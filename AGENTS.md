@@ -1,6 +1,6 @@
 # Agent instructions — cyba-phantom
 
-**Agent Canary** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event in a tamper-evident Merkle log with Ed25519-signed checkpoints. Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
+**Agent Canary** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event, of which evidence events are kept in a tamper-evident Merkle log with Ed25519-signed checkpoints (ADR-007). Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
 
 The full spec kit lives in the private sibling repository (documentation-only, canonical). This file mirrors its core constraints so the repo is self-contained; in the multi-root workspace both are visible and the spec kit wins on any disagreement.
 
