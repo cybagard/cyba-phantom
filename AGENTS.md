@@ -23,9 +23,9 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | C4 | The sensor is passive: it never acts on request-derived content and never contacts a visiting IP; outbound is allow-listed (ACME, alerts, checkpoints, bundle). |
 | C5 | Every alert is backed by an event whose hash is in the Merkle log before the alert is sent. |
 | C6 | Honest attribution: bands `human` / `crawler` / `agent-likely` / `agent-confirmed`; callbacks are never presented as compromises. |
-| C7 | Verification open; live traps, tables, token scheme internals, and raw data closed and shipped as signed bundles. |
+| C7 | Verification open (Apache-2.0: log format, schema, SDK, verifier, skeleton, token scheme); live trap templates, fingerprint tables, scoring rules, and token HMAC seeds are closed, shipped as signed bundles. Raw data never ships (ADR-008). |
 | C8 | Privacy: raw IPs 7 days then HMAC-hashed; raw events 30 days then aggregates only; bodies to 4 KB. |
-| C9 | The open repo is never a turnkey attack kit; reference traps are stale and documented as research artifacts. |
+| C9 | Nothing in the open repo is a turnkey attack kit: reference traps are stale, documented as research artifacts (§202c). |
 | C10 | Every requirement has a test ID and every test a requirement ID; the traceability matrix must never contain orphans. |
 
 ## Layout
@@ -68,7 +68,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 ## Spec loop
 
 - The spec kit (private sibling repo) defines reading order and ID conventions. Each task names the requirement IDs it satisfies and the test IDs that must pass.
-- Definition of done per task: named tests pass (`go test -race`, coverage threshold held); no new per-request goroutines (bench diff attached); `tools/trace` green; constitution checklist (C1–C10) answered in the PR template; `docs/` updated when an interface changes.
+- Definition of done per task: named tests pass (`go test -race`, coverage threshold held); no new per-request goroutines (bench diff attached); `tools/trace` green; constitution checklist (C1–C10) answered in the PR body; `docs/` updated when an interface changes.
 - No requirement without a test ID, no test without a requirement ID (C10).
 
 ## Commands
