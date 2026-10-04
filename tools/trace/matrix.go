@@ -433,8 +433,8 @@ func groupKind(g matGroup) int {
 	}
 }
 
-// diffFinding reports where two file texts differ: a count plus a bounded
-// sample of differing lines.
+// diffFinding reports where two file texts differ: line numbers and a
+// count only (T7: findings name IDs and counts, never file content).
 func diffFinding(committed, canonical string) []string {
 	cl := strings.Split(committed, "\n")
 	nl := strings.Split(canonical, "\n")
@@ -448,12 +448,6 @@ func diffFinding(committed, canonical string) []string {
 		}
 		return "<absent>"
 	}
-	trunc := func(s string) string {
-		if len(s) > 60 {
-			return s[:60] + "…"
-		}
-		return s
-	}
 	var out []string
 	diffs := 0
 	for i := 0; i < n; i++ {
@@ -462,7 +456,7 @@ func diffFinding(committed, canonical string) []string {
 		}
 		diffs++
 		if len(out) < 10 {
-			out = append(out, fmt.Sprintf("08-traceability line %d: committed %q, canonical %q", i+1, trunc(at(cl, i)), trunc(at(nl, i))))
+			out = append(out, fmt.Sprintf("08-traceability: line %d differs (committed vs canonical)", i+1))
 		}
 	}
 	if diffs == 0 {

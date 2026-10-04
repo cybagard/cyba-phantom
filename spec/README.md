@@ -14,14 +14,17 @@ open, and the canonical copy wins on any disagreement).
 
 Rules:
 
-- Do not edit these files directly. Spec changes are made in the
-  canonical repository and land here only via the maintainer's sync PR,
-  which also rotates the `manifest.json` stamp.
+- Do not edit the canonical mirror files (`01-prd.md`, `07-test-plan.md`,
+  `08-traceability.md`, `constitution-table.md`) directly. Spec changes
+  are made in the canonical repository and land here only via the
+  maintainer's sync PR, which also rotates the `manifest.json` stamp.
+  `README.md` and `manifest.json` are public-side bookkeeping about the
+  mirror; the maintainer updates them in sync or fix PRs.
 - CI verifies the sync on every PR: `tools/trace` regenerates
   `08-traceability.md` from `01` + `07` and requires a byte-exact match,
   then re-hashes this directory against the stamp.
 - `constitution-table.md` is a verbatim copy of the C1–C10 table in the
-  internal `AGENTS.md` (D2): both instruction files carry a byte-identical
+  internal `AGENTS.md`: both instruction files carry a byte-identical
   table, and the internal repo's CI runs the same check in the other
   direction, so the three (internal table, public table, golden) cannot
   drift apart.

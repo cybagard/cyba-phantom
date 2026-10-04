@@ -37,5 +37,8 @@ external-corporate contributor; DCO stands until then.
 ## Branch protection (current state)
 
 - `main`: signed commits required, required status checks (`.github`
-  workflows), required review, maintainer-only merge.
+  workflows), maintainer-only merge.
 - Force-push to `main`: disabled.
+- **Pending:** required review (one approver) on the instruction files,
+  `spec/**`, and `.github/**` (as listed above) — blocked on a second
+  approver account; the visibility flip waits on it.

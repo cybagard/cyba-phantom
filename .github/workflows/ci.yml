@@ -11,10 +11,12 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
-#   - gate checkers (trace, mirror-diff) run from the *default branch*
-#     against the PR work tree, so a PR cannot fake its own gates by
-#     editing the checkers; lint/test/build self-attest and are closed by
-#     maintainer-only merge + human review;
+#   - gate checkers (trace, mirror-diff) are built from an explicit
+#     checkout of the PR base branch (a ref-less checkout on
+#     pull_request would yield the merge ref — the PR's own changes)
+#     and run against the PR work tree, so a PR cannot fake its own
+#     gates by editing the checkers; lint/test/build self-attest and
+#     are closed by maintainer-only merge + human review;
 #   - CodeQL workflow scanning is enabled from the repo settings (GitHub
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
@@ -80,17 +82,24 @@ jobs:
         run: sh tools/coverage.sh
 
   trace:
-    # Checker-from-base: the trace tool is built from the default branch;
-    # it checks the PR work tree. A PR cannot weaken its own C10 gate.
+    # Checker-from-base: the trace tool is built from the PR base branch
+    # (explicit ref — see below) and runs against the PR work tree. A PR
+    # cannot weaken its own C10 gate.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Base checkout (default branch for PRs)
+      - name: Base checkout (PR base branch)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           path: base
+          # Explicit ref is load-bearing: on pull_request, a ref-less
+          # checkout yields the merge ref (base + the PR's own changes),
+          # which would let a PR ship a weakened checker. On push events
+          # the expression is empty, so the event ref (main) is checked
+          # out — the single-checkout case.
+          ref: ${{ github.event.pull_request.base.ref }}
 
-      - name: Build trace from the default branch
+      - name: Build trace from the base tree
         working-directory: base
         run: go build -o ../bin/trace ./tools/trace
 
@@ -107,15 +116,20 @@ jobs:
         run: ../bin/trace all spec
 
   mirror-diff:
-    # Checker-from-base: the extraction script comes from the default
-    # branch; the AGENTS.md table and the golden are the PR's files.
+    # Checker-from-base: the extraction script comes from the PR base
+    # branch (explicit ref — see below); the AGENTS.md table and the
+    # golden are the PR's files.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Base checkout (default branch for PRs)
+      - name: Base checkout (PR base branch)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           path: base
+          # Same load-bearing ref as the trace job: a ref-less checkout
+          # on pull_request yields the merge ref, not the base branch.
+          # On push events the expression is empty (event ref = main).
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: PR work tree
         if: github.event_name == 'pull_request'

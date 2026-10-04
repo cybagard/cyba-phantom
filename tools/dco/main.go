@@ -6,8 +6,9 @@
 //	dco <base> <head>
 //
 // It shells out to git (the toolchain image ships it) and reports commit
-// SHAs and subjects only. Exit codes: 0 all signed (or an empty range),
-// 1 unsigned commits, 2 usage or git error.
+// SHAs and counts only — never the (PR-authored) subject, which is
+// untrusted content in a CI log (T7). Exit codes: 0 all signed (or an
+// empty range), 1 unsigned commits, 2 usage or git error.
 package main
 
 import (
@@ -36,7 +37,11 @@ func run(args []string, dir string) int {
 	cmd := exec.Command("git", "-C", dir, "log", "--format=%H%x00%P%x00%s%x00%B%x00", base+".."+head)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dco: git log %s..%s: %v\n%s", base, head, err, out)
+		o := string(out)
+		if len(o) > 512 {
+			o = o[:512] + "…"
+		}
+		fmt.Fprintf(os.Stderr, "dco: git log %s..%s: %v\n%s", base, head, err, o)
 		return 2
 	}
 
@@ -54,14 +59,17 @@ func run(args []string, dir string) int {
 		if len(f) < 4 {
 			continue
 		}
-		hash, subject, body := string(f[0]), string(f[2]), string(f[3])
+		// f[2] is the commit subject — PR-authored content, never
+		// printed: a planted instruction in a subject would reach any
+		// agent reading the CI log (T7).
+		hash, body := string(f[0]), string(f[3])
 		total++
 		if !signoffRE.MatchString(body) {
 			unsigned++
 			if len(hash) > 12 {
 				hash = hash[:12]
 			}
-			fmt.Printf("unsigned: %s  %s\n", hash, subject)
+			fmt.Printf("unsigned: %s\n", hash)
 		}
 	}
 

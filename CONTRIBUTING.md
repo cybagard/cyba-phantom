@@ -13,7 +13,8 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
    `GOVERNANCE.md`). Branch protection is on `main`: signed commits,
-   required checks, required review.
+   required checks; required review lands with the second approver
+   account.
 3. Small, reviewable changes beat big ones. Name the constitution rules a
    change touches in the PR body.
 
