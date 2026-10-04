@@ -112,6 +112,16 @@ jobs:
           # out — the single-checkout case.
           ref: ${{ github.event.pull_request.base.ref }}
 
+      - name: PR work tree
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: work
+          # Before the build step on purpose: the build step's bootstrap
+          # fallback probes for the work tree, so it must exist by then.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
       - name: Build trace from the base tree (work tree at bootstrap)
         run: |
           if [ -f "$GITHUB_WORKSPACE/base/tools/trace/main.go" ]; then
@@ -125,14 +135,6 @@ jobs:
           fi
           mkdir -p "$GITHUB_WORKSPACE/bin"
           (cd "$GITHUB_WORKSPACE/$src" && go build -o "$GITHUB_WORKSPACE/bin/trace" ./tools/trace)
-
-      - name: PR work tree
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          path: work
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
 
       - name: C10 matrix + sync stamp
         working-directory: ${{ github.event_name == 'pull_request' && 'work' || 'base' }}
