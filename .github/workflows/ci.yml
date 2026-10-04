@@ -1,0 +1,152 @@
+# CI for cyba-phantom.
+#
+# Security posture (mirrors the internal repo's CI spec):
+#   - one workflow, triggered on push to main and on pull_request only;
+#   - no pull_request_target, no workflow_run, no schedule triggers;
+#   - permissions: read-all; no secret is referenced anywhere in this file;
+#   - no artifact uploads (write scopes unneeded);
+#   - concurrency: one run per ref, superseded runs cancel;
+#   - every action is pinned to a full SHA (the tag is a comment);
+#   - Go: the runner's toolchain is switched to the exact pinned release
+#     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
+#     equal to the go line is stripped by go mod tidy), downloaded with
+#     Go's checksum verification; no setup-go action, zero dependencies;
+#   - gate checkers (trace, mirror-diff) run from the *default branch*
+#     against the PR work tree, so a PR cannot fake its own gates by
+#     editing the checkers; lint/test/build self-attest and are closed by
+#     maintainer-only merge + human review;
+#   - CodeQL workflow scanning is enabled from the repo settings (GitHub
+#     App), not from this file — it is the third leg of the gate
+#     integrity story for the workflow files themselves.
+#
+# Jobs: lint (gofmt/vet + DCO on PRs), test (-race + coverage gate),
+# trace (C10 matrix + sync stamp), mirror-diff (constitution table),
+# build (T-P-07: reproducible, static, sized, cgroup-budgeted).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: read-all
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: go1.27.1
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0 # DCO check needs the full commit range
+
+      - name: gofmt
+        run: |
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then
+            echo "gofmt: files need formatting:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # DCO: every commit in the PR range must carry a Signed-off-by.
+      # PRs only — squash merges drop trailers, so pushed main is never
+      # re-checked (the history of main is what was reviewed).
+      - name: DCO sign-off (pull requests)
+        if: github.event_name == 'pull_request'
+        run: go run ./tools/dco "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: go test -race
+        run: go test -race ./...
+
+      - name: coverage gate
+        run: sh tools/coverage.sh
+
+  trace:
+    # Checker-from-base: the trace tool is built from the default branch;
+    # it checks the PR work tree. A PR cannot weaken its own C10 gate.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Base checkout (default branch for PRs)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: base
+
+      - name: Build trace from the default branch
+        working-directory: base
+        run: go build -o ../bin/trace ./tools/trace
+
+      - name: PR work tree
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: work
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: C10 matrix + sync stamp
+        working-directory: ${{ github.event_name == 'pull_request' && 'work' || 'base' }}
+        run: ../bin/trace all spec
+
+  mirror-diff:
+    # Checker-from-base: the extraction script comes from the default
+    # branch; the AGENTS.md table and the golden are the PR's files.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Base checkout (default branch for PRs)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: base
+
+      - name: PR work tree
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: work
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: C1-C10 table mirror
+        working-directory: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bash tools/mirror-diff.sh work/AGENTS.md work/spec/constitution-table.md
+          else
+            bash tools/mirror-diff.sh AGENTS.md spec/constitution-table.md
+          fi
+
+  build:
+    # T-P-07: two builds must hash identically; the binary is statically
+    # linked and at most 25 MB, built under the 07 section 2 budget
+    # (1 vCPU / 512 MB cgroup).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Reproducible, static, sized build
+        run: make perf
+
+      - name: Binary facts
+        run: |
+          file bin/canary-a || true
+          stat -c%s bin/canary-a | awk '{printf "binary size: %d bytes\n", $1}'

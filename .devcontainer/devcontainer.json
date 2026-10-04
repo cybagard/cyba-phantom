@@ -1,0 +1,8 @@
+{
+  "name": "cyba-phantom (Go 1.27.1, matching CI)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/src",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind"
+}

@@ -1,0 +1,10 @@
+# build artifacts
+/bin/
+cover*.out
+
+# dev tooling storage
+.kilo/
+
+# editor / OS
+*.swp
+.DS_Store
