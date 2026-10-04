@@ -17,6 +17,10 @@
 #     and run against the PR work tree, so a PR cannot fake its own
 #     gates by editing the checkers; lint/test/build self-attest and
 #     are closed by maintainer-only merge + human review;
+#   - the one exception is a PR that introduces a gate checker while
+#     the base branch predates it (bootstrap): the job falls back to
+#     the work tree with a loud warning — self-attested, closed by the
+#     same human review + maintainer-only merge;
 #   - CodeQL workflow scanning is enabled from the repo settings (GitHub
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
@@ -84,7 +88,8 @@ jobs:
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
     # (explicit ref — see below) and runs against the PR work tree. A PR
-    # cannot weaken its own C10 gate.
+    # cannot weaken its own C10 gate. At bootstrap (base predates the
+    # gate) the tool is built from the work tree — warned, self-attested.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -99,9 +104,19 @@ jobs:
           # out — the single-checkout case.
           ref: ${{ github.event.pull_request.base.ref }}
 
-      - name: Build trace from the base tree
-        working-directory: base
-        run: go build -o ../bin/trace ./tools/trace
+      - name: Build trace from the base tree (work tree at bootstrap)
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/base/tools/trace/main.go" ]; then
+            src=base
+          elif [ -d "$GITHUB_WORKSPACE/work" ]; then
+            src=work
+            echo "::warning::bootstrap: tools/trace is not on the PR base — building the C10 gate from the PR work tree (self-attested; human review is the control)"
+          else
+            echo "::error::tools/trace is absent from the base tree and no PR work tree is present — the C10 gate cannot be built"
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          (cd "$GITHUB_WORKSPACE/$src" && go build -o "$GITHUB_WORKSPACE/bin/trace" ./tools/trace)
 
       - name: PR work tree
         if: github.event_name == 'pull_request'
@@ -118,7 +133,8 @@ jobs:
   mirror-diff:
     # Checker-from-base: the extraction script comes from the PR base
     # branch (explicit ref — see below); the AGENTS.md table and the
-    # golden are the PR's files.
+    # golden are the PR's files. At bootstrap (base predates the gate)
+    # the script runs from the work tree — warned, self-attested.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -140,12 +156,27 @@ jobs:
           fetch-depth: 1
 
       - name: C1-C10 table mirror
-        working-directory: base
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            bash tools/mirror-diff.sh work/AGENTS.md work/spec/constitution-table.md
+          if [ -f "$GITHUB_WORKSPACE/base/tools/mirror-diff.sh" ]; then
+            script=base
+          elif [ -d "$GITHUB_WORKSPACE/work" ]; then
+            script=work
+            echo "::warning::bootstrap: tools/mirror-diff.sh is not on the PR base — running the C1-C10 mirror gate from the PR work tree (self-attested; human review is the control)"
           else
-            bash tools/mirror-diff.sh AGENTS.md spec/constitution-table.md
+            echo "::error::tools/mirror-diff.sh is absent from the base tree and no PR work tree is present — the C1-C10 mirror gate cannot run"
+            exit 1
+          fi
+          # Absolute paths: base/ and work/ are sibling checkouts, so a
+          # relative "work/..." resolved from inside base/ would never
+          # reach the work tree.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bash "$GITHUB_WORKSPACE/$script/tools/mirror-diff.sh" \
+              "$GITHUB_WORKSPACE/work/AGENTS.md" \
+              "$GITHUB_WORKSPACE/work/spec/constitution-table.md"
+          else
+            bash "$GITHUB_WORKSPACE/$script/tools/mirror-diff.sh" \
+              "$GITHUB_WORKSPACE/base/AGENTS.md" \
+              "$GITHUB_WORKSPACE/base/spec/constitution-table.md"
           fi
 
   build:
