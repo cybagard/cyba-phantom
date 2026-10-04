@@ -1,7 +1,7 @@
 # CI for cyba-phantom.
 #
 # Security posture (mirrors the internal repo's CI spec):
-#   - one workflow, triggered on push to main and on pull_request only;
+#   - one workflow, triggered on push to main and on PRs to main only;
 #   - no pull_request_target, no workflow_run, no schedule triggers;
 #   - permissions: read-all; no secret is referenced anywhere in this file;
 #   - no artifact uploads (write scopes unneeded);
@@ -35,6 +35,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The gate checkers are built from the PR base branch. Restricting
+    # PRs to those targeting main keeps that base on main: a PR
+    # targeting any other branch would resolve the base to a branch
+    # the author can push (same-repo write access) — running
+    # author-controlled checkers. PRs to other branches are
+    # maintainer-orchestrated intermediates; the final PR to main
+    # re-gates everything from main.
+    branches: [main]
 
 permissions: read-all
 
