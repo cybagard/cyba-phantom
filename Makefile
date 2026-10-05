@@ -1,8 +1,8 @@
 # Agent Canary — M-1 task 1.1 (09).
 #
 # Toolchain: Go 1.27.1, pinned exactly via GOTOOLCHAIN (below; go.mod sets
-# the minimum, the env var the exact release). .devcontainer ships the same
-# image CI uses, so local runs and CI runs agree.
+# the minimum, the env var the exact release). CI and .devcontainer run the
+# same pinned toolchain, so local runs and CI runs agree.
 
 GO := go
 
@@ -36,8 +36,9 @@ lint:
 trace:
 	$(GO) run ./tools/trace all spec
 
+# Rotate the spec sync stamp (sync PRs only; `make trace` verifies it).
 stamp:
-	$(GO) run ./tools/trace stamp spec
+	$(GO) run ./tools/trace stamp spec --write
 
 # AGENTS.md C1–C10 table vs the golden spec/constitution-table.md.
 mirror-diff:
@@ -49,16 +50,22 @@ dco:
 
 # 07 §1 coverage gate (vacuous on internal/* in M-1; 80 % on tools/).
 coverage:
-	sh tools/coverage.sh
+	bash tools/coverage.sh
 
 # T-P-07: two builds must hash identically; the binary is static and
 # <= 25 MB, built under the 07 §2 cgroup budget (1 vCPU / 512 MB).
+# systemd-run --scope runs perf-inner in the foreground, in this directory,
+# with this environment, and returns its exit status. Where no systemd user
+# manager is available (macOS, containers) perf runs unbounded with a note;
+# PERF_REQUIRE_CGROUP=1 (set in CI) turns that into a failure.
 perf:
-	@if command -v systemd-run >/dev/null 2>&1; then \
+	@if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet true >/dev/null 2>&1; then \
 		echo "perf: building under a 1 vCPU / 512 MB cgroup"; \
-		systemd-run --user -p MemoryMax=512M -p CPUQuota=100% -- $(MAKE) perf-inner; \
+		systemd-run --user --scope --quiet -p MemoryMax=512M -p CPUQuota=100% -- $(MAKE) perf-inner; \
+	elif [ "$${PERF_REQUIRE_CGROUP:-0}" = 1 ]; then \
+		echo "perf FAIL: no systemd user manager for the cgroup budget (PERF_REQUIRE_CGROUP=1)"; exit 1; \
 	else \
-		echo "perf: systemd-run not available — running unbounded"; \
+		echo "perf: no systemd user manager — running unbounded"; \
 		$(MAKE) perf-inner; \
 	fi
 

@@ -340,7 +340,7 @@ func TestStampMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range findings {
-		if strings.Contains(f, "01-prd.md changed") {
+		if strings.Contains(f, `"01-prd.md" changed`) {
 			return
 		}
 	}
@@ -355,7 +355,7 @@ func TestStampExtraFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range findings {
-		if strings.Contains(f, "stray.md is not stamped") {
+		if strings.Contains(f, `"stray.md" is not stamped`) {
 			return
 		}
 	}
@@ -372,7 +372,7 @@ func TestStampMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range findings {
-		if strings.Contains(f, "08-traceability.md is stamped but missing") {
+		if strings.Contains(f, `"08-traceability.md" is stamped but missing`) {
 			return
 		}
 	}
@@ -394,5 +394,22 @@ func TestUsageAndExitCodes(t *testing.T) {
 	}
 	if got := run([]string{"-x"}); got != 2 {
 		t.Errorf("unknown flag: got %d, want 2", got)
+	}
+}
+
+func TestStampEscapesNames(t *testing.T) {
+	dir := newSpec(t)
+	writeFile(t, dir, "evil\x1b[31m\nname.md", "x\n")
+	findings, err := runStamp(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if strings.ContainsAny(f, "\x1b\n") {
+			t.Errorf("finding carries a raw control character: %q", f)
+		}
+	}
+	if len(findings) == 0 {
+		t.Error("no finding for the unstamped file")
 	}
 }

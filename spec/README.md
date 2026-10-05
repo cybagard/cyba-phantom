@@ -23,8 +23,6 @@ Rules:
 - CI verifies the sync on every PR: `tools/trace` regenerates
   `08-traceability.md` from `01` + `07` and requires a byte-exact match,
   then re-hashes this directory against the stamp.
-- `constitution-table.md` is a verbatim copy of the C1–C10 table in the
-  internal `AGENTS.md`: both instruction files carry a byte-identical
-  table, and the internal repo's CI runs the same check in the other
-  direction, so the three (internal table, public table, golden) cannot
-  drift apart.
+- `constitution-table.md` is a verbatim copy of the canonical C1–C10
+  table; `tools/mirror-diff.sh` holds the table in `AGENTS.md` to it byte
+  for byte.

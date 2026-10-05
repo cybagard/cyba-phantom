@@ -50,7 +50,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/export` | nightly aggregate export, no IPs |
 | `internal/config` | one YAML file + env overrides, `--check` |
 | `sdk/` | Go + TS: read checkpoints, verify proofs |
-| `tools/` | `trace` (traceability check), `dco` (sign-off check), `mirror-diff` (constitution table check), `bundle-sign` |
+| `tools/` | `trace` (traceability check), `dco` (sign-off check), `mirror-diff` (constitution table check), `bundle-sign`, `score-report` |
 | `spec/` | synced read-only mirror of the canonical spec documents (01, 07, 08, manifest, golden table) — the traceability inputs |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |

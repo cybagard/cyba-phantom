@@ -13,8 +13,8 @@ This repository is open source, permanently.
   (load + Ed25519 verify).
 - `bundles/reference/` (from M-2) is a stale, research-grade reference
   bundle committed under Apache-2.0 so the open engine has *something* to
-  load. It is not an operational tool, and it must stay stale — see C9 in
-  `AGENTS.md`.
+  load. It is not an operational tool: it is documented as a research
+  artifact (§202c StGB), and it must stay stale — see C9 in `AGENTS.md`.
 
 ## License sign-off
 
@@ -27,18 +27,19 @@ external-corporate contributor; DCO stands until then.
 
 - This project currently has one maintainer. Every merge into `main` is a
   human decision made by the maintainer; agents prepare, humans merge.
-- Every pull request requires a review sign-off, including from the
-  maintainer on changes to the governance and agent-instruction files
-  (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, this file, `spec/**`,
-  `.github/**`).
+- The maintainer reviews every pull request before merging it. Changes to
+  the high review-surface paths listed in `CONTRIBUTING.md` (the
+  agent-instruction and governance files, `spec/**`, `.github/**`,
+  `Makefile`, `go.mod`) get extra scrutiny.
 - If the maintainer count ever grows, branch protection is updated in the
   same change that adds the account.
 
 ## Branch protection (current state)
 
-- `main`: signed commits required, required status checks (`.github`
-  workflows), maintainer-only merge.
-- Force-push to `main`: disabled.
-- **Pending:** required review (one approver) on the instruction files,
-  `spec/**`, and `.github/**` (as listed above) — blocked on a second
-  approver account; the visibility flip waits on it.
+- `main`: required status checks (`.github` workflows); only the
+  maintainer has write access, so only the maintainer merges.
+- Force-push to and deletion of `main`: disabled.
+- **Pending:** required review (one approver) on `AGENTS.md`, `CLAUDE.md`,
+  `CONTRIBUTING.md`, `spec/**`, and `.github/**` — blocked on a second
+  approver account. Until it lands, review is the maintainer's practice,
+  not an enforced rule.

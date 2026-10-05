@@ -6,8 +6,8 @@
 // first occurrence in 07) and requires a byte-exact match with the
 // committed file, so the file is a pure function of the other two.
 //
-// Findings name IDs and counts only (T7: no requirement text, no
-// threat-assessment content).
+// Findings name IDs and counts only: spec text is PR-controlled, so it
+// never reaches a CI log.
 
 package main
 
@@ -33,11 +33,13 @@ var (
 	reqIDRE   = regexp.MustCompile(`^(FR|NFR|SEC)-\d{2}$`)
 	goalIDRE  = regexp.MustCompile(`^G\d+$`)
 	cRuleRE   = regexp.MustCompile(`^C(10|[1-9])$`)
-	testIDRE  = regexp.MustCompile(`^T-([A-Z])-(\d{2})$`)
-	testTokRE = regexp.MustCompile(`^T-([A-Z])-(\d{2})(\.\.(\d{2}))?$`)
 	reqTokRE  = regexp.MustCompile(`^(FR-\d{2}|NFR-\d{2}|SEC-\d{2}|C(10|[1-9])|G\d+)$`)
-	tidSearch = regexp.MustCompile(`T-[A-Z]-\d{2}(?:\.\.\d{2})?`)
 	sepCellRE = regexp.MustCompile(`^-{3,}$`)
+
+	// Test references, from strictest to loosest.
+	testIDRE          = regexp.MustCompile(`^T-([A-Z])-(\d{2})$`)               // one test ID: T-U-01
+	testRefRE         = regexp.MustCompile(`^T-([A-Z])-(\d{2})(\.\.(\d{2}))?$`) // a test ID or a range: T-U-01..04
+	testRefAnywhereRE = regexp.MustCompile(`T-[A-Z]-\d{2}(?:\.\.\d{2})?`)       // a test reference anywhere in a string
 )
 
 // req is a requirement or goal declared in 01.
@@ -294,7 +296,7 @@ func expectedRows(reqs []req) (main, goals []string) {
 // expandOne expands one Tests-cell token (a test ID or a contiguous
 // range) into test IDs; it returns nil for a malformed token.
 func expandOne(tok string) []string {
-	m := testTokRE.FindStringSubmatch(tok)
+	m := testRefRE.FindStringSubmatch(tok)
 	if m == nil {
 		return nil
 	}
@@ -362,7 +364,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 		}
 		ids := expandOne(part)
 		if ids == nil {
-			if tidSearch.MatchString(part) {
+			if testRefAnywhereRE.MatchString(part) {
 				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference %q", reqID, part))
 			}
 			toks = append(toks, tok{orig: part, pos: -1}) // prose marker
@@ -413,28 +415,28 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// groupKind classifies a committed table: 0 main, 1 goals, 2 mixed.
-func groupKind(g matGroup) int {
-	main, goals := false, false
-	for _, r := range g.rows {
-		if goalIDRE.MatchString(r.reqID) {
-			goals = true
-		} else {
-			main = true
-		}
-	}
-	switch {
-	case main && goals:
-		return 2
-	case goals:
-		return 1
-	default:
-		return 0
-	}
+// tableRows records which kinds of row a committed table holds. A table
+// holding both is mixed: a finding, re-emitted as both canonical sets.
+type tableRows struct {
+	main, goals bool
 }
 
+func classifyTable(g matGroup) tableRows {
+	var k tableRows
+	for _, r := range g.rows {
+		if goalIDRE.MatchString(r.reqID) {
+			k.goals = true
+		} else {
+			k.main = true
+		}
+	}
+	return k
+}
+
+func (k tableRows) mixed() bool { return k.main && k.goals }
+
 // diffFinding reports where two file texts differ: line numbers and a
-// count only (T7: findings name IDs and counts, never file content).
+// count only: findings name IDs and counts, never file content.
 func diffFinding(committed, canonical string) []string {
 	cl := strings.Split(committed, "\n")
 	nl := strings.Split(canonical, "\n")
@@ -484,31 +486,16 @@ func buildCanonical(text string, groups []matGroup, expMain, expGoals []string, 
 		for _, r := range g.rows {
 			skip[r.line] = true
 		}
-		kind := groupKind(g)
-		if kind == 2 {
+		kind := classifyTable(g)
+		if kind.mixed() {
 			*findings = append(*findings, fmt.Sprintf("08-traceability: table %d mixes goal and requirement rows", gi+1))
 		}
-		mainHere, goalsHere := false, false
-		for _, r := range g.rows {
-			if goalIDRE.MatchString(r.reqID) {
-				goalsHere = true
-			} else {
-				mainHere = true
-			}
-		}
 		var sets [][]string
-		switch kind {
-		case 1:
-			sets = [][]string{expGoals}
-		case 2:
-			if mainHere {
-				sets = append(sets, expMain)
-			}
-			if goalsHere {
-				sets = append(sets, expGoals)
-			}
-		default:
-			sets = [][]string{expMain}
+		if kind.main || !kind.goals {
+			sets = append(sets, expMain)
+		}
+		if kind.goals {
+			sets = append(sets, expGoals)
 		}
 		var rowLines []string
 		for _, set := range sets {
@@ -620,7 +607,7 @@ func checkMatrix(prd, tp, mat string) []string {
 			exp[id] = true
 		}
 		if r.reqID == "C10" {
-			if tidSearch.MatchString(r.tests) {
+			if testRefAnywhereRE.MatchString(r.tests) {
 				findings = append(findings, "08-traceability: C10 Tests cell contains a T-ID; it must be the no-test marker")
 			}
 			continue

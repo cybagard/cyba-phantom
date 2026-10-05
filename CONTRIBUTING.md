@@ -12,9 +12,9 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    external-corporate contributor; until then DCO is the
    contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
-   `GOVERNANCE.md`). Branch protection is on `main`: signed commits,
-   required checks; required review lands with the second approver
-   account.
+   `GOVERNANCE.md`). Branch protection is on `main`: required checks,
+   no force-push; required review lands with the second approver
+   account. (DCO sign-off is a commit trailer, not a signed commit.)
 3. Small, reviewable changes beat big ones. Name the constitution rules a
    change touches in the PR body.
 
@@ -46,8 +46,8 @@ sibling, so they are prompt-injection surface. (SEC-07)
   the PR body (supply-chain and size budget, C2).
 - Memory: nothing unbounded on a request path (C2). Attach a
   `go test -bench -benchmem` diff to any hot-path change.
-- Detection content (traps, fingerprint tables, scoring rules, token
-  seeds) never goes in the repository — it ships only as signed bundles
+- Proprietary artifacts (live trap templates, fingerprint tables, scoring
+  rules, token HMAC seeds) never go in the repository — it ships only as signed bundles
   (C7). `internal/bundle` is the one path content enters the system.
   `bundles/reference/` is a stale research-grade artifact (C9); keep it
   stale.
@@ -57,7 +57,8 @@ sibling, so they are prompt-injection surface. (SEC-07)
 The build runs Go 1.27.1 exactly: `go.mod` sets the minimum and the
 `Makefile`/CI pin the release via `GOTOOLCHAIN` (Go downloads it with
 checksum verification when your local toolchain differs). If you do not
-have Go at all, use the devcontainer — same image as CI:
+have Go at all, use the devcontainer — it runs the same pinned toolchain
+as CI:
 
 ```sh
 docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile .devcontainer

@@ -1,6 +1,6 @@
 // Stamp: the spec sync stamp. manifest.json records the date (YYYY-MM-DD)
-// of the last internal sync plus a SHA-256 hash of every other file in
-// spec/. Verify mode re-hashes the directory and reports drift (a changed
+// of the last sync from the canonical spec plus a SHA-256 hash of every
+// other file in spec/. Verify mode re-hashes the directory and reports drift (a changed
 // file without a new sync, or a file that is not stamped). --write
 // rotates the stamp; it never reports drift.
 
@@ -36,11 +36,11 @@ func hashDir(specDir string) (map[string]string, []string, error) {
 	var findings []string
 	entries, err := os.ReadDir(specDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read spec dir %s: %v", specDir, err)
+		return nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			findings = append(findings, fmt.Sprintf("spec: unexpected subdirectory %s (spec/ must be flat)", e.Name()))
+			findings = append(findings, fmt.Sprintf("spec: unexpected subdirectory %q (spec/ must be flat)", e.Name()))
 			continue
 		}
 		if e.Name() == "manifest.json" {
@@ -48,7 +48,7 @@ func hashDir(specDir string) (map[string]string, []string, error) {
 		}
 		data, err := os.ReadFile(filepath.Join(specDir, e.Name()))
 		if err != nil {
-			findings = append(findings, fmt.Sprintf("spec: cannot read %s: %v", e.Name(), err))
+			findings = append(findings, fmt.Sprintf("spec: cannot read %q: %v", e.Name(), err))
 			continue
 		}
 		hashes[e.Name()] = sha256Hex(data)
@@ -89,16 +89,16 @@ func runStamp(specDir string, write bool) ([]string, error) {
 	for name, want := range m.Files {
 		got, ok := hashes[name]
 		if !ok {
-			findings = append(findings, fmt.Sprintf("spec: %s is stamped but missing from spec/", name))
+			findings = append(findings, fmt.Sprintf("spec: %q is stamped but missing from spec/", name))
 			continue
 		}
 		if got != want {
-			findings = append(findings, fmt.Sprintf("spec: %s changed since the sync stamp (%s)", name, m.Synced))
+			findings = append(findings, fmt.Sprintf("spec: %q changed since the sync stamp (%q)", name, m.Synced))
 		}
 	}
 	for name := range hashes {
 		if _, ok := m.Files[name]; !ok {
-			findings = append(findings, fmt.Sprintf("spec: %s is not stamped (add it or re-sync)", name))
+			findings = append(findings, fmt.Sprintf("spec: %q is not stamped (add it or re-sync)", name))
 		}
 	}
 	return findings, nil

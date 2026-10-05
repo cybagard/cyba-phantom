@@ -7,7 +7,7 @@
 //
 // It shells out to git (the toolchain image ships it) and reports commit
 // SHAs and counts only — never the (PR-authored) subject, which is
-// untrusted content in a CI log (T7). Exit codes: 0 all signed (or an
+// untrusted content in a CI log. Exit codes: 0 all signed (or an
 // empty range), 1 unsigned commits, 2 usage or git error.
 package main
 
@@ -61,7 +61,7 @@ func run(args []string, dir string) int {
 		}
 		// f[2] is the commit subject — PR-authored content, never
 		// printed: a planted instruction in a subject would reach any
-		// agent reading the CI log (T7).
+		// agent reading the CI log.
 		hash, body := string(f[0]), string(f[3])
 		total++
 		if !signoffRE.MatchString(body) {

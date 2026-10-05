@@ -2,9 +2,8 @@
 # mirror-diff — verify the C1–C10 constitution table in AGENTS.md is
 # byte-identical to the golden spec/constitution-table.md.
 #
-# The table syncs verbatim: the public AGENTS.md and the internal
-# canonical AGENTS.md carry a byte-identical C1–C10 block, and the golden
-# is a verbatim copy of it. Any byte difference fails the check; the only
+# The table syncs verbatim from the canonical spec, and the golden is a
+# verbatim copy of it. Any byte difference fails the check; the only
 # way a row changes is a constitution change landed as a paired change.
 #
 # Usage: mirror-diff.sh [agents-md] [golden]
