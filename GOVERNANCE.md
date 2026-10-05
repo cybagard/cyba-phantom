@@ -23,6 +23,16 @@ Contributors sign with the Developer Certificate of Origin
 `CONTRIBUTING.md`). A CLA will be adopted before the first
 external-corporate contributor; DCO stands until then.
 
+## Writing standard
+
+All prose in this repository follows ASD-STE100 (Simplified Technical
+English). Prose is documentation, issue and pull request text, commit
+messages, code comments, and text that the software shows to users.
+These items are not prose: code identifiers, IDs, quoted text, legal
+text (for example `LICENSE`), and the synced `spec/` files. The rule
+applies to new text and to all text that a change touches. Review is
+the control.
+
 ## Maintainers and merges
 
 - This project currently has one maintainer. Every merge into `main` is a

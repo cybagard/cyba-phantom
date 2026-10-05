@@ -17,6 +17,10 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    account. (DCO sign-off is a commit trailer, not a signed commit.)
 3. Small, reviewable changes beat big ones. Name the constitution rules a
    change touches in the PR body.
+4. Write all prose in ASD-STE100 (Simplified Technical English): docs,
+   PR and issue text, commit messages, code comments, and user-facing
+   strings. Use short sentences, active voice, and one meaning for each
+   word. Do not edit the synced `spec/` files. See `GOVERNANCE.md`.
 
 ## Spec documents (`spec/`)
 
