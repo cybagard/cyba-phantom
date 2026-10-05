@@ -15,6 +15,7 @@ const maxConfigSize = 64 * 1024
 type leaf struct {
 	line  int
 	value string
+	style yaml.Style
 }
 
 func readFileCapped(path string, opts *Options) ([]byte, error) {
@@ -24,9 +25,20 @@ func readFileCapped(path string, opts *Options) ([]byte, error) {
 	}
 	defer f.Close()
 
-	// M2: Read capped at 64 KiB + 1 byte
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat config file: %w", err)
+	}
+	if info.Mode()&0022 != 0 {
+		return nil, fmt.Errorf("config file %q must not be group or world writable", path)
+	}
+
+	// Read capped at 64 KiB + 1 byte
 	buf := make([]byte, maxConfigSize+1)
 	n, err := io.ReadFull(f, buf)
+	if err == nil {
+		return nil, errors.New("config file exceeds 64 KiB limit")
+	}
 	if err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, err
 	}
@@ -37,31 +49,34 @@ func readFileCapped(path string, opts *Options) ([]byte, error) {
 
 	data := buf[:n]
 
-	// M2: Reject BOM
+	// Reject BOM
 	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
 		return nil, errors.New("config file must not contain a BOM")
 	}
 
-	// M2: Reject NUL
+	// Reject NUL
 	if bytes.Contains(data, []byte("\x00")) {
 		return nil, errors.New("config file must not contain NUL bytes")
 	}
 
-	// M2: Reject non-UTF-8 (implicitly handled by yaml.v3, but we could check here)
+	// Reject non-UTF-8 (implicitly handled by yaml.v3, but we could check here)
 	return data, nil
 }
 
 func parseCapped(data []byte) (map[string]leaf, map[string]bool, map[string]bool, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		return nil, nil, nil, fmt.Errorf("yaml parse error: %w", err)
 	}
 
-	// M3: Reject second document
+	// Reject second document
 	if doc.Kind != yaml.DocumentNode {
 		return nil, nil, nil, errors.New("config must be a YAML document")
 	}
-	if len(doc.Content) > 1 {
+
+	var doc2 yaml.Node
+	if err := dec.Decode(&doc2); err != io.EOF {
 		return nil, nil, nil, errors.New("config must contain only one document")
 	}
 
@@ -82,12 +97,12 @@ func parseCapped(data []byte) (map[string]leaf, map[string]bool, map[string]bool
 }
 
 func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[string]bool, allPaths map[string]bool, depth int) error {
-	// M3: Nesting > 8
+	// Nesting > 8
 	if depth > 8 {
 		return errors.New("config nesting exceeds limit of 8")
 	}
 
-	// M3: Reject aliases and anchors
+	// Reject aliases and anchors
 	if n.Alias != nil {
 		return fmt.Errorf("config at %q contains an alias", path)
 	}
@@ -95,9 +110,14 @@ func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[s
 		return fmt.Errorf("config at %q contains an anchor", path)
 	}
 
+	// Reject custom tags (only core schema allowed)
+	if n.Tag != "" && !isCoreTag(n.Tag, n.Kind) {
+		return fmt.Errorf("config at %q contains custom tag %q", path, n.Tag)
+	}
+
 	switch n.Kind {
 	case yaml.MappingNode:
-		// M3: Duplicate mapping keys
+		// Duplicate mapping keys
 		seen := make(map[string]bool)
 		for i := 0; i < len(n.Content); i += 2 {
 			keyNode := n.Content[i]
@@ -108,6 +128,10 @@ func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[s
 			}
 
 			key := keyNode.Value
+			if key == "<<" {
+				return fmt.Errorf("config at %q contains merge key", path)
+			}
+
 			if seen[key] {
 				return fmt.Errorf("config at %q contains duplicate key %q", path, key)
 			}
@@ -133,7 +157,7 @@ func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[s
 		}
 
 	case yaml.ScalarNode:
-		// M3: Reject tags outside core schema (implicitly handled by yaml.v3 mostly, but we check)
+		// Reject tags outside core schema (implicitly handled by yaml.v3 mostly, but we check)
 		// M4: Strict scalars (bool, int, duration) are checked during apply/validate
 		// Here we just capture the raw value and line.
 
@@ -144,6 +168,7 @@ func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[s
 		leaves[path] = leaf{
 			line:  n.Line,
 			value: n.Value,
+			style: n.Style,
 		}
 
 	default:
@@ -151,4 +176,19 @@ func walkNode(n *yaml.Node, path string, leaves map[string]leaf, nonLeaves map[s
 	}
 
 	return nil
+}
+
+func isCoreTag(tag string, kind yaml.Kind) bool {
+	// Basic core tags for common types
+	switch kind {
+	case yaml.ScalarNode:
+		return tag == "" || tag == "!!str" || tag == "!!int" || tag == "!!float" || tag == "!!bool" || tag == "!!null"
+	case yaml.MappingNode:
+		return tag == "" || tag == "!!map"
+	case yaml.SequenceNode:
+		return tag == "" || tag == "!!seq"
+	case yaml.DocumentNode:
+		return tag == "" || tag == "!!doc"
+	}
+	return false
 }

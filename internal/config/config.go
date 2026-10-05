@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // Config holds the validated sensor configuration.
@@ -149,11 +151,11 @@ func Load(path string, opts Options) (*Config, error) {
 // fill resolves each key (env, then file, then default) and validates it.
 func (c *Config) fill(leaves map[string]leaf, nonLeaves, allPaths map[string]bool, opts *Options) error {
 	for _, k := range keys {
-		raw, source, err := resolve(k, leaves, nonLeaves, opts)
+		raw, source, l, err := resolve(k, leaves, nonLeaves, opts)
 		if err != nil {
 			return err
 		}
-		val, err := c.apply(k, raw, source, opts)
+		val, err := c.apply(k, raw, source, l, opts)
 		if err != nil {
 			return err
 		}
@@ -168,27 +170,27 @@ func (c *Config) fill(leaves map[string]leaf, nonLeaves, allPaths map[string]boo
 }
 
 // resolve returns the raw value for a key and its source.
-func resolve(k key, leaves map[string]leaf, nonLeaves map[string]bool, opts *Options) (string, string, error) {
+func resolve(k key, leaves map[string]leaf, nonLeaves map[string]bool, opts *Options) (string, string, leaf, error) {
 	if v, ok := osLookup(opts.Env, keyEnvName(k.path)); ok {
-		return v, "env " + keyEnvName(k.path), nil
+		return v, "env " + keyEnvName(k.path), leaf{}, nil
 	}
 	if nonLeaves[k.path] {
-		return "", "", newCfgError(k.path, "file", "expected a scalar", "")
+		return "", "", leaf{}, newCfgError(k.path, "file", "expected a scalar", "")
 	}
 	if l, ok := leaves[k.path]; ok {
-		return l.value, "file line " + strconv.Itoa(l.line), nil
+		return l.value, "file line " + strconv.Itoa(l.line), l, nil
 	}
 	if k.def != "" {
-		return k.def, "default", nil
+		return k.def, "default", leaf{}, nil
 	}
 	if k.required {
-		return "", "", newCfgError(k.path, "none", "required key is missing", "")
+		return "", "", leaf{}, newCfgError(k.path, "none", "required key is missing", "")
 	}
-	return "", "", nil
+	return "", "", leaf{}, nil
 }
 
 // checkScalar validates that a raw value matches the expected scalar type.
-func checkScalar(k key, raw string) error {
+func checkScalar(k key, raw string, l leaf) error {
 	switch k.kind {
 	case kindString:
 		return nil
@@ -197,6 +199,9 @@ func checkScalar(k key, raw string) error {
 			return fmt.Errorf("must be true or false")
 		}
 	case kindInt:
+		if l.style == yaml.SingleQuotedStyle || l.style == yaml.DoubleQuotedStyle {
+			return fmt.Errorf("quoted numbers not allowed")
+		}
 		if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
 			return fmt.Errorf("must be a decimal integer")
 		}
@@ -217,8 +222,8 @@ func checkScalar(k key, raw string) error {
 // apply validates a raw value against the key and returns the stored value.
 // A validator failure becomes a cfgError that names the key, its source, the
 // problem, and the value (for non-secret keys).
-func (c *Config) apply(k key, raw, source string, opts *Options) (string, error) {
-	if err := checkScalar(k, raw); err != nil {
+func (c *Config) apply(k key, raw, source string, l leaf, opts *Options) (string, error) {
+	if err := checkScalar(k, raw, l); err != nil {
 		return "", newCfgError(k.path, source, err.Error(), raw)
 	}
 	v, err := validateValue(k, raw, opts)
