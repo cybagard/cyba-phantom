@@ -1,0 +1,4 @@
+acme:
+  email: admin@example.com
+listen:
+  http: 80 # should be string "80" or quoted in YAML to avoid int if we want strict scalar, but let's see.

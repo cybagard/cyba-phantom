@@ -5,3 +5,5 @@ module github.com/cybagard/cyba-phantom
 // verification when the local toolchain differs. This is what makes the
 // two-build hash compare (T-P-07) meaningful. Zero dependencies in M-1.
 go 1.27.1
+
+require go.yaml.in/yaml/v3 v3.0.5
