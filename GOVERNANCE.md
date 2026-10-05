@@ -43,8 +43,8 @@ checks it; no tool checks it.
 - This project currently has one maintainer. Every merge into `main` is a
   human decision made by the maintainer; agents prepare, humans merge.
 - The maintainer reviews every pull request before merging it. Changes to
-  the high review-surface paths listed in `CONTRIBUTING.md` get extra
-  scrutiny.
+  the high review-surface paths listed in `CONTRIBUTING.md` get a more
+  careful review.
 - If the maintainer count ever grows, branch protection is updated in the
   same change that adds the account.
 
@@ -57,8 +57,9 @@ These settings apply to `main` from the day the repository is public:
   maintainer merges.
 - The maintainer is an admin and can bypass the required checks. This is
   accepted while the project has one maintainer.
-- Force-push to and deletion of `main`: disabled.
+- Force-push to and deletion of `main`: disabled. The admin cannot
+  bypass this rule.
 - No required review by a second account: the project has one
   maintainer, and GitHub counts approvals only from accounts with write
-  access. The maintainer reviews every pull request. The high
-  review-surface paths in `CONTRIBUTING.md` get extra scrutiny.
+  access. The high review-surface paths in `CONTRIBUTING.md` get a more
+  careful review.

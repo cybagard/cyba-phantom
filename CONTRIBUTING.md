@@ -13,7 +13,8 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
    `GOVERNANCE.md`). From the day the repository is public, branch
-   protection on `main` requires the CI checks and blocks force-push.
+   protection on `main` requires the CI checks and blocks force-push and
+   deletion.
    (A DCO sign-off is a commit trailer, not a signed commit.)
 3. Make small changes that are easy to review. In the PR body, name the
    constitution rules that the change touches.
@@ -39,9 +40,10 @@ here only via the maintainer's sync PR, which also rotates the
 ## High review-surface paths
 
 Changes to `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `GOVERNANCE.md`,
-`LICENSE`, `spec/**`, `.github/**`, `Makefile`, or `go.mod` get extra
-scrutiny. Most of these files steer the coding agents that work in this
-repository and its sibling, so they are prompt-injection surface.
+`LICENSE`, `spec/**`, `.github/**`, `Makefile`, or `go.mod` get a more
+careful review. Most of these files steer the coding agents that work
+in this repository and its sibling, so they are prompt-injection
+surface.
 `LICENSE` and `GOVERNANCE.md` set the legal and governance terms.
 
 ## Code
