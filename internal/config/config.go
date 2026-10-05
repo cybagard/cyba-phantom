@@ -170,13 +170,13 @@ func (c *Config) fill(leaves map[string]leaf, nonLeaves, allPaths map[string]boo
 // resolve returns the raw value for a key and its source.
 func resolve(k key, leaves map[string]leaf, nonLeaves map[string]bool, opts *Options) (string, string, error) {
 	if v, ok := osLookup(opts.Env, keyEnvName(k.path)); ok {
-		return v, "env "+keyEnvName(k.path), nil
+		return v, "env " + keyEnvName(k.path), nil
 	}
 	if nonLeaves[k.path] {
 		return "", "", newCfgError(k.path, "file", "expected a scalar", "")
 	}
 	if l, ok := leaves[k.path]; ok {
-		return l.value, "file line "+strconv.Itoa(l.line), nil
+		return l.value, "file line " + strconv.Itoa(l.line), nil
 	}
 	if k.def != "" {
 		return k.def, "default", nil
@@ -321,10 +321,10 @@ func osLookup(env func() []string, name string) (string, bool) {
 
 // cfgError is a config failure that names the key and its source.
 type cfgError struct {
-	key     string
-	source  string
-	detail  string
-	value   string
+	key    string
+	source string
+	detail string
+	value  string
 }
 
 func (e cfgError) Error() string {

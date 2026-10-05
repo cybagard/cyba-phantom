@@ -24,7 +24,7 @@ func TestLoad_Valid(t *testing.T) {
 
 	opts := Options{
 		StateRoot: stateRoot,
-		Env: func() []string { return nil },
+		Env:       func() []string { return nil },
 	}
 
 	_, err := Load(path, opts)
@@ -103,7 +103,7 @@ func TestTU10_EnvOverridePrecedence(t *testing.T) {
 	env := []string{"CANARY_LISTEN_HTTP=:9090", "CANARY_ACME_EMAIL=env@example.com"}
 	opts := Options{
 		StateRoot: stateRoot,
-		Env: func() []string { return env },
+		Env:       func() []string { return env },
 	}
 
 	cfg, err := Load(path, opts)
