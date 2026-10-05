@@ -90,6 +90,9 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 | SEC-07 | Log injection: all user-controlled strings are escaped in logs, alerts, and dashboard (no raw HTML, no ANSI) |
 | SEC-08 | Canary tokens are not derivable from session data without the bundle secret |
 | SEC-09 | Static analysis (gosec, govulncheck, staticcheck) clean; SBOM generated per release |
+| SEC-11 | The config loader fails closed. It reads one YAML document of ≤ 64 KiB. It rejects anchors, aliases, merge keys, custom tags, duplicate keys, more than one document, and non-canonical scalars. On an error, the sensor does not start. `--check` opens no network connection (04 §3, ADR-013) |
+| SEC-12 | Config can only make a constitution or `SEC-nn` value stricter. Every numeric key and duration key has a minimum and a maximum (04 §3 bounds table). Retention cannot exceed C8. Configured paths are absolute and clean. Outbound endpoints are the C4 allow-list and use TLS (04 §3, ADR-013) |
+| SEC-13 | Secrets never appear in the config file. A `*_env` key names an environment variable that holds the secret. `--check` output, error messages, and logs never contain a secret value or URL credentials. The loader rejects a config file or htpasswd file that other users can write (04 §3, ADR-013) |
 
 ## Success metrics
 - **Leading (30 days):** G1/G2 harness pass rate in CI; time-to-first-page in install tests; number of external verifications of published checkpoints.

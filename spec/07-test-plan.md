@@ -82,6 +82,8 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-S-07 | SEC-01 | `systemd-analyze security agent-canary` score ≤ 2.0 ("OK"); unit lint in CI |
 | T-S-08 | C4 | Egress test: during 1 h simulated traffic, `nftables` counters show outbound only to allow-listed destinations |
 | T-S-09 | SEC-09 | `gosec`, `govulncheck`, `staticcheck` clean; SBOM generated |
+| T-S-10 | SEC-11, SEC-13, FR-12 | Config parser: fuzz plus fixed cases (alias expansion, > 64 KiB, deep nesting, duplicate key, second document, custom tag, YAML 1.1 boolean, octal integer, `${…}` value, unknown `CANARY_*` variable) → non-zero exit naming the key, bounded time and memory; a known secret marker never appears in `--check` output, errors, or logs; config file writable by other → rejected |
+| T-S-11 | SEC-12, SEC-13, SEC-02, SEC-04, SEC-06, C2, C4, C8 | Config bounds: for each row of the 04 §3 bounds table, the minimum and maximum pass and one value past each edge fails naming the key; public `ops.listen`, `http` URL, URL with user information, link-local host, bad `tlog.origin`, unset or short secret variable → rejected; loader allow-list equals the configured endpoints |
 
 ### Acceptance (installed sensor, simulator harness `test/simulator`)
 | ID | Covers | Test |
@@ -116,7 +118,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 ## 5. Exit criteria per milestone
 | Milestone | Must pass |
 |-----------|-----------|
-| M-1 | T-U-06..12, T-I-01, T-I-03, T-P-07 |
+| M-1 | T-U-06..12, T-I-01, T-I-03, T-P-07, T-S-10, T-S-11 |
 | M-2 | + T-U-01, T-U-08, T-U-14, T-I-02, T-I-04, T-I-12, T-S-01, T-S-02 |
 | M-3 | + T-U-02..05, T-U-13, T-U-16, T-I-05..10, T-I-14, T-S-03 |
 | M-4 | + T-U-11, T-U-15, T-I-11, T-I-13, T-I-15, T-S-04..09, T-A-04, T-A-09 |
