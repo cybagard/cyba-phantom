@@ -35,30 +35,34 @@ func sha256Hex(data []byte) string {
 func hashDir(specDir string) (map[string]string, []string, error) {
 	hashes := map[string]string{}
 	var findings []string
+	if err := checkSpecDir(specDir); err != nil {
+		return nil, nil, err
+	}
 	entries, err := os.ReadDir(specDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			findings = append(findings, fmt.Sprintf("spec: unexpected subdirectory %q (spec/ must be flat)", e.Name()))
+			findings = append(findings, fmt.Sprintf("spec: unexpected subdirectory %s (spec/ must be flat)", printableName(e.Name())))
 			continue
 		}
 		if e.Name() == "manifest.json" {
 			continue
 		}
-		// Names and errors are PR-controlled: findings carry the quoted
-		// name only, never the raw error text.
+		// Names and errors are PR-controlled: a finding carries an
+		// allow-listed name only, never raw error text.
+		name := printableName(e.Name())
 		data, err := readCapped(filepath.Join(specDir, e.Name()))
 		switch {
 		case errors.Is(err, errNotRegular):
-			findings = append(findings, fmt.Sprintf("spec: %q is not a regular file", e.Name()))
+			findings = append(findings, fmt.Sprintf("spec: %s is not a regular file", name))
+			continue
+		case errors.Is(err, errTooLarge):
+			findings = append(findings, fmt.Sprintf("spec: %s exceeds the %d byte cap", name, maxFileBytes))
 			continue
 		case err != nil:
-			findings = append(findings, fmt.Sprintf("spec: cannot read %q", e.Name()))
-			continue
-		case len(data) > maxFileBytes:
-			findings = append(findings, fmt.Sprintf("spec: %q exceeds the %d byte cap", e.Name(), maxFileBytes))
+			findings = append(findings, fmt.Sprintf("spec: cannot read %s", name))
 			continue
 		}
 		hashes[e.Name()] = sha256Hex(data)
@@ -82,14 +86,20 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		if err != nil {
 			return findings, fmt.Errorf("stamp: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(specDir, "manifest.json"), append(out, '\n'), 0o644); err != nil {
+		// Never write through a symlink: an existing manifest.json must be
+		// a regular file.
+		target := filepath.Join(specDir, "manifest.json")
+		if fi, err := os.Lstat(target); err == nil && !fi.Mode().IsRegular() {
+			return findings, fmt.Errorf("stamp: manifest.json is not a regular file")
+		}
+		if err := os.WriteFile(target, append(out, '\n'), 0o644); err != nil {
 			return findings, fmt.Errorf("stamp: cannot write manifest.json: %v", err)
 		}
 		return findings, nil
 	}
 
 	data, err := readCapped(filepath.Join(specDir, "manifest.json"))
-	if err != nil || len(data) > maxFileBytes {
+	if err != nil {
 		return append(findings, "spec: manifest.json is missing, not a regular file, unreadable, or over the size cap"), nil
 	}
 	var m manifest
@@ -97,19 +107,24 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		// The decoder error quotes manifest content raw: never print it.
 		return append(findings, "spec: manifest.json is not valid JSON in the stamp format"), nil
 	}
+	// Manifest keys and the sync date are PR-controlled: print only
+	// allow-listed names, and never print the date.
+	if !syncDateRE.MatchString(m.Synced) {
+		findings = append(findings, "spec: manifest.json sync date is not in YYYY-MM-DD form")
+	}
 	for name, want := range m.Files {
 		got, ok := hashes[name]
 		if !ok {
-			findings = append(findings, fmt.Sprintf("spec: %q is stamped but missing from spec/", name))
+			findings = append(findings, fmt.Sprintf("spec: %s is stamped but missing from spec/", printableName(name)))
 			continue
 		}
 		if got != want {
-			findings = append(findings, fmt.Sprintf("spec: %q changed since the sync stamp (%q)", name, m.Synced))
+			findings = append(findings, fmt.Sprintf("spec: %s changed since the sync stamp", printableName(name)))
 		}
 	}
 	for name := range hashes {
 		if _, ok := m.Files[name]; !ok {
-			findings = append(findings, fmt.Sprintf("spec: %q is not stamped (add it or re-sync)", name))
+			findings = append(findings, fmt.Sprintf("spec: %s is not stamped (add it or re-sync)", printableName(name)))
 		}
 	}
 	return findings, nil

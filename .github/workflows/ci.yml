@@ -17,21 +17,21 @@
 #     and run against the PR work tree, so a PR cannot weaken a gate by
 #     editing its checker; lint/test/build self-attest and are closed
 #     by maintainer-only merge + human review;
+#   - exception (bootstrap): when a PR adds a gate checker that the base
+#     branch does not have yet, the job falls back to the work tree with
+#     a loud warning. This is self-attested; human review and
+#     maintainer-only merge close it;
 #   - limit: on pull_request, GitHub runs the workflow file from the PR
 #     merge ref, so a PR that edits this file runs its edited copy. Human
 #     review of every .github/** change is the control for that;
-#   - the one exception is a PR that introduces a gate checker while
-#     the base branch predates it (bootstrap): the job falls back to
-#     the work tree with a loud warning — self-attested, closed by the
-#     same human review + maintainer-only merge;
 #   - CodeQL workflow scanning is enabled from the repo settings (GitHub
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
 #
 # Jobs: lint (gofmt/vet), dco (sign-off, PRs only), test (-race + coverage
 # gate), trace (C10 matrix + sync stamp), mirror-diff (constitution table),
-# build (T-P-07: reproducible, static, sized, cgroup-budgeted). The gate
-# jobs share their checkout and gate-source steps via YAML anchors.
+# build (T-P-07: reproducible, static, sized, cgroup-budgeted). Jobs
+# share their checkout and gate-source steps through YAML anchors.
 
 name: ci
 

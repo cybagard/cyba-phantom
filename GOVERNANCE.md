@@ -30,9 +30,11 @@ English). Prose is documentation, issue and pull request text, commit
 messages, code comments, and text that the software shows to users.
 These items are not prose: code identifiers, commands, paths, IDs,
 quoted and third-party text, legal text (for example `LICENSE`), names
-of standards and products, and the synced `spec/` files. Do not change
+of standards and products, technical terms, and the synced `spec/`
+files. Do not change
 the C1–C10 table in `AGENTS.md` for STE100: it is a byte-exact mirror.
-An STE100 rewrite must not change what a rule means. The rule
+An STE100 rewrite must not change what a rule means. If it can, keep
+the old text and open an issue. The rule
 applies to new text and to all text that a change touches. Human review
 checks it; no tool checks it.
 

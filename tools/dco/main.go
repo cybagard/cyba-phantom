@@ -27,14 +27,41 @@ var signoffRE = regexp.MustCompile(`(?m)^Signed-off-by: \S.* <[^<>\s]+@[^<>\s]+\
 
 func main() { os.Exit(run(os.Args[1:], ".")) }
 
-// trailerBlock returns the last paragraph of a commit message. Git puts
-// trailers there; a sign-off line in the middle of the body does not count.
+// trailerLineRE matches one git trailer line ("Key: value"); a line that
+// starts with whitespace continues the previous trailer.
+var trailerLineRE = regexp.MustCompile(`^([A-Za-z0-9-]+: |[ \t])`)
+
+// trailerBlock returns the trailer block of a commit message: the last
+// paragraph, if it is not the subject and every line in it is a trailer.
+// Otherwise it returns "". Paragraphs split on lines that are empty or
+// hold only whitespace, as git splits them; CRLF counts as LF.
 func trailerBlock(body string) string {
-	body = strings.TrimRight(body, " \t\n")
-	if i := strings.LastIndex(body, "\n\n"); i >= 0 {
-		return body[i+2:]
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	var paras [][]string
+	var cur []string
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			if len(cur) > 0 {
+				paras = append(paras, cur)
+				cur = nil
+			}
+			continue
+		}
+		cur = append(cur, l)
 	}
-	return body
+	if len(cur) > 0 {
+		paras = append(paras, cur)
+	}
+	if len(paras) < 2 { // only a subject: no trailer block
+		return ""
+	}
+	last := paras[len(paras)-1]
+	for _, l := range last {
+		if !trailerLineRE.MatchString(l) {
+			return ""
+		}
+	}
+	return strings.Join(last, "\n")
 }
 
 // run checks that every commit in base..head of the repository in dir

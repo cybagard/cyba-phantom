@@ -28,7 +28,7 @@ test:
 
 lint:
 	@bad=$$(gofmt -l .); \
-	if [ -n "$$bad" ]; then echo "gofmt: files need formatting:"; echo "$$bad"; exit 1; fi
+	if [ -n "$$bad" ]; then echo "gofmt: files need formatting:"; echo "$$bad" | cat -v | sed 's/^/  > /'; exit 1; fi
 	$(GO) vet ./...
 
 # C10: regenerate spec/08 from 01 + 07 and require a byte-exact match,
@@ -95,13 +95,13 @@ perf-inner:
 		echo "perf: reproducible build OK ($$ha)"; \
 	fi
 	@if command -v readelf >/dev/null 2>&1; then \
-		dyn=$$(readelf -d bin/canary-a 2>&1 | grep -c 'no dynamic section'); \
+		static=$$(readelf -d bin/canary-a 2>&1 | grep -c 'no dynamic section'); \
 	elif command -v ldd >/dev/null 2>&1; then \
-		dyn=$$(ldd bin/canary-a 2>&1 | grep -c 'not a dynamic executable'); \
+		static=$$(ldd bin/canary-a 2>&1 | grep -c 'not a dynamic executable'); \
 	else \
 		$(call skip,no readelf/ldd for the static-link check); exit 0; \
 	fi; \
-	if [ "$$dyn" -ge 1 ]; then echo "perf: statically linked OK"; \
+	if [ "$$static" -ge 1 ]; then echo "perf: statically linked OK"; \
 	else echo "perf FAIL: binary is dynamically linked"; exit 1; fi
 	@size=$$(stat -c%s bin/canary-a 2>/dev/null || stat -f%z bin/canary-a 2>/dev/null); \
 	if [ -z "$$size" ]; then $(call skip,no stat for the size check); exit 0; fi; \

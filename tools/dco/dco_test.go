@@ -116,3 +116,36 @@ func TestSignoffOutsideTrailerFails(t *testing.T) {
 		t.Fatalf("run = %d, want 1", code)
 	}
 }
+
+// A subject line alone is not a trailer block.
+func TestSignoffAsSubjectFails(t *testing.T) {
+	dir := newRepo(t)
+	commit(t, dir, "base", true)
+	git(t, dir, "branch", "base")
+	git(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com",
+		"commit", "--allow-empty", "--cleanup=verbatim", "-m", "Signed-off-by: t <t@example.com>")
+	if code := run([]string{"base", "HEAD"}, dir); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+}
+
+// A line that holds only whitespace separates paragraphs, as in git.
+func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
+	if got := trailerBlock("subject\n\nSigned-off-by: t <t@example.com>\n \t\nclosing words\n"); got != "" {
+		t.Fatalf("trailerBlock = %q, want \"\"", got)
+	}
+}
+
+// A last paragraph with a non-trailer line is not a trailer block.
+func TestMixedLastParagraphFails(t *testing.T) {
+	if got := trailerBlock("subject\n\nSigned-off-by: t <t@example.com>\nplain words\n"); got != "" {
+		t.Fatalf("trailerBlock = %q, want \"\"", got)
+	}
+}
+
+func TestTrailerBlockCRLF(t *testing.T) {
+	got := trailerBlock("subject\r\n\r\nbody\r\n\r\nSigned-off-by: t <t@example.com>\r\n")
+	if got != "Signed-off-by: t <t@example.com>" {
+		t.Fatalf("trailerBlock = %q", got)
+	}
+}

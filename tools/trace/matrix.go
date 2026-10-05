@@ -14,8 +14,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -30,28 +28,6 @@ const (
 	maxFileLines = 10000   // lines per file
 	maxLineBytes = 8192    // bytes per line
 )
-
-// errNotRegular rejects symlinks, devices, and other non-regular files.
-var errNotRegular = errors.New("not a regular file")
-
-// readCapped reads a regular file, at most maxFileBytes+1 bytes. It does
-// not follow symlinks. A result longer than maxFileBytes means the file
-// is over the cap.
-func readCapped(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, errNotRegular
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-}
 
 var (
 	reqIDRE   = regexp.MustCompile(`^(FR|NFR|SEC)-\d{2}$`)
@@ -100,14 +76,15 @@ type matGroup struct {
 // missing or unreadable file.
 func loadSpec(path string) (string, []string, error) {
 	data, err := readCapped(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNotRegular):
+		return "", []string{fmt.Sprintf("%s: not a regular file", path)}, nil
+	case errors.Is(err, errTooLarge):
+		return "", []string{fmt.Sprintf("%s: exceeds the %d byte cap", path, maxFileBytes)}, nil
+	case err != nil:
 		return "", nil, fmt.Errorf("%s: %w", path, err)
 	}
 	var findings []string
-	if len(data) > maxFileBytes {
-		findings = append(findings, fmt.Sprintf("%s: exceeds the %d byte cap", path, maxFileBytes))
-		return "", findings, nil
-	}
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if text != string(data) {
 		findings = append(findings, fmt.Sprintf("%s: contains CRLF line endings; re-normalize to LF", path))

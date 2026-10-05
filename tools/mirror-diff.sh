@@ -55,7 +55,9 @@ if diff -u "$GOLDEN" "$tmp" > "$tmp.d" 2>&1; then
   echo "mirror-diff: $AGENTS_MD C1–C10 table matches $GOLDEN (12 lines, byte-identical)"
   exit 0
 fi
-# cat -v: the diff carries PR-authored bytes; show control bytes visibly.
-cat -v "$tmp.d" >&2
+# The diff carries PR-authored bytes. cat -v shows control bytes, and the
+# "  > " prefix keeps every line from starting with a runner command
+# ("::" or "##["), because the runner trims leading spaces only.
+cat -v "$tmp.d" | sed 's/^/  > /' >&2
 echo "mirror-diff: C1–C10 table in $AGENTS_MD differs from $GOLDEN (diff above)" >&2
 exit 1
