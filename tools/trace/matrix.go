@@ -34,6 +34,8 @@ var (
 	cRuleRE   = regexp.MustCompile(`^C(10|[1-9])$`)
 	reqTokRE  = regexp.MustCompile(`^(FR-\d{2}|NFR-\d{2}|SEC-\d{2}|C(10|[1-9])|G\d+)$`)
 	sepCellRE = regexp.MustCompile(`^-{3,}$`)
+	// idLikeRE matches a token shaped like a requirement ID, valid or not.
+	idLikeRE = regexp.MustCompile(`^(FR|NFR|SEC|C|G)-?\d+$`)
 
 	// Test references, from strictest to loosest.
 	testIDRE          = regexp.MustCompile(`^T-([A-Z])-(\d{2})$`)               // one test ID: T-U-01
@@ -209,10 +211,16 @@ func parseTestPlan(text string, findings *[]string) []test {
 		}
 		seen[id] = true
 		t := test{id: id, order: len(tests)}
-		for _, tok := range strings.Split(cells[1], ",") {
+		for i, tok := range strings.Split(cells[1], ",") {
 			tok = strings.TrimSpace(tok)
-			if tok != "" && reqTokRE.MatchString(tok) {
+			switch {
+			case tok == "":
+			case reqTokRE.MatchString(tok):
 				t.covers = append(t.covers, tok)
+			case idLikeRE.MatchString(tok):
+				// Looks like an ID but is not one (FR-1, FR-100, C11):
+				// a typo must not drop out of the C10 check.
+				*findings = append(*findings, fmt.Sprintf("07-test-plan: test %s Covers item %d is not a valid requirement ID", id, i+1))
 			}
 		}
 		tests = append(tests, t)
@@ -607,6 +615,9 @@ func checkMatrix(prd, tp, mat string) []string {
 		for _, c := range t.covers {
 			if !declared[c] {
 				findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers %s, which 01 does not declare", t.id, c))
+			}
+			if exempt[c] {
+				findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers %s, which is exempt from C10 (no v1 tests)", t.id, c))
 			}
 			if c == "C10" {
 				findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers C10; no test may cover the trace check", t.id))

@@ -9,7 +9,7 @@
 # Usage: mirror-diff.sh [agents-md] [golden]
 #        (defaults: AGENTS.md, spec/constitution-table.md)
 #
-# Exit: 0 in sync; 1 on any difference (unified diff on stderr);
+# Exit: 0 in sync; 1 on any difference (differing line numbers on stderr);
 #       2 on a missing or malformed table.
 set -uo pipefail
 
@@ -58,11 +58,19 @@ fi
 # Report line numbers only, never table text: the text is PR-controlled,
 # and the runner reads "::" at the start of a line and "##[" anywhere in a
 # line as commands. Line N is header (1), separator (2), or rule C(N-2).
-awk 'NR == FNR { g[FNR] = $0; gn = FNR; next }
+# At most 12 lines are reported: the table has 12, and a huge golden file
+# must not flood the log.
+awk 'FILENAME == ARGV[1] { g[FNR] = $0; gn = FNR; next }
      { t[FNR] = $0; tn = FNR }
      END {
        n = (gn > tn) ? gn : tn
-       for (i = 1; i <= n; i++) if (g[i] != t[i]) printf "  line %d differs\n", i
+       shown = 0
+       for (i = 1; i <= n; i++) {
+         if (g[i] == t[i]) continue
+         if (shown < 12) printf "  line %d differs\n", i
+         shown++
+       }
+       if (shown > 12) printf "  and %d more differing lines\n", shown - 12
      }' "$GOLDEN" "$tmp" >&2
 echo "mirror-diff: C1–C10 table in $AGENTS_MD differs from $GOLDEN (line numbers above)" >&2
 exit 1

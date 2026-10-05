@@ -94,6 +94,9 @@ func run(args []string) int {
 		}
 		if write {
 			fmt.Printf("trace: stamp rotated in %s\n", dir)
+			if len(findings) == 0 {
+				return 0
+			}
 		}
 	}
 

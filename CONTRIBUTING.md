@@ -12,9 +12,9 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    adopt a CLA before the first external-corporate contributor. Until
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
-   `GOVERNANCE.md`). Branch protection is on `main`: required checks,
-   no force-push; required review lands with the second approver
-   account. (DCO sign-off is a commit trailer, not a signed commit.)
+   `GOVERNANCE.md`). From the day the repository is public, branch
+   protection on `main` requires the CI checks and blocks force-push.
+   Required review lands with the second approver account. (DCO sign-off is a commit trailer, not a signed commit.)
 3. Make small changes that are easy to review. In the PR body, name the
    constitution rules that the change touches.
 4. Write all prose in ASD-STE100 (Simplified Technical English): docs,

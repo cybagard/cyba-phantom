@@ -558,7 +558,7 @@ func TestUnlistedNameHidden(t *testing.T) {
 	}
 }
 
-// A test that covers only an ID that 01 does not declare is an orphan.
+// A test that covers an ID that 01 does not declare is a finding.
 func TestUndeclaredCoverIsFinding(t *testing.T) {
 	dir := newSpec(t)
 	replaceLine(t, dir, "07-test-plan.md",
@@ -590,4 +590,13 @@ func TestSymlinkedSpecDirRejectedByMatrix(t *testing.T) {
 	if _, err := runMatrix(link); err == nil {
 		t.Error("matrix accepted a symlinked spec dir")
 	}
+}
+
+// An ID-shaped typo in Covers is a finding, not a silent drop.
+func TestMalformedCoverIDIsFinding(t *testing.T) {
+	dir := newSpec(t)
+	replaceLine(t, dir, "07-test-plan.md",
+		"| T-A-02 | FR-02, G1 | band |",
+		"| T-A-02 | FR-02, G1, FR-100 | band |")
+	wantFinding(t, dir, "T-A-02 Covers item 3 is not a valid requirement ID")
 }

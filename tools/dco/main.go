@@ -43,13 +43,10 @@ func run(args []string, dir string) int {
 	base, head := args[0], args[1]
 
 	cmd := exec.Command("git", "-C", dir, "log", logFormat, base+".."+head)
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		o := string(out)
-		if len(o) > 512 {
-			o = o[:512] + "…"
-		}
-		fmt.Fprintf(os.Stderr, "dco: git log %s..%s: %v\n%s", base, head, err, o)
+		// git's own error text is not printed: print the exit status only.
+		fmt.Fprintf(os.Stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
 

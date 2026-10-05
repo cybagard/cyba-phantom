@@ -32,19 +32,21 @@ func sha256Hex(data []byte) string {
 // hashDir maps every regular file in specDir (except manifest.json) to
 // its SHA-256. Subdirectories are findings: spec/ must be flat. A
 // non-nil error means the directory itself is unreadable.
-func hashDir(specDir string) (map[string]string, []string, error) {
+func hashDir(specDir string) (map[string]string, map[string]bool, []string, error) {
 	hashes := map[string]string{}
+	flagged := map[string]bool{} // names that already have a finding
 	var findings []string
 	if err := checkSpecDir(specDir); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	entries, err := os.ReadDir(specDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
+		return nil, nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
 			findings = append(findings, fmt.Sprintf("spec: unexpected subdirectory %s (spec/ must be flat)", printableName(e.Name())))
+			flagged[e.Name()] = true
 			continue
 		}
 		if e.Name() == "manifest.json" {
@@ -56,21 +58,23 @@ func hashDir(specDir string) (map[string]string, []string, error) {
 		data, err := readCapped(filepath.Join(specDir, e.Name()))
 		if f := readFinding("spec: "+name, err); f != "" {
 			findings = append(findings, f)
+			flagged[e.Name()] = true
 			continue
 		}
 		if err != nil {
 			findings = append(findings, fmt.Sprintf("spec: cannot read %s", name))
+			flagged[e.Name()] = true
 			continue
 		}
 		hashes[e.Name()] = sha256Hex(data)
 	}
-	return hashes, findings, nil
+	return hashes, flagged, findings, nil
 }
 
 // runStamp verifies (or, with write, rotates) the sync stamp. It returns
 // findings and a fatal error only for an unreadable spec directory.
 func runStamp(specDir string, write bool) ([]string, error) {
-	hashes, findings, err := hashDir(specDir)
+	hashes, flagged, findings, err := hashDir(specDir)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +116,9 @@ func runStamp(specDir string, write bool) ([]string, error) {
 	}
 	for name, want := range m.Files {
 		got, ok := hashes[name]
+		if !ok && flagged[name] {
+			continue // already reported by hashDir
+		}
 		if !ok {
 			findings = append(findings, fmt.Sprintf("spec: %s is stamped but missing from spec/", printableName(name)))
 			continue
