@@ -14,10 +14,7 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 2. The maintainer reviews every PR and is the final merge gate (see
    `GOVERNANCE.md`). From the day the repository is public, branch
    protection on `main` requires the CI checks and blocks force-push.
-   Changes to the instruction and governance files, `spec/**`, and
-   `.github/**` also need one approval from a code owner (see
-   `GOVERNANCE.md`). (A DCO sign-off is a commit trailer,
-   not a signed commit.)
+   (A DCO sign-off is a commit trailer, not a signed commit.)
 3. Make small changes that are easy to review. In the PR body, name the
    constitution rules that the change touches.
 4. Write all prose in ASD-STE100 (Simplified Technical English): docs,

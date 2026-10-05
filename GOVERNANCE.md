@@ -58,8 +58,7 @@ These settings apply to `main` from the day the repository is public:
 - The maintainer is an admin and can bypass the required checks. This is
   accepted while the project has one maintainer.
 - Force-push to and deletion of `main`: disabled.
-- Required review: one approval from a code owner (`.github/CODEOWNERS`)
-  for changes to `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`,
-  `GOVERNANCE.md`, `LICENSE`, `spec/**`, and `.github/**`. The author of a
-  pull request cannot approve it. `Makefile` and `go.mod` get extra
-  scrutiny but no required review.
+- No required review by a second account: the project has one
+  maintainer, and GitHub counts approvals only from accounts with write
+  access. The maintainer reviews every pull request. The high
+  review-surface paths in `CONTRIBUTING.md` get extra scrutiny.
