@@ -1,0 +1,10 @@
+# Canonical LF endings (the byte-exact mirror checks depend on it)
+*.md text eol=lf
+*.sh text eol=lf
+*.go text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# signed content bundles are opaque binary
+*.cbnd binary

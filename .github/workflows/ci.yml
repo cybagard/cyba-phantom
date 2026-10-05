@@ -1,0 +1,213 @@
+# CI for cyba-phantom.
+#
+# Security posture:
+#   - one workflow, triggered on push to main and on PRs to main only;
+#   - no pull_request_target, no workflow_run, no schedule triggers;
+#   - permissions: read-all; no secret is referenced anywhere in this file;
+#   - no artifact uploads (write scopes unneeded);
+#   - concurrency: one run per ref, superseded runs cancel;
+#   - every action is pinned to a full SHA (the tag is a comment);
+#   - Go: the runner's toolchain is switched to the exact pinned release
+#     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
+#     equal to the go line is stripped by go mod tidy), downloaded with
+#     Go's checksum verification; no setup-go action, zero dependencies;
+#   - gate checkers (dco, trace, mirror-diff) are built from an explicit
+#     checkout of the PR base branch (a ref-less checkout on
+#     pull_request would yield the merge ref — the PR's own changes)
+#     and run against the PR work tree, so a PR cannot weaken a gate by
+#     editing its checker; lint/test/build self-attest and are closed
+#     by maintainer-only merge + human review;
+#   - exception (bootstrap): when a PR adds a gate checker that the base
+#     branch does not have yet, the job falls back to the work tree with
+#     a loud warning. This is self-attested; human review and
+#     maintainer-only merge close it;
+#   - limit: on pull_request, GitHub runs the workflow file from the PR
+#     merge ref, so a PR that edits this file runs its edited copy. Human
+#     review of every .github/** change is the control for that;
+#   - CodeQL workflow scanning is enabled from the repo settings (GitHub
+#     App), not from this file — it is the third leg of the gate
+#     integrity story for the workflow files themselves.
+#
+# Jobs: lint (gofmt/vet), dco (sign-off, PRs only), test (-race + coverage
+# gate), trace (C10 matrix + sync stamp), mirror-diff (constitution table),
+# build (T-P-07: reproducible, static, sized, cgroup-budgeted). Jobs
+# share their checkout and gate-source steps through YAML anchors.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # The gate checkers are built from the PR base branch. Restricting
+    # PRs to those targeting main keeps that base on main: a PR
+    # targeting any other branch would resolve the base to a branch
+    # the author can push (same-repo write access) — running
+    # author-controlled checkers. PRs to other branches are
+    # maintainer-orchestrated intermediates; the final PR to main
+    # re-gates everything from main.
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: go1.27.1
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - &checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: gofmt + go vet
+        run: make lint
+
+  dco:
+    # Checker-from-base: every commit in the PR range must carry a
+    # Signed-off-by. PRs only — squash merges drop trailers, so pushed
+    # main is never re-checked (the history of main is what was reviewed).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/dco/main.go
+      GATE_NAME: DCO
+    steps:
+      - &base-checkout
+        name: Base checkout (PR base branch)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: base
+          persist-credentials: false
+          # Explicit ref is load-bearing: on pull_request, a ref-less
+          # checkout yields the merge ref (base + the PR's own changes),
+          # which would let a PR ship a weakened checker. On push events
+          # the expression is empty, so the event ref (main) is checked
+          # out — the single-checkout case.
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: PR work tree (full history for the commit range)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: work
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - &gate-source
+        # Before this step on purpose: the bootstrap fallback probes for
+        # the work tree, so it must already be checked out. Outputs the
+        # checker source tree and the tree to check (absolute paths:
+        # base/ and work/ are sibling checkouts).
+        name: Resolve gate source (base tree; work tree at bootstrap)
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            tree="$GITHUB_WORKSPACE/work"
+          else
+            tree="$GITHUB_WORKSPACE/base"
+          fi
+          if [ -f "$GITHUB_WORKSPACE/base/$GATE_FILE" ]; then
+            src="$GITHUB_WORKSPACE/base"
+          elif [ -f "$GITHUB_WORKSPACE/work/$GATE_FILE" ]; then
+            src="$GITHUB_WORKSPACE/work"
+            echo "::warning::bootstrap: $GATE_FILE is not on the PR base — running the $GATE_NAME gate from the PR work tree (self-attested; human review is the control)"
+          else
+            echo "::error::$GATE_FILE is absent from the base tree and no PR work tree carries it — the $GATE_NAME gate cannot run"
+            exit 1
+          fi
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: DCO sign-off
+        run: |
+          (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/dco" ./tools/dco)
+          cd "${{ steps.gate.outputs.tree }}"
+          "$RUNNER_TEMP/dco" "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - *checkout
+
+      - name: go test -race + coverage gate
+        run: make coverage
+
+  trace:
+    # Checker-from-base: the trace tool is built from the PR base branch
+    # and runs against the PR work tree. A PR cannot weaken its own C10
+    # gate. At bootstrap (base predates the gate) the tool is built from
+    # the work tree — warned, self-attested.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/trace/main.go
+      GATE_NAME: C10
+    steps:
+      - *base-checkout
+      - &work-checkout
+        name: PR work tree
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: work
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - *gate-source
+
+      - name: C10 matrix + sync stamp
+        run: |
+          (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
+          cd "${{ steps.gate.outputs.tree }}"
+          "$RUNNER_TEMP/trace" all spec
+
+  mirror-diff:
+    # Checker-from-base: the extraction script comes from the PR base
+    # branch; the AGENTS.md table and the golden are the PR's files. At
+    # bootstrap (base predates the gate) the script runs from the work
+    # tree — warned, self-attested.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/mirror-diff.sh
+      GATE_NAME: C1-C10 mirror
+    steps:
+      - *base-checkout
+      - *work-checkout
+      - *gate-source
+
+      - name: C1-C10 table mirror
+        run: |
+          tree="${{ steps.gate.outputs.tree }}"
+          bash "${{ steps.gate.outputs.src }}/tools/mirror-diff.sh" \
+            "$tree/AGENTS.md" "$tree/spec/constitution-table.md"
+
+  build:
+    # T-P-07: two builds must hash identically; the binary is statically
+    # linked and at most 25 MB, built under the 07 section 2 budget
+    # (1 vCPU / 512 MB cgroup). PERF_STRICT makes every skipped check a
+    # failure: no cgroup, limits not applied, or a missing tool.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PERF_STRICT: "1"
+    steps:
+      - *checkout
+
+      - name: Reproducible, static, sized build
+        run: make perf
+
+      - name: Binary facts
+        run: |
+          file bin/canary-a || true
+          stat -c%s bin/canary-a | awk '{printf "binary size: %d bytes\n", $1}'
