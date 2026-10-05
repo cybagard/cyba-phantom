@@ -20,49 +20,18 @@ import (
 	"strings"
 )
 
-// signoffRE matches a DCO trailer line: "Signed-off-by: Name <address>",
-// where address has a local part, an @, and a dotted domain. It applies to
-// the trailer block only (see trailerBlock).
-var signoffRE = regexp.MustCompile(`(?m)^Signed-off-by: \S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>\s*$`)
+// signoffRE matches the value of one Signed-off-by trailer: "Name
+// <address>", where address has a local part, an @, and a dotted domain.
+var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
+
+// logFormat asks git for each commit's hash and the values of its
+// Signed-off-by trailers. Git's own trailer parser decides what a trailer
+// is, so dco accepts exactly the sign-offs that git recognizes (for
+// example the block that cherry-pick -x -s writes), and never the subject
+// or a line in the middle of the body.
+const logFormat = "--format=%H%x00%(trailers:key=Signed-off-by,valueonly,unfold,separator=%x01)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".")) }
-
-// trailerLineRE matches one git trailer line ("Key: value"); a line that
-// starts with whitespace continues the previous trailer.
-var trailerLineRE = regexp.MustCompile(`^([A-Za-z0-9-]+: |[ \t])`)
-
-// trailerBlock returns the trailer block of a commit message: the last
-// paragraph, if it is not the subject and every line in it is a trailer.
-// Otherwise it returns "". Paragraphs split on lines that are empty or
-// hold only whitespace, as git splits them; CRLF counts as LF.
-func trailerBlock(body string) string {
-	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
-	var paras [][]string
-	var cur []string
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			if len(cur) > 0 {
-				paras = append(paras, cur)
-				cur = nil
-			}
-			continue
-		}
-		cur = append(cur, l)
-	}
-	if len(cur) > 0 {
-		paras = append(paras, cur)
-	}
-	if len(paras) < 2 { // only a subject: no trailer block
-		return ""
-	}
-	last := paras[len(paras)-1]
-	for _, l := range last {
-		if !trailerLineRE.MatchString(l) {
-			return ""
-		}
-	}
-	return strings.Join(last, "\n")
-}
 
 // run checks that every commit in base..head of the repository in dir
 // carries a sign-off trailer.
@@ -73,7 +42,7 @@ func run(args []string, dir string) int {
 	}
 	base, head := args[0], args[1]
 
-	cmd := exec.Command("git", "-C", dir, "log", "--format=%H%x00%P%x00%s%x00%B%x00", base+".."+head)
+	cmd := exec.Command("git", "-C", dir, "log", logFormat, base+".."+head)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		o := string(out)
@@ -84,26 +53,23 @@ func run(args []string, dir string) int {
 		return 2
 	}
 
-	// Each record is H NUL P NUL S NUL B, and git terminates every record
-	// with the format's final NUL plus its own record newline, so records
-	// separate on NUL+LF. %B (the full body) may contain newlines but
-	// never NUL, so splitting each record into four fields is safe.
+	// Each record is H NUL TRAILERS NUL, and git ends every record with
+	// its own newline, so records separate on NUL+LF. Trailer values are
+	// joined by SOH (0x01) and never hold NUL. No PR-authored text is
+	// printed: only hashes and counts.
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
 	}
 	total, unsigned := 0, 0
 	for _, rec := range records {
-		f := bytes.SplitN(rec, []byte{0}, 4)
-		if len(f) < 4 {
+		f := bytes.SplitN(rec, []byte{0}, 2)
+		if len(f) < 2 {
 			continue
 		}
-		// f[2] is the commit subject — PR-authored content, never
-		// printed: a planted instruction in a subject would reach any
-		// agent reading the CI log.
-		hash, body := string(f[0]), string(f[3])
+		hash := string(f[0])
 		total++
-		if !signoffRE.MatchString(trailerBlock(body)) {
+		if !hasSignoff(string(f[1])) {
 			unsigned++
 			if len(hash) > 12 {
 				hash = hash[:12]
@@ -123,4 +89,15 @@ func run(args []string, dir string) int {
 	}
 	fmt.Printf("dco: all %d commits in %s..%s carry Signed-off-by\n", total, base, head)
 	return 0
+}
+
+// hasSignoff reports whether any SOH-separated trailer value is a valid
+// "Name <address>" sign-off.
+func hasSignoff(values string) bool {
+	for _, v := range strings.Split(values, "\x01") {
+		if signoffRE.MatchString(strings.TrimSpace(v)) {
+			return true
+		}
+	}
+	return false
 }

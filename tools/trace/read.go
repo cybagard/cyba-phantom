@@ -1,14 +1,16 @@
 // Read: safe input handling for spec files. Spec content and file names
 // are PR-controlled, so the tool reads only regular files under a size
-// cap and prints only names that pass an allow-list.
+// cap, and a finding names a file only if the tool itself knows the name.
 
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
-	"regexp"
 )
 
 var (
@@ -16,15 +18,18 @@ var (
 	errNotRegular = errors.New("not a regular file")
 	// errTooLarge rejects a file over maxFileBytes.
 	errTooLarge = errors.New("over the size cap")
-
-	// printableNameRE is the allow-list for a file name in a finding.
-	printableNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-	// syncDateRE is the only accepted form of the manifest sync date.
-	syncDateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 )
 
+// knownSpecFiles are the only file names a finding prints. Every other
+// name is PR-controlled text and shows as a short hash.
+var knownSpecFiles = map[string]bool{
+	"01-prd.md": true, "07-test-plan.md": true, "08-traceability.md": true,
+	"README.md": true, "constitution-table.md": true, "manifest.json": true,
+}
+
 // readCapped reads a regular file of at most maxFileBytes. It does not
-// follow symlinks: the file it opens must be the file it checked.
+// follow symlinks: the file it opens must be the file it checked, and the
+// open does not block on a FIFO swapped in between.
 func readCapped(path string) ([]byte, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
@@ -33,7 +38,7 @@ func readCapped(path string) ([]byte, error) {
 	if !before.Mode().IsRegular() {
 		return nil, errNotRegular
 	}
-	f, err := os.Open(path)
+	f, err := openNoBlock(path)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +47,7 @@ func readCapped(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !os.SameFile(before, after) {
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
 		return nil, errNotRegular // replaced between the check and the open
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
@@ -53,6 +58,18 @@ func readCapped(path string) ([]byte, error) {
 		return nil, errTooLarge
 	}
 	return data, nil
+}
+
+// readFinding turns a rejected read into a finding. It returns "" for
+// any other error, which the caller handles.
+func readFinding(name string, err error) string {
+	switch {
+	case errors.Is(err, errNotRegular):
+		return fmt.Sprintf("%s: not a regular file", name)
+	case errors.Is(err, errTooLarge):
+		return fmt.Sprintf("%s: exceeds the %d byte cap", name, maxFileBytes)
+	}
+	return ""
 }
 
 // checkSpecDir requires specDir to be a real directory, not a symlink.
@@ -67,11 +84,12 @@ func checkSpecDir(specDir string) error {
 	return nil
 }
 
-// printableName returns name if it passes the allow-list, else a fixed
-// placeholder. Findings never carry a name that could hold prose.
+// printableName returns a known spec file name as is. Any other name
+// shows as "unlisted file <hash>": a finding never carries PR text.
 func printableName(name string) string {
-	if printableNameRE.MatchString(name) {
+	if knownSpecFiles[name] {
 		return name
 	}
-	return "<file name not shown: outside [A-Za-z0-9._-]{1,64}>"
+	sum := sha256.Sum256([]byte(name))
+	return "unlisted file " + hex.EncodeToString(sum[:4])
 }

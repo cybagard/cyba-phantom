@@ -7,10 +7,10 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 
 1. Fork, branch, and open a pull request. Every commit must carry a
    sign-off under the Developer Certificate of Origin (DCO) 1.1: sign
-   with `git commit -s` (see <https://developercertificate.org>). CI checks the range on every PR;
-   unsigned commits fail. We adopt a CLA before the first
-   external-corporate contributor; until then DCO is the
-   contribution license.
+   with `git commit -s` (see <https://developercertificate.org>). CI
+   checks every commit in each PR, and an unsigned commit fails. We
+   adopt a CLA before the first external-corporate contributor. Until
+   then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
    `GOVERNANCE.md`). Branch protection is on `main`: required checks,
    no force-push; required review lands with the second approver

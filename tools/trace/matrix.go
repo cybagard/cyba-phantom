@@ -12,7 +12,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -76,12 +75,10 @@ type matGroup struct {
 // missing or unreadable file.
 func loadSpec(path string) (string, []string, error) {
 	data, err := readCapped(path)
-	switch {
-	case errors.Is(err, errNotRegular):
-		return "", []string{fmt.Sprintf("%s: not a regular file", path)}, nil
-	case errors.Is(err, errTooLarge):
-		return "", []string{fmt.Sprintf("%s: exceeds the %d byte cap", path, maxFileBytes)}, nil
-	case err != nil:
+	if f := readFinding(path, err); f != "" {
+		return "", []string{f}, nil
+	}
+	if err != nil {
 		return "", nil, fmt.Errorf("%s: %w", path, err)
 	}
 	var findings []string
@@ -90,8 +87,12 @@ func loadSpec(path string) (string, []string, error) {
 		findings = append(findings, fmt.Sprintf("%s: contains CRLF line endings; re-normalize to LF", path))
 	}
 	lines := strings.Split(text, "\n")
-	if len(lines) > maxFileLines {
-		findings = append(findings, fmt.Sprintf("%s: %d lines exceeds the %d line cap", path, len(lines), maxFileLines))
+	n := len(lines)
+	if n > 0 && lines[n-1] == "" {
+		n-- // a final newline ends the last line; it does not start one
+	}
+	if n > maxFileLines {
+		findings = append(findings, fmt.Sprintf("%s: %d lines exceeds the %d line cap", path, n, maxFileLines))
 	}
 	for _, l := range lines {
 		if len(l) > maxLineBytes {
@@ -107,6 +108,9 @@ func loadSpec(path string) (string, []string, error) {
 
 // runMatrix runs the full C10 check over one spec directory.
 func runMatrix(specDir string) ([]string, error) {
+	if err := checkSpecDir(specDir); err != nil {
+		return nil, err
+	}
 	prd, f, err := loadSpec(filepath.Join(specDir, "01-prd.md"))
 	findings := append([]string(nil), f...)
 	if err != nil {
@@ -547,10 +551,15 @@ func checkMatrix(prd, tp, mat string) []string {
 		expected[id] = true
 	}
 	exempt := map[string]bool{}
+	declared := map[string]bool{}
 	for _, r := range reqs {
+		declared[r.id] = true
 		if r.exempt {
 			exempt[r.id] = true
 		}
+	}
+	for i := 1; i <= 10; i++ {
+		declared[fmt.Sprintf("C%d", i)] = true
 	}
 
 	// Row set <-> requirement set, in both directions.
@@ -596,6 +605,9 @@ func checkMatrix(prd, tp, mat string) []string {
 			findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers no requirement (orphan)", t.id))
 		}
 		for _, c := range t.covers {
+			if !declared[c] {
+				findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers %s, which 01 does not declare", t.id, c))
+			}
 			if c == "C10" {
 				findings = append(findings, fmt.Sprintf("07-test-plan: test %s covers C10; no test may cover the trace check", t.id))
 			}

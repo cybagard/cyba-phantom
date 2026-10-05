@@ -129,23 +129,39 @@ func TestSignoffAsSubjectFails(t *testing.T) {
 	}
 }
 
+// commitMsg makes a commit with an exact message (no cleanup).
+func commitMsg(t *testing.T, dir, msg string) {
+	t.Helper()
+	git(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com",
+		"commit", "--allow-empty", "--cleanup=verbatim", "-m", msg)
+}
+
+func runOn(t *testing.T, msg string) int {
+	t.Helper()
+	dir := newRepo(t)
+	commit(t, dir, "base", true)
+	git(t, dir, "branch", "base")
+	commitMsg(t, dir, msg)
+	return run([]string{"base", "HEAD"}, dir)
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
-	if got := trailerBlock("subject\n\nSigned-off-by: t <t@example.com>\n \t\nclosing words\n"); got != "" {
-		t.Fatalf("trailerBlock = %q, want \"\"", got)
+	if code := runOn(t, "subject\n\nSigned-off-by: t <t@example.com>\n \t\nclosing words\n"); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
 	}
 }
 
-// A last paragraph with a non-trailer line is not a trailer block.
-func TestMixedLastParagraphFails(t *testing.T) {
-	if got := trailerBlock("subject\n\nSigned-off-by: t <t@example.com>\nplain words\n"); got != "" {
-		t.Fatalf("trailerBlock = %q, want \"\"", got)
+// git accepts a trailer block that mixes a git-generated trailer with
+// other lines (for example "cherry picked from"); so does dco.
+func TestCherryPickBlockPasses(t *testing.T) {
+	if code := runOn(t, "subject\n\nbody\n\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\nSigned-off-by: t <t@example.com>\n"); code != 0 {
+		t.Fatalf("run = %d, want 0", code)
 	}
 }
 
-func TestTrailerBlockCRLF(t *testing.T) {
-	got := trailerBlock("subject\r\n\r\nbody\r\n\r\nSigned-off-by: t <t@example.com>\r\n")
-	if got != "Signed-off-by: t <t@example.com>" {
-		t.Fatalf("trailerBlock = %q", got)
+func TestCRLFMessage(t *testing.T) {
+	if code := runOn(t, "subject\r\n\r\nbody\r\n\r\nSigned-off-by: t <t@example.com>\r\n"); code != 0 {
+		t.Fatalf("run = %d, want 0", code)
 	}
 }

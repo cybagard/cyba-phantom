@@ -26,6 +26,9 @@ import (
 	"strings"
 )
 
+// maxPrintedFindings caps the findings printed to the log.
+const maxPrintedFindings = 25
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -95,7 +98,12 @@ func run(args []string) int {
 	}
 
 	if len(findings) > 0 {
-		for _, f := range findings {
+		// Cap the printed findings: a hostile spec/ can produce many.
+		for i, f := range findings {
+			if i == maxPrintedFindings {
+				fmt.Printf("trace: … %d more finding(s) not shown\n", len(findings)-i)
+				break
+			}
 			fmt.Println("trace:", f)
 		}
 		fmt.Printf("trace FAIL: %d finding(s)\n", len(findings))

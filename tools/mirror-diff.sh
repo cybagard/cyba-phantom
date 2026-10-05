@@ -26,7 +26,7 @@ if [ ! -f "$GOLDEN" ]; then
 fi
 
 tmp="$(mktemp)" || exit 2
-trap 'rm -f "$tmp" "$tmp.d"' EXIT
+trap 'rm -f "$tmp"' EXIT
 
 # The table block: the "| Rule | Digest |" header, its separator, and the
 # ten C-rows — 12 lines (awk stops after the 12th), LF-normalized
@@ -51,13 +51,18 @@ if [ "$tablelines" -ne 12 ]; then
   exit 2
 fi
 
-if diff -u "$GOLDEN" "$tmp" > "$tmp.d" 2>&1; then
+if cmp -s "$GOLDEN" "$tmp"; then
   echo "mirror-diff: $AGENTS_MD C1–C10 table matches $GOLDEN (12 lines, byte-identical)"
   exit 0
 fi
-# The diff carries PR-authored bytes. cat -v shows control bytes, and the
-# "  > " prefix keeps every line from starting with a runner command
-# ("::" or "##["), because the runner trims leading spaces only.
-cat -v "$tmp.d" | sed 's/^/  > /' >&2
-echo "mirror-diff: C1–C10 table in $AGENTS_MD differs from $GOLDEN (diff above)" >&2
+# Report line numbers only, never table text: the text is PR-controlled,
+# and the runner reads "::" at the start of a line and "##[" anywhere in a
+# line as commands. Line N is header (1), separator (2), or rule C(N-2).
+awk 'NR == FNR { g[FNR] = $0; gn = FNR; next }
+     { t[FNR] = $0; tn = FNR }
+     END {
+       n = (gn > tn) ? gn : tn
+       for (i = 1; i <= n; i++) if (g[i] != t[i]) printf "  line %d differs\n", i
+     }' "$GOLDEN" "$tmp" >&2
+echo "mirror-diff: C1–C10 table in $AGENTS_MD differs from $GOLDEN (line numbers above)" >&2
 exit 1

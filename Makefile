@@ -28,7 +28,7 @@ test:
 
 lint:
 	@bad=$$(gofmt -l .); \
-	if [ -n "$$bad" ]; then echo "gofmt: files need formatting:"; echo "$$bad" | cat -v | sed 's/^/  > /'; exit 1; fi
+	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 
 # C10: regenerate spec/08 from 01 + 07 and require a byte-exact match,

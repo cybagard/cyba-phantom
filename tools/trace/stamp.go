@@ -10,10 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -54,14 +54,11 @@ func hashDir(specDir string) (map[string]string, []string, error) {
 		// allow-listed name only, never raw error text.
 		name := printableName(e.Name())
 		data, err := readCapped(filepath.Join(specDir, e.Name()))
-		switch {
-		case errors.Is(err, errNotRegular):
-			findings = append(findings, fmt.Sprintf("spec: %s is not a regular file", name))
+		if f := readFinding("spec: "+name, err); f != "" {
+			findings = append(findings, f)
 			continue
-		case errors.Is(err, errTooLarge):
-			findings = append(findings, fmt.Sprintf("spec: %s exceeds the %d byte cap", name, maxFileBytes))
-			continue
-		case err != nil:
+		}
+		if err != nil {
 			findings = append(findings, fmt.Sprintf("spec: cannot read %s", name))
 			continue
 		}
@@ -87,12 +84,13 @@ func runStamp(specDir string, write bool) ([]string, error) {
 			return findings, fmt.Errorf("stamp: %v", err)
 		}
 		// Never write through a symlink: an existing manifest.json must be
-		// a regular file.
+		// a regular file. Write a temp file and rename it into place, so a
+		// symlink swapped in after the check is replaced, not followed.
 		target := filepath.Join(specDir, "manifest.json")
 		if fi, err := os.Lstat(target); err == nil && !fi.Mode().IsRegular() {
 			return findings, fmt.Errorf("stamp: manifest.json is not a regular file")
 		}
-		if err := os.WriteFile(target, append(out, '\n'), 0o644); err != nil {
+		if err := writeReplace(target, append(out, '\n')); err != nil {
 			return findings, fmt.Errorf("stamp: cannot write manifest.json: %v", err)
 		}
 		return findings, nil
@@ -128,4 +126,29 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		}
 	}
 	return findings, nil
+}
+
+// syncDateRE is the only accepted form of the manifest sync date.
+var syncDateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// writeReplace writes data to a temp file in the target's directory, then
+// renames it over target. Rename replaces a symlink; it never follows one.
+func writeReplace(target string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".manifest-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), target)
 }
