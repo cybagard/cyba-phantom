@@ -55,6 +55,7 @@ if diff -u "$GOLDEN" "$tmp" > "$tmp.d" 2>&1; then
   echo "mirror-diff: $AGENTS_MD C1–C10 table matches $GOLDEN (12 lines, byte-identical)"
   exit 0
 fi
-cat "$tmp.d" >&2
+# cat -v: the diff carries PR-authored bytes; show control bytes visibly.
+cat -v "$tmp.d" >&2
 echo "mirror-diff: C1–C10 table in $AGENTS_MD differs from $GOLDEN (diff above)" >&2
 exit 1

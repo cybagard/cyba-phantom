@@ -14,9 +14,12 @@
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)
-#     and run against the PR work tree, so a PR cannot fake its own
-#     gates by editing the checkers; lint/test/build self-attest and
-#     are closed by maintainer-only merge + human review;
+#     and run against the PR work tree, so a PR cannot weaken a gate by
+#     editing its checker; lint/test/build self-attest and are closed
+#     by maintainer-only merge + human review;
+#   - limit: on pull_request, GitHub runs the workflow file from the PR
+#     merge ref, so a PR that edits this file runs its edited copy. Human
+#     review of every .github/** change is the control for that;
 #   - the one exception is a PR that introduces a gate checker while
 #     the base branch predates it (bootstrap): the job falls back to
 #     the work tree with a loud warning — self-attested, closed by the
@@ -59,7 +62,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - &checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -133,9 +137,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
+      - *checkout
 
       - name: go test -race + coverage gate
         run: make coverage
@@ -193,16 +195,14 @@ jobs:
   build:
     # T-P-07: two builds must hash identically; the binary is statically
     # linked and at most 25 MB, built under the 07 section 2 budget
-    # (1 vCPU / 512 MB cgroup). PERF_REQUIRE_CGROUP fails the job rather
-    # than building unbounded when the runner has no systemd user manager.
+    # (1 vCPU / 512 MB cgroup). PERF_STRICT makes every skipped check a
+    # failure: no cgroup, limits not applied, or a missing tool.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      PERF_REQUIRE_CGROUP: "1"
+      PERF_STRICT: "1"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
+      - *checkout
 
       - name: Reproducible, static, sized build
         run: make perf

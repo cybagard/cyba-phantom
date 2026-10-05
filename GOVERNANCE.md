@@ -28,28 +28,34 @@ external-corporate contributor; DCO stands until then.
 All prose in this repository follows ASD-STE100 (Simplified Technical
 English). Prose is documentation, issue and pull request text, commit
 messages, code comments, and text that the software shows to users.
-These items are not prose: code identifiers, IDs, quoted text, legal
-text (for example `LICENSE`), and the synced `spec/` files. The rule
-applies to new text and to all text that a change touches. Review is
-the control.
+These items are not prose: code identifiers, commands, paths, IDs,
+quoted and third-party text, legal text (for example `LICENSE`), names
+of standards and products, and the synced `spec/` files. Do not change
+the C1–C10 table in `AGENTS.md` for STE100: it is a byte-exact mirror.
+An STE100 rewrite must not change what a rule means. The rule
+applies to new text and to all text that a change touches. Human review
+checks it; no tool checks it.
 
 ## Maintainers and merges
 
 - This project currently has one maintainer. Every merge into `main` is a
   human decision made by the maintainer; agents prepare, humans merge.
 - The maintainer reviews every pull request before merging it. Changes to
-  the high review-surface paths listed in `CONTRIBUTING.md` (the
-  agent-instruction and governance files, `spec/**`, `.github/**`,
-  `Makefile`, `go.mod`) get extra scrutiny.
+  the high review-surface paths listed in `CONTRIBUTING.md` get extra
+  scrutiny.
 - If the maintainer count ever grows, branch protection is updated in the
   same change that adds the account.
 
 ## Branch protection (current state)
 
-- `main`: required status checks (`.github` workflows); only the
-  maintainer has write access, so only the maintainer merges.
+- `main`: the `ci` workflow checks (lint, dco, test, trace, mirror-diff,
+  build) must pass. Only the maintainer has write access, so only the
+  maintainer merges.
+- The maintainer is an admin and can bypass the required checks. This is
+  accepted while the project has one maintainer.
 - Force-push to and deletion of `main`: disabled.
 - **Pending:** required review (one approver) on `AGENTS.md`, `CLAUDE.md`,
-  `CONTRIBUTING.md`, `spec/**`, and `.github/**` — blocked on a second
-  approver account. Until it lands, review is the maintainer's practice,
-  not an enforced rule.
+  `CONTRIBUTING.md`, `GOVERNANCE.md`, `LICENSE`, `spec/**`, and
+  `.github/**`. A second approver account is necessary first. Until then,
+  review is the maintainer's practice, not an enforced rule. `Makefile`
+  and `go.mod` get extra scrutiny but no required review.

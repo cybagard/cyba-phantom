@@ -55,48 +55,56 @@ coverage:
 # T-P-07: two builds must hash identically; the binary is static and
 # <= 25 MB, built under the 07 §2 cgroup budget (1 vCPU / 512 MB).
 # systemd-run --scope runs perf-inner in the foreground, in this directory,
-# with this environment, and returns its exit status. Where no systemd user
-# manager is available (macOS, containers) perf runs unbounded with a note;
-# PERF_REQUIRE_CGROUP=1 (set in CI) turns that into a failure.
+# with this environment, and returns its exit status. perf-inner then reads
+# its own cgroup to confirm that the limits apply.
+#
+# Where a tool is missing (no systemd user manager, no readelf/ldd, no
+# sha256 tool), perf skips that check with a note. PERF_STRICT=1 (set in
+# CI) turns every skip into a failure.
+PERF_STRICT ?= 0
+# skip <message>: a note, or a failure under PERF_STRICT=1.
+skip = if [ "$(PERF_STRICT)" = 1 ]; then echo "perf FAIL: $(1) (PERF_STRICT=1)"; exit 1; else echo "perf: $(1) — skipped"; fi
+
 perf:
 	@if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet true >/dev/null 2>&1; then \
 		echo "perf: building under a 1 vCPU / 512 MB cgroup"; \
-		systemd-run --user --scope --quiet -p MemoryMax=512M -p CPUQuota=100% -- $(MAKE) perf-inner; \
-	elif [ "$${PERF_REQUIRE_CGROUP:-0}" = 1 ]; then \
-		echo "perf FAIL: no systemd user manager for the cgroup budget (PERF_REQUIRE_CGROUP=1)"; exit 1; \
+		systemd-run --user --scope --quiet -p MemoryMax=512M -p CPUQuota=100% -- $(MAKE) perf-inner PERF_IN_CGROUP=1; \
 	else \
-		echo "perf: no systemd user manager — running unbounded"; \
+		$(call skip,no systemd user manager for the cgroup budget); \
 		$(MAKE) perf-inner; \
 	fi
 
 perf-inner:
+	@if [ "$(PERF_IN_CGROUP)" = 1 ]; then \
+		cg="/sys/fs/cgroup$$(sed -n 's/^0:://p' /proc/self/cgroup)"; \
+		mem=$$(cat "$$cg/memory.max" 2>/dev/null); cpu=$$(cat "$$cg/cpu.max" 2>/dev/null); \
+		if [ "$$mem" != 536870912 ] || [ "$$cpu" != "100000 100000" ]; then \
+			echo "perf FAIL: cgroup limits not applied (memory.max=$$mem, cpu.max=$$cpu)"; exit 1; \
+		fi; \
+		echo "perf: cgroup limits applied (memory.max=$$mem, cpu.max=$$cpu)"; \
+	fi
 	CGO_ENABLED=0 $(GO) build -trimpath -o bin/canary-a ./cmd/canary
 	CGO_ENABLED=0 $(GO) build -trimpath -o bin/canary-b ./cmd/canary
 	@ha=$$($(HASH) bin/canary-a 2>/dev/null | cut -d' ' -f1); \
 	hb=$$($(HASH) bin/canary-b 2>/dev/null | cut -d' ' -f1); \
 	if [ -z "$$ha" ] || [ -z "$$hb" ]; then \
-		echo "warning: no sha256sum/shasum available — reproducibility check skipped"; \
+		$(call skip,no sha256sum/shasum for the reproducibility check); \
 	elif [ "$$ha" != "$$hb" ]; then \
 		echo "perf FAIL: two builds hashed differently"; exit 1; \
 	else \
 		echo "perf: reproducible build OK ($$ha)"; \
 	fi
 	@if command -v readelf >/dev/null 2>&1; then \
-		if readelf -d bin/canary-a 2>&1 | grep -q 'no dynamic section'; then \
-			echo "perf: statically linked OK"; \
-		else \
-			echo "perf FAIL: binary is dynamically linked"; exit 1; \
-		fi; \
+		dyn=$$(readelf -d bin/canary-a 2>&1 | grep -c 'no dynamic section'); \
 	elif command -v ldd >/dev/null 2>&1; then \
-		if ldd bin/canary-a 2>&1 | grep -q 'not a dynamic executable'; then \
-			echo "perf: statically linked OK"; \
-		else \
-			echo "perf FAIL: binary is dynamically linked"; exit 1; \
-		fi; \
+		dyn=$$(ldd bin/canary-a 2>&1 | grep -c 'not a dynamic executable'); \
 	else \
-		echo "perf: no readelf/ldd available — static-link check skipped (CGO_ENABLED=0 is the gate)"; \
-	fi
-	@size=$$(stat -c%s bin/canary-a 2>/dev/null || stat -f%z bin/canary-a); \
+		$(call skip,no readelf/ldd for the static-link check); exit 0; \
+	fi; \
+	if [ "$$dyn" -ge 1 ]; then echo "perf: statically linked OK"; \
+	else echo "perf FAIL: binary is dynamically linked"; exit 1; fi
+	@size=$$(stat -c%s bin/canary-a 2>/dev/null || stat -f%z bin/canary-a 2>/dev/null); \
+	if [ -z "$$size" ]; then $(call skip,no stat for the size check); exit 0; fi; \
 	if [ "$$size" -gt 26214400 ]; then echo "perf FAIL: binary is $${size} bytes (> 25 MB)"; exit 1; fi; \
 	echo "perf: binary size $${size} bytes (<= 25 MB)"
 

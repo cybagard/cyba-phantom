@@ -2,7 +2,7 @@
 
 **Agent Canary** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event, of which evidence events are kept in a tamper-evident Merkle log with Ed25519-signed checkpoints (ADR-007). Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
 
-The full spec kit lives in the private sibling repository (documentation-only, canonical); a synced read-only copy of the traceability inputs ships in `spec/`. This file mirrors the spec kit's core constraints so the repo is self-contained; in the multi-root workspace both are visible and the spec kit wins on any disagreement.
+The full spec kit lives in the private sibling repository (documentation-only, canonical). A synced read-only copy of the traceability inputs ships in `spec/`. This file mirrors the spec kit's core constraints so the repo is self-contained; in the multi-root workspace both are visible and the spec kit wins on any disagreement.
 
 ## Licensing (ADR-006) — read first
 
@@ -71,12 +71,13 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 - The spec kit (private sibling repo) defines reading order and ID conventions. Each task names the requirement IDs it satisfies and the test IDs that must pass.
 - Definition of done per task: named tests pass (`go test -race`, coverage threshold held); no new per-request goroutines (bench diff attached); `tools/trace` green; constitution checklist (C1–C10) answered in the PR body; `docs/` updated when an interface changes.
 - No requirement without a test ID, no test without a requirement ID (C10).
+- Write all prose in ASD-STE100 (Simplified Technical English): docs, comments, commit messages, PR text, and user-facing strings. See `GOVERNANCE.md`.
 
 ## Commands
 
 - `make all` — build, lint (gofmt/vet), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`), and the constitution-table mirror check.
-- `make perf` — the T-P-07 gate: two builds must hash identically; the binary is statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup (skips gracefully where systemd is absent).
-- `make coverage` — the 07 §1 coverage gate (80 % on `tools/` until the gate set lands).
+- `make perf` — the T-P-07 gate: two builds must hash identically; the binary is statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. A check that cannot run locally (no systemd, no readelf) is skipped with a note; CI sets `PERF_STRICT=1`, so there every skip fails.
+- `make coverage` — the 07 §1 coverage gate: 80 % on each `internal/{token,score,tlog,limiter,store}` package that exists, and 80 % on `tools/`.
 - `make dco BASE=<sha> HEAD=<sha>` — DCO sign-off across a commit range (CI runs it on every PR).
 
 The floor for any change: `go build ./...`, `go vet ./...`, `go test -race ./...`.

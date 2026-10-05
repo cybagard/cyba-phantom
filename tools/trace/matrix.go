@@ -12,7 +12,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +30,28 @@ const (
 	maxFileLines = 10000   // lines per file
 	maxLineBytes = 8192    // bytes per line
 )
+
+// errNotRegular rejects symlinks, devices, and other non-regular files.
+var errNotRegular = errors.New("not a regular file")
+
+// readCapped reads a regular file, at most maxFileBytes+1 bytes. It does
+// not follow symlinks. A result longer than maxFileBytes means the file
+// is over the cap.
+func readCapped(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxFileBytes+1))
+}
 
 var (
 	reqIDRE   = regexp.MustCompile(`^(FR|NFR|SEC)-\d{2}$`)
@@ -75,13 +99,14 @@ type matGroup struct {
 // LF-normalized text, any cap/CRLF findings, and a fatal error for a
 // missing or unreadable file.
 func loadSpec(path string) (string, []string, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCapped(path)
 	if err != nil {
 		return "", nil, fmt.Errorf("%s: %w", path, err)
 	}
 	var findings []string
 	if len(data) > maxFileBytes {
-		findings = append(findings, fmt.Sprintf("%s: %d bytes exceeds the %d byte cap", path, len(data), maxFileBytes))
+		findings = append(findings, fmt.Sprintf("%s: exceeds the %d byte cap", path, maxFileBytes))
+		return "", findings, nil
 	}
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if text != string(data) {
@@ -357,7 +382,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 		pos  int
 	}
 	var toks []tok
-	for _, part := range strings.Split(cell, ",") {
+	for i, part := range strings.Split(cell, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -365,7 +390,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 		ids := expandOne(part)
 		if ids == nil {
 			if testRefAnywhereRE.MatchString(part) {
-				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference %q", reqID, part))
+				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference (item %d)", reqID, i+1))
 			}
 			toks = append(toks, tok{orig: part, pos: -1}) // prose marker
 			continue

@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,9 +47,18 @@ func hashDir(specDir string) (map[string]string, []string, error) {
 		if e.Name() == "manifest.json" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(specDir, e.Name()))
-		if err != nil {
-			findings = append(findings, fmt.Sprintf("spec: cannot read %q: %v", e.Name(), err))
+		// Names and errors are PR-controlled: findings carry the quoted
+		// name only, never the raw error text.
+		data, err := readCapped(filepath.Join(specDir, e.Name()))
+		switch {
+		case errors.Is(err, errNotRegular):
+			findings = append(findings, fmt.Sprintf("spec: %q is not a regular file", e.Name()))
+			continue
+		case err != nil:
+			findings = append(findings, fmt.Sprintf("spec: cannot read %q", e.Name()))
+			continue
+		case len(data) > maxFileBytes:
+			findings = append(findings, fmt.Sprintf("spec: %q exceeds the %d byte cap", e.Name(), maxFileBytes))
 			continue
 		}
 		hashes[e.Name()] = sha256Hex(data)
@@ -75,16 +85,17 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		if err := os.WriteFile(filepath.Join(specDir, "manifest.json"), append(out, '\n'), 0o644); err != nil {
 			return findings, fmt.Errorf("stamp: cannot write manifest.json: %v", err)
 		}
-		return nil, nil
+		return findings, nil
 	}
 
-	data, err := os.ReadFile(filepath.Join(specDir, "manifest.json"))
-	if err != nil {
-		return append(findings, fmt.Sprintf("spec: manifest.json missing or unreadable: %v", err)), nil
+	data, err := readCapped(filepath.Join(specDir, "manifest.json"))
+	if err != nil || len(data) > maxFileBytes {
+		return append(findings, "spec: manifest.json is missing, not a regular file, unreadable, or over the size cap"), nil
 	}
 	var m manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return append(findings, fmt.Sprintf("spec: manifest.json malformed: %v", err)), nil
+		// The decoder error quotes manifest content raw: never print it.
+		return append(findings, "spec: manifest.json is not valid JSON in the stamp format"), nil
 	}
 	for name, want := range m.Files {
 		got, ok := hashes[name]

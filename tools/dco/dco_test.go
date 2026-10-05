@@ -101,3 +101,18 @@ func TestUsageError(t *testing.T) {
 		t.Fatalf("run = %d, want 2", code)
 	}
 }
+
+// A sign-off line outside the trailer block (the last paragraph) does
+// not count.
+func TestSignoffOutsideTrailerFails(t *testing.T) {
+	dir := newRepo(t)
+	commit(t, dir, "base", true)
+	git(t, dir, "branch", "base")
+	git(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com",
+		"commit", "--allow-empty", "-m", "subject",
+		"-m", "Signed-off-by: t <t@example.com>",
+		"-m", "A closing paragraph after the sign-off.")
+	if code := run([]string{"base", "HEAD"}, dir); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+}

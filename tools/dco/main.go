@@ -17,13 +17,25 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 )
 
 // signoffRE matches a DCO trailer line: "Signed-off-by: Name <address>",
-// where address has a local part, an @, and a dotted domain.
+// where address has a local part, an @, and a dotted domain. It applies to
+// the trailer block only (see trailerBlock).
 var signoffRE = regexp.MustCompile(`(?m)^Signed-off-by: \S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>\s*$`)
 
 func main() { os.Exit(run(os.Args[1:], ".")) }
+
+// trailerBlock returns the last paragraph of a commit message. Git puts
+// trailers there; a sign-off line in the middle of the body does not count.
+func trailerBlock(body string) string {
+	body = strings.TrimRight(body, " \t\n")
+	if i := strings.LastIndex(body, "\n\n"); i >= 0 {
+		return body[i+2:]
+	}
+	return body
+}
 
 // run checks that every commit in base..head of the repository in dir
 // carries a sign-off trailer.
@@ -64,7 +76,7 @@ func run(args []string, dir string) int {
 		// agent reading the CI log.
 		hash, body := string(f[0]), string(f[3])
 		total++
-		if !signoffRE.MatchString(body) {
+		if !signoffRE.MatchString(trailerBlock(body)) {
 			unsigned++
 			if len(hash) > 12 {
 				hash = hash[:12]

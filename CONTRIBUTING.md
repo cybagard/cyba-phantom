@@ -39,9 +39,10 @@ here only via the maintainer's sync PR, which also rotates the
 ## High review-surface paths
 
 Changes to `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `GOVERNANCE.md`,
-`spec/**`, `.github/**`, `Makefile`, or `go.mod` get extra scrutiny: these
-files steer the coding agents that work in this repository and its
-sibling, so they are prompt-injection surface. (SEC-07)
+`LICENSE`, `spec/**`, `.github/**`, `Makefile`, or `go.mod` get extra
+scrutiny. These files steer the coding agents that work in this
+repository and its sibling, so they are prompt-injection surface.
+(SEC-07)
 
 ## Code
 
@@ -51,8 +52,8 @@ sibling, so they are prompt-injection surface. (SEC-07)
 - Memory: nothing unbounded on a request path (C2). Attach a
   `go test -bench -benchmem` diff to any hot-path change.
 - Proprietary artifacts (live trap templates, fingerprint tables, scoring
-  rules, token HMAC seeds) never go in the repository — it ships only as signed bundles
-  (C7). `internal/bundle` is the one path content enters the system.
+  rules, token HMAC seeds) never go in the repository. They ship only as
+  signed bundles (C7). `internal/bundle` is the one path content enters the system.
   `bundles/reference/` is a stale research-grade artifact (C9); keep it
   stale.
 

@@ -413,3 +413,52 @@ func TestStampEscapesNames(t *testing.T) {
 		t.Error("no finding for the unstamped file")
 	}
 }
+
+func TestStampRejectsSymlink(t *testing.T) {
+	dir := newSpec(t)
+	if err := os.Symlink("/dev/zero", filepath.Join(dir, "zero.md")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	findings, err := runStamp(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f, `"zero.md" is not a regular file`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no not-regular finding; got: %v", findings)
+	}
+}
+
+func TestMalformedManifestHidesContent(t *testing.T) {
+	dir := newSpec(t)
+	writeFile(t, dir, "manifest.json", "{\"files\": {\"x\n::warning::planted\": 1}}")
+	findings, err := runStamp(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if strings.Contains(f, "planted") || strings.ContainsAny(f, "\n\x1b") {
+			t.Errorf("finding echoes manifest content: %q", f)
+		}
+	}
+}
+
+// A malformed test reference is reported by requirement and item number;
+// the cell text never reaches the finding.
+func TestMalformedReferenceHidesText(t *testing.T) {
+	dir := newSpec(t)
+	replaceLine(t, dir, "08-traceability.md",
+		"| FR-01 | 02 | T-U-01, T-I-01 |",
+		"| FR-01 | 02 | T-U-01, T-I-01 planted words |")
+	wantFinding(t, dir, "FR-01 Tests cell has a malformed test reference (item 2)")
+	for _, f := range check(t, dir) {
+		if strings.Contains(f, "planted") {
+			t.Errorf("finding echoes cell text: %q", f)
+		}
+	}
+}
