@@ -48,7 +48,9 @@ checks it; no tool checks it.
 - If the maintainer count ever grows, branch protection is updated in the
   same change that adds the account.
 
-## Branch protection (current state)
+## Branch protection
+
+These settings apply to `main` from the day the repository is public:
 
 - `main`: the `ci` workflow checks (lint, dco, test, trace, mirror-diff,
   build) must pass. Only the maintainer has write access, so only the
