@@ -34,8 +34,10 @@ var (
 	cRuleRE   = regexp.MustCompile(`^C(10|[1-9])$`)
 	reqTokRE  = regexp.MustCompile(`^(FR-\d{2}|NFR-\d{2}|SEC-\d{2}|C(10|[1-9])|G\d+)$`)
 	sepCellRE = regexp.MustCompile(`^-{3,}$`)
-	// idLikeRE matches a token shaped like a requirement ID, valid or not.
-	idLikeRE = regexp.MustCompile(`^(FR|NFR|SEC|C|G)-?\d+$`)
+	// idLikeRE matches a token that starts like a requirement ID, valid or
+	// not, in any case: "FR-O3", "fr-03", "SEC-04a", "FR 01", "C11", "G 2".
+	// Prose in Covers ("rotation", "threat A2") does not match.
+	idLikeRE = regexp.MustCompile(`(?i)^((fr|nfr|sec)[^a-z]|[cg][- ]?\d)`)
 
 	// Test references, from strictest to loosest.
 	testIDRE          = regexp.MustCompile(`^T-([A-Z])-(\d{2})$`)               // one test ID: T-U-01

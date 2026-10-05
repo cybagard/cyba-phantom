@@ -600,3 +600,66 @@ func TestMalformedCoverIDIsFinding(t *testing.T) {
 		"| T-A-02 | FR-02, G1, FR-100 | band |")
 	wantFinding(t, dir, "T-A-02 Covers item 3 is not a valid requirement ID")
 }
+
+// Typos that do not look like digits-only IDs are findings too.
+func TestCaseAndLetterTyposAreFindings(t *testing.T) {
+	for _, typo := range []string{"FR-O3", "fr-03", "SEC-04a", "FR 01"} {
+		dir := newSpec(t)
+		replaceLine(t, dir, "07-test-plan.md",
+			"| T-A-02 | FR-02, G1 | band |",
+			"| T-A-02 | FR-02, G1, "+typo+" | band |")
+		wantFinding(t, dir, "T-A-02 Covers item 3 is not a valid requirement ID")
+	}
+}
+
+// A test may not cover a requirement that is exempt from C10.
+func TestExemptCoverIsFinding(t *testing.T) {
+	dir := newSpec(t)
+	ids := exemptIDs(t, dir)
+	if len(ids) == 0 {
+		t.Skip("fixture has no exempt requirement")
+	}
+	replaceLine(t, dir, "07-test-plan.md",
+		"| T-A-02 | FR-02, G1 | band |",
+		"| T-A-02 | FR-02, G1, "+ids[0]+" | band |")
+	wantFinding(t, dir, "which is exempt from C10")
+}
+
+// exemptIDs returns the requirement IDs under the "exempt from C10"
+// heading of the fixture 01.
+func exemptIDs(t *testing.T, dir string) []string {
+	t.Helper()
+	var findings []string
+	reqs := parsePRD(readSpec(t, dir, "01-prd.md"), &findings)
+	var ids []string
+	for _, r := range reqs {
+		if r.exempt {
+			ids = append(ids, r.id)
+		}
+	}
+	return ids
+}
+
+// A file that already has a finding is not reported again as missing.
+func TestFlaggedFileNotReportedTwice(t *testing.T) {
+	dir := newSpec(t)
+	if err := os.Remove(filepath.Join(dir, "07-test-plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/null", filepath.Join(dir, "07-test-plan.md")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	findings, err := runStamp(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range findings {
+		if strings.Contains(f, "07-test-plan.md") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("07-test-plan.md has %d findings, want 1: %v", n, findings)
+	}
+}
