@@ -64,7 +64,11 @@ func writeConfig(t *testing.T, body string) string {
 	return cfg
 }
 
-const base = "acme:\n  email: sec@example.com\n"
+// base holds the required keys. A file value that a test adds after it starts at line 6.
+const (
+	tlogOrigin = "tlog:\n  origin: test/origin\n"
+	base       = "acme:\n  email: sec@example.com\n" + tlogOrigin
+)
 
 // TestTU10_Precedence checks default < file < env and the source of each value.
 func TestTU10_Precedence(t *testing.T) {
@@ -73,14 +77,14 @@ func TestTU10_Precedence(t *testing.T) {
 		want                 Value
 	}{
 		{"default", base, "", "listen.http", Value{Str: ":80", Source: "default"}},
-		{"file", base + "listen:\n  http: \":8080\"\n", "", "listen.http", Value{Str: ":8080", Source: cfg, Line: 4}},
+		{"file", base + "listen:\n  http: \":8080\"\n", "", "listen.http", Value{Str: ":8080", Source: cfg, Line: 6}},
 		{"env", base + "listen:\n  http: \":8080\"\n", "CANARY_LISTEN_HTTP=:81", "listen.http", Value{Str: ":81", Source: "CANARY_LISTEN_HTTP"}},
 		{"htpasswd default", base, "", "ops.basic_auth_htpasswd", Value{Str: filepath.Join(testDir, "htpasswd"), Source: "default"}},
 		{"int default", base, "", "a.delta", Value{Int: -1, Source: "default"}},
-		{"int file", base + "a:\n  delta: -7\n", "", "a.delta", Value{Int: -7, Source: cfg, Line: 4}},
+		{"int file", base + "a:\n  delta: -7\n", "", "a.delta", Value{Int: -7, Source: cfg, Line: 6}},
 		{"int env", base + "a:\n  delta: -7\n", "CANARY_A_DELTA=9", "a.delta", Value{Int: 9, Source: "CANARY_A_DELTA"}},
 		{"bool env", base + "a:\n  flag: false\n", "CANARY_A_FLAG=true", "a.flag", Value{Bool: true, Source: "CANARY_A_FLAG"}},
-		{"duration file", base + "a:\n  every: 15m\n", "", "a.every", Value{Dur: 15 * time.Minute, Source: cfg, Line: 4}},
+		{"duration file", base + "a:\n  every: 15m\n", "", "a.every", Value{Dur: 15 * time.Minute, Source: cfg, Line: 6}},
 		{"bytes env", base, "CANARY_A_SIZE=1024", "a.size", Value{Int: 1024, Source: "CANARY_A_SIZE"}},
 	}
 	for _, r := range rows {
@@ -109,7 +113,7 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != cfg || v.Line != 4 {
+		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != cfg || v.Line != 6 {
 			t.Errorf("got %+v", v)
 		}
 	})
@@ -138,7 +142,7 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 	t.Run("file value fails", func(t *testing.T) {
 		bad := filepath.Join(testDir, "missing")
 		_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), nil)
-		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at "+cfg[len(cfg)-64:]+":4: ") || strings.Contains(err.Error(), "default") {
+		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at "+cfg[len(cfg)-64:]+":6: ") || strings.Contains(err.Error(), "default") {
 			t.Errorf("got %v", err)
 		}
 	})
@@ -169,6 +173,7 @@ func TestTU10_Errors(t *testing.T) {
 		`config: acme.email at ` + p + `:9: the key needs a scalar value`,
 		`config: CANARY_NOPE: unknown CANARY_ variable`,
 		`config: acme.email at ` + p + `: the key is required`,
+		`config: tlog.origin at ` + p + `: the key is required`,
 	}, "\n")
 	if err.Error() != want {
 		t.Errorf("got\n%v\nwant\n%v", err, want)
@@ -236,7 +241,7 @@ func TestTS10_Scalars(t *testing.T) {
 		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable"},
 		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`},
 		{"URL text to the last @", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
-		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key is invalid`},
+		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 6 column 3: mapping key is invalid`},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
