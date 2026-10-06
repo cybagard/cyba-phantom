@@ -2,9 +2,11 @@ package config
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"io/fs"
 	"maps"
+	"net"
 	"regexp"
 	"slices"
 	"strconv"
@@ -92,10 +94,33 @@ func (e *Error) Error() string {
 	return s
 }
 
-// Load reads the config file at path one time. It applies the CANARY_*
-// overrides in env (use os.Environ()). Precedence: default < file < env.
-// Load returns all errors together and never returns a partial config.
+// Dialer opens connections. The loader checks a URL value for syntax only (SEC-11),
+// so no key uses a Dialer yet.
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// Resolver looks up host names. No key uses a Resolver yet, for the same reason.
+type Resolver interface {
+	LookupHost(ctx context.Context, host string) ([]string, error)
+}
+
+// Net is the network access of the load path.
+type Net struct {
+	Dialer   Dialer
+	Resolver Resolver
+}
+
+// Load is LoadWith with the system dialer and resolver.
 func Load(path string, env []string) (*Config, error) {
+	return LoadWith(path, env, Net{Dialer: &net.Dialer{}, Resolver: net.DefaultResolver})
+}
+
+// LoadWith reads the config file at path one time. It applies the CANARY_*
+// overrides in env (use os.Environ()). Precedence: default < file < env.
+// LoadWith returns all errors together and never returns a partial config.
+// It uses the network only through n.
+func LoadWith(path string, env []string, _ Net) (*Config, error) {
 	return load(path, env, keys)
 }
 
