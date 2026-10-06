@@ -18,8 +18,6 @@ const (
 	maxDepth      = 8
 )
 
-// ReadOptions is removed as per requirement.
-
 // Leaf represents a scalar value in the configuration.
 type Leaf struct {
 	Value string
@@ -30,8 +28,8 @@ type Leaf struct {
 // Doc represents the parsed configuration.
 type Doc struct {
 	Leaves    map[string]Leaf // Leaves hold scalar values.
-	Mappings  map[string]bool // Mappings hold the paths of container nodes.
-	Sequences map[string]bool // Sequences hold the paths of container nodes.
+	Mappings  map[string]bool // Mappings holds the paths of mapping nodes; "" is the root
+	Sequences map[string]bool // Sequences holds the paths of sequence nodes
 }
 
 // ReadFile reads the configuration file at path and returns a Doc.
@@ -48,12 +46,12 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if info.Mode()&os.ModeType != 0 {
-		return nil, fmt.Errorf("config: %s: not a regular file", formatPath(path))
+		return nil, fmt.Errorf("config: %s: not a regular file", formatFilePath(path))
 	}
 
 	mode := info.Mode()
 	if mode&0022 != 0 {
-		return nil, fmt.Errorf("config: %s: group or other writable", formatPath(path))
+		return nil, fmt.Errorf("config: %s: group or other writable", formatFilePath(path))
 	}
 
 	uid, err := getUid(info)
@@ -62,7 +60,7 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if uid != 0 && uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("config: %s: owner must be root or current user", formatPath(path))
+		return nil, fmt.Errorf("config: %s: the owner must be root or the current user", formatFilePath(path))
 	}
 
 	lr := io.LimitReader(f, maxConfigSize+1)
@@ -72,7 +70,7 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if len(b) > maxConfigSize {
-		return nil, fmt.Errorf("config: %s: config file exceeds 64 KiB limit", formatPath(path))
+		return nil, fmt.Errorf("config: %s: the file is larger than 64 KiB", formatFilePath(path))
 	}
 
 	return ReadBytes(b)
@@ -91,7 +89,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 		return nil, errors.New("config: empty document")
 	}
 	if len(b) > maxConfigSize {
-		return nil, errors.New("config: config file exceeds 64 KiB limit")
+		return nil, errors.New("config: the file is larger than 64 KiB")
 	}
 	if !utf8.Valid(b) {
 		return nil, errors.New("config: invalid UTF-8 encoding")
@@ -108,6 +106,9 @@ func ReadBytes(b []byte) (*Doc, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("config: empty document")
+		}
 		return nil, wrapYamlError(err)
 	}
 
@@ -144,7 +145,13 @@ func ReadBytes(b []byte) (*Doc, error) {
 
 func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 	if depth > maxDepth {
-		return fmt.Errorf("config: %s: nesting exceeds limit of %d", formatPath(path), maxDepth)
+		return fmt.Errorf("config: %s: line %d column %d: nesting exceeds limit of %d", formatPath(path), n.Line, n.Column, maxDepth)
+	}
+
+	if path != "" {
+		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
+			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), n.Line, n.Column)
+		}
 	}
 
 	if n.Alias != nil {
@@ -156,14 +163,11 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: custom tag %q is rejected", formatPath(path), n.Line, n.Column, cut(n.Tag))
+		return fmt.Errorf("config: %s: line %d column %d: tag %q is outside the core schema", formatPath(path), n.Line, n.Column, cut(n.Tag))
 	}
 
 	switch n.Kind {
 	case yaml.MappingNode:
-		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
-			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), n.Line, n.Column)
-		}
 		doc.Mappings[path] = true
 		for i := 0; i < len(n.Content); i += 2 {
 			keyNode := n.Content[i]
@@ -195,19 +199,12 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 				newPath = path + "." + key
 			}
 
-			if _, exists := doc.Leaves[newPath]; exists || doc.Mappings[newPath] || doc.Sequences[newPath] {
-				return fmt.Errorf("config: %s: line %d column %d: duplicate key %q", formatPath(path), keyNode.Line, keyNode.Column, cut(newPath))
-			}
-
 			if err := walkNode(valNode, newPath, doc, depth+1); err != nil {
 				return err
 			}
 		}
 
 	case yaml.SequenceNode:
-		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
-			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), n.Line, n.Column)
-		}
 		doc.Sequences[path] = true
 		for i, child := range n.Content {
 			newPath := fmt.Sprintf("%s[%d]", path, i)
@@ -222,10 +219,6 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 	case yaml.ScalarNode:
 		if path == "" {
 			return errors.New("config: root must be a mapping")
-		}
-
-		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
-			return fmt.Errorf("config: %s: line %d column %d: duplicate key %q", formatPath(path), n.Line, n.Column, cut(path))
 		}
 
 		doc.Leaves[path] = Leaf{
@@ -263,15 +256,6 @@ func cut(s string) string {
 	return s
 }
 
-func containsDot(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '.' {
-			return true
-		}
-	}
-	return false
-}
-
 func isValidKey(s string) bool {
 	if len(s) == 0 {
 		return false
@@ -285,6 +269,10 @@ func isValidKey(s string) bool {
 	return true
 }
 
+func formatFilePath(path string) string {
+	return fmt.Sprintf("%q", path)
+}
+
 func formatPath(path string) string {
 	if path == "" {
 		return "(root)"
@@ -295,9 +283,9 @@ func formatPath(path string) string {
 func formatOSError(path string, err error) error {
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) {
-		return fmt.Errorf("config: %s: %v", formatPath(pathErr.Path), errors.Unwrap(pathErr))
+		return fmt.Errorf("config: %s: %w", formatFilePath(pathErr.Path), errors.Unwrap(pathErr))
 	}
-	return fmt.Errorf("config: %s: %w", formatPath(path), err)
+	return fmt.Errorf("config: %s: %w", formatFilePath(path), err)
 }
 
 func wrapYamlError(err error) error {
@@ -311,8 +299,5 @@ func wrapYamlError(err error) error {
 		}
 	}
 
-	if n == 2 {
-		return fmt.Errorf("config: line %d column %d: invalid YAML", line, col)
-	}
 	return fmt.Errorf("config: line %d: invalid YAML", line)
 }

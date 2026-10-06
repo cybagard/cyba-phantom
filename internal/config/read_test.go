@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,47 +19,55 @@ func TestTS10_Read(t *testing.T) {
 		uid      uint32
 		wantRule string
 		wantPath string
+		ceiling  int
 	}
 
 	rows := []row{
-		{"Valid", "foo: bar", false, 0, 0, "", ""},
-		{"EmptyKey", "\"\": 1", false, 0, 0, "mapping key", "\"\""},
-		{"MergeKey", "a: 1\n<<: {b: 2}", false, 0, 0, "merge keys are rejected", ""},
-		{"DottedKey", "foo.bar: 1", false, 0, 0, "mapping key", "\"foo.bar\""},
-		{"Alias", "foo: *a", false, 0, 0, "invalid YAML", ""},
-		{"Anchor", "anchor: &a value", false, 0, 0, "anchors are rejected", "\"anchor\""},
-		{"CustomTag", "foo: !!custom value", false, 0, 0, "custom tag", "\"foo\""},
-		{"DuplicateKey", "foo: 1\nfoo: 2", false, 0, 0, "duplicate key", "\"foo\""},
-		{"DuplicateKeyPath", "outer: { inner: 1 }\nouter: { inner: 2 }", false, 0, 0, "duplicate key", "\"outer\""},
-		{"Depth8", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h: 1", false, 0, 0, "", ""},
-		{"Depth9", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h:\n                i: 1", false, 0, 0, "nesting exceeds limit of 8", "\"a.b.c.d.e.f.g.h.i\""},
-		{"InvalidUTF8", "\xff\xfe\xfd", false, 0, 0, "invalid UTF-8 encoding", ""},
-		{"NULByte", "foo: bar\x00baz", false, 0, 0, "contains NUL byte", ""},
-		{"BOM", "\xef\xbb\xbffoo: bar", false, 0, 0, "contains UTF-8 BOM", ""},
-		{"SecondDocument", "foo: bar\n---\nbaz: qux", false, 0, 0, "contains more than one document", ""},
-		{"EmptyDocument", " ", false, 0, 0, "empty document", ""},
-		{"NotAMapping", "- foo: bar", false, 0, 0, "root must be a mapping", ""},
-		{"LargeFile", "foo: bar", true, 0, 0, "config file exceeds 64 KiB limit", ""},
-		{"OtherWritable", "foo: bar", true, 0602, 0, "group or other writable", ""},
-		{"WrongOwner", "foo: bar", true, 0644, 12345, "owner must be root or current user", ""},
-		{"FIFO", "foo: bar", true, 0, 0, "not a regular file", ""},
-		{"ValidFile", "foo: bar", true, 0644, 0, "", ""},
-		{"KeyAnchor", "&k foo: 1", false, 0, 0, "mapping key anchor is rejected", "(root)"},
-		{"KeyTagCustom", "!custom foo: 1", false, 0, 0, "mapping key tag \"!custom\" is rejected", "(root)"},
-		{"KeyTagBinary", "!!binary Zm9v: 1", false, 0, 0, "mapping key", "\"Zm9v\""},
-		{"KeyTagTilde", "~: 1", false, 0, 0, "mapping key", "\"~\""},
-		{"KeyTagTrue", "true: 1", false, 0, 0, "mapping key tag \"!!bool\" is rejected", "(root)"},
-		{"KeyBrackets", "\"sinks[0]\": {type: x}", false, 0, 0, "mapping key", "\"sinks[0]\""},
-		{"DupListEmpty", "a: []\na: []", false, 0, 0, "duplicate key \"a\"", "\"a\""},
-		{"DupListScalar", "a: [1]\na: 1", false, 0, 0, "duplicate key \"a\"", "\"a\""},
-		{"DupListScalarX", "a: []\na: x", false, 0, 0, "duplicate key \"a\"", "\"a\""},
-		{"DupListMapping", "a: [x]\na: {b: 1}", false, 0, 0, "duplicate key \"a\"", "\"a\""},
-		{"ScalarList", "a: [1, 2]", false, 0, 0, "", ""},
-		{"MappingList", "s: [{t: 1}, {t: 2}]", false, 0, 0, "", ""},
-		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", ""},
-		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", ""},
-		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", ""},
-		{"ValidLarge", "large: value", false, 0, 0, "", ""},
+		{"Valid", "foo: bar", false, 0, 0, "", "", 94},
+		{"EmptyKey", "\"\": 1", false, 0, 0, "mapping key", "\"\"", 88},
+		{"MergeKey", "a: 1\n<<: {b: 2}", false, 0, 0, "merge keys are rejected", "(root)", 126},
+		{"DottedKey", "foo.bar: 1", false, 0, 0, "mapping key", "\"foo.bar\"", 96},
+		{"UnknownAlias", "foo: *a", false, 0, 0, "invalid YAML", "", 98},
+		{"AliasExpansion", "a: &a [x, x]\nb: [*a, *a]", false, 0, 0, "anchors are rejected", "\"a\"", 142},
+		{"Anchor", "anchor: &a value", false, 0, 0, "anchors are rejected", "\"anchor\"", 106},
+		{"CustomTag", "foo: !!custom value", false, 0, 0, "is outside the core schema", "\"foo\"", 112},
+		{"DuplicateKey", "foo: 1\nfoo: 2", false, 0, 0, "duplicate key", "\"foo\"", 116},
+		{"DuplicateKeyPath", "outer: { inner: 1 }\nouter: { inner: 2 }", false, 0, 0, "duplicate key", "\"outer\"", 154},
+		{"Depth8", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h: 1", false, 0, 0, "", "", 206},
+		{"Depth9", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h:\n                i: 1", false, 0, 0, "nesting exceeds limit of 8", "\"a.b.c.d.e.f.g.h.i\"", 238},
+		{"InvalidUTF8", "\xff\xfe\xfd", false, 0, 0, "invalid UTF-8 encoding", "", 2},
+		{"NULByte", "foo: bar\x00baz", false, 0, 0, "contains NUL byte", "", 2},
+		{"BOM", "\xef\xbb\xbffoo: bar", false, 0, 0, "contains UTF-8 BOM", "", 2},
+		{"SecondDocument", "foo: bar\n---\nbaz: qux", false, 0, 0, "contains more than one document", "", 120},
+		{"EmptyDocument", " ", false, 0, 0, "empty document", "", 2},
+		{"CommentsOnly", "# only a comment\n", false, 0, 0, "empty document", "", 34},
+		{"NotAMapping", "- foo: bar", false, 0, 0, "root must be a mapping", "", 94},
+		{"LargeFile", "foo: bar", true, 0, 0, "the file is larger than 64 KiB", "", 54},
+		{"Exactly64KiB", "foo: bar", true, 0, 0, "", "", 174},
+		{"Over64KiB", "foo: bar", true, 0, 0, "the file is larger than 64 KiB", "", 54},
+		{"OtherWritable", "foo: bar", true, 0602, 0, "group or other writable", "", 20},
+		{"GroupWritable", "foo: bar", true, 0620, 0, "group or other writable", "", 20},
+		{"WrongOwner", "foo: bar", true, 0644, 12345, "the owner must be root or the current user", "", 20},
+		{"FIFO", "foo: bar", true, 0, 0, "not a regular file", "", 20},
+		{"MissingFile", "foo: bar", true, 0, 0, "no such file", "", 18},
+		{"Unreadable", "foo: bar", true, 0000, 0, "permission denied", "", 18},
+		{"ValidFile", "foo: bar", true, 0644, 0, "", "", 106},
+		{"KeyAnchor", "&k foo: 1", false, 0, 0, "mapping key anchor is rejected", "(root)", 98},
+		{"KeyTagCustom", "!custom foo: 1", false, 0, 0, "mapping key tag \"!custom\" is rejected", "(root)", 104},
+		{"KeyTagBinary", "!!binary Zm9v: 1", false, 0, 0, "mapping key", "\"Zm9v\"", 102},
+		{"KeyTagTilde", "~: 1", false, 0, 0, "mapping key", "\"~\"", 92},
+		{"KeyTagTrue", "true: 1", false, 0, 0, "mapping key tag \"!!bool\" is rejected", "(root)", 94},
+		{"KeyBrackets", "\"sinks[0]\": {type: x}", false, 0, 0, "mapping key", "\"sinks[0]\"", 116},
+		{"DupListEmpty", "a: []\na: []", false, 0, 0, "duplicate key", "\"a\"", 110},
+		{"DupListScalar", "a: [1]\na: 1", false, 0, 0, "duplicate key", "\"a\"", 126},
+		{"DupListScalarX", "a: []\na: x", false, 0, 0, "duplicate key", "\"a\"", 114},
+		{"DupListMapping", "a: [x]\na: {b: 1}", false, 0, 0, "duplicate key", "\"a\"", 140},
+		{"ScalarList", "a: [1, 2]", false, 0, 0, "", "", 114},
+		{"MappingList", "s: [{t: 1}, {t: 2}]", false, 0, 0, "", "", 146},
+		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", "", 94},
+		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", "", 118},
+		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", "", 98},
+		{"ValidLarge", "large: value", false, 0, 0, "", "", 132},
 	}
 
 	for _, r := range rows {
@@ -72,6 +82,14 @@ func TestTS10_Read(t *testing.T) {
 
 				input := r.input
 				if r.name == "LargeFile" {
+					input = "large: " + strings.Repeat("a", 64*1024)
+				} else if r.name == "Exactly64KiB" {
+					input = "foo: " + strings.Repeat("a", 64*1024-5)
+					// adjust to be exactly 65536 bytes. "foo: " is 5 bytes.
+					// input = "foo: aaaa...a" where len(input) == 65536
+					// current: "foo: " (5) + strings.Repeat("a", 64*1024-5) (65531) = 65536
+					input = "foo: " + strings.Repeat("a", 64*1024-5)
+				} else if r.name == "Over64KiB" {
 					input = "large: " + strings.Repeat("a", 64*1024)
 				}
 
@@ -91,6 +109,19 @@ func TestTS10_Read(t *testing.T) {
 						t.Fatal(err)
 					}
 					path = fifoPath
+				} else if r.name == "MissingFile" {
+					path = filepath.Join(tmpDir, "missing.yaml")
+				} else if r.name == "Unreadable" {
+					if os.Geteuid() == 0 {
+						t.Skip("skipping unreadable test as root")
+					}
+					path = filepath.Join(tmpDir, "unreadable.yaml")
+					if err := os.WriteFile(path, []byte("foo: bar"), 0644); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(path, 0000); err != nil {
+						t.Fatal(err)
+					}
 				}
 
 				origGetUid := getUid
@@ -166,6 +197,10 @@ func TestTS10_Read(t *testing.T) {
 						if strings.Contains(err.Error(), "marker_XYZ") {
 							t.Errorf("error should not contain %q, got %q", "marker_XYZ", err.Error())
 						}
+					} else if r.name == "MissingFile" {
+						if !errors.Is(err, fs.ErrNotExist) {
+							t.Errorf("expected error to be fs.ErrNotExist, got %v", err)
+						}
 					}
 				}
 			}
@@ -198,8 +233,8 @@ func TestTS10_Read(t *testing.T) {
 				}
 			})
 
-			if allocs > 240 { // Measured maximum: 119
-				t.Errorf("too many allocations in %s: %v", r.name, allocs)
+			if allocs > float64(r.ceiling) {
+				t.Errorf("too many allocations in %s: %v (ceiling %d)", r.name, allocs, r.ceiling)
 			}
 		})
 	}
@@ -208,7 +243,7 @@ func TestTS10_Read(t *testing.T) {
 func TestReadBytesSizeLimit(t *testing.T) {
 	data := make([]byte, 64*1024+1)
 	_, err := ReadBytes(data)
-	if err == nil || !strings.Contains(err.Error(), "config file exceeds 64 KiB limit") {
+	if err == nil || !strings.Contains(err.Error(), "the file is larger than 64 KiB") {
 		t.Errorf("expected size limit error, got %v", err)
 	}
 }
@@ -248,11 +283,15 @@ func FuzzRead(f *testing.F) {
 		"foo: ${HOME}",
 		"foo: : bar",
 		"a: *marker_XYZ",
+		// Seeds for boundaries and rejected patterns.
+		"a: 1\nb: [\n",
+		"a: &a [x, x]\nb: [*a, *a]",
 	}
 
 	for _, in := range inputs {
 		f.Add([]byte(in))
 	}
+	f.Add([]byte("large: " + strings.Repeat("a", 65537)))
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ReadBytes(b)
