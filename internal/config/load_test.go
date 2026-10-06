@@ -57,7 +57,7 @@ func TestTU10_Precedence(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			c, err := load(writeConfig(t, r.file), strings.Fields(r.env), testKeys)
+			c, err := load(writeConfig(t, r.file), strings.Fields(r.env), testKeys, Net{})
 			if err != nil {
 				t.Fatal(err)
 			}

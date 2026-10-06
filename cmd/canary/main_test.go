@@ -34,7 +34,31 @@ func writeFile(t *testing.T, body string) string {
 	return p
 }
 
-const valid = "acme:\n  email: sec@example.com\nlisten:\n  http: \"http://user:pw@example.invalid:80\"\n"
+const valid = "acme:\n  email: sec@example.com\n  ca: \"https://user:pw@example.invalid\"\n"
+
+// TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
+func TestTS10_CheckWiring(t *testing.T) {
+	var got config.Net
+	old := loadWith
+	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) { got = n; return nil, nil }
+	t.Cleanup(func() { loadWith = old })
+	var out strings.Builder
+	if code := run([]string{"--check", "f.yaml"}, nil, &out, &out); code != 0 {
+		t.Fatalf("--check: exit %d, output %q", code, out.String())
+	}
+	if _, err := got.Dialer.DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
+		t.Errorf("--check dial error = %v", err)
+	}
+	if _, err := got.Resolver.LookupHost(t.Context(), "example.invalid"); !errors.Is(err, errNoNet) {
+		t.Errorf("--check lookup error = %v", err)
+	}
+	if code := run([]string{"f.yaml"}, nil, &out, &out); code != 0 {
+		t.Fatalf("start: exit %d, output %q", code, out.String())
+	}
+	if _, ok := got.Dialer.(noNet); ok {
+		t.Error("the start uses noNet")
+	}
+}
 
 // TestTS10_CheckNoDial checks that the load of a valid file calls no Dialer and no Resolver (SEC-11).
 func TestTS10_CheckNoDial(t *testing.T) {
@@ -57,12 +81,10 @@ func TestTS10_CheckExec(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	const marker = "SECRET-MARKER-7c1f9a"
-	// The key table has no *_env key or secret key yet, so the marker is the override of a known key.
-	env := append(os.Environ(), "CANARY_ACME_CA="+marker)
 	run := func(file string) (code int, stdout, stderr string) {
 		var so, se strings.Builder
 		cmd := exec.Command(bin, "--check", file)
-		cmd.Env, cmd.Stdout, cmd.Stderr = env, &so, &se
+		cmd.Stdout, cmd.Stderr = &so, &se
 		err := cmd.Run()
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
@@ -86,7 +108,16 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("invalid file: stderr %q lacks %q", se, want)
 		}
 	}
+	// The key table has no secret key yet. The value has a wrong type, so the loader prints it
+	// with the marker in the user information of a URL-like value.
+	code, so, se = run(writeFile(t, "acme:\n  email: sec@example.com\n  ca: !!int \"https://u:"+marker+"@h.example\"\n"))
+	if code == 0 {
+		t.Error("wrong type: exit 0")
+	}
 	if outs += so + se; strings.Contains(outs, marker) || strings.Contains(outs, "pw@") {
 		t.Errorf("output holds a secret: %q", outs)
+	}
+	if !strings.Contains(se, "REDACTED@") {
+		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
 	}
 }

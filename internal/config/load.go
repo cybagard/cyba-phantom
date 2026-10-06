@@ -94,8 +94,7 @@ func (e *Error) Error() string {
 	return s
 }
 
-// Dialer opens connections. The loader checks a URL value for syntax only (SEC-11),
-// so no key uses a Dialer yet.
+// Dialer opens connections. No key uses a Dialer yet.
 type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
@@ -111,24 +110,30 @@ type Net struct {
 	Resolver Resolver
 }
 
+// SystemNet returns the Net with the system dialer and resolver.
+func SystemNet() Net {
+	return Net{Dialer: &net.Dialer{}, Resolver: net.DefaultResolver}
+}
+
 // Load is LoadWith with the system dialer and resolver.
 func Load(path string, env []string) (*Config, error) {
-	return LoadWith(path, env, Net{Dialer: &net.Dialer{}, Resolver: net.DefaultResolver})
+	return LoadWith(path, env, SystemNet())
 }
 
 // LoadWith reads the config file at path one time. It applies the CANARY_*
 // overrides in env (use os.Environ()). Precedence: default < file < env.
 // LoadWith returns all errors together and never returns a partial config.
-// It uses the network only through n.
-func LoadWith(path string, env []string, _ Net) (*Config, error) {
-	return load(path, env, keys)
+// LoadWith passes n to load. No code in load uses n yet. A later network use must go
+// through n, and a test fails if this package uses the system network directly.
+func LoadWith(path string, env []string, n Net) (*Config, error) {
+	return load(path, env, keys, n)
 }
 
 func envName(path string) string {
 	return "CANARY_" + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
 }
 
-func load(path string, env []string, table []key) (*Config, error) {
+func load(path string, env []string, table []key, n Net) (*Config, error) {
 	doc, err := ReadFile(path)
 	if err != nil {
 		return nil, errors.Join(readError(path, err, table))
