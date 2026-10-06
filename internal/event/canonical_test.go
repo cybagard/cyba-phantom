@@ -111,6 +111,9 @@ func TestTU06_Encode(t *testing.T) {
 	}
 }
 
+// bs is one backslash. It starts a JSON escape in the inputs below.
+const bs = `\`
+
 type rejectCase struct{ name, in string }
 
 var rejects = []rejectCase{
@@ -122,8 +125,10 @@ var rejects = []rejectCase{
 	{"surrogate in name", `{"\ud800":1}`},
 	{"high surrogate, no low", `{"a":"\ud800A"}`},
 	{"duplicate name", `{"a":1,"a":2}`},
-	{"duplicate name, escaped", `{"a":1,"a":2}`},
+	{"duplicate name, escaped", `{"a":1,"` + bs + `u0061":2}`},
 	{"duplicate name, nested", `{"o":{"b":1,"b":2}}`},
+	{"duplicate name, nested and escaped", `{"o":{"b":1,"` + bs + `u0062":2}}`},
+	{"duplicate name, raw and escaped non-BMP", "{\"\U0001F600\":1,\"\\ud83d\\ude00\":2}"},
 	{"1.0", `{"a":1.0}`},
 	{"1e2", `{"a":1e2}`},
 	{"1E2", `{"a":1E2}`},
@@ -174,9 +179,34 @@ func TestTS12_ErrorText(t *testing.T) {
 
 // A valid U+FFFD is data. Canonical keeps it as it is.
 func TestTS12_ReplacementCharKept(t *testing.T) {
-	got, err := Canonical([]byte(`{"a":"�","b":"` + "\xef\xbf\xbd" + `"}`))
+	got, err := Canonical([]byte(`{"a":"` + bs + `ufffd","b":"` + "\xef\xbf\xbd" + `"}`))
 	if want := "{\"a\":\"\xef\xbf\xbd\",\"b\":\"\xef\xbf\xbd\"}"; err != nil || string(got) != want {
 		t.Errorf("got %q, %v", got, err)
+	}
+}
+
+func BenchmarkCanonical(b *testing.B) {
+	for _, size := range []int{64 << 10, 1 << 20} {
+		// One object of short members. Its text is about size bytes.
+		var sb strings.Builder
+		sb.WriteByte('{')
+		for i := 0; sb.Len() < size; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, `"k%07d":"value %d"`, i, i)
+		}
+		sb.WriteByte('}')
+		in := []byte(sb.String())
+		b.Run(fmt.Sprintf("%dKiB", len(in)>>10), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(in)))
+			for range b.N {
+				if _, err := Canonical(in); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

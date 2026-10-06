@@ -34,7 +34,8 @@ var strict = []jsontext.Options{
 // The input must be one JSON object. It must hold only valid UTF-8, unique
 // member names, and integers from -(2^53-1) to 2^53-1. It must hold no float
 // and no -0. Canonical does not change raw. On a failed check it returns no
-// bytes and an error that names the rule and the byte offset. The error text
+// bytes and an error that names the rule and a byte offset near the error. The
+// offset can be at the token before or after the bad value. The error text
 // holds no input text.
 func Canonical(raw []byte) ([]byte, error) {
 	if err := check(raw); err != nil {
@@ -110,7 +111,7 @@ func numberRule(n string) string {
 		return "number is not an integer"
 	}
 	if v, err := strconv.ParseInt(n, 10, 64); err != nil || v > maxInt || v < -maxInt {
-		return "integer outside 2^53-1"
+		return "integer outside -(2^53-1) to 2^53-1"
 	}
 	return ""
 }
