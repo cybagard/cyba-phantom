@@ -1,3 +1,4 @@
+// Package config provides a strict YAML configuration loader.
 package config
 
 import (
@@ -12,30 +13,38 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const maxConfigSize = 64 * 1024
+const (
+	maxConfigSize = 64 * 1024
+	maxDepth      = 8
+)
 
+// ReadOptions contains options for reading the configuration file.
 type ReadOptions struct {
-	Stat func(string) (os.FileInfo, error)
 }
 
+// Leaf represents a scalar value in the configuration.
 type Leaf struct {
 	Value string
 	Tag   string
 	Line  int
 }
 
+// Doc represents the parsed configuration.
 type Doc struct {
-	Leaves   map[string]Leaf
-	Mappings map[string]bool
+	Leaves    map[string]Leaf
+	Mappings  map[string]bool
+	Sequences map[string]bool
 }
 
+// ReadFile reads the configuration file at path and returns a Doc.
 func ReadFile(path string, opts ReadOptions) (*Doc, error) {
-	statFunc := opts.Stat
-	if statFunc == nil {
-		statFunc = os.Stat
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("config file %q: %w", path, err)
 	}
+	defer f.Close()
 
-	info, err := statFunc(path)
+	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("config file %q: %w", path, err)
 	}
@@ -58,12 +67,6 @@ func ReadFile(path string, opts ReadOptions) (*Doc, error) {
 		return nil, fmt.Errorf("config file %q: owner must be root or current user", path)
 	}
 
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("config file %q: %w", path, err)
-	}
-	defer f.Close()
-
 	lr := io.LimitReader(f, maxConfigSize+1)
 	b, err := io.ReadAll(lr)
 	if err != nil {
@@ -77,21 +80,21 @@ func ReadFile(path string, opts ReadOptions) (*Doc, error) {
 	return ReadBytes(b)
 }
 
-func getUid(info os.FileInfo) (uint32, error) {
+var getUid = func(info os.FileInfo) (uint32, error) {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		return stat.Uid, nil
-	}
-	if mock, ok := info.(mockFileInfoInterface); ok {
-		return mock.Uid(), nil
 	}
 	return 0, errors.New("failed to get owner uid")
 }
 
-type mockFileInfoInterface interface {
-	Uid() uint32
-}
-
+// ReadBytes parses the configuration from a byte slice and returns a Doc.
 func ReadBytes(b []byte) (*Doc, error) {
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, errors.New("config: empty document")
+	}
+	if len(b) > maxConfigSize {
+		return nil, errors.New("config: config file exceeds 64 KiB limit")
+	}
 	if !utf8.Valid(b) {
 		return nil, errors.New("config: invalid UTF-8 encoding")
 	}
@@ -129,8 +132,9 @@ func ReadBytes(b []byte) (*Doc, error) {
 	}
 
 	res := &Doc{
-		Leaves:   make(map[string]Leaf),
-		Mappings: make(map[string]bool),
+		Leaves:    make(map[string]Leaf),
+		Mappings:  make(map[string]bool),
+		Sequences: make(map[string]bool),
 	}
 
 	if err := walkNode(root, "", res, 0); err != nil {
@@ -141,20 +145,20 @@ func ReadBytes(b []byte) (*Doc, error) {
 }
 
 func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
-	if depth > 8 {
-		return errors.New("config: nesting exceeds limit of 8")
+	if depth > maxDepth {
+		return fmt.Errorf("config: %s: nesting exceeds limit of %d", path, maxDepth)
 	}
 
 	if n.Alias != nil {
-		return fmt.Errorf("config: line %d column %d: alias nodes are rejected", n.Line, n.Column)
+		return fmt.Errorf("config: %s: line %d column %d: alias nodes are rejected", path, n.Line, n.Column)
 	}
 
 	if n.Anchor != "" {
-		return fmt.Errorf("config: line %d column %d: anchors are rejected", n.Line, n.Column)
+		return fmt.Errorf("config: %s: line %d column %d: anchors are rejected", path, n.Line, n.Column)
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: line %d column %d: custom tag %q is rejected", n.Line, n.Column, n.Tag)
+		return fmt.Errorf("config: %s: line %d column %d: custom tag %q is rejected", path, n.Line, n.Column, cut(n.Tag))
 	}
 
 	switch n.Kind {
@@ -165,20 +169,28 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 			valNode := n.Content[i+1]
 
 			if keyNode.Kind != yaml.ScalarNode {
-				return fmt.Errorf("config: line %d column %d: mapping keys must be scalars", keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: mapping keys must be scalars", path, keyNode.Line, keyNode.Column)
+			}
+
+			if keyNode.Tag != "" && keyNode.Tag != "!!str" {
+				return fmt.Errorf("config: %s: line %d column %d: mapping key tag %q is rejected", path, keyNode.Line, keyNode.Column, cut(keyNode.Tag))
+			}
+
+			if keyNode.Anchor != "" {
+				return fmt.Errorf("config: %s: line %d column %d: mapping key anchor is rejected", path, keyNode.Line, keyNode.Column)
 			}
 
 			key := keyNode.Value
 			if key == "" {
-				return fmt.Errorf("config: line %d column %d: mapping key cannot be empty", keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: mapping key cannot be empty", path, keyNode.Line, keyNode.Column)
 			}
 
 			if containsDot(key) {
-				return fmt.Errorf("config: line %d column %d: mapping key %q cannot contain dot", keyNode.Line, keyNode.Column, key)
+				return fmt.Errorf("config: %s: line %d column %d: mapping key %q cannot contain dot", path, keyNode.Line, keyNode.Column, cut(key))
 			}
 
 			if key == "<<" {
-				return fmt.Errorf("config: line %d column %d: merge keys are rejected", keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: merge keys are rejected", path, keyNode.Line, keyNode.Column)
 			}
 
 			newPath := key
@@ -186,12 +198,11 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 				newPath = path + "." + key
 			}
 
-			// Check for duplicate keys by full path
 			if _, exists := doc.Leaves[newPath]; exists {
-				return fmt.Errorf("config: line %d column %d: duplicate key %q", keyNode.Line, keyNode.Column, newPath)
+				return fmt.Errorf("config: %s: line %d column %d: duplicate key %q", path, keyNode.Line, keyNode.Column, cut(newPath))
 			}
 			if doc.Mappings[newPath] {
-				return fmt.Errorf("config: line %d column %d: duplicate key %q", keyNode.Line, keyNode.Column, newPath)
+				return fmt.Errorf("config: %s: line %d column %d: duplicate key %q", path, keyNode.Line, keyNode.Column, cut(newPath))
 			}
 
 			if err := walkNode(valNode, newPath, doc, depth+1); err != nil {
@@ -200,8 +211,13 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 		}
 
 	case yaml.SequenceNode:
-		for _, child := range n.Content {
-			if err := walkNode(child, path, doc, depth+1); err != nil {
+		doc.Sequences[path] = true
+		for i, child := range n.Content {
+			newPath := fmt.Sprintf("%s[%d]", path, i)
+			if path == "" {
+				newPath = fmt.Sprintf("[%d]", i)
+			}
+			if err := walkNode(child, newPath, doc, depth+1); err != nil {
 				return err
 			}
 		}
@@ -212,7 +228,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 		}
 
 		if _, exists := doc.Leaves[path]; exists {
-			return fmt.Errorf("config: line %d column %d: duplicate key %q", n.Line, n.Column, path)
+			return fmt.Errorf("config: %s: line %d column %d: duplicate key %q", path, n.Line, n.Column, cut(path))
 		}
 
 		doc.Leaves[path] = Leaf{
@@ -222,7 +238,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 		}
 
 	default:
-		return fmt.Errorf("config: line %d column %d: unsupported node type", n.Line, n.Column)
+		return fmt.Errorf("config: %s: line %d column %d: unsupported node type", path, n.Line, n.Column)
 	}
 
 	return nil
@@ -243,6 +259,13 @@ func isCoreTag(tag string, kind yaml.Kind) bool {
 	}
 }
 
+func cut(s string) string {
+	if len(s) > 64 {
+		return s[:64]
+	}
+	return s
+}
+
 func containsDot(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '.' {
@@ -253,8 +276,18 @@ func containsDot(s string) bool {
 }
 
 func wrapYamlError(err error) error {
-	// yaml.v3 TypeError contains a list of errors, usually formatted as "line:col: message"
-	// The prompt asks to map it to "config: line N column M: invalid YAML".
-	// We'll just return the fixed message as a fallback, but try to be consistent.
-	return fmt.Errorf("config: invalid YAML")
+	s := err.Error()
+	var line, col int
+	n, parseErr := fmt.Sscanf(s, "yaml: line %d column %d", &line, &col)
+	if n < 1 || parseErr != nil {
+		n, parseErr = fmt.Sscanf(s, "yaml: line %d", &line)
+		if n < 1 || parseErr != nil {
+			return fmt.Errorf("config: invalid YAML (%v)", err)
+		}
+	}
+
+	if n == 2 {
+		return fmt.Errorf("config: line %d column %d: invalid YAML", line, col)
+	}
+	return fmt.Errorf("config: line %d: invalid YAML", line)
 }

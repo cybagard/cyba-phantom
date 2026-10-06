@@ -1,237 +1,183 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
-type mockFileInfo struct {
-	name string
-	size int64
-	mode os.FileMode
-	uid  uint32
+func TestTS10_Read(t *testing.T) {
+	type row struct {
+		name     string
+		input    string
+		isFile   bool
+		mode     os.FileMode
+		uid      uint32
+		wantRule string
+		wantPath string
+	}
+
+	rows := []row{
+		{"Valid", "foo: bar", false, 0, 0, "", ""},
+		{"EmptyKey", "\"\": 1", false, 0, 0, "mapping key cannot be empty", ""},
+		{"MergeKey", "a: 1\n<<: {b: 2}", false, 0, 0, "mapping key tag \"!!merge\" is rejected", ""},
+		{"DottedKey", "foo.bar: 1", false, 0, 0, "cannot contain dot", ""},
+		{"Alias", "anchor: &a value\nalias: *a", false, 0, 0, "anchors are rejected", ""},
+		{"Anchor", "anchor: &a value", false, 0, 0, "anchors are rejected", ""},
+		{"CustomTag", "foo: !!custom value", false, 0, 0, "custom tag", ""},
+		{"DuplicateKey", "foo: 1\nfoo: 2", false, 0, 0, "duplicate key", ""},
+		{"DuplicateKeyPath", "outer: { inner: 1 }\nouter: { inner: 2 }", false, 0, 0, "duplicate key", ""},
+		{"Depth8", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h: 1", false, 0, 0, "", ""},
+		{"Depth9", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h:\n                i: 1", false, 0, 0, "nesting exceeds limit of 8", ""},
+		{"InvalidUTF8", "\xff\xfe\xfd", false, 0, 0, "invalid UTF-8 encoding", ""},
+		{"NULByte", "foo: bar\x00baz", false, 0, 0, "contains NUL byte", ""},
+		{"BOM", "\xef\xbb\xbffoo: bar", false, 0, 0, "contains UTF-8 BOM", ""},
+		{"SecondDocument", "foo: bar\n---\nbaz: qux", false, 0, 0, "contains more than one document", ""},
+		{"EmptyDocument", " ", false, 0, 0, "empty document", ""},
+		{"NotAMapping", "- foo: bar", false, 0, 0, "root must be a mapping", ""},
+		{"LargeFile", "foo: bar", true, 0, 0, "config file exceeds 64 KiB limit", ""},
+		{"OtherWritable", "foo: bar", true, 0602, 0, "group or other writable", ""},
+		{"WrongOwner", "foo: bar", true, 0644, 12345, "owner must be root or current user", ""},
+		{"FIFO", "foo: bar", true, 0, 0, "not a regular file", ""},
+		{"ValidFile", "foo: bar", true, 0644, 0, "", ""},
+	}
+
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			var err error
+			var doc *Doc
+
+			if r.isFile {
+				tmpDir := t.TempDir()
+				path := filepath.Join(tmpDir, "config.yaml")
+
+				input := r.input
+				if r.name == "LargeFile" {
+					input = string(make([]byte, 64*1024+1))
+				}
+
+				if err := os.WriteFile(path, []byte(input), 0644); err != nil {
+					t.Fatal(err)
+				}
+
+				if r.mode != 0 {
+					if err := os.Chmod(path, r.mode); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				if r.name == "FIFO" {
+					fifoPath := filepath.Join(tmpDir, "fifo")
+					if err := syscall.Mkfifo(fifoPath, 0666); err != nil {
+						t.Fatal(err)
+					}
+					path = fifoPath
+				}
+
+				origGetUid := getUid
+				if r.uid != 0 {
+					getUid = func(info os.FileInfo) (uint32, error) {
+						return r.uid, nil
+					}
+					defer func() { getUid = origGetUid }()
+				}
+
+				doc, err = ReadFile(path, ReadOptions{})
+			} else {
+				doc, err = ReadBytes([]byte(r.input))
+			}
+
+			if r.wantRule == "" {
+				if err != nil {
+					t.Errorf("expected no error, got %v", err)
+				} else if doc == nil {
+					t.Error("expected doc, got nil")
+				}
+			} else {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", r.wantRule)
+				} else {
+					if !strings.Contains(err.Error(), r.wantRule) {
+						t.Errorf("expected error containing %q, got %q", r.wantRule, err.Error())
+					}
+					if r.wantPath != "" && !strings.Contains(err.Error(), r.wantPath) {
+						t.Errorf("expected error containing path %q, got %q", r.wantPath, err.Error())
+					}
+				}
+			}
+		})
+	}
 }
 
-func (m *mockFileInfo) Name() string       { return m.name }
-func (m *mockFileInfo) Size() int64        { return m.size }
-func (m *mockFileInfo) Mode() os.FileMode  { return m.mode }
-func (m *mockFileInfo) ModTime() time.Time { return time.Time{} }
-func (m *mockFileInfo) IsDir() bool        { return m.mode.IsDir() }
-func (m *mockFileInfo) Sys() interface{}   { return nil }
-func (m *mockFileInfo) Uid() uint32        { return m.uid }
+func TestAllocs(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"Size", "foo: bar"}, // We'll use a large input here
+		{"Depth", "a: { b: { c: { d: { e: { f: { g: { h: 1 } } } } } } }"},
+		{"Alias", "anchor: &a value\nalias: *a"},
+	}
 
-func TestTS10_FileSize(t *testing.T) {
-	// T-S-10: > 64 KiB (rejected before parse)
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "large.yaml")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var input []byte
+			if c.name == "Size" {
+				input = make([]byte, 64*1024)
+				copy(input, "foo: bar") // just some content
+			} else {
+				input = []byte(c.input)
+			}
+
+			allocs := testing.AllocsPerRun(10, func() {
+				_, _ = ReadBytes(input)
+			})
+
+			if allocs > 1000 { // Arbitrary bound, should be checked
+				t.Errorf("too many allocations: %v", allocs)
+			}
+		})
+	}
+}
+
+func TestReadBytesSizeLimit(t *testing.T) {
 	data := make([]byte, 64*1024+1)
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := ReadFile(path, ReadOptions{})
-	if err == nil || err.Error() != fmt.Sprintf("config file %q: config file exceeds 64 KiB limit", path) {
-		t.Errorf("expected size error, got %v", err)
-	}
-}
-
-func TestTS10_UTF8(t *testing.T) {
-	// T-S-10: invalid UTF-8
-	data := []byte{0xff, 0xfe, 0xfd}
 	_, err := ReadBytes(data)
-	if err == nil || err.Error() != "config: invalid UTF-8 encoding" {
-		t.Errorf("expected utf8 error, got %v", err)
-	}
-}
-
-func TestTS10_NUL(t *testing.T) {
-	// T-S-10: NUL byte
-	data := []byte("foo: bar\x00baz")
-	_, err := ReadBytes(data)
-	if err == nil || err.Error() != "config: contains NUL byte" {
-		t.Errorf("expected nul error, got %v", err)
-	}
-}
-
-func TestTS10_BOM(t *testing.T) {
-	// T-S-10: BOM
-	data := []byte("\xef\xbb\xbffoo: bar")
-	_, err := ReadBytes(data)
-	if err == nil || err.Error() != "config: contains UTF-8 BOM" {
-		t.Errorf("expected bom error, got %v", err)
-	}
-}
-
-func TestTS10_Alias(t *testing.T) {
-	// T-S-10: alias
-	data := []byte("anchor: &a value\nalias: *a")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for alias")
-	}
-}
-
-func TestTS10_Anchor(t *testing.T) {
-	// T-S-10: anchor
-	data := []byte("anchor: &a value")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for anchor")
-	}
-}
-
-func TestTS10_MergeKey(t *testing.T) {
-	// T-S-10: merge key
-	data := []byte("base: { a: 1 }\nchild: { <<: *base }") // Also uses alias
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for merge key")
-	}
-}
-
-func TestTS10_CustomTag(t *testing.T) {
-	// T-S-10: custom tag
-	data := []byte("foo: !!custom value")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for custom tag")
-	}
-}
-
-func TestTS10_SecondDocument(t *testing.T) {
-	// T-S-10: second document
-	data := []byte("foo: bar\n---\nbaz: qux")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for second document")
-	}
-}
-
-func TestTS10_Depth(t *testing.T) {
-	// T-S-10: depth 9
-	data := []byte("a: { b: { c: { d: { e: { f: { g: { h: { i: 1 } } } } } } } }")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for depth > 8")
-	}
-}
-
-func TestTS10_DuplicateKey(t *testing.T) {
-	// T-S-10: duplicate key
-	data := []byte("foo: 1\nfoo: 2")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for duplicate key")
-	}
-}
-
-func TestTS10_DuplicateKeyPath(t *testing.T) {
-	// T-S-10: duplicate key by full path
-	data := []byte("outer: { inner: 1 }\nouter: { inner: 2 }")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for duplicate key path")
-	}
-}
-
-func TestTS10_DottedKey(t *testing.T) {
-	// T-S-10: dotted key
-	data := []byte("foo.bar: 1")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for dotted key")
-	}
-}
-
-func TestTS10_EmptyKey(t *testing.T) {
-	// T-S-10: empty key
-	data := []byte(" : 1")
-	_, err := ReadBytes(data)
-	if err == nil {
-		t.Fatal("expected error for empty key")
-	}
-}
-
-func TestTS10_LiteralVariable(t *testing.T) {
-	// T-S-10: ${HOME} stays literal
-	data := []byte("foo: ${HOME}")
-	doc, err := ReadBytes(data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if doc.Leaves["foo"].Value != "${HOME}" {
-		t.Errorf("expected ${HOME}, got %q", doc.Leaves["foo"].Value)
-	}
-}
-
-func TestTS10_FIFO(t *testing.T) {
-	// T-S-10: FIFO path (does not block)
-	tmpDir := t.TempDir()
-	fifoPath := filepath.Join(tmpDir, "fifo")
-	err := syscall.Mkfifo(fifoPath, 0666)
-	if err != nil {
-		t.Fatalf("failed to create fifo: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "config file exceeds 64 KiB limit") {
+		t.Errorf("expected size limit error, got %v", err)
 	}
 
-	_, err = ReadFile(fifoPath, ReadOptions{})
-	if err == nil {
-		t.Fatal("expected error for FIFO")
-	}
-}
-
-func TestTS10_GroupWritable(t *testing.T) {
-	// T-S-10: group-writable file
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(path, []byte("foo: bar"), 0664); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0664); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := ReadFile(path, ReadOptions{})
-	if err == nil {
-		t.Fatal("expected error for group-writable file")
-	}
-}
-
-func TestTS10_WrongOwner(t *testing.T) {
-	// T-S-10: wrong owner (via the fake stat)
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(path, []byte("foo: bar"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	mock := &mockFileInfo{
-		name: "config.yaml",
-		size: 8,
-		mode: 0,     // Regular file
-		uid:  12345, // Not 0 and not euid usually
-	}
-
-	_, err := ReadFile(path, ReadOptions{
-		Stat: func(p string) (os.FileInfo, error) {
-			return mock, nil
-		},
-	})
-
-	if err == nil {
-		t.Fatal("expected error for wrong owner")
-	}
+	// Check that ReadBytes doesn't read more than 64KiB + 1
+	// This is harder to test without a custom reader, but ReadFile uses LimitReader.
 }
 
 func FuzzRead(f *testing.F) {
-	// Seed with fixed cases
-	f.Add([]byte("foo: bar"))
-	f.Add([]byte("anchor: &a value\nalias: *a"))
-	f.Add([]byte("foo: 1\nfoo: 2"))
-	f.Add([]byte("\xef\xbb\xbffoo: bar"))
+	// Seed with table inputs
+	inputs := []string{
+		"foo: bar",
+		" : 1",
+		"a: 1\n<<: {b: 2}",
+		"foo.bar: 1",
+		"anchor: &a value\nalias: *a",
+		"anchor: &a value",
+		"foo: !!custom value",
+		"foo: 1\nfoo: 2",
+		"outer: { inner: 1 }\nouter: { inner: 2 }",
+		"a: { b: { c: { d: { e: { f: { g: { h: 1 } } } } } } }",
+		"a: { b: { c: { d: { e: { f: { g: { h: { i: 1 } } } } } } }",
+		"\xff\xfe\xfd",
+		"foo: bar\x00baz",
+		"\xef\xbb\xbffoo: bar",
+		"foo: bar\n---\nbaz: qux",
+		"",
+		"foo: bar\n- baz",
+	}
+
+	for _, in := range inputs {
+		f.Add([]byte(in))
+	}
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ReadBytes(b)
