@@ -125,8 +125,8 @@ func Load(path string, env []string) (*Config, error) {
 // LoadWith returns all errors together and never returns a partial config.
 // LoadWith returns an error if n.Dialer or n.Resolver is nil.
 // LoadWith passes n to load. No code in load uses n yet. A later network use must go
-// through n. TestTS10_NoSystemNetwork reads the source of this package and fails on the
-// forms in its doc comment.
+// through n. TestTS10_NoSystemNetwork fails on the source forms listed in its doc
+// comment. It does not detect every way to use the network.
 func LoadWith(path string, env []string, n Net) (*Config, error) {
 	if n.Dialer == nil {
 		return nil, errors.New("config: Net.Dialer is nil")
