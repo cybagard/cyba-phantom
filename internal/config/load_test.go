@@ -152,7 +152,7 @@ func TestTS10_Scalars(t *testing.T) {
 		{"mixed case env", "", "Canary_Listen_Http=:1", "Canary_Listen_Http: unknown CANARY_ variable", true},
 		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable", true},
 		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`, true},
-		{"URL user information", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://host"`, false},
+		{"URL text to the last @", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`, false},
 		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key is invalid`, true},
 	}
 	for _, r := range rows {
@@ -178,7 +178,7 @@ func TestTS10_Secret(t *testing.T) {
 	for _, body := range []string{
 		"token: " + marker + "\n  pin: " + marker + "\n  port: x",
 		"token: !" + marker, "pin: !" + marker, "token: !<" + marker + "> x", "token: [!" + marker + "]",
-		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1",
+		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1", "token: [" + marker + ": !t 1]",
 	} {
 		_, err := load(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker}, testKeys)
 		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
@@ -189,16 +189,22 @@ func TestTS10_Secret(t *testing.T) {
 	}
 }
 
-// TestTS10_Escape checks the escaper on control bytes, URL user information, and the cut.
+// TestTS10_Escape checks the escaper on control bytes, the text from "//" to the last "@", and the cut.
 func TestTS10_Escape(t *testing.T) {
 	rows := []struct{ in, want string }{
 		{"a\x1b[31mb\n", `a\x1b[31mb\n`},
-		{"https://user:pw@host/x", "https://host/x"},
-		{"https://user:p/w@host", "https://host"},
-		{"https://u:a?b#c@host", "https://host"},
-		{"https://u@p@h/x?to=ops@corp.com", "https://h/x?to=ops@corp.com"},
-		{"https://x/y?to=ops@corp.com", "https://x/y?to=ops@corp.com"},
-		{"x //u:a b\tc@host", "x //host"},
+		{"https://u:SECRET@h", "https://REDACTED@h"},
+		{"https://user:p/w@h", "https://REDACTED@h"},
+		{"https://u:a?b@h/x", "https://REDACTED@h/x"},
+		{"https://u:a#b@h", "https://REDACTED@h"},
+		{"https://u:a b@h", "https://REDACTED@h"},
+		{"https://ops@corp.com:pa/ss@smtp.corp.com", "https://REDACTED@smtp.corp.com"},
+		{"https://a b:SECRET@h", "https://REDACTED@h"},
+		{"https://u@p@h/x?to=ops@corp.com", "https://REDACTED@corp.com"},
+		{"HTTP://U:SECRET@h", "HTTP://REDACTED@h"},
+		{"//u:SECRET@h", "//REDACTED@h"},
+		{"x //u:a b\tc@host", "x //REDACTED@host"},
+		{"https://h/x", "https://h/x"},
 		{"\u202e" + strings.Repeat("é", 40), `\u202e` + strings.Repeat(`\u00e9`, 30)},
 		{"bad\xff", `bad\xff`},
 	}

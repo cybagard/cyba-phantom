@@ -68,8 +68,9 @@ func (c *Config) Get(path string) (Value, bool) {
 	return v, ok
 }
 
-// Error is one config error. It never holds a secret value: Value is empty for a secret key,
-// and the only file text in a reader error is key paths, cut at a secret key. Error() escapes each part.
+// Error is one config error. It never holds a secret value: Value is empty for a secret key.
+// A reader error holds no file text other than key paths. If a key path is below a secret key,
+// the loader cuts it to the secret key. Error() escapes each part.
 type Error struct {
 	Key, Source, Detail, Value string
 	Line                       int
@@ -238,7 +239,7 @@ func parent(p string) string {
 
 // readError changes a reader error into an Error. A wrapped system error becomes
 // a fixed message. It removes the reader's quotes, so esc escapes the text one time only.
-// It cuts a key path below a secret key to the secret key: such a key can be the secret.
+// A key below a secret key can be the secret value, so readError changes its path to the path of the secret key.
 func readError(path string, err error, table []key) error {
 	detail := "the loader cannot read the file"
 	switch {
@@ -250,7 +251,9 @@ func readError(path string, err error, table []key) error {
 		detail = strings.TrimPrefix(strings.TrimPrefix(err.Error(), "config: "), strconv.Quote(path)+": ")
 		detail = quoted.ReplaceAllStringFunc(detail, func(q string) string {
 			s, _ := strconv.Unquote(q)
-			if i := slices.IndexFunc(table, func(k key) bool { return k.secret && strings.HasPrefix(s, k.path+".") }); i >= 0 {
+			if i := slices.IndexFunc(table, func(k key) bool {
+				return k.secret && (strings.HasPrefix(s, k.path+".") || strings.HasPrefix(s, k.path+"["))
+			}); i >= 0 {
 				return table[i].path
 			}
 			return s
@@ -261,15 +264,15 @@ func readError(path string, err error, table []key) error {
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 
-// userinfo matches from "//" to the last "@" before "/", "?", "#", or space. After a ":",
-// a password can contain these characters, so the match then goes to the last "@".
-var userinfo = regexp.MustCompile(`(?is)((?:[a-z][a-z0-9+.-]*:)?//)(?:[^/?#@:\s]*:.*|[^/?#\s]*)@`)
+// userinfo matches all text from the first "//" to the last "@" in the value. A more
+// precise rule can miss a password form, so the loader accepts that it removes too much.
+var userinfo = regexp.MustCompile(`(?s)//.*@`)
 
-// esc is the one escaper for printed text (SEC-07). It removes URL user information,
-// cuts the text to max bytes on a rune boundary (max < 0: keep the last -max
-// bytes), and escapes control characters, ANSI sequences, and non-ASCII runes.
+// esc is the one escaper for printed text (SEC-07). It replaces the text from "//" to
+// the last "@" with "//REDACTED@", cuts the text to max bytes on a rune boundary (max < 0:
+// keep the last -max bytes), and escapes control characters, ANSI sequences, and non-ASCII runes.
 func esc(s string, max int) string {
-	s = userinfo.ReplaceAllString(s, "$1")
+	s = userinfo.ReplaceAllString(s, "//REDACTED@")
 	if n := len(s) + max; max < 0 && n > 0 {
 		for n < len(s) && !utf8.RuneStart(s[n]) {
 			n++
