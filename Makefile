@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint trace stamp mirror-diff dco coverage perf perf-inner clean
+.PHONY: all build test lint trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
 
 all: build lint test trace mirror-diff
 
@@ -51,6 +51,11 @@ dco:
 # 07 §1 coverage gate (vacuous on internal/* in M-1; 80 % on tools/).
 coverage:
 	bash tools/coverage.sh
+
+# T-U-06: write the sha256 values of the hand-written canonical text into
+# internal/event/testdata. Nobody edits those values by hand (test/README).
+fixtures:
+	$(GO) test ./internal/event -run TestTU06 -update
 
 # T-P-07: two builds must hash identically; the binary is static and
 # <= 25 MB, built under the 07 §2 cgroup budget (1 vCPU / 512 MB).
