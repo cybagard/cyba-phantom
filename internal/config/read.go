@@ -1,4 +1,8 @@
 // Package config provides a strict YAML configuration loader.
+//
+// The sensor reads the config one time at start, with Load. The package has
+// no reload function. SIGHUP and the reload request reload the bundle, not
+// the config. A config change needs a restart.
 package config
 
 import (
@@ -30,6 +34,7 @@ type Doc struct {
 	Leaves    map[string]Leaf // Leaves hold scalar values.
 	Mappings  map[string]bool // Mappings holds the paths of mapping nodes; "" is the root
 	Sequences map[string]bool // Sequences holds the paths of sequence nodes
+	Lines     map[string]int  // Lines holds the line of each node by path
 }
 
 // ReadFile reads the configuration file at path and returns a Doc.
@@ -134,6 +139,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 		Leaves:    make(map[string]Leaf),
 		Mappings:  make(map[string]bool),
 		Sequences: make(map[string]bool),
+		Lines:     make(map[string]int),
 	}
 
 	if err := walkNode(root, "", res, 0); err != nil {
@@ -166,6 +172,9 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 		return fmt.Errorf("config: %s: line %d column %d: tag %q is outside the core schema", formatPath(path), n.Line, n.Column, cut(n.Tag))
 	}
 
+	if _, ok := doc.Lines[path]; !ok {
+		doc.Lines[path] = n.Line
+	}
 	switch n.Kind {
 	case yaml.MappingNode:
 		doc.Mappings[path] = true
@@ -199,6 +208,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 				newPath = path + "." + key
 			}
 
+			doc.Lines[newPath] = keyNode.Line
 			if err := walkNode(valNode, newPath, doc, depth+1); err != nil {
 				return err
 			}
