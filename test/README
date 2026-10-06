@@ -12,4 +12,8 @@ To change a vector:
 
 1. Edit the canonical text.
 2. Run "make fixtures".
-3. Commit the text and the hashes together.
+3. Run "make test".
+4. Commit the text and the hashes together.
+
+To add a vector, give it a sha256 field with an empty value, then do the
+steps above.

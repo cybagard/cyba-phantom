@@ -20,8 +20,8 @@ import (
 	"unicode/utf8"
 )
 
-// maxInt is the largest integer that a JSON number holds exactly in an IEEE
-// 754 double: 2^53 - 1.
+// maxInt is 2^53 - 1. A double holds every integer from -maxInt to maxInt
+// exactly.
 const maxInt = 1<<53 - 1
 
 // strict makes the decoder and the encoder reject invalid UTF-8 and duplicate
@@ -66,10 +66,10 @@ func errRule(rule string, off int64) error {
 }
 
 // check walks the token stream of raw and rejects the first value that is
-// outside the domain. The decoder gives one error kind for a lone surrogate,
-// for too deep nesting and for other bad syntax, and the public API of jsontext
-// does not tell them apart. For this reason the catch-all rule "malformed JSON"
-// covers all three.
+// outside the domain. The decoder gives one error kind for three faults: a
+// lone surrogate, too deep nesting, and other bad syntax. The public API of
+// jsontext does not tell them apart. For this reason the catch-all rule
+// "malformed JSON" covers all three.
 func check(raw []byte) error {
 	if !utf8.Valid(raw) {
 		off := 0

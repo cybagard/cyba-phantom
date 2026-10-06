@@ -2,6 +2,7 @@ package event
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"flag"
 	"fmt"
@@ -37,23 +38,25 @@ func loadVectors(t testing.TB) ([]byte, []vector) {
 }
 
 // T-U-06: each vector has hand-written canonical text. The -update flag
-// hashes that text, not the encoder output.
+// hashes that text with crypto/sha256, not the encoder output. After the
+// write, the test checks every vector, so a wrong canonical text fails.
 func TestTU06_Vectors(t *testing.T) {
 	raw, vs := loadVectors(t)
 	if *update {
+		re := regexp.MustCompile(`"sha256": "[0-9a-f]*"`)
+		if n := len(re.FindAll(raw, -1)); n != len(vs) {
+			t.Fatalf("found %d sha256 fields for %d vectors", n, len(vs))
+		}
 		i := 0
-		out := regexp.MustCompile(`"sha256": "[0-9a-f]*"`).ReplaceAllFunc(raw, func([]byte) []byte {
-			h := Hash([]byte(vs[i].Canonical))
+		out := re.ReplaceAllFunc(raw, func([]byte) []byte {
+			h := sha256.Sum256([]byte(vs[i].Canonical))
 			i++
 			return []byte(fmt.Sprintf(`"sha256": "%x"`, h))
 		})
-		if i != len(vs) {
-			t.Fatalf("found %d sha256 fields for %d vectors", i, len(vs))
-		}
 		if err := os.WriteFile(vectorsPath, out, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return
+		_, vs = loadVectors(t)
 	}
 	for _, v := range vs {
 		t.Run(v.Name, func(t *testing.T) {
@@ -79,7 +82,7 @@ func TestTU06_Vectors(t *testing.T) {
 }
 
 func TestTU06_Hash(t *testing.T) {
-	// FIPS 180-2 test vector for "abc".
+	// This is the FIPS 180-2 test vector for abc.
 	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 	if got := fmt.Sprintf("%x", Hash([]byte("abc"))); got != want {
 		t.Errorf("Hash(abc) = %s", got)
@@ -189,6 +192,7 @@ func TestTS12_ReplacementCharKept(t *testing.T) {
 	}
 }
 
+// BenchmarkCanonical measures the allocation of Canonical.
 func BenchmarkCanonical(b *testing.B) {
 	for _, c := range []struct {
 		name, member string
@@ -196,7 +200,7 @@ func BenchmarkCanonical(b *testing.B) {
 	}{
 		{"members", `"k%07[1]d":"value %[1]d"`, 64 << 10},
 		{"members", `"k%07[1]d":"value %[1]d"`, 1 << 20},
-		// Worst case: the shortest members. Each input byte costs most here.
+		// This case uses the shortest members. Each input byte costs most here.
 		{"short", `"%[1]x":1`, 1 << 20},
 	} {
 		// The input is one object of members. Its text is about size bytes.
@@ -222,6 +226,7 @@ func BenchmarkCanonical(b *testing.B) {
 	}
 }
 
+// T-S-12: each input gives an error and no bytes, or an output that is stable and decodes to the same value.
 func FuzzCanonical(f *testing.F) {
 	for _, c := range rejects {
 		f.Add([]byte(c.in))
