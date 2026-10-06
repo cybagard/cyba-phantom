@@ -125,45 +125,45 @@ func TestTU10_NoReload(t *testing.T) {
 	}
 }
 
-// TestTS10_Scalars checks strict scalars, unknown CANARY_ variables, and escaped values.
+// useTestKeys sets the key table to testKeys until the test ends, so Load also checks the
+// test keys. A test that calls it must not run in parallel.
+func useTestKeys(t *testing.T) {
+	old := keys
+	keys = testKeys
+	t.Cleanup(func() { keys = old })
+}
+
+// TestTS10_Scalars checks strict scalars, unknown CANARY_ variables, and escaped values through Load.
 func TestTS10_Scalars(t *testing.T) {
-	rows := []struct {
-		name, file, env, want string
-		prod                  bool
-	}{
-		{"YAML 1.1 bool yes", "a:\n  flag: yes\n", "", "the value is not a valid bool", false},
-		{"YAML 1.1 bool on", "a:\n  flag: on\n", "", "the value is not a valid bool", false},
-		{"octal", "a:\n  port: 017\n", "", "decimal literal only", false},
-		{"hex", "a:\n  port: 0x1F\n", "", "decimal literal only", false},
-		{"underscore", "a:\n  size: 1_000\n", "", "decimal literal only", false},
-		{"sign on uint", "a:\n  port: -1\n", "", "decimal literal only", false},
-		{"float into int", "a:\n  delta: 1.5\n", "", "the value is not a valid int", false},
-		{"quoted int", "a:\n  port: \"8080\"\n", "", "the value is not a valid uint", false},
-		{"tagged int", "a:\n  port: !!int x\n", "", "decimal literal only", false},
-		{"null", "a:\n  every: ~\n", "", "the value is not a valid duration", false},
-		{"duration number", "a:\n  every: 5\n", "", "the value is not a valid duration", false},
-		{"env octal", "", "CANARY_A_PORT=017", "decimal literal only", false},
-		{"env bool", "", "CANARY_A_FLAG=on", "true or false only", false},
-		{"env range", "", "CANARY_A_SIZE=99999999999999999999", "out of range", false},
-		{"bool into string", "listen:\n  https: true\n", "", "the value is not a valid string", true},
-		{"octal into string", "listen:\n  http: 017\n", "", "the value is not a valid string", true},
-		{"unknown env", "", "CANARY_LISTEN_HTTPX=:1", "CANARY_LISTEN_HTTPX: unknown CANARY_ variable", true},
-		{"lower case env", "", "canary_listen_http=:1", "canary_listen_http: unknown CANARY_ variable", true},
-		{"mixed case env", "", "Canary_Listen_Http=:1", "Canary_Listen_Http: unknown CANARY_ variable", true},
-		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable", true},
-		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`, true},
-		{"URL text to the last @", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`, false},
-		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key is invalid`, true},
+	useTestKeys(t)
+	rows := []struct{ name, file, env, want string }{
+		{"YAML 1.1 bool yes", "a:\n  flag: yes\n", "", "the value is not a valid bool"},
+		{"YAML 1.1 bool on", "a:\n  flag: on\n", "", "the value is not a valid bool"},
+		{"octal", "a:\n  port: 017\n", "", "decimal literal only"},
+		{"hex", "a:\n  port: 0x1F\n", "", "decimal literal only"},
+		{"underscore", "a:\n  size: 1_000\n", "", "decimal literal only"},
+		{"sign on uint", "a:\n  port: -1\n", "", "decimal literal only"},
+		{"float into int", "a:\n  delta: 1.5\n", "", "the value is not a valid int"},
+		{"quoted int", "a:\n  port: \"8080\"\n", "", "the value is not a valid uint"},
+		{"tagged int", "a:\n  port: !!int x\n", "", "decimal literal only"},
+		{"null", "a:\n  every: ~\n", "", "the value is not a valid duration"},
+		{"duration number", "a:\n  every: 5\n", "", "the value is not a valid duration"},
+		{"env octal", "", "CANARY_A_PORT=017", "decimal literal only"},
+		{"env bool", "", "CANARY_A_FLAG=on", "true or false only"},
+		{"env range", "", "CANARY_A_SIZE=99999999999999999999", "out of range"},
+		{"bool into string", "listen:\n  https: true\n", "", "the value is not a valid string"},
+		{"octal into string", "listen:\n  http: 017\n", "", "the value is not a valid string"},
+		{"unknown env", "", "CANARY_LISTEN_HTTPX=:1", "CANARY_LISTEN_HTTPX: unknown CANARY_ variable"},
+		{"lower case env", "", "canary_listen_http=:1", "canary_listen_http: unknown CANARY_ variable"},
+		{"mixed case env", "", "Canary_Listen_Http=:1", "Canary_Listen_Http: unknown CANARY_ variable"},
+		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable"},
+		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`},
+		{"URL text to the last @", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
+		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key is invalid`},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			p := writeConfig(t, base+r.file)
-			var err error
-			if r.prod {
-				_, err = Load(p, strings.Fields(r.env))
-			} else {
-				_, err = load(p, strings.Fields(r.env), testKeys)
-			}
+			_, err := Load(writeConfig(t, base+r.file), strings.Fields(r.env))
 			if err == nil || !strings.Contains(err.Error(), r.want) {
 				t.Errorf("got %v, want %q", err, r.want)
 			}
@@ -174,13 +174,14 @@ func TestTS10_Scalars(t *testing.T) {
 // TestTS10_Secret checks that a secret value never appears in an error: as a value,
 // as a YAML tag, as a mapping key, or as a key below a secret key.
 func TestTS10_Secret(t *testing.T) {
+	useTestKeys(t)
 	const marker = "secret_marker_7f3a"
 	for _, body := range []string{
 		"token: " + marker + "\n  pin: " + marker + "\n  port: x",
 		"token: !" + marker, "pin: !" + marker, "token: !<" + marker + "> x", "token: [!" + marker + "]",
 		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1", "token: [" + marker + ": !t 1]",
 	} {
-		_, err := load(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker}, testKeys)
+		_, err := Load(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker})
 		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
 			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
 				t.Errorf("%q: the error shows a secret value: %s", body, s)
@@ -189,7 +190,7 @@ func TestTS10_Secret(t *testing.T) {
 	}
 }
 
-// TestTS10_Escape checks the escaper on control bytes, the text from "//" to the last "@", and the cut.
+// TestTS10_Escape checks the escaper on control bytes, the URL user information, and the cut.
 func TestTS10_Escape(t *testing.T) {
 	rows := []struct{ in, want string }{
 		{"a\x1b[31mb\n", `a\x1b[31mb\n`},
@@ -205,12 +206,22 @@ func TestTS10_Escape(t *testing.T) {
 		{"//u:SECRET@h", "//REDACTED@h"},
 		{"x //u:a b\tc@host", "x //REDACTED@host"},
 		{"https://h/x", "https://h/x"},
+		{`https:\\u:SECRET@h`, `https:\\\\REDACTED@h`},
+		{`https:/\/u:SECRET@h`, `https:/\\/REDACTED@h`},
+		{"https:/u:SECRET@h", "https:/REDACTED@h"},
+		{"https:u:SECRET@h", "https:REDACTED@h"},
+		{"https:/\t/u:SECRET@h", `https:/\t/REDACTED@h`},
+		{"user:SECRET@tcp(h:3306)/db", "user:REDACTED@tcp(h:3306)/db"},
 		{"\u202e" + strings.Repeat("é", 40), `\u202e` + strings.Repeat(`\u00e9`, 30)},
 		{"bad\xff", `bad\xff`},
 	}
 	for _, r := range rows {
-		if got := esc(r.in, 64); got != r.want {
+		got := esc(r.in, 64)
+		if got != r.want {
 			t.Errorf("esc(%q) = %q, want %q", r.in, got, r.want)
+		}
+		if strings.Contains(r.in, "SECRET") && (strings.Contains(got, "SECRET") || !strings.Contains(got, "REDACTED@")) {
+			t.Errorf("esc(%q) = %q: the password is not removed", r.in, got)
 		}
 	}
 }
