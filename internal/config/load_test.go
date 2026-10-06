@@ -153,7 +153,7 @@ func TestTS10_Scalars(t *testing.T) {
 		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable", true},
 		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`, true},
 		{"URL user information", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://host"`, false},
-		{"reader key escaped one time", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key \x1b[2J is invalid`, true},
+		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 4 column 3: mapping key is invalid`, true},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -171,20 +171,20 @@ func TestTS10_Scalars(t *testing.T) {
 	}
 }
 
-// TestTS10_Secret checks that a secret value never appears in an error.
+// TestTS10_Secret checks that a secret value never appears in an error: as a value,
+// as a YAML tag, as a mapping key, or as a key below a secret key.
 func TestTS10_Secret(t *testing.T) {
-	const marker = "SECRET_MARKER_7f3a"
-	p := writeConfig(t, base+"a:\n  token: "+marker+"\n  pin: "+marker+"\n  port: x\n")
-	_, err := load(p, []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker, "CANARY_" + marker + "=" + marker}, testKeys)
-	if err == nil || !strings.Contains(err.Error(), `a.port at`) || !strings.Contains(err.Error(), `a.pin at CANARY_A_PIN`) {
-		t.Fatalf("got %v", err)
-	}
-	if strings.Count(err.Error(), marker) != 1 || !strings.Contains(err.Error(), "CANARY_"+marker+": unknown") {
-		t.Errorf("error shows a secret value: %v", err)
-	}
-	for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
-		if s := fmt.Sprintf("%#v", e); !strings.Contains(s, "CANARY_"+marker) && strings.Contains(s, marker) {
-			t.Errorf("error value holds a secret value: %s", s)
+	const marker = "secret_marker_7f3a"
+	for _, body := range []string{
+		"token: " + marker + "\n  pin: " + marker + "\n  port: x",
+		"token: !" + marker, "pin: !" + marker, "token: !<" + marker + "> x", "token: [!" + marker + "]",
+		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1",
+	} {
+		_, err := load(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker}, testKeys)
+		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
+			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
+				t.Errorf("%q: the error shows a secret value: %s", body, s)
+			}
 		}
 	}
 }
@@ -196,6 +196,8 @@ func TestTS10_Escape(t *testing.T) {
 		{"https://user:pw@host/x", "https://host/x"},
 		{"https://user:p/w@host", "https://host"},
 		{"https://u:a?b#c@host", "https://host"},
+		{"https://u@p@h/x?to=ops@corp.com", "https://h/x?to=ops@corp.com"},
+		{"https://x/y?to=ops@corp.com", "https://x/y?to=ops@corp.com"},
 		{"x //u:a b\tc@host", "x //host"},
 		{"\u202e" + strings.Repeat("é", 40), `\u202e` + strings.Repeat(`\u00e9`, 30)},
 		{"bad\xff", `bad\xff`},

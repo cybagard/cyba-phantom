@@ -169,7 +169,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: tag %q is outside the core schema", formatPath(path), n.Line, n.Column, cut(n.Tag))
+		return fmt.Errorf("config: %s: line %d column %d: tag is outside the core schema", formatPath(path), n.Line, n.Column)
 	}
 
 	if _, ok := doc.Lines[path]; !ok {
@@ -192,11 +192,11 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 			}
 
 			if !isValidKey(key) {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key %q is invalid", formatPath(path), keyNode.Line, keyNode.Column, cut(key))
+				return fmt.Errorf("config: %s: line %d column %d: mapping key is invalid", formatPath(path), keyNode.Line, keyNode.Column)
 			}
 
 			if keyNode.Tag != "" && keyNode.Tag != "!!str" {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key tag %q is rejected", formatPath(path), keyNode.Line, keyNode.Column, cut(keyNode.Tag))
+				return fmt.Errorf("config: %s: line %d column %d: mapping key tag is rejected", formatPath(path), keyNode.Line, keyNode.Column)
 			}
 
 			if keyNode.Anchor != "" {
