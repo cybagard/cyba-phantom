@@ -121,21 +121,24 @@ func (l *loader) load(path string, env []string, table []key) (*Config, error) {
 		byEnv[envName(k.path)] = k
 	}
 	vals := make(map[string]Value)
+	raws := make(map[string]string) // raws holds the text of each value in vals.
 	var errs []error
-	set := func(k key, raw, tag, src string, line int) {
-		v, detail := parse(k, raw, tag)
-		if detail == "" && k.check != nil {
-			detail = k.check(l, raw)
-		}
-		if detail == "" {
-			v.Source, v.Line = src, line
-			vals[k.path] = v
-			return
-		}
+	keyError := func(k key, raw, src string, line int, detail string) error {
 		if k.secret || k.kind == kindURL {
 			raw = "" // An Error never holds a secret value or a URL: a URL can hold user information.
 		}
-		errs = append(errs, &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw})
+		return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
+	}
+	// set parses one value. A later source replaces an earlier one. A value that fails to parse is removed.
+	set := func(k key, raw, tag, src string, line int) {
+		v, detail := parse(k, raw, tag)
+		if detail == "" {
+			v.Source, v.Line = src, line
+			vals[k.path], raws[k.path] = v, raw
+			return
+		}
+		delete(vals, k.path)
+		errs = append(errs, keyError(k, raw, src, line, detail))
 	}
 	for _, k := range table {
 		if !k.req {
@@ -189,6 +192,17 @@ func (l *loader) load(path string, env []string, table []key) (*Config, error) {
 	for _, k := range table {
 		if _, ok := vals[k.path]; k.req && !ok {
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
+		}
+	}
+	// Each check runs one time, on the effective value. A key that fails is removed from vals.
+	for _, k := range table {
+		v, ok := vals[k.path]
+		if !ok || k.check == nil {
+			continue
+		}
+		if detail := k.check(l, raws[k.path]); detail != "" {
+			delete(vals, k.path)
+			errs = append(errs, keyError(k, raws[k.path], v.Source, v.Line, detail))
 		}
 	}
 	errs = append(errs, crossCheck(vals)...)

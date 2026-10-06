@@ -1,10 +1,12 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -43,6 +45,13 @@ func TestTU10_Listen(t *testing.T) {
 		{"empty", "", "host:port"},
 		{"bare ipv6", "::1:80", "host:port"},
 		{"bad host", "ex ample:80", "host name"},
+		{"empty label", "a..b:80", "host name"},
+		{"leading dot", ".a:80", "host name"},
+		{"trailing dot", "a.:80", "host name"},
+		{"numeric name", "999.1.1.1:80", "host name"},
+		{"numeric last label", "a.1:80", "host name"},
+		{"single digit", "0:80", "host name"},
+		{"digits in a label", "a1.b2:80", ""},
 		{"url", "http://h:80", "host"},
 	}, func(s string) string { return checkListen(nil, s) })
 }
@@ -111,9 +120,58 @@ func TestTU10_OpsListenOverlap(t *testing.T) {
 		{"same port, other IP", "listen:\n  https: \"192.0.2.1:9443\"\n", ""},
 		{"ops on port 443", "ops:\n  listen: \"127.0.0.1:443\"\n", "ops.listen"},
 		{"ops on port 80", "ops:\n  listen: \"[::1]:80\"\n", "ops.listen"},
+		{"mapped unspecified", "listen:\n  https: \"[::ffff:0.0.0.0]:9443\"\n", "ops.listen"},
+		{"mapped unspecified, other port", "listen:\n  https: \"[::ffff:0.0.0.0]:8443\"\n", ""},
+		{"host name, same port", "listen:\n  http: \"localhost:9443\"\n", "ops.listen"},
+		{"host name https, same port", "listen:\n  https: \"example.com:9443\"\n", "ops.listen"},
+		{"numeric host, same port", "listen:\n  http: \"0:9443\"\n", "listen.http"},
+		{"host name, other port", "listen:\n  http: \"localhost:8443\"\n", ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { wantLoad(t, r.file, r.want) })
+	}
+}
+
+// TestTU10_CrossCheckFailedKey checks that a key whose value failed is not in the cross check.
+func TestTU10_CrossCheckFailedKey(t *testing.T) {
+	useTestKeys(t)
+	for _, file := range []string{
+		"listen:\n  http: \":443\"\n  https: bad\n",
+		"listen:\n  http: \":443\"\n  https: \":99999\"\n",
+	} {
+		_, err := Load(writeConfig(t, base+file), nil)
+		if err == nil || !strings.Contains(err.Error(), "listen.https") {
+			t.Fatalf("got %v", err)
+		}
+		if strings.Contains(err.Error(), "default") || strings.Contains(err.Error(), "must differ") {
+			t.Errorf("a stale default is in the cross check: %v", err)
+		}
+	}
+	_, err := Load(writeConfig(t, base), []string{"CANARY_LISTEN_HTTP=:9443", "CANARY_OPS_LISTEN=0.0.0.0:9443"})
+	if err == nil || strings.Count(err.Error(), "\n") != 0 || !strings.Contains(err.Error(), "ops.listen at CANARY_OPS_LISTEN") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestTU10_CrossCheckText checks that each cross-check detail is short and has no "be or be".
+func TestTU10_CrossCheckText(t *testing.T) {
+	useTestKeys(t)
+	for _, file := range []string{
+		"listen:\n  http: \"127.0.0.1:9443\"\n",
+		"listen:\n  https: \":9443\"\n",
+		"listen:\n  http: \"localhost:9443\"\n",
+		"listen:\n  https: \":80\"\n",
+	} {
+		_, err := Load(writeConfig(t, base+file), nil)
+		if err == nil {
+			t.Fatalf("no error for %q", file)
+		}
+		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+			d := e.(*Error).Detail
+			if n := len(strings.Fields(d)); n > 20 || strings.Contains(d, "be inside") || strings.Contains(d, "be or") {
+				t.Errorf("the detail %q is not a short, simple sentence", d)
+			}
+		}
 	}
 }
 
@@ -174,6 +232,20 @@ func TestTU10_URL(t *testing.T) {
 		{"unspecified v6", "https://[::]/", []string{"https"}, "unspecified"},
 		{"port 0", "https://h:0/", []string{"https"}, "port"},
 		{"port 65536", "https://h:65536/", []string{"https"}, "port"},
+		{"port leading zero", "https://example.com:0443/", []string{"https"}, "decimal"},
+		{"port sign", "https://example.com:+443/", []string{"https"}, "not a valid URL"},
+		{"empty port", "https://h:/", []string{"https"}, "port is empty"},
+		{"empty port ipv6", "https://[2001:db8::1]:/", []string{"https"}, "port is empty"},
+		{"number host", "https://2852039166/", []string{"https"}, "number"},
+		{"hex host", "https://0xa9fea9fe/", []string{"https"}, "number"},
+		{"octal dotted host", "https://0251.0376.0251.0376/", []string{"https"}, "number"},
+		{"short dotted host", "https://169.254.43518/", []string{"https"}, "number"},
+		{"zero host", "https://0/", []string{"https"}, "number"},
+		{"hex first label", "https://0x7f.1/", []string{"https"}, "number"},
+		{"numeric last label", "https://a.1/", []string{"https"}, "number"},
+		{"numeric host with dot at end", "https://2852039166./", []string{"https"}, "number"},
+		{"name with digits", "https://a1.example/", []string{"https"}, ""},
+		{"upper case name", "https://CA.Example:443/", []string{"https"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -199,6 +271,8 @@ func TestTU10_CA(t *testing.T) {
 		{"empty", "", "scheme"},
 		{"link-local", "https://[fe81::]/dir", "link-local"},
 		{"user", "https://u:p@ca.example/dir", "user information"},
+		{"port leading zero", "https://ca.example:0443/dir", "decimal"},
+		{"number host", "https://2852039166/dir", "number"},
 	}, func(s string) string { return checkCA(nil, s) })
 }
 
@@ -214,6 +288,7 @@ func TestTU10_AllowList(t *testing.T) {
 		{"url", "acme:\n  ca: https://ca.example:14000/dir\n", []Endpoint{{"https", "ca.example", "14000"}}},
 		{"url default port", "acme:\n  ca: https://ca.example/dir\n", []Endpoint{{"https", "ca.example", "443"}}},
 		{"ipv6", "acme:\n  ca: \"https://[2001:db8::1]:8443/\"\n", []Endpoint{{"https", "2001:db8::1", "8443"}}},
+		{"upper case host", "acme:\n  ca: https://CA.Example:14000/dir\n", []Endpoint{{"https", "ca.example", "14000"}}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -365,13 +440,10 @@ func TestTU10_Htpasswd(t *testing.T) {
 	}
 	runRows(t, rows, func(s string) string { return checkHtpasswd(tr.l, s) })
 
-	// A failed file rule names the file.
+	// The detail is fixed text. It never holds the path.
 	for _, r := range rows {
-		if r.want == "" || !strings.HasPrefix(r.in, tr.outside) || strings.ContainsAny(r.in, "\x00") || strings.Contains(r.in, "..") {
-			continue
-		}
-		if d := checkHtpasswd(tr.l, r.in); !strings.HasSuffix(d, ": "+r.in) {
-			t.Errorf("%s: the detail %q does not name the file", r.name, d)
+		if d := checkHtpasswd(tr.l, r.in); d != "" && strings.Contains(d, tr.outside) {
+			t.Errorf("%s: the detail %q holds the path", r.name, d)
 		}
 	}
 
@@ -384,10 +456,60 @@ func TestTU10_Htpasswd(t *testing.T) {
 			}
 			return
 		}
-		if !strings.Contains(got, "owner") || !strings.HasSuffix(got, good) {
-			t.Errorf("got %q, want an owner error that names the file", got)
+		if !strings.Contains(got, "owner") {
+			t.Errorf("got %q, want an owner error", got)
 		}
 	})
+}
+
+// TestTU10_HtpasswdOpen checks that the check opens the file one time, and reads the rules from the open file.
+func TestTU10_HtpasswdOpen(t *testing.T) {
+	tr := newTree(t)
+	fifo := filepath.Join(tr.outside, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkHtpasswd(tr.l, fifo); !strings.Contains(got, "not a regular file") {
+		t.Errorf("fifo: got %q", got)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a file that has no read permission")
+	}
+	p := filepath.Join(tr.outside, "write-only")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkHtpasswd(tr.l, p); !strings.Contains(got, "cannot be opened") {
+		t.Errorf("file with no read permission: got %q", got)
+	}
+}
+
+// TestTU10_HtpasswdValueOnly checks that the error shows the path in the Value field only,
+// cut to 64 bytes, and that the detail is fixed text.
+func TestTU10_HtpasswdValueOnly(t *testing.T) {
+	useTestKeys(t)
+	p := filepath.Join(t.TempDir(), strings.Repeat("n", 90))
+	_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
+	if err == nil {
+		t.Fatal("no error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("got %T", err)
+	}
+	if e.Detail != "the htpasswd file cannot be resolved" || e.Value != p {
+		t.Errorf("got detail %q, value %q", e.Detail, e.Value)
+	}
+	s := err.Error()
+	if strings.Contains(s, p) || strings.Contains(s, strings.Repeat("n", 65)) {
+		t.Errorf("the error shows more than 64 bytes of the path: %s", s)
+	}
+	if !strings.Contains(s, ": the htpasswd file cannot be resolved: value \"") {
+		t.Errorf("the error has no value: %s", s)
+	}
 }
 
 // TestTU10_FileThroughLoad checks that an htpasswd error shows through Load with the key and the file.

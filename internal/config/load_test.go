@@ -96,6 +96,54 @@ func TestTU10_Precedence(t *testing.T) {
 	}
 }
 
+// TestTU10_EffectiveValueCheck uses the production key table. It checks that each check runs on
+// the effective value only: a default that the file or the environment replaces is not checked.
+func TestTU10_EffectiveValueCheck(t *testing.T) {
+	const def = "/etc/agent-canary/htpasswd"
+	if _, err := os.Lstat(def); err == nil {
+		t.Skip("the default htpasswd file exists on this host")
+	}
+	good := filepath.Join(testDir, "htpasswd")
+	t.Run("file", func(t *testing.T) {
+		c, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+good+"\n"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != cfg || v.Line != 4 {
+			t.Errorf("got %+v", v)
+		}
+	})
+	t.Run("env", func(t *testing.T) {
+		c, err := Load(writeConfig(t, base), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != "CANARY_OPS_BASIC_AUTH_HTPASSWD" {
+			t.Errorf("got %+v", v)
+		}
+	})
+	t.Run("env over bad file value", func(t *testing.T) {
+		bad := filepath.Join(testDir, "missing")
+		_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		if err != nil {
+			t.Errorf("a file value that the environment replaces is checked: %v", err)
+		}
+	})
+	t.Run("default fails", func(t *testing.T) {
+		_, err := Load(writeConfig(t, base), nil)
+		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at default: the htpasswd file cannot be resolved") {
+			t.Errorf("got %v", err)
+		}
+	})
+	t.Run("file value fails", func(t *testing.T) {
+		bad := filepath.Join(testDir, "missing")
+		_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), nil)
+		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at "+cfg[len(cfg)-64:]+":4: ") || strings.Contains(err.Error(), "default") {
+			t.Errorf("got %v", err)
+		}
+	})
+}
+
 // TestTU10_EnvNames checks that each key in the key table has its own variable name.
 func TestTU10_EnvNames(t *testing.T) {
 	seen := make(map[string]string)

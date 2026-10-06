@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -25,8 +26,21 @@ type loader struct {
 
 func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.Geteuid()} }
 
-// hostname matches a DNS name for a listen address.
-var hostname = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+// hostname matches host name labels that a dot separates. A label is not empty.
+var hostname = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
+
+// lastLabel returns the text after the last dot of host. It ignores one dot at the end.
+func lastLabel(host string) string {
+	host = strings.TrimSuffix(host, ".")
+	return host[strings.LastIndexByte(host, '.')+1:]
+}
+
+// numericLabel reports whether the last label of host is only digits.
+// Such a host is a number, not a name. Some resolvers read it as an IPv4 address.
+func numericLabel(host string) bool {
+	l := lastLabel(host)
+	return l != "" && strings.IndexFunc(l, func(r rune) bool { return r < '0' || r > '9' }) < 0
+}
 
 // hostPort is a parsed host:port value.
 type hostPort struct {
@@ -57,16 +71,19 @@ func parseHostPort(s string) (hostPort, string) {
 		hp.addr = a
 		return hp, ""
 	}
-	if !hostname.MatchString(host) {
+	if !hostname.MatchString(host) || numericLabel(host) {
 		return hp, "the host is not an IP literal or a host name"
 	}
 	return hp, ""
 }
 
 // wildcard reports whether the address binds all interfaces.
-func (h hostPort) wildcard() bool { return h.host == "" || h.addr.IsUnspecified() }
+func (h hostPort) wildcard() bool { return h.host == "" || h.addr.Unmap().IsUnspecified() }
 
-// overlaps reports whether a and b can bind the same address and port.
+// named reports whether the host is a name. The loader does not resolve names.
+func (h hostPort) named() bool { return h.host != "" && !h.addr.IsValid() }
+
+// overlaps reports whether h and o can bind the same address and port.
 func (h hostPort) overlaps(o hostPort) bool {
 	if h.port != o.port {
 		return false
@@ -105,7 +122,20 @@ func checkOpsListen(_ *loader, raw string) string {
 	return ""
 }
 
-// crossCheck checks the rules that compare two keys. It skips a key that has no valid value.
+// opsConflict returns a detail if the ops address can clash with the listen address l.
+// A listen host name with the same port is a clash: the loader does not resolve names.
+func opsConflict(ops, l hostPort, name string) string {
+	switch {
+	case ops.overlaps(l):
+		return "the address overlaps the " + name + " address"
+	case l.named() && l.port == ops.port:
+		return "the port is the same as the port of " + name + ", and that host is a name"
+	}
+	return ""
+}
+
+// crossCheck checks the rules that compare two keys. It skips a key that is not in vals.
+// The loader removes a key from vals if its value failed to parse or failed its check.
 func crossCheck(vals map[string]Value) []error {
 	get := func(p string) (hostPort, Value, bool) {
 		v, ok := vals[p]
@@ -125,11 +155,15 @@ func crossCheck(vals map[string]Value) []error {
 		fail("listen.https", httpsV, "the address must differ from listen.http")
 	}
 	if ops, v, ok := get("ops.listen"); ok {
-		if okHTTP && ops.overlaps(httpA) {
-			fail("ops.listen", v, "the address must not be or be inside the listen.http address")
+		if okHTTP {
+			if d := opsConflict(ops, httpA, "listen.http"); d != "" {
+				fail("ops.listen", v, d)
+			}
 		}
-		if okHTTPS && ops.overlaps(httpsA) {
-			fail("ops.listen", v, "the address must not be or be inside the listen.https address")
+		if okHTTPS {
+			if d := opsConflict(ops, httpsA, "listen.https"); d != "" {
+				fail("ops.listen", v, d)
+			}
 		}
 	}
 	return errs
@@ -164,12 +198,19 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 	case u.Hostname() == "":
 		return nil, "the URL must have a host"
 	}
-	if p := u.Port(); p != "" {
+	p := u.Port()
+	switch {
+	case p == "" && strings.HasSuffix(u.Host, ":"):
+		return nil, "the URL port is empty"
+	case p != "" && !decimal.MatchString(p):
+		return nil, "the URL port is not a decimal literal"
+	case p != "":
 		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
 			return nil, "the URL port is not in the range 1 to 65535"
 		}
 	}
-	if a, err := netip.ParseAddr(u.Hostname()); err == nil {
+	host := u.Hostname()
+	if a, err := netip.ParseAddr(host); err == nil {
 		a0 := a.Unmap()
 		switch {
 		case a.Zone() != "":
@@ -179,6 +220,8 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		case a0.IsUnspecified():
 			return nil, "the URL host must not be unspecified"
 		}
+	} else if numericLabel(host) || strings.HasPrefix(strings.ToLower(host), "0x") {
+		return nil, "the URL host is a number but not an IP address in dotted form"
 	}
 	return u, ""
 }
@@ -228,7 +271,7 @@ func (c *Config) AllowList() []Endpoint {
 	if port == "" {
 		port = "443"
 	}
-	return []Endpoint{{Scheme: u.Scheme, Host: u.Hostname(), Port: port}}
+	return []Endpoint{{Scheme: u.Scheme, Host: strings.ToLower(u.Hostname()), Port: port}}
 }
 
 // checkPathForm checks that p is absolute, clean, and free of NUL.
@@ -295,32 +338,39 @@ func checkStatePath(l *loader, raw string) string {
 	return ""
 }
 
-// checkHtpasswd applies the file rules (04 section 3). The detail names the file and the failed rule.
+// checkHtpasswd applies the file rules (04 section 3). The detail is fixed text. The
+// loader shows the path in the Value field. The check opens the resolved file one time,
+// then reads the type, owner, and mode from the open file, as ReadFile does.
 func checkHtpasswd(l *loader, raw string) string {
 	if d := checkPathForm(raw); d != "" {
 		return d
 	}
 	r, err := filepath.EvalSymlinks(raw)
 	if err != nil {
-		return "the htpasswd file cannot be resolved: " + raw
+		return "the htpasswd file cannot be resolved"
 	}
-	fi, err := os.Stat(r)
+	f, err := os.OpenFile(r, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "the htpasswd file cannot be opened"
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	switch {
 	case err != nil:
-		return "the htpasswd file cannot be read: " + raw
+		return "the htpasswd file cannot be read"
 	case !fi.Mode().IsRegular():
-		return "the htpasswd file is not a regular file: " + raw
+		return "the htpasswd file is not a regular file"
 	}
 	if uid, ok := fileOwner(fi); !ok || (uid != 0 && int(uid) != l.euid) {
-		return "the owner of the htpasswd file is not root or the sensor user: " + raw
+		return "the owner of the htpasswd file is not root or the sensor user"
 	}
 	switch perm := fi.Mode().Perm(); {
 	case perm&0o020 != 0:
-		return "the htpasswd file is writable by group: " + raw
+		return "the htpasswd file is writable by group"
 	case perm&0o002 != 0:
-		return "the htpasswd file is writable by other: " + raw
+		return "the htpasswd file is writable by other"
 	case perm&0o004 != 0:
-		return "the htpasswd file is readable by other: " + raw
+		return "the htpasswd file is readable by other"
 	}
 	return ""
 }
