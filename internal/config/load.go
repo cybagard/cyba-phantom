@@ -99,7 +99,7 @@ type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-// Resolver looks up host names. No key uses a Resolver yet, for the same reason.
+// Resolver looks up host names. No key uses a Resolver yet.
 type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
@@ -123,9 +123,17 @@ func Load(path string, env []string) (*Config, error) {
 // LoadWith reads the config file at path one time. It applies the CANARY_*
 // overrides in env (use os.Environ()). Precedence: default < file < env.
 // LoadWith returns all errors together and never returns a partial config.
+// LoadWith returns an error if n.Dialer or n.Resolver is nil.
 // LoadWith passes n to load. No code in load uses n yet. A later network use must go
-// through n, and a test fails if this package uses the system network directly.
+// through n. TestTS10_NoSystemNetwork reads the source of this package and fails on the
+// forms in its doc comment.
 func LoadWith(path string, env []string, n Net) (*Config, error) {
+	if n.Dialer == nil {
+		return nil, errors.New("config: Net.Dialer is nil")
+	}
+	if n.Resolver == nil {
+		return nil, errors.New("config: Net.Resolver is nil")
+	}
 	return load(path, env, keys, n)
 }
 

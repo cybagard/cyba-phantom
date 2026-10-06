@@ -108,8 +108,9 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("invalid file: stderr %q lacks %q", se, want)
 		}
 	}
-	// The key table has no secret key yet. The value has a wrong type, so the loader prints it
-	// with the marker in the user information of a URL-like value.
+	// The key table has no secret key yet. The value has a wrong type, so the loader prints it.
+	// The marker is in the user information of a URL-like value, so the printed value must
+	// show REDACTED@ and not the marker.
 	code, so, se = run(writeFile(t, "acme:\n  email: sec@example.com\n  ca: !!int \"https://u:"+marker+"@h.example\"\n"))
 	if code == 0 {
 		t.Error("wrong type: exit 0")
