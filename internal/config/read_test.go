@@ -55,7 +55,7 @@ func TestTS10_Read(t *testing.T) {
 		{"ScalarList", "a: [1, 2]", false, 0, 0, "", ""},
 		{"MappingList", "s: [{t: 1}, {t: 2}]", false, 0, 0, "", ""},
 		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", ""},
-		{"ParseErrorLine", "foo: : bar", false, 0, 0, "invalid YAML", ""},
+		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", ""},
 		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", ""},
 		{"ValidLarge", "large: value", false, 0, 0, "", ""},
 	}
@@ -64,14 +64,15 @@ func TestTS10_Read(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			var err error
 			var doc *Doc
+			var path string
 
 			if r.isFile {
 				tmpDir := t.TempDir()
-				path := filepath.Join(tmpDir, "config.yaml")
+				path = filepath.Join(tmpDir, "config.yaml")
 
 				input := r.input
 				if r.name == "LargeFile" {
-					input = string(make([]byte, 64*1024+1))
+					input = "large: " + strings.Repeat("a", 64*1024)
 				}
 
 				if err := os.WriteFile(path, []byte(input), 0644); err != nil {
@@ -141,6 +142,10 @@ func TestTS10_Read(t *testing.T) {
 						if !doc.Sequences["s"] {
 							t.Error("expected path s to be a sequence")
 						}
+					} else if r.name == "LiteralEnv" {
+						if doc.Leaves["foo"].Value != "${HOME}" {
+							t.Errorf("expected value %q, got %q", "${HOME}", doc.Leaves["foo"].Value)
+						}
 					}
 				}
 			} else {
@@ -153,19 +158,25 @@ func TestTS10_Read(t *testing.T) {
 					if r.wantPath != "" && !strings.Contains(err.Error(), r.wantPath) {
 						t.Errorf("expected error containing path %q, got %q", r.wantPath, err.Error())
 					}
+					if r.name == "ParseErrorLine" {
+						if !strings.Contains(err.Error(), "invalid YAML") {
+							t.Errorf("expected error containing %q, got %q", "invalid YAML", err.Error())
+						}
+					} else if r.name == "UnknownAnchor" {
+						if strings.Contains(err.Error(), "marker_XYZ") {
+							t.Errorf("error should not contain %q, got %q", "marker_XYZ", err.Error())
+						}
+					}
 				}
 			}
 
 			// Allocation check
 			var input []byte
 			if r.isFile {
-				tmpDir := t.TempDir()
-				path := filepath.Join(tmpDir, "config.yaml")
 				input = []byte(r.input)
 				if r.name == "LargeFile" {
-					input = make([]byte, 64*1024+1)
+					input = []byte("large: " + strings.Repeat("a", 64*1024))
 				}
-				_ = os.WriteFile(path, input, 0644) // not used but for consistency
 			} else {
 				if r.name == "ValidLarge" {
 					var b strings.Builder
@@ -181,13 +192,13 @@ func TestTS10_Read(t *testing.T) {
 
 			allocs := testing.AllocsPerRun(10, func() {
 				if r.isFile {
-					_, _ = ReadFile("nonexistent") // just to check allocs of the call
+					_, _ = ReadFile(path)
 				} else {
 					_, _ = ReadBytes(input)
 				}
 			})
 
-			if allocs > 2000 { // Baseline bound
+			if allocs > 240 { // Measured maximum: 119
 				t.Errorf("too many allocations in %s: %v", r.name, allocs)
 			}
 		})
