@@ -1,0 +1,44 @@
+[
+  {
+    "name": "MemberSort",
+    "input": "{\"\\u20ac\":\"Euro Sign\",\"\\r\":\"Carriage Return\",\"\\ufb33\":\"Hebrew Letter Dalet With Dagesh\",\"1\":\"One\",\"\\ud83d\\ude00\":\"Emoji: Grinning Face\",\"\\u0080\":\"Control\",\"\\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
+    "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}",
+    "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+  },
+  {
+    "name": "StringEscape",
+    "input": "{\"string\": \"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\"}",
+    "canonical": "{\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+    "sha256": "ca355c6f913afd1af684476e56a97043696f617c7e34c84221c5643b66842a63"
+  },
+  {
+    "name": "Literals",
+    "input": "{ \"literals\" : [ null , true , false ] }",
+    "canonical": "{\"literals\":[null,true,false]}",
+    "sha256": "f4e3f047101e0191aeb3ebf17ee457cbf687f209bd983dade6ac183f86d93797"
+  },
+  {
+    "name": "EscapedInput",
+    "input": "{\"html\":\"<>&\",\"ls\":\"\\u2028\\u2029\",\"del\":\"\\u007f\",\"slash\":\"a\\/b/c\",\"ctl\":\"\\b\\t\\n\\f\\r\",\"low\":\"\\u0001\\u001F\\u0000\"}",
+    "canonical": "{\"ctl\":\"\\b\\t\\n\\f\\r\",\"del\":\"\u007f\",\"html\":\"<>&\",\"low\":\"\\u0001\\u001f\\u0000\",\"ls\":\"\u2028\u2029\",\"slash\":\"a/b/c\"}",
+    "sha256": "90ca1a4f075e98436473e7f5259f2dd9132a97fc34de6244cce323bd804b2faf"
+  },
+  {
+    "name": "RawInput",
+    "input": "{\"s\":\"<>&\u2028\u2029\u007f/\"}",
+    "canonical": "{\"s\":\"<>&\u2028\u2029\u007f/\"}",
+    "sha256": "592085513e221810b4bf1c3596a8a2b4c8281f6497e05cfc9fce0287fc9545e5"
+  },
+  {
+    "name": "IntegerBounds",
+    "input": "\n\t{ \"c\" : 0 ,\n \"b\" : -9007199254740991 , \"a\" : 9007199254740991 }\n ",
+    "canonical": "{\"a\":9007199254740991,\"b\":-9007199254740991,\"c\":0}",
+    "sha256": "c998a09f338f0c1f7b58c1de5a2eee3a02bbbe40a8417c02b3175f1b901b283f"
+  },
+  {
+    "name": "NestedOrder",
+    "input": "{\"z\":{\"b\":1,\"a\":[3,{\"y\":true,\"x\":null}]},\"a\":\"s\"}",
+    "canonical": "{\"a\":\"s\",\"z\":{\"a\":[3,{\"x\":null,\"y\":true}],\"b\":1}}",
+    "sha256": "c1f8b2cf411c9b7b8b5a8efc8eae9f93ef9d2cf6d1d9660735a0b0390597e6c1"
+  }
+]
