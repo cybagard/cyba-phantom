@@ -34,7 +34,7 @@ type Doc struct {
 	Leaves    map[string]Leaf // Leaves hold scalar values.
 	Mappings  map[string]bool // Mappings holds the paths of mapping nodes; "" is the root
 	Sequences map[string]bool // Sequences holds the paths of sequence nodes
-	Lines     map[string]int  // Lines holds the line of each node by path
+	Lines     map[string]int  // Lines holds the line of each node by path; for a mapping entry, the line of the key
 }
 
 // ReadFile reads the configuration file at path and returns a Doc.
