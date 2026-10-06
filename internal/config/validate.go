@@ -181,7 +181,7 @@ func crossCheck(vals map[string]Value) []error {
 			}
 		}
 	}
-	// A bound that depends on a second key. A key that failed is not in vals, so the loader skips it.
+	// These checks compare a bound with the value of a second key. A key that failed is not in vals, so the loader skips it.
 	if b, ok := vals["limits.per_ip_burst"]; ok {
 		if r, ok := vals["limits.per_ip_rps"]; ok && b.Int < r.Int {
 			fail("limits.per_ip_burst", b, "the value must not be less than limits.per_ip_rps")
@@ -200,30 +200,39 @@ func crossCheck(vals map[string]Value) []error {
 	return errs
 }
 
-// intRange returns a check that the integer value is in the range min to max.
-func intRange(min, max int64) func(*loader, string) string {
+// intRange returns a check that the integer value is in the range lo to hi.
+func intRange(lo, hi int64) func(*loader, string) string {
 	return func(_ *loader, raw string) string {
-		if n, _ := strconv.ParseInt(raw, 10, 64); n < min || n > max {
-			if max == math.MaxInt64 {
-				return "the value must be at least " + strconv.FormatInt(min, 10)
+		if n, _ := strconv.ParseInt(raw, 10, 64); n < lo || n > hi {
+			if hi == math.MaxInt64 {
+				return "the value must be at least " + strconv.FormatInt(lo, 10)
 			}
-			return "the value must be in the range " + strconv.FormatInt(min, 10) + " to " + strconv.FormatInt(max, 10)
+			return "the value must be in the range " + strconv.FormatInt(lo, 10) + " to " + strconv.FormatInt(hi, 10)
 		}
 		return ""
 	}
 }
 
-// durRange returns a check that the duration value is in the range min to max.
-func durRange(min, max time.Duration) func(*loader, string) string {
+// durRange returns a check that the duration value is in the range lo to hi.
+func durRange(lo, hi time.Duration) func(*loader, string) string {
 	return func(_ *loader, raw string) string {
-		if d, _ := time.ParseDuration(raw); d < min || d > max {
-			return "the duration must be in the range " + min.String() + " to " + max.String()
+		if d, _ := time.ParseDuration(raw); d < lo || d > hi {
+			return "the duration must be in the range " + lo.String() + " to " + hi.String()
 		}
 		return ""
 	}
 }
 
-// originChars matches 1 to 128 bytes of letters, digits, and . _ / -
+// checkPositiveDuration rejects a duration that is zero or less. It runs for every value of the key.
+// The range 15m to 168h is a cross-check that applies only if bundle.fetch_url is set.
+func checkPositiveDuration(_ *loader, raw string) string {
+	if d, _ := time.ParseDuration(raw); d <= 0 {
+		return "the duration must be greater than 0"
+	}
+	return ""
+}
+
+// originChars matches 1 to 128 bytes. Each byte is a letter, a digit, or one of these marks: dot, underscore, slash, hyphen.
 var originChars = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,128}$`)
 
 func checkOrigin(_ *loader, raw string) string {

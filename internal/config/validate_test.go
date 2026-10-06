@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -600,7 +601,11 @@ func TestTU10_URLOutput(t *testing.T) {
 // on a test host, so the call sets it through the environment.
 func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	t.Helper()
-	env = append([]string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + filepath.Join(testDir, "htpasswd")}, env...)
+	const htpasswdEnv = "CANARY_OPS_BASIC_AUTH_HTPASSWD"
+	// The loader rejects a variable that occurs two times, so the default is set only if the caller does not set it.
+	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
+		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
+	}
 	return Load(writeConfig(t, file), env)
 }
 
@@ -615,6 +620,19 @@ type bound struct {
 var (
 	longOrigin = strings.Repeat("a", 128)
 	fetchURL   = "CANARY_BUNDLE_FETCH_URL=https://bundle.example/current"
+	// groupWritable is a file in a temp dir with mode 0660. The other bad values of the htpasswd row
+	// are a relative path, an unclean path, and a missing file. All of them go through the CANARY_ variable.
+	groupWritable = func() string {
+		p := filepath.Join(testDir, "group-writable")
+		err := os.WriteFile(p, nil, 0o600)
+		if err == nil {
+			err = os.Chmod(p, 0o660)
+		}
+		if err != nil {
+			panic(err)
+		}
+		return p
+	}()
 )
 
 // scalarBounds mirrors the bounds table for each scalar key (min and max pass; min-1 and max+1 fail).
@@ -622,12 +640,14 @@ var scalarBounds = []bound{
 	{key: "listen.http", pass: []string{":1", ":65535"}, fail: []string{":0", ":65536", "x"}},
 	{key: "listen.https", pass: []string{":1", ":65535"}, fail: []string{":0", ":65536", ":80"}},
 	{key: "ops.listen", pass: []string{"127.0.0.1:1", "[::1]:65535", "10.0.0.1:9443"}, fail: []string{"127.0.0.1:0", "127.0.0.1:65536", "0.0.0.0:9443", "8.8.8.8:9443", "localhost:9443"}},
+	{key: "ops.basic_auth_htpasswd", pass: []string{filepath.Join(testDir, "htpasswd")}, fail: []string{"htpasswd", testDir + "/./htpasswd", filepath.Join(testDir, "missing"), groupWritable}},
 	{key: "acme.email", pass: []string{"a@b.example"}, fail: []string{"a@b.example\nBcc: c@d.example", "a@b.example, c@d.example", ""}},
 	{key: "acme.ca", pass: []string{"letsencrypt", "letsencrypt-staging", "https://ca.example/dir"}, fail: []string{"http://ca.example/dir", "https://u:p@ca.example/", "https://169.254.169.254/"}},
 	{key: "acme.cache_dir", pass: []string{"/var/lib/agent-canary/certs"}, fail: []string{"/var/lib/other", "var/lib/agent-canary", "/var/lib/agent-canary/../x"}},
 	{key: "bundle.path", pass: []string{"/var/lib/agent-canary/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/agent-canary/b/../../x"}},
 	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "0s", "-1h"}, with: []string{fetchURL}},
+	{key: "bundle.fetch_interval", pass: []string{"1s"}, fail: []string{"0s", "-1h"}}, // The fetch is off: only the check for a value > 0 applies.
 	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
 	{key: "limits.body_bytes", pass: []string{"1", "65536"}, fail: []string{"0", "65537"}},
 	{key: "limits.header_bytes", pass: []string{"1", "16384"}, fail: []string{"0", "16385"}},
@@ -737,7 +757,7 @@ func TestTU10_Overrides(t *testing.T) {
 	}
 	for _, k := range keys {
 		b, ok := rowOf[k.path]
-		if !ok && k.path != "ops.basic_auth_htpasswd" {
+		if !ok {
 			t.Errorf("%s has no row in scalarBounds", k.path)
 			continue
 		}
@@ -811,7 +831,8 @@ func TestTS10_NewScalars(t *testing.T) {
 		{"YAML 1.1 bool on", "privacy:\n  include_ip: on\n", "privacy.include_ip", "the value is not a valid bool"},
 		{"legacy octal", "limits:\n  max_conns: 0755\n", "limits.max_conns", "decimal literal only"},
 		{"quoted int", "limits:\n  max_conns: \"100\"\n", "limits.max_conns", "the value is not a valid int"},
-		{"float into int", "limits:\n  body_bytes: 1.5\n", "limits.body_bytes", "the value is not a valid byte size"},
+		{"float into int", "limits:\n  max_conns: 1.5\n", "limits.max_conns", "the value is not a valid int"},
+		{"float into byte size", "limits:\n  body_bytes: 1.5\n", "limits.body_bytes", "the value is not a valid byte size"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {

@@ -64,7 +64,7 @@ func writeConfig(t *testing.T, body string) string {
 	return cfg
 }
 
-// base holds the required keys. A file value that a test adds after it starts at line 6.
+// base has 4 lines. Thus, a section line that a test adds after base is on line 5, and its first key is on line 6.
 const (
 	tlogOrigin = "tlog:\n  origin: test/origin\n"
 	base       = "acme:\n  email: sec@example.com\n" + tlogOrigin
