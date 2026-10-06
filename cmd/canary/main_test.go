@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,7 +35,15 @@ func writeFile(t *testing.T, body string) string {
 	return p
 }
 
-const valid = "acme:\n  email: sec@example.com\n  ca: \"https://user:pw@example.invalid\"\n"
+// validBody returns a config file that passes all validators. The htpasswd file must exist.
+func validBody(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "htpasswd")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\n"
+}
 
 // TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
 func TestTS10_CheckWiring(t *testing.T) {
@@ -62,7 +71,7 @@ func TestTS10_CheckWiring(t *testing.T) {
 
 // TestTS10_CheckNoDial checks that the load of a valid file calls no Dialer and no Resolver (SEC-11).
 func TestTS10_CheckNoDial(t *testing.T) {
-	if _, err := config.LoadWith(writeFile(t, valid), nil, config.Net{Dialer: failNet{t}, Resolver: failNet{t}}); err != nil {
+	if _, err := config.LoadWith(writeFile(t, validBody(t)), nil, config.Net{Dialer: failNet{t}, Resolver: failNet{t}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (noNet{}).DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
@@ -74,16 +83,18 @@ func TestTS10_CheckNoDial(t *testing.T) {
 }
 
 // TestTS10_CheckExec runs the binary: exit 0 for a valid file, non-zero for an invalid file
-// with the key and the source in stderr (FR-12), and no secret marker in the output (T-S-10).
+// with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
+// URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
 func TestTS10_CheckExec(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "canary")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	const marker = "SECRET-MARKER-7c1f9a"
-	run := func(file string) (code int, stdout, stderr string) {
+	run := func(file string, env ...string) (code int, stdout, stderr string) {
 		var so, se strings.Builder
 		cmd := exec.Command(bin, "--check", file)
+		cmd.Env = append(os.Environ(), env...)
 		cmd.Stdout, cmd.Stderr = &so, &se
 		err := cmd.Run()
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -94,11 +105,18 @@ func TestTS10_CheckExec(t *testing.T) {
 		return code, so.String(), se.String()
 	}
 	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
-	code, so, se := run(writeFile(t, valid))
+	code, so, se := run(writeFile(t, validBody(t)))
 	if code != 0 {
 		t.Errorf("valid file: exit %d, stderr %q", code, se)
 	}
 	outs := so + se
+	code, so, se = run(writeFile(t, validBody(t)), "CANARY_ACME_CA=not a url")
+	if code == 0 {
+		t.Error("acme.ca not a URL: exit 0")
+	}
+	if !strings.Contains(se, "acme.ca") {
+		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
+	}
 	code, so, se = run(bad)
 	if code == 0 {
 		t.Error("invalid file: exit 0")
@@ -108,10 +126,10 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("invalid file: stderr %q lacks %q", se, want)
 		}
 	}
-	// The key table has no secret key yet. The value has a wrong type, so the loader prints it.
-	// The marker is in the user information of a URL-like value, so the printed value must
-	// show REDACTED@ and not the marker.
-	code, so, se = run(writeFile(t, "acme:\n  email: sec@example.com\n  ca: !!int \"https://u:"+marker+"@h.example\"\n"))
+	// The key table has no secret key yet, and the loader never prints the value of a URL key.
+	// The email value has a wrong type, so the loader prints it. The marker is in the user
+	// information of a URL-like text, so the printed value must show REDACTED@ and not the marker.
+	code, so, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
 	if code == 0 {
 		t.Error("wrong type: exit 0")
 	}

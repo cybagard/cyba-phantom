@@ -16,7 +16,8 @@ import (
 // on the forms below. The local name of an import is the alias if there is one, so nn is
 // the local name of net in nn "net". The test fails on:
 //   - a selector X.Y where X is the local name of the net import and Y is not Conn, outside
-//     the declaration of the function SystemNet;
+//     the declaration of the function SystemNet. One exemption: net.SplitHostPort in the
+//     file validate.go. It parses a string and opens no socket;
 //   - a call expression whose function is the identifier SystemNet, outside the declaration
 //     of the function Load;
 //   - a dot import of net or syscall;
@@ -80,7 +81,8 @@ func TestTS10_NoSystemNetwork(t *testing.T) {
 					}
 					switch s := x.Sel.Name; local[id.Name] {
 					case "net":
-						if s != "Conn" && !in("SystemNet") {
+						parseOnly := name == "validate.go" && s == "SplitHostPort"
+						if s != "Conn" && !parseOnly && !in("SystemNet") {
 							t.Errorf("%s: uses net.%s", fset.Position(x.Pos()), s)
 						}
 					case "syscall":
