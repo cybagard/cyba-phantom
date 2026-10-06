@@ -1,4 +1,5 @@
 package config
+
 import (
 	"fmt"
 	"os"
@@ -9,10 +10,10 @@ import (
 )
 
 type mockFileInfo struct {
-	name    string
-	size    int64
-	mode    os.FileMode
-	uid     uint32
+	name string
+	size int64
+	mode os.FileMode
+	uid  uint32
 }
 
 func (m *mockFileInfo) Name() string       { return m.name }
@@ -22,7 +23,6 @@ func (m *mockFileInfo) ModTime() time.Time { return time.Time{} }
 func (m *mockFileInfo) IsDir() bool        { return m.mode.IsDir() }
 func (m *mockFileInfo) Sys() interface{}   { return nil }
 func (m *mockFileInfo) Uid() uint32        { return m.uid }
-
 
 func TestTS10_FileSize(t *testing.T) {
 	// T-S-10: > 64 KiB (rejected before parse)
@@ -211,10 +211,9 @@ func TestTS10_WrongOwner(t *testing.T) {
 	mock := &mockFileInfo{
 		name: "config.yaml",
 		size: 8,
-		mode: 0, // Regular file
+		mode: 0,     // Regular file
 		uid:  12345, // Not 0 and not euid usually
 	}
-
 
 	_, err := ReadFile(path, ReadOptions{
 		Stat: func(p string) (os.FileInfo, error) {
