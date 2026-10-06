@@ -52,6 +52,8 @@ func TestTU10_Listen(t *testing.T) {
 		{"numeric last label", "a.1:80", "host name"},
 		{"single digit", "0:80", "host name"},
 		{"digits in a label", "a1.b2:80", ""},
+		{"hex last label", "127.0.0.0x1:80", "host name"},
+		{"hex name", "0xcafe.example.com:80", ""},
 		{"url", "http://h:80", "host"},
 	}, func(s string) string { return checkListen(nil, s) })
 }
@@ -125,6 +127,9 @@ func TestTU10_OpsListenOverlap(t *testing.T) {
 		{"host name, same port", "listen:\n  http: \"localhost:9443\"\n", "ops.listen"},
 		{"host name https, same port", "listen:\n  https: \"example.com:9443\"\n", "ops.listen"},
 		{"numeric host, same port", "listen:\n  http: \"0:9443\"\n", "listen.http"},
+		{"zoned unspecified http", "listen:\n  http: \"[::%lo0]:9443\"\n", "ops.listen"},
+		{"zoned unspecified https", "listen:\n  https: \"[::%lo0]:9443\"\n", "ops.listen"},
+		{"zoned unspecified, other port", "listen:\n  https: \"[::%lo0]:8443\"\n", ""},
 		{"host name, other port", "listen:\n  http: \"localhost:8443\"\n", ""},
 	}
 	for _, r := range rows {
@@ -244,6 +249,19 @@ func TestTU10_URL(t *testing.T) {
 		{"hex first label", "https://0x7f.1/", []string{"https"}, "number"},
 		{"numeric last label", "https://a.1/", []string{"https"}, "number"},
 		{"numeric host with dot at end", "https://2852039166./", []string{"https"}, "number"},
+		{"hex last label", "https://169.254.169.0xfe/", []string{"https"}, "number"},
+		{"hex last label loopback", "https://127.0.0.0x1/", []string{"https"}, "number"},
+		{"hex last label upper case", "https://10.0.0.0XA/", []string{"https"}, "number"},
+		{"hex last label, empty hex part", "https://10.0.0.0x/", []string{"https"}, "number"},
+		{"hex name 0x0.st", "https://0x0.st/", []string{"https"}, ""},
+		{"hex name 0x.org", "https://0x.org/", []string{"https"}, ""},
+		{"hex name 0xcafe", "https://0xcafe.example.com/", []string{"https"}, ""},
+		{"digit name", "https://1password.com/", []string{"https"}, ""},
+		{"full-width digits and dots", "https://１６９．２５４．１６９．２５４/", []string{"https"}, "ASCII"},
+		{"ideographic full stop", "https://169。254。169。254/", []string{"https"}, "ASCII"},
+		{"full-width unspecified", "https://０．０．０．０/", []string{"https"}, "ASCII"},
+		{"percent-encoded full-width", "https://%EF%BC%91%EF%BC%96%EF%BC%99.254.169.254/", []string{"https"}, "ASCII"},
+		{"non-ASCII name", "https://例え.jp/", []string{"https"}, "ASCII"},
 		{"name with digits", "https://a1.example/", []string{"https"}, ""},
 		{"upper case name", "https://CA.Example:443/", []string{"https"}, ""},
 	}
@@ -273,6 +291,7 @@ func TestTU10_CA(t *testing.T) {
 		{"user", "https://u:p@ca.example/dir", "user information"},
 		{"port leading zero", "https://ca.example:0443/dir", "decimal"},
 		{"number host", "https://2852039166/dir", "number"},
+		{"full-width host", "https://１６９．２５４．１６９．２５４/dir", "ASCII"},
 	}, func(s string) string { return checkCA(nil, s) })
 }
 
@@ -393,7 +412,7 @@ func TestTU10_StatePath(t *testing.T) {
 	}
 }
 
-// TestTU10_Htpasswd checks the htpasswd file rules and that the error names the file and the rule.
+// TestTU10_Htpasswd checks the htpasswd file rules and that the error detail is fixed text.
 func TestTU10_Htpasswd(t *testing.T) {
 	tr := newTree(t)
 	file := func(name string, mode os.FileMode) string {

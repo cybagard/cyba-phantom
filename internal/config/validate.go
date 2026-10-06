@@ -35,11 +35,22 @@ func lastLabel(host string) string {
 	return host[strings.LastIndexByte(host, '.')+1:]
 }
 
-// numericLabel reports whether the last label of host is only digits.
+// numericLabel reports whether the last label of host is a number. A number is only
+// decimal digits, or 0x or 0X with hex digits only (the hex part can be empty).
 // Such a host is a number, not a name. Some resolvers read it as an IPv4 address.
 func numericLabel(host string) bool {
 	l := lastLabel(host)
-	return l != "" && strings.IndexFunc(l, func(r rune) bool { return r < '0' || r > '9' }) < 0
+	if l == "" {
+		return false
+	}
+	if len(l) >= 2 && l[0] == '0' && (l[1] == 'x' || l[1] == 'X') {
+		return strings.IndexFunc(l[2:], func(r rune) bool { return !isHex(r) }) < 0
+	}
+	return strings.IndexFunc(l, func(r rune) bool { return r < '0' || r > '9' }) < 0
+}
+
+func isHex(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F'
 }
 
 // hostPort is a parsed host:port value.
@@ -77,8 +88,10 @@ func parseHostPort(s string) (hostPort, string) {
 	return hp, ""
 }
 
-// wildcard reports whether the address binds all interfaces.
-func (h hostPort) wildcard() bool { return h.host == "" || h.addr.Unmap().IsUnspecified() }
+// wildcard reports whether the address binds all interfaces. A zone does not change this.
+func (h hostPort) wildcard() bool {
+	return h.host == "" || h.addr.WithZone("").Unmap().IsUnspecified()
+}
 
 // named reports whether the host is a name. The loader does not resolve names.
 func (h hostPort) named() bool { return h.host != "" && !h.addr.IsValid() }
@@ -92,7 +105,7 @@ func (h hostPort) overlaps(o hostPort) bool {
 		return true
 	}
 	if h.addr.IsValid() && o.addr.IsValid() {
-		return h.addr.Unmap() == o.addr.Unmap()
+		return h.addr.WithZone("").Unmap() == o.addr.WithZone("").Unmap()
 	}
 	return strings.EqualFold(h.host, o.host)
 }
@@ -210,6 +223,12 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		}
 	}
 	host := u.Hostname()
+	// The HTTP client can map a non-ASCII host to an IP address before it connects.
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return nil, "the URL host must be ASCII"
+		}
+	}
 	if a, err := netip.ParseAddr(host); err == nil {
 		a0 := a.Unmap()
 		switch {
@@ -220,7 +239,7 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		case a0.IsUnspecified():
 			return nil, "the URL host must not be unspecified"
 		}
-	} else if numericLabel(host) || strings.HasPrefix(strings.ToLower(host), "0x") {
+	} else if numericLabel(host) {
 		return nil, "the URL host is a number but not an IP address in dotted form"
 	}
 	return u, ""
