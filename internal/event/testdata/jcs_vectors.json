@@ -7,7 +7,7 @@
   },
   {
     "name": "StringEscape",
-    "input": "{\"string\":\"\\u20ac$\\u000F\\u000aA'B\\\"\\\\\\\\\\\"\\/\"}",
+    "input": "{\"string\": \"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\"}",
     "canonical": "{\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
     "sha256": "ca355c6f913afd1af684476e56a97043696f617c7e34c84221c5643b66842a63"
   },

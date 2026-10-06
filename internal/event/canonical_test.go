@@ -114,41 +114,42 @@ func TestTU06_Encode(t *testing.T) {
 // bs is one backslash. It starts a JSON escape in the inputs below.
 const bs = `\`
 
-type rejectCase struct{ name, in string }
+type rejectCase struct{ name, in, rule string }
 
 var rejects = []rejectCase{
-	{"bad utf-8 in value", "{\"a\":\"\xff\"}"},
-	{"bad utf-8 in name", "{\"\xff\":1}"},
-	{"truncated utf-8", "{\"a\":\"\xc3\"}"},
-	{"high surrogate", `{"a":"\ud800"}`},
-	{"low surrogate", `{"a":"\udc00"}`},
-	{"surrogate in name", `{"\ud800":1}`},
-	{"high surrogate, no low", `{"a":"\ud800A"}`},
-	{"duplicate name", `{"a":1,"a":2}`},
-	{"duplicate name, escaped", `{"a":1,"` + bs + `u0061":2}`},
-	{"duplicate name, nested", `{"o":{"b":1,"b":2}}`},
-	{"duplicate name, nested and escaped", `{"o":{"b":1,"` + bs + `u0062":2}}`},
-	{"duplicate name, raw and escaped non-BMP", "{\"\U0001F600\":1,\"\\ud83d\\ude00\":2}"},
-	{"1.0", `{"a":1.0}`},
-	{"1e2", `{"a":1e2}`},
-	{"1E2", `{"a":1E2}`},
-	{"float in array", `{"a":[1,2.5]}`},
-	{"-0", `{"a":-0}`},
-	{"-0.0", `{"a":-0.0}`},
-	{"2^53", `{"a":9007199254740992}`},
-	{"-2^53", `{"a":-9007199254740992}`},
-	{"30 digits", `{"a":` + strings.Repeat("9", 30) + `}`},
-	{"array", `[]`},
-	{"string", `"s"`},
-	{"number", `1`},
-	{"null", `null`},
-	{"empty", ``},
-	{"two objects", `{"a":1} {"b":2}`},
-	{"text after object", `{"a":1}x`},
-	{"truncated", `{"a":`},
+	{"bad utf-8 in value", "{\"a\":\"\xff\"}", "invalid UTF-8"},
+	{"bad utf-8 in name", "{\"\xff\":1}", "invalid UTF-8"},
+	{"truncated utf-8", "{\"a\":\"\xc3\"}", "invalid UTF-8"},
+	{"high surrogate", `{"a":"\ud800"}`, "malformed JSON"},
+	{"low surrogate", `{"a":"\udc00"}`, "malformed JSON"},
+	{"surrogate in name", `{"\ud800":1}`, "malformed JSON"},
+	{"high surrogate, no low", `{"a":"\ud800A"}`, "malformed JSON"},
+	{"duplicate name", `{"a":1,"a":2}`, "duplicate member name"},
+	{"duplicate name, escaped", `{"a":1,"` + bs + `u0061":2}`, "duplicate member name"},
+	{"duplicate name, nested", `{"o":{"b":1,"b":2}}`, "duplicate member name"},
+	{"duplicate name, nested and escaped", `{"o":{"b":1,"` + bs + `u0062":2}}`, "duplicate member name"},
+	{"duplicate name, raw and escaped non-BMP", "{\"\U0001F600\":1,\"\\ud83d\\ude00\":2}", "duplicate member name"},
+	{"1.0", `{"a":1.0}`, "not an integer"},
+	{"1e2", `{"a":1e2}`, "not an integer"},
+	{"1E2", `{"a":1E2}`, "not an integer"},
+	{"float in array", `{"a":[1,2.5]}`, "not an integer"},
+	{"-0", `{"a":-0}`, "negative zero"},
+	{"-0.0", `{"a":-0.0}`, "not an integer"},
+	{"2^53", `{"a":9007199254740992}`, "integer outside"},
+	{"-2^53", `{"a":-9007199254740992}`, "integer outside"},
+	{"30 digits", `{"a":` + strings.Repeat("9", 30) + `}`, "integer outside"},
+	{"array", `[]`, "top level is not an object"},
+	{"string", `"s"`, "top level is not an object"},
+	{"number", `1`, "top level is not an object"},
+	{"null", `null`, "top level is not an object"},
+	{"empty", ``, "top level is not an object"},
+	{"two objects", `{"a":1} {"b":2}`, "data after the object"},
+	{"text after object", `{"a":1}x`, "data after the object"},
+	{"truncated", `{"a":`, "malformed JSON"},
 }
 
-// T-S-12: every input outside the domain gives an error and no bytes.
+// T-S-12: every input outside the domain gives an error and no bytes. The
+// error text names the rule.
 func TestTS12_Reject(t *testing.T) {
 	for _, c := range rejects {
 		t.Run(c.name, func(t *testing.T) {
@@ -156,6 +157,9 @@ func TestTS12_Reject(t *testing.T) {
 			out, err := Canonical(in)
 			if err == nil || out != nil {
 				t.Fatalf("got %q, %v", out, err)
+			}
+			if !strings.Contains(err.Error(), c.rule) {
+				t.Errorf("error %q does not name the rule %q", err, c.rule)
 			}
 			if string(in) != c.in {
 				t.Error("input changed")
@@ -186,19 +190,27 @@ func TestTS12_ReplacementCharKept(t *testing.T) {
 }
 
 func BenchmarkCanonical(b *testing.B) {
-	for _, size := range []int{64 << 10, 1 << 20} {
-		// One object of short members. Its text is about size bytes.
+	for _, c := range []struct {
+		name, member string
+		size         int
+	}{
+		{"members", `"k%07[1]d":"value %[1]d"`, 64 << 10},
+		{"members", `"k%07[1]d":"value %[1]d"`, 1 << 20},
+		// Worst case: the shortest members. Each input byte costs most here.
+		{"short", `"%[1]x":1`, 1 << 20},
+	} {
+		// The input is one object of members. Its text is about size bytes.
 		var sb strings.Builder
 		sb.WriteByte('{')
-		for i := 0; sb.Len() < size; i++ {
+		for i := 0; sb.Len() < c.size; i++ {
 			if i > 0 {
 				sb.WriteByte(',')
 			}
-			fmt.Fprintf(&sb, `"k%07d":"value %d"`, i, i)
+			fmt.Fprintf(&sb, c.member, i)
 		}
 		sb.WriteByte('}')
 		in := []byte(sb.String())
-		b.Run(fmt.Sprintf("%dKiB", len(in)>>10), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%s/%dKiB", c.name, len(in)>>10), func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(in)))
 			for range b.N {

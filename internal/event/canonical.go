@@ -3,8 +3,9 @@
 // The canonical form is the RFC 8785 (JCS) text of one JSON object. A third
 // party who has the record can build the same bytes and the same hash. For
 // this reason the package never repairs a value. It checks the input first and
-// returns an error when a value is outside the strict domain. It uses only the
-// standard library packages encoding/json/v2 and encoding/json/jsontext.
+// returns an error when a value is outside the strict domain. For JSON, it uses
+// only the standard library packages encoding/json/v2 and
+// encoding/json/jsontext.
 package event
 
 import (
@@ -44,7 +45,7 @@ func Canonical(raw []byte) ([]byte, error) {
 	// Canonicalize works in place. Copy first.
 	v := jsontext.Value(bytes.Clone(raw))
 	if err := v.Canonicalize(strict...); err != nil {
-		return nil, errRule("canonicalize failed", 0)
+		return nil, errors.New("event: canonicalize failed")
 	}
 	return v, nil
 }
@@ -55,7 +56,7 @@ func Canonical(raw []byte) ([]byte, error) {
 func Encode(v any) ([]byte, error) {
 	b, err := json.Marshal(v, strict...)
 	if err != nil {
-		return nil, errRule("marshal failed", 0)
+		return nil, errors.New("event: marshal failed")
 	}
 	return Canonical(b)
 }
@@ -65,7 +66,10 @@ func errRule(rule string, off int64) error {
 }
 
 // check walks the token stream of raw and rejects the first value that is
-// outside the domain.
+// outside the domain. The decoder gives one error kind for a lone surrogate,
+// for too deep nesting and for other bad syntax, and the public API of jsontext
+// does not tell them apart. For this reason the catch-all rule "malformed JSON"
+// covers all three.
 func check(raw []byte) error {
 	if !utf8.Valid(raw) {
 		off := 0
@@ -88,7 +92,7 @@ func check(raw []byte) error {
 		case errors.Is(err, jsontext.ErrDuplicateName):
 			return errRule("duplicate member name", dec.InputOffset())
 		case err != nil:
-			return errRule("malformed JSON or lone surrogate", dec.InputOffset())
+			return errRule("malformed JSON", dec.InputOffset())
 		case tok.Kind() == '0':
 			if rule := numberRule(tok.String()); rule != "" {
 				return errRule(rule, dec.InputOffset())
