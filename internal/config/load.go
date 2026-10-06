@@ -264,15 +264,19 @@ func readError(path string, err error, table []key) error {
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 
-// userinfo matches all text from the first "//" to the last "@" in the value. A more
-// precise rule can miss a password form, so the loader accepts that it removes too much.
-var userinfo = regexp.MustCompile(`(?s)//.*@`)
+// userinfo matches a start and all text after it to the last "@" in the value. The start
+// is the first of these in the value: a ":" with all slashes, backslashes, and white space
+// after it, or two characters that are each a slash or a backslash. Thus the rule also
+// removes a password after a backslash, after one slash or no slash, and in "user:password@host".
+// A more precise rule can miss a password form, so the loader accepts that it removes too much.
+var userinfo = regexp.MustCompile(`(?s)(:[/\\\s]*|[/\\]{2}).*@`)
 
-// esc is the one escaper for printed text (SEC-07). It replaces the text from "//" to
-// the last "@" with "//REDACTED@", cuts the text to max bytes on a rune boundary (max < 0:
-// keep the last -max bytes), and escapes control characters, ANSI sequences, and non-ASCII runes.
+// esc is the one escaper for printed text (SEC-07). It keeps the start that userinfo matches
+// and replaces the text after it, to the last "@", with "REDACTED@". Then it cuts the text to
+// max bytes on a rune boundary (max < 0: keep the last -max bytes), and escapes control
+// characters, ANSI sequences, and non-ASCII runes.
 func esc(s string, max int) string {
-	s = userinfo.ReplaceAllString(s, "//REDACTED@")
+	s = userinfo.ReplaceAllString(s, "${1}REDACTED@")
 	if n := len(s) + max; max < 0 && n > 0 {
 		for n < len(s) && !utf8.RuneStart(s[n]) {
 			n++
