@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"maps"
+	"math"
 	"net"
 	"regexp"
 	"slices"
@@ -41,8 +42,8 @@ type key struct {
 	check  func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
 }
 
-// keys is the production key table (04 section 3). Later changes add the
-// other sections.
+// keys is the production key table (04 section 3). It holds the scalar keys. The list
+// keys and the keys that name secrets are not in it yet.
 var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
@@ -51,6 +52,26 @@ var keys = []key{
 	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/agent-canary/certs", check: checkStatePath},
+	{path: "bundle.path", kind: kindPath, def: "/var/lib/agent-canary/bundle/current.cbnd", check: checkStatePath},
+	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
+	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: checkPositiveDuration}, // The bounds 15m to 7d are a cross-check: they apply if fetch_url is set.
+	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
+	{path: "limits.body_bytes", kind: kindBytes, def: "65536", check: intRange(1, 65536)},
+	{path: "limits.header_bytes", kind: kindBytes, def: "16384", check: intRange(1, 16384)},
+	{path: "limits.per_ip_rps", kind: kindInt, def: "50", check: intRange(1, 1000)},
+	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)}, // The lower bound is per_ip_rps: a cross-check.
+	{path: "limits.queue_depth", kind: kindInt, def: "4096", check: intRange(1, 8192)},
+	{path: "store.path", kind: kindPath, def: "/var/lib/agent-canary/events.db", check: checkStatePath},
+	{path: "store.max_bytes", kind: kindBytes, def: "10737418240", check: intRange(268435456, math.MaxInt64)},
+	{path: "store.retention_days.ip", kind: kindInt, def: "7", check: intRange(1, 7)},
+	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
+	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)}, // The lower bound is retention_days.raw: a cross-check.
+	{path: "tlog.dir", kind: kindPath, def: "/var/lib/agent-canary/tlog", check: checkStatePath},
+	{path: "tlog.origin", kind: kindString, req: true, check: checkOrigin},
+	{path: "tlog.checkpoint_interval", kind: kindDuration, def: "1h", check: durRange(time.Minute, 24*time.Hour)},
+	{path: "alerts.min_band", kind: kindString, def: "agent-likely", check: checkMinBand},
+	{path: "privacy.store_body_prefix", kind: kindBool, def: "true"},
+	{path: "privacy.include_ip", kind: kindBool, def: "false"},
 }
 
 // Value is one effective config value.

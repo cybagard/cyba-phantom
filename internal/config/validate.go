@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -179,7 +181,81 @@ func crossCheck(vals map[string]Value) []error {
 			}
 		}
 	}
+	// These checks compare a bound with the value of a second key. A key that failed is not in vals, so the loader skips it.
+	if b, ok := vals["limits.per_ip_burst"]; ok {
+		if r, ok := vals["limits.per_ip_rps"]; ok && b.Int < r.Int {
+			fail("limits.per_ip_burst", b, "the value must not be less than limits.per_ip_rps")
+		}
+	}
+	if e, ok := vals["store.retention_days.events"]; ok {
+		if r, ok := vals["store.retention_days.raw"]; ok && e.Int < r.Int {
+			fail("store.retention_days.events", e, "the value must not be less than store.retention_days.raw")
+		}
+	}
+	if u, ok := vals["bundle.fetch_url"]; ok && u.Str != "" {
+		if i, ok := vals["bundle.fetch_interval"]; ok && (i.Dur < 15*time.Minute || i.Dur > 7*24*time.Hour) {
+			fail("bundle.fetch_interval", i, "the duration must be in the range 15m to 168h if bundle.fetch_url is set")
+		}
+	}
 	return errs
+}
+
+// intRange returns a check that the integer value is in the range lo to hi.
+func intRange(lo, hi int64) func(*loader, string) string {
+	return func(_ *loader, raw string) string {
+		if n, _ := strconv.ParseInt(raw, 10, 64); n < lo || n > hi {
+			if hi == math.MaxInt64 {
+				return "the value must be at least " + strconv.FormatInt(lo, 10)
+			}
+			return "the value must be in the range " + strconv.FormatInt(lo, 10) + " to " + strconv.FormatInt(hi, 10)
+		}
+		return ""
+	}
+}
+
+// durRange returns a check that the duration value is in the range lo to hi.
+func durRange(lo, hi time.Duration) func(*loader, string) string {
+	return func(_ *loader, raw string) string {
+		if d, _ := time.ParseDuration(raw); d < lo || d > hi {
+			return "the duration must be in the range " + lo.String() + " to " + hi.String()
+		}
+		return ""
+	}
+}
+
+// checkPositiveDuration rejects a duration that is zero or less. It runs for every value of the key.
+// The range 15m to 168h is a cross-check that applies only if bundle.fetch_url is set.
+func checkPositiveDuration(_ *loader, raw string) string {
+	if d, _ := time.ParseDuration(raw); d <= 0 {
+		return "the duration must be greater than 0"
+	}
+	return ""
+}
+
+// originChars matches 1 to 128 bytes. Each byte is a letter, a digit, or one of these marks: dot, underscore, slash, hyphen.
+var originChars = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,128}$`)
+
+func checkOrigin(_ *loader, raw string) string {
+	if !originChars.MatchString(raw) {
+		return "the origin must be 1 to 128 bytes of A-Z a-z 0-9 . _ / -"
+	}
+	return ""
+}
+
+func checkMinBand(_ *loader, raw string) string {
+	if raw != "agent-likely" && raw != "agent-confirmed" {
+		return "the band must be agent-likely or agent-confirmed"
+	}
+	return ""
+}
+
+// checkFetchURL accepts an empty value (the fetch is off) or an https URL.
+func checkFetchURL(_ *loader, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	_, d := parseURL(raw, "https")
+	return d
 }
 
 func checkEmail(_ *loader, raw string) string {
@@ -272,25 +348,25 @@ func checkCA(_ *loader, raw string) string {
 type Endpoint struct{ Scheme, Host, Port string }
 
 // AllowList returns the outbound endpoints that the config allows. In this version
-// the list holds the acme.ca endpoint.
+// the list holds the acme.ca endpoint, and the bundle.fetch_url endpoint if it is set.
 func (c *Config) AllowList() []Endpoint {
-	v, ok := c.values["acme.ca"]
-	if !ok {
-		return nil
+	var list []Endpoint
+	for _, p := range []string{"acme.ca", "bundle.fetch_url"} {
+		raw := c.values[p].Str
+		if dir, ok := caDirectories[raw]; ok && p == "acme.ca" {
+			raw = dir
+		}
+		u, d := parseURL(raw, "https")
+		if d != "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = "443"
+		}
+		list = append(list, Endpoint{Scheme: u.Scheme, Host: strings.ToLower(u.Hostname()), Port: port})
 	}
-	raw := v.Str
-	if dir, ok := caDirectories[raw]; ok {
-		raw = dir
-	}
-	u, d := parseURL(raw, "https")
-	if d != "" {
-		return nil
-	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
-	return []Endpoint{{Scheme: u.Scheme, Host: strings.ToLower(u.Hostname()), Port: port}}
+	return list
 }
 
 // checkPathForm checks that p is absolute, clean, and free of NUL.

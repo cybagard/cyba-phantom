@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type row struct {
@@ -315,7 +317,7 @@ func TestTU10_AllowList(t *testing.T) {
 			if r.file != "" {
 				body += strings.TrimPrefix(r.file, "acme:\n")
 			}
-			c, err := Load(writeConfig(t, body), nil)
+			c, err := Load(writeConfig(t, body+tlogOrigin), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -565,7 +567,7 @@ func TestTU10_URLOutput(t *testing.T) {
 		"https://[fe81::" + secret + "]/",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			_, err := Load(writeConfig(t, "acme:\n  email: sec@example.com\n  ca: \""+ca+"\"\n"), nil)
+			_, err := Load(writeConfig(t, "acme:\n  email: sec@example.com\n  ca: \""+ca+"\"\n"+tlogOrigin), nil)
 			if err == nil || !strings.Contains(err.Error(), "acme.ca") {
 				t.Fatalf("got %v", err)
 			}
@@ -583,14 +585,261 @@ func TestTU10_URLOutput(t *testing.T) {
 		}
 	})
 	t.Run("email keeps the at sign", func(t *testing.T) {
-		_, err := Load(writeConfig(t, "acme:\n  email: \"ops@corp.com, b@corp.com\"\n"), nil)
+		_, err := Load(writeConfig(t, "acme:\n  email: \"ops@corp.com, b@corp.com\"\n"+tlogOrigin), nil)
 		if err == nil || !strings.Contains(err.Error(), `value "ops@corp.com, b@corp.com"`) {
 			t.Errorf("got %v", err)
 		}
 	})
 	t.Run("valid email passes", func(t *testing.T) {
-		if _, err := Load(writeConfig(t, "acme:\n  email: ops@corp.com\n"), nil); err != nil {
+		if _, err := Load(writeConfig(t, "acme:\n  email: ops@corp.com\n"+tlogOrigin), nil); err != nil {
 			t.Error(err)
 		}
 	})
+}
+
+// loadProd loads file with the production key table. The default htpasswd path does not exist
+// on a test host, so the call sets it through the environment.
+func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
+	t.Helper()
+	const htpasswdEnv = "CANARY_OPS_BASIC_AUTH_HTPASSWD"
+	// The loader rejects a variable that occurs two times, so the default is set only if the caller does not set it.
+	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
+		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
+	}
+	return Load(writeConfig(t, file), env)
+}
+
+// bound is one row of the 04 section 3 bounds table: values that pass, values that fail,
+// and the other variables that the row needs. The test sets a value by its CANARY_ variable.
+type bound struct {
+	key        string
+	pass, fail []string
+	with       []string
+}
+
+var (
+	longOrigin = strings.Repeat("a", 128)
+	fetchURL   = "CANARY_BUNDLE_FETCH_URL=https://bundle.example/current"
+	// groupWritable is a file in a temp dir with mode 0660. The other bad values of the htpasswd row
+	// are a relative path, an unclean path, and a missing file. All of them go through the CANARY_ variable.
+	groupWritable = func() string {
+		p := filepath.Join(testDir, "group-writable")
+		err := os.WriteFile(p, nil, 0o600)
+		if err == nil {
+			err = os.Chmod(p, 0o660)
+		}
+		if err != nil {
+			panic(err)
+		}
+		return p
+	}()
+)
+
+// scalarBounds mirrors the bounds table for each scalar key (min and max pass; min-1 and max+1 fail).
+var scalarBounds = []bound{
+	{key: "listen.http", pass: []string{":1", ":65535"}, fail: []string{":0", ":65536", "x"}},
+	{key: "listen.https", pass: []string{":1", ":65535"}, fail: []string{":0", ":65536", ":80"}},
+	{key: "ops.listen", pass: []string{"127.0.0.1:1", "[::1]:65535", "10.0.0.1:9443"}, fail: []string{"127.0.0.1:0", "127.0.0.1:65536", "0.0.0.0:9443", "8.8.8.8:9443", "localhost:9443"}},
+	{key: "ops.basic_auth_htpasswd", pass: []string{filepath.Join(testDir, "htpasswd")}, fail: []string{"htpasswd", testDir + "/./htpasswd", filepath.Join(testDir, "missing"), groupWritable}},
+	{key: "acme.email", pass: []string{"a@b.example"}, fail: []string{"a@b.example\nBcc: c@d.example", "a@b.example, c@d.example", ""}},
+	{key: "acme.ca", pass: []string{"letsencrypt", "letsencrypt-staging", "https://ca.example/dir"}, fail: []string{"http://ca.example/dir", "https://u:p@ca.example/", "https://169.254.169.254/"}},
+	{key: "acme.cache_dir", pass: []string{"/var/lib/agent-canary/certs"}, fail: []string{"/var/lib/other", "var/lib/agent-canary", "/var/lib/agent-canary/../x"}},
+	{key: "bundle.path", pass: []string{"/var/lib/agent-canary/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/agent-canary/b/../../x"}},
+	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
+	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "0s", "-1h"}, with: []string{fetchURL}},
+	{key: "bundle.fetch_interval", pass: []string{"1s"}, fail: []string{"0s", "-1h"}}, // The fetch is off: only the check for a value > 0 applies.
+	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
+	{key: "limits.body_bytes", pass: []string{"1", "65536"}, fail: []string{"0", "65537"}},
+	{key: "limits.header_bytes", pass: []string{"1", "16384"}, fail: []string{"0", "16385"}},
+	{key: "limits.per_ip_rps", pass: []string{"1", "1000"}, fail: []string{"0", "1001"}, with: []string{"CANARY_LIMITS_PER_IP_BURST=5000"}},
+	{key: "limits.per_ip_rps", pass: []string{"200"}}, // The default burst is 200. A larger rate fails on the burst key (TestTS11_CrossChecks).
+	{key: "limits.per_ip_burst", pass: []string{"100", "5000"}, fail: []string{"99", "5001", "0"}, with: []string{"CANARY_LIMITS_PER_IP_RPS=100"}},
+	{key: "limits.per_ip_burst", pass: []string{"1"}, fail: []string{"0"}, with: []string{"CANARY_LIMITS_PER_IP_RPS=1"}},
+	{key: "limits.queue_depth", pass: []string{"1", "8192"}, fail: []string{"0", "8193"}},
+	{key: "store.path", pass: []string{"/var/lib/agent-canary/events.db"}, fail: []string{"/tmp/events.db", "events.db"}},
+	{key: "store.max_bytes", pass: []string{"268435456", "9223372036854775807"}, fail: []string{"268435455", "0", "9223372036854775808"}},
+	{key: "store.retention_days.ip", pass: []string{"1", "7"}, fail: []string{"0", "8"}},
+	{key: "store.retention_days.raw", pass: []string{"1", "30"}, fail: []string{"0", "31"}},
+	{key: "store.retention_days.events", pass: []string{"30", "90"}, fail: []string{"29", "91", "0"}},
+	{key: "store.retention_days.events", pass: []string{"5"}, fail: []string{"4"}, with: []string{"CANARY_STORE_RETENTION_DAYS_RAW=5"}},
+	{key: "tlog.dir", pass: []string{"/var/lib/agent-canary/tlog"}, fail: []string{"/var/tlog", "tlog"}},
+	{key: "tlog.origin", pass: []string{"a", longOrigin, "agent-canary/abc_1.2-x"}, fail: []string{"", longOrigin + "a", "agent-canary/<install_id>", "a b", "a\nb", "é"}},
+	{key: "tlog.checkpoint_interval", pass: []string{"1m", "24h"}, fail: []string{"59s", "24h0m1s", "0s", "-1m"}},
+	{key: "alerts.min_band", pass: []string{"agent-likely", "agent-confirmed"}, fail: []string{"human", "crawler", "", "Agent-Likely"}},
+	{key: "privacy.store_body_prefix", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
+	{key: "privacy.include_ip", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
+}
+
+// TestTS11_ScalarBounds runs the bounds table through Load, one value per CANARY_ variable.
+func TestTS11_ScalarBounds(t *testing.T) {
+	for _, b := range scalarBounds {
+		env := envName(b.key)
+		try := func(v string) error {
+			_, err := loadProd(t, base, append([]string{env + "=" + v}, b.with...)...)
+			return err
+		}
+		for _, v := range b.pass {
+			if err := try(v); err != nil {
+				t.Errorf("%s=%q: %v", b.key, v, err)
+			}
+		}
+		for _, v := range b.fail {
+			if err := try(v); err == nil || !strings.Contains(err.Error(), b.key+" at "+env) {
+				t.Errorf("%s=%q: got %v, want an error that names the key and the variable", b.key, v, err)
+			}
+		}
+	}
+}
+
+// TestTS11_CrossChecks checks the bounds that depend on a second key, for file values, and
+// that a bound error names the key and the line of the key that fails.
+func TestTS11_CrossChecks(t *testing.T) {
+	rows := []struct{ name, file, want string }{
+		{"burst below rps", "limits:\n  per_ip_rps: 300\n", "limits.per_ip_burst at default: the value must not be less than limits.per_ip_rps"},
+		{"burst equals rps", "limits:\n  per_ip_rps: 200\n", ""},
+		{"events below raw", "store:\n  retention_days:\n    raw: 91\n", "store.retention_days.raw"}, // The raw bound fails first.
+		{"events below raw 2", "store:\n  retention_days:\n    raw: 30\n    events: 29\n", "store.retention_days.events at " + cfg[len(cfg)-64:] + ":8: the value must not be less than"},
+		{"interval, fetch off", "bundle:\n  fetch_interval: 1s\n", ""},
+		{"interval, fetch on", "bundle:\n  fetch_url: https://b.example/x\n  fetch_interval: 14m\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":7: the duration must be in the range"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base+r.file)
+			if (r.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), r.want)) {
+				t.Errorf("got %v, want %q", err, r.want)
+			}
+		})
+	}
+}
+
+// TestTU10_Defaults checks the 04 section 3 default of each key, on a minimal valid file.
+func TestTU10_Defaults(t *testing.T) {
+	c, err := loadProd(t, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const state = "/var/lib/agent-canary/"
+	rows := map[string]Value{
+		"bundle.path":                 {Str: state + "bundle/current.cbnd"},
+		"bundle.fetch_url":            {},
+		"bundle.fetch_interval":       {Dur: 6 * time.Hour},
+		"limits.max_conns":            {Int: 2000},
+		"limits.body_bytes":           {Int: 65536},
+		"limits.header_bytes":         {Int: 16384},
+		"limits.per_ip_rps":           {Int: 50},
+		"limits.per_ip_burst":         {Int: 200},
+		"limits.queue_depth":          {Int: 4096},
+		"store.path":                  {Str: state + "events.db"},
+		"store.max_bytes":             {Int: 10737418240},
+		"store.retention_days.ip":     {Int: 7},
+		"store.retention_days.raw":    {Int: 30},
+		"store.retention_days.events": {Int: 90},
+		"tlog.dir":                    {Str: state + "tlog"},
+		"tlog.checkpoint_interval":    {Dur: time.Hour},
+		"alerts.min_band":             {Str: "agent-likely"},
+		"privacy.store_body_prefix":   {Bool: true},
+		"privacy.include_ip":          {},
+	}
+	for p, want := range rows {
+		want.Source = "default"
+		if got, ok := c.Get(p); !ok || got != want {
+			t.Errorf("%s: got %+v, want %+v", p, got, want)
+		}
+	}
+}
+
+// TestTU10_Overrides checks that each key has a CANARY_ override that goes through the bounds.
+// Each key of the table must have a row in scalarBounds.
+func TestTU10_Overrides(t *testing.T) {
+	rowOf := make(map[string]bound)
+	for _, b := range scalarBounds {
+		rowOf[b.key] = b
+	}
+	for _, k := range keys {
+		b, ok := rowOf[k.path]
+		if !ok {
+			t.Errorf("%s has no row in scalarBounds", k.path)
+			continue
+		}
+		if !ok || len(b.pass) == 0 {
+			continue
+		}
+		v := b.pass[len(b.pass)-1]
+		c, err := loadProd(t, base, append([]string{envName(k.path) + "=" + v}, b.with...)...)
+		if err != nil {
+			t.Errorf("%s: %v", envName(k.path), err)
+			continue
+		}
+		if got, _ := c.Get(k.path); got.Source != envName(k.path) {
+			t.Errorf("%s: the source is %q", k.path, got.Source)
+		}
+	}
+	c, err := loadProd(t, base, "CANARY_LIMITS_BODY_BYTES=100", "CANARY_STORE_RETENTION_DAYS_IP=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := c.Get("limits.body_bytes"); v.Int != 100 {
+		t.Errorf("got %+v", v)
+	}
+	if v, _ := c.Get("store.retention_days.ip"); v.Int != 3 {
+		t.Errorf("got %+v", v)
+	}
+	_, err = loadProd(t, base+"limits:\n  body_bytes: 100\n", "CANARY_LIMITS_BODY_BYTES=65537")
+	if err == nil || !strings.Contains(err.Error(), "limits.body_bytes at CANARY_LIMITS_BODY_BYTES") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestTU10_NewSectionsInvalid checks one invalid file value for each new section.
+func TestTU10_NewSectionsInvalid(t *testing.T) {
+	rows := []struct{ file, key string }{
+		{base + "bundle:\n  fetch_url: http://b.example/x\n", "bundle.fetch_url"},
+		{base + "limits:\n  body_bytes: 65537\n", "limits.body_bytes"},
+		{base + "store:\n  retention_days:\n    ip: 8\n", "store.retention_days.ip"},
+		{"acme:\n  email: sec@example.com\ntlog:\n  origin: \"agent-canary/<install_id>\"\n", "tlog.origin"},
+		{base + "alerts:\n  min_band: human\n", "alerts.min_band"},
+		{base + "privacy:\n  include_ip: 1\n", "privacy.include_ip"},
+		{"acme:\n  email: sec@example.com\n", "tlog.origin"}, // The key is required.
+	}
+	for _, r := range rows {
+		_, err := loadProd(t, r.file)
+		if err == nil || !strings.Contains(err.Error(), r.key+" at ") {
+			t.Errorf("%s: got %v", r.key, err)
+		}
+	}
+}
+
+// TestTU10_FetchURLAllowList checks that bundle.fetch_url adds its endpoint to the allow-list.
+func TestTU10_FetchURLAllowList(t *testing.T) {
+	c, err := loadProd(t, base)
+	if err != nil || len(c.AllowList()) != 1 {
+		t.Fatalf("fetch off: %v, %+v", err, c)
+	}
+	c, err = loadProd(t, base, "CANARY_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, {"https", "bundle.example", "8443"}}
+	if got := c.AllowList(); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestTS10_NewScalars checks strict scalars of the new keys through Load with the production table.
+func TestTS10_NewScalars(t *testing.T) {
+	rows := []struct{ name, file, key, want string }{
+		{"YAML 1.1 bool on", "privacy:\n  include_ip: on\n", "privacy.include_ip", "the value is not a valid bool"},
+		{"legacy octal", "limits:\n  max_conns: 0755\n", "limits.max_conns", "decimal literal only"},
+		{"quoted int", "limits:\n  max_conns: \"100\"\n", "limits.max_conns", "the value is not a valid int"},
+		{"float into int", "limits:\n  max_conns: 1.5\n", "limits.max_conns", "the value is not a valid int"},
+		{"float into byte size", "limits:\n  body_bytes: 1.5\n", "limits.body_bytes", "the value is not a valid byte size"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base+r.file)
+			if err == nil || !strings.Contains(err.Error(), r.key+" at ") || !strings.Contains(err.Error(), r.want) {
+				t.Errorf("got %v", err)
+			}
+		})
+	}
 }

@@ -42,7 +42,7 @@ func validBody(t *testing.T) string {
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\n"
+	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n"
 }
 
 // TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
