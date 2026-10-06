@@ -25,30 +25,32 @@ const (
 	kindBytes
 	kindDuration
 	kindPath
+	kindURL // kindURL is a key whose value is never printed in an error: it can hold user information.
 )
 
-var kindNames = [...]string{"string", "bool", "int", "uint", "byte size", "duration", "path"}
-var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str", "!!str"}
+var kindNames = [...]string{"string", "bool", "int", "uint", "byte size", "duration", "path", "URL"}
+var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str", "!!str", "!!str"}
 
 // key is one row of the key table.
 type key struct {
 	path   string
 	kind   kind
-	def    string // def is the default value, parsed like an override.
-	req    bool   // req marks a required key: the file or the environment must set it.
-	secret bool   // secret marks a key whose value is never printed.
+	def    string                             // def is the default value, parsed like an override.
+	req    bool                               // req marks a required key: the file or the environment must set it.
+	secret bool                               // secret marks a key whose value is never printed.
+	check  func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
 }
 
 // keys is the production key table (04 section 3). Later changes add the
-// other sections. Only the kind is checked here.
+// other sections.
 var keys = []key{
-	{path: "listen.http", kind: kindString, def: ":80"},
-	{path: "listen.https", kind: kindString, def: ":443"},
-	{path: "ops.listen", kind: kindString, def: "127.0.0.1:9443"},
-	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/agent-canary/htpasswd"},
-	{path: "acme.email", kind: kindString, req: true},
-	{path: "acme.ca", kind: kindString, def: "letsencrypt"},
-	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/agent-canary/certs"},
+	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
+	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
+	{path: "ops.listen", kind: kindString, def: "127.0.0.1:9443", check: checkOpsListen},
+	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/agent-canary/htpasswd", check: checkHtpasswd},
+	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
+	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
+	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/agent-canary/certs", check: checkStatePath},
 }
 
 // Value is one effective config value.
@@ -137,11 +139,15 @@ func LoadWith(path string, env []string, n Net) (*Config, error) {
 	return load(path, env, keys, n)
 }
 
+func load(path string, env []string, table []key, n Net) (*Config, error) {
+	return newLoader().load(path, env, table, n)
+}
+
 func envName(path string) string {
 	return "CANARY_" + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
 }
 
-func load(path string, env []string, table []key, n Net) (*Config, error) {
+func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
 	doc, err := ReadFile(path)
 	if err != nil {
 		return nil, errors.Join(readError(path, err, table))
@@ -153,18 +159,24 @@ func load(path string, env []string, table []key, n Net) (*Config, error) {
 		byEnv[envName(k.path)] = k
 	}
 	vals := make(map[string]Value)
+	raws := make(map[string]string) // raws holds the text of each value in vals.
 	var errs []error
+	keyError := func(k key, raw, src string, line int, detail string) error {
+		if k.secret || k.kind == kindURL {
+			raw = "" // An Error never holds a secret value or a URL: a URL can hold user information.
+		}
+		return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
+	}
+	// set parses one value. A later source replaces an earlier one. A value that fails to parse is removed.
 	set := func(k key, raw, tag, src string, line int) {
 		v, detail := parse(k, raw, tag)
 		if detail == "" {
 			v.Source, v.Line = src, line
-			vals[k.path] = v
+			vals[k.path], raws[k.path] = v, raw
 			return
 		}
-		if k.secret {
-			raw = "" // An Error never holds a secret value.
-		}
-		errs = append(errs, &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw})
+		delete(vals, k.path)
+		errs = append(errs, keyError(k, raw, src, line, detail))
 	}
 	for _, k := range table {
 		if !k.req {
@@ -220,6 +232,18 @@ func load(path string, env []string, table []key, n Net) (*Config, error) {
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
 		}
 	}
+	// Each check runs one time, on the effective value. A key that fails is removed from vals.
+	for _, k := range table {
+		v, ok := vals[k.path]
+		if !ok || k.check == nil {
+			continue
+		}
+		if detail := k.check(l, raws[k.path]); detail != "" {
+			delete(vals, k.path)
+			errs = append(errs, keyError(k, raws[k.path], v.Source, v.Line, detail))
+		}
+	}
+	errs = append(errs, crossCheck(vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
