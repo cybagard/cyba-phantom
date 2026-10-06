@@ -13,8 +13,26 @@ import (
 	"time"
 )
 
-// testKeys adds kinds that the production table does not have yet.
-var testKeys = append(append([]key{}, keys...), []key{
+// testDir holds a valid htpasswd file: the default path of the production table does not exist here.
+var testDir = func() string {
+	d, err := os.MkdirTemp("", "config-test")
+	if err == nil {
+		err = os.WriteFile(filepath.Join(d, "htpasswd"), nil, 0o600)
+	}
+	if err != nil {
+		panic(err)
+	}
+	return d
+}()
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	os.RemoveAll(testDir)
+	os.Exit(code)
+}
+
+// testKeys uses the htpasswd file in testDir and adds kinds that the production table does not have yet.
+var testKeys = append(withHtpasswd(keys, filepath.Join(testDir, "htpasswd")), []key{
 	{path: "a.flag", kind: kindBool, def: "false"},
 	{path: "a.port", kind: kindUint, def: "8"},
 	{path: "a.delta", kind: kindInt, def: "-1"},
@@ -23,6 +41,16 @@ var testKeys = append(append([]key{}, keys...), []key{
 	{path: "a.token", kind: kindString, secret: true},
 	{path: "a.pin", kind: kindInt, def: "0", secret: true},
 }...)
+
+func withHtpasswd(table []key, path string) []key {
+	out := append([]key{}, table...)
+	for i := range out {
+		if out[i].path == "ops.basic_auth_htpasswd" {
+			out[i].def = path
+		}
+	}
+	return out
+}
 
 // cfg is longer than 64 bytes, so each error shows the cut source.
 var cfg = filepath.Join(strings.Repeat("d", 60), "config.yaml")
@@ -47,7 +75,7 @@ func TestTU10_Precedence(t *testing.T) {
 		{"default", base, "", "listen.http", Value{Str: ":80", Source: "default"}},
 		{"file", base + "listen:\n  http: \":8080\"\n", "", "listen.http", Value{Str: ":8080", Source: cfg, Line: 4}},
 		{"env", base + "listen:\n  http: \":8080\"\n", "CANARY_LISTEN_HTTP=:81", "listen.http", Value{Str: ":81", Source: "CANARY_LISTEN_HTTP"}},
-		{"htpasswd default", base, "", "ops.basic_auth_htpasswd", Value{Str: "/etc/agent-canary/htpasswd", Source: "default"}},
+		{"htpasswd default", base, "", "ops.basic_auth_htpasswd", Value{Str: filepath.Join(testDir, "htpasswd"), Source: "default"}},
 		{"int default", base, "", "a.delta", Value{Int: -1, Source: "default"}},
 		{"int file", base + "a:\n  delta: -7\n", "", "a.delta", Value{Int: -7, Source: cfg, Line: 4}},
 		{"int env", base + "a:\n  delta: -7\n", "CANARY_A_DELTA=9", "a.delta", Value{Int: 9, Source: "CANARY_A_DELTA"}},
@@ -81,6 +109,7 @@ func TestTU10_EnvNames(t *testing.T) {
 
 // TestTU10_Errors checks unknown keys, wrong shapes, and error collection.
 func TestTU10_Errors(t *testing.T) {
+	useTestKeys(t)
 	p := writeConfig(t, "zz: 1\nlisten:\n  http: \":1\"\n  bogus: 1\nfoo:\n  bar: 1\nops: [x]\nacme:\n  email: [a]\n")
 	_, err := Load(p, []string{"CANARY_LISTEN_HTTPS=:2", "CANARY_NOPE=1", "HOME=/x"})
 	p = p[len(p)-64:] // The error keeps the end of a long path: the file name and the line.
