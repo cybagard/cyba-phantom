@@ -653,8 +653,9 @@ func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
 }
 
 // After a crash, a tile that the root computation does not read can have two
-// partial files. Open keeps the widest one.
-func TestTU07OpenTidiesTilesBeyondTheHead(t *testing.T) {
+// partial files. Open does not read the tile and does not list its directory,
+// so it leaves both files. A WriteTile of the tile deletes the narrower file.
+func TestTU07OpenLeavesTilesThatItDoesNotRead(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var a testLog
@@ -667,43 +668,48 @@ func TestTU07OpenTidiesTilesBeyondTheHead(t *testing.T) {
 	narrow := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 3}
 	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), b.tileData(narrow), fileMode))
 	s.Close()
-	openStore(t, state)
-	ents, err := os.ReadDir(filepath.Join(dir, "tlog", "tile", "8", "0", "001.p"))
-	mustNil(t, err)
-	if len(ents) != 1 || ents[0].Name() != "5" {
-		t.Fatalf("files of tile 1: %v", ents)
+	s = openStore(t, state)
+	partial := filepath.Join(dir, "tlog", "tile", "8", "0", "001.p")
+	names := func() []string {
+		ents, err := os.ReadDir(partial)
+		mustNil(t, err)
+		var got []string
+		for _, e := range ents {
+			got = append(got, e.Name())
+		}
+		return got
+	}
+	if got := names(); !slices.Equal(got, []string{"3", "5"}) {
+		t.Fatalf("files of tile 1 after Open: %v", got)
+	}
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 5}
+	mustNil(t, s.WriteTile(wide, a.tileData(wide)))
+	if got := names(); !slices.Equal(got, []string{"5"}) {
+		t.Fatalf("files of tile 1 after the write: %v", got)
 	}
 }
 
-func TestTU07TilesBeyondTheHeadIncludeGroupDirectories(t *testing.T) {
-	cases := []struct {
-		head  int64 // number of hashes at level 0
-		files []string
-		want  []int64
-	}{
-		{1500 * fullWidth, []string{"x001/498.p/3", "x001/499.p/1", "x001/500", "x001/x000/002.tmp", "x002/000.p/1", "x000/900", "x999/x000/001.p/1"},
-			[]int64{1499, 1500, 1000002, 2000, 999000001}},
-		// The lost batch goes on to the first tile number with one more group.
-		{1000000 * fullWidth, []string{"x999/999", "x001/x000/002.p/1", "x001/x001/000"}, []int64{999999, 1000002, 1001000}},
+// At most one partial file stays for a tile after a write of the tile, and after
+// an Open that reads the tile.
+func TestTU07OnePartialFileStaysAfterWriteAndAfterOpenThatReadsTheTile(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after the write: %v", names)
 	}
-	for i, c := range cases {
-		state, dir := newLogState(t)
-		s := openStore(t, state)
-		s.head.N = c.head
-		for _, f := range c.files {
-			p := filepath.Join(dir, "tlog", "tile", "8", "0", f)
-			mustNil(t, os.MkdirAll(filepath.Dir(p), dirMode))
-			mustNil(t, os.WriteFile(p, nil, fileMode))
-		}
-		tiles, err := s.tilesBeyond(0)
-		mustNil(t, err)
-		var got []int64
-		for _, tile := range tiles {
-			got = append(got, tile.N)
-		}
-		if !slices.Equal(got, slices.Sorted(slices.Values(c.want))) {
-			t.Fatalf("case %d: got %v, want %v", i, got, c.want)
-		}
+	s.Close()
+	// A crash between the rename of width 5 and the delete of width 3.
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), l.tileData(narrow), fileMode))
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after the crash: %v", names)
+	}
+	openStore(t, state)
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after Open: %v", names)
 	}
 }
 
@@ -713,26 +719,22 @@ func TestTU07DirectoryWithTooManyNamesIsAnError(t *testing.T) {
 			mustNil(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("junk%d", i)), nil, fileMode))
 		}
 	}
-	for _, c := range []struct {
-		dir   string
-		limit int
-	}{{"tile/8/0/000.p", maxPartialNames}, {"tile/8/0", maxLevelNames}} {
-		state, dir := committedLog(t, 3)
-		names, err := os.ReadDir(filepath.Join(dir, "tlog", c.dir))
-		mustNil(t, err)
-		fill(t, filepath.Join(dir, "tlog", c.dir), 0, c.limit-len(names))
-		openStore(t, state) // the limit is allowed
-		fill(t, filepath.Join(dir, "tlog", c.dir), c.limit, 1)
-		if e := openErr(t, state, ruleTooMany); e.Name != c.dir {
-			t.Fatalf("name %q", e.Name)
-		}
+	const rel = "tile/8/0/000.p"
+	state, dir := committedLog(t, 3)
+	names, err := os.ReadDir(filepath.Join(dir, "tlog", rel))
+	mustNil(t, err)
+	fill(t, filepath.Join(dir, "tlog", rel), 0, maxPartialNames-len(names))
+	openStore(t, state) // the limit is allowed
+	fill(t, filepath.Join(dir, "tlog", rel), maxPartialNames, 1)
+	if e := openErr(t, state, ruleTooMany); e.Name != rel {
+		t.Fatalf("name %q", e.Name)
 	}
 }
 
 // Open and WriteTile delete the temporary file of a full tile, which is in the
 // level directory.
 func TestTU07TidyDeletesTemporaryFileOfFullTile(t *testing.T) {
-	state, dir := committedLog(t, 256)
+	state, dir := committedLog(t, 3) // Open reads tile 0
 	full := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}.Path()+tmpSuffix)
 	mustNil(t, os.WriteFile(full, []byte("x"), fileMode))
 	s := openStore(t, state)
@@ -999,54 +1001,4 @@ func TestTU07NarrowerWriteKeepsTheRecordedWidth(t *testing.T) {
 		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
 	}
 	mustNil(t, s.SetHead(5, l.root(t, 5)))
-}
-
-// A planted group directory below the deepest group of a valid tile number, and
-// a tile number above the largest of its level, are not tiles of the log.
-func TestTU07ScanIgnoresTileNumbersAboveTheLevelBound(t *testing.T) {
-	state, dir := newLogState(t)
-	s := openStore(t, state)
-	plant := func(level int, rel string) {
-		p := filepath.Join(dir, "tlog", "tile", "8", fmt.Sprint(level), filepath.FromSlash(rel))
-		mustNil(t, os.MkdirAll(filepath.Dir(p), dirMode))
-		mustNil(t, os.WriteFile(p, nil, fileMode))
-	}
-	plant(0, strings.Repeat("x999/", 8)+"999.p/1") // too many groups
-	plant(0, "x999/x999/x999/999.p/1")             // the largest shape that fits
-	plant(1, "x999/x999/x999/999")                 // above 2^32 - 1
-	plant(6, "001.p/1")                            // above 0
-	for _, c := range []struct {
-		level int
-		want  []int64
-	}{{0, []int64{999999999999}}, {1, nil}, {6, nil}} {
-		tiles, err := s.tilesBeyond(c.level)
-		mustNil(t, err)
-		var got []int64
-		for _, tile := range tiles {
-			got = append(got, tile.N)
-		}
-		if !slices.Equal(got, c.want) {
-			t.Errorf("level %d: got %v, want %v", c.level, got, c.want)
-		}
-	}
-}
-
-// The scans of one level use at most the bound for names, together.
-func TestTU07ScansOfALevelUseAtMostTheNameBound(t *testing.T) {
-	state, dir := newLogState(t)
-	s := openStore(t, state)
-	level := filepath.Join(dir, "tlog", "tile", "8", "0")
-	mustNil(t, os.MkdirAll(level, dirMode))
-	for _, name := range []string{"001", "002", "003", "004"} {
-		mustNil(t, os.WriteFile(filepath.Join(level, name), nil, fileMode))
-	}
-	for left, wantErr := range map[int]bool{4: false, 3: true} {
-		sc := newScan(s, 0, map[int64]bool{})
-		sc.groups, sc.left = 1, left
-		err := sc.dir("tile/8/0", 0, 0)
-		var e *Error
-		if wantErr != (errors.As(err, &e) && e.Rule == ruleTooMany) || (!wantErr && (err != nil || sc.left != 0)) {
-			t.Errorf("left %d: err %v, left after %d", left, err, sc.left)
-		}
-	}
 }

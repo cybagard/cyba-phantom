@@ -6,8 +6,8 @@
 // or deletes a hash that the tree head covers. It deletes narrower partial
 // files, stale files of a tile (files that differ from a durable new file only
 // beyond the tree head), and its own temporary files. It never repairs,
-// truncates, or rebuilds any other file. A file that is wrong makes Open return
-// an error, and the caller stops the log.
+// truncates, or rebuilds any other file. If a file is wrong, Open returns an
+// error, and the caller stops the log.
 package tlog
 
 import (
@@ -17,7 +17,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"maps"
 	"os"
 	"path"
 	"slices"
@@ -40,17 +39,11 @@ const (
 	maxSize  = 1 << (TileHeight * maxLevel)
 
 	// A partial-tile directory holds at most 255 widths and 255 temporary
-	// files. A level directory holds at most 1000 tiles, 1000 partial-tile
-	// directories, 1000 temporary files, and 1000 group directories. A longer
-	// listing is an error. The scans of one level (at most two) read at most
-	// maxScanNames names together: a listing that goes over the bound is an
-	// error.
+	// files. A longer listing is an error.
 	maxPartialNames = 1024
-	maxLevelNames   = 4096
-	maxScanNames    = 65536
 
-	// maxBatchTiles is the number of tiles that WriteTile accepts between two
-	// calls of SetHead.
+	// maxBatchTiles is the number of different tiles with hashes beyond the
+	// tree head that WriteTile accepts between two calls of SetHead.
 	maxBatchTiles = 4096
 
 	headName  = "head"
@@ -119,17 +112,18 @@ type Store struct {
 }
 
 // Open opens the log directory dir below the state directory. The path dir is
-// relative to state. Open makes the directory (mode 0700) if it does not
-// exist. The directory must have no group or other permission bits. Open
-// reads the tree head and the tiles that the root computation reads, and
-// checks that they give the root of the tree head. Open does not read the
-// other tiles. A later change checks them with authenticated reads. Open
-// checks the files of the tiles at and beyond the rightmost tile of the tree
-// head, so that at most one partial file stays for each tile after a crash.
-// It deletes files only after all checks pass: when Open returns an error from
-// a check, it has deleted nothing. A directory with no tree head must be
-// empty, or hold only the temporary file of the tree head. Open writes a tree
-// head of size 0 for it, before any tile can be written.
+// relative to state. state.OpenRoot follows a link inside the state directory,
+// so Open refuses only a log directory that links out of the state directory.
+// Open makes the directory (mode 0700) if it does not exist. The directory
+// must have no group or other permission bits. Open reads the tree head and
+// the tiles that the root computation reads, and checks that they give the root
+// of the tree head. Open does not read the other tiles. A later change checks
+// them with authenticated reads. Open tidies the tiles that it reads, so that
+// at most one partial file stays for each of them after a crash. Open does not
+// list or tidy any other tile. It deletes files only after all checks pass: if
+// a check fails, Open has deleted nothing. A directory with no tree head must
+// be empty, or hold only the temporary file of the tree head. Open writes a
+// tree head of size 0 for it, before any tile can be written.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -182,22 +176,22 @@ func (s *Store) load() error {
 	}
 	s.head.N = int64(size)
 	copy(s.head.Hash[:], b[sizeLen:])
-	if _, err := s.verify(s.head); err != nil {
+	read, err := s.verify(s.head)
+	if err != nil {
 		return err
 	}
 	var rm []string
-	for l := 0; l <= maxLevel; l++ {
-		tiles, err := s.tilesBeyond(l)
+	seen := map[tlog.Tile]bool{}
+	for _, t := range read {
+		if seen[tileKey(t)] {
+			continue
+		}
+		seen[tileKey(t)] = true
+		names, err := s.stale(t, 0, s.committed(t))
 		if err != nil {
 			return err
 		}
-		for _, t := range tiles {
-			names, err := s.stale(t, 0, s.committed(t))
-			if err != nil {
-				return err
-			}
-			rm = append(rm, names...)
-		}
+		rm = append(rm, names...)
 	}
 	return s.remove(rm)
 }
@@ -266,14 +260,14 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 // tile of the tree first, and must call SetHead only after each WriteTile
 // returned nil. SetHead refuses a size that is smaller than the stored size
 // and a size above maxSize. It reads the tiles and refuses the call if they no
-// longer give the stored tree head, or if they do not give the new one. For
-// each tile that the new root computation reads, and for each tile that the new
-// tree head covers for the first time (at every level), every stored file of
-// the tile must agree with the other files in the hashes that the new tree head
-// covers. Else the next Open would refuse the tree head. For each tile that the
-// new tree head covers for the first time, SetHead also refuses hashes that
-// this Store did not write or check since the last SetHead (a tile that
-// WriteTile did not accept). SetHead refuses a size that adds more than
+// longer give the stored tree head, or if they do not give the new one. Take
+// each tile that the new root computation reads, and each tile that the new
+// tree head covers for the first time (at every level). Every stored file of
+// such a tile must agree with the other files in the hashes that the new tree
+// head covers. If not, the next Open would refuse the tree head. For a tile
+// that the new tree head covers for the first time, SetHead also refuses
+// hashes that this Store did not write or check since the last SetHead (a tile
+// that WriteTile did not accept). SetHead refuses a size that adds more than
 // maxBatchTiles full tiles. A refused call changes no file.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
@@ -337,8 +331,10 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // data and differs beyond the tree head is stale: WriteTile writes the new
 // file first, then deletes the stale files. After the write, the store
 // deletes the narrower partial files, so that at most one partial file stays.
-// WriteTile accepts at most maxBatchTiles different tiles between two calls of
-// SetHead.
+// WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
+// the tree head between two calls of SetHead. Before it writes, renames, or
+// deletes anything, WriteTile checks that each directory of the tile path is a
+// real directory and not a link.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
@@ -348,6 +344,9 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	c := s.committed(t)
 	if _, ok := s.written[tileKey(t)]; !ok && t.W > c && len(s.written) >= maxBatchTiles {
 		return &Error{"tile", ruleBatch}
+	}
+	if err := s.checkDirs(t); err != nil {
+		return err
 	}
 	widths, _, err := s.partials(t)
 	if err != nil {
@@ -466,8 +465,8 @@ func (s *Store) tidy(t tlog.Tile, keep int) error {
 // widest file, so it returns only narrower files. A file of tile t that is
 // wider than keep is stale: the caller has written the file of width keep, and
 // the files differ only beyond the tree head. The kept file must hold all c
-// covered hashes, and a file in the result must have the same covered hashes.
-// Else stale returns an error, because the file can be the only copy of covered
+// covered hashes. A file in the result must have the same covered hashes. If
+// not, stale returns an error, because the file can be the only copy of covered
 // hashes. stale deletes nothing.
 func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	widths, tmps, err := s.partials(t)
@@ -561,112 +560,39 @@ func (s *Store) names(dir string, limit int) ([]string, error) {
 	}
 }
 
-// tilesBeyond returns the tiles of level l that have a stored file and a tile
-// number not below the rightmost tile of the stored tree head. If a lost batch
-// went on to a longer tile number (more groups of 3 digits), the tiles from the
-// first such number are in the result too.
-func (s *Store) tilesBeyond(l int) ([]tlog.Tile, error) {
-	first := max(0, (s.head.N>>(TileHeight*l)-1)/fullWidth)
-	found := map[int64]bool{}
-	starts := []int64{first}
-	if first >= 1000 {
-		next := int64(1000)
-		for next <= first {
-			next *= 1000
-		}
-		starts = append(starts, next)
-	}
-	sc := newScan(s, l, found)
-	for _, from := range starts {
-		sc.from = from
-		for sc.groups = 1; pow1000(sc.groups) <= from; sc.groups++ {
-		}
-		if err := sc.dir(path.Dir(tilePath(tlog.Tile{H: TileHeight, L: l}, fullWidth)), 0, 0); err != nil {
-			return nil, err
-		}
-	}
-	var tiles []tlog.Tile
-	for _, n := range slices.Sorted(maps.Keys(found)) {
-		tiles = append(tiles, tlog.Tile{H: TileHeight, L: l, N: n})
-	}
-	return tiles, nil
-}
-
-func pow1000(n int) int64 {
-	p := int64(1)
-	for ; n > 0; n-- {
-		p *= 1000
-	}
-	return p
-}
-
-// scan finds the tile numbers of one level that are not below from. A tile
-// path holds the number in groups of 3 digits: the directory x001 holds tiles
-// 1000 to 1999. The scan ignores a tile number above the largest valid number
-// of the level, and does not descend below the groups of that number.
-type scan struct {
-	s         *Store
-	level     int
-	from      int64
-	groups    int // groups of 3 digits in from
-	maxN      int64
-	maxGroups int // groups of 3 digits in maxN
-	found     map[int64]bool
-	left      int // names that the scans of the level can still use
-}
-
-func newScan(s *Store, level int, found map[int64]bool) *scan {
-	c := &scan{s: s, level: level, maxN: maxTileN(level), found: found, left: maxScanNames}
-	for c.maxGroups = 1; pow1000(c.maxGroups) <= c.maxN; c.maxGroups++ {
-	}
-	return c
-}
-
-// dir scans the directory dir, which holds the tiles with the number prefix
-// (and the groups below it): depth is the number of groups in prefix.
-func (c *scan) dir(dir string, prefix int64, depth int) error {
-	names, err := c.s.names(dir, min(maxLevelNames, c.left))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	} else if err == nil {
-		c.left -= len(names)
-	}
-	if err != nil {
-		return &Error{dir, fileRule(err)}
-	}
-	for _, name := range names {
-		base, _ := strings.CutSuffix(name, ".p")
-		base = strings.TrimSuffix(base, tmpSuffix)
-		if g, ok := digits(base); ok && len(base) == 3 {
-			if n := prefix*1000 + g; n >= c.from && n <= c.maxN {
-				c.found[n] = true
-			}
-		} else if g, ok := digits(strings.TrimPrefix(name, "x")); ok && len(name) == 4 && name[0] == 'x' {
-			// Descend if the group directory holds tile numbers not below from,
-			// and if a tile number can have one more group.
-			sub := prefix*1000 + g
-			if depth+1 < c.maxGroups && (depth+1 >= c.groups || sub >= c.from/pow1000(c.groups-depth-1)) {
-				if err := c.dir(path.Join(dir, name), sub, depth+1); err != nil {
-					return err
-				}
-			}
+// checkDirs checks that each directory on the path of tile t below the log
+// directory is a real directory and not a link: tile, tile/8, the level
+// directory, the group directories, and the partial-tile directory. A directory
+// that is not there yet is not an error, and none below it can exist. checkDirs
+// does not follow a link, so it makes no change through one.
+func (s *Store) checkDirs(t tlog.Tile) error {
+	p := ""
+	for _, part := range strings.Split(path.Dir(tilePath(t, 1)), "/") {
+		p = path.Join(p, part)
+		fi, err := s.dir.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return nil
+		case err != nil:
+			return &Error{p, fileRule(err)}
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return &Error{p, ruleLink}
+		case !fi.IsDir():
+			return &Error{p, ruleType}
 		}
 	}
 	return nil
-}
-
-// digits returns the number in s, if s has only the digits 0 to 9.
-func digits(s string) (int64, bool) {
-	n, err := strconv.ParseUint(s, 10, 32)
-	return int64(n), err == nil
 }
 
 // readTile returns the hashes of tile t. If the file of that exact width is
 // not there, it uses the first wider partial file or the full file. A stored
 // hash that the tree head covers never changes, so a prefix of a wider tile is
 // correct. This is the case when a crash comes after a wider tile and before
-// the tree head.
+// the tree head. readTile refuses a link in a directory of the tile path.
 func (s *Store) readTile(t tlog.Tile) ([]byte, error) {
+	if err := s.checkDirs(t); err != nil {
+		return nil, err
+	}
 	want := t.W
 	for w := want; w <= fullWidth; w++ {
 		file := tilePath(t, w)

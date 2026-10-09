@@ -144,18 +144,109 @@ func TestTS13DirectoryLinkInsideLogDirectoryIsAnError(t *testing.T) {
 	l.put(t, s, 3, 9) // only the file of width 9 holds the covered hashes
 	s.Close()
 	level := filepath.Join(dir, "tlog", "tile", "8", "0")
-	mustNil(t, os.Symlink("000.p", filepath.Join(level, "001.p")))
-	mustNil(t, os.WriteFile(filepath.Join(level, "001"), make([]byte, fullWidth*tlog.HashSize), fileMode))
+	// The partial-tile directory of the tile that Open reads is a link to the
+	// directory that holds the only copy of the covered hashes.
+	mustNil(t, os.Rename(filepath.Join(level, "000.p"), filepath.Join(level, "000.real")))
+	mustNil(t, os.Symlink("000.real", filepath.Join(level, "000.p")))
+	mustNil(t, os.WriteFile(filepath.Join(level, "000"), make([]byte, fullWidth*tlog.HashSize), fileMode))
+	before := snapshot(t, filepath.Join(dir, "tlog"))
 	w9 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 9}
-	if e := openErr(t, state, ruleLink); e.Name != "tile/8/0/001.p" {
+	if e := openErr(t, state, ruleLink); e.Name != "tile/8/0/000.p" {
 		t.Fatalf("name %q", e.Name)
 	}
-	got, err := os.ReadFile(filepath.Join(dir, "tlog", w9.Path()))
+	got, err := os.ReadFile(filepath.Join(level, "000.real", "9"))
 	if err != nil || !bytes.Equal(got, l.tileData(w9)) {
 		t.Fatalf("the only copy of the covered hashes changed: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(level, "001")); err != nil {
-		t.Fatalf("a file was deleted: %v", err)
+	if snapshot(t, filepath.Join(dir, "tlog")) != before {
+		t.Fatal("a failed open changed a file")
+	}
+}
+
+// snapshot returns the type of each entry below dir and the contents of each
+// regular file. It does not follow a link.
+func snapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var sb strings.Builder
+	mustNil(t, filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&sb, "%s %v", p, d.Type())
+		if d.Type().IsRegular() {
+			b, err := os.ReadFile(p)
+			fmt.Fprintf(&sb, " %x", b)
+			if err != nil {
+				return err
+			}
+		}
+		sb.WriteString("\n")
+		return nil
+	}))
+	return sb.String()
+}
+
+// A directory link that appears after Open must not make WriteTile write,
+// rename, or delete through it. This holds also when the tile has no partial-tile
+// directory yet.
+func TestTS13WriteTileRefusesDirectoryLinkPlantedAfterOpen(t *testing.T) {
+	cases := []struct {
+		name string
+		link string // the directory that becomes a link, below the log directory
+		to   string // the target of the link, relative to the link
+		tile tlog.Tile
+	}{
+		// Level 1 becomes a link to level 0. The tile has no partial-tile
+		// directory, and a write would rename over the covered tile 1 of level 0.
+		{"level directory", "tile/8/1", "0", tlog.Tile{H: TileHeight, L: 1, N: 1, W: fullWidth}},
+		{"group directory", "tile/8/0/x001", ".", tlog.Tile{H: TileHeight, L: 0, N: 1000, W: fullWidth}},
+		{"partial-tile directory", "tile/8/0/002.p", "../1", tlog.Tile{H: TileHeight, L: 0, N: 2, W: 89}},
+		{"tile directory", "tile", "tile.real", tlog.Tile{H: TileHeight, L: 0, N: 1000, W: fullWidth}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := newLogState(t)
+			s := openStore(t, state)
+			var l testLog
+			l.commit(t, s, 0, 600) // one batch: tile 1 is full and has no partial-tile directory
+			link := filepath.Join(dir, "tlog", filepath.FromSlash(c.link))
+			if c.link == "tile" {
+				mustNil(t, os.Rename(link, link+".real"))
+			} else if err := os.RemoveAll(link); err != nil {
+				t.Fatal(err)
+			}
+			mustNil(t, os.Symlink(c.to, link))
+			covered := filepath.Join(dir, "tlog", "tile", "8", "0", "001")
+			before := snapshot(t, filepath.Join(dir, "tlog"))
+			err := s.WriteTile(c.tile, bytes.Repeat([]byte{0xAB}, c.tile.W*tlog.HashSize))
+			var e *Error
+			if !errors.As(err, &e) || e.Rule != ruleLink || e.Name != c.link {
+				t.Fatalf("got %v", err)
+			}
+			full := tlog.Tile{H: TileHeight, L: 0, N: 1, W: fullWidth}
+			if got, err := os.ReadFile(covered); err != nil || !bytes.Equal(got, l.tileData(full)) {
+				t.Fatalf("the covered tile changed: %v", err)
+			}
+			if snapshot(t, filepath.Join(dir, "tlog")) != before {
+				t.Fatal("a refused write changed a file")
+			}
+		})
+	}
+}
+
+// Open reads a tile through a level directory that is a link. It refuses the
+// link, also when the tile has no partial-tile directory.
+func TestTS13OpenRefusesLevelDirectoryLink(t *testing.T) {
+	state, dir := committedLog(t, 600)
+	level := filepath.Join(dir, "tlog", "tile", "8", "1")
+	mustNil(t, os.Rename(level, level+".real"))
+	mustNil(t, os.Symlink("1.real", level))
+	before := snapshot(t, filepath.Join(dir, "tlog"))
+	if e := openErr(t, state, ruleLink); e.Name != "tile/8/1" {
+		t.Fatalf("name %q", e.Name)
+	}
+	if snapshot(t, filepath.Join(dir, "tlog")) != before {
+		t.Fatal("a failed open changed a file")
 	}
 }
 
