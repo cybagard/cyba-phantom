@@ -106,7 +106,9 @@ func openStore(t *testing.T, state *os.Root) *Store {
 	return s
 }
 
-func newState(t *testing.T) (*os.Root, string) {
+// newLogState makes a state directory with mode 0700. The test directory of
+// the testing package can have other modes.
+func newLogState(t *testing.T) (*os.Root, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -121,7 +123,7 @@ func newState(t *testing.T) (*os.Root, string) {
 }
 
 func TestTU07ReopenGivesSameSizeAndRoot(t *testing.T) {
-	state, _ := newState(t)
+	state, _ := newLogState(t)
 	s := openStore(t, state)
 	if size, root := s.TreeHead(); size != 0 || root != emptyRoot {
 		t.Fatalf("new log: size %d, root %x", size, root)
@@ -140,7 +142,7 @@ func TestTU07ReopenGivesSameSizeAndRoot(t *testing.T) {
 }
 
 func TestTU07OpenAfterTilesBeforeHead(t *testing.T) {
-	state, _ := newState(t)
+	state, _ := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -153,7 +155,7 @@ func TestTU07OpenAfterTilesBeforeHead(t *testing.T) {
 }
 
 func TestTU07HeadIsWrittenLast(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.extend(t, 3)
@@ -179,7 +181,7 @@ func TestTU07HeadIsWrittenLast(t *testing.T) {
 
 // A new log has a tree head of size 0 before the first tile is written.
 func TestTU07OpenWritesEmptyHead(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var want [headSize]byte
 	copy(want[sizeLen:], emptyRoot[:])
@@ -200,7 +202,7 @@ func TestTU07OpenWritesEmptyHead(t *testing.T) {
 }
 
 func TestTU07OpenWithLeftoverHeadTemporaryFile(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	mustNil(t, os.Mkdir(filepath.Join(dir, "tlog"), dirMode))
 	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName+tmpSuffix), []byte("x"), fileMode))
 	s := openStore(t, state)
@@ -215,7 +217,7 @@ func TestTU07OpenWithLeftoverHeadTemporaryFile(t *testing.T) {
 // No head and a file that is not the temporary file of the head means loss or
 // tampering. Open does not repair it.
 func TestTS13OpenRefusesTilesWithoutHead(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	mustNil(t, os.Mkdir(filepath.Join(dir, "tlog"), dirMode))
 	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName+tmpSuffix), []byte("x"), fileMode))
 	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", "other"), nil, fileMode))
@@ -234,7 +236,7 @@ func TestTS13OpenRefusesTilesWithoutHead(t *testing.T) {
 // not end for a size above 2^62.
 func TestTS13HugeTreeSizeIsAnError(t *testing.T) {
 	for _, size := range []uint64{maxSize + 1, 1 << 62, 1<<63 - 1, 1 << 63, 1<<64 - 1} {
-		state, dir := newState(t)
+		state, dir := newLogState(t)
 		openStore(t, state).Close()
 		var b [headSize]byte
 		binary.BigEndian.PutUint64(b[:], size)
@@ -245,7 +247,7 @@ func TestTS13HugeTreeSizeIsAnError(t *testing.T) {
 			t.Fatalf("size %d: %v", size, err)
 		}
 	}
-	state, _ := newState(t)
+	state, _ := newLogState(t)
 	s := openStore(t, state)
 	for _, size := range []int64{maxSize + 1, 1 << 62, math.MaxInt64} {
 		err := within(t, func() error { return s.SetHead(size, tlog.Hash{}) })
@@ -271,7 +273,7 @@ func within(t *testing.T, f func() error) error {
 }
 
 func TestTU07FullTileIsNeverWrittenAgain(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 256)
@@ -297,7 +299,7 @@ func TestTU07FullTileIsNeverWrittenAgain(t *testing.T) {
 }
 
 func TestTU07OnePartialFileForEachTile(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	var from int64
@@ -342,7 +344,7 @@ func TestTS13OpenRejectsBadFiles(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			state, dir := newState(t)
+			state, dir := newLogState(t)
 			s := openStore(t, state)
 			var l testLog
 			l.commit(t, s, 0, size)
@@ -402,7 +404,7 @@ func TestTS13StoreNeverChangesModes(t *testing.T) {
 // The error names the file that failed, not the narrower file that the reader
 // asked for first. The name is never empty.
 func TestTS13ErrorNamesTheFileThatFailed(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 600)
@@ -420,7 +422,7 @@ func TestTS13ErrorNamesTheFileThatFailed(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 
-	state, _ = newState(t)
+	state, _ = newLogState(t)
 	s = openStore(t, state)
 	err = s.SetHead(0, tlog.Hash{1})
 	if !errors.As(err, &e) || e.Name != headName || e.Rule != ruleRoot {
@@ -432,7 +434,7 @@ func TestTS13ErrorNamesTheFileThatFailed(t *testing.T) {
 // up to size more, written by the log l, and the same store after a restart.
 func crashAfterTiles(t *testing.T, head, more int64) (*os.Root, string, *testLog, *Store) {
 	t.Helper()
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, head)
@@ -496,7 +498,7 @@ func TestTU07CoveredHashesNeverChange(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			state, dir := newState(t)
+			state, dir := newLogState(t)
 			s := openStore(t, state)
 			var l testLog
 			l.commit(t, s, 0, c.head)
@@ -520,7 +522,7 @@ func TestTU07CoveredHashesNeverChange(t *testing.T) {
 
 // A narrower write that matches the stored hashes is accepted and makes no file.
 func TestTU07NarrowerMatchingWriteMakesNoFile(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 5)
@@ -534,7 +536,7 @@ func TestTU07NarrowerMatchingWriteMakesNoFile(t *testing.T) {
 
 // SetHead refuses a new head if the tiles no longer give the stored head.
 func TestTU07SetHeadChecksTheStoredHead(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -583,7 +585,7 @@ func TestTU07SetHeadRefusesFilesThatDisagree(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			state, dir := newState(t)
+			state, dir := newLogState(t)
 			s := openStore(t, state)
 			var l testLog
 			size, other := c.setup(t, s, dir, &l)
@@ -631,7 +633,7 @@ func TestTU07SetHeadRefusesHashesThatThisStoreDidNotWrite(t *testing.T) {
 }
 
 func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.extend(t, 300)
@@ -653,7 +655,7 @@ func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
 // After a crash, a tile that the root computation does not read can have two
 // partial files. Open keeps the widest one.
 func TestTU07OpenTidiesTilesBeyondTheHead(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var a testLog
 	a.commit(t, s, 0, 256)
@@ -685,7 +687,7 @@ func TestTU07TilesBeyondTheHeadIncludeGroupDirectories(t *testing.T) {
 		{1000000 * fullWidth, []string{"x999/999", "x001/x000/002.p/1", "x001/x001/000"}, []int64{999999, 1000002, 1001000}},
 	}
 	for i, c := range cases {
-		state, dir := newState(t)
+		state, dir := newLogState(t)
 		s := openStore(t, state)
 		s.head.N = c.head
 		for _, f := range c.files {
@@ -749,7 +751,7 @@ func TestTU07TidyDeletesTemporaryFileOfFullTile(t *testing.T) {
 }
 
 func TestTU07TileCoordinateBound(t *testing.T) {
-	state, _ := newState(t)
+	state, _ := newLogState(t)
 	s := openStore(t, state)
 	one := make([]byte, tlog.HashSize)
 	for _, c := range []struct {
@@ -768,7 +770,7 @@ func TestTU07TileCoordinateBound(t *testing.T) {
 // Open checks all files before it deletes one. A failed check deletes nothing,
 // not even a temporary file.
 func TestTU07OpenFailureDeletesNothing(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -790,7 +792,7 @@ func TestTU07OpenFailureDeletesNothing(t *testing.T) {
 
 // The file that a rename replaces must agree in the covered hashes too.
 func TestTU07WriteRefusesToReplaceAFileWithOtherCoveredHashes(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -823,7 +825,7 @@ func partialFiles(t *testing.T, dir string) []string {
 }
 
 func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -840,7 +842,7 @@ func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
 }
 
 func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 600)
@@ -859,7 +861,7 @@ func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
 // The store deletes a narrower file only if a wider file has the same covered
 // hashes. Else the narrower file can be the only copy of them.
 func TestTU07NeverDeletesTheOnlyCopyOfCoveredHashes(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -880,7 +882,7 @@ func TestTU07NeverDeletesTheOnlyCopyOfCoveredHashes(t *testing.T) {
 
 // The store accepts a partial width only if the name is the width in decimal.
 func TestTU07PartialNameMustBeTheWidth(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 3)
@@ -926,4 +928,125 @@ func tree(t *testing.T, dir string) string {
 		return err
 	}))
 	return sb.String()
+}
+
+// A move of the tree head from 3 to 600 covers the full tiles 0 and 1 for the
+// first time. The new root computation does not read them. SetHead checks them
+// too.
+func TestTU07SetHeadChecksEveryNewlyCoveredTile(t *testing.T) {
+	const to = 600
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, l *testLog) (other *testLog, skip func(tlog.Tile) bool, rule string)
+		plant bool // plant a partial file with other records after the writes
+	}{
+		{"tiles of a lost batch that the caller did not write", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
+			// The caller writes only the tiles that the root computation reads.
+			return l, func(x tlog.Tile) bool { return x.L == 0 && x.W == fullWidth }, ruleUnwrit
+		}, false},
+		{"full tile of a lost batch next to other records", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
+			o := l.fork(t, 3, "other")
+			o.extend(t, to)
+			return o, func(x tlog.Tile) bool { return x.L == 0 && x.N == 1 }, ruleUnwrit
+		}, false},
+		{"partial file with other records next to a full tile", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
+			return l, func(tlog.Tile) bool { return false }, ruleRewrite
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir, l, s := crashAfterTiles(t, 3, to)
+			other, skip, rule := c.setup(t, l)
+			for _, tile := range tlog.NewTiles(TileHeight, 3, to) {
+				if !skip(tile) {
+					mustNil(t, s.WriteTile(tile, other.tileData(tile)))
+				}
+			}
+			if c.plant {
+				o := l.fork(t, 3, "forged")
+				o.extend(t, to)
+				p := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 5}
+				mustNil(t, os.MkdirAll(filepath.Join(dir, "tlog", filepath.Dir(p.Path())), dirMode))
+				mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", p.Path()), o.tileData(p), fileMode))
+			}
+			before := tree(t, dir)
+			err := s.SetHead(to, other.root(t, to))
+			var e *Error
+			if !errors.As(err, &e) || e.Rule != rule {
+				t.Fatalf("want rule %q, got %v", rule, err)
+			}
+			if n, _ := s.TreeHead(); n != 3 || tree(t, dir) != before {
+				t.Fatalf("a refused SetHead changed the head (%d) or a file", n)
+			}
+			s.Close()
+			if n, root := openStore(t, state).TreeHead(); n != 3 || root != l.root(t, 3) {
+				t.Fatalf("next Open: head %d, %x", n, root)
+			}
+		})
+	}
+}
+
+// A write of a narrower width that makes no file does not lower the recorded
+// width of the tile.
+func TestTU07NarrowerWriteKeepsTheRecordedWidth(t *testing.T) {
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.extend(t, 5)
+	for _, w := range []int{5, 4} {
+		tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: w}
+		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+	}
+	mustNil(t, s.SetHead(5, l.root(t, 5)))
+}
+
+// A planted group directory below the deepest group of a valid tile number, and
+// a tile number above the largest of its level, are not tiles of the log.
+func TestTU07ScanIgnoresTileNumbersAboveTheLevelBound(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	plant := func(level int, rel string) {
+		p := filepath.Join(dir, "tlog", "tile", "8", fmt.Sprint(level), filepath.FromSlash(rel))
+		mustNil(t, os.MkdirAll(filepath.Dir(p), dirMode))
+		mustNil(t, os.WriteFile(p, nil, fileMode))
+	}
+	plant(0, strings.Repeat("x999/", 8)+"999.p/1") // too many groups
+	plant(0, "x999/x999/x999/999.p/1")             // the largest shape that fits
+	plant(1, "x999/x999/x999/999")                 // above 2^32 - 1
+	plant(6, "001.p/1")                            // above 0
+	for _, c := range []struct {
+		level int
+		want  []int64
+	}{{0, []int64{999999999999}}, {1, nil}, {6, nil}} {
+		tiles, err := s.tilesBeyond(c.level)
+		mustNil(t, err)
+		var got []int64
+		for _, tile := range tiles {
+			got = append(got, tile.N)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("level %d: got %v, want %v", c.level, got, c.want)
+		}
+	}
+}
+
+// The scans of one level use at most the bound for names, together.
+func TestTU07ScansOfALevelUseAtMostTheNameBound(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	level := filepath.Join(dir, "tlog", "tile", "8", "0")
+	mustNil(t, os.MkdirAll(level, dirMode))
+	for _, name := range []string{"001", "002", "003", "004"} {
+		mustNil(t, os.WriteFile(filepath.Join(level, name), nil, fileMode))
+	}
+	for left, wantErr := range map[int]bool{4: false, 3: true} {
+		sc := newScan(s, 0, map[int64]bool{})
+		sc.groups, sc.left = 1, left
+		err := sc.dir("tile/8/0", 0, 0)
+		var e *Error
+		if wantErr != (errors.As(err, &e) && e.Rule == ruleTooMany) || (!wantErr && (err != nil || sc.left != 0)) {
+			t.Errorf("left %d: err %v, left after %d", left, err, sc.left)
+		}
+	}
 }

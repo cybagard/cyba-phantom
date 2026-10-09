@@ -42,7 +42,9 @@ const (
 	// A partial-tile directory holds at most 255 widths and 255 temporary
 	// files. A level directory holds at most 1000 tiles, 1000 partial-tile
 	// directories, 1000 temporary files, and 1000 group directories. A longer
-	// listing is an error. A scan of one level reads at most maxScanNames.
+	// listing is an error. The scans of one level (at most two) read at most
+	// maxScanNames names together: a listing that goes over the bound is an
+	// error.
 	maxPartialNames = 1024
 	maxLevelNames   = 4096
 	maxScanNames    = 65536
@@ -80,6 +82,7 @@ const (
 	ruleTooMany  = "directory has too many names"
 	ruleUnwrit   = "tile of the new tree head was not written by this store"
 	ruleBatch    = "too many tiles since the last tree head"
+	ruleLink     = "directory is a link"
 )
 
 var (
@@ -88,6 +91,7 @@ var (
 	errNotFile = errors.New("not a regular file")
 	errNotDir  = errors.New("not a directory")
 	errMode    = errors.New("mode")
+	errLink    = errors.New("link")
 
 	emptyRoot = tlog.Hash(sha256.Sum256(nil))
 )
@@ -263,11 +267,14 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 // returned nil. SetHead refuses a size that is smaller than the stored size
 // and a size above maxSize. It reads the tiles and refuses the call if they no
 // longer give the stored tree head, or if they do not give the new one. For
-// each tile that the new root computation reads, every stored file of the tile
-// must agree with the other files in the hashes that the new tree head covers.
-// Else the next Open would refuse the tree head. SetHead also refuses newly
-// covered hashes that this Store did not write or check since the last SetHead
-// (a tile that WriteTile did not accept). A refused call changes no file.
+// each tile that the new root computation reads, and for each tile that the new
+// tree head covers for the first time (at every level), every stored file of
+// the tile must agree with the other files in the hashes that the new tree head
+// covers. Else the next Open would refuse the tree head. For each tile that the
+// new tree head covers for the first time, SetHead also refuses hashes that
+// this Store did not write or check since the last SetHead (a tile that
+// WriteTile did not accept). SetHead refuses a size that adds more than
+// maxBatchTiles full tiles. A refused call changes no file.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -275,6 +282,8 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 		return &Error{headName, ruleSize}
 	case size < s.head.N:
 		return &Error{headName, ruleShrink}
+	case (size-s.head.N)/fullWidth > maxBatchTiles:
+		return &Error{headName, ruleBatch}
 	}
 	if _, err := s.verify(s.head); err != nil {
 		return err
@@ -283,7 +292,12 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	if err != nil {
 		return err
 	}
-	for _, t := range read {
+	seen := map[tlog.Tile]bool{}
+	for _, t := range slices.Concat(read, tlog.NewTiles(TileHeight, s.head.N, next.N)) {
+		if seen[tileKey(t)] {
+			continue
+		}
+		seen[tileKey(t)] = true
 		c := covered(next.N, t)
 		if _, err := s.stale(t, 0, c); err != nil {
 			return err
@@ -326,9 +340,8 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // WriteTile accepts at most maxBatchTiles different tiles between two calls of
 // SetHead.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
-	// A level has ceil(hashes / fullWidth) tiles at the largest tree size.
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
-		t.N >= (maxSize>>(TileHeight*t.L)+fullWidth-1)/fullWidth || t.W < 1 ||
+		t.N > maxTileN(t.L) || t.W < 1 ||
 		t.W > fullWidth || len(data) != t.W*tlog.HashSize {
 		return &Error{"tile", ruleTile}
 	}
@@ -379,9 +392,15 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		return err
 	}
 	if t.W > c {
-		s.written[tileKey(t)] = t.W
+		s.written[tileKey(t)] = max(s.written[tileKey(t)], t.W)
 	}
 	return nil
+}
+
+// maxTileN returns the largest tile number of level l. A level has
+// ceil(hashes / fullWidth) tiles at the largest tree size.
+func maxTileN(l int) int64 {
+	return (maxSize>>(TileHeight*l)+fullWidth-1)/fullWidth - 1
 }
 
 func tilePath(t tlog.Tile, w int) string {
@@ -557,8 +576,9 @@ func (s *Store) tilesBeyond(l int) ([]tlog.Tile, error) {
 		}
 		starts = append(starts, next)
 	}
+	sc := newScan(s, l, found)
 	for _, from := range starts {
-		sc := &scan{s: s, level: l, from: from, found: found, left: maxScanNames}
+		sc.from = from
 		for sc.groups = 1; pow1000(sc.groups) <= from; sc.groups++ {
 		}
 		if err := sc.dir(path.Dir(tilePath(tlog.Tile{H: TileHeight, L: l}, fullWidth)), 0, 0); err != nil {
@@ -582,26 +602,34 @@ func pow1000(n int) int64 {
 
 // scan finds the tile numbers of one level that are not below from. A tile
 // path holds the number in groups of 3 digits: the directory x001 holds tiles
-// 1000 to 1999.
+// 1000 to 1999. The scan ignores a tile number above the largest valid number
+// of the level, and does not descend below the groups of that number.
 type scan struct {
-	s      *Store
-	level  int
-	from   int64
-	groups int // groups of 3 digits in from
-	found  map[int64]bool
-	left   int // names that the scan can still read
+	s         *Store
+	level     int
+	from      int64
+	groups    int // groups of 3 digits in from
+	maxN      int64
+	maxGroups int // groups of 3 digits in maxN
+	found     map[int64]bool
+	left      int // names that the scans of the level can still use
+}
+
+func newScan(s *Store, level int, found map[int64]bool) *scan {
+	c := &scan{s: s, level: level, maxN: maxTileN(level), found: found, left: maxScanNames}
+	for c.maxGroups = 1; pow1000(c.maxGroups) <= c.maxN; c.maxGroups++ {
+	}
+	return c
 }
 
 // dir scans the directory dir, which holds the tiles with the number prefix
 // (and the groups below it): depth is the number of groups in prefix.
 func (c *scan) dir(dir string, prefix int64, depth int) error {
-	names, err := c.s.names(dir, maxLevelNames)
+	names, err := c.s.names(dir, min(maxLevelNames, c.left))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err == nil {
-		if c.left -= len(names); c.left < 0 {
-			err = errTooMany
-		}
+		c.left -= len(names)
 	}
 	if err != nil {
 		return &Error{dir, fileRule(err)}
@@ -610,13 +638,14 @@ func (c *scan) dir(dir string, prefix int64, depth int) error {
 		base, _ := strings.CutSuffix(name, ".p")
 		base = strings.TrimSuffix(base, tmpSuffix)
 		if g, ok := digits(base); ok && len(base) == 3 {
-			if n := prefix*1000 + g; n >= c.from {
+			if n := prefix*1000 + g; n >= c.from && n <= c.maxN {
 				c.found[n] = true
 			}
 		} else if g, ok := digits(strings.TrimPrefix(name, "x")); ok && len(name) == 4 && name[0] == 'x' {
-			// Descend if the group directory holds tile numbers not below from.
+			// Descend if the group directory holds tile numbers not below from,
+			// and if a tile number can have one more group.
 			sub := prefix*1000 + g
-			if depth+1 >= c.groups || sub >= c.from/pow1000(c.groups-depth-1) {
+			if depth+1 < c.maxGroups && (depth+1 >= c.groups || sub >= c.from/pow1000(c.groups-depth-1)) {
 				if err := c.dir(path.Join(dir, name), sub, depth+1); err != nil {
 					return err
 				}
@@ -654,8 +683,8 @@ func (s *Store) readTile(t tlog.Tile) ([]byte, error) {
 
 // openDir opens the directory name. It does not block on a FIFO. The root
 // refuses a link out of the state directory and follows a link that stays
-// inside it. The directory name and each parent below r must have no group or
-// other permission bit.
+// inside it, but openDir refuses a directory that is a link. The directory
+// name and each parent below r must have no group or other permission bit.
 func openDir(r *os.Root, name string) (*os.File, error) {
 	f, err := openOne(r, name)
 	if err != nil {
@@ -673,7 +702,8 @@ func openDir(r *os.Root, name string) (*os.File, error) {
 	return f, nil
 }
 
-// openOne opens the directory name and checks its type and mode.
+// openOne opens the directory name and checks its type, its mode, and that it
+// is not a link: the open directory must be the one that Lstat gives for name.
 func openOne(r *os.Root, name string) (*os.File, error) {
 	f, err := r.OpenFile(name, readFlags, 0)
 	if err != nil {
@@ -686,6 +716,10 @@ func openOne(r *os.Root, name string) (*os.File, error) {
 		err = errNotDir
 	case fi.Mode().Perm()&otherBits != 0:
 		err = errMode
+	default:
+		if li, lerr := r.Lstat(name); lerr != nil || !os.SameFile(li, fi) {
+			err = errLink
+		}
 	}
 	if err != nil {
 		f.Close()
@@ -735,6 +769,8 @@ func fileRule(err error) string {
 		return ruleMode
 	case errors.Is(err, errTooMany):
 		return ruleTooMany
+	case errors.Is(err, errLink):
+		return ruleLink
 	}
 	return ruleRead
 }

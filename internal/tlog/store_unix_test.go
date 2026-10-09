@@ -17,7 +17,7 @@ import (
 )
 
 func TestTS13FilesAndDirectoriesHaveFixedModes(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 300)
@@ -126,12 +126,37 @@ func openErr(t *testing.T, state *os.Root, rule string) *Error {
 
 func committedLog(t *testing.T, size int64) (*os.Root, string) {
 	t.Helper()
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, size)
 	s.Close()
 	return state, dir
+}
+
+// A directory link inside the log directory makes the store list and delete
+// the files of another tile. Open refuses the link and deletes nothing.
+func TestTS13DirectoryLinkInsideLogDirectoryIsAnError(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 9) // only the file of width 9 holds the covered hashes
+	s.Close()
+	level := filepath.Join(dir, "tlog", "tile", "8", "0")
+	mustNil(t, os.Symlink("000.p", filepath.Join(level, "001.p")))
+	mustNil(t, os.WriteFile(filepath.Join(level, "001"), make([]byte, fullWidth*tlog.HashSize), fileMode))
+	w9 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 9}
+	if e := openErr(t, state, ruleLink); e.Name != "tile/8/0/001.p" {
+		t.Fatalf("name %q", e.Name)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "tlog", w9.Path()))
+	if err != nil || !bytes.Equal(got, l.tileData(w9)) {
+		t.Fatalf("the only copy of the covered hashes changed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(level, "001")); err != nil {
+		t.Fatalf("a file was deleted: %v", err)
+	}
 }
 
 func TestTS13FifoAtTilePathIsAnError(t *testing.T) {
@@ -216,7 +241,7 @@ func TestTS13TileDirectoryWithGroupOrOtherBitsIsAnError(t *testing.T) {
 // The store deletes a stale temporary file first and makes the new one with
 // O_EXCL, so a link, a FIFO, or a file with another mode does not stay.
 func TestTS13StaleTemporaryFileIsReplaced(t *testing.T) {
-	state, dir := newState(t)
+	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var l testLog
 	l.commit(t, s, 0, 256)
