@@ -2,10 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -77,7 +79,7 @@ func TestTU10_ListenDiffer(t *testing.T) {
 
 func wantLoad(t *testing.T, file, want string) {
 	t.Helper()
-	_, err := Load(writeConfig(t, base+file), nil)
+	_, err := loadTest(writeConfig(t, base+file), nil)
 	if (want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), want)) {
 		t.Errorf("got %v, want %q", err, want)
 	}
@@ -146,7 +148,7 @@ func TestTU10_CrossCheckFailedKey(t *testing.T) {
 		"listen:\n  http: \":443\"\n  https: bad\n",
 		"listen:\n  http: \":443\"\n  https: \":99999\"\n",
 	} {
-		_, err := Load(writeConfig(t, base+file), nil)
+		_, err := loadTest(writeConfig(t, base+file), nil)
 		if err == nil || !strings.Contains(err.Error(), "listen.https") {
 			t.Fatalf("got %v", err)
 		}
@@ -154,7 +156,7 @@ func TestTU10_CrossCheckFailedKey(t *testing.T) {
 			t.Errorf("a stale default is in the cross check: %v", err)
 		}
 	}
-	_, err := Load(writeConfig(t, base), []string{"CANARY_LISTEN_HTTP=:9443", "CANARY_OPS_LISTEN=0.0.0.0:9443"})
+	_, err := loadTest(writeConfig(t, base), []string{"CANARY_LISTEN_HTTP=:9443", "CANARY_OPS_LISTEN=0.0.0.0:9443"})
 	if err == nil || strings.Count(err.Error(), "\n") != 0 || !strings.Contains(err.Error(), "ops.listen at CANARY_OPS_LISTEN") {
 		t.Errorf("got %v", err)
 	}
@@ -169,7 +171,7 @@ func TestTU10_CrossCheckText(t *testing.T) {
 		"listen:\n  http: \"localhost:9443\"\n",
 		"listen:\n  https: \":80\"\n",
 	} {
-		_, err := Load(writeConfig(t, base+file), nil)
+		_, err := loadTest(writeConfig(t, base+file), nil)
 		if err == nil {
 			t.Fatalf("no error for %q", file)
 		}
@@ -297,7 +299,10 @@ func TestTU10_CA(t *testing.T) {
 	}, func(s string) string { return checkCA(nil, s) })
 }
 
-// TestTU10_AllowList checks that AllowList returns the acme.ca endpoint only.
+// ckptEndpoint is the endpoint of the publisher in base.
+var ckptEndpoint = Endpoint{"https", "ckpt.example", "443"}
+
+// TestTU10_AllowList checks that AllowList returns the acme.ca endpoint, then the publisher endpoint of base.
 func TestTU10_AllowList(t *testing.T) {
 	useTestKeys(t)
 	rows := []struct {
@@ -317,12 +322,12 @@ func TestTU10_AllowList(t *testing.T) {
 			if r.file != "" {
 				body += strings.TrimPrefix(r.file, "acme:\n")
 			}
-			c, err := Load(writeConfig(t, body+tlogOrigin), nil)
+			c, err := loadTest(writeConfig(t, body+tlogOrigin), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := c.AllowList(); !reflect.DeepEqual(got, r.want) {
-				t.Errorf("got %+v, want %+v", got, r.want)
+			if want := append(r.want, ckptEndpoint); !reflect.DeepEqual(c.AllowList(), want) {
+				t.Errorf("got %+v, want %+v", c.AllowList(), want)
 			}
 		})
 	}
@@ -513,7 +518,7 @@ func TestTU10_HtpasswdOpen(t *testing.T) {
 func TestTU10_HtpasswdValueOnly(t *testing.T) {
 	useTestKeys(t)
 	p := filepath.Join(t.TempDir(), strings.Repeat("n", 90))
-	_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
+	_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
 	if err == nil {
 		t.Fatal("no error")
 	}
@@ -543,7 +548,7 @@ func TestTU10_FileThroughLoad(t *testing.T) {
 	if err := os.Chmod(p, 0o666); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
+	_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd") || !strings.Contains(err.Error(), "writable by group") {
 		t.Errorf("got %v", err)
 	}
@@ -567,7 +572,7 @@ func TestTU10_URLOutput(t *testing.T) {
 		"https://[fe81::" + secret + "]/",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			_, err := Load(writeConfig(t, "acme:\n  email: sec@example.com\n  ca: \""+ca+"\"\n"+tlogOrigin), nil)
+			_, err := loadTest(writeConfig(t, "acme:\n  email: sec@example.com\n  ca: \""+ca+"\"\n"+tlogOrigin), nil)
 			if err == nil || !strings.Contains(err.Error(), "acme.ca") {
 				t.Fatalf("got %v", err)
 			}
@@ -579,19 +584,19 @@ func TestTU10_URLOutput(t *testing.T) {
 		})
 	}
 	t.Run("env", func(t *testing.T) {
-		_, err := Load(writeConfig(t, base), []string{"CANARY_ACME_CA=https://u:" + secret + "@h/"})
+		_, err := loadTest(writeConfig(t, base), []string{"CANARY_ACME_CA=https://u:" + secret + "@h/"})
 		if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "CANARY_ACME_CA") {
 			t.Errorf("got %v", err)
 		}
 	})
 	t.Run("email keeps the at sign", func(t *testing.T) {
-		_, err := Load(writeConfig(t, "acme:\n  email: \"ops@corp.com, b@corp.com\"\n"+tlogOrigin), nil)
+		_, err := loadTest(writeConfig(t, "acme:\n  email: \"ops@corp.com, b@corp.com\"\n"+tlogOrigin), nil)
 		if err == nil || !strings.Contains(err.Error(), `value "ops@corp.com, b@corp.com"`) {
 			t.Errorf("got %v", err)
 		}
 	})
 	t.Run("valid email passes", func(t *testing.T) {
-		if _, err := Load(writeConfig(t, "acme:\n  email: ops@corp.com\n"+tlogOrigin), nil); err != nil {
+		if _, err := loadTest(writeConfig(t, "acme:\n  email: ops@corp.com\n"+tlogOrigin), nil); err != nil {
 			t.Error(err)
 		}
 	})
@@ -606,7 +611,7 @@ func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
 	}
-	return Load(writeConfig(t, file), env)
+	return loadTest(writeConfig(t, file), env)
 }
 
 // bound is one row of the 04 section 3 bounds table: values that pass, values that fail,
@@ -812,14 +817,14 @@ func TestTU10_NewSectionsInvalid(t *testing.T) {
 // TestTU10_FetchURLAllowList checks that bundle.fetch_url adds its endpoint to the allow-list.
 func TestTU10_FetchURLAllowList(t *testing.T) {
 	c, err := loadProd(t, base)
-	if err != nil || len(c.AllowList()) != 1 {
+	if err != nil || len(c.AllowList()) != 2 { // acme.ca and the publisher of base
 		t.Fatalf("fetch off: %v, %+v", err, c)
 	}
 	c, err = loadProd(t, base, "CANARY_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, {"https", "bundle.example", "8443"}}
+	want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, {"https", "bundle.example", "8443"}, ckptEndpoint}
 	if got := c.AllowList(); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -841,5 +846,222 @@ func TestTS10_NewScalars(t *testing.T) {
 				t.Errorf("got %v", err)
 			}
 		})
+	}
+}
+
+// Flow mappings for the list items. The variables that they name are in listEnv and in loadTest.
+const (
+	acmeTlog = "acme:\n  email: sec@example.com\ntlog:\n  origin: test/origin\n"
+	pubItem  = `{type: https-put, url: "https://ckpt.example/put", token_env: CKPT_TOKEN}`
+	hookItem = `{type: webhook, url: "https://hook.example/a", hmac_secret_env: ALERT_HMAC}`
+	sysItem  = `{type: syslog, addr: "udp://10.0.0.5:514"}`
+	mailItem = `{type: smtp, host: "mail.example:587", from: a@b.example, to: [c@d.example]}`
+)
+
+// listEnv sets the variable of the webhook items to 32 bytes: the minimum of SEC-06.
+var listEnv = []string{"ALERT_HMAC=" + strings.Repeat("h", 32)}
+
+// pub returns a file whose tlog.publish list holds the items.
+func pub(items ...string) string {
+	return acmeTlog + "  publish:\n    - " + strings.Join(items, "\n    - ") + "\n"
+}
+
+// snk returns base and an alerts.sinks list that holds the items.
+func snk(items ...string) string {
+	return base + "alerts:\n  sinks:\n    - " + strings.Join(items, "\n    - ") + "\n"
+}
+
+// TestTS11_Lists checks the list rows of the 04 section 3 bounds table and the secret rules through Load:
+// the minimum and the maximum pass, one past each edge fails, and each error names the key path (T-S-11).
+func TestTS11_Lists(t *testing.T) {
+	many := func(n int, s string) []string { return slices.Repeat([]string{s}, n) }
+	to := func(n int) string { return "[" + strings.Join(many(n, "c@d.example"), ", ") + "]" }
+	mail := func(f string) string { return `{type: smtp, host: "mail.example:587", from: a@b.example, ` + f + "}" }
+	tok := func(v string) string { return `{type: https-put, url: "https://a.example/", token_env: ` + v + "}" }
+	hmac := func(v string) string { return `{type: webhook, url: "https://a.example/", hmac_secret_env: ` + v + "}" }
+	rows := []struct {
+		name, file string
+		env        []string
+		want       string // want is "" for an accepted file, or the key path that the error names.
+	}{
+		{"publish 1", pub(pubItem), nil, ""},
+		{"publish 4", pub(many(4, pubItem)...), nil, ""},
+		{"publish 5", pub(many(5, pubItem)...), nil, "tlog.publish"},
+		{"publish empty", acmeTlog + "  publish: []\n", nil, "tlog.publish"},
+		{"publish missing", acmeTlog, nil, "tlog.publish"},
+		{"publish scalar", acmeTlog + "  publish: x\n", nil, "tlog.publish"},
+		{"publish item scalar", pub("x"), nil, "tlog.publish[0]"},
+		{"publish type", pub(`{type: s3, url: "https://a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].type"},
+		{"publish type missing", pub(`{url: "https://a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].type"},
+		{"publish url missing", pub(`{type: https-put, token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish url http", pub(`{type: https-put, url: "http://a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish url user info", pub(`{type: https-put, url: "https://u:p@a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish url link-local", pub(`{type: https-put, url: "https://169.254.169.254/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish url not string", pub(`{type: https-put, url: 5, token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish token_env missing", pub(`{type: https-put, url: "https://a.example/"}`), nil, "tlog.publish[0].token_env"},
+		{"publish unknown key", pub(pubItem, strings.TrimSuffix(pubItem, "}")+", extra: 1}"), nil, "tlog.publish[1].extra"},
+		{"publish unknown mapping", pub(strings.TrimSuffix(pubItem, "}") + ", extra: {a: 1}}"), nil, "tlog.publish[0].extra"},
+		{"sinks 0", base + "alerts:\n  sinks: []\n", nil, ""},
+		{"sinks absent", base, nil, ""},
+		{"sinks 8", snk(many(8, sysItem)...), nil, ""},
+		{"sinks 9", snk(many(9, sysItem)...), nil, "alerts.sinks"},
+		{"sinks scalar", base + "alerts:\n  sinks: x\n", nil, "alerts.sinks"},
+		{"sink type", snk(`{type: pager, addr: "udp://h:1"}`), nil, "alerts.sinks[0].type"},
+		{"sink type missing", snk(`{addr: "udp://h:1"}`), nil, "alerts.sinks[0].type"},
+		{"sink type mapping", snk(`{type: {a: 1}, addr: "udp://h:1"}`), nil, "alerts.sinks[0].type"},
+		{"sink unknown key", snk(hookItem, strings.TrimSuffix(sysItem, "}")+", extra: 1}"), listEnv, "alerts.sinks[1].extra"},
+		{"sink key of another type", snk(strings.TrimSuffix(sysItem, "}") + `, url: "https://a.example/"}`), nil, "alerts.sinks[0].url"},
+		{"webhook", snk(hookItem), listEnv, ""},
+		{"webhook url http", snk(`{type: webhook, url: "http://a.example/", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook url missing", snk(`{type: webhook, hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook hmac missing", snk(`{type: webhook, url: "https://a.example/"}`), nil, "alerts.sinks[0].hmac_secret_env"},
+		{"webhook hmac 31 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 31)}, "alerts.sinks[0].hmac_secret_env"},
+		{"webhook hmac 32 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 32)}, ""},
+		{"syslog udp", snk(sysItem), nil, ""},
+		{"syslog tcp", snk(`{type: syslog, addr: "tcp://log.example:514"}`), nil, ""},
+		{"syslog tls", snk(`{type: syslog, addr: "tls://[2001:db8::1]:6514"}`), nil, ""},
+		{"syslog scheme", snk(`{type: syslog, addr: "http://log.example:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog no scheme", snk(`{type: syslog, addr: "log.example:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog no port", snk(`{type: syslog, addr: "udp://log.example"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog port 0", snk(`{type: syslog, addr: "udp://log.example:0"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog path", snk(`{type: syslog, addr: "udp://log.example:514/x"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog user info", snk(`{type: syslog, addr: "udp://u:p@log.example:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog empty host", snk(`{type: syslog, addr: "udp://:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog unspecified", snk(`{type: syslog, addr: "udp://0.0.0.0:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog link-local", snk(`{type: syslog, addr: "udp://169.254.1.1:514"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog addr missing", snk(`{type: syslog}`), nil, "alerts.sinks[0].addr"},
+		{"smtp", snk(mailItem), nil, ""},
+		{"smtp host no port", snk(`{type: smtp, host: mail.example, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtp host link-local", snk(`{type: smtp, host: "169.254.1.1:25", from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtp host missing", snk(`{type: smtp, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtp from CRLF", snk(`{type: smtp, host: "m.example:25", from: "a@b.example\r\nBcc: x@y.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
+		{"smtp from missing", snk(`{type: smtp, host: "m.example:25", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
+		{"smtp to 1", snk(mail("to: " + to(1))), nil, ""},
+		{"smtp to 16", snk(mail("to: " + to(16))), nil, ""},
+		{"smtp to 17", snk(mail("to: " + to(17))), nil, "alerts.sinks[0].to"},
+		{"smtp to empty", snk(mail("to: []")), nil, "alerts.sinks[0].to"},
+		{"smtp to missing", snk(mail("cc: x@y.example")), nil, "alerts.sinks[0].to"},
+		{"smtp to scalar", snk(mail("to: c@d.example")), nil, "alerts.sinks[0].to"},
+		{"smtp to CRLF", snk(mail(`to: [c@d.example, "e@f.example\nBcc: x@y.example"]`)), nil, "alerts.sinks[0].to[1]"},
+		{"smtp to two addresses", snk(mail(`to: ["c@d.example, e@f.example"]`)), nil, "alerts.sinks[0].to[0]"},
+		{"smtp to mapping", snk(mail(`to: [{a: 1}]`)), nil, "alerts.sinks[0].to[0]"},
+		{"smtp to not string", snk(mail(`to: [5]`)), nil, "alerts.sinks[0].to[0]"},
+		{"smtp unknown key", snk(mail("to: [c@d.example], cc: x@y.example")), nil, "alerts.sinks[0].cc"},
+		// The rules of the *_env keys (SEC-13).
+		{"env lower case", pub(tok("ckpt_token")), nil, "tlog.publish[0].token_env"},
+		{"env digit first", pub(tok("1TOKEN")), []string{"1TOKEN=x"}, "tlog.publish[0].token_env"},
+		{"env hyphen", pub(tok("CKPT-TOKEN")), []string{"CKPT-TOKEN=x"}, "tlog.publish[0].token_env"},
+		{"env CANARY_ prefix", pub(tok("CANARY_TOKEN")), []string{"CANARY_TOKEN=x"}, "tlog.publish[0].token_env"},
+		{"env underscore first", pub(tok("_TOKEN")), []string{"_TOKEN=x"}, ""},
+		{"env unset", pub(tok("NO_SUCH_VAR")), nil, "tlog.publish[0].token_env"},
+		{"env empty", pub(pubItem), []string{"CKPT_TOKEN="}, "tlog.publish[0].token_env"},
+		{"env hmac unset", snk(hookItem), nil, "alerts.sinks[0].hmac_secret_env"},
+		{"env hmac CANARY_ prefix", snk(hmac("CANARY_HMAC")), []string{"CANARY_HMAC=" + strings.Repeat("h", 32)}, "alerts.sinks[0].hmac_secret_env"},
+		{"env hmac not string", snk(hmac("5")), nil, "alerts.sinks[0].hmac_secret_env"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			c, err := loadProd(t, r.file, r.env...)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), "config: "+r.want+" at ")):
+				t.Errorf("got %v, want an error that names %s", err, r.want)
+			case r.want != "" && c != nil:
+				t.Error("an invalid entry returned a config") // The load fails closed.
+			}
+		})
+	}
+}
+
+// TestTU10_ListKeys checks that every list key of 04 section 3 loads and keeps its value with the source line,
+// and that a list key has no CANARY_ override.
+func TestTU10_ListKeys(t *testing.T) {
+	file := acmeTlog + "  publish:\n    - " + pubItem + "\n    - " + strings.Replace(pubItem, "CKPT_TOKEN", "OTHER_TOKEN", 1) +
+		"\nalerts:\n  sinks:\n    - " + hookItem + "\n    - " + sysItem + "\n    - " + mailItem + "\n"
+	c, err := loadProd(t, file, append([]string{"OTHER_TOKEN=x"}, listEnv...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"tlog.publish[0].type": "https-put", "tlog.publish[0].url": "https://ckpt.example/put", "tlog.publish[0].token_env": "CKPT_TOKEN",
+		"tlog.publish[1].token_env": "OTHER_TOKEN",
+		"alerts.sinks[0].type":      "webhook", "alerts.sinks[0].url": "https://hook.example/a", "alerts.sinks[0].hmac_secret_env": "ALERT_HMAC",
+		"alerts.sinks[1].type": "syslog", "alerts.sinks[1].addr": "udp://10.0.0.5:514",
+		"alerts.sinks[2].type": "smtp", "alerts.sinks[2].host": "mail.example:587", "alerts.sinks[2].from": "a@b.example", "alerts.sinks[2].to[0]": "c@d.example",
+	}
+	for p, s := range want {
+		if v, ok := c.Get(p); !ok || v.Str != s || v.Source != cfg || v.Line == 0 {
+			t.Errorf("%s: got %+v, want %q from the file", p, v, s)
+		}
+	}
+	for _, name := range []string{"CANARY_TLOG_PUBLISH", "CANARY_TLOG_PUBLISH_0_URL", "CANARY_ALERTS_SINKS", "CANARY_ALERTS_SINKS_0_TYPE", "CANARY_ALERTS_SINKS_2_TO"} {
+		_, err := loadProd(t, file, append([]string{name + "=x"}, append([]string{"OTHER_TOKEN=x"}, listEnv...)...)...)
+		if err == nil || !strings.Contains(err.Error(), name+": unknown CANARY_ variable") {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+// TestTS10_ListSecrets (SEC-13) sets every *_env variable to a marker and loads files with the production tables.
+// Valid files and files with many list errors must not show the marker, or its length, in an error, in %#v of
+// the error, or in the config. A name that someone pastes into a *_env key is also not shown, if it is not a variable name.
+func TestTS10_ListSecrets(t *testing.T) {
+	const marker = "secret_marker_7f3a_abcde" // 24 bytes
+	long := strings.Repeat(marker, 2)
+	env := []string{"CKPT_TOKEN=" + marker, "ALERT_HMAC=" + long, "SHORT_HMAC=" + marker}
+	good := pub(pubItem) + "alerts:\n  sinks:\n    - " + hookItem + "\n"
+	c, err := loadProd(t, good, env...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := fmt.Sprintf("%#v %v", c, c.AllowList()); strings.Contains(s, marker) {
+		t.Errorf("the config shows the marker: %s", s)
+	}
+	bad := acmeTlog + "  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "http://a.example/", token_env: ` + marker + "}\n" +
+		"alerts:\n  sinks:\n    - " + `{type: webhook, url: "https://a.example/", hmac_secret_env: SHORT_HMAC}` + "\n" +
+		"    - " + `{type: webhook, url: "https://a.example/", hmac_secret_env: ` + marker + "}\n" +
+		"    - " + `{type: webhook, url: "https://u:` + marker + `@a.example/", hmac_secret_env: ALERT_HMAC, extra: 1}` + "\n"
+	_, err = loadProd(t, bad, env...)
+	if err == nil {
+		t.Fatal("the invalid file loads")
+	}
+	for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+		s := fmt.Sprintf("%v %#v", e, e)
+		if strings.Contains(strings.ToLower(s), marker) || strings.Contains(s, strconv.Itoa(len(marker))) {
+			t.Errorf("the error shows the marker or its length: %s", s)
+		}
+	}
+	for _, want := range []string{"tlog.publish[1].token_env", "alerts.sinks[0].hmac_secret_env", "alerts.sinks[1].hmac_secret_env", "alerts.sinks[2].url", "alerts.sinks[2].extra"} {
+		if !strings.Contains(err.Error(), "config: "+want+" at ") {
+			t.Errorf("the error lacks %s: %v", want, err)
+		}
+	}
+}
+
+// TestTS08_AllowList checks that AllowList holds the endpoints of acme.ca, bundle.fetch_url, tlog.publish[].url,
+// and the sinks, and that an endpoint that many keys share is in the list one time (C4, T-S-11).
+func TestTS08_AllowList(t *testing.T) {
+	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\nbundle:\n  fetch_url: https://CA.EXAMPLE:14000/b\n" +
+		"tlog:\n  origin: test/origin\n  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "https://CA.example:14000/ckpt", token_env: CKPT_TOKEN}` + "\n" +
+		"alerts:\n  sinks:\n" +
+		"    - " + `{type: webhook, url: "https://ckpt.example:443/hook", hmac_secret_env: ALERT_HMAC}` + "\n" +
+		"    - " + sysItem + "\n" +
+		"    - " + `{type: syslog, addr: "tcp://10.0.0.5:514"}` + "\n" +
+		"    - " + `{type: syslog, addr: "tls://[2001:DB8::1]:6514"}` + "\n" +
+		"    - " + mailItem + "\n" +
+		"    - " + `{type: smtp, host: "MAIL.example:587", from: a@b.example, to: [c@d.example]}` + "\n" +
+		"    - " + hookItem + "\n"
+	c, err := loadProd(t, file, listEnv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Endpoint{
+		{"https", "ca.example", "14000"}, {"https", "ckpt.example", "443"},
+		{"udp", "10.0.0.5", "514"}, {"tcp", "10.0.0.5", "514"}, {"tls", "2001:db8::1", "6514"},
+		{"smtp", "mail.example", "587"}, {"https", "hook.example", "443"},
+	}
+	if got := c.AllowList(); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 }

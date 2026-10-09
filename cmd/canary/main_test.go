@@ -42,7 +42,7 @@ func validBody(t *testing.T) string {
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n"
+	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
 }
 
 // TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
@@ -71,7 +71,7 @@ func TestTS10_CheckWiring(t *testing.T) {
 
 // TestTS10_CheckNoDial checks that the load of a valid file calls no Dialer and no Resolver (SEC-11).
 func TestTS10_CheckNoDial(t *testing.T) {
-	if _, err := config.LoadWith(writeFile(t, validBody(t)), nil, config.Net{Dialer: failNet{t}, Resolver: failNet{t}}); err != nil {
+	if _, err := config.LoadWith(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=token"}, config.Net{Dialer: failNet{t}, Resolver: failNet{t}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (noNet{}).DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
@@ -91,12 +91,14 @@ func TestTS10_CheckExec(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	const marker = "SECRET-MARKER-7c1f9a"
+	var outs string
 	run := func(file string, env ...string) (code int, stdout, stderr string) {
 		var so, se strings.Builder
 		cmd := exec.Command(bin, "--check", file)
-		cmd.Env = append(os.Environ(), env...)
+		cmd.Env = append(append(os.Environ(), "CKPT_TOKEN="+marker), env...) // The publisher of validBody names CKPT_TOKEN.
 		cmd.Stdout, cmd.Stderr = &so, &se
 		err := cmd.Run()
+		defer func() { outs += so.String() + se.String() }() // outs holds the output of every run.
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else if err != nil {
@@ -105,19 +107,18 @@ func TestTS10_CheckExec(t *testing.T) {
 		return code, so.String(), se.String()
 	}
 	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
-	code, so, se := run(writeFile(t, validBody(t)))
+	code, _, se := run(writeFile(t, validBody(t)))
 	if code != 0 {
 		t.Errorf("valid file: exit %d, stderr %q", code, se)
 	}
-	outs := so + se
-	code, so, se = run(writeFile(t, validBody(t)), "CANARY_ACME_CA=not a url")
+	code, _, se = run(writeFile(t, validBody(t)), "CANARY_ACME_CA=not a url")
 	if code == 0 {
 		t.Error("acme.ca not a URL: exit 0")
 	}
 	if !strings.Contains(se, "acme.ca") {
 		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
 	}
-	code, so, se = run(bad)
+	code, _, se = run(bad)
 	if code == 0 {
 		t.Error("invalid file: exit 0")
 	}
@@ -126,14 +127,14 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("invalid file: stderr %q lacks %q", se, want)
 		}
 	}
-	// The key table has no secret key yet, and the loader never prints the value of a URL key.
-	// The email value has a wrong type, so the loader prints it. The marker is in the user
-	// information of a URL-like text, so the printed value must show REDACTED@ and not the marker.
-	code, so, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
+	// The loader never prints the value of a URL key or a secret key. The email value has a wrong
+	// type, so the loader prints it. The marker is in the user information of a URL-like text, so the
+	// printed value must show REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
+	code, _, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
 	if code == 0 {
 		t.Error("wrong type: exit 0")
 	}
-	if outs += so + se; strings.Contains(outs, marker) || strings.Contains(outs, "pw@") {
+	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") {
 		t.Errorf("output holds a secret: %q", outs)
 	}
 	if !strings.Contains(se, "REDACTED@") {

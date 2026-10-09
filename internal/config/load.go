@@ -39,11 +39,12 @@ type key struct {
 	def    string                             // def is the default value, parsed like an override.
 	req    bool                               // req marks a required key: the file or the environment must set it.
 	secret bool                               // secret marks a key whose value is never printed.
+	many   int                                // many > 0 marks a key in a list item that holds 1 to many scalars in a list.
 	check  func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
 }
 
 // keys is the production key table (04 section 3). It holds the scalar keys. The list
-// keys and the keys that name secrets are not in it yet.
+// keys are in the table lists. The keys in the item schemas are in the table of the load.
 var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
@@ -173,6 +174,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	if err != nil {
 		return nil, errors.Join(readError(path, err, table))
 	}
+	l.env = env
 	byPath := make(map[string]key, len(table))
 	byEnv := make(map[string]key, len(table))
 	for _, k := range table {
@@ -205,6 +207,16 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
+	// Lists: the list keys have no CANARY_ override, so byEnv does not hold the item keys.
+	// The loader handles an item key like a scalar key from here: set, required, and check.
+	itemKeys, listErrs := expandLists(doc, path, lists) // The loader reports listErrs after the required scalar keys.
+	table = append(slices.Clone(table), itemKeys...)
+	for _, k := range itemKeys {
+		if leaf, ok := doc.Leaves[k.path]; ok {
+			set(k, leaf.Value, leaf.Tag, path, leaf.Line)
+		}
+	}
+
 	// File: each node must be a known key or section. Errors come in file order.
 	paths := slices.Collect(maps.Keys(doc.Lines))
 	slices.SortFunc(paths, func(a, b string) int {
@@ -215,6 +227,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		k, isKey := byPath[p]
 		leaf, isLeaf := doc.Leaves[p]
 		switch {
+		case isListPath(p): // expandLists reads the list and its items.
 		case isKey && isLeaf:
 			set(k, leaf.Value, leaf.Tag, path, line)
 		case isKey:
@@ -253,6 +266,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
 		}
 	}
+	errs = append(errs, listErrs...)
 	// Each check runs one time, on the effective value. A key that fails is removed from vals.
 	for _, k := range table {
 		v, ok := vals[k.path]
