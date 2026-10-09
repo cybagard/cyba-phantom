@@ -51,6 +51,11 @@ func putKey(t *testing.T, dir, text string, mode os.FileMode) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A file left by an earlier call can be read-only (0400); a non-root owner
+	// cannot open it for write, so remove it first.
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(p, []byte(text), mode); err != nil {
 		t.Fatal(err)
 	}
