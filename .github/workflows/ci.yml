@@ -55,7 +55,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GOTOOLCHAIN: go1.27.1
+  GOTOOLCHAIN: go1.27.2
 
 jobs:
   lint:

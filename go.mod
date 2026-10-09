@@ -1,6 +1,6 @@
 module github.com/cybagard/cyba-phantom
 
-// The build pins the exact release via GOTOOLCHAIN=go1.27.1 (Makefile,
+// The build pins the exact release via GOTOOLCHAIN=go1.27.2 (Makefile,
 // CI env): every build runs the same Go, downloaded with Go's checksum
 // verification when the local toolchain differs. This is what makes the
 // two-build hash compare (T-P-07) meaningful. M-1 has two dependencies:
@@ -9,7 +9,7 @@ module github.com/cybagard/cyba-phantom
 // sumdb/note; ADR-002, SEC-16). x/mod must stay at v0.40.0 or later:
 // earlier versions do not check every tile against its parent in
 // tlog.TileHashReader (GO-2026-6179).
-go 1.27.1
+go 1.27.2
 
 require (
 	go.yaml.in/yaml/v3 v3.0.5

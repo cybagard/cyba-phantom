@@ -62,7 +62,7 @@ surface.
 
 ## Developing locally
 
-The build runs Go 1.27.1 exactly: `go.mod` sets the minimum and the
+The build runs Go 1.27.2 exactly: `go.mod` sets the minimum and the
 `Makefile`/CI pin the release via `GOTOOLCHAIN` (Go downloads it with
 checksum verification when your local toolchain differs). If you do not
 have Go at all, use the devcontainer — it runs the same pinned toolchain
