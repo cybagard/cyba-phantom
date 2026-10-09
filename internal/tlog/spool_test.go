@@ -293,8 +293,8 @@ func TestTI09_NewestRegularNoteStays(t *testing.T) {
 	}
 }
 
-// T-S-13: a regular note that cannot be opened (mode 0000) is a bad note. It is
-// not sent and it is deleted. Publish continues with the next notes and returns
+// T-S-13: a regular note that the open refuses with permission denied (mode
+// 0000) is a bad note. It is not sent and it is deleted. Publish continues with the next notes and returns
 // an error that names the file and the rule.
 func TestTS13_UnreadableNote(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -320,6 +320,33 @@ func TestTS13_UnreadableNote(t *testing.T) {
 	}
 	if st := e.Stats(); st.Rejected != 1 {
 		t.Fatalf("rejected = %d, want 1", st.Rejected)
+	}
+}
+
+// T-S-13: an open error that is not a property of the note is not a bad note. A
+// swap between the check and the open stands for it. Publish keeps the note,
+// does not count it, stops, and returns an error that names the file and the rule.
+func TestTS13_OpenErrorIsNotABadNote(t *testing.T) {
+	e := newSpool(t)
+	for size := uint64(1); size <= 3; size++ {
+		e.add(t, size)
+	}
+	path := filepath.Join(e.dir, e.noteFile(2))
+	calls := 0
+	afterLstat = func() { // the second read is the read of note 2
+		if calls++; calls == 2 {
+			must(t, os.WriteFile(path+".swap", nil, 0o600))
+			must(t, os.Rename(path+".swap", path))
+		}
+	}
+	t.Cleanup(func() { afterLstat = nil })
+	f := newFake()
+	err := e.Publish(0, f)
+	if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "changed between") {
+		t.Fatalf("Publish error = %v, want the file and the rule", err)
+	}
+	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || !slices.Equal(e.files(t), []uint64{1, 2, 3}) || e.Stats().Rejected != 0 {
+		t.Fatalf("sent %v, on disk %v, rejected %d", f.got, e.files(t), e.Stats().Rejected)
 	}
 }
 
