@@ -51,7 +51,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-I-06 | FR-06, FR-08 | Simulated instruction-following session → `agent-confirmed`, alert at all three sinks (mock webhook, mock syslog, MailHog) ≤ 60 s |
 | T-I-07 | FR-07, ADR-002, C5 | Kill writer mid-batch (panic injection): no evidence-kind event visible in SQLite without a tlog leaf (request/beacon events store without a leaf); restart recovers |
 | T-I-08 | FR-09 | Two checkpoints; consistency proof verifies; after manual tile corruption, `/healthz` 503 and consistency fails |
-| T-I-09 | FR-09 | Publisher down for 3 intervals → 3 queued checkpoints published in order on recovery |
+| T-I-09 | FR-09, SEC-17 | Publisher down for 3 intervals → 3 queued checkpoints published in order on recovery |
 | T-I-10 | FR-08, threat: alert storm | 5 000 callbacks in one session → exactly 1 `agent-confirmed` alert + summary; sink calls ≤ 10/min |
 | T-I-11 | FR-10, SEC-04 | Dashboard unreachable on decoy vhost; 401 without auth; binds only configured interface |
 | T-I-12 | FR-14 | SIGHUP with new bundle: no dropped requests during swap (continuous 200 rps load) |
@@ -86,6 +86,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-S-10 | SEC-11, SEC-13, FR-12 | Config parser: fuzz plus fixed cases (alias expansion, > 64 KiB, deep nesting, duplicate key, second document, custom tag, YAML 1.1 boolean, octal integer, `${…}` value, unknown `CANARY_*` variable) → non-zero exit naming the key, bounded time and memory; a known secret marker never appears in `--check` output, errors, or logs; config file writable by other → rejected |
 | T-S-11 | SEC-12, SEC-13, SEC-02, SEC-04, SEC-06, C2, C4, C8 | Config bounds: for each row of the 04 §3 bounds table, the minimum and maximum pass and one value past each edge fails naming the key; public `ops.listen`, `http` URL, URL with user information, link-local host, bad `tlog.origin`, unset or short secret variable → rejected; loader allow-list equals the configured endpoints |
 | T-S-12 | SEC-14, FR-07, C8 | Event record and encoder: fuzz plus fixed cases (invalid UTF-8, lone surrogate escape, duplicate member name, float, `-0`, integer past 2^53−1, `<>&`, U+2028, non-BMP member names) → an error or the exact RFC 8785 bytes, never a repaired value; output is stable when encoded again; an IP and an `ip_hmac` marker in each constructor input never appear in the canonical bytes; `request` and `beacon` records cannot be hashed; an unknown kind is an error; the largest record is ≤ the fixed maximum size |
+| T-S-13 | SEC-16, SEC-17, FR-07, FR-09, C4 | tlog, signer and publisher: a one-leaf log has the root SHA-256(0x00 ‖ event hash); a changed, short or missing tile, or a tile symlink out of the state directory → open fails and a proof is never returned; the signer refuses a smaller tree, the same size with another root, and a tree with no consistency proof to the last signed checkpoint; a key file that is a symlink, has group or other bits, has another owner, or has a key name that is not the origin → error; a missing key on a log with a signed checkpoint → error and no new key; the publisher does not follow a redirect, does not use a proxy from the environment, and sends a spooled checkpoint only after its signature verifies; a key marker and a token marker never appear in logs or errors |
 
 ### Acceptance (installed sensor, simulator harness `test/simulator`)
 | ID | Covers | Test |
@@ -120,7 +121,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 ## 5. Exit criteria per milestone
 | Milestone | Must pass |
 |-----------|-----------|
-| M-1 | T-U-06..12, T-U-17, T-I-01, T-I-03, T-P-07, T-S-10, T-S-11, T-S-12 |
+| M-1 | T-U-06..12, T-U-17, T-I-01, T-I-03, T-P-07, T-S-10, T-S-11, T-S-12, T-S-13 |
 | M-2 | + T-U-01, T-U-08, T-U-14, T-I-02, T-I-04, T-I-12, T-S-01, T-S-02 |
 | M-3 | + T-U-02..05, T-U-13, T-U-16, T-I-05..10, T-I-14, T-S-03 |
 | M-4 | + T-U-11, T-U-15, T-I-11, T-I-13, T-I-15, T-S-04..09, T-A-04, T-A-09 |
