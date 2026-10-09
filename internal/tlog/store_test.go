@@ -2,14 +2,20 @@ package tlog
 
 import (
 	"bytes"
+	"cmp"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -19,6 +25,25 @@ import (
 type testLog struct {
 	hashes []tlog.Hash
 	n      int64
+	label  string // text of the records; "record" if empty
+}
+
+// fork returns a log with the first n records of l. The records after n have
+// the text label.
+func (l *testLog) fork(t *testing.T, n int64, label string) *testLog {
+	t.Helper()
+	f := &testLog{hashes: slices.Clone(l.hashes[:tlog.StoredHashCount(n)]), n: n, label: label}
+	return f
+}
+
+// tileData returns the data of tile t.
+func (l *testLog) tileData(t tlog.Tile) []byte {
+	var data []byte
+	for j := 0; j < t.W; j++ {
+		h := l.hashes[tlog.StoredHashIndex(t.H*t.L, t.N*fullWidth+int64(j))]
+		data = append(data, h[:]...)
+	}
+	return data
 }
 
 func (l *testLog) ReadHashes(idx []int64) ([]tlog.Hash, error) {
@@ -41,8 +66,9 @@ func (l *testLog) root(t *testing.T, n int64) tlog.Hash {
 // extend adds records until the log has n records.
 func (l *testLog) extend(t *testing.T, n int64) {
 	t.Helper()
+	label := cmp.Or(l.label, "record")
 	for ; l.n < n; l.n++ {
-		hs, err := tlog.StoredHashes(l.n, []byte(fmt.Sprintf("record %d", l.n)), l)
+		hs, err := tlog.StoredHashes(l.n, []byte(fmt.Sprintf("%s %d", label, l.n)), l)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,12 +81,7 @@ func (l *testLog) put(t *testing.T, s *Store, from, to int64) {
 	t.Helper()
 	l.extend(t, to)
 	for _, tile := range tlog.NewTiles(TileHeight, from, to) {
-		var data []byte
-		for j := 0; j < tile.W; j++ {
-			h := l.hashes[tlog.StoredHashIndex(tile.H*tile.L, tile.N*fullWidth+int64(j))]
-			data = append(data, h[:]...)
-		}
-		if err := s.WriteTile(tile, data); err != nil {
+		if err := s.WriteTile(tile, l.tileData(tile)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -136,15 +157,116 @@ func TestTU07HeadIsWrittenLast(t *testing.T) {
 	s := openStore(t, state)
 	var l testLog
 	l.extend(t, 3)
+	head := filepath.Join(dir, "tlog", headName)
+	empty, err := os.ReadFile(head)
+	mustNil(t, err)
 	if err := s.SetHead(3, l.root(t, 3)); err == nil {
 		t.Fatal("tree head accepted with no tiles")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "tlog", headName)); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("tree head file exists: %v", err)
+	if now, _ := os.ReadFile(head); !bytes.Equal(now, empty) {
+		t.Fatal("a refused tree head changed the head file")
 	}
-	l.commit(t, s, 0, 3)
+	l.put(t, s, 0, 3)
+	var e *Error
+	if err := s.SetHead(3, tlog.Hash{1}); !errors.As(err, &e) || e.Rule != ruleRoot {
+		t.Fatalf("wrong root over stored tiles: %v", err)
+	}
+	mustNil(t, s.SetHead(3, l.root(t, 3)))
 	if err := s.SetHead(2, l.root(t, 2)); err == nil {
 		t.Fatal("tree head got smaller")
+	}
+}
+
+// A new log has a tree head of size 0 before the first tile is written.
+func TestTU07OpenWritesEmptyHead(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var want [headSize]byte
+	copy(want[sizeLen:], emptyRoot[:])
+	if got, err := os.ReadFile(filepath.Join(dir, "tlog", headName)); err != nil || !bytes.Equal(got, want[:]) {
+		t.Fatalf("head file after the first Open: %x, %v", got, err)
+	}
+	// A crash after the first tile and before the first tree head.
+	var l testLog
+	l.put(t, s, 0, 3)
+	s.Close()
+	s = openStore(t, state)
+	if size, root := s.TreeHead(); size != 0 || root != emptyRoot {
+		t.Fatalf("size %d, root %x", size, root)
+	}
+	// The log grows with other records over the stale tiles.
+	o := l.fork(t, 0, "other")
+	o.commit(t, s, 0, 5)
+}
+
+func TestTU07OpenWithLeftoverHeadTemporaryFile(t *testing.T) {
+	state, dir := newState(t)
+	mustNil(t, os.Mkdir(filepath.Join(dir, "tlog"), dirMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName+tmpSuffix), []byte("x"), fileMode))
+	s := openStore(t, state)
+	if size, root := s.TreeHead(); size != 0 || root != emptyRoot {
+		t.Fatalf("size %d, root %x", size, root)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tlog", headName+tmpSuffix)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the temporary file stays: %v", err)
+	}
+}
+
+// No head and a file that is not the temporary file of the head means loss or
+// tampering. Open does not repair it.
+func TestTS13OpenRefusesTilesWithoutHead(t *testing.T) {
+	state, dir := newState(t)
+	mustNil(t, os.Mkdir(filepath.Join(dir, "tlog"), dirMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName+tmpSuffix), []byte("x"), fileMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", "other"), nil, fileMode))
+	snapshot := tree(t, dir)
+	_, err := Open(state, "tlog")
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleEmpty || e.Name != headName {
+		t.Fatalf("got %v", err)
+	}
+	if tree(t, dir) != snapshot {
+		t.Fatal("Open changed the files")
+	}
+}
+
+// A size above the limit is an error before any hash is computed. x/mod does
+// not end for a size above 2^62.
+func TestTS13HugeTreeSizeIsAnError(t *testing.T) {
+	for _, size := range []uint64{maxSize + 1, 1 << 62, 1<<63 - 1, 1 << 63, 1<<64 - 1} {
+		state, dir := newState(t)
+		openStore(t, state).Close()
+		var b [headSize]byte
+		binary.BigEndian.PutUint64(b[:], size)
+		mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName), b[:], fileMode))
+		err := within(t, func() error { _, err := Open(state, "tlog"); return err })
+		var e *Error
+		if !errors.As(err, &e) || e.Rule != ruleSize || e.Name != headName {
+			t.Fatalf("size %d: %v", size, err)
+		}
+	}
+	state, _ := newState(t)
+	s := openStore(t, state)
+	for _, size := range []int64{maxSize + 1, 1 << 62, math.MaxInt64} {
+		err := within(t, func() error { return s.SetHead(size, tlog.Hash{}) })
+		var e *Error
+		if !errors.As(err, &e) || e.Rule != ruleSize {
+			t.Fatalf("SetHead(%d): %v", size, err)
+		}
+	}
+}
+
+// within runs f and fails the test if f does not return in a short time.
+func within(t *testing.T, f func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("call did not return")
+		return nil
 	}
 }
 
@@ -236,8 +358,16 @@ func TestTS13OpenRejectsBadFiles(t *testing.T) {
 			if !strings.Contains(text, c.rule) || (c.file != headName && !strings.Contains(text, c.file)) {
 				t.Fatalf("error does not name the file and the rule: %q", text)
 			}
-			if raw, _ := os.ReadFile(file); len(raw) > 8 && strings.Contains(text, hex.EncodeToString(raw[:8])) {
-				t.Fatalf("error holds file bytes: %q", text)
+			raw, _ := os.ReadFile(file)
+			for _, enc := range []string{
+				hex.EncodeToString(raw),
+				base64.StdEncoding.EncodeToString(raw),
+				base64.URLEncoding.EncodeToString(raw),
+				base64.RawStdEncoding.EncodeToString(raw),
+			} {
+				if len(raw) > 0 && strings.Contains(text, enc) {
+					t.Fatalf("error holds file bytes: %q", text)
+				}
 			}
 			if after := tree(t, dir); after != snapshot {
 				t.Fatal("open changed the files")
@@ -247,14 +377,240 @@ func TestTS13OpenRejectsBadFiles(t *testing.T) {
 }
 
 func TestTS13StoreNeverChangesModes(t *testing.T) {
-	src, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatal(err)
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no source files: %v", err)
 	}
-	for _, call := range []string{".Chmod(", ".Chown(", ".Chtimes("} {
-		if bytes.Contains(src, []byte(call)) {
-			t.Errorf("store.go calls %s", call)
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
 		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range []string{"Chmod", "Chown", "Chtimes"} {
+			if bytes.Contains(src, []byte(call)) {
+				t.Errorf("%s names %s", file, call)
+			}
+		}
+	}
+}
+
+// The error names the file that failed, not the narrower file that the reader
+// asked for first. The name is never empty.
+func TestTS13ErrorNamesTheFileThatFailed(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 600)
+	s.Close()
+	// The root computation reads the partial tile of width 88. A short file of
+	// width 100 replaces it.
+	tail := tlog.Tile{H: TileHeight, L: 0, N: 2, W: 88}
+	wide := tail
+	wide.W = 100
+	mustNil(t, os.Remove(filepath.Join(dir, "tlog", tail.Path())))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", wide.Path()), make([]byte, 64), fileMode))
+	_, err := Open(state, "tlog")
+	var e *Error
+	if !errors.As(err, &e) || e.Name != wide.Path() || e.Rule != ruleLength {
+		t.Fatalf("got %v", err)
+	}
+
+	state, _ = newState(t)
+	s = openStore(t, state)
+	err = s.SetHead(0, tlog.Hash{1})
+	if !errors.As(err, &e) || e.Name != headName || e.Rule != ruleRoot {
+		t.Fatalf("wrong root for size 0: %v", err)
+	}
+}
+
+// crashAfterTiles returns a store with a tree head of size head and the tiles
+// up to size more, written by the log l, and the same store after a restart.
+func crashAfterTiles(t *testing.T, head, more int64) (*os.Root, string, *testLog, *Store) {
+	t.Helper()
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, head)
+	l.put(t, s, head, more)
+	s.Close()
+	return state, dir, &l, openStore(t, state)
+}
+
+// Hashes beyond the tree head are not committed. After a crash, the log grows
+// with other records over them, in the same partial width and in the full tile.
+func TestTU07CrashAfterTilesThenOtherRecords(t *testing.T) {
+	for _, to := range []int64{5, 256, 300} {
+		_, _, l, s := crashAfterTiles(t, 3, to)
+		o := l.fork(t, 3, "other")
+		o.commit(t, s, 3, to)
+		if size, root := s.TreeHead(); size != to || root != o.root(t, to) {
+			t.Fatalf("size %d: head %d, %x", to, size, root)
+		}
+	}
+}
+
+// A write that changes a covered hash is an error, at every width.
+func TestTU07CoveredHashesNeverChange(t *testing.T) {
+	cases := []struct {
+		name         string
+		head, stored int64
+		width        int
+	}{
+		{"same width", 5, 5, 5},
+		{"narrower than head", 5, 5, 3},
+		{"wider than head", 5, 5, 7},
+		{"wider than the stored file", 3, 3, 5},
+		{"narrower than a wider stored file", 3, 5, 4},
+		{"narrower after the full tile", 256, 256, 3},
+		{"full tile", 256, 256, 256},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := newState(t)
+			s := openStore(t, state)
+			var l testLog
+			l.commit(t, s, 0, c.head)
+			l.put(t, s, c.head, c.stored)
+			// The first 3 records are other records: they differ in covered hashes.
+			o := l.fork(t, 0, "other")
+			o.extend(t, 300)
+			tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: c.width}
+			before := tree(t, dir)
+			err := s.WriteTile(tile, o.tileData(tile))
+			var e *Error
+			if !errors.As(err, &e) || e.Rule != ruleRewrite || !strings.HasPrefix(e.Name, "tile/8/0/000") {
+				t.Fatalf("got %v", err)
+			}
+			if tree(t, dir) != before {
+				t.Fatal("the failed write changed a file")
+			}
+		})
+	}
+}
+
+// A narrower write that matches the stored hashes is accepted and makes no file.
+func TestTU07NarrowerMatchingWriteMakesNoFile(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 5)
+	before := tree(t, dir)
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+	if tree(t, dir) != before {
+		t.Fatal("the write changed a file")
+	}
+}
+
+// SetHead refuses a new head if the tiles no longer give the stored head.
+func TestTU07SetHeadChecksTheStoredHead(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	// A wider file with correct hashes. It is not a write through the store.
+	l.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", wide.Path()), l.tileData(wide), fileMode))
+	root := l.root(t, 5)
+	// The file of the stored head changes in a covered hash.
+	flipByte(t, filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}.Path()), 0)
+	err := s.SetHead(5, root)
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleRoot {
+		t.Fatalf("got %v", err)
+	}
+	if size, _ := s.TreeHead(); size != 3 {
+		t.Fatalf("size %d", size)
+	}
+}
+
+// partialFiles returns the names in the partial directory of tile 0 at level 0.
+func partialFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(dir, "tlog", "tile", "8", "0", "000.p"))
+	mustNil(t, err)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	s.Close()
+	// A crash between the rename of width 5 and the delete of width 3.
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), l.tileData(narrow), fileMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()+tmpSuffix), []byte("x"), fileMode))
+	openStore(t, state)
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
+		t.Fatalf("files after Open: %v", names)
+	}
+}
+
+func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 600)
+	// The root computation does not read tile 0. Open does not clean it.
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 2}
+	mustNil(t, os.MkdirAll(filepath.Join(dir, "tlog", filepath.Dir(narrow.Path())), dirMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), l.tileData(narrow), fileMode))
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()+tmpSuffix), []byte("x"), fileMode))
+	full := tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}
+	mustNil(t, s.WriteTile(full, l.tileData(full)))
+	if names := partialFiles(t, dir); len(names) != 0 {
+		t.Fatalf("files after the write: %v", names)
+	}
+}
+
+// The store deletes a narrower file only if a wider file has the same covered
+// hashes. Else the narrower file can be the only copy of them.
+func TestTU07NeverDeletesTheOnlyCopyOfCoveredHashes(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	s.Close()
+	o := l.fork(t, 0, "other")
+	o.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", wide.Path()), o.tileData(wide), fileMode))
+	_, err := Open(state, "tlog")
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleRewrite {
+		t.Fatalf("got %v", err)
+	}
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"3", "5"}) {
+		t.Fatalf("files after Open: %v", names)
+	}
+}
+
+// The store accepts a partial width only if the name is the width in decimal.
+func TestTU07PartialNameMustBeTheWidth(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	s.Close()
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	for _, name := range []string{"03", "+3", "3x"} {
+		mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", filepath.Dir(narrow.Path()), name), l.tileData(narrow), fileMode))
+	}
+	openStore(t, state)
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"+3", "03", "3x", "5"}) {
+		t.Fatalf("files after Open: %v", names)
 	}
 }
 
