@@ -1,11 +1,11 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -38,7 +38,7 @@ var lists = []listKey{
 		"smtp": {
 			{path: "host", kind: kindString, req: true, check: checkSMTPHost},
 			{path: "from", kind: kindString, req: true, check: checkEmail},
-			{path: "to", kind: kindString, req: true, many: 16, check: checkEmail},
+			{path: "to", kind: kindString, req: true, maxItems: 16, check: checkEmail},
 		},
 	}},
 }
@@ -59,13 +59,18 @@ func count(doc *Doc, p string) int {
 	}
 }
 
+// failer returns a function that adds an Error for the key at p to errs.
+func failer(doc *Doc, file string, errs *[]error) func(p, detail string) {
+	return func(p, detail string) {
+		*errs = append(*errs, &Error{Key: p, Source: file, Line: doc.Lines[p], Detail: detail})
+	}
+}
+
 // expandLists reads the lists in doc. It returns one key for each scalar node that the
 // item schemas allow, with the full path (for example "alerts.sinks[1].url"), and the
 // errors in the shape of the lists. The loader then handles these keys like scalar keys.
 func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []error) {
-	fail := func(p, detail string) {
-		errs = append(errs, &Error{Key: p, Source: file, Line: doc.Lines[p], Detail: detail})
-	}
+	fail := failer(doc, file, &errs)
 	for _, l := range table {
 		if _, present := doc.Lines[l.path]; !present {
 			if l.req {
@@ -92,9 +97,7 @@ func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []erro
 
 // expandItem expands the item at ip.
 func expandItem(doc *Doc, file string, l listKey, ip string) (out []key, errs []error) {
-	fail := func(p, detail string) {
-		errs = append(errs, &Error{Key: p, Source: file, Line: doc.Lines[p], Detail: detail})
-	}
+	fail := failer(doc, file, &errs)
 	if !doc.Mappings[ip] {
 		fail(ip, "the item needs a mapping")
 		return
@@ -123,28 +126,27 @@ func expandItem(doc *Doc, file string, l listKey, ip string) (out []key, errs []
 	for _, f := range schema {
 		f.path = ip + "." + f.path
 		_, present := doc.Lines[f.path]
-		_, leaf := doc.Leaves[f.path]
 		switch {
-		case f.many > 0 && !present:
+		case f.maxItems > 0 && !present:
 			errs = append(errs, &Error{Key: f.path, Source: file, Line: doc.Lines[ip], Detail: "the key is required"})
-		case f.many > 0 && !doc.Sequences[f.path]:
+		case f.maxItems > 0 && !doc.Sequences[f.path]:
 			fail(f.path, "the key needs a list")
-		case f.many > 0:
+		case f.maxItems > 0:
 			n := count(doc, f.path)
-			if n < 1 || n > f.many {
-				fail(f.path, "the list needs 1 to "+strconv.Itoa(f.many)+" entries")
+			if n < 1 || n > f.maxItems {
+				fail(f.path, "the list needs 1 to "+strconv.Itoa(f.maxItems)+" entries")
 				continue
 			}
 			for j := range n {
 				e := f
-				e.path, e.req, e.many = fmt.Sprintf("%s[%d]", f.path, j), false, 0
-				if _, ok := doc.Leaves[e.path]; !ok {
+				e.path, e.req, e.maxItems = fmt.Sprintf("%s[%d]", f.path, j), false, 0
+				if !isScalar(doc, e.path) {
 					fail(e.path, "the key needs a scalar value")
 					continue
 				}
 				out = append(out, e)
 			}
-		case present && !leaf:
+		case present && !isScalar(doc, f.path):
 			fail(f.path, "the key needs a scalar value")
 		default: // An absent key stays in the list: the required check reports it.
 			out = append(out, f)
@@ -163,11 +165,8 @@ func children(doc *Doc, p string) []string {
 			out = append(out, q)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if a, b := doc.Lines[out[i]], doc.Lines[out[j]]; a != b {
-			return a < b
-		}
-		return out[i] < out[j]
+	slices.SortFunc(out, func(a, b string) int {
+		return cmp.Or(cmp.Compare(doc.Lines[a], doc.Lines[b]), cmp.Compare(a, b))
 	})
 	return out
 }
@@ -176,10 +175,10 @@ func children(doc *Doc, p string) []string {
 var envVarName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // checkSecretEnv returns a check for a *_env key. The value is the name of a variable
-// that must be set in the environment of the loader, with at least min bytes. The detail
-// names the variable and never shows its value or its length (SEC-13). The loader never
-// prints the value of the key, because the name can be a pasted secret.
-func checkSecretEnv(min int) func(*loader, string) string {
+// that must be set in the environment of the loader, with at least minBytes bytes. The
+// detail names the variable (04 section 3). It shows a name only if the name matches the
+// name rule. It never shows the value of the variable or its length (SEC-13).
+func checkSecretEnv(minBytes int) func(*loader, string) string {
 	return func(l *loader, raw string) string {
 		switch {
 		case !envVarName.MatchString(raw):
@@ -188,7 +187,7 @@ func checkSecretEnv(min int) func(*loader, string) string {
 			return "the variable name must not start with CANARY_"
 		}
 		v, ok := "", false
-		for _, kv := range l.env { // The last entry wins, as in a child process.
+		for _, kv := range l.env { // The loader uses the last entry. os.Environ holds one entry for each name.
 			if n, val, found := strings.Cut(kv, "="); found && n == raw {
 				v, ok = val, true
 			}
@@ -196,8 +195,8 @@ func checkSecretEnv(min int) func(*loader, string) string {
 		switch {
 		case !ok || v == "":
 			return "the variable " + raw + " is not set or is empty"
-		case len(v) < min:
-			return "the variable " + raw + " must hold at least " + strconv.Itoa(min) + " bytes"
+		case len(v) < minBytes:
+			return "the variable " + raw + " must hold at least " + strconv.Itoa(minBytes) + " bytes"
 		}
 		return ""
 	}

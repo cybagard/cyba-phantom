@@ -408,8 +408,8 @@ func checkSMTPHost(_ *loader, raw string) string {
 
 // AllowList returns the outbound endpoints that the config allows (C4): the endpoints of
 // acme.ca, bundle.fetch_url (if set), tlog.publish[].url, and the alert sinks. An endpoint
-// that two keys share is in the list one time. The order is the first use, in the order
-// of that sentence. A webhook has the scheme https, a syslog sink has udp, tcp, or tls,
+// that two keys share is in the list one time. The order is acme.ca, bundle.fetch_url,
+// tlog.publish, then alerts.sinks. A webhook has the scheme https, a syslog sink has udp, tcp, or tls,
 // and an smtp sink has the scheme smtp.
 func (c *Config) AllowList() []Endpoint {
 	var list []Endpoint

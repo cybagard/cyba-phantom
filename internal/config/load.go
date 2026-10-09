@@ -34,17 +34,17 @@ var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str"
 
 // key is one row of the key table.
 type key struct {
-	path   string
-	kind   kind
-	def    string                             // def is the default value, parsed like an override.
-	req    bool                               // req marks a required key: the file or the environment must set it.
-	secret bool                               // secret marks a key whose value is never printed.
-	many   int                                // many > 0 marks a key in a list item that holds 1 to many scalars in a list.
-	check  func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
+	path     string
+	kind     kind
+	def      string                             // def is the default value, parsed like an override.
+	req      bool                               // req marks a required key: the file or the environment must set it.
+	secret   bool                               // secret marks a key whose value is never printed.
+	maxItems int                                // maxItems > 0 marks a key in a list item that holds 1 to maxItems scalars in a list.
+	check    func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
 }
 
 // keys is the production key table (04 section 3). It holds the scalar keys. The list
-// keys are in the table lists. The keys in the item schemas are in the table of the load.
+// keys are in the table lists. The loader adds the item keys to its table when it reads the lists (expandLists).
 var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
@@ -353,10 +353,37 @@ func readError(path string, err error, table []key) error {
 			}); i >= 0 {
 				return table[i].path
 			}
+			if p := secretItemPath(s); p != "" {
+				return p
+			}
 			return s
 		})
 	}
 	return &Error{Source: path, Detail: detail}
+}
+
+// secretItemPath returns the path of the secret item key that the path s is below, or "".
+// The secret item keys come from the list schemas. For example, "tlog.publish[0].token_env.x"
+// gives "tlog.publish[0].token_env".
+func secretItemPath(s string) string {
+	for _, l := range lists {
+		rest, ok := strings.CutPrefix(s, l.path+"[")
+		if !ok {
+			continue
+		}
+		n, rest, ok := strings.Cut(rest, "].")
+		if !ok || !decimal.MatchString(n) {
+			continue
+		}
+		for _, schema := range l.schemas {
+			for _, f := range schema {
+				if f.secret && (strings.HasPrefix(rest, f.path+".") || strings.HasPrefix(rest, f.path+"[")) {
+					return l.path + "[" + n + "]." + f.path
+				}
+			}
+		}
+	}
+	return ""
 }
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)

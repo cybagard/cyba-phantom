@@ -897,6 +897,7 @@ func TestTS11_Lists(t *testing.T) {
 		{"publish url http", pub(`{type: https-put, url: "http://a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
 		{"publish url user info", pub(`{type: https-put, url: "https://u:p@a.example/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
 		{"publish url link-local", pub(`{type: https-put, url: "https://169.254.169.254/", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
+		{"publish url fragment", pub(`{type: https-put, url: "https://a.example/#f", token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
 		{"publish url not string", pub(`{type: https-put, url: 5, token_env: CKPT_TOKEN}`), nil, "tlog.publish[0].url"},
 		{"publish token_env missing", pub(`{type: https-put, url: "https://a.example/"}`), nil, "tlog.publish[0].token_env"},
 		{"publish unknown key", pub(pubItem, strings.TrimSuffix(pubItem, "}")+", extra: 1}"), nil, "tlog.publish[1].extra"},
@@ -914,6 +915,10 @@ func TestTS11_Lists(t *testing.T) {
 		{"webhook", snk(hookItem), listEnv, ""},
 		{"webhook url http", snk(`{type: webhook, url: "http://a.example/", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
 		{"webhook url missing", snk(`{type: webhook, hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook url user info", snk(`{type: webhook, url: "https://u:p@a.example/", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook url link-local", snk(`{type: webhook, url: "https://169.254.169.254/", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook url unspecified", snk(`{type: webhook, url: "https://0.0.0.0/", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
+		{"webhook url fragment", snk(`{type: webhook, url: "https://a.example/#f", hmac_secret_env: ALERT_HMAC}`), listEnv, "alerts.sinks[0].url"},
 		{"webhook hmac missing", snk(`{type: webhook, url: "https://a.example/"}`), nil, "alerts.sinks[0].hmac_secret_env"},
 		{"webhook hmac 31 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 31)}, "alerts.sinks[0].hmac_secret_env"},
 		{"webhook hmac 32 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 32)}, ""},
@@ -924,6 +929,7 @@ func TestTS11_Lists(t *testing.T) {
 		{"syslog no scheme", snk(`{type: syslog, addr: "log.example:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog no port", snk(`{type: syslog, addr: "udp://log.example"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog port 0", snk(`{type: syslog, addr: "udp://log.example:0"}`), nil, "alerts.sinks[0].addr"},
+		{"syslog port 65536", snk(`{type: syslog, addr: "udp://log.example:65536"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog path", snk(`{type: syslog, addr: "udp://log.example:514/x"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog user info", snk(`{type: syslog, addr: "udp://u:p@log.example:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog empty host", snk(`{type: syslog, addr: "udp://:514"}`), nil, "alerts.sinks[0].addr"},
@@ -934,6 +940,8 @@ func TestTS11_Lists(t *testing.T) {
 		{"smtp host no port", snk(`{type: smtp, host: mail.example, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
 		{"smtp host link-local", snk(`{type: smtp, host: "169.254.1.1:25", from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
 		{"smtp host missing", snk(`{type: smtp, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtp host unspecified", snk(`{type: smtp, host: "0.0.0.0:25", from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtp from two addresses", snk(`{type: smtp, host: "m.example:25", from: "a@b.example, e@f.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
 		{"smtp from CRLF", snk(`{type: smtp, host: "m.example:25", from: "a@b.example\r\nBcc: x@y.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
 		{"smtp from missing", snk(`{type: smtp, host: "m.example:25", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
 		{"smtp to 1", snk(mail("to: " + to(1))), nil, ""},
@@ -1005,7 +1013,7 @@ func TestTU10_ListKeys(t *testing.T) {
 
 // TestTS10_ListSecrets (SEC-13) sets every *_env variable to a marker and loads files with the production tables.
 // Valid files and files with many list errors must not show the marker, or its length, in an error, in %#v of
-// the error, or in the config. A name that someone pastes into a *_env key is also not shown, if it is not a variable name.
+// the error, or in the config. The loader shows a pasted name only if it matches the name rule.
 func TestTS10_ListSecrets(t *testing.T) {
 	const marker = "secret_marker_7f3a_abcde" // 24 bytes
 	long := strings.Repeat(marker, 2)
@@ -1037,10 +1045,38 @@ func TestTS10_ListSecrets(t *testing.T) {
 			t.Errorf("the error lacks %s: %v", want, err)
 		}
 	}
+	// The body forms of TestTS10_Secret, below each secret item key of the production lists.
+	files := map[string]func(body string) string{
+		"token_env": func(body string) string {
+			return acmeTlog + "  publish:\n    - type: https-put\n      url: \"https://ckpt.example/put\"\n      token_env: " + body + "\n"
+		},
+		"hmac_secret_env": func(body string) string {
+			return base + "alerts:\n  sinks:\n    - type: webhook\n      url: \"https://hook.example/a\"\n      hmac_secret_env: " + body + "\n"
+		},
+	}
+	upper := strings.ToUpper(marker)
+	for name, file := range files {
+		for _, body := range []string{
+			marker, "!" + marker, "!<" + marker + "> x", "[!" + marker + "]",
+			"{" + upper + ": 1}", "\n        " + marker + ":\n          x: !t 1", "[" + marker + ": !t 1]",
+			"{" + marker + ": 1, " + marker + ": 2}", "\n        - " + marker + ": !t 1", "[" + marker + "]",
+		} {
+			_, err := loadProd(t, file(body), env...)
+			if err == nil {
+				t.Errorf("%s %q: the invalid file loads", name, body)
+				continue
+			}
+			for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+				if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
+					t.Errorf("%s %q: the error shows the marker: %s", name, body, s)
+				}
+			}
+		}
+	}
 }
 
 // TestTS08_AllowList checks that AllowList holds the endpoints of acme.ca, bundle.fetch_url, tlog.publish[].url,
-// and the sinks, and that an endpoint that many keys share is in the list one time (C4, T-S-11).
+// and the sinks, and that an endpoint that many keys share is in the list one time (C4, T-S-08, T-S-11).
 func TestTS08_AllowList(t *testing.T) {
 	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\nbundle:\n  fetch_url: https://CA.EXAMPLE:14000/b\n" +
 		"tlog:\n  origin: test/origin\n  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "https://CA.example:14000/ckpt", token_env: CKPT_TOKEN}` + "\n" +
