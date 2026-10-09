@@ -355,7 +355,7 @@ func endpoint(scheme, host, port string) Endpoint {
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
 // in the exact case. The host is not empty. An IP literal has no zone and is not unspecified
 // or link-local. It returns a fixed detail on an error.
-func parseEndpoint(raw string, schemes ...string) (Endpoint, string) {
+func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !contains(schemes, scheme) {
 		return Endpoint{}, "the address scheme must be " + strings.Join(schemes, ", ") + " and be followed by ://"
@@ -387,12 +387,13 @@ func loopbackLiteral(a netip.Addr) bool {
 }
 
 // checkSyslogAddr accepts tls:// to any allowed host. It accepts udp:// and tcp:// only to a
-// loopback IP literal: a host name is not loopback, as the loader does not resolve names.
+// loopback IP literal: a host name is not loopback, because the loader does not resolve names.
 func checkSyslogAddr(_ *loader, raw string) string {
-	e, d := parseEndpoint(raw, syslogSchemes...)
+	e, d := parseEndpoint(raw, syslogSchemes)
 	if d != "" || e.Scheme == "tls" {
 		return d
 	}
+	// Parse the host again: endpoint() unmaps an IPv4-mapped address, so e.Host cannot reject ::ffff:127.0.0.1.
 	_, rest, _ := strings.Cut(raw, "://")
 	if hp, _ := parseHostPort(rest); !loopbackLiteral(hp.addr) {
 		return "the host of a udp or tcp address must be a loopback IP literal (127.0.0.0/8 or ::1)"
@@ -401,7 +402,7 @@ func checkSyslogAddr(_ *loader, raw string) string {
 }
 
 func checkSMTPHost(_ *loader, raw string) string {
-	_, d := parseEndpoint(raw, smtpSchemes...)
+	_, d := parseEndpoint(raw, smtpSchemes)
 	return d
 }
 
@@ -443,11 +444,11 @@ func (c *Config) AllowList() []Endpoint {
 		case "webhook":
 			fromURL(c.values[p+"url"].Str)
 		case "syslog":
-			if e, d := parseEndpoint(c.values[p+"addr"].Str, syslogSchemes...); d == "" {
+			if e, d := parseEndpoint(c.values[p+"addr"].Str, syslogSchemes); d == "" {
 				add(e)
 			}
 		case "smtp":
-			if e, d := parseEndpoint(c.values[p+"host"].Str, smtpSchemes...); d == "" {
+			if e, d := parseEndpoint(c.values[p+"host"].Str, smtpSchemes); d == "" {
 				add(e)
 			}
 		default:

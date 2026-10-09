@@ -134,6 +134,9 @@ func TestTS10_CheckExec(t *testing.T) {
 	if code == 0 {
 		t.Error("wrong type: exit 0")
 	}
+	if !strings.Contains(se, "REDACTED@") {
+		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
+	}
 	// A *_env key can hold a pasted secret in place of a name. The error names the key path and
 	// never the variable name, for an unset variable and for a short one (SEC-13).
 	const nameMarker = "JBSWY3DPEHPK3PXPZZSECRETQ7"
@@ -160,8 +163,5 @@ func TestTS10_CheckExec(t *testing.T) {
 	}
 	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") || strings.Contains(outs, nameMarker) {
 		t.Errorf("output holds a secret: %q", outs)
-	}
-	if !strings.Contains(se, "REDACTED@") {
-		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
 	}
 }
