@@ -1,6 +1,6 @@
 # Agent Canary — M-1 task 1.1 (09).
 #
-# Toolchain: Go 1.27.1, pinned exactly via GOTOOLCHAIN (below; go.mod sets
+# Toolchain: Go 1.27.2, pinned exactly via GOTOOLCHAIN (below; go.mod sets
 # the minimum, the env var the exact release). CI and .devcontainer run the
 # same pinned toolchain, so local runs and CI runs agree.
 
@@ -9,7 +9,7 @@ GO := go
 # Exact toolchain pin (T-P-07 reproducibility): every go command runs the
 # same Go release everywhere — downloaded with Go's checksum verification
 # when the local toolchain differs from the pinned one.
-GOTOOLCHAIN := go1.27.1
+GOTOOLCHAIN := go1.27.2
 export GOTOOLCHAIN
 
 # sha256sum is absent on macOS; shasum -a 256 is the BSD fallback. Both
