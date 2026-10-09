@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,6 +41,8 @@ type fakeTarget struct {
 	*httptest.Server
 	mu       sync.Mutex
 	status   int    // 0: 200
+	queue    []int  // the status of the next requests, before status; 0: 200
+	open     int    // connections that are not closed
 	location string // sent with a 3xx status
 	big      bool   // a response body of 1 MiB
 	stall    chan struct{}
@@ -58,6 +61,9 @@ func newTarget(t *testing.T) *fakeTarget {
 		size, _ := strconv.ParseUint(lines[min(1, len(lines)-1)], 10, 64)
 		f.mu.Lock()
 		status, stall := f.status, f.stall
+		if len(f.queue) > 0 {
+			status, f.queue = f.queue[0], f.queue[1:]
+		}
 		f.attempts = append(f.attempts, size)
 		f.auth = append(f.auth, r.Header.Get("Authorization"))
 		if status == 0 {
@@ -81,6 +87,16 @@ func newTarget(t *testing.T) *fakeTarget {
 		}
 	}))
 	f.Config.ErrorLog = log.New(io.Discard, "", 0)
+	f.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch s {
+		case http.StateNew:
+			f.open++
+		case http.StateClosed, http.StateHijacked:
+			f.open--
+		}
+	}
 	f.StartTLS()
 	t.Cleanup(f.Close)
 	return f
@@ -96,6 +112,12 @@ func (f *fakeTarget) got() (attempts, stored []uint64, auth []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.attempts), slices.Clone(f.stored), slices.Clone(f.auth)
+}
+
+func (f *fakeTarget) openConns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open
 }
 
 func (f *fakeTarget) url() string {
@@ -121,6 +143,9 @@ type pubEnv struct {
 func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ...PublishOption) *pubEnv {
 	t.Helper()
 	root, dir := newState(t)
+	if os.Getenv(tokenVar) == "" { // the constructor needs a token
+		t.Setenv(tokenVar, tokenMarker)
+	}
 	signer, verifier := noteKeys(t, testOrigin, 1)
 	lg, buf := testLogger()
 	pool := x509.NewCertPool()
@@ -244,6 +269,50 @@ func TestTI09_Backoff(t *testing.T) {
 	}
 }
 
+// T-I-09: a 2xx response resets the backoff, also when a later note of the same
+// call fails. The next wait is then 30 s and not a doubled value.
+func TestTI09_SuccessResetsBackoffBeforeLaterFailure(t *testing.T) {
+	a := newTarget(t)
+	e := newPub(t, 5*time.Minute, []*fakeTarget{a})
+	e.pub.backoff(0, e.clock.t)
+	e.pub.backoff(0, e.clock.t)
+	if e.pub.state[0].delay != 2*backoffStart {
+		t.Fatalf("delay before the call = %v, want 60 s", e.pub.state[0].delay)
+	}
+	e.clock.t = e.pub.state[0].next
+	e.add(t, 1)
+	e.add(t, 2)
+	a.queue = []int{0, http.StatusInternalServerError} // note 1: 2xx, note 2: fails
+	e.pub.pass()
+	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1}) {
+		t.Fatalf("stored = %v, want only note 1", stored)
+	}
+	if got := e.pub.state[0].delay; got != backoffStart {
+		t.Fatalf("delay = %v, want %v after a 2xx and a failure", got, backoffStart)
+	}
+	if got := e.pub.state[0].next.Sub(e.clock.t); got < 29*time.Second || got > 31*time.Second {
+		t.Fatalf("wait = %v, want 30 s", got)
+	}
+}
+
+// T-I-09: the time of the next try starts at the end of the send and not at the
+// start of the pass. The test clock moves 10 s each time that it is read.
+func TestTI09_BackoffStartsAfterSend(t *testing.T) {
+	a := newTarget(t)
+	a.setStatus(http.StatusInternalServerError)
+	e := newPub(t, 5*time.Minute, []*fakeTarget{a})
+	e.add(t, 1)
+	base, reads := e.clock.t, 0
+	e.pub.now = func() time.Time {
+		reads++
+		return base.Add(time.Duration(reads-1) * 10 * time.Second)
+	}
+	e.pub.pass()
+	if got := e.pub.state[0].next.Sub(base); got < 40*time.Second-time.Microsecond {
+		t.Fatalf("next try is %v after the start of the pass, want 40 s or more", got)
+	}
+}
+
 func TestTI09_BackoffCapAndJitter(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, 24*time.Hour, []*fakeTarget{a})
@@ -278,12 +347,43 @@ func TestTI09_Limits(t *testing.T) {
 	if p.timeout != 30*time.Second || tr.TLSHandshakeTimeout != 10*time.Second || tr.ResponseHeaderTimeout != 10*time.Second || tr.MaxIdleConnsPerHost != 1 {
 		t.Fatalf("limits: %v %v %v %v", p.timeout, tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout, tr.MaxIdleConnsPerHost)
 	}
+	if tr.IdleConnTimeout != 90*time.Second || tr.MaxResponseHeaderBytes != 16<<10 {
+		t.Fatalf("limits: idle timeout %v, header bytes %d, want 90 s and 16 KiB", tr.IdleConnTimeout, tr.MaxResponseHeaderBytes)
+	}
 	if tr.Proxy != nil || p.client.CheckRedirect == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
 		tr.TLSClientConfig.InsecureSkipVerify || tr.TLSClientConfig.RootCAs != nil {
 		t.Fatal("the transport must have no proxy, no redirect, verified TLS 1.2 or later, and the system roots")
 	}
 	if _, err := NewPublisher(e.spool, nil, time.Minute, nil); err == nil {
 		t.Fatal("targets that differ from the spool must be an error")
+	}
+}
+
+// T-I-09: the constructor refuses an interval that is not positive and a token
+// that is empty or not set. The error names neither the variable nor a token.
+func TestTI09_NewPublisherRefusesBadInput(t *testing.T) {
+	a := newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a})
+	for _, interval := range []time.Duration{0, -time.Minute} {
+		if _, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}}, interval, nil); err == nil {
+			t.Errorf("interval %v: want an error", interval)
+		}
+	}
+	const unsetVar, emptyVar = "TLOG_TEST_PUBLISH_NOT_SET", "TLOG_TEST_PUBLISH_EMPTY"
+	t.Setenv(emptyVar, "")
+	for _, name := range []string{unsetVar, emptyVar} {
+		_, err := NewPublisher(e.spool, []PublishTarget{{a.url(), name}}, time.Minute, nil)
+		if err == nil {
+			t.Fatalf("token variable %s: want an error", name)
+		}
+		for _, bad := range []string{name, tokenMarker, "TLOG_TEST"} {
+			if strings.Contains(err.Error(), bad) {
+				t.Errorf("error has %q: %v", bad, err)
+			}
+		}
+		if !strings.Contains(err.Error(), "target 0") {
+			t.Errorf("error does not name the target index: %v", err)
+		}
 	}
 }
 
@@ -319,16 +419,23 @@ func TestTS13_NoRedirect(t *testing.T) {
 	}
 }
 
-// T-S-13: Send contacts only a configured URL.
+// T-S-13: Send contacts only a configured URL. A URL that is not configured has
+// its own error class and one log line with no URL.
 func TestTS13_OnlyConfiguredURLs(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})
-	if err := e.pub.Send(a.URL+"/other", 1, []byte("x\n1\n")); !errors.Is(err, errPublishTransport) {
-		t.Fatalf("err = %v, want a refusal", err)
+	err := e.pub.Send(a.URL+"/other", 1, []byte("x\n1\n"))
+	if !errors.Is(err, errPublishNotConfig) || err.Error() != "publish: target not configured" {
+		t.Fatalf("err = %v, want the class target not configured", err)
 	}
 	if attempts, _, _ := a.got(); len(attempts) != 0 {
 		t.Fatal("a URL that is not configured got a request")
 	}
+	if want := `target=-1 status=0 class="target not configured"`; strings.Count(e.logs.String(), want) != 1 {
+		t.Fatalf("log = %q, want one line with %q", e.logs, want)
+	}
+	e.assertClean(t, "error", err.Error())
+	e.assertClean(t, "log", e.logs.String())
 }
 
 // T-S-13: the proxy of the environment is not used. The target has a name that
@@ -466,10 +573,18 @@ func TestTI09_RunPublishesAndStops(t *testing.T) {
 			t.Fatal("Run did not publish the note")
 		}
 	}
+	if n := a.openConns(); n != 1 {
+		t.Fatalf("open connections while Run waits = %d, want the 1 idle connection", n)
+	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+	for deadline := time.Now().Add(10 * time.Second); a.openConns() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not close the idle connection")
+		}
 	}
 }

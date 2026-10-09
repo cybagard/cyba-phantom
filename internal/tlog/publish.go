@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -23,6 +24,8 @@ const (
 	backoffStart         = 30 * time.Second
 	backoffMax           = time.Hour
 	backoffJitter        = 0.2
+	idleConnTimeout      = 90 * time.Second
+	maxResponseHeader    = 16 << 10
 )
 
 // publishError is an error of a fixed class. It has no URL, host, token, or
@@ -37,6 +40,7 @@ const (
 	errPublishStatus    = publishError("status not 2xx")
 	errPublishTimeout   = publishError("timeout")
 	errPublishAddress   = publishError("address refused")
+	errPublishNotConfig = publishError("target not configured")
 )
 
 // PublishTarget is one tlog.publish entry. TokenEnv names the variable that
@@ -69,7 +73,7 @@ type backoffState struct {
 type Publisher struct {
 	spool    *Spool
 	targets  []publishTarget
-	state    []backoffState // used only by Run
+	state    []backoffState // used on the goroutine of Run; Send runs on it
 	client   *http.Client
 	interval time.Duration
 	timeout  time.Duration
@@ -80,9 +84,10 @@ type Publisher struct {
 }
 
 // NewPublisher makes the publisher for the targets of spool, in the same order.
-// It reads each token from its environment variable one time. It uses its own
-// transport: no proxy, no redirect, verified TLS 1.2 or later, and no connect to
-// an unspecified, link-local, or multicast address.
+// It reads each token from its environment variable one time. It returns an
+// error if the interval is not positive or if a token is empty or not set. It
+// uses its own transport: no proxy, no redirect, verified TLS 1.2 or later, and
+// no connect to an unspecified, link-local, or multicast address.
 func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger, opts ...PublishOption) (*Publisher, error) {
 	cfg := publishConfig{timeout: publishTimeout, now: time.Now, jitter: rand.Float64}
 	for _, o := range opts {
@@ -90,6 +95,9 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	if interval <= 0 {
+		return nil, errors.New("publisher: the checkpoint interval must be positive")
 	}
 	if len(targets) != len(spool.targets) {
 		return nil, errors.New("publisher: the targets are not the targets of the spool")
@@ -100,7 +108,11 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 		if t.URL != spool.targets[i] {
 			return nil, errors.New("publisher: the targets are not the targets of the spool")
 		}
-		p.targets = append(p.targets, publishTarget{t.URL, os.Getenv(t.TokenEnv)})
+		token := os.Getenv(t.TokenEnv)
+		if token == "" {
+			return nil, fmt.Errorf("publisher: the token of target %d is empty or not set", i)
+		}
+		p.targets = append(p.targets, publishTarget{t.URL, token})
 	}
 	dial := newDialer().DialContext
 	if cfg.dialAddr != nil {
@@ -110,14 +122,16 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 	}
 	p.client = &http.Client{
 		Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           dial,
-			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: cfg.roots},
-			TLSHandshakeTimeout:   publishHeaderTimeout,
-			ResponseHeaderTimeout: publishHeaderTimeout,
-			MaxIdleConns:          len(targets),
-			MaxIdleConnsPerHost:   1,
-			ForceAttemptHTTP2:     true,
+			Proxy:                  nil,
+			DialContext:            dial,
+			TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: cfg.roots},
+			TLSHandshakeTimeout:    publishHeaderTimeout,
+			ResponseHeaderTimeout:  publishHeaderTimeout,
+			MaxResponseHeaderBytes: maxResponseHeader,
+			IdleConnTimeout:        idleConnTimeout,
+			MaxIdleConns:           len(targets),
+			MaxIdleConnsPerHost:    1,
+			ForceAttemptHTTP2:      true,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errPublishRedirect },
 	}
@@ -125,8 +139,9 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 }
 
 // Send puts one note to target. It returns nil only for a 2xx response. Every
-// error has a fixed class (publishError). The timeout bounds the call, and the
-// spool holds its lock while it runs.
+// error has a fixed class (publishError). The timeout bounds the call. The
+// caller (the spool) holds its lock while Send runs. A 2xx response resets the
+// backoff of the target.
 func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 	i := -1
 	for j, t := range p.targets {
@@ -136,7 +151,7 @@ func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 		}
 	}
 	if i < 0 { // only the configured URLs are contacted
-		return errPublishTransport
+		return p.fail(-1, 0, errPublishNotConfig)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
@@ -145,9 +160,7 @@ func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 		return p.fail(i, 0, errPublishTransport)
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	if tok := p.targets[i].token; tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
+	req.Header.Set("Authorization", "Bearer "+p.targets[i].token)
 	resp, err := p.client.Do(req)
 	status := 0
 	if resp != nil { // also set for a refused redirect, with the body closed
@@ -160,6 +173,7 @@ func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 	case status < 200 || status > 299:
 		return p.fail(i, status, errPublishStatus)
 	}
+	p.state[i] = backoffState{}
 	p.log.Info("checkpoint published", "target", i, "status", status)
 	return nil
 }
@@ -199,8 +213,10 @@ func (p *Publisher) Notify() {
 }
 
 // Run publishes until ctx ends. It starts with one pass, then waits for Notify
-// or for the next target whose backoff ends.
+// or for the next target whose backoff ends. When it returns, it closes the idle
+// connections of the transport.
 func (p *Publisher) Run(ctx context.Context) {
+	defer p.client.CloseIdleConnections()
 	for {
 		wait, pending := p.pass()
 		var tick <-chan time.Time
@@ -218,11 +234,10 @@ func (p *Publisher) Run(ctx context.Context) {
 
 // pass publishes to each target whose backoff has ended. It returns the time to
 // the next backoff end, if a target waits. A failed target does not stop the
-// others.
+// others. The next try of a failed target starts at the end of its send.
 func (p *Publisher) pass() (wait time.Duration, pending bool) {
-	now := p.now()
 	for i := range p.targets {
-		if now.Before(p.state[i].next) {
+		if p.now().Before(p.state[i].next) {
 			continue
 		}
 		err := p.spool.Publish(i, p)
@@ -233,8 +248,9 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 		if !errors.As(err, new(publishError)) { // Send logged the others
 			p.log.Warn("checkpoint publish failed", "target", i, "status", 0, "class", "spool")
 		}
-		p.backoff(i, now)
+		p.backoff(i, p.now())
 	}
+	now := p.now()
 	for _, st := range p.state {
 		if d := st.next.Sub(now); d > 0 && (!pending || d < wait) {
 			wait, pending = d, true
@@ -244,7 +260,8 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 }
 
 // backoff doubles the delay of target i, from 30 s up to the smaller of the
-// checkpoint interval and 1 h. The wait is the delay with a jitter of 20 %.
+// checkpoint interval and 1 h. The wait is the delay with a jitter of plus or
+// minus 20 %.
 func (p *Publisher) backoff(i int, now time.Time) {
 	st := &p.state[i]
 	st.delay = min(max(2*st.delay, backoffStart), min(p.interval, backoffMax))

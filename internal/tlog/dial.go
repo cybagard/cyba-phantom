@@ -17,9 +17,8 @@ func newDialer() *net.Dialer {
 }
 
 // refuseAddress is the Control function of the dialer. It refuses an address that
-// is unspecified, link-local unicast, or multicast. This is the load-time rule
-// for a configured address, applied to the address that the connect uses.
-// Loopback is allowed.
+// is unspecified, link-local unicast, or multicast. This is the rule of 04
+// section 5 for a resolved address. Loopback is allowed.
 func refuseAddress(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
