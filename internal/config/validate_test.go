@@ -1073,25 +1073,34 @@ func TestTS10_ListSecrets(t *testing.T) {
 			}
 		}
 	}
-	// The cut does not depend on the shape of the list: a list in a list, a list written as a mapping,
-	// a mapping with a "0" key, a secret item key in an item of another type, and a secret item key of
-	// another schema in a publish item.
+	// The loader cuts these paths too. Each file puts the secret key in a different place.
 	deep := "{" + marker + ": !t 1}"
 	item := `type: https-put, url: "https://ckpt.example/put", `
-	for name, file := range map[string]string{
-		"list in list":      acmeTlog + "  publish: [[{" + item + "token_env: " + deep + "}]]\n",
-		"list as mapping":   acmeTlog + "  publish: {token_env: " + deep + "}\n",
-		"mapping with 0":    acmeTlog + `  publish: {"0": {token_env: ` + deep + "}}\n",
-		"token_env in sink": pub(pubItem) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example/a\", token_env: " + deep + "}\n",
-		"hmac in publish":   acmeTlog + "  publish: [{" + item + "token_env: CKPT_TOKEN, hmac_secret_env: " + deep + "}]\n",
+	hook := `type: webhook, url: "https://hook.example/a", `
+	for _, c := range []struct{ name, file, cut string }{
+		{"list in list", acmeTlog + "  publish: [[{" + item + "token_env: " + deep + "}]]\n", "tlog.publish[0][0].token_env"},
+		{"list as mapping", acmeTlog + "  publish: {token_env: " + deep + "}\n", "tlog.publish.token_env"},
+		{"mapping with 0", acmeTlog + `  publish: {"0": {token_env: ` + deep + "}}\n", "tlog.publish.0.token_env"},
+		{"token_env in sink", pub(pubItem) + "alerts:\n  sinks:\n    - {" + hook + "token_env: " + deep + "}\n", "alerts.sinks[0].token_env"},
+		{"hmac in publish", acmeTlog + "  publish: [{" + item + "token_env: CKPT_TOKEN, hmac_secret_env: " + deep + "}]\n", "tlog.publish[0].hmac_secret_env"},
+		{"tlog as list", "acme:\n  email: sec@example.com\ntlog: [{origin: test/origin, publish: [{" + item + "token_env: " + deep + "}]}]\n", "tlog[0].publish[0].token_env"},
+		{"alerts as list", pub(pubItem) + "alerts: [{sinks: [{" + hook + "hmac_secret_env: " + deep + "}]}]\n", "alerts[0].sinks[0].hmac_secret_env"},
+		{"token_env at a wrong indent", acmeTlog + "  token_env: " + deep + "\n", "tlog.token_env"},
+		{"top-level token_env", pub(pubItem) + "token_env: " + deep + "\n", "token_env"},
+		{"alerts.hmac_secret_env", pub(pubItem) + "alerts:\n  hmac_secret_env: " + deep + "\n", "alerts.hmac_secret_env"},
 	} {
-		_, err := loadProd(t, file, env...)
+		_, err := loadProd(t, c.file, env...)
 		if err == nil {
-			t.Errorf("%s: the invalid file loads", name)
+			t.Errorf("%s: the invalid file loads", c.name)
 			continue
 		}
-		if s := fmt.Sprintf("%v %#v", err, err); strings.Contains(strings.ToLower(s), marker) {
-			t.Errorf("%s: the error shows the marker: %s", name, s)
+		if !strings.Contains(err.Error(), c.cut) {
+			t.Errorf("%s: the error lacks the path %s: %v", c.name, c.cut, err)
+		}
+		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
+				t.Errorf("%s: the error shows the marker: %s", c.name, s)
+			}
 		}
 	}
 }

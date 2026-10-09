@@ -368,38 +368,34 @@ func isBelow(s, p string) bool {
 	return strings.HasPrefix(s, p+".") || strings.HasPrefix(s, p+"[")
 }
 
-// pathPart matches one part of a path: the text between "." and "[" characters.
-var pathPart = regexp.MustCompile(`[^.\[]+`)
+// pathPart matches one part of a path: the text between the characters ".", "[", and "]".
+var pathPart = regexp.MustCompile(`[^.\[\]]+`)
 
-// secretItemPath cuts the path s after the first part that is the name of a secret item key
-// of any list schema, if s is below a list path. Else it returns "". The cut does not depend
-// on the shape of the list or on the type of the item. For example, "tlog.publish[0].token_env.x"
-// and "tlog.publish.0.token_env.x" give "tlog.publish[0].token_env" and "tlog.publish.0.token_env".
-func secretItemPath(s string, listTable []listKey) string {
-	for _, l := range listTable {
-		if !isBelow(s, l.path) {
-			continue
-		}
-		for _, m := range pathPart.FindAllStringIndex(s[len(l.path):], -1) {
-			part := strings.TrimSuffix(s[len(l.path):][m[0]:m[1]], "]")
-			if isSecretItemName(part, listTable) {
-				return s[:len(l.path)+m[0]+len(part)]
-			}
+// secretItemPath cuts the path s after its first secret item name. A secret item name is the name
+// of a secret key in a list schema. The cut does not depend on the shape of the list or on the item type.
+// For example, "tlog.publish[0].token_env.x" and "token_env.x" give "tlog.publish[0].token_env" and "token_env".
+// If s has no secret item name, it returns "".
+func secretItemPath(s string, table []listKey) string {
+	for _, m := range pathPart.FindAllStringIndex(s, -1) {
+		if isSecretItemName(s[m[0]:m[1]], table) {
+			return s[:m[1]]
 		}
 	}
 	return ""
 }
 
-// isSecretItemName reports whether name is the name of a secret item key in a schema of any list.
-func isSecretItemName(name string, listTable []listKey) bool {
-	return slices.ContainsFunc(listTable, func(l listKey) bool {
+// isSecretItemName reports whether name is the name of a secret key in a schema of any list.
+func isSecretItemName(name string, table []listKey) bool {
+	for _, l := range table {
 		for _, schema := range l.schemas {
-			if slices.ContainsFunc(schema, func(f key) bool { return f.secret && f.path == name }) {
-				return true
+			for _, f := range schema {
+				if f.secret && f.path == name {
+					return true
+				}
 			}
 		}
-		return false
-	})
+	}
+	return false
 }
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
