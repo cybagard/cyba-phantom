@@ -176,8 +176,9 @@ var envVarName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // checkSecretEnv returns a check for a *_env key. The value is the name of a variable
 // that must be set in the environment of the loader, with at least minBytes bytes. The
-// detail names the variable (04 section 3). It shows a name only if the name matches the
-// name rule. It never shows the value of the variable or its length (SEC-13).
+// detail never holds the variable name, because an operator can paste a secret in place of
+// a name. The error names the key path and the file line only (04 section 3). The detail
+// never holds the value of the variable or its length either (SEC-13).
 func checkSecretEnv(minBytes int) func(*loader, string) string {
 	return func(l *loader, raw string) string {
 		switch {
@@ -194,9 +195,9 @@ func checkSecretEnv(minBytes int) func(*loader, string) string {
 		}
 		switch {
 		case !ok || v == "":
-			return "the variable " + raw + " is not set or is empty"
+			return "the variable that the key names is not set or is empty"
 		case len(v) < minBytes:
-			return "the variable " + raw + " must hold at least " + strconv.Itoa(minBytes) + " bytes"
+			return "the variable that the key names must hold at least " + strconv.Itoa(minBytes) + " bytes"
 		}
 		return ""
 	}

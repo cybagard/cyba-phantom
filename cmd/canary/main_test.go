@@ -134,7 +134,31 @@ func TestTS10_CheckExec(t *testing.T) {
 	if code == 0 {
 		t.Error("wrong type: exit 0")
 	}
-	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") {
+	// A *_env key can hold a pasted secret in place of a name. The error names the key path and
+	// never the variable name, for an unset variable and for a short one (SEC-13).
+	const nameMarker = "JBSWY3DPEHPK3PXPZZSECRETQ7"
+	tok := strings.Replace(validBody(t), "CKPT_TOKEN", nameMarker, 1)
+	hook := validBody(t) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example.invalid/a\", hmac_secret_env: " + nameMarker + "}\n"
+	for _, c := range []struct {
+		name, body, env, key string
+	}{
+		{"token unset", tok, "", "tlog.publish[0].token_env"},
+		{"hmac unset", hook, "", "alerts.sinks[0].hmac_secret_env"},
+		{"hmac short", hook, nameMarker + "=short", "alerts.sinks[0].hmac_secret_env"},
+	} {
+		env := []string{}
+		if c.env != "" {
+			env = append(env, c.env)
+		}
+		code, so, se := run(writeFile(t, c.body), env...)
+		if code == 0 || !strings.Contains(se, c.key) {
+			t.Errorf("%s: exit %d, stderr %q lacks %s", c.name, code, se, c.key)
+		}
+		if strings.Contains(so+se, nameMarker) {
+			t.Errorf("%s: the output holds the variable name: %q", c.name, so+se)
+		}
+	}
+	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") || strings.Contains(outs, nameMarker) {
 		t.Errorf("output holds a secret: %q", outs)
 	}
 	if !strings.Contains(se, "REDACTED@") {

@@ -195,11 +195,6 @@ func crossCheck(vals map[string]Value) []error {
 			fail("store.retention_days.events", e, "the value must not be less than store.retention_days.raw")
 		}
 	}
-	if u, ok := vals["bundle.fetch_url"]; ok && u.Str != "" {
-		if i, ok := vals["bundle.fetch_interval"]; ok && (i.Dur < 15*time.Minute || i.Dur > 7*24*time.Hour) {
-			fail("bundle.fetch_interval", i, "the duration must be in the range 15m to 168h if bundle.fetch_url is set")
-		}
-	}
 	return errs
 }
 
@@ -224,15 +219,6 @@ func durRange(lo, hi time.Duration) func(*loader, string) string {
 		}
 		return ""
 	}
-}
-
-// checkPositiveDuration rejects a duration that is zero or less. It runs for every value of the key.
-// The range 15m to 168h is a cross-check that applies only if bundle.fetch_url is set.
-func checkPositiveDuration(_ *loader, raw string) string {
-	if d, _ := time.ParseDuration(raw); d <= 0 {
-		return "the duration must be greater than 0"
-	}
-	return ""
 }
 
 // originChars matches 1 to 128 bytes. Each byte is a letter, a digit, or one of these marks: dot, underscore, slash, hyphen.
@@ -366,17 +352,13 @@ func endpoint(scheme, host, port string) Endpoint {
 	return Endpoint{Scheme: scheme, Host: host, Port: port}
 }
 
-// parseEndpoint parses host:port, with a scheme and "://" before it if schemes is not empty.
-// The host is not empty. An IP literal has no zone and is not unspecified or link-local.
-// It returns a fixed detail on an error.
+// parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
+// in the exact case. The host is not empty. An IP literal has no zone and is not unspecified
+// or link-local. It returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes ...string) (Endpoint, string) {
-	scheme := "smtp"
-	if len(schemes) > 0 {
-		s, rest, ok := strings.Cut(raw, "://")
-		if !ok || !contains(schemes, s) {
-			return Endpoint{}, "the address scheme must be " + strings.Join(schemes, ", ") + " and be followed by ://"
-		}
-		scheme, raw = s, rest
+	scheme, raw, ok := strings.Cut(raw, "://")
+	if !ok || !contains(schemes, scheme) {
+		return Endpoint{}, "the address scheme must be " + strings.Join(schemes, ", ") + " and be followed by ://"
 	}
 	hp, d := parseHostPort(raw)
 	switch {
@@ -396,13 +378,30 @@ func parseEndpoint(raw string, schemes ...string) (Endpoint, string) {
 
 var syslogSchemes = []string{"udp", "tcp", "tls"}
 
+var smtpSchemes = []string{"smtp", "smtps"}
+
+// loopbackLiteral reports whether a is an IP literal in 127.0.0.0/8 or is ::1. An IPv4-mapped
+// IPv6 address is not loopback here: the rule names only these two forms (04 section 3).
+func loopbackLiteral(a netip.Addr) bool {
+	return a.Is4() && a.IsLoopback() || a == netip.IPv6Loopback()
+}
+
+// checkSyslogAddr accepts tls:// to any allowed host. It accepts udp:// and tcp:// only to a
+// loopback IP literal: a host name is not loopback, as the loader does not resolve names.
 func checkSyslogAddr(_ *loader, raw string) string {
-	_, d := parseEndpoint(raw, syslogSchemes...)
-	return d
+	e, d := parseEndpoint(raw, syslogSchemes...)
+	if d != "" || e.Scheme == "tls" {
+		return d
+	}
+	_, rest, _ := strings.Cut(raw, "://")
+	if hp, _ := parseHostPort(rest); !loopbackLiteral(hp.addr) {
+		return "the host of a udp or tcp address must be a loopback IP literal (127.0.0.0/8 or ::1)"
+	}
+	return ""
 }
 
 func checkSMTPHost(_ *loader, raw string) string {
-	_, d := parseEndpoint(raw)
+	_, d := parseEndpoint(raw, smtpSchemes...)
 	return d
 }
 
@@ -410,7 +409,8 @@ func checkSMTPHost(_ *loader, raw string) string {
 // acme.ca, bundle.fetch_url (if set), tlog.publish[].url, and the alert sinks. An endpoint
 // that two keys share is in the list one time. The order is acme.ca, bundle.fetch_url,
 // tlog.publish, then alerts.sinks. A webhook has the scheme https, a syslog sink has udp, tcp, or tls,
-// and an smtp sink has the scheme smtp.
+// and an smtp sink has the scheme of its value: smtp or smtps. A loopback sink is in the list: it is
+// not egress (04 section 3).
 func (c *Config) AllowList() []Endpoint {
 	var list []Endpoint
 	add := func(e Endpoint) {
@@ -447,7 +447,7 @@ func (c *Config) AllowList() []Endpoint {
 				add(e)
 			}
 		case "smtp":
-			if e, d := parseEndpoint(c.values[p+"host"].Str); d == "" {
+			if e, d := parseEndpoint(c.values[p+"host"].Str, smtpSchemes...); d == "" {
 				add(e)
 			}
 		default:
