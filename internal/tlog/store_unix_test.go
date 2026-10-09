@@ -5,9 +5,11 @@ package tlog
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -47,50 +49,59 @@ func linkOut(t *testing.T, dir, name, target string) {
 	mustNil(t, os.Symlink(rel, link))
 }
 
+// outsideFiles returns the path and the contents of all files next to the state
+// directory dir, and below those that are not in it.
+func outsideFiles(t *testing.T, dir string) string {
+	t.Helper()
+	var sb strings.Builder
+	mustNil(t, filepath.WalkDir(filepath.Dir(dir), func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == dir {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			b, err := os.ReadFile(p)
+			fmt.Fprintf(&sb, "%s %x\n", p, b)
+			return err
+		}
+		return nil
+	}))
+	return sb.String()
+}
+
 func TestTS13TileSymlinkOutOfStateDirectory(t *testing.T) {
-	state, dir := newState(t)
-	s := openStore(t, state)
-	var l testLog
-	l.commit(t, s, 0, 3)
+	state, dir := committedLog(t, 3)
 	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
 	good, err := os.ReadFile(filepath.Join(dir, "tlog", tile.Path()))
 	mustNil(t, err)
-	s.Close()
 
 	// The outside file holds a correct tile. A store that follows the link
 	// opens the log with no error.
 	outside := filepath.Join(filepath.Dir(dir), "outside")
 	mustNil(t, os.WriteFile(outside, good, 0o644))
-	before, err := os.Stat(outside)
-	mustNil(t, err)
 	linkOut(t, dir, tile.Path(), outside)
-	if _, err := Open(state, "tlog"); err == nil {
-		t.Fatal("open followed a symlink out of the state directory")
+	before := outsideFiles(t, dir)
+	if e := openErr(t, state, ruleRead); e.Name != tile.Path() {
+		t.Fatalf("name %q", e.Name)
 	}
 
 	// A write to a tile path that is a link to a new outside file.
 	created := filepath.Join(filepath.Dir(dir), "created")
 	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
 	linkOut(t, dir, wide.Path(), created)
+	var l testLog
 	l.extend(t, 5)
-	s = &Store{}
-	s.dir, err = state.OpenRoot("tlog")
+	sub, err := state.OpenRoot("tlog")
 	mustNil(t, err)
+	s := &Store{dir: sub, written: map[tlog.Tile]int{}}
 	defer s.Close()
-	var data []byte
-	for j := 0; j < 5; j++ {
-		h := l.hashes[tlog.StoredHashIndex(0, int64(j))]
-		data = append(data, h[:]...)
-	}
-	if err := s.WriteTile(wide, data); err == nil {
-		t.Fatal("write followed a symlink out of the state directory")
+	var e *Error
+	if err := s.WriteTile(wide, l.tileData(wide)); !errors.As(err, &e) || e.Rule != ruleRead || e.Name != wide.Path() {
+		t.Fatalf("write: %v", err)
 	}
 	if _, err := os.Lstat(created); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("write made the outside file: %v", err)
 	}
-	after, err := os.Stat(outside)
-	mustNil(t, err)
-	if now, _ := os.ReadFile(outside); !bytes.Equal(now, good) || !after.ModTime().Equal(before.ModTime()) {
+	if now, _ := os.ReadFile(outside); !bytes.Equal(now, good) || outsideFiles(t, dir) != before {
 		t.Fatal("the outside file changed")
 	}
 }
@@ -158,8 +169,12 @@ func TestTS13HeadSymlinkOutOfStateDirectory(t *testing.T) {
 	outside := filepath.Join(filepath.Dir(dir), "outside")
 	mustNil(t, os.WriteFile(outside, good, fileMode))
 	linkOut(t, dir, headName, outside)
+	before := outsideFiles(t, dir)
 	if e := openErr(t, state, ruleRead); e.Name != headName {
 		t.Fatalf("name %q", e.Name)
+	}
+	if now, _ := os.ReadFile(outside); !bytes.Equal(now, good) || outsideFiles(t, dir) != before {
+		t.Fatal("the outside file changed")
 	}
 }
 
@@ -168,18 +183,33 @@ func TestTS13LogDirectorySymlinkOutOfStateDirectory(t *testing.T) {
 	outside := filepath.Join(filepath.Dir(dir), "outdir")
 	mustNil(t, os.Rename(filepath.Join(dir, "tlog"), outside))
 	mustNil(t, os.Symlink(outside, filepath.Join(dir, "tlog")))
+	before := outsideFiles(t, dir)
 	if e := openErr(t, state, ruleOpenRoot); e.Name != "tlog directory" {
 		t.Fatalf("name %q", e.Name)
+	}
+	if outsideFiles(t, dir) != before {
+		t.Fatal("open changed a file outside")
 	}
 	// A link to a missing directory makes no directory outside.
 	mustNil(t, os.Remove(filepath.Join(dir, "tlog")))
 	missing := filepath.Join(filepath.Dir(dir), "missing")
 	mustNil(t, os.Symlink(missing, filepath.Join(dir, "tlog")))
-	if _, err := Open(state, "tlog"); err == nil {
-		t.Fatal("open followed a symlink to a missing directory")
+	if e := openErr(t, state, ruleOpenRoot); e.Name != "tlog directory" {
+		t.Fatalf("name %q", e.Name)
 	}
-	if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("open made a directory outside: %v", err)
+	if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) || outsideFiles(t, dir) != before {
+		t.Fatalf("open made a directory or file outside: %v", err)
+	}
+}
+
+// Every directory below the log directory must have no group or other bit.
+func TestTS13TileDirectoryWithGroupOrOtherBitsIsAnError(t *testing.T) {
+	for _, name := range []string{"tile", "tile/8", "tile/8/0", "tile/8/0/000.p"} {
+		for _, mode := range []os.FileMode{0o777, 0o750, 0o705} {
+			state, dir := committedLog(t, 3)
+			mustNil(t, os.Chmod(filepath.Join(dir, "tlog", name), mode))
+			openErr(t, state, ruleMode)
+		}
 	}
 }
 

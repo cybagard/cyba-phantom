@@ -347,6 +347,8 @@ func TestTS13OpenRejectsBadFiles(t *testing.T) {
 			var l testLog
 			l.commit(t, s, 0, size)
 			s.Close()
+			// A temporary file of the store stays too.
+			mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", tail.Path()+tmpSuffix), []byte("x"), fileMode))
 			file := filepath.Join(dir, "tlog", c.file)
 			c.change(t, file)
 			snapshot := tree(t, dir)
@@ -553,6 +555,261 @@ func TestTU07SetHeadChecksTheStoredHead(t *testing.T) {
 	}
 }
 
+// SetHead refuses a tree head if a stored file of a tile that the new root
+// computation reads has other hashes in the range that the new head covers. The
+// next Open would refuse that head. A refused call changes no file.
+func TestTU07SetHeadRefusesFilesThatDisagree(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, s *Store, dir string, l *testLog) (size int64, other *testLog)
+	}{
+		{"planted wider file with other records", func(t *testing.T, s *Store, dir string, l *testLog) (int64, *testLog) {
+			l.commit(t, s, 0, 3)
+			o := l.fork(t, 0, "forged")
+			o.extend(t, 5)
+			wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+			mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", wide.Path()), o.tileData(wide), fileMode))
+			return 5, o
+		}},
+		{"stored file of the lost batch next to a file with other records", func(t *testing.T, s *Store, dir string, l *testLog) (int64, *testLog) {
+			l.commit(t, s, 0, 3)
+			l.put(t, s, 3, 9)
+			o := l.fork(t, 3, "other")
+			o.extend(t, 5)
+			w5 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+			mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", w5.Path()), o.tileData(w5), fileMode))
+			return 5, o
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := newState(t)
+			s := openStore(t, state)
+			var l testLog
+			size, other := c.setup(t, s, dir, &l)
+			before := tree(t, dir)
+			err := s.SetHead(size, other.root(t, size))
+			var e *Error
+			if !errors.As(err, &e) || e.Rule != ruleRewrite {
+				t.Fatalf("got %v", err)
+			}
+			if n, _ := s.TreeHead(); n != 3 || tree(t, dir) != before {
+				t.Fatalf("a refused SetHead changed the head (%d) or a file", n)
+			}
+		})
+	}
+}
+
+// After a crash, the hashes of a lost batch are in a tile file, but this Store
+// did not write them. SetHead refuses them until WriteTile accepts the same
+// hashes.
+func TestTU07SetHeadRefusesHashesThatThisStoreDidNotWrite(t *testing.T) {
+	_, dir, l, s := crashAfterTiles(t, 3, 5)
+	headFile := filepath.Join(dir, "tlog", headName)
+	before, err := os.ReadFile(headFile)
+	mustNil(t, err)
+	err = s.SetHead(4, l.root(t, 4))
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleUnwrit {
+		t.Fatalf("got %v", err)
+	}
+	if after, _ := os.ReadFile(headFile); !bytes.Equal(after, before) {
+		t.Fatal("a refused SetHead changed the head file")
+	}
+	// The same records again: WriteTile finds the hashes in the wider file and
+	// makes no file.
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 4}
+	files := tree(t, dir)
+	mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+	if tree(t, dir) != files {
+		t.Fatal("the write changed a file")
+	}
+	mustNil(t, s.SetHead(4, l.root(t, 4)))
+	if len(s.written) != 0 {
+		t.Fatalf("written tiles stay after SetHead: %v", s.written)
+	}
+}
+
+func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.extend(t, 300)
+	for i := range maxBatchTiles {
+		s.written[tlog.Tile{H: TileHeight, L: 0, N: int64(i) + 1000}] = 1
+	}
+	before := tree(t, dir)
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	var e *Error
+	if err := s.WriteTile(tile, l.tileData(tile)); !errors.As(err, &e) || e.Rule != ruleBatch || tree(t, dir) != before {
+		t.Fatalf("got %v", err)
+	}
+	// A tile of the batch can be written again.
+	tile.N = 1000
+	s.written[tileKey(tile)] = 1
+	mustNil(t, s.WriteTile(tile, make([]byte, 3*tlog.HashSize)))
+}
+
+// After a crash, a tile that the root computation does not read can have two
+// partial files. Open keeps the widest one.
+func TestTU07OpenTidiesTilesBeyondTheHead(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var a testLog
+	a.commit(t, s, 0, 256)
+	a.put(t, s, 256, 261) // a lost batch: tile 1 has 5 hashes
+	b := a.fork(t, 256, "other")
+	b.extend(t, 259)
+	// A crash after the rename of a narrower file with other records and before
+	// the delete of the wider file.
+	narrow := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 3}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), b.tileData(narrow), fileMode))
+	s.Close()
+	openStore(t, state)
+	ents, err := os.ReadDir(filepath.Join(dir, "tlog", "tile", "8", "0", "001.p"))
+	mustNil(t, err)
+	if len(ents) != 1 || ents[0].Name() != "5" {
+		t.Fatalf("files of tile 1: %v", ents)
+	}
+}
+
+func TestTU07TilesBeyondTheHeadIncludeGroupDirectories(t *testing.T) {
+	cases := []struct {
+		head  int64 // number of hashes at level 0
+		files []string
+		want  []int64
+	}{
+		{1500 * fullWidth, []string{"x001/498.p/3", "x001/499.p/1", "x001/500", "x001/x000/002.tmp", "x002/000.p/1", "x000/900", "x999/x000/001.p/1"},
+			[]int64{1499, 1500, 1000002, 2000, 999000001}},
+		// The lost batch goes on to the first tile number with one more group.
+		{1000000 * fullWidth, []string{"x999/999", "x001/x000/002.p/1", "x001/x001/000"}, []int64{999999, 1000002, 1001000}},
+	}
+	for i, c := range cases {
+		state, dir := newState(t)
+		s := openStore(t, state)
+		s.head.N = c.head
+		for _, f := range c.files {
+			p := filepath.Join(dir, "tlog", "tile", "8", "0", f)
+			mustNil(t, os.MkdirAll(filepath.Dir(p), dirMode))
+			mustNil(t, os.WriteFile(p, nil, fileMode))
+		}
+		tiles, err := s.tilesBeyond(0)
+		mustNil(t, err)
+		var got []int64
+		for _, tile := range tiles {
+			got = append(got, tile.N)
+		}
+		if !slices.Equal(got, slices.Sorted(slices.Values(c.want))) {
+			t.Fatalf("case %d: got %v, want %v", i, got, c.want)
+		}
+	}
+}
+
+func TestTU07DirectoryWithTooManyNamesIsAnError(t *testing.T) {
+	fill := func(t *testing.T, dir string, from, n int) {
+		for i := from; i < from+n; i++ {
+			mustNil(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("junk%d", i)), nil, fileMode))
+		}
+	}
+	for _, c := range []struct {
+		dir   string
+		limit int
+	}{{"tile/8/0/000.p", maxPartialNames}, {"tile/8/0", maxLevelNames}} {
+		state, dir := committedLog(t, 3)
+		names, err := os.ReadDir(filepath.Join(dir, "tlog", c.dir))
+		mustNil(t, err)
+		fill(t, filepath.Join(dir, "tlog", c.dir), 0, c.limit-len(names))
+		openStore(t, state) // the limit is allowed
+		fill(t, filepath.Join(dir, "tlog", c.dir), c.limit, 1)
+		if e := openErr(t, state, ruleTooMany); e.Name != c.dir {
+			t.Fatalf("name %q", e.Name)
+		}
+	}
+}
+
+// Open and WriteTile delete the temporary file of a full tile, which is in the
+// level directory.
+func TestTU07TidyDeletesTemporaryFileOfFullTile(t *testing.T) {
+	state, dir := committedLog(t, 256)
+	full := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}.Path()+tmpSuffix)
+	mustNil(t, os.WriteFile(full, []byte("x"), fileMode))
+	s := openStore(t, state)
+	if _, err := os.Lstat(full); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("open: the temporary file stays: %v", err)
+	}
+	var l testLog
+	l.extend(t, 258)
+	next := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 2}
+	tmp := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: 1, W: fullWidth}.Path()+tmpSuffix)
+	mustNil(t, os.WriteFile(tmp, []byte("x"), fileMode))
+	mustNil(t, s.WriteTile(next, l.tileData(next)))
+	if _, err := os.Lstat(tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("write: the temporary file stays: %v", err)
+	}
+}
+
+func TestTU07TileCoordinateBound(t *testing.T) {
+	state, _ := newState(t)
+	s := openStore(t, state)
+	one := make([]byte, tlog.HashSize)
+	for _, c := range []struct {
+		l    int
+		n    int64
+		fail bool
+	}{{0, 1 << 40, true}, {0, 1<<40 - 1, false}, {6, 0, false}, {6, 1, true}, {7, 0, true}} {
+		err := s.WriteTile(tlog.Tile{H: TileHeight, L: c.l, N: c.n, W: 1}, one)
+		var e *Error
+		if bad := errors.As(err, &e) && e.Rule == ruleTile; bad != c.fail {
+			t.Errorf("level %d, tile %d: %v", c.l, c.n, err)
+		}
+	}
+}
+
+// Open checks all files before it deletes one. A failed check deletes nothing,
+// not even a temporary file.
+func TestTU07OpenFailureDeletesNothing(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 5)
+	s.Close()
+	t3 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	t5 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", t3.Path()), l.tileData(t3), fileMode))
+	flipByte(t, filepath.Join(dir, "tlog", t5.Path()), 0)
+	for _, tmp := range []string{t5.Path(), tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}.Path()} {
+		mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", tmp+tmpSuffix), []byte("x"), fileMode))
+	}
+	before := tree(t, dir)
+	openErr(t, state, ruleRewrite)
+	if tree(t, dir) != before {
+		t.Fatal("a failed open changed a file")
+	}
+}
+
+// The file that a rename replaces must agree in the covered hashes too.
+func TestTU07WriteRefusesToReplaceAFileWithOtherCoveredHashes(t *testing.T) {
+	state, dir := newState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.put(t, s, 3, 9)
+	o := l.fork(t, 0, "other")
+	o.extend(t, 4)
+	w4 := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 4}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", w4.Path()), o.tileData(w4), fileMode))
+	// The new data has the covered hashes of the widest file.
+	f := l.fork(t, 3, "x")
+	f.extend(t, 4)
+	before := tree(t, dir)
+	err := s.WriteTile(w4, f.tileData(w4))
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleRewrite || e.Name != w4.Path() || tree(t, dir) != before {
+		t.Fatalf("got %v", err)
+	}
+}
+
 // partialFiles returns the names in the partial directory of tile 0 at level 0.
 func partialFiles(t *testing.T, dir string) []string {
 	t.Helper()
@@ -656,7 +913,7 @@ func mustNil(t *testing.T, err error) {
 	}
 }
 
-// tree returns the names, sizes and contents of all files below dir.
+// tree returns the path and the contents (in hex) of all files below dir.
 func tree(t *testing.T, dir string) string {
 	t.Helper()
 	var sb strings.Builder
