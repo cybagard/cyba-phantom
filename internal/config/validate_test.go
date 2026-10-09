@@ -1073,6 +1073,27 @@ func TestTS10_ListSecrets(t *testing.T) {
 			}
 		}
 	}
+	// The cut does not depend on the shape of the list: a list in a list, a list written as a mapping,
+	// a mapping with a "0" key, a secret item key in an item of another type, and a secret item key of
+	// another schema in a publish item.
+	deep := "{" + marker + ": !t 1}"
+	item := `type: https-put, url: "https://ckpt.example/put", `
+	for name, file := range map[string]string{
+		"list in list":      acmeTlog + "  publish: [[{" + item + "token_env: " + deep + "}]]\n",
+		"list as mapping":   acmeTlog + "  publish: {token_env: " + deep + "}\n",
+		"mapping with 0":    acmeTlog + `  publish: {"0": {token_env: ` + deep + "}}\n",
+		"token_env in sink": pub(pubItem) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example/a\", token_env: " + deep + "}\n",
+		"hmac in publish":   acmeTlog + "  publish: [{" + item + "token_env: CKPT_TOKEN, hmac_secret_env: " + deep + "}]\n",
+	} {
+		_, err := loadProd(t, file, env...)
+		if err == nil {
+			t.Errorf("%s: the invalid file loads", name)
+			continue
+		}
+		if s := fmt.Sprintf("%v %#v", err, err); strings.Contains(strings.ToLower(s), marker) {
+			t.Errorf("%s: the error shows the marker: %s", name, s)
+		}
+	}
 }
 
 // TestTS08_AllowList checks that AllowList holds the endpoints of acme.ca, bundle.fetch_url, tlog.publish[].url,

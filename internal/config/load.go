@@ -172,7 +172,7 @@ func envName(path string) string {
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
 	doc, err := ReadFile(path)
 	if err != nil {
-		return nil, errors.Join(readError(path, err, table))
+		return nil, errors.Join(readError(path, err, table, lists))
 	}
 	l.env = env
 	byPath := make(map[string]key, len(table))
@@ -337,7 +337,8 @@ func parent(p string) string {
 // readError changes a reader error into an Error. A wrapped system error becomes
 // a fixed message. It removes the reader's quotes, so esc escapes the text one time only.
 // A key below a secret key can be the secret value, so readError changes its path to the path of the secret key.
-func readError(path string, err error, table []key) error {
+// The tables are parameters, so readError does not read the global tables.
+func readError(path string, err error, table []key, listTable []listKey) error {
 	detail := "the loader cannot read the file"
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -349,11 +350,11 @@ func readError(path string, err error, table []key) error {
 		detail = quoted.ReplaceAllStringFunc(detail, func(q string) string {
 			s, _ := strconv.Unquote(q)
 			if i := slices.IndexFunc(table, func(k key) bool {
-				return k.secret && (strings.HasPrefix(s, k.path+".") || strings.HasPrefix(s, k.path+"["))
+				return k.secret && isBelow(s, k.path)
 			}); i >= 0 {
 				return table[i].path
 			}
-			if p := secretItemPath(s); p != "" {
+			if p := secretItemPath(s, listTable); p != "" {
 				return p
 			}
 			return s
@@ -362,28 +363,43 @@ func readError(path string, err error, table []key) error {
 	return &Error{Source: path, Detail: detail}
 }
 
-// secretItemPath returns the path of the secret item key that the path s is below, or "".
-// The secret item keys come from the list schemas. For example, "tlog.publish[0].token_env.x"
-// gives "tlog.publish[0].token_env".
-func secretItemPath(s string) string {
-	for _, l := range lists {
-		rest, ok := strings.CutPrefix(s, l.path+"[")
-		if !ok {
+// isBelow reports whether the path s is below the key p: s has the prefix p+"." or p+"[".
+func isBelow(s, p string) bool {
+	return strings.HasPrefix(s, p+".") || strings.HasPrefix(s, p+"[")
+}
+
+// pathPart matches one part of a path: the text between "." and "[" characters.
+var pathPart = regexp.MustCompile(`[^.\[]+`)
+
+// secretItemPath cuts the path s after the first part that is the name of a secret item key
+// of any list schema, if s is below a list path. Else it returns "". The cut does not depend
+// on the shape of the list or on the type of the item. For example, "tlog.publish[0].token_env.x"
+// and "tlog.publish.0.token_env.x" give "tlog.publish[0].token_env" and "tlog.publish.0.token_env".
+func secretItemPath(s string, listTable []listKey) string {
+	for _, l := range listTable {
+		if !isBelow(s, l.path) {
 			continue
 		}
-		n, rest, ok := strings.Cut(rest, "].")
-		if !ok || !decimal.MatchString(n) {
-			continue
-		}
-		for _, schema := range l.schemas {
-			for _, f := range schema {
-				if f.secret && (strings.HasPrefix(rest, f.path+".") || strings.HasPrefix(rest, f.path+"[")) {
-					return l.path + "[" + n + "]." + f.path
-				}
+		for _, m := range pathPart.FindAllStringIndex(s[len(l.path):], -1) {
+			part := strings.TrimSuffix(s[len(l.path):][m[0]:m[1]], "]")
+			if isSecretItemName(part, listTable) {
+				return s[:len(l.path)+m[0]+len(part)]
 			}
 		}
 	}
 	return ""
+}
+
+// isSecretItemName reports whether name is the name of a secret item key in a schema of any list.
+func isSecretItemName(name string, listTable []listKey) bool {
+	return slices.ContainsFunc(listTable, func(l listKey) bool {
+		for _, schema := range l.schemas {
+			if slices.ContainsFunc(schema, func(f key) bool { return f.secret && f.path == name }) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
