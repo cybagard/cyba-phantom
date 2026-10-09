@@ -1,7 +1,9 @@
 package tlog
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/mod/sumdb/note"
 )
@@ -30,20 +33,27 @@ const (
 // the tree has leaves is an error, and no key is made (SEC-16).
 //
 // The key text, its base64 form, and the seed never go to the log or to an
-// error. The function keeps only the signer value. The public key text is
-// public and is logged.
+// error. The function keeps only the signer value. It derives the public key
+// text from the key and logs it. It never logs the bytes of a file.
 func LoadOrCreateSigner(root *os.Root, log *slog.Logger, origin string, signerState bool, treeSize uint64) (note.Signer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	path := filepath.Join(root.Name(), keyName)
-	fi, err := root.Lstat(keyName)
-	switch {
-	case err == nil:
-		return loadSigner(root, log, path, origin, fi)
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, keyError(path, "cannot be examined")
-	case signerState || treeSize > 0:
+	keysExist, err := checkKeysDir(root, path)
+	if err != nil {
+		return nil, err
+	}
+	if keysExist {
+		fi, err := root.Lstat(keyName)
+		switch {
+		case err == nil:
+			return loadSigner(root, log, path, origin, fi)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, keyError(path, "cannot be examined")
+		}
+	}
+	if signerState || treeSize > 0 {
 		return nil, keyError(path, "is missing but the log has a signer state or leaves; no new key is made")
 	}
 	return createSigner(root, log, path, origin)
@@ -54,11 +64,27 @@ func keyError(path, rule string) error {
 	return fmt.Errorf("checkpoint key %s: %s", path, rule)
 }
 
+// checkKeysDir reports whether the keys directory exists. An entry that is
+// not a real directory (a symlink, for example) is an error.
+func checkKeysDir(root *os.Root, path string) (bool, error) {
+	fi, err := root.Lstat(keysDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, keyError(path, "keys directory cannot be examined")
+	case !fi.IsDir():
+		return false, keyError(path, "keys must be a real directory and not a symlink")
+	}
+	return true, nil
+}
+
 func loadSigner(root *os.Root, log *slog.Logger, path, origin string, fi fs.FileInfo) (note.Signer, error) {
 	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
 		return nil, keyError(path, "must be a regular file and not a symlink")
 	}
-	f, err := root.Open(keyName)
+	// The flags stop a symlink swapped in after Lstat and a FIFO that blocks.
+	f, err := root.OpenFile(keyName, readFlags, 0)
 	if err != nil {
 		return nil, keyError(path, "cannot be opened")
 	}
@@ -88,23 +114,44 @@ func loadSigner(root *os.Root, log *slog.Logger, path, origin string, fi fs.File
 	if signer.Name() != origin {
 		return nil, keyError(path, "key name must equal the configured origin")
 	}
-	attrs := []any{"name", signer.Name(), "key_hash", fmt.Sprintf("%08x", signer.KeyHash())}
-	if v, ok := readVkey(root); ok {
-		attrs = append(attrs, "vkey", v)
+	vkey, err := deriveVkey(string(b), origin, signer)
+	if err != nil {
+		return nil, keyError(path, "public key cannot be derived from the key")
 	}
-	log.Info("checkpoint signing key loaded", attrs...)
+	clear(b) // only the signer stays
+
+	// The load path never reads the public key file. It can be a symlink or a
+	// copy of the key. A missing file is made again from the derived text.
+	if _, err := root.Lstat(vkeyName); errors.Is(err, fs.ErrNotExist) {
+		if err := writeNew(root, vkeyName, vkey+"\n"); err != nil {
+			log.Warn("public key file cannot be written")
+		}
+	}
+	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
 	return signer, nil
 }
 
-// readVkey reads the public key text. It is best effort: it is only for the log.
-func readVkey(root *os.Root) (string, bool) {
-	f, err := root.Open(vkeyName)
-	if err != nil {
-		return "", false
+// deriveVkey makes the verifier key text from the private key text: the name,
+// the key hash, and base64 of 0x01 followed by the Ed25519 public key. It
+// checks the result with note.NewVerifier.
+func deriveVkey(skey, origin string, signer note.Signer) (string, error) {
+	errBad := errors.New("bad key")
+	parts := strings.SplitN(skey, "+", 5)
+	if len(parts) != 5 {
+		return "", errBad
 	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxKeySize))
-	return string(b), err == nil && len(b) > 0
+	raw, err := base64.StdEncoding.DecodeString(parts[4])
+	if err != nil || len(raw) != 1+ed25519.SeedSize || raw[0] != 1 {
+		return "", errBad
+	}
+	pub := ed25519.NewKeyFromSeed(raw[1:]).Public().(ed25519.PublicKey)
+	clear(raw)
+	vkey := fmt.Sprintf("%s+%08x+%s", origin, signer.KeyHash(), base64.StdEncoding.EncodeToString(append([]byte{1}, pub...)))
+	v, err := note.NewVerifier(vkey)
+	if err != nil || v.Name() != origin || v.KeyHash() != signer.KeyHash() {
+		return "", errBad
+	}
+	return vkey, nil
 }
 
 func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Signer, error) {
@@ -119,10 +166,14 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	if err := root.MkdirAll(keysDir, 0o700); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot make the keys directory: %w", path, err)
 	}
-	if err := writeNew(root, keyName, skey, os.O_EXCL); err != nil {
+	// Any entry at the public key path is an error. The write must not follow it.
+	if _, err := root.Lstat(vkeyName); !errors.Is(err, fs.ErrNotExist) {
+		return nil, keyError(path, "public key file must not exist on the first start")
+	}
+	if err := writeNew(root, keyName, skey); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot write the key file: %w", path, err)
 	}
-	if err := writeNew(root, vkeyName, vkey+"\n", os.O_TRUNC); err != nil {
+	if err := writeNew(root, vkeyName, vkey+"\n"); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot write the public key file: %w", path, err)
 	}
 	for _, dir := range []string{keysDir, "."} {
@@ -134,11 +185,11 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	return signer, nil
 }
 
-// writeNew writes a new file with mode 0600 and syncs it. A failed write of a
-// file that this call made removes the file, so no half key stays on disk.
-// flag is os.O_EXCL for the key (never replace) or os.O_TRUNC.
-func writeNew(root *os.Root, name, text string, flag int) error {
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|flag, 0o600)
+// writeNew makes a new file with mode 0600 and syncs it. O_EXCL means that the
+// call never opens or replaces an existing entry, and never follows a symlink.
+// A failed write removes the file. Only this call made that file.
+func writeNew(root *os.Root, name, text string) error {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
