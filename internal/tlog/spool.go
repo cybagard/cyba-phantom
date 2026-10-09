@@ -28,14 +28,16 @@ const (
 	cursorHexChars = 16
 )
 
-// Sender is the contract between the spool and a publisher. It sends one note
+// Sender is the interface between the spool and a publisher. It sends one note
 // to one target. It returns nil only if the target has the note. The HTTPS
-// publisher and the fake sender of the tests use this one contract.
+// publisher and the fake sender of the tests use this one interface.
 type Sender interface {
 	Send(target string, size uint64, note []byte) error
 }
 
-// errBadNote marks a spool note that is too large to be a checkpoint note.
+// errBadNote marks a spool note that must not go to a sender. It is not a
+// regular file, it is larger than 1 KiB, it does not parse or verify, or its
+// size is not the size in its name.
 var errBadNote = errors.New("bad note")
 
 // cursor is the last size that a target published. set is false before the
@@ -130,7 +132,8 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 			return err
 		}
 	}
-	return s.collect(sizes)
+	s.collect(sizes)
+	return nil
 }
 
 // Publish gives the notes after the cursor of target i to send, in increasing
@@ -153,11 +156,12 @@ func (s *Spool) Publish(i int, send Sender) error {
 		}
 		msg, err := s.verified(size)
 		if errors.Is(err, errBadNote) {
-			if err := s.remove(size); err != nil {
-				return err
-			}
 			s.rejected++
-			s.log.Warn("checkpoint spool deleted a note that does not verify", "size", size)
+			if err := s.remove(size); err != nil { // for example a directory that is not empty
+				s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "size", size)
+			} else {
+				s.log.Warn("checkpoint spool deleted a note that must not be sent", "size", size)
+			}
 			continue
 		}
 		if err != nil {
@@ -171,17 +175,23 @@ func (s *Spool) Publish(i int, send Sender) error {
 			return err
 		}
 	}
-	if sizes, err = s.sizes(); err != nil { // a bad note may have been the newest
+	if sizes, err = s.sizes(); err != nil { // a bad note can be the newest
 		return err
 	}
-	return s.collect(sizes)
+	s.collect(sizes)
+	return nil
 }
 
-// verified reads a note and checks it. A note that is too large, does not
-// parse, does not verify, or has another size than its name gives errBadNote.
-// Any other error (a symlink, a read error) is not a bad note.
+// verified reads a note and checks it. A note that is not a regular file (a
+// symlink, a directory, a FIFO), is larger than 1 KiB, does not parse, does not
+// verify, or has another size than its name gives errBadNote. A read error is
+// not a bad note.
 func (s *Spool) verified(size uint64) ([]byte, error) {
-	msg, err := s.readFile(noteName(size))
+	name := noteName(size)
+	if fi, err := s.root.Lstat(name); err == nil && (!fi.Mode().IsRegular() || fi.Size() > maxNoteSize) {
+		return nil, errBadNote
+	}
+	msg, err := s.readFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -197,9 +207,6 @@ func (s *Spool) readFile(name string) ([]byte, error) {
 	lfi, err := s.root.Lstat(name)
 	if err != nil {
 		return nil, err
-	}
-	if lfi.Mode().IsRegular() && lfi.Size() > maxNoteSize {
-		return nil, errBadNote
 	}
 	f, _, rule := openChecked(s.root, name, lfi)
 	if rule != "" {
@@ -230,8 +237,8 @@ func (s *Spool) readCursor(i int) (cursor, error) {
 }
 
 // sizes lists the sizes of the notes, smallest first. A name that is not
-// <canonical decimal>.note is not a note. A symlink with such a name is listed:
-// the read then gives an error.
+// <canonical decimal>.note is not a note. An entry with such a name is listed
+// when it is not a regular file. Publish then treats it as a bad note.
 func (s *Spool) sizes() ([]uint64, error) {
 	d, err := s.root.Open(spoolDir)
 	if err != nil {
@@ -286,14 +293,11 @@ func (s *Spool) remove(size uint64) error {
 }
 
 // drop deletes the oldest note because the spool is full. It counts the note
-// as skipped for each target whose cursor is below its size.
+// as skipped for each target whose cursor is below its size. It also counts the
+// note for a target whose cursor cannot be read, so the bound always holds.
 func (s *Spool) drop(size uint64) error {
 	for i := range s.targets {
-		cur, err := s.readCursor(i)
-		if err != nil {
-			return err
-		}
-		if !cur.covers(size) {
+		if cur, err := s.readCursor(i); err != nil || !cur.covers(size) {
 			s.skip(i)
 		}
 	}
@@ -311,28 +315,25 @@ func (s *Spool) skip(i int) {
 	}
 }
 
-// collect deletes the notes that every target published, except the newest.
-func (s *Spool) collect(sizes []uint64) error {
+// collect deletes the notes that every target published, except the newest. It
+// deletes nothing while a cursor cannot be read, because that target can still
+// need a note. The error shows in Publish for that target. An entry that cannot
+// be deleted stays and does not stop the work.
+func (s *Spool) collect(sizes []uint64) {
 	if len(s.targets) == 0 || len(sizes) < 2 {
-		return nil
+		return
 	}
 	published := sizes[len(sizes)-1] // the newest note stays, so it is the upper limit
 	for i := range s.targets {
 		cur, err := s.readCursor(i)
-		if err != nil {
-			return err
-		}
-		if !cur.set {
-			return nil
+		if err != nil || !cur.set {
+			return
 		}
 		published = min(published, cur.size)
 	}
 	for _, size := range sizes[:len(sizes)-1] {
 		if size <= published {
-			if err := s.remove(size); err != nil {
-				return err
-			}
+			_ = s.remove(size)
 		}
 	}
-	return nil
 }

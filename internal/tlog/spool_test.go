@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func (e *spoolEnv) files(t *testing.T) []uint64 {
 }
 
 // T-I-09: each note is checkpoints/<size>.note with mode 0600 in a 0700
-// directory, and no temporary file stays, also after a crash left one.
+// directory, and no temporary file stays, even after a crash left one.
 func TestTI09_SpoolFiles(t *testing.T) {
 	e := newSpool(t)
 	must(t, os.WriteFile(filepath.Join(e.dir, spoolDir, "7.note.tmp"), []byte("left by a crash"), 0o600))
@@ -95,7 +96,7 @@ func TestTI09_SpoolFiles(t *testing.T) {
 }
 
 // T-I-09: for each target the notes come out in increasing size after the
-// cursor; the cursor moves only on success; a down target does not stop the
+// cursor; the cursor moves only on success; a target that fails does not stop the
 // other target; the cursor file is checkpoints/target-<16 hex of SHA-256>.
 func TestTI09_OrderAndCursor(t *testing.T) {
 	e := newSpool(t)
@@ -158,6 +159,70 @@ func TestTI09_Bound(t *testing.T) {
 	must(t, e.Add(1031, []byte("x")))
 	if n := strings.Count(e.logs.String(), "notes were skipped"); n != 4 {
 		t.Fatalf("%d summary lines after one hour, want 4", n)
+	}
+}
+
+// T-I-09: a cursor file that cannot be read does not turn off the bound. Add
+// does not fail, the spool keeps at most 1025 notes, and each dropped note is
+// skipped for that target. That target gets an error from Publish. The other
+// target publishes.
+func TestTI09_BadCursorKeepsBound(t *testing.T) {
+	e := newSpool(t)
+	must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte("x"), 0o600))
+	const last = maxSpoolNotes + 5
+	for size := uint64(1); size <= last; size++ {
+		e.add(t, size)
+	}
+	if sizes := e.files(t); len(sizes) != maxSpoolNotes || sizes[0] != 6 {
+		t.Fatalf("spool has %d notes from %d", len(sizes), sizes[0])
+	}
+	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{5, 5}) {
+		t.Fatalf("skipped = %v", st.Skipped)
+	}
+	f := newFake()
+	if err := e.Publish(0, f); err == nil || !strings.Contains(err.Error(), "canonical decimal") || len(f.got) != 0 {
+		t.Fatalf("Publish(0): err %v, sent %v", err, f.got)
+	}
+	must(t, e.Publish(1, f))
+	if got := f.got[spoolTargets[1]]; len(got) != maxSpoolNotes || got[len(got)-1] != last {
+		t.Fatalf("target 1 got %d notes", len(got))
+	}
+}
+
+// T-S-13: an entry at a note name that is not a regular file (a directory, a
+// FIFO, a symlink) is not given to the sender. It is deleted and counted. If it
+// cannot be deleted, it is counted and the targets go on with the next note.
+func TestTS13_NonRegularNote(t *testing.T) {
+	for name, make := range map[string]func(t *testing.T, path string){
+		"directory": func(t *testing.T, path string) { must(t, os.Mkdir(path, 0o700)) },
+		"fifo":      func(t *testing.T, path string) { must(t, syscall.Mkfifo(path, 0o600)) },
+		"directory-not-empty": func(t *testing.T, path string) {
+			must(t, os.Mkdir(path, 0o700))
+			must(t, os.WriteFile(filepath.Join(path, "x"), nil, 0o600))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newSpool(t)
+			e.add(t, 1)
+			path := filepath.Join(e.dir, e.noteFile(2))
+			make(t, path)
+			e.add(t, 3)
+			f := newFake()
+			must(t, e.Publish(0, f))
+			must(t, e.Publish(1, f))
+			for _, target := range spoolTargets {
+				if !slices.Equal(f.got[target], []uint64{1, 3}) {
+					t.Fatalf("sent = %v", f.got)
+				}
+			}
+			_, err := os.Lstat(path)
+			if kept := name == "directory-not-empty"; kept == errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("entry kept = %v, want %v (err %v)", !errors.Is(err, os.ErrNotExist), kept, err)
+			}
+			if st := e.Stats(); st.Rejected == 0 {
+				t.Fatal("entry not counted")
+			}
+		})
 	}
 }
 
@@ -224,9 +289,12 @@ func TestTS13_SymlinkOut(t *testing.T) {
 		e := newSpool(t)
 		mustSymlink(t, secret, filepath.Join(e.dir, e.noteFile(3)))
 		f := newFake()
-		if err := e.Publish(0, f); err == nil || len(f.got) != 0 {
-			t.Fatalf("Publish: err %v, sent %v", err, f.got)
+		must(t, e.Publish(0, f)) // the link is a bad note: deleted, not read, not sent
+		if len(f.got) != 0 || e.Stats().Rejected != 1 {
+			t.Fatalf("sent %v, rejected %d", f.got, e.Stats().Rejected)
 		}
+		check(t)
+		mustSymlink(t, secret, filepath.Join(e.dir, e.noteFile(3)))
 		e.add(t, 3) // a write replaces the link and does not follow it
 		check(t)
 		must(t, e.Publish(0, f))
