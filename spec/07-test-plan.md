@@ -38,7 +38,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-U-14 | FR-04 | Callback attribution from token alone (session row deleted) still yields trap id |
 | T-U-15 | C8 | ip_hmac rotates with day key; same IP different days ≠ equal |
 | T-U-16 | SEC-07 | Escaping: fuzz UA/path with ANSI, `<script>`, CRLF into log line, syslog SD, dashboard cell → no raw control chars / HTML |
-| T-U-17 | SEC-15, C2, C3, NFR-08 | Event queue: concurrent producers with a stopped writer → enqueue never blocks, lane depths and the byte budget are never exceeded, each drop is counted one time in `dropped_events` and in the counter of its key; evidence events are accepted while the bulk lane is full; the counter map stays ≤ 4096 keys plus the overflow bucket under 10^6 distinct IPv6 addresses; enqueue after close does not panic |
+| T-U-17 | SEC-15, C2, C3, NFR-08 | Event queue: concurrent producers with a stopped writer → enqueue never blocks, lane depths and the byte cap of each lane (bulk 24 MiB, evidence 8 MiB) are never exceeded, each drop is counted one time in `dropped_events` and in the counter of its key; evidence events are accepted while the bulk lane is full by count, and while maximum-size bulk events fill the bulk byte cap (at depth 4096 and 8192); the counter map stays ≤ 4096 keys plus the overflow bucket under 10^6 distinct IPv6 addresses; enqueue after close does not panic |
 
 ### Integration
 | ID | Covers | Test |
