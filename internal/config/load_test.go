@@ -65,10 +65,17 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 // base has 4 lines. Thus, a section line that a test adds after base is on line 5, and its first key is on line 6.
+// The tlog section has one line, and an empty line follows it. Its publisher names the variable tokenVar.
 const (
-	tlogOrigin = "tlog:\n  origin: test/origin\n"
+	tokenVar   = "CKPT_TOKEN"
+	tlogOrigin = "tlog: {origin: test/origin, publish: [{type: https-put, url: \"https://ckpt.example/put\", token_env: " + tokenVar + "}]}\n\n"
 	base       = "acme:\n  email: sec@example.com\n" + tlogOrigin
 )
+
+// loadTest is Load with a valid value in tokenVar. A later entry in env replaces it.
+func loadTest(path string, env []string) (*Config, error) {
+	return Load(path, append([]string{tokenVar + "=" + strings.Repeat("t", 32)}, env...))
+}
 
 // TestTU10_Precedence checks default < file < env and the source of each value.
 func TestTU10_Precedence(t *testing.T) {
@@ -89,7 +96,7 @@ func TestTU10_Precedence(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			c, err := load(writeConfig(t, r.file), strings.Fields(r.env), testKeys, Net{})
+			c, err := load(writeConfig(t, r.file), append(strings.Fields(r.env), tokenVar+"=token"), testKeys, Net{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,7 +116,7 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 	}
 	good := filepath.Join(testDir, "htpasswd")
 	t.Run("file", func(t *testing.T) {
-		c, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+good+"\n"), nil)
+		c, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+good+"\n"), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +125,7 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 		}
 	})
 	t.Run("env", func(t *testing.T) {
-		c, err := Load(writeConfig(t, base), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		c, err := loadTest(writeConfig(t, base), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,20 +135,20 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 	})
 	t.Run("env over bad file value", func(t *testing.T) {
 		bad := filepath.Join(testDir, "missing")
-		_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
 		if err != nil {
 			t.Errorf("a file value that the environment replaces is checked: %v", err)
 		}
 	})
 	t.Run("default fails", func(t *testing.T) {
-		_, err := Load(writeConfig(t, base), nil)
+		_, err := loadTest(writeConfig(t, base), nil)
 		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at default: the htpasswd file cannot be resolved") {
 			t.Errorf("got %v", err)
 		}
 	})
 	t.Run("file value fails", func(t *testing.T) {
 		bad := filepath.Join(testDir, "missing")
-		_, err := Load(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), nil)
+		_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), nil)
 		if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd at "+cfg[len(cfg)-64:]+":6: ") || strings.Contains(err.Error(), "default") {
 			t.Errorf("got %v", err)
 		}
@@ -163,7 +170,7 @@ func TestTU10_EnvNames(t *testing.T) {
 func TestTU10_Errors(t *testing.T) {
 	useTestKeys(t)
 	p := writeConfig(t, "zz: 1\nlisten:\n  http: \":1\"\n  bogus: 1\nfoo:\n  bar: 1\nops: [x]\nacme:\n  email: [a]\n")
-	_, err := Load(p, []string{"CANARY_LISTEN_HTTPS=:2", "CANARY_NOPE=1", "HOME=/x"})
+	_, err := loadTest(p, []string{"CANARY_LISTEN_HTTPS=:2", "CANARY_NOPE=1", "HOME=/x"})
 	p = p[len(p)-64:] // The error keeps the end of a long path: the file name and the line.
 	want := strings.Join([]string{
 		`config: zz at ` + p + `:1: unknown key`,
@@ -174,16 +181,17 @@ func TestTU10_Errors(t *testing.T) {
 		`config: CANARY_NOPE: unknown CANARY_ variable`,
 		`config: acme.email at ` + p + `: the key is required`,
 		`config: tlog.origin at ` + p + `: the key is required`,
+		`config: tlog.publish at ` + p + `: the key is required`,
 	}, "\n")
 	if err.Error() != want {
 		t.Errorf("got\n%v\nwant\n%v", err, want)
 	}
 	for _, body := range []string{"", "a: [\n"} {
-		if _, err := Load(writeConfig(t, body), nil); err == nil {
+		if _, err := loadTest(writeConfig(t, body), nil); err == nil {
 			t.Errorf("Load(%q) returned no error", body)
 		}
 	}
-	_, err = Load(filepath.Join(t.TempDir(), "missing.yaml"), nil)
+	_, err = loadTest(filepath.Join(t.TempDir(), "missing.yaml"), nil)
 	if err == nil || !strings.HasSuffix(err.Error(), ": the file does not exist") {
 		t.Errorf("missing file: got %v", err)
 	}
@@ -245,7 +253,7 @@ func TestTS10_Scalars(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			_, err := Load(writeConfig(t, base+r.file), strings.Fields(r.env))
+			_, err := loadTest(writeConfig(t, base+r.file), strings.Fields(r.env))
 			if err == nil || !strings.Contains(err.Error(), r.want) {
 				t.Errorf("got %v, want %q", err, r.want)
 			}
@@ -263,7 +271,7 @@ func TestTS10_Secret(t *testing.T) {
 		"token: !" + marker, "pin: !" + marker, "token: !<" + marker + "> x", "token: [!" + marker + "]",
 		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1", "token: [" + marker + ": !t 1]",
 	} {
-		_, err := Load(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker})
+		_, err := loadTest(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker})
 		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
 			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
 				t.Errorf("%q: the error shows a secret value: %s", body, s)

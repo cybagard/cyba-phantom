@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,8 +24,9 @@ const defaultStateRoot = "/var/lib/agent-canary"
 
 // loader holds the settings that the validators use. A test sets them to use a temporary directory.
 type loader struct {
-	stateRoot string // stateRoot is the directory that state paths must stay under after symlink resolution.
-	euid      int    // euid is the user that runs the sensor.
+	stateRoot string   // stateRoot is the directory that state paths must stay under after symlink resolution.
+	euid      int      // euid is the user that runs the sensor.
+	env       []string // env is the environment that the *_env keys name. The loader does not read the process environment.
 }
 
 func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.Geteuid()} }
@@ -347,26 +350,110 @@ func checkCA(_ *loader, raw string) string {
 // Endpoint is one allowed outbound endpoint (C4).
 type Endpoint struct{ Scheme, Host, Port string }
 
-// AllowList returns the outbound endpoints that the config allows. In this version
-// the list holds the acme.ca endpoint, and the bundle.fetch_url endpoint if it is set.
+// checkHTTPS accepts an https URL.
+func checkHTTPS(_ *loader, raw string) string {
+	_, d := parseURL(raw, "https")
+	return d
+}
+
+// endpoint makes an Endpoint. It writes the host in lower case and an IP literal in canonical form,
+// so that two spellings of one endpoint are equal.
+func endpoint(scheme, host, port string) Endpoint {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if a, err := netip.ParseAddr(host); err == nil {
+		host = a.Unmap().String()
+	}
+	return Endpoint{Scheme: scheme, Host: host, Port: port}
+}
+
+// parseEndpoint parses host:port, with a scheme and "://" before it if schemes is not empty.
+// The host is not empty. An IP literal has no zone and is not unspecified or link-local.
+// It returns a fixed detail on an error.
+func parseEndpoint(raw string, schemes ...string) (Endpoint, string) {
+	scheme := "smtp"
+	if len(schemes) > 0 {
+		s, rest, ok := strings.Cut(raw, "://")
+		if !ok || !contains(schemes, s) {
+			return Endpoint{}, "the address scheme must be " + strings.Join(schemes, ", ") + " and be followed by ://"
+		}
+		scheme, raw = s, rest
+	}
+	hp, d := parseHostPort(raw)
+	switch {
+	case d != "":
+		return Endpoint{}, d
+	case hp.host == "":
+		return Endpoint{}, "the host must not be empty"
+	case hp.addr.Zone() != "":
+		return Endpoint{}, "the host must not have a zone"
+	case hp.addr.Unmap().IsUnspecified():
+		return Endpoint{}, "the host must not be unspecified"
+	case hp.addr.Unmap().IsLinkLocalUnicast():
+		return Endpoint{}, "the host must not be link-local"
+	}
+	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
+}
+
+var syslogSchemes = []string{"udp", "tcp", "tls"}
+
+func checkSyslogAddr(_ *loader, raw string) string {
+	_, d := parseEndpoint(raw, syslogSchemes...)
+	return d
+}
+
+func checkSMTPHost(_ *loader, raw string) string {
+	_, d := parseEndpoint(raw)
+	return d
+}
+
+// AllowList returns the outbound endpoints that the config allows (C4): the endpoints of
+// acme.ca, bundle.fetch_url (if set), tlog.publish[].url, and the alert sinks. An endpoint
+// that two keys share is in the list one time. The order is acme.ca, bundle.fetch_url,
+// tlog.publish, then alerts.sinks. A webhook has the scheme https, a syslog sink has udp, tcp, or tls,
+// and an smtp sink has the scheme smtp.
 func (c *Config) AllowList() []Endpoint {
 	var list []Endpoint
+	add := func(e Endpoint) {
+		if !slices.Contains(list, e) {
+			list = append(list, e)
+		}
+	}
+	fromURL := func(raw string) {
+		if u, d := parseURL(raw, "https"); d == "" {
+			port := u.Port()
+			if port == "" {
+				port = "443"
+			}
+			add(endpoint(u.Scheme, u.Hostname(), port))
+		}
+	}
 	for _, p := range []string{"acme.ca", "bundle.fetch_url"} {
 		raw := c.values[p].Str
 		if dir, ok := caDirectories[raw]; ok && p == "acme.ca" {
 			raw = dir
 		}
-		u, d := parseURL(raw, "https")
-		if d != "" {
-			continue
-		}
-		port := u.Port()
-		if port == "" {
-			port = "443"
-		}
-		list = append(list, Endpoint{Scheme: u.Scheme, Host: strings.ToLower(u.Hostname()), Port: port})
+		fromURL(raw)
 	}
-	return list
+	for i := 0; c.values[fmt.Sprintf("tlog.publish[%d].type", i)].Str != ""; i++ {
+		fromURL(c.values[fmt.Sprintf("tlog.publish[%d].url", i)].Str)
+	}
+	for i := 0; ; i++ {
+		p := fmt.Sprintf("alerts.sinks[%d].", i)
+		switch c.values[p+"type"].Str {
+		case "webhook":
+			fromURL(c.values[p+"url"].Str)
+		case "syslog":
+			if e, d := parseEndpoint(c.values[p+"addr"].Str, syslogSchemes...); d == "" {
+				add(e)
+			}
+		case "smtp":
+			if e, d := parseEndpoint(c.values[p+"host"].Str); d == "" {
+				add(e)
+			}
+		default:
+			return list
+		}
+	}
 }
 
 // checkPathForm checks that p is absolute, clean, and free of NUL.

@@ -34,16 +34,17 @@ var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str"
 
 // key is one row of the key table.
 type key struct {
-	path   string
-	kind   kind
-	def    string                             // def is the default value, parsed like an override.
-	req    bool                               // req marks a required key: the file or the environment must set it.
-	secret bool                               // secret marks a key whose value is never printed.
-	check  func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
+	path     string
+	kind     kind
+	def      string                             // def is the default value, parsed like an override.
+	req      bool                               // req marks a required key: the file or the environment must set it.
+	secret   bool                               // secret marks a key whose value is never printed.
+	maxItems int                                // maxItems > 0 marks a key in a list item that holds 1 to maxItems scalars in a list.
+	check    func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
 }
 
 // keys is the production key table (04 section 3). It holds the scalar keys. The list
-// keys and the keys that name secrets are not in it yet.
+// keys are in the table lists. The loader adds the item keys to its table when it reads the lists (expandLists).
 var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
@@ -171,8 +172,9 @@ func envName(path string) string {
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
 	doc, err := ReadFile(path)
 	if err != nil {
-		return nil, errors.Join(readError(path, err, table))
+		return nil, errors.Join(readError(path, err, table, lists))
 	}
+	l.env = env
 	byPath := make(map[string]key, len(table))
 	byEnv := make(map[string]key, len(table))
 	for _, k := range table {
@@ -205,6 +207,16 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
+	// Lists: the list keys have no CANARY_ override, so byEnv does not hold the item keys.
+	// The loader handles an item key like a scalar key from here: set, required, and check.
+	itemKeys, listErrs := expandLists(doc, path, lists) // The loader reports listErrs after the required scalar keys.
+	table = append(slices.Clone(table), itemKeys...)
+	for _, k := range itemKeys {
+		if leaf, ok := doc.Leaves[k.path]; ok {
+			set(k, leaf.Value, leaf.Tag, path, leaf.Line)
+		}
+	}
+
 	// File: each node must be a known key or section. Errors come in file order.
 	paths := slices.Collect(maps.Keys(doc.Lines))
 	slices.SortFunc(paths, func(a, b string) int {
@@ -215,6 +227,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		k, isKey := byPath[p]
 		leaf, isLeaf := doc.Leaves[p]
 		switch {
+		case isListPath(p): // expandLists reads the list and its items.
 		case isKey && isLeaf:
 			set(k, leaf.Value, leaf.Tag, path, line)
 		case isKey:
@@ -253,6 +266,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
 		}
 	}
+	errs = append(errs, listErrs...)
 	// Each check runs one time, on the effective value. A key that fails is removed from vals.
 	for _, k := range table {
 		v, ok := vals[k.path]
@@ -323,7 +337,8 @@ func parent(p string) string {
 // readError changes a reader error into an Error. A wrapped system error becomes
 // a fixed message. It removes the reader's quotes, so esc escapes the text one time only.
 // A key below a secret key can be the secret value, so readError changes its path to the path of the secret key.
-func readError(path string, err error, table []key) error {
+// The tables are parameters, so readError does not read the global tables.
+func readError(path string, err error, table []key, listTable []listKey) error {
 	detail := "the loader cannot read the file"
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -335,14 +350,52 @@ func readError(path string, err error, table []key) error {
 		detail = quoted.ReplaceAllStringFunc(detail, func(q string) string {
 			s, _ := strconv.Unquote(q)
 			if i := slices.IndexFunc(table, func(k key) bool {
-				return k.secret && (strings.HasPrefix(s, k.path+".") || strings.HasPrefix(s, k.path+"["))
+				return k.secret && isBelow(s, k.path)
 			}); i >= 0 {
 				return table[i].path
+			}
+			if p := secretItemPath(s, listTable); p != "" {
+				return p
 			}
 			return s
 		})
 	}
 	return &Error{Source: path, Detail: detail}
+}
+
+// isBelow reports whether the path s is below the key p: s has the prefix p+"." or p+"[".
+func isBelow(s, p string) bool {
+	return strings.HasPrefix(s, p+".") || strings.HasPrefix(s, p+"[")
+}
+
+// pathPart matches one part of a path: the text between the characters ".", "[", and "]".
+var pathPart = regexp.MustCompile(`[^.\[\]]+`)
+
+// secretItemPath cuts the path s after its first secret item name. A secret item name is the name
+// of a secret key in a list schema. The cut does not depend on the shape of the list or on the item type.
+// For example, "tlog.publish[0].token_env.x" and "token_env.x" give "tlog.publish[0].token_env" and "token_env".
+// If s has no secret item name, it returns "".
+func secretItemPath(s string, table []listKey) string {
+	for _, m := range pathPart.FindAllStringIndex(s, -1) {
+		if isSecretItemName(s[m[0]:m[1]], table) {
+			return s[:m[1]]
+		}
+	}
+	return ""
+}
+
+// isSecretItemName reports whether name is the name of a secret key in a schema of any list.
+func isSecretItemName(name string, table []listKey) bool {
+	for _, l := range table {
+		for _, schema := range l.schemas {
+			for _, f := range schema {
+				if f.secret && f.path == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
