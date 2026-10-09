@@ -534,3 +534,61 @@ func TestTU07FullLogIsAnError(t *testing.T) {
 		t.Fatal("Append to a full log returned nil")
 	}
 }
+
+func TestOpenLogMakesLoadedHeadDurable(t *testing.T) {
+	state, dir := newLogState(t)
+	log := filepath.Join(dir, "tlog")
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 300)
+	// The head rename works, but the fsync of the log directory fails.
+	stop := failDirSyncAfterRename(t, headName)
+	if _, err := l.Append(testEvent(300)); err == nil {
+		t.Fatal("Append returned nil after the failed fsync")
+	}
+	stop()
+	l.Close()
+
+	oldDir := syncDirFile
+	t.Cleanup(func() { syncDirFile = oldDir })
+	// Each directory that the root computation reads: the full tile, the
+	// partial tile, and the partial tile of the next level.
+	want := []string{"..", ".", "tile/8/0", "tile/8/0/001.p", "tile/8/1/000.p"}
+	var synced []string
+	syncDirFile = func(f *os.File) error {
+		fi, err := f.Stat()
+		mustNil(t, err)
+		for _, d := range want {
+			if di, err := os.Stat(filepath.Join(log, d)); err == nil && os.SameFile(di, fi) {
+				synced = append(synced, d)
+			}
+		}
+		return oldDir(f)
+	}
+	l, err := OpenLog(state, "tlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	for _, d := range want {
+		if !slices.Contains(synced, d) {
+			t.Errorf("OpenLog did not call fsync on %q, only on %q", d, synced)
+		}
+	}
+	if size, _ := l.Head(); size != 301 {
+		t.Fatalf("head size %d, want 301", size)
+	}
+	l.Close()
+
+	// If the fsync of the log directory fails, OpenLog fails and returns no Log.
+	syncDirFile = func(f *os.File) error {
+		if fi, err := f.Stat(); err == nil {
+			if di, err := os.Stat(log); err == nil && os.SameFile(di, fi) {
+				return errors.New("injected")
+			}
+		}
+		return oldDir(f)
+	}
+	if l, err := OpenLog(state, "tlog"); err == nil || l != nil {
+		t.Fatalf("OpenLog gave %v, %v after the failed fsync", l, err)
+	}
+}

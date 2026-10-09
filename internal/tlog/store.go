@@ -131,7 +131,10 @@ type Store struct {
 // list or tidy any other tile. It deletes files only after all checks pass: if
 // a check fails, Open has deleted nothing. A directory with no tree head must
 // be empty, or hold only the temporary file of the tree head. Open writes a
-// tree head of size 0 for it, before any tile can be written.
+// tree head of size 0 for it, before any tile can be written. Open calls fsync
+// on the log directory, on its parents, and on the directories of the tiles
+// that it read, so that the loaded tree head is durable. If an fsync fails,
+// Open returns an error.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -158,6 +161,11 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	if err := s.load(); err != nil {
 		sub.Close()
 		return nil, err
+	}
+	// The loaded tree head must be durable: its directory entry can be new.
+	if err := syncDirs(state, dir); err != nil {
+		sub.Close()
+		return nil, &Error{headName, ruleWrite}
 	}
 	return s, nil
 }
@@ -190,7 +198,10 @@ func (s *Store) load() error {
 	}
 	var rm []string
 	seen := map[tlog.Tile]bool{}
+	var dirs []string
 	for _, t := range read {
+		// The tile came from a partial file or from the full file.
+		dirs = append(dirs, path.Dir(tilePath(t, t.W)), path.Dir(tilePath(t, fullWidth)))
 		if seen[tileKey(t)] {
 			continue
 		}
@@ -201,7 +212,26 @@ func (s *Store) load() error {
 		}
 		rm = append(rm, names...)
 	}
-	return s.remove(rm)
+	if err := s.remove(rm); err != nil {
+		return err
+	}
+	return s.syncRead(dirs)
+}
+
+// syncRead calls fsync on each directory in dirs that exists, and on its
+// parents. The store cannot know if a directory is durable already, so it
+// syncs each one every time.
+func (s *Store) syncRead(dirs []string) error {
+	slices.Sort(dirs)
+	for _, dir := range slices.Compact(dirs) {
+		if _, err := s.dir.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err := syncDirs(s.dir, dir); err != nil {
+			return &Error{dir, ruleWrite}
+		}
+	}
+	return nil
 }
 
 // initHead writes the tree head of an empty log. The directory must be empty
