@@ -75,7 +75,7 @@ func TestTU17_QueueConstructor(t *testing.T) {
 }
 
 // T-U-17: many producers and a stopped consumer. The enqueues finish in
-// bounded time, the byte sum of each lane stays in its cap, and the queue counts
+// bounded time. The byte sum of each lane stays in its cap. The queue counts
 // each drop one time, for its lane and for its client key. The capacity of a
 // channel is the count bound of the lane, so the test does not check it.
 func TestTU17_QueueConcurrentBounds(t *testing.T) {
@@ -287,7 +287,7 @@ func TestTU17_QueueByteBudgetConcurrent(t *testing.T) {
 	}
 }
 
-// T-U-17: maximum-size bulk events fill the byte cap of the bulk lane, and the
+// T-U-17: large bulk events near MaxEventBytes fill the byte cap of the bulk lane, and the
 // evidence lane still accepts every callback event (SEC-15, ADR-019). The bulk
 // lane has room by count, so the byte cap causes the drops. The test runs at
 // the default depth and at the largest depth.
@@ -446,11 +446,15 @@ func TestTU17_QueueReadyAndInvalid(t *testing.T) {
 // T-U-17: an IP text that is not an address goes to the overflow bucket.
 func TestTU17_QueueBadAddress(t *testing.T) {
 	q, c := mustQueue(t, 1, maxBulkBytes, maxEvidenceBytes)
-	q.Enqueue(qEvent(t, KindRequest, ""))
-	// NewEvent rejects this text, so the test sets it after NewEvent.
-	e := qEvent(t, KindRequest, "")
-	e.DB.IP = "not-an-address"
-	q.Enqueue(e)
+	// NewEvent rejects this text, so the test builds the event as a literal. Its
+	// size is 0, so the queue drops it as invalid and reads the IP text.
+	e := &Event{Record: Record{Kind: KindRequest}, DB: DBOnly{IP: "not-an-address"}}
+	if q.Enqueue(e) {
+		t.Error("Enqueue accepted an event with a bad IP text")
+	}
+	if d := q.Dropped(); d != (Dropped{Invalid: 1}) {
+		t.Errorf("dropped %+v, want Invalid 1", d)
+	}
 	m, overflow := c.Snapshot()
 	if len(m) != 0 || overflow != 1 {
 		t.Errorf("counters: %d keys, overflow %d; want overflow 1", len(m), overflow)
