@@ -76,6 +76,7 @@ const (
 	ruleUnwrit   = "tile of the new tree head was not written by this store"
 	ruleBatch    = "too many tiles since the last tree head"
 	ruleLink     = "directory is a link"
+	ruleNotDir   = "path part is not a directory"
 )
 
 var (
@@ -87,6 +88,13 @@ var (
 	errLink    = errors.New("link")
 
 	emptyRoot = tlog.Hash(sha256.Sum256(nil))
+
+	// The calls that make a write durable. The code calls them through these
+	// variables, so that a test can record their order. A test must restore
+	// the real functions.
+	syncFile    = (*os.File).Sync
+	syncDirFile = (*os.File).Sync
+	renameFile  = (*os.Root).Rename
 )
 
 // Error names the file that failed and the rule that failed. The name is a
@@ -259,16 +267,15 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 // SetHead writes the tree head. The caller must call WriteTile for each new
 // tile of the tree first, and must call SetHead only after each WriteTile
 // returned nil. SetHead refuses a size that is smaller than the stored size
-// and a size above maxSize. It reads the tiles and refuses the call if they no
-// longer give the stored tree head, or if they do not give the new one. Take
-// each tile that the new root computation reads, and each tile that the new
-// tree head covers for the first time (at every level). Every stored file of
-// such a tile must agree with the other files in the hashes that the new tree
-// head covers. If not, the next Open would refuse the tree head. For a tile
-// that the new tree head covers for the first time, SetHead also refuses
-// hashes that this Store did not write or check since the last SetHead (a tile
-// that WriteTile did not accept). SetHead refuses a size that adds more than
-// maxBatchTiles full tiles. A refused call changes no file.
+// and a size above maxSize. It refuses the call if the tiles no longer give
+// the stored tree head or do not give the new one. It checks each tile that
+// the new root computation reads and each tile that the new tree head covers
+// for the first time. For each such tile, SetHead refuses a link in the tile
+// path, like WriteTile. The stored files of the tile must agree in the hashes
+// that the new tree head covers. If not, the next Open would refuse the tree
+// head. A newly covered hash must be one that WriteTile accepted since the
+// last SetHead. SetHead refuses a size that adds more than maxBatchTiles full
+// tiles. A refused call changes no file.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -292,6 +299,9 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 			continue
 		}
 		seen[tileKey(t)] = true
+		if err := s.checkDirs(t); err != nil {
+			return err
+		}
 		c := covered(next.N, t)
 		if _, err := s.stale(t, 0, c); err != nil {
 			return err
@@ -560,11 +570,11 @@ func (s *Store) names(dir string, limit int) ([]string, error) {
 	}
 }
 
-// checkDirs checks that each directory on the path of tile t below the log
-// directory is a real directory and not a link: tile, tile/8, the level
-// directory, the group directories, and the partial-tile directory. A directory
-// that is not there yet is not an error, and none below it can exist. checkDirs
-// does not follow a link, so it makes no change through one.
+// checkDirs checks the directories on the path of tile t below the log
+// directory. Each must be a real directory and not a link: tile, tile/8, the
+// level directory, the group directories, and the partial-tile directory. A
+// directory that is not there yet is not an error, and none below it can
+// exist. checkDirs does not follow a link, so it makes no change through one.
 func (s *Store) checkDirs(t tlog.Tile) error {
 	p := ""
 	for _, part := range strings.Split(path.Dir(tilePath(t, 1)), "/") {
@@ -578,7 +588,7 @@ func (s *Store) checkDirs(t tlog.Tile) error {
 		case fi.Mode()&fs.ModeSymlink != 0:
 			return &Error{p, ruleLink}
 		case !fi.IsDir():
-			return &Error{p, ruleType}
+			return &Error{p, ruleNotDir}
 		}
 	}
 	return nil
@@ -720,13 +730,13 @@ func (s *Store) writeFile(name string, data []byte) error {
 	}
 	_, err = f.Write(data)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = s.dir.Rename(tmp, name)
+		err = renameFile(s.dir, tmp, name)
 	}
 	if err == nil {
 		return syncDirs(s.dir, dir)
@@ -742,7 +752,7 @@ func syncDirs(r *os.Root, dir string) error {
 		if err != nil {
 			return err
 		}
-		err = d.Sync()
+		err = syncDirFile(d)
 		d.Close()
 		if err != nil || dir == "." {
 			return err

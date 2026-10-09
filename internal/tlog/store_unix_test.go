@@ -234,8 +234,58 @@ func TestTS13WriteTileRefusesDirectoryLinkPlantedAfterOpen(t *testing.T) {
 	}
 }
 
+// A directory link that appears after WriteTile must not let SetHead read a
+// newly covered tile through it, also when no root computation reads the tile.
+func TestTS13SetHeadRefusesDirectoryLinkOverNewlyCoveredTile(t *testing.T) {
+	cases := []struct {
+		name       string
+		link       string // the directory that becomes a link, below the log directory
+		to         string // the target of the link, relative to the link's directory
+		from, size int64  // the log grows from..size; the root computation does not read the tile
+	}{
+		// Tile 1999 is full at tile/8/0/x001/999 and has no partial-tile
+		// directory. The root of 2000*256+1 reads only the group x002.
+		{"group directory", "tile/8/0/x001", "x001.real", 1999 * fullWidth, 2000*fullWidth + 1},
+		// Tile 0 of level 1 is full. The root of 65536 reads only level 2.
+		{"level directory", "tile/8/1", "1.real", 0, fullWidth * fullWidth},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := newLogState(t)
+			s := openStore(t, state)
+			var l testLog
+			if c.from > 0 {
+				l.commit(t, s, 0, c.from)
+			}
+			l.put(t, s, c.from, c.size)
+			link := filepath.Join(dir, "tlog", filepath.FromSlash(c.link))
+			mustNil(t, os.Rename(link, link+".real"))
+			mustNil(t, os.Symlink(c.to, link))
+			size0, root0 := s.TreeHead()
+			head := filepath.Join(dir, "tlog", headName)
+			before, err := os.ReadFile(head)
+			mustNil(t, err)
+			files := snapshot(t, filepath.Join(dir, "tlog"))
+			err = s.SetHead(c.size, l.root(t, c.size))
+			var e *Error
+			if !errors.As(err, &e) || e.Rule != ruleLink || e.Name != c.link {
+				t.Fatalf("got %v", err)
+			}
+			if size, root := s.TreeHead(); size != size0 || root != root0 {
+				t.Fatal("a refused call changed the tree head in memory")
+			}
+			if now, err := os.ReadFile(head); err != nil || !bytes.Equal(now, before) {
+				t.Fatal("a refused call changed the head file")
+			}
+			if snapshot(t, filepath.Join(dir, "tlog")) != files {
+				t.Fatal("a refused call changed a file")
+			}
+		})
+	}
+}
+
 // Open reads a tile through a level directory that is a link. It refuses the
-// link, also when the tile has no partial-tile directory.
+// link.
 func TestTS13OpenRefusesLevelDirectoryLink(t *testing.T) {
 	state, dir := committedLog(t, 600)
 	level := filepath.Join(dir, "tlog", "tile", "8", "1")

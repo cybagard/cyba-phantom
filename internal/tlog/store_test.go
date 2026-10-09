@@ -179,6 +179,87 @@ func TestTU07HeadIsWrittenLast(t *testing.T) {
 	}
 }
 
+// recordDurableSteps replaces the calls that make a write durable with hooks
+// that record their order. Each hook also checks the state of the files at its
+// step. The test restores the real calls when it ends.
+func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
+	t.Helper()
+	var steps []string
+	tmp := filepath.Join(log, name+tmpSuffix)
+	final := filepath.Join(log, name)
+	holds := func(file string) bool {
+		b, err := os.ReadFile(file)
+		return err == nil && bytes.Equal(b, data)
+	}
+	oldSync, oldDir, oldRename := syncFile, syncDirFile, renameFile
+	t.Cleanup(func() { syncFile, syncDirFile, renameFile = oldSync, oldDir, oldRename })
+	syncFile = func(f *os.File) error {
+		if !holds(tmp) || holds(final) {
+			t.Error("file sync: the temporary file lacks the data, or the final file has it already")
+		}
+		steps = append(steps, "sync file")
+		return oldSync(f)
+	}
+	renameFile = func(r *os.Root, from, to string) error {
+		if from != name+tmpSuffix || to != name || !holds(tmp) || holds(final) {
+			t.Errorf("rename %s to %s: wrong names or state", from, to)
+		}
+		steps = append(steps, "rename")
+		return oldRename(r, from, to)
+	}
+	syncDirFile = func(f *os.File) error {
+		if _, err := os.Lstat(tmp); err == nil || !holds(final) {
+			t.Error("directory sync: the temporary file is there, or the final file lacks the data")
+		}
+		fi, err := f.Stat()
+		mustNil(t, err)
+		for d := filepath.Dir(name); ; d = filepath.Dir(d) {
+			if di, err := os.Stat(filepath.Join(log, d)); err == nil && os.SameFile(di, fi) {
+				steps = append(steps, "sync dir "+d)
+				break
+			} else if d == "." {
+				steps = append(steps, "sync of an unknown directory")
+				break
+			}
+		}
+		return oldDir(f)
+	}
+	return &steps
+}
+
+// A tile or the tree head is durable in this order: write of the temporary
+// file, fsync of the file, rename, fsync of the directory and of each parent.
+func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	log := filepath.Join(dir, "tlog")
+	var l testLog
+	l.extend(t, 3)
+
+	t.Run("tile", func(t *testing.T) {
+		tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+		steps := recordDurableSteps(t, log, tile.Path(), l.tileData(tile))
+		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+		want := []string{"sync file", "rename", "sync dir tile/8/0/000.p", "sync dir tile/8/0",
+			"sync dir tile/8", "sync dir tile", "sync dir ."}
+		if !slices.Equal(*steps, want) {
+			t.Fatalf("got %q, want %q", *steps, want)
+		}
+	})
+	t.Run("tree head", func(t *testing.T) {
+		var head [headSize]byte
+		binary.BigEndian.PutUint64(head[:], 3)
+		root := l.root(t, 3)
+		copy(head[sizeLen:], root[:])
+		steps := recordDurableSteps(t, log, headName, head[:])
+		mustNil(t, s.SetHead(3, root))
+		want := []string{"sync file", "rename", "sync dir ."}
+		if !slices.Equal(*steps, want) {
+			t.Fatalf("got %q, want %q", *steps, want)
+		}
+	})
+}
+
 // A new log has a tree head of size 0 before the first tile is written.
 func TestTU07OpenWritesEmptyHead(t *testing.T) {
 	state, dir := newLogState(t)
@@ -861,7 +942,7 @@ func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
 }
 
 // The store deletes a narrower file only if a wider file has the same covered
-// hashes. Else the narrower file can be the only copy of them.
+// hashes. If not, the narrower file can be the only copy of them.
 func TestTU07NeverDeletesTheOnlyCopyOfCoveredHashes(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
