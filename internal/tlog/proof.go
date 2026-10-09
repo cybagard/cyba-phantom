@@ -34,8 +34,9 @@ func (l *Log) RootAt(size int64) (tlog.Hash, error) {
 
 // ProveInclusion returns the proof that the leaf at position index is in the
 // tree of the first size leaves. The index must be below the size, and the size
-// must not be above the size of the log. Check the proof with VerifyInclusion
-// and the root that RootAt gives for the size.
+// must not be above the size of the log. With an error, the proof is nil. A
+// third party checks the proof with VerifyInclusion and the root of a signed
+// checkpoint of that size. RootAt gives the same root in this process.
 func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -47,14 +48,19 @@ func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 		proof, err = tlog.ProveRecord(size, index, r)
 		return err
 	})
-	return proof, err
+	if err != nil {
+		return nil, err
+	}
+	return proof, nil
 }
 
 // ProveConsistency returns the proof that the tree of the first oldSize leaves
 // is a prefix of the tree of the first newSize leaves. The sizes must follow
 // 0 <= oldSize <= newSize <= the size of the log. For oldSize 0 and for equal
-// sizes, the proof is empty and the check is the roots only. Check a proof with
-// tlog.CheckTree and the roots that RootAt gives.
+// sizes, the proof is empty and the check is the roots only. With an error, the
+// proof is nil. A third party checks a proof with tlog.CheckTree and the roots
+// of the signed checkpoints of the two sizes. RootAt gives the same roots in
+// this process.
 func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -69,7 +75,10 @@ func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 		proof, err = tlog.ProveTree(newSize, oldSize, r)
 		return err
 	})
-	return proof, err
+	if err != nil {
+		return nil, err
+	}
+	return proof, nil
 }
 
 // read calls f with a hash reader that reads tiles from the store and checks
