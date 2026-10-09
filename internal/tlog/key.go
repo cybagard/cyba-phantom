@@ -28,9 +28,10 @@ const (
 // root, the state directory that the caller opened one time. The key name must
 // equal origin (tlog.origin).
 //
-// A key is made only on the first start: no key file, no signer state
-// (signerState), and tree size 0. A missing key while a signer state exists or
-// the tree has leaves is an error, and no key is made (SEC-16).
+// The function makes a new key only on the first start: no key file, no signer
+// state (signerState), and tree size 0. If the key is missing and a signer
+// state exists or the tree has leaves, the function returns an error and makes
+// no key (SEC-16).
 //
 // The key text, its base64 form, and the seed never go to the log or to an
 // error. The function keeps only the signer value. It derives the public key
@@ -79,35 +80,61 @@ func checkKeysDir(root *os.Root, path string) (bool, error) {
 	return true, nil
 }
 
-func loadSigner(root *os.Root, log *slog.Logger, path, origin string, fi fs.FileInfo) (note.Signer, error) {
-	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
-		return nil, keyError(path, "must be a regular file and not a symlink")
+// afterLstat is a test hook. Production code leaves it nil. A test sets it to
+// change the file system between the Lstat and the open.
+var afterLstat func()
+
+// openChecked opens name for read and compares the open file with lfi, the
+// Lstat result of the same name. os.Root adds O_NOFOLLOW itself, but it still
+// follows a symlink that stays inside the root. The os.SameFile comparison
+// finds such a change. The returned string is the failed rule, or empty.
+func openChecked(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string) {
+	if !lfi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
+		return nil, nil, "must be a regular file and not a symlink"
 	}
-	// The flags stop a symlink swapped in after Lstat and a FIFO that blocks.
-	f, err := root.OpenFile(keyName, readFlags, 0)
+	if afterLstat != nil {
+		afterLstat()
+	}
+	f, err := root.OpenFile(name, readFlags, 0)
 	if err != nil {
-		return nil, keyError(path, "cannot be opened")
+		return nil, nil, "cannot be opened"
+	}
+	fi, err := f.Stat() // the open file, not the name
+	rule := ""
+	switch {
+	case err != nil:
+		rule = "cannot be examined"
+	case !os.SameFile(lfi, fi):
+		rule = "changed between the check and the open"
+	case !fi.Mode().IsRegular():
+		rule = "must be a regular file"
+	case fi.Size() > maxKeySize:
+		rule = "must not be larger than 1 KiB"
+	}
+	if rule != "" {
+		f.Close()
+		return nil, nil, rule
+	}
+	return f, fi, ""
+}
+
+func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.FileInfo) (note.Signer, error) {
+	f, fi, rule := openChecked(root, keyName, lfi)
+	if rule != "" {
+		return nil, keyError(path, rule)
 	}
 	defer f.Close()
-	fi, err = f.Stat() // the open file, not the name
-	if err != nil {
-		return nil, keyError(path, "cannot be examined")
-	}
 	switch {
-	case !fi.Mode().IsRegular():
-		return nil, keyError(path, "must be a regular file")
 	case !ownedByEUID(fi):
 		return nil, keyError(path, "must be owned by the user that runs the sensor")
 	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0o600:
 		return nil, keyError(path, "mode must be exactly 0600")
-	case fi.Size() > maxKeySize:
-		return nil, keyError(path, "must not be larger than 1 KiB")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxKeySize+1))
 	if err != nil || len(b) > maxKeySize {
 		return nil, keyError(path, "cannot be read within 1 KiB")
 	}
-	signer, err := note.NewSigner(string(b)) // the error text is not passed on
+	signer, err := note.NewSigner(string(b)) // the error text of note stays out of our error
 	if err != nil {
 		return nil, keyError(path, "is not a valid note signer key")
 	}
@@ -118,17 +145,51 @@ func loadSigner(root *os.Root, log *slog.Logger, path, origin string, fi fs.File
 	if err != nil {
 		return nil, keyError(path, "public key cannot be derived from the key")
 	}
-	clear(b) // only the signer stays
+	// This wipes the byte slice only. The string copies stay in memory until
+	// the garbage collector frees them.
+	clear(b)
 
-	// The load path never reads the public key file. It can be a symlink or a
-	// copy of the key. A missing file is made again from the derived text.
-	if _, err := root.Lstat(vkeyName); errors.Is(err, fs.ErrNotExist) {
-		if err := writeNew(root, vkeyName, vkey+"\n"); err != nil {
+	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
+	checkVkey(root, log, vkey)
+	return signer, nil
+}
+
+// checkVkey writes the public key file again if it is missing. If the file
+// exists, checkVkey reads it with the rules of the key file and warns when its
+// text differs from vkey. The warnings have fixed text and never have file bytes.
+func checkVkey(root *os.Root, log *slog.Logger, vkey string) {
+	const (
+		cannotCheck = "checkpoint public key file cannot be checked; the log has the correct key"
+		differs     = "checkpoint public key file differs from the key; the log has the correct key"
+	)
+	fi, err := root.Lstat(vkeyName)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = writeNew(root, vkeyName, vkey+"\n")
+		if err == nil {
+			err = syncDir(root, keysDir)
+		}
+		if err != nil {
 			log.Warn("public key file cannot be written")
 		}
+		return
 	}
-	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
-	return signer, nil
+	if err != nil {
+		log.Warn(cannotCheck)
+		return
+	}
+	f, _, rule := openChecked(root, vkeyName, fi)
+	if rule != "" {
+		log.Warn(cannotCheck)
+		return
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxKeySize+1))
+	switch {
+	case err != nil || len(b) > maxKeySize:
+		log.Warn(cannotCheck)
+	case strings.TrimSpace(string(b)) != vkey:
+		log.Warn(differs)
+	}
 }
 
 // deriveVkey makes the verifier key text from the private key text: the name,
@@ -166,7 +227,7 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	if err := root.MkdirAll(keysDir, 0o700); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot make the keys directory: %w", path, err)
 	}
-	// Any entry at the public key path is an error. The write must not follow it.
+	// An entry at the public key path is an error. The write must not follow it.
 	if _, err := root.Lstat(vkeyName); !errors.Is(err, fs.ErrNotExist) {
 		return nil, keyError(path, "public key file must not exist on the first start")
 	}

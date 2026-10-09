@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -145,8 +146,8 @@ func TestTS13_KeyFileRules(t *testing.T) {
 		{"directory", func(t *testing.T, dir string) { must(t, os.MkdirAll(filepath.Join(dir, keyName), 0o700)) }, "", "must be a regular file"},
 		{"symlink inside", func(t *testing.T, dir string) {
 			putKey(t, dir, good, 0o600)
-			must(t, os.Rename(filepath.Join(dir, keyName), filepath.Join(dir, "real.key")))
-			mustSymlink(t, filepath.Join(dir, "real.key"), filepath.Join(dir, keyName))
+			must(t, os.Rename(filepath.Join(dir, keyName), filepath.Join(dir, keysDir, "real.key")))
+			mustSymlink(t, "real.key", filepath.Join(dir, keyName))
 		}, good, "must be a regular file and not a symlink"},
 		{"keys is a symlink inside the root", func(t *testing.T, dir string) {
 			must(t, os.Mkdir(filepath.Join(dir, "tlog"), 0o700))
@@ -274,8 +275,8 @@ func TestTS13_FirstStartAndReload(t *testing.T) {
 	}
 }
 
-// T-S-13: a missing key on a log with a signer state or leaves is an error,
-// and no file is made.
+// T-S-13: if the key is missing and the log has a signer state or leaves, the
+// function returns an error and makes no file.
 func TestTS13_MissingKeyNoNewKey(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -374,12 +375,15 @@ func vkeyOf(t *testing.T, log string) string {
 	if !ok {
 		t.Fatal("the log has no public key")
 	}
-	v, _, _ := strings.Cut(strings.TrimSpace(rest), " ")
-	return v
+	if i := strings.IndexAny(rest, " \n"); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
 }
 
 // T-S-13: a public key file that is a symlink to the key file, or a copy of it,
-// does not put the key text in the log. The load path logs the derived text.
+// does not put the key text in the log. The load path logs the derived text
+// and a fixed warning.
 func TestTS13_VkeyIsKeyFile(t *testing.T) {
 	for _, kind := range []string{"symlink", "copy"} {
 		t.Run(kind, func(t *testing.T) {
@@ -387,7 +391,7 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 			vpath := filepath.Join(dir, vkeyName)
 			must(t, os.Remove(vpath))
 			if kind == "symlink" {
-				mustSymlink(t, filepath.Join(dir, keyName), vpath)
+				mustSymlink(t, "checkpoint.key", vpath)
 			} else {
 				must(t, os.WriteFile(vpath, []byte(text), 0o600))
 			}
@@ -395,6 +399,9 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 			s, err := loadWithin(t, root, log, testOrigin, true, 1)
 			must(t, err)
 			assertNoSecret(t, "log", buf.String(), secretsOf(text))
+			if !strings.Contains(buf.String(), "checkpoint public key file ") {
+				t.Error("the log has no warning about the public key file")
+			}
 			v, err := note.NewVerifier(vkeyOf(t, buf.String()))
 			if err != nil || v.Name() != testOrigin || v.KeyHash() != s.KeyHash() {
 				t.Errorf("the logged public key does not match the signer: %v", err)
@@ -403,14 +410,14 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 	}
 }
 
-// T-S-13: on the first start, any entry at the public key path is an error,
-// and the write does not follow a symlink. The target stays as it was, and no
+// T-S-13: on the first start, a symlink at the public key path gives an error.
+// The write does not follow the symlink, the target does not change, and no
 // key file is made.
 func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 	root, dir := firstStartKeysDir(t)
 	target := filepath.Join(dir, "other-state")
 	must(t, os.WriteFile(target, []byte("state"), 0o600))
-	mustSymlink(t, target, filepath.Join(dir, vkeyName))
+	mustSymlink(t, "../other-state", filepath.Join(dir, vkeyName))
 	s, err := loadWithin(t, root, nil, testOrigin, false, 0)
 	if err == nil || s != nil || !strings.Contains(err.Error(), "public key file must not exist") {
 		t.Fatalf("got signer %v, error %v; want the rule error", s, err)
@@ -430,13 +437,58 @@ func TestTS13_VkeyFifo(t *testing.T) {
 	vpath := filepath.Join(dir, vkeyName)
 	must(t, os.Remove(vpath))
 	mustFifo(t, vpath)
-	if _, err := loadWithin(t, root, nil, testOrigin, true, 1); err != nil {
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
 		t.Fatalf("load: %v", err)
+	}
+	if !strings.Contains(buf.String(), "checkpoint public key file cannot be checked; the log has the correct key") {
+		t.Errorf("the log has no warning: %s", buf)
 	}
 	root2, dir2 := firstStartKeysDir(t)
 	mustFifo(t, filepath.Join(dir2, vkeyName))
 	if _, err := loadWithin(t, root2, nil, testOrigin, false, 0); err == nil {
 		t.Error("first start with a FIFO at the public key path: want an error")
+	}
+}
+
+// T-S-13: a symlink to another valid key file that replaces the key between
+// the Lstat and the open gives an error. os.Root follows the relative symlink.
+func TestTS13_SwapAfterLstat(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	other := filepath.Join(dir, keysDir, "other.key")
+	must(t, os.WriteFile(other, []byte(newKeyText(t, testOrigin)), 0o600))
+	must(t, os.Chmod(other, 0o600))
+	called := false
+	afterLstat = func() {
+		called = true
+		must(t, os.Remove(filepath.Join(dir, keyName)))
+		mustSymlink(t, "other.key", filepath.Join(dir, keyName))
+	}
+	t.Cleanup(func() { afterLstat = nil })
+	s, err := loadWithin(t, root, nil, testOrigin, true, 1)
+	if !called {
+		t.Fatal("the test hook did not run")
+	}
+	if err == nil || s != nil || !strings.Contains(err.Error(), keyName) || !strings.Contains(err.Error(), "changed between the check and the open") {
+		t.Fatalf("got signer %v, error %v; want the rule error", s, err)
+	}
+}
+
+// T-S-13: a public key file with other text gives one fixed warning and no
+// file bytes in the log. The start succeeds.
+func TestTS13_VkeyDiffers(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	must(t, os.Remove(filepath.Join(dir, vkeyName)))
+	must(t, os.WriteFile(filepath.Join(dir, vkeyName), []byte("other-text-marker"), 0o600))
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "checkpoint public key file differs from the key; the log has the correct key") {
+		t.Errorf("the log has no warning: %s", buf)
+	}
+	if strings.Contains(buf.String(), "other-text-marker") {
+		t.Error("the log has bytes of the public key file")
 	}
 }
 
@@ -458,16 +510,21 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 	}
 }
 
-// T-S-13: os.Root.OpenFile honours O_NOFOLLOW and O_NONBLOCK. The key load
-// depends on both.
+// T-S-13: os.Root.OpenFile follows a relative symlink that stays inside the
+// root, so the key load compares the file before and after the open. With
+// O_NONBLOCK, the open of a FIFO returns and the file is not a regular file.
 func TestTS13_RootOpenFileFlags(t *testing.T) {
 	root, dir := newState(t)
 	must(t, os.WriteFile(filepath.Join(dir, "target"), []byte("x"), 0o600))
-	mustSymlink(t, filepath.Join(dir, "target"), filepath.Join(dir, "link"))
-	if f, err := root.OpenFile("link", readFlags, 0); err == nil {
-		f.Close()
-		t.Error("a symlink at the path: want an error")
+	mustSymlink(t, "target", filepath.Join(dir, "link"))
+	f, err := root.OpenFile("link", readFlags, 0)
+	if err != nil {
+		t.Fatalf("open of an in-root symlink: %v; want success", err)
 	}
+	if b, _ := io.ReadAll(f); string(b) != "x" {
+		t.Errorf("read %q through the symlink; want the target text", b)
+	}
+	f.Close()
 	mustFifo(t, filepath.Join(dir, "fifo"))
 	type result struct {
 		f   *os.File

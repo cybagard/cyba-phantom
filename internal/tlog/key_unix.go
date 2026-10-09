@@ -8,9 +8,9 @@ import (
 	"syscall"
 )
 
-// readFlags open the key for read. O_NOFOLLOW refuses a symlink. O_NONBLOCK
-// stops a FIFO from blocking the open.
-const readFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+// readFlags open a file for read. O_NONBLOCK stops a FIFO from blocking the
+// open. os.Root adds O_NOFOLLOW itself, but it does not stop an in-root symlink.
+const readFlags = os.O_RDONLY | syscall.O_NONBLOCK
 
 // geteuid is a test hook. A test uses it to check an owner mismatch without root.
 var geteuid = os.Geteuid
