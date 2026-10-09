@@ -53,7 +53,7 @@ type Log struct {
 	size  int64
 	root  tlog.Hash
 	tiles [maxLevel + 1]tileBuf
-	err   error // the first write error; Append returns it until the caller reopens the log
+	err   error // the first write error or tile-read error; each later Append, proof, and root read returns it until the caller opens the log again
 }
 
 // OpenLog opens the store in dir below state, checks the tiles that the tree
@@ -103,7 +103,8 @@ func (l *Log) Head() (int64, tlog.Hash) {
 // the root in memory change only after the tree head is durable. If a write
 // fails, Append returns an error, and the size and the root in memory do not
 // change. The leaf can still be on disk after the error. The log then refuses
-// each later Append with the same error. The caller must close the log and
+// each later Append with the same error. A proof or root read that finds a bad
+// tile stops the log in the same way. The caller must close the log and
 // open it again with OpenLog. OpenLog loads the state on disk.
 func (l *Log) Append(h EventHash) (int64, error) {
 	l.mu.Lock()

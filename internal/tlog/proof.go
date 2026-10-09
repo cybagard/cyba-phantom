@@ -19,8 +19,11 @@ const (
 // Each hash comes from a tile that was checked against the tree head of the
 // log. If a tile does not match, RootAt returns an error and no root.
 func (l *Log) RootAt(size int64) (tlog.Hash, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return tlog.Hash{}, l.err
+	}
 	if size < 0 || size > l.size {
 		return tlog.Hash{}, &Error{"root", ruleProofInput}
 	}
@@ -38,8 +41,11 @@ func (l *Log) RootAt(size int64) (tlog.Hash, error) {
 // third party checks the proof with VerifyInclusion and the root of a signed
 // checkpoint of that size. RootAt gives the same root in this process.
 func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return nil, l.err
+	}
 	if index < 0 || index >= size || size > l.size {
 		return nil, &Error{"inclusion proof", ruleProofInput}
 	}
@@ -62,8 +68,11 @@ func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 // of the signed checkpoints of the two sizes. RootAt gives the same roots in
 // this process.
 func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return nil, l.err
+	}
 	if oldSize < 0 || oldSize > newSize || newSize > l.size {
 		return nil, &Error{"consistency proof", ruleProofInput}
 	}
@@ -82,7 +91,10 @@ func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 }
 
 // read calls f with a hash reader that reads tiles from the store and checks
-// each tile against the tree head of the log. The caller holds the lock.
+// each tile against the tree head of the log. The caller holds the write lock.
+// An error from a tile read stops the log: read keeps the error in l.err, and
+// each later Append, proof, and root read returns it. The package does not
+// repair a tile. The caller opens the log again.
 func (l *Log) read(f func(tlog.HashReader) error) error {
 	tr := &tileReader{s: l.store}
 	err := f(tlog.TileHashReader(tlog.Tree{N: l.size, Hash: l.root}, tr))
@@ -91,6 +103,7 @@ func (l *Log) read(f func(tlog.HashReader) error) error {
 	case err == nil:
 		return nil
 	case errors.As(err, &e):
+		l.err = e
 		return e
 	}
 	// The check does not say which tile is wrong. Name the tiles that it read.
@@ -101,5 +114,6 @@ func (l *Log) read(f func(tlog.HashReader) error) error {
 	if len(names) == 0 {
 		names = append(names, "proof")
 	}
-	return &Error{strings.Join(names, ","), ruleProofRead}
+	l.err = &Error{strings.Join(names, ","), ruleProofRead}
+	return l.err
 }
