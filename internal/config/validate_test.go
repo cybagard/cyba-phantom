@@ -652,7 +652,7 @@ var scalarBounds = []bound{
 	{key: "bundle.path", pass: []string{"/var/lib/agent-canary/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/agent-canary/b/../../x"}},
 	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "0s", "-1h"}, with: []string{fetchURL}},
-	{key: "bundle.fetch_interval", pass: []string{"1s"}, fail: []string{"0s", "-1h"}}, // The fetch is off: only the check for a value > 0 applies.
+	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "1s", "0s", "-1h"}}, // The bounds apply also if the fetch is off.
 	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
 	{key: "limits.body_bytes", pass: []string{"1", "65536"}, fail: []string{"0", "65537"}},
 	{key: "limits.header_bytes", pass: []string{"1", "16384"}, fail: []string{"0", "16385"}},
@@ -704,7 +704,7 @@ func TestTS11_CrossChecks(t *testing.T) {
 		{"burst equals rps", "limits:\n  per_ip_rps: 200\n", ""},
 		{"events below raw", "store:\n  retention_days:\n    raw: 91\n", "store.retention_days.raw"}, // The raw bound fails first.
 		{"events below raw 2", "store:\n  retention_days:\n    raw: 30\n    events: 29\n", "store.retention_days.events at " + cfg[len(cfg)-64:] + ":8: the value must not be less than"},
-		{"interval, fetch off", "bundle:\n  fetch_interval: 1s\n", ""},
+		{"interval, fetch off", "bundle:\n  fetch_interval: 1s\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":6: the duration must be in the range"},
 		{"interval, fetch on", "bundle:\n  fetch_url: https://b.example/x\n  fetch_interval: 14m\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":7: the duration must be in the range"},
 	}
 	for _, r := range rows {
@@ -854,8 +854,8 @@ const (
 	acmeTlog = "acme:\n  email: sec@example.com\ntlog:\n  origin: test/origin\n"
 	pubItem  = `{type: https-put, url: "https://ckpt.example/put", token_env: CKPT_TOKEN}`
 	hookItem = `{type: webhook, url: "https://hook.example/a", hmac_secret_env: ALERT_HMAC}`
-	sysItem  = `{type: syslog, addr: "udp://10.0.0.5:514"}`
-	mailItem = `{type: smtp, host: "mail.example:587", from: a@b.example, to: [c@d.example]}`
+	sysItem  = `{type: syslog, addr: "udp://127.0.0.1:514"}`
+	mailItem = `{type: smtp, host: "smtp://mail.example:587", from: a@b.example, to: [c@d.example]}`
 )
 
 // listEnv sets the variable of the webhook items to 32 bytes: the minimum of SEC-06.
@@ -876,7 +876,11 @@ func snk(items ...string) string {
 func TestTS11_Lists(t *testing.T) {
 	many := func(n int, s string) []string { return slices.Repeat([]string{s}, n) }
 	to := func(n int) string { return "[" + strings.Join(many(n, "c@d.example"), ", ") + "]" }
-	mail := func(f string) string { return `{type: smtp, host: "mail.example:587", from: a@b.example, ` + f + "}" }
+	mail := func(f string) string {
+		return `{type: smtp, host: "smtp://mail.example:587", from: a@b.example, ` + f + "}"
+	}
+	sys := func(addr string) string { return `{type: syslog, addr: "` + addr + `"}` }
+	smtpHost := func(h string) string { return `{type: smtp, host: "` + h + `", from: a@b.example, to: [c@d.example]}` }
 	tok := func(v string) string { return `{type: https-put, url: "https://a.example/", token_env: ` + v + "}" }
 	hmac := func(v string) string { return `{type: webhook, url: "https://a.example/", hmac_secret_env: ` + v + "}" }
 	rows := []struct {
@@ -923,8 +927,25 @@ func TestTS11_Lists(t *testing.T) {
 		{"webhook hmac 31 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 31)}, "alerts.sinks[0].hmac_secret_env"},
 		{"webhook hmac 32 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 32)}, ""},
 		{"syslog udp", snk(sysItem), nil, ""},
-		{"syslog tcp", snk(`{type: syslog, addr: "tcp://log.example:514"}`), nil, ""},
-		{"syslog tls", snk(`{type: syslog, addr: "tls://[2001:db8::1]:6514"}`), nil, ""},
+		{"syslog tcp", snk(sys("tcp://127.0.0.1:514")), nil, ""},
+		{"syslog tls", snk(sys("tls://[2001:db8::1]:6514")), nil, ""},
+		{"syslog tls host name", snk(sys("tls://log.example:6514")), nil, ""},
+		{"syslog tls loopback", snk(sys("tls://127.0.0.1:6514")), nil, ""},
+		{"syslog udp 127.1.2.3", snk(sys("udp://127.1.2.3:514")), nil, ""},
+		{"syslog tcp 127.1.2.3", snk(sys("tcp://127.1.2.3:514")), nil, ""},
+		{"syslog udp ::1", snk(sys("udp://[::1]:514")), nil, ""},
+		{"syslog tcp ::1", snk(sys("tcp://[::1]:514")), nil, ""},
+		{"syslog udp host name", snk(sys("udp://log.example:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tcp host name", snk(sys("tcp://log.example:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp localhost", snk(sys("udp://localhost:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tcp localhost", snk(sys("tcp://localhost:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp private", snk(sys("udp://10.0.0.5:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tcp private", snk(sys("tcp://10.0.0.5:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp v4-mapped loopback", snk(sys("udp://[::ffff:127.0.0.1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tcp v4-mapped loopback", snk(sys("tcp://[::ffff:127.0.0.1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp global v6", snk(sys("udp://[2001:db8::1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tcp global v6", snk(sys("tcp://[2001:db8::1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp upper-case scheme", snk(sys("UDP://127.0.0.1:514")), nil, "alerts.sinks[0].addr"},
 		{"syslog scheme", snk(`{type: syslog, addr: "http://log.example:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog no scheme", snk(`{type: syslog, addr: "log.example:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog no port", snk(`{type: syslog, addr: "udp://log.example"}`), nil, "alerts.sinks[0].addr"},
@@ -937,13 +958,21 @@ func TestTS11_Lists(t *testing.T) {
 		{"syslog link-local", snk(`{type: syslog, addr: "udp://169.254.1.1:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog addr missing", snk(`{type: syslog}`), nil, "alerts.sinks[0].addr"},
 		{"smtp", snk(mailItem), nil, ""},
-		{"smtp host no port", snk(`{type: smtp, host: mail.example, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
-		{"smtp host link-local", snk(`{type: smtp, host: "169.254.1.1:25", from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
+		{"smtps", snk(smtpHost("smtps://mail.example:465")), nil, ""},
+		{"smtp host no scheme", snk(smtpHost("mail.example:587")), nil, "alerts.sinks[0].host"},
+		{"smtp host http", snk(smtpHost("http://mail.example:587")), nil, "alerts.sinks[0].host"},
+		{"smtp host one slash", snk(smtpHost("smtp:/mail.example:587")), nil, "alerts.sinks[0].host"},
+		{"smtp host upper-case scheme", snk(smtpHost("SMTP://mail.example:587")), nil, "alerts.sinks[0].host"},
+		{"smtp host smtps upper-case", snk(smtpHost("SMTPS://mail.example:465")), nil, "alerts.sinks[0].host"},
+		{"smtp host no port", snk(smtpHost("smtp://mail.example")), nil, "alerts.sinks[0].host"},
+		{"smtp host link-local", snk(smtpHost("smtp://169.254.1.1:25")), nil, "alerts.sinks[0].host"},
+		{"smtps host link-local", snk(smtpHost("smtps://169.254.1.1:465")), nil, "alerts.sinks[0].host"},
+		{"smtp host CRLF", snk(smtpHost(`smtp://mail.example:25\r\nBcc: x`)), nil, "alerts.sinks[0].host"},
 		{"smtp host missing", snk(`{type: smtp, from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
-		{"smtp host unspecified", snk(`{type: smtp, host: "0.0.0.0:25", from: a@b.example, to: [c@d.example]}`), nil, "alerts.sinks[0].host"},
-		{"smtp from two addresses", snk(`{type: smtp, host: "m.example:25", from: "a@b.example, e@f.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
-		{"smtp from CRLF", snk(`{type: smtp, host: "m.example:25", from: "a@b.example\r\nBcc: x@y.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
-		{"smtp from missing", snk(`{type: smtp, host: "m.example:25", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
+		{"smtp host unspecified", snk(smtpHost("smtp://0.0.0.0:25")), nil, "alerts.sinks[0].host"},
+		{"smtp from two addresses", snk(`{type: smtp, host: "smtp://m.example:25", from: "a@b.example, e@f.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
+		{"smtp from CRLF", snk(`{type: smtp, host: "smtp://m.example:25", from: "a@b.example\r\nBcc: x@y.example", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
+		{"smtp from missing", snk(`{type: smtp, host: "smtp://m.example:25", to: [c@d.example]}`), nil, "alerts.sinks[0].from"},
 		{"smtp to 1", snk(mail("to: " + to(1))), nil, ""},
 		{"smtp to 16", snk(mail("to: " + to(16))), nil, ""},
 		{"smtp to 17", snk(mail("to: " + to(17))), nil, "alerts.sinks[0].to"},
@@ -982,6 +1011,36 @@ func TestTS11_Lists(t *testing.T) {
 	}
 }
 
+// TestTS10_EnvErrorsHideName checks that an error for a *_env key names the key path and never the
+// variable name: an operator can paste a secret in place of a name (SEC-13, T-S-10).
+func TestTS10_EnvErrorsHideName(t *testing.T) {
+	const name = "JBSWY3DPEHPK3PXPZZSECRETQ7"
+	tok := pub(`{type: https-put, url: "https://a.example/", token_env: ` + name + "}")
+	hook := snk(`{type: webhook, url: "https://a.example/", hmac_secret_env: ` + name + "}")
+	rows := []struct {
+		label, file, key string
+		env              []string
+	}{
+		{"token unset", tok, "tlog.publish[0].token_env", nil},
+		{"token empty", tok, "tlog.publish[0].token_env", []string{name + "="}},
+		{"hmac unset", hook, "alerts.sinks[0].hmac_secret_env", nil},
+		{"hmac short", hook, "alerts.sinks[0].hmac_secret_env", []string{name + "=short"}},
+		{"name rule", strings.Replace(tok, name, name+"-x", 1), "tlog.publish[0].token_env", nil},
+		{"CANARY_ prefix", strings.Replace(tok, name, "CANARY_"+name, 1), "tlog.publish[0].token_env", nil},
+	}
+	for _, r := range rows {
+		t.Run(r.label, func(t *testing.T) {
+			_, err := loadProd(t, r.file, r.env...)
+			if err == nil || !strings.Contains(err.Error(), "config: "+r.key+" at ") {
+				t.Fatalf("got %v, want an error that names %s", err, r.key)
+			}
+			if strings.Contains(err.Error(), name) {
+				t.Errorf("the error holds the variable name: %v", err)
+			}
+		})
+	}
+}
+
 // TestTU10_ListKeys checks that every list key of 04 section 3 loads and keeps its value with the source line,
 // and that a list key has no CANARY_ override.
 func TestTU10_ListKeys(t *testing.T) {
@@ -995,8 +1054,8 @@ func TestTU10_ListKeys(t *testing.T) {
 		"tlog.publish[0].type": "https-put", "tlog.publish[0].url": "https://ckpt.example/put", "tlog.publish[0].token_env": "CKPT_TOKEN",
 		"tlog.publish[1].token_env": "OTHER_TOKEN",
 		"alerts.sinks[0].type":      "webhook", "alerts.sinks[0].url": "https://hook.example/a", "alerts.sinks[0].hmac_secret_env": "ALERT_HMAC",
-		"alerts.sinks[1].type": "syslog", "alerts.sinks[1].addr": "udp://10.0.0.5:514",
-		"alerts.sinks[2].type": "smtp", "alerts.sinks[2].host": "mail.example:587", "alerts.sinks[2].from": "a@b.example", "alerts.sinks[2].to[0]": "c@d.example",
+		"alerts.sinks[1].type": "syslog", "alerts.sinks[1].addr": "udp://127.0.0.1:514",
+		"alerts.sinks[2].type": "smtp", "alerts.sinks[2].host": "smtp://mail.example:587", "alerts.sinks[2].from": "a@b.example", "alerts.sinks[2].to[0]": "c@d.example",
 	}
 	for p, s := range want {
 		if v, ok := c.Get(p); !ok || v.Str != s || v.Source != cfg || v.Line == 0 {
@@ -1113,10 +1172,11 @@ func TestTS08_AllowList(t *testing.T) {
 		"alerts:\n  sinks:\n" +
 		"    - " + `{type: webhook, url: "https://ckpt.example:443/hook", hmac_secret_env: ALERT_HMAC}` + "\n" +
 		"    - " + sysItem + "\n" +
-		"    - " + `{type: syslog, addr: "tcp://10.0.0.5:514"}` + "\n" +
+		"    - " + `{type: syslog, addr: "tcp://[::1]:514"}` + "\n" +
 		"    - " + `{type: syslog, addr: "tls://[2001:DB8::1]:6514"}` + "\n" +
 		"    - " + mailItem + "\n" +
-		"    - " + `{type: smtp, host: "MAIL.example:587", from: a@b.example, to: [c@d.example]}` + "\n" +
+		"    - " + `{type: smtp, host: "smtp://MAIL.example:587", from: a@b.example, to: [c@d.example]}` + "\n" +
+		"    - " + `{type: smtp, host: "smtps://mail.example:465", from: a@b.example, to: [c@d.example]}` + "\n" +
 		"    - " + hookItem + "\n"
 	c, err := loadProd(t, file, listEnv...)
 	if err != nil {
@@ -1124,8 +1184,8 @@ func TestTS08_AllowList(t *testing.T) {
 	}
 	want := []Endpoint{
 		{"https", "ca.example", "14000"}, {"https", "ckpt.example", "443"},
-		{"udp", "10.0.0.5", "514"}, {"tcp", "10.0.0.5", "514"}, {"tls", "2001:db8::1", "6514"},
-		{"smtp", "mail.example", "587"}, {"https", "hook.example", "443"},
+		{"udp", "127.0.0.1", "514"}, {"tcp", "::1", "514"}, {"tls", "2001:db8::1", "6514"}, // A loopback sink is in the list (04 section 3).
+		{"smtp", "mail.example", "587"}, {"smtps", "mail.example", "465"}, {"https", "hook.example", "443"},
 	}
 	if got := c.AllowList(); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)

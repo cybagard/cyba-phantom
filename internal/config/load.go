@@ -55,7 +55,7 @@ var keys = []key{
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/agent-canary/certs", check: checkStatePath},
 	{path: "bundle.path", kind: kindPath, def: "/var/lib/agent-canary/bundle/current.cbnd", check: checkStatePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
-	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: checkPositiveDuration}, // The bounds 15m to 7d are a cross-check: they apply if fetch_url is set.
+	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)}, // The bounds apply also if fetch_url is empty.
 	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
 	{path: "limits.body_bytes", kind: kindBytes, def: "65536", check: intRange(1, 65536)},
 	{path: "limits.header_bytes", kind: kindBytes, def: "16384", check: intRange(1, 16384)},
