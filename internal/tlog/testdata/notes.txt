@@ -1,0 +1,66 @@
+# Note texts for T-U-12. A line "-- name --" starts a section.
+# The test signs the body sections with a fixed test key. The key is made
+# only for the test.
+-- golden --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+
+— agent-canary/test TKww15iEpFQEcyx/v4kr7unCQw1fXFCH1keE6Rq7rnc+QkjWjwf0zA6wboXV+UH5xbxmibV5NqE+R0YIAg+R18uYlAc=
+-- ok --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- fourth-line --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+more
+-- extension-line --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+timestamp 1
+-- two-lines --
+agent-canary/test
+42
+-- size-leading-zero --
+agent-canary/test
+042
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- size-sign --
+agent-canary/test
++42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- size-space --
+agent-canary/test
+ 42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- size-empty --
+agent-canary/test
+
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- size-overflow --
+agent-canary/test
+18446744073709551616
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+-- root-padding-bits --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9=
+-- root-no-padding --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+-- root-31-bytes --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg==
+-- root-33-bytes --
+agent-canary/test
+42
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g
+-- root-empty --
+agent-canary/test
+42
+
