@@ -1,0 +1,20 @@
+[
+  {
+    "name": "callback with every field",
+    "row": {
+      "ts": 1758300000123, "session_id": "s-1", "kind": "callback",
+      "vhost": "decoy.example", "method": "GET", "path": "/api/v2/internal/x",
+      "status": 200, "trap_id": "t-1", "token_id": "k-1", "surface": "path",
+      "fp": {"ja4": "j", "h2": "h", "hdr": "d"},
+      "detail": "{\"b\":true,\"a\":1,\"c\":\"x\"}"
+    },
+    "canonical": "{\"detail\":{\"a\":1,\"b\":true,\"c\":\"x\"},\"fp\":{\"h2\":\"h\",\"hdr\":\"d\",\"ja4\":\"j\"},\"kind\":\"callback\",\"method\":\"GET\",\"path\":\"/api/v2/internal/x\",\"session\":\"s-1\",\"status\":200,\"surface\":\"path\",\"token_id\":\"k-1\",\"trap_id\":\"t-1\",\"ts\":1758300000123,\"v\":1,\"vhost\":\"decoy.example\"}",
+    "sha256": "69cdcbb3437d681b729e6521868b4c26b59ae015dc19c92d19a1e948f9427752"
+  },
+  {
+    "name": "bundle_load has no session",
+    "row": {"ts": 1758300000999, "kind": "bundle_load", "detail": "{\"version\":3}"},
+    "canonical": "{\"detail\":{\"version\":3},\"kind\":\"bundle_load\",\"ts\":1758300000999,\"v\":1}",
+    "sha256": "7ae5541f390ab4ce2066ca8a430ab142f64ddd03ffa891698e30b77e0825dc11"
+  }
+]
