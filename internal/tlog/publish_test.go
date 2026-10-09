@@ -220,8 +220,8 @@ func TestTI09_RecoverInOrder(t *testing.T) {
 	}
 }
 
-// T-I-09: one down target does not stop or delay the other target. The down
-// target waits for its backoff and is then tried again.
+// T-I-09: a target in backoff after a failure does not stop the publish to the
+// other target. The down target waits for its backoff and is then tried again.
 func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	down, up := newTarget(t), newTarget(t)
 	down.setStatus(http.StatusInternalServerError)
@@ -238,6 +238,39 @@ func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	e.pub.pass()
 	if downAttempts, _, _ = down.got(); !slices.Equal(downAttempts, []uint64{1, 1}) {
 		t.Fatalf("down attempts = %v, want a new try after the backoff", downAttempts)
+	}
+}
+
+// T-I-09: the backoff of target 0 ends while the pass sends to target 1. The
+// pass returns a wait of 0, so Run does not need a Notify to try target 0. With
+// no failed target, the pass is not pending, so Run does not loop.
+func TestTI09_BackoffEndDuringOtherSend(t *testing.T) {
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	e.pub.backoff(0, e.clock.t) // target 0 waits 30 s
+	e.add(t, 1)
+	base, reads := e.clock.t, 0
+	e.pub.now = func() time.Time {
+		reads++
+		if reads <= 2 { // the checks of target 0 and of target 1
+			return base
+		}
+		return base.Add(2 * backoffStart) // after the send to target 1
+	}
+	wait, pending := e.pub.pass()
+	if _, stored, _ := b.got(); !slices.Equal(stored, []uint64{1}) {
+		t.Fatalf("target 1 stored %v, want 1", stored)
+	}
+	if !pending || wait != 0 {
+		t.Fatalf("pass = %v, %v, want a wait of 0 and pending", wait, pending)
+	}
+	e.pub.now = e.clock.now
+	e.clock.t = base.Add(2 * backoffStart)
+	if wait, pending = e.pub.pass(); pending || wait != 0 {
+		t.Fatalf("pass with no failed target = %v, %v, want not pending", wait, pending)
+	}
+	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1}) {
+		t.Fatalf("target 0 stored %v, want 1", stored)
 	}
 }
 

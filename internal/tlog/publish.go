@@ -73,7 +73,7 @@ type backoffState struct {
 type Publisher struct {
 	spool    *Spool
 	targets  []publishTarget
-	state    []backoffState // used on the goroutine of Run; Send runs on it
+	state    []backoffState // only the Run goroutine uses this field; Send also runs on the Run goroutine
 	client   *http.Client
 	interval time.Duration
 	timeout  time.Duration
@@ -233,7 +233,9 @@ func (p *Publisher) Run(ctx context.Context) {
 }
 
 // pass publishes to each target whose backoff has ended. It returns the time to
-// the next backoff end, if a target waits. A failed target does not stop the
+// the next backoff end, if a target waits. A target whose backoff ended during
+// the pass is due: the wait is 0, so Run starts the next pass at once. A target
+// with no backoff state is never pending. A failed target does not stop the
 // others. The next try of a failed target starts at the end of its send.
 func (p *Publisher) pass() (wait time.Duration, pending bool) {
 	for i := range p.targets {
@@ -252,7 +254,10 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 	}
 	now := p.now()
 	for _, st := range p.state {
-		if d := st.next.Sub(now); d > 0 && (!pending || d < wait) {
+		if st.next.IsZero() {
+			continue
+		}
+		if d := max(st.next.Sub(now), 0); !pending || d < wait {
 			wait, pending = d, true
 		}
 	}
