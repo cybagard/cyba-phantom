@@ -1,8 +1,13 @@
 package event
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -200,5 +205,130 @@ func TestTU17_SnapshotReset(t *testing.T) {
 	}
 	if m, other := c.Snapshot(); len(m) != 0 || other != 0 {
 		t.Errorf("second snapshot = %v, %d, want empty", m, other)
+	}
+}
+
+// markerForms returns every text form of the client address s that a leak
+// could show: the address, its key, the IPv4-mapped forms, and the decimal and
+// hex forms of the two 64-bit words of the key. All forms are lower case.
+func markerForms(t *testing.T, s string) []string {
+	t.Helper()
+	a := mustAddr(t, s)
+	k, ok := counterKey(a)
+	if !ok {
+		t.Fatalf("no key for %s", s)
+	}
+	forms := []string{a.String(), k.String(), k.StringExpanded(), a.Unmap().String()}
+	if k.Is4() {
+		m := netip.AddrFrom16(k.As16())
+		forms = append(forms, "::ffff:"+k.String(), m.String(), m.StringExpanded())
+	}
+	b := k.As16()
+	for _, w := range []uint64{binary.BigEndian.Uint64(b[:8]), binary.BigEndian.Uint64(b[8:])} {
+		if w < 1<<16 {
+			continue // too short to be a marker: it would match a count
+		}
+		forms = append(forms, fmt.Sprintf("%d", w), fmt.Sprintf("%x", w))
+	}
+	for i, f := range forms {
+		forms[i] = strings.ToLower(f)
+	}
+	return forms
+}
+
+// markerAddrs are a known IPv4 address, an IPv4-mapped IPv6 address, and an
+// IPv6 address.
+var markerAddrs = []string{
+	"203.0.113.7",
+	"::ffff:198.51.100.9",
+	"2001:db8:1:2:aaaa:bbbb:cccc:dddd",
+}
+
+// markedCounters returns a Counters value with one key for each marker and
+// two events in the overflow bucket.
+func markedCounters() *Counters {
+	c := NewCounters()
+	for _, s := range markerAddrs {
+		c.Drop(netip.MustParseAddr(s))
+	}
+	c.Drop(netip.Addr{})
+	c.DropNoAddr()
+	return c
+}
+
+// checkNoMarker fails when out holds a form of a marker, or does not hold the
+// key count and the bucket count.
+func checkNoMarker(t *testing.T, out string) {
+	t.Helper()
+	low := strings.ToLower(out)
+	for _, s := range markerAddrs {
+		for _, f := range markerForms(t, s) {
+			if strings.Contains(low, f) {
+				t.Errorf("output holds %q (a form of %s): %s", f, s, out)
+			}
+		}
+	}
+	if !strings.Contains(out, "keys:3") || !strings.Contains(out, "overflow:2") {
+		t.Errorf("output lacks the key count or the bucket count: %s", out)
+	}
+}
+
+// T-U-17: the marker forms hold the known words: 203.0.113.7 as a netip word
+// is 281474087547143 (0xffffcb007107). The leak checks below are not vacuous.
+func TestTU17_MarkerFormsCoverNetipWords(t *testing.T) {
+	forms := strings.Join(markerForms(t, "203.0.113.7"), " ")
+	for _, want := range []string{"203.0.113.7", "::ffff:203.0.113.7", "281474087547143", "ffffcb007107"} {
+		if !strings.Contains(forms, want) {
+			t.Errorf("forms lack %q: %s", want, forms)
+		}
+	}
+}
+
+// T-U-17: fmt of a *Counters and of a Counters value, with each verb, prints
+// no key in any form, and prints the key count.
+func TestTU17_FormatHoldsNoKey(t *testing.T) {
+	c := markedCounters()
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
+		for _, form := range []struct {
+			name string
+			arg  any
+		}{{"pointer", c}, {"value", *c}} {
+			t.Run(verb+"/"+form.name, func(t *testing.T) {
+				checkNoMarker(t, fmt.Sprintf(verb, form.arg))
+			})
+		}
+	}
+}
+
+// T-U-17: a Counters inside an error text and inside a slog record holds no
+// key, for the pointer and for the value.
+func TestTU17_FormatInErrorAndLog(t *testing.T) {
+	c := markedCounters()
+	for _, form := range []struct {
+		name string
+		arg  any
+	}{{"pointer", c}, {"value", *c}} {
+		t.Run("error/"+form.name, func(t *testing.T) {
+			checkNoMarker(t, fmt.Errorf("drops: %v", form.arg).Error())
+		})
+		t.Run("slog/"+form.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			slog.New(slog.NewTextHandler(&buf, nil)).Info("dropped", slog.Any("c", form.arg))
+			checkNoMarker(t, buf.String())
+		})
+	}
+}
+
+// T-U-17: Format does not change the counts (a snapshot after a format still
+// returns the keys), and a zero value formats without a panic.
+func TestTU17_FormatKeepsCounts(t *testing.T) {
+	c := markedCounters()
+	_ = fmt.Sprintf("%v %+v %#v %s", c, c, *c, *c)
+	m, other := c.Snapshot()
+	if len(m) != 3 || other != 2 {
+		t.Errorf("snapshot after format = %d keys, %d in the bucket, want 3 and 2", len(m), other)
+	}
+	if got := fmt.Sprintf("%v", Counters{}); !strings.Contains(got, "keys:0") {
+		t.Errorf("zero value formats as %q", got)
 	}
 }

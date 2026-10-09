@@ -1,6 +1,7 @@
 package event
 
 import (
+	"fmt"
 	"net/netip"
 	"sync"
 )
@@ -20,18 +21,43 @@ const ipv6PrefixBits = 64
 // always increments its own counter. The map never evicts a key between two
 // snapshots.
 //
-// The package never logs a key. Counters has no String, GoString, or Format
-// method. Only Snapshot gives the keys to its caller. All methods are safe for
-// concurrent use. The zero value is not ready for use: call NewCounters.
+// The default fmt output of a struct holding this map would print every key,
+// that is every client address. Counters therefore implements fmt.Formatter:
+// for a Counters value and for a *Counters, with every verb, Format prints only
+// the key count and the overflow bucket count. A log line or an error text that
+// holds a Counters has no client address (C8). Only Snapshot gives the keys to
+// its caller. All methods are safe for concurrent use. The zero value is not
+// ready for use: call NewCounters.
+//
+// The lock and the map are behind one pointer, so a copy of a Counters value
+// shares the counts of the original.
 type Counters struct {
-	mu     sync.Mutex
-	counts map[netip.Addr]uint64
-	other  uint64
+	s *counterState
+}
+
+// counterState holds the lock, the map, and the overflow bucket.
+type counterState struct {
+	mu       sync.Mutex
+	counts   map[netip.Addr]uint64
+	overflow uint64
 }
 
 // NewCounters returns an empty Counters value.
 func NewCounters() *Counters {
-	return &Counters{counts: make(map[netip.Addr]uint64)}
+	return &Counters{s: &counterState{counts: make(map[netip.Addr]uint64)}}
+}
+
+// Format implements fmt.Formatter. It prints the key count and the overflow
+// bucket count for every verb and flag, and never prints a key.
+func (c Counters) Format(f fmt.State, _ rune) {
+	var keys int
+	var overflow uint64
+	if c.s != nil {
+		c.s.mu.Lock()
+		keys, overflow = len(c.s.counts), c.s.overflow
+		c.s.mu.Unlock()
+	}
+	fmt.Fprintf(f, "event.Counters{keys:%d overflow:%d}", keys, overflow)
 }
 
 // counterKey returns the key for a. It maps an IPv4-mapped IPv6 address to
@@ -52,25 +78,27 @@ func counterKey(a netip.Addr) (netip.Addr, bool) {
 // goes to the overflow bucket.
 func (c *Counters) Drop(a netip.Addr) {
 	k, ok := counterKey(a)
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !ok {
-		c.other++
+		s.overflow++
 		return
 	}
-	if _, found := c.counts[k]; found || len(c.counts) < maxCounterKeys {
-		c.counts[k]++
+	if _, found := s.counts[k]; found || len(s.counts) < maxCounterKeys {
+		s.counts[k]++
 		return
 	}
-	c.other++
+	s.overflow++
 }
 
 // DropNoAddr counts one dropped event that has no client address, for example
 // a system event. It goes to the overflow bucket.
 func (c *Counters) DropNoAddr() {
-	c.mu.Lock()
-	c.other++
-	c.mu.Unlock()
+	s := c.s
+	s.mu.Lock()
+	s.overflow++
+	s.mu.Unlock()
 }
 
 // Snapshot swaps in an empty map and a zero overflow bucket. It returns the
@@ -78,9 +106,10 @@ func (c *Counters) DropNoAddr() {
 // increment is in the snapshot before it or in the snapshot after it, one
 // time.
 func (c *Counters) Snapshot() (counts map[netip.Addr]uint64, other uint64) {
-	c.mu.Lock()
-	counts, other = c.counts, c.other
-	c.counts, c.other = make(map[netip.Addr]uint64), 0
-	c.mu.Unlock()
+	s := c.s
+	s.mu.Lock()
+	counts, other = s.counts, s.overflow
+	s.counts, s.overflow = make(map[netip.Addr]uint64), 0
+	s.mu.Unlock()
 	return counts, other
 }
