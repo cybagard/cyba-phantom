@@ -312,6 +312,8 @@ func TestTU17_QueueLaneByteCaps(t *testing.T) {
 				}
 			}
 			b := q.Bytes()
+			t.Logf("depth %d: %d bulk events queued (large size %d), byte sums %+v, %d of 10 callback events accepted, dropped %+v",
+				depth, len(q.bulk), big.Size(), b, accepted, q.Dropped())
 			if accepted != 10 || q.Dropped().Evidence != 0 {
 				t.Errorf("depth %d: %d of 10 callback events accepted, dropped %+v", depth, accepted, q.Dropped())
 			}
