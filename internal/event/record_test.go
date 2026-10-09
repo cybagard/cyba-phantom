@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"math"
 	"math/rand/v2"
 	"os"
 	"reflect"
@@ -12,6 +13,10 @@ import (
 	"testing"
 	"time"
 )
+
+// largestRecord is the length of the largest canonical record, as measured by
+// TestTS12_LargestEvent. That test builds the record.
+const largestRecord = 19620
 
 func sp(s string) *string { return &s }
 
@@ -49,9 +54,9 @@ func TestTU06_RecordVectors(t *testing.T) {
 		}
 		b, err := EvidenceBytes(r)
 		sum := sha256.Sum256([]byte(c.Canonical))
-		h, _ := HashEvidence(r)
-		if err != nil || string(b) != c.Canonical || hex.EncodeToString(sum[:]) != c.SHA256 || h != sum {
-			t.Errorf("%s: bytes %s, error %v, hash %x", c.Name, b, err, h)
+		h, herr := HashEvidence(r)
+		if err != nil || herr != nil || string(b) != c.Canonical || hex.EncodeToString(sum[:]) != c.SHA256 || h != sum {
+			t.Errorf("%s: bytes %s, errors %v, %v, hash %x", c.Name, b, err, herr, h)
 		}
 	}
 }
@@ -218,8 +223,8 @@ func TestTS12_StringConstruction(t *testing.T) {
 	if e.Record.TS != 1758300000123 {
 		t.Errorf("ts %d is not from the clock", e.Record.TS)
 	}
-	if e, _ := NewEvent(nil, Input{Kind: KindRequest}); e == nil || e.Record.TS < 1e12 {
-		t.Error("nil clock does not use the time of the sensor")
+	if e, err := NewEvent(nil, Input{Kind: KindRequest}); err != nil || e.Record.TS < 1e12 {
+		t.Errorf("nil clock does not use the time of the sensor: %v", err)
 	}
 	if _, err := NewEvent(nil, Input{Kind: KindRequest, Surface: "cookie"}); err == nil {
 		t.Error("an unknown surface is accepted")
@@ -229,26 +234,23 @@ func TestTS12_StringConstruction(t *testing.T) {
 	}
 }
 
-// T-S-12: no form of an IP or ip_hmac marker given to the constructor is in
-// the canonical bytes, for each kind. Detail values are typed by the producer:
-// a producer must not put an address in a string, and review checks that.
+// T-S-12: no form of an IP or ip_hmac marker given as client address,
+// forwarded value or body prefix is in the canonical bytes, for each kind. An
+// ip_hmac is not an address, so the constructor refuses it as a client address.
 func TestTS12_IPMarkers(t *testing.T) {
-	markers := []string{"203.0.113.7", "2001:db8::7", "::ffff:203.0.113.7", "9f2c4a7be1d3058c6a1f77aa"}
-	forms := append([]string{"2001:0db8:0000:0000:0000:0000:0000:0007", "::ffff:cb00:7107",
-		"cb007107", "203", "0113"}, markers...)
-	all := strings.Join(markers, ", ")
+	const hmac = "9f2c4a7be1d3058c6a1f77aa"
+	addrs := []string{"203.0.113.7", "2001:db8::7", "::ffff:203.0.113.7"}
+	forms := append([]string{"2001:0db8:0000:0000:0000:0000:0000:0007", "::ffff:cb00:7107", "cb007107", hmac}, addrs...)
+	all := strings.Join(forms, ", ")
 	for _, k := range allKinds {
 		inputs := []Input{{Forwarded: all, BodyPrefix: []byte(all)}}
-		for _, m := range markers {
-			inputs = append(inputs, Input{ClientIP: m, Forwarded: "for=" + m, BodyPrefix: []byte(m)})
+		for _, a := range addrs {
+			inputs = append(inputs, Input{ClientIP: a, Forwarded: "for=" + all, BodyPrefix: []byte(all)})
 		}
 		for _, in := range inputs {
 			in.Kind, in.Vhost, in.Detail = k, "decoy.example", Detail{"n": Int(1)}
-			e, err := NewEvent(nil, in)
+			e, err := NewEvent(fixedClock(1758300000123), in)
 			if err != nil {
-				if in.ClientIP == markers[3] {
-					continue // an ip_hmac is not an address
-				}
 				t.Fatal(err)
 			}
 			b, err := e.Record.canonical()
@@ -258,22 +260,110 @@ func TestTS12_IPMarkers(t *testing.T) {
 			if in.ClientIP != "" && e.DB.IP == "" {
 				t.Errorf("%v: the address is not in the DB part", k)
 			}
-			for _, f := range forms[2:] {
-				// "203" and "0113" can be part of a time stamp; skip short forms.
-				if len(f) > 4 && bytes.Contains(bytes.ToLower(b), []byte(strings.ToLower(f))) {
+			for _, f := range forms {
+				if bytes.Contains(bytes.ToLower(b), []byte(strings.ToLower(f))) {
 					t.Errorf("%v: %q is in %s", k, f, b)
 				}
 			}
 		}
+		if _, err := NewEvent(nil, Input{Kind: k, ClientIP: hmac}); err == nil {
+			t.Errorf("%v: an ip_hmac is accepted as client address", k)
+		}
+	}
+}
+
+// T-S-12: text in the request-content fields and in a Detail string is copied
+// as given, after repair and cut. It is request content, not the connection
+// address, so it is hashed by design. The producer owns that rule.
+func TestTS12_RequestContentCopied(t *testing.T) {
+	const m = "203.0.113.7"
+	e := mustEvent(t, Input{Kind: KindCallback, Session: m, Vhost: m, Method: m, Path: "/" + m, TrapID: m,
+		TokenID: m, JA4: m, H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
+	b, err := e.Record.canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), m); n != 10 {
+		t.Errorf("marker is %d times in %s, want 10", n, b)
+	}
+}
+
+// watchEncoder records the length of each input of the encoder until the end
+// of the test.
+func watchEncoder(t *testing.T) *[]int {
+	var seen []int
+	orig := canonicalize
+	canonicalize = func(raw []byte) ([]byte, error) {
+		seen = append(seen, len(raw))
+		return orig(raw)
+	}
+	t.Cleanup(func() { canonicalize = orig })
+	return &seen
+}
+
+// manyMembers makes a Detail of n members that have the value v. The names are
+// the names in first, then each printable name of 1 byte, then of 2 bytes.
+func manyMembers(n int, v Value, first ...string) Detail {
+	d := Detail{}
+	add := func(s string) {
+		if len(d) < n {
+			d[s] = v
+		}
+	}
+	for _, s := range first {
+		add(s)
+	}
+	for a := 0x20; a <= 0x7e; a++ {
+		add(string(rune(a)))
+	}
+	for a := 0x20; a <= 0x7e; a++ {
+		for b := 0x20; b <= 0x7e; b++ {
+			add(string(rune(a)) + string(rune(b)))
+		}
+	}
+	return d
+}
+
+// T-S-12: a Detail of many short members is an error before the encoder runs.
+// Before the fix, 1071 members passed the test of the raw bytes and the encoder
+// got a text of up to 27 870 bytes.
+func TestTS12_ManyDetailMembers(t *testing.T) {
+	seen := watchEncoder(t)
+	quotes := []string{`"`, `\`, `""`, `\\`, `"\`, `\"`}
+	for name, d := range map[string]Detail{
+		"int":       manyMembers(1071, Int(-(1<<53 - 1))),
+		"int quote": manyMembers(1071, Int(-(1<<53 - 1)), quotes...),
+		"min int64": manyMembers(1071, Int(math.MinInt64)),
+		"bool":      manyMembers(1071, Bool(false)),
+		"empty str": manyMembers(1071, Str("")),
+	} {
+		if len(d) != 1071 {
+			t.Fatalf("%s: %d members", name, len(d))
+		}
+		if _, err := d.JSON(); err == nil {
+			t.Errorf("%s: JSON accepts the detail", name)
+		}
+		if _, err := HashEvidence(Record{TS: 1, Kind: KindCallback, Detail: d}); err == nil {
+			t.Errorf("%s: HashEvidence accepts the detail", name)
+		}
+		if _, err := NewEvent(nil, Input{Kind: KindCallback, Detail: d}); err == nil {
+			t.Errorf("%s: NewEvent accepts the detail", name)
+		}
+	}
+	if len(*seen) != 0 {
+		t.Errorf("the encoder got input of lengths %v", *seen)
 	}
 }
 
 // T-S-12: the largest event has a fixed size; the encoder input is bounded by
 // the record caps.
 func TestTS12_LargestEvent(t *testing.T) {
+	seen := watchEncoder(t)
 	ctl := strings.Repeat("\x01", 300) // a control byte is 6 bytes in canonical form
-	st := int64(1<<53 - 1)
-	e, err := NewEvent(fixedClock(1<<53-1), Input{Kind: KindCallback, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
+	// The longest ts and status are the negative integers -(2^53-1). The kind
+	// score_change is the longest name of a kind that can have a session.
+	st := int64(-maxInt)
+	e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
 		Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
 		Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
 		Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
@@ -281,11 +371,17 @@ func TestTS12_LargestEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := e.Record.canonical()
-	if len(b) > MaxRecordBytes || len(e.DB.BodyPrefix) != MaxBodyPrefix || e.Size() > MaxEventBytes {
+	b, err := e.Record.canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > MaxRecordBytes || len(e.DB.BodyPrefix) != MaxBodyPrefix || len(e.DB.IP) != maxIPText || e.Size() > MaxEventBytes {
 		t.Fatalf("record %d, prefix %d, size %d", len(b), len(e.DB.BodyPrefix), e.Size())
 	}
-	if len(b) != 19614 || e.Size() != len(b)+MaxBodyPrefix+39 {
+	// The pinned size is the length of the canonical bytes of the record above.
+	// Each text field is as long as its cap allows, and each control byte is a
+	// 6-byte escape. The test measured the value; a change of a cap changes it.
+	if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+maxIPText {
 		t.Errorf("largest record is %d bytes, event is %d", len(b), e.Size())
 	}
 	// Input past a cap is an error before it reaches the encoder.
@@ -302,6 +398,14 @@ func TestTS12_LargestEvent(t *testing.T) {
 		if _, err := HashEvidence(r); err == nil {
 			t.Errorf("record %d is accepted", i)
 		}
+	}
+	for _, n := range *seen {
+		if n > MaxRecordBytes {
+			t.Errorf("the encoder got %d bytes, more than %d", n, MaxRecordBytes)
+		}
+	}
+	if len(*seen) == 0 {
+		t.Error("the encoder was not called")
 	}
 }
 

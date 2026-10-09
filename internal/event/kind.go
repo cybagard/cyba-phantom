@@ -4,8 +4,9 @@ import "errors"
 
 var errUnknownKind = errors.New("event: unknown kind")
 
-// Kind is the kind of an event. The set is closed: it has the 8 kinds of the
-// event table and no other value. The zero value is not a kind.
+// Kind is the type of an event. The set is closed: it has 8 values (request,
+// callback, beacon, score_change, bundle_load, bundle_rejected, alert_sent and
+// retention) and no other value. The zero value is not a Kind.
 type Kind uint8
 
 const (

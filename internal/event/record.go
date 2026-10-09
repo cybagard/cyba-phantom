@@ -14,10 +14,10 @@ import (
 	"unicode/utf8"
 )
 
-// The caps of the variable fields. Each cap is in bytes. With them the largest
-// canonical record has a fixed size: MaxRecordBytes holds it, with room for
-// the worst case, in which each byte of a string is a control character that
-// the encoder writes as 6 bytes.
+// The caps of the variable fields. Each cap is in bytes. Because of the caps,
+// the largest canonical record has a fixed size. MaxRecordBytes is more than
+// that size. It allows the worst case, in which the encoder writes each byte
+// of a string as a 6-byte escape.
 const (
 	MaxRecordBytes = 24 << 10
 	MaxDetailBytes = 2 << 10
@@ -50,9 +50,10 @@ type FP struct {
 	Hdr *string `json:"hdr,omitzero"`
 }
 
-// Record is the hashed form of an event: the field set of the data model and
-// no other field. It has no field for an IP, an ip_hmac, a body, a user agent,
-// a header value or a cookie. A nil pointer and an empty Detail mean that the
+// Record is the hashed form of an event. Its fields are ts, session, kind,
+// vhost, method, path, status, trap_id, token_id, surface, fp and detail. It
+// has no other field: none for an IP, an ip_hmac, a body, a user agent, a
+// header value or a cookie. A nil pointer and an empty Detail mean that the
 // field is absent. The version member is not a field: it is always 1. A
 // number is an int64, never a float.
 type Record struct {
@@ -77,23 +78,23 @@ type wire struct {
 
 // Value is one value of a Detail: an int64, a bool or a string.
 type Value struct {
-	kind byte
-	i    int64
-	s    string
+	tag byte // 'i', 'b' or 's'; zero when the Value has no type
+	i   int64
+	s   string
 }
 
-func Int(v int64) Value  { return Value{kind: 'i', i: v} }
-func Str(v string) Value { return Value{kind: 's', s: v} }
+func Int(v int64) Value  { return Value{tag: 'i', i: v} }
+func Str(v string) Value { return Value{tag: 's', s: v} }
 func Bool(v bool) Value {
 	if v {
-		return Value{kind: 'b', i: 1}
+		return Value{tag: 'b', i: 1}
 	}
-	return Value{kind: 'b'}
+	return Value{tag: 'b'}
 }
 
 // MarshalJSON writes the value. A Value that has no type is an error.
 func (v Value) MarshalJSON() ([]byte, error) {
-	switch v.kind {
+	switch v.tag {
 	case 'i':
 		return strconv.AppendInt(nil, v.i, 10), nil
 	case 'b':
@@ -106,10 +107,17 @@ func (v Value) MarshalJSON() ([]byte, error) {
 
 // Detail is the flat object of the detail member: unique ASCII names and
 // values of the types int64, bool and string. It has no nesting. It is at most
-// MaxDetailBytes in canonical form. Detail cannot know what a string means: a
-// producer must not put request-derived text that can hold an address in it.
+// MaxDetailBytes in canonical form. Detail does not check what a string means:
+// a producer must not put request-derived text that can hold an address in it.
 type Detail map[string]Value
 
+// canonicalize is Canonical. A test replaces it to see the input of the
+// encoder.
+var canonicalize = Canonical
+
+// check tests the names and a lower bound of the size. It does no encoding.
+// Each member needs at least len(name)+4 bytes of JSON text: two quotes, a
+// colon and a value of one byte. A string value adds its own length.
 func (d Detail) check() error {
 	raw := 0
 	for n, v := range d {
@@ -121,9 +129,9 @@ func (d Detail) check() error {
 				return errors.New("event: detail name is not printable ASCII")
 			}
 		}
-		// A canonical string is never shorter than its raw bytes, so a raw
-		// sum past the cap is too large. This check runs before any encoding.
-		if raw += len(n) + len(v.s); raw > MaxDetailBytes {
+		// The sum is a lower bound of the size of the text. A sum past the cap
+		// is too large, so the map is rejected before the encoder sees it.
+		if raw += len(n) + len(v.s) + 4; raw > MaxDetailBytes {
 			return errors.New("event: detail is too large")
 		}
 	}
@@ -131,19 +139,27 @@ func (d Detail) check() error {
 }
 
 // JSON returns the canonical text of d, which is the text of the detail
-// column.
+// column. It tests the size of the marshaled text before it calls the
+// encoder, so the encoder gets at most MaxDetailBytes.
 func (d Detail) JSON() ([]byte, error) {
 	if err := d.check(); err != nil {
 		return nil, err
 	}
-	b, err := Encode(d)
+	b, err := json.Marshal(d, strict...)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("event: marshal failed")
 	}
 	if len(b) > MaxDetailBytes {
 		return nil, errors.New("event: detail is too large")
 	}
-	return b, nil
+	out, err := canonicalize(b)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > MaxDetailBytes {
+		return nil, errors.New("event: detail is too large")
+	}
+	return out, nil
 }
 
 // ParseDetail reads the text of a detail column. It accepts only the flat
@@ -163,7 +179,7 @@ func ParseDetail(text string) (Detail, error) {
 		if err != nil || tok.Kind() != '"' {
 			return nil, bad
 		}
-		name := tok.String() // a token is void after the next read
+		name := tok.String() // the next read makes the token invalid
 		if tok, err = dec.ReadToken(); err != nil {
 			return nil, bad
 		}
@@ -204,8 +220,9 @@ func checkText(name string, p *string, max int) error {
 	return nil
 }
 
-// check tests the rules of the record before any encoding. Each cap is tested
-// here, so the text that goes to the encoder is at most MaxRecordBytes.
+// check tests the rules of the record before the record is encoded. Each cap
+// is tested here, and Detail.JSON tests the size of the detail text. Thus the
+// encoder gets at most MaxRecordBytes.
 func (r Record) check() error {
 	if !r.Kind.valid() {
 		return errUnknownKind
@@ -262,7 +279,7 @@ func (r Record) canonical() ([]byte, error) {
 	if len(b) > MaxRecordBytes {
 		return nil, errors.New("event: record is too large")
 	}
-	out, err := Canonical(b)
+	out, err := canonicalize(b)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +365,8 @@ type Clock func() time.Time
 
 // Input holds the values for one event. The values from a request are
 // untrusted. ClientIP and BodyPrefix go to the DB-only part. Forwarded is the
-// value of an X-Forwarded-For or Forwarded header: NewEvent ignores it, as the
-// record and the DB part never hold a forwarded address.
+// value of an X-Forwarded-For or Forwarded header. NewEvent ignores it because
+// the record and the DB part never hold a forwarded address.
 type Input struct {
 	Kind                         Kind
 	Session, Vhost, Method, Path string
@@ -422,6 +439,9 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	}
 	if in.Session != "" && in.Kind.isSystem() {
 		return nil, errors.New("event: a system kind has no session")
+	}
+	if err := in.Detail.check(); err != nil {
+		return nil, err
 	}
 	r := Record{
 		TS: now().UnixMilli(), Kind: in.Kind, Session: text(in.Session, capID),
