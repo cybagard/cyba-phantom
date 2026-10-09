@@ -108,8 +108,8 @@ type Error struct {
 func (e *Error) Error() string { return "tlog: " + e.Name + ": " + e.Rule }
 
 // Store keeps the tiles and the tree head of one log. A Store is not safe for
-// use by more than one goroutine. The caller must hold a lock for each call;
-// the append change adds that lock.
+// use by more than one goroutine. The caller must hold a lock for each call.
+// The Log holds that lock.
 type Store struct {
 	dir  *os.Root
 	head tlog.Tree
@@ -337,7 +337,9 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
 // tree head with a temporary file and an atomic rename, and writes nothing if
-// a stored file has the data already. A stored file that is wider than the
+// a stored file has the data already. In that case, if the data has hashes
+// beyond the tree head, WriteTile calls fsync on the directories of the stored
+// file, because an earlier call can have failed after the rename. A stored file that is wider than the
 // data and differs beyond the tree head is stale: WriteTile writes the new
 // file first, then deletes the stale files. After the write, the store
 // deletes the narrower partial files, so that at most one partial file stays.
@@ -376,8 +378,13 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	keep := 0
 	switch {
 	case t.W <= c:
-	case t.W < w && bytes.Equal(data, old[:len(data)]):
-	case t.W == w && bytes.Equal(data, old):
+	case t.W < w && bytes.Equal(data, old[:len(data)]), t.W == w && bytes.Equal(data, old):
+		// The kept file has the data and this call writes nothing. An earlier
+		// call can have renamed the file and then failed to sync its
+		// directory. The head must not cover the hashes before that sync works.
+		if err := syncDirs(s.dir, path.Dir(name)); err != nil {
+			return &Error{name, ruleWrite}
+		}
 	default:
 		// The file that the rename replaces must agree in the covered hashes too.
 		if slices.Contains(widths, t.W) && t.W != w {

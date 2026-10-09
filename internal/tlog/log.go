@@ -15,7 +15,6 @@ const (
 	ruleFull      = "log has the largest size"
 	ruleCache     = "tile in memory does not match the tree"
 	ruleInclusion = "proof does not match the event hash, the index, and the tree head"
-	ruleLoad      = "tiles do not give the root of the tree head"
 )
 
 // EventHash is the SHA-256 hash of the canonical bytes of one event. It is the
@@ -26,9 +25,10 @@ type EventHash [sha256.Size]byte
 // (RFC 6962, SEC-16). The log, the verifier, and the SDK use this one rule.
 func LeafHash(h EventHash) tlog.Hash { return tlog.RecordHash(h[:]) }
 
-// VerifyInclusion checks that the event is the leaf at index in the tree of
-// size leaves with root root. It returns nil only if the proof, with the leaf
-// hash of the event, gives the root. It never panics for any input.
+// VerifyInclusion checks that the event is the leaf at position index in the
+// tree that has size leaves and the root root. It returns nil only if the
+// proof, with the leaf hash of the event, gives the root. It never panics for
+// any input.
 func VerifyInclusion(h EventHash, index, size int64, root tlog.Hash, proof tlog.RecordProof) error {
 	if index < 0 || size < 1 || size > maxSize || index >= size ||
 		tlog.CheckRecord(proof, size, root, index, LeafHash(h)) != nil {
@@ -53,6 +53,7 @@ type Log struct {
 	size  int64
 	root  tlog.Hash
 	tiles [maxLevel + 1]tileBuf
+	err   error // the first write error; Append returns it until the caller reopens the log
 }
 
 // OpenLog opens the store in dir below state, checks the tiles that the tree
@@ -74,7 +75,7 @@ func OpenLog(state *os.Root, dir string) (*Log, error) {
 		return nil, e
 	case err != nil || got != l.root:
 		s.Close()
-		return nil, &Error{"log", ruleLoad}
+		return nil, &Error{"log", ruleRoot}
 	}
 	return l, nil
 }
@@ -93,19 +94,19 @@ func (l *Log) Head() (int64, tlog.Hash) {
 	return l.size, l.root
 }
 
-// Size returns the number of leaves.
-func (l *Log) Size() int64 { n, _ := l.Head(); return n }
-
-// Root returns the root of the tree.
-func (l *Log) Root() tlog.Hash { _, r := l.Head(); return r }
-
 // Append adds one leaf for the event and returns its index. It writes the
 // rightmost tile of each level that changes, then the tree head. The size and
 // the root in memory change only after the tree head is durable. If a write
-// fails, Append returns the error and the log keeps the old head.
+// fails, Append returns an error, and the size and the root in memory do not
+// change. The leaf can still be on disk after the error. The log then refuses
+// each later Append with the same error. The caller must close the log and
+// open it again with OpenLog. OpenLog loads the state on disk.
 func (l *Log) Append(h EventHash) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.err != nil {
+		return 0, l.err
+	}
 	n := l.size
 	if n >= maxSize {
 		return 0, &Error{"log", ruleFull}
@@ -114,11 +115,11 @@ func (l *Log) Append(h EventHash) (int64, error) {
 	if err != nil {
 		return 0, &Error{"log", ruleCache}
 	}
-	next := l.tiles // the buffers are copied by value; a changed one gets new data
+	next := l.tiles // Append copies the buffers by value. A changed buffer gets new data.
 	var changed []int
 	for i, hash := range hs {
 		if i%TileHeight != 0 {
-			continue // only the hashes of tile levels are stored
+			continue // The store keeps only the hashes of the tile levels.
 		}
 		lv, k := i/TileHeight, n>>i // the new hash is number k of its level
 		var data []byte
@@ -140,10 +141,12 @@ func (l *Log) Append(h EventHash) (int64, error) {
 		b := next[lv]
 		t := tlog.Tile{H: TileHeight, L: lv, N: b.n, W: len(b.data) / tlog.HashSize}
 		if err := l.store.WriteTile(t, b.data); err != nil {
+			l.err = err
 			return 0, err
 		}
 	}
 	if err := l.store.SetHead(n+1, root); err != nil {
+		l.err = err
 		return 0, err
 	}
 	l.tiles, l.size, l.root = next, n+1, root
