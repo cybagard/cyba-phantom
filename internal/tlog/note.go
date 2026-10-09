@@ -41,7 +41,8 @@ func SignCheckpoint(signer note.Signer, size uint64, root [32]byte) ([]byte, err
 // returns an error if the note is larger than 1 KiB, if the signature does not
 // verify with verifier, or if the body is not exactly three canonical lines:
 // the configured origin, a canonical decimal size, and a canonical base64 root
-// of 32 bytes (SEC-16).
+// of 32 bytes, and if the note has any signature other than the one of verifier
+// (SEC-16).
 func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpoint, error) {
 	var c Checkpoint
 	if len(msg) > maxNoteSize { // before any parse
@@ -50,6 +51,13 @@ func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpo
 	n, err := note.Open(msg, note.VerifierList(verifier))
 	if err != nil {
 		return c, errors.New("checkpoint note signature does not verify")
+	}
+	// The sensor's own notes carry exactly one signature. Any other signature
+	// line is an error, also one from an unknown key. A cosigned note needs
+	// another parser. With one verifier, Open cannot give more than one
+	// verified signature; the first test is a guard for a larger verifier set.
+	if len(n.Sigs) != 1 || len(n.UnverifiedSigs) != 0 {
+		return c, errors.New("checkpoint note must have exactly one signature")
 	}
 	lines := strings.Split(n.Text, "\n")
 	if len(lines) != 4 || lines[3] != "" {

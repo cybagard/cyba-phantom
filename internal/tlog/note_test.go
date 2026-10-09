@@ -178,3 +178,26 @@ func TestTU12_Rejects(t *testing.T) {
 		}
 	})
 }
+
+// T-U-12: the sensor's own notes carry one signature. A second signature (from
+// another key of the same name, or from an unknown name) is an error, also
+// if the first signature is good. A cosigned note needs another parser.
+func TestTU12_RejectsExtraSignatures(t *testing.T) {
+	signer, verifier := noteKeys(t, testOrigin, 1)
+	body := checkpointBody(Checkpoint{testOrigin, 42, testRoot()})
+	second, _ := noteKeys(t, testOrigin, 2)
+	unknown, _ := noteKeys(t, "agent-canary/witness", 3)
+	for name, extra := range map[string]note.Signer{"second-key-same-name": second, "unknown-key": unknown} {
+		t.Run(name, func(t *testing.T) {
+			msg, err := note.Sign(&note.Note{Text: body}, signer, extra)
+			must(t, err)
+			if _, err := note.Open(msg, note.VerifierList(verifier)); err != nil {
+				t.Fatalf("note.Open: %v (the first signature must be good)", err)
+			}
+			_, err = ParseCheckpoint(msg, testOrigin, verifier)
+			if err == nil || !strings.Contains(err.Error(), "exactly one signature") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
