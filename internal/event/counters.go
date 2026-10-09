@@ -24,15 +24,22 @@ const ipv6PrefixBits = 64
 // The default fmt output of the map would print every key. A key is a client
 // address (C8). Counters therefore implements fmt.Formatter. For the verbs
 // that call it, Format prints only the key count and the overflow bucket count.
-// The verbs %T and %p do not call Format. They print the type and the address
-// of the pointer, and they print no key.
+// The verbs %T and %p do not call Format. The verb %T prints the type. For a
+// *Counters, %p prints the pointer value. For a Counters value, %p prints a
+// bad-verb text. Neither verb prints a key.
 //
 // A Counters value holds a pointer to a stateRef. The stateRef holds the
 // pointer to the state. The state holds the lock, the map, and the bucket.
-// When fmt reaches a Counters value by reflection, fmt stops at the second
-// pointer and prints no key. This holds for a Counters value in an unexported
-// field, in an unexported any field, in a nested struct, in an array, and in
-// a map. It also holds for a *Counters in an unexported field.
+// Take a struct with an unexported Counters value field. For %v, fmt prints
+// the first pointer, to the stateRef, as an address. Fmt does not follow it.
+// Only the bad-verb path (for example %s) follows the first pointer. That
+// path prints %!s(*event.stateRef=&{0x...}) and stops at the second pointer.
+// That is why the second pointer exists. Thus fmt prints no key.
+//
+// This holds for a Counters value in an unexported field or in an unexported
+// any field. It also holds in a nested struct, in an array, and in a map. It
+// also holds for a *Counters in an unexported field. A reflect walker that
+// reads the private fields on purpose can reach the map.
 //
 // Only Snapshot gives the keys to its caller. All methods are safe for
 // concurrent use. The zero value is not ready for use: call NewCounters.

@@ -209,8 +209,9 @@ func TestTU17_SnapshotReset(t *testing.T) {
 }
 
 // markerForms returns every text form of the client address s that a leak
-// could show: the address, its key, the IPv4-mapped forms, and the decimal and
-// hex forms of the two 64-bit words of the key. All forms are lower case.
+// could show. The forms are the address, its key, and the IPv4-mapped forms.
+// They also include the decimal, hex, binary, and octal forms of the two 64-bit
+// words of the key. All forms are lower case.
 func markerForms(t *testing.T, s string) []string {
 	t.Helper()
 	a := mustAddr(t, s)
@@ -228,7 +229,8 @@ func markerForms(t *testing.T, s string) []string {
 		if w < 1<<16 {
 			continue // too short to be a marker: it would match a count
 		}
-		forms = append(forms, fmt.Sprintf("%d", w), fmt.Sprintf("%x", w))
+		forms = append(forms, fmt.Sprintf("%d", w), fmt.Sprintf("%x", w),
+			fmt.Sprintf("%b", w), fmt.Sprintf("%o", w))
 	}
 	for i, f := range forms {
 		forms[i] = strings.ToLower(f)
@@ -281,13 +283,13 @@ func checkCounts(t *testing.T, out string) {
 // The types below hold a Counters in each way that fmt reaches by reflection.
 // Their fields are unexported, so fmt cannot call Format on the field.
 type (
-	holdValue struct{ c Counters }
-	holdAny   struct{ v any }
-	inner     struct{ C Counters }
-	outer     struct{ in inner }
-	holdArray struct{ a [1]Counters }
-	holdMap   struct{ m map[int]Counters }
-	holdPtr   struct{ p *Counters }
+	holdValue  struct{ c Counters }
+	holdAny    struct{ v any }
+	holdInner  struct{ C Counters }
+	holdNested struct{ in holdInner }
+	holdArray  struct{ a [1]Counters }
+	holdMap    struct{ m map[int]Counters }
+	holdPtr    struct{ p *Counters }
 )
 
 // counterShape is a value that holds a marked Counters. Direct is true when fmt
@@ -306,7 +308,7 @@ func counterShapes(c *Counters) []counterShape {
 		{"value", *c, true},
 		{"unexported-value-field", holdValue{c: *c}, false},
 		{"unexported-any-field", holdAny{v: *c}, false},
-		{"nested-struct", outer{in: inner{C: *c}}, false},
+		{"nested-struct", holdNested{in: holdInner{C: *c}}, false},
 		{"unexported-array-field", holdArray{a: [1]Counters{*c}}, false},
 		{"unexported-map-field", holdMap{m: map[int]Counters{1: *c}}, false},
 		{"unexported-pointer-field", holdPtr{p: c}, false},
@@ -327,10 +329,10 @@ func TestTU17_MarkerFormsCoverNetipWords(t *testing.T) {
 	}
 }
 
-// T-U-17: fmt of a *Counters, of a Counters value, and of a value that holds a
-// Counters in an unexported field (also in an any field, a nested struct, an
-// array, or a map), with each verb, prints no key in any form. Where fmt calls
-// Format, the output holds the key count and the bucket count.
+// T-U-17: fmt prints no key in any form, for each verb and each shape in
+// counterShapes. The shapes are a *Counters, a Counters value, and a value that
+// holds a Counters in an unexported field. Where fmt calls Format, the output
+// holds the key count and the bucket count.
 func TestTU17_FormatHoldsNoKey(t *testing.T) {
 	c := markedCounters()
 	for _, verb := range formatVerbs {
@@ -369,8 +371,8 @@ func TestTU17_FormatInErrorAndLog(t *testing.T) {
 	}
 }
 
-// T-U-17: Format does not change the counts (a snapshot after a format still
-// returns the keys), and a zero value formats without a panic.
+// T-U-17: Format does not change the counts. A snapshot after a format still
+// returns the keys. A zero value formats without a panic.
 func TestTU17_FormatKeepsCounts(t *testing.T) {
 	c := markedCounters()
 	_ = fmt.Sprintf("%v %+v %#v %s", c, c, *c, *c)
