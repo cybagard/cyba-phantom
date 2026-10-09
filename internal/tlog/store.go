@@ -129,13 +129,14 @@ type Store struct {
 // of the tree head. Open does not read the other tiles. A later change checks
 // them with authenticated reads. Open tidies the tiles that it reads, so that
 // at most one partial file stays for each of them after a crash. Open does not
-// list or tidy any other tile. It deletes files only after all checks pass: if
-// a check fails, Open has deleted nothing. A directory with no tree head must
-// be empty, or hold only the temporary file of the tree head. Open writes a
-// tree head of size 0 for it, before any tile can be written. Open makes the
-// loaded tree head durable. It calls fsync on the log directory, on its
-// parents, and on the directories of the tiles that it read. If an fsync
-// fails, Open returns an error.
+// list or tidy any other tile. A directory with no tree head must be empty, or
+// hold only the temporary file of the tree head. Open writes a tree head of
+// size 0 for it, before any tile can be written. Open makes the loaded tree
+// head durable. It calls fsync on the log directory and on its parents before
+// it reads, writes, or deletes any file there. Then it calls fsync on the
+// directories of the tiles that it read. It deletes files only after all
+// checks and all fsync calls pass. If a check or an fsync fails, Open returns
+// an error and has deleted nothing.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -158,13 +159,9 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		sub.Close()
 		return nil, &Error{"tlog directory", fileRule(err)}
 	}
-	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
-	if err := s.load(); err != nil {
-		sub.Close()
-		return nil, err
-	}
 	// A write before a crash can rename the tree head and then fail the fsync of
-	// the directory. Make the tree head durable now.
+	// the directory. Make the tree head durable now. Do it before load, so that
+	// a refusal or a failed fsync here deletes and writes nothing.
 	if err := syncDirs(state, dir); err != nil {
 		sub.Close()
 		rule := ruleWrite
@@ -172,6 +169,11 @@ func Open(state *os.Root, dir string) (*Store, error) {
 			rule = fileRule(err)
 		}
 		return nil, &Error{"tlog directory", rule}
+	}
+	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
+	if err := s.load(); err != nil {
+		sub.Close()
+		return nil, err
 	}
 	return s, nil
 }
@@ -219,7 +221,7 @@ func (s *Store) load() error {
 		}
 		rm = append(rm, names...)
 	}
-	// Sync first: if an fsync fails, Open has deleted nothing.
+	// Sync before the delete. A failed fsync leaves the stale files in place.
 	if err := s.syncRead(dirs); err != nil {
 		return err
 	}

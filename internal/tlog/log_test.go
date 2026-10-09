@@ -627,8 +627,49 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 		state, log := crashed(t)
 		failDirSync(t, log, ".")
 		l, err := OpenLog(state, "tlog")
-		// The fsync of the first tile directory reaches the log directory first.
-		wantOpenError(t, l, err, "tile/8/0", ruleWrite)
+		wantOpenError(t, l, err, "tlog directory", ruleWrite)
+	})
+
+	// plantStale makes a file that load deletes. The returned function checks
+	// that the file is still there.
+	plantStale := func(t *testing.T, log string) (check func()) {
+		t.Helper()
+		stale := filepath.Join(log, "tile/8/0/000.tmp")
+		if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return func() {
+			t.Helper()
+			if _, err := os.Stat(stale); err != nil {
+				t.Fatalf("the refused open deleted the stale file: %v", err)
+			}
+		}
+	}
+
+	t.Run("state directory mode refused before load", func(t *testing.T) {
+		state, log := crashed(t)
+		check := plantStale(t, log)
+		if err := os.Chmod(filepath.Dir(log), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		l, err := OpenLog(state, "tlog")
+		wantOpenError(t, l, err, "tlog directory", ruleMode)
+		check()
+	})
+
+	t.Run("log directory link refused before load", func(t *testing.T) {
+		state, log := crashed(t)
+		real := filepath.Join(filepath.Dir(log), "real")
+		if err := os.Rename(log, real); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real", log); err != nil {
+			t.Fatal(err)
+		}
+		check := plantStale(t, real)
+		l, err := OpenLog(state, "tlog")
+		wantOpenError(t, l, err, "tlog directory", ruleLink)
+		check()
 	})
 
 	t.Run("empty log, log directory fsync fails", func(t *testing.T) {
