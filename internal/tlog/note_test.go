@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -177,4 +178,49 @@ func TestTU12_Rejects(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
+}
+
+// T-U-12: the sensor's own notes carry one signature. A second signature (from
+// another key of the same name, or from an unknown name) is an error, even
+// if the first signature is good. A repeated line with the key name and key hash
+// of the good line is an error too, although note.Open drops it before it
+// verifies it. A cosigned note needs another parser.
+func TestTU12_RejectsExtraSignatures(t *testing.T) {
+	signer, verifier := noteKeys(t, testOrigin, 1)
+	body := checkpointBody(Checkpoint{testOrigin, 42, testRoot()})
+	second, _ := noteKeys(t, testOrigin, 2)
+	unknown, _ := noteKeys(t, "agent-canary/witness", 3)
+	for name, extra := range map[string]note.Signer{"second-key-same-name": second, "unknown-key": unknown} {
+		t.Run(name, func(t *testing.T) {
+			msg, err := note.Sign(&note.Note{Text: body}, signer, extra)
+			must(t, err)
+			if _, err := note.Open(msg, note.VerifierList(verifier)); err != nil {
+				t.Fatalf("note.Open: %v (the first signature must be good)", err)
+			}
+			_, err = ParseCheckpoint(msg, testOrigin, verifier)
+			if err == nil || !strings.Contains(err.Error(), "exactly one signature") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+
+	good, err := SignCheckpoint(signer, 42, testRoot())
+	must(t, err)
+	line := good[bytes.LastIndex(good, []byte("\n\n"))+2:] // the one signature line
+	fields := strings.Fields(string(line))                 // the dash, the key name, the base64 text
+	raw, err := base64.StdEncoding.DecodeString(fields[2])
+	must(t, err)
+	other := fmt.Sprintf("%s %s %s\n", fields[0], fields[1], base64.StdEncoding.EncodeToString(append(raw[:4:4], make([]byte, 64)...)))
+	for name, extra := range map[string]string{"identical-copy": string(line), "own-name-and-hash-other-bytes": other} {
+		t.Run(name, func(t *testing.T) {
+			msg := append(slices.Clone(good), extra...)
+			if _, err := note.Open(msg, note.VerifierList(verifier)); err != nil {
+				t.Fatalf("note.Open: %v (it must drop the repeated line)", err)
+			}
+			_, err := ParseCheckpoint(msg, testOrigin, verifier)
+			if err == nil || !strings.Contains(err.Error(), "exactly one signature") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
 }

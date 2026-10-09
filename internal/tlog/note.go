@@ -1,6 +1,7 @@
 package tlog
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"strconv"
@@ -20,8 +21,8 @@ type Checkpoint struct {
 	Root   [32]byte
 }
 
-// checkpointBody writes the note body in the C2SP tlog-checkpoint format
-// (04 §5): the origin, the tree size in decimal, and the root hash in
+// checkpointBody writes the note body in the C2SP tlog-checkpoint format. The
+// lines are the origin, the tree size in decimal, and the root hash in
 // standard base64, each with a newline. There is no extension line. The
 // tree-note helpers of x/mod write another first line, so this code does not
 // use them.
@@ -37,11 +38,12 @@ func SignCheckpoint(signer note.Signer, size uint64, root [32]byte) ([]byte, err
 	return note.Sign(&note.Note{Text: checkpointBody(Checkpoint{signer.Name(), size, root})}, signer)
 }
 
-// ParseCheckpoint is the strict parser for the notes of this package. It
-// returns an error if the note is larger than 1 KiB, if the signature does not
-// verify with verifier, or if the body is not exactly three canonical lines:
-// the configured origin, a canonical decimal size, and a canonical base64 root
-// of 32 bytes (SEC-16).
+// ParseCheckpoint is the strict parser for the notes of this package (SEC-16).
+// It returns an error if the note is larger than 1 KiB. It returns an error if
+// the signature does not verify with verifier. It returns an error if the
+// signature block does not have exactly one line. It returns an error if the
+// body is not exactly three canonical lines: the configured origin, a canonical
+// decimal size, and a canonical base64 root of 32 bytes.
 func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpoint, error) {
 	var c Checkpoint
 	if len(msg) > maxNoteSize { // before any parse
@@ -50,6 +52,14 @@ func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpo
 	n, err := note.Open(msg, note.VerifierList(verifier))
 	if err != nil {
 		return c, errors.New("checkpoint note signature does not verify")
+	}
+	// The sensor's own notes have exactly one signature line. A cosigned note
+	// needs another parser. Open drops a repeated line of the same key name and
+	// hash before it verifies that line, so the count uses the raw bytes. The
+	// signature block is the part after the last blank line. Open succeeded, so
+	// that blank line exists.
+	if bytes.Count(msg[bytes.LastIndex(msg, []byte("\n\n"))+2:], []byte("\n")) != 1 {
+		return c, errors.New("checkpoint note must have exactly one signature")
 	}
 	lines := strings.Split(n.Text, "\n")
 	if len(lines) != 4 || lines[3] != "" {
