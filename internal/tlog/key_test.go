@@ -87,18 +87,21 @@ func assertNoSecret(t *testing.T, what, s string, secrets []string) {
 	}
 }
 
-func mustSymlink(t *testing.T, target, link string) {
+func must(t *testing.T, err error) {
 	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 }
 
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	must(t, os.Symlink(target, link))
+}
+
 func mustFifo(t *testing.T, path string) {
 	t.Helper()
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, syscall.Mkfifo(path, 0o600))
 }
 
 // loadWithin runs LoadOrCreateSigner and fails the test if it does not return.
@@ -139,32 +142,20 @@ func TestTS13_KeyFileRules(t *testing.T) {
 		{"wrong key name", func(t *testing.T, dir string) { putKey(t, dir, newKeyText(t, "other/origin"), 0o600) }, "", "key name must equal the configured origin"},
 		{"malformed", func(t *testing.T, dir string) { putKey(t, dir, "PRIVATE+KEY+not-a-key", 0o600) }, "", "is not a valid note signer key"},
 		{"empty", func(t *testing.T, dir string) { putKey(t, dir, "", 0o600) }, "", "is not a valid note signer key"},
-		{"directory", func(t *testing.T, dir string) {
-			if err := os.MkdirAll(filepath.Join(dir, keyName), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}, "", "must be a regular file"},
+		{"directory", func(t *testing.T, dir string) { must(t, os.MkdirAll(filepath.Join(dir, keyName), 0o700)) }, "", "must be a regular file"},
 		{"symlink inside", func(t *testing.T, dir string) {
 			putKey(t, dir, good, 0o600)
-			if err := os.Rename(filepath.Join(dir, keyName), filepath.Join(dir, "real.key")); err != nil {
-				t.Fatal(err)
-			}
+			must(t, os.Rename(filepath.Join(dir, keyName), filepath.Join(dir, "real.key")))
 			mustSymlink(t, filepath.Join(dir, "real.key"), filepath.Join(dir, keyName))
 		}, good, "must be a regular file and not a symlink"},
 		{"keys is a symlink inside the root", func(t *testing.T, dir string) {
-			if err := os.Mkdir(filepath.Join(dir, "tlog"), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			must(t, os.Mkdir(filepath.Join(dir, "tlog"), 0o700))
 			putKey(t, filepath.Join(dir, "tlog"), good, 0o600)
-			if err := os.Rename(filepath.Join(dir, "tlog", keysDir), filepath.Join(dir, "tlog", "k")); err != nil {
-				t.Fatal(err)
-			}
+			must(t, os.Rename(filepath.Join(dir, "tlog", keysDir), filepath.Join(dir, "tlog", "k")))
 			mustSymlink(t, "tlog/k", filepath.Join(dir, keysDir))
 		}, good, "keys must be a real directory and not a symlink"},
 		{"FIFO at the key path", func(t *testing.T, dir string) {
-			if err := os.Mkdir(filepath.Join(dir, keysDir), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
 			mustFifo(t, filepath.Join(dir, keyName))
 		}, "", "must be a regular file"},
 	}
@@ -199,31 +190,15 @@ func TestTS13_SymlinkOutside(t *testing.T) {
 			root, dir := newState(t)
 			outside := t.TempDir()
 			fifo := filepath.Join(outside, "checkpoint.key")
-			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			mustFifo(t, fifo)
 			if link == "file" {
-				if err := os.Mkdir(filepath.Join(dir, keysDir), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(fifo, filepath.Join(dir, keyName)); err != nil {
-					t.Fatal(err)
-				}
-			} else if err := os.Symlink(outside, filepath.Join(dir, keysDir)); err != nil {
-				t.Fatal(err)
+				must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
+				mustSymlink(t, fifo, filepath.Join(dir, keyName))
+			} else {
+				mustSymlink(t, outside, filepath.Join(dir, keysDir))
 			}
-			done := make(chan error, 1)
-			go func() {
-				_, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1)
-				done <- err
-			}()
-			select {
-			case err := <-done:
-				if err == nil {
-					t.Fatal("want an error")
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("the outside file was opened")
+			if _, err := loadWithin(t, root, nil, testOrigin, true, 1); err == nil {
+				t.Fatal("want an error")
 			}
 		})
 	}
@@ -328,27 +303,24 @@ func TestTS13_MissingKeyNoNewKey(t *testing.T) {
 func TestTS13_NoKeyOutput(t *testing.T) {
 	root, dir := newState(t)
 	log, buf := testLogger()
-	if _, err := LoadOrCreateSigner(root, log, testOrigin, false, 0); err != nil {
-		t.Fatal(err)
-	}
-	text, err := os.ReadFile(filepath.Join(dir, keyName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	secrets := secretsOf(string(text))
+	_, err := LoadOrCreateSigner(root, log, testOrigin, false, 0)
+	must(t, err)
+	b, err := os.ReadFile(filepath.Join(dir, keyName))
+	must(t, err)
+	text := string(b)
+	secrets := secretsOf(text)
 	if len(secrets) != 3 {
 		t.Fatalf("got %d secret forms; want 3", len(secrets))
 	}
-	if _, err := LoadOrCreateSigner(root, log, testOrigin, true, 1); err != nil {
-		t.Fatal(err)
-	}
+	_, err = LoadOrCreateSigner(root, log, testOrigin, true, 1)
+	must(t, err)
 	var errs []error
 	for _, mode := range []os.FileMode{0o640, 0o604, 0o400} {
-		putKey(t, dir, string(text), mode)
+		putKey(t, dir, text, mode)
 		_, err := LoadOrCreateSigner(root, log, testOrigin, true, 1)
 		errs = append(errs, err)
 	}
-	putKey(t, dir, string(text), 0o600)
+	putKey(t, dir, text, 0o600)
 	_, err = LoadOrCreateSigner(root, log, "another/origin", true, 1) // wrong name
 	errs = append(errs, err)
 	geteuidOld := geteuid
@@ -359,15 +331,10 @@ func TestTS13_NoKeyOutput(t *testing.T) {
 	errs = append(errs, err)
 
 	// The public key file has hostile content: the private key text.
-	if err := os.Remove(filepath.Join(dir, vkeyName)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, vkeyName), text, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreateSigner(root, log, testOrigin, true, 1); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Remove(filepath.Join(dir, vkeyName)))
+	must(t, os.WriteFile(filepath.Join(dir, vkeyName), []byte(text), 0o600))
+	_, err = LoadOrCreateSigner(root, log, testOrigin, true, 1)
+	must(t, err)
 
 	if buf.Len() == 0 {
 		t.Fatal("no log output to check")
@@ -385,14 +352,19 @@ func TestTS13_NoKeyOutput(t *testing.T) {
 func firstStart(t *testing.T) (*os.Root, string, string) {
 	t.Helper()
 	root, dir := newState(t)
-	if _, err := LoadOrCreateSigner(root, nil, testOrigin, false, 0); err != nil {
-		t.Fatal(err)
-	}
+	_, err := LoadOrCreateSigner(root, nil, testOrigin, false, 0)
+	must(t, err)
 	text, err := os.ReadFile(filepath.Join(dir, keyName))
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	return root, dir, string(text)
+}
+
+// firstStartKeysDir returns a state directory that has an empty keys directory.
+func firstStartKeysDir(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	root, dir := newState(t)
+	must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
+	return root, dir
 }
 
 // vkeyOf returns the value of the vkey attribute of the log.
@@ -413,19 +385,15 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			root, dir, text := firstStart(t)
 			vpath := filepath.Join(dir, vkeyName)
-			if err := os.Remove(vpath); err != nil {
-				t.Fatal(err)
-			}
+			must(t, os.Remove(vpath))
 			if kind == "symlink" {
 				mustSymlink(t, filepath.Join(dir, keyName), vpath)
-			} else if err := os.WriteFile(vpath, []byte(text), 0o600); err != nil {
-				t.Fatal(err)
+			} else {
+				must(t, os.WriteFile(vpath, []byte(text), 0o600))
 			}
 			log, buf := testLogger()
 			s, err := loadWithin(t, root, log, testOrigin, true, 1)
-			if err != nil {
-				t.Fatal(err)
-			}
+			must(t, err)
 			assertNoSecret(t, "log", buf.String(), secretsOf(text))
 			v, err := note.NewVerifier(vkeyOf(t, buf.String()))
 			if err != nil || v.Name() != testOrigin || v.KeyHash() != s.KeyHash() {
@@ -439,14 +407,9 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 // and the write does not follow a symlink. The target stays as it was, and no
 // key file is made.
 func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
-	root, dir := newState(t)
-	if err := os.Mkdir(filepath.Join(dir, keysDir), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root, dir := firstStartKeysDir(t)
 	target := filepath.Join(dir, "other-state")
-	if err := os.WriteFile(target, []byte("state"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(target, []byte("state"), 0o600))
 	mustSymlink(t, target, filepath.Join(dir, vkeyName))
 	s, err := loadWithin(t, root, nil, testOrigin, false, 0)
 	if err == nil || s != nil || !strings.Contains(err.Error(), "public key file must not exist") {
@@ -465,17 +428,12 @@ func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 func TestTS13_VkeyFifo(t *testing.T) {
 	root, dir, _ := firstStart(t)
 	vpath := filepath.Join(dir, vkeyName)
-	if err := os.Remove(vpath); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Remove(vpath))
 	mustFifo(t, vpath)
 	if _, err := loadWithin(t, root, nil, testOrigin, true, 1); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	root2, dir2 := newState(t)
-	if err := os.Mkdir(filepath.Join(dir2, keysDir), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root2, dir2 := firstStartKeysDir(t)
 	mustFifo(t, filepath.Join(dir2, vkeyName))
 	if _, err := loadWithin(t, root2, nil, testOrigin, false, 0); err == nil {
 		t.Error("first start with a FIFO at the public key path: want an error")
@@ -487,15 +445,10 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 	root, dir, _ := firstStart(t)
 	vpath := filepath.Join(dir, vkeyName)
 	want, err := os.ReadFile(vpath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(vpath); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1); err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
+	must(t, os.Remove(vpath))
+	_, err = LoadOrCreateSigner(root, nil, testOrigin, true, 1)
+	must(t, err)
 	got, err := os.ReadFile(vpath)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Errorf("public key file %q, error %v; want %q", got, err, want)
@@ -509,9 +462,7 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 // depends on both.
 func TestTS13_RootOpenFileFlags(t *testing.T) {
 	root, dir := newState(t)
-	if err := os.WriteFile(filepath.Join(dir, "target"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(filepath.Join(dir, "target"), []byte("x"), 0o600))
 	mustSymlink(t, filepath.Join(dir, "target"), filepath.Join(dir, "link"))
 	if f, err := root.OpenFile("link", readFlags, 0); err == nil {
 		f.Close()
