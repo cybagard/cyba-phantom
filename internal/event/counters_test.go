@@ -23,8 +23,8 @@ func mustAddr(t testing.TB, s string) netip.Addr {
 }
 
 // total adds the counts of a snapshot and its overflow bucket.
-func total(m map[netip.Addr]uint64, other uint64) uint64 {
-	n := other
+func total(m map[netip.Addr]uint64, overflow uint64) uint64 {
+	n := overflow
 	for _, v := range m {
 		n += v
 	}
@@ -74,12 +74,12 @@ func TestTU17_DropCounts(t *testing.T) {
 	c.Drop(mustAddr(t, "fe80::1%eth0"))
 	c.Drop(netip.Addr{})
 	c.DropNoAddr()
-	m, other := c.Snapshot()
+	m, overflow := c.Snapshot()
 	if len(m) != 2 || m[mustAddr(t, "192.0.2.1")] != 2 || m[mustAddr(t, "fe80::")] != 1 {
 		t.Errorf("unexpected counts: %v", m)
 	}
-	if other != 2 {
-		t.Errorf("bucket = %d, want 2", other)
+	if overflow != 2 {
+		t.Errorf("bucket = %d, want 2", overflow)
 	}
 }
 
@@ -90,14 +90,14 @@ func checkBound(t *testing.T, gen func(r *rand.Rand) netip.Addr) {
 	for range n {
 		c.Drop(gen(r))
 	}
-	m, other := c.Snapshot()
+	m, overflow := c.Snapshot()
 	if len(m) > maxCounterKeys {
 		t.Errorf("%d keys, want at most %d", len(m), maxCounterKeys)
 	}
-	if got := total(m, other); got != n {
+	if got := total(m, overflow); got != n {
 		t.Errorf("sum = %d, want %d", got, n)
 	}
-	if other == 0 {
+	if overflow == 0 {
 		t.Error("overflow bucket is empty")
 	}
 }
@@ -141,12 +141,12 @@ func TestTU17_NoEviction(t *testing.T) {
 	}
 	c.Drop(key(0))
 	c.Drop(key(maxCounterKeys - 1))
-	m, other := c.Snapshot()
+	m, overflow := c.Snapshot()
 	if len(m) != maxCounterKeys {
 		t.Fatalf("%d keys, want %d", len(m), maxCounterKeys)
 	}
-	if other != 10 {
-		t.Errorf("bucket = %d, want 10", other)
+	if overflow != 10 {
+		t.Errorf("bucket = %d, want 10", overflow)
 	}
 	if m[key(0)] != 2 || m[key(maxCounterKeys-1)] != 2 || m[key(1)] != 1 {
 		t.Error("a key in the map did not keep its own counter")
@@ -200,11 +200,11 @@ func TestTU17_SnapshotReset(t *testing.T) {
 	c := NewCounters()
 	c.Drop(mustAddr(t, "192.0.2.1"))
 	c.DropNoAddr()
-	if m, other := c.Snapshot(); len(m) != 1 || other != 1 {
-		t.Fatalf("first snapshot = %v, %d", m, other)
+	if m, overflow := c.Snapshot(); len(m) != 1 || overflow != 1 {
+		t.Fatalf("first snapshot = %v, %d", m, overflow)
 	}
-	if m, other := c.Snapshot(); len(m) != 0 || other != 0 {
-		t.Errorf("second snapshot = %v, %d, want empty", m, other)
+	if m, overflow := c.Snapshot(); len(m) != 0 || overflow != 0 {
+		t.Errorf("second snapshot = %v, %d, want empty", m, overflow)
 	}
 }
 
@@ -256,8 +256,7 @@ func markedCounters() *Counters {
 	return c
 }
 
-// checkNoMarker fails when out holds a form of a marker, or does not hold the
-// key count and the bucket count.
+// checkNoMarker fails when out holds a form of a marker.
 func checkNoMarker(t *testing.T, out string) {
 	t.Helper()
 	low := strings.ToLower(out)
@@ -268,10 +267,54 @@ func checkNoMarker(t *testing.T, out string) {
 			}
 		}
 	}
+}
+
+// checkCounts fails when out does not hold the key count and the bucket count
+// of markedCounters.
+func checkCounts(t *testing.T, out string) {
+	t.Helper()
 	if !strings.Contains(out, "keys:3") || !strings.Contains(out, "overflow:2") {
 		t.Errorf("output lacks the key count or the bucket count: %s", out)
 	}
 }
+
+// The types below hold a Counters in each way that fmt reaches by reflection.
+// Their fields are unexported, so fmt cannot call Format on the field.
+type (
+	holdValue struct{ c Counters }
+	holdAny   struct{ v any }
+	inner     struct{ C Counters }
+	outer     struct{ in inner }
+	holdArray struct{ a [1]Counters }
+	holdMap   struct{ m map[int]Counters }
+	holdPtr   struct{ p *Counters }
+)
+
+// counterShape is a value that holds a marked Counters. Direct is true when fmt
+// calls Format on the value itself.
+type counterShape struct {
+	name   string
+	arg    any
+	direct bool
+}
+
+// counterShapes returns every shape that the format tests check. Only this
+// function lists the shapes.
+func counterShapes(c *Counters) []counterShape {
+	return []counterShape{
+		{"pointer", c, true},
+		{"value", *c, true},
+		{"unexported-value-field", holdValue{c: *c}, false},
+		{"unexported-any-field", holdAny{v: *c}, false},
+		{"nested-struct", outer{in: inner{C: *c}}, false},
+		{"unexported-array-field", holdArray{a: [1]Counters{*c}}, false},
+		{"unexported-map-field", holdMap{m: map[int]Counters{1: *c}}, false},
+		{"unexported-pointer-field", holdPtr{p: c}, false},
+	}
+}
+
+// formatVerbs are the fmt verbs that the format tests use.
+var formatVerbs = []string{"%v", "%+v", "%#v", "%s", "%q", "%t", "%e", "%c", "%U", "%d", "%x", "%X", "%b", "%o"}
 
 // T-U-17: the marker forms hold the known words: 203.0.113.7 as a netip word
 // is 281474087547143 (0xffffcb007107). The leak checks below are not vacuous.
@@ -284,37 +327,44 @@ func TestTU17_MarkerFormsCoverNetipWords(t *testing.T) {
 	}
 }
 
-// T-U-17: fmt of a *Counters and of a Counters value, with each verb, prints
-// no key in any form, and prints the key count.
+// T-U-17: fmt of a *Counters, of a Counters value, and of a value that holds a
+// Counters in an unexported field (also in an any field, a nested struct, an
+// array, or a map), with each verb, prints no key in any form. Where fmt calls
+// Format, the output holds the key count and the bucket count.
 func TestTU17_FormatHoldsNoKey(t *testing.T) {
 	c := markedCounters()
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
-		for _, form := range []struct {
-			name string
-			arg  any
-		}{{"pointer", c}, {"value", *c}} {
-			t.Run(verb+"/"+form.name, func(t *testing.T) {
-				checkNoMarker(t, fmt.Sprintf(verb, form.arg))
+	for _, verb := range formatVerbs {
+		for _, shape := range counterShapes(c) {
+			t.Run(verb+"/"+shape.name, func(t *testing.T) {
+				out := fmt.Sprintf(verb, shape.arg)
+				checkNoMarker(t, out)
+				if shape.direct {
+					checkCounts(t, out)
+				}
 			})
 		}
 	}
 }
 
 // T-U-17: a Counters inside an error text and inside a slog record holds no
-// key, for the pointer and for the value.
+// key, for each shape.
 func TestTU17_FormatInErrorAndLog(t *testing.T) {
 	c := markedCounters()
-	for _, form := range []struct {
-		name string
-		arg  any
-	}{{"pointer", c}, {"value", *c}} {
-		t.Run("error/"+form.name, func(t *testing.T) {
-			checkNoMarker(t, fmt.Errorf("drops: %v", form.arg).Error())
+	for _, shape := range counterShapes(c) {
+		t.Run("error/"+shape.name, func(t *testing.T) {
+			out := fmt.Errorf("drops: %v", shape.arg).Error()
+			checkNoMarker(t, out)
+			if shape.direct {
+				checkCounts(t, out)
+			}
 		})
-		t.Run("slog/"+form.name, func(t *testing.T) {
+		t.Run("slog/"+shape.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			slog.New(slog.NewTextHandler(&buf, nil)).Info("dropped", slog.Any("c", form.arg))
+			slog.New(slog.NewTextHandler(&buf, nil)).Info("dropped", slog.Any("c", shape.arg))
 			checkNoMarker(t, buf.String())
+			if shape.direct {
+				checkCounts(t, buf.String())
+			}
 		})
 	}
 }
@@ -324,9 +374,9 @@ func TestTU17_FormatInErrorAndLog(t *testing.T) {
 func TestTU17_FormatKeepsCounts(t *testing.T) {
 	c := markedCounters()
 	_ = fmt.Sprintf("%v %+v %#v %s", c, c, *c, *c)
-	m, other := c.Snapshot()
-	if len(m) != 3 || other != 2 {
-		t.Errorf("snapshot after format = %d keys, %d in the bucket, want 3 and 2", len(m), other)
+	m, overflow := c.Snapshot()
+	if len(m) != 3 || overflow != 2 {
+		t.Errorf("snapshot after format = %d keys, %d in the bucket, want 3 and 2", len(m), overflow)
 	}
 	if got := fmt.Sprintf("%v", Counters{}); !strings.Contains(got, "keys:0") {
 		t.Errorf("zero value formats as %q", got)

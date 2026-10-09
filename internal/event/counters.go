@@ -21,17 +21,28 @@ const ipv6PrefixBits = 64
 // always increments its own counter. The map never evicts a key between two
 // snapshots.
 //
-// The default fmt output of a struct holding this map would print every key,
-// that is every client address. Counters therefore implements fmt.Formatter:
-// for a Counters value and for a *Counters, with every verb, Format prints only
-// the key count and the overflow bucket count. A log line or an error text that
-// holds a Counters has no client address (C8). Only Snapshot gives the keys to
-// its caller. All methods are safe for concurrent use. The zero value is not
-// ready for use: call NewCounters.
+// The default fmt output of the map would print every key. A key is a client
+// address (C8). Counters therefore implements fmt.Formatter. For the verbs
+// that call it, Format prints only the key count and the overflow bucket count.
+// The verbs %T and %p do not call Format. They print the type and the address
+// of the pointer, and they print no key.
 //
-// The lock and the map are behind one pointer, so a copy of a Counters value
-// shares the counts of the original.
+// A Counters value holds a pointer to a stateRef. The stateRef holds the
+// pointer to the state. The state holds the lock, the map, and the bucket.
+// When fmt reaches a Counters value by reflection, fmt stops at the second
+// pointer and prints no key. This holds for a Counters value in an unexported
+// field, in an unexported any field, in a nested struct, in an array, and in
+// a map. It also holds for a *Counters in an unexported field.
+//
+// Only Snapshot gives the keys to its caller. All methods are safe for
+// concurrent use. The zero value is not ready for use: call NewCounters.
 type Counters struct {
+	h *stateRef
+}
+
+// stateRef holds the pointer to the state. It is the second pointer between
+// a Counters value and the map.
+type stateRef struct {
 	s *counterState
 }
 
@@ -44,18 +55,21 @@ type counterState struct {
 
 // NewCounters returns an empty Counters value.
 func NewCounters() *Counters {
-	return &Counters{s: &counterState{counts: make(map[netip.Addr]uint64)}}
+	st := &counterState{counts: make(map[netip.Addr]uint64)}
+	return &Counters{h: &stateRef{s: st}}
 }
 
 // Format implements fmt.Formatter. It prints the key count and the overflow
-// bucket count for every verb and flag, and never prints a key.
+// bucket count for every verb and flag, and never prints a key. The zero value
+// prints zero for both counts.
 func (c Counters) Format(f fmt.State, _ rune) {
 	var keys int
 	var overflow uint64
-	if c.s != nil {
-		c.s.mu.Lock()
-		keys, overflow = len(c.s.counts), c.s.overflow
-		c.s.mu.Unlock()
+	if c.h != nil {
+		s := c.h.s
+		s.mu.Lock()
+		keys, overflow = len(s.counts), s.overflow
+		s.mu.Unlock()
 	}
 	fmt.Fprintf(f, "event.Counters{keys:%d overflow:%d}", keys, overflow)
 }
@@ -78,7 +92,7 @@ func counterKey(a netip.Addr) (netip.Addr, bool) {
 // goes to the overflow bucket.
 func (c *Counters) Drop(a netip.Addr) {
 	k, ok := counterKey(a)
-	s := c.s
+	s := c.h.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !ok {
@@ -95,7 +109,7 @@ func (c *Counters) Drop(a netip.Addr) {
 // DropNoAddr counts one dropped event that has no client address, for example
 // a system event. It goes to the overflow bucket.
 func (c *Counters) DropNoAddr() {
-	s := c.s
+	s := c.h.s
 	s.mu.Lock()
 	s.overflow++
 	s.mu.Unlock()
@@ -103,13 +117,12 @@ func (c *Counters) DropNoAddr() {
 
 // Snapshot swaps in an empty map and a zero overflow bucket. It returns the
 // old map and the old bucket count. The caller owns the returned map. Each
-// increment is in the snapshot before it or in the snapshot after it, one
-// time.
-func (c *Counters) Snapshot() (counts map[netip.Addr]uint64, other uint64) {
-	s := c.s
+// increment is in exactly one snapshot.
+func (c *Counters) Snapshot() (counts map[netip.Addr]uint64, overflow uint64) {
+	s := c.h.s
 	s.mu.Lock()
-	counts, other = s.counts, s.overflow
+	counts, overflow = s.counts, s.overflow
 	s.counts, s.overflow = make(map[netip.Addr]uint64), 0
 	s.mu.Unlock()
-	return counts, other
+	return counts, overflow
 }
