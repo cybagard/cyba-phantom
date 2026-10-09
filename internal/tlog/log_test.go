@@ -634,7 +634,7 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 	// that the file is still there.
 	plantStale := func(t *testing.T, log string) (check func()) {
 		t.Helper()
-		stale := filepath.Join(log, "tile/8/0/000.tmp")
+		stale := filepath.Join(log, "tile/8/0/001.tmp")
 		if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
 			t.Fatal(err)
 		}
