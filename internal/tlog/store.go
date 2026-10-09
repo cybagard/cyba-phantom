@@ -120,18 +120,23 @@ type Store struct {
 }
 
 // Open opens the log directory dir below the state directory. The path dir is
-// relative to state. state.OpenRoot follows a link inside the state directory,
-// so Open refuses only a log directory that links out of the state directory.
+// relative to state. state.OpenRoot refuses a log directory that links out of
+// the state directory. Open also refuses a log directory that is a link inside
+// the state directory, because the fsync of the log directory refuses a link.
 // Open makes the directory (mode 0700) if it does not exist. The directory
 // must have no group or other permission bits. Open reads the tree head and
 // the tiles that the root computation reads, and checks that they give the root
 // of the tree head. Open does not read the other tiles. A later change checks
 // them with authenticated reads. Open tidies the tiles that it reads, so that
 // at most one partial file stays for each of them after a crash. Open does not
-// list or tidy any other tile. It deletes files only after all checks pass: if
-// a check fails, Open has deleted nothing. A directory with no tree head must
-// be empty, or hold only the temporary file of the tree head. Open writes a
-// tree head of size 0 for it, before any tile can be written.
+// list or tidy any other tile. A directory with no tree head must be empty, or
+// hold only the temporary file of the tree head. Open writes a tree head of
+// size 0 for it, before any tile can be written. Open makes the loaded tree
+// head durable. It calls fsync on the log directory and on its parents before
+// it reads, writes, or deletes any file there. Then it calls fsync on the
+// directories of the tiles that it read. It deletes files only after all
+// checks and all fsync calls pass. If a check or an fsync fails, Open returns
+// an error and has deleted nothing.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -153,6 +158,17 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	if err != nil {
 		sub.Close()
 		return nil, &Error{"tlog directory", fileRule(err)}
+	}
+	// A write before a crash can rename the tree head and then fail the fsync of
+	// the directory. Make the tree head durable now. Do it before load, so that
+	// a refusal or a failed fsync here deletes and writes nothing.
+	if err := syncDirs(state, dir); err != nil {
+		sub.Close()
+		rule := ruleWrite
+		if errors.Is(err, errMode) || errors.Is(err, errLink) {
+			rule = fileRule(err)
+		}
+		return nil, &Error{"tlog directory", rule}
 	}
 	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
 	if err := s.load(); err != nil {
@@ -190,7 +206,11 @@ func (s *Store) load() error {
 	}
 	var rm []string
 	seen := map[tlog.Tile]bool{}
+	var dirs []string
 	for _, t := range read {
+		// readTile can read the tile from a partial file or from the full file.
+		// Sync the directories of both.
+		dirs = append(dirs, path.Dir(tilePath(t, t.W)), path.Dir(tilePath(t, fullWidth)))
 		if seen[tileKey(t)] {
 			continue
 		}
@@ -201,7 +221,32 @@ func (s *Store) load() error {
 		}
 		rm = append(rm, names...)
 	}
+	// Sync before the delete. A failed fsync leaves the stale files in place.
+	if err := s.syncRead(dirs); err != nil {
+		return err
+	}
 	return s.remove(rm)
+}
+
+// syncRead calls fsync on each directory in dirs that exists, and on its
+// parents. The store does not know which directories are durable, so it syncs
+// each one each time.
+func (s *Store) syncRead(dirs []string) error {
+	return s.syncAll(slices.DeleteFunc(dirs, func(dir string) bool {
+		_, err := s.dir.Lstat(dir)
+		return errors.Is(err, fs.ErrNotExist)
+	}))
+}
+
+// syncAll calls fsync on each distinct directory in dirs, and on its parents.
+func (s *Store) syncAll(dirs []string) error {
+	slices.Sort(dirs)
+	for _, dir := range slices.Compact(dirs) {
+		if err := syncDirs(s.dir, dir); err != nil {
+			return &Error{dir, ruleWrite}
+		}
+	}
+	return nil
 }
 
 // initHead writes the tree head of an empty log. The directory must be empty
@@ -543,13 +588,7 @@ func (s *Store) remove(names []string) error {
 		}
 		dirs = append(dirs, path.Dir(name))
 	}
-	slices.Sort(dirs)
-	for _, dir := range slices.Compact(dirs) {
-		if err := syncDirs(s.dir, dir); err != nil {
-			return &Error{dir, ruleWrite}
-		}
-	}
-	return nil
+	return s.syncAll(dirs)
 }
 
 // names lists the directory dir in batches. It returns errTooMany if the

@@ -57,7 +57,11 @@ type Log struct {
 }
 
 // OpenLog opens the store in dir below state, checks the tiles that the tree
-// head covers on its right edge, and keeps them in memory.
+// head covers on its right edge, and keeps them in memory. OpenLog makes the
+// loaded tree head durable before it returns. It calls fsync on the log
+// directory, on its parents up to the state directory, and on the directories
+// of the tiles that it read. If an fsync fails, OpenLog returns an error and no
+// Log. It repairs nothing.
 func OpenLog(state *os.Root, dir string) (*Log, error) {
 	s, err := Open(state, dir)
 	if err != nil {
