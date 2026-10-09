@@ -120,8 +120,9 @@ type Store struct {
 }
 
 // Open opens the log directory dir below the state directory. The path dir is
-// relative to state. state.OpenRoot follows a link inside the state directory,
-// so Open refuses only a log directory that links out of the state directory.
+// relative to state. state.OpenRoot refuses a log directory that links out of
+// the state directory. Open also refuses a log directory that is a link inside
+// the state directory, because the fsync of the log directory refuses a link.
 // Open makes the directory (mode 0700) if it does not exist. The directory
 // must have no group or other permission bits. Open reads the tree head and
 // the tiles that the root computation reads, and checks that they give the root
@@ -131,10 +132,10 @@ type Store struct {
 // list or tidy any other tile. It deletes files only after all checks pass: if
 // a check fails, Open has deleted nothing. A directory with no tree head must
 // be empty, or hold only the temporary file of the tree head. Open writes a
-// tree head of size 0 for it, before any tile can be written. Open calls fsync
-// on the log directory, on its parents, and on the directories of the tiles
-// that it read, so that the loaded tree head is durable. If an fsync fails,
-// Open returns an error.
+// tree head of size 0 for it, before any tile can be written. Open makes the
+// loaded tree head durable. It calls fsync on the log directory, on its
+// parents, and on the directories of the tiles that it read. If an fsync
+// fails, Open returns an error.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -162,10 +163,15 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		sub.Close()
 		return nil, err
 	}
-	// The loaded tree head must be durable: its directory entry can be new.
+	// A write before a crash can rename the tree head and then fail the fsync of
+	// the directory. Make the tree head durable now.
 	if err := syncDirs(state, dir); err != nil {
 		sub.Close()
-		return nil, &Error{headName, ruleWrite}
+		rule := ruleWrite
+		if errors.Is(err, errMode) || errors.Is(err, errLink) {
+			rule = fileRule(err)
+		}
+		return nil, &Error{"tlog directory", rule}
 	}
 	return s, nil
 }
@@ -200,7 +206,8 @@ func (s *Store) load() error {
 	seen := map[tlog.Tile]bool{}
 	var dirs []string
 	for _, t := range read {
-		// The tile came from a partial file or from the full file.
+		// readTile can read the tile from a partial file or from the full file.
+		// Sync the directories of both.
 		dirs = append(dirs, path.Dir(tilePath(t, t.W)), path.Dir(tilePath(t, fullWidth)))
 		if seen[tileKey(t)] {
 			continue
@@ -212,21 +219,27 @@ func (s *Store) load() error {
 		}
 		rm = append(rm, names...)
 	}
-	if err := s.remove(rm); err != nil {
+	// Sync first: if an fsync fails, Open has deleted nothing.
+	if err := s.syncRead(dirs); err != nil {
 		return err
 	}
-	return s.syncRead(dirs)
+	return s.remove(rm)
 }
 
 // syncRead calls fsync on each directory in dirs that exists, and on its
-// parents. The store cannot know if a directory is durable already, so it
-// syncs each one every time.
+// parents. The store does not know which directories are durable, so it syncs
+// each one each time.
 func (s *Store) syncRead(dirs []string) error {
+	return s.syncAll(slices.DeleteFunc(dirs, func(dir string) bool {
+		_, err := s.dir.Lstat(dir)
+		return errors.Is(err, fs.ErrNotExist)
+	}))
+}
+
+// syncAll calls fsync on each distinct directory in dirs, and on its parents.
+func (s *Store) syncAll(dirs []string) error {
 	slices.Sort(dirs)
 	for _, dir := range slices.Compact(dirs) {
-		if _, err := s.dir.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
 		if err := syncDirs(s.dir, dir); err != nil {
 			return &Error{dir, ruleWrite}
 		}
@@ -573,13 +586,7 @@ func (s *Store) remove(names []string) error {
 		}
 		dirs = append(dirs, path.Dir(name))
 	}
-	slices.Sort(dirs)
-	for _, dir := range slices.Compact(dirs) {
-		if err := syncDirs(s.dir, dir); err != nil {
-			return &Error{dir, ruleWrite}
-		}
-	}
-	return nil
+	return s.syncAll(dirs)
 }
 
 // names lists the directory dir in batches. It returns errTooMany if the
