@@ -40,6 +40,12 @@ type Sender interface {
 // size is not the size in its name.
 var errBadNote = errors.New("bad note")
 
+// entryError is a bad note that is not a regular file. Its text names the file
+// and the rule, and errors.Is reports errBadNote for it.
+type entryError struct{ error }
+
+func (entryError) Is(target error) bool { return target == errBadNote }
+
 // cursor is the last size that a target published. set is false before the
 // first success.
 type cursor struct {
@@ -127,10 +133,13 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 	if err != nil {
 		return err
 	}
-	for ; len(sizes) > maxSpoolNotes; sizes = sizes[1:] {
+	// An entry that cannot be deleted stays and does not count toward the
+	// bound. The loop goes on with the next note.
+	for len(sizes) > maxSpoolNotes {
 		if err := s.drop(sizes[0]); err != nil {
-			return err
+			s.log.Warn("checkpoint spool cannot delete an entry", "size", sizes[0])
 		}
+		sizes = sizes[1:]
 	}
 	s.collect(sizes)
 	return nil
@@ -138,7 +147,9 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 
 // Publish gives the notes after the cursor of target i to send, in increasing
 // size. The cursor moves only after Send returns nil. At the first error from
-// Send, Publish stops and returns it; a later call sends that note again.
+// Send, Publish stops and returns it; a later call sends that note again. An
+// entry that is not a regular file does not stop Publish. Publish deletes it
+// if it can, goes on with the next notes, and then returns an error for it.
 func (s *Spool) Publish(i int, send Sender) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,6 +161,7 @@ func (s *Spool) Publish(i int, send Sender) error {
 	if err != nil {
 		return err
 	}
+	var entryErrs []error
 	for _, size := range sizes {
 		if cur.covers(size) {
 			continue
@@ -157,6 +169,9 @@ func (s *Spool) Publish(i int, send Sender) error {
 		msg, err := s.verified(size)
 		if errors.Is(err, errBadNote) {
 			s.rejected++
+			if ee := (entryError{}); errors.As(err, &ee) {
+				entryErrs = append(entryErrs, err)
+			}
 			if err := s.remove(size); err != nil { // for example a directory that is not empty
 				s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "size", size)
 			} else {
@@ -179,7 +194,7 @@ func (s *Spool) Publish(i int, send Sender) error {
 		return err
 	}
 	s.collect(sizes)
-	return nil
+	return errors.Join(entryErrs...)
 }
 
 // verified reads a note and checks it. A note that is not a regular file (a
@@ -188,7 +203,9 @@ func (s *Spool) Publish(i int, send Sender) error {
 // not a bad note.
 func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
-	if fi, err := s.root.Lstat(name); err == nil && (!fi.Mode().IsRegular() || fi.Size() > maxNoteSize) {
+	if fi, err := s.root.Lstat(name); err == nil && !fi.Mode().IsRegular() {
+		return nil, entryError{spoolError(name, "must be a regular file and not a symlink")}
+	} else if err == nil && fi.Size() > maxNoteSize {
 		return nil, errBadNote
 	}
 	msg, err := s.readFile(name)
@@ -296,12 +313,15 @@ func (s *Spool) remove(size uint64) error {
 // as skipped for each target whose cursor is below its size. It also counts the
 // note for a target whose cursor cannot be read, so the bound always holds.
 func (s *Spool) drop(size uint64) error {
+	if err := s.remove(size); err != nil {
+		return err
+	}
 	for i := range s.targets {
 		if cur, err := s.readCursor(i); err != nil || !cur.covers(size) {
 			s.skip(i)
 		}
 	}
-	return s.remove(size)
+	return nil
 }
 
 // skip counts a skipped note and logs at most one summary line each hour for

@@ -189,9 +189,45 @@ func TestTI09_BadCursorKeepsBound(t *testing.T) {
 	}
 }
 
+// T-I-09: a cursor file larger than 1 KiB gives an error with the file name and
+// the rule.
+func TestTI09_BigCursorError(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), bytes.Repeat([]byte("1"), 2*maxNoteSize), 0o600))
+	err := e.Publish(0, newFake())
+	if err == nil || !strings.Contains(err.Error(), e.cursorName(0)) || !strings.Contains(err.Error(), "1 KiB") || strings.Contains(err.Error(), "bad note") {
+		t.Fatalf("Publish error = %v", err)
+	}
+}
+
+// T-I-09: an entry at the oldest note name that cannot be deleted does not stop
+// the trim. The notes that can be deleted stay within the bound.
+func TestTI09_UndeletableOldest(t *testing.T) {
+	e := newSpool(t)
+	dir := filepath.Join(e.dir, e.noteFile(1))
+	must(t, os.Mkdir(dir, 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
+	for size := uint64(2); size <= 1030; size++ {
+		must(t, e.Add(size, []byte("x")))
+	}
+	notes := 0
+	entries, err := os.ReadDir(filepath.Join(e.dir, spoolDir))
+	must(t, err)
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), noteSuffix) {
+			notes++
+		}
+	}
+	if notes != maxSpoolNotes {
+		t.Fatalf("%d regular notes on disk, want %d", notes, maxSpoolNotes)
+	}
+}
+
 // T-S-13: an entry at a note name that is not a regular file (a directory, a
 // FIFO, a symlink) is not given to the sender. It is deleted and counted. If it
-// cannot be deleted, it is counted and the targets go on with the next note.
+// cannot be deleted, it is counted. The targets go on with the next notes, and
+// Publish returns an error that names the file and the rule.
 func TestTS13_NonRegularNote(t *testing.T) {
 	for name, make := range map[string]func(t *testing.T, path string){
 		"directory": func(t *testing.T, path string) { must(t, os.Mkdir(path, 0o700)) },
@@ -208,15 +244,21 @@ func TestTS13_NonRegularNote(t *testing.T) {
 			make(t, path)
 			e.add(t, 3)
 			f := newFake()
-			must(t, e.Publish(0, f))
-			must(t, e.Publish(1, f))
+			kept := name == "directory-not-empty"
+			err0, err1 := e.Publish(0, f), e.Publish(1, f)
+			if err0 == nil || !strings.Contains(err0.Error(), "2.note") || !strings.Contains(err0.Error(), "regular file") {
+				t.Fatalf("Publish(0) error = %v, want the file and the rule", err0)
+			}
+			if (err1 != nil) != kept { // a deleted entry gives an error only one time
+				t.Fatalf("Publish(1) error = %v, entry kept = %v", err1, kept)
+			}
 			for _, target := range spoolTargets {
 				if !slices.Equal(f.got[target], []uint64{1, 3}) {
 					t.Fatalf("sent = %v", f.got)
 				}
 			}
 			_, err := os.Lstat(path)
-			if kept := name == "directory-not-empty"; kept == errors.Is(err, os.ErrNotExist) {
+			if kept == errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("entry kept = %v, want %v (err %v)", !errors.Is(err, os.ErrNotExist), kept, err)
 			}
 			if st := e.Stats(); st.Rejected == 0 {
@@ -289,7 +331,10 @@ func TestTS13_SymlinkOut(t *testing.T) {
 		e := newSpool(t)
 		mustSymlink(t, secret, filepath.Join(e.dir, e.noteFile(3)))
 		f := newFake()
-		must(t, e.Publish(0, f)) // the link is a bad note: deleted, not read, not sent
+		// The link is a bad note: deleted, not read, not sent, and an error.
+		if err := e.Publish(0, f); err == nil || !strings.Contains(err.Error(), "3.note") || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("Publish error = %v, want the file and the rule", err)
+		}
 		if len(f.got) != 0 || e.Stats().Rejected != 1 {
 			t.Fatalf("sent %v, rejected %d", f.got, e.Stats().Rejected)
 		}
