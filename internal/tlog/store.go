@@ -158,7 +158,7 @@ func (s *Store) load() error {
 		return err
 	}
 	for _, t := range read {
-		if err := s.tidy(t); err != nil {
+		if err := s.tidy(t, 0); err != nil {
 			return err
 		}
 	}
@@ -258,10 +258,10 @@ func (s *Store) committed(t tlog.Tile) int {
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
 // tree head with a temporary file and an atomic rename, and writes nothing if
-// a stored file has the data already. A write that is narrower than a stored
-// file must match that file. After the write, the store deletes the partial
-// files that are narrower than the widest file, so that one partial file
-// stays.
+// a stored file has the data already. A stored file that is wider than the
+// data and differs beyond the tree head is stale: WriteTile writes the new
+// file first, then deletes the stale files. After the write, the store
+// deletes the narrower partial files, so that one partial file stays.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > (maxSize>>(TileHeight*t.L))/fullWidth || t.W < 1 ||
@@ -286,17 +286,18 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	}
 	switch {
 	case t.W <= c:
-	case t.W < w:
-		if !bytes.Equal(data, old[:len(data)]) {
-			return &Error{name, ruleRewrite}
-		}
+	case t.W < w && bytes.Equal(data, old[:len(data)]):
 	case t.W == w && bytes.Equal(data, old):
 	default:
 		if err := s.writeFile(t.Path(), data); err != nil {
 			return &Error{t.Path(), ruleWrite}
 		}
+		if t.W < w {
+			// The wider files differ beyond the tree head: they are stale.
+			return s.tidy(t, t.W)
+		}
 	}
-	return s.tidy(t)
+	return s.tidy(t, 0)
 }
 
 func tilePath(t tlog.Tile, w int) string {
@@ -352,12 +353,15 @@ func (s *Store) widest(t tlog.Tile, widths []int) (int, []byte, string, error) {
 	return w, b, tilePath(t, w), nil
 }
 
-// tidy deletes the temporary files of tile t, and the partial files that are
-// narrower than the widest file. It deletes a narrower file only if the widest
-// file holds all covered hashes and has the same covered hashes. Else it
-// returns an error and deletes nothing more, because the narrower file can be
-// the only copy of covered hashes.
-func (s *Store) tidy(t tlog.Tile) error {
+// tidy deletes the temporary files of tile t and every stored file of the tile
+// except the file of width keep. If keep is 0, it keeps the widest file, so it
+// deletes only narrower files. A file of tile t that is wider than keep is
+// stale: the caller has written the file of width keep, and the files differ
+// only beyond the tree head. tidy deletes a file only if the kept file holds
+// all covered hashes and has the same covered hashes. Else it returns an error
+// and deletes nothing more, because the file can be the only copy of covered
+// hashes.
+func (s *Store) tidy(t tlog.Tile, keep int) error {
 	widths, tmps, err := s.partials(t)
 	if err != nil {
 		return err
@@ -365,6 +369,15 @@ func (s *Store) tidy(t tlog.Tile) error {
 	w, top, _, err := s.widest(t, widths)
 	if err != nil {
 		return err
+	}
+	if w == fullWidth {
+		widths = append(widths, w)
+	}
+	if keep > 0 && keep != w {
+		if top, err = s.readFile(tilePath(t, keep), keep*tlog.HashSize); err != nil {
+			return &Error{tilePath(t, keep), fileRule(err)}
+		}
+		w = keep
 	}
 	c := s.committed(t)
 	if w < c {
@@ -379,7 +392,7 @@ func (s *Store) tidy(t tlog.Tile) error {
 		changed = true
 	}
 	for _, p := range widths {
-		if p >= w {
+		if p == w {
 			continue
 		}
 		file := tilePath(t, p)

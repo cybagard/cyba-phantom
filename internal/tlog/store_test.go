@@ -452,6 +452,31 @@ func TestTU07CrashAfterTilesThenOtherRecords(t *testing.T) {
 	}
 }
 
+// A stale file is wider than the new write and differs only beyond the tree
+// head. The store writes the new file, then deletes the stale file.
+func TestTU07NarrowerWriteReplacesStaleWiderFile(t *testing.T) {
+	for _, stale := range []int64{5, 256} {
+		state, dir, l, s := crashAfterTiles(t, 3, stale)
+		o := l.fork(t, 3, "other")
+		o.commit(t, s, 3, 4)
+		if names := partialFiles(t, dir); !slices.Equal(names, []string{"4"}) {
+			t.Fatalf("stale %d: files after the write: %v", stale, names)
+		}
+		full := tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}
+		if _, err := os.Stat(filepath.Join(dir, "tlog", full.Path())); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stale %d: the stale full tile stays: %v", stale, err)
+		}
+		s.Close()
+		s = openStore(t, state)
+		if size, root := s.TreeHead(); size != 4 || root != o.root(t, 4) {
+			t.Fatalf("stale %d: size %d, root %x", stale, size, root)
+		}
+		if names := partialFiles(t, dir); !slices.Equal(names, []string{"4"}) {
+			t.Fatalf("stale %d: files after Open: %v", stale, names)
+		}
+	}
+}
+
 // A write that changes a covered hash is an error, at every width.
 func TestTU07CoveredHashesNeverChange(t *testing.T) {
 	cases := []struct {
