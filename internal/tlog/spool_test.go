@@ -162,7 +162,7 @@ func TestTI09_Bound(t *testing.T) {
 	}
 }
 
-// T-I-09: a cursor file that cannot be read does not turn off the bound. Add
+// T-I-09: a cursor file that cannot be read does not stop the bound. Add
 // does not fail, the spool keeps at most 1025 notes, and each dropped note is
 // skipped for that target. That target gets an error from Publish. The other
 // target publishes.
@@ -226,7 +226,7 @@ func TestTI09_UndeletableOldest(t *testing.T) {
 
 // T-S-13: an entry at a note name that is not a regular file (a directory, a
 // FIFO, a symlink) is not given to the sender. It is deleted and counted. If it
-// cannot be deleted, it is counted. The targets go on with the next notes, and
+// cannot be deleted, it is counted. The targets continue with the next notes, and
 // Publish returns an error that names the file and the rule.
 func TestTS13_NonRegularNote(t *testing.T) {
 	for name, make := range map[string]func(t *testing.T, path string){
@@ -265,6 +265,61 @@ func TestTS13_NonRegularNote(t *testing.T) {
 				t.Fatal("entry not counted")
 			}
 		})
+	}
+}
+
+// T-I-09: an entry that is not a regular file and cannot be deleted never
+// counts as the newest note. The newest regular note stays on disk.
+func TestTI09_NewestRegularNoteStays(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	e.add(t, 2)
+	f := newFake()
+	must(t, e.Publish(0, f))
+	must(t, e.Publish(1, f))
+	dir := filepath.Join(e.dir, e.noteFile(3))
+	must(t, os.Mkdir(dir, 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
+	for range 4 {
+		if err := e.Publish(0, f); err == nil {
+			t.Fatal("Publish hid the entry that is not a regular file")
+		}
+	}
+	if got := e.files(t); !slices.Equal(got, []uint64{2, 3}) {
+		t.Fatalf("notes on disk = %v, want 2 (regular) and 3 (directory)", got)
+	}
+	if fi, err := os.Lstat(filepath.Join(e.dir, e.noteFile(2))); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("note 2: %v, %v", fi, err)
+	}
+}
+
+// T-S-13: a regular note that cannot be opened (mode 0000) is a bad note. It is
+// not sent and it is deleted. Publish continues with the next notes and returns
+// an error that names the file and the rule.
+func TestTS13_UnreadableNote(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a file with mode 0000")
+	}
+	e := newSpool(t)
+	for size := uint64(1); size <= 3; size++ {
+		e.add(t, size)
+	}
+	must(t, os.Chmod(filepath.Join(e.dir, e.noteFile(2)), 0))
+	f := newFake()
+	for i, target := range spoolTargets {
+		err := e.Publish(i, f)
+		if i == 0 && (err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "cannot be opened")) {
+			t.Fatalf("Publish(0) error = %v, want the file and the rule", err)
+		}
+		if !slices.Equal(f.got[target], []uint64{1, 3}) {
+			t.Fatalf("sent = %v", f.got)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(e.dir, e.noteFile(2))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreadable note stays: %v", err)
+	}
+	if st := e.Stats(); st.Rejected != 1 {
+		t.Fatalf("rejected = %d, want 1", st.Rejected)
 	}
 }
 
