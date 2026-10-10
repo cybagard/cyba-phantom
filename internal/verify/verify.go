@@ -7,7 +7,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 	modtlog "golang.org/x/mod/sumdb/tlog"
 
-	"github.com/cybagard/cyba-phantom/internal/tlog"
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 )
 
 // The errors of the inclusion check are fixed values like the errors in
@@ -28,7 +28,7 @@ type Result struct {
 	Origin      string
 	Size        uint64
 	Root        [32]byte
-	EventHash   tlog.EventHash
+	EventHash   verifier.EventHash
 	LeafIndex   int64
 	Proof       []modtlog.Hash
 	Consistency []modtlog.Hash
@@ -48,7 +48,7 @@ type Result struct {
 // m to the checkpoint size must give the checkpoint root. The root at m is
 // accepted only through the consistency proof. A bad inclusion proof gives
 // ErrNotVerified. A bad consistency proof gives ErrFork. The leaf hash and the
-// proof checks come from internal/tlog.
+// proof checks come from internal/tlog/verifier.
 func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (Result, error) {
 	c, err := ParseCheckpoint(checkpoint, v)
 	if err != nil {
@@ -65,7 +65,7 @@ func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (R
 	case bridged:
 		root = *p.Root
 	}
-	if tlog.VerifyInclusion(e.Hash, p.Index, p.TreeSize, root, modtlog.RecordProof(p.Hashes)) != nil {
+	if verifier.VerifyInclusion(e.Hash, p.Index, p.TreeSize, root, modtlog.RecordProof(p.Hashes)) != nil {
 		return Result{}, ErrNotVerified
 	}
 	if bridged {

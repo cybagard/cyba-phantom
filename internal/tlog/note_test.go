@@ -60,7 +60,7 @@ func testRoot() (r [32]byte) {
 }
 
 func TestTU12_BodyFormat(t *testing.T) {
-	got := checkpointBody(Checkpoint{testOrigin, 42, testRoot()})
+	got := checkpointBody(Checkpoint{Origin: testOrigin, Size: 42, Root: testRoot()})
 	if want := noteSections(t)["ok"]; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
@@ -76,12 +76,12 @@ func TestTU12_RoundTrip(t *testing.T) {
 
 	n, err := note.Open(msg, note.VerifierList(verifier))
 	must(t, err)
-	if n.Text != checkpointBody(Checkpoint{testOrigin, 42, testRoot()}) || len(n.Sigs) != 1 {
+	if n.Text != checkpointBody(Checkpoint{Origin: testOrigin, Size: 42, Root: testRoot()}) || len(n.Sigs) != 1 {
 		t.Fatalf("opened note = %+v", n)
 	}
 	c, err := ParseCheckpoint(msg, testOrigin, verifier)
 	must(t, err)
-	if c != (Checkpoint{testOrigin, 42, testRoot()}) {
+	if c != (Checkpoint{Origin: testOrigin, Size: 42, Root: testRoot()}) {
 		t.Fatalf("parsed = %+v", c)
 	}
 
@@ -225,7 +225,7 @@ func TestTU12_Rejects(t *testing.T) {
 // verifies it. A cosigned note needs another parser.
 func TestTU12_RejectsExtraSignatures(t *testing.T) {
 	signer, verifier := noteKeys(t, testOrigin, 1)
-	body := checkpointBody(Checkpoint{testOrigin, 42, testRoot()})
+	body := checkpointBody(Checkpoint{Origin: testOrigin, Size: 42, Root: testRoot()})
 	second, _ := noteKeys(t, testOrigin, 2)
 	unknown, _ := noteKeys(t, "phantom/witness", 3)
 	for name, extra := range map[string]note.Signer{"second-key-same-name": second, "unknown-key": unknown} {

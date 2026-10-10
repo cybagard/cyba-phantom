@@ -23,20 +23,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
 const (
 	// TileHeight is the height of a tile. A full tile holds 256 hashes.
-	TileHeight = 8
+	TileHeight = verifier.TileHeight
 
 	fullWidth = 1 << TileHeight
 
-	// maxLevel is the highest tile level. A tree of maxSize leaves has one
-	// hash at this level. x/mod does not return for a size above 2^62, so the
-	// bound is much lower.
-	maxLevel = 6
-	maxSize  = 1 << (TileHeight * maxLevel)
+	// maxLevel is the highest tile level, and maxSize is the largest tree. The
+	// verifier package holds both, because the inclusion check uses maxSize.
+	maxLevel = verifier.MaxLevel
+	maxSize  = verifier.MaxSize
 
 	// A partial-tile directory holds at most 255 widths and 255 temporary
 	// files. A longer listing is an error.
@@ -97,15 +97,12 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
-// Error names the file that failed and the rule that failed. The name is a
-// tile path, the name of the tree head, a directory, a comma-separated list
-// of tile paths, or a fixed word. It is never empty.
-type Error struct {
-	Name string
-	Rule string
-}
+// Error names the file that failed and the rule that failed. The type is in
+// the verifier package, so that the inclusion check returns the same type.
+type Error = verifier.Error
 
-func (e *Error) Error() string { return "tlog: " + e.Name + ": " + e.Rule }
+// newError returns the Error of a name and a rule.
+func newError(name, rule string) *Error { return &Error{Name: name, Rule: rule} }
 
 // Store keeps the tiles and the tree head of one log. A Store is not safe for
 // use by more than one goroutine. The caller must hold a lock for each call.
@@ -144,12 +141,12 @@ func Open(state *os.Root, dir string) (*Store, error) {
 			err = syncDirs(state, dir)
 		}
 		if err != nil {
-			return nil, &Error{"tlog directory", ruleWrite}
+			return nil, newError("tlog directory", ruleWrite)
 		}
 		sub, err = state.OpenRoot(dir)
 	}
 	if err != nil {
-		return nil, &Error{"tlog directory", ruleOpenRoot}
+		return nil, newError("tlog directory", ruleOpenRoot)
 	}
 	fi, err := sub.Stat(".")
 	if err == nil && fi.Mode().Perm()&otherBits != 0 {
@@ -157,7 +154,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	}
 	if err != nil {
 		sub.Close()
-		return nil, &Error{"tlog directory", fileRule(err)}
+		return nil, newError("tlog directory", fileRule(err))
 	}
 	// A write before a crash can rename the tree head and then fail the fsync of
 	// the directory. Make the tree head durable now. Do it before load, so that
@@ -168,7 +165,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		if errors.Is(err, errMode) || errors.Is(err, errLink) {
 			rule = fileRule(err)
 		}
-		return nil, &Error{"tlog directory", rule}
+		return nil, newError("tlog directory", rule)
 	}
 	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
 	if err := s.load(); err != nil {
@@ -190,13 +187,13 @@ func (s *Store) load() error {
 	case errors.Is(err, fs.ErrNotExist):
 		return s.initHead()
 	case errors.Is(err, errLength):
-		return &Error{headName, ruleHead}
+		return newError(headName, ruleHead)
 	case err != nil:
-		return &Error{headName, fileRule(err)}
+		return newError(headName, fileRule(err))
 	}
 	size := binary.BigEndian.Uint64(b)
 	if size > maxSize {
-		return &Error{headName, ruleSize}
+		return newError(headName, ruleSize)
 	}
 	s.head.N = int64(size)
 	copy(s.head.Hash[:], b[sizeLen:])
@@ -243,7 +240,7 @@ func (s *Store) syncAll(dirs []string) error {
 	slices.Sort(dirs)
 	for _, dir := range slices.Compact(dirs) {
 		if err := syncDirs(s.dir, dir); err != nil {
-			return &Error{dir, ruleWrite}
+			return newError(dir, ruleWrite)
 		}
 	}
 	return nil
@@ -255,16 +252,16 @@ func (s *Store) syncAll(dirs []string) error {
 func (s *Store) initHead() error {
 	d, err := openDir(s.dir, ".")
 	if err != nil {
-		return &Error{headName, ruleRead}
+		return newError(headName, ruleRead)
 	}
 	entries, err := d.ReadDir(2)
 	d.Close()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return &Error{headName, ruleRead}
+		return newError(headName, ruleRead)
 	}
 	for _, e := range entries {
 		if e.Name() != headName+tmpSuffix {
-			return &Error{headName, ruleEmpty}
+			return newError(headName, ruleEmpty)
 		}
 	}
 	return s.writeHead(tlog.Tree{Hash: emptyRoot})
@@ -275,7 +272,7 @@ func (s *Store) writeHead(tree tlog.Tree) error {
 	binary.BigEndian.PutUint64(b[:], uint64(tree.N))
 	copy(b[sizeLen:], tree.Hash[:])
 	if err := s.writeFile(headName, b[:]); err != nil {
-		return &Error{headName, ruleWrite}
+		return newError(headName, ruleWrite)
 	}
 	s.head = tree
 	return nil
@@ -287,7 +284,7 @@ func (s *Store) writeHead(tree tlog.Tree) error {
 // read.
 func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 	if tree.N < 0 || tree.N > maxSize {
-		return nil, &Error{headName, ruleSize}
+		return nil, newError(headName, ruleSize)
 	}
 	r := &tileReader{s: s}
 	got, err := tlog.TreeHash(tree.N, tlog.TileHashReader(tree, r))
@@ -304,7 +301,7 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 		if len(names) == 0 {
 			names = append(names, headName)
 		}
-		return nil, &Error{strings.Join(names, ","), ruleRoot}
+		return nil, newError(strings.Join(names, ","), ruleRoot)
 	}
 	return r.read, nil
 }
@@ -325,11 +322,11 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
 	case size < 0 || size > maxSize:
-		return &Error{headName, ruleSize}
+		return newError(headName, ruleSize)
 	case size < s.head.N:
-		return &Error{headName, ruleShrink}
+		return newError(headName, ruleShrink)
 	case (size-s.head.N)/fullWidth > maxBatchTiles:
-		return &Error{headName, ruleBatch}
+		return newError(headName, ruleBatch)
 	}
 	if _, err := s.verify(s.head); err != nil {
 		return err
@@ -352,7 +349,7 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 			return err
 		}
 		if c > s.committed(t) && s.written[tileKey(t)] < c {
-			return &Error{tilePath(t, c), ruleUnwrit}
+			return newError(tilePath(t, c), ruleUnwrit)
 		}
 	}
 	if err := s.writeHead(next); err != nil {
@@ -396,11 +393,11 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
 		t.W > fullWidth || len(data) != t.W*tlog.HashSize {
-		return &Error{"tile", ruleTile}
+		return newError("tile", ruleTile)
 	}
 	c := s.committed(t)
 	if _, ok := s.written[tileKey(t)]; !ok && t.W > c && len(s.written) >= maxBatchTiles {
-		return &Error{"tile", ruleBatch}
+		return newError("tile", ruleBatch)
 	}
 	if err := s.checkDirs(t); err != nil {
 		return err
@@ -414,11 +411,11 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		return err
 	}
 	if w < c {
-		return &Error{tilePath(t, c), ruleMissing}
+		return newError(tilePath(t, c), ruleMissing)
 	}
 	n := min(c, t.W) * tlog.HashSize
 	if !bytes.Equal(data[:n], old[:n]) {
-		return &Error{name, ruleRewrite}
+		return newError(name, ruleRewrite)
 	}
 	keep := 0
 	switch {
@@ -428,21 +425,21 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		// call can have renamed the file and then failed to sync its
 		// directory. The head must not cover the hashes before that sync works.
 		if err := syncDirs(s.dir, path.Dir(name)); err != nil {
-			return &Error{name, ruleWrite}
+			return newError(name, ruleWrite)
 		}
 	default:
 		// The file that the rename replaces must agree in the covered hashes too.
 		if slices.Contains(widths, t.W) && t.W != w {
 			b, err := s.readFile(t.Path(), t.W*tlog.HashSize)
 			if err != nil {
-				return &Error{t.Path(), fileRule(err)}
+				return newError(t.Path(), fileRule(err))
 			}
 			if !bytes.Equal(b[:n], data[:n]) {
-				return &Error{t.Path(), ruleRewrite}
+				return newError(t.Path(), ruleRewrite)
 			}
 		}
 		if err := s.writeFile(t.Path(), data); err != nil {
-			return &Error{t.Path(), ruleWrite}
+			return newError(t.Path(), ruleWrite)
 		}
 		if t.W < w {
 			// The wider files differ beyond the tree head: they are stale.
@@ -477,7 +474,7 @@ func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, nil
 	} else if err != nil {
-		return nil, nil, &Error{dir, fileRule(err)}
+		return nil, nil, newError(dir, fileRule(err))
 	}
 	for _, name := range entries {
 		base, isTmp := strings.CutSuffix(name, tmpSuffix)
@@ -507,7 +504,7 @@ func (s *Store) widest(t tlog.Tile, widths []int) (int, []byte, string, error) {
 		b, err = s.readFile(tilePath(t, w), w*tlog.HashSize)
 	}
 	if err != nil {
-		return 0, nil, "", &Error{tilePath(t, w), fileRule(err)}
+		return 0, nil, "", newError(tilePath(t, w), fileRule(err))
 	}
 	return w, b, tilePath(t, w), nil
 }
@@ -544,12 +541,12 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	}
 	if keep > 0 && keep != w {
 		if top, err = s.readFile(tilePath(t, keep), keep*tlog.HashSize); err != nil {
-			return nil, &Error{tilePath(t, keep), fileRule(err)}
+			return nil, newError(tilePath(t, keep), fileRule(err))
 		}
 		w = keep
 	}
 	if w < c {
-		return nil, &Error{tilePath(t, c), ruleMissing}
+		return nil, newError(tilePath(t, c), ruleMissing)
 	}
 	dir := path.Dir(tilePath(t, 1))
 	var rm []string
@@ -565,11 +562,11 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 		file := tilePath(t, p)
 		b, err := s.readFile(file, p*tlog.HashSize)
 		if err != nil {
-			return nil, &Error{file, fileRule(err)}
+			return nil, newError(file, fileRule(err))
 		}
 		n := min(p, c) * tlog.HashSize
 		if !bytes.Equal(b[:n], top[:n]) {
-			return nil, &Error{file, ruleRewrite}
+			return nil, newError(file, ruleRewrite)
 		}
 		rm = append(rm, file)
 	}
@@ -584,7 +581,7 @@ func (s *Store) remove(names []string) error {
 		if err := s.dir.Remove(name); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return &Error{name, ruleWrite}
+			return newError(name, ruleWrite)
 		}
 		dirs = append(dirs, path.Dir(name))
 	}
@@ -630,11 +627,11 @@ func (s *Store) checkDirs(t tlog.Tile) error {
 		case errors.Is(err, fs.ErrNotExist):
 			return nil
 		case err != nil:
-			return &Error{p, fileRule(err)}
+			return newError(p, fileRule(err))
 		case fi.Mode()&fs.ModeSymlink != 0:
-			return &Error{p, ruleLink}
+			return newError(p, ruleLink)
 		case !fi.IsDir():
-			return &Error{p, ruleNotDir}
+			return newError(p, ruleNotDir)
 		}
 	}
 	return nil
@@ -657,10 +654,10 @@ func (s *Store) readTile(t tlog.Tile) ([]byte, error) {
 		case err == nil:
 			return b[:want*tlog.HashSize], nil
 		case !errors.Is(err, fs.ErrNotExist):
-			return nil, &Error{file, fileRule(err)}
+			return nil, newError(file, fileRule(err))
 		}
 	}
-	return nil, &Error{tilePath(t, want), ruleMissing}
+	return nil, newError(tilePath(t, want), ruleMissing)
 }
 
 // openDir opens the directory name. It does not block on a FIFO. The root

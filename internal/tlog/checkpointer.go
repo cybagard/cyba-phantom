@@ -246,7 +246,7 @@ func (c *Checkpointer) sign() {
 		c.fail(err)
 		return
 	}
-	c.last, c.lastMsg, c.pending = Checkpoint{c.origin, size, root}, msg, true
+	c.last, c.lastMsg, c.pending = Checkpoint{Origin: c.origin, Size: size, Root: root}, msg, true
 	c.resend()
 }
 

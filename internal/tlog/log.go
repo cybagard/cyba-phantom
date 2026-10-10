@@ -1,40 +1,31 @@
 package tlog
 
 import (
-	"crypto/sha256"
 	"errors"
 	"os"
 	"slices"
 	"sync"
 
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
 // The rules in the text of an Error from the log.
 const (
-	ruleFull      = "log has the largest size"
-	ruleCache     = "tile in memory does not match the tree"
-	ruleInclusion = "proof does not match the event hash, the index, and the tree head"
+	ruleFull  = "log has the largest size"
+	ruleCache = "tile in memory does not match the tree"
 )
 
-// EventHash is the SHA-256 hash of the canonical bytes of one event. It is the
-// record data of a leaf. It is never a hash of the tree.
-type EventHash [sha256.Size]byte
+// EventHash is the hash of the canonical bytes of one event.
+type EventHash = verifier.EventHash
 
-// LeafHash returns the leaf hash of an event: SHA-256(0x00 || event hash)
-// (RFC 6962, SEC-16). The log, the verifier, and the SDK use this one rule.
-func LeafHash(h EventHash) tlog.Hash { return tlog.RecordHash(h[:]) }
+// LeafHash returns the leaf hash of an event (SEC-16).
+func LeafHash(h EventHash) tlog.Hash { return verifier.LeafHash(h) }
 
-// VerifyInclusion checks that the event is the leaf at position index in the
-// tree that has size leaves and the root root. It returns nil only if the
-// proof, with the leaf hash of the event, gives the root. It never panics for
-// any input.
+// VerifyInclusion checks an inclusion proof. The rules are in
+// internal/tlog/verifier.
 func VerifyInclusion(h EventHash, index, size int64, root tlog.Hash, proof tlog.RecordProof) error {
-	if index < 0 || size < 1 || size > maxSize || index >= size ||
-		tlog.CheckRecord(proof, size, root, index, LeafHash(h)) != nil {
-		return &Error{"inclusion proof", ruleInclusion}
-	}
-	return nil
+	return verifier.VerifyInclusion(h, index, size, root, proof)
 }
 
 // tileBuf is the rightmost tile of one level: its number and its hashes. A
@@ -79,7 +70,7 @@ func OpenLog(state *os.Root, dir string) (*Log, error) {
 		return nil, e
 	case err != nil || got != l.root:
 		s.Close()
-		return nil, &Error{"log", ruleRoot}
+		return nil, newError("log", ruleRoot)
 	}
 	return l, nil
 }
@@ -114,11 +105,11 @@ func (l *Log) Append(h EventHash) (int64, error) {
 	}
 	n := l.size
 	if n >= maxSize {
-		return 0, &Error{"log", ruleFull}
+		return 0, newError("log", ruleFull)
 	}
 	hs, err := tlog.StoredHashes(n, h[:], cacheView{&l.tiles})
 	if err != nil {
-		return 0, &Error{"log", ruleCache}
+		return 0, newError("log", ruleCache)
 	}
 	next := l.tiles // Append copies the buffers by value. A changed buffer gets new data.
 	var changed []int
@@ -131,7 +122,7 @@ func (l *Log) Append(h EventHash) (int64, error) {
 		if pos := int(k % fullWidth); pos > 0 {
 			old := l.tiles[lv]
 			if old.n != k/fullWidth || len(old.data) != pos*tlog.HashSize {
-				return 0, &Error{"log", ruleCache}
+				return 0, newError("log", ruleCache)
 			}
 			data = slices.Clone(old.data)
 		}
@@ -140,7 +131,7 @@ func (l *Log) Append(h EventHash) (int64, error) {
 	}
 	root, err := tlog.TreeHash(n+1, cacheView{&next})
 	if err != nil {
-		return 0, &Error{"log", ruleCache}
+		return 0, newError("log", ruleCache)
 	}
 	for _, lv := range changed {
 		b := next[lv]
@@ -165,17 +156,17 @@ func (v cacheView) ReadHashes(indexes []int64) ([]tlog.Hash, error) {
 	out := make([]tlog.Hash, len(indexes))
 	for i, x := range indexes {
 		if x < 0 {
-			return nil, &Error{"log", ruleCache}
+			return nil, newError("log", ruleCache)
 		}
 		t := tlog.TileForIndex(TileHeight, x)
 		if t.L > maxLevel || v.tiles[t.L].n != t.N {
-			return nil, &Error{"log", ruleCache}
+			return nil, newError("log", ruleCache)
 		}
 		b := v.tiles[t.L]
 		t.W = len(b.data) / tlog.HashSize
 		h, err := tlog.HashFromTile(t, b.data, x)
 		if err != nil {
-			return nil, &Error{"log", ruleCache}
+			return nil, newError("log", ruleCache)
 		}
 		out[i] = h
 	}

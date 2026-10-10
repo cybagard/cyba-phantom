@@ -25,7 +25,7 @@ func (l *Log) RootAt(size int64) (tlog.Hash, error) {
 		return tlog.Hash{}, l.err
 	}
 	if size < 0 || size > l.size {
-		return tlog.Hash{}, &Error{"root", ruleProofInput}
+		return tlog.Hash{}, newError("root", ruleProofInput)
 	}
 	var root tlog.Hash
 	err := l.read(func(r tlog.HashReader) (err error) {
@@ -47,7 +47,7 @@ func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 		return nil, l.err
 	}
 	if index < 0 || index >= size || size > l.size {
-		return nil, &Error{"inclusion proof", ruleProofInput}
+		return nil, newError("inclusion proof", ruleProofInput)
 	}
 	var proof tlog.RecordProof
 	err := l.read(func(r tlog.HashReader) (err error) {
@@ -74,7 +74,7 @@ func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 		return nil, l.err
 	}
 	if oldSize < 0 || oldSize > newSize || newSize > l.size {
-		return nil, &Error{"consistency proof", ruleProofInput}
+		return nil, newError("consistency proof", ruleProofInput)
 	}
 	if oldSize == 0 || oldSize == newSize {
 		return tlog.TreeProof{}, nil
@@ -114,6 +114,6 @@ func (l *Log) read(f func(tlog.HashReader) error) error {
 	if len(names) == 0 {
 		names = append(names, "proof")
 	}
-	l.err = &Error{strings.Join(names, ","), ruleProofRead}
+	l.err = newError(strings.Join(names, ","), ruleProofRead)
 	return l.err
 }

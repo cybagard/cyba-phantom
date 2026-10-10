@@ -20,7 +20,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
-	"github.com/cybagard/cyba-phantom/internal/tlog"
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 )
 
 // The size caps of the inputs, in bytes. The key cap and the note cap are
@@ -31,10 +31,9 @@ const (
 	MaxProofBytes = 16 << 10
 )
 
-// maxSize is the largest size or index that the verifier accepts: 2^48. It has
-// the same value as the bound of internal/tlog. That package does not export
-// its bound.
-const maxSize = 1 << 48
+// maxSize is the largest size or index that the verifier accepts: 2^48. It is
+// the bound of the log.
+const maxSize = verifier.MaxSize
 
 // The errors of this package.
 var (
@@ -81,29 +80,30 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 	return ParseKey(b)
 }
 
-// ParseCheckpoint parses a signed note with the strict parser of internal/tlog.
+// ParseCheckpoint parses a signed note with the strict parser of
+// internal/tlog/verifier.
 // The origin is the name of the verifier. The parser refuses a note with two or
 // more signature lines. This rule applies also when a line is from another
 // key. The function checks the size against 2^48.
-func ParseCheckpoint(b []byte, v note.Verifier) (tlog.Checkpoint, error) {
+func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	if len(b) > MaxNoteBytes {
-		return tlog.Checkpoint{}, ErrTooLarge
+		return verifier.Checkpoint{}, ErrTooLarge
 	}
-	c, err := tlog.ParseCheckpoint(b, v.Name(), v)
+	c, err := verifier.ParseCheckpoint(b, v.Name(), v)
 	if err != nil {
-		return tlog.Checkpoint{}, ErrCheckpoint
+		return verifier.Checkpoint{}, ErrCheckpoint
 	}
 	if c.Size > maxSize {
-		return tlog.Checkpoint{}, ErrRange
+		return verifier.Checkpoint{}, ErrRange
 	}
 	return c, nil
 }
 
 // ReadCheckpoint reads a note with the size cap, then calls ParseCheckpoint.
-func ReadCheckpoint(r io.Reader, v note.Verifier) (tlog.Checkpoint, error) {
+func ReadCheckpoint(r io.Reader, v note.Verifier) (verifier.Checkpoint, error) {
 	b, err := readCapped(r, MaxNoteBytes)
 	if err != nil {
-		return tlog.Checkpoint{}, err
+		return verifier.Checkpoint{}, err
 	}
 	return ParseCheckpoint(b, v)
 }
@@ -111,7 +111,7 @@ func ReadCheckpoint(r io.Reader, v note.Verifier) (tlog.Checkpoint, error) {
 // Event holds the received bytes of an event and their hash.
 type Event struct {
 	Raw  []byte
-	Hash tlog.EventHash
+	Hash verifier.EventHash
 }
 
 // ParseEvent accepts b only if b is at most event.MaxRecordBytes long and equal
