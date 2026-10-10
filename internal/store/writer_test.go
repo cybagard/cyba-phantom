@@ -8,6 +8,7 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,9 +25,18 @@ type testAppender struct {
 	err    error
 	firsts []int64
 	calls  [][]tlog.EventHash
+
+	// While gated is true, AppendBatch sends on entered and waits for release.
+	gated   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
 }
 
 func (a *testAppender) AppendBatch(hs []tlog.EventHash) (int64, error) {
+	if a.gated.Load() {
+		a.entered <- struct{}{}
+		<-a.release
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.err != nil {
@@ -72,20 +82,38 @@ func (r *rig) add(kind event.Kind, ts int64) {
 	}
 }
 
+// launch starts the writer goroutine. The channel gets the result of Run.
+func (r *rig) launch(ctx context.Context) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- r.w.Run(ctx) }()
+	return done
+}
+
+// wait gets the result of Run. It fails if Run does not return in waitFor.
+func (r *rig) wait(done <-chan error) error {
+	r.t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(waitFor):
+		r.t.Fatal("Run did not return")
+		return nil
+	}
+}
+
+// run calls Run and waits for it with a bound.
+func (r *rig) run(ctx context.Context) error {
+	r.t.Helper()
+	return r.wait(r.launch(ctx))
+}
+
 // start runs the writer goroutine. The returned function stops it.
 func (r *rig) start() (stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- r.w.Run(ctx) }()
+	done := r.launch(ctx)
 	return func() error {
 		cancel()
-		select {
-		case err := <-done:
-			return err
-		case <-time.After(waitFor):
-			r.t.Fatal("Run did not return")
-			return nil
-		}
+		return r.wait(done)
 	}
 }
 
@@ -148,7 +176,7 @@ func TestTU18EvidenceLaneIsFirst(t *testing.T) {
 		}
 	}
 	r.q.Close()
-	if err := r.w.Run(context.Background()); err != nil {
+	if err := r.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	wantCommits(t, r, 50)
@@ -183,6 +211,9 @@ func TestTU18BatchesHaveAtMost500Events(t *testing.T) {
 	stop := r.start()
 	wantCommits(t, r, 500, 500)
 	r.drained()
+	if len(r.commits) != 0 || r.rows() != 1000 {
+		t.Fatal("the last 250 events were written before the tick")
+	}
 	r.fire()
 	wantCommits(t, r, 250)
 	if err := stop(); !errors.Is(err, context.Canceled) || r.rows() != 1250 {
@@ -208,17 +239,16 @@ func TestTU18EventsCommitAtTheTick(t *testing.T) {
 	}
 }
 
-// T-U-18: the goroutine count does not grow with the number of events.
+// T-U-18: the goroutine count does not grow with the number of events. The base
+// is the count before Run starts. A batch in flight adds the goroutine of its
+// transaction (database/sql ends it after the commit) and the goroutine of Run.
+// Limit of this test: a goroutine that ends before the count is not seen.
 func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 	r := newRig(t, 4000)
-	stop := r.start()
-	for i := int64(0); i < 10; i++ {
-		r.add(event.KindRequest, i)
-	}
-	r.drained()
-	r.fire()
-	wantCommits(t, r, 10) // the first batch starts the goroutine of database/sql
+	r.app.entered, r.app.release = make(chan struct{}, 1), make(chan struct{})
+	r.app.gated.Store(true)
 	base := runtime.NumGoroutine()
+	stop := r.start()
 	for i := int64(0); i < 2000; i++ {
 		kind := event.KindRequest
 		if i%5 == 0 {
@@ -226,9 +256,22 @@ func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 		}
 		r.add(kind, i)
 	}
+	select { // the first batch waits in AppendBatch with its transaction open
+	case <-r.app.entered:
+	case <-time.After(waitFor):
+		t.Fatal("no batch reached the appender")
+	}
+	if n := runtime.NumGoroutine(); n > base+2 {
+		t.Fatalf("%d goroutines with a batch in flight, %d before Run", n, base)
+	}
+	r.app.gated.Store(false)
+	close(r.app.release)
 	wantCommits(t, r, 500, 500, 500, 500)
-	if n := runtime.NumGoroutine(); n > base {
-		t.Fatalf("%d goroutines after 2 000 events, %d after 10", n, base)
+	// The goroutine of the last transaction can end a short time after Commit.
+	for end := time.Now().Add(waitFor); runtime.NumGoroutine() > base+1; runtime.Gosched() {
+		if time.Now().After(end) {
+			t.Fatalf("%d goroutines after 2 000 events, %d before Run", runtime.NumGoroutine(), base)
+		}
 	}
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
@@ -300,7 +343,7 @@ func TestTU18CloseWritesAllEvents(t *testing.T) {
 		r.add(kind, i)
 	}
 	r.q.Close()
-	if err := r.w.Run(context.Background()); err != nil {
+	if err := r.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	wantCommits(t, r, 500, 500, 100)
@@ -373,8 +416,61 @@ func TestTU18CancelWritesTheTakenEvents(t *testing.T) {
 	}
 }
 
-// T-U-18: a database error, a row that the CHECK refuses, and an append error
-// roll back the batch, and Run returns the error with a fixed rule.
+// T-U-18: Close while Run waits ends Run with nil and writes the events. Case
+// one closes with events in the lanes. Case two closes when Run holds the batch.
+// No tick is sent.
+func TestTU18CloseWhileRunning(t *testing.T) {
+	for _, waitForBatch := range []bool{false, true} {
+		name := "events in the lanes"
+		if waitForBatch {
+			name = "batch in hand"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			done := r.launch(context.Background())
+			for i := int64(0); i < 10; i++ {
+				r.add(event.KindRequest, i)
+			}
+			if waitForBatch {
+				r.drained()
+			}
+			r.q.Close()
+			if err := r.wait(done); err != nil {
+				t.Fatal(err)
+			}
+			if r.rows() != 10 {
+				t.Fatalf("%d rows for 10 events", r.rows())
+			}
+		})
+	}
+}
+
+// T-U-18: when Close and the end of ctx both come before Run sees them, Run does
+// the normal shutdown: it writes all events and returns nil.
+func TestTU18CloseWinsOverCancel(t *testing.T) {
+	r := newRig(t, 2000)
+	for i := int64(0); i < 700; i++ {
+		kind := event.KindRequest
+		if i%7 == 0 {
+			kind = event.KindCallback
+		}
+		r.add(kind, i)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r.q.Close()
+	cancel()
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r.rows() != 700 {
+		t.Fatalf("%d rows for 700 events", r.rows())
+	}
+}
+
+// T-U-18: closed database: BEGIN fails, nothing is committed, and Run returns
+// the database rule. A refused row and an append error roll back the batch (no
+// row). For the refused row, the appender got its one call, so the leaves of
+// that batch stay in the appender with no row; the later stop rules count them.
 func TestTU18ErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
 		name, rule string
@@ -391,12 +487,15 @@ func TestTU18ErrorsRollBackTheBatch(t *testing.T) {
 			r.add(event.KindCallback, 2)
 			r.q.Close()
 			c.setup(r)
-			wantRule(t, r.w.Run(context.Background()), writerName, c.rule)
+			wantRule(t, r.run(context.Background()), writerName, c.rule)
 			if len(r.commits) != 0 {
 				t.Fatal("the batch was committed")
 			}
 			if c.name != "closed database" && r.rows() != 0 {
 				t.Fatalf("%d rows after the rollback", r.rows())
+			}
+			if c.name == "refused row" && len(r.app.calls) != 1 {
+				t.Fatalf("%d appender calls, want 1", len(r.app.calls))
 			}
 		})
 	}

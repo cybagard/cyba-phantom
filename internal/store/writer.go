@@ -23,9 +23,10 @@ const (
 	insertEvent = "INSERT INTO event (ts, kind, hash, leaf_index, record) VALUES (?, ?, ?, ?, ?)"
 )
 
-// Writer is the one writer of the event table. It owns the database pool from
-// Open and Migrate, the queue, and the appender. This step writes only the
-// columns ts, kind, hash, leaf_index and record.
+// Writer is the one writer of the event table. It uses the database pool from
+// Open and Migrate, the queue, and the appender. The caller closes them after
+// Run returns. This step writes only the columns ts, kind, hash, leaf_index and
+// record.
 type Writer struct {
 	db  *sql.DB
 	q   *event.Queue
@@ -36,7 +37,8 @@ type Writer struct {
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
-// hashes in app.
+// hashes in app. The three arguments are required: the caller passes none that
+// is nil.
 func NewWriter(db *sql.DB, q *event.Queue, app appender) *Writer {
 	return &Writer{db: db, q: q, app: app}
 }
@@ -45,14 +47,18 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender) *Writer {
 // other writer. Run takes events with TryTake, evidence lane first, into one
 // batch. It writes the batch in one transaction when the batch has 500 events,
 // and at each tick when the batch is not empty. It holds one batch at a time and
-// starts no goroutine for an event.
+// starts no goroutine for an event. While the lanes stay non-empty, Run writes
+// at 500 events and the tick case can wait.
 //
 // Normal shutdown: the caller stops the producers and calls Close on the queue.
 // Run then writes its batch, takes the events that are left with Drain, writes
-// them in batches of at most 500, and returns nil.
+// them in batches of at most 500, and returns nil. The caller does not cancel
+// ctx until Run returns. If the queue is closed when ctx ends, Run does the same
+// shutdown.
 //
-// If ctx ends first, Run writes the batch that it already has and returns
-// ctx.Err(). The events that Run did not take stay in the lanes.
+// If ctx ends and the queue is not closed, Run writes the batch that it already
+// has and returns ctx.Err(). The events that Run did not take stay in the lanes.
+// Thus a cancel without Close can leave events in the lanes.
 //
 // A database error or an append error rolls back the batch. Run then returns
 // the error, an *Error that holds no driver text and no row value.
@@ -68,6 +74,9 @@ func (w *Writer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if w.q.Closed() {
+				return w.shutdown(batch)
+			}
 			if _, err = w.flush(batch); err != nil {
 				return err
 			}
@@ -75,7 +84,9 @@ func (w *Writer) Run(ctx context.Context) error {
 		case <-tick:
 			batch, err = w.flush(batch)
 		case <-w.q.Ready():
-			// Take events until the lanes are empty, then look at Closed.
+			// Take events until the lanes are empty, then examine Closed. After
+			// a flush at 500 events, leave the loop if ctx has ended, so that
+			// the select can take ctx.Done.
 			for {
 				e, ok := w.q.TryTake()
 				if !ok {
@@ -84,6 +95,9 @@ func (w *Writer) Run(ctx context.Context) error {
 				if batch = append(batch, e); len(batch) == maxBatch {
 					if batch, err = w.flush(batch); err != nil {
 						return err
+					}
+					if ctx.Err() != nil {
+						break
 					}
 				}
 			}
@@ -107,6 +121,7 @@ func (w *Writer) shutdown(batch []*event.Event) error {
 		if err := w.write(rest[:n]); err != nil {
 			return err
 		}
+		clear(rest[:n])
 		rest = rest[n:]
 	}
 	return nil
@@ -120,23 +135,18 @@ func (w *Writer) flush(batch []*event.Event) ([]*event.Event, error) {
 	return batch[:0], err
 }
 
-// write stores one batch in one transaction. The evidence hashes go to the
-// appender in one call before COMMIT. Row i of the evidence events gets
-// leaf_index first+i. The transaction does not use the context of Run: the
-// last write must work after ctx ends.
+// write stores one batch in one transaction. It hashes the evidence events
+// first. Then it starts the transaction and prepares the insert. The evidence
+// hashes go to the appender in one call before COMMIT. Row i of the evidence
+// events gets leaf_index first+i. The transaction does not use the context of
+// Run: the last write must work after ctx ends.
 func (w *Writer) write(batch []*event.Event) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	ctx := context.Background()
-	tx, err := w.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fail(writerName, ruleDatabase)
-	}
-	defer tx.Rollback() // no effect after COMMIT
-
 	hs := make([]tlog.EventHash, 0, len(batch))
-	for _, e := range batch {
+	evidence := make([]bool, len(batch))
+	for j, e := range batch {
 		ok, err := e.Record.Kind.IsEvidence()
 		if err != nil {
 			return fail(writerName, ruleRecord)
@@ -148,24 +158,32 @@ func (w *Writer) write(batch []*event.Event) error {
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
+		evidence[j] = true
 		hs = append(hs, tlog.EventHash(h))
 	}
+
+	ctx := context.Background()
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer tx.Rollback() // no effect after COMMIT
+	stmt, err := tx.PrepareContext(ctx, insertEvent)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer stmt.Close()
+
 	var first int64
 	if len(hs) > 0 {
 		if first, err = w.app.AppendBatch(hs); err != nil {
 			return fail(writerName, ruleAppend)
 		}
 	}
-
-	stmt, err := tx.PrepareContext(ctx, insertEvent)
-	if err != nil {
-		return fail(writerName, ruleDatabase)
-	}
-	defer stmt.Close()
 	i := 0
-	for _, e := range batch {
+	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
-		if ok, _ := e.Record.Kind.IsEvidence(); ok {
+		if evidence[j] {
 			b, err := event.EvidenceBytes(e.Record)
 			if err != nil {
 				return fail(writerName, ruleRecord)
