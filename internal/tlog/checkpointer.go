@@ -72,11 +72,15 @@ type Checkpointer struct {
 //   - the signer state is missing (the operator decides);
 //   - the first line of the signer state is the origin, but the state does not
 //     parse as a note or the note does not verify;
+//   - the size in the signer state is too large;
+//   - the size in the signer state is above the size of the log;
 //   - the tiles at the size of the stored note do not give its root.
 //
 // A checkpointer that is not healthy writes no state. The constructor does not
-// call the sink. A healthy checkpointer marks the stored note as pending, except
-// the note of the empty tree. The first tick gives it to the sink.
+// call the sink. It marks the stored note as pending, except the note of the
+// empty tree. Each tick gives a pending note to the sink before it checks the
+// current tree. So the stored note reaches the sink when the tree grew or the
+// log stopped before the first tick.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
 	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
 	switch {
@@ -196,12 +200,14 @@ func (c *Checkpointer) Run(ctx context.Context) {
 // sign makes one checkpoint if the size changed. Head only shows the size. The
 // root always comes from RootAt, which returns the error of a stopped log, and
 // the consistency proof comes from the tiles. The state file is durable before
-// the note goes to the sink. The log lock is not held while the sink runs. At an
-// unchanged size, sign gives a pending note to the sink again.
+// the note goes to the sink. The log lock is not held while the sink runs. After
+// the fault check, sign gives a pending note to the sink. The note was verified
+// at start or written durable before, so this signs nothing new.
 func (c *Checkpointer) sign() {
 	if c.Err() != nil {
 		return
 	}
+	c.resend()
 	n, _ := c.log.Head()
 	size, ok := toUint(n)
 	switch {
@@ -220,11 +226,10 @@ func (c *Checkpointer) sign() {
 	if size == c.last.Size {
 		if root != c.last.Root {
 			c.fail(errors.New("checkpointer: the root at the last signed size changed"))
-			return
 		}
-		c.resend()
 		return
 	}
+	// At last size 0, consistent runs no proof, so only RootAt checks the tree.
 	if err := c.consistent(n, root); err != nil {
 		c.fail(err)
 		return
@@ -247,7 +252,8 @@ func (c *Checkpointer) sign() {
 
 // resend gives the last note to the sink if the sink has not taken it. A failed
 // Add leaves the note pending, and the next tick tries again while the size does
-// not change. Spool.Add replaces the file of that size, so a second Add is safe.
+// not change. A new note replaces a pending note. Spool.Add replaces the file of
+// that size, so a second Add is safe.
 func (c *Checkpointer) resend() {
 	if !c.pending {
 		return
@@ -267,7 +273,7 @@ func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 		return errors.New("checkpointer: the last signed size is too large")
 	}
 	if old == 0 {
-		return nil // at old size 0 no proof runs: the empty tree is a prefix of every tree; only RootAt runs
+		return nil // the empty tree is a prefix of every tree, so no proof runs
 	}
 	proof, err := c.log.ProveConsistency(old, n)
 	if err != nil {

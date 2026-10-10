@@ -334,8 +334,8 @@ func TestTS13StoredNoteThatVerifiesStarts(t *testing.T) {
 	}
 	c := e.mustStart(t)
 	c.sign()
-	// The tree grew before the first tick: the new note replaces the pending one.
-	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{10}) {
+	// The tree grew before the first tick: the stored note goes first.
+	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{4, 10}) {
 		t.Fatalf("healthy %v, signed %v", c.Healthy(), got)
 	}
 }
@@ -439,8 +439,9 @@ func TestTS13PendingNoteGoesToTheSinkAgain(t *testing.T) {
 }
 
 // T-S-13: the constructor does not call the sink. The first tick gives it the
-// stored note, except the empty-tree note. A failed Add is tried again.
-func TestTS13StoredNoteGoesToTheSinkAtStart(t *testing.T) {
+// stored note, except the empty-tree note. A failed Add is tried again. The
+// stored note also goes to the sink when the log stops before the first tick.
+func TestTS13ConstructorLeavesTheStoredNoteToTheFirstTick(t *testing.T) {
 	e := newEnv(t, 0)
 	e.mustStart(t).sign() // the stored note is the empty tree
 	if got := e.sink.added(); len(got) != 0 {
@@ -468,6 +469,26 @@ func TestTS13StoredNoteGoesToTheSinkAtStart(t *testing.T) {
 	c2.sign()
 	if got := e2.sink.added(); !slices.Equal(got, []uint64{3, 3}) {
 		t.Fatalf("sink took %v", got)
+	}
+	e3 := newEnv(t, 600)
+	root600, _ := e3.l.RootAt(600)
+	stored600 := e3.signed(t, 600, root600)
+	e3.put(t, stored600)
+	c3 := e3.mustStart(t)
+	file := filepath.Join(e3.dir, "tlog", "tile", "8", "0", "000")
+	b, err := os.ReadFile(file)
+	must(t, err)
+	b[len(b)/2] ^= 1
+	must(t, os.WriteFile(file, b, 0o600))
+	if _, err := e3.l.ProveInclusion(5, 600); err == nil { // the log stops
+		t.Fatal("no error for the changed tile")
+	}
+	c3.sign()
+	if got := e3.sink.added(); !slices.Equal(got, []uint64{600}) || !bytes.Equal(e3.sink.msgs[0], stored600) {
+		t.Fatalf("log stopped: sink took %v", got)
+	}
+	if c3.Healthy() || !bytes.Equal(e3.saved(), stored600) {
+		t.Fatalf("log stopped: healthy %v, state changed %v", c3.Healthy(), !bytes.Equal(e3.saved(), stored600))
 	}
 }
 
@@ -542,8 +563,10 @@ func TestTS13StateIsDurableBeforeTheSpool(t *testing.T) {
 	e.sink.err = errors.New("spool is full") // a sink error does not stop the signing
 	c.sign()
 	appendTo(t, e.l, 3, 5)
-	c.sign()
-	if got := e.sink.added(); !slices.Equal(got, []uint64{3, 5}) || !c.Healthy() {
+	c.sign() // note 3 is pending and goes first, then note 5
+	e.sink.err = nil
+	c.sign() // note 5 is pending and goes again
+	if got := e.sink.added(); !slices.Equal(got, []uint64{3, 3, 5, 5}) || !c.Healthy() {
 		t.Fatalf("signed %v, healthy %v", got, c.Healthy())
 	}
 	// A state file that cannot be replaced: no note goes to the spool.
@@ -551,7 +574,7 @@ func TestTS13StateIsDurableBeforeTheSpool(t *testing.T) {
 	must(t, os.Mkdir(filepath.Join(e.dir, stateName), 0o700))
 	appendTo(t, e.l, 5, 7)
 	c.sign()
-	if got := e.sink.added(); len(got) != 2 || c.Healthy() {
+	if got := e.sink.added(); len(got) != 4 || c.Healthy() {
 		t.Fatalf("signed %v, healthy %v", got, c.Healthy())
 	}
 }
