@@ -21,7 +21,7 @@ steps above.
 ## Signed notes
 
 Run "make fixtures" to generate the golden section of
-internal/tlog/testdata/notes.txt. The golden section holds the signed note
+internal/tlog/verifier/testdata/notes.txt. The golden section holds the signed note
 that TestTU12_Golden makes. Never edit it by hand.
 
 The other sections are note text that is written by hand.
