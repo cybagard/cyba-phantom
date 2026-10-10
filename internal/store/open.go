@@ -39,9 +39,9 @@ const (
 	ruleLocation   = "opened at a path other than the checked path"
 )
 
-// Error is a refused open. Name is the file, or the config key or directory
-// that broke the rule; Rule is one of the fixed classes. The error never wraps
-// another error, so no driver text can reach its string.
+// Error is a refused store operation. Name is the file, the config key, the
+// directory, or "database schema"; Rule is one of the fixed classes. The error
+// never wraps another error, so no driver text can reach its string.
 type Error struct{ Name, Rule string }
 
 func (e *Error) Error() string { return "store: " + e.Name + " " + e.Rule }
@@ -135,7 +135,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	db, err := sql.Open("sqlite", dsn(path))
+	db, err := sql.Open("sqlite", dsn(path, absent))
 	if err != nil {
 		return nil, refuse(ruleOpen)
 	}
@@ -255,11 +255,16 @@ func checkFile(fi fs.FileInfo) string {
 }
 
 // dsn makes the connection string from fixed text and the checked path. The
-// path has no ? or #: checkPath and stateBase refuse them.
-func dsn(path string) string {
+// path has no ? or #: checkPath and stateBase refuse them. For a file that Open
+// made, auto_vacuum comes first: journal_mode(WAL) writes page 1 when the
+// connection opens, and after that auto_vacuum cannot change.
+func dsn(path string, created bool) string {
 	var b strings.Builder
 	b.WriteString(path)
 	b.WriteString("?_defensive=1&_txlock=immediate")
+	if created {
+		b.WriteString("&_pragma=auto_vacuum(INCREMENTAL)")
+	}
 	for _, p := range pragmas {
 		b.WriteString("&_pragma=")
 		b.WriteString(p)

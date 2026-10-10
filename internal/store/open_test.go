@@ -183,14 +183,20 @@ func TestTS15ConnectionStringIsFixedText(t *testing.T) {
 		"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-8000)" +
 		"&_pragma=temp_store(MEMORY)&_pragma=mmap_size(0)&_pragma=foreign_keys(OFF)" +
 		"&_pragma=busy_timeout(5000)&_pragma=journal_size_limit(67108864)&_pragma=trusted_schema(OFF)"
-	if got := dsn("/s/events.db"); got != want {
+	if got := dsn("/s/events.db", false); got != want {
 		t.Fatalf("got %s", got)
+	}
+	// A file that Open made gets auto_vacuum before journal_mode(WAL).
+	const first = "?_defensive=1&_txlock=immediate&_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)"
+	if !strings.Contains(dsn("/s/events.db", true), first) {
+		t.Fatal("auto_vacuum is not first")
 	}
 }
 
-// T-S-15: each pragma of 03 reads back its value on each new connection, the
-// journal mode is wal, the writer pool has one connection, and the soft heap
-// limit of the process is 16 MiB.
+// T-S-15, T-U-18: each pragma of 03 reads back its value on each new connection.
+// The journal mode is wal. The writer pool has one connection. The soft heap
+// limit of the process is 16 MiB. A file that Open made has auto_vacuum 2.
+// This shows that the driver applies the pragmas in order.
 func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 	root, state, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
@@ -205,7 +211,7 @@ func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 
 	// A second pool with the same string, and two connections that are open at
 	// the same time, so that the settings do not come from the first connection.
-	fresh, err := sql.Open("sqlite", dsn(filepath.Join(state, "events.db")))
+	fresh, err := sql.Open("sqlite", dsn(filepath.Join(state, "events.db"), false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +219,7 @@ func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 	want := map[string]string{
 		"journal_mode": "wal", "synchronous": "1", "cache_size": "-8000", "temp_store": "2",
 		"mmap_size": "0", "foreign_keys": "0", "busy_timeout": "5000",
-		"journal_size_limit": "67108864", "trusted_schema": "0",
+		"journal_size_limit": "67108864", "trusted_schema": "0", "auto_vacuum": "2",
 	}
 	for i := 0; i < 2; i++ {
 		c, err := fresh.Conn(context.Background())
