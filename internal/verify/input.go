@@ -3,7 +3,8 @@
 // package treats the checkpoint note, the event and the proof file as
 // untrusted. The user gives the key by a separate channel, and the package
 // trusts it. The package checks the size cap of each input before it parses
-// the input. The package does not check a proof against a root.
+// the input. The package also checks that an event is in the tree of a
+// checkpoint (verify.go).
 //
 // The errors of this package are the fixed values below. They hold no input
 // bytes. The package does not wrap an error from another package and does not

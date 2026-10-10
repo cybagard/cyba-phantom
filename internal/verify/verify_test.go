@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/mod/sumdb/note"
@@ -17,7 +19,7 @@ import (
 // realLog opens a real log in a temporary state directory and appends n events.
 // Event i is the canonical JSON {"n":i}. The function returns the log and the
 // events in the order of their leaves.
-func realLog(t *testing.T, n int) (*tlog.Log, []Event) {
+func realLog(t testing.TB, n int) (*tlog.Log, []Event) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -48,7 +50,7 @@ func realLog(t *testing.T, n int) (*tlog.Log, []Event) {
 }
 
 // checkpointAt signs the checkpoint of the first size leaves of the log.
-func checkpointAt(t *testing.T, l *tlog.Log, s note.Signer, size int64) []byte {
+func checkpointAt(t testing.TB, l *tlog.Log, s note.Signer, size int64) []byte {
 	t.Helper()
 	root, err := l.RootAt(size)
 	if err != nil {
@@ -62,7 +64,7 @@ func checkpointAt(t *testing.T, l *tlog.Log, s note.Signer, size int64) []byte {
 }
 
 // proofAt returns the proof file content for leaf index in the tree of size.
-func proofAt(t *testing.T, l *tlog.Log, index, size int64) InclusionProof {
+func proofAt(t testing.TB, l *tlog.Log, index, size int64) InclusionProof {
 	t.Helper()
 	hs, err := l.ProveInclusion(index, size)
 	if err != nil {
@@ -132,7 +134,7 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	flipped, err := ParseEvent([]byte(`{"n":3,"x":0}`))
+	withMember, err := ParseEvent([]byte(`{"n":3,"x":0}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +163,7 @@ func TestTS14_InclusionRefused(t *testing.T) {
 		want error
 	}{
 		"changed event":                 {msg, changed, good, ErrNotVerified},
-		"event with an added member":    {msg, flipped, good, ErrNotVerified},
+		"event with an added member":    {msg, withMember, good, ErrNotVerified},
 		"wrong index":                   {msg, events[3], proofAt(t, l, 4, 10), ErrNotVerified},
 		"index set to another leaf":     {msg, events[3], InclusionProof{Index: 4, TreeSize: 10, Hashes: good.Hashes}, ErrNotVerified},
 		"proof hash changed":            {msg, events[3], badHash, ErrNotVerified},
@@ -178,7 +180,7 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	} {
 		res, err := Inclusion(v, tc.msg, tc.e, tc.p)
 		wantErr(t, name, err, tc.want)
-		if err != nil && (res.Root != [32]byte{} || res.Proof != nil || res.Origin != "") {
+		if err != nil && !reflect.DeepEqual(res, Result{}) {
 			t.Errorf("%s: result is not empty with an error: %+v", name, res)
 		}
 	}
@@ -189,4 +191,76 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	// A size-0 checkpoint has no leaf. Its proof size is 0.
 	_, err = Inclusion(v, empty, events[0], InclusionProof{Hashes: []modtlog.Hash{}})
 	wantErr(t, "empty tree, size 0 proof", err, ErrNotVerified)
+}
+
+// proofJSON writes the proof file form of p (04 §7).
+func proofJSON(p InclusionProof) []byte {
+	list := func(hs []modtlog.Hash) string {
+		items := make([]string, 0, len(hs))
+		for _, h := range hs {
+			items = append(items, `"`+base64.StdEncoding.EncodeToString(h[:])+`"`)
+		}
+		return "[" + strings.Join(items, ",") + "]"
+	}
+	s := fmt.Sprintf(`{"index":%d,"tree_size":%d,"hashes":%s`, p.Index, p.TreeSize, list(p.Hashes))
+	if p.Root != nil {
+		s += fmt.Sprintf(`,"root":"%s","consistency":%s`, base64.StdEncoding.EncodeToString(p.Root[:]), list(p.Consistency))
+	}
+	return []byte(s + "}")
+}
+
+// T-S-14: for any checkpoint bytes, event bytes, and proof file bytes, the
+// check does not panic, an error gives the zero Result, and a success gives a
+// Result that matches the inputs. The seeds hold one verified case and some
+// refused cases.
+func FuzzTS14_Inclusion(f *testing.F) {
+	s, text := newKey(f, origin)
+	v, _ := ParseKey([]byte(text))
+	l, events := realLog(f, 10)
+	msg := checkpointAt(f, l, s, 10)
+	good := proofAt(f, l, 3, 10)
+	otherRoot, _ := tlog.SignCheckpoint(s, 10, modtlog.Hash{9})
+	root := modtlog.Hash{1}
+	withRoot := proofAt(f, l, 3, 10)
+	withRoot.Root, withRoot.Consistency = &root, []modtlog.Hash{}
+	for _, seed := range []struct{ cp, ev, pf []byte }{
+		{msg, events[3].Raw, proofJSON(good)},                                                        // verified
+		{msg, events[4].Raw, proofJSON(good)},                                                        // another event
+		{msg, events[3].Raw, proofJSON(proofAt(f, l, 4, 10))},                                        // wrong index
+		{msg, events[3].Raw, proofJSON(InclusionProof{Index: 3, TreeSize: 11, Hashes: good.Hashes})}, // larger tree
+		{msg, events[3].Raw, proofJSON(proofAt(f, l, 3, 5))},                                         // smaller tree
+		{msg, events[3].Raw, proofJSON(withRoot)},                                                    // root at the same size
+		{otherRoot, events[3].Raw, proofJSON(good)},                                                  // another root
+		{msg[:len(msg)-3], events[3].Raw, proofJSON(good)},                                           // bad note
+		{msg, []byte(`{"n":3,"x":0}`), proofJSON(good)},                                              // event with an added member
+		{checkpointAt(f, l, s, 0), events[0].Raw, []byte(`{"index":0,"tree_size":0,"hashes":[]}`)},   // empty tree
+	} {
+		f.Add(seed.cp, seed.ev, seed.pf)
+	}
+	f.Fuzz(func(t *testing.T, cp, evBytes, pfBytes []byte) {
+		e, err := ParseEvent(evBytes)
+		if err != nil {
+			return
+		}
+		p, err := ParseInclusionProof(pfBytes)
+		if err != nil {
+			return
+		}
+		res, err := Inclusion(v, cp, e, p)
+		if err != nil {
+			if !reflect.DeepEqual(res, Result{}) {
+				t.Errorf("result is not empty with an error: %+v", res)
+			}
+			return
+		}
+		c, err := ParseCheckpoint(cp, v)
+		if err != nil {
+			t.Fatalf("Inclusion accepted a checkpoint that ParseCheckpoint refuses: %v", err)
+		}
+		if res.Origin != c.Origin || res.Size != c.Size || res.Root != c.Root ||
+			res.EventHash != e.Hash || res.LeafIndex != p.Index || !slices.Equal(res.Proof, p.Hashes) ||
+			int64(c.Size) != p.TreeSize || p.Root != nil || p.Consistency != nil {
+			t.Errorf("result does not match the inputs: %+v", res)
+		}
+	})
 }
