@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -258,6 +259,7 @@ func TestTS14_Refused(t *testing.T) {
 	other, _ := testKey(t, origin) // same name, another key
 	l, events := testLog(t, 20, `{"n":%d}`)
 	fork, _ := testLog(t, 20, `{"m":%d}`)
+	marked, markedEvents := testLog(t, 20, `{"k":"`+contentMarker+`","n":%d}`)
 	f := newFiles(t)
 	key := f.write("key", []byte(keyText))
 	cp10 := f.write("cp10", checkpointAt(t, l, s, 10))
@@ -281,6 +283,14 @@ func TestTS14_Refused(t *testing.T) {
 			"checkpoint signature does not verify"},
 		"changed signature": {[]string{"--checkpoint", f.write("badsig", badSig)},
 			"checkpoint signature does not verify"},
+		"prior of another key": {[]string{"--checkpoint", cp10, "--prior", f.write("otherprior", checkpointAt(t, l, other, 5))},
+			"checkpoint signature does not verify"},
+		"prior with a changed signature": {[]string{"--checkpoint", cp10, "--prior", f.write("badprior", badSig)},
+			"checkpoint signature does not verify"},
+		// The event holds contentMarker. The proof is the proof of another leaf.
+		"event with content": {[]string{"--checkpoint", f.write("mcp", checkpointAt(t, marked, s, 10)),
+			"--event", f.write("me4", markedEvents[4].Raw), "--proof", f.write("mproof", []byte(inclusionJSON(t, marked, 3, 10)))},
+			"not verified: the event is not in the tree"},
 		"forked prior": {[]string{"--checkpoint", f.write("fcp", checkpointAt(t, fork, s, 20)), "--prior", f.write("pcp", checkpointAt(t, l, s, 5)),
 			"--consistency", f.write("fc", []byte(consistencyJSON(t, fork, 5, 20)))},
 			"the log has a fork"},
@@ -418,6 +428,54 @@ func TestTS14_EventFieldsNotPrinted(t *testing.T) {
 	wantLines(t, "event", stdout, "event hash: "+b64(events[2].Hash), "leaf index: 2")
 	if strings.ContainsAny(stdout, `{}"`) {
 		t.Errorf("stdout holds event text: %q", stdout)
+	}
+}
+
+// T-S-14: an event can hold a bidirectional format character and a C1 control
+// character. Canonical JSON keeps them raw. They never reach stdout or stderr,
+// on exit 0 and on exit 1.
+func TestTS14_EventControlCharacters(t *testing.T) {
+	const raw = "‮\u009b"
+	s, keyText := testKey(t, origin)
+	l, events := testLog(t, 4, "{\"n\":%d,\"s\":\"a‮b\u009bc\"}")
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp := f.write("cp", checkpointAt(t, l, s, 4))
+	proof := f.write("proof", []byte(inclusionJSON(t, l, 2, 4)))
+	if !bytes.Contains(events[2].Raw, []byte("‮")) || !bytes.Contains(events[2].Raw, []byte("\u009b")) {
+		t.Fatalf("the event does not hold the raw characters: %q", events[2].Raw)
+	}
+	code, stdout, stderr := invoke("--key", key, "--checkpoint", cp, "--event", f.write("event", events[2].Raw), "--proof", proof)
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if strings.ContainsAny(stdout+stderr, raw) {
+		t.Errorf("exit 0: output holds a raw character: %q %q", stdout, stderr)
+	}
+	changed := bytes.Replace(events[2].Raw, []byte(`"n":2`), []byte(`"n":3`), 1)
+	code, stdout, stderr = invoke("--key", key, "--checkpoint", cp, "--event", f.write("changed", changed), "--proof", proof)
+	if code != 1 || stdout != "" {
+		t.Fatalf("changed event: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if strings.ContainsAny(stdout+stderr, raw) {
+		t.Errorf("exit 1: output holds a raw character: %q %q", stdout, stderr)
+	}
+}
+
+// failWriter is a writer that always fails.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+// T-S-14: if stdout cannot be written, the command gives exit 2 and a fixed line.
+func TestTS14_OutputError(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 3, `{"n":%d}`)
+	f := newFiles(t)
+	var stderr bytes.Buffer
+	code := run([]string{"--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 3))}, failWriter{}, &stderr)
+	if want := "phantom-verify: output error: stdout cannot be written\n"; code != 2 || stderr.String() != want {
+		t.Errorf("exit %d, stderr %q, want exit 2 and %q", code, stderr.String(), want)
 	}
 }
 

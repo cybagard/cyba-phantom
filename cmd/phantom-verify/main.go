@@ -1,10 +1,12 @@
 // Command phantom-verify checks a signed checkpoint of the Phantom log, and
 // optionally that an event is in the log (SEC-18, 04 §7).
 //
-// The command opens no network connection. It imports internal/verify and
-// internal/tlog/verifier only. Exit code 0 means verified. Exit code 1 means
-// not verified. Exit code 2 means a usage error or an input error. Error text
-// is fixed and holds no input bytes: no path, no flag value, no file content.
+// The command opens no network connection. Of the packages of this repository,
+// it imports only internal/verify and internal/tlog/verifier. It also imports
+// golang.org/x/mod/sumdb/note. Exit code 0 means verified. Exit code 1 means
+// not verified. Exit code 2 means a usage error, an input error, or an output
+// error. Error text is fixed and holds no input bytes: no path, no flag value,
+// no file content.
 package main
 
 import (
@@ -91,7 +93,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "phantom-verify: internal error")
 		return 2
 	}
-	stdout.Write(out)
+	if _, err := stdout.Write(out); err != nil {
+		fmt.Fprintln(stderr, "phantom-verify: output error: stdout cannot be written")
+		return 2
+	}
 	return 0
 }
 
