@@ -56,7 +56,7 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 | FR-13 | Aggregate export (JSON, nightly) of per-band, per-fingerprint-family counts without IPs |
 | FR-14 | Hot-reload bundle on SIGHUP or on-schedule fetch from bundle server |
 | FR-15 | Prometheus-style `/metrics` on the ops listener |
-| FR-16 | CLI verifier `canary-verify` (open) that checks an event against a checkpoint |
+| FR-16 | CLI verifier `canary-verify` (open) that checks an event against a checkpoint. It refuses a checkpoint that is not consistent with the last checkpoint that it accepted for the same key |
 
 ### P2 (design for, do not build — exempt from C10 in v1: no v1 tests, no 08 rows)
 | ID | Requirement |
@@ -97,6 +97,7 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 | SEC-15 | Enqueue of an event never blocks the request path. Evidence events have their own queue lane, so a flood of `request` events cannot drop them. Each lane has a count bound from config and its own byte bound: 24 MiB for the bulk lane and 8 MiB for the evidence lane. The overflow counters key IPv6 by /64 prefix and hold at most 4096 keys. Every dropped event is counted (02, ADR-015, ADR-019) |
 | SEC-16 | The tlog leaf hash is SHA-256(0x00 ‖ event hash); the event hash is never a leaf hash. The sensor reads tile hashes only through a check against a trusted tree head. A changed or missing tile stops the tlog, and the sensor never repairs it. The sensor never signs a checkpoint that is not consistent with the last checkpoint that it signed. The signing key is a regular file with mode 0600, owned by the sensor user, at a fixed path; a missing key on a log that has a signed checkpoint stops the signer. tlog files, the key and the checkpoint spool open below the state directory and do not follow a symlink out of it. The key never appears in a log, an error, or `--check` output (04 §5, ADR-020) |
 | SEC-17 | The checkpoint publisher connects only to the configured `tlog.publish` URLs. It follows no redirect, uses no proxy from the environment, and verifies TLS. Each publish has a timeout and a cap on the response size. Retries use bounded backoff. The local spool holds a bounded number of checkpoints, and checkpoints publish in order for each target. The publish token is never in a URL, a log, or an error (04 §5, ADR-020) |
+| SEC-18 | `canary-verify` takes the log key only from a file that the user gives, never from the checkpoint, proof or event input. It parses each checkpoint with the strict note rules of 04 §5. It reads each input with a size cap before it parses it, parses proof files strictly, and hashes the event bytes that it received; event bytes that are not in canonical form are refused. It keeps the last accepted checkpoint for each key as a signed note. It refuses a checkpoint without a valid consistency proof to that state or to a given prior checkpoint, and a state file that does not verify. It opens no network connection. Text from the input is escaped in its output, and error text holds no input bytes (04 §7, ADR-021) |
 
 ## Success metrics
 - **Leading (30 days):** G1/G2 harness pass rate in CI; time-to-first-page in install tests; number of external verifications of published checkpoints.
