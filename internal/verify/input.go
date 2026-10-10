@@ -42,7 +42,7 @@ var (
 	ErrTooLarge   = errors.New("verify: input is larger than its size cap")
 	ErrRead       = errors.New("verify: input cannot be read")
 	ErrKey        = errors.New("verify: key text is not a valid verifier key")
-	ErrCheckpoint = errors.New("verify: checkpoint note is not valid for the key")
+	ErrCheckpoint = errors.New("verify: checkpoint note is not valid in form")
 	ErrSignature  = errors.New("verify: checkpoint signature does not verify with the key")
 	ErrEvent      = errors.New("verify: event is not one canonical JSON object")
 	ErrProof      = errors.New("verify: proof file is not valid")
@@ -90,11 +90,15 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 // key. The function checks the size against 2^48.
 //
 // When the strict parser refuses the note, the function opens the note with
-// the same key. If note.Open says that the signature of the key is wrong, or
-// that no signature line is from the key (for example a note signed by another
-// key), the result is ErrSignature (not verified). Every other result is
-// ErrCheckpoint (an input error): text that is not a note, a second signature
-// line, a bad body, or a size that is too large.
+// the same key. If note.Open says that the signature of the key is wrong, the
+// result is ErrSignature (not verified). The result is also ErrSignature if
+// no signature line is from the key, for example in a note signed by another
+// key. Every other result is ErrCheckpoint (an input error). These are text
+// that is not a note, a second signature line, and a bad body. A size that is
+// not a 64-bit number also gives ErrCheckpoint. A size above 2^48 gives
+// ErrRange. The first fault that note.Open finds decides between ErrSignature
+// and ErrCheckpoint. A note that is both malformed and badly signed can give
+// either.
 func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	if len(b) > MaxNoteBytes {
 		return verifier.Checkpoint{}, ErrTooLarge
