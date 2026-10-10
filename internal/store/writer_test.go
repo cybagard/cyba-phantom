@@ -107,10 +107,25 @@ func (r *rig) run(ctx context.Context) error {
 	return r.wait(r.launch(ctx))
 }
 
-// start runs the writer goroutine. The returned function stops it.
+// gate makes the next AppendBatch call wait. ungate releases it. Call gate only
+// when Run is not inside AppendBatch.
+func (r *rig) gate() {
+	r.app.entered, r.app.release = make(chan struct{}, 1), make(chan struct{})
+	r.app.gated.Store(true)
+}
+
+func (r *rig) ungate() {
+	if r.app.gated.Swap(false) {
+		close(r.app.release)
+	}
+}
+
+// start runs the writer goroutine. The returned function stops it. If the test
+// fails first, the cleanup releases the gate and cancels ctx, so Run ends.
 func (r *rig) start() (stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := r.launch(ctx)
+	r.t.Cleanup(func() { r.ungate(); cancel() })
 	return func() error {
 		cancel()
 		return r.wait(done)
@@ -202,19 +217,32 @@ func TestTU18EvidenceLaneIsFirst(t *testing.T) {
 }
 
 // T-U-18: 1 250 events give three transactions (500, 500, 250). The last one
-// waits for the tick.
+// waits for the tick. The gated appender makes the check exact: Run is one
+// goroutine, so the tick send succeeds only while Run waits in select. An early
+// write of the last 250 events (one has evidence) would block in AppendBatch.
 func TestTU18BatchesHaveAtMost500Events(t *testing.T) {
 	r := newRig(t, 2000)
-	for i := int64(0); i < 1250; i++ {
+	for i := int64(0); i < 1000; i++ {
 		r.add(event.KindRequest, i)
 	}
 	stop := r.start()
 	wantCommits(t, r, 500, 500)
 	r.drained()
-	if len(r.commits) != 0 || r.rows() != 1000 {
-		t.Fatal("the last 250 events were written before the tick")
+	r.gate()
+	for i := int64(0); i < 250; i++ {
+		kind := event.KindRequest
+		if i == 0 {
+			kind = event.KindAlertSent
+		}
+		r.add(kind, 1000+i)
 	}
-	r.fire()
+	r.drained()
+	select {
+	case <-r.app.entered:
+		t.Fatal("the last 250 events were written before the tick")
+	case r.tick <- time.Now():
+	}
+	r.ungate()
 	wantCommits(t, r, 250)
 	if err := stop(); !errors.Is(err, context.Canceled) || r.rows() != 1250 {
 		t.Fatalf("err %v, rows %d", err, r.rows())
@@ -245,8 +273,7 @@ func TestTU18EventsCommitAtTheTick(t *testing.T) {
 // Limit of this test: a goroutine that ends before the count is not seen.
 func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 	r := newRig(t, 4000)
-	r.app.entered, r.app.release = make(chan struct{}, 1), make(chan struct{})
-	r.app.gated.Store(true)
+	r.gate()
 	base := runtime.NumGoroutine()
 	stop := r.start()
 	for i := int64(0); i < 2000; i++ {
@@ -264,8 +291,7 @@ func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 	if n := runtime.NumGoroutine(); n > base+2 {
 		t.Fatalf("%d goroutines with a batch in flight, %d before Run", n, base)
 	}
-	r.app.gated.Store(false)
-	close(r.app.release)
+	r.ungate()
 	wantCommits(t, r, 500, 500, 500, 500)
 	// The goroutine of the last transaction can end a short time after Commit.
 	for end := time.Now().Add(waitFor); runtime.NumGoroutine() > base+1; runtime.Gosched() {
@@ -417,11 +443,11 @@ func TestTU18CancelWritesTheTakenEvents(t *testing.T) {
 }
 
 // T-U-18: Close while Run waits ends Run with nil and writes the events. Case
-// one closes with events in the lanes. Case two closes when Run holds the batch.
-// No tick is sent.
+// one closes right after the adds: Run may or may not have taken the events.
+// Case two closes when Run holds the batch. No tick is sent.
 func TestTU18CloseWhileRunning(t *testing.T) {
 	for _, waitForBatch := range []bool{false, true} {
-		name := "events in the lanes"
+		name := "Close right after the adds"
 		if waitForBatch {
 			name = "batch in hand"
 		}
@@ -446,24 +472,73 @@ func TestTU18CloseWhileRunning(t *testing.T) {
 }
 
 // T-U-18: when Close and the end of ctx both come before Run sees them, Run does
-// the normal shutdown: it writes all events and returns nil.
+// the normal shutdown: it writes all events and returns nil. In the case "only
+// ctx is ready", the test takes the one pending wake, so Run takes the ctx.Done
+// branch with all 700 events in the lanes and Drain returns them. In the other
+// case, Run can take either branch.
 func TestTU18CloseWinsOverCancel(t *testing.T) {
-	r := newRig(t, 2000)
-	for i := int64(0); i < 700; i++ {
+	for _, onlyCtx := range []bool{true, false} {
+		name := "both ready"
+		if onlyCtx {
+			name = "only ctx is ready"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 2000)
+			for i := int64(0); i < 700; i++ {
+				kind := event.KindRequest
+				if i%7 == 0 {
+					kind = event.KindCallback
+				}
+				r.add(kind, i)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			r.q.Close()
+			cancel()
+			if onlyCtx {
+				<-r.q.Ready() // the wake channel holds one value
+			}
+			if err := r.run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if r.rows() != 700 {
+				t.Fatalf("%d rows for 700 events", r.rows())
+			}
+		})
+	}
+}
+
+// T-U-18: after a full flush, Run leaves the take loop when ctx has ended. The
+// first batch waits in AppendBatch while more than 1 000 events are queued. Then
+// the test cancels ctx (no Close) and releases the batch. Run writes at most one
+// more batch, returns context.Canceled, and leaves events in the lanes.
+func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
+	r := newRig(t, 4000)
+	r.gate()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := r.launch(ctx)
+	t.Cleanup(func() { r.ungate(); cancel() })
+	for i := int64(0); i < 1200; i++ {
 		kind := event.KindRequest
-		if i%7 == 0 {
-			kind = event.KindCallback
+		if i%5 == 0 {
+			kind = event.KindAlertSent
 		}
 		r.add(kind, i)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	r.q.Close()
-	cancel()
-	if err := r.run(ctx); err != nil {
-		t.Fatal(err)
+	select {
+	case <-r.app.entered:
+	case <-time.After(waitFor):
+		t.Fatal("no batch reached the appender")
 	}
-	if r.rows() != 700 {
-		t.Fatalf("%d rows for 700 events", r.rows())
+	cancel()
+	r.ungate()
+	if err := r.wait(done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v", err)
+	}
+	if n := len(r.commits); n < 1 || n > 2 {
+		t.Fatalf("%d batches written, want 1 or 2", n)
+	}
+	if r.q.Bytes() == (event.Bytes{}) {
+		t.Fatal("no event is left in the lanes")
 	}
 }
 

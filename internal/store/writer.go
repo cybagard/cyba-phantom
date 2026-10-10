@@ -37,8 +37,7 @@ type Writer struct {
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
-// hashes in app. The three arguments are required: the caller passes none that
-// is nil.
+// hashes in app. Each of the three arguments must not be nil.
 func NewWriter(db *sql.DB, q *event.Queue, app appender) *Writer {
 	return &Writer{db: db, q: q, app: app}
 }
@@ -60,8 +59,9 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender) *Writer {
 // has and returns ctx.Err(). The events that Run did not take stay in the lanes.
 // Thus a cancel without Close can leave events in the lanes.
 //
-// A database error or an append error rolls back the batch. Run then returns
-// the error, an *Error that holds no driver text and no row value.
+// A database error or an append error ends the batch with no row: a failed
+// BEGIN starts no transaction, and a later error rolls the transaction back. Run
+// then returns the error, an *Error that holds no driver text and no row value.
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick
 	if tick == nil {
@@ -135,8 +135,8 @@ func (w *Writer) flush(batch []*event.Event) ([]*event.Event, error) {
 	return batch[:0], err
 }
 
-// write stores one batch in one transaction. It hashes the evidence events
-// first. Then it starts the transaction and prepares the insert. The evidence
+// write stores one batch in one transaction. It hashes the evidence events and
+// makes their record bytes first. Then it starts the transaction and prepares the insert. The evidence
 // hashes go to the appender in one call before COMMIT. Row i of the evidence
 // events gets leaf_index first+i. The transaction does not use the context of
 // Run: the last write must work after ctx ends.
@@ -146,6 +146,7 @@ func (w *Writer) write(batch []*event.Event) error {
 	}
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
+	records := make([][]byte, len(batch))
 	for j, e := range batch {
 		ok, err := e.Record.Kind.IsEvidence()
 		if err != nil {
@@ -158,7 +159,11 @@ func (w *Writer) write(batch []*event.Event) error {
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
-		evidence[j] = true
+		b, err := event.EvidenceBytes(e.Record)
+		if err != nil {
+			return fail(writerName, ruleRecord)
+		}
+		evidence[j], records[j] = true, b
 		hs = append(hs, tlog.EventHash(h))
 	}
 
@@ -184,11 +189,7 @@ func (w *Writer) write(batch []*event.Event) error {
 	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
 		if evidence[j] {
-			b, err := event.EvidenceBytes(e.Record)
-			if err != nil {
-				return fail(writerName, ruleRecord)
-			}
-			hash, leaf, record = hs[i][:], first+int64(i), b
+			hash, leaf, record = hs[i][:], first+int64(i), records[j]
 			i++
 		}
 		if _, err := stmt.ExecContext(ctx, e.Record.TS, e.Record.Kind.String(), hash, leaf, record); err != nil {
