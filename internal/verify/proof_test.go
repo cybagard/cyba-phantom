@@ -118,6 +118,91 @@ func TestTS14_Proof(t *testing.T) {
 	}
 }
 
+// T-S-14, input cases: the consistency proof file.
+func TestTS14_ConsistencyProofFile(t *testing.T) {
+	obj := func(oldSize, newSize, hashes, tail string) string {
+		return fmt.Sprintf(`{"old_size":%s,"new_size":%s,"hashes":%s%s}`, oldSize, newSize, hashes, tail)
+	}
+	good := obj("5", "9", `["`+hb(1)+`","`+hb(2)+`"]`, "")
+	p, err := ReadConsistencyProof(strings.NewReader(good))
+	if err != nil || p.OldSize != 5 || p.NewSize != 9 || len(p.Hashes) != 2 || p.Hashes[1][0] != 2 {
+		t.Fatalf("good proof: %+v, %v", p, err)
+	}
+	for name, in := range map[string]string{
+		"empty hashes":      obj("0", "9", "[]", ""),
+		"equal sizes":       obj("9", "9", "[]", ""),
+		"96 hashes":         obj("1", "2", hashList(96), ""),
+		"limits of size":    obj("281474976710656", "281474976710656", "[]", ""),
+		"spaces and breaks": "{\n\t\"old_size\" : 5 ,\r\n\"new_size\":9,\n\"hashes\" : [ ]\n}\n",
+	} {
+		if _, err := ParseConsistencyProof([]byte(in)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		in   string
+		want error
+	}{
+		"duplicate member":   {`{"old_size":1,"old_size":1,"new_size":2,"hashes":[]}`, ErrProof},
+		"unknown member":     {obj("1", "2", "[]", `,"SECRETMARKER":1`), ErrProof},
+		"wrong-case member":  {`{"Old_size":1,"new_size":2,"hashes":[]}`, ErrProof},
+		"inclusion members":  {`{"index":1,"tree_size":2,"hashes":[]}`, ErrProof},
+		"missing old_size":   {`{"new_size":2,"hashes":[]}`, ErrProof},
+		"missing new_size":   {`{"old_size":1,"hashes":[]}`, ErrProof},
+		"missing hashes":     {`{"old_size":1,"new_size":2}`, ErrProof},
+		"null old_size":      {obj("null", "2", "[]", ""), ErrProof},
+		"null new_size":      {obj("1", "null", "[]", ""), ErrProof},
+		"null hashes":        {obj("1", "2", "null", ""), ErrProof},
+		"null element":       {obj("1", "2", "[null]", ""), ErrProof},
+		"old size too large": {obj("3", "2", "[]", ""), ErrProof},
+		"97 hashes":          {obj("1", "2", hashList(97), ""), ErrProof},
+		"bad base64":         {obj("1", "2", `["`+strings.TrimRight(hb(1), "=")+`"]`, ""), ErrProof},
+		"not base64":         {obj("1", "2", `["!"]`, ""), ErrProof},
+		"negative size":      {obj("-1", "2", "[]", ""), ErrProof},
+		"fraction":           {obj("1", "2.0", "[]", ""), ErrProof},
+		"size past 2^48":     {obj("1", "281474976710657", "[]", ""), ErrRange},
+		"second value":       {good + good, ErrProof},
+		"array":              {`[]`, ErrProof},
+		"empty":              {``, ErrProof},
+		"over 16 KiB":        {obj("1", "2", "[]", `,"x":"`+strings.Repeat("a", MaxProofBytes)+`"`), ErrTooLarge},
+		"over 16 KiB reader": {strings.Repeat(" ", 1<<20), ErrTooLarge},
+	} {
+		_, err := ReadConsistencyProof(strings.NewReader(tc.in))
+		wantErr(t, name, err, tc.want)
+		if err != nil && strings.Contains(err.Error(), "SECRETMARKER") {
+			t.Errorf("%s: error text holds input bytes", name)
+		}
+	}
+}
+
+// T-S-14: the consistency proof parser never panics. What it accepts holds the
+// rules. The seeds run with go test.
+func FuzzTS14_ConsistencyProof(f *testing.F) {
+	h := hb(1)
+	for _, s := range []string{
+		`{"old_size":5,"new_size":9,"hashes":["` + h + `"]}`,
+		`{"old_size":0,"new_size":0,"hashes":[]}`,
+		`{"old_size":1,"old_size":1,"new_size":2,"hashes":[]}`,
+		`{"old_size":9,"new_size":5,"hashes":[]}`,
+		`{"old_size":-1,"new_size":1e2,"hashes":null}`,
+		`{"old_size":1,"new_size":18446744073709551615,"hashes":[]}`,
+		`{"old_size":1,"new_size":2,"hashes":` + hashList(97) + `}`,
+		`[]`, `null`, ``,
+	} {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		p, err := ParseConsistencyProof(b)
+		if err != nil {
+			return
+		}
+		if p.OldSize < 0 || p.OldSize > p.NewSize || p.NewSize > maxSize ||
+			p.Hashes == nil || len(p.Hashes) > maxConsistencyHashes {
+			t.Errorf("accepted proof breaks a rule")
+		}
+	})
+}
+
 // T-S-14: the proof parser never panics, and what it accepts holds the rules.
 func FuzzTS14_Proof(f *testing.F) {
 	h := hb(1)
