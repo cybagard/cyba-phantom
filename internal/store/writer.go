@@ -135,18 +135,19 @@ func (w *Writer) flush(batch []*event.Event) ([]*event.Event, error) {
 	return batch[:0], err
 }
 
-// write stores one batch in one transaction. It hashes the evidence events and
-// makes their record bytes first. Then it starts the transaction and prepares the insert. The evidence
+// write stores one batch in one transaction. It hashes the evidence events
+// first. Then it starts the transaction and prepares the insert. The evidence
 // hashes go to the appender in one call before COMMIT. Row i of the evidence
-// events gets leaf_index first+i. The transaction does not use the context of
-// Run: the last write must work after ctx ends.
+// events gets leaf_index first+i. The insert loop makes the record bytes for
+// each row, binds them, and drops them after the insert. Thus the writer keeps
+// no second copy of the record bytes of the batch. The transaction does not use
+// the context of Run: the last write must work after ctx ends.
 func (w *Writer) write(batch []*event.Event) error {
 	if len(batch) == 0 {
 		return nil
 	}
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
-	records := make([][]byte, len(batch))
 	for j, e := range batch {
 		ok, err := e.Record.Kind.IsEvidence()
 		if err != nil {
@@ -159,11 +160,7 @@ func (w *Writer) write(batch []*event.Event) error {
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
-		b, err := event.EvidenceBytes(e.Record)
-		if err != nil {
-			return fail(writerName, ruleRecord)
-		}
-		evidence[j], records[j] = true, b
+		evidence[j] = true
 		hs = append(hs, tlog.EventHash(h))
 	}
 
@@ -189,7 +186,11 @@ func (w *Writer) write(batch []*event.Event) error {
 	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
 		if evidence[j] {
-			hash, leaf, record = hs[i][:], first+int64(i), records[j]
+			b, err := event.EvidenceBytes(e.Record)
+			if err != nil {
+				return fail(writerName, ruleRecord)
+			}
+			hash, leaf, record = hs[i][:], first+int64(i), b
 			i++
 		}
 		if _, err := stmt.ExecContext(ctx, e.Record.TS, e.Record.Kind.String(), hash, leaf, record); err != nil {

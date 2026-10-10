@@ -57,6 +57,7 @@ type rig struct {
 	app     *testAppender
 	tick    chan time.Time
 	commits chan int
+	exited  chan struct{} // closed when the last launched Run returns
 }
 
 func newRig(t *testing.T, depth int) *rig {
@@ -84,8 +85,12 @@ func (r *rig) add(kind event.Kind, ts int64) {
 
 // launch starts the writer goroutine. The channel gets the result of Run.
 func (r *rig) launch(ctx context.Context) <-chan error {
-	done := make(chan error, 1)
-	go func() { done <- r.w.Run(ctx) }()
+	done, exited := make(chan error, 1), make(chan struct{})
+	r.exited = exited
+	go func() {
+		done <- r.w.Run(ctx)
+		close(exited)
+	}()
 	return done
 }
 
@@ -120,12 +125,24 @@ func (r *rig) ungate() {
 	}
 }
 
+// stopRun is for a cleanup. It releases the gate, cancels ctx, and waits for Run
+// to return. It reports a Run that does not return, and does not call Fatal.
+func (r *rig) stopRun(cancel context.CancelFunc) {
+	r.ungate()
+	cancel()
+	select {
+	case <-r.exited:
+	case <-time.After(waitFor):
+		r.t.Error("Run did not return at the end of the test")
+	}
+}
+
 // start runs the writer goroutine. The returned function stops it. If the test
 // fails first, the cleanup releases the gate and cancels ctx, so Run ends.
 func (r *rig) start() (stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := r.launch(ctx)
-	r.t.Cleanup(func() { r.ungate(); cancel() })
+	r.t.Cleanup(func() { r.stopRun(cancel) })
 	return func() error {
 		cancel()
 		return r.wait(done)
@@ -241,6 +258,8 @@ func TestTU18BatchesHaveAtMost500Events(t *testing.T) {
 	case <-r.app.entered:
 		t.Fatal("the last 250 events were written before the tick")
 	case r.tick <- time.Now():
+	case <-time.After(waitFor):
+		t.Fatal("Run did not wait for the tick")
 	}
 	r.ungate()
 	wantCommits(t, r, 250)
@@ -508,15 +527,16 @@ func TestTU18CloseWinsOverCancel(t *testing.T) {
 }
 
 // T-U-18: after a full flush, Run leaves the take loop when ctx has ended. The
-// first batch waits in AppendBatch while more than 1 000 events are queued. Then
-// the test cancels ctx (no Close) and releases the batch. Run writes at most one
-// more batch, returns context.Canceled, and leaves events in the lanes.
+// test enqueues 1 200 events. When the first batch waits in AppendBatch, 500
+// events are in the batch and the rest stay in the lanes. Then the test cancels
+// ctx (no Close) and releases the batch. Run writes at most one more batch,
+// returns context.Canceled, and leaves events in the lanes.
 func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 	r := newRig(t, 4000)
 	r.gate()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := r.launch(ctx)
-	t.Cleanup(func() { r.ungate(); cancel() })
+	t.Cleanup(func() { r.stopRun(cancel) })
 	for i := int64(0); i < 1200; i++ {
 		kind := event.KindRequest
 		if i%5 == 0 {
