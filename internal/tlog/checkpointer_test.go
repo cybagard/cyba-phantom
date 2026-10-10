@@ -215,7 +215,7 @@ func TestTU12StartRefusals(t *testing.T) {
 		}
 	}
 	root, _ := e.l.RootAt(3)
-	foreign, err := note.Sign(&note.Note{Text: checkpointBody(Checkpoint{"other/origin", 3, root})}, e.signer)
+	foreign, err := note.Sign(&note.Note{Text: checkpointBody(Checkpoint{Origin: "other/origin", Size: 3, Root: root})}, e.signer)
 	must(t, err)
 	otherKey, err := SignCheckpoint(other, 3, root)
 	must(t, err)
@@ -270,9 +270,9 @@ func TestTS13GuardRefusesAndStopsUntilRestart(t *testing.T) {
 		name string
 		last Checkpoint
 	}{
-		{"smaller size", Checkpoint{testOrigin, 12, bogus}},
-		{"same size, other root", Checkpoint{testOrigin, 10, bogus}},
-		{"larger tree, no consistency proof", Checkpoint{testOrigin, 3, bogus}},
+		{"smaller size", Checkpoint{Origin: testOrigin, Size: 12, Root: bogus}},
+		{"same size, other root", Checkpoint{Origin: testOrigin, Size: 10, Root: bogus}},
+		{"larger tree, no consistency proof", Checkpoint{Origin: testOrigin, Size: 3, Root: bogus}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, 10)
@@ -300,7 +300,7 @@ func TestTS13BadStoredNoteIsNotHealthy(t *testing.T) {
 		{"not a note", func(*ckEnv, tlog.Hash) []byte { return []byte(testOrigin + "\ngarbage") }},
 		{"other key", func(e *ckEnv, r tlog.Hash) []byte {
 			other, _ := noteKeys(t, "other/origin", 2)
-			b, err := note.Sign(&note.Note{Text: checkpointBody(Checkpoint{testOrigin, 10, r})}, other)
+			b, err := note.Sign(&note.Note{Text: checkpointBody(Checkpoint{Origin: testOrigin, Size: 10, Root: r})}, other)
 			must(t, err)
 			return b
 		}},
@@ -528,7 +528,7 @@ func TestTS13StoppedLogDoesNotSign(t *testing.T) {
 		e := newEnv(t, 600)
 		c := e.mustStart(t)
 		root, _ := e.l.RootAt(100)
-		c.last = Checkpoint{testOrigin, 100, root}
+		c.last = Checkpoint{Origin: testOrigin, Size: 100, Root: root}
 		before := e.saved()
 		file := filepath.Join(e.dir, "tlog", "tile", "8", "0", "000")
 		b, err := os.ReadFile(file)
@@ -596,7 +596,7 @@ func TestTS13SizeConversions(t *testing.T) {
 	}
 	e := newEnv(t, 3)
 	c := e.mustStart(t)
-	c.last = Checkpoint{testOrigin, 1 << 63, tlog.Hash{}}
+	c.last = Checkpoint{Origin: testOrigin, Size: 1 << 63, Root: tlog.Hash{}}
 	if err := c.consistent(3, tlog.Hash{}); err == nil {
 		t.Error("last signed size above the limit")
 	}
