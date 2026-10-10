@@ -90,9 +90,9 @@ var heap struct {
 // text, and then, through root, each parent directory and each of the database,
 // -wal, -shm and -journal files, before SQLite opens anything. A new database
 // file is made through root with mode 0600. After the open, the file that SQLite
-// reports must be the checked path. A symlink that someone puts in the short
-// window between the checks and the open of SQLite is not stopped, but that last
-// check finds it when it changes the path.
+// reports must be the checked path. A short window stays between the checks and
+// the open of SQLite. Open does not stop a symlink that is put in place in this
+// window. If the symlink changes the path, the database_list check finds it.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {

@@ -206,7 +206,7 @@ func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 // change the owner, so it skips when the process does not run as root.
 func TestTS15OtherOwnerIsRefused(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("changing the owner of a file needs root")
+		t.Skip("the test must run as root to change the owner of a file")
 	}
 	f := newFixture(t)
 	if err := os.Chown(filepath.Join(f.state, "events.db"), 12345, -1); err != nil {
