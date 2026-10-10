@@ -19,6 +19,7 @@ func TestTS14_NoNetworkImports(t *testing.T) {
 	for _, pkg := range []string{
 		"github.com/cybagard/cyba-phantom/internal/verify",
 		"github.com/cybagard/cyba-phantom/internal/tlog/verifier",
+		"github.com/cybagard/cyba-phantom/cmd/phantom-verify",
 	} {
 		out, err := exec.Command(goTool, "list", "-deps", pkg).Output()
 		if err != nil {

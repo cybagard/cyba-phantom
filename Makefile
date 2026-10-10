@@ -22,6 +22,7 @@ all: build lint test trace mirror-diff
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom ./cmd/phantom
+	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-verify ./cmd/phantom-verify
 
 test:
 	$(GO) test -race ./...

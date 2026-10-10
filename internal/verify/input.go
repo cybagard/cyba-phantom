@@ -35,12 +35,15 @@ const (
 // the bound of the log.
 const maxSize = verifier.MaxSize
 
-// The errors of this package.
+// The errors of this package. ErrSignature means that the signature does not
+// verify with the key (not verified). ErrCheckpoint means that the note is not
+// valid in form (an input error).
 var (
 	ErrTooLarge   = errors.New("verify: input is larger than its size cap")
 	ErrRead       = errors.New("verify: input cannot be read")
 	ErrKey        = errors.New("verify: key text is not a valid verifier key")
-	ErrCheckpoint = errors.New("verify: checkpoint note is not valid for the key")
+	ErrCheckpoint = errors.New("verify: checkpoint note is not valid in form")
+	ErrSignature  = errors.New("verify: checkpoint signature does not verify with the key")
 	ErrEvent      = errors.New("verify: event is not one canonical JSON object")
 	ErrProof      = errors.New("verify: proof file is not valid")
 	ErrRange      = errors.New("verify: size or index is outside 0 to 2^48")
@@ -85,12 +88,29 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 // The origin is the name of the verifier. The parser refuses a note with two or
 // more signature lines. This rule applies also when a line is from another
 // key. The function checks the size against 2^48.
+//
+// When the strict parser refuses the note, the function opens the note with
+// the same key. If note.Open says that the signature of the key is wrong, the
+// result is ErrSignature (not verified). The result is also ErrSignature if
+// no signature line is from the key, for example in a note signed by another
+// key. Every other result is ErrCheckpoint (an input error). These are text
+// that is not a note, a second signature line, and a bad body. A size that is
+// not a 64-bit number also gives ErrCheckpoint. A size above 2^48 gives
+// ErrRange. The first fault that note.Open finds decides between ErrSignature
+// and ErrCheckpoint. A note that is both malformed and badly signed can give
+// either.
 func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	if len(b) > MaxNoteBytes {
 		return verifier.Checkpoint{}, ErrTooLarge
 	}
 	c, err := verifier.ParseCheckpoint(b, v.Name(), v)
 	if err != nil {
+		_, nerr := note.Open(b, note.VerifierList(v))
+		var invalid *note.InvalidSignatureError
+		var unverified *note.UnverifiedNoteError
+		if errors.As(nerr, &invalid) || errors.As(nerr, &unverified) {
+			return verifier.Checkpoint{}, ErrSignature
+		}
 		return verifier.Checkpoint{}, ErrCheckpoint
 	}
 	if c.Size > maxSize {
