@@ -209,5 +209,5 @@ jobs:
 
       - name: Binary facts
         run: |
-          file bin/canary-a || true
-          stat -c%s bin/canary-a | awk '{printf "binary size: %d bytes\n", $1}'
+          file bin/phantom-a || true
+          stat -c%s bin/phantom-a | awk '{printf "binary size: %d bytes\n", $1}'

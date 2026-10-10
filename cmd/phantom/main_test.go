@@ -45,6 +45,20 @@ func validBody(t *testing.T) string {
 	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
 }
 
+// TestTS10_Usage checks that a run with no argument exits 2 and prints the fixed usage line.
+func TestTS10_Usage(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if code := run(nil, nil, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if want := "usage: phantom [--check] <config-path>\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 // TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
 func TestTS10_CheckWiring(t *testing.T) {
 	var got config.Net
@@ -86,7 +100,7 @@ func TestTS10_CheckNoDial(t *testing.T) {
 // with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
 // URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
 func TestTS10_CheckExec(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "canary")
+	bin := filepath.Join(t.TempDir(), "phantom")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -111,7 +125,7 @@ func TestTS10_CheckExec(t *testing.T) {
 	if code != 0 {
 		t.Errorf("valid file: exit %d, stderr %q", code, se)
 	}
-	code, _, se = run(writeFile(t, validBody(t)), "CANARY_ACME_CA=not a url")
+	code, _, se = run(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
 	if code == 0 {
 		t.Error("acme.ca not a URL: exit 0")
 	}

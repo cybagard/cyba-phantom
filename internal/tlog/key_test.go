@@ -18,7 +18,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 )
 
-const testOrigin = "agent-canary/test"
+const testOrigin = "phantom/test"
 
 func newState(t *testing.T) (*os.Root, string) {
 	t.Helper()

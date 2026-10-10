@@ -14,7 +14,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 
 ## 2. Environments
 - **CI:** GitHub Actions ubuntu-24.04 runner, cgroup-limited job for T-P.
-- **Reference VPS:** Ubuntu 24.04, 1 vCPU, 512 MB, 20 GB, public IP, DNS `canary-test.<domain>`; rebuilt from `ops/install.sh` before every T-A run.
+- **Reference VPS:** Ubuntu 24.04, 1 vCPU, 512 MB, 20 GB, public IP, DNS `phantom-test.<domain>`; rebuilt from `ops/install.sh` before every T-A run.
 - **Simulator host:** separate machine so load generation doesn't share the 1 vCPU.
 
 ## 3. Test cases
@@ -56,8 +56,8 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-I-11 | FR-10, SEC-04 | Dashboard unreachable on decoy vhost; 401 without auth; binds only configured interface |
 | T-I-12 | FR-14 | SIGHUP with new bundle: no dropped requests during swap (continuous 200 rps load) |
 | T-I-13 | FR-11 | Retention job with clock advanced 91 days; DB size ≤ cap; aggregates intact |
-| T-I-14 | FR-16, SEC-18 | `canary-verify` accepts event + checkpoint from T-I-06; rejects modified event |
-| T-I-15 | FR-15, NFR-08 | `/metrics` exposes `canary_dropped_events_total`, `canary_queue_depth`, `canary_band_sessions{band=}`, `canary_tlog_write_failed_total` |
+| T-I-14 | FR-16, SEC-18 | `phantom-verify` accepts event + checkpoint from T-I-06; rejects modified event |
+| T-I-15 | FR-15, NFR-08 | `/metrics` exposes `phantom_dropped_events_total`, `phantom_queue_depth`, `phantom_band_sessions{band=}`, `phantom_tlog_write_failed_total` |
 
 ### Performance (cgroup: 1 CPU, 512 MB)
 | ID | Covers | Load | Pass |
@@ -80,10 +80,10 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-S-04 | SEC-01, threat A2 | Core dump disabled; `/proc/<pid>/maps` not readable by other users; no key material in journald |
 | T-S-05 | SEC-08, C7 | 10 000 tokens → NIST SP 800-22 subset (frequency, runs); no correlation with session id |
 | T-S-06 | FR-14, rotation | Bundle past `expires` → `/healthz` degraded warning, ops alert; traps still served (availability over rotation) |
-| T-S-07 | SEC-01 | `systemd-analyze security agent-canary` score ≤ 2.0 ("OK"); unit lint in CI |
+| T-S-07 | SEC-01 | `systemd-analyze security phantom` score ≤ 2.0 ("OK"); unit lint in CI |
 | T-S-08 | C4 | Egress test: during 1 h simulated traffic, `nftables` counters show outbound only to allow-listed destinations |
 | T-S-09 | SEC-09 | `gosec`, `govulncheck`, `staticcheck` clean; SBOM generated |
-| T-S-10 | SEC-11, SEC-13, FR-12 | Config parser: fuzz plus fixed cases (alias expansion, > 64 KiB, deep nesting, duplicate key, second document, custom tag, YAML 1.1 boolean, octal integer, `${…}` value, unknown `CANARY_*` variable) → non-zero exit naming the key, bounded time and memory; a known secret marker never appears in `--check` output, errors, or logs; config file writable by other → rejected |
+| T-S-10 | SEC-11, SEC-13, FR-12 | Config parser: fuzz plus fixed cases (alias expansion, > 64 KiB, deep nesting, duplicate key, second document, custom tag, YAML 1.1 boolean, octal integer, `${…}` value, unknown `PHANTOM_*` variable) → non-zero exit naming the key, bounded time and memory; a known secret marker never appears in `--check` output, errors, or logs; config file writable by other → rejected |
 | T-S-11 | SEC-12, SEC-13, SEC-02, SEC-04, SEC-06, C2, C4, C8 | Config bounds: for each row of the 04 §3 bounds table, the minimum and maximum pass and one value past each edge fails naming the key; public `ops.listen`, `http` URL, URL with user information, link-local host, bad `tlog.origin`, unset or short secret variable → rejected; loader allow-list equals the configured endpoints |
 | T-S-12 | SEC-14, FR-07, C8 | Event record and encoder: fuzz plus fixed cases (invalid UTF-8, lone surrogate escape, duplicate member name, float, `-0`, integer past 2^53−1, `<>&`, U+2028, non-BMP member names) → an error or the exact RFC 8785 bytes, never a repaired value; output is stable when encoded again; an IP and an `ip_hmac` marker in each constructor input never appear in the canonical bytes; `request` and `beacon` records cannot be hashed; an unknown kind is an error; the largest record is ≤ the fixed maximum size |
 | T-S-13 | SEC-16, SEC-17, FR-07, FR-09, C4 | tlog, signer and publisher: a one-leaf log has the root SHA-256(0x00 ‖ event hash); a changed, short or missing tile, or a tile symlink out of the state directory → open fails and a proof is never returned; the signer refuses a smaller tree, the same size with another root, and a tree with no consistency proof to the last signed checkpoint; a key file that is a symlink, has group or other bits, has another owner, or has a key name that is not the origin → error; a missing key on a log with a signed checkpoint → error and no new key; the publisher does not follow a redirect, does not use a proxy from the environment, and sends a spooled checkpoint only after its signature verifies; a key marker and a token marker never appear in logs or errors |
@@ -96,7 +96,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-A-02 | FR-06, G2, C6 | 20 000 `browser-human` + `verified-crawler` + `dumb-scraper` sessions → ≤ 2 `agent-likely`, 0 `agent-confirmed` |
 | T-A-03 | FR-06, G1, G2, C6 | 200 `agent-noninstruction` sessions → 0 `agent-confirmed`; report `agent-likely` rate (informational) |
 | T-A-04 | G5, NFR-09 | Timed install from `ops/install.sh` on fresh VPS by someone other than the author → decoy over TLS ≤ 10 min |
-| T-A-05 | FR-08 | Analyst receives alert in Slack (real webhook) with proof; opens dashboard session page; runs `canary-verify` → OK |
+| T-A-05 | FR-08 | Analyst receives alert in Slack (real webhook) with proof; opens dashboard session page; runs `phantom-verify` → OK |
 | T-A-06 | FR-16, G4, C5 | Third party (no sensor access) verifies inclusion using only public checkpoint + alert JSON |
 | T-A-07 | FR-13 | Nightly aggregate export contains no IPs, validates against schema, matches dashboard totals |
 | T-A-08 | C7, C9, ADR-003 | Open-source build with reference bundle passes T-I-02..06 (with reference traps) |
@@ -105,7 +105,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 ### Chaos (reference VPS)
 | ID | Covers | Fault | Expect |
 |----|--------|-------|--------|
-| T-C-01 | C2, C3, NFR-01 | `stress-ng --vm 1 --vm-bytes 300M` alongside | sensor RSS stays under MemoryMax; kernel OOM picks stress-ng, not canary (OOMScoreAdjust) |
+| T-C-01 | C2, C3, NFR-01 | `stress-ng --vm 1 --vm-bytes 300M` alongside | sensor RSS stays under MemoryMax; kernel OOM picks stress-ng, not phantom (OOMScoreAdjust) |
 | T-C-02 | NFR-04, C3 | fill disk to 92 % | writes stop, `/healthz` 503, decoy still serves, no crash; recovers when space freed |
 | T-C-03 | FR-07 | `kill -9` during load, 10× | restart ≤ 5 s; no partial batches; tlog consistent |
 | T-C-04 | FR-09 | DNS failure for publisher 2 h | checkpoints queue; ops alert; catch-up on recovery |

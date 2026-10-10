@@ -1,4 +1,4 @@
-# Agent Canary — M-1 task 1.1 (09).
+# Phantom — build, test, and check targets.
 #
 # Toolchain: Go 1.27.2, pinned exactly via GOTOOLCHAIN (below; go.mod sets
 # the minimum, the env var the exact release). CI and .devcontainer run the
@@ -21,7 +21,7 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 all: build lint test trace mirror-diff
 
 build:
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/canary ./cmd/canary
+	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom ./cmd/phantom
 
 test:
 	$(GO) test -race ./...
@@ -53,9 +53,12 @@ coverage:
 	bash tools/coverage.sh
 
 # T-U-06: write the sha256 values of the hand-written canonical text into
-# internal/event/testdata. Nobody edits those values by hand (test/README).
+# internal/event/testdata. T-U-12: write the signed note into the golden
+# section of internal/tlog/testdata/notes.txt. Nobody edits those values by
+# hand (test/README).
 fixtures:
 	$(GO) test ./internal/event -run TestTU06 -update
+	$(GO) test ./internal/tlog -run TestTU12_Golden -update
 
 # T-P-07: two builds must hash identically; the binary is static and
 # <= 25 MB, built under the 07 §2 cgroup budget (1 vCPU / 512 MB).
@@ -88,10 +91,10 @@ perf-inner:
 		fi; \
 		echo "perf: cgroup limits applied (memory.max=$$mem, cpu.max=$$cpu)"; \
 	fi
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/canary-a ./cmd/canary
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/canary-b ./cmd/canary
-	@ha=$$($(HASH) bin/canary-a 2>/dev/null | cut -d' ' -f1); \
-	hb=$$($(HASH) bin/canary-b 2>/dev/null | cut -d' ' -f1); \
+	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-a ./cmd/phantom
+	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-b ./cmd/phantom
+	@ha=$$($(HASH) bin/phantom-a 2>/dev/null | cut -d' ' -f1); \
+	hb=$$($(HASH) bin/phantom-b 2>/dev/null | cut -d' ' -f1); \
 	if [ -z "$$ha" ] || [ -z "$$hb" ]; then \
 		$(call skip,no sha256sum/shasum for the reproducibility check); \
 	elif [ "$$ha" != "$$hb" ]; then \
@@ -100,15 +103,15 @@ perf-inner:
 		echo "perf: reproducible build OK ($$ha)"; \
 	fi
 	@if command -v readelf >/dev/null 2>&1; then \
-		static=$$(readelf -d bin/canary-a 2>&1 | grep -c 'no dynamic section'); \
+		static=$$(readelf -d bin/phantom-a 2>&1 | grep -c 'no dynamic section'); \
 	elif command -v ldd >/dev/null 2>&1; then \
-		static=$$(ldd bin/canary-a 2>&1 | grep -c 'not a dynamic executable'); \
+		static=$$(ldd bin/phantom-a 2>&1 | grep -c 'not a dynamic executable'); \
 	else \
 		$(call skip,no readelf/ldd for the static-link check); exit 0; \
 	fi; \
 	if [ "$$static" -ge 1 ]; then echo "perf: statically linked OK"; \
 	else echo "perf FAIL: binary is dynamically linked"; exit 1; fi
-	@size=$$(stat -c%s bin/canary-a 2>/dev/null || stat -f%z bin/canary-a 2>/dev/null); \
+	@size=$$(stat -c%s bin/phantom-a 2>/dev/null || stat -f%z bin/phantom-a 2>/dev/null); \
 	if [ -z "$$size" ]; then $(call skip,no stat for the size check); exit 0; fi; \
 	if [ "$$size" -gt 26214400 ]; then echo "perf FAIL: binary is $${size} bytes (> 25 MB)"; exit 1; fi; \
 	echo "perf: binary size $${size} bytes (<= 25 MB)"

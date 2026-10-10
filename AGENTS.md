@@ -1,6 +1,6 @@
 # Agent instructions — cyba-phantom
 
-**Agent Canary** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event, of which evidence events are kept in a tamper-evident Merkle log with Ed25519-signed checkpoints (ADR-007). Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
+**Phantom** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event, of which evidence events are kept in a tamper-evident Merkle log with Ed25519-signed checkpoints (ADR-007). Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
 
 The full spec kit lives in the private sibling repository (documentation-only, canonical). A synced read-only copy of the traceability inputs ships in `spec/`. This file mirrors the core constraints of the spec kit, so that the repo is self-contained. In the multi-root workspace both are visible. If they disagree, the spec kit wins.
 
@@ -32,8 +32,8 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 
 | Path | Role (open code; content marked ◆ arrives via bundle) |
 |------|--------------------------------------------------------|
-| `cmd/canary` | main: config, wiring, run loop |
-| `cmd/canary-verify` | verifier CLI: inclusion proof against a checkpoint |
+| `cmd/phantom` | main: config, wiring, run loop |
+| `cmd/phantom-verify` | verifier CLI: inclusion proof against a checkpoint |
 | `internal/listener` | TLS via certmagic (ACME); ClientHello capture for JA4 |
 | `internal/limiter` | conn cap, per-IP token bucket, body/header/path caps |
 | `internal/bait` | decoy vhosts, template rendering, per-session token injection, callback surfaces, JS beacon |

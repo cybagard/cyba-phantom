@@ -156,8 +156,8 @@ func TestTU10_CrossCheckFailedKey(t *testing.T) {
 			t.Errorf("a stale default is in the cross check: %v", err)
 		}
 	}
-	_, err := loadTest(writeConfig(t, base), []string{"CANARY_LISTEN_HTTP=:9443", "CANARY_OPS_LISTEN=0.0.0.0:9443"})
-	if err == nil || strings.Count(err.Error(), "\n") != 0 || !strings.Contains(err.Error(), "ops.listen at CANARY_OPS_LISTEN") {
+	_, err := loadTest(writeConfig(t, base), []string{"PHANTOM_LISTEN_HTTP=:9443", "PHANTOM_OPS_LISTEN=0.0.0.0:9443"})
+	if err == nil || strings.Count(err.Error(), "\n") != 0 || !strings.Contains(err.Error(), "ops.listen at PHANTOM_OPS_LISTEN") {
 		t.Errorf("got %v", err)
 	}
 }
@@ -336,7 +336,7 @@ func TestTU10_AllowList(t *testing.T) {
 // TestTU10_PathForm checks the path helper.
 func TestTU10_PathForm(t *testing.T) {
 	runRows(t, []row{
-		{"absolute", "/var/lib/agent-canary/certs", ""},
+		{"absolute", "/var/lib/phantom/certs", ""},
 		{"root", "/", ""},
 		{"relative", "certs", "absolute"},
 		{"dot", ".", "absolute"},
@@ -584,8 +584,8 @@ func TestTU10_URLOutput(t *testing.T) {
 		})
 	}
 	t.Run("env", func(t *testing.T) {
-		_, err := loadTest(writeConfig(t, base), []string{"CANARY_ACME_CA=https://u:" + secret + "@h/"})
-		if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "CANARY_ACME_CA") {
+		_, err := loadTest(writeConfig(t, base), []string{"PHANTOM_ACME_CA=https://u:" + secret + "@h/"})
+		if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "PHANTOM_ACME_CA") {
 			t.Errorf("got %v", err)
 		}
 	})
@@ -606,7 +606,7 @@ func TestTU10_URLOutput(t *testing.T) {
 // on a test host, so the call sets it through the environment.
 func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	t.Helper()
-	const htpasswdEnv = "CANARY_OPS_BASIC_AUTH_HTPASSWD"
+	const htpasswdEnv = "PHANTOM_OPS_BASIC_AUTH_HTPASSWD"
 	// The loader rejects a variable that occurs two times, so the default is set only if the caller does not set it.
 	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
@@ -615,7 +615,7 @@ func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 }
 
 // bound is one row of the 04 section 3 bounds table: values that pass, values that fail,
-// and the other variables that the row needs. The test sets a value by its CANARY_ variable.
+// and the other variables that the row needs. The test sets a value by its PHANTOM_ variable.
 type bound struct {
 	key        string
 	pass, fail []string
@@ -624,9 +624,9 @@ type bound struct {
 
 var (
 	longOrigin = strings.Repeat("a", 128)
-	fetchURL   = "CANARY_BUNDLE_FETCH_URL=https://bundle.example/current"
+	fetchURL   = "PHANTOM_BUNDLE_FETCH_URL=https://bundle.example/current"
 	// groupWritable is a file in a temp dir with mode 0660. The other bad values of the htpasswd row
-	// are a relative path, an unclean path, and a missing file. All of them go through the CANARY_ variable.
+	// are a relative path, an unclean path, and a missing file. All of them go through the PHANTOM_ variable.
 	groupWritable = func() string {
 		p := filepath.Join(testDir, "group-writable")
 		err := os.WriteFile(p, nil, 0o600)
@@ -648,34 +648,34 @@ var scalarBounds = []bound{
 	{key: "ops.basic_auth_htpasswd", pass: []string{filepath.Join(testDir, "htpasswd")}, fail: []string{"htpasswd", testDir + "/./htpasswd", filepath.Join(testDir, "missing"), groupWritable}},
 	{key: "acme.email", pass: []string{"a@b.example"}, fail: []string{"a@b.example\nBcc: c@d.example", "a@b.example, c@d.example", ""}},
 	{key: "acme.ca", pass: []string{"letsencrypt", "letsencrypt-staging", "https://ca.example/dir"}, fail: []string{"http://ca.example/dir", "https://u:p@ca.example/", "https://169.254.169.254/"}},
-	{key: "acme.cache_dir", pass: []string{"/var/lib/agent-canary/certs"}, fail: []string{"/var/lib/other", "var/lib/agent-canary", "/var/lib/agent-canary/../x"}},
-	{key: "bundle.path", pass: []string{"/var/lib/agent-canary/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/agent-canary/b/../../x"}},
+	{key: "acme.cache_dir", pass: []string{"/var/lib/phantom/certs"}, fail: []string{"/var/lib/other", "var/lib/phantom", "/var/lib/phantom/../x"}},
+	{key: "bundle.path", pass: []string{"/var/lib/phantom/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/phantom/b/../../x"}},
 	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "0s", "-1h"}, with: []string{fetchURL}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "1s", "0s", "-1h"}}, // The bounds apply also if the fetch is off.
 	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
 	{key: "limits.body_bytes", pass: []string{"1", "65536"}, fail: []string{"0", "65537"}},
 	{key: "limits.header_bytes", pass: []string{"1", "16384"}, fail: []string{"0", "16385"}},
-	{key: "limits.per_ip_rps", pass: []string{"1", "1000"}, fail: []string{"0", "1001"}, with: []string{"CANARY_LIMITS_PER_IP_BURST=5000"}},
+	{key: "limits.per_ip_rps", pass: []string{"1", "1000"}, fail: []string{"0", "1001"}, with: []string{"PHANTOM_LIMITS_PER_IP_BURST=5000"}},
 	{key: "limits.per_ip_rps", pass: []string{"200"}}, // The default burst is 200. A larger rate fails on the burst key (TestTS11_CrossChecks).
-	{key: "limits.per_ip_burst", pass: []string{"100", "5000"}, fail: []string{"99", "5001", "0"}, with: []string{"CANARY_LIMITS_PER_IP_RPS=100"}},
-	{key: "limits.per_ip_burst", pass: []string{"1"}, fail: []string{"0"}, with: []string{"CANARY_LIMITS_PER_IP_RPS=1"}},
+	{key: "limits.per_ip_burst", pass: []string{"100", "5000"}, fail: []string{"99", "5001", "0"}, with: []string{"PHANTOM_LIMITS_PER_IP_RPS=100"}},
+	{key: "limits.per_ip_burst", pass: []string{"1"}, fail: []string{"0"}, with: []string{"PHANTOM_LIMITS_PER_IP_RPS=1"}},
 	{key: "limits.queue_depth", pass: []string{"1", "8192"}, fail: []string{"0", "8193"}},
-	{key: "store.path", pass: []string{"/var/lib/agent-canary/events.db"}, fail: []string{"/tmp/events.db", "events.db"}},
+	{key: "store.path", pass: []string{"/var/lib/phantom/events.db"}, fail: []string{"/tmp/events.db", "events.db"}},
 	{key: "store.max_bytes", pass: []string{"268435456", "9223372036854775807"}, fail: []string{"268435455", "0", "9223372036854775808"}},
 	{key: "store.retention_days.ip", pass: []string{"1", "7"}, fail: []string{"0", "8"}},
 	{key: "store.retention_days.raw", pass: []string{"1", "30"}, fail: []string{"0", "31"}},
 	{key: "store.retention_days.events", pass: []string{"30", "90"}, fail: []string{"29", "91", "0"}},
-	{key: "store.retention_days.events", pass: []string{"5"}, fail: []string{"4"}, with: []string{"CANARY_STORE_RETENTION_DAYS_RAW=5"}},
-	{key: "tlog.dir", pass: []string{"/var/lib/agent-canary/tlog"}, fail: []string{"/var/tlog", "tlog"}},
-	{key: "tlog.origin", pass: []string{"a", longOrigin, "agent-canary/abc_1.2-x"}, fail: []string{"", longOrigin + "a", "agent-canary/<install_id>", "a b", "a\nb", "é"}},
+	{key: "store.retention_days.events", pass: []string{"5"}, fail: []string{"4"}, with: []string{"PHANTOM_STORE_RETENTION_DAYS_RAW=5"}},
+	{key: "tlog.dir", pass: []string{"/var/lib/phantom/tlog"}, fail: []string{"/var/tlog", "tlog"}},
+	{key: "tlog.origin", pass: []string{"a", longOrigin, "phantom/abc_1.2-x"}, fail: []string{"", longOrigin + "a", "phantom/<install_id>", "a b", "a\nb", "é"}},
 	{key: "tlog.checkpoint_interval", pass: []string{"1m", "24h"}, fail: []string{"59s", "24h0m1s", "0s", "-1m"}},
 	{key: "alerts.min_band", pass: []string{"agent-likely", "agent-confirmed"}, fail: []string{"human", "crawler", "", "Agent-Likely"}},
 	{key: "privacy.store_body_prefix", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 	{key: "privacy.include_ip", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 }
 
-// TestTS11_ScalarBounds runs the bounds table through Load, one value per CANARY_ variable.
+// TestTS11_ScalarBounds runs the bounds table through Load, one value per PHANTOM_ variable.
 func TestTS11_ScalarBounds(t *testing.T) {
 	for _, b := range scalarBounds {
 		env := envName(b.key)
@@ -723,7 +723,7 @@ func TestTU10_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const state = "/var/lib/agent-canary/"
+	const state = "/var/lib/phantom/"
 	rows := map[string]Value{
 		"bundle.path":                 {Str: state + "bundle/current.cbnd"},
 		"bundle.fetch_url":            {},
@@ -753,7 +753,7 @@ func TestTU10_Defaults(t *testing.T) {
 	}
 }
 
-// TestTU10_Overrides checks that each key has a CANARY_ override that goes through the bounds.
+// TestTU10_Overrides checks that each key has a PHANTOM_ override that goes through the bounds.
 // Each key of the table must have a row in scalarBounds.
 func TestTU10_Overrides(t *testing.T) {
 	rowOf := make(map[string]bound)
@@ -779,7 +779,7 @@ func TestTU10_Overrides(t *testing.T) {
 			t.Errorf("%s: the source is %q", k.path, got.Source)
 		}
 	}
-	c, err := loadProd(t, base, "CANARY_LIMITS_BODY_BYTES=100", "CANARY_STORE_RETENTION_DAYS_IP=3")
+	c, err := loadProd(t, base, "PHANTOM_LIMITS_BODY_BYTES=100", "PHANTOM_STORE_RETENTION_DAYS_IP=3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,8 +789,8 @@ func TestTU10_Overrides(t *testing.T) {
 	if v, _ := c.Get("store.retention_days.ip"); v.Int != 3 {
 		t.Errorf("got %+v", v)
 	}
-	_, err = loadProd(t, base+"limits:\n  body_bytes: 100\n", "CANARY_LIMITS_BODY_BYTES=65537")
-	if err == nil || !strings.Contains(err.Error(), "limits.body_bytes at CANARY_LIMITS_BODY_BYTES") {
+	_, err = loadProd(t, base+"limits:\n  body_bytes: 100\n", "PHANTOM_LIMITS_BODY_BYTES=65537")
+	if err == nil || !strings.Contains(err.Error(), "limits.body_bytes at PHANTOM_LIMITS_BODY_BYTES") {
 		t.Errorf("got %v", err)
 	}
 }
@@ -801,7 +801,7 @@ func TestTU10_NewSectionsInvalid(t *testing.T) {
 		{base + "bundle:\n  fetch_url: http://b.example/x\n", "bundle.fetch_url"},
 		{base + "limits:\n  body_bytes: 65537\n", "limits.body_bytes"},
 		{base + "store:\n  retention_days:\n    ip: 8\n", "store.retention_days.ip"},
-		{"acme:\n  email: sec@example.com\ntlog:\n  origin: \"agent-canary/<install_id>\"\n", "tlog.origin"},
+		{"acme:\n  email: sec@example.com\ntlog:\n  origin: \"phantom/<install_id>\"\n", "tlog.origin"},
 		{base + "alerts:\n  min_band: human\n", "alerts.min_band"},
 		{base + "privacy:\n  include_ip: 1\n", "privacy.include_ip"},
 		{"acme:\n  email: sec@example.com\n", "tlog.origin"}, // The key is required.
@@ -820,7 +820,7 @@ func TestTU10_FetchURLAllowList(t *testing.T) {
 	if err != nil || len(c.AllowList()) != 2 { // acme.ca and the publisher of base
 		t.Fatalf("fetch off: %v, %+v", err, c)
 	}
-	c, err = loadProd(t, base, "CANARY_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b")
+	c, err = loadProd(t, base, "PHANTOM_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -988,12 +988,12 @@ func TestTS11_Lists(t *testing.T) {
 		{"env lower case", pub(tok("ckpt_token")), nil, "tlog.publish[0].token_env"},
 		{"env digit first", pub(tok("1TOKEN")), []string{"1TOKEN=x"}, "tlog.publish[0].token_env"},
 		{"env hyphen", pub(tok("CKPT-TOKEN")), []string{"CKPT-TOKEN=x"}, "tlog.publish[0].token_env"},
-		{"env CANARY_ prefix", pub(tok("CANARY_TOKEN")), []string{"CANARY_TOKEN=x"}, "tlog.publish[0].token_env"},
+		{"env PHANTOM_ prefix", pub(tok("PHANTOM_TOKEN")), []string{"PHANTOM_TOKEN=x"}, "tlog.publish[0].token_env"},
 		{"env underscore first", pub(tok("_TOKEN")), []string{"_TOKEN=x"}, ""},
 		{"env unset", pub(tok("NO_SUCH_VAR")), nil, "tlog.publish[0].token_env"},
 		{"env empty", pub(pubItem), []string{"CKPT_TOKEN="}, "tlog.publish[0].token_env"},
 		{"env hmac unset", snk(hookItem), nil, "alerts.sinks[0].hmac_secret_env"},
-		{"env hmac CANARY_ prefix", snk(hmac("CANARY_HMAC")), []string{"CANARY_HMAC=" + strings.Repeat("h", 32)}, "alerts.sinks[0].hmac_secret_env"},
+		{"env hmac PHANTOM_ prefix", snk(hmac("PHANTOM_HMAC")), []string{"PHANTOM_HMAC=" + strings.Repeat("h", 32)}, "alerts.sinks[0].hmac_secret_env"},
 		{"env hmac not string", snk(hmac("5")), nil, "alerts.sinks[0].hmac_secret_env"},
 	}
 	for _, r := range rows {
@@ -1026,7 +1026,7 @@ func TestTS10_EnvErrorsHideName(t *testing.T) {
 		{"hmac unset", hook, "alerts.sinks[0].hmac_secret_env", nil},
 		{"hmac short", hook, "alerts.sinks[0].hmac_secret_env", []string{name + "=short"}},
 		{"name rule", strings.Replace(tok, name, name+"-x", 1), "tlog.publish[0].token_env", nil},
-		{"CANARY_ prefix", strings.Replace(tok, name, "CANARY_"+name, 1), "tlog.publish[0].token_env", nil},
+		{"PHANTOM_ prefix", strings.Replace(tok, name, "PHANTOM_"+name, 1), "tlog.publish[0].token_env", nil},
 	}
 	for _, r := range rows {
 		t.Run(r.label, func(t *testing.T) {
@@ -1042,7 +1042,7 @@ func TestTS10_EnvErrorsHideName(t *testing.T) {
 }
 
 // TestTU10_ListKeys checks that every list key of 04 section 3 loads and keeps its value with the source line,
-// and that a list key has no CANARY_ override.
+// and that a list key has no PHANTOM_ override.
 func TestTU10_ListKeys(t *testing.T) {
 	file := acmeTlog + "  publish:\n    - " + pubItem + "\n    - " + strings.Replace(pubItem, "CKPT_TOKEN", "OTHER_TOKEN", 1) +
 		"\nalerts:\n  sinks:\n    - " + hookItem + "\n    - " + sysItem + "\n    - " + mailItem + "\n"
@@ -1062,9 +1062,9 @@ func TestTU10_ListKeys(t *testing.T) {
 			t.Errorf("%s: got %+v, want %q from the file", p, v, s)
 		}
 	}
-	for _, name := range []string{"CANARY_TLOG_PUBLISH", "CANARY_TLOG_PUBLISH_0_URL", "CANARY_ALERTS_SINKS", "CANARY_ALERTS_SINKS_0_TYPE", "CANARY_ALERTS_SINKS_2_TO"} {
+	for _, name := range []string{"PHANTOM_TLOG_PUBLISH", "PHANTOM_TLOG_PUBLISH_0_URL", "PHANTOM_ALERTS_SINKS", "PHANTOM_ALERTS_SINKS_0_TYPE", "PHANTOM_ALERTS_SINKS_2_TO"} {
 		_, err := loadProd(t, file, append([]string{name + "=x"}, append([]string{"OTHER_TOKEN=x"}, listEnv...)...)...)
-		if err == nil || !strings.Contains(err.Error(), name+": unknown CANARY_ variable") {
+		if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM_ variable") {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
