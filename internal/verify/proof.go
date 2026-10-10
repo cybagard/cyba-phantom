@@ -97,6 +97,60 @@ func ReadInclusionProof(r io.Reader) (InclusionProof, error) {
 	return ParseInclusionProof(b)
 }
 
+// ConsistencyProof is a parsed consistency proof file. It links the tree of
+// OldSize leaves to the tree of NewSize leaves.
+type ConsistencyProof struct {
+	OldSize, NewSize int64
+	Hashes           []modtlog.Hash
+}
+
+// consistencyFile is the wire form. A Value has the same meaning as in proofFile.
+type consistencyFile struct {
+	OldSize jsontext.Value `json:"old_size"`
+	NewSize jsontext.Value `json:"new_size"`
+	Hashes  jsontext.Value `json:"hashes"`
+}
+
+// ParseConsistencyProof parses a consistency proof file with the rules of 04 §7.
+// The input must be one JSON object of at most 16 KiB. The object must not have
+// a duplicate, unknown or wrong-case member, and must not have a null value. The
+// members old_size, new_size and hashes are required. The old size must not be
+// larger than the new size.
+func ParseConsistencyProof(b []byte) (ConsistencyProof, error) {
+	if len(b) > MaxProofBytes {
+		return ConsistencyProof{}, ErrTooLarge
+	}
+	var f consistencyFile
+	if json.Unmarshal(b, &f, jsonOpts) != nil { // also refuses a second value
+		return ConsistencyProof{}, ErrProof
+	}
+	var p ConsistencyProof
+	var err error
+	if p.OldSize, err = parseSize(f.OldSize); err != nil {
+		return ConsistencyProof{}, err
+	}
+	if p.NewSize, err = parseSize(f.NewSize); err != nil {
+		return ConsistencyProof{}, err
+	}
+	if p.OldSize > p.NewSize {
+		return ConsistencyProof{}, ErrProof
+	}
+	if p.Hashes, err = parseHashes(f.Hashes, maxConsistencyHashes); err != nil {
+		return ConsistencyProof{}, err
+	}
+	return p, nil
+}
+
+// ReadConsistencyProof reads a consistency proof file with the size cap, then
+// calls ParseConsistencyProof.
+func ReadConsistencyProof(r io.Reader) (ConsistencyProof, error) {
+	b, err := readCapped(r, MaxProofBytes)
+	if err != nil {
+		return ConsistencyProof{}, err
+	}
+	return ParseConsistencyProof(b)
+}
+
 // parseSize reads a JSON number that is a plain decimal integer from 0 to 2^48.
 // The function refuses a missing member, null, a sign, a fraction and an
 // exponent. It checks the range before the cast to int64.
