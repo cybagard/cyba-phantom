@@ -23,5 +23,7 @@ func ParseCheckpoint(msg []byte, origin string, v note.Verifier) (Checkpoint, er
 	return verifier.ParseCheckpoint(msg, origin, v)
 }
 
-// canonicalDecimal reports whether s is a canonical decimal.
+// canonicalDecimal reports whether s is a canonical decimal: digits only, no
+// sign, no space, and no leading zero except for "0". See
+// verifier.CanonicalDecimal.
 func canonicalDecimal(s string) bool { return verifier.CanonicalDecimal(s) }

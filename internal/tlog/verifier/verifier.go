@@ -2,8 +2,9 @@
 // sensor (FR-07, SEC-16): the strict parser of a signed checkpoint, the leaf
 // hash of an event, and the check of an inclusion proof. The package opens no
 // file and no network connection. It imports no net, net/http, or crypto/tls,
-// directly or through a dependency. The verifier command depends on it and not
-// on the package that writes the log (SEC-18).
+// directly or through a dependency. A verifier command must depend on this
+// package and not on internal/tlog (SEC-18). The package also holds the note
+// body writer (CheckpointBody) and SignCheckpoint, which the log uses.
 package verifier
 
 import (
@@ -26,9 +27,11 @@ const (
 // ruleInclusion is the rule in the text of an Error from VerifyInclusion.
 const ruleInclusion = "proof does not match the event hash, the index, and the tree head"
 
-// Error names the file that failed and the rule that failed. The name is a
-// tile path, the name of the tree head, a directory, a comma-separated list
-// of tile paths, or a fixed word. It is never empty.
+// Error names the file that failed and the rule that failed. The name is never
+// empty. This package makes errors with fixed words as names. The log package
+// (internal/tlog) makes errors of the same type with other names: a tile path,
+// the name of the tree head, a directory, or a comma-separated list of tile
+// paths.
 type Error struct {
 	Name string
 	Rule string

@@ -40,7 +40,7 @@ func SignCheckpoint(signer note.Signer, size uint64, root [32]byte) ([]byte, err
 
 // ParseCheckpoint is the strict parser for the notes of the sensor (SEC-16).
 // It returns an error if the note is larger than 1 KiB. It returns an error if
-// the signature does not verify with verifier. It returns an error if the
+// the signature does not verify with the given note verifier. It returns an error if the
 // signature block does not have exactly one line. It returns an error if the
 // body is not exactly three canonical lines: the configured origin, a canonical
 // decimal size, and a canonical base64 root of 32 bytes.
