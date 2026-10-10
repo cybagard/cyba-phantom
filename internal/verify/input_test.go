@@ -13,7 +13,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
-const origin = "agent-canary/test"
+const origin = "phantom/test"
 
 var testRoot = [32]byte{1, 2, 3}
 
@@ -86,12 +86,12 @@ func TestTS14_Checkpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongOrigin, err := note.Sign(&note.Note{Text: "agent-canary/other\n7\n" + "AQIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"}, s)
+	wrongOrigin, err := note.Sign(&note.Note{Text: "phantom/other\n7\n" + "AQIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"}, s)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Another key text gives a verifier with another name: the origin follows the key.
-	_, nameText := newKey(t, "agent-canary/name")
+	_, nameText := newKey(t, "phantom/name")
 	nameV, _ := ParseKey([]byte(nameText))
 	for name, tc := range map[string]struct {
 		msg  []byte
