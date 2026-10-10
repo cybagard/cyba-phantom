@@ -9,15 +9,18 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/mod/sumdb/note"
 )
 
 // The errors of the verifier state (ADR-021, decision 6). ErrState covers each
-// fault of the state: it cannot be opened, read, or written, or it does not
-// parse with the key. ErrStateChanged means that the state file changed between
-// the load and the write. The text of both is fixed. A parse error is never
-// wrapped: a state of another key is a state fault, not a bad signature.
+// fault of the state: there is no usable state directory, or the state cannot
+// be opened, read, or written, or it does not parse with the key.
+// ErrStateChanged means that the state file changed between the load and the
+// write: the bytes differ, or the file is now absent or present. The text of
+// both is fixed. A parse error is never wrapped: a state of another key is a
+// state fault, not a bad signature.
 var (
 	ErrState        = errors.New("verify: the state is not valid")
 	ErrStateChanged = errors.New("verify: the state changed during the run")
@@ -94,7 +97,8 @@ func (s *State) Close() error { return s.root.Close() }
 // read reads the state file. It returns false if the file does not exist. The
 // file must be a regular file, and the open file must be the file that Lstat
 // saw. Root.Open follows a symlink that stays inside the root, so Lstat comes
-// first.
+// first. The open uses O_NONBLOCK. Thus a FIFO that replaced the file after
+// Lstat does not block the open, and the SameFile check refuses it.
 func (s *State) read() ([]byte, bool, error) {
 	li, err := s.root.Lstat(s.name)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -103,7 +107,7 @@ func (s *State) read() ([]byte, bool, error) {
 	if err != nil || !li.Mode().IsRegular() {
 		return nil, false, ErrState
 	}
-	f, err := s.root.Open(s.name)
+	f, err := s.root.OpenFile(s.name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, false, ErrState
 	}
@@ -125,8 +129,9 @@ func (s *State) read() ([]byte, bool, error) {
 //
 // The write uses a temporary file with mode 0600, Sync, and Rename. Before the
 // rename, Update reads the state file again. If it is not the file that was
-// loaded, Update removes the temporary file and returns ErrStateChanged. On
-// each failure, Update removes the temporary file.
+// loaded, Update removes the temporary file and returns ErrStateChanged. After
+// the rename, Update syncs the directory. On each failure before the rename,
+// Update removes the temporary file.
 func (s *State) Update(latest []byte) (StateChange, error) {
 	c, err := ParseCheckpoint(latest, s.v)
 	if err != nil {
@@ -176,6 +181,20 @@ func (s *State) write(latest []byte) (err error) {
 		return ErrStateChanged
 	}
 	if s.root.Rename(tmp, s.name) != nil {
+		return ErrState
+	}
+	return s.syncDir()
+}
+
+// syncDir syncs the state directory, so that the rename survives a crash.
+func (s *State) syncDir() error {
+	d, err := s.root.Open(".")
+	if err != nil {
+		return ErrState
+	}
+	serr := d.Sync()
+	cerr := d.Close()
+	if serr != nil || cerr != nil {
 		return ErrState
 	}
 	return nil

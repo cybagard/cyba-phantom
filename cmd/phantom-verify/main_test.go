@@ -713,7 +713,65 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
-// T-S-14: if stdout cannot be written, the command gives exit 2 and a fixed line.
+// T-S-14: a note of size 0 with the empty root is accepted with no proof, also
+// as the first checkpoint. A larger checkpoint then needs no proof. A signed
+// note of size 0 with another root is refused on first use, and no state file
+// is written.
+func TestTS14_StateSizeZero(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 5, `{"n":%d}`)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	home := t.TempDir()
+
+	code, stdout, stderr := invokeIn(t, home, "--key", key, "--checkpoint", f.write("cp0", checkpointAt(t, l, s, 0)))
+	if code != 0 || stderr != "" {
+		t.Fatalf("size 0: exit %d, stderr %q", code, stderr)
+	}
+	wantLines(t, "size 0", stdout, "size: 0", firstUseLine)
+	code, stdout, stderr = invokeIn(t, home, "--key", key, "--checkpoint", f.write("cp5", checkpointAt(t, l, s, 5)))
+	if code != 0 || stderr != "" {
+		t.Fatalf("larger: exit %d, stderr %q", code, stderr)
+	}
+	wantLines(t, "larger", stdout, "state: updated")
+
+	root := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	bad, err := note.Sign(&note.Note{Text: origin + "\n0\n" + root + "\n"}, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.Mkdir(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := stateSnap(t, empty)
+	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", f.write("bad0", bad), "--state", empty)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "the log has a fork") || strings.Contains(stderr, "state:") {
+		t.Errorf("another root: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if after := stateSnap(t, empty); after != before || after != "" {
+		t.Errorf("another root: the state directory changed:\n%q\n%q", before, after)
+	}
+	noLeak(t, "another root", stderr)
+}
+
+// T-S-14: the table of refusals maps a state change during the run to exit 2
+// and a fixed text. The command cannot change the state between the load and
+// the write, so the table is checked here.
+func TestTS14_StateChangedRefusal(t *testing.T) {
+	for _, r := range refusals {
+		if r.err == verify.ErrStateChanged {
+			if r.code != 2 || r.msg != "state fault: the state changed during the run" {
+				t.Errorf("exit %d, text %q", r.code, r.msg)
+			}
+			return
+		}
+	}
+	t.Error("the table has no entry for ErrStateChanged")
+}
+
+// T-S-14: if stdout cannot be written, the command gives exit 2 and a fixed
+// line. The state is already written, so stderr has the state line first.
 func TestTS14_OutputError(t *testing.T) {
 	s, keyText := testKey(t, origin)
 	l, _ := testLog(t, 3, `{"n":%d}`)
@@ -721,7 +779,7 @@ func TestTS14_OutputError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var stderr bytes.Buffer
 	code := run([]string{"--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 3))}, failWriter{}, &stderr)
-	if want := "phantom-verify: output error: stdout cannot be written\n"; code != 2 || stderr.String() != want {
+	if want := firstUseLine + "\nphantom-verify: output error: stdout cannot be written\n"; code != 2 || stderr.String() != want {
 		t.Errorf("exit %d, stderr %q, want exit 2 and %q", code, stderr.String(), want)
 	}
 }

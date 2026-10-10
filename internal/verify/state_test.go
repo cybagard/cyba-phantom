@@ -2,6 +2,7 @@ package verify
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -152,11 +153,12 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 		first  bool // no state at load
 		change func(file string) error
 		want   string // the bytes in the file after the run, "" for none
+		err    error  // the error of Update
 	}{
-		"state replaced":     {false, func(f string) error { return os.WriteFile(f, cp(7), 0o600) }, string(cp(7))},
-		"state removed":      {false, os.Remove, ""},
-		"state made":         {true, func(f string) error { return os.WriteFile(f, cp(7), 0o600) }, string(cp(7))},
-		"state made, a link": {true, func(f string) error { return os.Symlink("x", f) }, ""},
+		"state replaced":     {false, func(f string) error { return os.WriteFile(f, cp(7), 0o600) }, string(cp(7)), ErrStateChanged},
+		"state removed":      {false, os.Remove, "", ErrStateChanged},
+		"state made":         {true, func(f string) error { return os.WriteFile(f, cp(7), 0o600) }, string(cp(7)), ErrStateChanged},
+		"state made, a link": {true, func(f string) error { return os.Symlink("x", f) }, "", ErrState},
 	} {
 		dir := t.TempDir()
 		file := filepath.Join(dir, stateName(v))
@@ -173,8 +175,8 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := snapshot(t, dir)
-		if _, err := st.Update(cp(10)); err == nil || (err != ErrStateChanged && err != ErrState) {
-			t.Errorf("%s: error %v", name, err)
+		if _, err := st.Update(cp(10)); !errors.Is(err, tc.err) {
+			t.Errorf("%s: error %v, want %v", name, err, tc.err)
 		}
 		if after := snapshot(t, dir); after != before {
 			t.Errorf("%s: the directory changed:\n%s\n%s", name, before, after)
@@ -185,6 +187,26 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 			}
 		}
 		st.Close()
+	}
+}
+
+// T-S-14: a note of size 0 with the empty root is consistent with itself. A
+// note of size 0 with another root is a fork. The command uses this check for
+// the first checkpoint, when there is no state.
+func TestTS14_SizeZeroRoot(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 5)
+	empty := checkpointAt(t, l, s, 0)
+	other, err := note.Sign(&note.Note{Text: origin + "\n0\n" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)) + "\n"}, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Consistency(v, empty, empty, nil); err != nil {
+		t.Errorf("empty root: %v", err)
+	}
+	if err := Consistency(v, other, other, nil); !errors.Is(err, ErrFork) {
+		t.Errorf("another root: %v, want ErrFork", err)
 	}
 }
 

@@ -104,6 +104,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if _, err := stdout.Write(out); err != nil {
+		// The state is already written. The user must still see its line.
+		fmt.Fprintln(stderr, stateLine)
 		fmt.Fprintln(stderr, "phantom-verify: output error: stdout cannot be written")
 		return 2
 	}
@@ -138,6 +140,14 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 	line("size", fmt.Sprint(c.Size))
 	line("root", b64(c.Root))
 
+	// The prior note is read before the proof files. The list of proofs is read
+	// once. It serves the prior check and the state check.
+	var prior bytes.Buffer
+	if priorPath != "" {
+		if _, err := loadNote(priorPath, v, &prior); err != nil {
+			return nil, "", err
+		}
+	}
 	var proofs []verify.ConsistencyProof
 	seen := map[[2]int64]bool{}
 	for _, p := range consPaths {
@@ -153,10 +163,6 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 		proofs = append(proofs, cons)
 	}
 	if priorPath != "" {
-		var prior bytes.Buffer
-		if _, err := loadNote(priorPath, v, &prior); err != nil {
-			return nil, "", err
-		}
 		if err := verify.Consistency(v, prior.Bytes(), latest.Bytes(), proofs); err != nil {
 			return nil, "", err
 		}
@@ -175,6 +181,13 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 	defer st.Close()
 	if prev := st.Bytes(); prev != nil {
 		if err := verify.Consistency(v, prev, latest.Bytes(), proofs); err != nil {
+			return nil, "", err
+		}
+	}
+	if c.Size == 0 {
+		// A note of size 0 needs no proof, but its root must be the empty root.
+		// With no state, no check above has looked at the root.
+		if err := verify.Consistency(v, latest.Bytes(), latest.Bytes(), nil); err != nil {
 			return nil, "", err
 		}
 	}
