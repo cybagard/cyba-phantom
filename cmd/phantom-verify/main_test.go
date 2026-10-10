@@ -161,8 +161,18 @@ func (f files) write(name string, data []byte) string {
 	return p
 }
 
-// invoke runs the command and returns the exit code, stdout and stderr.
-func invoke(args ...string) (int, string, string) {
+// invoke runs the command with a new empty state directory and returns the
+// exit code, stdout and stderr.
+func invoke(t *testing.T, args ...string) (int, string, string) {
+	t.Helper()
+	return invokeIn(t, t.TempDir(), args...)
+}
+
+// invokeIn runs the command with the given state home in XDG_STATE_HOME. The
+// state directory of the command is "phantom-verify" in it.
+func invokeIn(t *testing.T, stateHome string, args ...string) (int, string, string) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", stateHome)
 	var stdout, stderr bytes.Buffer
 	code := run(args, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
@@ -197,7 +207,7 @@ func TestTS14_Verified(t *testing.T) {
 	root300, _ := l.RootAt(300)
 	head := []string{"origin: " + origin, "size: 300", "root: " + b64(root300)}
 
-	code, stdout, stderr := invoke("--key", key, "--checkpoint", cp(300))
+	code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp(300))
 	if code != 0 || stderr != "" {
 		t.Fatalf("checkpoint only: exit %d, stderr %q", code, stderr)
 	}
@@ -207,7 +217,7 @@ func TestTS14_Verified(t *testing.T) {
 	ev := f.write("event", events[7].Raw)
 	proof := f.write("proof", []byte(inclusionJSON(t, l, 7, 300)))
 	hs, _ := l.ProveInclusion(7, 300)
-	code, stdout, stderr = invoke("--key", key, "--checkpoint", cp(300), "--event", ev, "--proof", proof)
+	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", cp(300), "--event", ev, "--proof", proof)
 	if code != 0 || stderr != "" {
 		t.Fatalf("event and proof: exit %d, stderr %q", code, stderr)
 	}
@@ -224,7 +234,7 @@ func TestTS14_Verified(t *testing.T) {
 	pj, incl, cons := bridgedJSON(t, l, 3, 5, 300)
 	ev = f.write("event3", events[3].Raw)
 	proof = f.write("bridged", []byte(pj))
-	code, stdout, stderr = invoke("--key", key, "--checkpoint", cp(300), "--event", ev, "--proof", proof)
+	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", cp(300), "--event", ev, "--proof", proof)
 	if code != 0 || stderr != "" {
 		t.Fatalf("bridged proof: exit %d, stderr %q", code, stderr)
 	}
@@ -240,13 +250,13 @@ func TestTS14_Verified(t *testing.T) {
 	// A prior checkpoint with one consistency file, and with an extra file.
 	c1 := f.write("c1", []byte(consistencyJSON(t, l, 5, 300)))
 	c2 := f.write("c2", []byte(consistencyJSON(t, l, 6, 300)))
-	code, stdout, stderr = invoke("--key", key, "--checkpoint", cp(300), "--prior", cp(5), "--consistency", c1, "--consistency", c2)
+	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", cp(300), "--prior", cp(5), "--consistency", c1, "--consistency", c2)
 	if code != 0 || stderr != "" {
 		t.Fatalf("prior: exit %d, stderr %q", code, stderr)
 	}
 	wantLines(t, "prior", stdout, append(head, "prior consistency: verified")...)
 	// The same size needs no file.
-	code, stdout, _ = invoke("--key", key, "--checkpoint", cp(300), "--prior", cp(300))
+	code, stdout, _ = invoke(t, "--key", key, "--checkpoint", cp(300), "--prior", cp(300))
 	if code != 0 {
 		t.Errorf("prior of the same size: exit %d", code)
 	}
@@ -297,7 +307,7 @@ func TestTS14_Refused(t *testing.T) {
 		"proof size larger": {[]string{"--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", f.write("big", []byte(bigProof))},
 			"larger than the checkpoint size"},
 	} {
-		code, stdout, stderr := invoke(append([]string{"--key", key}, tc.args...)...)
+		code, stdout, stderr := invoke(t, append([]string{"--key", key}, tc.args...)...)
 		if code != 1 || stdout != "" || !strings.Contains(stderr, tc.msg) {
 			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
 		}
@@ -306,7 +316,7 @@ func TestTS14_Refused(t *testing.T) {
 		}
 		noLeak(t, name, stderr)
 	}
-	if code, _, _ := invoke("--key", key, "--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", proof); code != 0 {
+	if code, _, _ := invoke(t, "--key", key, "--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", proof); code != 0 {
 		t.Errorf("unchanged inputs: exit %d", code)
 	}
 }
@@ -336,7 +346,6 @@ func TestTS14_InputFaults(t *testing.T) {
 		"extra argument":               {"--key", key, "--checkpoint", cp, flagMarker},
 		"event without proof":          {"--key", key, "--checkpoint", cp, "--event", ev},
 		"proof without event":          {"--key", key, "--checkpoint", cp, "--proof", proof},
-		"consistency without prior":    {"--key", key, "--checkpoint", cp, "--consistency", c5},
 		"missing key":                  {"--key", missing, "--checkpoint", cp},
 		"missing checkpoint":           {"--key", key, "--checkpoint", missing},
 		"directory as file":            {"--key", f.dir, "--checkpoint", cp},
@@ -352,7 +361,7 @@ func TestTS14_InputFaults(t *testing.T) {
 		"file with other sizes":        {"--key", key, "--checkpoint", cp, "--prior", prior, "--consistency", f.write("c1", []byte(consistencyJSON(t, l, 1, 10)))},
 		"two files with the same size": {"--key", key, "--checkpoint", cp, "--prior", prior, "--consistency", c5, "--consistency", c5b},
 	} {
-		code, stdout, stderr := invoke(args...)
+		code, stdout, stderr := invoke(t, args...)
 		if code != 2 || stdout != "" || stderr == "" {
 			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
 		}
@@ -362,7 +371,7 @@ func TestTS14_InputFaults(t *testing.T) {
 		}
 	}
 	// A usage error prints the fixed usage text.
-	if _, _, stderr := invoke("--" + flagMarker); !strings.HasPrefix(stderr, "usage: phantom-verify ") {
+	if _, _, stderr := invoke(t, "--"+flagMarker); !strings.HasPrefix(stderr, "usage: phantom-verify ") {
 		t.Errorf("usage text: %q", stderr)
 	}
 }
@@ -375,7 +384,7 @@ func TestTS14_OriginEscaped(t *testing.T) {
 	s, keyText := testKey(t, name)
 	l, _ := testLog(t, 3, `{"n":%d}`)
 	f := newFiles(t)
-	code, stdout, stderr := invoke("--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 3)))
+	code, stdout, stderr := invoke(t, "--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 3)))
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
@@ -420,7 +429,7 @@ func TestTS14_EventFieldsNotPrinted(t *testing.T) {
 	s, keyText := testKey(t, origin)
 	l, events := testLog(t, 4, `{"A":2,"a":%d}`)
 	f := newFiles(t)
-	code, stdout, stderr := invoke("--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 4)),
+	code, stdout, stderr := invoke(t, "--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 4)),
 		"--event", f.write("event", events[2].Raw), "--proof", f.write("proof", []byte(inclusionJSON(t, l, 2, 4))))
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
@@ -445,7 +454,7 @@ func TestTS14_EventControlCharacters(t *testing.T) {
 	if !bytes.Contains(events[2].Raw, []byte("‮")) || !bytes.Contains(events[2].Raw, []byte("\u009b")) {
 		t.Fatalf("the event does not hold the raw characters: %q", events[2].Raw)
 	}
-	code, stdout, stderr := invoke("--key", key, "--checkpoint", cp, "--event", f.write("event", events[2].Raw), "--proof", proof)
+	code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--event", f.write("event", events[2].Raw), "--proof", proof)
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
@@ -453,12 +462,249 @@ func TestTS14_EventControlCharacters(t *testing.T) {
 		t.Errorf("exit 0: output holds a raw character: %q %q", stdout, stderr)
 	}
 	changed := bytes.Replace(events[2].Raw, []byte(`"n":2`), []byte(`"n":3`), 1)
-	code, stdout, stderr = invoke("--key", key, "--checkpoint", cp, "--event", f.write("changed", changed), "--proof", proof)
+	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", cp, "--event", f.write("changed", changed), "--proof", proof)
 	if code != 1 || stdout != "" {
 		t.Fatalf("changed event: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if strings.ContainsAny(stdout+stderr, raw) {
 		t.Errorf("exit 1: output holds a raw character: %q %q", stdout, stderr)
+	}
+}
+
+const firstUseLine = "state: no earlier checkpoint was known; the checkpoint is now the state"
+
+// stateSnap lists a directory: each name, with the bytes of a file or the
+// target of a link. Two equal lists mean that nothing changed and that no
+// temporary file is left.
+func stateSnap(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if target, err := os.Readlink(p); err == nil {
+			fmt.Fprintf(&b, "%s -> %s\n", e.Name(), target)
+		} else if data, err := os.ReadFile(p); err == nil {
+			fmt.Fprintf(&b, "%s: %q\n", e.Name(), data)
+		} else {
+			fmt.Fprintf(&b, "%s/\n", e.Name())
+		}
+	}
+	return b.String()
+}
+
+// stateFile is the name of the state file of the key in the key file text.
+func stateFile(t *testing.T, keyText string) string {
+	t.Helper()
+	v, err := verify.ParseKey([]byte(keyText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%08x.note", v.KeyHash())
+}
+
+// T-S-14: the state follows the last accepted checkpoint. A larger consistent
+// checkpoint updates it. A refused checkpoint leaves it as it is.
+func TestTS14_State(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 20, `{"n":%d}`)
+	fork, _ := testLog(t, 20, `{"m":%d}`)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp := func(lg *tlog.Log, tag string, size int64) string {
+		return f.write(fmt.Sprintf("%s%d", tag, size), checkpointAt(t, lg, s, size))
+	}
+	cons := func(lg *tlog.Log, tag string, oldSize, newSize int64) string {
+		return f.write(fmt.Sprintf("%sc%d-%d", tag, oldSize, newSize), []byte(consistencyJSON(t, lg, oldSize, newSize)))
+	}
+	home := t.TempDir()
+	dir := filepath.Join(home, "phantom-verify")
+	file := filepath.Join(dir, stateFile(t, keyText))
+	run := func(args ...string) (int, string, string) {
+		return invokeIn(t, home, append([]string{"--key", key}, args...)...)
+	}
+	accepted := func(name, line, cpPath string, args ...string) {
+		t.Helper()
+		code, stdout, stderr := run(append([]string{"--checkpoint", cpPath}, args...)...)
+		if code != 0 || stderr != "" {
+			t.Fatalf("%s: exit %d, stderr %q", name, code, stderr)
+		}
+		wantLines(t, name, stdout, line)
+	}
+	holds := func(name, cpPath string) {
+		t.Helper()
+		want, _ := os.ReadFile(cpPath)
+		if got, _ := os.ReadFile(file); !bytes.Equal(got, want) {
+			t.Errorf("%s: the state file holds another note", name)
+		}
+	}
+
+	accepted("first use", firstUseLine, cp(l, "l", 5))
+	holds("first use", cp(l, "l", 5))
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the state file mode: %v, %v", fi, err)
+	}
+	accepted("same checkpoint", "state: unchanged", cp(l, "l", 5))
+	// --consistency without --prior serves the state check.
+	accepted("larger", "state: updated", cp(l, "l", 10), "--consistency", cons(l, "l", 5, 10))
+	holds("larger", cp(l, "l", 10))
+	accepted("same again", "state: unchanged", cp(l, "l", 10))
+	accepted("older with a proof", "state: unchanged", cp(l, "l", 5), "--consistency", cons(l, "l", 5, 10))
+	holds("older with a proof", cp(l, "l", 10))
+
+	for name, tc := range map[string]struct {
+		code int
+		msg  string
+		args []string
+	}{
+		"fork":                    {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 15), "--consistency", cons(fork, "f", 10, 15)}},
+		"same size, another root": {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 10)}},
+		"older without a proof":   {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 5)}},
+		"larger without a proof":  {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 15)}},
+		"two proofs, same sizes": {2, "have the same sizes", []string{"--checkpoint", cp(l, "l", 15),
+			"--consistency", cons(l, "l", 10, 15), "--consistency", f.write("again", []byte(consistencyJSON(t, l, 10, 15)))}},
+	} {
+		before := stateSnap(t, dir)
+		code, stdout, stderr := run(tc.args...)
+		if code != tc.code || stdout != "" || !strings.Contains(stderr, tc.msg) || strings.Contains(stderr, "state:") {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
+		}
+		if after := stateSnap(t, dir); after != before {
+			t.Errorf("%s: the state directory changed:\n%s\n%s", name, before, after)
+		}
+		noLeak(t, name, stderr)
+	}
+	accepted("larger after refusals", "state: updated", cp(l, "l", 15), "--consistency", cons(l, "l", 10, 15))
+	holds("larger after refusals", cp(l, "l", 15))
+}
+
+// T-S-14: a state that cannot be used gives exit 2 and a fixed message. The
+// state file is not changed or removed.
+func TestTS14_StateFaults(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	other, _ := testKey(t, origin) // same name, another key
+	l, _ := testLog(t, 10, `{"n":%d}`)
+	good := checkpointAt(t, l, s, 5)
+	changed := bytes.Clone(good)
+	changed[len(changed)-20] ^= 1
+	name := stateFile(t, keyText)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp := f.write("cp", checkpointAt(t, l, s, 10))
+	outside := f.write("outside.note", good)
+	write := func(dir, data string) error { return os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600) }
+	for label, setup := range map[string]func(dir string) error{
+		"changed byte": func(dir string) error { return write(dir, string(changed)) },
+		"another key":  func(dir string) error { return write(dir, string(checkpointAt(t, l, other, 5))) },
+		"garbage":      func(dir string) error { return write(dir, contentMarker) },
+		"past the cap": func(dir string) error { return write(dir, strings.Repeat(contentMarker, 100)) },
+		"directory":    func(dir string) error { return os.Mkdir(filepath.Join(dir, name), 0o700) },
+		"link inside": func(dir string) error {
+			if err := os.WriteFile(filepath.Join(dir, "valid.note"), good, 0o600); err != nil {
+				return err
+			}
+			return os.Symlink("valid.note", filepath.Join(dir, name))
+		},
+		"link outside": func(dir string) error { return os.Symlink(outside, filepath.Join(dir, name)) },
+	} {
+		dir := filepath.Join(newFiles(t).dir, "state")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := setup(dir); err != nil {
+			t.Fatal(err)
+		}
+		before := stateSnap(t, dir)
+		code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--state", dir)
+		if code != 2 || stdout != "" || !strings.Contains(stderr, "state fault") {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", label, code, stdout, stderr)
+		}
+		if after := stateSnap(t, dir); after != before {
+			t.Errorf("%s: the state directory changed:\n%s\n%s", label, before, after)
+		}
+		noLeak(t, label, stdout+stderr)
+		if strings.Contains(strings.ToLower(stderr), "fork") || strings.Contains(stderr, "not verified") {
+			t.Errorf("%s: stderr %q", label, stderr)
+		}
+	}
+	if got, _ := os.ReadFile(outside); !bytes.Equal(got, good) {
+		t.Error("the file outside changed")
+	}
+}
+
+// T-S-14: the state changes when the checkpoint is accepted, also when the
+// event check refuses. Then stdout is empty and stderr holds the state line.
+func TestTS14_StateBeforeEvent(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, events := testLog(t, 10, `{"n":%d}`)
+	f := newFiles(t)
+	dir := filepath.Join(f.dir, "state")
+	cpBytes := checkpointAt(t, l, s, 10)
+	code, stdout, stderr := invoke(t, "--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", cpBytes), "--state", dir,
+		"--event", f.write("e4", events[4].Raw), "--proof", f.write("proof", []byte(inclusionJSON(t, l, 3, 10))))
+	want := firstUseLine + "\nphantom-verify: not verified: the event is not in the tree of the checkpoint\n"
+	if code != 1 || stdout != "" || stderr != want {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, stateFile(t, keyText))); !bytes.Equal(got, cpBytes) {
+		t.Error("the state file does not hold the checkpoint")
+	}
+}
+
+// T-S-14: the --state directory and the default directory.
+func TestTS14_StateDirectory(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 5, `{"n":%d}`)
+	f := newFiles(t)
+	args := []string{"--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 5))}
+	name := stateFile(t, keyText)
+	exists := func(label string, path ...string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(path...)); err != nil {
+			t.Errorf("%s: %v", label, err)
+		}
+	}
+
+	// A missing --state directory is made with mode 0700. The default is not used.
+	home := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "a", "b")
+	if code, _, stderr := invokeIn(t, home, append(args, "--state", dir)...); code != 0 {
+		t.Fatalf("--state: exit %d, stderr %q", code, stderr)
+	}
+	exists("--state", dir, name)
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("the --state directory: %v, %v", fi, err)
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Errorf("the default directory was used: %v", entries)
+	}
+
+	// XDG_STATE_HOME is used only if it is an absolute path.
+	xdg := t.TempDir()
+	if code, _, stderr := invokeIn(t, xdg, args...); code != 0 {
+		t.Fatalf("absolute XDG_STATE_HOME: exit %d, stderr %q", code, stderr)
+	}
+	exists("absolute XDG_STATE_HOME", xdg, "phantom-verify", name)
+	for label, value := range map[string]string{"empty XDG_STATE_HOME": "", "relative XDG_STATE_HOME": "rel"} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if code, _, stderr := invokeIn(t, value, args...); code != 0 {
+			t.Fatalf("%s: exit %d, stderr %q", label, code, stderr)
+		}
+		exists(label, home, ".local", "state", "phantom-verify", name)
+	}
+	if _, err := os.Stat("rel"); err == nil {
+		t.Error("a relative XDG_STATE_HOME was used")
+	}
+
+	// No usable directory is a state fault.
+	t.Setenv("HOME", "")
+	code, stdout, stderr := invokeIn(t, "", args...)
+	if code != 2 || stdout != "" || !strings.Contains(stderr, "state fault") {
+		t.Errorf("no directory: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 
@@ -472,6 +718,7 @@ func TestTS14_OutputError(t *testing.T) {
 	s, keyText := testKey(t, origin)
 	l, _ := testLog(t, 3, `{"n":%d}`)
 	f := newFiles(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var stderr bytes.Buffer
 	code := run([]string{"--key", f.write("key", []byte(keyText)), "--checkpoint", f.write("cp", checkpointAt(t, l, s, 3))}, failWriter{}, &stderr)
 	if want := "phantom-verify: output error: stdout cannot be written\n"; code != 2 || stderr.String() != want {
@@ -488,13 +735,13 @@ func TestTI14_EndToEnd(t *testing.T) {
 	key := f.write("key", []byte(keyText))
 	cp := f.write("cp", checkpointAt(t, l, s, 50))
 	proof := f.write("proof", []byte(inclusionJSON(t, l, 11, 50)))
-	code, stdout, stderr := invoke("--key", key, "--checkpoint", cp, "--event", f.write("event", events[11].Raw), "--proof", proof)
+	code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--event", f.write("event", events[11].Raw), "--proof", proof)
 	if code != 0 || stderr != "" {
 		t.Fatalf("event and checkpoint: exit %d, stderr %q", code, stderr)
 	}
 	wantLines(t, "event and checkpoint", stdout, "origin: "+origin, "size: 50", "event hash: "+b64(events[11].Hash), "leaf index: 11")
 	modified := bytes.Replace(events[11].Raw, []byte("11"), []byte("12"), 1)
-	if code, _, _ := invoke("--key", key, "--checkpoint", cp, "--event", f.write("modified", modified), "--proof", proof); code != 1 {
+	if code, _, _ := invoke(t, "--key", key, "--checkpoint", cp, "--event", f.write("modified", modified), "--proof", proof); code != 1 {
 		t.Errorf("modified event: exit %d, want 1", code)
 	}
 
