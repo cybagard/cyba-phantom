@@ -62,7 +62,7 @@ var keys = []key{
 	{path: "limits.per_ip_rps", kind: kindInt, def: "50", check: intRange(1, 1000)},
 	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)}, // The lower bound is per_ip_rps: a cross-check.
 	{path: "limits.queue_depth", kind: kindInt, def: "4096", check: intRange(1, 8192)},
-	{path: "store.path", kind: kindPath, def: "/var/lib/phantom/events.db", check: checkStatePath},
+	{path: "store.path", kind: kindPath, def: "/var/lib/phantom/events.db", check: checkStorePath},
 	{path: "store.max_bytes", kind: kindBytes, def: "10737418240", check: intRange(268435456, math.MaxInt64)},
 	{path: "store.retention_days.ip", kind: kindInt, def: "7", check: intRange(1, 7)},
 	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
@@ -278,7 +278,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 			errs = append(errs, keyError(k, raws[k.path], v.Source, v.Line, detail))
 		}
 	}
-	errs = append(errs, crossCheck(vals)...)
+	errs = append(errs, crossCheck(l, vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

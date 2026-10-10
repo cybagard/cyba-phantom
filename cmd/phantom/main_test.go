@@ -96,6 +96,49 @@ func TestTS10_CheckNoDial(t *testing.T) {
 	}
 }
 
+// TestTS11_CheckStorePath checks that --check refuses each bad store.path with exit 1 and the error text of the load,
+// and accepts a good path (SEC-20). The state directory is the default one.
+func TestTS11_CheckStorePath(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	file := writeFile(t, validBody(t))
+	check := func(path string, extra ...string) (code int, stderr string, loadErr string) {
+		env := append([]string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_STORE_PATH=" + path}, extra...)
+		var so, se strings.Builder
+		code = run([]string{"--check", file}, env, &so, &se)
+		if _, err := config.Load(file, env); err != nil {
+			loadErr = err.Error()
+		}
+		return code, se.String(), loadErr
+	}
+	if code, se, _ := check(s + "db/events-2.db"); code != 0 {
+		t.Errorf("good path: exit %d, stderr %q", code, se)
+	}
+	for _, c := range []struct {
+		name, path string
+		extra      []string
+	}{
+		{"question mark", s + "events.db?mode=rwc", nil},
+		{"hash", s + "events.db#x", nil},
+		{"space", s + "my events.db", nil},
+		{"non-ASCII letter", s + "évents.db", nil},
+		{"tlog.dir", s + "tlog/e.db", nil},
+		{"acme.cache_dir", s + "certs/e.db", nil},
+		{"directory of bundle.path", s + "bundle/e.db", nil},
+		{"keys", s + "keys/e.db", nil},
+		{"checkpoints", s + "checkpoints/e.db", nil},
+		{"checkpoint.state", s + "checkpoint.state", nil},
+		{"writer.stop", s + "writer.stop", nil},
+		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, se, loadErr := check(c.path, c.extra...)
+			if code != 1 || !strings.Contains(se, "store.path") || loadErr == "" || se != loadErr+"\n" {
+				t.Errorf("exit %d, stderr %q, load error %q", code, se, loadErr)
+			}
+		})
+	}
+}
+
 // TestTS10_CheckExec runs the binary: exit 0 for a valid file, non-zero for an invalid file
 // with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
 // URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).

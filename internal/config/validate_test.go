@@ -717,6 +717,98 @@ func TestTS11_CrossChecks(t *testing.T) {
 	}
 }
 
+// TestTS11_StorePathText checks the store.path rules for the path text below the state directory (SEC-20).
+func TestTS11_StorePathText(t *testing.T) {
+	tr := newTree(t)
+	in := func(s string) string { return tr.root + "/" + s }
+	const partDetail = "each path part below the state directory"
+	runRows(t, []row{
+		{"file", in("events.db"), ""},
+		{"nested", in("db/events-2.db"), ""},
+		{"all permitted marks", in("a.B_c-9/E_1.db"), ""},
+		{"dots inside a part", in("a..b"), ""},
+		{"question mark", in("events.db?mode=ro"), partDetail},
+		{"question mark in a parent", in("a?/events.db"), partDetail},
+		{"hash", in("events.db#x"), partDetail},
+		{"space", in("my events.db"), partDetail},
+		{"non-ASCII letter", in("évents.db"), partDetail},
+		{"colon", in("events:db"), partDetail},
+		{"backslash", in(`a\b`), partDetail},
+		{"dot dot part", in("a/../events.db"), "clean"}, // The rule that runs first refuses the part.
+		{"state root", tr.root, "must be below the state directory"},
+		{"sibling of the root", tr.root + "-evil/events.db", "not under the state directory"},
+		{"outside", tr.outside + "/events.db", "not under the state directory"},
+		{"relative", "events.db", "absolute"},
+	}, func(s string) string { return checkStorePath(tr.l, s) })
+	// The rule applies only below the state directory: it does not check the parts of the root.
+	spaced := &loader{stateRoot: tr.root + "/a b?", euid: os.Geteuid()}
+	if d := checkStorePath(spaced, spaced.stateRoot+"/events.db"); d != "" {
+		t.Errorf("state root with a space: %q", d)
+	}
+}
+
+// TestTS11_StorePathLoad checks that the load refuses a store.path in a directory of another key, or a state file,
+// and that the error names store.path only. Each row runs with the other key at its default and set (SEC-20).
+func TestTS11_StorePathLoad(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	rows := []struct {
+		name, path string
+		with       []string
+		want       string // want is "" for a path that loads.
+	}{
+		{"default", s + "events.db", nil, ""},
+		{"nested file", s + "db/events-2.db", nil, ""},
+		{"name that starts like tlog", s + "tlog2/events.db", nil, ""},
+		{"question mark", s + "events.db?mode=rwc", nil, "each path part"},
+		{"hash", s + "events.db#x", nil, "each path part"},
+		{"space", s + "my events.db", nil, "each path part"},
+		{"non-ASCII letter", s + "évents.db", nil, "each path part"},
+		{"dot dot", s + "a/../events.db", nil, "must be clean"},
+		{"state root", "/var/lib/phantom", nil, "below the state directory"},
+		{"tlog.dir default", s + "tlog/e.db", nil, "in tlog.dir"},
+		{"tlog.dir itself", s + "tlog", nil, "in tlog.dir"},
+		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "in tlog.dir"},
+		{"tlog.dir set, itself", s + "t2", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "in tlog.dir"},
+		{"acme.cache_dir default", s + "certs/e.db", nil, "in acme.cache_dir"},
+		{"acme.cache_dir itself", s + "certs", nil, "in acme.cache_dir"},
+		{"acme.cache_dir set", s + "c2/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c2"}, "in acme.cache_dir"},
+		{"bundle dir default", s + "bundle/e.db", nil, "directory of bundle.path"},
+		{"bundle dir set", s + "b2/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "b2/current.cbnd"}, "directory of bundle.path"},
+		{"bundle file in its dir", s + "b2/current.cbnd", []string{"PHANTOM_BUNDLE_PATH=" + s + "b2/current.cbnd"}, "directory of bundle.path"},
+		{"keys", s + "keys/e.db", nil, "keys directory"},
+		{"keys itself", s + "keys", nil, "keys directory"},
+		{"checkpoints", s + "checkpoints/e.db", nil, "checkpoints directory"},
+		{"checkpoints itself", s + "checkpoints", nil, "checkpoints directory"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
+		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base, append([]string{"PHANTOM_STORE_PATH=" + r.path}, r.with...)...)
+			switch {
+			case r.want == "" && err != nil, r.want != "" && err == nil:
+				t.Fatalf("got %v, want %q", err, r.want)
+			case err == nil:
+			case !strings.Contains(err.Error(), "store.path at PHANTOM_STORE_PATH: ") || !strings.Contains(err.Error(), r.want) || strings.Contains(err.Error(), "\n"):
+				t.Errorf("got %v, want one error on store.path with %q", err, r.want)
+			}
+		})
+	}
+	t.Run("moved tlog dir, default store", func(t *testing.T) {
+		if _, err := loadProd(t, base, "PHANTOM_TLOG_DIR="+s+"t2"); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// TestTS11_StorePathFailedKey checks that a tlog.dir that failed its own check is not in the store.path rules.
+func TestTS11_StorePathFailedKey(t *testing.T) {
+	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/elsewhere", "PHANTOM_STORE_PATH=/var/lib/phantom/tlog/e.db")
+	if err == nil || strings.Contains(err.Error(), "store.path") || !strings.Contains(err.Error(), "tlog.dir") {
+		t.Errorf("got %v", err)
+	}
+}
+
 // TestTU10_Defaults checks the 04 section 3 default of each key, on a minimal valid file.
 func TestTU10_Defaults(t *testing.T) {
 	c, err := loadProd(t, base)

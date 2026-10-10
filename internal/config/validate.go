@@ -154,7 +154,7 @@ func opsConflict(ops, l hostPort, name string) string {
 
 // crossCheck checks the rules that compare two keys. It skips a key that is not in vals.
 // The loader removes a key from vals if its value failed to parse or failed its check.
-func crossCheck(vals map[string]Value) []error {
+func crossCheck(l *loader, vals map[string]Value) []error {
 	get := func(p string) (hostPort, Value, bool) {
 		v, ok := vals[p]
 		if !ok {
@@ -193,6 +193,11 @@ func crossCheck(vals map[string]Value) []error {
 	if e, ok := vals["store.retention_days.events"]; ok {
 		if r, ok := vals["store.retention_days.raw"]; ok && e.Int < r.Int {
 			fail("store.retention_days.events", e, "the value must not be less than store.retention_days.raw")
+		}
+	}
+	if s, ok := vals["store.path"]; ok {
+		if d := storeConflict(l, vals, s.Str); d != "" {
+			fail("store.path", s, d)
 		}
 	}
 	return errs
@@ -517,6 +522,63 @@ func checkStatePath(l *loader, raw string) string {
 	}
 	if !ok {
 		return "the path is not under the state directory after symlink resolution"
+	}
+	return ""
+}
+
+// storePart matches one path part of store.path below the state directory (SEC-20).
+var storePart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// checkStorePath applies the rules of checkStatePath. Then it checks the path text below the
+// state directory: each part has only A-Z a-z 0-9 . _ - and is not "." or "..". It does not
+// resolve symlinks. A path that it cannot compare with the state directory fails (ADR-013).
+func checkStorePath(l *loader, raw string) string {
+	if d := checkStatePath(l, raw); d != "" {
+		return d
+	}
+	rel, err := filepath.Rel(l.stateRoot, raw)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "the path must be below the state directory"
+	}
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "." || part == ".." || !storePart.MatchString(part) {
+			return "each path part below the state directory must have only A-Z a-z 0-9 . _ - and must not be . or .."
+		}
+	}
+	return ""
+}
+
+// inDir reports whether the clean path p is the clean path d or is below it. It compares text only.
+func inDir(p, d string) bool {
+	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
+}
+
+// storeConflict returns a detail if the store.path value p is in a directory that the sensor
+// uses for other files, or is one of its state files (SEC-20). It compares the path text only.
+// A key that is not in vals failed its own check, so it is skipped.
+func storeConflict(l *loader, vals map[string]Value, p string) string {
+	for _, k := range []string{"tlog.dir", "acme.cache_dir", "bundle.path"} {
+		v, ok := vals[k]
+		if !ok {
+			continue
+		}
+		name := k
+		if k == "bundle.path" {
+			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
+		}
+		if inDir(p, v.Str) {
+			return "the path must not be in " + name
+		}
+	}
+	for _, d := range []string{"keys", "checkpoints"} {
+		if inDir(p, filepath.Join(l.stateRoot, d)) {
+			return "the path must not be in the " + d + " directory"
+		}
+	}
+	for _, f := range []string{"checkpoint.state", "writer.stop"} {
+		if p == filepath.Join(l.stateRoot, f) {
+			return "the path must not be " + f
+		}
 	}
 	return ""
 }
