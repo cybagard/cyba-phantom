@@ -17,3 +17,18 @@ To change a vector:
 
 To add a vector, give it a sha256 field with an empty value, then do the
 steps above.
+
+## Signed notes
+
+Run "make fixtures" to generate the golden section of
+internal/tlog/testdata/notes.txt. The golden section holds the signed note
+that TestTU12_Golden makes. Never edit it by hand.
+
+The other sections are note text that is written by hand.
+
+To change a note text:
+
+1. Edit the text in the section.
+2. Run "make fixtures". It keeps the comment lines and the other sections.
+3. Run "make test".
+4. Commit the text and the golden section together.

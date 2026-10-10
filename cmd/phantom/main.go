@@ -1,7 +1,7 @@
-// Command canary is the Agent Canary sensor entry point.
+// Command phantom is the Phantom sensor entry point.
 //
-// The binary reads one config file: "canary <path>" loads it and exits, and
-// "canary --check <path>" only validates it (FR-12). Both modes use the same
+// The binary reads one config file: "phantom <path>" loads it and exits, and
+// "phantom --check <path>" only validates it (FR-12). Both modes use the same
 // load function. --check opens no socket and does no DNS lookup (SEC-11).
 // The run loop is not part of the binary yet. The binary writes no files.
 package main
@@ -24,11 +24,11 @@ func main() {
 
 // run returns the exit code: 0 for a valid config, 1 for an invalid config, 2 for a usage error.
 func run(args, env []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("canary", flag.ContinueOnError)
+	fs := flag.NewFlagSet("phantom", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // The flag package prints a flag name raw, so run prints a fixed usage line.
 	check := fs.Bool("check", false, "validate the config file and exit")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: canary [--check] <config-path>")
+		fmt.Fprintln(stderr, "usage: phantom[--check] <config-path>")
 		return 2
 	}
 	if _, err := loadWith(fs.Arg(0), env, netFor(*check)); err != nil {
@@ -37,10 +37,10 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if *check {
-		fmt.Fprintln(stdout, "canary: config is valid")
+		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
-	fmt.Fprintln(stdout, "canary: config loaded — no listeners yet")
+	fmt.Fprintln(stdout, "phantom: config loaded — no listeners yet")
 	return 0
 }
 

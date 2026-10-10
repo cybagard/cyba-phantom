@@ -20,7 +20,7 @@ import (
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
-const defaultStateRoot = "/var/lib/agent-canary"
+const defaultStateRoot = "/var/lib/phantom"
 
 // loader holds the settings that the validators use. A test sets them to use a temporary directory.
 type loader struct {

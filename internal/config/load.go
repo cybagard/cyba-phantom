@@ -49,11 +49,11 @@ var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
 	{path: "ops.listen", kind: kindString, def: "127.0.0.1:9443", check: checkOpsListen},
-	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/agent-canary/htpasswd", check: checkHtpasswd},
+	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/phantom/htpasswd", check: checkHtpasswd},
 	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
-	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/agent-canary/certs", check: checkStatePath},
-	{path: "bundle.path", kind: kindPath, def: "/var/lib/agent-canary/bundle/current.cbnd", check: checkStatePath},
+	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkStatePath},
+	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkStatePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
 	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)}, // The bounds apply also if fetch_url is empty.
 	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
@@ -62,12 +62,12 @@ var keys = []key{
 	{path: "limits.per_ip_rps", kind: kindInt, def: "50", check: intRange(1, 1000)},
 	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)}, // The lower bound is per_ip_rps: a cross-check.
 	{path: "limits.queue_depth", kind: kindInt, def: "4096", check: intRange(1, 8192)},
-	{path: "store.path", kind: kindPath, def: "/var/lib/agent-canary/events.db", check: checkStatePath},
+	{path: "store.path", kind: kindPath, def: "/var/lib/phantom/events.db", check: checkStatePath},
 	{path: "store.max_bytes", kind: kindBytes, def: "10737418240", check: intRange(268435456, math.MaxInt64)},
 	{path: "store.retention_days.ip", kind: kindInt, def: "7", check: intRange(1, 7)},
 	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
 	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)}, // The lower bound is retention_days.raw: a cross-check.
-	{path: "tlog.dir", kind: kindPath, def: "/var/lib/agent-canary/tlog", check: checkStatePath},
+	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStatePath},
 	{path: "tlog.origin", kind: kindString, req: true, check: checkOrigin},
 	{path: "tlog.checkpoint_interval", kind: kindDuration, def: "1h", check: durRange(time.Minute, 24*time.Hour)},
 	{path: "alerts.min_band", kind: kindString, def: "agent-likely", check: checkMinBand},
@@ -144,7 +144,7 @@ func Load(path string, env []string) (*Config, error) {
 	return LoadWith(path, env, SystemNet())
 }
 
-// LoadWith reads the config file at path one time. It applies the CANARY_*
+// LoadWith reads the config file at path one time. It applies the PHANTOM_*
 // overrides in env (use os.Environ()). Precedence: default < file < env.
 // LoadWith returns all errors together and never returns a partial config.
 // LoadWith returns an error if n.Dialer or n.Resolver is nil.
@@ -166,7 +166,7 @@ func load(path string, env []string, table []key, n Net) (*Config, error) {
 }
 
 func envName(path string) string {
-	return "CANARY_" + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
+	return "PHANTOM_" + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
 }
 
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
@@ -207,7 +207,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	// Lists: the list keys have no CANARY_ override, so byEnv does not hold the item keys.
+	// Lists: the list keys have no PHANTOM_ override, so byEnv does not hold the item keys.
 	// The loader handles an item key like a scalar key from here: set, required, and check.
 	itemKeys, listErrs := expandLists(doc, path, lists) // The loader reports listErrs after the required scalar keys.
 	table = append(slices.Clone(table), itemKeys...)
@@ -241,18 +241,18 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	// Env: if a name, in upper case and with "-" changed to "_", starts with CANARY_,
+	// Env: if a name, in upper case and with "-" changed to "_", starts with PHANTOM_,
 	// the key table must contain it.
 	seen := make(map[string]bool)
 	for _, kv := range env {
 		name, raw, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(strings.ToUpper(strings.ReplaceAll(name, "-", "_")), "CANARY_") {
+		if !strings.HasPrefix(strings.ToUpper(strings.ReplaceAll(name, "-", "_")), "PHANTOM_") {
 			continue
 		}
 		k, ok := byEnv[name]
 		switch {
 		case !ok:
-			errs = append(errs, &Error{Source: name, Detail: "unknown CANARY_ variable"})
+			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM_ variable"})
 		case seen[name]:
 			errs = append(errs, &Error{Source: name, Detail: "the variable occurs more than one time"})
 		default:

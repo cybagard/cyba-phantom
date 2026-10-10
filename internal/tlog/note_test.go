@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"os"
 	"slices"
@@ -14,6 +15,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 )
+
+var update = flag.Bool("update", false, "write the signed note into the golden section of testdata/notes.txt")
 
 // noteKeys makes a signer and a verifier from a fixed seed. The keys are made
 // only for the tests.
@@ -91,10 +94,45 @@ func TestTU12_RoundTrip(t *testing.T) {
 	}
 }
 
+// writeGolden replaces the body of the golden section of testdata/notes.txt with msg.
+// It keeps the comment lines and all other sections.
+func writeGolden(t *testing.T, msg []byte) {
+	t.Helper()
+	const path = "testdata/notes.txt"
+	b, err := os.ReadFile(path)
+	must(t, err)
+	var out strings.Builder
+	inGolden, found := false, false
+	for _, line := range strings.SplitAfter(string(b), "\n") {
+		tl := strings.TrimSuffix(line, "\n")
+		if strings.HasPrefix(tl, "-- ") && strings.HasSuffix(tl, " --") {
+			inGolden = tl == "-- golden --"
+			if inGolden {
+				found = true
+				out.WriteString(line)
+				out.Write(msg)
+				continue
+			}
+		}
+		if !inGolden {
+			out.WriteString(line)
+		}
+	}
+	if !found {
+		t.Fatal("testdata/notes.txt has no golden section")
+	}
+	must(t, os.WriteFile(path, []byte(out.String()), 0o644))
+}
+
+// T-U-12: the -update flag writes the signed note that the test makes into the golden
+// section. After the write, the test compares the file with the note.
 func TestTU12_Golden(t *testing.T) {
 	signer, _ := noteKeys(t, testOrigin, 1)
 	msg, err := SignCheckpoint(signer, 42, testRoot())
 	must(t, err)
+	if *update {
+		writeGolden(t, msg)
+	}
 	if want := noteSections(t)["golden"]; string(msg) != want {
 		t.Fatalf("signed note changed:\n%s", msg)
 	}
@@ -157,7 +195,7 @@ func TestTU12_Rejects(t *testing.T) {
 		}
 	})
 	t.Run("other-origin", func(t *testing.T) {
-		otherSigner, otherVerifier := noteKeys(t, "agent-canary/other", 1)
+		otherSigner, otherVerifier := noteKeys(t, "phantom/other", 1)
 		msg, err := SignCheckpoint(otherSigner, 42, testRoot())
 		must(t, err)
 		_, err = ParseCheckpoint(msg, testOrigin, otherVerifier) // the signature is valid
@@ -189,7 +227,7 @@ func TestTU12_RejectsExtraSignatures(t *testing.T) {
 	signer, verifier := noteKeys(t, testOrigin, 1)
 	body := checkpointBody(Checkpoint{testOrigin, 42, testRoot()})
 	second, _ := noteKeys(t, testOrigin, 2)
-	unknown, _ := noteKeys(t, "agent-canary/witness", 3)
+	unknown, _ := noteKeys(t, "phantom/witness", 3)
 	for name, extra := range map[string]note.Signer{"second-key-same-name": second, "unknown-key": unknown} {
 		t.Run(name, func(t *testing.T) {
 			msg, err := note.Sign(&note.Note{Text: body}, signer, extra)

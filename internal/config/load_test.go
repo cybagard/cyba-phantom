@@ -85,14 +85,14 @@ func TestTU10_Precedence(t *testing.T) {
 	}{
 		{"default", base, "", "listen.http", Value{Str: ":80", Source: "default"}},
 		{"file", base + "listen:\n  http: \":8080\"\n", "", "listen.http", Value{Str: ":8080", Source: cfg, Line: 6}},
-		{"env", base + "listen:\n  http: \":8080\"\n", "CANARY_LISTEN_HTTP=:81", "listen.http", Value{Str: ":81", Source: "CANARY_LISTEN_HTTP"}},
+		{"env", base + "listen:\n  http: \":8080\"\n", "PHANTOM_LISTEN_HTTP=:81", "listen.http", Value{Str: ":81", Source: "PHANTOM_LISTEN_HTTP"}},
 		{"htpasswd default", base, "", "ops.basic_auth_htpasswd", Value{Str: filepath.Join(testDir, "htpasswd"), Source: "default"}},
 		{"int default", base, "", "a.delta", Value{Int: -1, Source: "default"}},
 		{"int file", base + "a:\n  delta: -7\n", "", "a.delta", Value{Int: -7, Source: cfg, Line: 6}},
-		{"int env", base + "a:\n  delta: -7\n", "CANARY_A_DELTA=9", "a.delta", Value{Int: 9, Source: "CANARY_A_DELTA"}},
-		{"bool env", base + "a:\n  flag: false\n", "CANARY_A_FLAG=true", "a.flag", Value{Bool: true, Source: "CANARY_A_FLAG"}},
+		{"int env", base + "a:\n  delta: -7\n", "PHANTOM_A_DELTA=9", "a.delta", Value{Int: 9, Source: "PHANTOM_A_DELTA"}},
+		{"bool env", base + "a:\n  flag: false\n", "PHANTOM_A_FLAG=true", "a.flag", Value{Bool: true, Source: "PHANTOM_A_FLAG"}},
 		{"duration file", base + "a:\n  every: 15m\n", "", "a.every", Value{Dur: 15 * time.Minute, Source: cfg, Line: 6}},
-		{"bytes env", base, "CANARY_A_SIZE=1024", "a.size", Value{Int: 1024, Source: "CANARY_A_SIZE"}},
+		{"bytes env", base, "PHANTOM_A_SIZE=1024", "a.size", Value{Int: 1024, Source: "PHANTOM_A_SIZE"}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -110,7 +110,7 @@ func TestTU10_Precedence(t *testing.T) {
 // TestTU10_EffectiveValueCheck uses the production key table. It checks that each check runs on
 // the effective value only: a default that the file or the environment replaces is not checked.
 func TestTU10_EffectiveValueCheck(t *testing.T) {
-	const def = "/etc/agent-canary/htpasswd"
+	const def = "/etc/phantom/htpasswd"
 	if _, err := os.Lstat(def); err == nil {
 		t.Skip("the default htpasswd file exists on this host")
 	}
@@ -125,17 +125,17 @@ func TestTU10_EffectiveValueCheck(t *testing.T) {
 		}
 	})
 	t.Run("env", func(t *testing.T) {
-		c, err := loadTest(writeConfig(t, base), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		c, err := loadTest(writeConfig(t, base), []string{"PHANTOM_OPS_BASIC_AUTH_HTPASSWD=" + good})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != "CANARY_OPS_BASIC_AUTH_HTPASSWD" {
+		if v, _ := c.Get("ops.basic_auth_htpasswd"); v.Str != good || v.Source != "PHANTOM_OPS_BASIC_AUTH_HTPASSWD" {
 			t.Errorf("got %+v", v)
 		}
 	})
 	t.Run("env over bad file value", func(t *testing.T) {
 		bad := filepath.Join(testDir, "missing")
-		_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), []string{"CANARY_OPS_BASIC_AUTH_HTPASSWD=" + good})
+		_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+bad+"\n"), []string{"PHANTOM_OPS_BASIC_AUTH_HTPASSWD=" + good})
 		if err != nil {
 			t.Errorf("a file value that the environment replaces is checked: %v", err)
 		}
@@ -170,7 +170,7 @@ func TestTU10_EnvNames(t *testing.T) {
 func TestTU10_Errors(t *testing.T) {
 	useTestKeys(t)
 	p := writeConfig(t, "zz: 1\nlisten:\n  http: \":1\"\n  bogus: 1\nfoo:\n  bar: 1\nops: [x]\nacme:\n  email: [a]\n")
-	_, err := loadTest(p, []string{"CANARY_LISTEN_HTTPS=:2", "CANARY_NOPE=1", "HOME=/x"})
+	_, err := loadTest(p, []string{"PHANTOM_LISTEN_HTTPS=:2", "PHANTOM_NOPE=1", "HOME=/x"})
 	p = p[len(p)-64:] // The error keeps the end of a long path: the file name and the line.
 	want := strings.Join([]string{
 		`config: zz at ` + p + `:1: unknown key`,
@@ -178,7 +178,7 @@ func TestTU10_Errors(t *testing.T) {
 		`config: foo at ` + p + `:5: unknown key`,
 		`config: ops at ` + p + `:7: the section needs a mapping`,
 		`config: acme.email at ` + p + `:9: the key needs a scalar value`,
-		`config: CANARY_NOPE: unknown CANARY_ variable`,
+		`config: PHANTOM_NOPE: unknown PHANTOM_ variable`,
 		`config: acme.email at ` + p + `: the key is required`,
 		`config: tlog.origin at ` + p + `: the key is required`,
 		`config: tlog.publish at ` + p + `: the key is required`,
@@ -223,7 +223,7 @@ func useTestKeys(t *testing.T) {
 	t.Cleanup(func() { keys = old })
 }
 
-// TestTS10_Scalars checks strict scalars, unknown CANARY_ variables, and escaped values through Load.
+// TestTS10_Scalars checks strict scalars, unknown PHANTOM_ variables, and escaped values through Load.
 func TestTS10_Scalars(t *testing.T) {
 	useTestKeys(t)
 	rows := []struct{ name, file, env, want string }{
@@ -238,17 +238,17 @@ func TestTS10_Scalars(t *testing.T) {
 		{"tagged int", "a:\n  port: !!int x\n", "", "decimal literal only"},
 		{"null", "a:\n  every: ~\n", "", "the value is not a valid duration"},
 		{"duration number", "a:\n  every: 5\n", "", "the value is not a valid duration"},
-		{"env octal", "", "CANARY_A_PORT=017", "decimal literal only"},
-		{"env bool", "", "CANARY_A_FLAG=on", "true or false only"},
-		{"env range", "", "CANARY_A_SIZE=99999999999999999999", "out of range"},
+		{"env octal", "", "PHANTOM_A_PORT=017", "decimal literal only"},
+		{"env bool", "", "PHANTOM_A_FLAG=on", "true or false only"},
+		{"env range", "", "PHANTOM_A_SIZE=99999999999999999999", "out of range"},
 		{"bool into string", "listen:\n  https: true\n", "", "the value is not a valid string"},
 		{"octal into string", "listen:\n  http: 017\n", "", "the value is not a valid string"},
-		{"unknown env", "", "CANARY_LISTEN_HTTPX=:1", "CANARY_LISTEN_HTTPX: unknown CANARY_ variable"},
-		{"lower case env", "", "canary_listen_http=:1", "canary_listen_http: unknown CANARY_ variable"},
-		{"mixed case env", "", "Canary_Listen_Http=:1", "Canary_Listen_Http: unknown CANARY_ variable"},
-		{"dash env", "", "CANARY-LISTEN-HTTP=:1", "CANARY-LISTEN-HTTP: unknown CANARY_ variable"},
-		{"ESC in env name", "", "CANARY_X\x1b[2J=1", `CANARY_X\x1b[2J: unknown CANARY_ variable`},
-		{"URL text to the last @", "", "CANARY_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
+		{"unknown env", "", "PHANTOM_LISTEN_HTTPX=:1", "PHANTOM_LISTEN_HTTPX: unknown PHANTOM_ variable"},
+		{"lower case env", "", "phantom_listen_http=:1", "phantom_listen_http: unknown PHANTOM_ variable"},
+		{"mixed case env", "", "Phantom_Listen_Http=:1", "Phantom_Listen_Http: unknown PHANTOM_ variable"},
+		{"dash env", "", "PHANTOM-LISTEN-HTTP=:1", "PHANTOM-LISTEN-HTTP: unknown PHANTOM_ variable"},
+		{"ESC in env name", "", "PHANTOM_X\x1b[2J=1", `PHANTOM_X\x1b[2J: unknown PHANTOM_ variable`},
+		{"URL text to the last @", "", "PHANTOM_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
 		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 6 column 3: mapping key is invalid`},
 	}
 	for _, r := range rows {
@@ -258,6 +258,19 @@ func TestTS10_Scalars(t *testing.T) {
 				t.Errorf("got %v, want %q", err, r.want)
 			}
 		})
+	}
+}
+
+// TestTS10_OldPrefixIgnored checks that a variable with the old prefix is not special: Load
+// ignores it, even when its name is a known key, and the value does not reach the config.
+func TestTS10_OldPrefixIgnored(t *testing.T) {
+	useTestKeys(t)
+	c, err := loadTest(writeConfig(t, base+"listen:\n  http: \":8080\"\n"), []string{"CANARY_LISTEN_HTTP=:81", "CANARY_NOPE=1"})
+	if err != nil {
+		t.Fatalf("Load returned an error for variables with the old prefix: %v", err)
+	}
+	if v, _ := c.Get("listen.http"); v.Str != ":8080" || v.Source == "CANARY_LISTEN_HTTP" {
+		t.Errorf("listen.http = %+v, want the file value", v)
 	}
 }
 
@@ -271,7 +284,7 @@ func TestTS10_Secret(t *testing.T) {
 		"token: !" + marker, "pin: !" + marker, "token: !<" + marker + "> x", "token: [!" + marker + "]",
 		"token: {" + strings.ToUpper(marker) + ": 1}", "token:\n    " + marker + ":\n      x: !t 1", "token: [" + marker + ": !t 1]",
 	} {
-		_, err := loadTest(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"CANARY_A_TOKEN=" + marker, "CANARY_A_PIN=" + marker})
+		_, err := loadTest(writeConfig(t, base+"a:\n  "+body+"\n"), []string{"PHANTOM_A_TOKEN=" + marker, "PHANTOM_A_PIN=" + marker})
 		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() { // Each *Error in the join.
 			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
 				t.Errorf("%q: the error shows a secret value: %s", body, s)

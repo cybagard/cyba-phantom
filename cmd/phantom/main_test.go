@@ -86,7 +86,7 @@ func TestTS10_CheckNoDial(t *testing.T) {
 // with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
 // URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
 func TestTS10_CheckExec(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "canary")
+	bin := filepath.Join(t.TempDir(), "phantom")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -111,7 +111,7 @@ func TestTS10_CheckExec(t *testing.T) {
 	if code != 0 {
 		t.Errorf("valid file: exit %d, stderr %q", code, se)
 	}
-	code, _, se = run(writeFile(t, validBody(t)), "CANARY_ACME_CA=not a url")
+	code, _, se = run(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
 	if code == 0 {
 		t.Error("acme.ca not a URL: exit 0")
 	}

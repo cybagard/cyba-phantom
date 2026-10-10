@@ -355,7 +355,7 @@ func TestTS13_OpenErrorIsNotABadNote(t *testing.T) {
 func TestTS13_BadNotesAreNotSent(t *testing.T) {
 	e := newSpool(t)
 	otherSigner, _ := noteKeys(t, testOrigin, 2) // same origin, other key
-	wrongOrigin, _ := noteKeys(t, "agent-canary/other", 1)
+	wrongOrigin, _ := noteKeys(t, "phantom/other", 1)
 	bad := func(size uint64, s note.Signer, signedSize uint64) {
 		msg, err := SignCheckpoint(s, signedSize, testRoot())
 		must(t, err)

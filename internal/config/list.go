@@ -11,7 +11,7 @@ import (
 )
 
 // listKey is one list key (04 section 3). Each item is a mapping. Its type key selects
-// the schema, which holds the other keys of the item. A list key has no CANARY_ override.
+// the schema, which holds the other keys of the item. A list key has no PHANTOM_ override.
 type listKey struct {
 	path     string
 	min, max int
@@ -184,8 +184,8 @@ func checkSecretEnv(minBytes int) func(*loader, string) string {
 		switch {
 		case !envVarName.MatchString(raw):
 			return "the value must be a variable name that matches ^[A-Z_][A-Z0-9_]*$"
-		case strings.HasPrefix(raw, "CANARY_"):
-			return "the variable name must not start with CANARY_"
+		case strings.HasPrefix(raw, "PHANTOM_"):
+			return "the variable name must not start with PHANTOM_"
 		}
 		v, ok := "", false
 		for _, kv := range l.env { // The loader uses the last entry. os.Environ holds one entry for each name.
