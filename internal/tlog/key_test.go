@@ -292,7 +292,7 @@ func TestTS13_FirstStartAndReload(t *testing.T) {
 // The key files stay. The next start loads the key and writes no state.
 func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 	root, dir := newState(t)
-	must(t, os.Mkdir(filepath.Join(dir, stateName), 0o700)) // the rename cannot replace it
+	must(t, os.MkdirAll(filepath.Join(dir, stateName+".tmp", "x"), 0o700)) // Remove cannot delete it
 	if s, err := loadWithin(t, root, nil, testOrigin, false, 0); err == nil || s != nil || !strings.Contains(err.Error(), "signer state") {
 		t.Fatalf("got signer %v, error %v; want a signer state error", s, err)
 	}
@@ -301,12 +301,26 @@ func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 			t.Errorf("%s: %v; want the file to stay", name, err)
 		}
 	}
-	must(t, os.Remove(filepath.Join(dir, stateName)))
+	must(t, os.RemoveAll(filepath.Join(dir, stateName+".tmp")))
 	if _, err := loadWithin(t, root, nil, testOrigin, false, 0); err != nil {
 		t.Fatalf("next start: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, stateName)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("signer state: %v; want not exist (a key with no state is a fault)", err)
+	}
+}
+
+// T-S-13: the first start refuses an entry at checkpoint.state and makes no key.
+func TestTS13_FirstStartRefusesExistingState(t *testing.T) {
+	root, dir := newState(t)
+	must(t, os.WriteFile(filepath.Join(dir, stateName), []byte("old state"), 0o600))
+	s, err := loadWithin(t, root, nil, testOrigin, false, 0) // a caller that passes false
+	if err == nil || s != nil || !strings.Contains(err.Error(), "signer state must not exist on the first start") {
+		t.Fatalf("got signer %v, error %v; want the rule error", s, err)
+	}
+	_, keyErr := os.Lstat(filepath.Join(dir, keyName))
+	if b, _ := os.ReadFile(filepath.Join(dir, stateName)); string(b) != "old state" || !errors.Is(keyErr, fs.ErrNotExist) {
+		t.Errorf("state %q, key file error %v; want the state unchanged and no key file", b, keyErr)
 	}
 }
 

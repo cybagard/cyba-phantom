@@ -33,11 +33,12 @@ const (
 // state exists or the tree has leaves, the function returns an error and makes
 // no key (SEC-16).
 //
-// A new key gets a signer state. The function writes the key file and the
-// public key file, and syncs the directories. Then it signs a checkpoint of
-// the empty tree (size 0) and writes it as checkpoint.state with the crash-safe
-// rule of the checkpointer. If that write fails, the function returns an error
-// and the key files stay. The next start then has a key with no signer state.
+// A new key gets a signer state. An entry at checkpoint.state is an error: the
+// function makes no key and keeps the entry. The function writes the key file
+// and the public key file, and syncs the directories. Then it signs a checkpoint
+// of the empty tree (size 0) and writes it as checkpoint.state with the
+// crash-safe rule of the checkpointer. If that write fails, the function returns
+// an error and the key files stay. The next start then has a key with no signer state.
 // That is a fault for the checkpointer, and the operator decides.
 //
 // The key text, its base64 form, and the seed never go to the log or to an
@@ -237,6 +238,9 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	// An entry at the public key path is an error. The write must not follow it.
 	if _, err := root.Lstat(vkeyName); !errors.Is(err, fs.ErrNotExist) {
 		return nil, keyError(path, "public key file must not exist on the first start")
+	}
+	if _, err := root.Lstat(stateName); !errors.Is(err, fs.ErrNotExist) {
+		return nil, keyError(path, "signer state must not exist on the first start")
 	}
 	if err := writeNew(root, keyName, skey); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot write the key file: %w", path, err)

@@ -64,17 +64,19 @@ type Checkpointer struct {
 //   - the key name or the key hash of the signer and of the verifier differ;
 //   - the signer state cannot be read (a symlink, a file that is not regular,
 //     or a file above 1 KiB);
-//   - the signer state is empty, is not a note, or names another origin.
+//   - the first line of the signer state is not the origin, and the state is
+//     empty, is not a note, or names another origin.
 //
 // The checkpointer is returned but it is not healthy and it never signs in
 // these cases:
 //   - the signer state is missing (the operator decides);
-//   - the stored note does not verify;
+//   - the first line of the signer state is the origin, but the state does not
+//     parse as a note or the note does not verify;
 //   - the tiles at the size of the stored note do not give its root.
 //
-// A checkpointer that is not healthy writes no state. At start, a healthy
-// checkpointer gives the stored note to the sink one time, except the note of
-// the empty tree.
+// A checkpointer that is not healthy writes no state. The constructor does not
+// call the sink. A healthy checkpointer marks the stored note as pending, except
+// the note of the empty tree. The first tick gives it to the sink.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
 	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
 	switch {
@@ -107,7 +109,6 @@ func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink 
 		return c, nil
 	}
 	c.lastMsg, c.pending = msg, c.last.Size > 0
-	c.resend()
 	return c, nil
 }
 
@@ -245,14 +246,14 @@ func (c *Checkpointer) sign() {
 }
 
 // resend gives the last note to the sink if the sink has not taken it. A failed
-// Add leaves the note pending, and the next tick tries again. Spool.Add replaces
-// the file of that size, so a second Add is safe.
+// Add leaves the note pending, and the next tick tries again while the size does
+// not change. Spool.Add replaces the file of that size, so a second Add is safe.
 func (c *Checkpointer) resend() {
 	if !c.pending {
 		return
 	}
 	if err := c.sink.Add(c.last.Size, c.lastMsg); err != nil {
-		c.lg.Warn("checkpoint cannot go to the spool; the next tick tries again", "size", c.last.Size, "error", err)
+		c.lg.Warn("checkpoint cannot go to the spool; the next tick tries again while the size does not change", "size", c.last.Size, "error", err)
 		return
 	}
 	c.pending = false
@@ -266,7 +267,7 @@ func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 		return errors.New("checkpointer: the last signed size is too large")
 	}
 	if old == 0 {
-		return nil // the empty tree is a prefix of every tree
+		return nil // at old size 0 no proof runs: the empty tree is a prefix of every tree; only RootAt runs
 	}
 	proof, err := c.log.ProveConsistency(old, n)
 	if err != nil {
@@ -283,8 +284,12 @@ func toSize(u uint64) (int64, bool) { return int64(u), u <= maxSize }
 
 func toUint(n int64) (uint64, bool) { return uint64(n), n >= 0 }
 
-func stateError(rule string) error {
-	return fmt.Errorf("checkpointer: signer state %s: %s", stateName, rule)
+// stateError names the failed rule. It wraps a cause that is not nil with %w.
+func stateError(rule string, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("checkpointer: signer state %s: %s", stateName, rule)
+	}
+	return fmt.Errorf("checkpointer: signer state %s: %s: %w", stateName, rule, cause)
 }
 
 // readState reads the signer state through root. A missing file gives ok false.
@@ -295,16 +300,16 @@ func readState(root *os.Root) (msg []byte, ok bool, err error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	} else if err != nil {
-		return nil, false, stateError("cannot be examined")
+		return nil, false, stateError("cannot be examined", err)
 	}
 	f, _, rule := openChecked(root, stateName, lfi)
 	if rule != "" {
-		return nil, false, stateError(rule)
+		return nil, false, stateError(rule, nil)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, maxNoteSize+1))
 	if err != nil || len(b) > maxNoteSize {
-		return nil, false, stateError("cannot be read within 1 KiB")
+		return nil, false, stateError("cannot be read within 1 KiB", err)
 	}
 	return b, true, nil
 }
@@ -319,10 +324,10 @@ func SignerState(root *os.Root) (size uint64, exists bool, err error) {
 	}
 	lines := strings.SplitN(string(msg), "\n", 3)
 	if len(lines) < 3 || !canonicalDecimal(lines[1]) {
-		return 0, false, stateError("has no canonical size")
+		return 0, false, stateError("has no canonical size", nil)
 	}
-	if size, err = strconv.ParseUint(lines[1], 10, 64); err != nil {
-		return 0, false, stateError("has a size that is too large")
+	if size, err = strconv.ParseUint(lines[1], 10, 64); err != nil { // the error of strconv quotes the text, so it stays out
+		return 0, false, stateError("has a size that is too large", nil)
 	}
 	return size, true, nil
 }
@@ -334,17 +339,17 @@ func writeState(root *os.Root, msg []byte) error {
 	tmp := stateName + ".tmp"
 	err := root.Remove(tmp)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return stateError("temporary file " + tmp + " cannot be removed")
+		return stateError("temporary file "+tmp+" cannot be removed", err)
 	}
 	if err = writeNew(root, tmp, string(msg)); err != nil {
-		return stateError("cannot be written")
+		return stateError("cannot be written", err)
 	}
 	if err = root.Rename(tmp, stateName); err != nil {
 		_ = root.Remove(tmp)
-		return stateError("cannot be written")
+		return stateError("cannot be written", err)
 	}
 	if err = syncDir(root, "."); err != nil {
-		return stateError("directory cannot be synced")
+		return stateError("directory cannot be synced", err)
 	}
 	return nil
 }

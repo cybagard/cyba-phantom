@@ -256,8 +256,8 @@ func TestTS13UndeletableTemporaryFileNamesTheRule(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(e.dir, stateName+".tmp", "x"), 0o700))
 	c := e.mustStart(t)
 	c.sign()
-	if err := c.Err(); err == nil || !strings.Contains(err.Error(), "temporary file") || !strings.Contains(err.Error(), "cannot be removed") {
-		t.Fatalf("error %v", err)
+	if err := c.Err(); err == nil || !strings.Contains(err.Error(), "temporary file") || !strings.Contains(err.Error(), "cannot be removed") || !errors.As(err, new(*fs.PathError)) {
+		t.Fatalf("error %v; want the rule and the OS error as cause", err)
 	}
 	if got := e.sink.added(); len(got) != 0 {
 		t.Fatalf("signed %v", got)
@@ -334,15 +334,15 @@ func TestTS13StoredNoteThatVerifiesStarts(t *testing.T) {
 	}
 	c := e.mustStart(t)
 	c.sign()
-	// The stored note goes to the sink one time at start. The new note follows.
-	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{4, 10}) {
+	// The tree grew before the first tick: the new note replaces the pending one.
+	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{10}) {
 		t.Fatalf("healthy %v, signed %v", c.Healthy(), got)
 	}
 }
 
 // T-S-13: the first start of the key writes the state of the empty tree. The
 // checkpointer accepts it and gives nothing to the sink. The first tick with
-// leaves signs with a consistency check from size 0.
+// leaves signs with no proof: the empty tree is a prefix. Only RootAt runs.
 func TestTS13FirstStartStateStartsTheCheckpointer(t *testing.T) {
 	withoutSync(t)
 	state, dir := newLogState(t)
@@ -438,18 +438,22 @@ func TestTS13PendingNoteGoesToTheSinkAgain(t *testing.T) {
 	}
 }
 
-// T-S-13: at start, the sink takes the verified stored note one time, except
-// the note of the empty tree. A failed Add at start is tried again at the tick.
+// T-S-13: the constructor does not call the sink. The first tick gives it the
+// stored note, except the empty-tree note. A failed Add is tried again.
 func TestTS13StoredNoteGoesToTheSinkAtStart(t *testing.T) {
-	e := newEnv(t, 3)
-	e.mustStart(t) // the stored note is the empty tree
+	e := newEnv(t, 0)
+	e.mustStart(t).sign() // the stored note is the empty tree
 	if got := e.sink.added(); len(got) != 0 {
 		t.Fatalf("empty tree: sink took %v", got)
 	}
+	appendTo(t, e.l, 0, 3)
 	root, _ := e.l.RootAt(3)
 	stored := e.signed(t, 3, root)
 	e.put(t, stored) // a crash after the state write, before the Add
 	c := e.mustStart(t)
+	if got := e.sink.added(); len(got) != 0 {
+		t.Fatalf("the constructor called the sink: %v", got)
+	}
 	c.sign()
 	c.sign()
 	if got := e.sink.added(); !slices.Equal(got, []uint64{3}) || !bytes.Equal(e.sink.msgs[0], stored) {
@@ -459,6 +463,7 @@ func TestTS13StoredNoteGoesToTheSinkAtStart(t *testing.T) {
 	e2.put(t, stored)
 	e2.sink.err = errors.New("spool is full")
 	c2 := e2.mustStart(t)
+	c2.sign() // the first Add fails
 	e2.sink.err = nil
 	c2.sign()
 	if got := e2.sink.added(); !slices.Equal(got, []uint64{3, 3}) {
