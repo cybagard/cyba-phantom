@@ -90,6 +90,15 @@ func TestTS14_Checkpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	badBody, err := note.Sign(&note.Note{Text: origin + "\nseven\n" + "AQIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"}, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A changed signature or a changed body: the note does not verify (exit 1).
+	changedSig := bytes.Clone(good)
+	changedSig[len(changedSig)-5] ^= 1
+	changedBody := bytes.Clone(good)
+	changedBody[len(changedBody)-len(sigLine)-3] ^= 1
 	// A key text with another name gives a verifier with another name. The
 	// origin comes from the verifier, so a note for the first name is refused.
 	_, nameText := newKey(t, "phantom/name")
@@ -102,13 +111,16 @@ func TestTS14_Checkpoint(t *testing.T) {
 		"over 1 KiB":                       {append(bytes.Clone(good), make([]byte, 1024)...), v, ErrTooLarge},
 		"two signature lines":              {append(bytes.Clone(good), sigLine...), v, ErrCheckpoint},
 		"cosigned note":                    {cosigned, v, ErrCheckpoint},
-		"another key":                      {signed(t, other, 7), v, ErrCheckpoint},
-		"other key as pinned":              {good, otherV, ErrCheckpoint},
-		"verifier of another name and key": {good, nameV, ErrCheckpoint},
+		"another key":                      {signed(t, other, 7), v, ErrSignature},
+		"other key as pinned":              {good, otherV, ErrSignature},
+		"verifier of another name and key": {good, nameV, ErrSignature},
+		"changed signature":                {changedSig, v, ErrSignature},
+		"changed body":                     {changedBody, v, ErrSignature},
 		"body origin not name":             {wrongOrigin, v, ErrCheckpoint},
+		"signed bad body":                  {badBody, v, ErrCheckpoint},
 		"size past 2^48":                   {signed(t, s, maxSize+1), v, ErrRange},
 		"size near 2^64":                   {signed(t, s, 1<<64-1), v, ErrRange},
-		"empty":                            {nil, v, ErrCheckpoint},
+		"empty":                            {nil, v, ErrSignature},
 	} {
 		_, err := ParseCheckpoint(tc.msg, tc.v)
 		wantErr(t, name, err, tc.want)
