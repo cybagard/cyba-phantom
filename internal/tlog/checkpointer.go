@@ -1,7 +1,6 @@
 package tlog
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -29,13 +29,14 @@ type NoteSink interface {
 
 var _ NoteSink = (*Spool)(nil)
 
-// CheckpointOption changes the checkpointer. The tests use it for the ticks.
-type CheckpointOption func(*Checkpointer)
-
 // Checkpointer signs a checkpoint at each interval when the tree size changed
 // (FR-09). Before each signature it applies the sign guard (SEC-16): the new
 // tree must be consistent with the last signed checkpoint. A failed check stops
-// the signing for good. Healthy and Err then report the fault.
+// the signing until the process starts again. The operator decides. Healthy and
+// Err then report the fault.
+//
+// The signer state is the last signed note. LoadOrCreateSigner writes a note of
+// the empty tree when it makes the key. A key with no signer state is a fault.
 type Checkpointer struct {
 	log      *Log
 	signer   note.Signer
@@ -46,23 +47,36 @@ type Checkpointer struct {
 	interval time.Duration
 	lg       *slog.Logger
 	ticks    <-chan time.Time // nil: a ticker with the interval
+	running  atomic.Bool      // a second Run returns at once
 
-	last    Checkpoint // only the constructor and the Run goroutine use these two fields
-	hasLast bool
+	// Only the constructor, the Run goroutine, and the tests use these fields.
+	last    Checkpoint // the last signed checkpoint, or the stored one
+	lastMsg []byte     // the note of last
+	pending bool       // lastMsg is durable but the sink has not taken it
 
 	mu  sync.Mutex
-	err error // the first fault; it never clears
+	err error // the first fault; it stays until the process starts again
 }
 
 // NewCheckpointer makes the checkpointer. The key name of the signer and of
-// the verifier must be the origin. It returns an error if the interval is not
-// positive, if the origin is empty, or if the signer state names another origin
-// or cannot be read (a symlink, a file that is not regular, or a file above
-// 1 KiB). If the stored note does not verify, or the tiles at its size do not
-// give its root, the checkpointer is returned but it is not healthy and it
-// never signs. No state file means the first start.
+// the verifier must be the origin. It returns an error in these cases:
+//   - the interval is not positive, or the origin is empty;
+//   - the key name or the key hash of the signer and of the verifier differ;
+//   - the signer state cannot be read (a symlink, a file that is not regular,
+//     or a file above 1 KiB);
+//   - the signer state is empty, is not a note, or names another origin.
+//
+// The checkpointer is returned but it is not healthy and it never signs in
+// these cases:
+//   - the signer state is missing (the operator decides);
+//   - the stored note does not verify;
+//   - the tiles at the size of the stored note do not give its root.
+//
+// A checkpointer that is not healthy writes no state. At start, a healthy
+// checkpointer gives the stored note to the sink one time, except the note of
+// the empty tree.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
-	origin string, interval time.Duration, lg *slog.Logger, opts ...CheckpointOption) (*Checkpointer, error) {
+	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
 	switch {
 	case interval <= 0:
 		return nil, errors.New("checkpointer: the interval must be positive")
@@ -70,34 +84,45 @@ func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink 
 		return nil, errors.New("checkpointer: the origin must not be empty")
 	case signer.Name() != origin || verifier.Name() != origin:
 		return nil, errors.New("checkpointer: the key name must be the origin")
+	case signer.KeyHash() != verifier.KeyHash():
+		return nil, errors.New("checkpointer: the signer and the verifier must have the same key")
 	}
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
 	c := &Checkpointer{log: log, signer: signer, verifier: verifier, sink: sink, state: state, origin: origin, interval: interval, lg: lg}
-	for _, o := range opts {
-		o(c)
-	}
 	msg, ok, err := readState(state)
-	if err != nil || !ok {
-		return c.ifNil(err)
+	if err != nil {
+		return nil, err
 	}
-	if line, _, _ := bytes.Cut(msg, []byte("\n")); string(line) != origin {
-		return nil, errors.New("checkpointer: the signer state has another origin")
+	if !ok {
+		c.fail(errors.New("checkpointer: the signer state is missing; the operator decides"))
+		return c, nil
+	}
+	if err := checkOrigin(msg, origin); err != nil {
+		return nil, err
 	}
 	if c.last, err = c.stored(msg); err != nil {
 		c.fail(err)
 		return c, nil
 	}
-	c.hasLast = true
+	c.lastMsg, c.pending = msg, c.last.Size > 0
+	c.resend()
 	return c, nil
 }
 
-func (c *Checkpointer) ifNil(err error) (*Checkpointer, error) {
-	if err != nil {
-		return nil, err
+// checkOrigin refuses a signer state that cannot be a note of this origin. Only
+// a well-formed body with another origin line is "another origin". The caller
+// checks the rest of the note.
+func checkOrigin(msg []byte, origin string) error {
+	lines := strings.SplitN(string(msg), "\n", 3)
+	switch {
+	case lines[0] == origin:
+		return nil
+	case lines[0] == "" || len(lines) < 3 || !canonicalDecimal(lines[1]):
+		return errors.New("checkpointer: the signer state is empty or is not a checkpoint note")
 	}
-	return c, nil
+	return errors.New("checkpointer: the signer state has another origin")
 }
 
 // stored checks the stored note: it verifies with the key, and the tiles at its
@@ -105,7 +130,7 @@ func (c *Checkpointer) ifNil(err error) (*Checkpointer, error) {
 func (c *Checkpointer) stored(msg []byte) (Checkpoint, error) {
 	cp, err := ParseCheckpoint(msg, c.origin, c.verifier)
 	if err != nil {
-		return cp, err
+		return cp, fmt.Errorf("checkpointer: %w", err)
 	}
 	n, ok := toSize(cp.Size)
 	if !ok {
@@ -113,7 +138,7 @@ func (c *Checkpointer) stored(msg []byte) (Checkpoint, error) {
 	}
 	root, err := c.log.RootAt(n)
 	if err != nil {
-		return cp, err
+		return cp, fmt.Errorf("checkpointer: %w", err)
 	}
 	if root != cp.Root {
 		return cp, errors.New("checkpointer: the tiles do not give the root in the signer state")
@@ -145,8 +170,12 @@ func (c *Checkpointer) fail(err error) {
 }
 
 // Run is the one goroutine of the checkpointer. It signs at each tick and
-// returns when ctx ends. Call it one time.
+// returns when ctx ends. A call while another Run is active returns at once.
 func (c *Checkpointer) Run(ctx context.Context) {
+	if !c.running.CompareAndSwap(false, true) {
+		return
+	}
+	defer c.running.Store(false)
 	ticks := c.ticks
 	if ticks == nil {
 		t := time.NewTicker(c.interval)
@@ -166,7 +195,8 @@ func (c *Checkpointer) Run(ctx context.Context) {
 // sign makes one checkpoint if the size changed. Head only shows the size. The
 // root always comes from RootAt, which returns the error of a stopped log, and
 // the consistency proof comes from the tiles. The state file is durable before
-// the note goes to the sink. The log lock is not held while the sink runs.
+// the note goes to the sink. The log lock is not held while the sink runs. At an
+// unchanged size, sign gives a pending note to the sink again.
 func (c *Checkpointer) sign() {
 	if c.Err() != nil {
 		return
@@ -177,44 +207,55 @@ func (c *Checkpointer) sign() {
 	case !ok:
 		c.fail(errors.New("checkpointer: the tree size is negative"))
 		return
-	case !c.hasLast && n == 0:
-		return
-	case c.hasLast && size < c.last.Size:
+	case size < c.last.Size:
 		c.fail(errors.New("checkpointer: the tree is smaller than the last signed checkpoint"))
 		return
 	}
 	root, err := c.log.RootAt(n)
 	if err != nil {
-		c.fail(err)
+		c.fail(fmt.Errorf("checkpointer: %w", err))
 		return
 	}
-	if c.hasLast {
-		if size == c.last.Size {
-			if root != c.last.Root {
-				c.fail(errors.New("checkpointer: the root at the last signed size changed"))
-			}
+	if size == c.last.Size {
+		if root != c.last.Root {
+			c.fail(errors.New("checkpointer: the root at the last signed size changed"))
 			return
 		}
-		if err := c.consistent(n, root); err != nil {
-			c.fail(err)
-			return
-		}
+		c.resend()
+		return
+	}
+	if err := c.consistent(n, root); err != nil {
+		c.fail(err)
+		return
 	}
 	msg, err := SignCheckpoint(c.signer, size, root)
 	if err == nil {
 		_, err = ParseCheckpoint(msg, c.origin, c.verifier) // the verifier must match the signer
 	}
-	if err == nil {
-		err = writeState(c.state, msg)
-	}
 	if err != nil {
+		c.fail(fmt.Errorf("checkpointer: %w", err))
+		return
+	}
+	if err = writeState(c.state, msg); err != nil {
 		c.fail(err)
 		return
 	}
-	c.last, c.hasLast = Checkpoint{c.origin, size, root}, true
-	if err := c.sink.Add(size, msg); err != nil {
-		c.lg.Warn("checkpoint cannot go to the spool", "size", size, "error", err)
+	c.last, c.lastMsg, c.pending = Checkpoint{c.origin, size, root}, msg, true
+	c.resend()
+}
+
+// resend gives the last note to the sink if the sink has not taken it. A failed
+// Add leaves the note pending, and the next tick tries again. Spool.Add replaces
+// the file of that size, so a second Add is safe.
+func (c *Checkpointer) resend() {
+	if !c.pending {
+		return
 	}
+	if err := c.sink.Add(c.last.Size, c.lastMsg); err != nil {
+		c.lg.Warn("checkpoint cannot go to the spool; the next tick tries again", "size", c.last.Size, "error", err)
+		return
+	}
+	c.pending = false
 }
 
 // consistent checks that the tree of n leaves with the root root has the last
@@ -229,7 +270,7 @@ func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 	}
 	proof, err := c.log.ProveConsistency(old, n)
 	if err != nil {
-		return err
+		return fmt.Errorf("checkpointer: %w", err)
 	}
 	if tlog.CheckTree(proof, n, root, old, c.last.Root) != nil {
 		return errors.New("checkpointer: the tree has no consistency proof to the last signed checkpoint")
@@ -243,12 +284,12 @@ func toSize(u uint64) (int64, bool) { return int64(u), u <= maxSize }
 func toUint(n int64) (uint64, bool) { return uint64(n), n >= 0 }
 
 func stateError(rule string) error {
-	return fmt.Errorf("checkpoint signer state %s: %s", stateName, rule)
+	return fmt.Errorf("checkpointer: signer state %s: %s", stateName, rule)
 }
 
-// readState reads the signer state through root. A missing file is the first
-// start. A symlink or a file that is not regular is an error, and so is a file
-// above 1 KiB. The note is not verified here.
+// readState reads the signer state through root. A missing file gives ok false.
+// A symlink or a file that is not regular is an error, and so is a file above
+// 1 KiB. The note is not verified here.
 func readState(root *os.Root) (msg []byte, ok bool, err error) {
 	lfi, err := root.Lstat(stateName)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -293,7 +334,7 @@ func writeState(root *os.Root, msg []byte) error {
 	tmp := stateName + ".tmp"
 	err := root.Remove(tmp)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return stateError("cannot be written")
+		return stateError("temporary file " + tmp + " cannot be removed")
 	}
 	if err = writeNew(root, tmp, string(msg)); err != nil {
 		return stateError("cannot be written")

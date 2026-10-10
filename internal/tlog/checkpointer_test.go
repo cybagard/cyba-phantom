@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -24,6 +27,7 @@ import (
 type fakeSink struct {
 	mu    sync.Mutex
 	sizes []uint64
+	msgs  [][]byte
 	err   error
 	onAdd func(size uint64, msg []byte)
 }
@@ -35,6 +39,7 @@ func (f *fakeSink) Add(size uint64, msg []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sizes = append(f.sizes, size)
+	f.msgs = append(f.msgs, slices.Clone(msg))
 	return f.err
 }
 
@@ -44,7 +49,8 @@ func (f *fakeSink) added() []uint64 {
 	return slices.Clone(f.sizes)
 }
 
-// ckEnv is a log with leaves leaves, a state directory, and a key pair.
+// ckEnv is a log with leaves leaves, a state directory, and a key pair. The
+// signer state is the note of the empty tree, as after the first start.
 type ckEnv struct {
 	l        *Log
 	state    *os.Root
@@ -61,11 +67,19 @@ func newEnv(t *testing.T, leaves int) *ckEnv {
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, leaves)
 	s, v := noteKeys(t, testOrigin, 1)
-	return &ckEnv{l, state, dir, &fakeSink{}, s, v}
+	e := &ckEnv{l, state, dir, &fakeSink{}, s, v}
+	e.put(t, e.signed(t, 0, emptyRoot))
+	return e
 }
 
-func (e *ckEnv) start(opts ...CheckpointOption) (*Checkpointer, error) {
-	return NewCheckpointer(e.l, e.signer, e.verifier, e.sink, e.state, testOrigin, time.Minute, nil, opts...)
+func (e *ckEnv) start() (*Checkpointer, error) {
+	return NewCheckpointer(e.l, e.signer, e.verifier, e.sink, e.state, testOrigin, time.Minute, nil)
+}
+
+// dropState removes the signer state and leaves the key.
+func (e *ckEnv) dropState(t *testing.T) {
+	t.Helper()
+	must(t, os.Remove(filepath.Join(e.dir, stateName)))
 }
 
 func (e *ckEnv) mustStart(t *testing.T) *Checkpointer {
@@ -112,8 +126,9 @@ func (e *ckEnv) refused(t *testing.T, c *Checkpointer, before []byte) {
 func TestTU12SignsAtEachTickOnlyWhenTheSizeChanged(t *testing.T) {
 	e := newEnv(t, 3)
 	ticks := make(chan time.Time)
-	c, err := e.start(func(c *Checkpointer) { c.ticks = ticks })
+	c, err := e.start()
 	must(t, err)
+	c.ticks = ticks
 	// tick runs the goroutine for one tick. It returns after the goroutine ended,
 	// so no sign runs while the test appends.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -148,9 +163,39 @@ func TestTU12SignsAtEachTickOnlyWhenTheSizeChanged(t *testing.T) {
 	c2.Run(ctx)
 }
 
+// A second Run call returns at once while the first Run is active.
+func TestTU12SecondRunReturnsAtOnce(t *testing.T) {
+	e := newEnv(t, 3)
+	ticks := make(chan time.Time)
+	c := e.mustStart(t)
+	c.ticks = ticks
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan struct{})
+	go func() { c.Run(ctx); close(first) }()
+	ticks <- time.Time{} // the first Run takes this tick, so it is active
+	second := make(chan struct{})
+	go func() { c.Run(ctx); close(second) }()
+	select {
+	case <-second:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second Run did not return")
+	}
+	select {
+	case <-first:
+		t.Fatal("the first Run ended with the second")
+	default:
+	}
+	cancel()
+	<-first
+	if got := e.sink.added(); !slices.Equal(got, []uint64{3}) || !c.Healthy() {
+		t.Fatalf("signed %v, healthy %v", got, c.Healthy())
+	}
+}
+
 func TestTU12StartRefusals(t *testing.T) {
 	e := newEnv(t, 3)
 	other, otherV := noteKeys(t, "other/origin", 2)
+	_, sameNameV := noteKeys(t, testOrigin, 2) // the right name, another key
 	for _, c := range []struct {
 		name     string
 		signer   note.Signer
@@ -163,6 +208,7 @@ func TestTU12StartRefusals(t *testing.T) {
 		{"no origin", e.signer, e.verifier, "", time.Minute},
 		{"signer of another name", other, e.verifier, testOrigin, time.Minute},
 		{"verifier of another name", e.signer, otherV, testOrigin, time.Minute},
+		{"verifier of another key", e.signer, sameNameV, testOrigin, time.Minute},
 	} {
 		if got, err := NewCheckpointer(e.l, c.signer, c.verifier, e.sink, e.state, c.origin, c.interval, nil); err == nil || got != nil {
 			t.Errorf("%s: checkpointer %v, error %v", c.name, got, err)
@@ -173,9 +219,11 @@ func TestTU12StartRefusals(t *testing.T) {
 	must(t, err)
 	otherKey, err := SignCheckpoint(other, 3, root)
 	must(t, err)
-	for name, state := range map[string][]byte{"origin line of another origin": foreign, "note of another key": otherKey} {
+	// Both states have an origin line that is not the origin. A note of another
+	// key with the same origin line is not a start error (TestTS13BadStoredNoteIsNotHealthy).
+	for name, state := range map[string][]byte{"note body of another origin": foreign, "note of a signer with another name": otherKey} {
 		e.put(t, state)
-		if got, err := e.start(); err == nil || got != nil {
+		if got, err := e.start(); err == nil || got != nil || !strings.Contains(err.Error(), "another origin") {
 			t.Errorf("%s: checkpointer %v, error %v", name, got, err)
 		}
 	}
@@ -184,7 +232,39 @@ func TestTU12StartRefusals(t *testing.T) {
 	}
 }
 
-func TestTS13GuardRefusesAndStopsForGood(t *testing.T) {
+// An empty or corrupt state file is a start error with its own text. It is not
+// "another origin".
+func TestTS13CorruptStateHasItsOwnError(t *testing.T) {
+	for name, state := range map[string][]byte{
+		"empty file":         nil,
+		"no newline":         []byte("garbage"),
+		"garbage first line": []byte("garbage\nnot a size\nAAAA\n"),
+	} {
+		e := newEnv(t, 3)
+		e.put(t, state)
+		got, err := e.start()
+		if err == nil || got != nil || strings.Contains(err.Error(), "another origin") || !strings.HasPrefix(err.Error(), "checkpointer: ") {
+			t.Errorf("%s: checkpointer %v, error %v", name, got, err)
+		}
+	}
+}
+
+// A temporary file that Remove cannot delete stops the signing. The error
+// names that rule.
+func TestTS13UndeletableTemporaryFileNamesTheRule(t *testing.T) {
+	e := newEnv(t, 3)
+	must(t, os.MkdirAll(filepath.Join(e.dir, stateName+".tmp", "x"), 0o700))
+	c := e.mustStart(t)
+	c.sign()
+	if err := c.Err(); err == nil || !strings.Contains(err.Error(), "temporary file") || !strings.Contains(err.Error(), "cannot be removed") {
+		t.Fatalf("error %v", err)
+	}
+	if got := e.sink.added(); len(got) != 0 {
+		t.Fatalf("signed %v", got)
+	}
+}
+
+func TestTS13GuardRefusesAndStopsUntilRestart(t *testing.T) {
 	bogus := tlog.Hash{1}
 	for _, tc := range []struct {
 		name string
@@ -197,12 +277,13 @@ func TestTS13GuardRefusesAndStopsForGood(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, 10)
 			c := e.mustStart(t)
-			c.last, c.hasLast = tc.last, true
+			c.last = tc.last
+			before := e.saved()
 			c.sign()
-			e.refused(t, c, nil)
+			e.refused(t, c, before)
 			appendTo(t, e.l, 10, 20)
 			c.sign() // no retry on a later tick
-			e.refused(t, c, nil)
+			e.refused(t, c, before)
 		})
 	}
 }
@@ -239,6 +320,10 @@ func TestTS13BadStoredNoteIsNotHealthy(t *testing.T) {
 
 func TestTS13StoredNoteThatVerifiesStarts(t *testing.T) {
 	e := newEnv(t, 10)
+	if size, ok, err := SignerState(e.state); size != 0 || !ok || err != nil {
+		t.Fatalf("state of the empty tree: %d %v %v", size, ok, err)
+	}
+	e.dropState(t)
 	if size, ok, err := SignerState(e.state); size != 0 || ok || err != nil {
 		t.Fatalf("no state: %d %v %v", size, ok, err)
 	}
@@ -249,22 +334,155 @@ func TestTS13StoredNoteThatVerifiesStarts(t *testing.T) {
 	}
 	c := e.mustStart(t)
 	c.sign()
-	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{10}) {
+	// The stored note goes to the sink one time at start. The new note follows.
+	if got := e.sink.added(); !c.Healthy() || !slices.Equal(got, []uint64{4, 10}) {
 		t.Fatalf("healthy %v, signed %v", c.Healthy(), got)
 	}
 }
 
+// T-S-13: the first start of the key writes the state of the empty tree. The
+// checkpointer accepts it and gives nothing to the sink. The first tick with
+// leaves signs with a consistency check from size 0.
+func TestTS13FirstStartStateStartsTheCheckpointer(t *testing.T) {
+	withoutSync(t)
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	signer, err := LoadOrCreateSigner(state, nil, testOrigin, false, 0)
+	must(t, err)
+	vkey, err := os.ReadFile(filepath.Join(dir, vkeyName))
+	must(t, err)
+	verifier, err := note.NewVerifier(strings.TrimSpace(string(vkey)))
+	must(t, err)
+	root0, err := l.RootAt(0)
+	must(t, err)
+	e := &ckEnv{l, state, dir, &fakeSink{}, signer, verifier}
+	if cp, err := ParseCheckpoint(e.saved(), testOrigin, verifier); err != nil || cp.Size != 0 || cp.Root != root0 {
+		t.Fatalf("state %+v, error %v", cp, err)
+	}
+	c := e.mustStart(t)
+	c.sign() // the tree is empty
+	if got := e.sink.added(); !c.Healthy() || len(got) != 0 {
+		t.Fatalf("healthy %v, signed %v", c.Healthy(), got)
+	}
+	appendTo(t, l, 0, 5)
+	c.sign()
+	root5, _ := l.RootAt(5)
+	if cp, err := ParseCheckpoint(e.saved(), testOrigin, verifier); err != nil || cp.Size != 5 || cp.Root != root5 || !c.Healthy() {
+		t.Fatalf("state %+v, error %v, healthy %v", cp, err, c.Healthy())
+	}
+	if got := e.sink.added(); !slices.Equal(got, []uint64{5}) {
+		t.Fatalf("signed %v", got)
+	}
+}
+
+// T-S-13: a key with no signer state is a fault. The checkpointer does not
+// sign, is not healthy, and writes no state, whatever the tree size.
+func TestTS13MissingStateIsAFault(t *testing.T) {
+	for _, leaves := range []int{0, 3} {
+		e := newEnv(t, leaves)
+		e.dropState(t)
+		c := e.mustStart(t)
+		c.sign()
+		appendTo(t, e.l, leaves, leaves+2)
+		c.sign()
+		e.refused(t, c, nil)
+		if _, err := os.Lstat(filepath.Join(e.dir, stateName)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%d leaves: state file made: %v", leaves, err)
+		}
+	}
+}
+
+// T-S-13: the fork case. The sensor signs at 10. Then the state file goes and
+// another tree replaces the log. The checkpointer does not sign.
+func TestTS13MissingStateAndForkedLogDoesNotSign(t *testing.T) {
+	e := newEnv(t, 10)
+	e.mustStart(t).sign()
+	if got := e.sink.added(); !slices.Equal(got, []uint64{10}) {
+		t.Fatalf("signed %v", got)
+	}
+	e.dropState(t)
+	e.l.Close()
+	must(t, os.RemoveAll(filepath.Join(e.dir, "tlog")))
+	l, err := OpenLog(e.state, "tlog")
+	must(t, err)
+	t.Cleanup(func() { l.Close() })
+	for i := range 12 {
+		_, err := l.Append(sha256.Sum256(fmt.Appendf(nil, "forged %d", i)))
+		must(t, err)
+	}
+	e.l, e.sink = l, &fakeSink{}
+	c := e.mustStart(t)
+	c.sign()
+	e.refused(t, c, nil)
+}
+
+// T-S-13: a note that is durable but did not reach the sink is added again at
+// each tick with an unchanged size, until the sink takes it. A new tick after
+// that adds nothing.
+func TestTS13PendingNoteGoesToTheSinkAgain(t *testing.T) {
+	e := newEnv(t, 3)
+	e.sink.err = errors.New("spool is full")
+	c := e.mustStart(t)
+	c.sign()
+	c.sign() // fails again
+	e.sink.err = nil
+	c.sign()
+	c.sign() // the sink has the note: no more calls
+	if got := e.sink.added(); !slices.Equal(got, []uint64{3, 3, 3}) || !c.Healthy() {
+		t.Fatalf("signed %v, healthy %v", got, c.Healthy())
+	}
+	for i, m := range e.sink.msgs {
+		if !bytes.Equal(m, e.saved()) {
+			t.Errorf("call %d: the note is not the stored note", i)
+		}
+	}
+}
+
+// T-S-13: at start, the sink takes the verified stored note one time, except
+// the note of the empty tree. A failed Add at start is tried again at the tick.
+func TestTS13StoredNoteGoesToTheSinkAtStart(t *testing.T) {
+	e := newEnv(t, 3)
+	e.mustStart(t) // the stored note is the empty tree
+	if got := e.sink.added(); len(got) != 0 {
+		t.Fatalf("empty tree: sink took %v", got)
+	}
+	root, _ := e.l.RootAt(3)
+	stored := e.signed(t, 3, root)
+	e.put(t, stored) // a crash after the state write, before the Add
+	c := e.mustStart(t)
+	c.sign()
+	c.sign()
+	if got := e.sink.added(); !slices.Equal(got, []uint64{3}) || !bytes.Equal(e.sink.msgs[0], stored) {
+		t.Fatalf("sink took %v", got)
+	}
+	e2 := newEnv(t, 3)
+	e2.put(t, stored)
+	e2.sink.err = errors.New("spool is full")
+	c2 := e2.mustStart(t)
+	e2.sink.err = nil
+	c2.sign()
+	if got := e2.sink.added(); !slices.Equal(got, []uint64{3, 3}) {
+		t.Fatalf("sink took %v", got)
+	}
+}
+
+// The symlink points to a valid note in a directory outside the root. If the
+// code followed the link, the checkpointer would start. It must give an error,
+// and the outside file must stay as it was.
 func TestTS13StateThatIsNotAPlainFileIsAnError(t *testing.T) {
-	for name, mk := range map[string]func(e *ckEnv, p string) error{
-		"symlink":   func(e *ckEnv, p string) error { return os.Symlink(filepath.Join(e.dir, "outside"), p) },
-		"directory": func(_ *ckEnv, p string) error { return os.Mkdir(p, 0o700) },
-		"too large": func(_ *ckEnv, p string) error { return os.WriteFile(p, make([]byte, 2048), 0o600) },
-		"no size":   func(_ *ckEnv, p string) error { return os.WriteFile(p, []byte("garbage"), 0o600) },
+	for name, mk := range map[string]func(e *ckEnv, p, outside string) error{
+		"symlink to a file outside the root": func(_ *ckEnv, p, outside string) error { return os.Symlink(outside, p) },
+		"directory":                          func(_ *ckEnv, p, _ string) error { return os.Mkdir(p, 0o700) },
+		"too large":                          func(_ *ckEnv, p, _ string) error { return os.WriteFile(p, make([]byte, 2048), 0o600) },
+		"no size":                            func(_ *ckEnv, p, _ string) error { return os.WriteFile(p, []byte("garbage"), 0o600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t, 3)
-			must(t, os.WriteFile(filepath.Join(e.dir, "outside"), []byte("outside"), 0o600))
-			must(t, mk(e, filepath.Join(e.dir, stateName)))
+			outside := filepath.Join(t.TempDir(), "outside.note") // another directory than the root
+			valid := e.signed(t, 0, emptyRoot)
+			must(t, os.WriteFile(outside, valid, 0o600))
+			e.dropState(t)
+			must(t, mk(e, filepath.Join(e.dir, stateName), outside))
 			_, ok, err := SignerState(e.state)
 			if ok || err == nil {
 				t.Fatalf("SignerState: %v, %v", ok, err)
@@ -272,7 +490,7 @@ func TestTS13StateThatIsNotAPlainFileIsAnError(t *testing.T) {
 			if got, err := e.start(); err == nil || got != nil {
 				t.Fatalf("checkpointer %v, error %v", got, err)
 			}
-			if b, _ := os.ReadFile(filepath.Join(e.dir, "outside")); string(b) != "outside" {
+			if b, _ := os.ReadFile(outside); !bytes.Equal(b, valid) {
 				t.Fatal("the outside file changed")
 			}
 		})
@@ -284,7 +502,8 @@ func TestTS13StoppedLogDoesNotSign(t *testing.T) {
 		e := newEnv(t, 600)
 		c := e.mustStart(t)
 		root, _ := e.l.RootAt(100)
-		c.last, c.hasLast = Checkpoint{testOrigin, 100, root}, true
+		c.last = Checkpoint{testOrigin, 100, root}
+		before := e.saved()
 		file := filepath.Join(e.dir, "tlog", "tile", "8", "0", "000")
 		b, err := os.ReadFile(file)
 		must(t, err)
@@ -296,7 +515,7 @@ func TestTS13StoppedLogDoesNotSign(t *testing.T) {
 			}
 		}
 		c.sign() // without preStop, the consistency proof of the guard finds it
-		e.refused(t, c, nil)
+		e.refused(t, c, before)
 		if _, err := e.l.RootAt(600); err == nil {
 			t.Fatal("the log is not stopped")
 		}
@@ -371,6 +590,7 @@ func TestTS13NoKeyTextInLogsOrErrors(t *testing.T) {
 	lg, logs := testLogger()
 	e := newEnv(t, 5)
 	e.signer, e.verifier = signer, verifier
+	e.put(t, e.signed(t, 0, emptyRoot)) // the state of the new key
 	c, err := NewCheckpointer(e.l, signer, verifier, e.sink, e.state, testOrigin, time.Minute, lg)
 	must(t, err)
 	c.sign()
@@ -379,6 +599,10 @@ func TestTS13NoKeyTextInLogsOrErrors(t *testing.T) {
 	c.last.Size = 3
 	c.sign() // a guard fault: the error goes to the log
 	errs := []error{c.Err()}
+	e.dropState(t)
+	missing, err := NewCheckpointer(e.l, signer, verifier, e.sink, e.state, testOrigin, time.Minute, lg)
+	must(t, err)
+	errs = append(errs, missing.Err())
 	other, _ := noteKeys(t, "other/origin", 2)
 	for _, s := range []note.Signer{other, signer} {
 		b, err := SignCheckpoint(s, 1, tlog.Hash{})
