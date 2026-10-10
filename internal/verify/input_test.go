@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"golang.org/x/mod/sumdb/note"
 
@@ -62,13 +63,12 @@ func TestTS14_Key(t *testing.T) {
 	}
 	_, err = ReadKey(strings.NewReader(strings.Repeat("a", MaxKeyBytes+1)))
 	wantErr(t, "oversize key", err, ErrTooLarge)
-	_, err = ReadKey(iotestErrReader{})
+	_, err = ReadKey(iotest.ErrReader(errors.New("secret-marker")))
 	wantErr(t, "read error", err, ErrRead)
+	if err != nil && strings.Contains(err.Error(), "secret-marker") {
+		t.Errorf("read error: error text holds the text of the reader error")
+	}
 }
-
-type iotestErrReader struct{}
-
-func (iotestErrReader) Read([]byte) (int, error) { return 0, errors.New("secret-marker") }
 
 // T-S-14, input cases: the checkpoint note.
 func TestTS14_Checkpoint(t *testing.T) {
@@ -90,7 +90,8 @@ func TestTS14_Checkpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Another key text gives a verifier with another name: the origin follows the key.
+	// A key text with another name gives a verifier with another name. The
+	// origin comes from the verifier, so a note for the first name is refused.
 	_, nameText := newKey(t, "phantom/name")
 	nameV, _ := ParseKey([]byte(nameText))
 	for name, tc := range map[string]struct {
@@ -98,16 +99,16 @@ func TestTS14_Checkpoint(t *testing.T) {
 		v    note.Verifier
 		want error
 	}{
-		"over 1 KiB":           {append(bytes.Clone(good), make([]byte, 1024)...), v, ErrTooLarge},
-		"two signature lines":  {append(bytes.Clone(good), sigLine...), v, ErrCheckpoint},
-		"cosigned note":        {cosigned, v, ErrCheckpoint},
-		"another key":          {signed(t, other, 7), v, ErrCheckpoint},
-		"other key as pinned":  {good, otherV, ErrCheckpoint},
-		"key name not origin":  {good, nameV, ErrCheckpoint},
-		"body origin not name": {wrongOrigin, v, ErrCheckpoint},
-		"size past 2^48":       {signed(t, s, maxSize+1), v, ErrRange},
-		"size near 2^64":       {signed(t, s, 1<<64-1), v, ErrRange},
-		"empty":                {nil, v, ErrCheckpoint},
+		"over 1 KiB":                       {append(bytes.Clone(good), make([]byte, 1024)...), v, ErrTooLarge},
+		"two signature lines":              {append(bytes.Clone(good), sigLine...), v, ErrCheckpoint},
+		"cosigned note":                    {cosigned, v, ErrCheckpoint},
+		"another key":                      {signed(t, other, 7), v, ErrCheckpoint},
+		"other key as pinned":              {good, otherV, ErrCheckpoint},
+		"verifier of another name and key": {good, nameV, ErrCheckpoint},
+		"body origin not name":             {wrongOrigin, v, ErrCheckpoint},
+		"size past 2^48":                   {signed(t, s, maxSize+1), v, ErrRange},
+		"size near 2^64":                   {signed(t, s, 1<<64-1), v, ErrRange},
+		"empty":                            {nil, v, ErrCheckpoint},
 	} {
 		_, err := ParseCheckpoint(tc.msg, tc.v)
 		wantErr(t, name, err, tc.want)
@@ -129,8 +130,14 @@ func TestTS14_Event(t *testing.T) {
 	if err != nil || !bytes.Equal(e.Raw, good) || e.Hash != tlog.EventHash(event.Hash(good)) {
 		t.Fatalf("canonical event: %+v, %v", e, err)
 	}
-	if _, err := ParseEvent([]byte(`{"A":1}`)); err != nil { // another case is another event
-		t.Errorf("member name in another case: %v", err)
+	// 04 §7 refuses only bytes that are not canonical. Two names that differ
+	// only in case are two names, and {"A":1,"a":2} is in canonical order. The
+	// parser accepts these bytes, and the hash covers the bytes.
+	for _, in := range []string{`{"A":1}`, `{"A":1,"a":2}`} {
+		e, err := ParseEvent([]byte(in))
+		if err != nil || e.Hash != tlog.EventHash(event.Hash([]byte(in))) {
+			t.Errorf("member names in another case %s: %+v, %v", in, e, err)
+		}
 	}
 	tooBig := []byte(`{"a":"` + strings.Repeat("x", event.MaxRecordBytes) + `"}`)
 	exact := []byte(`{"a":"` + strings.Repeat("x", event.MaxRecordBytes-8) + `"}`)

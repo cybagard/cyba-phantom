@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -33,6 +34,24 @@ func TestTS14_Proof(t *testing.T) {
 	if err != nil || p.Index != 5 || p.TreeSize != 9 || len(p.Hashes) != 2 || p.Hashes[0][0] != 1 || p.Root != nil || p.Consistency != nil {
 		t.Fatalf("good proof: %+v, %v", p, err)
 	}
+	// 04 §7 shows a proof with spaces and newlines. White space between tokens
+	// is not part of any value, so the parser accepts it.
+	pretty := "{\n\t\"index\" : 5 ,\r\n\t\"tree_size\":\t9,\n \"hashes\" : [ \"" + h1 + "\" ,\n\"" + h2 + "\" ]\n}\n"
+	p, err = ParseInclusionProof([]byte(pretty))
+	if err != nil || p.Index != 5 || p.TreeSize != 9 || len(p.Hashes) != 2 || p.Hashes[1][0] != 2 {
+		t.Fatalf("proof with spaces, tabs and newlines: %+v, %v", p, err)
+	}
+	// The size cap is exact: 16384 bytes pass the cap, and 16385 bytes do not.
+	// The padded member is unknown, so the first input fails for another reason.
+	atCap := obj("1", "2", "[]", `,"x":"`+strings.Repeat("a", MaxProofBytes-len(obj("1", "2", "[]", `,"x":""`)))+`"`)
+	if len(atCap) != MaxProofBytes {
+		t.Fatalf("test input has %d bytes, want %d", len(atCap), MaxProofBytes)
+	}
+	if _, err := ParseInclusionProof([]byte(atCap)); errors.Is(err, ErrTooLarge) {
+		t.Errorf("proof of exactly 16 KiB: refused for size")
+	}
+	_, err = ParseInclusionProof([]byte(atCap + " "))
+	wantErr(t, "proof of 16 KiB + 1 byte", err, ErrTooLarge)
 	p, err = ParseInclusionProof([]byte(obj("0", "1", "[]", rc)))
 	if err != nil || p.Root == nil || p.Root[0] != 1 || len(p.Consistency) != 1 || p.Hashes == nil {
 		t.Fatalf("proof with root and consistency: %+v, %v", p, err)
