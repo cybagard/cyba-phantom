@@ -575,10 +575,12 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 
 			oldRename := renameFile
 			t.Cleanup(func() { renameFile = oldRename })
-			heads := 0
+			heads, tileWrites := 0, 0
 			renameFile = func(r *os.Root, from, to string) error {
 				if to == headName {
 					heads++
+				} else {
+					tileWrites++
 				}
 				return oldRename(r, from, to)
 			}
@@ -586,6 +588,12 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			renameFile = oldRename
 			if err != nil || first != int64(start) || heads != 1 {
 				t.Fatalf("AppendBatch gave %d, %v after %d head writes, want %d, nil, 1", first, err, heads, start)
+			}
+			// Each tile is written one time. From 0: tile 0 and tile 1 of level 0,
+			// and tile 0 of level 1. From 100: tiles 0, 1, and 2 of level 0, and
+			// tile 0 of level 1.
+			if want := map[int]int{0: 3, 100: 4}[start]; tileWrites != want {
+				t.Fatalf("AppendBatch wrote %d tiles, want %d", tileWrites, want)
 			}
 			size, root := ref.Head()
 			if s2, r2 := l.Head(); s2 != size || r2 != root {
@@ -626,12 +634,14 @@ func TestTU07BatchEdges(t *testing.T) {
 	}
 	// A batch that does not fit, or has too many tiles, is refused before any write.
 	l.size = maxSize - 1
-	if _, err := l.AppendBatch(batchOf(0, 2)); err == nil {
-		t.Fatal("a batch above the largest size returned nil")
+	var e *Error
+	if _, err := l.AppendBatch(batchOf(0, 2)); !errors.As(err, &e) || e.Rule != ruleFull {
+		t.Fatalf("a batch above the largest size gave %v, want the rule %q", err, ruleFull)
 	}
 	l.size = 0
-	if _, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth+1)); err == nil {
-		t.Fatal("a batch with too many tiles returned nil")
+	e = nil
+	if _, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth+1)); !errors.As(err, &e) || e.Rule != ruleBatch {
+		t.Fatalf("a batch with too many tiles gave %v, want the rule %q", err, ruleBatch)
 	}
 	if l.err != nil {
 		t.Fatalf("a refused batch stopped the log: %v", l.err)
@@ -639,25 +649,35 @@ func TestTU07BatchEdges(t *testing.T) {
 }
 
 func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
-	// The batch from size 255 to size 300 writes tile 0 in full, then tile 1
-	// with 44 hashes, then the tile of level 1, then the head.
-	for _, c := range []struct {
-		name  string
-		fault func(t *testing.T)
-	}{
-		{"second tile", func(t *testing.T) {
+	// The batch from size 255 to size 300 writes the tiles in the order in which
+	// the batch first changes them: tile 0 of level 0 with 256 hashes, tile 0 of
+	// level 1 with one hash, and tile 1 of level 0 with 44 hashes. Then it writes
+	// the head.
+	failTileRename := func(nth int) func(t *testing.T) {
+		return func(t *testing.T) {
 			old, tiles := renameFile, 0
 			renameFile = func(r *os.Root, from, to string) error {
 				if to != headName {
-					if tiles++; tiles == 2 {
+					if tiles++; tiles == nth {
 						return errors.New("injected")
 					}
 				}
 				return old(r, from, to)
 			}
-		}},
-		{"tile directory sync", func(t *testing.T) { failDirSyncAfterRename(t, "tile/8/0/001.p/44") }},
-		{"head", func(t *testing.T) {
+		}
+	}
+	batchRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
+	for _, c := range []struct {
+		name  string
+		fault func(t *testing.T)
+		// covers is true when the head on disk covers the batch after the failure.
+		covers bool
+	}{
+		{"level 0 tile 0 rename", failTileRename(1), false},
+		{"level 1 tile 0 rename", failTileRename(2), false},
+		{"level 0 tile 1 rename", failTileRename(3), false},
+		{"level 0 tile 1 directory sync", func(t *testing.T) { failDirSyncAfterRename(t, "tile/8/0/001.p/44") }, false},
+		{"head rename", func(t *testing.T) {
 			old := renameFile
 			renameFile = func(r *os.Root, from, to string) error {
 				if to == headName {
@@ -665,7 +685,9 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 				}
 				return old(r, from, to)
 			}
-		}},
+		}, false},
+		// The rename of the head works and the fsync of its directory fails.
+		{"head directory sync", func(t *testing.T) { failDirSyncAfterRename(t, headName) }, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state, dir := newLogState(t)
@@ -680,16 +702,26 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 			if first == nil {
 				t.Fatal("AppendBatch returned nil")
 			}
-			check := func(l *Log, what string) {
+			// The head in memory is always the old head. The head on disk is the old
+			// head, or it covers the batch.
+			diskSize, diskRoot := size, root
+			if c.covers {
+				diskSize, diskRoot = 300, batchRoot
+			}
+			check := func(l *Log, what string, loaded bool) {
 				t.Helper()
-				if s2, r2 := l.Head(); s2 != size || r2 != root {
-					t.Fatalf("%s: head %d, %x, want %d, %x", what, s2, r2, size, root)
+				wantSize, wantRoot := size, root
+				if loaded {
+					wantSize, wantRoot = diskSize, diskRoot
 				}
-				if s2, r2 := diskHead(t, dir); s2 != size || r2 != root {
-					t.Fatalf("%s: head on disk %d, %x", what, s2, r2)
+				if s2, r2 := l.Head(); s2 != wantSize || r2 != wantRoot {
+					t.Fatalf("%s: head %d, %x, want %d, %x", what, s2, r2, wantSize, wantRoot)
+				}
+				if s2, r2 := diskHead(t, dir); s2 != diskSize || r2 != diskRoot {
+					t.Fatalf("%s: head on disk %d, %x, want %d, %x", what, s2, r2, diskSize, diskRoot)
 				}
 			}
-			check(l, "after the failure")
+			check(l, "after the failure", false)
 			// The log refuses each later call with the same error, also when the writes work.
 			if _, err := l.Append(testEvent(255)); !errors.Is(err, first) {
 				t.Fatalf("next Append gave %v, want %v", err, first)
@@ -700,12 +732,23 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 			if _, err := l.AppendBatch(nil); !errors.Is(err, first) {
 				t.Fatalf("next empty AppendBatch gave %v, want %v", err, first)
 			}
-			check(l, "after the refused calls")
+			check(l, "after the refused calls", false)
 
-			// A reopen loads the old head, and the same batch works again.
+			// A reopen loads the head on disk. If that head is the old head, the same
+			// batch works again. If it covers the batch, the log holds the batch already.
 			l.Close()
 			l = openTestLog(t, state)
-			check(l, "after the reopen")
+			check(l, "after the reopen", true)
+			if c.covers {
+				checkProof(t, l, 299)
+				if idx, err := l.Append(testEvent(300)); err != nil || idx != 300 {
+					t.Fatalf("Append after the reopen gave %d, %v", idx, err)
+				}
+				if want := rfcRoot(rfcLeaves(batchOf(0, 301))); rootOf(l) != tlog.Hash(want) || sizeOf(l) != 301 {
+					t.Fatalf("after the reopen: size %d, root %x, want %x", sizeOf(l), rootOf(l), want)
+				}
+				return
+			}
 			if idx, err := l.AppendBatch(batchOf(255, 300)); err != nil || idx != 255 {
 				t.Fatalf("batch after the reopen gave %d, %v", idx, err)
 			}

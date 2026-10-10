@@ -44,7 +44,7 @@ type Log struct {
 	size  int64
 	root  tlog.Hash
 	tiles [maxLevel + 1]tileBuf
-	err   error // the first write error or tile-read error; each later Append, proof, and root read returns it until the caller opens the log again
+	err   error // the first write error or tile-read error; each later Append, AppendBatch, proof, and root read returns it until the caller opens the log again
 }
 
 // OpenLog opens the store in dir below state, checks the tiles that the tree
@@ -97,18 +97,24 @@ func (l *Log) Append(h EventHash) (int64, error) {
 
 // AppendBatch adds one leaf for each event hash, in order, and returns the index
 // of the first leaf. It writes each tile that the batch changes one time, with
-// its final width, and then it writes the tree head one time. A tile that the
-// batch fills is written in full, also if the batch starts the next tile. The
-// size and the root in memory change only after the tree head is durable. An
-// empty batch writes nothing and returns the size. If the batch does not fit in
-// the log, or if it changes more tiles than the store accepts for one tree head,
-// AppendBatch returns an error before it writes. If a write fails, AppendBatch
-// returns an error, and the size and the root in memory do not change. The old
-// tree head stays, so no leaf of the batch is in the tree. The leaves can still
-// be on disk after the error. The log then refuses each later Append and
+// its final width. Then it writes the tree head one time. A tile that the batch
+// fills is written in full. This is also true when the batch goes on into the
+// next tile. The size and the root in memory change only after the tree head is
+// durable. An empty batch writes nothing and returns the size. If the batch does
+// not fit in the log, AppendBatch returns an error before it writes. It does the
+// same if the batch changes more tiles than the store accepts for one tree head.
+//
+// If a write fails, AppendBatch returns an error and the log stops. The size and
+// the root in memory do not change. The log then refuses each later Append and
 // AppendBatch with the same error. A proof or root read that finds a bad tile
-// stops the log in the same way. The caller must close the log and open it
-// again with OpenLog. OpenLog loads the state on disk.
+// stops the log in the same way.
+//
+// The tree head on disk depends on the failure. If a tile write fails, or the
+// write or rename of the head file fails, the old tree head stays on disk. No
+// leaf of the batch is in that tree head, but the leaves can be in tile files.
+// If the rename of the head file works and the fsync of its directory then
+// fails, the tree head on disk can cover the whole batch. The caller must close
+// the log and open it again with OpenLog. OpenLog loads the tree head on disk.
 func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -125,7 +131,7 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	if len(hs) > maxBatchTiles*fullWidth {
 		return 0, newError("log", ruleBatch)
 	}
-	// Work on a copy of the tiles. The batch clones a buffer when it first
+	// Work on a copy of the tiles. The batch copies a buffer when it first
 	// changes it, so the buffers of the log stay as they are until the head is durable.
 	work := l.tiles
 	var owned [maxLevel + 1]bool
