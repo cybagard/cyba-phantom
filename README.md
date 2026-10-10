@@ -1,8 +1,8 @@
-# Agent Canary
+# Phantom
 
 > **Pre-release.** This project is under active development. It is not ready for production use. Interfaces, file formats, and configuration can change without notice until `v1.0.0-rc1`.
 
-Agent Canary is a self-hosted sensor that detects AI agents. It serves decoy sites with prompt-injection bait, fingerprints each session, and scores the traffic as `human`, `crawler`, `agent-likely`, or `agent-confirmed`.
+Phantom is a self-hosted sensor that detects AI agents. It serves decoy sites with prompt-injection bait, fingerprints each session, and scores the traffic as `human`, `crawler`, `agent-likely`, or `agent-confirmed`.
 
 Goals for v1 (not all built yet):
 
