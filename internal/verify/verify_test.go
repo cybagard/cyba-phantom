@@ -174,7 +174,7 @@ func TestTS14_InclusionRefused(t *testing.T) {
 		"proof size equal, with a root": {msg, events[3], withRoot, ErrProof},
 		"proof size smaller, no root":   {msg, events[3], proofAt(t, l, 3, 5), ErrProof},
 		"index past the size":           {msg, events[3], InclusionProof{Index: 10, TreeSize: 10, Hashes: good.Hashes}, ErrNotVerified},
-		"checkpoint note is bad":        {msg[:len(msg)-3], events[3], good, ErrSignature},
+		"checkpoint note is bad":        {msg[:len(msg)-3], events[3], good, ErrCheckpoint},
 	} {
 		res, err := Inclusion(v, tc.msg, tc.e, tc.p)
 		wantErr(t, name, err, tc.want)

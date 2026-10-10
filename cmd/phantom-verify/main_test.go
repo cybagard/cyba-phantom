@@ -264,7 +264,11 @@ func TestTS14_Refused(t *testing.T) {
 	proof := f.write("proof", []byte(inclusionJSON(t, l, 3, 10)))
 	good := checkpointAt(t, l, s, 10)
 	badSig := bytes.Clone(good)
-	badSig[len(badSig)-5] ^= 1
+	i := len(badSig) - 20 // a base64 digit in the middle of the signature
+	badSig[i] = 'B'
+	if good[i] == 'B' {
+		badSig[i] = 'C'
+	}
 	bigProof := inclusionJSON(t, l, 3, 10)
 	bigProof = strings.Replace(bigProof, `"tree_size":10`, `"tree_size":11`, 1)
 	for name, tc := range map[string]struct {
@@ -328,6 +332,7 @@ func TestTS14_InputFaults(t *testing.T) {
 		"directory as file":            {"--key", f.dir, "--checkpoint", cp},
 		"key is not a key":             {"--key", f.write("badkey", []byte(contentMarker)), "--checkpoint", cp},
 		"key past its size cap":        {"--key", f.write("bigkey", bytes.Repeat([]byte("a"), 2048)), "--checkpoint", cp},
+		"garbage checkpoint":           {"--key", key, "--checkpoint", f.write("garbage", []byte(contentMarker))},
 		"note with two signatures":     {"--key", key, "--checkpoint", twoSigs},
 		"bad event":                    {"--key", key, "--checkpoint", cp, "--event", f.write("badev", []byte(`{"b":1,"a":"`+contentMarker+`"}`)), "--proof", proof},
 		"bad proof":                    {"--key", key, "--checkpoint", cp, "--event", ev, "--proof", f.write("badproof", []byte(`{"`+contentMarker+`":1}`))},

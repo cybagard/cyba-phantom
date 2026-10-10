@@ -96,7 +96,11 @@ func TestTS14_Checkpoint(t *testing.T) {
 	}
 	// A changed signature or a changed body: the note does not verify (exit 1).
 	changedSig := bytes.Clone(good)
-	changedSig[len(changedSig)-5] ^= 1
+	i := len(changedSig) - 20 // a base64 digit in the middle of the signature
+	changedSig[i] = 'B'
+	if good[i] == 'B' {
+		changedSig[i] = 'C'
+	}
 	changedBody := bytes.Clone(good)
 	changedBody[len(changedBody)-len(sigLine)-3] ^= 1
 	// A key text with another name gives a verifier with another name. The
@@ -120,7 +124,10 @@ func TestTS14_Checkpoint(t *testing.T) {
 		"signed bad body":                  {badBody, v, ErrCheckpoint},
 		"size past 2^48":                   {signed(t, s, maxSize+1), v, ErrRange},
 		"size near 2^64":                   {signed(t, s, 1<<64-1), v, ErrRange},
-		"empty":                            {nil, v, ErrSignature},
+		"empty":                            {nil, v, ErrCheckpoint},
+		"garbage text":                     {[]byte("not a note at all"), v, ErrCheckpoint},
+		"no blank line":                    {bytes.ReplaceAll(good, []byte("\n\n"), []byte("\n")), v, ErrCheckpoint},
+		"bad signature line form":          {append(bytes.Clone(good[:len(good)-len(sigLine)]), "- x\n"...), v, ErrCheckpoint},
 	} {
 		_, err := ParseCheckpoint(tc.msg, tc.v)
 		wantErr(t, name, err, tc.want)

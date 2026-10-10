@@ -59,7 +59,7 @@ func TestTS14_Consistency(t *testing.T) {
 		"no proof":                  {cp(5), cp(10), nil, ErrNoProof},
 		"prior of another key":      {checkpointAt(t, l, other, 5), cp(10), []ConsistencyProof{consProof(t, l, 5, 10)}, ErrSignature},
 		"latest of another key":     {cp(5), checkpointAt(t, l, other, 10), []ConsistencyProof{consProof(t, l, 5, 10)}, ErrSignature},
-		"prior is bad":              {cp(5)[:20], cp(10), nil, ErrSignature},
+		"prior is bad":              {cp(5)[:20], cp(10), nil, ErrCheckpoint},
 		"same size, other root":     {cp(10), emptyAt(t, s, 10, modtlog.Hash{9}), nil, ErrFork},
 		"empty with another root":   {emptyCheckpoint(t, s, modtlog.Hash{9}), cp(10), nil, ErrFork},
 		"empty, latest, bad root":   {cp(10), emptyCheckpoint(t, s, modtlog.Hash{9}), nil, ErrFork},

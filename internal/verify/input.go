@@ -36,8 +36,8 @@ const (
 const maxSize = verifier.MaxSize
 
 // The errors of this package. ErrSignature means that the signature does not
-// verify with the key (not verified). ErrCheckpoint means that the form of the
-// note is bad (an input error).
+// verify with the key (not verified). ErrCheckpoint means that the note is not
+// valid in form (an input error).
 var (
 	ErrTooLarge   = errors.New("verify: input is larger than its size cap")
 	ErrRead       = errors.New("verify: input cannot be read")
@@ -90,17 +90,21 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 // key. The function checks the size against 2^48.
 //
 // When the strict parser refuses the note, the function opens the note with
-// the same key. If that fails, the signature is bad or the key is another key:
-// the result is ErrSignature (not verified). If it works, the form of the note
-// is bad: a second signature line, a bad body, or a size that is too large. The
-// result is ErrCheckpoint (an input error).
+// the same key. If note.Open says that the signature of the key is wrong, or
+// that no signature line is from the key (for example a note signed by another
+// key), the result is ErrSignature (not verified). Every other result is
+// ErrCheckpoint (an input error): text that is not a note, a second signature
+// line, a bad body, or a size that is too large.
 func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	if len(b) > MaxNoteBytes {
 		return verifier.Checkpoint{}, ErrTooLarge
 	}
 	c, err := verifier.ParseCheckpoint(b, v.Name(), v)
 	if err != nil {
-		if _, nerr := note.Open(b, note.VerifierList(v)); nerr != nil {
+		_, nerr := note.Open(b, note.VerifierList(v))
+		var invalid *note.InvalidSignatureError
+		var unverified *note.UnverifiedNoteError
+		if errors.As(nerr, &invalid) || errors.As(nerr, &unverified) {
 			return verifier.Checkpoint{}, ErrSignature
 		}
 		return verifier.Checkpoint{}, ErrCheckpoint
