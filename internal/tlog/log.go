@@ -89,63 +89,102 @@ func (l *Log) Head() (int64, tlog.Hash) {
 	return l.size, l.root
 }
 
-// Append adds one leaf for the event and returns its index. It writes the
-// rightmost tile of each level that changes, then the tree head. The size and
-// the root in memory change only after the tree head is durable. If a write
-// fails, Append returns an error, and the size and the root in memory do not
-// change. The leaf can still be on disk after the error. The log then refuses
-// each later Append with the same error. A proof or root read that finds a bad
-// tile stops the log in the same way. The caller must close the log and
-// open it again with OpenLog. OpenLog loads the state on disk.
+// Append adds one leaf for the event and returns its index. It is AppendBatch
+// with one hash.
 func (l *Log) Append(h EventHash) (int64, error) {
+	return l.AppendBatch([]EventHash{h})
+}
+
+// AppendBatch adds one leaf for each event hash, in order, and returns the index
+// of the first leaf. It writes each tile that the batch changes one time, with
+// its final width, and then it writes the tree head one time. A tile that the
+// batch fills is written in full, also if the batch starts the next tile. The
+// size and the root in memory change only after the tree head is durable. An
+// empty batch writes nothing and returns the size. If the batch does not fit in
+// the log, or if it changes more tiles than the store accepts for one tree head,
+// AppendBatch returns an error before it writes. If a write fails, AppendBatch
+// returns an error, and the size and the root in memory do not change. The old
+// tree head stays, so no leaf of the batch is in the tree. The leaves can still
+// be on disk after the error. The log then refuses each later Append and
+// AppendBatch with the same error. A proof or root read that finds a bad tile
+// stops the log in the same way. The caller must close the log and open it
+// again with OpenLog. OpenLog loads the state on disk.
+func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.err != nil {
 		return 0, l.err
 	}
 	n := l.size
-	if n >= maxSize {
+	if len(hs) == 0 {
+		return n, nil
+	}
+	if int64(len(hs)) > maxSize-n {
 		return 0, newError("log", ruleFull)
 	}
-	hs, err := tlog.StoredHashes(n, h[:], cacheView{&l.tiles})
-	if err != nil {
-		return 0, newError("log", ruleCache)
+	if len(hs) > maxBatchTiles*fullWidth {
+		return 0, newError("log", ruleBatch)
 	}
-	next := l.tiles // Append copies the buffers by value. A changed buffer gets new data.
-	var changed []int
-	for i, hash := range hs {
-		if i%TileHeight != 0 {
-			continue // The store keeps only the hashes of the tile levels.
+	// Work on a copy of the tiles. The batch clones a buffer when it first
+	// changes it, so the buffers of the log stay as they are until the head is durable.
+	work := l.tiles
+	var owned [maxLevel + 1]bool
+	type slot struct {
+		lv int
+		n  int64
+	}
+	final := map[slot][]byte{} // the last data of each tile that the batch changes
+	var order []slot
+	for j, h := range hs {
+		size := n + int64(j)
+		stored, err := tlog.StoredHashes(size, h[:], cacheView{&work})
+		if err != nil {
+			return 0, newError("log", ruleCache)
 		}
-		lv, k := i/TileHeight, n>>i // the new hash is number k of its level
-		var data []byte
-		if pos := int(k % fullWidth); pos > 0 {
-			old := l.tiles[lv]
-			if old.n != k/fullWidth || len(old.data) != pos*tlog.HashSize {
-				return 0, newError("log", ruleCache)
+		for i, hash := range stored {
+			if i%TileHeight != 0 {
+				continue // The store keeps only the hashes of the tile levels.
 			}
-			data = slices.Clone(old.data)
+			lv, k := i/TileHeight, size>>i // the new hash is number k of its level
+			var data []byte
+			if pos := int(k % fullWidth); pos > 0 {
+				old := work[lv]
+				if old.n != k/fullWidth || len(old.data) != pos*tlog.HashSize {
+					return 0, newError("log", ruleCache)
+				}
+				if data = old.data; !owned[lv] {
+					data = slices.Clone(data)
+				}
+			}
+			work[lv], owned[lv] = tileBuf{k / fullWidth, append(data, hash[:]...)}, true
+			s := slot{lv, k / fullWidth}
+			if _, ok := final[s]; !ok {
+				order = append(order, s)
+			}
+			final[s] = work[lv].data
 		}
-		next[lv] = tileBuf{k / fullWidth, append(data, hash[:]...)}
-		changed = append(changed, lv)
 	}
-	root, err := tlog.TreeHash(n+1, cacheView{&next})
+	if len(order) > maxBatchTiles {
+		return 0, newError("log", ruleBatch)
+	}
+	end := n + int64(len(hs))
+	root, err := tlog.TreeHash(end, cacheView{&work})
 	if err != nil {
 		return 0, newError("log", ruleCache)
 	}
-	for _, lv := range changed {
-		b := next[lv]
-		t := tlog.Tile{H: TileHeight, L: lv, N: b.n, W: len(b.data) / tlog.HashSize}
-		if err := l.store.WriteTile(t, b.data); err != nil {
+	for _, s := range order {
+		data := final[s]
+		t := tlog.Tile{H: TileHeight, L: s.lv, N: s.n, W: len(data) / tlog.HashSize}
+		if err := l.store.WriteTile(t, data); err != nil {
 			l.err = err
 			return 0, err
 		}
 	}
-	if err := l.store.SetHead(n+1, root); err != nil {
+	if err := l.store.SetHead(end, root); err != nil {
 		l.err = err
 		return 0, err
 	}
-	l.tiles, l.size, l.root = next, n+1, root
+	l.tiles, l.size, l.root = work, end, root
 	return n, nil
 }
 
