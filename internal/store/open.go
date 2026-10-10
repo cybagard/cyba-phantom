@@ -39,9 +39,9 @@ const (
 	ruleLocation   = "opened at a path other than the checked path"
 )
 
-// Error is a refused open. Name is the file, or the config key or directory
-// that broke the rule; Rule is one of the fixed classes. The error never wraps
-// another error, so no driver text can reach its string.
+// Error is a refused store operation. Name is the file, the config key, the
+// directory, or "database schema"; Rule is one of the fixed classes. The error
+// never wraps another error, so no driver text can reach its string.
 type Error struct{ Name, Rule string }
 
 func (e *Error) Error() string { return "store: " + e.Name + " " + e.Rule }

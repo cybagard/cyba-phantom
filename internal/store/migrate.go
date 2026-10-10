@@ -48,8 +48,11 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 		return err
 	}
 	ctx := context.Background()
-	var vacuum int
-	if err := db.QueryRowContext(ctx, "PRAGMA auto_vacuum").Scan(&vacuum); err != nil || vacuum != 2 {
+	var autoVacuum int
+	if err := db.QueryRowContext(ctx, "PRAGMA auto_vacuum").Scan(&autoVacuum); err != nil {
+		return fail(schemaName, ruleMigrate)
+	}
+	if autoVacuum != 2 {
 		return fail(schemaName, ruleVacuum)
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -66,13 +69,20 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	case have == len(scripts):
 		return nil
 	}
-	ok := true
-	run := func(q string, args ...any) bool { _, err := tx.ExecContext(ctx, q, args...); return err == nil }
 	for _, s := range scripts[have:] {
-		ok = ok && run(s)
+		if _, err := tx.ExecContext(ctx, s); err != nil {
+			return fail(schemaName, ruleMigrate)
+		}
 	}
-	ok = ok && (!fresh || run(insertOrigin, origin)) && run(setVersion, strconv.Itoa(len(scripts))) && tx.Commit() == nil
-	if !ok {
+	if fresh {
+		if _, err := tx.ExecContext(ctx, insertOrigin, origin); err != nil {
+			return fail(schemaName, ruleMigrate)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, setVersion, strconv.Itoa(len(scripts))); err != nil {
+		return fail(schemaName, ruleMigrate)
+	}
+	if err := tx.Commit(); err != nil {
 		return fail(schemaName, ruleMigrate)
 	}
 	return nil
@@ -97,8 +107,9 @@ func readScripts(set fs.FS) ([]string, error) {
 	return scripts, nil
 }
 
-// currentVersion reads the state: no entry in sqlite_master is fresh (version
-// 0); tables but no usable meta.schema_version give ruleForeign.
+// currentVersion reads the state of the database. If sqlite_master has no entry,
+// the database is new (version 0). If it has entries but no meta table or no
+// valid schema_version, the result is ruleForeign.
 func currentVersion(ctx context.Context, tx *sql.Tx) (version int, fresh bool, rule string) {
 	var entries, metas int
 	err := tx.QueryRowContext(ctx, "SELECT count(*), count(CASE WHEN type = 'table' AND name = 'meta' THEN 1 END) FROM sqlite_master").

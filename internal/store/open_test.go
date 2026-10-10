@@ -193,10 +193,10 @@ func TestTS15ConnectionStringIsFixedText(t *testing.T) {
 	}
 }
 
-// T-S-15, T-U-18: each pragma of 03 reads back its value on each new connection,
-// the journal mode is wal, the writer pool has one connection, and the soft heap
-// limit of the process is 16 MiB. The file that Open made has auto_vacuum 2: this
-// shows that the driver applies the pragmas in order.
+// T-S-15, T-U-18: each pragma of 03 reads back its value on each new connection.
+// The journal mode is wal. The writer pool has one connection. The soft heap
+// limit of the process is 16 MiB. A file that Open made has auto_vacuum 2.
+// This shows that the driver applies the pragmas in order.
 func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 	root, state, _ := newState(t)
 	db := mustOpen(t, root, "events.db")

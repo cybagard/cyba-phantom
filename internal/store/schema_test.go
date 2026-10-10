@@ -78,7 +78,10 @@ func TestTS15SchemaRefusesBadRows(t *testing.T) {
 	}
 	// Retention sets record to NULL on an evidence row.
 	res, err := db.Exec("UPDATE event SET record = NULL WHERE kind = 'callback'")
-	if n, _ := res.RowsAffected(); err != nil || n != 1 {
+	if err != nil {
 		t.Fatalf("retention update: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("retention update: %d rows", n)
 	}
 }

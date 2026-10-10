@@ -153,50 +153,71 @@ func TestTU18RefusedDatabasesAreNotChanged(t *testing.T) {
 
 // T-U-18: auto_vacuum other than 2 is refused (also an empty file from before Open).
 func TestTU18ExistingDatabaseWithOtherAutoVacuumIsRefused(t *testing.T) {
-	for _, full := range []bool{true, false} {
-		root, state, _ := newState(t)
-		file := filepath.Join(state, "events.db")
-		if err := os.WriteFile(file, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if full {
-			plain, err := sql.Open("sqlite", file)
-			if err != nil {
+	cases := []struct {
+		name string
+		full bool
+		want int
+	}{
+		{"full", true, 1},
+		{"empty file", false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			plain.SetMaxOpenConns(1)
-			if _, err := plain.Exec("PRAGMA auto_vacuum = FULL; CREATE TABLE t (a)"); err != nil {
-				t.Fatal(err)
+			if c.full {
+				plain, err := sql.Open("sqlite", file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plain.SetMaxOpenConns(1)
+				if _, err := plain.Exec("PRAGMA auto_vacuum = FULL; CREATE TABLE t (a)"); err != nil {
+					t.Fatal(err)
+				}
+				plain.Close()
 			}
-			plain.Close()
-		}
-		db := mustOpen(t, root, "events.db")
-		before := content(t, db, file)
-		wantRule(t, Migrate(db, "o"), schemaName, ruleVacuum)
-		var v int
-		if err := db.QueryRow("PRAGMA auto_vacuum").Scan(&v); err != nil || v != map[bool]int{true: 1, false: 0}[full] {
-			t.Fatalf("full=%v: auto_vacuum %d: %v", full, v, err)
-		}
-		if content(t, db, file) != before {
-			t.Fatalf("full=%v: the refused database changed", full)
-		}
-		db.Close()
+			db := mustOpen(t, root, "events.db")
+			defer db.Close()
+			before := content(t, db, file)
+			wantRule(t, Migrate(db, "o"), schemaName, ruleVacuum)
+			var v int
+			if err := db.QueryRow("PRAGMA auto_vacuum").Scan(&v); err != nil || v != c.want {
+				t.Fatalf("auto_vacuum %d: %v", v, err)
+			}
+			if content(t, db, file) != before {
+				t.Fatal("the refused database changed")
+			}
+		})
 	}
 }
 
-// T-U-18: no non-test Go file and no SQL file of the package has the word.
+// T-U-18: no non-test Go file and no SQL file of the package has the SQL keyword
+// VACUUM, in any case.
 func TestTU18NoVacuumInSource(t *testing.T) {
-	word := regexp.MustCompile(`\bVACUUM\b`)
-	if !word.MatchString("VACUUM;") || word.MatchString("auto_vacuum incremental_vacuum") {
+	word := regexp.MustCompile(`(?i)\bvacuum\b`)
+	if !word.MatchString("VACUUM;") || !word.MatchString("vacuum;") || word.MatchString("auto_vacuum incremental_vacuum") {
 		t.Fatal("the pattern is wrong")
 	}
-	filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
+	scanned := map[string]bool{}
+	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".sql") && (!strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go")) {
 			return err
 		}
+		scanned[filepath.ToSlash(p)] = true
 		if b, err := os.ReadFile(p); err != nil || word.Match(b) {
 			t.Errorf("%s has the word or cannot be read", p)
 		}
 		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"migrate.go", "open.go", "migrations/0001_schema_v1.sql"} {
+		if !scanned[p] {
+			t.Errorf("%s was not scanned", p)
+		}
+	}
 }
