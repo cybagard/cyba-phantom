@@ -45,6 +45,20 @@ func validBody(t *testing.T) string {
 	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
 }
 
+// TestTS10_Usage checks that a run with no argument exits 2 and prints the fixed usage line.
+func TestTS10_Usage(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if code := run(nil, nil, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if want := "usage: phantom [--check] <config-path>\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 // TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
 func TestTS10_CheckWiring(t *testing.T) {
 	var got config.Net

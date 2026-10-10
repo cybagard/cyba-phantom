@@ -28,7 +28,7 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard) // The flag package prints a flag name raw, so run prints a fixed usage line.
 	check := fs.Bool("check", false, "validate the config file and exit")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: phantom[--check] <config-path>")
+		fmt.Fprintln(stderr, "usage: phantom [--check] <config-path>")
 		return 2
 	}
 	if _, err := loadWith(fs.Arg(0), env, netFor(*check)); err != nil {
