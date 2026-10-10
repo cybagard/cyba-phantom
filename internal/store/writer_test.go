@@ -309,6 +309,53 @@ func TestTU18CloseWritesAllEvents(t *testing.T) {
 	}
 }
 
+// T-U-18: the shutdown step writes the batch, then the events that Drain
+// returns, in batches of at most 500, in order, and loses no event.
+func TestTU18ShutdownWritesTheDrainedEvents(t *testing.T) {
+	r := newRig(t, 2000)
+	for i := int64(0); i < 605; i++ {
+		kind := event.KindRequest
+		if i%6 == 0 {
+			kind = event.KindScoreChange
+		}
+		r.add(kind, i)
+	}
+	var batch []*event.Event
+	for len(batch) < 5 {
+		e, ok := r.q.TryTake()
+		if !ok {
+			t.Fatal("the lanes are empty")
+		}
+		batch = append(batch, e)
+	}
+	r.q.Close()
+	if err := r.w.shutdown(batch); err != nil {
+		t.Fatal(err)
+	}
+	wantCommits(t, r, 5, 500, 100)
+	if e, ok := r.q.TryTake(); ok || e != nil {
+		t.Fatal("an event is left in the lanes")
+	}
+	if r.rows() != 605 {
+		t.Fatalf("%d rows for 605 events", r.rows())
+	}
+	rows, err := r.db.Query("SELECT leaf_index FROM event WHERE leaf_index IS NOT NULL ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := int64(0)
+	for ; rows.Next(); n++ {
+		var leaf int64
+		if rows.Scan(&leaf) != nil || leaf != 100+n {
+			t.Fatalf("evidence row %d has leaf %d", n, leaf)
+		}
+	}
+	if n != 101 { // i = 0, 6, ..., 600
+		t.Fatalf("%d evidence rows, want 101", n)
+	}
+}
+
 // T-U-18: when ctx ends, Run writes the events that it took and returns ctx.Err().
 func TestTU18CancelWritesTheTakenEvents(t *testing.T) {
 	r := newRig(t, 100)
