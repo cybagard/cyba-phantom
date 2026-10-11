@@ -67,10 +67,17 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 	if cp.Size == 0 || cp.Size != size || cp.Size > math.MaxInt64 {
 		return fail(sinkName, ruleSize)
 	}
-	if s.forked.Load() || s.forkStop() {
+	if s.forked.Load() {
 		return fail(sinkName, ruleRowFork)
 	}
-	if s.w == nil || !s.w.Healthy() {
+	var stopErr error // one read of the writer state for all branches
+	if s.w != nil {
+		stopErr = s.w.Err()
+	}
+	if s.forkStop(stopErr) {
+		return fail(sinkName, ruleRowFork)
+	}
+	if s.w == nil || stopErr != nil {
 		if err := s.spool.Add(size, msg); err != nil {
 			return err
 		}
@@ -78,7 +85,7 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 		return nil
 	}
 	if err := s.request(rowRequest{size: cp.Size, root: cp.Root, msg: msg, reply: make(chan error, 1)}); err != nil {
-		if s.forkStop() {
+		if s.forkStop(s.w.Err()) {
 			return fail(sinkName, ruleRowFork)
 		}
 		return err
@@ -86,14 +93,12 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 	return s.spool.Add(size, msg)
 }
 
-// forkStop tells if the writer stopped for a fork signal. It sets the flag of
-// the sink then, also when the reply of the writer came after the timer.
-func (s *Sink) forkStop() bool {
-	if s.w == nil {
-		return false
-	}
+// forkStop tells if stopErr, the error of a stopped writer, is a fork signal.
+// When the writer stopped for a fork signal, the sink sets its fork flag. This
+// also applies when the reply of the writer comes after the timer.
+func (s *Sink) forkStop(stopErr error) bool {
 	var e *Error
-	if !errors.As(s.w.Err(), &e) || e.Rule != ruleFork {
+	if !errors.As(stopErr, &e) || e.Rule != ruleFork {
 		return false
 	}
 	s.forked.Store(true)
