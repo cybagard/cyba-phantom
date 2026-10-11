@@ -173,10 +173,11 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 	const m = "zq9marker"
 	cases := []struct {
 		name  string
+		rule  string
 		setup func(r *rig)
 	}{
-		{"closed database", func(r *rig) { r.db.Close() }},
-		{"refused row", func(r *rig) { r.app.next = -1 }},
+		{"closed database", ruleDBRead, func(r *rig) { r.db.Close() }}, // the start check fails
+		{"refused row", ruleDatabase, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -199,7 +200,7 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 			if err := r.run(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			wantRule(t, r.w.Err(), writerName, c.rule)
 			text := out.String()
 			if n := strings.Count(text, "\n"); n != 1 || !strings.Contains(text, r.w.Err().Error()) {
 				t.Fatalf("%d log lines, want 1: %q", n, text)

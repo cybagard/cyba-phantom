@@ -582,10 +582,11 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
 		name  string
+		rule  string
 		setup func(r *rig)
 	}{
-		{"closed database", func(r *rig) { r.db.Close() }},
-		{"refused row", func(r *rig) { r.app.next = -1 }},
+		{"closed database", ruleDBRead, func(r *rig) { r.db.Close() }}, // the start check fails
+		{"refused row", ruleDatabase, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -597,7 +598,7 @@ func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 			if err := r.run(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			wantRule(t, r.w.Err(), writerName, c.rule)
 			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != 0 {
 				t.Fatalf("healthy %v, %d commits, stats %+v", r.w.Healthy(), len(r.commits), r.w.Stats())
 			}
