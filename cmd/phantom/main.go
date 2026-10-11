@@ -1,9 +1,10 @@
 // Command phantom is the Phantom sensor entry point.
 //
-// The binary reads one config file: "phantom <path>" loads it and exits, and
-// "phantom --check <path>" only validates it (FR-12). Both modes use the same
-// load function. --check opens no socket and does no DNS lookup (SEC-11).
-// The run loop is not part of the binary yet. The binary writes no files.
+// The binary reads one config file. "phantom <path>" loads it, starts the store,
+// the writer and the checkpointer, and waits for SIGINT or SIGTERM. "phantom --check <path>"
+// only validates it (FR-12). Both modes use the same load function. --check opens no
+// socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
+// The listeners are not part of the binary yet.
 package main
 
 import (
@@ -12,10 +13,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/config"
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 func main() {
@@ -31,7 +36,8 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: phantom [--check] <config-path>")
 		return 2
 	}
-	if _, err := loadWith(fs.Arg(0), env, netFor(*check)); err != nil {
+	cfg, err := loadWith(fs.Arg(0), env, netFor(*check))
+	if err != nil {
 		// The error is a joined list of *config.Error. Each one escapes its text and holds no secret value.
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -40,7 +46,30 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
-	fmt.Fprintln(stdout, "phantom: config loaded — no listeners yet")
+	return serve(cfg, stdout, stderr)
+}
+
+// serve starts the store part and waits for SIGINT or SIGTERM. Then it stops the store part. A test replaces it.
+// The signal handler is set before the start, so a signal during the start is caught.
+var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
+	c := event.NewCounters()
+	depth, _ := cfg.Get("limits.queue_depth")
+	q, err := event.NewQueue(int(depth.Int), c)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	s := start(paramsOf(cfg), q, c, realDeps, slog.New(slog.NewTextHandler(stderr, nil)))
+	if s.Healthy() {
+		fmt.Fprintln(stdout, "phantom: started — no listeners yet")
+	} else {
+		fmt.Fprintln(stdout, "phantom: started — store not healthy, no listeners yet")
+	}
+	<-ctx.Done()
+	stop() // A second signal during Stop gets the default action.
+	s.Stop()
 	return 0
 }
 
