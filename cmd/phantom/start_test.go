@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -44,12 +47,17 @@ func testParams(t *testing.T, storePath string) startParams {
 
 func launch(t *testing.T, p startParams, d startDeps) (*started, *event.Queue) {
 	t.Helper()
+	return launchLog(t, p, d, slog.New(slog.DiscardHandler))
+}
+
+func launchLog(t *testing.T, p startParams, d startDeps, lg *slog.Logger) (*started, *event.Queue) {
+	t.Helper()
 	c := event.NewCounters()
 	q, err := event.NewQueue(8, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := start(p, q, c, d, slog.New(slog.DiscardHandler))
+	s := start(p, q, c, d, lg)
 	t.Cleanup(s.Stop)
 	return s, q
 }
@@ -67,16 +75,17 @@ func put(t *testing.T, q *event.Queue, k event.Kind, n int) {
 // refusals are the stores that do not open: a refused path, a file that is not a database, and a refused schema.
 var refusals = []struct {
 	name, path string
-	migrates   int // the runs of the migration: only a database that opens reaches it
+	want       string // the text of the *store.Error in the log
+	migrates   int    // the runs of the migration: only a database that opens reaches it
 	prep       func(t *testing.T, file string)
 }{
-	{"refused path", "keys/events.db", 0, nil},
-	{"not a database", "events.db", 0, func(t *testing.T, file string) {
+	{"refused path", "keys/events.db", "store: store.path must not be a reserved state path", 0, nil},
+	{"not a database", "events.db", "store: events.db cannot be opened as a database", 0, func(t *testing.T, file string) {
 		if err := os.WriteFile(file, []byte(strings.Repeat("not a database ", 100)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}},
-	{"refused schema", "events.db", 1, func(t *testing.T, file string) {
+	{"refused schema", "events.db", "store: database schema has tables and no schema version", 1, func(t *testing.T, file string) {
 		db, err := sql.Open("sqlite", file)
 		if err != nil {
 			t.Fatal(err)
@@ -91,8 +100,8 @@ var refusals = []struct {
 	}},
 }
 
-// TestTU18_StoreRefused checks that a store that does not open leaves the process running with no writer,
-// not healthy, and with one open of the log and of the store.
+// T-U-18: a store that does not open leaves the process running with no writer, not healthy, and with one open
+// of the log and of the store. The log has the reason, and a refused schema leaves the database closed.
 func TestTU18_StoreRefused(t *testing.T) {
 	for _, c := range refusals {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,7 +110,12 @@ func TestTU18_StoreRefused(t *testing.T) {
 				c.prep(t, filepath.Join(p.Root, c.path))
 			}
 			var o opens
-			s, _ := launch(t, p, o.deps())
+			var db *sql.DB
+			d := o.deps()
+			migrate := d.migrate
+			d.migrate = func(x *sql.DB, origin string) error { db = x; return migrate(x, origin) }
+			var buf bytes.Buffer
+			s, _ := launchLog(t, p, d, slog.New(slog.NewTextHandler(&buf, nil)))
 			if s.Healthy() || s.writer != nil || s.db != nil {
 				t.Errorf("healthy %v, writer %v, db %v; want not healthy, no writer, no database", s.Healthy(), s.writer, s.db)
 			}
@@ -109,21 +123,82 @@ func TestTU18_StoreRefused(t *testing.T) {
 			if want := (opens{log: 1, store: 1, migrate: c.migrates}); o != want {
 				t.Errorf("opens %+v, want %+v", o, want)
 			}
+			if out := buf.String(); !strings.Contains(out, "store does not open") || !strings.Contains(out, c.want) {
+				t.Errorf("log %q; want \"store does not open\" and %q", out, c.want)
+			}
+			if db != nil && db.Ping() == nil {
+				t.Error("the database is still open after the refusal")
+			}
 		})
 	}
 }
 
-// TestTU18_DrainWithoutStore checks that with no store, the drain takes the events out of both lanes at its
-// tick, and counts each drop for its lane. The tick of Discard is fixed (250 ms) and cannot be replaced from
-// here, so the test waits for the drops with a limit of 10 s.
+// T-U-18: a log that does not open gives no store and no writer, not healthy, and no key directory.
+func TestTU18_LogRefused(t *testing.T) {
+	var o opens
+	d := o.deps()
+	d.openLog = func(*os.Root, string) (*tlog.Log, error) { o.log++; return nil, errors.New("refused") }
+	p := testParams(t, "events.db")
+	s, _ := launch(t, p, d)
+	if s.Healthy() || s.TlogHealthy() || s.writer != nil {
+		t.Errorf("healthy %v, tlog healthy %v, writer %v; want none", s.Healthy(), s.TlogHealthy(), s.writer)
+	}
+	if want := (opens{log: 1}); o != want {
+		t.Errorf("opens %+v, want %+v", o, want)
+	}
+	if _, err := os.Stat(filepath.Join(p.Root, "keys")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("keys directory: %v; want it not made", err)
+	}
+}
+
+// T-U-18: a checkpointer that starts gives TlogHealthy. A signer that refuses (a log with a leaf, no key, no
+// signer state) leaves no checkpointer and no key file, and the writer runs.
+func TestTU18_Checkpointer(t *testing.T) {
+	t.Run("starts", func(t *testing.T) {
+		s, _ := launch(t, testParams(t, "events.db"), realDeps)
+		if !s.TlogHealthy() || !s.Healthy() {
+			t.Errorf("tlog healthy %v, healthy %v; want both", s.TlogHealthy(), s.Healthy())
+		}
+	})
+	t.Run("signer refuses", func(t *testing.T) {
+		p := testParams(t, "events.db")
+		r, err := os.OpenRoot(p.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := tlog.OpenLog(r, p.TlogDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append(tlog.EventHash{1}); err != nil {
+			t.Fatal(err)
+		}
+		l.Close()
+		r.Close()
+		s, _ := launch(t, p, realDeps)
+		if s == nil || s.cp != nil || s.TlogHealthy() {
+			t.Errorf("checkpointer %v, tlog healthy %v; want none", s.cp, s.TlogHealthy())
+		}
+		if !s.Healthy() {
+			t.Error("the writer does not run")
+		}
+		if _, err := os.Stat(filepath.Join(p.Root, "keys/checkpoint.key")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("key file: %v; want it not made", err)
+		}
+	})
+}
+
+// T-U-18: with no store, the drain takes the events out of both lanes at its tick, and counts each drop for its
+// lane. The tick of Discard is fixed (250 ms) and cannot be replaced from here, so the test waits for the
+// drops with a limit of 10 s.
 func TestTU18_DrainWithoutStore(t *testing.T) {
 	s, q := launch(t, testParams(t, "keys/events.db"), realDeps)
 	put(t, q, event.KindRequest, 2)
 	put(t, q, event.KindCallback, 1)
 	want := store.Drops{Bulk: 2, Evidence: 1}
-	for end := time.Now().Add(10 * time.Second); s.drops.Load() != want && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+	for end := time.Now().Add(10 * time.Second); s.Drops() != want && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
 	}
-	if got := s.drops.Load(); got != want {
+	if got := s.Drops(); got != want {
 		t.Errorf("drops %+v, want %+v", got, want)
 	}
 	if b := q.Bytes(); b != (event.Bytes{}) {
@@ -131,8 +206,8 @@ func TestTU18_DrainWithoutStore(t *testing.T) {
 	}
 }
 
-// TestTU18_Sink checks that the checkpointer gets the checkpoint row sink, with the writer and with no writer,
-// and never the bare spool.
+// T-U-18: the checkpointer gets the checkpoint row sink, with the writer and with no writer, and never the bare
+// spool. With the writer, the sink call stores the row.
 func TestTU18_Sink(t *testing.T) {
 	for _, c := range []struct {
 		name, path string
@@ -165,29 +240,47 @@ func TestTU18_Sink(t *testing.T) {
 			if got := ss.RowMissing(); got != c.missing {
 				t.Errorf("RowMissing = %d, want %d", got, c.missing)
 			}
+			if c.healthy {
+				var n int
+				if err := s.db.QueryRow("SELECT count(*) FROM checkpoint WHERE tree_size = ?", 1).Scan(&n); err != nil || n != 1 {
+					t.Errorf("checkpoint rows of size 1 = %d (%v), want 1", n, err)
+				}
+			}
 		})
 	}
 }
 
-// TestTU18_OneStart checks that a writer that stopped at its start check leaves the part not healthy, and that
-// the log and the store are opened one time: no reopen, no second writer.
+// T-U-18: a writer that stopped at its start check leaves the part not healthy. After that, the checkpointer
+// and the drain tick several times, and start opens the log and the store one time each and makes one writer.
 func TestTU18_OneStart(t *testing.T) {
 	p := testParams(t, "events.db")
+	p.Interval = 10 * time.Millisecond
 	if err := os.WriteFile(filepath.Join(p.Root, "writer.stop"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var o opens
-	s, _ := launch(t, p, o.deps())
-	s.Stop() // The writer returns after the close of the queue, so its stop is final here.
-	if s.writer == nil || s.Healthy() {
-		t.Errorf("writer %v, healthy %v; want a writer that is not healthy", s.writer, s.Healthy())
+	writers := 0
+	d := o.deps()
+	d.newWriter = func(db *sql.DB, q *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
+		writers++
+		return store.NewWriter(db, q, l, c, bp, lg, r)
 	}
-	if want := (opens{log: 1, store: 1, migrate: 1}); o != want {
-		t.Errorf("opens %+v, want %+v", o, want)
+	s, _ := launch(t, p, d)
+	end := time.Now().Add(10 * time.Second)
+	for s.Healthy() && time.Now().Before(end) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.Healthy() {
+		t.Fatal("the writer is still healthy after 10 s")
+	}
+	time.Sleep(3 * 250 * time.Millisecond) // Three ticks of the drain; the checkpointer ticks every 10 ms.
+	s.Stop()
+	if want := (opens{log: 1, store: 1, migrate: 1}); o != want || writers != 1 {
+		t.Errorf("opens %+v, writers %d; want %+v, 1", o, writers, want)
 	}
 }
 
-// TestTU18_StopOrder checks that Stop ends the checkpointer before it closes the queue.
+// T-U-18: Stop ends the checkpointer before it closes the queue.
 func TestTU18_StopOrder(t *testing.T) {
 	exited := make(chan bool, 1)
 	c := event.NewCounters()
@@ -202,12 +295,17 @@ func TestTU18_StopOrder(t *testing.T) {
 		t.Fatal("the part is not healthy")
 	}
 	s.Stop()
-	if closed := <-exited; closed {
-		t.Error("the queue was closed before the checkpointer ended")
+	select {
+	case closed := <-exited:
+		if closed {
+			t.Error("the queue was closed before the checkpointer ended")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the checkpointer did not end")
 	}
 }
 
-// TestTU18_Params checks the values that the start takes from the loaded config.
+// T-U-18: the values that start takes from the loaded config.
 func TestTU18_Params(t *testing.T) {
 	cfg, err := config.Load(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)})
 	if err != nil {

@@ -46,12 +46,12 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
-	fmt.Fprintln(stdout, "phantom: started — no listeners yet")
-	return serve(cfg, stderr)
+	return serve(cfg, stdout, stderr)
 }
 
 // serve starts the store part and waits for SIGINT or SIGTERM. Then it stops the store part. A test replaces it.
-var serve = func(cfg *config.Config, stderr io.Writer) int {
+// The signal handler is set before the start, so a signal during the start is caught.
+var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
 	c := event.NewCounters()
 	depth, _ := cfg.Get("limits.queue_depth")
 	q, err := event.NewQueue(int(depth.Int), c)
@@ -59,10 +59,16 @@ var serve = func(cfg *config.Config, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	s := start(paramsOf(cfg), q, c, realDeps, slog.New(slog.NewTextHandler(stderr, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	s := start(paramsOf(cfg), q, c, realDeps, slog.New(slog.NewTextHandler(stderr, nil)))
+	if s.Healthy() {
+		fmt.Fprintln(stdout, "phantom: started — no listeners yet")
+	} else {
+		fmt.Fprintln(stdout, "phantom: started — store not healthy, no listeners yet")
+	}
 	<-ctx.Done()
+	stop() // A second signal during Stop gets the default action.
 	s.Stop()
 	return 0
 }

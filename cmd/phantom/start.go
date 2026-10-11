@@ -37,19 +37,25 @@ type startDeps struct {
 	openLog         func(*os.Root, string) (*tlog.Log, error)
 	openStore       func(*os.Root, string, store.Options) (*sql.DB, error)
 	migrate         func(*sql.DB, string) error
+	newWriter       func(*sql.DB, *event.Queue, *tlog.Log, *event.Counters, bool, *slog.Logger, store.Recovery) *store.Writer
 	newCheckpointer func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink, *os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error)
 	runCheckpointer func(context.Context, *tlog.Checkpointer)
 }
 
-var realDeps = startDeps{tlog.OpenLog, store.Open, store.Migrate, tlog.NewCheckpointer,
-	func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) }}
+var realDeps = startDeps{tlog.OpenLog, store.Open, store.Migrate,
+	func(db *sql.DB, q *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
+		return store.NewWriter(db, q, l, c, bp, lg, r)
+	},
+	tlog.NewCheckpointer, func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) }}
 
 // paramsOf reads the values of the store start from the loaded config.
 func paramsOf(cfg *config.Config) startParams {
 	rel := func(abs string) string {
 		r, err := filepath.Rel(stateDir, abs)
 		if err != nil {
-			return abs // The loader keeps the path below the state directory, so this is not reached.
+			// The loader checks the path below the state directory after symlinks. A path that is not below it
+			// as text gives a ".." path, and the open through the root then refuses it.
+			return abs
 		}
 		return filepath.ToSlash(r)
 	}
@@ -71,6 +77,8 @@ type started struct {
 	root   *os.Root
 	log    *tlog.Log
 	db     *sql.DB
+	sink   *store.Sink
+	cp     *tlog.Checkpointer // nil when the checkpointer did not start
 	cancel context.CancelFunc // stops the checkpointer
 	ckpt   sync.WaitGroup
 	wg     sync.WaitGroup // the writer, or the drain
@@ -79,8 +87,15 @@ type started struct {
 // Healthy tells if the store part works: false with no writer, else the health of the writer.
 func (s *started) Healthy() bool { return s.writer != nil && s.writer.Healthy() }
 
+// TlogHealthy tells if the checkpointer started and is healthy. Healthy does not show the checkpointer.
+func (s *started) TlogHealthy() bool { return s.cp != nil && s.cp.Healthy() }
+
+// Drops returns the count of the events that the drain dropped. It stays zero when the store opened.
+func (s *started) Drops() store.Drops { return s.drops.Load() }
+
 // start opens the log and the store one time each and starts the writer or the drain, and the checkpointer.
-// A part that does not open or start leaves the process running: it is logged, and the store part is not healthy.
+// A state directory, a log or a store that does not open gives no writer, and the store part is not healthy.
+// A checkpointer that does not start is logged, and the health of the writer does not show it (see TlogHealthy).
 // There is no reopen, retry or restart. q and c are the queue and its counters.
 func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *slog.Logger) *started {
 	s := &started{q: q, cancel: func() {}}
@@ -94,7 +109,7 @@ func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *sl
 		lg.Error("store does not open", "error", err)
 	}
 	if s.db != nil {
-		s.writer = store.NewWriter(s.db, q, s.log, c, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log})
+		s.writer = d.newWriter(s.db, q, s.log, c, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log})
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
@@ -107,7 +122,7 @@ func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *sl
 	return s
 }
 
-// openDB opens the store and brings its schema to the newest version. A refusal closes the database.
+// openDB opens the store and brings its schema to the newest version. openDB closes the database when Migrate refuses it.
 func (s *started) openDB(p startParams, d startDeps) (*sql.DB, error) {
 	db, err := d.openStore(s.root, p.StorePath, store.Options{Reserved: p.Reserved})
 	if err != nil {
@@ -144,10 +159,12 @@ func (s *started) startCheckpointer(p startParams, d startDeps, lg *slog.Logger)
 	if err != nil {
 		return err
 	}
-	cp, err := d.newCheckpointer(s.log, signer, v, store.NewSink(s.writer, spool, p.Origin, v), s.root, p.Origin, p.Interval, lg)
+	s.sink = store.NewSink(s.writer, spool, p.Origin, v)
+	cp, err := d.newCheckpointer(s.log, signer, v, s.sink, s.root, p.Origin, p.Interval, lg)
 	if err != nil {
 		return err
 	}
+	s.cp = cp
 	var ctx context.Context
 	ctx, s.cancel = context.WithCancel(context.Background())
 	s.ckpt.Go(func() { d.runCheckpointer(ctx, cp) })

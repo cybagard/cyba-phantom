@@ -68,7 +68,7 @@ func TestTS10_CheckWiring(t *testing.T) {
 	t.Cleanup(func() { loadWith = old })
 	served := 0
 	oldServe := serve
-	serve = func(*config.Config, io.Writer) int { served++; return 0 }
+	serve = func(*config.Config, io.Writer, io.Writer) int { served++; return 0 }
 	t.Cleanup(func() { serve = oldServe })
 	var out strings.Builder
 	if code := run([]string{"--check", "f.yaml"}, nil, &out, &out); code != 0 || served != 0 {
