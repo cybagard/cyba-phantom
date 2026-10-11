@@ -21,6 +21,7 @@ type fakeSpool struct {
 	mu    sync.Mutex
 	sizes []uint64
 	check func()
+	fails int // the next Add calls that return an error and keep nothing
 }
 
 func (s *fakeSpool) Add(size uint64, _ []byte) error {
@@ -29,6 +30,10 @@ func (s *fakeSpool) Add(size uint64, _ []byte) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.fails > 0 {
+		s.fails--
+		return errors.New("spool failed")
+	}
 	s.sizes = append(s.sizes, size)
 	return nil
 }
@@ -212,7 +217,6 @@ func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 // the spool with no row, and the sink counts it.
 func TestTU18SinkStoppedOrMissingWriterGivesTheSpoolTheNote(t *testing.T) {
 	r := newSinkRig(t)
-	r.sink.timeout = time.Millisecond
 	r.w.stop(fail(writerName, ruleDatabase))
 	none := NewSink(nil, r.spool, "origin", r.v)
 	for i, s := range []*Sink{r.sink, none} {
@@ -225,5 +229,35 @@ func TestTU18SinkStoppedOrMissingWriterGivesTheSpoolTheNote(t *testing.T) {
 	}
 	if err := none.Add(3, []byte("junk")); err == nil || none.RowMissing() != 1 {
 		t.Errorf("a note that does not verify: error %v, missing %d", err, none.RowMissing())
+	}
+}
+
+// T-U-18: a writer that stopped for a fork signal gives an error, also when the
+// sink did not see the reply. The spool gets no note and nothing is counted.
+func TestTU18SinkTakesTheForkStateFromTheWriter(t *testing.T) {
+	r := newSinkRig(t)
+	r.w.stop(fail(writerName, ruleFork))
+	for range 2 {
+		if err := r.sink.Add(3, r.note(3, 1)); err == nil {
+			t.Fatal("a stopped writer with the fork rule gave no error")
+		}
+	}
+	if r.spool.count() != 0 || r.sink.RowMissing() != 0 {
+		t.Errorf("spool %d (want 0), missing %d (want 0)", r.spool.count(), r.sink.RowMissing())
+	}
+}
+
+// T-U-18: the missing row is counted after the spool took the note. A failed
+// spool call counts nothing, and the retry counts once.
+func TestTU18SinkCountsTheMissingRowAfterTheSpool(t *testing.T) {
+	r := newSinkRig(t)
+	r.spool.fails = 1
+	r.w.stop(fail(writerName, ruleDatabase))
+	msg := r.note(3, 1)
+	if err := r.sink.Add(3, msg); err == nil || r.sink.RowMissing() != 0 {
+		t.Fatalf("failed spool: error %v, missing %d (want 0)", err, r.sink.RowMissing())
+	}
+	if err := r.sink.Add(3, msg); err != nil || r.sink.RowMissing() != 1 || r.spool.count() != 1 {
+		t.Errorf("retry: error %v, missing %d, spool %d (want nil, 1, 1)", err, r.sink.RowMissing(), r.spool.count())
 	}
 }

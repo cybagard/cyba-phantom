@@ -19,7 +19,7 @@ const (
 	ruleNote     = "note is not valid"
 	ruleSize     = "note has a size that is not accepted"
 	ruleRowFork  = "a fork signal stopped the sink"
-	ruleRowReply = "row is not stored"
+	ruleRowReply = "no reply from the writer"
 )
 
 // Sink is the tlog.NoteSink of the store (FR-09). It stores the checkpoint row
@@ -67,21 +67,37 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 	if cp.Size == 0 || cp.Size != size || cp.Size > math.MaxInt64 {
 		return fail(sinkName, ruleSize)
 	}
-	if s.forked.Load() {
+	if s.forked.Load() || s.forkStop() {
 		return fail(sinkName, ruleRowFork)
 	}
 	if s.w == nil || !s.w.Healthy() {
+		if err := s.spool.Add(size, msg); err != nil {
+			return err
+		}
 		s.missing.Add(1)
-		return s.spool.Add(size, msg)
+		return nil
 	}
 	if err := s.request(rowRequest{size: cp.Size, root: cp.Root, msg: msg, reply: make(chan error, 1)}); err != nil {
-		var e *Error
-		if errors.As(err, &e) && e.Rule == ruleFork {
-			s.forked.Store(true)
+		if s.forkStop() {
+			return fail(sinkName, ruleRowFork)
 		}
 		return err
 	}
 	return s.spool.Add(size, msg)
+}
+
+// forkStop tells if the writer stopped for a fork signal. It sets the flag of
+// the sink then, also when the reply of the writer came after the timer.
+func (s *Sink) forkStop() bool {
+	if s.w == nil {
+		return false
+	}
+	var e *Error
+	if !errors.As(s.w.Err(), &e) || e.Rule != ruleFork {
+		return false
+	}
+	s.forked.Store(true)
+	return true
 }
 
 // request sends rq to the writer and waits for the reply. One timer bounds the
