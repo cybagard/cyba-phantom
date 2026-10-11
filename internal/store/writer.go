@@ -157,6 +157,9 @@ func (w *Writer) Run(ctx context.Context) error {
 			}
 		}
 		if !w.Healthy() {
+			// A row request can stop the writer while the batch holds events that
+			// Run took. Flush drops and counts them, as discardLoop does for the lanes.
+			w.flush(batch)
 			return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 		}
 	}
@@ -343,15 +346,13 @@ type rowRequest struct {
 	reply chan error
 }
 
-// serveRow answers a request of the checkpoint sink. A fork signal stops the
-// writer, as the other stop causes do. A database error of the row only fails
-// the request: the sink gives the note again at the next tick of the
-// checkpointer, and the next event batch stops the writer if the database
-// stays broken.
+// serveRow answers a request of the checkpoint sink. storeRow returns only a
+// database error or a fork signal. Each such error stops the writer, as the
+// other stop causes do, before the reply goes to the sink. The reply is the same
+// error.
 func (w *Writer) serveRow(rq rowRequest) {
 	err := w.storeRow(rq)
-	var e *Error
-	if errors.As(err, &e) && e.Rule == ruleFork {
+	if err != nil {
 		w.stop(err)
 	}
 	rq.reply <- err
