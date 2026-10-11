@@ -109,8 +109,8 @@ func runLoad(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	w := NewWriter(db, q, &testAppender{}, c, false, nil)
-	var batches, commits []time.Duration // the writer goroutine appends; read after Run returns
+	w := NewWriter(db, q, &testAppender{}, c, false, nil, Recovery{}) // the benchmark never calls Run
+	var batches, commits []time.Duration                              // the writer goroutine appends; read after Run returns
 	w.timing = func(batch, commit time.Duration) {
 		batches, commits = append(batches, batch), append(commits, commit)
 	}

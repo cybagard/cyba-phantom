@@ -49,7 +49,7 @@ func BenchmarkEvidenceBatch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	w := NewWriter(db, q, l, c, false, nil)
+	w := NewWriter(db, q, l, c, false, nil, Recovery{State: root, Origin: "origin", Log: l})
 	n := 0
 	for range b.N {
 		b.StopTimer()

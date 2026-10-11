@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,9 @@ type rig struct {
 	c       *event.Counters
 	db      *sql.DB
 	app     *testAppender
+	root    *os.Root // the state directory
+	state   string   // its path
+	lg      *fakeLog // what the start check reads
 	tick    chan time.Time
 	commits chan int
 	exited  chan struct{} // closed when the last launched Run returns
@@ -70,9 +74,15 @@ func newRig(t *testing.T, depth int) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, q: q, c: c, db: migrated(t), app: &testAppender{next: 100},
-		tick: make(chan time.Time), commits: make(chan int, 64)}
-	r.w = NewWriter(r.db, q, r.app, c, false, nil)
+	root, state, _ := newState(t)
+	db := mustOpen(t, root, "events.db")
+	t.Cleanup(func() { db.Close() })
+	if err := Migrate(db, "origin"); err != nil {
+		t.Fatal(err)
+	}
+	r := &rig{t: t, q: q, c: c, db: db, app: &testAppender{next: 100}, root: root, state: state,
+		lg: &fakeLog{}, tick: make(chan time.Time), commits: make(chan int, 64)}
+	r.w = NewWriter(r.db, q, r.app, c, false, nil, Recovery{State: root, Origin: "origin", Log: r.lg})
 	r.w.tick = r.tick
 	r.w.onCommit = func(n int) { r.commits <- n }
 	return r
