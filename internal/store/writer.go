@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ const (
 	ruleDatabase = "database write failed"
 	ruleAppend   = "log append failed"
 	ruleRecord   = "evidence record cannot be made"
+	ruleFork     = "checkpoint fork signal"
 )
 
 // Writer is the one writer of the event table. It uses the database pool from
@@ -57,6 +59,13 @@ type Writer struct {
 	// beforeAppend runs in the transaction before AppendBatch. A test sets it;
 	// nil in production.
 	beforeAppend func()
+
+	// beforeRowCommit runs on the transaction of a checkpoint row before COMMIT.
+	// An error from it is a failed COMMIT. A test sets it; nil in production.
+	beforeRowCommit func(tx *sql.Tx) error
+
+	// rows takes the requests of the checkpoint sink. Only Run reads it.
+	rows chan rowRequest
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
@@ -70,7 +79,7 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, log: log}
+	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, log: log, rows: make(chan rowRequest, 1)}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -124,6 +133,8 @@ func (w *Writer) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-tick:
 			batch = w.flush(batch)
+		case rq := <-w.rows:
+			w.serveRow(rq)
 		case <-w.q.Ready():
 			// Take events until the lanes are empty, then examine Closed. After
 			// a flush at 500 events, leave the loop if ctx has ended or the
@@ -321,4 +332,82 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		w.onCommit(rows)
 	}
 	return appendErr
+}
+
+// rowRequest asks the writer goroutine to store one checkpoint row. The reply
+// channel has room for one value, so the writer never waits for the sink.
+type rowRequest struct {
+	size  uint64
+	root  [32]byte
+	msg   []byte
+	reply chan error
+}
+
+// serveRow answers a request of the checkpoint sink. A fork signal stops the
+// writer, as the other stop causes do. A database error of the row only fails
+// the request: the sink gives the note again at the next tick of the
+// checkpointer, and the next event batch stops the writer if the database
+// stays broken.
+func (w *Writer) serveRow(rq rowRequest) {
+	err := w.storeRow(rq)
+	var e *Error
+	if errors.As(err, &e) && e.Rule == ruleFork {
+		w.stop(err)
+	}
+	rq.reply <- err
+}
+
+// storeRow stores the row in its own transaction, with synchronous=FULL set
+// before BEGIN and NORMAL again after the transaction has ended. A row for the
+// size with the same note is a success and changes nothing. A row with another
+// note is a fork signal. The transaction does not use the context of Run.
+func (w *Writer) storeRow(rq rowRequest) (err error) {
+	ctx := context.Background()
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer func() {
+		if _, e := conn.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); e != nil && err == nil {
+			err = fail(writerName, ruleDatabase)
+		}
+	}()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer tx.Rollback() // no effect after COMMIT
+	var have string
+	switch err := tx.QueryRowContext(ctx, "SELECT signed_note FROM checkpoint WHERE tree_size = ?", rq.size).Scan(&have); {
+	case err == nil:
+		if have != string(rq.msg) {
+			return fail(writerName, ruleFork)
+		}
+		return nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return fail(writerName, ruleDatabase)
+	}
+	now := time.Now
+	if w.clock != nil {
+		now = w.clock
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) VALUES (?, ?, ?, ?)",
+		rq.size, rq.root[:], string(rq.msg), now().UnixMilli()); err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	err = nil
+	if w.beforeRowCommit != nil {
+		err = w.beforeRowCommit(tx)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	return nil
 }
