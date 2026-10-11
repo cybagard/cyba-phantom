@@ -63,8 +63,9 @@ type Writer struct {
 // hashes in app. The writer adds the drop counts of c to ip_counter. It stores
 // the body prefix of an event only when bodyPrefix is true. It writes one line to
 // log when it stops; a nil log writes nothing. rec gives the state directory, the
-// origin, and the log for the start check and the stop marker. The other pointer
-// arguments must not be nil.
+// origin, and the log for the start check and the stop marker. rec.State and
+// rec.Log must not be nil: a nil one stops the writer at the start of Run. The
+// other pointer arguments must not be nil.
 func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

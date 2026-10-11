@@ -159,6 +159,53 @@ func TestTI07StartCheckStopsTheWriter(t *testing.T) {
 	}
 }
 
+// T-I-07: a database that cannot be read at start stops the writer with the class
+// of a failed read, not the class of a failed write.
+func TestTI07DatabaseReadErrorAtStartStopsTheWriter(t *testing.T) {
+	for _, evidence := range []bool{false, true} {
+		t.Run(map[bool]string{false: "origin read", true: "evidence row read"}[evidence], func(t *testing.T) {
+			l, r := realLog(t), newRig(t, 100)
+			r.seed(l, 3)
+			n := r.restart(l, l, "origin")
+			if evidence {
+				// The origin read works. The read of the last evidence row fails.
+				if _, err := r.db.Exec("ALTER TABLE event RENAME COLUMN leaf_index TO leaf_gone"); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := r.db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			n.finish()
+			wantRule(t, n.w.Err(), writerName, ruleDBRead)
+		})
+	}
+}
+
+// T-I-07: a writer with no state directory or no log stops at the start of Run. It
+// does not panic.
+func TestTI07NilRecoveryStopsTheWriter(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rec  func(r *rig) Recovery
+	}{
+		{"both nil", func(*rig) Recovery { return Recovery{} }},
+		{"no log", func(r *rig) Recovery { return Recovery{State: r.root, Origin: "origin"} }},
+		{"no state", func(r *rig) Recovery { return Recovery{Origin: "origin", Log: r.lg} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			out := r.logTo()
+			r.w = NewWriter(r.db, r.q, r.app, r.c, false, slog.New(slog.NewTextHandler(out, nil)), c.rec(r))
+			r.w.tick = r.tick
+			r.finish()
+			if r.w.Healthy() || r.app.tries != 0 || r.rows() != 0 {
+				t.Fatalf("healthy %v, %d appends, %d rows", r.w.Healthy(), r.app.tries, r.rows())
+			}
+			wantRule(t, r.w.Err(), writerName, ruleNoRecover)
+		})
+	}
+}
+
 // T-I-07: the root for the check comes from RootAt and not from Head.
 func TestTI07StartCheckTakesTheRootFromRootAt(t *testing.T) {
 	l, r := realLog(t), newRig(t, 100)
@@ -190,8 +237,8 @@ func TestTI07OrphanLeavesAreLoggedOnce(t *testing.T) {
 	}
 }
 
-// T-I-07: a database with no evidence row has the origin check only. All leaves
-// of the log are orphan leaves.
+// T-I-07: a database with no evidence row has the origin check and the root check
+// only. All leaves of the log are orphan leaves.
 func TestTI07EmptyDatabaseMakesNoProofCall(t *testing.T) {
 	r := newRig(t, 100)
 	r.lg.size = 3
@@ -268,6 +315,7 @@ func TestTI07MarkerIsTriedAgainAtEachTick(t *testing.T) {
 	r.w.rec.State = closed // every use of this root fails
 	r.start()
 	eventually(t, func() bool { return out.count("cannot make the stop marker") == 1 })
+	wantRule(t, r.w.Err(), writerName, ruleMarkerRead)
 	// A tick drops the event after the marker step. The drop shows that the step
 	// has ended, so the next change of the root is not a race.
 	tick := func(drops uint64) {
@@ -283,5 +331,53 @@ func TestTI07MarkerIsTriedAgainAtEachTick(t *testing.T) {
 	tick(2)
 	if fi, err := r.marker(); err != nil || fi.Mode() != 0o600 || fi.Size() != 0 {
 		t.Fatalf("marker %v, %v", fi, err)
+	}
+}
+
+// T-I-07: a stop during Run makes the marker. If the writer cannot make it, it
+// logs this one time and tries again at each tick of the stopped state.
+func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
+	r := newRig(t, 100)
+	out := r.logTo()
+	stop := r.start()
+	r.add(event.KindRequest, 1)
+	r.drained()
+	r.fire()
+	r.commit() // the writer has passed the start check and is healthy
+	if !r.w.Healthy() {
+		t.Fatalf("the writer stopped: %v", r.w.Err())
+	}
+	closed, err := os.OpenRoot(r.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	r.w.rec.State = closed // every use of this root fails
+	r.app.mu.Lock()
+	r.app.err = errBadTile
+	r.app.mu.Unlock()
+	r.add(event.KindCallback, 2)
+	r.drained()
+	r.fire()
+	eventually(t, func() bool { return out.count("cannot make the stop marker") == 1 })
+	wantRule(t, r.w.Err(), writerName, ruleAppend)
+	// A tick drops the event after the marker step. The drop shows that the step
+	// has ended, so the next change of the root is not a race.
+	tick := func(drops uint64) {
+		r.add(event.KindRequest, int64(10+drops))
+		r.fire()
+		eventually(t, func() bool { return r.w.Stats().Dropped.Bulk == drops })
+	}
+	tick(1)
+	if _, err := r.marker(); !errors.Is(err, os.ErrNotExist) || out.count("cannot make the stop marker") != 1 {
+		t.Fatalf("marker %v, log:\n%s", err, out.b.String())
+	}
+	r.w.rec.State = r.root
+	tick(2)
+	if fi, err := r.marker(); err != nil || fi.Mode() != 0o600 || fi.Size() != 0 {
+		t.Fatalf("marker %v, %v", fi, err)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v after the cancel", err)
 	}
 }

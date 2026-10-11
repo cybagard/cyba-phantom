@@ -29,8 +29,12 @@ func checkMarker(root *os.Root) error {
 }
 
 // makeMarker makes the marker if it is absent. A marker that exists is a
-// success. It calls fsync on the file and then on the directory.
+// success. When it makes the file, it calls fsync on the file. It always calls
+// fsync on the directory. A nil root is an error.
 func makeMarker(root *os.Root) error {
+	if root == nil {
+		return errors.New("no state directory")
+	}
 	f, err := root.OpenFile(markerName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		err = f.Sync()

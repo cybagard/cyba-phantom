@@ -18,6 +18,8 @@ const (
 	rulePastLog   = "database points past the end of the log"
 	ruleLeafProof = "last evidence row does not verify in the log"
 	ruleLogRead   = "log root or proof cannot be read"
+	ruleDBRead    = "database cannot be read"
+	ruleNoRecover = "writer has no state directory or log"
 )
 
 // logReader is the part of the log that the start check reads. The appender
@@ -32,7 +34,8 @@ var _ logReader = (*tlog.Log)(nil)
 
 // Recovery holds what the writer needs at start and at a stop. State is the
 // state directory that Open used. Origin is tlog.origin. Log is the log that the
-// appender writes to.
+// appender writes to. It must be the same log as the appender argument of
+// NewWriter. State and Log must not be nil.
 type Recovery struct {
 	State  *os.Root
 	Origin string
@@ -42,6 +45,9 @@ type Recovery struct {
 // start runs before the first write. A stop marker or a failed check gives an
 // error, and the writer stops.
 func (w *Writer) start() error {
+	if w.rec.State == nil || w.rec.Log == nil {
+		return fail(writerName, ruleNoRecover)
+	}
 	if err := checkMarker(w.rec.State); err != nil {
 		return err
 	}
@@ -60,7 +66,7 @@ func (w *Writer) checkLog() error {
 	case errors.Is(err, sql.ErrNoRows):
 		return fail(writerName, ruleNoOrigin)
 	case err != nil:
-		return fail(writerName, ruleDatabase)
+		return fail(writerName, ruleDBRead)
 	case origin != w.rec.Origin:
 		return fail(writerName, ruleOrigin)
 	}
@@ -75,7 +81,7 @@ func (w *Writer) checkLog() error {
 	case errors.Is(err, sql.ErrNoRows):
 		leaf = -1
 	case err != nil:
-		return fail(writerName, ruleDatabase)
+		return fail(writerName, ruleDBRead)
 	case leaf >= size:
 		return fail(writerName, rulePastLog)
 	default:
@@ -84,7 +90,7 @@ func (w *Writer) checkLog() error {
 			return fail(writerName, ruleLogRead)
 		}
 		var h tlog.EventHash
-		if copy(h[:], hash) != len(h) || tlog.VerifyInclusion(h, leaf, size, root, proof) != nil {
+		if len(hash) != len(h) || copy(h[:], hash) != len(h) || tlog.VerifyInclusion(h, leaf, size, root, proof) != nil {
 			return fail(writerName, ruleLeafProof)
 		}
 	}

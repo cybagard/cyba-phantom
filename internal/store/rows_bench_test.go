@@ -89,6 +89,12 @@ func BenchmarkWriterLoad(b *testing.B) {
 	}
 }
 
+// loadLog is a test appender that is also an empty log for the start check.
+type loadLog struct {
+	*testAppender
+	fakeLog
+}
+
 func runLoad(b *testing.B) {
 	dir := b.TempDir()
 	root, err := os.OpenRoot(dir)
@@ -109,8 +115,9 @@ func runLoad(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	w := NewWriter(db, q, &testAppender{}, c, false, nil, Recovery{}) // the benchmark never calls Run
-	var batches, commits []time.Duration                              // the writer goroutine appends; read after Run returns
+	lg := &loadLog{testAppender: &testAppender{}} // the appender and the log are one object
+	w := NewWriter(db, q, lg, c, false, nil, Recovery{State: root, Origin: "origin", Log: lg})
+	var batches, commits []time.Duration // the writer goroutine appends; read after Run returns
 	w.timing = func(batch, commit time.Duration) {
 		batches, commits = append(batches, batch), append(commits, commit)
 	}
