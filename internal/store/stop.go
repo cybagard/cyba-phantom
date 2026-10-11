@@ -45,7 +45,8 @@ type Stats struct {
 	// OrphanLeaves counts the leaves of a batch whose COMMIT failed after a good
 	// AppendBatch call. It is for phantom_tlog_orphan_leaves_total.
 	OrphanLeaves uint64
-	// Dropped counts the events that the stopped writer took out of the lanes.
+	// Dropped counts the events that the stopped writer took out of the lanes,
+	// for each lane. It is for phantom_store_dropped_events_total.
 	Dropped Drops
 }
 
@@ -85,7 +86,7 @@ func (w *Writer) stop(err error) {
 // event out of both lanes with TryTake and drops it. It counts each drop in d for
 // the lane of the event. It writes no row and calls no appender. It is not
 // Queue.Drain: it gives the events to nobody. Discard needs no store and no
-// writer.
+// writer. The argument d must not be nil.
 //
 // Discard returns nil after Close of the queue, when it has dropped the events
 // that are left. It returns ctx.Err() when ctx ends first.

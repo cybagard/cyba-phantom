@@ -86,9 +86,9 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // transaction, and a later database error rolls the transaction back. The writer
 // keeps the first error (Err), is not healthy (Healthy), and writes one log line
 // with the fixed class of the error. It does not open the log or the database
-// again, and it does not end the process. Run does not return the error. It goes
-// on in the stopped state: it writes no row, calls no appender, and runs
-// Discard, so that the lanes do not stay full. It returns nil after Close and
+// again, and it does not end the process. Run does not return the error. It
+// continues in the stopped state: it writes no row, calls no appender, and runs
+// the Discard loop, so that the lanes do not stay full. It returns nil after Close and
 // ctx.Err() after a cancel, as it does when it has not stopped.
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick

@@ -74,28 +74,45 @@ func TestTU18FailedAppendCommitsBulkRowsAndStops(t *testing.T) {
 	}
 }
 
-// T-U-18: after the stop, the writer takes each event out of both lanes at one
-// tick and drops it, and counts each drop for its lane. It writes no row and
-// makes no AppendBatch call. After Close, it drops the events that are left.
+// T-U-18: both lanes are full when the writer stops. At one tick after the stop,
+// the writer takes each event out of both lanes and drops it, and counts each
+// drop for its lane. It writes no row and makes no AppendBatch call. After Close,
+// it drops the events that are left.
 func TestTU18StoppedWriterDropsBothLanes(t *testing.T) {
 	r := newRig(t, 40) // bulk lane 40, evidence lane 10
 	r.app.err = errors.New("log is stopped")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := r.launch(ctx)
 	t.Cleanup(func() { r.stopRun(cancel) })
+
+	// Hold the first AppendBatch call, so that the lanes fill before the stop.
+	r.gate()
 	r.add(event.KindCallback, 0)
 	r.drained()
 	r.fire()
-	waitUntil(t, "the stop", func() bool { return !r.w.Healthy() })
-
+	select {
+	case <-r.app.entered:
+	case <-time.After(waitFor):
+		t.Fatal("no batch reached the appender")
+	}
 	for i := int64(0); i < 40; i++ {
 		r.add(event.KindRequest, i)
 	}
 	for i := int64(0); i < 10; i++ {
 		r.add(event.KindBundleLoad, i)
 	}
-	if r.q.Bytes().Bulk == 0 || r.q.Bytes().Evidence == 0 {
-		t.Fatal("a lane is not full")
+	for _, k := range []event.Kind{event.KindRequest, event.KindBundleLoad} {
+		e, err := event.NewEvent(nil, event.Input{Kind: k})
+		if err != nil || r.q.Enqueue(e) {
+			t.Fatalf("the lane of kind %v is not full (err %v)", k, err)
+		}
+	}
+	full := r.q.Bytes()
+
+	r.ungate() // the held call fails and stops the writer
+	waitUntil(t, "the stop", func() bool { return !r.w.Healthy() })
+	if r.q.Bytes() != full || r.w.Stats().Dropped != (Drops{}) {
+		t.Fatalf("bytes %+v, drops %+v before the tick", r.q.Bytes(), r.w.Stats().Dropped)
 	}
 	r.fire() // one tick
 	waitUntil(t, "the drops", func() bool { return r.w.Stats().Dropped == (Drops{Bulk: 40, Evidence: 10}) })
@@ -133,13 +150,17 @@ func TestTU18DiscardNeedsNoWriter(t *testing.T) {
 		}
 	}
 	tick <- time.Now()
+	waitUntil(t, "the drops", func() bool { return d.Load() == (Drops{Bulk: 2, Evidence: 1}) })
 	q.Close()
 	if err := <-done; err != nil || d.Load() != (Drops{Bulk: 2, Evidence: 1}) {
 		t.Fatalf("err %v, drops %+v", err, d.Load())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	q2, _ := event.NewQueue(8, c)
+	q2, err := event.NewQueue(8, c)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := Discard(ctx, q2, &d); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Discard returned %v", err)
 	}
