@@ -574,28 +574,59 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 	}
 }
 
-// T-U-18: a closed database (BEGIN fails) and a refused row stop the writer and
-// commit nothing; Run returns nil after Close and Err holds the database rule.
-// For the refused row, the appender got its one call, so the leaves of that
-// batch stay in the log with no row. An insert error after the append is not
-// counted as an orphan case.
+// runAfterStart starts the writer and waits until it has passed the start check
+// and committed one event. Then it calls late, calls batch to queue the events,
+// closes the queue, and returns the result of Run. Thus late changes the world
+// after the start check and before the batch is written.
+func (r *rig) runAfterStart(late, batch func()) error {
+	r.t.Helper()
+	stop := r.start()
+	r.add(event.KindRequest, 0)
+	r.drained()
+	r.fire()
+	r.commit()
+	if !r.w.Healthy() {
+		r.t.Fatalf("the writer stopped at the start: %v", r.w.Err())
+	}
+	late()
+	batch()
+	r.q.Close()
+	return stop()
+}
+
+// T-U-18: a closed database and a refused row stop the writer and commit nothing
+// of the batch; Run returns nil after Close and Err holds the database rule. The
+// database closes after the start check, so the write path fails. For the
+// refused row, the appender got its one call, so the leaves of that batch stay
+// in the log with no row. An insert error after the append is not counted as an
+// orphan case.
 func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
 		name  string
 		rule  string
+		late  bool // close the database after the start check
 		setup func(r *rig)
 	}{
-		{"closed database", ruleDBRead, func(r *rig) { r.db.Close() }}, // the start check fails
-		{"refused row", ruleDatabase, func(r *rig) { r.app.next = -1 }},
+		{"closed database", ruleDatabase, true, func(r *rig) { r.db.Close() }},
+		{"refused row", ruleDatabase, false, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t, 100)
-			r.add(event.KindRequest, 1)
-			r.add(event.KindCallback, 2)
-			r.q.Close()
-			c.setup(r)
-			if err := r.run(context.Background()); err != nil {
+			batch := func() {
+				r.add(event.KindRequest, 1)
+				r.add(event.KindCallback, 2)
+			}
+			var err error
+			if c.late {
+				err = r.runAfterStart(func() { c.setup(r) }, batch)
+			} else {
+				batch()
+				r.q.Close()
+				c.setup(r)
+				err = r.run(context.Background())
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			wantRule(t, r.w.Err(), writerName, c.rule)
