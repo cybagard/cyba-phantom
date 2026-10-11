@@ -23,7 +23,7 @@ var (
 // knownSpecFiles are the only file names a finding prints. Every other
 // name is PR-controlled text and shows as a short hash.
 var knownSpecFiles = map[string]bool{
-	"01-prd.md": true, "07-test-plan.md": true, "08-traceability.md": true,
+	"01-prd.md": true, "04-interfaces.md": true, "07-test-plan.md": true, "08-traceability.md": true,
 	"README.md": true, "constitution-table.md": true, "manifest.json": true,
 }
 

@@ -558,6 +558,26 @@ func TestUnlistedNameHidden(t *testing.T) {
 	}
 }
 
+// The interfaces file is a known spec file: it is stamped like the others,
+// and a finding prints its name.
+func TestInterfacesFileKnown(t *testing.T) {
+	dir := newSpec(t)
+	writeFile(t, dir, "04-interfaces.md", "# 04 — Interfaces\n")
+	findings, err := runStamp(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || !strings.Contains(findings[0], "spec: 04-interfaces.md is not stamped") {
+		t.Fatalf("findings = %v; want one not-stamped finding that names 04-interfaces.md", findings)
+	}
+	if _, err := runStamp(dir, true); err != nil {
+		t.Fatalf("stamp rotate: %v", err)
+	}
+	if findings, err := runStamp(dir, false); err != nil || len(findings) != 0 {
+		t.Fatalf("after rotate: findings = %v, err = %v; want none", findings, err)
+	}
+}
+
 // A test that covers an ID that 01 does not declare is a finding.
 func TestUndeclaredCoverIsFinding(t *testing.T) {
 	dir := newSpec(t)
