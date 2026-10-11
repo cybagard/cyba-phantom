@@ -176,26 +176,25 @@ func TestTU18SinkSecondAddAndForkSignal(t *testing.T) {
 	}
 }
 
-// T-U-18: with a healthy writer, a failed insert or no reply in 5 s gives an
-// error and no note to the spool. The note can go again later.
+// T-U-18: a failed commit of the row gives an error and no note to the spool, and
+// it stops the writer with the database rule, not the fork rule. The next note
+// goes to the spool with no row, and the sink counts the missing row. With a
+// healthy writer, no reply in 5 s gives an error and no note to the spool.
 func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 	r := newSinkRig(t)
-	var fail atomic.Bool
-	fail.Store(true)
-	r.w.beforeRowCommit = func(*sql.Tx) error {
-		if fail.Load() {
-			return errors.New("insert failed")
-		}
-		return nil
-	}
+	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("commit failed") }
 	stop := r.start()
 	msg := r.note(4, 1)
-	if err := r.sink.Add(4, msg); err == nil || r.spool.count() != 0 || r.rowCount() != 0 || !r.w.Healthy() {
-		t.Fatalf("failed insert: error %v, spool %d, rows %d, healthy %v", err, r.spool.count(), r.rowCount(), r.w.Healthy())
+	if err := r.sink.Add(4, msg); err == nil || r.spool.count() != 0 || r.rowCount() != 0 {
+		t.Fatalf("failed commit: error %v, spool %d, rows %d", err, r.spool.count(), r.rowCount())
 	}
-	fail.Store(false)
-	if err := r.sink.Add(4, msg); err != nil || r.spool.count() != 1 || r.rowCount() != 1 {
-		t.Fatalf("second try: error %v, spool %d, rows %d", err, r.spool.count(), r.rowCount())
+	eventually(t, func() bool { return !r.w.Healthy() })
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if _, err := r.marker(); err != nil {
+		t.Errorf("no stop marker: %v", err)
+	}
+	if err := r.sink.Add(4, msg); err != nil || r.spool.count() != 1 || r.rowCount() != 0 || r.sink.RowMissing() != 1 {
+		t.Fatalf("after the stop: error %v, spool %d, rows %d, missing %d (want nil, 1, 0, 1)", err, r.spool.count(), r.rowCount(), r.sink.RowMissing())
 	}
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
@@ -210,6 +209,31 @@ func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 		if err := idle.sink.Add(4, idle.note(4, 1)); err == nil || time.Since(begin) > waitFor || idle.spool.count() != 0 {
 			t.Fatalf("no reply: error %v, spool %d", err, idle.spool.count())
 		}
+	}
+}
+
+// T-U-18: a database error before the commit of the row also stops the writer.
+// Here the database is closed, so the connection for the row fails.
+func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
+	r := newSinkRig(t)
+	stop := r.start()
+	// A good row first: the writer has passed its start check before the close.
+	if err := r.sink.Add(3, r.note(3, 1)); err != nil || r.spool.count() != 1 {
+		t.Fatalf("good row: error %v, spool %d", err, r.spool.count())
+	}
+	if err := r.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.sink.Add(4, r.note(4, 1)); err == nil || r.spool.count() != 1 {
+		t.Fatalf("closed database: error %v, spool %d (want an error, 1)", err, r.spool.count())
+	}
+	eventually(t, func() bool { return !r.w.Healthy() })
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if _, err := r.marker(); err != nil {
+		t.Errorf("no stop marker: %v", err)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 }
 

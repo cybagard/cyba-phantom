@@ -55,8 +55,10 @@ func (s *Sink) RowMissing() uint64 { return s.missing.Load() }
 //     spool with no row and counts the missing row;
 //   - otherwise it asks the writer to store the row, and gives the note to the
 //     spool only after the row is stored. Another note for a stored size is a
-//     fork signal: the writer stops, and so does the sink. An error, or no reply
-//     in 5 s, gives an error and the spool gets nothing.
+//     fork signal: the writer stops, and so does the sink. A database error of
+//     the row also stops the writer. Each of these gives an error and the spool
+//     gets nothing. No reply in 5 s gives an error and the spool gets nothing,
+//     and it does not stop a healthy writer.
 //
 // The same note a second time is a success and changes nothing.
 func (s *Sink) Add(size uint64, msg []byte) error {
