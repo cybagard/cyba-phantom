@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -65,9 +66,13 @@ func TestTS10_CheckWiring(t *testing.T) {
 	old := loadWith
 	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) { got = n; return nil, nil }
 	t.Cleanup(func() { loadWith = old })
+	served := 0
+	oldServe := serve
+	serve = func(*config.Config, io.Writer) int { served++; return 0 }
+	t.Cleanup(func() { serve = oldServe })
 	var out strings.Builder
-	if code := run([]string{"--check", "f.yaml"}, nil, &out, &out); code != 0 {
-		t.Fatalf("--check: exit %d, output %q", code, out.String())
+	if code := run([]string{"--check", "f.yaml"}, nil, &out, &out); code != 0 || served != 0 {
+		t.Fatalf("--check: exit %d, starts %d, output %q", code, served, out.String())
 	}
 	if _, err := got.Dialer.DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
 		t.Errorf("--check dial error = %v", err)
@@ -75,8 +80,8 @@ func TestTS10_CheckWiring(t *testing.T) {
 	if _, err := got.Resolver.LookupHost(t.Context(), "example.invalid"); !errors.Is(err, errNoNet) {
 		t.Errorf("--check lookup error = %v", err)
 	}
-	if code := run([]string{"f.yaml"}, nil, &out, &out); code != 0 {
-		t.Fatalf("start: exit %d, output %q", code, out.String())
+	if code := run([]string{"f.yaml"}, nil, &out, &out); code != 0 || served != 1 {
+		t.Fatalf("start: exit %d, starts %d, output %q", code, served, out.String())
 	}
 	if _, ok := got.Dialer.(noNet); ok {
 		t.Error("the start uses noNet")
