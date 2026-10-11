@@ -23,6 +23,7 @@ type testAppender struct {
 	mu     sync.Mutex
 	next   int64
 	err    error
+	tries  int // calls, also the failed ones
 	firsts []int64
 	calls  [][]tlog.EventHash
 
@@ -39,6 +40,7 @@ func (a *testAppender) AppendBatch(hs []tlog.EventHash) (int64, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.tries++
 	if a.err != nil {
 		return 0, a.err
 	}
@@ -70,7 +72,7 @@ func newRig(t *testing.T, depth int) *rig {
 	}
 	r := &rig{t: t, q: q, c: c, db: migrated(t), app: &testAppender{next: 100},
 		tick: make(chan time.Time), commits: make(chan int, 64)}
-	r.w = NewWriter(r.db, q, r.app, c, false)
+	r.w = NewWriter(r.db, q, r.app, c, false, nil)
 	r.w.tick = r.tick
 	r.w.onCommit = func(n int) { r.commits <- n }
 	return r
@@ -419,9 +421,7 @@ func TestTU18ShutdownWritesTheDrainedEvents(t *testing.T) {
 		batch = append(batch, e)
 	}
 	r.q.Close()
-	if err := r.w.shutdown(batch); err != nil {
-		t.Fatal(err)
-	}
+	r.w.shutdown(batch)
 	wantCommits(t, r, 5, 500, 100)
 	if e, ok := r.q.TryTake(); ok || e != nil {
 		t.Fatal("an event is left in the lanes")
@@ -564,18 +564,18 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 	}
 }
 
-// T-U-18: closed database: BEGIN fails, nothing is committed, and Run returns
-// the database rule. A refused row and an append error roll back the batch (no
-// row). For the refused row, the appender got its one call, so the leaves of
-// that batch stay in the appender with no row; the later stop rules count them.
-func TestTU18ErrorsRollBackTheBatch(t *testing.T) {
+// T-U-18: a closed database (BEGIN fails) and a refused row stop the writer and
+// commit nothing; Run returns nil after Close and Err holds the database rule.
+// For the refused row, the appender got its one call, so the leaves of that
+// batch stay in the log with no row. An insert error after the append is not
+// counted as an orphan case.
+func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
-		name, rule string
-		setup      func(r *rig)
+		name  string
+		setup func(r *rig)
 	}{
-		{"closed database", ruleDatabase, func(r *rig) { r.db.Close() }},
-		{"refused row", ruleDatabase, func(r *rig) { r.app.next = -1 }},
-		{"append error", ruleAppend, func(r *rig) { r.app.err = errors.New("log is stopped") }},
+		{"closed database", func(r *rig) { r.db.Close() }},
+		{"refused row", func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -584,15 +584,15 @@ func TestTU18ErrorsRollBackTheBatch(t *testing.T) {
 			r.add(event.KindCallback, 2)
 			r.q.Close()
 			c.setup(r)
-			wantRule(t, r.run(context.Background()), writerName, c.rule)
-			if len(r.commits) != 0 {
-				t.Fatal("the batch was committed")
+			if err := r.run(context.Background()); err != nil {
+				t.Fatal(err)
 			}
-			if c.name != "closed database" && r.rows() != 0 {
-				t.Fatalf("%d rows after the rollback", r.rows())
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != 0 {
+				t.Fatalf("healthy %v, %d commits, stats %+v", r.w.Healthy(), len(r.commits), r.w.Stats())
 			}
-			if c.name == "refused row" && len(r.app.calls) != 1 {
-				t.Fatalf("%d appender calls, want 1", len(r.app.calls))
+			if c.name == "refused row" && (r.rows() != 0 || len(r.app.calls) != 1) {
+				t.Fatalf("%d rows, %d appender calls", r.rows(), len(r.app.calls))
 			}
 		})
 	}
