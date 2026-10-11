@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 
+	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
@@ -185,7 +186,9 @@ func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("commit failed") }
 	stop := r.start()
 	msg := r.note(4, 1)
-	if err := r.sink.Add(4, msg); err == nil || r.spool.count() != 0 || r.rowCount() != 0 {
+	err := r.sink.Add(4, msg)
+	wantRule(t, err, writerName, ruleDatabase)
+	if r.spool.count() != 0 || r.rowCount() != 0 {
 		t.Fatalf("failed commit: error %v, spool %d, rows %d", err, r.spool.count(), r.rowCount())
 	}
 	eventually(t, func() bool { return !r.w.Healthy() })
@@ -212,6 +215,29 @@ func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 	}
 }
 
+// T-U-18: when a row request stops the writer, the events that the writer took
+// from the lanes and did not write are dropped and counted for their lane.
+func TestTU18SinkRowStopCountsTheEventsTheWriterTook(t *testing.T) {
+	r := newSinkRig(t)
+	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("commit failed") }
+	r.start()
+	for i := range 3 {
+		r.add(event.KindRequest, int64(i))
+	}
+	r.add(event.KindAlertSent, 9)
+	r.drained()
+	err := r.sink.Add(4, r.note(4, 1))
+	wantRule(t, err, writerName, ruleDatabase)
+	eventually(t, func() bool { return !r.w.Healthy() })
+	r.fire()
+	for end := time.Now().Add(waitFor); r.w.Stats().Dropped != (Drops{Bulk: 3, Evidence: 1}) && time.Now().Before(end); {
+		time.Sleep(time.Millisecond)
+	}
+	if got := r.w.Stats().Dropped; got != (Drops{Bulk: 3, Evidence: 1}) || r.rows() != 0 {
+		t.Errorf("dropped %+v (want bulk 3, evidence 1), event rows %d (want 0)", got, r.rows())
+	}
+}
+
 // T-U-18: a database error before the commit of the row also stops the writer.
 // Here the database is closed, so the connection for the row fails.
 func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
@@ -224,7 +250,9 @@ func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
 	if err := r.db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.sink.Add(4, r.note(4, 1)); err == nil || r.spool.count() != 1 {
+	err := r.sink.Add(4, r.note(4, 1))
+	wantRule(t, err, writerName, ruleDatabase)
+	if r.spool.count() != 1 {
 		t.Fatalf("closed database: error %v, spool %d (want an error, 1)", err, r.spool.count())
 	}
 	eventually(t, func() bool { return !r.w.Healthy() })

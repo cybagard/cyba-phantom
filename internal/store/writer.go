@@ -157,6 +157,9 @@ func (w *Writer) Run(ctx context.Context) error {
 			}
 		}
 		if !w.Healthy() {
+			// A row request can stop the writer while the batch holds events that
+			// Run took. Flush drops and counts them, as discardLoop does for the lanes.
+			w.flush(batch)
 			return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 		}
 	}
