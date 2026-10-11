@@ -53,6 +53,7 @@ type rig struct {
 	t       *testing.T
 	w       *Writer
 	q       *event.Queue
+	c       *event.Counters
 	db      *sql.DB
 	app     *testAppender
 	tick    chan time.Time
@@ -62,13 +63,14 @@ type rig struct {
 
 func newRig(t *testing.T, depth int) *rig {
 	t.Helper()
-	q, err := event.NewQueue(depth, event.NewCounters())
+	c := event.NewCounters()
+	q, err := event.NewQueue(depth, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, q: q, db: migrated(t), app: &testAppender{next: 100},
+	r := &rig{t: t, q: q, c: c, db: migrated(t), app: &testAppender{next: 100},
 		tick: make(chan time.Time), commits: make(chan int, 64)}
-	r.w = NewWriter(r.db, q, r.app)
+	r.w = NewWriter(r.db, q, r.app, c, false)
 	r.w.tick = r.tick
 	r.w.onCommit = func(n int) { r.commits <- n }
 	return r

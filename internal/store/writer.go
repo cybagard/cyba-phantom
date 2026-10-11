@@ -19,27 +19,33 @@ const (
 	ruleDatabase = "database write failed"
 	ruleAppend   = "log append failed"
 	ruleRecord   = "evidence record cannot be made"
-
-	insertEvent = "INSERT INTO event (ts, kind, hash, leaf_index, record) VALUES (?, ?, ?, ?, ?)"
 )
 
 // Writer is the one writer of the event table. It uses the database pool from
 // Open and Migrate, the queue, and the appender. The caller closes them after
-// Run returns. This step writes only the columns ts, kind, hash, leaf_index and
-// record.
+// Run returns. It also adds the drop counts of the queue to ip_counter.
 type Writer struct {
-	db  *sql.DB
-	q   *event.Queue
-	app appender
+	db         *sql.DB
+	q          *event.Queue
+	app        appender
+	counters   *event.Counters
+	bodyPrefix bool // privacy.store_body_prefix
+	dk         dayKey
 
 	tick     <-chan time.Time // a test sets it; nil means a ticker of flushEvery
 	onCommit func(rows int)   // a test sets it; nil in production
+	clock    func() time.Time // a test sets it; nil means time.Now
+	// timing gets the time of a batch and of its commit. A test sets it; nil in
+	// production.
+	timing func(batch, commit time.Duration)
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
-// hashes in app. Each of the three arguments must not be nil.
-func NewWriter(db *sql.DB, q *event.Queue, app appender) *Writer {
-	return &Writer{db: db, q: q, app: app}
+// hashes in app. The writer adds the drop counts of c to ip_counter. It stores
+// the body prefix of an event only when bodyPrefix is true. The pointer
+// arguments must not be nil.
+func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, bodyPrefix bool) *Writer {
+	return &Writer{db: db, q: q, app: app, counters: c, bodyPrefix: bodyPrefix}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -142,10 +148,24 @@ func (w *Writer) flush(batch []*event.Event) ([]*event.Event, error) {
 // each row, binds them, and drops them after the insert. Thus the writer keeps
 // no second copy of the record bytes of the batch. The transaction does not use
 // the context of Run: the last write must work after ctx ends.
+//
+// At its start the batch reads the clock one time and takes the UTC date and
+// the day key for it. The ip_counter rows of the batch use them, also when the
+// batch ends after midnight.
 func (w *Writer) write(batch []*event.Event) error {
 	if len(batch) == 0 {
 		return nil
 	}
+	var begin time.Time
+	if w.timing != nil {
+		begin = time.Now()
+	}
+	now := time.Now
+	if w.clock != nil {
+		now = w.clock
+	}
+	day := now().UTC().Format(dayLayout)
+	w.dk.use(day)
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
 	for j, e := range batch {
@@ -193,12 +213,22 @@ func (w *Writer) write(batch []*event.Event) error {
 			hash, leaf, record = hs[i][:], first+int64(i), b
 			i++
 		}
-		if _, err := stmt.ExecContext(ctx, e.Record.TS, e.Record.Kind.String(), hash, leaf, record); err != nil {
-			return fail(writerName, ruleDatabase)
+		if err := w.insertRow(ctx, stmt, e, hash, leaf, record); err != nil {
+			return err
 		}
+	}
+	if err := w.countDrops(ctx, tx, day); err != nil {
+		return err
+	}
+	var commitAt time.Time
+	if w.timing != nil {
+		commitAt = time.Now()
 	}
 	if tx.Commit() != nil {
 		return fail(writerName, ruleDatabase)
+	}
+	if w.timing != nil {
+		w.timing(time.Since(begin), time.Since(commitAt))
 	}
 	if w.onCommit != nil {
 		w.onCommit(len(batch))
