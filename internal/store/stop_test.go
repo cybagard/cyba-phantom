@@ -173,10 +173,12 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 	const m = "zq9marker"
 	cases := []struct {
 		name  string
+		rule  string
+		late  bool // close the database after the start check
 		setup func(r *rig)
 	}{
-		{"closed database", func(r *rig) { r.db.Close() }},
-		{"refused row", func(r *rig) { r.app.next = -1 }},
+		{"closed database", ruleDatabase, true, func(r *rig) { r.db.Close() }},
+		{"refused row", ruleDatabase, false, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -184,22 +186,31 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 			var out logBuf
 			r.w.log = slog.New(slog.NewTextHandler(&out, nil))
 			st := int64(404)
-			e, err := event.NewEvent(nil, event.Input{
-				Kind: event.KindCallback, Session: "sess-" + m, Vhost: m + ".example.test", Method: "POST",
-				Path: "/" + m, Status: &st, TrapID: "trap-" + m, TokenID: "tok-" + m, Surface: event.SurfaceQuery,
-				ClientIP: "203.0.113.9", BodyPrefix: []byte(m),
-				Detail: event.Detail{"k": event.Str(m)},
-			})
-			if err != nil || !r.q.Enqueue(e) {
+			batch := func() {
+				e, err := event.NewEvent(nil, event.Input{
+					Kind: event.KindCallback, Session: "sess-" + m, Vhost: m + ".example.test", Method: "POST",
+					Path: "/" + m, Status: &st, TrapID: "trap-" + m, TokenID: "tok-" + m, Surface: event.SurfaceQuery,
+					ClientIP: "203.0.113.9", BodyPrefix: []byte(m),
+					Detail: event.Detail{"k": event.Str(m)},
+				})
+				if err != nil || !r.q.Enqueue(e) {
+					t.Fatal(err)
+				}
+				r.add(event.KindRequest, 1)
+			}
+			var err error
+			if c.late {
+				err = r.runAfterStart(func() { c.setup(r) }, batch)
+			} else {
+				batch()
+				r.q.Close()
+				c.setup(r)
+				err = r.run(context.Background())
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
-			r.add(event.KindRequest, 1)
-			r.q.Close()
-			c.setup(r)
-			if err := r.run(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			wantRule(t, r.w.Err(), writerName, c.rule)
 			text := out.String()
 			if n := strings.Count(text, "\n"); n != 1 || !strings.Contains(text, r.w.Err().Error()) {
 				t.Fatalf("%d log lines, want 1: %q", n, text)

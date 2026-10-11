@@ -69,9 +69,9 @@ func (w *Writer) Err() error {
 	return nil
 }
 
-// stop records err as the reason of the stop and writes one log line. A later
-// call changes nothing and logs nothing. There is no reopen of the log or of the
-// database, and no exit of the process.
+// stop records err as the reason of the stop, writes one log line, and makes the
+// stop marker (see ensureMarker). A later call changes nothing and logs nothing.
+// There is no reopen of the log or of the database, and no exit of the process.
 func (w *Writer) stop(err error) {
 	var e *Error
 	if !errors.As(err, &e) {
@@ -79,6 +79,7 @@ func (w *Writer) stop(err error) {
 	}
 	if w.stopErr.CompareAndSwap(nil, &err) {
 		w.log.Error("store writer stopped", "class", err.Error())
+		w.ensureMarker()
 	}
 }
 
@@ -97,6 +98,12 @@ func Discard(ctx context.Context, q *event.Queue, d *DropCount) error {
 }
 
 func discard(ctx context.Context, q *event.Queue, d *DropCount, tick <-chan time.Time) error {
+	return discardLoop(ctx, q, d, tick, func() {})
+}
+
+// discardLoop is discard with a function that runs at each tick, before the
+// drop. The writer uses it to try again to make the stop marker.
+func discardLoop(ctx context.Context, q *event.Queue, d *DropCount, tick <-chan time.Time, onTick func()) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -106,6 +113,7 @@ func discard(ctx context.Context, q *event.Queue, d *DropCount, tick <-chan time
 			}
 			return ctx.Err()
 		case <-tick:
+			onTick()
 			discardAll(q, d)
 		case <-q.Ready():
 			// The wake value must be taken, or this select would not wait. Only

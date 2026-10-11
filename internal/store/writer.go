@@ -33,6 +33,7 @@ type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
 	app        appender
+	rec        Recovery
 	counters   *event.Counters
 	bodyPrefix bool // privacy.store_body_prefix
 	dk         dayKey
@@ -41,6 +42,8 @@ type Writer struct {
 	stopErr              atomic.Pointer[error] // the first error; nil while the writer runs
 	writeFailed, orphans atomic.Uint64
 	drops                DropCount
+	markerMade           atomic.Bool // writer.stop exists
+	markerLogged         atomic.Bool // the failed create has a log line
 
 	tick     <-chan time.Time // a test sets it; nil means a ticker of flushEvery
 	onCommit func(rows int)   // a test sets it; nil in production
@@ -51,18 +54,23 @@ type Writer struct {
 	// beforeCommit runs on the transaction before COMMIT. An error from it is a
 	// failed COMMIT. A test sets it; nil in production.
 	beforeCommit func(tx *sql.Tx) error
+	// beforeAppend runs in the transaction before AppendBatch. A test sets it;
+	// nil in production.
+	beforeAppend func()
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
 // hashes in app. The writer adds the drop counts of c to ip_counter. It stores
 // the body prefix of an event only when bodyPrefix is true. It writes one line to
-// log when it stops; a nil log writes nothing. The other pointer arguments must
-// not be nil.
-func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, bodyPrefix bool, log *slog.Logger) *Writer {
+// log when it stops; a nil log writes nothing. rec gives the state directory, the
+// origin, and the log for the start check and the stop marker. rec.State and
+// rec.Log must not be nil: a nil one stops the writer at the start of Run. The
+// other pointer arguments must not be nil.
+func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Writer{db: db, q: q, app: app, counters: c, bodyPrefix: bodyPrefix, log: log}
+	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, log: log}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -71,6 +79,9 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // and at each tick when the batch is not empty. It holds one batch at a time and
 // starts no goroutine for an event. While the lanes stay non-empty, Run writes
 // at 500 events and the tick case can wait.
+//
+// Before the first write, Run does the start check (see start). A stop marker or
+// a failed check stops the writer, and Run goes to the stopped state at once.
 //
 // Normal shutdown: the caller stops the producers and calls Close on the queue.
 // Run then writes its batch, takes the events that are left with Drain, writes
@@ -96,6 +107,10 @@ func (w *Writer) Run(ctx context.Context) error {
 		t := time.NewTicker(flushEvery)
 		defer t.Stop()
 		tick = t.C
+	}
+	if err := w.start(); err != nil {
+		w.stop(err)
+		return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 	}
 	batch := make([]*event.Event, 0, maxBatch)
 	for {
@@ -131,7 +146,7 @@ func (w *Writer) Run(ctx context.Context) error {
 			}
 		}
 		if !w.Healthy() {
-			return discard(ctx, w.q, &w.drops, tick)
+			return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 		}
 	}
 }
@@ -251,6 +266,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	var first int64
 	var appendErr error
 	if len(hs) > 0 {
+		if w.beforeAppend != nil {
+			w.beforeAppend()
+		}
 		if first, err = w.app.AppendBatch(hs); err != nil {
 			appendErr = fail(writerName, ruleAppend)
 			w.writeFailed.Add(uint64(len(hs)))
