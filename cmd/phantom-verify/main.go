@@ -41,14 +41,15 @@ const usage = `usage: phantom-verify --key <vkey file> --checkpoint <note file>
 var errSameSizes = errors.New("two consistency proof files have the same sizes")
 
 // refusals maps each error to its exit code and its fixed message. The message
-// holds no input bytes. Only ErrFork says "fork".
+// holds no input bytes. Only ErrFork says "fork". It says that a fork is one
+// cause, because a bad consistency proof file gives the same error.
 var refusals = []struct {
 	err  error
 	code int
 	msg  string
 }{
 	{verify.ErrNotVerified, 1, "not verified: the event is not in the tree of the checkpoint"},
-	{verify.ErrFork, 1, "not verified: the checkpoints are not consistent and the log has a fork"},
+	{verify.ErrFork, 1, "not consistent: a fork of the log, or a bad consistency proof"},
 	{verify.ErrTreeSize, 1, "not verified: the proof tree size is larger than the checkpoint size"},
 	{verify.ErrSignature, 1, "not verified: the checkpoint signature does not verify with the key"},
 	{verify.ErrTooLarge, 2, "input error: an input is larger than its size cap"},

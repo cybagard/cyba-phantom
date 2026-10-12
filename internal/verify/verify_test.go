@@ -2,6 +2,7 @@ package verify
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -254,9 +255,9 @@ func TestTS14_InclusionBridged(t *testing.T) {
 		want error
 	}{
 		"wrong root at m":             {wrongRoot, ErrNotVerified},
-		"changed consistency hash":    {badCons, ErrFork},
+		"changed consistency hash":    {badCons, ErrNotVerified},
 		"changed inclusion hash":      {badIncl, ErrNotVerified},
-		"empty consistency proof":     {noCons, ErrFork},
+		"empty consistency proof":     {noCons, ErrNotVerified},
 		"root at the checkpoint size": {atSize, ErrProof},
 		"root alone at the size":      {atSizeRootOnly, ErrProof},
 		"size 0 with a root":          {zero, ErrNotVerified},
@@ -266,11 +267,14 @@ func TestTS14_InclusionBridged(t *testing.T) {
 			c := bridgedProof(t, l, 3, 6, 300)
 			p.Consistency = c.Consistency
 			return p
-		}(), ErrFork},
+		}(), ErrNotVerified},
 		"size above the checkpoint size": {InclusionProof{Index: 3, TreeSize: 301, Hashes: good.Hashes}, ErrTreeSize},
 	} {
 		res, err := Inclusion(v, msg, events[3], tc.p)
 		wantErr(t, name, err, tc.want)
+		if errors.Is(err, ErrFork) {
+			t.Errorf("%s: a bad proof file is not a fork: %v", name, err)
+		}
 		if err != nil && !reflect.DeepEqual(res, Result{}) {
 			t.Errorf("%s: result is not empty with an error: %+v", name, res)
 		}

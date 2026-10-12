@@ -303,7 +303,7 @@ func TestTS14_Refused(t *testing.T) {
 			"not verified: the event is not in the tree"},
 		"forked prior": {[]string{"--checkpoint", f.write("fcp", checkpointAt(t, fork, s, 20)), "--prior", f.write("pcp", checkpointAt(t, l, s, 5)),
 			"--consistency", f.write("fc", []byte(consistencyJSON(t, fork, 5, 20)))},
-			"the log has a fork"},
+			forkText},
 		"proof size larger": {[]string{"--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", f.write("big", []byte(bigProof))},
 			"larger than the checkpoint size"},
 	} {
@@ -318,6 +318,46 @@ func TestTS14_Refused(t *testing.T) {
 	}
 	if code, _, _ := invoke(t, "--key", key, "--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", proof); code != 0 {
 		t.Errorf("unchanged inputs: exit %d", code)
+	}
+}
+
+// forkText is the message for a consistency failure between two signed
+// checkpoints.
+const forkText = "not consistent: a fork of the log, or a bad consistency proof"
+
+// T-S-14: a bridged proof file with a changed consistency hash is a bad proof
+// file. The exit code is 1 and the output does not say fork. The same files
+// without the change pass.
+func TestTS14_BridgedProofNotFork(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, events := testLog(t, 20, `{"n":%d}`)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp := f.write("cp", checkpointAt(t, l, s, 20))
+	ev := f.write("event", events[3].Raw)
+	good, _, cons := bridgedJSON(t, l, 3, 5, 20)
+	flipped := cons[0]
+	flipped[0] ^= 1 // a changed hash that is still canonical base64
+	// The first consistency hash can also be an inclusion hash, so only the
+	// consistency list changes.
+	head, tail, _ := strings.Cut(good, `"consistency":`)
+	bad := head + `"consistency":` + strings.Replace(tail, b64(cons[0]), b64(flipped), 1)
+	if bad == good {
+		t.Fatal("the proof file did not change")
+	}
+	for name, tc := range map[string]struct {
+		proof string
+		code  int
+	}{"changed consistency hash": {bad, 1}, "unchanged": {good, 0}} {
+		// Each run has its own state directory.
+		code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--event", ev,
+			"--proof", f.write("proof-"+name, []byte(tc.proof)), "--state", filepath.Join(f.dir, "state-"+name))
+		if code != tc.code {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
+		}
+		if strings.Contains(strings.ToLower(stdout+stderr), "fork") {
+			t.Errorf("%s: output says fork: %q %q", name, stdout, stderr)
+		}
 	}
 }
 
@@ -560,8 +600,8 @@ func TestTS14_State(t *testing.T) {
 		msg  string
 		args []string
 	}{
-		"fork":                    {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 15), "--consistency", cons(fork, "f", 10, 15)}},
-		"same size, another root": {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 10)}},
+		"fork":                    {1, forkText, []string{"--checkpoint", cp(fork, "f", 15), "--consistency", cons(fork, "f", 10, 15)}},
+		"same size, another root": {1, forkText, []string{"--checkpoint", cp(fork, "f", 10)}},
 		"older without a proof":   {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 5)}},
 		"larger without a proof":  {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 15)}},
 		"two proofs, same sizes": {2, "have the same sizes", []string{"--checkpoint", cp(l, "l", 15),
@@ -746,7 +786,7 @@ func TestTS14_StateSizeZero(t *testing.T) {
 	}
 	before := stateSnap(t, empty)
 	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", f.write("bad0", bad), "--state", empty)
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "the log has a fork") || strings.Contains(stderr, "state:") {
+	if code != 1 || stdout != "" || !strings.Contains(stderr, forkText) || strings.Contains(stderr, "state:") {
 		t.Errorf("another root: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if after := stateSnap(t, empty); after != before || after != "" {
