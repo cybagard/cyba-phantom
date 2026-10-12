@@ -26,7 +26,8 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 ## Spec documents (`spec/`)
 
 `spec/` is a synced, read-only copy of the canonical spec kit (the private
-sibling repository is the source of truth). **Do not edit these files
+sibling repository is the source of truth): 01, the open sections of 04,
+07, and 08. **Do not edit these files
 directly.** Spec changes are made in the canonical repository and land
 here only via the maintainer's sync PR, which also rotates the
 `manifest.json` stamp. CI verifies the sync on every PR:

@@ -2,7 +2,7 @@
 
 **Phantom** — a self-hosted sensor that plants prompt-injection bait on decoy vhosts, fingerprints every session, scores traffic into `human` / `crawler` / `agent-likely` / `agent-confirmed`, alerts within 60 s, and records every event, of which evidence events are kept in a tamper-evident Merkle log with Ed25519-signed checkpoints (ADR-007). Target host: 1 vCPU / 512 MB / 20 GB, Ubuntu 24.04.
 
-The full spec kit lives in the private sibling repository (documentation-only, canonical). A synced read-only copy of the traceability inputs ships in `spec/`. This file mirrors the core constraints of the spec kit, so that the repo is self-contained. In the multi-root workspace both are visible. If they disagree, the spec kit wins.
+The full spec kit lives in the private sibling repository (documentation-only, canonical). A synced read-only copy of the traceability inputs and of the open interface sections ships in `spec/`. This file mirrors the core constraints of the spec kit, so that the repo is self-contained. In the multi-root workspace both are visible. If they disagree, the spec kit wins.
 
 ## Licensing (ADR-006) — read first
 
@@ -51,7 +51,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/config` | one YAML file + env overrides, `--check` |
 | `sdk/` | Go + TS: read checkpoints, verify proofs |
 | `tools/` | `trace` (traceability check), `dco` (sign-off check), `mirror-diff` (constitution table check), `bundle-sign`, `score-report` |
-| `spec/` | synced read-only mirror of the canonical spec documents (01, 07, 08, manifest, golden table) — the traceability inputs |
+| `spec/` | synced read-only mirror of the canonical spec documents (01, 04 open sections, 07, 08, manifest, golden table) — the traceability inputs and the open interfaces |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |
 

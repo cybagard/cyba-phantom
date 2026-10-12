@@ -7,6 +7,7 @@ open, and the canonical copy wins on any disagreement).
 | File | What it is |
 |------|------------|
 | `01-prd.md` | Product requirements: goals G1–G5, FR, NFR, SEC (ID conventions per the spec kit) |
+| `04-interfaces.md` | Interfaces: ops listener (§2), config file (§3), checkpoint (§5), alert payload (§6), verifier (§7). §1 and §4 hold closed content (C7) and are not in this copy |
 | `07-test-plan.md` | Test plan: every T-ID and what it covers |
 | `08-traceability.md` | The C10 traceability matrix (requirement → design → tests) |
 | `constitution-table.md` | The C1–C10 table exactly as it appears in the public `AGENTS.md` — the golden for `tools/mirror-diff.sh` |
@@ -14,7 +15,7 @@ open, and the canonical copy wins on any disagreement).
 
 Rules:
 
-- Do not edit the canonical mirror files (`01-prd.md`, `07-test-plan.md`,
+- Do not edit the canonical mirror files (`01-prd.md`, `04-interfaces.md`, `07-test-plan.md`,
   `08-traceability.md`, `constitution-table.md`) directly. Spec changes
   are made in the canonical repository and land here only via the
   maintainer's sync PR, which also rotates the `manifest.json` stamp.

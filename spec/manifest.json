@@ -1,10 +1,11 @@
 {
-  "synced": "2026-10-10",
+  "synced": "2026-10-11",
   "files": {
-    "01-prd.md": "7d8fe251fd7243b6770d4e71f0860be5db4928287a4d7d51aa254b67c2422ae7",
+    "01-prd.md": "d62c67a363d23e731e463de08cf05ba7b1f7227d0171cff7bcfb5b4701f92b10",
+    "04-interfaces.md": "b63a0ca8dfac56e808eecbe2ec224856e27092331f41cd809a0989f6fbd70e99",
     "07-test-plan.md": "2fc1258d56a4a56129d63259d194f774e1cb8133d5bfcf34a0366fa42f957370",
-    "08-traceability.md": "6ca9faa4308f623cee33ac5eaab0d1d7e88e2fbea79434064cf35eb790f6f7a5",
-    "README.md": "6406dd37d6f8d0d8d72f24c58d2d4463494d4eba4f4d16eb1de572ba7f59c1da",
+    "08-traceability.md": "19a99f10efe36e35f7512057faa832c7c66dfdad4ebda004ca0323d65cf8183d",
+    "README.md": "59b9b908a15ff3f09c5bc4ba1688821de4f79df5dbee335ec82a3be56db42d82",
     "constitution-table.md": "e50c6e461a1ac26de14c82a21508dcf6ae64acaad1afd24fd288c0d1a43bbba3"
   }
 }

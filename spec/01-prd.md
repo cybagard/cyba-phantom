@@ -42,7 +42,7 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 | FR-03 | Inject per-session canary tokens into every trap surface (hidden text, HTML comment, fake API link, robots.txt, `.well-known`, meta tag, link `rel`) | Given two requests from different sessions, when pages are compared, then tokens differ and are unpredictable (≥ 128 bit) |
 | FR-04 | Record a canary callback when a token is presented on any callback surface (URL path, header, query, POST body) | Given a session S received token T, when any request presents T, then a `callback` event is written linking to S within 250 ms |
 | FR-05 | Fingerprint every session (JA4, HTTP/2 SETTINGS/priority fingerprint, header order, UA, Accept-*, JS-execution beacon, request cadence) | Given any TLS session, when the first request completes, then a fingerprint record with all available signals exists |
-| FR-06 | Score sessions into bands `human`, `crawler`, `agent-likely`, `agent-confirmed` per `05-detection-spec.md` | Harness thresholds in G1/G2 met |
+| FR-06 | Score sessions into bands `human`, `crawler`, `agent-likely`, `agent-confirmed` per the detection rules (ADR-004) | Harness thresholds in G1/G2 met |
 | FR-07 | Write every event to SQLite; evidence events are appended to the Merkle log before any alert fires | Given an alert, when its inclusion proof is checked against the latest checkpoint, then it verifies |
 | FR-08 | Emit alerts for `agent-likely` and `agent-confirmed` via webhook (JSON), syslog (RFC 5424), and SMTP | Given a confirmed session, when scored, then all configured sinks receive the alert within 60 s |
 | FR-09 | Publish an Ed25519-signed checkpoint (tree size, root hash, timestamp) at a configurable interval (default 1 h) to ≥ 1 configured target | Given the publisher is unreachable, when the interval passes, then checkpoints queue locally and publish when reachable, in order |
@@ -114,4 +114,4 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 | Bundle license terms and rotation cadence | Product | Before paid tier |
 
 ## Phasing
-- **M-1** skeleton + log + config; **M-2** traps + tokens + callbacks; **M-3** fingerprinting + scoring + alerts; **M-4** retention, dashboard, hardening, install; **M-5** perf/soak on target VPS and release candidate. See `09-implementation-plan.md`.
+- **M-1** skeleton + log + config; **M-2** traps + tokens + callbacks; **M-3** fingerprinting + scoring + alerts; **M-4** retention, dashboard, hardening, install; **M-5** perf/soak on target VPS and release candidate.
