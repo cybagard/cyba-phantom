@@ -30,22 +30,29 @@ type connector struct {
 	driver.Connector
 	root *os.Root
 	rel  string
-	want string // the absolute path that database_list must give
-	id   fileID // the identity of the database file that Open checked
+	want string   // the absolute path that database_list must give
+	id   fileID   // the identity of the database file that Open checked
+	held *os.File // the database file, open for the life of the pool
 
 	// checked is true until the first Connect: Open has just run the checks.
 	checked atomic.Bool
 }
 
-func newConnector(root *os.Root, rel, path, dsn string, id fileID) (*connector, error) {
+func newConnector(root *os.Root, rel, path, dsn string, held *os.File, id fileID) (*connector, error) {
 	base, err := sqlite.NewConnector(dsn)
 	if err != nil {
 		return nil, fail(rel, ruleOpen)
 	}
-	c := &connector{Connector: base, root: root, rel: rel, want: path, id: id}
+	c := &connector{Connector: base, root: root, rel: rel, want: path, id: id, held: held}
 	c.checked.Store(true)
 	return c, nil
 }
+
+// Close closes the held descriptor. database/sql calls it from DB.Close, after
+// it has closed the connections. The descriptor is closed only here: SQLite
+// holds POSIX record locks on the file, and the close of any descriptor of the
+// file drops all locks of the process on it.
+func (c *connector) Close() error { return c.held.Close() }
 
 // identityOf returns the device and the inode of a file from an Lstat result.
 func identityOf(rel string, fi fs.FileInfo, err error) (fileID, error) {
@@ -61,21 +68,20 @@ func identityOf(rel string, fi fs.FileInfo, err error) (fileID, error) {
 
 // check runs the parent checks and the file checks. The database file must
 // exist: if it is gone, the driver would make a new file, so this is a refusal.
-// The file must be the one that Open checked. The path that SQLite opens must
+// The file must be the one that Open holds open. The path that SQLite opens must
 // lead to the same file as the path through the root.
 func (c *connector) check() error {
 	if err := checkParents(c.root, c.rel); err != nil {
 		return err
 	}
-	absent, err := checkFiles(c.root, c.rel)
+	fi, err := checkFiles(c.root, c.rel)
 	if err != nil {
 		return err
 	}
-	if absent {
+	if fi == nil {
 		return fail(c.rel, ruleChanged)
 	}
-	fi, err := c.root.Lstat(c.rel)
-	id, err := identityOf(c.rel, fi, err)
+	id, err := identityOf(c.rel, fi, nil)
 	if err != nil {
 		return err
 	}

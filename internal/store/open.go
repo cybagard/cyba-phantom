@@ -55,8 +55,8 @@ type Options struct {
 	// clean path relative to the state directory; "." is the state directory
 	// itself. The directories keys and checkpoints and the names
 	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
-	// ADR-022), so the store adds them itself. Names match exactly, with the case of the path.
-	// The store does not import internal/config.
+	// ADR-022), so the store adds them itself. Names match exactly, with the
+	// case of the path. The store does not import internal/config.
 	Reserved []string
 }
 
@@ -81,6 +81,10 @@ var afterChecks func()
 // the open of SQLite and the second checks.
 var afterVerify func()
 
+// onHeld is a test hook. A test sets it to get the descriptor that Open holds
+// open for the pool.
+var onHeld func(*os.File)
+
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
 	sync.Mutex
@@ -98,6 +102,8 @@ var heap struct {
 //   - After the open, and on each new connection: database_list, the
 //     directories, the four files, and the identity of the database file. The
 //     file is the same file as before, and the path that SQLite opens leads to it.
+//     Open keeps the database file open until the pool closes, so that it stays
+//     the same file.
 //
 // A failed check gives a fixed error and closes the database or connection.
 // A change that is made and undone between two checks is not found.
@@ -114,21 +120,27 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if err := checkParents(root, rel); err != nil {
 		return nil, err
 	}
-	absent, err := checkFiles(root, rel)
+	checked, err := checkFiles(root, rel)
 	if err != nil {
 		return nil, err
 	}
+	absent := checked == nil
+	// The descriptor stays open until the pool closes. While it is open, the
+	// inode of the file cannot be given to a new file.
+	var held *os.File
 	if absent {
-		f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		held, err = root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return nil, fail(rel, ruleChanged)
 			}
 			return nil, fail(rel, ruleCreate)
 		}
-		if f.Close() != nil {
-			return nil, fail(rel, ruleCreate)
-		}
+	} else if held, err = openHeld(root, rel); err != nil {
+		return nil, fail(rel, ruleChanged)
+	}
+	if onHeld != nil {
+		onHeld(held)
 	}
 	// A failed open removes the entry at rel when this call made the database
 	// file. If someone put a link there, Remove deletes the link and not its
@@ -139,24 +151,31 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		}
 		return err
 	}
-	fi, err := root.Lstat(rel)
+	fi, err := held.Stat()
 	id, err := identityOf(rel, fi, err)
+	if err == nil && !absent {
+		if cid, _ := identityOf(rel, checked, nil); cid != id {
+			err = fail(rel, ruleChanged)
+		}
+	}
 	if err != nil {
+		held.Close()
 		return nil, refuse(err)
 	}
 	if afterChecks != nil {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	conn, err := newConnector(root, rel, path, dsn(path, absent), id)
+	conn, err := newConnector(root, rel, path, dsn(path, absent), held, id)
 	if err != nil {
+		held.Close()
 		return nil, refuse(err)
 	}
 	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
-	if rule := verify(db); rule != "" {
+	if err := verify(db, rel); err != nil {
 		db.Close()
-		return nil, refuse(fail(rel, rule))
+		return nil, refuse(err)
 	}
 	if afterVerify != nil {
 		afterVerify()
@@ -246,23 +265,26 @@ func checkParents(root *os.Root, rel string) error {
 }
 
 // checkFiles checks the database file and its -wal, -shm and -journal files.
-// Each is absent or a safe file. It reports whether the database file is absent.
-func checkFiles(root *os.Root, rel string) (absent bool, err error) {
+// Each is absent or a safe file. It returns the FileInfo of the database file
+// that it checked, or nil when that file is absent.
+func checkFiles(root *os.Root, rel string) (db fs.FileInfo, err error) {
 	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		name := rel + suffix
 		fi, err := root.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
-			absent = absent || suffix == ""
 			continue
 		}
 		if err != nil {
-			return false, fail(name, ruleExamine)
+			return nil, fail(name, ruleExamine)
 		}
 		if rule := checkFile(fi); rule != "" {
-			return false, fail(name, rule)
+			return nil, fail(name, rule)
+		}
+		if suffix == "" {
+			db = fi
 		}
 	}
-	return absent, nil
+	return db, nil
 }
 
 // checkFile returns the failed rule for an existing file, or an empty string.
@@ -310,28 +332,28 @@ func dsn(path string, created bool) string {
 }
 
 // verify reads back the journal mode of the first connection and sets the
-// process settings. The connector checks the location. It returns the failed
-// rule, or an empty string.
-func verify(db *sql.DB) string {
+// process settings. The connector checks the location. It returns the *Error of
+// the connector as it is, or a fixed error for rel.
+func verify(db *sql.DB, rel string) error {
 	ctx := context.Background()
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
 		var e *Error // the connector refused the first connection
 		if errors.As(err, &e) {
-			return e.Rule
+			return e
 		}
-		return ruleOpen
+		return fail(rel, ruleOpen)
 	}
 	if mode != "wal" {
-		return ruleSetting
+		return fail(rel, ruleSetting)
 	}
 	heap.Lock()
 	defer heap.Unlock()
 	if !heap.set {
 		if _, err := db.ExecContext(ctx, "PRAGMA soft_heap_limit="+strconv.Itoa(softHeapLimit)); err != nil {
-			return ruleSetting
+			return fail(rel, ruleSetting)
 		}
 		heap.set = true
 	}
-	return ""
+	return nil
 }

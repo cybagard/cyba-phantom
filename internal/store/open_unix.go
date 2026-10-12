@@ -8,11 +8,14 @@ import (
 	"syscall"
 )
 
-// geteuid is a test hook. A test uses it to check an owner mismatch without root.
-var geteuid = os.Geteuid
-
 // euid returns the effective user of the process.
-func euid() int64 { return int64(geteuid()) }
+func euid() int64 { return int64(os.Geteuid()) }
+
+// openHeld opens an existing database file through root for reading. It does not
+// follow a symlink, and the descriptor does not pass to a child process.
+func openHeld(root *os.Root, rel string) (*os.File, error) {
+	return root.OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+}
 
 // fileFacts is a test variable: a test replaces it to give one directory or file
 // another owner without root. It returns the link count and the owner of a file.

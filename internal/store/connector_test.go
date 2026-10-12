@@ -5,6 +5,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -58,9 +60,9 @@ func TestTS15CancelledQueryReconnects(t *testing.T) {
 // noHooks turns the test hooks off, so that a helper can call Open inside a
 // hook. The returned function sets them again.
 func noHooks() func() {
-	a, b, c, d := onConnect, afterChecks, afterVerify, beforeDriverOpen
-	onConnect, afterChecks, afterVerify, beforeDriverOpen = nil, nil, nil, nil
-	return func() { onConnect, afterChecks, afterVerify, beforeDriverOpen = a, b, c, d }
+	a, b, c, d, e := onConnect, afterChecks, afterVerify, beforeDriverOpen, onHeld
+	onConnect, afterChecks, afterVerify, beforeDriverOpen, onHeld = nil, nil, nil, nil, nil
+	return func() { onConnect, afterChecks, afterVerify, beforeDriverOpen, onHeld = a, b, c, d, e }
 }
 
 // cleanDatabase makes a valid database file in another state directory, with
@@ -156,7 +158,7 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 			r.fire()
 			r.commit()
 
-			n := countConnects(t)
+			n, want := countConnects(t), int64(1)
 			cancelQuery(t, r.db)
 			file := filepath.Join(r.state, "events.db")
 			switch name {
@@ -168,6 +170,9 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 				replaceFile(t, file)
 			case "state directory swapped":
 				swapStateDir(t, r.state)
+				// This direct query is refused by the check of the path.
+				wantRule(t, r.db.QueryRow("SELECT 1").Scan(new(int)), "events.db", ruleLocation)
+				want++ // the writer makes one more try
 			}
 			r.add(event.KindRequest, 2)
 			r.drained()
@@ -179,8 +184,8 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 				r.commit()
 			}
 			stop()
-			if r.w.Healthy() == bad || n.Load() != 1 {
-				t.Fatalf("healthy %v, %d Connect calls", r.w.Healthy(), n.Load())
+			if r.w.Healthy() == bad || n.Load() != want {
+				t.Fatalf("healthy %v, %d Connect calls, want %d", r.w.Healthy(), n.Load(), want)
 			}
 		})
 	}
@@ -277,11 +282,181 @@ func TestTS15ChangeBeforeDriverOpenIsRefused(t *testing.T) {
 		defer syscall.Umask(old)
 		f := newFixture(t)
 		file := filepath.Join(f.state, "events.db")
-		// A kept link holds the old inode, so that the new file cannot reuse it.
 		err := changeBeforeDriverOpen(t, f, "events.db", func() {
-			os.Link(file, file+".kept")
 			os.Remove(file)
 		})
 		wantRule(t, err, "events.db", ruleChanged)
 	})
+}
+
+// removeDatabase removes the database file and its WAL and SHM files, if any.
+func removeDatabase(t *testing.T, file string) {
+	t.Helper()
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(file + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+}
+
+// T-S-15: a database file that is removed and made again while the pool has no
+// connection is refused, also when the new file gets the number of the old
+// inode. Each row runs 10 times, because the number is not the same each time.
+// A row makes its new file in the same directory, after the removal, so that
+// the file system can give it the number of the removed inode.
+func TestTS15RemovedFileMadeAgainIsRefused(t *testing.T) {
+	remake := map[string]func(t *testing.T, f *fixture) func(){
+		"clean file renamed in": func(t *testing.T, f *fixture) func() {
+			return func() {
+				mustOpen(t, f.root, "other.db").Close()
+				err := os.Rename(filepath.Join(f.state, "other.db"), filepath.Join(f.state, "events.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+		"new database written": func(t *testing.T, f *fixture) func() {
+			b, err := os.ReadFile(cleanDatabase(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return func() {
+				if err := os.WriteFile(filepath.Join(f.state, "events.db"), b, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+	}
+	for name, prepare := range remake {
+		t.Run(name, func(t *testing.T) {
+			for i := 0; i < 10; i++ {
+				f := newFixture(t)
+				db := mustOpen(t, f.root, "events.db")
+				cancelQuery(t, db)
+				remade := prepare(t, f)
+				removeDatabase(t, filepath.Join(f.state, "events.db"))
+				remade()
+				err := db.QueryRow("SELECT 1").Scan(new(int))
+				db.Close()
+				wantRule(t, err, "events.db", ruleChanged)
+			}
+		})
+	}
+}
+
+// holdHook makes onHeld save the descriptor that Open holds, until the end of
+// the test.
+func holdHook(t *testing.T) **os.File {
+	t.Helper()
+	var held *os.File
+	onHeld = func(f *os.File) { held = f }
+	t.Cleanup(func() { onHeld = nil })
+	return &held
+}
+
+// isClosed reports whether the descriptor is closed.
+func isClosed(f *os.File) bool {
+	_, err := f.Stat()
+	return errors.Is(err, os.ErrClosed)
+}
+
+// T-S-15: the pool holds the database file open, for an existing file and for a
+// new one, and the close of the pool closes the descriptor.
+func TestTS15PoolCloseClosesHeldDescriptor(t *testing.T) {
+	for _, name := range []string{"existing file", "new file"} {
+		t.Run(name, func(t *testing.T) {
+			held := holdHook(t)
+			var root *os.Root
+			if name == "new file" {
+				root, _, _ = newState(t)
+			} else {
+				root = newFixture(t).root
+			}
+			db := mustOpen(t, root, "events.db")
+			if *held == nil || isClosed(*held) {
+				t.Fatal("Open does not hold the database file open")
+			}
+			cancelQuery(t, db) // the pool drops its connection, not the descriptor
+			if isClosed(*held) {
+				t.Fatal("the descriptor was closed with the connection")
+			}
+			db.Close()
+			if !isClosed(*held) {
+				t.Fatal("the close of the pool left the descriptor open")
+			}
+		})
+	}
+}
+
+// T-S-15: a refused Open leaves no descriptor open, in the second checks and in
+// the failure of the identity check.
+func TestTS15RefusedOpenClosesDescriptor(t *testing.T) {
+	t.Run("second checks", func(t *testing.T) {
+		held := holdHook(t)
+		swapAfterVerify(t, ruleChanged, func(f *fixture) {
+			replaceFile(t, filepath.Join(f.state, "events.db"))
+		})
+		if *held == nil || !isClosed(*held) {
+			t.Fatal("the refused Open left the descriptor open")
+		}
+	})
+	t.Run("connection refused", func(t *testing.T) {
+		held := holdHook(t)
+		f := newFixture(t)
+		afterChecks = func() { replaceFile(t, filepath.Join(f.state, "events.db")) }
+		defer func() { afterChecks = nil }()
+		_, err := Open(f.root, "events.db", Options{})
+		wantRule(t, err, "events.db", ruleChanged)
+		if *held == nil || !isClosed(*held) {
+			t.Fatal("the refused Open left the descriptor open")
+		}
+	})
+}
+
+// T-S-15: a clean file that is renamed over the database after the file checks
+// and before Open opens it is refused, and the file outside does not change.
+func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
+	f := newFixture(t)
+	held := holdHook(t)
+	clean := cleanDatabase(t)
+	before := snapshot(t, f.outside)
+	renamed := false
+	fileFacts = func(fi fs.FileInfo) (uint64, uint64, bool) {
+		if fi.Name() == "events.db" && !renamed {
+			renamed = true // the Lstat of the file is done: the rename comes after it
+			if err := os.Rename(clean, filepath.Join(f.state, "events.db")); err != nil {
+				t.Error(err)
+			}
+		}
+		return systemFacts(fi)
+	}
+	defer func() { fileFacts = systemFacts }()
+	db, err := Open(f.root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleChanged)
+	if !renamed || snapshot(t, f.outside) != before {
+		t.Fatalf("renamed %v; outside changed: %v", renamed, snapshot(t, f.outside) != before)
+	}
+	if *held != nil && !isClosed(*held) {
+		t.Fatal("the refused Open left the descriptor open")
+	}
+}
+
+// T-S-15: a parent directory that gets group bits after the file checks is
+// refused on the first connection, and the error names the directory.
+func TestTS15ParentChangeNamesTheDirectory(t *testing.T) {
+	root, state, _ := newState(t)
+	data := filepath.Join(state, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	afterChecks = func() { os.Chmod(data, 0o755) }
+	defer func() { afterChecks = nil }()
+	db, err := Open(root, "data/events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "data", ruleMode)
 }
