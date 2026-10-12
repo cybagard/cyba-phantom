@@ -208,9 +208,9 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 	return out.Bytes(), stateLine, nil
 }
 
-// updateState loads the state, checks the checkpoint against it, and writes the
-// checkpoint. It closes the state before it returns, so the lock is not held
-// while the command reads the event and proof files.
+// updateState loads the state, checks the checkpoint against it, and updates the
+// state with the checkpoint. It closes the state before it returns. Thus the
+// command does not hold the lock while it reads the event and proof files.
 func updateState(dir string, v note.Verifier, size uint64, latest []byte, proofs []verify.ConsistencyProof) (verify.StateChange, error) {
 	st, err := verify.LoadState(dir, v)
 	if err != nil {

@@ -9,8 +9,8 @@ import (
 )
 
 // lockDir opens the state directory and takes an exclusive flock on it. It
-// waits until it has the lock. The kernel releases the lock when the file is
-// closed, or when the process ends. A signal can interrupt the wait, so the
+// waits until it has the lock. The kernel releases the lock when the caller
+// closes the file, or when the process ends. A signal can interrupt the wait, so the
 // call repeats on EINTR. Any other fault gives ErrState.
 func lockDir(root *os.Root) (*os.File, error) {
 	d, err := root.Open(".")

@@ -708,6 +708,13 @@ func TestTS14_StateUnlockedBeforeEvent(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// If the test fails early, run 1 still blocks on the open of the FIFO. This
+	// open and close lets it return.
+	t.Cleanup(func() {
+		if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
+			w.Close()
+		}
+	})
 	key := f.write("key", []byte(keyText))
 	cp := f.write("cp", checkpointAt(t, l, s, 10))
 	proof := f.write("proof", []byte(inclusionJSON(t, l, 3, 10)))
@@ -730,6 +737,11 @@ func TestTS14_StateUnlockedBeforeEvent(t *testing.T) {
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		if _, err := os.Stat(file); err == nil {
 			break
+		}
+		select {
+		case msg := <-first:
+			t.Fatalf("run 1 finished before it wrote the state: %q", msg)
+		default:
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("run 1 did not write the state")

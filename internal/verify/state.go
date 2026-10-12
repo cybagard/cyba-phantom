@@ -37,7 +37,7 @@ const (
 
 // State is the last accepted checkpoint of one key. It holds the directory
 // open as an os.Root. It also holds an exclusive lock on the directory until the
-// state is closed. A second run on the same directory waits for the lock. The
+// caller closes the state. A second run on the same directory waits for the lock. The
 // kernel releases the lock when the process ends.
 type State struct {
 	root   *os.Root

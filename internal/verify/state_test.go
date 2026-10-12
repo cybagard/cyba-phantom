@@ -85,12 +85,15 @@ func TestTS14_StateUpdate(t *testing.T) {
 	}
 	st.Close()
 	// A Load in a new object sees the file. The first state holds the lock until
-	// it is closed, so this load comes after the close.
+	// the test closes it, so this load comes after the close.
 	again, err := LoadState(dir, v)
-	if err != nil || !bytes.Equal(again.Bytes(), cp(10)) {
-		t.Errorf("load after close: %v", err)
+	if err != nil {
+		t.Fatalf("load after close: %v", err)
 	}
-	again.Close()
+	defer again.Close()
+	if !bytes.Equal(again.Bytes(), cp(10)) {
+		t.Error("load after close: the state holds another note")
+	}
 }
 
 // T-S-14: two runs on one state directory, each with its own load, never leave
@@ -192,7 +195,7 @@ func TestTS14_LoadWaitsForClose(t *testing.T) {
 }
 
 // The helper process of TestTS14_KilledRunReleasesLock. It takes the lock,
-// prints one line, and waits to be killed.
+// prints one line, and waits until the test kills it.
 func TestTS14_LockHelper(t *testing.T) {
 	dir := os.Getenv("PHANTOM_TEST_LOCK_DIR")
 	if dir == "" {
@@ -232,7 +235,8 @@ func TestTS14_KilledRunReleasesLock(t *testing.T) {
 	// The helper holds the lock, so a load in this process waits.
 	done := loadAsync(dir, v)
 	select {
-	case <-done:
+	case r := <-done:
+		closeLoaded(t, r)
 		cmd.Process.Kill()
 		cmd.Wait()
 		t.Fatal("the load returned while the helper held the lock")
@@ -246,7 +250,7 @@ func TestTS14_KilledRunReleasesLock(t *testing.T) {
 	case r := <-done:
 		closeLoaded(t, r)
 	case <-time.After(5 * time.Second):
-		t.Fatal("the load did not return after the helper was killed")
+		t.Fatal("the load did not return after the test killed the helper")
 	}
 }
 
