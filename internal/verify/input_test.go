@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -214,4 +215,24 @@ func FuzzTS14_Checkpoint(f *testing.F) {
 			t.Errorf("accepted checkpoint out of range: %+v", c)
 		}
 	})
+}
+
+func TestSizeConversion(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		in   uint64
+		want int64
+		err  error
+	}{
+		{"at the bound", maxSize, maxSize, nil},
+		{"past the bound", maxSize + 1, 0, ErrRange},
+		{"largest 64-bit number", math.MaxUint64, 0, ErrRange},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := toSize(c.in)
+			if got != c.want || !errors.Is(err, c.err) {
+				t.Fatalf("toSize(%d) = %d, %v; want %d, %v", c.in, got, err, c.want, c.err)
+			}
+		})
+	}
 }

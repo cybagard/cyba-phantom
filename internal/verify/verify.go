@@ -57,7 +57,10 @@ func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (R
 	if err != nil {
 		return Result{}, err
 	}
-	size := int64(c.Size) // ParseCheckpoint kept the size inside 0 to 2^48
+	size, err := toSize(c.Size)
+	if err != nil {
+		return Result{}, err
+	}
 	root := c.Root
 	bridged := p.TreeSize < size
 	switch {
