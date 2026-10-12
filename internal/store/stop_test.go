@@ -69,7 +69,7 @@ func TestTU18FailedAppendCommitsBulkRowsAndStops(t *testing.T) {
 	if r.w.Healthy() || r.rows() != 2 || r.evidenceRows() != 0 {
 		t.Fatalf("healthy %v, %d rows, %d evidence rows", r.w.Healthy(), r.rows(), r.evidenceRows())
 	}
-	if s := r.w.Stats(); s.WriteFailed != 3 || s.OrphanLeaves != 0 || r.app.tries != 1 {
+	if s := r.w.Stats(); s.WriteFailed != 3 || s.OrphanLeaves != 0 || s.Dropped != (Drops{}) || r.app.tries != 1 {
 		t.Fatalf("stats %+v, %d appender calls", s, r.app.tries)
 	}
 }

@@ -29,8 +29,10 @@ const (
 // Open and Migrate, the queue, and the appender. The caller closes them after
 // Run returns. It also adds the drop counts of the queue to ip_counter.
 //
-// After a database error or an append error the writer stops (see Run). Healthy,
-// Err and Stats are safe to call from any goroutine.
+// The writer stops for one of five causes: an append error, a database error, a
+// record error (the kind, the event hash or the record bytes of an event cannot
+// be made), a failed start check, or a fork signal of the checkpoint row (see
+// Run). Healthy, Err and Stats are safe to call from any goroutine.
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
@@ -87,7 +89,8 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // batch. It writes the batch in one transaction when the batch has 500 events,
 // and at each tick when the batch is not empty. It holds one batch at a time and
 // starts no goroutine for an event. While the lanes stay non-empty, Run writes
-// at 500 events and the tick case can wait.
+// at 500 events. After each such write it serves a waiting row request and a
+// waiting tick, with no wait, so a flood does not hold them.
 //
 // Before the first write, Run does the start check (see start). A stop marker or
 // a failed check stops the writer, and Run goes to the stopped state at once.
@@ -102,11 +105,15 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // has and returns ctx.Err(). The events that Run did not take stay in the lanes.
 // Thus a cancel without Close can leave events in the lanes.
 //
-// A database error or an append error stops the writer. A failed BEGIN starts no
-// transaction, and a later database error rolls the transaction back. The writer
-// keeps the first error (Err), is not healthy (Healthy), and writes one log line
-// with the fixed class of the error. It does not open the log or the database
-// again, and it does not end the process. Run does not return the error. It
+// Each of these stops the writer: an append error, a database error, a record
+// error (the kind, the event hash or the record bytes of an event cannot be made),
+// a failed start check, and a fork signal of the checkpoint row. A failed BEGIN
+// starts no transaction, and a later database error rolls the transaction back.
+// The events of a batch that ends with an error and no COMMIT count as drops for
+// their lane. The writer keeps the first error (Err), is not healthy (Healthy),
+// and writes one log line with the fixed class of the error. It does not open
+// the log or the database again, and it does not end the process. Run does not
+// return the error. It
 // continues in the stopped state: it writes no row, calls no appender, and runs
 // the Discard loop, so that the lanes do not stay full. It returns nil after Close and
 // ctx.Err() after a cancel, as it does when it has not stopped.
@@ -137,8 +144,10 @@ func (w *Writer) Run(ctx context.Context) error {
 			w.serveRow(rq)
 		case <-w.q.Ready():
 			// Take events until the lanes are empty, then examine Closed. After
-			// a flush at 500 events, leave the loop if ctx has ended or the
-			// writer has stopped, so that the select can take ctx.Done.
+			// a flush at 500 events, serve a waiting row request and a waiting
+			// tick, so that a flood does not hold them. Then leave the loop if
+			// ctx has ended or the writer has stopped, so that the select can
+			// take ctx.Done.
 			for {
 				e, ok := w.q.TryTake()
 				if !ok {
@@ -146,6 +155,7 @@ func (w *Writer) Run(ctx context.Context) error {
 				}
 				if batch = append(batch, e); len(batch) == maxBatch {
 					batch = w.flush(batch)
+					batch = w.serveWaiting(tick, batch)
 					if ctx.Err() != nil || !w.Healthy() {
 						break
 					}
@@ -165,6 +175,27 @@ func (w *Writer) Run(ctx context.Context) error {
 	}
 }
 
+// serveWaiting serves a row request and a tick that wait now. Each select has a
+// default case, so it never blocks. A tick goes through flush, as in the select
+// of Run. A stopped writer serves nothing: the flush before can have stopped it,
+// and a stopped writer writes no row.
+func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*event.Event {
+	if !w.Healthy() {
+		return batch
+	}
+	select {
+	case rq := <-w.rows:
+		w.serveRow(rq)
+	default:
+	}
+	select {
+	case <-tick:
+		batch = w.flush(batch)
+	default:
+	}
+	return batch
+}
+
 // shutdown writes the last batch and the events that Drain returns. If the
 // writer has stopped, flush drops the events that are left, and counts them.
 func (w *Writer) shutdown(batch []*event.Event) {
@@ -178,7 +209,9 @@ func (w *Writer) shutdown(batch []*event.Event) {
 
 // flush writes the batch and returns it empty. It clears the pointers, so the
 // events of the written batch can be freed. An error stops the writer. A stopped
-// writer writes nothing: flush drops the events and counts the drops.
+// writer writes nothing: flush drops the events and counts the drops. A batch
+// that ends with an error and no COMMIT is lost: flush counts each of its events
+// as a drop for its lane. It does not count a batch whose COMMIT succeeded.
 func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		for _, e := range batch {
@@ -195,7 +228,9 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 // first. For a batch with evidence it takes the one pool connection and sets
 // synchronous=FULL on it before BEGIN. It sets NORMAL again when the transaction
 // has ended, after a commit and after a rollback. A failure to set either value
-// is a database error.
+// is a database error. If write returns an error and the COMMIT did not succeed,
+// write counts each event of the batch as a drop for its lane. A failed NORMAL
+// after a good COMMIT counts none, because the rows exist.
 //
 // In the transaction, the evidence hashes go to the appender in one call before
 // COMMIT. Row i of the evidence events gets leaf_index first+i. The insert loop
@@ -217,6 +252,14 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if len(batch) == 0 {
 		return nil
 	}
+	committed := false
+	defer func() {
+		if err != nil && !committed {
+			for _, e := range batch {
+				w.drops.add(e)
+			}
+		}
+	}()
 	var begin time.Time
 	if w.timing != nil {
 		begin = time.Now()
@@ -261,19 +304,20 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 			}
 		}()
 	}
-	return w.transact(ctx, conn, batch, hs, evidence, day, begin)
+	committed, err = w.transact(ctx, conn, batch, hs, evidence, day, begin)
+	return err
 }
 
 // transact is the transaction of write.
-func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) error {
+func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (bool, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return fail(writerName, ruleDatabase)
+		return false, fail(writerName, ruleDatabase)
 	}
 	defer tx.Rollback() // no effect after COMMIT
 	stmt, err := tx.PrepareContext(ctx, insertEvent)
 	if err != nil {
-		return fail(writerName, ruleDatabase)
+		return false, fail(writerName, ruleDatabase)
 	}
 	defer stmt.Close()
 
@@ -297,18 +341,18 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			}
 			b, err := event.EvidenceBytes(e.Record)
 			if err != nil {
-				return fail(writerName, ruleRecord)
+				return false, fail(writerName, ruleRecord)
 			}
 			hash, leaf, record = hs[i][:], first+int64(i), b
 			i++
 		}
 		if err := w.insertRow(ctx, stmt, e, hash, leaf, record); err != nil {
-			return err
+			return false, err
 		}
 		rows++
 	}
 	if err := w.countDrops(ctx, tx, day); err != nil {
-		return err
+		return false, err
 	}
 	var commitAt time.Time
 	if w.timing != nil {
@@ -323,10 +367,10 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	}
 	if err != nil {
 		if appendErr != nil {
-			return appendErr
+			return false, appendErr
 		}
 		w.orphans.Add(uint64(len(hs)))
-		return fail(writerName, ruleDatabase)
+		return false, fail(writerName, ruleDatabase)
 	}
 	if w.timing != nil {
 		w.timing(time.Since(begin), time.Since(commitAt))
@@ -334,7 +378,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	if w.onCommit != nil {
 		w.onCommit(rows)
 	}
-	return appendErr
+	return true, appendErr
 }
 
 // rowRequest asks the writer goroutine to store one checkpoint row. The reply
