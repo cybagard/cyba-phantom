@@ -14,8 +14,10 @@ import (
 // input.go. ErrNotVerified means that the inclusion proof does not give the
 // root. ErrTreeSize means that the proof tree size is larger than the
 // checkpoint size. Inclusion also returns ErrProof when the proof has a wrong
-// shape for its tree size. It returns ErrFork when the consistency proof does
-// not verify.
+// shape for its tree size. It returns ErrNotVerified when the consistency part
+// of a bridged proof does not verify. The root at the smaller size comes from
+// the proof file, which is not signed. Thus this is a bad proof and not a fork.
+// Inclusion never returns ErrFork.
 var (
 	ErrNotVerified = errors.New("verify: event is not in the tree of the checkpoint")
 	ErrTreeSize    = errors.New("verify: proof tree size is larger than the checkpoint size")
@@ -47,7 +49,8 @@ type Result struct {
 // both. The inclusion proof must give the root at m. The consistency proof from
 // m to the checkpoint size must give the checkpoint root. The root at m is
 // accepted only through the consistency proof. A bad inclusion proof gives
-// ErrNotVerified. A bad consistency proof gives ErrFork. The leaf hash and the
+// ErrNotVerified. A bad consistency proof gives ErrNotVerified too, because
+// both come from the proof file, which is not signed. The leaf hash and the
 // proof checks come from internal/tlog/verifier.
 func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (Result, error) {
 	c, err := ParseCheckpoint(checkpoint, v)
@@ -69,8 +72,8 @@ func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (R
 		return Result{}, ErrNotVerified
 	}
 	if bridged {
-		if err := consistent(p.TreeSize, size, root, c.Root, p.Consistency); err != nil {
-			return Result{}, err
+		if consistent(p.TreeSize, size, root, c.Root, p.Consistency) != nil {
+			return Result{}, ErrNotVerified
 		}
 	}
 	return Result{

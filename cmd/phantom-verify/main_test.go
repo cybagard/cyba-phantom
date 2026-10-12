@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 	"unicode"
 
 	"golang.org/x/mod/sumdb/note"
@@ -303,7 +305,7 @@ func TestTS14_Refused(t *testing.T) {
 			"not verified: the event is not in the tree"},
 		"forked prior": {[]string{"--checkpoint", f.write("fcp", checkpointAt(t, fork, s, 20)), "--prior", f.write("pcp", checkpointAt(t, l, s, 5)),
 			"--consistency", f.write("fc", []byte(consistencyJSON(t, fork, 5, 20)))},
-			"the log has a fork"},
+			forkText},
 		"proof size larger": {[]string{"--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", f.write("big", []byte(bigProof))},
 			"larger than the checkpoint size"},
 	} {
@@ -318,6 +320,46 @@ func TestTS14_Refused(t *testing.T) {
 	}
 	if code, _, _ := invoke(t, "--key", key, "--checkpoint", cp10, "--event", f.write("e3", events[3].Raw), "--proof", proof); code != 0 {
 		t.Errorf("unchanged inputs: exit %d", code)
+	}
+}
+
+// forkText is the message for a consistency failure between two signed
+// checkpoints.
+const forkText = "not consistent: a fork of the log, or a bad consistency proof"
+
+// T-S-14: a bridged proof file with a changed consistency hash is a bad proof
+// file. The exit code is 1 and the output does not say fork. The same files
+// without the change pass.
+func TestTS14_BridgedProofNotFork(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, events := testLog(t, 20, `{"n":%d}`)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp := f.write("cp", checkpointAt(t, l, s, 20))
+	ev := f.write("event", events[3].Raw)
+	good, _, cons := bridgedJSON(t, l, 3, 5, 20)
+	flipped := cons[0]
+	flipped[0] ^= 1 // a changed hash that is still canonical base64
+	// The first consistency hash can also be an inclusion hash, so only the
+	// consistency list changes.
+	head, tail, _ := strings.Cut(good, `"consistency":`)
+	bad := head + `"consistency":` + strings.Replace(tail, b64(cons[0]), b64(flipped), 1)
+	if bad == good {
+		t.Fatal("the proof file did not change")
+	}
+	for name, tc := range map[string]struct {
+		proof string
+		code  int
+	}{"changed consistency hash": {bad, 1}, "unchanged": {good, 0}} {
+		// Each run has its own state directory.
+		code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--event", ev,
+			"--proof", f.write("proof-"+name, []byte(tc.proof)), "--state", filepath.Join(f.dir, "state-"+name))
+		if code != tc.code {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
+		}
+		if strings.Contains(strings.ToLower(stdout+stderr), "fork") {
+			t.Errorf("%s: output says fork: %q %q", name, stdout, stderr)
+		}
 	}
 }
 
@@ -560,8 +602,8 @@ func TestTS14_State(t *testing.T) {
 		msg  string
 		args []string
 	}{
-		"fork":                    {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 15), "--consistency", cons(fork, "f", 10, 15)}},
-		"same size, another root": {1, "the log has a fork", []string{"--checkpoint", cp(fork, "f", 10)}},
+		"fork":                    {1, forkText, []string{"--checkpoint", cp(fork, "f", 15), "--consistency", cons(fork, "f", 10, 15)}},
+		"same size, another root": {1, forkText, []string{"--checkpoint", cp(fork, "f", 10)}},
 		"older without a proof":   {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 5)}},
 		"larger without a proof":  {2, "no consistency proof file has the needed sizes", []string{"--checkpoint", cp(l, "l", 15)}},
 		"two proofs, same sizes": {2, "have the same sizes", []string{"--checkpoint", cp(l, "l", 15),
@@ -651,6 +693,99 @@ func TestTS14_StateBeforeEvent(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, stateFile(t, keyText))); !bytes.Equal(got, cpBytes) {
 		t.Error("the state file does not hold the checkpoint")
+	}
+}
+
+// T-S-14: the command closes the state, and so frees the lock, before it reads
+// the event file. Run 1 blocks on a FIFO as event file. Run 2 on the same state
+// directory must finish while run 1 still waits for the event.
+func TestTS14_StateUnlockedBeforeEvent(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, events := testLog(t, 10, `{"n":%d}`)
+	f := newFiles(t)
+	dir := filepath.Join(f.dir, "state")
+	fifo := filepath.Join(f.dir, "event")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// If the test fails early, run 1 still blocks on the open of the FIFO. This
+	// open and close lets it return.
+	t.Cleanup(func() {
+		if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
+			w.Close()
+		}
+	})
+	key := f.write("key", []byte(keyText))
+	cp := f.write("cp", checkpointAt(t, l, s, 10))
+	proof := f.write("proof", []byte(inclusionJSON(t, l, 3, 10)))
+	// start runs the command in a goroutine. The channel gets "" or the fault.
+	start := func(args ...string) <-chan string {
+		done := make(chan string, 1)
+		go func() {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				done <- fmt.Sprintf("exit %d, stderr %q", code, stderr.String())
+				return
+			}
+			done <- ""
+		}()
+		return done
+	}
+	first := start("--key", key, "--checkpoint", cp, "--state", dir, "--event", fifo, "--proof", proof)
+
+	file := filepath.Join(dir, stateFile(t, keyText))
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(file); err == nil {
+			break
+		}
+		select {
+		case msg := <-first:
+			t.Fatalf("run 1 finished before it wrote the state: %q", msg)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run 1 did not write the state")
+		}
+	}
+
+	second := start("--key", key, "--checkpoint", cp, "--state", dir)
+	select {
+	case msg := <-second:
+		if msg != "" {
+			t.Errorf("run 2: %s", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("run 2 did not finish while run 1 waited for the event file")
+	}
+
+	type opened struct {
+		w   *os.File
+		err error
+	}
+	open := make(chan opened, 1)
+	go func() {
+		w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		open <- opened{w, err}
+	}()
+	select {
+	case o := <-open:
+		if o.err != nil {
+			t.Fatal(o.err)
+		}
+		_, werr := o.w.Write(events[3].Raw)
+		if cerr := o.w.Close(); werr != nil || cerr != nil {
+			t.Fatalf("write the event: %v, %v", werr, cerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 1 did not open the event file")
+	}
+	select {
+	case msg := <-first:
+		if msg != "" {
+			t.Errorf("run 1: %s", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run 1 did not finish")
 	}
 }
 
@@ -746,7 +881,7 @@ func TestTS14_StateSizeZero(t *testing.T) {
 	}
 	before := stateSnap(t, empty)
 	code, stdout, stderr = invoke(t, "--key", key, "--checkpoint", f.write("bad0", bad), "--state", empty)
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "the log has a fork") || strings.Contains(stderr, "state:") {
+	if code != 1 || stdout != "" || !strings.Contains(stderr, forkText) || strings.Contains(stderr, "state:") {
 		t.Errorf("another root: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if after := stateSnap(t, empty); after != before || after != "" {

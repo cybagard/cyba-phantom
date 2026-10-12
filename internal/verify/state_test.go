@@ -1,14 +1,18 @@
 package verify
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/mod/sumdb/note"
 )
@@ -78,14 +82,176 @@ func TestTS14_StateUpdate(t *testing.T) {
 		if got := snapshot(t, dir); strings.Count(got, "\n") != 1 {
 			t.Errorf("size %d: the directory holds more than the state:\n%s", step.size, got)
 		}
-		// A Load in a new object sees the file.
-		again, err := LoadState(dir, v)
-		if err != nil || !bytes.Equal(again.Bytes(), cp(step.file)) {
-			t.Errorf("size %d: load: %v", step.size, err)
-		}
-		again.Close()
 	}
 	st.Close()
+	// A Load in a new object sees the file. The first state holds the lock until
+	// the test closes it, so this load comes after the close.
+	again, err := LoadState(dir, v)
+	if err != nil {
+		t.Fatalf("load after close: %v", err)
+	}
+	defer again.Close()
+	if !bytes.Equal(again.Bytes(), cp(10)) {
+		t.Error("load after close: the state holds another note")
+	}
+}
+
+// T-S-14: two runs on one state directory, each with its own load, never leave
+// the state at the smaller size. A run holds the lock from the load until it
+// closes the state, so the second run loads the state that the first one wrote.
+func TestTS14_ConcurrentRuns(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 15)
+	cp5, cp10, cp15 := checkpointAt(t, l, s, 5), checkpointAt(t, l, s, 10), checkpointAt(t, l, s, 15)
+	for pair := 0; pair < 100; pair++ {
+		dir := filepath.Join(t.TempDir(), "state")
+		first, err := LoadState(dir, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := first.Update(cp5); err != nil {
+			t.Fatal(err)
+		}
+		first.Close()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, latest := range [][]byte{cp15, cp10} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				st, err := LoadState(dir, v)
+				if err != nil {
+					t.Errorf("pair %d: load: %v", pair, err)
+					return
+				}
+				defer st.Close()
+				if _, err := st.Update(latest); err != nil {
+					t.Errorf("pair %d: update: %v", pair, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if got, _ := os.ReadFile(filepath.Join(dir, stateName(v))); !bytes.Equal(got, cp15) {
+			t.Fatalf("pair %d: the state file does not hold the size 15 note", pair)
+		}
+	}
+}
+
+// loadResult is the result of a LoadState call in a goroutine.
+type loadResult struct {
+	st  *State
+	err error
+}
+
+// loadAsync loads the state in a goroutine. The channel gets the state and the
+// error.
+func loadAsync(dir string, v note.Verifier) <-chan loadResult {
+	done := make(chan loadResult, 1)
+	go func() {
+		st, err := LoadState(dir, v)
+		done <- loadResult{st, err}
+	}()
+	return done
+}
+
+// closeLoaded reports the error of a load and closes the state.
+func closeLoaded(t *testing.T, r loadResult) {
+	t.Helper()
+	if r.err != nil {
+		t.Errorf("load: %v", r.err)
+	}
+	if r.st != nil {
+		r.st.Close()
+	}
+}
+
+// T-S-14: a second load on the same directory waits until the first state is
+// closed.
+func TestTS14_LoadWaitsForClose(t *testing.T) {
+	_, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	dir := filepath.Join(t.TempDir(), "state")
+	first, err := LoadState(dir, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := loadAsync(dir, v)
+	select {
+	case <-done:
+		t.Fatal("the second load returned while the first state was open")
+	case <-time.After(200 * time.Millisecond):
+	}
+	first.Close()
+	select {
+	case r := <-done:
+		closeLoaded(t, r)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second load did not return after the close")
+	}
+}
+
+// The helper process of TestTS14_KilledRunReleasesLock. It takes the lock,
+// prints one line, and waits until the test kills it.
+func TestTS14_LockHelper(t *testing.T) {
+	dir := os.Getenv("PHANTOM_TEST_LOCK_DIR")
+	if dir == "" {
+		t.Skip("helper process only")
+	}
+	v, err := ParseKey([]byte(os.Getenv("PHANTOM_TEST_LOCK_KEY")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(dir, v); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("locked")
+	select {}
+}
+
+// T-S-14: the kernel releases the lock when the process ends. A run that is
+// killed leaves no lock.
+func TestTS14_KilledRunReleasesLock(t *testing.T) {
+	_, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	dir := filepath.Join(t.TempDir(), "state")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTS14_LockHelper$")
+	cmd.Env = append(os.Environ(), "PHANTOM_TEST_LOCK_DIR="+dir, "PHANTOM_TEST_LOCK_KEY="+text)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(out).ReadString('\n'); line != "locked\n" {
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatalf("helper line %q, %v", line, err)
+	}
+	// The helper holds the lock, so a load in this process waits.
+	done := loadAsync(dir, v)
+	select {
+	case r := <-done:
+		closeLoaded(t, r)
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatal("the load returned while the helper held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	select {
+	case r := <-done:
+		closeLoaded(t, r)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the load did not return after the test killed the helper")
+	}
 }
 
 // T-S-14: a state that does not load is a fault. The file stays as it is.

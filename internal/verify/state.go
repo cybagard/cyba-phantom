@@ -36,9 +36,12 @@ const (
 )
 
 // State is the last accepted checkpoint of one key. It holds the directory
-// open as an os.Root.
+// open as an os.Root. It also holds an exclusive lock on the directory until the
+// caller closes the state. A second run on the same directory waits for the lock. The
+// kernel releases the lock when the process ends.
 type State struct {
 	root   *os.Root
+	lock   *os.File // the open directory that holds the flock
 	v      note.Verifier
 	name   string // the file name: <key hash>.note
 	loaded bool   // a state file existed at load
@@ -62,7 +65,11 @@ func DefaultStateDir() (string, error) {
 // makes a missing directory with mode 0700. If the file does not exist, this is
 // the first use, and Bytes is nil. A symlink, a file that is not regular, a
 // file past the note cap, and a note that does not parse with v give ErrState.
-// The caller must call Close.
+//
+// Before it reads the state, LoadState takes an exclusive lock on the
+// directory. If another run holds the lock, LoadState waits. A run holds the
+// lock until it closes the state. The kernel releases it when the process ends. A
+// failure to take the lock gives ErrState. The caller must call Close.
 func LoadState(dir string, v note.Verifier) (*State, error) {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return nil, ErrState
@@ -71,7 +78,12 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 	if err != nil {
 		return nil, ErrState
 	}
-	s := &State{root: root, v: v, name: fmt.Sprintf("%08x.note", v.KeyHash())}
+	lock, err := lockDir(root)
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	s := &State{root: root, lock: lock, v: v, name: fmt.Sprintf("%08x.note", v.KeyHash())}
 	raw, exists, err := s.read()
 	if err == nil && exists {
 		c, perr := ParseCheckpoint(raw, v)
@@ -82,7 +94,7 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 		}
 	}
 	if err != nil {
-		root.Close()
+		s.Close()
 		return nil, err
 	}
 	return s, nil
@@ -91,8 +103,11 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 // Bytes returns the note that was loaded. It is nil on first use.
 func (s *State) Bytes() []byte { return s.raw }
 
-// Close closes the state directory.
-func (s *State) Close() error { return s.root.Close() }
+// Close releases the lock and closes the state directory. A run holds the lock
+// until it closes the state.
+func (s *State) Close() error {
+	return errors.Join(s.lock.Close(), s.root.Close())
+}
 
 // read reads the state file. It returns false if the file does not exist. The
 // file must be a regular file, and the open file must be the file that Lstat
