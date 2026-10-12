@@ -217,7 +217,8 @@ func FuzzTS14_Checkpoint(f *testing.F) {
 	})
 }
 
-func TestSizeConversion(t *testing.T) {
+// T-S-14: a size past 2^48 is refused.
+func TestTS14_SizeConversion(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		in   uint64

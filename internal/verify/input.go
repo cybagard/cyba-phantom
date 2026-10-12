@@ -36,7 +36,8 @@ const (
 const maxSize = verifier.MaxSize
 
 // toSize converts a size from a note to a log size. A size above maxSize gives
-// ErrRange.
+// ErrRange. ParseCheckpoint refuses this size first. The check stays here so
+// that the bound is next to the conversion.
 func toSize(u uint64) (int64, error) {
 	if u > maxSize {
 		return 0, ErrRange
