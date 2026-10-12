@@ -41,8 +41,9 @@ const usage = `usage: phantom-verify --key <vkey file> --checkpoint <note file>
 var errSameSizes = errors.New("two consistency proof files have the same sizes")
 
 // refusals maps each error to its exit code and its fixed message. The message
-// holds no input bytes. Only ErrFork says "fork". It says that a fork is one
-// cause, because a bad consistency proof file gives the same error.
+// holds no input bytes. Only ErrFork says "fork". The message of ErrFork says
+// that a fork is one cause, because a bad consistency proof file gives the same
+// error.
 var refusals = []struct {
 	err  error
 	code int
@@ -175,24 +176,7 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 			return nil, "", err
 		}
 	}
-	st, err := verify.LoadState(stateDir, v)
-	if err != nil {
-		return nil, "", err
-	}
-	defer st.Close()
-	if prev := st.Bytes(); prev != nil {
-		if err := verify.Consistency(v, prev, latest.Bytes(), proofs); err != nil {
-			return nil, "", err
-		}
-	}
-	if c.Size == 0 {
-		// A note of size 0 needs no proof, but its root must be the empty root.
-		// With no state, no check above has looked at the root.
-		if err := verify.Consistency(v, latest.Bytes(), latest.Bytes(), nil); err != nil {
-			return nil, "", err
-		}
-	}
-	change, err := st.Update(latest.Bytes())
+	change, err := updateState(stateDir, v, c.Size, latest.Bytes(), proofs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -222,6 +206,30 @@ func verifyAll(keyPath, cpPath, eventPath, proofPath, priorPath, stateDir string
 		}
 	}
 	return out.Bytes(), stateLine, nil
+}
+
+// updateState loads the state, checks the checkpoint against it, and writes the
+// checkpoint. It closes the state before it returns, so the lock is not held
+// while the command reads the event and proof files.
+func updateState(dir string, v note.Verifier, size uint64, latest []byte, proofs []verify.ConsistencyProof) (verify.StateChange, error) {
+	st, err := verify.LoadState(dir, v)
+	if err != nil {
+		return 0, err
+	}
+	defer st.Close()
+	if prev := st.Bytes(); prev != nil {
+		if err := verify.Consistency(v, prev, latest, proofs); err != nil {
+			return 0, err
+		}
+	}
+	if size == 0 {
+		// A note of size 0 needs no proof, but its root must be the empty root.
+		// With no state, no check above has looked at the root.
+		if err := verify.Consistency(v, latest, latest, nil); err != nil {
+			return 0, err
+		}
+	}
+	return st.Update(latest)
 }
 
 // loadNote reads a checkpoint note with the key v. The raw bytes that

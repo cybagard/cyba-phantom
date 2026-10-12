@@ -15,9 +15,9 @@ import (
 // root. ErrTreeSize means that the proof tree size is larger than the
 // checkpoint size. Inclusion also returns ErrProof when the proof has a wrong
 // shape for its tree size. It returns ErrNotVerified when the consistency part
-// of a bridged proof does not verify: the root at the smaller size comes from
-// the unsigned proof file, so this is a bad proof and not a fork. Inclusion
-// never returns ErrFork.
+// of a bridged proof does not verify. The root at the smaller size comes from
+// the proof file, which is not signed. Thus this is a bad proof and not a fork.
+// Inclusion never returns ErrFork.
 var (
 	ErrNotVerified = errors.New("verify: event is not in the tree of the checkpoint")
 	ErrTreeSize    = errors.New("verify: proof tree size is larger than the checkpoint size")

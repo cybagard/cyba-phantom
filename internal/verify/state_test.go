@@ -138,17 +138,32 @@ func TestTS14_ConcurrentRuns(t *testing.T) {
 	}
 }
 
-// loadAsync loads the state in a goroutine. The channel gets the state.
-func loadAsync(t *testing.T, dir string, v note.Verifier) <-chan *State {
-	done := make(chan *State, 1)
+// loadResult is the result of a LoadState call in a goroutine.
+type loadResult struct {
+	st  *State
+	err error
+}
+
+// loadAsync loads the state in a goroutine. The channel gets the state and the
+// error.
+func loadAsync(dir string, v note.Verifier) <-chan loadResult {
+	done := make(chan loadResult, 1)
 	go func() {
 		st, err := LoadState(dir, v)
-		if err != nil {
-			t.Errorf("load: %v", err)
-		}
-		done <- st
+		done <- loadResult{st, err}
 	}()
 	return done
+}
+
+// closeLoaded reports the error of a load and closes the state.
+func closeLoaded(t *testing.T, r loadResult) {
+	t.Helper()
+	if r.err != nil {
+		t.Errorf("load: %v", r.err)
+	}
+	if r.st != nil {
+		r.st.Close()
+	}
 }
 
 // T-S-14: a second load on the same directory waits until the first state is
@@ -161,7 +176,7 @@ func TestTS14_LoadWaitsForClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := loadAsync(t, dir, v)
+	done := loadAsync(dir, v)
 	select {
 	case <-done:
 		t.Fatal("the second load returned while the first state was open")
@@ -169,10 +184,8 @@ func TestTS14_LoadWaitsForClose(t *testing.T) {
 	}
 	first.Close()
 	select {
-	case st := <-done:
-		if st != nil {
-			st.Close()
-		}
+	case r := <-done:
+		closeLoaded(t, r)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the second load did not return after the close")
 	}
@@ -216,15 +229,22 @@ func TestTS14_KilledRunReleasesLock(t *testing.T) {
 		cmd.Wait()
 		t.Fatalf("helper line %q, %v", line, err)
 	}
+	// The helper holds the lock, so a load in this process waits.
+	done := loadAsync(dir, v)
+	select {
+	case <-done:
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatal("the load returned while the helper held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	cmd.Wait()
 	select {
-	case st := <-loadAsync(t, dir, v):
-		if st != nil {
-			st.Close()
-		}
+	case r := <-done:
+		closeLoaded(t, r)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the load did not return after the helper was killed")
 	}

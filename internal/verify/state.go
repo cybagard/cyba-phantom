@@ -67,8 +67,8 @@ func DefaultStateDir() (string, error) {
 // file past the note cap, and a note that does not parse with v give ErrState.
 //
 // Before it reads the state, LoadState takes an exclusive lock on the
-// directory. If another run holds the lock, LoadState waits. The lock is held
-// until the state is closed. The kernel releases it when the process ends. A
+// directory. If another run holds the lock, LoadState waits. A run holds the
+// lock until it closes the state. The kernel releases it when the process ends. A
 // failure to take the lock gives ErrState. The caller must call Close.
 func LoadState(dir string, v note.Verifier) (*State, error) {
 	if os.MkdirAll(dir, 0o700) != nil {
@@ -104,7 +104,7 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 func (s *State) Bytes() []byte { return s.raw }
 
 // Close releases the lock and closes the state directory. A run holds the lock
-// until the state is closed.
+// until it closes the state.
 func (s *State) Close() error {
 	return errors.Join(s.lock.Close(), s.root.Close())
 }
