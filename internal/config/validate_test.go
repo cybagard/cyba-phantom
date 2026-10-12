@@ -780,6 +780,7 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"checkpoints", s + "checkpoints/e.db", nil, "checkpoints directory"},
 		{"checkpoints itself", s + "checkpoints", nil, "checkpoints directory"},
 		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
 		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
 	}
 	for _, r := range rows {

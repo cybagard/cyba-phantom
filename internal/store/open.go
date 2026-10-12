@@ -62,7 +62,7 @@ type Options struct {
 
 var (
 	fixedDirs  = []string{"keys", "checkpoints"}
-	fixedNames = []string{"checkpoint.state", "writer.stop"}
+	fixedNames = []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"}
 )
 
 // pragmas are the 03 pragmas. Each is in the connection string, so SQLite
@@ -77,6 +77,10 @@ var pragmas = []string{
 // change the file system between the file checks and the open of SQLite.
 var afterChecks func()
 
+// afterVerify is a test hook. A test sets it to change the file system between
+// the open of SQLite and the second checks.
+var afterVerify func()
+
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
 	sync.Mutex
@@ -87,12 +91,27 @@ var heap struct {
 // caller opened one time. rel is the store.path relative to root.
 //
 // SQLite opens a file by path and not through root. So Open checks the path
-// text, and then, through root, each parent directory and each of the database,
-// -wal, -shm and -journal files, before SQLite opens anything. A new database
-// file is made through root with mode 0600. After the open, the file that SQLite
-// reports must be the checked path. A short window stays between the checks and
-// the open of SQLite. Open does not stop a symlink that is put in place in this
-// window. If the symlink changes the path, the database_list check finds it.
+// text, and then, through root, the state directory, each parent directory of
+// the database file, and each of the database, -wal, -shm and -journal files,
+// before SQLite opens anything. A directory must be a real directory, owned by
+// the user that runs the sensor, with no group or other permission bits. A file
+// must be absent or safe (not a link, one hard link, same owner and mode rule).
+// A new database file is made through root with mode 0600.
+//
+// After SQLite opens the database, Open checks the file that SQLite reports
+// (database_list), and then the directories and the four files again. If a check
+// fails, Open closes the database and removes the file that it made.
+//
+// The pool makes each later connection through a connector. The connector runs
+// the same directory and file checks before and after the driver opens the
+// connection, and the database_list check on the new connection, before the
+// pool runs a statement on it. A failed check gives a fixed error and the
+// connection is closed.
+//
+// A short window stays. A swap that is put in place after one check and
+// removed again before the next check is not found. Between two checks, SQLite
+// can open or write the swapped file. The checks make the window short. They do
+// not close it.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
@@ -125,24 +144,32 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// A failed open removes the file that this call made, so a refused open
 	// leaves no new entry. If someone put a link there, Remove deletes the link
 	// and not its target.
-	refuse := func(rule string) error {
+	refuse := func(err error) error {
 		if absent {
 			root.Remove(rel)
 		}
-		return fail(rel, rule)
+		return err
 	}
 	if afterChecks != nil {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	db, err := sql.Open("sqlite", dsn(path, absent))
+	conn, err := newConnector(root, rel, path, dsn(path, absent))
 	if err != nil {
-		return nil, refuse(ruleOpen)
+		return nil, refuse(err)
 	}
+	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
 	if rule := verify(db, path); rule != "" {
 		db.Close()
-		return nil, refuse(rule)
+		return nil, refuse(fail(rel, rule))
+	}
+	if afterVerify != nil {
+		afterVerify()
+	}
+	if err := conn.check(); err != nil {
+		db.Close()
+		return nil, refuse(err)
 	}
 	return db, nil
 }
@@ -198,18 +225,27 @@ func stateBase(root *os.Root) (string, error) {
 	return base, nil
 }
 
-// checkParents checks that each directory above rel exists, is a directory,
-// and is not a symlink. Lstat does not follow a link.
+// checkParents checks the state directory and each directory above rel. Each
+// exists, is a directory and not a symlink (Lstat does not follow a link), is
+// owned by the user that runs the sensor, and has no group or other permission
+// bits and no setuid, setgid or sticky bit.
 func checkParents(root *os.Root, rel string) error {
 	parts := strings.Split(rel, "/")
-	for i := 1; i < len(parts); i++ {
-		dir := strings.Join(parts[:i], "/")
+	for i := 0; i < len(parts); i++ {
+		dir, name := ".", "state directory"
+		if i > 0 {
+			dir = strings.Join(parts[:i], "/")
+			name = dir
+		}
 		fi, err := root.Lstat(dir)
 		switch {
 		case errors.Is(err, fs.ErrNotExist), err == nil && !fi.IsDir():
-			return fail(dir, ruleParent)
+			return fail(name, ruleParent)
 		case err != nil:
-			return fail(dir, ruleExamine)
+			return fail(name, ruleExamine)
+		}
+		if rule := checkOwnerMode(fi); rule != "" {
+			return fail(name, rule)
 		}
 	}
 	return nil
@@ -240,12 +276,19 @@ func checkFile(fi fs.FileInfo) string {
 	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
 		return ruleType
 	}
-	nlink, uid, ok := fileFacts(fi)
+	if nlink, _, ok := fileFacts(fi); ok && nlink != 1 {
+		return ruleLinks
+	}
+	return checkOwnerMode(fi)
+}
+
+// checkOwnerMode returns the failed rule for the owner and the mode of a file
+// or a directory, or an empty string.
+func checkOwnerMode(fi fs.FileInfo) string {
+	_, uid, ok := fileFacts(fi)
 	switch {
 	case !ok:
 		return ruleExamine // fail closed
-	case nlink != 1:
-		return ruleLinks
 	case int64(uid) != euid():
 		return ruleOwner
 	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
@@ -278,6 +321,10 @@ func verify(db *sql.DB, want string) string {
 	ctx := context.Background()
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+		var e *Error // the connector refused the first connection
+		if errors.As(err, &e) {
+			return e.Rule
+		}
 		return ruleOpen
 	}
 	if mode != "wal" {

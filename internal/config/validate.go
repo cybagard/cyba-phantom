@@ -575,7 +575,7 @@ func storeConflict(l *loader, vals map[string]Value, p string) string {
 			return "the path must not be in the " + d + " directory"
 		}
 	}
-	for _, f := range []string{"checkpoint.state", "writer.stop"} {
+	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
 		if p == filepath.Join(l.stateRoot, f) {
 			return "the path must not be " + f
 		}

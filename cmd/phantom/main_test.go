@@ -132,6 +132,7 @@ func TestTS11_CheckStorePath(t *testing.T) {
 		{"keys", s + "keys/e.db", nil},
 		{"checkpoints", s + "checkpoints/e.db", nil},
 		{"checkpoint.state", s + "checkpoint.state", nil},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil},
 		{"writer.stop", s + "writer.stop", nil},
 		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}},
 	} {
