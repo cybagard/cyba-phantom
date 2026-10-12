@@ -54,8 +54,8 @@ type Options struct {
 	// tlog.dir, acme.cache_dir, and the directory of bundle.path. Each entry is a
 	// clean path relative to the state directory; "." is the state directory
 	// itself. The directories keys and checkpoints and the names
-	// checkpoint.state and writer.stop are fixed (ADR-020, ADR-022), so the
-	// store adds them itself. Names match exactly, with the case of the path.
+	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
+	// ADR-022), so the store adds them itself. Names match exactly, with the case of the path.
 	// The store does not import internal/config.
 	Reserved []string
 }
@@ -90,28 +90,17 @@ var heap struct {
 // Open opens the database at rel below root, the state directory that the
 // caller opened one time. rel is the store.path relative to root.
 //
-// SQLite opens a file by path and not through root. So Open checks the path
-// text, and then, through root, the state directory, each parent directory of
-// the database file, and each of the database, -wal, -shm and -journal files,
-// before SQLite opens anything. A directory must be a real directory, owned by
-// the user that runs the sensor, with no group or other permission bits. A file
-// must be absent or safe (not a link, one hard link, same owner and mode rule).
-// A new database file is made through root with mode 0600.
+// SQLite opens a file by path and not through root. So Open checks these:
+//   - Before the open: the path text, the directories, and the database, -wal,
+//     -shm and -journal files. A directory is real, owned by the sensor user,
+//     with no group or other bits. A file is absent or safe. A new database
+//     file is made through root with mode 0600.
+//   - After the open, and on each new connection: database_list, the
+//     directories, the four files, and the identity of the database file. The
+//     file is the same file as before, and the path that SQLite opens leads to it.
 //
-// After SQLite opens the database, Open checks the file that SQLite reports
-// (database_list), and then the directories and the four files again. If a check
-// fails, Open closes the database and removes the file that it made.
-//
-// The pool makes each later connection through a connector. The connector runs
-// the same directory and file checks before and after the driver opens the
-// connection, and the database_list check on the new connection, before the
-// pool runs a statement on it. A failed check gives a fixed error and the
-// connection is closed.
-//
-// A short window stays. A swap that is put in place after one check and
-// removed again before the next check is not found. Between two checks, SQLite
-// can open or write the swapped file. The checks make the window short. They do
-// not close it.
+// A failed check gives a fixed error and closes the database or connection.
+// A change that is made and undone between two checks is not found.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
@@ -141,26 +130,31 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 			return nil, fail(rel, ruleCreate)
 		}
 	}
-	// A failed open removes the file that this call made, so a refused open
-	// leaves no new entry. If someone put a link there, Remove deletes the link
-	// and not its target.
+	// A failed open removes the entry at rel when this call made the database
+	// file. If someone put a link there, Remove deletes the link and not its
+	// target.
 	refuse := func(err error) error {
 		if absent {
 			root.Remove(rel)
 		}
 		return err
 	}
+	fi, err := root.Lstat(rel)
+	id, err := identityOf(rel, fi, err)
+	if err != nil {
+		return nil, refuse(err)
+	}
 	if afterChecks != nil {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	conn, err := newConnector(root, rel, path, dsn(path, absent))
+	conn, err := newConnector(root, rel, path, dsn(path, absent), id)
 	if err != nil {
 		return nil, refuse(err)
 	}
 	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
-	if rule := verify(db, path); rule != "" {
+	if rule := verify(db); rule != "" {
 		db.Close()
 		return nil, refuse(fail(rel, rule))
 	}
@@ -315,9 +309,10 @@ func dsn(path string, created bool) string {
 	return b.String()
 }
 
-// verify checks the first connection and sets the process settings. It returns
-// the failed rule, or an empty string.
-func verify(db *sql.DB, want string) string {
+// verify reads back the journal mode of the first connection and sets the
+// process settings. The connector checks the location. It returns the failed
+// rule, or an empty string.
+func verify(db *sql.DB) string {
 	ctx := context.Background()
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
@@ -330,13 +325,6 @@ func verify(db *sql.DB, want string) string {
 	if mode != "wal" {
 		return ruleSetting
 	}
-	file, rule := mainFile(ctx, db)
-	switch {
-	case rule != "":
-		return rule
-	case file != want:
-		return ruleLocation
-	}
 	heap.Lock()
 	defer heap.Unlock()
 	if !heap.set {
@@ -346,25 +334,4 @@ func verify(db *sql.DB, want string) string {
 		heap.set = true
 	}
 	return ""
-}
-
-// mainFile returns the file that SQLite opened for the main database.
-func mainFile(ctx context.Context, db *sql.DB) (string, string) {
-	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
-	if err != nil {
-		return "", ruleOpen
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var seq int
-		var name string
-		var file sql.NullString
-		if rows.Scan(&seq, &name, &file) != nil {
-			return "", ruleOpen
-		}
-		if name == "main" {
-			return file.String, ""
-		}
-	}
-	return "", ruleOpen
 }

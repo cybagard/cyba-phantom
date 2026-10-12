@@ -34,9 +34,13 @@ func TestTS15NewFileHasMode0600(t *testing.T) {
 			t.Errorf("events.db%s: %v, %v", suffix, fi, err)
 		}
 	}
-	file, rule := mainFile(t.Context(), db)
-	if want := filepath.Join(state, "data", "events.db"); rule != "" || file != want {
-		t.Fatalf("database_list gives %q, want %q (%s)", file, want, rule)
+	var seq int
+	var name, file string
+	if err := db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(state, "data", "events.db"); name != "main" || file != want {
+		t.Fatalf("database_list gives %q %q, want main %q", name, file, want)
 	}
 }
 
