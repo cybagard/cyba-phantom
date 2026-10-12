@@ -10,7 +10,7 @@
 | `GET /session/{id}` | signals, events, proof link |
 | `GET /proof/{event_id}` | JSON inclusion proof + latest checkpoint |
 | `GET /metrics` | Prometheus text (FR-15) |
-| `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise |
+| `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise. Each tile-read error stops the tlog: a changed, short or missing tile, and also a mode error or an I/O error. The tlog stays not healthy until the operator opens the log again (SEC-16) |
 | `POST /reload` | bundle reload (also SIGHUP) |
 
 ## 3. Config (`/etc/phantom/config.yaml`)
@@ -55,7 +55,7 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 | `acme.email` | — (required) | one address; no CR or LF |
 | `acme.ca` | `letsencrypt` | `letsencrypt`, `letsencrypt-staging`, or an `https` URL |
 | `acme.cache_dir`, `bundle.path`, `tlog.dir` | as in the example | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution |
-| `store.path` | `/var/lib/phantom/events.db` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -` (thus no `?`, `#` or `..`); not in `tlog.dir`, `acme.cache_dir`, the directory of `bundle.path`, `keys/` or `checkpoints/`; not `checkpoint.state` or `writer.stop`. The loader checks the path text only; the store checks the files when it opens them (SEC-20, ADR-022) |
+| `store.path` | `/var/lib/phantom/events.db` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -` (thus no `?`, `#` or `..`); not in `tlog.dir`, `acme.cache_dir`, the directory of `bundle.path`, `keys/` or `checkpoints/`; not `checkpoint.state`, `checkpoint.state.tmp` or `writer.stop`. The loader checks the path text only; the store checks the files when it opens them (SEC-20, ADR-022) |
 | `bundle.fetch_url` | `""` (off) | empty, or an `https` URL |
 | `bundle.fetch_interval` | `6h` | 15m–7d, also when `bundle.fetch_url` is empty |
 | `limits.max_conns` | 2000 | 1–2000 (SEC-02) |
@@ -121,7 +121,7 @@ phantom-verify --key <vkey file> --checkpoint <note file>
               [--state <dir>]
 ```
 
-Rules (SEC-18, ADR-021):
+Rules (SEC-18, ADR-021, ADR-024):
 
 - **Key.** `--key` is required. The file holds the `note` verifier key text (`keys/checkpoint.vkey` of the sensor). The key name is the origin. The verifier never takes a key or an origin from another input.
 - **Checkpoint.** Each note is parsed with the strict parser of 04 §5: ≤ 1 KiB, three body lines, exactly one signature line, origin equal to the key name. A note with more than one signature line is refused.
@@ -134,8 +134,8 @@ Rules (SEC-18, ADR-021):
   `hashes` is the inclusion proof at `tree_size` (≤ 48 hashes). If `tree_size` is equal to the checkpoint size, `root` and `consistency` are absent. If `tree_size` is smaller, `root` is the root at `tree_size` and `consistency` is the proof from `tree_size` to the checkpoint size (≤ 96 hashes). A larger `tree_size` is refused.
 - **Consistency proof file.** `{ "old_size": 98800, "new_size": 99000, "hashes": ["<base64>", "…"] }`, with the same parse rules, ≤ 96 hashes. The verifier uses the file whose sizes match the check that it must do.
 - **Hashes and sizes.** Each hash is canonical standard base64 of 32 bytes. Each size is an integer from 0 to 2^48.
-- **State.** The state of a key is the last accepted signed note, in the file `<key hash>.note` in the state directory. The key hash is the 8 hexadecimal digits of the verifier key. The default directory is `phantom-verify` in the user state directory (`$XDG_STATE_HOME`, else `~/.local/state`). The directory opens as an `os.Root`; the file has mode 0600 and is written with a temporary file, `fsync`, and `rename`. The verifier reads the state again before the rename and refuses the write if the state changed. A state that does not parse with the key is a fault (exit 2); the verifier does not replace it.
+- **State.** The state of a key is the last accepted signed note, in the file `<key hash>.note` in the state directory. The key hash is the 8 hexadecimal digits of the verifier key. The default directory is `phantom-verify` in the user state directory (`$XDG_STATE_HOME`, else `~/.local/state`). The directory opens as an `os.Root`; the file has mode 0600 and is written with a temporary file, `fsync`, and `rename`. A run holds an exclusive lock (`flock`) on the state directory from the load of the state to the rename, so two runs at the same time cannot move the state back to an older checkpoint. The kernel releases the lock when the process ends. The verifier reads the state again before the rename and refuses the write if the state changed. A state that does not parse with the key is a fault (exit 2); the verifier does not replace it.
 - **Consistency.** For a prior checkpoint (`--prior`) and for the state, with size S, and the checkpoint with size N: N > S needs a proof from S to N; N = S needs the same root; N < S needs a proof from N to S. Size 0 needs no proof, and its root must be the root of the empty tree. Sizes do not have to be adjacent. Only N > S against the state changes the state. The state changes when the checkpoint is accepted, also when the event check fails. With no state, the checkpoint becomes the state, and the output says that no earlier checkpoint was known.
 - **Network.** The verifier opens no network connection.
 - **Output.** On success, the verifier prints the origin, the size and the root of the checkpoint, the event hash, the leaf index, and each proof hash in base64. Text from the input is printed with each control character, bidirectional format character and invalid byte escaped. Error text is fixed and holds no input bytes.
-- **Exit codes.** 0: verified. 1: not verified (hash, signature, proof, or consistency; a consistency failure is reported as a fork). 2: usage error, input error, or state fault.
+- **Exit codes.** 0: verified. 1: not verified (hash, signature, proof, or consistency). A consistency failure between two signed checkpoints (`--prior` or the state) is reported as "not consistent: a fork of the log, or a bad consistency proof". A consistency failure in an inclusion proof file (a proof at a smaller size) is a bad proof, not a fork: the root at the proof size comes from the proof file, which has no signature. 2: usage error, input error, or state fault.
