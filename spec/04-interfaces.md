@@ -17,7 +17,7 @@
 ```yaml
 listen: { http: ":80", https: ":443" }
 ops:    { listen: "127.0.0.1:9443", basic_auth_htpasswd: "/etc/phantom/htpasswd" }
-acme:   { email: "sec@example.com", ca: "letsencrypt", cache_dir: "/var/lib/phantom/certs" }
+acme:   { email: "sec@example.com", ca: "letsencrypt", cache_dir: "/var/lib/phantom/certs", names: [ "decoy.example.com" ] }
 bundle: { path: "/var/lib/phantom/bundle/current.cbnd", fetch_url: "", fetch_interval: "6h" }
 limits: { max_conns: 2000, body_bytes: 65536, header_bytes: 16384, per_ip_rps: 50, per_ip_burst: 200, queue_depth: 4096 }
 store:  { path: "/var/lib/phantom/events.db", max_bytes: 10737418240, retention_days: { ip: 7, raw: 30, events: 90 } }
@@ -37,7 +37,7 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 
 **Parse.** The file is UTF-8 and ≤ 64 KiB. It contains exactly one YAML document. The loader rejects anchors, aliases, merge keys (`<<`), tags other than the core schema, duplicate keys, and nesting deeper than 8 levels. A boolean is `true` or `false` only. An integer is a decimal literal only. A duration is a Go duration string (for example `6h`). The loader does not expand `${…}` or other variables in values. A missing, empty, or unreadable file is an error. The sensor reads the config one time at start. SIGHUP and `POST /reload` reload the bundle, not the config.
 
-**Environment overrides.** Precedence: default < file < environment. Each scalar leaf key has one variable name: `PHANTOM_` + the key path in upper case, with `.` changed to `_` (for example `PHANTOM_LIMITS_BODY_BYTES`, `PHANTOM_STORE_RETENTION_DAYS_IP`). The loader makes the names from its key table and compares them exactly. List keys (`tlog.publish`, `alerts.sinks`, `alerts.sinks[].to`) have no override. A `PHANTOM_*` variable that is not in the key table is an error. An override value goes through the same parse and bounds rules as a file value.
+**Environment overrides.** Precedence: default < file < environment. Each scalar leaf key has one variable name: `PHANTOM_` + the key path in upper case, with `.` changed to `_` (for example `PHANTOM_LIMITS_BODY_BYTES`, `PHANTOM_STORE_RETENTION_DAYS_IP`). The loader makes the names from its key table and compares them exactly. List keys (`acme.names`, `tlog.publish`, `alerts.sinks`, `alerts.sinks[].to`) have no override. A `PHANTOM_*` variable that is not in the key table is an error. An override value goes through the same parse and bounds rules as a file value.
 
 **Secrets.** A key that ends in `_env` holds the name of an environment variable, not a secret. The variable name must not start with `PHANTOM_`. At start and in `--check`, the variable must be set. A webhook `hmac_secret_env` value must be ≥ 32 bytes (SEC-06). No secret value, no htpasswd content, and no URL user information goes to `--check` output, an error message, or a log.
 
@@ -53,8 +53,10 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 | `ops.listen` | `127.0.0.1:9443` | IP literal, loopback or private (RFC 1918, RFC 4193); not unspecified; not the same as a `listen` address (SEC-04) |
 | `ops.basic_auth_htpasswd` | `/etc/phantom/htpasswd` | absolute path; file rules above |
 | `acme.email` | — (required) | one address; no CR or LF |
-| `acme.ca` | `letsencrypt` | `letsencrypt`, `letsencrypt-staging`, or an `https` URL |
-| `acme.cache_dir`, `bundle.path`, `tlog.dir` | as in the example | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution |
+| `acme.ca` | `letsencrypt` | `letsencrypt`, `letsencrypt-staging`, or an `https` URL. The ACME client connects only to the host and port of this directory, also for a retry (SEC-21, ADR-025) |
+| `acme.names` | — (required) | 1–16 entries; no duplicate. Each entry is a DNS name in lower case, ≤ 253 bytes, with at least two labels; each label has 1–63 bytes of `a–z 0–9 -` and does not start or end with `-`. No wildcard, no IP literal, no trailing dot. Not `localhost`, and not a name below `localhost`, `local`, `internal` or `home.arpa`. The listener gets certificates only for these names (SEC-21, ADR-025) |
+| `acme.cache_dir` | `/var/lib/phantom/certs` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; not `/var/lib/phantom` itself; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -`; not in or above `tlog.dir`, the directory of `bundle.path`, `keys/` or `checkpoints/`. The loader checks the path text only; the listener checks the directories when it opens them (SEC-21, ADR-025) |
+| `bundle.path`, `tlog.dir` | as in the example | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution |
 | `store.path` | `/var/lib/phantom/events.db` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -` (thus no `?`, `#` or `..`); not in `tlog.dir`, `acme.cache_dir`, the directory of `bundle.path`, `keys/` or `checkpoints/`; not `checkpoint.state`, `checkpoint.state.tmp` or `writer.stop`. The loader checks the path text only; the store checks the files when it opens them (SEC-20, ADR-022) |
 | `bundle.fetch_url` | `""` (off) | empty, or an `https` URL |
 | `bundle.fetch_interval` | `6h` | 15m–7d, also when `bundle.fetch_url` is empty |
