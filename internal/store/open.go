@@ -54,15 +54,15 @@ type Options struct {
 	// tlog.dir, acme.cache_dir, and the directory of bundle.path. Each entry is a
 	// clean path relative to the state directory; "." is the state directory
 	// itself. The directories keys and checkpoints and the names
-	// checkpoint.state and writer.stop are fixed (ADR-020, ADR-022), so the
-	// store adds them itself. Names match exactly, with the case of the path.
-	// The store does not import internal/config.
+	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
+	// ADR-022), so the store adds them itself. Names match exactly, with the
+	// case of the path. The store does not import internal/config.
 	Reserved []string
 }
 
 var (
 	fixedDirs  = []string{"keys", "checkpoints"}
-	fixedNames = []string{"checkpoint.state", "writer.stop"}
+	fixedNames = []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"}
 )
 
 // pragmas are the 03 pragmas. Each is in the connection string, so SQLite
@@ -77,6 +77,14 @@ var pragmas = []string{
 // change the file system between the file checks and the open of SQLite.
 var afterChecks func()
 
+// afterVerify is a test hook. A test sets it to change the file system between
+// the open of SQLite and the second checks.
+var afterVerify func()
+
+// onHeld is a test hook. A test sets it to get the descriptor that Open holds
+// open for the pool.
+var onHeld func(*os.File)
+
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
 	sync.Mutex
@@ -86,13 +94,19 @@ var heap struct {
 // Open opens the database at rel below root, the state directory that the
 // caller opened one time. rel is the store.path relative to root.
 //
-// SQLite opens a file by path and not through root. So Open checks the path
-// text, and then, through root, each parent directory and each of the database,
-// -wal, -shm and -journal files, before SQLite opens anything. A new database
-// file is made through root with mode 0600. After the open, the file that SQLite
-// reports must be the checked path. A short window stays between the checks and
-// the open of SQLite. Open does not stop a symlink that is put in place in this
-// window. If the symlink changes the path, the database_list check finds it.
+// SQLite opens a file by path and not through root. So Open checks these:
+//   - Before the open: the path text, the directories, and the database, -wal,
+//     -shm and -journal files. A directory is real, owned by the sensor user,
+//     with no group or other bits. A file is absent or safe. A new database
+//     file is made through root with mode 0600.
+//   - After the open, and on each new connection: database_list, the
+//     directories, the four files, and the identity of the database file. The
+//     file is the same file as before, and the path that SQLite opens leads to it.
+//     Open keeps the database file open until the pool closes, so that it stays
+//     the same file.
+//
+// A failed check gives a fixed error and closes the database or connection.
+// A change that is made and undone between two checks is not found.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
@@ -106,43 +120,69 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if err := checkParents(root, rel); err != nil {
 		return nil, err
 	}
-	absent, err := checkFiles(root, rel)
+	checked, err := checkFiles(root, rel)
 	if err != nil {
 		return nil, err
 	}
+	absent := checked == nil
+	// The descriptor stays open until the pool closes. While it is open, the
+	// inode of the file cannot be given to a new file.
+	var held *os.File
 	if absent {
-		f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		held, err = root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return nil, fail(rel, ruleChanged)
 			}
 			return nil, fail(rel, ruleCreate)
 		}
-		if f.Close() != nil {
-			return nil, fail(rel, ruleCreate)
-		}
+	} else if held, err = openHeld(root, rel); err != nil {
+		return nil, fail(rel, ruleChanged)
 	}
-	// A failed open removes the file that this call made, so a refused open
-	// leaves no new entry. If someone put a link there, Remove deletes the link
-	// and not its target.
-	refuse := func(rule string) error {
+	if onHeld != nil {
+		onHeld(held)
+	}
+	// A failed open removes the entry at rel when this call made the database
+	// file. If someone put a link there, Remove deletes the link and not its
+	// target.
+	refuse := func(err error) error {
 		if absent {
 			root.Remove(rel)
 		}
-		return fail(rel, rule)
+		return err
+	}
+	fi, err := held.Stat()
+	id, err := identityOf(rel, fi, err)
+	if err == nil && !absent {
+		if cid, _ := identityOf(rel, checked, nil); cid != id {
+			err = fail(rel, ruleChanged)
+		}
+	}
+	if err != nil {
+		held.Close()
+		return nil, refuse(err)
 	}
 	if afterChecks != nil {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	db, err := sql.Open("sqlite", dsn(path, absent))
+	conn, err := newConnector(root, rel, path, dsn(path, absent), held, id)
 	if err != nil {
-		return nil, refuse(ruleOpen)
+		held.Close()
+		return nil, refuse(err)
 	}
+	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
-	if rule := verify(db, path); rule != "" {
+	if err := verify(db, rel); err != nil {
 		db.Close()
-		return nil, refuse(rule)
+		return nil, refuse(err)
+	}
+	if afterVerify != nil {
+		afterVerify()
+	}
+	if err := conn.check(); err != nil {
+		db.Close()
+		return nil, refuse(err)
 	}
 	return db, nil
 }
@@ -198,41 +238,53 @@ func stateBase(root *os.Root) (string, error) {
 	return base, nil
 }
 
-// checkParents checks that each directory above rel exists, is a directory,
-// and is not a symlink. Lstat does not follow a link.
+// checkParents checks the state directory and each directory above rel. Each
+// exists, is a directory and not a symlink (Lstat does not follow a link), is
+// owned by the user that runs the sensor, and has no group or other permission
+// bits and no setuid, setgid or sticky bit.
 func checkParents(root *os.Root, rel string) error {
 	parts := strings.Split(rel, "/")
-	for i := 1; i < len(parts); i++ {
-		dir := strings.Join(parts[:i], "/")
+	for i := 0; i < len(parts); i++ {
+		dir, name := ".", "state directory"
+		if i > 0 {
+			dir = strings.Join(parts[:i], "/")
+			name = dir
+		}
 		fi, err := root.Lstat(dir)
 		switch {
 		case errors.Is(err, fs.ErrNotExist), err == nil && !fi.IsDir():
-			return fail(dir, ruleParent)
+			return fail(name, ruleParent)
 		case err != nil:
-			return fail(dir, ruleExamine)
+			return fail(name, ruleExamine)
+		}
+		if rule := checkOwnerMode(fi); rule != "" {
+			return fail(name, rule)
 		}
 	}
 	return nil
 }
 
 // checkFiles checks the database file and its -wal, -shm and -journal files.
-// Each is absent or a safe file. It reports whether the database file is absent.
-func checkFiles(root *os.Root, rel string) (absent bool, err error) {
+// Each is absent or a safe file. It returns the FileInfo of the database file
+// that it checked, or nil when that file is absent.
+func checkFiles(root *os.Root, rel string) (db fs.FileInfo, err error) {
 	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		name := rel + suffix
 		fi, err := root.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
-			absent = absent || suffix == ""
 			continue
 		}
 		if err != nil {
-			return false, fail(name, ruleExamine)
+			return nil, fail(name, ruleExamine)
 		}
 		if rule := checkFile(fi); rule != "" {
-			return false, fail(name, rule)
+			return nil, fail(name, rule)
+		}
+		if suffix == "" {
+			db = fi
 		}
 	}
-	return absent, nil
+	return db, nil
 }
 
 // checkFile returns the failed rule for an existing file, or an empty string.
@@ -240,12 +292,19 @@ func checkFile(fi fs.FileInfo) string {
 	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
 		return ruleType
 	}
-	nlink, uid, ok := fileFacts(fi)
+	if nlink, _, ok := fileFacts(fi); ok && nlink != 1 {
+		return ruleLinks
+	}
+	return checkOwnerMode(fi)
+}
+
+// checkOwnerMode returns the failed rule for the owner and the mode of a file
+// or a directory, or an empty string.
+func checkOwnerMode(fi fs.FileInfo) string {
+	_, uid, ok := fileFacts(fi)
 	switch {
 	case !ok:
 		return ruleExamine // fail closed
-	case nlink != 1:
-		return ruleLinks
 	case int64(uid) != euid():
 		return ruleOwner
 	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
@@ -272,52 +331,29 @@ func dsn(path string, created bool) string {
 	return b.String()
 }
 
-// verify checks the first connection and sets the process settings. It returns
-// the failed rule, or an empty string.
-func verify(db *sql.DB, want string) string {
+// verify reads back the journal mode of the first connection and sets the
+// process settings. The connector checks the location. It returns the *Error of
+// the connector as it is, or a fixed error for rel.
+func verify(db *sql.DB, rel string) error {
 	ctx := context.Background()
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
-		return ruleOpen
+		var e *Error // the connector refused the first connection
+		if errors.As(err, &e) {
+			return e
+		}
+		return fail(rel, ruleOpen)
 	}
 	if mode != "wal" {
-		return ruleSetting
-	}
-	file, rule := mainFile(ctx, db)
-	switch {
-	case rule != "":
-		return rule
-	case file != want:
-		return ruleLocation
+		return fail(rel, ruleSetting)
 	}
 	heap.Lock()
 	defer heap.Unlock()
 	if !heap.set {
 		if _, err := db.ExecContext(ctx, "PRAGMA soft_heap_limit="+strconv.Itoa(softHeapLimit)); err != nil {
-			return ruleSetting
+			return fail(rel, ruleSetting)
 		}
 		heap.set = true
 	}
-	return ""
-}
-
-// mainFile returns the file that SQLite opened for the main database.
-func mainFile(ctx context.Context, db *sql.DB) (string, string) {
-	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
-	if err != nil {
-		return "", ruleOpen
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var seq int
-		var name string
-		var file sql.NullString
-		if rows.Scan(&seq, &name, &file) != nil {
-			return "", ruleOpen
-		}
-		if name == "main" {
-			return file.String, ""
-		}
-	}
-	return "", ruleOpen
+	return nil
 }

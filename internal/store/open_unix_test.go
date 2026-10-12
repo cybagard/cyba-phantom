@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -33,9 +34,13 @@ func TestTS15NewFileHasMode0600(t *testing.T) {
 			t.Errorf("events.db%s: %v, %v", suffix, fi, err)
 		}
 	}
-	file, rule := mainFile(t.Context(), db)
-	if want := filepath.Join(state, "data", "events.db"); rule != "" || file != want {
-		t.Fatalf("database_list gives %q, want %q (%s)", file, want, rule)
+	var seq int
+	var name, file string
+	if err := db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(state, "data", "events.db"); name != "main" || file != want {
+		t.Fatalf("database_list gives %q %q, want main %q", name, file, want)
 	}
 }
 
@@ -197,9 +202,52 @@ func TestTS15UnsafeFileIsRefused(t *testing.T) {
 // user differ from the owner, so the rule has a test that does not need root.
 func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f := newFixture(t)
-	geteuid = func() int { return os.Geteuid() + 1 }
-	defer func() { geteuid = os.Geteuid }()
+	facts := func(name string) func(fs.FileInfo) (uint64, uint64, bool) {
+		return func(fi fs.FileInfo) (uint64, uint64, bool) {
+			n, uid, ok := systemFacts(fi)
+			if fi.Name() == name {
+				uid++
+			}
+			return n, uid, ok
+		}
+	}
+	defer func() { fileFacts = systemFacts }()
+	fileFacts = facts("events.db")
 	f.refused(t, "events.db", "events.db", ruleOwner)
+	// The same hook for the state directory and for a parent directory.
+	if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fileFacts = facts("data")
+	f.refused(t, "data/events.db", "data", ruleOwner)
+	fileFacts = facts(".")
+	f.refused(t, "events.db", "state directory", ruleOwner)
+}
+
+// T-S-15: the state directory and a parent directory with group or other bits,
+// or with a setuid, setgid or sticky bit, are refused, and nothing changes.
+func TestTS15UnsafeDirectoryIsRefused(t *testing.T) {
+	for _, mode := range []os.FileMode{0o777, 0o750, 0o705, os.ModeSetgid | 0o700, os.ModeSticky | 0o700} {
+		t.Run("parent "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			f := newFixture(t)
+			dir := filepath.Join(f.state, "data")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatal(err)
+			}
+			f.refused(t, "data/events.db", "data", ruleMode)
+		})
+		t.Run("state "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			f := newFixture(t)
+			if err := os.Chmod(f.state, mode); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(f.state, 0o700)
+			f.refused(t, "events.db", "state directory", ruleMode)
+		})
+	}
 }
 
 // T-S-15: a file that another user owns is refused. The test needs root to

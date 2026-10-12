@@ -97,6 +97,9 @@ type loadLog struct {
 
 func runLoad(b *testing.B) {
 	dir := b.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		b.Fatal(err)
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		b.Fatal(err)
