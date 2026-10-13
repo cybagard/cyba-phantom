@@ -233,11 +233,9 @@ func openPart(r *os.Root, part string) (*os.Root, error) {
 }
 
 // checkPath checks each directory on the path parts below r. When create is
-// true, it makes a missing directory with mode 0700 first. It returns the facts
-// of the last directory, or nil if parts is empty.
-func checkPath(r *os.Root, parts []string, create bool) (fs.FileInfo, error) {
+// true, it makes a missing directory with mode 0700 first.
+func checkPath(r *os.Root, parts []string, create bool) error {
 	p := ""
-	var last fs.FileInfo
 	for _, part := range parts {
 		p = path.Join(p, part)
 		fi, err := r.Lstat(p)
@@ -249,14 +247,13 @@ func checkPath(r *os.Root, parts []string, create bool) (fs.FileInfo, error) {
 			}
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := dirRule(fi); err != nil {
-			return nil, err
+			return err
 		}
-		last = fi
 	}
-	return last, nil
+	return nil
 }
 
 // dirRule returns the error for a directory that the store must not use.
@@ -285,8 +282,7 @@ func (s *Store) dirs(parts []string, create bool) error {
 	if err := dirRule(fi); err != nil {
 		return err
 	}
-	_, err = checkPath(s.root, parts, create)
-	return err
+	return checkPath(s.root, parts, create)
 }
 
 // syncPath calls fsync on the directory r and on each directory of parts below
