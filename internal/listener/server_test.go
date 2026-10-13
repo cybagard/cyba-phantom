@@ -231,8 +231,10 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 	defer over.Close()
 	_ = over.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if n, err := over.Read(make([]byte, 16)); n != 0 || err == nil {
-		t.Fatalf("connection over the cap: %d bytes, err %v", n, err)
+	start := time.Now()
+	n, err := over.Read(make([]byte, 16))
+	if n != 0 || !isClosed(err) || time.Since(start) > time.Second {
+		t.Fatalf("connection over the cap: %d bytes, err %v after %v; want an end of stream or a reset at once", n, err, time.Since(start))
 	}
 	if calls.Load() != max {
 		t.Fatalf("capture ran %d times, want %d", calls.Load(), max)
