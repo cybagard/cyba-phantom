@@ -129,6 +129,10 @@ var beforeCheck func(part string)
 // production.
 var betweenCheckAndOpen func(part string)
 
+// betweenLstatAndOpen is a test hook. Load calls it after the Lstat of the key
+// file and before it opens the file. It is nil in production.
+var betweenLstatAndOpen func()
+
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
 // not exist. Each directory of dir must be a real directory, not a link, owned
@@ -435,6 +439,9 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	}
 	if fi.Size() > maxValue {
 		return nil, false, fail(op, ruleSize)
+	}
+	if betweenLstatAndOpen != nil {
+		betweenLstatAndOpen()
 	}
 	f, err := s.root.OpenFile(rel(parts), readFlags, 0)
 	if err != nil {

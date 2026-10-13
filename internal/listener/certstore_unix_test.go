@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -501,6 +502,85 @@ func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 	mustNil(t, err)
 	if want := []string{"cache", "acme", "state"}; !slices.Equal(steps, want) {
 		t.Errorf("fsync of %q, want %q", steps, want)
+	}
+}
+
+func TestTS16LoadDoesNotReturnTheBytesOfAnotherKeyWhenALinkReplacesTheKeyFile(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(ctx, "key", []byte("own value")))
+	mustNil(t, s.Store(ctx, "other-key", []byte("value of another key")))
+	calls := 0
+	betweenLstatAndOpen = func() {
+		if calls++; calls == 1 {
+			mustNil(t, os.Remove(filepath.Join(cache, "key")))
+			mustNil(t, os.Symlink("other-key", filepath.Join(cache, "key")))
+		}
+	}
+	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	b, err := s.Load(ctx, "key")
+	if err == nil {
+		if string(b) != "own value" {
+			t.Errorf("Load returned %q", b)
+		}
+		return
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Op != "load" || (e.Rule != ruleLink && e.Rule != ruleChanged) {
+		t.Errorf("Load error = %#v, want the link rule or the rule for a file that changed", err)
+	}
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+}
+
+func TestTS16LoadGivesTheChangedRuleWhenEveryTryFindsAnotherFile(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	calls := 0
+	betweenLstatAndOpen = func() {
+		// A new file with its own inode replaces the key file at each try.
+		calls++
+		tmp := filepath.Join(cache, ".tmp-replace")
+		mustNil(t, os.WriteFile(tmp, []byte("v"), 0o600))
+		mustNil(t, os.Rename(tmp, filepath.Join(cache, "key")))
+	}
+	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	b, err := s.Load(ctx, "key")
+	wantError(t, err, "load", ruleChanged)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+	if calls != loadTries {
+		t.Errorf("Load made %d tries, want %d", calls, loadTries)
+	}
+}
+
+func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	// The file is sparse, so the growth costs no disk. The same file is open, so
+	// the check of the file identity passes.
+	betweenLstatAndOpen = func() {
+		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/key"), 32<<20))
+	}
+	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	b, err := s.Load(ctx, "key")
+	runtime.ReadMemStats(&after)
+	wantError(t, err, "load", ruleSize)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+	// A read of the whole file allocates 32 MiB or more. A read of 64 KiB + 1
+	// byte allocates far less.
+	if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+		t.Errorf("Load allocated %d bytes for a file that grew to 32 MiB", n)
 	}
 }
 
