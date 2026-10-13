@@ -44,6 +44,7 @@ const (
 	ruleNotDir  = "path part is not a directory"
 	ruleOwner   = "directory has another owner"
 	ruleMode    = "directory allows access for group or other"
+	ruleSpecial = "directory has a setuid, setgid or sticky bit"
 	ruleMissing = "key is missing"
 	ruleIO      = "file cannot be accessed below the cache directory"
 	ruleMany    = "directory listing has too many names"
@@ -240,8 +241,10 @@ func dirRule(fi fs.FileInfo) error {
 		return fail("check", ruleNotDir)
 	case !ownedByUs(fi):
 		return fail("check", ruleOwner)
-	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
+	case fi.Mode().Perm()&otherBit != 0:
 		return fail("check", ruleMode)
+	case fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0:
+		return fail("check", ruleSpecial)
 	}
 	return nil
 }

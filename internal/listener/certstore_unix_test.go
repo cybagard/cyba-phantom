@@ -477,8 +477,10 @@ func TestTS16DirectoryWithSetuidSetgidOrStickyBitIsRefused(t *testing.T) {
 				t.Skipf("the system did not set the %s bit: %v, %v", bit.name, fi, err)
 			}
 			_, err := s.Load(ctx, "kd/key")
-			wantError(t, err, "load", ruleMode)
-			wantError(t, s.Store(ctx, "kd/key2", []byte("v")), "store", ruleMode)
+			// The mode is 0700 with one special bit. No group or other bit is set,
+			// so the rule for these bits applies, not the rule for the mode.
+			wantError(t, err, "load", ruleSpecial)
+			wantError(t, s.Store(ctx, "kd/key2", []byte("v")), "store", ruleSpecial)
 			unchanged(t, target)
 		})
 	}
