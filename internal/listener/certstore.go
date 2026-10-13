@@ -71,7 +71,7 @@ func wrap(op string, err error) error {
 	case err == nil:
 		return nil
 	case errors.As(err, &e):
-		return e
+		return &Error{Op: op, Rule: e.Rule, err: e.err}
 	case errors.Is(err, fs.ErrNotExist):
 		return &Error{Op: op, Rule: ruleMissing, err: fs.ErrNotExist}
 	case isLoop(err):

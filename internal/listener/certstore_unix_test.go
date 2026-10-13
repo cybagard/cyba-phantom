@@ -4,6 +4,7 @@ package listener
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -204,6 +205,72 @@ func TestTS16LinkMadeAfterOpenOrBetweenCallsIsRefused(t *testing.T) {
 	mustNil(t, os.Symlink(filepath.Dir(target), cache))
 	_ = s.Store(ctx, "new", []byte("changed"))
 	unchanged(t, target)
+}
+
+// breakDir is one way to make a directory fail one rule of the directory check.
+type breakDir struct {
+	name  string
+	rule  string
+	apply func(t *testing.T, p string)
+}
+
+var breakDirs = []breakDir{
+	{"link", ruleLink, func(t *testing.T, p string) {
+		mustNil(t, os.Rename(p, p+"-real"))
+		mustNil(t, os.Symlink(filepath.Base(p)+"-real", p))
+	}},
+	{"mode", ruleMode, func(t *testing.T, p string) { mustNil(t, os.Chmod(p, 0o755)) }},
+	{"owner", ruleOwner, func(t *testing.T, _ string) {
+		old := geteuid
+		t.Cleanup(func() { geteuid = old })
+		geteuid = func() int { return os.Geteuid() + 1 }
+	}},
+	{"not a directory", ruleNotDir, func(t *testing.T, p string) {
+		mustNil(t, os.RemoveAll(p))
+		mustNil(t, os.WriteFile(p, nil, 0o600))
+	}},
+}
+
+// wantError fails unless err is an *Error with the operation op and the rule.
+func wantError(t *testing.T, err error, op, rule string) {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Errorf("%s: error %v is not an *Error", op, err)
+	} else if e.Op != op || e.Rule != rule {
+		t.Errorf("%s: error has operation %q and rule %q, want %q", op, e.Op, e.Rule, rule)
+	}
+}
+
+func TestTS16DirectoryRuleErrorsNameTheOperation(t *testing.T) {
+	for _, tc := range breakDirs {
+		t.Run(tc.name, func(t *testing.T) {
+			s, dir := newStore(t)
+			ctx := context.Background()
+			mustNil(t, s.Store(ctx, "kd/key", []byte("v")))
+			tc.apply(t, filepath.Join(dir, "acme/cache/kd"))
+			_, err := s.Load(ctx, "kd/key")
+			wantError(t, err, "load", tc.rule)
+			wantError(t, s.Store(ctx, "kd/key2", []byte("v")), "store", tc.rule)
+			_, err = s.Stat(ctx, "kd/key")
+			wantError(t, err, "stat", tc.rule)
+			_, err = s.List(ctx, "kd", false)
+			wantError(t, err, "list", tc.rule)
+			wantError(t, s.Delete(ctx, "kd/key"), "delete", tc.rule)
+		})
+		t.Run(tc.name+" in Open", func(t *testing.T) {
+			_, dir := newStore(t)
+			state, err := os.OpenRoot(dir)
+			mustNil(t, err)
+			defer state.Close()
+			tc.apply(t, filepath.Join(dir, "acme/cache"))
+			o, err := Open(state, "acme/cache")
+			if err == nil {
+				o.Close()
+			}
+			wantError(t, err, "open", tc.rule)
+		})
+	}
 }
 
 func TestTS16ErrorsNeverHoldKeyMarkerBytes(t *testing.T) {
