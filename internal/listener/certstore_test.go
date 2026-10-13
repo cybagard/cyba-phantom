@@ -285,6 +285,80 @@ func TestTS16ListIsBoundedByTheNameCount(t *testing.T) {
 	}
 }
 
+// fill makes n empty key files with mode 0600 in the directory d of the cache.
+func fill(t *testing.T, dir, d string, n int) {
+	t.Helper()
+	mustNil(t, os.MkdirAll(filepath.Join(dir, "acme/cache", d), 0o700))
+	for i := 0; i < n; i++ {
+		mustNil(t, os.WriteFile(filepath.Join(dir, "acme/cache", d, fmt.Sprintf("k%d", i)), nil, 0o600))
+	}
+}
+
+func TestTS16ListHidesTemporaryFiles(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	for _, k := range []string{"r", "kd/k"} {
+		mustNil(t, s.Store(ctx, k, []byte("v")))
+	}
+	for _, p := range []string{".tmp-a", "kd/.tmp-b"} {
+		mustNil(t, os.WriteFile(filepath.Join(cache, p), []byte("v"), 0o600))
+	}
+	for _, tc := range []struct {
+		prefix    string
+		recursive bool
+		want      []string
+	}{
+		{"", false, []string{"kd", "r"}},
+		{"", true, []string{"kd/k", "r"}},
+		{"kd", false, []string{"kd/k"}},
+		{"kd", true, []string{"kd/k"}},
+	} {
+		got, err := s.List(ctx, tc.prefix, tc.recursive)
+		slices.Sort(got)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("List(%q, %v) = %v, %v; want %v", tc.prefix, tc.recursive, got, err, tc.want)
+		}
+	}
+}
+
+func TestTS16ListBoundCountsTheNamesOfAllDirectories(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	// Each directory is below the bound. Together they are above it.
+	fill(t, dir, "d1", 2058)
+	fill(t, dir, "d2", 2058)
+	for _, d := range []string{"d1", "d2"} {
+		if keys, err := s.List(ctx, d, true); err != nil || len(keys) != 2058 {
+			t.Fatalf("List(%q) = %d keys, %v", d, len(keys), err)
+		}
+	}
+	keys, err := s.List(ctx, "", true)
+	if e := new(Error); !errors.As(err, &e) || e.Op != "list" || e.Rule != ruleMany || keys != nil {
+		t.Fatalf("recursive List = %d keys, %v; want the name limit", len(keys), err)
+	}
+}
+
+func TestTS16ListAcceptsExactlyTheMostNames(t *testing.T) {
+	ctx := context.Background()
+	t.Run("one directory", func(t *testing.T) {
+		s, dir := newStore(t)
+		fill(t, dir, ".", maxList)
+		if keys, err := s.List(ctx, "", false); err != nil || len(keys) != maxList {
+			t.Fatalf("List = %d keys, %v; want %d keys", len(keys), err, maxList)
+		}
+	})
+	t.Run("two directories", func(t *testing.T) {
+		s, dir := newStore(t)
+		// The two directories count as 2 names.
+		fill(t, dir, "d1", (maxList-2)/2)
+		fill(t, dir, "d2", (maxList-2)/2)
+		if keys, err := s.List(ctx, "", true); err != nil || len(keys) != maxList-2 {
+			t.Fatalf("List = %d keys, %v; want %d keys", len(keys), err, maxList-2)
+		}
+	})
+}
+
 func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
