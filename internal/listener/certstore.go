@@ -117,41 +117,38 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
-// betweenCheckAndOpen is a test hook. Open calls it after the check of the path
-// and before it opens the cache directory. It is nil in production.
-var betweenCheckAndOpen func()
+// betweenCheckAndOpen is a test hook. Open calls it for each part of the path,
+// after the check of the part and before it opens the part. It is nil in
+// production.
+var betweenCheckAndOpen func(part string)
 
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
 // not exist. Each directory of dir must be a real directory, not a link, owned
-// by the effective user, with no group or other permission bit.
+// by the effective user, with no group or other permission bit and no setuid,
+// setgid or sticky bit.
+//
+// Open walks dir one part at a time. It checks a part in the root of the part
+// before it, and then opens the part as a root. The opened directory must be the
+// directory that the check passed, else Open gives the link rule. The next part
+// is checked in the root that Open just opened, so no later step resolves an
+// earlier part again.
 func Open(state *os.Root, dir string) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
 		return nil, fail(op, ruleCachePath)
 	}
 	parts := strings.Split(dir, "/")
-	checked, err := checkPath(state, parts, true)
-	if err != nil {
-		return nil, wrap(op, err)
-	}
-	if betweenCheckAndOpen != nil {
-		betweenCheckAndOpen()
-	}
-	root, err := state.OpenRoot(dir)
-	if err != nil {
-		return nil, wrap(op, err)
-	}
-	// OpenRoot resolves dir again. The directory that it opened must be the
-	// directory that the check passed.
-	opened, err := root.Stat(".")
-	if err != nil {
-		root.Close()
-		return nil, wrap(op, err)
-	}
-	if !os.SameFile(checked, opened) {
-		root.Close()
-		return nil, fail(op, ruleLink)
+	root := state
+	for _, part := range parts {
+		next, err := openPart(root, part)
+		if root != state {
+			root.Close()
+		}
+		if err != nil {
+			return nil, wrap(op, err)
+		}
+		root = next
 	}
 	s := &Store{root: root, locks: map[string]chan struct{}{}}
 	if err := s.dirs(nil, false); err != nil {
@@ -168,6 +165,43 @@ func Open(state *os.Root, dir string) (*Store, error) {
 // Close closes the cache directory. An error of the close has the operation
 // "close" and a fixed rule, like the error of any other method.
 func (s *Store) Close() error { return wrap("close", s.root.Close()) }
+
+// openPart checks the directory part in r, makes it with mode 0700 if it is
+// missing, and opens it as a root. The opened directory must be the directory
+// that the check passed.
+func openPart(r *os.Root, part string) (*os.Root, error) {
+	fi, err := r.Lstat(part)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Another Store can make the same directory first. Then the checks
+		// below apply to the directory that it made.
+		if err = r.Mkdir(part, dirMode); err == nil || errors.Is(err, fs.ErrExist) {
+			fi, err = r.Lstat(part)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := dirRule(fi); err != nil {
+		return nil, err
+	}
+	if betweenCheckAndOpen != nil {
+		betweenCheckAndOpen(part)
+	}
+	next, err := r.OpenRoot(part)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := next.Stat(".")
+	if err != nil {
+		next.Close()
+		return nil, err
+	}
+	if !os.SameFile(fi, opened) {
+		next.Close()
+		return nil, fail("check", ruleLink)
+	}
+	return next, nil
+}
 
 // checkPath checks each directory on the path parts below r. With create set, it
 // makes a missing directory with mode 0700 first. It returns the facts of the

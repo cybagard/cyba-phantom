@@ -321,7 +321,10 @@ func TestTS16OpenRefusesADirectorySwappedForALinkAfterTheCheck(t *testing.T) {
 	other := filepath.Join(dir, "acme/other")
 	mustNil(t, os.Mkdir(other, 0o700))
 	cache := filepath.Join(dir, "acme/cache")
-	betweenCheckAndOpen = func() {
+	betweenCheckAndOpen = func(part string) {
+		if part != "cache" {
+			return
+		}
 		mustNil(t, os.Rename(cache, cache+"-real"))
 		mustNil(t, os.Symlink("other", cache))
 	}
@@ -335,6 +338,35 @@ func TestTS16OpenRefusesADirectorySwappedForALinkAfterTheCheck(t *testing.T) {
 	wantError(t, err, "open", ruleLink)
 	if names, err := os.ReadDir(other); err != nil || len(names) != 0 {
 		t.Errorf("the other directory has %d names, %v; want none", len(names), err)
+	}
+}
+
+func TestTS16OpenRefusesAParentSwappedForALinkAfterTheCheck(t *testing.T) {
+	_, dir := newStore(t)
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	// other is a real directory in the state directory. It has a cache directory
+	// that passes every check, so only the link shows the swap.
+	other := filepath.Join(dir, "other")
+	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
+	betweenCheckAndOpen = func(part string) {
+		if part != "acme" {
+			return
+		}
+		mustNil(t, os.Rename(filepath.Join(dir, "acme"), filepath.Join(dir, "acme-real")))
+		mustNil(t, os.Symlink("other", filepath.Join(dir, "acme")))
+	}
+	t.Cleanup(func() { betweenCheckAndOpen = nil })
+	s, err := Open(state, "acme/cache")
+	if err == nil {
+		// If Open accepted the link, this Store would reach the other directory.
+		s.Store(context.Background(), "key", []byte("v"))
+		s.Close()
+	}
+	wantError(t, err, "open", ruleLink)
+	if names, err := os.ReadDir(filepath.Join(other, "cache")); err != nil || len(names) != 0 {
+		t.Errorf("the cache directory of the other directory has %d names, %v; want none", len(names), err)
 	}
 }
 
