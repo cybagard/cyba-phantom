@@ -520,16 +520,11 @@ func TestTS16LoadDoesNotReturnTheBytesOfAnotherKeyWhenALinkReplacesTheKeyFile(t 
 	}
 	t.Cleanup(func() { betweenLstatAndOpen = nil })
 	b, err := s.Load(ctx, "key")
-	if err == nil {
-		if string(b) != "own value" {
-			t.Errorf("Load returned %q", b)
-		}
-		return
+	if calls < 1 {
+		t.Errorf("the hook ran %d times, want 1 or more", calls)
 	}
-	var e *Error
-	if !errors.As(err, &e) || e.Op != "load" || (e.Rule != ruleLink && e.Rule != ruleChanged) {
-		t.Errorf("Load error = %#v, want the link rule or the rule for a file that changed", err)
-	}
+	// The link stays at the key, so the second try gives the link rule.
+	wantError(t, err, "load", ruleLink)
 	if b != nil {
 		t.Errorf("Load returned %d bytes with an error", len(b))
 	}
@@ -578,8 +573,10 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *tes
 		t.Errorf("Load returned %d bytes with an error", len(b))
 	}
 	// A read of the whole file allocates 32 MiB or more. A read of 64 KiB + 1
-	// byte allocates far less.
-	if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+	// byte allocates about 290 KiB in all with the race detector, and less without
+	// it. A read limit of four times the cap allocates about 630 KiB without the
+	// race detector and about 1.2 MiB with it.
+	if n := after.TotalAlloc - before.TotalAlloc; n > 384<<10 {
 		t.Errorf("Load allocated %d bytes for a file that grew to 32 MiB", n)
 	}
 }
@@ -590,10 +587,20 @@ func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatEvenIfOneLinkIsGoneAtTheOp
 	cache := filepath.Join(dir, "acme/cache")
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
 	mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
-	// The hook removes the second name, so the open file has one link.
-	betweenLstatAndOpen = func() { mustNil(t, os.Remove(filepath.Join(cache, "second-name"))) }
+	// If Load went on to the open, the hook would remove the second name, and the
+	// open file would have one link.
+	calls := 0
+	betweenLstatAndOpen = func() {
+		calls++
+		mustNil(t, os.Remove(filepath.Join(cache, "second-name")))
+	}
 	t.Cleanup(func() { betweenLstatAndOpen = nil })
 	b, err := s.Load(ctx, "key")
+	// Load refuses at the Lstat, so it stops before the point where it calls the
+	// hook.
+	if calls != 0 {
+		t.Errorf("the hook ran %d times, want 0: Load went on after the Lstat", calls)
+	}
 	wantError(t, err, "load", ruleLinks)
 	if b != nil {
 		t.Errorf("Load returned %d bytes with an error", len(b))
