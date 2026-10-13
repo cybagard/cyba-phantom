@@ -146,10 +146,11 @@ var betweenLstatAndOpen func()
 // earlier part again.
 //
 // Open keeps the root of each part open until the walk ends. Then it calls fsync
-// on each of these roots, from the cache directory up to the state directory,
-// through the root itself and not through a path. Open does this for every
-// part, also when the part existed before, so the directories on the path are
-// durable when Open returns.
+// on each of these roots, from the cache directory up to the state directory.
+// For each root, it opens the "." entry of that root and calls fsync on it. It
+// does not open a directory by a path from the state root. Open does this for
+// every part, also when the part existed before, so the directories on the path
+// are durable when Open returns.
 func Open(state *os.Root, dir string) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
@@ -286,7 +287,9 @@ func (s *Store) dirs(parts []string, create bool) error {
 }
 
 // syncPath calls fsync on the directory r and on each directory of parts below
-// it, the deepest first. It opens each directory by its path below r.
+// it, the deepest first. It opens each directory by its path below r. The path
+// of r itself is ".", so Open calls syncPath with no parts to call fsync on a
+// root that it opened.
 func syncPath(r *os.Root, parts []string) error {
 	for i := len(parts); i >= 0; i-- {
 		f, err := r.OpenFile(rel(parts[:i]), readFlags, 0)
@@ -518,7 +521,8 @@ func (s *Store) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error)
 // List returns the keys below prefix. With recursive false, it returns the
 // direct children, directories too. With recursive true, it returns the keys of
 // files below prefix. The prefix "" is the cache directory. A missing prefix
-// gives fs.ErrNotExist. List reads at most maxList names.
+// gives fs.ErrNotExist. A prefix below a file gives the rule "path part is not a
+// directory". List reads at most maxList names.
 func (s *Store) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	const op = "list"
 	if err := stopped(ctx, op); err != nil {

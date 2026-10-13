@@ -38,7 +38,7 @@ func linkCount(fi fs.FileInfo) (uint64, bool) {
 	return uint64(st.Nlink), true
 }
 
-// isLoop reports whether err is ELOOP. A call of os.Root gives ELOOP when it
-// finds a loop of links, and when the open fails because of a link that the call
-// then cannot read, for example after a race that replaces the link.
+// isLoop reports whether err is ELOOP. A call of os.Root gives ELOOP when a name
+// has more links than os.Root allows (a loop of links or a long chain of links),
+// and when the open gave an error and the call then cannot read the link.
 func isLoop(err error) bool { return errors.Is(err, syscall.ELOOP) }
