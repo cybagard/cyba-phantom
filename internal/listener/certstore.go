@@ -455,7 +455,7 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	// replaced the key file between the two calls.
 	of, err := f.Stat()
 	if err != nil {
-		return nil, false, fail(op, ruleLink)
+		return nil, false, wrap(op, err)
 	}
 	if !os.SameFile(fi, of) {
 		return nil, true, nil
