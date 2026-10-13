@@ -201,7 +201,7 @@ func openPart(r *os.Root, part string) (*os.Root, error) {
 	}
 	fi, err := r.Lstat(part)
 	if errors.Is(err, fs.ErrNotExist) {
-		// Another Store can make the same directory first. Then the checks
+		// Another Open can make the same directory first. Then the checks
 		// below apply to the directory that it made.
 		if err = r.Mkdir(part, dirMode); err == nil || errors.Is(err, fs.ErrExist) {
 			fi, err = r.Lstat(part)
@@ -412,10 +412,11 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	return wrap(op, syncPath(s.root, dir))
 }
 
-// Load returns the value at key. A file above the size cap is an error. A Store
-// of the same key can replace the key file while Load runs. Then Load starts
-// again, at most loadTries times in all. If the file still changes, Load gives
-// the rule "file changed during the read".
+// Load returns the value at key. A file above the size cap is an error. If a
+// Store replaces the key file between the Lstat and the open, Load starts again,
+// at most loadTries times in all. If the file still changes, Load gives the rule
+// "file changed during the read". A replacement after the open does not matter:
+// Load returns the value of the open file.
 func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 	const op = "load"
 	for i := 0; i < loadTries; i++ {
@@ -461,8 +462,8 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 		return nil, true, nil
 	}
 	// The key file must have one link only, and only the owner of the store may
-	// have access to it. A count of 0 is a file that a rename has replaced. The
-	// open file still holds the whole value.
+	// have access to it. A count of 0 is a file that a rename or a Delete removed
+	// after the open. The open file still holds the whole value.
 	if n, ok := linkCount(of); !ok || n > 1 {
 		return nil, false, fail(op, ruleLinks)
 	}

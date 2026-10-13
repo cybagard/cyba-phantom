@@ -9,8 +9,10 @@ import (
 	"syscall"
 )
 
-// readFlags opens a file or a directory for read. O_NOFOLLOW refuses a link in
-// the last part, and O_NONBLOCK stops a FIFO from blocking the open.
+// readFlags opens a file or a directory for read. A call of os.Root.OpenFile
+// follows a link in the last part of a name, if the link stays inside the root.
+// It does this also with O_NOFOLLOW. Only O_CREATE|O_EXCL does not follow a link.
+// O_NONBLOCK stops a FIFO from blocking the open.
 const readFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
 
 // createFlags makes a new file. The open fails if the name exists.
@@ -36,5 +38,7 @@ func linkCount(fi fs.FileInfo) (uint64, bool) {
 	return uint64(st.Nlink), true
 }
 
-// isLoop reports whether err is the error of a link that O_NOFOLLOW refused.
+// isLoop reports whether err is ELOOP. A call of os.Root gives ELOOP when it
+// finds a loop of links, and when the open fails because of a link that the call
+// then cannot read, for example after a race that replaces the link.
 func isLoop(err error) bool { return errors.Is(err, syscall.ELOOP) }
