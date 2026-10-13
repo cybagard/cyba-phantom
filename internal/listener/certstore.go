@@ -21,13 +21,14 @@ import (
 )
 
 const (
-	maxValue = 64 << 10 // the size cap of a stored value
-	maxParts = 8        // the most parts in a key
-	maxPart  = 255      // the most bytes in a part of a key
-	maxList  = 4096     // the most names that List reads
-	dirMode  = 0o700
-	fileMode = 0o600
-	otherBit = 0o077 // group and other permission bits
+	maxValue  = 64 << 10 // the size cap of a stored value
+	maxParts  = 8        // the most parts in a key
+	maxPart   = 255      // the most bytes in a part of a key
+	maxList   = 4096     // the most names that List reads
+	loadTries = 3        // the most tries of Load when a Store replaces the key file
+	dirMode   = 0o700
+	fileMode  = 0o600
+	otherBit  = 0o077 // group and other permission bits
 
 	// tmpPrefix starts the name of a temporary file. No key part can start with it.
 	tmpPrefix = ".tmp-"
@@ -50,6 +51,7 @@ const (
 	ruleStopped = "operation was stopped by its context"
 
 	ruleLinks     = "file has more than one link"
+	ruleChanged   = "file changed during the read"
 	ruleFileOwner = "file has another owner"
 
 	ruleCachePath = "cache directory path is not valid"
@@ -380,48 +382,68 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	return wrap(op, syncPath(s.root, dir))
 }
 
-// Load returns the value at key. A file above the size cap is an error.
+// Load returns the value at key. A file above the size cap is an error. A Store
+// of the same key can replace the key file while Load runs. Then Load starts
+// again, at most loadTries times in all. If the file still changes, Load gives
+// the rule "file changed during the read".
 func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 	const op = "load"
+	for i := 0; i < loadTries; i++ {
+		b, changed, err := s.load(ctx, op, key)
+		if !changed {
+			return b, err
+		}
+	}
+	return nil, fail(op, ruleChanged)
+}
+
+// load makes one try to read the value at key. It returns changed true when the
+// open file is not the file that Lstat gave.
+func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed bool, err error) {
 	fi, parts, err := s.info(ctx, op, key)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fail(op, ruleType)
+		return nil, false, fail(op, ruleType)
 	}
 	if fi.Size() > maxValue {
-		return nil, fail(op, ruleSize)
+		return nil, false, fail(op, ruleSize)
 	}
 	f, err := s.root.OpenFile(rel(parts), readFlags, 0)
 	if err != nil {
-		return nil, wrap(op, err)
+		return nil, false, wrap(op, err)
 	}
 	defer f.Close()
-	// The open file must be the file that Lstat gave.
+	// The open file must be the file that Lstat gave. If it is not, a Store has
+	// replaced the key file between the two calls.
 	of, err := f.Stat()
-	if err != nil || !os.SameFile(fi, of) {
-		return nil, fail(op, ruleLink)
+	if err != nil {
+		return nil, false, fail(op, ruleLink)
 	}
-	// The key file must be only a name for this file, and only the owner of the
-	// store may have access to it.
-	if n, ok := linkCount(of); !ok || n != 1 {
-		return nil, fail(op, ruleLinks)
+	if !os.SameFile(fi, of) {
+		return nil, true, nil
+	}
+	// The key file must have one link only, and only the owner of the store may
+	// have access to it. A count of 0 is a file that a rename has replaced. The
+	// open file still holds the whole value.
+	if n, ok := linkCount(of); !ok || n > 1 {
+		return nil, false, fail(op, ruleLinks)
 	}
 	if !ownedByUs(of) {
-		return nil, fail(op, ruleFileOwner)
+		return nil, false, fail(op, ruleFileOwner)
 	}
 	if of.Mode().Perm()&otherBit != 0 {
-		return nil, fail(op, ruleFileMode)
+		return nil, false, fail(op, ruleFileMode)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxValue+1))
+	b, err = io.ReadAll(io.LimitReader(f, maxValue+1))
 	if err != nil {
-		return nil, wrap(op, err)
+		return nil, false, wrap(op, err)
 	}
 	if len(b) > maxValue {
-		return nil, fail(op, ruleSize)
+		return nil, false, fail(op, ruleSize)
 	}
-	return b, nil
+	return b, false, nil
 }
 
 // Delete deletes key. A directory key deletes every key below it. A missing key

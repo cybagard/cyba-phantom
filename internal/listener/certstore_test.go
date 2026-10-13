@@ -380,6 +380,50 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	unchanged(t, target)
 }
 
+func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	// Each value is complete and has its own length and byte.
+	values := make([][]byte, 8)
+	for i := range values {
+		values[i] = bytes.Repeat([]byte{byte('a' + i)}, 1+i*1500)
+	}
+	mustNil(t, s.Store(ctx, "kd/key", values[0]))
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := s.Store(ctx, "kd/key", values[i%len(values)]); err != nil {
+				t.Errorf("Store: %v", err)
+				return
+			}
+		}
+	}()
+	failed := 0
+	for i := 0; i < 20000; i++ {
+		b, err := s.Load(ctx, "kd/key")
+		if err != nil {
+			if failed++; failed <= 3 {
+				t.Errorf("Load: %v", err)
+			}
+		} else if !slices.ContainsFunc(values, func(v []byte) bool { return bytes.Equal(v, b) }) {
+			t.Fatalf("Load returned %d bytes that are not a stored value", len(b))
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if failed != 0 {
+		t.Fatalf("%d of 20000 Load calls failed", failed)
+	}
+}
+
 func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
