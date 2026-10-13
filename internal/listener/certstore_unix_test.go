@@ -312,6 +312,32 @@ func TestTS16LinkMadeAfterOpenOrBetweenCallsIsRefused(t *testing.T) {
 	unchanged(t, target)
 }
 
+func TestTS16OpenRefusesADirectorySwappedForALinkAfterTheCheck(t *testing.T) {
+	_, dir := newStore(t)
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	// other is a real directory in the state directory that the link will name.
+	other := filepath.Join(dir, "acme/other")
+	mustNil(t, os.Mkdir(other, 0o700))
+	cache := filepath.Join(dir, "acme/cache")
+	betweenCheckAndOpen = func() {
+		mustNil(t, os.Rename(cache, cache+"-real"))
+		mustNil(t, os.Symlink("other", cache))
+	}
+	t.Cleanup(func() { betweenCheckAndOpen = nil })
+	s, err := Open(state, "acme/cache")
+	if err == nil {
+		// If Open accepted the link, this Store would reach the other directory.
+		s.Store(context.Background(), "key", []byte("v"))
+		s.Close()
+	}
+	wantError(t, err, "open", ruleLink)
+	if names, err := os.ReadDir(other); err != nil || len(names) != 0 {
+		t.Errorf("the other directory has %d names, %v; want none", len(names), err)
+	}
+}
+
 // breakDir is one way to make a directory fail one rule of the directory check.
 type breakDir struct {
 	name  string

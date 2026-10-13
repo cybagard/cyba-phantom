@@ -110,6 +110,10 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
+// betweenCheckAndOpen is a test hook. Open calls it after the check of the path
+// and before it opens the cache directory. It is nil in production.
+var betweenCheckAndOpen func()
+
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
 // not exist. Each directory of dir must be a real directory, not a link, owned
@@ -120,12 +124,27 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		return nil, fail(op, ruleKey)
 	}
 	parts := strings.Split(dir, "/")
-	if err := checkPath(state, parts, true); err != nil {
+	checked, err := checkPath(state, parts, true)
+	if err != nil {
 		return nil, wrap(op, err)
+	}
+	if betweenCheckAndOpen != nil {
+		betweenCheckAndOpen()
 	}
 	root, err := state.OpenRoot(dir)
 	if err != nil {
 		return nil, wrap(op, err)
+	}
+	// OpenRoot resolves dir again. The directory that it opened must be the
+	// directory that the check passed.
+	opened, err := root.Stat(".")
+	if err != nil {
+		root.Close()
+		return nil, wrap(op, err)
+	}
+	if !os.SameFile(checked, opened) {
+		root.Close()
+		return nil, fail(op, ruleLink)
 	}
 	s := &Store{root: root, locks: map[string]chan struct{}{}}
 	if err := s.dirs(nil, false); err != nil {
@@ -143,9 +162,11 @@ func Open(state *os.Root, dir string) (*Store, error) {
 func (s *Store) Close() error { return s.root.Close() }
 
 // checkPath checks each directory on the path parts below r. With create set, it
-// makes a missing directory with mode 0700 first.
-func checkPath(r *os.Root, parts []string, create bool) error {
+// makes a missing directory with mode 0700 first. It returns the facts of the
+// last directory, or nil if parts is empty.
+func checkPath(r *os.Root, parts []string, create bool) (fs.FileInfo, error) {
 	p := ""
+	var last fs.FileInfo
 	for _, part := range parts {
 		p = path.Join(p, part)
 		fi, err := r.Lstat(p)
@@ -157,13 +178,14 @@ func checkPath(r *os.Root, parts []string, create bool) error {
 			}
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := dirRule(fi); err != nil {
-			return err
+			return nil, err
 		}
+		last = fi
 	}
-	return nil
+	return last, nil
 }
 
 // dirRule returns the error for a directory that the store must not use.
@@ -190,7 +212,8 @@ func (s *Store) dirs(parts []string, create bool) error {
 	if err := dirRule(fi); err != nil {
 		return err
 	}
-	return checkPath(s.root, parts, create)
+	_, err = checkPath(s.root, parts, create)
+	return err
 }
 
 // syncPath calls fsync on the directory r and on each directory of parts below it.
