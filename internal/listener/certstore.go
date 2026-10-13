@@ -131,7 +131,9 @@ func checkPath(r *os.Root, parts []string, create bool) error {
 		p = path.Join(p, part)
 		fi, err := r.Lstat(p)
 		if errors.Is(err, fs.ErrNotExist) && create {
-			if err = r.Mkdir(p, dirMode); err == nil {
+			// Another Store can make the same directory first. Then the checks
+			// below apply to the directory that it made.
+			if err = r.Mkdir(p, dirMode); err == nil || errors.Is(err, fs.ErrExist) {
 				fi, err = r.Lstat(p)
 			}
 		}

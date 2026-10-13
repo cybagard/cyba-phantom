@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -64,6 +66,34 @@ func TestTS16StoreLoadStatDeleteRoundTrip(t *testing.T) {
 	mustNil(t, s.Delete(ctx, "certificates/ca-dir"))
 	if s.Exists(ctx, key) {
 		t.Fatal("Delete of a directory key left a key below it")
+	}
+}
+
+func TestTS16StoresIntoNewSharedDirectoriesDoNotFail(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var failed atomic.Int64
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				// Every goroutine makes the same new directories at the same time.
+				key := fmt.Sprintf("d%d/e%d/k%d-%d", j%4, j/4, g, j)
+				if err := s.Store(ctx, key, []byte("v")); err != nil {
+					failed.Add(1)
+					t.Errorf("Store: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if n := failed.Load(); n != 0 {
+		t.Fatalf("%d of 1600 Store calls failed", n)
+	}
+	if b, err := s.Load(ctx, "d3/e49/k7-199"); err != nil || string(b) != "v" {
+		t.Fatalf("Load = %q, %v", b, err)
 	}
 }
 
