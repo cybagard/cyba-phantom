@@ -164,8 +164,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	return s, nil
 }
 
-// Close closes the cache directory. An error of the close has the operation
-// "close" and a fixed rule, like the error of any other method.
+// Close closes the cache directory.
 func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 
 // openPart checks the directory part in r, makes it with mode 0700 if it is
