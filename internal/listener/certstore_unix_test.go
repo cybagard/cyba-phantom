@@ -122,6 +122,63 @@ func TestTS16WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 	}
 }
 
+// failText is the text of a failure that a seam returns. It holds a path, so a
+// test can see that Store does not copy the text of an inner error.
+const failText = "/private/path/to/disk: EIO"
+
+// seamError fails unless err is an *Error with the operation store and the rule
+// for a file that cannot be accessed, and its text holds no path and no key.
+func seamError(t *testing.T, err error, key string) {
+	t.Helper()
+	wantError(t, err, "store", ruleIO)
+	noMarker(t, err, key)
+	if err != nil && (strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "EIO")) {
+		t.Errorf("error text %q holds the text of the inner error", err)
+	}
+}
+
+func TestTS16FailedRenameLeavesNoTemporaryFileAndGivesAnError(t *testing.T) {
+	s, dir := newStore(t)
+	const key = "kd/ca/key"
+	mustNil(t, s.Store(context.Background(), key, []byte("old")))
+	old := renameFile
+	t.Cleanup(func() { renameFile = old })
+	renameFile = func(*os.Root, string, string) error { return errors.New(failText) }
+	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
+	names, err := os.ReadDir(filepath.Join(dir, "acme/cache/kd/ca"))
+	if err != nil || len(names) != 1 || names[0].Name() != "key" {
+		t.Errorf("key directory has the names %v, %v; want only key", names, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "acme/cache", key)); err != nil || string(b) != "old" {
+		t.Errorf("the key holds %q, %v; want old", b, err)
+	}
+}
+
+func TestTS16FailedFileSyncFailsStore(t *testing.T) {
+	s, dir := newStore(t)
+	const key = "kd/ca/key"
+	mustNil(t, s.Store(context.Background(), key, []byte("old")))
+	old := syncFile
+	t.Cleanup(func() { syncFile = old })
+	syncFile = func(*os.File) error { return errors.New(failText) }
+	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
+	if b, err := os.ReadFile(filepath.Join(dir, "acme/cache", key)); err != nil || string(b) != "old" {
+		t.Errorf("the key holds %q, %v; want old", b, err)
+	}
+	if names, err := os.ReadDir(filepath.Join(dir, "acme/cache/kd/ca")); err != nil || len(names) != 1 {
+		t.Errorf("key directory has the names %v, %v; want only key", names, err)
+	}
+}
+
+func TestTS16FailedDirectorySyncFailsStore(t *testing.T) {
+	s, _ := newStore(t)
+	const key = "kd/ca/key"
+	old := syncDirFile
+	t.Cleanup(func() { syncDirFile = old })
+	syncDirFile = func(*os.File) error { return errors.New(failText) }
+	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
+}
+
 func TestTS16StoreOverAHardLinkKeepsTheOutsideFile(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
