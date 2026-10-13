@@ -97,6 +97,63 @@ func TestTS16StoresIntoNewSharedDirectoriesDoNotFail(t *testing.T) {
 	}
 }
 
+func TestTS16EndedContextGivesAnErrorWithTheContextIdentity(t *testing.T) {
+	s, _ := newStore(t)
+	mustNil(t, s.Store(context.Background(), "kd/key", []byte("v")))
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{"canceled", canceled, context.Canceled},
+		{"deadline", expired, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tc.ctx
+			check := func(op string, err error) {
+				t.Helper()
+				if !errors.Is(err, tc.want) {
+					t.Errorf("%s: error %v does not wrap %v", op, err, tc.want)
+				}
+				var e *Error
+				if !errors.As(err, &e) || e.Op != op || e.Rule != ruleStopped {
+					t.Errorf("%s: error %#v is not an *Error with the operation and the rule", op, err)
+				}
+			}
+			_, err := s.Load(ctx, "kd/key")
+			check("load", err)
+			check("store", s.Store(ctx, "kd/key", []byte("changed")))
+			_, err = s.Stat(ctx, "kd/key")
+			check("stat", err)
+			_, err = s.List(ctx, "", true)
+			check("list", err)
+			check("delete", s.Delete(ctx, "kd/key"))
+			check("lock", s.Lock(ctx, "name"))
+			if s.Exists(ctx, "kd/key") {
+				t.Error("Exists with an ended context is true")
+			}
+			// The failed calls changed nothing.
+			if b, err := s.Load(context.Background(), "kd/key"); err != nil || string(b) != "v" {
+				t.Errorf("Load = %q, %v", b, err)
+			}
+		})
+	}
+	// A Lock that waits for a held lock stops with the same error.
+	bg := context.Background()
+	mustNil(t, s.Lock(bg, "held"))
+	wctx, wcancel := context.WithTimeout(bg, 20*time.Millisecond)
+	defer wcancel()
+	err := s.Lock(wctx, "held")
+	var e *Error
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &e) || e.Op != "lock" || e.Rule != ruleStopped {
+		t.Errorf("Lock while the lock is held, context ends: %#v", err)
+	}
+}
+
 func TestTS16MissingKeyKeepsTheNotExistIdentity(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()

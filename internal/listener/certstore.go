@@ -47,6 +47,7 @@ const (
 	ruleIO      = "file cannot be accessed below the cache directory"
 	ruleMany    = "directory listing has too many names"
 	ruleNotHeld = "lock is not held"
+	ruleStopped = "operation was stopped by its context"
 )
 
 // Error names the operation that failed and the rule that failed. The text is
@@ -78,6 +79,15 @@ func wrap(op string, err error) error {
 		return fail(op, ruleLink)
 	}
 	return fail(op, ruleIO)
+}
+
+// stopped returns an Error if ctx has ended. The Error wraps ctx.Err(), so
+// errors.Is finds context.Canceled and context.DeadlineExceeded.
+func stopped(ctx context.Context, op string) error {
+	if err := ctx.Err(); err != nil {
+		return &Error{Op: op, Rule: ruleStopped, err: err}
+	}
+	return nil
 }
 
 // Store is a certmagic.Storage and certmagic.Locker. It is safe for use by many
@@ -231,7 +241,7 @@ func parseKey(op, key string, empty bool) ([]string, error) {
 // info checks the directories on the path of key and returns the facts of the
 // key, a file or a directory. It does not follow a link.
 func (s *Store) info(ctx context.Context, op, key string) (fs.FileInfo, []string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := stopped(ctx, op); err != nil {
 		return nil, nil, err
 	}
 	parts, err := parseKey(op, key, false)
@@ -258,7 +268,7 @@ func (s *Store) info(ctx context.Context, op, key string) (fs.FileInfo, []string
 // rename, then fsync of the directories. It makes missing directories.
 func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	const op = "store"
-	if err := ctx.Err(); err != nil {
+	if err := stopped(ctx, op); err != nil {
 		return err
 	}
 	parts, err := parseKey(op, key, false)
@@ -374,7 +384,7 @@ func (s *Store) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error)
 // gives fs.ErrNotExist. List reads at most maxList names.
 func (s *Store) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	const op = "list"
-	if err := ctx.Err(); err != nil {
+	if err := stopped(ctx, op); err != nil {
 		return nil, err
 	}
 	parts, err := parseKey(op, prefix, true)
@@ -435,8 +445,9 @@ func (s *Store) list(op string, parts []string, recursive bool, keys *[]string, 
 // Lock waits until it holds the lock name, or until ctx ends. The lock is in
 // memory, so it works for one process only.
 func (s *Store) Lock(ctx context.Context, name string) error {
+	const op = "lock"
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := stopped(ctx, op); err != nil {
 			return err
 		}
 		s.mu.Lock()
@@ -451,7 +462,7 @@ func (s *Store) Lock(ctx context.Context, name string) error {
 		select {
 		case <-held:
 		case <-ctx.Done():
-			return ctx.Err()
+			return stopped(ctx, op)
 		}
 	}
 }
