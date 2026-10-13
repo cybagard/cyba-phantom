@@ -449,7 +449,9 @@ func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
 		t.Fatalf("Lock with an ended context = %v", err)
 	}
 	mustNil(t, s.Unlock(ctx, "a"))
-	if err := s.Unlock(ctx, "a"); err == nil {
+	err := s.Unlock(ctx, "a")
+	if err == nil {
 		t.Fatal("Unlock of a lock that is not held = nil")
 	}
+	wantError(t, err, "unlock", ruleNotHeld)
 }
