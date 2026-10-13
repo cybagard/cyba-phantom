@@ -10,10 +10,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
 func TestTS16NewFilesAreMode0600AndNewDirectoriesMode0700(t *testing.T) {
+	// Set the umask to 0, so that it does not hide a wrong mode in the code.
+	old := syscall.Umask(0)
+	defer syscall.Umask(old)
 	s, dir := newStore(t)
 	mustNil(t, s.Store(context.Background(), "certificates/ca/site/site.key", []byte("k")))
 	cache := filepath.Join(dir, "acme/cache")
@@ -22,14 +26,17 @@ func TestTS16NewFilesAreMode0600AndNewDirectoriesMode0700(t *testing.T) {
 			return err
 		}
 		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
 		want := fs.FileMode(0o600)
 		if fi.IsDir() {
 			want = 0o700
 		}
-		if err == nil && fi.Mode().Perm() != want {
+		if fi.Mode().Perm() != want {
 			t.Errorf("%s has mode %o, want %o", p, fi.Mode().Perm(), want)
 		}
-		return err
+		return nil
 	}))
 	if fi, err := os.Lstat(filepath.Join(dir, "acme")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("parent of the cache directory: %v, %v", fi, err)
