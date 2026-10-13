@@ -255,7 +255,7 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 	if _, err := s.Load(ctx, "kd/key"); err != nil {
 		t.Fatalf("Load after the repair = %v", err)
 	}
-	// Another owner, through the hook.
+	// The hook gives each directory another owner.
 	old := geteuid
 	t.Cleanup(func() { geteuid = old })
 	geteuid = func() int { return os.Geteuid() + 1 }
@@ -268,8 +268,8 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 	unchanged(t, target)
 }
 
-// A check is fooled if the state changes after it. These tests change the
-// directory between two calls and between Open and the first call.
+// A check is not enough if the directory changes after it. These tests change
+// the directory between two calls and between Open and the first call.
 func TestTS16LinkMadeAfterOpenOrBetweenCallsIsRefused(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
@@ -296,8 +296,8 @@ func TestTS16LinkMadeAfterOpenOrBetweenCallsIsRefused(t *testing.T) {
 	noMarker(t, err, "kd/key")
 	noMarker(t, s.Store(ctx, "kd/key", []byte("changed")), "kd/key")
 	unchanged(t, target)
-	// The cache directory is replaced by a link after Open: the open root still
-	// holds the old directory, so nothing outside the root changes.
+	// A link replaces the cache directory after Open. The open root still holds
+	// the old directory, so nothing outside the root changes.
 	mustNil(t, os.Rename(cache, cache+"-moved"))
 	mustNil(t, os.Symlink(filepath.Dir(target), cache))
 	if err := s.Store(ctx, "new", []byte("changed")); err != nil {

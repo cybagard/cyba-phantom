@@ -1,6 +1,6 @@
-// Package listener holds the TLS listener of the sensor. This file is the
-// certificate cache (FR-01, SEC-21). It is a certmagic.Storage that keeps its
-// keys as files in one directory below the state directory. It does not use
+// Package listener is the TLS listener of the sensor. The package holds the
+// certificate cache (FR-01, SEC-21). The cache is a certmagic.Storage that keeps
+// its keys as files in one directory below the state directory. It does not use
 // certmagic.FileStorage. Every access goes through an os.Root of the cache
 // directory, and the store checks each directory on the path of a key.
 package listener
@@ -71,7 +71,8 @@ func (e *Error) Unwrap() error { return e.err }
 
 func fail(op, rule string) error { return &Error{Op: op, Rule: rule} }
 
-// wrap turns an error of the file system into an Error. It drops the text.
+// wrap turns an error of the file system into an Error. It does not keep the
+// text of err. An err that is an Error already gets the operation op.
 func wrap(op string, err error) error {
 	var e *Error
 	switch {
@@ -102,7 +103,7 @@ type Store struct {
 	root *os.Root
 
 	mu    sync.Mutex
-	locks map[string]chan struct{} // closed when the lock is released
+	locks map[string]chan struct{} // one channel for each held lock; Unlock closes it
 }
 
 var _ certmagic.Storage = (*Store)(nil)
@@ -242,8 +243,9 @@ func syncPath(r *os.Root, parts []string) error {
 func rel(parts []string) string { return path.Join(slices.Concat([]string{"."}, parts)...) }
 
 // parseKey splits key into parts. Each part has only A-Z a-z 0-9 @ . _ -, is not
-// empty, "." or "..", and has at most maxPart bytes. A key has at most maxParts
-// parts. With empty set, the key "" gives no part.
+// empty, "." or "..", and has at most maxPart bytes. A part must not start with
+// .tmp-. A key has at most maxParts parts. When empty is true, the key "" gives
+// no parts.
 func parseKey(op, key string, empty bool) ([]string, error) {
 	if key == "" && empty {
 		return nil, nil
