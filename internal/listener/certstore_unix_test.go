@@ -600,6 +600,29 @@ func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatEvenIfOneLinkIsGoneAtTheOp
 	}
 }
 
+func TestTS16LoadRefusesAKeyFileThatGetsASecondLinkAfterTheLstat(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	// The key file has one link at the Lstat. The hook makes a second name for the
+	// same file, so the open file has two links.
+	calls := 0
+	betweenLstatAndOpen = func() {
+		calls++
+		mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
+	}
+	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	b, err := s.Load(ctx, "key")
+	if calls != 1 {
+		t.Errorf("the hook ran %d times, want 1", calls)
+	}
+	wantError(t, err, "load", ruleLinks)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+}
+
 func TestTS16DeleteOfAKeyBelowAFileGivesNilAndTheKeyIsMissing(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
