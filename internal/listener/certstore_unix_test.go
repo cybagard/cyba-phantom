@@ -394,6 +394,41 @@ func TestTS16LoadRefusesAKeyFileOfAnotherOwner(t *testing.T) {
 	unchanged(t, target)
 }
 
+func TestTS16DirectoryOfAnotherUserIsRefused(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the test needs root to change the owner of a directory")
+	}
+	ctx := context.Background()
+	// A key directory, and a key directory that has the name of the parent of the
+	// cache directory.
+	for _, kd := range []string{"kd", "acme"} {
+		t.Run("key directory "+kd, func(t *testing.T) {
+			s, dir := newStore(t)
+			target := outside(t, dir)
+			mustNil(t, s.Store(ctx, kd+"/key", []byte("v")))
+			mustNil(t, os.Chown(filepath.Join(dir, "acme/cache", kd), 12345, -1))
+			_, err := s.Load(ctx, kd+"/key")
+			wantError(t, err, "load", ruleOwner)
+			wantError(t, s.Store(ctx, kd+"/key2", []byte("v")), "store", ruleOwner)
+			unchanged(t, target)
+		})
+	}
+	t.Run("parent of the cache directory", func(t *testing.T) {
+		_, dir := newStore(t)
+		target := outside(t, dir)
+		state, err := os.OpenRoot(dir)
+		mustNil(t, err)
+		defer state.Close()
+		mustNil(t, os.Chown(filepath.Join(dir, "acme"), 12345, -1))
+		o, err := Open(state, "acme/cache")
+		if err == nil {
+			o.Close()
+		}
+		wantError(t, err, "open", ruleOwner)
+		unchanged(t, target)
+	})
+}
+
 // breakDir is one way to make a directory fail one rule of the directory check.
 type breakDir struct {
 	name  string
