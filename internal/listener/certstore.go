@@ -134,33 +134,49 @@ var betweenCheckAndOpen func(part string)
 // Open walks dir one part at a time. It checks a part in the root of the part
 // before it, and then opens the part as a root. The opened directory must be the
 // directory that the check passed, else Open gives the link rule. The next part
-// is checked in the root that Open just opened, so no later step resolves an
+// is checked in the root that Open just opened, so the walk does not resolve an
 // earlier part again.
+//
+// Open keeps the root of each part open until the walk ends. Then it calls fsync
+// on each of these roots, from the cache directory up to the state directory,
+// through the root itself and not through a path. Open does this for every
+// part, also when the part existed before, so the directories on the path are
+// durable when Open returns.
 func Open(state *os.Root, dir string) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
 		return nil, fail(op, ruleCachePath)
 	}
 	parts := strings.Split(dir, "/")
-	root := state
-	for _, part := range parts {
-		next, err := openPart(root, part)
-		if root != state {
-			root.Close()
+	roots := make([]*os.Root, 1, len(parts)+1) // roots[i] is the directory of parts[:i]
+	roots[0] = state
+	closeOpened := func() {
+		for _, r := range roots[1:] {
+			r.Close()
 		}
+	}
+	for _, part := range parts {
+		next, err := openPart(roots[len(roots)-1], part)
 		if err != nil {
+			closeOpened()
 			return nil, wrap(op, err)
 		}
-		root = next
+		roots = append(roots, next)
 	}
+	root := roots[len(roots)-1]
 	s := &Store{root: root, locks: map[string]chan struct{}{}}
 	if err := s.dirs(nil, false); err != nil {
-		root.Close()
+		closeOpened()
 		return nil, wrap(op, err)
 	}
-	if err := syncPath(state, parts); err != nil {
-		root.Close()
-		return nil, wrap(op, err)
+	for i := len(roots) - 1; i >= 0; i-- {
+		if err := syncPath(roots[i], nil); err != nil {
+			closeOpened()
+			return nil, wrap(op, err)
+		}
+	}
+	for _, r := range roots[1 : len(roots)-1] {
+		r.Close()
 	}
 	return s, nil
 }
@@ -262,7 +278,8 @@ func (s *Store) dirs(parts []string, create bool) error {
 	return err
 }
 
-// syncPath calls fsync on the directory r and on each directory of parts below it.
+// syncPath calls fsync on the directory r and on each directory of parts below
+// it, the deepest first. It opens each directory by its path below r.
 func syncPath(r *os.Root, parts []string) error {
 	for i := len(parts); i >= 0; i-- {
 		f, err := r.OpenFile(rel(parts[:i]), readFlags, 0)

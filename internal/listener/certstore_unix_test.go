@@ -427,6 +427,53 @@ func TestTS16OpenRefusesAParentSwappedForALinkAfterTheCheck(t *testing.T) {
 	}
 }
 
+func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
+	dir := t.TempDir()
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	// other is a real directory with a cache directory. The first fsync swaps
+	// acme for a link to it.
+	other := filepath.Join(dir, "other")
+	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
+	var realAcme, realCache fs.FileInfo
+	var steps []string
+	old := syncDirFile
+	t.Cleanup(func() { syncDirFile = old })
+	syncDirFile = func(f *os.File) error {
+		if realAcme == nil {
+			var err error
+			realAcme, err = os.Stat(filepath.Join(dir, "acme"))
+			mustNil(t, err)
+			realCache, err = os.Stat(filepath.Join(dir, "acme/cache"))
+			mustNil(t, err)
+			mustNil(t, os.Rename(filepath.Join(dir, "acme"), filepath.Join(dir, "acme-real")))
+			mustNil(t, os.Symlink("other", filepath.Join(dir, "acme")))
+		}
+		fi, err := f.Stat()
+		mustNil(t, err)
+		step := "a directory that the walk did not open"
+		for name, p := range map[string]fs.FileInfo{"cache": realCache, "acme": realAcme} {
+			if os.SameFile(fi, p) {
+				step = name
+			}
+		}
+		if st, err := os.Stat(dir); err == nil && os.SameFile(fi, st) {
+			step = "state"
+		}
+		steps = append(steps, step)
+		return old(f)
+	}
+	s, err := Open(state, "acme/cache")
+	if err == nil {
+		s.Close()
+	}
+	mustNil(t, err)
+	if want := []string{"cache", "acme", "state"}; !slices.Equal(steps, want) {
+		t.Errorf("fsync of %q, want %q", steps, want)
+	}
+}
+
 func TestTS16StoreOverAKeyFileThatIsALinkGivesTheLinkRule(t *testing.T) {
 	s, dir := newStore(t)
 	target := outside(t, dir)
