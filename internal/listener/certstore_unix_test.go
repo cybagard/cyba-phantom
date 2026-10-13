@@ -228,6 +228,7 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	cache := filepath.Join(dir, "acme/cache")
+	target := outside(t, dir)
 	mustNil(t, s.Store(ctx, "kd/key", []byte("v")))
 	state, err := os.OpenRoot(dir)
 	mustNil(t, err)
@@ -237,7 +238,7 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 			mustNil(t, os.Chmod(p, mode))
 			_, err := s.Load(ctx, "kd/key")
 			noMarker(t, err, "kd/key")
-			noMarker(t, s.Store(ctx, "kd/key2", nil), "")
+			noMarker(t, s.Store(ctx, "kd/key2", nil), "kd/key2")
 			mustNil(t, os.Chmod(p, 0o700))
 		}
 	}
@@ -264,6 +265,7 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 		o.Close()
 		t.Error("Open accepted a directory of another owner")
 	}
+	unchanged(t, target)
 }
 
 // A check is fooled if the state changes after it. These tests change the
@@ -298,7 +300,15 @@ func TestTS16LinkMadeAfterOpenOrBetweenCallsIsRefused(t *testing.T) {
 	// holds the old directory, so nothing outside the root changes.
 	mustNil(t, os.Rename(cache, cache+"-moved"))
 	mustNil(t, os.Symlink(filepath.Dir(target), cache))
-	_ = s.Store(ctx, "new", []byte("changed"))
+	if err := s.Store(ctx, "new", []byte("changed")); err != nil {
+		t.Errorf("Store after the replacement of the cache directory = %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cache+"-moved", "new")); err != nil || string(b) != "changed" {
+		t.Errorf("the old cache directory holds %q, %v", b, err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(target), "new")); err == nil {
+		t.Error("Store made a file in the directory that the link names")
+	}
 	unchanged(t, target)
 }
 

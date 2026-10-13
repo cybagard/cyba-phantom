@@ -185,6 +185,7 @@ func TestTS16MissingKeyKeepsTheNotExistIdentity(t *testing.T) {
 func TestTS16BadKeysAreRefused(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
+	target := outside(t, dir)
 	keys := []string{
 		"", "/", "a//b", "..", ".", "a/../b", "a/./b", "../x", "a/", "/a", "a/b\x00",
 		"a b", "a:b", "a\\b", "a*b", "ä", "a/b%2f", ".tmp-x",
@@ -211,9 +212,19 @@ func TestTS16BadKeysAreRefused(t *testing.T) {
 	if _, err := s.List(ctx, "a/..", false); err == nil {
 		t.Error("List of a prefix with .. = nil")
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "x")); err == nil {
-		t.Error("a bad key made a file outside the cache directory")
+	// A bad key must not make a name next to the cache directory (acme/x, which
+	// is also acme/cache/../x) or in the state directory (x).
+	for _, p := range []string{"x", "acme/x", "acme/cache/../x"} {
+		if _, err := os.Lstat(filepath.Join(dir, p)); err == nil {
+			t.Errorf("a bad key made %s outside the cache directory", p)
+		}
 	}
+	for p, want := range map[string]string{".": "acme", "acme": "cache"} {
+		if names, err := os.ReadDir(filepath.Join(dir, p)); err != nil || len(names) != 1 || names[0].Name() != want {
+			t.Errorf("directory %s has the names %v, %v; want only %s", p, names, err, want)
+		}
+	}
+	unchanged(t, target)
 }
 
 func TestTS16ListFollowsTheStorageContract(t *testing.T) {
@@ -257,6 +268,7 @@ func TestTS16ListIsBoundedByTheNameCount(t *testing.T) {
 func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
+	target := outside(t, dir)
 	mustNil(t, s.Store(ctx, "ok", bytes.Repeat([]byte("x"), maxValue)))
 	if b, err := s.Load(ctx, "ok"); err != nil || len(b) != maxValue {
 		t.Fatalf("Load of a file at the cap = %d bytes, %v", len(b), err)
@@ -271,6 +283,7 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	if err == nil || b != nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("Load of a 70 KiB file = %d bytes, %v", len(b), err)
 	}
+	unchanged(t, target)
 }
 
 func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
