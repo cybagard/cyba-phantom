@@ -91,6 +91,15 @@ type Store struct {
 
 var _ certmagic.Storage = (*Store)(nil)
 
+// The calls that make a write durable. The code calls them through these
+// variables, so that a test can record their order. A test must restore the
+// real functions.
+var (
+	syncFile    = (*os.File).Sync
+	syncDirFile = (*os.File).Sync
+	renameFile  = (*os.Root).Rename
+)
+
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
 // not exist. Each directory of dir must be a real directory, not a link, owned
@@ -181,7 +190,7 @@ func syncPath(r *os.Root, parts []string) error {
 		if err != nil {
 			return err
 		}
-		err = f.Sync()
+		err = syncDirFile(f)
 		f.Close()
 		if err != nil {
 			return err
@@ -280,13 +289,13 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	}
 	_, err = f.Write(value)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = s.root.Rename(tmp, name)
+		err = renameFile(s.root, tmp, name)
 	}
 	if err != nil {
 		s.root.Remove(tmp)

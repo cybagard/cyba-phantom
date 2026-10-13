@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,93 @@ func TestTS16NewFilesAreMode0600AndNewDirectoriesMode0700(t *testing.T) {
 	// A temporary file does not stay.
 	if names, _ := os.ReadDir(filepath.Join(cache, "certificates/ca/site")); len(names) != 1 {
 		t.Errorf("key directory has %d names, want 1", len(names))
+	}
+}
+
+// A value is durable in this order: write of a temporary file in the directory
+// of the key, fsync of the file, rename, then fsync of the key directory and of
+// each directory above it up to the cache directory.
+func TestTS16WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	const key = "kd/ca/key"
+	mustNil(t, s.Store(ctx, key, []byte("old")))
+	keyDir := filepath.Join(cache, "kd/ca")
+	final := filepath.Join(cache, key)
+	holds := func(p, v string) bool {
+		b, err := os.ReadFile(p)
+		return err == nil && string(b) == v
+	}
+	// tmpFile returns the temporary file in the key directory, if there is one.
+	tmpFile := func() (string, bool) {
+		names, _ := os.ReadDir(keyDir)
+		for _, n := range names {
+			if strings.HasPrefix(n.Name(), tmpPrefix) {
+				return filepath.Join(keyDir, n.Name()), true
+			}
+		}
+		return "", false
+	}
+	var steps []string
+	oldSync, oldDir, oldRename := syncFile, syncDirFile, renameFile
+	t.Cleanup(func() { syncFile, syncDirFile, renameFile = oldSync, oldDir, oldRename })
+	syncFile = func(f *os.File) error {
+		tmp, ok := tmpFile()
+		if !ok || !holds(tmp, "new") || !holds(final, "old") {
+			t.Error("file sync: the temporary file lacks the value, or the key has it already")
+		} else if fi, err := f.Stat(); err != nil {
+			t.Error(err)
+		} else if ti, err := os.Stat(tmp); err != nil || !os.SameFile(fi, ti) {
+			t.Error("file sync: the file is not the temporary file")
+		}
+		steps = append(steps, "sync file")
+		return oldSync(f)
+	}
+	renameFile = func(r *os.Root, from, to string) error {
+		tmp, ok := tmpFile()
+		if !ok || filepath.Dir(from) != "kd/ca" || !strings.HasPrefix(filepath.Base(from), tmpPrefix) ||
+			filepath.Base(tmp) != filepath.Base(from) || to != key || !holds(tmp, "new") || !holds(final, "old") {
+			t.Errorf("rename %s to %s: wrong names or state", from, to)
+		}
+		steps = append(steps, "rename")
+		return oldRename(r, from, to)
+	}
+	syncDirFile = func(f *os.File) error {
+		if _, ok := tmpFile(); ok || !holds(final, "new") {
+			t.Error("directory sync: the temporary file is there, or the key lacks the value")
+		}
+		fi, err := f.Stat()
+		mustNil(t, err)
+		step := "sync of an unknown directory"
+		for _, d := range []string{"kd/ca", "kd", "."} {
+			if di, err := os.Stat(filepath.Join(cache, d)); err == nil && os.SameFile(di, fi) {
+				step = "sync dir " + d
+				break
+			}
+		}
+		steps = append(steps, step)
+		return oldDir(f)
+	}
+	mustNil(t, s.Store(ctx, key, []byte("new")))
+	want := []string{"sync file", "rename", "sync dir kd/ca", "sync dir kd", "sync dir ."}
+	if !slices.Equal(steps, want) {
+		t.Errorf("steps = %q, want %q", steps, want)
+	}
+	if !holds(final, "new") {
+		t.Error("the key does not hold the new value")
+	}
+}
+
+func TestTS16StoreOverAHardLinkKeepsTheOutsideFile(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	mustNil(t, os.Link(target, filepath.Join(dir, "acme/cache/hl")))
+	mustNil(t, s.Store(ctx, "hl", []byte("new")))
+	unchanged(t, target)
+	if b, err := s.Load(ctx, "hl"); err != nil || string(b) != "new" {
+		t.Fatalf("Load = %q, %v", b, err)
 	}
 }
 
