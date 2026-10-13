@@ -1,10 +1,10 @@
 {
-  "synced": "2026-10-12",
+  "synced": "2026-10-13",
   "files": {
-    "01-prd.md": "72544a811fb820991b7aaf5e4b418eab240d667ea559d212fa2200b0ab688494",
-    "04-interfaces.md": "9df71da3ae7793c5dce3b124403dcf4a7cc134f3dadb621efb86c5f3a4975b90",
-    "07-test-plan.md": "28f66ab8cc66e8e84637726a8df6797d9cbbb16fbdfde854b869fed29209cf51",
-    "08-traceability.md": "01fa8c44f621d50feb99683100db3ea97501631373211a5035509799970bd964",
+    "01-prd.md": "cdf069be64a197269cde0196bb747f2e13d908744b65a65c1ab6e5906e05e63c",
+    "04-interfaces.md": "f5bd777349b48089409b80988357a0ace98dbbf237ad6c56c4c1b0a0d29b0cf9",
+    "07-test-plan.md": "650cafd50108da63b478a18249497bd1d46efb24628d09f1edc6b0b240742534",
+    "08-traceability.md": "8e999e1feb3f1222c999b5a2a38d7c8c47a27403415936a0ea74535cea8dc361",
     "README.md": "59b9b908a15ff3f09c5bc4ba1688821de4f79df5dbee335ec82a3be56db42d82",
     "constitution-table.md": "e50c6e461a1ac26de14c82a21508dcf6ae64acaad1afd24fd288c0d1a43bbba3"
   }
