@@ -53,7 +53,9 @@ type sinkRig struct {
 	sink   *Sink
 }
 
-func newSinkRig(t *testing.T) *sinkRig {
+func newSinkRig(t *testing.T) *sinkRig { return newSinkRigDepth(t, 10) }
+
+func newSinkRigDepth(t *testing.T, depth int) *sinkRig {
 	t.Helper()
 	skey, vkey, err := note.GenerateKey(rand.Reader, "origin")
 	if err != nil {
@@ -67,7 +69,7 @@ func newSinkRig(t *testing.T) *sinkRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &sinkRig{rig: newRig(t, 10), signer: s, v: v, spool: &fakeSpool{}}
+	r := &sinkRig{rig: newRig(t, depth), signer: s, v: v, spool: &fakeSpool{}}
 	r.sink = NewSink(r.w, r.spool, "origin", v)
 	return r
 }
