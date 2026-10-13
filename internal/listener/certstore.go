@@ -165,8 +165,9 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	return s, nil
 }
 
-// Close closes the cache directory.
-func (s *Store) Close() error { return s.root.Close() }
+// Close closes the cache directory. An error of the close has the operation
+// "close" and a fixed rule, like the error of any other method.
+func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 
 // checkPath checks each directory on the path parts below r. With create set, it
 // makes a missing directory with mode 0700 first. It returns the facts of the
