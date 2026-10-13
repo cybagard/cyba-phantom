@@ -440,6 +440,9 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	if fi.Size() > maxValue {
 		return nil, false, fail(op, ruleSize)
 	}
+	if n, ok := linkCount(fi); !ok || n > 1 {
+		return nil, false, fail(op, ruleLinks)
+	}
 	if betweenLstatAndOpen != nil {
 		betweenLstatAndOpen()
 	}

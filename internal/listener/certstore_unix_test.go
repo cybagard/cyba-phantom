@@ -584,6 +584,22 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *tes
 	}
 }
 
+func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatEvenIfOneLinkIsGoneAtTheOpen(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
+	// The hook removes the second name, so the open file has one link.
+	betweenLstatAndOpen = func() { mustNil(t, os.Remove(filepath.Join(cache, "second-name"))) }
+	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	b, err := s.Load(ctx, "key")
+	wantError(t, err, "load", ruleLinks)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+}
+
 func TestTS16StoreOverAKeyFileThatIsALinkGivesTheLinkRule(t *testing.T) {
 	s, dir := newStore(t)
 	target := outside(t, dir)
