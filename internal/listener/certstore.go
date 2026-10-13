@@ -64,7 +64,7 @@ const (
 type Error struct {
 	Op   string
 	Rule string
-	err  error // fs.ErrNotExist for a missing key, else nil
+	err  error // fs.ErrNotExist for a missing key, ctx.Err() for an ended context, else nil
 }
 
 func (e *Error) Error() string { return "listener: cert cache: " + e.Op + ": " + e.Rule }
@@ -205,9 +205,9 @@ func openPart(r *os.Root, part string) (*os.Root, error) {
 	return next, nil
 }
 
-// checkPath checks each directory on the path parts below r. With create set, it
-// makes a missing directory with mode 0700 first. It returns the facts of the
-// last directory, or nil if parts is empty.
+// checkPath checks each directory on the path parts below r. When create is
+// true, it makes a missing directory with mode 0700 first. It returns the facts
+// of the last directory, or nil if parts is empty.
 func checkPath(r *os.Root, parts []string, create bool) (fs.FileInfo, error) {
 	p := ""
 	var last fs.FileInfo
