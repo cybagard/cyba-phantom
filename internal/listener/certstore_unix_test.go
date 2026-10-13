@@ -427,6 +427,36 @@ func TestTS16OpenRefusesAParentSwappedForALinkAfterTheCheck(t *testing.T) {
 	}
 }
 
+func TestTS16OpenUsesTheDirectoryThatItOpenedForEarlierPartsWhenAParentChanges(t *testing.T) {
+	dir := t.TempDir()
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	mustNil(t, os.MkdirAll(filepath.Join(dir, "acme/cache"), 0o700))
+	// other is a real directory with a cache directory that passes every check.
+	// The hook swaps acme for a link to it before the check of cache.
+	other := filepath.Join(dir, "other")
+	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
+	beforeCheck = func(part string) {
+		if part != "cache" {
+			return
+		}
+		mustNil(t, os.Rename(filepath.Join(dir, "acme"), filepath.Join(dir, "acme-real")))
+		mustNil(t, os.Symlink("other", filepath.Join(dir, "acme")))
+	}
+	t.Cleanup(func() { beforeCheck = nil })
+	s, err := Open(state, "acme/cache")
+	mustNil(t, err)
+	defer s.Close()
+	mustNil(t, s.Store(context.Background(), "key", []byte("v")))
+	if b, err := os.ReadFile(filepath.Join(dir, "acme-real/cache/key")); err != nil || string(b) != "v" {
+		t.Errorf("the cache directory below the real acme holds %q, %v; want v", b, err)
+	}
+	if names, err := os.ReadDir(filepath.Join(other, "cache")); err != nil || len(names) != 0 {
+		t.Errorf("the other cache directory has %d names, %v; want none", len(names), err)
+	}
+}
+
 func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 	dir := t.TempDir()
 	state, err := os.OpenRoot(dir)

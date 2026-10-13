@@ -120,6 +120,10 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
+// beforeCheck is a test hook. Open calls it for each part of the path, before
+// the check of the part. It is nil in production.
+var beforeCheck func(part string)
+
 // betweenCheckAndOpen is a test hook. Open calls it for each part of the path,
 // after the check of the part and before it opens the part. It is nil in
 // production.
@@ -188,6 +192,9 @@ func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 // missing, and opens it as a root. The opened directory must be the directory
 // that the check passed.
 func openPart(r *os.Root, part string) (*os.Root, error) {
+	if beforeCheck != nil {
+		beforeCheck(part)
+	}
 	fi, err := r.Lstat(part)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Another Store can make the same directory first. Then the checks
