@@ -417,6 +417,11 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 			}
 		}
 	}()
+	// A t.Fatalf in the loop must not leave the goroutine running after the test.
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
 	failed := 0
 	for i := 0; i < 20000; i++ {
 		b, err := s.Load(ctx, "kd/key")
@@ -428,8 +433,6 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 			t.Fatalf("Load returned %d bytes that are not a stored value", len(b))
 		}
 	}
-	close(stop)
-	wg.Wait()
 	if failed != 0 {
 		t.Fatalf("%d of 20000 Load calls failed", failed)
 	}
