@@ -48,6 +48,10 @@ const (
 	ruleMany    = "directory listing has too many names"
 	ruleNotHeld = "lock is not held"
 	ruleStopped = "operation was stopped by its context"
+
+	ruleLinks     = "file has more than one link"
+	ruleFileOwner = "file has another owner"
+	ruleFileMode  = "file allows access for group or other"
 )
 
 // Error names the operation that failed and the rule that failed. The text is
@@ -356,8 +360,20 @@ func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer f.Close()
 	// The open file must be the file that Lstat gave.
-	if of, err := f.Stat(); err != nil || !os.SameFile(fi, of) {
+	of, err := f.Stat()
+	if err != nil || !os.SameFile(fi, of) {
 		return nil, fail(op, ruleLink)
+	}
+	// The key file must be only a name for this file, and only the owner of the
+	// store may have access to it.
+	if n, ok := linkCount(of); !ok || n != 1 {
+		return nil, fail(op, ruleLinks)
+	}
+	if !ownedByUs(of) {
+		return nil, fail(op, ruleFileOwner)
+	}
+	if of.Mode().Perm()&otherBit != 0 {
+		return nil, fail(op, ruleFileMode)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxValue+1))
 	if err != nil {

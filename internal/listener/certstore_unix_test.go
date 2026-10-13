@@ -338,6 +338,62 @@ func TestTS16OpenRefusesADirectorySwappedForALinkAfterTheCheck(t *testing.T) {
 	}
 }
 
+func TestTS16LoadRefusesAKeyFileWithMoreThanOneLink(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, os.Link(target, filepath.Join(cache, "hl-outside")))
+	mustNil(t, s.Store(ctx, "inside", []byte("v")))
+	mustNil(t, os.Link(filepath.Join(cache, "inside"), filepath.Join(cache, "hl-inside")))
+	for _, key := range []string{"hl-outside", "hl-inside", "inside"} {
+		b, err := s.Load(ctx, key)
+		if b != nil {
+			t.Errorf("Load(%q) returned %d bytes", key, len(b))
+		}
+		wantError(t, err, "load", ruleLinks)
+		noMarker(t, err, key)
+	}
+	unchanged(t, target)
+}
+
+func TestTS16LoadRefusesAKeyFileWithGroupOrOtherBits(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	cache := filepath.Join(dir, "acme/cache")
+	for _, mode := range []fs.FileMode{0o644, 0o640, 0o604, 0o660, 0o666, 0o610} {
+		mustNil(t, s.Store(ctx, "key", []byte(marker)))
+		mustNil(t, os.Chmod(filepath.Join(cache, "key"), mode))
+		b, err := s.Load(ctx, "key")
+		if b != nil {
+			t.Errorf("Load of mode %o returned %d bytes", mode, len(b))
+		}
+		wantError(t, err, "load", ruleFileMode)
+		noMarker(t, err, "key")
+		mustNil(t, os.Remove(filepath.Join(cache, "key")))
+	}
+	unchanged(t, target)
+}
+
+func TestTS16LoadRefusesAKeyFileOfAnotherOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the test needs root to change the owner of a file")
+	}
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	mustNil(t, s.Store(ctx, "key", []byte(marker)))
+	mustNil(t, os.Chown(filepath.Join(dir, "acme/cache/key"), 12345, -1))
+	b, err := s.Load(ctx, "key")
+	if b != nil {
+		t.Errorf("Load returned %d bytes", len(b))
+	}
+	wantError(t, err, "load", ruleFileOwner)
+	noMarker(t, err, "key")
+	unchanged(t, target)
+}
+
 // breakDir is one way to make a directory fail one rule of the directory check.
 type breakDir struct {
 	name  string

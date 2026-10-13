@@ -25,5 +25,15 @@ func ownedByUs(fi fs.FileInfo) bool {
 	return ok && int64(st.Uid) == int64(geteuid())
 }
 
+// linkCount returns the number of hard links of the file. It returns false when
+// the system gives no count.
+func linkCount(fi fs.FileInfo) (uint64, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(st.Nlink), true
+}
+
 // isLoop reports whether err is the error of a link that O_NOFOLLOW refused.
 func isLoop(err error) bool { return errors.Is(err, syscall.ELOOP) }
