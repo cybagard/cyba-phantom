@@ -370,6 +370,16 @@ func TestTS16OpenRefusesAParentSwappedForALinkAfterTheCheck(t *testing.T) {
 	}
 }
 
+func TestTS16StoreOverAKeyFileThatIsALinkGivesTheLinkRule(t *testing.T) {
+	s, dir := newStore(t)
+	target := outside(t, dir)
+	mustNil(t, os.Symlink(target, filepath.Join(dir, "acme/cache/linkfile")))
+	err := s.Store(context.Background(), "linkfile", []byte("changed"))
+	wantError(t, err, "store", ruleLink)
+	noMarker(t, err, "linkfile")
+	unchanged(t, target)
+}
+
 func TestTS16LoadRefusesAKeyFileWithMoreThanOneLink(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()

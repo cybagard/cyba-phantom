@@ -247,6 +247,17 @@ func TestTS16BadKeysAreRefused(t *testing.T) {
 	unchanged(t, target)
 }
 
+func TestTS16KeyPartOf256BytesGivesTheKeyRule(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	for _, key := range []string{strings.Repeat("a", 256), "kd/" + strings.Repeat("a", 256)} {
+		wantError(t, s.Store(ctx, key, []byte("v")), "store", ruleKey)
+		_, err := s.Load(ctx, key)
+		wantError(t, err, "load", ruleKey)
+		wantError(t, s.Delete(ctx, key), "delete", ruleKey)
+	}
+}
+
 func TestTS16ListFollowsTheStorageContract(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
