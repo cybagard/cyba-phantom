@@ -347,6 +347,10 @@ func (s *Store) info(ctx context.Context, op, key string) (fs.FileInfo, []string
 		return nil, nil, err
 	}
 	if err := s.dirs(parts[:len(parts)-1], false); err != nil {
+		// A file in place of a directory on the path: the key cannot exist.
+		if e := new(Error); errors.As(err, &e) && e.Rule == ruleNotDir {
+			return nil, nil, &Error{Op: op, Rule: ruleMissing, err: fs.ErrNotExist}
+		}
 		return nil, nil, wrap(op, err)
 	}
 	fi, err := s.root.Lstat(rel(parts))

@@ -600,6 +600,26 @@ func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatEvenIfOneLinkIsGoneAtTheOp
 	}
 }
 
+func TestTS16DeleteOfAKeyBelowAFileGivesNilAndTheKeyIsMissing(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "f", []byte("v")))
+	mustNil(t, s.Delete(ctx, "f/x"))
+	mustNil(t, s.Delete(ctx, "f/x/y"))
+	if s.Exists(ctx, "f/x") {
+		t.Error("Exists of a key below a file is true")
+	}
+	_, err := s.Load(ctx, "f/x")
+	wantError(t, err, "load", ruleMissing)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Load error %v does not wrap fs.ErrNotExist", err)
+	}
+	// The file stays.
+	if b, err := os.ReadFile(filepath.Join(dir, "acme/cache/f")); err != nil || string(b) != "v" {
+		t.Errorf("the file f holds %q, %v; want v", b, err)
+	}
+}
+
 func TestTS16StoreOverAKeyFileThatIsALinkGivesTheLinkRule(t *testing.T) {
 	s, dir := newStore(t)
 	target := outside(t, dir)
@@ -768,14 +788,24 @@ func TestTS16DirectoryRuleErrorsNameTheOperation(t *testing.T) {
 			ctx := context.Background()
 			mustNil(t, s.Store(ctx, "kd/key", []byte("v")))
 			tc.apply(t, filepath.Join(dir, "acme/cache/kd"))
+			// A key below a file cannot exist, so Load and Stat give the rule for
+			// a missing key, and Delete gives nil.
+			readRule := tc.rule
+			if tc.rule == ruleNotDir {
+				readRule = ruleMissing
+			}
 			_, err := s.Load(ctx, "kd/key")
-			wantError(t, err, "load", tc.rule)
+			wantError(t, err, "load", readRule)
 			wantError(t, s.Store(ctx, "kd/key2", []byte("v")), "store", tc.rule)
 			_, err = s.Stat(ctx, "kd/key")
-			wantError(t, err, "stat", tc.rule)
+			wantError(t, err, "stat", readRule)
 			_, err = s.List(ctx, "kd", false)
 			wantError(t, err, "list", tc.rule)
-			wantError(t, s.Delete(ctx, "kd/key"), "delete", tc.rule)
+			if tc.rule == ruleNotDir {
+				mustNil(t, s.Delete(ctx, "kd/key"))
+			} else {
+				wantError(t, s.Delete(ctx, "kd/key"), "delete", tc.rule)
+			}
 		})
 		t.Run(tc.name+" in Open", func(t *testing.T) {
 			_, dir := newStore(t)
