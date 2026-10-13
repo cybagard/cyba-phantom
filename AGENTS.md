@@ -34,8 +34,8 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 |------|--------------------------------------------------------|
 | `cmd/phantom` | main: config, wiring, run loop |
 | `cmd/phantom-verify` | verifier CLI: inclusion proof against a checkpoint |
-| `internal/listener` | TLS via certmagic (ACME); ClientHello capture for JA4 |
-| `internal/limiter` | conn cap, per-IP token bucket, body/header/path caps |
+| `internal/listener` | TLS via certmagic (ACME); ClientHello capture for JA4; connection caps (total and for each source address), read limits and header caps for each decoy connection |
+| `internal/limiter` | per-IP token bucket, body/path caps |
 | `internal/bait` | decoy vhosts, template rendering, per-session token injection, callback surfaces, JS beacon |
 | `internal/bundle` | bundle load + Ed25519 verify, hot-reload — the only path to content |
 | `internal/token` | mint/verify canary tokens (◇ code; HMAC ◆ seeds from bundle) |
