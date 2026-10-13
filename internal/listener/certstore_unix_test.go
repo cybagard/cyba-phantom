@@ -429,6 +429,29 @@ func TestTS16DirectoryOfAnotherUserIsRefused(t *testing.T) {
 	})
 }
 
+func TestTS16DirectoryWithSetuidSetgidOrStickyBitIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, bit := range []struct {
+		name string
+		mode fs.FileMode
+	}{{"sticky", os.ModeSticky}, {"setgid", os.ModeSetgid}, {"setuid", os.ModeSetuid}} {
+		t.Run(bit.name, func(t *testing.T) {
+			s, dir := newStore(t)
+			target := outside(t, dir)
+			mustNil(t, s.Store(ctx, "kd/key", []byte("v")))
+			kd := filepath.Join(dir, "acme/cache/kd")
+			mustNil(t, os.Chmod(kd, 0o700|bit.mode))
+			if fi, err := os.Lstat(kd); err != nil || fi.Mode()&bit.mode == 0 {
+				t.Skipf("the system did not set the %s bit: %v, %v", bit.name, fi, err)
+			}
+			_, err := s.Load(ctx, "kd/key")
+			wantError(t, err, "load", ruleMode)
+			wantError(t, s.Store(ctx, "kd/key2", []byte("v")), "store", ruleMode)
+			unchanged(t, target)
+		})
+	}
+}
+
 // breakDir is one way to make a directory fail one rule of the directory check.
 type breakDir struct {
 	name  string

@@ -201,7 +201,7 @@ func dirRule(fi fs.FileInfo) error {
 		return fail("check", ruleNotDir)
 	case !ownedByUs(fi):
 		return fail("check", ruleOwner)
-	case fi.Mode().Perm()&otherBit != 0:
+	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
 		return fail("check", ruleMode)
 	}
 	return nil
