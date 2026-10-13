@@ -9,19 +9,26 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
 
 const testName = "decoy.test"
+
+// testHeaderBytes is the smallest HeaderBytes that New accepts.
+const testHeaderBytes = 8192
 
 // testCert makes a self-signed certificate in the test: no fixture file.
 func testCert(t testing.TB) (tls.Certificate, *x509.CertPool) {
@@ -60,7 +67,7 @@ type rig struct {
 
 var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") })
 
-// newRig builds a server; the test may change s.tls before it calls serve.
+// newRig builds a server; the test can change s.tls before it calls serve.
 func newRig(t *testing.T, maxConns, headerBytes int, tm timeouts, h http.Handler) *rig {
 	t.Helper()
 	cert, pool := testCert(t)
@@ -104,7 +111,25 @@ func status(c net.Conn, n int) int {
 	if n > len(head)+4 {
 		pad = n - len(head) - 4
 	}
-	req := head + strings.Repeat("a", pad) + "\r\n\r\n"
+	return roundTrip(c, head+strings.Repeat("a", pad)+"\r\n\r\n")
+}
+
+// statusValues sends a request with n header values (Host and n-1 others, each
+// on its own line) and returns the status code, or 0 when the server closed
+// the connection.
+func statusValues(c net.Conn, n int) int {
+	var b strings.Builder
+	b.WriteString("GET / HTTP/1.1\r\nHost: a\r\n")
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, "X-H%d: v\r\n", i)
+	}
+	b.WriteString("\r\n")
+	return roundTrip(c, b.String())
+}
+
+// roundTrip writes req, reads the whole response and returns its status code,
+// or 0 when the write or the read fails.
+func roundTrip(c net.Conn, req string) int {
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(c, req); err != nil {
 		return 0
@@ -113,13 +138,21 @@ func status(c net.Conn, n int) int {
 	if err != nil {
 		return 0
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return resp.StatusCode
 }
 
+// shortTimeouts has three different values. The read-header timeout is short.
+// The read and write timeouts are long, so a close before them comes from the
+// read-header timeout and the handshake deadline.
 func shortTimeouts() timeouts {
-	return timeouts{readHeader: 300 * time.Millisecond, read: 300 * time.Millisecond, write: 300 * time.Millisecond, idle: time.Second}
+	return timeouts{readHeader: 300 * time.Millisecond, read: 5 * time.Second, write: 7 * time.Second, idle: time.Second}
 }
+
+// closeBound is the upper bound for a close that the short read-header
+// timeout causes. It is below the read and write timeouts.
+const closeBound = time.Second
 
 // closesWithin reads until the server closes the connection and returns the
 // time that took.
@@ -128,13 +161,14 @@ func closesWithin(t *testing.T, c net.Conn) time.Duration {
 	start := time.Now()
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.Copy(io.Discard, c); err != nil && !isClosed(err) {
-		t.Fatalf("connection not closed by the server: %v", err)
+		t.Fatalf("connection not closed by the server (timeout: %v): %v", errors.Is(err, os.ErrDeadlineExceeded), err)
 	}
 	return time.Since(start)
 }
 
+// isClosed tells if err is an end of stream or a reset.
 func isClosed(err error) bool {
-	return err != nil && !strings.Contains(err.Error(), "i/o timeout")
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // T-S-17: the production bounds are 10 s, 10 s, 10 s and 30 s.
@@ -142,11 +176,11 @@ func TestTS17DefaultBounds(t *testing.T) {
 	if defaultTimeouts != (timeouts{10 * time.Second, 10 * time.Second, 10 * time.Second, 30 * time.Second}) {
 		t.Fatalf("defaults: %+v", defaultTimeouts)
 	}
-	r := newRig(t, 1, 777, defaultTimeouts, okHandler)
+	r := newRig(t, 1, 9000, defaultTimeouts, okHandler)
 	s := r.s.srv
 	if s.ReadHeaderTimeout != 10*time.Second || s.ReadTimeout != 10*time.Second || s.WriteTimeout != 10*time.Second ||
-		s.IdleTimeout != 30*time.Second || s.MaxHeaderBytes != 777 {
-		t.Fatalf("server: %v %v %v %v %v", s.ReadHeaderTimeout, s.ReadTimeout, s.WriteTimeout, s.IdleTimeout, s.MaxHeaderBytes)
+		s.IdleTimeout != 30*time.Second || s.MaxHeaderBytes != 9000-4096 || s.MaxHeaderValueCount != 64 {
+		t.Fatalf("server: %v %v %v %v %v %v", s.ReadHeaderTimeout, s.ReadTimeout, s.WriteTimeout, s.IdleTimeout, s.MaxHeaderBytes, s.MaxHeaderValueCount)
 	}
 	if !s.Protocols.HTTP1() || s.Protocols.HTTP2() || s.Protocols.UnencryptedHTTP2() {
 		t.Fatalf("protocols: %v", s.Protocols)
@@ -154,11 +188,13 @@ func TestTS17DefaultBounds(t *testing.T) {
 }
 
 // T-S-17: an idle connection and a partial ClientHello close at the
-// handshake deadline.
+// handshake deadline. The error log shows that the close comes from the
+// handshake path.
 func TestTS17IdleAndPartialHelloClose(t *testing.T) {
-	r := newRig(t, 4, 1024, shortTimeouts(), okHandler)
+	r := newRig(t, 4, testHeaderBytes, shortTimeouts(), okHandler)
 	r.serve(t)
 	for name, partial := range map[string][]byte{"idle": nil, "partial hello": {0x16, 0x03, 0x01, 0x01, 0x00, 0x01}} {
+		lines := r.s.ErrorLines()
 		c, err := net.Dial("tcp", r.addr)
 		if err != nil {
 			t.Fatal(err)
@@ -168,49 +204,83 @@ func TestTS17IdleAndPartialHelloClose(t *testing.T) {
 		}
 		d := closesWithin(t, c)
 		_ = c.Close()
-		if d < 200*time.Millisecond || d > 3*time.Second {
+		if d < 200*time.Millisecond || d > closeBound {
 			t.Errorf("%s closed after %v", name, d)
+		}
+		if got := r.s.ErrorLines(); got <= lines {
+			t.Errorf("%s: error lines %d, want more than %d", name, got, lines)
 		}
 	}
 }
 
 // T-S-17: slow headers close at the read-header timeout.
 func TestTS17SlowHeadersClose(t *testing.T) {
-	r := newRig(t, 4, 1024, shortTimeouts(), okHandler)
+	r := newRig(t, 4, testHeaderBytes, shortTimeouts(), okHandler)
 	r.serve(t)
 	c := r.dial(t)
 	_, _ = io.WriteString(c, "GET / HTTP/1.1\r\nHost: a\r\n")
-	if d := closesWithin(t, c); d < 200*time.Millisecond || d > 3*time.Second {
+	if d := closesWithin(t, c); d < 200*time.Millisecond || d > closeBound {
 		t.Errorf("closed after %v", d)
 	}
 }
 
-// T-S-17: the header cap. net/http reads MaxHeaderBytes + 4096 bytes (the
-// bufio slop) before it answers 431, so a head one byte over the cap is not
-// refused. The test measures the boundary: the head is the request line, the
-// header lines and the blank line. Measured: 200 up to cap + 4096 bytes, 431
-// from cap + 4097 bytes.
+// T-S-17: the header cap. The server sets MaxHeaderBytes to header_bytes -
+// 4096, and net/http reads 4096 bytes more than that before it answers 431.
+// The head is the request line, the header lines and the blank line. A head
+// of header_bytes bytes gets 200 and a head of header_bytes + 1 bytes gets 431.
 func TestTS17HeaderCapBoundary(t *testing.T) {
-	const cap = 1024
-	r := newRig(t, 8, cap, defaultTimeouts, okHandler)
+	const headerBytes = testHeaderBytes
+	r := newRig(t, 8, headerBytes, defaultTimeouts, okHandler)
 	r.serve(t)
 	for _, tc := range []struct{ n, want int }{
-		{cap, 200}, {cap + 1, 200}, {cap + 4096, 200}, {cap + 4096 + 1, 431}, {cap + 8192, 431},
+		{headerBytes, 200}, {headerBytes + 1, 431}, {headerBytes + 4096, 431},
 	} {
 		c := r.dial(t)
 		got := status(c, tc.n)
-		t.Logf("head of %d bytes (cap + %d): status %d", tc.n, tc.n-cap, got)
+		t.Logf("head of %d bytes (header_bytes + %d): status %d", tc.n, tc.n-headerBytes, got)
 		if got != tc.want {
 			t.Errorf("head of %d bytes: status %d, want %d", tc.n, got, tc.want)
 		}
 	}
 }
 
+// T-S-17: the header value count. A request with 64 header values (Host and
+// 63 others) gets 200 and a request with 65 gets 431.
+func TestTS17HeaderValueCount(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	for _, tc := range []struct{ n, want int }{{64, 200}, {65, 431}} {
+		c := r.dial(t)
+		got := statusValues(c, tc.n)
+		t.Logf("%d header values: status %d", tc.n, got)
+		if got != tc.want {
+			t.Errorf("%d header values: status %d, want %d", tc.n, got, tc.want)
+		}
+	}
+}
+
+// T-S-17: New refuses a nil handler and a header cap below 8192.
+func TestTS17NewRefusals(t *testing.T) {
+	cert, _ := testCert(t)
+	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes}
+	if _, err := New(cfg, nil); err == nil {
+		t.Error("nil handler: no error")
+	}
+	cfg.HeaderBytes = testHeaderBytes - 1
+	if _, err := New(cfg, okHandler); err == nil {
+		t.Error("header bytes 8191: no error")
+	}
+	cfg.HeaderBytes = testHeaderBytes
+	if _, err := New(cfg, okHandler); err != nil {
+		t.Errorf("header bytes 8192: %v", err)
+	}
+}
+
 // T-S-17: connection max_conns + 1 closes before the handshake and the others
 // serve. A connection that is closed gives its slot back.
 func TestTS17ConnectionCap(t *testing.T) {
-	const max = 3
-	r := newRig(t, max, 1024, defaultTimeouts, okHandler)
+	const nConns = 3
+	r := newRig(t, nConns, testHeaderBytes, defaultTimeouts, okHandler)
 	var calls atomic.Int32
 	r.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 		calls.Add(1)
@@ -218,7 +288,7 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 	r.serve(t)
 	var conns []*tls.Conn
-	for range max {
+	for range nConns {
 		c := r.dial(t)
 		if got := status(c, 0); got != 200 {
 			t.Fatalf("status %d", got)
@@ -230,14 +300,21 @@ func TestTS17ConnectionCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer over.Close()
-	_ = over.SetReadDeadline(time.Now().Add(3 * time.Second))
-	start := time.Now()
-	n, err := over.Read(make([]byte, 16))
-	if n != 0 || !isClosed(err) || time.Since(start) > time.Second {
-		t.Fatalf("connection over the cap: %d bytes, err %v after %v; want an end of stream or a reset at once", n, err, time.Since(start))
+	// The connection over the cap sends a ClientHello. The handshake must end
+	// with an end of stream or a reset; a timeout fails the test.
+	_ = over.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
+		t.Fatalf("connection over the cap: handshake error %v; want an end of stream or a reset", err)
 	}
-	if calls.Load() != max {
-		t.Fatalf("capture ran %d times, want %d", calls.Load(), max)
+	_ = over.Close()
+	if calls.Load() != nConns {
+		t.Fatalf("capture ran %d times, want %d", calls.Load(), nConns)
+	}
+	// The others serve after the connection over the cap.
+	for i, c := range conns {
+		if got := status(c, 0); got != 200 {
+			t.Fatalf("open connection %d: status %d after the connection over the cap", i, got)
+		}
 	}
 	_ = conns[0].Close()
 	deadline := time.Now().Add(5 * time.Second)
@@ -286,7 +363,7 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 
 // T-S-17: ALPN h2 is not selected.
 func TestTS17NoH2(t *testing.T) {
-	r := newRig(t, 4, 1024, defaultTimeouts, okHandler)
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
 	c, err := tls.Dial("tcp", r.addr, r.clientConfig("h2", "http/1.1"))
 	if err != nil {
@@ -296,11 +373,21 @@ func TestTS17NoH2(t *testing.T) {
 	if p := c.ConnectionState().NegotiatedProtocol; p != "http/1.1" {
 		t.Fatalf("negotiated %q", p)
 	}
-	if c2, err := tls.Dial("tcp", r.addr, r.clientConfig("h2")); err == nil {
-		defer c2.Close()
-		if p := c2.ConnectionState().NegotiatedProtocol; p == "h2" {
-			t.Fatal("h2 selected")
+	// A client that offers only h2 gets a handshake error, or a protocol that
+	// is not h2. A timeout is neither.
+	c2, err := tls.Dial("tcp", r.addr, r.clientConfig("h2"))
+	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("h2-only dial timed out: %v", err)
 		}
+		t.Logf("h2-only dial: handshake error: %v", err)
+		return
+	}
+	defer c2.Close()
+	p := c2.ConnectionState().NegotiatedProtocol
+	t.Logf("h2-only dial: negotiated %q", p)
+	if p == "h2" {
+		t.Fatal("h2 selected")
 	}
 }
 
@@ -313,7 +400,7 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&structured, nil)))
 	log.SetOutput(&std)
 
-	r := newRig(t, 8, 1024, defaultTimeouts, okHandler)
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
 	var addrs []string
 	for range 3 {

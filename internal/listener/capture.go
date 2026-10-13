@@ -35,21 +35,26 @@ type Hello struct {
 	cut        bool
 }
 
-// CipherSuites returns the cipher suites in wire order.
+// CipherSuites returns the cipher suites in wire order. The caller must not
+// change the returned slice.
 func (h *Hello) CipherSuites() []uint16 { return h.ciphers[:h.nCiphers] }
 
-// Extensions returns the extension IDs in wire order.
+// Extensions returns the extension IDs in wire order. The caller must not
+// change the returned slice.
 func (h *Hello) Extensions() []uint16 { return h.extensions[:h.nExtensions] }
 
-// SignatureSchemes returns the signature schemes in wire order.
+// SignatureSchemes returns the signature schemes in wire order. The caller
+// must not change the returned slice.
 func (h *Hello) SignatureSchemes() []uint16 { return h.sigSchemes[:h.nSigSchemes] }
 
-// SupportedGroups returns the supported groups in wire order.
+// SupportedGroups returns the supported groups in wire order. The caller must
+// not change the returned slice.
 func (h *Hello) SupportedGroups() []uint16 { return h.groups[:h.nGroups] }
 
 // SupportedVersions returns the supported versions in wire order. When the
 // client sends no supported_versions extension, crypto/tls extrapolates the
-// list from the legacy version, and Extensions has no entry 43.
+// list from the legacy version, and Extensions has no entry 43. The caller
+// must not change the returned slice.
 func (h *Hello) SupportedVersions() []uint16 { return h.versions[:h.nVersions] }
 
 // ALPN returns the first ALPN value, or "" when the client sent none.
@@ -94,11 +99,11 @@ func captureHello(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 func (s *connState) capture(chi *tls.ClientHelloInfo) {
 	h := new(Hello)
 	var c [5]bool
-	h.nCiphers, c[0] = fill(h.ciphers[:], chi.CipherSuites)
-	h.nExtensions, c[1] = fill(h.extensions[:], chi.Extensions)
-	h.nSigSchemes, c[2] = fill(h.sigSchemes[:], chi.SignatureSchemes)
-	h.nGroups, c[3] = fill(h.groups[:], chi.SupportedCurves)
-	h.nVersions, c[4] = fill(h.versions[:], chi.SupportedVersions)
+	h.nCiphers, c[0] = copyCapped(h.ciphers[:], chi.CipherSuites)
+	h.nExtensions, c[1] = copyCapped(h.extensions[:], chi.Extensions)
+	h.nSigSchemes, c[2] = copyCapped(h.sigSchemes[:], chi.SignatureSchemes)
+	h.nGroups, c[3] = copyCapped(h.groups[:], chi.SupportedCurves)
+	h.nVersions, c[4] = copyCapped(h.versions[:], chi.SupportedVersions)
 	h.cut = c[0] || c[1] || c[2] || c[3] || c[4]
 	if len(chi.SupportedProtos) > 0 {
 		h.alpnLen = uint8(copy(h.alpn[:], chi.SupportedProtos[0]))
@@ -107,9 +112,9 @@ func (s *connState) capture(chi *tls.ClientHelloInfo) {
 	s.hello.CompareAndSwap(nil, h)
 }
 
-// fill copies the first entries of src into dst. It returns their number and
-// true when src has more entries than dst.
-func fill[T ~uint16](dst []uint16, src []T) (uint8, bool) {
+// copyCapped copies the first entries of src into dst. It returns their number
+// and true when src has more entries than dst.
+func copyCapped[T ~uint16](dst []uint16, src []T) (uint8, bool) {
 	for i, v := range src {
 		if i == len(dst) {
 			return uint8(i), true

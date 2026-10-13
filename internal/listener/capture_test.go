@@ -79,7 +79,7 @@ type capRig struct {
 
 func newCapRig(t *testing.T, h http.Handler) *capRig {
 	t.Helper()
-	c := &capRig{rig: newRig(t, 8, 1024, defaultTimeouts, h), got: make(chan *Hello, 8)}
+	c := &capRig{rig: newRig(t, 8, testHeaderBytes, defaultTimeouts, h), got: make(chan *Hello, 8)}
 	c.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 		c.calls.Add(1)
 		cfg, err := captureHello(chi)
@@ -89,7 +89,7 @@ func newCapRig(t *testing.T, h http.Handler) *capRig {
 	return c
 }
 
-// capture sends the hello on a plain TCP connection. The handshake may fail;
+// capture sends the hello on a plain TCP connection. The handshake can fail;
 // the copy is there after the callback.
 func (c *capRig) capture(t *testing.T, h rawHello) *Hello {
 	t.Helper()
@@ -194,7 +194,8 @@ func TestTU19NoSupportedVersions(t *testing.T) {
 
 // T-U-19: a handshake with a HelloRetryRequest gives one capture, the first
 // ClientHello. The test forces the retry: the client key share is for X25519
-// and the server accepts only P-256.
+// and the server accepts only P-256. The retried hello has the same lists as
+// the first, so TestTU19FirstWins proves that the first copy stays.
 func TestTU19HelloRetryRequestKeepsFirst(t *testing.T) {
 	seen := make(chan bool, 4) // HelloRetryRequest flag of each GetCertificate call: crypto/tls calls it only for the second hello
 	var got atomic.Pointer[Hello]

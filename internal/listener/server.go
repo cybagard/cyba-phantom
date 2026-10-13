@@ -1,7 +1,12 @@
-// Package listener is the core of the decoy listener: an HTTP/1.1 server over
-// TLS with bounds on connections, headers and time (SEC-02, SEC-22), a fixed
-// size copy of the first ClientHello of each connection (FR-05), and an error
-// log that counts and keeps no client data (SEC-22).
+// Package listener is the core of the decoy listener. It is an HTTP/1.1 server
+// over TLS with bounds on connections, headers and time (SEC-02, SEC-22).
+//
+// Of SEC-02, the package enforces the size of the request head and the number
+// of header values. The request body cap is not in this package.
+//
+// The package keeps a fixed size copy of the first ClientHello of each
+// connection (FR-05). Its error log counts the lines and keeps no client data
+// (SEC-22).
 package listener
 
 import (
@@ -20,11 +25,20 @@ type Config struct {
 	// TLS gives the certificates. The server clones it, sets the ALPN list
 	// to http/1.1 and sets the ClientHello capture.
 	TLS *tls.Config
-	// MaxConns is the number of open connections. limits.max_conns.
+	// MaxConns is the maximum number of open connections. limits.max_conns.
 	MaxConns int
-	// HeaderBytes is the header size cap. limits.header_bytes.
+	// HeaderBytes is the size cap of the request head: the request line, the
+	// header lines and the blank line. New refuses a value below 8192.
+	// limits.header_bytes.
 	HeaderBytes int
 }
+
+// minHeaderBytes is the smallest HeaderBytes. net/http reads 4096 bytes more
+// than MaxHeaderBytes, so the server sets MaxHeaderBytes to HeaderBytes - 4096.
+const minHeaderBytes = 8192
+
+// maxHeaderValues is the cap of header values in one request (SEC-02).
+const maxHeaderValues = 64
 
 // timeouts holds the time bounds of the server. A test sets short values.
 type timeouts struct {
@@ -33,7 +47,8 @@ type timeouts struct {
 
 // defaultTimeouts are the production values. The read-header timeout is also
 // the handshake deadline: net/http uses the smallest of the three read and
-// write timeouts, and only for a connection that is a *tls.Conn.
+// write timeouts. It sets the deadline only for a connection that has a
+// ConnectionState method, such as a *tls.Conn.
 var defaultTimeouts = timeouts{
 	readHeader: 10 * time.Second,
 	read:       10 * time.Second,
@@ -63,8 +78,14 @@ func New(cfg Config, h http.Handler) (*Server, error) {
 }
 
 func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
-	if cfg.TLS == nil || cfg.MaxConns < 1 || cfg.HeaderBytes < 1 {
-		return nil, errors.New("listener: TLS config, max conns and header bytes are required")
+	if h == nil {
+		return nil, errors.New("listener: a handler is required")
+	}
+	if cfg.TLS == nil || cfg.MaxConns < 1 {
+		return nil, errors.New("listener: TLS config and max conns are required")
+	}
+	if cfg.HeaderBytes < minHeaderBytes {
+		return nil, errors.New("listener: header bytes must be at least 8192")
 	}
 	s := &Server{tls: cfg.TLS.Clone(), maxConns: cfg.MaxConns}
 	s.tls.NextProtos = []string{"http/1.1"}
@@ -72,14 +93,15 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	var p http.Protocols
 	p.SetHTTP1(true)
 	s.srv = &http.Server{
-		Handler:           h,
-		ReadHeaderTimeout: t.readHeader,
-		ReadTimeout:       t.read,
-		WriteTimeout:      t.write,
-		IdleTimeout:       t.idle,
-		MaxHeaderBytes:    cfg.HeaderBytes,
-		Protocols:         &p,
-		ErrorLog:          log.New(&s.errLines, "", 0),
+		Handler:             h,
+		ReadHeaderTimeout:   t.readHeader,
+		ReadTimeout:         t.read,
+		WriteTimeout:        t.write,
+		IdleTimeout:         t.idle,
+		MaxHeaderBytes:      cfg.HeaderBytes - 4096,
+		MaxHeaderValueCount: maxHeaderValues,
+		Protocols:           &p,
+		ErrorLog:            log.New(&s.errLines, "", 0),
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
 			return withConnState(ctx)
 		},
@@ -88,7 +110,9 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 }
 
 // Serve accepts connections from the raw TCP listener ln until Close. The
-// connection cap sits on the raw listener, the TLS layer on top of it.
+// connection cap is on the raw listener, and the TLS layer is on top of it.
+// A connection that a handler hijacks keeps its slot until the handler closes
+// it.
 func (s *Server) Serve(ln net.Listener) error {
 	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.maxConns), s.tls))
 }
