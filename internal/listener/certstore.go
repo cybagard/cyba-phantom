@@ -51,6 +51,8 @@ const (
 
 	ruleLinks     = "file has more than one link"
 	ruleFileOwner = "file has another owner"
+
+	ruleCachePath = "cache directory path is not valid"
 	ruleFileMode  = "file allows access for group or other"
 )
 
@@ -125,7 +127,7 @@ var betweenCheckAndOpen func()
 func Open(state *os.Root, dir string) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
-		return nil, fail(op, ruleKey)
+		return nil, fail(op, ruleCachePath)
 	}
 	parts := strings.Split(dir, "/")
 	checked, err := checkPath(state, parts, true)

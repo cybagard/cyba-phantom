@@ -154,6 +154,26 @@ func TestTS16EndedContextGivesAnErrorWithTheContextIdentity(t *testing.T) {
 	}
 }
 
+func TestTS16OpenRefusesABadCacheDirectoryPath(t *testing.T) {
+	dir := t.TempDir()
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	for _, p := range []string{"", ".", "/", "/acme", "acme/", "..", "../acme", "a//b", "a/../b", "a/./b"} {
+		s, err := Open(state, p)
+		if err == nil {
+			s.Close()
+		}
+		var e *Error
+		if !errors.As(err, &e) || e.Op != "open" || e.Rule != ruleCachePath {
+			t.Errorf("Open(%q) error = %#v, want the operation open and the rule for the cache path", p, err)
+		}
+	}
+	if names, err := os.ReadDir(dir); err != nil || len(names) != 0 {
+		t.Errorf("a bad path made %d names in the state directory, %v", len(names), err)
+	}
+}
+
 func TestTS16MissingKeyKeepsTheNotExistIdentity(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
