@@ -35,6 +35,16 @@ const (
 // the bound of the log.
 const maxSize = verifier.MaxSize
 
+// toSize converts a size from a note to a log size. A size above maxSize gives
+// ErrRange. ParseCheckpoint refuses this size first. The check stays here so
+// that the bound is next to the conversion.
+func toSize(u uint64) (int64, error) {
+	if u > maxSize {
+		return 0, ErrRange
+	}
+	return int64(u), nil
+}
+
 // The errors of this package. ErrSignature means that the signature does not
 // verify with the key (not verified). ErrCheckpoint means that the note is not
 // valid in form (an input error).

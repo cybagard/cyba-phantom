@@ -286,7 +286,12 @@ func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 }
 
 // toSize converts a size from a note to a log size. toUint converts back.
-func toSize(u uint64) (int64, bool) { return int64(u), u <= maxSize }
+func toSize(u uint64) (int64, bool) {
+	if u > maxSize {
+		return 0, false
+	}
+	return int64(u), true
+}
 
 func toUint(n int64) (uint64, bool) { return uint64(n), n >= 0 }
 

@@ -36,7 +36,14 @@ func Consistency(v note.Verifier, prior, latest []byte, proofs []ConsistencyProo
 	if err != nil {
 		return err
 	}
-	small, large := int64(p.Size), int64(l.Size) // ParseCheckpoint kept both inside 0 to 2^48
+	small, err := toSize(p.Size)
+	if err != nil {
+		return err
+	}
+	large, err := toSize(l.Size)
+	if err != nil {
+		return err
+	}
 	smallRoot, largeRoot := p.Root, l.Root
 	if small > large {
 		small, large = large, small
