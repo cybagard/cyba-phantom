@@ -1,10 +1,17 @@
 package listener
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
+	"log"
+	"log/slog"
 	"net"
 	"net/netip"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -183,26 +190,167 @@ func TestTS17SourceCountReleased(t *testing.T) {
 	}
 }
 
-// T-S-17: the map is made with room for MaxConns keys. Making the map and
-// inserting MaxConns keys allocates less than the same steps with a map that
-// has no size hint. newServer makes its map with newSourceCap(cfg.MaxConns).
+// mallocsDuring returns the number of heap allocations that f makes.
+func mallocsDuring(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.Mallocs - before.Mallocs
+}
+
+// T-S-17: the map that newServer makes has room for MaxConns keys: n distinct
+// keys take no allocation. A map without a size hint allocates on the same
+// steps, so the measure sees growth.
 func TestTS17SourceMapCapacity(t *testing.T) {
 	const n = 256
 	keys := make([]netip.Addr, n)
 	for i := range keys {
 		keys[i] = netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)})
 	}
-	allocs := func(mk func() *sourceCap) float64 {
-		return testing.AllocsPerRun(20, func() {
-			s := mk()
+	fill := func(s *sourceCap) uint64 {
+		return mallocsDuring(func() {
 			for _, k := range keys {
 				s.take(k)
 			}
 		})
 	}
-	sized := allocs(func() *sourceCap { return newSourceCap(n) })
-	unsized := allocs(func() *sourceCap { return &sourceCap{count: make(map[netip.Addr]uint16)} })
-	if sized >= unsized {
-		t.Fatalf("sized map: %v allocations, unsized map: %v", sized, unsized)
+	r := newRig(t, n, testHeaderBytes, defaultTimeouts, okHandler)
+	if got := fill(r.s.src); got != 0 {
+		t.Errorf("server map: %d allocations for %d keys, want 0", got, n)
+	}
+	if got := r.s.src.keys(); got != n {
+		t.Errorf("server map holds %d keys, want %d", got, n)
+	}
+	if got := fill(&sourceCap{count: make(map[netip.Addr]uint16)}); got == 0 {
+		t.Error("map without a size hint took 0 allocations: the measure does not see growth")
+	}
+}
+
+// T-S-17: no log line holds a source address during closes at the source cap.
+func TestTS17SourceCapNotLogged(t *testing.T) {
+	var std, structured bytes.Buffer
+	prevOut, prevSlog := log.Writer(), slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prevSlog); log.SetOutput(prevOut) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&structured, nil)))
+	log.SetOutput(&std)
+
+	r := newRig(t, 40, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	for range maxConnsPerSource {
+		r.dialTLSFrom(t, r.addr, 5)
+	}
+	lines := r.s.ErrorLines()
+	expectCapClose(t, r, r.addr, 5)
+	expectCapClose(t, r, r.addr, 5)
+	if got := r.s.SourceCapCloses(); got != 2 {
+		t.Fatalf("source cap closes %d, want 2", got)
+	}
+	if got := r.s.ErrorLines(); got != lines {
+		t.Fatalf("error lines %d, want %d", got, lines)
+	}
+	for _, out := range []string{std.String(), structured.String()} {
+		if strings.Contains(out, "127.0.0.5") {
+			t.Errorf("log output holds the source address: %q", out)
+		}
+	}
+}
+
+// fakeConn is a pipe end with a chosen peer and local address. It records Close.
+type fakeConn struct {
+	net.Conn
+	remote, local net.Addr
+	closed        atomic.Bool
+}
+
+func (c *fakeConn) RemoteAddr() net.Addr { return c.remote }
+func (c *fakeConn) LocalAddr() net.Addr  { return c.local }
+func (c *fakeConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+// fakeListener returns its connections in order, then err.
+type fakeListener struct {
+	conns []*fakeConn
+	err   error
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	if len(l.conns) == 0 {
+		return nil, l.err
+	}
+	c := l.conns[0]
+	l.conns = l.conns[1:]
+	return c, nil
+}
+func (l *fakeListener) Close() error   { return nil }
+func (l *fakeListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 443} }
+
+func newFakeConn(t *testing.T, remote, local string) *fakeConn {
+	t.Helper()
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	return &fakeConn{
+		Conn:   a,
+		remote: net.TCPAddrFromAddrPort(netip.MustParseAddrPort(remote)),
+		local:  net.TCPAddrFromAddrPort(netip.MustParseAddrPort(local)),
+	}
+}
+
+// T-S-17: the key comes from RemoteAddr only, and Accept makes no error text of
+// its own. All connections have the same peer host and different local
+// addresses. Connection 33 closes inside Accept, and Accept returns the next
+// connection, which has another peer host. The error of the listener below
+// passes through unchanged.
+func TestTS17SourceKeyFromRemoteAddrOnly(t *testing.T) {
+	fake := &fakeListener{err: errors.New("fake accept error")}
+	for i := range maxConnsPerSource {
+		fake.conns = append(fake.conns, newFakeConn(t, fmt.Sprintf("192.0.2.7:%d", 1000+i), fmt.Sprintf("198.51.100.%d:443", i+1)))
+	}
+	over := newFakeConn(t, "192.0.2.7:2000", "198.51.100.200:443")
+	other := newFakeConn(t, "192.0.2.8:1000", "198.51.100.1:443")
+	fake.conns = append(fake.conns, over, other)
+
+	l := newLimitListener(fake, make(chan struct{}, 2*maxConnsPerSource), newSourceCap(2*maxConnsPerSource))
+	for i := range maxConnsPerSource {
+		if _, err := l.Accept(); err != nil {
+			t.Fatalf("accept %d: %v", i, err)
+		}
+	}
+	got, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !over.closed.Load() {
+		t.Error("connection 33 from the same peer host is not closed")
+	}
+	if lc, ok := got.(*limitConn); !ok || lc.Conn != net.Conn(other) {
+		t.Errorf("Accept returned %v, want the connection from the other peer host", got)
+	}
+	if other.closed.Load() {
+		t.Error("connection from the other peer host is closed")
+	}
+	if n := l.src.closes.Load(); n != 1 {
+		t.Errorf("source cap closes %d, want 1", n)
+	}
+	if _, err := l.Accept(); err != fake.err {
+		t.Errorf("Accept error %v, want the error of the listener", err)
+	}
+}
+
+// T-S-17: one step of the accept path takes no heap allocation, for an IPv4 and
+// an IPv6 peer address.
+func TestTS17SourceCapStepNoAllocs(t *testing.T) {
+	s := newSourceCap(8)
+	for _, ip := range []string{"192.0.2.7", "2001:db8:1:2::7"} {
+		addr := net.TCPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr(ip), 1000))
+		if n := testing.AllocsPerRun(100, func() {
+			k := sourceKey(addr)
+			s.take(k)
+			s.give(k)
+		}); n != 0 {
+			t.Errorf("%s: %v allocations, want 0", ip, n)
+		}
 	}
 }
