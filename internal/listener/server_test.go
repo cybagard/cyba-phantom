@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -432,7 +433,8 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := newLimitListener(ln, make(chan struct{}, 2))
+	src := newSourceCap(2)
+	l := newLimitListener(ln, make(chan struct{}, 2), src)
 	defer l.Close()
 	var served []net.Conn
 	for range 2 {
@@ -452,6 +454,11 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 	_ = served[0].Close()
 	if n := l.inUse(); n != 1 {
 		t.Fatalf("slots in use: %d, want 1", n)
+	}
+	// Both connections share one source: the count is 2, then 1 after the
+	// double close. A second give would make it 0 and delete the key.
+	if got := src.count[netip.MustParseAddr("127.0.0.1")]; got != 1 {
+		t.Fatalf("source count %d, want 1", got)
 	}
 }
 

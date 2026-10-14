@@ -62,6 +62,7 @@ type Server struct {
 	srv      *http.Server
 	tls      *tls.Config
 	sem      chan struct{} // the connection slots, shared by all Serve calls
+	src      *sourceCap    // the connection counts for each source, shared by all Serve calls
 	errLines countWriter
 }
 
@@ -80,7 +81,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	if cfg.HeaderBytes < minHeaderBytes {
 		return nil, fmt.Errorf("listener: header bytes must be at least %d", minHeaderBytes)
 	}
-	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns)}
+	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns)}
 	s.tls.NextProtos = []string{"http/1.1"}
 	s.tls.GetConfigForClient = captureHello
 	var p http.Protocols
@@ -109,9 +110,10 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 // Serve accepts connections from the raw TCP listener ln until Close. The
 // connection cap is on the raw listener, and the TLS layer is on top of it.
 // A connection that a handler hijacks keeps its slot until the handler closes
-// it. All Serve calls of one server share the MaxConns slots.
+// it. All Serve calls of one server share the MaxConns slots and the cap of 32
+// open connections for each source address.
 func (s *Server) Serve(ln net.Listener) error {
-	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem), s.tls))
+	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src), s.tls))
 }
 
 // Close closes the listener and all connections.
@@ -120,3 +122,7 @@ func (s *Server) Close() error { return s.srv.Close() }
 // ErrorLines is the number of lines that the server wrote to its error log.
 // They include one line for each failed handshake. The log keeps no text.
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
+
+// SourceCapCloses is the number of connections that the server closed because
+// their source had 32 open connections. It holds no address.
+func (s *Server) SourceCapCloses() uint64 { return s.src.closes.Load() }
