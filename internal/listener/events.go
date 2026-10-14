@@ -14,8 +14,8 @@ type recorder struct {
 	errs atomic.Uint64 // requests for which NewEvent returned an error
 }
 
-// record makes the event for r and the status code that the handler writes. It
-// never reads the body, a forwarded header, or the protocol fields of r. The
+// record makes the event from r and from code (the status that the handler
+// writes). It never reads the body, a forwarded header, or the protocol fields of r. The
 // fingerprint values stay empty. A NewEvent error adds one to errs. A full
 // queue counts its own drop. The call never waits.
 func (rc *recorder) record(r *http.Request, code int) {

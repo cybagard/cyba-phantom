@@ -50,7 +50,9 @@ func serveRaw(t *testing.T, h http.Handler, r *http.Request) (*http.Response, st
 	return w.Result(), b.String()
 }
 
-func TestHelloRequestsGiveEvents(t *testing.T) {
+// T-U-19: each request over TLS gives one request event, with the client IP of
+// the connection.
+func TestTU19RequestsGiveEvents(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 16)
 	rg := newRig(t, 8, testHeaderBytes, defaultTimeouts, h)
 	rg.serve(t)
@@ -75,7 +77,9 @@ func TestHelloRequestsGiveEvents(t *testing.T) {
 	}
 }
 
-func TestHelloFullQueueSameResponse(t *testing.T) {
+// T-U-19: a full queue drops the event and counts the drop for its lane and
+// key. The response bytes do not change.
+func TestTU19FullQueueSameResponse(t *testing.T) {
 	h, q, c := newHelloQueue(t, event.MinQueueDepth)
 	var first string
 	for i := 0; i <= event.MinQueueDepth; i++ {
@@ -95,7 +99,8 @@ func TestHelloFullQueueSameResponse(t *testing.T) {
 	}
 }
 
-func TestHelloForwardedHeadersNotInEvent(t *testing.T) {
+// T-U-19: a forwarded-header marker is not in the event.
+func TestTU19ForwardedHeadersNotInEvent(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 4)
 	r := &http.Request{Method: "GET", Host: "decoy.test", Header: http.Header{
 		"X-Forwarded-For": {"203.0.113.9 fwdmark"}, "Forwarded": {"for=203.0.113.9;fwdmark"}}}
@@ -111,7 +116,11 @@ func TestHelloForwardedHeadersNotInEvent(t *testing.T) {
 	}
 }
 
-func TestHelloAndRedirectNeverReflect(t *testing.T) {
+// T-S-17: markers in the query, Host and headers are not in any response. A
+// marker in the path is only in the Location of the redirect, with each segment
+// escaped. The redirect goes only to a configured name, and a foreign Host gets
+// the 404 page with no Location.
+func TestTS17HelloAndRedirectNeverReflect(t *testing.T) {
 	long := strings.Repeat("a", 5000)
 	cases := []struct{ name, m string }{
 		{"script", "<script>"}, {"crlf", "x\r\nSet-Cookie: a=b"}, {"pct", "%0d%0a"},
@@ -127,6 +136,9 @@ func TestHelloAndRedirectNeverReflect(t *testing.T) {
 				if strings.Contains(raw, tc.m) || resp.Header.Get("Server") != "" {
 					t.Fatalf("%s: reflected or Server header: %q", tc.name, raw)
 				}
+				if host != "decoy.test" && (resp.StatusCode != 404 || resp.Header.Get("Location") != "") {
+					t.Fatalf("%s: foreign Host: status %d, Location %q", tc.name, resp.StatusCode, resp.Header.Get("Location"))
+				}
 			}
 			// The marker in the path: only the redirect copies it, escaped.
 			resp, raw := serveRaw(t, h, &http.Request{Method: "GET", Host: "DECOY.test:80", URL: &url.URL{Path: "/" + tc.m}})
@@ -141,7 +153,7 @@ func TestHelloAndRedirectNeverReflect(t *testing.T) {
 			if err != nil || u.Scheme != "https" || u.Host != "decoy.test" || u.RawQuery != "" {
 				t.Fatalf("%s: bad Location %q (%v)", tc.name, loc, err)
 			}
-			if len(loc) > 2048 || strings.ContainsAny(loc, "<\r\n") || strings.Contains(loc, "%0d%0a") || resp.StatusCode != 308 {
+			if len(loc) > maxLocation || strings.ContainsAny(loc, "<\r\n") || strings.Contains(loc, "%0d%0a") || resp.StatusCode != 308 {
 				t.Fatalf("%s: unsafe Location or status %d: %q", tc.name, resp.StatusCode, loc)
 			}
 			if strings.Contains(loc[len(loc)-2:], "%") {
@@ -151,7 +163,9 @@ func TestHelloAndRedirectNeverReflect(t *testing.T) {
 	}
 }
 
-func TestMethodAndHostRules(t *testing.T) {
+// T-S-17: on both handlers a method other than GET and HEAD gets 405, and an
+// unknown or malformed Host gets 404. GET and HEAD on a configured name get 200.
+func TestTS17MethodAndHostRules(t *testing.T) {
 	hello, q, _ := newHelloQueue(t, 8)
 	for _, h := range []http.Handler{hello, NewRedirect(helloNames)} {
 		for _, tc := range []struct {
@@ -171,7 +185,7 @@ func TestMethodAndHostRules(t *testing.T) {
 			}
 		}
 	}
-	// GET and HEAD on a configured name: one fixed body, and no body for HEAD.
+	// GET and HEAD on a configured name: status 200, and one fixed body for GET.
 	for _, m := range []string{"GET", "HEAD"} {
 		resp, _ := serveRaw(t, hello, &http.Request{Method: m, Host: "other.test", URL: &url.URL{Path: "/any/path"}})
 		if resp.StatusCode != 200 {
@@ -187,7 +201,8 @@ func TestMethodAndHostRules(t *testing.T) {
 	}
 }
 
-func TestRedirectWritesNoEvent(t *testing.T) {
+// T-S-17: the redirect writes no event, and it escapes each path segment.
+func TestTS17RedirectWritesNoEvent(t *testing.T) {
 	_, q, _ := newHelloQueue(t, 4)
 	serveRaw(t, NewRedirect(helloNames), &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: "/a b"}})
 	if n := len(q.Drain()); n != 0 {
@@ -199,7 +214,9 @@ func TestRedirectWritesNoEvent(t *testing.T) {
 	}
 }
 
-func TestNewEventErrorCountsAndServes(t *testing.T) {
+// T-U-19: a NewEvent error adds one to the error counter. The response does not
+// change and the queue gets no event.
+func TestTU19NewEventErrorCountsAndServes(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 4)
 	// A remote address that is not an IP makes NewEvent return an error.
 	resp, raw := serveRaw(t, h, &http.Request{Method: "GET", Host: "decoy.test", RemoteAddr: "not-an-address"})
@@ -211,7 +228,9 @@ func TestNewEventErrorCountsAndServes(t *testing.T) {
 	}
 }
 
-func TestPriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
+// T-S-17: a PRI * HTTP/2.0 request over TLS gets the fixed 404 page and one
+// request event.
+func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 4)
 	rg := newRig(t, 8, testHeaderBytes, defaultTimeouts, h)
 	rg.serve(t)
@@ -241,6 +260,8 @@ func TestPriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 	}
 }
 
+// T-U-19: BenchmarkHelloHandler measures one request on the TLS handler: the
+// reply and the request event. The figure includes the httptest recorder.
 func BenchmarkHelloHandler(b *testing.B) {
 	c := event.NewCounters()
 	q, err := event.NewQueue(event.MaxQueueDepth, c)
@@ -251,10 +272,54 @@ func BenchmarkHelloHandler(b *testing.B) {
 	r := &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: "/"},
 		Header: http.Header{}, RemoteAddr: "192.0.2.7:4000"}
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	n := 0
+	for b.Loop() {
 		h.ServeHTTP(httptest.NewRecorder(), r)
-		if i%1024 == 1023 {
+		if n++; n%1024 == 0 {
 			q.Drain()
+		}
+	}
+}
+
+// T-S-17: a cut of the Location never ends inside a %XX escape. The path
+// "/" + pad + "<" * 700 has its "%" at byte 2047 (pad 0), 2046 (pad 2) and 2045
+// (pad 1) of the Location value, counted from 0. Each "<" is "%3C" and the
+// prefix "https://decoy.test/" has 19 bytes.
+func TestTS17LocationCutKeepsEscapes(t *testing.T) {
+	for _, pad := range []int{0, 1, 2} {
+		p := "/" + strings.Repeat("a", pad) + strings.Repeat("<", 700)
+		loc := location("decoy.test", p)
+		if len(loc) > maxLocation {
+			t.Fatalf("pad %d: length %d", pad, len(loc))
+		}
+		if strings.Contains(loc[len(loc)-2:], "%") {
+			t.Fatalf("pad %d: cut inside an escape: %q", pad, loc[len(loc)-4:])
+		}
+		u, err := url.Parse(loc)
+		if err != nil || u.Host != "decoy.test" {
+			t.Fatalf("pad %d: Location %q (%v)", pad, loc[len(loc)-8:], err)
+		}
+	}
+}
+
+// T-S-17: the work of location is bounded by maxLocation, not by the path. A
+// path of 16384 bytes takes less than 16 KiB of heap in each run.
+func TestTS17LocationWorkIsBounded(t *testing.T) {
+	for _, tc := range []struct{ name, path string }{
+		{"slash", strings.Repeat("/", 16384)}, {"escape", strings.Repeat("<", 16384)},
+	} {
+		r := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				location("decoy.test", tc.path)
+			}
+		})
+		t.Logf("%s: %d B/op, %d allocs/op", tc.name, r.AllocedBytesPerOp(), r.AllocsPerOp())
+		if got := r.AllocedBytesPerOp(); got >= 16*1024 {
+			t.Fatalf("%s: %d bytes in each run", tc.name, got)
+		}
+		if loc := location("decoy.test", tc.path); len(loc) > maxLocation {
+			t.Fatalf("%s: length %d", tc.name, len(loc))
 		}
 	}
 }

@@ -55,7 +55,7 @@ func reply(w http.ResponseWriter, code int, body string) int {
 	return code
 }
 
-func readMethod(m string) bool { return m == http.MethodGet || m == http.MethodHead }
+func getOrHead(m string) bool { return m == http.MethodGet || m == http.MethodHead }
 
 // HelloHandler is the handler of the TLS socket. Each request gives one request
 // event.
@@ -73,11 +73,14 @@ func NewHelloHandler(list []string, q *event.Queue) *HelloHandler {
 // EventErrors is the number of requests for which NewEvent returned an error.
 func (h *HelloHandler) EventErrors() uint64 { return h.rec.errs.Load() }
 
+// ServeHTTP writes the fixed page for the Host and method of r: 200 for a
+// configured name with GET or HEAD, 405 for another method, else 404. It
+// records one request event with the status code that it writes.
 func (h *HelloHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code, body := http.StatusOK, helloBody
 	if _, ok := h.names.match(r.Host); !ok {
 		code, body = http.StatusNotFound, notFoundBody
-	} else if !readMethod(r.Method) {
+	} else if !getOrHead(r.Method) {
 		code, body = http.StatusMethodNotAllowed, methodBody
 	}
 	h.rec.record(r, code)
@@ -90,12 +93,14 @@ type Redirect struct{ names names }
 // NewRedirect returns the handler for the configured names (acme.names).
 func NewRedirect(list []string) *Redirect { return &Redirect{names: newNames(list)} }
 
+// ServeHTTP writes a 308 to the https form of the path for a configured name
+// with GET or HEAD, 405 for another method, else 404. It writes no event.
 func (h *Redirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name, ok := h.names.match(r.Host)
 	switch {
 	case !ok:
 		reply(w, http.StatusNotFound, notFoundBody)
-	case !readMethod(r.Method):
+	case !getOrHead(r.Method):
 		reply(w, http.StatusMethodNotAllowed, methodBody)
 	default:
 		w.Header().Set("Location", location(name, r.URL.Path))
@@ -107,15 +112,34 @@ func (h *Redirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // with each segment escaped. It has no query. It is at most maxLocation bytes,
 // and a cut never splits a %XX escape.
 func location(name, path string) string {
-	segs := strings.Split(path, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
+	// Escaping never makes a byte shorter, so the first maxLocation bytes of
+	// the path give the first maxLocation bytes of the result. The builder
+	// takes one byte more than maxLocation, so that the cut below sees a value
+	// that is too long. The loop stops when it has enough.
+	if len(path) > maxLocation {
+		path = path[:maxLocation]
 	}
-	p := strings.Join(segs, "/")
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
+	var b strings.Builder
+	b.Grow(maxLocation + 1)
+	b.WriteString("https://")
+	b.WriteString(name)
+	if !strings.HasPrefix(path, "/") {
+		b.WriteByte('/')
 	}
-	loc := "https://" + name + p
+	for b.Len() <= maxLocation {
+		seg, rest, more := strings.Cut(path, "/")
+		esc := url.PathEscape(seg)
+		if room := maxLocation + 1 - b.Len(); len(esc) > room {
+			esc = esc[:room]
+		}
+		b.WriteString(esc)
+		if !more || b.Len() > maxLocation {
+			break
+		}
+		b.WriteByte('/')
+		path = rest
+	}
+	loc := b.String()
 	if len(loc) > maxLocation {
 		loc = loc[:maxLocation]
 		if loc[maxLocation-1] == '%' {
