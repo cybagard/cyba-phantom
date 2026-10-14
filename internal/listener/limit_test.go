@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -191,40 +190,47 @@ func TestTS17SourceCountReleased(t *testing.T) {
 	}
 }
 
-// mallocsDuring returns the number of heap allocations that f makes.
-func mallocsDuring(f func()) uint64 {
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	f()
-	runtime.ReadMemStats(&after)
-	return after.Mallocs - before.Mallocs
-}
-
 // T-S-17: the map that newServer makes has room for MaxConns keys: n distinct
 // keys take no allocation. A map without a size hint allocates on the same
-// steps, so the measure sees growth.
+// steps, so the measure sees growth. The measure is the average over many
+// fills, because the counter is for the whole process and a goroutine of
+// another test can allocate during a run.
 func TestTS17SourceMapCapacity(t *testing.T) {
-	const n = 256
+	const (
+		n    = 256
+		runs = 50
+	)
 	keys := make([]netip.Addr, n)
 	for i := range keys {
 		keys[i] = netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)})
 	}
-	fill := func(s *sourceCap) uint64 {
-		return mallocsDuring(func() {
+	// AllocsPerRun calls f one more time before it measures, so runs+1 maps.
+	average := func(caps []*sourceCap) float64 {
+		next := 0
+		return testing.AllocsPerRun(runs, func() {
+			s := caps[next]
+			next++
 			for _, k := range keys {
 				s.take(k)
 			}
 		})
 	}
-	r := newRig(t, n, testHeaderBytes, defaultTimeouts, okHandler)
-	if got := fill(r.s.src); got != 0 {
-		t.Errorf("server map: %d allocations for %d keys, want 0", got, n)
+	servers := make([]*sourceCap, runs+1)
+	plain := make([]*sourceCap, runs+1)
+	for i := range servers {
+		servers[i] = newRig(t, n, testHeaderBytes, defaultTimeouts, okHandler).s.src
+		plain[i] = &sourceCap{count: make(map[netip.Addr]uint16)}
 	}
-	if got := r.s.src.keys(); got != n {
-		t.Errorf("server map holds %d keys, want %d", got, n)
+	if got := average(servers); got != 0 {
+		t.Errorf("server map: %v allocations on average for %d keys, want 0", got, n)
 	}
-	if got := fill(&sourceCap{count: make(map[netip.Addr]uint16)}); got == 0 {
-		t.Error("map without a size hint took 0 allocations: the measure does not see growth")
+	for i, s := range servers {
+		if got := s.keys(); got != n {
+			t.Errorf("server map %d holds %d keys, want %d", i, got, n)
+		}
+	}
+	if got := average(plain); got == 0 {
+		t.Error("map without a size hint took 0 allocations on average: the measure does not see growth")
 	}
 }
 
