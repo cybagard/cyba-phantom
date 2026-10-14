@@ -250,7 +250,8 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 	if st, err := handshake(a, "DECOY.Test"); err != nil || !bytes.Equal(st.PeerCertificates[0].Raw, want) {
 		t.Fatalf("upper-case name: %v", err)
 	}
-	// A client library removes the trailing dot, so this call has no handshake.
+	// The Go TLS client removes a trailing dot from the server name. Thus this
+	// test calls GetCertificate directly.
 	c, s := net.Pipe()
 	t.Cleanup(func() { c.Close(); s.Close() })
 	cert, err := a.GetCertificate(&tls.ClientHelloInfo{ServerName: "decoy.test.", Conn: s})
@@ -261,9 +262,15 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 		t.Errorf("refused = %d", a.Refused())
 	}
 	// The gate removes one trailing dot only.
-	if _, err := a.GetCertificate(&tls.ClientHelloInfo{ServerName: "decoy.test..", Conn: s}); err != errName {
+	if _, err := a.GetCertificate(&tls.ClientHelloInfo{ServerName: "decoy.test..", Conn: s}); !errors.Is(err, errName) {
 		t.Errorf("name with two trailing dots: %v", err)
 	}
+}
+
+func TestTS16StopCanBeCalledTwice(t *testing.T) {
+	a := newTestACME(t, nil)
+	a.Stop()
+	a.Stop() // the cleanup of newTestACME calls Stop a third time
 }
 
 func TestTS16EventLinesAreWrittenForThreeEventsOnly(t *testing.T) {

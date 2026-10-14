@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/caddyserver/certmagic"
@@ -18,9 +19,6 @@ import (
 
 const (
 	maxNames = 16 // the most configured names
-
-	// The ALPN name of the TLS-ALPN-01 challenge.
-	alpnACME = "acme-tls/1"
 
 	// A 90-day certificate renews about 31.5 days before it ends. The ratio 1/3
 	// would start the renewal just below 30 days (FR-01).
@@ -59,12 +57,14 @@ type ACME struct {
 	allowed map[string]struct{}
 	logger  *slog.Logger
 	refused atomic.Uint64
+	stop    sync.Once
 }
 
 // NewACME builds the configuration from p. It makes the certmagic cache, which
 // runs a maintenance goroutine. The caller must call Stop. NewACME does not read
-// the storage and makes no request. It sets each field that certmagic would else
-// take from its package variables.
+// the storage and makes no request. It sets the fields that the decoy listener
+// depends on. The other fields come from certmagic.Default and
+// certmagic.DefaultACME, which the sensor does not change.
 func NewACME(p ACMEParams) (*ACME, error) {
 	ca, err := url.Parse(p.CA)
 	switch {
@@ -73,7 +73,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	case err != nil || ca.Scheme != "https" || ca.Hostname() == "":
 		return nil, errors.New("listener: acme: the CA URL is not an https URL")
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
-		return nil, errors.New("listener: acme: storage, logger or port is not set")
+		return nil, errors.New("listener: acme: storage or logger is not set, or the port is not 1 to 65535")
 	}
 	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger}
 	for _, n := range a.names {
@@ -85,7 +85,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
 		Logger:           zap.NewNop(),
 	})
-	log := p.Logger
+	logger := p.Logger
 	a.cfg = certmagic.New(a.cache, certmagic.Config{
 		RenewalWindowRatio: renewalRatio,
 		MustStaple:         false,
@@ -108,16 +108,16 @@ func NewACME(p ACMEParams) (*ACME, error) {
 			if event == "cert_failed" {
 				level = slog.LevelWarn
 			}
-			log.LogAttrs(ctx, level, "acme certificate event", slog.String("event", event), slog.String("name", name))
+			logger.LogAttrs(ctx, level, "acme certificate event", slog.String("event", event), slog.String("name", name))
 			return nil
 		},
 	})
 	cfg.Store(a.cfg)
 	a.cfg.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(a.cfg, certmagic.ACMEIssuer{
 		CA:                        p.CA,
-		TestCA:                    p.CA, // else certmagic takes the staging host of a known CA
+		TestCA:                    p.CA, // if not set, certmagic uses the staging host of a known CA
 		Email:                     p.Email,
-		Agreed:                    true, // else certmagic asks on stdin
+		Agreed:                    true, // the operator accepts the CA terms through acme.ca
 		DisableHTTPChallenge:      true,
 		DisableDistributedSolvers: true,
 		ListenHost:                p.Host,
@@ -135,7 +135,13 @@ func isLoggedEvent(event string) bool {
 
 // egressGuard returns the proxy function for the ACME client and the OCSP
 // client. It refuses each request whose scheme, host or port differs from ca. It
-// never gives a proxy, so the environment is not used. seen may be nil.
+// never gives a proxy, so it never uses a proxy from the environment. seen may be
+// nil.
+//
+// The transport calls the function for each new connection and for each
+// HTTP/1.1 request. A request on a pooled HTTP/2 connection to the same
+// authority does not call it. The function allowed that authority when the
+// transport made the connection.
 func egressGuard(ca *url.URL, seen func(host string)) func(*http.Request) (*url.URL, error) {
 	scheme, host, port := strings.ToLower(ca.Scheme), strings.ToLower(ca.Hostname()), portOf(ca)
 	return func(r *http.Request) (*url.URL, error) {
@@ -204,5 +210,5 @@ func (a *ACME) Start(ctx context.Context) error {
 }
 
 // Stop stops the maintenance goroutine of the certmagic cache. It waits for the
-// goroutine to end.
-func (a *ACME) Stop() { a.cache.Stop() }
+// goroutine to end. A second call does nothing.
+func (a *ACME) Stop() { a.stop.Do(a.cache.Stop) }
