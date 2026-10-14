@@ -15,16 +15,18 @@ const maxConnsPerSource = 32
 const ipv6PrefixBits = 64
 
 // sourceCap counts the open connections of each source key. One value serves
-// all Serve calls of one Server, like the slot semaphore. It holds no String or
-// Format method: nothing prints the map.
+// all Serve calls of one Server, like the slot semaphore. It has no String or
+// Format method, and no code prints the map.
 type sourceCap struct {
 	mu     sync.Mutex
 	count  map[netip.Addr]uint16
 	closes atomic.Uint64 // connections closed at the source cap
 }
 
-// newSourceCap makes the map with room for maxConns keys: the slot cap bounds
-// the number of keys, so the map never grows.
+// newSourceCap makes the map with room for maxConns keys. The map holds at most
+// maxConns keys, plus one key for each Serve call that is between the source
+// check and the slot. A Go map does not shrink after a delete, so under churn
+// the map grows to a bounded size.
 func newSourceCap(maxConns int) *sourceCap {
 	return &sourceCap{count: make(map[netip.Addr]uint16, maxConns)}
 }
@@ -95,8 +97,9 @@ func newLimitListener(ln net.Listener, sem chan struct{}, src *sourceCap) *limit
 }
 
 // Accept returns a connection that has a free slot and is within the source
-// cap. It closes a connection over a cap immediately and accepts the next one,
-// so it never blocks.
+// cap. It closes a connection over a cap at once and accepts the next one. It
+// does not block on a full semaphore or on a full source count. It still blocks
+// in the Accept of the wrapped listener.
 func (l *limitListener) Accept() (net.Conn, error) {
 	for {
 		c, err := l.Listener.Accept()

@@ -110,8 +110,10 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 // Serve accepts connections from the raw TCP listener ln until Close. The
 // connection cap is on the raw listener, and the TLS layer is on top of it.
 // A connection that a handler hijacks keeps its slot until the handler closes
-// it. All Serve calls of one server share the MaxConns slots and the cap of 32
-// open connections for each source address.
+// it. All Serve calls of one server share the MaxConns slots and the cap of
+// maxConnsPerSource open connections for each source address. The connections
+// of ln must have a *net.TCPAddr peer address: all connections with another
+// address type share one source count.
 func (s *Server) Serve(ln net.Listener) error {
 	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src), s.tls))
 }
@@ -124,5 +126,5 @@ func (s *Server) Close() error { return s.srv.Close() }
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
 
 // SourceCapCloses is the number of connections that the server closed because
-// their source had 32 open connections. It holds no address.
+// their source had maxConnsPerSource open connections. It holds no address.
 func (s *Server) SourceCapCloses() uint64 { return s.src.closes.Load() }

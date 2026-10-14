@@ -339,6 +339,75 @@ func TestTS17SourceKeyFromRemoteAddrOnly(t *testing.T) {
 	}
 }
 
+// T-S-17: the source check comes before the slot. The slots are full and the
+// source is at the cap: Accept closes the connection at the source cap, takes
+// no slot and leaves the count of the key unchanged.
+func TestTS17SourceCheckBeforeSlot(t *testing.T) {
+	over := newFakeConn(t, "192.0.2.7:2000", "198.51.100.1:443")
+	fake := &fakeListener{conns: []*fakeConn{over}, err: errors.New("end of fake listener")}
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+	src := newSourceCap(1)
+	key := netip.MustParseAddr("192.0.2.7")
+	for range maxConnsPerSource {
+		src.take(key)
+	}
+	l := newLimitListener(fake, sem, src)
+	if _, err := l.Accept(); err != fake.err {
+		t.Fatalf("Accept error %v, want the error of the listener", err)
+	}
+	if !over.closed.Load() {
+		t.Error("connection over the source cap is not closed")
+	}
+	if n := src.closes.Load(); n != 1 {
+		t.Errorf("source cap closes %d, want 1", n)
+	}
+	if n := len(sem); n != 1 {
+		t.Errorf("slots in use %d, want 1", n)
+	}
+	if n := src.count[key]; n != maxConnsPerSource {
+		t.Errorf("count of the key %d, want %d", n, maxConnsPerSource)
+	}
+}
+
+// benchConn is a pipe end with a TCP peer address. Close does nothing, so the
+// benchmark makes the connection once and measures only the listener.
+type benchConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c *benchConn) RemoteAddr() net.Addr { return c.remote }
+func (c *benchConn) Close() error         { return nil }
+
+// benchListener returns the same connection on each Accept.
+type benchListener struct{ conn net.Conn }
+
+func (l *benchListener) Accept() (net.Conn, error) { return l.conn, nil }
+func (l *benchListener) Close() error              { return nil }
+func (l *benchListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 443}
+}
+
+// BenchmarkLimitAccept measures one Accept and one Close of limitListener.
+func BenchmarkLimitAccept(b *testing.B) {
+	a, p := net.Pipe()
+	defer a.Close()
+	defer p.Close()
+	conn := &benchConn{Conn: a, remote: net.TCPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.7:1000"))}
+	const slots = 64
+	l := newLimitListener(&benchListener{conn: conn}, make(chan struct{}, slots), newSourceCap(slots))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		c, err := l.Accept()
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = c.Close()
+	}
+}
+
 // T-S-17: one step of the accept path takes no heap allocation, for an IPv4 and
 // an IPv6 peer address.
 func TestTS17SourceCapStepNoAllocs(t *testing.T) {
