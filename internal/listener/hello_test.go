@@ -217,6 +217,31 @@ func TestTS17RedirectEscapesSegments(t *testing.T) {
 	}
 }
 
+// T-S-17: a path that starts with two slashes, a slash and a backslash, or
+// their escaped forms, never changes the host of the redirect; the Location is
+// https and its host is the configured name.
+func TestTS17RedirectHostIsAlwaysConfigured(t *testing.T) {
+	for _, target := range []string{
+		"//evil.example", "/\\evil.example", "/%2F%2Fevil.example", "///evil.example", "/\\/evil.example",
+	} {
+		raw := "GET " + target + " HTTP/1.1\r\nHost: decoy.test\r\n\r\n"
+		r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+		if err != nil {
+			t.Fatalf("target %q: ReadRequest: %v", target, err)
+		}
+		resp, _ := serveRaw(t, NewRedirect(helloNames), r)
+		loc := resp.Header.Get("Location")
+		t.Logf("target %q: status %d, Location %q", target, resp.StatusCode, loc)
+		if resp.StatusCode != 308 || loc == "" {
+			t.Fatalf("target %q: status %d, Location %q", target, resp.StatusCode, loc)
+		}
+		u, err := url.Parse(loc)
+		if err != nil || u.Scheme != "https" || u.Host != "decoy.test" || u.User != nil {
+			t.Fatalf("target %q: bad Location %q (%v)", target, loc, err)
+		}
+	}
+}
+
 // T-U-19: a NewEvent error adds one to the error counter. The response does not
 // change and the queue gets no event.
 func TestTU19NewEventErrorCountsAndServes(t *testing.T) {
