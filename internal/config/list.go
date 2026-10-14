@@ -17,10 +17,13 @@ type listKey struct {
 	min, max int
 	req      bool             // req marks a required list: the file must set it.
 	schemas  map[string][]key // schemas holds the keys of an item by type. The path of a key is its name in the item.
+	item     *key             // item, if set, makes the list a list of scalars: each entry has this key and no schemas.
+	unique   bool             // unique marks a list of scalars with no duplicate entry.
 }
 
 // lists is the production list table. The key table holds the scalar keys.
 var lists = []listKey{
+	{path: "acme.names", min: 1, max: 16, req: true, unique: true, item: &key{kind: kindString, check: checkACMEName}},
 	{path: "tlog.publish", min: 1, max: 4, req: true, schemas: map[string][]key{
 		"https-put": {
 			{path: "url", kind: kindURL, req: true, check: checkHTTPS},
@@ -87,10 +90,37 @@ func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []erro
 			fail(l.path, "the list needs "+strconv.Itoa(l.min)+" to "+strconv.Itoa(l.max)+" entries")
 			continue
 		}
+		if l.item != nil {
+			k, e := expandScalars(doc, file, l, n)
+			out, errs = append(out, k...), append(errs, e...)
+			continue
+		}
 		for i := range n {
 			k, e := expandItem(doc, file, l, fmt.Sprintf("%s[%d]", l.path, i))
 			out, errs = append(out, k...), append(errs, e...)
 		}
+	}
+	return out, errs
+}
+
+// expandScalars expands the entries of the list of scalars l. Each entry is a key with the
+// check of l.item. An entry that is not a scalar is an error on the entry. A duplicate entry is an error on the list key.
+func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []error) {
+	fail := failer(doc, file, &errs)
+	seen := make(map[string]int, n)
+	for i := range n {
+		k := *l.item
+		k.path = fmt.Sprintf("%s[%d]", l.path, i)
+		leaf, ok := doc.Leaves[k.path]
+		if !ok {
+			fail(k.path, "the key needs a scalar value")
+			continue
+		}
+		seen[leaf.Value]++
+		if l.unique && seen[leaf.Value] == 2 { // One error for each duplicate value.
+			fail(l.path, "the list must not hold an entry two times")
+		}
+		out = append(out, k)
 	}
 	return out, errs
 }
