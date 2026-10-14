@@ -178,6 +178,11 @@ func isClosed(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
+// connEnded tells if err is an end of stream, a reset, or an unexpected end of stream.
+func connEnded(err error) bool {
+	return isClosed(err) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // T-S-17: the production bounds are 10 s, 10 s, 10 s and 30 s.
 func TestTS17DefaultBounds(t *testing.T) {
 	if defaultTimeouts != (timeouts{10 * time.Second, 10 * time.Second, 10 * time.Second, 30 * time.Second}) {
@@ -347,36 +352,50 @@ func TestTS17ConnectionCap(t *testing.T) {
 }
 
 // T-S-17: no second request is served on a connection (keep-alive is off). The
-// first request gets 200. A second head of 8193 bytes or of 8192 bytes, sent in
-// the same write, gets no response, and the connection ends.
+// first request and a second head of 8193 bytes or of 8192 bytes go out in one
+// write. The server can answer and close before that write ends. So a write
+// error is accepted. A first read that ends in a reset or an end of stream is
+// accepted too. The test still reads the connection. On at least one of the two
+// sizes the first response must be read, and it must be 200. No second
+// response is allowed, and the connection must end.
 func TestTS17PipelinedHeadNotServed(t *testing.T) {
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
 	const first = "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+	checked := 0
 	for _, n := range []int{testHeaderBytes + 1, testHeaderBytes} {
 		c := r.dial(t)
 		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-		if _, err := io.WriteString(c, first+head(n)); err != nil {
-			t.Fatal(err)
+		if _, err := io.WriteString(c, first+head(n)); err != nil &&
+			!errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) {
+			t.Fatalf("second head of %d bytes: write: %v", n, err)
 		}
 		br := bufio.NewReader(c)
 		resp, err := http.ReadResponse(br, nil)
 		if err != nil {
-			t.Fatalf("second head of %d bytes: first response: %v", n, err)
+			if !connEnded(err) {
+				t.Fatalf("second head of %d bytes: first response: %v", n, err)
+			}
+			t.Logf("second head of %d bytes: the first response could not be read because the connection ended or was reset: %v", n, err)
+			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode != 200 {
 			t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
 		}
+		checked++
 		resp2, err := http.ReadResponse(br, nil)
 		if err == nil {
 			_ = resp2.Body.Close()
 			t.Fatalf("second head of %d bytes: second response, status %d", n, resp2.StatusCode)
 		}
-		if !isClosed(err) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		if !connEnded(err) {
 			t.Fatalf("second head of %d bytes: want the end of the connection, got %v", n, err)
 		}
+	}
+	if checked == 0 {
+		t.Fatal("no size read the first response: the 200 was not checked")
 	}
 }
 
