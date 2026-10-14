@@ -163,8 +163,9 @@ func TestTS17HelloAndRedirectNeverReflect(t *testing.T) {
 	}
 }
 
-// T-S-17: on both handlers a method other than GET and HEAD gets 405, and an
-// unknown or malformed Host gets 404. GET and HEAD on a configured name get 200.
+// T-S-17: On both handlers, a method other than GET and HEAD gets 405, and an
+// unknown or malformed Host gets 404. On the TLS handler, GET and HEAD on a
+// configured name get 200.
 func TestTS17MethodAndHostRules(t *testing.T) {
 	hello, q, _ := newHelloQueue(t, 8)
 	for _, h := range []http.Handler{hello, NewRedirect(helloNames)} {
@@ -201,16 +202,18 @@ func TestTS17MethodAndHostRules(t *testing.T) {
 	}
 }
 
-// T-S-17: the redirect writes no event, and it escapes each path segment.
-func TestTS17RedirectWritesNoEvent(t *testing.T) {
-	_, q, _ := newHelloQueue(t, 4)
-	serveRaw(t, NewRedirect(helloNames), &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: "/a b"}})
-	if n := len(q.Drain()); n != 0 {
-		t.Fatalf("events: %d", n)
-	}
-	resp, _ := serveRaw(t, NewRedirect(helloNames), &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: "/a b/c"}})
-	if got := resp.Header.Get("Location"); got != "https://decoy.test/a%20b/c" {
-		t.Fatalf("Location %q", got)
+// T-S-17: the Location of the redirect has each path segment escaped. The path
+// "*" gives "/%2A", and the empty path gives "/".
+func TestTS17RedirectEscapesSegments(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"/a b/c", "https://decoy.test/a%20b/c"},
+		{"*", "https://decoy.test/%2A"},
+		{"", "https://decoy.test/"},
+	} {
+		resp, _ := serveRaw(t, NewRedirect(helloNames), &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: tc.path}})
+		if got := resp.Header.Get("Location"); got != tc.want {
+			t.Fatalf("path %q: Location %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -303,10 +306,14 @@ func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 }
 
 // T-S-17: the work of location is bounded by maxLocation, not by the path. A
-// path of 16384 bytes takes less than 16 KiB of heap in each run.
+// path of 16384 bytes takes less than 16 KiB of heap in each run. Measured
+// with -race: "/a/b" takes 32 B, 16384 "/" take 2304 B, 16384 "<" take 14592 B,
+// and "/" + 238 "<" + "/" + 16384 "<" take 16128 B in each run.
 func TestTS17LocationWorkIsBounded(t *testing.T) {
 	for _, tc := range []struct{ name, path string }{
+		{"short", "/a/b"},
 		{"slash", strings.Repeat("/", 16384)}, {"escape", strings.Repeat("<", 16384)},
+		{"mixed", "/" + strings.Repeat("<", 238) + "/" + strings.Repeat("<", 16384)},
 	} {
 		r := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()

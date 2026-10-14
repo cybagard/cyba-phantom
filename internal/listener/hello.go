@@ -115,12 +115,13 @@ func location(name, path string) string {
 	// Escaping never makes a byte shorter, so the first maxLocation bytes of
 	// the path give the first maxLocation bytes of the result. The builder
 	// takes one byte more than maxLocation, so that the cut below sees a value
-	// that is too long. The loop stops when it has enough.
+	// that is too long. The loop stops at the end of the path or when the
+	// builder holds more than maxLocation bytes.
 	if len(path) > maxLocation {
 		path = path[:maxLocation]
 	}
 	var b strings.Builder
-	b.Grow(maxLocation + 1)
+	b.Grow(min(maxLocation+1, len("https://")+len(name)+1+3*len(path)))
 	b.WriteString("https://")
 	b.WriteString(name)
 	if !strings.HasPrefix(path, "/") {
