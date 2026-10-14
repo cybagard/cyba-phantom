@@ -3,6 +3,7 @@ package listener
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -229,17 +230,25 @@ func TestTS17SlowHeadersClose(t *testing.T) {
 // The head is the request line, the header lines and the blank line. A head
 // of header_bytes bytes gets 200 and a head of header_bytes + 1 bytes gets 431.
 func TestTS17HeaderCapBoundary(t *testing.T) {
-	const headerBytes = testHeaderBytes
-	r := newRig(t, 8, headerBytes, defaultTimeouts, okHandler)
-	r.serve(t)
-	for _, tc := range []struct{ n, want int }{
-		{headerBytes, 200}, {headerBytes + 1, 431}, {headerBytes + 4096, 431},
+	// 16384 is the largest value that the config accepts.
+	for _, tc := range []struct {
+		headerBytes int
+		heads       []struct{ n, want int }
+	}{
+		{testHeaderBytes, []struct{ n, want int }{
+			{testHeaderBytes, 200}, {testHeaderBytes + 1, 431}, {testHeaderBytes + 4096, 431},
+		}},
+		{16384, []struct{ n, want int }{{16384, 200}, {16385, 431}}},
 	} {
-		c := r.dial(t)
-		got := status(c, tc.n)
-		t.Logf("head of %d bytes (header_bytes + %d): status %d", tc.n, tc.n-headerBytes, got)
-		if got != tc.want {
-			t.Errorf("head of %d bytes: status %d, want %d", tc.n, got, tc.want)
+		r := newRig(t, 8, tc.headerBytes, defaultTimeouts, okHandler)
+		r.serve(t)
+		for _, h := range tc.heads {
+			c := r.dial(t)
+			got := status(c, h.n)
+			t.Logf("header_bytes %d: head of %d bytes (header_bytes + %d): status %d", tc.headerBytes, h.n, h.n-tc.headerBytes, got)
+			if got != h.want {
+				t.Errorf("header_bytes %d: head of %d bytes: status %d, want %d", tc.headerBytes, h.n, got, h.want)
+			}
 		}
 	}
 }
@@ -333,13 +342,57 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 }
 
+// T-S-17: all Serve calls of one server share max_conns. With max_conns 1, a
+// connection on the second listener closes before the handshake while the
+// connection on the first listener is open, and it serves after that one closes.
+func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
+	r := newRig(t, 1, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	first := r.addr
+	r.serve(t)
+	second := r.addr
+
+	c1, err := tls.Dial("tcp", first, r.clientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	if got := status(c1, 0); got != 200 {
+		t.Fatalf("first listener: status %d", got)
+	}
+	over, err := net.Dial("tcp", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer over.Close()
+	_ = over.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
+		t.Fatalf("second listener over the cap: handshake error %v; want an end of stream or a reset", err)
+	}
+	_ = c1.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if c, err := tls.Dial("tcp", second, r.clientConfig()); err == nil {
+			ok := status(c, 0) == 200
+			_ = c.Close()
+			if ok {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second listener does not serve after the slot is free")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // T-S-17: Close gives the slot back one time, also when called two times.
 func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := newLimitListener(ln, 2)
+	l := newLimitListener(ln, make(chan struct{}, 2))
 	defer l.Close()
 	var served []net.Conn
 	for range 2 {
@@ -352,6 +405,7 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = c.Close() })
 		served = append(served, c)
 	}
 	_ = served[0].Close()
@@ -374,10 +428,19 @@ func TestTS17NoH2(t *testing.T) {
 		t.Fatalf("negotiated %q", p)
 	}
 	// A client that offers only h2 gets a handshake error, or a protocol that
-	// is not h2. A timeout is neither.
-	c2, err := tls.Dial("tcp", r.addr, r.clientConfig("h2"))
+	// is not h2. A timeout is neither: the dial has a limit of 3 s and a
+	// timeout fails the test.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: r.clientConfig("h2")}
+	nc, err := d.DialContext(ctx, "tcp", r.addr)
+	var c2 *tls.Conn
+	if err == nil {
+		c2 = nc.(*tls.Conn)
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrDeadlineExceeded) {
+		var ne net.Error
+		if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
 			t.Fatalf("h2-only dial timed out: %v", err)
 		}
 		t.Logf("h2-only dial: handshake error: %v", err)
@@ -401,6 +464,10 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	log.SetOutput(&std)
 
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	// The error log writes to the counter and to no other writer.
+	if r.s.srv.ErrorLog.Writer() != &r.s.errLines {
+		t.Fatal("the server error log does not write only to the counter")
+	}
 	r.serve(t)
 	var addrs []string
 	for range 3 {
@@ -408,6 +475,7 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
 		addrs = append(addrs, raw.LocalAddr().String())
 		// No trusted root: the client refuses the certificate and fails the handshake.
 		if err := tls.Client(raw, &tls.Config{ServerName: "marker-sni.example"}).Handshake(); err == nil {
@@ -419,11 +487,13 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = garbage.SetDeadline(time.Now().Add(5 * time.Second))
 	addrs = append(addrs, garbage.LocalAddr().String())
 	_, _ = io.WriteString(garbage, "GET /marker-path HTTP/1.1\r\nHost: marker-sni.example\r\n\r\n")
 	_ = garbage.Close()
 	// A bad request over TLS: no Host header.
 	c := r.dial(t)
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	addrs = append(addrs, c.LocalAddr().String())
 	_, _ = io.WriteString(c, "GET /marker-path HTTP/1.1\r\n\r\n")
 	_, _ = io.Copy(io.Discard, c)

@@ -57,7 +57,8 @@ func (h *Hello) SupportedGroups() []uint16 { return h.groups[:h.nGroups] }
 // must not change the returned slice.
 func (h *Hello) SupportedVersions() []uint16 { return h.versions[:h.nVersions] }
 
-// ALPN returns the first ALPN value, or "" when the client sent none.
+// ALPN returns the first ALPN value, or "" when the client sent none. The value
+// is raw client bytes. Escape it before it goes to a log or an event (SEC-07).
 func (h *Hello) ALPN() string { return string(h.alpn[:h.alpnLen]) }
 
 // HasServerName tells if the client sent a server name. The name is not kept.

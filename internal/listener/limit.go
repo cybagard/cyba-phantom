@@ -13,12 +13,14 @@ type limitListener struct {
 	sem chan struct{}
 }
 
-func newLimitListener(ln net.Listener, max int) *limitListener {
-	return &limitListener{Listener: ln, sem: make(chan struct{}, max)}
+// newLimitListener takes the semaphore from the caller, so that more than one
+// listener can share the same slots.
+func newLimitListener(ln net.Listener, sem chan struct{}) *limitListener {
+	return &limitListener{Listener: ln, sem: sem}
 }
 
 // Accept returns a connection that has a free slot. It closes a connection
-// over the cap at once and accepts the next one, so it never blocks on a full
+// over the cap immediately and accepts the next one, so it never blocks on a full
 // semaphore.
 func (l *limitListener) Accept() (net.Conn, error) {
 	for {

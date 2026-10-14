@@ -247,9 +247,10 @@ func TestTU19FirstWins(t *testing.T) {
 }
 
 // T-U-19: the copy has a fixed size. The arrays take 2 * (128 + 128 + 64 + 64
-// + 16) = 800 bytes, the ALPN array 255, five list counts, the ALPN length and
-// two flags 8 more: 1063, and one pad byte for the 2-byte alignment: 1064.
-// That is over 1 KiB (1024); the caps are fixed by the design.
+// + 16) = 800 bytes. The ALPN array takes 255 bytes. Five list counts, the ALPN
+// length and two flags take 8 bytes more: 1063. One pad byte keeps the 2-byte
+// alignment: 1064. The criterion is 1152 bytes or less, so 1064 is in the
+// limit.
 func TestTU19FixedSize(t *testing.T) {
 	const want = 2*(128+128+64+64+16) + 255 + 8 + 1
 	if got := unsafe.Sizeof(Hello{}); got != want || want != 1064 {
