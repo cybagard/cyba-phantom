@@ -93,10 +93,12 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		Issuers:            []certmagic.Issuer{}, // not nil: New would make an issuer from the package defaults
 		Storage:            p.Storage,
 		Logger:             zap.NewNop(),
-		ShouldEmitFunc: func(event string) bool {
-			return event == "cert_obtaining" || event == "cert_obtained" || event == "cert_failed"
-		},
+		ShouldEmitFunc:     isLoggedEvent,
 		OnEvent: func(ctx context.Context, event string, data map[string]any) error {
+			// certmagic calls OnEvent for each event. Only three events get a line.
+			if !isLoggedEvent(event) {
+				return nil
+			}
 			// Only a configured name goes into the line.
 			name, _ := data["identifier"].(string)
 			if _, ok := a.allowed[name]; !ok {
@@ -124,6 +126,11 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		HTTPProxy:                 guard,
 	})}
 	return a, nil
+}
+
+// isLoggedEvent reports whether an event of certmagic gets a log line.
+func isLoggedEvent(event string) bool {
+	return event == "cert_obtaining" || event == "cert_obtained" || event == "cert_failed"
 }
 
 // egressGuard returns the proxy function for the ACME client and the OCSP

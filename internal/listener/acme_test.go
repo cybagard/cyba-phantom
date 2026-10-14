@@ -266,6 +266,28 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 	}
 }
 
+func TestTS16EventLinesAreWrittenForThreeEventsOnly(t *testing.T) {
+	var logs syncBuf
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.CA = "https://" + closedAddr(t)
+		p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	seedCert(t, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// Start loads the cached certificate. certmagic emits cached_managed_cert.
+	mustNil(t, a.Start(ctx))
+	if _, err := handshake(a, "decoy.test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{"cached_managed_cert", "cached_unmanaged_cert", "cert_ocsp_revoked", "tls_get_certificate"} {
+		mustNil(t, a.cfg.OnEvent(ctx, event, map[string]any{"identifier": "decoy.test", "sans": []string{"decoy.test"}}))
+	}
+	if out := logs.String(); out != "" {
+		t.Errorf("log output: %q", out)
+	}
+}
+
 func TestTS16EventLinesHoldTheConfiguredNameOnly(t *testing.T) {
 	var logs syncBuf
 	a := newTestACME(t, func(p *ACMEParams) { p.Logger = slog.New(slog.NewTextHandler(&logs, nil)) })
