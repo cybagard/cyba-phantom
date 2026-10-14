@@ -99,6 +99,10 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 			return withConnState(ctx)
 		},
 	}
+	// Each connection serves one request. A request head that a client sends
+	// after the first request on the same connection is not read, so the header
+	// cap holds for each head that is served.
+	s.srv.SetKeepAlivesEnabled(false)
 	return s, nil
 }
 

@@ -107,12 +107,18 @@ func (r *rig) dial(t *testing.T) *tls.Conn {
 // status sends a request with a head of n bytes (0: a short head) and returns
 // the status code, or 0 when the server closed the connection.
 func status(c net.Conn, n int) int {
-	const head = "GET / HTTP/1.1\r\nHost: a\r\nX-Pad: "
+	return roundTrip(c, head(n))
+}
+
+// head returns a request head of n bytes (0: a short head): the request line,
+// the header lines and the blank line.
+func head(n int) string {
+	const start = "GET / HTTP/1.1\r\nHost: a\r\nX-Pad: "
 	pad := 0
-	if n > len(head)+4 {
-		pad = n - len(head) - 4
+	if n > len(start)+4 {
+		pad = n - len(start) - 4
 	}
-	return roundTrip(c, head+strings.Repeat("a", pad)+"\r\n\r\n")
+	return start + strings.Repeat("a", pad) + "\r\n\r\n"
 }
 
 // statusValues sends a request with n header values (Host and n-1 others, each
@@ -297,12 +303,10 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 	r.serve(t)
 	var conns []*tls.Conn
+	// Each connection serves one request, so the open connections finish the
+	// handshake and wait: they keep their slots until they send a request.
 	for range nConns {
-		c := r.dial(t)
-		if got := status(c, 0); got != 200 {
-			t.Fatalf("status %d", got)
-		}
-		conns = append(conns, c)
+		conns = append(conns, r.dial(t))
 	}
 	over, err := net.Dial("tcp", r.addr)
 	if err != nil {
@@ -319,13 +323,13 @@ func TestTS17ConnectionCap(t *testing.T) {
 	if calls.Load() != nConns {
 		t.Fatalf("capture ran %d times, want %d", calls.Load(), nConns)
 	}
-	// The others serve after the connection over the cap.
+	// The others serve their one request after the connection over the cap.
+	// Each of them gives its slot back when the request ends.
 	for i, c := range conns {
 		if got := status(c, 0); got != 200 {
 			t.Fatalf("open connection %d: status %d after the connection over the cap", i, got)
 		}
 	}
-	_ = conns[0].Close()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if c, err := tls.Dial("tcp", r.addr, r.clientConfig()); err == nil {
@@ -339,6 +343,40 @@ func TestTS17ConnectionCap(t *testing.T) {
 			t.Fatal("slot not given back")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// T-S-17: no second request is served on a connection (keep-alive is off). The
+// first request gets 200. A second head of 8193 bytes or of 8192 bytes, sent in
+// the same write, gets no response, and the connection ends.
+func TestTS17PipelinedHeadNotServed(t *testing.T) {
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	const first = "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+	for _, n := range []int{testHeaderBytes + 1, testHeaderBytes} {
+		c := r.dial(t)
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.WriteString(c, first+head(n)); err != nil {
+			t.Fatal(err)
+		}
+		br := bufio.NewReader(c)
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("second head of %d bytes: first response: %v", n, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
+		}
+		resp2, err := http.ReadResponse(br, nil)
+		if err == nil {
+			_ = resp2.Body.Close()
+			t.Fatalf("second head of %d bytes: second response, status %d", n, resp2.StatusCode)
+		}
+		if !isClosed(err) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("second head of %d bytes: want the end of the connection, got %v", n, err)
+		}
 	}
 }
 
@@ -357,9 +395,6 @@ func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c1.Close()
-	if got := status(c1, 0); got != 200 {
-		t.Fatalf("first listener: status %d", got)
-	}
 	over, err := net.Dial("tcp", second)
 	if err != nil {
 		t.Fatal(err)
@@ -368,6 +403,11 @@ func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
 	_ = over.SetDeadline(time.Now().Add(3 * time.Second))
 	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
 		t.Fatalf("second listener over the cap: handshake error %v; want an end of stream or a reset", err)
+	}
+	// The connection on the first listener serves its request and gives the
+	// slot back.
+	if got := status(c1, 0); got != 200 {
+		t.Fatalf("first listener: status %d", got)
 	}
 	_ = c1.Close()
 	deadline := time.Now().Add(5 * time.Second)
