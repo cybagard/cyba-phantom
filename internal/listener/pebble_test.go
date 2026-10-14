@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"io"
 	"log"
 	"net"
@@ -11,8 +12,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,22 +29,22 @@ import (
 // newOrderPath is the path of the new-order URL of Pebble.
 const newOrderPath = "/order-plz"
 
-// pebbleRig is a Pebble CA in the test process. It listens on loopback, and so
-// does the DNS server that gives 127.0.0.1 for each name.
+// pebbleRig is a Pebble CA in the test process. Pebble listens on loopback. The
+// DNS server listens on loopback too, and it answers 127.0.0.1 for each name.
 type pebbleRig struct {
 	dir   string         // the directory URL, with an IP authority
 	host  string         // host:port of the directory
-	trust *x509.CertPool // the TLS certificate of the directory server (ACMEParams.TrustedRoots)
+	trust *x509.CertPool // a pool that holds the certificate of the directory server (ACMEParams.trustedRoots)
 	root  *x509.CertPool // the root that issues the certificates
 }
 
 // newPebbleRig starts Pebble. Its validation connects to port tlsPort of the
-// name. front may wrap the handler of the CA. Pebble reads the environment when
-// it starts, so a caller of newPebbleRig must not use t.Parallel.
+// name. front may wrap the handler of the CA. t.Setenv panics in a parallel
+// test, so a caller of newPebbleRig must not use t.Parallel.
 func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handler) *pebbleRig {
 	t.Helper()
 	t.Setenv("PEBBLE_VA_NOSLEEP", "1")      // no random sleep before a validation
-	t.Setenv("PEBBLE_WFE_NONCEREJECT", "0") // no good nonce is rejected
+	t.Setenv("PEBBLE_WFE_NONCEREJECT", "0") // Pebble rejects no good nonce
 	t.Setenv("PEBBLE_AUTHZREUSE", "0")      // each order gets a new challenge
 	logger := log.New(io.Discard, "", 0)
 	dnsAddr := closedAddr(t)
@@ -49,7 +52,7 @@ func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handl
 	mustNil(t, err)
 	dns.SetDefaultDNSIPv4("127.0.0.1")
 	dns.SetDefaultDNSIPv6("")
-	go dns.Run()
+	dns.Run()
 	t.Cleanup(dns.Shutdown)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		if c, err := net.Dial("tcp", dnsAddr); err == nil {
@@ -67,6 +70,21 @@ func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handl
 	if front != nil {
 		api = front(api)
 	}
+	// With HTTP/1.1, each request of the ACME client calls the proxy function, so
+	// the set of authorities that the guard saw covers every request.
+	var notHTTP11 atomic.Int64
+	t.Cleanup(func() {
+		if n := notHTTP11.Load(); n != 0 {
+			t.Errorf("Pebble got %d requests that were not HTTP/1.1", n)
+		}
+	})
+	inner := api
+	api = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 1 || r.ProtoMinor != 1 {
+			notHTTP11.Add(1)
+		}
+		inner.ServeHTTP(w, r)
+	})
 	mux := http.NewServeMux() // Pebble serves its roots on a management handler
 	mux.Handle("/", api)
 	mux.Handle(pebbleWFE.RootCertPath, wfe.ManagementHandler())
@@ -118,7 +136,8 @@ type issueFixture struct {
 	rig    *pebbleRig
 	egress *egressSet
 	name   string
-	addr   string // host:port of the decoy socket
+	addr   string       // host:port of the decoy socket
+	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
 }
 
 // newIssueFixture binds the decoy socket first. It answers on that socket only,
@@ -133,7 +152,7 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 	f := &issueFixture{name: name, addr: l.Addr().String(), egress: &egressSet{}, rig: newPebbleRig(t, port, front)}
 	f.a = newTestACME(t, func(p *ACMEParams) {
 		p.Names, p.CA, p.Host, p.Port = []string{name}, f.rig.dir, "127.0.0.1", port
-		p.OnEgress, p.TrustedRoots = f.egress.record, f.rig.trust
+		p.OnEgress, p.trustedRoots = f.egress.record, f.rig.trust
 		if mod != nil {
 			mod(p)
 		}
@@ -148,7 +167,10 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 			go func() {
 				defer c.Close()
 				c.SetDeadline(time.Now().Add(10 * time.Second))
-				c.(*tls.Conn).Handshake()
+				tc := c.(*tls.Conn)
+				if tc.Handshake() == nil && tc.ConnectionState().NegotiatedProtocol == "acme-tls/1" {
+					f.alpn.Add(1)
+				}
 			}()
 		}
 	}()
@@ -201,12 +223,31 @@ func (f *issueFixture) onlyPebble(t *testing.T, when string) {
 	}
 }
 
+// requireALPN fails the test unless the decoy socket completed a handshake with
+// acme-tls/1, so the TLS-ALPN-01 validation came to the decoy socket.
+func (f *issueFixture) requireALPN(t *testing.T) {
+	t.Helper()
+	if n := f.alpn.Load(); n < 1 {
+		t.Errorf("the decoy socket completed %d acme-tls/1 handshakes", n)
+	}
+}
+
 // listeningInodes returns the inodes of the TCP sockets in the LISTEN state that
 // this process holds, with their local address. It reads /proc.
 func listeningInodes(t *testing.T) map[string]string {
 	t.Helper()
-	fds, err := os.ReadDir("/proc/self/fd")
+	out, err := listeningSockets()
 	mustNil(t, err)
+	return out
+}
+
+// listeningSockets is listeningInodes with an error result, for a goroutine. An
+// IPv4 address is host:port; an IPv6 address stays as /proc writes it.
+func listeningSockets() (map[string]string, error) {
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return nil, err
+	}
 	held := map[string]bool{}
 	for _, fd := range fds {
 		if l, err := os.Readlink("/proc/self/fd/" + fd.Name()); err == nil && strings.HasPrefix(l, "socket:[") {
@@ -216,15 +257,32 @@ func listeningInodes(t *testing.T) map[string]string {
 	out := map[string]string{}
 	for _, file := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
 		f, err := os.Open(file)
-		mustNil(t, err)
+		if err != nil {
+			return nil, err
+		}
 		sc := bufio.NewScanner(f)
 		sc.Scan() // the header row
 		for sc.Scan() {
 			if row := strings.Fields(sc.Text()); len(row) > 9 && row[3] == "0A" && held[row[9]] {
-				out[row[9]] = row[1]
+				out[row[9]] = procAddr(row[1])
 			}
 		}
 		f.Close()
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
 	}
-	return out
+	return out, nil
+}
+
+// procAddr turns a local address of /proc/net/tcp ("0100007F:1F90") into
+// "127.0.0.1:8080". It returns any other form as it is.
+func procAddr(s string) string {
+	ip, port, _ := strings.Cut(s, ":")
+	b, err := hex.DecodeString(ip)
+	n, perr := strconv.ParseUint(port, 16, 16)
+	if err != nil || perr != nil || len(b) != 4 {
+		return s
+	}
+	return net.JoinHostPort(net.IPv4(b[3], b[2], b[1], b[0]).String(), strconv.FormatUint(n, 10))
 }
