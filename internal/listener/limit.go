@@ -25,8 +25,8 @@ type sourceCap struct {
 
 // newSourceCap makes the map with room for maxConns keys. The map holds at most
 // maxConns keys, plus one key for each Serve call that is between the source
-// check and the slot. A Go map does not shrink after a delete, so under churn
-// the map grows to a bounded size.
+// check and the slot. A delete does not shrink a Go map. Under churn the map
+// can grow, to a bounded size.
 func newSourceCap(maxConns int) *sourceCap {
 	return &sourceCap{count: make(map[netip.Addr]uint16, maxConns)}
 }
@@ -125,8 +125,8 @@ func (l *limitListener) Accept() (net.Conn, error) {
 // inUse is the number of slots that are taken.
 func (l *limitListener) inUse() int { return len(l.sem) }
 
-// limitConn gives its slot and its source count back on the first Close and
-// only on the first.
+// limitConn gives its source count and then its slot back on the first Close
+// and only on the first. The key leaves the map before the slot is free.
 type limitConn struct {
 	net.Conn
 	sem  chan struct{}
@@ -138,8 +138,8 @@ type limitConn struct {
 func (c *limitConn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(func() {
-		<-c.sem
 		c.src.give(c.key)
+		<-c.sem
 	})
 	return err
 }

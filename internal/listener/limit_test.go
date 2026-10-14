@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -389,7 +390,8 @@ func (l *benchListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 443}
 }
 
-// BenchmarkLimitAccept measures one Accept and one Close of limitListener.
+// BenchmarkLimitAccept measures one Accept of limitListener and one Close of
+// the limitConn that it returns.
 func BenchmarkLimitAccept(b *testing.B) {
 	a, p := net.Pipe()
 	defer a.Close()
@@ -405,6 +407,54 @@ func BenchmarkLimitAccept(b *testing.B) {
 			b.Fatal(err)
 		}
 		_ = c.Close()
+	}
+}
+
+// newSourceListener returns a new source address on each Accept.
+type newSourceListener struct{ n atomic.Uint32 }
+
+func (l *newSourceListener) Accept() (net.Conn, error) {
+	i := l.n.Add(1)
+	a := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+	return &benchConn{remote: net.TCPAddrFromAddrPort(netip.AddrPortFrom(a, 1))}, nil
+}
+func (l *newSourceListener) Close() error { return nil }
+func (l *newSourceListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 443}
+}
+
+// T-S-17: with one Accept loop and connections that close in their own
+// goroutines, the map never holds more than slots+1 keys.
+func TestTS17SourceKeysWithinBound(t *testing.T) {
+	const slots, accepts = 4, 30_000
+	src := newSourceCap(slots)
+	l := newLimitListener(&newSourceListener{}, make(chan struct{}, slots), src)
+	var done atomic.Bool
+	var max int
+	var sampler sync.WaitGroup
+	sampler.Add(1)
+	go func() {
+		defer sampler.Done()
+		for !done.Load() {
+			if k := src.keys(); k > max {
+				max = k
+			}
+		}
+	}()
+	var closers sync.WaitGroup
+	for range accepts {
+		c, err := l.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		closers.Add(1)
+		go func() { defer closers.Done(); _ = c.Close() }()
+	}
+	closers.Wait()
+	done.Store(true)
+	sampler.Wait()
+	if max > slots+1 {
+		t.Errorf("map held %d keys, want at most %d", max, slots+1)
 	}
 }
 
