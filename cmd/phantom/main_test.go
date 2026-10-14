@@ -146,7 +146,7 @@ func TestTS11_CheckStorePath(t *testing.T) {
 }
 
 // TestTS11_CheckACME checks that --check refuses a bad acme.names list, a bad acme.cache_dir, and a
-// limits.header_bytes outside 8192 to 16384 with exit 1 and the key in stderr, and accepts the edges (SEC-21, SEC-02).
+// limits.header_bytes outside 8192 to 16384 with exit 1 and the key in stderr, and accepts the edges (SEC-21, SEC-02, T-S-11, T-U-10).
 func TestTS11_CheckACME(t *testing.T) {
 	body := validBody(t)
 	names := func(list string) string { return strings.Replace(body, "[decoy.example.com]", list, 1) }

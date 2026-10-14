@@ -1295,7 +1295,8 @@ func namesFile(names ...string) string {
 }
 
 // TestTS11_ACMENames checks the acme.names rule: the count, each entry, the duplicates, and the missing
-// override (SEC-21, T-S-11). Each bad value gives an error that names acme.names.
+// override (SEC-21, T-S-11, T-U-10). Each bad value gives an error that names acme.names. The override
+// row checks that a PHANTOM_ variable for a list key is an unknown-variable error (T-U-10).
 func TestTS11_ACMENames(t *testing.T) {
 	l63 := strings.Repeat("a", 63)
 	name253 := strings.Join([]string{l63, l63, l63, strings.Repeat("a", 61)}, ".")
