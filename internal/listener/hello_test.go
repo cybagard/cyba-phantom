@@ -240,3 +240,21 @@ func TestPriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 		t.Fatalf("event: %+v", r)
 	}
 }
+
+func BenchmarkHelloHandler(b *testing.B) {
+	c := event.NewCounters()
+	q, err := event.NewQueue(event.MaxQueueDepth, c)
+	if err != nil {
+		b.Fatal(err)
+	}
+	h := NewHelloHandler(helloNames, q)
+	r := &http.Request{Method: "GET", Host: "decoy.test", URL: &url.URL{Path: "/"},
+		Header: http.Header{}, RemoteAddr: "192.0.2.7:4000"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		if i%1024 == 1023 {
+			q.Drain()
+		}
+	}
+}
