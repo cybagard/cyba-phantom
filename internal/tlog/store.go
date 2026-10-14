@@ -97,6 +97,27 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
+// ErrHeadOnDisk is the mark of an append error after which the tree head file
+// on disk can cover the batch: the rename of the head file worked and a later
+// step of the head write failed. Test for it with errors.Is. No other error
+// matches it. In particular, a failed directory sync of a tile file does not.
+var ErrHeadOnDisk = errors.New("tree head on disk can cover the batch")
+
+// renamedError is the error of a step of writeFile that comes after the rename.
+type renamedError struct{ err error }
+
+func (e *renamedError) Error() string { return e.err.Error() }
+func (e *renamedError) Unwrap() error { return e.err }
+
+// headError is the Error of a head write that failed after the rename of the
+// head file. It has the type and the text of that Error, and it matches
+// ErrHeadOnDisk.
+type headError struct{ err *Error }
+
+func (e *headError) Error() string        { return e.err.Error() }
+func (e *headError) Unwrap() error        { return e.err }
+func (e *headError) Is(target error) bool { return target == ErrHeadOnDisk }
+
 // Error names the file that failed and the rule that failed. The type is in
 // the verifier package, so that the inclusion check returns the same type.
 type Error = verifier.Error
@@ -272,7 +293,11 @@ func (s *Store) writeHead(tree tlog.Tree) error {
 	binary.BigEndian.PutUint64(b[:], uint64(tree.N))
 	copy(b[sizeLen:], tree.Hash[:])
 	if err := s.writeFile(headName, b[:]); err != nil {
-		return newError(headName, ruleWrite)
+		e := newError(headName, ruleWrite)
+		if errors.As(err, new(*renamedError)) {
+			return &headError{e}
+		}
+		return e
 	}
 	s.head = tree
 	return nil
@@ -757,7 +782,8 @@ func fileRule(err error) string {
 // writeFile writes name in four steps: a temporary file in the same
 // directory, fsync of the file, rename, and fsync of the directories. It
 // deletes an old temporary file first and makes the new one with O_EXCL and
-// mode 0600. The store does not change a mode afterwards.
+// mode 0600. The store does not change a mode afterwards. An error of the
+// directory fsync, which comes after the rename, has the type *renamedError.
 func (s *Store) writeFile(name string, data []byte) error {
 	dir := path.Dir(name)
 	if err := s.dir.MkdirAll(dir, dirMode); err != nil {
@@ -782,7 +808,10 @@ func (s *Store) writeFile(name string, data []byte) error {
 		err = renameFile(s.dir, tmp, name)
 	}
 	if err == nil {
-		return syncDirs(s.dir, dir)
+		if err := syncDirs(s.dir, dir); err != nil {
+			return &renamedError{err}
+		}
+		return nil
 	}
 	s.dir.Remove(tmp)
 	return err

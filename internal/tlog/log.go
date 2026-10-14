@@ -44,7 +44,11 @@ type Log struct {
 	size  int64
 	root  tlog.Hash
 	tiles [maxLevel + 1]tileBuf
-	err   error // the first write error or tile-read error; each later Append, AppendBatch, proof, and root read returns it until the caller opens the log again
+	// err is the first write error or tile-read error. Each later Append,
+	// AppendBatch, proof, and root read returns it until the caller opens the log
+	// again. If the first error matches ErrHeadOnDisk, err is the same *Error
+	// without the mark: a later batch reaches no tree head.
+	err error
 }
 
 // OpenLog opens the store in dir below state, checks the tiles that the tree
@@ -106,15 +110,20 @@ func (l *Log) Append(h EventHash) (int64, error) {
 //
 // If a write fails, AppendBatch returns an error and the log stops. The size and
 // the root in memory do not change. The log then refuses each later Append and
-// AppendBatch with the same error. A proof or root read that finds a bad tile
-// stops the log in the same way.
+// AppendBatch with the same error, except that it removes the mark ErrHeadOnDisk
+// (see below). A proof or root read that finds a bad tile stops the log in the
+// same way.
 //
 // The tree head on disk depends on the failure. If a tile write fails, or the
 // write or rename of the head file fails, the old tree head stays on disk. No
 // leaf of the batch is in that tree head, but the leaves can be in tile files.
-// If the rename of the head file works and the fsync of its directory then
-// fails, the tree head on disk can cover the whole batch. The caller must close
-// the log and open it again with OpenLog. OpenLog loads the tree head on disk.
+// If the rename of the head file works and a later step of the head write fails
+// (the open or the fsync of a directory), the tree head on disk can cover the
+// whole batch. AppendBatch then returns an error that matches ErrHeadOnDisk
+// with errors.Is. No other error of AppendBatch matches it, and the error of a
+// later call on the stopped log does not match it. The error keeps its type and
+// its text: errors.As to *Error works for each error. The caller must close the
+// log and open it again with OpenLog. OpenLog loads the tree head on disk.
 func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -182,16 +191,25 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 		data := final[s]
 		t := tlog.Tile{H: TileHeight, L: s.lv, N: s.n, W: len(data) / tlog.HashSize}
 		if err := l.store.WriteTile(t, data); err != nil {
-			l.err = err
-			return 0, err
+			return 0, l.stop(err)
 		}
 	}
 	if err := l.store.SetHead(end, root); err != nil {
-		l.err = err
-		return 0, err
+		return 0, l.stop(err)
 	}
 	l.tiles, l.size, l.root = work, end, root
 	return n, nil
+}
+
+// stop stops the log with err and returns err. The caller holds the lock. The
+// stored error has no ErrHeadOnDisk mark, because a later call reaches no head.
+func (l *Log) stop(err error) error {
+	l.err = err
+	var h *headError
+	if errors.As(err, &h) {
+		l.err = h.err
+	}
+	return err
 }
 
 // cacheView gives stored hashes from the tiles in memory.
