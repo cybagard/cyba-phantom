@@ -192,6 +192,44 @@ func TestTU12SecondRunReturnsAtOnce(t *testing.T) {
 	}
 }
 
+// T-S-13: Run ends within its bound while a Publish of the same spool waits in Send.
+func TestTS13RunEndsWhilePublishSends(t *testing.T) {
+	e := newEnv(t, 3)
+	sp, err := OpenSpool(e.state, nil, testOrigin, e.verifier, spoolTargets[:1])
+	must(t, err)
+	must(t, sp.Add(1, e.signed(t, 1, emptyRoot)))
+	g := newGate(true)
+	published := make(chan error, 1)
+	go func() { published <- sp.Publish(0, g) }()
+	g.waitEntered(t)
+
+	c, err := NewCheckpointer(e.l, e.signer, e.verifier, sp, e.state, testOrigin, time.Minute, nil)
+	must(t, err)
+	ticks := make(chan time.Time)
+	c.ticks = ticks
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ended := make(chan struct{})
+	go func() { c.Run(ctx); close(ended) }()
+	ticks <- time.Time{}
+	note := filepath.Join(e.dir, spoolDir, "3.note") // Add wrote it, so it did not wait
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(note); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatal("Add did not return while Send waited")
+		}
+	}
+	cancel()
+	select {
+	case <-ended:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Run did not end within 300 ms")
+	}
+	close(g.release)
+	must(t, <-published)
+}
+
 func TestTU12StartRefusals(t *testing.T) {
 	e := newEnv(t, 3)
 	other, otherV := noteKeys(t, "other/origin", 2)

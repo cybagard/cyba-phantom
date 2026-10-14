@@ -73,11 +73,16 @@ type Spool struct {
 	targets  []string
 	now      func() time.Time
 
-	mu       sync.Mutex
-	skipped  []uint64
-	unlogged []uint64
-	lastLog  []time.Time
-	rejected uint64
+	// mu guards the fields below and every file change in the spool. Add holds
+	// it for the whole call. Publish holds it to read the cursor and the note,
+	// to handle a bad note, to write the cursor, and to delete the published
+	// notes. Publish does not hold it during Send.
+	mu         sync.Mutex
+	skipped    []uint64
+	unlogged   []uint64
+	lastLog    []time.Time
+	rejected   uint64
+	publishing []bool // for each target: a Publish call runs
 }
 
 // OpenSpool opens the spool in root, the state directory that the caller
@@ -102,7 +107,7 @@ func OpenSpool(root *os.Root, log *slog.Logger, origin string, verifier note.Ver
 	}
 	n := len(targets)
 	return &Spool{root: root, log: log, origin: origin, verifier: verifier, targets: slices.Clone(targets), now: time.Now,
-		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n)}, nil
+		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n), publishing: make([]bool, n)}, nil
 }
 
 func spoolError(name, rule string) error { return fmt.Errorf("checkpoint spool %s: %s", name, rule) }
@@ -156,27 +161,98 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 // entryError, Publish then returns an error. Any other error to examine, open,
 // or read a note is not a bad note. Publish keeps the note, does not count it,
 // stops for this target, and returns an error that names the file and the rule.
+//
+// Publish handles one note in each cycle. It holds the lock to read the cursor
+// and the note, and to handle a bad note. It calls Send with no lock. It holds
+// the lock again to check the cursor and to write it. If the cursor changed
+// during Send, Publish does not write it and returns an error. At the end,
+// Publish holds the lock to delete the notes that every target published. A
+// second call for a target returns an error at once while a call for that
+// target runs. It sends nothing. While Send runs, Add can drop the note that
+// Send sends because the spool is full. Add counts it as skipped for this
+// target. If Send then succeeds, the cursor moves to that size.
+//
+// The limit of one call is the largest size in the first listing. Publish sends
+// no size above the limit, so a call ends even if Add adds notes during it. It
+// sends the notes above the limit in the next call.
 func (s *Spool) Publish(i int, send Sender) error {
+	if i < 0 || i >= len(s.targets) {
+		return fmt.Errorf("checkpoint spool: target %d is not a target of the spool", i)
+	}
+	s.mu.Lock()
+	busy := s.publishing[i]
+	s.publishing[i] = true
+	s.mu.Unlock()
+	if busy {
+		return spoolError(s.cursorName(i), "has a publish that runs for this target")
+	}
+	defer func() {
+		s.mu.Lock()
+		s.publishing[i] = false
+		s.mu.Unlock()
+	}()
+	var (
+		entryErrs []error
+		lim       limit
+	)
+	for {
+		cur, size, msg, found, err := s.next(i, &entryErrs, &lim)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.Join(entryErrs...)
+		}
+		if err := send.Send(s.targets[i], size, msg); err != nil {
+			return fmt.Errorf("checkpoint spool: send of size %d to target %d failed: %w", size, i, err)
+		}
+		if err := s.advance(i, cur, size); err != nil {
+			return err
+		}
+	}
+}
+
+// limit is the largest size that one Publish call sends. set is false before
+// the first listing.
+type limit struct {
+	size uint64
+	set  bool
+}
+
+// next finds the first note after the cursor of target i that is not bad and is
+// not above the limit. It holds s.mu. The first call sets the limit to the
+// largest size in its listing. next handles each bad note on the way. If no note
+// is left, it deletes the notes that every target published and gives found as
+// false.
+func (s *Spool) next(i int, entryErrs *[]error, lim *limit) (cur cursor, size uint64, msg []byte, found bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cur, err := s.readCursor(i)
-	if err != nil {
-		return err
+	if cur, err = s.readCursor(i); err != nil {
+		return
 	}
 	sizes, err := s.sizes()
 	if err != nil {
-		return err
+		return
 	}
-	var entryErrs []error
-	for _, size := range sizes {
+	if !lim.set {
+		lim.set = true
+		if len(sizes) > 0 {
+			lim.size = sizes[len(sizes)-1]
+		}
+	}
+	for _, size = range sizes {
+		if size > lim.size {
+			break
+		}
 		if cur.covers(size) {
 			continue
 		}
-		msg, err := s.verified(size)
-		if errors.Is(err, errBadNote) {
+		var verr error
+		msg, verr = s.verified(size)
+		if errors.Is(verr, errBadNote) {
 			s.rejected++
-			if ee := (entryError{}); errors.As(err, &ee) {
-				entryErrs = append(entryErrs, err)
+			if ee := (entryError{}); errors.As(verr, &ee) {
+				*entryErrs = append(*entryErrs, verr)
 			}
 			if err := s.remove(size); err != nil { // for example a directory that is not empty
 				s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "size", size)
@@ -185,22 +261,28 @@ func (s *Spool) Publish(i int, send Sender) error {
 			}
 			continue
 		}
-		if err != nil {
-			return err
-		}
-		if err := send.Send(s.targets[i], size, msg); err != nil {
-			return fmt.Errorf("checkpoint spool: send of size %d to target %d failed: %w", size, i, err)
-		}
-		cur = cursor{size, true}
-		if err := s.replace(s.cursorName(i), strconv.FormatUint(size, 10)); err != nil {
-			return err
-		}
+		return cur, size, msg, verr == nil, verr
 	}
 	if sizes, err = s.sizes(); err != nil { // a bad note can be the newest
-		return err
+		return
 	}
 	s.collect(sizes)
-	return errors.Join(entryErrs...)
+	return cur, 0, nil, false, nil
+}
+
+// advance writes the cursor of target i after a successful send. It holds
+// s.mu. If the cursor is not the value that next read, advance does not write.
+func (s *Spool) advance(i int, before cursor, size uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now, err := s.readCursor(i)
+	if err != nil {
+		return err
+	}
+	if now != before {
+		return spoolError(s.cursorName(i), "changed while the lock was free")
+	}
+	return s.replace(s.cursorName(i), strconv.FormatUint(size, 10))
 }
 
 // verified reads a note and checks it. It gives errBadNote for a note that is
