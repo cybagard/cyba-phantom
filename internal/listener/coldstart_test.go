@@ -47,6 +47,10 @@ func seedCertFor(t *testing.T, a *ACME, name string, notBefore, notAfter time.Ti
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		OCSPServer:   ocspServer,
 	}
+	if len(ocspServer) > 0 {
+		// With no issuer in the chain, an OCSP client fetches the issuer first.
+		tmpl.IssuingCertificateURL = []string{"http://issuer.other.test/ca.der"}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	mustNil(t, err)
 	keyDER, err := x509.MarshalECPrivateKey(key)
