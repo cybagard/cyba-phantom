@@ -140,8 +140,8 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 
 // Send puts one note to target. It returns nil only for a 2xx response. Every
 // error has a fixed class (publishError). The timeout bounds the call. The
-// caller (the spool) holds its lock while Send runs. A 2xx response resets the
-// backoff of the target.
+// spool calls Send with no lock held, on the goroutine that calls Publish. A 2xx
+// response resets the backoff of the target.
 func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 	i := -1
 	for j, t := range p.targets {

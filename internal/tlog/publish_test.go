@@ -46,7 +46,8 @@ type fakeTarget struct {
 	location string // sent with a 3xx status
 	big      bool   // a response body of 1 MiB
 	stall    chan struct{}
-	alias    string // the URL that the spool uses, if it is not the server URL
+	delay    time.Duration // the wait before a 2xx or other answer
+	alias    string        // the URL that the spool uses, if it is not the server URL
 	attempts []uint64
 	stored   []uint64
 	auth     []string
@@ -60,7 +61,7 @@ func newTarget(t *testing.T) *fakeTarget {
 		lines := strings.Split(string(body), "\n")
 		size, _ := strconv.ParseUint(lines[min(1, len(lines)-1)], 10, 64)
 		f.mu.Lock()
-		status, stall := f.status, f.stall
+		status, stall, delay := f.status, f.stall, f.delay
 		if len(f.queue) > 0 {
 			status, f.queue = f.queue[0], f.queue[1:]
 		}
@@ -70,6 +71,12 @@ func newTarget(t *testing.T) *fakeTarget {
 			f.stored = append(f.stored, size)
 		}
 		f.mu.Unlock()
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+			}
+		}
 		switch {
 		case stall != nil:
 			select {
@@ -191,6 +198,55 @@ func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 }
 
 func withTimeout(d time.Duration) PublishOption { return func(c *publishConfig) { c.timeout = d } }
+
+func (f *fakeTarget) setDelay(d time.Duration) {
+	f.mu.Lock()
+	f.delay = d
+	f.mu.Unlock()
+}
+
+// T-S-13: the lock-hold check, as a test: several notes, a slow HTTPS target
+// that answers 2xx, the real publisher. While a pass sends, Spool.Add returns in
+// less time than one send.
+func TestTS13AddDoesNotWaitForSlowTarget(t *testing.T) {
+	const delay, bound = 200 * time.Millisecond, 100 * time.Millisecond
+	a := newTarget(t)
+	a.setDelay(delay)
+	e := newPub(t, time.Minute, []*fakeTarget{a}, withTimeout(300*time.Millisecond))
+	for size := uint64(1); size <= 5; size++ {
+		e.add(t, size)
+	}
+	msg, err := SignCheckpoint(e.signer, 6, testRoot())
+	must(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.pub.pass()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if attempts, _, _ := a.got(); len(attempts) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the publisher did not send")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	must(t, e.spool.Add(6, msg))
+	if took := time.Since(start); took > bound {
+		t.Fatalf("Add took %v while the publisher sent, want less than %v", took, bound)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pass did not end")
+	}
+	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1, 2, 3, 4, 5}) {
+		t.Fatalf("stored = %v, want 1 2 3 4 5", stored)
+	}
+}
 
 // T-I-09: a target that is down for 3 intervals gets the 3 notes in order on
 // recovery. The cursor moves only after a 2xx response.

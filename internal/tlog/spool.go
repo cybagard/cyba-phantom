@@ -168,10 +168,17 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 // during Send, Publish does not write it and returns an error. At the end,
 // Publish holds the lock to delete the notes that every target published. A
 // second call for a target returns an error at once while a call for that
-// target runs. It sends nothing. While Send runs, Add can drop the note in
-// flight because the spool is full. Add counts it as skipped for this target.
-// If Send then succeeds, the cursor moves to that size.
+// target runs. It sends nothing. While Send runs, Add can drop the note that
+// Send sends because the spool is full. Add counts it as skipped for this
+// target. If Send then succeeds, the cursor moves to that size.
+//
+// The limit of one call is the largest size in the first listing. Publish sends
+// no size above the limit, so a call ends even if Add adds notes during it. It
+// sends the notes above the limit in the next call.
 func (s *Spool) Publish(i int, send Sender) error {
+	if i < 0 || i >= len(s.targets) {
+		return fmt.Errorf("checkpoint spool: target %d is not a target of the spool", i)
+	}
 	s.mu.Lock()
 	busy := s.publishing[i]
 	s.publishing[i] = true
@@ -184,9 +191,12 @@ func (s *Spool) Publish(i int, send Sender) error {
 		s.publishing[i] = false
 		s.mu.Unlock()
 	}()
-	var entryErrs []error
+	var (
+		entryErrs []error
+		lim       limit
+	)
 	for {
-		cur, size, msg, found, err := s.next(i, &entryErrs)
+		cur, size, msg, found, err := s.next(i, &entryErrs, &lim)
 		if err != nil {
 			return err
 		}
@@ -202,10 +212,19 @@ func (s *Spool) Publish(i int, send Sender) error {
 	}
 }
 
-// next finds the first note after the cursor of target i that is not bad. It
-// holds s.mu. It handles each bad note on the way. If no note is left, it
-// deletes the notes that every target published and gives found as false.
-func (s *Spool) next(i int, entryErrs *[]error) (cur cursor, size uint64, msg []byte, found bool, err error) {
+// limit is the largest size that one Publish call sends. set is false before
+// the first listing.
+type limit struct {
+	size uint64
+	set  bool
+}
+
+// next finds the first note after the cursor of target i that is not bad and is
+// not above the limit. It holds s.mu. The first call sets the limit to the
+// largest size in its listing. next handles each bad note on the way. If no note
+// is left, it deletes the notes that every target published and gives found as
+// false.
+func (s *Spool) next(i int, entryErrs *[]error, lim *limit) (cur cursor, size uint64, msg []byte, found bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cur, err = s.readCursor(i); err != nil {
@@ -215,7 +234,16 @@ func (s *Spool) next(i int, entryErrs *[]error) (cur cursor, size uint64, msg []
 	if err != nil {
 		return
 	}
+	if !lim.set {
+		lim.set = true
+		if len(sizes) > 0 {
+			lim.size = sizes[len(sizes)-1]
+		}
+	}
 	for _, size = range sizes {
+		if size > lim.size {
+			break
+		}
 		if cur.covers(size) {
 			continue
 		}

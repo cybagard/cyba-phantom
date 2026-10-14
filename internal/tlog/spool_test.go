@@ -518,8 +518,12 @@ func TestTS13AddDoesNotWaitForSend(t *testing.T) {
 	}
 	close(g.release)
 	must(t, <-done)
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1}) {
+		t.Fatalf("sent = %v, want 1 only: size 2 is above the limit of the call", got)
+	}
+	must(t, e.Publish(0, g))
 	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2}) {
-		t.Fatalf("sent = %v", got)
+		t.Fatalf("sent after the second call = %v", got)
 	}
 }
 
@@ -555,8 +559,17 @@ func TestTS13SecondPublishSendsNothing(t *testing.T) {
 	g := newGate(true)
 	done := e.publishAsync(g)
 	g.waitEntered(t)
-	if err := e.Publish(0, g); err == nil {
-		t.Fatal("the second Publish did not return an error")
+	second := make(chan error, 1)
+	go func() { second <- e.Publish(0, g) }()
+	select {
+	case err := <-second:
+		if err == nil {
+			close(g.release)
+			t.Fatal("the second Publish entered Send")
+		}
+	case <-time.After(time.Second):
+		close(g.release)
+		t.Fatal("the second Publish did not return")
 	}
 	close(g.release)
 	must(t, <-done)
@@ -586,7 +599,9 @@ func TestTS13CursorChangeIsAnError(t *testing.T) {
 	}
 }
 
-// T-S-13: the sizes for one target increase, also when Add adds notes during Send.
+// T-S-13: the sizes for one target increase, also when Add adds notes during
+// Send. The first call sends only the note of its first listing. The second call
+// sends the notes that Add added, in order. No size goes out two times.
 func TestTS13SizesIncreaseWhileAddRuns(t *testing.T) {
 	e := newSpool(t)
 	e.add(t, 1)
@@ -598,7 +613,94 @@ func TestTS13SizesIncreaseWhileAddRuns(t *testing.T) {
 		}
 	}
 	must(t, e.Publish(0, g))
-	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2, 3}) {
-		t.Fatalf("sent = %v", got)
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1}) {
+		t.Fatalf("sent after the first call = %v, want 1 only", got)
+	}
+	must(t, e.Publish(0, g))
+	got := g.got(spoolTargets[0])
+	if !slices.Equal(got, []uint64{1, 2, 3}) {
+		t.Fatalf("sent after the second call = %v, want 1 2 3", got)
+	}
+	if len(slices.Compact(slices.Clone(got))) != len(got) {
+		t.Fatalf("a size went out two times: %v", got)
+	}
+}
+
+// T-S-13: one Publish call ends after the notes of its first listing, also when
+// Add adds a new note during each Send. The next call sends the new notes.
+func TestTS13PublishEndsAtTheFirstListing(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	e.add(t, 2)
+	g := newGate(false)
+	g.onSend = func(_ string, size uint64) {
+		if size < 100 {
+			e.add(t, size+100)
+		}
+	}
+	must(t, e.Publish(0, g))
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2}) {
+		t.Fatalf("sent = %v, want the notes of the first listing only", got)
+	}
+	must(t, e.Publish(0, g))
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2, 101, 102}) {
+		t.Fatalf("sent after the second call = %v", got)
+	}
+}
+
+// T-S-13: Publish with a target index that is not in the spool returns an error
+// and does not leave the lock held.
+func TestTS13BadTargetIndexIsAnError(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	for _, i := range []int{-1, len(spoolTargets)} {
+		if err := e.Publish(i, newFake()); err == nil {
+			t.Fatalf("Publish(%d) returned no error", i)
+		}
+	}
+	msg, err := SignCheckpoint(e.signer, 2, testRoot())
+	must(t, err)
+	added := make(chan error, 1)
+	go func() { added <- e.Add(2, msg) }()
+	select {
+	case err := <-added:
+		must(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Add waited after a bad target index")
+	}
+}
+
+// panicSender is a Sender whose Send panics.
+type panicSender struct{}
+
+func (panicSender) Send(string, uint64, []byte) error { panic("send panic") }
+
+// T-S-13: after a panic in Send, the flag of the target is reset. A new Publish
+// for the target sends the note, and Add does not block.
+func TestTS13FlagResetsAfterPanicInSend(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("Send did not panic")
+			}
+		}()
+		_ = e.Publish(0, panicSender{})
+	}()
+	msg, err := SignCheckpoint(e.signer, 2, testRoot())
+	must(t, err)
+	added := make(chan error, 1)
+	go func() { added <- e.Add(2, msg) }()
+	select {
+	case err := <-added:
+		must(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Add waited after a panic in Send")
+	}
+	f := newFake()
+	must(t, e.Publish(0, f))
+	if got := f.got[spoolTargets[0]]; !slices.Equal(got, []uint64{1, 2}) {
+		t.Fatalf("sent = %v, want 1 2", got)
 	}
 }
