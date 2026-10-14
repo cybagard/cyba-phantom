@@ -107,7 +107,7 @@ func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []erro
 // check of l.item. An entry that is not a scalar is an error on the entry. A duplicate entry is an error on the list key.
 func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []error) {
 	fail := failer(doc, file, &errs)
-	seen := make(map[string]bool, n)
+	seen := make(map[string]int, n)
 	for i := range n {
 		k := *l.item
 		k.path = fmt.Sprintf("%s[%d]", l.path, i)
@@ -116,10 +116,10 @@ func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []e
 			fail(k.path, "the key needs a scalar value")
 			continue
 		}
-		if l.unique && seen[leaf.Value] {
+		seen[leaf.Value]++
+		if l.unique && seen[leaf.Value] == 2 { // One error for each duplicate value.
 			fail(l.path, "the list must not hold an entry two times")
 		}
-		seen[leaf.Value] = true
 		out = append(out, k)
 	}
 	return out, errs

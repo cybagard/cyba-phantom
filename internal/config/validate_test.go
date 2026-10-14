@@ -1364,6 +1364,18 @@ func TestTS11_ACMENames(t *testing.T) {
 	}
 }
 
+// TestTS11_ACMENamesTripleDuplicate checks that a name that occurs 3 times gives one duplicate error
+// line, not one for each extra occurrence (SEC-21, T-S-11).
+func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
+	_, err := loadProd(t, namesFile("a.example.com", "a.example.com", "a.example.com"))
+	if err == nil {
+		t.Fatal("got no error")
+	}
+	if n := strings.Count(err.Error(), "the list must not hold an entry two times"); n != 1 {
+		t.Errorf("got %d duplicate errors, want 1: %v", n, err)
+	}
+}
+
 // TestTS11_ACMECacheDir checks the acme.cache_dir rule on the path text (SEC-21, T-S-11). Each bad
 // value gives an error that names acme.cache_dir.
 func TestTS11_ACMECacheDir(t *testing.T) {

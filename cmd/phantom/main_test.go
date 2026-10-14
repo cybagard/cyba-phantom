@@ -150,7 +150,7 @@ func TestTS11_CheckStorePath(t *testing.T) {
 func TestTS11_CheckACME(t *testing.T) {
 	body := validBody(t)
 	names := func(list string) string { return strings.Replace(body, "[decoy.example.com]", list, 1) }
-	// many is a list of n distinct names; label is a name of a label of n bytes.
+	// many returns a list of n distinct names; label returns a label of n bytes.
 	many := func(n int) string {
 		var l []string
 		for i := range n {
@@ -170,7 +170,7 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}},
 		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}},
 		{"no names", names("[]"), "acme.names", nil},
-		{"17 names", names("[" + strings.Repeat("a.example, ", 16) + "b.example]"), "acme.names", nil},
+		{"17 names", names(many(17)), "acme.names", nil},
 		{"upper case", names("[Decoy.example.com]"), "acme.names", nil},
 		{"wildcard", names(`["*.example.com"]`), "acme.names", nil},
 		{"IP literal", names("[192.0.2.1]"), "acme.names", nil},
