@@ -29,7 +29,10 @@ func TestTS16OCSPIsOffForACachedCertificateWithAnOCSPURL(t *testing.T) {
 				p.CA = "https://" + addr
 				p.OnEgress = func(h string) { mu.Lock(); seen = append(seen, h); mu.Unlock() }
 			})
-			a.cfg.OCSP.DisableStapling = !c.stapling
+			// The "stapling off" case keeps the value that NewACME sets.
+			if c.stapling {
+				a.cfg.OCSP.DisableStapling = false
+			}
 			now := time.Now()
 			seedCertFor(t, a, "decoy.test", now.Add(-time.Hour), now.Add(90*24*time.Hour), []string{"http://ocsp.other.test/"})
 			ctx, cancel := context.WithCancel(context.Background())

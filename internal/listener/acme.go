@@ -35,7 +35,7 @@ var (
 
 // ACMEParams are the inputs of NewACME.
 type ACMEParams struct {
-	Names   []string          // 1 to 16 DNS names, valid and in lower case (acme.names)
+	Names   []string          // 1 to 16 DNS names in lower case; the config loader checks the DNS syntax
 	CA      string            // the directory URL of the CA, https (acme.ca)
 	Email   string            // the account contact (acme.email)
 	Storage certmagic.Storage // the certificate cache, for example a *Store
@@ -73,7 +73,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		return nil, errors.New("listener: acme: the number of names is not 1 to 16")
 	case err != nil || ca.Scheme != "https" || ca.Hostname() == "":
 		return nil, errors.New("listener: acme: the CA URL is not an https URL")
-	case ca.User != nil || ca.Fragment != "" || strings.Contains(p.CA, "#") || !validPort(ca.Port()):
+	case ca.User != nil || strings.Contains(p.CA, "#") || !validPort(ca.Port()):
 		return nil, errors.New("listener: acme: the CA URL has user info, a fragment or a port that is not 1 to 65535")
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
 		return nil, errors.New("listener: acme: storage or logger is not set, or the port is not 1 to 65535")
@@ -94,7 +94,6 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
 		Logger:           zap.NewNop(),
 	})
-	logger := p.Logger
 	a.cfg = certmagic.New(a.cache, certmagic.Config{
 		RenewalWindowRatio: renewalRatio,
 		MustStaple:         false,
@@ -117,7 +116,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 			if event == "cert_failed" {
 				level = slog.LevelWarn
 			}
-			logger.LogAttrs(ctx, level, "acme certificate event", slog.String("event", event), slog.String("name", name))
+			a.logger.LogAttrs(ctx, level, "acme certificate event", slog.String("event", event), slog.String("name", name))
 			return nil
 		},
 	})
@@ -126,7 +125,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		CA:                        p.CA,
 		TestCA:                    p.CA, // if not set, certmagic uses the staging host of a known CA
 		Email:                     p.Email,
-		Agreed:                    true, // the operator accepts the CA terms through acme.ca
+		Agreed:                    true, // the sensor accepts the CA terms; certmagic must not ask
 		DisableHTTPChallenge:      true,
 		DisableDistributedSolvers: true,
 		ListenHost:                p.Host,
@@ -207,8 +206,8 @@ func portOf(u *url.URL) string {
 // line. This also holds for ALPN acme-tls/1, which certmagic would answer with a
 // storage read for any name.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	// Lower only ASCII letters: ToLower maps U+212A KELVIN SIGN to "k". A byte of
-	// 0x80 or more is not in a configured name, so the gate refuses it first.
+	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
+	// or more first, so ToLower changes only ASCII letters.
 	name := hello.ServerName
 	for i := 0; i < len(name); i++ {
 		if name[i] >= 0x80 {
@@ -230,7 +229,8 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 func (a *ACME) Refused() uint64 { return a.refused.Load() }
 
 // Start loads the cached certificates of the configured names, then starts
-// their management. A handshake that follows Start gets a cached certificate.
+// their management. A handshake that follows Start gets the cached certificate
+// of its name, if that certificate loaded.
 // The load reads the storage only: stapling is off, and the ARI data comes from
 // the stored resource. A name with no cached certificate is not an error. Any
 // other load error writes one fixed line and does not fail Start.

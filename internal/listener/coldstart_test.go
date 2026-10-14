@@ -36,7 +36,7 @@ func seedCert(t testing.TB, a *ACME, name string) []byte {
 func seedCertFor(t testing.TB, a *ACME, name string, notBefore, notAfter time.Time, ocspServer []string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	must(t, err)
+	mustNil(t, err)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: name},
@@ -52,18 +52,18 @@ func seedCertFor(t testing.TB, a *ACME, name string, notBefore, notAfter time.Ti
 		tmpl.IssuingCertificateURL = []string{"http://issuer.other.test/ca.der"}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	must(t, err)
+	mustNil(t, err)
 	keyDER, err := x509.MarshalECPrivateKey(key)
-	must(t, err)
+	mustNil(t, err)
 	meta, err := json.Marshal(certmagic.CertificateResource{SANs: []string{name}})
-	must(t, err)
+	mustNil(t, err)
 	ik := a.cfg.Issuers[0].(*certmagic.ACMEIssuer).IssuerKey()
 	for k, v := range map[string][]byte{
 		certmagic.StorageKeys.SiteCert(ik, name):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		certmagic.StorageKeys.SitePrivateKey(ik, name): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
 		certmagic.StorageKeys.SiteMeta(ik, name):       meta,
 	} {
-		must(t, a.cfg.Storage.Store(context.Background(), k, v))
+		mustNil(t, a.cfg.Storage.Store(context.Background(), k, v))
 	}
 	return der
 }
@@ -181,6 +181,39 @@ func TestTI03StartDoesNotWaitForTheCA(t *testing.T) {
 				t.Fatalf("the handshake took %v", d)
 			}
 		})
+	}
+}
+
+// TestTI03StartWithAnEmptyCacheStartsTheManagement uses a closed CA port. Start
+// writes no load line for a name with no cached certificate. The guard sees a
+// request to the CA within 5 s: the background management started.
+func TestTI03StartWithAnEmptyCacheStartsTheManagement(t *testing.T) {
+	var logs syncBuf
+	addr := closedAddr(t)
+	seen := make(chan string, 16)
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.CA = "https://" + addr
+		p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+		p.OnEgress = func(h string) {
+			select {
+			case seen <- h:
+			default:
+			}
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	if strings.Contains(logs.String(), "acme certificate load failed") {
+		t.Errorf("an empty cache wrote a load line: %q", logs.String())
+	}
+	select {
+	case h := <-seen:
+		if h != addr {
+			t.Errorf("the first request went to %q, not to the CA", h)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no request to the CA within 5 s of Start: the management did not start")
 	}
 }
 

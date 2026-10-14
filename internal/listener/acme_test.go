@@ -69,11 +69,17 @@ func (c *countingStorage) List(ctx context.Context, p string, r bool) ([]string,
 	return c.Storage.List(ctx, p, r)
 }
 
-// newTestACME builds an ACME with test values. mod changes the values first. The
-// test stops the cache when it ends.
-func newTestACME(t *testing.T, mod func(*ACMEParams)) *ACME {
+// newTestACME builds an ACME with test values and a new store. mod changes the
+// values first. The default CA name does not resolve: a seeded certificate that
+// needs no renewal makes no request. The test stops the cache when it ends.
+func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
-	st, _ := newStore(t)
+	state, err := os.OpenRoot(t.TempDir())
+	mustNil(t, err)
+	t.Cleanup(func() { state.Close() })
+	st, err := Open(state, "acme/cache")
+	mustNil(t, err)
+	t.Cleanup(func() { st.Close() })
 	p := ACMEParams{
 		Names:   []string{"decoy.test"},
 		CA:      "https://ca.test/dir",
@@ -113,36 +119,10 @@ func handshake(a *ACME, serverName string, protos ...string) (tls.ConnectionStat
 	return cl.ConnectionState(), err
 }
 
-// must stops the test or benchmark if err is not nil.
-func must(tb testing.TB, err error) {
-	tb.Helper()
-	if err != nil {
-		tb.Fatal(err)
-	}
-}
-
-// newBenchACME builds an ACME with a new store, for a benchmark. The CA name
-// does not resolve: a seeded certificate that needs no renewal makes no request.
-func newBenchACME(b *testing.B) *ACME {
-	b.Helper()
-	state, err := os.OpenRoot(b.TempDir())
-	must(b, err)
-	b.Cleanup(func() { state.Close() })
-	st, err := Open(state, "acme/cache")
-	must(b, err)
-	b.Cleanup(func() { st.Close() })
-	a, err := NewACME(ACMEParams{
-		Names: []string{"decoy.test"}, CA: "https://ca.test/dir", Email: "ops@example.test",
-		Storage: st, Host: "127.0.0.1", Port: 8443, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	must(b, err)
-	b.Cleanup(a.Stop)
-	return a
-}
-
-// BenchmarkGetCertificateRefused measures a handshake that the name gate refuses.
+// BenchmarkGetCertificateRefused measures one GetCertificate call for a name that
+// the name gate refuses.
 func BenchmarkGetCertificateRefused(b *testing.B) {
-	a := newBenchACME(b)
+	a := newTestACME(b, nil)
 	hello := &tls.ClientHelloInfo{ServerName: "other.test"}
 	b.ReportAllocs()
 	for b.Loop() {
@@ -152,14 +132,14 @@ func BenchmarkGetCertificateRefused(b *testing.B) {
 	}
 }
 
-// BenchmarkGetCertificateAccepted measures a handshake for a configured name
-// with a cached certificate.
+// BenchmarkGetCertificateAccepted measures one GetCertificate call for a
+// configured name with a cached certificate.
 func BenchmarkGetCertificateAccepted(b *testing.B) {
-	a := newBenchACME(b)
+	a := newTestACME(b, nil)
 	seedCert(b, a, "decoy.test")
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
-	must(b, a.Start(ctx))
+	mustNil(b, a.Start(ctx))
 	c, s := net.Pipe()
 	b.Cleanup(func() { c.Close(); s.Close() })
 	hello := &tls.ClientHelloInfo{ServerName: "decoy.test", Conn: s}
@@ -300,6 +280,21 @@ func TestTS16NameGateRefusesBeforeCertmagic(t *testing.T) {
 	}
 }
 
+func TestTS16NameGateLetsAConfiguredNameWithACMETLSALPNReachCertmagic(t *testing.T) {
+	st, _ := newStore(t)
+	cs := &countingStorage{Storage: st}
+	a := newTestACME(t, func(p *ACMEParams) { p.Storage = cs })
+	// There is no challenge token, so the handshake fails. The lookup of the token
+	// is the storage read that shows the call reached certmagic.
+	handshake(a, "decoy.test", "acme-tls/1")
+	if cs.reads.Load() < 1 {
+		t.Error("the handshake did not reach certmagic: no storage read")
+	}
+	if got := a.Refused(); got != 0 {
+		t.Errorf("refused = %d", got)
+	}
+}
+
 func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 	a := newTestACME(t, nil)
 	want := seedCert(t, a, "decoy.test")
@@ -331,7 +326,7 @@ func TestTS16NameGateRefusesAByteAbove0x7f(t *testing.T) {
 	cs := &countingStorage{Storage: st}
 	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{"kiosk.test"}; p.Storage = cs })
 	// U+212A KELVIN SIGN: a Unicode-aware ToLower maps it to "k".
-	names := []string{"Kiosk.test", "kiosk.testé", "\xffkiosk.test"}
+	names := []string{string(rune(0x212a)) + "iosk.test", "kiosk.testé", "\xffkiosk.test"}
 	for _, n := range names {
 		for _, protos := range [][]string{nil, {"acme-tls/1"}} {
 			if _, err := handshake(a, n, protos...); err == nil {

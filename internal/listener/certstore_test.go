@@ -36,7 +36,7 @@ func newStore(t *testing.T) (*Store, string) {
 	return s, dir
 }
 
-func mustNil(t *testing.T, err error) {
+func mustNil(t testing.TB, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
