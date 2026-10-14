@@ -43,7 +43,7 @@ func validBody(t *testing.T) string {
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
+	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\n  names: [decoy.example.com]\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
 }
 
 // TestTS10_Usage checks that a run with no argument exits 2 and prints the fixed usage line.
@@ -140,6 +140,80 @@ func TestTS11_CheckStorePath(t *testing.T) {
 			code, se, loadErr := check(c.path, c.extra...)
 			if code != 1 || !strings.Contains(se, "store.path") || loadErr == "" || se != loadErr+"\n" {
 				t.Errorf("exit %d, stderr %q, load error %q", code, se, loadErr)
+			}
+		})
+	}
+}
+
+// TestTS11_CheckACME checks that --check refuses a bad acme.names list, a bad acme.cache_dir, and a
+// limits.header_bytes outside 8192 to 16384 with exit 1 and the key in stderr, and accepts the edges (SEC-21, SEC-02, T-S-11, T-U-10).
+func TestTS11_CheckACME(t *testing.T) {
+	body := validBody(t)
+	names := func(list string) string { return strings.Replace(body, "[decoy.example.com]", list, 1) }
+	// many returns a list of n distinct names; label returns a label of n bytes.
+	many := func(n int) string {
+		var l []string
+		for i := range n {
+			l = append(l, "n"+strconv.Itoa(i)+".example")
+		}
+		return "[" + strings.Join(l, ", ") + "]"
+	}
+	label := func(n int) string { return strings.Repeat("a", n) }
+	rows := []struct {
+		name, file string
+		key        string // key is "" for a file that passes.
+		env        []string
+	}{
+		{"valid", body, "", nil},
+		{"header 8192", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=8192"}},
+		{"header 16384", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=16384"}},
+		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}},
+		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}},
+		{"no names", names("[]"), "acme.names", nil},
+		{"17 names", names(many(17)), "acme.names", nil},
+		{"upper case", names("[Decoy.example.com]"), "acme.names", nil},
+		{"wildcard", names(`["*.example.com"]`), "acme.names", nil},
+		{"IP literal", names("[192.0.2.1]"), "acme.names", nil},
+		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil},
+		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil},
+		{"one label", names("[decoy]"), "acme.names", nil},
+		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil},
+		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil},
+		{"localhost", names("[localhost]"), "acme.names", nil},
+		{"x.localhost", names("[x.localhost]"), "acme.names", nil},
+		{"x.local", names("[x.local]"), "acme.names", nil},
+		{"internal name", names("[x.internal]"), "acme.names", nil},
+		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil},
+		{"local", names("[local]"), "acme.names", nil},
+		{"internal", names("[internal]"), "acme.names", nil},
+		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil},
+		{"home.arpa", names("[home.arpa]"), "", nil},
+		{"16 names", names(many(16)), "", nil},
+		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil},
+		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil},
+		{"duplicate", names("[a.example, a.example]"), "acme.names", nil},
+		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}},
+		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}},
+		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"}},
+		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}},
+		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}},
+		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}},
+		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}},
+		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}},
+		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}},
+		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}},
+		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}},
+		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}},
+		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}},
+		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			env := append([]string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, r.env...)
+			var so, se strings.Builder
+			code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
+			if r.key == "" && (code != 0 || se.Len() != 0) || r.key != "" && (code != 1 || !strings.Contains(se.String(), r.key)) {
+				t.Errorf("exit %d, stderr %q, want a refusal that names %q", code, se.String(), r.key)
 			}
 		})
 	}

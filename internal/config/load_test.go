@@ -65,11 +65,14 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 // base has 4 lines. Thus, a section line that a test adds after base is on line 5, and its first key is on line 6.
-// The tlog section has one line, and an empty line follows it. Its publisher names the variable tokenVar.
+// The acme section has three lines (with acmeNames). The tlog section has one line, and its publisher names
+// the variable tokenVar. tlogOrigin adds an empty line after the tlog section; base does not.
 const (
 	tokenVar   = "CKPT_TOKEN"
-	tlogOrigin = "tlog: {origin: test/origin, publish: [{type: https-put, url: \"https://ckpt.example/put\", token_env: " + tokenVar + "}]}\n\n"
-	base       = "acme:\n  email: sec@example.com\n" + tlogOrigin
+	tlogLine   = "tlog: {origin: test/origin, publish: [{type: https-put, url: \"https://ckpt.example/put\", token_env: " + tokenVar + "}]}\n"
+	tlogOrigin = tlogLine + "\n"
+	acmeNames  = "  names: [decoy.example.com]\n"
+	base       = "acme:\n  email: sec@example.com\n" + acmeNames + tlogLine
 )
 
 // loadTest is Load with a valid value in tokenVar. A later entry in env replaces it.
@@ -181,6 +184,7 @@ func TestTU10_Errors(t *testing.T) {
 		`config: PHANTOM_NOPE: unknown PHANTOM_ variable`,
 		`config: acme.email at ` + p + `: the key is required`,
 		`config: tlog.origin at ` + p + `: the key is required`,
+		`config: acme.names at ` + p + `: the key is required`,
 		`config: tlog.publish at ` + p + `: the key is required`,
 	}, "\n")
 	if err.Error() != want {
