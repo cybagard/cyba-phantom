@@ -108,6 +108,78 @@ func TestTI03ColdStartServesTheCachedCertificateWithoutNetwork(t *testing.T) {
 	}
 }
 
+// blackholeAddr returns the address of a loopback listener that accepts each
+// connection and never answers. The test closes the connections at the end.
+func blackholeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	mustNil(t, err)
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+	})
+	return l.Addr().String()
+}
+
+func TestTI03StartDoesNotWaitForTheCA(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		name                string
+		seed                bool
+		notBefore, notAfter time.Time
+	}{
+		{"empty cache", false, time.Time{}, time.Time{}},
+		{"cached certificate in the renewal window", true, now.Add(-85 * 24 * time.Hour), now.Add(5 * 24 * time.Hour)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestACME(t, func(p *ACMEParams) { p.CA = "https://" + blackholeAddr(t) + "/dir" })
+			var want []byte
+			if c.seed {
+				want = seedCertFor(t, a, "decoy.test", c.notBefore, c.notAfter, nil)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			done := make(chan error, 1)
+			go func() { done <- a.Start(ctx) }()
+			select {
+			case err := <-done:
+				mustNil(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("Start did not return within 1 s: it waits for the CA")
+			}
+			if !c.seed {
+				return
+			}
+			begin := time.Now()
+			st, err := handshake(a, "decoy.test")
+			mustNil(t, err)
+			if !bytes.Equal(st.PeerCertificates[0].Raw, want) {
+				t.Fatal("the handshake did not serve the cached certificate")
+			}
+			if d := time.Since(begin); d > 2*time.Second {
+				t.Fatalf("the handshake took %v", d)
+			}
+		})
+	}
+}
+
 // slowStorage delays each read of the storage under it.
 type slowStorage struct {
 	certmagic.Storage
