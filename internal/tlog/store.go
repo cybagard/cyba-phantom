@@ -99,8 +99,10 @@ var (
 
 // ErrHeadOnDisk is the mark of an append error after which the tree head file
 // on disk can cover the batch: the rename of the head file worked and a later
-// step of the head write failed. Test for it with errors.Is. No other error
-// matches it. In particular, a failed directory sync of a tile file does not.
+// step of the head write failed. Test for it with errors.Is. Only Log.Append
+// and Log.AppendBatch return an error that matches it, and no other error of
+// them matches it. In particular, a failed directory sync of a tile file does
+// not. Open and OpenLog never return the mark.
 var ErrHeadOnDisk = errors.New("tree head on disk can cover the batch")
 
 // renamedError is the error of a step of writeFile that comes after the rename.
@@ -285,7 +287,14 @@ func (s *Store) initHead() error {
 			return newError(headName, ruleEmpty)
 		}
 	}
-	return s.writeHead(tlog.Tree{Hash: emptyRoot})
+	// The mark is only for Log.Append and Log.AppendBatch. Open returns the plain
+	// error.
+	err = s.writeHead(tlog.Tree{Hash: emptyRoot})
+	var h *headError
+	if errors.As(err, &h) {
+		return h.err
+	}
+	return err
 }
 
 func (s *Store) writeHead(tree tlog.Tree) error {

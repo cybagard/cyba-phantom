@@ -719,6 +719,23 @@ func TestTS13StoppedLogAfterMarkedFailureIsNotMarked(t *testing.T) {
 	}
 }
 
+// OpenLog of a new log directory writes the first tree head. If the fsync of
+// the directory fails after the rename, the error is a failed write with no
+// mark: the mark is only for Append and AppendBatch.
+func TestTS13OpenLogFirstHeadDirectorySyncFailureIsNotMarked(t *testing.T) {
+	state, _ := newLogState(t)
+	failDirSyncAfterRename(t, headName)
+	l, err := OpenLog(state, "tlog")
+	if err == nil {
+		l.Close()
+		t.Fatal("OpenLog returned nil after the failed fsync")
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleWrite || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("OpenLog gave %v, want the rule %q with no mark", err, ruleWrite)
+	}
+}
+
 // The open of the log directory fails after the rename of the head file. The
 // head on disk covers the batch, so the error has the mark.
 func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
