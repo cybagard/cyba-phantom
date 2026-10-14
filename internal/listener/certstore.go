@@ -1,8 +1,8 @@
-// Package listener is the TLS listener of the sensor. The package holds the
-// certificate cache (FR-01, SEC-21). The cache is a certmagic.Storage that keeps
+// The certificate cache (FR-01, SEC-21) is a certmagic.Storage that keeps
 // its keys as files in one directory below the state directory. It does not use
 // certmagic.FileStorage. Every access goes through an os.Root of the cache
 // directory, and the store checks each directory on the path of a key.
+
 package listener
 
 import (
