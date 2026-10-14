@@ -163,7 +163,7 @@ func TestTS17HelloAndRedirectNeverReflect(t *testing.T) {
 	}
 }
 
-// T-S-17: On both handlers, a method other than GET and HEAD gets 405, and an
+// T-S-17: on both handlers, a method other than GET and HEAD gets 405, and an
 // unknown or malformed Host gets 404. On the TLS handler, GET and HEAD on a
 // configured name get 200.
 func TestTS17MethodAndHostRules(t *testing.T) {
@@ -305,10 +305,9 @@ func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 	}
 }
 
-// T-S-17: the work of location is bounded by maxLocation, not by the path. A
-// path of 16384 bytes takes less than 16 KiB of heap in each run. Measured
-// with -race: "/a/b" takes 32 B, 16384 "/" take 2304 B, 16384 "<" take 14592 B,
-// and "/" + 238 "<" + "/" + 16384 "<" take 16128 B in each run.
+// T-S-17: the work of location is bounded by maxLocation, not by the path.
+// Each case takes less than 16 KiB of heap in each run, and the short path
+// takes less than 256 B.
 func TestTS17LocationWorkIsBounded(t *testing.T) {
 	for _, tc := range []struct{ name, path string }{
 		{"short", "/a/b"},
@@ -324,6 +323,9 @@ func TestTS17LocationWorkIsBounded(t *testing.T) {
 		t.Logf("%s: %d B/op, %d allocs/op", tc.name, r.AllocedBytesPerOp(), r.AllocsPerOp())
 		if got := r.AllocedBytesPerOp(); got >= 16*1024 {
 			t.Fatalf("%s: %d bytes in each run", tc.name, got)
+		}
+		if got := r.AllocedBytesPerOp(); tc.name == "short" && got >= 256 {
+			t.Fatalf("%s: %d bytes in each run, want less than 256", tc.name, got)
 		}
 		if loc := location("decoy.test", tc.path); len(loc) > maxLocation {
 			t.Fatalf("%s: length %d", tc.name, len(loc))
