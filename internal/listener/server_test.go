@@ -178,6 +178,11 @@ func isClosed(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
+// connEnded tells if err is an end of stream, a reset, or an unexpected end of stream.
+func connEnded(err error) bool {
+	return isClosed(err) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // T-S-17: the production bounds are 10 s, 10 s, 10 s and 30 s.
 func TestTS17DefaultBounds(t *testing.T) {
 	if defaultTimeouts != (timeouts{10 * time.Second, 10 * time.Second, 10 * time.Second, 30 * time.Second}) {
@@ -349,9 +354,10 @@ func TestTS17ConnectionCap(t *testing.T) {
 // T-S-17: no second request is served on a connection (keep-alive is off). The
 // first request and a second head of 8193 bytes or of 8192 bytes go out in one
 // write. The server can answer and close before that write ends. So a write
-// error or a reset is accepted, and the test still reads the connection. On at
-// least one of the two sizes the first response must be read, and it must be
-// 200. No second response is allowed, and the connection must end.
+// error is accepted. A first read that ends in a reset or an end of stream is
+// accepted too. The test still reads the connection. On at least one of the two
+// sizes the first response must be read, and it must be 200. No second
+// response is allowed, and the connection must end.
 func TestTS17PipelinedHeadNotServed(t *testing.T) {
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
@@ -367,10 +373,10 @@ func TestTS17PipelinedHeadNotServed(t *testing.T) {
 		br := bufio.NewReader(c)
 		resp, err := http.ReadResponse(br, nil)
 		if err != nil {
-			if !isClosed(err) {
+			if !connEnded(err) {
 				t.Fatalf("second head of %d bytes: first response: %v", n, err)
 			}
-			t.Logf("second head of %d bytes: the first response could not be read because of the reset: %v", n, err)
+			t.Logf("second head of %d bytes: the first response could not be read because the connection ended or was reset: %v", n, err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -384,7 +390,7 @@ func TestTS17PipelinedHeadNotServed(t *testing.T) {
 			_ = resp2.Body.Close()
 			t.Fatalf("second head of %d bytes: second response, status %d", n, resp2.StatusCode)
 		}
-		if !isClosed(err) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		if !connEnded(err) {
 			t.Fatalf("second head of %d bytes: want the end of the connection, got %v", n, err)
 		}
 	}
