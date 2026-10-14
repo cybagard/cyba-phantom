@@ -122,6 +122,24 @@ func (c *Counters) DropNoAddr() {
 	s.mu.Unlock()
 }
 
+// Pending tells if a snapshot would return a count: the map has a key with a
+// count, or the overflow bucket is not zero. It takes the lock and does not swap
+// the map, so it does not change what the next Snapshot returns.
+func (c *Counters) Pending() bool {
+	s := c.h.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.overflow > 0 {
+		return true
+	}
+	for _, n := range s.counts {
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Snapshot swaps in an empty map and a zero overflow bucket. It returns the
 // old map and the old bucket count. The caller owns the returned map. Each
 // increment is in exactly one snapshot.

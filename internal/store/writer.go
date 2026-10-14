@@ -61,6 +61,10 @@ type Writer struct {
 	// beforeAppend runs in the transaction before AppendBatch. A test sets it;
 	// nil in production.
 	beforeAppend func()
+	// evidenceBytes makes the record bytes of an evidence row. A test sets it, to
+	// make an error that no real record gives after HashEvidence worked. Nil in
+	// production: the writer then calls event.EvidenceBytes.
+	evidenceBytes func(event.Record) ([]byte, error)
 
 	// beforeRowCommit runs on the transaction of a checkpoint row before COMMIT.
 	// An error from it is a failed COMMIT. A test sets it; nil in production.
@@ -117,6 +121,9 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // continues in the stopped state: it writes no row, calls no appender, and runs
 // the Discard loop, so that the lanes do not stay full. It returns nil after Close and
 // ctx.Err() after a cancel, as it does when it has not stopped.
+//
+// At each tick, also when the batch is empty, the writer adds the drop counts of
+// the queue to ip_counter if there are any (see write).
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick
 	if tick == nil {
@@ -198,6 +205,9 @@ func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*ev
 
 // shutdown writes the last batch and the events that Drain returns. If the
 // writer has stopped, flush drops the events that are left, and counts them.
+// It ends with one flush of an empty batch, so that the drop counts that are
+// still in memory go to ip_counter. Thus a healthy writer keeps no count in
+// memory after shutdown.
 func (w *Writer) shutdown(batch []*event.Event) {
 	w.flush(batch)
 	for rest := w.q.Drain(); len(rest) > 0; {
@@ -205,6 +215,7 @@ func (w *Writer) shutdown(batch []*event.Event) {
 		w.flush(rest[:n])
 		rest = rest[n:]
 	}
+	w.flush(nil)
 }
 
 // flush writes the batch and returns it empty. It clears the pointers, so the
@@ -241,15 +252,27 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 //
 // If AppendBatch fails, the transaction stores only the bulk rows of the batch.
 // It stores no evidence row. Each evidence event of the batch counts as a failed
-// log write, and write returns the append error after the commit. If COMMIT
-// fails after a good AppendBatch call, the leaves of the batch are in the log
-// and have no row. Each of them counts as an orphan leaf.
+// log write, and write returns the append error after the commit. If the error
+// matches tlog.ErrHeadOnDisk, the head of the log on disk can cover the batch,
+// and each leaf of the batch also counts as an orphan leaf. This count is made
+// when the append fails, so a later COMMIT, good or not, does not change it.
+//
+// If AppendBatch works and the transaction then ends without a COMMIT, the
+// leaves of the batch are in the log and have no row. Each of them counts as an
+// orphan leaf. This holds for each error after the append: the record bytes, an
+// insert, the drop counts and the COMMIT. An error before the append, for
+// example of the prepare, counts none, because no leaf reached the log.
 //
 // At its start the batch reads the clock one time and takes the UTC date and
 // the day key for it. The ip_counter rows of the batch use them, also when the
 // batch ends after midnight.
+//
+// An empty batch writes nothing if the queue has no drop count. If it has, write
+// runs the transaction with no row and no AppendBatch call, and no evidence, so
+// synchronous stays NORMAL. The transaction adds the counts to ip_counter and
+// takes the date and the day key at its start, as for a batch.
 func (w *Writer) write(batch []*event.Event) (err error) {
-	if len(batch) == 0 {
+	if len(batch) == 0 && !w.counters.Pending() {
 		return nil
 	}
 	committed := false
@@ -308,8 +331,16 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	return err
 }
 
-// transact is the transaction of write.
-func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (bool, error) {
+// transact is the transaction of write. It returns true when the COMMIT worked.
+// If AppendBatch returned nil and the transaction ends without a COMMIT, the
+// deferred function counts each leaf of the batch as an orphan leaf, one time.
+func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (committed bool, err error) {
+	appended := false
+	defer func() {
+		if appended && !committed {
+			w.orphans.Add(uint64(len(hs)))
+		}
+	}()
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fail(writerName, ruleDatabase)
@@ -330,6 +361,11 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if first, err = w.app.AppendBatch(hs); err != nil {
 			appendErr = fail(writerName, ruleAppend)
 			w.writeFailed.Add(uint64(len(hs)))
+			if errors.Is(err, tlog.ErrHeadOnDisk) {
+				w.orphans.Add(uint64(len(hs)))
+			}
+		} else {
+			appended = true
 		}
 	}
 	i, rows := 0, 0
@@ -339,7 +375,11 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			if appendErr != nil {
 				continue
 			}
-			b, err := event.EvidenceBytes(e.Record)
+			evBytes := event.EvidenceBytes
+			if w.evidenceBytes != nil {
+				evBytes = w.evidenceBytes
+			}
+			b, err := evBytes(e.Record)
 			if err != nil {
 				return false, fail(writerName, ruleRecord)
 			}
@@ -369,7 +409,6 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if appendErr != nil {
 			return false, appendErr
 		}
-		w.orphans.Add(uint64(len(hs)))
 		return false, fail(writerName, ruleDatabase)
 	}
 	if w.timing != nil {

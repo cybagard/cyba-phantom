@@ -208,6 +208,53 @@ func TestTU17_SnapshotReset(t *testing.T) {
 	}
 }
 
+// T-U-18: Pending is false for an empty value, true after Drop and after
+// DropNoAddr, false after Snapshot, and it does not change the next Snapshot.
+func TestTU18_CountersPending(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		if NewCounters().Pending() {
+			t.Fatal("Pending is true for an empty value")
+		}
+	})
+	t.Run("after Drop", func(t *testing.T) {
+		c := NewCounters()
+		c.Drop(mustAddr(t, "192.0.2.1"))
+		if !c.Pending() {
+			t.Fatal("Pending is false after Drop")
+		}
+	})
+	t.Run("after DropNoAddr", func(t *testing.T) {
+		c := NewCounters()
+		c.DropNoAddr()
+		if !c.Pending() {
+			t.Fatal("Pending is false after DropNoAddr")
+		}
+	})
+	t.Run("after Snapshot", func(t *testing.T) {
+		c := NewCounters()
+		c.Drop(mustAddr(t, "192.0.2.1"))
+		c.DropNoAddr()
+		c.Snapshot()
+		if c.Pending() {
+			t.Fatal("Pending is true after Snapshot")
+		}
+	})
+	t.Run("does not change the next Snapshot", func(t *testing.T) {
+		c := NewCounters()
+		a := mustAddr(t, "192.0.2.1")
+		c.Drop(a)
+		c.Drop(a)
+		c.DropNoAddr()
+		for range 3 {
+			c.Pending()
+		}
+		m, overflow := c.Snapshot()
+		if len(m) != 1 || m[a] != 2 || overflow != 1 {
+			t.Fatalf("snapshot %v, overflow %d", m, overflow)
+		}
+	})
+}
+
 // markerForms returns every text form of the client address s that a leak
 // could show. The forms are the address, its key, and the IPv4-mapped forms.
 // They also include the decimal, hex, binary, and octal forms of the two 64-bit

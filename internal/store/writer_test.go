@@ -6,8 +6,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -598,17 +601,18 @@ func (r *rig) runAfterStart(late, batch func()) error {
 // of the batch; Run returns nil after Close and Err holds the database rule. The
 // database closes after the start check, so the write path fails. For the
 // refused row, the appender got its one call, so the leaves of that batch stay
-// in the log with no row. An insert error after the append is not counted as an
-// orphan case.
+// in the log with no row. They count as orphan leaves: one evidence event, one
+// orphan leaf. The closed database fails before the append and counts none.
 func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
-		name  string
-		rule  string
-		late  bool // close the database after the start check
-		setup func(r *rig)
+		name    string
+		rule    string
+		late    bool // close the database after the start check
+		orphans uint64
+		setup   func(r *rig)
 	}{
-		{"closed database", ruleDatabase, true, func(r *rig) { r.db.Close() }},
-		{"refused row", ruleDatabase, false, func(r *rig) { r.app.next = -1 }},
+		{"closed database", ruleDatabase, true, 0, func(r *rig) { r.db.Close() }},
+		{"refused row", ruleDatabase, false, 1, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -630,12 +634,236 @@ func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantRule(t, r.w.Err(), writerName, c.rule)
-			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != 0 {
+			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != c.orphans {
 				t.Fatalf("healthy %v, %d commits, stats %+v", r.w.Healthy(), len(r.commits), r.w.Stats())
 			}
 			if c.name == "refused row" && (r.rows() != 0 || len(r.app.calls) != 1) {
 				t.Fatalf("%d rows, %d appender calls", r.rows(), len(r.app.calls))
 			}
 		})
+	}
+}
+
+// batchOfFour queues one bulk event and three evidence events, and closes the
+// queue.
+func (r *rig) batchOfFour() {
+	r.add(event.KindRequest, 1)
+	for i := int64(2); i < 5; i++ {
+		r.add(event.KindCallback, i)
+	}
+	r.q.Close()
+}
+
+// ipCounters returns the ip_counter rows as "day ip_hmac dropped" texts.
+func (r *rig) ipCounters() (out []string) {
+	r.t.Helper()
+	rows, err := r.db.Query("SELECT day, ip_hmac, dropped FROM ip_counter ORDER BY day, ip_hmac")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day, hmac string
+		var dropped int64
+		if err := rows.Scan(&day, &hmac, &dropped); err != nil {
+			r.t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("%s %s %d", day, hmac, dropped))
+	}
+	if err := rows.Err(); err != nil {
+		r.t.Fatal(err)
+	}
+	return out
+}
+
+// T-U-18: after a good AppendBatch call, an error of the record bytes, of an
+// insert, of the drop counts or of the COMMIT counts each leaf of the batch as an
+// orphan leaf. The writer stops and no row of the batch exists. The batch has
+// three evidence events.
+func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
+	cases := []struct {
+		name  string
+		rule  string
+		setup func(r *rig)
+	}{
+		{"record bytes", ruleRecord, func(r *rig) {
+			r.w.evidenceBytes = func(event.Record) ([]byte, error) { return nil, errors.New("no bytes") }
+		}},
+		{"insert", ruleDatabase, func(r *rig) { r.app.next = -1 }},
+		{"drop counts", ruleDatabase, func(r *rig) {
+			if _, err := r.db.Exec("DROP TABLE ip_counter"); err != nil {
+				r.t.Fatal(err)
+			}
+			r.c.DropNoAddr()
+		}},
+		{"COMMIT", ruleDatabase, func(r *rig) {
+			r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit refused") }
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			c.setup(r)
+			r.batchOfFour()
+			if err := r.run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			wantRule(t, r.w.Err(), writerName, c.rule)
+			s := r.w.Stats()
+			if r.w.Healthy() || s.OrphanLeaves != 3 || s.WriteFailed != 0 || r.app.tries != 1 {
+				t.Fatalf("healthy %v, stats %+v, %d appender calls", r.w.Healthy(), s, r.app.tries)
+			}
+			if r.rows() != 0 || len(r.commits) != 0 {
+				t.Fatalf("%d rows, %d commits", r.rows(), len(r.commits))
+			}
+		})
+	}
+}
+
+// T-U-18: the prepare runs before the batch append. An error of the prepare
+// proves that no leaf reached the log: the appender gets no call, the orphan
+// count is 0, and the writer stops.
+func TestTU18PrepareErrorCountsNoOrphanLeaf(t *testing.T) {
+	r := newRig(t, 100)
+	late := func() {
+		if _, err := r.db.Exec("ALTER TABLE event RENAME TO event_gone"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	batch := func() {
+		r.add(event.KindRequest, 1)
+		r.add(event.KindCallback, 2)
+		r.add(event.KindCallback, 3)
+	}
+	if err := r.runAfterStart(late, batch); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if s := r.w.Stats(); r.w.Healthy() || s.OrphanLeaves != 0 || s.WriteFailed != 0 || r.app.tries != 0 {
+		t.Fatalf("healthy %v, stats %+v, %d appender calls", r.w.Healthy(), s, r.app.tries)
+	}
+}
+
+// T-U-18: an AppendBatch error that matches tlog.ErrHeadOnDisk, also when it is
+// wrapped, counts each leaf of the batch as an orphan leaf and each evidence
+// event as a failed log write. The COMMIT of the bulk rows still works: no
+// evidence row exists. A failed COMMIT after the error counts the leaves one
+// time. An error without the mark counts no orphan leaf.
+func TestTU18AppendErrorWithTheMarkCountsOrphanLeaves(t *testing.T) {
+	marked := fmt.Errorf("append: %w", tlog.ErrHeadOnDisk)
+	cases := []struct {
+		name         string
+		err          error
+		failedCommit bool
+		orphans      uint64
+	}{
+		{"marked error, COMMIT works", marked, false, 3},
+		{"marked error, COMMIT fails", marked, true, 3},
+		{"error without the mark", errors.New("log is stopped"), false, 0},
+		{"error without the mark, COMMIT fails", errors.New("log is stopped"), true, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			r.app.err = c.err
+			if c.failedCommit {
+				r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit refused") }
+			}
+			r.batchOfFour()
+			if err := r.run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			wantRule(t, r.w.Err(), writerName, ruleAppend)
+			s := r.w.Stats()
+			if r.w.Healthy() || s.OrphanLeaves != c.orphans || s.WriteFailed != 3 || r.app.tries != 1 {
+				t.Fatalf("healthy %v, stats %+v, %d appender calls", r.w.Healthy(), s, r.app.tries)
+			}
+			wantRows := 1
+			if c.failedCommit {
+				wantRows = 0
+			}
+			if r.rows() != wantRows || r.evidenceRows() != 0 || len(r.commits) != wantRows {
+				t.Fatalf("%d rows, %d evidence rows, %d commits", r.rows(), r.evidenceRows(), len(r.commits))
+			}
+		})
+	}
+}
+
+// T-U-18: at a tick with an empty queue and a pending drop count, the writer runs
+// a transaction with no row. It adds the count to ip_counter with the day of the
+// clock at the start of the transaction and the ip_hmac of the day key. It calls
+// no appender.
+func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
+	r := newRig(t, 100)
+	var calls int
+	r.w.clock = func() time.Time {
+		calls++
+		if calls == 1 {
+			return time.Date(2026, 3, 1, 23, 59, 59, 0, time.UTC)
+		}
+		return time.Date(2026, 3, 2, 0, 0, 1, 0, time.UTC)
+	}
+	addr := netip.MustParseAddr("192.0.2.7")
+	r.c.Drop(addr)
+	r.c.Drop(addr)
+	r.start()
+	r.fire()
+	wantCommits(t, r, 0)
+	want := "2026-03-01 " + r.w.dk.hmac(addr) + " 2"
+	if got := r.ipCounters(); len(got) != 1 || got[0] != want || calls != 1 || r.app.tries != 0 || r.rows() != 0 {
+		t.Fatalf("ip_counter %q, want %q; %d clock reads, %d appender calls", got, want, calls, r.app.tries)
+	}
+	if r.w.dk.date != "2026-03-01" {
+		t.Fatalf("day key for %q", r.w.dk.date)
+	}
+}
+
+// T-U-18: at a tick with an empty queue and no pending count, the writer runs no
+// transaction.
+func TestTU18TickWithNoPendingCountRunsNoTransaction(t *testing.T) {
+	r := newRig(t, 100)
+	r.start()
+	r.fire()
+	r.fire() // the writer has finished the first tick when it reads the second
+	if len(r.commits) != 0 || len(r.ipCounters()) != 0 {
+		t.Fatalf("%d commits, ip_counter %q", len(r.commits), r.ipCounters())
+	}
+}
+
+// T-U-18: the shutdown of a healthy writer ends with a write of the drop counts.
+// Probe: DropNoAddr, Close, Run until it returns: one ip_counter row, the
+// overflow row, with dropped 1.
+func TestTU18ShutdownWritesTheCountsInMemory(t *testing.T) {
+	r := newRig(t, 100)
+	r.c.DropNoAddr()
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := r.ipCounters()
+	if len(got) != 1 || !strings.HasSuffix(got[0], " "+overflowHMAC+" 1") || r.c.Pending() {
+		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+}
+
+// T-U-18: a stopped writer writes no ip_counter row, also with a pending count,
+// at a tick and at Close.
+func TestTU18StoppedWriterWritesNoCounterRow(t *testing.T) {
+	r := newRig(t, 100)
+	r.app.err = errors.New("log is stopped")
+	stop := r.start()
+	r.add(event.KindCallback, 1)
+	r.drained()
+	r.fire()
+	waitUntil(t, "the stop", func() bool { return !r.w.Healthy() })
+	r.c.DropNoAddr()
+	r.fire()
+	r.fire()
+	r.q.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.ipCounters(); len(got) != 0 || !r.c.Pending() {
+		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
 	}
 }
