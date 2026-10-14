@@ -153,18 +153,23 @@ func TestTS16RedirectToAnotherPortIsRefused(t *testing.T) {
 // a new bind fails.
 func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	f := newIssueFixture(t, "sockets.phantom.test", nil, nil)
-	if l, err := net.Listen("tcp", f.addr); err == nil {
-		l.Close()
-		t.Fatal("a second listener bound the address of the decoy socket")
-	} else if !strings.Contains(err.Error(), "address already in use") {
-		t.Fatalf("second bind: %v", err)
+	decoyHoldsAddress := func(when string) {
+		t.Helper()
+		if l, err := net.Listen("tcp", f.addr); err == nil {
+			l.Close()
+			t.Fatalf("%s: a second listener bound the address of the decoy socket", when)
+		} else if !strings.Contains(err.Error(), "address already in use") {
+			t.Fatalf("%s: second bind: %v", when, err)
+		}
 	}
+	decoyHoldsAddress("before Start")
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
 	before := listeningInodes(t)
 	startIssue(t, f)
 	f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })
+	decoyHoldsAddress("after the certificate")
 	for inode, addr := range listeningInodes(t) {
 		if _, ok := before[inode]; !ok {
 			t.Errorf("new listening socket %s (inode %s)", addr, inode)
@@ -187,7 +192,12 @@ func TestTS16OCSPStaysOffAfterMaintenanceTicks(t *testing.T) {
 	seedCertFor(t, f.a, f.name, now.Add(-time.Hour), now.Add(90*24*time.Hour), []string{ocsp.URL})
 	startIssue(t, f)
 	time.Sleep(time.Second) // 20 ticks
-	if hits.Load() != 0 || slices.Contains(f.egress.hosts(), strings.TrimPrefix(ocsp.URL, "http://")) {
-		t.Errorf("OCSP server got %d requests; guard saw %v", hits.Load(), f.egress.hosts())
+	if hits.Load() != 0 {
+		t.Errorf("OCSP server got %d requests", hits.Load())
+	}
+	// The seeded certificate names an issuer on another host, so an OCSP client
+	// reaches the guard with that host before it reaches the OCSP server.
+	if got := f.egress.hosts(); len(got) != 0 && !slices.Equal(got, []string{f.rig.host}) {
+		t.Errorf("guard saw %v, want nothing or only %s", got, f.rig.host)
 	}
 }
