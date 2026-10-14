@@ -122,9 +122,10 @@ func (c *Counters) DropNoAddr() {
 	s.mu.Unlock()
 }
 
-// Pending tells if a snapshot would return a count: the map has a key with a
-// count, or the overflow bucket is not zero. It takes the lock and does not swap
-// the map, so it does not change what the next Snapshot returns.
+// Pending tells if a snapshot would return a count. That is the case when the
+// map has a key with a count, or when the overflow bucket is not zero. It takes
+// the lock and does not swap the map, so it does not change what the next
+// Snapshot returns.
 func (c *Counters) Pending() bool {
 	s := c.h.s
 	s.mu.Lock()

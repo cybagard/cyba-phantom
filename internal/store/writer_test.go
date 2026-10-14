@@ -676,10 +676,10 @@ func (r *rig) ipCounters() (out []string) {
 	return out
 }
 
-// T-U-18: after a good AppendBatch call, an error of the record bytes, of an
-// insert, of the drop counts or of the COMMIT counts each leaf of the batch as an
-// orphan leaf. The writer stops and no row of the batch exists. The batch has
-// three evidence events.
+// T-U-18: take a good AppendBatch call. After it, an error of the record bytes,
+// of an insert, of the drop counts or of the COMMIT counts each leaf of the
+// batch as an orphan leaf. The writer stops and no row of the batch exists. The
+// batch has three evidence events.
 func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -721,7 +721,7 @@ func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
 }
 
 // T-U-18: the prepare runs before the batch append. An error of the prepare
-// proves that no leaf reached the log: the appender gets no call, the orphan
+// proves that no leaf reached the log. The appender gets no call, the orphan
 // count is 0, and the writer stops.
 func TestTU18PrepareErrorCountsNoOrphanLeaf(t *testing.T) {
 	r := newRig(t, 100)
@@ -744,11 +744,11 @@ func TestTU18PrepareErrorCountsNoOrphanLeaf(t *testing.T) {
 	}
 }
 
-// T-U-18: an AppendBatch error that matches tlog.ErrHeadOnDisk, also when it is
-// wrapped, counts each leaf of the batch as an orphan leaf and each evidence
-// event as a failed log write. The COMMIT of the bulk rows still works: no
-// evidence row exists. A failed COMMIT after the error counts the leaves one
-// time. An error without the mark counts no orphan leaf.
+// T-U-18: an AppendBatch error can match tlog.ErrHeadOnDisk, also when it is
+// wrapped. Then each leaf of the batch counts as an orphan leaf. Each evidence
+// event counts as a failed log write. The COMMIT of the bulk rows still works,
+// and no evidence row exists. A failed COMMIT after the error counts the leaves
+// one time. An error without the mark counts no orphan leaf.
 func TestTU18AppendErrorWithTheMarkCountsOrphanLeaves(t *testing.T) {
 	marked := fmt.Errorf("append: %w", tlog.ErrHeadOnDisk)
 	cases := []struct {
@@ -792,9 +792,15 @@ func TestTU18AppendErrorWithTheMarkCountsOrphanLeaves(t *testing.T) {
 // T-U-18: at a tick with an empty queue and a pending drop count, the writer runs
 // a transaction with no row. It adds the count to ip_counter with the day of the
 // clock at the start of the transaction and the ip_hmac of the day key. It calls
-// no appender.
+// no appender. The transaction is in NORMAL synchronous mode, and it does not
+// call the timing hook.
 func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
 	r := newRig(t, 100)
+	var syncMode, timings int
+	r.w.timing = func(time.Duration, time.Duration) { timings++ }
+	r.w.beforeCommit = func(tx *sql.Tx) error {
+		return tx.QueryRow("PRAGMA synchronous").Scan(&syncMode)
+	}
 	var calls int
 	r.w.clock = func() time.Time {
 		calls++
@@ -815,6 +821,9 @@ func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
 	}
 	if r.w.dk.date != "2026-03-01" {
 		t.Fatalf("day key for %q", r.w.dk.date)
+	}
+	if syncMode != 1 || timings != 0 {
+		t.Fatalf("synchronous %d (want 1, NORMAL), %d timing calls (want 0)", syncMode, timings)
 	}
 }
 
@@ -843,6 +852,50 @@ func TestTU18ShutdownWritesTheCountsInMemory(t *testing.T) {
 	got := r.ipCounters()
 	if len(got) != 1 || !strings.HasSuffix(got[0], " "+overflowHMAC+" 1") || r.c.Pending() {
 		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+}
+
+// T-U-18: the last batch at Close has an event, and a drop is counted after the
+// snapshot of that batch. The last step of the shutdown, a flush of an empty
+// batch, writes this late count: one ip_counter row, the overflow row, with
+// dropped 1, and nothing pending.
+func TestTU18ShutdownLastStepWritesLateCounts(t *testing.T) {
+	r := newRig(t, 100)
+	dropped := false
+	r.w.beforeCommit = func(*sql.Tx) error {
+		if !dropped {
+			dropped = true
+			r.c.DropNoAddr()
+		}
+		return nil
+	}
+	r.add(event.KindRequest, 1)
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := r.ipCounters()
+	if len(got) != 1 || !strings.HasSuffix(got[0], " "+overflowHMAC+" 1") || r.c.Pending() {
+		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+}
+
+// T-U-18: a request for a checkpoint row stops the writer, while a drop count is
+// pending. Then two ticks write no ip_counter row, and the count stays pending.
+func TestTU18RowStopKeepsThePendingCount(t *testing.T) {
+	r := newSinkRig(t)
+	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("commit failed") }
+	stop := r.start()
+	r.c.DropNoAddr()
+	wantRule(t, r.sink.Add(4, r.note(4, 1)), writerName, ruleDatabase)
+	eventually(t, func() bool { return !r.w.Healthy() })
+	r.fire()
+	r.fire() // the writer has finished the first tick when it reads the second
+	if got := r.ipCounters(); len(got) != 0 || !r.c.Pending() {
+		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 }
 

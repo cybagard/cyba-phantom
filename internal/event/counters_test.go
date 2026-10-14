@@ -208,8 +208,8 @@ func TestTU17_SnapshotReset(t *testing.T) {
 	}
 }
 
-// T-U-18: Pending is false for an empty value, true after Drop and after
-// DropNoAddr, false after Snapshot, and it does not change the next Snapshot.
+// T-U-18: Pending is false for an empty value. It is true after Drop and after
+// DropNoAddr, and false after Snapshot. It does not change the next Snapshot.
 func TestTU18_CountersPending(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		if NewCounters().Pending() {

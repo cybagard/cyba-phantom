@@ -52,7 +52,8 @@ type Writer struct {
 	tick     <-chan time.Time // a test sets it; nil means a ticker of flushEvery
 	onCommit func(rows int)   // a test sets it; nil in production
 	clock    func() time.Time // a test sets it; nil means time.Now
-	// timing gets the time of a batch and of its commit. A test sets it; nil in
+	// timing gets the time of a batch and of its commit. A transaction with only
+	// drop counts and no event does not call it. A test sets it; nil in
 	// production.
 	timing func(batch, commit time.Duration)
 	// beforeCommit runs on the transaction before COMMIT. An error from it is a
@@ -122,8 +123,8 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // the Discard loop, so that the lanes do not stay full. It returns nil after Close and
 // ctx.Err() after a cancel, as it does when it has not stopped.
 //
-// At each tick, also when the batch is empty, the writer adds the drop counts of
-// the queue to ip_counter if there are any (see write).
+// At each tick, also when the batch is empty, the writer checks the drop counts
+// of the queue. If there are any, it adds them to ip_counter (see write).
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick
 	if tick == nil {
@@ -252,16 +253,18 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 //
 // If AppendBatch fails, the transaction stores only the bulk rows of the batch.
 // It stores no evidence row. Each evidence event of the batch counts as a failed
-// log write, and write returns the append error after the commit. If the error
-// matches tlog.ErrHeadOnDisk, the head of the log on disk can cover the batch,
-// and each leaf of the batch also counts as an orphan leaf. This count is made
-// when the append fails, so a later COMMIT, good or not, does not change it.
+// log write, and write returns the append error after the commit. Suppose the
+// error matches tlog.ErrHeadOnDisk. Then the head of the log on disk can cover
+// the batch, and each leaf of the batch also counts as an orphan leaf. This
+// count is made when the append fails, so a later COMMIT, good or not, does not
+// change it.
 //
-// If AppendBatch works and the transaction then ends without a COMMIT, the
-// leaves of the batch are in the log and have no row. Each of them counts as an
-// orphan leaf. This holds for each error after the append: the record bytes, an
-// insert, the drop counts and the COMMIT. An error before the append, for
-// example of the prepare, counts none, because no leaf reached the log.
+// Suppose AppendBatch works and the transaction then ends without a COMMIT.
+// Then the leaves of the batch are in the log and have no row. Each of them
+// counts as an orphan leaf. This holds for each error after the append: the
+// record bytes, an insert, the drop counts and the COMMIT. An error before the
+// append, for example of the prepare, counts none, because no leaf reached the
+// log.
 //
 // At its start the batch reads the clock one time and takes the UTC date and
 // the day key for it. The ip_counter rows of the batch use them, also when the
@@ -332,8 +335,9 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 }
 
 // transact is the transaction of write. It returns true when the COMMIT worked.
-// If AppendBatch returned nil and the transaction ends without a COMMIT, the
-// deferred function counts each leaf of the batch as an orphan leaf, one time.
+// Suppose AppendBatch returned nil and the transaction ends without a COMMIT.
+// Then the deferred function counts each leaf of the batch as an orphan leaf,
+// one time.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
@@ -411,7 +415,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		return false, fail(writerName, ruleDatabase)
 	}
-	if w.timing != nil {
+	if w.timing != nil && len(batch) > 0 {
 		w.timing(time.Since(begin), time.Since(commitAt))
 	}
 	if w.onCommit != nil {
