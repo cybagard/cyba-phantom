@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"go.uber.org/zap/zapcore"
 )
 
 // syncBuf is a bytes.Buffer that many goroutines can write.
@@ -110,6 +112,20 @@ func handshake(a *ACME, serverName string, protos ...string) (tls.ConnectionStat
 	return cl.ConnectionState(), err
 }
 
+// issuerProxyRefuses reports whether the proxy function of iss refuses a request
+// to another host, with a proxy in the environment.
+func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
+	t.Helper()
+	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
+	if iss.HTTPProxy == nil {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://other.test/dir", nil)
+	mustNil(t, err)
+	u, err := iss.HTTPProxy(req)
+	return errors.Is(err, errEgress) && u == nil
+}
+
 func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 	st, _ := newStore(t)
 	a := newTestACME(t, func(p *ACMEParams) { p.Storage = st; p.Port = 9443 })
@@ -139,8 +155,9 @@ func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 		"renewal ratio":        cfg.RenewalWindowRatio == 0.35,
 		"ARI on":               !cfg.DisableARI,
 		"OCSP proxy is set":    cfg.OCSP.HTTPProxy != nil,
-		"issuer proxy is set":  iss.HTTPProxy != nil,
-		"certmagic log is off": cfg.Logger != nil && iss.Logger != nil,
+		"issuer proxy refuses": issuerProxyRefuses(t, iss),
+		"config log is off":    !cfg.Logger.Core().Enabled(zapcore.ErrorLevel),
+		"issuer log is off":    !iss.Logger.Core().Enabled(zapcore.ErrorLevel),
 	} {
 		if !ok {
 			t.Errorf("%s is wrong", name)
