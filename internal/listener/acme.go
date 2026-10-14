@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
@@ -46,6 +48,16 @@ type ACMEParams struct {
 	// OnEgress is a test hook. The egress guard calls it with the host of each
 	// request that it sees, before it decides. It is nil in production.
 	OnEgress func(host string)
+
+	// TrustedRoots is a test hook. It is the pool of root certificates that the
+	// ACME client trusts for the CA. It is nil in production, and then the client
+	// uses the roots of the system.
+	TrustedRoots *x509.CertPool
+
+	// MaintenanceInterval is a test hook. It is the time between two renewal
+	// checks, and between two OCSP checks, of the certificate cache. It is zero in
+	// production, and then certmagic uses its default intervals.
+	MaintenanceInterval time.Duration
 }
 
 // ACME is the certmagic configuration of the decoy listener. It has one issuer.
@@ -91,8 +103,10 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	guard := egressGuard(ca, p.OnEgress)
 	var cfg atomic.Pointer[certmagic.Config] // the cache needs the config, the config needs the cache
 	a.cache = certmagic.NewCache(certmagic.CacheOptions{
-		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
-		Logger:           zap.NewNop(),
+		GetConfigForCert:   func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
+		RenewCheckInterval: p.MaintenanceInterval,
+		OCSPCheckInterval:  p.MaintenanceInterval,
+		Logger:             zap.NewNop(),
 	})
 	a.cfg = certmagic.New(a.cache, certmagic.Config{
 		RenewalWindowRatio: renewalRatio,
@@ -132,6 +146,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		AltTLSALPNPort:            p.Port,
 		Logger:                    zap.NewNop(),
 		HTTPProxy:                 guard,
+		TrustedRoots:              p.TrustedRoots,
 	})}
 	return a, nil
 }
