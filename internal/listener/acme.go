@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -56,6 +57,7 @@ type ACME struct {
 	cache   *certmagic.Cache
 	names   []string
 	allowed map[string]struct{}
+	logger  *slog.Logger
 	refused atomic.Uint64
 }
 
@@ -73,7 +75,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
 		return nil, errors.New("listener: acme: storage, logger or port is not set")
 	}
-	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}}
+	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger}
 	for _, n := range a.names {
 		a.allowed[n] = struct{}{}
 	}
@@ -173,10 +175,24 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 // Refused returns the number of handshakes that the name gate refused.
 func (a *ACME) Refused() uint64 { return a.refused.Load() }
 
-// Start starts the management of the configured names. Cached certificates load
-// in the call. Obtain, renew and ARI run in the background until ctx ends. An
-// ACME error does not fail Start, and Start does not wait for the network.
+// Start loads the cached certificates of the configured names, then starts
+// their management. A handshake that follows Start gets a cached certificate.
+// The load reads the storage only: stapling is off, and the ARI data comes from
+// the stored resource. A name with no cached certificate is not an error. Any
+// other load error writes one fixed line and does not fail Start.
+//
+// ManageAsync does the obtain, renew and ARI work in the background. Those jobs
+// stop when ctx ends. The maintenance of the cache runs until Stop. A
+// certificate that Start loaded gets its first renew or ARI check at the first
+// maintenance tick, because certmagic manageOne returns at once for a managed
+// certificate. An ACME error does not fail Start, and Start does not wait for
+// the network.
 func (a *ACME) Start(ctx context.Context) error {
+	for _, n := range a.names {
+		if _, err := a.cfg.CacheManagedCertificate(ctx, n); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			a.logger.LogAttrs(ctx, slog.LevelWarn, "acme certificate load failed", slog.String("name", n))
+		}
+	}
 	return a.cfg.ManageAsync(ctx, a.names)
 }
 

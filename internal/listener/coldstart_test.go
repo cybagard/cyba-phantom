@@ -6,12 +6,16 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"log/slog"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,17 +27,25 @@ import (
 // certmagic reads for the issuer of a. It returns the DER bytes of the leaf.
 func seedCert(t *testing.T, a *ACME, name string) []byte {
 	t.Helper()
+	now := time.Now()
+	return seedCertFor(t, a, name, now.Add(-time.Hour), now.Add(90*24*time.Hour), nil)
+}
+
+// seedCertFor is seedCert with the validity period and the OCSP server URLs of
+// the leaf.
+func seedCertFor(t *testing.T, a *ACME, name string, notBefore, notAfter time.Time, ocspServer []string) []byte {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	mustNil(t, err)
-	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: name},
 		DNSNames:     []string{name},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(90 * 24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		OCSPServer:   ocspServer,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	mustNil(t, err)
@@ -93,5 +105,59 @@ func TestTI03ColdStartServesTheCachedCertificateWithoutNetwork(t *testing.T) {
 		if h != addr {
 			t.Errorf("a request went to %q, not to the CA", h)
 		}
+	}
+}
+
+// slowStorage delays each read of the storage under it.
+type slowStorage struct {
+	certmagic.Storage
+	delay time.Duration
+}
+
+func (s *slowStorage) Load(ctx context.Context, k string) ([]byte, error) {
+	time.Sleep(s.delay)
+	return s.Storage.Load(ctx, k)
+}
+
+// failingStorage fails each read with an error that is not fs.ErrNotExist.
+type failingStorage struct{ certmagic.Storage }
+
+func (failingStorage) Load(context.Context, string) ([]byte, error) {
+	return nil, errors.New("disk failure in /private/path")
+}
+
+func TestTI03StartLoadsTheCacheBeforeItReturns(t *testing.T) {
+	st, _ := newStore(t)
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.CA = "https://" + closedAddr(t)
+		p.Storage = &slowStorage{Storage: st, delay: 300 * time.Millisecond}
+	})
+	want := seedCert(t, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	// No sleep and no retry: the certificate is in the cache when Start returns.
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	cert, err := a.GetCertificate(&tls.ClientHelloInfo{ServerName: "decoy.test", Conn: s})
+	if err != nil || !bytes.Equal(cert.Certificate[0], want) {
+		t.Fatalf("GetCertificate right after Start: %v", err)
+	}
+}
+
+func TestTI03StartLoadErrorWritesOneFixedLine(t *testing.T) {
+	var logs syncBuf
+	st, _ := newStore(t)
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.CA = "https://" + closedAddr(t)
+		p.Storage = failingStorage{st}
+		p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	out := logs.String()
+	if !strings.Contains(out, `msg="acme certificate load failed" name=decoy.test`) || strings.Contains(out, "/private/path") {
+		t.Errorf("log output: %q", out)
 	}
 }
