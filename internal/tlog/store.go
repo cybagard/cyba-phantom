@@ -97,6 +97,40 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
+// ErrHeadOnDisk is the mark of an append error after which the tree head file
+// on disk can cover the batch. The rename of the head file worked and a later
+// step of the head write failed. Test for it with errors.Is. Only
+// Store.SetHead, Log.Append and Log.AppendBatch return an error that matches
+// it. Each other error of these functions does not match it. A failed
+// directory sync of a tile file does not match it. Open and OpenLog never
+// return the mark.
+var ErrHeadOnDisk = errors.New("tree head on disk can cover the batch")
+
+// renamedError is the error of a step of writeFile that comes after the rename.
+type renamedError struct{ err error }
+
+func (e *renamedError) Error() string { return e.err.Error() }
+func (e *renamedError) Unwrap() error { return e.err }
+
+// headError is the Error of a head write that failed after the rename of the
+// head file. It has the text of that Error, and it matches ErrHeadOnDisk.
+// errors.As to *Error gives that Error. A type assertion err.(*Error) does not
+// match it.
+type headError struct{ err *Error }
+
+// unmark returns the Error of a headError in err, or else err.
+func unmark(err error) error {
+	var h *headError
+	if errors.As(err, &h) {
+		return h.err
+	}
+	return err
+}
+
+func (e *headError) Error() string        { return e.err.Error() }
+func (e *headError) Unwrap() error        { return e.err }
+func (e *headError) Is(target error) bool { return target == ErrHeadOnDisk }
+
 // Error names the file that failed and the rule that failed. The type is in
 // the verifier package, so that the inclusion check returns the same type.
 type Error = verifier.Error
@@ -264,7 +298,8 @@ func (s *Store) initHead() error {
 			return newError(headName, ruleEmpty)
 		}
 	}
-	return s.writeHead(tlog.Tree{Hash: emptyRoot})
+	// Open never returns the mark. It returns the plain error.
+	return unmark(s.writeHead(tlog.Tree{Hash: emptyRoot}))
 }
 
 func (s *Store) writeHead(tree tlog.Tree) error {
@@ -272,7 +307,11 @@ func (s *Store) writeHead(tree tlog.Tree) error {
 	binary.BigEndian.PutUint64(b[:], uint64(tree.N))
 	copy(b[sizeLen:], tree.Hash[:])
 	if err := s.writeFile(headName, b[:]); err != nil {
-		return newError(headName, ruleWrite)
+		e := newError(headName, ruleWrite)
+		if errors.As(err, new(*renamedError)) {
+			return &headError{e}
+		}
+		return e
 	}
 	s.head = tree
 	return nil
@@ -317,7 +356,8 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 // that the new tree head covers. If not, the next Open would refuse the tree
 // head. A newly covered hash must be one that WriteTile accepted since the
 // last SetHead. SetHead refuses a size that adds more than maxBatchTiles full
-// tiles. A refused call changes no file.
+// tiles. A refused call changes no file. The error of SetHead matches
+// ErrHeadOnDisk if the rename of the head file worked and a later step failed.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -757,7 +797,9 @@ func fileRule(err error) string {
 // writeFile writes name in four steps: a temporary file in the same
 // directory, fsync of the file, rename, and fsync of the directories. It
 // deletes an old temporary file first and makes the new one with O_EXCL and
-// mode 0600. The store does not change a mode afterwards.
+// mode 0600. The store does not change a mode afterwards. Each error
+// after the rename (the open or the fsync of a directory) has the type
+// *renamedError.
 func (s *Store) writeFile(name string, data []byte) error {
 	dir := path.Dir(name)
 	if err := s.dir.MkdirAll(dir, dirMode); err != nil {
@@ -782,7 +824,10 @@ func (s *Store) writeFile(name string, data []byte) error {
 		err = renameFile(s.dir, tmp, name)
 	}
 	if err == nil {
-		return syncDirs(s.dir, dir)
+		if err := syncDirs(s.dir, dir); err != nil {
+			return &renamedError{err}
+		}
+		return nil
 	}
 	s.dir.Remove(tmp)
 	return err

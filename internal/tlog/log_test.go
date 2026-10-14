@@ -315,7 +315,7 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 		}
 		// The log refuses each later Append with the same error, also when the writes work.
 		renameFile = old
-		if _, err := l.Append(testEvent(255)); !errors.Is(err, first) {
+		if _, err := l.Append(testEvent(255)); !sameStop(err, first) {
 			t.Fatalf("%s failure: next Append gave %v, want %v", fail, err, first)
 		}
 		if s2, r2 := l.Head(); s2 != size || r2 != root {
@@ -395,7 +395,7 @@ func TestTU07HeadRenameThenDirectorySyncFailureStopsAppends(t *testing.T) {
 	if s2, r2 := diskHead(t, dir); s2 != size+1 || r2 != rootA {
 		t.Fatalf("head on disk is %d, %x, want %d, %x", s2, r2, size+1, rootA)
 	}
-	if _, err := l.Append(b); !errors.Is(err, first) {
+	if _, err := l.Append(b); !sameStop(err, first) {
 		t.Fatalf("next Append gave %v, want %v", err, first)
 	}
 	if s2, r2 := diskHead(t, dir); s2 != size+1 || r2 != rootA {
@@ -635,16 +635,143 @@ func TestTU07BatchEdges(t *testing.T) {
 	// A batch that does not fit, or has too many tiles, is refused before any write.
 	l.size = maxSize - 1
 	var e *Error
-	if _, err := l.AppendBatch(batchOf(0, 2)); !errors.As(err, &e) || e.Rule != ruleFull {
-		t.Fatalf("a batch above the largest size gave %v, want the rule %q", err, ruleFull)
+	if _, err := l.AppendBatch(batchOf(0, 2)); !errors.As(err, &e) || e.Rule != ruleFull || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch above the largest size gave %v, want the rule %q with no mark", err, ruleFull)
 	}
 	l.size = 0
 	e = nil
-	if _, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth+1)); !errors.As(err, &e) || e.Rule != ruleBatch {
-		t.Fatalf("a batch with too many tiles gave %v, want the rule %q", err, ruleBatch)
+	if _, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth+1)); !errors.As(err, &e) || e.Rule != ruleBatch || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch with too many leaves gave %v, want the rule %q with no mark", err, ruleBatch)
 	}
 	if l.err != nil {
 		t.Fatalf("a refused batch stopped the log: %v", l.err)
+	}
+}
+
+// sameStop reports whether err and first hold the same *Error.
+func sameStop(err, first error) bool {
+	var a, b *Error
+	return errors.As(err, &a) && errors.As(first, &b) && a == b
+}
+
+// A batch that fits the leaf limit but changes more tiles than the store
+// accepts for one tree head is refused before a write, with no mark.
+func TestTS13BatchWithTooManyTilesIsNotMarked(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	logDir := filepath.Join(dir, "tlog")
+	before := snapshot(t, logDir)
+	var e *Error
+	_, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth))
+	if !errors.As(err, &e) || e.Rule != ruleBatch || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch with too many tiles gave %v, want the rule %q with no mark", err, ruleBatch)
+	}
+	if l.err != nil || snapshot(t, logDir) != before {
+		t.Fatalf("a refused batch stopped the log (%v) or changed a file", l.err)
+	}
+}
+
+// Tiles in memory that do not match the tree are refused before a write, with
+// no mark.
+func TestTS13TilesInMemoryThatDoNotMatchAreNotMarked(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 3)
+	l.tiles[0].n++
+	logDir := filepath.Join(dir, "tlog")
+	before := snapshot(t, logDir)
+	var e *Error
+	_, err := l.AppendBatch(batchOf(3, 5))
+	if !errors.As(err, &e) || e.Rule != ruleCache || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("AppendBatch gave %v, want the rule %q with no mark", err, ruleCache)
+	}
+	if snapshot(t, logDir) != before {
+		t.Fatal("a refused batch changed a file")
+	}
+}
+
+// After a tile write failure, the next batch gets the same error with no mark.
+func TestTS13StoppedLogAfterTileWriteFailureIsNotMarked(t *testing.T) {
+	state, _ := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 255)
+	old := renameFile
+	t.Cleanup(func() { renameFile = old })
+	renameFile = func(*os.Root, string, string) error { return errors.New("injected") }
+	_, first := l.AppendBatch(batchOf(255, 300))
+	renameFile = old
+	_, next := l.AppendBatch(batchOf(255, 300))
+	if first == nil || next == nil || errors.Is(first, ErrHeadOnDisk) || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, first) {
+		t.Fatalf("first error %v, next error %v: want the same error with no mark", first, next)
+	}
+}
+
+// After a marked failure, the next batch gets the same *Error with no mark.
+func TestTS13StoppedLogAfterMarkedFailureIsNotMarked(t *testing.T) {
+	state, _ := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 255)
+	failDirSyncAfterRename(t, headName)
+	_, first := l.AppendBatch(batchOf(255, 300))
+	_, next := l.AppendBatch(batchOf(255, 300))
+	if !errors.Is(first, ErrHeadOnDisk) || next == nil || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, first) {
+		t.Fatalf("first error %v, next error %v: want a mark on the first only", first, next)
+	}
+}
+
+// OpenLog of a new log directory writes the first tree head. If the fsync of
+// the directory fails after the rename, the error is a failed write with no
+// mark: the mark is only for Append and AppendBatch.
+func TestTS13OpenLogFirstHeadDirectorySyncFailureIsNotMarked(t *testing.T) {
+	state, _ := newLogState(t)
+	failDirSyncAfterRename(t, headName)
+	l, err := OpenLog(state, "tlog")
+	if err == nil {
+		l.Close()
+		t.Fatal("OpenLog returned nil after the failed fsync")
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleWrite || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("OpenLog gave %v, want the rule %q with no mark", err, ruleWrite)
+	}
+}
+
+// The open of the log directory fails after the rename of the head file. The
+// head on disk covers the batch, so the error has the mark.
+func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 255)
+	size, root := l.Head()
+	logDir := filepath.Join(dir, "tlog")
+	old := renameFile
+	t.Cleanup(func() {
+		renameFile = old
+		os.Chmod(logDir, dirMode)
+	})
+	renameFile = func(r *os.Root, from, to string) error {
+		err := old(r, from, to)
+		if err == nil && to == headName {
+			// The open of a directory with group access fails.
+			err = os.Chmod(logDir, 0o750)
+			if err == nil {
+				return nil
+			}
+		}
+		return err
+	}
+	_, err := l.AppendBatch(batchOf(255, 300))
+	renameFile = old
+	var e *Error
+	if !errors.Is(err, ErrHeadOnDisk) || !errors.As(err, &e) || e.Rule != ruleWrite {
+		t.Fatalf("AppendBatch gave %v, want the rule %q with the mark", err, ruleWrite)
+	}
+	if s2, r2 := l.Head(); s2 != size || r2 != root {
+		t.Fatalf("head in memory changed to %d, %x", s2, r2)
+	}
+	wantRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
+	if s2, r2 := diskHead(t, dir); s2 != 300 || r2 != wantRoot {
+		t.Fatalf("head on disk is %d, %x, want 300, %x", s2, r2, wantRoot)
 	}
 }
 
@@ -722,14 +849,17 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 				}
 			}
 			check(l, "after the failure", false)
+			if got := errors.Is(first, ErrHeadOnDisk); got != c.covers {
+				t.Fatalf("errors.Is(first, ErrHeadOnDisk) = %v, want %v", got, c.covers)
+			}
 			// The log refuses each later call with the same error, also when the writes work.
-			if _, err := l.Append(testEvent(255)); !errors.Is(err, first) {
+			if _, err := l.Append(testEvent(255)); !sameStop(err, first) {
 				t.Fatalf("next Append gave %v, want %v", err, first)
 			}
-			if _, err := l.AppendBatch(batchOf(255, 256)); !errors.Is(err, first) {
+			if _, err := l.AppendBatch(batchOf(255, 256)); !sameStop(err, first) {
 				t.Fatalf("next AppendBatch gave %v, want %v", err, first)
 			}
-			if _, err := l.AppendBatch(nil); !errors.Is(err, first) {
+			if _, err := l.AppendBatch(nil); !sameStop(err, first) {
 				t.Fatalf("next empty AppendBatch gave %v, want %v", err, first)
 			}
 			check(l, "after the refused calls", false)
