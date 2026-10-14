@@ -200,6 +200,11 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 			fail("store.path", s, d)
 		}
 	}
+	if c, ok := vals["acme.cache_dir"]; ok {
+		if d := cacheConflict(l, vals, c.Str); d != "" {
+			fail("acme.cache_dir", c, d)
+		}
+	}
 	return errs
 }
 
@@ -547,6 +552,70 @@ func checkStorePath(l *loader, raw string) string {
 	}
 	return ""
 }
+
+// checkCacheDir applies the rules of checkStorePath: the cache directory is below the state
+// directory, and each path part has only A-Z a-z 0-9 . _ - (SEC-21). The cross-check
+// cacheConflict compares it with the other state directories.
+func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw) }
+
+// cacheConflict returns a detail if the acme.cache_dir value p is in or above a directory that the
+// sensor uses for other files (SEC-21). It compares the path text only. A key that is not in vals
+// failed its own check, so it is skipped.
+func cacheConflict(l *loader, vals map[string]Value, p string) string {
+	for _, k := range []string{"tlog.dir", "bundle.path"} {
+		v, ok := vals[k]
+		if !ok {
+			continue
+		}
+		name := k
+		if k == "bundle.path" {
+			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
+		}
+		if inDir(p, v.Str) || inDir(v.Str, p) {
+			return "the path must not be in or above " + name
+		}
+	}
+	for _, d := range []string{"keys", "checkpoints"} {
+		if s := filepath.Join(l.stateRoot, d); inDir(p, s) || inDir(s, p) {
+			return "the path must not be in or above the " + d + " directory"
+		}
+	}
+	return ""
+}
+
+// checkACMEName checks one entry of acme.names (SEC-21): a DNS name in lower case with
+// at least two labels, and not an IP literal or an internal name.
+func checkACMEName(_ *loader, raw string) string {
+	if len(raw) > 253 {
+		return "the name must have at most 253 bytes"
+	}
+	if _, err := netip.ParseAddr(raw); err == nil {
+		return "the name must not be an IP literal"
+	}
+	labels := strings.Split(raw, ".")
+	if len(labels) < 2 {
+		return "the name must have at least two labels"
+	}
+	for _, label := range labels {
+		switch {
+		case label == "":
+			return "the name must not have an empty label or a dot at the end"
+		case len(label) > 63:
+			return "each label must have at most 63 bytes"
+		case !acmeLabel.MatchString(label):
+			return "each label must have only a-z 0-9 - and must not start or end with -"
+		}
+	}
+	for _, internal := range []string{"localhost", "local", "internal", "home.arpa"} {
+		if strings.HasSuffix(raw, "."+internal) {
+			return "the name must not be below localhost, local, internal or home.arpa"
+		}
+	}
+	return ""
+}
+
+// acmeLabel matches one label of an acme.names entry.
+var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // inDir reports whether the clean path p is the clean path d or is below it. It compares text only.
 func inDir(p, d string) bool {

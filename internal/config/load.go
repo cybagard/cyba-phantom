@@ -52,13 +52,13 @@ var keys = []key{
 	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/phantom/htpasswd", check: checkHtpasswd},
 	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
-	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkStatePath},
+	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkCacheDir},
 	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkStatePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
 	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)}, // The bounds apply also if fetch_url is empty.
 	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
 	{path: "limits.body_bytes", kind: kindBytes, def: "65536", check: intRange(1, 65536)},
-	{path: "limits.header_bytes", kind: kindBytes, def: "16384", check: intRange(1, 16384)},
+	{path: "limits.header_bytes", kind: kindBytes, def: "16384", check: intRange(8192, 16384)},
 	{path: "limits.per_ip_rps", kind: kindInt, def: "50", check: intRange(1, 1000)},
 	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)}, // The lower bound is per_ip_rps: a cross-check.
 	{path: "limits.queue_depth", kind: kindInt, def: "4096", check: intRange(1, 8192)},

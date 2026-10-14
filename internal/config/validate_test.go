@@ -318,7 +318,7 @@ func TestTU10_AllowList(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			body := "acme:\n  email: sec@example.com\n"
+			body := "acme:\n  email: sec@example.com\n" + acmeNames
 			if r.file != "" {
 				body += strings.TrimPrefix(r.file, "acme:\n")
 			}
@@ -596,7 +596,7 @@ func TestTU10_URLOutput(t *testing.T) {
 		}
 	})
 	t.Run("valid email passes", func(t *testing.T) {
-		if _, err := loadTest(writeConfig(t, "acme:\n  email: ops@corp.com\n"+tlogOrigin), nil); err != nil {
+		if _, err := loadTest(writeConfig(t, "acme:\n  email: ops@corp.com\n"+acmeNames+tlogOrigin), nil); err != nil {
 			t.Error(err)
 		}
 	})
@@ -655,7 +655,7 @@ var scalarBounds = []bound{
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "1s", "0s", "-1h"}}, // The bounds apply also if the fetch is off.
 	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
 	{key: "limits.body_bytes", pass: []string{"1", "65536"}, fail: []string{"0", "65537"}},
-	{key: "limits.header_bytes", pass: []string{"1", "16384"}, fail: []string{"0", "16385"}},
+	{key: "limits.header_bytes", pass: []string{"8192", "16384"}, fail: []string{"8191", "16385", "1", "0"}},
 	{key: "limits.per_ip_rps", pass: []string{"1", "1000"}, fail: []string{"0", "1001"}, with: []string{"PHANTOM_LIMITS_PER_IP_BURST=5000"}},
 	{key: "limits.per_ip_rps", pass: []string{"200"}}, // The default burst is 200. A larger rate fails on the burst key (TestTS11_CrossChecks).
 	{key: "limits.per_ip_burst", pass: []string{"100", "5000"}, fail: []string{"99", "5001", "0"}, with: []string{"PHANTOM_LIMITS_PER_IP_RPS=100"}},
@@ -944,7 +944,7 @@ func TestTS10_NewScalars(t *testing.T) {
 
 // Flow mappings for the list items. The variables that they name are in listEnv and in loadTest.
 const (
-	acmeTlog = "acme:\n  email: sec@example.com\ntlog:\n  origin: test/origin\n"
+	acmeTlog = "acme:\n  email: sec@example.com\n" + acmeNames + "tlog:\n  origin: test/origin\n"
 	pubItem  = `{type: https-put, url: "https://ckpt.example/put", token_env: CKPT_TOKEN}`
 	hookItem = `{type: webhook, url: "https://hook.example/a", hmac_secret_env: ALERT_HMAC}`
 	sysItem  = `{type: syslog, addr: "udp://127.0.0.1:514"}`
@@ -1260,7 +1260,7 @@ func TestTS10_ListSecrets(t *testing.T) {
 // TestTS08_AllowList checks that AllowList holds the endpoints of acme.ca, bundle.fetch_url, tlog.publish[].url,
 // and the sinks, and that an endpoint that many keys share is in the list one time (C4, T-S-08, T-S-11).
 func TestTS08_AllowList(t *testing.T) {
-	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\nbundle:\n  fetch_url: https://CA.EXAMPLE:14000/b\n" +
+	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\n" + acmeNames + "bundle:\n  fetch_url: https://CA.EXAMPLE:14000/b\n" +
 		"tlog:\n  origin: test/origin\n  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "https://CA.example:14000/ckpt", token_env: CKPT_TOKEN}` + "\n" +
 		"alerts:\n  sinks:\n" +
 		"    - " + `{type: webhook, url: "https://ckpt.example:443/hook", hmac_secret_env: ALERT_HMAC}` + "\n" +
@@ -1282,5 +1282,130 @@ func TestTS08_AllowList(t *testing.T) {
 	}
 	if got := c.AllowList(); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// namesFile returns base with the acme.names list set to the entries.
+func namesFile(names ...string) string {
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = strconv.Quote(n)
+	}
+	return strings.Replace(base, acmeNames, "  names: ["+strings.Join(q, ", ")+"]\n", 1)
+}
+
+// TestTS11_ACMENames checks the acme.names rule: the count, each entry, the duplicates, and the missing
+// override (SEC-21, T-S-11). Each bad value gives an error that names acme.names.
+func TestTS11_ACMENames(t *testing.T) {
+	l63 := strings.Repeat("a", 63)
+	name253 := strings.Join([]string{l63, l63, l63, strings.Repeat("a", 61)}, ".")
+	var many []string
+	for i := range 17 {
+		many = append(many, fmt.Sprintf("h%d.example.com", i))
+	}
+	const key = "acme.names"
+	rows := []struct {
+		name, file, env, want string // want is "" for a file that loads.
+	}{
+		{"1 name", namesFile("decoy.example.com"), "", ""},
+		{"16 names", namesFile(many[:16]...), "", ""},
+		{"label of 63 bytes", namesFile(l63 + ".example"), "", ""},
+		{"name of 253 bytes", namesFile(name253), "", ""},
+		{"digits and hyphen", namesFile("a-1.b2-c.example"), "", ""},
+		// The row bars the names below home.arpa, not home.arpa: it has two labels, so it loads.
+		{"home.arpa", namesFile("home.arpa"), "", ""},
+		{"0 names", namesFile(), "", key},
+		{"17 names", namesFile(many...), "", key},
+		{"upper-case letter", namesFile("Decoy.example.com"), "", key},
+		{"wildcard", namesFile("*.example.com"), "", key},
+		{"IPv4 literal", namesFile("192.0.2.1"), "", key},
+		{"IPv6 literal", namesFile("2001:db8::1"), "", key},
+		{"trailing dot", namesFile("decoy.example.com."), "", key},
+		{"empty label", namesFile("decoy..example.com"), "", key},
+		{"one label", namesFile("decoy"), "", key},
+		{"label of 64 bytes", namesFile(l63 + "a.example"), "", key},
+		{"name of 254 bytes", namesFile(name253 + "a"), "", key},
+		{"leading hyphen", namesFile("-decoy.example.com"), "", key},
+		{"trailing hyphen", namesFile("decoy-.example.com"), "", key},
+		{"underscore", namesFile("de_coy.example.com"), "", key},
+		{"non-ASCII", namesFile("dé.example.com"), "", key},
+		{"localhost", namesFile("localhost"), "", key},
+		{"below localhost", namesFile("x.localhost"), "", key},
+		{"below local", namesFile("x.local"), "", key},
+		{"below internal", namesFile("x.internal"), "", key},
+		{"below home.arpa", namesFile("x.home.arpa"), "", key},
+		// The names local and internal have one label: the rule for two labels bars them.
+		{"local", namesFile("local"), "", key},
+		{"internal", namesFile("internal"), "", key},
+		{"duplicate", namesFile("a.example.com", "b.example.com", "a.example.com"), "", key},
+		{"not a scalar", strings.Replace(base, "[decoy.example.com]", "[[a]]", 1), "", "acme.names[0]"},
+		{"not a string", strings.Replace(base, "[decoy.example.com]", "[12]", 1), "", "acme.names[0]"},
+		{"not a list", strings.Replace(base, "[decoy.example.com]", "decoy.example.com", 1), "", key},
+		{"missing", strings.Replace(base, acmeNames, "", 1), "", key},
+		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM_ variable"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			var env []string
+			if r.env != "" {
+				env = append(env, r.env)
+			}
+			c, err := loadProd(t, r.file, env...)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), r.want)):
+				t.Errorf("got %v, want an error with %q", err, r.want)
+			case r.want != "" && c != nil:
+				t.Error("a config came back with the error")
+			}
+		})
+	}
+}
+
+// TestTS11_ACMECacheDir checks the acme.cache_dir rule on the path text (SEC-21, T-S-11). Each bad
+// value gives an error that names acme.cache_dir.
+func TestTS11_ACMECacheDir(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	rows := []struct {
+		name, dir string
+		with      []string
+		want      string // want is "" for a value that loads.
+	}{
+		{"default", "", nil, ""},
+		{"sibling", s + "certs2", nil, ""},
+		{"all permitted characters", s + "Ab_1.x-y/Z", nil, ""},
+		{"name that starts like tlog", s + "tlog2", nil, ""},
+		{"state directory", "/var/lib/phantom", nil, "below the state directory"},
+		{"space", s + "my certs", nil, "each path part"},
+		{"question mark", s + "certs?x", nil, "each path part"},
+		{"non-ASCII letter", s + "cér", nil, "each path part"},
+		{"dot dot", s + "a/../certs", nil, "clean"},
+		{"outside the state directory", "/var/lib/other", nil, "state directory"},
+		{"tlog.dir", s + "tlog", nil, "in or above tlog.dir"},
+		{"in tlog.dir", s + "tlog/c", nil, "in or above tlog.dir"},
+		{"above tlog.dir", s + "a", []string{"PHANTOM_TLOG_DIR=" + s + "a/t"}, "in or above tlog.dir"},
+		{"bundle directory", s + "bundle", nil, "directory of bundle.path"},
+		{"in the bundle directory", s + "bundle/c", nil, "directory of bundle.path"},
+		{"above the bundle directory", s + "b", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x/current.cbnd"}, "directory of bundle.path"},
+		{"keys", s + "keys", nil, "keys directory"},
+		{"in keys", s + "keys/c", nil, "keys directory"},
+		{"checkpoints", s + "checkpoints", nil, "checkpoints directory"},
+		{"in checkpoints", s + "checkpoints/c", nil, "checkpoints directory"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			env := r.with
+			if r.dir != "" {
+				env = append([]string{"PHANTOM_ACME_CACHE_DIR=" + r.dir}, env...)
+			}
+			_, err := loadProd(t, base, env...)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), "acme.cache_dir at ") || !strings.Contains(err.Error(), r.want)):
+				t.Errorf("got %v, want an error on acme.cache_dir with %q", err, r.want)
+			}
+		})
 	}
 }
