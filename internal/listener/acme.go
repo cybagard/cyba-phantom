@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,11 +73,19 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		return nil, errors.New("listener: acme: the number of names is not 1 to 16")
 	case err != nil || ca.Scheme != "https" || ca.Hostname() == "":
 		return nil, errors.New("listener: acme: the CA URL is not an https URL")
+	case ca.User != nil || ca.Fragment != "" || strings.Contains(p.CA, "#") || !validPort(ca.Port()):
+		return nil, errors.New("listener: acme: the CA URL has user info, a fragment or a port that is not 1 to 65535")
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
 		return nil, errors.New("listener: acme: storage or logger is not set, or the port is not 1 to 65535")
 	}
 	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger}
 	for _, n := range a.names {
+		if !validName(n) {
+			return nil, errors.New("listener: acme: a name is empty, has an upper-case letter or a byte above 0x7f, or ends with a dot")
+		}
+		if _, dup := a.allowed[n]; dup {
+			return nil, errors.New("listener: acme: a name is in the list more than one time")
+		}
 		a.allowed[n] = struct{}{}
 	}
 	guard := egressGuard(ca, p.OnEgress)
@@ -128,6 +137,29 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	return a, nil
 }
 
+// validPort reports whether s is empty or a port from 1 to 65535.
+func validPort(s string) bool {
+	if s == "" {
+		return true
+	}
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// validName reports whether n can be a configured name: not empty, ASCII, no
+// upper-case letter and no trailing dot.
+func validName(n string) bool {
+	if n == "" || strings.HasSuffix(n, ".") {
+		return false
+	}
+	for i := 0; i < len(n); i++ {
+		if c := n[i]; c >= 0x80 || ('A' <= c && c <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // isLoggedEvent reports whether an event of certmagic gets a log line.
 func isLoggedEvent(event string) bool {
 	return event == "cert_obtaining" || event == "cert_obtained" || event == "cert_failed"
@@ -175,7 +207,16 @@ func portOf(u *url.URL) string {
 // line. This also holds for ALPN acme-tls/1, which certmagic would answer with a
 // storage read for any name.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	name := strings.TrimSuffix(strings.ToLower(hello.ServerName), ".")
+	// Lower only ASCII letters: ToLower maps U+212A KELVIN SIGN to "k". A byte of
+	// 0x80 or more is not in a configured name, so the gate refuses it first.
+	name := hello.ServerName
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 0x80 {
+			a.refused.Add(1)
+			return nil, errName
+		}
+	}
+	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	if _, ok := a.allowed[name]; !ok {
 		a.refused.Add(1)
 		return nil, errName

@@ -267,6 +267,74 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 	}
 }
 
+func TestTS16NameGateRefusesAByteAbove0x7f(t *testing.T) {
+	st, _ := newStore(t)
+	cs := &countingStorage{Storage: st}
+	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{"kiosk.test"}; p.Storage = cs })
+	// U+212A KELVIN SIGN: a Unicode-aware ToLower maps it to "k".
+	names := []string{"Kiosk.test", "kiosk.testé", "\xffkiosk.test"}
+	for _, n := range names {
+		for _, protos := range [][]string{nil, {"acme-tls/1"}} {
+			if _, err := handshake(a, n, protos...); err == nil {
+				t.Errorf("handshake for %q with %v worked", n, protos)
+			}
+		}
+	}
+	if r := cs.reads.Load(); r != 0 {
+		t.Errorf("storage reads: %d", r)
+	}
+	if got := a.Refused(); got != uint64(2*len(names)) {
+		t.Errorf("refused = %d", got)
+	}
+}
+
+func TestTS16NewACMERefusesBadInput(t *testing.T) {
+	st, _ := newStore(t)
+	for _, c := range []struct {
+		name string
+		mod  func(*ACMEParams)
+	}{
+		{"no name", func(p *ACMEParams) { p.Names = nil }},
+		{"17 names", func(p *ACMEParams) {
+			p.Names = nil
+			for i := range 17 {
+				p.Names = append(p.Names, fmt.Sprintf("n%d.test", i))
+			}
+		}},
+		{"empty name", func(p *ACMEParams) { p.Names = []string{"decoy.test", ""} }},
+		{"upper-case letter", func(p *ACMEParams) { p.Names = []string{"Decoy.test"} }},
+		{"byte above 0x7f", func(p *ACMEParams) { p.Names = []string{"décoy.test"} }},
+		{"trailing dot", func(p *ACMEParams) { p.Names = []string{"decoy.test."} }},
+		{"duplicate name", func(p *ACMEParams) { p.Names = []string{"decoy.test", "other.test", "decoy.test"} }},
+		{"CA with http", func(p *ACMEParams) { p.CA = "http://ca.test/dir" }},
+		{"CA with user info", func(p *ACMEParams) { p.CA = "https://u:p@ca.test/dir" }},
+		{"CA with a fragment", func(p *ACMEParams) { p.CA = "https://ca.test/dir#frag" }},
+		{"CA with an empty fragment", func(p *ACMEParams) { p.CA = "https://ca.test/dir#" }},
+		{"CA port 0", func(p *ACMEParams) { p.CA = "https://ca.test:0/dir" }},
+		{"CA port 65536", func(p *ACMEParams) { p.CA = "https://ca.test:65536/dir" }},
+		{"CA port 99999", func(p *ACMEParams) { p.CA = "https://ca.test:99999/dir" }},
+		{"no storage", func(p *ACMEParams) { p.Storage = nil }},
+		{"no logger", func(p *ACMEParams) { p.Logger = nil }},
+		{"port 0", func(p *ACMEParams) { p.Port = 0 }},
+		{"port 65536", func(p *ACMEParams) { p.Port = 65536 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := ACMEParams{
+				Names: []string{"decoy.test"}, CA: "https://ca.test/dir", Email: "ops@example.test",
+				Storage: st, Host: "127.0.0.1", Port: 8443, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+			c.mod(&p)
+			a, err := NewACME(p)
+			if err == nil {
+				a.Stop()
+				t.Fatal("NewACME accepted the input")
+			}
+		})
+	}
+	// A CA URL with the highest port is valid.
+	newTestACME(t, func(p *ACMEParams) { p.CA = "https://ca.test:65535/dir" })
+}
+
 func TestTS16StopCanBeCalledTwice(t *testing.T) {
 	a := newTestACME(t, nil)
 	a.Stop()
