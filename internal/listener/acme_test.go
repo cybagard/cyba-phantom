@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -110,6 +111,64 @@ func handshake(a *ACME, serverName string, protos ...string) (tls.ConnectionStat
 	c.Close()
 	<-done
 	return cl.ConnectionState(), err
+}
+
+// must stops the test or benchmark if err is not nil.
+func must(tb testing.TB, err error) {
+	tb.Helper()
+	if err != nil {
+		tb.Fatal(err)
+	}
+}
+
+// newBenchACME builds an ACME with a new store, for a benchmark. The CA name
+// does not resolve: a seeded certificate that needs no renewal makes no request.
+func newBenchACME(b *testing.B) *ACME {
+	b.Helper()
+	state, err := os.OpenRoot(b.TempDir())
+	must(b, err)
+	b.Cleanup(func() { state.Close() })
+	st, err := Open(state, "acme/cache")
+	must(b, err)
+	b.Cleanup(func() { st.Close() })
+	a, err := NewACME(ACMEParams{
+		Names: []string{"decoy.test"}, CA: "https://ca.test/dir", Email: "ops@example.test",
+		Storage: st, Host: "127.0.0.1", Port: 8443, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	must(b, err)
+	b.Cleanup(a.Stop)
+	return a
+}
+
+// BenchmarkGetCertificateRefused measures a handshake that the name gate refuses.
+func BenchmarkGetCertificateRefused(b *testing.B) {
+	a := newBenchACME(b)
+	hello := &tls.ClientHelloInfo{ServerName: "other.test"}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := a.GetCertificate(hello); err == nil {
+			b.Fatal("the gate accepted the name")
+		}
+	}
+}
+
+// BenchmarkGetCertificateAccepted measures a handshake for a configured name
+// with a cached certificate.
+func BenchmarkGetCertificateAccepted(b *testing.B) {
+	a := newBenchACME(b)
+	seedCert(b, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	b.Cleanup(cancel)
+	must(b, a.Start(ctx))
+	c, s := net.Pipe()
+	b.Cleanup(func() { c.Close(); s.Close() })
+	hello := &tls.ClientHelloInfo{ServerName: "decoy.test", Conn: s}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := a.GetCertificate(hello); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 // issuerProxyRefuses reports whether the proxy function of iss refuses a request

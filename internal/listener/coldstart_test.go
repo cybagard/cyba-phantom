@@ -25,7 +25,7 @@ import (
 
 // seedCert stores a certificate for name in the storage of a, at the keys that
 // certmagic reads for the issuer of a. It returns the DER bytes of the leaf.
-func seedCert(t *testing.T, a *ACME, name string) []byte {
+func seedCert(t testing.TB, a *ACME, name string) []byte {
 	t.Helper()
 	now := time.Now()
 	return seedCertFor(t, a, name, now.Add(-time.Hour), now.Add(90*24*time.Hour), nil)
@@ -33,10 +33,10 @@ func seedCert(t *testing.T, a *ACME, name string) []byte {
 
 // seedCertFor is seedCert with the validity period and the OCSP server URLs of
 // the leaf.
-func seedCertFor(t *testing.T, a *ACME, name string, notBefore, notAfter time.Time, ocspServer []string) []byte {
+func seedCertFor(t testing.TB, a *ACME, name string, notBefore, notAfter time.Time, ocspServer []string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	mustNil(t, err)
+	must(t, err)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: name},
@@ -52,18 +52,18 @@ func seedCertFor(t *testing.T, a *ACME, name string, notBefore, notAfter time.Ti
 		tmpl.IssuingCertificateURL = []string{"http://issuer.other.test/ca.der"}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	mustNil(t, err)
+	must(t, err)
 	keyDER, err := x509.MarshalECPrivateKey(key)
-	mustNil(t, err)
+	must(t, err)
 	meta, err := json.Marshal(certmagic.CertificateResource{SANs: []string{name}})
-	mustNil(t, err)
+	must(t, err)
 	ik := a.cfg.Issuers[0].(*certmagic.ACMEIssuer).IssuerKey()
 	for k, v := range map[string][]byte{
 		certmagic.StorageKeys.SiteCert(ik, name):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		certmagic.StorageKeys.SitePrivateKey(ik, name): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
 		certmagic.StorageKeys.SiteMeta(ik, name):       meta,
 	} {
-		mustNil(t, a.cfg.Storage.Store(context.Background(), k, v))
+		must(t, a.cfg.Storage.Store(context.Background(), k, v))
 	}
 	return der
 }
