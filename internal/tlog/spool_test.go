@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -333,8 +334,8 @@ func TestTS13_OpenErrorIsNotABadNote(t *testing.T) {
 	}
 	path := filepath.Join(e.dir, e.noteFile(2))
 	calls := 0
-	afterLstat = func() { // the second read is the read of note 2
-		if calls++; calls == 2 {
+	afterLstat = func() { // the reads are note 1, the cursor, and note 2
+		if calls++; calls == 3 {
 			must(t, os.WriteFile(path+".swap", nil, 0o600))
 			must(t, os.Rename(path+".swap", path))
 		}
@@ -441,4 +442,163 @@ func TestTS13_SymlinkOut(t *testing.T) {
 
 func (e *spoolEnv) noteFile(size uint64) string {
 	return "checkpoints/" + strconv.FormatUint(size, 10) + ".note"
+}
+
+// gateSender is a Sender for tests with several goroutines. Send tells the test
+// that it is entered. It then waits for release (a nil release does not wait),
+// and records the size.
+type gateSender struct {
+	mu      sync.Mutex
+	sent    map[string][]uint64
+	entered chan uint64
+	release chan struct{}
+	onSend  func(target string, size uint64)
+}
+
+func newGate(block bool) *gateSender {
+	g := &gateSender{sent: map[string][]uint64{}, entered: make(chan uint64, 16)}
+	if block {
+		g.release = make(chan struct{})
+	}
+	return g
+}
+
+func (g *gateSender) Send(target string, size uint64, _ []byte) error {
+	if g.onSend != nil {
+		g.onSend(target, size)
+	}
+	g.entered <- size
+	if g.release != nil {
+		<-g.release
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sent[target] = append(g.sent[target], size)
+	return nil
+}
+
+func (g *gateSender) got(target string) []uint64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.sent[target])
+}
+
+func (g *gateSender) waitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send was not entered")
+	}
+}
+
+// publishAsync runs Publish for target 0 in a goroutine and returns its result.
+func (e *spoolEnv) publishAsync(send Sender) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- e.Publish(0, send) }()
+	return done
+}
+
+// T-S-13: Add returns while a Publish waits in Send.
+func TestTS13AddDoesNotWaitForSend(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	msg2, err := SignCheckpoint(e.signer, 2, testRoot())
+	must(t, err)
+	g := newGate(true)
+	done := e.publishAsync(g)
+	g.waitEntered(t)
+	added := make(chan error, 1)
+	go func() { added <- e.Add(2, msg2) }()
+	select {
+	case err := <-added:
+		must(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Add waited for Send")
+	}
+	close(g.release)
+	must(t, <-done)
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2}) {
+		t.Fatalf("sent = %v", got)
+	}
+}
+
+// T-S-13: a failed Send leaves the cursor, and the next Publish starts with the
+// same size.
+func TestTS13FailedSendKeepsCursor(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 3)
+	f := newFake()
+	must(t, e.Publish(0, f))
+	e.add(t, 4)
+	f.failAt[spoolTargets[0]] = 4
+	if err := e.Publish(0, f); err == nil {
+		t.Fatal("Publish hid the error of the sender")
+	}
+	if b, err := os.ReadFile(filepath.Join(e.dir, e.cursorName(0))); err != nil || string(b) != "3" {
+		t.Fatalf("cursor = %q, err %v, want 3", b, err)
+	}
+	delete(f.failAt, spoolTargets[0])
+	must(t, e.Publish(0, f))
+	if got := f.got[spoolTargets[0]]; !slices.Equal(got, []uint64{3, 4}) {
+		t.Fatalf("sent = %v", got)
+	}
+}
+
+// T-S-13: a second Publish for one target returns at once while the first one
+// sends. No size goes out two times, also not after the cursor moved.
+func TestTS13SecondPublishSendsNothing(t *testing.T) {
+	e := newSpool(t)
+	for _, size := range []uint64{1, 2, 3} {
+		e.add(t, size)
+	}
+	g := newGate(true)
+	done := e.publishAsync(g)
+	g.waitEntered(t)
+	if err := e.Publish(0, g); err == nil {
+		t.Fatal("the second Publish did not return an error")
+	}
+	close(g.release)
+	must(t, <-done)
+	must(t, e.Publish(0, g))
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2, 3}) {
+		t.Fatalf("sent = %v, want each size one time", got)
+	}
+	if got := len(g.entered); got != 2 { // sizes 2 and 3; the test read size 1
+		t.Fatalf("Send was entered %d more times, want 2", got)
+	}
+}
+
+// T-S-13: if the cursor changes during Send, Publish does not write it.
+func TestTS13CursorChangeIsAnError(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	g := newGate(false)
+	g.onSend = func(string, uint64) {
+		must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte("9"), 0o600))
+	}
+	err := e.Publish(0, g)
+	if err == nil || !strings.Contains(err.Error(), e.cursorName(0)) {
+		t.Fatalf("error = %v, want one that names the cursor file", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(e.dir, e.cursorName(0))); err != nil || string(b) != "9" {
+		t.Fatalf("cursor = %q, err %v, want the value of the sender", b, err)
+	}
+}
+
+// T-S-13: the sizes for one target increase, also when Add adds notes during Send.
+func TestTS13SizesIncreaseWhileAddRuns(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	g := newGate(false)
+	g.onSend = func(_ string, size uint64) {
+		if size == 1 {
+			e.add(t, 3)
+			e.add(t, 2)
+		}
+	}
+	must(t, e.Publish(0, g))
+	if got := g.got(spoolTargets[0]); !slices.Equal(got, []uint64{1, 2, 3}) {
+		t.Fatalf("sent = %v", got)
+	}
 }
