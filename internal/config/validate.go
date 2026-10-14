@@ -575,6 +575,7 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 			return "the path must not be in or above " + name
 		}
 	}
+	// checkCacheDir already refuses the only path above these (the state directory), so no test reaches inDir(s, p).
 	for _, d := range []string{"keys", "checkpoints"} {
 		if s := filepath.Join(l.stateRoot, d); inDir(p, s) || inDir(s, p) {
 			return "the path must not be in or above the " + d + " directory"

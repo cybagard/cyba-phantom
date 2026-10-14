@@ -65,8 +65,8 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 // base has 4 lines. Thus, a section line that a test adds after base is on line 5, and its first key is on line 6.
-// The acme section has two lines and the tlog section has one line. Its publisher names the variable tokenVar.
-// tlogOrigin has an empty line after the tlog section. base has not: acmeNames takes the line.
+// The acme section has three lines (with acmeNames). The tlog section has one line, and its publisher names
+// the variable tokenVar. tlogOrigin adds an empty line after the tlog section; base does not.
 const (
 	tokenVar   = "CKPT_TOKEN"
 	tlogLine   = "tlog: {origin: test/origin, publish: [{type: https-put, url: \"https://ckpt.example/put\", token_env: " + tokenVar + "}]}\n"
