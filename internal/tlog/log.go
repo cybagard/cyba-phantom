@@ -120,10 +120,11 @@ func (l *Log) Append(h EventHash) (int64, error) {
 // If the rename of the head file works and a later step of the head write fails
 // (the open or the fsync of a directory), the tree head on disk can cover the
 // whole batch. AppendBatch then returns an error that matches ErrHeadOnDisk
-// with errors.Is. No other error of AppendBatch matches it, and the error of a
-// later call on the stopped log does not match it. The error keeps its type and
-// its text: errors.As to *Error works for each error. The caller must close the
-// log and open it again with OpenLog. OpenLog loads the tree head on disk.
+// with errors.Is. Each other error of AppendBatch does not match it. The error
+// of a later call on the stopped log does not match it. The marked error has
+// the text of the Error. errors.As to *Error works for each error. A type
+// assertion to *Error does not match the marked error. The caller must close
+// the log and open it again with OpenLog. OpenLog loads the tree head on disk.
 func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -204,11 +205,7 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 // stop stops the log with err and returns err. The caller holds the lock. The
 // stored error has no ErrHeadOnDisk mark, because a later call reaches no head.
 func (l *Log) stop(err error) error {
-	l.err = err
-	var h *headError
-	if errors.As(err, &h) {
-		l.err = h.err
-	}
+	l.err = unmark(err)
 	return err
 }
 

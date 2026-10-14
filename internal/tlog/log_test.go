@@ -769,8 +769,9 @@ func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
 	if s2, r2 := l.Head(); s2 != size || r2 != root {
 		t.Fatalf("head in memory changed to %d, %x", s2, r2)
 	}
-	if s2, _ := diskHead(t, dir); s2 != 300 {
-		t.Fatalf("head on disk has size %d, want 300", s2)
+	wantRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
+	if s2, r2 := diskHead(t, dir); s2 != 300 || r2 != wantRoot {
+		t.Fatalf("head on disk is %d, %x, want 300, %x", s2, r2, wantRoot)
 	}
 }
 
