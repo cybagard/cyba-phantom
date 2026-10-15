@@ -309,8 +309,8 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 	r.serve(t)
 	var conns []*tls.Conn
-	// Each connection serves one request, so the open connections finish the
-	// handshake and wait: they keep their slots until they send a request.
+	// The open connections finish the handshake and wait: they keep their slots
+	// until the client closes them.
 	for range nConns {
 		conns = append(conns, r.dial(t))
 	}
@@ -329,12 +329,14 @@ func TestTS17ConnectionCap(t *testing.T) {
 	if calls.Load() != nConns {
 		t.Fatalf("capture ran %d times, want %d", calls.Load(), nConns)
 	}
-	// The others serve their one request after the connection over the cap.
-	// Each of them gives its slot back when the request ends.
+	// The others serve a request after the connection over the cap. The server
+	// keeps the connection open, so each client closes its connection to give
+	// the slot back.
 	for i, c := range conns {
 		if got := status(c, 0); got != 200 {
 			t.Fatalf("open connection %d: status %d after the connection over the cap", i, got)
 		}
+		_ = c.Close()
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -352,51 +354,132 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 }
 
-// T-S-17: no second request is served on a connection (keep-alive is off). The
-// first request and a second head of 8193 bytes or of 8192 bytes go out in one
-// write. The server can answer and close before that write ends. So a write
-// error is accepted. A first read that ends in a reset or an end of stream is
-// accepted too. The test still reads the connection. On at least one of the two
-// sizes the first response must be read, and it must be 200. No second
-// response is allowed, and the connection must end.
-func TestTS17PipelinedHeadNotServed(t *testing.T) {
-	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
-	r.serve(t)
-	const first = "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
-	checked := 0
-	for _, n := range []int{testHeaderBytes + 1, testHeaderBytes} {
-		c := r.dial(t)
-		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-		if _, err := io.WriteString(c, first+head(n)); err != nil &&
-			!errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) {
-			t.Fatalf("second head of %d bytes: write: %v", n, err)
+// pipelined sends a first request and a second head of n bytes. With split 0 it
+// is one write. With split p it sends the first request and the first p bytes
+// of the head, waits for the first response, and then sends the rest. It
+// returns the status of the second response (0: none, the connection ended) and
+// the bytes that the wrapper counted in the first period.
+func pipelined(t *testing.T, r *rig, l *periodLog, n, split int) (second int, used int64) {
+	t.Helper()
+	before, _ := l.lens()
+	c := r.dialWhole(t)
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	h := head(n)
+	if split == 0 {
+		split = len(h)
+	}
+	_, _ = io.WriteString(c, "GET / HTTP/1.1\r\nHost: a\r\n\r\n"+h[:split])
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("second head of %d bytes: first response: %v", n, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
+	}
+	_, _ = io.WriteString(c, h[split:])
+	want := before + 1
+	if resp2, err := http.ReadResponse(br, nil); err == nil {
+		second = resp2.StatusCode
+		_ = resp2.Body.Close()
+		if second == 200 {
+			want++ // the second request ends a period too
 		}
-		br := bufio.NewReader(c)
-		resp, err := http.ReadResponse(br, nil)
-		if err != nil {
-			if !connEnded(err) {
-				t.Fatalf("second head of %d bytes: first response: %v", n, err)
+	} else if !connEnded(err) {
+		t.Fatalf("second head of %d bytes: want a response or the end of the connection, got %v", n, err)
+	}
+	idle, _ := l.wait(t, want, 0)
+	return second, idle[before].used
+}
+
+// largestServed searches the largest second head from lo (served) to hi (not
+// served) that gets 200, with the given split. A served head must come after a
+// first period of 4096 bytes or less. It returns the head size and the bytes of
+// the first period for it.
+func largestServed(t *testing.T, r *rig, l *periodLog, lo, hi, split int) (int, int64) {
+	t.Helper()
+	for hi-lo > 1 {
+		mid := (lo + hi) / 2
+		if second, used := pipelined(t, r, l, mid, split); second == 200 {
+			if used > keepAliveBytes {
+				t.Fatalf("second head of %d bytes served after a first period of %d bytes", mid, used)
 			}
-			t.Logf("second head of %d bytes: the first response could not be read because the connection ended or was reset: %v", n, err)
-			continue
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
-		}
-		checked++
-		resp2, err := http.ReadResponse(br, nil)
-		if err == nil {
-			_ = resp2.Body.Close()
-			t.Fatalf("second head of %d bytes: second response, status %d", n, resp2.StatusCode)
-		}
-		if !connEnded(err) {
-			t.Fatalf("second head of %d bytes: want the end of the connection, got %v", n, err)
+			lo = mid
+		} else {
+			hi = mid
 		}
 	}
-	if checked == 0 {
-		t.Fatal("no size read the first response: the 200 was not checked")
+	_, used := pipelined(t, r, l, lo, split)
+	return lo, used
+}
+
+// T-S-18: pipelined second heads, in two forms. net/http does not count the
+// bytes in its buffer against its header limit.
+//
+// One write (first request and the whole second head). The first period holds
+// the whole second head. When it reads more than 4096 bytes, the wrapper closes
+// the connection after the first response and the second head is not served. A
+// second head is served only when the first period stays at 4096 bytes or less.
+// Measured with header_bytes 8192 and a TLS 1.3 client of the Go library: the
+// largest second head with status 200 is 2469 bytes, the first period read 4096
+// bytes, and a head one byte larger is not served. A second head of
+// header_bytes + 1 bytes gets no response (the connection closes).
+func TestTS18PipelinedHeadOneWrite(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	if second, used := pipelined(t, r, l, 5000, 0); second != 0 || used <= keepAliveBytes {
+		t.Fatalf("first period of %d bytes: second status %d, want no second response", used, second)
+	}
+	second, used := pipelined(t, r, l, testHeaderBytes+1, 0)
+	t.Logf("second head of header_bytes + 1 bytes: status %d, first period %d bytes", second, used)
+	if second != 0 && second != 431 {
+		t.Fatalf("second head of header_bytes + 1 bytes: status %d", second)
+	}
+	if second, _ := pipelined(t, r, l, 0, 0); second != 200 {
+		t.Fatalf("a short second head: status %d, want 200", second)
+	}
+	lo, used := largestServed(t, r, l, 0, testHeaderBytes+1, 0)
+	t.Logf("one write: largest second head with status 200: %d bytes; the first period read %d bytes", lo, used)
+	if lo > testHeaderBytes+keepAliveBytes {
+		t.Fatalf("a pipelined head of %d bytes was served, over header_bytes + 4096", lo)
+	}
+}
+
+// T-S-18: split write. The first write is the first request and the first
+// splitBytes bytes of the second head, so the first period stays at 4096 bytes
+// or less and the connection stays open after the first response. The client
+// then sends the rest of the head. The bytes that net/http holds from the first
+// period do not count against its header limit, so the second head can be
+// larger than header_bytes. The test asserts only a bound: a head of
+// header_bytes + 4097 bytes or more is not served, and a served head is not
+// larger than header_bytes + 4096.
+//
+// Measured with header_bytes 8192, splitBytes 2000 and a TLS 1.3 client of the
+// Go library: the largest second head with status 200 is 10192 bytes (header_bytes
+// + 2000, the same as splitBytes). The first period read 3627 bytes. A head of
+// header_bytes + 4097 bytes (12289) gets no response (the connection closes).
+func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
+	const splitBytes = 2000
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	over := testHeaderBytes + keepAliveBytes + 1
+	second, used := pipelined(t, r, l, over, splitBytes)
+	t.Logf("split write: second head of %d bytes: status %d, first period %d bytes", over, second, used)
+	if second == 200 || used > keepAliveBytes {
+		t.Fatalf("second head of %d bytes: status %d, first period %d bytes", over, second, used)
+	}
+	if second, _ := pipelined(t, r, l, splitBytes, splitBytes); second != 200 {
+		t.Fatalf("a second head of %d bytes: status %d, want 200", splitBytes, second)
+	}
+	lo, used := largestServed(t, r, l, splitBytes, over, splitBytes)
+	t.Logf("split write: largest second head with status 200: %d bytes (header_bytes + %d); split at %d bytes; the first period read %d bytes", lo, lo-testHeaderBytes, splitBytes, used)
+	if lo > testHeaderBytes+keepAliveBytes {
+		t.Fatalf("a pipelined head of %d bytes was served, over header_bytes + 4096", lo)
 	}
 }
 
@@ -424,8 +507,8 @@ func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
 	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
 		t.Fatalf("second listener over the cap: handshake error %v; want an end of stream or a reset", err)
 	}
-	// The connection on the first listener serves its request and gives the
-	// slot back.
+	// The connection on the first listener serves its request and stays open.
+	// The client closes it to give the slot back.
 	if got := status(c1, 0); got != 200 {
 		t.Fatalf("first listener: status %d", got)
 	}
@@ -453,7 +536,7 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := newSourceCap(2)
-	l := newLimitListener(ln, make(chan struct{}, 2), src)
+	l := newLimitListener(ln, make(chan struct{}, 2), src, newReadLimit(testHeaderBytes))
 	defer l.Close()
 	var served []net.Conn
 	for range 2 {

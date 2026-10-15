@@ -63,6 +63,7 @@ type Server struct {
 	tls      *tls.Config
 	sem      chan struct{} // the connection slots, shared by all Serve calls
 	src      *sourceCap    // the connection counts for each source, shared by all Serve calls
+	rd       *readLimit    // the read budgets and the read pool, shared by all Serve calls
 	errLines countWriter
 }
 
@@ -81,7 +82,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	if cfg.HeaderBytes < minHeaderBytes {
 		return nil, fmt.Errorf("listener: header bytes must be at least %d", minHeaderBytes)
 	}
-	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns)}
+	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes)}
 	s.tls.NextProtos = []string{"http/1.1"}
 	s.tls.GetConfigForClient = captureHello
 	var p http.Protocols
@@ -100,11 +101,23 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 			return withConnState(ctx)
 		},
 	}
-	// Each connection serves one request. A request head that a client sends
-	// after the first request on the same connection is not read, so the header
-	// cap holds for each head that is served.
-	s.srv.SetKeepAlivesEnabled(false)
+	s.srv.ConnState = periodHook
 	return s, nil
+}
+
+// periodHook is the ConnState hook. It starts the next read period of a
+// connection that becomes idle. A connection that read more than keepAliveBytes
+// in its period closes, so it gets no keep-alive. It must not wait on the
+// network. A connection of another type is left as it is.
+func periodHook(c net.Conn, st http.ConnState) {
+	if st != http.StateIdle {
+		return
+	}
+	if tc, ok := c.(*tls.Conn); ok {
+		if lc, ok := tc.NetConn().(*limitConn); ok {
+			lc.nextPeriod()
+		}
+	}
 }
 
 // Serve accepts connections from the raw TCP listener ln until Close. The
@@ -115,7 +128,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 // of ln must have a *net.TCPAddr peer address: all connections with another
 // address type share one source count.
 func (s *Server) Serve(ln net.Listener) error {
-	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src), s.tls))
+	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src, s.rd), s.tls))
 }
 
 // Close closes the listener and all connections.
