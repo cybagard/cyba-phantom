@@ -354,16 +354,22 @@ func TestTS17ConnectionCap(t *testing.T) {
 	}
 }
 
-// pipelined sends a first request and a second head of n bytes in one write. It
+// pipelined sends a first request and a second head of n bytes. With split 0 it
+// is one write. With split p it sends the first request and the first p bytes
+// of the head, waits for the first response, and then sends the rest. It
 // returns the status of the second response (0: none, the connection ended) and
 // the bytes that the wrapper counted in the first period.
-func pipelined(t *testing.T, r *rig, l *periodLog, n int) (second int, used int64) {
+func pipelined(t *testing.T, r *rig, l *periodLog, n, split int) (second int, used int64) {
 	t.Helper()
 	before, _ := l.lens()
 	c := r.dialWhole(t)
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	_, _ = io.WriteString(c, "GET / HTTP/1.1\r\nHost: a\r\n\r\n"+head(n))
+	h := head(n)
+	if split == 0 {
+		split = len(h)
+	}
+	_, _ = io.WriteString(c, "GET / HTTP/1.1\r\nHost: a\r\n\r\n"+h[:split])
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
@@ -374,11 +380,14 @@ func pipelined(t *testing.T, r *rig, l *periodLog, n int) (second int, used int6
 	if resp.StatusCode != 200 {
 		t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
 	}
+	_, _ = io.WriteString(c, h[split:])
 	want := before + 1
 	if resp2, err := http.ReadResponse(br, nil); err == nil {
 		second = resp2.StatusCode
 		_ = resp2.Body.Close()
-		want++ // the second request ends a period too
+		if second == 200 {
+			want++ // the second request ends a period too
+		}
 	} else if !connEnded(err) {
 		t.Fatalf("second head of %d bytes: want a response or the end of the connection, got %v", n, err)
 	}
@@ -386,39 +395,15 @@ func pipelined(t *testing.T, r *rig, l *periodLog, n int) (second int, used int6
 	return second, idle[before].used
 }
 
-// T-S-18: the keep-alive limit bounds a pipelined head. net/http does not count
-// the bytes in its buffer against its header limit, so a second head in the
-// same write as the first request can be larger than header_bytes. The wrapper
-// closes the connection after the first response when the first period read
-// more than 4096 bytes, and then the second head is not served. A served
-// pipelined head is one that fits in the first 4096 bytes together with the
-// handshake and the first request.
-//
-// Measured with header_bytes 8192 and a TLS 1.3 client of the Go library: the
-// largest second head with status 200 is 2469 bytes. The first period read
-// 4096 bytes, and a head one byte larger is not served. A second head of
-// header_bytes + 1 bytes gets no response: the connection closes.
-func TestTS18PipelinedHeadBound(t *testing.T) {
-	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
-	l := r.watchPeriods()
-	r.serve(t)
-	if second, used := pipelined(t, r, l, 5000); second != 0 || used <= keepAliveBytes {
-		t.Fatalf("first period of %d bytes: second status %d, want no second response", used, second)
-	}
-	second, used := pipelined(t, r, l, testHeaderBytes+1)
-	t.Logf("second head of header_bytes + 1 bytes: status %d, first period %d bytes", second, used)
-	if second != 0 && second != 431 {
-		t.Fatalf("second head of header_bytes + 1 bytes: status %d", second)
-	}
-	// Binary search: lo gets 200 as second head, hi does not.
-	lo, hi := 0, testHeaderBytes+1
-	if second, _ := pipelined(t, r, l, lo); second != 200 {
-		t.Fatalf("a short second head: status %d, want 200", second)
-	}
+// largestServed searches the largest second head from lo (served) to hi (not
+// served) that gets 200, with the given split. A served head must come after a
+// first period of 4096 bytes or less. It returns the head size and the bytes of
+// the first period for it.
+func largestServed(t *testing.T, r *rig, l *periodLog, lo, hi, split int) (int, int64) {
+	t.Helper()
 	for hi-lo > 1 {
 		mid := (lo + hi) / 2
-		second, used := pipelined(t, r, l, mid)
-		if second == 200 {
+		if second, used := pipelined(t, r, l, mid, split); second == 200 {
 			if used > keepAliveBytes {
 				t.Fatalf("second head of %d bytes served after a first period of %d bytes", mid, used)
 			}
@@ -427,8 +412,72 @@ func TestTS18PipelinedHeadBound(t *testing.T) {
 			hi = mid
 		}
 	}
-	_, used = pipelined(t, r, l, lo)
-	t.Logf("largest second head with status 200: %d bytes; the first period read %d bytes", lo, used)
+	_, used := pipelined(t, r, l, lo, split)
+	return lo, used
+}
+
+// T-S-18: pipelined second heads, in two forms. net/http does not count the
+// bytes in its buffer against its header limit.
+//
+// One write (first request and the whole second head). The first period holds
+// the whole second head. When it reads more than 4096 bytes, the wrapper closes
+// the connection after the first response and the second head is not served. A
+// second head is served only when the first period stays at 4096 bytes or less.
+// Measured with header_bytes 8192 and a TLS 1.3 client of the Go library: the
+// largest second head with status 200 is 2469 bytes, the first period read 4096
+// bytes, and a head one byte larger is not served. A second head of
+// header_bytes + 1 bytes gets no response (the connection closes).
+func TestTS18PipelinedHeadOneWrite(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	if second, used := pipelined(t, r, l, 5000, 0); second != 0 || used <= keepAliveBytes {
+		t.Fatalf("first period of %d bytes: second status %d, want no second response", used, second)
+	}
+	second, used := pipelined(t, r, l, testHeaderBytes+1, 0)
+	t.Logf("second head of header_bytes + 1 bytes: status %d, first period %d bytes", second, used)
+	if second != 0 && second != 431 {
+		t.Fatalf("second head of header_bytes + 1 bytes: status %d", second)
+	}
+	if second, _ := pipelined(t, r, l, 0, 0); second != 200 {
+		t.Fatalf("a short second head: status %d, want 200", second)
+	}
+	lo, used := largestServed(t, r, l, 0, testHeaderBytes+1, 0)
+	t.Logf("one write: largest second head with status 200: %d bytes; the first period read %d bytes", lo, used)
+	if lo > testHeaderBytes+keepAliveBytes {
+		t.Fatalf("a pipelined head of %d bytes was served, over header_bytes + 4096", lo)
+	}
+}
+
+// T-S-18: split write. The first write is the first request and the first
+// splitBytes bytes of the second head, so the first period stays at 4096 bytes
+// or less and the connection stays open after the first response. The client
+// then sends the rest of the head. The bytes that net/http holds from the first
+// period do not count against its header limit, so the second head can be
+// larger than header_bytes. The test asserts only a bound: a head of
+// header_bytes + 4097 bytes or more is not served, and a served head is not
+// larger than header_bytes + 4096.
+//
+// Measured with header_bytes 8192, splitBytes 2000 and a TLS 1.3 client of the
+// Go library: the largest second head with status 200 is 10192 bytes (header_bytes
+// + 2000, the same as splitBytes). The first period read 3627 bytes. A head of
+// header_bytes + 4097 bytes (12289) gets no response (the connection closes).
+func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
+	const splitBytes = 2000
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	over := testHeaderBytes + keepAliveBytes + 1
+	second, used := pipelined(t, r, l, over, splitBytes)
+	t.Logf("split write: second head of %d bytes: status %d, first period %d bytes", over, second, used)
+	if second == 200 || used > keepAliveBytes {
+		t.Fatalf("second head of %d bytes: status %d, first period %d bytes", over, second, used)
+	}
+	if second, _ := pipelined(t, r, l, splitBytes, splitBytes); second != 200 {
+		t.Fatalf("a second head of %d bytes: status %d, want 200", splitBytes, second)
+	}
+	lo, used := largestServed(t, r, l, splitBytes, over, splitBytes)
+	t.Logf("split write: largest second head with status 200: %d bytes (header_bytes + %d); split at %d bytes; the first period read %d bytes", lo, lo-testHeaderBytes, splitBytes, used)
 	if lo > testHeaderBytes+keepAliveBytes {
 		t.Fatalf("a pipelined head of %d bytes was served, over header_bytes + 4096", lo)
 	}
