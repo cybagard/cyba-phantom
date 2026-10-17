@@ -160,7 +160,7 @@ func splitTrailer(t string) (key, value string) {
 // Signed-off-by sign-off.
 func hasSignoff(trailers []string) bool {
 	for _, t := range trailers {
-		if k, v := splitTrailer(t); sameAddr(k, "Signed-off-by") && signoffRE.MatchString(v) {
+		if k, v := splitTrailer(t); asciiEqualFold(k, "Signed-off-by") && signoffRE.MatchString(v) {
 			return true
 		}
 	}
@@ -169,21 +169,21 @@ func hasSignoff(trailers []string) bool {
 
 // identityOK applies the identity rule to one commit.
 func identityOK(author, committer string, trailers []string) bool {
-	if !sameAddr(author, maintainerAddr) ||
-		!(sameAddr(committer, maintainerAddr) || sameAddr(committer, githubAddr)) {
+	if !asciiEqualFold(author, maintainerAddr) ||
+		!(asciiEqualFold(committer, maintainerAddr) || asciiEqualFold(committer, githubAddr)) {
 		return false
 	}
 	for _, t := range trailers {
 		key, value := splitTrailer(t)
 		addrs := addrRE.FindAllString(value, -1)
-		if len(addrs) == 0 && sameAddr(key, "Signed-off-by") {
+		if len(addrs) == 0 && asciiEqualFold(key, "Signed-off-by") {
 			return false
 		}
 		for _, a := range addrs {
-			if sameAddr(a, maintainerAddr) {
+			if asciiEqualFold(a, maintainerAddr) {
 				continue
 			}
-			if sameAddr(a, claudeAddr) && len(addrs) == 1 && sameAddr(key, "Co-authored-by") && claudeName(value) {
+			if asciiEqualFold(a, claudeAddr) && len(addrs) == 1 && asciiEqualFold(key, "Co-authored-by") && claudeName(value) {
 				continue
 			}
 			return false
@@ -192,10 +192,10 @@ func identityOK(author, committer string, trailers []string) bool {
 	return true
 }
 
-// sameAddr reports whether two addresses are equal without case. Only ASCII
-// letters fold. An address with a byte of 0x80 or more never matches.
-// Trailer keys follow the same rule.
-func sameAddr(a, b string) bool {
+// asciiEqualFold reports whether two strings are equal without case. It
+// compares addresses and trailer keys. Only ASCII letters fold. A string with
+// a byte of 0x80 or more never matches.
+func asciiEqualFold(a, b string) bool {
 	for _, s := range []string{a, b} {
 		for i := 0; i < len(s); i++ {
 			if s[i] >= 0x80 {

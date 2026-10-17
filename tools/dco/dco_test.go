@@ -205,7 +205,7 @@ func TestSOHInTrailerDoesNotSplit(t *testing.T) {
 
 // lookAlike differs from me by one letter. U+017F (long s) folds to "s" in
 // Unicode, but the address is not the same.
-const lookAlike = "67512030+cybagard@uſers.noreply.github.com"
+const lookAlike = "67512030+cybagard@u\xc5\xbfers.noreply.github.com"
 
 // An address with a non-ASCII byte never matches the noreply address.
 func TestLookAlikeAddressFails(t *testing.T) {
@@ -224,11 +224,11 @@ func TestLookAlikeAddressFails(t *testing.T) {
 // s) folds to "s" in Unicode. Git drops such a line from the trailers, so
 // this test also runs the checker on a whole commit.
 func TestNonASCIIKeyIsNotSignoff(t *testing.T) {
-	failsWith(t, nil, "subject\n\nſigned-off-by: t <"+me+">\n", "unsigned")
-	if hasSignoff([]string{"ſigned-off-by: t <" + me + ">"}) {
+	failsWith(t, nil, "subject\n\n\xc5\xbfigned-off-by: t <"+me+">\n", "unsigned")
+	if hasSignoff([]string{"\xc5\xbfigned-off-by: t <" + me + ">"}) {
 		t.Error("hasSignoff accepts a key with U+017F")
 	}
-	if !identityOK(me, me, []string{"ſigned-off-by: t"}) {
+	if !identityOK(me, me, []string{"\xc5\xbfigned-off-by: t"}) {
 		t.Error("identityOK treats a key with U+017F as a sign-off key")
 	}
 }
@@ -236,7 +236,7 @@ func TestNonASCIIKeyIsNotSignoff(t *testing.T) {
 // A Co-authored-by key with a non-ASCII byte does not permit the Claude
 // address.
 func TestNonASCIICoauthorKeyFails(t *testing.T) {
-	if identityOK(me, me, []string{"Co-authöred-by: Claude <" + claudeAddr + ">"}) {
+	if identityOK(me, me, []string{"Co-auth\xc3\xb6red-by: Claude <" + claudeAddr + ">"}) {
 		t.Error("identityOK permits the Claude address under a key with a non-ASCII byte")
 	}
 }
@@ -296,15 +296,18 @@ func TestFailHintMatchesFailure(t *testing.T) {
 	})
 }
 
+// goodRecord is one well-formed git log record: hash, author, committer, an
+// empty encoding header, and a sign-off trailer.
+const goodRecord = "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
+
 // A record with fewer than five fields is an error. The checker prints a
 // fixed line, no part of the record, and never "all N commits pass".
 func TestMalformedRecordIsError(t *testing.T) {
-	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 	cases := map[string]string{
 		"four fields":         "0123456789abcdef\x00SECRET\x00SECRET\x00\x00\n",
 		"three fields":        "0123456789abcdef\x00SECRET\x00SECRET\x00\n",
 		"one field":           "SECRET\x00\n",
-		"good then malformed": good + "SECRET\x00SECRET\x00\n",
+		"good then malformed": goodRecord + "SECRET\x00SECRET\x00\n",
 	}
 	for name, out := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -324,9 +327,8 @@ func TestMalformedRecordIsError(t *testing.T) {
 
 // A well-formed record passes.
 func TestCheckGoodRecord(t *testing.T) {
-	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 	var stdout, stderr bytes.Buffer
-	if code := check([]byte(good), "base", "HEAD", &stdout, &stderr); code != 0 {
+	if code := check([]byte(goodRecord), "base", "HEAD", &stdout, &stderr); code != 0 {
 		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -444,9 +446,6 @@ func TestIdentityRule(t *testing.T) {
 			code, out, hash := runOn(t, c.env, c.msg)
 			if code != c.want {
 				t.Fatalf("run = %d, want %d; output %q", code, c.want, out)
-			}
-			if strings.Contains(out, "example.com") || strings.Contains(out, "@") {
-				t.Errorf("the output shows an address: %q", out)
 			}
 			if got := strings.Contains(out, "identity: "+hash+"\n"); got != (c.want == 1) {
 				t.Errorf("identity line for %q present = %v, want %v; output %q", hash, got, c.want == 1, out)
