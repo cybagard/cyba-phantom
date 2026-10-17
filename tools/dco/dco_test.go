@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -58,11 +57,12 @@ func commit(t *testing.T, dir, msg string, sign bool) {
 	commitWith(t, dir, nil, args...)
 }
 
-// runDCO runs the checker and returns the exit code and standard output.
-func runDCO(args []string, dir string) (int, string) {
-	var out bytes.Buffer
-	code := run(args, dir, &out, io.Discard)
-	return code, out.String()
+// runDCO runs the checker and returns the exit code, the standard output
+// and the standard error.
+func runDCO(args []string, dir string) (int, string, string) {
+	var out, errOut bytes.Buffer
+	code := run(args, dir, &out, &errOut)
+	return code, out.String(), errOut.String()
 }
 
 func TestAllSigned(t *testing.T) {
@@ -71,7 +71,7 @@ func TestAllSigned(t *testing.T) {
 	git(t, dir, "branch", "base")
 	commit(t, dir, "signed one", true)
 	commit(t, dir, "signed two", true)
-	if code, _ := runDCO([]string{"base", "HEAD"}, dir); code != 0 {
+	if code, _, _ := runDCO([]string{"base", "HEAD"}, dir); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
 	}
 }
@@ -82,7 +82,7 @@ func TestUnsignedFails(t *testing.T) {
 	git(t, dir, "branch", "base")
 	commit(t, dir, "signed", true)
 	commit(t, dir, "unsigned", false)
-	code, out := runDCO([]string{"base", "HEAD"}, dir)
+	code, out, _ := runDCO([]string{"base", "HEAD"}, dir)
 	if code != 1 || !strings.Contains(out, "unsigned: ") {
 		t.Fatalf("run = %d, want 1 with an unsigned line; output %q", code, out)
 	}
@@ -94,7 +94,7 @@ func TestManualTrailerCounts(t *testing.T) {
 	commit(t, dir, "base", true)
 	git(t, dir, "branch", "base")
 	commitWith(t, dir, nil, "-m", "manual", "-m", "Signed-off-by: t <"+me+">")
-	if code, _ := runDCO([]string{"base", "HEAD"}, dir); code != 0 {
+	if code, _, _ := runDCO([]string{"base", "HEAD"}, dir); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
 	}
 }
@@ -105,7 +105,7 @@ func TestSignoffWithoutEmailFails(t *testing.T) {
 	commit(t, dir, "base", true)
 	git(t, dir, "branch", "base")
 	commitWith(t, dir, nil, "-m", "nope", "-m", "Signed-off-by: t")
-	if code, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
+	if code, _, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 }
@@ -113,7 +113,7 @@ func TestSignoffWithoutEmailFails(t *testing.T) {
 func TestEmptyRangePasses(t *testing.T) {
 	dir := newRepo(t)
 	commit(t, dir, "only", true)
-	if code, _ := runDCO([]string{"HEAD", "HEAD"}, dir); code != 0 {
+	if code, _, _ := runDCO([]string{"HEAD", "HEAD"}, dir); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
 	}
 }
@@ -121,13 +121,13 @@ func TestEmptyRangePasses(t *testing.T) {
 func TestBadRefIsUsageError(t *testing.T) {
 	dir := newRepo(t)
 	commit(t, dir, "only", true)
-	if code, _ := runDCO([]string{"no-such-ref", "HEAD"}, dir); code != 2 {
+	if code, _, _ := runDCO([]string{"no-such-ref", "HEAD"}, dir); code != 2 {
 		t.Fatalf("run = %d, want 2", code)
 	}
 }
 
 func TestUsageError(t *testing.T) {
-	if code, _ := runDCO([]string{"only-one-arg"}, "."); code != 2 {
+	if code, _, _ := runDCO([]string{"only-one-arg"}, "."); code != 2 {
 		t.Fatalf("run = %d, want 2", code)
 	}
 }
@@ -141,7 +141,7 @@ func TestSignoffOutsideTrailerFails(t *testing.T) {
 	commitWith(t, dir, nil, "-m", "subject",
 		"-m", "Signed-off-by: t <"+me+">",
 		"-m", "A closing paragraph after the sign-off.")
-	if code, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
+	if code, _, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 }
@@ -152,21 +152,27 @@ func TestSignoffAsSubjectFails(t *testing.T) {
 	commit(t, dir, "base", true)
 	git(t, dir, "branch", "base")
 	commitWith(t, dir, nil, "--cleanup=verbatim", "-m", "Signed-off-by: t <"+me+">")
-	if code, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
+	if code, _, _ := runDCO([]string{"base", "HEAD"}, dir); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 }
 
 // runOn commits msg verbatim (by the author and the committer set in env)
 // on top of a signed base, and returns the checker's exit code, its output
-// and the short hash of the new commit.
+// and the short hash of the new commit. It fails the test if the standard
+// output or the standard error holds an "@".
 func runOn(t *testing.T, env []string, msg string) (int, string, string) {
 	t.Helper()
 	dir := newRepo(t)
 	commit(t, dir, "base", true)
 	git(t, dir, "branch", "base")
 	commitWith(t, dir, env, "--cleanup=verbatim", "-m", msg)
-	code, out := runDCO([]string{"base", "HEAD"}, dir)
+	code, out, errOut := runDCO([]string{"base", "HEAD"}, dir)
+	for _, s := range []string{out, errOut} {
+		if strings.Contains(s, "@") {
+			t.Errorf("the output shows an address: %q", s)
+		}
+	}
 	return code, out, strings.TrimSpace(git(t, dir, "rev-parse", "--short=12", "HEAD"))
 }
 
