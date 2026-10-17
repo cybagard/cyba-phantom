@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -78,25 +79,47 @@ func mixKind(i int) string {
 	return "near_limit"
 }
 
+// tp09Get sends a request with a head of n bytes and checks for the status 200.
+func tp09Get(c net.Conn, n int) error {
+	_ = c.SetDeadline(time.Now().Add(60 * time.Second))
+	if _, err := io.WriteString(c, head(n)); err != nil {
+		return err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return c.SetDeadline(time.Time{})
+}
+
 // tp09Dial runs the client side of one connection of a form on raw. A form
 // over a limit ignores the errors of the handshake: the server closes it.
+//
+// The ClientHello of manyProtos(245) is 64 244 bytes in 4 records, one Write
+// for each record, so the cut of hello_pending counts one record header for each
+// Write. It is more than the budget of the first period, 16 384 + 16 384 +
+// 1 024 = 33 792 bytes: in hello_open and in hello_pending the server reads
+// exactly 33 792 bytes and closes. The same holds for the Certificate-type
+// message (certBytes, in the forms cert_tls12 and cert_tls13).
 func tp09Dial(t *testing.T, form string, raw net.Conn) error {
 	cfg := &tls.Config{InsecureSkipVerify: true, ServerName: testName, NextProtos: []string{"http/1.1"}} // the child has no certificate pool
-	_ = raw.SetReadDeadline(time.Now().Add(20 * time.Second))
+	_ = raw.SetReadDeadline(time.Now().Add(60 * time.Second))
 	switch form {
 	case "normal", "near_limit":
 		tc := tls.Client(raw, cfg)
 		if err := tc.Handshake(); err != nil {
 			return err
 		}
-		head := 0
+		n := 0
 		if form == "near_limit" {
-			head = nearLimitHead
+			n = nearLimitHead
 		}
-		if got := status(tc, head); got != 200 {
-			return fmt.Errorf("status %d", got)
-		}
-		return raw.SetDeadline(time.Time{})
+		return tp09Get(tc, n)
 	case "hello_open":
 		cfg.NextProtos = manyProtos(245)
 		_ = tls.Client(raw, cfg).Handshake()
@@ -150,8 +173,10 @@ func tp09Dial(t *testing.T, form string, raw net.Conn) error {
 }
 
 // TestTP09Client is the child process of TestTP09. It opens the connections of
-// one form from 63 loopback sources, at most 32 from each, prints a READY line
-// and holds the connections until its stdin closes.
+// one form from 63 loopback sources, at most 32 from each. It dials all of
+// them first, then starts all clients at the same time, so that the 2 000
+// connections are in flight together. It prints a READY line and holds the
+// connections until its stdin closes.
 func TestTP09Client(t *testing.T) {
 	addr := os.Getenv("PHANTOM_TP09_ADDR")
 	if addr == "" {
@@ -159,43 +184,53 @@ func TestTP09Client(t *testing.T) {
 	}
 	form := os.Getenv("PHANTOM_TP09_FORM")
 	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		held []net.Conn // a socket that nothing refers to is closed by its finalizer
-		bad  atomic.Int64
-		sem  = make(chan struct{}, 32)
+		wg    sync.WaitGroup
+		bad   atomic.Int64
+		conns = make([]net.Conn, tp09Conns) // a socket that nothing refers to is closed by its finalizer
+		sem   = make(chan struct{}, 64)
 	)
-	for i := range tp09Conns {
+	for i := range conns {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			raw, err := loopbackDialer(byte(2+i/maxConnsPerSource)).Dial("tcp", addr)
-			if err != nil {
-				bad.Add(1)
-				return
-			}
-			mu.Lock()
-			held = append(held, raw)
-			mu.Unlock()
-			kind := form
-			if form == "mix" {
-				kind = mixKind(i)
-			}
-			if err := tp09Dial(t, kind, raw); err != nil {
+			var err error
+			if conns[i], err = loopbackDialer(byte(2+i/maxConnsPerSource)).Dial("tcp", addr); err != nil {
 				bad.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
+	for i, raw := range conns {
+		if raw == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			ok := false
+			defer func() { // a failed helper ends the goroutine without a return
+				if !ok {
+					bad.Add(1)
+				}
+				wg.Done()
+			}()
+			kind := form
+			if form == "mix" {
+				kind = mixKind(i)
+			}
+			ok = tp09Dial(t, kind, raw) == nil
+		}()
+	}
+	wg.Wait()
 	fmt.Printf("READY bad=%d\n", bad.Load())
 	_, _ = io.Copy(io.Discard, os.Stdin)
-	runtime.KeepAlive(held)
+	runtime.KeepAlive(conns)
 }
 
 // startClients runs the child process of one form and returns when its clients
-// are done. The returned function stops the child and waits for it.
-func startClients(t *testing.T, addr, form string) func() {
+// are done. The returned function stops the child, waits for it and returns its
+// exit error.
+func startClients(t *testing.T, addr, form string) func() error {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+tp09Client+"$")
 	cmd.Env = append(os.Environ(), "PHANTOM_TP09_ADDR="+addr, "PHANTOM_TP09_FORM="+form)
@@ -211,12 +246,20 @@ func startClients(t *testing.T, addr, form string) func() {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	var once sync.Once
-	stop := func() { once.Do(func() { _ = stdin.Close(); _ = cmd.Wait() }) }
-	t.Cleanup(func() { _ = cmd.Process.Kill(); stop() })
+	var (
+		once    sync.Once
+		waitErr error
+	)
+	stop := func() error {
+		once.Do(func() { _ = stdin.Close(); waitErr = cmd.Wait() })
+		return waitErr
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = stop() })
 	for sc := bufio.NewScanner(stdout); sc.Scan(); {
-		if strings.HasPrefix(sc.Text(), "READY") {
-			t.Logf("clients of form %s: %s", form, sc.Text())
+		if line := sc.Text(); strings.HasPrefix(line, "READY") {
+			if line != "READY bad=0" {
+				t.Errorf("clients of form %s: %s", form, line)
+			}
 			return stop
 		}
 	}
@@ -233,15 +276,16 @@ func memNow() uint64 {
 	return m.HeapInuse + m.StackInuse
 }
 
-// rssBytes reads the resident set size of this process (Linux).
-func rssBytes(t *testing.T) uint64 {
+// procStatus reads a size in bytes from /proc/self/status (Linux): key is
+// VmRSS: or VmHWM:, the resident set size and its peak.
+func procStatus(t *testing.T, key string) uint64 {
 	t.Helper()
 	b, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if f := strings.Fields(line); len(f) >= 2 && f[0] == "VmRSS:" {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == key {
 			kb, err := strconv.ParseUint(f[1], 10, 64)
 			if err != nil {
 				t.Fatal(err)
@@ -249,8 +293,53 @@ func rssBytes(t *testing.T) uint64 {
 			return kb << 10
 		}
 	}
-	t.Fatal("no VmRSS line in /proc/self/status")
+	t.Fatalf("no %s line in /proc/self/status", key)
 	return 0
+}
+
+// resetPeakRSS sets VmHWM to the current RSS.
+func resetPeakRSS(t *testing.T) {
+	t.Helper()
+	f, err := os.OpenFile("/proc/self/clear_refs", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("5"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// peaks are the largest open count and the largest heap and stack in use (no
+// collection) that samplePeaks saw.
+type peaks struct {
+	open int
+	mem  uint64
+}
+
+// samplePeaks samples the server every 50 ms. The returned function stops it
+// and returns the peaks.
+func samplePeaks(s *Server) func() peaks {
+	done, res := make(chan struct{}), make(chan peaks)
+	go func() {
+		var p peaks
+		var m runtime.MemStats
+		sample := func() {
+			runtime.ReadMemStats(&m)
+			p.open, p.mem = max(p.open, len(s.sem)), max(p.mem, m.HeapInuse+m.StackInuse)
+		}
+		for tick := time.NewTicker(50 * time.Millisecond); ; {
+			select {
+			case <-done:
+				sample()
+				res <- p
+				return
+			case <-tick.C:
+				sample()
+			}
+		}
+	}()
+	return func() peaks { close(done); return <-res }
 }
 
 // settle waits until the open count and the pool stay the same for 1.5 s, and
@@ -281,6 +370,12 @@ func (s *Server) settle(t *testing.T) (open int, pool int64) {
 // test binary again), so that their memory is not in the server heap. The
 // timeouts are long: the production deadlines bound time, not memory, and the
 // connections must stay open while the test reads the memory.
+//
+// For each form the result line has the settled state (open count, pool, heap
+// and stack after two collections, RSS) and the peaks during the form (open
+// count, heap and stack without a collection, VmHWM). A form over a limit
+// ends with an open count of 0 after the server closes its connections, so the
+// settled values are small and the peak values show the memory of the form.
 func TestTP09(t *testing.T) {
 	if os.Getenv("PHANTOM_TP09") != "1" {
 		t.Skip("T-P-09 runs with PHANTOM_TP09=1")
@@ -298,20 +393,27 @@ func TestTP09(t *testing.T) {
 		{"cert_tls13", 0}, {"hello_4k", tp09Conns}, {"record_header", tp09Conns}, {"mix", -1},
 	} {
 		before := memNow()
+		resetPeakRSS(t)
+		stopPeaks := samplePeaks(r.s)
 		stop := startClients(t, r.addr, f.name)
 		open, pool := r.s.settle(t)
+		peak := stopPeaks()
 		heap := float64(int64(memNow())-int64(before)) / 1e6
-		rss := float64(rssBytes(t)) / 1e6
-		pass := heap <= 140 && rss <= 180
+		rss, peakRSS := float64(procStatus(t, "VmRSS:"))/1e6, float64(procStatus(t, "VmHWM:"))/1e6
+		peakHeap := float64(int64(peak.mem)-int64(before)) / 1e6
+		heapMax, rssMax := 140.0, 180.0
 		if f.name == "normal" {
-			pass = rss <= 150
+			heapMax, rssMax = 1e9, 150
 		}
-		pass = pass && (f.want < 0 || open == f.want)
-		t.Logf("TP09 form=%s conns=%d open=%d pool=%d heap+stack=%.1f rss=%.1f pass=%t", f.name, tp09Conns, open, pool, heap, rss, pass)
+		pass := heap <= heapMax && rss <= rssMax && peakRSS <= rssMax && (f.want < 0 || open == f.want)
+		t.Logf("TP09 form=%s conns=%d open=%d pool=%d heap+stack=%.1f rss=%.1f peak_open=%d peak_heap+stack=%.1f peak_rss=%.1f pass=%t",
+			f.name, tp09Conns, open, pool, heap, rss, peak.open, peakHeap, peakRSS, pass)
 		if !pass {
-			t.Errorf("form %s: open %d (want %d), heap+stack %.1f MB, RSS %.1f MB", f.name, open, f.want, heap, rss)
+			t.Errorf("form %s: open %d (want %d), heap+stack %.1f MB, RSS %.1f MB, peak RSS %.1f MB", f.name, open, f.want, heap, rss, peakRSS)
 		}
-		stop()
+		if err := stop(); err != nil {
+			t.Errorf("clients of form %s: %v", f.name, err)
+		}
 		waitFor(t, "all connections closed", func() bool { return len(r.s.sem) == 0 })
 		debug.FreeOSMemory()
 	}
