@@ -17,7 +17,7 @@
 //   - Every address in any other trailer is the maintainer address. The
 //     Claude co-author address is also permitted, in a Co-authored-by
 //     trailer. The name in that trailer is "Claude" or starts with
-//     "Claude ".
+//     "Claude ". That trailer holds exactly one address.
 //
 // An address is any token of the form x@y with no space, "<" or ">". A
 // trailer without an address is not checked. A Signed-off-by trailer
@@ -183,7 +183,7 @@ func identityOK(author, committer string, trailers []string) bool {
 			if sameAddr(a, maintainerAddr) {
 				continue
 			}
-			if sameAddr(a, claudeAddr) && sameAddr(key, "Co-authored-by") && claudeName(value) {
+			if sameAddr(a, claudeAddr) && len(addrs) == 1 && sameAddr(key, "Co-authored-by") && claudeName(value) {
 				continue
 			}
 			return false
