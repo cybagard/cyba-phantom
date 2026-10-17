@@ -590,13 +590,13 @@ func TestTU10_URLOutput(t *testing.T) {
 		}
 	})
 	t.Run("email keeps the at sign", func(t *testing.T) {
-		_, err := loadTest(writeConfig(t, "acme:\n  email: \"ops@corp.com, b@corp.com\"\n"+tlogOrigin), nil)
-		if err == nil || !strings.Contains(err.Error(), `value "ops@corp.com, b@corp.com"`) {
+		_, err := loadTest(writeConfig(t, "acme:\n  email: \"ops@corp.example, b@corp.example\"\n"+tlogOrigin), nil)
+		if err == nil || !strings.Contains(err.Error(), `value "ops@corp.example, b@corp.example"`) {
 			t.Errorf("got %v", err)
 		}
 	})
 	t.Run("valid email passes", func(t *testing.T) {
-		if _, err := loadTest(writeConfig(t, "acme:\n  email: ops@corp.com\n"+acmeNames+tlogOrigin), nil); err != nil {
+		if _, err := loadTest(writeConfig(t, "acme:\n  email: ops@corp.example\n"+acmeNames+tlogOrigin), nil); err != nil {
 			t.Error(err)
 		}
 	})
