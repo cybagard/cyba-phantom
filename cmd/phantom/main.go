@@ -1,10 +1,10 @@
 // Command phantom is the Phantom sensor entry point.
 //
-// The binary reads one config file. "phantom <path>" loads it, binds the two listen
-// sockets, starts the store, the writer and the checkpointer, starts the certificate
-// client and the decoy listener, and waits for SIGINT or SIGTERM. "phantom --check <path>"
-// only validates it (FR-12). Both modes use the same load function. --check opens no
-// socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
+// The binary reads one config file. "phantom <path>" loads it and binds the two listen sockets.
+// It starts the store, the writer and the checkpointer. It starts the certificate client
+// and the decoy listener. Then it waits for SIGINT or SIGTERM.
+// "phantom --check <path>" only validates the file (FR-12). Both modes use the same load function.
+// --check opens no socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
 package main
 
 import (

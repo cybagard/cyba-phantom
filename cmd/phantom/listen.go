@@ -20,6 +20,8 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/listener"
 )
 
+var errNoClient = errors.New("no certificate client")
+
 // shutdownTime is the time that the servers get to end their open connections at the stop.
 const shutdownTime = 5 * time.Second
 
@@ -27,16 +29,21 @@ const shutdownTime = 5 * time.Second
 var (
 	newServer = listener.New
 	startACME = (*listener.ACME).Start
+	stopACME  = (*listener.ACME).Stop
 	served    = func() {} // runs after Serve or ServePlain returned
 	listen    = net.Listen
 	// serveSetup gives serve the start values and the parts of the store start. A test sets another state directory.
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
-// serveWith runs the sensor on the state of p until ctx ends. The order is fixed (T-S-16): the queue, the two
-// listen sockets (a bind error ends it before the store part opens a file), the store part, the certificate
-// cache and client, then the servers. The stop is the reverse: both servers return, then the client, the cache
-// and the store part, which closes the queue. Thus no handler adds an event to a closed queue.
+// serveWith runs the sensor on the state of p until ctx ends. The start order is: the queue, the two listen
+// sockets, the store part, the decoy server, the certificate cache and client, then the serve calls.
+// A bind error ends the start before the store part opens a file.
+// The stop is the reverse. Both serve calls return. Then the client stops, the cache closes,
+// and the store part closes the queue. Thus no handler adds an event to a closed queue.
+// A failure of the state directory, the cache or the client does not end the process.
+// The decoys serve, the sensor writes one fixed line, and the start line says that it is not healthy.
+// Only a decoy server that does not start gives exit 1 at once.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	c := event.NewCounters()
@@ -51,27 +58,6 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		return 1
 	}
 	s := start(p, q, c, d, slog.New(slog.NewTextHandler(stderr, nil)))
-	var cache *listener.Store
-	var acme *listener.ACME
-	// abort ends a start that failed, in the order of the stop. No server runs yet.
-	abort := func(msg string) int {
-		fmt.Fprintln(stderr, msg)
-		httpsLn.Close()
-		httpLn.Close()
-		if acme != nil {
-			acme.Stop()
-		}
-		if cache != nil {
-			cache.Close()
-		}
-		s.Stop()
-		return 1
-	}
-	if s.root == nil {
-		return abort("phantom: certificate cache does not open")
-	} else if cache, err = listener.Open(s.root, p.CacheDir); err != nil {
-		return abort("phantom: certificate cache does not open")
-	}
 	var names []string
 	for i := 0; ; i++ {
 		v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
@@ -82,34 +68,60 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	}
 	maxConns, _ := cfg.Get("limits.max_conns")
 	headerBytes, _ := cfg.Get("limits.header_bytes")
+	var cache *listener.Store
+	var acme *listener.ACME // nil when the client does not exist
 	// The handshake runs only after Serve, which starts after acme is set.
 	srv, err := newServer(listener.Config{
-		TLS:         &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) { return acme.GetCertificate(h) }},
+		TLS: &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if acme == nil {
+				return nil, errNoClient
+			}
+			return acme.GetCertificate(h)
+		}},
 		MaxConns:    int(maxConns.Int),
 		HeaderBytes: int(headerBytes.Int),
 	}, listener.NewHelloHandler(names, q))
 	if err != nil {
-		return abort("phantom: decoy listener does not start")
+		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
+		httpsLn.Close()
+		httpLn.Close()
+		s.Stop()
+		return 1
 	}
 	// certmagic also writes with the standard log package. It gets the counting writer of the server error log,
 	// which keeps no text. This runs before the client exists.
 	log.SetOutput(srv.ErrLog())
-	ca, _ := cfg.Get("acme.ca")
-	email, _ := cfg.Get("acme.email")
-	addr := httpsLn.Addr().(*net.TCPAddr)
-	host := ""
-	if !addr.IP.IsUnspecified() {
-		host = addr.IP.String()
+	// startCerts opens the cache and starts the client. It returns the fixed line of the first failure, or "".
+	startCerts := func() string {
+		const clientLine = "phantom: certificate client does not start"
+		if s.root == nil {
+			return "phantom: state directory does not open"
+		}
+		if cache, err = listener.Open(s.root, p.CacheDir); err != nil {
+			return "phantom: certificate cache does not open"
+		}
+		ca, _ := cfg.Get("acme.ca")
+		email, _ := cfg.Get("acme.email")
+		addr := httpsLn.Addr().(*net.TCPAddr)
+		host := ""
+		if !addr.IP.IsUnspecified() {
+			host = addr.IP.String()
+		}
+		if acme, err = listener.NewACME(listener.ACMEParams{
+			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
+			Host: host, Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
+		}); err != nil {
+			acme = nil
+			return clientLine
+		}
+		if startACME(acme, ctx) != nil {
+			return clientLine // The client serves the cached certificates.
+		}
+		return ""
 	}
-	acme, err = listener.NewACME(listener.ACMEParams{
-		Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
-		Host: host, Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
-	})
-	if err != nil {
-		return abort("phantom: certificate client does not start")
-	}
-	if err := startACME(acme, ctx); err != nil {
-		return abort("phantom: certificate client does not start")
+	certLine := startCerts()
+	if certLine != "" {
+		fmt.Fprintln(stderr, certLine)
 	}
 	var wg sync.WaitGroup
 	var failed atomic.Bool // a serve call ended with an error: the exit code is 1, so a supervisor restarts the sensor
@@ -125,19 +137,26 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	}
 	serveOne(func() error { return srv.Serve(httpsLn) })
 	serveOne(func() error { return srv.ServePlain(httpLn, listener.NewRedirect(names)) })
-	if s.Healthy() {
-		fmt.Fprintln(stdout, "phantom: started")
-	} else {
-		fmt.Fprintln(stdout, "phantom: started — store not healthy")
+	startLine := "phantom: started"
+	if !s.Healthy() {
+		startLine += " — store not healthy"
 	}
+	if certLine != "" {
+		startLine += " — certificate client not running"
+	}
+	fmt.Fprintln(stdout, startLine)
 	<-ctx.Done()
 	stop() // A second signal during the stop gets the default action.
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTime)
 	srv.Shutdown(sctx)
 	cancel()
 	wg.Wait()
-	acme.Stop()
-	cache.Close()
+	if acme != nil {
+		stopACME(acme)
+	}
+	if cache != nil {
+		cache.Close()
+	}
 	s.Stop()
 	if failed.Load() {
 		return 1
