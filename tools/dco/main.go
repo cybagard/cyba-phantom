@@ -20,8 +20,8 @@
 //     "Claude ". That trailer holds exactly one address.
 //
 // An address is any token of the form x@y with no space, "<" or ">". A
-// trailer without an address is not checked. A Signed-off-by trailer
-// without an address fails.
+// trailer without an address: dco skips it. A Signed-off-by trailer without
+// an address fails.
 //
 // A commit with an encoding header fails, whatever its value. Git converts
 // the message to UTF-8 from that header. The bytes of an address can then
@@ -58,11 +58,12 @@ var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
 // logFormat asks git for the hash, author address, committer address,
-// encoding header and trailers of each commit. Git's own trailer parser decides what a trailer
-// is. The option `only` drops the lines of the trailer block that are not
-// trailers. So dco accepts exactly the sign-offs that git recognizes, for
-// example the block that cherry-pick -x -s writes. It never accepts the
-// subject or a line in the middle of the body.
+// encoding header and trailers of each commit. Git's own trailer parser
+// decides what a trailer is. The option `only` drops the lines of the
+// trailer block that are not trailers. Because git parses the trailers, dco
+// accepts exactly the sign-offs that git recognizes. One example is the
+// block that cherry-pick -x -s writes. It never accepts the subject or a
+// line in the middle of the body.
 const logFormat = "--format=%H%x00%ae%x00%ce%x00%e%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
@@ -79,7 +80,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	cmd := exec.Command("git", "-C", dir, "log", logFormat, base+".."+head)
 	out, err := cmd.Output()
 	if err != nil {
-		// git's own error text is not printed: print the exit status only.
+		// dco does not print the error text of git: it prints the exit status only.
 		fmt.Fprintf(stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
@@ -89,8 +90,8 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 // check parses the output of git log and applies both rules to each commit.
 func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 	// Each record is H NUL AE NUL CE NUL E NUL TRAILERS NUL. Git ends every
-	// record with its own newline, so records separate on NUL+LF. Trailers
-	// are joined by LF. An unfolded trailer holds no LF and no NUL. The
+	// record with its own newline, so records separate on NUL+LF. Git joins
+	// the trailers with LF. An unfolded trailer holds no LF and no NUL. The
 	// checker prints no PR-authored text, only hashes and counts.
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
@@ -100,7 +101,7 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 	for _, rec := range records {
 		f := bytes.SplitN(rec, []byte{0}, 5)
 		if len(f) < 5 {
-			// The record is not printed: it is PR-authored content.
+			// dco does not print the record: it is PR-authored content.
 			fmt.Fprintln(stderr, "dco: malformed git log record")
 			return 2
 		}

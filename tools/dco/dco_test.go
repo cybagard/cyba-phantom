@@ -221,8 +221,9 @@ func TestLookAlikeAddressFails(t *testing.T) {
 }
 
 // A trailer key with a non-ASCII byte is not a sign-off key. U+017F (long
-// s) folds to "s" in Unicode. Git drops such a line from the trailers, so
-// this test also runs the checker on a whole commit.
+// s) folds to "s" in Unicode. Git drops such a line from the trailers, so a
+// run on a whole commit does not reach the key compare. The test also calls
+// hasSignoff and identityOK directly.
 func TestNonASCIIKeyIsNotSignoff(t *testing.T) {
 	failsWith(t, nil, "subject\n\n\xc5\xbfigned-off-by: t <"+me+">\n", "unsigned")
 	if hasSignoff([]string{"\xc5\xbfigned-off-by: t <" + me + ">"}) {
