@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -378,33 +379,61 @@ func TestTI03_ListenerFailureExits1(t *testing.T) {
 	}
 }
 
-// TestTI03_OpenFailureKeepsServing breaks the certificate cache, and then the state directory. Each case must
-// start with a fixed line and a start line that says the client does not run. The redirect on listen.http must
-// answer 308, a handshake on listen.https must fail and count, and a cancel must give exit 0 (C3).
+// TestTI03_OpenFailureKeepsServing breaks the certificate cache, the state directory, and the start of the
+// client. Each case must write its stderr lines and its start line exactly. The redirect on listen.http must
+// answer 308, and a cancel must give exit 0 (C3). With no client, a handshake on listen.https must fail with
+// the TLS alert "internal error" and count. With a client that did not start, the cached certificate serves,
+// and the cancel stops the client once.
 func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 	for _, c := range []struct {
-		name, line string
-		breakIt    func(t *testing.T, p *startParams)
+		name, line, startLine string
+		noState, cached       bool // noState: the store start writes its own error line first
+		breakIt               func(t *testing.T, p *startParams)
 	}{
-		{"cache is a file", "phantom: certificate cache does not open\n", func(t *testing.T, p *startParams) {
+		{"cache is a file", "phantom: certificate cache does not open", "phantom: started — certificate client not running", false, false, func(t *testing.T, p *startParams) {
 			if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"no state directory", "phantom: state directory does not open\n", func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") }},
+		{"no state directory", "phantom: state directory does not open", "phantom: started — store not healthy — certificate client not running", true, false,
+			func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") }},
+		{"client start fails", "phantom: certificate client does not start", "phantom: started — certificate client start failed", false, true, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			https, plain := freeAddr(t), freeAddr(t)
 			cfg := serveCfg(t, https, plain)
 			p := tempState(t, cfg)
-			c.breakIt(t, &p)
+			if c.breakIt != nil {
+				c.breakIt(t, &p)
+			}
+			var der []byte
+			var stops atomic.Int32
+			oldStart, oldStop := startACME, stopACME
+			t.Cleanup(func() { startACME, stopACME = oldStart, oldStop })
+			stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
+			if c.cached {
+				ca, _ := cfg.Get("acme.ca")
+				der = seedCache(t, p, ca.Str)
+				startACME = func(a *listener.ACME, ctx context.Context) error { a.Start(ctx); return errors.New("test error") }
+			}
 			server := captureServer(t)
 			var q *event.Queue // stays nil when the state directory is missing: no writer starts
 			closed := closedAtReturn(t, &q)
 			r := launchServe(t, cfg, p, depsWithQueue(&q))
 			r.waitStarted(t)
-			if !strings.Contains(r.out.String(), "certificate client not running") || !strings.Contains(r.err.String(), c.line) {
-				t.Errorf("stdout %q, stderr %q; want the not-running start line and %q", r.out.String(), r.err.String(), c.line)
+			// The store start writes its own line first: the error with the path, or the checkpoint key line.
+			// The test drops the time attribute and the key value.
+			want := []string{fmt.Sprintf("level=INFO msg=%q name=%s", "checkpoint signing key made", p.Origin), c.line}
+			if c.noState {
+				want[0] = fmt.Sprintf("level=ERROR msg=%q error=%q", "state directory does not open", "open "+p.Root+": no such file or directory")
+			}
+			got := strings.Split(strings.TrimSuffix(r.err.String(), "\n"), "\n")
+			if !strings.HasPrefix(got[0], "phantom:") {
+				_, got[0], _ = strings.Cut(got[0], " ")
+				got[0], _, _ = strings.Cut(got[0], " vkey=")
+			}
+			if !slices.Equal(got, want) || r.out.String() != c.startLine+"\n" {
+				t.Errorf("stderr lines %q, stdout %q; want %q and %q", got, r.out.String(), want, c.startLine+"\n")
 			}
 			req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+plain+"/", nil)
 			req.Host = decoyName
@@ -412,19 +441,31 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 			if resp, err := hc.Do(req); err != nil || resp.StatusCode != http.StatusPermanentRedirect {
 				t.Errorf("redirect: %v, %v; want 308", resp, err)
 			}
-			srv := server()
-			lines := srv.ErrorLines()
-			if conn, err := tls.Dial("tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true}); err == nil {
-				conn.Close()
-				t.Error("a handshake worked with no certificate client")
-			}
-			if got := waitErrorLines(srv, lines+1); got <= lines {
-				t.Errorf("error log lines = %d, want more than %d", got, lines)
+			if c.cached {
+				coldHandshake(t, https, r.begin, der, &r.err).Close()
+			} else {
+				srv := server()
+				lines := srv.ErrorLines()
+				// Without the check for a missing client, the handshake panics and the client sees EOF.
+				conn, err := tls.Dial("tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+				if err == nil {
+					conn.Close()
+					t.Error("a handshake worked with no certificate client")
+				} else if alert := "remote error: tls: internal error"; err.Error() != alert {
+					t.Errorf("handshake error %q, want the TLS alert %q", err, alert)
+				}
+				if got := waitErrorLines(srv, lines+1); got <= lines {
+					t.Errorf("error log lines = %d, want more than %d", got, lines)
+				}
 			}
 			r.cancel()
 			<-r.done
-			if r.code != 0 || !reflect.DeepEqual(closed(), []bool{false, false}) || (q != nil && !q.Closed()) {
-				t.Errorf("exit %d, closed at return %v; want 0, [false false] and a closed queue", r.code, closed())
+			wantStops := int32(0)
+			if c.cached {
+				wantStops = 1
+			}
+			if r.code != 0 || !reflect.DeepEqual(closed(), []bool{false, false}) || stops.Load() != wantStops || (!c.noState && (q == nil || !q.Closed())) {
+				t.Errorf("exit %d, closed at return %v, client stops %d; want 0, [false false], %d, and a closed queue", r.code, closed(), stops.Load(), wantStops)
 			}
 		})
 	}

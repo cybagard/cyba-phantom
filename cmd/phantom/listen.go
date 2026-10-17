@@ -141,7 +141,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	if !s.Healthy() {
 		startLine += " — store not healthy"
 	}
-	if certLine != "" {
+	if certLine != "" && acme != nil {
+		startLine += " — certificate client start failed"
+	} else if certLine != "" {
 		startLine += " — certificate client not running"
 	}
 	fmt.Fprintln(stdout, startLine)
