@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/config"
@@ -27,9 +28,12 @@ var (
 	newServer = listener.New
 	startACME = (*listener.ACME).Start
 	served    = func() {} // runs after Serve or ServePlain returned
+	listen    = net.Listen
+	// serveSetup gives serve the start values and the parts of the store start. A test sets another state directory.
+	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
-// serveWith runs the sensor on the state of p until ctx ends. The order is fixed (SEC-21): the queue, the two
+// serveWith runs the sensor on the state of p until ctx ends. The order is fixed (T-S-16): the queue, the two
 // listen sockets (a bind error ends it before the store part opens a file), the store part, the certificate
 // cache and client, then the servers. The stop is the reverse: both servers return, then the client, the cache
 // and the store part, which closes the queue. Thus no handler adds an event to a closed queue.
@@ -108,10 +112,12 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		return abort("phantom: certificate client does not start")
 	}
 	var wg sync.WaitGroup
+	var failed atomic.Bool // a serve call ended with an error: the exit code is 1, so a supervisor restarts the sensor
 	serveOne := func(f func() error) {
 		wg.Go(func() {
 			if err := f(); !errors.Is(err, http.ErrServerClosed) {
 				fmt.Fprintln(stderr, "phantom: listener stopped")
+				failed.Store(true)
 				stop()
 			}
 			served()
@@ -133,6 +139,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	acme.Stop()
 	cache.Close()
 	s.Stop()
+	if failed.Load() {
+		return 1
+	}
 	return 0
 }
 
@@ -142,7 +151,7 @@ func bindBoth(cfg *config.Config, stderr io.Writer) (https, plain net.Listener, 
 	var lns []net.Listener
 	for _, k := range []string{"listen.https", "listen.http"} {
 		v, _ := cfg.Get(k)
-		ln, err := net.Listen("tcp", v.Str)
+		ln, err := listen("tcp", v.Str)
 		if err != nil {
 			fmt.Fprintf(stderr, "phantom: cannot bind %s\n", k)
 			for _, l := range lns {

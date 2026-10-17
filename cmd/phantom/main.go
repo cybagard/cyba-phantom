@@ -52,7 +52,8 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveWith(ctx, stop, cfg, paramsOf(cfg), realDeps, stdout, stderr)
+	p, d := serveSetup(paramsOf(cfg))
+	return serveWith(ctx, stop, cfg, p, d, stdout, stderr)
 }
 
 // loadWith is the one load function of both modes. A test replaces it to see the Net.

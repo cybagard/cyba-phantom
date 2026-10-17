@@ -18,10 +18,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -152,6 +155,16 @@ func TestTS16_BindConflict(t *testing.T) {
 	}
 }
 
+// depsWithQueue returns the real parts of the store start. When the writer starts, it sets *q to the queue.
+func depsWithQueue(q **event.Queue) startDeps {
+	d := realDeps
+	d.newWriter = func(db *sql.DB, qq *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, rec store.Recovery) *store.Writer {
+		*q = qq
+		return realDeps.newWriter(db, qq, l, c, bp, lg, rec)
+	}
+	return d
+}
+
 // TestTI03_StartAndStopOrder checks that the store and the certificate client start only after both sockets are
 // bound, that one socket holds each address while the sensor runs, and that after the stop signal the queue
 // closes only after both serve calls returned (SEC-21, NFR-05).
@@ -163,14 +176,10 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	note := func(s string) { mu.Lock(); events = append(events, s); mu.Unlock() }
 	bound := func() bool { return inUse(https) && inUse(plain) }
 	var q *event.Queue
-	d := realDeps
+	d := depsWithQueue(&q)
 	d.openLog = func(r *os.Root, dir string) (*tlog.Log, error) {
 		note(fmt.Sprint("store bound=", bound()))
 		return tlog.OpenLog(r, dir)
-	}
-	d.newWriter = func(db *sql.DB, qq *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, rec store.Recovery) *store.Writer {
-		q = qq
-		return realDeps.newWriter(db, qq, l, c, bp, lg, rec)
 	}
 	oldStart, oldServed := startACME, served
 	t.Cleanup(func() { startACME, served = oldStart, oldServed })
@@ -299,6 +308,114 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	}
 	if captured.String() != "" || r.err.String() != errBefore {
 		t.Errorf("standard log %q; stderr %q", captured.String(), r.err.String())
+	}
+}
+
+// TestTI03_ListenerFailureExits1 checks that a serve call that ends with an error stops the sensor in order and
+// gives exit 1, so that a supervisor restarts it (C3).
+func TestTI03_ListenerFailureExits1(t *testing.T) {
+	https := freeAddr(t)
+	cfg := serveCfg(t, https, freeAddr(t))
+	var first net.Listener
+	oldListen, oldServed := listen, served
+	t.Cleanup(func() { listen, served = oldListen, oldServed })
+	listen = func(network, addr string) (net.Listener, error) {
+		ln, err := oldListen(network, addr)
+		if first == nil {
+			first = ln
+		}
+		return ln, err
+	}
+	var q *event.Queue
+	var closed []bool
+	var mu sync.Mutex
+	served = func() { mu.Lock(); closed = append(closed, q.Closed()); mu.Unlock() }
+	r := launchServe(t, cfg, tempState(t, cfg), depsWithQueue(&q))
+	r.waitStarted(t)
+	first.Close() // the https socket, under the server
+	<-r.done
+	if r.code != 1 || !q.Closed() || inUse(https) || !reflect.DeepEqual(closed, []bool{false, false}) {
+		t.Errorf("exit %d, queue closed %v, socket held %v, closed at return %v; want 1, true, false, [false false]", r.code, q.Closed(), inUse(https), closed)
+	}
+}
+
+// TestTI03_SigtermStopsServe checks that serve, with its own signal handling, returns 0 after SIGTERM, and that the
+// queue closes only after both serve calls returned (NFR-05).
+func TestTI03_SigtermStopsServe(t *testing.T) {
+	cfg := serveCfg(t, freeAddr(t), freeAddr(t))
+	var q *event.Queue
+	d, p := depsWithQueue(&q), tempState(t, cfg)
+	oldSetup, oldServed, oldLog := serveSetup, served, log.Writer()
+	t.Cleanup(func() { serveSetup, served = oldSetup, oldServed; log.SetOutput(oldLog) })
+	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
+	var closed []bool
+	var mu sync.Mutex
+	served = func() { mu.Lock(); closed = append(closed, q.Closed()); mu.Unlock() }
+	var out, errb syncBuf
+	code := make(chan int, 1)
+	go func() { code <- serve(cfg, &out, &errb) }()
+	for begin := time.Now(); !strings.Contains(out.String(), "phantom: started"); time.Sleep(5 * time.Millisecond) {
+		if time.Since(begin) > 5*time.Second {
+			t.Fatalf("no start line; stderr %q", errb.String())
+		}
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case c := <-code:
+		if c != 0 || !q.Closed() || !reflect.DeepEqual(closed, []bool{false, false}) {
+			t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return after SIGTERM")
+	}
+}
+
+// TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
+// that no one answers. A TLS handshake with the cached certificate must work at most 2 s after the process start,
+// and SIGTERM must end the process with exit 0 (NFR-05). It needs root, because /var/lib/phantom is the state directory.
+func TestTI03_ColdStartBinary(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the test must run as root to make the state directory")
+	}
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Skip("the state directory exists already, or cannot be made")
+	}
+	t.Cleanup(func() { os.RemoveAll(stateDir) })
+	bin := filepath.Join(t.TempDir(), "phantom")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	https, ca := freeAddr(t), "https://"+freeAddr(t)+"/directory"
+	der := seedCache(t, startParams{Root: stateDir, CacheDir: "certs"}, ca)
+	cmd := exec.Command(bin, writeFile(t, validBody(t)))
+	cmd.Env = append(os.Environ(), "CKPT_TOKEN="+strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS="+https,
+		"PHANTOM_LISTEN_HTTP="+freeAddr(t), "PHANTOM_ACME_CA="+ca)
+	var errb syncBuf
+	cmd.Stderr = &errb
+	begin := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill() })
+	for !inUse(https) && time.Since(begin) < 2*time.Second {
+		time.Sleep(time.Millisecond)
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("handshake: %v; stderr %q", err, errb.String())
+	}
+	defer conn.Close()
+	if d := time.Since(begin); d > 2*time.Second {
+		t.Errorf("handshake after %v, want at most 2s", d)
+	}
+	if !bytes.Equal(conn.ConnectionState().PeerCertificates[0].Raw, der) {
+		t.Error("the handshake did not give the cached certificate")
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	if err := cmd.Wait(); err != nil {
+		t.Errorf("after SIGTERM: %v; stderr %q", err, errb.String())
 	}
 }
 
