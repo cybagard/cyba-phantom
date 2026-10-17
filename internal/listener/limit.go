@@ -181,12 +181,12 @@ func (l *limitListener) inUse() int { return len(l.sem) }
 // read more than keepAliveBytes, so it also closes at its idle state.
 //
 // A client can send its next request before net/http reaches the idle state of
-// the last one. The bytes that Read takes after the first response write of an
-// active request are late: they are not part of that period but start the next
-// one. This also holds for the body bytes that the handler reads or net/http
-// drains after that write, for example after a 100-continue reply. For such a
-// body of more than keepAliveBytes, the close for the large period comes at the
-// idle state of the next request, not of this one.
+// the last one. The bytes that Read takes after a response write of an active
+// request are late. They are not part of that period. They start the next one.
+// Examples are the next request, and the body bytes that a handler reads after
+// a 100-continue reply. Read counts late bytes against the next budget, and it
+// charges them to the pool by their own count. For a late body of more than
+// keepAliveBytes, the close comes at the idle state of the next request.
 type limitConn struct {
 	net.Conn
 	sem  chan struct{}
@@ -195,14 +195,15 @@ type limitConn struct {
 	once sync.Once
 	rd   *readLimit
 
-	mu      sync.Mutex
-	left    int64 // budget left in this period
-	used    int64 // bytes read in this period
-	charged int64 // bytes of this period that the pool holds
-	closed  bool
-	active  bool  // a request is active: the next Write is part of its response
-	late    int64 // bytes of used that were read after the response write
-	lateRun bool  // a response write happened: all next bytes are late
+	mu          sync.Mutex
+	left        int64 // budget left in this period
+	used        int64 // bytes read in this period
+	charged     int64 // bytes of this period that the pool holds
+	lateCharged int64 // bytes of late that the pool holds
+	closed      bool
+	active      bool  // a request is active: the next Write is part of its response
+	late        int64 // bytes of used that were read after the response write
+	lateRun     bool  // a response write happened: all next bytes are late
 }
 
 func (c *limitConn) Close() error {
@@ -218,18 +219,22 @@ func (c *limitConn) Close() error {
 	return err
 }
 
-// refund gives the charged bytes back to the pool, one time. The caller holds mu.
+// refund gives both charges back to the pool, one time. The caller holds mu.
 func (c *limitConn) refund() {
-	c.rd.pool.Add(-c.charged)
-	c.charged = 0
+	c.rd.pool.Add(-(c.charged + c.lateCharged))
+	c.charged, c.lateCharged = 0, 0
 }
 
 // Read asks the socket for no more than the budget left and no more than
-// keepAliveBytes. A read that the budget or the pool refuses closes the
-// socket, so net/http cannot send a reply after the failed read.
+// keepAliveBytes. Late bytes use the next budget, less the late bytes read
+// before. A read that the budget or the pool refuses closes the socket, so
+// net/http cannot send a reply after the failed read.
 func (c *limitConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	left := c.left
+	if c.lateRun && left > 0 {
+		left = c.rd.next - c.late
+	}
 	c.mu.Unlock()
 	if left <= 0 {
 		_ = c.Close()
@@ -241,16 +246,21 @@ func (c *limitConn) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	c.mu.Lock()
+	var over int64
 	if c.lateRun {
+		over = c.late + int64(n) - max(c.late, keepAliveBytes)
 		c.late += int64(n)
+	} else {
+		over = c.used + int64(n) - max(c.used, keepAliveBytes)
+		c.left -= int64(n)
 	}
-	c.left -= int64(n)
-	before := c.used
 	c.used += int64(n)
 	refused := false
-	if over := c.used - max(before, keepAliveBytes); over > 0 && !c.closed {
+	if over > 0 && !c.closed {
 		if refused = !c.rd.take(over); refused {
 			c.left = 0
+		} else if c.lateRun {
+			c.lateCharged += over
 		} else {
 			c.charged += over
 		}
@@ -280,13 +290,13 @@ func (c *limitConn) startRequest() {
 	c.mu.Unlock()
 }
 
-// nextPeriod ends the period at an idle state. The late bytes, which were read
-// after the response write, are not part of the ending period: they start the
-// next one. A connection that read more than keepAliveBytes before them closes,
-// and Close gives its charged bytes back. So does a connection whose late bytes
-// fill the next budget. Another one gives back its charged bytes here and gets
-// the next budget, less the late bytes. The late bytes above keepAliveBytes are
-// charged to the pool. It does not wait on the network.
+// nextPeriod ends the period at an idle state. The late bytes are not part of
+// the ending period. They start the next one. The connection closes when the
+// bytes before the late bytes are more than keepAliveBytes. It also closes
+// when the late bytes use all of the next budget. Close gives the charges back.
+// Else the charge of the own bytes goes back to the pool here. The late charge
+// becomes the charge of the next period. The next budget is less the late
+// bytes. This function does not wait on the network.
 func (c *limitConn) nextPeriod() {
 	c.mu.Lock()
 	late := c.late
@@ -295,15 +305,8 @@ func (c *limitConn) nextPeriod() {
 		_ = c.Close()
 		return
 	}
-	c.refund()
+	c.rd.pool.Add(-c.charged)
+	c.charged, c.lateCharged = c.lateCharged, 0
 	c.used, c.left, c.late, c.lateRun, c.active = late, c.rd.next-late, 0, false, false
-	if over := late - keepAliveBytes; over > 0 {
-		if !c.rd.take(over) {
-			c.mu.Unlock()
-			_ = c.Close()
-			return
-		}
-		c.charged = over
-	}
 	c.mu.Unlock()
 }

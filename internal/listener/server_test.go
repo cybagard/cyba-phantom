@@ -458,7 +458,7 @@ func TestTS18PipelinedHeadOneWrite(t *testing.T) {
 // then sends the rest of the head. The bytes that net/http holds from the first
 // period do not count against its header limit, so the second head can be
 // larger than header_bytes. The test asserts only a bound. A head of
-// header_bytes + 4097 bytes is not served. A served head is not larger than
+// header_bytes + 4097 bytes gets no response. A served head is not larger than
 // header_bytes + 4096. The client sends the rest of the head only after the
 // idle record of the first request, so the test does not depend on time. The
 // forced timing, with the rest before the idle state, is in
@@ -476,8 +476,8 @@ func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 	over := testHeaderBytes + keepAliveBytes + 1
 	second, used := pipelined(t, r, l, over, splitBytes)
 	t.Logf("split write: second head of %d bytes: status %d, first period %d bytes", over, second, used)
-	if second == 200 || used > keepAliveBytes {
-		t.Fatalf("second head of %d bytes: status %d, first period %d bytes; want it not served", over, second, used)
+	if second != 0 || used > keepAliveBytes {
+		t.Fatalf("second head of %d bytes: status %d, first period %d bytes; want no response", over, second, used)
 	}
 	if second, _ := pipelined(t, r, l, splitBytes, splitBytes); second != 200 {
 		t.Fatalf("a second head of %d bytes: status %d, want 200", splitBytes, second)
