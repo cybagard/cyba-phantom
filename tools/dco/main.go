@@ -76,7 +76,11 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
+	return check(out, base, head, stdout, stderr)
+}
 
+// check parses the output of git log and applies both rules to each commit.
+func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 	// Each record is H NUL AE NUL CE NUL TRAILERS NUL, and git ends every
 	// record with its own newline, so records separate on NUL+LF. Trailers
 	// are joined by LF. An unfolded trailer holds no LF and no NUL. No
@@ -89,7 +93,9 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	for _, rec := range records {
 		f := bytes.SplitN(rec, []byte{0}, 4)
 		if len(f) < 4 {
-			continue
+			// The record is not printed: it is PR-authored content.
+			fmt.Fprintln(stderr, "dco: malformed git log record")
+			return 2
 		}
 		hash := string(f[0])
 		if len(hash) > 12 {

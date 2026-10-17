@@ -247,6 +247,40 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 	}
 }
 
+// A record with fewer than four fields is an error. The checker prints a
+// fixed line, no part of the record, and never "all N commits pass".
+func TestMalformedRecordIsError(t *testing.T) {
+	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00Signed-off-by: t <" + me + ">\x00\n"
+	cases := map[string]string{
+		"three fields":        "0123456789abcdef\x00SECRET\x00SECRET\x00\n",
+		"one field":           "SECRET\x00\n",
+		"good then malformed": good + "SECRET\x00SECRET\x00\n",
+	}
+	for name, out := range cases {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := check([]byte(out), "base", "HEAD", &stdout, &stderr); code != 2 {
+				t.Fatalf("check = %d, want 2; stdout %q", code, stdout.String())
+			}
+			if got, want := stderr.String(), "dco: malformed git log record\n"; got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+			if strings.Contains(stdout.String(), "pass") || strings.Contains(stdout.String()+stderr.String(), "SECRET") {
+				t.Errorf("unexpected output: stdout %q, stderr %q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// A well-formed record passes.
+func TestCheckGoodRecord(t *testing.T) {
+	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00Signed-off-by: t <" + me + ">\x00\n"
+	var stdout, stderr bytes.Buffer
+	if code := check([]byte(good), "base", "HEAD", &stdout, &stderr); code != 0 {
+		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nSigned-off-by: t <"+me+">\n \t\nclosing words\n"); code != 1 {
