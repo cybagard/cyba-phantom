@@ -275,7 +275,7 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 // The FAIL output gives the sign-off hint only for an unsigned commit.
 // It gives the identity hint only for a commit that breaks the identity rule.
 func TestFailHintMatchesFailure(t *testing.T) {
-	const signHint, idHint = "git commit -s", "noreply address"
+	const signHint, idHint = "git commit -s", "trailer addresses must be the maintainer noreply address"
 	t.Run("identity only", func(t *testing.T) {
 		_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, signoff)
 		if strings.Contains(out, signHint) || !strings.Contains(out, idHint) {

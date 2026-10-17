@@ -139,7 +139,7 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
 		}
 		if badAddr > 0 {
-			fmt.Fprintln(stdout, "hint: use the noreply address for author, committer and every address trailer")
+			fmt.Fprintln(stdout, "hint: author, committer and trailer addresses must be the maintainer noreply address; a Claude co-author trailer may use the Claude co-author address (see tools/dco/main.go)")
 		}
 		if badEnc > 0 {
 			fmt.Fprintln(stdout, "hint: commits must not set an encoding header")
