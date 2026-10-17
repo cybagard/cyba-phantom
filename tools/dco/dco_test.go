@@ -157,10 +157,10 @@ func TestSignoffAsSubjectFails(t *testing.T) {
 	}
 }
 
-// runOn commits msg verbatim (by the author and the committer set in env)
-// on top of a signed base, and returns the checker's exit code, its output
-// and the short hash of the new commit. It fails the test if the standard
-// output or the standard error holds an "@".
+// runOn commits msg verbatim on top of a signed base. Env sets the author
+// and the committer. It returns the exit code of the checker, its standard
+// output and the short hash of the new commit. It fails the test if the
+// standard output or the standard error holds an "@".
 func runOn(t *testing.T, env []string, msg string) (int, string, string) {
 	t.Helper()
 	dir := newRepo(t)
@@ -176,7 +176,8 @@ func runOn(t *testing.T, env []string, msg string) (int, string, string) {
 	return code, out, strings.TrimSpace(git(t, dir, "rev-parse", "--short=12", "HEAD"))
 }
 
-// signoff is a valid trailer block with the sign-off at the noreply address.
+// signoff is a whole message: a subject, a blank line, and a trailer block
+// with one sign-off at the noreply address.
 const signoff = "subject\n\nSigned-off-by: t <" + me + ">\n"
 
 // failsWith commits msg (by the author and the committer set in env) and
@@ -202,8 +203,8 @@ func TestSOHInTrailerDoesNotSplit(t *testing.T) {
 	})
 }
 
-// lookAlike differs from me by one letter: U+017F (long s) folds to "s"
-// in Unicode, but is not the same address.
+// lookAlike differs from me by one letter. U+017F (long s) folds to "s" in
+// Unicode, but the address is not the same.
 const lookAlike = "67512030+cybagard@uſers.noreply.github.com"
 
 // An address with a non-ASCII byte never matches the noreply address.
@@ -247,8 +248,8 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 	}
 }
 
-// The FAIL output gives the sign-off hint only for an unsigned commit, and
-// the identity hint only for a commit that breaks the identity rule.
+// The FAIL output gives the sign-off hint only for an unsigned commit.
+// It gives the identity hint only for a commit that breaks the identity rule.
 func TestFailHintMatchesFailure(t *testing.T) {
 	const signHint, idHint = "git commit -s", "noreply address"
 	t.Run("identity only", func(t *testing.T) {
@@ -312,8 +313,8 @@ func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	}
 }
 
-// git accepts a trailer block that mixes a git-generated trailer with
-// other lines (for example "cherry picked from"); so does dco.
+// Git accepts a trailer block that mixes a trailer with other lines, for
+// example "cherry picked from". So does dco.
 func TestCherryPickBlockPasses(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nbody\n\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\nSigned-off-by: t <"+me+">\n"); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
@@ -326,9 +327,8 @@ func TestCRLFMessage(t *testing.T) {
 	}
 }
 
-// The identity rule: each case is one commit; a failing commit gets an
-// "identity:" line with its 12-character hash, and no output holds an
-// address.
+// The identity rule: each case is one commit. A failing commit gets an
+// "identity:" line with its 12-character hash. No output holds an address.
 func TestIdentityRule(t *testing.T) {
 	asOther := func(v string) []string { return []string{v + "=" + other} }
 	cases := []struct {

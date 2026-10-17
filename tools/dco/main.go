@@ -1,31 +1,33 @@
-// Command dco checks Developer Certificate of Origin sign-off (DCO 1.1)
-// and commit identity: every commit in base..head must carry a
-// "Signed-off-by" trailer, and the only identity in the public history is
-// the maintainer's noreply address.
+// Command dco checks the Developer Certificate of Origin sign-off (DCO 1.1)
+// and the commit identity. Every commit in base..head must carry a
+// "Signed-off-by" trailer. Each commit uses only the permitted addresses
+// (below).
 //
 // Usage:
 //
 //	dco <base> <head>
 //
-// Identity rule, for each commit (addresses and trailer keys compare
-// without case; the author and committer come from %ae and %ce, so no
-// mailmap applies):
-//   - the author address is the maintainer noreply address;
-//   - the committer address is that address, or the GitHub committer address
-//     (GitHub makes the commit for a web merge);
-//   - every Signed-off-by value has the maintainer address;
-//   - every address in any other trailer is the maintainer address, or the
-//     Claude co-author address in a Co-authored-by trailer whose name is
-//     "Claude" or starts with "Claude ".
+// Identity rule, for each commit. Addresses and trailer keys compare
+// without case. The author and committer come from %ae and %ce, so no
+// mailmap applies.
+//   - The author address is the maintainer noreply address.
+//   - The committer address is that address, or the GitHub committer
+//     address. GitHub makes the commit for a web merge.
+//   - Every Signed-off-by value has the maintainer address.
+//   - Every address in any other trailer is the maintainer address. The
+//     Claude co-author address is also permitted, in a Co-authored-by
+//     trailer. The name in that trailer is "Claude" or starts with
+//     "Claude ".
 //
 // An address is any token of the form x@y with no space, "<" or ">". A
-// trailer without an address is not checked.
+// trailer without an address is not checked. A Signed-off-by trailer
+// without an address fails.
 //
-// It shells out to git (the toolchain image ships it) and reports short
-// commit hashes and counts only — never an address, a name, a subject or a
-// trailer value, which are untrusted (PR-authored) content in a CI log.
+// It runs git (the toolchain image ships it). It prints short commit
+// hashes and counts only. It never prints an address, a name, a subject or
+// a trailer value. A PR author controls these, and a CI log shows them.
 // Exit codes: 0 all commits pass (or an empty range), 1 a commit fails a
-// check, 2 usage or git error.
+// check, 2 usage, git or log format error.
 package main
 
 import (
@@ -51,11 +53,12 @@ var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 // addrRE finds each address in a trailer value.
 var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
-// logFormat asks git for each commit's hash, author address, committer
-// address and trailers. Git's own trailer parser decides what a trailer is
-// (only: no other line of the last paragraph), so dco accepts exactly the
-// sign-offs that git recognizes (for example the block that cherry-pick -x
-// -s writes), and never the subject or a line in the middle of the body.
+// logFormat asks git for the hash, author address, committer address and
+// trailers of each commit. Git's own trailer parser decides what a trailer
+// is. The option `only` drops the lines of the trailer block that are not
+// trailers. So dco accepts exactly the sign-offs that git recognizes, for
+// example the block that cherry-pick -x -s writes. It never accepts the
+// subject or a line in the middle of the body.
 const logFormat = "--format=%H%x00%ae%x00%ce%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
@@ -81,10 +84,10 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 
 // check parses the output of git log and applies both rules to each commit.
 func check(out []byte, base, head string, stdout, stderr io.Writer) int {
-	// Each record is H NUL AE NUL CE NUL TRAILERS NUL, and git ends every
+	// Each record is H NUL AE NUL CE NUL TRAILERS NUL. Git ends every
 	// record with its own newline, so records separate on NUL+LF. Trailers
-	// are joined by LF. An unfolded trailer holds no LF and no NUL. No
-	// PR-authored text is printed: only hashes and counts.
+	// are joined by LF. An unfolded trailer holds no LF and no NUL. The
+	// checker prints no PR-authored text, only hashes and counts.
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
