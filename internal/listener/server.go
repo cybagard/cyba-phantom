@@ -21,7 +21,7 @@ type Config struct {
 	// handshake.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
-	// all Serve calls. limits.max_conns.
+	// all Serve and ServePlain calls. limits.max_conns.
 	MaxConns int
 	// HeaderBytes is the size cap of the request head: the request line, the
 	// header lines and the blank line. New refuses a value below 8192.
@@ -96,13 +96,15 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	}
 	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes}
 	// http/1.1 comes first, so a client that offers both gets http/1.1. A client
-	// that offers only acme-tls/1 is a challenge client: crypto/tls would refuse
-	// it before GetCertificate if the list had no acme-tls/1.
+	// that offers only acme-tls/1 is a challenge client. If the list has no
+	// acme-tls/1, crypto/tls refuses that client before it calls GetCertificate.
 	s.tls.NextProtos = []string{"http/1.1", challengeProto}
 	s.tls.GetConfigForClient = captureHello
 	s.srv = s.newHTTP(h)
-	// net/http calls this function with the connection in the active state and
-	// closes the connection when it returns. It serves no HTTP.
+	// net/http also closes a TLS connection whose negotiated protocol has no
+	// TLSNextProto function, without HTTP. This entry makes that behavior
+	// explicit in this package, and tests use it to count the challenge
+	// connections.
 	s.srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){
 		challengeProto: func(*http.Server, *tls.Conn, http.Handler) {},
 	}
@@ -151,13 +153,12 @@ func periodHook(c net.Conn, st http.ConnState) {
 
 // Serve accepts connections from the raw TCP listener ln until Close or
 // Shutdown. A connection that negotiates acme-tls/1 closes after the handshake
-// and gets no HTTP. The
-// connection cap is on the raw listener, and the TLS layer is on top of it.
-// A connection that a handler hijacks keeps its slot until the handler closes
-// it. All Serve calls of one server share the MaxConns slots and the cap of
-// maxConnsPerSource open connections for each source address. The connections
-// of ln must have a *net.TCPAddr peer address: all connections with another
-// address type share one source count.
+// and gets no HTTP. The connection cap is on the raw listener, and the TLS layer
+// is on top of it. A connection that a handler hijacks keeps its slot until the
+// handler closes it. All Serve calls of one server share the MaxConns slots and
+// the cap of maxConnsPerSource open connections for each source address. The
+// connections of ln must have a *net.TCPAddr peer address: all connections with
+// another address type share one source count.
 func (s *Server) Serve(ln net.Listener) error {
 	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src, s.rd), s.tls))
 }
@@ -207,20 +208,20 @@ func (s *Server) Close() error {
 // connections are done. A connection that is still open when ctx ends is
 // closed, and Shutdown returns the error of ctx.
 func (s *Server) Shutdown(ctx context.Context) error {
-	all := s.all()
-	res := make(chan error, len(all))
-	for _, hs := range all {
+	servers := s.all()
+	res := make(chan error, len(servers))
+	for _, hs := range servers {
 		go func() { res <- hs.Shutdown(ctx) }()
 	}
 	var err error
-	for range all {
+	for range servers {
 		if e := <-res; err == nil {
 			err = e
 		}
 	}
 	if err != nil {
 		// http.Server.Shutdown leaves the open connections open when ctx ends.
-		for _, hs := range all {
+		for _, hs := range servers {
 			_ = hs.Close()
 		}
 	}

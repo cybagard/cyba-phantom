@@ -818,10 +818,10 @@ func TestTS17SourceCapSharedByPlainAndTLS(t *testing.T) {
 	}
 }
 
-// T-S-17: the read budget is the same on the plain socket. After a first request,
+// T-S-18: the read budget is the same on the plain socket. After a first request,
 // a head of header_bytes bytes gets 200 and a head of header_bytes + 2000 bytes
 // closes the connection with no response, on both sockets.
-func TestTS17PlainReadBudget(t *testing.T) {
+func TestTS18PlainReadBudget(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
 	plain, _ := r.servePlain(t, okHandler)
@@ -846,10 +846,10 @@ func TestTS17PlainReadBudget(t *testing.T) {
 	}
 }
 
-// T-S-17: the keep-alive limit runs on the plain socket. A connection that read
+// T-S-18: the keep-alive limit runs on the plain socket. A connection that read
 // 4096 bytes or less in its period stays open. One that read more closes after
 // its response.
-func TestTS17PlainKeepAliveLimit(t *testing.T) {
+func TestTS18PlainKeepAliveLimit(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	plain, _ := r.servePlain(t, okHandler)
 	small := dialPlain(t, plain, 1)

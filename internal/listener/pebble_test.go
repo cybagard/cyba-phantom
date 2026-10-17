@@ -140,9 +140,9 @@ type issueFixture struct {
 	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
 }
 
-// newIssueFixture binds the decoy socket first. A Server from New serves that
-// socket, with GetCertificate of the ACME. Then it builds the ACME for name, with
-// Pebble as the CA. It does not call Start.
+// newIssueFixture binds the decoy socket, then builds the ACME for name with
+// Pebble as the CA. Then it serves the socket with a Server from New and
+// GetCertificate of the ACME. It does not call Start.
 func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
