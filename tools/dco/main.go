@@ -7,25 +7,26 @@
 //
 //	dco <base> <head>
 //
-// Identity rule, for each commit. Addresses and trailer keys compare
-// without case. The author and committer come from %ae and %ce, so no
-// mailmap applies.
+// dco applies the identity rule to each commit. Addresses and trailer keys
+// compare without case. The author and committer come from %ae and %ce, so
+// no mailmap applies.
 //   - The author address is the maintainer noreply address.
 //   - The committer address is that address, or the GitHub committer
 //     address. GitHub makes the commit for a web merge.
 //   - Every Signed-off-by value has the maintainer address.
-//   - Every address in any other trailer is the maintainer address. The
-//     Claude co-author address is also permitted, in a Co-authored-by
+//   - Every address in any other trailer is the maintainer address. dco
+//     also permits the Claude co-author address, in a Co-authored-by
 //     trailer. The name in that trailer is "Claude" or starts with
 //     "Claude ". That trailer holds exactly one address.
 //
-// An address is any token of the form x@y with no space, "<" or ">". A
-// trailer without an address: dco skips it. A Signed-off-by trailer without
+// An address is any token of the form x@y with no space, "<" or ">". dco
+// skips a trailer without an address. A Signed-off-by trailer without
 // an address fails.
 //
-// A commit with an encoding header fails, whatever its value. Git converts
-// the message to UTF-8 from that header. The bytes of an address can then
-// come out as other characters, and dco would see no address.
+// A commit with a non-empty encoding header fails, whatever its value. An
+// empty value gives an empty %e, the same as no header, and dco does not fail
+// it. dco reports such a commit as an identity failure ("identity: <hash>"),
+// with its own hint.
 //
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
@@ -61,9 +62,7 @@ var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 // encoding header and trailers of each commit. Git's own trailer parser
 // decides what a trailer is. The option `only` drops the lines of the
 // trailer block that are not trailers. Because git parses the trailers, dco
-// accepts exactly the sign-offs that git recognizes. One example is the
-// block that cherry-pick -x -s writes. It never accepts the subject or a
-// line in the middle of the body.
+// accepts only the sign-offs that git recognizes as trailers.
 const logFormat = "--format=%H%x00%ae%x00%ce%x00%e%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
@@ -80,7 +79,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	cmd := exec.Command("git", "-C", dir, "log", logFormat, base+".."+head)
 	out, err := cmd.Output()
 	if err != nil {
-		// dco does not print the error text of git: it prints the exit status only.
+		// dco does not print the stderr of git.
 		fmt.Fprintf(stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
@@ -140,7 +139,7 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
 		}
 		if badAddr > 0 {
-			fmt.Fprintln(stdout, "hint: author, committer and trailer addresses must be the maintainer noreply address; a Claude co-author trailer may use the Claude co-author address (see tools/dco/main.go)")
+			fmt.Fprintln(stdout, "hint: the author and trailer addresses must be the maintainer noreply address; the committer can also be the GitHub committer address; a Claude co-author trailer can use the Claude co-author address (see tools/dco/main.go)")
 		}
 		if badEnc > 0 {
 			fmt.Fprintln(stdout, "hint: commits must not set an encoding header")

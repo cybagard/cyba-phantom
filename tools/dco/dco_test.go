@@ -222,8 +222,8 @@ func TestLookAlikeAddressFails(t *testing.T) {
 
 // A trailer key with a non-ASCII byte is not a sign-off key. U+017F (long
 // s) folds to "s" in Unicode. Git drops such a line from the trailers, so a
-// run on a whole commit does not reach the key compare. The test also calls
-// hasSignoff and identityOK directly.
+// run on a whole commit does not reach the code that compares keys. The test
+// also calls hasSignoff and identityOK directly.
 func TestNonASCIIKeyIsNotSignoff(t *testing.T) {
 	failsWith(t, nil, "subject\n\n\xc5\xbfigned-off-by: t <"+me+">\n", "unsigned")
 	if hasSignoff([]string{"\xc5\xbfigned-off-by: t <" + me + ">"}) {
@@ -273,10 +273,13 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 	}
 }
 
+// idHint is the fixed text of the identity hint.
+const idHint = "hint: the author and trailer addresses must be the maintainer noreply address; the committer can also be the GitHub committer address; a Claude co-author trailer can use the Claude co-author address (see tools/dco/main.go)\n"
+
 // The FAIL output gives the sign-off hint only for an unsigned commit.
-// It gives the identity hint only for a commit that breaks the identity rule.
+// It gives the identity hint only for a commit with a wrong address.
 func TestFailHintMatchesFailure(t *testing.T) {
-	const signHint, idHint = "git commit -s", "trailer addresses must be the maintainer noreply address"
+	const signHint = "git commit -s"
 	t.Run("identity only", func(t *testing.T) {
 		_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, signoff)
 		if strings.Contains(out, signHint) || !strings.Contains(out, idHint) {
@@ -389,6 +392,16 @@ func TestEncodingHeaderFails(t *testing.T) {
 		if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") || !strings.Contains(out, hint) {
 			t.Fatalf("run = %d, want 1 with an identity line and the encoding hint; output %q", code, out)
 		}
+		if strings.Contains(out, idHint) {
+			t.Errorf("an encoding-only failure shows the address hint; output %q", out)
+		}
+	})
+	t.Run("empty value", func(t *testing.T) {
+		// An empty value gives an empty %e, the same as no header.
+		dir, _ := forgeCommit(t, "encoding \n", signoff)
+		if code, out, _ := runDCO([]string{"base", "forged"}, dir); code != 0 {
+			t.Fatalf("run = %d, want 0; output %q", code, out)
+		}
 	})
 }
 
@@ -435,6 +448,7 @@ func TestIdentityRule(t *testing.T) {
 		{"co-author named exactly Claude", nil, signoff + "Co-authored-by: Claude <noreply@anthropic.com>\n", 0},
 		{"Claude co-author without angle brackets", nil, signoff + "Co-authored-by: Claude noreply@anthropic.com\n", 1},
 		{"Claude co-author with a second address", nil, signoff + "Co-authored-by: Claude <noreply@anthropic.com>, Bob <noreply@anthropic.com>\n", 1},
+		{"Claude co-author at another address", nil, signoff + "Co-authored-by: Claude <" + other + ">\n", 1},
 		{"co-author named Claudette", nil, signoff + "Co-authored-by: Claudette <noreply@anthropic.com>\n", 1},
 		{"Claude address in another key", nil, signoff + "Reviewed-by: Claude <noreply@anthropic.com>\n", 1},
 		{"address without angle brackets", nil, signoff + "Reviewed-by: " + other + "\n", 1},
