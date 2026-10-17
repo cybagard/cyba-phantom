@@ -579,13 +579,15 @@ func TestTS18UnreadBody(t *testing.T) {
 	if got := post(c, 6000); got != 200 {
 		t.Fatalf("body of 6000 bytes: status %d, want 200", got)
 	}
-	if got := post(c, 10); got != 0 {
-		t.Fatalf("next request after an unread body: status %d, want no response", got)
-	}
-	idle, _ := l.wait(t, 1, 1)
+	// The next request goes out after the idle record, so it cannot be late.
+	idle, _ := l.wait(t, 1, 0)
 	if idle[0].late != 0 || idle[0].used <= keepAliveBytes {
 		t.Fatalf("idle record %+v, want no late bytes and a period over %d bytes", idle[0], keepAliveBytes)
 	}
+	if got := post(c, 10); got != 0 {
+		t.Fatalf("next request after an unread body: status %d, want no response", got)
+	}
+	l.wait(t, 1, 1)
 	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 
 	c = r.dialWhole(t)
