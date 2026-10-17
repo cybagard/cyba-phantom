@@ -225,6 +225,28 @@ func TestSecondSignoffWithoutAddressFails(t *testing.T) {
 	failsWith(t, nil, signoff+"Signed-off-by: Bob\n", "identity")
 }
 
+// Addresses and trailer keys compare without case.
+func TestCaseInsensitiveCompare(t *testing.T) {
+	upper := strings.ToUpper(me)
+	cases := []struct {
+		name string
+		env  []string
+		msg  string
+	}{
+		{"author address in upper case", []string{"GIT_AUTHOR_EMAIL=" + upper}, signoff},
+		{"sign-off address in upper case", nil, "subject\n\nSigned-off-by: t <" + upper + ">\n"},
+		{"sign-off key in lower case", nil, "subject\n\nsigned-off-by: t <" + me + ">\n"},
+		{"Claude address in upper case", nil, signoff + "Co-authored-by: Claude Sonnet 5.5 <NOREPLY@ANTHROPIC.COM>\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if code, out, _ := runOn(t, c.env, c.msg); code != 0 {
+				t.Fatalf("run = %d, want 0; output %q", code, out)
+			}
+		})
+	}
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nSigned-off-by: t <"+me+">\n \t\nclosing words\n"); code != 1 {
