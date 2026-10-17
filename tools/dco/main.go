@@ -145,7 +145,11 @@ func identityOK(author, committer string, trailers []string) bool {
 	}
 	for _, t := range trailers {
 		key, value := splitTrailer(t)
-		for _, a := range addrRE.FindAllString(value, -1) {
+		addrs := addrRE.FindAllString(value, -1)
+		if len(addrs) == 0 && strings.EqualFold(key, "Signed-off-by") {
+			return false
+		}
+		for _, a := range addrs {
 			if sameAddr(a, maintainerAddr) {
 				continue
 			}

@@ -219,6 +219,12 @@ func TestLookAlikeAddressFails(t *testing.T) {
 	})
 }
 
+// Every Signed-off-by value has the noreply address, also next to a valid
+// sign-off.
+func TestSecondSignoffWithoutAddressFails(t *testing.T) {
+	failsWith(t, nil, signoff+"Signed-off-by: Bob\n", "identity")
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nSigned-off-by: t <"+me+">\n \t\nclosing words\n"); code != 1 {
