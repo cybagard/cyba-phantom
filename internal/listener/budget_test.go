@@ -1,6 +1,7 @@
 package listener
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,30 +11,43 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash"
+	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// periodRec is what the wrapper of one connection counted in one period.
+// periodRec is what the wrapper of one connection counted in one period. The
+// late bytes, read after the response write, are not in used.
 type periodRec struct{ used, charged int64 }
 
 func (c *limitConn) snapshot() periodRec {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return periodRec{c.used, c.charged}
+	return periodRec{c.used - c.late, c.charged}
+}
+
+// readTotal is the bytes that the wrapper read in this period, late ones too.
+func (c *limitConn) readTotal() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.used
 }
 
 // periodLog records the counts of the wrapper at each idle state and at each
-// close, before the production hook acts on them.
+// close, before the production hook acts on them. conn is the last wrapper.
 type periodLog struct {
 	mu           sync.Mutex
 	idle, closed []periodRec
+	conn         atomic.Pointer[limitConn]
 }
 
 func (l *periodLog) lens() (int, int) {
@@ -59,6 +73,7 @@ func (r *rig) watchPeriods() *periodLog {
 	r.s.srv.ConnState = func(c net.Conn, st http.ConnState) {
 		if tc, ok := c.(*tls.Conn); ok {
 			if lc, ok := tc.NetConn().(*limitConn); ok {
+				l.conn.Store(lc)
 				l.mu.Lock()
 				switch st {
 				case http.StateIdle:
@@ -241,6 +256,230 @@ func (w *recordWriter) handshake(msg []byte) []byte {
 		out.Write(w.aead.Seal(nil, nonce, inner, ad))
 	}
 	return out.Bytes()
+}
+
+// lateResult is the result of lateRequests.
+type lateResult struct {
+	c      *tls.Conn
+	br     *bufio.Reader
+	second int   // status of the second response, 0: none
+	base   int64 // bytes that the client wrote before rest
+	l      *periodLog
+}
+
+// lateRequests forces the late bytes. The handler flushes a whole response and
+// waits. The client writes first, reads that response, and writes rest. The
+// test waits until the wrapper has read the late bytes (all of them with whole,
+// else the first record), and only then lets the handler return. So the bytes
+// reach the wrapper before the idle state in every run, with no sleep. With
+// whole the client sends one record for each write.
+func lateRequests(t *testing.T, whole bool, first, rest string) lateResult {
+	t.Helper()
+	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		_, _ = io.WriteString(w, "ok")
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	l := r.watchPeriods()
+	r.serve(t)
+	raw, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := &countConn{Conn: raw}
+	cfg := r.clientConfig()
+	cfg.DynamicRecordSizingDisabled = whole
+	c := tls.Client(cc, cfg)
+	t.Cleanup(func() { _ = c.Close() })
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := c.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(c, first)
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	res := lateResult{c: c, br: br, base: int64(cc.n), l: l}
+	_, _ = io.WriteString(c, rest)
+	total := int64(cc.n)
+	waitFor(t, "the late bytes in the wrapper", func() bool {
+		lc := l.conn.Load()
+		return lc != nil && (whole && lc.readTotal() >= total || !whole && lc.readTotal() > res.base)
+	})
+	once.Do(func() { close(release) })
+	if resp2, err := http.ReadResponse(br, nil); err == nil {
+		res.second = resp2.StatusCode
+		_, _ = io.Copy(io.Discard, resp2.Body)
+	}
+	return res
+}
+
+// T-S-18: split write, forced. The client writes the rest of the second head
+// after it read the first response and before the idle state. The rest is more
+// than 4096 bytes, so the wrapper reads it in several Reads. The first period
+// holds only the bytes before it, and the rest starts the next period. A head
+// that fits the next budget gets 200. A head of header_bytes + 4097 bytes is
+// not served.
+func TestTS18LateBytesStartTheNextPeriod(t *testing.T) {
+	const splitBytes = 2000
+	for _, tc := range []struct {
+		name    string
+		n, want int
+	}{
+		{"fits", testHeaderBytes, 200},
+		{"over", testHeaderBytes + keepAliveBytes + 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := head(tc.n)
+			res := lateRequests(t, true, "GET / HTTP/1.1\r\nHost: a\r\n\r\n"+h[:splitBytes], h[splitBytes:])
+			if res.second != tc.want {
+				t.Fatalf("second head of %d bytes: status %d, want %d", tc.n, res.second, tc.want)
+			}
+			idle, _ := res.l.wait(t, 1, 0)
+			if idle[0].used != res.base {
+				t.Fatalf("first period %d bytes, want %d", idle[0].used, res.base)
+			}
+			if tc.want == 200 {
+				// The late part is more than 4096 bytes: it is the whole next period,
+				// so the connection closes after the second response.
+				idle, _ = res.l.wait(t, 2, 1)
+				if p := idle[1]; p.used <= keepAliveBytes || p.charged != p.used-keepAliveBytes {
+					t.Fatalf("second period %+v", p)
+				}
+			}
+		})
+	}
+}
+
+// T-S-18: a normal keep-alive client, forced. It reads the whole first response
+// and sends a request of 3000 bytes before the idle state. The request gets 200,
+// the first period holds only the bytes before it, and the connection stays
+// open for a third request. A second request over the next budget closes.
+func TestTS18LateRequestOfNormalClient(t *testing.T) {
+	const req = "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+	res := lateRequests(t, false, req, head(3000))
+	if res.second != 200 {
+		t.Fatalf("request of 3000 bytes: status %d, want 200", res.second)
+	}
+	if idle, _ := res.l.wait(t, 1, 0); idle[0].used != res.base {
+		t.Fatalf("first period %d bytes, want %d", idle[0].used, res.base)
+	}
+	res.l.wait(t, 2, 0)
+	if got := roundTrip(res.c, head(0)); got != 200 {
+		t.Fatalf("third request: status %d, want 200", got)
+	}
+	if res := lateRequests(t, false, req, head(testHeaderBytes+keepAliveBytes+1)); res.second == 200 {
+		t.Fatal("a request over the budget got 200")
+	}
+}
+
+// slowConn is a connection whose Read waits for the test.
+type slowConn struct {
+	net.Conn
+	entered chan struct{} // gets a value when Read starts
+	data    chan []byte
+}
+
+func (c *slowConn) Read(p []byte) (int, error) {
+	c.entered <- struct{}{}
+	return copy(p, <-c.data), nil
+}
+
+func (c *slowConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *slowConn) Close() error                { return nil }
+
+// T-S-18: the pool and the keep-alive limit with late bytes. The late bytes are
+// more than 4096 and come in two Reads, the first of them open at a write. At
+// idle the period before them is within 4096 bytes, so the connection stays
+// open, the pool holds the late bytes above 4096, and it gives them back one
+// time at the next idle. A period of more than 4096 bytes before the late bytes
+// closes.
+func TestTS18LateBytesPoolAndKeepAlive(t *testing.T) {
+	rd := newReadLimit(testHeaderBytes)
+	conn := func() (*limitConn, *slowConn) {
+		sc := &slowConn{entered: make(chan struct{}, 1), data: make(chan []byte)}
+		src := newSourceCap(1)
+		key := netip.MustParseAddr("192.0.2.1")
+		src.take(key)
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		lc := &limitConn{Conn: sc, sem: sem, src: src, key: key, rd: rd, left: rd.first}
+		lc.startRequest() // a Write now is a response write
+		return lc, sc
+	}
+	read := func(lc *limitConn, sc *slowConn, n int, write bool) {
+		t.Helper()
+		done := make(chan int)
+		go func() { m, _ := lc.Read(make([]byte, n)); done <- m }()
+		<-sc.entered // the Read is open
+		if write {
+			_, _ = lc.Write([]byte("x"))
+		}
+		sc.data <- make([]byte, n)
+		if m := <-done; m != n {
+			t.Fatalf("read %d bytes, want %d", m, n)
+		}
+	}
+	lc, sc := conn()
+	read(lc, sc, 1000, false)
+	read(lc, sc, keepAliveBytes, true)
+	read(lc, sc, 1904, false)
+	lc.nextPeriod()
+	if lc.closed || lc.used != 6000 || lc.charged != 6000-keepAliveBytes || rd.pool.Load() != lc.charged || lc.left != rd.next-6000 {
+		t.Fatalf("after the first idle: used %d, charged %d, pool %d, left %d, closed %v", lc.used, lc.charged, rd.pool.Load(), lc.left, lc.closed)
+	}
+	lc.nextPeriod() // this period read more than 4096 bytes
+	if !lc.closed || rd.pool.Load() != 0 {
+		t.Fatalf("after the second idle: closed %v, pool %d", lc.closed, rd.pool.Load())
+	}
+	_ = lc.Close()
+	if rd.pool.Load() != 0 {
+		t.Fatalf("pool %d after Close, want 0", rd.pool.Load())
+	}
+
+	lc, sc = conn()
+	read(lc, sc, keepAliveBytes, false)
+	read(lc, sc, 1000, false)
+	read(lc, sc, 100, true)
+	lc.nextPeriod() // 5096 bytes before the late ones
+	if !lc.closed || rd.pool.Load() != 0 {
+		t.Fatalf("a period over 4096 bytes before the late bytes: closed %v, pool %d", lc.closed, rd.pool.Load())
+	}
+}
+
+// T-S-18: a request body that the handler does not read. A body of 6000 bytes
+// gets its response, and the connection is closed at the idle state of the next
+// request at the latest. A body over the next budget closes the connection. The
+// pool is back to 0 after the close.
+func TestTS18UnreadBody(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	post := func(c net.Conn, n int) int {
+		return roundTrip(c, fmt.Sprintf("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: %d\r\n\r\n%s", n, strings.Repeat("a", n)))
+	}
+	c := r.dialWhole(t)
+	if got := post(c, 6000); got != 200 {
+		t.Fatalf("body of 6000 bytes: status %d, want 200", got)
+	}
+	_ = post(c, 10) // the connection may be closed already
+	l.wait(t, 1, 1)
+	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
+
+	c = r.dialWhole(t)
+	if got := status(c, 0); got != 200 {
+		t.Fatalf("first request: status %d, want 200", got)
+	}
+	_ = post(c, int(r.s.rd.next)+1)
+	l.wait(t, 1, 2)
+	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 }
 
 // expectBudgetClose checks that the client got a close and that the wrapper of

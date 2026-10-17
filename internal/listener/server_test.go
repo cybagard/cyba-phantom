@@ -380,8 +380,11 @@ func pipelined(t *testing.T, r *rig, l *periodLog, n, split int) (second int, us
 	if resp.StatusCode != 200 {
 		t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
 	}
-	_, _ = io.WriteString(c, h[split:])
+	// The rest of the head goes out only after the idle state of the first
+	// request, so its bytes cannot reach the wrapper before that state.
 	want := before + 1
+	l.wait(t, want, 0)
+	_, _ = io.WriteString(c, h[split:])
 	if resp2, err := http.ReadResponse(br, nil); err == nil {
 		second = resp2.StatusCode
 		_ = resp2.Body.Close()
@@ -455,8 +458,11 @@ func TestTS18PipelinedHeadOneWrite(t *testing.T) {
 // then sends the rest of the head. The bytes that net/http holds from the first
 // period do not count against its header limit, so the second head can be
 // larger than header_bytes. The test asserts only a bound. A head of
-// header_bytes + 4097 bytes gets no response (status 0, the connection ends).
-// A served head is not larger than header_bytes + 4096.
+// header_bytes + 4097 bytes is not served. A served head is not larger than
+// header_bytes + 4096. The client sends the rest of the head only after the
+// idle record of the first request, so the test does not depend on time. The
+// forced timing, with the rest before the idle state, is in
+// TestTS18LateBytesStartTheNextPeriod.
 //
 // Measured with header_bytes 8192, splitBytes 2000 and a TLS 1.3 client of the
 // Go library: the largest second head with status 200 is 10192 bytes
@@ -470,8 +476,8 @@ func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 	over := testHeaderBytes + keepAliveBytes + 1
 	second, used := pipelined(t, r, l, over, splitBytes)
 	t.Logf("split write: second head of %d bytes: status %d, first period %d bytes", over, second, used)
-	if second != 0 || used > keepAliveBytes {
-		t.Fatalf("second head of %d bytes: status %d, first period %d bytes; want no response", over, second, used)
+	if second == 200 || used > keepAliveBytes {
+		t.Fatalf("second head of %d bytes: status %d, first period %d bytes; want it not served", over, second, used)
 	}
 	if second, _ := pipelined(t, r, l, splitBytes, splitBytes); second != 200 {
 		t.Fatalf("a second head of %d bytes: status %d, want 200", splitBytes, second)

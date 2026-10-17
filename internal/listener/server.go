@@ -133,21 +133,25 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 	}
 }
 
-// periodHook is the ConnState hook. It starts the next read period of a
-// connection that becomes idle. A connection that read more than keepAliveBytes
+// periodHook is the ConnState hook. It marks a request as active, and it starts
+// the next read period of a connection that becomes idle. A connection that read more than keepAliveBytes
 // in its period closes, so it gets no keep-alive. It must not wait on the
 // network. A connection of another type is left as it is. The connection of a
 // plain serve is the limitConn itself; the connection of the TLS serve has a
 // *tls.Conn around it.
 func periodHook(c net.Conn, st http.ConnState) {
-	if st != http.StateIdle {
+	if st != http.StateIdle && st != http.StateActive {
 		return
 	}
 	if tc, ok := c.(*tls.Conn); ok {
 		c = tc.NetConn()
 	}
 	if lc, ok := c.(*limitConn); ok {
-		lc.nextPeriod()
+		if st == http.StateActive {
+			lc.startRequest()
+		} else {
+			lc.nextPeriod()
+		}
 	}
 }
 
