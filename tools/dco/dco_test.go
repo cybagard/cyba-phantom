@@ -220,6 +220,27 @@ func TestLookAlikeAddressFails(t *testing.T) {
 	})
 }
 
+// A trailer key with a non-ASCII byte is not a sign-off key. U+017F (long
+// s) folds to "s" in Unicode. Git drops such a line from the trailers, so
+// this test also runs the checker on a whole commit.
+func TestNonASCIIKeyIsNotSignoff(t *testing.T) {
+	failsWith(t, nil, "subject\n\nſigned-off-by: t <"+me+">\n", "unsigned")
+	if hasSignoff([]string{"ſigned-off-by: t <" + me + ">"}) {
+		t.Error("hasSignoff accepts a key with U+017F")
+	}
+	if !identityOK(me, me, []string{"ſigned-off-by: t"}) {
+		t.Error("identityOK treats a key with U+017F as a sign-off key")
+	}
+}
+
+// A Co-authored-by key with a non-ASCII byte does not permit the Claude
+// address.
+func TestNonASCIICoauthorKeyFails(t *testing.T) {
+	if identityOK(me, me, []string{"Co-authöred-by: Claude <" + claudeAddr + ">"}) {
+		t.Error("identityOK permits the Claude address under a key with a non-ASCII byte")
+	}
+}
+
 // Every Signed-off-by value has the noreply address, also next to a valid
 // sign-off.
 func TestSecondSignoffWithoutAddressFails(t *testing.T) {

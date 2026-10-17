@@ -145,7 +145,7 @@ func splitTrailer(t string) (key, value string) {
 // Signed-off-by sign-off.
 func hasSignoff(trailers []string) bool {
 	for _, t := range trailers {
-		if k, v := splitTrailer(t); strings.EqualFold(k, "Signed-off-by") && signoffRE.MatchString(v) {
+		if k, v := splitTrailer(t); sameAddr(k, "Signed-off-by") && signoffRE.MatchString(v) {
 			return true
 		}
 	}
@@ -161,14 +161,14 @@ func identityOK(author, committer string, trailers []string) bool {
 	for _, t := range trailers {
 		key, value := splitTrailer(t)
 		addrs := addrRE.FindAllString(value, -1)
-		if len(addrs) == 0 && strings.EqualFold(key, "Signed-off-by") {
+		if len(addrs) == 0 && sameAddr(key, "Signed-off-by") {
 			return false
 		}
 		for _, a := range addrs {
 			if sameAddr(a, maintainerAddr) {
 				continue
 			}
-			if sameAddr(a, claudeAddr) && strings.EqualFold(key, "Co-authored-by") && claudeName(value) {
+			if sameAddr(a, claudeAddr) && sameAddr(key, "Co-authored-by") && claudeName(value) {
 				continue
 			}
 			return false
@@ -179,6 +179,7 @@ func identityOK(author, committer string, trailers []string) bool {
 
 // sameAddr reports whether two addresses are equal without case. Only ASCII
 // letters fold. An address with a byte of 0x80 or more never matches.
+// Trailer keys follow the same rule.
 func sameAddr(a, b string) bool {
 	for _, s := range []string{a, b} {
 		for i := 0; i < len(s); i++ {
