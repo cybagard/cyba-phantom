@@ -89,6 +89,46 @@ func (r *rig) dialWhole(t *testing.T) *tls.Conn {
 	return c
 }
 
+// countConn counts the bytes that the client writes.
+type countConn struct {
+	net.Conn
+	n int
+}
+
+func (c *countConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.n += n
+	return n, err
+}
+
+// dialReading opens a TLS 1.3 connection from 127.0.0.<host>. Then it writes one
+// encrypted record with the start of a Certificate-type message, so that the
+// server reads exactly total bytes in the first period and waits for more.
+func (r *rig) dialReading(t *testing.T, host byte, total int) *tls.Conn {
+	t.Helper()
+	raw, err := loopbackDialer(host).Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	cc := &countConn{Conn: raw}
+	var keyLog bytes.Buffer
+	cfg := r.clientConfig()
+	cfg.MinVersion, cfg.KeyLogWriter = tls.VersionTLS13, &keyLog
+	tc := tls.Client(cc, cfg)
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	w := newRecordWriter(t, keyLog.String(), tc.ConnectionState().CipherSuite)
+	// A record is 5 bytes of header, the message, 1 byte of type and 16 of tag.
+	rec := w.handshake(certMessage()[:total-cc.n-22])
+	if cc.n+len(rec) != total {
+		t.Fatalf("record of %d bytes after %d handshake bytes, want %d in all", len(rec), cc.n, total)
+	}
+	_, _ = raw.Write(rec) // the server can close before the write ends
+	return tc
+}
+
 // manyProtos returns n ALPN values of 255 bytes, then http/1.1.
 func manyProtos(n int) []string {
 	var ps []string
@@ -133,8 +173,9 @@ func (c *nthWrite) Write(p []byte) (int, error) {
 }
 
 // recordWriter writes TLS 1.3 records with the client application traffic key,
-// from the key log of the client. It is the first record after the handshake,
-// so the sequence number starts at 0.
+// from the key log of the client. The first record that it writes has sequence
+// number 0, so use it only for the first records after the handshake. Each
+// record that it writes adds 1 to the number.
 type recordWriter struct {
 	aead cipher.AEAD
 	iv   []byte

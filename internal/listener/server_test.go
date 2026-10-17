@@ -395,10 +395,10 @@ func pipelined(t *testing.T, r *rig, l *periodLog, n, split int) (second int, us
 	return second, idle[before].used
 }
 
-// largestServed searches the largest second head from lo (served) to hi (not
-// served) that gets 200, with the given split. A served head must come after a
-// first period of 4096 bytes or less. It returns the head size and the bytes of
-// the first period for it.
+// largestServed finds, with a binary search, the largest second head from lo
+// (served) to hi (not served) that gets 200, with the given split. A served
+// head must come after a first period of 4096 bytes or less. It returns the
+// head size and the bytes of the first period for it.
 func largestServed(t *testing.T, r *rig, l *periodLog, lo, hi, split int) (int, int64) {
 	t.Helper()
 	for hi-lo > 1 {
@@ -454,14 +454,14 @@ func TestTS18PipelinedHeadOneWrite(t *testing.T) {
 // or less and the connection stays open after the first response. The client
 // then sends the rest of the head. The bytes that net/http holds from the first
 // period do not count against its header limit, so the second head can be
-// larger than header_bytes. The test asserts only a bound: a head of
-// header_bytes + 4097 bytes or more is not served, and a served head is not
-// larger than header_bytes + 4096.
+// larger than header_bytes. The test asserts only a bound. A head of
+// header_bytes + 4097 bytes gets no response (status 0, the connection ends).
+// A served head is not larger than header_bytes + 4096.
 //
 // Measured with header_bytes 8192, splitBytes 2000 and a TLS 1.3 client of the
-// Go library: the largest second head with status 200 is 10192 bytes (header_bytes
-// + 2000, the same as splitBytes). The first period read 3627 bytes. A head of
-// header_bytes + 4097 bytes (12289) gets no response (the connection closes).
+// Go library: the largest second head with status 200 is 10192 bytes
+// (header_bytes + 2000, the same as splitBytes). The first period read 3627
+// bytes. A head of 12289 bytes (header_bytes + 4097) gets no response.
 func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 	const splitBytes = 2000
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
@@ -470,8 +470,8 @@ func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 	over := testHeaderBytes + keepAliveBytes + 1
 	second, used := pipelined(t, r, l, over, splitBytes)
 	t.Logf("split write: second head of %d bytes: status %d, first period %d bytes", over, second, used)
-	if second == 200 || used > keepAliveBytes {
-		t.Fatalf("second head of %d bytes: status %d, first period %d bytes", over, second, used)
+	if second != 0 || used > keepAliveBytes {
+		t.Fatalf("second head of %d bytes: status %d, first period %d bytes; want no response", over, second, used)
 	}
 	if second, _ := pipelined(t, r, l, splitBytes, splitBytes); second != 200 {
 		t.Fatalf("a second head of %d bytes: status %d, want 200", splitBytes, second)

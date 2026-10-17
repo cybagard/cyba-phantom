@@ -176,7 +176,9 @@ func (l *limitListener) inUse() int { return len(l.sem) }
 // It also counts the bytes that Read takes from the socket. A period is the
 // time from the start of the connection, or from the last idle state, to the
 // next idle state. Read fails when the budget of the period is used. The bytes
-// of a period above keepAliveBytes are charged to the pool of the Server.
+// of a period above keepAliveBytes are charged to the pool of the Server. The
+// charged bytes go back to the pool in Close. A connection with charged bytes
+// read more than keepAliveBytes, so it also closes at its idle state.
 type limitConn struct {
 	net.Conn
 	sem  chan struct{}
@@ -248,8 +250,9 @@ func (c *limitConn) Read(p []byte) (int, error) {
 }
 
 // nextPeriod ends the period at an idle state. A connection that read more than
-// keepAliveBytes closes. Another one gives its charged bytes back and gets the
-// budget of the next period. It does not wait on the network.
+// keepAliveBytes closes, and Close gives its charged bytes back. Another one
+// has no charged bytes, so the refund here gives back 0. It gets the budget of
+// the next period. It does not wait on the network.
 func (c *limitConn) nextPeriod() {
 	c.mu.Lock()
 	if c.used > keepAliveBytes {
