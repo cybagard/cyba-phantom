@@ -118,8 +118,14 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "dco: no commits in range — nothing to check")
 		return 0
 	case unsigned > 0 || badID > 0:
-		fmt.Fprintf(stdout, "dco FAIL: of %d commits in %s..%s, %d lack a Signed-off-by trailer (sign with `git commit -s`) and %d break the identity rule\n",
+		fmt.Fprintf(stdout, "dco FAIL: of %d commits in %s..%s, %d lack a Signed-off-by trailer and %d break the identity rule\n",
 			total, base, head, unsigned, badID)
+		if unsigned > 0 {
+			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
+		}
+		if badID > 0 {
+			fmt.Fprintln(stdout, "hint: use the noreply address for author, committer and every address trailer")
+		}
 		return 1
 	}
 	fmt.Fprintf(stdout, "dco: all %d commits in %s..%s carry Signed-off-by and pass the identity rule\n", total, base, head)

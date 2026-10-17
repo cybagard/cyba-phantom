@@ -247,6 +247,30 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 	}
 }
 
+// The FAIL output gives the sign-off hint only for an unsigned commit, and
+// the identity hint only for a commit that breaks the identity rule.
+func TestFailHintMatchesFailure(t *testing.T) {
+	const signHint, idHint = "git commit -s", "noreply address"
+	t.Run("identity only", func(t *testing.T) {
+		_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, signoff)
+		if strings.Contains(out, signHint) || !strings.Contains(out, idHint) {
+			t.Errorf("want the identity hint only; output %q", out)
+		}
+	})
+	t.Run("unsigned only", func(t *testing.T) {
+		_, out, _ := runOn(t, nil, "subject\n")
+		if !strings.Contains(out, signHint) || strings.Contains(out, idHint) {
+			t.Errorf("want the sign-off hint only; output %q", out)
+		}
+	})
+	t.Run("both", func(t *testing.T) {
+		_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, "subject\n")
+		if !strings.Contains(out, signHint) || !strings.Contains(out, idHint) {
+			t.Errorf("want both hints; output %q", out)
+		}
+	})
+}
+
 // A record with fewer than four fields is an error. The checker prints a
 // fixed line, no part of the record, and never "all N commits pass".
 func TestMalformedRecordIsError(t *testing.T) {
