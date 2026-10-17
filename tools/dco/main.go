@@ -139,23 +139,36 @@ func hasSignoff(trailers []string) bool {
 
 // identityOK applies the identity rule to one commit.
 func identityOK(author, committer string, trailers []string) bool {
-	if !strings.EqualFold(author, maintainerAddr) ||
-		!(strings.EqualFold(committer, maintainerAddr) || strings.EqualFold(committer, githubAddr)) {
+	if !sameAddr(author, maintainerAddr) ||
+		!(sameAddr(committer, maintainerAddr) || sameAddr(committer, githubAddr)) {
 		return false
 	}
 	for _, t := range trailers {
 		key, value := splitTrailer(t)
 		for _, a := range addrRE.FindAllString(value, -1) {
-			if strings.EqualFold(a, maintainerAddr) {
+			if sameAddr(a, maintainerAddr) {
 				continue
 			}
-			if strings.EqualFold(a, claudeAddr) && strings.EqualFold(key, "Co-authored-by") && claudeName(value) {
+			if sameAddr(a, claudeAddr) && strings.EqualFold(key, "Co-authored-by") && claudeName(value) {
 				continue
 			}
 			return false
 		}
 	}
 	return true
+}
+
+// sameAddr reports whether two addresses are equal without case. Only ASCII
+// letters fold. An address with a byte of 0x80 or more never matches.
+func sameAddr(a, b string) bool {
+	for _, s := range []string{a, b} {
+		for i := 0; i < len(s); i++ {
+			if s[i] >= 0x80 {
+				return false
+			}
+		}
+	}
+	return strings.EqualFold(a, b)
 }
 
 // claudeName reports whether the name before the "<" of a trailer value is

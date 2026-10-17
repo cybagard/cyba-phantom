@@ -202,6 +202,23 @@ func TestSOHInTrailerDoesNotSplit(t *testing.T) {
 	})
 }
 
+// lookAlike differs from me by one letter: U+017F (long s) folds to "s"
+// in Unicode, but is not the same address.
+const lookAlike = "67512030+cybagard@uſers.noreply.github.com"
+
+// An address with a non-ASCII byte never matches the noreply address.
+func TestLookAlikeAddressFails(t *testing.T) {
+	t.Run("author", func(t *testing.T) {
+		failsWith(t, []string{"GIT_AUTHOR_EMAIL=" + lookAlike}, signoff, "identity")
+	})
+	t.Run("committer", func(t *testing.T) {
+		failsWith(t, []string{"GIT_COMMITTER_EMAIL=" + lookAlike}, signoff, "identity")
+	})
+	t.Run("sign-off", func(t *testing.T) {
+		failsWith(t, nil, "subject\n\nSigned-off-by: t <"+lookAlike+">\n", "identity")
+	})
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nSigned-off-by: t <"+me+">\n \t\nclosing words\n"); code != 1 {
