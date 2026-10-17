@@ -23,6 +23,10 @@
 // trailer without an address is not checked. A Signed-off-by trailer
 // without an address fails.
 //
+// A commit with an encoding header fails, whatever its value. Git converts
+// the message to UTF-8 from that header. The bytes of an address can then
+// come out as other characters, and dco would see no address.
+//
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
 // a trailer value. A PR author controls these, and a CI log shows them.
@@ -53,13 +57,13 @@ var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 // addrRE finds each address in a trailer value.
 var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
-// logFormat asks git for the hash, author address, committer address and
-// trailers of each commit. Git's own trailer parser decides what a trailer
+// logFormat asks git for the hash, author address, committer address,
+// encoding header and trailers of each commit. Git's own trailer parser decides what a trailer
 // is. The option `only` drops the lines of the trailer block that are not
 // trailers. So dco accepts exactly the sign-offs that git recognizes, for
 // example the block that cherry-pick -x -s writes. It never accepts the
 // subject or a line in the middle of the body.
-const logFormat = "--format=%H%x00%ae%x00%ce%x00%(trailers:only,unfold,separator=%x0a)%x00"
+const logFormat = "--format=%H%x00%ae%x00%ce%x00%e%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
 
@@ -84,7 +88,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 
 // check parses the output of git log and applies both rules to each commit.
 func check(out []byte, base, head string, stdout, stderr io.Writer) int {
-	// Each record is H NUL AE NUL CE NUL TRAILERS NUL. Git ends every
+	// Each record is H NUL AE NUL CE NUL E NUL TRAILERS NUL. Git ends every
 	// record with its own newline, so records separate on NUL+LF. Trailers
 	// are joined by LF. An unfolded trailer holds no LF and no NUL. The
 	// checker prints no PR-authored text, only hashes and counts.
@@ -92,10 +96,10 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
 	}
-	total, unsigned, badID := 0, 0, 0
+	total, unsigned, badID, badEnc, badAddr := 0, 0, 0, 0, 0
 	for _, rec := range records {
-		f := bytes.SplitN(rec, []byte{0}, 4)
-		if len(f) < 4 {
+		f := bytes.SplitN(rec, []byte{0}, 5)
+		if len(f) < 5 {
 			// The record is not printed: it is PR-authored content.
 			fmt.Fprintln(stderr, "dco: malformed git log record")
 			return 2
@@ -105,14 +109,22 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 			hash = hash[:12]
 		}
 		total++
-		trailers := strings.Split(string(f[3]), "\n")
+		trailers := strings.Split(string(f[4]), "\n")
 		if !hasSignoff(trailers) {
 			unsigned++
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
 		}
-		if !identityOK(string(f[1]), string(f[2]), trailers) {
+		encoded := len(f[3]) > 0
+		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers)
+		if encoded || wrongAddr {
 			badID++
 			fmt.Fprintf(stdout, "identity: %s\n", hash)
+		}
+		if encoded {
+			badEnc++
+		}
+		if wrongAddr {
+			badAddr++
 		}
 	}
 
@@ -126,8 +138,11 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 		if unsigned > 0 {
 			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
 		}
-		if badID > 0 {
+		if badAddr > 0 {
 			fmt.Fprintln(stdout, "hint: use the noreply address for author, committer and every address trailer")
+		}
+		if badEnc > 0 {
+			fmt.Fprintln(stdout, "hint: commits must not set an encoding header")
 		}
 		return 1
 	}

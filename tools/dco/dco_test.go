@@ -293,11 +293,12 @@ func TestFailHintMatchesFailure(t *testing.T) {
 	})
 }
 
-// A record with fewer than four fields is an error. The checker prints a
+// A record with fewer than five fields is an error. The checker prints a
 // fixed line, no part of the record, and never "all N commits pass".
 func TestMalformedRecordIsError(t *testing.T) {
-	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00Signed-off-by: t <" + me + ">\x00\n"
+	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 	cases := map[string]string{
+		"four fields":         "0123456789abcdef\x00SECRET\x00SECRET\x00\x00\n",
 		"three fields":        "0123456789abcdef\x00SECRET\x00SECRET\x00\n",
 		"one field":           "SECRET\x00\n",
 		"good then malformed": good + "SECRET\x00SECRET\x00\n",
@@ -320,11 +321,69 @@ func TestMalformedRecordIsError(t *testing.T) {
 
 // A well-formed record passes.
 func TestCheckGoodRecord(t *testing.T) {
-	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00Signed-off-by: t <" + me + ">\x00\n"
+	good := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 	var stdout, stderr bytes.Buffer
 	if code := check([]byte(good), "base", "HEAD", &stdout, &stderr); code != 0 {
 		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
+}
+
+// forgeCommit writes a commit object by hand on top of a signed base. The
+// header line extra goes after the committer line. It uses no --literally, so
+// git checks the object. It returns the repository and the full hash. The
+// branch "base" holds the base commit and the branch "forged" the new one.
+func forgeCommit(t *testing.T, extra, msg string) (dir, hash string) {
+	t.Helper()
+	dir = newRepo(t)
+	commit(t, dir, "base", true)
+	git(t, dir, "branch", "base")
+	tree := strings.TrimSpace(git(t, dir, "rev-parse", "HEAD^{tree}"))
+	parent := strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))
+	ident := "t <" + me + "> 1700000000 +0000"
+	obj := "tree " + tree + "\nparent " + parent + "\nauthor " + ident + "\ncommitter " + ident + "\n" +
+		extra + "\n" + msg
+	cmd := exec.Command("git", "-C", dir, "hash-object", "-t", "commit", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader(obj)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git hash-object: %v\n%s", err, out)
+	}
+	hash = strings.TrimSpace(string(out))
+	git(t, dir, "update-ref", "refs/heads/forged", hash)
+	return dir, hash
+}
+
+// Git converts the message to UTF-8 from the encoding header. The bytes of
+// an address can then come out as other characters, so dco cannot see the
+// address. A commit with any encoding header fails.
+func TestEncodingHeaderFails(t *testing.T) {
+	const hint = "hint: commits must not set an encoding header\n"
+	t.Run("ISO-2022-JP hides an address", func(t *testing.T) {
+		// After ESC $ B, the bytes "ma" and "@i" are two kanji. ESC ( B
+		// returns to ASCII.
+		msg := "subject\n\nSigned-off-by: t <" + me + ">\nCo-authored-by: Bob \x1b$Bma@i\x1b(B.example\n"
+		dir, hash := forgeCommit(t, "encoding ISO-2022-JP\n", msg)
+		if raw := git(t, dir, "cat-file", "-p", hash); !strings.Contains(raw, "ma@i") {
+			t.Fatalf("the raw object lacks the address bytes: %q", raw)
+		}
+		if shown := git(t, dir, "log", "-1", "--format=%(trailers:key=Co-authored-by,valueonly)", hash); strings.Contains(shown, "@") {
+			t.Fatalf("git log shows an address: %q", shown)
+		}
+		code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+		if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") || !strings.Contains(out, hint) {
+			t.Fatalf("run = %d, want 1 with an identity line and the encoding hint; output %q", code, out)
+		}
+		if strings.Contains(out+errOut, "@") {
+			t.Errorf("the output shows an address: %q %q", out, errOut)
+		}
+	})
+	t.Run("UTF-8", func(t *testing.T) {
+		dir, hash := forgeCommit(t, "encoding UTF-8\n", signoff)
+		code, out, _ := runDCO([]string{"base", "forged"}, dir)
+		if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") || !strings.Contains(out, hint) {
+			t.Fatalf("run = %d, want 1 with an identity line and the encoding hint; output %q", code, out)
+		}
+	})
 }
 
 // A line that holds only whitespace separates paragraphs, as in git.
