@@ -30,17 +30,19 @@ const (
 	// tp09Client is the test function that the child process runs.
 	tp09Client = "TestTP09Client"
 
-	// The mix has three kinds of connection. 300 pool holders read about 30 000
-	// bytes each, so that they charge about 26 KB each to the pool: together
-	// they take most of the 8 MiB, and none of them is refused. 1 000 are
-	// record-header connections, the largest part of the memory for each
-	// connection. The 700 others are kept-open connections that read about
-	// 3 200 bytes in the first period, below the 4 KiB that the pool does not
-	// charge.
-	mixHolders    = 300
-	mixHeaders    = 1000
+	// The mix has three kinds of connection. For each connection, a pool holder
+	// keeps about 100 KB. A record-header connection keeps about 55 KB. A
+	// near-limit kept-open connection keeps about 34 KB. A holder reads 30 000
+	// bytes and charges 30 000 - 4 096 = 25 904 bytes to the pool. 320 holders
+	// charge 8 289 280 bytes. That is below the pool, 8 388 608 bytes, so the
+	// pool refuses no holder. The pool does not bound the record-header
+	// connections, so they fill the rest. Ten near-limit connections stay open,
+	// so the mix has all three kinds.
+	mixHolders    = 320
+	mixHeaders    = 1670
 	holderBytes   = 30000
-	nearLimitHead = 1500 // size of the request head of a near-limit connection
+	mixPool       = mixHolders * (holderBytes - keepAliveBytes) // the pool value of the mix
+	nearLimitHead = 1500                                        // size of the request head of a near-limit connection
 	// certBytes is the part of the Certificate-type message that the forms over
 	// a limit send. It is more than the budget of the first period.
 	certBytes = 50000
@@ -100,12 +102,12 @@ func tp09Get(c net.Conn, n int) error {
 // tp09Dial runs the client side of one connection of a form on raw. A form
 // over a limit ignores the errors of the handshake: the server closes it.
 //
-// The ClientHello of manyProtos(245) is 64 244 bytes in 4 records, one Write
-// for each record, so the cut of hello_pending counts one record header for each
-// Write. It is more than the budget of the first period, 16 384 + 16 384 +
-// 1 024 = 33 792 bytes: in hello_open and in hello_pending the server reads
-// exactly 33 792 bytes and closes. The same holds for the Certificate-type
-// message (certBytes, in the forms cert_tls12 and cert_tls13).
+// The ClientHello of manyProtos(245) has 64 244 bytes in 4 records, with one
+// Write for each record. The cut of hello_pending counts one record header for
+// each Write. The budget of the first period is 16 384 + 16 384 + 1 024 =
+// 33 792 bytes. In hello_open and hello_pending the server reads exactly
+// 33 792 bytes and closes. This holds for the Certificate-type message too
+// (certBytes, in the forms cert_tls12 and cert_tls13).
 func tp09Dial(t *testing.T, form string, raw net.Conn) error {
 	cfg := &tls.Config{InsecureSkipVerify: true, ServerName: testName, NextProtos: []string{"http/1.1"}} // the child has no certificate pool
 	_ = raw.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -174,9 +176,8 @@ func tp09Dial(t *testing.T, form string, raw net.Conn) error {
 
 // TestTP09Client is the child process of TestTP09. It opens the connections of
 // one form from 63 loopback sources, at most 32 from each. It dials all of
-// them first, then starts all clients at the same time, so that the 2 000
-// connections are in flight together. It prints a READY line and holds the
-// connections until its stdin closes.
+// them first, then starts all clients at the same time. It prints a READY line
+// and holds the connections until its stdin closes.
 func TestTP09Client(t *testing.T) {
 	addr := os.Getenv("PHANTOM_TP09_ADDR")
 	if addr == "" {
@@ -364,18 +365,29 @@ func (s *Server) settle(t *testing.T) (open int, pool int64) {
 	return open, pool
 }
 
-// T-P-09: 2 000 decoy connections for each client form. It runs only with
-// PHANTOM_TP09=1, so it is not part of make all. The server runs in this
-// process with the production limits. The clients run in a child process (this
-// test binary again), so that their memory is not in the server heap. The
-// timeouts are long: the production deadlines bound time, not memory, and the
-// connections must stay open while the test reads the memory.
+// T-P-09: 2 000 decoy connections for each client form. The test runs only with
+// PHANTOM_TP09=1, so make all skips it. The server runs in this process with
+// the production limits. The clients run in a child process (this test binary
+// again), so their memory is not in the server heap. The timeouts are long. The
+// production deadlines bound time, not memory. The connections must stay open
+// while the test reads the memory.
 //
-// For each form the result line has the settled state (open count, pool, heap
-// and stack after two collections, RSS) and the peaks during the form (open
-// count, heap and stack without a collection, VmHWM). A form over a limit
-// ends with an open count of 0 after the server closes its connections, so the
-// settled values are small and the peak values show the memory of the form.
+// Each result line has settled values and peak values. The settled values are
+// the open count, the pool, the heap and stack after two collections, and the
+// RSS. The peak values are the open count, the heap and stack without a
+// collection, and VmHWM.
+//
+// The checks of each form:
+//   - normal: RSS and peak RSS at most 150 MB (NFR-01).
+//   - hello_open, hello_pending, cert_tls12, cert_tls13: the server closes every
+//     connection. The open count is 0 and the settled heap and stack are at most
+//     5 MB, so a closed connection keeps no bytes. The peak heap and stack are at
+//     most 140 MB. RSS and peak RSS are at most 180 MB.
+//   - hello_4k, record_header, mix: the connections stay open. The open count
+//     is 2 000. The settled heap and stack are at most 140 MB. RSS and peak RSS
+//     are at most 180 MB. The peak heap is only logged: for the mix it is near
+//     140 MB and it changes from run to run.
+//   - mix: the pool holds exactly mixPool bytes, so the pool refuses no holder.
 func TestTP09(t *testing.T) {
 	if os.Getenv("PHANTOM_TP09") != "1" {
 		t.Skip("T-P-09 runs with PHANTOM_TP09=1")
@@ -384,13 +396,13 @@ func TestTP09(t *testing.T) {
 	r := newRig(t, tp09Conns, tp09HeaderBytes, timeouts{readHeader: long, read: long, write: long, idle: long}, okHandler)
 	r.serve(t)
 	// want is the open count that the form must reach: 2 000 for a form that
-	// stays open, 0 for a form over a limit, -1 when the test only logs it.
+	// stays open, 0 for a form over a limit.
 	for _, f := range []struct {
 		name string
 		want int
 	}{
 		{"normal", tp09Conns}, {"hello_open", 0}, {"hello_pending", 0}, {"cert_tls12", 0},
-		{"cert_tls13", 0}, {"hello_4k", tp09Conns}, {"record_header", tp09Conns}, {"mix", -1},
+		{"cert_tls13", 0}, {"hello_4k", tp09Conns}, {"record_header", tp09Conns}, {"mix", tp09Conns},
 	} {
 		before := memNow()
 		resetPeakRSS(t)
@@ -402,14 +414,18 @@ func TestTP09(t *testing.T) {
 		rss, peakRSS := float64(procStatus(t, "VmRSS:"))/1e6, float64(procStatus(t, "VmHWM:"))/1e6
 		peakHeap := float64(int64(peak.mem)-int64(before)) / 1e6
 		heapMax, rssMax := 140.0, 180.0
-		if f.name == "normal" {
+		switch {
+		case f.name == "normal":
 			heapMax, rssMax = 1e9, 150
+		case f.want == 0:
+			heapMax = 5
 		}
-		pass := heap <= heapMax && rss <= rssMax && peakRSS <= rssMax && (f.want < 0 || open == f.want)
+		pass := heap <= heapMax && rss <= rssMax && peakRSS <= rssMax && open == f.want
+		pass = pass && (f.want != 0 || peakHeap <= 140) && (f.name != "mix" || pool == mixPool)
 		t.Logf("TP09 form=%s conns=%d open=%d pool=%d heap+stack=%.1f rss=%.1f peak_open=%d peak_heap+stack=%.1f peak_rss=%.1f pass=%t",
 			f.name, tp09Conns, open, pool, heap, rss, peak.open, peakHeap, peakRSS, pass)
 		if !pass {
-			t.Errorf("form %s: open %d (want %d), heap+stack %.1f MB, RSS %.1f MB, peak RSS %.1f MB", f.name, open, f.want, heap, rss, peakRSS)
+			t.Errorf("form %s: open %d (want %d), pool %d, heap+stack %.1f MB (peak %.1f), RSS %.1f MB (peak %.1f)", f.name, open, f.want, pool, heap, peakHeap, rss, peakRSS)
 		}
 		if err := stop(); err != nil {
 			t.Errorf("clients of form %s: %v", f.name, err)
