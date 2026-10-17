@@ -47,7 +47,6 @@ type fakeTarget struct {
 	big      bool   // a response body of 1 MiB
 	stall    chan struct{}
 	arrived  chan struct{} // gets a signal for a request that arrives, if not nil and not full
-	delay    time.Duration // the wait before a 2xx or other answer
 	alias    string        // the URL that the spool uses, if it is not the server URL
 	attempts []uint64
 	stored   []uint64
@@ -62,7 +61,7 @@ func newTarget(t *testing.T) *fakeTarget {
 		lines := strings.Split(string(body), "\n")
 		size, _ := strconv.ParseUint(lines[min(1, len(lines)-1)], 10, 64)
 		f.mu.Lock()
-		status, stall, delay, arrived := f.status, f.stall, f.delay, f.arrived
+		status, stall, arrived := f.status, f.stall, f.arrived
 		if len(f.queue) > 0 {
 			status, f.queue = f.queue[0], f.queue[1:]
 		}
@@ -76,12 +75,6 @@ func newTarget(t *testing.T) *fakeTarget {
 			select {
 			case arrived <- struct{}{}:
 			default:
-			}
-		}
-		if delay > 0 {
-			select {
-			case <-time.After(delay):
-			case <-r.Context().Done():
 			}
 		}
 		switch {
@@ -206,12 +199,13 @@ func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 
 func withTimeout(d time.Duration) PublishOption { return func(c *publishConfig) { c.timeout = d } }
 
-// T-S-13: the lock-hold check, as a test: several notes, an HTTPS target that
-// holds the request for the first note open, the real publisher. While a pass
-// is in Send, Spool.Add returns. The test checks the overlap and not a time:
-// Add returns while the pass still runs and before the target has stored a size
-// above 1. After the release, the pass sends the notes in increasing size, and
-// the cursor is the last size that the target stored.
+// T-S-13: the lock-hold check, as a test. It uses several notes and the real
+// publisher. An HTTPS target holds the request for the first note open.
+// While a pass is in Send, Spool.Add returns. The test checks the overlap and
+// not a time. Add returns while the pass still runs, and the target stores a
+// size above 1 only later. Add returns before the test releases the held
+// request. After the release, the pass sends the notes in increasing size.
+// The cursor is the last size that the target stored.
 func TestTS13AddDoesNotWaitForSlowTarget(t *testing.T) {
 	const hang = 5 * time.Second
 	a := newTarget(t)
