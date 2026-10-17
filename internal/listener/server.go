@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -231,6 +232,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ErrorLines is the number of lines that the server wrote to its error log.
 // They include one line for each failed handshake. The log keeps no text.
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
+
+// ErrLog returns the counting writer of the error log, which ErrorLines counts. It keeps no text.
+func (s *Server) ErrLog() io.Writer { return &s.errLines }
 
 // SourceCapCloses is the number of connections that the server closed because
 // their source had maxConnsPerSource open connections. It holds no address.
