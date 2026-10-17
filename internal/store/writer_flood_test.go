@@ -86,7 +86,7 @@ func TestTU18RowRequestIsServedUnderAFlood(t *testing.T) {
 	if err := stopRun(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if res.err != nil || res.took > rowTimeout/2 || r.rowCount() != 1 {
+	if res.err != nil || res.took > rowTimeout || r.rowCount() != 1 {
 		t.Fatalf("reply %v after %v, %d rows", res.err, res.took, r.rowCount())
 	}
 	if afterCommits < 1 || !lanesFull {

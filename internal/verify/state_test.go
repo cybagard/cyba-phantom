@@ -197,11 +197,11 @@ func TestTS14_LoadWaitsForClose(t *testing.T) {
 // The helper process of TestTS14_KilledRunReleasesLock. It takes the lock,
 // prints one line, and waits until the test kills it.
 func TestTS14_LockHelper(t *testing.T) {
-	dir := os.Getenv("PHANTOM_TEST_LOCK_DIR")
+	dir := os.Getenv("VERIFY_LOCK_TEST_DIR")
 	if dir == "" {
 		t.Skip("helper process only")
 	}
-	v, err := ParseKey([]byte(os.Getenv("PHANTOM_TEST_LOCK_KEY")))
+	v, err := ParseKey([]byte(os.Getenv("VERIFY_LOCK_TEST_KEY")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestTS14_KilledRunReleasesLock(t *testing.T) {
 	v, _ := ParseKey([]byte(text))
 	dir := filepath.Join(t.TempDir(), "state")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestTS14_LockHelper$")
-	cmd.Env = append(os.Environ(), "PHANTOM_TEST_LOCK_DIR="+dir, "PHANTOM_TEST_LOCK_KEY="+text)
+	cmd.Env = append(os.Environ(), "VERIFY_LOCK_TEST_DIR="+dir, "VERIFY_LOCK_TEST_KEY="+text)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

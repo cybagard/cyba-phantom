@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	crashPointEnv = "PHANTOM_CRASH_POINT" // names the crash point; empty in a normal run
-	crashStateEnv = "PHANTOM_CRASH_STATE" // the state directory that the parent made
+	crashPointEnv = "STORE_CRASH_TEST_POINT" // names the crash point; empty in a normal run
+	crashStateEnv = "STORE_CRASH_TEST_STATE" // the state directory that the parent made
 	crashMessage  = "intended crash of the writer"
 
 	goodBatch = 1000 // ts of the events of the batch that commits
@@ -63,6 +63,24 @@ func crashEvents(t *testing.T, q *event.Queue, base int64) {
 	}
 }
 
+// flushWhenTaken waits until the writer has taken all events from the lanes, then
+// sends one tick. A tick while events are still in the lanes can write a part of
+// the batch, because Run picks at random between a waiting tick and new events.
+// Run reads the tick only after it has put each event it took in its batch.
+func flushWhenTaken(t *testing.T, q *event.Queue, tick chan<- time.Time) {
+	t.Helper()
+	for end := time.Now().Add(waitFor); q.Bytes() != (event.Bytes{}); time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the writer did not take the events")
+		}
+	}
+	select {
+	case tick <- time.Now():
+	case <-time.After(waitFor):
+		t.Fatal("the writer did not read the tick")
+	}
+}
+
 // T-I-07: this is the helper process of the crash test. It runs the real writer
 // with the real log, commits one batch, and panics in the second batch at the
 // crash point from the environment. Without the environment it does nothing.
@@ -94,14 +112,20 @@ func TestTI07CrashHelper(t *testing.T) {
 	}
 	committed := make(chan int, 4)
 	w.onCommit = func(n int) { committed <- n }
+	// The tick channel has no buffer, so a completed send proves that Run read
+	// the tick. The real ticker could fire between two enqueues and split a batch.
+	tick := make(chan time.Time)
+	w.tick = tick
 	crashEvents(t, q, goodBatch)
 	go w.Run(context.Background())
+	flushWhenTaken(t, q, tick)
 	select {
 	case <-committed:
 	case <-time.After(waitFor):
 		t.Fatal("the first batch was not committed")
 	}
 	crashEvents(t, q, badBatch)
+	flushWhenTaken(t, q, tick)
 	time.Sleep(waitFor) // the panic in the writer goroutine ends the process
 	t.Fatal("the writer did not crash")
 }
