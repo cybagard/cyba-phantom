@@ -62,7 +62,7 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 | `bundle.fetch_interval` | `6h` | 15m–7d, also when `bundle.fetch_url` is empty |
 | `limits.max_conns` | 2000 | 1–2000 (SEC-02) |
 | `limits.body_bytes` | 65536 | 1–65536 (SEC-02) |
-| `limits.header_bytes` | 16384 | 8192–16384 (SEC-02; the decoy listener answers 431 to a request head over this size, SEC-22) |
+| `limits.header_bytes` | 16384 | 8192–16384 (SEC-02; the decoy listener answers 431 to a request head over this size; a pipelined request head is served only up to this size + 4096 bytes, SEC-22) |
 | `limits.per_ip_rps` | 50 | 1–1000 |
 | `limits.per_ip_burst` | 200 | `per_ip_rps`–5000 |
 | `limits.queue_depth` | 4096 | 1–8192 (C2: queue memory stays in the 150 MB load budget, NFR-01) |
