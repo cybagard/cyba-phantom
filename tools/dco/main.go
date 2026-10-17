@@ -1,43 +1,70 @@
-// Command dco checks Developer Certificate of Origin sign-off (DCO 1.1):
-// every commit in base..head must carry a "Signed-off-by" trailer.
+// Command dco checks Developer Certificate of Origin sign-off (DCO 1.1)
+// and commit identity: every commit in base..head must carry a
+// "Signed-off-by" trailer, and the only identity in the public history is
+// the maintainer's noreply address.
 //
 // Usage:
 //
 //	dco <base> <head>
 //
-// It shells out to git (the toolchain image ships it) and reports commit
-// SHAs and counts only — never the (PR-authored) subject, which is
-// untrusted content in a CI log. Exit codes: 0 all signed (or an
-// empty range), 1 unsigned commits, 2 usage or git error.
+// Identity rule, for each commit (addresses and trailer keys compare
+// without case; the author and committer come from %ae and %ce, so no
+// mailmap applies):
+//   - the author address is the maintainer noreply address;
+//   - the committer address is that address, or the GitHub committer address
+//     (GitHub makes the commit for a web merge);
+//   - every Signed-off-by value has the maintainer address;
+//   - every address in any other trailer is the maintainer address, or the
+//     Claude co-author address in a Co-authored-by trailer whose name is
+//     "Claude" or starts with "Claude ".
+//
+// An address is any token of the form x@y with no space, "<" or ">". A
+// trailer without an address is not checked.
+//
+// It shells out to git (the toolchain image ships it) and reports short
+// commit hashes and counts only — never an address, a name, a subject or a
+// trailer value, which are untrusted (PR-authored) content in a CI log.
+// Exit codes: 0 all commits pass (or an empty range), 1 a commit fails a
+// check, 2 usage or git error.
 package main
 
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 )
 
+const (
+	maintainerAddr = "67512030+cybagard@users.noreply.github.com"
+	githubAddr     = "noreply@github.com"
+	claudeAddr     = "noreply@anthropic.com"
+)
+
 // signoffRE matches the value of one Signed-off-by trailer: "Name
 // <address>", where address has a local part, an @, and a dotted domain.
 var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 
-// logFormat asks git for each commit's hash and the values of its
-// Signed-off-by trailers. Git's own trailer parser decides what a trailer
-// is, so dco accepts exactly the sign-offs that git recognizes (for
-// example the block that cherry-pick -x -s writes), and never the subject
-// or a line in the middle of the body.
-const logFormat = "--format=%H%x00%(trailers:key=Signed-off-by,valueonly,unfold,separator=%x01)%x00"
+// addrRE finds each address in a trailer value.
+var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
-func main() { os.Exit(run(os.Args[1:], ".")) }
+// logFormat asks git for each commit's hash, author address, committer
+// address and trailers. Git's own trailer parser decides what a trailer is
+// (only: no other line of the last paragraph), so dco accepts exactly the
+// sign-offs that git recognizes (for example the block that cherry-pick -x
+// -s writes), and never the subject or a line in the middle of the body.
+const logFormat = "--format=%H%x00%ae%x00%ce%x00%(trailers:only,unfold,separator=%x01)%x00"
 
-// run checks that every commit in base..head of the repository in dir
-// carries a sign-off trailer.
-func run(args []string, dir string) int {
+func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
+
+// run checks the sign-off and identity of every commit in base..head of
+// the repository in dir.
+func run(args []string, dir string, stdout, stderr io.Writer) int {
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: dco <base> <head>")
+		fmt.Fprintln(stderr, "usage: dco <base> <head>")
 		return 2
 	}
 	base, head := args[0], args[1]
@@ -46,55 +73,95 @@ func run(args []string, dir string) int {
 	out, err := cmd.Output()
 	if err != nil {
 		// git's own error text is not printed: print the exit status only.
-		fmt.Fprintf(os.Stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
+		fmt.Fprintf(stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
 
-	// Each record is H NUL TRAILERS NUL, and git ends every record with
-	// its own newline, so records separate on NUL+LF. Trailer values are
-	// joined by SOH (0x01) and never hold NUL. No PR-authored text is
+	// Each record is H NUL AE NUL CE NUL TRAILERS NUL, and git ends every
+	// record with its own newline, so records separate on NUL+LF. Trailers
+	// are joined by SOH (0x01) and never hold NUL. No PR-authored text is
 	// printed: only hashes and counts.
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
 	}
-	total, unsigned := 0, 0
+	total, unsigned, badID := 0, 0, 0
 	for _, rec := range records {
-		f := bytes.SplitN(rec, []byte{0}, 2)
-		if len(f) < 2 {
+		f := bytes.SplitN(rec, []byte{0}, 4)
+		if len(f) < 4 {
 			continue
 		}
 		hash := string(f[0])
+		if len(hash) > 12 {
+			hash = hash[:12]
+		}
 		total++
-		if !hasSignoff(string(f[1])) {
+		trailers := strings.Split(string(f[3]), "\x01")
+		if !hasSignoff(trailers) {
 			unsigned++
-			if len(hash) > 12 {
-				hash = hash[:12]
-			}
-			fmt.Printf("unsigned: %s\n", hash)
+			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
+		}
+		if !identityOK(string(f[1]), string(f[2]), trailers) {
+			badID++
+			fmt.Fprintf(stdout, "identity: %s\n", hash)
 		}
 	}
 
 	switch {
 	case total == 0:
-		fmt.Println("dco: no commits in range — nothing to check")
+		fmt.Fprintln(stdout, "dco: no commits in range — nothing to check")
 		return 0
-	case unsigned > 0:
-		fmt.Printf("dco FAIL: %d of %d commits in %s..%s lack a Signed-off-by trailer (sign with `git commit -s`)\n",
-			unsigned, total, base, head)
+	case unsigned > 0 || badID > 0:
+		fmt.Fprintf(stdout, "dco FAIL: of %d commits in %s..%s, %d lack a Signed-off-by trailer (sign with `git commit -s`) and %d break the identity rule\n",
+			total, base, head, unsigned, badID)
 		return 1
 	}
-	fmt.Printf("dco: all %d commits in %s..%s carry Signed-off-by\n", total, base, head)
+	fmt.Fprintf(stdout, "dco: all %d commits in %s..%s carry Signed-off-by and pass the identity rule\n", total, base, head)
 	return 0
 }
 
-// hasSignoff reports whether any SOH-separated trailer value is a valid
-// "Name <address>" sign-off.
-func hasSignoff(values string) bool {
-	for _, v := range strings.Split(values, "\x01") {
-		if signoffRE.MatchString(strings.TrimSpace(v)) {
+// splitTrailer splits an unfolded "Key: value" trailer line.
+func splitTrailer(t string) (key, value string) {
+	k, v, _ := strings.Cut(t, ":")
+	return strings.TrimSpace(k), strings.TrimSpace(v)
+}
+
+// hasSignoff reports whether any trailer is a valid "Name <address>"
+// Signed-off-by sign-off.
+func hasSignoff(trailers []string) bool {
+	for _, t := range trailers {
+		if k, v := splitTrailer(t); strings.EqualFold(k, "Signed-off-by") && signoffRE.MatchString(v) {
 			return true
 		}
 	}
 	return false
+}
+
+// identityOK applies the identity rule to one commit.
+func identityOK(author, committer string, trailers []string) bool {
+	if !strings.EqualFold(author, maintainerAddr) ||
+		!(strings.EqualFold(committer, maintainerAddr) || strings.EqualFold(committer, githubAddr)) {
+		return false
+	}
+	for _, t := range trailers {
+		key, value := splitTrailer(t)
+		for _, a := range addrRE.FindAllString(value, -1) {
+			if strings.EqualFold(a, maintainerAddr) {
+				continue
+			}
+			if strings.EqualFold(a, claudeAddr) && strings.EqualFold(key, "Co-authored-by") && claudeName(value) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// claudeName reports whether the name before the "<" of a trailer value is
+// "Claude" or starts with "Claude ".
+func claudeName(value string) bool {
+	name, _, ok := strings.Cut(value, "<")
+	name = strings.TrimSpace(name)
+	return ok && (name == "Claude" || strings.HasPrefix(name, "Claude "))
 }
