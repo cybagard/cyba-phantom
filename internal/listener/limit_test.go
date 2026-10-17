@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -319,7 +320,7 @@ func TestTS17SourceKeyFromRemoteAddrOnly(t *testing.T) {
 	other := newFakeConn(t, "192.0.2.8:1000", "198.51.100.1:443")
 	fake.conns = append(fake.conns, over, other)
 
-	l := newLimitListener(fake, make(chan struct{}, 2*maxConnsPerSource), newSourceCap(2*maxConnsPerSource))
+	l := newLimitListener(fake, make(chan struct{}, 2*maxConnsPerSource), newSourceCap(2*maxConnsPerSource), newReadLimit(testHeaderBytes))
 	for i := range maxConnsPerSource {
 		if _, err := l.Accept(); err != nil {
 			t.Fatalf("accept %d: %v", i, err)
@@ -359,7 +360,7 @@ func TestTS17SourceCheckBeforeSlot(t *testing.T) {
 	for range maxConnsPerSource {
 		src.take(key)
 	}
-	l := newLimitListener(fake, sem, src)
+	l := newLimitListener(fake, sem, src, newReadLimit(testHeaderBytes))
 	if _, err := l.Accept(); err != fake.err {
 		t.Fatalf("Accept error %v, want the error of the listener", err)
 	}
@@ -404,7 +405,7 @@ func BenchmarkLimitAccept(b *testing.B) {
 	defer p.Close()
 	conn := &benchConn{Conn: a, remote: net.TCPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.7:1000"))}
 	const slots = 64
-	l := newLimitListener(&benchListener{conn: conn}, make(chan struct{}, slots), newSourceCap(slots))
+	l := newLimitListener(&benchListener{conn: conn}, make(chan struct{}, slots), newSourceCap(slots), newReadLimit(testHeaderBytes))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -434,7 +435,7 @@ func (l *newSourceListener) Addr() net.Addr {
 func TestTS17SourceKeysWithinBound(t *testing.T) {
 	const slots, accepts = 4, 30_000
 	src := newSourceCap(slots)
-	l := newLimitListener(&newSourceListener{}, make(chan struct{}, slots), src)
+	l := newLimitListener(&newSourceListener{}, make(chan struct{}, slots), src, newReadLimit(testHeaderBytes))
 	var done atomic.Bool
 	var max int
 	var sampler sync.WaitGroup
@@ -478,4 +479,316 @@ func TestTS17SourceCapStepNoAllocs(t *testing.T) {
 			t.Errorf("%s: %v allocations, want 0", ip, n)
 		}
 	}
+}
+
+// T-S-18: a normal client reads 4096 bytes or less in each period, so the pool
+// charges nothing, the connection stays open and a second request gets 200. The
+// pool and the slots are empty after the client closes. The test logs the bytes
+// of the first period.
+func TestTS18NormalClient(t *testing.T) {
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	c := r.dial(t)
+	for i := range 2 {
+		if got := status(c, 0); got != 200 {
+			t.Fatalf("request %d: status %d, want 200", i, got)
+		}
+	}
+	idle, _ := l.wait(t, 2, 0)
+	t.Logf("first period of a normal client: the wrapper counted %d bytes", idle[0].used)
+	for i, p := range idle {
+		if p.used == 0 || p.used > keepAliveBytes || p.charged != 0 {
+			t.Errorf("period %d: read %d bytes, charged %d", i, p.used, p.charged)
+		}
+	}
+	_ = c.Close()
+	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
+}
+
+// T-S-18: the budget of the next period is header_bytes + 1024. After a first
+// request, a head of header_bytes bytes gets 200. A period that reads more than
+// the budget closes the connection with no response, and the wrapper counted
+// exactly the budget.
+func TestTS18NextPeriodBudget(t *testing.T) {
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	c := r.dialWhole(t)
+	if got := status(c, 0); got != 200 {
+		t.Fatalf("first request: status %d", got)
+	}
+	if got := status(c, testHeaderBytes); got != 200 {
+		t.Fatalf("head of header_bytes bytes: status %d, want 200", got)
+	}
+	over := r.dialWhole(t)
+	if got := status(over, 0); got != 200 {
+		t.Fatalf("first request: status %d", got)
+	}
+	if got := status(over, testHeaderBytes+2000); got != 0 {
+		t.Fatalf("head over the budget: status %d, want a close", got)
+	}
+	_, closed := l.wait(t, 0, 2)
+	var most int64
+	for _, p := range closed {
+		most = max(most, p.used)
+	}
+	if most != r.s.rd.next {
+		t.Fatalf("the most bytes of a period: %d, want the budget %d", most, r.s.rd.next)
+	}
+}
+
+// T-S-18: the keep-alive limit. The test first measures the TLS overhead of one
+// request. Then it sends a request that makes the wrapper count 4096 bytes in
+// the period (the connection stays open). Then it sends one that makes the
+// wrapper count 4097 bytes (the connection closes after the response).
+func TestTS18KeepAliveLimit(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	c := r.dialWhole(t)
+	status(c, 0)
+	status(c, 100)
+	idle, _ := l.wait(t, 2, 0)
+	overhead := idle[1].used - 100
+	base := 2
+	for _, tc := range []struct {
+		used int64
+		open bool
+	}{{keepAliveBytes, true}, {keepAliveBytes + 1, false}} {
+		c := r.dialWhole(t)
+		if got := status(c, 0); got != 200 {
+			t.Fatalf("first request: status %d", got)
+		}
+		if got := status(c, int(tc.used-overhead)); got != 200 {
+			t.Fatalf("period of %d bytes: status %d, want 200", tc.used, got)
+		}
+		base += 2
+		idle, _ := l.wait(t, base, 0)
+		if idle[base-1].used != tc.used {
+			t.Fatalf("the wrapper counted %d bytes, want %d", idle[base-1].used, tc.used)
+		}
+		if open := status(c, 0) == 200; open != tc.open {
+			t.Errorf("period of %d bytes: connection open %v, want %v", tc.used, open, tc.open)
+		}
+		if tc.open {
+			base++
+		}
+	}
+}
+
+// T-S-18: the pool arithmetic on the wrapper. The first 4096 bytes of a period
+// are not charged. The charged bytes go back in Close, one time. At idle, a
+// connection with charged bytes closes. A read that takes the pool over
+// poolBytes fails and charges nothing.
+func TestTS18PoolArithmetic(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd := newReadLimit(testHeaderBytes)
+	l := newLimitListener(ln, make(chan struct{}, 8), newSourceCap(8), rd)
+	defer l.Close()
+	// open returns a wrapper whose client sent n bytes, and the wrapper has read k.
+	open := func(n, k int) *limitConn {
+		cc, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cc.Close() })
+		c, err := l.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = cc.Write(make([]byte, n))
+		lc := c.(*limitConn)
+		buf := make([]byte, k)
+		for got := 0; got < k; {
+			m, err := lc.Read(buf[:k-got])
+			if err != nil {
+				t.Fatal(err)
+			}
+			got += m
+		}
+		return lc
+	}
+	want := func(what string, pool int64) {
+		t.Helper()
+		if got := rd.pool.Load(); got != pool {
+			t.Fatalf("%s: pool %d, want %d", what, got, pool)
+		}
+	}
+	a, b := open(10000, 10000), open(10000, 10000)
+	if s := a.snapshot(); s != (periodRec{10000, 10000 - keepAliveBytes}) {
+		t.Fatalf("snapshot %+v", s)
+	}
+	want("two large periods", 2*(10000-keepAliveBytes))
+	a.nextPeriod() // a read more than 4096 bytes: it closes and gives its bytes back
+	_ = a.Close()
+	want("a closed at idle, then closed again", 10000-keepAliveBytes)
+	_ = b.Close()
+	_ = b.Close()
+	want("b closed two times", 0)
+
+	n := open(3000, 3000)
+	n.nextPeriod() // within 4096 bytes: it stays open with the next budget
+	if s := n.snapshot(); s != (periodRec{}) || n.left != rd.next {
+		t.Fatalf("after idle: %+v, left %d", s, n.left)
+	}
+	want("idle with 4096 bytes or less", 0)
+
+	rd.pool.Store(poolBytes - 100)
+	f := open(keepAliveBytes+300, keepAliveBytes)
+	if _, err := f.Read(make([]byte, 8192)); err == nil {
+		t.Fatal("a read over the pool worked")
+	}
+	if _, err := f.Read(make([]byte, 8)); err == nil {
+		t.Fatal("a read after the refusal worked")
+	}
+	_ = f.Close()
+	want("refused read", poolBytes-100)
+
+	rd.pool.Store(poolBytes - 500)
+	e := open(keepAliveBytes+501, keepAliveBytes+500)
+	want("pool filled to the limit", poolBytes)
+	if _, err := e.Read(make([]byte, 8)); err == nil {
+		t.Fatal("a charged read at a full pool worked")
+	}
+	_ = e.Close()
+	want("close of the holder", poolBytes-500)
+}
+
+// T-S-18: with the pool full, a normal client completes its handshake and
+// request and gets 200. A ClientHello that reads above 4096 bytes has a
+// charged read, and the connection closes. The pool does not change.
+func TestTS18PoolFull(t *testing.T) {
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	r.s.rd.pool.Store(poolBytes)
+	if got := status(r.dial(t), 0); got != 200 {
+		t.Fatalf("normal client with a full pool: status %d, want 200", got)
+	}
+	raw, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := tls.Client(raw, r.clientConfig(manyProtos(20)...)).Handshake(); err == nil {
+		t.Fatal("a ClientHello over 4096 bytes worked with a full pool")
+	}
+	if _, closed := l.wait(t, 0, 1); closed[0].used <= keepAliveBytes {
+		t.Fatalf("the closed connection read %d bytes", closed[0].used)
+	}
+	if got := r.s.rd.pool.Load(); got != poolBytes {
+		t.Fatalf("pool %d, want %d", got, poolBytes)
+	}
+}
+
+// T-S-18: connections that read above 4096 bytes hold charged bytes, and the
+// pool is 0 again after they close.
+func TestTS18PoolReleasedAfterClose(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	r.serve(t)
+	const n = 5
+	for range n {
+		c, err := tls.Dial("tcp", r.addr, r.clientConfig(manyProtos(40)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if got := status(c, 0); got != 200 {
+			t.Fatalf("status %d, want 200", got)
+		}
+	}
+	idle, _ := l.wait(t, n, 0)
+	for i, p := range idle {
+		if p.charged <= 0 {
+			t.Errorf("connection %d: charged %d, want more than 0", i, p.charged)
+		}
+	}
+	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
+}
+
+// sizeConn records the largest buffer that Read gets.
+type sizeConn struct {
+	net.Conn
+	most int
+}
+
+func (c *sizeConn) Read(p []byte) (int, error) {
+	c.most = max(c.most, len(p))
+	return c.Conn.Read(p)
+}
+
+// T-S-18: no single Read of the wrapper asks the socket for more than 4096
+// bytes, also when the caller gives a buffer of 16 KiB and the client sent 16 KiB.
+func TestTS18ReadSizeCap(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLimitListener(ln, make(chan struct{}, 1), newSourceCap(1), newReadLimit(testHeaderBytes))
+	defer l.Close()
+	cc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := c.(*limitConn)
+	defer lc.Close()
+	sc := &sizeConn{Conn: lc.Conn}
+	lc.Conn = sc
+	_, _ = cc.Write(make([]byte, 16384))
+	buf := make([]byte, 16384)
+	for got := 0; got < len(buf); {
+		n, err := lc.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got += n
+	}
+	if sc.most > keepAliveBytes {
+		t.Fatalf("a Read asked the socket for %d bytes, want at most %d", sc.most, keepAliveBytes)
+	}
+}
+
+// T-S-18: real connections take the pool to 8 MiB. The pool starts 10 x 8 KiB
+// below the limit. Ten connections from ten sources each read 12288 bytes in
+// their first period, so each holds 8192 charged bytes. Then the next charged
+// read closes its connection, a normal client from another source gets 200,
+// and the pool returns to its start value when the connections close.
+func TestTS18PoolFilledByConnections(t *testing.T) {
+	const holders, charge = 10, 8192
+	r := newRig(t, 16, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	start := int64(poolBytes - holders*charge)
+	r.s.rd.pool.Store(start)
+	var conns []net.Conn
+	for i := range holders {
+		conns = append(conns, r.dialReading(t, byte(2+i), keepAliveBytes+charge))
+	}
+	waitFor(t, "pool at its limit", func() bool { return r.s.rd.pool.Load() == poolBytes })
+	// The next charged read fails: the server closes this connection.
+	over := r.dialReading(t, 12, keepAliveBytes+charge)
+	_ = over.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := over.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("connection at a full pool: read error %v, want a close", err)
+	}
+	if got := status(r.dialTLSFrom(t, r.addr, 13), 0); got != 200 {
+		t.Fatalf("normal client with a full pool: status %d, want 200", got)
+	}
+	if got := r.s.rd.pool.Load(); got != poolBytes {
+		t.Fatalf("pool %d after the refused read, want %d", got, poolBytes)
+	}
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	waitFor(t, "pool at its start value", func() bool { return r.s.rd.pool.Load() == start })
 }
