@@ -184,6 +184,69 @@ func TestTI03StartDoesNotWaitForTheCA(t *testing.T) {
 	}
 }
 
+// T-I-01: a cached certificate that is due for renewal starts its renewal when
+// Start runs, and Start does not wait for the CA. The CA accepts connections and
+// never answers. Start returns within 500 ms, the guard sees a request to the CA
+// within 5 s (the maintenance tick of the cache is 10 minutes away), and a
+// handshake still gets the cached certificate.
+func TestTI01StartWithADueCertificateStartsTheRenewalWithoutWaiting(t *testing.T) {
+	ca := blackholeAddr(t)
+	seen := make(chan string, 16)
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.CA = "https://" + ca + "/dir"
+		p.OnEgress = func(h string) {
+			select {
+			case seen <- h:
+			default:
+			}
+		}
+	})
+	now := time.Now()
+	want := seedCertFor(t, a, "decoy.test", now.Add(-61*24*time.Hour), now.Add(29*24*time.Hour), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- a.Start(ctx) }()
+	select {
+	case err := <-done:
+		mustNil(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Start did not return within 500 ms: it waits for the CA")
+	}
+	select {
+	case h := <-seen:
+		if h != ca {
+			t.Errorf("the first request went to %q, not to the CA", h)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no request to the CA within 5 s of Start: the renewal did not start")
+	}
+	st, err := handshake(a, "decoy.test")
+	mustNil(t, err)
+	if !bytes.Equal(st.PeerCertificates[0].Raw, want) {
+		t.Fatal("the handshake did not serve the cached certificate")
+	}
+}
+
+// T-I-01: with a maintenance tick far away, a cached certificate that is due for
+// renewal gets a Pebble certificate right after Start, and the new certificate
+// replaces the cached one.
+func TestTI01StartRenewsADueCertificateBeforeTheFirstTick(t *testing.T) {
+	f := newIssueFixture(t, "due.phantom.test", nil, func(p *ACMEParams) { p.maintenanceInterval = time.Hour })
+	now := time.Now()
+	seeded, err := x509.ParseCertificate(seedCertFor(t, f.a, f.name, now.Add(-61*24*time.Hour), now.Add(29*24*time.Hour), nil))
+	mustNil(t, err)
+	begin := startIssue(t, f)
+	chain := f.waitChain(t, 30*time.Second, func(leaf *x509.Certificate) bool { return !leaf.Equal(seeded) })
+	t.Logf("renewed certificate served %v after Start", time.Since(begin))
+	f.verifyToPebble(t, chain)
+	f.onlyPebble(t, "after the renewal at start")
+	f.requireALPN(t)
+	if n := len(f.a.cache.AllMatchingCertificates(f.name)); n != 1 {
+		t.Errorf("%d certificates for the name in the cache, want 1", n)
+	}
+}
+
 // TestTI03StartWithAnEmptyCacheStartsTheManagement uses a closed CA port. Start
 // writes no load line for a name with no cached certificate. The guard sees a
 // request to the CA within 5 s: the background management started.

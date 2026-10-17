@@ -251,19 +251,40 @@ func (a *ACME) Refused() uint64 { return a.refused.Load() }
 // the stored resource. A name with no cached certificate is not an error. Any
 // other load error writes one fixed line and does not fail Start.
 //
-// ManageAsync does the obtain, renew and ARI work in the background. Those jobs
-// stop when ctx ends. The maintenance of the cache runs until Stop. A
-// certificate that Start loaded gets its first renew or ARI check at the first
-// maintenance tick, because certmagic manageOne returns at once for a managed
-// certificate. An ACME error does not fail Start, and Start does not wait for
-// the network.
+// A certificate that Start loaded and that is due for renewal starts its renewal
+// in the background at once. The old certificate stays in the cache until the
+// new one is stored, then the new one replaces it. ManageAsync does the obtain
+// work for the other names in the background. Those jobs stop when ctx ends.
+// The maintenance of the cache runs until Stop. A certificate that is not due
+// gets its first renew or ARI check at the first maintenance tick. The reason is
+// that certmagic manageOne returns at once for a managed certificate. An ACME
+// error does not fail Start. Start does not wait for the network.
 func (a *ACME) Start(ctx context.Context) error {
 	for _, n := range a.names {
-		if _, err := a.cfg.CacheManagedCertificate(ctx, n); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		cert, err := a.cfg.CacheManagedCertificate(ctx, n)
+		switch {
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			a.logger.LogAttrs(ctx, slog.LevelWarn, "acme certificate load failed", slog.String("name", n))
+		case err == nil && cert.NeedsRenewal(a.cfg):
+			go a.renewDue(ctx, n, cert)
 		}
 	}
 	return a.cfg.ManageAsync(ctx, a.names)
+}
+
+// renewDue renews the cached certificate old of name. The renewal tries again
+// after a failure. It stops when it succeeds, when its retry time ends, or when
+// ctx ends, so it runs in its own goroutine. A renewal only writes the storage,
+// so on success the new certificate goes into the cache and replaces old. A
+// failure writes no line here. While it runs, a renewal of the same name at a
+// maintenance tick waits for it.
+func (a *ACME) renewDue(ctx context.Context, name string, old certmagic.Certificate) {
+	if err := a.cfg.RenewCertAsync(ctx, name, false); err != nil {
+		return
+	}
+	if cert, err := a.cfg.CacheManagedCertificate(ctx, name); err == nil && cert.Hash() != old.Hash() {
+		a.cache.Remove([]string{old.Hash()})
+	}
 }
 
 // Stop stops the maintenance goroutine of the certmagic cache. It waits for the
