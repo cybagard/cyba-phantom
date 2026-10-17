@@ -662,3 +662,355 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 		}
 	}
 }
+
+// servePlain serves a plain socket of the server with h. It returns the address
+// and the channel that gets the result of ServePlain.
+func (r *rig) servePlain(t *testing.T, h http.Handler) (string, <-chan error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.s.ServePlain(ln, h) }()
+	t.Cleanup(func() { _ = r.s.Close() })
+	return ln.Addr().String(), done
+}
+
+// dialPlain opens a plain connection to addr from 127.0.0.<host>. The test closes
+// it at the end.
+func dialPlain(t *testing.T, addr string, host byte) net.Conn {
+	t.Helper()
+	c, err := loopbackDialer(host).Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// countingHandler counts its requests and answers 200.
+func countingHandler(n *atomic.Int32) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n.Add(1)
+		_, _ = io.WriteString(w, "ok")
+	})
+}
+
+// T-S-17: a client that offers only acme-tls/1 completes the handshake and gets
+// no HTTP: the server closes the connection, sends no byte and gives no request
+// event, also when the client sends a request.
+func TestTS17ChallengeProtoGetsNoHTTP(t *testing.T) {
+	h, q, _ := newHelloQueue(t, 16)
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
+	r.serve(t)
+	c, err := tls.Dial("tcp", r.addr, r.clientConfig(challengeProto))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if p := c.ConnectionState().NegotiatedProtocol; p != challengeProto {
+		t.Fatalf("negotiated %q, want %q", p, challengeProto)
+	}
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "GET / HTTP/1.1\r\nHost: decoy.test\r\n\r\n")
+	if n, err := c.Read(make([]byte, 512)); n != 0 || err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("read after acme-tls/1: %d bytes, error %v; want a close and no bytes", n, err)
+	}
+	waitFor(t, "slot free", func() bool { return len(r.s.sem) == 0 })
+	if evs := q.Drain(); len(evs) != 0 {
+		t.Fatalf("%d request events, want 0", len(evs))
+	}
+}
+
+// T-S-17: the server lists http/1.1 before acme-tls/1. A client with ALPN
+// http/1.1, with no ALPN, or with both values gets HTTP/1.1 only, and h2 is not
+// negotiated.
+func TestTS17ALPNListKeepsHTTP11(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	if got := r.s.tls.NextProtos; len(got) != 2 || got[0] != "http/1.1" || got[1] != challengeProto {
+		t.Fatalf("server ALPN list %v", got)
+	}
+	for _, tc := range []struct {
+		offer []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{"http/1.1"}, "http/1.1"},
+		{[]string{challengeProto, "http/1.1"}, "http/1.1"},
+		{[]string{"h2", challengeProto, "http/1.1"}, "http/1.1"},
+		{[]string{"h2", "http/1.1"}, "http/1.1"},
+	} {
+		c, err := tls.Dial("tcp", r.addr, r.clientConfig(tc.offer...))
+		if err != nil {
+			t.Fatalf("offer %v: %v", tc.offer, err)
+		}
+		if p := c.ConnectionState().NegotiatedProtocol; p != tc.want {
+			t.Errorf("offer %v: negotiated %q, want %q", tc.offer, p, tc.want)
+		}
+		if got := status(c, 0); got != 200 {
+			t.Errorf("offer %v: status %d, want 200", tc.offer, got)
+		}
+		_ = c.Close()
+	}
+}
+
+// T-S-17: the TLS socket and the plain socket share the slots. When one socket
+// holds all of them, a connection on the other socket closes before a read.
+func TestTS17SlotsSharedByPlainAndTLS(t *testing.T) {
+	const slots = 2
+	t.Run("TLS holds the slots", func(t *testing.T) {
+		var served atomic.Int32
+		r := newRig(t, slots, testHeaderBytes, defaultTimeouts, countingHandler(&served))
+		r.serve(t)
+		plain, _ := r.servePlain(t, countingHandler(&served))
+		for range slots {
+			r.dial(t)
+		}
+		waitFor(t, "slots taken", func() bool { return len(r.s.sem) == slots })
+		over := dialPlain(t, plain, 1)
+		_, _ = io.WriteString(over, head(0))
+		if d := closesWithin(t, over); d > closeBound {
+			t.Fatalf("close took %v, want at most %v", d, closeBound)
+		}
+		if served.Load() != 0 || r.s.SourceCapCloses() != 0 {
+			t.Fatalf("requests served %d, source cap closes %d; want 0 and 0", served.Load(), r.s.SourceCapCloses())
+		}
+	})
+	t.Run("plain holds the slots", func(t *testing.T) {
+		r := newRig(t, slots, testHeaderBytes, defaultTimeouts, okHandler)
+		r.serve(t)
+		plain, _ := r.servePlain(t, okHandler)
+		for range slots {
+			dialPlain(t, plain, 1)
+		}
+		waitFor(t, "slots taken", func() bool { return len(r.s.sem) == slots })
+		expectCapClose(t, r, r.addr, 1)
+		if r.s.SourceCapCloses() != 0 {
+			t.Fatalf("source cap closes %d, want 0", r.s.SourceCapCloses())
+		}
+	})
+}
+
+// T-S-17: the source cap is for both sockets. 16 connections on each socket are
+// 32 from one source address. Connection 33 closes on the plain socket, and then
+// on the TLS socket, and each close adds one to the source cap count.
+func TestTS17SourceCapSharedByPlainAndTLS(t *testing.T) {
+	r := newRig(t, 2*maxConnsPerSource, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	tlsAddr := r.addr
+	plain, _ := r.servePlain(t, okHandler)
+	for range maxConnsPerSource / 2 {
+		r.dialTLSFrom(t, tlsAddr, 2)
+		dialPlain(t, plain, 2)
+	}
+	waitFor(t, "slots taken", func() bool { return len(r.s.sem) == maxConnsPerSource })
+	if d := closesWithin(t, dialPlain(t, plain, 2)); d > closeBound {
+		t.Fatalf("close on the plain socket took %v", d)
+	}
+	if got := r.s.SourceCapCloses(); got != 1 {
+		t.Fatalf("source cap closes %d after the plain socket, want 1", got)
+	}
+	expectCapClose(t, r, tlsAddr, 2)
+	if got := r.s.SourceCapCloses(); got != 2 {
+		t.Fatalf("source cap closes %d after the TLS socket, want 2", got)
+	}
+}
+
+// T-S-17: the read budget is the same on the plain socket. After a first request,
+// a head of header_bytes bytes gets 200 and a head of header_bytes + 2000 bytes
+// closes the connection with no response, on both sockets.
+func TestTS17PlainReadBudget(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	plain, _ := r.servePlain(t, okHandler)
+	for name, dial := range map[string]func() net.Conn{
+		"TLS":   func() net.Conn { return r.dial(t) },
+		"plain": func() net.Conn { return dialPlain(t, plain, 1) },
+	} {
+		c := dial()
+		if got := status(c, 0); got != 200 {
+			t.Fatalf("%s: first request: status %d", name, got)
+		}
+		if got := status(c, testHeaderBytes); got != 200 {
+			t.Fatalf("%s: head of header_bytes bytes: status %d, want 200", name, got)
+		}
+		over := dial()
+		if got := status(over, 0); got != 200 {
+			t.Fatalf("%s: first request: status %d", name, got)
+		}
+		if got := status(over, testHeaderBytes+2000); got != 0 {
+			t.Errorf("%s: head over the budget: status %d, want a close", name, got)
+		}
+	}
+}
+
+// T-S-17: the keep-alive limit runs on the plain socket. A connection that read
+// 4096 bytes or less in its period stays open. One that read more closes after
+// its response.
+func TestTS17PlainKeepAliveLimit(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	plain, _ := r.servePlain(t, okHandler)
+	small := dialPlain(t, plain, 1)
+	for i := range 2 {
+		if got := status(small, 0); got != 200 {
+			t.Fatalf("small request %d: status %d, want 200", i, got)
+		}
+	}
+	big := dialPlain(t, plain, 1)
+	if got := status(big, keepAliveBytes+904); got != 200 {
+		t.Fatalf("large request: status %d, want 200", got)
+	}
+	if got := status(big, 0); got != 0 {
+		t.Fatalf("request after a period of more than %d bytes: status %d, want a close", keepAliveBytes, got)
+	}
+}
+
+// blockingHandler tells on started that a request is in the handler, and holds
+// the request until release is closed.
+type blockingHandler struct{ started, release chan struct{} }
+
+func (b blockingHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	b.started <- struct{}{}
+	<-b.release
+	_, _ = io.WriteString(w, "ok")
+}
+
+// openRequests serves a TLS socket and a plain socket with a blockingHandler,
+// sends one request to each, and waits until both are in the handler. It returns
+// the results of the two Serve calls and the channel of the two client statuses.
+func openRequests(t *testing.T, r *rig, bh blockingHandler) (serves [2]<-chan error, statuses <-chan int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.addr = ln.Addr().String()
+	tlsDone := make(chan error, 1)
+	go func() { tlsDone <- r.s.Serve(ln) }()
+	plain, plainDone := r.servePlain(t, bh)
+	res := make(chan int, 2)
+	go func() {
+		c, err := tls.Dial("tcp", r.addr, r.clientConfig())
+		if err != nil {
+			res <- 0
+			return
+		}
+		defer c.Close()
+		res <- status(c, 0)
+	}()
+	go func() {
+		c, err := net.Dial("tcp", plain)
+		if err != nil {
+			res <- 0
+			return
+		}
+		defer c.Close()
+		res <- status(c, 0)
+	}()
+	for range 2 {
+		select {
+		case <-bh.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a request did not reach the handler")
+		}
+	}
+	return [2]<-chan error{tlsDone, plainDone}, res
+}
+
+// T-S-17: Shutdown returns after the open requests of the TLS socket and the
+// plain socket are done, and both Serve calls return http.ErrServerClosed.
+func TestTS17ShutdownWaitsForBothSockets(t *testing.T) {
+	bh := blockingHandler{started: make(chan struct{}, 2), release: make(chan struct{})}
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, bh)
+	serves, statuses := openRequests(t, r, bh)
+	done := make(chan error, 1)
+	go func() { done <- r.s.Shutdown(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown returned with two open requests: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(bh.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the handlers returned")
+	}
+	for range 2 {
+		if got := <-statuses; got != 200 {
+			t.Errorf("client status %d, want 200", got)
+		}
+	}
+	for i, ch := range serves {
+		if err := <-ch; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve call %d returned %v, want http.ErrServerClosed", i, err)
+		}
+	}
+	if _, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
+		t.Error("the TLS socket still accepts connections")
+	}
+}
+
+// T-S-17: a request that is still open when the context of Shutdown ends is
+// closed on both sockets, and Shutdown returns at the deadline with its error.
+func TestTS17ShutdownClosesOpenConnectionsAtTheDeadline(t *testing.T) {
+	const deadline = 300 * time.Millisecond
+	bh := blockingHandler{started: make(chan struct{}, 2), release: make(chan struct{})}
+	t.Cleanup(func() { close(bh.release) })
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, bh)
+	_, statuses := openRequests(t, r, bh)
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	begin := time.Now()
+	err := r.s.Shutdown(ctx)
+	took := time.Since(begin)
+	if !errors.Is(err, context.DeadlineExceeded) || took < deadline-50*time.Millisecond || took > deadline+time.Second {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error at about %v", err, took, deadline)
+	}
+	for range 2 {
+		select {
+		case got := <-statuses:
+			if got != 0 {
+				t.Errorf("client status %d, want a closed connection", got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a client connection is still open after Shutdown")
+		}
+	}
+	waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
+}
+
+// T-S-17: a TCP connection from the address of the sensor that sends no byte and
+// closes, like the self-check of certmagic before a challenge, gives no request
+// event and no ClientHello capture. The test logs the change of the error lines
+// and of the slots in use.
+func TestTS17SelfDialGivesNoEventAndNoCapture(t *testing.T) {
+	h, q, _ := newHelloQueue(t, 16)
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
+	var hellos atomic.Int32
+	r.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+		hellos.Add(1)
+		return captureHello(chi)
+	}
+	r.serve(t)
+	lines, used := r.s.ErrorLines(), len(r.s.sem)
+	c, err := loopbackDialer(1).Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	waitFor(t, "the failed handshake in the error log", func() bool { return r.s.ErrorLines() > lines })
+	waitFor(t, "slot free", func() bool { return len(r.s.sem) == used })
+	t.Logf("error lines %d -> %d; slots in use %d -> %d", lines, r.s.ErrorLines(), used, len(r.s.sem))
+	if n := hellos.Load(); n != 0 {
+		t.Errorf("%d ClientHello captures, want 0", n)
+	}
+	if evs := q.Drain(); len(evs) != 0 {
+		t.Errorf("%d request events, want 0", len(evs))
+	}
+}

@@ -140,9 +140,9 @@ type issueFixture struct {
 	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
 }
 
-// newIssueFixture binds the decoy socket first. It answers on that socket only,
-// with GetCertificate of the ACME, and with acme-tls/1 in its ALPN list. Then it
-// builds the ACME for name, with Pebble as the CA. It does not call Start.
+// newIssueFixture binds the decoy socket first. A Server from New serves that
+// socket, with GetCertificate of the ACME. Then it builds the ACME for name, with
+// Pebble as the CA. It does not call Start.
 func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -157,23 +157,16 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 			mod(p)
 		}
 	})
-	tl := tls.NewListener(l, &tls.Config{GetCertificate: f.a.GetCertificate, NextProtos: []string{"acme-tls/1"}})
-	go func() {
-		for {
-			c, err := tl.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer c.Close()
-				c.SetDeadline(time.Now().Add(10 * time.Second))
-				tc := c.(*tls.Conn)
-				if tc.Handshake() == nil && tc.ConnectionState().NegotiatedProtocol == "acme-tls/1" {
-					f.alpn.Add(1)
-				}
-			}()
-		}
-	}()
+	s, err := New(Config{TLS: &tls.Config{GetCertificate: f.a.GetCertificate}, MaxConns: 64, HeaderBytes: testHeaderBytes}, okHandler)
+	mustNil(t, err)
+	// Count the connections that negotiated acme-tls/1, then run the real function.
+	next := s.srv.TLSNextProto[challengeProto]
+	s.srv.TLSNextProto[challengeProto] = func(sv *http.Server, c *tls.Conn, h http.Handler) {
+		f.alpn.Add(1)
+		next(sv, c, h)
+	}
+	go func() { _ = s.Serve(l) }()
+	t.Cleanup(func() { _ = s.Close() })
 	return f
 }
 
