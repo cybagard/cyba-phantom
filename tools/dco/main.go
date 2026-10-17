@@ -56,7 +56,7 @@ var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 // (only: no other line of the last paragraph), so dco accepts exactly the
 // sign-offs that git recognizes (for example the block that cherry-pick -x
 // -s writes), and never the subject or a line in the middle of the body.
-const logFormat = "--format=%H%x00%ae%x00%ce%x00%(trailers:only,unfold,separator=%x01)%x00"
+const logFormat = "--format=%H%x00%ae%x00%ce%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
 
@@ -79,8 +79,8 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 
 	// Each record is H NUL AE NUL CE NUL TRAILERS NUL, and git ends every
 	// record with its own newline, so records separate on NUL+LF. Trailers
-	// are joined by SOH (0x01) and never hold NUL. No PR-authored text is
-	// printed: only hashes and counts.
+	// are joined by LF. An unfolded trailer holds no LF and no NUL. No
+	// PR-authored text is printed: only hashes and counts.
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
@@ -96,7 +96,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 			hash = hash[:12]
 		}
 		total++
-		trailers := strings.Split(string(f[3]), "\x01")
+		trailers := strings.Split(string(f[3]), "\n")
 		if !hasSignoff(trailers) {
 			unsigned++
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)

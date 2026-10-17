@@ -179,6 +179,29 @@ func runOn(t *testing.T, env []string, msg string) (int, string, string) {
 // signoff is a valid trailer block with the sign-off at the noreply address.
 const signoff = "subject\n\nSigned-off-by: t <" + me + ">\n"
 
+// failsWith commits msg (by the author and the committer set in env) and
+// expects exit 1 with a "<kind>: <hash>" line.
+func failsWith(t *testing.T, env []string, msg, kind string) {
+	t.Helper()
+	code, out, hash := runOn(t, env, msg)
+	if code != 1 || !strings.Contains(out, kind+": "+hash+"\n") {
+		t.Fatalf("run = %d, want 1 with a %q line for %q; output %q", code, kind, hash, out)
+	}
+}
+
+// A SOH byte in a trailer value does not split the trailer in two.
+func TestSOHInTrailerDoesNotSplit(t *testing.T) {
+	t.Run("hidden sign-off", func(t *testing.T) {
+		failsWith(t, nil, "subject\n\nFixes: x\x01Signed-off-by: t <"+me+">\n", "unsigned")
+	})
+	t.Run("hidden co-author", func(t *testing.T) {
+		failsWith(t, nil, signoff+"Co-authored-by: Bob\x01<"+other+">\n", "identity")
+	})
+	t.Run("hidden Claude co-author", func(t *testing.T) {
+		failsWith(t, nil, signoff+"Reviewed-by: x\x01Co-authored-by: Claude <noreply@anthropic.com>\n", "identity")
+	})
+}
+
 // A line that holds only whitespace separates paragraphs, as in git.
 func TestWhitespaceLineSplitsParagraphs(t *testing.T) {
 	if code, _, _ := runOn(t, nil, "subject\n\nSigned-off-by: t <"+me+">\n \t\nclosing words\n"); code != 1 {
