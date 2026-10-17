@@ -670,6 +670,51 @@ func TestTS18ContinueBodyIsLate(t *testing.T) {
 	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 }
 
+// T-S-18: late reads have a budget at read time. A handler reads a body of
+// 20000 bytes after a 100-continue reply. The body is more than the next budget.
+// The body read returns an error, and the handler reads at most the next budget.
+// The late count of the wrapper is at most the next budget. The connection
+// closes, and the next request gets no response.
+func TestTS18LateReadBudget(t *testing.T) {
+	type result struct {
+		n   int64
+		err error
+	}
+	done := make(chan result, 1)
+	readBody := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1000)
+		var res result
+		for res.err == nil {
+			var n int
+			n, res.err = r.Body.Read(buf)
+			res.n += int64(n)
+		}
+		done <- res
+	})
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, readBody)
+	l := r.watchPeriods()
+	r.serve(t)
+	c := r.dialWhole(t)
+	br := bufio.NewReader(c)
+	_ = continueBody(c, br, 20000)
+	res := <-done
+	if res.err == nil || res.err == io.EOF {
+		t.Fatalf("body read error %v, want a read error", res.err)
+	}
+	if res.n > r.s.rd.next {
+		t.Fatalf("the handler read %d bytes, want at most %d", res.n, r.s.rd.next)
+	}
+	if late := l.conn.Load().lateBytes(); late > r.s.rd.next {
+		t.Fatalf("late bytes %d, want at most %d", late, r.s.rd.next)
+	}
+	_, _ = io.WriteString(c, head(0))
+	if got := readStatus(br); got != 0 {
+		t.Fatalf("next request: status %d, want no response", got)
+	}
+	l.wait(t, 0, 1)
+	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
+}
+
 // expectBudgetClose checks that the client got a close and that the wrapper of
 // the one closed connection counted exactly the budget of the first period.
 func expectBudgetClose(t *testing.T, r *rig, l *periodLog, err error) {
