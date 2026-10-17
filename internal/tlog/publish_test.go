@@ -46,6 +46,7 @@ type fakeTarget struct {
 	location string // sent with a 3xx status
 	big      bool   // a response body of 1 MiB
 	stall    chan struct{}
+	arrived  chan struct{} // gets a signal for a request that arrives, if not nil and not full
 	delay    time.Duration // the wait before a 2xx or other answer
 	alias    string        // the URL that the spool uses, if it is not the server URL
 	attempts []uint64
@@ -61,7 +62,7 @@ func newTarget(t *testing.T) *fakeTarget {
 		lines := strings.Split(string(body), "\n")
 		size, _ := strconv.ParseUint(lines[min(1, len(lines)-1)], 10, 64)
 		f.mu.Lock()
-		status, stall, delay := f.status, f.stall, f.delay
+		status, stall, delay, arrived := f.status, f.stall, f.delay, f.arrived
 		if len(f.queue) > 0 {
 			status, f.queue = f.queue[0], f.queue[1:]
 		}
@@ -71,6 +72,12 @@ func newTarget(t *testing.T) *fakeTarget {
 			f.stored = append(f.stored, size)
 		}
 		f.mu.Unlock()
+		if arrived != nil {
+			select {
+			case arrived <- struct{}{}:
+			default:
+			}
+		}
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
@@ -199,52 +206,63 @@ func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 
 func withTimeout(d time.Duration) PublishOption { return func(c *publishConfig) { c.timeout = d } }
 
-func (f *fakeTarget) setDelay(d time.Duration) {
-	f.mu.Lock()
-	f.delay = d
-	f.mu.Unlock()
-}
-
-// T-S-13: the lock-hold check, as a test: several notes, a slow HTTPS target
-// that answers 2xx, the real publisher. While a pass sends, Spool.Add returns in
-// less time than one send.
+// T-S-13: the lock-hold check, as a test: several notes, an HTTPS target that
+// holds the request for the first note open, the real publisher. While a pass
+// is in Send, Spool.Add returns. The test checks the overlap and not a time:
+// Add returns while the pass still runs and before the target has stored a size
+// above 1. After the release, the pass sends the notes in increasing size, and
+// the cursor is the last size that the target stored.
 func TestTS13AddDoesNotWaitForSlowTarget(t *testing.T) {
-	const delay, bound = 200 * time.Millisecond, 100 * time.Millisecond
+	const hang = 5 * time.Second
 	a := newTarget(t)
-	a.setDelay(delay)
-	e := newPub(t, time.Minute, []*fakeTarget{a}, withTimeout(300*time.Millisecond))
+	a.stall = make(chan struct{})
+	a.arrived = make(chan struct{}, 1)
+	var release sync.Once
+	free := func() { release.Do(func() { close(a.stall) }) }
+	t.Cleanup(free) // runs before the close of the server
+	e := newPub(t, time.Minute, []*fakeTarget{a}, withTimeout(30*time.Second))
 	for size := uint64(1); size <= 5; size++ {
 		e.add(t, size)
 	}
 	msg, err := SignCheckpoint(e.signer, 6, testRoot())
 	must(t, err)
-	done := make(chan struct{})
+	passDone := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(passDone)
 		e.pub.pass()
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if attempts, _, _ := a.got(); len(attempts) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the publisher did not send")
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-a.arrived:
+	case <-time.After(hang):
+		t.Fatal("the publisher did not send")
 	}
-	start := time.Now()
-	must(t, e.spool.Add(6, msg))
-	if took := time.Since(start); took > bound {
-		t.Fatalf("Add took %v while the publisher sent, want less than %v", took, bound)
+	addDone := make(chan error, 1)
+	go func() { addDone <- e.spool.Add(6, msg) }()
+	select {
+	case err := <-addDone:
+		must(t, err)
+	case <-time.After(hang):
+		t.Fatal("Add did not return while the publisher sent")
 	}
 	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-passDone:
+		t.Fatal("the pass ended before the target answered the first request")
+	default:
+	}
+	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1}) {
+		t.Fatalf("stored = %v when Add returned, want only 1 (the request that is held)", stored)
+	}
+	free()
+	select {
+	case <-passDone:
+	case <-time.After(2 * hang):
 		t.Fatal("the pass did not end")
 	}
 	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1, 2, 3, 4, 5}) {
 		t.Fatalf("stored = %v, want 1 2 3 4 5", stored)
+	}
+	if b, err := os.ReadFile(filepath.Join(e.dir, e.spool.cursorName(0))); err != nil || string(b) != "5" {
+		t.Fatalf("cursor = %q, %v, want 5", b, err)
 	}
 }
 
