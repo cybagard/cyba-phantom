@@ -259,6 +259,8 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 		{"author address in upper case", []string{"GIT_AUTHOR_EMAIL=" + upper}, signoff},
 		{"sign-off address in upper case", nil, "subject\n\nSigned-off-by: t <" + upper + ">\n"},
 		{"sign-off key in lower case", nil, "subject\n\nsigned-off-by: t <" + me + ">\n"},
+		{"committer address in upper case", []string{"GIT_COMMITTER_EMAIL=" + upper}, signoff},
+		{"GitHub committer address in upper case", []string{"GIT_COMMITTER_EMAIL=NOREPLY@GITHUB.COM"}, signoff},
 		{"Claude address in upper case", nil, signoff + "Co-authored-by: Claude Sonnet 5.5 <NOREPLY@ANTHROPIC.COM>\n"},
 	}
 	for _, c := range cases {
@@ -427,6 +429,8 @@ func TestIdentityRule(t *testing.T) {
 		{"Claude co-author", []string{"GIT_COMMITTER_EMAIL=noreply@github.com"}, signoff + "Co-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>\n", 0},
 		{"Claude co-author, key in other case", nil, signoff + "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n", 0},
 		{"co-author named Bob at the Claude address", nil, signoff + "Co-authored-by: Bob <noreply@anthropic.com>\n", 1},
+		{"co-author named exactly Claude", nil, signoff + "Co-authored-by: Claude <noreply@anthropic.com>\n", 0},
+		{"Claude co-author without angle brackets", nil, signoff + "Co-authored-by: Claude noreply@anthropic.com\n", 1},
 		{"Claude co-author with a second address", nil, signoff + "Co-authored-by: Claude <noreply@anthropic.com>, Bob <noreply@anthropic.com>\n", 1},
 		{"co-author named Claudette", nil, signoff + "Co-authored-by: Claudette <noreply@anthropic.com>\n", 1},
 		{"Claude address in another key", nil, signoff + "Reviewed-by: Claude <noreply@anthropic.com>\n", 1},
