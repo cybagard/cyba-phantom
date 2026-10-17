@@ -245,6 +245,7 @@ func TestNonASCIICoauthorKeyFails(t *testing.T) {
 // sign-off.
 func TestSecondSignoffWithoutAddressFails(t *testing.T) {
 	failsWith(t, nil, signoff+"Signed-off-by: Bob\n", "identity")
+	failsWith(t, nil, signoff+"signed-off-by: Bob\n", "identity")
 }
 
 // Addresses and trailer keys compare without case.
@@ -431,6 +432,7 @@ func TestIdentityRule(t *testing.T) {
 		{"address without angle brackets", nil, signoff + "Reviewed-by: " + other + "\n", 1},
 		{"co-author at the noreply address", nil, signoff + "Co-authored-by: t <" + me + ">\n", 0},
 		{"trailer without an address", nil, signoff + "Fixes: 12\n", 0},
+		{"folded trailer with another address", nil, signoff + "Co-authored-by: Bob\n <" + other + ">\n", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
