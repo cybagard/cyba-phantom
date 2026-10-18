@@ -53,8 +53,8 @@ func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 // startWriter is a writer that closes started when the text written so far holds the start line.
-// The line can come in more than one Write call. It holds the text in a named field, so a caller cannot write
-// past the signal. After the signal, Write does not scan the text again.
+// The line can come in more than one Write call. The named field text stops a caller from using the Write of
+// syncBuf, which does not look for the start line. After started closes, Write does not scan the text again.
 type startWriter struct {
 	text    syncBuf
 	started chan struct{}
@@ -77,7 +77,7 @@ func (w *startWriter) hasStarted() bool {
 	}
 }
 
-// Write is called by one goroutine at a time: the writer of stdout of serve, or the copy of the child output.
+// Write has one caller at a time: the writer of stdout of serve, or the copy of the child output.
 func (w *startWriter) Write(p []byte) (int, error) {
 	n, err := w.text.Write(p)
 	if !w.hasStarted() && strings.Contains(w.text.String(), "phantom: started") {
@@ -234,8 +234,8 @@ func captureServer(t *testing.T) func() *listener.Server {
 	return func() *listener.Server { return srv }
 }
 
-// awaitErrorLines waits until the server error log counts at least n lines. It waits on the line signal of the
-// server. One signal can stand for more than one line, so it reads the count again after each signal.
+// awaitErrorLines waits until the server error log counts at least n lines. It waits for a value on the line
+// channel of the server. One value can stand for more than one line, so it reads the count again after each value.
 // It has no deadline of its own. It fails when serve ends. If the server never writes the line, the wait
 // ends at the go test timeout.
 func (r *running) awaitErrorLines(t *testing.T, srv *listener.Server, n uint64) {
@@ -332,7 +332,7 @@ func depsWithQueue(q **event.Queue) startDeps {
 
 // TestTI03_StartAndStopOrder checks that the store and the certificate client start after serve holds the two test
 // listeners. It checks that serve holds them while the sensor runs.
-// After the stop signal, the client stops and the queue closes after both serve calls returned (NFR-05).
+// After the context ends, the client stops and the queue closes after both serve calls returned (NFR-05).
 func TestTI03_StartAndStopOrder(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -591,13 +591,12 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 // listeners closed, the queue closed, the database closed, and no goroutine that serve started and left running.
 // The test compares the goroutine IDs right after the return with the IDs right before the call. It does not
 // count goroutines: the runtime can hold a goroutine that has ended and is not yet freed, and a count includes it.
-// The test skips two kinds of new goroutine. One is a goroutine of database/sql, for example the connection
-// opener. The close of the database cancels it but does not wait for it. So the test checks the database instead:
-// it must be closed, and it must have no open connection. The close does not wait for a connection in use. A
-// Transaction or Rows that the store did not close keeps its connection open, and then its goroutine does not
-// end. No open connection means that the store closed every Transaction and Rows, so these goroutines end on
-// their own. The other kind is a goroutine of the runtime, for example the finalizer goroutine. User code does
-// not start it, and it can show in the dump while it runs a finalizer. Every other new goroutine fails the test.
+// The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. So the test skips that
+// goroutine only for the database that it captured and found closed, with no open connection. Any other
+// connectionOpener fails the test. The goroutines of a sql.Tx or sql.Rows stay skipped only when every new
+// connectionOpener is of a closed database, because a sql.Tx or sql.Rows of another database keeps its opener alive.
+// The test also skips the goroutines that the runtime creates, for example the finalizer goroutine. Every other
+// new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -617,22 +616,57 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	if !q.Closed() || !https.closed.Load() || !plain.closed.Load() {
 		t.Errorf("queue closed %v, listeners closed %v %v; want true, true true", q.Closed(), https.closed.Load(), plain.closed.Load())
 	}
+	closedDB := "" // the pointer text of db, when db passed the closed check
 	if db == nil {
 		t.Error("serve did not start the writer, so the test has no database to check")
 	} else if err := db.Ping(); err == nil || err.Error() != "sql: database is closed" {
 		t.Errorf("database ping after serve returned: %v; want %q", err, "sql: database is closed")
 	} else if st := db.Stats(); st.OpenConnections != 0 || st.InUse != 0 {
 		t.Errorf("database connections after serve returned: %d open, %d in use; want 0 and 0", st.OpenConnections, st.InUse)
+	} else {
+		closedDB = fmt.Sprintf("%p", db)
 	}
-	for id, block := range after {
-		if _, old := before[id]; old {
-			continue
+	var fresh []int
+	for id := range after {
+		if _, old := before[id]; !old {
+			fresh = append(fresh, id)
 		}
-		if strings.Contains(block, "\ncreated by database/sql.") || strings.Contains(block, "\ncreated by runtime.") {
+	}
+	slices.Sort(fresh)
+	openersOK := true
+	for _, id := range fresh {
+		if arg, ok := openerDB(after[id]); ok && (closedDB == "" || arg != closedDB) {
+			openersOK = false
+			t.Errorf("goroutine %d is the connectionOpener of a database that the test did not find closed (%s; closed database %q):\n%s", id, arg, closedDB, after[id])
+		}
+	}
+	for _, id := range fresh {
+		block := after[id]
+		if _, ok := openerDB(block); ok {
+			continue // checked above
+		}
+		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || strings.Contains(block, "\ncreated by runtime.") {
 			continue
 		}
 		t.Errorf("goroutine %d started in serve and is still running after serve returned:\n%s", id, block)
 	}
+}
+
+// openerDB reports whether the top frame of a stack block is (*sql.DB).connectionOpener. If so, it returns the
+// text of the first argument, the address of the database, as the dump prints it.
+func openerDB(block string) (string, bool) {
+	lines := strings.SplitN(block, "\n", 3)
+	if len(lines) < 2 {
+		return "", false
+	}
+	args, ok := strings.CutPrefix(lines[1], "database/sql.(*DB).connectionOpener(")
+	if !ok {
+		return "", false
+	}
+	if i := strings.IndexAny(args, ",)"); i >= 0 {
+		args = args[:i]
+	}
+	return strings.TrimSuffix(args, "?"), true
 }
 
 // depsWithDB wraps the newWriter of d. When the writer starts, it sets *db to the database of the store.
@@ -684,14 +718,14 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	t.Cleanup(func() { serveSetup = oldSetup; log.SetOutput(oldLog) })
 	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
 	closed := closedAtReturn(t, &q)
-	waiting, signalled := make(chan struct{}), make(chan struct{})
+	waiting, sent := make(chan struct{}), make(chan struct{})
 	var release sync.Once
-	t.Cleanup(func() { release.Do(func() { close(signalled) }) }) // frees serve if the test ends before it sent SIGTERM
+	t.Cleanup(func() { release.Do(func() { close(sent) }) }) // frees serve if the test ends before it sent SIGTERM
 	oldWait := waitStop
 	t.Cleanup(func() { waitStop = oldWait })
 	waitStop = func(ctx context.Context) {
 		close(waiting)
-		<-signalled
+		<-sent
 		oldWait(ctx)
 	}
 	out := newStartWriter()
@@ -699,12 +733,12 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	var c int
 	done := make(chan struct{})
 	go func() { c = serve(cfg, out, &errb); close(done) }()
-	t.Cleanup(func() { release.Do(func() { close(signalled) }); <-done })
+	t.Cleanup(func() { release.Do(func() { close(sent) }); <-done })
 	startWait{"serve", out, done, func() string { return fmt.Sprintf("exit %d; stderr %q", c, errb.String()) }}.until(t, waiting, false)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	release.Do(func() { close(signalled) })
+	release.Do(func() { close(sent) })
 	<-done
 	if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
 		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
