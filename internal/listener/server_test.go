@@ -1077,8 +1077,9 @@ func (l *stallListener) Accept() (net.Conn, error) {
 
 // T-S-17: three idle TLS connections whose write below TLS cannot complete close
 // at the deadline of Shutdown. Shutdown returns the error of its context in at
-// most the deadline + 1 s, and all slots are free after it. Without the fix, the
-// close_notify write of each connection waits for its own 5 s write deadline.
+// most the deadline + 1 s, and all slots are free after it. Without the raw close
+// in Shutdown, the close_notify write of each connection waits for its own 5 s
+// write deadline.
 //
 // The test simulates the full send buffer and does not use a real kernel send
 // buffer. A connection with a real full buffer is hard to keep idle: a response

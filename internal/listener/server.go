@@ -180,13 +180,13 @@ func periodHook(c net.Conn, st http.ConnState) {
 // Shutdown. A connection that negotiates acme-tls/1 closes after the handshake
 // and gets no HTTP. The connection cap is on the raw listener, and the TLS layer
 // is on top of it. A connection that a handler hijacks keeps its slot until the
-// handler closes it, or until the context of Shutdown ends while Shutdown waits
-// for another connection: Shutdown then closes it at the socket. When no other
-// connection holds Shutdown, Shutdown returns at once and the hijacked
-// connection stays open. All Serve calls of one server share the MaxConns slots
-// and the cap of maxConnsPerSource open connections for each source address. The
-// connections of ln must have a *net.TCPAddr peer address: all connections with
-// another address type share one source count.
+// handler closes it, or until the context of Shutdown ends before Shutdown
+// returns: Shutdown then closes it at the socket. When no other connection holds
+// Shutdown and its context is not done when it is called, Shutdown returns at
+// once and the hijacked connection stays open. All Serve calls of one server
+// share the MaxConns slots and the cap of maxConnsPerSource open connections for
+// each source address. The connections of ln must have a *net.TCPAddr peer
+// address: all connections with another address type share one source count.
 func (s *Server) Serve(ln net.Listener) error {
 	return s.srv.Serve(tls.NewListener(newLimitListener(ln, s.sem, s.src, s.rd), s.tls))
 }
