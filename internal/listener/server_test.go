@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1002,6 +1003,193 @@ func TestTS17ShutdownClosesOpenConnectionsAtTheDeadline(t *testing.T) {
 		}
 	}
 	waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
+}
+
+// stallConn is a raw connection whose Write cannot complete once the test sets
+// stall, like a socket with a full send buffer. A stalled Write waits until the
+// write deadline or until Close, and returns at once on Close like a real socket.
+type stallConn struct {
+	net.Conn
+	stall  *atomic.Bool
+	closed chan struct{}
+	once   sync.Once
+
+	mu       sync.Mutex
+	deadline time.Time // the write deadline; the zero value means none
+}
+
+func (c *stallConn) setDeadline(d time.Time) {
+	c.mu.Lock()
+	c.deadline = d
+	c.mu.Unlock()
+}
+
+func (c *stallConn) SetDeadline(d time.Time) error {
+	c.setDeadline(d)
+	return c.Conn.SetDeadline(d)
+}
+
+func (c *stallConn) SetWriteDeadline(d time.Time) error {
+	c.setDeadline(d)
+	return c.Conn.SetWriteDeadline(d)
+}
+
+func (c *stallConn) Write(p []byte) (int, error) {
+	if !c.stall.Load() {
+		return c.Conn.Write(p)
+	}
+	c.mu.Lock()
+	d := c.deadline
+	c.mu.Unlock()
+	var expired <-chan time.Time // nil: no deadline, wait for Close only
+	if !d.IsZero() {
+		timer := time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	case <-expired:
+		return 0, os.ErrDeadlineExceeded
+	}
+}
+
+func (c *stallConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// stallListener wraps the raw listener that the test gives to Serve, so that
+// each accepted connection is a stallConn.
+type stallListener struct {
+	net.Listener
+	stall atomic.Bool
+}
+
+func (l *stallListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &stallConn{Conn: c, stall: &l.stall, closed: make(chan struct{})}, nil
+}
+
+// T-S-17: three idle TLS connections whose write below TLS cannot complete close
+// at the deadline of Shutdown. Shutdown returns the error of its context in at
+// most the deadline + 1 s, and all slots are free after it. Without the raw close
+// in Shutdown, the close_notify write of each connection waits for its own 5 s
+// write deadline.
+//
+// The test simulates the full send buffer and does not use a real kernel send
+// buffer. A connection with a real full buffer is hard to keep idle: a response
+// that fills the buffer holds the handler, so the connection is not idle. The
+// stallConn above lets the test read every response, wait for the idle state of
+// each connection, and only then stop its writes. Its Write returns at once when
+// the connection is closed, like a real socket.
+func TestTS17ShutdownClosesIdleTLSConnectionsWithStalledWrites(t *testing.T) {
+	const (
+		nConns   = 3
+		deadline = 300 * time.Millisecond
+	)
+	r := newRig(t, nConns, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := &stallListener{Listener: raw}
+	r.addr = raw.Addr().String()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- r.s.Serve(ln) }()
+	t.Cleanup(func() { _ = r.s.Close() })
+
+	for range nConns {
+		if got := status(r.dial(t), 0); got != 200 {
+			t.Fatalf("status %d, want 200", got)
+		}
+	}
+	l.wait(t, nConns, 0)
+	waitFor(t, "slots taken", func() bool { return len(r.s.sem) == nConns })
+	ln.stall.Store(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	res := make(chan error, 1)
+	begin := time.Now()
+	go func() { res <- r.s.Shutdown(ctx) }()
+	var got error
+	select {
+	case got = <-res:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Shutdown did not return in 30 s")
+	}
+	took := time.Since(begin)
+	t.Logf("Shutdown returned %v after %v", got, took)
+	if !errors.Is(got, context.DeadlineExceeded) || took > deadline+time.Second {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", got, took, deadline+time.Second)
+	}
+	waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
+	if err := <-serveDone; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve returned %v, want http.ErrServerClosed", err)
+	}
+}
+
+// T-S-17: the record of open connections holds each open connection of the TLS
+// socket and the plain socket, never more than max_conns, and no connection that
+// a cap refused. A closed connection leaves it.
+func TestTS17OpenConnectionRecord(t *testing.T) {
+	t.Run("slot cap", func(t *testing.T) {
+		const slots = 2
+		r := newRig(t, slots, testHeaderBytes, defaultTimeouts, okHandler)
+		r.serve(t)
+		tlsAddr := r.addr
+		plain, _ := r.servePlain(t, okHandler)
+		tc := r.dial(t)
+		pc := dialPlain(t, plain, 1)
+		waitFor(t, "both connections in the record", func() bool { return r.s.src.openConns() == slots })
+		// A connection over the slot cap closes at once on each socket and never
+		// enters the record.
+		expectCapClose(t, r, tlsAddr, 1)
+		if d := closesWithin(t, dialPlain(t, plain, 1)); d > closeBound {
+			t.Fatalf("close on the plain socket took %v", d)
+		}
+		if n := r.s.src.openConns(); n != slots {
+			t.Fatalf("record holds %d connections after the refused ones, want %d", n, slots)
+		}
+		_ = tc.Close()
+		waitFor(t, "TLS connection out of the record", func() bool { return r.s.src.openConns() == 1 })
+		_ = pc.Close()
+		waitFor(t, "record empty", func() bool { return r.s.src.openConns() == 0 })
+		waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
+	})
+	t.Run("source cap", func(t *testing.T) {
+		r := newRig(t, 2*maxConnsPerSource, testHeaderBytes, defaultTimeouts, okHandler)
+		r.serve(t)
+		tlsAddr := r.addr
+		plain, _ := r.servePlain(t, okHandler)
+		var conns []net.Conn
+		for range maxConnsPerSource / 2 {
+			conns = append(conns, r.dialTLSFrom(t, tlsAddr, 2), dialPlain(t, plain, 2))
+		}
+		waitFor(t, "all connections in the record", func() bool { return r.s.src.openConns() == maxConnsPerSource })
+		// Connection 33 of the source closes on each socket and never enters the record.
+		if d := closesWithin(t, dialPlain(t, plain, 2)); d > closeBound {
+			t.Fatalf("close on the plain socket took %v", d)
+		}
+		expectCapClose(t, r, tlsAddr, 2)
+		if got := r.s.SourceCapCloses(); got != 2 {
+			t.Fatalf("source cap closes %d, want 2", got)
+		}
+		if n := r.s.src.openConns(); n != maxConnsPerSource {
+			t.Fatalf("record holds %d connections after the refused ones, want %d", n, maxConnsPerSource)
+		}
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		waitFor(t, "record empty", func() bool { return r.s.src.openConns() == 0 })
+		waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
+	})
 }
 
 // T-S-17: a TCP connection from the address of the sensor that sends no byte and
