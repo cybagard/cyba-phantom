@@ -135,6 +135,7 @@ func (c *countConn) Write(p []byte) (int, error) {
 // server reads exactly total bytes in the first period and waits for more.
 func (r *rig) dialReading(t *testing.T, host byte, total int) *tls.Conn {
 	t.Helper()
+	requireLoopback(t, host)
 	raw, err := loopbackDialer(host).Dial("tcp", r.addr)
 	if err != nil {
 		t.Fatal(err)

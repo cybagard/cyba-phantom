@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -25,10 +27,34 @@ func loopbackDialer(host byte) *net.Dialer {
 	return &net.Dialer{Timeout: 3 * time.Second, LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, host)}}
 }
 
+// requireLoopback checks that the host can bind the source address
+// 127.0.0.<host>. Address 127.0.0.1 always works. Linux routes all of
+// 127.0.0.0/8 to loopback, so there a bind error fails the test. Other systems
+// can assign only 127.0.0.1: there the test skips when the address is not
+// available. Any other error fails the test on all systems. Call it from the
+// goroutine of the test.
+func requireLoopback(t *testing.T, host byte) {
+	t.Helper()
+	if host == 1 {
+		return
+	}
+	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, host)}
+	l, err := net.ListenTCP("tcp", addr)
+	if err == nil {
+		_ = l.Close()
+		return
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) && runtime.GOOS != "linux" {
+		t.Skipf("host has no loopback address %v", addr.IP)
+	}
+	t.Fatalf("bind %v: %v", addr.IP, err)
+}
+
 // dialTLSFrom opens a TLS connection to addr from 127.0.0.<host>. The test
 // closes it at the end.
 func (r *rig) dialTLSFrom(t *testing.T, addr string, host byte) net.Conn {
 	t.Helper()
+	requireLoopback(t, host)
 	d := tls.Dialer{NetDialer: loopbackDialer(host), Config: r.clientConfig()}
 	c, err := d.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
@@ -43,6 +69,7 @@ func (r *rig) dialTLSFrom(t *testing.T, addr string, host byte) net.Conn {
 // closeBound.
 func expectCapClose(t *testing.T, r *rig, addr string, host byte) {
 	t.Helper()
+	requireLoopback(t, host)
 	raw, err := loopbackDialer(host).Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)

@@ -184,6 +184,10 @@ func TestTP09Client(t *testing.T) {
 		t.Skip("child process of TestTP09")
 	}
 	form := os.Getenv("PHANTOM_TP09_FORM")
+	// The dial goroutines below cannot skip the test, so the check runs here.
+	for i := 0; i < tp09Conns; i += maxConnsPerSource {
+		requireLoopback(t, byte(2+i/maxConnsPerSource))
+	}
 	var (
 		wg    sync.WaitGroup
 		bad   atomic.Int64
