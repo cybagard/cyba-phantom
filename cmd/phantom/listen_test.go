@@ -51,8 +51,8 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-// startWriter is a writer that closes started when the text written so far holds the start line. The line can
-// come in more than one Write call.
+// startWriter is a writer that closes started when the text written so far holds the start line.
+// The line can come in more than one Write call.
 type startWriter struct {
 	syncBuf
 	once    sync.Once
@@ -60,6 +60,18 @@ type startWriter struct {
 }
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
+
+// hasStarted reports without blocking whether the start line is written. A wait that sees the end of the
+// process first calls it. When the process wrote the line and then ended, both channels are ready and select
+// picks one at random.
+func (w *startWriter) hasStarted() bool {
+	select {
+	case <-w.started:
+		return true
+	default:
+		return false
+	}
+}
 
 func (w *startWriter) Write(p []byte) (int, error) {
 	n, err := w.syncBuf.Write(p)
@@ -69,11 +81,11 @@ func (w *startWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// trackedListener is a listener that the test opened. It notes when serve takes it through the listen seam
-// and when it is closed.
+// trackedListener is a listener that the test opened. It notes when serve takes it through the listen seam.
+// It also notes when it is closed.
 type trackedListener struct {
 	net.Listener
-	bypass        bool // the listen seam does not give it to serve: it only holds its address
+	bypass        bool // the listen seam does not give it to serve. It only holds its address.
 	taken, closed atomic.Bool
 }
 
@@ -82,10 +94,10 @@ func (l *trackedListener) Close() error { l.closed.Store(true); return l.Listene
 // isBound reports whether serve took the listener and has not closed it.
 func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Load() }
 
-// openListeners opens the https and the http listener on a loopback port and keeps them open until the test
-// ends. It replaces the listen seam until then: a listen call for the address of one of them gives that
-// listener, and any other address goes to the real listen. So no port is closed and bound again. It also gives
-// an address for the ACME CA. Nothing answers this address, so it needs no open listener.
+// openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
+// ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
+// listener. Any other address goes to the real listen. So no port is closed and bound again.
+// It also gives an address for the ACME CA. Nothing answers this address, so it needs no open listener.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
@@ -193,14 +205,17 @@ func (r *running) waitStarted(t *testing.T) {
 	select {
 	case <-r.out.started:
 	case <-r.done:
-		t.Fatalf("serve ended with exit %d before the start line; stderr %q", r.code, r.err.String())
+		if !r.out.hasStarted() {
+			t.Fatalf("serve ended with exit %d before the start line; stderr %q", r.code, r.err.String())
+		}
 	}
 }
 
 // TestTS16_BindConflict checks a socket in use on listen.https and on listen.http. Each case gives exit 1,
-// one fixed line, no open of the log or the store, no file in the state directory, and no socket left.
-// The blocked address stays with a test listener that the listen seam does not give, so serve binds it with the
-// real listen and fails. The other address is a test listener that the seam gives.
+// one fixed line, no open of the log or the store, no file in the state directory, and every listener that
+// serve took is closed.
+// The blocked address stays with a test listener that the listen seam does not give. So serve binds it with
+// the real listen and fails. The other address is a test listener that the seam gives.
 func TestTS16_BindConflict(t *testing.T) {
 	for _, key := range []string{"listen.https", "listen.http"} {
 		t.Run(key, func(t *testing.T) {
@@ -246,7 +261,7 @@ func depsWithQueue(q **event.Queue) startDeps {
 }
 
 // TestTI03_StartAndStopOrder checks that the store and the certificate client start after both sockets are bound.
-// It checks that one socket holds each address while the sensor runs.
+// It checks that serve holds both test listeners while the sensor runs.
 // After the stop signal, the client stops and the queue closes after both serve calls returned (NFR-05).
 func TestTI03_StartAndStopOrder(t *testing.T) {
 	https, plain, ca := openListeners(t)
@@ -507,7 +522,7 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 }
 
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
-// sockets free, the queue closed, and the number of goroutines back to its value before the start.
+// listeners closed, the queue closed, and the number of goroutines back to its value before the start.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -547,21 +562,24 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	var errb syncBuf
 	code := make(chan int, 1)
 	go func() { code <- serve(cfg, out, &errb) }()
+	var c int
+	ended := false
 	select {
 	case <-out.started:
-	case c := <-code:
-		t.Fatalf("serve ended with exit %d before the start line; stderr %q", c, errb.String())
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case c := <-code:
-		if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
-			t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
+	case c = <-code:
+		if !out.hasStarted() {
+			t.Fatalf("serve ended with exit %d before the start line; stderr %q", c, errb.String())
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("serve did not return after SIGTERM")
+		ended = true // serve wrote the start line and ended. The test keeps c for the stop check.
+	}
+	if !ended {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		c = <-code
+	}
+	if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
+		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
 	}
 }
 
@@ -580,8 +598,8 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	// The child is a separate process and binds the addresses itself. So the test frees the two listeners; the
-	// window between the close and the bind of the child stays.
+	// The child is a separate process and binds the addresses itself. So the test frees the two listeners.
+	// The window between the close and the bind of the child stays.
 	httpsLn, plainLn, caAddr := openListeners(t)
 	https, plain, ca := httpsLn.Addr().String(), plainLn.Addr().String(), "https://"+caAddr+"/directory"
 	httpsLn.Close()
@@ -604,7 +622,10 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	select {
 	case <-out.started:
 	case <-exited:
-		t.Fatalf("the child ended before the start line: %v; stderr %q", waitErr, errb.String())
+		// The child can write the line and then end. The handshake then fails with its own message.
+		if !out.hasStarted() {
+			t.Fatalf("the child ended before the start line: %v; stderr %q", waitErr, errb.String())
+		}
 	}
 	coldHandshake(t, https, begin, der, errb).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
