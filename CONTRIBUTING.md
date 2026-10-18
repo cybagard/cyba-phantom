@@ -8,9 +8,9 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 1. Every commit in a pull request must carry a `Signed-off-by` trailer
    under the Developer Certificate of Origin (DCO) 1.1: sign with
    `git commit -s` (see <https://developercertificate.org>). The `dco`
-   check of CI also tests the commit identity of every commit in the PR.
-   The author, the committer, and every `Signed-off-by` address must be
-   the maintainer noreply address
+   check of CI also tests the commit identity of every commit in the
+   pull request. The author, the committer, and every `Signed-off-by`
+   address must be the maintainer noreply address
    (`67512030+cybagard@users.noreply.github.com`). The committer can also
    be the GitHub committer address, for a commit that GitHub makes. Every
    address in any other trailer must also be the maintainer noreply
@@ -21,16 +21,19 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    the encoding header. A commit that fails one of these rules fails the
    check.
    An outside contributor forks, branches, commits with `git commit -s`,
-   and opens a pull request. The `dco` check of that pull request fails.
-   This failure is normal. The maintainer reviews the change. The
-   maintainer does not merge the outside pull request. The maintainer
-   closes it and opens a new pull request. The new pull request has a new
-   commit with the maintainer as author and only the maintainer sign-off
-   (`git commit -s`). A cherry-pick or an amend keeps the outside author
-   and sign-off, so the check fails. The text of the new pull request
-   gives the name of the contributor and links the outside pull request.
-   The outside commits keep the contributor sign-off there. The text has
-   no email address of the contributor.
+   and opens a pull request. An outside contributor commits with their
+   own name and address, never with the maintainer address. The `dco`
+   check of that pull request fails. This failure is normal. The
+   maintainer reviews the change. The maintainer does not merge the
+   outside pull request. The maintainer closes it and opens a new pull
+   request. The new pull request has a new commit with the maintainer as
+   author and only the maintainer sign-off (`git commit -s`). A
+   cherry-pick or an amend keeps the outside author and sign-off, so the
+   check fails. The text of the new pull request gives the name of the
+   contributor and links the outside pull request. The commits in the
+   outside pull request keep the contributor sign-off. The text of the
+   new pull request must not contain an email address of the
+   contributor.
    We adopt a CLA before the first external-corporate contributor. Until
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
