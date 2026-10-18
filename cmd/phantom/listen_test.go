@@ -282,14 +282,21 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 	return der
 }
 
-// coldHandshake waits for the socket at https, then makes a TLS handshake for decoyName. It checks that the
-// handshake ends at most 2 s after begin and gives the certificate der. The caller closes the connection.
+// coldHandshake makes a TLS handshake for decoyName at https. The socket is bound a moment after the call, so it
+// repeats the dial while the connection is refused, until 2 s after begin. It does not bind the address: a probe
+// socket could hold the port when serve binds. It checks that the handshake ends at most 2 s after begin and gives
+// the certificate der. The caller closes the connection.
 func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf) *tls.Conn {
 	t.Helper()
-	for !inUse(https) && time.Since(begin) < 2*time.Second { // The socket is bound a moment after the call.
+	var conn *tls.Conn
+	var err error
+	for {
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+		if !errors.Is(err, syscall.ECONNREFUSED) || time.Since(begin) >= 2*time.Second {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("handshake: %v; stderr %q", err, stderr.String())
 	}
