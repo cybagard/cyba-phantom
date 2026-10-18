@@ -47,20 +47,11 @@ func (c *limitConn) idleSnapshot() idleRec {
 	return idleRec{periodRec{c.used - c.late, c.charged}, c.late}
 }
 
-// lateBytes is the bytes that the wrapper read after the response write.
+// lateBytes is the number of late bytes that the wrapper read.
 func (c *limitConn) lateBytes() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.late
-}
-
-// idled reports that nextPeriod ended the period of the last request, or closed
-// the connection. Call it after the client read the response: a request is
-// active until then.
-func (c *limitConn) idled() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return !c.active || c.closed
 }
 
 // periodLog records the counts of the wrapper at each idle state and at each
@@ -385,8 +376,8 @@ func lateRequests(t *testing.T, o lateOpts) lateResult {
 	read()
 	res := lateResult{r: r, c: c, br: br, base: int64(cc.n), l: l}
 	_, _ = io.WriteString(c, o.rest)
-	// The wrapper reads late bytes only up to the next budget, and fewer when
-	// the bytes before them used part of the budget.
+	// The wrapper reads late bytes only while budget is left, so the test waits
+	// for min(bytes sent, next budget) late bytes.
 	total := min(int64(cc.n)-res.base, r.s.rd.next)
 	waitFor(t, "the late bytes in the wrapper", func() bool {
 		lc := l.conn.Load()
@@ -484,7 +475,7 @@ func TestTS18LateRequestWithFullPool(t *testing.T) {
 // T-S-18: a late head of 6000 bytes after a next period of about 3000 bytes is
 // more than keepAliveBytes, and it fits the budget of the period. It gets no
 // response, and the connection closes at the idle state. The pool and the slots
-// are free after.
+// are free when the test ends.
 func TestTS18LargeLateHeadCloses(t *testing.T) {
 	first := strings.Replace(head(3000), "GET /", "GET /hold", 1)
 	res := lateRequests(t, lateOpts{whole: true, pre: head(0), first: first, rest: head(6000)})
@@ -498,7 +489,8 @@ func TestTS18LargeLateHeadCloses(t *testing.T) {
 	waitFor(t, "pool and slots free", func() bool { return res.r.s.rd.pool.Load() == 0 && len(res.r.s.sem) == 0 })
 }
 
-// slowConn is a connection whose Read waits for the test.
+// slowConn is a connection whose Read waits for the test. A Read that gets no
+// data in 5 seconds fails, so a Read that the test did not expect cannot hang.
 type slowConn struct {
 	net.Conn
 	entered chan struct{} // gets a value when Read starts
@@ -506,8 +498,16 @@ type slowConn struct {
 }
 
 func (c *slowConn) Read(p []byte) (int, error) {
-	c.entered <- struct{}{}
-	return copy(p, <-c.data), nil
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case d := <-c.data:
+		return copy(p, d), nil
+	case <-time.After(5 * time.Second):
+		return 0, errors.New("slowConn: the test sent no data")
+	}
 }
 
 func (c *slowConn) Write(p []byte) (int, error) { return len(p), nil }
@@ -567,7 +567,7 @@ func slowRead(t *testing.T, lc *limitConn, sc *slowConn, n int, write bool) {
 
 // T-S-18: the pool charge of late bytes is their own count above keepAliveBytes.
 // The bytes before them do not change it. The pool holds it while the bytes are
-// read, the connection closes at nextPeriod, and the pool is 0 after.
+// read, the connection closes at nextPeriod, and the pool is then 0.
 func TestTS18LateChargeIsOwnCount(t *testing.T) {
 	rd := newReadLimit(testHeaderBytes)
 	lc, sc := activeConn(rd)
@@ -640,7 +640,7 @@ func TestTS18LateBytesPoolAndKeepAlive(t *testing.T) {
 // response write. So the period has the body, and the connection closes at the
 // first idle state: the next request gets no response. This is the behavior
 // before and after the late-byte handling. A body over the next budget closes
-// the connection. The pool is back to 0 after the close.
+// the connection. The pool is 0 after the close.
 func TestTS18UnreadBody(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
@@ -667,8 +667,11 @@ func TestTS18UnreadBody(t *testing.T) {
 	if got := status(c, 0); got != 200 {
 		t.Fatalf("first request: status %d, want 200", got)
 	}
+	// The next request goes out after the idle record of the first request, so
+	// the test always reaches the close for a request over the budget.
+	l.wait(t, 2, 1)
 	_ = post(c, int(r.s.rd.next)+1)
-	l.wait(t, 1, 2)
+	l.wait(t, 2, 2)
 	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 }
 
@@ -710,7 +713,7 @@ func continueBody(c net.Conn, br *bufio.Reader, n int) int {
 // bytes and a period over keepAliveBytes. The connection closes at the first
 // idle state: the next request gets no response. The same holds for a head and
 // a body that are together 1000 bytes over keepAliveBytes. The pool and the
-// slots are free after.
+// slots are free when the test ends.
 func TestTS18ContinueBodyIsNotLate(t *testing.T) {
 	readBody := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -771,7 +774,7 @@ func TestTS18LateReadBudget(t *testing.T) {
 // the server write while it reads the body. The request has a body, so the
 // write is not a response write: the rest of the body is not late. The idle
 // record has no late bytes and a period over keepAliveBytes, the connection
-// closes at that idle state, and the pool and the slots are free after. The
+// closes at that idle state, and the pool and the slots are free at the end. The
 // KeyUpdate is at 500 bytes of the body in the first period, and at 2000 bytes
 // of the body in the second period.
 func TestTS18KeyUpdateInBody(t *testing.T) {

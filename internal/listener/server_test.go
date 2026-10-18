@@ -831,26 +831,18 @@ func TestTS18PlainReadBudget(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
 	r.serve(t)
-	// The plain serve builds its own http.Server, so the period log does not
-	// see it. The handler keeps the wrapper of the last request, and the test
-	// waits until nextPeriod ended the period of that request.
-	var last atomic.Pointer[limitConn]
-	plain, _ := r.servePlain(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		last.Store(req.Context().Value(limitConnKey{}).(*limitConn))
-		okHandler.ServeHTTP(w, req)
-	}))
-	// A head of more than 4096 bytes that arrives before the idle state is late
-	// and closes the connection, so each large head goes out after the idle
-	// state of the request before it.
+	plain, _ := r.servePlain(t, okHandler)
+	// Only the TLS connection waits for the idle state. A TLS read can take a
+	// whole record, so a large head that arrives before the idle state is late
+	// and closes the connection. The background read of net/http on a plain
+	// connection takes 1 byte, so no plain head is late by more than 1 byte.
 	var tlsIdle int
 	for name, k := range map[string]struct {
 		dial func() net.Conn
 		idle func()
 	}{
-		"TLS": {func() net.Conn { return r.dial(t) }, func() { tlsIdle++; l.wait(t, tlsIdle, 0) }},
-		"plain": {func() net.Conn { return dialPlain(t, plain, 1) }, func() {
-			waitFor(t, "idle state of the plain connection", func() bool { return last.Load().idled() })
-		}},
+		"TLS":   {func() net.Conn { return r.dial(t) }, func() { tlsIdle++; l.wait(t, tlsIdle, 0) }},
+		"plain": {func() net.Conn { return dialPlain(t, plain, 1) }, func() {}},
 	} {
 		dial, idle := k.dial, k.idle
 		c := dial()
