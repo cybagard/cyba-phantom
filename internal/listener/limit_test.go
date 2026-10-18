@@ -518,8 +518,8 @@ func TestTS18NextPeriodBudget(t *testing.T) {
 	if got := status(c, 0); got != 200 {
 		t.Fatalf("first request: status %d", got)
 	}
-	// A head of more than 4096 bytes that arrives before the idle state is late
-	// and closes the connection, so each large head goes out after the idle
+	// A head of more than 4096 bytes that arrives before the idle state is late.
+	// It closes the connection. So each large head goes out after the idle
 	// record of the request before it.
 	l.wait(t, 1, 0)
 	if got := status(c, testHeaderBytes); got != 200 {
@@ -565,8 +565,8 @@ func TestTS18KeepAliveLimit(t *testing.T) {
 		if got := status(c, 0); got != 200 {
 			t.Fatalf("first request: status %d", got)
 		}
-		// The next request goes out after the idle record of the first, so its
-		// bytes are not late.
+		// The next request goes out after the idle record of the first request.
+		// So its bytes are not late.
 		l.wait(t, base+1, 0)
 		if got := status(c, int(tc.used-overhead)); got != 200 {
 			t.Fatalf("period of %d bytes: status %d, want 200", tc.used, got)

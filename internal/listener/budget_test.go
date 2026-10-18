@@ -26,7 +26,8 @@ import (
 )
 
 // periodRec is what the wrapper of one connection counted in one period. The
-// late bytes, read after the response write, are not in used.
+// late run starts at each Write while a request without a body is active. The
+// late bytes are not in used.
 type periodRec struct{ used, charged int64 }
 
 // idleRec is the record of an idle state. It also has the late bytes.
@@ -431,7 +432,7 @@ func TestTS18LateBytesStartTheNextPeriod(t *testing.T) {
 
 // T-S-18: a normal keep-alive client with a held handler. It reads the whole
 // first response and sends a request of 3000 bytes before the idle state. The
-// request gets 200, the first period holds only the bytes before it, and the
+// request gets 200. The first period holds only the bytes before it. The
 // connection stays open for a third request. A late request of more than
 // keepAliveBytes gets no response, and the connection closes.
 func TestTS18LateRequestOfNormalClient(t *testing.T) {
@@ -513,8 +514,8 @@ func (c *slowConn) Read(p []byte) (int, error) {
 func (c *slowConn) Write(p []byte) (int, error) { return len(p), nil }
 func (c *slowConn) Close() error                { return nil }
 
-// activeConn returns a limitConn on a slowConn with an active request, so that
-// the next Write is a response write.
+// activeConn returns a limitConn on a slowConn with an active request without a
+// body, so that the next Write starts the late run.
 func activeConn(rd *readLimit) (*limitConn, *slowConn) {
 	sc := &slowConn{entered: make(chan struct{}, 1), data: make(chan []byte)}
 	src := newSourceCap(1)
@@ -527,7 +528,7 @@ func activeConn(rd *readLimit) (*limitConn, *slowConn) {
 	return lc, sc
 }
 
-// within waits for a value from ch, and fails the test after a few seconds.
+// within waits for a value from ch, and fails the test after 5 s.
 func within[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
 	select {
@@ -636,11 +637,11 @@ func TestTS18LateBytesPoolAndKeepAlive(t *testing.T) {
 }
 
 // T-S-18: a request body that the handler does not read. A body of 6000 bytes
-// gets its response. It is not late, because net/http reads it before the
-// response write. So the period has the body, and the connection closes at the
-// first idle state: the next request gets no response. This is the behavior
-// before and after the late-byte handling. A body over the next budget closes
-// the connection. The pool is 0 after the close.
+// gets its response. The body is not late, because the handler wrapper does not
+// mark a request with a body. So the period has the body. The connection closes
+// at the first idle state, and the next request gets no response. A request
+// over the next budget gets no response, and the closed record has the budget
+// as used bytes. The pool is 0 after the close.
 func TestTS18UnreadBody(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
@@ -652,7 +653,7 @@ func TestTS18UnreadBody(t *testing.T) {
 	if got := post(c, 6000); got != 200 {
 		t.Fatalf("body of 6000 bytes: status %d, want 200", got)
 	}
-	// The next request goes out after the idle record, so it cannot be late.
+	// A request with a body is not marked, so the next request is not late.
 	idle, _ := l.wait(t, 1, 0)
 	if idle[0].late != 0 || idle[0].used <= keepAliveBytes {
 		t.Fatalf("idle record %+v, want no late bytes and a period over %d bytes", idle[0], keepAliveBytes)
@@ -667,11 +668,15 @@ func TestTS18UnreadBody(t *testing.T) {
 	if got := status(c, 0); got != 200 {
 		t.Fatalf("first request: status %d, want 200", got)
 	}
-	// The next request goes out after the idle record of the first request, so
-	// the test always reaches the close for a request over the budget.
+	// The next request goes out after the idle record of the first request.
+	// So the test always reaches the close for a request over the budget.
 	l.wait(t, 2, 1)
-	_ = post(c, int(r.s.rd.next)+1)
-	l.wait(t, 2, 2)
+	if got := post(c, int(r.s.rd.next)+1); got != 0 {
+		t.Fatalf("request over the budget: status %d, want no response", got)
+	}
+	if _, closed := l.wait(t, 2, 2); closed[1].used != r.s.rd.next {
+		t.Fatalf("the server read %d bytes, want the budget %d", closed[1].used, r.s.rd.next)
+	}
 	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 }
 
@@ -750,9 +755,10 @@ func TestTS18ContinueBodyIsNotLate(t *testing.T) {
 }
 
 // T-S-18: late reads have a budget at read time. In a period with a budget of
-// 5000 bytes, a read of 1000 own bytes and a read of 3000 late bytes leave 1000
-// bytes. The next read gets 1000 bytes only, and the read after it closes with
-// errBudgetRead. Own and late bytes together are at most the budget.
+// 5000 bytes, a read of 1000 bytes before the late bytes and a read of 3000 late
+// bytes leave 1000 bytes. The next read gets 1000 bytes only. The read after it
+// closes with errBudgetRead. The bytes before the late bytes and the late bytes
+// together are at most the budget.
 func TestTS18LateReadBudget(t *testing.T) {
 	const budget = 5000
 	lc, sc := activeConn(newReadLimit(testHeaderBytes))
@@ -771,12 +777,12 @@ func TestTS18LateReadBudget(t *testing.T) {
 }
 
 // T-S-18: a TLS 1.3 KeyUpdate with update_requested inside a request body makes
-// the server write while it reads the body. The request has a body, so the
-// write is not a response write: the rest of the body is not late. The idle
-// record has no late bytes and a period over keepAliveBytes, the connection
-// closes at that idle state, and the pool and the slots are free at the end. The
-// KeyUpdate is at 500 bytes of the body in the first period, and at 2000 bytes
-// of the body in the second period.
+// the server write while it reads the body. The rest of the body is not late,
+// because the handler wrapper does not mark a request with a body. The idle
+// record has no late bytes and a period over keepAliveBytes. The connection
+// closes at that idle state. The pool and the slots are free at the end. The
+// KeyUpdate is at 500 bytes of the body in the first period. In the second
+// period it is at 2000 bytes of the body.
 func TestTS18KeyUpdateInBody(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

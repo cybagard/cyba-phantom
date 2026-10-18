@@ -163,8 +163,9 @@ func markRequest(h http.Handler) http.Handler {
 
 // periodHook is the ConnState hook. It starts the next read period of a
 // connection that becomes idle. A connection that read more than keepAliveBytes
-// in its period closes, so it gets no keep-alive. It must not wait on the
-// network. A connection of another type is left as it is.
+// in its period closes, so it gets no keep-alive. It also closes a connection
+// with more than keepAliveBytes late bytes. It must not wait on the network. A
+// connection of another type is left as it is.
 func periodHook(c net.Conn, st http.ConnState) {
 	if st != http.StateIdle {
 		return

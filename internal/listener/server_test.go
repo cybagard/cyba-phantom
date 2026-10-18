@@ -381,7 +381,7 @@ func pipelined(t *testing.T, r *rig, l *periodLog, n, split int) (second int, us
 		t.Fatalf("second head of %d bytes: first status %d, want 200", n, resp.StatusCode)
 	}
 	// The rest of the head goes out only after the idle state of the first
-	// request, so its bytes cannot reach the wrapper before that state.
+	// request. So its bytes cannot reach the wrapper before that state.
 	want := before + 1
 	l.wait(t, want, 0)
 	_, _ = io.WriteString(c, h[split:])
@@ -460,9 +460,9 @@ func TestTS18PipelinedHeadOneWrite(t *testing.T) {
 // larger than header_bytes. The test asserts only a bound. A head of
 // header_bytes + 4097 bytes gets no response. A served head is not larger than
 // header_bytes + 4096. The client sends the rest of the head only after the
-// idle record of the first request, so the test does not depend on time. The
-// forced timing, with the rest before the idle state, is in
-// TestTS18LateBytesStartTheNextPeriod.
+// idle record of the first request, so the test does not depend on time.
+// TestTS18LateBytesStartTheNextPeriod holds the handler. So the rest arrives
+// before the idle state in every run.
 //
 // Measured with header_bytes 8192, splitBytes 2000 and a TLS 1.3 client of the
 // Go library: the largest second head with status 200 is 10192 bytes
@@ -833,9 +833,9 @@ func TestTS18PlainReadBudget(t *testing.T) {
 	r.serve(t)
 	plain, _ := r.servePlain(t, okHandler)
 	// Only the TLS connection waits for the idle state. A TLS read can take a
-	// whole record, so a large head that arrives before the idle state is late
+	// whole record. So a large head that arrives before the idle state is late
 	// and closes the connection. The background read of net/http on a plain
-	// connection takes 1 byte, so no plain head is late by more than 1 byte.
+	// connection takes 1 byte. So no plain head is late by more than 1 byte.
 	var tlsIdle int
 	for name, k := range map[string]struct {
 		dial func() net.Conn
