@@ -53,7 +53,7 @@ func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 // startWriter is a writer that closes started when the text written so far holds the start line.
-// The line can come in more than one Write call. The named field text stops a caller from using the Write of
+// The line can come in more than one Write call. The named field `text` stops a caller from using the Write of
 // syncBuf, which does not look for the start line. After started closes, Write does not scan the text again.
 type startWriter struct {
 	text    syncBuf
@@ -588,15 +588,15 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 }
 
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
-// listeners closed, the queue closed, the database closed, and no goroutine that serve started and left running.
-// The test compares the goroutine IDs right after the return with the IDs right before the call. It does not
-// count goroutines. The runtime frees an ended goroutine later, and a count can include it.
-// The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. So the test skips that
-// goroutine only for the database that it captured and found closed, with no open connection. Any other
-// connectionOpener fails the test. The goroutines of a sql.Tx or sql.Rows stay skipped only when every new
-// connectionOpener is of a closed database, because a sql.Tx or sql.Rows of another database keeps its opener alive.
-// The test also skips the goroutines that the runtime creates, for example the finalizer goroutine. Every other
-// new goroutine fails the test.
+// listeners closed, the queue closed, the database closed, and no goroutine that serve left running.
+// The test compares goroutine IDs right before the call and right after the return. It does not count
+// goroutines. The runtime frees an ended goroutine later, and a count can include it.
+// The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. The test skips a
+// connectionOpener only when it belongs to the captured store database, and that database is closed with no
+// open connection. Any other connectionOpener fails the test.
+// The test also skips the other goroutines of database/sql, for example of a sql.Tx or sql.Rows, and the
+// goroutines of the runtime, for example the finalizer goroutine. Limit: a leaked sql.Tx or sql.Rows of a
+// second database that serve closes is not found. Every other new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
