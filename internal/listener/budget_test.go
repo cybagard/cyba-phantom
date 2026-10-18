@@ -376,7 +376,8 @@ func lateRequests(t *testing.T, o lateOpts) lateResult {
 	read()
 	res := lateResult{r: r, c: c, br: br, base: int64(cc.n), l: l}
 	_, _ = io.WriteString(c, o.rest)
-	// The wrapper reads late bytes only up to the next budget.
+	// The wrapper reads late bytes only up to the next budget, and fewer when
+	// the bytes before them used part of the budget.
 	total := min(int64(cc.n)-res.base, r.s.rd.next)
 	waitFor(t, "the late bytes in the wrapper", func() bool {
 		lc := l.conn.Load()

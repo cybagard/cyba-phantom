@@ -288,13 +288,13 @@ func (c *limitConn) startRequest() {
 // the ending period. They start the next one. The connection closes when the
 // bytes before the late bytes are more than keepAliveBytes. It also closes when
 // the late bytes are more than keepAliveBytes. Close gives the charge back.
-// Else the late bytes have no charge, and the charge of the own bytes goes back
-// to the pool here. The next budget is less the late bytes. This function does
-// not wait on the network.
+// Otherwise the late bytes have no charge, and the charge of the own bytes goes
+// back to the pool here. The late bytes use up part of the next budget. This
+// function does not wait on the network.
 func (c *limitConn) nextPeriod() {
 	c.mu.Lock()
 	late := c.late
-	// header_bytes is at least 8192, so the next budget is at least 9216 and this check comes first.
+	// The next budget is at least 9216, so late > keepAliveBytes is true before the budget ends.
 	if c.used-late > keepAliveBytes || late > keepAliveBytes || c.closed {
 		c.mu.Unlock()
 		_ = c.Close()
