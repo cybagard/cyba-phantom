@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -587,10 +588,16 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 }
 
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
-// listeners closed, the queue closed, and no goroutine that serve started and left running.
-// Serve returns only after it joined its goroutines. So the test compares the goroutine IDs right after the
-// return with the IDs right before the call. It does not count goroutines: the runtime can hold a goroutine that
-// has ended and is not yet freed, and a count includes it.
+// listeners closed, the queue closed, the database closed, and no goroutine that serve started and left running.
+// The test compares the goroutine IDs right after the return with the IDs right before the call. It does not
+// count goroutines: the runtime can hold a goroutine that has ended and is not yet freed, and a count includes it.
+// The test skips two kinds of new goroutine. One is a goroutine of database/sql, for example the connection
+// opener. The close of the database cancels it but does not wait for it. So the test checks the database instead:
+// it must be closed, and it must have no open connection. The close does not wait for a connection in use. A
+// Transaction or Rows that the store did not close keeps its connection open, and then its goroutine does not
+// end. No open connection means that the store closed every Transaction and Rows, so these goroutines end on
+// their own. The other kind is a goroutine of the runtime, for example the finalizer goroutine. User code does
+// not start it, and it can show in the dump while it runs a finalizer. Every other new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -598,26 +605,48 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	t.Cleanup(func() { newServer = oldNew })
 	newServer = func(listener.Config, http.Handler) (*listener.Server, error) { return nil, errors.New("test error") }
 	var q *event.Queue
-	p, d := tempState(t, cfg), depsWithQueue(&q)
+	var db *sql.DB
+	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
-	before, _ := goroutineIDs() // after openListeners, so the accept goroutine of the CA listener is in the set
+	before := goroutineBlocks() // after openListeners, so the accept goroutine of the CA listener is in the set
 	code := serveWith(t.Context(), func() {}, cfg, p, d, &stdout, &stderr)
-	after, dump := goroutineIDs()
+	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
 	}
 	if !q.Closed() || !https.closed.Load() || !plain.closed.Load() {
 		t.Errorf("queue closed %v, listeners closed %v %v; want true, true true", q.Closed(), https.closed.Load(), plain.closed.Load())
 	}
-	for id := range after {
-		if !before[id] {
-			t.Errorf("goroutine %d started in serve and is still running after serve returned; goroutines:\n%s", id, dump)
+	if db == nil {
+		t.Error("serve did not start the writer, so the test has no database to check")
+	} else if err := db.Ping(); err == nil || err.Error() != "sql: database is closed" {
+		t.Errorf("database ping after serve returned: %v; want %q", err, "sql: database is closed")
+	} else if st := db.Stats(); st.OpenConnections != 0 || st.InUse != 0 {
+		t.Errorf("database connections after serve returned: %d open, %d in use; want 0 and 0", st.OpenConnections, st.InUse)
+	}
+	for id, block := range after {
+		if _, old := before[id]; old {
+			continue
 		}
+		if strings.Contains(block, "\ncreated by database/sql.") || strings.Contains(block, "\ncreated by runtime.") {
+			continue
+		}
+		t.Errorf("goroutine %d started in serve and is still running after serve returned:\n%s", id, block)
 	}
 }
 
-// goroutineIDs returns the IDs of the goroutines that run now, and the stack dump that they come from.
-func goroutineIDs() (map[int]bool, string) {
+// depsWithDB wraps the newWriter of d. When the writer starts, it sets *db to the database of the store.
+func depsWithDB(d startDeps, db **sql.DB) startDeps {
+	next := d.newWriter
+	d.newWriter = func(x *sql.DB, qq *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, rec store.Recovery) *store.Writer {
+		*db = x
+		return next(x, qq, l, c, bp, lg, rec)
+	}
+	return d
+}
+
+// goroutineBlocks returns the stack block of each goroutine that runs now, by goroutine ID.
+func goroutineBlocks() map[int]string {
 	buf := make([]byte, 1<<16)
 	for {
 		n := runtime.Stack(buf, true)
@@ -627,24 +656,28 @@ func goroutineIDs() (map[int]bool, string) {
 		}
 		buf = make([]byte, 2*len(buf))
 	}
-	ids := map[int]bool{}
+	blocks := map[int]string{}
 	for _, block := range strings.Split(string(buf), "\n\n") {
 		var id int
 		if _, err := fmt.Sscanf(block, "goroutine %d [", &id); err == nil {
-			ids[id] = true
+			blocks[id] = block
 		}
 	}
-	return ids, string(buf)
+	return blocks
 }
 
 // TestTI03_SigtermStopsServe sends SIGTERM to the real serve function. It checks that serve returns 0, and that
 // the queue closes after both serve calls returned (NFR-05).
-// The test wraps the waitStop seam. The wrapper tells the test that serve waits for the stop, and then it
-// holds serve until the test has sent SIGTERM. So the test sends the signal only after serve waits, and serve
-// cannot remove its signal handler before the signal. A serve that ends without the wait fails the test.
+// The test registers its own SIGTERM handler before it starts serve, and keeps it to the end. So a SIGTERM never
+// gets the default action in the test process, also when a failed serve call removes the handler of serve before
+// the signal. The test wraps the waitStop seam. The wrapper tells the test that serve waits for the stop, and then
+// it holds serve until the test has sent SIGTERM. A serve that ends without the wait fails the test.
 func TestTI03_SigtermStopsServe(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM)
+	t.Cleanup(func() { signal.Stop(sig) })
 	var q *event.Queue
 	d, p := depsWithQueue(&q), tempState(t, cfg)
 	oldSetup, oldLog := serveSetup, log.Writer()
