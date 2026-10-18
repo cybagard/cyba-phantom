@@ -21,8 +21,9 @@ This repository is open source, permanently.
 Contributors sign with the Developer Certificate of Origin
 (`git commit -s`), checked by CI on every pull request. The CI check
 also requires the maintainer noreply address as author, committer and
-sign-off address. `CONTRIBUTING.md` describes the path for an outside
-contributor. A CLA will be adopted before the first
+sign-off address. The committer can also be the GitHub committer
+address, for a commit that GitHub makes. See `CONTRIBUTING.md` for the
+full rule and for the path of an outside contributor. A CLA will be adopted before the first
 external-corporate contributor; DCO stands until then.
 
 ## Writing standard

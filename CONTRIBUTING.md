@@ -11,15 +11,26 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    check of CI also tests the commit identity of every commit in the PR.
    The author, the committer, and every `Signed-off-by` address must be
    the maintainer noreply address
-   (`67512030+cybagard@users.noreply.github.com`). The GitHub committer
-   address is permitted for a commit that GitHub makes. The Claude
-   co-author address is permitted only in a `Co-authored-by` trailer. A
-   commit that fails one of these rules fails the check.
+   (`67512030+cybagard@users.noreply.github.com`). The committer can also
+   be the GitHub committer address, for a commit that GitHub makes. Every
+   address in any other trailer must also be the maintainer noreply
+   address. Only a `Co-authored-by` trailer can have the Claude co-author
+   address. The name in that trailer is "Claude" or starts with "Claude ",
+   and the trailer has no other address. The header comment of
+   `tools/dco/main.go` gives the full rules. It also covers the rule for
+   the encoding header. A commit that fails one of these rules fails the
+   check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. The `dco` check of that pull request fails.
-   This is expected. The maintainer reviews the change, then commits it
-   again with the maintainer sign-off. The maintainer names the
-   contributor in the PR text by name, without an email address.
+   This failure is normal. The maintainer reviews the change. The
+   maintainer does not merge the outside pull request. The maintainer
+   closes it and opens a new pull request. The new pull request has a new
+   commit with the maintainer as author and only the maintainer sign-off
+   (`git commit -s`). A cherry-pick or an amend keeps the outside author
+   and sign-off, so the check fails. The text of the new pull request
+   gives the name of the contributor and links the outside pull request.
+   The outside commits keep the contributor sign-off there. The text has
+   no email address of the contributor.
    We adopt a CLA before the first external-corporate contributor. Until
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see

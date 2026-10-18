@@ -73,7 +73,8 @@ jobs:
   dco:
     # Checker-from-base: every commit in the PR range must carry a
     # Signed-off-by, and the author, committer and sign-off addresses
-    # must be the maintainer noreply address. PRs only — squash merges
+    # must be the maintainer noreply address. The committer can also be
+    # the GitHub committer address, for a commit that GitHub makes. PRs only — squash merges
     # drop trailers, so pushed main is never re-checked (the history of
     # main is what was reviewed).
     if: github.event_name == 'pull_request'
