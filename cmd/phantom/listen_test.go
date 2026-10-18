@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -13,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math/big"
@@ -282,21 +284,31 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 	return der
 }
 
-// coldHandshake makes a TLS handshake for decoyName at https. The socket is bound a moment after the call, so it
-// repeats the dial while the connection is refused, until 2 s after begin. It does not bind the address: a probe
-// socket could hold the port when serve binds. It checks that the handshake ends at most 2 s after begin and gives
-// the certificate der. The caller closes the connection.
+// bindSignal replaces listen for the test. The channel closes when the listen call for addr returns. Then the
+// test knows that serve has bound addr, or failed to bind it, without a deadline and without a test listener
+// on the address.
+func bindSignal(t *testing.T, addr string) <-chan struct{} {
+	t.Helper()
+	bound := make(chan struct{})
+	var once sync.Once
+	old := listen
+	t.Cleanup(func() { listen = old })
+	listen = func(network, a string) (net.Listener, error) {
+		ln, err := old(network, a)
+		if a == addr {
+			once.Do(func() { close(bound) })
+		}
+		return ln, err
+	}
+	return bound
+}
+
+// coldHandshake makes one TLS handshake for decoyName at https. The caller first makes sure that serve has
+// bound https. It checks that the handshake ends at most 2 s after begin and gives the certificate der. The
+// caller closes the connection.
 func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf) *tls.Conn {
 	t.Helper()
-	var conn *tls.Conn
-	var err error
-	for {
-		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
-		if !errors.Is(err, syscall.ECONNREFUSED) || time.Since(begin) >= 2*time.Second {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("handshake: %v; stderr %q", err, stderr.String())
 	}
@@ -319,7 +331,12 @@ func TestTI03_ColdStart(t *testing.T) {
 	ca, _ := cfg.Get("acme.ca")
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
+	bound := bindSignal(t, https)
 	r := launchServe(t, cfg, p, realDeps)
+	select {
+	case <-bound:
+	case <-r.done:
+	}
 	defer coldHandshake(t, https, r.begin, der, &r.err).Close()
 	r.waitStarted(t)
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
@@ -557,13 +574,29 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		"PHANTOM_LISTEN_HTTP="+freeAddr(t), "PHANTOM_ACME_CA="+ca)
 	var errb syncBuf
 	cmd.Stderr = &errb
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	begin := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cmd.Process.Kill() })
+	// The start line comes after the child bound https.
+	out := bufio.NewReader(stdout)
+	for {
+		line, err := out.ReadString('\n')
+		if strings.HasPrefix(line, "phantom: started") {
+			break
+		}
+		if err != nil {
+			t.Fatalf("no start line: %v; stderr %q", err, errb.String())
+		}
+	}
 	defer coldHandshake(t, https, begin, der, &errb).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
+	io.Copy(io.Discard, out) // ends when the child closes stdout; cmd.Wait closes the pipe
 	if err := cmd.Wait(); err != nil {
 		t.Errorf("after SIGTERM: %v; stderr %q", err, errb.String())
 	}
