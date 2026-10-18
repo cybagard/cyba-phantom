@@ -52,18 +52,21 @@ func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 // startWriter is a writer that closes started when the text written so far holds the start line.
-// The line can come in more than one Write call.
+// The line can come in more than one Write call. It holds the text in a named field, so a caller cannot write
+// past the signal. After the signal, Write does not scan the text again.
 type startWriter struct {
-	syncBuf
-	once    sync.Once
+	text    syncBuf
 	started chan struct{}
 }
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
 
+// String returns the text written so far.
+func (w *startWriter) String() string { return w.text.String() }
+
 // hasStarted reports, without blocking, whether the writer has the start line. A wait that sees the end
-// of serve or of the child calls it first. When serve or the child writes the line and then ends, both
-// channels are ready, and select picks one at random.
+// of serve or of the child calls hasStarted after it saw that end. When serve or the child writes the line
+// and then ends, both channels are ready, and select picks one at random.
 func (w *startWriter) hasStarted() bool {
 	select {
 	case <-w.started:
@@ -73,12 +76,38 @@ func (w *startWriter) hasStarted() bool {
 	}
 }
 
+// Write is called by one goroutine at a time: the writer of stdout of serve, or the copy of the child output.
 func (w *startWriter) Write(p []byte) (int, error) {
-	n, err := w.syncBuf.Write(p)
-	if strings.Contains(w.String(), "phantom: started") {
-		w.once.Do(func() { close(w.started) })
+	n, err := w.text.Write(p)
+	if !w.hasStarted() && strings.Contains(w.text.String(), "phantom: started") {
+		close(w.started)
 	}
 	return n, err
+}
+
+// startWait is what a test needs to wait for the start line of serve or of the child.
+type startWait struct {
+	who   string          // "serve" or "the child"
+	out   *startWriter    // the stdout of who
+	ended <-chan struct{} // closes when who ends
+	info  func() string   // the exit and stderr of who. It runs after ended closed.
+}
+
+// until waits until ready closes, or until who ends. ready is the start line, or a later point of serve.
+// When who ends first, the test fails, with one message for an end before the start line and one for
+// an end after it. An end after the start line is not a failure when afterOK is true. Then the test goes on.
+func (w startWait) until(t *testing.T, ready <-chan struct{}, afterOK bool) {
+	t.Helper()
+	select {
+	case <-ready:
+	case <-w.ended:
+		switch {
+		case !w.out.hasStarted():
+			t.Fatalf("%s ended before the start line: %s", w.who, w.info())
+		case !afterOK:
+			t.Fatalf("%s ended after the start line, before the point that the test waits for: %s", w.who, w.info())
+		}
+	}
 }
 
 // trackedListener is a listener that the test opened. It notes when serve takes it through the listen seam.
@@ -87,6 +116,7 @@ type trackedListener struct {
 	net.Listener
 	bypass        bool // the listen seam does not give it to serve. It only holds its address.
 	taken, closed atomic.Bool
+	asked         atomic.Int64 // the place of its address in the listen calls of serve, from 1. 0: serve did not ask.
 }
 
 func (l *trackedListener) Close() error { l.closed.Store(true); return l.Listener.Close() }
@@ -97,7 +127,9 @@ func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Lo
 // openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
 // ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
 // listener. Any other address goes to the real listen. So no port is closed and bound again.
-// It also gives an address for the ACME CA. Nothing answers this address, so it needs no open listener.
+// It also gives an address for the ACME CA, on a third listener that stays open until the test ends. One goroutine
+// accepts each connection and closes it at once. So a client of the CA fails fast, as with a closed port, and no
+// other socket can take the port. The cleanup waits for that goroutine.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
@@ -110,18 +142,38 @@ func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 		return l
 	}
 	https, plain = open(), open()
-	caLn := open() // open while the other two are open, so the three ports differ
+	caLn, err := net.Listen("tcp", "127.0.0.1:0") // open while the other two are open, so the three ports differ
+	if err != nil {
+		t.Fatal(err)
+	}
 	ca = caLn.Addr().String()
-	caLn.Close()
+	acceptEnded := make(chan struct{})
+	go func() {
+		defer close(acceptEnded)
+		for {
+			c, err := caLn.Accept()
+			if err != nil { // the listener is closed
+				return
+			}
+			c.Close()
+		}
+	}()
+	t.Cleanup(func() { caLn.Close(); <-acceptEnded })
 	byAddr := map[string]*trackedListener{https.Addr().String(): https, plain.Addr().String(): plain}
+	var asks atomic.Int64
 	old := listen
 	t.Cleanup(func() { listen = old })
 	listen = func(network, addr string) (net.Listener, error) {
-		if l := byAddr[addr]; l != nil && !l.bypass {
-			l.taken.Store(true)
-			return l, nil
+		l := byAddr[addr]
+		if l == nil {
+			return old(network, addr)
 		}
-		return old(network, addr)
+		l.asked.Store(asks.Add(1))
+		if l.bypass {
+			return old(network, addr)
+		}
+		l.taken.Store(true)
+		return l, nil
 	}
 	return https, plain, ca
 }
@@ -181,12 +233,20 @@ func captureServer(t *testing.T) func() *listener.Server {
 	return func() *listener.Server { return srv }
 }
 
-// waitErrorLines waits up to 2 s until the server error log counts n lines, and returns the count.
-func waitErrorLines(srv *listener.Server, n uint64) uint64 {
-	for end := time.Now().Add(2 * time.Second); srv.ErrorLines() < n && time.Now().Before(end); {
-		time.Sleep(5 * time.Millisecond)
+// awaitErrorLines waits until the server error log counts at least n lines. It waits on the line signal of the
+// server. One signal can stand for more than one line, so it reads the count again after each signal.
+// It has no deadline of its own. It fails when serve ends. If the server never writes the line, the wait
+// ends at the go test timeout.
+func (r *running) awaitErrorLines(t *testing.T, srv *listener.Server, n uint64) {
+	t.Helper()
+	sig := srv.ErrorLineSignal()
+	for srv.ErrorLines() < n {
+		select {
+		case <-sig:
+		case <-r.done:
+			t.Fatalf("serve ended with exit %d when the error log had %d lines, want %d; stderr %q", r.code, srv.ErrorLines(), n, r.err.String())
+		}
 	}
-	return srv.ErrorLines()
 }
 
 // closedAtReturn replaces served until the test ends. The returned function gives, for each serve call that
@@ -202,13 +262,13 @@ func closedAtReturn(t *testing.T, q **event.Queue) func() []bool {
 
 // waitStarted waits until serve has written the start line, or has ended.
 func (r *running) waitStarted(t *testing.T) {
-	select {
-	case <-r.out.started:
-	case <-r.done:
-		if !r.out.hasStarted() {
-			t.Fatalf("serve ended with exit %d before the start line; stderr %q", r.code, r.err.String())
-		}
-	}
+	t.Helper()
+	r.startWait().until(t, r.out.started, true)
+}
+
+// startWait is the wait of the test for the start line of this serve call.
+func (r *running) startWait() startWait {
+	return startWait{"serve", r.out, r.done, func() string { return fmt.Sprintf("exit %d; stderr %q", r.code, r.err.String()) }}
 }
 
 // TestTS16_BindConflict checks a socket in use on listen.https and on listen.http. Each case gives exit 1,
@@ -216,6 +276,7 @@ func (r *running) waitStarted(t *testing.T) {
 // serve took is closed.
 // The blocked address stays with a test listener that the listen seam does not give. So serve binds it with
 // the real listen and fails. The other address is a test listener that the seam gives.
+// Serve runs in a goroutine. If it binds the blocked address, the test fails at the start line.
 func TestTS16_BindConflict(t *testing.T) {
 	for _, key := range []string{"listen.https", "listen.http"} {
 		t.Run(key, func(t *testing.T) {
@@ -228,12 +289,20 @@ func TestTS16_BindConflict(t *testing.T) {
 			cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
 			p := tempState(t, cfg)
 			var o opens
-			var stdout, stderr strings.Builder
-			if code := serveWith(t.Context(), func() {}, cfg, p, o.deps(), &stdout, &stderr); code != 1 {
-				t.Errorf("exit code = %d, want 1", code)
+			r := launchServe(t, cfg, p, o.deps())
+			select {
+			case <-r.done:
+			case <-r.out.started:
+				t.Fatalf("serve bound the blocked address %s and wrote the start line; stderr %q", blocker.Addr(), r.err.String())
 			}
-			if want := "phantom: cannot bind " + key + "\n"; stderr.String() != want || stdout.Len() != 0 {
-				t.Errorf("stderr %q, stdout %q; want %q and nothing", stderr.String(), stdout.String(), want)
+			if r.out.hasStarted() { // serve wrote the start line, then ended
+				t.Fatalf("serve bound the blocked address %s and wrote the start line; exit %d; stderr %q", blocker.Addr(), r.code, r.err.String())
+			}
+			if r.code != 1 {
+				t.Errorf("exit code = %d, want 1", r.code)
+			}
+			if want := "phantom: cannot bind " + key + "\n"; r.err.String() != want || r.out.String() != "" {
+				t.Errorf("stderr %q, stdout %q; want %q and nothing", r.err.String(), r.out.String(), want)
 			}
 			if o.log != 0 || o.store != 0 || o.migrate != 0 {
 				t.Errorf("opens: log %d, store %d, migrate %d; want 0", o.log, o.store, o.migrate)
@@ -241,8 +310,8 @@ func TestTS16_BindConflict(t *testing.T) {
 			if files, _ := os.ReadDir(p.Root); len(files) != 0 {
 				t.Errorf("the state directory has %d entries, want none", len(files))
 			}
-			// serve binds listen.https first. When that fails, it never takes the other listener.
-			tookOther := key == "listen.http"
+			// The other listener is taken, and then closed, only if serve asked for its address before the blocked one.
+			tookOther := other.asked.Load() != 0 && other.asked.Load() < blocker.asked.Load()
 			if other.taken.Load() != tookOther || other.closed.Load() != tookOther {
 				t.Errorf("the other listener: taken %v, closed %v; want both %v", other.taken.Load(), other.closed.Load(), tookOther)
 			}
@@ -260,8 +329,8 @@ func depsWithQueue(q **event.Queue) startDeps {
 	return d
 }
 
-// TestTI03_StartAndStopOrder checks that the store and the certificate client start after serve holds both listeners.
-// It checks that serve holds both test listeners while the sensor runs.
+// TestTI03_StartAndStopOrder checks that the store and the certificate client start after serve holds the two test
+// listeners. It checks that serve holds them while the sensor runs.
 // After the stop signal, the client stops and the queue closes after both serve calls returned (NFR-05).
 func TestTI03_StartAndStopOrder(t *testing.T) {
 	https, plain, ca := openListeners(t)
@@ -294,7 +363,7 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	r := launchServe(t, cfg, tempState(t, cfg), d)
 	r.waitStarted(t)
 	if !bound() {
-		t.Error("a listener is not held while the sensor runs")
+		t.Error("serve does not hold a test listener while the sensor runs")
 	}
 	r.cancel()
 	<-r.done
@@ -370,9 +439,9 @@ func TestTI03_ColdStart(t *testing.T) {
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
 	r := launchServe(t, cfg, p, realDeps)
-	// The test opened https, so the dial waits in the backlog until serve accepts it.
-	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err).Close()
+	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
 	r.waitStarted(t)
+	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err).Close()
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
 }
 
@@ -404,9 +473,7 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 		raw.Write([]byte("garbage that is no TLS\r\n\r\n"))
 		raw.Close()
 	}
-	if got := waitErrorLines(srv, lines+2); got < lines+2 {
-		t.Errorf("error log lines rose from %d to %d, want at least 2 more", lines, got)
-	}
+	r.awaitErrorLines(t, srv, lines+2)
 	if captured.String() != "" || r.err.String() != errBefore {
 		t.Errorf("standard log %q; stderr %q", captured.String(), r.err.String())
 	}
@@ -504,9 +571,7 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 				} else if alert := "remote error: tls: internal error"; err.Error() != alert {
 					t.Errorf("handshake error %q, want the TLS alert %q", err, alert)
 				}
-				if got := waitErrorLines(srv, lines+1); got <= lines {
-					t.Errorf("error log lines = %d, want more than %d", got, lines)
-				}
+				r.awaitErrorLines(t, srv, lines+1)
 			}
 			r.cancel()
 			<-r.done
@@ -522,7 +587,10 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 }
 
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
-// listeners closed, the queue closed, and the number of goroutines back to its value before the start.
+// listeners closed, the queue closed, and no goroutine that serve started and left running.
+// Serve returns only after it joined its goroutines. So the test compares the goroutine IDs right after the
+// return with the IDs right before the call. It does not count goroutines: the runtime can hold a goroutine that
+// has ended and is not yet freed, and a count includes it.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -530,25 +598,50 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	t.Cleanup(func() { newServer = oldNew })
 	newServer = func(listener.Config, http.Handler) (*listener.Server, error) { return nil, errors.New("test error") }
 	var q *event.Queue
-	before := runtime.NumGoroutine()
+	p, d := tempState(t, cfg), depsWithQueue(&q)
 	var stdout, stderr strings.Builder
-	code := serveWith(t.Context(), func() {}, cfg, tempState(t, cfg), depsWithQueue(&q), &stdout, &stderr)
+	before, _ := goroutineIDs() // after openListeners, so the accept goroutine of the CA listener is in the set
+	code := serveWith(t.Context(), func() {}, cfg, p, d, &stdout, &stderr)
+	after, dump := goroutineIDs()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
 	}
 	if !q.Closed() || !https.closed.Load() || !plain.closed.Load() {
 		t.Errorf("queue closed %v, listeners closed %v %v; want true, true true", q.Closed(), https.closed.Load(), plain.closed.Load())
 	}
-	for end := time.Now().Add(2 * time.Second); runtime.NumGoroutine() > before && time.Now().Before(end); {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if n := runtime.NumGoroutine(); n > before {
-		t.Errorf("goroutines = %d, want at most %d", n, before)
+	for id := range after {
+		if !before[id] {
+			t.Errorf("goroutine %d started in serve and is still running after serve returned; goroutines:\n%s", id, dump)
+		}
 	}
 }
 
+// goroutineIDs returns the IDs of the goroutines that run now, and the stack dump that they come from.
+func goroutineIDs() (map[int]bool, string) {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	ids := map[int]bool{}
+	for _, block := range strings.Split(string(buf), "\n\n") {
+		var id int
+		if _, err := fmt.Sscanf(block, "goroutine %d [", &id); err == nil {
+			ids[id] = true
+		}
+	}
+	return ids, string(buf)
+}
+
 // TestTI03_SigtermStopsServe sends SIGTERM to the real serve function. It checks that serve returns 0, and that
-// the queue closes after both serve calls returned (NFR-05). A serve that ends before SIGTERM fails the test.
+// the queue closes after both serve calls returned (NFR-05).
+// The test wraps the waitStop seam. The wrapper tells the test that serve waits for the stop, and then it
+// holds serve until the test has sent SIGTERM. So the test sends the signal only after serve waits, and serve
+// cannot remove its signal handler before the signal. A serve that ends without the wait fails the test.
 func TestTI03_SigtermStopsServe(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -558,22 +651,28 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	t.Cleanup(func() { serveSetup = oldSetup; log.SetOutput(oldLog) })
 	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
 	closed := closedAtReturn(t, &q)
+	waiting, signalled := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(signalled) }) }) // frees serve if the test ends before it sent SIGTERM
+	oldWait := waitStop
+	t.Cleanup(func() { waitStop = oldWait })
+	waitStop = func(ctx context.Context) {
+		close(waiting)
+		<-signalled
+		oldWait(ctx)
+	}
 	out := newStartWriter()
 	var errb syncBuf
-	code := make(chan int, 1)
-	go func() { code <- serve(cfg, out, &errb) }()
-	select {
-	case <-out.started:
-	case c := <-code:
-		if out.hasStarted() {
-			t.Fatalf("serve ended with exit %d after the start line, before SIGTERM; stderr %q", c, errb.String())
-		}
-		t.Fatalf("serve ended with exit %d before the start line; stderr %q", c, errb.String())
-	}
+	var c int
+	done := make(chan struct{})
+	go func() { c = serve(cfg, out, &errb); close(done) }()
+	t.Cleanup(func() { release.Do(func() { close(signalled) }); <-done })
+	startWait{"serve", out, done, func() string { return fmt.Sprintf("exit %d; stderr %q", c, errb.String()) }}.until(t, waiting, false)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	c := <-code
+	release.Do(func() { close(signalled) })
+	<-done
 	if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
 		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
 	}
@@ -594,8 +693,9 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	// The child is a separate process and binds the addresses itself. So the test frees the two listeners.
-	// The window between the close and the bind of the child stays.
+	// The child is a separate process and binds the https and http addresses itself. A separate process cannot
+	// take a test listener. So the test frees these two listeners, and the window between the close and the bind
+	// of the child stays. The listener of the CA stays open in the test process.
 	httpsLn, plainLn, caAddr := openListeners(t)
 	https, plain, ca := httpsLn.Addr().String(), plainLn.Addr().String(), "https://"+caAddr+"/directory"
 	httpsLn.Close()
@@ -615,14 +715,8 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	go func() { waitErr = cmd.Wait(); close(exited) }()
 	t.Cleanup(func() { cmd.Process.Kill(); <-exited })
 	// The child writes the start line after it has bound both addresses and started the two serve goroutines.
-	select {
-	case <-out.started:
-	case <-exited:
-		// The child can write the line and then end. Then coldHandshake fails with its handshake error.
-		if !out.hasStarted() {
-			t.Fatalf("the child ended before the start line: %v; stderr %q", waitErr, errb.String())
-		}
-	}
+	// The child can write the line and then end. Then coldHandshake fails with its handshake error.
+	startWait{"the child", out, exited, func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) }}.until(t, out.started, true)
 	coldHandshake(t, https, begin, der, errb).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
 	<-exited
