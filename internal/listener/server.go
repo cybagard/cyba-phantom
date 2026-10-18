@@ -54,7 +54,7 @@ var defaultTimeouts = timeouts{
 }
 
 // countWriter counts the lines of the server error log and drops them.
-// After each line it makes a send on lines that does not block, for tests.
+// After each line it sends a value on the channel lines, for tests. The send does not block.
 type countWriter struct {
 	n     atomic.Uint64
 	lines chan struct{} // buffer 1
@@ -64,7 +64,7 @@ func (w *countWriter) Write(p []byte) (int, error) {
 	w.n.Add(1)
 	select {
 	case w.lines <- struct{}{}:
-	default: // a signal is waiting already
+	default: // a value waits in the channel already
 	}
 	return len(p), nil
 }
@@ -286,7 +286,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // They include one line for each failed handshake. The log keeps no text.
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
 
-// ErrorLineSignal is for tests. It returns a channel that gets a value after a line of the error log. One value
+// ErrorLineSignal is for tests. It returns the channel that gets a value after a line of the error log. One value
 // can stand for more than one line, so a receiver reads ErrorLines again after each receive.
 func (s *Server) ErrorLineSignal() <-chan struct{} { return s.errLines.lines }
 

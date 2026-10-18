@@ -670,8 +670,8 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	}
 }
 
-// A line of the error log makes the line signal ready and raises the counter. The send happens inside
-// the write, so no wait is needed. A second line while a signal waits adds no second signal.
+// T-S-17: a line of the error log puts a value on the line channel and raises the counter. The send happens
+// inside the write, so the test needs no wait. A second line while a value waits adds no second value.
 func TestTS17ErrorLineSignalFollowsLine(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	sig := r.s.ErrorLineSignal()
@@ -684,16 +684,16 @@ func TestTS17ErrorLineSignalFollowsLine(t *testing.T) {
 		}
 	}
 	if ready() {
-		t.Fatal("the line signal is ready before any line")
+		t.Fatal("the line channel has a value before any line")
 	}
 	r.s.srv.ErrorLog.Print("a line")
 	if !ready() || r.s.ErrorLines() != 1 {
-		t.Fatalf("after one line: lines %d; want 1 and a ready signal", r.s.ErrorLines())
+		t.Fatalf("after one line: lines %d; want 1 and a value on the line channel", r.s.ErrorLines())
 	}
 	r.s.srv.ErrorLog.Print("a line")
 	r.s.srv.ErrorLog.Print("a line")
 	if !ready() || ready() || r.s.ErrorLines() != 3 {
-		t.Fatalf("after two more lines: lines %d; want 3 and one ready signal", r.s.ErrorLines())
+		t.Fatalf("after two more lines: lines %d; want 3 and one value on the line channel", r.s.ErrorLines())
 	}
 }
 
