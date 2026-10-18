@@ -274,7 +274,50 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 }
 
 // idHint is the fixed text of the identity hint.
-const idHint = "hint: the author and trailer addresses must be the maintainer noreply address; the committer can also be the GitHub committer address; a Claude co-author trailer can use the Claude co-author address (see tools/dco/main.go)\n"
+const idHint = "hint: this check passes only for commits of the maintainer; for an outside contribution, see CONTRIBUTING.md (the maintainer commits the change again)\n"
+
+// oldIDHint is the text of the identity hint before it stopped naming the
+// maintainer address. It is a negative fixture: the hint must not return to it.
+const oldIDHint = "hint: the author and trailer addresses must be the maintainer noreply address; the committer can also be the GitHub committer address; a Claude co-author trailer can use the Claude co-author address (see tools/dco/main.go)"
+
+// hintFault returns why a hint text is not acceptable, or "" if it is. The
+// hint is in a public CI log. It must name no address, give no step to change
+// the author, and point to CONTRIBUTING.md.
+func hintFault(hint string) string {
+	low := strings.ToLower(hint)
+	for _, bad := range []string{
+		"@", "noreply", "maintainer address", "maintainer noreply", "--author",
+		"git_author", "git_committer", "user.email", "git config", "must be", "use the",
+	} {
+		if strings.Contains(low, bad) {
+			return "contains " + bad
+		}
+	}
+	if !strings.Contains(hint, "CONTRIBUTING.md") {
+		return "does not point to CONTRIBUTING.md"
+	}
+	return ""
+}
+
+// The identity hint names no address and gives no step to change the author.
+func TestIdentityHintNamesNoAddress(t *testing.T) {
+	_, out, _ := runOn(t, []string{"GIT_AUTHOR_EMAIL=" + other}, signoff)
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "hint: ") && !strings.Contains(l, "git commit -s") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("the output has no identity hint; output %q", out)
+	}
+	if why := hintFault(line); why != "" {
+		t.Errorf("identity hint %q: %s", line, why)
+	}
+	if hintFault(oldIDHint) == "" {
+		t.Error("the predicate accepts the old hint text")
+	}
+}
 
 // The FAIL output gives the sign-off hint only for an unsigned commit.
 // It gives the identity hint only for a commit with a wrong address.
