@@ -590,7 +590,7 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
 // listeners closed, the queue closed, the database closed, and no goroutine that serve started and left running.
 // The test compares the goroutine IDs right after the return with the IDs right before the call. It does not
-// count goroutines: the runtime can hold a goroutine that has ended and is not yet freed, and a count includes it.
+// count goroutines. The runtime frees an ended goroutine later, and a count can include it.
 // The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. So the test skips that
 // goroutine only for the database that it captured and found closed, with no open connection. Any other
 // connectionOpener fails the test. The goroutines of a sql.Tx or sql.Rows stay skipped only when every new
