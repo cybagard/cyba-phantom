@@ -75,8 +75,9 @@ jobs:
     # Checker-from-base: every commit in the PR range needs a
     # Signed-off-by. The author, the committer and every trailer address
     # must be the maintainer noreply address. The committer can also be
-    # the GitHub committer address. One Co-authored-by trailer for
-    # Claude is the exception. tools/dco/main.go gives the full rules.
+    # the GitHub committer address. A Co-authored-by trailer for Claude,
+    # with only the Claude co-author address, is the exception.
+    # tools/dco/main.go gives the full rules.
     # PRs only — squash merges drop trailers, so pushed main is never
     # re-checked (the history of main is what was reviewed).
     if: github.event_name == 'pull_request'

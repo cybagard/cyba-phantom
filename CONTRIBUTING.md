@@ -5,19 +5,21 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 
 ## Getting changes in
 
-1. Every commit in a pull request must carry a `Signed-off-by` trailer
-   under the Developer Certificate of Origin (DCO) 1.1: sign with
-   `git commit -s` (see <https://developercertificate.org>). The `dco`
-   check of CI also tests the commit identity of every commit in the
-   pull request. The author, the committer, and every `Signed-off-by`
-   address must be the maintainer noreply address
-   (`67512030+cybagard@users.noreply.github.com`). The committer can also
-   be the GitHub committer address, for a commit that GitHub makes. Every
-   address in any other trailer must also be the maintainer noreply
-   address. Only a `Co-authored-by` trailer can have the Claude co-author
-   address. The name in that trailer is "Claude" or starts with "Claude ",
-   and the trailer has no other address. The header comment of
-   `tools/dco/main.go` gives the full rules. It also covers the rule for
+1. Sign every commit with `git commit -s`. This adds a `Signed-off-by`
+   trailer under the Developer Certificate of Origin (DCO) 1.1 (see
+   <https://developercertificate.org>). The `dco` check of CI tests the
+   sign-off and the commit identity of every commit in a pull request.
+   The check passes only for a commit with the maintainer noreply address
+   (`67512030+cybagard@users.noreply.github.com`) as author, committer
+   and `Signed-off-by` address. An outside contributor never uses this
+   address (see the path for an outside contributor below). The committer
+   can also be the GitHub committer address, for a commit that GitHub
+   makes. For the check to pass, every address in any other trailer is
+   also the maintainer noreply address. Only a `Co-authored-by` trailer
+   can have the Claude co-author address. The name in that trailer is
+   "Claude" or starts with "Claude ", and the trailer has no other
+   address. The header comment of `tools/dco/main.go` gives the full
+   rules. It also covers the rule for
    the encoding header. A commit that fails one of these rules fails the
    check.
    An outside contributor forks, branches, commits with `git commit -s`,
@@ -33,7 +35,8 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    contributor and links the outside pull request. The commits in the
    outside pull request keep the contributor sign-off. The text of the
    new pull request must not contain an email address of the
-   contributor.
+   contributor. This keeps the address of the contributor out of the
+   public history.
    We adopt a CLA before the first external-corporate contributor. Until
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
