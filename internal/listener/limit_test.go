@@ -46,7 +46,7 @@ func requireLoopback(t *testing.T, host byte) {
 		return
 	}
 	if errors.Is(err, syscall.EADDRNOTAVAIL) && runtime.GOOS != "linux" {
-		t.Skipf("host has no loopback address %v", addr.IP)
+		t.Skipf("this machine has no loopback address %v", addr.IP)
 	}
 	t.Fatalf("bind %v: %v", addr.IP, err)
 }
