@@ -54,6 +54,15 @@ func (c *limitConn) lateBytes() int64 {
 	return c.late
 }
 
+// idled reports that nextPeriod ended the period of the last request, or closed
+// the connection. Call it after the client read the response: a request is
+// active until then.
+func (c *limitConn) idled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.active || c.closed
+}
+
 // periodLog records the counts of the wrapper at each idle state and at each
 // close, before the production hook acts on them. conn is the last wrapper.
 type periodLog struct {

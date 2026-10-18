@@ -829,23 +829,44 @@ func TestTS17SourceCapSharedByPlainAndTLS(t *testing.T) {
 // closes the connection with no response, on both sockets.
 func TestTS18PlainReadBudget(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
 	r.serve(t)
-	plain, _ := r.servePlain(t, okHandler)
-	for name, dial := range map[string]func() net.Conn{
-		"TLS":   func() net.Conn { return r.dial(t) },
-		"plain": func() net.Conn { return dialPlain(t, plain, 1) },
+	// The plain serve builds its own http.Server, so the period log does not
+	// see it. The handler keeps the wrapper of the last request, and the test
+	// waits until nextPeriod ended the period of that request.
+	var last atomic.Pointer[limitConn]
+	plain, _ := r.servePlain(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		last.Store(req.Context().Value(limitConnKey{}).(*limitConn))
+		okHandler.ServeHTTP(w, req)
+	}))
+	// A head of more than 4096 bytes that arrives before the idle state is late
+	// and closes the connection, so each large head goes out after the idle
+	// state of the request before it.
+	var tlsIdle int
+	for name, k := range map[string]struct {
+		dial func() net.Conn
+		idle func()
+	}{
+		"TLS": {func() net.Conn { return r.dial(t) }, func() { tlsIdle++; l.wait(t, tlsIdle, 0) }},
+		"plain": {func() net.Conn { return dialPlain(t, plain, 1) }, func() {
+			waitFor(t, "idle state of the plain connection", func() bool { return last.Load().idled() })
+		}},
 	} {
+		dial, idle := k.dial, k.idle
 		c := dial()
 		if got := status(c, 0); got != 200 {
 			t.Fatalf("%s: first request: status %d", name, got)
 		}
+		idle()
 		if got := status(c, testHeaderBytes); got != 200 {
 			t.Fatalf("%s: head of header_bytes bytes: status %d, want 200", name, got)
 		}
+		idle()
 		over := dial()
 		if got := status(over, 0); got != 200 {
 			t.Fatalf("%s: first request: status %d", name, got)
 		}
+		idle()
 		if got := status(over, testHeaderBytes+2000); got != 0 {
 			t.Errorf("%s: head over the budget: status %d, want a close", name, got)
 		}
