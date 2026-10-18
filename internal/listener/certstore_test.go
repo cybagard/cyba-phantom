@@ -391,51 +391,78 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	unchanged(t, target)
 }
 
+// A test hook puts the rename of a Store at each place against a Load, so the
+// test does not depend on timing. In each place Load returns a whole value with
+// no error:
+//   - between the Lstat and the open: the new value, after a second try;
+//   - after the open, before Stat: the old value of the open file, in one try;
+//   - while the temporary file is written and not yet renamed: the old value.
+//
+// After the Store returns, Load gives the new value.
 func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
-	s, _ := newStore(t)
 	ctx := context.Background()
-	// Each value is complete and has its own length and byte.
-	values := make([][]byte, 8)
-	for i := range values {
-		values[i] = bytes.Repeat([]byte{byte('a' + i)}, 1+i*1500)
+	oldValue := bytes.Repeat([]byte("o"), 1500)
+	newValue := bytes.Repeat([]byte("nm"), 2500)
+	setup := func(t *testing.T) *Store {
+		s, _ := newStore(t)
+		mustNil(t, s.Store(ctx, "kd/key", oldValue))
+		return s
 	}
-	mustNil(t, s.Store(ctx, "kd/key", values[0]))
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 1; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := s.Store(ctx, "kd/key", values[i%len(values)]); err != nil {
-				t.Errorf("Store: %v", err)
-				return
-			}
-		}
-	}()
-	// A t.Fatalf in the loop must not leave the goroutine running after the test.
-	defer func() {
-		close(stop)
-		wg.Wait()
-	}()
-	failed := 0
-	for i := 0; i < 20000; i++ {
-		b, err := s.Load(ctx, "kd/key")
-		if err != nil {
-			if failed++; failed <= 3 {
-				t.Errorf("Load: %v", err)
-			}
-		} else if !slices.ContainsFunc(values, func(v []byte) bool { return bytes.Equal(v, b) }) {
-			t.Fatalf("Load returned %d bytes that are not a stored value", len(b))
+	load := func(t *testing.T, s *Store, want []byte) {
+		t.Helper()
+		if b, err := s.Load(ctx, "kd/key"); err != nil || !bytes.Equal(b, want) {
+			t.Fatalf("Load = %d bytes, %v; want the %d bytes of the whole value", len(b), err, len(want))
 		}
 	}
-	if failed != 0 {
-		t.Fatalf("%d of 20000 Load calls failed", failed)
-	}
+
+	t.Run("rename between the Lstat and the open", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		betweenLstatAndOpen = func() {
+			if calls++; calls == 1 {
+				mustNil(t, s.Store(ctx, "kd/key", newValue))
+			}
+		}
+		t.Cleanup(func() { betweenLstatAndOpen = nil })
+		load(t, s, newValue)
+		if calls != 2 {
+			t.Errorf("the hook ran %d times, want 2", calls)
+		}
+	})
+
+	t.Run("rename after the open, before Stat", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		betweenOpenAndStat = func() {
+			if calls++; calls == 1 {
+				mustNil(t, s.Store(ctx, "kd/key", newValue))
+			}
+		}
+		t.Cleanup(func() { betweenOpenAndStat = nil })
+		load(t, s, oldValue)
+		if calls != 1 {
+			t.Errorf("the hook ran %d times, want 1", calls)
+		}
+		load(t, s, newValue)
+	})
+
+	t.Run("temporary file written, not yet renamed", func(t *testing.T) {
+		s := setup(t)
+		realRename := renameFile
+		t.Cleanup(func() { renameFile = realRename })
+		calls := 0
+		renameFile = func(r *os.Root, from, to string) error {
+			if calls++; calls == 1 {
+				load(t, s, oldValue)
+			}
+			return realRename(r, from, to)
+		}
+		mustNil(t, s.Store(ctx, "kd/key", newValue))
+		if calls != 1 {
+			t.Errorf("the rename ran %d times, want 1", calls)
+		}
+		load(t, s, newValue)
+	})
 }
 
 func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
