@@ -335,6 +335,14 @@ var caDirectories = map[string]string{
 	"letsencrypt-staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
 }
 
+// CADirectory returns the directory URL of an acme.ca value: the URL of a known shorthand, else raw as it is.
+func CADirectory(raw string) string {
+	if dir, ok := caDirectories[raw]; ok {
+		return dir
+	}
+	return raw
+}
+
 func checkCA(_ *loader, raw string) string {
 	if _, ok := caDirectories[raw]; ok {
 		return ""
@@ -440,8 +448,8 @@ func (c *Config) AllowList() []Endpoint {
 	}
 	for _, p := range []string{"acme.ca", "bundle.fetch_url"} {
 		raw := c.values[p].Str
-		if dir, ok := caDirectories[raw]; ok && p == "acme.ca" {
-			raw = dir
+		if p == "acme.ca" {
+			raw = CADirectory(raw)
 		}
 		fromURL(raw)
 	}

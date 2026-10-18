@@ -27,6 +27,7 @@ const vkeyName = "keys/checkpoint.vkey"
 // startParams holds the values of the store start. Each path is relative to Root, in slash form.
 type startParams struct {
 	Root, StorePath, TlogDir, Origin string
+	CacheDir                         string // the certificate cache directory
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
@@ -64,6 +65,7 @@ func paramsOf(cfg *config.Config) startParams {
 	bp, _ := cfg.Get("privacy.store_body_prefix")
 	return startParams{
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),
+		CacheDir: rel(str("acme.cache_dir")),
 		Reserved: []string{rel(str("tlog.dir")), rel(str("acme.cache_dir")), rel(filepath.Dir(str("bundle.path")))},
 		Interval: iv.Dur, BodyPrefix: bp.Bool,
 	}

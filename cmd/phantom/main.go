@@ -1,10 +1,10 @@
 // Command phantom is the Phantom sensor entry point.
 //
-// The binary reads one config file. "phantom <path>" loads it, starts the store,
-// the writer and the checkpointer, and waits for SIGINT or SIGTERM. "phantom --check <path>"
-// only validates it (FR-12). Both modes use the same load function. --check opens no
-// socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
-// The listeners are not part of the binary yet.
+// The binary reads one config file. "phantom <path>" loads it and binds the two listen sockets.
+// It starts the store, the writer and the checkpointer. It starts the certificate client
+// and the decoy listener. Then it waits for SIGINT or SIGTERM.
+// "phantom --check <path>" only validates the file (FR-12). Both modes use the same load function.
+// --check opens no socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
 package main
 
 import (
@@ -13,14 +13,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/config"
-	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 func main() {
@@ -49,28 +47,13 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 	return serve(cfg, stdout, stderr)
 }
 
-// serve starts the store part and waits for SIGINT or SIGTERM. Then it stops the store part. A test replaces it.
+// serve runs the sensor until SIGINT or SIGTERM (see serveWith). A test replaces it.
 // The signal handler is set before the start, so a signal during the start is caught.
 var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
-	c := event.NewCounters()
-	depth, _ := cfg.Get("limits.queue_depth")
-	q, err := event.NewQueue(int(depth.Int), c)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	s := start(paramsOf(cfg), q, c, realDeps, slog.New(slog.NewTextHandler(stderr, nil)))
-	if s.Healthy() {
-		fmt.Fprintln(stdout, "phantom: started — no listeners yet")
-	} else {
-		fmt.Fprintln(stdout, "phantom: started — store not healthy, no listeners yet")
-	}
-	<-ctx.Done()
-	stop() // A second signal during Stop gets the default action.
-	s.Stop()
-	return 0
+	p, d := serveSetup(paramsOf(cfg))
+	return serveWith(ctx, stop, cfg, p, d, stdout, stderr)
 }
 
 // loadWith is the one load function of both modes. A test replaces it to see the Net.
