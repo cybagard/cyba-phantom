@@ -50,7 +50,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/export` | nightly aggregate export, no IPs |
 | `internal/config` | one YAML file + env overrides, `--check` |
 | `sdk/` | Go + TS: read checkpoints, verify proofs |
-| `tools/` | `trace` (traceability check), `dco` (sign-off check), `mirror-diff` (constitution table check), `bundle-sign`, `score-report` |
+| `tools/` | `trace` (traceability check), `dco` (sign-off and commit identity check), `mirror-diff` (constitution table check), `bundle-sign`, `score-report` |
 | `spec/` | synced read-only mirror of the canonical spec documents (01, 04 open sections, 07, 08, manifest, golden table) — the traceability inputs and the open interfaces |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |
@@ -78,7 +78,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 - `make all` — build, lint (gofmt/vet), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`), and the constitution-table mirror check.
 - `make perf` — the T-P-07 gate. Two builds must hash identically. The binary must be statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. Locally, a check that cannot run (no systemd, no readelf) is skipped with a note. CI sets `PERF_STRICT=1`, so in CI each skip fails.
 - `make coverage` — the 07 §1 coverage gate: 80 % on each `internal/{token,score,tlog,limiter,store}` package that exists, and 80 % on `tools/`.
-- `make dco BASE=<sha> HEAD=<sha>` — DCO sign-off across a commit range (CI runs it on every PR).
+- `make dco BASE=<sha> HEAD=<sha>` — DCO sign-off and commit identity check across a commit range (CI runs it on every PR).
 
 The floor for any change: `go build ./...`, `go vet ./...`, `go test -race ./...`.
 

@@ -25,7 +25,7 @@ All code in this repository is Apache-2.0. Live trap templates, fingerprint tabl
 
 ## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md). Each commit needs a DCO sign-off (`git commit -s`).
+Read [`AGENTS.md`](AGENTS.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md). Each commit needs a DCO sign-off (`git commit -s`). The `dco` check passes only for commits with the maintainer noreply address as author, committer and sign-off address. An outside contributor never uses this address. The committer can also be the GitHub committer address, for a commit that GitHub makes. See `CONTRIBUTING.md` for the full rules. It also gives the path of an outside contributor.
 
 ## License
 

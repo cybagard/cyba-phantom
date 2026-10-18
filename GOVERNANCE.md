@@ -19,8 +19,12 @@ This repository is open source, permanently.
 ## License sign-off
 
 Contributors sign with the Developer Certificate of Origin
-(`git commit -s`), checked by CI on every pull request (see
-`CONTRIBUTING.md`). A CLA will be adopted before the first
+(`git commit -s`). CI checks the sign-off on every pull request. The
+check passes only for commits with the maintainer noreply address as
+author, committer and sign-off address. An outside contributor never
+uses this address. The committer can also be the GitHub committer
+address, for a commit that GitHub makes. See `CONTRIBUTING.md` for the
+full rules and for the path of an outside contributor. A CLA will be adopted before the first
 external-corporate contributor; DCO stands until then.
 
 ## Writing standard

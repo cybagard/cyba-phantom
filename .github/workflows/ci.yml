@@ -28,10 +28,11 @@
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
 #
-# Jobs: lint (gofmt/vet), dco (sign-off, PRs only), test (-race + coverage
-# gate), trace (C10 matrix + sync stamp), mirror-diff (constitution table),
-# build (T-P-07: reproducible, static, sized, cgroup-budgeted). Jobs
-# share their checkout and gate-source steps through YAML anchors.
+# Jobs: lint (gofmt/vet), dco (sign-off and commit identity, PRs only),
+# test (-race + coverage gate), trace (C10 matrix + sync stamp),
+# mirror-diff (constitution table), build (T-P-07: reproducible, static,
+# sized, cgroup-budgeted). Jobs share their checkout and gate-source
+# steps through YAML anchors.
 
 name: ci
 
@@ -71,9 +72,14 @@ jobs:
         run: make lint
 
   dco:
-    # Checker-from-base: every commit in the PR range must carry a
-    # Signed-off-by. PRs only — squash merges drop trailers, so pushed
-    # main is never re-checked (the history of main is what was reviewed).
+    # Checker-from-base: every commit in the PR range needs a
+    # Signed-off-by. The author, the committer and every trailer address
+    # must be the maintainer noreply address. The committer can also be
+    # the GitHub committer address. A Co-authored-by trailer for Claude,
+    # with only the Claude co-author address, is the exception.
+    # tools/dco/main.go gives the full rules.
+    # PRs only — squash merges drop trailers, so pushed main is never
+    # re-checked (the history of main is what was reviewed).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

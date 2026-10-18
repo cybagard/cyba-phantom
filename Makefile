@@ -45,7 +45,7 @@ stamp:
 mirror-diff:
 	./tools/mirror-diff.sh
 
-# DCO sign-off across a commit range: make dco BASE=<sha> HEAD=<sha>
+# DCO sign-off and commit identity across a commit range: make dco BASE=<sha> HEAD=<sha>
 dco:
 	$(GO) run ./tools/dco $(BASE) $(HEAD)
 
