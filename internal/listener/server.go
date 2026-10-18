@@ -238,11 +238,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	for _, hs := range servers {
 		go func() { res <- hs.Shutdown(ctx) }()
 	}
-	var err error
-	for range servers {
-		if e := <-res; err == nil {
-			err = e
+	done := make(chan error, 1)
+	go func() {
+		var first error
+		for range servers {
+			if e := <-res; first == nil {
+				first = e
+			}
 		}
+		done <- first
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		// http.Server.Shutdown closes an idle TLS connection with a close_notify
+		// write that can wait for its own deadline, one connection after the other.
+		// So close the sockets below TLS. The pending writes fail and the calls
+		// return. After the sockets are closed, the calls can find no open
+		// connection and return nil, so the error of ctx is the result.
+		s.src.closeAll()
+		<-done
+		err = ctx.Err()
 	}
 	if err != nil {
 		// http.Server.Shutdown leaves the open connections open when ctx ends.

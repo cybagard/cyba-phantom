@@ -18,18 +18,60 @@ const ipv6PrefixBits = 64
 // sourceCap counts the open connections of each source key. One value serves
 // all Serve calls of one Server, like the slot semaphore. It has no String or
 // Format method, and no code prints the map.
+//
+// It also holds the record of the open limitConns of all Serve calls, so that
+// Shutdown can close them at the socket. A connection enters the record after it
+// got its slot, so the record holds at most maxConns entries. It leaves the
+// record in the first Close, before its slot is free.
 type sourceCap struct {
 	mu     sync.Mutex
 	count  map[netip.Addr]uint16
+	open   map[*limitConn]struct{}
 	closes atomic.Uint64 // connections closed at the source cap
 }
 
 // newSourceCap makes the map with room for maxConns keys. The map holds at most
 // maxConns keys, plus one key for each Serve call that is between the source
 // check and the slot. A delete does not shrink a Go map. Under churn the map
-// can grow, to a bounded size.
+// can grow, to a bounded size. The record has room for maxConns connections.
 func newSourceCap(maxConns int) *sourceCap {
-	return &sourceCap{count: make(map[netip.Addr]uint16, maxConns)}
+	return &sourceCap{count: make(map[netip.Addr]uint16, maxConns), open: make(map[*limitConn]struct{}, maxConns)}
+}
+
+// track adds c to the record of open connections.
+func (s *sourceCap) track(c *limitConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.open[c] = struct{}{}
+}
+
+// untrack removes c from the record. A connection that is not in it is ignored.
+func (s *sourceCap) untrack(c *limitConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.open, c)
+}
+
+// openConns is the number of connections in the record.
+func (s *sourceCap) openConns() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.open)
+}
+
+// closeAll closes each connection in the record at the socket below TLS, so
+// there is no close_notify write. Close takes mu to remove the connection, so
+// the loop runs without it.
+func (s *sourceCap) closeAll() {
+	s.mu.Lock()
+	conns := make([]*limitConn, 0, len(s.open))
+	for c := range s.open {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 // take adds one connection to key and tells if it is within the cap.
@@ -159,7 +201,9 @@ func (l *limitListener) Accept() (net.Conn, error) {
 		}
 		select {
 		case l.sem <- struct{}{}:
-			return &limitConn{Conn: c, sem: l.sem, src: l.src, key: key, rd: l.rd, left: l.rd.first}, nil
+			lc := &limitConn{Conn: c, sem: l.sem, src: l.src, key: key, rd: l.rd, left: l.rd.first}
+			l.src.track(lc)
+			return lc, nil
 		default:
 			l.src.give(key)
 			_ = c.Close()
@@ -171,7 +215,8 @@ func (l *limitListener) Accept() (net.Conn, error) {
 func (l *limitListener) inUse() int { return len(l.sem) }
 
 // limitConn gives its source count and then its slot back on the first Close
-// and only on the first. The key leaves the map before the slot is free.
+// and only on the first. The key and the record entry leave before the slot is
+// free.
 //
 // It also counts the bytes that Read takes from the socket. A period is the
 // time from the start of the connection, or from the last idle state, to the
@@ -213,6 +258,7 @@ func (c *limitConn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(func() {
 		c.src.give(c.key)
+		c.src.untrack(c)
 		<-c.sem
 	})
 	c.mu.Lock()
