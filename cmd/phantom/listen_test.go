@@ -61,9 +61,9 @@ type startWriter struct {
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
 
-// hasStarted reports without blocking whether the start line is written. A wait that sees the end of the
-// process first calls it. When the process wrote the line and then ended, both channels are ready and select
-// picks one at random.
+// hasStarted reports, without blocking, whether the writer has the start line. A wait that sees the end
+// of serve or of the child calls it first. When serve or the child writes the line and then ends, both
+// channels are ready, and select picks one at random.
 func (w *startWriter) hasStarted() bool {
 	select {
 	case <-w.started:
@@ -260,7 +260,7 @@ func depsWithQueue(q **event.Queue) startDeps {
 	return d
 }
 
-// TestTI03_StartAndStopOrder checks that the store and the certificate client start after both sockets are bound.
+// TestTI03_StartAndStopOrder checks that the store and the certificate client start after serve holds both listeners.
 // It checks that serve holds both test listeners while the sensor runs.
 // After the stop signal, the client stops and the queue closes after both serve calls returned (NFR-05).
 func TestTI03_StartAndStopOrder(t *testing.T) {
@@ -294,7 +294,7 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	r := launchServe(t, cfg, tempState(t, cfg), d)
 	r.waitStarted(t)
 	if !bound() {
-		t.Error("a socket is missing while the sensor runs")
+		t.Error("a listener is not held while the sensor runs")
 	}
 	r.cancel()
 	<-r.done
@@ -303,7 +303,7 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 		t.Errorf("events = %q, want %q", events, want)
 	}
 	if r.code != 0 || !q.Closed() || !https.closed.Load() || !plain.closed.Load() {
-		t.Errorf("exit %d, queue closed %v, sockets closed %v %v; want 0, true, true true", r.code, q.Closed(), https.closed.Load(), plain.closed.Load())
+		t.Errorf("exit %d, queue closed %v, listeners closed %v %v; want 0, true, true true", r.code, q.Closed(), https.closed.Load(), plain.closed.Load())
 	}
 }
 
@@ -412,7 +412,7 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	}
 }
 
-// TestTI03_ListenerFailureExits1 closes the https socket under the server. It checks that the sensor stops in
+// TestTI03_ListenerFailureExits1 closes the https listener under the server. It checks that the sensor stops in
 // order and gives exit 1, so that a supervisor restarts it (C3).
 func TestTI03_ListenerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
@@ -421,10 +421,10 @@ func TestTI03_ListenerFailureExits1(t *testing.T) {
 	closed := closedAtReturn(t, &q)
 	r := launchServe(t, cfg, tempState(t, cfg), depsWithQueue(&q))
 	r.waitStarted(t)
-	https.Close() // the https socket, under the server
+	https.Close() // the https listener, under the server
 	<-r.done
 	if r.code != 1 || !q.Closed() || !plain.closed.Load() || !reflect.DeepEqual(closed(), []bool{false, false}) {
-		t.Errorf("exit %d, queue closed %v, http socket closed %v, closed at return %v; want 1, true, true, [false false]", r.code, q.Closed(), plain.closed.Load(), closed())
+		t.Errorf("exit %d, queue closed %v, http listener closed %v, closed at return %v; want 1, true, true, [false false]", r.code, q.Closed(), plain.closed.Load(), closed())
 	}
 }
 
@@ -537,7 +537,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
 	}
 	if !q.Closed() || !https.closed.Load() || !plain.closed.Load() {
-		t.Errorf("queue closed %v, sockets closed %v %v; want true, true true", q.Closed(), https.closed.Load(), plain.closed.Load())
+		t.Errorf("queue closed %v, listeners closed %v %v; want true, true true", q.Closed(), https.closed.Load(), plain.closed.Load())
 	}
 	for end := time.Now().Add(2 * time.Second); runtime.NumGoroutine() > before && time.Now().Before(end); {
 		time.Sleep(5 * time.Millisecond)
@@ -548,7 +548,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 }
 
 // TestTI03_SigtermStopsServe sends SIGTERM to the real serve function. It checks that serve returns 0, and that
-// the queue closes after both serve calls returned (NFR-05).
+// the queue closes after both serve calls returned (NFR-05). A serve that ends before SIGTERM fails the test.
 func TestTI03_SigtermStopsServe(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -562,22 +562,18 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	var errb syncBuf
 	code := make(chan int, 1)
 	go func() { code <- serve(cfg, out, &errb) }()
-	var c int
-	ended := false
 	select {
 	case <-out.started:
-	case c = <-code:
-		if !out.hasStarted() {
-			t.Fatalf("serve ended with exit %d before the start line; stderr %q", c, errb.String())
+	case c := <-code:
+		if out.hasStarted() {
+			t.Fatalf("serve ended with exit %d after the start line, before SIGTERM; stderr %q", c, errb.String())
 		}
-		ended = true // serve wrote the start line and ended. The test keeps c for the stop check.
+		t.Fatalf("serve ended with exit %d before the start line; stderr %q", c, errb.String())
 	}
-	if !ended {
-		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-			t.Fatal(err)
-		}
-		c = <-code
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
 	}
+	c := <-code
 	if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
 		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
 	}
@@ -622,7 +618,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	select {
 	case <-out.started:
 	case <-exited:
-		// The child can write the line and then end. The handshake then fails with its own message.
+		// The child can write the line and then end. Then coldHandshake fails with its handshake error.
 		if !out.hasStarted() {
 			t.Fatalf("the child ended before the start line: %v; stderr %q", waitErr, errb.String())
 		}
