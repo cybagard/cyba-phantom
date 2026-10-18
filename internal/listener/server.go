@@ -118,7 +118,7 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 	var p http.Protocols
 	p.SetHTTP1(true)
 	return &http.Server{
-		Handler:             h,
+		Handler:             markRequest(h),
 		ReadHeaderTimeout:   s.t.readHeader,
 		ReadTimeout:         s.t.read,
 		WriteTimeout:        s.t.write,
@@ -127,27 +127,51 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 		MaxHeaderValueCount: maxHeaderValues,
 		Protocols:           &p,
 		ErrorLog:            log.New(&s.errLines, "", 0),
-		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if lc := limitConnOf(c); lc != nil {
+				ctx = context.WithValue(ctx, limitConnKey{}, lc)
+			}
 			return withConnState(ctx)
 		},
 		ConnState: periodHook,
 	}
 }
 
+// limitConnKey is the context key of the limitConn of a request.
+type limitConnKey struct{}
+
+// limitConnOf returns the limitConn of c, or nil for a connection of another
+// type. The connection of a plain serve is the limitConn itself; the connection
+// of the TLS serve has a *tls.Conn around it.
+func limitConnOf(c net.Conn) *limitConn {
+	if tc, ok := c.(*tls.Conn); ok {
+		c = tc.NetConn()
+	}
+	lc, _ := c.(*limitConn)
+	return lc
+}
+
+// markRequest wraps h. Before h runs, it marks a request without a body as
+// active on its limitConn. A request with a body never starts a late run.
+func markRequest(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if lc, ok := r.Context().Value(limitConnKey{}).(*limitConn); ok && r.Body == http.NoBody {
+			lc.startRequest()
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // periodHook is the ConnState hook. It starts the next read period of a
 // connection that becomes idle. A connection that read more than keepAliveBytes
-// in its period closes, so it gets no keep-alive. It must not wait on the
-// network. A connection of another type is left as it is. The connection of a
-// plain serve is the limitConn itself; the connection of the TLS serve has a
-// *tls.Conn around it.
+// in its period closes, so it gets no keep-alive. It also closes a connection
+// with more than keepAliveBytes late bytes. It must not wait on the network. A
+// connection of another type is left as it is.
 func periodHook(c net.Conn, st http.ConnState) {
 	if st != http.StateIdle {
 		return
 	}
-	if tc, ok := c.(*tls.Conn); ok {
-		c = tc.NetConn()
-	}
-	if lc, ok := c.(*limitConn); ok {
+	if lc := limitConnOf(c); lc != nil {
 		lc.nextPeriod()
 	}
 }
