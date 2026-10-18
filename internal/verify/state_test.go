@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -205,11 +206,18 @@ func TestTS14_LockHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(dir, v); err != nil {
+	state, err := LoadState(dir, v)
+	if err != nil {
 		t.Fatal(err)
 	}
 	fmt.Println("locked")
-	select {}
+	// The state holds the locked directory file. Without a reference, the
+	// garbage collector can run the finalizer of the file, which closes it and
+	// frees the lock.
+	for {
+		runtime.KeepAlive(state)
+		time.Sleep(time.Second)
+	}
 }
 
 // T-S-14: the kernel releases the lock when the process ends. A run that is

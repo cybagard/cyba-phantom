@@ -174,6 +174,9 @@ func tp09Dial(t *testing.T, form string, raw net.Conn) error {
 	return nil
 }
 
+// tp09Source gives the last byte of the source address of client i.
+func tp09Source(i int) byte { return byte(2 + i/maxConnsPerSource) }
+
 // TestTP09Client is the child process of TestTP09. It opens the connections of
 // one form from 63 loopback sources, at most 32 from each. It dials all of
 // them first, then starts all clients at the same time. It prints a READY line
@@ -196,7 +199,7 @@ func TestTP09Client(t *testing.T) {
 		go func() {
 			defer func() { <-sem; wg.Done() }()
 			var err error
-			if conns[i], err = loopbackDialer(byte(2+i/maxConnsPerSource)).Dial("tcp", addr); err != nil {
+			if conns[i], err = loopbackDialer(tp09Source(i)).Dial("tcp", addr); err != nil {
 				bad.Add(1)
 			}
 		}()
@@ -391,6 +394,10 @@ func (s *Server) settle(t *testing.T) (open int, pool int64) {
 func TestTP09(t *testing.T) {
 	if os.Getenv("PHANTOM_TP09") != "1" {
 		t.Skip("T-P-09 runs with PHANTOM_TP09=1")
+	}
+	// The child process cannot report a skip, so the parent checks the source addresses of the clients.
+	for i := 0; i < tp09Conns; i += maxConnsPerSource {
+		requireLoopback(t, tp09Source(i))
 	}
 	long := 10 * time.Minute
 	r := newRig(t, tp09Conns, tp09HeaderBytes, timeouts{readHeader: long, read: long, write: long, idle: long}, okHandler)

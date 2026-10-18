@@ -688,6 +688,7 @@ func (r *rig) servePlain(t *testing.T, h http.Handler) (string, <-chan error) {
 // it at the end.
 func dialPlain(t *testing.T, addr string, host byte) net.Conn {
 	t.Helper()
+	requireLoopback(t, host)
 	c, err := loopbackDialer(host).Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)

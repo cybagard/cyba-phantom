@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -13,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math/big"
@@ -51,14 +53,20 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-// freeAddr returns a loopback address with a port that no socket holds now.
-func freeAddr(t *testing.T) string {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+// freeAddrs gives n loopback addresses that nothing holds. It keeps all n listeners open until it has read their
+// addresses, so the n ports differ.
+func freeAddrs(t *testing.T, n int) []string {
+	t.Helper()
+	addrs := make([]string, n)
+	for i := range addrs {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		addrs[i] = ln.Addr().String()
 	}
-	defer ln.Close()
-	return ln.Addr().String()
+	return addrs
 }
 
 // inUse reports whether a socket holds addr.
@@ -70,10 +78,10 @@ func inUse(addr string) bool {
 	return err != nil
 }
 
-// serveCfg loads a config with the two listen addresses and an acme.ca on a loopback port that nothing holds.
-func serveCfg(t *testing.T, https, plain string) *config.Config {
+// serveCfg loads a config with the two listen addresses and the address ca for acme.ca.
+func serveCfg(t *testing.T, https, plain, ca string) *config.Config {
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS=" + https, "PHANTOM_LISTEN_HTTP=" + plain,
-		"PHANTOM_ACME_CA=https://" + freeAddr(t) + "/directory"}
+		"PHANTOM_ACME_CA=https://" + ca + "/directory"}
 	cfg, err := config.Load(writeFile(t, validBody(t)), env)
 	if err != nil {
 		t.Fatal(err)
@@ -158,13 +166,14 @@ func (r *running) waitStarted(t *testing.T) {
 func TestTS16_BindConflict(t *testing.T) {
 	for _, key := range []string{"listen.https", "listen.http"} {
 		t.Run(key, func(t *testing.T) {
-			addrs := map[string]string{"listen.https": freeAddr(t), "listen.http": freeAddr(t)}
+			a := freeAddrs(t, 3)
+			addrs := map[string]string{"listen.https": a[0], "listen.http": a[1]}
 			blocker, err := net.Listen("tcp", addrs[key])
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer blocker.Close()
-			cfg := serveCfg(t, addrs["listen.https"], addrs["listen.http"])
+			cfg := serveCfg(t, addrs["listen.https"], addrs["listen.http"], a[2])
 			p := tempState(t, cfg)
 			var o opens
 			var stdout, stderr strings.Builder
@@ -204,8 +213,9 @@ func depsWithQueue(q **event.Queue) startDeps {
 // It checks that one socket holds each address while the sensor runs.
 // After the stop signal, the client stops and the queue closes after both serve calls returned (NFR-05).
 func TestTI03_StartAndStopOrder(t *testing.T) {
-	https, plain := freeAddr(t), freeAddr(t)
-	cfg := serveCfg(t, https, plain)
+	a := freeAddrs(t, 3)
+	https, plain := a[0], a[1]
+	cfg := serveCfg(t, https, plain, a[2])
 	var mu sync.Mutex
 	var events []string
 	note := func(s string) { mu.Lock(); events = append(events, s); mu.Unlock() }
@@ -282,13 +292,30 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 	return der
 }
 
-// coldHandshake waits for the socket at https, then makes a TLS handshake for decoyName. It checks that the
-// handshake ends at most 2 s after begin and gives the certificate der. The caller closes the connection.
+// bindSignal replaces listen for the test. The channel closes when the listen call for addr returns. Then the
+// test knows that serve has bound addr, or failed to bind it, without a deadline and without a test listener
+// on the address.
+func bindSignal(t *testing.T, addr string) <-chan struct{} {
+	t.Helper()
+	bound := make(chan struct{})
+	var once sync.Once
+	old := listen
+	t.Cleanup(func() { listen = old })
+	listen = func(network, a string) (net.Listener, error) {
+		ln, err := old(network, a)
+		if a == addr {
+			once.Do(func() { close(bound) })
+		}
+		return ln, err
+	}
+	return bound
+}
+
+// coldHandshake makes one TLS handshake for decoyName at https. The caller first makes sure that serve has
+// bound https. It checks that the handshake ends at most 2 s after begin and gives the certificate der. The
+// caller closes the connection.
 func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf) *tls.Conn {
 	t.Helper()
-	for !inUse(https) && time.Since(begin) < 2*time.Second { // The socket is bound a moment after the call.
-		time.Sleep(time.Millisecond)
-	}
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("handshake: %v; stderr %q", err, stderr.String())
@@ -306,13 +333,19 @@ func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stde
 // handshake with the cached certificate works at most 2 s after the start (NFR-05).
 // It runs serveWith in the test process, not the built binary. It logs the number of goroutines after the start.
 func TestTI03_ColdStart(t *testing.T) {
-	https := freeAddr(t)
-	cfg := serveCfg(t, https, freeAddr(t))
+	a := freeAddrs(t, 3)
+	https := a[0]
+	cfg := serveCfg(t, https, a[1], a[2])
 	p := tempState(t, cfg)
 	ca, _ := cfg.Get("acme.ca")
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
+	bound := bindSignal(t, https)
 	r := launchServe(t, cfg, p, realDeps)
+	select {
+	case <-bound:
+	case <-r.done:
+	}
 	defer coldHandshake(t, https, r.begin, der, &r.err).Close()
 	r.waitStarted(t)
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
@@ -328,8 +361,9 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	var captured syncBuf
 	log.SetOutput(&captured)
-	https := freeAddr(t)
-	cfg := serveCfg(t, https, freeAddr(t))
+	a := freeAddrs(t, 3)
+	https := a[0]
+	cfg := serveCfg(t, https, a[1], a[2])
 	p := tempState(t, cfg)
 	ca, _ := cfg.Get("acme.ca")
 	seedCache(t, p, ca.Str) // With a cached certificate the client starts no order, so it writes no line.
@@ -356,8 +390,9 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 // TestTI03_ListenerFailureExits1 closes the https socket under the server. It checks that the sensor stops in
 // order and gives exit 1, so that a supervisor restarts it (C3).
 func TestTI03_ListenerFailureExits1(t *testing.T) {
-	https := freeAddr(t)
-	cfg := serveCfg(t, https, freeAddr(t))
+	a := freeAddrs(t, 3)
+	https := a[0]
+	cfg := serveCfg(t, https, a[1], a[2])
 	var first net.Listener
 	oldListen := listen
 	t.Cleanup(func() { listen = oldListen })
@@ -400,8 +435,9 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 		{"client start fails", "phantom: certificate client does not start", "phantom: started — certificate client start failed", false, true, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			https, plain := freeAddr(t), freeAddr(t)
-			cfg := serveCfg(t, https, plain)
+			a := freeAddrs(t, 3)
+			https, plain := a[0], a[1]
+			cfg := serveCfg(t, https, plain, a[2])
 			p := tempState(t, cfg)
 			if c.breakIt != nil {
 				c.breakIt(t, &p)
@@ -474,8 +510,9 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 // TestTI03_ServerFailureExits1 makes the decoy server fail to start. It checks exit 1 with a fixed line, both
 // sockets free, the queue closed, and the number of goroutines back to its value before the start.
 func TestTI03_ServerFailureExits1(t *testing.T) {
-	https, plain := freeAddr(t), freeAddr(t)
-	cfg := serveCfg(t, https, plain)
+	a := freeAddrs(t, 3)
+	https, plain := a[0], a[1]
+	cfg := serveCfg(t, https, plain, a[2])
 	oldNew := newServer
 	t.Cleanup(func() { newServer = oldNew })
 	newServer = func(listener.Config, http.Handler) (*listener.Server, error) { return nil, errors.New("test error") }
@@ -500,7 +537,8 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 // TestTI03_SigtermStopsServe sends SIGTERM to the real serve function. It checks that serve returns 0, and that
 // the queue closes after both serve calls returned (NFR-05).
 func TestTI03_SigtermStopsServe(t *testing.T) {
-	cfg := serveCfg(t, freeAddr(t), freeAddr(t))
+	a := freeAddrs(t, 3)
+	cfg := serveCfg(t, a[0], a[1], a[2])
 	var q *event.Queue
 	d, p := depsWithQueue(&q), tempState(t, cfg)
 	oldSetup, oldLog := serveSetup, log.Writer()
@@ -543,20 +581,38 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	https, ca := freeAddr(t), "https://"+freeAddr(t)+"/directory"
+	a := freeAddrs(t, 3)
+	https, ca := a[0], "https://"+a[1]+"/directory"
 	der := seedCache(t, startParams{Root: stateDir, CacheDir: "certs"}, ca)
 	cmd := exec.Command(bin, writeFile(t, validBody(t)))
 	cmd.Env = append(os.Environ(), "CKPT_TOKEN="+strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS="+https,
-		"PHANTOM_LISTEN_HTTP="+freeAddr(t), "PHANTOM_ACME_CA="+ca)
+		"PHANTOM_LISTEN_HTTP="+a[2], "PHANTOM_ACME_CA="+ca)
 	var errb syncBuf
 	cmd.Stderr = &errb
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	begin := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cmd.Process.Kill() })
+	// The child writes the start line after it has bound both addresses and started both Serve calls.
+	out := bufio.NewReader(stdout)
+	for {
+		line, err := out.ReadString('\n')
+		if strings.HasPrefix(line, "phantom: started") {
+			break
+		}
+		if err != nil {
+			t.Fatalf("no start line: %v; stderr %q", err, errb.String())
+		}
+	}
 	defer coldHandshake(t, https, begin, der, &errb).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
+	// Read stdout to the end before cmd.Wait, because cmd.Wait closes the pipe.
+	io.Copy(io.Discard, out)
 	if err := cmd.Wait(); err != nil {
 		t.Errorf("after SIGTERM: %v; stderr %q", err, errb.String())
 	}
