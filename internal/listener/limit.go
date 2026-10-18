@@ -181,12 +181,11 @@ func (l *limitListener) inUse() int { return len(l.sem) }
 // read more than keepAliveBytes, so it also closes at its idle state.
 //
 // A client can send its next request before net/http reaches the idle state of
-// the last one. The bytes that Read takes after a response write of an active
-// request are late. They are not part of that period. They start the next one.
-// Examples are the next request, and the body bytes that a handler reads after
-// a 100-continue reply. Read counts late bytes against the next budget, and it
-// charges them to the pool by their own count. For a late body of more than
-// keepAliveBytes, the close comes at the idle state of the next request.
+// the last one. The late run starts at the response write of a request without
+// a body, after the handler wrapper marks it. The bytes that Read takes after
+// that write are late. They are not part of that period. They start the next
+// one. They are always bytes of the next request. Read counts them against the
+// budget of the period, and it charges them to the pool by their own count.
 type limitConn struct {
 	net.Conn
 	sem  chan struct{}
@@ -195,15 +194,14 @@ type limitConn struct {
 	once sync.Once
 	rd   *readLimit
 
-	mu          sync.Mutex
-	left        int64 // budget left in this period
-	used        int64 // bytes read in this period
-	charged     int64 // bytes of this period that the pool holds
-	lateCharged int64 // bytes of late that the pool holds
-	closed      bool
-	active      bool  // a request is active: the next Write is part of its response
-	late        int64 // bytes of used that were read after the response write
-	lateRun     bool  // a response write happened: all next bytes are late
+	mu      sync.Mutex
+	left    int64 // budget left in this period
+	used    int64 // bytes read in this period
+	charged int64 // bytes of this period that the pool holds
+	closed  bool
+	active  bool  // a request without a body is active: the next Write is its response
+	late    int64 // bytes of used that were read after the response write
+	lateRun bool  // a response write happened: all next bytes are late
 }
 
 func (c *limitConn) Close() error {
@@ -219,22 +217,19 @@ func (c *limitConn) Close() error {
 	return err
 }
 
-// refund gives both charges back to the pool, one time. The caller holds mu.
+// refund gives the charge back to the pool, one time. The caller holds mu.
 func (c *limitConn) refund() {
-	c.rd.pool.Add(-(c.charged + c.lateCharged))
-	c.charged, c.lateCharged = 0, 0
+	c.rd.pool.Add(-c.charged)
+	c.charged = 0
 }
 
 // Read asks the socket for no more than the budget left and no more than
-// keepAliveBytes. Late bytes use the next budget, less the late bytes read
-// before. A read that the budget or the pool refuses closes the socket, so
-// net/http cannot send a reply after the failed read.
+// keepAliveBytes. Late bytes also use up the budget. A read that the budget or
+// the pool refuses closes the socket, so net/http cannot send a reply after the
+// failed read.
 func (c *limitConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	left := c.left
-	if c.lateRun && left > 0 {
-		left = c.rd.next - c.late
-	}
 	c.mu.Unlock()
 	if left <= 0 {
 		_ = c.Close()
@@ -252,15 +247,13 @@ func (c *limitConn) Read(p []byte) (int, error) {
 		c.late += int64(n)
 	} else {
 		over = c.used + int64(n) - max(c.used, keepAliveBytes)
-		c.left -= int64(n)
 	}
+	c.left -= int64(n)
 	c.used += int64(n)
 	refused := false
 	if over > 0 && !c.closed {
 		if refused = !c.rd.take(over); refused {
 			c.left = 0
-		} else if c.lateRun {
-			c.lateCharged += over
 		} else {
 			c.charged += over
 		}
@@ -273,9 +266,9 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Write starts the late run when a request is active, before it writes: a client
-// that reads the response can answer before Write returns. The handshake writes
-// before the first request is active.
+// Write starts the late run when a request without a body is active, before it
+// writes: a client that reads the response can answer before Write returns. The
+// handshake writes before the first request is active.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateRun = c.lateRun || c.active
@@ -283,7 +276,8 @@ func (c *limitConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-// startRequest marks a request as active. It runs in the hook at StateActive.
+// startRequest marks a request without a body as active. The handler wrapper
+// calls it before the handler runs.
 func (c *limitConn) startRequest() {
 	c.mu.Lock()
 	c.active = true
@@ -292,21 +286,21 @@ func (c *limitConn) startRequest() {
 
 // nextPeriod ends the period at an idle state. The late bytes are not part of
 // the ending period. They start the next one. The connection closes when the
-// bytes before the late bytes are more than keepAliveBytes. It also closes
-// when the late bytes use all of the next budget. Close gives the charges back.
-// Else the charge of the own bytes goes back to the pool here. The late charge
-// becomes the charge of the next period. The next budget is less the late
-// bytes. This function does not wait on the network.
+// bytes before the late bytes are more than keepAliveBytes. It also closes when
+// the late bytes are more than keepAliveBytes. Close gives the charge back.
+// Else the late bytes have no charge, and the charge of the own bytes goes back
+// to the pool here. The next budget is less the late bytes. This function does
+// not wait on the network.
 func (c *limitConn) nextPeriod() {
 	c.mu.Lock()
 	late := c.late
-	if c.used-late > keepAliveBytes || late >= c.rd.next || c.closed {
+	// header_bytes is at least 8192, so the next budget is at least 9216 and this check comes first.
+	if c.used-late > keepAliveBytes || late > keepAliveBytes || c.closed {
 		c.mu.Unlock()
 		_ = c.Close()
 		return
 	}
-	c.rd.pool.Add(-c.charged)
-	c.charged, c.lateCharged = c.lateCharged, 0
+	c.refund()
 	c.used, c.left, c.late, c.lateRun, c.active = late, c.rd.next-late, 0, false, false
 	c.mu.Unlock()
 }
