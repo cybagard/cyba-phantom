@@ -27,12 +27,13 @@ func loopbackDialer(host byte) *net.Dialer {
 	return &net.Dialer{Timeout: 3 * time.Second, LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, host)}}
 }
 
-// requireLoopback checks that the host can bind the source address
+// requireLoopback checks that this machine can bind the source address
 // 127.0.0.<host>. Address 127.0.0.1 always works. Linux routes all of
-// 127.0.0.0/8 to loopback, so there a bind error fails the test. Other systems
-// can assign only 127.0.0.1: there the test skips when the address is not
-// available. Any other error fails the test on all systems. Call it from the
-// goroutine of the test.
+// 127.0.0.0/8 to loopback, so there a bind error fails the test. On other
+// systems, 127.0.0.1 is often the only loopback address: there the test
+// skips when the bind gives EADDRNOTAVAIL. Any other error fails the test
+// on all systems. Call it from the goroutine of the test, because t.Skipf
+// and t.Fatalf stop only the goroutine that calls them.
 func requireLoopback(t *testing.T, host byte) {
 	t.Helper()
 	if host == 1 {
