@@ -54,10 +54,18 @@ var defaultTimeouts = timeouts{
 }
 
 // countWriter counts the lines of the server error log and drops them.
-type countWriter struct{ n atomic.Uint64 }
+// After each line it makes a send on lines that does not block, for tests.
+type countWriter struct {
+	n     atomic.Uint64
+	lines chan struct{} // buffer 1
+}
 
 func (w *countWriter) Write(p []byte) (int, error) {
 	w.n.Add(1)
+	select {
+	case w.lines <- struct{}{}:
+	default: // a signal is waiting already
+	}
 	return len(p), nil
 }
 
@@ -96,6 +104,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 		return nil, fmt.Errorf("listener: header bytes must be at least %d", minHeaderBytes)
 	}
 	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes}
+	s.errLines.lines = make(chan struct{}, 1)
 	// http/1.1 comes first, so a client that offers both gets http/1.1. A client
 	// that offers only acme-tls/1 is a challenge client. If the list has no
 	// acme-tls/1, crypto/tls refuses that client before it calls GetCertificate.
@@ -276,6 +285,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ErrorLines is the number of lines that the server wrote to its error log.
 // They include one line for each failed handshake. The log keeps no text.
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
+
+// ErrorLineSignal is for tests. It returns a channel that gets a value after a line of the error log. One value
+// can stand for more than one line, so a receiver reads ErrorLines again after each receive.
+func (s *Server) ErrorLineSignal() <-chan struct{} { return s.errLines.lines }
 
 // ErrLog returns the counting writer of the error log, which ErrorLines counts. It keeps no text.
 func (s *Server) ErrLog() io.Writer { return &s.errLines }

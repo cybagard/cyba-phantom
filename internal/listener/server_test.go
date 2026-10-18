@@ -670,6 +670,33 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	}
 }
 
+// A line of the error log makes the line signal ready and raises the counter. The send happens inside
+// the write, so no wait is needed. A second line while a signal waits adds no second signal.
+func TestTS17ErrorLineSignalFollowsLine(t *testing.T) {
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	sig := r.s.ErrorLineSignal()
+	ready := func() bool {
+		select {
+		case <-sig:
+			return true
+		default:
+			return false
+		}
+	}
+	if ready() {
+		t.Fatal("the line signal is ready before any line")
+	}
+	r.s.srv.ErrorLog.Print("a line")
+	if !ready() || r.s.ErrorLines() != 1 {
+		t.Fatalf("after one line: lines %d; want 1 and a ready signal", r.s.ErrorLines())
+	}
+	r.s.srv.ErrorLog.Print("a line")
+	r.s.srv.ErrorLog.Print("a line")
+	if !ready() || ready() || r.s.ErrorLines() != 3 {
+		t.Fatalf("after two more lines: lines %d; want 3 and one ready signal", r.s.ErrorLines())
+	}
+}
+
 // servePlain serves a plain socket of the server with h. It returns the address
 // and the channel that gets the result of ServePlain.
 func (r *rig) servePlain(t *testing.T, h http.Handler) (string, <-chan error) {
