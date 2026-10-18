@@ -28,7 +28,7 @@
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
 #
-# Jobs: lint (gofmt/vet), dco (sign-off, PRs only), test (-race + coverage
+# Jobs: lint (gofmt/vet), dco (sign-off + identity, PRs only), test (-race + coverage
 # gate), trace (C10 matrix + sync stamp), mirror-diff (constitution table),
 # build (T-P-07: reproducible, static, sized, cgroup-budgeted). Jobs
 # share their checkout and gate-source steps through YAML anchors.
@@ -72,8 +72,10 @@ jobs:
 
   dco:
     # Checker-from-base: every commit in the PR range must carry a
-    # Signed-off-by. PRs only — squash merges drop trailers, so pushed
-    # main is never re-checked (the history of main is what was reviewed).
+    # Signed-off-by, and the author, committer and sign-off addresses
+    # must be the maintainer noreply address. PRs only — squash merges
+    # drop trailers, so pushed main is never re-checked (the history of
+    # main is what was reviewed).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

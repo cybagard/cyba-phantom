@@ -5,11 +5,22 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
 
 ## Getting changes in
 
-1. Fork, branch, and open a pull request. Every commit must carry a
-   sign-off under the Developer Certificate of Origin (DCO) 1.1: sign
-   with `git commit -s` (see <https://developercertificate.org>). CI
-   checks every commit in each PR, and an unsigned commit fails. We
-   adopt a CLA before the first external-corporate contributor. Until
+1. Every commit in a pull request must carry a `Signed-off-by` trailer
+   under the Developer Certificate of Origin (DCO) 1.1: sign with
+   `git commit -s` (see <https://developercertificate.org>). The `dco`
+   check of CI also tests the commit identity of every commit in the PR.
+   The author, the committer, and every `Signed-off-by` address must be
+   the maintainer noreply address
+   (`67512030+cybagard@users.noreply.github.com`). The GitHub committer
+   address is permitted for a commit that GitHub makes. The Claude
+   co-author address is permitted only in a `Co-authored-by` trailer. A
+   commit that fails one of these rules fails the check.
+   An outside contributor forks, branches, commits with `git commit -s`,
+   and opens a pull request. The `dco` check of that pull request fails.
+   This is expected. The maintainer reviews the change, then commits it
+   again with the maintainer sign-off. The maintainer names the
+   contributor in the PR text by name, without an email address.
+   We adopt a CLA before the first external-corporate contributor. Until
    then, the DCO is the contribution license.
 2. The maintainer reviews every PR and is the final merge gate (see
    `GOVERNANCE.md`). From the day the repository is public, branch
@@ -78,4 +89,5 @@ docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
 `.devcontainer/devcontainer.json`.) `make all` runs build, lint, tests
 (`-race`), the C10 trace check, and the constitution-table mirror.
 `make perf` and `make coverage` are the extra gates; `make dco
-BASE=<sha> HEAD=<sha>` re-checks sign-off locally.
+BASE=<sha> HEAD=<sha>` checks the sign-off and the commit identity
+locally.
