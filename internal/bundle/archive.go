@@ -80,15 +80,19 @@ func (c *capReader) Read(p []byte) (int, error) {
 // than '0' (regular file) and '5' (directory). A directory has no data and no
 // effect, but it counts toward MaxEntries.
 //
-// ReadArchive also refuses a name that two entries use, a header with a
-// GNU.sparse. PAX record (Next gives such an entry its logical size, and the
-// hole bytes do not pass through the decoded-byte count), and an archive where
-// the sum of the regular entry sizes passes MaxDecodedBytes.
+// ReadArchive also refuses:
+//   - a name that two entries use;
+//   - a header with a GNU.sparse. PAX record, because Next gives such an
+//     entry its logical size, and the hole bytes do not pass through the
+//     decoded-byte count;
+//   - an archive where the sum of the regular entry sizes passes
+//     MaxDecodedBytes.
 //
 // After the end of the tar, only zero bytes can follow until the end of the
 // gzip data. ReadArchive reads further gzip members as the standard library
-// reads them, and each member must hold only zero bytes. Every failure gives
-// ErrArchiveInvalid. The function does not keep b, and it opens no file.
+// reads them, and each further member must hold only zero bytes. Every
+// failure gives ErrArchiveInvalid. The function does not keep b, and it opens
+// no file.
 func ReadArchive(b []byte) (*Archive, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
@@ -108,7 +112,10 @@ func ReadArchive(b []byte) (*Archive, error) {
 		if err != nil || n >= MaxEntries || seen[hdr.Name] {
 			return nil, ErrArchiveInvalid
 		}
-		seen[hdr.Name] = true
+		// A name from a PAX path record points into the PAX buffer. The
+		// clone lets the Archive keep the name without that buffer.
+		name := strings.Clone(hdr.Name)
+		seen[name] = true
 		for key := range hdr.PAXRecords {
 			if strings.HasPrefix(key, "GNU.sparse.") {
 				return nil, ErrArchiveInvalid
@@ -135,7 +142,7 @@ func ReadArchive(b []byte) (*Archive, error) {
 			if _, err := io.ReadFull(io.LimitReader(tr, MaxEntryBytes+1), data); err != nil {
 				return nil, ErrArchiveInvalid
 			}
-			files[hdr.Name] = data
+			files[name] = data
 		default:
 			return nil, ErrArchiveInvalid
 		}

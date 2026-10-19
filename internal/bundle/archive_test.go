@@ -187,6 +187,30 @@ func many(n int) []ent {
 	return ents
 }
 
+// validArchive makes the valid archive of the tests: a directory, a trap file
+// and the manifest.
+func validArchive() []byte {
+	return build(
+		ent{name: "traps/", typ: tar.TypeDir},
+		ent{name: "traps/trap-fixture-1", data: []byte(markerData)},
+		ent{name: "manifest.json", data: []byte(`{"version":"2026.01.01-1"}`)})
+}
+
+// sparse1x0 makes one regular entry with PAX sparse records (format 1.0), a
+// logical size of MaxEntryBytes and the map in the data.
+func sparse1x0() []byte {
+	data := padded([]byte("1\n0\n1\n"))
+	tb := paxHdr(
+		paxRec("GNU.sparse.major", "1"),
+		paxRec("GNU.sparse.minor", "0"),
+		paxRec("GNU.sparse.name", "s0"),
+		paxRec("GNU.sparse.realsize", strconv.Itoa(MaxEntryBytes)))
+	tb = append(tb, rawHdr("s0", tar.TypeReg, int64(len(data))+1)...)
+	tb = append(tb, data...)
+	tb = append(tb, padded([]byte("z"))...)
+	return append(tb, zeros(1024)...)
+}
+
 // lenOf gives the length of a, or -1 for no archive. A failure message uses
 // it, so that the message does not print the whole archive.
 func lenOf(a *Archive) int {
@@ -213,10 +237,7 @@ var (
 func fixtures() (fail, pass []fixture) {
 	fixOnce.Do(func() {
 		file := func(n int) ent { return ent{name: markerName, data: zeros(n)} }
-		validBytes = build(
-			ent{name: "traps/", typ: tar.TypeDir},
-			ent{name: "traps/trap-fixture-1", data: []byte(markerData)},
-			ent{name: "manifest.json", data: []byte(`{"version":"2026.01.01-1"}`)})
+		validBytes = validArchive()
 		tarValid := buildTar(ent{name: markerName, data: []byte(markerData)})
 		flipped := slices.Clone(validBytes)
 		flipped[len(flipped)-8] ^= 0xff
@@ -260,6 +281,7 @@ func fixtures() (fail, pass []fixture) {
 			{"directory with a size", gz(dirWithSize())},
 			{"sparse entry, format 0.1", gz(sparseTar(1))},
 			{"sparse entry, format 0.0", gz(sparseTar00())},
+			{"sparse entry, format 1.0", gz(sparse1x0())},
 			{"sparse entry, old GNU type", gz(sparseOldTar())},
 			{"sparse bomb of 16 entries", gz(sparseTar(16))},
 		}
@@ -269,10 +291,7 @@ func fixtures() (fail, pass []fixture) {
 
 // T-S-19: a valid archive gives the sorted names and the bytes of the files.
 func TestTS19ValidArchive(t *testing.T) {
-	a, err := ReadArchive(build(
-		ent{name: "traps/", typ: tar.TypeDir},
-		ent{name: "traps/trap-fixture-1", data: []byte("trap-fixture-1")},
-		ent{name: "manifest.json", data: []byte(`{"version":"2026.01.01-1"}`)}))
+	a, err := ReadArchive(validArchive())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,13 +335,15 @@ func TestTS19ArchiveInvalid(t *testing.T) {
 	}
 }
 
-// T-S-19: a sparse entry gives an error. This test alone proves the check of
-// the GNU.sparse. records: each case holds one entry of 4 MiB, so the sum of
-// the entry sizes does not refuse it.
+// T-S-19: a sparse entry gives an error. The PAX cases (0.0, 0.1, 1.0) prove
+// the check of the GNU.sparse. records alone: each holds one entry of 4 MiB, so
+// the sum of the entry sizes does not refuse it. The type check refuses the
+// old GNU 'S' case.
 func TestTS19SparseEntryIsRefused(t *testing.T) {
 	for name, tb := range map[string][]byte{
 		"PAX format 0.1":   sparseTar(1),
 		"PAX format 0.0":   sparseTar00(),
+		"PAX format 1.0":   sparse1x0(),
 		"old GNU type 'S'": sparseOldTar(),
 	} {
 		if a, err := ReadArchive(gz(tb)); a != nil || err != ErrArchiveInvalid {
@@ -343,21 +364,21 @@ func allocated(b []byte) (uint64, error) {
 	return after.TotalAlloc - before.TotalAlloc, err
 }
 
-// heapBound is the most that ReadArchive may allocate for the bomb: the cap
-// (8 MiB) plus the entry that crosses it (3.5 MiB) plus a margin. TotalAlloc
-// is an upper bound of the peak heap, so the peak heap is below it. A reader
-// that has only the entry cap reads all 70 MiB, so it fails this bound.
+// heapBound is the most that ReadArchive may allocate for the bomb: the two
+// entries (7 MiB) plus a margin. TotalAlloc is an upper bound of the peak heap,
+// so the peak heap is below it. The sum of the entry sizes is 7 MiB, so the
+// decoded-byte cap is the check that fires, in the zero bytes after the tar
+// end. A reader without that cap accepts the archive, and the error check
+// fails.
 const heapBound = 24 << 20
 
-// T-S-19: a stream that decodes to 70 MiB, in entries below the entry cap, is
-// refused before the allocation grows past the bound.
+// T-S-19: a stream that decodes to more than 70 MiB, with 64 MiB of zero bytes
+// after the tar end, gives an error. ReadArchive refuses it with the
+// decoded-byte cap, and the allocation stays below the bound.
 func TestTS19AllocationOfDecodedBytesBomb(t *testing.T) {
-	ents := make([]ent, 20)
-	for i := range ents {
-		ents[i] = ent{name: "e" + strconv.Itoa(i), data: zeros(3584 << 10)}
-	}
-	bomb := build(ents...)
-	ents = nil
+	bomb := gz(append(buildTar(
+		ent{name: "a", data: zeros(3584 << 10)},
+		ent{name: "b", data: zeros(3584 << 10)}), zeros(64<<20)...))
 	grown, err := allocated(bomb)
 	if err != ErrArchiveInvalid {
 		t.Fatalf("error %v", err)
@@ -373,8 +394,8 @@ func TestTS19AllocationOfDecodedBytesBomb(t *testing.T) {
 // that makes the buffer of the third entry first needs about 12 MiB.
 const sizesBound = 10 << 20
 
-// T-S-19: a header that claims more than the rest of the budget is refused
-// before ReadArchive makes the buffer of the entry.
+// T-S-19: ReadArchive refuses a header that claims more than the rest of the
+// budget before it makes the buffer of the entry.
 func TestTS19EntrySizesPastBudget(t *testing.T) {
 	tb := buildTar(
 		ent{name: "a", data: zeros(MaxEntryBytes)},
@@ -391,6 +412,38 @@ func TestTS19EntrySizesPastBudget(t *testing.T) {
 	if grown > sizesBound {
 		t.Errorf("allocated %d bytes, bound %d bytes", grown, sizesBound)
 	}
+}
+
+// keptBound is the most heap that an Archive may keep for the names of the
+// entries below.
+const keptBound = 1 << 20
+
+// T-S-19: 7 entries, each with a PAX path record and a PAX record of about
+// 1 MiB, are accepted. The Archive keeps the names, not the PAX buffers.
+func TestTS19ArchiveKeepsNoPAXBuffer(t *testing.T) {
+	comment := strings.Repeat("c", 1<<20-200)
+	var tb []byte
+	for i := range 7 {
+		tb = append(tb, paxHdr(paxRec("path", "d"+strconv.Itoa(i)), paxRec("comment", comment))...)
+		tb = append(tb, rawHdr("x", tar.TypeReg, 0)...)
+	}
+	in := gz(append(tb, zeros(1024)...))
+	tb = nil
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	a, err := ReadArchive(in)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if err != nil || a.Len() != 7 {
+		t.Fatalf("error %v, len %d", err, lenOf(a))
+	}
+	kept := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	t.Logf("kept %d bytes, bound %d bytes", kept, keptBound)
+	if kept > keptBound {
+		t.Errorf("kept %d bytes, bound %d bytes", kept, keptBound)
+	}
+	runtime.KeepAlive(a)
 }
 
 // T-S-19: ReadArchive makes no file and no directory.
