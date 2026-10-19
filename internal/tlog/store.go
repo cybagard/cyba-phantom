@@ -332,17 +332,23 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 	case errors.As(err, &e):
 		return nil, e
 	case err != nil || got != tree.Hash:
-		// The check does not say which tile is wrong. Name the tiles that it read.
-		names := make([]string, len(r.read))
-		for i, t := range r.read {
-			names[i] = t.Path()
-		}
-		if len(names) == 0 {
-			names = append(names, headName)
-		}
-		return nil, newError(strings.Join(names, ","), ruleRoot)
+		return nil, newError(readNames(r.read, headName), ruleRoot)
 	}
 	return r.read, nil
+}
+
+// readNames names the tiles that a check read, as a list that the commas
+// separate. The check does not say which tile is wrong. If it read no tile, the
+// name is none.
+func readNames(read []tlog.Tile, none string) string {
+	if len(read) == 0 {
+		return none
+	}
+	names := make([]string, len(read))
+	for i, t := range read {
+		names[i] = t.Path()
+	}
+	return strings.Join(names, ",")
 }
 
 // SetHead writes the tree head. The caller must call WriteTile for each new
