@@ -307,6 +307,8 @@ func rawFormCases() []entryCase {
 		{"PAX mtime record with a plus sign",
 			rawArchive(paxHdr(paxRec("mtime", "+1")), rawFile(p, "x")),
 			rawArchive(paxHdr(paxRec("mtime", "1")), rawFile(p, "x"))},
+		// Not isolated to rawFormOK: Next gives the format unknown for a size
+		// field that has no NUL at the end, so the format check refuses it.
 		{"size field with a trailing space", sizeForm("00000000001 "), rawArchive(rawFile(p, "x"))},
 		{"size field with a leading NUL", rawArchive(withHidden(withField(slices.Clone(size), 124, nulSize))),
 			rawArchive(withHidden(size))},
