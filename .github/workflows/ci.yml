@@ -29,7 +29,8 @@
 #     integrity story for the workflow files themselves.
 #
 # Jobs: lint (gofmt/vet), dco (sign-off and commit identity, PRs only),
-# test (-race + coverage gate), trace (C10 matrix + sync stamp),
+# test (-race + coverage gate), oracle (tar reader oracle, in the
+# pinned golang container), trace (C10 matrix + sync stamp),
 # mirror-diff (constitution table), build (T-P-07: reproducible, static,
 # sized, cgroup-budgeted). Jobs share their checkout and gate-source
 # steps through YAML anchors.
@@ -142,11 +143,30 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # The reader oracle needs GNU tar 1.35 and Python 3.13, which the
+      # runner image does not have. The oracle job runs it.
+      GOFLAGS: -skip=^TestTS19ReaderOracle$
     steps:
       - *checkout
 
       - name: go test -race + coverage gate
         run: make coverage
+
+  oracle:
+    # The reader oracle of internal/bundle compares Go archive/tar with
+    # GNU tar 1.35 and Python 3.13. The job runs in the base image of
+    # .devcontainer/Dockerfile, at the same digest (bump both together).
+    # With CI=true, a missing tool or another version fails the test.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+    steps:
+      - *checkout
+
+      - name: reader oracle (GNU tar, Python)
+        run: go test -race -count=1 -run '^TestTS19ReaderOracle$' ./internal/bundle/
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch

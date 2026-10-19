@@ -5,6 +5,7 @@
 # Development only — the deployed sensor is a static binary with no
 # container dependency (C1).
 # Pinned by digest (multi-arch index of golang:1.27.2); bump both together.
+# The oracle job of .github/workflows/ci.yml uses the same digest.
 FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
 
 # Static analysis tools (SEC-09). We pin each tool by its module
