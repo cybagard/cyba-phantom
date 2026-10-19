@@ -1,9 +1,9 @@
 {
-  "synced": "2026-10-17",
+  "synced": "2026-10-19",
   "files": {
-    "01-prd.md": "7281307916398624fc053a538a46ff1f868032318bd54877b8719c7f8b175b9a",
-    "04-interfaces.md": "838f197f62b98915e6d936cfcd6682c8b23d5c78307336974cd43c107628b940",
-    "07-test-plan.md": "66b6d8e0790100a3528d09251c4ec7acaddb467c665b4d78f4967a0a44b18e38",
+    "01-prd.md": "a614eda15bf0504bd6c5d15608b408fb227b4f08f0570e2c5234450dd52664e1",
+    "04-interfaces.md": "ee128b64ec89cfcb03ff4f2b0df347d3d3197420f909f49748b3c8f72be253c5",
+    "07-test-plan.md": "6d51cd8da3bd345a34af76afd1a5ec82a9d8f3f66c8cc238d76131b534bb5d53",
     "08-traceability.md": "13aeae8ad6cea89a843fff57a98978b19685ea1c58c9ff055c72c74d028ffc6c",
     "README.md": "59b9b908a15ff3f09c5bc4ba1688821de4f79df5dbee335ec82a3be56db42d82",
     "constitution-table.md": "e50c6e461a1ac26de14c82a21508dcf6ae64acaad1afd24fd288c0d1a43bbba3"
