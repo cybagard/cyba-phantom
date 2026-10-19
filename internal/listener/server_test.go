@@ -1665,8 +1665,8 @@ func TestTS17ShutdownClosesHijackedConnectionAtTheDeadline(t *testing.T) {
 	defer cancel()
 	took, err := shutdownWithin(t, r.s, ctx)
 	t.Logf("Shutdown returned %v after %v", err, took)
-	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+time.Second {
-		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+handlerWait/2 {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+handlerWait/2)
 	}
 	t.Logf("handler read: %v", handlerReadError(t, h))
 	if n := len(r.s.sem); n != 0 {
