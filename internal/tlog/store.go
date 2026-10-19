@@ -338,11 +338,11 @@ func (s *Store) verify(tree tlog.Tree) ([]tlog.Tile, error) {
 }
 
 // readNames names the tiles that a check read, as a list that the commas
-// separate. The check does not say which tile is wrong. If it read no tile, the
-// name is none.
-func readNames(read []tlog.Tile, none string) string {
+// separate. The check does not say which tile is wrong. If the check read no tile,
+// readNames returns empty.
+func readNames(read []tlog.Tile, empty string) string {
 	if len(read) == 0 {
-		return none
+		return empty
 	}
 	names := make([]string, len(read))
 	for i, t := range read {

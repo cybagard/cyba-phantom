@@ -17,7 +17,7 @@ const proofLoaders = 2
 // holds the write lock of the log while it reads tiles, so Append waits for
 // them. The log has bigLeaves leaves, so a proof reads tiles of level 0, 1 and
 // 2. The ns/op value is the latency of one Append. The setup does not call
-// fsync, and the timed Append calls do.
+// fsync. The timed Append calls call fsync.
 func BenchmarkAppendUnderProofs(b *testing.B) {
 	dir := filepath.Join(b.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {

@@ -184,9 +184,10 @@ const bigLeaves = 65793
 
 // tileCases lists the calls of the T-S-13 tests. The tile is a file that the
 // call reads. At 300 leaves, level 0 has a full tile and a partial tile, and
-// level 1 has one hash. At 600 leaves, only a proof call reads the full tiles
-// 0/000 and 0/001, because the tests do not open the log again after they
-// damage a tile. At bigLeaves, the root reads the level-2 tile.
+// level 1 has one hash. At 600 leaves, OpenLog does not read the full tiles 0/000
+// and 0/001, so only a proof call reads them. The tests that use tileCases do
+// not open the log again after they damage a tile. At bigLeaves, the root reads
+// the level-2 tile.
 var tileCases = []struct {
 	call   string
 	tile   string
@@ -222,6 +223,26 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// buildBigLog builds a log of bigLeaves leaves in the new state directory dir,
+// with one batch.
+func buildBigLog(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return err
+	}
+	state, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+	l, err := OpenLog(state, "tlog")
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	_, err = l.AppendBatch(batchOf(0, bigLeaves))
+	return err
+}
+
 // bigState builds a log of bigLeaves leaves one time for all tests, with one
 // batch. It returns the state directory of that log. A test must copy the
 // directory and not change it.
@@ -233,27 +254,12 @@ func bigState(t *testing.T) string {
 			t.Error(err)
 			return
 		}
+		if err := buildBigLog(filepath.Join(parent, "state")); err != nil {
+			t.Error(err)
+			os.RemoveAll(parent)
+			return
+		}
 		bigParent = parent
-		dir := filepath.Join(parent, "state")
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Error(err)
-			return
-		}
-		state, err := os.OpenRoot(dir)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer state.Close()
-		l, err := OpenLog(state, "tlog")
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer l.Close()
-		if _, err := l.AppendBatch(batchOf(0, bigLeaves)); err != nil {
-			t.Error(err)
-		}
 	})
 	if bigParent == "" || t.Failed() {
 		t.Fatal("the large log is not there")
@@ -302,15 +308,21 @@ func tileLog(t *testing.T, leaves int, tile string) (*Log, string, *os.Root) {
 	return l, filepath.Join(dir, "tlog", filepath.FromSlash(tile)), state
 }
 
-// The name of an Error from a proof call is "proof" or "head" if the check read
-// no tile. Else it is a list of tile paths that the commas separate. A path has
-// the level, the number in groups of three digits (the groups before the last
-// one have the prefix x), and the width of a partial tile.
+// The name of an Error from a proof call is "proof" if the check read no tile.
+// The open and the head check of the store give "head" if the check read no
+// tile. If the check read tiles, the name is a list of tile paths that the
+// commas separate. A path has the level, the number in groups of three digits,
+// and the width of a partial tile. Each group before the last one has the prefix
+// x, and the first of them is not 000.
 var tileNames = regexp.MustCompile(`^(?:proof|head|` + tilePaths + `)$`)
 
+// The level range [0-6] is 0 to maxLevel, and the width range is 1 to 255
+// (fullWidth - 1). A full tile has no ".p/" part.
 const (
-	tilePathPattern = `tile/8/[0-9]+/(?:x[0-9]{3}/)*[0-9]{3}(?:\.p/[0-9]+)?`
-	tilePaths       = tilePathPattern + `(?:,` + tilePathPattern + `)*`
+	tilePathPattern = `tile/8/[0-6]/` +
+		`(?:[0-9]{3}|x(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2})(?:/x[0-9]{3})*/[0-9]{3})` +
+		`(?:\.p/(?:[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5]))?`
+	tilePaths = tilePathPattern + `(?:,` + tilePathPattern + `)*`
 )
 
 func TestTS13TileNamePatternMatchesTilePathsOnly(t *testing.T) {
@@ -318,10 +330,22 @@ func TestTS13TileNamePatternMatchesTilePathsOnly(t *testing.T) {
 	if len(hexName) != 64 {
 		t.Fatalf("test hex string has %d characters", len(hexName))
 	}
-	for _, name := range []string{
+	valid := []string{
 		"proof", "head", "tile/8/0/000", "tile/8/0/001.p/44", "tile/8/2/000.p/1",
 		"tile/8/1/000.p/1,tile/8/0/001.p/44", "tile/8/0/x001/x234/067",
-	} {
+	}
+	for level := 0; level <= maxLevel; level++ {
+		valid = append(valid, tlog.Tile{H: TileHeight, L: level, N: 7, W: fullWidth}.Path())
+	}
+	for _, w := range []int{1, fullWidth - 1} {
+		valid = append(valid, tlog.Tile{H: TileHeight, L: 0, N: 3, W: w}.Path())
+	}
+	valid = append(valid,
+		tlog.Tile{H: TileHeight, L: 1, N: 1000, W: fullWidth}.Path(),
+		tlog.Tile{H: TileHeight, L: 0, N: 1234567, W: fullWidth}.Path(),
+		tlog.Tile{H: TileHeight, L: 0, N: 1234567, W: 255}.Path(),
+	)
+	for _, name := range valid {
 		if !tileNames.MatchString(name) {
 			t.Errorf("%q does not match", name)
 		}
@@ -329,6 +353,8 @@ func TestTS13TileNamePatternMatchesTilePathsOnly(t *testing.T) {
 	for _, name := range []string{
 		hexName, "", "tlog", "tile", "tile/8/0/000,", ",tile/8/0/000", "tile/8/0/000," + hexName,
 		"tile/8/0/00", "tile/8/0/000.p/", "tile/8/0/000.p/x", "tile/9/0/000", "proof,head",
+		"tile/8/0/000.p/0", "tile/8/0/000.p/256", "tile/8/0/000.p/999", "tile/8/0/000.p/007",
+		"tile/8/99/000", "tile/8/0/x000/000",
 	} {
 		if tileNames.MatchString(name) {
 			t.Errorf("%q matches", name)
@@ -413,9 +439,9 @@ func TestTS13MissingOrShortTileGivesAnErrorNotAProof(t *testing.T) {
 	}
 }
 
-// A tile that a link replaces after OpenLog is not read, also when the target
-// has the same bytes. The call returns an error and no proof. The target
-// outside the state directory is not changed.
+// A link out of the state directory that replaces a tile after OpenLog is not
+// followed, also when the target has the same bytes. The call returns an error
+// and no proof. The target outside the state directory is not changed.
 func TestTS13TileLinkOutOfTheStateDirectoryGivesAnErrorNotAProof(t *testing.T) {
 	withoutSync(t)
 	for _, c := range tileCases {
