@@ -129,21 +129,62 @@ func pythonListing(path string) listing {
 // fails the test.
 func requireOracleTools(t *testing.T) {
 	t.Helper()
-	strict := os.Getenv("IN_DEVCONTAINER") == "1" || os.Getenv("CI") == "true"
+	strict := strictEnv(os.Getenv("IN_DEVCONTAINER"), os.Getenv("CI"))
 	for _, c := range []struct{ bin, want string }{{"tar", "tar (GNU tar) 1.35"}, {"python3", "Python 3.13."}} {
 		found := "not found"
 		if path, err := exec.LookPath(c.bin); err == nil {
 			out, _ := exec.Command(path, "--version").Output()
 			found, _, _ = strings.Cut(string(out), "\n")
 		}
-		if !strings.HasPrefix(found, c.want) {
-			msg := fmt.Sprintf("%s: version %q; the oracle needs %q", c.bin, found, c.want)
-			if strict {
-				t.Fatal(msg)
-			}
+		msg := fmt.Sprintf("%s: version %q; the oracle needs %q", c.bin, found, c.want)
+		switch toolDecision(strict, found, c.want) {
+		case "fail":
+			t.Fatal(msg)
+		case "skip":
 			t.Skip(msg)
 		}
 		t.Logf("%s: %s", c.bin, found)
+	}
+}
+
+// strictEnv reports whether a missing tool must fail the test: the values of
+// IN_DEVCONTAINER and CI are "1" and "true".
+func strictEnv(inDevcontainer, ci string) bool { return inDevcontainer == "1" || ci == "true" }
+
+// toolDecision returns "run" when the version found starts with want, else
+// "fail" when strict, else "skip".
+func toolDecision(strict bool, found, want string) string {
+	switch {
+	case strings.HasPrefix(found, want):
+		return "run"
+	case strict:
+		return "fail"
+	}
+	return "skip"
+}
+
+// T-S-19: the oracle test runs with the right versions, skips outside the
+// devcontainer and CI, and fails inside them.
+func TestTS19OracleToolDecision(t *testing.T) {
+	for _, c := range []struct {
+		dev, ci, found, want string
+	}{
+		{"", "", "Python 3.13.5", "run"},
+		{"1", "true", "Python 3.13.5", "run"},
+		{"", "", "Python 3.12.3", "skip"},
+		{"", "", "not found", "skip"},
+		{"0", "false", "not found", "skip"},
+		{"yes", "1", "Python 3.12.3", "skip"},
+		{"1", "", "Python 3.12.3", "fail"},
+		{"1", "", "not found", "fail"},
+		{"", "true", "Python 3.12.3", "fail"},
+		{"", "true", "not found", "fail"},
+		{"1", "true", "not found", "fail"},
+	} {
+		got := toolDecision(strictEnv(c.dev, c.ci), c.found, "Python 3.13.")
+		if got != c.want {
+			t.Errorf("IN_DEVCONTAINER=%q CI=%q found %q: %s; want %s", c.dev, c.ci, c.found, got, c.want)
+		}
 	}
 }
 
@@ -195,6 +236,9 @@ var differential = map[string]bool{
 	"size field with a leading NUL":                             true,
 	"size field of the PAX header with a leading NUL":           true,
 	"size field with a leading space":                           false,
+	"size field with a non-octal byte":                          false,
+	"size field in base-256 form":                               false,
+	"PAX size record with a plus sign":                          true,
 	"size field with fewer digits":                              false,
 	"PAX path in the padding of the PAX header":                 true,
 	"PAX path of the manifest in the padding of the PAX header": true,

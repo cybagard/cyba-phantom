@@ -262,6 +262,13 @@ func rawFormCases() []entryCase {
 		{"size field of the PAX header with a leading NUL", rawArchive(xNul, rawFile("traps/good", "x")),
 			rawArchive(pathEntry("traps/good"))},
 		{"size field with a leading space", sizeForm(fmt.Sprintf(" %010o\x00", 1)), rawArchive(rawFile(p, "x"))},
+		// The next two forms are not isolated to rawFormOK. Next refuses the
+		// non-octal byte with a header error. Next accepts the base-256 form
+		// (size 1) with the format unknown, so the format check refuses it.
+		{"size field with a non-octal byte", sizeForm("0000000001" + "8" + "\x00"), rawArchive(rawFile(p, "x"))},
+		{"size field in base-256 form", sizeForm("\x80" + strings.Repeat("\x00", 10) + "\x01"), rawArchive(rawFile(p, "x"))},
+		{"PAX size record with a plus sign",
+			rawArchive(paxHdr(paxRec("size", "+1")), rawFile(p, "x")), rawArchive(paxHdr(paxRec("size", "1")), rawFile(p, "x"))},
 		{"size field with fewer digits", sizeForm("1" + strings.Repeat("\x00", 11)), rawArchive(rawFile(p, "x"))},
 		{"PAX path in the padding of the PAX header",
 			rawArchive(paxHdrTail(paxRec("path", "../../evil"), good), rawFile("traps/good", "x")),
