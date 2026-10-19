@@ -90,6 +90,7 @@ func TestTS14_Proof(t *testing.T) {
 		"URL alphabet":          {obj("1", "2", `["`+strings.NewReplacer("+", "-", "/", "_").Replace(b64(bytes.Repeat([]byte{0xfb, 0xff}, 16)))+`"]`, ""), ErrProof},
 		"newline in hash":       {obj("1", "2", `["`+h1[:20]+`\n`+h1[20:]+`"]`, ""), ErrProof},
 		"hash with newline end": {obj("1", "2", `["`+h1+`\n"]`, ""), ErrProof},
+		"CR in hash":            {obj("1", "2", `["`+h1[:20]+`\r`+h1[20:]+`"]`, ""), ErrProof},
 		"31-byte hash":          {obj("1", "2", `["`+b64(make([]byte, 31))+`"]`, ""), ErrProof},
 		"33-byte hash":          {obj("1", "2", `["`+b64(make([]byte, 33))+`"]`, ""), ErrProof},
 		"non-zero pad bits":     {obj("1", "2", `["`+h1[:42]+`B="]`, ""), ErrProof},
