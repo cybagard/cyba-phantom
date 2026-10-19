@@ -3,7 +3,6 @@ package verifier
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"flag"
@@ -31,16 +30,25 @@ func must(t *testing.T, err error) {
 // only for the tests.
 func noteKeys(t *testing.T, name string, seedByte byte) (note.Signer, note.Verifier) {
 	t.Helper()
-	seed := bytes.Repeat([]byte{seedByte}, ed25519.SeedSize)
-	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-	sum := sha256.Sum256(append(append([]byte(name+"\n"), 1), pub...))
-	hash := binary.BigEndian.Uint32(sum[:4])
-	enc := base64.StdEncoding.EncodeToString
-	signer, err := note.NewSigner(fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s", name, hash, enc(append([]byte{1}, seed...))))
+	seed := bytes.NewReader(bytes.Repeat([]byte{seedByte}, ed25519.SeedSize))
+	skey, vkey, err := note.GenerateKey(seed, name)
 	must(t, err)
-	verifier, err := note.NewVerifier(fmt.Sprintf("%s+%08x+%s", name, hash, enc(append([]byte{1}, pub...))))
+	signer, err := note.NewSigner(skey)
+	must(t, err)
+	verifier, err := note.NewVerifier(vkey)
 	must(t, err)
 	return signer, verifier
+}
+
+// signRaw signs text with signer and builds the note bytes by hand, for texts
+// that note.Sign refuses.
+func signRaw(t *testing.T, signer note.Signer, text string) []byte {
+	t.Helper()
+	sig, err := signer.Sign([]byte(text))
+	must(t, err)
+	raw := binary.BigEndian.AppendUint32(nil, signer.KeyHash())
+	line := "— " + signer.Name() + " " + base64.StdEncoding.EncodeToString(append(raw, sig...)) + "\n"
+	return []byte(text + "\n" + line)
 }
 
 // noteSections reads testdata/notes.txt: a line "-- name --" starts a section.
@@ -66,6 +74,11 @@ func testRoot() (r [32]byte) {
 		r[i] = byte(i)
 	}
 	return r
+}
+
+func testRootB64() string {
+	r := testRoot()
+	return base64.StdEncoding.EncodeToString(r[:])
 }
 
 func TestTU12_BodyFormat(t *testing.T) {
@@ -162,10 +175,16 @@ func TestTU12_SizeLimits(t *testing.T) {
 func TestTU12_Rejects(t *testing.T) {
 	signer, verifier := noteKeys(t, testOrigin, 1)
 	sections := noteSections(t)
-	sign := func(s *note.Signer, text string) []byte {
-		msg, err := note.Sign(&note.Note{Text: text}, *s)
+	sign := func(s note.Signer, text string) []byte {
+		msg, err := note.Sign(&note.Note{Text: text}, s)
 		must(t, err)
 		return msg
+	}
+	const wantOpen = "checkpoint note is malformed or its signature does not verify"
+	root := testRootB64()
+	urlRoot := base64.URLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)) // "-" and "_"
+	if strings.ContainsAny(urlRoot, "+/") || !strings.ContainsAny(urlRoot, "-_") {
+		t.Fatalf("test root is not URL-safe base64: %s", urlRoot)
 	}
 	for _, tc := range []struct{ section, want string }{
 		{"fourth-line", "exactly three lines"},
@@ -187,7 +206,7 @@ func TestTU12_Rejects(t *testing.T) {
 			if !ok {
 				t.Fatal("missing section")
 			}
-			_, err := ParseCheckpoint(sign(&signer, text), testOrigin, verifier)
+			_, err := ParseCheckpoint(sign(signer, text), testOrigin, verifier)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -196,6 +215,26 @@ func TestTU12_Rejects(t *testing.T) {
 
 	good, err := SignCheckpoint(signer, 42, testRoot())
 	must(t, err)
+	// The edge of the size limit. The key name and the origin are the same
+	// string of 438 bytes. The name is in the body and in the signature line,
+	// so 2 × 438 bytes, plus 2 bytes for the size 10, plus 146 other bytes
+	// make 1024.
+	t.Run("1024-bytes-accepted", func(t *testing.T) {
+		name := "phantom/" + strings.Repeat("a", 438-len("phantom/"))
+		s, v := noteKeys(t, name, 1)
+		msg, err := SignCheckpoint(s, 10, testRoot())
+		must(t, err)
+		if len(msg) != MaxNoteSize {
+			t.Fatalf("len(msg) = %d, want %d", len(msg), MaxNoteSize)
+		}
+		if c, err := ParseCheckpoint(msg, name, v); err != nil || c.Size != 10 {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+		_, err = ParseCheckpoint(append(msg, '\n'), name, v) // 1025 bytes
+		if err == nil || err.Error() != "checkpoint note is larger than 1 KiB" {
+			t.Fatalf("1025 bytes: error = %v", err)
+		}
+	})
 	t.Run("larger-than-1-KiB", func(t *testing.T) {
 		big := append(append([]byte{}, good...), bytes.Repeat([]byte("x"), MaxNoteSize)...)
 		_, err := ParseCheckpoint(big, testOrigin, verifier)
@@ -203,28 +242,82 @@ func TestTU12_Rejects(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
-	t.Run("other-origin", func(t *testing.T) {
+	t.Run("nil-verifier", func(t *testing.T) {
+		_, err := ParseCheckpoint(good, testOrigin, nil)
+		if err == nil || err.Error() != "checkpoint note verifier is nil" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("key-name-is-not-origin", func(t *testing.T) {
+		// The body origin is the configured origin. The key has another name.
 		otherSigner, otherVerifier := noteKeys(t, "phantom/other", 1)
-		msg, err := SignCheckpoint(otherSigner, 42, testRoot())
-		must(t, err)
-		_, err = ParseCheckpoint(msg, testOrigin, otherVerifier) // the signature is valid
-		if err == nil || !strings.Contains(err.Error(), "origin") {
+		msg := sign(otherSigner, CheckpointBody(Checkpoint{testOrigin, 42, testRoot()}))
+		_, err := ParseCheckpoint(msg, testOrigin, otherVerifier) // the signature is valid
+		if err == nil || err.Error() != "checkpoint note key name is not the configured origin" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("body-origin-is-not-origin", func(t *testing.T) {
+		// The key name is the configured origin. The first line of the body is not.
+		msg := sign(signer, CheckpointBody(Checkpoint{"phantom/other", 42, testRoot()}))
+		_, err := ParseCheckpoint(msg, testOrigin, verifier)
+		if err == nil || err.Error() != "checkpoint note origin is not the configured origin" {
 			t.Fatalf("error = %v", err)
 		}
 	})
 	t.Run("changed-body", func(t *testing.T) {
 		bad := bytes.Replace(good, []byte("\n42\n"), []byte("\n43\n"), 1)
 		_, err := ParseCheckpoint(bad, testOrigin, verifier)
-		if err == nil || !strings.Contains(err.Error(), "signature") {
+		if err == nil || err.Error() != wantOpen {
 			t.Fatalf("error = %v", err)
 		}
 	})
 	t.Run("no-signature", func(t *testing.T) {
 		_, err := ParseCheckpoint([]byte(sections["ok"]), testOrigin, verifier)
-		if err == nil || !strings.Contains(err.Error(), "signature") {
+		if err == nil || err.Error() != wantOpen {
 			t.Fatalf("error = %v", err)
 		}
 	})
+	t.Run("not-a-note", func(t *testing.T) {
+		_, err := ParseCheckpoint([]byte("not a note"), testOrigin, verifier)
+		if err == nil || err.Error() != wantOpen {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	// Bytes that the strict parser refuses. In the first four cases note.Open
+	// refuses the note (a control character other than LF, or invalid UTF-8),
+	// so note.Sign cannot make it and the note is built by hand.
+	body := func(origin, size, root string) string { return origin + "\n" + size + "\n" + root + "\n" }
+	for _, tc := range []struct {
+		name, want string
+		raw        bool
+		text       string
+	}{
+		{"cr-in-origin-line", wantOpen, true, body(testOrigin+"\r", "42", root)},
+		{"tab-in-size-line", wantOpen, true, body(testOrigin, "4\t2", root)},
+		{"nul-in-root-line", wantOpen, true, body(testOrigin, "42", root[:10]+"\x00"+root[10:])},
+		{"invalid-utf8-in-origin-line", wantOpen, true, body(testOrigin+"\xff", "42", root)},
+		// A LF in the origin line makes four lines.
+		{"lf-in-origin-line", "exactly three lines", false, body("phantom/\ntest", "42", root)},
+		// A space at the end of the root line.
+		{"space-in-root-line", "canonical base64", false, body(testOrigin, "42", root+" ")},
+		// "-" and "_" in the root line instead of "+" and "/".
+		{"url-base64-in-root-line", "canonical base64", false, body(testOrigin, "42", urlRoot)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var msg []byte
+			if tc.raw {
+				msg = signRaw(t, signer, tc.text)
+			} else {
+				msg = sign(signer, tc.text)
+			}
+			_, err := ParseCheckpoint(msg, testOrigin, verifier)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }
 
 // T-U-12: the sensor's own notes carry one signature. A second signature (from

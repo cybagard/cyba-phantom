@@ -635,8 +635,8 @@ func TestTS13SizeConversions(t *testing.T) {
 	e := newEnv(t, 3)
 	c := e.mustStart(t)
 	c.last = Checkpoint{Origin: testOrigin, Size: 1 << 63, Root: tlog.Hash{}}
-	if err := c.consistent(3, tlog.Hash{}); err == nil {
-		t.Error("last signed size above the limit")
+	if err := c.consistent(3, tlog.Hash{}); err == nil || !strings.Contains(err.Error(), "the last signed size is too large") {
+		t.Errorf("last signed size above the limit: error = %v", err)
 	}
 }
 
