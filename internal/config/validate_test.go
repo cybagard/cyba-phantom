@@ -808,6 +808,9 @@ func TestTS11_StorePathLoad(t *testing.T) {
 				t.Errorf("got %v, want an error with %q", err, want)
 			}
 		}
+		if strings.Count(err.Error(), "\n") != 1 {
+			t.Errorf("got %v, want exactly two errors", err)
+		}
 	})
 	t.Run("moved tlog dir, default store", func(t *testing.T) {
 		if _, err := loadProd(t, base, "PHANTOM_TLOG_DIR="+s+"t2"); err != nil {
@@ -824,9 +827,9 @@ func TestTS11_StorePathFailedKey(t *testing.T) {
 	}
 }
 
-// TestTS11_BundlePathLoad checks that the load refuses a bundle.path with a bad path part, a bad file name, a
-// bad directory, or the value of store.path, and that the error names bundle.path (SEC-23). Each row runs with
-// the other key at its default or set.
+// TestTS11_BundlePathLoad checks that the load refuses a bundle.path with a bad path part, file name, or directory (SEC-23).
+// It also checks the value of store.path. The error names bundle.path.
+// Each row runs with the key that it compares with (tlog.dir, acme.cache_dir or store.path) at its default or set.
 func TestTS11_BundlePathLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
@@ -879,7 +882,8 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 	}
 }
 
-// TestTS11_BundlePathFailedKey checks that a bundle.path that failed its own check is not in the store.path rules.
+// TestTS11_BundlePathFailedKey checks that the load gives the bundle.path error and no store.path error.
+// A key that failed its own check is not in the cross-checks.
 func TestTS11_BundlePathFailedKey(t *testing.T) {
 	_, err := loadProd(t, base, "PHANTOM_BUNDLE_PATH=/var/lib/phantom/current.cbnd")
 	if err == nil || !strings.Contains(err.Error(), "bundle.path") || strings.Contains(err.Error(), "store.path") {

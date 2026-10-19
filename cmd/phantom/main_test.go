@@ -165,19 +165,23 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 	for _, c := range []struct {
 		name, path string
 		extra      []string
+		detail     string
 	}{
-		{"space", s + "bundle/my bundle.cbnd", nil},
-		{"file name", s + "bundle/current.bin", nil},
-		{"state directory", s + "current.cbnd", nil},
-		{"tlog.dir", s + "tlog/x.cbnd", nil},
-		{"acme.cache_dir", s + "certs/x.cbnd", nil},
-		{"keys", s + "keys/x.cbnd", nil},
-		{"checkpoints", s + "checkpoints/x.cbnd", nil},
-		{"store.path", s + "b2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b2/x.cbnd"}},
+		{"space", s + "bundle/my bundle.cbnd", nil, "each path part"},
+		{"file name", s + "bundle/current.bin", nil, "must end in .cbnd"},
+		{"state directory", s + "current.cbnd", nil, "must not be the state directory"},
+		{"tlog.dir", s + "tlog/x.cbnd", nil, "in or above tlog.dir"},
+		{"above tlog.dir", s + "a/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "a/t"}, "in or above tlog.dir"},
+		{"acme.cache_dir", s + "certs/x.cbnd", nil, "in or above acme.cache_dir"},
+		{"above acme.cache_dir", s + "c/x.cbnd", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c/d"}, "in or above acme.cache_dir"},
+		{"keys", s + "keys/x.cbnd", nil, "keys directory"},
+		{"checkpoints", s + "checkpoints/x.cbnd", nil, "checkpoints directory"},
+		{"store.path", s + "b2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b2/x.cbnd"}, "must not be store.path"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(append([]string{"PHANTOM_BUNDLE_PATH=" + c.path}, c.extra...)...)
-			if code != 1 || !strings.Contains(se, "bundle.path") || loadErr == "" || se != loadErr+"\n" {
+			_, after, found := strings.Cut(se, "bundle.path at PHANTOM_BUNDLE_PATH: ")
+			if code != 1 || !found || !strings.Contains(after, c.detail) || loadErr == "" || se != loadErr+"\n" {
 				t.Errorf("exit %d, stderr %q, load error %q", code, se, loadErr)
 			}
 		})

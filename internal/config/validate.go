@@ -597,10 +597,11 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 	return ""
 }
 
-// checkBundlePath applies the rules of checkStorePath. Then it checks that the file name ends in
-// .cbnd, and that the directory is not the state directory and is not in the keys or checkpoints
-// directory (SEC-23). It compares the path text only. The state directory is the only path above
-// those two directories. The cross-check bundleConflict compares the path with the other keys.
+// checkBundlePath applies the rules of checkStorePath. Then it checks that the file name ends in .cbnd (SEC-23).
+// It also checks that the directory is not the state directory and is not in the keys or checkpoints directory.
+// These new rules compare the path text only. checkStorePath resolves symlinks to check the state directory.
+// checkStorePath requires a path below the state directory, so the state directory is the only path above those two directories.
+// The cross-check bundleConflict compares the path with the other keys.
 func checkBundlePath(l *loader, raw string) string {
 	if d := checkStorePath(l, raw); d != "" {
 		return d
