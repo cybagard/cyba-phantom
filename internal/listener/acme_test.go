@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"math/rand/v2"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -43,30 +45,124 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-// countingStorage counts the reads of the storage under it.
+// countingStorage counts the reads of the storage under it, and the calls of
+// every method.
 type countingStorage struct {
 	certmagic.Storage
 	reads atomic.Int64
+	calls atomic.Int64
 }
 
 func (c *countingStorage) Load(ctx context.Context, k string) ([]byte, error) {
 	c.reads.Add(1)
+	c.calls.Add(1)
 	return c.Storage.Load(ctx, k)
 }
 
 func (c *countingStorage) Stat(ctx context.Context, k string) (certmagic.KeyInfo, error) {
 	c.reads.Add(1)
+	c.calls.Add(1)
 	return c.Storage.Stat(ctx, k)
 }
 
 func (c *countingStorage) Exists(ctx context.Context, k string) bool {
 	c.reads.Add(1)
+	c.calls.Add(1)
 	return c.Storage.Exists(ctx, k)
 }
 
 func (c *countingStorage) List(ctx context.Context, p string, r bool) ([]string, error) {
 	c.reads.Add(1)
+	c.calls.Add(1)
 	return c.Storage.List(ctx, p, r)
+}
+
+func (c *countingStorage) Store(ctx context.Context, k string, v []byte) error {
+	c.calls.Add(1)
+	return c.Storage.Store(ctx, k, v)
+}
+
+func (c *countingStorage) Delete(ctx context.Context, k string) error {
+	c.calls.Add(1)
+	return c.Storage.Delete(ctx, k)
+}
+
+func (c *countingStorage) Lock(ctx context.Context, name string) error {
+	c.calls.Add(1)
+	return c.Storage.Lock(ctx, name)
+}
+
+func (c *countingStorage) Unlock(ctx context.Context, name string) error {
+	c.calls.Add(1)
+	return c.Storage.Unlock(ctx, name)
+}
+
+// errStorage is a storage whose methods return err, except Exists. Exists returns true.
+type errStorage struct{ err error }
+
+func (e errStorage) Lock(context.Context, string) error                   { return e.err }
+func (e errStorage) Unlock(context.Context, string) error                 { return e.err }
+func (e errStorage) Store(context.Context, string, []byte) error          { return e.err }
+func (e errStorage) Load(context.Context, string) ([]byte, error)         { return nil, e.err }
+func (e errStorage) Delete(context.Context, string) error                 { return e.err }
+func (e errStorage) Exists(context.Context, string) bool                  { return true }
+func (e errStorage) List(context.Context, string, bool) ([]string, error) { return nil, e.err }
+func (e errStorage) Stat(context.Context, string) (certmagic.KeyInfo, error) {
+	return certmagic.KeyInfo{}, e.err
+}
+
+// loadRecorder records the keys of the Load calls that reach the storage under it.
+type loadRecorder struct {
+	certmagic.Storage
+	mu    sync.Mutex
+	loads []string
+}
+
+func (l *loadRecorder) Load(ctx context.Context, k string) ([]byte, error) {
+	l.mu.Lock()
+	l.loads = append(l.loads, k)
+	l.mu.Unlock()
+	return l.Storage.Load(ctx, k)
+}
+
+func (l *loadRecorder) count(k string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, got := range l.loads {
+		if got == k {
+			n++
+		}
+	}
+	return n
+}
+
+// tokenKeyOf returns the key of the challenge token file of name, from the
+// values of certmagic. The issuer key goes through Safe, as in certmagic.
+func tokenKeyOf(a *ACME, name string) string {
+	issuer := certmagic.StorageKeys.Safe(a.cfg.Issuers[0].IssuerKey())
+	return path.Join("acme", issuer, "challenge_tokens", certmagic.StorageKeys.Safe(name)+".json")
+}
+
+// prodHandshake is a handshake over a pipe with the server ALPN list of the
+// decoy listener.
+func prodHandshake(a *ACME, sni string, protos ...string) error {
+	c, s := net.Pipe()
+	defer c.Close()
+	defer s.Close()
+	dl := time.Now().Add(10 * time.Second)
+	c.SetDeadline(dl)
+	s.SetDeadline(dl)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tls.Server(s, &tls.Config{GetCertificate: a.GetCertificate, NextProtos: []string{"http/1.1", challengeProto}}).Handshake()
+	}()
+	cl := tls.Client(c, &tls.Config{ServerName: sni, NextProtos: protos, InsecureSkipVerify: true})
+	err := cl.Handshake()
+	c.Close()
+	<-done
+	return err
 }
 
 // newTestACME builds an ACME with test values and a new store. mod changes the
@@ -164,6 +260,24 @@ func BenchmarkGetCertificateNoChallenge(b *testing.B) {
 	}
 }
 
+// BenchmarkGetCertificateTokenKeyRefused measures one GetCertificate call for a
+// configured name with the single ALPN acme-tls/1. The lookup says that a
+// challenge is active, but the certmagic map holds none. The storage refuses the
+// token key.
+func BenchmarkGetCertificateTokenKeyRefused(b *testing.B) {
+	a := newTestACME(b, nil)
+	a.challenge = func(string) (certmagic.Challenge, bool) { return certmagic.Challenge{}, true }
+	c, s := net.Pipe()
+	b.Cleanup(func() { c.Close(); s.Close() })
+	hello := &tls.ClientHelloInfo{ServerName: "decoy.test", SupportedProtos: []string{"acme-tls/1"}, Conn: s}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := a.GetCertificate(hello); err == nil || errors.Is(err, errNoChallenge) {
+			b.Fatal("the handshake did not reach the storage")
+		}
+	}
+}
+
 // issuerProxyRefuses reports whether the proxy function of iss refuses a request
 // to another host, with a proxy in the environment.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
@@ -182,8 +296,9 @@ func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 	st, _ := newStore(t)
 	a := newTestACME(t, func(p *ACMEParams) { p.Storage = st; p.Port = 9443 })
 	cfg := a.cfg
-	if cfg.Storage != certmagic.Storage(st) || len(cfg.Issuers) != 1 {
-		t.Fatalf("storage is the given storage: %v, issuers: %d", cfg.Storage == certmagic.Storage(st), len(cfg.Issuers))
+	wrap, _ := cfg.Storage.(*noTokenStorage)
+	if wrap == nil || wrap.Storage != certmagic.Storage(st) || len(cfg.Issuers) != 1 {
+		t.Fatalf("storage is the wrapper of the given storage: %v, issuers: %d", wrap != nil && wrap.Storage == certmagic.Storage(st), len(cfg.Issuers))
 	}
 	iss, ok := cfg.Issuers[0].(*certmagic.ACMEIssuer)
 	if !ok {
@@ -323,6 +438,234 @@ func TestTS16ACMETLSALPNForAConfiguredNameNeedsAnActiveChallenge(t *testing.T) {
 	}
 	if got := a.Refused(); got != 100 {
 		t.Errorf("refused = %d", got)
+	}
+}
+
+func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
+	var logs, std syncBuf
+	old := log.Writer()
+	log.SetOutput(&std)
+	t.Cleanup(func() { log.SetOutput(old) })
+	var egress atomic.Int64
+	st, _ := newStore(t)
+	cs := &countingStorage{Storage: st}
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.Storage = cs
+		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		p.OnEgress = func(string) { egress.Add(1) }
+	})
+	// The recorder sees each key that certmagic gives to the storage.
+	rec := &loadRecorder{Storage: a.cfg.Storage}
+	a.cfg.Storage = rec
+	// The seam says that the challenge is active, but the map of certmagic has no
+	// entry. This is the state of the window after the end of a challenge.
+	a.challenge = func(name string) (certmagic.Challenge, bool) { return certmagic.Challenge{}, name == "decoy.test" }
+	const total, workers = 4000, 8
+	var next, worked atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for next.Add(1) <= total {
+				if prodHandshake(a, "decoy.test", "acme-tls/1") == nil {
+					worked.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if w := worked.Load(); w != 0 {
+		t.Errorf("handshakes that worked: %d", w)
+	}
+	if r := cs.reads.Load(); r != 0 {
+		t.Errorf("storage reads: %d", r)
+	}
+	if got := a.Refused(); got != 0 {
+		t.Errorf("refused = %d: the gate did not let each handshake through", got)
+	}
+	if e := egress.Load(); e != 0 {
+		t.Errorf("guard calls: %d", e)
+	}
+	if logs.String() != "" || std.String() != "" {
+		t.Errorf("log output: %q %q", logs.String(), std.String())
+	}
+	if n := rec.count(tokenKeyOf(a, "decoy.test")); n != total {
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake", n, total)
+	}
+}
+
+func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
+	a := newTestACME(t, nil)
+	rawIssuer := a.cfg.Issuers[0].IssuerKey()
+	issuer := certmagic.StorageKeys.Safe(rawIssuer)
+	wrap := func(under certmagic.Storage) *noTokenStorage { return newNoTokenStorage(under, rawIssuer) }
+	sentinel := errors.New("storage under the wrapper")
+	ctx := context.Background()
+	tokenKeys := []string{
+		tokenKeyOf(a, "decoy.test"),
+		path.Join("acme", issuer, "challenge_tokens"), // the prefix, as List gets it
+		"acme/" + issuer + "/challenge_tokens/",
+		"acme/" + issuer + "/challenge_tokens/a/b.json",
+	}
+	for _, k := range tokenKeys {
+		under := &countingStorage{Storage: errStorage{sentinel}}
+		w := wrap(under)
+		if _, err := w.Load(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Load(%q) = %v", k, err)
+		}
+		if _, err := w.Stat(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Stat(%q) = %v", k, err)
+		}
+		if _, err := w.List(ctx, k, true); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("List(%q) = %v", k, err)
+		}
+		if w.Exists(ctx, k) {
+			t.Errorf("Exists(%q) = true", k)
+		}
+		if err := w.Store(ctx, k, []byte("x")); err != errTokenStore {
+			t.Errorf("Store(%q) = %v", k, err)
+		}
+		if err := w.Delete(ctx, k); err != errTokenStore {
+			t.Errorf("Delete(%q) = %v", k, err)
+		}
+		if strings.Contains(errTokenStore.Error(), "challenge_tokens/") {
+			t.Errorf("error text holds a key: %v", errTokenStore)
+		}
+		if n := under.calls.Load(); n != 0 {
+			t.Errorf("%q: the storage under the wrapper got %d calls", k, n)
+		}
+	}
+	passKeys := []string{
+		"certificates/" + issuer + "/challenge_tokens.example/x.crt",
+		"acme/" + issuer + "/accounts/acct/key.json",
+		"acme/" + issuer + "/challenge_tokensx/decoy.test.json",
+		"challenge_tokens/decoy.test.json",
+		// Not the key that certmagic builds for this CA, so it passes. The exact
+		// prefix test refuses this form for a CA whose issuer element collapses.
+		"acme/challenge_tokens/decoy.test.json",
+		"certificates/" + issuer + "/challenge_tokens/x.crt", // the first element is not "acme"
+		"acme",
+		"",
+	}
+	for _, k := range passKeys {
+		for _, c := range []struct {
+			name string
+			call func(w *noTokenStorage) error
+		}{
+			{"Load", func(w *noTokenStorage) error { _, err := w.Load(ctx, k); return err }},
+			{"Stat", func(w *noTokenStorage) error { _, err := w.Stat(ctx, k); return err }},
+			{"List", func(w *noTokenStorage) error { _, err := w.List(ctx, k, false); return err }},
+			{"Store", func(w *noTokenStorage) error { return w.Store(ctx, k, nil) }},
+			{"Delete", func(w *noTokenStorage) error { return w.Delete(ctx, k) }},
+		} {
+			under := &countingStorage{Storage: errStorage{sentinel}}
+			if err := c.call(wrap(under)); err != sentinel {
+				t.Errorf("%s(%q) = %v; want the error of the storage under the wrapper", c.name, k, err)
+			}
+			if n := under.calls.Load(); n != 1 {
+				t.Errorf("%s(%q): the storage under the wrapper got %d calls", c.name, k, n)
+			}
+		}
+		under := &countingStorage{Storage: errStorage{sentinel}}
+		if !wrap(under).Exists(ctx, k) || under.calls.Load() != 1 {
+			t.Errorf("Exists(%q) did not pass through", k)
+		}
+	}
+	under := &countingStorage{Storage: errStorage{sentinel}}
+	w := wrap(under)
+	if err := w.Lock(ctx, tokenKeys[0]); err != sentinel {
+		t.Errorf("Lock = %v", err)
+	}
+	if err := w.Unlock(ctx, tokenKeys[0]); err != sentinel {
+		t.Errorf("Unlock = %v", err)
+	}
+	if n := under.calls.Load(); n != 2 {
+		t.Errorf("Lock and Unlock: the storage under the wrapper got %d calls", n)
+	}
+	// A missing key of the storage under the wrapper comes back unchanged.
+	missing := wrap(errStorage{fs.ErrNotExist})
+	if _, err := missing.Load(ctx, "acme/"+issuer+"/accounts/acct/key.json"); err != fs.ErrNotExist {
+		t.Errorf("Load of a missing key = %v", err)
+	}
+	var sink bool
+	if n := testing.AllocsPerRun(100, func() { sink = w.refuses(tokenKeys[0]) }); n != 0 || !sink {
+		t.Errorf("allocations of the match: %v", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { sink = w.refuses(passKeys[0]) }); n != 0 || sink {
+		t.Errorf("allocations of the match for a key that passes: %v", n)
+	}
+}
+
+// TestTS16StorageRefusesTheExactIssuerPrefix: path.Join can collapse the issuer
+// element of a token key. For a CA whose host is ".", "..", or has no word
+// character, the key that certmagic builds has no issuer element. The wrapper
+// refuses that key because it holds the exact token prefix of the issuer.
+func TestTS16StorageRefusesTheExactIssuerPrefix(t *testing.T) {
+	sentinel := errors.New("storage under the wrapper")
+	ctx := context.Background()
+	for _, c := range []struct {
+		ca        string
+		collapsed bool // the issuer element is empty after Safe and path.Join
+	}{
+		{"https://ca.test/dir", false},
+		{"https://CA.Test/a/b/", false},
+		{"https://.", true},
+		{"https://..", true},
+		{"https://!", true},
+		{"https://!/", true},
+	} {
+		t.Run(c.ca, func(t *testing.T) {
+			under := &countingStorage{Storage: errStorage{sentinel}}
+			a := newTestACME(t, func(p *ACMEParams) { p.CA, p.Storage = c.ca, under })
+			iss := a.cfg.Issuers[0]
+			if got, want := (&certmagic.ACMEIssuer{CA: c.ca}).IssuerKey(), iss.IssuerKey(); got != want {
+				t.Fatalf("issuer key before certmagic.New = %q; the issuer has %q", got, want)
+			}
+			w, _ := a.cfg.Storage.(*noTokenStorage)
+			if w == nil {
+				t.Fatalf("storage is %T", a.cfg.Storage)
+			}
+			want := path.Join("acme", certmagic.StorageKeys.Safe(iss.IssuerKey()), "challenge_tokens")
+			if w.prefix != want || w.prefixSlash != want+"/" {
+				t.Fatalf("prefix = %q and %q; want %q", w.prefix, w.prefixSlash, want)
+			}
+			key := tokenKeyOf(a, "decoy.test")
+			if collapsed := key == "acme/challenge_tokens/decoy.test.json"; collapsed != c.collapsed {
+				t.Fatalf("key = %q; collapsed = %v, want %v", key, collapsed, c.collapsed)
+			}
+			for _, k := range []string{key, w.prefix, w.prefixSlash} {
+				if _, err := w.Load(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("Load(%q) = %v", k, err)
+				}
+				if _, err := w.Stat(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("Stat(%q) = %v", k, err)
+				}
+				if _, err := w.List(ctx, k, true); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("List(%q) = %v", k, err)
+				}
+				if w.Exists(ctx, k) {
+					t.Errorf("Exists(%q) = true", k)
+				}
+				if err := w.Store(ctx, k, nil); err != errTokenStore {
+					t.Errorf("Store(%q) = %v", k, err)
+				}
+				if err := w.Delete(ctx, k); err != errTokenStore {
+					t.Errorf("Delete(%q) = %v", k, err)
+				}
+			}
+			if n := under.calls.Load(); n != 0 {
+				t.Errorf("the storage under the wrapper got %d calls", n)
+			}
+			var sink bool
+			if n := testing.AllocsPerRun(100, func() { sink = w.refuses(key) }); n != 0 || !sink {
+				t.Errorf("allocations of the match: %v", n)
+			}
+			// A key next to the prefix is not a token key.
+			for _, k := range []string{w.prefix + "x", w.prefix + "x/decoy.test.json"} {
+				if err := w.Store(ctx, k, nil); err != sentinel {
+					t.Errorf("Store(%q) = %v; want the error of the storage under the wrapper", k, err)
+				}
+			}
+		})
 	}
 }
 

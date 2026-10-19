@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -78,11 +79,100 @@ type ACME struct {
 	challenge func(string) (certmagic.Challenge, bool) // the lookup of an active challenge; tests replace it
 }
 
+// noTokenStorage is the storage that certmagic gets. It refuses each key of a
+// challenge token file, and it passes every other call to the storage under it.
+// The storage under it has no optional certmagic interface (TryLocker,
+// LockLeaseRenewer or a local cache), so this wrapper hides none.
+type noTokenStorage struct {
+	certmagic.Storage
+	prefix      string // the token prefix of the issuer, as certmagic builds it
+	prefixSlash string // prefix and "/", made one time so that the match makes no allocation
+}
+
+// newNoTokenStorage returns the wrapper of under for the issuer key. The prefix
+// is the key that certmagic builds for the token files of the issuer. The path
+// join can collapse an element of the issuer key, so the element rule is not enough.
+func newNoTokenStorage(under certmagic.Storage, issuerKey string) *noTokenStorage {
+	prefix := path.Join("acme", certmagic.StorageKeys.Safe(issuerKey), "challenge_tokens")
+	return &noTokenStorage{Storage: under, prefix: prefix, prefixSlash: prefix + "/"}
+}
+
+// errTokenStore is the fixed error for a write to a challenge token key.
+var errTokenStore = errors.New("listener: acme: the storage refuses challenge token keys")
+
+// refuses reports whether k is a challenge token key. The element rule matches,
+// or k is the token prefix of the issuer, or k is under that prefix. It makes no
+// allocation.
+func (s *noTokenStorage) refuses(k string) bool {
+	return isTokenKey(k) || k == s.prefix || strings.HasPrefix(k, s.prefixSlash)
+}
+
+// isTokenKey is the element rule: the first path element is "acme" and the third
+// is "challenge_tokens". It makes no allocation.
+func isTokenKey(k string) bool {
+	first, rest, ok := strings.Cut(k, "/")
+	if !ok || first != "acme" {
+		return false
+	}
+	_, rest, ok = strings.Cut(rest, "/")
+	if !ok {
+		return false
+	}
+	third, _, _ := strings.Cut(rest, "/")
+	return third == "challenge_tokens"
+}
+
+func (s *noTokenStorage) Load(ctx context.Context, k string) ([]byte, error) {
+	if s.refuses(k) {
+		return nil, fs.ErrNotExist
+	}
+	return s.Storage.Load(ctx, k)
+}
+
+func (s *noTokenStorage) Stat(ctx context.Context, k string) (certmagic.KeyInfo, error) {
+	if s.refuses(k) {
+		return certmagic.KeyInfo{}, fs.ErrNotExist
+	}
+	return s.Storage.Stat(ctx, k)
+}
+
+func (s *noTokenStorage) Exists(ctx context.Context, k string) bool {
+	return !s.refuses(k) && s.Storage.Exists(ctx, k)
+}
+
+func (s *noTokenStorage) List(ctx context.Context, p string, recursive bool) ([]string, error) {
+	if s.refuses(p) {
+		return nil, fs.ErrNotExist
+	}
+	return s.Storage.List(ctx, p, recursive)
+}
+
+func (s *noTokenStorage) Store(ctx context.Context, k string, v []byte) error {
+	if s.refuses(k) {
+		return errTokenStore
+	}
+	return s.Storage.Store(ctx, k, v)
+}
+
+func (s *noTokenStorage) Delete(ctx context.Context, k string) error {
+	if s.refuses(k) {
+		return errTokenStore
+	}
+	return s.Storage.Delete(ctx, k)
+}
+
 // NewACME builds the configuration from p. It makes the certmagic cache, which
 // runs a maintenance goroutine. The caller must call Stop. NewACME does not read
 // the storage and makes no request. It sets the fields that the decoy listener
 // depends on. The other fields come from certmagic.Default and
 // certmagic.DefaultACME, which the sensor does not change.
+//
+// Two rules keep the challenge token files out of the storage. First,
+// DisableDistributedSolvers is on, so this process never writes a challenge token
+// file. Second, the storage that certmagic gets refuses each token key and makes
+// no call to the storage under it. So no handshake can read a token file from the
+// storage. A token key matches the element rule or the exact token prefix of the
+// issuer.
 func NewACME(p ACMEParams) (*ACME, error) {
 	ca, err := url.Parse(p.CA)
 	switch {
@@ -106,6 +196,9 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		a.allowed[n] = struct{}{}
 	}
 	guard := egressGuard(ca, p.OnEgress)
+
+	// The key of the issuer below. The wrapper needs it before certmagic.New.
+	issuerKey := (&certmagic.ACMEIssuer{CA: p.CA}).IssuerKey()
 	var cfg atomic.Pointer[certmagic.Config] // the cache needs the config, the config needs the cache
 	a.cache = certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert:   func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
@@ -118,7 +211,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		MustStaple:         false,
 		OCSP:               certmagic.OCSPConfig{DisableStapling: true, HTTPProxy: guard},
 		Issuers:            []certmagic.Issuer{}, // not nil: New would make an issuer from the package defaults
-		Storage:            p.Storage,
+		Storage:            newNoTokenStorage(p.Storage, issuerKey),
 		Logger:             zap.NewNop(),
 		ShouldEmitFunc:     isLoggedEvent,
 		OnEvent: func(ctx context.Context, event string, data map[string]any) error {
@@ -227,15 +320,16 @@ func portOf(u *url.URL) string {
 // storage read for any name.
 //
 // A handshake for a configured name whose ALPN list is exactly acme-tls/1 goes
-// to certmagic only while an in-memory challenge for that name is active. If no
+// to certmagic only while a challenge for that name is active in memory. If no
 // challenge is active, the handshake fails at once with errNoChallenge: no
 // storage call, no request and no log line. Refused counts these refusals
 // together with the refusals of the name gate. The condition is the same as the
 // condition of certmagic (one protocol, the exact string). Thus this check does
 // not refuse a handshake with two protocols. This process writes no distributed
 // token file (DisableDistributedSolvers), so only an in-memory challenge can be
-// valid. If a challenge ends between this check and the lookup of certmagic,
-// certmagic reads the storage one time for the token file of the name.
+// valid. A challenge can end between this check and the lookup of certmagic. Then
+// certmagic looks up the token file, and the storage refuses that key with no
+// read.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
 	// or more first, so ToLower changes only ASCII letters.
