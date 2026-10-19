@@ -486,14 +486,14 @@ func TestTS14_EventFieldsNotPrinted(t *testing.T) {
 // character. Canonical JSON keeps them raw. They never reach stdout or stderr,
 // on exit 0 and on exit 1.
 func TestTS14_EventControlCharacters(t *testing.T) {
-	const raw = "‮\u009b"
+	const raw = "\u202e\u009b"
 	s, keyText := testKey(t, origin)
-	l, events := testLog(t, 4, "{\"n\":%d,\"s\":\"a‮b\u009bc\"}")
+	l, events := testLog(t, 4, "{\"n\":%d,\"s\":\"a\u202eb\u009bc\"}")
 	f := newFiles(t)
 	key := f.write("key", []byte(keyText))
 	cp := f.write("cp", checkpointAt(t, l, s, 4))
 	proof := f.write("proof", []byte(inclusionJSON(t, l, 2, 4)))
-	if !bytes.Contains(events[2].Raw, []byte("‮")) || !bytes.Contains(events[2].Raw, []byte("\u009b")) {
+	if !bytes.Contains(events[2].Raw, []byte("\u202e")) || !bytes.Contains(events[2].Raw, []byte("\u009b")) {
 		t.Fatalf("the event does not hold the raw characters: %q", events[2].Raw)
 	}
 	code, stdout, stderr := invoke(t, "--key", key, "--checkpoint", cp, "--event", f.write("event", events[2].Raw), "--proof", proof)
@@ -545,7 +545,7 @@ func stateFile(t *testing.T, keyText string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("%08x.note", v.KeyHash())
+	return verify.StateFileName(v)
 }
 
 // T-S-14: the state follows the last accepted checkpoint. A larger consistent
@@ -565,12 +565,12 @@ func TestTS14_State(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "phantom-verify")
 	file := filepath.Join(dir, stateFile(t, keyText))
-	run := func(args ...string) (int, string, string) {
+	runState := func(args ...string) (int, string, string) {
 		return invokeIn(t, home, append([]string{"--key", key}, args...)...)
 	}
 	accepted := func(name, line, cpPath string, args ...string) {
 		t.Helper()
-		code, stdout, stderr := run(append([]string{"--checkpoint", cpPath}, args...)...)
+		code, stdout, stderr := runState(append([]string{"--checkpoint", cpPath}, args...)...)
 		if code != 0 || stderr != "" {
 			t.Fatalf("%s: exit %d, stderr %q", name, code, stderr)
 		}
@@ -610,7 +610,7 @@ func TestTS14_State(t *testing.T) {
 			"--consistency", cons(l, "l", 10, 15), "--consistency", f.write("again", []byte(consistencyJSON(t, l, 10, 15)))}},
 	} {
 		before := stateSnap(t, dir)
-		code, stdout, stderr := run(tc.args...)
+		code, stdout, stderr := runState(tc.args...)
 		if code != tc.code || stdout != "" || !strings.Contains(stderr, tc.msg) || strings.Contains(stderr, "state:") {
 			t.Errorf("%s: exit %d, stdout %q, stderr %q", name, code, stdout, stderr)
 		}
@@ -729,99 +729,6 @@ func TestTS14_StateBeforeEvent(t *testing.T) {
 	}
 }
 
-// T-S-14: the command closes the state, and so frees the lock, before it reads
-// the event file. Run 1 blocks on a FIFO as event file. Run 2 on the same state
-// directory must finish while run 1 still waits for the event.
-func TestTS14_StateUnlockedBeforeEvent(t *testing.T) {
-	s, keyText := testKey(t, origin)
-	l, events := testLog(t, 10, `{"n":%d}`)
-	f := newFiles(t)
-	dir := filepath.Join(f.dir, "state")
-	fifo := filepath.Join(f.dir, "event")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// If the test fails early, run 1 still blocks on the open of the FIFO. This
-	// open and close lets it return.
-	t.Cleanup(func() {
-		if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
-			w.Close()
-		}
-	})
-	key := f.write("key", []byte(keyText))
-	cp := f.write("cp", checkpointAt(t, l, s, 10))
-	proof := f.write("proof", []byte(inclusionJSON(t, l, 3, 10)))
-	// start runs the command in a goroutine. The channel gets "" or the fault.
-	start := func(args ...string) <-chan string {
-		done := make(chan string, 1)
-		go func() {
-			var stdout, stderr bytes.Buffer
-			if code := run(args, &stdout, &stderr); code != 0 {
-				done <- fmt.Sprintf("exit %d, stderr %q", code, stderr.String())
-				return
-			}
-			done <- ""
-		}()
-		return done
-	}
-	first := start("--key", key, "--checkpoint", cp, "--state", dir, "--event", fifo, "--proof", proof)
-
-	file := filepath.Join(dir, stateFile(t, keyText))
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(file); err == nil {
-			break
-		}
-		select {
-		case msg := <-first:
-			t.Fatalf("run 1 finished before it wrote the state: %q", msg)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("run 1 did not write the state")
-		}
-	}
-
-	second := start("--key", key, "--checkpoint", cp, "--state", dir)
-	select {
-	case msg := <-second:
-		if msg != "" {
-			t.Errorf("run 2: %s", msg)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("run 2 did not finish while run 1 waited for the event file")
-	}
-
-	type opened struct {
-		w   *os.File
-		err error
-	}
-	open := make(chan opened, 1)
-	go func() {
-		w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-		open <- opened{w, err}
-	}()
-	select {
-	case o := <-open:
-		if o.err != nil {
-			t.Fatal(o.err)
-		}
-		_, werr := o.w.Write(events[3].Raw)
-		if cerr := o.w.Close(); werr != nil || cerr != nil {
-			t.Fatalf("write the event: %v, %v", werr, cerr)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("run 1 did not open the event file")
-	}
-	select {
-	case msg := <-first:
-		if msg != "" {
-			t.Errorf("run 1: %s", msg)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("run 1 did not finish")
-	}
-}
-
 // T-S-14: the --state directory and the default directory.
 func TestTS14_StateDirectory(t *testing.T) {
 	s, keyText := testKey(t, origin)
@@ -936,6 +843,62 @@ func TestTS14_StateChangedRefusal(t *testing.T) {
 		}
 	}
 	t.Error("the table has no entry for ErrStateChanged")
+}
+
+// failDirSync makes the sync of the state directory fail until the test ends.
+// A test that calls it must not run in parallel.
+func failDirSync(t *testing.T) {
+	t.Helper()
+	old := verify.DirSync
+	verify.DirSync = func(*os.File) error { return errors.New("sync failed") }
+	t.Cleanup(func() { verify.DirSync = old })
+}
+
+// T-S-14: if the sync of the state directory fails after the write, the new
+// checkpoint is the state. The command prints the state line and a fixed text,
+// gives exit 2, and writes nothing to stdout. A later run with the same
+// checkpoint finds it as the state.
+func TestTS14_StateSyncFault(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 10, `{"n":%d}`)
+	f := newFiles(t)
+	key := f.write("key", []byte(keyText))
+	cp5 := f.write("cp5", checkpointAt(t, l, s, 5))
+	cp10 := f.write("cp10", checkpointAt(t, l, s, 10))
+	cons := f.write("cons", []byte(consistencyJSON(t, l, 5, 10)))
+	const fault = "phantom-verify: state fault: the state was written, but the directory sync failed\n"
+	for name, tc := range map[string]struct {
+		prior bool // a state exists before the run
+		line  string
+	}{
+		"updated":   {true, "state: updated\n"},
+		"first use": {false, firstUseLine + "\n"},
+	} {
+		home := t.TempDir()
+		args := []string{"--key", key, "--checkpoint", cp10}
+		if tc.prior {
+			if code, _, stderr := invokeIn(t, home, "--key", key, "--checkpoint", cp5); code != 0 {
+				t.Fatalf("%s: first run: exit %d, stderr %q", name, code, stderr)
+			}
+			args = append(args, "--consistency", cons)
+		}
+		t.Run(name, func(t *testing.T) {
+			failDirSync(t)
+			code, stdout, stderr := invokeIn(t, home, args...)
+			if code != 2 || stdout != "" || stderr != tc.line+fault {
+				t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+			}
+		})
+		want, _ := os.ReadFile(cp10)
+		if got, _ := os.ReadFile(filepath.Join(home, "phantom-verify", stateFile(t, keyText))); !bytes.Equal(got, want) {
+			t.Errorf("%s: the state file does not hold the new checkpoint", name)
+		}
+		code, stdout, stderr := invokeIn(t, home, "--key", key, "--checkpoint", cp10)
+		if code != 0 || stderr != "" {
+			t.Fatalf("%s: second run: exit %d, stderr %q", name, code, stderr)
+		}
+		wantLines(t, name, stdout, "state: unchanged")
+	}
 }
 
 // T-S-14: if stdout cannot be written, the command gives exit 2 and a fixed

@@ -45,8 +45,6 @@ func snapshot(t *testing.T, dir string) string {
 	return b.String()
 }
 
-func stateName(v note.Verifier) string { return fmt.Sprintf("%08x.note", v.KeyHash()) }
-
 // T-S-14: first use, update, and no write for a smaller or equal size.
 func TestTS14_StateUpdate(t *testing.T) {
 	s, text := newKey(t, origin)
@@ -54,7 +52,7 @@ func TestTS14_StateUpdate(t *testing.T) {
 	l, _ := realLog(t, 20)
 	cp := func(size int64) []byte { return checkpointAt(t, l, s, size) }
 	dir := filepath.Join(t.TempDir(), "a", "b") // the directory does not exist
-	file := filepath.Join(dir, stateName(v))
+	file := filepath.Join(dir, StateFileName(v))
 
 	st, err := LoadState(dir, v)
 	if err != nil || st.Bytes() != nil {
@@ -137,7 +135,7 @@ func TestTS14_ConcurrentRuns(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
-		if got, _ := os.ReadFile(filepath.Join(dir, stateName(v))); !bytes.Equal(got, cp15) {
+		if got, _ := os.ReadFile(filepath.Join(dir, StateFileName(v))); !bytes.Equal(got, cp15) {
 			t.Fatalf("pair %d: the state file does not hold the size 15 note", pair)
 		}
 	}
@@ -289,7 +287,7 @@ func TestTS14_StateFaults(t *testing.T) {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := setup(dir, filepath.Join(dir, stateName(v))); err != nil {
+		if err := setup(dir, filepath.Join(dir, StateFileName(v))); err != nil {
 			t.Fatal(err)
 		}
 		before := snapshot(t, dir)
@@ -339,7 +337,7 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 		if err := os.Chmod(dir, 0o700); err != nil { // t.TempDir makes the directory with the umask
 			t.Fatal(err)
 		}
-		file := filepath.Join(dir, stateName(v))
+		file := filepath.Join(dir, StateFileName(v))
 		if !tc.first {
 			if err := os.WriteFile(file, cp(5), 0o600); err != nil {
 				t.Fatal(err)
@@ -417,7 +415,7 @@ func stateWithFile(t *testing.T) (note.Verifier, string, string) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(dir, stateName(v))
+	file := filepath.Join(dir, StateFileName(v))
 	if err := os.WriteFile(file, checkpointAt(t, l, s, 5), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -534,6 +532,75 @@ func TestTS14_LockWaitLimit(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(file); !bytes.Equal(after, before) {
 		t.Error("the state file changed")
+	}
+}
+
+// T-S-14: StateFirstUse is not the zero value, which Update returns with an
+// error.
+func TestTS14_StateChangeNotZero(t *testing.T) {
+	for name, c := range map[string]StateChange{"first use": StateFirstUse, "updated": StateUpdated, "unchanged": StateUnchanged} {
+		if c == 0 {
+			t.Errorf("%s is the zero value", name)
+		}
+	}
+}
+
+// T-S-14: if the sync of the directory fails after the rename, the new
+// checkpoint is the state: in the object, and in the file. Update gives the
+// change that it made and ErrStateSync, no temporary file is left, and a new
+// load finds the new checkpoint.
+func TestTS14_DirectorySyncFault(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 10)
+	cp5, cp10 := checkpointAt(t, l, s, 5), checkpointAt(t, l, s, 10)
+	for name, tc := range map[string]struct {
+		old  []byte // the state before the run, nil for none
+		want StateChange
+	}{
+		"updated":   {cp5, StateUpdated},
+		"first use": {nil, StateFirstUse},
+	} {
+		dir := filepath.Join(t.TempDir(), "state")
+		file := filepath.Join(dir, StateFileName(v))
+		if tc.old != nil {
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, tc.old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st, err := LoadState(dir, v)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		old := DirSync
+		DirSync = func(*os.File) error { return errors.New("sync failed") }
+		got, err := st.Update(cp10)
+		DirSync = old
+		if got != tc.want || err != ErrStateSync || !errors.Is(err, ErrState) {
+			t.Errorf("%s: %v, %v, want %v and ErrStateSync", name, got, err, tc.want)
+		}
+		if !bytes.Equal(st.Bytes(), cp10) {
+			t.Errorf("%s: Bytes does not hold the new checkpoint", name)
+		}
+		if b, _ := os.ReadFile(file); !bytes.Equal(b, cp10) {
+			t.Errorf("%s: the file does not hold the new checkpoint", name)
+		}
+		if n := strings.Count(snapshot(t, dir), "\n"); n != 1 {
+			t.Errorf("%s: the directory holds more than the state:\n%s", name, snapshot(t, dir))
+		}
+		st.Close()
+
+		again, err := LoadState(dir, v)
+		if err != nil {
+			t.Fatalf("%s: load after the fault: %v", name, err)
+		}
+		if !bytes.Equal(again.Bytes(), cp10) {
+			t.Errorf("%s: the load after the fault holds another note", name)
+		}
+		again.Close()
 	}
 }
 

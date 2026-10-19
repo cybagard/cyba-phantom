@@ -33,7 +33,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | Path | Role (open code; content marked ◆ arrives via bundle) |
 |------|--------------------------------------------------------|
 | `cmd/phantom` | main: config, wiring, run loop |
-| `cmd/phantom-verify` | verifier CLI: inclusion proof against a checkpoint |
+| `cmd/phantom-verify` | verifier CLI: checkpoint signature, consistency with a prior checkpoint and the state, and inclusion proof of an event |
 | `internal/listener` | TLS via certmagic (ACME); ClientHello capture for JA4; connection caps (total and for each source address), read limits and header caps for each decoy connection |
 | `internal/limiter` | per-IP token bucket, body/path caps |
 | `internal/bait` | decoy vhosts, template rendering, per-session token injection, callback surfaces, JS beacon |
