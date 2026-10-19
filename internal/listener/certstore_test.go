@@ -567,6 +567,39 @@ func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
 	unchanged(t, target)
 }
 
+// The walk of Open goes into a directory only down to maxParts levels below the
+// cache directory. The directory d8 is the deepest that it enters. It does not
+// enter d9, so a leftover file in d9 stays.
+func TestTS16OpenRemovesLeftoverFilesOnlyDownToTheDepthLimit(t *testing.T) {
+	first, dir := newStore(t)
+	mustNil(t, first.Close())
+	p := filepath.Join(dir, "acme/cache")
+	var levels []string
+	for i := 1; i <= maxParts+1; i++ {
+		p = filepath.Join(p, fmt.Sprintf("d%d", i))
+		levels = append(levels, p)
+	}
+	mustNil(t, os.MkdirAll(p, 0o700))
+	inReach := filepath.Join(levels[maxParts-1], tmpPrefix+"in-reach")
+	belowLimit := filepath.Join(levels[maxParts], tmpPrefix+"below-limit")
+	mustNil(t, os.WriteFile(inReach, nil, 0o600))
+	mustNil(t, os.WriteFile(belowLimit, nil, 0o600))
+
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	s, err := Open(state, "acme/cache")
+	mustNil(t, err)
+	defer s.Close()
+
+	if _, err := os.Lstat(inReach); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the leftover file in the directory at level %d stays: %v", maxParts, err)
+	}
+	if _, err := os.Lstat(belowLimit); err != nil {
+		t.Errorf("the leftover file in the directory at level %d is gone: %v", maxParts+1, err)
+	}
+}
+
 func TestTS16LoadGivesTheChangedRuleWhenTheKeyFileIsTruncatedAfterTheOpen(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
@@ -591,20 +624,25 @@ func TestTS16LoadGivesTheChangedRuleWhenTheKeyFileIsTruncatedAfterTheOpen(t *tes
 
 // The hook changes the size of the key file after the size checks of Load and
 // before the read. The bytes read then differ from the size of the open file.
-func TestTS16LoadGivesTheChangedRuleWhenTheSizeChangesBeforeTheRead(t *testing.T) {
+// A growth above the size cap gives the size rule. Any other change gives the
+// changed rule.
+func TestTS16LoadRefusesAKeyFileWhoseSizeChangesAfterTheSizeChecksAndBeforeTheRead(t *testing.T) {
 	ctx := context.Background()
+	appendBytes := func(t *testing.T, p string, n int) {
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+		mustNil(t, err)
+		_, err = f.Write(bytes.Repeat([]byte("g"), n))
+		mustNil(t, err)
+		mustNil(t, f.Close())
+	}
 	for _, c := range []struct {
 		name   string
 		change func(t *testing.T, p string)
+		rule   string
 	}{
-		{"truncate", func(t *testing.T, p string) { mustNil(t, os.Truncate(p, 700)) }},
-		{"grow", func(t *testing.T, p string) {
-			f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
-			mustNil(t, err)
-			_, err = f.Write(bytes.Repeat([]byte("g"), 10))
-			mustNil(t, err)
-			mustNil(t, f.Close())
-		}},
+		{"truncate", func(t *testing.T, p string) { mustNil(t, os.Truncate(p, 700)) }, ruleChanged},
+		{"grow", func(t *testing.T, p string) { appendBytes(t, p, 10) }, ruleChanged},
+		{"grow above the size cap", func(t *testing.T, p string) { appendBytes(t, p, 70000-1500) }, ruleSize},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, dir := newStore(t)
@@ -616,7 +654,7 @@ func TestTS16LoadGivesTheChangedRuleWhenTheSizeChangesBeforeTheRead(t *testing.T
 			}
 			t.Cleanup(func() { betweenSizeCheckAndRead = nil })
 			b, err := s.Load(ctx, "kd/key")
-			wantError(t, err, "load", ruleChanged)
+			wantError(t, err, "load", c.rule)
 			if b != nil {
 				t.Errorf("Load returned %d bytes with an error", len(b))
 			}

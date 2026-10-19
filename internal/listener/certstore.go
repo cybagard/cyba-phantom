@@ -148,9 +148,9 @@ var beforeListChild func(key string)
 
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
-// not exist. Each directory of dir must be a real directory, not a symbolic link,
-// owned by the effective user, with no group or other permission bit and no
-// setuid, setgid or sticky bit.
+// not exist. Each directory of dir must be a real directory, not a symbolic
+// link. The effective user must own it. It must have no group or other
+// permission bit and no setuid, setgid or sticky bit.
 //
 // Open removes the leftover temporary files of an earlier Store that stopped, for
 // example in a crash. This is best effort. Open removes the names that start with
@@ -219,15 +219,15 @@ func Open(state *os.Root, dir string) (*Store, error) {
 func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 
 // removeTemporary removes the names that start with tmpPrefix in the directory
-// parts. The directory parts is the cache directory or a directory below it. The
-// walk is best effort and returns no error. A name that it cannot remove stays.
-// The walk goes into a child that is a directory, not a symbolic link, down to
-// maxParts levels. It opens the child through the root and applies dirRule to the
-// open directory. A child that it cannot open, or that fails dirRule, stays and
-// the walk skips it. A ReadDir error ends the walk of that directory only. The
-// walk reads a directory in parts of 256 names and keeps no list of names, so the
-// number of names does not matter. It calls fsync on a directory only if it
-// removed a name in it, and it ignores an fsync error.
+// at the path parts. That directory is the cache directory or a directory below
+// it. The walk is best effort and returns no error. A name that it cannot remove
+// stays. The walk goes into a child that is a directory, not a symbolic link,
+// down to maxParts levels. It opens the child through the root and applies
+// dirRule to the open directory. A child that it cannot open, or that fails
+// dirRule, stays and the walk skips it. A ReadDir error ends the walk of that
+// directory only. The walk reads a directory 256 names at a time and keeps no
+// list of names. So the number of names does not matter. It calls fsync on a
+// directory only if it removed a name in it, and it ignores an fsync error.
 func (s *Store) removeTemporary(parts []string) {
 	d, err := s.root.OpenFile(rel(parts), readFlags, 0)
 	if err != nil {
@@ -503,11 +503,11 @@ func wrapAfterDirs(op string, err error) error {
 // "file changed during the read". A replacement after the open does not matter:
 // Load returns the value of the open file.
 //
-// A write in place of the key file (the same file) that changes its size during
-// the Load gives the rule "file changed during the read". When the file grows
-// above 64 KiB, Load gives the rule "value is above the size cap". Load does not
-// start again then. A write in place that keeps the size is not detected. This is
-// a limit of Load.
+// A write in place of the key file (the same file) can change its size during
+// the Load. Then Load gives the rule "file changed during the read". When the
+// file grows above 64 KiB, Load gives the rule "value is above the size cap".
+// Load does not start again then. A write in place that keeps the size is not
+// detected. This is a limit of Load.
 func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 	const op = "load"
 	for i := 0; i < loadTries; i++ {
@@ -604,9 +604,9 @@ func keyFileRule(op string, fi fs.FileInfo) error {
 }
 
 // Delete deletes key. A directory key deletes every key below it. A missing key
-// is not an error, as the certmagic.Storage contract says. A symbolic link is an error.
-// Delete removes a key file also when Load refuses it, so a bad name does not
-// stay in the cache.
+// is not an error, as the certmagic.Storage contract says. A symbolic link is
+// an error. Delete removes a key file also when Load refuses it, so a bad name
+// does not stay in the cache.
 func (s *Store) Delete(ctx context.Context, key string) error {
 	const op = "delete"
 	_, parts, err := s.info(ctx, op, key)
@@ -621,8 +621,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return wrap(op, syncPath(s.root, parts[:len(parts)-1]))
 }
 
-// checkedInfo is info. For a key file it also applies the rules of Load for its
-// hard links, owner, mode, special bits and size.
+// checkedInfo is info. For a key file it also applies the rules of Load: hard
+// links, owner, mode, the setuid, setgid or sticky bit, and size.
 func (s *Store) checkedInfo(ctx context.Context, op, key string) (fs.FileInfo, error) {
 	fi, _, err := s.info(ctx, op, key)
 	if err != nil {
@@ -661,10 +661,10 @@ func (s *Store) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error)
 // direct children, directories too. With recursive true, it returns the keys of
 // files below prefix. The prefix "" is the cache directory. A missing prefix
 // gives fs.ErrNotExist. A prefix below a file gives the rule "path part is not a
-// directory". List reads at most maxList names. These make the whole List fail: a
-// name that is not a valid key, a symbolic link, or a file that is not a regular
-// file or a directory. This is on purpose. A Delete can remove a child directory
-// during a recursive List. List then skips that directory.
+// directory". List reads at most maxList names. A name that is not a valid key
+// makes the whole List fail. So does a symbolic link, and so does a file that is
+// not a regular file or a directory. This is on purpose. A Delete can remove a
+// child directory during a recursive List. List then skips that directory.
 func (s *Store) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	const op = "list"
 	if err := stopped(ctx, op); err != nil {

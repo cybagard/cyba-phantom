@@ -748,6 +748,19 @@ func TestTS16LoadRefusesAKeyFileOfAnotherOwner(t *testing.T) {
 	if b, err := s.Load(ctx, "key2"); err != nil || string(b) != "v" {
 		t.Errorf("Load of the second key = %q, %v", b, err)
 	}
+	// Stat and Exists refuse the key file of another owner, as Load does. They
+	// accept the second key.
+	_, err = s.Stat(ctx, "key")
+	wantError(t, err, "stat", ruleFileOwner)
+	if s.Exists(ctx, "key") {
+		t.Error("Exists is true for a key file of another owner")
+	}
+	if _, err := s.Stat(ctx, "key2"); err != nil {
+		t.Errorf("Stat of the second key = %v", err)
+	}
+	if !s.Exists(ctx, "key2") {
+		t.Error("Exists is false for the second key")
+	}
 	unchanged(t, target)
 }
 
@@ -809,8 +822,9 @@ func TestTS16LoadRefusesAKeyFileWithASetuidSetgidOrStickyBit(t *testing.T) {
 			if fi, err := os.Lstat(p); err != nil || fi.Mode()&bit.mode == 0 {
 				t.Skipf("the system did not set the %s bit: %v, %v", bit.name, fi, err)
 			}
-			// The mode is 0600 with one special bit. No group or other bit is set,
-			// so the rule for these bits applies, not the rule for the mode.
+			// The mode is 0600 with one setuid, setgid or sticky bit. No group or
+			// other bit is set. So the rule for that bit applies, not the rule for
+			// the mode.
 			b, err := s.Load(ctx, "key")
 			if b != nil {
 				t.Errorf("Load returned %d bytes", len(b))
@@ -890,9 +904,8 @@ func TestTS16StatAndExistsRefuseAKeyFileThatLoadRefuses(t *testing.T) {
 // does not go into a directory that it cannot open or that fails the directory
 // rules.
 func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("a directory with mode 0000 is open for root")
-	}
+	// Root can open a directory with mode 0000, so only that case needs another user.
+	closedCase := os.Geteuid() != 0
 	ctx := context.Background()
 	first, dir := newStore(t)
 	mustNil(t, first.Store(ctx, "good/real", []byte("v")))
@@ -907,10 +920,12 @@ func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
 	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o755))
 	// (b) a key directory with mode 0000 and a leftover file. The cleanup gives the
 	// mode back, so that t.TempDir can remove the directory.
-	mustNil(t, os.Mkdir(filepath.Join(cache, "closed"), 0o700))
-	touch(tmpIn("closed"))
-	mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0))
-	t.Cleanup(func() { os.Chmod(filepath.Join(cache, "closed"), 0o700) })
+	if closedCase {
+		mustNil(t, os.Mkdir(filepath.Join(cache, "closed"), 0o700))
+		touch(tmpIn("closed"))
+		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0))
+		t.Cleanup(func() { os.Chmod(filepath.Join(cache, "closed"), 0o700) })
+	}
 	// (c) a directory with a name that starts with tmpPrefix and is not empty.
 	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"dir"), 0o700))
 	touch(filepath.Join(cache, tmpPrefix+"dir", "inner"))
@@ -927,17 +942,24 @@ func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
 	defer s.Close()
 
 	if _, err := os.Lstat(tmpIn("good")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("the leftover file in the good directory stays: %v", err)
+		t.Errorf("Open did not remove the leftover file in the good key directory: %v", err)
 	}
 	if _, err := os.Lstat(tmpIn("wide")); err != nil {
-		t.Errorf("the leftover file in the directory with mode 0755 is gone: %v", err)
+		t.Errorf("Open removed the leftover file in the key directory with mode 0755, but it must skip that directory: %v", err)
+	}
+	// Remove cannot remove a directory that is not empty, so the directory stays.
+	// The walk does not go into it, so its file "inner" stays too.
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir")); err != nil {
+		t.Errorf("the directory %sdir is gone, but it holds the file inner: %v", tmpPrefix, err)
 	}
 	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir", "inner")); err != nil {
-		t.Errorf("the file in the directory that Remove cannot remove is gone: %v", err)
+		t.Errorf("the file inner in the directory %sdir is gone: %v", tmpPrefix, err)
 	}
-	mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0o700))
-	if _, err := os.Lstat(tmpIn("closed")); err != nil {
-		t.Errorf("the leftover file in the directory with mode 0000 is gone: %v", err)
+	if closedCase {
+		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0o700))
+		if _, err := os.Lstat(tmpIn("closed")); err != nil {
+			t.Errorf("Open removed the leftover file in the key directory with mode 0000, but it must skip that directory: %v", err)
+		}
 	}
 	if b, err := s.Load(ctx, "good/real"); err != nil || string(b) != "v" {
 		t.Errorf("Load = %q, %v", b, err)
