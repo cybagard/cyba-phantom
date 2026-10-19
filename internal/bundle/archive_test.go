@@ -214,8 +214,8 @@ func sparse1x0() []byte {
 
 // longMtimeTar makes n empty regular entries. Each entry follows a PAX header
 // with an mtime record of about 500 KiB. The record has a permitted key and a
-// valid value. The reader ignores the digits after the first nine of the
-// fraction. So only the decoded-byte cap can refuse a stream of them.
+// valid value. Next ignores the digits after the first nine of the fraction.
+// So only the decoded-byte cap can refuse a stream of them.
 func longMtimeTar(n int) []byte {
 	long := "1700000000." + strings.Repeat("1", 500<<10)
 	var tb []byte
@@ -350,9 +350,11 @@ func TestTS19ArchiveInvalid(t *testing.T) {
 	}
 }
 
-// T-S-19: a sparse entry gives an error. The PAX record set refuses the PAX
-// cases (0.0, 0.1, 1.0). Each holds one entry of 4 MiB, so the sum of the
-// entry sizes does not refuse it. The type check refuses the old GNU 'S' case.
+// T-S-19: a sparse entry gives an error. Each case holds one entry of 4 MiB,
+// so the sum of the entry sizes does not refuse it. The PAX record set refuses
+// the formats 0.0 and 0.1. The byte count refuses format 1.0, because Next
+// reads its map block. The format check refuses the old GNU 'S' case, because
+// its header has the GNU magic.
 func TestTS19SparseEntryIsRefused(t *testing.T) {
 	for name, tb := range map[string][]byte{
 		"PAX format 0.1":   sparseTar(1),

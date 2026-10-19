@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -108,7 +109,8 @@ func longName(parts, partLen int) string {
 	return "traps/" + strings.Repeat(p+"/", parts-2) + p
 }
 
-// entryCases returns the refused entry forms, each with its twin.
+// entryCases returns the refused entry forms. Each has a twin, except the case
+// "PAX path and GNU long name".
 func entryCases() []entryCase {
 	const p = "traps/a"
 	reg := func(names ...string) []byte {
@@ -129,6 +131,11 @@ func entryCases() []entryCase {
 		{"symlink with an empty link name", rawArchive(rawHdr(p, tar.TypeSymlink, 0)), same},
 		{"hard link", rawArchive(rawLinkHdr(p, tar.TypeLink, "traps/b")), same},
 		{"hard link with an empty link name", rawArchive(rawHdr(p, tar.TypeLink, 0)), same},
+		// Only the link name differs from the twin, so only the link-name check
+		// can refuse the bad archive.
+		{"regular file with a link name",
+			rawArchive(rawLinkHdr(p, tar.TypeReg, "traps/b")),
+			rawArchive(rawHdr(p, tar.TypeReg, 0))},
 		{"character device", typed(tar.TypeChar), same},
 		{"block device", typed(tar.TypeBlock), same},
 		{"FIFO", typed(tar.TypeFifo), same},
@@ -151,6 +158,16 @@ func entryCases() []entryCase {
 				withMagic(withPrefix(rawHdr(manifestName, tar.TypeReg, 1), "traps"), "ustar  \x00"), padded([]byte("B"))),
 			rawArchive(rawFile(manifestName, "x"),
 				withPrefix(rawHdr(manifestName, tar.TypeReg, 1), "traps"), padded([]byte("B")))},
+		// The header has no prefix, so its format is GNU and not unknown. Only the
+		// magic differs from the twin, so only the format check can refuse it.
+		{"header with the GNU magic",
+			rawArchive(withMagic(rawHdr("traps/g", tar.TypeReg, 1), "ustar  \x00"), padded([]byte("x"))),
+			rawArchive(rawHdr("traps/g", tar.TypeReg, 1), padded([]byte("x")))},
+		// The header has no magic, which is the v7 form. Only the magic differs
+		// from the twin.
+		{"header with no magic",
+			rawArchive(withMagic(rawHdr("traps/v", tar.TypeReg, 1), string(make([]byte, 8))), padded([]byte("x"))),
+			rawArchive(rawHdr("traps/v", tar.TypeReg, 1), padded([]byte("x")))},
 		{"STAR header", rawArchive(rawFile(manifestName, "x"), starHdr()),
 			rawArchive(rawFile(manifestName, "x"), ustarTwinOfStar())},
 		{"two PAX headers before one entry",
@@ -208,6 +225,14 @@ func entryPassCases() []passCase {
 	// The last part has 64 bytes, so no ustar prefix and name split fits the
 	// name, and tar.Writer writes a PAX path record.
 	long := longName(8, 64)
+	// The canonical records have 101 and 412 bytes. Together they have 513
+	// bytes, so they fill two blocks. A record of 101 bytes is a length that a
+	// guess of the length field gets wrong by one.
+	path101 := "traps/" + strings.Repeat("a", 64) + "/" + strings.Repeat("a", 20)
+	mtime412 := "1700000000." + strings.Repeat("1", 390)
+	if len(paxRec("path", path101)) != 101 || len(paxRec("mtime", mtime412)) != 412 {
+		panic("the PAX records of the fixture do not have 101 and 412 bytes")
+	}
 	return []passCase{
 		{"PAX path over 100 bytes, written by tar.Writer", build(ent{name: long, data: []byte("x")}), []string{long}},
 		{"PAX path record",
@@ -215,6 +240,15 @@ func entryPassCases() []passCase {
 		{"PAX path and mtime records",
 			rawArchive(paxHdr(paxRec("path", "traps/p"), paxRec("mtime", "1700000000.5")), rawFile("traps/x", "x")),
 			[]string{"traps/p"}},
+		{"PAX records of 513 bytes with a record of 101 bytes",
+			rawArchive(paxHdr(paxRec("path", path101), paxRec("mtime", mtime412)), rawFile("traps/x", "x")),
+			[]string{path101}},
+		// The file of 1 byte leaves padding. The directory has none, so the next
+		// header must not count the padding of the file before the directory.
+		{"file, directory, file",
+			build(ent{name: "traps/a", data: []byte("x")}, ent{name: "traps/d/", typ: tar.TypeDir},
+				ent{name: "traps/b", data: []byte("x")}),
+			[]string{"traps/a", "traps/b"}},
 		{"type NUL regular file",
 			rawArchive(append(rawHdr("traps/n", 0, 1), padded([]byte("x"))...)), []string{"traps/n"}},
 		{"type NUL directory", rawArchive(rawHdr("traps/d/", 0, 0)), []string{}},
@@ -240,7 +274,7 @@ func entryPassing() []fixture {
 }
 
 // T-S-19: each refused entry form gives the one error. ReadArchive accepts
-// the twin of each form.
+// the twin of each form that has one.
 func TestTS19EntryRules(t *testing.T) {
 	for _, c := range entryCases() {
 		t.Run(c.name, func(t *testing.T) {
@@ -271,6 +305,48 @@ func TestTS19UstarPrefixTwinNames(t *testing.T) {
 		if want := []string{manifestName, "traps/" + manifestName}; !slices.Equal(a.Names(), want) {
 			t.Errorf("names %q; want %q", a.Names(), want)
 		}
+	}
+}
+
+// T-S-19: paxRecordLen gives the length of the record that paxRec makes, for
+// value lengths from 0 to 1200. This covers the points where the length field
+// gains a digit.
+func TestTS19PAXRecordLen(t *testing.T) {
+	for _, key := range []string{"path", "size", "mtime", "a"} {
+		for n := 0; n <= 1200; n++ {
+			value := strings.Repeat("v", n)
+			if got, want := paxRecordLen(key, value), len(paxRec(key, value)); got != want {
+				t.Fatalf("key %q, value of %d bytes: paxRecordLen %d; record has %d bytes", key, n, got, want)
+			}
+		}
+	}
+}
+
+// nameAllocBound is the most that checkEntry may allocate for a name with
+// 500 000 parts. A split in at most 9 parts needs 144 bytes. A split in every
+// part needs about 8 MiB.
+const nameAllocBound = 64 << 10
+
+// T-S-19: the name check of a name with very many parts allocates a small,
+// fixed amount, because it splits the name in at most 9 parts.
+func TestTS19NameWithManyPartsAllocatesLittle(t *testing.T) {
+	hdr := &tar.Header{
+		Name:     "traps/" + strings.Repeat("a/", 500_000) + "a",
+		Typeflag: tar.TypeReg,
+		Format:   tar.FormatPAX,
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := checkEntry(hdr)
+	runtime.ReadMemStats(&after)
+	if err != ErrArchiveInvalid {
+		t.Fatalf("error %v", err)
+	}
+	grown := after.TotalAlloc - before.TotalAlloc
+	t.Logf("allocated %d bytes, bound %d bytes", grown, nameAllocBound)
+	if grown > nameAllocBound {
+		t.Errorf("allocated %d bytes, bound %d bytes", grown, nameAllocBound)
 	}
 }
 

@@ -25,8 +25,9 @@ var topLevelDirs = []string{"vhosts", "traps", "fp", "score", "secrets"}
 // Next maps type NUL to a regular file, or to a directory when the name ends
 // in a slash. Next also applies a PAX path record to the name. checkEntry
 // checks that final form. The checks, in this order:
-//   - the format is ustar or PAX. A GNU long name or long link header, a GNU
-//     header and a STAR header give another format, so they fail here;
+//   - the format is ustar or PAX. A GNU header and a STAR header give another
+//     format, so they fail here. A GNU long name or long link header fails the
+//     byte count of ReadArchive first;
 //   - the type is a regular file or a directory;
 //   - the link name is empty;
 //   - each PAX record is a path, a size or an mtime record;
@@ -104,10 +105,10 @@ func validPart(p string) bool {
 // blockBytes is the size of one tar block.
 const blockBytes = 512
 
-// headerBytes returns the number of decoded bytes that one Next call reads
-// when the entry has one header and no other meta header. prevPad is the
-// padding of the previous entry. An entry with PAX records has one more
-// header block and the padded records in canonical form.
+// headerBytes returns the number of decoded bytes that one Next call reads for
+// an entry with one header block and at most one PAX header. prevPad is the
+// padding of the previous entry. A PAX header adds one block and the padded
+// records in canonical form.
 func headerBytes(prevPad int64, hdr *tar.Header) int64 {
 	n := prevPad + blockBytes
 	if len(hdr.PAXRecords) == 0 {

@@ -77,13 +77,15 @@ func (c *capReader) Read(p []byte) (int, error) {
 // have one PAX 'x' header before it, and no other meta header. Type NUL is a
 // regular file, or a directory when the name ends in a slash.
 //
-// ReadArchive checks each entry: the number of header bytes, the header
-// format, the type, the link name, the PAX records, the name and the
-// top-level name. A GNU header, a STAR header and a GNU long name or long link
-// header fail the format check. A header with a GNU.sparse. PAX record fails
-// the check of the PAX records. Next gives such an entry its logical size, and
-// the hole bytes do not pass through the decoded-byte count. A directory has
-// no data and no effect, but it counts toward MaxEntries.
+// ReadArchive checks the header bytes of each entry. It then checks the header
+// format, the type, the link name, the PAX records, the name and the top-level
+// name. The byte count refuses a GNU long name or long link header, because
+// Next reads its data as extra bytes. It also refuses sparse format 1.0, for
+// the same reason. The format check refuses a GNU header and a STAR header.
+// The check of the PAX records refuses a GNU.sparse. record. Next gives a
+// sparse entry its logical size, and the hole bytes do not pass through the
+// decoded-byte count. A directory has no data and no effect, but it counts
+// toward MaxEntries.
 //
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
@@ -118,11 +120,11 @@ func ReadArchive(b []byte) (*Archive, error) {
 			return nil, ErrArchiveInvalid
 		}
 		// Next keeps only the last PAX 'x' header and leaves no trace of an
-		// earlier one. Another reader can take its name from that header. So
-		// the bytes that this Next call read must match the bytes of one
-		// header. This needs archive/tar to read the header blocks and the PAX
-		// data exactly, with no read-ahead, from a reader that is not an
-		// io.Seeker. The capReader is such a reader. If a Go change adds a
+		// earlier one. Another tar implementation can take its name from that
+		// header. So the bytes that this Next call read must match the bytes of
+		// one header. This needs archive/tar to read the header blocks and the
+		// PAX data exactly, with no read-ahead, from a source that is not an
+		// io.Seeker. The capReader is such a source. If a Go change adds a
 		// buffer, every archive fails, and the tests that use tar.Writer show it.
 		if cr.n-before != headerBytes(prevPad, hdr) {
 			return nil, ErrArchiveInvalid
