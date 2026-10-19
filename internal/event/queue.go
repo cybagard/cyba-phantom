@@ -99,8 +99,8 @@ func reserve(sum *atomic.Int64, n, limit int64) bool {
 //   - the event is not valid
 //
 // Only an event from NewEvent can enter the queue. An event with Size() of 0 or
-// less is not valid. An event must not change after NewEvent, because the queue
-// counts the bytes from the size that NewEvent set.
+// less is not valid. An event cannot change after NewEvent. Thus the size that
+// NewEvent set stays true, and the queue counts the right bytes.
 func (q *Queue) Enqueue(e *Event) bool {
 	if e == nil {
 		q.droppedInvalid.Add(1)
@@ -172,15 +172,18 @@ func (q *Queue) TryTake() (*Event, bool) {
 
 // Ready returns a channel for the consumer to wait on. A value arrives after an
 // accepted event and after Close. A value can arrive when no event is left.
-// Thus the consumer must do these steps: call TryTake until it returns false,
-// examine Closed, then wait again.
+// When a value arrives, the consumer does these steps:
+//  1. Call TryTake until it returns false.
+//  2. Call Closed.
+//  3. Wait on the channel again.
 func (q *Queue) Ready() <-chan struct{} { return q.wake }
 
 // Close stops the queue from accepting events. Producers never close a
 // channel, so Enqueue after Close counts a drop and does not panic. The
 // consumer can still take what is left. Close does not wait for an Enqueue that
-// started before Close. Such an Enqueue can put an event in a lane after Close
-// returns.
+// started before Close. That Enqueue can put an event in a lane after Close
+// returns. It can also do so after Drain returns. Drain does not take that
+// event.
 //
 // For a complete shutdown, do these steps in this order. Stop every producer,
 // for example with http.Server.Shutdown. Call Close. Call Drain. Then Drain
@@ -218,17 +221,17 @@ type Bytes struct {
 // Bytes returns the sum of Event.Size over the queued events of each lane. A
 // sum can be more than the true sum for a short time. This occurs while a
 // producer or the consumer is between the byte update and the lane update. The
-// bulk sum is never more
-// than 24 MiB. The evidence sum is never more than 8 MiB.
+// bulk sum is never more than 24 MiB. The evidence sum is never more than
+// 8 MiB.
 func (q *Queue) Bytes() Bytes {
 	return Bytes{Bulk: q.bulkBytes.Load(), Evidence: q.evidenceBytes.Load()}
 }
 
-// Dropped holds the numbers of dropped events for each lane. These are the
-// values of the lane label of the dropped_events metric: lane="bulk",
-// lane="evidence", and lane="invalid" (field Invalid). Invalid counts events
-// that have no lane: a nil event, a kind that is not known, or an event with
-// Size 0 or less, for example an event that NewEvent did not make.
+// Dropped holds the numbers of dropped events for each lane. The fields are the
+// values of the lane label of the dropped_events metric: bulk, evidence and
+// invalid. Invalid counts events that have no lane. These are a nil event, an
+// event with a kind that is not known, and an event with Size 0 or less. An
+// example of the last case is an event that NewEvent did not make.
 type Dropped struct {
 	Bulk, Evidence, Invalid uint64
 }

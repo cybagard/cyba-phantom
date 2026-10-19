@@ -31,15 +31,20 @@ const ipv6PrefixBits = 64
 // A Counters value holds a pointer to a stateRef. The stateRef holds the
 // pointer to the state. The state holds the lock, the map, and the bucket.
 // Take a struct with an unexported Counters value field. For %v, fmt prints
-// the first pointer, to the stateRef, as an address. Fmt does not follow it.
-// Only the bad-verb path (for example %s) follows the first pointer. That
-// path prints %!s(*event.stateRef=&{0x...}) and stops at the second pointer.
-// That is why the second pointer exists. Thus fmt prints no key.
+// the first pointer, to the stateRef, as an address. Fmt does not follow that
+// pointer. Only the bad-verb path (for example %s) follows it. That path prints
+// %!s(*event.stateRef=&{0x...}) and stops at the second pointer. That is why the
+// second pointer exists. Thus fmt prints no key.
 //
-// This holds for a Counters value in an unexported field or in an unexported
-// any field. It also holds in a nested struct, in an array, and in a map. It
-// also holds for a *Counters in an unexported field. A reflect walker that
-// reads the private fields on purpose can reach the map.
+// Fmt prints no key for a Counters value in each of these places:
+//   - an unexported field
+//   - an unexported any field
+//   - a nested struct, an array, or a map
+//
+// Fmt also prints no key for a *Counters in an unexported field.
+//
+// Code that uses reflect can reach the map. For this, the code must read the
+// private fields on purpose.
 //
 // Only Snapshot gives the keys to its caller. All methods are safe for
 // concurrent use. The zero value is not ready for use: call NewCounters.
@@ -67,8 +72,9 @@ func NewCounters() *Counters {
 }
 
 // Format implements fmt.Formatter. It prints the key count and the overflow
-// bucket count for every verb and flag, and never prints a key. The zero value
-// prints zero for both counts.
+// bucket count. It prints no key. The tests check the verbs %v, %+v, %#v, %s,
+// %q, %t, %e, %c, %U, %d, %x, %X, %b and %o. The zero value prints zero for
+// both counts.
 func (c Counters) Format(f fmt.State, _ rune) {
 	var keys int
 	var overflow uint64

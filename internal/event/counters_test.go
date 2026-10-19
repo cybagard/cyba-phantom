@@ -366,10 +366,12 @@ func counterShapes(c *Counters) []counterShape {
 var formatVerbs = []string{"%v", "%+v", "%#v", "%s", "%q", "%t", "%e", "%c", "%U", "%d", "%x", "%X", "%b", "%o"}
 
 // T-U-17: the marker forms hold the known words: 203.0.113.7 as a netip word
-// is 281474087547143 (0xffffcb007107). The leak checks below are not vacuous.
+// is 281474087547143 (0xffffcb007107). The test checks the decimal, hex, binary
+// and octal forms of that word. The leak checks below are not vacuous.
 func TestTU17_MarkerFormsCoverNetipWords(t *testing.T) {
 	forms := strings.Join(markerForms(t, "203.0.113.7"), " ")
-	for _, want := range []string{"203.0.113.7", "::ffff:203.0.113.7", "281474087547143", "ffffcb007107"} {
+	for _, want := range []string{"203.0.113.7", "::ffff:203.0.113.7", "281474087547143", "ffffcb007107",
+		"111111111111111111001011000000000111000100000111", "7777771300070407"} {
 		if !strings.Contains(forms, want) {
 			t.Errorf("forms lack %q: %s", want, forms)
 		}
