@@ -1369,8 +1369,8 @@ func inHTTPShutdown() bool {
 // splitCtx gives http.Server.Shutdown the Done and Err of inHTTP. It gives all
 // other callers the Done and Err of the embedded context. With gate set, Done
 // blocks in http.Server.Shutdown until gate is closed. Its only test uses one
-// context for both and the gate. Thus the Shutdown call of net/http stays open
-// after the context ends.
+// context for both, and the gate. The gate holds the Shutdown call of net/http
+// until after the context ends.
 type splitCtx struct {
 	context.Context
 	inHTTP context.Context
@@ -1541,7 +1541,7 @@ func (h writeHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 }
 
 // T-S-17: the listener of the TLS serve gives an error at Close, and the context
-// of Shutdown is not done. net/http returns this error without a wait, because
+// of Shutdown is not done. net/http returns this error immediately, because
 // its only open connection is hijacked and net/http does not track it. A
 // hijacked TLS connection with a blocked write closes through the socket sweep.
 // The client does not read. Shutdown returns the listener error well before the
@@ -1655,7 +1655,7 @@ func handlerReadError(t *testing.T, h hijackHandler) error {
 }
 
 // T-S-17: the only open connection is a TLS connection that a handler hijacks.
-// net/http does not track it, so its Shutdown call returns without a wait. The
+// net/http does not track it, so its Shutdown call returns immediately. The
 // context ends while the handler runs. Shutdown closes the connection at the
 // socket and returns the error of the context. The handler read returns an
 // error before Shutdown returns, and the slot is free.

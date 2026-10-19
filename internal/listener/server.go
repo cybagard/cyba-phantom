@@ -347,12 +347,13 @@ func (s *Server) Close() error {
 // wait for a hijacked connection, only for its handler.
 //
 // Shutdown returns an error in three cases. In the first case, ctx ends before
-// the open connections are closed or idle and the running handlers return. In
-// the second case, ctx ended before the call. In the third case, a listener
-// close gives an error. In each case Shutdown closes each connection in its
-// record at the socket below TLS, also each hijacked connection. So a stalled
-// close_notify write does not hold it. The error is the error of ctx, or the
-// error of the listener close.
+// http.Server.Shutdown finds each open connection closed or idle, or before the
+// running handlers return. net/http does this check at intervals of up to about
+// 0.5 s. In the second case, ctx ended before the call. In the third case, a
+// listener close gives an error. In each case Shutdown closes each connection
+// in the record of open connections at the socket below TLS, also each
+// hijacked connection. So a stalled close_notify write does not hold it. The
+// error is the error of ctx, or the error of the listener close.
 //
 // When Shutdown returns nil, no handler runs. A hijacked connection whose
 // handler returned can still be open.
