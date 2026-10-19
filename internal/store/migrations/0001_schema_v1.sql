@@ -19,7 +19,7 @@ CREATE TABLE event (
   id            INTEGER PRIMARY KEY,
   ts            INTEGER NOT NULL,
   session_id    TEXT REFERENCES session(id),
-  kind          TEXT NOT NULL CHECK (kind IN ('request','callback','beacon','score_change','bundle_load','bundle_rejected','alert_sent','retention')),
+  kind          TEXT NOT NULL CHECK (kind IN ('request','refused','callback','beacon','score_change','bundle_load','bundle_rejected','alert_sent','retention')),
   vhost TEXT, method TEXT, path TEXT, status INTEGER,
   trap_id       TEXT,
   token_id      TEXT,
@@ -29,8 +29,8 @@ CREATE TABLE event (
   leaf_index    INTEGER,
   detail        TEXT,
   record        BLOB,
-  CHECK ((kind IN ('request','beacon') AND hash IS NULL AND leaf_index IS NULL AND record IS NULL)
-      OR (kind NOT IN ('request','beacon')
+  CHECK ((kind IN ('request','refused','beacon') AND hash IS NULL AND leaf_index IS NULL AND record IS NULL)
+      OR (kind NOT IN ('request','refused','beacon')
           AND hash IS NOT NULL AND typeof(hash) = 'blob' AND length(hash) = 32
           AND leaf_index IS NOT NULL AND typeof(leaf_index) = 'integer' AND leaf_index >= 0))
 );

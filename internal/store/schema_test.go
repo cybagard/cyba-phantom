@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,76 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	q = "SELECT count(*) FROM pragma_table_info('checkpoint') WHERE name IN ('published_at', 'publish_target')"
 	if err := db.QueryRow(q).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("publish column: %d %v", n, err)
+	}
+}
+
+// eventSchemaText is the fixed text of the event table and of its four indexes.
+const eventSchemaText = `CREATE TABLE event (
+  id            INTEGER PRIMARY KEY,
+  ts            INTEGER NOT NULL,
+  session_id    TEXT REFERENCES session(id),
+  kind          TEXT NOT NULL CHECK (kind IN ('request','refused','callback','beacon','score_change','bundle_load','bundle_rejected','alert_sent','retention')),
+  vhost TEXT, method TEXT, path TEXT, status INTEGER,
+  trap_id       TEXT,
+  token_id      TEXT,
+  surface       TEXT,
+  body_prefix   BLOB,
+  hash          BLOB,
+  leaf_index    INTEGER,
+  detail        TEXT,
+  record        BLOB,
+  CHECK ((kind IN ('request','refused','beacon') AND hash IS NULL AND leaf_index IS NULL AND record IS NULL)
+      OR (kind NOT IN ('request','refused','beacon')
+          AND hash IS NOT NULL AND typeof(hash) = 'blob' AND length(hash) = 32
+          AND leaf_index IS NOT NULL AND typeof(leaf_index) = 'integer' AND leaf_index >= 0))
+)
+CREATE INDEX event_session ON event(session_id)
+CREATE INDEX event_ts ON event(ts)
+CREATE INDEX event_kind_ts ON event(kind, ts)
+CREATE UNIQUE INDEX event_leaf ON event(leaf_index) WHERE leaf_index IS NOT NULL`
+
+// T-U-18: a new database has the fixed text of the event table and of its
+// indexes, not only the text of the embedded file.
+func TestTU18EventSchemaEqualsFixedText(t *testing.T) {
+	var got string
+	q := "SELECT group_concat(sql, char(10)) FROM (SELECT sql FROM sqlite_master WHERE tbl_name = 'event' ORDER BY rowid)"
+	if err := migrated(t).QueryRow(q).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != eventSchemaText {
+		t.Fatalf("the event schema differs from the fixed text:\n%s\n%s", got, eventSchemaText)
+	}
+}
+
+// T-U-18: the only migration is the first one, and a new database has
+// schema_version 1.
+func TestTU18OnlyFirstMigrationExists(t *testing.T) {
+	files, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil || len(files) != 1 || files[0].Name() != "0001_schema_v1.sql" {
+		t.Fatalf("migration files %v: %v", files, err)
+	}
+	if v := metaValue(t, migrated(t), "schema_version"); v != "1" {
+		t.Fatalf("schema_version %s", v)
+	}
+}
+
+// T-S-22: the schema refuses a refused row with a hash, a leaf index or a
+// record, and takes a refused row with none of them.
+func TestTS22RefusedRowHasNoHashLeafOrRecord(t *testing.T) {
+	const ev = "INSERT INTO event (ts, kind, hash, leaf_index, record) VALUES (1, 'refused', ?, ?, ?)"
+	h := bytes.Repeat([]byte{7}, 32)
+	db := migrated(t)
+	for name, args := range map[string][]any{
+		"hash":       {h, nil, nil},
+		"leaf index": {nil, 7, nil},
+		"record":     {nil, nil, []byte("rec")},
+	} {
+		if _, err := db.Exec(ev, args...); err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+			t.Errorf("refused row with a %s: %v", name, err)
+		}
+	}
+	if _, err := db.Exec(ev, nil, nil, nil); err != nil {
+		t.Fatalf("refused row with none: %v", err)
 	}
 }
 
