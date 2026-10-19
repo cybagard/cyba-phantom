@@ -41,7 +41,7 @@ var errQueueCounters = errors.New("event: queue needs a counters value from NewC
 // One consumer takes events with TryTake or Drain. Many producers can call
 // Enqueue. The zero value is not ready for use: call NewQueue.
 type Queue struct {
-	bulk, evidence           chan *Event
+	bulk, evidence           chan queued
 	bulkBytes, evidenceBytes atomic.Int64
 	bulkCap, evidenceCap     int64
 	closed                   atomic.Bool
@@ -49,6 +49,13 @@ type Queue struct {
 	counters                 *Counters
 
 	droppedBulk, droppedEvidence, droppedInvalid atomic.Uint64
+}
+
+// queued is one element of a lane: the event and the number of bytes that
+// Enqueue reserved for it. TryTake subtracts n and does not read Size again.
+type queued struct {
+	e *Event
+	n int64
 }
 
 // NewQueue returns a queue for the given depth (limits.queue_depth, 1 to 8192).
@@ -67,8 +74,8 @@ func newQueue(depth int, bulkCap, evidenceCap int64, c *Counters) (*Queue, error
 		return nil, errQueueCounters
 	}
 	return &Queue{
-		bulk:        make(chan *Event, depth),
-		evidence:    make(chan *Event, max(1, depth/4)),
+		bulk:        make(chan queued, depth),
+		evidence:    make(chan queued, max(1, depth/4)),
 		bulkCap:     bulkCap,
 		evidenceCap: evidenceCap,
 		wake:        make(chan struct{}, 1),
@@ -99,8 +106,9 @@ func reserve(sum *atomic.Int64, n, limit int64) bool {
 //   - the event is not valid
 //
 // Only an event from NewEvent can enter the queue. An event with Size() of 0 or
-// less is not valid. An event cannot change after NewEvent. Thus the size that
-// NewEvent set stays true, and the queue counts the right bytes.
+// less is not valid. The queue counts the bytes that it reserves here, and it
+// subtracts the same number when the consumer takes the event. A later change
+// to the event, for example a whole-value assignment, cannot change the sum.
 func (q *Queue) Enqueue(e *Event) bool {
 	if e == nil {
 		q.droppedInvalid.Add(1)
@@ -126,7 +134,7 @@ func (q *Queue) Enqueue(e *Event) bool {
 		return false
 	}
 	select {
-	case lane <- e:
+	case lane <- queued{e, n}:
 		select {
 		case q.wake <- struct{}{}:
 		default:
@@ -156,15 +164,15 @@ func (q *Queue) drop(count *atomic.Uint64, e *Event) {
 // second result is false when both lanes are empty.
 func (q *Queue) TryTake() (*Event, bool) {
 	select {
-	case e := <-q.evidence:
-		q.evidenceBytes.Add(-int64(e.Size()))
-		return e, true
+	case it := <-q.evidence:
+		q.evidenceBytes.Add(-it.n)
+		return it.e, true
 	default:
 	}
 	select {
-	case e := <-q.bulk:
-		q.bulkBytes.Add(-int64(e.Size()))
-		return e, true
+	case it := <-q.bulk:
+		q.bulkBytes.Add(-it.n)
+		return it.e, true
 	default:
 		return nil, false
 	}
@@ -174,7 +182,7 @@ func (q *Queue) TryTake() (*Event, bool) {
 // accepted event and after Close. A value can arrive when no event is left.
 // When a value arrives, the consumer does these steps:
 //  1. Call TryTake until it returns false.
-//  2. Call Closed.
+//  2. Call Closed. If it returns true, stop.
 //  3. Wait on the channel again.
 func (q *Queue) Ready() <-chan struct{} { return q.wake }
 
@@ -218,8 +226,8 @@ type Bytes struct {
 	Bulk, Evidence int64
 }
 
-// Bytes returns the sum of Event.Size over the queued events of each lane. A
-// sum can be more than the true sum for a short time. This occurs while a
+// Bytes returns the sum of the bytes that Enqueue reserved for the queued
+// events of each lane. A sum can be more than the true sum for a short time. This occurs while a
 // producer or the consumer is between the byte update and the lane update. The
 // bulk sum is never more than 24 MiB. The evidence sum is never more than
 // 8 MiB.

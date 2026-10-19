@@ -2,6 +2,7 @@ package event_test
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -240,13 +241,15 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 	}
 }
 
-// T-S-12: a queue of a small depth holds events of the largest size. A caller
-// tries to change each event after the enqueue. The byte sum of the queue stays
-// the sum of Size over the accepted events, and it never passes the byte caps of
-// the lanes. These caps are 24 MiB for the bulk lane and 8 MiB for the evidence
-// lane, as the Queue documentation says. The second case uses the largest depth,
-// so that the byte caps and not the lane lengths drop the events.
-func TestTS12_QueueBytesWithChangedEvents(t *testing.T) {
+// T-U-17: a queue holds events near the maximum size (at least 4/5 of
+// MaxEventBytes). A caller tries to change each event after the enqueue. The
+// byte sum of the queue stays the sum of Size over the accepted events, and it
+// never passes the byte caps of the lanes. These caps are 24 MiB for the bulk
+// lane and 8 MiB for the evidence lane, as the Queue documentation says. The
+// first case uses the depth 4, so that the lane lengths drop the events. The
+// second case uses the largest depth (MaxQueueDepth), so that the byte caps and
+// not the lane lengths drop the events.
+func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 	const bulkCap, evidenceCap = 24 << 20, 8 << 20
 	for _, c := range []struct {
 		name    string
@@ -330,5 +333,136 @@ func TestTS12_QueueBytesWithChangedEvents(t *testing.T) {
 				t.Errorf("%d accepted events were not taken, sum %+v", len(snaps), sum)
 			}
 		})
+	}
+}
+
+// T-U-17: Go lets a caller assign a whole Event value (*e = *other). The queue
+// counts the bytes that it reserved at the enqueue, so such an assignment after
+// the enqueue cannot change the byte sums.
+func TestTU17_QueueBytesWithWholeValueAssignment(t *testing.T) {
+	const bulkCap = 24 << 20
+	newQ := func(t *testing.T) *event.Queue {
+		t.Helper()
+		q, err := event.NewQueue(event.MaxQueueDepth, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
+	small := func(t *testing.T, k event.Kind) *event.Event { return mustEvent(t, at(1), event.Input{Kind: k}) }
+	enqueue := func(t *testing.T, q *event.Queue, e *event.Event) {
+		t.Helper()
+		if !q.Enqueue(e) {
+			t.Fatal("the queue dropped the event")
+		}
+	}
+	takeOne := func(t *testing.T, q *event.Queue, want *event.Event) {
+		t.Helper()
+		if got, ok := q.TryTake(); !ok || got != want {
+			t.Fatalf("TryTake returned %p, %v: want %p", got, ok, want)
+		}
+	}
+	zero := func(t *testing.T, q *event.Queue) {
+		t.Helper()
+		if got := q.Bytes(); got != (event.Bytes{}) {
+			t.Fatalf("queue bytes %+v after the take: want both lane sums 0", got)
+		}
+	}
+
+	t.Run("small event, big event assigned", func(t *testing.T) {
+		q := newQ(t)
+		e, big := small(t, event.KindRequest), mustEvent(t, at(1), bigInput(event.KindRequest))
+		enqueue(t, q, e)
+		*e = *big
+		takeOne(t, q, e)
+		zero(t, q)
+	})
+	t.Run("zero event assigned", func(t *testing.T) {
+		q := newQ(t)
+		e := mustEvent(t, at(1), bigInput(event.KindRequest))
+		enqueue(t, q, e)
+		*e = event.Event{}
+		takeOne(t, q, e)
+		zero(t, q)
+		if _, ok := q.TryTake(); ok {
+			t.Fatal("a lane still holds an event")
+		}
+	})
+	t.Run("evidence event assigned to a bulk event", func(t *testing.T) {
+		q := newQ(t)
+		e, ev := small(t, event.KindRequest), mustEvent(t, at(1), bigInput(event.KindCallback))
+		enqueue(t, q, e)
+		*e = *ev
+		takeOne(t, q, e)
+		zero(t, q)
+	})
+	t.Run("1000 rounds, then a full bulk lane", func(t *testing.T) {
+		q := newQ(t)
+		big := mustEvent(t, at(1), bigInput(event.KindRequest))
+		for range 1000 {
+			e := small(t, event.KindRequest)
+			enqueue(t, q, e)
+			*e = *big
+			takeOne(t, q, e)
+		}
+		zero(t, q)
+		var trueSum int64 // the sum of Size over the queued events
+		for range 1100 {
+			e := mustEvent(t, at(1), bigInput(event.KindRequest))
+			if size := e.Size(); size < event.MaxEventBytes*4/5 {
+				t.Fatalf("size %d is not near %d", size, event.MaxEventBytes)
+			}
+			if q.Enqueue(e) {
+				trueSum += int64(e.Size())
+			}
+			if got := q.Bytes().Bulk; got > bulkCap || trueSum > bulkCap {
+				t.Fatalf("bulk sum %d and true sum %d pass the cap %d", got, trueSum, bulkCap)
+			}
+		}
+		if got := q.Bytes(); got.Bulk != trueSum || got.Evidence != 0 {
+			t.Fatalf("queue bytes %+v, true bulk sum %d", got, trueSum)
+		}
+		if q.Dropped().Bulk == 0 {
+			t.Fatal("the byte cap dropped no event: the test does not fill the lane")
+		}
+	})
+}
+
+// T-U-06, T-S-12: Record returns a copy with its own pointers. A pointer or map
+// field of Record or FP that the copy shares with the event is a field that a
+// caller could change. The test walks both types with reflect and compares two
+// copies of one event: a field that Record does not copy has the same pointer in
+// both. A new field that Record does not copy fails the test. It needs an event
+// with every field set.
+func TestTS12_RecordCopyHasNoSharedPointer(t *testing.T) {
+	var walk func(path string, orig, cp reflect.Value)
+	walk = func(path string, orig, cp reflect.Value) {
+		switch orig.Kind() {
+		case reflect.Struct:
+			for i := range orig.NumField() {
+				walk(path+"."+orig.Type().Field(i).Name, orig.Field(i), cp.Field(i))
+			}
+		case reflect.Pointer, reflect.Map, reflect.Slice:
+			if orig.IsNil() {
+				t.Errorf("%s is not set in the original: the test input must set every field", path)
+				return
+			}
+			if cp.IsNil() || orig.Pointer() == cp.Pointer() {
+				t.Errorf("%s of the copy is nil or shares memory with the event", path)
+				return
+			}
+			if orig.Kind() == reflect.Pointer && orig.Elem().Kind() == reflect.Struct {
+				walk(path, orig.Elem(), cp.Elem())
+			}
+		}
+	}
+	for _, k := range allKinds {
+		if !hasSession(k) {
+			continue
+		}
+		e := mustEvent(t, at(1), fullInput(k))
+		// Both copies come from the event. A field that Record does not copy
+		// points to the memory of the event in both, so the pointers are equal.
+		walk(k.String()+".Record", reflect.ValueOf(e.Record()), reflect.ValueOf(e.Record()))
 	}
 }
