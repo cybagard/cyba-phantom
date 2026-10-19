@@ -11,6 +11,8 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
+#   - one container image: the oracle job runs in golang:1.27.2 from
+#     Docker Hub, pinned by digest (the base image of .devcontainer);
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)
@@ -166,7 +168,7 @@ jobs:
       - *checkout
 
       - name: reader oracle (GNU tar, Python)
-        run: go test -race -count=1 -run '^TestTS19ReaderOracle$' ./internal/bundle/
+        run: go test -race -count=1 -v -run '^TestTS19ReaderOracle$' ./internal/bundle/
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
