@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 // snapshot lists a directory: each name, with the bytes of a file or the target
@@ -54,7 +56,7 @@ func TestTS14_StateUpdate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "a", "b") // the directory does not exist
 	file := filepath.Join(dir, StateFileName(v))
 
-	st, err := LoadState(dir, v)
+	st, err := LoadState(dir, v, StateOptions{})
 	if err != nil || st.Bytes() != nil {
 		t.Fatalf("first use: %v, %q", err, st.Bytes())
 	}
@@ -86,7 +88,7 @@ func TestTS14_StateUpdate(t *testing.T) {
 	st.Close()
 	// A Load in a new object sees the file. The first state holds the lock until
 	// the test closes it, so this load comes after the close.
-	again, err := LoadState(dir, v)
+	again, err := LoadState(dir, v, StateOptions{})
 	if err != nil {
 		t.Fatalf("load after close: %v", err)
 	}
@@ -106,7 +108,7 @@ func TestTS14_ConcurrentRuns(t *testing.T) {
 	cp5, cp10, cp15 := checkpointAt(t, l, s, 5), checkpointAt(t, l, s, 10), checkpointAt(t, l, s, 15)
 	for pair := 0; pair < 100; pair++ {
 		dir := filepath.Join(t.TempDir(), "state")
-		first, err := LoadState(dir, v)
+		first, err := LoadState(dir, v, StateOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +124,7 @@ func TestTS14_ConcurrentRuns(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				st, err := LoadState(dir, v)
+				st, err := LoadState(dir, v, StateOptions{})
 				if err != nil {
 					t.Errorf("pair %d: load: %v", pair, err)
 					return
@@ -152,7 +154,7 @@ type loadResult struct {
 func loadAsync(dir string, v note.Verifier) <-chan loadResult {
 	done := make(chan loadResult, 1)
 	go func() {
-		st, err := LoadState(dir, v)
+		st, err := LoadState(dir, v, StateOptions{})
 		done <- loadResult{st, err}
 	}()
 	return done
@@ -175,7 +177,7 @@ func TestTS14_LoadWaitsForClose(t *testing.T) {
 	_, text := newKey(t, origin)
 	v, _ := ParseKey([]byte(text))
 	dir := filepath.Join(t.TempDir(), "state")
-	first, err := LoadState(dir, v)
+	first, err := LoadState(dir, v, StateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +207,7 @@ func TestTS14_LockHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := LoadState(dir, v)
+	state, err := LoadState(dir, v, StateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +293,7 @@ func TestTS14_StateFaults(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := snapshot(t, dir)
-		_, err := LoadState(dir, v)
+		_, err := LoadState(dir, v, StateOptions{})
 		if err != ErrState {
 			t.Errorf("%s: error %v, want ErrState", name, err)
 		}
@@ -343,7 +345,7 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		st, err := LoadState(dir, v)
+		st, err := LoadState(dir, v, StateOptions{})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -427,7 +429,7 @@ func stateWithFile(t *testing.T) (note.Verifier, string, string) {
 func wantRefused(t *testing.T, name, dir string, v note.Verifier) {
 	t.Helper()
 	before := snapshot(t, dir)
-	st, err := LoadState(dir, v)
+	st, err := LoadState(dir, v, StateOptions{})
 	if !errors.Is(err, ErrState) || errors.Is(err, ErrStateLocked) {
 		t.Errorf("%s: error %v, want ErrState", name, err)
 	}
@@ -490,7 +492,7 @@ func TestTS14_MadeDirectoryLoadsAgain(t *testing.T) {
 	v, _ := ParseKey([]byte(text))
 	dir := filepath.Join(t.TempDir(), "a", "state")
 	for range 2 {
-		st, err := LoadState(dir, v)
+		st, err := LoadState(dir, v, StateOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -502,7 +504,7 @@ func TestTS14_MadeDirectoryLoadsAgain(t *testing.T) {
 }
 
 // T-S-14: if another run holds the lock, LoadState gives ErrStateLocked after
-// LockWait, and not much later. The state file does not change.
+// the lock wait, and not much later. The state file does not change.
 func TestTS14_LockWaitLimit(t *testing.T) {
 	v, dir, file := stateWithFile(t)
 	before, _ := os.ReadFile(file)
@@ -514,12 +516,10 @@ func TestTS14_LockWaitLimit(t *testing.T) {
 	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
-	old := LockWait
-	LockWait = 300 * time.Millisecond
-	t.Cleanup(func() { LockWait = old })
+	const wait = 300 * time.Millisecond
 
 	start := time.Now()
-	st, err := LoadState(dir, v)
+	st, err := LoadState(dir, v, StateOptions{LockWait: wait})
 	elapsed := time.Since(start)
 	if st != nil {
 		st.Close()
@@ -527,8 +527,8 @@ func TestTS14_LockWaitLimit(t *testing.T) {
 	if !errors.Is(err, ErrStateLocked) || !errors.Is(err, ErrState) {
 		t.Errorf("error %v, want ErrStateLocked and ErrState", err)
 	}
-	if elapsed < LockWait || elapsed > LockWait+2*time.Second {
-		t.Errorf("LoadState returned after %v, limit %v", elapsed, LockWait)
+	if elapsed < wait || elapsed > wait+2*time.Second {
+		t.Errorf("LoadState returned after %v, limit %v", elapsed, wait)
 	}
 	if after, _ := os.ReadFile(file); !bytes.Equal(after, before) {
 		t.Error("the state file changed")
@@ -571,14 +571,12 @@ func TestTS14_DirectorySyncFault(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		st, err := LoadState(dir, v)
+		failSync := StateOptions{DirSync: func(*os.File) error { return errors.New("sync failed") }}
+		st, err := LoadState(dir, v, failSync)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		old := DirSync
-		DirSync = func(*os.File) error { return errors.New("sync failed") }
 		got, err := st.Update(cp10)
-		DirSync = old
 		if got != tc.want || err != ErrStateSync || !errors.Is(err, ErrState) {
 			t.Errorf("%s: %v, %v, want %v and ErrStateSync", name, got, err, tc.want)
 		}
@@ -593,7 +591,7 @@ func TestTS14_DirectorySyncFault(t *testing.T) {
 		}
 		st.Close()
 
-		again, err := LoadState(dir, v)
+		again, err := LoadState(dir, v, StateOptions{})
 		if err != nil {
 			t.Fatalf("%s: load after the fault: %v", name, err)
 		}
@@ -608,8 +606,6 @@ func TestTS14_DirectorySyncFault(t *testing.T) {
 // ErrState, and not ErrStateLocked.
 func TestTS14_LockFault(t *testing.T) {
 	v, dir, _ := stateWithFile(t)
-	old := flock
-	flock = func(int, int) error { return syscall.EBADF }
-	t.Cleanup(func() { flock = old })
+	testutil.Set(t, &flock, func(int, int) error { return syscall.EBADF })
 	wantRefused(t, "flock fault", dir, v)
 }

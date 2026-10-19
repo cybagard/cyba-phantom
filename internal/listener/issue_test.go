@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 const issueLimit = 120 * time.Second // the most time that the listener can take to obtain a certificate
@@ -461,13 +463,22 @@ func TestTS16OCSPStaysOffAfterMaintenanceTicks(t *testing.T) {
 	var hits atomic.Int64
 	ocsp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	t.Cleanup(ocsp.Close)
-	f := newIssueFixture(t, "ocsp.phantom.test", nil, func(p *ACMEParams) { p.maintenanceInterval = 50 * time.Millisecond })
+	// certmagic asks for the config of the certificate at the start of each renewal check and of each OCSP check,
+	// before it does the work of that check. Both checks run at the same interval, so each tick gives two asks.
+	// When the count is above 2*ticks, the OCSP check ran about ticks times, and the work of all but the last
+	// check is done.
+	const ticks = 20
+	var asks atomic.Int64
+	f := newIssueFixture(t, "ocsp.phantom.test", nil, func(p *ACMEParams) {
+		p.maintenanceInterval = 50 * time.Millisecond
+		p.onMaintenance = func() { asks.Add(1) }
+	})
 	seeded := seedOCSPChain(t, f.a, f.name, ocsp.URL)
 	startIssue(t, f)
 	if ch, err := f.chain(); err != nil || !ch[0].Equal(seeded) {
 		t.Fatalf("Start did not serve the seeded certificate: %v", err)
 	}
-	time.Sleep(time.Second) // about 20 ticks
+	testutil.WaitFor(t, func() bool { return asks.Load() > 2*ticks }, issueLimit)
 	if hits.Load() != 0 {
 		t.Errorf("OCSP server got %d requests", hits.Load())
 	}

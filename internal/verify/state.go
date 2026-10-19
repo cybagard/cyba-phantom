@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/mod/sumdb/note"
 )
@@ -20,7 +21,7 @@ import (
 // ErrStateChanged means that the state file changed between the load and the
 // write: the bytes differ, or the file is now absent or present.
 // ErrStateLocked means that another run held the lock for the whole of
-// LockWait. It also matches ErrState.
+// the lock wait. It also matches ErrState.
 // ErrStateSync means that the new checkpoint is already the state file, but the
 // sync of the directory failed, so the file may not survive a crash. It also
 // matches ErrState. The text of each is fixed. A parse error is never wrapped:
@@ -32,9 +33,19 @@ var (
 	ErrStateSync    = fmt.Errorf("verify: the state was written, but the directory sync failed: %w", ErrState)
 )
 
-// DirSync syncs the open state directory. Only tests change it. No flag, no
-// environment variable, and no other input sets it.
-var DirSync = func(d *os.File) error { return d.Sync() }
+// StateOptions are the two values of LoadState that a test changes. The zero
+// value of each field gives the production behavior.
+type StateOptions struct {
+	// LockWait is the longest time that LoadState waits for the lock of another
+	// run. Zero means 30 seconds.
+	LockWait time.Duration
+	// DirSync syncs the open state directory. Nil means the Sync method of the
+	// directory.
+	DirSync func(*os.File) error
+}
+
+// defaultLockWait is the lock wait when StateOptions.LockWait is zero.
+const defaultLockWait = 30 * time.Second
 
 // StateChange tells what Update did to the state. The zero value is not a
 // change: Update returns it with an error that left the state as it was.
@@ -53,9 +64,10 @@ func StateFileName(v note.Verifier) string { return fmt.Sprintf("%08x.note", v.K
 // State is the last accepted checkpoint of one key. It holds the directory
 // open as an os.Root. It also holds an exclusive lock on the directory until
 // the caller closes the state. A second run on the same directory waits for
-// the lock for at most LockWait. The kernel releases the lock when the process
-// ends.
+// the lock for at most the lock wait. The kernel releases the lock when the
+// process ends.
 type State struct {
+	sync   func(*os.File) error // the sync of the directory
 	root   *os.Root
 	lock   *os.File // the open directory that holds the flock
 	v      note.Verifier
@@ -85,11 +97,17 @@ func DefaultStateDir() (string, error) {
 // LoadState refuses an existing directory or state file that has a group or
 // other permission bit, or that another user owns. It checks the directory
 // before it takes the lock. Then it takes an exclusive lock on the directory.
-// If another run holds the lock, LoadState waits for at most LockWait and then
-// gives ErrStateLocked. A run holds the lock until it closes the state. The
-// kernel releases it when the process ends. A failure to take the lock gives
-// ErrState. The caller must call Close.
-func LoadState(dir string, v note.Verifier) (*State, error) {
+// If another run holds the lock, LoadState waits for at most opts.LockWait (30
+// seconds if it is zero) and then gives ErrStateLocked. A run holds the lock
+// until it closes the state. The kernel releases it when the process ends. A
+// failure to take the lock gives ErrState. The caller must call Close.
+func LoadState(dir string, v note.Verifier, opts StateOptions) (*State, error) {
+	if opts.LockWait == 0 {
+		opts.LockWait = defaultLockWait
+	}
+	if opts.DirSync == nil {
+		opts.DirSync = func(d *os.File) error { return d.Sync() }
+	}
 	if os.MkdirAll(dir, 0o700) != nil {
 		return nil, ErrState
 	}
@@ -97,12 +115,12 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 	if err != nil {
 		return nil, ErrState
 	}
-	lock, err := lockDir(root)
+	lock, err := lockDir(root, opts.LockWait)
 	if err != nil {
 		root.Close()
 		return nil, err
 	}
-	s := &State{root: root, lock: lock, v: v, name: StateFileName(v)}
+	s := &State{sync: opts.DirSync, root: root, lock: lock, v: v, name: StateFileName(v)}
 	raw, exists, err := s.read()
 	if err == nil && exists {
 		c, perr := ParseCheckpoint(raw, v)
@@ -233,7 +251,7 @@ func (s *State) syncDir() error {
 	if err != nil {
 		return ErrStateSync
 	}
-	serr := DirSync(d)
+	serr := s.sync(d)
 	cerr := d.Close()
 	if serr != nil || cerr != nil {
 		return ErrStateSync

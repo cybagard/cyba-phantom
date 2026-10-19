@@ -62,6 +62,12 @@ type ACMEParams struct {
 	// package set it. It is zero in production, and then certmagic uses its default
 	// intervals.
 	maintenanceInterval time.Duration
+
+	// onMaintenance is a test hook. certmagic asks for the config of each managed
+	// certificate at each renewal check and at each OCSP check, and this function
+	// runs at each of those asks. It must not block. It is nil in production. No
+	// config key, flag, environment variable, or other input sets it.
+	onMaintenance func()
 }
 
 // ACME is the certmagic configuration of the decoy listener. It has one issuer.
@@ -201,7 +207,12 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	issuerKey := (&certmagic.ACMEIssuer{CA: p.CA}).IssuerKey()
 	var cfg atomic.Pointer[certmagic.Config] // the cache needs the config, the config needs the cache
 	a.cache = certmagic.NewCache(certmagic.CacheOptions{
-		GetConfigForCert:   func(certmagic.Certificate) (*certmagic.Config, error) { return cfg.Load(), nil },
+		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
+			if p.onMaintenance != nil {
+				p.onMaintenance()
+			}
+			return cfg.Load(), nil
+		},
 		RenewCheckInterval: p.maintenanceInterval,
 		OCSPCheckInterval:  p.maintenanceInterval,
 		Logger:             zap.NewNop(),

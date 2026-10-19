@@ -9,11 +9,6 @@ import (
 	"time"
 )
 
-// LockWait is the longest time that LoadState waits for the lock of another
-// run. Only tests change it. No flag, no environment variable, and no other
-// input sets it.
-var LockWait = 30 * time.Second
-
 // lockRetry is the time between two tries to take the lock.
 const lockRetry = 10 * time.Millisecond
 
@@ -30,11 +25,11 @@ func trusted(fi os.FileInfo) bool {
 // lockDir opens the state directory, checks its mode and owner, and takes an
 // exclusive flock on it. The check is on the open directory, which is the
 // directory that the lock covers. It comes before the lock. If another run
-// holds the lock, lockDir tries again until LockWait has passed. Then it gives
+// holds the lock, lockDir tries again until wait has passed. Then it gives
 // ErrStateLocked. The kernel releases the lock when the caller closes the
 // file, or when the process ends. A signal can interrupt the call, so it
 // repeats on EINTR. Any other fault gives ErrState.
-func lockDir(root *os.Root) (*os.File, error) {
+func lockDir(root *os.Root, wait time.Duration) (*os.File, error) {
 	d, err := root.Open(".")
 	if err != nil {
 		return nil, ErrState
@@ -49,7 +44,7 @@ func lockDir(root *os.Root) (*os.File, error) {
 		return nil, ErrState
 	}
 	var ferr error
-	deadline := time.Now().Add(LockWait)
+	deadline := time.Now().Add(wait)
 	if err := rc.Control(func(fd uintptr) {
 		for {
 			ferr = flock(int(fd), syscall.LOCK_EX|syscall.LOCK_NB)
