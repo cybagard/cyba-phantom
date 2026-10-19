@@ -12,7 +12,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
-	"github.com/cybagard/cyba-phantom/internal/tlog"
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 )
 
 const origin = "phantom/test"
@@ -35,7 +35,7 @@ func newKey(t testing.TB, name string) (note.Signer, string) {
 
 func signed(t testing.TB, s note.Signer, size uint64) []byte {
 	t.Helper()
-	msg, err := tlog.SignCheckpoint(s, size, testRoot)
+	msg, err := verifier.SignCheckpoint(s, size, testRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +104,8 @@ func TestTS14_Checkpoint(t *testing.T) {
 	}
 	changedBody := bytes.Clone(good)
 	changedBody[len(changedBody)-len(sigLine)-3] ^= 1
-	// A key text with another name gives a verifier with another name. The
-	// origin comes from the verifier, so a note for the first name is refused.
+	// This verifier has another name and another key. The signature check
+	// refuses the note first, because no signature line is from this key.
 	_, nameText := newKey(t, "phantom/name")
 	nameV, _ := ParseKey([]byte(nameText))
 	for name, tc := range map[string]struct {
@@ -143,11 +143,29 @@ func TestTS14_Checkpoint(t *testing.T) {
 	wantErr(t, "large reader", err, ErrTooLarge)
 }
 
+// T-S-14: a nil verifier means that the trusted key is missing. The result is
+// ErrKey and not a panic, also for a note past the size cap. Inclusion and
+// Consistency call ParseCheckpoint, so they give the same result. The test
+// covers only a nil interface.
+func TestTS14_NilVerifier(t *testing.T) {
+	s, _ := newKey(t, origin)
+	good := signed(t, s, 7)
+	_, err := ParseCheckpoint(good, nil)
+	wantErr(t, "ParseCheckpoint", err, ErrKey)
+	_, err = ParseCheckpoint(make([]byte, MaxNoteBytes+1), nil)
+	wantErr(t, "ParseCheckpoint, note over the cap", err, ErrKey)
+	_, err = ReadCheckpoint(bytes.NewReader(good), nil)
+	wantErr(t, "ReadCheckpoint", err, ErrKey)
+	_, err = Inclusion(nil, good, Event{}, InclusionProof{})
+	wantErr(t, "Inclusion", err, ErrKey)
+	wantErr(t, "Consistency", Consistency(nil, good, good, nil), ErrKey)
+}
+
 // T-S-14, input cases: the event bytes.
 func TestTS14_Event(t *testing.T) {
 	good := []byte(`{"a":1,"b":"x"}`)
 	e, err := ReadEvent(bytes.NewReader(good))
-	if err != nil || !bytes.Equal(e.Raw, good) || e.Hash != tlog.EventHash(event.Hash(good)) {
+	if err != nil || !bytes.Equal(e.Raw, good) || e.Hash != verifier.EventHash(event.Hash(good)) {
 		t.Fatalf("canonical event: %+v, %v", e, err)
 	}
 	// 04 §7 refuses only bytes that are not canonical. Two names that differ
@@ -155,7 +173,7 @@ func TestTS14_Event(t *testing.T) {
 	// parser accepts these bytes, and the hash covers the bytes.
 	for _, in := range []string{`{"A":1}`, `{"A":1,"a":2}`} {
 		e, err := ParseEvent([]byte(in))
-		if err != nil || e.Hash != tlog.EventHash(event.Hash([]byte(in))) {
+		if err != nil || e.Hash != verifier.EventHash(event.Hash([]byte(in))) {
 			t.Errorf("member names in another case %s: %+v, %v", in, e, err)
 		}
 	}
@@ -197,7 +215,7 @@ func FuzzTS14_Event(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if c, err := event.Canonical(b); err != nil || !bytes.Equal(c, b) || e.Hash != tlog.EventHash(event.Hash(b)) {
+		if c, err := event.Canonical(b); err != nil || !bytes.Equal(c, b) || e.Hash != verifier.EventHash(event.Hash(b)) {
 			t.Errorf("accepted event is not canonical or has another hash")
 		}
 	})

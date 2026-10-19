@@ -16,9 +16,11 @@ const (
 	maxConsistencyHashes = 96
 )
 
-// jsonOpts sets the three member rules of 04 §7 explicitly.
+// jsonOpts sets the member rules and the text rule of 04 §7 explicitly. A
+// string with invalid UTF-8 is an error.
 var jsonOpts = json.JoinOptions(
 	jsontext.AllowDuplicateNames(false),
+	jsontext.AllowInvalidUTF8(false),
 	json.MatchCaseInsensitiveNames(false),
 	json.RejectUnknownMembers(true),
 )
