@@ -20,12 +20,15 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 const testName = "decoy.test"
@@ -81,15 +84,49 @@ func newRig(t *testing.T, maxConns, headerBytes int, tm timeouts, h http.Handler
 	return &rig{s: s, pool: pool}
 }
 
-func (r *rig) serve(t *testing.T) {
+// dialTimeout is the time limit of the dials of the tests in this file.
+const dialTimeout = 3 * time.Second
+
+// dialTCP opens a TCP connection to addr, with a time limit.
+func dialTCP(addr string) (net.Conn, error) {
+	return net.DialTimeout("tcp", addr, dialTimeout)
+}
+
+// dialTLS opens a TLS connection to addr, with a time limit for the dial and
+// the handshake.
+func dialTLS(addr string, cfg *tls.Config) (*tls.Conn, error) {
+	return tls.DialWithDialer(&net.Dialer{Timeout: dialTimeout}, "tcp", addr, cfg)
+}
+
+// listenLoopback opens a TCP socket on a free port of the loopback address.
+func listenLoopback(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ln
+}
+
+// serve serves a new socket with Serve and returns its address. It sets r.addr
+// to this address, so the last call wins. A test that sets r.addr itself uses
+// serveOn.
+func (r *rig) serve(t *testing.T) string {
+	t.Helper()
+	ln := listenLoopback(t)
 	r.addr = ln.Addr().String()
-	go func() { _ = r.s.Serve(ln) }()
+	r.serveOn(t, ln)
+	return r.addr
+}
+
+// serveOn serves ln with Serve and returns the channel of the Serve result. It
+// does not set r.addr.
+func (r *rig) serveOn(t *testing.T, ln net.Listener) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- r.s.Serve(ln) }()
 	t.Cleanup(func() { _ = r.s.Close() })
+	return done
 }
 
 func (r *rig) clientConfig(protos ...string) *tls.Config {
@@ -98,7 +135,7 @@ func (r *rig) clientConfig(protos ...string) *tls.Config {
 
 func (r *rig) dial(t *testing.T) *tls.Conn {
 	t.Helper()
-	c, err := tls.Dial("tcp", r.addr, r.clientConfig())
+	c, err := dialTLS(r.addr, r.clientConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,19 +174,54 @@ func statusValues(c net.Conn, n int) int {
 }
 
 // roundTrip writes req, reads the whole response and returns its status code,
-// or 0 when the write or the read fails.
+// or 0 when the write or the read fails. A test that must show the cause of a
+// failure uses roundTripErr.
 func roundTrip(c net.Conn, req string) int {
+	code, _ := roundTripErr(c, req)
+	return code
+}
+
+// roundTripErr is roundTrip with the cause: on a failure it returns 0 and the
+// error of the write or of the read.
+func roundTripErr(c net.Conn, req string) (int, error) {
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(c, req); err != nil {
-		return 0
+		return 0, fmt.Errorf("write: %w", err)
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("read: %w", err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	return resp.StatusCode
+	return resp.StatusCode, nil
+}
+
+// servesAgain fails the test unless a new TLS connection to addr gets a 200
+// within 5 s. It shows the last cause when it fails.
+func servesAgain(t *testing.T, r *rig, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last error
+	for {
+		c, err := dialTLS(addr, r.clientConfig())
+		if err == nil {
+			var code int
+			if code, err = roundTripErr(c, head(0)); err == nil && code == 200 {
+				_ = c.Close()
+				return
+			}
+			if err == nil {
+				err = fmt.Errorf("status %d", code)
+			}
+			_ = c.Close()
+		}
+		last = err
+		if time.Now().After(deadline) {
+			t.Fatalf("%s does not serve after a slot is free: %v", addr, last)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // shortTimeouts has three different values. The read-header timeout is short.
@@ -209,7 +281,7 @@ func TestTS17IdleAndPartialHelloClose(t *testing.T) {
 	r.serve(t)
 	for name, partial := range map[string][]byte{"idle": nil, "partial hello": {0x16, 0x03, 0x01, 0x01, 0x00, 0x01}} {
 		lines := r.s.ErrorLines()
-		c, err := net.Dial("tcp", r.addr)
+		c, err := dialTCP(r.addr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -281,12 +353,27 @@ func TestTS17HeaderValueCount(t *testing.T) {
 	}
 }
 
-// T-S-17: New refuses a nil handler and a header cap below 8192.
+// T-S-17: New refuses a nil handler, a header cap below 8192, no TLS config, no
+// connection slot, and a TLS config that sets NextProtos or GetConfigForClient.
 func TestTS17NewRefusals(t *testing.T) {
 	cert, _ := testCert(t)
 	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes}
 	if _, err := New(cfg, nil); err == nil {
 		t.Error("nil handler: no error")
+	}
+	for name, mod := range map[string]func(*Config){
+		"no TLS config": func(c *Config) { c.TLS = nil },
+		"max conns 0":   func(c *Config) { c.MaxConns = 0 },
+		"NextProtos":    func(c *Config) { c.TLS = &tls.Config{Certificates: c.TLS.Certificates, NextProtos: []string{"h2"}} },
+		"GetConfigForClient": func(c *Config) {
+			c.TLS = &tls.Config{Certificates: c.TLS.Certificates, GetConfigForClient: captureHello}
+		},
+	} {
+		bad := cfg
+		mod(&bad)
+		if _, err := New(bad, okHandler); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 	cfg.HeaderBytes = testHeaderBytes - 1
 	if _, err := New(cfg, okHandler); err == nil {
@@ -315,18 +402,9 @@ func TestTS17ConnectionCap(t *testing.T) {
 	for range nConns {
 		conns = append(conns, r.dial(t))
 	}
-	over, err := net.Dial("tcp", r.addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer over.Close()
 	// The connection over the cap sends a ClientHello. The handshake must end
 	// with an end of stream or a reset; a timeout fails the test.
-	_ = over.SetDeadline(time.Now().Add(3 * time.Second))
-	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
-		t.Fatalf("connection over the cap: handshake error %v; want an end of stream or a reset", err)
-	}
-	_ = over.Close()
+	expectCapClose(t, r, r.addr, 1)
 	if calls.Load() != nConns {
 		t.Fatalf("capture ran %d times, want %d", calls.Load(), nConns)
 	}
@@ -339,20 +417,7 @@ func TestTS17ConnectionCap(t *testing.T) {
 		}
 		_ = c.Close()
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if c, err := tls.Dial("tcp", r.addr, r.clientConfig()); err == nil {
-			ok := status(c, 0) == 200
-			_ = c.Close()
-			if ok {
-				return
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("slot not given back")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	servesAgain(t, r, r.addr)
 }
 
 // pipelined sends a first request and a second head of n bytes. With split 0 it
@@ -495,45 +560,22 @@ func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 // connection on the first listener is open, and it serves after that one closes.
 func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
 	r := newRig(t, 1, testHeaderBytes, defaultTimeouts, okHandler)
-	r.serve(t)
-	first := r.addr
-	r.serve(t)
-	second := r.addr
+	first := r.serve(t)
+	second := r.serve(t)
 
-	c1, err := tls.Dial("tcp", first, r.clientConfig())
+	c1, err := dialTLS(first, r.clientConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c1.Close()
-	over, err := net.Dial("tcp", second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer over.Close()
-	_ = over.SetDeadline(time.Now().Add(3 * time.Second))
-	if err := tls.Client(over, r.clientConfig()).Handshake(); !isClosed(err) {
-		t.Fatalf("second listener over the cap: handshake error %v; want an end of stream or a reset", err)
-	}
+	expectCapClose(t, r, second, 1)
 	// The connection on the first listener serves its request and stays open.
 	// The client closes it to give the slot back.
-	if got := status(c1, 0); got != 200 {
-		t.Fatalf("first listener: status %d", got)
+	if code, err := roundTripErr(c1, head(0)); code != 200 {
+		t.Fatalf("first listener: status %d: %v", code, err)
 	}
 	_ = c1.Close()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if c, err := tls.Dial("tcp", second, r.clientConfig()); err == nil {
-			ok := status(c, 0) == 200
-			_ = c.Close()
-			if ok {
-				return
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("second listener does not serve after the slot is free")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	servesAgain(t, r, second)
 }
 
 // T-S-17: Close gives the slot back one time, also when called two times.
@@ -547,7 +589,7 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 	defer l.Close()
 	var served []net.Conn
 	for range 2 {
-		cc, err := net.Dial("tcp", ln.Addr().String())
+		cc, err := dialTCP(ln.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -575,7 +617,7 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 func TestTS17NoH2(t *testing.T) {
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	r.serve(t)
-	c, err := tls.Dial("tcp", r.addr, r.clientConfig("h2", "http/1.1"))
+	c, err := dialTLS(r.addr, r.clientConfig("h2", "http/1.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +669,7 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 	r.serve(t)
 	var addrs []string
 	for range 3 {
-		raw, err := net.Dial("tcp", r.addr)
+		raw, err := dialTCP(r.addr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -639,7 +681,7 @@ func TestTS17FailedHandshakesCountedNotLogged(t *testing.T) {
 		}
 		_ = raw.Close()
 	}
-	garbage, err := net.Dial("tcp", r.addr)
+	garbage, err := dialTCP(r.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,10 +743,7 @@ func TestTS17ErrorLineSignalFollowsLine(t *testing.T) {
 // and the channel that gets the result of ServePlain.
 func (r *rig) servePlain(t *testing.T, h http.Handler) (string, <-chan error) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := listenLoopback(t)
 	done := make(chan error, 1)
 	go func() { done <- r.s.ServePlain(ln, h) }()
 	t.Cleanup(func() { _ = r.s.Close() })
@@ -739,7 +778,7 @@ func TestTS17ChallengeProtoGetsNoHTTP(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 16)
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
 	r.serve(t)
-	c, err := tls.Dial("tcp", r.addr, r.clientConfig(challengeProto))
+	c, err := dialTLS(r.addr, r.clientConfig(challengeProto))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -777,7 +816,7 @@ func TestTS17ALPNListKeepsHTTP11(t *testing.T) {
 		{[]string{"h2", challengeProto, "http/1.1"}, "http/1.1"},
 		{[]string{"h2", "http/1.1"}, "http/1.1"},
 	} {
-		c, err := tls.Dial("tcp", r.addr, r.clientConfig(tc.offer...))
+		c, err := dialTLS(r.addr, r.clientConfig(tc.offer...))
 		if err != nil {
 			t.Fatalf("offer %v: %v", tc.offer, err)
 		}
@@ -930,17 +969,13 @@ func (b blockingHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 // the results of the two Serve calls and the channel of the two client statuses.
 func openRequests(t *testing.T, r *rig, bh blockingHandler) (serves [2]<-chan error, statuses <-chan int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := listenLoopback(t)
 	r.addr = ln.Addr().String()
-	tlsDone := make(chan error, 1)
-	go func() { tlsDone <- r.s.Serve(ln) }()
+	tlsDone := r.serveOn(t, ln)
 	plain, plainDone := r.servePlain(t, bh)
 	res := make(chan int, 2)
 	go func() {
-		c, err := tls.Dial("tcp", r.addr, r.clientConfig())
+		c, err := dialTLS(r.addr, r.clientConfig())
 		if err != nil {
 			res <- 0
 			return
@@ -949,7 +984,7 @@ func openRequests(t *testing.T, r *rig, bh blockingHandler) (serves [2]<-chan er
 		res <- status(c, 0)
 	}()
 	go func() {
-		c, err := net.Dial("tcp", plain)
+		c, err := dialTCP(plain)
 		if err != nil {
 			res <- 0
 			return
@@ -1017,8 +1052,10 @@ func TestTS17ShutdownClosesOpenConnectionsAtTheDeadline(t *testing.T) {
 	begin := time.Now()
 	err := r.s.Shutdown(ctx)
 	took := time.Since(begin)
-	if !errors.Is(err, context.DeadlineExceeded) || took < deadline-50*time.Millisecond || took > deadline+time.Second {
-		t.Fatalf("Shutdown returned %v after %v; want the deadline error at about %v", err, took, deadline)
+	// The handler waits for its release channel, not for the connection. So
+	// Shutdown also waits handlerWait for it.
+	if !errors.Is(err, context.DeadlineExceeded) || took < deadline-50*time.Millisecond || took > deadline+handlerWait+500*time.Millisecond {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error at about %v", err, took, deadline+handlerWait)
 	}
 	for range 2 {
 		select {
@@ -1103,6 +1140,16 @@ func (l *stallListener) Accept() (net.Conn, error) {
 	return &stallConn{Conn: c, stall: &l.stall, closed: make(chan struct{})}, nil
 }
 
+// serveStall serves a socket whose connections are stallConns. It sets r.addr
+// and returns the listener and the channel of the Serve result.
+func (r *rig) serveStall(t *testing.T) (*stallListener, <-chan error) {
+	t.Helper()
+	raw := listenLoopback(t)
+	ln := &stallListener{Listener: raw}
+	r.addr = raw.Addr().String()
+	return ln, r.serveOn(t, ln)
+}
+
 // T-S-17: three idle TLS connections whose write below TLS cannot complete close
 // at the deadline of Shutdown. Shutdown returns the error of its context in at
 // most the deadline + 1 s, and all slots are free after it. Without the raw close
@@ -1122,15 +1169,7 @@ func TestTS17ShutdownClosesIdleTLSConnectionsWithStalledWrites(t *testing.T) {
 	)
 	r := newRig(t, nConns, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
-	raw, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln := &stallListener{Listener: raw}
-	r.addr = raw.Addr().String()
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- r.s.Serve(ln) }()
-	t.Cleanup(func() { _ = r.s.Close() })
+	ln, serveDone := r.serveStall(t)
 
 	for range nConns {
 		if got := status(r.dial(t), 0); got != 200 {
@@ -1247,5 +1286,396 @@ func TestTS17SelfDialGivesNoEventAndNoCapture(t *testing.T) {
 	}
 	if evs := q.Drain(); len(evs) != 0 {
 		t.Errorf("%d request events, want 0", len(evs))
+	}
+}
+
+// running is the number of handlers that run now.
+func (s *Server) running() int {
+	s.handlers.mu.Lock()
+	defer s.handlers.mu.Unlock()
+	return s.handlers.n
+}
+
+// shutdownWithin calls Shutdown and returns its result and its time. It fails
+// the test when Shutdown does not return in 30 s.
+func shutdownWithin(t *testing.T, s *Server, ctx context.Context) (error, time.Duration) {
+	t.Helper()
+	res := make(chan error, 1)
+	begin := time.Now()
+	go func() { res <- s.Shutdown(ctx) }()
+	select {
+	case err := <-res:
+		return err, time.Since(begin)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Shutdown did not return in 30 s")
+		return nil, 0
+	}
+}
+
+// holdHandler tells on started that a request is in the handler. It returns when
+// the connection of the request closes.
+type holdHandler struct{ started chan struct{} }
+
+func (h holdHandler) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
+	h.started <- struct{}{}
+	<-r.Context().Done()
+}
+
+// holdRequest opens a TLS connection, sends a request and waits until the request
+// is in the handler. The test closes the connection at the end.
+func (r *rig) holdRequest(t *testing.T, h holdHandler) {
+	t.Helper()
+	c := r.dial(t)
+	if _, err := io.WriteString(c, head(0)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-h.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not reach the handler")
+	}
+}
+
+// stalledHeldRig serves a socket of stallConns, holds one request in the handler,
+// and then stalls the writes below TLS. The connection is active, so
+// http.Server.Shutdown does not close it. A close_notify write on it cannot
+// complete.
+func stalledHeldRig(t *testing.T) *rig {
+	t.Helper()
+	h := holdHandler{started: make(chan struct{}, 1)}
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, h)
+	ln, _ := r.serveStall(t)
+	r.holdRequest(t, h)
+	ln.stall.Store(true)
+	return r
+}
+
+// inHTTPShutdown tells if http.Server.Shutdown is in the call stack of the caller.
+func inHTTPShutdown() bool {
+	pcs := make([]uintptr, 24)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if f.Function == "net/http.(*Server).Shutdown" {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// splitCtx is a context with two ends. http.Server.Shutdown sees inHTTP. All
+// other callers see the embedded context. With gate set, Done blocks in
+// http.Server.Shutdown until gate is closed.
+type splitCtx struct {
+	context.Context
+	inHTTP context.Context
+	gate   chan struct{}
+}
+
+func (c splitCtx) Done() <-chan struct{} {
+	if !inHTTPShutdown() {
+		return c.Context.Done()
+	}
+	if c.gate != nil {
+		<-c.gate
+	}
+	return c.inHTTP.Done()
+}
+
+func (c splitCtx) Err() error {
+	if inHTTPShutdown() {
+		return c.inHTTP.Err()
+	}
+	return c.Context.Err()
+}
+
+// T-S-17: a handler that runs past the deadline of Shutdown and then calls
+// Enqueue is done before Shutdown returns. After Shutdown returns and the queue
+// closes, the queue counts no drop and holds the event. Shutdown returns within
+// the deadline + 1 s.
+func TestTS17ShutdownWaitsForHandlerBeforeQueueClose(t *testing.T) {
+	const (
+		deadline   = 300 * time.Millisecond
+		handlerRun = 600 * time.Millisecond
+	)
+	hello, q, _ := newHelloQueue(t, 16)
+	started := make(chan struct{}, 1)
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		time.Sleep(handlerRun) // a timer, not the network
+		hello.ServeHTTP(w, r)
+	})
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, slow)
+	r.serve(t)
+	c := r.dial(t)
+	go func() { _, _ = roundTripErr(c, head(0)) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not reach the handler")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	err, took := shutdownWithin(t, r.s, ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+time.Second {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+time.Second)
+	}
+	q.Close()
+	if d := q.Dropped(); d != (event.Dropped{}) {
+		t.Fatalf("the queue counts drops %+v, want none", d)
+	}
+	if evs := q.Drain(); len(evs) != 1 {
+		t.Fatalf("the queue holds %d events after Shutdown, want 1", len(evs))
+	}
+}
+
+// T-S-17: a handler that runs longer than the bound does not hold Shutdown for
+// more than handlerWait after its deadline.
+func TestTS17ShutdownWaitForHandlerHasABound(t *testing.T) {
+	const (
+		deadline = 300 * time.Millisecond
+		margin   = 500 * time.Millisecond
+	)
+	bh := blockingHandler{started: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(bh.release) })
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, bh)
+	r.serve(t)
+	c := r.dial(t)
+	go func() { _, _ = roundTripErr(c, head(0)) }()
+	<-bh.started
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	err, took := shutdownWithin(t, r.s, ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown returned %v, want the deadline error", err)
+	}
+	if took < deadline+handlerWait-100*time.Millisecond || took > deadline+handlerWait+margin {
+		t.Fatalf("Shutdown returned after %v; want about %v", took, deadline+handlerWait)
+	}
+	if n := r.s.running(); n != 1 {
+		t.Fatalf("%d handlers run after Shutdown, want 1", n)
+	}
+}
+
+// T-S-17: the count of running handlers goes down when a handler panics, so
+// Shutdown does not wait for the bound.
+func TestTS17ShutdownDoesNotWaitForPanickedHandler(t *testing.T) {
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("test panic")
+	}))
+	r.serve(t)
+	c := r.dial(t)
+	// net/http recovers the panic and closes the connection after the count went down.
+	if code, err := roundTripErr(c, head(0)); code != 0 || err == nil {
+		t.Fatalf("status %d, error %v; want a closed connection", code, err)
+	}
+	if n := r.s.running(); n != 0 {
+		t.Fatalf("%d handlers run after the panic, want 0", n)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, took := shutdownWithin(t, r.s, ctx); took > handlerWait/2 {
+		t.Fatalf("Shutdown took %v after a panic, want less than %v", took, handlerWait/2)
+	}
+}
+
+// T-S-17: Shutdown also waits for a handler of a plain serve.
+func TestTS17ShutdownWaitsForPlainHandler(t *testing.T) {
+	const (
+		deadline   = 100 * time.Millisecond
+		handlerRun = 400 * time.Millisecond
+	)
+	var finished atomic.Bool
+	started := make(chan struct{}, 1)
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, okHandler)
+	plain, _ := r.servePlain(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		started <- struct{}{}
+		time.Sleep(handlerRun) // a timer, not the network
+		finished.Store(true)
+	}))
+	c := dialPlain(t, plain, 1)
+	go func() { _, _ = roundTripErr(c, head(0)) }()
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	err, took := shutdownWithin(t, r.s, ctx)
+	if !finished.Load() {
+		t.Fatalf("Shutdown returned after %v while the plain handler still ran", took)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+handlerWait {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+handlerWait)
+	}
+}
+
+// T-S-17: the Shutdown calls of net/http end with an error, and the context of
+// Shutdown is not done. This is the done arm with an error. A stalled TLS
+// connection closes through the socket sweep. Without the sweep, hs.Close waits
+// 5 s for the close_notify write. Shutdown returns within 1 s of its deadline.
+func TestTS17ShutdownSweepsWhenDoneArmGivesError(t *testing.T) {
+	const deadline = 300 * time.Millisecond
+	r := stalledHeldRig(t)
+	inHTTP, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	err, took := shutdownWithin(t, r.s, splitCtx{Context: context.Background(), inHTTP: inHTTP})
+	t.Logf("Shutdown returned %v after %v", err, took)
+	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+time.Second {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+time.Second)
+	}
+	if n := len(r.s.sem); n != 0 {
+		t.Fatalf("%d slots in use after Shutdown, want 0", n)
+	}
+}
+
+// T-S-17: the context is done at the call. A stalled TLS connection closes
+// through the socket sweep, and Shutdown returns the error of the context within
+// 1 s.
+func TestTS17ShutdownWithDoneContextClosesStalledConnection(t *testing.T) {
+	r := stalledHeldRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err, took := shutdownWithin(t, r.s, ctx)
+	if err != context.Canceled || took > time.Second {
+		t.Fatalf("Shutdown returned %v after %v; want %v in at most 1 s", err, took, context.Canceled)
+	}
+	if n := len(r.s.sem); n != 0 {
+		t.Fatalf("%d slots in use after Shutdown, want 0", n)
+	}
+	if n := r.s.running(); n != 0 {
+		t.Fatalf("%d handlers run after Shutdown, want 0", n)
+	}
+}
+
+// T-S-17: with a context that is done at the call, Shutdown gives the error of
+// the context every time. Without the check at the entry, the result is nil or
+// the error at random.
+func TestTS17ShutdownWithDoneContextGivesContextError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := range 20 {
+		r := newRig(t, 2, testHeaderBytes, defaultTimeouts, okHandler)
+		r.serve(t)
+		if err := r.s.Shutdown(ctx); err != context.Canceled {
+			t.Errorf("run %d: Shutdown returned %v, want %v", i, err, context.Canceled)
+		}
+	}
+}
+
+// T-S-17: Shutdown returns only after each Shutdown call of net/http returned.
+// The test holds one of these calls inside the context. Shutdown must not
+// return while the call runs.
+func TestTS17ShutdownWaitsForServerShutdownCalls(t *testing.T) {
+	const deadline = 300 * time.Millisecond
+	h := holdHandler{started: make(chan struct{}, 1)}
+	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, h)
+	r.serve(t)
+	r.holdRequest(t, h)
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	base, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { res <- r.s.Shutdown(splitCtx{Context: base, inHTTP: base, gate: gate}) }()
+	select {
+	case err := <-res:
+		t.Fatalf("Shutdown returned %v while a Shutdown call of net/http still ran", err)
+	case <-time.After(deadline + 400*time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-res:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown returned %v, want the deadline error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the Shutdown call of net/http returned")
+	}
+}
+
+// fillHandler hijacks its connection and writes to it until a write times out.
+// Then the send buffer of the socket is full. It tells on filled, and then it
+// writes once more with no deadline. It sends the error of this write on result.
+// The connection is hijacked, so net/http does not close it at Close.
+type fillHandler struct{ filled, result chan error }
+
+func (f fillHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		f.filled <- err
+		return
+	}
+	defer conn.Close()
+	chunk := make([]byte, 32<<10)
+	for {
+		_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, err := conn.Write(chunk); err != nil {
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				f.filled <- err
+				return
+			}
+			break
+		}
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	f.filled <- nil
+	_, err = conn.Write(chunk)
+	f.result <- err
+}
+
+// T-S-17: a real TCP connection with a full send buffer closes through the
+// socket sweep. The client does not read. The handler holds the connection, and
+// its write blocks. A hijacked connection is not in the list of net/http, so only
+// the sweep can close it. A second request on the TLS socket keeps the Shutdown
+// call of net/http open until the deadline. Shutdown returns within the deadline
+// + 1 s, and the handler write returns an error before that.
+func TestTS17ShutdownClosesConnectionWithFullSendBuffer(t *testing.T) {
+	const deadline = 300 * time.Millisecond
+	f := fillHandler{filled: make(chan error, 1), result: make(chan error, 1)}
+	hold := holdHandler{started: make(chan struct{}, 1)}
+	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, hold)
+	r.serve(t)
+	plain, _ := r.servePlain(t, f)
+	r.holdRequest(t, hold)
+	raw, err := dialTCP(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	// A small receive buffer on the client side makes the send buffer of the
+	// server fill with little data. The client never reads.
+	if err := raw.(*net.TCPConn).SetReadBuffer(2048); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(raw, head(0)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-f.filled:
+		if err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send buffer did not fill")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	err, took := shutdownWithin(t, r.s, ctx)
+	t.Logf("Shutdown returned %v after %v", err, took)
+	if !errors.Is(err, context.DeadlineExceeded) || took > deadline+handlerWait/2 {
+		t.Fatalf("Shutdown returned %v after %v; want the deadline error in at most %v", err, took, deadline+handlerWait/2)
+	}
+	select {
+	case err := <-f.result:
+		t.Logf("handler write: %v", err)
+		if err == nil {
+			t.Fatal("the handler write returned no error")
+		}
+	default:
+		t.Fatal("the handler write is still blocked after Shutdown returned")
+	}
+	if n := len(r.s.sem); n != 0 {
+		t.Fatalf("%d slots in use after Shutdown, want 0", n)
 	}
 }
