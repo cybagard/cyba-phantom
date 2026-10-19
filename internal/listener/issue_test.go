@@ -11,6 +11,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
+	"log/slog"
 	"maps"
 	"math/big"
 	"net"
@@ -72,6 +74,177 @@ func TestTI01ObtainsACertificateFromPebble(t *testing.T) {
 	f.requireALPN(t)
 	if got := f.a.Refused(); got != 0 {
 		t.Errorf("name gate refused %d handshakes", got)
+	}
+}
+
+// holdStorage counts every call by key. It holds the first Store of a key that
+// starts with "certificates/": it closes held one time, then waits for release.
+type holdStorage struct {
+	certmagic.Storage
+	held, release chan struct{}
+	once          sync.Once
+	mu            sync.Mutex
+	byKey         map[string]int
+}
+
+func (h *holdStorage) note(k string) {
+	h.mu.Lock()
+	h.byKey[k]++
+	h.mu.Unlock()
+}
+
+// calls returns the number of calls and a copy of the counts for each key.
+func (h *holdStorage) calls() (int, map[string]int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	total := 0
+	for _, n := range h.byKey {
+		total += n
+	}
+	return total, maps.Clone(h.byKey)
+}
+
+func (h *holdStorage) Lock(ctx context.Context, k string) error {
+	h.note(k)
+	return h.Storage.Lock(ctx, k)
+}
+
+func (h *holdStorage) Unlock(ctx context.Context, k string) error {
+	h.note(k)
+	return h.Storage.Unlock(ctx, k)
+}
+
+func (h *holdStorage) Load(ctx context.Context, k string) ([]byte, error) {
+	h.note(k)
+	return h.Storage.Load(ctx, k)
+}
+
+func (h *holdStorage) Stat(ctx context.Context, k string) (certmagic.KeyInfo, error) {
+	h.note(k)
+	return h.Storage.Stat(ctx, k)
+}
+
+func (h *holdStorage) Exists(ctx context.Context, k string) bool {
+	h.note(k)
+	return h.Storage.Exists(ctx, k)
+}
+
+func (h *holdStorage) List(ctx context.Context, p string, r bool) ([]string, error) {
+	h.note(p)
+	return h.Storage.List(ctx, p, r)
+}
+
+func (h *holdStorage) Delete(ctx context.Context, k string) error {
+	h.note(k)
+	return h.Storage.Delete(ctx, k)
+}
+
+func (h *holdStorage) Store(ctx context.Context, k string, v []byte) error {
+	h.note(k)
+	if strings.HasPrefix(k, "certificates/") {
+		h.once.Do(func() {
+			close(h.held)
+			<-h.release
+		})
+	}
+	return h.Storage.Store(ctx, k, v)
+}
+
+// TestTS16NoStorageReadForAcmeTLSDuringARealIssuance (T-S-16): Pebble issues a
+// certificate while 4 000 acme-tls/1 handshakes for the name go to the listener.
+// The first Store of a certificate key holds the issuance. At that point the
+// solver is cleaned up, no request is in flight, and the certificate is not yet
+// served. This is the window after the end of a challenge. The hold is in the
+// storage, not in the CA handler: a held request could make the ACME client
+// retry. The handshakes use pipes and GetCertificate, not the decoy socket. The
+// connection limit of the socket gives a slot back after the client sees the end
+// of a connection. Pebble validates on the decoy socket.
+func TestTS16NoStorageReadForAcmeTLSDuringARealIssuance(t *testing.T) {
+	var logs, std syncBuf
+	old := log.Writer()
+	log.SetOutput(&std)
+	t.Cleanup(func() { log.SetOutput(old) })
+	hold := &holdStorage{held: make(chan struct{}), release: make(chan struct{}), byKey: map[string]int{}}
+	f := newIssueFixture(t, "window.phantom.test", nil, func(p *ACMEParams) {
+		hold.Storage, p.Storage = p.Storage, hold
+		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	var releaseOnce sync.Once
+	open := func() { releaseOnce.Do(func() { close(hold.release) }) }
+	t.Cleanup(open) // a failed check must not leave the issuance held
+	// The recorder sees each key that certmagic gives to the wrapper.
+	rec := &loadRecorder{Storage: f.a.cfg.Storage}
+	f.a.cfg.Storage = rec
+	key := tokenKeyOf(f.a, f.name)
+	startIssue(t, f)
+
+	timer := time.NewTimer(issueLimit)
+	defer timer.Stop()
+	select {
+	case <-hold.held:
+	case <-timer.C:
+		t.Fatalf("the issuance did not store a certificate within %v", issueLimit)
+	}
+	if _, active := certmagic.GetACMEChallenge(f.name); active {
+		t.Fatal("the challenge is still active at the hold")
+	}
+	if _, err := f.chain(); err == nil {
+		t.Fatal("the listener serves a certificate before the issuance stored it")
+	}
+	f.requireALPN(t) // Pebble validated on the decoy socket before the hold
+
+	total0, keys0 := hold.calls()
+	loads0, refused0 := rec.count(key), f.a.Refused()
+	logs0, std0 := logs.String(), std.String()
+	// The window: the lookup says that a challenge is active, as it does just
+	// before the end of a challenge. The map of certmagic holds none.
+	f.a.challenge = func(name string) (certmagic.Challenge, bool) { return certmagic.Challenge{}, name == f.name }
+	const handshakes, workers = 4000, 8
+	var next, worked atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for next.Add(1) <= handshakes {
+				if prodHandshake(f.a, f.name, "acme-tls/1") == nil {
+					worked.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	f.a.challenge = certmagic.GetACMEChallenge
+
+	if w := worked.Load(); w != 0 {
+		t.Errorf("handshakes that worked: %d", w)
+	}
+	total1, keys1 := hold.calls()
+	if total1 != total0 {
+		for k, n := range keys1 {
+			if n != keys0[k] {
+				t.Errorf("the storage under the wrapper got %d calls for %q during the handshakes", n-keys0[k], k)
+			}
+		}
+	}
+	if n := rec.count(key) - loads0; n != handshakes {
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake", n, handshakes)
+	}
+	if got := f.a.Refused(); got != refused0 {
+		t.Errorf("refused changed from %d to %d: the gate did not let each handshake through", refused0, got)
+	}
+	if logs.String() != logs0 || std.String() != std0 {
+		t.Errorf("log output during the handshakes: %q %q", strings.TrimPrefix(logs.String(), logs0), strings.TrimPrefix(std.String(), std0))
+	}
+	f.onlyPebble(t, "during the handshakes")
+
+	open()
+	chain := f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })
+	f.verifyToPebble(t, chain)
+	f.onlyPebble(t, "after the issuance")
+	_, keys := hold.calls()
+	for k, n := range keys {
+		if strings.Contains(k, "challenge_tokens") {
+			t.Errorf("the storage under the wrapper got %d calls for the token key %q", n, k)
+		}
 	}
 }
 
