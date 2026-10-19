@@ -440,8 +440,9 @@ func TestTS19ArchiveKeepsNoPAXBuffer(t *testing.T) {
 	mtime := "1700000000." + strings.Repeat("1", 1<<20-200)
 	var tb []byte
 	for i := range 7 {
-		tb = append(tb, paxHdr(paxRec("path", "traps/d"+strconv.Itoa(i)), paxRec("mtime", mtime))...)
-		tb = append(tb, rawHdr("x", tar.TypeReg, 0)...)
+		name := "traps/d" + strconv.Itoa(i)
+		tb = append(tb, paxHdr(paxRec("path", name), paxRec("mtime", mtime))...)
+		tb = append(tb, rawHdr(name, tar.TypeReg, 0)...)
 	}
 	in := gz(append(tb, zeros(1024)...))
 	tb = nil

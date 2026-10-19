@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"archive/tar"
+	"bytes"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -51,10 +52,14 @@ func checkEntry(hdr *tar.Header) (string, error) {
 	if hdr.Linkname != "" {
 		return "", ErrArchiveInvalid
 	}
-	for key := range hdr.PAXRecords {
+	for key, value := range hdr.PAXRecords {
 		switch key {
 		case "path", "size", "mtime":
 		default:
+			return "", ErrArchiveInvalid
+		}
+		// Next skips an empty value and another reader applies it.
+		if value == "" {
 			return "", ErrArchiveInvalid
 		}
 	}
@@ -114,11 +119,92 @@ func headerBytes(prevPad int64, hdr *tar.Header) int64 {
 	if len(hdr.PAXRecords) == 0 {
 		return n
 	}
+	return n + blockBytes + (paxBytes(hdr)+blockBytes-1)/blockBytes*blockBytes
+}
+
+// paxBytes returns the sum of the canonical lengths of the PAX records.
+func paxBytes(hdr *tar.Header) int64 {
 	var records int64
 	for k, v := range hdr.PAXRecords {
 		records += int64(paxRecordLen(k, v))
 	}
-	return n + blockBytes + (records+blockBytes-1)/blockBytes*blockBytes
+	return records
+}
+
+// maxCut is the length of the ustar name field. A reader that does not read
+// PAX records sees only the first maxCut bytes of a longer PAX path.
+const maxCut = 100
+
+// ustarSeenKey returns the key of the name that a reader without PAX support
+// sees: the cut of a long PAX path, or else the final name. It has the form of
+// the key that checkEntry returns, and a cut that ends in a slash loses it.
+func ustarSeenKey(hdr *tar.Header) string {
+	name := hdr.Name
+	if p := hdr.PAXRecords["path"]; len(p) > maxCut {
+		name = p[:maxCut]
+	}
+	return strings.ToLower(strings.TrimSuffix(name, "/"))
+}
+
+// ustarSize returns the value of the size field of the header block b. The
+// field must have the form that tar.Writer, GNU tar and Python write: 11 octal
+// digits and one NUL.
+func ustarSize(b []byte) (int64, bool) {
+	f := b[124:136]
+	var n int64
+	for _, c := range f[:11] {
+		if c < '0' || c > '7' {
+			return 0, false
+		}
+		n = n*8 + int64(c-'0')
+	}
+	if f[11] != 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// zeroed reports whether b holds only zero bytes.
+func zeroed(b []byte) bool { return len(bytes.TrimLeft(b, "\x00")) == 0 }
+
+// rawFormOK checks the bytes k that the Next call of hdr read, after the
+// byte count of headerBytes. The layout of k is then fixed: the padding of the
+// previous entry, a PAX header with its records when hdr has PAX records, and
+// the header block of the entry. The checks:
+//   - the size field of each header block has the canonical form;
+//   - the size of the PAX header is the sum of the canonical record lengths,
+//     and the bytes after the records are zero. A repeated key or a record
+//     length with a leading zero makes the sum smaller;
+//   - a PAX size record has decimal digits only, with no sign and no leading
+//     zero, and its value is the value of the size field of the entry;
+//   - with a PAX path record, the prefix field is zero and the name field is
+//     the path, or the first 100 bytes of it, with NUL padding.
+func rawFormOK(k []byte, pad int64, hdr *tar.Header) bool {
+	entry := k[len(k)-blockBytes:]
+	size, ok := ustarSize(entry)
+	if !ok {
+		return false
+	}
+	if len(hdr.PAXRecords) > 0 {
+		x := k[pad : pad+blockBytes]
+		recs := k[pad+blockBytes : len(k)-blockBytes]
+		// A size field in another form gives 0, which is not the sum.
+		n, _ := ustarSize(x)
+		if n != paxBytes(hdr) || !zeroed(recs[n:]) {
+			return false
+		}
+	}
+	if s, ok := hdr.PAXRecords["size"]; ok {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || strconv.FormatInt(n, 10) != s || n != size {
+			return false
+		}
+	}
+	if p, ok := hdr.PAXRecords["path"]; ok {
+		p = p[:min(len(p), maxCut)]
+		return zeroed(entry[345:500]) && string(entry[:len(p)]) == p && zeroed(entry[len(p):maxCut])
+	}
+	return true
 }
 
 // paxRecordLen returns the length of the PAX record "<n> <key>=<value>\n" in

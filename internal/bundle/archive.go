@@ -56,7 +56,16 @@ func (a *Archive) Len() int { return len(a.files) }
 type capReader struct {
 	r io.Reader
 	n int64
+	// While keep is set, the reader appends the bytes that it passes to kept.
+	// ReadArchive sets keep for one Next call, so kept holds at most maxKept
+	// bytes: the padding of the previous entry, two header blocks, the PAX data
+	// that archive/tar caps at 1 MiB, and the end blocks.
+	keep bool
+	kept []byte
 }
+
+// maxKept is the most bytes that the Next call of one entry can read.
+const maxKept = 3*blockBytes + 1<<20
 
 func (c *capReader) Read(p []byte) (int, error) {
 	if c.n > MaxDecodedBytes {
@@ -69,6 +78,12 @@ func (c *capReader) Read(p []byte) (int, error) {
 	c.n += int64(n)
 	if c.n > MaxDecodedBytes {
 		return n, ErrArchiveInvalid
+	}
+	if c.keep {
+		if len(c.kept)+n > maxKept {
+			return n, ErrArchiveInvalid
+		}
+		c.kept = append(c.kept, p[:n]...)
 	}
 	return n, err
 }
@@ -87,9 +102,15 @@ func (c *capReader) Read(p []byte) (int, error) {
 // decoded-byte count. A directory has no data and no effect, but it counts
 // toward MaxEntries.
 //
+// ReadArchive keeps the bytes that each Next call reads and checks their form
+// (rawFormOK). The tar end is the padding of the last entry and exactly two
+// zero blocks.
+//
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
 //     differ only in case or in a trailing slash;
+//   - two entries whose names are equal in the same way for a reader that does
+//     not read PAX records (ustarSeenKey);
 //   - a directory with a size;
 //   - an archive where the sum of the regular entry sizes passes
 //     MaxDecodedBytes.
@@ -109,11 +130,17 @@ func ReadArchive(b []byte) (*Archive, error) {
 	tr := tar.NewReader(cr)
 	files := make(map[string][]byte)
 	seen := make(map[string]bool)
+	seenUstar := make(map[string]bool)
 	var sizes, prevPad int64
 	for n := 0; ; n++ {
-		before := cr.n
+		cr.kept, cr.keep = cr.kept[:0], true
 		hdr, err := tr.Next()
+		cr.keep = false
 		if err == io.EOF {
+			// The end is the padding of the last entry and two zero blocks.
+			if int64(len(cr.kept)) != prevPad+2*blockBytes {
+				return nil, ErrArchiveInvalid
+			}
 			break
 		}
 		if err != nil || n >= MaxEntries {
@@ -126,21 +153,27 @@ func ReadArchive(b []byte) (*Archive, error) {
 		// PAX data exactly, with no read-ahead, from a source that is not an
 		// io.Seeker. The capReader is such a source. If a Go change adds a
 		// buffer, every archive fails, and the tests that use tar.Writer show it.
-		if cr.n-before != headerBytes(prevPad, hdr) {
+		if int64(len(cr.kept)) != headerBytes(prevPad, hdr) {
 			return nil, ErrArchiveInvalid
 		}
+		padBefore := prevPad
 		prevPad = 0
 		if hdr.Typeflag == tar.TypeReg {
 			prevPad = (blockBytes - hdr.Size%blockBytes) % blockBytes
 		}
 		key, err := checkEntry(hdr)
-		if err != nil || seen[key] {
+		if err != nil || !rawFormOK(cr.kept, padBefore, hdr) {
 			return nil, ErrArchiveInvalid
 		}
-		// Only the files map outlives ReadArchive. The clone of the key lets
-		// the seen map hold no PAX buffer, so the peak heap in the loop stays
+		ustarKey := ustarSeenKey(hdr)
+		if seen[key] || seenUstar[ustarKey] {
+			return nil, ErrArchiveInvalid
+		}
+		// Only the files map outlives ReadArchive. The clones of the keys let
+		// the seen maps hold no PAX buffer, so the peak heap in the loop stays
 		// small.
 		seen[strings.Clone(key)] = true
+		seenUstar[strings.Clone(ustarKey)] = true
 		if hdr.Typeflag == tar.TypeDir {
 			if hdr.Size != 0 {
 				return nil, ErrArchiveInvalid
