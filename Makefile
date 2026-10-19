@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
+.PHONY: all build test lint check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
 
 all: build lint test trace mirror-diff
 
@@ -31,6 +31,38 @@ lint:
 	@bad=$$(gofmt -l .); \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
+
+# The check target runs staticcheck, gosec and govulncheck on the module.
+# All three tools run on every call. Each tool prints under its own header line.
+# The target fails when any tool fails, and it names the failed tools.
+# The target is not part of all.
+# govulncheck v1.9.0 ignores the GOVULNDB environment variable.
+# The target passes the database with -db.
+# The devcontainer has no network, so it sets GOVULNDB to a local copy.
+# gosec reads the GOSEC_AI_* variables and can send code to an AI service.
+# The target removes these variables from the gosec environment.
+# A file:// database must have a modified value in its index/db.json.
+# When that value is missing, the target counts govulncheck as failed.
+GOVULNDB ?= https://vuln.go.dev
+
+check:
+	@failed=""; \
+	echo "== staticcheck =="; \
+	staticcheck ./... || failed="$$failed staticcheck"; \
+	echo "== gosec =="; \
+	env -u GOSEC_AI_PROVIDER -u GOSEC_AI_API_KEY -u GOSEC_AI_BASE_URL gosec -quiet ./... || failed="$$failed gosec"; \
+	echo "== govulncheck (db: $(GOVULNDB)) =="; \
+	case "$(GOVULNDB)" in \
+	file://*) \
+		index="$(GOVULNDB:file://%=%)/index/db.json"; \
+		modified=$$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' "$$index" 2>/dev/null | tr -cd '0-9A-Za-z:.+-'); \
+		if [ -n "$$modified" ]; then echo "govulncheck: database modified $$modified"; \
+		else echo "govulncheck: error: no modified value in $$index"; vulnfail=1; fi;; \
+	esac; \
+	govulncheck -db "$(GOVULNDB)" ./... || vulnfail=1; \
+	if [ -n "$$vulnfail" ]; then failed="$$failed govulncheck"; fi; \
+	if [ -n "$$failed" ]; then echo "check FAIL:$$failed"; exit 1; fi; \
+	echo "check: staticcheck, gosec and govulncheck passed"
 
 # C10: regenerate spec/08 from 01 + 07 and require a byte-exact match,
 # then re-hash spec/ against the sync stamp.
