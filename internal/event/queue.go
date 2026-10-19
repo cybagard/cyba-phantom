@@ -227,10 +227,10 @@ type Bytes struct {
 }
 
 // Bytes returns the sum of the bytes that Enqueue reserved for the queued
-// events of each lane. A sum can be more than the true sum for a short time. This occurs while a
-// producer or the consumer is between the byte update and the lane update. The
-// bulk sum is never more than 24 MiB. The evidence sum is never more than
-// 8 MiB.
+// events of each lane. A sum can be more than the sum of the queued events for
+// a short time. This occurs while a producer or the consumer is between the
+// byte update and the lane update. The bulk sum is never more than 24 MiB. The
+// evidence sum is never more than 8 MiB.
 func (q *Queue) Bytes() Bytes {
 	return Bytes{Bulk: q.bulkBytes.Load(), Evidence: q.evidenceBytes.Load()}
 }

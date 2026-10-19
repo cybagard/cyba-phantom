@@ -388,10 +388,12 @@ type dbOnly struct {
 
 // Event is a record with the DB-only values next to it. The record is the
 // value that the DB row and the hashed record both use. NewEvent sets all
-// fields. No function changes them later (C2, SEC-15), so Size stays true. The
-// queue reserves the bytes of Size at Enqueue. Each accessor returns a value that shares
-// no memory with the event. Code that uses reflect on the unexported fields can
-// reach the stored body prefix. No other package does this.
+// fields. No method changes them later (C2, SEC-15). Each accessor returns a
+// value that shares no memory with the event. Go permits the assignment of a
+// whole Event value. The queue does not depend on Size after Enqueue, because
+// it keeps the bytes that it reserved. Code that uses reflect on the
+// unexported fields can reach the stored body prefix. No other package does
+// this.
 type Event struct {
 	record Record
 	db     dbOnly
