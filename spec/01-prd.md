@@ -37,7 +37,7 @@ Organisations cannot tell whether AI browsing agents are hitting their web prope
 ### P0
 | ID | Requirement | Acceptance criteria |
 |----|-------------|---------------------|
-| FR-01 | Serve one or more decoy vhosts over HTTPS with automatic ACME certificates | Given a DNS A record and ports 80/443 open, when the service starts, then a valid cert is obtained within 120 s and renewed ≥ 30 days before expiry |
+| FR-01 | Serve one or more decoy vhosts over HTTPS with automatic ACME certificates | Given a DNS A record and ports 80/443 open, when the service starts, then a valid cert is obtained within 120 s, and its renewal starts when 35 % of its lifetime is left (about 31.5 days before expiry for a 90-day cert) (ADR-025) |
 | FR-02 | Load traps from a signed bundle and reject unsigned/tampered bundles | Given a bundle with a bad signature, when loaded, then the sensor keeps the previous bundle and logs `bundle_rejected` |
 | FR-03 | Inject per-session canary tokens into every trap surface (hidden text, HTML comment, fake API link, robots.txt, `.well-known`, meta tag, link `rel`) | Given two requests from different sessions, when pages are compared, then tokens differ and are unpredictable (≥ 128 bit) |
 | FR-04 | Record a canary callback when a token is presented on any callback surface (URL path, header, query, POST body) | Given a session S received token T, when any request presents T, then a `callback` event is written linking to S within 250 ms |
