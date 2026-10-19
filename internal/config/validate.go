@@ -205,6 +205,11 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 			fail("acme.cache_dir", c, d)
 		}
 	}
+	if b, ok := vals["bundle.path"]; ok {
+		if d := bundleConflict(vals, b.Str); d != "" {
+			fail("bundle.path", b, d)
+		}
+	}
 	return errs
 }
 
@@ -588,6 +593,45 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 		if s := filepath.Join(l.stateRoot, d); inDir(p, s) || inDir(s, p) {
 			return "the path must not be in or above the " + d + " directory"
 		}
+	}
+	return ""
+}
+
+// checkBundlePath applies the rules of checkStorePath. Then it checks that the file name ends in
+// .cbnd, and that the directory is not the state directory and is not in the keys or checkpoints
+// directory (SEC-23). It compares the path text only. The state directory is the only path above
+// those two directories. The cross-check bundleConflict compares the path with the other keys.
+func checkBundlePath(l *loader, raw string) string {
+	if d := checkStorePath(l, raw); d != "" {
+		return d
+	}
+	if !strings.HasSuffix(raw, ".cbnd") {
+		return "the file name must end in .cbnd"
+	}
+	dir := filepath.Dir(raw)
+	if dir == l.stateRoot {
+		return "the directory must not be the state directory"
+	}
+	for _, d := range []string{"keys", "checkpoints"} {
+		if inDir(dir, filepath.Join(l.stateRoot, d)) {
+			return "the directory must not be in the " + d + " directory"
+		}
+	}
+	return ""
+}
+
+// bundleConflict returns a detail if the directory of the bundle.path value p is in or above
+// tlog.dir or acme.cache_dir, or if p is store.path (SEC-23). It compares the path text only.
+// A key that is not in vals failed its own check, so it is skipped.
+func bundleConflict(vals map[string]Value, p string) string {
+	dir := filepath.Dir(p)
+	for _, k := range []string{"tlog.dir", "acme.cache_dir"} {
+		if v, ok := vals[k]; ok && (inDir(dir, v.Str) || inDir(v.Str, dir)) {
+			return "the directory must not be in or above " + k
+		}
+	}
+	if v, ok := vals["store.path"]; ok && v.Str == p {
+		return "the path must not be store.path"
 	}
 	return ""
 }

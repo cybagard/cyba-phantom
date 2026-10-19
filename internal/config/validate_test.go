@@ -774,7 +774,6 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"acme.cache_dir set", s + "c2/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c2"}, "in acme.cache_dir"},
 		{"bundle dir default", s + "bundle/e.db", nil, "directory of bundle.path"},
 		{"bundle dir set", s + "b2/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "b2/current.cbnd"}, "directory of bundle.path"},
-		{"bundle file in its dir", s + "b2/current.cbnd", []string{"PHANTOM_BUNDLE_PATH=" + s + "b2/current.cbnd"}, "directory of bundle.path"},
 		{"keys", s + "keys/e.db", nil, "keys directory"},
 		{"keys itself", s + "keys", nil, "keys directory"},
 		{"checkpoints", s + "checkpoints/e.db", nil, "checkpoints directory"},
@@ -795,6 +794,21 @@ func TestTS11_StorePathLoad(t *testing.T) {
 			}
 		})
 	}
+	// The bundle file is in its own directory: the load gives one error for each key, and each error names its key.
+	t.Run("bundle file in its dir", func(t *testing.T) {
+		_, err := loadProd(t, base, "PHANTOM_STORE_PATH="+s+"b2/current.cbnd", "PHANTOM_BUNDLE_PATH="+s+"b2/current.cbnd")
+		if err == nil {
+			t.Fatal("got no error")
+		}
+		for _, want := range []string{
+			"store.path at PHANTOM_STORE_PATH: the path must not be in the directory of bundle.path",
+			"bundle.path at PHANTOM_BUNDLE_PATH: the path must not be store.path",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("got %v, want an error with %q", err, want)
+			}
+		}
+	})
 	t.Run("moved tlog dir, default store", func(t *testing.T) {
 		if _, err := loadProd(t, base, "PHANTOM_TLOG_DIR="+s+"t2"); err != nil {
 			t.Error(err)
@@ -806,6 +820,69 @@ func TestTS11_StorePathLoad(t *testing.T) {
 func TestTS11_StorePathFailedKey(t *testing.T) {
 	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/elsewhere", "PHANTOM_STORE_PATH=/var/lib/phantom/tlog/e.db")
 	if err == nil || strings.Contains(err.Error(), "store.path") || !strings.Contains(err.Error(), "tlog.dir") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestTS11_BundlePathLoad checks that the load refuses a bundle.path with a bad path part, a bad file name, a
+// bad directory, or the value of store.path, and that the error names bundle.path (SEC-23). Each row runs with
+// the other key at its default or set.
+func TestTS11_BundlePathLoad(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	rows := []struct {
+		name, path string
+		with       []string
+		want       string // want is "" for a path that loads.
+	}{
+		{"default", s + "bundle/current.cbnd", nil, ""},
+		{"sibling directory", s + "bundle2/x.cbnd", nil, ""},
+		{"nested directory", s + "bundle/a/b/current.cbnd", nil, ""},
+		{"name that starts like tlog", s + "tlog2/x.cbnd", nil, ""},
+		{"all permitted characters", s + "Ab_1.x-y/Z.cbnd", nil, ""},
+		{"question mark", s + "bundle/c?.cbnd", nil, "each path part"},
+		{"hash in a parent", s + "bun#dle/current.cbnd", nil, "each path part"},
+		{"space", s + "bundle/my bundle.cbnd", nil, "each path part"},
+		{"non-ASCII letter", s + "bundle/cürrent.cbnd", nil, "each path part"},
+		{"dot dot", s + "bundle/../x.cbnd", nil, "must be clean"},
+		{"outside the state directory", "/etc/current.cbnd", nil, "state directory"},
+		{"state directory", "/var/lib/phantom", nil, "below the state directory"},
+		{"other suffix", s + "bundle/current.bin", nil, "must end in .cbnd"},
+		{"signature file", s + "bundle/current.cbnd.sig", nil, "must end in .cbnd"},
+		{"suffix in other case", s + "bundle/current.CBND", nil, "must end in .cbnd"},
+		{"no suffix", s + "bundle/current", nil, "must end in .cbnd"},
+		{"file in the state directory", s + "current.cbnd", nil, "must not be the state directory"},
+		{"tlog.dir default", s + "tlog/x.cbnd", nil, "in or above tlog.dir"},
+		{"in tlog.dir", s + "tlog/a/x.cbnd", nil, "in or above tlog.dir"},
+		{"tlog.dir set", s + "t2/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "in or above tlog.dir"},
+		{"above tlog.dir", s + "a/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "a/t"}, "in or above tlog.dir"},
+		{"acme.cache_dir default", s + "certs/x.cbnd", nil, "in or above acme.cache_dir"},
+		{"in acme.cache_dir", s + "certs/a/x.cbnd", nil, "in or above acme.cache_dir"},
+		{"acme.cache_dir set", s + "c2/x.cbnd", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c2"}, "in or above acme.cache_dir"},
+		{"above acme.cache_dir", s + "c/x.cbnd", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c/d"}, "in or above acme.cache_dir"},
+		{"keys", s + "keys/x.cbnd", nil, "keys directory"},
+		{"in keys", s + "keys/a/x.cbnd", nil, "keys directory"},
+		{"checkpoints", s + "checkpoints/x.cbnd", nil, "checkpoints directory"},
+		{"in checkpoints", s + "checkpoints/a/x.cbnd", nil, "checkpoints directory"},
+		{"store.path", s + "b2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b2/x.cbnd"}, "must not be store.path"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base, append([]string{"PHANTOM_BUNDLE_PATH=" + r.path}, r.with...)...)
+			switch {
+			case r.want == "" && err != nil, r.want != "" && err == nil:
+				t.Fatalf("got %v, want %q", err, r.want)
+			case err == nil:
+			case !strings.Contains(err.Error(), "bundle.path at PHANTOM_BUNDLE_PATH: ") || !strings.Contains(err.Error(), r.want):
+				t.Errorf("got %v, want an error on bundle.path with %q", err, r.want)
+			}
+		})
+	}
+}
+
+// TestTS11_BundlePathFailedKey checks that a bundle.path that failed its own check is not in the store.path rules.
+func TestTS11_BundlePathFailedKey(t *testing.T) {
+	_, err := loadProd(t, base, "PHANTOM_BUNDLE_PATH=/var/lib/phantom/current.cbnd")
+	if err == nil || !strings.Contains(err.Error(), "bundle.path") || strings.Contains(err.Error(), "store.path") {
 		t.Errorf("got %v", err)
 	}
 }

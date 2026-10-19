@@ -53,7 +53,7 @@ var keys = []key{
 	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkCacheDir},
-	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkStatePath},
+	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkBundlePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
 	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)}, // The bounds apply also if fetch_url is empty.
 	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
