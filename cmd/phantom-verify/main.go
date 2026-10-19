@@ -62,6 +62,7 @@ var refusals = []struct {
 	{verify.ErrRange, 2, "input error: a size or an index is outside 0 to 2^48"},
 	{verify.ErrNoProof, 2, "input error: no consistency proof file has the needed sizes"},
 	{errSameSizes, 2, "input error: two consistency proof files have the same sizes"},
+	{verify.ErrStateLocked, 2, "state fault: another run holds the state lock"},
 	{verify.ErrState, 2, "state fault: the state cannot be used"},
 	{verify.ErrStateChanged, 2, "state fault: the state changed during the run"},
 }
