@@ -18,12 +18,15 @@ import (
 // fault of the state: there is no usable state directory, or the state cannot
 // be opened, read, or written, or it does not parse with the key.
 // ErrStateChanged means that the state file changed between the load and the
-// write: the bytes differ, or the file is now absent or present. The text of
-// both is fixed. A parse error is never wrapped: a state of another key is a
-// state fault, not a bad signature.
+// write: the bytes differ, or the file is now absent or present.
+// ErrStateLocked means that another run held the lock for the whole of
+// LockWait. It also matches ErrState. The text of each is fixed. A parse error
+// is never wrapped: a state of another key is a state fault, not a bad
+// signature.
 var (
 	ErrState        = errors.New("verify: the state is not valid")
 	ErrStateChanged = errors.New("verify: the state changed during the run")
+	ErrStateLocked  = fmt.Errorf("verify: another run holds the state lock: %w", ErrState)
 )
 
 // StateChange tells what Update did to the state.
@@ -36,9 +39,10 @@ const (
 )
 
 // State is the last accepted checkpoint of one key. It holds the directory
-// open as an os.Root. It also holds an exclusive lock on the directory until the
-// caller closes the state. A second run on the same directory waits for the lock. The
-// kernel releases the lock when the process ends.
+// open as an os.Root. It also holds an exclusive lock on the directory until
+// the caller closes the state. A second run on the same directory waits for
+// the lock for at most LockWait. The kernel releases the lock when the process
+// ends.
 type State struct {
 	root   *os.Root
 	lock   *os.File // the open directory that holds the flock
@@ -66,10 +70,13 @@ func DefaultStateDir() (string, error) {
 // the first use, and Bytes is nil. A symlink, a file that is not regular, a
 // file past the note cap, and a note that does not parse with v give ErrState.
 //
-// Before it reads the state, LoadState takes an exclusive lock on the
-// directory. If another run holds the lock, LoadState waits. A run holds the
-// lock until it closes the state. The kernel releases it when the process ends. A
-// failure to take the lock gives ErrState. The caller must call Close.
+// LoadState refuses an existing directory or state file that has a group or
+// other permission bit, or that another user owns. It checks the directory
+// before it takes the lock. Then it takes an exclusive lock on the directory.
+// If another run holds the lock, LoadState waits for at most LockWait and then
+// gives ErrStateLocked. A run holds the lock until it closes the state. The
+// kernel releases it when the process ends. A failure to take the lock gives
+// ErrState. The caller must call Close.
 func LoadState(dir string, v note.Verifier) (*State, error) {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return nil, ErrState
@@ -127,7 +134,7 @@ func (s *State) read() ([]byte, bool, error) {
 		return nil, false, ErrState
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !os.SameFile(li, fi) {
+	if fi, err := f.Stat(); err != nil || !os.SameFile(li, fi) || !trusted(fi) {
 		return nil, false, ErrState
 	}
 	b, err := readCapped(f, MaxNoteBytes)
@@ -143,10 +150,10 @@ func (s *State) read() ([]byte, bool, error) {
 // the file as it is.
 //
 // The write uses a temporary file with mode 0600, Sync, and Rename. Before the
-// rename, Update reads the state file again. If it is not the file that was
-// loaded, Update removes the temporary file and returns ErrStateChanged. After
-// the rename, Update syncs the directory. On each failure before the rename,
-// Update removes the temporary file.
+// rename, Update reads the state file again. If the bytes differ, or the file
+// is now absent or present, Update returns ErrStateChanged. If the second read
+// fails, it returns ErrState. After the rename, Update syncs the directory. On
+// each failure before the rename, Update removes the temporary file.
 func (s *State) Update(latest []byte) (StateChange, error) {
 	c, err := ParseCheckpoint(latest, s.v)
 	if err != nil {

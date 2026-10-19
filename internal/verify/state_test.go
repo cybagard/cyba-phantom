@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -170,8 +171,8 @@ func closeLoaded(t *testing.T, r loadResult) {
 	}
 }
 
-// T-S-14: a second load on the same directory waits until the first state is
-// closed.
+// T-S-14: a second load on the same directory waits until the first run
+// closes its state.
 func TestTS14_LoadWaitsForClose(t *testing.T) {
 	_, text := newKey(t, origin)
 	v, _ := ParseKey([]byte(text))
@@ -220,8 +221,8 @@ func TestTS14_LockHelper(t *testing.T) {
 	}
 }
 
-// T-S-14: the kernel releases the lock when the process ends. A run that is
-// killed leaves no lock.
+// T-S-14: the kernel releases the lock when the process ends. When the test
+// kills a run, the run leaves no lock.
 func TestTS14_KilledRunReleasesLock(t *testing.T) {
 	_, text := newKey(t, origin)
 	v, _ := ParseKey([]byte(text))
@@ -335,6 +336,9 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 		"state made, a link": {true, func(f string) error { return os.Symlink("x", f) }, "", ErrState},
 	} {
 		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil { // t.TempDir makes the directory with the umask
+			t.Fatal(err)
+		}
 		file := filepath.Join(dir, stateName(v))
 		if !tc.first {
 			if err := os.WriteFile(file, cp(5), 0o600); err != nil {
@@ -400,4 +404,145 @@ func TestTS14_DefaultStateDir(t *testing.T) {
 			t.Errorf("%s: %q, %v", name, got, err)
 		}
 	}
+}
+
+// stateWithFile makes a state directory with mode 0700 that holds a valid state
+// file with mode 0600. It returns the key, the directory, and the file.
+func stateWithFile(t *testing.T) (note.Verifier, string, string) {
+	t.Helper()
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 10)
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, stateName(v))
+	if err := os.WriteFile(file, checkpointAt(t, l, s, 5), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return v, dir, file
+}
+
+// wantRefused checks that LoadState refuses dir with ErrState and that the
+// directory does not change.
+func wantRefused(t *testing.T, name, dir string, v note.Verifier) {
+	t.Helper()
+	before := snapshot(t, dir)
+	st, err := LoadState(dir, v)
+	if !errors.Is(err, ErrState) || errors.Is(err, ErrStateLocked) {
+		t.Errorf("%s: error %v, want ErrState", name, err)
+	}
+	if st != nil {
+		st.Close()
+	}
+	if after := snapshot(t, dir); after != before {
+		t.Errorf("%s: the directory changed:\n%s\n%s", name, before, after)
+	}
+}
+
+// T-S-14: a state directory with a group or other permission bit is refused.
+// The state file does not change.
+func TestTS14_SharedDirectory(t *testing.T) {
+	for _, mode := range []os.FileMode{0o755, 0o750} {
+		v, dir, file := stateWithFile(t)
+		if err := os.Chmod(dir, mode); err != nil { // not Mkdir, so the umask does not change it
+			t.Fatal(err)
+		}
+		wantRefused(t, mode.String(), dir, v)
+		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%v: the file mode: %v, %v", mode, fi, err)
+		}
+	}
+}
+
+// T-S-14: a state file with a group or other permission bit is refused.
+func TestTS14_SharedFile(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o604} {
+		v, dir, file := stateWithFile(t)
+		if err := os.Chmod(file, mode); err != nil {
+			t.Fatal(err)
+		}
+		wantRefused(t, mode.String(), dir, v)
+		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != mode {
+			t.Errorf("%v: the file mode: %v, %v", mode, fi, err)
+		}
+	}
+}
+
+// T-S-14: a state directory or a state file that another user owns is refused.
+func TestTS14_ForeignOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("os.Chown to another user needs root")
+	}
+	const other = 65534
+	for _, target := range []string{"directory", "file"} {
+		v, dir, file := stateWithFile(t)
+		path := map[string]string{"directory": dir, "file": file}[target]
+		if err := os.Chown(path, other, other); err != nil {
+			t.Fatal(err)
+		}
+		wantRefused(t, target, dir, v)
+	}
+}
+
+// T-S-14: a directory that LoadState makes has mode 0700 and loads again.
+func TestTS14_MadeDirectoryLoadsAgain(t *testing.T) {
+	_, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	dir := filepath.Join(t.TempDir(), "a", "state")
+	for range 2 {
+		st, err := LoadState(dir, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Close()
+		if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("the directory: %v, %v", fi, err)
+		}
+	}
+}
+
+// T-S-14: if another run holds the lock, LoadState gives ErrStateLocked after
+// LockWait, and not much later. The state file does not change.
+func TestTS14_LockWaitLimit(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	before, _ := os.ReadFile(file)
+	held, err := os.Open(dir) // another open file: its lock conflicts in one process
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	old := LockWait
+	LockWait = 300 * time.Millisecond
+	t.Cleanup(func() { LockWait = old })
+
+	start := time.Now()
+	st, err := LoadState(dir, v)
+	elapsed := time.Since(start)
+	if st != nil {
+		st.Close()
+	}
+	if !errors.Is(err, ErrStateLocked) || !errors.Is(err, ErrState) {
+		t.Errorf("error %v, want ErrStateLocked and ErrState", err)
+	}
+	if elapsed < LockWait || elapsed > LockWait+2*time.Second {
+		t.Errorf("LoadState returned after %v, limit %v", elapsed, LockWait)
+	}
+	if after, _ := os.ReadFile(file); !bytes.Equal(after, before) {
+		t.Error("the state file changed")
+	}
+}
+
+// T-S-14: a fault of flock, other than a lock that another run holds, gives
+// ErrState, and not ErrStateLocked.
+func TestTS14_LockFault(t *testing.T) {
+	v, dir, _ := stateWithFile(t)
+	old := flock
+	flock = func(int, int) error { return syscall.EBADF }
+	t.Cleanup(func() { flock = old })
+	wantRefused(t, "flock fault", dir, v)
 }

@@ -677,6 +677,39 @@ func TestTS14_StateFaults(t *testing.T) {
 	}
 }
 
+// T-S-14: a lock that another run holds gives exit 2 and a fixed message after
+// the lock-wait limit. The state does not change.
+func TestTS14_StateLocked(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 10, `{"n":%d}`)
+	f := newFiles(t)
+	dir := filepath.Join(f.dir, "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(dir) // another open file: its lock conflicts in one process
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	old := verify.LockWait
+	verify.LockWait = 200 * time.Millisecond
+	t.Cleanup(func() { verify.LockWait = old })
+
+	before := stateSnap(t, dir)
+	code, stdout, stderr := invoke(t, "--key", f.write("key", []byte(keyText)),
+		"--checkpoint", f.write("cp", checkpointAt(t, l, s, 10)), "--state", dir)
+	if code != 2 || stdout != "" || stderr != "phantom-verify: state fault: another run holds the state lock\n" {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if after := stateSnap(t, dir); after != before {
+		t.Errorf("the state directory changed:\n%s\n%s", before, after)
+	}
+}
+
 // T-S-14: the state changes when the checkpoint is accepted, also when the
 // event check refuses. Then stdout is empty and stderr holds the state line.
 func TestTS14_StateBeforeEvent(t *testing.T) {
