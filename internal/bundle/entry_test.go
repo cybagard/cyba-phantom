@@ -3,6 +3,7 @@ package bundle
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,10 +26,63 @@ func rawLinkHdr(name string, typ byte, link string) []byte {
 	return withSum(h)
 }
 
+// withMagic sets the magic and version field of the header block h.
+func withMagic(h []byte, magic string) []byte {
+	copy(h[257:265], magic)
+	return withSum(h)
+}
+
+// withPrefix sets the ustar prefix field of the header block h.
+func withPrefix(h []byte, prefix string) []byte {
+	copy(h[345:500], prefix)
+	return withSum(h)
+}
+
 // longHdr makes a GNU 'L' (long name) or 'K' (long link) header with its
-// text. Next applies it to the entry that follows.
+// text. It has the GNU magic, as GNU tar writes it.
 func longHdr(typ byte, text string) []byte {
-	return append(rawHdr("long-header", typ, int64(len(text)+1)), padded([]byte(text+"\x00"))...)
+	h := withMagic(rawHdr("long-header", typ, int64(len(text)+1)), "ustar  \x00")
+	return append(h, padded([]byte(text+"\x00"))...)
+}
+
+// paxRecZeros makes a PAX record whose length field has leading zeros, so
+// that the field is wider than the canonical form.
+func paxRecZeros(key, value string) string {
+	rest := " " + key + "=" + value + "\n"
+	return fmt.Sprintf("%04d%s", len(rest)+4, rest)
+}
+
+// fullBlockMtime returns an mtime value so that a path record for path and
+// the mtime record together fill exactly one block in canonical form.
+func fullBlockMtime(path string) string {
+	for d := 0; d < blockBytes; d++ {
+		v := "1700000000." + strings.Repeat("1", d)
+		if paxRecordLen("path", path)+paxRecordLen("mtime", v) == blockBytes {
+			return v
+		}
+	}
+	panic("no mtime value fills one block")
+}
+
+// starHdr makes a STAR header with a prefix of 131 bytes, base-256 times and
+// the STAR trailer. The ustar prefix field of the same block has 155 bytes.
+func starHdr() []byte {
+	h := rawHdr("manifest.json", tar.TypeReg, 1)
+	copy(h[345:476], "traps/"+strings.Repeat("a", 60)+"/"+strings.Repeat("b", 64))
+	times := []byte{0xff, 0xff, 0xff, 0xff, 0x80, '/', '.', '.', '/', '.', '.', '/'}
+	copy(h[476:488], times)
+	copy(h[488:500], times)
+	copy(h[508:512], "tar\x00")
+	return append(withSum(h), padded([]byte("S"))...)
+}
+
+// ustarTwinOfStar makes the block of starHdr with the ustar form: no trailer
+// and zero times, so that the prefix field ends after 131 bytes.
+func ustarTwinOfStar() []byte {
+	h := starHdr()[:blockBytes]
+	clear(h[476:500])
+	clear(h[508:512])
+	return append(withSum(h), padded([]byte("S"))...)
 }
 
 // globalHdr makes a PAX global header with the records.
@@ -37,8 +91,11 @@ func globalHdr(recs ...string) []byte {
 	return append(rawHdr("pax-global-header", tar.TypeXGlobalHeader, int64(len(body))), padded([]byte(body))...)
 }
 
-// entryCase is a refused archive and its passing twin. The twin changes only
-// the refused property, so that the bad archive fails from its own rule.
+// entryCase is a refused archive and its passing twin. The twin changes the
+// refused property, so that the bad archive fails from its own rule. The type
+// cases use a regular file with the same name as the twin. The case "directory
+// named like the manifest" also removes the trailing slash. A nil twin means
+// that the refused form has no accepted form.
 type entryCase struct {
 	name      string
 	bad, twin []byte
@@ -51,6 +108,7 @@ func longName(parts, partLen int) string {
 	return "traps/" + strings.Repeat(p+"/", parts-2) + p
 }
 
+// entryCases returns the refused entry forms, each with its twin.
 func entryCases() []entryCase {
 	const p = "traps/a"
 	reg := func(names ...string) []byte {
@@ -64,10 +122,13 @@ func entryCases() []entryCase {
 	dir := func(name string) ent { return ent{name: name, typ: tar.TypeDir} }
 	file := func(name string) ent { return ent{name: name, data: []byte("x")} }
 	same := reg(p)
+	long := longName(8, 14)
 	const mtime = "1700000000"
 	return []entryCase{
 		{"symlink", typed(tar.TypeSymlink), same},
+		{"symlink with an empty link name", rawArchive(rawHdr(p, tar.TypeSymlink, 0)), same},
 		{"hard link", rawArchive(rawLinkHdr(p, tar.TypeLink, "traps/b")), same},
+		{"hard link with an empty link name", rawArchive(rawHdr(p, tar.TypeLink, 0)), same},
 		{"character device", typed(tar.TypeChar), same},
 		{"block device", typed(tar.TypeBlock), same},
 		{"FIFO", typed(tar.TypeFifo), same},
@@ -75,20 +136,46 @@ func entryCases() []entryCase {
 			rawArchive(globalHdr(paxRec("mtime", mtime)), rawFile(p, "x")),
 			rawArchive(paxHdr(paxRec("mtime", mtime)), rawFile(p, "x"))},
 		{"unknown PAX record",
-			rawArchive(paxHdr(paxRec("comment", "x")), rawFile(p, "x")),
+			rawArchive(paxHdr(paxRec("comment", mtime)), rawFile(p, "x")),
 			rawArchive(paxHdr(paxRec("mtime", mtime)), rawFile(p, "x"))},
 		{"GNU long link before a regular file",
 			rawArchive(longHdr(tar.TypeGNULongLink, "traps/b"), rawFile(p, "x")), same},
+		{"GNU long name",
+			rawArchive(longHdr(tar.TypeGNULongName, long), rawFile("traps/x", "x")),
+			rawArchive(paxHdr(paxRec("path", long)), rawFile("traps/x", "x"))},
+		{"PAX path and GNU long name",
+			rawArchive(paxHdr(paxRec("path", "../../evil")), longHdr(tar.TypeGNULongName, "traps/fromL"),
+				rawFile("traps/ustar", "x")), nil},
+		{"GNU header with a prefix",
+			rawArchive(rawFile(manifestName, "x"),
+				withMagic(withPrefix(rawHdr(manifestName, tar.TypeReg, 1), "traps"), "ustar  \x00"), padded([]byte("B"))),
+			rawArchive(rawFile(manifestName, "x"),
+				withPrefix(rawHdr(manifestName, tar.TypeReg, 1), "traps"), padded([]byte("B")))},
+		{"STAR header", rawArchive(rawFile(manifestName, "x"), starHdr()),
+			rawArchive(rawFile(manifestName, "x"), ustarTwinOfStar())},
+		{"two PAX headers before one entry",
+			rawArchive(paxHdr(paxRec("path", p)), paxHdr(paxRec("mtime", "1")), rawFile("traps/x", "x")),
+			rawArchive(paxHdr(paxRec("path", p), paxRec("mtime", "1")), rawFile("traps/x", "x"))},
+		// The first path record is long, so the repeated key adds a block.
+		{"PAX header with a repeated key",
+			rawArchive(paxHdr(paxRec("path", strings.Repeat("a", 600)), paxRec("path", p)), rawFile("traps/x", "x")),
+			rawArchive(paxHdr(paxRec("path", p)), rawFile("traps/x", "x"))},
+		{"PAX header with no records",
+			rawArchive(rawHdr("PaxHeaders/x", tar.TypeXHeader, 0), rawFile(p, "x")), same},
+		// The canonical records fill one block, so the extra zeros add a block.
+		{"PAX record with a non-minimal length",
+			rawArchive(paxHdr(paxRecZeros("path", p), paxRec("mtime", fullBlockMtime(p))), rawFile("traps/x", "x")),
+			rawArchive(paxHdr(paxRec("path", p), paxRec("mtime", fullBlockMtime(p))), rawFile("traps/x", "x"))},
 		{"absolute name", reg("/traps/a"), same},
-		{"name with ..", reg("traps/../traps/a"), reg("traps/..a")},
+		{"name with ..", reg("traps/../a"), reg("traps/..a/a")},
 		{"part outside the set", reg("traps/a b"), reg("traps/a_b")},
 		{"part with a non-ASCII byte", reg("traps/é"), reg("traps/e")},
 		{"part with a backslash", reg(`traps/a\b`), reg("traps/a_b")},
 		{"part over 64 bytes", reg("traps/" + strings.Repeat("a", 65)), reg("traps/" + strings.Repeat("a", 64))},
 		{"more than 8 parts", reg("traps/a/b/c/d/e/f/g/h"), reg("traps/a/b/c/d/e/f/g")},
-		{"GNU long name with 9 parts",
-			rawArchive(longHdr(tar.TypeGNULongName, longName(9, 12)), rawFile("traps/x", "x")),
-			rawArchive(longHdr(tar.TypeGNULongName, longName(8, 14)), rawFile("traps/x", "x"))},
+		{"PAX path with 9 parts",
+			rawArchive(paxHdr(paxRec("path", longName(9, 12))), rawFile("traps/x", "x")),
+			rawArchive(paxHdr(paxRec("path", longName(8, 12))), rawFile("traps/x", "x"))},
 		{"unknown top-level name", reg("other/a"), same},
 		{"regular file with one part", reg("traps"), build(dir("traps"))},
 		{"directory named like the manifest", build(dir("manifest.json/")), reg("manifest.json")},
@@ -115,11 +202,14 @@ type passCase struct {
 	names []string
 }
 
+// entryPassCases returns the accepted entry forms, each with the names that
+// ReadArchive gives.
 func entryPassCases() []passCase {
-	long := longName(8, 14)
+	// The last part has 64 bytes, so no ustar prefix and name split fits the
+	// name, and tar.Writer writes a PAX path record.
+	long := longName(8, 64)
 	return []passCase{
-		{"GNU long name, valid name over 100 bytes",
-			rawArchive(longHdr(tar.TypeGNULongName, long), rawFile("traps/x", "x")), []string{long}},
+		{"PAX path over 100 bytes, written by tar.Writer", build(ent{name: long, data: []byte("x")}), []string{long}},
 		{"PAX path record",
 			rawArchive(paxHdr(paxRec("path", "traps/p")), rawFile("traps/x", "x")), []string{"traps/p"}},
 		{"PAX path and mtime records",
@@ -140,6 +230,7 @@ func entryPassCases() []passCase {
 	}
 }
 
+// entryPassing returns the accepted entry forms as fixtures.
 func entryPassing() []fixture {
 	var fs []fixture
 	for _, c := range entryPassCases() {
@@ -148,13 +239,16 @@ func entryPassing() []fixture {
 	return fs
 }
 
-// T-S-19: each refused entry form gives the one error, and the same archive
-// with only the refused property changed is accepted.
+// T-S-19: each refused entry form gives the one error. ReadArchive accepts
+// the twin of each form.
 func TestTS19EntryRules(t *testing.T) {
 	for _, c := range entryCases() {
 		t.Run(c.name, func(t *testing.T) {
 			if a, err := ReadArchive(c.bad); a != nil || err != ErrArchiveInvalid {
 				t.Errorf("refused archive: archive %v, len %d, error %v", a != nil, lenOf(a), err)
+			}
+			if c.twin == nil {
+				return
 			}
 			if _, err := ReadArchive(c.twin); err != nil {
 				t.Errorf("twin: %v", err)
@@ -163,8 +257,38 @@ func TestTS19EntryRules(t *testing.T) {
 	}
 }
 
-// T-S-19: the accepted forms give the final names. Next applies a GNU long
-// name and a PAX path record, and a directory is not an entry of the files.
+// T-S-19: ReadArchive accepts the twin of a ustar prefix header and gives both
+// names of the archive.
+func TestTS19UstarPrefixTwinNames(t *testing.T) {
+	for _, c := range entryCases() {
+		if c.name != "GNU header with a prefix" {
+			continue
+		}
+		a, err := ReadArchive(c.twin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{manifestName, "traps/" + manifestName}; !slices.Equal(a.Names(), want) {
+			t.Errorf("names %q; want %q", a.Names(), want)
+		}
+	}
+}
+
+// T-S-19: tar.Writer writes a PAX header for the long name of the pass case.
+// The case then pins the byte count of the PAX header against the real writer.
+func TestTS19WriterWritesPAXForLongName(t *testing.T) {
+	tr := tar.NewReader(bytes.NewReader(buildTar(ent{name: longName(8, 64), data: []byte("x")})))
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.Format != tar.FormatPAX || len(hdr.PAXRecords) != 1 {
+		t.Errorf("format %v, %d PAX records; want PAX and 1", hdr.Format, len(hdr.PAXRecords))
+	}
+}
+
+// T-S-19: the accepted forms give the final names. Next applies a PAX path
+// record. A directory gives no name, because it holds no file.
 func TestTS19EntryNamesAccepted(t *testing.T) {
 	for _, c := range entryPassCases() {
 		t.Run(c.name, func(t *testing.T) {

@@ -73,15 +73,17 @@ func (c *capReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ReadArchive reads the archive in b. The Next function of archive/tar reads
-// the PAX 'x' headers and the GNU 'L' and 'K' headers itself and applies them
-// to the next entry. It reads type NUL as a regular file or a directory.
-// ReadArchive checks each header that Next returns with checkEntry: the type,
-// the link name, the PAX records, the name and the top-level name. A header
-// with a GNU.sparse. PAX record fails there, because Next gives such an entry
-// its logical size, and the hole bytes do not pass through the decoded-byte
-// count. A directory has no data and no effect, but it counts toward
-// MaxEntries.
+// ReadArchive reads the archive in b. Each entry has one header block. It can
+// have one PAX 'x' header before it, and no other meta header. Type NUL is a
+// regular file, or a directory when the name ends in a slash.
+//
+// ReadArchive checks each entry: the number of header bytes, the header
+// format, the type, the link name, the PAX records, the name and the
+// top-level name. A GNU header, a STAR header and a GNU long name or long link
+// header fail the format check. A header with a GNU.sparse. PAX record fails
+// the check of the PAX records. Next gives such an entry its logical size, and
+// the hole bytes do not pass through the decoded-byte count. A directory has
+// no data and no effect, but it counts toward MaxEntries.
 //
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
@@ -105,8 +107,9 @@ func ReadArchive(b []byte) (*Archive, error) {
 	tr := tar.NewReader(cr)
 	files := make(map[string][]byte)
 	seen := make(map[string]bool)
-	var sizes int64
+	var sizes, prevPad int64
 	for n := 0; ; n++ {
+		before := cr.n
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -114,12 +117,27 @@ func ReadArchive(b []byte) (*Archive, error) {
 		if err != nil || n >= MaxEntries {
 			return nil, ErrArchiveInvalid
 		}
+		// Next keeps only the last PAX 'x' header and leaves no trace of an
+		// earlier one. Another reader can take its name from that header. So
+		// the bytes that this Next call read must match the bytes of one
+		// header. This needs archive/tar to read the header blocks and the PAX
+		// data exactly, with no read-ahead, from a reader that is not an
+		// io.Seeker. The capReader is such a reader. If a Go change adds a
+		// buffer, every archive fails, and the tests that use tar.Writer show it.
+		if cr.n-before != headerBytes(prevPad, hdr) {
+			return nil, ErrArchiveInvalid
+		}
+		prevPad = 0
+		if hdr.Typeflag == tar.TypeReg {
+			prevPad = (blockBytes - hdr.Size%blockBytes) % blockBytes
+		}
 		key, err := checkEntry(hdr)
 		if err != nil || seen[key] {
 			return nil, ErrArchiveInvalid
 		}
-		// A name from a PAX path record points into the PAX buffer. The
-		// clone lets the maps keep the name without that buffer.
+		// Only the files map outlives ReadArchive. The clone of the key lets
+		// the seen map hold no PAX buffer, so the peak heap in the loop stays
+		// small.
 		seen[strings.Clone(key)] = true
 		if hdr.Typeflag == tar.TypeDir {
 			if hdr.Size != 0 {
