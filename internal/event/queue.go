@@ -107,7 +107,7 @@ func (q *Queue) Enqueue(e *Event) bool {
 		q.counters.DropNoAddr()
 		return false
 	}
-	isEvidence, err := e.Record.Kind.IsEvidence()
+	isEvidence, err := e.record.Kind.IsEvidence()
 	n := int64(e.Size())
 	if err != nil || n <= 0 {
 		q.drop(&q.droppedInvalid, e)
@@ -142,8 +142,8 @@ func (q *Queue) Enqueue(e *Event) bool {
 // drop adds one to the lane count and one to the counters of the client key.
 func (q *Queue) drop(count *atomic.Uint64, e *Event) {
 	count.Add(1)
-	if e.DB.IP != "" {
-		if a, err := netip.ParseAddr(e.DB.IP); err == nil {
+	if e.db.ip != "" {
+		if a, err := netip.ParseAddr(e.db.ip); err == nil {
 			q.counters.Drop(a)
 			return
 		}

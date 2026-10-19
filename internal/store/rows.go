@@ -17,9 +17,8 @@ const (
 // insertRow stores one event. It writes each column from the event as
 // internal/event made it. A nil pointer is NULL. The client IP goes to no
 // column. hash, leaf and record are nil for a bulk event. The body prefix is
-// stored only when w.bodyPrefix is true.
-func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, hash, leaf, record any) error {
-	r := e.Record
+// stored only when w.bodyPrefix is true. The caller gives r, the record of e.
+func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, r event.Record, hash, leaf, record any) error {
 	var detail, prefix any // nil is NULL
 	if len(r.Detail) > 0 {
 		b, err := r.Detail.JSON()
@@ -28,8 +27,10 @@ func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, 
 		}
 		detail = string(b)
 	}
-	if w.bodyPrefix && len(e.DB.BodyPrefix) > 0 {
-		prefix = e.DB.BodyPrefix
+	if w.bodyPrefix {
+		if b := e.BodyPrefix(); len(b) > 0 {
+			prefix = b
+		}
 	}
 	if _, err := stmt.ExecContext(ctx, r.TS, r.Session, r.Kind.String(), r.Vhost, r.Method, r.Path,
 		r.Status, r.TrapID, r.TokenID, r.Surface, prefix, hash, leaf, detail, record); err != nil {
