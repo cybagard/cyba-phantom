@@ -30,7 +30,7 @@ func (d *DropCount) Load() Drops {
 // add counts one dropped event for its lane. The lane comes from the kind, as
 // in the queue.
 func (d *DropCount) add(e *event.Event) {
-	if ok, err := e.Record.Kind.IsEvidence(); err == nil && ok {
+	if ok, err := e.Kind().IsEvidence(); err == nil && ok {
 		d.evidence.Add(1)
 		return
 	}

@@ -95,11 +95,11 @@ func TestTU06_Encode(t *testing.T) {
 		A int64  `json:"a"`
 		M string `json:"m"`
 	}
-	got, err := Encode(rec{Z: "<&>", A: 7, M: " "})
+	got, err := Encode(rec{Z: "<&>", A: 7, M: "\U00002028"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "{\"a\":7,\"m\":\" \",\"z\":\"<&>\"}"; string(got) != want {
+	if want := "{\"a\":7,\"m\":\"\U00002028\",\"z\":\"<&>\"}"; string(got) != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	for name, v := range map[string]any{
@@ -138,6 +138,8 @@ var rejects = []rejectCase{
 	{"float in array", `{"a":[1,2.5]}`, "not an integer"},
 	{"-0", `{"a":-0}`, "negative zero"},
 	{"-0.0", `{"a":-0.0}`, "not an integer"},
+	// The decoder reads the token -0 and stops there, so the rule is negative zero.
+	{"-00", `{"a":-00}`, "negative zero"},
 	{"2^53", `{"a":9007199254740992}`, "integer outside"},
 	{"-2^53", `{"a":-9007199254740992}`, "integer outside"},
 	{"30 digits", `{"a":` + strings.Repeat("9", 30) + `}`, "integer outside"},

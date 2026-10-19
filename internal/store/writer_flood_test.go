@@ -171,24 +171,29 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 
 // T-U-18: a record error (an event whose kind is not a kind) stops the writer.
 // Err holds the record class, the batch stores no row, and the events that come
-// later are taken out of the lanes and counted. The test makes the bad kind after
-// the enqueue, because Enqueue refuses it.
+// later are taken out of the lanes and counted. Enqueue refuses an event with
+// kind 0 or Size 0, so the bad event cannot come from the lanes. The test
+// gives the writer a batch with the zero Event (kind 0) through flush, the
+// function that Run calls with each batch. The stopped writer then takes the
+// later events from the lanes.
 func TestTU18RecordErrorStopsTheWriter(t *testing.T) {
 	r := newRig(t, 100)
-	bad, err := event.NewEvent(time.Now, event.Input{Kind: event.KindRequest})
-	if err != nil || !r.q.Enqueue(bad) {
-		t.Fatal("enqueue failed")
+	mk := func(k event.Kind, ts int64) *event.Event {
+		e, err := event.NewEvent(func() time.Time { return time.UnixMilli(ts) }, event.Input{Kind: k})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
 	}
-	bad.Record.Kind = 0
-	r.add(event.KindRequest, 1)
-	r.add(event.KindCallback, 2)
-	stop := r.start()
-	r.drained()
-	r.fire() // the batch has three events
-	eventually(t, func() bool { return !r.w.Healthy() })
+	batch := []*event.Event{{}, mk(event.KindRequest, 1), mk(event.KindCallback, 2)}
+	r.w.flush(batch)
 	wantRule(t, r.w.Err(), writerName, ruleRecord)
+	if got := r.rows(); got != 0 {
+		t.Fatalf("%d rows after the record error", got)
+	}
 	r.add(event.KindRequest, 3)
 	r.add(event.KindAlertSent, 4)
+	stop := r.start()
 	r.fire() // one tick of the stopped state
 	want := Drops{Bulk: 3, Evidence: 2}
 	eventually(t, func() bool { return r.w.Stats().Dropped == want })

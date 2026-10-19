@@ -14,10 +14,10 @@ import (
 	"unicode/utf8"
 )
 
-// The caps of the variable fields. Each cap is in bytes. Because of the caps,
-// the largest canonical record has a fixed size. MaxRecordBytes is more than
-// that size. It allows the worst case, in which the encoder writes each byte
-// of a string as a 6-byte escape.
+// These constants set the caps of the variable fields. Each cap is in bytes.
+// Because of the caps, the largest canonical record has a fixed size.
+// MaxRecordBytes is more than that size. It allows the worst case, in which the
+// encoder writes each byte of a string as a 6-byte escape.
 const (
 	MaxRecordBytes = 24 << 10
 	MaxDetailBytes = 2 << 10
@@ -379,24 +379,69 @@ type Input struct {
 	BodyPrefix                   []byte
 }
 
-// DBOnly holds the values that only the local database keeps. They are never
+// dbOnly holds the values that only the local database keeps. They are never
 // in the record.
-type DBOnly struct {
-	IP         string
-	BodyPrefix []byte
+type dbOnly struct {
+	ip         string
+	bodyPrefix []byte
 }
 
-// Event is a record with the DB-only values next to it. Record holds the
-// value that the DB row and the hashed record both use.
+// Event is a record with the DB-only values next to it. The record is the
+// value that the DB row and the hashed record both use. NewEvent sets all
+// fields. No method changes them later (C2, SEC-15). Each accessor returns a
+// value that shares no memory with the event. Go permits the assignment of a
+// whole Event value. The queue does not depend on Size after Enqueue, because
+// it keeps the bytes that it reserved. Code that uses reflect on the
+// unexported fields can reach the stored body prefix. No other package does
+// this.
 type Event struct {
-	Record Record
-	DB     DBOnly
+	record Record
+	db     dbOnly
 	size   int
 }
 
 // Size returns the size in bytes of the event: the canonical record, the IP
 // text and the body prefix. It is at most MaxEventBytes.
 func (e *Event) Size() int { return e.size }
+
+// Kind returns the kind of the event.
+func (e *Event) Kind() Kind { return e.record.Kind }
+
+// IP returns the client IP text of the event. It is empty when NewEvent got no
+// client address.
+func (e *Event) IP() string { return e.db.ip }
+
+// BodyPrefix returns a copy of the body prefix. It returns nil when the prefix
+// is empty.
+func (e *Event) BodyPrefix() []byte {
+	if len(e.db.bodyPrefix) == 0 {
+		return nil
+	}
+	return append([]byte(nil), e.db.bodyPrefix...)
+}
+
+// Record returns a deep copy of the record. A change to the copy does not
+// change the event.
+func (e *Event) Record() Record {
+	r := e.record
+	r.Session, r.Vhost, r.Method, r.Path = dup(r.Session), dup(r.Vhost), dup(r.Method), dup(r.Path)
+	r.TrapID, r.TokenID = dup(r.TrapID), dup(r.TokenID)
+	r.Status, r.Surface = dup(r.Status), dup(r.Surface)
+	if r.FP != nil {
+		r.FP = &FP{JA4: dup(r.FP.JA4), H2: dup(r.FP.H2), Hdr: dup(r.FP.Hdr)}
+	}
+	r.Detail = maps.Clone(r.Detail)
+	return r
+}
+
+// dup returns a pointer to a copy of *p, or nil for a nil pointer.
+func dup[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
 
 // MaxEventBytes is the largest value of Size.
 const MaxEventBytes = maxEventSize
@@ -460,17 +505,17 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if fp := (FP{text(in.JA4, capFP), text(in.H2, capFP), text(in.Hdr, capFP)}); fp != (FP{}) {
 		r.FP = &fp
 	}
-	db := DBOnly{BodyPrefix: append([]byte(nil), in.BodyPrefix[:min(len(in.BodyPrefix), MaxBodyPrefix)]...)}
+	db := dbOnly{bodyPrefix: append([]byte(nil), in.BodyPrefix[:min(len(in.BodyPrefix), MaxBodyPrefix)]...)}
 	if in.ClientIP != "" {
 		a, err := netip.ParseAddr(in.ClientIP)
 		if err != nil || a.Zone() != "" {
 			return nil, errors.New("event: client IP is not an address")
 		}
-		db.IP = a.String()
+		db.ip = a.String()
 	}
 	b, err := r.canonical()
 	if err != nil {
 		return nil, err
 	}
-	return &Event{Record: r, DB: db, size: len(b) + len(db.IP) + len(db.BodyPrefix)}, nil
+	return &Event{record: r, db: db, size: len(b) + len(db.ip) + len(db.bodyPrefix)}, nil
 }

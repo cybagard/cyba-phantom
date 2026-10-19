@@ -76,7 +76,7 @@ func TestTU06_AbsentFields(t *testing.T) {
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		b, err := e.Record.canonical()
+		b, err := e.record.canonical()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,23 +159,24 @@ func TestTU06_StoredRowRebuild(t *testing.T) {
 	st := int64(404)
 	for _, k := range []Kind{KindCallback, KindAlertSent, KindBundleRejected} {
 		in := Input{Kind: k, Vhost: "decoy.\xffexample", Method: "GET", Path: "/a\xc3(b", Status: &st, TrapID: "t",
-			TokenID: "k", Surface: SurfaceHeader, JA4: "j", Detail: Detail{"b": Bool(true), "n": Int(-5), "s": Str("é<>& ")}}
+			TokenID: "k", Surface: SurfaceHeader, JA4: "j", Detail: Detail{"b": Bool(true), "n": Int(-5), "s": Str("é<>&\U00002028")}}
 		if !k.isSystem() {
 			in.Session = "s-9"
 		}
 		e := mustEvent(t, in)
-		dj, err := e.Record.Detail.JSON()
+		rec := e.Record()
+		dj, err := rec.Detail.JSON()
 		if err != nil {
 			t.Fatal(err)
 		}
-		row := Row{TS: e.Record.TS, SessionID: e.Record.Session, Kind: k.String(), Vhost: e.Record.Vhost,
-			Method: e.Record.Method, Path: e.Record.Path, Status: e.Record.Status, TrapID: e.Record.TrapID,
-			TokenID: e.Record.TokenID, Surface: e.Record.Surface, FP: e.Record.FP, Detail: sp(string(dj))}
+		row := Row{TS: rec.TS, SessionID: rec.Session, Kind: k.String(), Vhost: rec.Vhost,
+			Method: rec.Method, Path: rec.Path, Status: rec.Status, TrapID: rec.TrapID,
+			TokenID: rec.TokenID, Surface: rec.Surface, FP: rec.FP, Detail: sp(string(dj))}
 		back, err := RecordFromRow(row)
 		if err != nil {
 			t.Fatal(err)
 		}
-		h1, err1 := HashEvidence(e.Record)
+		h1, err1 := HashEvidence(rec)
 		h2, err2 := HashEvidence(back)
 		if err1 != nil || err2 != nil || h1 != h2 {
 			t.Errorf("%v: hashes %x and %x, errors %v, %v", k, h1, h2, err1, err2)
@@ -217,13 +218,13 @@ func TestTS12_StringConstruction(t *testing.T) {
 		}
 	}
 	e := mustEvent(t, Input{Kind: KindRequest, Vhost: long, Path: long, Surface: SurfaceBody, JA4: long})
-	if len(*e.Record.Vhost) != 252 || len(*e.Record.Path) != 2048 || len(*e.Record.FP.JA4) != 128 {
+	if rec := e.Record(); len(*rec.Vhost) != 252 || len(*rec.Path) != 2048 || len(*rec.FP.JA4) != 128 {
 		t.Error("caps are not applied in the constructor")
 	}
-	if e.Record.TS != 1758300000123 {
-		t.Errorf("ts %d is not from the clock", e.Record.TS)
+	if ts := e.Record().TS; ts != 1758300000123 {
+		t.Errorf("ts %d is not from the clock", ts)
 	}
-	if e, err := NewEvent(nil, Input{Kind: KindRequest}); err != nil || e.Record.TS < 1e12 {
+	if e, err := NewEvent(nil, Input{Kind: KindRequest}); err != nil || e.Record().TS < 1e12 {
 		t.Errorf("nil clock does not use the time of the sensor: %v", err)
 	}
 	if _, err := NewEvent(nil, Input{Kind: KindRequest, Surface: "cookie"}); err == nil {
@@ -253,11 +254,11 @@ func TestTS12_IPMarkers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err := e.Record.canonical()
+			b, err := e.record.canonical()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if in.ClientIP != "" && e.DB.IP == "" {
+			if in.ClientIP != "" && e.IP() == "" {
 				t.Errorf("%v: the address is not in the DB part", k)
 			}
 			for _, f := range forms {
@@ -279,7 +280,7 @@ func TestTS12_RequestContentCopied(t *testing.T) {
 	const m = "203.0.113.7"
 	e := mustEvent(t, Input{Kind: KindCallback, Session: m, Vhost: m, Method: m, Path: "/" + m, TrapID: m,
 		TokenID: m, JA4: m, H2: m, Hdr: m, Detail: Detail{"src": Str(m)}})
-	b, err := e.Record.canonical()
+	b, err := e.record.canonical()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,9 +325,9 @@ func manyMembers(n int, v Value, first ...string) Detail {
 	return d
 }
 
-// T-S-12: a Detail of many short members is an error before the encoder runs.
-// Before the fix, 1071 members passed the test of the raw bytes and the encoder
-// got a text of up to 27 870 bytes.
+// T-S-12: a Detail of 1071 short members is an error before the encoder runs.
+// The test counts the encoder inputs and expects none. It covers int, bool and
+// empty string values, and names that need a JSON escape.
 func TestTS12_ManyDetailMembers(t *testing.T) {
 	seen := watchEncoder(t)
 	quotes := []string{`"`, `\`, `""`, `\\`, `"\`, `\"`}
@@ -363,26 +364,38 @@ func TestTS12_LargestEvent(t *testing.T) {
 	// The longest ts and status are the negative integers -(2^53-1). The kind
 	// score_change is the longest name of a kind that can have a session.
 	st := int64(-maxInt)
-	e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
-		Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-		Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
-		Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
-		ClientIP: "2a01:fb8f:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := e.Record.canonical()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) > MaxRecordBytes || len(e.DB.BodyPrefix) != MaxBodyPrefix || len(e.DB.IP) != maxIPText || e.Size() > MaxEventBytes {
-		t.Fatalf("record %d, prefix %d, size %d", len(b), len(e.DB.BodyPrefix), e.Size())
-	}
-	// The pinned size is the length of the canonical bytes of the record above.
-	// Each text field is as long as its cap allows, and each control byte is a
-	// 6-byte escape. The test measured the value; a change of a cap changes it.
-	if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+maxIPText {
-		t.Errorf("largest record is %d bytes, event is %d", len(b), e.Size())
+	// The documentation prefix has the group db8 with 3 digits, so the first
+	// address has 38 bytes, one less than maxIPText. The second address has the
+	// longest text that an address can have.
+	for _, c := range []struct {
+		ip     string
+		length int
+	}{
+		{"2001:db8:1234:5678:9abc:def0:1234:5678", maxIPText - 1},
+		{"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", maxIPText},
+	} {
+		e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
+			Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+			Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+			Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
+			ClientIP: c.ip, BodyPrefix: make([]byte, 9000)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := e.record.canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ip := e.IP()
+		if len(b) > MaxRecordBytes || len(e.BodyPrefix()) != MaxBodyPrefix || len(ip) != c.length || e.Size() > MaxEventBytes {
+			t.Fatalf("ip %q: record %d, prefix %d, size %d", c.ip, len(b), len(e.BodyPrefix()), e.Size())
+		}
+		// The pinned size is the length of the canonical bytes of the record above.
+		// Each text field is as long as its cap allows, and each control byte is a
+		// 6-byte escape. The test measured the value; a change of a cap changes it.
+		if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+len(ip) {
+			t.Errorf("ip %q: largest record is %d bytes, event is %d", c.ip, len(b), e.Size())
+		}
 	}
 	// Input past a cap is an error before it reaches the encoder.
 	over := strings.Repeat("a", 5000)

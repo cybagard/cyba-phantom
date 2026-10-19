@@ -299,14 +299,14 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
 	for j, e := range batch {
-		ok, err := e.Record.Kind.IsEvidence()
+		ok, err := e.Kind().IsEvidence()
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
 		if !ok {
 			continue
 		}
-		h, err := event.HashEvidence(e.Record)
+		h, err := event.HashEvidence(e.Record())
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
@@ -375,22 +375,23 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	i, rows := 0, 0
 	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
+		if evidence[j] && appendErr != nil {
+			continue
+		}
+		rec := e.Record() // one copy for the record bytes and the row
 		if evidence[j] {
-			if appendErr != nil {
-				continue
-			}
 			evBytes := event.EvidenceBytes
 			if w.evidenceBytes != nil {
 				evBytes = w.evidenceBytes
 			}
-			b, err := evBytes(e.Record)
+			b, err := evBytes(rec)
 			if err != nil {
 				return false, fail(writerName, ruleRecord)
 			}
 			hash, leaf, record = hs[i][:], first+int64(i), b
 			i++
 		}
-		if err := w.insertRow(ctx, stmt, e, hash, leaf, record); err != nil {
+		if err := w.insertRow(ctx, stmt, e, rec, hash, leaf, record); err != nil {
 			return false, err
 		}
 		rows++

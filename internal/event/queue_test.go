@@ -163,7 +163,7 @@ func TestTU17_QueueConcurrentBounds(t *testing.T) {
 	}
 	var queued Bytes
 	for _, e := range q.Drain() {
-		if isEv, _ := e.Record.Kind.IsEvidence(); isEv {
+		if isEv, _ := e.Kind().IsEvidence(); isEv {
 			queued.Evidence += int64(e.Size())
 		} else {
 			queued.Bulk += int64(e.Size())
@@ -205,7 +205,7 @@ func TestTU17_QueueEvidenceFirst(t *testing.T) {
 		if !ok {
 			break
 		}
-		kinds = append(kinds, e.Record.Kind)
+		kinds = append(kinds, e.Kind())
 	}
 	if len(kinds) != depth+cap(q.evidence) {
 		t.Fatalf("took %d events", len(kinds))
@@ -352,7 +352,7 @@ func TestTU17_QueueShutdown(t *testing.T) {
 	q.Close()
 	var drained [2]uint64
 	for _, e := range q.Drain() {
-		if isEv, _ := e.Record.Kind.IsEvidence(); isEv {
+		if isEv, _ := e.Kind().IsEvidence(); isEv {
 			drained[1]++
 		} else {
 			drained[0]++
@@ -399,7 +399,7 @@ func TestTU17_QueueClose(t *testing.T) {
 		t.Error("Ready has no value after Close")
 	}
 	got := q.Drain()
-	if len(got) != 2 || got[0].Record.Kind != KindCallback || got[1].Record.Kind != KindRequest {
+	if len(got) != 2 || got[0].Kind() != KindCallback || got[1].Kind() != KindRequest {
 		t.Errorf("drain gave %d events, want the evidence event then the bulk event", len(got))
 	}
 	if len(q.Drain()) != 0 || q.Bytes() != (Bytes{}) {
@@ -425,9 +425,9 @@ func TestTU17_QueueReadyAndInvalid(t *testing.T) {
 	}
 	q.TryTake()
 	literal := func(k Kind, ip string) *Event {
-		return &Event{Record: Record{Kind: k}, DB: DBOnly{IP: ip, BodyPrefix: make([]byte, 1<<20)}}
+		return &Event{record: Record{Kind: k}, db: dbOnly{ip: ip, bodyPrefix: make([]byte, 1<<20)}}
 	}
-	if q.Enqueue(nil) || q.Enqueue(&Event{Record: Record{Kind: 0}}) || q.Enqueue(literal(99, "198.51.100.1")) ||
+	if q.Enqueue(nil) || q.Enqueue(&Event{record: Record{Kind: 0}}) || q.Enqueue(literal(99, "198.51.100.1")) ||
 		q.Enqueue(literal(KindRequest, "198.51.100.2")) || q.Enqueue(literal(KindCallback, "")) {
 		t.Fatal("an invalid event was accepted")
 	}
@@ -448,7 +448,7 @@ func TestTU17_QueueBadAddress(t *testing.T) {
 	q, c := mustQueue(t, 1, maxBulkBytes, maxEvidenceBytes)
 	// NewEvent rejects this text, so the test builds the event as a literal. Its
 	// size is 0, so the queue drops it as invalid and reads the IP text.
-	e := &Event{Record: Record{Kind: KindRequest}, DB: DBOnly{IP: "not-an-address"}}
+	e := &Event{record: Record{Kind: KindRequest}, db: dbOnly{ip: "not-an-address"}}
 	if q.Enqueue(e) {
 		t.Error("Enqueue accepted an event with a bad IP text")
 	}

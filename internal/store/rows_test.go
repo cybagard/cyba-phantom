@@ -102,7 +102,7 @@ func TestTU18StoredValuesEqualEventValues(t *testing.T) {
 				t.Fatalf("%d rows for %d events", len(rows), len(batch))
 			}
 			for i, e := range batch {
-				rec, got := e.Record, rows[i]
+				rec, got := e.Record(), rows[i]
 				var surface *string
 				if rec.Surface != nil {
 					s := string(*rec.Surface)
@@ -118,8 +118,8 @@ func TestTU18StoredValuesEqualEventValues(t *testing.T) {
 					detail = &s
 				}
 				var body []byte
-				if keep && len(e.DB.BodyPrefix) > 0 {
-					body = e.DB.BodyPrefix
+				if b := e.BodyPrefix(); keep && len(b) > 0 {
+					body = b
 				}
 				name := fmt.Sprintf("row %d (%v)", i, rec.Kind)
 				for col, pair := range map[string][2]any{

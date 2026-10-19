@@ -68,8 +68,9 @@ func TestTU19RequestsGiveEvents(t *testing.T) {
 		t.Fatalf("events: got %d, want %d", len(evs), n)
 	}
 	for _, e := range evs {
-		if e.DB.IP != "127.0.0.1" || e.Record.Kind != event.KindRequest || *e.Record.Status != 200 || *e.Record.Path != "/p" {
-			t.Fatalf("event: %+v ip %q", e.Record, e.DB.IP)
+		rec := e.Record()
+		if e.IP() != "127.0.0.1" || e.Kind() != event.KindRequest || *rec.Status != 200 || *rec.Path != "/p" {
+			t.Fatalf("event: %+v ip %q", rec, e.IP())
 		}
 	}
 	if h.EventErrors() != 0 {
@@ -109,9 +110,9 @@ func TestTU19ForwardedHeadersNotInEvent(t *testing.T) {
 	if !ok {
 		t.Fatal("no event")
 	}
-	rec, _ := json.Marshal(e.Record)
-	all := string(rec) + e.DB.IP + string(e.DB.BodyPrefix)
-	if strings.Contains(all, "fwdmark") || strings.Contains(all, "203.0.113.9") || e.DB.IP != "192.0.2.7" {
+	rec, _ := json.Marshal(e.Record())
+	all := string(rec) + e.IP() + string(e.BodyPrefix())
+	if strings.Contains(all, "fwdmark") || strings.Contains(all, "203.0.113.9") || e.IP() != "192.0.2.7" {
 		t.Fatalf("forwarded value in event: %s", all)
 	}
 }
@@ -282,8 +283,8 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("events: %d", len(evs))
 	}
-	r := evs[0].Record
-	if *r.Method != "PRI" || *r.Status != 404 || r.FP != nil || evs[0].DB.IP != "127.0.0.1" {
+	r := evs[0].Record()
+	if *r.Method != "PRI" || *r.Status != 404 || r.FP != nil || evs[0].IP() != "127.0.0.1" {
 		t.Fatalf("event: %+v", r)
 	}
 }
