@@ -40,6 +40,6 @@ ENV GOVULNDB=file:///opt/govulndb
 # Tests read this variable to know that they run in this container. A test
 # that needs a tool of this image fails here when the tool is absent, and
 # can skip outside the container.
-ENV PHANTOM_DEVCONTAINER=1
+ENV IN_DEVCONTAINER=1
 
 WORKDIR /src
