@@ -343,7 +343,8 @@ type Row struct {
 }
 
 // RecordFromRow makes the record of a stored row, so that a verifier can hash
-// it again. It applies all rules of the record.
+// it again. It applies all rules of the record. The record of a refused row has
+// no session, because the session column of that row is not part of the record.
 func RecordFromRow(row Row) (Record, error) {
 	k, err := ParseKind(row.Kind)
 	if err != nil {
@@ -353,6 +354,9 @@ func RecordFromRow(row Row) (Record, error) {
 		TS: row.TS, Session: row.SessionID, Kind: k, Vhost: row.Vhost,
 		Method: row.Method, Path: row.Path, Status: row.Status,
 		TrapID: row.TrapID, TokenID: row.TokenID, Surface: row.Surface, FP: row.FP,
+	}
+	if k == KindRefused {
+		r.Session = nil
 	}
 	if row.Detail != nil {
 		if r.Detail, err = ParseDetail(*row.Detail); err != nil {

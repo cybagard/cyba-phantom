@@ -47,10 +47,10 @@ func TestTS12_EvidencePredicate(t *testing.T) {
 	}
 }
 
-// T-S-12: request and beacon records cannot be hashed; an unknown kind is an
+// T-S-12: request, beacon and refused records cannot be hashed; an unknown kind is an
 // error; the evidence kinds hash.
 func TestTS12_HashEvidenceRefusal(t *testing.T) {
-	for _, k := range append(allKinds, 0, KindRefused+1) {
+	for _, k := range append(allKinds, KindRefused, 0, KindRefused+1) {
 		r := Record{TS: 1, Kind: k}
 		h, err := HashEvidence(r)
 		b, berr := EvidenceBytes(r)

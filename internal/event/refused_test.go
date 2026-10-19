@@ -1,6 +1,7 @@
 package event
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -64,30 +65,33 @@ func TestTU06_RefusedInputs(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		mod  func(*Input)
+		want error
 	}{
-		{"status", func(in *Input) { in.Status = &st }},
-		{"vhost", func(in *Input) { in.Vhost = "a.example" }},
-		{"method", func(in *Input) { in.Method = "GET" }},
-		{"path", func(in *Input) { in.Path = "/" }},
-		{"trap_id", func(in *Input) { in.TrapID = "t-1" }},
-		{"token_id", func(in *Input) { in.TokenID = "k-1" }},
-		{"surface", func(in *Input) { in.Surface = SurfacePath }},
-		{"session", func(in *Input) { in.Session = "s-1" }},
-		{"body prefix", func(in *Input) { in.BodyPrefix = []byte("x") }},
-		{"reason zero", func(in *Input) { in.Reason = 0 }},
-		{"reason past the last", func(in *Input) { in.Reason = ReasonRefusedRequest + 1 }},
-		{"caller detail", func(in *Input) { in.Detail = Detail{"reason": Str("bad_hello")} }},
-		{"empty caller detail", func(in *Input) { in.Detail = Detail{} }},
+		{"status", func(in *Input) { in.Status = &st }, errRefusedField},
+		{"vhost", func(in *Input) { in.Vhost = "a.example" }, errRefusedField},
+		{"method", func(in *Input) { in.Method = "GET" }, errRefusedField},
+		{"path", func(in *Input) { in.Path = "/" }, errRefusedField},
+		{"trap_id", func(in *Input) { in.TrapID = "t-1" }, errRefusedField},
+		{"token_id", func(in *Input) { in.TokenID = "k-1" }, errRefusedField},
+		{"surface", func(in *Input) { in.Surface = SurfacePath }, errRefusedField},
+		{"session", func(in *Input) { in.Session = "s-1" }, errRefusedField},
+		{"h2", func(in *Input) { in.H2 = "x" }, errRefusedField},
+		{"hdr", func(in *Input) { in.Hdr = "y" }, errRefusedField},
+		{"body prefix", func(in *Input) { in.BodyPrefix = []byte("x") }, errRefusedInput},
+		{"reason zero", func(in *Input) { in.Reason = 0 }, errRefusedReason},
+		{"reason past the last", func(in *Input) { in.Reason = ReasonRefusedRequest + 1 }, errRefusedReason},
+		{"caller detail", func(in *Input) { in.Detail = Detail{"reason": Str("bad_hello")} }, errRefusedInput},
+		{"empty caller detail", func(in *Input) { in.Detail = Detail{} }, errRefusedInput},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if e, err := NewEvent(fixedClock(1), refusedInput(c.mod)); err == nil || e != nil {
-				t.Errorf("accepted: %v", e)
+			if e, err := NewEvent(fixedClock(1), refusedInput(c.mod)); !errors.Is(err, c.want) || e != nil {
+				t.Errorf("event %v, error %v, want %v", e, err, c.want)
 			}
 		})
 	}
 	t.Run("reason on another kind", func(t *testing.T) {
-		if _, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, Reason: ReasonBadHello}); err == nil {
-			t.Error("accepted")
+		if _, err := NewEvent(fixedClock(1), Input{Kind: KindRequest, Reason: ReasonBadHello}); !errors.Is(err, errReasonKind) {
+			t.Errorf("error %v, want %v", err, errReasonKind)
 		}
 	})
 }
@@ -127,31 +131,41 @@ func TestTU06_RefusedRecordRules(t *testing.T) {
 	if _, err := good().canonical(); err != nil {
 		t.Fatal(err)
 	}
+	withJA4 := good()
+	withJA4.FP = &FP{JA4: sp("t13d")}
+	if _, err := withJA4.canonical(); err != nil {
+		t.Errorf("a record with only fp.ja4: %v", err)
+	}
 	st, s := int64(400), Surface("path")
 	for _, c := range []struct {
 		name string
 		mod  func(*Record)
+		want error
 	}{
-		{"second member", func(r *Record) { r.Detail["x"] = Int(1) }},
-		{"reason outside the five", func(r *Record) { r.Detail["reason"] = Str("other") }},
-		{"empty reason", func(r *Record) { r.Detail["reason"] = Str("") }},
-		{"reason not a string", func(r *Record) { r.Detail["reason"] = Int(1) }},
-		{"other member name", func(r *Record) { r.Detail = Detail{"why": Str("bad_hello")} }},
-		{"no detail", func(r *Record) { r.Detail = nil }},
-		{"status", func(r *Record) { r.Status = &st }},
-		{"vhost", func(r *Record) { r.Vhost = sp("a") }},
-		{"method", func(r *Record) { r.Method = sp("GET") }},
-		{"path", func(r *Record) { r.Path = sp("/") }},
-		{"trap_id", func(r *Record) { r.TrapID = sp("t") }},
-		{"token_id", func(r *Record) { r.TokenID = sp("k") }},
-		{"surface", func(r *Record) { r.Surface = (*Surface)(&s) }},
-		{"session", func(r *Record) { r.Session = sp("s") }},
+		{"second member", func(r *Record) { r.Detail["x"] = Int(1) }, errRefusedDetail},
+		{"reason outside the five", func(r *Record) { r.Detail["reason"] = Str("other") }, errRefusedReason},
+		{"empty reason", func(r *Record) { r.Detail["reason"] = Str("") }, errRefusedReason},
+		{"reason not a string", func(r *Record) { r.Detail["reason"] = Int(1) }, errRefusedDetail},
+		{"other member name", func(r *Record) { r.Detail = Detail{"why": Str("bad_hello")} }, errRefusedDetail},
+		{"no detail", func(r *Record) { r.Detail = nil }, errRefusedDetail},
+		{"empty detail", func(r *Record) { r.Detail = Detail{} }, errRefusedDetail},
+		{"status", func(r *Record) { r.Status = &st }, errRefusedField},
+		{"vhost", func(r *Record) { r.Vhost = sp("a") }, errRefusedField},
+		{"method", func(r *Record) { r.Method = sp("GET") }, errRefusedField},
+		{"path", func(r *Record) { r.Path = sp("/") }, errRefusedField},
+		{"trap_id", func(r *Record) { r.TrapID = sp("t") }, errRefusedField},
+		{"token_id", func(r *Record) { r.TokenID = sp("k") }, errRefusedField},
+		{"surface", func(r *Record) { r.Surface = (*Surface)(&s) }, errRefusedField},
+		{"session", func(r *Record) { r.Session = sp("s") }, errRefusedField},
+		{"fp.h2", func(r *Record) { r.FP = &FP{H2: sp("x")} }, errRefusedField},
+		{"fp.hdr", func(r *Record) { r.FP = &FP{Hdr: sp("y")} }, errRefusedField},
+		{"bad reason and status", func(r *Record) { r.Detail["reason"] = Str("other"); r.Status = &st }, errRefusedField},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := good()
 			c.mod(&r)
-			if _, err := r.canonical(); err == nil {
-				t.Error("canonical accepted the record")
+			if _, err := r.canonical(); !errors.Is(err, c.want) {
+				t.Errorf("error %v, want %v", err, c.want)
 			}
 		})
 	}
@@ -161,18 +175,39 @@ func TestTU06_RefusedRecordRules(t *testing.T) {
 			t.Errorf("row %s: %v", d, err)
 		}
 	}
-	for _, d := range []string{`{"reason":"x"}`, `{"reason":"bad_hello","a":1}`, `{"reason":1}`} {
-		if _, err := RecordFromRow(row(&d)); err == nil {
-			t.Errorf("row %s accepted", d)
-		}
+	// The session column of a refused row is not part of the record.
+	stored := row(sp(`{"reason":"bad_hello"}`))
+	stored.SessionID = sp("abcdefghijklmnopqrstuvwxyz")
+	stored.FP = &FP{JA4: sp("t13d")}
+	if r, err := RecordFromRow(stored); err != nil || r.Session != nil {
+		t.Errorf("row with a session id: session %v, error %v", r.Session, err)
 	}
-	if _, err := RecordFromRow(row(nil)); err == nil {
-		t.Error("row with no detail accepted")
+	if r, err := RecordFromRow(Row{TS: 1, Kind: "request", SessionID: sp("s-1")}); err != nil || r.Session == nil || *r.Session != "s-1" {
+		t.Errorf("request row: session %v, error %v", r.Session, err)
 	}
-	withStatus := row(sp(`{"reason":"bad_hello"}`))
-	withStatus.Status = &st
-	if _, err := RecordFromRow(withStatus); err == nil {
-		t.Error("row with a status accepted")
+	for _, c := range []struct {
+		name string
+		row  Row
+		want error
+	}{
+		{"reason outside the five", row(sp(`{"reason":"x"}`)), errRefusedReason},
+		{"second member", row(sp(`{"reason":"bad_hello","a":1}`)), errRefusedDetail},
+		{"reason not a string", row(sp(`{"reason":1}`)), errRefusedDetail},
+		{"no detail", row(nil), errRefusedDetail},
+		{"status", func() Row { r := row(sp(`{"reason":"bad_hello"}`)); r.Status = &st; return r }(), errRefusedField},
+		{"fp.h2", func() Row { r := row(sp(`{"reason":"bad_hello"}`)); r.FP = &FP{H2: sp("x")}; return r }(), errRefusedField},
+		{"fp.hdr", func() Row { r := row(sp(`{"reason":"bad_hello"}`)); r.FP = &FP{Hdr: sp("y")}; return r }(), errRefusedField},
+	} {
+		t.Run("row "+c.name, func(t *testing.T) {
+			if _, err := RecordFromRow(c.row); !errors.Is(err, c.want) {
+				t.Errorf("error %v, want %v", err, c.want)
+			}
+		})
+	}
+	// ParseDetail has its own error for a text that is not an object: the test
+	// checks only that the row is refused.
+	if _, err := RecordFromRow(row(sp(`{"reason":`))); err == nil {
+		t.Error("row with a detail text that does not parse accepted")
 	}
 }
 
