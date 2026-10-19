@@ -587,16 +587,17 @@ func TestTS16LoadGivesTheChangedRuleWhenEveryTryFindsAnotherFile(t *testing.T) {
 	}
 }
 
-func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *testing.T) {
+func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsBeforeTheRead(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
-	// The file is sparse, so the growth costs no disk. The same file is open, so
-	// the check of the file identity passes.
-	betweenLstatAndOpen = func() {
+	// The file grows after the size checks of the open file and before the read.
+	// The size checks have passed, so only the read limit bounds the memory. The
+	// file is sparse, so the growth costs no disk.
+	betweenSizeCheckAndRead = func() {
 		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/key"), 32<<20))
 	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	t.Cleanup(func() { betweenSizeCheckAndRead = nil })
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	b, err := s.Load(ctx, "key")
@@ -609,7 +610,9 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *tes
 	// byte allocates about 290 KiB in all with the race detector, and less without
 	// it. A read limit of four times the cap allocates about 630 KiB without the
 	// race detector and about 1.2 MiB with it.
-	if n := after.TotalAlloc - before.TotalAlloc; n > 384<<10 {
+	n := after.TotalAlloc - before.TotalAlloc
+	t.Logf("Load allocated %d bytes", n)
+	if n > 384<<10 {
 		t.Errorf("Load allocated %d bytes for a file that grew to 32 MiB", n)
 	}
 }
@@ -926,9 +929,12 @@ func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
 		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0))
 		t.Cleanup(func() { os.Chmod(filepath.Join(cache, "closed"), 0o700) })
 	}
-	// (c) a directory with a name that starts with tmpPrefix and is not empty.
+	// (c) a directory with a name that starts with tmpPrefix and is not empty. Its
+	// file also starts with tmpPrefix, so a walk that enters the directory removes it.
 	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"dir"), 0o700))
-	touch(filepath.Join(cache, tmpPrefix+"dir", "inner"))
+	touch(filepath.Join(cache, tmpPrefix+"dir", tmpPrefix+"inner"))
+	// (e) an empty directory with a name that starts with tmpPrefix.
+	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"empty"), 0o700))
 	// (d) a good key directory with a leftover file.
 	touch(tmpIn("good"))
 
@@ -948,12 +954,16 @@ func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
 		t.Errorf("Open removed the leftover file in the key directory with mode 0755, but it must skip that directory: %v", err)
 	}
 	// Remove cannot remove a directory that is not empty, so the directory stays.
-	// The walk does not go into it, so its file "inner" stays too.
+	// The walk does not go into it, so its leftover-named file stays too.
 	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir")); err != nil {
-		t.Errorf("the directory %sdir is gone, but it holds the file inner: %v", tmpPrefix, err)
+		t.Errorf("the directory %sdir is gone, but it holds the file %sinner: %v", tmpPrefix, tmpPrefix, err)
 	}
-	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir", "inner")); err != nil {
-		t.Errorf("the file inner in the directory %sdir is gone: %v", tmpPrefix, err)
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir", tmpPrefix+"inner")); err != nil {
+		t.Errorf("the file %sinner in the directory %sdir is gone: %v", tmpPrefix, tmpPrefix, err)
+	}
+	// Remove removes an empty directory, so Open removes this one.
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"empty")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open did not remove the empty directory %sempty: %v", tmpPrefix, err)
 	}
 	if closedCase {
 		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0o700))

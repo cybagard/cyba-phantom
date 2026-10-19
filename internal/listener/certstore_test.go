@@ -568,8 +568,8 @@ func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
 }
 
 // The walk of Open goes into a directory only down to maxParts levels below the
-// cache directory. The directory d8 is the deepest that it enters. It does not
-// enter d9, so a leftover file in d9 stays.
+// cache directory. The directory at level maxParts is the deepest that it enters.
+// It does not enter the next level, so a leftover file there stays.
 func TestTS16OpenRemovesLeftoverFilesOnlyDownToTheDepthLimit(t *testing.T) {
 	first, dir := newStore(t)
 	mustNil(t, first.Close())
