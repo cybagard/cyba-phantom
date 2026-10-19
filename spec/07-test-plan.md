@@ -133,7 +133,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 ## 5. Exit criteria per milestone
 | Milestone | Must pass |
 |-----------|-----------|
-| M-1 | T-U-06..12, T-U-17, T-U-18, T-U-19, T-I-01, T-I-03, T-P-07, T-P-09, T-S-10, T-S-11, T-S-12, T-S-13, T-S-14, T-S-15, T-S-16, T-S-17, T-S-18 |
+| M-1 | T-U-06, T-U-07, T-U-09, T-U-10, T-U-12, T-U-17, T-U-18, T-U-19, T-I-01, T-I-03, T-P-07, T-P-09, T-S-10, T-S-11, T-S-12, T-S-13, T-S-14, T-S-15, T-S-16, T-S-17, T-S-18 |
 | M-2 | + T-U-01, T-U-08, T-U-14, T-I-02, T-I-04, T-I-12, T-S-01, T-S-02, T-S-19, T-S-20, T-S-21, T-S-22 |
 | M-3 | + T-U-02..05, T-U-13, T-U-16, T-I-05..10, T-I-14, T-S-03 |
 | M-4 | + T-U-11, T-U-15, T-I-11, T-I-13, T-I-15, T-S-04..09, T-A-04, T-A-09 |
