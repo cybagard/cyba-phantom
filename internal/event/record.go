@@ -230,6 +230,11 @@ func (r Record) check() error {
 	if r.Session != nil && r.Kind.isSystem() {
 		return errors.New("event: a system kind has no session")
 	}
+	if r.Kind == KindRefused {
+		if err := r.checkRefused(); err != nil {
+			return err
+		}
+	}
 	fp := FP{}
 	if r.FP != nil {
 		fp = *r.FP
@@ -301,7 +306,7 @@ func (r Record) evidence() error {
 }
 
 // EvidenceBytes returns the canonical bytes of an evidence record. It returns
-// an error for request and beacon records and for an unknown kind.
+// an error for request, beacon and refused records and for an unknown kind.
 func EvidenceBytes(r Record) ([]byte, error) {
 	if err := r.evidence(); err != nil {
 		return nil, err
@@ -310,8 +315,8 @@ func EvidenceBytes(r Record) ([]byte, error) {
 }
 
 // HashEvidence returns the hash of an evidence record. It is the only function
-// that hashes a record. It returns an error for request and beacon records
-// and for an unknown kind.
+// that hashes a record. It returns an error for request, beacon and refused
+// records and for an unknown kind.
 func HashEvidence(r Record) ([32]byte, error) {
 	b, err := EvidenceBytes(r)
 	if err != nil {
@@ -338,7 +343,8 @@ type Row struct {
 }
 
 // RecordFromRow makes the record of a stored row, so that a verifier can hash
-// it again. It applies all rules of the record.
+// it again. It applies all rules of the record. The record of a refused row has
+// no session, because the session column of that row is not part of the record.
 func RecordFromRow(row Row) (Record, error) {
 	k, err := ParseKind(row.Kind)
 	if err != nil {
@@ -348,6 +354,9 @@ func RecordFromRow(row Row) (Record, error) {
 		TS: row.TS, Session: row.SessionID, Kind: k, Vhost: row.Vhost,
 		Method: row.Method, Path: row.Path, Status: row.Status,
 		TrapID: row.TrapID, TokenID: row.TokenID, Surface: row.Surface, FP: row.FP,
+	}
+	if k == KindRefused {
+		r.Session = nil
 	}
 	if row.Detail != nil {
 		if r.Detail, err = ParseDetail(*row.Detail); err != nil {
@@ -366,7 +375,9 @@ type Clock func() time.Time
 // Input holds the values for one event. The values from a request are
 // untrusted. ClientIP and BodyPrefix go to the DB-only part. Forwarded is the
 // value of an X-Forwarded-For or Forwarded header. NewEvent ignores it because
-// the record and the DB part never hold a forwarded address.
+// the record and the DB part never hold a forwarded address. Reason is for the
+// refused kind only: NewEvent builds the detail from it, and it refuses a
+// detail from the caller for that kind.
 type Input struct {
 	Kind                         Kind
 	Session, Vhost, Method, Path string
@@ -375,6 +386,7 @@ type Input struct {
 	Surface                      Surface
 	JA4, H2, Hdr                 string
 	Detail                       Detail
+	Reason                       RefusedReason
 	ClientIP, Forwarded          string
 	BodyPrefix                   []byte
 }
@@ -484,6 +496,15 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	}
 	if in.Session != "" && in.Kind.isSystem() {
 		return nil, errors.New("event: a system kind has no session")
+	}
+	if in.Kind == KindRefused {
+		d, err := in.refusedDetail()
+		if err != nil {
+			return nil, err
+		}
+		in.Detail = d
+	} else if in.Reason != 0 {
+		return nil, errReasonKind
 	}
 	if err := in.Detail.check(); err != nil {
 		return nil, err

@@ -4,9 +4,9 @@ import "errors"
 
 var errUnknownKind = errors.New("event: unknown kind")
 
-// Kind is the type of an event. The set is closed: it has 8 values (request,
-// callback, beacon, score_change, bundle_load, bundle_rejected, alert_sent and
-// retention) and no other value. The zero value is not a Kind.
+// Kind is the type of an event. The set is closed: it has 9 values (request,
+// callback, beacon, score_change, bundle_load, bundle_rejected, alert_sent,
+// retention and refused) and no other value. The zero value is not a Kind.
 type Kind uint8
 
 const (
@@ -18,6 +18,8 @@ const (
 	KindBundleRejected
 	KindAlertSent
 	KindRetention
+	// KindRefused is last, so that the values of the other kinds stay the same.
+	KindRefused
 )
 
 var kindNames = [...]string{
@@ -29,12 +31,13 @@ var kindNames = [...]string{
 	KindBundleRejected: "bundle_rejected",
 	KindAlertSent:      "alert_sent",
 	KindRetention:      "retention",
+	KindRefused:        "refused",
 }
 
 // ParseKind returns the kind with the name s. The match is exact and
 // case-sensitive. An unknown name is an error.
 func ParseKind(s string) (Kind, error) {
-	for k := KindRequest; k <= KindRetention; k++ {
+	for k := KindRequest; k <= KindRefused; k++ {
 		if kindNames[k] == s {
 			return k, nil
 		}
@@ -42,7 +45,7 @@ func ParseKind(s string) (Kind, error) {
 	return 0, errUnknownKind
 }
 
-func (k Kind) valid() bool { return k >= KindRequest && k <= KindRetention }
+func (k Kind) valid() bool { return k >= KindRequest && k <= KindRefused }
 
 // String returns the name of k, or "unknown" for a value that is not a kind.
 func (k Kind) String() string {
@@ -68,7 +71,7 @@ func (k Kind) IsEvidence() (bool, error) {
 	case KindCallback, KindScoreChange, KindAlertSent,
 		KindBundleLoad, KindBundleRejected, KindRetention:
 		return true, nil
-	case KindRequest, KindBeacon:
+	case KindRequest, KindBeacon, KindRefused:
 		return false, nil
 	}
 	return false, errUnknownKind

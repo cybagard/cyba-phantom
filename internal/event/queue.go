@@ -23,8 +23,8 @@ var errQueueDepth = errors.New("event: queue depth is out of range")
 var errQueueCounters = errors.New("event: queue needs a counters value from NewCounters")
 
 // Queue is the bounded queue between the request path and the writer (SEC-15,
-// C2, C3). It has two lanes. The bulk lane holds request and beacon events and
-// has the capacity of the queue depth. The evidence lane holds the six
+// C2, C3). It has two lanes. The bulk lane holds request, beacon and refused
+// events and has the capacity of the queue depth. The evidence lane holds the six
 // evidence kinds and has the capacity max(1, depth/4). The kind decides the
 // lane (Kind.IsEvidence). A kind that is not known is never queued.
 //
