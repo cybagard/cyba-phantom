@@ -1366,11 +1366,11 @@ func inHTTPShutdown() bool {
 	}
 }
 
-// splitCtx is a context that http.Server.Shutdown sees as done at inHTTP, and
-// that all other callers see as done at the embedded context. It models a window
-// of one real context: ctx ends after the entry check of Shutdown and before its
-// select, or the select takes the done case when both cases are ready. With gate
-// set, Done blocks in http.Server.Shutdown until gate is closed.
+// splitCtx gives http.Server.Shutdown the Done and Err of inHTTP. It gives all
+// other callers the Done and Err of the embedded context. With gate set, Done
+// blocks in http.Server.Shutdown until gate is closed. Its only test uses one
+// context for both and the gate. Thus the Shutdown call of net/http stays open
+// after the context ends.
 type splitCtx struct {
 	context.Context
 	inHTTP context.Context
@@ -1541,11 +1541,11 @@ func (h writeHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 }
 
 // T-S-17: the listener of the TLS serve gives an error at Close, and the context
-// of Shutdown is not done. net/http returns this error at once, because its only
-// open connection is hijacked and net/http does not track it. A hijacked TLS
-// connection with a blocked write closes through the socket sweep. The client
-// does not read. Shutdown returns the listener error well before the context ends,
-// and the handler write returns an error.
+// of Shutdown is not done. net/http returns this error without a wait, because
+// its only open connection is hijacked and net/http does not track it. A
+// hijacked TLS connection with a blocked write closes through the socket sweep.
+// The client does not read. Shutdown returns the listener error well before the
+// context ends, and the handler write returns an error.
 func TestTS17ShutdownSweepsWhenListenerCloseGivesError(t *testing.T) {
 	h := writeHandler{started: make(chan error, 1), result: make(chan error, 1)}
 	r := newRig(t, 2, testHeaderBytes, defaultTimeouts, h)
@@ -1598,8 +1598,9 @@ func TestTS17ShutdownSweepsWhenListenerCloseGivesError(t *testing.T) {
 	}
 }
 
-// hijackHandler hijacks its connection and reads from it until the read fails.
-// It sends on started after the hijack, and the error of the read on result.
+// hijackHandler hijacks its connection and reads one byte from it. The read
+// returns when a byte arrives or when the read fails. The handler sends on
+// started after the hijack, and the error of the read on result.
 type hijackHandler struct{ started, result chan error }
 
 func (h hijackHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
@@ -1615,8 +1616,8 @@ func (h hijackHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 }
 
 // hijacked serves a TLS socket with a hijackHandler, sends one request on a new
-// connection, and waits until the handler has hijacked it. It returns the handler
-// and the client connection.
+// connection, and waits until the handler has hijacked it. It returns the rig,
+// the handler and the client connection.
 func hijacked(t *testing.T) (*rig, hijackHandler, *tls.Conn) {
 	t.Helper()
 	h := hijackHandler{started: make(chan error, 1), result: make(chan error, 1)}
@@ -1654,10 +1655,10 @@ func handlerReadError(t *testing.T, h hijackHandler) error {
 }
 
 // T-S-17: the only open connection is a TLS connection that a handler hijacks.
-// net/http does not track it, so its Shutdown call returns at once. The context
-// ends while the handler runs. Shutdown closes the connection at the socket and
-// returns the error of the context. The handler read returns an error before
-// Shutdown returns, and the slot is free.
+// net/http does not track it, so its Shutdown call returns without a wait. The
+// context ends while the handler runs. Shutdown closes the connection at the
+// socket and returns the error of the context. The handler read returns an
+// error before Shutdown returns, and the slot is free.
 func TestTS17ShutdownClosesHijackedConnectionAtTheDeadline(t *testing.T) {
 	const deadline = 300 * time.Millisecond
 	r, h, _ := hijacked(t)

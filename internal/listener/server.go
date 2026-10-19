@@ -343,14 +343,16 @@ func (s *Server) Close() error {
 }
 
 // Shutdown closes the listeners of all serve calls. It waits until their open
-// connections are done and their running handlers return. It does not wait for
-// a hijacked connection, only for its handler.
+// connections are closed or idle and their running handlers return. It does not
+// wait for a hijacked connection, only for its handler.
 //
-// Shutdown returns an error when ctx ends first, when ctx is done at the call,
-// or when a listener close gives an error. On each of these paths it closes each
-// open connection at the socket below TLS, also each hijacked connection. So a
-// stalled close_notify write does not hold it. The error is the error of ctx, or
-// the error of the listener close.
+// Shutdown returns an error in three cases. In the first case, ctx ends before
+// the open connections are closed or idle and the running handlers return. In
+// the second case, ctx ended before the call. In the third case, a listener
+// close gives an error. In each case Shutdown closes each connection in its
+// record at the socket below TLS, also each hijacked connection. So a stalled
+// close_notify write does not hold it. The error is the error of ctx, or the
+// error of the listener close.
 //
 // When Shutdown returns nil, no handler runs. A hijacked connection whose
 // handler returned can still be open.
@@ -368,7 +370,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	servers := s.markClosed()
 	if err := ctx.Err(); err != nil {
 		// A connection that Accept returns after this sweep can be in its
-		// handshake. It has an empty send buffer, so its close does not wait.
+		// handshake. Its send buffer holds at most its handshake messages, so the
+		// close_notify write of its close does not wait for a full buffer.
 		s.sweep(servers)
 		s.handlers.waitBound()
 		return err
