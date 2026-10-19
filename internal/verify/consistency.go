@@ -16,7 +16,8 @@ var (
 	ErrNoProof = errors.New("verify: no consistency proof has the needed sizes")
 )
 
-// Consistency checks that two checkpoints belong to one log (SEC-18, FR-16). The key v is the trust anchor for both notes. S is the size of the prior
+// Consistency checks that two checkpoints belong to one log (SEC-18, FR-16).
+// The key v is the trust anchor for both notes. S is the size of the prior
 // note and N is the size of the latest note.
 //
 // If N is larger than S, a proof from S to N must verify. If N is smaller than

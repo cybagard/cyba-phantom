@@ -262,8 +262,7 @@ func TestTS14_InclusionBridged(t *testing.T) {
 	// The log b shares the first 5 leaves with the log l and then differs. The
 	// inclusion proof, the root at 5 and the consistency proof come from b. The
 	// checkpoint is from l. The proof file is not signed, so this is a bad proof
-	// and not a fork. phantom-verify gives exit 1 for it (ErrNotVerified, line 56
-	// of cmd/phantom-verify/main.go).
+	// and not a fork. phantom-verify maps ErrNotVerified to exit 1.
 	forked := bridgedProof(t, forkedLog(t, 5, 300), 3, 5, 300)
 	zero := InclusionProof{TreeSize: 0, Hashes: []modtlog.Hash{}, Root: &modtlog.Hash{}, Consistency: []modtlog.Hash{}}
 	for name, tc := range map[string]struct {

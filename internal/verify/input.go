@@ -99,9 +99,9 @@ func ReadKey(r io.Reader) (note.Verifier, error) {
 // internal/tlog/verifier.
 // The origin is the name of the verifier. A nil verifier gives ErrKey, because
 // the trusted key is missing. The function checks this before the size check.
-// The parser refuses a note with two or
-// more signature lines. This rule applies also when a line is from another
-// key. The function checks the size against 2^48.
+// The parser refuses a note with two or more signature lines. This rule
+// applies also when a line is from another key. The function checks the size
+// against 2^48.
 //
 // When the strict parser refuses the note, the function opens the note with
 // the same key. If note.Open says that the signature of the key is wrong, the
