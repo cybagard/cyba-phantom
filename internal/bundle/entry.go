@@ -65,7 +65,8 @@ func checkEntry(hdr *tar.Header) (string, error) {
 		if value == "" {
 			return "", ErrArchiveInvalid
 		}
-		if key == "mtime" && !paxTimeOK(value) {
+		// The empty value has its own rule above, so this rule skips it.
+		if key == "mtime" && value != "" && !paxTimeOK(value) {
 			return "", ErrArchiveInvalid
 		}
 	}
