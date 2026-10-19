@@ -32,11 +32,17 @@ lint:
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 
-# staticcheck, gosec and govulncheck on the module. All three run on every
-# call, each under a header line; the target then fails if any of them
-# failed and names them. It is not part of all. govulncheck v1.9.0 ignores
-# the GOVULNDB environment variable, so the database goes in with -db; the
-# devcontainer sets GOVULNDB to a local copy (no network there).
+# staticcheck, gosec and govulncheck on the module.
+# All three tools run on every call. Each tool prints under its own header line.
+# The target fails when any tool fails, and it names the failed tools.
+# The target is not part of all.
+# govulncheck v1.9.0 ignores the GOVULNDB environment variable.
+# The target passes the database with -db.
+# The devcontainer has no network, so it sets GOVULNDB to a local copy.
+# gosec reads the GOSEC_AI_* variables and can send code to an AI service.
+# The target removes these variables from the gosec environment.
+# A file:// database needs a modified value in its index/db.json.
+# The target fails govulncheck when that value is missing.
 GOVULNDB ?= https://vuln.go.dev
 
 check:
@@ -44,14 +50,17 @@ check:
 	echo "== staticcheck =="; \
 	staticcheck ./... || failed="$$failed staticcheck"; \
 	echo "== gosec =="; \
-	gosec -quiet ./... || failed="$$failed gosec"; \
+	env -u GOSEC_AI_PROVIDER -u GOSEC_AI_API_KEY -u GOSEC_AI_BASE_URL gosec -quiet ./... || failed="$$failed gosec"; \
 	echo "== govulncheck (db: $(GOVULNDB)) =="; \
 	case "$(GOVULNDB)" in \
 	file://*) \
 		index="$(GOVULNDB:file://%=%)/index/db.json"; \
-		echo "govulncheck: database modified $$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' "$$index" 2>/dev/null)";; \
+		modified=$$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' "$$index" 2>/dev/null | tr -cd '0-9A-Za-z:.+-'); \
+		if [ -n "$$modified" ]; then echo "govulncheck: database modified $$modified"; \
+		else echo "govulncheck: error: no modified value in $$index"; vulnfail=1; fi;; \
 	esac; \
-	govulncheck -db "$(GOVULNDB)" ./... || failed="$$failed govulncheck"; \
+	govulncheck -db "$(GOVULNDB)" ./... || vulnfail=1; \
+	if [ -n "$$vulnfail" ]; then failed="$$failed govulncheck"; fi; \
 	if [ -n "$$failed" ]; then echo "check FAIL:$$failed"; exit 1; fi; \
 	echo "check: staticcheck, gosec and govulncheck passed"
 
