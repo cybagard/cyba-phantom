@@ -391,12 +391,13 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	unchanged(t, target)
 }
 
-// A test hook puts the rename of a Store at each place against a Load, so the
-// test does not depend on timing. In each place Load returns a whole value with
-// no error:
+// A hook does the rename of a Store at three fixed points of a Load, so the test
+// does not depend on timing. At each point Load returns a whole value with no
+// error:
 //   - between the Lstat and the open: the new value, after a second try;
 //   - after the open, before Stat: the old value of the open file, in one try;
-//   - while the temporary file is written and not yet renamed: the old value.
+//   - before the rename, when the temporary file is written: the old value (the
+//     Load runs first, then the rename).
 //
 // After the Store returns, Load gives the new value.
 func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
@@ -495,4 +496,150 @@ func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
 		t.Fatal("Unlock of a lock that is not held = nil")
 	}
 	wantError(t, err, "unlock", ruleNotHeld)
+}
+
+// countTmp returns the number of names in the host directory p that start with
+// tmpPrefix.
+func countTmp(t *testing.T, p string) int {
+	t.Helper()
+	names, err := os.ReadDir(p)
+	mustNil(t, err)
+	n := 0
+	for _, e := range names {
+		if strings.HasPrefix(e.Name(), tmpPrefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
+	ctx := context.Background()
+	first, dir := newStore(t)
+	mustNil(t, first.Store(ctx, "kd/real", []byte("v")))
+	mustNil(t, first.Close())
+	cache := filepath.Join(dir, "acme/cache")
+	kd := filepath.Join(cache, "kd")
+	mustNil(t, os.Mkdir(filepath.Join(kd, "sub"), 0o700))
+	// More leftovers than List reads, in one key directory. A few more are in the
+	// cache directory and in a directory below the key directory.
+	for i := 0; i <= maxList; i++ {
+		mustNil(t, os.WriteFile(filepath.Join(kd, fmt.Sprintf("%s%d", tmpPrefix, i)), nil, 0o600))
+	}
+	for i := 0; i < 3; i++ {
+		mustNil(t, os.WriteFile(filepath.Join(cache, fmt.Sprintf("%sroot%d", tmpPrefix, i)), nil, 0o600))
+	}
+	mustNil(t, os.WriteFile(filepath.Join(kd, "sub", tmpPrefix+"deep"), nil, 0o600))
+	// The names outside the cache directory: in the parent, outside the state
+	// directory, and a symbolic link in the cache that names the outside file.
+	target := outside(t, dir)
+	parentTmp := filepath.Join(dir, "acme", tmpPrefix+"parent")
+	outsideTmp := filepath.Join(filepath.Dir(dir), tmpPrefix+"outside-"+filepath.Base(dir))
+	mustNil(t, os.WriteFile(parentTmp, []byte("parent"), 0o600))
+	mustNil(t, os.WriteFile(outsideTmp, []byte("outside"), 0o600))
+	mustNil(t, os.Symlink(outsideTmp, filepath.Join(cache, tmpPrefix+"link")))
+
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	s, err := Open(state, "acme/cache")
+	mustNil(t, err)
+	defer s.Close()
+
+	for _, p := range []string{cache, kd, filepath.Join(kd, "sub")} {
+		if n := countTmp(t, p); n != 0 {
+			t.Errorf("%d temporary names stay in %s", n, p)
+		}
+	}
+	if b, err := s.Load(ctx, "kd/real"); err != nil || string(b) != "v" {
+		t.Errorf("Load = %q, %v", b, err)
+	}
+	keys, err := s.List(ctx, "kd", false)
+	slices.Sort(keys)
+	if err != nil || !slices.Equal(keys, []string{"kd/real", "kd/sub"}) {
+		t.Errorf("List = %v, %v", keys, err)
+	}
+	for p, want := range map[string]string{parentTmp: "parent", outsideTmp: "outside"} {
+		if b, err := os.ReadFile(p); err != nil || string(b) != want {
+			t.Errorf("%s holds %q, %v; want %q", p, b, err, want)
+		}
+	}
+	unchanged(t, target)
+}
+
+func TestTS16LoadGivesTheChangedRuleForAKeyFileThatShrinksAfterTheOpen(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "kd/key", bytes.Repeat([]byte("v"), 1500)))
+	// The hook cuts the same file before Load calls Stat, so the open file has the
+	// size 700 when Load reads it. Load must not return the 700 bytes.
+	calls := 0
+	betweenOpenAndStat = func() {
+		calls++
+		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/kd/key"), 700))
+	}
+	t.Cleanup(func() { betweenOpenAndStat = nil })
+	b, err := s.Load(ctx, "kd/key")
+	wantError(t, err, "load", ruleChanged)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+	if calls != 1 {
+		t.Errorf("the hook ran %d times, want 1: Load must not try again", calls)
+	}
+}
+
+func TestTS16ListSkipsAChildDirectoryThatADeleteRemovesDuringTheList(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	for _, k := range []string{"d1/a", "d2/b", "d3/c"} {
+		mustNil(t, s.Store(ctx, k, []byte("v")))
+	}
+	calls := 0
+	beforeListChild = func(key string) {
+		if key == "d2" {
+			calls++
+			mustNil(t, os.RemoveAll(filepath.Join(dir, "acme/cache/d2")))
+		}
+	}
+	t.Cleanup(func() { beforeListChild = nil })
+	keys, err := s.List(ctx, "", true)
+	slices.Sort(keys)
+	if err != nil || !slices.Equal(keys, []string{"d1/a", "d3/c"}) {
+		t.Errorf("List = %v, %v; want the keys of the other directories", keys, err)
+	}
+	if calls != 1 {
+		t.Errorf("the hook ran %d times, want 1", calls)
+	}
+	// A missing top prefix is still an error.
+	if _, err := s.List(ctx, "d2", true); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("List of the missing prefix error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestTS16StoreGivesTheFileRuleWhenADeleteRemovesTheKeyDirectory(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "kd/key", []byte("old")))
+	// The hook removes the key directory after the checks of Store and before the
+	// rename. The rename then fails with ENOENT.
+	realRename := renameFile
+	t.Cleanup(func() { renameFile = realRename })
+	renameFile = func(r *os.Root, from, to string) error {
+		mustNil(t, os.RemoveAll(filepath.Join(dir, "acme/cache/kd")))
+		return realRename(r, from, to)
+	}
+	err := s.Store(ctx, "kd/key", []byte("new"))
+	wantError(t, err, "store", ruleIO)
+	noMarker(t, err, "kd/key")
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error %v wraps fs.ErrNotExist", err)
+	}
+	cache := filepath.Join(dir, "acme/cache")
+	if n := countTmp(t, cache); n != 0 {
+		t.Errorf("%d temporary names stay in the cache directory", n)
+	}
+	if _, err := os.Lstat(filepath.Join(cache, "kd")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Lstat of the key directory = %v, want not exist", err)
+	}
 }

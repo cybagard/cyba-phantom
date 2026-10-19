@@ -18,14 +18,23 @@ const readFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscal
 // createFlags makes a new file. The open fails if the name exists.
 const createFlags = os.O_WRONLY | os.O_CREATE | os.O_EXCL | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
 
-// geteuid is a test hook. A test uses it to check an owner mismatch without root.
-var geteuid = os.Geteuid
+// otherOwner is a test hook. When it is not nil and it gives true for the device
+// and the inode of a file or a directory, ownedByUs returns false for it. So a
+// test gives another owner to one inode only, with no need for root. It is nil in
+// production.
+var otherOwner func(dev, ino uint64) bool
 
 // ownedByUs reports whether the effective user owns the file. It returns false
 // when the system gives no owner.
 func ownedByUs(fi fs.FileInfo) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	return ok && int64(st.Uid) == int64(geteuid())
+	if !ok {
+		return false
+	}
+	if otherOwner != nil && otherOwner(uint64(st.Dev), uint64(st.Ino)) {
+		return false
+	}
+	return int64(st.Uid) == int64(os.Geteuid())
 }
 
 // linkCount returns the number of hard links of the file. It returns false when
@@ -38,7 +47,8 @@ func linkCount(fi fs.FileInfo) (uint64, bool) {
 	return uint64(st.Nlink), true
 }
 
-// isLoop reports whether err is ELOOP. A call of os.Root gives ELOOP when a name
-// has more links than os.Root allows (a loop of links or a long chain of links),
-// and when the open gave an error and the call then cannot read the link.
+// isLoop reports whether err is ELOOP. ELOOP comes back when a name has more
+// symbolic links than os.Root allows (a loop of symbolic links or a long chain of
+// them), and when the open (or Stat) gave ELOOP and the following readlinkat
+// fails. An ENOTDIR stays ENOTDIR.
 func isLoop(err error) bool { return errors.Is(err, syscall.ELOOP) }
