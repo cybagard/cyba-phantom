@@ -1547,17 +1547,29 @@ func TestTS17ShutdownWithDoneContextClosesStalledConnection(t *testing.T) {
 	}
 }
 
+// errOnlyCtx has an error from the start, and its Done channel never closes. A
+// real context is in this state for a short time: cancel sets the error and then
+// closes the channel.
+type errOnlyCtx struct{ context.Context }
+
+func (errOnlyCtx) Done() <-chan struct{} { return nil }
+func (errOnlyCtx) Err() error            { return context.Canceled }
+
 // T-S-17: with a context that is done at the call, Shutdown gives the error of
 // the context every time. Without the check at the entry, the result is nil or
-// the error at random.
+// the error at random. A real context that is done before the call gives the
+// error in most runs even without the check. The context with an error and no
+// closed Done channel gives nil in each run without the check.
 func TestTS17ShutdownWithDoneContextGivesContextError(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	done, cancel := context.WithCancel(context.Background())
 	cancel()
 	for i := range 20 {
-		r := newRig(t, 2, testHeaderBytes, defaultTimeouts, okHandler)
-		r.serve(t)
-		if err := r.s.Shutdown(ctx); err != context.Canceled {
-			t.Errorf("run %d: Shutdown returned %v, want %v", i, err, context.Canceled)
+		for name, ctx := range map[string]context.Context{"done context": done, "error before Done": errOnlyCtx{context.Background()}} {
+			r := newRig(t, 2, testHeaderBytes, defaultTimeouts, okHandler)
+			r.serve(t)
+			if err := r.s.Shutdown(ctx); err != context.Canceled {
+				t.Errorf("run %d, %s: Shutdown returned %v, want %v", i, name, err, context.Canceled)
+			}
 		}
 	}
 }
