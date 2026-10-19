@@ -20,23 +20,35 @@ import (
 // ErrStateChanged means that the state file changed between the load and the
 // write: the bytes differ, or the file is now absent or present.
 // ErrStateLocked means that another run held the lock for the whole of
-// LockWait. It also matches ErrState. The text of each is fixed. A parse error
-// is never wrapped: a state of another key is a state fault, not a bad
-// signature.
+// LockWait. It also matches ErrState.
+// ErrStateSync means that the new checkpoint is already the state file, but the
+// sync of the directory failed, so the file may not survive a crash. It also
+// matches ErrState. The text of each is fixed. A parse error is never wrapped:
+// a state of another key is a state fault, not a bad signature.
 var (
 	ErrState        = errors.New("verify: the state is not valid")
 	ErrStateChanged = errors.New("verify: the state changed during the run")
 	ErrStateLocked  = fmt.Errorf("verify: another run holds the state lock: %w", ErrState)
+	ErrStateSync    = fmt.Errorf("verify: the state was written, but the directory sync failed: %w", ErrState)
 )
 
-// StateChange tells what Update did to the state.
+// DirSync syncs the open state directory. Only tests change it. No flag, no
+// environment variable, and no other input sets it.
+var DirSync = func(d *os.File) error { return d.Sync() }
+
+// StateChange tells what Update did to the state. The zero value is not a
+// change: Update returns it with an error that left the state as it was.
 type StateChange int
 
 const (
-	StateFirstUse  StateChange = iota // No state existed. The checkpoint is now the state.
-	StateUpdated                      // The checkpoint was larger. It replaced the state.
-	StateUnchanged                    // The checkpoint was not larger. The file is the same.
+	StateFirstUse  StateChange = iota + 1 // No state existed. The checkpoint is now the state.
+	StateUpdated                          // The checkpoint was larger. It replaced the state.
+	StateUnchanged                        // The checkpoint was not larger. The file is the same.
 )
+
+// StateFileName returns the name of the state file of the key v: the hash of
+// the key as 8 hex digits, and ".note".
+func StateFileName(v note.Verifier) string { return fmt.Sprintf("%08x.note", v.KeyHash()) }
 
 // State is the last accepted checkpoint of one key. It holds the directory
 // open as an os.Root. It also holds an exclusive lock on the directory until
@@ -90,7 +102,7 @@ func LoadState(dir string, v note.Verifier) (*State, error) {
 		root.Close()
 		return nil, err
 	}
-	s := &State{root: root, lock: lock, v: v, name: fmt.Sprintf("%08x.note", v.KeyHash())}
+	s := &State{root: root, lock: lock, v: v, name: StateFileName(v)}
 	raw, exists, err := s.read()
 	if err == nil && exists {
 		c, perr := ParseCheckpoint(raw, v)
@@ -153,7 +165,12 @@ func (s *State) read() ([]byte, bool, error) {
 // rename, Update reads the state file again. If the bytes differ, or the file
 // is now absent or present, Update returns ErrStateChanged. If the second read
 // fails, it returns ErrState. After the rename, Update syncs the directory. On
-// each failure before the rename, Update removes the temporary file.
+// each failure before the rename, Update removes the temporary file and returns
+// 0 with the error.
+//
+// If the sync fails, the rename is done: the new checkpoint is the state file.
+// Update then sets the state to the new checkpoint, and returns the change that
+// it made (StateFirstUse or StateUpdated) with ErrStateSync.
 func (s *State) Update(latest []byte) (StateChange, error) {
 	c, err := ParseCheckpoint(latest, s.v)
 	if err != nil {
@@ -162,15 +179,16 @@ func (s *State) Update(latest []byte) (StateChange, error) {
 	if s.loaded && c.Size <= s.size {
 		return StateUnchanged, nil
 	}
-	if err := s.write(latest); err != nil {
-		return 0, err
+	werr := s.write(latest)
+	if werr != nil && !errors.Is(werr, ErrStateSync) {
+		return 0, werr
 	}
-	first := !s.loaded
+	change := StateUpdated
+	if !s.loaded {
+		change = StateFirstUse
+	}
 	s.loaded, s.raw, s.size = true, bytes.Clone(latest), c.Size
-	if first {
-		return StateFirstUse, nil
-	}
-	return StateUpdated, nil
+	return change, werr
 }
 
 // write is the temporary file, the second read, and the rename.
@@ -185,7 +203,7 @@ func (s *State) write(latest []byte) (err error) {
 		return ErrState
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrStateSync) { // the rename is done, so tmp has its new name
 			s.root.Remove(tmp)
 		}
 	}()
@@ -208,16 +226,17 @@ func (s *State) write(latest []byte) (err error) {
 	return s.syncDir()
 }
 
-// syncDir syncs the state directory, so that the rename survives a crash.
+// syncDir syncs the state directory, so that the rename survives a crash. A
+// failure gives ErrStateSync, because the caller has done the rename.
 func (s *State) syncDir() error {
 	d, err := s.root.Open(".")
 	if err != nil {
-		return ErrState
+		return ErrStateSync
 	}
-	serr := d.Sync()
+	serr := DirSync(d)
 	cerr := d.Close()
 	if serr != nil || cerr != nil {
-		return ErrState
+		return ErrStateSync
 	}
 	return nil
 }
