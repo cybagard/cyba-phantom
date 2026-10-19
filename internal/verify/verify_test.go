@@ -15,6 +15,7 @@ import (
 	modtlog "golang.org/x/mod/sumdb/tlog"
 
 	"github.com/cybagard/cyba-phantom/internal/tlog"
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 )
 
 // realLog opens a real log in a temporary state directory and appends n events.
@@ -63,7 +64,7 @@ func checkpointAt(t testing.TB, l *tlog.Log, s note.Signer, size int64) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, err := tlog.SignCheckpoint(s, uint64(size), root)
+	msg, err := verifier.SignCheckpoint(s, uint64(size), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,15 +112,7 @@ func TestTS14_InclusionRoundTrip(t *testing.T) {
 		t.Errorf("size 1: %+v, %v", res, err)
 	}
 	// The proof file path: the JSON of 04 §7 gives the same result.
-	p := proofAt(t, l, 100, 257)
-	var hashes string
-	for i, h := range p.Hashes {
-		if i > 0 {
-			hashes += ","
-		}
-		hashes += `"` + base64.StdEncoding.EncodeToString(h[:]) + `"`
-	}
-	parsed, err := ParseInclusionProof([]byte(fmt.Sprintf(`{"index":100,"tree_size":257,"hashes":[%s]}`, hashes)))
+	parsed, err := ParseInclusionProof(proofJSON(proofAt(t, l, 100, 257)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +147,7 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	withRoot := proofAt(t, l, 3, 10)
 	withRoot.Root, withRoot.Consistency = &root, []modtlog.Hash{}
 	larger := InclusionProof{Index: 3, TreeSize: 11, Hashes: good.Hashes}
-	otherRoot, _ := tlog.SignCheckpoint(s, 10, modtlog.Hash{9})
+	otherRoot, _ := verifier.SignCheckpoint(s, 10, modtlog.Hash{9})
 	empty := checkpointAt(t, l, s, 0)
 	for name, tc := range map[string]struct {
 		msg  []byte
@@ -192,8 +185,8 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	wantErr(t, "empty tree, size 0 proof", err, ErrNotVerified)
 }
 
-// bridgedProof returns the proof file content for leaf index in the tree of
-// size m, with the root at m and the consistency proof from m to n.
+// bridgedProof returns an InclusionProof value for leaf index in the tree of
+// size m. It has the root at m and the consistency proof from m to n.
 func bridgedProof(t testing.TB, l *tlog.Log, index, m, n int64) InclusionProof {
 	t.Helper()
 	p := proofAt(t, l, index, m)
@@ -207,6 +200,23 @@ func bridgedProof(t testing.TB, l *tlog.Log, index, m, n int64) InclusionProof {
 	}
 	p.Root, p.Consistency = &root, cons
 	return p
+}
+
+// forkedLog returns a log of n leaves. Its first shared leaves are the leaves
+// of realLog. The other leaves differ from the leaves of realLog.
+func forkedLog(t testing.TB, shared, n int) *tlog.Log {
+	t.Helper()
+	l, _ := realLog(t, shared)
+	for i := shared; i < n; i++ {
+		e, err := ParseEvent([]byte(fmt.Sprintf(`{"m":%d}`, i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append(e.Hash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return l
 }
 
 // T-S-14: a proof at a size below the checkpoint size needs the root at that
@@ -249,6 +259,11 @@ func TestTS14_InclusionBridged(t *testing.T) {
 	atSize.Root, atSize.Consistency = &r, []modtlog.Hash{}
 	atSizeRootOnly := proofAt(t, l, 3, 300)
 	atSizeRootOnly.Root = &r
+	// The log b shares the first 5 leaves with the log l and then differs. The
+	// inclusion proof, the root at 5 and the consistency proof come from b. The
+	// checkpoint is from l. The proof file is not signed, so this is a bad
+	// proof and not a fork. phantom-verify maps ErrNotVerified to exit 1.
+	forked := bridgedProof(t, forkedLog(t, 5, 300), 3, 5, 300)
 	zero := InclusionProof{TreeSize: 0, Hashes: []modtlog.Hash{}, Root: &modtlog.Hash{}, Consistency: []modtlog.Hash{}}
 	for name, tc := range map[string]struct {
 		p    InclusionProof
@@ -261,8 +276,9 @@ func TestTS14_InclusionBridged(t *testing.T) {
 		"root at the checkpoint size": {atSize, ErrProof},
 		"root alone at the size":      {atSizeRootOnly, ErrProof},
 		"size 0 with a root":          {zero, ErrNotVerified},
+		"proof from a forked log":     {forked, ErrNotVerified},
 		"no root below the size":      {proofAt(t, l, 3, 5), ErrProof},
-		"consistency of another sizes": {func() InclusionProof {
+		"consistency proof of other sizes": {func() InclusionProof {
 			p := bridgedProof(t, l, 3, 5, 300)
 			c := bridgedProof(t, l, 3, 6, 300)
 			p.Consistency = c.Consistency
@@ -307,7 +323,7 @@ func FuzzTS14_Inclusion(f *testing.F) {
 	l, events := realLog(f, 10)
 	msg := checkpointAt(f, l, s, 10)
 	good := proofAt(f, l, 3, 10)
-	otherRoot, _ := tlog.SignCheckpoint(s, 10, modtlog.Hash{9})
+	otherRoot, _ := verifier.SignCheckpoint(s, 10, modtlog.Hash{9})
 	root := modtlog.Hash{1}
 	withRoot := proofAt(f, l, 3, 10)
 	withRoot.Root, withRoot.Consistency = &root, []modtlog.Hash{}
@@ -352,6 +368,17 @@ func FuzzTS14_Inclusion(f *testing.F) {
 			!slices.Equal(res.Consistency, p.Consistency) || (p.TreeSize == int64(c.Size)) != (p.Root == nil) ||
 			p.TreeSize > int64(c.Size) {
 			t.Errorf("result does not match the inputs: %+v", res)
+		}
+		// The proof must hold with VerifyInclusion at the size of the proof. A
+		// proof at the checkpoint size has no root, so the root at that size is
+		// the checkpoint root. A bridged proof has the root at its own size,
+		// which is p.Root. This is not res.Root.
+		rootAtProof := modtlog.Hash(res.Root)
+		if p.Root != nil {
+			rootAtProof = *p.Root
+		}
+		if err := verifier.VerifyInclusion(res.EventHash, res.LeafIndex, p.TreeSize, rootAtProof, modtlog.RecordProof(res.Proof)); err != nil {
+			t.Errorf("accepted result does not verify with VerifyInclusion: %v", err)
 		}
 	})
 }

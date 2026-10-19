@@ -8,15 +8,16 @@ import (
 )
 
 // The errors of the consistency check. ErrFork means that two signed roots
-// cannot come from one log. ErrNoProof means that the list of proofs has no
-// proof with the needed sizes. The text of both is fixed.
+// cannot come from one log, or that the consistency proof is bad. ErrNoProof
+// means that the list of proofs has no proof with the needed sizes. The text of
+// both is fixed.
 var (
-	ErrFork    = errors.New("verify: checkpoints are not consistent: the log has a fork")
+	ErrFork    = errors.New("verify: checkpoints are not consistent")
 	ErrNoProof = errors.New("verify: no consistency proof has the needed sizes")
 )
 
-// Consistency checks that two checkpoints belong to one log (ADR-021, decision
-// 7). The key v is the trust anchor for both notes. S is the size of the prior
+// Consistency checks that two checkpoints belong to one log (SEC-18, FR-16).
+// The key v is the trust anchor for both notes. S is the size of the prior
 // note and N is the size of the latest note.
 //
 // If N is larger than S, a proof from S to N must verify. If N is smaller than
@@ -36,47 +37,52 @@ func Consistency(v note.Verifier, prior, latest []byte, proofs []ConsistencyProo
 	if err != nil {
 		return err
 	}
-	small, err := toSize(p.Size)
+	priorSize, err := toSize(p.Size)
 	if err != nil {
 		return err
 	}
-	large, err := toSize(l.Size)
+	latestSize, err := toSize(l.Size)
 	if err != nil {
 		return err
 	}
-	smallRoot, largeRoot := p.Root, l.Root
-	if small > large {
+	small, large := tree{priorSize, p.Root}, tree{latestSize, l.Root}
+	if small.size > large.size {
 		small, large = large, small
-		smallRoot, largeRoot = largeRoot, smallRoot
 	}
-	if small == 0 || small == large {
-		return consistent(small, large, smallRoot, largeRoot, nil)
+	if small.size == 0 || small.size == large.size {
+		return consistent(small, large, nil)
 	}
 	for _, c := range proofs {
-		if c.OldSize == small && c.NewSize == large {
-			return consistent(small, large, smallRoot, largeRoot, c.Hashes)
+		if c.OldSize == small.size && c.NewSize == large.size {
+			return consistent(small, large, c.Hashes)
 		}
 	}
 	return ErrNoProof
 }
 
-// consistent checks the roots of two trees with small <= large leaves. The
-// proof hashes are used only if both sizes are above 0 and different.
-func consistent(small, large int64, smallRoot, largeRoot modtlog.Hash, hashes []modtlog.Hash) error {
-	if small == 0 {
+// tree is the size and the root of one tree.
+type tree struct {
+	size int64
+	root modtlog.Hash
+}
+
+// consistent checks two trees with small.size <= large.size. The proof hashes
+// are used only if both sizes are above 0 and different.
+func consistent(small, large tree, hashes []modtlog.Hash) error {
+	if small.size == 0 {
 		empty, _ := modtlog.TreeHash(0, nil) // reads nothing, so it has no error
-		if smallRoot != empty || (large == 0 && largeRoot != empty) {
+		if small.root != empty || (large.size == 0 && large.root != empty) {
 			return ErrFork
 		}
 		return nil
 	}
-	if small == large {
-		if smallRoot != largeRoot {
+	if small.size == large.size {
+		if small.root != large.root {
 			return ErrFork
 		}
 		return nil
 	}
-	if modtlog.CheckTree(modtlog.TreeProof(hashes), large, largeRoot, small, smallRoot) != nil {
+	if modtlog.CheckTree(modtlog.TreeProof(hashes), large.size, large.root, small.size, small.root) != nil {
 		return ErrFork
 	}
 	return nil
