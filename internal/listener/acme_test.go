@@ -436,6 +436,53 @@ func TestTS16NewACMERefusesBadInput(t *testing.T) {
 	newTestACME(t, func(p *ACMEParams) { p.CA = "https://ca.test:65535/dir" })
 }
 
+func TestTS16ACMETLSALPNLooksUpTheNormalizedName(t *testing.T) {
+	a := newTestACME(t, nil)
+	// A new ACME has the lookup of certmagic. With no issuance, no challenge is active.
+	if a.challenge == nil {
+		t.Fatal("the lookup of an active challenge is not set")
+	}
+	if _, active := a.challenge("decoy.test"); active {
+		t.Fatal("a challenge is active with no issuance")
+	}
+	var calls []string
+	a.challenge = func(name string) (certmagic.Challenge, bool) {
+		calls = append(calls, name)
+		return certmagic.Challenge{}, false
+	}
+	// The Go TLS client removes a trailing dot from the server name. Thus this
+	// test calls GetCertificate directly.
+	for _, form := range []string{"decoy.test", "DECOY.TEST", "decoy.test.", "Decoy.Test."} {
+		calls = nil
+		hello := &tls.ClientHelloInfo{ServerName: form, SupportedProtos: []string{"acme-tls/1"}}
+		if _, err := a.GetCertificate(hello); !errors.Is(err, errNoChallenge) {
+			t.Errorf("%q: error = %v", form, err)
+		}
+		if !slices.Equal(calls, []string{"decoy.test"}) {
+			t.Errorf("%q: the lookup got %q", form, calls)
+		}
+	}
+	// The lookup is not called for two protocols, nor for a name that is not configured.
+	seedCert(t, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	calls = nil
+	two := &tls.ClientHelloInfo{ServerName: "decoy.test", SupportedProtos: []string{"acme-tls/1", "http/1.1"}, Conn: s}
+	other := &tls.ClientHelloInfo{ServerName: "other.test", SupportedProtos: []string{"acme-tls/1"}, Conn: s}
+	if _, err := a.GetCertificate(two); err != nil {
+		t.Errorf("two protocols: %v", err)
+	}
+	if _, err := a.GetCertificate(other); !errors.Is(err, errName) {
+		t.Errorf("name that is not configured: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("the lookup got %q", calls)
+	}
+}
+
 func TestTS16StopCanBeCalledTwice(t *testing.T) {
 	a := newTestACME(t, nil)
 	a.Stop()
