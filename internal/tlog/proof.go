@@ -2,7 +2,6 @@ package tlog
 
 import (
 	"errors"
-	"strings"
 
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -17,7 +16,9 @@ const (
 // RootAt returns the root of the tree of the first size leaves. Size 0 gives
 // the root of the empty tree. The size must not be above the size of the log.
 // Each hash comes from a tile that was checked against the tree head of the
-// log. If a tile does not match, RootAt returns an error and no root.
+// log. If a tile does not match, RootAt returns an error and no root. The call
+// holds the write lock of the log while it reads tiles. Append waits until the
+// call returns.
 func (l *Log) RootAt(size int64) (tlog.Hash, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -39,7 +40,9 @@ func (l *Log) RootAt(size int64) (tlog.Hash, error) {
 // tree of the first size leaves. The index must be below the size, and the size
 // must not be above the size of the log. With an error, the proof is nil. A
 // third party checks the proof with VerifyInclusion and the root of a signed
-// checkpoint of that size. RootAt gives the same root in this process.
+// checkpoint of that size. RootAt gives the same root in this process. The call
+// holds the write lock of the log while it reads tiles. Append waits until the
+// call returns.
 func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -66,7 +69,8 @@ func (l *Log) ProveInclusion(index, size int64) (tlog.RecordProof, error) {
 // sizes, the proof is empty and the check is the roots only. With an error, the
 // proof is nil. A third party checks a proof with tlog.CheckTree and the roots
 // of the signed checkpoints of the two sizes. RootAt gives the same roots in
-// this process.
+// this process. The call holds the write lock of the log while it reads tiles.
+// Append waits until the call returns.
 func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -94,7 +98,8 @@ func (l *Log) ProveConsistency(oldSize, newSize int64) (tlog.TreeProof, error) {
 // each tile against the tree head of the log. The caller holds the write lock.
 // An error from a tile read stops the log: read keeps the error in l.err, and
 // each later Append, proof, and root read returns it. The package does not
-// repair a tile. The caller opens the log again.
+// repair a tile. The caller opens the log again. A read can set l.err, so the
+// caller needs the write lock and not the read lock.
 func (l *Log) read(f func(tlog.HashReader) error) error {
 	tr := &tileReader{s: l.store}
 	err := f(tlog.TileHashReader(tlog.Tree{N: l.size, Hash: l.root}, tr))
@@ -106,14 +111,6 @@ func (l *Log) read(f func(tlog.HashReader) error) error {
 		l.err = e
 		return e
 	}
-	// The check does not say which tile is wrong. Name the tiles that it read.
-	names := make([]string, len(tr.read))
-	for i, t := range tr.read {
-		names[i] = t.Path()
-	}
-	if len(names) == 0 {
-		names = append(names, "proof")
-	}
-	l.err = newError(strings.Join(names, ","), ruleProofRead)
+	l.err = newError(readNames(tr.read, "proof"), ruleProofRead)
 	return l.err
 }

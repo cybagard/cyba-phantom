@@ -117,12 +117,13 @@ func (l *Log) Append(h EventHash) (int64, error) {
 // The tree head on disk depends on the failure. If a tile write fails, or the
 // write or rename of the head file fails, the old tree head stays on disk. No
 // leaf of the batch is in that tree head, but the leaves can be in tile files.
-// If the rename of the head file works and a later step of the head write fails
-// (the open or the fsync of a directory), the tree head on disk can cover the
-// whole batch. AppendBatch then returns an error that matches ErrHeadOnDisk
-// with errors.Is. Each other error of AppendBatch does not match it. The error
-// of a later call on the stopped log does not match it. The marked error has
-// the text of the Error. errors.As to *Error works for each error. A type
+// The rename of the head file can work, and then a later step of the head write
+// can fail. That step is the open or the fsync of a directory. In this case the
+// tree head on disk can cover the whole batch. AppendBatch then returns an error
+// that matches ErrHeadOnDisk with errors.Is. Each other error of AppendBatch
+// does not match it. The error of a later call on the stopped log does not match
+// it. The marked error has the text of the wrapped *Error. errors.As to *Error
+// works for each error. It gives the wrapped *Error for the marked error. A type
 // assertion to *Error does not match the marked error. The caller must close
 // the log and open it again with OpenLog. OpenLog loads the tree head on disk.
 func (l *Log) AppendBatch(hs []EventHash) (int64, error) {

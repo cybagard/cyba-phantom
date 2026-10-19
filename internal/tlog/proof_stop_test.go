@@ -1,9 +1,7 @@
 package tlog
 
 import (
-	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -13,23 +11,20 @@ import (
 func TestTS13BadOlderTileStopsTheLog(t *testing.T) {
 	withoutSync(t)
 	for _, c := range []struct {
-		name, tile string
-		index      int64
-		damage     func(file string, b []byte) error
+		name, tile, rule string
+		index            int64
+		damage           func(file string, b []byte) error
 	}{
-		{"changed byte", "tile/8/0/000", 5, func(f string, b []byte) error { b[len(b)/2] ^= 1; return os.WriteFile(f, b, 0o600) }},
-		{"changed byte in the second tile", "tile/8/0/001", 300, func(f string, b []byte) error { b[0] ^= 1; return os.WriteFile(f, b, 0o600) }},
-		{"short file", "tile/8/0/000", 5, func(f string, b []byte) error { return os.WriteFile(f, b[:len(b)-1], 0o600) }},
-		{"missing file", "tile/8/0/001", 300, func(f string, _ []byte) error { return os.Remove(f) }},
+		{"changed byte", "tile/8/0/000", ruleProofRead, 5, func(f string, b []byte) error { b[len(b)/2] ^= 1; return os.WriteFile(f, b, 0o600) }},
+		{"changed byte in the second tile", "tile/8/0/001", ruleProofRead, 300, func(f string, b []byte) error { b[0] ^= 1; return os.WriteFile(f, b, 0o600) }},
+		{"short file", "tile/8/0/000", ruleLength, 5, func(f string, b []byte) error { return os.WriteFile(f, b[:len(b)-1], 0o600) }},
+		{"missing file", "tile/8/0/001", ruleMissing, 300, func(f string, _ []byte) error { return os.Remove(f) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			state, dir := newLogState(t)
-			l := openTestLog(t, state)
-			appendTo(t, l, 0, 600)
+			l, file, state := tileLog(t, 600, c.tile)
 			if _, err := l.ProveInclusion(c.index, 600); err != nil {
 				t.Fatal(err)
 			}
-			file := filepath.Join(dir, "tlog", filepath.FromSlash(c.tile))
 			b, err := os.ReadFile(file)
 			if err != nil {
 				t.Fatal(err)
@@ -41,8 +36,7 @@ func TestTS13BadOlderTileStopsTheLog(t *testing.T) {
 			if proof != nil || first == nil {
 				t.Fatalf("proof %v, error %v", proof, first)
 			}
-			var e *Error
-			if !errors.As(first, &e) || !strings.Contains(e.Name, c.tile) || !tileNames.MatchString(e.Name) {
+			if e := wantTileError(t, len(proof), first, c.rule); !strings.Contains(e.Name, c.tile) {
 				t.Fatalf("error %q does not name the tile %s", first, c.tile)
 			}
 			if _, err := l.Append(testEvent(600)); err != first {
@@ -62,10 +56,18 @@ func TestTS13BadOlderTileStopsTheLog(t *testing.T) {
 			if n, _ := l.Head(); n != 600 {
 				t.Fatalf("size %d after the stop", n)
 			}
-			// A new open is the way back. It must not panic.
+			// Open the log again. OpenLog must not panic. It returns no error, because
+			// it does not read the bad tile. The new log appends, and a proof that
+			// reads the bad tile gives the tile error again: the package does not
+			// repair the tile.
 			l.Close()
-			if l2, err := OpenLog(state, "tlog"); err == nil {
-				l2.Close()
+			l2 := openTestLog(t, state)
+			if i, err := l2.Append(testEvent(600)); err != nil || i != 600 {
+				t.Fatalf("append to the new log: index %d, error %v", i, err)
+			}
+			proof, err = l2.ProveInclusion(c.index, 600)
+			if e := wantTileError(t, len(proof), err, c.rule); !strings.Contains(e.Name, c.tile) {
+				t.Fatalf("error %q does not name the tile %s", err, c.tile)
 			}
 		})
 	}
