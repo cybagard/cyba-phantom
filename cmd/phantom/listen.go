@@ -32,6 +32,7 @@ var (
 	stopACME  = (*listener.ACME).Stop
 	served    = func() {} // runs after Serve or ServePlain returned
 	listen    = net.Listen
+	waitStop  = func(ctx context.Context) { <-ctx.Done() } // serve waits here until the stop
 	// serveSetup gives serve the start values and the parts of the store start. A test sets another state directory.
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
@@ -147,7 +148,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		startLine += " — certificate client not running"
 	}
 	fmt.Fprintln(stdout, startLine)
-	<-ctx.Done()
+	waitStop(ctx)
 	stop() // A second signal during the stop gets the default action.
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTime)
 	srv.Shutdown(sctx)
