@@ -4,7 +4,9 @@
 // file and no network connection. It imports no net, net/http, or crypto/tls,
 // directly or through a dependency. A verifier command must depend on this
 // package and not on internal/tlog (SEC-18). The package also holds the note
-// body writer (CheckpointBody) and SignCheckpoint, which the log uses.
+// body writer (CheckpointBody) and SignCheckpoint. The file
+// internal/tlog/note.go wraps SignCheckpoint for internal/tlog/checkpointer.go
+// and internal/tlog/key.go.
 package verifier
 
 import (
@@ -21,7 +23,10 @@ const (
 	// hash at this level. x/mod does not return for a size above 2^62, so the
 	// bound is much lower.
 	MaxLevel = 6
-	MaxSize  = 1 << (TileHeight * MaxLevel)
+
+	// MaxSize is the largest tree size, 2^48 leaves, that VerifyInclusion
+	// accepts.
+	MaxSize = 1 << (TileHeight * MaxLevel)
 )
 
 // ruleInclusion is the rule in the text of an Error from VerifyInclusion.
@@ -29,9 +34,10 @@ const ruleInclusion = "proof does not match the event hash, the index, and the t
 
 // Error names the file that failed and the rule that failed. The name is never
 // empty. This package makes errors with fixed words as names. The log package
-// (internal/tlog) makes errors of the same type with other names: a tile path,
-// the name of the tree head, a directory, or a comma-separated list of tile
-// paths.
+// (internal/tlog) makes errors of the same type with the fixed words "log",
+// "tlog directory", "tile", "root", "consistency proof", and "inclusion proof"
+// as names, and with other names: a tile path, the name of the tree head, a
+// directory, or a comma-separated list of tile paths.
 type Error struct {
 	Name string
 	Rule string
@@ -48,7 +54,7 @@ type EventHash [sha256.Size]byte
 func LeafHash(h EventHash) tlog.Hash { return tlog.RecordHash(h[:]) }
 
 // VerifyInclusion checks that the event is the leaf at position index in the
-// tree that has size leaves and the root root. It returns nil only if the
+// tree of size leaves with the root root. It returns nil only if the
 // proof, with the leaf hash of the event, gives the root. It never panics for
 // any input.
 func VerifyInclusion(h EventHash, index, size int64, root tlog.Hash, proof tlog.RecordProof) error {

@@ -11,8 +11,30 @@ import (
 )
 
 // MaxNoteSize is the largest signed note that ParseCheckpoint accepts. A
-// checkpoint with one signature is far smaller.
+// checkpoint with one signature and a short origin is smaller.
 const MaxNoteSize = 1024
+
+var (
+	errHashBase64 = errors.New("hash is not canonical base64")
+	errHashLength = errors.New("hash is not 32 bytes")
+)
+
+// ParseHash reads a 32-byte hash from standard base64 with padding. The
+// padding bits must be zero (Strict). The decoder skips CR and LF, so the
+// encoded form of the result must also be equal to s. ParseCheckpoint and the
+// proof parser of internal/verify use this one rule.
+func ParseHash(s string) ([32]byte, error) {
+	var h [32]byte
+	raw, err := base64.StdEncoding.Strict().DecodeString(s)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != s {
+		return h, errHashBase64
+	}
+	if len(raw) != len(h) {
+		return h, errHashLength
+	}
+	copy(h[:], raw)
+	return h, nil
+}
 
 // Checkpoint is the content of a checkpoint note body.
 type Checkpoint struct {
@@ -21,7 +43,7 @@ type Checkpoint struct {
 	Root   [32]byte
 }
 
-// CheckpointBody writes the note body in the C2SP tlog-checkpoint format. The
+// CheckpointBody returns the note body in the C2SP tlog-checkpoint format. The
 // lines are the origin, the tree size in decimal, and the root hash in
 // standard base64, each with a newline. There is no extension line. The
 // tree-note helpers of x/mod write another first line, so this code does not
@@ -40,18 +62,26 @@ func SignCheckpoint(signer note.Signer, size uint64, root [32]byte) ([]byte, err
 
 // ParseCheckpoint is the strict parser for the notes of the sensor (SEC-16).
 // It returns an error if the note is larger than 1 KiB. It returns an error if
-// the signature does not verify with the given note verifier. It returns an error if the
-// signature block does not have exactly one line. It returns an error if the
-// body is not exactly three canonical lines: the configured origin, a canonical
-// decimal size, and a canonical base64 root of 32 bytes.
+// the verifier is nil or its key name is not the origin. It returns an error if
+// the note is malformed or its signature does not verify with the verifier. It
+// returns an error if the signature block does not have exactly one line. It
+// returns an error if the body is not exactly three canonical lines: the
+// configured origin, a canonical decimal size, and a canonical base64 root of
+// 32 bytes.
 func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpoint, error) {
 	var c Checkpoint
 	if len(msg) > MaxNoteSize { // before any parse
 		return c, errors.New("checkpoint note is larger than 1 KiB")
 	}
+	if verifier == nil {
+		return c, errors.New("checkpoint note verifier is nil")
+	}
+	if verifier.Name() != origin {
+		return c, errors.New("checkpoint note key name is not the configured origin")
+	}
 	n, err := note.Open(msg, note.VerifierList(verifier))
 	if err != nil {
-		return c, errors.New("checkpoint note signature does not verify")
+		return c, errors.New("checkpoint note is malformed or its signature does not verify")
 	}
 	// The sensor's own notes have exactly one signature line. A cosigned note
 	// needs another parser. Open drops a repeated line of the same key name and
@@ -75,16 +105,11 @@ func ParseCheckpoint(msg []byte, origin string, verifier note.Verifier) (Checkpo
 	if c.Size, err = strconv.ParseUint(lines[1], 10, 64); err != nil {
 		return c, errors.New("checkpoint note size is too large")
 	}
-	// Strict rejects non-zero padding bits. The decoder skips CR and LF, so the
-	// encoded form must also equal the input.
-	raw, err := base64.StdEncoding.Strict().DecodeString(lines[2])
-	if err != nil || base64.StdEncoding.EncodeToString(raw) != lines[2] {
+	if c.Root, err = ParseHash(lines[2]); errors.Is(err, errHashBase64) {
 		return c, errors.New("checkpoint note root is not canonical base64")
-	}
-	if len(raw) != len(c.Root) {
+	} else if err != nil {
 		return c, errors.New("checkpoint note root is not 32 bytes")
 	}
-	copy(c.Root[:], raw)
 	return c, nil
 }
 

@@ -1,12 +1,12 @@
 package verify
 
 import (
-	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io"
 	"strconv"
 
+	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 	modtlog "golang.org/x/mod/sumdb/tlog"
 )
 
@@ -188,14 +188,12 @@ func parseHashes(v jsontext.Value, limit int) ([]modtlog.Hash, error) {
 	return out, nil
 }
 
-// parseHash reads canonical standard base64 of exactly 32 bytes. The decoder
-// skips CR and LF. For this reason the function also checks that the encoded
-// form of the result is equal to the input.
-func parseHash(s string) (h modtlog.Hash, err error) {
-	raw, derr := base64.StdEncoding.Strict().DecodeString(s)
-	if derr != nil || len(raw) != len(h) || base64.StdEncoding.EncodeToString(raw) != s {
-		return h, ErrProof
+// parseHash reads canonical standard base64 of exactly 32 bytes with
+// verifier.ParseHash. Each failure gives ErrProof.
+func parseHash(s string) (modtlog.Hash, error) {
+	h, err := verifier.ParseHash(s)
+	if err != nil {
+		return modtlog.Hash{}, ErrProof
 	}
-	copy(h[:], raw)
 	return h, nil
 }
