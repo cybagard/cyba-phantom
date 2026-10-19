@@ -22,7 +22,7 @@ func TestTS12_KindSet(t *testing.T) {
 			t.Errorf("ParseKind(%q) gave no error", bad)
 		}
 	}
-	for _, k := range []Kind{0, 9, 255} {
+	for _, k := range []Kind{0, KindRefused + 1, 255} {
 		if _, err := k.MarshalText(); err == nil || k.String() != "unknown" {
 			t.Errorf("Kind(%d) is accepted", k)
 		}
@@ -40,7 +40,7 @@ func TestTS12_EvidencePredicate(t *testing.T) {
 			t.Errorf("%v.IsEvidence() = %v, %v", k, got, err)
 		}
 	}
-	for _, k := range []Kind{0, 9, 255} {
+	for _, k := range []Kind{0, KindRefused + 1, 255} {
 		if got, err := k.IsEvidence(); err == nil || got {
 			t.Errorf("Kind(%d).IsEvidence() = %v, %v", k, got, err)
 		}
@@ -50,7 +50,7 @@ func TestTS12_EvidencePredicate(t *testing.T) {
 // T-S-12: request and beacon records cannot be hashed; an unknown kind is an
 // error; the evidence kinds hash.
 func TestTS12_HashEvidenceRefusal(t *testing.T) {
-	for _, k := range append(allKinds, 0, 9) {
+	for _, k := range append(allKinds, 0, KindRefused+1) {
 		r := Record{TS: 1, Kind: k}
 		h, err := HashEvidence(r)
 		b, berr := EvidenceBytes(r)
