@@ -32,7 +32,7 @@ lint:
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 
-# staticcheck, gosec and govulncheck on the module.
+# The check target runs staticcheck, gosec and govulncheck on the module.
 # All three tools run on every call. Each tool prints under its own header line.
 # The target fails when any tool fails, and it names the failed tools.
 # The target is not part of all.
@@ -41,8 +41,8 @@ lint:
 # The devcontainer has no network, so it sets GOVULNDB to a local copy.
 # gosec reads the GOSEC_AI_* variables and can send code to an AI service.
 # The target removes these variables from the gosec environment.
-# A file:// database needs a modified value in its index/db.json.
-# The target fails govulncheck when that value is missing.
+# A file:// database must have a modified value in its index/db.json.
+# When that value is missing, the target counts govulncheck as failed.
 GOVULNDB ?= https://vuln.go.dev
 
 check:

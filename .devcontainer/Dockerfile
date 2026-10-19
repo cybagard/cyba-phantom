@@ -7,7 +7,7 @@
 # Pinned by digest (multi-arch index of golang:1.27.2); bump both together.
 FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
 
-# Static analysis tools (SEC-09). Each tool is pinned by its module
+# Static analysis tools (SEC-09). We pin each tool by its module
 # version. go install and go get check each module against the Go
 # checksum database.
 ARG STATICCHECK_VERSION=v0.8.2
@@ -18,7 +18,7 @@ ARG GOVULNCHECK_VERSION=v1.9.0
 # most packages ("export data version 5 is greater than maximum
 # supported version 4"). So we build gosec in a scratch module with
 # x/tools v0.52.0. When you change the Go version or the gosec version,
-# examine GOSEC_XTOOLS_VERSION too, and make sure that gosec prints no
+# examine GOSEC_XTOOLS_VERSION too. Then make sure that gosec prints no
 # "export data" error.
 ARG GOSEC_XTOOLS_VERSION=v0.52.0
 RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION} \
