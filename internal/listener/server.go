@@ -45,9 +45,10 @@ const handlerWait = time.Second
 // errNoHandler is the error for a nil handler.
 var errNoHandler = errors.New("listener: a handler is required")
 
-// handlerCount counts the running handlers of a server. It uses a mutex, a count
-// and a channel, not a sync.WaitGroup: a WaitGroup does not allow an Add at the
-// same time as a Wait, and a request can start while Shutdown waits.
+// handlerCount counts the running handlers of a server. It does not use a
+// sync.WaitGroup. A WaitGroup does not permit an Add from zero at the same time
+// as a Wait. A request can start while Shutdown waits. So the count uses a
+// mutex, a number and a channel.
 type handlerCount struct {
 	mu   sync.Mutex
 	n    int
@@ -70,23 +71,41 @@ func (c *handlerCount) leave() {
 	c.mu.Unlock()
 }
 
-// wait returns when no handler runs, or handlerWait after ctx is done. The
-// channel is made here and not in enter, so a request allocates nothing.
-func (c *handlerCount) wait(ctx context.Context) {
+// idleChan returns a channel that closes when no handler runs. It returns nil
+// when no handler runs now. The channel is made here and not in enter, so a
+// request allocates nothing.
+func (c *handlerCount) idleChan() <-chan struct{} {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.n == 0 {
-		c.mu.Unlock()
-		return
+		return nil
 	}
 	if c.idle == nil {
 		c.idle = make(chan struct{})
 	}
-	idle := c.idle
-	c.mu.Unlock()
+	return c.idle
+}
+
+// waitIdle waits until no handler runs, or until ctx is done. It returns true
+// when no handler runs.
+func (c *handlerCount) waitIdle(ctx context.Context) bool {
+	idle := c.idleChan()
+	if idle == nil {
+		return true
+	}
 	select {
 	case <-idle:
-		return
+		return true
 	case <-ctx.Done():
+		return false
+	}
+}
+
+// waitBound waits until no handler runs, or for handlerWait at most.
+func (c *handlerCount) waitBound() {
+	idle := c.idleChan()
+	if idle == nil {
+		return
 	}
 	t := time.NewTimer(handlerWait)
 	defer t.Stop()
@@ -260,11 +279,11 @@ func periodHook(c net.Conn, st http.ConnState) {
 // acme-tls/1 closes after the handshake and gets no HTTP. The connection cap is
 // on the raw listener, and the TLS layer is on top of it.
 //
-// A connection that a handler hijacks keeps its slot until the handler closes
-// it. It also keeps its entry in the record of open connections, and the record
-// holds a reference to it until it closes. Shutdown closes a hijacked connection
-// at the socket only when the context of Shutdown ends before Shutdown returns.
-// In all other cases the hijacked connection stays open.
+// A connection that a handler hijacks keeps its slot until it closes. It also
+// keeps its entry in the record of open connections, and the record holds a
+// reference to it until it closes. When Shutdown returns an error, it has closed
+// each hijacked connection at the socket. A hijacked connection stays open after
+// Close, and after a Shutdown that returns nil.
 //
 // All Serve calls of one server share the MaxConns slots and the cap of
 // maxConnsPerSource open connections for each source address. The connections of
@@ -323,18 +342,24 @@ func (s *Server) Close() error {
 	return closeServers(s.markClosed())
 }
 
-// Shutdown closes the listeners of all serve calls and waits until their open
-// connections are done. A connection that is still open when ctx ends is
-// closed, and Shutdown returns the error of ctx. When ctx is done at the call,
-// Shutdown closes all connections and returns the error of ctx. On each path
-// with an error, Shutdown closes the sockets below TLS first, so a stalled
-// close_notify write does not hold it.
+// Shutdown closes the listeners of all serve calls. It waits until their open
+// connections are done and their running handlers return. It does not wait for
+// a hijacked connection, only for its handler.
 //
-// Shutdown also waits until the running handlers of all serve calls return. The
-// wait ends at the latest handlerWait (1 s) after ctx is done. A handler that
-// runs longer than this can still run after Shutdown returns. It can then, for
-// example, call Enqueue on a queue that is closed. When ctx has no deadline,
-// Shutdown waits for each running handler, also for one of a hijacked connection.
+// Shutdown returns an error when ctx ends first, when ctx is done at the call,
+// or when a listener close gives an error. On each of these paths it closes each
+// open connection at the socket below TLS, also each hijacked connection. So a
+// stalled close_notify write does not hold it. The error is the error of ctx, or
+// the error of the listener close.
+//
+// When Shutdown returns nil, no handler runs. A hijacked connection whose
+// handler returned can still be open.
+//
+// After ctx ends, Shutdown waits at most handlerWait (1 s) more for the running
+// handlers. A handler that runs longer than this can still run after Shutdown
+// returns. It can then, for example, call Enqueue on a queue that is closed.
+// When ctx never ends, Shutdown waits for each running handler, also for one of
+// a hijacked connection.
 //
 // So Shutdown returns at about the end of ctx plus handlerWait. The Accept retry
 // sleep of net/http (up to 1 s) can add to this, because Shutdown waits until
@@ -342,11 +367,10 @@ func (s *Server) Close() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	servers := s.markClosed()
 	if err := ctx.Err(); err != nil {
-		// A connection that Accept returns after this sweep has no finished
-		// handshake. So closeServers closes it with no close_notify write.
-		s.src.closeAll()
-		closeServers(servers)
-		s.handlers.wait(ctx)
+		// A connection that Accept returns after this sweep can be in its
+		// handshake. It has an empty send buffer, so its close does not wait.
+		s.sweep(servers)
+		s.handlers.waitBound()
 		return err
 	}
 	res := make(chan error, len(servers))
@@ -366,6 +390,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	select {
 	case err = <-done:
+		if err != nil {
+			// http.Server.Shutdown leaves the open connections open when it
+			// returns an error, for example from a listener close.
+			s.sweep(servers)
+		}
 	case <-ctx.Done():
 		// http.Server.Shutdown closes an idle TLS connection with a close_notify
 		// write that can wait for its own deadline, one connection after the other.
@@ -376,17 +405,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// Wait for the Shutdown calls above, so that none runs after this
 		// function returns.
 		<-done
+		_ = closeServers(servers)
 		err = ctx.Err()
 	}
-	if err != nil {
-		// http.Server.Shutdown leaves the open connections open when ctx ends.
-		// Close the sockets below TLS before hs.Close: the done arm can give an
-		// error too, for example from a listener close.
-		s.src.closeAll()
-		closeServers(servers)
+	if !s.handlers.waitIdle(ctx) {
+		// ctx ended while a handler runs. If no sweep ran yet, net/http returned
+		// nil, so the handler can belong to a hijacked connection, which net/http
+		// does not track. Close the sockets, so that the handler returns.
+		if err == nil {
+			s.sweep(servers)
+			err = ctx.Err()
+		}
+		s.handlers.waitBound()
 	}
-	s.handlers.wait(ctx)
 	return err
+}
+
+// sweep closes the sockets below TLS, and then the HTTP servers. The order
+// matters: with the sockets closed, hs.Close does not wait for a close_notify
+// write.
+func (s *Server) sweep(servers []*http.Server) {
+	s.src.closeAll()
+	_ = closeServers(servers)
 }
 
 // ErrorLines is the number of lines that the server wrote to its error log.
@@ -408,5 +448,6 @@ func (s *Server) ErrLog() io.Writer { return &s.errLines }
 // frees the slot. In the window between these two steps, a connection that finds
 // no slot holds a source count for a short time. A connection of the same source
 // can then count as a close at the source cap, while the source has fewer than
-// maxConnsPerSource open connections.
+// maxConnsPerSource open connections. The window needs two or more serve calls
+// that accept at the same time, because one Accept loop is sequential.
 func (s *Server) SourceCapCloses() uint64 { return s.src.closes.Load() }
