@@ -78,11 +78,82 @@ type ACME struct {
 	challenge func(string) (certmagic.Challenge, bool) // the lookup of an active challenge; tests replace it
 }
 
+// noTokenStorage is the storage that certmagic gets. It refuses each key of a
+// challenge token file, and it passes every other call to the storage under it.
+// The storage under it has no optional certmagic interface (TryLocker,
+// LockLeaseRenewer or a local cache), so this wrapper hides none.
+type noTokenStorage struct {
+	certmagic.Storage
+}
+
+// errTokenStore is the fixed error for a write to a challenge token key.
+var errTokenStore = errors.New("listener: acme: the storage refuses challenge token keys")
+
+// isTokenKey reports whether k is a challenge token key: the first path element
+// is "acme" and the third is "challenge_tokens". It makes no allocation.
+func isTokenKey(k string) bool {
+	first, rest, ok := strings.Cut(k, "/")
+	if !ok || first != "acme" {
+		return false
+	}
+	_, rest, ok = strings.Cut(rest, "/")
+	if !ok {
+		return false
+	}
+	third, _, _ := strings.Cut(rest, "/")
+	return third == "challenge_tokens"
+}
+
+func (s *noTokenStorage) Load(ctx context.Context, k string) ([]byte, error) {
+	if isTokenKey(k) {
+		return nil, fs.ErrNotExist
+	}
+	return s.Storage.Load(ctx, k)
+}
+
+func (s *noTokenStorage) Stat(ctx context.Context, k string) (certmagic.KeyInfo, error) {
+	if isTokenKey(k) {
+		return certmagic.KeyInfo{}, fs.ErrNotExist
+	}
+	return s.Storage.Stat(ctx, k)
+}
+
+func (s *noTokenStorage) Exists(ctx context.Context, k string) bool {
+	return !isTokenKey(k) && s.Storage.Exists(ctx, k)
+}
+
+func (s *noTokenStorage) List(ctx context.Context, p string, recursive bool) ([]string, error) {
+	if isTokenKey(p) {
+		return nil, fs.ErrNotExist
+	}
+	return s.Storage.List(ctx, p, recursive)
+}
+
+func (s *noTokenStorage) Store(ctx context.Context, k string, v []byte) error {
+	if isTokenKey(k) {
+		return errTokenStore
+	}
+	return s.Storage.Store(ctx, k, v)
+}
+
+func (s *noTokenStorage) Delete(ctx context.Context, k string) error {
+	if isTokenKey(k) {
+		return errTokenStore
+	}
+	return s.Storage.Delete(ctx, k)
+}
+
 // NewACME builds the configuration from p. It makes the certmagic cache, which
 // runs a maintenance goroutine. The caller must call Stop. NewACME does not read
 // the storage and makes no request. It sets the fields that the decoy listener
 // depends on. The other fields come from certmagic.Default and
 // certmagic.DefaultACME, which the sensor does not change.
+//
+// Two rules keep the challenge token files out of the storage. First,
+// DisableDistributedSolvers is on, so this process never writes a challenge token
+// file. Second, the storage that certmagic gets refuses each token key with no
+// call to the storage under it, so no handshake can make a storage read for a
+// token file.
 func NewACME(p ACMEParams) (*ACME, error) {
 	ca, err := url.Parse(p.CA)
 	switch {
@@ -118,7 +189,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		MustStaple:         false,
 		OCSP:               certmagic.OCSPConfig{DisableStapling: true, HTTPProxy: guard},
 		Issuers:            []certmagic.Issuer{}, // not nil: New would make an issuer from the package defaults
-		Storage:            p.Storage,
+		Storage:            &noTokenStorage{p.Storage},
 		Logger:             zap.NewNop(),
 		ShouldEmitFunc:     isLoggedEvent,
 		OnEvent: func(ctx context.Context, event string, data map[string]any) error {
@@ -235,7 +306,8 @@ func portOf(u *url.URL) string {
 // not refuse a handshake with two protocols. This process writes no distributed
 // token file (DisableDistributedSolvers), so only an in-memory challenge can be
 // valid. If a challenge ends between this check and the lookup of certmagic,
-// certmagic reads the storage one time for the token file of the name.
+// certmagic then looks up the token file, and the storage refuses that key with
+// no read.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
 	// or more first, so ToLower changes only ASCII letters.
