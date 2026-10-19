@@ -33,6 +33,8 @@ const (
 var (
 	errEgress = errors.New("listener: acme: request is not for the configured CA")
 	errName   = errors.New("listener: acme: server name is not configured")
+
+	errNoChallenge = errors.New("listener: acme: no active challenge for the server name")
 )
 
 // ACMEParams are the inputs of NewACME.
@@ -72,6 +74,8 @@ type ACME struct {
 	logger  *slog.Logger
 	refused atomic.Uint64
 	stop    sync.Once
+
+	challenge func(string) (certmagic.Challenge, bool) // the lookup of an active challenge; tests replace it
 }
 
 // NewACME builds the configuration from p. It makes the certmagic cache, which
@@ -91,7 +95,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
 		return nil, errors.New("listener: acme: storage or logger is not set, or the port is not 1 to 65535")
 	}
-	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger}
+	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger, challenge: certmagic.GetACMEChallenge}
 	for _, n := range a.names {
 		if !validName(n) {
 			return nil, errors.New("listener: acme: a name is empty, has an upper-case letter or a byte above 0x7f, or ends with a dot")
@@ -221,6 +225,17 @@ func portOf(u *url.URL) string {
 // name, it returns a fixed error at once: no storage call, no request and no log
 // line. This also holds for ALPN acme-tls/1, which certmagic would answer with a
 // storage read for any name.
+//
+// A handshake for a configured name whose ALPN list is exactly acme-tls/1 goes
+// to certmagic only while an in-memory challenge for that name is active. If no
+// challenge is active, the handshake fails at once with errNoChallenge: no
+// storage call, no request and no log line. Refused counts these refusals
+// together with the refusals of the name gate. The condition is the same as the
+// condition of certmagic (one protocol, the exact string). Thus this check does
+// not refuse a handshake with two protocols. This process writes no distributed
+// token file (DisableDistributedSolvers), so only an in-memory challenge can be
+// valid. If a challenge ends between this check and the lookup of certmagic,
+// certmagic reads the storage one time for the token file of the name.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
 	// or more first, so ToLower changes only ASCII letters.
@@ -236,12 +251,20 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 		a.refused.Add(1)
 		return nil, errName
 	}
+	if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto {
+		if _, active := a.challenge(name); !active {
+			a.refused.Add(1)
+			return nil, errNoChallenge
+		}
+	}
 	h := *hello
 	h.ServerName = name
 	return a.cfg.GetCertificate(&h)
 }
 
-// Refused returns the number of handshakes that the name gate refused.
+// Refused returns the number of handshakes that GetCertificate refused: the
+// handshakes that the name gate refused, and the acme-tls/1 handshakes for a
+// configured name with no active challenge.
 func (a *ACME) Refused() uint64 { return a.refused.Load() }
 
 // Start loads the cached certificates of the configured names, then starts

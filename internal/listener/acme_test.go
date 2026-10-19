@@ -151,6 +151,19 @@ func BenchmarkGetCertificateAccepted(b *testing.B) {
 	}
 }
 
+// BenchmarkGetCertificateNoChallenge measures one GetCertificate call for a
+// configured name with the single ALPN acme-tls/1 and no active challenge.
+func BenchmarkGetCertificateNoChallenge(b *testing.B) {
+	a := newTestACME(b, nil)
+	hello := &tls.ClientHelloInfo{ServerName: "decoy.test", SupportedProtos: []string{"acme-tls/1"}}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := a.GetCertificate(hello); !errors.Is(err, errNoChallenge) {
+			b.Fatal("the check did not refuse the handshake")
+		}
+	}
+}
+
 // issuerProxyRefuses reports whether the proxy function of iss refuses a request
 // to another host, with a proxy in the environment.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
@@ -280,15 +293,49 @@ func TestTS16NameGateRefusesBeforeCertmagic(t *testing.T) {
 	}
 }
 
-func TestTS16NameGateLetsAConfiguredNameWithACMETLSALPNReachCertmagic(t *testing.T) {
+func TestTS16ACMETLSALPNForAConfiguredNameNeedsAnActiveChallenge(t *testing.T) {
+	var logs, std syncBuf
+	old := log.Writer()
+	log.SetOutput(&std)
+	t.Cleanup(func() { log.SetOutput(old) })
+	var egress atomic.Int64
 	st, _ := newStore(t)
 	cs := &countingStorage{Storage: st}
-	a := newTestACME(t, func(p *ACMEParams) { p.Storage = cs })
-	// There is no challenge token, so the handshake fails. The lookup of the token
-	// is the storage read that shows the call reached certmagic.
-	handshake(a, "decoy.test", "acme-tls/1")
-	if cs.reads.Load() < 1 {
-		t.Error("the handshake did not reach certmagic: no storage read")
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.Storage = cs
+		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		p.OnEgress = func(string) { egress.Add(1) }
+	})
+	// No issuance runs, so no challenge is active for the name.
+	for range 100 {
+		if _, err := handshake(a, "decoy.test", "acme-tls/1"); err == nil {
+			t.Fatal("handshake with ALPN acme-tls/1 and no active challenge worked")
+		}
+	}
+	if r := cs.reads.Load(); r != 0 {
+		t.Errorf("storage reads: %d", r)
+	}
+	if e := egress.Load(); e != 0 {
+		t.Errorf("guard calls: %d", e)
+	}
+	if logs.String() != "" || std.String() != "" {
+		t.Errorf("log output: %q %q", logs.String(), std.String())
+	}
+	if got := a.Refused(); got != 100 {
+		t.Errorf("refused = %d", got)
+	}
+}
+
+func TestTS16ACMETLSALPNWithTwoProtocolsIsNotRefused(t *testing.T) {
+	a := newTestACME(t, nil)
+	want := seedCert(t, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	for _, protos := range [][]string{{"acme-tls/1", "http/1.1"}, {"http/1.1", "acme-tls/1"}} {
+		if st, err := handshake(a, "decoy.test", protos...); err != nil || !bytes.Equal(st.PeerCertificates[0].Raw, want) {
+			t.Fatalf("handshake with %v: %v", protos, err)
+		}
 	}
 	if got := a.Refused(); got != 0 {
 		t.Errorf("refused = %d", got)
@@ -387,6 +434,53 @@ func TestTS16NewACMERefusesBadInput(t *testing.T) {
 	}
 	// A CA URL with the highest port is valid.
 	newTestACME(t, func(p *ACMEParams) { p.CA = "https://ca.test:65535/dir" })
+}
+
+func TestTS16ACMETLSALPNLooksUpTheNormalizedName(t *testing.T) {
+	a := newTestACME(t, nil)
+	// A new ACME has the lookup of certmagic. With no issuance, no challenge is active.
+	if a.challenge == nil {
+		t.Fatal("the lookup of an active challenge is not set")
+	}
+	if _, active := a.challenge("decoy.test"); active {
+		t.Fatal("a challenge is active with no issuance")
+	}
+	var calls []string
+	a.challenge = func(name string) (certmagic.Challenge, bool) {
+		calls = append(calls, name)
+		return certmagic.Challenge{}, false
+	}
+	// The Go TLS client removes a trailing dot from the server name. Thus this
+	// test calls GetCertificate directly.
+	for _, form := range []string{"decoy.test", "DECOY.TEST", "decoy.test.", "Decoy.Test."} {
+		calls = nil
+		hello := &tls.ClientHelloInfo{ServerName: form, SupportedProtos: []string{"acme-tls/1"}}
+		if _, err := a.GetCertificate(hello); !errors.Is(err, errNoChallenge) {
+			t.Errorf("%q: error = %v", form, err)
+		}
+		if !slices.Equal(calls, []string{"decoy.test"}) {
+			t.Errorf("%q: the lookup got %q", form, calls)
+		}
+	}
+	// The lookup is not called for two protocols, nor for a name that is not configured.
+	seedCert(t, a, "decoy.test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mustNil(t, a.Start(ctx))
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	calls = nil
+	two := &tls.ClientHelloInfo{ServerName: "decoy.test", SupportedProtos: []string{"acme-tls/1", "http/1.1"}, Conn: s}
+	other := &tls.ClientHelloInfo{ServerName: "other.test", SupportedProtos: []string{"acme-tls/1"}, Conn: s}
+	if _, err := a.GetCertificate(two); err != nil {
+		t.Errorf("two protocols: %v", err)
+	}
+	if _, err := a.GetCertificate(other); !errors.Is(err, errName) {
+		t.Errorf("name that is not configured: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("the lookup got %q", calls)
+	}
 }
 
 func TestTS16StopCanBeCalledTwice(t *testing.T) {
