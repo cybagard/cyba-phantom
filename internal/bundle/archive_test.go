@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"runtime"
 	"slices"
@@ -79,6 +80,32 @@ func gz(b []byte) []byte {
 func build(ents ...ent) []byte { return gz(buildTar(ents...)) }
 
 func zeros(n int) []byte { return make([]byte, n) }
+
+// T-S-19: with keep set, capReader keeps exactly maxKept bytes without an
+// error, and it gives ErrArchiveInvalid for the first byte over maxKept. It
+// does not keep that byte.
+func TestTS19CapReaderKeepsAtMostMaxKept(t *testing.T) {
+	readAll := func(n int) (*capReader, error) {
+		cr := &capReader{r: bytes.NewReader(zeros(n)), keep: true}
+		buf := make([]byte, 4096)
+		for {
+			if _, err := cr.Read(buf); err != nil {
+				return cr, err
+			}
+		}
+	}
+	if cr, err := readAll(maxKept); err != io.EOF || len(cr.kept) != maxKept {
+		t.Errorf("maxKept bytes: error %v, kept %d; want EOF and %d", err, len(cr.kept), maxKept)
+	}
+	if cr, err := readAll(maxKept + 1); err != ErrArchiveInvalid || len(cr.kept) > maxKept {
+		t.Errorf("maxKept+1 bytes: error %v, kept %d; want ErrArchiveInvalid and at most %d", err, len(cr.kept), maxKept)
+	}
+	// With keep unset, the reader keeps nothing and has no cap of this kind.
+	cr := &capReader{r: bytes.NewReader(zeros(maxKept + 1))}
+	if _, err := io.Copy(io.Discard, cr); err != nil || len(cr.kept) != 0 {
+		t.Errorf("keep unset: error %v, kept %d", err, len(cr.kept))
+	}
+}
 
 // rawHdr makes one ustar header block. The Writer of archive/tar cannot make
 // the headers that some fixtures need (a GNU.sparse. PAX record, a directory

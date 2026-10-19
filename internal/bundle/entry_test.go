@@ -202,12 +202,12 @@ func entryCases() []entryCase {
 		{"empty part", reg("traps//a"), same},
 		{"directory and file with the same name",
 			build(dir("traps/a/"), file(p)), build(dir("traps/a/"), file("traps/b"))},
-		{"type NUL directory and regular file with the same name",
-			rawArchive(rawHdr("traps/a/", 0, 0), rawFile(p, "x")),
-			rawArchive(rawHdr("traps/a/", 0, 0), rawFile("traps/b", "x"))},
-		{"regular file and type NUL directory with the same name",
-			rawArchive(rawFile(p, "x"), rawHdr("traps/a/", 0, 0)),
-			rawArchive(rawFile(p, "x"), rawHdr("traps/b/", 0, 0))},
+		{"raw directory header and regular file with the same name",
+			rawArchive(rawHdr("traps/a/", tar.TypeDir, 0), rawFile(p, "x")),
+			rawArchive(rawHdr("traps/a/", tar.TypeDir, 0), rawFile("traps/b", "x"))},
+		{"regular file and raw directory header with the same name",
+			rawArchive(rawFile(p, "x"), rawHdr("traps/a/", tar.TypeDir, 0)),
+			rawArchive(rawFile(p, "x"), rawHdr("traps/b/", tar.TypeDir, 0))},
 	}, rawFormCases()...)
 }
 
@@ -223,6 +223,19 @@ func pathEntry(path string, recs ...string) []byte {
 func withField(h []byte, off int, v string) []byte {
 	copy(h[off:], v)
 	return withSum(h)
+}
+
+// withChksumForm writes the checksum of the header block h in the form of the
+// format. The format has one %o verb for the value, which is the sum with the
+// checksum field as spaces.
+func withChksumForm(h []byte, format string) []byte {
+	copy(h[148:156], "        ")
+	sum := 0
+	for _, c := range h {
+		sum += int(c)
+	}
+	copy(h[148:156], fmt.Sprintf(format, sum))
+	return h
 }
 
 // paxHdrTail makes a PAX header whose size field covers the records only. The
@@ -256,7 +269,45 @@ func rawFormCases() []entryCase {
 		return rawArchive(withField(rawHdr(p, tar.TypeReg, 1), 124, field), padded([]byte("x")))
 	}
 	hiddenLink := rawLinkHdr("traps/link", tar.TypeSymlink, "/etc/passwd")
+	// secondFile makes the file traps/b with the checksum field in the form of
+	// the format, after the file traps/a.
+	secondFile := func(format string) []byte {
+		h := withChksumForm(rawHdr("traps/b", tar.TypeReg, 1), format)
+		return append(rawFile(p, "x"), append(h, padded([]byte("x"))...)...)
+	}
+	// xSum makes the PAX header of traps/b with the checksum field in the form
+	// of the format, after the file traps/a. The entry follows the header.
+	xSum := func(format string) []byte {
+		x := paxHdr(paxRec("path", "traps/b"))
+		withChksumForm(x[:blockBytes], format)
+		return append(rawFile(p, "x"), append(x, rawFile("traps/b", "x")...)...)
+	}
+	const nulSum = "\x00%06o\x00"
 	return []entryCase{
+		// The raw type byte is '0' or '5' in the twins. The three writers write
+		// these bytes.
+		{"type NUL regular file", rawArchive(rawHdr("traps/n", 0, 1), padded([]byte("x"))),
+			rawArchive(rawFile("traps/n", "x"))},
+		{"type NUL directory", rawArchive(rawHdr("traps/d/", 0, 0)), rawArchive(rawHdr("traps/d/", tar.TypeDir, 0))},
+		{"type NUL directory behind a PAX mtime record",
+			rawArchive(paxHdr(paxRec("mtime", "1")), rawHdr("traps/d/", 0, 0)),
+			rawArchive(paxHdr(paxRec("mtime", "1")), rawHdr("traps/d/", tar.TypeDir, 0))},
+		{"type NUL directory behind a PAX path record",
+			rawArchive(paxHdr(paxRec("path", "traps/d/")), rawHdr("traps/d/", 0, 0)),
+			rawArchive(paxHdr(paxRec("path", "traps/d/")), rawHdr("traps/d/", tar.TypeDir, 0))},
+		{"type NUL with a prefix and an empty name field",
+			rawArchive(withPrefix(rawHdr("", 0, 0), "traps/d")),
+			rawArchive(withPrefix(rawHdr("", tar.TypeDir, 0), "traps/d"))},
+		{"chksum field with a leading NUL in the second entry", rawArchive(secondFile(nulSum)),
+			rawArchive(rawFile(p, "x"), rawFile("traps/b", "x"))},
+		{"chksum field with a leading NUL in a PAX header that is not the first header", rawArchive(xSum(nulSum)),
+			rawArchive(rawFile(p, "x"), pathEntry("traps/b"))},
+		{"chksum field with a leading space", rawArchive(secondFile(" %06o\x00")),
+			rawArchive(rawFile(p, "x"), rawFile("traps/b", "x"))},
+		{"PAX mtime record with a plus sign",
+			rawArchive(paxHdr(paxRec("mtime", "+1")), rawFile(p, "x")),
+			rawArchive(paxHdr(paxRec("mtime", "1")), rawFile(p, "x"))},
+		{"size field with a trailing space", sizeForm("00000000001 "), rawArchive(rawFile(p, "x"))},
 		{"size field with a leading NUL", rawArchive(withHidden(withField(slices.Clone(size), 124, nulSize))),
 			rawArchive(withHidden(size))},
 		{"size field of the PAX header with a leading NUL", rawArchive(xNul, rawFile("traps/good", "x")),
@@ -350,9 +401,6 @@ func entryPassCases() []passCase {
 			build(ent{name: "traps/a", data: []byte("x")}, ent{name: "traps/d/", typ: tar.TypeDir},
 				ent{name: "traps/b", data: []byte("x")}),
 			[]string{"traps/a", "traps/b"}},
-		{"type NUL regular file",
-			rawArchive(append(rawHdr("traps/n", 0, 1), padded([]byte("x"))...)), []string{"traps/n"}},
-		{"type NUL directory", rawArchive(rawHdr("traps/d/", 0, 0)), []string{}},
 		{"directory and file below vhosts",
 			build(ent{name: "vhosts/", typ: tar.TypeDir}, ent{name: "vhosts/a", data: []byte("x")}),
 			[]string{"vhosts/a"}},

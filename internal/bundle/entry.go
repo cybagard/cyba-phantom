@@ -24,8 +24,9 @@ var topLevelDirs = []string{"vhosts", "traps", "fp", "score", "secrets"}
 // the key that two entries must not share, or ErrArchiveInvalid.
 //
 // Next maps type NUL to a regular file, or to a directory when the name ends
-// in a slash. Next also applies a PAX path record to the name. checkEntry
-// checks that final form. The checks, in this order:
+// in a slash. rawFormOK refuses the raw type byte NUL, so ReadArchive accepts
+// only the raw types '0' and '5'. Next also applies a PAX path record to the
+// name. checkEntry checks that final form. The checks, in this order:
 //   - the format is ustar or PAX. A GNU header and a STAR header give another
 //     format, so they fail here. A GNU long name or long link header fails the
 //     byte count of ReadArchive first;
@@ -58,8 +59,13 @@ func checkEntry(hdr *tar.Header) (string, error) {
 		default:
 			return "", ErrArchiveInvalid
 		}
-		// Next skips an empty value and another reader applies it.
+		// Next ignores a record with an empty value. Python reads an empty path
+		// as the name and an empty size as 0. GNU tar fails on an empty mtime or
+		// size.
 		if value == "" {
+			return "", ErrArchiveInvalid
+		}
+		if key == "mtime" && !paxTimeOK(value) {
 			return "", ErrArchiveInvalid
 		}
 	}
@@ -87,6 +93,28 @@ func checkEntry(hdr *tar.Header) (string, error) {
 		return "", ErrArchiveInvalid
 	}
 	return strings.ToLower(name), nil
+}
+
+// paxTimeOK reports whether v has the form of a PAX mtime value: an optional
+// "-", one or more digits, and optionally "." and one or more digits. GNU tar
+// fails on a value with a plus sign.
+func paxTimeOK(v string) bool {
+	v = strings.TrimPrefix(v, "-")
+	whole, frac, dot := strings.Cut(v, ".")
+	return digits(whole) && (!dot || digits(frac))
+}
+
+// digits reports whether s has one or more bytes, all of them 0-9.
+func digits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // validPart reports whether p has 1 to 64 bytes of A-Z a-z 0-9 . _ - and is
@@ -136,8 +164,9 @@ func paxBytes(hdr *tar.Header) int64 {
 const maxCut = 100
 
 // ustarSeenKey returns the key of the name that a reader without PAX support
-// sees: the cut of a long PAX path, or else the final name. It has the form of
-// the key that checkEntry returns, and a cut that ends in a slash loses it.
+// sees: the cut of a long PAX path, or else the final name. The key has the
+// form of the key that checkEntry returns: lower case, with one trailing slash
+// removed from the cut or from the name.
 func ustarSeenKey(hdr *tar.Header) string {
 	name := hdr.Name
 	if p := hdr.PAXRecords["path"]; len(p) > maxCut {
@@ -167,10 +196,27 @@ func ustarSize(b []byte) (int64, bool) {
 // zeroed reports whether b holds only zero bytes.
 func zeroed(b []byte) bool { return len(bytes.TrimLeft(b, "\x00")) == 0 }
 
-// rawFormOK checks the bytes k that the Next call of hdr read, after the
-// byte count of headerBytes. The layout of k is then fixed: the padding of the
-// previous entry, a PAX header with its records when hdr has PAX records, and
-// the header block of the entry. The checks:
+// chksumOK reports whether the checksum field of the header block b has the
+// form that tar.Writer, GNU tar and Python write: 6 octal digits, one NUL and
+// one space. archive/tar checks the value of the field.
+func chksumOK(b []byte) bool {
+	f := b[148:156]
+	for _, c := range f[:6] {
+		if c < '0' || c > '7' {
+			return false
+		}
+	}
+	return f[6] == 0 && f[7] == ' '
+}
+
+// rawFormOK checks the bytes k that the Next call of hdr read. It runs only
+// after the byte count of headerBytes has passed. The layout of k is then
+// fixed: the padding of the previous entry, a PAX header with its records when
+// hdr has PAX records, and the header block of the entry. The checks:
+//   - the type byte of the entry is '0' (file) or '5' (directory). The three
+//     writers write these bytes. Type NUL is refused in every form, because
+//     Python reads it as a file when a PAX header or a ustar prefix is present;
+//   - the checksum field of each header block has the form of chksumOK;
 //   - the size field of each header block has the canonical form;
 //   - the size of the PAX header is the sum of the canonical record lengths,
 //     and the bytes after the records are zero. A repeated key or a record
@@ -181,12 +227,21 @@ func zeroed(b []byte) bool { return len(bytes.TrimLeft(b, "\x00")) == 0 }
 //     the path, or the first 100 bytes of it, with NUL padding.
 func rawFormOK(k []byte, pad int64, hdr *tar.Header) bool {
 	entry := k[len(k)-blockBytes:]
+	if t := entry[156]; t != tar.TypeReg && t != tar.TypeDir {
+		return false
+	}
+	if !chksumOK(entry) {
+		return false
+	}
 	size, ok := ustarSize(entry)
 	if !ok {
 		return false
 	}
 	if len(hdr.PAXRecords) > 0 {
 		x := k[pad : pad+blockBytes]
+		if !chksumOK(x) {
+			return false
+		}
 		recs := k[pad+blockBytes : len(k)-blockBytes]
 		// A size field in another form gives 0, which is not the sum.
 		n, _ := ustarSize(x)

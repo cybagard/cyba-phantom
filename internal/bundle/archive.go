@@ -58,13 +58,17 @@ type capReader struct {
 	n int64
 	// While keep is set, the reader appends the bytes that it passes to kept.
 	// ReadArchive sets keep for one Next call, so kept holds at most maxKept
-	// bytes: the padding of the previous entry, two header blocks, the PAX data
-	// that archive/tar caps at 1 MiB, and the end blocks.
+	// bytes.
 	keep bool
 	kept []byte
 }
 
-// maxKept is the most bytes that the Next call of one entry can read.
+// maxKept is the most bytes that ReadArchive accepts from one Next call. A
+// Next call that reads an entry reads the padding of the previous entry, one
+// PAX header block with its data, and one entry header block. archive/tar caps
+// the PAX data at 1 MiB. A Next call that reads the tar end reads the padding
+// and the end blocks. The header blocks and the end blocks are never in the
+// same call. A call that reads more than maxKept bytes gives ErrArchiveInvalid.
 const maxKept = 3*blockBytes + 1<<20
 
 func (c *capReader) Read(p []byte) (int, error) {
@@ -89,8 +93,9 @@ func (c *capReader) Read(p []byte) (int, error) {
 }
 
 // ReadArchive reads the archive in b. Each entry has one header block. It can
-// have one PAX 'x' header before it, and no other meta header. Type NUL is a
-// regular file, or a directory when the name ends in a slash.
+// have one PAX 'x' header before it, and no other meta header. The type byte of
+// an entry is '0' (regular file) or '5' (directory). ReadArchive refuses type
+// NUL.
 //
 // ReadArchive checks the header bytes of each entry. It then checks the header
 // format, the type, the link name, the PAX records, the name and the top-level
