@@ -202,8 +202,8 @@ func bridgedProof(t testing.TB, l *tlog.Log, index, m, n int64) InclusionProof {
 	return p
 }
 
-// forkedLog returns a log of n leaves. Its first shared leaves are the leaves of
-// realLog. The other leaves differ from the leaves of realLog.
+// forkedLog returns a log of n leaves. Its first shared leaves are the leaves
+// of realLog. The other leaves differ from the leaves of realLog.
 func forkedLog(t testing.TB, shared, n int) *tlog.Log {
 	t.Helper()
 	l, _ := realLog(t, shared)
@@ -261,8 +261,8 @@ func TestTS14_InclusionBridged(t *testing.T) {
 	atSizeRootOnly.Root = &r
 	// The log b shares the first 5 leaves with the log l and then differs. The
 	// inclusion proof, the root at 5 and the consistency proof come from b. The
-	// checkpoint is from l. The proof file is not signed, so this is a bad proof
-	// and not a fork. phantom-verify maps ErrNotVerified to exit 1.
+	// checkpoint is from l. The proof file is not signed, so this is a bad
+	// proof and not a fork. phantom-verify maps ErrNotVerified to exit 1.
 	forked := bridgedProof(t, forkedLog(t, 5, 300), 3, 5, 300)
 	zero := InclusionProof{TreeSize: 0, Hashes: []modtlog.Hash{}, Root: &modtlog.Hash{}, Consistency: []modtlog.Hash{}}
 	for name, tc := range map[string]struct {
