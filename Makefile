@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
+.PHONY: all build test lint check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
 
 all: build lint test trace mirror-diff
 
@@ -31,6 +31,29 @@ lint:
 	@bad=$$(gofmt -l .); \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
+
+# staticcheck, gosec and govulncheck on the module. All three run on every
+# call, each under a header line; the target then fails if any of them
+# failed and names them. It is not part of all. govulncheck v1.9.0 ignores
+# the GOVULNDB environment variable, so the database goes in with -db; the
+# devcontainer sets GOVULNDB to a local copy (no network there).
+GOVULNDB ?= https://vuln.go.dev
+
+check:
+	@failed=""; \
+	echo "== staticcheck =="; \
+	staticcheck ./... || failed="$$failed staticcheck"; \
+	echo "== gosec =="; \
+	gosec -quiet ./... || failed="$$failed gosec"; \
+	echo "== govulncheck (db: $(GOVULNDB)) =="; \
+	case "$(GOVULNDB)" in \
+	file://*) \
+		index="$(GOVULNDB:file://%=%)/index/db.json"; \
+		echo "govulncheck: database modified $$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' "$$index" 2>/dev/null)";; \
+	esac; \
+	govulncheck -db "$(GOVULNDB)" ./... || failed="$$failed govulncheck"; \
+	if [ -n "$$failed" ]; then echo "check FAIL:$$failed"; exit 1; fi; \
+	echo "check: staticcheck, gosec and govulncheck passed"
 
 # C10: regenerate spec/08 from 01 + 07 and require a byte-exact match,
 # then re-hash spec/ against the sync stamp.
