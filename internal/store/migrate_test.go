@@ -11,18 +11,18 @@ import (
 	"testing/fstest"
 )
 
-func opened(t *testing.T) (*sql.DB, string) {
+func opened(t *testing.T) (*sql.DB, string, *os.Root) {
 	t.Helper()
 	root, state, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	return db, filepath.Join(state, "events.db")
+	return db, filepath.Join(state, "events.db"), root
 }
 
 func migrated(t *testing.T) *sql.DB {
 	t.Helper()
-	db, _ := opened(t)
-	if err := Migrate(db, "origin"); err != nil {
+	db, _, root := opened(t)
+	if err := Migrate(db, root, "events.db", "origin"); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -60,7 +60,7 @@ func content(t *testing.T, db *sql.DB, file string) string {
 
 // T-U-18: a bad migration name or a gap is an error and changes nothing.
 func TestTU18MigrationNamesAreChecked(t *testing.T) {
-	db, file := opened(t)
+	db, file, _ := opened(t)
 	before := content(t, db, file)
 	bad := []fstest.MapFS{
 		testSet(map[string]string{"0003_c.sql": "SELECT 1"}),
@@ -72,7 +72,7 @@ func TestTU18MigrationNamesAreChecked(t *testing.T) {
 		{},
 	}
 	for i, set := range bad {
-		wantRule(t, migrate(db, set, "o"), schemaName, ruleNames)
+		wantRule(t, migrate(db, set, "o", nil), schemaName, ruleNames)
 		if content(t, db, file) != before {
 			t.Fatalf("set %d changed the database", i)
 		}
@@ -81,18 +81,18 @@ func TestTU18MigrationNamesAreChecked(t *testing.T) {
 
 // T-U-18: a failed migration leaves the old version and content.
 func TestTU18FailedMigrationKeepsOldVersion(t *testing.T) {
-	db, file := opened(t)
+	db, file, _ := opened(t)
 	empty := content(t, db, file)
 	bad := testSet(map[string]string{"0002_bad.sql": "CREATE TABLE extra (a); INSERT INTO nope VALUES (1)"})
-	wantRule(t, migrate(db, bad, "o"), schemaName, ruleMigrate)
+	wantRule(t, migrate(db, bad, "o", nil), schemaName, ruleMigrate)
 	if content(t, db, file) != empty {
 		t.Fatal("a failed run on a new database left content")
 	}
-	if err := Migrate(db, "o"); err != nil {
+	if err := migrate(db, testSet(nil), "o", nil); err != nil {
 		t.Fatal(err)
 	}
 	v1 := content(t, db, file)
-	wantRule(t, migrate(db, bad, "o"), schemaName, ruleMigrate)
+	wantRule(t, migrate(db, bad, "o", nil), schemaName, ruleMigrate)
 	if content(t, db, file) != v1 || metaValue(t, db, "schema_version") != "1" {
 		t.Fatal("a failed migration changed the database")
 	}
@@ -102,8 +102,8 @@ func TestTU18FailedMigrationKeepsOldVersion(t *testing.T) {
 // the last write. Later runs keep the origin; an equal version changes nothing.
 func TestTU18OriginIsBoundAndVersionIsLast(t *testing.T) {
 	const origin = "o'); DROP TABLE meta; --"
-	db, file := opened(t)
-	if err := migrate(db, testSet(nil), origin); err != nil {
+	db, file, _ := opened(t)
+	if err := migrate(db, testSet(nil), origin, nil); err != nil {
 		t.Fatal(err)
 	}
 	var order string
@@ -114,14 +114,14 @@ func TestTU18OriginIsBoundAndVersionIsLast(t *testing.T) {
 		t.Fatalf("meta rows %q", order)
 	}
 	set := testSet(map[string]string{"0002_more.sql": "CREATE TABLE more (a)"})
-	if err := migrate(db, set, "other"); err != nil {
+	if err := migrate(db, set, "other", nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, o := metaValue(t, db, "schema_version"), metaValue(t, db, "tlog_origin"); v != "2" || o != origin {
 		t.Fatalf("version %s origin %q", v, o)
 	}
 	before := content(t, db, file)
-	if err := migrate(db, set, "x"); err != nil || content(t, db, file) != before {
+	if err := migrate(db, set, "x", nil); err != nil || content(t, db, file) != before {
 		t.Fatalf("equal version: %v", err)
 	}
 }
@@ -136,15 +136,15 @@ func TestTU18RefusedDatabasesAreNotChanged(t *testing.T) {
 		{"text version", meta + "INSERT INTO meta VALUES ('schema_version', 'x')", ruleForeign},
 	}
 	for _, c := range cases {
-		db, file := opened(t)
-		if c.name == "newer" && Migrate(db, "o") != nil {
+		db, file, root := opened(t)
+		if c.name == "newer" && Migrate(db, root, "events.db", "o") != nil {
 			t.Fatal("migrate")
 		}
 		if _, err := db.Exec(c.setup); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		before := content(t, db, file)
-		wantRule(t, Migrate(db, "o"), schemaName, c.rule)
+		wantRule(t, Migrate(db, root, "events.db", "o"), schemaName, c.rule)
 		if content(t, db, file) != before {
 			t.Errorf("%s: the refused database changed", c.name)
 		}
@@ -182,7 +182,7 @@ func TestTU18ExistingDatabaseWithOtherAutoVacuumIsRefused(t *testing.T) {
 			db := mustOpen(t, root, "events.db")
 			defer db.Close()
 			before := content(t, db, file)
-			wantRule(t, Migrate(db, "o"), schemaName, ruleVacuum)
+			wantRule(t, Migrate(db, root, "events.db", "o"), schemaName, ruleVacuum)
 			var v int
 			if err := db.QueryRow("PRAGMA auto_vacuum").Scan(&v); err != nil || v != c.want {
 				t.Fatalf("auto_vacuum %d: %v", v, err)
@@ -215,7 +215,7 @@ func TestTU18NoVacuumInSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"migrate.go", "open.go", "migrations/0001_schema_v1.sql"} {
+	for _, p := range []string{"migrate.go", "open.go", "migrations/0001_schema_v1.sql", "migrations/0002_refused_kind.sql", "space_unix.go", "space_other.go"} {
 		if !scanned[p] {
 			t.Errorf("%s was not scanned", p)
 		}

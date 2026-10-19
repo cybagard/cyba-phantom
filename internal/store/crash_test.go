@@ -37,7 +37,7 @@ func openCrashState(t *testing.T, state string) (*os.Root, *sql.DB, *tlog.Log) {
 	t.Cleanup(func() { root.Close() })
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	if err := Migrate(db, "origin"); err != nil {
+	if err := Migrate(db, root, "events.db", "origin"); err != nil {
 		t.Fatal(err)
 	}
 	l, err := tlog.OpenLog(root, "tlog")

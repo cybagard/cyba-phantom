@@ -37,7 +37,7 @@ type startParams struct {
 type startDeps struct {
 	openLog         func(*os.Root, string) (*tlog.Log, error)
 	openStore       func(*os.Root, string, store.Options) (*sql.DB, error)
-	migrate         func(*sql.DB, string) error
+	migrate         func(*sql.DB, *os.Root, string, string) error
 	newWriter       func(*sql.DB, *event.Queue, *tlog.Log, *event.Counters, bool, *slog.Logger, store.Recovery) *store.Writer
 	newCheckpointer func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink, *os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error)
 	runCheckpointer func(context.Context, *tlog.Checkpointer)
@@ -130,7 +130,7 @@ func (s *started) openDB(p startParams, d startDeps) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := d.migrate(db, p.Origin); err != nil {
+	if err := d.migrate(db, s.root, p.StorePath, p.Origin); err != nil {
 		db.Close()
 		return nil, err
 	}

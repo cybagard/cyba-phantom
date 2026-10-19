@@ -80,7 +80,7 @@ func newRig(t *testing.T, depth int) *rig {
 	root, state, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	if err := Migrate(db, "origin"); err != nil {
+	if err := Migrate(db, root, "events.db", "origin"); err != nil {
 		t.Fatal(err)
 	}
 	r := &rig{t: t, q: q, c: c, db: db, app: &testAppender{next: 100}, root: root, state: state,

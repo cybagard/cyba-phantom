@@ -2,29 +2,62 @@ package store
 
 import (
 	"bytes"
+	"maps"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// T-U-18: sqlite_master equals the embedded DDL; checkpoint has no publish column.
+var createName = regexp.MustCompile(`^CREATE (?:UNIQUE )?(?:TABLE|INDEX) (\w+)`)
+
+// ddlOf returns the CREATE statements of the embedded migrations by object name,
+// without the final semicolon, as SQLite stores them. A statement of a later
+// migration replaces the one of the same name.
+func ddlOf(t *testing.T, files ...string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, f := range files {
+		b, err := migrationFiles.ReadFile("migrations/" + f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range strings.Split(strings.TrimSpace(string(b)), ";\n") {
+			if m := createName.FindStringSubmatch(stmt); m != nil {
+				out[m[1]] = strings.TrimSuffix(stmt, ";")
+			}
+		}
+	}
+	return out
+}
+
+// T-U-18: sqlite_master equals the embedded DDL of 0001 and 0002; checkpoint has
+// no publish column. The compare is by object name because the rebuild gives the
+// event table and its indexes new positions. 0002 renames the old table first and
+// makes the new table with its own text, so sqlite_master holds that text as it
+// is, with no quotes around the name.
 func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	db := migrated(t)
-	ddl, err := migrationFiles.ReadFile("migrations/0001_schema_v1.sql")
+	want := ddlOf(t, "0001_schema_v1.sql", "0002_refused_kind.sql")
+	got := map[string]string{}
+	rows, err := db.Query("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got string
-	q := "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid)"
-	if err := db.QueryRow(q).Scan(&got); err != nil {
+	for rows.Next() {
+		var name, stmt string
+		if err := rows.Scan(&name, &stmt); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = stmt
+	}
+	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// SQLite stores each statement without its final semicolon.
-	want := strings.TrimSuffix(strings.Join(strings.Split(strings.TrimSpace(string(ddl)), ";\n"), ";"), ";")
-	if got != want || strings.Count(want, "CREATE ") != 13 {
+	if !maps.Equal(got, want) || len(want) != 13 || strings.Count(want["event"], "'refused'") != 3 {
 		t.Fatalf("sqlite_master differs from the embedded DDL:\n%q\n%q", got, want)
 	}
 	var n int
-	q = "SELECT count(*) FROM pragma_table_info('checkpoint') WHERE name IN ('published_at', 'publish_target')"
+	q := "SELECT count(*) FROM pragma_table_info('checkpoint') WHERE name IN ('published_at', 'publish_target')"
 	if err := db.QueryRow(q).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("publish column: %d %v", n, err)
 	}

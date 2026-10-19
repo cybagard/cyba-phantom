@@ -32,7 +32,10 @@ func (o *opens) deps() startDeps {
 		o.store++
 		return store.Open(r, p, opt)
 	}
-	d.migrate = func(db *sql.DB, origin string) error { o.migrate++; return store.Migrate(db, origin) }
+	d.migrate = func(db *sql.DB, r *os.Root, p, origin string) error {
+		o.migrate++
+		return store.Migrate(db, r, p, origin)
+	}
 	return d
 }
 
@@ -113,7 +116,7 @@ func TestTU18_StoreRefused(t *testing.T) {
 			var db *sql.DB
 			d := o.deps()
 			migrate := d.migrate
-			d.migrate = func(x *sql.DB, origin string) error { db = x; return migrate(x, origin) }
+			d.migrate = func(x *sql.DB, r *os.Root, p, origin string) error { db = x; return migrate(x, r, p, origin) }
 			var buf bytes.Buffer
 			s, _ := launchLog(t, p, d, slog.New(slog.NewTextHandler(&buf, nil)))
 			if s.Healthy() || s.writer != nil || s.db != nil {

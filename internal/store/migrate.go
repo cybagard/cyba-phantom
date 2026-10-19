@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"os"
 	"regexp"
 	"strconv"
 )
@@ -17,11 +18,13 @@ var migrationFiles embed.FS
 
 // The fixed error classes of the migration step.
 const (
-	ruleVacuum  = "must use auto_vacuum incremental"
-	ruleNames   = "migrations must have a four-digit number, in order from 0001 with no gap"
-	ruleForeign = "has tables and no schema version"
-	ruleNewer   = "has a schema version above the newest migration"
-	ruleMigrate = "migration failed"
+	ruleVacuum    = "must use auto_vacuum incremental"
+	ruleNames     = "migrations must have a four-digit number, in order from 0001 with no gap"
+	ruleForeign   = "has tables and no schema version"
+	ruleNewer     = "has a schema version above the newest migration"
+	ruleMigrate   = "migration failed"
+	ruleSpace     = "has too little free space to rebuild the event table"
+	ruleSpaceRead = "free space to rebuild the event table cannot be read"
 )
 
 const (
@@ -34,15 +37,33 @@ const (
 var migrationName = regexp.MustCompile(`^[0-9]{4}_[A-Za-z0-9_]+\.sql$`)
 
 // Migrate brings the database that Open made to the newest embedded schema
-// version. On a new database it also stores origin as meta.tlog_origin.
-func Migrate(db *sql.DB, origin string) error {
+// version. On a new database it also stores origin as meta.tlog_origin. root and
+// rel are the state directory and the store.path that Open got: the free-space
+// check before the rebuild of the event table reads the database file through them.
+func Migrate(db *sql.DB, root *os.Root, rel, origin string) error {
 	set, _ := fs.Sub(migrationFiles, "migrations") // fails only for an invalid name
-	return migrate(db, set, origin)
+	return migrate(db, set, origin, func() error { return checkSpace(root, rel) })
+}
+
+// checkSpace refuses when the file system of the database file has less free
+// space than twice the size of the file plus a tenth of the file system. It also
+// refuses when the size or the space cannot be read.
+func checkSpace(root *os.Root, rel string) error {
+	size, fsSize, free, ok := diskSpace(root, rel)
+	switch {
+	case !ok:
+		return fail(schemaName, ruleSpaceRead)
+	case free < 2*size+fsSize/10:
+		return fail(schemaName, ruleSpace)
+	}
+	return nil
 }
 
 // migrate does the work of Migrate for a set of migrations, in one transaction.
 // A refused database is not changed. An error is an *Error with a fixed rule.
-func migrate(db *sql.DB, set fs.FS, origin string) error {
+// space runs before the migration 0002 on a database whose event table has
+// rows, and a nil space runs no check.
+func migrate(db *sql.DB, set fs.FS, origin string, space func() error) error {
 	scripts, err := readScripts(set)
 	if err != nil {
 		return err
@@ -68,6 +89,17 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 		return fail(schemaName, ruleNewer)
 	case have == len(scripts):
 		return nil
+	}
+	if have == 1 && space != nil { // the migration 0002 rebuilds the event table
+		var rows bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM event)").Scan(&rows); err != nil {
+			return fail(schemaName, ruleMigrate)
+		}
+		if rows {
+			if err := space(); err != nil {
+				return err
+			}
+		}
 	}
 	for _, s := range scripts[have:] {
 		if _, err := tx.ExecContext(ctx, s); err != nil {

@@ -36,7 +36,7 @@ func BenchmarkEvidenceBatch(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer db.Close()
-	if err := Migrate(db, "origin"); err != nil {
+	if err := Migrate(db, root, "events.db", "origin"); err != nil {
 		b.Fatal(err)
 	}
 	l, err := tlog.OpenLog(root, "tlog")
