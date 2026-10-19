@@ -55,8 +55,9 @@ const (
 	ruleChanged   = "file changed during the read"
 	ruleFileOwner = "file has another owner"
 
-	ruleCachePath = "cache directory path is not valid"
-	ruleFileMode  = "file allows access for group or other"
+	ruleCachePath   = "cache directory path is not valid"
+	ruleFileMode    = "file allows access for group or other"
+	ruleFileSpecial = "file has a setuid, setgid or sticky bit"
 )
 
 // Error names the operation that failed and the rule that failed. The text is
@@ -133,15 +134,34 @@ var betweenCheckAndOpen func(part string)
 // file and before it opens the file. It is nil in production.
 var betweenLstatAndOpen func()
 
-// betweenOpenAndStat is a test hook. Load calls it after it opened the key file
+// betweenOpenAndStat is a test hook. Load calls it after it opens the key file
 // and before it calls Stat on the open file. It is nil in production.
 var betweenOpenAndStat func()
 
+// betweenSizeCheckAndRead is a test hook. Load calls it after the size checks of
+// the open file and before it reads the file. It is nil in production.
+var betweenSizeCheckAndRead func()
+
+// beforeListChild is a test hook. List calls it with the key of a child
+// directory, before it goes into the directory. It is nil in production.
+var beforeListChild func(key string)
+
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
-// not exist. Each directory of dir must be a real directory, not a link, owned
-// by the effective user, with no group or other permission bit and no setuid,
-// setgid or sticky bit.
+// not exist. Each directory of dir must be a real directory, not a symbolic
+// link. The effective user must own it. It must have no group or other
+// permission bit and no setuid, setgid or sticky bit.
+//
+// Open removes the leftover temporary files of an earlier Store that stopped, for
+// example in a crash. This is best effort. Open removes the names that start with
+// tmpPrefix through the cache root, in the cache directory and in the key
+// directories below it. A name that Open cannot remove stays. A directory that
+// Open cannot open, or that fails the directory rules, stays and Open does not
+// go into it. In each case Open goes on.
+//
+// One Open for each cache directory at a time is the rule. A second Open of the
+// same cache during a Store removes the temporary file of that Store, and that
+// Store then fails.
 //
 // Open walks dir one part at a time. It checks a part in the root of the part
 // before it, and then opens the part as a root. The opened directory must be the
@@ -182,6 +202,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		closeOpened()
 		return nil, wrap(op, err)
 	}
+	s.removeTemporary(nil)
 	for i := len(roots) - 1; i >= 0; i-- {
 		if err := syncPath(roots[i], nil); err != nil {
 			closeOpened()
@@ -196,6 +217,49 @@ func Open(state *os.Root, dir string) (*Store, error) {
 
 // Close closes the cache directory.
 func (s *Store) Close() error { return wrap("close", s.root.Close()) }
+
+// removeTemporary removes the names that start with tmpPrefix in the directory
+// at the path parts. That directory is the cache directory or a directory below
+// it. The walk is best effort and returns no error. A name that it cannot remove
+// stays. The walk goes into a child that is a directory, not a symbolic link,
+// down to maxParts levels. It opens the child through the root and applies
+// dirRule to the open directory. A child that it cannot open, or that fails
+// dirRule, stays and the walk skips it. A ReadDir error ends the walk of that
+// directory only. The walk reads a directory 256 names at a time and keeps no
+// list of names. So the number of names does not matter. It calls fsync on a
+// directory only if it removed a name in it, and it ignores an fsync error.
+func (s *Store) removeTemporary(parts []string) {
+	d, err := s.root.OpenFile(rel(parts), readFlags, 0)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	if fi, err := d.Stat(); err != nil || dirRule(fi) != nil {
+		return
+	}
+	removed := false
+	for {
+		entries, err := d.ReadDir(256)
+		for _, e := range entries {
+			name := e.Name()
+			child := slices.Concat(parts, []string{name})
+			switch {
+			case strings.HasPrefix(name, tmpPrefix):
+				if s.root.Remove(rel(child)) == nil {
+					removed = true
+				}
+			case e.IsDir() && len(child) <= maxParts:
+				s.removeTemporary(child)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	if removed {
+		_ = syncDirFile(d)
+	}
+}
 
 // openPart checks the directory part in r, makes it with mode 0700 if it is
 // missing, and opens it as a root. The opened directory must be the directory
@@ -292,8 +356,8 @@ func (s *Store) dirs(parts []string, create bool) error {
 
 // syncPath calls fsync on the directory r and on each directory of parts below
 // it, the deepest first. It opens each directory by its path below r. The path
-// of r itself is ".", so Open calls syncPath with no parts to call fsync on a
-// root that it opened.
+// of r itself is ".". Open calls syncPath with no parts on each root of its walk.
+// This includes roots[0], the state root of the caller.
 func syncPath(r *os.Root, parts []string) error {
 	for i := len(parts); i >= 0; i-- {
 		f, err := r.OpenFile(rel(parts[:i]), readFlags, 0)
@@ -370,7 +434,10 @@ func (s *Store) info(ctx context.Context, op, key string) (fs.FileInfo, []string
 }
 
 // Store writes value at key: a temporary file in the directory of the key, fsync,
-// rename, then fsync of the directories. It makes missing directories.
+// rename, then fsync of the directories. It makes missing directories. A Delete
+// can remove a directory of the key during the Store. Then the Store gives the
+// rule for a file that cannot be accessed. It does not give the rule for a
+// missing key.
 func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	const op = "store"
 	if err := stopped(ctx, op); err != nil {
@@ -400,7 +467,7 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	tmp := path.Join(rel(dir), tmpPrefix+rand.Text())
 	f, err := s.root.OpenFile(tmp, createFlags, fileMode)
 	if err != nil {
-		return wrap(op, err)
+		return wrapAfterDirs(op, err)
 	}
 	_, err = f.Write(value)
 	if err == nil {
@@ -414,9 +481,20 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	}
 	if err != nil {
 		s.root.Remove(tmp)
-		return wrap(op, err)
+		return wrapAfterDirs(op, err)
 	}
-	return wrap(op, syncPath(s.root, dir))
+	return wrapAfterDirs(op, syncPath(s.root, dir))
+}
+
+// wrapAfterDirs is wrap for a call that runs after the check of the directories
+// of a key. There, a missing name means that a Delete removed a directory at the
+// same time. The key itself is not missing. So the error gets the rule for a file
+// that cannot be accessed, and it does not wrap fs.ErrNotExist.
+func wrapAfterDirs(op string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fail(op, ruleIO)
+	}
+	return wrap(op, err)
 }
 
 // Load returns the value at key. A file above the size cap is an error. If a
@@ -424,6 +502,12 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 // at most loadTries times in all. If the file still changes, Load gives the rule
 // "file changed during the read". A replacement after the open does not matter:
 // Load returns the value of the open file.
+//
+// A write in place of the key file (the same file) can change its size during
+// the Load. Then Load gives the rule "file changed during the read". When the
+// file grows above 64 KiB, Load gives the rule "value is above the size cap".
+// Load does not start again then. A write in place that keeps the size is not
+// detected. This is a limit of Load.
 func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 	const op = "load"
 	for i := 0; i < loadTries; i++ {
@@ -471,17 +555,20 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	if !os.SameFile(fi, of) {
 		return nil, true, nil
 	}
-	// The key file must have one link only, and only the owner of the store may
-	// have access to it. A count of 0 is a file that a rename or a Delete removed
-	// after the open. The open file still holds the whole value.
-	if n, ok := linkCount(of); !ok || n > 1 {
-		return nil, false, fail(op, ruleLinks)
+	if err := keyFileRule(op, of); err != nil {
+		return nil, false, err
 	}
-	if !ownedByUs(of) {
-		return nil, false, fail(op, ruleFileOwner)
+	// A write in place can change the size after the open. The size of the open
+	// file must be the size that Lstat gave, and the read must give that size.
+	// This is not a new try: a new try would read the changed file with no error.
+	if of.Size() > maxValue {
+		return nil, false, fail(op, ruleSize)
 	}
-	if of.Mode().Perm()&otherBit != 0 {
-		return nil, false, fail(op, ruleFileMode)
+	if of.Size() != fi.Size() {
+		return nil, false, fail(op, ruleChanged)
+	}
+	if betweenSizeCheckAndRead != nil {
+		betweenSizeCheckAndRead()
 	}
 	b, err = io.ReadAll(io.LimitReader(f, maxValue+1))
 	if err != nil {
@@ -490,11 +577,36 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	if len(b) > maxValue {
 		return nil, false, fail(op, ruleSize)
 	}
+	if int64(len(b)) != of.Size() {
+		return nil, false, fail(op, ruleChanged)
+	}
 	return b, false, nil
 }
 
+// keyFileRule returns the error for a regular key file that the store must not
+// use. Four rules apply. The file must have one hard link only. The effective
+// user must own it. It must have no group or other permission bit. It must have
+// no setuid, setgid or sticky bit. A count of 0 is a file that a rename or a
+// Delete removed after the open. The open file still holds the whole value.
+func keyFileRule(op string, fi fs.FileInfo) error {
+	n, ok := linkCount(fi)
+	switch {
+	case !ok || n > 1:
+		return fail(op, ruleLinks)
+	case !ownedByUs(fi):
+		return fail(op, ruleFileOwner)
+	case fi.Mode().Perm()&otherBit != 0:
+		return fail(op, ruleFileMode)
+	case fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0:
+		return fail(op, ruleFileSpecial)
+	}
+	return nil
+}
+
 // Delete deletes key. A directory key deletes every key below it. A missing key
-// is not an error, as the certmagic.Storage contract says. A link is an error.
+// is not an error, as the certmagic.Storage contract says. A symbolic link is
+// an error. Delete removes a key file also when Load refuses it, so a bad name
+// does not stay in the cache.
 func (s *Store) Delete(ctx context.Context, key string) error {
 	const op = "delete"
 	_, parts, err := s.info(ctx, op, key)
@@ -509,16 +621,36 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return wrap(op, syncPath(s.root, parts[:len(parts)-1]))
 }
 
-// Exists reports whether key is a file or a directory. A bad key and a link give
-// false.
+// checkedInfo is info. For a key file it also applies the rules of Load: hard
+// links, owner, mode, the setuid, setgid or sticky bit, and size.
+func (s *Store) checkedInfo(ctx context.Context, op, key string) (fs.FileInfo, error) {
+	fi, _, err := s.info(ctx, op, key)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode().IsRegular() {
+		if err := keyFileRule(op, fi); err != nil {
+			return nil, err
+		}
+		if fi.Size() > maxValue {
+			return nil, fail(op, ruleSize)
+		}
+	}
+	return fi, nil
+}
+
+// Exists reports whether key is a file or a directory. A bad key, a symbolic
+// link, and a key file that Load refuses give false.
 func (s *Store) Exists(ctx context.Context, key string) bool {
-	_, _, err := s.info(ctx, "exists", key)
+	_, err := s.checkedInfo(ctx, "exists", key)
 	return err == nil
 }
 
-// Stat returns the facts of key. A directory key has IsTerminal false.
+// Stat returns the facts of key. A directory key has IsTerminal false. A key file
+// that Load refuses gives an error. Load refuses a key file for its hard links,
+// owner, mode, setuid, setgid or sticky bit, or size.
 func (s *Store) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
-	fi, _, err := s.info(ctx, "stat", key)
+	fi, err := s.checkedInfo(ctx, "stat", key)
 	if err != nil {
 		return certmagic.KeyInfo{}, err
 	}
@@ -529,7 +661,10 @@ func (s *Store) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error)
 // direct children, directories too. With recursive true, it returns the keys of
 // files below prefix. The prefix "" is the cache directory. A missing prefix
 // gives fs.ErrNotExist. A prefix below a file gives the rule "path part is not a
-// directory". List reads at most maxList names.
+// directory". List reads at most maxList names. A name that is not a valid key
+// makes the whole List fail. So does a symbolic link, and so does a file that is
+// not a regular file or a directory. This is on purpose. A Delete can remove a
+// child directory during a recursive List. List then skips that directory.
 func (s *Store) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	const op = "list"
 	if err := stopped(ctx, op); err != nil {
@@ -575,7 +710,12 @@ func (s *Store) list(op string, parts []string, recursive bool, keys *[]string, 
 			case !e.IsDir() && !e.Type().IsRegular():
 				return fail(op, ruleType)
 			case e.IsDir() && recursive:
-				if err := s.list(op, child, true, keys, n); err != nil {
+				if beforeListChild != nil {
+					beforeListChild(strings.Join(child, "/"))
+				}
+				// A Delete can remove the child after the read of its parent. Then
+				// the child is skipped, as if List did not read it.
+				if err := s.list(op, child, true, keys, n); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					return err
 				}
 			default:

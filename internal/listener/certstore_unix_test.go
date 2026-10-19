@@ -3,6 +3,7 @@
 package listener
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -313,17 +314,49 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 	if _, err := s.Load(ctx, "kd/key"); err != nil {
 		t.Fatalf("Load after the repair = %v", err)
 	}
-	// The hook gives each directory another owner.
-	old := geteuid
-	t.Cleanup(func() { geteuid = old })
-	geteuid = func() int { return os.Geteuid() + 1 }
+	// The hook gives another owner to one directory. The cache directory has the
+	// other owner: Load and Open refuse it.
+	setOtherOwner(t, cache)
 	_, err = s.Load(ctx, "kd/key")
+	wantError(t, err, "load", ruleOwner)
 	noMarker(t, err, "kd/key")
-	if o, err := Open(state, "acme/cache"); err == nil {
+	o, err := Open(state, "acme/cache")
+	if err == nil {
 		o.Close()
-		t.Error("Open accepted a directory of another owner")
 	}
+	wantError(t, err, "open", ruleOwner)
+	// The parent of the cache directory has the other owner: Open refuses it, and
+	// Load does not check it.
+	setOtherOwner(t, filepath.Join(dir, "acme"))
+	o, err = Open(state, "acme/cache")
+	if err == nil {
+		o.Close()
+	}
+	wantError(t, err, "open", ruleOwner)
+	if _, err := s.Load(ctx, "kd/key"); err != nil {
+		t.Errorf("Load with another owner on the parent = %v", err)
+	}
+	// The key directory has the other owner: Load refuses it.
+	setOtherOwner(t, filepath.Join(cache, "kd"))
+	_, err = s.Load(ctx, "kd/key")
+	wantError(t, err, "load", ruleOwner)
 	unchanged(t, target)
+}
+
+// setOtherOwner makes the hook give another owner to the file or directory at
+// the host path p, and to no other inode. The hook stays until the test ends or
+// the next call.
+func setOtherOwner(t *testing.T, p string) {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	mustNil(t, err)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no Stat_t for %s", p)
+	}
+	dev, ino := uint64(st.Dev), uint64(st.Ino)
+	otherOwner = func(d, i uint64) bool { return d == dev && i == ino }
+	t.Cleanup(func() { otherOwner = nil })
 }
 
 // A check is not enough if the directory changes after it. These tests change
@@ -554,16 +587,17 @@ func TestTS16LoadGivesTheChangedRuleWhenEveryTryFindsAnotherFile(t *testing.T) {
 	}
 }
 
-func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *testing.T) {
+func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsBeforeTheRead(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
-	// The file is sparse, so the growth costs no disk. The same file is open, so
-	// the check of the file identity passes.
-	betweenLstatAndOpen = func() {
+	// The file grows after the size checks of the open file and before the read.
+	// The size checks have passed, so only the read limit bounds the memory. The
+	// file is sparse, so the growth costs no disk.
+	betweenSizeCheckAndRead = func() {
 		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/key"), 32<<20))
 	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	t.Cleanup(func() { betweenSizeCheckAndRead = nil })
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	b, err := s.Load(ctx, "key")
@@ -576,7 +610,9 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsAfterTheLstat(t *tes
 	// byte allocates about 290 KiB in all with the race detector, and less without
 	// it. A read limit of four times the cap allocates about 630 KiB without the
 	// race detector and about 1.2 MiB with it.
-	if n := after.TotalAlloc - before.TotalAlloc; n > 384<<10 {
+	n := after.TotalAlloc - before.TotalAlloc
+	t.Logf("Load allocated %d bytes", n)
+	if n > 384<<10 {
 		t.Errorf("Load allocated %d bytes for a file that grew to 32 MiB", n)
 	}
 }
@@ -699,27 +735,39 @@ func TestTS16LoadRefusesAKeyFileWithGroupOrOtherBits(t *testing.T) {
 }
 
 func TestTS16LoadRefusesAKeyFileOfAnotherOwner(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("the test needs root to change the owner of a file")
-	}
 	s, dir := newStore(t)
 	ctx := context.Background()
 	target := outside(t, dir)
 	mustNil(t, s.Store(ctx, "key", []byte(marker)))
-	mustNil(t, os.Chown(filepath.Join(dir, "acme/cache/key"), 12345, -1))
+	mustNil(t, s.Store(ctx, "key2", []byte("v")))
+	setOtherOwner(t, filepath.Join(dir, "acme/cache/key"))
 	b, err := s.Load(ctx, "key")
 	if b != nil {
 		t.Errorf("Load returned %d bytes", len(b))
 	}
 	wantError(t, err, "load", ruleFileOwner)
 	noMarker(t, err, "key")
+	// The hook selects one inode: a second key in the same directory still loads.
+	if b, err := s.Load(ctx, "key2"); err != nil || string(b) != "v" {
+		t.Errorf("Load of the second key = %q, %v", b, err)
+	}
+	// Stat and Exists refuse the key file of another owner, as Load does. They
+	// accept the second key.
+	_, err = s.Stat(ctx, "key")
+	wantError(t, err, "stat", ruleFileOwner)
+	if s.Exists(ctx, "key") {
+		t.Error("Exists is true for a key file of another owner")
+	}
+	if _, err := s.Stat(ctx, "key2"); err != nil {
+		t.Errorf("Stat of the second key = %v", err)
+	}
+	if !s.Exists(ctx, "key2") {
+		t.Error("Exists is false for the second key")
+	}
 	unchanged(t, target)
 }
 
 func TestTS16DirectoryOfAnotherUserIsRefused(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("the test needs root to change the owner of a directory")
-	}
 	ctx := context.Background()
 	// A key directory, and a key directory that has the name of the parent of the
 	// cache directory.
@@ -728,27 +776,217 @@ func TestTS16DirectoryOfAnotherUserIsRefused(t *testing.T) {
 			s, dir := newStore(t)
 			target := outside(t, dir)
 			mustNil(t, s.Store(ctx, kd+"/key", []byte("v")))
-			mustNil(t, os.Chown(filepath.Join(dir, "acme/cache", kd), 12345, -1))
+			mustNil(t, s.Store(ctx, "other/key", []byte("v")))
+			setOtherOwner(t, filepath.Join(dir, "acme/cache", kd))
 			_, err := s.Load(ctx, kd+"/key")
 			wantError(t, err, "load", ruleOwner)
 			wantError(t, s.Store(ctx, kd+"/key2", []byte("v")), "store", ruleOwner)
+			// The hook selects one inode: a key in another key directory still loads.
+			if b, err := s.Load(ctx, "other/key"); err != nil || string(b) != "v" {
+				t.Errorf("Load in another key directory = %q, %v", b, err)
+			}
 			unchanged(t, target)
 		})
 	}
 	t.Run("parent of the cache directory", func(t *testing.T) {
-		_, dir := newStore(t)
+		s, dir := newStore(t)
 		target := outside(t, dir)
+		mustNil(t, s.Store(ctx, "key", []byte("v")))
 		state, err := os.OpenRoot(dir)
 		mustNil(t, err)
 		defer state.Close()
-		mustNil(t, os.Chown(filepath.Join(dir, "acme"), 12345, -1))
+		setOtherOwner(t, filepath.Join(dir, "acme"))
 		o, err := Open(state, "acme/cache")
 		if err == nil {
 			o.Close()
 		}
 		wantError(t, err, "open", ruleOwner)
+		// The open store checks the cache directory and the directories below it,
+		// not the parent.
+		if b, err := s.Load(ctx, "key"); err != nil || string(b) != "v" {
+			t.Errorf("Load by the open store = %q, %v", b, err)
+		}
 		unchanged(t, target)
 	})
+}
+
+func TestTS16LoadRefusesAKeyFileWithASetuidSetgidOrStickyBit(t *testing.T) {
+	ctx := context.Background()
+	for _, bit := range []struct {
+		name string
+		mode fs.FileMode
+	}{{"sticky", os.ModeSticky}, {"setgid", os.ModeSetgid}, {"setuid", os.ModeSetuid}} {
+		t.Run(bit.name, func(t *testing.T) {
+			s, dir := newStore(t)
+			target := outside(t, dir)
+			mustNil(t, s.Store(ctx, "key", []byte(marker)))
+			p := filepath.Join(dir, "acme/cache/key")
+			mustNil(t, os.Chmod(p, 0o600|bit.mode))
+			if fi, err := os.Lstat(p); err != nil || fi.Mode()&bit.mode == 0 {
+				t.Skipf("the system did not set the %s bit: %v, %v", bit.name, fi, err)
+			}
+			// The mode is 0600 with one setuid, setgid or sticky bit. No group or
+			// other bit is set. So the rule for that bit applies, not the rule for
+			// the mode.
+			b, err := s.Load(ctx, "key")
+			if b != nil {
+				t.Errorf("Load returned %d bytes", len(b))
+			}
+			wantError(t, err, "load", ruleFileSpecial)
+			noMarker(t, err, "key")
+			_, err = s.Stat(ctx, "key")
+			wantError(t, err, "stat", ruleFileSpecial)
+			if s.Exists(ctx, "key") {
+				t.Error("Exists is true for a key file that Load refuses")
+			}
+			unchanged(t, target)
+		})
+	}
+}
+
+// badKeyFile is a key file that Load refuses, with the rule.
+type badKeyFile struct {
+	key, rule string
+}
+
+// badKeyFiles makes four key files that Load refuses. Two are the names of a file
+// with a second hard link in the cache ("inside" and "hl-inside"). One is a hard
+// link to the outside file. One is a file with mode 0644.
+func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
+	t.Helper()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(context.Background(), "inside", []byte("v")))
+	mustNil(t, os.Link(filepath.Join(cache, "inside"), filepath.Join(cache, "hl-inside")))
+	mustNil(t, os.Link(target, filepath.Join(cache, "hl-outside")))
+	mustNil(t, s.Store(context.Background(), "wide", []byte("v")))
+	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o644))
+	return []badKeyFile{{"inside", ruleLinks}, {"hl-inside", ruleLinks}, {"hl-outside", ruleLinks}, {"wide", ruleFileMode}}
+}
+
+func TestTS16StatAndExistsRefuseAKeyFileThatLoadRefuses(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	for _, bad := range badKeyFiles(t, s, dir, target) {
+		_, err := s.Stat(ctx, bad.key)
+		wantError(t, err, "stat", bad.rule)
+		noMarker(t, err, bad.key)
+		if s.Exists(ctx, bad.key) {
+			t.Errorf("Exists(%q) is true", bad.key)
+		}
+		_, err = s.Load(ctx, bad.key)
+		wantError(t, err, "load", bad.rule)
+	}
+	unchanged(t, target)
+
+	// A key file of maxValue+1 bytes written on the host path: Load refuses it for
+	// its size, so Stat and Exists refuse it too. A file of exactly maxValue bytes
+	// is valid for all three.
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, os.WriteFile(filepath.Join(cache, "big"), bytes.Repeat([]byte("x"), maxValue+1), 0o600))
+	mustNil(t, os.WriteFile(filepath.Join(cache, "exact"), bytes.Repeat([]byte("x"), maxValue), 0o600))
+	_, err := s.Stat(ctx, "big")
+	wantError(t, err, "stat", ruleSize)
+	if s.Exists(ctx, "big") {
+		t.Error("Exists is true for a key file above the size cap")
+	}
+	_, err = s.Load(ctx, "big")
+	wantError(t, err, "load", ruleSize)
+	if _, err := s.Stat(ctx, "exact"); err != nil {
+		t.Errorf("Stat of a key file at the size cap = %v", err)
+	}
+	if !s.Exists(ctx, "exact") {
+		t.Error("Exists is false for a key file at the size cap")
+	}
+	if b, err := s.Load(ctx, "exact"); err != nil || len(b) != maxValue {
+		t.Errorf("Load of a key file at the size cap = %d bytes, %v", len(b), err)
+	}
+}
+
+// Open is best effort when it removes leftover files. It does not fail, and it
+// does not go into a directory that it cannot open or that fails the directory
+// rules.
+func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
+	// Root can open a directory with mode 0000, so only that case needs another user.
+	closedCase := os.Geteuid() != 0
+	ctx := context.Background()
+	first, dir := newStore(t)
+	mustNil(t, first.Store(ctx, "good/real", []byte("v")))
+	mustNil(t, first.Close())
+	cache := filepath.Join(dir, "acme/cache")
+	tmpIn := func(d string) string { return filepath.Join(cache, d, tmpPrefix+"left") }
+	touch := func(p string) { mustNil(t, os.WriteFile(p, nil, 0o600)) }
+
+	// (a) a key directory with mode 0755 and a leftover file.
+	mustNil(t, os.Mkdir(filepath.Join(cache, "wide"), 0o700))
+	touch(tmpIn("wide"))
+	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o755))
+	// (b) a key directory with mode 0000 and a leftover file. The cleanup gives the
+	// mode back, so that t.TempDir can remove the directory.
+	if closedCase {
+		mustNil(t, os.Mkdir(filepath.Join(cache, "closed"), 0o700))
+		touch(tmpIn("closed"))
+		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0))
+		t.Cleanup(func() { os.Chmod(filepath.Join(cache, "closed"), 0o700) })
+	}
+	// (c) a directory with a name that starts with tmpPrefix and is not empty. Its
+	// file also starts with tmpPrefix, so a walk that enters the directory removes it.
+	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"dir"), 0o700))
+	touch(filepath.Join(cache, tmpPrefix+"dir", tmpPrefix+"inner"))
+	// (e) an empty directory with a name that starts with tmpPrefix.
+	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"empty"), 0o700))
+	// (d) a good key directory with a leftover file.
+	touch(tmpIn("good"))
+
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	s, err := Open(state, "acme/cache")
+	if err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+	defer s.Close()
+
+	if _, err := os.Lstat(tmpIn("good")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open did not remove the leftover file in the good key directory: %v", err)
+	}
+	if _, err := os.Lstat(tmpIn("wide")); err != nil {
+		t.Errorf("Open removed the leftover file in the key directory with mode 0755, but it must skip that directory: %v", err)
+	}
+	// Remove cannot remove a directory that is not empty, so the directory stays.
+	// The walk does not go into it, so its leftover-named file stays too.
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir")); err != nil {
+		t.Errorf("the directory %sdir is gone, but it holds the file %sinner: %v", tmpPrefix, tmpPrefix, err)
+	}
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir", tmpPrefix+"inner")); err != nil {
+		t.Errorf("the file %sinner in the directory %sdir is gone: %v", tmpPrefix, tmpPrefix, err)
+	}
+	// Remove removes an empty directory, so Open removes this one.
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"empty")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open did not remove the empty directory %sempty: %v", tmpPrefix, err)
+	}
+	if closedCase {
+		mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0o700))
+		if _, err := os.Lstat(tmpIn("closed")); err != nil {
+			t.Errorf("Open removed the leftover file in the key directory with mode 0000, but it must skip that directory: %v", err)
+		}
+	}
+	if b, err := s.Load(ctx, "good/real"); err != nil || string(b) != "v" {
+		t.Errorf("Load = %q, %v", b, err)
+	}
+}
+
+func TestTS16DeleteRemovesAKeyFileThatLoadRefuses(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	target := outside(t, dir)
+	for _, bad := range badKeyFiles(t, s, dir, target) {
+		mustNil(t, s.Delete(ctx, bad.key))
+		if _, err := os.Lstat(filepath.Join(dir, "acme/cache", bad.key)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Delete(%q) left the name: %v", bad.key, err)
+		}
+	}
+	unchanged(t, target)
 }
 
 func TestTS16DirectoryWithSetuidSetgidOrStickyBitIsRefused(t *testing.T) {
@@ -789,11 +1027,7 @@ var breakDirs = []breakDir{
 		mustNil(t, os.Symlink(filepath.Base(p)+"-real", p))
 	}},
 	{"mode", ruleMode, func(t *testing.T, p string) { mustNil(t, os.Chmod(p, 0o755)) }},
-	{"owner", ruleOwner, func(t *testing.T, _ string) {
-		old := geteuid
-		t.Cleanup(func() { geteuid = old })
-		geteuid = func() int { return os.Geteuid() + 1 }
-	}},
+	{"owner", ruleOwner, func(t *testing.T, p string) { setOtherOwner(t, p) }},
 	{"not a directory", ruleNotDir, func(t *testing.T, p string) {
 		mustNil(t, os.RemoveAll(p))
 		mustNil(t, os.WriteFile(p, nil, 0o600))
