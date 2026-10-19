@@ -364,29 +364,38 @@ func TestTS12_LargestEvent(t *testing.T) {
 	// The longest ts and status are the negative integers -(2^53-1). The kind
 	// score_change is the longest name of a kind that can have a session.
 	st := int64(-maxInt)
-	e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
-		Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
-		Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
-		Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
-		ClientIP: "2001:db8:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := e.record.canonical()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The documentation prefix has the group db8 with 3 digits, so this address
-	// has 38 bytes, one less than maxIPText.
-	ip := e.IP()
-	if len(b) > MaxRecordBytes || len(e.BodyPrefix()) != MaxBodyPrefix || len(ip) != maxIPText-1 || e.Size() > MaxEventBytes {
-		t.Fatalf("record %d, prefix %d, size %d", len(b), len(e.BodyPrefix()), e.Size())
-	}
-	// The pinned size is the length of the canonical bytes of the record above.
-	// Each text field is as long as its cap allows, and each control byte is a
-	// 6-byte escape. The test measured the value; a change of a cap changes it.
-	if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+len(ip) {
-		t.Errorf("largest record is %d bytes, event is %d", len(b), e.Size())
+	// The documentation prefix has the group db8 with 3 digits, so the first
+	// address has 38 bytes, one less than maxIPText. The second address has the
+	// longest text that an address can have.
+	for _, c := range []struct {
+		ip     string
+		length int
+	}{
+		{"2001:db8:1234:5678:9abc:def0:1234:5678", maxIPText - 1},
+		{"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", maxIPText},
+	} {
+		e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
+			Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+			Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+			Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
+			ClientIP: c.ip, BodyPrefix: make([]byte, 9000)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := e.record.canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ip := e.IP()
+		if len(b) > MaxRecordBytes || len(e.BodyPrefix()) != MaxBodyPrefix || len(ip) != c.length || e.Size() > MaxEventBytes {
+			t.Fatalf("ip %q: record %d, prefix %d, size %d", c.ip, len(b), len(e.BodyPrefix()), e.Size())
+		}
+		// The pinned size is the length of the canonical bytes of the record above.
+		// Each text field is as long as its cap allows, and each control byte is a
+		// 6-byte escape. The test measured the value; a change of a cap changes it.
+		if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+len(ip) {
+			t.Errorf("ip %q: largest record is %d bytes, event is %d", c.ip, len(b), e.Size())
+		}
 	}
 	// Input past a cap is an error before it reaches the encoder.
 	over := strings.Repeat("a", 5000)

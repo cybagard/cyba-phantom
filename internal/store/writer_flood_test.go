@@ -171,10 +171,11 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 
 // T-U-18: a record error (an event whose kind is not a kind) stops the writer.
 // Err holds the record class, the batch stores no row, and the events that come
-// later are taken out of the lanes and counted. Enqueue refuses an event that
-// NewEvent did not make, and an event cannot change after NewEvent. So the test
-// gives the writer a batch with the zero Event (kind 0) through flush, as Run
-// does. The stopped writer then takes the later events from the lanes.
+// later are taken out of the lanes and counted. Enqueue refuses an event with
+// kind 0 or Size 0, and an event cannot change after NewEvent. So the test
+// gives the writer a batch with the zero Event (kind 0) through flush, the
+// function that Run calls with each batch. The stopped writer then takes the
+// later events from the lanes.
 func TestTU18RecordErrorStopsTheWriter(t *testing.T) {
 	r := newRig(t, 100)
 	mk := func(k event.Kind, ts int64) *event.Event {

@@ -31,20 +31,20 @@ const ipv6PrefixBits = 64
 // A Counters value holds a pointer to a stateRef. The stateRef holds the
 // pointer to the state. The state holds the lock, the map, and the bucket.
 // Take a struct with an unexported Counters value field. For %v, fmt prints
-// the first pointer, to the stateRef, as an address. Fmt does not follow that
-// pointer. Only the bad-verb path (for example %s) follows it. That path prints
-// %!s(*event.stateRef=&{0x...}) and stops at the second pointer. That is why the
-// second pointer exists. Thus fmt prints no key.
+// the first pointer, to the stateRef, as an address. The fmt package does not
+// follow that pointer. Only the bad-verb path (for example %s) follows it. That
+// path prints %!s(*event.stateRef=&{0x...}) and stops at the second pointer.
+// That is why the second pointer exists. Thus fmt prints no key.
 //
-// Fmt prints no key for a Counters value in each of these places:
+// The fmt package prints no key for a Counters value in each of these places:
 //   - an unexported field
 //   - an unexported any field
 //   - a nested struct, an array, or a map
 //
-// Fmt also prints no key for a *Counters in an unexported field.
+// The fmt package also prints no key for a *Counters in an unexported field.
 //
 // Code that uses reflect can reach the map. For this, the code must read the
-// private fields on purpose.
+// unexported fields on purpose.
 //
 // Only Snapshot gives the keys to its caller. All methods are safe for
 // concurrent use. The zero value is not ready for use: call NewCounters.
