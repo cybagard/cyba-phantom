@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// T-S-19: no panic for any input. On success, the archive keeps all caps.
+// T-S-19: no panic for any input. On success, the archive is within all caps.
 func FuzzTS19ReadArchive(f *testing.F) {
-	fail, pass := fixtures(f)
+	fail, pass := fixtures()
 	for _, x := range append(fail, pass...) {
 		f.Add(x.b)
 	}
@@ -15,7 +15,7 @@ func FuzzTS19ReadArchive(f *testing.F) {
 		a, err := ReadArchive(b)
 		if err != nil {
 			if a != nil || err != ErrArchiveInvalid {
-				t.Fatalf("failure gave %v, %v", a, err)
+				t.Fatalf("failure gave archive %v, len %d, error %v", a != nil, lenOf(a), err)
 			}
 			return
 		}

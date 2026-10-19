@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strings"
 )
 
 // The caps of an archive, in bytes or in entries. MaxDecodedBytes counts the
@@ -72,11 +73,22 @@ func (c *capReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ReadArchive reads the archive in b. It accepts regular files (type 0) and
-// directories (type 5). A directory has no effect, but it counts toward
-// MaxEntries. After the end of the tar, only zero bytes can follow, and the
-// gzip stream must end. Every failure gives ErrArchiveInvalid. The function
-// does not keep b, and it opens no file.
+// ReadArchive reads the archive in b. The Next function of archive/tar reads
+// the PAX 'x' headers and the GNU 'L' and 'K' headers itself and applies them
+// to the next entry. It reads type NUL as a regular file or a directory.
+// ReadArchive refuses each header that Next returns with a type flag other
+// than '0' (regular file) and '5' (directory). A directory has no data and no
+// effect, but it counts toward MaxEntries.
+//
+// ReadArchive also refuses a name that two entries use, a header with a
+// GNU.sparse. PAX record (Next gives such an entry its logical size, and the
+// hole bytes do not pass through the decoded-byte count), and an archive where
+// the sum of the regular entry sizes passes MaxDecodedBytes.
+//
+// After the end of the tar, only zero bytes can follow until the end of the
+// gzip data. ReadArchive reads further gzip members as the standard library
+// reads them, and each member must hold only zero bytes. Every failure gives
+// ErrArchiveInvalid. The function does not keep b, and it opens no file.
 func ReadArchive(b []byte) (*Archive, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
@@ -86,18 +98,35 @@ func ReadArchive(b []byte) (*Archive, error) {
 	cr := &capReader{r: zr}
 	tr := tar.NewReader(cr)
 	files := make(map[string][]byte)
+	seen := make(map[string]bool)
+	var sizes int64
 	for n := 0; ; n++ {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
-		if err != nil || n >= MaxEntries {
+		if err != nil || n >= MaxEntries || seen[hdr.Name] {
 			return nil, ErrArchiveInvalid
+		}
+		seen[hdr.Name] = true
+		for key := range hdr.PAXRecords {
+			if strings.HasPrefix(key, "GNU.sparse.") {
+				return nil, ErrArchiveInvalid
+			}
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if hdr.Size != 0 {
+				return nil, ErrArchiveInvalid
+			}
 		case tar.TypeReg:
-			if _, dup := files[hdr.Name]; dup || hdr.Size > MaxEntryBytes {
+			if hdr.Size > MaxEntryBytes {
+				return nil, ErrArchiveInvalid
+			}
+			// The sum of the sizes bounds the memory of the entries, also when
+			// the reader makes more bytes than the stream holds.
+			sizes += hdr.Size
+			if sizes > MaxDecodedBytes {
 				return nil, ErrArchiveInvalid
 			}
 			// The size is within the cap, so the buffer has the right size at
