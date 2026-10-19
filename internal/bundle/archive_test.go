@@ -21,6 +21,8 @@ import (
 const (
 	markerName = "marker-name-7f3a"
 	markerData = "marker-data-91c2"
+	// markerPath is a permitted name that holds the marker text.
+	markerPath = "traps/" + markerName
 )
 
 // ent is one tar entry of a fixture. typ 0 (the zero value) means tar.TypeReg.
@@ -28,7 +30,6 @@ type ent struct {
 	name string
 	typ  byte
 	data []byte
-	pax  map[string]string
 }
 
 // buildTar makes the tar bytes of the entries, with the end blocks. It panics
@@ -40,7 +41,7 @@ func buildTar(ents ...ent) []byte {
 		if e.typ == 0 {
 			e.typ = tar.TypeReg
 		}
-		h := &tar.Header{Name: e.name, Typeflag: e.typ, Mode: 0o644, PAXRecords: e.pax}
+		h := &tar.Header{Name: e.name, Typeflag: e.typ, Mode: 0o644}
 		switch e.typ {
 		case tar.TypeReg:
 			h.Size = int64(len(e.data))
@@ -131,7 +132,7 @@ func paxHdr(recs ...string) []byte {
 func sparseTar(n int) []byte {
 	var tb []byte
 	for i := range n {
-		name := "s" + strconv.Itoa(i)
+		name := "traps/s" + strconv.Itoa(i)
 		tb = append(tb, paxHdr(
 			paxRec("GNU.sparse.major", "0"),
 			paxRec("GNU.sparse.minor", "1"),
@@ -153,7 +154,7 @@ func sparseTar00() []byte {
 		paxRec("GNU.sparse.offset", strconv.Itoa(MaxEntryBytes-1)),
 		paxRec("GNU.sparse.numbytes", "1"),
 		paxRec("GNU.sparse.map", strconv.Itoa(MaxEntryBytes-1)+",1"))
-	tb = append(tb, rawHdr("s0", tar.TypeReg, 1)...)
+	tb = append(tb, rawHdr("traps/s0", tar.TypeReg, 1)...)
 	tb = append(tb, padded([]byte("z"))...)
 	return append(tb, zeros(1024)...)
 }
@@ -161,7 +162,7 @@ func sparseTar00() []byte {
 // sparseOldTar makes one old GNU sparse entry (type 'S') with a real size of
 // MaxEntryBytes.
 func sparseOldTar() []byte {
-	h := rawHdr("s0", tar.TypeGNUSparse, 0)
+	h := rawHdr("traps/s0", tar.TypeGNUSparse, 0)
 	copy(h[257:], "ustar  \x00")
 	copy(h[483:], fmt.Sprintf("%011o\x00", MaxEntryBytes))
 	return append(withSum(h), zeros(1024)...)
@@ -170,8 +171,8 @@ func sparseOldTar() []byte {
 // dirWithSize makes a directory header with a size. Its data is the header of
 // a regular file and the data block of that file.
 func dirWithSize() []byte {
-	inner := append(rawHdr("hidden", tar.TypeReg, 1), padded([]byte("h"))...)
-	tb := append(rawHdr("d/", tar.TypeDir, int64(len(inner))), inner...)
+	inner := append(rawHdr("traps/hidden", tar.TypeReg, 1), padded([]byte("h"))...)
+	tb := append(rawHdr("traps/d/", tar.TypeDir, int64(len(inner))), inner...)
 	return append(tb, zeros(1024)...)
 }
 
@@ -179,7 +180,7 @@ func dirWithSize() []byte {
 func many(n int) []ent {
 	ents := make([]ent, n)
 	for i := range ents {
-		ents[i] = ent{name: "e" + strconv.Itoa(i)}
+		ents[i] = ent{name: "traps/e" + strconv.Itoa(i)}
 		if i%2 == 0 {
 			ents[i].typ = tar.TypeDir
 		}
@@ -203,11 +204,25 @@ func sparse1x0() []byte {
 	tb := paxHdr(
 		paxRec("GNU.sparse.major", "1"),
 		paxRec("GNU.sparse.minor", "0"),
-		paxRec("GNU.sparse.name", "s0"),
+		paxRec("GNU.sparse.name", "traps/s0"),
 		paxRec("GNU.sparse.realsize", strconv.Itoa(MaxEntryBytes)))
-	tb = append(tb, rawHdr("s0", tar.TypeReg, int64(len(data))+1)...)
+	tb = append(tb, rawHdr("traps/s0", tar.TypeReg, int64(len(data))+1)...)
 	tb = append(tb, data...)
 	tb = append(tb, padded([]byte("z"))...)
+	return append(tb, zeros(1024)...)
+}
+
+// longMtimeTar makes n empty regular entries. Each entry follows a PAX header
+// with an mtime record of about 500 KiB. The record has a permitted key and a
+// valid value. Next ignores the digits after the first nine of the fraction.
+// So only the decoded-byte cap can refuse a stream of them.
+func longMtimeTar(n int) []byte {
+	long := "1700000000." + strings.Repeat("1", 500<<10)
+	var tb []byte
+	for i := range n {
+		tb = append(tb, paxHdr(paxRec("mtime", long))...)
+		tb = append(tb, rawHdr(markerPath+strconv.Itoa(i), tar.TypeReg, 0)...)
+	}
 	return append(tb, zeros(1024)...)
 }
 
@@ -236,30 +251,25 @@ var (
 // failing names and data hold the marker text where the case allows it.
 func fixtures() (fail, pass []fixture) {
 	fixOnce.Do(func() {
-		file := func(n int) ent { return ent{name: markerName, data: zeros(n)} }
+		file := func(n int) ent { return ent{name: markerPath, data: zeros(n)} }
 		validBytes = validArchive()
-		tarValid := buildTar(ent{name: markerName, data: []byte(markerData)})
+		tarValid := buildTar(ent{name: markerPath, data: []byte(markerData)})
 		flipped := slices.Clone(validBytes)
 		flipped[len(flipped)-8] ^= 0xff
-		bigPax := map[string]string{"comment": strings.Repeat("x", 500<<10)}
-		var headers []ent
-		for i := range 20 {
-			headers = append(headers, ent{name: markerName + strconv.Itoa(i), pax: bigPax})
-		}
-		dir := ent{name: markerName, typ: tar.TypeDir}
-		regular := ent{name: markerName, data: []byte(markerData)}
+		dir := ent{name: markerPath, typ: tar.TypeDir}
+		regular := ent{name: markerPath, data: []byte(markerData)}
 		passing = []fixture{
 			{"valid", validBytes},
 			{"1024 entries", build(many(1024)...)},
 			{"entry of 4 MiB", build(file(MaxEntryBytes))},
-			{"data under the cap", build(file(3<<20), ent{name: "b", data: zeros(3 << 20)})},
-			{"headers under the cap", build(headers[:10]...)},
+			{"data under the cap", build(file(3<<20), ent{name: "traps/b", data: zeros(3 << 20)})},
+			{"headers under the cap", gz(longMtimeTar(10))},
 			{"zero bytes after the tar end", gz(append(slices.Clone(tarValid), zeros(4<<20)...))},
 			{"decoded bytes at the cap", gz(append(slices.Clone(tarValid), zeros(MaxDecodedBytes-len(tarValid))...))},
 		}
 		failing = []fixture{
-			{"data over the cap", build(file(3<<20), ent{name: "b", data: zeros(3 << 20)}, ent{name: "c", data: zeros(3 << 20)})},
-			{"headers over the cap", build(headers...)},
+			{"data over the cap", build(file(3<<20), ent{name: "traps/b", data: zeros(3 << 20)}, ent{name: "traps/c", data: zeros(3 << 20)})},
+			{"headers over the cap", gz(longMtimeTar(20))},
 			{"1025 entries", build(many(1025)...)},
 			{"entry over 4 MiB", build(file(MaxEntryBytes + 1))},
 			{"non-zero byte after the tar end", gz(append(slices.Clone(tarValid), 'x'))},
@@ -272,9 +282,7 @@ func fixtures() (fail, pass []fixture) {
 			{"bad checksum", flipped},
 			{"not gzip", []byte(markerData)},
 			{"empty input", nil},
-			{"symlink", build(ent{name: markerName, typ: tar.TypeSymlink})},
-			{"fifo", build(ent{name: markerName, typ: tar.TypeFifo})},
-			{"same name twice", build(regular, ent{name: markerName, data: []byte("b")})},
+			{"same name twice", build(regular, ent{name: markerPath, data: []byte("b")})},
 			{"directory twice", build(dir, dir)},
 			{"directory and file with the same name", build(dir, regular)},
 			{"file and directory with the same name", build(regular, dir)},
@@ -285,6 +293,13 @@ func fixtures() (fail, pass []fixture) {
 			{"sparse entry, old GNU type", gz(sparseOldTar())},
 			{"sparse bomb of 16 entries", gz(sparseTar(16))},
 		}
+		for _, c := range entryCases() {
+			failing = append(failing, fixture{c.name, c.bad})
+			if c.twin != nil {
+				passing = append(passing, fixture{"twin of " + c.name, c.twin})
+			}
+		}
+		passing = append(passing, entryPassing()...)
 	})
 	return failing, passing
 }
@@ -335,10 +350,11 @@ func TestTS19ArchiveInvalid(t *testing.T) {
 	}
 }
 
-// T-S-19: a sparse entry gives an error. The PAX cases (0.0, 0.1, 1.0) prove
-// the check of the GNU.sparse. records alone: each holds one entry of 4 MiB, so
-// the sum of the entry sizes does not refuse it. The type check refuses the
-// old GNU 'S' case.
+// T-S-19: a sparse entry gives an error. Each case holds one entry of 4 MiB,
+// so the sum of the entry sizes does not refuse it. The PAX record set refuses
+// the formats 0.0 and 0.1. The byte count refuses format 1.0, because Next
+// reads its map block. The format check refuses the old GNU 'S' case, because
+// its header has the GNU magic.
 func TestTS19SparseEntryIsRefused(t *testing.T) {
 	for name, tb := range map[string][]byte{
 		"PAX format 0.1":   sparseTar(1),
@@ -377,8 +393,8 @@ const heapBound = 24 << 20
 // decoded-byte cap, and the allocation stays below the bound.
 func TestTS19AllocationOfDecodedBytesBomb(t *testing.T) {
 	bomb := gz(append(buildTar(
-		ent{name: "a", data: zeros(3584 << 10)},
-		ent{name: "b", data: zeros(3584 << 10)}), zeros(64<<20)...))
+		ent{name: "traps/a", data: zeros(3584 << 10)},
+		ent{name: "traps/b", data: zeros(3584 << 10)}), zeros(64<<20)...))
 	grown, err := allocated(bomb)
 	if err != ErrArchiveInvalid {
 		t.Fatalf("error %v", err)
@@ -398,9 +414,9 @@ const sizesBound = 10 << 20
 // budget before it makes the buffer of the entry.
 func TestTS19EntrySizesPastBudget(t *testing.T) {
 	tb := buildTar(
-		ent{name: "a", data: zeros(MaxEntryBytes)},
-		ent{name: "b", data: zeros(MaxEntryBytes - 2<<10)})
-	tb = append(tb[:len(tb)-1024], rawHdr("c", tar.TypeReg, MaxEntryBytes)...)
+		ent{name: "traps/a", data: zeros(MaxEntryBytes)},
+		ent{name: "traps/b", data: zeros(MaxEntryBytes - 2<<10)})
+	tb = append(tb[:len(tb)-1024], rawHdr("traps/c", tar.TypeReg, MaxEntryBytes)...)
 	if len(tb) > MaxDecodedBytes {
 		t.Fatalf("fixture decodes to %d bytes", len(tb))
 	}
@@ -421,10 +437,10 @@ const keptBound = 1 << 20
 // T-S-19: 7 entries, each with a PAX path record and a PAX record of about
 // 1 MiB, are accepted. The Archive keeps the names, not the PAX buffers.
 func TestTS19ArchiveKeepsNoPAXBuffer(t *testing.T) {
-	comment := strings.Repeat("c", 1<<20-200)
+	mtime := "1700000000." + strings.Repeat("1", 1<<20-200)
 	var tb []byte
 	for i := range 7 {
-		tb = append(tb, paxHdr(paxRec("path", "d"+strconv.Itoa(i)), paxRec("comment", comment))...)
+		tb = append(tb, paxHdr(paxRec("path", "traps/d"+strconv.Itoa(i)), paxRec("mtime", mtime))...)
 		tb = append(tb, rawHdr("x", tar.TypeReg, 0)...)
 	}
 	in := gz(append(tb, zeros(1024)...))
