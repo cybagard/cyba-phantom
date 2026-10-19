@@ -391,9 +391,9 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 	unchanged(t, target)
 }
 
-// A hook does the rename of a Store at three fixed points of a Load, so the test
-// does not depend on timing. At each point Load returns a whole value with no
-// error:
+// A hook does the rename of a Store at three fixed points of a Load. So the test
+// does not depend on the order of two goroutines. At each point Load returns a
+// whole value with no error:
 //   - between the Lstat and the open: the new value, after a second try;
 //   - after the open, before Stat: the old value of the open file, in one try;
 //   - before the rename, when the temporary file is written: the old value (the
@@ -521,8 +521,8 @@ func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
 	cache := filepath.Join(dir, "acme/cache")
 	kd := filepath.Join(cache, "kd")
 	mustNil(t, os.Mkdir(filepath.Join(kd, "sub"), 0o700))
-	// More leftovers than List reads, in one key directory. A few more are in the
-	// cache directory and in a directory below the key directory.
+	// More leftover files than List reads are in one key directory. A few more are
+	// in the cache directory and in a directory below the key directory.
 	for i := 0; i <= maxList; i++ {
 		mustNil(t, os.WriteFile(filepath.Join(kd, fmt.Sprintf("%s%d", tmpPrefix, i)), nil, 0o600))
 	}
@@ -567,12 +567,12 @@ func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
 	unchanged(t, target)
 }
 
-func TestTS16LoadGivesTheChangedRuleForAKeyFileThatShrinksAfterTheOpen(t *testing.T) {
+func TestTS16LoadGivesTheChangedRuleWhenTheKeyFileIsTruncatedAfterTheOpen(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	mustNil(t, s.Store(ctx, "kd/key", bytes.Repeat([]byte("v"), 1500)))
-	// The hook cuts the same file before Load calls Stat, so the open file has the
-	// size 700 when Load reads it. Load must not return the 700 bytes.
+	// The hook truncates the same file before Load calls Stat. The open file then
+	// has the size 700 when Load reads it. Load must not return the 700 bytes.
 	calls := 0
 	betweenOpenAndStat = func() {
 		calls++
@@ -586,6 +586,44 @@ func TestTS16LoadGivesTheChangedRuleForAKeyFileThatShrinksAfterTheOpen(t *testin
 	}
 	if calls != 1 {
 		t.Errorf("the hook ran %d times, want 1: Load must not try again", calls)
+	}
+}
+
+// The hook changes the size of the key file after the size checks of Load and
+// before the read. The bytes read then differ from the size of the open file.
+func TestTS16LoadGivesTheChangedRuleWhenTheSizeChangesBeforeTheRead(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name   string
+		change func(t *testing.T, p string)
+	}{
+		{"truncate", func(t *testing.T, p string) { mustNil(t, os.Truncate(p, 700)) }},
+		{"grow", func(t *testing.T, p string) {
+			f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+			mustNil(t, err)
+			_, err = f.Write(bytes.Repeat([]byte("g"), 10))
+			mustNil(t, err)
+			mustNil(t, f.Close())
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, dir := newStore(t)
+			mustNil(t, s.Store(ctx, "kd/key", bytes.Repeat([]byte("v"), 1500)))
+			calls := 0
+			betweenSizeCheckAndRead = func() {
+				calls++
+				c.change(t, filepath.Join(dir, "acme/cache/kd/key"))
+			}
+			t.Cleanup(func() { betweenSizeCheckAndRead = nil })
+			b, err := s.Load(ctx, "kd/key")
+			wantError(t, err, "load", ruleChanged)
+			if b != nil {
+				t.Errorf("Load returned %d bytes with an error", len(b))
+			}
+			if calls != 1 {
+				t.Errorf("the hook ran %d times, want 1: Load must not try again", calls)
+			}
+		})
 	}
 }
 

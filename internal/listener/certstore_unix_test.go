@@ -3,6 +3,7 @@
 package listener
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -831,9 +832,9 @@ type badKeyFile struct {
 	key, rule string
 }
 
-// badKeyFiles makes three key files that Load refuses: a file with a second link
-// in the cache, a file that is a link to the outside file, and a file with mode
-// 0644.
+// badKeyFiles makes four key files that Load refuses. Two are the names of a file
+// with a second hard link in the cache ("inside" and "hl-inside"). One is a hard
+// link to the outside file. One is a file with mode 0644.
 func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
 	t.Helper()
 	cache := filepath.Join(dir, "acme/cache")
@@ -860,6 +861,87 @@ func TestTS16StatAndExistsRefuseAKeyFileThatLoadRefuses(t *testing.T) {
 		wantError(t, err, "load", bad.rule)
 	}
 	unchanged(t, target)
+
+	// A key file of maxValue+1 bytes written on the host path: Load refuses it for
+	// its size, so Stat and Exists refuse it too. A file of exactly maxValue bytes
+	// is valid for all three.
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, os.WriteFile(filepath.Join(cache, "big"), bytes.Repeat([]byte("x"), maxValue+1), 0o600))
+	mustNil(t, os.WriteFile(filepath.Join(cache, "exact"), bytes.Repeat([]byte("x"), maxValue), 0o600))
+	_, err := s.Stat(ctx, "big")
+	wantError(t, err, "stat", ruleSize)
+	if s.Exists(ctx, "big") {
+		t.Error("Exists is true for a key file above the size cap")
+	}
+	_, err = s.Load(ctx, "big")
+	wantError(t, err, "load", ruleSize)
+	if _, err := s.Stat(ctx, "exact"); err != nil {
+		t.Errorf("Stat of a key file at the size cap = %v", err)
+	}
+	if !s.Exists(ctx, "exact") {
+		t.Error("Exists is false for a key file at the size cap")
+	}
+	if b, err := s.Load(ctx, "exact"); err != nil || len(b) != maxValue {
+		t.Errorf("Load of a key file at the size cap = %d bytes, %v", len(b), err)
+	}
+}
+
+// Open is best effort when it removes leftover files. It does not fail, and it
+// does not go into a directory that it cannot open or that fails the directory
+// rules.
+func TestTS16OpenSkipsADirectoryThatFailsTheRulesAndGoesOn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a directory with mode 0000 is open for root")
+	}
+	ctx := context.Background()
+	first, dir := newStore(t)
+	mustNil(t, first.Store(ctx, "good/real", []byte("v")))
+	mustNil(t, first.Close())
+	cache := filepath.Join(dir, "acme/cache")
+	tmpIn := func(d string) string { return filepath.Join(cache, d, tmpPrefix+"left") }
+	touch := func(p string) { mustNil(t, os.WriteFile(p, nil, 0o600)) }
+
+	// (a) a key directory with mode 0755 and a leftover file.
+	mustNil(t, os.Mkdir(filepath.Join(cache, "wide"), 0o700))
+	touch(tmpIn("wide"))
+	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o755))
+	// (b) a key directory with mode 0000 and a leftover file. The cleanup gives the
+	// mode back, so that t.TempDir can remove the directory.
+	mustNil(t, os.Mkdir(filepath.Join(cache, "closed"), 0o700))
+	touch(tmpIn("closed"))
+	mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0))
+	t.Cleanup(func() { os.Chmod(filepath.Join(cache, "closed"), 0o700) })
+	// (c) a directory with a name that starts with tmpPrefix and is not empty.
+	mustNil(t, os.Mkdir(filepath.Join(cache, tmpPrefix+"dir"), 0o700))
+	touch(filepath.Join(cache, tmpPrefix+"dir", "inner"))
+	// (d) a good key directory with a leftover file.
+	touch(tmpIn("good"))
+
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	s, err := Open(state, "acme/cache")
+	if err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+	defer s.Close()
+
+	if _, err := os.Lstat(tmpIn("good")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the leftover file in the good directory stays: %v", err)
+	}
+	if _, err := os.Lstat(tmpIn("wide")); err != nil {
+		t.Errorf("the leftover file in the directory with mode 0755 is gone: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cache, tmpPrefix+"dir", "inner")); err != nil {
+		t.Errorf("the file in the directory that Remove cannot remove is gone: %v", err)
+	}
+	mustNil(t, os.Chmod(filepath.Join(cache, "closed"), 0o700))
+	if _, err := os.Lstat(tmpIn("closed")); err != nil {
+		t.Errorf("the leftover file in the directory with mode 0000 is gone: %v", err)
+	}
+	if b, err := s.Load(ctx, "good/real"); err != nil || string(b) != "v" {
+		t.Errorf("Load = %q, %v", b, err)
+	}
 }
 
 func TestTS16DeleteRemovesAKeyFileThatLoadRefuses(t *testing.T) {

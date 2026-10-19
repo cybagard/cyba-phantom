@@ -18,10 +18,10 @@ const readFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscal
 // createFlags makes a new file. The open fails if the name exists.
 const createFlags = os.O_WRONLY | os.O_CREATE | os.O_EXCL | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
 
-// otherOwner is a test hook. When it is not nil and it gives true for the device
-// and the inode of a file or a directory, ownedByUs returns false for it. So a
-// test gives another owner to one inode only, with no need for root. It is nil in
-// production.
+// otherOwner is a test hook. When it is not nil, ownedByUs gives it the device and
+// the inode of a file or a directory. If it gives true, ownedByUs returns false.
+// So a test gives another owner to one inode only, with no need for root. It is
+// nil in production.
 var otherOwner func(dev, ino uint64) bool
 
 // ownedByUs reports whether the effective user owns the file. It returns false
@@ -48,7 +48,7 @@ func linkCount(fi fs.FileInfo) (uint64, bool) {
 }
 
 // isLoop reports whether err is ELOOP. ELOOP comes back when a name has more
-// symbolic links than os.Root allows (a loop of symbolic links or a long chain of
-// them), and when the open (or Stat) gave ELOOP and the following readlinkat
-// fails. An ENOTDIR stays ENOTDIR.
+// symbolic links than os.Root allows. This is a loop of symbolic links or a long
+// chain of them. ELOOP also comes back when the open (or Stat) gave ELOOP and the
+// following readlinkat fails. An ENOTDIR stays ENOTDIR.
 func isLoop(err error) bool { return errors.Is(err, syscall.ELOOP) }
