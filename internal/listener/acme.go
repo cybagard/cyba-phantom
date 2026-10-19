@@ -33,6 +33,8 @@ const (
 var (
 	errEgress = errors.New("listener: acme: request is not for the configured CA")
 	errName   = errors.New("listener: acme: server name is not configured")
+
+	errNoChallenge = errors.New("listener: acme: no active challenge for the server name")
 )
 
 // ACMEParams are the inputs of NewACME.
@@ -221,6 +223,14 @@ func portOf(u *url.URL) string {
 // name, it returns a fixed error at once: no storage call, no request and no log
 // line. This also holds for ALPN acme-tls/1, which certmagic would answer with a
 // storage read for any name.
+//
+// A handshake for a configured name whose ALPN list is exactly acme-tls/1 goes to
+// certmagic only while an in-memory challenge for that name is active. If there
+// is none, it fails like a refused name: no storage call, no request and no log
+// line. Both refusals count in Refused. The test is the same as
+// the test of certmagic (one protocol, the exact string), so a handshake with two
+// protocols is never refused by it. The in-memory lookup is the only valid source
+// of a challenge, as distributed solving is off.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
 	// or more first, so ToLower changes only ASCII letters.
@@ -236,12 +246,20 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 		a.refused.Add(1)
 		return nil, errName
 	}
+	if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto {
+		if _, active := certmagic.GetACMEChallenge(name); !active {
+			a.refused.Add(1)
+			return nil, errNoChallenge
+		}
+	}
 	h := *hello
 	h.ServerName = name
 	return a.cfg.GetCertificate(&h)
 }
 
-// Refused returns the number of handshakes that the name gate refused.
+// Refused returns the number of handshakes that GetCertificate refused: the
+// handshakes that the name gate refused, and the acme-tls/1 handshakes for a
+// configured name with no active challenge.
 func (a *ACME) Refused() uint64 { return a.refused.Load() }
 
 // Start loads the cached certificates of the configured names, then starts
