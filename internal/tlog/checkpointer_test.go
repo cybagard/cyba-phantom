@@ -513,14 +513,7 @@ func TestTS13ConstructorLeavesTheStoredNoteToTheFirstTick(t *testing.T) {
 	stored600 := e3.signed(t, 600, root600)
 	e3.put(t, stored600)
 	c3 := e3.mustStart(t)
-	file := filepath.Join(e3.dir, "tlog", "tile", "8", "0", "000")
-	b, err := os.ReadFile(file)
-	must(t, err)
-	b[len(b)/2] ^= 1
-	must(t, os.WriteFile(file, b, 0o600))
-	if _, err := e3.l.ProveInclusion(5, 600); err == nil { // the log stops
-		t.Fatal("no error for the changed tile")
-	}
+	e3.stopLog(t)
 	c3.sign()
 	if got := e3.sink.added(); !slices.Equal(got, []uint64{600}) || !bytes.Equal(e3.sink.msgs[0], stored600) {
 		t.Fatalf("log stopped: sink took %v", got)
@@ -561,28 +554,85 @@ func TestTS13StateThatIsNotAPlainFileIsAnError(t *testing.T) {
 	}
 }
 
+// corruptTile changes one byte of the first tile of the leaves. The log does
+// not notice until a call reads that tile.
+func (e *ckEnv) corruptTile(t *testing.T) {
+	t.Helper()
+	file := filepath.Join(e.dir, "tlog", "tile", "8", "0", "000")
+	b, err := os.ReadFile(file)
+	must(t, err)
+	b[len(b)/2] ^= 1
+	must(t, os.WriteFile(file, b, 0o600))
+}
+
+// stopLog changes a tile and makes a proof call that finds the change, so the
+// log stops.
+func (e *ckEnv) stopLog(t *testing.T) {
+	t.Helper()
+	e.corruptTile(t)
+	if _, err := e.l.ProveInclusion(5, 600); err == nil || e.l.err == nil {
+		t.Fatal("no error for the changed tile")
+	}
+}
+
+// T-S-13: a stopped log does not sign. In the first case, an earlier call
+// stopped the log, so RootAt in sign gives its error. In the second case, the
+// log is not stopped and RootAt passes. So only the consistency proof of the
+// guard finds the changed tile.
 func TestTS13StoppedLogDoesNotSign(t *testing.T) {
-	for _, preStop := range []bool{true, false} {
-		e := newEnv(t, 600)
-		c := e.mustStart(t)
-		root, _ := e.l.RootAt(100)
-		c.last = Checkpoint{Origin: testOrigin, Size: 100, Root: root}
-		before := e.saved()
-		file := filepath.Join(e.dir, "tlog", "tile", "8", "0", "000")
-		b, err := os.ReadFile(file)
-		must(t, err)
-		b[len(b)/2] ^= 1
-		must(t, os.WriteFile(file, b, 0o600))
-		if preStop { // a proof call finds the changed byte, and the log stops
-			if _, err := e.l.ProveInclusion(5, 600); err == nil {
-				t.Fatal("no error for the changed tile")
+	for name, tc := range map[string]struct {
+		stop       func(*ckEnv, *testing.T)
+		stoppedNow bool // the log is stopped before sign runs
+	}{
+		"an earlier call stopped the log":      {(*ckEnv).stopLog, true},
+		"the consistency proof finds the tile": {(*ckEnv).corruptTile, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, 600)
+			c := e.mustStart(t)
+			root, _ := e.l.RootAt(100)
+			c.last = Checkpoint{Origin: testOrigin, Size: 100, Root: root}
+			before := e.saved()
+			tc.stop(e, t)
+			if stopped := e.l.err != nil; stopped != tc.stoppedNow {
+				t.Fatalf("log stopped before sign = %v, want %v", stopped, tc.stoppedNow)
 			}
-		}
-		c.sign() // without preStop, the consistency proof of the guard finds it
-		e.refused(t, c, before)
-		if _, err := e.l.RootAt(600); err == nil {
-			t.Fatal("the log is not stopped")
-		}
+			if _, err := e.l.RootAt(600); (err != nil) != tc.stoppedNow {
+				t.Fatalf("RootAt(600) error = %v, want an error only for a stopped log", err)
+			}
+			c.sign()
+			e.refused(t, c, before)
+			if _, err := e.l.RootAt(600); err == nil {
+				t.Fatal("the log is not stopped")
+			}
+		})
+	}
+}
+
+// T-S-13: a note that is pending when the log stops is never given to the sink
+// later. The first tick gives the note to the sink, but the sink fails. The
+// same tick finds the stopped log and stops the checkpointer. No later tick
+// calls the sink, also after the sink works again.
+func TestTS13PendingNoteAtAFaultIsNotSentLater(t *testing.T) {
+	e := newEnv(t, 600)
+	root, _ := e.l.RootAt(600)
+	stored := e.signed(t, 600, root)
+	e.put(t, stored)
+	e.sink.err = errors.New("spool is full")
+	c := e.mustStart(t)
+	e.stopLog(t)
+	c.sign() // the sink fails, then RootAt finds the stopped log
+	if c.Healthy() {
+		t.Fatal("the checkpointer is healthy with a stopped log")
+	}
+	e.sink.err = nil
+	c.sign()
+	c.sign()
+	if got := e.sink.added(); !slices.Equal(got, []uint64{600}) {
+		t.Fatalf("sink took %v, want only the failed call at the first tick", got)
+	}
+	if !bytes.Equal(e.saved(), stored) {
+		t.Fatal("the state changed")
 	}
 }
 

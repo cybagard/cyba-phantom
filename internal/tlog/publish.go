@@ -47,9 +47,11 @@ const (
 // holds the bearer token.
 type PublishTarget struct{ URL, TokenEnv string }
 
-// PublishOption changes the publisher. The tests use it for the clock, the
-// jitter, the timeout, and the trusted roots.
-type PublishOption func(*publishConfig)
+// publishOption changes the publisher. Only the tests use it, through
+// newPublisher. It sets the clock, the jitter, the timeout, the trusted roots,
+// and the dial address. NewPublisher takes no option, so no caller outside the
+// package can change the dial address.
+type publishOption func(*publishConfig)
 
 type publishConfig struct {
 	roots    *x509.CertPool // nil: the system roots
@@ -59,7 +61,8 @@ type publishConfig struct {
 	dialAddr func(string) string
 }
 
-type publishTarget struct{ url, token string }
+// endpoint is a target with the token that NewPublisher read.
+type endpoint struct{ url, token string }
 
 // backoffState is the retry state of one target. next is the earliest time of
 // the next try.
@@ -72,7 +75,7 @@ type backoffState struct {
 // goroutine (Run) serves all targets. It implements Sender.
 type Publisher struct {
 	spool    *Spool
-	targets  []publishTarget
+	targets  []endpoint
 	state    []backoffState // only the Run goroutine uses this field; Send also runs on the Run goroutine
 	client   *http.Client
 	interval time.Duration
@@ -85,10 +88,21 @@ type Publisher struct {
 
 // NewPublisher makes the publisher for the targets of spool, in the same order.
 // It reads each token from its environment variable one time. It returns an
-// error if the interval is not positive or if a token is empty or not set. It
-// uses its own transport: no proxy, no redirect, verified TLS 1.2 or later, and
-// no connect to an unspecified, link-local, or multicast address.
-func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger, opts ...PublishOption) (*Publisher, error) {
+// error if the interval is below 30 s. It returns an error if two targets have
+// the same URL. It returns an error if a token is empty or not set. It uses its
+// own transport, with no proxy and no redirect. The transport verifies TLS 1.2
+// or later. It does not connect to an unspecified, link-local, or multicast
+// address.
+func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger) (*Publisher, error) {
+	return newPublisher(spool, targets, interval, log)
+}
+
+// refuse makes the error of a constructor that refuses its input.
+func refuse(format string, args ...any) error {
+	return fmt.Errorf("publisher: "+format, args...)
+}
+
+func newPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger, opts ...publishOption) (*Publisher, error) {
 	cfg := publishConfig{timeout: publishTimeout, now: time.Now, jitter: rand.Float64}
 	for _, o := range opts {
 		o(&cfg)
@@ -96,23 +110,28 @@ func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	if interval <= 0 {
-		return nil, errors.New("publisher: the checkpoint interval must be positive")
+	if interval < backoffStart {
+		return nil, refuse("the checkpoint interval must be %v or more", backoffStart)
 	}
 	if len(targets) != len(spool.targets) {
-		return nil, errors.New("publisher: the targets are not the targets of the spool")
+		return nil, refuse("the targets are not the targets of the spool")
 	}
 	p := &Publisher{spool: spool, interval: interval, timeout: cfg.timeout, log: log, now: cfg.now, jitter: cfg.jitter,
 		state: make([]backoffState, len(targets)), wake: make(chan struct{}, 1)}
+	seen := make(map[string]bool, len(targets))
 	for i, t := range targets {
 		if t.URL != spool.targets[i] {
-			return nil, errors.New("publisher: the targets are not the targets of the spool")
+			return nil, refuse("the targets are not the targets of the spool")
 		}
+		if seen[t.URL] {
+			return nil, refuse("target %d has the same URL as an earlier target", i)
+		}
+		seen[t.URL] = true
 		token := os.Getenv(t.TokenEnv)
 		if token == "" {
-			return nil, fmt.Errorf("publisher: the token of target %d is empty or not set", i)
+			return nil, refuse("the token of target %d is empty or not set", i)
 		}
-		p.targets = append(p.targets, publishTarget{t.URL, token})
+		p.targets = append(p.targets, endpoint{t.URL, token})
 	}
 	dial := newDialer().DialContext
 	if cfg.dialAddr != nil {
@@ -243,8 +262,12 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 			continue
 		}
 		err := p.spool.Publish(i, p)
-		if err == nil {
+		entries := entryCount(err)
+		if err == nil || entries > 0 { // every send got a 2xx
 			p.state[i] = backoffState{}
+			if entries > 0 { // an entry error is not a fault of the target
+				p.log.Warn("checkpoint spool refused an entry that is not a note", "target", i, "entries", entries)
+			}
 			continue
 		}
 		if !errors.As(err, new(publishError)) { // Send logged the others
@@ -264,11 +287,29 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 	return wait, pending
 }
 
+// entryCount returns the number of errors in err if Spool.Publish returned only
+// entry errors. If not, it returns 0.
+func entryCount(err error) int {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return 0
+	}
+	errs := joined.Unwrap()
+	for _, e := range errs {
+		if !errors.As(e, new(entryError)) {
+			return 0
+		}
+	}
+	return len(errs)
+}
+
 // backoff doubles the delay of target i, from 30 s up to the smaller of the
 // checkpoint interval and 1 h. The wait is the delay with a jitter of plus or
-// minus 20 %.
+// minus 20 %. The wait is never below 30 s and never above that cap.
 func (p *Publisher) backoff(i int, now time.Time) {
 	st := &p.state[i]
-	st.delay = min(max(2*st.delay, backoffStart), min(p.interval, backoffMax))
-	st.next = now.Add(time.Duration(float64(st.delay) * (1 - backoffJitter + 2*backoffJitter*p.jitter())))
+	ceiling := min(p.interval, backoffMax)
+	st.delay = min(max(2*st.delay, backoffStart), ceiling)
+	wait := time.Duration(float64(st.delay) * (1 - backoffJitter + 2*backoffJitter*p.jitter()))
+	st.next = now.Add(min(max(wait, backoffStart), ceiling))
 }

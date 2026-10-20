@@ -393,26 +393,43 @@ func (s *Spool) sizes() ([]uint64, error) {
 	return sizes, nil
 }
 
-// replace writes name with the crash-safe rule: a temporary file in the same
-// directory, write, fsync, rename, fsync of the directory. A file that an
-// earlier crash left is removed first. The rename replaces a symlink at name
-// and does not follow it.
+// replace writes name with replaceFile. The error has the rule and not the
+// cause, which can name a path.
 func (s *Spool) replace(name, text string) error {
-	tmp := name + spoolTmpSuffix
-	if err := s.root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return spoolError(name, "cannot be written")
-	}
-	if err := writeNew(s.root, tmp, text); err != nil {
-		return spoolError(name, "cannot be written")
-	}
-	if err := s.root.Rename(tmp, name); err != nil {
-		_ = s.root.Remove(tmp)
-		return spoolError(name, "cannot be written")
-	}
-	if err := syncDir(s.root, spoolDir); err != nil {
-		return spoolError(name, "directory cannot be synced")
+	if rule, err := replaceFile(s.root, name, text, spoolDir); err != nil {
+		return spoolError(name, rule)
 	}
 	return nil
+}
+
+// The rules that replaceFile gives for a failed step.
+const (
+	ruleTmpRemove = "temporary file cannot be removed"
+	ruleFileWrite = "cannot be written"
+	ruleDirSync   = "directory cannot be synced"
+)
+
+// replaceFile writes name in a crash-safe way. It writes a temporary file in
+// the same directory, then runs fsync, rename, and fsync of the directory dir.
+// A file that an earlier crash left is removed first. The rename replaces a
+// symlink at name and does not follow it. For a failed step, it returns the
+// rule and the cause.
+func replaceFile(root *os.Root, name, text, dir string) (rule string, err error) {
+	tmp := name + spoolTmpSuffix
+	if err = root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return ruleTmpRemove, err
+	}
+	if err = writeNew(root, tmp, text); err != nil {
+		return ruleFileWrite, err
+	}
+	if err = root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp)
+		return ruleFileWrite, err
+	}
+	if err = syncDir(root, dir); err != nil {
+		return ruleDirSync, err
+	}
+	return "", nil
 }
 
 func (s *Spool) remove(size uint64) error {

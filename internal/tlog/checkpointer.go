@@ -47,12 +47,11 @@ type Checkpointer struct {
 	interval time.Duration
 	lg       *slog.Logger
 	ticks    <-chan time.Time // nil: a ticker with the interval
-	running  atomic.Bool      // a second Run returns at once
+	running  atomic.Bool      // a second Run returns immediately
 
 	// Only the constructor, the Run goroutine, and the tests use these fields.
-	last    Checkpoint // the last signed checkpoint, or the stored one
-	lastMsg []byte     // the note of last
-	pending bool       // lastMsg is durable but the sink has not taken it
+	last   Checkpoint // the last signed checkpoint, or the stored one
+	unsent []byte     // the note of last, if the sink has not taken it
 
 	mu  sync.Mutex
 	err error // the first fault; it stays until the process starts again
@@ -67,20 +66,24 @@ type Checkpointer struct {
 //   - the first line of the signer state is not the origin, and the state is
 //     empty, is not a note, or names another origin.
 //
-// The checkpointer is returned but it is not healthy and it never signs in
-// these cases:
+// The checkpointer is returned but it is not healthy. It never signs and it
+// never gives a note to the sink in these cases:
 //   - the signer state is missing (the operator decides);
 //   - the first line of the signer state is the origin, but the state does not
 //     parse as a note or the note does not verify;
 //   - the size in the signer state is too large;
 //   - the size in the signer state is above the size of the log;
+//   - RootAt gives an error at the size of the stored note, for example when a
+//     tile cannot be read;
 //   - the tiles at the size of the stored note do not give its root.
 //
 // A checkpointer that is not healthy writes no state. The constructor does not
 // call the sink. It marks the stored note as pending, except the note of the
-// empty tree. Each tick gives a pending note to the sink before it checks the
-// current tree. So the stored note reaches the sink when the tree grew or the
-// log stopped before the first tick.
+// empty tree. A healthy checkpointer gives a pending note to the sink at each
+// tick, before it checks the current tree. So the first tick gives the stored
+// note to the sink, also if the tree grew or the log stopped. If Add fails, a
+// later tick tries again. After a fault, no tick gives a note to the sink, and
+// a pending note stays unsent.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
 	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
 	switch {
@@ -112,19 +115,32 @@ func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink 
 		c.fail(err)
 		return c, nil
 	}
-	c.lastMsg, c.pending = msg, c.last.Size > 0
+	if c.last.Size > 0 {
+		c.unsent = msg
+	}
 	return c, nil
+}
+
+// noteHead gives the origin line and the size line of a note. ok is false if
+// the note has fewer than 3 lines or the size line is not a canonical decimal.
+// The note is not verified.
+func noteHead(msg []byte) (origin, size string, ok bool) {
+	lines := strings.SplitN(string(msg), "\n", 3)
+	if len(lines) < 3 || !canonicalDecimal(lines[1]) {
+		return lines[0], "", false
+	}
+	return lines[0], lines[1], true
 }
 
 // checkOrigin refuses a signer state that cannot be a note of this origin. Only
 // a well-formed body with another origin line is "another origin". The caller
 // checks the rest of the note.
 func checkOrigin(msg []byte, origin string) error {
-	lines := strings.SplitN(string(msg), "\n", 3)
+	first, _, ok := noteHead(msg)
 	switch {
-	case lines[0] == origin:
+	case first == origin:
 		return nil
-	case lines[0] == "" || len(lines) < 3 || !canonicalDecimal(lines[1]):
+	case first == "" || !ok:
 		return errors.New("checkpointer: the signer state is empty or is not a checkpoint note")
 	}
 	return errors.New("checkpointer: the signer state has another origin")
@@ -175,7 +191,8 @@ func (c *Checkpointer) fail(err error) {
 }
 
 // Run is the one goroutine of the checkpointer. It signs at each tick and
-// returns when ctx ends. A call while another Run is active returns at once.
+// returns when ctx ends. A call while another Run is active returns
+// immediately.
 func (c *Checkpointer) Run(ctx context.Context) {
 	if !c.running.CompareAndSwap(false, true) {
 		return
@@ -207,7 +224,7 @@ func (c *Checkpointer) sign() {
 	if c.Err() != nil {
 		return
 	}
-	c.resend()
+	c.deliver()
 	n, _ := c.log.Head()
 	size, ok := toUint(n)
 	switch {
@@ -229,7 +246,6 @@ func (c *Checkpointer) sign() {
 		}
 		return
 	}
-	// At last size 0, consistent runs no proof, so only RootAt checks the tree.
 	if err := c.consistent(n, root); err != nil {
 		c.fail(err)
 		return
@@ -246,27 +262,28 @@ func (c *Checkpointer) sign() {
 		c.fail(err)
 		return
 	}
-	c.last, c.lastMsg, c.pending = Checkpoint{Origin: c.origin, Size: size, Root: root}, msg, true
-	c.resend()
+	c.last, c.unsent = Checkpoint{Origin: c.origin, Size: size, Root: root}, msg
+	c.deliver()
 }
 
-// resend gives the last note to the sink if the sink has not taken it. A failed
-// Add leaves the note pending, and the next tick tries again while the size does
-// not change. A new note replaces a pending note. Spool.Add replaces the file of
-// that size, so a second Add is safe.
-func (c *Checkpointer) resend() {
-	if !c.pending {
+// deliver gives the pending note to the sink. It does this for the first time
+// and for each try after a failure. A failed Add leaves the note pending.
+// `sign` then tries again at each later tick, before it checks the tree, until
+// a fault stops it. A new note replaces a pending note. Spool.Add replaces the
+// file of that size, so a second Add is safe.
+func (c *Checkpointer) deliver() {
+	if c.unsent == nil {
 		return
 	}
-	if err := c.sink.Add(c.last.Size, c.lastMsg); err != nil {
-		c.lg.Warn("checkpoint cannot go to the spool; the next tick tries again while the size does not change", "size", c.last.Size, "error", err)
+	if err := c.sink.Add(c.last.Size, c.unsent); err != nil {
+		c.lg.Warn("checkpoint cannot go to the spool; the next tick tries again", "size", c.last.Size, "error", err)
 		return
 	}
-	c.pending = false
+	c.unsent = nil
 }
 
-// consistent checks that the tree of n leaves with the root root has the last
-// signed tree as a prefix.
+// consistent checks that the last signed tree is a prefix of the tree with n
+// leaves. That tree has the root hash root.
 func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 	old, ok := toSize(c.last.Size)
 	if !ok {
@@ -333,11 +350,12 @@ func SignerState(root *os.Root) (size uint64, exists bool, err error) {
 	if err != nil || !ok {
 		return 0, false, err
 	}
-	lines := strings.SplitN(string(msg), "\n", 3)
-	if len(lines) < 3 || !canonicalDecimal(lines[1]) {
+	_, text, ok := noteHead(msg)
+	if !ok {
 		return 0, false, stateError("has no canonical size", nil)
 	}
-	if size, err = strconv.ParseUint(lines[1], 10, 64); err != nil { // the error of strconv quotes the text, so it stays out
+	// The error of strconv quotes the text, so it stays out.
+	if size, err = strconv.ParseUint(text, 10, 64); err != nil {
 		return 0, false, stateError("has a size that is too large", nil)
 	}
 	return size, true, nil
@@ -347,20 +365,8 @@ func SignerState(root *os.Root) (size uint64, exists bool, err error) {
 // file in the same directory, fsync, rename, fsync of the directory. The mode
 // is 0600. It does not follow a symlink and it does not change a mode.
 func writeState(root *os.Root, msg []byte) error {
-	tmp := stateName + ".tmp"
-	err := root.Remove(tmp)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return stateError("temporary file "+tmp+" cannot be removed", err)
-	}
-	if err = writeNew(root, tmp, string(msg)); err != nil {
-		return stateError("cannot be written", err)
-	}
-	if err = root.Rename(tmp, stateName); err != nil {
-		_ = root.Remove(tmp)
-		return stateError("cannot be written", err)
-	}
-	if err = syncDir(root, "."); err != nil {
-		return stateError("directory cannot be synced", err)
+	if rule, err := replaceFile(root, stateName, string(msg), "."); err != nil {
+		return stateError(rule, err)
 	}
 	return nil
 }
