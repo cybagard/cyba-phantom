@@ -138,7 +138,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | M-2 | + T-U-01, T-U-08, T-U-14, T-I-02, T-I-04, T-I-12, T-S-01, T-S-02, T-S-19, T-S-20, T-S-21, T-S-22, T-S-23 |
 | M-3 | + T-U-02..05, T-U-13, T-U-16, T-I-05..10, T-I-14, T-S-03 |
 | M-4 | + T-U-09, T-U-11, T-U-15, T-I-11, T-I-13, T-I-15, T-S-04..09, T-A-04, T-A-09 |
-| M-5 (RC) | everything incl. T-P-01..08, T-A-01..08, T-C-01..06 |
+| M-5 (RC) | everything incl. T-P-01..06, T-P-08, T-A-01..03, T-A-05..08, T-C-01..06 |
 
 ## 6. Defect severity
 SEV-0 memory/disk unbounded, evidence inconsistency, key leak → blocks release. SEV-1 NFR miss, false `agent-confirmed` → blocks release. SEV-2 functional gap with workaround. SEV-3 cosmetic.
