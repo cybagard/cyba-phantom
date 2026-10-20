@@ -405,9 +405,9 @@ const (
 	ruleDirSync   = "directory cannot be synced"
 )
 
-// replaceFile writes name with the crash-safe rule: a temporary file in the
-// same directory, write, fsync, rename, fsync of the directory dir. A file that
-// an earlier crash left is removed first. The rename replaces a symlink at name
+// replaceFile writes name in a crash-safe way. It writes a temporary file in
+// the same directory, then runs fsync, rename, and fsync of the directory dir.
+// A file that an earlier crash left is removed first. The rename replaces a symlink at name
 // and does not follow it. For a failed step, it returns the rule and the cause.
 func replaceFile(root *os.Root, name, text, dir string) (rule string, err error) {
 	tmp := name + spoolTmpSuffix

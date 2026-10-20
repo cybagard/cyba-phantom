@@ -316,10 +316,11 @@ func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
-// T-I-09: an entry that is not a note and cannot be deleted (a directory that
-// is not empty) makes Spool.Publish return an error after each send got a 2xx.
-// That is not a fault of the targets, so the pass does not back them off. The
-// spool counts the entry and the pass logs it again at each pass.
+// T-I-09: an entry that is not a note and cannot be deleted stays in the spool.
+// An example is a directory that is not empty. Spool.Publish returns an error
+// for it after each send got a 2xx. The error is not a fault of the targets, so
+// the pass does not back them off. The spool counts the entry and the pass logs
+// it again at each pass.
 func TestTI09_EntryErrorDoesNotBackOffTargets(t *testing.T) {
 	a, b := newTarget(t), newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a, b})
@@ -348,7 +349,7 @@ func TestTI09_EntryErrorDoesNotBackOffTargets(t *testing.T) {
 	if got := e.spool.Stats().Rejected; got != 4 { // 2 targets in 2 passes
 		t.Errorf("rejected = %d, want 4", got)
 	}
-	if n := strings.Count(e.logs.String(), "has an entry that is not a note"); n != 4 {
+	if n := strings.Count(e.logs.String(), "refused an entry that is not a note"); n != 4 {
 		t.Errorf("log has %d lines for the entry, want one for each target and pass: %s", n, e.logs)
 	}
 	if _, err := os.Stat(stuck); err != nil {
@@ -485,7 +486,9 @@ func TestTI09_BackoffStartsAfterSend(t *testing.T) {
 }
 
 // T-I-09: the delay stops at the cap, and the jitter does not move a wait above
-// the cap. Below the cap, the jitter spreads the wait by plus or minus 20 %.
+// the cap. Between the floor of 30 s and the cap, the jitter spreads the wait
+// by plus or minus 20 %. At the first wait, the lower half of the jitter range
+// gives the floor. At the cap, the upper half gives the cap.
 func TestTI09_BackoffCapAndJitter(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, 24*time.Hour, []*fakeTarget{a})
@@ -528,7 +531,8 @@ func TestTI09_BackoffCapAndJitter(t *testing.T) {
 
 // T-S-13: with an interval of 30 s, the cap and the floor are both 30 s. The
 // wait is 30 s for every jitter, and a target that failed is not tried again
-// before 30 s.
+// before 30 s. With an interval of 1 m and jitter 0, the first wait is 30 s and
+// not 24 s.
 func TestTS13_FailedTargetWaitsForTheFloor(t *testing.T) {
 	a := newTarget(t)
 	a.setStatus(http.StatusInternalServerError)
@@ -542,8 +546,15 @@ func TestTS13_FailedTargetWaitsForTheFloor(t *testing.T) {
 			t.Errorf("jitter %v: wait = %v, want %v", j, got, backoffStart)
 		}
 	}
+	e.pub.interval = time.Minute // without the floor, the first wait is 24 s
 	e.pub.state[0] = backoffState{}
 	e.pub.jitter = func() float64 { return 0 }
+	e.pub.backoff(0, e.clock.t)
+	if got := e.pub.state[0].next.Sub(e.clock.t); got != backoffStart {
+		t.Errorf("interval 1 m, jitter 0: wait = %v, want %v", got, backoffStart)
+	}
+	e.pub.interval = backoffStart
+	e.pub.state[0] = backoffState{}
 	e.pub.pass()
 	e.clock.t = e.clock.t.Add(backoffStart - time.Second)
 	e.pub.pass()
@@ -646,7 +657,7 @@ func TestTS13_NewPublisherRefusesDuplicateURLs(t *testing.T) {
 			must(t, err)
 			p, err := NewPublisher(spool, targets, time.Minute, nil)
 			if err == nil || p != nil {
-				t.Fatalf("publisher %v, error %v, want an error", p, err)
+				t.Fatalf("publisher is nil: %v, error %v, want an error and no publisher", p == nil, err)
 			}
 			e.assertClean(t, "error", err.Error())
 		})

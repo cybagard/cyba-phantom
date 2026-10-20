@@ -48,9 +48,9 @@ const (
 type PublishTarget struct{ URL, TokenEnv string }
 
 // publishOption changes the publisher. Only the tests use it, through
-// newPublisher, for the clock, the jitter, the timeout, the trusted roots, and
-// the dial address. NewPublisher takes no option, so no caller outside the
-// package can redirect a dial.
+// newPublisher. It sets the clock, the jitter, the timeout, the trusted roots,
+// and the dial address. NewPublisher takes no option, so no caller outside the
+// package can change the dial address.
 type publishOption func(*publishConfig)
 
 type publishConfig struct {
@@ -88,10 +88,11 @@ type Publisher struct {
 
 // NewPublisher makes the publisher for the targets of spool, in the same order.
 // It reads each token from its environment variable one time. It returns an
-// error if the interval is below 30 s, if two targets have the same URL, or if
-// a token is empty or not set. It uses its own transport: no proxy, no
-// redirect, verified TLS 1.2 or later, and no connect to an unspecified,
-// link-local, or multicast address.
+// error if the interval is below 30 s. It returns an error if two targets have
+// the same URL. It returns an error if a token is empty or not set. It uses its
+// own transport, with no proxy and no redirect. The transport verifies TLS 1.2
+// or later. It does not connect to an unspecified, link-local, or multicast
+// address.
 func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger) (*Publisher, error) {
 	return newPublisher(spool, targets, interval, log)
 }
@@ -264,8 +265,8 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 		entries := entryCount(err)
 		if err == nil || entries > 0 { // every send got a 2xx
 			p.state[i] = backoffState{}
-			if entries > 0 { // an entry that stays is not a fault of the target
-				p.log.Warn("checkpoint spool has an entry that is not a note", "target", i, "entries", entries)
+			if entries > 0 { // an entry error is not a fault of the target
+				p.log.Warn("checkpoint spool refused an entry that is not a note", "target", i, "entries", entries)
 			}
 			continue
 		}
@@ -287,7 +288,7 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 }
 
 // entryCount returns the number of errors in err if Spool.Publish returned only
-// entry errors. Else it returns 0.
+// entry errors. If not, it returns 0.
 func entryCount(err error) int {
 	joined, ok := err.(interface{ Unwrap() []error })
 	if !ok {

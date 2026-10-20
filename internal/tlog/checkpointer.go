@@ -73,14 +73,16 @@ type Checkpointer struct {
 //     parse as a note or the note does not verify;
 //   - the size in the signer state is too large;
 //   - the size in the signer state is above the size of the log;
+//   - RootAt gives an error at the size of the stored note, for example when a
+//     tile cannot be read;
 //   - the tiles at the size of the stored note do not give its root.
 //
 // A checkpointer that is not healthy writes no state. The constructor does not
 // call the sink. It marks the stored note as pending, except the note of the
 // empty tree. A healthy checkpointer gives a pending note to the sink at each
-// tick, before it checks the current tree. So the stored note reaches the sink
-// at the first tick, also if the tree grew or the log stopped since the start.
-// After a fault, no tick gives a note to the sink, and a pending note stays
+// tick, before it checks the current tree. So the first tick gives the stored
+// note to the sink, also if the tree grew or the log stopped. If Add fails, a
+// later tick tries again. After a fault, no tick gives a note to the sink, and a pending note stays
 // unsent.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
 	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
@@ -120,8 +122,8 @@ func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink 
 }
 
 // noteHead gives the origin line and the size line of a note. ok is false if
-// the note has fewer than 3 lines or if the size line is not a canonical
-// decimal. The note is not verified.
+// the note has fewer than 3 lines or the size line is not a canonical decimal.
+// The note is not verified.
 func noteHead(msg []byte) (origin, size string, ok bool) {
 	lines := strings.SplitN(string(msg), "\n", 3)
 	if len(lines) < 3 || !canonicalDecimal(lines[1]) {
@@ -244,8 +246,6 @@ func (c *Checkpointer) sign() {
 		}
 		return
 	}
-	// If nothing was signed, consistent has no proof to run. RootAt is the
-	// only check.
 	if err := c.consistent(n, root); err != nil {
 		c.fail(err)
 		return
@@ -267,9 +267,9 @@ func (c *Checkpointer) sign() {
 }
 
 // deliver gives the pending note to the sink. It does this for the first time
-// and for each try after a failure. A failed Add leaves the note pending. Sign
-// then tries again at each later tick, before it checks the tree, until a fault
-// stops it. A new note replaces a pending note. Spool.Add replaces the file of
+// and for each try after a failure. A failed Add leaves the note pending.
+// `sign` then tries again at each later tick, before it checks the tree, until
+// a fault stops it. A new note replaces a pending note. Spool.Add replaces the file of
 // that size, so a second Add is safe.
 func (c *Checkpointer) deliver() {
 	if c.unsent == nil {
@@ -282,8 +282,8 @@ func (c *Checkpointer) deliver() {
 	c.unsent = nil
 }
 
-// consistent checks that the last signed tree is a prefix of the tree that
-// has n leaves and the root hash root.
+// consistent checks that the last signed tree is a prefix of the tree with n
+// leaves. That tree has the root hash root.
 func (c *Checkpointer) consistent(n int64, root tlog.Hash) error {
 	old, ok := toSize(c.last.Size)
 	if !ok {

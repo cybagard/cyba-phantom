@@ -577,7 +577,7 @@ func (e *ckEnv) stopLog(t *testing.T) {
 
 // T-S-13: a stopped log does not sign. In the first case, an earlier call
 // stopped the log, so RootAt in sign gives its error. In the second case, the
-// log is not stopped and RootAt passes, so only the consistency proof of the
+// log is not stopped and RootAt passes. So only the consistency proof of the
 // guard finds the changed tile.
 func TestTS13StoppedLogDoesNotSign(t *testing.T) {
 	for name, tc := range map[string]struct {
