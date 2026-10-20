@@ -42,9 +42,16 @@ const (
 	// files. A longer listing is an error.
 	maxPartialNames = 1024
 
-	// maxBatchTiles is the number of different tiles with hashes beyond the
-	// tree head that WriteTile accepts between two calls of SetHead.
+	// maxBatchTiles is the number of different tiles with new hashes that one
+	// tree head can add. WriteTile accepts at most this number of tiles between
+	// two calls of SetHead. SetHead and Log.AppendBatch refuse a growth that
+	// needs more tiles. Open also uses it. For each level, Open tidies the
+	// tiles beyond the tree head. The range starts at the first tile that the
+	// head does not cover. It ends this many tiles above that tile.
 	maxBatchTiles = 4096
+
+	// groupTiles is the number of tile files in one group directory.
+	groupTiles = 1000
 
 	headName  = "head"
 	tmpSuffix = ".tmp"
@@ -98,22 +105,25 @@ var (
 )
 
 // ErrHeadOnDisk is the mark of an append error after which the tree head file
-// on disk can cover the batch. The rename of the head file worked and a later
-// step of the head write failed. Test for it with errors.Is. Only
-// Store.SetHead, Log.Append and Log.AppendBatch return an error that matches
-// it. Each other error of these functions does not match it. A failed
-// directory sync of a tile file does not match it. Open and OpenLog never
-// return the mark.
+// on disk can cover the batch. It marks each error of the rename of the head
+// file. A rename can take effect and still return an error. It also marks each
+// error of a later step: the open or the fsync of a directory. Test for it
+// with errors.Is. Only Store.SetHead, Log.Append and Log.AppendBatch return an
+// error that matches it. Each other error of these functions does not match
+// it. A failed directory sync of a tile file does not match it. Open and
+// OpenLog never return the mark.
 var ErrHeadOnDisk = errors.New("tree head on disk can cover the batch")
 
 // renamedError is the error of a step of writeFile that comes after the rename.
+// It is also the error of the rename of the head file. A rename can take
+// effect and still return an error.
 type renamedError struct{ err error }
 
 func (e *renamedError) Error() string { return e.err.Error() }
 func (e *renamedError) Unwrap() error { return e.err }
 
-// headError is the Error of a head write that failed after the rename of the
-// head file. It has the text of that Error, and it matches ErrHeadOnDisk.
+// headError is the Error of a head write that failed at the rename of the head
+// file or after it. It has the text of that Error. It matches ErrHeadOnDisk.
 // errors.As to *Error gives that Error. A type assertion err.(*Error) does not
 // match it.
 type headError struct{ err *Error }
@@ -156,18 +166,24 @@ type Store struct {
 // the state directory, because the fsync of the log directory refuses a link.
 // Open makes the directory (mode 0700) if it does not exist. The directory
 // must have no group or other permission bits. Open reads the tree head and
-// the tiles that the root computation reads, and checks that they give the root
-// of the tree head. Open does not read the other tiles. A later change checks
-// them with authenticated reads. Open tidies the tiles that it reads, so that
-// at most one partial file stays for each of them after a crash. Open does not
-// list or tidy any other tile. A directory with no tree head must be empty, or
-// hold only the temporary file of the tree head. Open writes a tree head of
-// size 0 for it, before any tile can be written. Open makes the loaded tree
-// head durable. It calls fsync on the log directory and on its parents before
-// it reads, writes, or deletes any file there. Then it calls fsync on the
-// directories of the tiles that it read. It deletes files only after all
-// checks and all fsync calls pass. If a check or an fsync fails, Open returns
-// an error and has deleted nothing.
+// the tiles that the root computation reads. It checks that these tiles give
+// the root of the tree head. Open does not read the other tiles that the tree
+// head covers. A later change checks them with authenticated reads. Open tidies
+// the tiles that it reads. Then at most one partial file stays for each of
+// them after a crash. Open also tidies the tiles beyond the tree head in a
+// bounded range. For each level, the range starts at the first tile that the
+// tree head does not cover. It ends maxBatchTiles tiles above that tile. A
+// crash can leave such tiles. The number of names that Open reads depends on
+// this bound and not on the size of the log. Open does not list or tidy any
+// other tile. A directory with no tree head must be empty, or hold only the
+// temporary file of the tree head. Open writes a tree head of size 0 for it,
+// before any tile can be written. Open makes the loaded tree head durable. It
+// calls fsync on the log directory and on its parents before it reads, writes,
+// or deletes any file there. Then it calls fsync on the directories of the
+// tiles that it tidies. It deletes files only after all checks pass and these
+// fsync calls pass. If a check or one of these fsync calls fails, Open returns
+// an error and has deleted nothing. A delete can fail, or the fsync after the
+// deletes can fail. Then Open returns an error and it can have deleted files.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -252,11 +268,74 @@ func (s *Store) load() error {
 		}
 		rm = append(rm, names...)
 	}
+	more, moreDirs, err := s.beyondHead()
+	if err != nil {
+		return err
+	}
+	rm, dirs = append(rm, more...), append(dirs, moreDirs...)
 	// Sync before the delete. A failed fsync leaves the stale files in place.
 	if err := s.syncRead(dirs); err != nil {
 		return err
 	}
 	return s.remove(rm)
+}
+
+// beyondHead checks the tiles beyond the tree head in the range that the Open
+// doc names. It returns the files to delete and the directories to sync. It
+// deletes nothing. It skips a group directory that is not there as a whole.
+// So the work depends on the bound and not on the size of the log.
+func (s *Store) beyondHead() (rm, dirs []string, err error) {
+	for l := 0; l <= maxLevel; l++ {
+		first := (s.head.N>>(TileHeight*l) + fullWidth - 1) / fullWidth
+		last := min(first+maxBatchTiles, maxTileN(l))
+		var group string
+		var groupOK bool
+		for n := first; n <= last; n++ {
+			t := tlog.Tile{H: TileHeight, L: l, N: n}
+			if g := path.Dir(path.Dir(tilePath(t, 1))); g != group {
+				group, groupOK = g, s.exists(g)
+			}
+			if !groupOK {
+				n += groupTiles - n%groupTiles - 1 // the last tile of the group
+				continue
+			}
+			partial, full := path.Dir(tilePath(t, 1)), tilePath(t, fullWidth)
+			if !s.exists(partial) && !s.exists(full) && !s.exists(full+tmpSuffix) {
+				continue
+			}
+			if err := s.checkDirs(t); err != nil {
+				return nil, nil, err
+			}
+			names, err := s.stale(t, 0, 0)
+			if err != nil {
+				return nil, nil, err
+			}
+			rm, dirs = append(rm, names...), append(dirs, partial, path.Dir(full))
+		}
+	}
+	return rm, dirs, nil
+}
+
+// exists returns false only if name is not there. Another error counts as
+// there, so that the next read of the name returns it.
+func (s *Store) exists(name string) bool {
+	_, err := s.dir.Lstat(name)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// batchTiles returns the number of tiles that get new hashes when the tree
+// grows from old to n leaves. It is the length of tlog.NewTiles, but it does
+// not make the list.
+func batchTiles(old, n int64) int64 {
+	var c int64
+	for l := 0; l <= maxLevel; l++ {
+		o, m := old>>(TileHeight*l), n>>(TileHeight*l)
+		if o == m {
+			break
+		}
+		c += (m+fullWidth-1)/fullWidth - o/fullWidth
+	}
+	return c
 }
 
 // syncRead calls fsync on each directory in dirs that exists, and on its
@@ -361,9 +440,14 @@ func readNames(read []tlog.Tile, empty string) string {
 // path, like WriteTile. The stored files of the tile must agree in the hashes
 // that the new tree head covers. If not, the next Open would refuse the tree
 // head. A newly covered hash must be one that WriteTile accepted since the
-// last SetHead. SetHead refuses a size that adds more than maxBatchTiles full
-// tiles. A refused call changes no file. The error of SetHead matches
-// ErrHeadOnDisk if the rename of the head file worked and a later step failed.
+// last SetHead. Take a newly covered full tile that the root computation does
+// not read. It must give the hash for it in the tile one level up. SetHead
+// refuses a size that gives new hashes to more than maxBatchTiles tiles. A
+// refused call changes no file, with one exception. The write can fail at the
+// rename of the head file or after it. Then the head file on disk can hold the
+// new size and root. The Store keeps the old tree head in memory. The error
+// matches ErrHeadOnDisk, and Log stops on it. The caller must close the Store
+// and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -371,7 +455,7 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 		return newError(headName, ruleSize)
 	case size < s.head.N:
 		return newError(headName, ruleShrink)
-	case (size-s.head.N)/fullWidth > maxBatchTiles:
+	case batchTiles(s.head.N, size) > maxBatchTiles:
 		return newError(headName, ruleBatch)
 	}
 	if _, err := s.verify(s.head); err != nil {
@@ -381,8 +465,9 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	if err != nil {
 		return err
 	}
+	newTiles := tlog.NewTiles(TileHeight, s.head.N, next.N)
 	seen := map[tlog.Tile]bool{}
-	for _, t := range slices.Concat(read, tlog.NewTiles(TileHeight, s.head.N, next.N)) {
+	for _, t := range slices.Concat(read, newTiles) {
 		if seen[tileKey(t)] {
 			continue
 		}
@@ -398,10 +483,55 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 			return newError(tilePath(t, c), ruleUnwrit)
 		}
 	}
+	for _, t := range newTiles {
+		// The root computation checks the tiles that it reads. Check the rest.
+		if t.W == fullWidth && !slices.ContainsFunc(read, func(r tlog.Tile) bool {
+			return tileKey(r) == tileKey(t)
+		}) {
+			if err := s.checkAbove(t, next.N); err != nil {
+				return err
+			}
+		}
+	}
 	if err := s.writeHead(next); err != nil {
 		return err
 	}
 	clear(s.written)
+	return nil
+}
+
+// checkAbove checks the full tile t against the tile one level up. The hashes
+// of t must give the hash for t in that tile. n is the size of the new tree
+// head, which covers both tiles. The hash for t is the root of the 256 hashes
+// of t.
+func (s *Store) checkAbove(t tlog.Tile, n int64) error {
+	up := tlog.Tile{H: TileHeight, L: t.L + 1, N: t.N / fullWidth}
+	if up.L > maxLevel {
+		return nil
+	}
+	up.W = covered(n, up)
+	data, err := s.readTile(t)
+	if err != nil {
+		return err
+	}
+	above, err := s.readTile(up)
+	if err != nil {
+		return err
+	}
+	hashes := make([]tlog.Hash, fullWidth)
+	for i := range hashes {
+		copy(hashes[i][:], data[i*tlog.HashSize:])
+	}
+	for w := fullWidth; w > 1; w /= 2 {
+		for i := range w / 2 {
+			hashes[i] = tlog.NodeHash(hashes[2*i], hashes[2*i+1])
+		}
+	}
+	at := int(t.N%fullWidth) * tlog.HashSize
+	if !bytes.Equal(hashes[0][:], above[at:at+tlog.HashSize]) {
+		// The check does not say which of the two tiles is wrong. Name both.
+		return newError(readNames([]tlog.Tile{t, up}, ""), ruleRoot)
+	}
 	return nil
 }
 
@@ -432,9 +562,12 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // file first, then deletes the stale files. After the write, the store
 // deletes the narrower partial files, so that at most one partial file stays.
 // WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
-// the tree head between two calls of SetHead. Before it writes, renames, or
-// deletes anything, WriteTile checks that each directory of the tile path is a
-// real directory and not a link.
+// the tree head between two calls of SetHead. WriteTile first checks each
+// directory of the tile path. Each must be a real directory and not a link.
+// This check comes before any write, rename, or delete. WriteTile also checks
+// the other files of the tile before it writes. Each must agree with the stored
+// file in the hashes that the tree head covers. A bad file gives an error and
+// no file changes.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
@@ -474,15 +607,11 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 			return newError(name, ruleWrite)
 		}
 	default:
-		// The file that the rename replaces must agree in the covered hashes too.
-		if slices.Contains(widths, t.W) && t.W != w {
-			b, err := s.readFile(t.Path(), t.W*tlog.HashSize)
-			if err != nil {
-				return newError(t.Path(), fileRule(err))
-			}
-			if !bytes.Equal(b[:n], data[:n]) {
-				return newError(t.Path(), ruleRewrite)
-			}
+		// Each other file of the tile must agree in the covered hashes. This
+		// includes the file that the rename replaces. Check before the write,
+		// so that a bad file gives an error and no file changes.
+		if _, err := s.stale(t, 0, c); err != nil {
+			return err
 		}
 		if err := s.writeFile(t.Path(), data); err != nil {
 			return newError(t.Path(), ruleWrite)
@@ -805,7 +934,7 @@ func fileRule(err error) string {
 // deletes an old temporary file first and makes the new one with O_EXCL and
 // mode 0600. The store does not change a mode afterwards. Each error
 // after the rename (the open or the fsync of a directory) has the type
-// *renamedError.
+// *renamedError. For the head file, each error of the rename has it too.
 func (s *Store) writeFile(name string, data []byte) error {
 	dir := path.Dir(name)
 	if err := s.dir.MkdirAll(dir, dirMode); err != nil {
@@ -828,6 +957,14 @@ func (s *Store) writeFile(name string, data []byte) error {
 	}
 	if err == nil {
 		err = renameFile(s.dir, tmp, name)
+		if err != nil && name == headName {
+			// A rename can take effect and still return an error. For the head
+			// file, treat each error of the rename as an error after it.
+			// A tile rename keeps the plain error. WriteTile maps both to the
+			// same rule. A retry of the tile finds the file and syncs the
+			// directories of the file.
+			err = &renamedError{err}
+		}
 	}
 	if err == nil {
 		if err := syncDirs(s.dir, dir); err != nil {

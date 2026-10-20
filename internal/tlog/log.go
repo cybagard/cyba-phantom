@@ -114,16 +114,17 @@ func (l *Log) Append(h EventHash) (int64, error) {
 // (see below). A proof or root read that finds a bad tile stops the log in the
 // same way.
 //
-// The tree head on disk depends on the failure. If a tile write fails, or the
-// write or rename of the head file fails, the old tree head stays on disk. No
-// leaf of the batch is in that tree head, but the leaves can be in tile files.
-// The rename of the head file can work, and then a later step of the head write
-// can fail. That step is the open or the fsync of a directory. In this case the
-// tree head on disk can cover the whole batch. AppendBatch then returns an error
-// that matches ErrHeadOnDisk with errors.Is. Each other error of AppendBatch
-// does not match it. The error of a later call on the stopped log does not match
-// it. The marked error has the text of the wrapped *Error. errors.As to *Error
-// works for each error. It gives the wrapped *Error for the marked error. A type
+// The tree head on disk depends on the failure. If a tile write fails, the old
+// tree head stays on disk. This is also true if the write of the head file
+// fails before its rename. No leaf of the batch is in that tree head, but the
+// leaves can be in tile files. The rename of the head file can fail and still
+// take effect. A step after the rename can also fail: the open or the fsync of
+// a directory. In these cases the tree head on disk is the old one or covers
+// the whole batch. AppendBatch then returns an error that matches ErrHeadOnDisk
+// with errors.Is. Each other error of AppendBatch does not match it. The error
+// of a later call on the stopped log does not match it. The marked error has
+// the text of the wrapped *Error. errors.As to *Error works for each error. It
+// gives the wrapped *Error for the marked error. A type
 // assertion to *Error does not match the marked error. The caller must close
 // the log and open it again with OpenLog. OpenLog loads the tree head on disk.
 func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
@@ -139,7 +140,9 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	if int64(len(hs)) > maxSize-n {
 		return 0, newError("log", ruleFull)
 	}
-	if len(hs) > maxBatchTiles*fullWidth {
+	// This is the bound of SetHead and WriteTile. The batch gives new hashes to
+	// exactly the tiles that it counts.
+	if batchTiles(n, n+int64(len(hs))) > maxBatchTiles {
 		return 0, newError("log", ruleBatch)
 	}
 	// Work on a copy of the tiles. The batch copies a buffer when it first
@@ -180,9 +183,6 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 			}
 			final[s] = work[lv].data
 		}
-	}
-	if len(order) > maxBatchTiles {
-		return 0, newError("log", ruleBatch)
 	}
 	end := n + int64(len(hs))
 	root, err := tlog.TreeHash(end, cacheView{&work})
