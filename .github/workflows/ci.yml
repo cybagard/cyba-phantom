@@ -11,6 +11,8 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
+#   - one container image: the oracle job runs in golang:1.27.2 from
+#     Docker Hub, pinned by digest (the base image of .devcontainer);
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)
@@ -32,10 +34,12 @@
 #   - lint: gofmt, go vet and comment line length;
 #   - dco: sign-off and commit identity, on PRs only;
 #   - test: go test -race and the coverage gate;
+#   - oracle: the tar reader oracle, in the pinned golang container;
 #   - trace: the C10 matrix and the sync stamp;
 #   - mirror-diff: the constitution table;
 #   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
-# The test and build jobs share one checkout step through a YAML anchor.
+# The test, oracle and build jobs share one checkout step through a YAML
+# anchor.
 # The dco, trace and mirror-diff jobs share their base-checkout and
 # gate-source steps through YAML anchors. The lint job has its own checkout.
 
@@ -157,6 +161,10 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # The reader oracle needs GNU tar 1.35 and Python 3.13, which the
+      # runner image does not have. The oracle job runs it.
+      GOFLAGS: -skip=^TestTS19ReaderOracle$
     steps:
       - &checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -165,6 +173,21 @@ jobs:
 
       - name: go test -race + coverage gate
         run: make coverage
+
+  oracle:
+    # The reader oracle of internal/bundle compares Go archive/tar with
+    # GNU tar 1.35 and Python 3.13. The job runs in the base image of
+    # .devcontainer/Dockerfile, at the same digest (bump both together).
+    # With CI=true, a missing tool or another version fails the test.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+    steps:
+      - *checkout
+
+      - name: reader oracle (GNU tar, Python)
+        run: go test -race -count=1 -v -run '^TestTS19ReaderOracle$' ./internal/bundle/
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
