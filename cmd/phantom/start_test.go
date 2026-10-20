@@ -19,6 +19,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/store"
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
@@ -196,8 +197,7 @@ func TestTU18_DrainWithoutStore(t *testing.T) {
 	put(t, q, event.KindRequest, 2)
 	put(t, q, event.KindCallback, 1)
 	want := store.Drops{Bulk: 2, Evidence: 1}
-	for end := time.Now().Add(10 * time.Second); s.Drops() != want && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-	}
+	testutil.WaitFor(t, func() bool { return s.Drops() == want }, 10*time.Second)
 	if got := s.Drops(); got != want {
 		t.Errorf("drops %+v, want %+v", got, want)
 	}
@@ -265,15 +265,15 @@ func TestTU18_OneStart(t *testing.T) {
 		writers++
 		return store.NewWriter(db, q, l, c, bp, lg, r)
 	}
-	s, _ := launch(t, p, d)
-	end := time.Now().Add(10 * time.Second)
-	for s.Healthy() && time.Now().Before(end) {
-		time.Sleep(10 * time.Millisecond)
+	s, q := launch(t, p, d)
+	testutil.WaitFor(t, func() bool { return !s.Healthy() }, 10*time.Second)
+	// The stopped writer drops the events of the lanes only at its tick, and a new event does not wake it. So
+	// each drop that the count shows is one tick of the drain. Wait for three, then check the counts. The
+	// checkpointer ticks every 10 ms, so it ticked many times in these three.
+	for want := uint64(1); want <= 3; want++ {
+		put(t, q, event.KindRequest, 1)
+		testutil.WaitFor(t, func() bool { return s.writer.Stats().Dropped.Bulk >= want }, 10*time.Second)
 	}
-	if s.Healthy() {
-		t.Fatal("the writer is still healthy after 10 s")
-	}
-	time.Sleep(3 * 250 * time.Millisecond) // Three ticks of the drain; the checkpointer ticks every 10 ms.
 	s.Stop()
 	if want := (opens{log: 1, store: 1, migrate: 1}); o != want || writers != 1 {
 		t.Errorf("opens %+v, writers %d; want %+v, 1", o, writers, want)

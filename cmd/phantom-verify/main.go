@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/mod/sumdb/note"
 
@@ -234,13 +235,21 @@ func verifyAll(in inputs) ([]byte, string, error) {
 	return out.Bytes(), stateLine, nil
 }
 
+// stateLockWait and stateDirSync are the lock wait and the directory sync of the
+// state. Only tests change them. No flag, no environment variable, and no other
+// input sets them. The zero value of each gives the production behavior.
+var (
+	stateLockWait time.Duration
+	stateDirSync  func(*os.File) error
+)
+
 // updateState loads the state, checks the checkpoint against it, and updates the
 // state with the checkpoint. It closes the state before it returns. Thus the
 // command does not hold the lock while it reads the event and proof files. If
 // the directory sync fails after the write, it returns the change together with
 // verify.ErrStateSync.
 func updateState(dir string, v note.Verifier, size uint64, latest []byte, proofs []verify.ConsistencyProof) (verify.StateChange, error) {
-	st, err := verify.LoadState(dir, v)
+	st, err := verify.LoadState(dir, v, verify.StateOptions{LockWait: stateLockWait, DirSync: stateDirSync})
 	if err != nil {
 		return 0, err
 	}

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 	modtlog "golang.org/x/mod/sumdb/tlog"
 
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 	"github.com/cybagard/cyba-phantom/internal/verify"
 )
@@ -695,9 +696,7 @@ func TestTS14_StateLocked(t *testing.T) {
 	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
-	old := verify.LockWait
-	verify.LockWait = 200 * time.Millisecond
-	t.Cleanup(func() { verify.LockWait = old })
+	testutil.Set(t, &stateLockWait, 200*time.Millisecond)
 
 	before := stateSnap(t, dir)
 	code, stdout, stderr := invoke(t, "--key", f.write("key", []byte(keyText)),
@@ -849,9 +848,7 @@ func TestTS14_StateChangedRefusal(t *testing.T) {
 // A test that calls it must not run in parallel.
 func failDirSync(t *testing.T) {
 	t.Helper()
-	old := verify.DirSync
-	verify.DirSync = func(*os.File) error { return errors.New("sync failed") }
-	t.Cleanup(func() { verify.DirSync = old })
+	testutil.Set(t, &stateDirSync, func(*os.File) error { return errors.New("sync failed") })
 }
 
 // T-S-14: if the sync of the state directory fails after the write, the new
