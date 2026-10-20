@@ -127,9 +127,9 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	}
 }
 
-// T-U-18: a refused row keeps the event values in each column except session_id,
-// also with store_body_prefix true. A request row keeps the session of its
-// record: the writer makes an id for no other kind.
+// T-U-18: a refused row keeps the event values in each column except
+// session_id, also with store_body_prefix true. A request row keeps the session
+// of its record: the writer makes an id for no other kind.
 func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 	r := newRig(t, 100)
 	r.w.bodyPrefix = true
