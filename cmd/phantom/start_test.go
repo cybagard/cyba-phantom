@@ -379,7 +379,8 @@ func otherKey(t *testing.T, name string) string {
 func TestTU18_VkeyMismatch(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		vkey func(t *testing.T, p startParams, saved string) string // the new public key text
+		// the new public key text
+		vkey func(t *testing.T, p startParams, saved string) string
 	}{
 		{"other name", func(t *testing.T, p startParams, _ string) string { return otherKey(t, "other/origin") }},
 		{"same name, other key", func(t *testing.T, p startParams, _ string) string { return otherKey(t, p.Origin) }},
