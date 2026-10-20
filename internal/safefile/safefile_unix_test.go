@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -20,18 +19,20 @@ import (
 
 var base = Rule{Type: Regular, Owner: OwnerSelf}
 
-// fakeT records a failure and ends the goroutine, as t.Fatalf does.
+// fakeT records a failure and returns, so the caller runs on after Fatalf.
 type fakeT struct {
 	testing.TB
-	msg atomic.Value
+	msg      string
+	cleanups []func()
 }
 
 func (f *fakeT) Helper() {}
 
 func (f *fakeT) Fatalf(format string, args ...any) {
-	f.msg.Store(fmt.Sprintf(format, args...))
-	runtime.Goexit()
+	f.msg = fmt.Sprintf(format, args...)
 }
+
+func (f *fakeT) Cleanup(fn func()) { f.cleanups = append(f.cleanups, fn) }
 
 // root makes a directory with a root on it.
 func root(t *testing.T) (*os.Root, string) {
@@ -414,14 +415,17 @@ func TestTS23_SetRestores(t *testing.T) {
 
 func TestTS23_SecondSetFails(t *testing.T) {
 	safefiletest.Set(t, safefiletest.Hooks{})
+	first := seam.Current()
 	f := &fakeT{}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		safefiletest.Set(f, safefiletest.Hooks{})
-	}()
-	<-done
-	if msg, _ := f.msg.Load().(string); msg == "" {
+	// Fatalf of fakeT returns, so Set must not install after the failure.
+	safefiletest.Set(f, safefiletest.Hooks{})
+	if f.msg == "" {
 		t.Error("a second Set did not fail the test")
+	}
+	if seam.Current() != first {
+		t.Error("a second Set replaced the first hook set")
+	}
+	if len(f.cleanups) != 0 {
+		t.Error("a failed Set registered a cleanup")
 	}
 }

@@ -16,9 +16,11 @@ func Set(t testing.TB, h Hooks) {
 	t.Helper()
 	if !testing.Testing() {
 		t.Fatalf("safefiletest: hooks are for test binaries only")
+		return
 	}
 	if !seam.Install(&h) {
 		t.Fatalf("safefiletest: a hook set is already active")
+		return
 	}
 	t.Cleanup(func() { seam.Remove(&h) })
 }
