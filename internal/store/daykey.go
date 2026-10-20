@@ -4,8 +4,12 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"net/netip"
+	"strings"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 // dayLayout is the layout of the UTC date that keys ip_counter.day.
@@ -46,4 +50,33 @@ func (d *dayKey) hmac(a netip.Addr) string {
 		m.Write(b[:])
 	}
 	return hex.EncodeToString(m.Sum(nil))
+}
+
+// sessionPrefix makes the session id differ from ip_hmac for one client key.
+const sessionPrefix = "phantom-session-v1"
+
+// sessionEncoding is the base32 form of a session id: no padding.
+var sessionEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// sessionID returns the session id of a refused event. The id is the first 16
+// bytes of HMAC-SHA256 over the prefix, 0x00, the client key and the JA4 text.
+// It is lower-case base32 with no padding. ip is the client address text. It
+// returns nil when ip is empty or is not an address. It never returns the text
+// of a parse error, because that text holds the input.
+func (d *dayKey) sessionID(ip, ja4 string) *string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return nil
+	}
+	k, ok := event.CounterKey(a)
+	if !ok {
+		return nil
+	}
+	m := hmac.New(sha256.New, d.key[:])
+	m.Write([]byte(sessionPrefix))
+	m.Write([]byte{0})
+	m.Write(k.AsSlice())
+	m.Write([]byte(ja4))
+	id := strings.ToLower(sessionEncoding.EncodeToString(m.Sum(nil)[:16]))
+	return &id
 }

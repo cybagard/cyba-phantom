@@ -36,7 +36,7 @@ func total(m map[netip.Addr]uint64, overflow uint64) uint64 {
 func TestTU17_KeyNormalization(t *testing.T) {
 	key := func(s string) netip.Addr {
 		t.Helper()
-		k, ok := counterKey(mustAddr(t, s))
+		k, ok := CounterKey(mustAddr(t, s))
 		if !ok {
 			t.Fatalf("no key for %s", s)
 		}
@@ -60,7 +60,7 @@ func TestTU17_KeyNormalization(t *testing.T) {
 	if key("2001:db8:1:2::1") == key("2001:db8:1:3::1") {
 		t.Error("addresses in different /64 prefixes share a key")
 	}
-	if _, ok := counterKey(netip.Addr{}); ok {
+	if _, ok := CounterKey(netip.Addr{}); ok {
 		t.Error("invalid address has a key")
 	}
 }
@@ -262,7 +262,7 @@ func TestTU18_CountersPending(t *testing.T) {
 func markerForms(t *testing.T, s string) []string {
 	t.Helper()
 	a := mustAddr(t, s)
-	k, ok := counterKey(a)
+	k, ok := CounterKey(a)
 	if !ok {
 		t.Fatalf("no key for %s", s)
 	}

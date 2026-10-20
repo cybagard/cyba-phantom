@@ -104,7 +104,7 @@ func (s *sourceCap) keys() int {
 }
 
 // sourceKey returns the key of the peer address a. It copies the rule of
-// counterKey in package event: an IPv4-mapped IPv6 address becomes IPv4, the
+// CounterKey in package event: an IPv4-mapped IPv6 address becomes IPv4, the
 // zone goes away, and an IPv6 address is masked to its /64 prefix. An address
 // that is not a *net.TCPAddr, or is not valid, gets the zero key, which all
 // such connections share. The key comes only from the peer address of the
