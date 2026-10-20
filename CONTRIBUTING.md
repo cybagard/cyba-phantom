@@ -63,6 +63,14 @@ here only via the maintainer's sync PR, which also rotates the
 - `tools/trace` regenerates `spec/08-traceability.md` from `01` + `07` and
   requires a byte-exact match (C10), then re-hashes the directory against
   the stamp.
+- `tools/trace tests` checks the exit criteria table in section 5 of
+  `spec/07-test-plan.md`. A test ID is in one milestone row only. Each
+  test ID of the milestones up to `TRACE_MILESTONE` (in the `Makefile`)
+  needs one of two things. The first is a top-level Go test in a
+  `*_test.go` file. Its name starts with `Test` and the ID without dashes,
+  with no digit after it: T-S-16 gives `TestTS16...`. The second is a
+  marker line `# trace-test: <ID> <target>` in the `Makefile`, above an
+  existing target that checks the ID.
 - `tools/mirror-diff.sh` checks the C1–C10 table in `AGENTS.md` against
   the golden `spec/constitution-table.md`.
 

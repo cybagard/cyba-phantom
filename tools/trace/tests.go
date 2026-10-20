@@ -17,9 +17,10 @@
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a Makefile target that checks it. The target must exist.
 //
-// Findings name test IDs, milestone IDs and counts only: the table, the
-// tree and the Makefile are PR-controlled, so their text never reaches a
-// CI log.
+// Findings print test IDs, milestone IDs, row numbers, counts and file
+// paths. A path goes through printableName, so it has no raw control
+// characters. No text of a table cell, a Go file or a Makefile line is
+// printed. The table, the tree and the Makefile come from a PR.
 
 package main
 
