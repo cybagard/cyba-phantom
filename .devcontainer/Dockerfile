@@ -5,6 +5,7 @@
 # Development only — the deployed sensor is a static binary with no
 # container dependency (C1).
 # Pinned by digest (multi-arch index of golang:1.27.2); bump both together.
+# The oracle job of .github/workflows/ci.yml uses the same digest.
 FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
 
 # Static analysis tools (SEC-09). We pin each tool by its module
@@ -36,5 +37,10 @@ RUN curl -fsSL --proto '=https' --proto-redir '=https' -o /tmp/vulndb.zip https:
  && rm /tmp/vulndb.zip \
  && chmod -R a+rX /opt/govulndb
 ENV GOVULNDB=file:///opt/govulndb
+
+# Tests read this variable to know that they run in this container. A test
+# that needs a tool of this image fails here when the tool is absent, and
+# can skip outside the container.
+ENV IN_DEVCONTAINER=1
 
 WORKDIR /src
