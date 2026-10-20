@@ -96,13 +96,19 @@ func checkEntry(hdr *tar.Header) (string, error) {
 	return strings.ToLower(name), nil
 }
 
+// maxTimeDigits is the most digits that the whole part of a PAX mtime value
+// can have, after its leading zeros. GNU tar 1.35 and Python 3.13 write 10.
+// GNU tar fails on the int64 minimum with a fraction, which has 19 digits.
+const maxTimeDigits = 18
+
 // paxTimeOK reports whether v has the form of a PAX mtime value: an optional
-// "-", one or more digits, and optionally "." and one or more digits. GNU tar
-// fails on a value with a plus sign.
+// "-", one or more digits, and optionally "." and one or more digits. The whole
+// part has at most maxTimeDigits digits after its leading zeros. GNU tar fails
+// on a value with a plus sign.
 func paxTimeOK(v string) bool {
 	v = strings.TrimPrefix(v, "-")
 	whole, frac, dot := strings.Cut(v, ".")
-	return digits(whole) && (!dot || digits(frac))
+	return digits(whole) && len(strings.TrimLeft(whole, "0")) <= maxTimeDigits && (!dot || digits(frac))
 }
 
 // digits reports whether s has one or more bytes, all of them 0-9.

@@ -339,6 +339,18 @@ func rawFormCases() []entryCase {
 			rawArchive(paxHdr(paxRecZeros("path", p)), rawFile(p, "x")), rawArchive(pathEntry(p))},
 		{"PAX path record with an empty value",
 			rawArchive(paxHdr(paxRec("path", "")), rawFile(p, "x")), rawArchive(pathEntry(p))},
+		// The twin has a minus sign and a fraction, so that a pass fixture holds
+		// both parts of the form.
+		{"PAX mtime record at the int64 minimum with a fraction",
+			rawArchive(paxHdr(paxRec("mtime", "-9223372036854775808.5")), rawFile(p, "x")),
+			rawArchive(paxHdr(paxRec("mtime", "-1.5")), rawFile(p, "x"))},
+		// The whole part has 19 digits. The twin has 18.
+		{"PAX mtime record with 19 digits",
+			rawArchive(paxHdr(paxRec("mtime", "1000000000000000000")), rawFile(p, "x")),
+			rawArchive(paxHdr(paxRec("mtime", "100000000000000000")), rawFile(p, "x"))},
+		{"PAX mtime record with a dot and no fraction",
+			rawArchive(paxHdr(paxRec("mtime", "1.")), rawFile(p, "x")),
+			rawArchive(paxHdr(paxRec("mtime", "1.5")), rawFile(p, "x"))},
 		{"PAX mtime record with an empty value",
 			rawArchive(paxHdr(paxRec("mtime", "")), rawFile(p, "x")),
 			rawArchive(paxHdr(paxRec("mtime", "1")), rawFile(p, "x"))},
