@@ -216,8 +216,8 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 }
 
 // belowFloor checks that the value of key is not less than the value of floor.
-// It skips a key that is not in vals. If key is at default, the operator set
-// floor: the error names floor.
+// It skips the check if key or floor is not in vals. If key is at default, the
+// operator set floor: the error names floor.
 func belowFloor(vals map[string]Value, key, floor string) (string, Value, string) {
 	k, ok := vals[key]
 	f, okFloor := vals[floor]
@@ -469,7 +469,6 @@ func (c *Config) AllowList() []Endpoint {
 	for i := 0; c.values[fmt.Sprintf("tlog.publish[%d].type", i)].Str != ""; i++ {
 		fromURL(c.values[fmt.Sprintf("tlog.publish[%d].url", i)].Str)
 	}
-	sinks := lists[slices.IndexFunc(lists, func(l listKey) bool { return l.path == "alerts.sinks" })].schemas
 	for i := 0; ; i++ {
 		p := fmt.Sprintf("alerts.sinks[%d].", i)
 		typ := c.values[p+"type"].Str
@@ -477,7 +476,7 @@ func (c *Config) AllowList() []Endpoint {
 			return list
 		}
 		// An unknown type has no schema: it adds nothing.
-		for _, f := range sinks[typ] {
+		for _, f := range sinkSchemas[typ] {
 			if f.endpoint == nil {
 				continue
 			}
@@ -486,6 +485,20 @@ func (c *Config) AllowList() []Endpoint {
 			}
 		}
 	}
+}
+
+// sinkSchemas holds the schemas of the alerts.sinks list.
+// The lookup runs one time at start.
+var sinkSchemas = schemasOf("alerts.sinks")
+
+// schemasOf returns the item schemas of the list at path.
+// It panics if the table has no such list.
+func schemasOf(path string) map[string][]key {
+	i := slices.IndexFunc(lists, func(l listKey) bool { return l.path == path })
+	if i < 0 {
+		panic("config: the list table has no list " + path)
+	}
+	return lists[i].schemas
 }
 
 // urlEndpoint makes the Endpoint of an https URL.

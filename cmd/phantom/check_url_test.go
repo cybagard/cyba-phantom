@@ -6,8 +6,8 @@ import (
 )
 
 // TestTS11_CheckURLRules checks that --check refuses a bad URL host and a URL
-// with a query for each URL key, with exit 1. The error names the key and
-// shows no part of the URL (T-S-11, SEC-13).
+// with a query. It does this for each URL key, with exit 1. The error names
+// the key and does not show the host (T-S-11, SEC-13).
 func TestTS11_CheckURLRules(t *testing.T) {
 	body := validBody(t)
 	hook := func(u string) string {

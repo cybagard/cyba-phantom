@@ -75,7 +75,8 @@ const (
 	base       = "acme:\n  email: sec@example.com\n" + acmeNames + tlogLine
 )
 
-// loadTest is Load with a valid value in tokenVar. A later entry in env replaces it.
+// loadTest is Load with a valid value in tokenVar. An entry for tokenVar in
+// env is a second entry for it: that is a load error.
 func loadTest(path string, env []string) (*Config, error) {
 	return Load(path, append([]string{tokenVar + "=" + strings.Repeat("t", 32)}, env...))
 }

@@ -226,7 +226,7 @@ func checkSecretEnv(minBytes int) func(*loader, string) string {
 		ok := n > 0
 		switch {
 		case n > 1:
-			return "the environment holds the variable that the key names two times"
+			return "the environment has more than one entry for the variable that the key names"
 		case !ok || v == "":
 			return "the variable that the key names is not set or is empty"
 		case len(v) < minBytes:

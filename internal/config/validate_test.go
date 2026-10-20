@@ -183,8 +183,22 @@ func TestTU10_OpsListenOverlap(t *testing.T) {
 		{"zoned unspecified, other port", "listen:\n  https: \"[::%lo0]:8443\"\n", ""},
 		{"host name, other port", "listen:\n  http: \"localhost:8443\"\n", ""},
 	}
+	// These rows also check the detail text, not only the key.
+	text := map[string]string{
+		"ops on port 443":      "the address overlaps the listen.https address",
+		"ops on port 80":       "the address overlaps the listen.http address",
+		"host name, same port": "that host is a name",
+	}
 	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) { wantLoad(t, r.file, r.want) })
+		t.Run(r.name, func(t *testing.T) {
+			wantLoad(t, r.file, r.want)
+			if w, ok := text[r.name]; ok {
+				_, err := loadTest(writeConfig(t, base+r.file), nil)
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("got %v, want the text %q", err, w)
+				}
+			}
+		})
 	}
 }
 
@@ -1242,10 +1256,15 @@ func TestTS11_Lists(t *testing.T) {
 				t.Errorf("got %v, want an error that names %s", err, r.want)
 			case r.want != "" && c != nil:
 				t.Error("an invalid entry returned a config") // The load fails closed.
+			case r.name == "env twice" && !strings.Contains(err.Error(), envMany):
+				t.Errorf("got %v, want the text %q", err, envMany)
 			}
 		})
 	}
 }
+
+// envMany is the detail for an env list with two entries for one variable.
+const envMany = "the environment has more than one entry for the variable that the key names"
 
 // TestTS10_EnvErrorsHideName checks that an error for a *_env key names the key path and never the
 // variable name: an operator can paste a secret in place of a name (SEC-13, T-S-10).
@@ -1273,6 +1292,9 @@ func TestTS10_EnvErrorsHideName(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), name) {
 				t.Errorf("the error holds the variable name: %v", err)
+			}
+			if r.label == "token twice" && !strings.Contains(err.Error(), envMany) {
+				t.Errorf("got %v, want the text %q", err, envMany)
 			}
 		})
 	}
@@ -1396,8 +1418,7 @@ func TestTS10_ListSecrets(t *testing.T) {
 		errs := err.(interface{ Unwrap() []error }).Unwrap()
 		// A reader error has no Key: its Detail starts with the cut path.
 		if !slices.ContainsFunc(errs, func(e error) bool {
-			x := e.(*Error)
-			return x.Key == c.cut || strings.HasPrefix(x.Detail, c.cut+": ")
+			return strings.HasPrefix(e.(*Error).Detail, c.cut+": ")
 		}) {
 			t.Errorf("%s: no error names the path %s: %v", c.name, c.cut, err)
 		}
@@ -1410,7 +1431,7 @@ func TestTS10_ListSecrets(t *testing.T) {
 }
 
 // TestTS11_URLKeys checks that a bad URL host and a query fail for each URL
-// key. The error names the key and shows no part of the URL (T-S-11).
+// key. The error names the key and does not show the host (T-S-11).
 func TestTS11_URLKeys(t *testing.T) {
 	for _, u := range []string{
 		"https://a..b/", "https://.example.com/", "https://169.254.169.254;/", "https://-h.example/", "https://h_x.example/",
@@ -1444,26 +1465,21 @@ func TestTS11_SinkEndpoints(t *testing.T) {
 		"syslog":  {sysItem, Endpoint{"udp", "127.0.0.1", "514"}},
 		"smtp":    {mailItem, Endpoint{"smtp", "mail.example", "587"}},
 	}
-	for _, l := range lists {
-		if l.path != "alerts.sinks" {
-			continue
-		}
-		for typ := range l.schemas {
-			t.Run(typ, func(t *testing.T) {
-				f, ok := fixtures[typ]
-				if !ok {
-					t.Fatalf("the sink type %s has no fixture", typ)
-				}
-				c, err := loadProd(t, snk(f.item), listEnv...)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, ckptEndpoint, f.want}
-				if got := c.AllowList(); !reflect.DeepEqual(got, want) {
-					t.Errorf("got %+v, want %+v", got, want)
-				}
-			})
-		}
+	for typ := range sinkSchemas {
+		t.Run(typ, func(t *testing.T) {
+			f, ok := fixtures[typ]
+			if !ok {
+				t.Fatalf("the sink type %s has no fixture", typ)
+			}
+			c, err := loadProd(t, snk(f.item), listEnv...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, ckptEndpoint, f.want}
+			if got := c.AllowList(); !reflect.DeepEqual(got, want) {
+				t.Errorf("got %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
