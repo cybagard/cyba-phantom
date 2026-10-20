@@ -34,8 +34,8 @@ const (
 type Rule struct {
 	Type    Type
 	Owner   Owner
-	Forbid  fs.FileMode // mode bits that must be 0 (perm and special bits)
-	Exact   fs.FileMode // when not 0, perm and special bits must equal it
+	Forbid  fs.FileMode // permission and special bits that must be 0
+	Exact   fs.FileMode // when not 0, permission and special bits equal it
 	OneLink bool        // the link count must be 1
 	MaxSize int64       // when > 0, the size of the open file is at most this
 }

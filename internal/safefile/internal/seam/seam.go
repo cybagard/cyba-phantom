@@ -1,6 +1,6 @@
 // Package seam holds the test hooks of package safefile. Only code below
-// internal/safefile can import it. A hook runs any test code. The tests
-// prove that a hook cannot make a refused file pass.
+// internal/safefile can import it. A hook runs any test code. No hook
+// result can make a refused file pass.
 package seam
 
 import "sync/atomic"

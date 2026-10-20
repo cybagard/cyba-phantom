@@ -23,11 +23,14 @@ func Identity(fi fs.FileInfo) (FileID, bool) {
 
 // Open checks name below root, opens it and checks the open file. The name is
 // one path element. Open refuses an empty name and a name with a slash. It
-// does not walk a directory below the root. The open does not block. Open
-// refuses a symlink at the name before the open. A symlink that replaces
-// the file after the check gives ErrChanged when it points to another file.
-// It gives ErrOpen when it leaves the root. A link to the checked file opens
-// that file, and the whole rule runs on it. The caller closes the file.
+// does not walk a directory below the root. A nil root or a rule that is not
+// valid gives ErrRule. The open does not block. Open refuses a symlink at the
+// name before the open. A symlink that replaces the file after the check
+// gives ErrChanged when it points to another file. It gives ErrOpen when it
+// leaves the root. A link to the checked file opens that file, and the whole
+// rule runs on it. The identity compare does not see a new file that gets
+// the inode number of the checked file. The whole rule runs on that file too.
+// The caller closes the file.
 func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if root == nil || !r.valid() {
 		return nil, nil, fail(ErrRule, nil)
@@ -83,9 +86,8 @@ func call(hook func(name string), name string) {
 	}
 }
 
-// openError names the refusal of a failed open. A symlink loop gives ELOOP.
-// A file that replaces a directory gives ENOTDIR. A directory that replaces
-// a file opens, and the identity compare gives ErrChanged.
+// openError names the refusal of a failed open. ELOOP or EMLINK gives
+// ErrSymlink. ENOTDIR gives ErrType. Each other error gives ErrOpen.
 func openError(err error) error {
 	switch {
 	case errors.Is(err, syscall.ELOOP), errors.Is(err, syscall.EMLINK):
