@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 // periodRec is what the wrapper of one connection counted in one period. The
@@ -132,8 +134,8 @@ func (c *countConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// recordOverhead is the size of a TLS 1.3 record without its message: 5 bytes
-// of header, 1 byte of type and 16 bytes of tag.
+// recordOverhead is the size of a TLS 1.3 record without its message. It is 5
+// bytes of header, 1 byte of type and 16 bytes of tag.
 const recordOverhead = 22
 
 // dialTLS13 does a TLS 1.3 handshake on raw. The client writes through the
@@ -397,9 +399,9 @@ func lateRequests(t *testing.T, o lateOpts) lateResult {
 	lc.mu.Unlock()
 	_, _ = io.WriteString(c, o.rest)
 	// The wrapper reads no more than the budget left. The test waits on the
-	// bytes that the wrapper reads in this period, late or not. So it also
-	// waits when the late handling is off. A wrong status then shows in the
-	// test.
+	// bytes that the wrapper reads in this period, late or not. So the wait
+	// also ends when the late handling is off. Then a wrong status shows in
+	// the status check of the test.
 	total := min(int64(cc.n)-res.base, left)
 	waitFor(t, "the bytes of rest in the wrapper", func() bool {
 		got := lc.readBytes() - before
@@ -925,11 +927,22 @@ func postText(t *testing.T, total int) string {
 	return req
 }
 
+// zeroGate is what the handler of TestTS18ExactBudget waits on. The hook
+// readAtZero closes seen at the first Read with no budget left.
+type zeroGate struct {
+	once sync.Once
+	seen chan struct{}
+}
+
 // T-S-18: a request that uses exactly the budget of its period gets 200. One
 // byte more closes the connection with no reply, and the wrapper counts the
 // budget only. The first period has the handshake bytes. The test sets its
 // budget to the bytes of the handshake and of one request. A later period has
-// the budget of header_bytes + 1024, and the request is a POST of that size.
+// the budget of header_bytes + 1024. The client sends a POST in one TLS record
+// of that size. In an exact case the handler waits before it replies. It waits
+// until a Read of the wrapper has started with no budget left, or until the
+// request context ends because the connection closed. So a Read that closes
+// the connection with no budget left always loses the reply.
 func TestTS18ExactBudget(t *testing.T) {
 	// dial13 opens a TLS 1.3 connection to r and returns the handshake bytes.
 	dial13 := func(t *testing.T, r *rig) (*tls.Conn, int) {
@@ -942,6 +955,14 @@ func TestTS18ExactBudget(t *testing.T) {
 		c, _, cc := r.dialTLS13(t, raw)
 		return c, cc.n
 	}
+	// The hook is set before any server runs, so no Read races with the set.
+	// A test case arms the gate that the hook closes.
+	var armed atomic.Pointer[zeroGate]
+	testutil.Set(t, &readAtZero, func() {
+		if g := armed.Load(); g != nil {
+			g.once.Do(func() { close(g.seen) })
+		}
+	})
 	probe := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	probe.serve(t)
 	_, handshake := dial13(t, probe)
@@ -951,7 +972,18 @@ func TestTS18ExactBudget(t *testing.T) {
 			extra, want int
 		}{{"exact", 0, 200}, {"one byte more", 1, 0}} {
 			t.Run(period+" period, "+tc.name, func(t *testing.T) {
-				r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
+				t.Cleanup(func() { armed.Store(nil) })
+				r := newRig(t, 4, testHeaderBytes, defaultTimeouts, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					// A read of the whole body lets net/http start its background read.
+					_, _ = io.Copy(io.Discard, req.Body)
+					if g := armed.Load(); g != nil {
+						select {
+						case <-g.seen:
+						case <-req.Context().Done():
+						}
+					}
+					okHandler.ServeHTTP(w, req)
+				}))
 				budget, req := r.s.rd.next, head(3000+tc.extra)
 				if period == "first" {
 					r.s.rd.first = int64(handshake + recordOverhead + len(head(3000)))
@@ -968,6 +1000,9 @@ func TestTS18ExactBudget(t *testing.T) {
 					l.wait(t, 1, 0)
 					req = postText(t, int(budget)-recordOverhead+tc.extra)
 				}
+				if tc.extra == 0 {
+					armed.Store(&zeroGate{seen: make(chan struct{})})
+				}
 				if got := roundTrip(c, req); got != tc.want {
 					t.Fatalf("request of %d bytes over the budget: status %d, want %d", tc.extra, got, tc.want)
 				}
@@ -975,18 +1010,21 @@ func TestTS18ExactBudget(t *testing.T) {
 				if _, closed := l.wait(t, 0, 1); closed[0].used != budget {
 					t.Fatalf("the server read %d bytes, want the budget %d", closed[0].used, budget)
 				}
+				// After the slot is free, no Read of this connection runs.
+				waitFor(t, "slots free", func() bool { return len(r.s.sem) == 0 })
 			})
 		}
 	}
 }
 
-// T-S-18: the probe of the idle close with unread client bytes. A request head
-// of more than keepAliveBytes makes the connection close at its idle state. The
-// ConnState hook of the test writes 100 raw bytes from the client before that
-// close. The server never reads them. So the receive queue of the server has
-// unread bytes at the close, and the kernel sends a reset in place of an end of
-// stream. The client reads the response after the close. The client gets the
-// whole response.
+// T-S-18: a response that reached the client before the idle close is not
+// lost. A request head of more than keepAliveBytes makes the connection close
+// at its idle state. The ConnState hook of the test writes 100 raw bytes from
+// the client before that close. The server never reads them, so a reset can
+// follow the close. Bytes that arrive after the close give an end of stream
+// in place of a reset. The client reads the response after the close and
+// gets all of it. Then it reads a reset or an end of stream. The test does
+// not cover a response that is still in the send queue of the server.
 func TestTS18IdleCloseWithUnreadBytes(t *testing.T) {
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, okHandler)
 	ln := listenLoopback(t)
@@ -1019,10 +1057,12 @@ func TestTS18IdleCloseWithUnreadBytes(t *testing.T) {
 	if got := readStatus(bufio.NewReader(c)); got != 200 {
 		t.Fatalf("response after the idle close with unread bytes: status %d, want 200", got)
 	}
-	// The unread bytes make the close send a reset.
-	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, syscall.ECONNRESET) {
-		t.Fatalf("read after the response: %v, want a reset", err)
+	// Unread bytes at the close give a reset. Bytes after the close give EOF.
+	_, err = c.Read(make([]byte, 1))
+	if !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, io.EOF) {
+		t.Fatalf("read after the response: %v, want a reset or an end of stream", err)
 	}
+	t.Logf("read after the response: %v", err)
 }
 
 // T-S-18: a refused pool take in a body read closes the socket before net/http

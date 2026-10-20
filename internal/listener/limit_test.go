@@ -411,50 +411,35 @@ func TestTS17SourceCheckBeforeSlot(t *testing.T) {
 	}
 }
 
-// signalConn is a pipe end whose Close sends on closing before it returns.
-type signalConn struct {
-	net.Conn
-	closing chan struct{} // buffer 1
-}
-
-func (c *signalConn) Close() error {
-	c.closing <- struct{}{}
-	return c.Conn.Close()
-}
-
 // T-S-17: the record entry leaves before the slot is free. The count of the key
 // also goes down first. The key stays while another connection holds a count.
-// The test runs on one processor, and its slot channel has no buffer. So Close
-// stops at its receive from the slot channel. The test reads the record there.
-// A Close that frees the slot before it removes the entry shows the entry.
+// The slot channel has no buffer, so Close waits at its receive from it. The
+// test waits until the record has no entry and the key has count 1. Only then
+// does it send on the slot channel. A Close that does one of these steps after
+// the receive never reaches that state, so the wait fails.
 func TestTS17RecordEntryLeavesBeforeSlot(t *testing.T) {
-	prev := runtime.GOMAXPROCS(1)
-	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
 	a, b := net.Pipe()
 	t.Cleanup(func() { _ = b.Close() })
-	closing := make(chan struct{}, 1)
 	src := newSourceCap(2)
 	key := netip.MustParseAddr("192.0.2.1")
 	src.take(key)
 	src.take(key) // the other connection of the same source
 	sem := make(chan struct{})
-	lc := newLimitConn(&signalConn{Conn: a, closing: closing}, sem, src, key, newReadLimit(testHeaderBytes))
+	lc := newLimitConn(a, sem, src, key, newReadLimit(testHeaderBytes))
 	src.track(lc)
 	done := make(chan struct{})
 	go func() { _ = lc.Close(); close(done) }()
-	within(t, closing, "Close starts")
-	src.mu.Lock()
-	entries, keys, count := len(src.open), len(src.count), src.count[key]
-	src.mu.Unlock()
+	waitFor(t, "no record entry, and count 1 for the key", func() bool {
+		src.mu.Lock()
+		defer src.mu.Unlock()
+		return len(src.open) == 0 && len(src.count) == 1 && src.count[key] == 1
+	})
 	select {
 	case sem <- struct{}{}:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout: Close does not free the slot")
 	}
 	within(t, done, "Close returns")
-	if entries != 0 || keys != 1 || count != 1 {
-		t.Fatalf("before the slot is free: %d record entries, %d keys, count %d, want 0, 1, 1", entries, keys, count)
-	}
 }
 
 // benchConn is a pipe end with a TCP peer address. Close does nothing, so the
@@ -520,9 +505,11 @@ func (l *newSourceListener) Addr() net.Addr {
 }
 
 // T-S-17: with one Accept loop and connections that close in their own
-// goroutines, the map never holds more than slots+1 keys. The test has a
-// deadline. The listener has a limit on its Accepts, also on the ones that
-// close at a cap. At the end, the map has no key and all slots are free.
+// goroutines, the map never holds more than slots+1 keys. The deadline is a
+// hang guard, not a speed check. It is 90 % of the time that the test run has
+// left, or 30 s when the run has no deadline. The listener has a limit on its
+// Accepts, also on the ones that close at a cap. At the end, the map has no key
+// and all slots are free.
 func TestTS17SourceKeysWithinBound(t *testing.T) {
 	const slots, accepts = 4, 30_000
 	src := newSourceCap(slots)
@@ -542,7 +529,10 @@ func TestTS17SourceKeysWithinBound(t *testing.T) {
 		}
 	}()
 	var closers sync.WaitGroup
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
+	if d, ok := t.Deadline(); ok {
+		deadline = time.Now().Add(time.Until(d) / 10 * 9)
+	}
 	for i := range accepts {
 		if time.Now().After(deadline) {
 			t.Fatalf("deadline: %d of %d connections accepted", i, accepts)
@@ -626,18 +616,38 @@ func TestTS18NextPeriodBudget(t *testing.T) {
 // the period. The connection stays open, the pool charges nothing, and a next
 // request gets 200. Then it sends one that makes the wrapper count 4097 bytes.
 // The connection closes after the response. The pool and the slots are empty
-// after the client closes.
+// after the client closes. A normal client from r.dial reads 4096 bytes or less
+// in each period, so its two requests get 200 and the pool charges nothing. A
+// client with a ClientHello over 4096 bytes gets 200 and holds a charge. The
+// pool and the slots are empty after it closes.
 func TestTS18KeepAliveLimit(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
 	r.serve(t)
 	c := r.dialWhole(t)
-	status(c, 0)
-	status(c, 100)
+	if got := status(c, 0); got != 200 {
+		t.Fatalf("request of the first measure: status %d, want 200", got)
+	}
+	if got := status(c, 100); got != 200 {
+		t.Fatalf("request of 100 bytes: status %d, want 200", got)
+	}
 	idle, _ := l.wait(t, 2, 0)
 	overhead := idle[1].used - 100
 	_ = c.Close()
-	base := 2
+	normal := r.dial(t)
+	for i := range 2 {
+		if got := status(normal, 0); got != 200 {
+			t.Fatalf("request %d of a normal client: status %d, want 200", i, got)
+		}
+	}
+	idle, _ = l.wait(t, 4, 0)
+	for i, p := range idle[2:] {
+		if p.used == 0 || p.used > keepAliveBytes || p.charged != 0 {
+			t.Errorf("period %d of a normal client: read %d bytes, charged %d", i, p.used, p.charged)
+		}
+	}
+	_ = normal.Close()
+	base := 4
 	for _, tc := range []struct {
 		used int64
 		open bool
@@ -668,6 +678,17 @@ func TestTS18KeepAliveLimit(t *testing.T) {
 		}
 		_ = c.Close()
 	}
+	big, err := dialTLS(r.addr, r.clientConfig(manyProtos(40)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status(big, 0); got != 200 {
+		t.Fatalf("client with a large ClientHello: status %d, want 200", got)
+	}
+	if idle, _ := l.wait(t, base+1, 0); idle[base].charged <= 0 {
+		t.Fatalf("large ClientHello: charged %d, want more than 0", idle[base].charged)
+	}
+	_ = big.Close()
 	waitFor(t, "pool and slots free", func() bool { return r.s.rd.pool.Load() == 0 && len(r.s.sem) == 0 })
 }
 
@@ -807,12 +828,14 @@ func TestTS18ReadSizeCap(t *testing.T) {
 // below the limit. Ten connections from ten sources each read 12288 bytes in
 // their first period, so each holds 8192 charged bytes. With the pool full, the
 // next charged read closes its connection. This holds for a record after the
-// handshake and for a ClientHello over 4096 bytes. A normal client from another
+// handshake and for a ClientHello over 4096 bytes. Each of the two closed
+// connections read more than keepAliveBytes. A normal client from another
 // source gets 200, and the pool does not change. The pool returns to its start
 // value when the connections close.
 func TestTS18PoolFilledByConnections(t *testing.T) {
 	const holders, charge = 10, 8192
 	r := newRig(t, 16, testHeaderBytes, defaultTimeouts, okHandler)
+	l := r.watchPeriods()
 	r.serve(t)
 	start := int64(poolBytes - holders*charge)
 	r.s.rd.pool.Store(start)
@@ -835,6 +858,14 @@ func TestTS18PoolFilledByConnections(t *testing.T) {
 	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
 	if err := tls.Client(raw, r.clientConfig(manyProtos(20)...)).Handshake(); err == nil {
 		t.Fatal("a ClientHello over 4096 bytes worked with a full pool")
+	}
+	// The two closed connections are the one at the full pool and this one. Both
+	// read more than keepAliveBytes before the close.
+	_, closed := l.wait(t, 0, 2)
+	for i, p := range closed {
+		if p.used <= keepAliveBytes {
+			t.Fatalf("closed connection %d read %d bytes, want more than %d", i, p.used, keepAliveBytes)
+		}
 	}
 	if got := status(r.dialTLSFrom(t, r.addr, 13), 0); got != 200 {
 		t.Fatalf("normal client with a full pool: status %d, want 200", got)

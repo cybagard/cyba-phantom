@@ -140,8 +140,12 @@ const (
 
 // errBudgetRead is the error of a read that the budget or the pool refuses.
 // Read closes the socket before it returns this error. So net/http cannot write
-// a reply after it.
+// a reply after the read error.
 var errBudgetRead error = &net.OpError{Op: "read", Net: "tcp", Err: errors.New("read budget used")}
+
+// readAtZero is nil in production. A test sets it to learn that a Read has
+// started with no budget left, before that Read asks the socket.
+var readAtZero func()
 
 // readLimit is the read budget of one Server and its pool. All Serve calls of
 // the Server share it, like the slots and the source counts.
@@ -170,8 +174,8 @@ func (r *readLimit) take(n int64) bool {
 
 // limitListener caps the number of open connections, and the number for each
 // source. It wraps the raw TCP listener. The TLS layer goes on top of it.
-// So a connection over a cap closes before the handshake. It costs no TLS
-// state.
+// So a connection over a cap closes before the handshake, and the listener
+// makes no TLS state for that connection.
 type limitListener struct {
 	net.Listener
 	sem chan struct{}
@@ -221,13 +225,13 @@ func (l *limitListener) inUse() int { return len(l.sem) }
 // leaves, before the slot is free. The key leaves the map only when its count
 // is 0.
 //
-// It also counts the bytes that Read takes from the socket. A period is the
-// time from the start of the connection, or from the last idle state, to the
-// next idle state. Read fails when it gets a byte after the budget of the
-// period is used. The bytes of a period above keepAliveBytes are charged to
-// the pool of the Server. The charged bytes go back to the pool in Close. A
-// connection with charged bytes read more than keepAliveBytes, so it also
-// closes at its idle state.
+// It also counts the bytes that Read takes from the socket. A period starts
+// with the connection or at an idle state. It ends at the next idle state.
+// Read fails when it gets a byte after the budget of the period is used. The
+// bytes of a period above keepAliveBytes are charged to the pool of the
+// Server. The charged bytes go back to the pool in Close. A connection with
+// charged bytes read more than keepAliveBytes, so it also closes at its idle
+// state.
 //
 // A client can send its next request before net/http reaches the idle state of
 // the last one. Each Write while a request without a body is active starts the
@@ -284,15 +288,18 @@ func (c *limitConn) refund() {
 	c.charged = 0
 }
 
-// Read asks the socket for no more than the budget left and no more than
-// keepAliveBytes. Late bytes also count against the budget. When no budget is
-// left, Read asks for one byte. A byte that arrives then is over the budget.
-// A read that gets no byte does not close. A read that the budget or the pool
-// refuses closes the socket. So net/http cannot send a reply after it.
+// Read asks the socket for at most the budget left and at most keepAliveBytes.
+// With no budget left, it asks for one byte. Late bytes also count against the
+// budget. A byte that arrives with no budget left is over the budget. A read
+// that gets no byte does not close. A read that the budget or the pool refuses
+// closes the socket. So net/http cannot send a reply after that close.
 func (c *limitConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	left := c.left
 	c.mu.Unlock()
+	if hook := readAtZero; hook != nil && left <= 0 {
+		hook()
+	}
 	p = p[:min(int64(len(p)), max(left, 1), keepAliveBytes)]
 	n, err := c.Conn.Read(p)
 	if n == 0 {
