@@ -7,14 +7,21 @@
 //
 // The first form fails only for lines that changed between base and head.
 // The changed lines come from "git diff base...head", the same range as the
-// dco check. The file text comes from head. The second form checks every
-// tracked file at head, prints each hit and a total, and exits 0.
+// dco check. The file text comes from head.
 //
-// A comment line is each source line that holds comment text: a "//" line,
-// a "//" comment after code, and each line of a "/* */" comment. go/scanner
-// finds the comments, so "//" in a string literal is not a comment. A
-// comment that starts with "//go:" or "//line " is a compiler directive.
-// It is not prose, so stelint skips it.
+// The second form checks the tracked Go files at head, except symbolic links.
+// It prints each hit and a total. It exits 0 unless git or an input limit
+// fails.
+//
+// A comment line is each source line that holds comment text. These are a
+// "//" line, a "//" comment after code, and each line of a "/* */" comment.
+// go/scanner finds the comments, so "//" in a string literal is not a comment.
+//
+// A comment is a compiler directive when it starts with "//go:build",
+// "//go:generate", "//go:embed" or "//go:linkname", then a space. A "//line "
+// comment whose text has no space is also a directive. A directive is not
+// prose, so stelint skips it. It checks each other "//go:" or "//line"
+// comment.
 //
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
@@ -24,12 +31,16 @@
 // A hit prints as "path:line: <n> columns (limit 80)". Paths come from a
 // pull request, so stelint prints no raw control character.
 //
-// A file over 1 MiB, or a git output over the output cap, is not parsed. It
-// gives an error and exit code 2. When base is empty, stelint prints one
-// line that says the check did not run, and exits 0.
+// A file over 1 MiB, or a git output over the output cap, is not parsed. A
+// hunk that ends after line 1048576 is not parsed. Each gives an error and
+// exit code 2. When base is empty, stelint prints one line that says the
+// check did not run, and exits 0.
 //
-// Exit codes: 0 pass (or the check did not run), 1 a changed line is too
-// long, 2 usage, git or input limit error.
+// Exit codes:
+//
+//	0  pass, or the check did not run
+//	1  a changed line is too long
+//	2  usage, git or input limit error
 package main
 
 import (
@@ -62,10 +73,28 @@ var (
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
 
-// target is a file to check. A nil lines map means every line.
+// span is a run of n lines that starts at line start.
+type span struct{ start, n int }
+
+// target is a file to check. When all is true, every line counts. Otherwise
+// only the lines in spans count.
 type target struct {
 	path  string
-	lines map[int]bool
+	all   bool
+	spans []span
+}
+
+// has reports whether the line is one that the check covers.
+func (t target) has(line int) bool {
+	if t.all {
+		return true
+	}
+	for _, s := range t.spans {
+		if line >= s.start && line < s.start+s.n {
+			return true
+		}
+	}
+	return false
 }
 
 // hit is a comment line that is too long.
@@ -106,7 +135,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 		return report(dir, head, targets, stdout, stderr)
 	}
 	if base == "" {
-		fmt.Fprintln(stdout, "stelint: the check did not run: no base commit (BASE is empty and origin/main does not exist)")
+		fmt.Fprintln(stdout, "stelint: the check did not run: BASE is empty and the ref origin/main does not exist")
 		return 0
 	}
 	targets, err := listChanged(dir, base, head)
@@ -140,7 +169,8 @@ func check(dir, base, head string, targets []target, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "stelint FAIL: %d changed comment line(s) over %d columns\n", hits, maxColumns)
 		return 1
 	}
-	fmt.Fprintf(stdout, "stelint: no changed comment line over %d columns in %.12s...%.12s\n", maxColumns, base, head)
+	fmt.Fprintf(stdout, "stelint: no changed comment line over %d columns in %.12s...%.12s\n",
+		maxColumns, clean(base), clean(head))
 	return 0
 }
 
@@ -157,7 +187,7 @@ func scanTargets(dir, head string, targets []target, stdout io.Writer) (hits, fi
 		}
 		n := 0
 		for _, h := range longLines(src) {
-			if t.lines != nil && !t.lines[h.line] {
+			if !t.has(h.line) {
 				continue
 			}
 			fmt.Fprintf(stdout, "%s:%d: %d columns (limit %d)\n", clean(t.path), h.line, h.cols, maxColumns)
@@ -204,16 +234,17 @@ func listTracked(dir, head string) ([]target, error) {
 		if f := strings.Fields(meta); len(f) != 3 || f[1] != "blob" || f[0] == "120000" {
 			continue
 		}
-		targets = append(targets, target{path: path})
+		targets = append(targets, target{path: path, all: true})
 	}
 	return targets, nil
 }
 
 // listChanged lists the Go files that differ between base and head, with
-// their changed line numbers in head.
+// their changed line numbers in head. The options --text and --no-textconv
+// keep a .gitattributes file from hiding a changed file as binary.
 func listChanged(dir, base, head string) ([]target, error) {
-	out, tooBig, err := gitOut(dir, maxDiffBytes, "diff", "-U0", "-M", "--no-color",
-		"--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", base+"..."+head, "--", "*.go")
+	out, tooBig, err := gitOut(dir, maxDiffBytes, "diff", "-U0", "-M", "--no-color", "--text",
+		"--no-textconv", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", base+"..."+head, "--", "*.go")
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s...%s failed: %w", clean(base), clean(head), err)
 	}
@@ -250,7 +281,7 @@ func parseDiff(patch string) ([]target, error) {
 				return nil, err
 			}
 			if ok && wanted(path) {
-				targets = append(targets, target{path: path, lines: map[int]bool{}})
+				targets = append(targets, target{path: path})
 				cur = &targets[len(targets)-1]
 			}
 		case strings.HasPrefix(l, "@@ "):
@@ -258,9 +289,14 @@ func parseDiff(patch string) ([]target, error) {
 			if !ok {
 				return nil, errors.New("bad hunk header in git diff output")
 			}
+			// A file of maxFileBytes bytes has at most that many lines.
+			if newLen > 0 && (start > maxFileBytes || newLen > maxFileBytes ||
+				start+newLen-1 > maxFileBytes) {
+				return nil, fmt.Errorf("a hunk ends after line %d: not parsed", maxFileBytes)
+			}
 			oldLeft, nLeft = oldLen, newLen
-			for i := 0; cur != nil && i < newLen; i++ {
-				cur.lines[start+i] = true
+			if cur != nil && newLen > 0 {
+				cur.spans = append(cur.spans, span{start, newLen})
 			}
 		}
 	}
@@ -270,12 +306,12 @@ func parseDiff(patch string) ([]target, error) {
 // newPath reads the path of the new file from the text after "+++ ". It
 // returns ok false for a deleted file.
 func newPath(s string) (path string, ok bool, err error) {
+	// Git can end the path with a tab, also after a closing quote.
+	s = strings.TrimSuffix(s, "\t")
 	if strings.HasPrefix(s, `"`) {
 		if s, err = strconv.Unquote(s); err != nil {
 			return "", false, errors.New("bad quoted path in git diff output")
 		}
-	} else {
-		s = strings.TrimSuffix(s, "\t")
 	}
 	if s == "/dev/null" {
 		return "", false, nil
@@ -325,7 +361,7 @@ func longLines(src []byte) []hit {
 		if tok == token.EOF {
 			break
 		}
-		if tok != token.COMMENT || strings.HasPrefix(lit, "//go:") || strings.HasPrefix(lit, "//line ") {
+		if tok != token.COMMENT || isDirective(lit) {
 			continue
 		}
 		// PositionFor with false ignores "//line" directives.
@@ -360,8 +396,24 @@ func longLines(src []byte) []hit {
 	return hits
 }
 
-// width counts the columns of a line as "expand -t4" does: a tab moves to the
-// next multiple of 4, and each other character is one column.
+// isDirective reports whether a comment is a compiler directive. These are
+// "//go:" with a known name and a space, and a "//line " comment with no space
+// in its text.
+func isDirective(lit string) bool {
+	if name, ok := strings.CutPrefix(lit, "//go:"); ok {
+		for _, d := range []string{"build ", "generate ", "embed ", "linkname "} {
+			if strings.HasPrefix(name, d) {
+				return true
+			}
+		}
+		return false
+	}
+	text, ok := strings.CutPrefix(lit, "//line ")
+	return ok && !strings.Contains(text, " ")
+}
+
+// width counts the columns of a line as "expand -t4" does. A tab moves to the
+// next multiple of 4. Each other character is one column.
 func width(line string) int {
 	col := 0
 	for _, r := range line {
@@ -429,8 +481,8 @@ func gitOut(dir string, max int, args ...string) (out []byte, tooBig bool, err e
 	return w.buf.Bytes(), false, err
 }
 
-// clean makes a string safe to print: it escapes each control character,
-// each other non-printing character, and each byte that is not UTF-8.
+// clean makes a string safe to print. It escapes each control character, each
+// other non-printing character, and each byte that is not UTF-8.
 func clean(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {

@@ -28,11 +28,16 @@
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
 #
-# Jobs: lint (gofmt/vet, comment line length), dco (sign-off and commit identity, PRs only),
-# test (-race + coverage gate), trace (C10 matrix + sync stamp),
-# mirror-diff (constitution table), build (T-P-07: reproducible, static,
-# sized, cgroup-budgeted). Jobs share their checkout and gate-source
-# steps through YAML anchors.
+# Jobs:
+#   - lint: gofmt, go vet and comment line length;
+#   - dco: sign-off and commit identity, on PRs only;
+#   - test: go test -race and the coverage gate;
+#   - trace: the C10 matrix and the sync stamp;
+#   - mirror-diff: the constitution table;
+#   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
+# The test and build jobs share one checkout step through a YAML anchor.
+# The dco, trace and mirror-diff jobs share their base-checkout and
+# gate-source steps through YAML anchors. The lint job has its own checkout.
 
 name: ci
 
@@ -62,10 +67,12 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The line check fails only for comment lines that the PR changed. On
-    # push, both SHAs are empty. The Makefile then uses the merge base with
-    # origin/main, which is the pushed commit on main, so the check passes.
-    # Like gofmt and go vet, this job runs the checker from the PR head.
+    # The line check fails only for comment lines that the PR changed.
+    # On pull_request, the checkout has no ref, so it is the PR merge ref.
+    # The job builds stelint, gofmt and go vet from that merge ref.
+    # The file text that stelint reads comes from HEAD_SHA, the PR head.
+    # On push, both SHAs are empty and origin/main is the pushed commit.
+    # The range from the merge base to HEAD is then empty.
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}

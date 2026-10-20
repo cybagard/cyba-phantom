@@ -146,7 +146,7 @@ func TestURLOnlyLineIsExempt(t *testing.T) {
 		"// see " + url + "\n",
 		"// " + url + " more\n",
 		"// ftp://example.com/" + strings.Repeat("a", 100) + "\n",
-		"// https://\n" + "// " + strings.Repeat("x", 90) + "\n",
+		"// https://" + strings.Repeat(" ", 80) + "\n",
 		"x := 1 // " + url + "\n",
 		"/* " + url + " */ x := 1\n",
 	}
@@ -162,15 +162,26 @@ func TestDirectivesAreExempt(t *testing.T) {
 	for _, src := range []string{
 		"//go:generate " + long + "\n",
 		"//go:build " + long + "\n",
-		"//line foo.go:1 " + long + "\n",
+		"//go:embed " + long + "\n",
+		"//go:linkname " + long + "\n",
+		"//line " + long + ":1\n",
 	} {
 		if got := hitLines(src); len(got) != 0 {
 			t.Errorf("%q: got %v, want no hit", src, got)
 		}
 	}
 	// A comment that only looks like a directive is prose.
-	if got := hitLines("// go:generate " + long + "\n"); len(got) != 1 {
-		t.Errorf("space before go: got %v, want one hit", got)
+	for _, src := range []string{
+		"// go:generate " + long + "\n",
+		"//go:" + long + "\n",
+		"//go:generate\t" + long + "\n",
+		"//line foo.go:1 " + long + "\n",
+		"//line " + strings.Repeat("a ", 50) + "\n",
+		"//lines " + long + "\n",
+	} {
+		if got := hitLines(src); len(got) != 1 {
+			t.Errorf("%q: got %v, want one hit", src, got)
+		}
 	}
 }
 
@@ -235,8 +246,8 @@ func TestCleanEscapes(t *testing.T) {
 	}
 }
 
-// baseRepo makes a repository with a file that holds a long comment line, and
-// returns its directory and the first commit.
+// baseRepo makes a repository with a file that holds a long comment line. It
+// returns the directory and the first commit.
 func baseRepo(t *testing.T) (dir, base string) {
 	t.Helper()
 	dir = newRepo(t)
@@ -257,6 +268,37 @@ func TestChangedLongCommentFails(t *testing.T) {
 	}
 	if strings.Contains(out, "a.go:3:") {
 		t.Errorf("the unchanged long line is a hit:\n%s", out)
+	}
+}
+
+func TestChangedFileBelowSubdirectoryFails(t *testing.T) {
+	dir, base := baseRepo(t)
+	writeFile(t, dir, "pkg/sub/x.go", "package sub\n\n"+comment(93)+"\n")
+	head := commitAll(t, dir, "add")
+	code, out, _ := runLint(dir, base, head)
+	if code != 1 || !strings.Contains(out, "pkg/sub/x.go:3: 93 columns (limit 80)\n") {
+		t.Errorf("code = %d, output:\n%s", code, out)
+	}
+}
+
+func TestAttributesDoNotHideChangedFile(t *testing.T) {
+	dir, base := baseRepo(t)
+	writeFile(t, dir, ".gitattributes", "*.go -diff\n")
+	writeFile(t, dir, "a.go", "package a\n\n"+comment(95)+"\nfunc f() {}\n\n"+comment(93)+"\n")
+	head := commitAll(t, dir, "attributes")
+	code, out, _ := runLint(dir, base, head)
+	if code != 1 || !strings.Contains(out, "a.go:6: 93 columns (limit 80)\n") {
+		t.Errorf("code = %d, output:\n%s", code, out)
+	}
+}
+
+func TestQuotedPathWithSpaceFails(t *testing.T) {
+	dir, base := baseRepo(t)
+	writeFile(t, dir, "d s/ä b.go", "package a\n\n"+comment(93)+"\n")
+	head := commitAll(t, dir, "odd path")
+	code, out, errOut := runLint(dir, base, head)
+	if code != 1 || !strings.Contains(out, "d s/ä b.go:3: 93 columns (limit 80)\n") {
+		t.Errorf("code = %d, output:\n%s%s", code, out, errOut)
 	}
 }
 
@@ -519,13 +561,64 @@ func TestParseDiffErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 || targets[0].path != "späce.go" || !targets[0].lines[2] || targets[0].lines[3] ||
-		targets[1].path != "with space.go" || !targets[1].lines[4] || len(targets[1].lines) != 1 {
+	if len(targets) != 2 || targets[0].path != "späce.go" || !targets[0].has(2) || targets[0].has(3) ||
+		targets[1].path != "with space.go" || !targets[1].has(4) || targets[1].has(3) || targets[1].has(5) {
 		t.Errorf("targets = %+v", targets)
 	}
 }
 
-func TestPrintedLinesAreShort(t *testing.T) {
+func TestParseDiffQuotedPathWithTab(t *testing.T) {
+	targets, err := parseDiff("+++ \"b/sp ace\\303\\244.go\"\t\n@@ -0,0 +1 @@\n+a\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].path != "sp aceä.go" || !targets[0].has(1) {
+		t.Errorf("targets = %+v", targets)
+	}
+}
+
+func TestParseDiffFileAfterRemovedLines(t *testing.T) {
+	targets, err := parseDiff("+++ b/a.go\n@@ -1 +1 @@\n-x\n+y\n+++ b/c.go\n@@ -0,0 +5 @@\n+z\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[1].path != "c.go" || !targets[1].has(5) || targets[1].has(1) {
+		t.Errorf("targets = %+v", targets)
+	}
+}
+
+func TestParseDiffRanges(t *testing.T) {
+	targets, err := parseDiff("+++ b/a.go\n@@ -1 +2,3 @@\n-x\n+a\n+b\n+c\n@@ -9,0 +20 @@\n+d\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || len(targets[0].spans) != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	for line, want := range map[int]bool{1: false, 2: true, 4: true, 5: false, 19: false, 20: true, 21: false} {
+		if got := targets[0].has(line); got != want {
+			t.Errorf("has(%d) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+func TestParseDiffRefusesHunkPastFileLimit(t *testing.T) {
+	for _, patch := range []string{
+		"+++ b/a.go\n@@ -0,0 +1,4000000 @@\n",
+		"+++ b/a.go\n@@ -0,0 +4000000 @@\n+x\n",
+		"+++ b/a.go\n@@ -0,0 +1048576,2 @@\n",
+	} {
+		if _, err := parseDiff(patch); err == nil {
+			t.Errorf("parseDiff(%q): want an error", patch)
+		}
+	}
+	// A hunk that ends at the limit is read.
+	if _, err := parseDiff("+++ b/a.go\n@@ -0,0 +1048576 @@\n+x\n"); err != nil {
+		t.Errorf("hunk at the limit: %v", err)
+	}
+}
+
+func TestOwnCommentLinesAreShort(t *testing.T) {
 	// The tool reads its own source and test with its own rule.
 	for _, name := range []string{"main.go", "stelint_test.go"} {
 		src, err := os.ReadFile(name)

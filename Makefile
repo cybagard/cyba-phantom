@@ -32,12 +32,15 @@ lint:
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \
-	if [ -z "$$base" ]; then base=$$(git merge-base origin/main "$$head" 2>/dev/null) || base=""; fi; \
+	if [ -z "$$base" ] && git rev-parse --verify -q origin/main >/dev/null; then \
+		base=$$(git merge-base origin/main "$$head") || { echo "lint: git merge-base origin/main $$head failed"; exit 1; }; \
+	fi; \
 	$(GO) run ./tools/stelint "$$base" "$$head"
 
-# Comment lines over 80 columns in every tracked file at HEAD (or at the HEAD
-# variable). stelint prints each hit and a total and exits 0. lint checks only
-# the lines that changed between BASE and HEAD.
+# This target lists the comment lines over 80 columns in the tracked Go files
+# at HEAD, or at the HEAD variable. It skips files below testdata. It prints
+# each hit and a total. It exits 0 unless git or an input limit fails.
+# The lint target checks only the lines that changed between BASE and HEAD.
 stelint-report:
 	$(GO) run ./tools/stelint -all "$(or $(HEAD),HEAD)"
 
