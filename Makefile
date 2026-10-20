@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
+.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
 
 all: build lint test trace mirror-diff
 
@@ -31,6 +31,15 @@ lint:
 	@bad=$$(gofmt -l .); \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
+	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \
+	if [ -z "$$base" ]; then base=$$(git merge-base origin/main "$$head" 2>/dev/null) || base=""; fi; \
+	$(GO) run ./tools/stelint "$$base" "$$head"
+
+# Comment lines over 80 columns in every tracked file at HEAD (or at the HEAD
+# variable). stelint prints each hit and a total and exits 0. lint checks only
+# the lines that changed between BASE and HEAD.
+stelint-report:
+	$(GO) run ./tools/stelint -all "$(or $(HEAD),HEAD)"
 
 # The check target runs staticcheck, gosec and govulncheck on the module.
 # All three tools run on every call. Each tool prints under its own header line.
