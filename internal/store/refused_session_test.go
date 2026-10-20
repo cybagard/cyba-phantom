@@ -58,8 +58,8 @@ func (r *rig) refusedIDs(w *Writer, ja4 string, ips ...string) []string {
 	return ids
 }
 
-// wantID is the session id by the definition: the first 16 bytes of the HMAC
-// over the prefix, 0x00, the key bytes and the JA4 text.
+// wantID is the session id by the definition. It is the first 16 bytes of the
+// HMAC over the prefix, 0x00, the key bytes and the JA4 text.
 func wantID(key [32]byte, k []byte, ja4 string) string {
 	m := hmac.New(sha256.New, key[:])
 	m.Write([]byte("phantom-session-v1"))
@@ -69,9 +69,9 @@ func wantID(key [32]byte, k []byte, ja4 string) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(m.Sum(nil)[:16]))
 }
 
-// T-S-22: the session id of a refused row is the HMAC function of the batch
-// day key, the client key and the JA4 text. An IPv4-mapped address has the id
-// of its IPv4 form. Two IPv6 addresses in one /64 have one id.
+// T-S-22: the session id of a refused row is an HMAC function. Its inputs are
+// the batch day key, the client key and the JA4 text. An IPv4-mapped address
+// has the id of its IPv4 form. Two IPv6 addresses in one /64 have one id.
 func TestTS22SessionIDIsTheFunctionOfTheKeyAndTheJA4(t *testing.T) {
 	r := newRig(t, 100)
 	r.w.clock = func() time.Time { return day("2026-03-01T10:00:00Z") }
@@ -106,8 +106,17 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	if first != wantID(r.w.dk.key, k[:], "") {
 		t.Errorf("session_id %q with an empty JA4 is not the defined value", first)
 	}
-	if first == r.w.dk.hmac(netip.MustParseAddr(ip)) || first == mac(r.w.dk.key, k[:]) {
-		t.Error("the session id equals ip_hmac")
+	idBytes, err := base32.StdEncoding.WithPadding(base32.NoPadding).
+		DecodeString(strings.ToUpper(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipMAC, err := hex.DecodeString(r.w.dk.hmac(netip.MustParseAddr(ip)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(idBytes, ipMAC[:16]) {
+		t.Error("the session id bytes equal the first 16 bytes of ip_hmac")
 	}
 	if again := r.refusedIDs(r.w, "", ip)[0]; again != first {
 		t.Error("the id changed inside one date")
@@ -178,19 +187,20 @@ func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 }
 
 // T-U-18, T-S-22: the writer stores no address of a refused event. No column of
-// any table, no log line and no returned error holds an address marker. No
-// session row is written.
+// any table, no log line and no returned error holds an address marker or the
+// JA4 text. No session row is written.
 func TestTU18RefusedEventStoresNoAddress(t *testing.T) {
 	r := newRig(t, 100)
+	const ja4Marker = "ja4mk7x2q9"
 	var logs bytes.Buffer
 	r.w.log = slog.New(slog.NewTextHandler(&logs, nil))
 	ips := []string{"192.0.2.9", "198.51.100.23", "203.0.113.77", "::ffff:203.0.113.5",
 		"2001:db8:abcd:1234::1", "2001:db8::beef"}
 	markers := []string{"192.0.2.", "198.51.100.", "203.0.113.", "2001:db8", "2001:0db8", "20010db8",
-		"c00002", "c63364", "cb0071", "0xc0", "::ffff"}
+		"c00002", "c63364", "cb0071", "0xc0", "::ffff", ja4Marker}
 	var batch []*event.Event
 	for _, ip := range ips {
-		batch = append(batch, refusedEvent(t, ip, "ja4"))
+		batch = append(batch, refusedEvent(t, ip, ja4Marker))
 	}
 	if err := r.w.write(batch); err != nil {
 		t.Fatal(err)
