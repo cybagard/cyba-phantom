@@ -75,8 +75,9 @@ const (
 	base       = "acme:\n  email: sec@example.com\n" + acmeNames + tlogLine
 )
 
-// loadTest is Load with a valid value in tokenVar. An entry for tokenVar in
-// env is a second entry for it: that is a load error.
+// loadTest is Load with one entry for tokenVar before env. If the file names
+// tokenVar in a *_env key, an entry for tokenVar in env makes two entries.
+// Load then fails with the text of envMany.
 func loadTest(path string, env []string) (*Config, error) {
 	return Load(path, append([]string{tokenVar + "=" + strings.Repeat("t", 32)}, env...))
 }
@@ -254,7 +255,7 @@ func TestTS10_Scalars(t *testing.T) {
 		{"dash env", "", "PHANTOM-LISTEN-HTTP=:1", "PHANTOM-LISTEN-HTTP: unknown PHANTOM_ variable"},
 		{"ESC in env name", "", "PHANTOM_X\x1b[2J=1", `PHANTOM_X\x1b[2J: unknown PHANTOM_ variable`},
 		{"URL text to the last @", "", "PHANTOM_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
-		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 6 column 3: mapping key is invalid`},
+		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml: listen: line 6 column 3: ` + keyRule},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
