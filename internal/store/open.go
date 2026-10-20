@@ -54,11 +54,11 @@ type Options struct {
 	// Reserved lists the directories that the database must not be in:
 	// tlog.dir, acme.cache_dir, and the directory of bundle.path. Each entry is a
 	// clean path relative to the state directory; "." is the state directory
-	// itself. The directories keys and checkpoints and the names
-	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
-	// ADR-022), so the store adds them itself. The match folds A-Z to a-z in
-	// the path and in each reserved path. No other byte changes. The store does
-	// not import internal/config.
+	// itself. The store adds the fixed directories keys and checkpoints itself.
+	// It also adds the fixed names checkpoint.state, checkpoint.state.tmp and
+	// writer.stop (ADR-020, ADR-022). The match changes A-Z to a-z in the path
+	// and in each reserved path. No other byte changes. The store does not
+	// import internal/config.
 	Reserved []string
 }
 
@@ -116,7 +116,8 @@ var heap struct {
 //
 // The caller must end each use of the pool before it calls DB.Close: each
 // query, transaction and Rows. DB.Close closes only the free connections. Then
-// it closes the held descriptor, and this drops the locks of the process.
+// it closes the held descriptor. That close drops the locks of the process on
+// the database file.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
@@ -153,11 +154,12 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		onHeld(held)
 	}
 	fi, statErr := held.Stat()
-	// Each failed step calls refuse before it closes anything. While held is
-	// open, the inode of the new file is not free, so os.SameFile cannot match
-	// another file. Refuse removes the entry at rel only when it is the
-	// database file that this call made. If the Stat of the new file failed,
-	// refuse removes nothing.
+	// Each failed step calls refuse before it closes the held descriptor or
+	// the pool. While held is open, the inode of the made file is not free.
+	// Thus a file that someone makes later cannot have the same inode. refuse
+	// removes the entry at rel when the Lstat shows the file that this call
+	// made. refuse does not find a change of the entry between the Lstat and
+	// the Remove. If the Stat of the made file failed, refuse removes nothing.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()

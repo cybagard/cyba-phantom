@@ -104,11 +104,12 @@ func TestTS15RefusedOpenKeepsOtherFileWithSameName(t *testing.T) {
 	}
 }
 
-// T-S-15: a refused open of a new file runs refuse before it closes anything.
-// The hook removes the file and makes another file at the path. While Open
-// holds the descriptor, the new file cannot get the inode of the file that
-// Open made. So refuse keeps it. The rows fail Open at the first connection and
-// at the second checks.
+// T-S-15: a refused open of a new file calls refuse before it closes the
+// held descriptor or the pool. The hook removes the file that Open made. Then
+// it puts the hook's file at the path. While Open holds the descriptor, the
+// hook's file cannot get the inode of the file that Open made. So refuse keeps
+// the hook's file. The rows fail Open at the first connection and at the
+// second checks.
 func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
 	rows := []struct {
 		name, rule string
@@ -311,8 +312,8 @@ func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f.refused(t, "events.db", "state directory", ruleOwner)
 }
 
-// T-S-15: a state directory or parent directory is refused if it has group or
-// other bits. The same holds for a setuid, setgid or sticky bit. Nothing
+// T-S-15: Open refuses a state directory or parent directory with group or
+// other bits. It also refuses one with a setuid, setgid or sticky bit. Nothing
 // changes.
 func TestTS15UnsafeDirectoryIsRefused(t *testing.T) {
 	for _, mode := range []os.FileMode{0o777, 0o750, 0o705, os.ModeSetgid | 0o700, os.ModeSticky | 0o700} {

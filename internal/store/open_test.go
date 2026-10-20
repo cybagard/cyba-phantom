@@ -119,7 +119,7 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 		{"tlog", ruleReserved}, {"tlog/events.db", ruleReserved},
 		{"keys/events.db", ruleReserved}, {"checkpoints/events.db", ruleReserved},
 		{"certs/events.db", ruleReserved}, {"bundle/x/events.db", ruleReserved},
-		// A reserved path in another case of the ASCII letters is refused too.
+		// Open also refuses a reserved path in another case of ASCII letters.
 		{"Keys/events.db", ruleReserved}, {"KEYS", ruleReserved},
 		{"CHECKPOINTS/events.db", ruleReserved}, {"WRITER.STOP", ruleReserved},
 		{"Checkpoint.State", ruleReserved}, {"checkpoint.STATE.tmp", ruleReserved},
@@ -269,8 +269,8 @@ func TestTS15BeginTakesWriteLockAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The first transaction ends before the pools close. The close of a pool
-	// closes a descriptor of the file, and this drops the locks of the
-	// process.
+	// closes a descriptor of the file. That close drops the locks of the
+	// process on the file.
 	defer tx1.Rollback()
 	tx2, err := db2.Begin()
 	if err == nil {

@@ -173,7 +173,7 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 				if err := os.Symlink(file+".moved", file); err != nil {
 					t.Fatal(err)
 				}
-				// This direct query is refused by the file check.
+				// The file check refuses this direct query.
 				wantRule(t, r.db.QueryRow("SELECT 1").Scan(new(int)), "events.db", ruleType)
 				want++ // the writer makes one more try
 			case "other file renamed over":
@@ -209,8 +209,8 @@ func swapAfterVerify(t *testing.T, rule string, swap func(f *fixture)) {
 	swapAfterVerifyOf(t, "events.db", rule, swap)
 }
 
-// swapAfterVerifyOf is swapAfterVerify with a name. Name is the file that the
-// refusal names, for example events.db-wal.
+// swapAfterVerifyOf is swapAfterVerify with one more argument: name is the
+// file that the refusal names, for example events.db-wal.
 func swapAfterVerifyOf(t *testing.T, name, rule string, swap func(f *fixture)) {
 	f := newFixture(t)
 	data, err := os.ReadFile(filepath.Join(f.state, "events.db"))
@@ -237,8 +237,8 @@ func swapAfterVerifyOf(t *testing.T, name, rule string, swap func(f *fixture)) {
 // T-S-15: the second checks find a swap that someone puts in place after the
 // open of SQLite. The swap can be a rename that puts a symlink in place of
 // the file. It can be a rename that puts a different clean file in place. It
-// can be a new hard link to the file. A symlink in place of the WAL, SHM or
-// journal file is found too.
+// can be a new hard link to the file. The second checks also find a symlink in
+// place of the WAL, SHM or journal file.
 func TestTS15SwapAfterOpenIsRefused(t *testing.T) {
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		t.Run("symlink in place of "+suffix, func(t *testing.T) {
