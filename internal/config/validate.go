@@ -22,6 +22,9 @@ import (
 // defaultStateRoot is the directory that state paths must stay under.
 const defaultStateRoot = "/var/lib/phantom"
 
+// DefaultStateRoot is defaultStateRoot for the code outside this package.
+const DefaultStateRoot = defaultStateRoot
+
 // loader holds the settings that the validators use. A test sets them to use a temporary directory.
 type loader struct {
 	stateRoot string   // stateRoot is the directory that state paths must stay under after symlink resolution.

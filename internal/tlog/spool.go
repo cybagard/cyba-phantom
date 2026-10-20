@@ -17,6 +17,10 @@ import (
 	"golang.org/x/mod/sumdb/note"
 )
 
+// SpoolDirName is the spool directory below the state directory, for the code
+// outside this package.
+const SpoolDirName = spoolDir
+
 // The spool files are at fixed names below the state directory (ADR-020).
 const (
 	spoolDir       = "checkpoints"

@@ -101,8 +101,99 @@ func TestTS10_CheckNoDial(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckStorePath checks that --check refuses each bad store.path with exit 1 and the error text of the load,
-// and accepts a good path (SEC-20). The state directory is the default one.
+// TestTS10_CheckExec runs the binary. A valid file gives exit 0. An invalid
+// file gives a non-zero exit, with the key and the source in stderr (FR-12).
+// The output has no secret marker (T-S-10). The URL check is only a syntax
+// check. An acme.ca value that is not a URL fails and names acme.ca (FR-12).
+func TestTS10_CheckExec(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "phantom")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	const marker = "SECRET-MARKER-7c1f9a"
+	var outs string
+	run := func(file string, env ...string) (code int, stdout, stderr string) {
+		var so, se strings.Builder
+		cmd := exec.Command(bin, "--check", file)
+		// The publisher of validBody names CKPT_TOKEN.
+		cmd.Env = append(append(os.Environ(), "CKPT_TOKEN="+marker), env...)
+		cmd.Stdout, cmd.Stderr = &so, &se
+		err := cmd.Run()
+		// outs holds the output of every run.
+		defer func() { outs += so.String() + se.String() }()
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return code, so.String(), se.String()
+	}
+	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
+	code, _, se := run(writeFile(t, validBody(t)))
+	if code != 0 {
+		t.Errorf("valid file: exit %d, stderr %q", code, se)
+	}
+	code, _, se = run(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
+	if code == 0 {
+		t.Error("acme.ca not a URL: exit 0")
+	}
+	if !strings.Contains(se, "acme.ca") {
+		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
+	}
+	code, _, se = run(bad)
+	if code == 0 {
+		t.Error("invalid file: exit 0")
+	}
+	for _, want := range []string{"listen.nope", "config.yaml:4"} {
+		if !strings.Contains(se, want) {
+			t.Errorf("invalid file: stderr %q lacks %q", se, want)
+		}
+	}
+	// The loader never prints the value of a URL key or a secret key. The email
+	// value has a wrong type, so the loader prints it. The marker is in the
+	// user information of a URL-like text. So the printed value must show
+	// REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
+	code, _, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
+	if code == 0 {
+		t.Error("wrong type: exit 0")
+	}
+	if !strings.Contains(se, "REDACTED@") {
+		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
+	}
+	// A *_env key can hold a pasted secret in place of a name. The error names
+	// the key path and never the variable name. This holds for an unset
+	// variable and for a short one (SEC-13).
+	const nameMarker = "JBSWY3DPEHPK3PXPZZSECRETQ7"
+	tok := strings.Replace(validBody(t), "CKPT_TOKEN", nameMarker, 1)
+	hook := validBody(t) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example.invalid/a\", hmac_secret_env: " + nameMarker + "}\n"
+	for _, c := range []struct {
+		name, body, env, key string
+	}{
+		{"token unset", tok, "", "tlog.publish[0].token_env"},
+		{"hmac unset", hook, "", "alerts.sinks[0].hmac_secret_env"},
+		{"hmac short", hook, nameMarker + "=short", "alerts.sinks[0].hmac_secret_env"},
+	} {
+		env := []string{}
+		if c.env != "" {
+			env = append(env, c.env)
+		}
+		code, so, se := run(writeFile(t, c.body), env...)
+		if code == 0 || !strings.Contains(se, c.key) {
+			t.Errorf("%s: exit %d, stderr %q lacks %s", c.name, code, se, c.key)
+		}
+		if strings.Contains(so+se, nameMarker) {
+			t.Errorf("%s: the output holds the variable name: %q", c.name, so+se)
+		}
+	}
+	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") || strings.Contains(outs, nameMarker) {
+		t.Errorf("output holds a secret: %q", outs)
+	}
+}
+
+// TestTS11_CheckStorePath checks that --check refuses each bad store.path with
+// exit 1 and the error text of the load. It also checks that --check accepts a
+// good path (SEC-20, T-S-11). Each row also names the rule in the detail of the
+// error. The state directory is the default one.
 func TestTS11_CheckStorePath(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	file := writeFile(t, validBody(t))
@@ -121,25 +212,31 @@ func TestTS11_CheckStorePath(t *testing.T) {
 	for _, c := range []struct {
 		name, path string
 		extra      []string
+		detail     string
 	}{
-		{"question mark", s + "events.db?mode=rwc", nil},
-		{"hash", s + "events.db#x", nil},
-		{"space", s + "my events.db", nil},
-		{"non-ASCII letter", s + "évents.db", nil},
-		{"tlog.dir", s + "tlog/e.db", nil},
-		{"acme.cache_dir", s + "certs/e.db", nil},
-		{"directory of bundle.path", s + "bundle/e.db", nil},
-		{"keys", s + "keys/e.db", nil},
-		{"checkpoints", s + "checkpoints/e.db", nil},
-		{"checkpoint.state", s + "checkpoint.state", nil},
-		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil},
-		{"writer.stop", s + "writer.stop", nil},
-		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}},
+		{"question mark", s + "events.db?mode=rwc", nil, "each path part below"},
+		{"hash", s + "events.db#x", nil, "each path part below"},
+		{"space", s + "my events.db", nil, "each path part below"},
+		{"non-ASCII letter", s + "évents.db", nil, "each path part below"},
+		{"parent part", s + "a/../events.db", nil, "the path must be clean"},
+		{"state directory", "/var/lib/phantom", nil, "the path must be below the state directory"},
+		{"tlog.dir", s + "tlog/e.db", nil, "must not be in tlog.dir"},
+		{"acme.cache_dir", s + "certs/e.db", nil, "must not be in acme.cache_dir"},
+		{"directory of bundle.path", s + "bundle/e.db", nil, "must not be in the directory of bundle.path"},
+		{"keys", s + "keys/e.db", nil, "must not be in the keys directory"},
+		{"checkpoints", s + "checkpoints/e.db", nil, "must not be in the checkpoints directory"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state\n"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
+		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "must not be in tlog.dir"},
+		{"acme.cache_dir set", s + "c/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c"}, "must not be in acme.cache_dir"},
+		{"bundle.path set", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x.cbnd"}, "must not be in the directory of bundle.path"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(c.path, c.extra...)
-			if code != 1 || !strings.Contains(se, "store.path") || loadErr == "" || se != loadErr+"\n" {
-				t.Errorf("exit %d, stderr %q, load error %q", code, se, loadErr)
+			_, after, found := strings.Cut(se, "store.path at PHANTOM_STORE_PATH: ")
+			if code != 1 || !found || !strings.Contains(after, c.detail) || loadErr == "" || se != loadErr+"\n" {
+				t.Errorf("exit %d, stderr %q, load error %q; want detail %q", code, se, loadErr, c.detail)
 			}
 		})
 	}
@@ -259,89 +356,5 @@ func TestTS11_CheckACME(t *testing.T) {
 				t.Errorf("exit %d, stderr %q, want a refusal that names %q", code, se.String(), r.key)
 			}
 		})
-	}
-}
-
-// TestTS10_CheckExec runs the binary: exit 0 for a valid file, non-zero for an invalid file
-// with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
-// URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
-func TestTS10_CheckExec(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "phantom")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-	const marker = "SECRET-MARKER-7c1f9a"
-	var outs string
-	run := func(file string, env ...string) (code int, stdout, stderr string) {
-		var so, se strings.Builder
-		cmd := exec.Command(bin, "--check", file)
-		cmd.Env = append(append(os.Environ(), "CKPT_TOKEN="+marker), env...) // The publisher of validBody names CKPT_TOKEN.
-		cmd.Stdout, cmd.Stderr = &so, &se
-		err := cmd.Run()
-		defer func() { outs += so.String() + se.String() }() // outs holds the output of every run.
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		return code, so.String(), se.String()
-	}
-	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
-	code, _, se := run(writeFile(t, validBody(t)))
-	if code != 0 {
-		t.Errorf("valid file: exit %d, stderr %q", code, se)
-	}
-	code, _, se = run(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
-	if code == 0 {
-		t.Error("acme.ca not a URL: exit 0")
-	}
-	if !strings.Contains(se, "acme.ca") {
-		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
-	}
-	code, _, se = run(bad)
-	if code == 0 {
-		t.Error("invalid file: exit 0")
-	}
-	for _, want := range []string{"listen.nope", "config.yaml:4"} {
-		if !strings.Contains(se, want) {
-			t.Errorf("invalid file: stderr %q lacks %q", se, want)
-		}
-	}
-	// The loader never prints the value of a URL key or a secret key. The email value has a wrong
-	// type, so the loader prints it. The marker is in the user information of a URL-like text, so the
-	// printed value must show REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
-	code, _, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
-	if code == 0 {
-		t.Error("wrong type: exit 0")
-	}
-	if !strings.Contains(se, "REDACTED@") {
-		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
-	}
-	// A *_env key can hold a pasted secret in place of a name. The error names the key path and
-	// never the variable name, for an unset variable and for a short one (SEC-13).
-	const nameMarker = "JBSWY3DPEHPK3PXPZZSECRETQ7"
-	tok := strings.Replace(validBody(t), "CKPT_TOKEN", nameMarker, 1)
-	hook := validBody(t) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example.invalid/a\", hmac_secret_env: " + nameMarker + "}\n"
-	for _, c := range []struct {
-		name, body, env, key string
-	}{
-		{"token unset", tok, "", "tlog.publish[0].token_env"},
-		{"hmac unset", hook, "", "alerts.sinks[0].hmac_secret_env"},
-		{"hmac short", hook, nameMarker + "=short", "alerts.sinks[0].hmac_secret_env"},
-	} {
-		env := []string{}
-		if c.env != "" {
-			env = append(env, c.env)
-		}
-		code, so, se := run(writeFile(t, c.body), env...)
-		if code == 0 || !strings.Contains(se, c.key) {
-			t.Errorf("%s: exit %d, stderr %q lacks %s", c.name, code, se, c.key)
-		}
-		if strings.Contains(so+se, nameMarker) {
-			t.Errorf("%s: the output holds the variable name: %q", c.name, so+se)
-		}
-	}
-	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") || strings.Contains(outs, nameMarker) {
-		t.Errorf("output holds a secret: %q", outs)
 	}
 }
