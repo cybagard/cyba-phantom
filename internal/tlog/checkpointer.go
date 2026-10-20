@@ -82,8 +82,8 @@ type Checkpointer struct {
 // empty tree. A healthy checkpointer gives a pending note to the sink at each
 // tick, before it checks the current tree. So the first tick gives the stored
 // note to the sink, also if the tree grew or the log stopped. If Add fails, a
-// later tick tries again. After a fault, no tick gives a note to the sink, and a pending note stays
-// unsent.
+// later tick tries again. After a fault, no tick gives a note to the sink, and
+// a pending note stays unsent.
 func NewCheckpointer(log *Log, signer note.Signer, verifier note.Verifier, sink NoteSink, state *os.Root,
 	origin string, interval time.Duration, lg *slog.Logger) (*Checkpointer, error) {
 	switch {
@@ -269,8 +269,8 @@ func (c *Checkpointer) sign() {
 // deliver gives the pending note to the sink. It does this for the first time
 // and for each try after a failure. A failed Add leaves the note pending.
 // `sign` then tries again at each later tick, before it checks the tree, until
-// a fault stops it. A new note replaces a pending note. Spool.Add replaces the file of
-// that size, so a second Add is safe.
+// a fault stops it. A new note replaces a pending note. Spool.Add replaces the
+// file of that size, so a second Add is safe.
 func (c *Checkpointer) deliver() {
 	if c.unsent == nil {
 		return
