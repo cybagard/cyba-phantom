@@ -1484,8 +1484,8 @@ func TestTS10_ListSecrets(t *testing.T) {
 			continue
 		}
 		errs := err.(interface{ Unwrap() []error }).Unwrap()
-		// A reader error has no Key. Its Detail starts with the path,
-		// shortened to 64 bytes.
+		// A reader error has no Key. readError changes a path below a secret
+		// key to the path of that key. The Detail starts with that path.
 		if !slices.ContainsFunc(errs, func(e error) bool {
 			return strings.HasPrefix(e.(*Error).Detail, c.cut+": ")
 		}) {

@@ -362,7 +362,8 @@ func TestTS11_CheckACME(t *testing.T) {
 
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
 // from, and an smtp to. Each value holds U+0085, U+0001, U+202E, U+2028, or
-// U+2029. The exit code is 1. Stderr names the key and gives the rule (T-S-11).
+// U+2029. The exit code is 1. Stderr names the key and gives the rule. It
+// does not hold the character (T-S-11).
 func TestTS11_CheckEmailMarks(t *testing.T) {
 	body := validBody(t)
 	smtp := func(from, to string) string {
