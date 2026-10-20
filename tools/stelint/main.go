@@ -397,8 +397,8 @@ func longLines(src []byte) []hit {
 }
 
 // isDirective reports whether a comment is a compiler directive. These are
-// "//go:" with a known name and a space, and a "//line " comment with no space
-// in its text.
+// "//go:" with a known name and a space, and "//line" with no space in its
+// text.
 func isDirective(lit string) bool {
 	if name, ok := strings.CutPrefix(lit, "//go:"); ok {
 		for _, d := range []string{"build ", "generate ", "embed ", "linkname "} {
