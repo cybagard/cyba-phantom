@@ -33,6 +33,7 @@
 # Jobs: lint (gofmt/vet), dco (sign-off and commit identity, PRs only),
 # test (-race + coverage gate), oracle (tar reader oracle, in the
 # pinned golang container), trace (C10 matrix + sync stamp),
+# trace-tests (a Go test or marker for each test ID of the milestone),
 # mirror-diff (constitution table), build (T-P-07: reproducible, static,
 # sized, cgroup-budgeted). Jobs share their checkout and gate-source
 # steps through YAML anchors.
@@ -198,6 +199,34 @@ jobs:
           (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
           cd "${{ steps.gate.outputs.tree }}"
           "$RUNNER_TEMP/trace" all spec
+
+  trace-tests:
+    # Checker-from-base, as in the trace job. This job has its own
+    # GATE_FILE. The base of the PR that adds the tests mode has no
+    # tests.go. Thus at bootstrap the job builds from the work tree and
+    # gives the warning. The milestone comes from the TRACE_MILESTONE line
+    # of the Makefile of the work tree. That line is the one copy of the
+    # value.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/trace/tests.go
+      GATE_NAME: test ID
+    steps:
+      - *base-checkout
+      - *work-checkout
+      - *gate-source
+
+      - name: Test IDs of the current milestone
+        run: |
+          (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
+          cd "${{ steps.gate.outputs.tree }}"
+          ms=$(sed -n 's/^TRACE_MILESTONE := \(M-[0-9][0-9]*\)$/\1/p' Makefile | tail -n 1)
+          if [ -z "$ms" ]; then
+            echo "::error::Makefile has no TRACE_MILESTONE := M-n line"
+            exit 1
+          fi
+          "$RUNNER_TEMP/trace" tests spec --milestone "$ms"
 
   mirror-diff:
     # Checker-from-base: the extraction script comes from the PR base
