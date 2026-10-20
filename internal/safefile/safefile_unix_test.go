@@ -1,4 +1,4 @@
-//go:build unix
+//go:build unix && !aix && !solaris
 
 package safefile
 
@@ -131,7 +131,6 @@ func TestTS23_RuleTable(t *testing.T) {
 	}{
 		{"regular", "f600", base, nil, nil},
 		{"dir", "d", Rule{Type: Dir, Owner: OwnerSelf}, nil, nil},
-		{"regular is a dir", "d", base, nil, ErrType},
 		{"dir is a file", "f600", Rule{Type: Dir, Owner: OwnerSelf}, nil, ErrType},
 		{"self or root", "f600", with(base, func(r *Rule) { r.Owner = OwnerSelfOrRoot }), nil, nil},
 		{"any owner", "f600", with(base, func(r *Rule) { r.Owner = OwnerAny }), nil, nil},
@@ -156,7 +155,35 @@ func TestTS23_RuleTable(t *testing.T) {
 				safefiletest.Set(t, *tc.hooks)
 			}
 			err := open(t, r, tc.file, tc.rule)
-			if tc.want == nil && err != nil || !errors.Is(err, tc.want) {
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+	// A file of root, opened as a normal user, has another owner.
+	etc, etcErr := os.OpenRoot("/etc")
+	if etcErr == nil {
+		defer etc.Close()
+	}
+	rootOwned := []struct {
+		name  string
+		owner Owner
+		want  error
+	}{
+		{"root file, self", OwnerSelf, ErrOwner},
+		{"root file, self or root", OwnerSelfOrRoot, nil},
+		{"root file, any owner", OwnerAny, nil},
+	}
+	for _, tc := range rootOwned {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("the file is the own file of root")
+			}
+			if etcErr != nil {
+				t.Skip("no /etc:", etcErr)
+			}
+			err := open(t, etc, "passwd", with(base, func(r *Rule) { r.Owner = tc.owner }))
+			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
@@ -206,11 +233,30 @@ func TestTS23_Identity(t *testing.T) {
 	}
 }
 
+// neverOpened fails the test when Open reaches the open of a refused name.
+func neverOpened(t *testing.T) {
+	t.Helper()
+	hook := func(string) { t.Error("Open ran a hook after the open check") }
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: hook, AfterOpen: hook})
+}
+
+func TestTS23_DirAtRegularNameNeverOpened(t *testing.T) {
+	r, dir := root(t)
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	neverOpened(t)
+	if err := open(t, r, "d", base); !errors.Is(err, ErrType) {
+		t.Errorf("err = %v, want ErrType", err)
+	}
+}
+
 func TestTS23_FIFOAtNameNeverOpened(t *testing.T) {
 	r, dir := root(t)
 	if err := syscall.Mkfifo(filepath.Join(dir, "p"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	neverOpened(t)
 	// The call must not run the open, so it needs no reader or writer.
 	if err := timed(t, r, "p", base); !errors.Is(err, ErrType) {
 		t.Errorf("err = %v, want ErrType", err)
@@ -223,6 +269,7 @@ func TestTS23_DeviceRefused(t *testing.T) {
 		t.Skip("no /dev:", err)
 	}
 	defer dev.Close()
+	neverOpened(t)
 	if err := timed(t, dev, "null", base); !errors.Is(err, ErrType) {
 		t.Errorf("err = %v, want ErrType", err)
 	}
@@ -238,6 +285,7 @@ func TestTS23_SocketRefused(t *testing.T) {
 	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: filepath.Join(dir, "s")}); err != nil {
 		t.Skip("no bind:", err)
 	}
+	neverOpened(t)
 	if err := timed(t, r, "s", base); !errors.Is(err, ErrType) {
 		t.Errorf("err = %v, want ErrType", err)
 	}
@@ -320,6 +368,61 @@ func TestTS23_SymlinkOutOfRootSwapAfterCheck(t *testing.T) {
 	})
 	if err := open(t, r, "f", base); !errors.Is(err, ErrOpen) {
 		t.Errorf("err = %v, want ErrOpen", err)
+	}
+}
+
+// A link to the checked file opens the checked file, and the rule runs on it.
+func TestTS23_SymlinkToCheckedFileOpens(t *testing.T) {
+	r, dir := root(t)
+	file(t, dir, "f", 0o600)
+	p := filepath.Join(dir, "f")
+	orig, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapAfterCheck(t, func(string) {
+		if err := os.Rename(p, filepath.Join(dir, "b")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink("b", p); err != nil {
+			t.Error(err)
+		}
+	})
+	f, fi, err := Open(r, "f", base)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	defer f.Close()
+	if !os.SameFile(orig, fi) {
+		t.Error("Open did not give the checked file")
+	}
+}
+
+func TestTS23_NameOnePart(t *testing.T) {
+	r, dir := root(t)
+	file(t, dir, "f", 0o600)
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file(t, filepath.Join(dir, "d"), "f", 0o600)
+	if err := os.Symlink("d", filepath.Join(dir, "a")); err != nil {
+		t.Fatal(err)
+	}
+	noHook := func(string) { t.Error("a hook ran for a refused name") }
+	safefiletest.Set(t, safefiletest.Hooks{
+		BeforeCheck: noHook, AfterCheck: noHook, AfterOpen: noHook,
+	})
+	for _, name := range []string{"", "a/f", "d/f", "/f", "f/"} {
+		if err := open(t, r, name, base); !errors.Is(err, ErrName) {
+			t.Errorf("name %q: err = %v, want ErrName", name, err)
+		}
+	}
+}
+
+func TestTS23_NameDotDotExamined(t *testing.T) {
+	r, _ := root(t)
+	if err := open(t, r, "..", Rule{Type: Dir, Owner: OwnerAny}); !errors.Is(err, ErrExamine) {
+		t.Errorf("err = %v, want ErrExamine", err)
 	}
 }
 

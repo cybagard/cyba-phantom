@@ -46,6 +46,7 @@ type FileID = seam.FileID
 // The refusals. Each one is the Reason field of an *Error.
 var (
 	ErrRule        = errors.New("safefile: rule is not valid")
+	ErrName        = errors.New("safefile: name is not one path element")
 	ErrType        = errors.New("safefile: file has the wrong type")
 	ErrSymlink     = errors.New("safefile: file is a symbolic link")
 	ErrOwner       = errors.New("safefile: file has the wrong owner")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile/internal/seam"
@@ -20,21 +21,25 @@ func Identity(fi fs.FileInfo) (FileID, bool) {
 	return FileID{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, true
 }
 
-// Open checks name below root, opens it and checks the open file. The open
-// does not block. A symlink at the name is refused before the open. A symlink
-// that replaces the file after the check is refused by the identity compare,
-// or by the open when it leaves the root. The caller closes the file.
+// Open checks name below root, opens it and checks the open file. The name is
+// one path element. Open refuses an empty name and a name with a slash. It
+// does not walk a directory below the root. The open does not block. Open
+// refuses a symlink at the name before the open. A symlink that replaces
+// the file after the check gives ErrChanged when it points to another file.
+// It gives ErrOpen when it leaves the root. A link to the checked file opens
+// that file, and the whole rule runs on it. The caller closes the file.
 func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if root == nil || !r.valid() {
 		return nil, nil, fail(ErrRule, nil)
+	}
+	if name == "" || strings.Contains(name, "/") {
+		return nil, nil, fail(ErrName, nil)
 	}
 	h := seam.Current()
 	if h == nil {
 		h = &seam.Hooks{}
 	}
-	if h.BeforeCheck != nil {
-		h.BeforeCheck(name)
-	}
+	call(h.BeforeCheck, name)
 	li, err := root.Lstat(name)
 	if err != nil {
 		return nil, nil, fail(ErrExamine, err)
@@ -42,9 +47,9 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if err := checkType(li, r); err != nil {
 		return nil, nil, err
 	}
-	if h.AfterCheck != nil {
-		h.AfterCheck(name)
-	}
+	call(h.AfterCheck, name)
+	// os.Root follows a last symlink that stays in the root, also with
+	// O_NOFOLLOW. The identity compare below catches a link to another file.
 	flags := os.O_RDONLY | syscall.O_NONBLOCK | syscall.O_NOCTTY |
 		syscall.O_NOFOLLOW
 	if r.Type == Dir {
@@ -54,15 +59,14 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if err != nil {
 		return nil, nil, openError(err)
 	}
-	if h.AfterOpen != nil {
-		h.AfterOpen(name)
-	}
+	call(h.AfterOpen, name)
 	fi, err := f.Stat()
-	if err == nil && !os.SameFile(li, fi) {
-		err = fail(ErrChanged, nil)
-	} else if err != nil {
+	switch {
+	case err != nil:
 		err = fail(ErrExamine, err)
-	} else {
+	case !os.SameFile(li, fi):
+		err = fail(ErrChanged, nil)
+	default:
 		err = checkOpen(fi, r, h)
 	}
 	if err != nil {
@@ -72,8 +76,16 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	return f, fi, nil
 }
 
-// openError names the refusal of a failed open. A symlink or a directory
-// that replaced the checked file is a refusal of its own.
+// call runs a hook when it is set.
+func call(hook func(name string), name string) {
+	if hook != nil {
+		hook(name)
+	}
+}
+
+// openError names the refusal of a failed open. A symlink loop gives ELOOP.
+// A file that replaces a directory gives ENOTDIR. A directory that replaces
+// a file opens, and the identity compare gives ErrChanged.
 func openError(err error) error {
 	switch {
 	case errors.Is(err, syscall.ELOOP), errors.Is(err, syscall.EMLINK):
