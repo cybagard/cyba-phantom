@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -147,7 +148,7 @@ type pubEnv struct {
 // newPub makes a spool and a publisher for the targets. The publisher trusts the
 // certificates of the targets; the clock is fixed and the jitter is 0.5, which
 // gives the delay with no change.
-func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ...PublishOption) *pubEnv {
+func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ...publishOption) *pubEnv {
 	t.Helper()
 	root, dir := newState(t)
 	if os.Getenv(tokenVar) == "" { // the constructor needs a token
@@ -169,7 +170,7 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 	base := func(c *publishConfig) {
 		c.roots, c.now, c.jitter = pool, e.clock.now, func() float64 { return 0.5 }
 	}
-	e.pub, err = NewPublisher(e.spool, pt, interval, lg, append([]PublishOption{base}, opts...)...)
+	e.pub, err = newPublisher(e.spool, pt, interval, lg, append([]publishOption{base}, opts...)...)
 	must(t, err)
 	return e
 }
@@ -197,24 +198,26 @@ func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 	}
 }
 
-func withTimeout(d time.Duration) PublishOption { return func(c *publishConfig) { c.timeout = d } }
+func withTimeout(d time.Duration) publishOption { return func(c *publishConfig) { c.timeout = d } }
 
 // T-S-13: the lock-hold check, as a test. It uses several notes and the real
 // publisher. An HTTPS target holds the request for the first note open.
 // While a pass is in Send, Spool.Add returns. The test checks the overlap and
-// not a time. Add returns while the pass still runs, and the target stores a
-// size above 1 only later. Add returns before the test releases the held
-// request. After the release, the pass sends the notes in increasing size.
-// The cursor is the last size that the target stored.
+// not a time. Add returns while the pass still runs. The target stores no size
+// above 1 until the test releases the held request. After the release, the
+// pass sends the notes in increasing size. The cursor is the last size that
+// the target stored.
 func TestTS13AddDoesNotWaitForSlowTarget(t *testing.T) {
 	const hang = 5 * time.Second
 	a := newTarget(t)
 	a.stall = make(chan struct{})
 	a.arrived = make(chan struct{}, 1)
+	e := newPub(t, time.Minute, []*fakeTarget{a}, withTimeout(30*time.Second))
 	var release sync.Once
 	free := func() { release.Do(func() { close(a.stall) }) }
-	t.Cleanup(free) // runs before the close of the server
-	e := newPub(t, time.Minute, []*fakeTarget{a}, withTimeout(30*time.Second))
+	// The cleanups run in reverse order. This one runs before the close of the
+	// server, which waits for the held request.
+	t.Cleanup(free)
 	for size := uint64(1); size <= 5; size++ {
 		e.add(t, size)
 	}
@@ -254,6 +257,10 @@ func TestTS13AddDoesNotWaitForSlowTarget(t *testing.T) {
 	}
 	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1, 2, 3, 4, 5}) {
 		t.Fatalf("stored = %v, want 1 2 3 4 5", stored)
+	}
+	// Size 6 is above the limit of the pass, so the spool still has it.
+	if _, err := os.Stat(filepath.Join(e.dir, noteName(6))); err != nil {
+		t.Fatalf("the note of size 6 is not in the spool: %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(e.dir, e.spool.cursorName(0))); err != nil || string(b) != "5" {
 		t.Fatalf("cursor = %q, %v, want 5", b, err)
@@ -306,6 +313,69 @@ func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	e.pub.pass()
 	if downAttempts, _, _ = down.got(); !slices.Equal(downAttempts, []uint64{1, 1}) {
 		t.Fatalf("down attempts = %v, want a new try after the backoff", downAttempts)
+	}
+}
+
+// T-I-09: an entry that is not a note and cannot be deleted (a directory that
+// is not empty) makes Spool.Publish return an error after each send got a 2xx.
+// That is not a fault of the targets, so the pass does not back them off. The
+// spool counts the entry and the pass logs it again at each pass.
+func TestTI09_EntryErrorDoesNotBackOffTargets(t *testing.T) {
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	e.add(t, 1)
+	stuck := filepath.Join(e.dir, noteName(2))
+	must(t, os.MkdirAll(filepath.Join(stuck, "inner"), 0o700))
+	pass := func() {
+		t.Helper()
+		if wait, pending := e.pub.pass(); pending || wait != 0 {
+			t.Fatalf("pass = %v, %v, want not pending", wait, pending)
+		}
+		for i, st := range e.pub.state {
+			if st != (backoffState{}) {
+				t.Errorf("target %d is in backoff: %+v", i, st)
+			}
+		}
+	}
+	pass()
+	e.add(t, 3) // the clock stays, so a target in backoff gets no note
+	pass()
+	for i, f := range []*fakeTarget{a, b} {
+		if _, stored, _ := f.got(); !slices.Equal(stored, []uint64{1, 3}) {
+			t.Errorf("target %d stored %v, want 1 3 with no wait after the entry error", i, stored)
+		}
+	}
+	if got := e.spool.Stats().Rejected; got != 4 { // 2 targets in 2 passes
+		t.Errorf("rejected = %d, want 4", got)
+	}
+	if n := strings.Count(e.logs.String(), "has an entry that is not a note"); n != 4 {
+		t.Errorf("log has %d lines for the entry, want one for each target and pass: %s", n, e.logs)
+	}
+	if _, err := os.Stat(stuck); err != nil {
+		t.Errorf("the entry is gone: %v", err)
+	}
+}
+
+// T-I-09: only entry errors are no fault of the target. A send error, or an
+// error of another kind joined with them, is one.
+func TestTI09_EntryCount(t *testing.T) {
+	entry := entryError{errors.New("entry")}
+	other := errors.New("other")
+	for name, tc := range map[string]struct {
+		err  error
+		want int
+	}{
+		"no error":         {nil, 0},
+		"one entry":        {errors.Join(entry), 1},
+		"two entries":      {errors.Join(entry, entry), 2},
+		"entry and other":  {errors.Join(entry, other), 0},
+		"not joined":       {entry, 0},
+		"send error":       {fmt.Errorf("send failed: %w", errPublishStatus), 0},
+		"entry in a chain": {errors.Join(fmt.Errorf("wrapped: %w", entry)), 1},
+	} {
+		if got := entryCount(tc.err); got != tc.want {
+			t.Errorf("%s: entryCount = %d, want %d", name, got, tc.want)
+		}
 	}
 }
 
@@ -414,9 +484,29 @@ func TestTI09_BackoffStartsAfterSend(t *testing.T) {
 	}
 }
 
+// T-I-09: the delay stops at the cap, and the jitter does not move a wait above
+// the cap. Below the cap, the jitter spreads the wait by plus or minus 20 %.
 func TestTI09_BackoffCapAndJitter(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, 24*time.Hour, []*fakeTarget{a})
+	wait := func(j float64) time.Duration {
+		e.pub.jitter = func() float64 { return j }
+		e.pub.backoff(0, e.clock.t)
+		return e.pub.state[0].next.Sub(e.clock.t)
+	}
+	near := func(got, want time.Duration) bool {
+		return got >= want-time.Microsecond && got <= want+time.Microsecond
+	}
+	// Two backoffs give the delays 30 s and 60 s.
+	e.pub.backoff(0, e.clock.t)
+	e.pub.backoff(0, e.clock.t)
+	// The next delay is 120 s, then 240 s.
+	if got, want := wait(0), 96*time.Second; !near(got, want) {
+		t.Errorf("lowest wait below the cap = %v, want %v", got, want)
+	}
+	if got, want := wait(0.75), 264*time.Second; !near(got, want) {
+		t.Errorf("wait above the delay and below the cap = %v, want %v", got, want)
+	}
 	for range 12 {
 		e.pub.backoff(0, e.clock.t)
 	}
@@ -424,17 +514,46 @@ func TestTI09_BackoffCapAndJitter(t *testing.T) {
 		t.Fatalf("delay = %v, want the cap of 1 h for a 24 h interval", e.pub.state[0].delay)
 	}
 	for _, j := range []float64{0, 0.25, 0.5, 0.75, 0.999999} {
-		e.pub.jitter = func() float64 { return j }
-		e.pub.backoff(0, e.clock.t)
-		lo, hi := 48*time.Minute-time.Microsecond, 72*time.Minute+time.Microsecond
-		if got := e.pub.state[0].next.Sub(e.clock.t); got < lo || got > hi {
-			t.Fatalf("jitter %v: wait %v is not within 20%% of 1 h", j, got)
+		if got := wait(j); got < 48*time.Minute-time.Microsecond || got > time.Hour {
+			t.Fatalf("jitter %v: wait %v is not between 48 min and the cap of 1 h", j, got)
 		}
 	}
-	e.pub.jitter = func() float64 { return 0 }
-	e.pub.backoff(0, e.clock.t)
-	if got := e.pub.state[0].next.Sub(e.clock.t); got < 48*time.Minute-time.Microsecond || got > 48*time.Minute+time.Microsecond {
+	if got := wait(0); !near(got, 48*time.Minute) {
 		t.Fatalf("lowest wait = %v, want 48m0s", got)
+	}
+	if got := wait(0.999999); got != time.Hour {
+		t.Fatalf("highest wait = %v, want the cap of 1 h", got)
+	}
+}
+
+// T-S-13: with an interval of 30 s, the cap and the floor are both 30 s. The
+// wait is 30 s for every jitter, and a target that failed is not tried again
+// before 30 s.
+func TestTS13_FailedTargetWaitsForTheFloor(t *testing.T) {
+	a := newTarget(t)
+	a.setStatus(http.StatusInternalServerError)
+	e := newPub(t, backoffStart, []*fakeTarget{a})
+	e.add(t, 1)
+	for _, j := range []float64{0, 0.5, 0.999999} {
+		e.pub.state[0] = backoffState{}
+		e.pub.jitter = func() float64 { return j }
+		e.pub.backoff(0, e.clock.t)
+		if got := e.pub.state[0].next.Sub(e.clock.t); got != backoffStart {
+			t.Errorf("jitter %v: wait = %v, want %v", j, got, backoffStart)
+		}
+	}
+	e.pub.state[0] = backoffState{}
+	e.pub.jitter = func() float64 { return 0 }
+	e.pub.pass()
+	e.clock.t = e.clock.t.Add(backoffStart - time.Second)
+	e.pub.pass()
+	if attempts, _, _ := a.got(); !slices.Equal(attempts, []uint64{1}) {
+		t.Fatalf("attempts = %v after 29 s, want one try", attempts)
+	}
+	e.clock.t = e.clock.t.Add(time.Second)
+	e.pub.pass()
+	if attempts, _, _ := a.got(); !slices.Equal(attempts, []uint64{1, 1}) {
+		t.Fatalf("attempts = %v after 30 s, want a second try", attempts)
 	}
 }
 
@@ -486,6 +605,54 @@ func TestTI09_NewPublisherRefusesBadInput(t *testing.T) {
 			t.Errorf("error does not name the target index: %v", err)
 		}
 	}
+}
+
+// T-S-13: the constructor refuses an interval below 30 s, the start of the
+// backoff, and accepts 30 s.
+func TestTS13_NewPublisherIntervalFloor(t *testing.T) {
+	a := newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a})
+	targets := []PublishTarget{{a.url(), tokenVar}}
+	for _, interval := range []time.Duration{time.Nanosecond, backoffStart - time.Second, backoffStart - time.Nanosecond} {
+		if _, err := NewPublisher(e.spool, targets, interval, nil); err == nil {
+			t.Errorf("interval %v: want an error", interval)
+		}
+	}
+	for _, interval := range []time.Duration{backoffStart, backoffStart + time.Nanosecond} {
+		if _, err := NewPublisher(e.spool, targets, interval, nil); err != nil {
+			t.Errorf("interval %v: %v", interval, err)
+		}
+	}
+}
+
+// T-S-13: the constructor refuses two targets with the same URL. Send takes the
+// first target with a URL, so the second target would never get a request. The
+// error has no URL.
+func TestTS13_NewPublisherRefusesDuplicateURLs(t *testing.T) {
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	root, _ := newState(t)
+	_, verifier := noteKeys(t, testOrigin, 1)
+	for name, urls := range map[string][]string{
+		"same target twice":   {a.url(), a.url()},
+		"equal after another": {a.url(), b.url(), a.url()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var targets []PublishTarget
+			for _, u := range urls {
+				targets = append(targets, PublishTarget{u, tokenVar})
+			}
+			spool, err := OpenSpool(root, nil, testOrigin, verifier, urls)
+			must(t, err)
+			p, err := NewPublisher(spool, targets, time.Minute, nil)
+			if err == nil || p != nil {
+				t.Fatalf("publisher %v, error %v, want an error", p, err)
+			}
+			e.assertClean(t, "error", err.Error())
+		})
+	}
+	_, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}, {b.url(), tokenVar}}, time.Minute, nil)
+	must(t, err) // two different URLs are not a duplicate
 }
 
 // T-I-09: a target that stalls gives a timeout error with a fixed class.
