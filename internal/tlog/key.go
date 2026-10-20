@@ -24,6 +24,10 @@ const (
 	maxKeySize = 1024
 )
 
+// VKeyName is the public key file below the state directory, for the code
+// outside this package.
+const VKeyName = vkeyName
+
 // LoadOrCreateSigner returns the checkpoint signer. It opens the key through
 // root, the state directory that the caller opened one time. The key name must
 // equal origin (tlog.origin).

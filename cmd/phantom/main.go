@@ -48,7 +48,8 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 }
 
 // serve runs the sensor until SIGINT or SIGTERM (see serveWith). A test replaces it.
-// The signal handler is set before the start, so a signal during the start is caught.
+// serve sets the signal handler before the start, so it catches a signal
+// during the start.
 var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
