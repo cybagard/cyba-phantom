@@ -263,6 +263,29 @@ func TestTS23_CheckFIFONoOpen(t *testing.T) {
 	}
 }
 
+// A file with mode 0 cannot be opened, but Check only examines it.
+func TestTS23_CheckOpensNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a file with mode 0")
+	}
+	r, dir := root(t)
+	p := put(t, dir, "f", "0123456789")
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := Check(r, "f", base)
+	if err != nil || !os.SameFile(fi, want) {
+		t.Errorf("Check: %v, %v", fi, err)
+	}
+	if err := open(t, r, "f", base); !errors.Is(err, ErrOpen) {
+		t.Errorf("Open: err = %v, want ErrOpen", err)
+	}
+}
+
 func TestTS23_ErrorTextHoldsNoPathOrBytes(t *testing.T) {
 	r, dir := root(t)
 	const secret = "SECRETCONTENT"

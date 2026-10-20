@@ -52,7 +52,18 @@ func importers(dir, path string) ([]string, error) {
 }
 
 func TestTS23_NoNonTestFileImportsSafefiletest(t *testing.T) {
-	found, err := importers(filepath.Join("..", ".."), testHelperPath)
+	top := filepath.Join("..", "..")
+	mod, err := os.ReadFile(filepath.Join(top, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const line = "module github.com/cybagard/cyba-phantom"
+	if !slices.ContainsFunc(strings.Split(string(mod), "\n"), func(l string) bool {
+		return strings.TrimSpace(l) == line
+	}) {
+		t.Fatalf("%s is not the module root: no line %q", top, line)
+	}
+	found, err := importers(top, testHelperPath)
 	if err != nil {
 		t.Fatal(err)
 	}
