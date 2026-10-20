@@ -19,14 +19,14 @@ const (
 	Dir
 )
 
-// Owner is the owner rule.
+// Owner is the owner check.
 type Owner uint8
 
-// The owner rules.
+// The owner checks.
 const (
 	OwnerSelf       Owner = iota + 1 // the effective user only
 	OwnerSelfOrRoot                  // the effective user or root
-	OwnerAny                         // no owner rule
+	OwnerAny                         // no owner check
 )
 
 // Rule is the rule of one caller. The zero value is not valid. Open refuses
@@ -43,7 +43,7 @@ type Rule struct {
 // FileID is the device and inode of a file.
 type FileID = seam.FileID
 
-// The errors of a refusal. Each one is the Rule field of an *Error.
+// The refusals. Each one is the Reason field of an *Error.
 var (
 	ErrRule        = errors.New("safefile: rule is not valid")
 	ErrType        = errors.New("safefile: file has the wrong type")
@@ -58,31 +58,31 @@ var (
 	ErrUnsupported = errors.New("safefile: system is not supported")
 )
 
-// Error is a refusal. Its text is the fixed text of the rule. It holds no
-// path and no file bytes.
+// Error is a refusal. Its text is the fixed text of the refusal. It holds
+// no path and no file bytes.
 type Error struct {
-	Rule  error // one of the Err values
-	Cause error // the system error, or nil
+	Reason error // one of the Err values
+	Cause  error // the system error, or nil
 }
 
-// Error gives the fixed text of the rule.
-func (e *Error) Error() string { return e.Rule.Error() }
+// Error gives the fixed text of the refusal.
+func (e *Error) Error() string { return e.Reason.Error() }
 
-// Unwrap gives the rule and the cause, so errors.Is finds both.
+// Unwrap gives the refusal and the cause, so errors.Is finds both.
 func (e *Error) Unwrap() []error {
 	if e.Cause == nil {
-		return []error{e.Rule}
+		return []error{e.Reason}
 	}
-	return []error{e.Rule, e.Cause}
+	return []error{e.Reason, e.Cause}
 }
 
 // fail makes the error of a refusal. A path error loses its path.
-func fail(rule, cause error) error {
+func fail(reason, cause error) error {
 	var pe *fs.PathError
 	if errors.As(cause, &pe) {
 		cause = pe.Err
 	}
-	return &Error{Rule: rule, Cause: cause}
+	return &Error{Reason: reason, Cause: cause}
 }
 
 const modeBits = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
