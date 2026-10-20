@@ -55,6 +55,9 @@ func (d *dayKey) hmac(a netip.Addr) string {
 // sessionPrefix makes the session id differ from ip_hmac for one client key.
 const sessionPrefix = "phantom-session-v1"
 
+// sessionEncoding is the base32 form of a session id: no padding.
+var sessionEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
 // sessionID returns the session id of a refused event: the first 16 bytes of
 // HMAC-SHA256 over the prefix, 0x00, the client key and the JA4 text, in
 // lower-case base32 with no padding. ip is the client address text. It returns
@@ -74,6 +77,6 @@ func (d *dayKey) sessionID(ip, ja4 string) *string {
 	m.Write([]byte{0})
 	m.Write(k.AsSlice())
 	m.Write([]byte(ja4))
-	id := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(m.Sum(nil)[:16]))
+	id := strings.ToLower(sessionEncoding.EncodeToString(m.Sum(nil)[:16]))
 	return &id
 }

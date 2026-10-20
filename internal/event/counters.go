@@ -90,7 +90,8 @@ func (c Counters) Format(f fmt.State, _ rune) {
 // CounterKey returns the key for a. It maps an IPv4-mapped IPv6 address to
 // IPv4, removes the zone, and masks an IPv6 address to its /64 prefix. The
 // second result is false for an invalid address: that address has no key. The
-// store uses the same key for ip_hmac and for the session id of a refused event.
+// store uses the same key for ip_hmac and for the session id of a refused
+// event.
 func CounterKey(a netip.Addr) (netip.Addr, bool) {
 	a = a.Unmap().WithZone("")
 	if !a.IsValid() {
