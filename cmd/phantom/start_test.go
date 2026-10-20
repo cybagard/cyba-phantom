@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -13,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -76,9 +79,9 @@ func put(t *testing.T, q *event.Queue, k event.Kind, n int) {
 	}
 }
 
-// refusals are the stores that do not open: a refused path, a file that is not
-// a database, a refused schema, a database with the wrong auto_vacuum, and a
-// failed migration.
+// refusals are the stores that do not open. One row refuses the path, and one
+// has a file that is not a database. One row refuses the schema, and one has
+// a wrong auto_vacuum. The last row fails the migration.
 var refusals = []struct {
 	name, path string
 	want       string // the text of the *store.Error in the log
@@ -122,9 +125,9 @@ func prepDB(t *testing.T, file, stmts string) {
 }
 
 // TestTU18_StoreRefused checks that a store that does not open leaves the
-// process running with no writer, not healthy, and with one call that opens the
-// log and one that opens the store. The log has the reason, and a refused
-// schema leaves the database closed (T-U-18).
+// process running. There is no writer, and the part is not healthy. One call
+// opens the log and one call opens the store. The log has the reason. A
+// refused schema leaves the database closed (T-U-18).
 func TestTU18_StoreRefused(t *testing.T) {
 	for _, c := range refusals {
 		t.Run(c.name, func(t *testing.T) {
@@ -156,8 +159,8 @@ func TestTU18_StoreRefused(t *testing.T) {
 	}
 }
 
-// TestTU18_LogRefused checks that a log that does not open gives no store and
-// no writer, not healthy, and no key directory (T-U-18).
+// TestTU18_LogRefused checks that a log that does not open gives no store, no
+// writer and no key directory. The part is not healthy (T-U-18).
 func TestTU18_LogRefused(t *testing.T) {
 	var o opens
 	d := o.deps()
@@ -176,8 +179,9 @@ func TestTU18_LogRefused(t *testing.T) {
 }
 
 // TestTU18_Checkpointer checks that a checkpointer that starts gives
-// TlogHealthy. A signer that refuses (a log with a leaf, no key, no signer
-// state) leaves no checkpointer and no key file, and the writer runs (T-U-18).
+// TlogHealthy. A signer that refuses leaves no checkpointer and no key file,
+// and the writer runs. The signer refuses a log with a leaf, no key and no
+// signer state (T-U-18).
 func TestTU18_Checkpointer(t *testing.T) {
 	t.Run("starts", func(t *testing.T) {
 		s, _ := launch(t, testParams(t, "events.db"), realDeps)
@@ -213,9 +217,9 @@ func TestTU18_Checkpointer(t *testing.T) {
 }
 
 // TestTU18_DrainWithoutStore checks that with no store, the drain takes the
-// events out of both lanes at its tick, and counts each drop for its lane. The
-// tick of Discard is fixed (250 ms), and a test cannot replace it, so the test
-// waits for the drops with a limit of 10 s (T-U-18).
+// events out of both lanes at its tick. It counts each drop for its lane. The
+// tick of the drain is fixed (250 ms), and a test cannot replace it. So the
+// test waits for the drops with a limit of 10 s (T-U-18).
 func TestTU18_DrainWithoutStore(t *testing.T) {
 	s, q := launch(t, testParams(t, "keys/events.db"), realDeps)
 	put(t, q, event.KindRequest, 2)
@@ -230,9 +234,9 @@ func TestTU18_DrainWithoutStore(t *testing.T) {
 	}
 }
 
-// TestTU18_Sink checks that the checkpointer gets the checkpoint row sink, with
-// the writer and with no writer, and never the bare spool. With the writer, the
-// sink call stores the row (T-U-18).
+// TestTU18_Sink checks that the checkpointer gets the checkpoint row sink and
+// never the bare spool. This holds with the writer and with no writer. With the
+// writer, the sink call stores the row (T-U-18).
 func TestTU18_Sink(t *testing.T) {
 	for _, c := range []struct {
 		name, path string
@@ -276,9 +280,9 @@ func TestTU18_Sink(t *testing.T) {
 }
 
 // TestTU18_OneStart checks that a writer that stopped at its start check leaves
-// the part not healthy. After that, the checkpointer runs, the drain ticks
-// several times, and start opens the log and the store one time each and makes
-// one writer (T-U-18).
+// the part not healthy. After that, the checkpointer runs and the drain ticks
+// several times. start opens the log and the store one time each and makes one
+// writer (T-U-18).
 func TestTU18_OneStart(t *testing.T) {
 	p := testParams(t, "events.db")
 	p.Interval = 10 * time.Millisecond
@@ -299,9 +303,10 @@ func TestTU18_OneStart(t *testing.T) {
 		t.Errorf("checkpointer started %v, tlog healthy %v; want it to run", s.cp != nil, s.TlogHealthy())
 	}
 	testutil.WaitFor(t, func() bool { return !s.Healthy() }, 10*time.Second)
-	// The stopped writer drops the events of the lanes only at its tick, and a new event does not wake it. So
-	// each drop that the count shows is one tick of the drain. Wait for three, then check the counts. The
-	// checkpointer ticks every 10 ms, so it ticked many times in these three.
+	// The stopped writer drops the events of the lanes only at its tick. A new
+	// event does not wake it. So each drop that the count shows is one tick of
+	// the drain. Wait for three, then check the counts. The checkpointer ticks
+	// every 10 ms, so it ticked many times in these three.
 	for want := uint64(1); want <= 3; want++ {
 		put(t, q, event.KindRequest, 1)
 		testutil.WaitFor(t, func() bool { return s.writer.Stats().Dropped.Bulk >= want }, 10*time.Second)
@@ -342,8 +347,8 @@ func TestTU18_StopOrder(t *testing.T) {
 	}
 }
 
-// savedKey makes the signer key and the public key file in the state directory
-// of p, as an earlier start did.
+// savedKey makes the signer key and the public key file in the state
+// directory of p. An earlier start did the same.
 func savedKey(t *testing.T, p startParams) {
 	t.Helper()
 	r, err := os.OpenRoot(p.Root)
@@ -367,41 +372,64 @@ func otherKey(t *testing.T, name string) string {
 }
 
 // TestTU18_VkeyMismatch checks that a public key file that is not the key of
-// the signer gives a start error, and the spool does not open (T-U-18). A key
-// with the same name and the same 32-bit key hash as the signer needs about
-// 2^32 keys, and NewVerifier checks the hash, so the table has no such key.
+// the signer gives a start error, and the spool does not open (T-U-18). The
+// table has no key with the same name and the same 32-bit key hash as the
+// signer. Such a key needs about 2^32 keys, and NewVerifier checks the hash.
 // TestTU18_SameKey covers it.
 func TestTU18_VkeyMismatch(t *testing.T) {
-	p := testParams(t, "events.db")
-	for _, c := range []struct{ name, vkey string }{
-		{"other name", otherKey(t, "other/origin")},
-		{"same name, other key", otherKey(t, p.Origin)},
+	for _, c := range []struct {
+		name string
+		vkey func(t *testing.T, p startParams, saved string) string // the new public key text
+	}{
+		{"other name", func(t *testing.T, p startParams, _ string) string { return otherKey(t, "other/origin") }},
+		{"same name, other key", func(t *testing.T, p startParams, _ string) string { return otherKey(t, p.Origin) }},
+		{"same key, other name", func(t *testing.T, _ startParams, saved string) string {
+			// The text is name+hash+base64(algorithm byte, public key).
+			parts := strings.SplitN(strings.TrimSpace(saved), "+", 3)
+			if len(parts) != 3 {
+				t.Fatalf("public key text has %d parts, want 3", len(parts))
+			}
+			raw, err := base64.StdEncoding.DecodeString(parts[2])
+			if err != nil || len(raw) != 1+ed25519.PublicKeySize {
+				t.Fatalf("public key bytes: %d, %v", len(raw), err)
+			}
+			v, err := note.NewEd25519VerifierKey("other/origin", ed25519.PublicKey(raw[1:]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := testParams(t, "events.db")
 			savedKey(t, p)
 			vpath := filepath.Join(p.Root, tlog.VKeyName)
+			saved, err := os.ReadFile(vpath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vkey := c.vkey(t, p, string(saved))
 			if err := os.Remove(vpath); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(vpath, []byte(c.vkey+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(vpath, []byte(vkey+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer
-			spools := 0
+			checkpointerCalls := 0
 			d := realDeps
 			d.newCheckpointer = func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink, *os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error) {
-				spools++
+				checkpointerCalls++
 				return nil, errors.New("the checkpointer must not start")
 			}
 			s, _ := launchLog(t, p, d, slog.New(slog.NewTextHandler(&buf, nil)))
-			if s.cp != nil || s.TlogHealthy() || spools != 0 {
-				t.Errorf("checkpointer started %v, tlog healthy %v, checkpointer calls %d; want none", s.cp != nil, s.TlogHealthy(), spools)
+			if s.cp != nil || s.TlogHealthy() || checkpointerCalls != 0 {
+				t.Errorf("checkpointer started %v, tlog healthy %v, checkpointer calls %d; want none", s.cp != nil, s.TlogHealthy(), checkpointerCalls)
 			}
 			if !strings.Contains(buf.String(), "checkpointer does not start") {
 				t.Errorf("log %q; want \"checkpointer does not start\"", buf.String())
 			}
-			if _, err := os.Stat(filepath.Join(p.Root, spoolDirName)); !errors.Is(err, fs.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(p.Root, tlog.SpoolDirName)); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("spool directory: %v; want it not made", err)
 			}
 		})
@@ -414,9 +442,9 @@ type rejectingKey struct{ note.Verifier }
 
 func (rejectingKey) Verify(msg, sig []byte) bool { return false }
 
-// TestTU18_SameKey checks that sameKey accepts the public key of the signer,
-// and refuses a verifier that has the name and the key hash of the signer but
-// does not verify its signature (T-U-18).
+// TestTU18_SameKey checks that sameKey accepts the public key of the signer.
+// It also checks that sameKey refuses a verifier that does not verify the
+// signature of the signer, although it has the name and the key hash (T-U-18).
 func TestTU18_SameKey(t *testing.T) {
 	skey, vkey, err := note.GenerateKey(rand.Reader, "test/origin")
 	if err != nil {
@@ -438,52 +466,156 @@ func TestTU18_SameKey(t *testing.T) {
 	}
 }
 
+// storeWithCheckpointRow makes the store of p with one checkpoint row, and
+// closes it.
+func storeWithCheckpointRow(t *testing.T, p startParams) {
+	t.Helper()
+	r, err := os.OpenRoot(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	db, err := store.Open(r, p.StorePath, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := store.Migrate(db, p.Origin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) VALUES (1, zeroblob(32), 'n', 1)"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestTS13_NoKeyOverRows checks that with keys/, checkpoint.state and tlog/
 // removed, a store with a checkpoint row or a spool with an entry gives no new
-// key, no signer state and no checkpointer (T-S-13, SEC-16). A spool that
-// cannot be read also gives no key. The empty store with no spool entry still
-// makes a key (first start).
+// key, no signer state and no checkpointer (T-S-13, SEC-16). A store that
+// exists and does not open also gives no key. A spool that start cannot read
+// does the same. A spool that is a FIFO or a symlink gives no key, and start
+// returns. The empty store with no spool entry still makes a key (first
+// start).
 func TestTS13_NoKeyOverRows(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		prep func(t *testing.T, p startParams)
+		name     string
+		prep     func(t *testing.T, p startParams)
+		deps     func(d *startDeps, hookErr *error)
+		wantKey  bool // a first start: the key and the checkpointer
+		healthy  bool // the writer runs
+		opens    bool // the store opens
+		needRoot bool // the row needs a user that is not root
 	}{
-		{"checkpoint row", func(t *testing.T, p startParams) {
-			r, err := os.OpenRoot(p.Root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer r.Close()
-			db, err := store.Open(r, p.StorePath, store.Options{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			if err := store.Migrate(db, p.Origin); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec("INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) VALUES (1, zeroblob(32), 'n', 1)"); err != nil {
+		{name: "checkpoint row", healthy: true, prep: storeWithCheckpointRow},
+		{name: "store with a checkpoint row that does not open", prep: func(t *testing.T, p startParams) {
+			storeWithCheckpointRow(t, p)
+			// The store refuses a file with group or other bits.
+			if err := os.Chmod(filepath.Join(p.Root, p.StorePath), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"spool entry", func(t *testing.T, p startParams) {
-			if err := os.Mkdir(filepath.Join(p.Root, spoolDirName), 0o700); err != nil {
+		{name: "checkpoint query fails", opens: true,
+			deps: func(d *startDeps, hookErr *error) {
+				d.migrate = func(db *sql.DB, origin string) error {
+					if err := store.Migrate(db, origin); err != nil {
+						return err
+					}
+					_, *hookErr = db.Exec("DROP TABLE checkpoint")
+					return *hookErr
+				}
+			}},
+		{name: "spool entry", prep: func(t *testing.T, p startParams) {
+			if err := os.Mkdir(filepath.Join(p.Root, tlog.SpoolDirName), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(p.Root, spoolDirName, "1.note"), nil, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(p.Root, tlog.SpoolDirName, "1.note"), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"spool is a file", func(t *testing.T, p startParams) {
-			if err := os.WriteFile(filepath.Join(p.Root, spoolDirName), nil, 0o600); err != nil {
+		{name: "spool is a file", prep: func(t *testing.T, p startParams) {
+			if err := os.WriteFile(filepath.Join(p.Root, tlog.SpoolDirName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "spool is a FIFO", prep: func(t *testing.T, p startParams) {
+			if err := syscall.Mkfifo(filepath.Join(p.Root, tlog.SpoolDirName), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "spool is a symlink", prep: func(t *testing.T, p startParams) {
+			if err := os.Mkdir(filepath.Join(p.Root, "empty"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("empty", filepath.Join(p.Root, tlog.SpoolDirName)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "spool is a dangling symlink", prep: func(t *testing.T, p startParams) {
+			if err := os.Symlink("missing", filepath.Join(p.Root, tlog.SpoolDirName)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "spool directory does not open", needRoot: true, prep: func(t *testing.T, p startParams) {
+			dir := filepath.Join(p.Root, tlog.SpoolDirName)
+			if err := os.Mkdir(dir, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			// The cleanup of the temporary directory needs the mode back.
+			t.Cleanup(func() { os.Chmod(dir, 0o700) })
+		}},
+		{name: "empty store, no spool", wantKey: true},
+		{name: "empty store, empty spool directory", wantKey: true, prep: func(t *testing.T, p startParams) {
+			if err := os.Mkdir(filepath.Join(p.Root, tlog.SpoolDirName), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.needRoot && os.Geteuid() == 0 {
+				t.Skip("root reads a directory with mode 0")
+			}
 			p := testParams(t, "events.db")
-			c.prep(t, p)
-			s, _ := launch(t, p, realDeps)
+			if c.prep != nil {
+				c.prep(t, p)
+			}
+			d := realDeps
+			var hookErr error
+			if c.deps != nil {
+				c.deps(&d, &hookErr)
+			}
+			cnt := event.NewCounters()
+			q, err := event.NewQueue(8, cnt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A FIFO in the spool path must not block start.
+			done := make(chan *storePart, 1)
+			go func() { done <- start(p, q, cnt, d, slog.New(slog.DiscardHandler)) }()
+			var s *storePart
+			select {
+			case s = <-done:
+				t.Cleanup(s.Stop)
+			case <-time.After(10 * time.Second):
+				t.Fatal("start did not return")
+			}
+			if hookErr != nil {
+				t.Fatalf("migrate hook: %v", hookErr)
+			}
+			if c.opens && s.db == nil {
+				t.Error("the store did not open; want it open")
+			}
+			if c.healthy {
+				// The writer sets Healthy in its own goroutine, so wait for it.
+				testutil.WaitFor(t, s.Healthy, 10*time.Second)
+			}
+			if c.wantKey {
+				if s.cp == nil {
+					t.Error("no checkpointer; want a first start to make one")
+				}
+				if _, err := os.Stat(filepath.Join(p.Root, tlog.VKeyName)); err != nil {
+					t.Errorf("public key file: %v; want it made", err)
+				}
+				return
+			}
 			if s.cp != nil || s.TlogHealthy() {
 				t.Errorf("checkpointer started %v, tlog healthy %v; want none", s.cp != nil, s.TlogHealthy())
 			}
@@ -496,9 +628,9 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 	}
 }
 
-// TestParamsOf checks the values that start takes from the loaded config. It
-// has no spec test ID: it tests the mapping of the config values, not the
-// start.
+// TestParamsOf checks the values that start takes from the loaded config
+// (FR-07, FR-12). It has no spec test ID: it tests the mapping of the config
+// values, not the start.
 func TestParamsOf(t *testing.T) {
 	cfg, err := config.Load(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)})
 	if err != nil {

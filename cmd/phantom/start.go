@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -24,9 +25,6 @@ import (
 // stateDir is the state directory. The config loader keeps each state path below it.
 const stateDir = config.DefaultStateRoot
 
-// spoolDirName is the directory of the signed notes below the state directory.
-const spoolDirName = "checkpoints"
-
 // startParams holds the values of the store start. Each path is relative to Root, in slash form.
 type startParams struct {
 	Root, StorePath, TlogDir, Origin string
@@ -36,8 +34,8 @@ type startParams struct {
 	BodyPrefix                       bool
 }
 
-// startDeps holds the parts that a test replaces to count the calls that open
-// the log and the store, or to see the sink.
+// startDeps holds the parts that a test replaces. A test counts the calls that
+// open the log and the store, or looks at the sink.
 type startDeps struct {
 	openLog   func(*os.Root, string) (*tlog.Log, error)
 	openStore func(*os.Root, string, store.Options) (*sql.DB, error)
@@ -66,7 +64,7 @@ var realDeps = startDeps{
 func paramsOf(cfg *config.Config) startParams {
 	rel := func(abs string) string {
 		// The loader checks the path below the state directory after symlinks.
-		// A path that is not below it as text gives a ".." path, and the open
+		// A path that is not below it as text gives a ".." path. The open
 		// through the root then refuses it.
 		r, err := filepath.Rel(stateDir, abs)
 		if err != nil {
@@ -85,8 +83,9 @@ func paramsOf(cfg *config.Config) startParams {
 	}
 }
 
-// storePart is the store part of the process: the writer, or the drain when the
-// store did not open, and the checkpointer.
+// storePart is the store part of the process. It holds the checkpointer and
+// the writer. When the store did not open, it holds the drain in place of the
+// writer.
 type storePart struct {
 	q      *event.Queue
 	writer *store.Writer // nil when the store did not open
@@ -110,12 +109,12 @@ func (s *storePart) TlogHealthy() bool { return s.cp != nil && s.cp.Healthy() }
 // Drops returns the count of the events that the drain dropped. It stays zero when the store opened.
 func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 
-// start opens the log and the store one time each and starts the writer or the
-// drain, and the checkpointer. A state directory, a log or a store that does
-// not open gives no writer, and the store part is not healthy. start logs a
-// checkpointer that does not start, and Healthy does not show it (see
-// TlogHealthy). There is no reopen, retry or restart. q and c are the queue and
-// its counters.
+// start opens the log and the store one time each. It starts the writer or
+// the drain, and the checkpointer. A state directory, a log or a store that
+// does not open gives no writer, and the store part is not healthy. start logs
+// a checkpointer that does not start, and Healthy does not show it (see
+// TlogHealthy). There is no reopen, retry or restart. q and c are the queue
+// and its counters.
 func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *slog.Logger) *storePart {
 	s := &storePart{q: q, cancel: func() {}}
 	var err error
@@ -156,19 +155,32 @@ func (s *storePart) openDB(p startParams, d startDeps) (*sql.DB, error) {
 
 // hasSignedCheckpoint tells if the store has a checkpoint row or the spool has
 // an entry. Then an earlier key signed a checkpoint, even when the key files,
-// the signer state and the log are gone. Without a store, only the spool
-// counts.
-func (s *storePart) hasSignedCheckpoint() (bool, error) {
+// the signer state and the log are gone. The rows of a store that did not open
+// are unknown. So an entry at storePath counts as a signed checkpoint. Without
+// an entry at storePath, only the spool counts.
+func (s *storePart) hasSignedCheckpoint(storePath string) (bool, error) {
 	if s.db != nil {
 		var found bool
 		if err := s.db.QueryRow("SELECT EXISTS (SELECT 1 FROM checkpoint)").Scan(&found); err != nil || found {
 			return found, err
 		}
+	} else if _, err := s.root.Lstat(storePath); !errors.Is(err, fs.ErrNotExist) {
+		return true, nil
 	}
-	dir, err := s.root.Open(spoolDirName)
+	// The spool must be a real directory. A FIFO or a symlink there must not
+	// block the start or lead out of the state directory.
+	fi, err := s.root.Lstat(tlog.SpoolDirName)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	} else if err != nil {
+		return false, errors.New("checkpoints directory cannot be examined")
+	} else if !fi.IsDir() {
+		return false, errors.New("checkpoints must be a real directory and not a symlink")
+	}
+	// O_DIRECTORY makes the open fail for an entry that replaced the directory
+	// after the Lstat, a FIFO for example. The open does not block.
+	dir, err := s.root.OpenFile(tlog.SpoolDirName, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
 		return false, err
 	}
 	defer dir.Close()
@@ -200,15 +212,16 @@ func sameKey(signer note.Signer, v note.Verifier) error {
 }
 
 // startCheckpointer gives the checkpointer the checkpoint row sink over the
-// spool. The sink has the writer, or nil. It treats a store with a checkpoint
-// row or a spool with an entry as a log that has a signed checkpoint (SEC-16),
-// so a new key never signs size 0 over them.
+// spool. The sink has the writer, or nil. A new key is made only on a first
+// start (SEC-16). A checkpoint row, a spool entry, or an error on a read of
+// either gives no new key. A store that did not open but has an entry at its
+// path also gives no new key.
 func (s *storePart) startCheckpointer(p startParams, d startDeps, lg *slog.Logger) error {
 	_, exists, err := tlog.SignerState(s.root)
 	if err != nil {
 		return err
 	}
-	signed, err := s.hasSignedCheckpoint()
+	signed, err := s.hasSignedCheckpoint(p.StorePath)
 	if err != nil {
 		return err
 	}
