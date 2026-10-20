@@ -52,19 +52,108 @@ func TestTS15ChangedPathAfterChecksIsRefused(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(state, "data"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	afterChecks = func() {
-		os.Rename(filepath.Join(state, "data"), filepath.Join(state, "data.real"))
-		os.Symlink("data.real", filepath.Join(state, "data"))
-	}
-	defer func() { afterChecks = nil }()
+	setHook(t, &afterChecks, func() {
+		if err := os.Rename(filepath.Join(state, "data"), filepath.Join(state, "data.real")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("data.real", filepath.Join(state, "data")); err != nil {
+			t.Fatal(err)
+		}
+	})
 	db, err := Open(root, "data/events.db", Options{})
 	if db != nil {
 		db.Close()
 	}
 	wantRule(t, err, "data/events.db", ruleLocation)
-	// The refused open leaves no new database file.
-	if _, err := os.Lstat(filepath.Join(state, "data.real", "events.db")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("the file that Open made stays: %v", err)
+	// The refused open leaves no new database file, and no WAL or SHM file.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if _, err := os.Lstat(filepath.Join(state, "data.real", "events.db"+suffix)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("events.db%s of the refused open stays: %v", suffix, err)
+		}
+	}
+}
+
+// T-S-15: a refused open of a new file does not remove another file with the
+// same name. The hook puts a different clean file in place of the new file.
+// That file stays, and the refused open leaves no WAL or SHM file.
+func TestTS15RefusedOpenKeepsOtherFileWithSameName(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	clean := cleanDatabase(t)
+	other, err := os.Lstat(clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHook(t, &afterChecks, func() {
+		if err := os.Rename(clean, file); err != nil {
+			t.Fatal(err)
+		}
+	})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleChanged)
+	if fi, err := os.Lstat(file); err != nil || !os.SameFile(fi, other) {
+		t.Fatalf("the other file with the same name is gone: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Lstat(file + suffix); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("events.db%s of the refused open stays: %v", suffix, err)
+		}
+	}
+}
+
+// T-S-15: a refused open of a new file calls refuse before it closes the
+// held descriptor or the pool. The hook removes the file that Open made. Then
+// it puts the hook's file at the path. While Open holds the descriptor, the
+// hook's file cannot get the inode of the file that Open made. So refuse keeps
+// the hook's file. The rows fail Open at the first connection and at the
+// second checks.
+func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
+	rows := []struct {
+		name, rule string
+		fail       func(t *testing.T, file string)
+	}{
+		{"first connection", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterChecks, func() {
+				if err := os.Chmod(file, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+		{"second checks", ruleChanged, func(t *testing.T, file string) {
+			setHook(t, &afterVerify, func() { replaceFile(t, file) })
+		}},
+	}
+	const content = "other file"
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			r.fail(t, file)
+			ran := 0
+			setHook(t, &beforeRefuse, func() {
+				ran++
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "events.db", r.rule)
+			if ran != 1 {
+				t.Fatalf("refuse ran %d times, want 1", ran)
+			}
+			if b, err := os.ReadFile(file); err != nil || string(b) != content {
+				t.Fatalf("the new file is gone or changed: %q, %v", b, err)
+			}
+		})
 	}
 }
 
@@ -211,8 +300,7 @@ func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 			return n, uid, ok
 		}
 	}
-	defer func() { fileFacts = systemFacts }()
-	fileFacts = facts("events.db")
+	setHook(t, &fileFacts, facts("events.db"))
 	f.refused(t, "events.db", "events.db", ruleOwner)
 	// The same hook for the state directory and for a parent directory.
 	if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
@@ -224,8 +312,9 @@ func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f.refused(t, "events.db", "state directory", ruleOwner)
 }
 
-// T-S-15: the state directory and a parent directory with group or other bits,
-// or with a setuid, setgid or sticky bit, are refused, and nothing changes.
+// T-S-15: Open refuses a state directory or parent directory with group or
+// other bits. It also refuses one with a setuid, setgid or sticky bit. Nothing
+// changes.
 func TestTS15UnsafeDirectoryIsRefused(t *testing.T) {
 	for _, mode := range []os.FileMode{0o777, 0o750, 0o705, os.ModeSetgid | 0o700, os.ModeSticky | 0o700} {
 		t.Run("parent "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"modernc.org/sqlite"
 )
 
 // newState makes a state directory and a sibling directory outside it. It
@@ -42,6 +44,14 @@ func mustOpen(t *testing.T, root *os.Root, rel string) *sql.DB {
 		t.Fatalf("open %s: %v", rel, err)
 	}
 	return db
+}
+
+// setHook sets a test hook and restores the old value at the end of the test.
+func setHook[T any](t *testing.T, hook *T, v T) {
+	t.Helper()
+	old := *hook
+	*hook = v
+	t.Cleanup(func() { *hook = old })
 }
 
 // snapshot returns the type, mode, size and mtime of each entry below dir, and
@@ -109,6 +119,12 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 		{"tlog", ruleReserved}, {"tlog/events.db", ruleReserved},
 		{"keys/events.db", ruleReserved}, {"checkpoints/events.db", ruleReserved},
 		{"certs/events.db", ruleReserved}, {"bundle/x/events.db", ruleReserved},
+		// Open also refuses a reserved path in another case of ASCII letters.
+		{"Keys/events.db", ruleReserved}, {"KEYS", ruleReserved},
+		{"CHECKPOINTS/events.db", ruleReserved}, {"WRITER.STOP", ruleReserved},
+		{"Checkpoint.State", ruleReserved}, {"checkpoint.STATE.tmp", ruleReserved},
+		{"TLOG/events.db", ruleReserved}, {"Bundle/x/events.db", ruleReserved},
+		{"CERTS", ruleReserved}, {"cErTs/x/events.db", ruleReserved},
 	}
 	root, state, outside := newState(t)
 	before := snapshot(t, state) + snapshot(t, outside)
@@ -144,6 +160,12 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	// "." as a reserved directory is the state directory: nothing is allowed.
 	_, err = Open(root, "events.db", Options{Reserved: []string{"."}})
 	wantRule(t, err, "store.path", ruleReserved)
+	// An entry in upper case matches a path in lower case.
+	_, err = Open(root, "tlog/events.db", Options{Reserved: []string{"TLOG"}})
+	wantRule(t, err, "store.path", ruleReserved)
+	// Only the ASCII letters fold: U+212A (Kelvin sign) is not the letter k.
+	_, err = Open(root, "kibana/events.db", Options{Reserved: []string{"\xe2\x84\xaaibana"}})
+	wantRule(t, err, "kibana", ruleParent)
 	// A name that only starts like a reserved directory is allowed by the path
 	// rules; the parent check then refuses it because it does not exist.
 	_, err = Open(root, "tlog2/events.db", opt)
@@ -191,6 +213,71 @@ func TestTS15ConnectionStringIsFixedText(t *testing.T) {
 	const first = "?_defensive=1&_txlock=immediate&_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)"
 	if !strings.Contains(dsn("/s/events.db", true), first) {
 		t.Fatal("auto_vacuum is not first")
+	}
+}
+
+// sqliteCode returns the primary result code of a driver error, or 0.
+func sqliteCode(err error) int {
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		return se.Code() & 0xff
+	}
+	return 0
+}
+
+// T-S-15: defensive mode refuses a write to sqlite_schema, also after
+// PRAGMA writable_schema=ON. The schema row does not change.
+func TestTS15DefensiveModeRefusesSchemaWrite(t *testing.T) {
+	root, _, _ := newState(t)
+	db := mustOpen(t, root, "events.db")
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t (x)"); err != nil {
+		t.Fatal(err)
+	}
+	const read = "SELECT sql FROM sqlite_schema WHERE name = 't'"
+	var before string
+	if err := db.QueryRow(read).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA writable_schema=ON"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec("UPDATE sqlite_schema SET sql='CREATE TABLE t (y)' WHERE name = 't'")
+	if sqliteCode(err) != 1 { // SQLITE_ERROR
+		t.Fatalf("write to sqlite_schema: %v", err)
+	}
+	var after string
+	if err := db.QueryRow(read).Scan(&after); err != nil || after != before {
+		t.Fatalf("schema row %q, want %q: %v", after, before, err)
+	}
+}
+
+// T-S-15: a Begin takes the write lock when it runs, before any statement. A
+// second pool for the same file gets SQLITE_BUSY at Begin when its
+// busy_timeout is 0.
+func TestTS15BeginTakesWriteLockAtOnce(t *testing.T) {
+	root, _, _ := newState(t)
+	db1 := mustOpen(t, root, "events.db")
+	defer db1.Close()
+	db2 := mustOpen(t, root, "events.db")
+	defer db2.Close()
+	if _, err := db2.Exec("PRAGMA busy_timeout=0"); err != nil {
+		t.Fatal(err)
+	}
+	tx1, err := db1.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first transaction ends before the pools close. The close of a pool
+	// closes a descriptor of the file. That close drops the locks of the
+	// process on the file.
+	defer tx1.Rollback()
+	tx2, err := db2.Begin()
+	if err == nil {
+		tx2.Rollback()
+	}
+	if sqliteCode(err) != 5 { // SQLITE_BUSY
+		t.Fatalf("second Begin: %v", err)
 	}
 }
 
