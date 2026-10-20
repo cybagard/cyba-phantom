@@ -780,8 +780,8 @@ func TestTS13OpenTidiesTilesBeyondTheHeadOnlyInRange(t *testing.T) {
 }
 
 // openSkipsATileOutsideTheRange shows that Open refuses a tile file with a
-// wrong length in the range beyond the tree head. The same file outside the
-// range stays, because Open does not read it.
+// wrong length in the range beyond the tree head. The same file outside it
+// stays, because Open does not read it.
 func openSkipsATileOutsideTheRange(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
@@ -817,18 +817,24 @@ func openSkipsATileOutsideTheRange(t *testing.T) {
 	}
 	// Control: the same file in the range gives an error.
 	plant(1 + maxBatchTiles)
-	if s, err := Open(state, "tlog"); err == nil {
+	s, err := Open(state, "tlog")
+	if err == nil {
 		s.Close()
 		t.Fatal("Open accepted a wrong length file in the range")
+	}
+	bad := tlog.Tile{H: TileHeight, L: 0, N: 1 + maxBatchTiles, W: 5}.Path()
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleLength || e.Name != bad {
+		t.Fatalf("got %v, want the rule %q for %s", err, ruleLength, bad)
 	}
 }
 
 // A valid log of more than 8 million leaves has level 0 tiles in more than 32
-// group directories. Open must succeed: the names that it reads depend on the
-// bound for the tiles beyond the head, not on the size of the log. The test
-// builds the tiles of level 1 and above from arbitrary hashes of the subtrees
-// of 256 leaves, and links one file for all tiles of level 0. Open does not
-// read the tiles of level 0, because the size is a multiple of 256.
+// group directories. Open must succeed. The names that it reads depend on the
+// bound for the tiles beyond the head. They do not depend on the size of the
+// log. The test builds the tiles of level 1 and above from arbitrary hashes of
+// the subtrees of 256 leaves. It links one file for all tiles of level 0. Open
+// does not read the tiles of level 0, because the size is a multiple of 256.
 func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	const tiles = 33*groupTiles + 1
 	state, dir := newLogState(t)
@@ -858,8 +864,14 @@ func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	head := binary.BigEndian.AppendUint64(nil, uint64(size))
 	root := m.root(t, tiles)
 	mustNil(t, os.WriteFile(filepath.Join(log, headName), append(head, root[:]...), fileMode))
-	if groups := dirNames(t, filepath.Join(log, "tile", "8", "0")); len(groups) <= 32 {
-		t.Fatalf("only %d group directories", len(groups))
+	groups := 0
+	for _, name := range dirNames(t, filepath.Join(log, "tile", "8", "0")) {
+		if strings.HasPrefix(name, "x") {
+			groups++
+		}
+	}
+	if groups <= 32 {
+		t.Fatalf("only %d group directories", groups)
 	}
 	if n, got := openStore(t, state).TreeHead(); n != size || got != root {
 		t.Fatalf("Open gave %d, %x", n, got)
@@ -1181,7 +1193,7 @@ func TestTU07NarrowerWriteKeepsTheRecordedWidth(t *testing.T) {
 }
 
 // A stored file of the tile with other covered hashes makes WriteTile refuse
-// the call before it writes the new file. No file changes.
+// the call. This happens before it writes the new file. No file changes.
 func TestTS13WriteTileChecksOtherFilesBeforeTheWrite(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
@@ -1204,9 +1216,9 @@ func TestTS13WriteTileChecksOtherFilesBeforeTheWrite(t *testing.T) {
 	}
 }
 
-// A newly covered full tile that the root computation does not read must give
-// the hash for it in the tile one level up. Here a stored byte of tile 1 of
-// level 0 changed after the write.
+// A newly covered full tile that the root computation does not read must agree
+// with the tile one level up. The tile must give the hash for it there. Here a
+// stored byte of tile 1 of level 0 changed after the write.
 func TestTS13SetHeadChecksNewTileAgainstTheLevelAbove(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
@@ -1216,9 +1228,11 @@ func TestTS13SetHeadChecksNewTileAgainstTheLevelAbove(t *testing.T) {
 	flipByte(t, filepath.Join(dir, "tlog", full.Path()), 5)
 	before := tree(t, dir)
 	err := s.SetHead(2*fullWidth, l.root(t, 2*fullWidth))
+	above := tlog.Tile{H: TileHeight, L: 1, N: 0, W: 2}
+	want := full.Path() + "," + above.Path()
 	var e *Error
-	if !errors.As(err, &e) || e.Rule != ruleRoot || e.Name != full.Path() {
-		t.Fatalf("got %v, want the rule %q for %s", err, ruleRoot, full.Path())
+	if !errors.As(err, &e) || e.Rule != ruleRoot || e.Name != want {
+		t.Fatalf("got %v, want the rule %q for %s", err, ruleRoot, want)
 	}
 	if n, _ := s.TreeHead(); n != 0 || tree(t, dir) != before {
 		t.Fatalf("a refused SetHead changed the head (%d) or a file", n)

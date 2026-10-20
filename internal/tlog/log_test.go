@@ -781,8 +781,8 @@ func TestTS13BatchWithTooManyTilesIsNotMarked(t *testing.T) {
 	if l.err != nil || snapshot(t, logDir) != before {
 		t.Fatalf("a refused batch stopped the log (%v) or changed a file", l.err)
 	}
-	// One leaf over the bound of the store: 4080 tiles of level 0, 16 of
-	// level 1, and 1 of level 2 get new hashes.
+	// This batch is one leaf over the bound of the store. It gives new hashes
+	// to 4080 tiles of level 0, 16 of level 1, and 1 of level 2.
 	_, err = l.AppendBatch(make([]EventHash, 4079*fullWidth+1))
 	if !errors.As(err, &e) || e.Rule != ruleBatch || errors.Is(err, ErrHeadOnDisk) {
 		t.Fatalf("a batch one leaf over the bound gave %v, want the rule %q", err, ruleBatch)
@@ -971,6 +971,10 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 				}
 			}
 			check(l, "after the failure", false)
+			// The Store keeps the old tree head in each case.
+			if s2, r2 := l.store.TreeHead(); s2 != size || r2 != root {
+				t.Fatalf("store head in memory changed to %d, %x", s2, r2)
+			}
 			// A rename error can come after the rename took effect. So an error
 			// of the head rename has the mark, also if the old head is on disk.
 			marked := c.covers || c.name == "head rename"

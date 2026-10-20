@@ -45,9 +45,9 @@ const (
 	// maxBatchTiles is the number of different tiles with new hashes that one
 	// tree head can add. WriteTile accepts at most this number of tiles between
 	// two calls of SetHead. SetHead and Log.AppendBatch refuse a growth that
-	// needs more tiles. Open also uses it: for each level, it tidies the tiles
-	// with a number from the first tile beyond the tree head up to this number
-	// above it.
+	// needs more tiles. Open also uses it. For each level, Open tidies the tiles
+	// beyond the tree head. The range starts at the first tile that the head does
+	// not cover. It ends this many tiles above that tile.
 	maxBatchTiles = 4096
 
 	// groupTiles is the number of tile files in one group directory.
@@ -105,25 +105,25 @@ var (
 )
 
 // ErrHeadOnDisk is the mark of an append error after which the tree head file
-// on disk can cover the batch. The rename of the head file worked, or it
-// returned an error (a rename can take effect and still return an error), or a
-// later step of the head write failed. Test for it with errors.Is. Only
-// Store.SetHead, Log.Append and Log.AppendBatch return an error that matches
-// it. Each other error of these functions does not match it. A failed
-// directory sync of a tile file does not match it. Open and OpenLog never
-// return the mark.
+// on disk can cover the batch. It marks each error of the rename of the head
+// file. A rename can take effect and still return an error. It also marks each
+// error of a later step: the open or the fsync of a directory. Test for it
+// with errors.Is. Only Store.SetHead, Log.Append and Log.AppendBatch return an
+// error that matches it. Each other error of these functions does not match
+// it. A failed directory sync of a tile file does not match it. Open and
+// OpenLog never return the mark.
 var ErrHeadOnDisk = errors.New("tree head on disk can cover the batch")
 
 // renamedError is the error of a step of writeFile that comes after the rename.
-// It is also the error of the rename of the head file, because a rename can
-// take effect and still return an error.
+// It is also the error of the rename of the head file. A rename can take
+// effect and still return an error.
 type renamedError struct{ err error }
 
 func (e *renamedError) Error() string { return e.err.Error() }
 func (e *renamedError) Unwrap() error { return e.err }
 
-// headError is the Error of a head write that failed after the rename of the
-// head file. It has the text of that Error, and it matches ErrHeadOnDisk.
+// headError is the Error of a head write that failed at the rename of the head
+// file or after it. It has the text of that Error. It matches ErrHeadOnDisk.
 // errors.As to *Error gives that Error. A type assertion err.(*Error) does not
 // match it.
 type headError struct{ err *Error }
@@ -171,10 +171,10 @@ type Store struct {
 // covers. A later change checks them with authenticated reads. Open tidies the
 // tiles that it reads, so that at most one partial file stays for each of them
 // after a crash. Open also tidies the tiles beyond the tree head in a bounded
-// range. For each level, these are the tiles from the first tile that the tree
-// head does not cover up to maxBatchTiles tiles above it. A crash can leave
-// such tiles. The number of names that Open reads depends on this bound and not
-// on the size of the log. Open does not list or tidy any other tile. A
+// range. For each level, the range starts at the first tile that the tree head
+// does not cover. It ends maxBatchTiles tiles above that tile. A crash can
+// leave such tiles. The number of names that Open reads depends on this bound
+// and not on the size of the log. Open does not list or tidy any other tile. A
 // directory with no tree head must be empty, or hold only the temporary file of
 // the tree head. Open writes a tree head of size 0 for it, before any tile can
 // be written. Open makes the loaded tree head durable. It calls fsync on the
@@ -182,8 +182,8 @@ type Store struct {
 // there. Then it calls fsync on the directories of the tiles that it tidies. It
 // deletes files only after all checks pass and these fsync calls pass. If a
 // check or one of these fsync calls fails, Open returns an error and has
-// deleted nothing. If a delete fails, or the fsync after the deletes fails,
-// Open returns an error, and it can have deleted files.
+// deleted nothing. A delete can fail, or the fsync after the deletes can
+// fail. Then Open returns an error and it can have deleted files.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -282,8 +282,8 @@ func (s *Store) load() error {
 
 // beyondHead checks the tiles beyond the tree head in the range that the Open
 // doc names. It returns the files to delete and the directories to sync. It
-// deletes nothing. A group directory that is not there is skipped as a whole,
-// so the work depends on the bound and not on the size of the log.
+// deletes nothing. It skips a group directory that is not there as a whole.
+// So the work depends on the bound and not on the size of the log.
 func (s *Store) beyondHead() (rm, dirs []string, err error) {
 	for l := 0; l <= maxLevel; l++ {
 		first := (s.head.N>>(TileHeight*l) + fullWidth - 1) / fullWidth
@@ -443,11 +443,11 @@ func readNames(read []tlog.Tile, empty string) string {
 // last SetHead. A newly covered full tile that the root computation does not
 // read must give the hash for it in the tile one level up. SetHead refuses a
 // size that gives new hashes to more than maxBatchTiles tiles. A refused call
-// changes no file, with one exception. If the rename of the head file worked
-// (or returned an error) and a later step failed, the head file on disk holds
-// the new size and root. The Store keeps the old tree head in memory, and the
-// error matches ErrHeadOnDisk. The caller must close the Store and open it
-// again.
+// changes no file, with one exception. The write can fail at the rename of
+// the head file or after it. Then the head file on disk can hold the new size
+// and root. The Store keeps the old tree head in memory. The error matches
+// ErrHeadOnDisk, and Log stops on it. The caller must close the Store and open
+// it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -528,7 +528,8 @@ func (s *Store) checkAbove(t tlog.Tile, n int64) error {
 	}
 	at := int(t.N%fullWidth) * tlog.HashSize
 	if !bytes.Equal(hashes[0][:], above[at:at+tlog.HashSize]) {
-		return newError(tilePath(t, fullWidth), ruleRoot)
+		// The check does not say which of the two tiles is wrong. Name both.
+		return newError(readNames([]tlog.Tile{t, up}, ""), ruleRoot)
 	}
 	return nil
 }
@@ -560,11 +561,12 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // file first, then deletes the stale files. After the write, the store
 // deletes the narrower partial files, so that at most one partial file stays.
 // WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
-// the tree head between two calls of SetHead. Before it writes, renames, or
-// deletes anything, WriteTile checks that each directory of the tile path is a
-// real directory and not a link. Before it writes a file, it also checks that
-// each other file of the tile agrees with the stored file in the hashes that
-// the tree head covers. A bad file gives an error and no file changes.
+// the tree head between two calls of SetHead. WriteTile first checks each
+// directory of the tile path. Each must be a real directory and not a link.
+// This check comes before any write, rename, or delete. WriteTile also checks
+// the other files of the tile before it writes. Each must agree with the stored
+// file in the hashes that the tree head covers. A bad file gives an error and
+// no file changes.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
@@ -958,7 +960,8 @@ func (s *Store) writeFile(name string, data []byte) error {
 			// A rename can take effect and still return an error. For the head
 			// file, treat each error of the rename as an error after it.
 			// A tile rename keeps the plain error. WriteTile maps both to the
-			// same rule. A retry of the tile finds the file and syncs it.
+			// same rule. A retry of the tile finds the file and syncs the
+			// directories of the file.
 			err = &renamedError{err}
 		}
 	}
