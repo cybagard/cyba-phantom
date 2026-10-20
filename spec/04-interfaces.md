@@ -77,7 +77,7 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 | `alerts.min_band` | `agent-likely` | `agent-likely` or `agent-confirmed` |
 | `alerts.sinks` | `[]` | 0–8 entries; `type` is `webhook`, `syslog`, or `smtp` |
 | webhook sink | — | `url` is `https`; `hmac_secret_env` required (SEC-06) |
-| syslog sink | — | `addr` is `tls://` + `host:port`, or `udp://` or `tcp://` + a loopback `host:port`. A loopback host is an IP literal in `127.0.0.0/8` or `::1` (for example `udp://127.0.0.1:514`, `tcp://[::1]:514`). A host name (also `localhost`) is not loopback: the loader does not resolve names. |
+| syslog sink | — | `addr` is `tls://` + `host:port`, or `udp://` or `tcp://` + a loopback `host:port`. A loopback host is an IP literal in `127.0.0.0/8` or `::1` (for example `udp://127.0.0.1:514`, `tcp://[::1]:514`). A host name (also `localhost`) is not loopback: the loader does not resolve names. The egress guard permits only this address, port and protocol, and only for this sink (SEC-26). |
 | smtp sink | — | `host` is `smtp://` + `host:port` (STARTTLS required, no plain fallback) or `smtps://` + `host:port` (implicit TLS); `from` and 1–16 `to` addresses; each address has the character rule of `acme.email` |
 | `privacy.store_body_prefix` | `true` | boolean; the prefix size is 4 KB and is not a key (C8) |
 | `privacy.include_ip` | `false` | boolean |
