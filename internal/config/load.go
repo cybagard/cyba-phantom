@@ -41,7 +41,13 @@ type key struct {
 	secret   bool                               // secret marks a key whose value is never printed.
 	maxItems int                                // maxItems > 0 marks a key in a list item that holds 1 to maxItems scalars in a list.
 	check    func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
+	// endpoint, if set, parses the value as an outbound endpoint for AllowList.
+	endpoint endpointParser
 }
+
+// endpointParser makes an Endpoint from a value.
+// It returns a fixed detail on an error.
+type endpointParser func(raw string) (Endpoint, string)
 
 // keys is the production key table (04 section 3). It holds the scalar keys. The list
 // keys are in the table lists. The loader adds the item keys to its table when it reads the lists (expandLists).
