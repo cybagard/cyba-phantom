@@ -166,24 +166,24 @@ type Store struct {
 // the state directory, because the fsync of the log directory refuses a link.
 // Open makes the directory (mode 0700) if it does not exist. The directory
 // must have no group or other permission bits. Open reads the tree head and
-// the tiles that the root computation reads, and checks that they give the root
-// of the tree head. Open does not read the other tiles that the tree head
-// covers. A later change checks them with authenticated reads. Open tidies the
-// tiles that it reads, so that at most one partial file stays for each of them
-// after a crash. Open also tidies the tiles beyond the tree head in a bounded
-// range. For each level, the range starts at the first tile that the tree head
-// does not cover. It ends maxBatchTiles tiles above that tile. A crash can
-// leave such tiles. The number of names that Open reads depends on this bound
-// and not on the size of the log. Open does not list or tidy any other tile. A
-// directory with no tree head must be empty, or hold only the temporary file of
-// the tree head. Open writes a tree head of size 0 for it, before any tile can
-// be written. Open makes the loaded tree head durable. It calls fsync on the
-// log directory and on its parents before it reads, writes, or deletes any file
-// there. Then it calls fsync on the directories of the tiles that it tidies. It
-// deletes files only after all checks pass and these fsync calls pass. If a
-// check or one of these fsync calls fails, Open returns an error and has
-// deleted nothing. A delete can fail, or the fsync after the deletes can
-// fail. Then Open returns an error and it can have deleted files.
+// the tiles that the root computation reads. It checks that these tiles give
+// the root of the tree head. Open does not read the other tiles that the tree
+// head covers. A later change checks them with authenticated reads. Open tidies
+// the tiles that it reads. Then at most one partial file stays for each of
+// them after a crash. Open also tidies the tiles beyond the tree head in a
+// bounded range. For each level, the range starts at the first tile that the
+// tree head does not cover. It ends maxBatchTiles tiles above that tile. A
+// crash can leave such tiles. The number of names that Open reads depends on
+// this bound and not on the size of the log. Open does not list or tidy any
+// other tile. A directory with no tree head must be empty, or hold only the
+// temporary file of the tree head. Open writes a tree head of size 0 for it,
+// before any tile can be written. Open makes the loaded tree head durable. It
+// calls fsync on the log directory and on its parents before it reads, writes,
+// or deletes any file there. Then it calls fsync on the directories of the
+// tiles that it tidies. It deletes files only after all checks pass and these
+// fsync calls pass. If a check or one of these fsync calls fails, Open returns
+// an error and has deleted nothing. A delete can fail, or the fsync after the
+// deletes can fail. Then Open returns an error and it can have deleted files.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -440,14 +440,14 @@ func readNames(read []tlog.Tile, empty string) string {
 // path, like WriteTile. The stored files of the tile must agree in the hashes
 // that the new tree head covers. If not, the next Open would refuse the tree
 // head. A newly covered hash must be one that WriteTile accepted since the
-// last SetHead. A newly covered full tile that the root computation does not
-// read must give the hash for it in the tile one level up. SetHead refuses a
-// size that gives new hashes to more than maxBatchTiles tiles. A refused call
-// changes no file, with one exception. The write can fail at the rename of
-// the head file or after it. Then the head file on disk can hold the new size
-// and root. The Store keeps the old tree head in memory. The error matches
-// ErrHeadOnDisk, and Log stops on it. The caller must close the Store and open
-// it again.
+// last SetHead. Take a newly covered full tile that the root computation does
+// not read. It must give the hash for it in the tile one level up. SetHead
+// refuses a size that gives new hashes to more than maxBatchTiles tiles. A
+// refused call changes no file, with one exception. The write can fail at the
+// rename of the head file or after it. Then the head file on disk can hold the
+// new size and root. The Store keeps the old tree head in memory. The error
+// matches ErrHeadOnDisk, and Log stops on it. The caller must close the Store
+// and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -500,9 +500,10 @@ func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	return nil
 }
 
-// checkAbove checks that the hashes of the full tile t give the hash for t in
-// the tile one level up. n is the size of the new tree head, which covers both
-// tiles. The hash for t is the root of the 256 hashes of t.
+// checkAbove checks the full tile t against the tile one level up. The hashes
+// of t must give the hash for t in that tile. n is the size of the new tree
+// head, which covers both tiles. The hash for t is the root of the 256 hashes
+// of t.
 func (s *Store) checkAbove(t tlog.Tile, n int64) error {
 	up := tlog.Tile{H: TileHeight, L: t.L + 1, N: t.N / fullWidth}
 	if up.L > maxLevel {
