@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	keyRule = "the key must be 1 or more characters of a-z, 0-9 and _ only"
-	tagRule = "the tag must be str, int, bool, float, null, map or seq"
+	keyRule       = "the key must be 1 or more characters of a-z, 0-9 and _ only"
+	scalarTagRule = "the tag of a scalar must be str, int, bool, float or null"
+	mapTagRule    = "the tag of a mapping must be map"
+	seqTagRule    = "the tag of a sequence must be seq"
 )
 
 func TestTS10_Read(t *testing.T) {
@@ -28,56 +30,60 @@ func TestTS10_Read(t *testing.T) {
 		// ceiling is the allocation limit. Each ceiling is at least 1.25
 		// times the count that go test -race measured in the devcontainer.
 		ceiling int
+		// size is the expected input length for a file row. 0 means no check.
+		size int
 	}
 
 	rows := []row{
-		{"Valid", "foo: bar", false, 0, 0, "", "", 94},
-		{"EmptyKey", "\"\": 1", false, 0, 0, keyRule, "(root)", 88},
-		{"MergeKey", "a: 1\n<<: {b: 2}", false, 0, 0, "merge keys are rejected", "(root)", 126},
-		{"DottedKey", "foo.bar: 1", false, 0, 0, keyRule, "(root)", 96},
-		{"UnknownAlias", "foo: *a", false, 0, 0, "invalid YAML", "", 98},
-		{"AliasExpansion", "a: &a [x, x]\nb: [*a, *a]", false, 0, 0, "anchors are rejected", "\"a\"", 142},
-		{"Anchor", "anchor: &a value", false, 0, 0, "anchors are rejected", "\"anchor\"", 106},
-		{"CustomTag", "foo: !!custom value", false, 0, 0, tagRule, "\"foo\"", 112},
-		{"DuplicateKey", "foo: 1\nfoo: 2", false, 0, 0, "duplicate key", "\"foo\"", 116},
-		{"DuplicateKeyPath", "outer: { inner: 1 }\nouter: { inner: 2 }", false, 0, 0, "duplicate key", "\"outer\"", 154},
-		{"Depth8", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h: 1", false, 0, 0, "", "", 206},
-		{"Depth9", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h:\n                i: 1", false, 0, 0, "nesting exceeds limit of 8", "\"a.b.c.d.e.f.g.h.i\"", 238},
-		{"InvalidUTF8", "\xff\xfe\xfd", false, 0, 0, "invalid UTF-8 encoding", "", 2},
-		{"NULByte", "foo: bar\x00baz", false, 0, 0, "contains NUL byte", "", 2},
-		{"BOM", "\xef\xbb\xbffoo: bar", false, 0, 0, "contains UTF-8 BOM", "", 2},
-		{"SecondDocument", "foo: bar\n---\nbaz: qux", false, 0, 0, "contains more than one document", "", 120},
-		{"EmptyDocument", " ", false, 0, 0, "empty document", "", 2},
-		{"CommentsOnly", "# only a comment\n", false, 0, 0, "empty document", "", 34},
-		{"NotAMapping", "- foo: bar", false, 0, 0, "root must be a mapping", "", 94},
-		{"LargeFile", padded(128 * 1024), true, 0, 0, "the file is larger than 64 KiB", "", 54},
-		{"Exactly64KiB", padded(64 * 1024), true, 0, 0, "", "", 174},
-		{"Over64KiB", padded(64*1024 + 1), true, 0, 0, "the file is larger than 64 KiB", "", 54},
-		{"OtherWritable", "foo: bar", true, 0602, 0, "group or other writable", "", 20},
-		{"GroupWritable", "foo: bar", true, 0620, 0, "group or other writable", "", 20},
-		{"WrongOwner", "foo: bar", true, 0644, 12345, "the owner must be root or the current user", "", 20},
-		{"FIFO", "foo: bar", true, 0, 0, "not a regular file", "", 20},
-		{"MissingFile", "foo: bar", true, 0, 0, "no such file", "", 18},
-		{"Unreadable", "foo: bar", true, 0000, 0, "permission denied", "", 18},
-		{"ValidFile", "foo: bar", true, 0644, 0, "", "", 106},
-		{"KeyAnchor", "&k foo: 1", false, 0, 0, "mapping key anchor is rejected", "(root)", 98},
-		{"KeyTagCustom", "!custom foo: 1", false, 0, 0, "mapping key tag is rejected", "(root)", 104},
-		{"KeyTagBinary", "!!binary Zm9v: 1", false, 0, 0, keyRule, "(root)", 102},
-		{"KeyTagTilde", "~: 1", false, 0, 0, keyRule, "(root)", 92},
-		{"KeyTagTrue", "true: 1", false, 0, 0, "mapping key tag is rejected", "(root)", 94},
-		{"KeyBrackets", "\"sinks[0]\": {type: x}", false, 0, 0, keyRule, "(root)", 116},
-		{"DupListEmpty", "a: []\na: []", false, 0, 0, "duplicate key", "\"a\"", 110},
-		{"DupListScalar", "a: [1]\na: 1", false, 0, 0, "duplicate key", "\"a\"", 126},
-		{"DupListScalarX", "a: []\na: x", false, 0, 0, "duplicate key", "\"a\"", 114},
-		{"DupListMapping", "a: [x]\na: {b: 1}", false, 0, 0, "duplicate key", "\"a\"", 140},
-		{"ScalarList", "a: [1, 2]", false, 0, 0, "", "", 114},
-		{"MappingList", "s: [{t: 1}, {t: 2}]", false, 0, 0, "", "", 146},
-		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", "", 94},
-		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", "", 118},
-		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", "", 98},
-		{"ValidLarge", padded(64*1024 - 3), false, 0, 0, "", "", 132},
+		{"Valid", "foo: bar", false, 0, 0, "", "", 94, 0},
+		{"EmptyKey", "\"\": 1", false, 0, 0, keyRule, "(root)", 88, 0},
+		{"MergeKey", "a: 1\n<<: {b: 2}", false, 0, 0, "merge keys are rejected", "(root)", 126, 0},
+		{"DottedKey", "foo.bar: 1", false, 0, 0, keyRule, "(root)", 96, 0},
+		{"UnknownAlias", "foo: *a", false, 0, 0, "invalid YAML", "", 98, 0},
+		{"AliasExpansion", "a: &a [x, x]\nb: [*a, *a]", false, 0, 0, "anchors are rejected", "\"a\"", 142, 0},
+		{"Anchor", "anchor: &a value", false, 0, 0, "anchors are rejected", "\"anchor\"", 106, 0},
+		{"CustomTag", "foo: !!custom value", false, 0, 0, scalarTagRule, "\"foo\"", 112, 0},
+		{"MapTagOnScalar", "a: !!map x", false, 0, 0, scalarTagRule, "\"a\"", 74, 0},
+		{"StrTagOnMapping", "a: !!str {b: 1}", false, 0, 0, mapTagRule, "\"a\"", 86, 0},
+		{"StrTagOnSequence", "a: !!str [1]", false, 0, 0, seqTagRule, "\"a\"", 80, 0},
+		{"DuplicateKey", "foo: 1\nfoo: 2", false, 0, 0, "duplicate key", "\"foo\"", 116, 0},
+		{"DuplicateKeyPath", "outer: { inner: 1 }\nouter: { inner: 2 }", false, 0, 0, "duplicate key", "\"outer\"", 154, 0},
+		{"Depth8", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h: 1", false, 0, 0, "", "", 206, 0},
+		{"Depth9", "a:\n  b:\n    c:\n      d:\n        e:\n          f:\n            g:\n              h:\n                i: 1", false, 0, 0, "nesting exceeds limit of 8", "\"a.b.c.d.e.f.g.h.i\"", 238, 0},
+		{"InvalidUTF8", "\xff\xfe\xfd", false, 0, 0, "invalid UTF-8 encoding", "", 2, 0},
+		{"NULByte", "foo: bar\x00baz", false, 0, 0, "contains NUL byte", "", 2, 0},
+		{"BOM", "\xef\xbb\xbffoo: bar", false, 0, 0, "contains UTF-8 BOM", "", 2, 0},
+		{"SecondDocument", "foo: bar\n---\nbaz: qux", false, 0, 0, "contains more than one document", "", 120, 0},
+		{"EmptyDocument", " ", false, 0, 0, "empty document", "", 2, 0},
+		{"CommentsOnly", "# only a comment\n", false, 0, 0, "empty document", "", 34, 0},
+		{"NotAMapping", "- foo: bar", false, 0, 0, "root must be a mapping", "", 94, 0},
+		{"LargeFile", padded(128 * 1024), true, 0, 0, "the file is larger than 64 KiB", "", 54, 0},
+		{"Exactly64KiB", padded(64 * 1024), true, 0, 0, "", "", 174, 65536},
+		{"Over64KiB", padded(64*1024 + 1), true, 0, 0, "the file is larger than 64 KiB", "", 54, 65537},
+		{"OtherWritable", "foo: bar", true, 0602, 0, "group or other writable", "", 20, 0},
+		{"GroupWritable", "foo: bar", true, 0620, 0, "group or other writable", "", 20, 0},
+		{"WrongOwner", "foo: bar", true, 0644, 12345, "the owner must be root or the current user", "", 20, 0},
+		{"FIFO", "foo: bar", true, 0, 0, "not a regular file", "", 20, 0},
+		{"MissingFile", "foo: bar", true, 0, 0, "no such file", "", 18, 0},
+		{"Unreadable", "foo: bar", true, 0000, 0, "permission denied", "", 18, 0},
+		{"ValidFile", "foo: bar", true, 0644, 0, "", "", 106, 0},
+		{"KeyAnchor", "&k foo: 1", false, 0, 0, "mapping key anchor is rejected", "(root)", 98, 0},
+		{"KeyTagCustom", "!custom foo: 1", false, 0, 0, "mapping key tag is rejected", "(root)", 104, 0},
+		{"KeyTagBinary", "!!binary Zm9v: 1", false, 0, 0, keyRule, "(root)", 102, 0},
+		{"KeyTagTilde", "~: 1", false, 0, 0, keyRule, "(root)", 92, 0},
+		{"KeyTagTrue", "true: 1", false, 0, 0, "mapping key tag is rejected", "(root)", 94, 0},
+		{"KeyBrackets", "\"sinks[0]\": {type: x}", false, 0, 0, keyRule, "(root)", 116, 0},
+		{"DupListEmpty", "a: []\na: []", false, 0, 0, "duplicate key", "\"a\"", 110, 0},
+		{"DupListScalar", "a: [1]\na: 1", false, 0, 0, "duplicate key", "\"a\"", 126, 0},
+		{"DupListScalarX", "a: []\na: x", false, 0, 0, "duplicate key", "\"a\"", 114, 0},
+		{"DupListMapping", "a: [x]\na: {b: 1}", false, 0, 0, "duplicate key", "\"a\"", 140, 0},
+		{"ScalarList", "a: [1, 2]", false, 0, 0, "", "", 114, 0},
+		{"MappingList", "s: [{t: 1}, {t: 2}]", false, 0, 0, "", "", 146, 0},
+		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", "", 94, 0},
+		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", "", 118, 0},
+		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", "", 98, 0},
+		{"ValidLarge", padded(64*1024 - 3), false, 0, 0, "", "", 132, 0},
 	}
-	wantSize := map[string]int{"Exactly64KiB": 65536, "Over64KiB": 65537}
 
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -89,8 +95,8 @@ func TestTS10_Read(t *testing.T) {
 				tmpDir := t.TempDir()
 				path = filepath.Join(tmpDir, "config.yaml")
 
-				if want, ok := wantSize[r.name]; ok && len(r.input) != want {
-					t.Fatalf("input has %d bytes, want %d", len(r.input), want)
+				if r.size != 0 && len(r.input) != r.size {
+					t.Fatalf("input has %d bytes, want %d", len(r.input), r.size)
 				}
 				if err := os.WriteFile(path, []byte(r.input), 0644); err != nil {
 					t.Fatal(err)

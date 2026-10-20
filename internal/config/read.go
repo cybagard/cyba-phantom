@@ -171,13 +171,14 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: the tag must be str, int, bool, float, null, map or seq", formatPath(path), n.Line, n.Column)
+		return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), n.Line, n.Column, tagRuleText(n.Kind))
 	}
 
-	doc.Lines[path] = n.Line
+	line := n.Line
 	if key != nil {
-		doc.Lines[path] = key.Line
+		line = key.Line
 	}
+	doc.Lines[path] = line
 	switch n.Kind {
 	case yaml.MappingNode:
 		doc.Mappings[path] = true
@@ -258,6 +259,18 @@ func isCoreTag(tag string, kind yaml.Kind) bool {
 		return tag == "" || tag == "!!doc"
 	default:
 		return false
+	}
+}
+
+// tagRuleText gives the fixed text of the tag rule for a node kind.
+func tagRuleText(kind yaml.Kind) string {
+	switch kind {
+	case yaml.MappingNode:
+		return "the tag of a mapping must be map"
+	case yaml.SequenceNode:
+		return "the tag of a sequence must be seq"
+	default:
+		return "the tag of a scalar must be str, int, bool, float or null"
 	}
 }
 

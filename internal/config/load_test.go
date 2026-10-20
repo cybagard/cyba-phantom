@@ -75,8 +75,9 @@ const (
 	base       = "acme:\n  email: sec@example.com\n" + acmeNames + tlogLine
 )
 
-// loadTest is Load with one entry for tokenVar before env. An entry for
-// tokenVar in env makes two entries, and Load fails with the text of envMany.
+// loadTest is Load with one entry for tokenVar before env. If the file names
+// tokenVar in a *_env key, an entry for tokenVar in env makes two entries.
+// Load then fails with the text of envMany.
 func loadTest(path string, env []string) (*Config, error) {
 	return Load(path, append([]string{tokenVar + "=" + strings.Repeat("t", 32)}, env...))
 }

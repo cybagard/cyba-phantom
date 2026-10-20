@@ -361,8 +361,8 @@ func TestTS11_CheckACME(t *testing.T) {
 }
 
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
-// from, and an smtp to with U+0085, U+0001, U+202E, U+2028, or U+2029. The exit
-// code is 1 and stderr names the key (T-S-11).
+// from, and an smtp to. Each value holds U+0085, U+0001, U+202E, U+2028, or
+// U+2029. The exit code is 1. Stderr names the key and gives the rule (T-S-11).
 func TestTS11_CheckEmailMarks(t *testing.T) {
 	body := validBody(t)
 	smtp := func(from, to string) string {
@@ -372,7 +372,7 @@ func TestTS11_CheckEmailMarks(t *testing.T) {
 		// A double-quoted YAML scalar reads this escape.
 		esc := fmt.Sprintf(`\u%04x`, m)
 		for _, r := range []struct{ key, file string }{
-			{"acme.email", strings.Replace(body, "sec@example.com", `a@example.com`+esc, 1)},
+			{"acme.email", strings.Replace(body, "sec@example.com", `"a@example.com`+esc+`"`, 1)},
 			{"alerts.sinks[0].from", smtp("a@example.com"+esc, "c@example.com")},
 			{"alerts.sinks[0].to[0]", smtp("a@example.com", "c@example.com"+esc)},
 		} {
@@ -380,8 +380,9 @@ func TestTS11_CheckEmailMarks(t *testing.T) {
 				env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
 				var so, se strings.Builder
 				code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
-				if code != 1 || !strings.Contains(se.String(), r.key) || strings.ContainsRune(se.String(), m) {
-					t.Errorf("exit %d, stderr %q, want a refusal that names %q and not the character", code, se.String(), r.key)
+				rule := "the address must not contain a control or format character"
+				if code != 1 || !strings.Contains(se.String(), r.key) || !strings.Contains(se.String(), rule) || strings.ContainsRune(se.String(), m) {
+					t.Errorf("exit %d, stderr %q, want a refusal that names %q, gives the rule, and not the character", code, se.String(), r.key)
 				}
 			})
 		}

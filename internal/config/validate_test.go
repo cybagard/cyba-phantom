@@ -283,8 +283,8 @@ func TestTU10_Email(t *testing.T) {
 var emailMarks = []string{"\u0085", "\u0001", "\u202e", "\u2028", "\u2029"}
 
 // TestTS11_EmailMarks checks that acme.email, smtp from, and smtp to refuse
-// each of the characters in emailMarks. The error names the key and does not
-// hold the character (T-S-11).
+// each of the characters in emailMarks. The error names the key and gives the
+// rule. It does not hold the character (T-S-11).
 func TestTS11_EmailMarks(t *testing.T) {
 	smtp := func(from, to string) string {
 		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "` + from + `", to: ["` + to + `"]}`)
@@ -302,6 +302,9 @@ func TestTS11_EmailMarks(t *testing.T) {
 				_, err := loadProd(t, r.file, listEnv...)
 				if err == nil || !strings.Contains(err.Error(), "config: "+r.key+" at ") {
 					t.Fatalf("got %v, want an error that names %s", err, r.key)
+				}
+				if !strings.Contains(err.Error(), "the address must not contain a control or format character") {
+					t.Errorf("the error does not give the rule: %q", err)
 				}
 				if strings.Contains(err.Error(), m) {
 					t.Errorf("the error holds the character: %q", err)
@@ -638,9 +641,9 @@ func TestTU10_HtpasswdOpen(t *testing.T) {
 	}
 }
 
-// TestTU10_HtpasswdValueOnly checks that the Value field holds the full path,
-// that Error() cuts the path to 64 bytes, and that the detail is fixed text
-// (T-U-10).
+// TestTU10_HtpasswdValueOnly checks three things (T-U-10). The Value field
+// holds the full path. Error() cuts the path to 64 bytes. The detail is fixed
+// text.
 func TestTU10_HtpasswdValueOnly(t *testing.T) {
 	useTestKeys(t)
 	p := filepath.Join(t.TempDir(), strings.Repeat("n", 90))
@@ -1481,7 +1484,8 @@ func TestTS10_ListSecrets(t *testing.T) {
 			continue
 		}
 		errs := err.(interface{ Unwrap() []error }).Unwrap()
-		// A reader error has no Key: its Detail starts with the cut path.
+		// A reader error has no Key. Its Detail starts with the path,
+		// shortened to 64 bytes.
 		if !slices.ContainsFunc(errs, func(e error) bool {
 			return strings.HasPrefix(e.(*Error).Detail, c.cut+": ")
 		}) {
