@@ -38,10 +38,12 @@ lint:
 	$(GO) run ./tools/stelint "$$base" "$$head"
 
 # This target lists the comment lines over 80 columns in the tracked Go files
-# at HEAD. The HEAD variable selects another commit. It skips files below
-# testdata. It prints each hit and a total. It exits 0 unless git or an input
-# limit fails.
-# The lint target checks only the lines that changed between BASE and HEAD.
+# at HEAD. It also lists the comment sentences over 20 words. The HEAD
+# variable selects another commit. It skips files below testdata. It prints
+# each hit and a total for each rule. It exits 0 unless git or an input limit
+# fails.
+# The lint target checks the comment lines that changed between BASE and HEAD.
+# It also checks a sentence that has a changed line, or that a deletion joins.
 stelint-report:
 	$(GO) run ./tools/stelint -all "$(or $(HEAD),HEAD)"
 
