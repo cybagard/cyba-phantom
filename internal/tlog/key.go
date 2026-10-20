@@ -32,10 +32,10 @@ const VKeyName = vkeyName
 // root, the state directory that the caller opened one time. The key name must
 // equal origin (tlog.origin).
 //
-// The function makes a new key only on the first start: no key file, no signer
-// state (signerState), and tree size 0. If the key is missing and a signer
-// state exists or the tree has leaves, the function returns an error and makes
-// no key (SEC-16).
+// The function makes a new key only on the first start: no key file, no signed
+// checkpoint (signed), and tree size 0. If the key is missing and signed is
+// true or the tree has leaves, the function returns an error and makes no key
+// (SEC-16).
 //
 // A new key gets a signer state. An entry at checkpoint.state is an error: the
 // function makes no key and keeps the entry. The function writes the key file
@@ -48,7 +48,7 @@ const VKeyName = vkeyName
 // The key text, its base64 form, and the seed never go to the log or to an
 // error. The function keeps only the signer value. It derives the public key
 // text from the key and logs it. It never logs the bytes of a file.
-func LoadOrCreateSigner(root *os.Root, log *slog.Logger, origin string, signerState bool, treeSize uint64) (note.Signer, error) {
+func LoadOrCreateSigner(root *os.Root, log *slog.Logger, origin string, signed bool, treeSize uint64) (note.Signer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -66,8 +66,8 @@ func LoadOrCreateSigner(root *os.Root, log *slog.Logger, origin string, signerSt
 			return nil, keyError(path, "cannot be examined")
 		}
 	}
-	if signerState || treeSize > 0 {
-		return nil, keyError(path, "is missing but the log has a signer state or leaves; no new key is made")
+	if signed || treeSize > 0 {
+		return nil, keyError(path, "is missing but the log has a signed checkpoint or leaves; no new key is made")
 	}
 	return createSigner(root, log, path, origin)
 }

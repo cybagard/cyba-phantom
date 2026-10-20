@@ -324,8 +324,8 @@ func TestTS13_FirstStartRefusesExistingState(t *testing.T) {
 	}
 }
 
-// T-S-13: if the key is missing and the log has a signer state or leaves, the
-// function returns an error and makes no file.
+// T-S-13: if the key is missing and the log has a signed checkpoint or leaves,
+// the function returns an error and makes no file.
 func TestTS13_MissingKeyNoNewKey(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
