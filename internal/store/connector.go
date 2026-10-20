@@ -49,9 +49,10 @@ func newConnector(root *os.Root, rel, path, dsn string, held *os.File, id fileID
 }
 
 // Close closes the held descriptor. database/sql calls it from DB.Close, after
-// it has closed the connections. The descriptor is closed only here: SQLite
-// holds POSIX record locks on the file, and the close of any descriptor of the
-// file drops all locks of the process on it.
+// it has closed the free connections. A connection that is in use stays open,
+// so the caller must end each use first (see Open). The descriptor is closed
+// only here. SQLite holds POSIX record locks on the file. The close of any
+// descriptor of the file drops all locks of the process on it.
 func (c *connector) Close() error { return c.held.Close() }
 
 // identityOf returns the device and the inode of a file from an Lstat result.
@@ -89,7 +90,8 @@ func (c *connector) check() error {
 		return fail(c.rel, ruleChanged)
 	}
 	fi, err = os.Lstat(c.want)
-	if pid, err := identityOf(c.rel, fi, err); err != nil || pid != id {
+	pid, err := identityOf(c.rel, fi, err)
+	if err != nil || pid != id {
 		return fail(c.rel, ruleLocation)
 	}
 	return nil

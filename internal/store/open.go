@@ -40,8 +40,9 @@ const (
 )
 
 // Error is a refused store operation. Name is the file, the config key, the
-// directory, or "database schema"; Rule is one of the fixed classes. The error
-// never wraps another error, so no driver text can reach its string.
+// directory, a store part such as the writer, or "database schema". Rule is
+// one of the fixed classes. The error never wraps another error, so no driver
+// text can reach its string.
 type Error struct{ Name, Rule string }
 
 func (e *Error) Error() string { return "store: " + e.Name + " " + e.Rule }
@@ -55,8 +56,8 @@ type Options struct {
 	// clean path relative to the state directory; "." is the state directory
 	// itself. The directories keys and checkpoints and the names
 	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
-	// ADR-022), so the store adds them itself. Names match exactly, with the
-	// case of the path. The store does not import internal/config.
+	// ADR-022), so the store adds them itself. Names match with no case: only
+	// the letters A-Z and a-z fold. The store does not import internal/config.
 	Reserved []string
 }
 
@@ -77,12 +78,12 @@ var pragmas = []string{
 // change the file system between the file checks and the open of SQLite.
 var afterChecks func()
 
-// afterVerify is a test hook. A test sets it to change the file system between
-// the open of SQLite and the second checks.
+// afterVerify is a test hook. Production code leaves it nil. A test sets it to
+// change the file system between the open of SQLite and the second checks.
 var afterVerify func()
 
-// onHeld is a test hook. A test sets it to get the descriptor that Open holds
-// open for the pool.
+// onHeld is a test hook. Production code leaves it nil. A test sets it to get
+// the descriptor that Open holds open for the pool.
 var onHeld func(*os.File)
 
 // heap guards soft_heap_limit, which is a setting of the process.
@@ -107,6 +108,10 @@ var heap struct {
 //
 // A failed check gives a fixed error and closes the database or connection.
 // A change that is made and undone between two checks is not found.
+//
+// The caller must end each use of the pool before it calls DB.Close: each
+// query, transaction and Rows. DB.Close closes only the free connections. Then
+// it closes the held descriptor, and this drops the locks of the process.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
@@ -142,25 +147,28 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if onHeld != nil {
 		onHeld(held)
 	}
-	// A failed open removes the entry at rel when this call made the database
-	// file. If someone put a link there, Remove deletes the link and not its
-	// target.
+	fi, statErr := held.Stat()
+	// A failed open removes the entry at rel only when it is the database file
+	// that this call made. Another file with the same name stays. If the Stat of
+	// the new file failed, nothing is removed.
 	refuse := func(err error) error {
-		if absent {
-			root.Remove(rel)
+		if absent && statErr == nil {
+			if cur, lerr := root.Lstat(rel); lerr == nil && os.SameFile(cur, fi) {
+				_ = root.Remove(rel)
+			}
 		}
 		return err
 	}
-	fi, err := held.Stat()
-	id, err := identityOf(rel, fi, err)
+	id, err := identityOf(rel, fi, statErr)
 	if err == nil && !absent {
 		if cid, _ := identityOf(rel, checked, nil); cid != id {
 			err = fail(rel, ruleChanged)
 		}
 	}
 	if err != nil {
+		err = refuse(err)
 		held.Close()
-		return nil, refuse(err)
+		return nil, err
 	}
 	if afterChecks != nil {
 		afterChecks()
@@ -206,17 +214,31 @@ func checkPath(rel string, opt Options) error {
 			return fail("reserved directory", rulePathForm)
 		}
 	}
+	low := foldASCII(rel)
 	for _, n := range fixedNames {
-		if rel == n {
+		if low == n {
 			return fail(key, ruleReserved)
 		}
 	}
 	for _, d := range append(append([]string{}, fixedDirs...), opt.Reserved...) {
-		if d == "." || rel == d || strings.HasPrefix(rel, d+"/") {
+		d = foldASCII(d)
+		if d == "." || low == d || strings.HasPrefix(low, d+"/") {
 			return fail(key, ruleReserved)
 		}
 	}
 	return nil
+}
+
+// foldASCII changes the letters A-Z in s to a-z. No other byte changes, so a
+// non-ASCII letter never matches an ASCII letter.
+func foldASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // stateBase returns the absolute state directory with its symlinks resolved.
@@ -239,9 +261,9 @@ func stateBase(root *os.Root) (string, error) {
 }
 
 // checkParents checks the state directory and each directory above rel. Each
-// exists, is a directory and not a symlink (Lstat does not follow a link), is
-// owned by the user that runs the sensor, and has no group or other permission
-// bits and no setuid, setgid or sticky bit.
+// must exist and be a real directory: Lstat does not follow a link. The owner
+// must be the user that runs the sensor. The mode must have no group or other
+// permission bits and no setuid, setgid or sticky bit.
 func checkParents(root *os.Root, rel string) error {
 	parts := strings.Split(rel, "/")
 	for i := 0; i < len(parts); i++ {
@@ -257,8 +279,8 @@ func checkParents(root *os.Root, rel string) error {
 		case err != nil:
 			return fail(name, ruleExamine)
 		}
-		if rule := checkOwnerMode(fi); rule != "" {
-			return fail(name, rule)
+		if err := checkOwnerMode(name, fi); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -277,8 +299,8 @@ func checkFiles(root *os.Root, rel string) (db fs.FileInfo, err error) {
 		if err != nil {
 			return nil, fail(name, ruleExamine)
 		}
-		if rule := checkFile(fi); rule != "" {
-			return nil, fail(name, rule)
+		if err := checkFile(name, fi); err != nil {
+			return nil, err
 		}
 		if suffix == "" {
 			db = fi
@@ -287,30 +309,30 @@ func checkFiles(root *os.Root, rel string) (db fs.FileInfo, err error) {
 	return db, nil
 }
 
-// checkFile returns the failed rule for an existing file, or an empty string.
-func checkFile(fi fs.FileInfo) string {
+// checkFile returns the error for an existing file that is not safe, or nil.
+func checkFile(name string, fi fs.FileInfo) error {
 	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
-		return ruleType
+		return fail(name, ruleType)
 	}
 	if nlink, _, ok := fileFacts(fi); ok && nlink != 1 {
-		return ruleLinks
+		return fail(name, ruleLinks)
 	}
-	return checkOwnerMode(fi)
+	return checkOwnerMode(name, fi)
 }
 
-// checkOwnerMode returns the failed rule for the owner and the mode of a file
-// or a directory, or an empty string.
-func checkOwnerMode(fi fs.FileInfo) string {
+// checkOwnerMode returns the error for the owner and the mode of a file or a
+// directory that is not safe, or nil.
+func checkOwnerMode(name string, fi fs.FileInfo) error {
 	_, uid, ok := fileFacts(fi)
 	switch {
 	case !ok:
-		return ruleExamine // fail closed
+		return fail(name, ruleExamine) // fail closed
 	case int64(uid) != euid():
-		return ruleOwner
+		return fail(name, ruleOwner)
 	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
-		return ruleMode
+		return fail(name, ruleMode)
 	}
-	return ""
+	return nil
 }
 
 // dsn makes the connection string from fixed text and the checked path. The

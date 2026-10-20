@@ -102,10 +102,10 @@ func swapStateDir(t *testing.T, state string) {
 	mustOpen(t, root, "events.db").Close()
 }
 
-// T-S-15: a symlink, a file that was renamed away, a different clean file, or a
-// different state directory in place of the database file when the pool makes a
-// new connection: the connection is refused with a fixed error, and the file
-// that the link points to is not changed.
+// T-S-15: the pool makes a new connection after a change at the database file.
+// The change is a symlink, a rename away, a different clean file, or a
+// different state directory. The connection is refused with a fixed error. The
+// file that the link points to does not change.
 func TestTS15ReconnectChecksTheFiles(t *testing.T) {
 	for _, mode := range []string{"symlink", "renamed", "other file", "state directory"} {
 		t.Run(mode, func(t *testing.T) {
@@ -148,7 +148,7 @@ func TestTS15ReconnectChecksTheFiles(t *testing.T) {
 // T-S-15: the writer stops with a database error when the pool cannot make a
 // connection, and it does not stop when the pool makes a good new one.
 func TestTS15WriterAfterReconnect(t *testing.T) {
-	for _, name := range []string{"no change", "file renamed", "other file renamed over", "state directory swapped"} {
+	for _, name := range []string{"no change", "file renamed", "symlink", "other file renamed over", "state directory swapped"} {
 		bad := name != "no change"
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, 100)
@@ -164,6 +164,13 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 			switch name {
 			case "file renamed":
 				if err := os.Rename(file, file+".moved"); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Rename(file, file+".moved"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(file+".moved", file); err != nil {
 					t.Fatal(err)
 				}
 			case "other file renamed over":
@@ -196,18 +203,23 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 // outside does not change, and that the database file is not removed.
 // Open keeps the file, because the fixture made it before the call.
 func swapAfterVerify(t *testing.T, rule string, swap func(f *fixture)) {
+	swapAfterVerifyOf(t, "events.db", rule, swap)
+}
+
+// swapAfterVerifyOf is swapAfterVerify for a swap that the rule names as name,
+// for example a WAL file.
+func swapAfterVerifyOf(t *testing.T, name, rule string, swap func(f *fixture)) {
 	f := newFixture(t)
 	data, err := os.ReadFile(filepath.Join(f.state, "events.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterVerify = func() { swap(f) }
-	defer func() { afterVerify = nil }()
+	setHook(t, &afterVerify, func() { swap(f) })
 	db, err := Open(f.root, "events.db", Options{})
 	if db != nil {
 		db.Close()
 	}
-	wantRule(t, err, "events.db", rule)
+	wantRule(t, err, name, rule)
 	if _, err := os.Lstat(filepath.Join(f.state, "events.db")); err != nil {
 		t.Fatalf("the database file is gone: %v", err)
 	}
@@ -219,11 +231,23 @@ func swapAfterVerify(t *testing.T, rule string, swap func(f *fixture)) {
 	}
 }
 
-// T-S-15: a swap that is put in place after the open of SQLite is found by the
-// second checks: a rename that puts a symlink in place of the file, a rename
-// that puts a different clean file in place, and a new hard link to the file.
+// T-S-15: the second checks find a swap that someone puts in place after the
+// open of SQLite. The swap is a rename that puts a symlink in place of the
+// file, a rename that puts a different clean file in place, or a new hard link
+// to the file. A symlink in place of the WAL, SHM or journal file is found too.
 func TestTS15SwapAfterOpenIsRefused(t *testing.T) {
-	t.Run("symlink put in place by rename", func(t *testing.T) {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		t.Run("symlink in place of "+suffix, func(t *testing.T) {
+			swapAfterVerifyOf(t, "events.db"+suffix, ruleType, func(f *fixture) {
+				file := filepath.Join(f.state, "events.db"+suffix)
+				os.Remove(file)
+				if err := os.Symlink(f.target, file); err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
+	t.Run("rename puts a symlink in place", func(t *testing.T) {
 		swapAfterVerify(t, ruleType, func(f *fixture) {
 			file := filepath.Join(f.state, "events.db")
 			os.Rename(file, file+".moved")
