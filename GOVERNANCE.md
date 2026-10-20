@@ -39,8 +39,28 @@ files. Do not change
 the C1–C10 table in `AGENTS.md` for STE100: it is a byte-exact mirror.
 An STE100 rewrite must not change what a rule means. If a rewrite can
 change the meaning, keep the old text and open an issue. The rule
-applies to new text and to all text that a change touches. Human review
-checks it; no tool checks it.
+applies to new text and to all text that a change touches.
+
+These limits apply to prose:
+
+- A sentence in a code comment has at most 20 words.
+- A sentence in text that the software shows to users has at most 20
+  words. This text is error messages, log messages, and help text.
+- A sentence in other prose has at most 25 words.
+- A code comment line has at most 80 columns. A tab is 4 columns.
+
+A sentence ends at `.`, `?` or `!` before a space or a line end. It also
+ends at the end of a paragraph, a heading and a list item. A colon that
+introduces a vertical list also ends it. A colon in a line, a semicolon, a
+dash and a parenthesis do not end a sentence. A code span in backticks is
+one word. In a Markdown link, only the link text counts. Code blocks do
+not count.
+
+`make lint` checks two limits for the comment lines that a change touches:
+the length of a comment line, and the words in a code comment sentence.
+Human review checks the rest. This includes the word limit for text that
+the software shows to users, the word limit for other prose, and the
+other STE100 rules.
 
 ## Maintainers and merges
 

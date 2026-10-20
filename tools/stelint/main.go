@@ -1,17 +1,18 @@
-// Command stelint finds Go comment lines that are longer than 80 columns.
+// Command stelint checks two limits in Go comments. A comment line has at most
+// 80 columns. A comment sentence has at most 20 words.
 //
 // Usage:
 //
 //	stelint <base> <head>
 //	stelint -all [head]
 //
-// The first form fails only for lines that changed between base and head.
-// The changed lines come from "git diff base...head", the same range as the
-// dco check. The file text comes from head.
+// The first form fails only for text that changed between base and head. The
+// changed lines come from "git diff base...head", the same range as the dco
+// check. The file text comes from head.
 //
 // The second form checks the tracked Go files at head, except symbolic links.
-// It prints each hit and a total. It exits 0 unless git or an input limit
-// fails.
+// It prints each hit and a total for each rule. It exits 0 unless git or an
+// input limit fails.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -28,18 +29,54 @@
 // one column. A comment line that holds only an http:// or https:// URL can
 // be longer. stelint skips each file with a testdata directory in its path.
 //
-// A hit prints as "path:line: <n> columns (limit 80)". Paths come from a
-// pull request, so stelint prints no raw control character.
+// # Sentences
+//
+// Adjacent "//" lines that each start their line are one text. A blank "//"
+// line, a line of code or a directive ends that text. A "//" comment after
+// code is a text of its own. Each "/* */" comment is also a text of its own.
+// In it the indent does not count. A "*" at the start of a line is removed.
+//
+// A sentence ends at ".", "?" or "!" before a space, a line end or the end of
+// the text. It also ends at a blank line, a heading, a list item, and the
+// start of a code block. A colon in a line does not end a sentence. A
+// semicolon, a dash and a parenthesis do not end a sentence.
+//
+// A heading starts with "#" and a space. A list item starts with a marker and
+// a space. The marker is "-", "*", "+", "•", or a number with "." or ")". An
+// indented line after a list item belongs to the item.
+//
+// A code block is a run of lines with a tab or two spaces of indent. It
+// starts after a blank line or a code block. A fence of three backticks also
+// makes a code block. stelint does not count code.
+//
+// A word is a run of characters between spaces. A code span in backticks is
+// one word, also when it has spaces. A "." in a code span does not end a
+// sentence. In a Markdown link, only the link text counts. A backtick or a
+// link with no closing mark is an ordinary character.
+//
+// A sentence is checked when at least one line of it is a changed line.
+//
+// # Output
+//
+// A long line prints as "path:line: <n> columns (limit 80)". A long sentence
+// prints as "path:line: <n> words (limit 20)", with the line of its first
+// word. Paths come from a pull request, so stelint prints no raw control
+// character.
 //
 // A file over 1 MiB, or a git output over the output cap, is not parsed. A
 // hunk that ends after line 1048576 is not parsed. Each gives an error and
 // exit code 2. When base is empty, stelint prints one line that says the
 // check did not run, and exits 0.
 //
+// Not in this change: stelint does not find quoted text, third-party text or
+// legal text. The writing standard does not count them. It does not check
+// text outside Go comments, such as Markdown files, strings and commit
+// messages.
+//
 // Exit codes:
 //
 //	0  pass, or the check did not run
-//	1  a changed line is too long
+//	1  a changed line is too long, or a changed sentence has too many words
 //	2  usage, git or input limit error
 package main
 
@@ -146,59 +183,77 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	return check(dir, base, head, targets, stdout, stderr)
 }
 
-// report prints every hit of every target and a total. It exits 0, unless an
-// input limit or git fails.
+// totals counts the hits of a scan. For each rule it holds the hits and the
+// files with a hit.
+type totals struct{ lines, lineFiles, sents, sentFiles int }
+
+// report prints every hit of every target and a total for each rule. It
+// exits 0, unless an input limit or git fails.
 func report(dir, head string, targets []target, stdout, stderr io.Writer) int {
-	hits, files, err := scanTargets(dir, head, targets, stdout)
+	n, err := scanTargets(dir, head, targets, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "stelint: %v\n", err)
 		return 2
 	}
-	fmt.Fprintf(stdout, "stelint: %d comment line(s) over %d columns in %d file(s)\n", hits, maxColumns, files)
+	fmt.Fprintf(stdout, "stelint: %d comment line(s) over %d columns in %d file(s)\n", n.lines, maxColumns, n.lineFiles)
+	fmt.Fprintf(stdout, "stelint: %d comment sentence(s) over %d words in %d file(s)\n", n.sents, maxWords, n.sentFiles)
 	return 0
 }
 
-// check fails when a changed comment line is too long.
+// check fails when a changed comment line is too long. It also fails when a
+// comment sentence with a changed line has too many words.
 func check(dir, base, head string, targets []target, stdout, stderr io.Writer) int {
-	hits, _, err := scanTargets(dir, head, targets, stdout)
+	n, err := scanTargets(dir, head, targets, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "stelint: %v\n", err)
 		return 2
 	}
-	if hits > 0 {
-		fmt.Fprintf(stdout, "stelint FAIL: %d changed comment line(s) over %d columns\n", hits, maxColumns)
+	if n.lines+n.sents > 0 {
+		fmt.Fprintf(stdout, "stelint FAIL: %d changed comment line(s) over %d columns, %d comment sentence(s) over %d words\n",
+			n.lines, maxColumns, n.sents, maxWords)
 		return 1
 	}
-	fmt.Fprintf(stdout, "stelint: no changed comment line over %d columns in %.12s...%.12s\n",
-		maxColumns, clean(base), clean(head))
+	fmt.Fprintf(stdout, "stelint: no changed comment line over %d columns and no changed sentence over %d words in %.12s...%.12s\n",
+		maxColumns, maxWords, clean(base), clean(head))
 	return 0
 }
 
-// scanTargets prints the hits of each target. It returns the number of hits
-// and the number of files with a hit.
-func scanTargets(dir, head string, targets []target, stdout io.Writer) (hits, files int, err error) {
+// scanTargets prints the hits of each target: the long lines, then the long
+// sentences. It returns the totals.
+func scanTargets(dir, head string, targets []target, stdout io.Writer) (n totals, err error) {
 	for _, t := range targets {
 		src, tooBig, err := gitOut(dir, maxFileBytes, "show", head+":"+t.path)
 		if err != nil {
-			return 0, 0, fmt.Errorf("git show of %s failed: %w", clean(t.path), err)
+			return totals{}, fmt.Errorf("git show of %s failed: %w", clean(t.path), err)
 		}
 		if tooBig {
-			return 0, 0, fmt.Errorf("%s is over %d bytes: not parsed", clean(t.path), maxFileBytes)
+			return totals{}, fmt.Errorf("%s is over %d bytes: not parsed", clean(t.path), maxFileBytes)
 		}
-		n := 0
+		lines, sents := 0, 0
 		for _, h := range longLines(src) {
 			if !t.has(h.line) {
 				continue
 			}
 			fmt.Fprintf(stdout, "%s:%d: %d columns (limit %d)\n", clean(t.path), h.line, h.cols, maxColumns)
-			n++
+			lines++
 		}
-		hits += n
-		if n > 0 {
-			files++
+		for _, s := range longSentences(src) {
+			if !t.hasAny(s.first, s.last) {
+				continue
+			}
+			fmt.Fprintf(stdout, "%s:%d: %d words (limit %d)\n", clean(t.path), s.first, s.words, maxWords)
+			sents++
+		}
+		n.lines += lines
+		n.sents += sents
+		if lines > 0 {
+			n.lineFiles++
+		}
+		if sents > 0 {
+			n.sentFiles++
 		}
 	}
-	return hits, files, nil
+	return n, nil
 }
 
 // wanted reports whether stelint checks the path: a Go file with no testdata

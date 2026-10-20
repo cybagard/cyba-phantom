@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gitRun runs a git subcommand in dir and fails the test on error.
@@ -459,7 +460,8 @@ func TestReportMode(t *testing.T) {
 	}
 	want := "a.go:3: 95 columns (limit 80)\n" +
 		"b/b.go:3: 93 columns (limit 80)\n" +
-		"stelint: 2 comment line(s) over 80 columns in 2 file(s)\n"
+		"stelint: 2 comment line(s) over 80 columns in 2 file(s)\n" +
+		"stelint: 0 comment sentence(s) over 20 words in 0 file(s)\n"
 	if out != want {
 		t.Errorf("output:\n%s\nwant:\n%s", out, want)
 	}
@@ -628,5 +630,273 @@ func TestOwnCommentLinesAreShort(t *testing.T) {
 		for _, h := range longLines(src) {
 			t.Errorf("%s:%d: %d columns (limit %d)", name, h.line, h.cols, maxColumns)
 		}
+		for _, s := range longSentences(src) {
+			t.Errorf("%s:%d: %d words (limit %d)", name, s.first, s.words, maxWords)
+		}
+	}
+}
+
+// ws returns n words that are not an end mark.
+func ws(n int) string { return strings.TrimSpace(strings.Repeat("w ", n)) }
+
+// sentences runs the sentence rule and returns the hits as {first, last,
+// words}.
+func sentences(src string) []sentence { return longSentences([]byte(src)) }
+
+func TestSentenceRules(t *testing.T) {
+	// A case has the source and the expected hits. A 20-word case passes. A
+	// 21-word case fails. A split turns 21 or more words into passing parts.
+	cases := []struct {
+		name, src string
+		want      []sentence
+	}{
+		{"20 words pass", "// " + ws(20) + ".\n", nil},
+		{"21 words fail", "// " + ws(21) + ".\n", []sentence{{1, 1, 21}}},
+		{"no end mark: end of text", "// " + ws(21), []sentence{{1, 1, 21}}},
+
+		// End marks.
+		{"period splits", "// " + ws(15) + ". " + ws(15) + ".\n", nil},
+		{"question mark splits", "// " + ws(15) + "? " + ws(15) + "?\n", nil},
+		{"exclamation mark splits", "// " + ws(15) + "! " + ws(15) + "!\n", nil},
+		{"mark at a line end splits", "// " + ws(15) + ".\n// " + ws(15) + ".\n", nil},
+		{"mark inside a word does not split", "// " + ws(10) + " a.b?c!d " + ws(10) + "\n", []sentence{{1, 1, 21}}},
+		{"mark before a bracket does not split", "// " + ws(15) + ".) " + ws(15) + "\n", []sentence{{1, 1, 30}}},
+		{"sentence over two lines", "// " + ws(11) + "\n// " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"first word line", "// " + ws(5) + ".\n// " + ws(11) + "\n// " + ws(10) + ".\n", []sentence{{2, 3, 21}}},
+
+		// Paragraph end and list item end.
+		{"one paragraph", "// " + ws(15) + "\n// " + ws(15) + "\n", []sentence{{1, 2, 30}}},
+		{"blank line ends a paragraph", "// " + ws(15) + "\n//\n// " + ws(15) + "\n", nil},
+		{"heading ends a sentence", "// # " + ws(15) + "\n// " + ws(15) + "\n", nil},
+		{"list items end", "// - " + ws(15) + "\n// - " + ws(15) + "\n", nil},
+		{"numbered items end", "// 1. " + ws(15) + "\n// 2) " + ws(15) + "\n", nil},
+		{"star and bullet items end", "// * " + ws(15) + "\n// • " + ws(15) + "\n// + " + ws(15) + "\n", nil},
+		{"list item at 20 words", "//   - " + ws(20) + "\n", nil},
+		{"list item at 21 words", "//   - " + ws(21) + "\n", []sentence{{1, 1, 21}}},
+		{"list item continuation", "// - " + ws(11) + "\n//   " + ws(10) + "\n", []sentence{{1, 2, 21}}},
+		{"text after a list is a new paragraph", "// - a\n// " + ws(15) + "\n// " + ws(15) + "\n", []sentence{{2, 3, 30}}},
+
+		// A colon before a vertical list.
+		{"colon before a list at 21", "// " + ws(21) + ":\n// - a\n// - b\n", []sentence{{1, 1, 21}}},
+		{"colon before a list at 20", "// " + ws(20) + ":\n// - a\n// - b\n", nil},
+		{"colon before a list splits", "// " + ws(15) + ":\n// - " + ws(15) + "\n", nil},
+
+		// A colon in a line.
+		{"colon in a line at 20", "// " + ws(9) + ": " + ws(11) + ".\n", nil},
+		{"colon in a line at 21", "// " + ws(10) + ": " + ws(11) + ".\n", []sentence{{1, 1, 21}}},
+
+		// Semicolon, dash and parenthesis.
+		{"semicolon at 20", "// " + ws(10) + "; " + ws(10) + ".\n", nil},
+		{"semicolon at 21", "// " + ws(10) + "; " + ws(11) + ".\n", []sentence{{1, 1, 21}}},
+		{"dash is a word and does not end", "// " + ws(10) + " - " + ws(10) + ".\n", []sentence{{1, 1, 21}}},
+		{"dash at 20", "// " + ws(10) + " - " + ws(9) + ".\n", nil},
+		{"parenthesis at 21", "// " + ws(10) + " (" + ws(11) + ").\n", []sentence{{1, 1, 21}}},
+		{"parenthesis at 20", "// " + ws(10) + " (" + ws(10) + ").\n", nil},
+
+		// A code span.
+		{"end mark in a code span at 21", "// `a. b? c!` " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"end mark in a code span at 20", "// `a. b? c!` " + ws(19) + ".\n", nil},
+		{"code span with spaces is one word at 20", "// `a b c d e f` " + ws(19) + ".\n", nil},
+		{"code span with spaces is one word at 21", "// `a b c d e f` " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"code span over two lines", "// `a\n// b` " + ws(19) + ".\n", nil},
+		{"code span joined to a word", "// x`a b`y " + ws(19) + ".\n", nil},
+		{"backtick with no close is a character", "// ` " + ws(19) + ".\n", nil},
+		{"backtick with no close at 21", "// ` " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A Markdown link.
+		{"link text counts at 20", "// [one two three](https://example.com/a?b=1.) " + ws(17) + ".\n", nil},
+		{"link text counts at 21", "// [one two three](https://example.com/a?b=1.) " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
+		{"link url with an end mark", "// [a](https://example.com/x.y.z?q=1!) " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"link before an end mark", "// [a b](https://example.com). " + ws(19) + ".\n", nil},
+		{"bracket without a url", "// [a b] (c) " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
+		{"bracket with an open url", "// [a b](c " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A code block.
+		{"code block is not counted", "// " + ws(5) + ".\n//\n//\t" + ws(30) + "\n//\n// " + ws(20) + ".\n", nil},
+		{"text after a code block at 21", "// " + ws(5) + ".\n//\n//\t" + ws(30) + "\n//\n// " + ws(21) + ".\n", []sentence{{5, 5, 21}}},
+		{"code block with two spaces", "//\n//  " + ws(30) + "\n", nil},
+		{"code block ends the text before it", "// " + ws(15) + ":\n//\n//\t" + ws(30) + "\n", nil},
+		{"fenced code block", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(20) + ".\n", nil},
+		{"text after a fence at 21", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(21) + ".\n", []sentence{{4, 4, 21}}},
+		{"indent in a paragraph is not code", "// " + ws(11) + "\n//\t" + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+	}
+	for _, c := range cases {
+		got := sentences(c.src)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+func TestSentenceCommentGroups(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []sentence
+	}{
+		{"adjacent lines are one text", "// " + ws(11) + "\n// " + ws(10) + "\n", []sentence{{1, 2, 21}}},
+		{"code between lines splits", "// " + ws(11) + "\nvar x = 1\n// " + ws(10) + "\n", nil},
+		{"blank line between comments splits", "// " + ws(11) + "\n\n// " + ws(10) + "\n", nil},
+		{"trailing comment is alone", "x := 1 // " + ws(11) + "\n// " + ws(10) + "\n", nil},
+		{"trailing comment is a text", "x := 1 // " + ws(21) + "\n", []sentence{{1, 1, 21}}},
+		{"line after a trailing comment starts a text", "x := 1 // a\n// " + ws(11) + "\n// " + ws(10) + "\n", []sentence{{2, 3, 21}}},
+		{"indented comments join", "func f() {\n\t// " + ws(11) + "\n\t// " + ws(10) + "\n}\n", []sentence{{2, 3, 21}}},
+		{"directive splits", "// " + ws(11) + "\n//go:generate x\n// " + ws(10) + "\n", nil},
+		{"directive text is skipped", "//go:generate " + ws(30) + "\n", nil},
+		{"block comment: lines of one text", "/*\n" + ws(11) + "\n" + ws(10) + "\n*/\n", []sentence{{2, 3, 21}}},
+		{"block comment: stars are removed", "/*\n * " + ws(11) + "\n * " + ws(10) + "\n */\n", []sentence{{2, 3, 21}}},
+		{"block comment at 20", "/* " + ws(20) + ". */\n", nil},
+		{"block comment at 21", "/* " + ws(21) + ". */\n", []sentence{{1, 1, 21}}},
+		{"block comment: indent does not make code", "/*\n\t" + ws(21) + ".\n*/\n", []sentence{{2, 2, 21}}},
+		{"string is not a comment", "s := \"// " + ws(30) + "\"\n", nil},
+		{"carriage returns", "// " + ws(21) + ".\r\n", []sentence{{1, 1, 21}}},
+		{"hits are in line order", "/* " + ws(21) + ". */\nx := 1 // " + ws(22) + "\n", []sentence{{1, 1, 21}, {2, 2, 22}}},
+		{"no comment", "package a\n", nil},
+	}
+	for _, c := range cases {
+		got := sentences(c.src)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+func TestSentenceTimeIsLinear(t *testing.T) {
+	// Each text has a mark that repeats and never closes. A search that
+	// starts again at each mark would take quadratic time and not finish.
+	n := 200000
+	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`"} {
+		src := "// " + strings.Repeat(unit, n) + "\n"
+		done := make(chan []sentence, 1)
+		go func() { done <- sentences(src) }()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("unit %q: no result after 20 s", unit)
+		}
+	}
+}
+
+// sentRepo makes a repository with a file that holds a comment sentence of 21
+// words. It returns the directory and the first commit.
+func sentRepo(t *testing.T) (dir, base string) {
+	t.Helper()
+	dir = newRepo(t)
+	writeFile(t, dir, "a.go", "package a\n\n// "+ws(21)+".\nfunc f() {}\n")
+	return dir, commitAll(t, dir, "base")
+}
+
+func TestChangedLongSentenceFails(t *testing.T) {
+	dir, base := sentRepo(t)
+	writeFile(t, dir, "a.go", "package a\n\n// "+ws(21)+".\nfunc f() {}\n\n// "+ws(21)+".\nfunc g() {}\n")
+	head := commitAll(t, dir, "add")
+	code, out, _ := runLint(dir, base, head)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "a.go:6: 21 words (limit 20)\n") {
+		t.Errorf("no hit line for a.go:6 in:\n%s", out)
+	}
+	if strings.Contains(out, "a.go:3:") {
+		t.Errorf("the unchanged long sentence is a hit:\n%s", out)
+	}
+	if !strings.Contains(out, "stelint FAIL: 0 changed comment line(s) over 80 columns, 1 comment sentence(s) over 20 words\n") {
+		t.Errorf("no fail line in:\n%s", out)
+	}
+}
+
+func TestUnchangedLongSentencePasses(t *testing.T) {
+	dir, base := sentRepo(t)
+	writeFile(t, dir, "a.go", "package a\n\nvar x = 1\n\n// "+ws(21)+".\nfunc f() {}\n\n// "+ws(20)+".\nfunc g() {}\n")
+	head := commitAll(t, dir, "move and add")
+	code, out, errOut := runLint(dir, base, head)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; output:\n%s%s", code, out, errOut)
+	}
+	if strings.Contains(out, "words (limit") {
+		t.Errorf("unexpected hit:\n%s", out)
+	}
+}
+
+func TestSentenceWithOneChangedLineFails(t *testing.T) {
+	dir := newRepo(t)
+	writeFile(t, dir, "a.go", "package a\n\n// "+ws(11)+"\n// "+ws(8)+".\nfunc f() {}\n")
+	base := commitAll(t, dir, "base")
+	// The edit adds two words on the second line only. The sentence has 21
+	// words, and its first line is not a changed line.
+	writeFile(t, dir, "a.go", "package a\n\n// "+ws(11)+"\n// "+ws(10)+".\nfunc f() {}\n")
+	head := commitAll(t, dir, "edit")
+	code, out, _ := runLint(dir, base, head)
+	if code != 1 || !strings.Contains(out, "a.go:3: 21 words (limit 20)\n") {
+		t.Errorf("code = %d, output:\n%s", code, out)
+	}
+}
+
+func TestSplitSentenceRepairsComment(t *testing.T) {
+	dir, base := sentRepo(t)
+	writeFile(t, dir, "a.go", "package a\n\n// "+ws(10)+".\n// "+ws(11)+".\nfunc f() {}\n")
+	head := commitAll(t, dir, "split")
+	if code, out, _ := runLint(dir, base, head); code != 0 {
+		t.Errorf("code = %d, want 0; output:\n%s", code, out)
+	}
+}
+
+func TestSentenceHitInTestdataIsSkipped(t *testing.T) {
+	dir, base := sentRepo(t)
+	writeFile(t, dir, "testdata/f.go", "package a\n\n// "+ws(30)+".\n")
+	head := commitAll(t, dir, "fixture")
+	if code, out, _ := runLint(dir, base, head); code != 0 {
+		t.Errorf("code = %d, output:\n%s", code, out)
+	}
+}
+
+func TestReportModeCountsSentences(t *testing.T) {
+	dir, _ := sentRepo(t)
+	writeFile(t, dir, "b/b.go", "package b\n\nvar x = 1 // "+ws(22)+".\n// "+ws(30)+"\n"+comment(95)+"\n")
+	writeFile(t, dir, "ok.go", "package ok\n\n// "+ws(20)+".\n")
+	commitAll(t, dir, "more")
+	code, out, errOut := runLint(dir, "-all")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, errOut)
+	}
+	want := "a.go:3: 21 words (limit 20)\n" +
+		"b/b.go:5: 95 columns (limit 80)\n" +
+		"b/b.go:3: 22 words (limit 20)\n" +
+		"b/b.go:4: 31 words (limit 20)\n" +
+		"stelint: 1 comment line(s) over 80 columns in 1 file(s)\n" +
+		"stelint: 3 comment sentence(s) over 20 words in 2 file(s)\n"
+	if out != want {
+		t.Errorf("output:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestHasAny(t *testing.T) {
+	tg := target{spans: []span{{3, 2}, {10, 1}}}
+	for _, c := range []struct {
+		first, last int
+		want        bool
+	}{
+		{1, 2, false}, {1, 3, true}, {4, 4, true}, {5, 9, false},
+		{5, 10, true}, {10, 20, true}, {11, 20, false}, {1, 100, true},
+	} {
+		if got := tg.hasAny(c.first, c.last); got != c.want {
+			t.Errorf("hasAny(%d, %d) = %v, want %v", c.first, c.last, got, c.want)
+		}
+	}
+	if !(target{all: true}).hasAny(1, 1) || (target{}).hasAny(1, 1) {
+		t.Error("hasAny with all set or with no span is wrong")
 	}
 }
