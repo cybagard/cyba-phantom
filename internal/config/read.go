@@ -2,7 +2,7 @@
 //
 // The sensor reads the config one time at start, with Load. The package has
 // no reload function. SIGHUP and the reload request reload the bundle, not
-// the config. A config change needs a restart.
+// the config. A config change needs a restart. The package is unix only.
 package config
 
 import (
@@ -94,7 +94,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 		return nil, errors.New("config: empty document")
 	}
 	if len(b) > maxConfigSize {
-		return nil, errors.New("config: the file is larger than 64 KiB")
+		return nil, errors.New("config: the input is larger than 64 KiB")
 	}
 	if !utf8.Valid(b) {
 		return nil, errors.New("config: invalid UTF-8 encoding")
@@ -142,21 +142,23 @@ func ReadBytes(b []byte) (*Doc, error) {
 		Lines:     make(map[string]int),
 	}
 
-	if err := walkNode(root, "", res, 0); err != nil {
+	if err := walkNode(root, nil, "", res, 0); err != nil {
 		return nil, err
 	}
 
 	return res, nil
 }
 
-func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
+// walkNode walks the node n at path. For a mapping entry, key is the key node;
+// it is nil for the root and for a sequence item.
+func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 	if depth > maxDepth {
 		return fmt.Errorf("config: %s: line %d column %d: nesting exceeds limit of %d", formatPath(path), n.Line, n.Column, maxDepth)
 	}
 
-	if path != "" {
+	if key != nil {
 		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
-			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), n.Line, n.Column)
+			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), key.Line, key.Column)
 		}
 	}
 
@@ -169,11 +171,12 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: tag is outside the core schema", formatPath(path), n.Line, n.Column)
+		return fmt.Errorf("config: %s: line %d column %d: the tag must be str, int, bool, float, null, map or seq", formatPath(path), n.Line, n.Column)
 	}
 
-	if _, ok := doc.Lines[path]; !ok {
-		doc.Lines[path] = n.Line
+	doc.Lines[path] = n.Line
+	if key != nil {
+		doc.Lines[path] = key.Line
 	}
 	switch n.Kind {
 	case yaml.MappingNode:
@@ -192,7 +195,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 			}
 
 			if !isValidKey(key) {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key is invalid", formatPath(path), keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: the key must be 1 or more characters of a-z, 0-9 and _ only", formatPath(path), keyNode.Line, keyNode.Column)
 			}
 
 			if keyNode.Tag != "" && keyNode.Tag != "!!str" {
@@ -208,8 +211,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 				newPath = path + "." + key
 			}
 
-			doc.Lines[newPath] = keyNode.Line
-			if err := walkNode(valNode, newPath, doc, depth+1); err != nil {
+			if err := walkNode(valNode, keyNode, newPath, doc, depth+1); err != nil {
 				return err
 			}
 		}
@@ -221,7 +223,7 @@ func walkNode(n *yaml.Node, path string, doc *Doc, depth int) error {
 			if path == "" {
 				newPath = fmt.Sprintf("[%d]", i)
 			}
-			if err := walkNode(child, newPath, doc, depth+1); err != nil {
+			if err := walkNode(child, nil, newPath, doc, depth+1); err != nil {
 				return err
 			}
 		}
@@ -299,15 +301,9 @@ func formatOSError(path string, err error) error {
 }
 
 func wrapYamlError(err error) error {
-	s := err.Error()
-	var line, col int
-	n, parseErr := fmt.Sscanf(s, "yaml: line %d column %d", &line, &col)
-	if n < 1 || parseErr != nil {
-		n, parseErr = fmt.Sscanf(s, "yaml: line %d", &line)
-		if n < 1 || parseErr != nil {
-			return errors.New("config: invalid YAML")
-		}
+	var line int
+	if n, parseErr := fmt.Sscanf(err.Error(), "yaml: line %d", &line); n < 1 || parseErr != nil {
+		return errors.New("config: invalid YAML")
 	}
-
 	return fmt.Errorf("config: line %d: invalid YAML", line)
 }

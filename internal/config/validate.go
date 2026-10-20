@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -82,12 +83,12 @@ func parseHostPort(s string) (hostPort, string) {
 		return hp, "the port is not in the range 1 to 65535"
 	}
 	hp.host, hp.port = host, n
-	if host == "" {
-		return hp, ""
-	}
 	a, err := netip.ParseAddr(host)
 	if strings.HasPrefix(s, "[") && (err != nil || !a.Is6()) {
 		return hp, "a host in brackets must be an IPv6 address"
+	}
+	if host == "" {
+		return hp, ""
 	}
 	if err == nil {
 		hp.addr = a
@@ -285,6 +286,11 @@ func checkFetchURL(_ *loader, raw string) string {
 func checkEmail(_ *loader, raw string) string {
 	if strings.ContainsAny(raw, "\r\n") {
 		return "the address must not contain CR or LF"
+	}
+	if strings.ContainsFunc(raw, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) {
+		return "the address must not contain a control or format character"
 	}
 	a, err := mail.ParseAddress(raw)
 	if err != nil || a.Address != raw {
