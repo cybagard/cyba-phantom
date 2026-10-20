@@ -232,14 +232,22 @@ func toolDecision(strict bool, tool oracleTool, found string) string {
 	return "skip"
 }
 
+// fakeTool is the script of one tool: it prints out (for printf) and exits
+// with status.
+type fakeTool struct {
+	out    string
+	status int
+}
+
 // fakeTools makes one executable script for each bin of scripts, in a
-// temporary directory. A script prints its text (for printf). fakeTools
-// returns a lookPath function that finds these scripts only.
-func fakeTools(t *testing.T, scripts map[string]string) func(string) (string, error) {
+// temporary directory. fakeTools returns a lookPath function that finds these
+// scripts only.
+func fakeTools(t *testing.T, scripts map[string]fakeTool) func(string) (string, error) {
 	t.Helper()
 	dir := t.TempDir()
-	for bin, text := range scripts {
-		if err := os.WriteFile(filepath.Join(dir, bin), []byte("#!/bin/sh\nprintf '"+text+"'\n"), 0o755); err != nil {
+	for bin, s := range scripts {
+		text := fmt.Sprintf("#!/bin/sh\nprintf '%s'\nexit %d\n", s.out, s.status)
+		if err := os.WriteFile(filepath.Join(dir, bin), []byte(text), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -265,9 +273,11 @@ func TestTS19CheckTool(t *testing.T) {
 			return ""
 		}
 	}
-	py312 := fakeTools(t, map[string]string{"python3": `Python 3.12.3\n`})
-	py313 := fakeTools(t, map[string]string{"python3": `Python 3.13.5\nsecond line\n`})
-	tar1350 := fakeTools(t, map[string]string{"tar": `tar (GNU tar) 1.350\n`})
+	py312 := fakeTools(t, map[string]fakeTool{"python3": {`Python 3.12.3\n`, 0}})
+	py313 := fakeTools(t, map[string]fakeTool{"python3": {`Python 3.13.5\nsecond line\n`, 0}})
+	tar1350 := fakeTools(t, map[string]fakeTool{"tar": {`tar (GNU tar) 1.350\n`, 0}})
+	// The version line is right, but --version exits with status 1.
+	pyFails := fakeTools(t, map[string]fakeTool{"python3": {`Python 3.13.5\n`, 1}})
 	none := fakeTools(t, nil)
 	for _, c := range []struct {
 		name     string
@@ -284,6 +294,8 @@ func TestTS19CheckTool(t *testing.T) {
 		{"missing tool in CI", env("CI", "true"), none, tarTool, "fail", []string{`"not found"`, `"tar (GNU tar) 1.35"`}},
 		{"right version, first line only", env(), py313, pythonTool, "run", []string{"python3: Python 3.13.5"}},
 		{"tar version with more digits", env(), tar1350, tarTool, "skip", []string{`"tar (GNU tar) 1.350"`}},
+		{"--version exits with an error outside", env(), pyFails, pythonTool, "skip", []string{`"no version line"`, `"Python 3.13."`}},
+		{"--version exits with an error in CI", env("CI", "true"), pyFails, pythonTool, "fail", []string{`"no version line"`}},
 	} {
 		decision, msg := checkTool(c.getenv, c.lookPath, c.tool)
 		if decision != c.decision {
