@@ -3,6 +3,7 @@ package tlog
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -733,40 +734,90 @@ func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
 	mustNil(t, s.WriteTile(tile, make([]byte, 3*tlog.HashSize)))
 }
 
-// After a crash, a tile that the root computation does not read can have two
-// partial files. Open does not read the tile and does not list its directory,
-// so it leaves both files. A WriteTile of the tile deletes the narrower file.
-func TestTU07OpenLeavesTilesThatItDoesNotRead(t *testing.T) {
+// dirNames returns the names in the directory dir.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	mustNil(t, err)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// After a crash, a tile beyond the tree head can have two partial files. Open
+// tidies the tiles from the first tile beyond the head up to maxBatchTiles
+// tiles above it. It does not read a tile outside this range.
+func TestTS13OpenTidiesTilesBeyondTheHeadOnlyInRange(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
 	var a testLog
-	a.commit(t, s, 0, 256)
-	a.put(t, s, 256, 261) // a lost batch: tile 1 has 5 hashes
-	b := a.fork(t, 256, "other")
-	b.extend(t, 259)
-	// A crash after the rename of a narrower file with other records and before
-	// the delete of the wider file.
-	narrow := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 3}
-	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", narrow.Path()), b.tileData(narrow), fileMode))
+	a.commit(t, s, 0, 256) // the first tile beyond the head is tile 1
 	s.Close()
-	s = openStore(t, state)
-	partial := filepath.Join(dir, "tlog", "tile", "8", "0", "001.p")
-	names := func() []string {
-		ents, err := os.ReadDir(partial)
-		mustNil(t, err)
-		var got []string
-		for _, e := range ents {
-			got = append(got, e.Name())
+	plant := func(n int64) string {
+		var partial string
+		for _, w := range []int{3, 5} {
+			file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: n, W: w}.Path())
+			partial = filepath.Dir(file)
+			mustNil(t, os.MkdirAll(partial, dirMode))
+			mustNil(t, os.WriteFile(file, make([]byte, w*tlog.HashSize), fileMode))
 		}
-		return got
+		return partial
 	}
-	if got := names(); !slices.Equal(got, []string{"3", "5"}) {
-		t.Fatalf("files of tile 1 after Open: %v", got)
+	first, last := plant(1), plant(1+maxBatchTiles)
+	outside := plant(2 + maxBatchTiles)
+	openStore(t, state)
+	for _, p := range []string{first, last} {
+		if got := dirNames(t, p); !slices.Equal(got, []string{"5"}) {
+			t.Fatalf("files of %s after Open: %v", p, got)
+		}
 	}
-	wide := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 5}
-	mustNil(t, s.WriteTile(wide, a.tileData(wide)))
-	if got := names(); !slices.Equal(got, []string{"5"}) {
-		t.Fatalf("files of tile 1 after the write: %v", got)
+	if got := dirNames(t, outside); !slices.Equal(got, []string{"3", "5"}) {
+		t.Fatalf("Open changed the tile outside the range: %v", got)
+	}
+}
+
+// A valid log of more than 8 million leaves has level 0 tiles in more than 32
+// group directories. Open must succeed: the names that it reads depend on the
+// bound for the tiles beyond the head, not on the size of the log. The test
+// builds the tiles of level 1 and above from arbitrary hashes of the subtrees
+// of 256 leaves, and links one file for all tiles of level 0. Open does not
+// read the tiles of level 0, because the size is a multiple of 256.
+func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
+	const tiles = 33*groupTiles + 1
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	var m testLog // the tree over the hashes of the subtrees of 256 leaves
+	for j := range int64(tiles) {
+		h := tlog.Hash(sha256.Sum256(binary.BigEndian.AppendUint64(nil, uint64(j))))
+		hs, err := tlog.StoredHashesForRecordHash(j, h, &m)
+		mustNil(t, err)
+		m.hashes = append(m.hashes, hs...)
+	}
+	size := int64(tiles) * fullWidth
+	log := filepath.Join(dir, "tlog")
+	base := filepath.Join(log, "base")
+	mustNil(t, os.WriteFile(base, make([]byte, fullWidth*tlog.HashSize), fileMode))
+	for _, tile := range tlog.NewTiles(TileHeight, 0, size) {
+		file := filepath.Join(log, tile.Path())
+		mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+		if tile.L == 0 {
+			mustNil(t, os.Link(base, file))
+			continue
+		}
+		up := tlog.Tile{H: TileHeight, L: tile.L - 1, N: tile.N, W: tile.W}
+		mustNil(t, os.WriteFile(file, m.tileData(up), fileMode))
+	}
+	mustNil(t, os.Remove(base))
+	head := binary.BigEndian.AppendUint64(nil, uint64(size))
+	root := m.root(t, tiles)
+	mustNil(t, os.WriteFile(filepath.Join(log, headName), append(head, root[:]...), fileMode))
+	if groups := dirNames(t, filepath.Join(log, "tile", "8", "0")); len(groups) <= 32 {
+		t.Fatalf("only %d group directories", len(groups))
+	}
+	if n, got := openStore(t, state).TreeHead(); n != size || got != root {
+		t.Fatalf("Open gave %d, %x", n, got)
 	}
 }
 
@@ -1082,4 +1133,156 @@ func TestTU07NarrowerWriteKeepsTheRecordedWidth(t *testing.T) {
 		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
 	}
 	mustNil(t, s.SetHead(5, l.root(t, 5)))
+}
+
+// A stored file of the tile with other covered hashes makes WriteTile refuse
+// the call before it writes the new file. No file changes.
+func TestTS13WriteTileChecksOtherFilesBeforeTheWrite(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	l.extend(t, 5)
+	forged := l.fork(t, 0, "forged")
+	forged.extend(t, 2)
+	bad := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 2}
+	mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", bad.Path()), forged.tileData(bad), fileMode))
+	before := tree(t, dir)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	err := s.WriteTile(wide, l.tileData(wide))
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleRewrite || e.Name != bad.Path() {
+		t.Fatalf("got %v, want the rule %q for %s", err, ruleRewrite, bad.Path())
+	}
+	if tree(t, dir) != before {
+		t.Fatal("a refused WriteTile changed a file")
+	}
+}
+
+// A newly covered full tile that the root computation does not read must give
+// the hash for it in the tile one level up. Here a stored byte of tile 1 of
+// level 0 changed after the write.
+func TestTS13SetHeadChecksNewTileAgainstTheLevelAbove(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.put(t, s, 0, 2*fullWidth)
+	full := tlog.Tile{H: TileHeight, L: 0, N: 1, W: fullWidth}
+	flipByte(t, filepath.Join(dir, "tlog", full.Path()), 5)
+	before := tree(t, dir)
+	err := s.SetHead(2*fullWidth, l.root(t, 2*fullWidth))
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleRoot || e.Name != full.Path() {
+		t.Fatalf("got %v, want the rule %q for %s", err, ruleRoot, full.Path())
+	}
+	if n, _ := s.TreeHead(); n != 0 || tree(t, dir) != before {
+		t.Fatalf("a refused SetHead changed the head (%d) or a file", n)
+	}
+}
+
+// SetHead, WriteTile, and Log.AppendBatch use one bound: at most maxBatchTiles
+// tiles get new hashes between two tree heads.
+func TestTU07BatchBoundEdge(t *testing.T) {
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	// 4079 full tiles of level 0, 16 of level 1, and 1 of level 2.
+	const edge = 4079 * fullWidth
+	if batchTiles(0, edge) != maxBatchTiles || batchTiles(0, edge+1) != maxBatchTiles+1 {
+		t.Fatalf("batchTiles: %d and %d", batchTiles(0, edge), batchTiles(0, edge+1))
+	}
+	if n := len(tlog.NewTiles(TileHeight, 0, edge+1)); int64(n) != batchTiles(0, edge+1) {
+		t.Fatalf("batchTiles differs from NewTiles: %d", n)
+	}
+	rule := func(err error) string {
+		var e *Error
+		if !errors.As(err, &e) {
+			t.Fatalf("got %v", err)
+		}
+		return e.Rule
+	}
+	// The tiles are missing, so the call stops at the first check after the
+	// bound.
+	if got := rule(s.SetHead(edge, tlog.Hash{})); got == ruleBatch {
+		t.Fatal("SetHead refused the largest batch")
+	}
+	if got := rule(s.SetHead(edge+1, tlog.Hash{})); got != ruleBatch {
+		t.Fatalf("SetHead gave the rule %q for one tile over the bound", got)
+	}
+	var l testLog
+	l.extend(t, 3)
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	for i := range maxBatchTiles - 1 {
+		s.written[tlog.Tile{H: TileHeight, L: 0, N: int64(i) + 1000}] = 1
+	}
+	mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+	tile.N = 1
+	if got := rule(s.WriteTile(tile, make([]byte, 3*tlog.HashSize))); got != ruleBatch {
+		t.Fatalf("WriteTile gave the rule %q for one tile over the bound", got)
+	}
+}
+
+// The rename of the head file can take effect and still return an error. Each
+// error of that rename has the mark, and the head file on disk has the new tree
+// head. A tile rename keeps the plain error. The orphan-leaf count of a marked
+// error is the test TestTU18AppendErrorWithTheMarkCountsOrphanLeaves in
+// internal/store.
+func TestTS13HeadRenameErrorAfterRenameIsMarked(t *testing.T) {
+	old := renameFile
+	t.Cleanup(func() { renameFile = old })
+	// failAfterRename makes each rename do its work and then return an error.
+	failAfterRename := func(t *testing.T) {
+		t.Cleanup(func() { renameFile = old })
+		renameFile = func(r *os.Root, from, to string) error {
+			if err := old(r, from, to); err != nil {
+				return err
+			}
+			return errors.New("injected")
+		}
+	}
+	t.Run("store head", func(t *testing.T) {
+		state, dir := newLogState(t)
+		s := openStore(t, state)
+		var l testLog
+		l.put(t, s, 0, 3)
+		failAfterRename(t)
+		err := s.SetHead(3, l.root(t, 3))
+		var e *Error
+		if !errors.Is(err, ErrHeadOnDisk) || !errors.As(err, &e) || e.Rule != ruleWrite {
+			t.Fatalf("got %v, want the rule %q with the mark", err, ruleWrite)
+		}
+		if n, _ := s.TreeHead(); n != 0 {
+			t.Fatalf("head in memory changed to %d", n)
+		}
+		if n, root := diskHead(t, dir); n != 3 || root != l.root(t, 3) {
+			t.Fatalf("head on disk is %d, %x", n, root)
+		}
+	})
+	t.Run("log append", func(t *testing.T) {
+		state, dir := newLogState(t)
+		l := openTestLog(t, state)
+		renameFile = func(r *os.Root, from, to string) error {
+			err := old(r, from, to)
+			if err == nil && to == headName {
+				err = errors.New("injected")
+			}
+			return err
+		}
+		_, err := l.Append(testEvent(0))
+		renameFile = old
+		if !errors.Is(err, ErrHeadOnDisk) {
+			t.Fatalf("got %v, want the mark", err)
+		}
+		if n, _ := diskHead(t, dir); n != 1 {
+			t.Fatalf("head on disk has size %d, want 1", n)
+		}
+	})
+	t.Run("tile", func(t *testing.T) {
+		state, _ := newLogState(t)
+		s := openStore(t, state)
+		failAfterRename(t)
+		err := s.writeFile("tile/8/0/000.p/1", make([]byte, tlog.HashSize))
+		if err == nil || errors.As(err, new(*renamedError)) {
+			t.Fatalf("got %v, want the plain error", err)
+		}
+	})
 }

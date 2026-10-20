@@ -139,7 +139,9 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	if int64(len(hs)) > maxSize-n {
 		return 0, newError("log", ruleFull)
 	}
-	if len(hs) > maxBatchTiles*fullWidth {
+	// This is the bound of SetHead and WriteTile. The batch gives new hashes to
+	// exactly the tiles that it counts.
+	if batchTiles(n, n+int64(len(hs))) > maxBatchTiles {
 		return 0, newError("log", ruleBatch)
 	}
 	// Work on a copy of the tiles. The batch copies a buffer when it first
@@ -180,9 +182,6 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 			}
 			final[s] = work[lv].data
 		}
-	}
-	if len(order) > maxBatchTiles {
-		return 0, newError("log", ruleBatch)
 	}
 	end := n + int64(len(hs))
 	root, err := tlog.TreeHash(end, cacheView{&work})
