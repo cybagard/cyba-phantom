@@ -45,9 +45,9 @@ const (
 	// maxBatchTiles is the number of different tiles with new hashes that one
 	// tree head can add. WriteTile accepts at most this number of tiles between
 	// two calls of SetHead. SetHead and Log.AppendBatch refuse a growth that
-	// needs more tiles. Open also uses it. For each level, Open tidies the tiles
-	// beyond the tree head. The range starts at the first tile that the head does
-	// not cover. It ends this many tiles above that tile.
+	// needs more tiles. Open also uses it. For each level, Open tidies the
+	// tiles beyond the tree head. The range starts at the first tile that the
+	// head does not cover. It ends this many tiles above that tile.
 	maxBatchTiles = 4096
 
 	// groupTiles is the number of tile files in one group directory.
