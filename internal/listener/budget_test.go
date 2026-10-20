@@ -940,9 +940,9 @@ type zeroGate struct {
 // budget to the bytes of the handshake and of one request. A later period has
 // the budget of header_bytes + 1024. The client sends a POST in one TLS record
 // of that size. In an exact case the handler waits before it replies. It
-// waits until a Read of the wrapper starts with no budget left. Or it waits
-// until the request context ends at the close. A Read that closes at no budget
-// left, before it calls the hook, then loses the reply.
+// waits until a Read of the wrapper starts with no budget left, or until the
+// connection closes. A Read that closes the connection with no budget left,
+// before it calls the hook, loses the reply.
 func TestTS18ExactBudget(t *testing.T) {
 	// dial13 opens a TLS 1.3 connection to r and returns the handshake bytes.
 	dial13 := func(t *testing.T, r *rig) (*tls.Conn, int) {
@@ -955,8 +955,8 @@ func TestTS18ExactBudget(t *testing.T) {
 		c, _, cc := r.dialTLS13(t, raw)
 		return c, cc.n
 	}
-	// The test sets the hook before any server runs. So no Read races with the
-	// set. A test case sets the gate that the hook closes.
+	// The test sets the hook before any server runs, so no Read races with it.
+	// A test case sets the gate that the hook closes.
 	var armed atomic.Pointer[zeroGate]
 	testutil.Set(t, &readAtZero, func() {
 		if g := armed.Load(); g != nil {

@@ -505,11 +505,12 @@ func (l *newSourceListener) Addr() net.Addr {
 }
 
 // T-S-17: one Accept loop runs, and the connections close in their own
-// goroutines. The map never holds more than slots+1 keys. The deadline only
-// stops a test that does not end. It is 90 % of the time left in the test run.
-// With no run deadline, it is 30 s. The listener has a limit on its
-// Accepts, also on the ones that close at a cap. At the end, the map has no key
-// and all slots are free.
+// goroutines. The map never holds more than slots+1 keys. The test checks a
+// deadline before each Accept. So it fails a slow Accept loop before the run
+// timeout. The deadline is not a speed check. It is 90 % of the time left in
+// the test run. With no run deadline, it is 30 s. The listener has a limit on
+// its Accepts, also on the ones that close at a cap. At the end, the map has
+// no key and all slots are free.
 func TestTS17SourceKeysWithinBound(t *testing.T) {
 	const slots, accepts = 4, 30_000
 	src := newSourceCap(slots)
@@ -615,10 +616,11 @@ func TestTS18NextPeriodBudget(t *testing.T) {
 // request. Then it sends a request that makes the wrapper count 4096 bytes in
 // the period. The connection stays open, the pool charges nothing, and a next
 // request gets 200. Then it sends one that makes the wrapper count 4097 bytes.
-// The connection closes after the response. A normal client from r.dial reads
-// 4096 bytes or less in each period. So its two requests get 200, and the pool
-// charges nothing. A client with a ClientHello over 4096 bytes gets 200 and
-// holds a charge. The pool and the slots are empty after each client closes.
+// The connection closes after the response. The wrapper reads 4096 bytes or
+// less from a normal client from r.dial in each period. So its two requests get
+// 200, and the pool charges nothing. A client with a ClientHello over 4096
+// bytes gets 200 and holds a charge. After all clients close, the pool and the
+// slots are empty.
 func TestTS18KeepAliveLimit(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
