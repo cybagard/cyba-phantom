@@ -36,12 +36,14 @@
 #   - test: go test -race and the coverage gate;
 #   - oracle: the tar reader oracle, in the pinned golang container;
 #   - trace: the C10 matrix and the sync stamp;
+#   - trace-tests: a Go test or a marker for each test ID of the milestone;
 #   - mirror-diff: the constitution table;
 #   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
 # The test, oracle and build jobs share one checkout step through a YAML
 # anchor.
-# The dco, trace and mirror-diff jobs share their base-checkout and
-# gate-source steps through YAML anchors. The lint job has its own checkout.
+# The dco, trace, trace-tests and mirror-diff jobs share their base-checkout
+# and gate-source steps through YAML anchors. The lint job has its own
+# checkout.
 
 name: ci
 
@@ -217,6 +219,34 @@ jobs:
           (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
           cd "${{ steps.gate.outputs.tree }}"
           "$RUNNER_TEMP/trace" all spec
+
+  trace-tests:
+    # Checker-from-base, as in the trace job. This job has its own
+    # GATE_FILE. The base of the PR that adds the tests mode has no
+    # tests.go. Thus at bootstrap the job builds from the work tree and
+    # gives the warning. The milestone comes from the TRACE_MILESTONE line
+    # of the Makefile of the work tree. That line is the one copy of the
+    # value.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/trace/tests.go
+      GATE_NAME: test ID
+    steps:
+      - *base-checkout
+      - *work-checkout
+      - *gate-source
+
+      - name: Test IDs of the current milestone
+        run: |
+          (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
+          cd "${{ steps.gate.outputs.tree }}"
+          ms=$(sed -n 's/^TRACE_MILESTONE := \(M-[0-9][0-9]*\)$/\1/p' Makefile | tail -n 1)
+          if [ -z "$ms" ]; then
+            echo "::error::Makefile has no TRACE_MILESTONE := M-n line"
+            exit 1
+          fi
+          "$RUNNER_TEMP/trace" tests spec --milestone "$ms"
 
   mirror-diff:
     # Checker-from-base: the extraction script comes from the PR base

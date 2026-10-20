@@ -77,10 +77,16 @@ check:
 	if [ -n "$$failed" ]; then echo "check FAIL:$$failed"; exit 1; fi; \
 	echo "check: staticcheck, gosec and govulncheck passed"
 
+# The current milestone of 07 section 5. A PR changes this value when a
+# milestone gate closes. CI reads this line with sed: keep the form.
+TRACE_MILESTONE := M-1
+
 # C10: regenerate spec/08 from 01 + 07 and require a byte-exact match,
-# then re-hash spec/ against the sync stamp.
+# then re-hash spec/ against the sync stamp. Then require a Go test or a
+# Makefile marker for each test ID of the milestones up to TRACE_MILESTONE.
 trace:
 	$(GO) run ./tools/trace all spec
+	$(GO) run ./tools/trace tests spec --milestone $(TRACE_MILESTONE)
 
 # Rotate the spec sync stamp (sync PRs only; `make trace` verifies it).
 stamp:
@@ -119,6 +125,7 @@ PERF_STRICT ?= 0
 # skip <message>: a note, or a failure under PERF_STRICT=1.
 skip = if [ "$(PERF_STRICT)" = 1 ]; then echo "perf FAIL: $(1) (PERF_STRICT=1)"; exit 1; else echo "perf: $(1) — skipped"; fi
 
+# trace-test: T-P-07 perf
 perf:
 	@if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet true >/dev/null 2>&1; then \
 		echo "perf: building under a 1 vCPU / 512 MB cgroup"; \
