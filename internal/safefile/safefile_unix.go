@@ -110,7 +110,7 @@ func checkType(fi fs.FileInfo, r Rule) error {
 	return nil
 }
 
-// checkOpen applies the whole rule to the fstat result of the open file.
+// checkOpen applies the whole rule to fi.
 func checkOpen(fi fs.FileInfo, r Rule, h *seam.Hooks) error {
 	if err := checkType(fi, r); err != nil {
 		return err

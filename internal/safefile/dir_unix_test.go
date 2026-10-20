@@ -99,11 +99,7 @@ func TestTS23_OpenRootLinkAtEachPart(t *testing.T) {
 			if err := os.RemoveAll(link); err != nil {
 				t.Fatal(err)
 			}
-			target := tc.target
-			if tc.link == "a" {
-				target = "real"
-			}
-			if err := os.Symlink(target, link); err != nil {
+			if err := os.Symlink(tc.target, link); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := OpenRoot(r, "a/b/c", dirRule); !errors.Is(err, ErrSymlink) {
@@ -117,7 +113,7 @@ func TestTS23_OpenRootSwapAfterCheck(t *testing.T) {
 	r, dir := root(t)
 	tree(t, dir)
 	swapAfterCheck(t, func(part string) {
-		// The new directory has a new inode, as the old one still exists.
+		// The new directory has a new inode, because the old one still exists.
 		q := filepath.Join(dir, "q")
 		if err := os.Mkdir(q, 0o700); err != nil {
 			t.Error(err)
@@ -202,6 +198,16 @@ func TestTS23_OpenRootClosesRoots(t *testing.T) {
 	if after := openFDs(t); after != before {
 		t.Errorf("open files: %d before, %d after", before, after)
 	}
+	// The rule refuses a directory after OpenRoot opened it.
+	if err := os.Chmod(filepath.Join(dir, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRoot(r, "a/b/c", dirRule); !errors.Is(err, ErrMode) {
+		t.Fatalf("bad mode: err = %v, want ErrMode", err)
+	}
+	if after := openFDs(t); after != before {
+		t.Errorf("open files after a rule error: %d before, %d after", before, after)
+	}
 }
 
 func TestTS23_CheckParents(t *testing.T) {
@@ -213,7 +219,7 @@ func TestTS23_CheckParents(t *testing.T) {
 	if err := CheckParents(r, "f", dirRule); err != nil {
 		t.Errorf("pass, name in the root: %v", err)
 	}
-	// The last part is not a parent, so it is not checked.
+	// The last part is not a parent, so CheckParents does not check it.
 	if err := CheckParents(r, "a/missing", dirRule); err != nil {
 		t.Errorf("last part: %v", err)
 	}

@@ -39,9 +39,10 @@ func walkArgs(root *os.Root, name string, dir Rule) ([]string, error) {
 // OpenRoot opens the directory name below root, one part at a time. For each
 // part it runs the Lstat, the type rule, and the open. Then it compares the
 // open directory with the Lstat result. Then it runs the whole rule on the
-// open directory. A link at a part gives ErrSymlink or ErrChanged. A directory
-// that is replaced after its check gives ErrChanged. The rule dir must be a
-// rule for a directory. The caller closes the root that it gets.
+// open directory. A link at a part gives ErrSymlink or ErrChanged. If another
+// directory replaces a part after its check, OpenRoot gives ErrChanged. The
+// rule dir must be a rule for a directory. The caller closes the root that it
+// gets.
 func OpenRoot(root *os.Root, name string, dir Rule) (*os.Root, error) {
 	ps, err := walkArgs(root, name, dir)
 	if err != nil {

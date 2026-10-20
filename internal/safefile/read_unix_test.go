@@ -93,6 +93,99 @@ func TestTS23_ReadAllGrowAfterOpen(t *testing.T) {
 	}
 }
 
+func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
+	r, dir := root(t)
+	p := put(t, dir, "f", "0123456789")
+	f, fi, err := Open(r, "f", capRule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	// Open passed the file at the cap. The file then grows to 8 MiB.
+	const big = 8 << 20
+	if err := os.Truncate(p, big); err != nil {
+		t.Fatal(err)
+	}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	_, err = ReadAll(f, fi, capRule)
+	runtime.ReadMemStats(&m1)
+	if !errors.Is(err, ErrSize) {
+		t.Errorf("err = %v, want ErrSize", err)
+	}
+	if n := m1.TotalAlloc - m0.TotalAlloc; n >= 1<<20 {
+		t.Errorf("ReadAll allocated %d bytes, want less than 1 MiB", n)
+	}
+}
+
+func TestTS23_ReadAllStartsAtOffsetZero(t *testing.T) {
+	r, dir := root(t)
+	put(t, dir, "f", "0123456789")
+	f, fi, err := Open(r, "f", capRule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Read(make([]byte, 3)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadAll(f, fi, capRule)
+	if err != nil || string(got) != "0123456789" {
+		t.Errorf("after a read of 3 bytes: %q, %v", got, err)
+	}
+}
+
+func TestTS23_ReadAllOtherFile(t *testing.T) {
+	r, dir := root(t)
+	put(t, dir, "checked", "01234")
+	put(t, dir, "other", "abcde")
+	_, fi, err := Open(r, "checked", capRule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(dir, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := ReadAll(f, fi, capRule)
+	if !errors.Is(err, ErrChanged) || len(got) != 0 {
+		t.Errorf("other file: %q, %v, want no bytes and ErrChanged", got, err)
+	}
+}
+
+func TestTS23_ReadAllFIFO(t *testing.T) {
+	r, dir := root(t)
+	put(t, dir, "checked", "01234")
+	_, fi, err := Open(r, "checked", capRule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe := filepath.Join(dir, "p")
+	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// O_RDWR does not block the open of a FIFO.
+	f, err := os.OpenFile(pipe, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadAll(f, fi, capRule)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrType) {
+			t.Errorf("err = %v, want ErrType", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadAll did not return before the deadline")
+	}
+}
+
 func TestTS23_ReadAllChangedSize(t *testing.T) {
 	r, dir := root(t)
 	p := put(t, dir, "f", "01234")
@@ -254,7 +347,7 @@ func TestTS23_CheckFIFONoOpen(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Check did not return before the deadline")
 	}
-	// A FIFO is no regular file, but a rule for it still must not open it.
+	// A FIFO is not a regular file, but a rule for it still must not open it.
 	if runtime.GOOS != "linux" {
 		t.Skip("the count of open files needs /proc/self/fd")
 	}
@@ -263,7 +356,7 @@ func TestTS23_CheckFIFONoOpen(t *testing.T) {
 	}
 }
 
-// A file with mode 0 cannot be opened, but Check only examines it.
+// Open fails on a file with mode 0, but Check only examines it.
 func TestTS23_CheckOpensNothing(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can open a file with mode 0")

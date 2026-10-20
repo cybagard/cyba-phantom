@@ -24,7 +24,7 @@ func importers(dir, path string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
 		name := d.Name()
@@ -74,9 +74,10 @@ func TestTS23_NoNonTestFileImportsSafefiletest(t *testing.T) {
 
 func TestTS23_ImportersFindsPlantedFiles(t *testing.T) {
 	dir := t.TempDir()
-	sub := filepath.Join(dir, "pkg", "deep")
-	if err := os.MkdirAll(sub, 0o700); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{"pkg/deep", "pkg/node_modules/dep"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	plant := func(rel, src string) {
 		t.Helper()
@@ -86,6 +87,8 @@ func TestTS23_ImportersFindsPlantedFiles(t *testing.T) {
 	}
 	plant("pkg/named.go", "package pkg\n\nimport st \""+testHelperPath+"\"\n\nvar _ = st.Set\n")
 	plant("pkg/deep/blank.go", "package deep\n\nimport _ \""+testHelperPath+"\"\n")
+	plant("pkg/node_modules/dep/vendored.go",
+		"package dep\n\nimport \""+testHelperPath+"\"\n")
 	plant("ignored.go", "//go:build ignore\n\npackage x\n\nimport \""+testHelperPath+"\"\n")
 	plant("grouped.go", "package x\n\nimport (\n\t\"os\"\n\t\""+testHelperPath+"\"\n)\n")
 	plant("pkg/clean.go", "package pkg\n\nimport \"os\"\n\nvar _ = os.Args\n")
@@ -97,7 +100,8 @@ func TestTS23_ImportersFindsPlantedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	slices.Sort(found)
-	want := []string{"grouped.go", "ignored.go", "pkg/deep/blank.go", "pkg/named.go"}
+	want := []string{"grouped.go", "ignored.go", "pkg/deep/blank.go", "pkg/named.go",
+		"pkg/node_modules/dep/vendored.go"}
 	if !slices.Equal(found, want) {
 		t.Errorf("found %v, want %v", found, want)
 	}

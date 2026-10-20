@@ -26,20 +26,31 @@ func readable(r Rule) bool {
 	return r.valid() && r.Type == Regular && r.MaxSize > 0
 }
 
-// ReadAll reads the open file f. The file was checked by Open, and fi is the
-// FileInfo that Open gave. ReadAll reads at most MaxSize + 1 bytes. A file
-// with more than MaxSize bytes gives ErrSize. A byte count that is not the
-// size in fi gives ErrChanged. A nil f or fi, or a rule that is not readable,
-// gives ErrRule. A read error gives ErrExamine. The caller closes f.
+// ReadAll reads the open file f from the start of the file. The file f must be
+// the open file of fi, and Open gave fi. ReadAll reads at most MaxSize + 1
+// bytes. A file with more than MaxSize bytes gives ErrSize. A byte count that
+// is not the size in fi gives ErrChanged. A file f that is not the file of fi
+// gives ErrChanged. A file f that is not a regular file gives ErrType. A nil f
+// or fi, or a rule that is not readable, gives ErrRule. A stat or read error
+// gives ErrExamine. The caller closes f.
 func ReadAll(f *os.File, fi fs.FileInfo, r Rule) ([]byte, error) {
 	if f == nil || fi == nil || !readable(r) {
 		return nil, fail(ErrRule, nil)
+	}
+	st, err := f.Stat()
+	switch {
+	case err != nil:
+		return nil, fail(ErrExamine, err)
+	case !st.Mode().IsRegular():
+		return nil, fail(ErrType, nil)
+	case !os.SameFile(st, fi):
+		return nil, fail(ErrChanged, nil)
 	}
 	limit := r.MaxSize
 	if limit < math.MaxInt64 {
 		limit++
 	}
-	b, err := io.ReadAll(io.LimitReader(f, limit))
+	b, err := io.ReadAll(io.NewSectionReader(f, 0, limit))
 	switch {
 	case err != nil:
 		return nil, fail(ErrExamine, err)
