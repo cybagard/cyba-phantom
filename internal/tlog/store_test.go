@@ -776,6 +776,51 @@ func TestTS13OpenTidiesTilesBeyondTheHeadOnlyInRange(t *testing.T) {
 	if got := dirNames(t, outside); !slices.Equal(got, []string{"3", "5"}) {
 		t.Fatalf("Open changed the tile outside the range: %v", got)
 	}
+	t.Run("not read", openSkipsATileOutsideTheRange)
+}
+
+// openSkipsATileOutsideTheRange shows that Open refuses a tile file with a
+// wrong length in the range beyond the tree head. The same file outside the
+// range stays, because Open does not read it.
+func openSkipsATileOutsideTheRange(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var a testLog
+	a.commit(t, s, 0, 256) // the first tile beyond the head is tile 1
+	s.Close()
+	// plant makes a good file of width 3 and a file of width 5 that holds four
+	// hashes. A read of the second file gives a length error.
+	plant := func(n int64) (string, []byte) {
+		var bad string
+		for _, w := range []int{3, 5} {
+			file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: n, W: w}.Path())
+			size := w * tlog.HashSize
+			if w == 5 {
+				size = 4 * tlog.HashSize
+			}
+			mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+			mustNil(t, os.WriteFile(file, make([]byte, size), fileMode))
+			bad = file
+		}
+		b, err := os.ReadFile(bad)
+		mustNil(t, err)
+		return bad, b
+	}
+	outside, content := plant(2 + maxBatchTiles)
+	before := tree(t, dir)
+	openStore(t, state).Close()
+	if tree(t, dir) != before {
+		t.Fatal("Open changed a file outside the range")
+	}
+	if got, err := os.ReadFile(outside); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("the file outside the range changed: %v", err)
+	}
+	// Control: the same file in the range gives an error.
+	plant(1 + maxBatchTiles)
+	if s, err := Open(state, "tlog"); err == nil {
+		s.Close()
+		t.Fatal("Open accepted a wrong length file in the range")
+	}
 }
 
 // A valid log of more than 8 million leaves has level 0 tiles in more than 32
