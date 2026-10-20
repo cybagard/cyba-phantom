@@ -101,9 +101,10 @@ func TestTS10_CheckNoDial(t *testing.T) {
 	}
 }
 
-// TestTS10_CheckExec runs the binary: exit 0 for a valid file, non-zero for an invalid file
-// with the key and the source in stderr (FR-12), no secret marker in the output (T-S-10), and
-// URL syntax checks only: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
+// TestTS10_CheckExec runs the binary: exit 0 for a valid file, non-zero for an
+// invalid file with the key and the source in stderr (FR-12), no secret marker
+// in the output (T-S-10), and URL syntax checks only: an acme.ca value that is
+// not a URL fails and names acme.ca (FR-12).
 func TestTS10_CheckExec(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "phantom")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
@@ -114,10 +115,12 @@ func TestTS10_CheckExec(t *testing.T) {
 	run := func(file string, env ...string) (code int, stdout, stderr string) {
 		var so, se strings.Builder
 		cmd := exec.Command(bin, "--check", file)
-		cmd.Env = append(append(os.Environ(), "CKPT_TOKEN="+marker), env...) // The publisher of validBody names CKPT_TOKEN.
+		// The publisher of validBody names CKPT_TOKEN.
+		cmd.Env = append(append(os.Environ(), "CKPT_TOKEN="+marker), env...)
 		cmd.Stdout, cmd.Stderr = &so, &se
 		err := cmd.Run()
-		defer func() { outs += so.String() + se.String() }() // outs holds the output of every run.
+		// outs holds the output of every run.
+		defer func() { outs += so.String() + se.String() }()
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else if err != nil {
@@ -146,9 +149,10 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("invalid file: stderr %q lacks %q", se, want)
 		}
 	}
-	// The loader never prints the value of a URL key or a secret key. The email value has a wrong
-	// type, so the loader prints it. The marker is in the user information of a URL-like text, so the
-	// printed value must show REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
+	// The loader never prints the value of a URL key or a secret key. The email
+	// value has a wrong type, so the loader prints it. The marker is in the
+	// user information of a URL-like text, so the printed value must show
+	// REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
 	code, _, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
 	if code == 0 {
 		t.Error("wrong type: exit 0")
@@ -156,8 +160,9 @@ func TestTS10_CheckExec(t *testing.T) {
 	if !strings.Contains(se, "REDACTED@") {
 		t.Errorf("wrong type: stderr %q lacks REDACTED@", se)
 	}
-	// A *_env key can hold a pasted secret in place of a name. The error names the key path and
-	// never the variable name, for an unset variable and for a short one (SEC-13).
+	// A *_env key can hold a pasted secret in place of a name. The error names
+	// the key path and never the variable name, for an unset variable and for a
+	// short one (SEC-13).
 	const nameMarker = "JBSWY3DPEHPK3PXPZZSECRETQ7"
 	tok := strings.Replace(validBody(t), "CKPT_TOKEN", nameMarker, 1)
 	hook := validBody(t) + "alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example.invalid/a\", hmac_secret_env: " + nameMarker + "}\n"
@@ -185,9 +190,10 @@ func TestTS10_CheckExec(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckStorePath checks that --check refuses each bad store.path with exit 1 and the error text of the load,
-// and accepts a good path (SEC-20, T-S-11). Each row also names the rule in the detail of the error.
-// The state directory is the default one.
+// TestTS11_CheckStorePath checks that --check refuses each bad store.path with
+// exit 1 and the error text of the load, and accepts a good path (SEC-20,
+// T-S-11). Each row also names the rule in the detail of the error. The state
+// directory is the default one.
 func TestTS11_CheckStorePath(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	file := writeFile(t, validBody(t))

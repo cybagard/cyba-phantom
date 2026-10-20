@@ -76,8 +76,8 @@ func put(t *testing.T, q *event.Queue, k event.Kind, n int) {
 	}
 }
 
-// refusals are the stores that do not open: a refused path, a file that is not a
-// database, a refused schema, a database with the wrong auto_vacuum, and a
+// refusals are the stores that do not open: a refused path, a file that is not
+// a database, a refused schema, a database with the wrong auto_vacuum, and a
 // failed migration.
 var refusals = []struct {
 	name, path string
@@ -98,7 +98,8 @@ var refusals = []struct {
 		prepDB(t, file, "PRAGMA auto_vacuum = 0; CREATE TABLE other (a)")
 	}},
 	{"failed migration", "events.db", "store: database schema migration failed", 1, func(t *testing.T, file string) {
-		// The meta table has no value column, so the read of the schema version fails.
+		// The meta table has no value column, so the read of the schema version
+		// fails.
 		prepDB(t, file, "PRAGMA auto_vacuum = 2; CREATE TABLE meta (key)")
 	}},
 }
@@ -114,14 +115,16 @@ func prepDB(t *testing.T, file, stmts string) {
 	if _, err := db.Exec(stmts); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(file, 0o600); err != nil { // The store refuses a file with group or other bits.
+	// The store refuses a file with group or other bits.
+	if err := os.Chmod(file, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestTU18_StoreRefused checks that a store that does not open leaves the process running with no writer, not
-// healthy, and with one call that opens the log and one that opens the store. The log has the reason, and a
-// refused schema leaves the database closed (T-U-18).
+// TestTU18_StoreRefused checks that a store that does not open leaves the
+// process running with no writer, not healthy, and with one call that opens the
+// log and one that opens the store. The log has the reason, and a refused
+// schema leaves the database closed (T-U-18).
 func TestTU18_StoreRefused(t *testing.T) {
 	for _, c := range refusals {
 		t.Run(c.name, func(t *testing.T) {
@@ -153,8 +156,8 @@ func TestTU18_StoreRefused(t *testing.T) {
 	}
 }
 
-// TestTU18_LogRefused checks that a log that does not open gives no store and no writer, not healthy, and no
-// key directory (T-U-18).
+// TestTU18_LogRefused checks that a log that does not open gives no store and
+// no writer, not healthy, and no key directory (T-U-18).
 func TestTU18_LogRefused(t *testing.T) {
 	var o opens
 	d := o.deps()
@@ -172,8 +175,9 @@ func TestTU18_LogRefused(t *testing.T) {
 	}
 }
 
-// TestTU18_Checkpointer checks that a checkpointer that starts gives TlogHealthy. A signer that refuses (a log
-// with a leaf, no key, no signer state) leaves no checkpointer and no key file, and the writer runs (T-U-18).
+// TestTU18_Checkpointer checks that a checkpointer that starts gives
+// TlogHealthy. A signer that refuses (a log with a leaf, no key, no signer
+// state) leaves no checkpointer and no key file, and the writer runs (T-U-18).
 func TestTU18_Checkpointer(t *testing.T) {
 	t.Run("starts", func(t *testing.T) {
 		s, _ := launch(t, testParams(t, "events.db"), realDeps)
@@ -208,9 +212,10 @@ func TestTU18_Checkpointer(t *testing.T) {
 	})
 }
 
-// TestTU18_DrainWithoutStore checks that with no store, the drain takes the events out of both lanes at its
-// tick, and counts each drop for its lane. The tick of Discard is fixed (250 ms), and a test cannot replace
-// it, so the test waits for the drops with a limit of 10 s (T-U-18).
+// TestTU18_DrainWithoutStore checks that with no store, the drain takes the
+// events out of both lanes at its tick, and counts each drop for its lane. The
+// tick of Discard is fixed (250 ms), and a test cannot replace it, so the test
+// waits for the drops with a limit of 10 s (T-U-18).
 func TestTU18_DrainWithoutStore(t *testing.T) {
 	s, q := launch(t, testParams(t, "keys/events.db"), realDeps)
 	put(t, q, event.KindRequest, 2)
@@ -225,8 +230,9 @@ func TestTU18_DrainWithoutStore(t *testing.T) {
 	}
 }
 
-// TestTU18_Sink checks that the checkpointer gets the checkpoint row sink, with the writer and with no writer,
-// and never the bare spool. With the writer, the sink call stores the row (T-U-18).
+// TestTU18_Sink checks that the checkpointer gets the checkpoint row sink, with
+// the writer and with no writer, and never the bare spool. With the writer, the
+// sink call stores the row (T-U-18).
 func TestTU18_Sink(t *testing.T) {
 	for _, c := range []struct {
 		name, path string
@@ -269,9 +275,10 @@ func TestTU18_Sink(t *testing.T) {
 	}
 }
 
-// TestTU18_OneStart checks that a writer that stopped at its start check leaves the part not healthy. After
-// that, the checkpointer runs, the drain ticks several times, and start opens the log and the store one time
-// each and makes one writer (T-U-18).
+// TestTU18_OneStart checks that a writer that stopped at its start check leaves
+// the part not healthy. After that, the checkpointer runs, the drain ticks
+// several times, and start opens the log and the store one time each and makes
+// one writer (T-U-18).
 func TestTU18_OneStart(t *testing.T) {
 	p := testParams(t, "events.db")
 	p.Interval = 10 * time.Millisecond
@@ -299,7 +306,8 @@ func TestTU18_OneStart(t *testing.T) {
 		put(t, q, event.KindRequest, 1)
 		testutil.WaitFor(t, func() bool { return s.writer.Stats().Dropped.Bulk >= want }, 10*time.Second)
 	}
-	s.Stop() // Stop waits for the checkpointer goroutine, so runs is final after it.
+	// Stop waits for the checkpointer goroutine, so runs is final after it.
+	s.Stop()
 	if want := (opens{log: 1, store: 1, migrate: 1}); o != want || writers != 1 {
 		t.Errorf("opens %+v, writers %d; want %+v, 1", o, writers, want)
 	}
@@ -308,7 +316,8 @@ func TestTU18_OneStart(t *testing.T) {
 	}
 }
 
-// TestTU18_StopOrder checks that Stop ends the checkpointer before it closes the queue (T-U-18).
+// TestTU18_StopOrder checks that Stop ends the checkpointer before it closes
+// the queue (T-U-18).
 func TestTU18_StopOrder(t *testing.T) {
 	exited := make(chan bool, 1)
 	c := event.NewCounters()
@@ -333,7 +342,8 @@ func TestTU18_StopOrder(t *testing.T) {
 	}
 }
 
-// savedKey makes the signer key and the public key file in the state directory of p, as an earlier start did.
+// savedKey makes the signer key and the public key file in the state directory
+// of p, as an earlier start did.
 func savedKey(t *testing.T, p startParams) {
 	t.Helper()
 	r, err := os.OpenRoot(p.Root)
@@ -356,9 +366,11 @@ func otherKey(t *testing.T, name string) string {
 	return vkey
 }
 
-// TestTU18_VkeyMismatch checks that a public key file that is not the key of the signer gives a start error, and
-// the spool does not open (T-U-18). A key with the same name and the same 32-bit key hash as the signer needs
-// about 2^32 keys, and NewVerifier checks the hash, so the table has no such key. TestTU18_SameKey covers it.
+// TestTU18_VkeyMismatch checks that a public key file that is not the key of
+// the signer gives a start error, and the spool does not open (T-U-18). A key
+// with the same name and the same 32-bit key hash as the signer needs about
+// 2^32 keys, and NewVerifier checks the hash, so the table has no such key.
+// TestTU18_SameKey covers it.
 func TestTU18_VkeyMismatch(t *testing.T) {
 	p := testParams(t, "events.db")
 	for _, c := range []struct{ name, vkey string }{
@@ -396,13 +408,15 @@ func TestTU18_VkeyMismatch(t *testing.T) {
 	}
 }
 
-// rejectingKey has the name and the key hash of a key, and verifies no signature.
+// rejectingKey has the name and the key hash of a key, and verifies no
+// signature.
 type rejectingKey struct{ note.Verifier }
 
 func (rejectingKey) Verify(msg, sig []byte) bool { return false }
 
-// TestTU18_SameKey checks that sameKey accepts the public key of the signer, and refuses a verifier that has the
-// name and the key hash of the signer but does not verify its signature (T-U-18).
+// TestTU18_SameKey checks that sameKey accepts the public key of the signer,
+// and refuses a verifier that has the name and the key hash of the signer but
+// does not verify its signature (T-U-18).
 func TestTU18_SameKey(t *testing.T) {
 	skey, vkey, err := note.GenerateKey(rand.Reader, "test/origin")
 	if err != nil {
@@ -424,9 +438,11 @@ func TestTU18_SameKey(t *testing.T) {
 	}
 }
 
-// TestTS13_NoKeyOverRows checks that with keys/, checkpoint.state and tlog/ removed, a store with a checkpoint
-// row or a spool with an entry gives no new key, no signer state and no checkpointer (T-S-13, SEC-16). A spool
-// that cannot be read also gives no key. The empty store with no spool entry still makes a key (first start).
+// TestTS13_NoKeyOverRows checks that with keys/, checkpoint.state and tlog/
+// removed, a store with a checkpoint row or a spool with an entry gives no new
+// key, no signer state and no checkpointer (T-S-13, SEC-16). A spool that
+// cannot be read also gives no key. The empty store with no spool entry still
+// makes a key (first start).
 func TestTS13_NoKeyOverRows(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -480,8 +496,9 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 	}
 }
 
-// TestParamsOf checks the values that start takes from the loaded config. It has no spec test ID: it tests the
-// mapping of the config values, not the start.
+// TestParamsOf checks the values that start takes from the loaded config. It
+// has no spec test ID: it tests the mapping of the config values, not the
+// start.
 func TestParamsOf(t *testing.T) {
 	cfg, err := config.Load(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)})
 	if err != nil {

@@ -156,7 +156,8 @@ func (s *storePart) openDB(p startParams, d startDeps) (*sql.DB, error) {
 
 // hasSignedCheckpoint tells if the store has a checkpoint row or the spool has
 // an entry. Then an earlier key signed a checkpoint, even when the key files,
-// the signer state and the log are gone. Without a store, only the spool counts.
+// the signer state and the log are gone. Without a store, only the spool
+// counts.
 func (s *storePart) hasSignedCheckpoint() (bool, error) {
 	if s.db != nil {
 		var found bool
