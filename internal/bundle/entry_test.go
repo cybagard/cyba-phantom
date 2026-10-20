@@ -318,8 +318,9 @@ func rawFormCases() []entryCase {
 		{"PAX mtime record with a plus sign",
 			rawArchive(paxHdr(paxRec("mtime", "+1")), rawFile(p, "x")),
 			rawArchive(paxHdr(paxRec("mtime", "1")), rawFile(p, "x"))},
-		// Not isolated to rawFormOK: Next gives the format unknown for a size
-		// field that has no NUL at the end, so the format check refuses it.
+		// rawFormOK is not the only rule that refuses this form. Next gives the
+		// format unknown for a size field that has no NUL at the end, so the
+		// format check refuses it first.
 		{"size field with a trailing space", sizeForm("00000000001 "), rawArchive(rawFile(p, "x"))},
 		{"size field with a leading NUL", rawArchive(withHidden(withField(slices.Clone(size), 124, nulSize))),
 			rawArchive(withHidden(size))},
@@ -393,9 +394,13 @@ func rawFormCases() []entryCase {
 		{"long name with a cut that differs from a file only in case",
 			rawArchive(pathEntry(upperLong), rawFile(strings.ToLower(upperLong[:maxCut]), "x")),
 			rawArchive(pathEntry(upperLong), rawFile(strings.ToLower(upperLong[:maxCut-1])+"b", "x"))},
-		// A directory name of exactly 100 bytes with its slash, with a longer
-		// name below it, is refused. The readers that read PAX records accept
-		// such an archive.
+		// The cut rule refuses an entry when its name (lower case, one trailing
+		// slash removed) is the first 100 bytes of a longer PAX path in the
+		// archive. So it refuses a directory of 99 or of 100 bytes (without its
+		// slash) with an entry below it. This fixture has the form of 99 bytes.
+		// A directory of 101 bytes passes. The rule also refuses a file whose
+		// name is the first 100 bytes of a longer PAX path. The readers that
+		// read PAX records accept these archives.
 		{"long name with a cut that ends in a slash and a directory",
 			rawArchive(rawHdr(slashCut[:maxCut], tar.TypeDir, 0), pathEntry(slashCut)),
 			rawArchive(rawHdr("traps/d", tar.TypeDir, 0), pathEntry(slashCut))},

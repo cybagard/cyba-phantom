@@ -158,8 +158,8 @@ func pythonListing(path string) listing {
 }
 
 // oracleTool is a tool of the oracle and the first line of its --version
-// output. The line is equal to want. When prefix is set, the line only starts
-// with want.
+// output that it needs. The first line of the output matches when it is equal
+// to want. When prefix is set, it matches when it starts with want.
 type oracleTool struct {
 	bin, want string
 	prefix    bool
@@ -261,7 +261,8 @@ func fakeTools(t *testing.T, scripts map[string]fakeTool) func(string) (string, 
 
 // T-S-19: checkTool reads the environment, finds the tool, cuts the first
 // line of the --version output, and makes the message with the reason and the
-// version found.
+// version found. A --version call that exits with an error gives "no version
+// line".
 func TestTS19CheckTool(t *testing.T) {
 	env := func(kv ...string) func(string) string {
 		return func(k string) string {
@@ -363,8 +364,9 @@ func TestTS19OracleParsers(t *testing.T) {
 }
 
 // T-S-19: the oracle test runs with the right versions, skips outside the
-// devcontainer and CI, and fails inside them. The version of GNU tar must be
-// equal to the line, and the version of Python must start with it.
+// devcontainer and CI, and fails inside them. The first line of the GNU tar
+// output must be equal to tarTool.want. The first line of the Python output
+// must start with pythonTool.want.
 func TestTS19OracleToolDecision(t *testing.T) {
 	for _, c := range []struct {
 		tool                 oracleTool

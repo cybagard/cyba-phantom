@@ -57,8 +57,8 @@ type capReader struct {
 	r io.Reader
 	n int64
 	// While keep is set, the reader appends the bytes that it passes to kept.
-	// ReadArchive sets keep for one Next call, so kept holds at most maxKept
-	// bytes.
+	// Before an append that would pass maxKept, Read gives ErrArchiveInvalid.
+	// So kept never holds more than maxKept bytes.
 	keep bool
 	kept []byte
 }
@@ -114,10 +114,10 @@ func (c *capReader) Read(p []byte) (int, error) {
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
 //     differ only in case or in a trailing slash;
-//   - an entry with a long PAX path (over 100 bytes) whose first 100 bytes
-//     are equal to the final name of another entry, in the same way as above
-//     (cutKey). The other entry can come before or after it. ReadArchive
-//     does not compare two such cuts with each other;
+//   - an entry with a long PAX path (over 100 bytes), when the first 100 bytes
+//     of that path are the final name of another entry (cutKey). Case and one
+//     trailing slash do not count, as above. The other entry can come before
+//     or after it. ReadArchive does not compare two such cuts;
 //   - a directory with a size;
 //   - an archive where the sum of the regular entry sizes passes
 //     MaxDecodedBytes.

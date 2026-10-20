@@ -81,9 +81,10 @@ func build(ents ...ent) []byte { return gz(buildTar(ents...)) }
 
 func zeros(n int) []byte { return make([]byte, n) }
 
-// T-S-19: with keep set, capReader keeps exactly maxKept bytes without an
-// error, and it gives ErrArchiveInvalid for the first byte over maxKept. It
-// does not keep that byte.
+// T-S-19: with keep set, capReader keeps maxKept bytes without an error. For
+// maxKept+1 bytes, it gives ErrArchiveInvalid and drops the whole Read that
+// passes maxKept, not only the last byte. The test asserts that kept never
+// holds more than maxKept bytes.
 func TestTS19CapReaderKeepsAtMostMaxKept(t *testing.T) {
 	readAll := func(n int) (*capReader, error) {
 		cr := &capReader{r: bytes.NewReader(zeros(n)), keep: true}
