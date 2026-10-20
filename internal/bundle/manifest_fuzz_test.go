@@ -6,8 +6,8 @@ import (
 )
 
 // T-S-19: no panic for any input. A failure is ErrManifestInvalid. A success
-// is a manifest that is within every rule of the format, and its two checks give
-// a fixed error or none.
+// is a manifest that is within every rule of the format. Its two checks give a
+// fixed error or none.
 func FuzzTS19ParseManifest(f *testing.F) {
 	for _, c := range append(refusedManifests(), validManifests()...) {
 		f.Add([]byte(c.in))

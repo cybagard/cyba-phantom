@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json/v2"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -25,7 +26,8 @@ var baseMembers = [][2]string{
 var testNow = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 
 // with builds the base manifest with the raw JSON value of one member changed.
-// An empty value leaves the member out. A member that the base lacks is added.
+// An empty value leaves the member out. If the base has no such member, with
+// adds it.
 func with(name, raw string) string {
 	var ms []string
 	found := false
@@ -116,7 +118,7 @@ func refusedManifests() []mcase {
 		}
 	}
 	for _, v := range []string{"2026.09.19", "2026.09.19-", "2026.09.19-0", "2026.09.19-1000", "2026.09.19-01",
-		"2026.09.19--1", "2026.09.19-+1", "2026.09.19-1 ", " 2026.09.19-1", "2026.09.19-1\n", "2026.9.19-1",
+		"2026.09.19--1", "2026.09.19-+1", "2026.09.19-1 ", " 2026.09.19-1", "2026.09.19-1\x5cn", "2026.9.19-1",
 		"26.09.19-1", "2026-09-19-1", "2026.09.19.1", "2026.13.01-1", "2026.00.19-1", "2026.09.00-1",
 		"2026.09.31-1", "2026.02.30-1", "2025.02.29-1", "2026.09.19-a", "v2026.09.19-1", "",
 		"٢٠٢٦.09.19-1"} {
@@ -124,20 +126,28 @@ func refusedManifests() []mcase {
 	}
 	for _, v := range []string{"1.0", "1", "1.0.0.0", "1.0.", ".1.0", "01.0.0", "1.00.0", "1.0.00", "1.0.01",
 		"10000.0.0", "1.10000.0", "1.0.10000", "-1.0.0", "+1.0.0", "1.0.+1", "a.b.c", "", "v1.0.0",
-		"1.0.0-rc1", " 1.0.0", "1.0.0 ", "1,0,0", "1.0.0\n"} {
+		"1.0.0-rc1", " 1.0.0", "1.0.0 ", "1,0,0", "1.0.0\x5cn"} {
 		cs = append(cs, mcase{"min_engine " + v, with("min_engine", q(v))})
 	}
-	for _, n := range []string{"created", "expires"} {
-		for _, v := range []string{"", "2026-09-19", "2026-09-19T00:00Z", "2026-09-19T00:00:00",
-			"2026-09-19T00:00:00z", "2026-09-19t00:00:00Z", "2026-09-19 00:00:00Z",
-			"2026-09-19T00:00:00.5Z", "2026-09-19T00:00:00.000Z", "2026-09-19T00:00:00+00:00",
-			"2026-09-19T00:00:00-00:00", "2026-09-19T01:00:00+01:00", "2026-09-18T23:00:00-01:00",
-			"2026-02-30T00:00:00Z", "2026-09-19T24:00:00Z", "2026-09-19T23:59:60Z", "2026-9-19T00:00:00Z",
-			" 2026-09-19T00:00:00Z", "2026-09-19T00:00:00Z ", "2026-09-19T00:00:00Z\n", "1789012345"} {
-			cs = append(cs, mcase{n + " " + v, with(n, q(v))})
+	// Each case of expires is an instant after created and within 366 days of
+	// it, so that only the form rule refuses it.
+	for _, n := range []struct{ name, day, prev, year string }{
+		{"created", "2026-09-19", "2026-09-18", "2026"},
+		{"expires", "2027-01-01", "2026-12-31", "2027"},
+	} {
+		at := func(day, sep, clock string) string { return day + sep + clock }
+		d, p, y := n.day, n.prev, n.year
+		for _, v := range []string{"", d, at(d, "T", "00:00Z"), at(d, "T", "00:00:00"),
+			at(d, "T", "00:00:00z"), at(d, "t", "00:00:00Z"), at(d, " ", "00:00:00Z"),
+			at(d, "T", "00:00:00.5Z"), at(d, "T", "00:00:00.000Z"), at(d, "T", "00:00:00+00:00"),
+			at(d, "T", "00:00:00-00:00"), at(d, "T", "01:00:00+01:00"), at(p, "T", "23:00:00-01:00"),
+			at(y+"-02-30", "T", "00:00:00Z"), at(d, "T", "24:00:00Z"), at(d, "T", "23:59:60Z"),
+			at(y+"-9-19", "T", "00:00:00Z"), " " + at(d, "T", "00:00:00Z"),
+			at(d, "T", "00:00:00Z "), at(d, "T", "00:00:00Z\x5cn"), "1789012345"} {
+			cs = append(cs, mcase{n.name + " " + v, with(n.name, q(v))})
 		}
 	}
-	for _, v := range []string{"", "k1k1k1k1k1k1k1k1k", "K1", "k_1", "k-1", "k 1", "k.1", "é", "k1\n", `k\u0000`} {
+	for _, v := range []string{"", "k1k1k1k1k1k1k1k1k", "K1", "k_1", "k-1", "k 1", "k.1", "é", "k1\x5cn", `k\u0000`} {
 		cs = append(cs, mcase{"key_id " + v, with("key_id", `"`+v+`"`)})
 	}
 	exp := func(v string) string { return with("expires", q(v)) }
@@ -210,8 +220,27 @@ func TestTS19ManifestInvalid(t *testing.T) {
 	}
 }
 
-// T-S-19: a manifest of 4096 bytes passes. One of 4097 bytes is refused although
-// it is valid JSON with only white space added.
+// T-S-19: a value with a JSON escape for a new line is valid JSON. The decoder
+// accepts it, so the form rule of the member is the rule that refuses it.
+func TestTS19EscapedNewLineIsJSON(t *testing.T) {
+	n := 0
+	for _, c := range refusedManifests() {
+		if !strings.HasSuffix(c.name, "\x5cn") {
+			continue
+		}
+		n++
+		var raw rawManifest
+		if err := json.Unmarshal([]byte(c.in), &raw, parseOpts...); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+	if n != 5 {
+		t.Errorf("%d cases", n)
+	}
+}
+
+// T-S-19: a manifest of 4096 bytes passes. The parser refuses one of 4097
+// bytes, although it is valid JSON with only white space added.
 func TestTS19ManifestSizeCap(t *testing.T) {
 	for _, c := range validManifests() {
 		if len(c.in) > MaxManifestBytes {
@@ -233,8 +262,8 @@ func TestTU08EngineVersionForm(t *testing.T) {
 	}
 }
 
-// T-U-08: min_engine above the engine version gives min_engine; an equal or lower
-// one passes. The compare goes part by part, as numbers.
+// T-U-08: min_engine above the engine version gives min_engine. An equal or
+// lower one passes. The compare goes part by part, as numbers.
 func TestTU08MinEngine(t *testing.T) {
 	engine := [3]int{2, 3, 4}
 	for _, c := range []struct {
@@ -301,8 +330,8 @@ func check(b string, now time.Time) error {
 }
 
 // T-U-08: each failure gives exactly one code. A format failure gives
-// manifest_invalid and nothing else, also when min_engine is above the engine
-// version and the manifest has expired.
+// manifest_invalid and nothing else. This holds also when min_engine is above
+// the engine version and the manifest has expired.
 func TestTU08OneCodeForEachFailure(t *testing.T) {
 	bad := strings.Replace(with("min_engine", q("9.0.0")), "2027-09-19", "2026-09-20", 1)
 	bad = strings.Replace(bad, "2026.09.19-1", "2026.09.31-1", 1)
@@ -369,7 +398,8 @@ func TestTU08CodeOf(t *testing.T) {
 	}
 }
 
-// T-U-08: the code of the manifest steps does not read the clock. The caller gives now.
+// T-U-08: the code of the manifest steps does not read the clock. The caller
+// gives now.
 func TestTU08NoWallClock(t *testing.T) {
 	for _, name := range []string{"manifest.go", "engine.go", "code.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)

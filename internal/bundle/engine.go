@@ -7,8 +7,8 @@ import "slices"
 const EngineVersion = "1.0.0"
 
 // CheckEngine gives ErrMinEngine when min_engine of the manifest is above
-// EngineVersion. The parts are compared as numbers, from the major part to the
-// patch part. An equal version passes.
+// EngineVersion. The check compares the parts as numbers, from the major part
+// to the patch part. An equal version passes.
 func (m *Manifest) CheckEngine() error {
 	engine, ok := parseEngine(EngineVersion)
 	if !ok {

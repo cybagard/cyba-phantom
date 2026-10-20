@@ -18,7 +18,9 @@ const maxValidity = 366 * 24 * time.Hour
 // whole seconds.
 const stampLayout = "2006-01-02T15:04:05Z"
 
-// Manifest is a manifest that passed the format checks of ParseManifest.
+// Manifest is a manifest that passed the format checks of ParseManifest. Only a
+// value from ParseManifest has passed these checks. CheckEngine and CheckExpiry
+// do not check the format again.
 type Manifest struct {
 	Version   string
 	MinEngine [3]int // major, minor, patch
@@ -36,8 +38,11 @@ type Rotation struct {
 }
 
 // parseOpts make the decoder refuse invalid UTF-8, duplicate member names and
-// unknown members. The decoder matches names with case (the default). These are
-// the strict options of internal/event, plus the unknown-member rule.
+// unknown members. The decoder matches names case-sensitively (the default).
+// These are the strict options of internal/event, plus the unknown-member rule.
+// No input shows the effect of AllowInvalidUTF8(false) alone. Each string
+// member has a form check, and the decoder refuses an unknown member anyway.
+// This option is a second guard.
 var parseOpts = []json.Options{
 	jsontext.AllowDuplicateNames(false),
 	jsontext.AllowInvalidUTF8(false),
@@ -60,7 +65,7 @@ type rawRotation struct {
 }
 
 // ParseManifest checks the format of a manifest. The manifest is one JSON
-// object of at most MaxManifestBytes bytes, with all five members and, in a
+// object of at most MaxManifestBytes bytes. It has all five members and, in a
 // transition bundle, rotation. It has no duplicate, unknown or case-variant
 // member, and no byte after the object except JSON white space. The forms:
 //   - version: YYYY.MM.DD-N, a date of the calendar, N from 1 to 999;
@@ -70,7 +75,8 @@ type rawRotation struct {
 //   - key_id: 1 to 16 bytes of a-z and 0-9;
 //   - rotation: from (a key_id form) and key (canonical base64 of 32 bytes).
 //
-// A number in version or min_engine has no leading zero.
+// N of version and each part of min_engine have no leading zero. A part of
+// min_engine can be a single "0".
 //
 // Every failure gives ErrManifestInvalid and no manifest. The error holds no
 // input bytes. ParseManifest does not check min_engine against the engine
@@ -118,8 +124,8 @@ func ParseManifest(b []byte) (*Manifest, error) {
 }
 
 // CheckExpiry gives ErrExpired when the manifest expires at now or before. now
-// is a parameter, so a later step can skip this check for a bundle that is
-// already accepted. The check is not part of ParseManifest.
+// is a parameter, so the caller gives the clock. ParseManifest does not do this
+// check. A later step can skip it for a bundle that is already accepted.
 func (m *Manifest) CheckExpiry(now time.Time) error {
 	if !now.Before(m.Expires) {
 		return ErrExpired
@@ -174,7 +180,7 @@ func parseEngine(s string) ([3]int, bool) {
 }
 
 // parseStamp reads a time in stampLayout. The text must be the exact output of
-// the layout, so an offset, a lower-case "z" and a fraction are refused.
+// the layout. It refuses an offset, a lower-case "z" and a fraction.
 func parseStamp(s string) (time.Time, bool) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil || t.UTC().Format(stampLayout) != s {
