@@ -95,7 +95,7 @@ func refusedManifests() []mcase {
 		{"NUL after", good + "\x00"}, {"text before", "x" + good},
 		{"duplicate version", plus(`"version":"2026.09.19-2"`)},
 		{"duplicate with same value", plus(`"key_id":"k1"`)},
-		{"duplicate by escape", plus(`"version":"2026.09.19-2"`)},
+		{"duplicate by escape", plus("\"\x5cu0076ersion\":\"2026.09.19-2\"")},
 		{"duplicate in rotation", with("rotation", `{"from":"k0","from":"k0","key":`+q(zeroKey)+`}`)},
 		{"unknown", plus(`"extra":"x"`)},
 		{"unknown with marker", plus(`"MARKER-7f3a":"MARKER-7f3a"`)},
