@@ -114,8 +114,10 @@ func (c *capReader) Read(p []byte) (int, error) {
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
 //     differ only in case or in a trailing slash;
-//   - two entries whose names are equal in the same way for a reader that does
-//     not read PAX records (ustarSeenKey);
+//   - an entry with a long PAX path (over 100 bytes) whose first 100 bytes
+//     are equal to the final name of another entry, in the same way as above
+//     (cutKey). The other entry can come before or after it. ReadArchive
+//     does not compare two such cuts with each other;
 //   - a directory with a size;
 //   - an archive where the sum of the regular entry sizes passes
 //     MaxDecodedBytes.
@@ -135,7 +137,7 @@ func ReadArchive(b []byte) (*Archive, error) {
 	tr := tar.NewReader(cr)
 	files := make(map[string][]byte)
 	seen := make(map[string]bool)
-	seenUstar := make(map[string]bool)
+	seenCut := make(map[string]bool)
 	var sizes, prevPad int64
 	for n := 0; ; n++ {
 		cr.kept, cr.keep = cr.kept[:0], true
@@ -170,15 +172,17 @@ func ReadArchive(b []byte) (*Archive, error) {
 		if err != nil || !rawFormOK(cr.kept, padBefore, hdr) {
 			return nil, ErrArchiveInvalid
 		}
-		ustarKey := ustarSeenKey(hdr)
-		if seen[key] || seenUstar[ustarKey] {
+		cut, hasCut := cutKey(hdr)
+		if seen[key] || seenCut[key] || (hasCut && seen[cut]) {
 			return nil, ErrArchiveInvalid
 		}
 		// Only the files map outlives ReadArchive. The clones of the keys let
 		// the seen maps hold no PAX buffer, so the peak heap in the loop stays
 		// small.
 		seen[strings.Clone(key)] = true
-		seenUstar[strings.Clone(ustarKey)] = true
+		if hasCut {
+			seenCut[strings.Clone(cut)] = true
+		}
 		if hdr.Typeflag == tar.TypeDir {
 			if hdr.Size != 0 {
 				return nil, ErrArchiveInvalid

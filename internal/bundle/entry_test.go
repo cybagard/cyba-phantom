@@ -250,9 +250,10 @@ func paxHdrTail(tail string, recs ...string) []byte {
 func rawFormCases() []entryCase {
 	const p = "traps/a"
 	long := longName(8, 64)
-	// tail has the 100-byte cut of long. other has another cut.
+	// other has another cut than long. upperLong has upper case letters in its
+	// first 100 bytes.
 	other := "traps/b" + long[7:]
-	tail := long[:len(long)-1] + "b"
+	upperLong := "traps/" + strings.ToUpper(long[6:])
 	// The first 100 bytes of slashCut end in a slash. A directory with these
 	// bytes as its name has the same key as the cut.
 	slashCut := "traps/" + strings.Repeat("a", 64) + "/" + strings.Repeat("b", 28) + "/" + strings.Repeat("c", 64)
@@ -356,10 +357,23 @@ func rawFormCases() []entryCase {
 			rawArchive(pathEntry("traps/p"))},
 		{"PAX path over 100 bytes with another ustar name",
 			rawArchive(paxHdr(paxRec("path", long)), rawFile("traps/x", "x")), rawArchive(pathEntry(long))},
-		{"two long names with the same cut", rawArchive(pathEntry(long), pathEntry(tail)),
-			rawArchive(pathEntry(long), pathEntry(other))},
 		{"long name with the cut of another file", rawArchive(rawFile(long[:maxCut], "x"), pathEntry(long)),
 			rawArchive(rawFile(other[:maxCut], "x"), pathEntry(long))},
+		// The cut ends in a slash, and the file name has no slash. The key of the
+		// cut loses the slash, so only the trim makes the two keys equal. The twin
+		// changes the last byte of the file name.
+		{"long name with a cut that ends in a slash and a file",
+			rawArchive(rawFile(slashCut[:maxCut-1], "x"), pathEntry(slashCut)),
+			rawArchive(rawFile(slashCut[:maxCut-2]+"c", "x"), pathEntry(slashCut))},
+		// The cut has upper case letters, and the file name has the lower case
+		// form of the cut. The long name comes first. The twin changes the last
+		// byte of the file name.
+		{"long name with a cut that differs from a file only in case",
+			rawArchive(pathEntry(upperLong), rawFile(strings.ToLower(upperLong[:maxCut]), "x")),
+			rawArchive(pathEntry(upperLong), rawFile(strings.ToLower(upperLong[:maxCut-1])+"b", "x"))},
+		// A directory name of exactly 100 bytes with its slash, with a longer
+		// name below it, is refused. The readers that read PAX records accept
+		// such an archive.
 		{"long name with a cut that ends in a slash and a directory",
 			rawArchive(rawHdr(slashCut[:maxCut], tar.TypeDir, 0), pathEntry(slashCut)),
 			rawArchive(rawHdr("traps/d", tar.TypeDir, 0), pathEntry(slashCut))},
@@ -392,6 +406,14 @@ func entryPassCases() []passCase {
 	}
 	return []passCase{
 		{"PAX path over 100 bytes, written by tar.Writer", build(ent{name: long, data: []byte("x")}), []string{long}},
+		// The two names have the same first 100 bytes. Two cuts are not compared.
+		{"two long names with the same cut",
+			rawArchive(pathEntry(long), pathEntry(long[:len(long)-1]+"b")),
+			[]string{long, long[:len(long)-1] + "b"}},
+		// tar.Writer writes a PAX path record for the directory and for each file
+		// (TestTS19WriterWritesPAXForDeepDirectory). The three names have the same
+		// first 100 bytes.
+		{"directory of 261 bytes and two files, written by tar.Writer", deepDirArchive(), deepDirFiles()},
 		{"PAX path record", rawArchive(pathEntry("traps/p")), []string{"traps/p"}},
 		{"PAX path and mtime records",
 			rawArchive(pathEntry("traps/p", paxRec("mtime", "1700000000.5"))), []string{"traps/p"}},
@@ -412,6 +434,46 @@ func entryPassCases() []passCase {
 				ent{name: "secrets/a", data: []byte("x")}, ent{name: "vhosts/h/a", data: []byte("x")},
 				ent{name: "traps/a", data: []byte("x")}),
 			[]string{"fp/a", "manifest.json", "score/a", "secrets/a", "traps/a", "vhosts/h/a"}},
+	}
+}
+
+// deepDir is a directory name of 261 bytes: traps and four parts, three of 64
+// bytes and one of 60 bytes.
+var deepDir = "traps/" + strings.Repeat("a", 64) + "/" + strings.Repeat("b", 64) + "/" +
+	strings.Repeat("c", 64) + "/" + strings.Repeat("d", 60)
+
+// deepDirEnts returns the entries of deepDirArchive: the directory and two
+// files in it.
+func deepDirEnts() []ent {
+	return []ent{
+		{name: deepDir, typ: tar.TypeDir},
+		{name: deepDir + "/f1", data: []byte("x")},
+		{name: deepDir + "/f2", data: []byte("x")},
+	}
+}
+
+// deepDirArchive makes the archive of deepDirEnts with tar.Writer.
+func deepDirArchive() []byte { return build(deepDirEnts()...) }
+
+// deepDirFiles returns the sorted names of the files of deepDirArchive.
+func deepDirFiles() []string { return []string{deepDir + "/f1", deepDir + "/f2"} }
+
+// T-S-19: tar.Writer writes a PAX path record for the directory of 261 bytes
+// and for each file in it, so that deepDirArchive holds three long PAX paths
+// with the same first 100 bytes.
+func TestTS19WriterWritesPAXForDeepDirectory(t *testing.T) {
+	if len(deepDir) != 261 {
+		t.Fatalf("directory of %d bytes; want 261", len(deepDir))
+	}
+	tr := tar.NewReader(bytes.NewReader(buildTar(deepDirEnts()...)))
+	for i := 0; i < 3; i++ {
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := hdr.PAXRecords["path"]; hdr.Format != tar.FormatPAX || len(p) <= maxCut {
+			t.Errorf("entry %d: format %v, path of %d bytes; want PAX and over %d", i, hdr.Format, len(p), maxCut)
+		}
 	}
 }
 

@@ -164,16 +164,18 @@ func paxBytes(hdr *tar.Header) int64 {
 // PAX records sees only the first maxCut bytes of a longer PAX path.
 const maxCut = 100
 
-// ustarSeenKey returns the key of the name that a reader without PAX support
-// sees: the cut of a long PAX path, or else the final name. The key has the
-// form of the key that checkEntry returns: lower case, with one trailing slash
-// removed from the cut or from the name.
-func ustarSeenKey(hdr *tar.Header) string {
-	name := hdr.Name
-	if p := hdr.PAXRecords["path"]; len(p) > maxCut {
-		name = p[:maxCut]
+// cutKey returns the key of the cut of a long PAX path: the first maxCut bytes
+// of a path over maxCut bytes. It reports false for an entry with no such
+// path. The key has the form of the key that checkEntry returns: lower case,
+// with one trailing slash removed. ReadArchive refuses an entry when its cut
+// key is equal to the key of the final name of another entry. It does not
+// compare two cut keys with each other.
+func cutKey(hdr *tar.Header) (string, bool) {
+	p := hdr.PAXRecords["path"]
+	if len(p) <= maxCut {
+		return "", false
 	}
-	return strings.ToLower(strings.TrimSuffix(name, "/"))
+	return strings.ToLower(strings.TrimSuffix(p[:maxCut], "/")), true
 }
 
 // ustarSize returns the value of the size field of the header block b. The
