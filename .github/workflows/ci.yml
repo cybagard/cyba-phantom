@@ -11,6 +11,8 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
+#   - one container image: the oracle job runs in golang:1.27.2 from
+#     Docker Hub, pinned by digest (the base image of .devcontainer);
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
 #     pull_request would yield the merge ref — the PR's own changes)
@@ -28,11 +30,20 @@
 #     App), not from this file — it is the third leg of the gate
 #     integrity story for the workflow files themselves.
 #
-# Jobs: lint (gofmt/vet), dco (sign-off and commit identity, PRs only),
-# test (-race + coverage gate), trace (C10 matrix + sync stamp),
-# mirror-diff (constitution table), build (T-P-07: reproducible, static,
-# sized, cgroup-budgeted). Jobs share their checkout and gate-source
-# steps through YAML anchors.
+# Jobs:
+#   - lint: gofmt, go vet and comment line length;
+#   - dco: sign-off and commit identity, on PRs only;
+#   - test: go test -race and the coverage gate;
+#   - oracle: the tar reader oracle, in the pinned golang container;
+#   - trace: the C10 matrix and the sync stamp;
+#   - trace-tests: a Go test or a marker for each test ID of the milestone;
+#   - mirror-diff: the constitution table;
+#   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
+# The test, oracle and build jobs share one checkout step through a YAML
+# anchor.
+# The dco, trace, trace-tests and mirror-diff jobs share their base-checkout
+# and gate-source steps through YAML anchors. The lint job has its own
+# checkout.
 
 name: ci
 
@@ -62,14 +73,24 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The line check fails only for comment lines that the PR changed.
+    # On pull_request, the checkout has no ref, so it is the PR merge ref.
+    # The job builds stelint, gofmt and go vet from that merge ref.
+    # The file text that stelint reads comes from HEAD_SHA, the PR head.
+    # On push, both SHAs are empty and origin/main is the pushed commit.
+    # The range from the merge base to HEAD is then empty.
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - &checkout
+      - name: Checkout (full history for the base commit)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: gofmt + go vet
-        run: make lint
+      - name: gofmt + go vet + comment line length
+        run: make lint BASE="$BASE_SHA" HEAD="$HEAD_SHA"
 
   dco:
     # Checker-from-base: every commit in the PR range needs a
@@ -142,11 +163,33 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # The reader oracle needs GNU tar 1.35 and Python 3.13, which the
+      # runner image does not have. The oracle job runs it.
+      GOFLAGS: -skip=^TestTS19ReaderOracle$
     steps:
-      - *checkout
+      - &checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: go test -race + coverage gate
         run: make coverage
+
+  oracle:
+    # The reader oracle of internal/bundle compares Go archive/tar with
+    # GNU tar 1.35 and Python 3.13. The job runs in the base image of
+    # .devcontainer/Dockerfile, at the same digest (bump both together).
+    # With CI=true, a missing tool or another version fails the test.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+    steps:
+      - *checkout
+
+      - name: reader oracle (GNU tar, Python)
+        run: go test -race -count=1 -v -run '^TestTS19ReaderOracle$' ./internal/bundle/
 
   trace:
     # Checker-from-base: the trace tool is built from the PR base branch
@@ -176,6 +219,34 @@ jobs:
           (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
           cd "${{ steps.gate.outputs.tree }}"
           "$RUNNER_TEMP/trace" all spec
+
+  trace-tests:
+    # Checker-from-base, as in the trace job. This job has its own
+    # GATE_FILE. The base of the PR that adds the tests mode has no
+    # tests.go. Thus at bootstrap the job builds from the work tree and
+    # gives the warning. The milestone comes from the TRACE_MILESTONE line
+    # of the Makefile of the work tree. That line is the one copy of the
+    # value.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GATE_FILE: tools/trace/tests.go
+      GATE_NAME: test ID
+    steps:
+      - *base-checkout
+      - *work-checkout
+      - *gate-source
+
+      - name: Test IDs of the current milestone
+        run: |
+          (cd "${{ steps.gate.outputs.src }}" && go build -o "$RUNNER_TEMP/trace" ./tools/trace)
+          cd "${{ steps.gate.outputs.tree }}"
+          ms=$(sed -n 's/^TRACE_MILESTONE := \(M-[0-9][0-9]*\)$/\1/p' Makefile | tail -n 1)
+          if [ -z "$ms" ]; then
+            echo "::error::Makefile has no TRACE_MILESTONE := M-n line"
+            exit 1
+          fi
+          "$RUNNER_TEMP/trace" tests spec --milestone "$ms"
 
   mirror-diff:
     # Checker-from-base: the extraction script comes from the PR base
