@@ -1,7 +1,8 @@
 // Package bundle reads a bundle archive (SEC-23, FR-02). The archive is a tar
 // stream that gzip compresses. The package treats the archive as untrusted
 // input. It reads the archive from memory and keeps each entry in memory. It
-// makes no file and no directory for an entry, and it does not import os.
+// makes no file and no directory for an entry, and it does not import os. The
+// package also parses the manifest of a bundle and checks it (manifest.go).
 //
 // The errors of this package are fixed values. They hold no input bytes. The
 // package does not wrap an error from another package and does not return
