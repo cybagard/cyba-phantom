@@ -1,0 +1,41 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestTS11_CheckURLRules checks that --check refuses a bad URL host and a URL
+// with a query. It does this for each URL key, with exit 1. The error names
+// the key and does not show the host (T-S-11, SEC-13).
+func TestTS11_CheckURLRules(t *testing.T) {
+	body := validBody(t)
+	hook := func(u string) string {
+		return body + "alerts:\n  sinks:\n    - {type: webhook, url: \"" + u + "\", hmac_secret_env: ALERT_HMAC}\n"
+	}
+	for _, u := range []string{
+		"https://a..b/", "https://.example.com/", "https://169.254.169.254;/", "https://-h.example/", "https://h_x.example/",
+		"https://h.example/p?t=x", "https://h.example/p?",
+	} {
+		host, _, _ := strings.Cut(strings.TrimPrefix(u, "https://"), "/")
+		for _, c := range []struct{ key, file, env string }{
+			{"acme.ca", body, "PHANTOM_ACME_CA=" + u},
+			{"bundle.fetch_url", body, "PHANTOM_BUNDLE_FETCH_URL=" + u},
+			{"tlog.publish[0].url", strings.Replace(body, "https://ckpt.example.invalid/put", u, 1), ""},
+			{"alerts.sinks[0].url", hook(u), ""},
+		} {
+			env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+			if c.env != "" {
+				env = append(env, c.env)
+			}
+			var so, se strings.Builder
+			code := run([]string{"--check", writeFile(t, c.file)}, env, &so, &se)
+			if code != 1 || !strings.Contains(se.String(), "config: "+c.key+" at ") {
+				t.Errorf("%s %s: exit %d, stderr %q", c.key, u, code, se.String())
+			}
+			if strings.Contains(se.String(), host) {
+				t.Errorf("%s %s: stderr shows the URL host: %q", c.key, u, se.String())
+			}
+		}
+	}
+}

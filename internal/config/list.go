@@ -32,14 +32,14 @@ var lists = []listKey{
 	}},
 	{path: "alerts.sinks", min: 0, max: 8, schemas: map[string][]key{
 		"webhook": {
-			{path: "url", kind: kindURL, req: true, check: checkHTTPS},
+			{path: "url", kind: kindURL, req: true, check: checkHTTPS, endpoint: urlEndpoint},
 			{path: "hmac_secret_env", kind: kindString, req: true, secret: true, check: checkSecretEnv(32)}, // SEC-06
 		},
 		"syslog": {
-			{path: "addr", kind: kindURL, req: true, check: checkSyslogAddr},
+			{path: "addr", kind: kindURL, req: true, check: checkSyslogAddr, endpoint: syslogEndpoint},
 		},
 		"smtp": {
-			{path: "host", kind: kindString, req: true, check: checkSMTPHost},
+			{path: "host", kind: kindString, req: true, check: checkSMTPHost, endpoint: smtpEndpoint},
 			{path: "from", kind: kindString, req: true, check: checkEmail},
 			{path: "to", kind: kindString, req: true, maxItems: 16, check: checkEmail},
 		},
@@ -217,13 +217,16 @@ func checkSecretEnv(minBytes int) func(*loader, string) string {
 		case strings.HasPrefix(raw, "PHANTOM_"):
 			return "the variable name must not start with PHANTOM_"
 		}
-		v, ok := "", false
-		for _, kv := range l.env { // The loader uses the last entry. os.Environ holds one entry for each name.
-			if n, val, found := strings.Cut(kv, "="); found && n == raw {
-				v, ok = val, true
+		v, n := "", 0
+		for _, kv := range l.env { // os.Environ holds one entry for each name.
+			if name, val, found := strings.Cut(kv, "="); found && name == raw {
+				v, n = val, n+1
 			}
 		}
+		ok := n > 0
 		switch {
+		case n > 1:
+			return "the environment has more than one entry for the variable that the key names"
 		case !ok || v == "":
 			return "the variable that the key names is not set or is empty"
 		case len(v) < minBytes:

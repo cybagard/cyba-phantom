@@ -34,9 +34,8 @@ func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.
 // hostname matches host name labels that a dot separates. A label is not empty.
 var hostname = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
 
-// lastLabel returns the text after the last dot of host. It ignores one dot at the end.
+// lastLabel returns the text after the last dot of host.
 func lastLabel(host string) string {
-	host = strings.TrimSuffix(host, ".")
 	return host[strings.LastIndexByte(host, '.')+1:]
 }
 
@@ -83,7 +82,11 @@ func parseHostPort(s string) (hostPort, string) {
 	if host == "" {
 		return hp, ""
 	}
-	if a, err := netip.ParseAddr(host); err == nil {
+	a, err := netip.ParseAddr(host)
+	if strings.HasPrefix(s, "[") && (err != nil || !a.Is6()) {
+		return hp, "a host in brackets must be an IPv6 address"
+	}
+	if err == nil {
 		hp.addr = a
 		return hp, ""
 	}
@@ -112,7 +115,8 @@ func (h hostPort) overlaps(o hostPort) bool {
 	if h.addr.IsValid() && o.addr.IsValid() {
 		return h.addr.WithZone("").Unmap() == o.addr.WithZone("").Unmap()
 	}
-	return strings.EqualFold(h.host, o.host)
+	// A host name is on at least one side. The loader does not resolve names.
+	return true
 }
 
 func checkListen(_ *loader, raw string) string {
@@ -144,10 +148,10 @@ func checkOpsListen(_ *loader, raw string) string {
 // A listen host name with the same port is a clash: the loader does not resolve names.
 func opsConflict(ops, l hostPort, name string) string {
 	switch {
-	case ops.overlaps(l):
-		return "the address overlaps the " + name + " address"
 	case l.named() && l.port == ops.port:
 		return "the port is the same as the port of " + name + ", and that host is a name"
+	case ops.overlaps(l):
+		return "the address overlaps the " + name + " address"
 	}
 	return ""
 }
@@ -185,14 +189,12 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 		}
 	}
 	// These checks compare a bound with the value of a second key. A key that failed is not in vals, so the loader skips it.
-	if b, ok := vals["limits.per_ip_burst"]; ok {
-		if r, ok := vals["limits.per_ip_rps"]; ok && b.Int < r.Int {
-			fail("limits.per_ip_burst", b, "the value must not be less than limits.per_ip_rps")
-		}
-	}
-	if e, ok := vals["store.retention_days.events"]; ok {
-		if r, ok := vals["store.retention_days.raw"]; ok && e.Int < r.Int {
-			fail("store.retention_days.events", e, "the value must not be less than store.retention_days.raw")
+	for _, pair := range [][2]string{
+		{"limits.per_ip_burst", "limits.per_ip_rps"},
+		{"store.retention_days.events", "store.retention_days.raw"},
+	} {
+		if p, v, d := belowFloor(vals, pair[0], pair[1]); d != "" {
+			fail(p, v, d)
 		}
 	}
 	if s, ok := vals["store.path"]; ok {
@@ -211,6 +213,21 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 		}
 	}
 	return errs
+}
+
+// belowFloor checks that the value of key is not less than the value of floor.
+// It skips the check if key or floor is not in vals. If key is at default, the
+// operator set floor: the error names floor.
+func belowFloor(vals map[string]Value, key, floor string) (string, Value, string) {
+	k, ok := vals[key]
+	f, okFloor := vals[floor]
+	switch {
+	case !ok || !okFloor || k.Int >= f.Int:
+		return "", Value{}, ""
+	case k.Source == "default":
+		return floor, f, "the value must not be more than " + key
+	}
+	return key, k, "the value must not be less than " + floor
 }
 
 // intRange returns a check that the integer value is in the range lo to hi.
@@ -280,7 +297,7 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 	switch {
 	case err != nil:
 		return nil, "the value is not a valid URL"
-	case !contains(schemes, u.Scheme):
+	case !slices.Contains(schemes, u.Scheme):
 		return nil, "the URL scheme is not allowed"
 	case u.Opaque != "":
 		return nil, "the URL must not be opaque"
@@ -288,6 +305,8 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		return nil, "the URL must not have user information"
 	case u.Fragment != "" || strings.Contains(raw, "#"):
 		return nil, "the URL must not have a fragment"
+	case strings.Contains(raw, "?"):
+		return nil, "the URL must not have a query"
 	case u.Hostname() == "":
 		return nil, "the URL must have a host"
 	}
@@ -319,19 +338,12 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		case a0.IsUnspecified():
 			return nil, "the URL host must not be unspecified"
 		}
+	} else if !hostname.MatchString(host) {
+		return nil, "the URL host is not an IP address or a host name"
 	} else if numericLabel(host) {
-		return nil, "the URL host is a number but not an IP address in dotted form"
+		return nil, "the last label of the URL host is a number, and the host is not an IP address"
 	}
 	return u, ""
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // Names of the ACME directories that the loader knows.
@@ -368,7 +380,7 @@ func checkHTTPS(_ *loader, raw string) string {
 // endpoint makes an Endpoint. It writes the host in lower case and an IP literal in canonical form,
 // so that two spellings of one endpoint are equal.
 func endpoint(scheme, host, port string) Endpoint {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = strings.ToLower(host)
 	if a, err := netip.ParseAddr(host); err == nil {
 		host = a.Unmap().String()
 	}
@@ -380,7 +392,7 @@ func endpoint(scheme, host, port string) Endpoint {
 // or link-local. It returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
-	if !ok || !contains(schemes, scheme) {
+	if !ok || !slices.Contains(schemes, scheme) {
 		return Endpoint{}, "the address scheme must be " + strings.Join(schemes, ", ") + " and be followed by ://"
 	}
 	hp, d := parseHostPort(raw)
@@ -443,12 +455,8 @@ func (c *Config) AllowList() []Endpoint {
 		}
 	}
 	fromURL := func(raw string) {
-		if u, d := parseURL(raw, "https"); d == "" {
-			port := u.Port()
-			if port == "" {
-				port = "443"
-			}
-			add(endpoint(u.Scheme, u.Hostname(), port))
+		if e, d := urlEndpoint(raw); d == "" {
+			add(e)
 		}
 	}
 	for _, p := range []string{"acme.ca", "bundle.fetch_url"} {
@@ -463,22 +471,53 @@ func (c *Config) AllowList() []Endpoint {
 	}
 	for i := 0; ; i++ {
 		p := fmt.Sprintf("alerts.sinks[%d].", i)
-		switch c.values[p+"type"].Str {
-		case "webhook":
-			fromURL(c.values[p+"url"].Str)
-		case "syslog":
-			if e, d := parseEndpoint(c.values[p+"addr"].Str, syslogSchemes); d == "" {
-				add(e)
-			}
-		case "smtp":
-			if e, d := parseEndpoint(c.values[p+"host"].Str, smtpSchemes); d == "" {
-				add(e)
-			}
-		default:
+		typ := c.values[p+"type"].Str
+		if typ == "" {
 			return list
+		}
+		// An unknown type has no schema: it adds nothing.
+		for _, f := range sinkSchemas[typ] {
+			if f.endpoint == nil {
+				continue
+			}
+			if e, d := f.endpoint(c.values[p+f.path].Str); d == "" {
+				add(e)
+			}
 		}
 	}
 }
+
+// sinkSchemas holds the schemas of the alerts.sinks list.
+// The lookup runs one time at start.
+var sinkSchemas = schemasOf("alerts.sinks")
+
+// schemasOf returns the item schemas of the list at path.
+// It panics if the table has no such list.
+func schemasOf(path string) map[string][]key {
+	i := slices.IndexFunc(lists, func(l listKey) bool { return l.path == path })
+	if i < 0 {
+		panic("config: the list table has no list " + path)
+	}
+	return lists[i].schemas
+}
+
+// urlEndpoint makes the Endpoint of an https URL.
+// The port is 443 if the URL has none.
+func urlEndpoint(raw string) (Endpoint, string) {
+	u, d := parseURL(raw, "https")
+	if d != "" {
+		return Endpoint{}, d
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	return endpoint(u.Scheme, u.Hostname(), port), ""
+}
+
+func syslogEndpoint(raw string) (Endpoint, string) { return parseEndpoint(raw, syslogSchemes) }
+
+func smtpEndpoint(raw string) (Endpoint, string) { return parseEndpoint(raw, smtpSchemes) }
 
 // checkPathForm checks that p is absolute, clean, and free of NUL.
 func checkPathForm(p string) string {

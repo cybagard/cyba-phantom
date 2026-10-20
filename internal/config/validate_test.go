@@ -59,7 +59,50 @@ func TestTU10_Listen(t *testing.T) {
 		{"hex last label", "127.0.0.0x1:80", "host name"},
 		{"hex name", "0xcafe.example.com:80", ""},
 		{"url", "http://h:80", "host"},
+		{"underscore", "h_x.example:80", "host name"},
+		{"bracketed IPv4", "[127.0.0.1]:80", "brackets"},
+		{"bracketed name", "[example.com]:80", "brackets"},
+		{"bracketed IPv6 with zone", "[fe80::1%eth0]:80", ""},
 	}, func(s string) string { return checkListen(nil, s) })
+}
+
+// TestTS11_HostRules checks that the URL host rule and the host:port host rule
+// give one result (T-S-11).
+func TestTS11_HostRules(t *testing.T) {
+	for _, h := range []string{
+		"ok.example", "a-b.example", "0x0.st", "a.", "a.example.", "h_x.example", "a..b", ".example.com", "-h.example",
+		"a-.example", "a.1", "192.0.2.1.", "1.2.3.4.5", "2852039166", "a;b.example", "h.example:",
+	} {
+		_, urlDetail := parseURL("https://"+h+"/", "https")
+		_, hostDetail := parseHostPort(h + ":443")
+		if (urlDetail == "") != (hostDetail == "") {
+			t.Errorf("%q: URL rule %q, host:port rule %q", h, urlDetail, hostDetail)
+		}
+	}
+}
+
+// TestTS11_BelowFloor checks that the error names the key that the operator
+// changed (T-S-11).
+func TestTS11_BelowFloor(t *testing.T) {
+	const hi, lo = "store.retention_days.events", "store.retention_days.raw"
+	set := Value{Int: 20, Source: "file", Line: 3}
+	rows := []struct {
+		name    string
+		hi      Value
+		wantKey string
+	}{
+		{"high at default", Value{Int: 10, Source: "default"}, lo},
+		{"high set", Value{Int: 10, Source: "file", Line: 5}, hi},
+		{"no error", Value{Int: 20, Source: "default"}, ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			k, v, d := belowFloor(map[string]Value{hi: r.hi, lo: set}, hi, lo)
+			if k != r.wantKey || (k == "") != (d == "") || (k == lo && v.Line != 3) {
+				t.Errorf("got %q, %+v, %q", k, v, d)
+			}
+		})
+	}
 }
 
 // TestTU10_ListenDiffer checks that listen.http and listen.https differ.
@@ -71,6 +114,10 @@ func TestTU10_ListenDiffer(t *testing.T) {
 		{"same host", "listen:\n  http: \"192.0.2.1:80\"\n  https: \"192.0.2.1:80\"\n", "listen.https"},
 		{"wildcard host", "listen:\n  http: \":80\"\n  https: \"192.0.2.1:80\"\n", "listen.https"},
 		{"other host", "listen:\n  http: \"192.0.2.1:80\"\n  https: \"192.0.2.2:80\"\n", ""},
+		{"name and IP, same port", "listen:\n  http: \"localhost:8080\"\n  https: \"127.0.0.1:8080\"\n", "listen.https"},
+		{"IP and name, same port", "listen:\n  http: \"127.0.0.1:8080\"\n  https: \"localhost:8080\"\n", "listen.https"},
+		{"two names, same port", "listen:\n  http: \"a.example:8080\"\n  https: \"b.example:8080\"\n", "listen.https"},
+		{"name and IP, other port", "listen:\n  http: \"localhost:8080\"\n  https: \"127.0.0.1:8081\"\n", ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { wantLoad(t, r.file, r.want) })
@@ -136,8 +183,22 @@ func TestTU10_OpsListenOverlap(t *testing.T) {
 		{"zoned unspecified, other port", "listen:\n  https: \"[::%lo0]:8443\"\n", ""},
 		{"host name, other port", "listen:\n  http: \"localhost:8443\"\n", ""},
 	}
+	// These rows also check the detail text, not only the key.
+	text := map[string]string{
+		"ops on port 443":      "the address overlaps the listen.https address",
+		"ops on port 80":       "the address overlaps the listen.http address",
+		"host name, same port": "that host is a name",
+	}
 	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) { wantLoad(t, r.file, r.want) })
+		t.Run(r.name, func(t *testing.T) {
+			wantLoad(t, r.file, r.want)
+			if w, ok := text[r.name]; ok {
+				_, err := loadTest(writeConfig(t, base+r.file), nil)
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("got %v, want the text %q", err, w)
+				}
+			}
+		})
 	}
 }
 
@@ -252,7 +313,7 @@ func TestTU10_URL(t *testing.T) {
 		{"zero host", "https://0/", []string{"https"}, "number"},
 		{"hex first label", "https://0x7f.1/", []string{"https"}, "number"},
 		{"numeric last label", "https://a.1/", []string{"https"}, "number"},
-		{"numeric host with dot at end", "https://2852039166./", []string{"https"}, "number"},
+		{"numeric host with dot at end", "https://2852039166./", []string{"https"}, "not an IP address or a host name"},
 		{"hex last label", "https://169.254.169.0xfe/", []string{"https"}, "number"},
 		{"hex last label loopback", "https://127.0.0.0x1/", []string{"https"}, "number"},
 		{"hex last label upper case", "https://10.0.0.0XA/", []string{"https"}, "number"},
@@ -268,6 +329,16 @@ func TestTU10_URL(t *testing.T) {
 		{"non-ASCII name", "https://例え.jp/", []string{"https"}, "ASCII"},
 		{"name with digits", "https://a1.example/", []string{"https"}, ""},
 		{"upper case name", "https://CA.Example:443/", []string{"https"}, ""},
+		{"empty label", "https://a..b/", []string{"https"}, "host name"},
+		{"leading dot", "https://.example.com/", []string{"https"}, "host name"},
+		{"semicolon", "https://169.254.169.254;/", []string{"https"}, "host name"},
+		{"leading hyphen", "https://-h.example/", []string{"https"}, "host name"},
+		{"underscore", "https://h_x.example/", []string{"https"}, "host name"},
+		{"name with dot at end", "https://h.example./", []string{"https"}, "host name"},
+		{"address with dot at end", "https://192.0.2.1./", []string{"https"}, "not an IP address or a host name"},
+		{"five labels, numeric last", "https://1.2.3.4.5/", []string{"https"}, "last label of the URL host is a number"},
+		{"query", "https://h.example/p?t=x", []string{"https"}, "query"},
+		{"empty query", "https://h.example/p?", []string{"https"}, "query"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -513,8 +584,9 @@ func TestTU10_HtpasswdOpen(t *testing.T) {
 	}
 }
 
-// TestTU10_HtpasswdValueOnly checks that the error shows the path in the Value field only,
-// cut to 64 bytes, and that the detail is fixed text.
+// TestTU10_HtpasswdValueOnly checks that the Value field holds the full path.
+// It checks that Error() cuts the path to 64 bytes.
+// It checks that the detail is fixed text.
 func TestTU10_HtpasswdValueOnly(t *testing.T) {
 	useTestKeys(t)
 	p := filepath.Join(t.TempDir(), strings.Repeat("n", 90))
@@ -700,7 +772,8 @@ func TestTS11_ScalarBounds(t *testing.T) {
 // that a bound error names the key and the line of the key that fails.
 func TestTS11_CrossChecks(t *testing.T) {
 	rows := []struct{ name, file, want string }{
-		{"burst below rps", "limits:\n  per_ip_rps: 300\n", "limits.per_ip_burst at default: the value must not be less than limits.per_ip_rps"},
+		{"burst below rps", "limits:\n  per_ip_rps: 300\n", "limits.per_ip_rps at " + cfg[len(cfg)-64:] + ":6: the value must not be more than limits.per_ip_burst"},
+		{"burst set below rps", "limits:\n  per_ip_rps: 300\n  per_ip_burst: 250\n", "limits.per_ip_burst at " + cfg[len(cfg)-64:] + ":7: the value must not be less than limits.per_ip_rps"},
 		{"burst equals rps", "limits:\n  per_ip_rps: 200\n", ""},
 		{"events below raw", "store:\n  retention_days:\n    raw: 91\n", "store.retention_days.raw"}, // The raw bound fails first.
 		{"events below raw 2", "store:\n  retention_days:\n    raw: 30\n    events: 29\n", "store.retention_days.events at " + cfg[len(cfg)-64:] + ":8: the value must not be less than"},
@@ -940,7 +1013,7 @@ func TestTU10_Overrides(t *testing.T) {
 			t.Errorf("%s has no row in scalarBounds", k.path)
 			continue
 		}
-		if !ok || len(b.pass) == 0 {
+		if len(b.pass) == 0 {
 			continue
 		}
 		v := b.pass[len(b.pass)-1]
@@ -1119,6 +1192,8 @@ func TestTS11_Lists(t *testing.T) {
 		{"syslog tcp v4-mapped loopback", snk(sys("tcp://[::ffff:127.0.0.1]:514")), nil, "alerts.sinks[0].addr"},
 		{"syslog udp global v6", snk(sys("udp://[2001:db8::1]:514")), nil, "alerts.sinks[0].addr"},
 		{"syslog tcp global v6", snk(sys("tcp://[2001:db8::1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog udp bracketed IPv4", snk(sys("udp://[127.0.0.1]:514")), nil, "alerts.sinks[0].addr"},
+		{"syslog tls bracketed name", snk(sys("tls://[example.com]:6514")), nil, "alerts.sinks[0].addr"},
 		{"syslog udp upper-case scheme", snk(sys("UDP://127.0.0.1:514")), nil, "alerts.sinks[0].addr"},
 		{"syslog scheme", snk(`{type: syslog, addr: "http://log.example:514"}`), nil, "alerts.sinks[0].addr"},
 		{"syslog no scheme", snk(`{type: syslog, addr: "log.example:514"}`), nil, "alerts.sinks[0].addr"},
@@ -1165,7 +1240,8 @@ func TestTS11_Lists(t *testing.T) {
 		{"env PHANTOM_ prefix", pub(tok("PHANTOM_TOKEN")), []string{"PHANTOM_TOKEN=x"}, "tlog.publish[0].token_env"},
 		{"env underscore first", pub(tok("_TOKEN")), []string{"_TOKEN=x"}, ""},
 		{"env unset", pub(tok("NO_SUCH_VAR")), nil, "tlog.publish[0].token_env"},
-		{"env empty", pub(pubItem), []string{"CKPT_TOKEN="}, "tlog.publish[0].token_env"},
+		{"env empty", pub(strings.Replace(pubItem, "CKPT_TOKEN", "EMPTY_TOKEN", 1)), []string{"EMPTY_TOKEN="}, "tlog.publish[0].token_env"},
+		{"env twice", pub(pubItem), []string{tokenVar + "=" + strings.Repeat("u", 32)}, "tlog.publish[0].token_env"},
 		{"env hmac unset", snk(hookItem), nil, "alerts.sinks[0].hmac_secret_env"},
 		{"env hmac PHANTOM_ prefix", snk(hmac("PHANTOM_HMAC")), []string{"PHANTOM_HMAC=" + strings.Repeat("h", 32)}, "alerts.sinks[0].hmac_secret_env"},
 		{"env hmac not string", snk(hmac("5")), nil, "alerts.sinks[0].hmac_secret_env"},
@@ -1180,10 +1256,15 @@ func TestTS11_Lists(t *testing.T) {
 				t.Errorf("got %v, want an error that names %s", err, r.want)
 			case r.want != "" && c != nil:
 				t.Error("an invalid entry returned a config") // The load fails closed.
+			case r.name == "env twice" && !strings.Contains(err.Error(), envMany):
+				t.Errorf("got %v, want the text %q", err, envMany)
 			}
 		})
 	}
 }
+
+// envMany is the detail for an env list with two entries for one variable.
+const envMany = "the environment has more than one entry for the variable that the key names"
 
 // TestTS10_EnvErrorsHideName checks that an error for a *_env key names the key path and never the
 // variable name: an operator can paste a secret in place of a name (SEC-13, T-S-10).
@@ -1199,6 +1280,7 @@ func TestTS10_EnvErrorsHideName(t *testing.T) {
 		{"token empty", tok, "tlog.publish[0].token_env", []string{name + "="}},
 		{"hmac unset", hook, "alerts.sinks[0].hmac_secret_env", nil},
 		{"hmac short", hook, "alerts.sinks[0].hmac_secret_env", []string{name + "=short"}},
+		{"token twice", tok, "tlog.publish[0].token_env", []string{name + "=" + name, name + "=" + name}},
 		{"name rule", strings.Replace(tok, name, name+"-x", 1), "tlog.publish[0].token_env", nil},
 		{"PHANTOM_ prefix", strings.Replace(tok, name, "PHANTOM_"+name, 1), "tlog.publish[0].token_env", nil},
 	}
@@ -1210,6 +1292,9 @@ func TestTS10_EnvErrorsHideName(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), name) {
 				t.Errorf("the error holds the variable name: %v", err)
+			}
+			if r.label == "token twice" && !strings.Contains(err.Error(), envMany) {
+				t.Errorf("got %v, want the text %q", err, envMany)
 			}
 		})
 	}
@@ -1250,8 +1335,11 @@ func TestTU10_ListKeys(t *testing.T) {
 func TestTS10_ListSecrets(t *testing.T) {
 	const marker = "secret_marker_7f3a_abcde" // 24 bytes
 	long := strings.Repeat(marker, 2)
-	env := []string{"CKPT_TOKEN=" + marker, "ALERT_HMAC=" + long, "SHORT_HMAC=" + marker}
-	good := pub(pubItem) + "alerts:\n  sinks:\n    - " + hookItem + "\n"
+	// loadTest sets CKPT_TOKEN, and a variable must not occur two times.
+	// So the marker is in MARKER_TOKEN.
+	env := []string{"MARKER_TOKEN=" + marker, "ALERT_HMAC=" + long, "SHORT_HMAC=" + marker}
+	pubMarker := strings.Replace(pubItem, "CKPT_TOKEN", "MARKER_TOKEN", 1)
+	good := pub(pubMarker) + "alerts:\n  sinks:\n    - " + hookItem + "\n"
 	c, err := loadProd(t, good, env...)
 	if err != nil {
 		t.Fatal(err)
@@ -1259,7 +1347,7 @@ func TestTS10_ListSecrets(t *testing.T) {
 	if s := fmt.Sprintf("%#v %v", c, c.AllowList()); strings.Contains(s, marker) {
 		t.Errorf("the config shows the marker: %s", s)
 	}
-	bad := acmeTlog + "  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "http://a.example/", token_env: ` + marker + "}\n" +
+	bad := acmeTlog + "  publish:\n    - " + pubMarker + "\n    - " + `{type: https-put, url: "http://a.example/", token_env: ` + marker + "}\n" +
 		"alerts:\n  sinks:\n    - " + `{type: webhook, url: "https://a.example/", hmac_secret_env: SHORT_HMAC}` + "\n" +
 		"    - " + `{type: webhook, url: "https://a.example/", hmac_secret_env: ` + marker + "}\n" +
 		"    - " + `{type: webhook, url: "https://u:` + marker + `@a.example/", hmac_secret_env: ALERT_HMAC, extra: 1}` + "\n"
@@ -1327,14 +1415,84 @@ func TestTS10_ListSecrets(t *testing.T) {
 			t.Errorf("%s: the invalid file loads", c.name)
 			continue
 		}
-		if !strings.Contains(err.Error(), c.cut) {
-			t.Errorf("%s: the error lacks the path %s: %v", c.name, c.cut, err)
+		errs := err.(interface{ Unwrap() []error }).Unwrap()
+		// A reader error has no Key: its Detail starts with the cut path.
+		if !slices.ContainsFunc(errs, func(e error) bool {
+			return strings.HasPrefix(e.(*Error).Detail, c.cut+": ")
+		}) {
+			t.Errorf("%s: no error names the path %s: %v", c.name, c.cut, err)
 		}
-		for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+		for _, e := range errs {
 			if s := fmt.Sprintf("%v %#v", e, e); strings.Contains(strings.ToLower(s), marker) {
 				t.Errorf("%s: the error shows the marker: %s", c.name, s)
 			}
 		}
+	}
+}
+
+// TestTS11_URLKeys checks that a bad URL host and a query fail for each URL
+// key. The error names the key and does not show the host (T-S-11).
+func TestTS11_URLKeys(t *testing.T) {
+	for _, u := range []string{
+		"https://a..b/", "https://.example.com/", "https://169.254.169.254;/", "https://-h.example/", "https://h_x.example/",
+		"https://h.example/p?t=x", "https://h.example/p?",
+	} {
+		for _, r := range []struct{ key, file string }{
+			{"acme.ca", "acme:\n  email: sec@example.com\n  ca: \"" + u + "\"\n" + acmeNames + tlogLine},
+			{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"" + u + "\"\n"},
+			{"tlog.publish[0].url", pub(`{type: https-put, url: "` + u + `", token_env: CKPT_TOKEN}`)},
+			{"alerts.sinks[0].url", snk(`{type: webhook, url: "` + u + `", hmac_secret_env: ALERT_HMAC}`)},
+		} {
+			_, err := loadProd(t, r.file, listEnv...)
+			if err == nil || !strings.Contains(err.Error(), "config: "+r.key+" at ") {
+				t.Errorf("%s %s: got %v", r.key, u, err)
+			} else if s := err.Error(); strings.Contains(s, "example") || strings.Contains(s, "169.254") {
+				t.Errorf("%s %s: the error shows the URL: %v", r.key, u, err)
+			}
+		}
+	}
+}
+
+// TestTS11_SinkEndpoints checks that each sink type of the alerts.sinks schema
+// gives its endpoint in AllowList. A type with no fixture or no endpoint
+// fails (C4, T-S-11).
+func TestTS11_SinkEndpoints(t *testing.T) {
+	fixtures := map[string]struct {
+		item string
+		want Endpoint
+	}{
+		"webhook": {hookItem, Endpoint{"https", "hook.example", "443"}},
+		"syslog":  {sysItem, Endpoint{"udp", "127.0.0.1", "514"}},
+		"smtp":    {mailItem, Endpoint{"smtp", "mail.example", "587"}},
+	}
+	for typ := range sinkSchemas {
+		t.Run(typ, func(t *testing.T) {
+			f, ok := fixtures[typ]
+			if !ok {
+				t.Fatalf("the sink type %s has no fixture", typ)
+			}
+			c, err := loadProd(t, snk(f.item), listEnv...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Endpoint{{"https", "acme-v02.api.letsencrypt.org", "443"}, ckptEndpoint, f.want}
+			if got := c.AllowList(); !reflect.DeepEqual(got, want) {
+				t.Errorf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// TestTS11_SinkUnknownType checks that an unknown sink type adds nothing.
+// It checks that the endpoints of the sinks after it stay (C4, T-S-11).
+func TestTS11_SinkUnknownType(t *testing.T) {
+	c := &Config{values: map[string]Value{
+		"alerts.sinks[0].type": {Str: "pager"},
+		"alerts.sinks[1].type": {Str: "syslog"},
+		"alerts.sinks[1].addr": {Str: "udp://127.0.0.1:514"},
+	}}
+	if got, want := c.AllowList(), []Endpoint{{"udp", "127.0.0.1", "514"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
 	}
 }
 
