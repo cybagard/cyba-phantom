@@ -143,8 +143,8 @@ const (
 // a reply after the read error.
 var errBudgetRead error = &net.OpError{Op: "read", Net: "tcp", Err: errors.New("read budget used")}
 
-// readAtZero is nil in production. A test sets it to learn that a Read has
-// started with no budget left, before that Read asks the socket.
+// readAtZero is a test hook. Read calls it with no budget left, before the
+// socket read. It is nil in production.
 var readAtZero func()
 
 // readLimit is the read budget of one Server and its pool. All Serve calls of
