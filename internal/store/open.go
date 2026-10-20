@@ -39,10 +39,10 @@ const (
 	ruleLocation   = "opened at a path other than the checked path"
 )
 
-// Error is a refused store operation. Name is the file, the config key, the
-// directory, a store part such as the writer, or "database schema". Rule is
-// one of the fixed classes. The error never wraps another error, so no driver
-// text can reach its string.
+// Error is a refused store operation. Name is the file, the config key, or the
+// directory. It can also be a store part such as the writer, "reserved
+// directory" or "database schema". Rule is one of the fixed classes. The error
+// never wraps another error, so no driver text can reach its string.
 type Error struct{ Name, Rule string }
 
 func (e *Error) Error() string { return "store: " + e.Name + " " + e.Rule }
@@ -56,8 +56,9 @@ type Options struct {
 	// clean path relative to the state directory; "." is the state directory
 	// itself. The directories keys and checkpoints and the names
 	// checkpoint.state, checkpoint.state.tmp and writer.stop are fixed (ADR-020,
-	// ADR-022), so the store adds them itself. Names match with no case: only
-	// the letters A-Z and a-z fold. The store does not import internal/config.
+	// ADR-022), so the store adds them itself. The match folds A-Z to a-z in
+	// the path and in each reserved path. No other byte changes. The store does
+	// not import internal/config.
 	Reserved []string
 }
 
@@ -85,6 +86,10 @@ var afterVerify func()
 // onHeld is a test hook. Production code leaves it nil. A test sets it to get
 // the descriptor that Open holds open for the pool.
 var onHeld func(*os.File)
+
+// beforeRefuse is a test hook. Production code leaves it nil. A test sets it to
+// change the file system before refuse looks at the file at rel.
+var beforeRefuse func()
 
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
@@ -148,10 +153,15 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		onHeld(held)
 	}
 	fi, statErr := held.Stat()
-	// A failed open removes the entry at rel only when it is the database file
-	// that this call made. Another file with the same name stays. If the Stat of
-	// the new file failed, nothing is removed.
+	// Each failed step calls refuse before it closes anything. While held is
+	// open, the inode of the new file is not free, so os.SameFile cannot match
+	// another file. Refuse removes the entry at rel only when it is the
+	// database file that this call made. If the Stat of the new file failed,
+	// refuse removes nothing.
 	refuse := func(err error) error {
+		if beforeRefuse != nil {
+			beforeRefuse()
+		}
 		if absent && statErr == nil {
 			if cur, lerr := root.Lstat(rel); lerr == nil && os.SameFile(cur, fi) {
 				_ = root.Remove(rel)
@@ -176,21 +186,24 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	path := filepath.Join(base, filepath.FromSlash(rel))
 	conn, err := newConnector(root, rel, path, dsn(path, absent), held, id)
 	if err != nil {
+		err = refuse(err)
 		held.Close()
-		return nil, refuse(err)
+		return nil, err
 	}
 	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
 	if err := verify(db, rel); err != nil {
+		err = refuse(err)
 		db.Close()
-		return nil, refuse(err)
+		return nil, err
 	}
 	if afterVerify != nil {
 		afterVerify()
 	}
 	if err := conn.check(); err != nil {
+		err = refuse(err)
 		db.Close()
-		return nil, refuse(err)
+		return nil, err
 	}
 	return db, nil
 }
@@ -320,8 +333,8 @@ func checkFile(name string, fi fs.FileInfo) error {
 	return checkOwnerMode(name, fi)
 }
 
-// checkOwnerMode returns the error for the owner and the mode of a file or a
-// directory that is not safe, or nil.
+// checkOwnerMode checks the owner and the mode of a file or a directory. It
+// returns nil when both are safe, and an error when they are not.
 func checkOwnerMode(name string, fi fs.FileInfo) error {
 	_, uid, ok := fileFacts(fi)
 	switch {

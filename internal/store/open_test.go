@@ -252,8 +252,9 @@ func TestTS15DefensiveModeRefusesSchemaWrite(t *testing.T) {
 	}
 }
 
-// T-S-15: a Begin takes the write lock at once. A second pool for the same
-// file gets SQLITE_BUSY at Begin when its busy_timeout is 0.
+// T-S-15: a Begin takes the write lock when it runs, before any statement. A
+// second pool for the same file gets SQLITE_BUSY at Begin when its
+// busy_timeout is 0.
 func TestTS15BeginTakesWriteLockAtOnce(t *testing.T) {
 	root, _, _ := newState(t)
 	db1 := mustOpen(t, root, "events.db")
@@ -267,8 +268,9 @@ func TestTS15BeginTakesWriteLockAtOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The first transaction ends before the pools close: the close of a pool
-	// closes a descriptor of the file, and this drops the locks of the process.
+	// The first transaction ends before the pools close. The close of a pool
+	// closes a descriptor of the file, and this drops the locks of the
+	// process.
 	defer tx1.Rollback()
 	tx2, err := db2.Begin()
 	if err == nil {

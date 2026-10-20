@@ -104,6 +104,58 @@ func TestTS15RefusedOpenKeepsOtherFileWithSameName(t *testing.T) {
 	}
 }
 
+// T-S-15: a refused open of a new file runs refuse before it closes anything.
+// The hook removes the file and makes another file at the path. While Open
+// holds the descriptor, the new file cannot get the inode of the file that
+// Open made. So refuse keeps it. The rows fail Open at the first connection and
+// at the second checks.
+func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
+	rows := []struct {
+		name, rule string
+		fail       func(t *testing.T, file string)
+	}{
+		{"first connection", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterChecks, func() {
+				if err := os.Chmod(file, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+		{"second checks", ruleChanged, func(t *testing.T, file string) {
+			setHook(t, &afterVerify, func() { replaceFile(t, file) })
+		}},
+	}
+	const content = "other file"
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			r.fail(t, file)
+			ran := 0
+			setHook(t, &beforeRefuse, func() {
+				ran++
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "events.db", r.rule)
+			if ran != 1 {
+				t.Fatalf("refuse ran %d times, want 1", ran)
+			}
+			if b, err := os.ReadFile(file); err != nil || string(b) != content {
+				t.Fatalf("the new file is gone or changed: %q, %v", b, err)
+			}
+		})
+	}
+}
+
 // fixture makes a state directory with a good database, closed again, and an
 // outside file with a fixed old mtime.
 type fixture struct {
