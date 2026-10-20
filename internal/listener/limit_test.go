@@ -859,8 +859,8 @@ func TestTS18PoolFilledByConnections(t *testing.T) {
 	if err := tls.Client(raw, r.clientConfig(manyProtos(20)...)).Handshake(); err == nil {
 		t.Fatal("a ClientHello over 4096 bytes worked with a full pool")
 	}
-	// The two closed connections are the one at the full pool and this one. Both
-	// read more than keepAliveBytes before the close.
+	// The two closed connections are the one at the full pool and this one.
+	// Both read more than keepAliveBytes before the close.
 	_, closed := l.wait(t, 0, 2)
 	for i, p := range closed {
 		if p.used <= keepAliveBytes {

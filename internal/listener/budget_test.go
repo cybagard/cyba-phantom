@@ -974,7 +974,7 @@ func TestTS18ExactBudget(t *testing.T) {
 			t.Run(period+" period, "+tc.name, func(t *testing.T) {
 				t.Cleanup(func() { armed.Store(nil) })
 				r := newRig(t, 4, testHeaderBytes, defaultTimeouts, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					// A read of the whole body lets net/http start its background read.
+					// Reading the body lets net/http start its background read.
 					_, _ = io.Copy(io.Discard, req.Body)
 					if g := armed.Load(); g != nil {
 						select {
