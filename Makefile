@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
+.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
 
 all: build lint test trace mirror-diff
 
@@ -31,6 +31,19 @@ lint:
 	@bad=$$(gofmt -l .); \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
+	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \
+	if [ -z "$$base" ] && git rev-parse --verify -q origin/main >/dev/null; then \
+		base=$$(git merge-base origin/main "$$head") || { echo "lint: git merge-base origin/main $$head failed"; exit 1; }; \
+	fi; \
+	$(GO) run ./tools/stelint "$$base" "$$head"
+
+# This target lists the comment lines over 80 columns in the tracked Go files
+# at HEAD. The HEAD variable selects another commit. It skips files below
+# testdata. It prints each hit and a total. It exits 0 unless git or an input
+# limit fails.
+# The lint target checks only the lines that changed between BASE and HEAD.
+stelint-report:
+	$(GO) run ./tools/stelint -all "$(or $(HEAD),HEAD)"
 
 # The check target runs staticcheck, gosec and govulncheck on the module.
 # All three tools run on every call. Each tool prints under its own header line.
