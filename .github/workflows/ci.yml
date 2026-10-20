@@ -179,11 +179,12 @@ jobs:
           "$RUNNER_TEMP/trace" all spec
 
   trace-tests:
-    # Checker-from-base, as the trace job. Own job and own GATE_FILE: the
-    # base of the PR that adds the tests mode has no tests.go, so this job
-    # builds from the work tree at bootstrap, with the warning. The
-    # milestone is the TRACE_MILESTONE line of the Makefile of the work
-    # tree: the one copy of the value.
+    # Checker-from-base, as in the trace job. This job has its own
+    # GATE_FILE. The base of the PR that adds the tests mode has no
+    # tests.go. Thus at bootstrap the job builds from the work tree and
+    # gives the warning. The milestone comes from the TRACE_MILESTONE line
+    # of the Makefile of the work tree. That line is the one copy of the
+    # value.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:

@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// Fixtures for tests mode. A test builds a tree in t.TempDir(): a spec
-// directory with 07-test-plan.md, Go files and a Makefile. The test names
-// in this file do not start with TestT and a letter and two digits, so the
-// real-tree check does not see them as tests of a test ID.
+// Fixtures for tests mode. A test builds a tree in t.TempDir(). The tree
+// has a spec directory with 07-test-plan.md, Go files and a Makefile. The
+// test names in this file do not start with TestT, a letter and two
+// digits. Thus the real-tree check does not see them as tests of a test ID.
 
 const plan07Head = `# 07 — Test plan (fixture)
 

@@ -75,7 +75,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 
 ## Commands
 
-- `make all` — build, lint (gofmt/vet), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`, which also checks that each test ID of the current milestone has a Go test or a marker), and the constitution-table mirror check.
+- `make all` — build, lint (gofmt/vet), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`), and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker.
 - `make perf` — the T-P-07 gate. Two builds must hash identically. The binary must be statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. Locally, a check that cannot run (no systemd, no readelf) is skipped with a note. CI sets `PERF_STRICT=1`, so in CI each skip fails.
 - `make coverage` — the 07 §1 coverage gate: 80 % on each `internal/{token,score,tlog,limiter,store}` package that exists, and 80 % on `tools/`.
 - `make fixtures` — writes the vector hashes in `internal/event/testdata` and the golden signed note in `internal/tlog/verifier/testdata/notes.txt`; nobody edits these values by hand (`test/README`).

@@ -4,23 +4,27 @@
 // tests mode reads that table and checks three rules:
 //
 //   - a test ID is in one milestone row only;
-//   - each ID in the table is declared in the test tables of 07;
-//   - each ID of the rows from M-1 up to the given milestone has a Go
-//     test, or a marker in the Makefile.
+//   - the test tables of 07 declare each ID of the milestone table;
+//   - each ID of the rows down to the given milestone has a Go test or a
+//     Makefile marker.
 //
-// A Go test is a top-level func in a *_test.go file. The name is TestT,
-// then the letter and the two digits of the ID, then the end of the name
-// or a character that is not a digit: T-S-16 gives TestTS16Anything. The
-// tool finds the funcs with go/parser, so a name in a string or a comment
-// does not count.
+// The tool reads the rows in table order, from the top down to the row of
+// the given milestone.
+//
+// A Go test is a top-level func in a *_test.go file. Its name is TestT,
+// then the letter and the two digits of the ID. After the digits, the name
+// ends or has a character that is not an ASCII digit. Thus T-S-16 gives
+// TestTS16Anything. The tool finds the funcs with go/parser. Thus a name
+// in a string or a comment does not count.
 //
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
-// and a Makefile target that checks it. The target must exist.
+// and a target. The Makefile must have a line that starts with the target
+// name and a colon, not followed by "=". The tool does not run make.
 //
-// Findings print test IDs, milestone IDs, row numbers, counts and file
-// paths. A path goes through printableName, so it has no raw control
-// characters. No text of a table cell, a Go file or a Makefile line is
-// printed. The table, the tree and the Makefile come from a PR.
+// Findings print test IDs, milestone IDs, row and line numbers, and counts.
+// A file path shows as "unlisted file <hash>" (printableName). No text of
+// a table cell, a Go file or a Makefile line is printed. The table, the
+// tree and the Makefile come from a PR.
 
 package main
 
@@ -334,8 +338,8 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 	return have, findings, nil
 }
 
-// testFuncID returns the test ID of a top-level test func, or "" when the
-// declaration is not a test func with an ID in its name.
+// testFuncID returns the test ID of a top-level test func. It returns ""
+// when the declaration is not a test func with an ID in its name.
 func testFuncID(decl ast.Decl) string {
 	fn, ok := decl.(*ast.FuncDecl)
 	if !ok || fn.Recv != nil || fn.Type.Params.NumFields() != 1 {
