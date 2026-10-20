@@ -371,8 +371,8 @@ func otherKey(t *testing.T, name string) string {
 	return vkey
 }
 
-// TestTU18_VkeyMismatch checks that a public key file that is not the key of
-// the signer gives a start error, and the spool does not open (T-U-18). The
+// TestTU18_VkeyMismatch checks a public key file that is not the key of the
+// signer. Start gives an error, and the spool does not open (T-U-18). The
 // table has no key with the same name and the same 32-bit key hash as the
 // signer. Such a key needs about 2^32 keys, and NewVerifier checks the hash.
 // TestTU18_SameKey covers it.
@@ -444,8 +444,9 @@ type rejectingKey struct{ note.Verifier }
 func (rejectingKey) Verify(msg, sig []byte) bool { return false }
 
 // TestTU18_SameKey checks that sameKey accepts the public key of the signer.
-// It also checks that sameKey refuses a verifier that does not verify the
-// signature of the signer, although it has the name and the key hash (T-U-18).
+// It also checks that sameKey refuses a verifier with the name and the key
+// hash of the signer. That verifier does not verify the signature of the
+// signer (T-U-18).
 func TestTU18_SameKey(t *testing.T) {
 	skey, vkey, err := note.GenerateKey(rand.Reader, "test/origin")
 	if err != nil {
@@ -489,24 +490,36 @@ func storeWithCheckpointRow(t *testing.T, p startParams) {
 	}
 }
 
-// TestTS13_NoKeyOverRows checks that with keys/, checkpoint.state and tlog/
-// removed, a store with a checkpoint row or a spool with an entry gives no new
-// key, no signer state and no checkpointer (T-S-13, SEC-16). A store that
-// exists and does not open also gives no key. A spool that start cannot read
-// does the same. A spool that is a FIFO or a symlink gives no key, and start
-// returns. The empty store with no spool entry still makes a key (first
-// start).
+// TestTS13_NoKeyOverRows checks a start with keys/, checkpoint.state and tlog/
+// removed. A store with a checkpoint row gives no new key, no signer state and
+// no checkpointer. A spool with an entry does the same (T-S-13, SEC-16). A
+// store that exists and does not open also gives no key. A store path that
+// cannot be examined gives no key and names that cause. A spool that start
+// cannot read does the same. A spool that is a FIFO or a symlink gives no key,
+// and start returns. The empty store with no spool entry still makes a key
+// (first start).
 func TestTS13_NoKeyOverRows(t *testing.T) {
 	for _, c := range []struct {
-		name     string
-		prep     func(t *testing.T, p startParams)
-		deps     func(d *startDeps, hookErr *error)
-		wantKey  bool // a first start: the key and the checkpointer
-		healthy  bool // the writer runs
-		opens    bool // the store opens
-		needRoot bool // the row needs a user that is not root
+		name       string
+		prep       func(t *testing.T, p startParams)
+		deps       func(d *startDeps, hookErr *error)
+		wantKey    bool   // a first start: the key and the checkpointer
+		storePath  string // the store path; empty means events.db
+		writerRuns bool   // the writer runs
+		opens      bool   // the store opens
+		skipAsRoot bool   // the row cannot run as root, so root skips it
+		wantLog    string // text that the log must have
+		notLog     string // text that the log must not have
 	}{
-		{name: "checkpoint row", healthy: true, prep: storeWithCheckpointRow},
+		{name: "checkpoint row", writerRuns: true, prep: storeWithCheckpointRow},
+		{name: "store path cannot be examined", storePath: "x/events.db",
+			wantLog: "store path cannot be examined", notLog: "signed checkpoint",
+			prep: func(t *testing.T, p startParams) {
+				// x is a file, so the Lstat of x/events.db gives ENOTDIR.
+				if err := os.WriteFile(filepath.Join(p.Root, "x"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
 		{name: "store with a checkpoint row that does not open", prep: func(t *testing.T, p startParams) {
 			storeWithCheckpointRow(t, p)
 			// The store refuses a file with group or other bits.
@@ -555,7 +568,7 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "spool directory does not open", needRoot: true, prep: func(t *testing.T, p startParams) {
+		{name: "spool directory does not open", skipAsRoot: true, prep: func(t *testing.T, p startParams) {
 			dir := filepath.Join(p.Root, tlog.SpoolDirName)
 			if err := os.Mkdir(dir, 0o000); err != nil {
 				t.Fatal(err)
@@ -571,10 +584,14 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.needRoot && os.Geteuid() == 0 {
+			if c.skipAsRoot && os.Geteuid() == 0 {
 				t.Skip("root reads a directory with mode 0")
 			}
-			p := testParams(t, "events.db")
+			storePath := c.storePath
+			if storePath == "" {
+				storePath = "events.db"
+			}
+			p := testParams(t, storePath)
 			if c.prep != nil {
 				c.prep(t, p)
 			}
@@ -590,7 +607,8 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 			}
 			// A FIFO in the spool path must not block start.
 			done := make(chan *storePart, 1)
-			go func() { done <- start(p, q, cnt, d, slog.New(slog.DiscardHandler)) }()
+			var buf bytes.Buffer
+			go func() { done <- start(p, q, cnt, d, slog.New(slog.NewTextHandler(&buf, nil))) }()
 			var s *storePart
 			select {
 			case s = <-done:
@@ -604,7 +622,7 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 			if c.opens && s.db == nil {
 				t.Error("the store did not open; want it open")
 			}
-			if c.healthy {
+			if c.writerRuns {
 				// The writer sets Healthy in its own goroutine, so wait for it.
 				testutil.WaitFor(t, s.Healthy, 10*time.Second)
 			}
@@ -619,6 +637,12 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 			}
 			if s.cp != nil || s.TlogHealthy() {
 				t.Errorf("checkpointer started %v, tlog healthy %v; want none", s.cp != nil, s.TlogHealthy())
+			}
+			if c.wantLog != "" && !strings.Contains(buf.String(), c.wantLog) {
+				t.Errorf("log %q; want %q", buf.String(), c.wantLog)
+			}
+			if c.notLog != "" && strings.Contains(buf.String(), c.notLog) {
+				t.Errorf("log %q; want no %q", buf.String(), c.notLog)
 			}
 			for _, name := range []string{"keys", "checkpoint.state"} {
 				if _, err := os.Stat(filepath.Join(p.Root, name)); !errors.Is(err, fs.ErrNotExist) {

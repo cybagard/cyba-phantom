@@ -32,10 +32,10 @@ const VKeyName = vkeyName
 // root, the state directory that the caller opened one time. The key name must
 // equal origin (tlog.origin).
 //
-// The function makes a new key only on the first start: no key file, no signed
-// checkpoint (signed), and tree size 0. If the key is missing and signed is
-// true or the tree has leaves, the function returns an error and makes no key
-// (SEC-16).
+// The function makes a new key only on the first start. That needs no key
+// file, no signed checkpoint (signed), and tree size 0. If the key is missing
+// and signed is true, the function returns an error. The same holds when the
+// tree has leaves. The function makes no key then (SEC-16).
 //
 // A new key gets a signer state. An entry at checkpoint.state is an error: the
 // function makes no key and keeps the entry. The function writes the key file

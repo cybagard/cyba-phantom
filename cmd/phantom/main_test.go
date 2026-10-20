@@ -104,7 +104,7 @@ func TestTS10_CheckNoDial(t *testing.T) {
 // TestTS10_CheckExec runs the binary. A valid file gives exit 0. An invalid
 // file gives a non-zero exit, with the key and the source in stderr (FR-12).
 // The output has no secret marker (T-S-10). The URL check is only a syntax
-// check: an acme.ca value that is not a URL fails and names acme.ca (FR-12).
+// check. An acme.ca value that is not a URL fails and names acme.ca (FR-12).
 func TestTS10_CheckExec(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "phantom")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
