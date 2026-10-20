@@ -21,14 +21,20 @@ type textLine struct {
 	line int
 }
 
-// hasAny reports whether the check covers at least one line from first to
-// last. The spans are in line order, as git prints them.
+// hasAny reports whether the check covers a sentence that runs from line first
+// to line last. It does when a line of the sentence changed. It also does when
+// a deletion joined the sentence: lines were deleted after a line from first
+// to last-1. The spans and the deletions are in line order, as git prints them.
 func (t target) hasAny(first, last int) bool {
 	if t.all {
 		return true
 	}
 	i := sort.Search(len(t.spans), func(i int) bool { return t.spans[i].start+t.spans[i].n > first })
-	return i < len(t.spans) && t.spans[i].start <= last
+	if i < len(t.spans) && t.spans[i].start <= last {
+		return true
+	}
+	j := sort.SearchInts(t.dels, first)
+	return j < len(t.dels) && t.dels[j] < last
 }
 
 // longSentences returns the sentences of the comments of src that have more
@@ -125,10 +131,12 @@ const (
 	modeCode
 )
 
-// paragraphs splits the lines of a comment into paragraphs, headings and list
-// items. Each ends a sentence. It leaves out code. A line is code in a fence
-// of three backticks. A line with a tab or two spaces of indent is also code.
-// This holds when no paragraph or list item is open.
+// paragraphs splits the lines of a comment into paragraphs, headings, list
+// items and table cells. Each ends a sentence. It leaves out code, separator
+// rows and trailer lines. A line is code in a fence of three backticks. A line
+// with a tab or two spaces of indent is also code. This holds when no
+// paragraph or list item is open. In a code block, each indented line stays
+// code.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -161,11 +169,22 @@ func paragraphs(g []textLine) []*para {
 		case t == "":
 			end()
 			mode = modeNone
+		case indented && mode == modeCode:
 		case !indented && isHeading(t):
 			end()
 			add(t, l.line)
 			end()
 			mode = modeNone
+		case isTrailer(t):
+			end()
+			mode = modeNone
+		case strings.HasPrefix(t, "|"):
+			end()
+			mode = modeNone
+			for _, cell := range tableCells(t) {
+				add(cell, l.line)
+				end()
+			}
 		case item:
 			end()
 			add(rest, l.line)
@@ -185,6 +204,32 @@ func paragraphs(g []textLine) []*para {
 	}
 	end()
 	return paras
+}
+
+// isTrailer reports whether a trimmed line is a commit trailer line: it starts
+// with "Signed-off-by:" or "Co-authored-by:" in any case.
+func isTrailer(t string) bool {
+	for _, p := range []string{"signed-off-by:", "co-authored-by:"} {
+		if len(t) >= len(p) && strings.EqualFold(t[:len(p)], p) {
+			return true
+		}
+	}
+	return false
+}
+
+// tableCells returns the cells of a table row, which starts with "|". A
+// separator row, with only "|", "-", ":" and spaces, has no cell.
+func tableCells(t string) []string {
+	if strings.Trim(t, "|-: ") == "" {
+		return nil
+	}
+	var cells []string
+	for _, c := range strings.Split(t, "|") {
+		if c = strings.TrimSpace(c); c != "" {
+			cells = append(cells, c)
+		}
+	}
+	return cells
 }
 
 // isHeading reports whether a trimmed line starts with "#" and a space.

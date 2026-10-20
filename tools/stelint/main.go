@@ -45,16 +45,26 @@
 // a space. The marker is "-", "*", "+", "•", or a number with "." or ")". An
 // indented line after a list item belongs to the item.
 //
+// A table row starts with "|". Each cell ends a sentence. A separator row
+// has only "|", "-", ":" and spaces, and it has no cell. A trailer line
+// starts with "Signed-off-by:" or "Co-authored-by:", in any case. It does not
+// count, and it ends the sentence before it.
+//
 // A code block is a run of lines with a tab or two spaces of indent. It
-// starts after a blank line or a code block. A fence of three backticks also
-// makes a code block. stelint does not count code.
+// starts at the start of a text, after a blank line, after a heading, or
+// after a code block. In a code block, an indented line stays code, also when
+// it starts with a list marker. A fence of three backticks also makes a code
+// block. stelint does not count code.
 //
 // A word is a run of characters between spaces. A code span in backticks is
 // one word, also when it has spaces. A "." in a code span does not end a
 // sentence. In a Markdown link, only the link text counts. A backtick or a
 // link with no closing mark is an ordinary character.
 //
-// A sentence is checked when at least one line of it is a changed line.
+// A sentence is checked when at least one line of it is a changed line. It
+// is also checked when a change deleted lines between two of its lines. So
+// a deletion that joins two sentences into one long sentence is a hit. The
+// line rule checks only the changed lines that are still in the file.
 //
 // # Output
 //
@@ -68,9 +78,9 @@
 // exit code 2. When base is empty, stelint prints one line that says the
 // check did not run, and exits 0.
 //
-// Not in this change: stelint does not find quoted text, third-party text or
-// legal text. The writing standard does not count them. It does not check
-// text outside Go comments, such as Markdown files, strings and commit
+// stelint does not find quoted text, third-party text or legal text. The
+// writing standard does not count them, but stelint counts them. It does not
+// check text outside Go comments, such as Markdown files, strings and commit
 // messages.
 //
 // Exit codes:
@@ -114,11 +124,13 @@ func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
 type span struct{ start, n int }
 
 // target is a file to check. When all is true, every line counts. Otherwise
-// only the lines in spans count.
+// only the lines in spans count. A deletion is the head line after which a
+// change deleted lines and added none. Only the sentence rule reads it.
 type target struct {
 	path  string
 	all   bool
 	spans []span
+	dels  []int
 }
 
 // has reports whether the line is one that the check covers.
@@ -350,8 +362,12 @@ func parseDiff(patch string) ([]target, error) {
 				return nil, fmt.Errorf("a hunk ends after line %d: not parsed", maxFileBytes)
 			}
 			oldLeft, nLeft = oldLen, newLen
-			if cur != nil && newLen > 0 {
+			switch {
+			case cur == nil:
+			case newLen > 0:
 				cur.spans = append(cur.spans, span{start, newLen})
+			default:
+				cur.dels = append(cur.dels, start)
 			}
 		}
 	}

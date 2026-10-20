@@ -719,6 +719,31 @@ func TestSentenceRules(t *testing.T) {
 		{"fenced code block", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(20) + ".\n", nil},
 		{"text after a fence at 21", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(21) + ".\n", []sentence{{4, 4, 21}}},
 		{"indent in a paragraph is not code", "// " + ws(11) + "\n//\t" + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"list marker in a code block stays code", "// Example:\n//\n//\tlist:\n//\t  - " + ws(25) + "\n//\t  - b\n", nil},
+		{"first indented line with a marker is a list", "//\t- " + ws(25) + "\n", []sentence{{1, 1, 25}}},
+		{"code block at the start of a text", "//  " + ws(25) + "\n", nil},
+		{"code block after a heading", "// # H\n//\t" + ws(25) + "\n", nil},
+
+		// A table row: each cell ends a sentence.
+		{"table cells at 12 and 12", "// | " + ws(12) + " | " + ws(12) + " |\n", nil},
+		{"table cell at 21", "// | " + ws(21) + " | a |\n", []sentence{{1, 1, 21}}},
+		{"table cell at 20", "// | " + ws(20) + " | a |\n", nil},
+		{"table rows end", "// | " + ws(10) + " | " + ws(10) + " |\n// | " + ws(10) + " | " + ws(10) + " |\n", nil},
+		{"separator row is not counted", "// | a | b |\n// | " + strings.Repeat("- ", 21) + "|\n// |:-:|\n// | c | d |\n", nil},
+		{"table ends a paragraph", "// " + ws(12) + "\n// | " + ws(12) + " |\n", nil},
+		{"table cell hit line", "// a\n// | b | " + ws(21) + " |\n", []sentence{{2, 2, 21}}},
+
+		// A trailer line is not counted and it ends the sentence before it.
+		{"trailer line at 20", "// " + ws(20) + "\n// Signed-off-by: A B <a@example.com>\n", nil},
+		{"trailer line at 21", "// " + ws(21) + "\n// Co-authored-by: A B <a@example.com>\n", []sentence{{1, 1, 21}}},
+		{"trailer line in any case", "// " + ws(20) + "\n// SIGNED-OFF-BY: A <a@example.com>\n", nil},
+		{"trailer line ends a sentence", "// " + ws(15) + "\n// Signed-off-by: A <a@example.com>\n// " + ws(15) + "\n", nil},
+		{"trailer name without a colon is text", "// " + ws(20) + "\n// Signed-off-by A <a@example.com>\n", []sentence{{1, 2, 23}}},
+
+		// A link: the url is skipped, so a backtick in it does not open a span.
+		{"link url with a backtick at 20", "// [a](https://example.com/`x) " + ws(18) + " `q`.\n", nil},
+		{"link url with a backtick at 21", "// [a](https://example.com/`x) " + ws(19) + " `q`.\n", []sentence{{1, 1, 21}}},
+		{"a bracket pair links once", "// [a](x) b](u`v) " + ws(30) + " `q`.\n", nil},
 	}
 	for _, c := range cases {
 		got := sentences(c.src)
@@ -898,5 +923,94 @@ func TestHasAny(t *testing.T) {
 	}
 	if !(target{all: true}).hasAny(1, 1) || (target{}).hasAny(1, 1) {
 		t.Error("hasAny with all set or with no span is wrong")
+	}
+}
+
+func TestHasAnyWithDeletions(t *testing.T) {
+	// A deletion after line 5 touches a sentence that has lines 5 and 6.
+	tg := target{dels: []int{2, 5}}
+	for _, c := range []struct {
+		first, last int
+		want        bool
+	}{
+		{5, 6, true}, {1, 9, true}, {3, 6, true}, {4, 5, false}, {6, 9, false},
+		{5, 5, false}, {2, 3, true}, {1, 2, false}, {3, 4, false},
+	} {
+		if got := tg.hasAny(c.first, c.last); got != c.want {
+			t.Errorf("hasAny(%d, %d) = %v, want %v", c.first, c.last, got, c.want)
+		}
+	}
+}
+
+func TestParseDiffReadsDeletions(t *testing.T) {
+	targets, err := parseDiff("+++ b/a.go\n@@ -3,2 +2,0 @@\n-x\n-y\n@@ -9 +8 @@\n-a\n+b\n@@ -20 +18,0 @@\n-c\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || len(targets[0].dels) != 2 || targets[0].dels[0] != 2 || targets[0].dels[1] != 18 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	if targets[0].has(2) || !targets[0].has(8) || len(targets[0].spans) != 1 {
+		t.Errorf("a deletion is a changed line: %+v", targets[0])
+	}
+}
+
+// editRepo commits before, then after, in one file. It returns the exit code
+// of the check and its output.
+func editRepo(t *testing.T, before, after string) (int, string) {
+	t.Helper()
+	dir := newRepo(t)
+	writeFile(t, dir, "a.go", before)
+	base := commitAll(t, dir, "base")
+	writeFile(t, dir, "a.go", after)
+	head := commitAll(t, dir, "edit")
+	code, out, errOut := runLint(dir, base, head)
+	return code, out + errOut
+}
+
+func TestDeletionThatJoinsSentencesFails(t *testing.T) {
+	for _, c := range []struct{ name, before, after string }{
+		{
+			"blank line between paragraphs",
+			"package a\n\n// " + ws(12) + "\n//\n// " + ws(12) + "\nfunc f() {}\n",
+			"package a\n\n// " + ws(12) + "\n// " + ws(12) + "\nfunc f() {}\n",
+		},
+		{
+			"comment line inside a sentence",
+			"package a\n\n// " + ws(12) + "\n// a.\n// " + ws(12) + "\nfunc f() {}\n",
+			"package a\n\n// " + ws(12) + "\n// " + ws(12) + "\nfunc f() {}\n",
+		},
+		{
+			"code line between two comment lines",
+			"package a\n\n// " + ws(12) + "\nvar x int\n// " + ws(12) + "\nfunc f() {}\n",
+			"package a\n\n// " + ws(12) + "\n// " + ws(12) + "\nfunc f() {}\n",
+		},
+		{
+			"blank line before an indented block",
+			"package a\n\n// " + ws(12) + "\n//\n//\t" + ws(12) + "\nfunc f() {}\n",
+			"package a\n\n// " + ws(12) + "\n//\t" + ws(12) + "\nfunc f() {}\n",
+		},
+	} {
+		code, out := editRepo(t, c.before, c.after)
+		if code != 1 || !strings.Contains(out, "a.go:3: 24 words (limit 20)\n") {
+			t.Errorf("%s: code = %d, want 1; output:\n%s", c.name, code, out)
+		}
+	}
+}
+
+func TestDeletionThatJoinsNothingPasses(t *testing.T) {
+	// Short sentences stay short after the deletion.
+	code, out := editRepo(t,
+		"package a\n\n// "+ws(5)+".\n//\n// "+ws(5)+".\nfunc f() {}\n",
+		"package a\n\n// "+ws(5)+".\n// "+ws(5)+".\nfunc f() {}\n")
+	if code != 0 {
+		t.Errorf("short sentences: code = %d, want 0; output:\n%s", code, out)
+	}
+	// A long sentence that the deletion does not touch is not a hit.
+	code, out = editRepo(t,
+		"package a\n\n// "+ws(21)+".\nfunc f() {}\n\nvar x int\n",
+		"package a\n\n// "+ws(21)+".\nfunc f() {}\n\n")
+	if code != 0 {
+		t.Errorf("far deletion: code = %d, want 0; output:\n%s", code, out)
 	}
 }
