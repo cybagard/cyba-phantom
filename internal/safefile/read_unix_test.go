@@ -5,6 +5,7 @@ package safefile
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -113,8 +114,8 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	if !errors.Is(err, ErrSize) {
 		t.Errorf("err = %v, want ErrSize", err)
 	}
-	if n := m1.TotalAlloc - m0.TotalAlloc; n >= 1<<20 {
-		t.Errorf("ReadAll allocated %d bytes, want less than 1 MiB", n)
+	if n := m1.TotalAlloc - m0.TotalAlloc; n >= 4<<10 {
+		t.Errorf("ReadAll allocated %d bytes, want less than 4 KiB", n)
 	}
 }
 
@@ -132,6 +133,9 @@ func TestTS23_ReadAllStartsAtOffsetZero(t *testing.T) {
 	got, err := ReadAll(f, fi, capRule)
 	if err != nil || string(got) != "0123456789" {
 		t.Errorf("after a read of 3 bytes: %q, %v", got, err)
+	}
+	if off, err := f.Seek(0, io.SeekCurrent); err != nil || off != 3 {
+		t.Errorf("offset after ReadAll = %d, %v, want 3", off, err)
 	}
 }
 
@@ -171,18 +175,30 @@ func TestTS23_ReadAllFIFO(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	done := make(chan error, 1)
-	go func() {
-		_, err := ReadAll(f, fi, capRule)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrType) {
-			t.Errorf("err = %v, want ErrType", err)
+	pipeInfo, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		fi   fs.FileInfo
+	}{
+		{"FileInfo of another file", fi},
+		{"FileInfo of the FIFO", pipeInfo},
+	} {
+		done := make(chan error, 1)
+		go func() {
+			_, err := ReadAll(f, tc.fi, capRule)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrType) {
+				t.Errorf("%s: err = %v, want ErrType", tc.name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: ReadAll did not return before the deadline", tc.name)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("ReadAll did not return before the deadline")
 	}
 }
 
@@ -408,7 +424,7 @@ func TestTS23_ErrorTextHoldsNoPathOrBytes(t *testing.T) {
 	err = CheckParents(r, "none/x", dirRule)
 	noLeak(t, err, dir, "none")
 
-	// A read of a closed file gives a path error with the path of the file.
+	// The stat of a closed file gives a path error with the path of the file.
 	f, fi, err := Open(r, "ok", rule)
 	if err != nil {
 		t.Fatal(err)
@@ -426,6 +442,26 @@ func TestTS23_ErrorTextHoldsNoPathOrBytes(t *testing.T) {
 	noLeak(t, err, dir, "ok", secret)
 	var e *Error
 	if errors.As(err, &e) && bytes.Contains([]byte(e.Cause.Error()), []byte(dir)) {
+		t.Errorf("cause %q holds the path", e.Cause)
+	}
+
+	// A write-only file passes the stat and the identity check. Its read fails.
+	_, fi, err = Open(r, "ok", rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := os.OpenFile(filepath.Join(dir, "ok"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wf.Close()
+	_, err = ReadAll(wf, fi, rule)
+	if !errors.Is(err, ErrExamine) {
+		t.Errorf("write-only file: err = %v, want ErrExamine", err)
+	}
+	noLeak(t, err, dir, "ok", secret)
+	e = nil
+	if errors.As(err, &e) && e.Cause != nil && bytes.Contains([]byte(e.Cause.Error()), []byte(dir)) {
 		t.Errorf("cause %q holds the path", e.Cause)
 	}
 }
