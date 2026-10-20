@@ -379,6 +379,15 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			continue
 		}
 		rec := e.Record() // one copy for the record bytes and the row
+		if rec.Kind == event.KindRefused {
+			// The row of a refused event gets a session id from the batch day
+			// key. The address and the JA4 text go to no column.
+			var ja4 string
+			if rec.FP != nil && rec.FP.JA4 != nil {
+				ja4 = *rec.FP.JA4
+			}
+			rec.Session = w.dk.sessionID(e.IP(), ja4)
+		}
 		if evidence[j] {
 			evBytes := event.EvidenceBytes
 			if w.evidenceBytes != nil {

@@ -87,10 +87,11 @@ func (c Counters) Format(f fmt.State, _ rune) {
 	fmt.Fprintf(f, "event.Counters{keys:%d overflow:%d}", keys, overflow)
 }
 
-// counterKey returns the key for a. It maps an IPv4-mapped IPv6 address to
+// CounterKey returns the key for a. It maps an IPv4-mapped IPv6 address to
 // IPv4, removes the zone, and masks an IPv6 address to its /64 prefix. The
-// second result is false for an invalid address: that address has no key.
-func counterKey(a netip.Addr) (netip.Addr, bool) {
+// second result is false for an invalid address: that address has no key. The
+// store uses the same key for ip_hmac and for the session id of a refused event.
+func CounterKey(a netip.Addr) (netip.Addr, bool) {
 	a = a.Unmap().WithZone("")
 	if !a.IsValid() {
 		return netip.Addr{}, false
@@ -104,7 +105,7 @@ func counterKey(a netip.Addr) (netip.Addr, bool) {
 // Drop counts one dropped event for the client address a. An invalid address
 // goes to the overflow bucket.
 func (c *Counters) Drop(a netip.Addr) {
-	k, ok := counterKey(a)
+	k, ok := CounterKey(a)
 	s := c.h.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
