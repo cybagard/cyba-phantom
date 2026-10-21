@@ -60,7 +60,8 @@ type capReader struct {
 	// While keep is set, the reader appends the bytes that it passes to kept.
 	// Read cuts a read to the room that is left in kept. When no room is
 	// left, Read passes no byte and gives ErrArchiveInvalid. So kept never
-	// holds more than maxKept bytes.
+	// holds more than maxKept bytes. An empty read at no room gives the
+	// result of r.
 	keep bool
 	kept []byte
 }
@@ -71,9 +72,11 @@ type capReader struct {
 // the tar end reads that padding and the two end blocks. The header block and
 // the end blocks are never in the same call. A call that needs more than
 // maxKept bytes fails inside Next. capReader gives ErrArchiveInvalid for the
-// first byte past maxKept. A PAX header with records adds two blocks. So it
-// fails in Next, before ReadArchive keeps the records. The byte count
-// and the format rule refuse a PAX header with no records.
+// first byte past maxKept. A PAX 'x' header with records adds at least two
+// blocks. So it fails in Next, before ReadArchive keeps the records. An 'x'
+// header with no records passes maxKept. The byte count and the format rule
+// refuse it. A PAX 'g' header passes maxKept and the byte count. The format
+// rule and the type rule refuse it.
 const maxKept = blockBytes - 1 + 2*blockBytes
 
 func (c *capReader) Read(p []byte) (int, error) {
@@ -109,13 +112,13 @@ func (c *capReader) Read(p []byte) (int, error) {
 // type NUL.
 //
 // ReadArchive checks the header bytes of each entry. It then checks the header
-// format, the type, the link name, the name and the top-level name. The byte
-// count refuses a PAX header, a GNU long name header and a GNU long link
-// header. It also refuses sparse format 1.0. Next reads their data as extra
-// bytes. The format check refuses a PAX header, a GNU header and a STAR
-// header. Next gives a sparse entry its logical size. The hole bytes do not
-// pass through the decoded-byte count. A directory has no data and no effect,
-// but it counts toward MaxEntries.
+// format, the type, the link name, the name and the top-level name. With data,
+// a PAX 'x', GNU 'L' or GNU 'K' header fails inside Next, at maxKept. The same
+// holds for sparse format 1.0. With no data
+// ('x' or 'L' of size 0), the byte count refuses it. The format check refuses
+// a PAX header, a GNU header and a STAR header. Next gives a sparse entry its
+// logical size. The hole bytes do not pass through the decoded-byte count. A
+// directory has no data and no effect, but it counts toward MaxEntries.
 //
 // ReadArchive keeps the bytes that each Next call reads and checks their form
 // (rawFormOK). The tar end is the padding of the last entry and exactly two
@@ -163,12 +166,15 @@ func ReadArchive(b []byte) (*Archive, error) {
 			return nil, ErrArchiveInvalid
 		}
 		// The byte count is a second guard, next to the format rule and
-		// maxKept. With go1.27.2, the three refuse the same meta headers.
-		// The bytes that this Next call read must be the padding of the
-		// previous entry and one header block. This needs archive/tar to read
-		// the header block exactly, with no read-ahead, from a source that is
-		// not an io.Seeker. The capReader is such a source. If a Go change
-		// adds a read-ahead, every archive fails. So the guard fails closed.
+		// maxKept. Together, the three refuse each meta header. With
+		// go1.27.2, an 'x' header with records fails at maxKept. An 'x'
+		// header with no records fails the byte count. A 'g' header passes
+		// both, and the format and type rules refuse it. The bytes that this
+		// Next call read must be the padding of the previous entry and one
+		// header block. This needs archive/tar to read the header block
+		// exactly, with no read-ahead, from a source that is not an
+		// io.Seeker. The capReader is such a source. If a Go change adds a
+		// read-ahead, every archive fails. So the guard fails closed.
 		if int64(len(cr.kept)) != prevPad+blockBytes {
 			return nil, ErrArchiveInvalid
 		}

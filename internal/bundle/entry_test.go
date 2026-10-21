@@ -96,8 +96,10 @@ func globalHdr(recs ...string) []byte {
 // refused property, so that the bad archive fails from its own rule. The type
 // cases use a regular file with the same name as the twin. The case "directory
 // named like the manifest" also removes the trailing slash. A nil twin means
-// that the refused form has no accepted form. Each form with a PAX header has
-// a nil twin, because the bundle archive has no PAX header.
+// that the refused form has no accepted form. The bundle archive has no PAX
+// header, so most forms with a PAX header have a nil twin. Two have a ustar
+// twin. They are "PAX header with no records" and "PAX path of a name that
+// does not fit the ustar fields".
 type entryCase struct {
 	name      string
 	bad, twin []byte
@@ -110,8 +112,9 @@ func longName(parts, partLen int) string {
 	return "traps/" + strings.Repeat(p+"/", parts-2) + p
 }
 
-// entryCases returns the refused entry forms. Each form with a PAX header has
-// a nil twin. A few other forms have a nil twin, as entryCase says.
+// entryCases returns the refused entry forms. Most forms with a PAX header
+// have a nil twin, and two have a ustar twin, as entryCase says. A few other
+// forms have a nil twin.
 func entryCases() []entryCase {
 	const p = "traps/a"
 	reg := func(names ...string) []byte {
@@ -125,7 +128,9 @@ func entryCases() []entryCase {
 	dir := func(name string) ent { return ent{name: name, typ: tar.TypeDir} }
 	file := func(name string) ent { return ent{name: name, data: []byte("x")} }
 	same := reg(p)
-	long := longName(8, 14)
+	// The name has 460 bytes, so no ustar split fits. The twin has a name of
+	// 110 bytes with a split.
+	long := longName(8, 64)
 	const mtime = "1700000000"
 	return append([]entryCase{
 		{"symlink", typed(tar.TypeSymlink), same},
@@ -148,7 +153,7 @@ func entryCases() []entryCase {
 		// or a GNU long name. The twin has a split name.
 		{"GNU long name",
 			rawArchive(longHdr(tar.TypeGNULongName, long), rawFile("traps/x", "x")),
-			build(ent{name: long, data: []byte("x")})},
+			build(ent{name: longName(8, 14), data: []byte("x")})},
 		{"PAX path of a name that does not fit the ustar fields",
 			rawArchive(pathEntry(noSplit)), build(ent{name: split131, data: []byte("x")})},
 		{"PAX path and GNU long name",

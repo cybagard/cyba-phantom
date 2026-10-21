@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -105,17 +106,48 @@ func TestTS19CapReaderKeepsAtMostMaxKept(t *testing.T) {
 }
 
 // T-S-19: a PAX 'x' header with one small record comes before an entry. Next
-// of archive/tar gives an error, on a capReader with keep set. ReadArchive
-// does not need its byte count for this. The kept bytes stay within maxKept.
+// of archive/tar gives ErrArchiveInvalid, on a capReader with keep set.
+// ReadArchive does not need its byte count for this. The reader keeps exactly
+// maxKept bytes.
 func TestTS19PAXHeaderWithSmallRecordFailsInNext(t *testing.T) {
 	tb := append(paxHdr(paxRec("mtime", "1")), rawHdr(markerPath, tar.TypeReg, 0)...)
 	cr := &capReader{r: bytes.NewReader(append(tb, zeros(1024)...)), keep: true}
 	hdr, err := tar.NewReader(cr).Next()
-	if err == nil || hdr != nil {
-		t.Errorf("Next gave header %v and error %v; want an error", hdr != nil, err)
+	if !errors.Is(err, ErrArchiveInvalid) || hdr != nil {
+		t.Errorf("Next gave header %v and error %v; want ErrArchiveInvalid", hdr != nil, err)
 	}
-	if len(cr.kept) > maxKept {
-		t.Errorf("kept %d bytes, at most %d", len(cr.kept), maxKept)
+	if len(cr.kept) != maxKept {
+		t.Errorf("kept %d bytes, want %d", len(cr.kept), maxKept)
+	}
+}
+
+// headerCapEnts makes the entries of the fixture for the decoded-byte cap. It
+// has two files of 8 MiB less 64 KiB together, and 1000 empty files.
+func headerCapEnts() []ent {
+	ents := []ent{
+		{name: "traps/a", data: zeros(MaxEntryBytes)},
+		{name: "traps/b", data: zeros(MaxEntryBytes - 64<<10)},
+	}
+	for i := range 1000 {
+		ents = append(ents, ent{name: "traps/e" + strconv.Itoa(i)})
+	}
+	return ents
+}
+
+// T-S-19: the tar headers bring the decoded bytes past MaxDecodedBytes. The sum
+// of the entry sizes and the number of entries stay within their caps. So only
+// the decoded-byte cap refuses the archive.
+func TestTS19DecodedCapInTarHeaders(t *testing.T) {
+	ents := headerCapEnts()
+	var sizes int
+	for _, e := range ents {
+		sizes += len(e.data)
+	}
+	if decoded := len(buildTar(ents...)); decoded <= MaxDecodedBytes || sizes > MaxDecodedBytes || len(ents) > MaxEntries {
+		t.Fatalf("decoded %d bytes, sizes %d, entries %d", decoded, sizes, len(ents))
+	}
+	if a, err := ReadArchive(build(ents...)); a != nil || err != ErrArchiveInvalid {
+		t.Errorf("archive %v, error %v", a != nil, err)
 	}
 }
 
@@ -307,6 +339,7 @@ func fixtures() (fail, pass []fixture) {
 		failing = []fixture{
 			{"data over the cap", build(file(3<<20), ent{name: "traps/b", data: zeros(3 << 20)}, ent{name: "traps/c", data: zeros(3 << 20)})},
 			{"PAX headers with an mtime record of 500 KiB, 10 entries", gz(longMtimeTar(10))},
+			{"tar headers past the decoded-byte cap", build(headerCapEnts()...)},
 			{"1025 entries", build(many(1025)...)},
 			{"entry over 4 MiB", build(file(MaxEntryBytes + 1))},
 			{"non-zero byte after the tar end", gz(append(slices.Clone(tarValid), 'x'))},
@@ -388,9 +421,10 @@ func TestTS19ArchiveInvalid(t *testing.T) {
 }
 
 // T-S-19: a sparse entry gives an error. Each case holds one entry of 4 MiB,
-// so the sum of the entry sizes does not refuse it. The format check refuses
-// the PAX forms (0.0, 0.1 and 1.0). It also refuses the old GNU 'S' case,
-// because its header has the GNU magic.
+// so the sum of the entry sizes does not refuse it. Each PAX form (0.0, 0.1
+// and 1.0) has an 'x' header with records. It fails inside Next, at maxKept.
+// The format check refuses the old GNU 'S' case, because its header has the
+// GNU magic.
 func TestTS19SparseEntryIsRefused(t *testing.T) {
 	for name, tb := range map[string][]byte{
 		"PAX format 0.1":   sparseTar(1),
