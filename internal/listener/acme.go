@@ -313,9 +313,10 @@ func isLoggedEvent(event string) bool {
 // An IP-literal host is compared as a parsed address with no IPv4-mapped form.
 // An address with a zone is refused. A name is compared as lower-case text.
 //
-// After that, the host must pass rule. An IP literal is checked as it is. A
-// name is looked up with resolver. The request is refused when the lookup
-// fails, gives no address, or gives one address that rule refuses. Each
+// After that, the host must pass rule. For an IP literal, rule checks the
+// parsed address, with no lookup. A name is looked up with resolver. The
+// request is refused when the lookup fails, gives no address, or gives an
+// address that rule refuses. Each
 // refusal gives errEgress, which holds no address, name or port. The function
 // never gives a proxy, so it never uses a proxy from the environment. seen may
 // be nil.

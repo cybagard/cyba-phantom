@@ -529,8 +529,9 @@ func TestTS21ProductionRuleRefusesLoopbackCA(t *testing.T) {
 			if len(f.egress.hosts()) == 0 {
 				t.Fatal("the guard saw no request")
 			}
-			// Start holds the lock of its name while it retries. So a
-			// synchronous obtain uses another name.
+			// While Start retries, it holds the lock for
+			// refused.phantom.test. Thus the synchronous obtain uses
+			// another name.
 			err := f.a.cfg.ObtainCertSync(ctx, "sync.phantom.test")
 			if err == nil || !strings.Contains(err.Error(), errEgress.Error()) {
 				t.Fatalf("obtain error is not the guard error: %v", err)

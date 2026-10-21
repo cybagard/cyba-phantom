@@ -169,8 +169,8 @@ func prodHandshake(a *ACME, sni string, protos ...string) error {
 	return err
 }
 
-// permitLoopback is the test address rule: the production rule, and also the
-// loopback addresses of the test CA.
+// permitLoopback is the test address rule: the production rule, and also all
+// loopback addresses.
 func permitLoopback(a netip.Addr) bool { return a.IsLoopback() || egress.Permitted(a) }
 
 // testNames returns a name set. The default CA name has a global address.
@@ -183,8 +183,9 @@ func testNames(t testing.TB) *egresstest.Names {
 // newTestACME builds an ACME with test values and a new store. mod changes the
 // values first. The test rule permits loopback. The test resolver answers for
 // the default CA name only, with a global address. A seeded certificate that
-// needs no renewal makes no request. A test of the production rule sets both
-// hooks to nil. The test stops the cache when it ends.
+// needs no renewal makes no request. A test of the production rule sets
+// egressRule to nil. It sets egressResolver to nil or to a test resolver. The
+// test stops the cache when it ends.
 func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
 	state, err := os.OpenRoot(t.TempDir())
