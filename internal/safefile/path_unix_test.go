@@ -258,6 +258,35 @@ func TestTS23_PathParents(t *testing.T) {
 		})
 	}
 
+	// Directories that the walk reaches only through a symlink.
+	holder := mkdir(t, filepath.Join(top, "holder"), 0o755)
+	tgt := mkdir(t, filepath.Join(top, "tgt"), 0o755)
+	put(t, tgt, "f", "x")
+	link(t, filepath.Join(ok, "f"), filepath.Join(holder, "lnk"))
+	link(t, "../holder/lnk", filepath.Join(ok, "chain"))
+	link(t, tgt, filepath.Join(ok, "tdir"))
+	for _, c := range []struct{ name, dir, path string }{
+		{"holder of a link", holder, filepath.Join(top, "okdir", "chain")},
+		{"directory of a target", tgt, filepath.Join(ok, "tdir", "f")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := CheckPathParents(c.path, parentRule); err != nil {
+				t.Fatalf("without the hook: %v", err)
+			}
+			fi, err := os.Stat(c.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := Identity(fi)
+			safefiletest.Set(t, safefiletest.Hooks{
+				OtherOwner: func(x FileID) bool { return x == id },
+			})
+			if err := CheckPathParents(c.path, parentRule); !errors.Is(err, ErrOwner) {
+				t.Errorf("err = %v, want ErrOwner", err)
+			}
+		})
+	}
+
 	for _, c := range []struct {
 		path string
 		rule Rule
