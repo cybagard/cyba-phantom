@@ -484,6 +484,14 @@ var differential = map[string]bool{
 	"long name with a cut that ends in a slash and a directory":                      false,
 	"no end blocks": false,
 	"one end block": false,
+	// The three readers read PAX records, so they list the same entries.
+	// ReadArchive refuses each form: the limit maxKept for the records, and the
+	// byte count and the format rule behind it. They guard a reader that does
+	// not read PAX records.
+	"PAX header with one mtime record before each entry":                           false,
+	"PAX header with a path record and an mtime record for a name of 131 bytes":    false,
+	"PAX header with mtime, atime and ctime records before each entry":             false,
+	"PAX header with path, mtime, atime and ctime records for a name of 131 bytes": false,
 }
 
 // T-S-19: for each archive that ReadArchive accepts, the three readers list

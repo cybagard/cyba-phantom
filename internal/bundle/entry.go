@@ -2,10 +2,8 @@ package bundle
 
 import (
 	"archive/tar"
-	"bytes"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -25,14 +23,13 @@ var topLevelDirs = []string{"vhosts", "traps", "fp", "score", "secrets"}
 //
 // Next maps type NUL to a regular file, or to a directory when the name ends
 // in a slash. rawFormOK refuses the raw type byte NUL, so ReadArchive accepts
-// only the raw types '0' and '5'. Next also applies a PAX path record to the
-// name. checkEntry checks that final form. The checks, in this order:
-//   - the format is ustar or PAX. A GNU header and a STAR header give another
-//     format, so they fail here. A GNU long name or long link header fails the
-//     byte count of ReadArchive first;
+// only the raw types '0' and '5'. The checks, in this order:
+//   - the format is ustar. A PAX header, a GNU header and a STAR header give
+//     another format, so they fail here. A PAX header, a GNU long name header
+//     and a GNU long link header fail in ReadArchive first. They fail the
+//     limit maxKept or the byte count;
 //   - the type is a regular file or a directory;
 //   - the link name is empty;
-//   - each PAX record is a path, a size or an mtime record;
 //   - the name is local and has 1 to 8 parts. Each part has 1 to 64 bytes of
 //     A-Z a-z 0-9 . _ - and is not "." or "..". A directory name loses one
 //     trailing slash first. A file name keeps it, so its last part is empty;
@@ -43,7 +40,7 @@ var topLevelDirs = []string{"vhosts", "traps", "fp", "score", "secrets"}
 // and a directory share it when they differ only in case or in the trailing
 // slash.
 func checkEntry(hdr *tar.Header) (string, error) {
-	if hdr.Format != tar.FormatUSTAR && hdr.Format != tar.FormatPAX {
+	if hdr.Format != tar.FormatUSTAR {
 		return "", ErrArchiveInvalid
 	}
 	isDir := hdr.Typeflag == tar.TypeDir
@@ -52,23 +49,6 @@ func checkEntry(hdr *tar.Header) (string, error) {
 	}
 	if hdr.Linkname != "" {
 		return "", ErrArchiveInvalid
-	}
-	for key, value := range hdr.PAXRecords {
-		switch key {
-		case "path", "size", "mtime":
-		default:
-			return "", ErrArchiveInvalid
-		}
-		// Next ignores a record with an empty value. Python reads an empty path
-		// as the name and an empty size as 0. GNU tar fails on an empty mtime or
-		// size.
-		if value == "" {
-			return "", ErrArchiveInvalid
-		}
-		// The empty value has its own rule above, so this rule skips it.
-		if key == "mtime" && value != "" && !paxTimeOK(value) {
-			return "", ErrArchiveInvalid
-		}
 	}
 	name := hdr.Name
 	if isDir {
@@ -96,30 +76,31 @@ func checkEntry(hdr *tar.Header) (string, error) {
 	return strings.ToLower(name), nil
 }
 
-// maxTimeDigits is the most digits that the whole part of a PAX mtime value
-// can have, after its leading zeros. GNU tar 1.35 and Python 3.13 write 10.
-// GNU tar fails on the int64 minimum with a fraction, which has 19 digits.
-const maxTimeDigits = 18
-
-// paxTimeOK reports whether v has the form of a PAX mtime value: an optional
-// "-", one or more digits, and optionally "." and one or more digits. The whole
-// part has at most maxTimeDigits digits after its leading zeros. GNU tar fails
-// on a value with a plus sign.
-func paxTimeOK(v string) bool {
-	v = strings.TrimPrefix(v, "-")
-	whole, frac, dot := strings.Cut(v, ".")
-	return digits(whole) && len(strings.TrimLeft(whole, "0")) <= maxTimeDigits && (!dot || digits(frac))
+// tree holds the keys that the entries so far give. A regular file must not be
+// the parent of another entry. The archive can hold the child before or after
+// the file, and it can omit the directory entries between them.
+type tree struct {
+	files   map[string]bool
+	parents map[string]bool
 }
 
-// digits reports whether s has one or more bytes, all of them 0-9.
-func digits(s string) bool {
-	if s == "" {
+// add records the entry with this key. It reports false when the entry and an
+// earlier entry are a file and its child. A directory is a parent only.
+func (t *tree) add(key string, isDir bool) bool {
+	if !isDir && t.parents[key] {
 		return false
 	}
-	for i := range len(s) {
-		if s[i] < '0' || s[i] > '9' {
+	for i := range len(key) {
+		if key[i] != '/' {
+			continue
+		}
+		if t.files[key[:i]] {
 			return false
 		}
+		t.parents[key[:i]] = true
+	}
+	if !isDir {
+		t.files[key] = true
 	}
 	return true
 }
@@ -145,65 +126,18 @@ func validPart(p string) bool {
 // blockBytes is the size of one tar block.
 const blockBytes = 512
 
-// headerBytes returns the number of decoded bytes that one Next call reads for
-// an entry with one header block and at most one PAX header. prevPad is the
-// padding of the previous entry. A PAX header adds one block and the padded
-// records in canonical form.
-func headerBytes(prevPad int64, hdr *tar.Header) int64 {
-	n := prevPad + blockBytes
-	if len(hdr.PAXRecords) == 0 {
-		return n
-	}
-	return n + blockBytes + (paxBytes(hdr)+blockBytes-1)/blockBytes*blockBytes
-}
-
-// paxBytes returns the sum of the canonical lengths of the PAX records.
-func paxBytes(hdr *tar.Header) int64 {
-	var records int64
-	for k, v := range hdr.PAXRecords {
-		records += int64(paxRecordLen(k, v))
-	}
-	return records
-}
-
-// maxCut is the length of the ustar name field. A reader that does not read
-// PAX records sees only the first maxCut bytes of a longer PAX path.
-const maxCut = 100
-
-// cutKey returns the key of the cut of a long PAX path: the first maxCut bytes
-// of a path over maxCut bytes. It reports false for an entry with no such
-// path. The key has the form of the key that checkEntry returns: lower case,
-// with one trailing slash removed. ReadArchive refuses an entry when its cut
-// key is equal to the key of the final name of another entry. It does not
-// compare two cut keys with each other.
-func cutKey(hdr *tar.Header) (string, bool) {
-	p := hdr.PAXRecords["path"]
-	if len(p) <= maxCut {
-		return "", false
-	}
-	return strings.ToLower(strings.TrimSuffix(p[:maxCut], "/")), true
-}
-
-// ustarSize returns the value of the size field of the header block b. The
-// field must have the form that tar.Writer, GNU tar and Python write: 11 octal
-// digits and one NUL.
-func ustarSize(b []byte) (int64, bool) {
+// ustarSizeOK reports whether the size field of the header block b has the
+// canonical form. tar.Writer, GNU tar and Python write 11 octal digits and one
+// NUL.
+func ustarSizeOK(b []byte) bool {
 	f := b[124:136]
-	var n int64
 	for _, c := range f[:11] {
 		if c < '0' || c > '7' {
-			return 0, false
+			return false
 		}
-		n = n*8 + int64(c-'0')
 	}
-	if f[11] != 0 {
-		return 0, false
-	}
-	return n, true
+	return f[11] == 0
 }
-
-// zeroed reports whether b holds only zero bytes.
-func zeroed(b []byte) bool { return len(bytes.TrimLeft(b, "\x00")) == 0 }
 
 // chksumOK reports whether the checksum field of the header block b has the
 // form that tar.Writer, GNU tar and Python write: 6 octal digits, one NUL and
@@ -218,67 +152,17 @@ func chksumOK(b []byte) bool {
 	return f[6] == 0 && f[7] == ' '
 }
 
-// rawFormOK checks the bytes k that the Next call of hdr read. It runs only
-// after the byte count of headerBytes has passed. The layout of k is then
-// fixed: the padding of the previous entry, a PAX header with its records when
-// hdr has PAX records, and the header block of the entry. The checks:
-//   - the type byte of the entry is '0' (file) or '5' (directory). The three
-//     writers write these bytes. Type NUL is refused in every form, because
-//     Python reads it as a file when a PAX header or a ustar prefix is present;
-//   - the checksum field of each header block has the form of chksumOK;
-//   - the size field of each header block has the canonical form;
-//   - the size of the PAX header is the sum of the canonical record lengths,
-//     and the bytes after the records are zero. A repeated key or a record
-//     length with a leading zero makes the sum smaller;
-//   - a PAX size record has decimal digits only, with no sign and no leading
-//     zero, and its value is the value of the size field of the entry;
-//   - with a PAX path record, the prefix field is zero and the name field is
-//     the path, or the first 100 bytes of it, with NUL padding.
-func rawFormOK(k []byte, pad int64, hdr *tar.Header) bool {
-	entry := k[len(k)-blockBytes:]
-	if t := entry[156]; t != tar.TypeReg && t != tar.TypeDir {
+// rawFormOK checks the header block b of an entry. It runs only after the byte
+// count of ReadArchive has passed, so b is the last block that Next read. The
+// checks:
+//   - the type byte is '0' (file) or '5' (directory). The three writers write
+//     these bytes. Type NUL is refused in every form, because Python reads it
+//     as a file when a ustar prefix is present;
+//   - the checksum field has the form of chksumOK;
+//   - the size field has the canonical form.
+func rawFormOK(b []byte) bool {
+	if t := b[156]; t != tar.TypeReg && t != tar.TypeDir {
 		return false
 	}
-	if !chksumOK(entry) {
-		return false
-	}
-	size, ok := ustarSize(entry)
-	if !ok {
-		return false
-	}
-	if len(hdr.PAXRecords) > 0 {
-		x := k[pad : pad+blockBytes]
-		if !chksumOK(x) {
-			return false
-		}
-		recs := k[pad+blockBytes : len(k)-blockBytes]
-		// A size field in another form gives 0, which is not the sum.
-		n, _ := ustarSize(x)
-		if n != paxBytes(hdr) || !zeroed(recs[n:]) {
-			return false
-		}
-	}
-	if s, ok := hdr.PAXRecords["size"]; ok {
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil || strconv.FormatInt(n, 10) != s || n != size {
-			return false
-		}
-	}
-	if p, ok := hdr.PAXRecords["path"]; ok {
-		p = p[:min(len(p), maxCut)]
-		return zeroed(entry[345:500]) && string(entry[:len(p)]) == p && zeroed(entry[len(p):maxCut])
-	}
-	return true
-}
-
-// paxRecordLen returns the length of the PAX record "<n> <key>=<value>\n" in
-// canonical form. The decimal number n is the length of the whole line, with
-// no leading zero.
-func paxRecordLen(key, value string) int {
-	rest := len(key) + len(value) + 3
-	n := rest + len(strconv.Itoa(rest))
-	if m := rest + len(strconv.Itoa(n)); m != n {
-		n = m
-	}
-	return n
+	return chksumOK(b) && ustarSizeOK(b)
 }
