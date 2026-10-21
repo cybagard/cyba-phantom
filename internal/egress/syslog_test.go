@@ -1,6 +1,8 @@
 package egress_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -73,10 +75,50 @@ func TestTS21SyslogUDPException(t *testing.T) {
 	mustRefuse(t, d, "udp6", netip.AddrPortFrom(loop6, ap.Port()).String())
 	mustRefuse(t, d, "tcp4", ap.String())
 	mustRefuse(t, d, "tcp6", netip.AddrPortFrom(loop6, ap.Port()).String())
+	mustRefuse(t, d, "udp4", netip.AddrPortFrom(loop4b, ap.Port()).String())
+	mapped := fmt.Sprintf("[::ffff:127.0.0.1%%lo]:%d", ap.Port())
+	mustRefuse(t, d, "udp", mapped)
+	mustHookRefuse(t, d, "udp6", mapped)
 
 	prod := egress.Dialer(testTimeout)
 	mustRefuse(t, prod, "udp4", ap.String())
 	noDatagram(t, uc)
+}
+
+func TestTS21SyslogTCPExceptionOnIPv4(t *testing.T) {
+	ln := listen(t, loop4)
+	ap := ln.Addr().(*net.TCPAddr).AddrPort()
+	d, err := egress.SyslogDialer("tcp", ap, testTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := dial(d, "tcp4", ap.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	c.Close()
+	mustRefuse(t, d, "tcp4", netip.AddrPortFrom(loop4b, ap.Port()).String())
+	mustRefuse(t, d, "tcp6", netip.AddrPortFrom(loop6, ap.Port()).String())
+	mapped := fmt.Sprintf("[::ffff:127.0.0.1%%lo]:%d", ap.Port())
+	mustRefuse(t, d, "tcp", mapped)
+	mustHookRefuse(t, d, "tcp6", mapped)
+}
+
+// mustHookRefuse calls the hook of d with no dial. On Linux, a dial does not
+// give the hook an IPv4-mapped address with a zone. Network udp6 fails before
+// the hook. Network udp gives an IPv4 address with a zone, and that address
+// does not parse.
+func mustHookRefuse(t *testing.T, d *net.Dialer, network, address string) {
+	t.Helper()
+	err := d.ControlContext(context.Background(), network, address, nil)
+	if !errors.Is(err, egress.ErrRefused) {
+		t.Errorf("hook %s %s: got %v", network, address, err)
+	}
 }
 
 func TestTS21SyslogTCPException(t *testing.T) {

@@ -3,8 +3,12 @@ package egress_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +21,9 @@ const testTimeout = 5 * time.Second
 var (
 	loop4 = netip.MustParseAddr("127.0.0.1")
 	loop6 = netip.MustParseAddr("::1")
+	// loop4b is a loopback address that no test uses as a listener. A macOS
+	// host has only 127.0.0.1.
+	loop4b = netip.MustParseAddr("127.0.0.2")
 )
 
 // listen opens a TCP listener on the loopback address a. It skips the test
@@ -138,6 +145,7 @@ func TestTS21DialerRefusesEachRange(t *testing.T) {
 		"[2001::1]", "[2001:db8::1]", "[2002::1]", "[3fff::1]", "[ff02::1]",
 		"[64:ff9b::a9fe:a9fe]", "[::ffff:10.0.0.1]", "[::ffff:127.0.0.1]",
 		"[::ffff:a9fe:a9fe]", "[fe80::1%eth0]", "[2606:4700::1111%eth0]",
+		"[::ffff:a9fe:a9fe%eth0]",
 	} {
 		mustRefuse(t, d, "tcp", addr+":443")
 		mustRefuse(t, d, "udp", addr+":53")
@@ -158,24 +166,55 @@ func TestTS21DialerRefusesName(t *testing.T) {
 func TestTS21NameWithRefusedAndStandIn(t *testing.T) {
 	ln := listen(t, loop4)
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	names := egresstest.NewNames(t)
-	d := egresstest.Dialer(t, testTimeout, loop4)
-	d.Resolver = names.Resolver()
-	for _, refused := range []string{"10.0.0.1", "2001:db8::1", "::ffff:10.0.0.1"} {
-		names.Set("mixed.test.", netip.MustParseAddr(refused), loop4)
-		c, err := dial(d, "tcp", "mixed.test.:"+port)
-		if err != nil {
-			t.Fatalf("answers %s and 127.0.0.1: %v", refused, err)
-		}
-		if got := c.RemoteAddr().String(); got != ln.Addr().String() {
-			t.Errorf("connected to %s", got)
-		}
-		c.Close()
-		s, err := ln.Accept()
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.Close()
+	for _, tc := range []struct{ refused, network string }{
+		{"::1", "tcp6"},
+		{"127.0.0.2", "tcp4"},
+	} {
+		t.Run(tc.refused, func(t *testing.T) {
+			if tc.network == "tcp6" {
+				listen(t, loop6) // skips the test when the host has no ::1
+			}
+			names := egresstest.NewNames(t)
+			names.Set("mixed.test.", netip.MustParseAddr(tc.refused), loop4)
+			d := egresstest.Dialer(t, testTimeout, loop4)
+			d.Resolver = names.Resolver()
+			hook := d.ControlContext
+			var mu sync.Mutex
+			var calls []string
+			d.ControlContext = func(
+				ctx context.Context, network, address string, c syscall.RawConn,
+			) error {
+				err := hook(ctx, network, address, c)
+				mu.Lock()
+				defer mu.Unlock()
+				calls = append(calls, fmt.Sprintf("%s %s refused=%t",
+					network, address, errors.Is(err, egress.ErrRefused)))
+				return err
+			}
+			c, err := dial(d, "tcp", "mixed.test.:"+port)
+			if err != nil {
+				t.Fatalf("answers %s and 127.0.0.1: %v", tc.refused, err)
+			}
+			defer c.Close()
+			if got := c.RemoteAddr().String(); got != ln.Addr().String() {
+				t.Errorf("connected to %s", got)
+			}
+			s, err := ln.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			wantRefused := fmt.Sprintf("%s %s refused=true", tc.network,
+				net.JoinHostPort(tc.refused, port))
+			wantPermitted := fmt.Sprintf("tcp4 %s refused=false", ln.Addr())
+			for _, want := range []string{wantRefused, wantPermitted} {
+				if !slices.Contains(calls, want) {
+					t.Errorf("hook calls %q lack %q", calls, want)
+				}
+			}
+		})
 	}
 }
 
@@ -220,7 +259,7 @@ func failsOn(f *fakeTB, fn func()) (failed bool) {
 // The Testing check of egresstest cannot fail in a test binary. This test
 // covers the other Fatalf path of the same helper.
 func TestTS21EgresstestRefusesNonLoopback(t *testing.T) {
-	for _, a := range []string{"10.0.0.1", "8.8.8.8", "::ffff:127.0.0.1"} {
+	for _, a := range []string{"10.0.0.1", "8.8.8.8", "::ffff:127.0.0.1", "::1%lo"} {
 		f := &fakeTB{TB: t}
 		if !failsOn(f, func() {
 			egresstest.Dialer(f, time.Second, netip.MustParseAddr(a))

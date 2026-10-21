@@ -1,6 +1,6 @@
 // Package egresstest gives a test a dialer and a resolver. The dialer also
 // permits the loopback addresses that the test names. The resolver answers
-// from memory. Production code never imports this package. The dialer calls
+// from memory. Production code must not import this package. The dialer calls
 // the production hook for each other address, so the rule stays the same.
 package egresstest
 
@@ -103,8 +103,8 @@ func (n *Names) Resolver() *net.Resolver {
 	}
 }
 
-// serve answers the queries on c, which has a 2-byte length before each
-// message, until c is closed.
+// serve answers the queries on c. Each message has a 2-byte length before it.
+// It stops when a read or a write fails, or when answer gives nil.
 func (n *Names) serve(c net.Conn) {
 	defer c.Close()
 	for {
@@ -127,8 +127,9 @@ func (n *Names) serve(c net.Conn) {
 	}
 }
 
-// answer builds the reply to the query q, or nil if q is not a query with one
-// question.
+// answer builds the reply to the query q. It gives nil when q is shorter than
+// the header and the question, when a label has 64 bytes or more, or when a
+// label goes past the end of q.
 func (n *Names) answer(q []byte) []byte {
 	var name strings.Builder
 	i := 12
