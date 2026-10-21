@@ -1,6 +1,7 @@
 package safefile
 
 import (
+	"errors"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -14,15 +15,26 @@ import (
 
 const testHelperPath = "github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 
+// walkError gives the error that stops the walk of dir at p. An entry that
+// another test removes during the walk is not an error. The dir itself must
+// exist.
+func walkError(dir, p string, err error) error {
+	if err != nil && p != dir && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // importers gives the .go files below dir that do not end in _test.go and
 // import path. It reads only the imports of each file. It reads a file with
-// a build constraint too.
+// a build constraint too. It skips an entry that another test removes during
+// the walk.
 func importers(dir, path string) ([]string, error) {
 	var found []string
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return walkError(dir, p, err)
 		}
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
@@ -34,7 +46,7 @@ func importers(dir, path string) ([]string, error) {
 		}
 		f, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
 		if err != nil {
-			return err
+			return walkError(dir, p, err)
 		}
 		for _, imp := range f.Imports {
 			if s, err := strconv.Unquote(imp.Path.Value); err == nil && s == path {
@@ -104,6 +116,27 @@ func TestTS23_ImportersFindsPlantedFiles(t *testing.T) {
 		"pkg/node_modules/dep/vendored.go"}
 	if !slices.Equal(found, want) {
 		t.Errorf("found %v, want %v", found, want)
+	}
+}
+
+func TestTS23_ImportersReportsMissingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "none")
+	if _, err := importers(dir, testHelperPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestTS23_WalkErrorSkipsRemovedEntry(t *testing.T) {
+	gone := &fs.PathError{Op: "open", Path: "x/y", Err: fs.ErrNotExist}
+	if err := walkError("x", "x/y", gone); err != nil {
+		t.Errorf("removed entry: err = %v, want nil", err)
+	}
+	if err := walkError("x", "x", gone); err == nil {
+		t.Error("missing dir: no error")
+	}
+	other := &fs.PathError{Op: "open", Path: "x/y", Err: fs.ErrPermission}
+	if err := walkError("x", "x/y", other); err == nil {
+		t.Error("other error: no error")
 	}
 }
 

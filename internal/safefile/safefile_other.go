@@ -37,5 +37,15 @@ func CheckParents(root *os.Root, name string, dir Rule) error {
 	return fail(ErrUnsupported, nil)
 }
 
+// OpenPath fails closed: this system has no checked open.
+func OpenPath(path string, r Rule) (*os.File, fs.FileInfo, error) {
+	return nil, nil, fail(ErrUnsupported, nil)
+}
+
+// CheckPathParents fails closed: this system has no checked walk.
+func CheckPathParents(path string, dir Rule) error {
+	return fail(ErrUnsupported, nil)
+}
+
 // Identity gives false: this system has no device and inode.
 func Identity(fi fs.FileInfo) (FileID, bool) { return FileID{}, false }
