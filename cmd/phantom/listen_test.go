@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,7 @@ func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(
 type startWriter struct {
 	text    syncBuf
 	started chan struct{}
+	signal  sync.Once // closes started one time
 }
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
@@ -81,7 +83,7 @@ func (w *startWriter) hasStarted() bool {
 func (w *startWriter) Write(p []byte) (int, error) {
 	n, err := w.text.Write(p)
 	if !w.hasStarted() && strings.Contains(w.text.String(), "phantom: started") {
-		close(w.started)
+		w.signal.Do(func() { close(w.started) })
 	}
 	return n, err
 }
@@ -217,7 +219,14 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
 	go func() { r.code = serveWith(ctx, cancel, cfg, p, d, r.out, &r.err); close(r.done) }()
-	t.Cleanup(func() { cancel(); <-r.done })
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-r.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return %v after the cancel at the end of the test", sigtermWait)
+		}
+	})
 	return r
 }
 
@@ -269,7 +278,12 @@ func (r *running) waitStarted(t *testing.T) {
 
 // startWait is the wait of the test for the start line of this serve call.
 func (r *running) startWait() startWait {
-	return startWait{"serve", r.out, r.done, func() string { return fmt.Sprintf("exit %d; stderr %q", r.code, r.err.String()) }}
+	return startWait{
+		who:   "serve",
+		out:   r.out,
+		ended: r.done,
+		info:  func() string { return fmt.Sprintf("exit %d; stderr %q", r.code, r.err.String()) },
+	}
 }
 
 // TestTS16_BindConflict checks a socket in use on listen.https and on listen.http. Each case gives exit 1,
@@ -294,9 +308,15 @@ func TestTS16_BindConflict(t *testing.T) {
 			select {
 			case <-r.done:
 			case <-r.out.started:
-				t.Fatalf("serve bound the blocked address %s and wrote the start line; stderr %q", blocker.Addr(), r.err.String())
+				// serve wrote the start line. Stop it, then read the exit code.
+				r.cancel()
+				select {
+				case <-r.done:
+				case <-time.After(sigtermWait):
+					t.Fatalf("serve did not return %v after the cancel", sigtermWait)
+				}
 			}
-			if r.out.hasStarted() { // serve wrote the start line, then ended
+			if r.out.hasStarted() {
 				t.Fatalf("serve bound the blocked address %s and wrote the start line; exit %d; stderr %q", blocker.Addr(), r.code, r.err.String())
 			}
 			if r.code != 1 {
@@ -320,6 +340,156 @@ func TestTS16_BindConflict(t *testing.T) {
 	}
 }
 
+// freePorts returns two different TCP ports that no socket holds now.
+// It holds both listeners while it takes the ports.
+// Another process can take a port before the caller binds it.
+func freePorts(t *testing.T) (int, int) {
+	t.Helper()
+	var ports [2]int
+	for i := range ports {
+		ln, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		ports[i] = ln.Addr().(*net.TCPAddr).Port
+	}
+	return ports[0], ports[1]
+}
+
+// listenSockets returns the local port of each TCP socket that this
+// process holds in the LISTEN state, by inode. It reads /proc/net/tcp
+// and /proc/net/tcp6. It keeps the entries of the socket files of the
+// process.
+func listenSockets(t *testing.T) map[string]int {
+	t.Helper()
+	own := map[string]bool{}
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range fds {
+		if link, err := os.Readlink("/proc/self/fd/" + fd.Name()); err == nil {
+			if inode, ok := strings.CutPrefix(link, "socket:["); ok {
+				own[strings.TrimSuffix(inode, "]")] = true
+			}
+		}
+	}
+	socks := map[string]int{}
+	for _, name := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(name)
+		if errors.Is(err, os.ErrNotExist) && name == "/proc/net/tcp6" {
+			continue // a system with no IPv6
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line := range strings.Lines(string(data)) {
+			f := strings.Fields(line)
+			// State 0A is LISTEN.
+			if len(f) < 10 || f[3] != "0A" || !own[f[9]] {
+				continue
+			}
+			_, hexPort, _ := strings.Cut(f[1], ":")
+			port, err := strconv.ParseUint(hexPort, 16, 16)
+			if err != nil {
+				t.Fatalf("%s: local address %q: %v", name, f[1], err)
+			}
+			socks[f[9]] = int(port)
+		}
+	}
+	return socks
+}
+
+// TestTS16_WildcardListen starts serve with listen.https on 0.0.0.0,
+// on [::], on 127.0.0.1, and on the empty host. After the start line,
+// the process has exactly two new LISTEN sockets: the two decoy sockets.
+// The test seeds a cached certificate, so no challenge runs. An
+// unspecified IP gives the empty Host to the client, so the solver
+// address is ":port". A bind on the solver address fails with "address
+// already in use", because the decoy socket holds the port. The test
+// checks the other parameters that serve gives to the client.
+// The test needs /proc/net/tcp. It skips without it.
+func TestTS16_WildcardListen(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp"); err != nil {
+		t.Skip("there is no /proc/net/tcp: the test reads the LISTEN sockets from it")
+	}
+	for _, c := range []struct{ name, host, wantHost string }{
+		{"0.0.0.0", "0.0.0.0", ""},
+		{"[::]", "[::]", ""},
+		{"127.0.0.1", "127.0.0.1", "127.0.0.1"},
+		{"no host", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// The test uses only the CA address. Serve binds the others
+			// with the real listen.
+			_, _, ca := openListeners(t)
+			httpsPort, httpPort := freePorts(t)
+			https := c.host + ":" + strconv.Itoa(httpsPort)
+			cfg := serveCfg(t, https, "127.0.0.1:"+strconv.Itoa(httpPort), ca)
+			p := tempState(t, cfg)
+			caURL, _ := cfg.Get("acme.ca")
+			// With a cached certificate the client makes no order.
+			seedCache(t, p, caURL.Str)
+			var got listener.ACMEParams
+			oldNew := newACME
+			t.Cleanup(func() { newACME = oldNew })
+			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+			before := listenSockets(t)
+			r := launchServe(t, cfg, p, realDeps)
+			r.waitStarted(t)
+			var fresh []int
+			for inode, port := range listenSockets(t) {
+				if _, old := before[inode]; !old {
+					fresh = append(fresh, port)
+				}
+			}
+			slices.Sort(fresh)
+			want := []int{httpsPort, httpPort}
+			slices.Sort(want)
+			if !slices.Equal(fresh, want) {
+				t.Errorf("new LISTEN ports %v, want exactly %v (the two decoy sockets)", fresh, want)
+			}
+			if got.Host != c.wantHost {
+				t.Errorf("Host given to NewACME = %q, want %q", got.Host, c.wantHost)
+			}
+			if got.Port != httpsPort {
+				t.Errorf("Port given to NewACME = %d, want %d", got.Port, httpsPort)
+			}
+			var wantNames []string
+			for i := 0; ; i++ {
+				v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
+				if v.Str == "" {
+					break
+				}
+				wantNames = append(wantNames, v.Str)
+			}
+			if !slices.Equal(got.Names, wantNames) {
+				t.Errorf("Names given to NewACME = %q, want %q", got.Names, wantNames)
+			}
+			if want := config.CADirectory(caURL.Str); got.CA != want {
+				t.Errorf("CA given to NewACME = %q, want %q", got.CA, want)
+			}
+			if email, _ := cfg.Get("acme.email"); got.Email != email.Str {
+				t.Errorf("Email given to NewACME = %q, want %q", got.Email, email.Str)
+			}
+			if got.Storage == nil {
+				t.Error("Storage given to NewACME is nil")
+			}
+			if got.Logger == nil {
+				t.Error("Logger given to NewACME is nil")
+			}
+			solver := net.JoinHostPort(got.Host, strconv.Itoa(got.Port))
+			if ln, err := net.Listen("tcp", solver); err == nil {
+				ln.Close()
+				t.Errorf("a bind on the solver address %q worked, want an error", solver)
+			} else if !errors.Is(err, syscall.EADDRINUSE) || !strings.Contains(err.Error(), "address already in use") {
+				t.Errorf("a bind on the solver address %q: %v; want address already in use", solver, err)
+			}
+		})
+	}
+}
+
 // depsWithQueue returns the real parts of the store start. When the writer starts, it sets *q to the queue.
 func depsWithQueue(q **event.Queue) startDeps {
 	d := realDeps
@@ -330,9 +500,19 @@ func depsWithQueue(q **event.Queue) startDeps {
 	return d
 }
 
+// holdServed is the time that TestTI03_StartAndStopOrder holds one
+// serve call.
+const holdServed = 300 * time.Millisecond
+
+// netWait is the deadline of a dial or a request that a test makes to
+// the local sensor.
+const netWait = 5 * time.Second
+
 // TestTI03_StartAndStopOrder checks that the store and the certificate client start after serve holds the two test
 // listeners. It checks that serve holds them while the sensor runs.
 // After the context ends, the client stops and the queue closes after both serve calls returned (NFR-05).
+// The test holds one serve call. A stop of the client before that call
+// returns frees the call. The count in the event of the stop shows it.
 func TestTI03_StartAndStopOrder(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -348,17 +528,38 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	}
 	oldStart, oldStop, oldServed := startACME, stopACME, served
 	t.Cleanup(func() { startACME, stopACME, served = oldStart, oldStop, oldServed })
-	startACME = func(a *listener.ACME, ctx context.Context) error {
+	startACME = func(ctx context.Context, a *listener.ACME) error {
 		note(fmt.Sprint("acme bound=", bound()))
 		return a.Start(ctx)
 	}
 	returned := 0
-	served = func() { mu.Lock(); returned++; mu.Unlock(); note(fmt.Sprint("served closed=", q.Closed())) }
+	stopSeen := make(chan struct{})
+	markStop := sync.OnceFunc(func() { close(stopSeen) })
+	var holdOne sync.Once
+	served = func() {
+		// The first serve call to return waits here until stopACME
+		// runs, or until holdServed ends. With the correct order,
+		// serveWith calls stopACME only after this call returns, so
+		// the time ends the wait.
+		// If stopACME runs before both serve calls returned, it
+		// frees this call. Then the count in its event is below 2.
+		holdOne.Do(func() {
+			select {
+			case <-stopSeen:
+			case <-time.After(holdServed):
+			}
+		})
+		mu.Lock()
+		returned++
+		mu.Unlock()
+		note(fmt.Sprint("served closed=", q.Closed()))
+	}
 	stopACME = func(a *listener.ACME) {
 		mu.Lock()
 		n := returned
 		mu.Unlock()
 		note(fmt.Sprint("acme stop after serve calls=", n))
+		markStop()
 		a.Stop()
 	}
 	r := launchServe(t, cfg, tempState(t, cfg), d)
@@ -467,10 +668,13 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	srv := server()
 	log.Print("a line of the standard log")
 	lines, errBefore := srv.ErrorLines(), r.err.String()
-	if _, err := tls.Dial("tcp", https, &tls.Config{ServerName: "other.example.com", InsecureSkipVerify: true}); err == nil {
+	// The timeout covers the TLS handshake too.
+	dialer := &net.Dialer{Timeout: netWait}
+	if _, err := tls.DialWithDialer(dialer, "tcp", https, &tls.Config{ServerName: "other.example.com", InsecureSkipVerify: true}); err == nil {
 		t.Error("a handshake for a name that is not configured worked")
 	}
-	if raw, err := net.Dial("tcp", https); err == nil {
+	if raw, err := dialer.Dial("tcp", https); err == nil {
+		raw.SetDeadline(time.Now().Add(netWait))
 		raw.Write([]byte("garbage that is no TLS\r\n\r\n"))
 		raw.Close()
 	}
@@ -496,25 +700,52 @@ func TestTI03_ListenerFailureExits1(t *testing.T) {
 	}
 }
 
-// TestTI03_OpenFailureKeepsServing breaks the certificate cache, the state directory, and the start of the
-// client. Each case must write its stderr lines and its start line exactly. The redirect on listen.http must
-// answer 308, and a cancel must give exit 0 (C3). With no client, a handshake on listen.https must fail with
-// the TLS alert "internal error" and count. With a client that did not start, the cached certificate serves,
-// and the cancel stops the client once.
-func TestTI03_OpenFailureKeepsServing(t *testing.T) {
+// TestTI03_OpenFailureKeepsServe breaks the certificate cache, the
+// state directory, the make of the client, and the start of the client.
+// Each case must write its stderr lines and its start line exactly.
+// The redirect on listen.http must answer 308, and a cancel must give
+// exit 0 (C3). With no client, a handshake on listen.https must fail
+// with the TLS alert "internal error" and count. With a client that did
+// not start, the cached certificate serves, and the cancel stops the
+// client once.
+func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 	for _, c := range []struct {
 		name, line, startLine string
-		noState, cached       bool // noState: the store start writes its own error line first
-		breakIt               func(t *testing.T, p *startParams)
+		// noState: the store start writes its own error line first.
+		noState, cached bool
+		// newFails: the make of the client fails. Serve calls newACME once.
+		newFails bool
+		breakIt  func(t *testing.T, p *startParams)
 	}{
-		{"cache is a file", "phantom: certificate cache does not open", "phantom: started — certificate client not running", false, false, func(t *testing.T, p *startParams) {
-			if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"no state directory", "phantom: state directory does not open", "phantom: started — store not healthy — certificate client not running", true, false,
-			func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") }},
-		{"client start fails", "phantom: certificate client does not start", "phantom: started — certificate client start failed", false, true, nil},
+		{
+			name:      "cache is a file",
+			line:      "phantom: certificate cache does not open",
+			startLine: "phantom: started — certificate client did not start",
+			breakIt: func(t *testing.T, p *startParams) {
+				if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:      "no state directory",
+			line:      "phantom: state directory does not open",
+			startLine: "phantom: started — store not healthy — certificate client did not start",
+			noState:   true,
+			breakIt:   func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") },
+		},
+		{
+			name:      "client make fails",
+			line:      "phantom: certificate client does not start",
+			startLine: "phantom: started — certificate client did not start",
+			newFails:  true,
+		},
+		{
+			name:      "client start fails",
+			line:      "phantom: certificate client does not start",
+			startLine: "phantom: started — certificate client start failed",
+			cached:    true,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			httpsLn, plainLn, caAddr := openListeners(t)
@@ -526,13 +757,17 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 			}
 			var der []byte
 			var stops atomic.Int32
-			oldStart, oldStop := startACME, stopACME
-			t.Cleanup(func() { startACME, stopACME = oldStart, oldStop })
+			oldNew, oldStart, oldStop := newACME, startACME, stopACME
+			t.Cleanup(func() { newACME, startACME, stopACME = oldNew, oldStart, oldStop })
 			stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
+			var news atomic.Int32
+			if c.newFails {
+				newACME = func(listener.ACMEParams) (*listener.ACME, error) { news.Add(1); return nil, errors.New("test error") }
+			}
 			if c.cached {
 				ca, _ := cfg.Get("acme.ca")
 				der = seedCache(t, p, ca.Str)
-				startACME = func(a *listener.ACME, ctx context.Context) error { a.Start(ctx); return errors.New("test error") }
+				startACME = func(ctx context.Context, a *listener.ACME) error { a.Start(ctx); return errors.New("test error") }
 			}
 			server := captureServer(t)
 			var q *event.Queue // stays nil when the state directory is missing: no writer starts
@@ -555,7 +790,7 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 			}
 			req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+plain+"/", nil)
 			req.Host = decoyName
-			hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			hc := &http.Client{Timeout: netWait, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 			if resp, err := hc.Do(req); err != nil || resp.StatusCode != http.StatusPermanentRedirect {
 				t.Errorf("redirect: %v, %v; want 308", resp, err)
 			}
@@ -565,7 +800,7 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 				srv := server()
 				lines := srv.ErrorLines()
 				// Without the check for a missing client, the handshake panics and the client sees EOF.
-				conn, err := tls.Dial("tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+				conn, err := tls.DialWithDialer(&net.Dialer{Timeout: netWait}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
 				if err == nil {
 					conn.Close()
 					t.Error("a handshake worked with no certificate client")
@@ -576,6 +811,9 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 			}
 			r.cancel()
 			<-r.done
+			if c.newFails && news.Load() != 1 {
+				t.Errorf("newACME calls = %d, want 1", news.Load())
+			}
 			wantStops := int32(0)
 			if c.cached {
 				wantStops = 1
@@ -594,9 +832,13 @@ func TestTI03_OpenFailureKeepsServing(t *testing.T) {
 // The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. The test skips a
 // connectionOpener only when it belongs to the captured store database, and that database is closed with no
 // open connection. Any other connectionOpener fails the test.
-// The test also skips the other goroutines of database/sql, for example of a sql.Tx or sql.Rows, and the
-// goroutines of the runtime, for example the finalizer goroutine. Limit: a leaked sql.Tx or sql.Rows of a
-// second database that serve closes is not found. Every other new goroutine fails the test.
+// The test also skips the other goroutines of database/sql,
+// for example of a sql.Tx or sql.Rows. It does this only when
+// openersOK is true: every connectionOpener passed the check.
+// It also skips the goroutines of the runtime, for example the
+// finalizer goroutine. Limit: the test does not find a leaked
+// sql.Tx or sql.Rows of a second database that serve closes.
+// Every other new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -633,16 +875,30 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 		}
 	}
 	slices.Sort(fresh)
+	// openers holds the database address of each new connectionOpener.
+	openers := map[int]string{}
+	for _, id := range fresh {
+		if arg, ok := openerDB(after[id]); ok {
+			openers[id] = arg
+		}
+	}
 	openersOK := true
 	for _, id := range fresh {
-		if arg, ok := openerDB(after[id]); ok && (closedDB == "" || arg != closedDB) {
+		arg, ok := openers[id]
+		switch {
+		case !ok:
+		case closedDB == "":
 			openersOK = false
-			t.Errorf("goroutine %d is the connectionOpener of a database that the test did not find closed (%s; closed database %q):\n%s", id, arg, closedDB, after[id])
+			t.Errorf("goroutine %d is the connectionOpener of database %s, but no database passed the closed check:\n%s",
+				id, arg, after[id])
+		case arg != closedDB:
+			openersOK = false
+			t.Errorf("goroutine %d is the connectionOpener of database %s, not of the closed database %s:\n%s", id, arg, closedDB, after[id])
 		}
 	}
 	for _, id := range fresh {
 		block := after[id]
-		if _, ok := openerDB(block); ok {
+		if _, ok := openers[id]; ok {
 			continue // checked above
 		}
 		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || strings.Contains(block, "\ncreated by runtime.") {
@@ -652,21 +908,21 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	}
 }
 
-// openerDB reports whether the top frame of a stack block is (*sql.DB).connectionOpener. If so, it returns the
-// text of the first argument, the address of the database, as the dump prints it.
+// openerDB reports whether a frame of a stack block is
+// (*sql.DB).connectionOpener. If so, it returns the text of the first
+// argument, the address of the database, as the dump prints it.
 func openerDB(block string) (string, bool) {
-	lines := strings.SplitN(block, "\n", 3)
-	if len(lines) < 2 {
-		return "", false
+	for line := range strings.SplitSeq(block, "\n") {
+		args, ok := strings.CutPrefix(line, "database/sql.(*DB).connectionOpener(")
+		if !ok {
+			continue
+		}
+		if i := strings.IndexAny(args, ",)"); i >= 0 {
+			args = args[:i]
+		}
+		return strings.TrimSuffix(args, "?"), true
 	}
-	args, ok := strings.CutPrefix(lines[1], "database/sql.(*DB).connectionOpener(")
-	if !ok {
-		return "", false
-	}
-	if i := strings.IndexAny(args, ",)"); i >= 0 {
-		args = args[:i]
-	}
-	return strings.TrimSuffix(args, "?"), true
+	return "", false
 }
 
 // depsWithDB wraps the newWriter of d. When the writer starts, it sets *db to the database of the store.
@@ -719,8 +975,8 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
 	closed := closedAtReturn(t, &q)
 	waiting, sent := make(chan struct{}), make(chan struct{})
-	var release sync.Once
-	t.Cleanup(func() { release.Do(func() { close(sent) }) }) // frees serve if the test ends before it sent SIGTERM
+	// release frees serve from the wrapper of waitStop.
+	release := sync.OnceFunc(func() { close(sent) })
 	oldWait := waitStop
 	t.Cleanup(func() { waitStop = oldWait })
 	waitStop = func(ctx context.Context) {
@@ -728,22 +984,66 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		<-sent
 		oldWait(ctx)
 	}
-	out := newStartWriter()
-	var errb syncBuf
-	var c int
-	done := make(chan struct{})
-	go func() { c = serve(cfg, out, &errb); close(done) }()
-	t.Cleanup(func() { release.Do(func() { close(sent) }); <-done })
-	startWait{"serve", out, done, func() string { return fmt.Sprintf("exit %d; stderr %q", c, errb.String()) }}.until(t, waiting, false)
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+	r := &running{done: make(chan struct{}), out: newStartWriter()}
+	go func() { r.code = serve(cfg, r.out, &r.err); close(r.done) }()
+	// sendSigterm sends one SIGTERM and waits until sig gets it.
+	// A SIGTERM that comes after signal.Stop ends the process.
+	// Thus the test waits for each delivery before it continues.
+	// sigSent tells the cleanup that the test sent the signal.
+	// sendSigterm empties sig before it sends. Thus the next value
+	// on sig is from this signal.
+	var sigSent bool
+	sendSigterm := func() error {
+		select {
+		case <-sig:
+		default:
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			return err
+		}
+		sigSent = true
+		select {
+		case <-sig:
+			return nil
+		case <-time.After(sigtermWait):
+			return fmt.Errorf("the test did not get SIGTERM within %v", sigtermWait)
+		}
+	}
+	// The cleanup ends in bounded time. It frees serve. It sends SIGTERM
+	// only if the test body did not, and waits for its delivery.
+	// Then it waits for serve to return.
+	t.Cleanup(func() {
+		release()
+		if !sigSent {
+			if err := sendSigterm(); err != nil {
+				t.Error(err)
+			}
+		}
+		select {
+		case <-r.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return %v after the cleanup freed it", sigtermWait)
+		}
+	})
+	r.startWait().until(t, waiting, false)
+	if err := sendSigterm(); err != nil {
 		t.Fatal(err)
 	}
-	release.Do(func() { close(sent) })
-	<-done
-	if c != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
-		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", c, q.Closed(), closed())
+	release()
+	select {
+	case <-r.done:
+	case <-time.After(sigtermWait):
+		t.Fatalf("serve did not return %v after SIGTERM", sigtermWait)
+	}
+	if r.code != 0 || !q.Closed() || !reflect.DeepEqual(closed(), []bool{false, false}) {
+		t.Errorf("exit %d, queue closed %v, closed at return %v; want 0, true, [false false]", r.code, q.Closed(), closed())
 	}
 }
+
+// sigtermWait is the time that serve gets to return after SIGTERM
+// or a cancel. It is also the time that a signal of the test gets
+// for its delivery. It is longer than shutdownTime.
+const sigtermWait = shutdownTime + 10*time.Second
 
 // TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
 // that no one answers. A TLS handshake with the cached certificate must work at most 2 s after the process start.
@@ -783,7 +1083,12 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	t.Cleanup(func() { cmd.Process.Kill(); <-exited })
 	// The child writes the start line after it has bound both addresses and started the two serve goroutines.
 	// The child can write the line and then end. Then coldHandshake fails with its handshake error.
-	startWait{"the child", out, exited, func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) }}.until(t, out.started, true)
+	startWait{
+		who:   "the child",
+		out:   out,
+		ended: exited,
+		info:  func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) },
+	}.until(t, out.started, true)
 	coldHandshake(t, https, begin, der, errb).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
 	<-exited

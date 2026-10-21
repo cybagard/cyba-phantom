@@ -61,8 +61,46 @@ func TestTS10_Usage(t *testing.T) {
 	}
 }
 
-// TestTS10_CheckWiring checks that run gives --check the no-network Net, and gives the start no such Net (SEC-11).
+// TestTS10_UnknownFlag checks that a flag name with control characters
+// is not printed. The run gives exit 2 and the fixed usage line on
+// stderr, and nothing on stdout (T-S-10).
+func TestTS10_UnknownFlag(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if code := run([]string{"--x\x1b[31m", "f.yaml"}, nil, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if want := "usage: phantom [--check] <config-path>\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	for _, part := range []string{"\x1b", "[31m", "--x"} {
+		if out := stdout.String() + stderr.String(); strings.Contains(out, part) {
+			t.Errorf("the output %q holds %q of the flag name", out, part)
+		}
+	}
+}
+
+// requireNoNet fails the test when the Dialer or the Resolver of --check
+// gives an error other than errNoNet. The caller passes noNet values,
+// so the calls use no network.
+func requireNoNet(t *testing.T, label string, d noNet, r noNet) {
+	t.Helper()
+	if _, err := d.DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
+		t.Errorf("%s dial error = %v", label, err)
+	}
+	if _, err := r.LookupHost(t.Context(), "example.invalid"); !errors.Is(err, errNoNet) {
+		t.Errorf("%s lookup error = %v", label, err)
+	}
+}
+
+// TestTS10_CheckWiring checks that run gives --check the no-network Net,
+// and gives the start no such Net (SEC-11). It also checks the stdout
+// of both modes (T-S-10). The test checks the types first. It calls a
+// method only on a noNet value.
 func TestTS10_CheckWiring(t *testing.T) {
+	const valid = "phantom: config is valid\n"
 	var got config.Net
 	old := loadWith
 	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) { got = n; return nil, nil }
@@ -71,21 +109,39 @@ func TestTS10_CheckWiring(t *testing.T) {
 	oldServe := serve
 	serve = func(*config.Config, io.Writer, io.Writer) int { starts++; return 0 }
 	t.Cleanup(func() { serve = oldServe })
-	var out strings.Builder
-	if code := run([]string{"--check", "f.yaml"}, nil, &out, &out); code != 0 || starts != 0 {
-		t.Fatalf("--check: exit %d, starts %d, output %q", code, starts, out.String())
+	var stdout, stderr strings.Builder
+	if code := run([]string{"--check", "f.yaml"}, nil, &stdout, &stderr); code != 0 || starts != 0 {
+		t.Fatalf("--check: exit %d, starts %d, stdout %q, stderr %q", code, starts, stdout.String(), stderr.String())
 	}
-	if _, err := got.Dialer.DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
-		t.Errorf("--check dial error = %v", err)
+	if stdout.String() != valid || stderr.Len() != 0 {
+		t.Errorf("--check: stdout %q, stderr %q; want %q and nothing", stdout.String(), stderr.String(), valid)
 	}
-	if _, err := got.Resolver.LookupHost(t.Context(), "example.invalid"); !errors.Is(err, errNoNet) {
-		t.Errorf("--check lookup error = %v", err)
+	d, dOK := got.Dialer.(noNet)
+	r, rOK := got.Resolver.(noNet)
+	if !dOK || !rOK {
+		t.Errorf("--check: Dialer %T, Resolver %T; want noNet for both", got.Dialer, got.Resolver)
+	} else {
+		requireNoNet(t, "--check", d, r)
 	}
-	if code := run([]string{"f.yaml"}, nil, &out, &out); code != 0 || starts != 1 {
-		t.Fatalf("start: exit %d, starts %d, output %q", code, starts, out.String())
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"f.yaml"}, nil, &stdout, &stderr); code != 0 || starts != 1 {
+		t.Fatalf("start: exit %d, starts %d, stdout %q, stderr %q", code, starts, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), valid) {
+		t.Errorf("start: stdout %q holds the --check line", stdout.String())
+	}
+	if got.Dialer == nil {
+		t.Error("the start Dialer is nil")
+	}
+	if got.Resolver == nil {
+		t.Error("the start Resolver is nil")
 	}
 	if _, ok := got.Dialer.(noNet); ok {
-		t.Error("the start uses noNet")
+		t.Error("the start Dialer is noNet")
+	}
+	if _, ok := got.Resolver.(noNet); ok {
+		t.Error("the start Resolver is noNet")
 	}
 }
 
@@ -94,26 +150,23 @@ func TestTS10_CheckNoDial(t *testing.T) {
 	if _, err := config.LoadWith(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=token"}, config.Net{Dialer: failNet{t}, Resolver: failNet{t}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (noNet{}).DialContext(t.Context(), "tcp", "example.invalid:80"); !errors.Is(err, errNoNet) {
-		t.Errorf("noNet dial error = %v", err)
-	}
-	if _, err := (noNet{}).LookupHost(t.Context(), "example.invalid"); !errors.Is(err, errNoNet) {
-		t.Errorf("noNet lookup error = %v", err)
-	}
+	requireNoNet(t, "noNet", noNet{}, noNet{})
 }
 
 // TestTS10_CheckExec runs the binary. A valid file gives exit 0. An invalid
 // file gives a non-zero exit, with the key and the source in stderr (FR-12).
-// The output has no secret marker (T-S-10). The URL check is only a syntax
-// check. An acme.ca value that is not a URL fails and names acme.ca (FR-12).
+// The output has no secret marker (T-S-10). An acme.ca value that is not a
+// URL fails and names acme.ca (SEC-12). A URL with a password in its user
+// information never shows the password or the user information.
 func TestTS10_CheckExec(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "phantom")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	const marker = "SECRET-MARKER-7c1f9a"
+	const urlUser, urlPass = "urluser-4b2e", "URLPASS-9d1a3f"
 	var outs string
-	run := func(file string, env ...string) (code int, stdout, stderr string) {
+	runCheck := func(file string, env ...string) (code int, stdout, stderr string) {
 		var so, se strings.Builder
 		cmd := exec.Command(bin, "--check", file)
 		// The publisher of validBody names CKPT_TOKEN.
@@ -130,18 +183,30 @@ func TestTS10_CheckExec(t *testing.T) {
 		return code, so.String(), se.String()
 	}
 	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
-	code, _, se := run(writeFile(t, validBody(t)))
-	if code != 0 {
-		t.Errorf("valid file: exit %d, stderr %q", code, se)
+	code, so, se := runCheck(writeFile(t, validBody(t)))
+	if code != 0 || so != "phantom: config is valid\n" || se != "" {
+		t.Errorf("valid file: exit %d, stdout %q, stderr %q", code, so, se)
 	}
-	code, _, se = run(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
+	code, _, se = runCheck(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
 	if code == 0 {
 		t.Error("acme.ca not a URL: exit 0")
 	}
 	if !strings.Contains(se, "acme.ca") {
 		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
 	}
-	code, _, se = run(bad)
+	// A URL key with user information and a password: the run shows
+	// neither (SEC-13). The check on outs at the end looks for both.
+	userInfo := urlUser + ":" + urlPass + "@"
+	code, _, se = runCheck(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=https://"+userInfo+"ca.example.invalid")
+	if code == 0 || !strings.Contains(se, "acme.ca") {
+		t.Errorf("acme.ca with user information: exit %d, stderr %q; want a refusal that names acme.ca", code, se)
+	}
+	pub := strings.Replace(validBody(t), "https://ckpt.example.invalid/put", "https://"+userInfo+"ckpt.example.invalid/put", 1)
+	code, _, se = runCheck(writeFile(t, pub))
+	if code == 0 || !strings.Contains(se, "tlog.publish[0].url") {
+		t.Errorf("publisher url with user information: exit %d, stderr %q; want a refusal that names tlog.publish[0].url", code, se)
+	}
+	code, _, se = runCheck(bad)
 	if code == 0 {
 		t.Error("invalid file: exit 0")
 	}
@@ -154,7 +219,7 @@ func TestTS10_CheckExec(t *testing.T) {
 	// value has a wrong type, so the loader prints it. The marker is in the
 	// user information of a URL-like text. So the printed value must show
 	// REDACTED@ and not the marker. CKPT_TOKEN holds the marker in every run.
-	code, _, se = run(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
+	code, _, se = runCheck(writeFile(t, "acme:\n  email: !!int \"https://u:"+marker+"@h.example\"\n"))
 	if code == 0 {
 		t.Error("wrong type: exit 0")
 	}
@@ -178,7 +243,7 @@ func TestTS10_CheckExec(t *testing.T) {
 		if c.env != "" {
 			env = append(env, c.env)
 		}
-		code, so, se := run(writeFile(t, c.body), env...)
+		code, so, se := runCheck(writeFile(t, c.body), env...)
 		if code == 0 || !strings.Contains(se, c.key) {
 			t.Errorf("%s: exit %d, stderr %q lacks %s", c.name, code, se, c.key)
 		}
@@ -186,7 +251,7 @@ func TestTS10_CheckExec(t *testing.T) {
 			t.Errorf("%s: the output holds the variable name: %q", c.name, so+se)
 		}
 	}
-	if strings.Contains(outs, marker) || strings.Contains(outs, "pw@") || strings.Contains(outs, nameMarker) {
+	if strings.Contains(outs, marker) || strings.Contains(outs, urlPass) || strings.Contains(outs, urlUser) || strings.Contains(outs, nameMarker) {
 		t.Errorf("output holds a secret: %q", outs)
 	}
 }
@@ -286,8 +351,12 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckACME checks that --check refuses a bad acme.names list, a bad acme.cache_dir, and a
-// limits.header_bytes outside 8192 to 16384 with exit 1 and the key in stderr, and accepts the edges (SEC-21, SEC-02, T-S-11, T-U-10).
+// TestTS11_CheckACME checks three kinds of bad value with --check.
+// These are a bad acme.names list, a bad acme.cache_dir, and a
+// limits.header_bytes outside 8192 to 16384. Each gives exit 1.
+// Stderr names the key. The test also checks that --check accepts the
+// edges. A row for a fixed refusal checks the whole stderr
+// (SEC-21, SEC-02, T-S-11, T-U-10).
 func TestTS11_CheckACME(t *testing.T) {
 	body := validBody(t)
 	names := func(list string) string { return strings.Replace(body, "[decoy.example.com]", list, 1) }
@@ -304,57 +373,68 @@ func TestTS11_CheckACME(t *testing.T) {
 		name, file string
 		key        string // key is "" for a file that passes.
 		env        []string
+		stderr     string // stderr is the whole text of a fixed refusal, or "".
 	}{
-		{"valid", body, "", nil},
-		{"header 8192", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=8192"}},
-		{"header 16384", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=16384"}},
-		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}},
-		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}},
-		{"no names", names("[]"), "acme.names", nil},
-		{"17 names", names(many(17)), "acme.names", nil},
-		{"upper case", names("[Decoy.example.com]"), "acme.names", nil},
-		{"wildcard", names(`["*.example.com"]`), "acme.names", nil},
-		{"IP literal", names("[192.0.2.1]"), "acme.names", nil},
-		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil},
-		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil},
-		{"one label", names("[decoy]"), "acme.names", nil},
-		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil},
-		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil},
-		{"localhost", names("[localhost]"), "acme.names", nil},
-		{"x.localhost", names("[x.localhost]"), "acme.names", nil},
-		{"x.local", names("[x.local]"), "acme.names", nil},
-		{"internal name", names("[x.internal]"), "acme.names", nil},
-		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil},
-		{"local", names("[local]"), "acme.names", nil},
-		{"internal", names("[internal]"), "acme.names", nil},
-		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil},
-		{"home.arpa", names("[home.arpa]"), "", nil},
-		{"16 names", names(many(16)), "", nil},
-		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil},
-		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil},
-		{"duplicate", names("[a.example, a.example]"), "acme.names", nil},
-		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}},
-		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}},
-		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"}},
-		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}},
-		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}},
-		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}},
-		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}},
-		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}},
-		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}},
-		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}},
-		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}},
-		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}},
-		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}},
-		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}},
+		{"valid", body, "", nil, ""},
+		{"header 8192", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=8192"}, ""},
+		{"header 16384", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=16384"}, ""},
+		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}, ""},
+		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}, ""},
+		{"no names", names("[]"), "acme.names", nil, ""},
+		{"17 names", names(many(17)), "acme.names", nil, ""},
+		{"upper case", names("[Decoy.example.com]"), "acme.names", nil, ""},
+		{"wildcard", names(`["*.example.com"]`), "acme.names", nil, ""},
+		{"IP literal", names("[192.0.2.1]"), "acme.names", nil, ""},
+		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil, ""},
+		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil, ""},
+		{"one label", names("[decoy]"), "acme.names", nil, ""},
+		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil, ""},
+		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil, ""},
+		{"localhost", names("[localhost]"), "acme.names", nil, ""},
+		{"x.localhost", names("[x.localhost]"), "acme.names", nil, ""},
+		{"x.local", names("[x.local]"), "acme.names", nil, ""},
+		{"internal name", names("[x.internal]"), "acme.names", nil, ""},
+		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil, ""},
+		{"local", names("[local]"), "acme.names", nil, ""},
+		{"internal", names("[internal]"), "acme.names", nil, ""},
+		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil, ""},
+		{"home.arpa", names("[home.arpa]"), "", nil, ""},
+		{"16 names", names(many(16)), "", nil, ""},
+		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil, ""},
+		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil, ""},
+		{"duplicate", names("[a.example, a.example]"), "acme.names", nil, ""},
+		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}, ""},
+		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}, ""},
+		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"},
+			"config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path must be below the state directory: value \"/var/lib/phantom\"\n"},
+		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}, ""},
+		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}, ""},
+		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}, ""},
+		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}, ""},
+		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}, ""},
+		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}, ""},
+		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}, ""},
+		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}, ""},
+		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
+		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
+		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			env := append([]string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, r.env...)
 			var so, se strings.Builder
 			code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
-			if r.key == "" && (code != 0 || se.Len() != 0) || r.key != "" && (code != 1 || !strings.Contains(se.String(), r.key)) {
-				t.Errorf("exit %d, stderr %q, want a refusal that names %q", code, se.String(), r.key)
+			if r.key == "" {
+				if code != 0 || se.Len() != 0 {
+					t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
+				}
+				return
+			}
+			if code != 1 || !strings.Contains(se.String(), r.key) {
+				t.Errorf("exit %d, stderr %q; want exit 1 and a refusal that names %q", code, se.String(), r.key)
+			}
+			if r.stderr != "" && se.String() != r.stderr {
+				t.Errorf("stderr %q; want %q", se.String(), r.stderr)
 			}
 		})
 	}

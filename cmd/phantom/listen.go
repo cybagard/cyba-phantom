@@ -28,7 +28,8 @@ const shutdownTime = 5 * time.Second
 // The seams of serveWith. A test replaces them to see the order of the start and the stop.
 var (
 	newServer = listener.New
-	startACME = (*listener.ACME).Start
+	newACME   = listener.NewACME
+	startACME = func(ctx context.Context, a *listener.ACME) error { return a.Start(ctx) }
 	stopACME  = (*listener.ACME).Stop
 	served    = func() {} // runs after Serve or ServePlain returned
 	listen    = net.Listen
@@ -44,7 +45,9 @@ var (
 // and the store part closes the queue. Thus no handler adds an event to a closed queue.
 // A failure of the state directory, the cache or the client does not end the process.
 // The decoys serve, the sensor writes one fixed line, and the start line says that it is not healthy.
-// Only a decoy server that does not start gives exit 1 at once.
+// A queue error, a bind error, or a decoy server that does not start
+// gives exit 1 at once.
+// A serve call that ends with an error also gives exit 1, after the stop.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	c := event.NewCounters()
@@ -108,14 +111,14 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		if !addr.IP.IsUnspecified() {
 			host = addr.IP.String()
 		}
-		if acme, err = listener.NewACME(listener.ACMEParams{
+		if acme, err = newACME(listener.ACMEParams{
 			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
 			Host: host, Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
 		}); err != nil {
 			acme = nil
 			return clientLine
 		}
-		if startACME(acme, ctx) != nil {
+		if startACME(ctx, acme) != nil {
 			return clientLine // The client serves the cached certificates.
 		}
 		return ""
@@ -145,7 +148,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	if certLine != "" && acme != nil {
 		startLine += " — certificate client start failed"
 	} else if certLine != "" {
-		startLine += " — certificate client not running"
+		startLine += " — certificate client did not start"
 	}
 	fmt.Fprintln(stdout, startLine)
 	waitStop(ctx)
