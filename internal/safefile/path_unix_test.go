@@ -179,8 +179,8 @@ func mkdir(t *testing.T, path string, m fs.FileMode) string {
 }
 
 func TestTS23_PathParents(t *testing.T) {
-	// The test tree is below the package directory, so each parent up to
-	// "/" is root or the test user and is not open for write.
+	// The test tree is below the package directory. Each parent up to "/"
+	// is then closed for write.
 	wd, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatal(err)
