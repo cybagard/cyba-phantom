@@ -986,12 +986,12 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	}
 	r := &running{done: make(chan struct{}), out: newStartWriter()}
 	go func() { r.code = serve(cfg, r.out, &r.err); close(r.done) }()
-	// sendSigterm sends one SIGTERM and waits until sig gets it. The kernel
-	// can run the handler later on another thread. The test must not
-	// end, and signal.Stop must not run, before that delivery. A late
-	// signal after signal.Stop would end the process. The send flag tells
-	// the cleanup that the signal went out. The receive before the send
-	// empties sig, so the wait belongs to this send.
+	// sendSigterm sends one SIGTERM and waits until sig gets it.
+	// A SIGTERM that comes after signal.Stop ends the process.
+	// Thus the test waits for each delivery before it continues.
+	// sigSent tells the cleanup that the test sent the signal.
+	// sendSigterm empties sig before it sends. Thus the next value
+	// on sig is from this signal.
 	var sigSent bool
 	sendSigterm := func() error {
 		select {
@@ -1040,8 +1040,9 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	}
 }
 
-// sigtermWait is the time that serve gets to return after SIGTERM.
-// It is longer than shutdownTime.
+// sigtermWait is the time that serve gets to return after SIGTERM
+// or a cancel. It is also the time that a signal of the test gets
+// for its delivery. It is longer than shutdownTime.
 const sigtermWait = shutdownTime + 10*time.Second
 
 // TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
