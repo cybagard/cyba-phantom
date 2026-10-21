@@ -21,8 +21,8 @@ import (
 )
 
 // The caps of an archive, in bytes or in entries. MaxDecodedBytes counts the
-// output of the gzip reader. It includes the tar headers, the PAX records,
-// the padding and the zero bytes after the end of the tar.
+// output of the gzip reader. It includes the tar headers, the padding and the
+// zero bytes after the end of the tar.
 const (
 	MaxDecodedBytes = 8 << 20
 	MaxEntries      = 1024
@@ -65,12 +65,13 @@ type capReader struct {
 }
 
 // maxKept is the most bytes that ReadArchive accepts from one Next call. A
-// Next call that reads an entry reads the padding of the previous entry, one
-// PAX header block with its data, and one entry header block. archive/tar caps
-// the PAX data at 1 MiB. A Next call that reads the tar end reads the padding
-// and the end blocks. The header blocks and the end blocks are never in the
-// same call. A call that reads more than maxKept bytes gives ErrArchiveInvalid.
-const maxKept = 3*blockBytes + 1<<20
+// Next call that reads an entry reads the padding of the previous entry. That
+// is at most 511 bytes. It also reads one header block. A Next call that reads
+// the tar end reads that padding and the two end blocks. The header block and
+// the end blocks are never in the same call. A call that reads more than
+// maxKept bytes gives ErrArchiveInvalid. So ReadArchive refuses a PAX header
+// with large records before it keeps them.
+const maxKept = blockBytes - 1 + 2*blockBytes
 
 func (c *capReader) Read(p []byte) (int, error) {
 	if c.n > MaxDecodedBytes {
@@ -93,20 +94,19 @@ func (c *capReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ReadArchive reads the archive in b. Each entry has one header block. It can
-// have one PAX 'x' header before it, and no other meta header. The type byte of
-// an entry is '0' (regular file) or '5' (directory). ReadArchive refuses type
-// NUL.
+// ReadArchive reads the archive in b. The archive has the USTAR form only.
+// Each entry has one header block, and no meta header before it. The type byte
+// of an entry is '0' (regular file) or '5' (directory). ReadArchive refuses
+// type NUL.
 //
 // ReadArchive checks the header bytes of each entry. It then checks the header
-// format, the type, the link name, the PAX records, the name and the top-level
-// name. The byte count refuses a GNU long name or long link header, because
-// Next reads its data as extra bytes. It also refuses sparse format 1.0, for
-// the same reason. The format check refuses a GNU header and a STAR header.
-// The check of the PAX records refuses a GNU.sparse. record. Next gives a
-// sparse entry its logical size, and the hole bytes do not pass through the
-// decoded-byte count. A directory has no data and no effect, but it counts
-// toward MaxEntries.
+// format, the type, the link name, the name and the top-level name. The byte
+// count refuses a PAX header, a GNU long name header and a GNU long link
+// header. It also refuses sparse format 1.0. Next reads their data as extra
+// bytes. The format check refuses a PAX header, a GNU header and a STAR
+// header. Next gives a sparse entry its logical size. The hole bytes do not
+// pass through the decoded-byte count. A directory has no data and no effect,
+// but it counts toward MaxEntries.
 //
 // ReadArchive keeps the bytes that each Next call reads and checks their form
 // (rawFormOK). The tar end is the padding of the last entry and exactly two
@@ -115,10 +115,9 @@ func (c *capReader) Read(p []byte) (int, error) {
 // ReadArchive also refuses:
 //   - two entries, files and directories together, whose names are equal or
 //     differ only in case or in a trailing slash;
-//   - an entry with a long PAX path (over 100 bytes), when the first 100 bytes
-//     of that path are the final name of another entry (cutKey). Case and one
-//     trailing slash do not count, as above. The other entry can come before
-//     or after it. ReadArchive does not compare two such cuts;
+//   - a regular file that is the parent of another entry, as a file traps/a
+//     and an entry traps/a/b. The order does not matter. The directory
+//     entries between them can be absent. Case does not count (tree);
 //   - a directory with a size;
 //   - an archive where the sum of the regular entry sizes passes
 //     MaxDecodedBytes.
@@ -138,7 +137,7 @@ func ReadArchive(b []byte) (*Archive, error) {
 	tr := tar.NewReader(cr)
 	files := make(map[string][]byte)
 	seen := make(map[string]bool)
-	seenCut := make(map[string]bool)
+	layout := &tree{files: make(map[string]bool), parents: make(map[string]bool)}
 	var sizes, prevPad int64
 	for n := 0; ; n++ {
 		cr.kept, cr.keep = cr.kept[:0], true
@@ -154,37 +153,30 @@ func ReadArchive(b []byte) (*Archive, error) {
 		if err != nil || n >= MaxEntries {
 			return nil, ErrArchiveInvalid
 		}
-		// Next keeps only the last PAX 'x' header and leaves no trace of an
-		// earlier one. Another tar implementation can take its name from that
-		// header. So the bytes that this Next call read must match the bytes of
-		// one header. This needs archive/tar to read the header blocks and the
-		// PAX data exactly, with no read-ahead, from a source that is not an
+		// Next skips a meta header and leaves no trace of it. Another tar
+		// implementation can take a name from that header. So the bytes that
+		// this Next call read must be the padding of the previous entry and
+		// one header block. This needs archive/tar to read the header block
+		// exactly, with no read-ahead, from a source that is not an
 		// io.Seeker. The capReader is such a source. If a Go change adds a
-		// buffer, every archive fails, and the tests that use tar.Writer show it.
-		if int64(len(cr.kept)) != headerBytes(prevPad, hdr) {
+		// buffer, every archive fails. The tests that use tar.Writer show it.
+		if int64(len(cr.kept)) != prevPad+blockBytes {
 			return nil, ErrArchiveInvalid
 		}
-		padBefore := prevPad
 		prevPad = 0
 		if hdr.Typeflag == tar.TypeReg {
 			prevPad = (blockBytes - hdr.Size%blockBytes) % blockBytes
 		}
 		key, err := checkEntry(hdr)
-		if err != nil || !rawFormOK(cr.kept, padBefore, hdr) {
+		if err != nil || !rawFormOK(cr.kept[len(cr.kept)-blockBytes:]) {
 			return nil, ErrArchiveInvalid
 		}
-		cut, hasCut := cutKey(hdr)
-		if seen[key] || seenCut[key] || (hasCut && seen[cut]) {
+		isDir := hdr.Typeflag == tar.TypeDir
+		if seen[key] || !layout.add(key, isDir) {
 			return nil, ErrArchiveInvalid
 		}
-		// Only the files map outlives ReadArchive. The clones of the keys let
-		// the seen maps hold no PAX buffer, so the peak heap in the loop stays
-		// small.
-		seen[strings.Clone(key)] = true
-		if hasCut {
-			seenCut[strings.Clone(cut)] = true
-		}
-		if hdr.Typeflag == tar.TypeDir {
+		seen[key] = true
+		if isDir {
 			if hdr.Size != 0 {
 				return nil, ErrArchiveInvalid
 			}
