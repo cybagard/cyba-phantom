@@ -38,6 +38,10 @@ type Rule struct {
 	Exact   fs.FileMode // when not 0, permission and special bits equal it
 	OneLink bool        // the link count must be 1
 	MaxSize int64       // when > 0, the size of the open file is at most this
+
+	// FollowEnd is for OpenPath only: follow a symlink at the last part.
+	// Open, Check, OpenRoot and CheckParents do not use it.
+	FollowEnd bool
 }
 
 // FileID is the device and inode of a file.
