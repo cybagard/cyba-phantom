@@ -110,8 +110,8 @@ func longName(parts, partLen int) string {
 	return "traps/" + strings.Repeat(p+"/", parts-2) + p
 }
 
-// entryCases returns the refused entry forms. Each has a twin, except the case
-// "PAX path and GNU long name".
+// entryCases returns the refused entry forms. Each form with a PAX header has
+// a nil twin. A few other forms have a nil twin, as entryCase says.
 func entryCases() []entryCase {
 	const p = "traps/a"
 	reg := func(names ...string) []byte {
@@ -208,21 +208,31 @@ func entryCases() []entryCase {
 		{"file, then a child", reg(p, "traps/a/b"), reg(p, "traps/ab")},
 		{"child, then the file", reg("traps/a/b", p), reg("traps/ab", p)},
 		{"file, then a grandchild with no parent directory", reg(p, "traps/a/b/c"), reg(p, "traps/ab/c")},
+		{"grandchild, then the file with no parent directory", reg("traps/a/b/c", p), reg("traps/ab/c", p)},
 		{"file, then a child that differs in case", reg("traps/A", "traps/a/b"), reg("traps/A", "traps/ab")},
 		{"file, then a directory below it", build(file(p), dir("traps/a/d/")), build(file(p), dir("traps/ab/d/"))},
 		{"directory below a file, then the file", build(dir("traps/a/d/"), file(p)), build(dir("traps/ab/d/"), file(p))},
 	}, rawFormCases()...)
 }
 
-// maxCut is the length of the ustar name field. posixMtime is an mtime value
+// maxCut is the length of the ustar name field. posixMtime is a time value
 // with a fraction, as GNU tar and Python write it.
 const (
 	maxCut     = 100
 	posixMtime = "1700000000.123456789"
 )
 
-// The names of the cases that need a name over 100 bytes. noSplit has 251 bytes
-// and no slash that gives a ustar split. split131 has 131 bytes and a split.
+// gnuTimes returns the three time records that GNU tar writes: mtime, atime
+// and ctime.
+func gnuTimes() []string {
+	return []string{paxRec("mtime", posixMtime), paxRec("atime", posixMtime), paxRec("ctime", posixMtime)}
+}
+
+// gnuPaxHdr makes the PAX header that GNU tar writes before an entry.
+func gnuPaxHdr() []byte { return paxHdr(gnuTimes()...) }
+
+// Two names need more than 100 bytes. noSplit has 251 bytes and no slash that
+// gives a ustar split. split131 has 131 bytes and a split.
 var (
 	noSplit  = "traps/" + strings.Repeat("a", 245)
 	split131 = "traps/" + strings.Repeat("a", 64) + "/" + strings.Repeat("b", 60)
@@ -379,14 +389,19 @@ func rawFormCases() []entryCase {
 			rawArchive(pathEntry(upperLong), rawFile(strings.ToLower(upperLong[:maxCut]), "x")), nil},
 		{"long name with a cut that ends in a slash and a directory",
 			rawArchive(rawHdr(slashCut[:maxCut], tar.TypeDir, 0), pathEntry(slashCut)), nil},
-		// GNU tar (--format=posix) and Python (PAX_FORMAT) write two forms.
-		// One has an mtime record before each entry. The other has a path
-		// record and an mtime record for a name of 131 bytes.
+		// Python 3.13 (PAX_FORMAT) writes an mtime record before each entry.
+		// For a name of 131 bytes, it writes a path record and an mtime record.
 		{"PAX header with one mtime record before each entry",
 			rawArchive(paxHdr(paxRec("mtime", posixMtime)), rawFile("traps/a", "x"),
 				paxHdr(paxRec("mtime", posixMtime)), rawFile("traps/b", "x")), nil},
 		{"PAX header with a path record and an mtime record for a name of 131 bytes",
 			rawArchive(pathEntry(split131, paxRec("mtime", posixMtime))), nil},
+		// GNU tar 1.35 (--format=posix) writes mtime, atime and ctime records
+		// before each entry. For a name of 131 bytes, it adds a path record.
+		{"PAX header with mtime, atime and ctime records before each entry",
+			rawArchive(gnuPaxHdr(), rawFile("traps/a", "x"), gnuPaxHdr(), rawFile("traps/b", "x")), nil},
+		{"PAX header with path, mtime, atime and ctime records for a name of 131 bytes",
+			rawArchive(pathEntry(split131, gnuTimes()...)), nil},
 		{"no end blocks", gz(rawFile(p, "x")), rawArchive(rawFile(p, "x"))},
 		{"one end block", gz(append(rawFile(p, "x"), zeros(blockBytes)...)), rawArchive(rawFile(p, "x"))},
 	}
@@ -543,6 +558,20 @@ func TestTS19UstarPrefixTwinNames(t *testing.T) {
 		}
 		if want := []string{manifestName, "traps/" + manifestName}; !slices.Equal(a.Names(), want) {
 			t.Errorf("names %q; want %q", a.Names(), want)
+		}
+	}
+}
+
+// T-S-19: checkEntry accepts a header with the format USTAR. It refuses the
+// same header with the format PAX or GNU.
+func TestTS19CheckEntryFormat(t *testing.T) {
+	for _, c := range []struct {
+		format tar.Format
+		ok     bool
+	}{{tar.FormatUSTAR, true}, {tar.FormatPAX, false}, {tar.FormatGNU, false}} {
+		hdr := &tar.Header{Name: "traps/a", Typeflag: tar.TypeReg, Format: c.format}
+		if _, err := checkEntry(hdr); (err == nil) != c.ok {
+			t.Errorf("format %v: error %v; want no error %v", c.format, err, c.ok)
 		}
 	}
 }

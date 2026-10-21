@@ -58,8 +58,9 @@ type capReader struct {
 	r io.Reader
 	n int64
 	// While keep is set, the reader appends the bytes that it passes to kept.
-	// Before an append that would pass maxKept, Read gives ErrArchiveInvalid.
-	// So kept never holds more than maxKept bytes.
+	// Read cuts a read to the room that is left in kept. When no room is
+	// left, Read passes no byte and gives ErrArchiveInvalid. So kept never
+	// holds more than maxKept bytes.
 	keep bool
 	kept []byte
 }
@@ -68,9 +69,11 @@ type capReader struct {
 // Next call that reads an entry reads the padding of the previous entry. That
 // is at most 511 bytes. It also reads one header block. A Next call that reads
 // the tar end reads that padding and the two end blocks. The header block and
-// the end blocks are never in the same call. A call that reads more than
-// maxKept bytes gives ErrArchiveInvalid. So ReadArchive refuses a PAX header
-// with large records before it keeps them.
+// the end blocks are never in the same call. A call that needs more than
+// maxKept bytes fails inside Next. capReader gives ErrArchiveInvalid for the
+// first byte past maxKept. A PAX header with records adds two blocks. So it
+// fails in Next, before ReadArchive keeps the records. The byte count
+// and the format rule refuse a PAX header with no records.
 const maxKept = blockBytes - 1 + 2*blockBytes
 
 func (c *capReader) Read(p []byte) (int, error) {
@@ -80,15 +83,21 @@ func (c *capReader) Read(p []byte) (int, error) {
 	if room := MaxDecodedBytes - c.n + 1; int64(len(p)) > room {
 		p = p[:room]
 	}
+	if c.keep {
+		room := maxKept - len(c.kept)
+		if room == 0 && len(p) > 0 {
+			return 0, ErrArchiveInvalid
+		}
+		if len(p) > room {
+			p = p[:room]
+		}
+	}
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	if c.n > MaxDecodedBytes {
 		return n, ErrArchiveInvalid
 	}
 	if c.keep {
-		if len(c.kept)+n > maxKept {
-			return n, ErrArchiveInvalid
-		}
 		c.kept = append(c.kept, p[:n]...)
 	}
 	return n, err
@@ -153,13 +162,13 @@ func ReadArchive(b []byte) (*Archive, error) {
 		if err != nil || n >= MaxEntries {
 			return nil, ErrArchiveInvalid
 		}
-		// Next skips a meta header and leaves no trace of it. Another tar
-		// implementation can take a name from that header. So the bytes that
-		// this Next call read must be the padding of the previous entry and
-		// one header block. This needs archive/tar to read the header block
-		// exactly, with no read-ahead, from a source that is not an
-		// io.Seeker. The capReader is such a source. If a Go change adds a
-		// buffer, every archive fails. The tests that use tar.Writer show it.
+		// The byte count is a second guard, next to the format rule and
+		// maxKept. With go1.27.2, the three refuse the same meta headers.
+		// The bytes that this Next call read must be the padding of the
+		// previous entry and one header block. This needs archive/tar to read
+		// the header block exactly, with no read-ahead, from a source that is
+		// not an io.Seeker. The capReader is such a source. If a Go change
+		// adds a read-ahead, every archive fails. So the guard fails closed.
 		if int64(len(cr.kept)) != prevPad+blockBytes {
 			return nil, ErrArchiveInvalid
 		}

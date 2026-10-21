@@ -25,8 +25,9 @@ var topLevelDirs = []string{"vhosts", "traps", "fp", "score", "secrets"}
 // in a slash. rawFormOK refuses the raw type byte NUL, so ReadArchive accepts
 // only the raw types '0' and '5'. The checks, in this order:
 //   - the format is ustar. A PAX header, a GNU header and a STAR header give
-//     another format, so they fail here. A GNU long name or long link header
-//     fails the byte count of ReadArchive first;
+//     another format, so they fail here. A PAX header, a GNU long name header
+//     and a GNU long link header fail in ReadArchive first. They fail the
+//     limit maxKept or the byte count;
 //   - the type is a regular file or a directory;
 //   - the link name is empty;
 //   - the name is local and has 1 to 8 parts. Each part has 1 to 64 bytes of

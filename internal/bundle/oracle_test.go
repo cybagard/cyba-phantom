@@ -486,8 +486,10 @@ var differential = map[string]bool{
 	"one end block": false,
 	// The three readers read PAX records, so they list the same entries. The
 	// rule of the format guards a reader that does not read PAX records.
-	"PAX header with one mtime record before each entry":                        false,
-	"PAX header with a path record and an mtime record for a name of 131 bytes": false,
+	"PAX header with one mtime record before each entry":                           false,
+	"PAX header with a path record and an mtime record for a name of 131 bytes":    false,
+	"PAX header with mtime, atime and ctime records before each entry":             false,
+	"PAX header with path, mtime, atime and ctime records for a name of 131 bytes": false,
 }
 
 // T-S-19: for each archive that ReadArchive accepts, the three readers list

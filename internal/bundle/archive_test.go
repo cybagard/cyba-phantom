@@ -81,30 +81,41 @@ func build(ents ...ent) []byte { return gz(buildTar(ents...)) }
 
 func zeros(n int) []byte { return make([]byte, n) }
 
-// T-S-19: with keep set, capReader keeps maxKept bytes without an error. For
-// maxKept+1 bytes, it gives ErrArchiveInvalid and drops the whole Read that
-// passes maxKept, not only the last byte. The test asserts that kept never
-// holds more than maxKept bytes.
+// T-S-19: with keep set, capReader keeps maxKept bytes without an error. A
+// read that asks for more gets the bytes up to maxKept. The next read gives
+// ErrArchiveInvalid and passes no byte. The test asserts that kept never holds
+// more than maxKept bytes.
 func TestTS19CapReaderKeepsAtMostMaxKept(t *testing.T) {
-	readAll := func(n int) (*capReader, error) {
-		cr := &capReader{r: bytes.NewReader(zeros(n)), keep: true}
-		buf := make([]byte, 4096)
-		for {
-			if _, err := cr.Read(buf); err != nil {
-				return cr, err
-			}
-		}
+	cr := &capReader{r: bytes.NewReader(zeros(maxKept + 1)), keep: true}
+	buf := make([]byte, 4096)
+	if n, err := cr.Read(buf); err != nil || n != maxKept || len(cr.kept) != maxKept {
+		t.Errorf("first read: %d bytes, error %v, kept %d; want %d bytes and no error", n, err, len(cr.kept), maxKept)
 	}
-	if cr, err := readAll(maxKept); err != io.EOF || len(cr.kept) != maxKept {
-		t.Errorf("maxKept bytes: error %v, kept %d; want EOF and %d", err, len(cr.kept), maxKept)
+	if n, err := cr.Read(buf); err != ErrArchiveInvalid || n != 0 || len(cr.kept) != maxKept {
+		t.Errorf("second read: %d bytes, error %v, kept %d; want 0 bytes and ErrArchiveInvalid", n, err, len(cr.kept))
 	}
-	if cr, err := readAll(maxKept + 1); err != ErrArchiveInvalid || len(cr.kept) > maxKept {
-		t.Errorf("maxKept+1 bytes: error %v, kept %d; want ErrArchiveInvalid and at most %d", err, len(cr.kept), maxKept)
+	if n, err := cr.Read(nil); err != nil || n != 0 {
+		t.Errorf("empty read: %d bytes, error %v", n, err)
 	}
 	// With keep unset, the reader keeps nothing and has no cap of this kind.
-	cr := &capReader{r: bytes.NewReader(zeros(maxKept + 1))}
-	if _, err := io.Copy(io.Discard, cr); err != nil || len(cr.kept) != 0 {
-		t.Errorf("keep unset: error %v, kept %d", err, len(cr.kept))
+	free := &capReader{r: bytes.NewReader(zeros(maxKept + 1))}
+	if _, err := io.Copy(io.Discard, free); err != nil || len(free.kept) != 0 {
+		t.Errorf("keep unset: error %v, kept %d", err, len(free.kept))
+	}
+}
+
+// T-S-19: a PAX 'x' header with one small record comes before an entry. Next
+// of archive/tar gives an error, on a capReader with keep set. ReadArchive
+// does not need its byte count for this. The kept bytes stay within maxKept.
+func TestTS19PAXHeaderWithSmallRecordFailsInNext(t *testing.T) {
+	tb := append(paxHdr(paxRec("mtime", "1")), rawHdr(markerPath, tar.TypeReg, 0)...)
+	cr := &capReader{r: bytes.NewReader(append(tb, zeros(1024)...)), keep: true}
+	hdr, err := tar.NewReader(cr).Next()
+	if err == nil || hdr != nil {
+		t.Errorf("Next gave header %v and error %v; want an error", hdr != nil, err)
+	}
+	if len(cr.kept) > maxKept {
+		t.Errorf("kept %d bytes, at most %d", len(cr.kept), maxKept)
 	}
 }
 
