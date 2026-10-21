@@ -39,8 +39,7 @@ type Rule struct {
 	OneLink bool        // the link count must be 1
 	MaxSize int64       // when > 0, the size of the open file is at most this
 
-	// FollowEnd is for OpenPath only: follow a symlink at the last part.
-	// Open, Check, OpenRoot and CheckParents do not use it.
+	// FollowEnd: follow a symlink at the last part. Only OpenPath uses it.
 	FollowEnd bool
 }
 
@@ -50,7 +49,7 @@ type FileID = seam.FileID
 // The refusals. Each one is the Reason field of an *Error.
 var (
 	ErrRule        = errors.New("safefile: rule is not valid")
-	ErrName        = errors.New("safefile: name is not one path element")
+	ErrName        = errors.New("safefile: name or path is not valid")
 	ErrType        = errors.New("safefile: file has the wrong type")
 	ErrSymlink     = errors.New("safefile: file is a symbolic link")
 	ErrOwner       = errors.New("safefile: file has the wrong owner")

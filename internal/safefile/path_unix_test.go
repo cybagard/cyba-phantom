@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -117,11 +118,16 @@ func TestTS23_OpenPathSwap(t *testing.T) {
 	fifo(t, filepath.Join(dir, "p"))
 	ln := filepath.Join(dir, "ln")
 	link(t, a, ln)
-	relink := func(target string) func() {
-		return func() {
+	// The actions run in the hook, on the goroutine of openWithin. They call
+	// t.Error and never t.Fatal.
+	relink := func(target string) func(t *testing.T) {
+		return func(t *testing.T) {
 			tmp := filepath.Join(dir, "tmp")
 			_ = os.Remove(tmp)
-			link(t, target, tmp)
+			if err := os.Symlink(target, tmp); err != nil {
+				t.Error(err)
+				return
+			}
 			if err := os.Rename(tmp, ln); err != nil {
 				t.Error(err)
 			}
@@ -131,23 +137,23 @@ func TestTS23_OpenPathSwap(t *testing.T) {
 		name   string
 		path   string
 		rule   Rule
-		action func()
+		action func(t *testing.T)
 	}{
 		{"follow, link to a file", ln, followRule, relink(b)},
 		{"follow, link to a FIFO", ln, followRule, relink(filepath.Join(dir, "p"))},
-		{"no follow, file over name", a, base, func() {
+		{"no follow, file over name", a, base, func(t *testing.T) {
 			if err := os.Rename(b, a); err != nil {
 				t.Error(err)
 			}
 		}},
-		{"no follow, FIFO over name", b, base, func() {
+		{"no follow, FIFO over name", b, base, func(t *testing.T) {
 			if err := os.Rename(filepath.Join(dir, "p"), b); err != nil {
 				t.Error(err)
 			}
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { c.action() }})
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { c.action(t) }})
 			err := openWithin(t, c.path, c.rule)
 			if !errors.Is(err, ErrChanged) {
 				t.Errorf("err = %v, want ErrChanged", err)
@@ -166,6 +172,153 @@ func TestTS23_OpenPathSwap(t *testing.T) {
 	}
 }
 
+func TestTS23_OpenPathEndForms(t *testing.T) {
+	dir := t.TempDir()
+	sub := mkdir(t, filepath.Join(dir, "sub"), 0o700)
+	ln := filepath.Join(dir, "ln")
+	link(t, sub, ln)
+	var checked int
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { checked++ }})
+
+	paths := []string{ln + "/", ln + "//", ln + "/.", ln + "/..", "/"}
+	rules := map[string]Rule{
+		"dir":     {Type: Dir, Owner: OwnerSelf},
+		"regular": {Type: Regular, Owner: OwnerSelf},
+	}
+	for name, r := range rules {
+		for _, follow := range []bool{false, true} {
+			r.FollowEnd = follow
+			for _, p := range paths {
+				if err := openWithin(t, p, r); !errors.Is(err, ErrName) {
+					t.Errorf("%s, follow %v, %q: err = %v, want ErrName",
+						name, follow, filepath.Base(p), err)
+				}
+			}
+		}
+	}
+	if checked != 0 {
+		t.Errorf("AfterCheck ran %d times, a refused path reached the open", checked)
+	}
+	for _, p := range paths {
+		if err := CheckPathParents(p, parentRule); !errors.Is(err, ErrName) {
+			t.Errorf("CheckPathParents %q: err = %v, want ErrName", filepath.Base(p), err)
+		}
+	}
+	// The link itself is still refused or followed by the rule.
+	dirRule := rules["dir"]
+	if err := openWithin(t, ln, dirRule); !errors.Is(err, ErrSymlink) {
+		t.Errorf("link without FollowEnd: err = %v, want ErrSymlink", err)
+	}
+	dirRule.FollowEnd = true
+	if err := openWithin(t, ln, dirRule); err != nil {
+		t.Errorf("link with FollowEnd: %v", err)
+	}
+}
+
+func TestTS23_OpenPathLoop(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	link(t, b, a)
+	link(t, a, b)
+	err := openWithin(t, a, followRule)
+	if !errors.Is(err, ErrSymlink) || !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("link loop with FollowEnd: err = %v, want ErrSymlink", err)
+	}
+	noLeak(t, err, dir)
+}
+
+func TestTS23_OpenPathWholeRule(t *testing.T) {
+	mode := func(m fs.FileMode) func(t *testing.T, p string) {
+		return func(t *testing.T, p string) {
+			if err := os.Chmod(p, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, c := range []struct {
+		name       string
+		setup      func(t *testing.T, p string)
+		rule       Rule // the rule with the parameter
+		hooks      func(t *testing.T, p string) safefiletest.Hooks
+		hookOnPass bool // the hook also runs for the rule without the parameter
+		want       error
+	}{
+		{name: "forbid", setup: mode(0o620), rule: Rule{Forbid: 0o022}, want: ErrMode},
+		{name: "exact", setup: mode(0o644), rule: Rule{Exact: 0o600}, want: ErrMode},
+		{name: "max size", rule: Rule{MaxSize: 5}, want: ErrSize,
+			setup: func(t *testing.T, p string) {
+				if err := os.WriteFile(p, []byte("0123456789"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "one link", rule: Rule{OneLink: true}, want: ErrLinks,
+			setup: func(t *testing.T, p string) {
+				if err := os.Link(p, p+"-twin"); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "owner", hooks: func(t *testing.T, p string) safefiletest.Hooks {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := Identity(fi)
+			return safefiletest.Hooks{OtherOwner: func(x FileID) bool { return x == id }}
+		}, want: ErrOwner},
+		{name: "chmod after the type check", rule: Rule{Forbid: 0o022},
+			hookOnPass: true, want: ErrMode,
+			hooks: func(t *testing.T, p string) safefiletest.Hooks {
+				return safefiletest.Hooks{AfterCheck: func(string) {
+					if err := os.Chmod(p, 0o666); err != nil {
+						t.Error(err)
+					}
+				}}
+			}},
+	} {
+		for _, follow := range []bool{false, true} {
+			name := c.name
+			if follow {
+				name += ", follow"
+			}
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				p := put(t, dir, "f", "x")
+				if c.setup != nil {
+					c.setup(t, p)
+				}
+				path := p
+				if follow {
+					path = filepath.Join(dir, "ln")
+					link(t, p, path)
+				}
+				var h safefiletest.Hooks
+				if c.hooks != nil {
+					h = c.hooks(t, p)
+				}
+				// The same file passes with a rule that lacks the parameter.
+				pass := Rule{Type: Regular, Owner: OwnerSelf, FollowEnd: follow}
+				if c.hookOnPass {
+					safefiletest.Set(t, h)
+				}
+				if err := openWithin(t, path, pass); err != nil {
+					t.Fatalf("without the parameter: %v", err)
+				}
+				if c.hookOnPass {
+					mode(0o600)(t, p)
+				}
+				r := c.rule
+				r.Type, r.Owner, r.FollowEnd = Regular, OwnerSelf, follow
+				if !c.hookOnPass {
+					safefiletest.Set(t, h)
+				}
+				if err := openWithin(t, path, r); !errors.Is(err, c.want) {
+					t.Errorf("err = %v, want %v", err, c.want)
+				}
+			})
+		}
+	}
+}
+
 // mkdir makes a directory with the exact mode m.
 func mkdir(t *testing.T, path string, m fs.FileMode) string {
 	t.Helper()
@@ -179,11 +332,15 @@ func mkdir(t *testing.T, path string, m fs.FileMode) string {
 }
 
 func TestTS23_PathParents(t *testing.T) {
-	// The test tree is below the package directory. Each parent up to "/"
-	// is then closed for write.
+	// The test tree is below the package directory. The test needs that each
+	// directory from "/" to the checkout has no group or other write bit.
 	wd, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := CheckPathParents(filepath.Join(wd, "path_unix_test.go"), parentRule); err != nil {
+		t.Fatalf("the checkout must be below directories with no group or other "+
+			"write bit: %v", err)
 	}
 	top, err := os.MkdirTemp(wd, "parents")
 	if err != nil {
@@ -246,8 +403,8 @@ func TestTS23_PathParents(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootID, _ := Identity(rootInfo)
-	for _, id := range []FileID{okID, rootID} {
-		t.Run("other owner", func(t *testing.T) {
+	for name, id := range map[string]FileID{"owner of ok": okID, "owner of /": rootID} {
+		t.Run(name, func(t *testing.T) {
 			safefiletest.Set(t, safefiletest.Hooks{
 				OtherOwner: func(x FileID) bool { return x == id },
 			})
@@ -287,11 +444,28 @@ func TestTS23_PathParents(t *testing.T) {
 		})
 	}
 
+	// A chain of links: lN points to l(N-1), and l1 points to the directory ok.
+	chain := mkdir(t, filepath.Join(top, "chain"), 0o755)
+	link(t, ok, filepath.Join(chain, "l1"))
+	for i := 2; i <= maxLinks+1; i++ {
+		link(t, "l"+strconv.Itoa(i-1), filepath.Join(chain, "l"+strconv.Itoa(i)))
+	}
+	chainPath := func(n int) string {
+		return filepath.Join(chain, "l"+strconv.Itoa(n), "f")
+	}
+	if err := CheckPathParents(chainPath(maxLinks), parentRule); err != nil {
+		t.Errorf("%d links: %v", maxLinks, err)
+	}
+
 	for _, c := range []struct {
 		path string
 		rule Rule
 		want error
 	}{
+		{chainPath(maxLinks + 1), parentRule, ErrSymlink},
+		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, FollowEnd: true}, ErrRule},
+		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, OneLink: true}, ErrRule},
+		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, MaxSize: 1}, ErrRule},
 		{filepath.Join(ok, "none"), parentRule, fs.ErrNotExist},
 		{filepath.Join(top, "none", "f"), parentRule, fs.ErrNotExist},
 		{filepath.Join(ok, "f", "x"), parentRule, ErrType},
