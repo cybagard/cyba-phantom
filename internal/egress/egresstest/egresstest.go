@@ -128,8 +128,8 @@ func (n *Names) serve(c net.Conn) {
 }
 
 // answer builds the reply to the query q. It gives nil when q is shorter than
-// the header and the question, when a label has 64 bytes or more, or when a
-// label goes past the end of q.
+// the header and the question. It also gives nil when a label is 64 bytes or
+// longer, or runs past the end of q.
 func (n *Names) answer(q []byte) []byte {
 	var name strings.Builder
 	i := 12
