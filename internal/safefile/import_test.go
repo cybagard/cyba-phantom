@@ -27,7 +27,7 @@ func walkError(dir, p string, err error) error {
 
 // importers gives the .go files below dir that do not end in _test.go and
 // import path. It reads only the imports of each file. It reads a file with
-// a build constraint too. It skips an entry that is removed during the walk.
+// a build constraint too. It skips an entry that another test removes during the walk.
 func importers(dir, path string) ([]string, error) {
 	var found []string
 	fset := token.NewFileSet()
