@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"slices"
@@ -19,6 +21,8 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 const (
@@ -56,6 +60,15 @@ type ACMEParams struct {
 	// for the CA. It is a test hook; only tests in this package set it. It is nil
 	// in production, and then the client uses the roots of the system.
 	trustedRoots *x509.CertPool
+
+	// egressRule and egressResolver are test hooks. Only tests in this package
+	// set them. egressRule replaces the address rule. egressResolver replaces
+	// the resolver that looks up the name of the CA. Both are nil in
+	// production, and then the client uses egress.Permitted and
+	// net.DefaultResolver. No config key, flag, environment variable, or other
+	// input sets them.
+	egressRule     func(netip.Addr) bool
+	egressResolver *net.Resolver
 
 	// maintenanceInterval is the time between two renewal checks, and between two
 	// OCSP checks, of the certificate cache. It is a test hook; only tests in this
@@ -201,7 +214,14 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		}
 		a.allowed[n] = struct{}{}
 	}
-	guard := egressGuard(ca, p.OnEgress)
+	rule, resolver := p.egressRule, p.egressResolver
+	if rule == nil {
+		rule = egress.Permitted
+	}
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	guard := egressGuard(ca, p.OnEgress, rule, resolver)
 
 	// The key of the issuer below. The wrapper needs it before certmagic.New.
 	issuerKey := (&certmagic.ACMEIssuer{CA: p.CA}).IssuerKey()
@@ -289,25 +309,66 @@ func isLoggedEvent(event string) bool {
 }
 
 // egressGuard returns the proxy function for the ACME client and the OCSP
-// client. It refuses each request whose scheme, host or port differs from ca. It
-// never gives a proxy, so it never uses a proxy from the environment. seen may be
-// nil.
+// client. It refuses each request whose scheme, host or port differs from ca.
+// An IP-literal host is compared as a parsed address with no IPv4-mapped form.
+// An address with a zone is refused. A name is compared as lower-case text.
+//
+// After that, the host must pass rule. An IP literal is checked as it is. A
+// name is looked up with resolver. The request is refused when the lookup
+// fails, gives no address, or gives one address that rule refuses. Each
+// refusal gives errEgress, which holds no address, name or port. The function
+// never gives a proxy, so it never uses a proxy from the environment. seen may
+// be nil.
 //
 // The transport calls the function for each new connection and for each
 // HTTP/1.1 request. A request on a pooled HTTP/2 connection to the same
 // authority does not call it. The function allowed that authority when the
 // transport made the connection.
-func egressGuard(ca *url.URL, seen func(host string)) func(*http.Request) (*url.URL, error) {
-	scheme, host, port := strings.ToLower(ca.Scheme), strings.ToLower(ca.Hostname()), portOf(ca)
+func egressGuard(ca *url.URL, seen func(host string), rule func(netip.Addr) bool, resolver *net.Resolver) func(*http.Request) (*url.URL, error) {
+	scheme, port := strings.ToLower(ca.Scheme), portOf(ca)
+	caAddr, caName, caOK := hostOf(ca)
 	return func(r *http.Request) (*url.URL, error) {
 		if seen != nil {
 			seen(r.URL.Host)
 		}
-		if strings.ToLower(r.URL.Scheme) != scheme || strings.ToLower(r.URL.Hostname()) != host || portOf(r.URL) != port {
+		addr, name, ok := hostOf(r.URL)
+		if !ok || !caOK || strings.ToLower(r.URL.Scheme) != scheme || portOf(r.URL) != port || addr != caAddr || name != caName {
 			return nil, errEgress
+		}
+		if addr.IsValid() {
+			if !rule(addr) {
+				return nil, errEgress
+			}
+			return nil, nil
+		}
+		addrs, err := resolver.LookupNetIP(r.Context(), "ip", name)
+		if err != nil || len(addrs) == 0 {
+			return nil, errEgress
+		}
+		for _, a := range addrs {
+			if !rule(a.Unmap()) {
+				return nil, errEgress
+			}
 		}
 		return nil, nil
 	}
+}
+
+// hostOf returns the host of u. An IP literal gives its parsed address with no
+// IPv4-mapped form. A name gives its lower-case text. The other result is the
+// zero value. ok is false for an address with a zone.
+func hostOf(u *url.URL) (addr netip.Addr, name string, ok bool) {
+	h := u.Hostname()
+	if a, err := netip.ParseAddr(h); err == nil {
+		return a.Unmap(), "", a.Zone() == ""
+	}
+	// Unicode folding maps U+212A KELVIN SIGN to "k". Fold ASCII only.
+	return netip.Addr{}, strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, h), true
 }
 
 // portOf returns the port of u. A URL with no port gets the port of its scheme.

@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -25,6 +26,9 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
+	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 )
 
 // syncBuf is a bytes.Buffer that many goroutines can write.
@@ -165,9 +169,22 @@ func prodHandshake(a *ACME, sni string, protos ...string) error {
 	return err
 }
 
+// permitLoopback is the test address rule: the production rule, and also the
+// loopback addresses of the test CA.
+func permitLoopback(a netip.Addr) bool { return a.IsLoopback() || egress.Permitted(a) }
+
+// testNames returns a name set. The default CA name has a global address.
+func testNames(t testing.TB) *egresstest.Names {
+	n := egresstest.NewNames(t)
+	n.Set("ca.test.", netip.MustParseAddr("1.1.1.1"))
+	return n
+}
+
 // newTestACME builds an ACME with test values and a new store. mod changes the
-// values first. The default CA name does not resolve: a seeded certificate that
-// needs no renewal makes no request. The test stops the cache when it ends.
+// values first. The test rule permits loopback. The test resolver answers for
+// the default CA name only, with a global address. A seeded certificate that
+// needs no renewal makes no request. A test of the production rule sets both
+// hooks to nil. The test stops the cache when it ends.
 func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
 	state, err := os.OpenRoot(t.TempDir())
@@ -184,6 +201,9 @@ func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 		Host:    "127.0.0.1",
 		Port:    8443,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+
+		egressRule:     permitLoopback,
+		egressResolver: testNames(t).Resolver(),
 	}
 	if mod != nil {
 		mod(&p)
@@ -367,6 +387,62 @@ func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 	}
 	if len(seen) != 12 || !slices.Contains(seen, "other.test") {
 		t.Errorf("the hook saw %v", seen)
+	}
+}
+
+// TestTS21GuardComparesLiteralsAsAddresses: an IP-literal host is the same
+// authority when it parses to the same unmapped address. Then the rule sees
+// that address. A zone is refused before the rule.
+func TestTS21GuardComparesLiteralsAsAddresses(t *testing.T) {
+	global, other := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("2001:db8::1")
+	for _, c := range []struct {
+		ca, req string
+		calls   []netip.Addr // the addresses that the rule saw
+		refuse  bool
+	}{
+		{"https://[2001:DB8:0::1]/", "https://[2001:db8::1]/", []netip.Addr{other}, true},
+		{"https://[::ffff:8.8.8.8]/", "https://8.8.8.8/", []netip.Addr{global}, false},
+		{"https://8.8.8.8/", "https://[::ffff:8.8.8.8]/", []netip.Addr{global}, false},
+		{"https://8.8.8.8/", "https://8.8.4.4/", nil, true},
+		{"https://[fe80::1%25eth0]/", "https://[fe80::1%25eth0]/", nil, true},
+		{"https://[fe80::1%25eth0]/", "https://[fe80::1]/", nil, true},
+	} {
+		var calls []netip.Addr
+		rule := func(a netip.Addr) bool { calls = append(calls, a); return a == global }
+		ca, err := url.Parse(c.ca)
+		mustNil(t, err)
+		req, err := http.NewRequest(http.MethodGet, c.req, nil)
+		mustNil(t, err)
+		u, err := egressGuard(ca, nil, rule, testNames(t).Resolver())(req)
+		if (err != nil) != c.refuse || u != nil || !slices.Equal(calls, c.calls) {
+			t.Errorf("%s vs %s: proxy = %v, %v; rule saw %v; want refuse = %v, %v", c.ca, c.req, u, err, calls, c.refuse, c.calls)
+		}
+		if err != nil && err != errEgress {
+			t.Errorf("%s vs %s: error is not the fixed error: %v", c.ca, c.req, err)
+		}
+	}
+}
+
+// TestTS21GuardChecksEveryAddressOfAName: a name passes only when the lookup
+// works and every address passes the production rule.
+func TestTS21GuardChecksEveryAddressOfAName(t *testing.T) {
+	names := egresstest.NewNames(t)
+	names.Set("ok.test.", netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("2001:4860:4860::8888"))
+	names.Set("mixed.test.", netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("10.0.0.1"))
+	names.Set("mapped.test.", netip.MustParseAddr("::ffff:127.0.0.1"))
+	names.Set("empty.test.")
+	for _, c := range []struct {
+		name   string
+		refuse bool
+	}{{"ok.test", false}, {"OK.test", false}, {"mixed.test", true}, {"mapped.test", true}, {"empty.test", true}, {"gone.test", true}} {
+		ca, err := url.Parse("https://" + c.name + "/")
+		mustNil(t, err)
+		req, err := http.NewRequest(http.MethodGet, "https://"+c.name+"/dir", nil)
+		mustNil(t, err)
+		u, err := egressGuard(ca, nil, egress.Permitted, names.Resolver())(req)
+		if (err != nil) != c.refuse || u != nil || (err != nil && err != errEgress) {
+			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.refuse)
+		}
 	}
 }
 

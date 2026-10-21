@@ -18,6 +18,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"runtime"
 	"slices"
 	"strconv"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
+	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
@@ -484,5 +487,70 @@ func TestTS16OCSPStaysOffAfterMaintenanceTicks(t *testing.T) {
 	}
 	if got := f.egress.hosts(); len(got) != 0 && !slices.Equal(got, []string{f.rig.host}) {
 		t.Errorf("guard saw %v, want nothing or only %s", got, f.rig.host)
+	}
+}
+
+// TestTS21ProductionRuleRefusesLoopbackCA: with the production rule, a CA on
+// a loopback address gets no request. This holds for an IP literal. It also
+// holds for a name that the resolver maps to loopback, or to a mix of
+// addresses. Start gives no error. The log text holds no address and no name.
+func TestTS21ProductionRuleRefusesLoopbackCA(t *testing.T) {
+	const caName = "pebble.test"
+	for _, c := range []struct {
+		label string
+		addrs []netip.Addr // answers for caName; nil: the CA is the IP literal
+	}{
+		{"literal", nil},
+		{"name for loopback", []netip.Addr{netip.MustParseAddr("127.0.0.1")}},
+		{"name for global and loopback", []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			var reqs atomic.Int64
+			var logs syncBuf
+			names := egresstest.NewNames(t)
+			names.Set(caName+".", c.addrs...)
+			front := func(h http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reqs.Add(1); h.ServeHTTP(w, r) })
+			}
+			f := newIssueFixture(t, "refused.phantom.test", front, func(p *ACMEParams) {
+				p.egressRule, p.egressResolver = nil, nil // production values
+				p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+				if c.addrs != nil { // p.CA is the IP-literal URL here
+					ca, err := url.Parse(p.CA)
+					mustNil(t, err)
+					p.CA, p.egressResolver = "https://"+caName+":"+ca.Port()+"/dir", names.Resolver()
+				}
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			mustNil(t, f.a.Start(ctx))
+			for deadline := time.Now().Add(10 * time.Second); len(f.egress.hosts()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			}
+			if len(f.egress.hosts()) == 0 {
+				t.Fatal("the guard saw no request")
+			}
+			// Start holds the lock of its name while it retries. So a
+			// synchronous obtain uses another name.
+			err := f.a.cfg.ObtainCertSync(ctx, "sync.phantom.test")
+			if err == nil || !strings.Contains(err.Error(), errEgress.Error()) {
+				t.Fatalf("obtain error is not the guard error: %v", err)
+			}
+			if n := reqs.Load(); n != 0 {
+				t.Errorf("Pebble got %d requests", n)
+			}
+			// The library wraps the error with the CA URL. That is the
+			// configured value, so the error text may hold the configured
+			// host. It holds no resolved address. The log holds neither.
+			for _, tried := range []string{"8.8.8.8", "127.0.0.1"} {
+				if c.addrs != nil && strings.Contains(err.Error(), tried) {
+					t.Errorf("error text holds %q: %v", tried, err)
+				}
+			}
+			for _, tried := range []string{"8.8.8.8", "127.0.0.1", caName} {
+				if strings.Contains(logs.String(), tried) {
+					t.Errorf("log text holds %q: %s", tried, logs.String())
+				}
+			}
+		})
 	}
 }
