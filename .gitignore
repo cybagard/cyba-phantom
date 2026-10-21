@@ -1,6 +1,7 @@
 # build artifacts
 /bin/
 cover*.out
+internal/safefile/parents*/
 
 # dev tooling storage
 .kilo/
