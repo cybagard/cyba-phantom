@@ -8,9 +8,14 @@ import (
 	"net/netip"
 )
 
+// errRefused is the error that each refusal returns.
+var errRefused = errors.New("connection refused by the address rule")
+
 // ErrRefused is the error for each refused address. Its text has no address,
-// name or port, so a client can log it.
-var ErrRefused = errors.New("connection refused by the address rule")
+// name or port, so a client can log it. A change to this variable does not
+// change the rule. After a change, errors.Is(err, ErrRefused) is false for a
+// refusal.
+var ErrRefused = errRefused
 
 // refused4 are the refused IPv4 prefixes. Each other IPv4 address is
 // permitted.
