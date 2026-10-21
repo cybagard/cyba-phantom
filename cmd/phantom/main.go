@@ -37,8 +37,9 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 	cfg, err := loadWith(fs.Arg(0), env, netFor(*check))
 	if err != nil {
 		// The error is a joined list of *config.Error. Each one escapes
-		// its text and holds no secret value. A nil Net gives a plain
-		// error instead, but netFor never gives a nil Net.
+		// its text and holds no secret value. LoadWith gives a plain
+		// error when the Dialer or the Resolver of the Net is nil.
+		// netFor always sets both.
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

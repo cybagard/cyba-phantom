@@ -47,6 +47,7 @@ var (
 // The decoys serve, the sensor writes one fixed line, and the start line says that it is not healthy.
 // A queue error, a bind error, or a decoy server that does not start
 // gives exit 1 at once.
+// A serve call that ends with an error also gives exit 1, after the stop.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	c := event.NewCounters()

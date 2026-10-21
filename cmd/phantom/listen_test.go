@@ -219,7 +219,14 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
 	go func() { r.code = serveWith(ctx, cancel, cfg, p, d, r.out, &r.err); close(r.done) }()
-	t.Cleanup(func() { cancel(); <-r.done })
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-r.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return %v after the cancel at the end of the test", sigtermWait)
+		}
+	})
 	return r
 }
 
@@ -303,7 +310,11 @@ func TestTS16_BindConflict(t *testing.T) {
 			case <-r.out.started:
 				// serve wrote the start line. Stop it, then read the exit code.
 				r.cancel()
-				<-r.done
+				select {
+				case <-r.done:
+				case <-time.After(sigtermWait):
+					t.Fatalf("serve did not return %v after the cancel", sigtermWait)
+				}
 			}
 			if r.out.hasStarted() {
 				t.Fatalf("serve bound the blocked address %s and wrote the start line; exit %d; stderr %q", blocker.Addr(), r.code, r.err.String())
@@ -329,16 +340,21 @@ func TestTS16_BindConflict(t *testing.T) {
 	}
 }
 
-// freePort returns a TCP port that no socket holds now.
-// Another process can take the port before the caller binds it.
-func freePort(t *testing.T) int {
+// freePorts returns two different TCP ports that no socket holds now.
+// It holds both listeners while it takes the ports.
+// Another process can take a port before the caller binds it.
+func freePorts(t *testing.T) (int, int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", ":0")
-	if err != nil {
-		t.Fatal(err)
+	var ports [2]int
+	for i := range ports {
+		ln, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		ports[i] = ln.Addr().(*net.TCPAddr).Port
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	return ports[0], ports[1]
 }
 
 // listenSockets returns the local port of each TCP socket that this
@@ -388,10 +404,12 @@ func listenSockets(t *testing.T) map[string]int {
 // TestTS16_WildcardListen starts serve with listen.https on 0.0.0.0,
 // on [::], on 127.0.0.1, and on the empty host. After the start line,
 // the process has exactly two new LISTEN sockets: the two decoy sockets.
-// The ACME client adds none. An unspecified IP gives the empty Host to
-// the client, so the solver address is ":port". A bind on the solver
-// address fails with "address already in use", because the decoy socket
-// holds the port. The test needs /proc/net/tcp. It skips without it.
+// The test seeds a cached certificate, so no challenge runs. An
+// unspecified IP gives the empty Host to the client, so the solver
+// address is ":port". A bind on the solver address fails with "address
+// already in use", because the decoy socket holds the port. The test
+// checks the other parameters that serve gives to the client.
+// The test needs /proc/net/tcp. It skips without it.
 func TestTS16_WildcardListen(t *testing.T) {
 	if _, err := os.Stat("/proc/net/tcp"); err != nil {
 		t.Skip("there is no /proc/net/tcp: the test reads the LISTEN sockets from it")
@@ -406,20 +424,17 @@ func TestTS16_WildcardListen(t *testing.T) {
 			// The test uses only the CA address. Serve binds the others
 			// with the real listen.
 			_, _, ca := openListeners(t)
-			httpsPort, httpPort := freePort(t), freePort(t)
-			if httpPort == httpsPort {
-				t.Skip("the free ports are the same")
-			}
+			httpsPort, httpPort := freePorts(t)
 			https := c.host + ":" + strconv.Itoa(httpsPort)
 			cfg := serveCfg(t, https, "127.0.0.1:"+strconv.Itoa(httpPort), ca)
 			p := tempState(t, cfg)
 			caURL, _ := cfg.Get("acme.ca")
 			// With a cached certificate the client makes no order.
 			seedCache(t, p, caURL.Str)
-			var gotHost string
+			var got listener.ACMEParams
 			oldNew := newACME
 			t.Cleanup(func() { newACME = oldNew })
-			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { gotHost = ap.Host; return oldNew(ap) }
+			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
 			before := listenSockets(t)
 			r := launchServe(t, cfg, p, realDeps)
 			r.waitStarted(t)
@@ -435,10 +450,36 @@ func TestTS16_WildcardListen(t *testing.T) {
 			if !slices.Equal(fresh, want) {
 				t.Errorf("new LISTEN ports %v, want exactly %v (the two decoy sockets)", fresh, want)
 			}
-			if gotHost != c.wantHost {
-				t.Errorf("Host given to NewACME = %q, want %q", gotHost, c.wantHost)
+			if got.Host != c.wantHost {
+				t.Errorf("Host given to NewACME = %q, want %q", got.Host, c.wantHost)
 			}
-			solver := net.JoinHostPort(gotHost, strconv.Itoa(httpsPort))
+			if got.Port != httpsPort {
+				t.Errorf("Port given to NewACME = %d, want %d", got.Port, httpsPort)
+			}
+			var wantNames []string
+			for i := 0; ; i++ {
+				v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
+				if v.Str == "" {
+					break
+				}
+				wantNames = append(wantNames, v.Str)
+			}
+			if !slices.Equal(got.Names, wantNames) {
+				t.Errorf("Names given to NewACME = %q, want %q", got.Names, wantNames)
+			}
+			if want := config.CADirectory(caURL.Str); got.CA != want {
+				t.Errorf("CA given to NewACME = %q, want %q", got.CA, want)
+			}
+			if email, _ := cfg.Get("acme.email"); got.Email != email.Str {
+				t.Errorf("Email given to NewACME = %q, want %q", got.Email, email.Str)
+			}
+			if got.Storage == nil {
+				t.Error("Storage given to NewACME is nil")
+			}
+			if got.Logger == nil {
+				t.Error("Logger given to NewACME is nil")
+			}
+			solver := net.JoinHostPort(got.Host, strconv.Itoa(got.Port))
 			if ln, err := net.Listen("tcp", solver); err == nil {
 				ln.Close()
 				t.Errorf("a bind on the solver address %q worked, want an error", solver)
@@ -498,7 +539,8 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 	served = func() {
 		// The first serve call to return waits here until stopACME
 		// runs, or until holdServed ends. With the correct order,
-		// stopACME waits for this call, so the time ends the wait.
+		// serveWith calls stopACME only after this call returns, so
+		// the time ends the wait.
 		// If stopACME runs before both serve calls returned, it
 		// frees this call. Then the count in its event is below 2.
 		holdOne.Do(func() {
@@ -675,15 +717,35 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 		newFails bool
 		breakIt  func(t *testing.T, p *startParams)
 	}{
-		{"cache is a file", "phantom: certificate cache does not open", "phantom: started — certificate client did not start", false, false, false, func(t *testing.T, p *startParams) {
-			if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"no state directory", "phantom: state directory does not open", "phantom: started — store not healthy — certificate client did not start", true, false, false,
-			func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") }},
-		{"client make fails", "phantom: certificate client does not start", "phantom: started — certificate client did not start", false, false, true, nil},
-		{"client start fails", "phantom: certificate client does not start", "phantom: started — certificate client start failed", false, true, false, nil},
+		{
+			name:      "cache is a file",
+			line:      "phantom: certificate cache does not open",
+			startLine: "phantom: started — certificate client did not start",
+			breakIt: func(t *testing.T, p *startParams) {
+				if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:      "no state directory",
+			line:      "phantom: state directory does not open",
+			startLine: "phantom: started — store not healthy — certificate client did not start",
+			noState:   true,
+			breakIt:   func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") },
+		},
+		{
+			name:      "client make fails",
+			line:      "phantom: certificate client does not start",
+			startLine: "phantom: started — certificate client did not start",
+			newFails:  true,
+		},
+		{
+			name:      "client start fails",
+			line:      "phantom: certificate client does not start",
+			startLine: "phantom: started — certificate client start failed",
+			cached:    true,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			httpsLn, plainLn, caAddr := openListeners(t)

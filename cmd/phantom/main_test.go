@@ -131,6 +131,12 @@ func TestTS10_CheckWiring(t *testing.T) {
 	if strings.Contains(stdout.String(), valid) {
 		t.Errorf("start: stdout %q holds the --check line", stdout.String())
 	}
+	if got.Dialer == nil {
+		t.Error("the start Dialer is nil")
+	}
+	if got.Resolver == nil {
+		t.Error("the start Resolver is nil")
+	}
 	if _, ok := got.Dialer.(noNet); ok {
 		t.Error("the start Dialer is noNet")
 	}
@@ -189,7 +195,7 @@ func TestTS10_CheckExec(t *testing.T) {
 		t.Errorf("acme.ca not a URL: stderr %q lacks acme.ca", se)
 	}
 	// A URL key with user information and a password: the run shows
-	// neither (SEC-12). The check on outs at the end looks for both.
+	// neither (SEC-13). The check on outs at the end looks for both.
 	userInfo := urlUser + ":" + urlPass + "@"
 	code, _, se = runCheck(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=https://"+userInfo+"ca.example.invalid")
 	if code == 0 || !strings.Contains(se, "acme.ca") {
@@ -367,53 +373,51 @@ func TestTS11_CheckACME(t *testing.T) {
 		name, file string
 		key        string // key is "" for a file that passes.
 		env        []string
+		stderr     string // stderr is the whole text of a fixed refusal, or "".
 	}{
-		{"valid", body, "", nil},
-		{"header 8192", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=8192"}},
-		{"header 16384", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=16384"}},
-		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}},
-		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}},
-		{"no names", names("[]"), "acme.names", nil},
-		{"17 names", names(many(17)), "acme.names", nil},
-		{"upper case", names("[Decoy.example.com]"), "acme.names", nil},
-		{"wildcard", names(`["*.example.com"]`), "acme.names", nil},
-		{"IP literal", names("[192.0.2.1]"), "acme.names", nil},
-		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil},
-		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil},
-		{"one label", names("[decoy]"), "acme.names", nil},
-		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil},
-		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil},
-		{"localhost", names("[localhost]"), "acme.names", nil},
-		{"x.localhost", names("[x.localhost]"), "acme.names", nil},
-		{"x.local", names("[x.local]"), "acme.names", nil},
-		{"internal name", names("[x.internal]"), "acme.names", nil},
-		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil},
-		{"local", names("[local]"), "acme.names", nil},
-		{"internal", names("[internal]"), "acme.names", nil},
-		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil},
-		{"home.arpa", names("[home.arpa]"), "", nil},
-		{"16 names", names(many(16)), "", nil},
-		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil},
-		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil},
-		{"duplicate", names("[a.example, a.example]"), "acme.names", nil},
-		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}},
-		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}},
-		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"}},
-		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}},
-		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}},
-		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}},
-		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}},
-		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}},
-		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}},
-		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}},
-		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}},
-		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}},
-		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}},
-		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}},
-	}
-	// fixed holds the whole stderr of a row with a fixed refusal text.
-	fixed := map[string]string{
-		"cache dir is the state directory": "config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path must be below the state directory: value \"/var/lib/phantom\"\n",
+		{"valid", body, "", nil, ""},
+		{"header 8192", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=8192"}, ""},
+		{"header 16384", body, "", []string{"PHANTOM_LIMITS_HEADER_BYTES=16384"}, ""},
+		{"header 8191", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=8191"}, ""},
+		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}, ""},
+		{"no names", names("[]"), "acme.names", nil, ""},
+		{"17 names", names(many(17)), "acme.names", nil, ""},
+		{"upper case", names("[Decoy.example.com]"), "acme.names", nil, ""},
+		{"wildcard", names(`["*.example.com"]`), "acme.names", nil, ""},
+		{"IP literal", names("[192.0.2.1]"), "acme.names", nil, ""},
+		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil, ""},
+		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil, ""},
+		{"one label", names("[decoy]"), "acme.names", nil, ""},
+		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil, ""},
+		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil, ""},
+		{"localhost", names("[localhost]"), "acme.names", nil, ""},
+		{"x.localhost", names("[x.localhost]"), "acme.names", nil, ""},
+		{"x.local", names("[x.local]"), "acme.names", nil, ""},
+		{"internal name", names("[x.internal]"), "acme.names", nil, ""},
+		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil, ""},
+		{"local", names("[local]"), "acme.names", nil, ""},
+		{"internal", names("[internal]"), "acme.names", nil, ""},
+		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil, ""},
+		{"home.arpa", names("[home.arpa]"), "", nil, ""},
+		{"16 names", names(many(16)), "", nil, ""},
+		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil, ""},
+		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil, ""},
+		{"duplicate", names("[a.example, a.example]"), "acme.names", nil, ""},
+		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}, ""},
+		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}, ""},
+		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"},
+			"config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path must be below the state directory: value \"/var/lib/phantom\"\n"},
+		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}, ""},
+		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}, ""},
+		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}, ""},
+		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}, ""},
+		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}, ""},
+		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}, ""},
+		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}, ""},
+		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}, ""},
+		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
+		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
+		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -429,8 +433,8 @@ func TestTS11_CheckACME(t *testing.T) {
 			if code != 1 || !strings.Contains(se.String(), r.key) {
 				t.Errorf("exit %d, stderr %q; want exit 1 and a refusal that names %q", code, se.String(), r.key)
 			}
-			if want, ok := fixed[r.name]; ok && se.String() != want {
-				t.Errorf("stderr %q; want %q", se.String(), want)
+			if r.stderr != "" && se.String() != r.stderr {
+				t.Errorf("stderr %q; want %q", se.String(), r.stderr)
 			}
 		})
 	}
