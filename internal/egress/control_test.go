@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTS21ControlRefusesBadInput(t *testing.T) {
@@ -34,6 +35,7 @@ func TestTS21ControlAppliesTheRule(t *testing.T) {
 	}
 	refused := []string{
 		"169.254.169.254:80", "[fe80::1%eth0]:443", "[::ffff:10.0.0.1]:443",
+		"[2606:4700::1111%eth0]:443", "8.8.8.8%eth0:443",
 	}
 	for _, tc := range tests {
 		err := control(context.Background(), tc.network, tc.global, nil)
@@ -61,5 +63,30 @@ func TestTS21RefusalSurvivesOpError(t *testing.T) {
 	wrapped := &net.OpError{Op: "dial", Net: "tcp", Err: err}
 	if !errors.Is(wrapped, ErrRefused) {
 		t.Errorf("errors.Is is false for %v", wrapped)
+	}
+}
+
+// A test that sets ErrRefused must not run in parallel.
+func TestTS21RefusalHoldsWhenErrRefusedIsReset(t *testing.T) {
+	saved := ErrRefused
+	t.Cleanup(func() { ErrRefused = saved })
+	ErrRefused = nil
+
+	err := control(context.Background(), "tcp4", "127.0.0.1:80", nil)
+	if err == nil {
+		t.Fatal("control permits 127.0.0.1")
+	}
+	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	defer ln.Close()
+	_, derr := Dialer(time.Second).Dial("tcp", ln.Addr().String())
+	if derr == nil {
+		t.Fatal("dialer connects to 127.0.0.1")
+	}
+	ErrRefused = saved
+	if !errors.Is(err, ErrRefused) || !errors.Is(derr, ErrRefused) {
+		t.Errorf("errors %v and %v do not match ErrRefused", err, derr)
 	}
 }
