@@ -986,20 +986,47 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	}
 	r := &running{done: make(chan struct{}), out: newStartWriter()}
 	go func() { r.code = serve(cfg, r.out, &r.err); close(r.done) }()
-	// The cleanup ends in bounded time. It frees serve and sends
-	// SIGTERM again. The test may end before the first signal or after
-	// a failed send. The handler of the test is still active then.
+	// sendSigterm sends one SIGTERM and waits until sig gets it. The kernel
+	// can run the handler later on another thread. The test must not
+	// end, and signal.Stop must not run, before that delivery. A late
+	// signal after signal.Stop would end the process. The send flag tells
+	// the cleanup that the signal went out. The receive before the send
+	// empties sig, so the wait belongs to this send.
+	var sigSent bool
+	sendSigterm := func() error {
+		select {
+		case <-sig:
+		default:
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			return err
+		}
+		sigSent = true
+		select {
+		case <-sig:
+			return nil
+		case <-time.After(sigtermWait):
+			return fmt.Errorf("the test did not get SIGTERM within %v", sigtermWait)
+		}
+	}
+	// The cleanup ends in bounded time. It frees serve. It sends SIGTERM
+	// only if the test body did not, and waits for its delivery.
+	// Then it waits for serve to return.
 	t.Cleanup(func() {
 		release()
-		syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		if !sigSent {
+			if err := sendSigterm(); err != nil {
+				t.Error(err)
+			}
+		}
 		select {
 		case <-r.done:
 		case <-time.After(sigtermWait):
-			t.Errorf("serve did not return %v after the cleanup freed it and sent SIGTERM", sigtermWait)
+			t.Errorf("serve did not return %v after the cleanup freed it", sigtermWait)
 		}
 	})
 	r.startWait().until(t, waiting, false)
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+	if err := sendSigterm(); err != nil {
 		t.Fatal(err)
 	}
 	release()
