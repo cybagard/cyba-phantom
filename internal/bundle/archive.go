@@ -115,10 +115,10 @@ func (c *capReader) Read(p []byte) (int, error) {
 // format, the type, the link name, the name and the top-level name. With data,
 // a PAX 'x', GNU 'L' or GNU 'K' header fails inside Next, at maxKept. The same
 // holds for sparse format 1.0. With no data ('x', 'L' or 'K' of size 0), the
-// byte count refuses it. The format check refuses
-// a PAX header, a GNU header and a STAR header. Next gives a sparse entry its
-// logical size. The hole bytes do not pass through the decoded-byte count. A
-// directory has no data and no effect, but it counts toward MaxEntries.
+// byte count refuses it. The format check refuses a PAX header, a GNU header
+// and a STAR header. Next gives a sparse entry its logical size. The hole
+// bytes do not pass through the decoded-byte count. A directory has no data
+// and no effect, but it counts toward MaxEntries.
 //
 // ReadArchive keeps the bytes that each Next call reads and checks their form
 // (rawFormOK). The tar end is the padding of the last entry and exactly two
