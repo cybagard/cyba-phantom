@@ -40,9 +40,10 @@ func TestTS11_CheckURLRules(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckEgressLiterals checks that --check refuses an IP-literal host that the egress rule
-// refuses, for each URL key, a tls address and an smtp host, with exit 1. The error names the key.
-// A global literal and a loopback udp address pass (T-S-11, SEC-26).
+// TestTS11_CheckEgressLiterals checks that --check refuses an IP literal that
+// the egress rule refuses. It does this for each URL key, a tls address and an
+// smtp host, with exit 1. The error names the key. A global literal and a
+// loopback udp address pass (T-S-11, SEC-26).
 func TestTS11_CheckEgressLiterals(t *testing.T) {
 	body := validBody(t)
 	sink := func(item string) string { return body + "alerts:\n  sinks:\n    - " + item + "\n" }
@@ -70,7 +71,8 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 	} {
 		for _, c := range files(host) {
 			code, se := check(c[1], c[2])
-			detail, _, _ := strings.Cut(se, ": value") // The loader shows the value of some keys after the detail.
+			// The loader shows the value of some keys after the detail.
+			detail, _, _ := strings.Cut(se, ": value")
 			if code != 1 || !strings.Contains(se, "config: "+c[0]+" at ") || strings.Contains(detail, host) {
 				t.Errorf("%s %s: exit %d, stderr %q", c[0], host, code, se)
 			}

@@ -1548,14 +1548,14 @@ func TestTS11_URLKeys(t *testing.T) {
 	}
 }
 
-// egressLiterals are IP-literal hosts that the egress rule refuses (T-S-11), in URL form.
+// egressLiterals are IP-literal hosts that the egress rule refuses (T-S-11).
 var egressLiterals = []string{
 	"127.0.0.1", "10.0.0.1", "100.100.100.200", "169.254.169.254", "224.0.0.1", "[fd00:ec2::254]",
 	"[64:ff9b::a9fe:a9fe]", "[::169.254.169.254]", "[::ffff:10.0.0.1]", "[fec0::1]", "[2001:db8::1]",
 }
 
-// egressKeyFiles returns, for each key that holds an endpoint, a file whose key has host.
-// A syslog address uses tls. The key is the first field.
+// egressKeyFiles returns one file for each key that holds an endpoint.
+// The key has host. The first field is the key. A syslog address uses tls.
 func egressKeyFiles(host string) [][2]string {
 	sys := func(addr string) string { return `{type: syslog, addr: "` + addr + `"}` }
 	smtpHost := func(h string) string { return `{type: smtp, host: "` + h + `", from: a@b.example, to: [c@d.example]}` }
@@ -1570,8 +1570,9 @@ func egressKeyFiles(host string) [][2]string {
 	}
 }
 
-// TestTS11_EgressLiterals checks that each literal in egressLiterals fails for each endpoint key,
-// and that a global literal passes. The error names the key and gives the fixed rule (T-S-11).
+// TestTS11_EgressLiterals checks that each literal in egressLiterals fails
+// for each endpoint key, and that a global literal passes. The error names the
+// key and gives the fixed rule (T-S-11).
 func TestTS11_EgressLiterals(t *testing.T) {
 	for _, lit := range egressLiterals {
 		for _, r := range egressKeyFiles(lit) {
@@ -1595,7 +1596,8 @@ func TestTS11_EgressLiterals(t *testing.T) {
 	}
 }
 
-// TestTS11_SystemNetRefusesLoopback checks that the Dialer of SystemNet applies the egress rule (T-S-21).
+// TestTS11_SystemNetRefusesLoopback checks that the Dialer of SystemNet
+// refuses a dial to a loopback address (T-S-21).
 func TestTS11_SystemNetRefusesLoopback(t *testing.T) {
 	_, err := SystemNet().Dialer.DialContext(context.Background(), "tcp", "127.0.0.1:9")
 	if !errors.Is(err, egress.ErrRefused) {
@@ -1666,7 +1668,8 @@ func TestTS08_AllowList(t *testing.T) {
 	}
 	want := []Endpoint{
 		{"https", "ca.example", "14000"}, {"https", "ckpt.example", "443"},
-		{"udp", "127.0.0.1", "514"}, {"tcp", "::1", "514"}, {"tls", "2606:4700::aaaa", "6514"}, // A loopback sink is in the list (04 section 3).
+		{"udp", "127.0.0.1", "514"}, {"tcp", "::1", "514"}, {"tls", "2606:4700::aaaa", "6514"},
+		// A loopback sink is in the list (04 section 3).
 		{"smtp", "mail.example", "587"}, {"smtps", "mail.example", "465"}, {"https", "hook.example", "443"},
 	}
 	if got := c.AllowList(); !reflect.DeepEqual(got, want) {

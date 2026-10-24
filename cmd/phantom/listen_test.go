@@ -130,8 +130,8 @@ func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Lo
 // openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
 // ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
 // listener. Any other address goes to the real listen. So no port is closed and bound again.
-// It also gives an address for the ACME CA. The host is a name below .invalid, which never resolves. So a client
-// of the CA fails at once, and the loader accepts the value. No socket listens at that address.
+// It also gives an address for the ACME CA. The host is a name below .invalid,
+// which never resolves. So a client of the CA fails at once.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
@@ -1044,7 +1044,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	}
 	// The child is a separate process and binds the https and http addresses itself. A separate process cannot
 	// take a test listener. So the test frees these two listeners, and the window between the close and the bind
-	// of the child stays. The CA name never resolves, so the child fails to reach the CA at once.
+	// of the child stays. The CA name never resolves, so the CA client fails.
 	httpsLn, plainLn, caAddr := openListeners(t)
 	https, plain, ca := httpsLn.Addr().String(), plainLn.Addr().String(), "https://"+caAddr+"/directory"
 	httpsLn.Close()

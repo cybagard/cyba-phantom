@@ -396,8 +396,9 @@ func endpoint(scheme, host, port string) Endpoint {
 }
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
-// in the exact case. The host is not empty. An IP literal has no zone and passes the egress
-// rule, except for udp and tcp. It returns a fixed detail on an error.
+// in the exact case. The host is not empty. An IP literal has no zone and
+// passes the egress rule, except for udp and tcp. It returns a fixed detail
+// on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -412,7 +413,7 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	case hp.addr.Zone() != "":
 		return Endpoint{}, "the host must not have a zone"
 	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
-		// A name passes here. checkSyslogAddr applies the loopback rule to udp and tcp.
+		// A name passes here. checkSyslogAddr checks udp and tcp.
 	case !egress.Permitted(hp.addr):
 		return Endpoint{}, "the host is an IP address that the egress rule refuses"
 	}
@@ -663,7 +664,7 @@ func checkBundlePath(l *loader, raw string) string {
 	if dir == l.stateRoot {
 		return "the directory must not be the state directory"
 	}
-	// The path has only ASCII characters now, so ToLower folds the ASCII letters only.
+	// The path has only ASCII characters here, so ToLower folds ASCII only.
 	dir = strings.ToLower(dir)
 	for _, d := range []string{"keys", "checkpoints"} {
 		if inDir(dir, strings.ToLower(filepath.Join(l.stateRoot, d))) {
@@ -679,8 +680,10 @@ func checkBundlePath(l *loader, raw string) string {
 }
 
 // bundleConflict returns a detail if the directory of the bundle.path value p is in or above
-// tlog.dir or acme.cache_dir, is or is in store.path or a SQLite side file of it, or if p is
-// store.path (SEC-23). It compares the path text only, and it ignores the case of the ASCII letters.
+// tlog.dir or acme.cache_dir. It also returns a detail if the directory is
+// store.path, a SQLite side file of it, or is in one of them. It returns a
+// detail if p is store.path (SEC-23). It compares the path text only. It
+// ignores the case of the ASCII letters.
 // A key that is not in vals failed its own check, so it is skipped.
 func bundleConflict(vals map[string]Value, p string) string {
 	p = strings.ToLower(p)
