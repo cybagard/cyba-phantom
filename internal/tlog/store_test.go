@@ -829,8 +829,9 @@ func openSkipsATileOutsideTheRange(t *testing.T) {
 	}
 }
 
-// A valid log of more than 8 million leaves has level 0 tiles in more than 32
-// group directories. Open must succeed. The names that it reads depend on the
+// A log that Open accepts can have more than 8 million leaves. Its level 0
+// tiles are then in more than 32 group directories. Open must succeed. The
+// names that it reads depend on the
 // bound for the tiles beyond the head. They do not depend on the size of the
 // log. The test builds the tiles of level 1 and above from arbitrary hashes of
 // the subtrees of 256 leaves. It links one file for all tiles of level 0. Open

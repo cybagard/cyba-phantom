@@ -163,14 +163,14 @@ type Store struct {
 // Open opens the log directory dir below the state directory. The path dir is
 // relative to state. state.OpenRoot refuses a log directory that links out of
 // the state directory. Open also refuses a log directory that is a link inside
-// the state directory, because the fsync of the log directory refuses a link.
+// the state directory. The fsync of the log directory refuses a link.
 // Open makes the directory (mode 0700) if it does not exist. The directory
 // must have no group or other permission bits. Open reads the tree head and
 // the tiles that the root computation reads. It checks that these tiles give
 // the root of the tree head. Open does not read the other tiles that the tree
-// head covers. A later change checks them with authenticated reads. Open tidies
-// the tiles that it reads. Then at most one partial file stays for each of
-// them after a crash. Open also tidies the tiles beyond the tree head in a
+// head covers. A later change checks them with authenticated reads.
+// After a crash, Open tidies the tiles that it reads. Then at most one partial
+// file stays for each of them. Open also tidies the tiles beyond the tree head in a
 // bounded range. For each level, the range starts at the first tile that the
 // tree head does not cover. It ends maxBatchTiles tiles above that tile. A
 // crash can leave such tiles. The number of names that Open reads depends on
@@ -435,13 +435,13 @@ func readNames(read []tlog.Tile, empty string) string {
 // returned nil. SetHead refuses a size that is smaller than the stored size
 // and a size above maxSize. It refuses the call if the tiles no longer give
 // the stored tree head or do not give the new one. It checks each tile that
-// the new root computation reads and each tile that the new tree head covers
-// for the first time. For each such tile, SetHead refuses a link in the tile
-// path, like WriteTile. The stored files of the tile must agree in the hashes
-// that the new tree head covers. If not, the next Open would refuse the tree
-// head. A newly covered hash must be one that WriteTile accepted since the
-// last SetHead. Take a newly covered full tile that the root computation does
-// not read. It must give the hash for it in the tile one level up. SetHead
+// the new root computation reads. It also checks each tile that the new tree
+// head covers for the first time. For each such tile, SetHead refuses a link in
+// the tile path, like WriteTile. The stored files of the tile must agree in the
+// hashes that the new tree head covers. If not, the next Open would refuse the
+// tree head. A newly covered hash must be one that WriteTile accepted since the
+// last SetHead. The root computation does not read some newly covered full
+// tiles. Each of them must give its hash in the tile one level up. SetHead
 // refuses a size that gives new hashes to more than maxBatchTiles tiles. A
 // refused call changes no file, with one exception. The write can fail at the
 // rename of the head file or after it. Then the head file on disk can hold the
