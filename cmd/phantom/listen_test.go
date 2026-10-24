@@ -130,9 +130,8 @@ func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Lo
 // openListeners opens the https and the http listener on a loopback port. It keeps them open until the test
 // ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
 // listener. Any other address goes to the real listen. So no port is closed and bound again.
-// It also gives an address for the ACME CA, on a third listener that stays open until the test ends. One goroutine
-// accepts each connection and closes it at once. So a client of the CA fails fast, as with a closed port, and no
-// other socket can take the port. The cleanup waits for that goroutine.
+// It also gives an address for the ACME CA. The host is a name below .invalid, which never resolves. So a client
+// of the CA fails at once, and the loader accepts the value. No socket listens at that address.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
@@ -145,23 +144,6 @@ func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 		return l
 	}
 	https, plain = open(), open()
-	caLn, err := net.Listen("tcp", "127.0.0.1:0") // open while the other two are open, so the three ports differ
-	if err != nil {
-		t.Fatal(err)
-	}
-	ca = caLn.Addr().String()
-	acceptEnded := make(chan struct{})
-	go func() {
-		defer close(acceptEnded)
-		for {
-			c, err := caLn.Accept()
-			if err != nil { // the listener is closed
-				return
-			}
-			c.Close()
-		}
-	}()
-	t.Cleanup(func() { caLn.Close(); <-acceptEnded })
 	byAddr := map[string]*trackedListener{https.Addr().String(): https, plain.Addr().String(): plain}
 	var asks atomic.Int64
 	old := listen
@@ -178,7 +160,7 @@ func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 		l.taken.Store(true)
 		return l, nil
 	}
-	return https, plain, ca
+	return https, plain, "ca.phantom.invalid:14000"
 }
 
 // serveCfg loads a config with the two listen addresses and the address of the ACME CA.
@@ -849,7 +831,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	var db *sql.DB
 	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
-	before := goroutineBlocks() // after openListeners, so the accept goroutine of the CA listener is in the set
+	before := goroutineBlocks()
 	code := serveWith(t.Context(), func() {}, cfg, p, d, &stdout, &stderr)
 	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
@@ -1062,7 +1044,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	}
 	// The child is a separate process and binds the https and http addresses itself. A separate process cannot
 	// take a test listener. So the test frees these two listeners, and the window between the close and the bind
-	// of the child stays. The listener of the CA stays open in the test process.
+	// of the child stays. The CA name never resolves, so the child fails to reach the CA at once.
 	httpsLn, plainLn, caAddr := openListeners(t)
 	https, plain, ca := httpsLn.Addr().String(), plainLn.Addr().String(), "https://"+caAddr+"/directory"
 	httpsLn.Close()

@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -338,14 +340,11 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		}
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		a0 := a.Unmap()
 		switch {
 		case a.Zone() != "":
 			return nil, "the URL host must not have a zone"
-		case a0.IsLinkLocalUnicast():
-			return nil, "the URL host must not be link-local"
-		case a0.IsUnspecified():
-			return nil, "the URL host must not be unspecified"
+		case !egress.Permitted(a):
+			return nil, "the URL host is an IP address that the egress rule refuses"
 		}
 	} else if !hostname.MatchString(host) {
 		return nil, "the URL host is not an IP address or a host name"
@@ -397,8 +396,8 @@ func endpoint(scheme, host, port string) Endpoint {
 }
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
-// in the exact case. The host is not empty. An IP literal has no zone and is not unspecified
-// or link-local. It returns a fixed detail on an error.
+// in the exact case. The host is not empty. An IP literal has no zone and passes the egress
+// rule, except for udp and tcp. It returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -412,10 +411,10 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 		return Endpoint{}, "the host must not be empty"
 	case hp.addr.Zone() != "":
 		return Endpoint{}, "the host must not have a zone"
-	case hp.addr.Unmap().IsUnspecified():
-		return Endpoint{}, "the host must not be unspecified"
-	case hp.addr.Unmap().IsLinkLocalUnicast():
-		return Endpoint{}, "the host must not be link-local"
+	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
+		// A name passes here. checkSyslogAddr applies the loopback rule to udp and tcp.
+	case !egress.Permitted(hp.addr):
+		return Endpoint{}, "the host is an IP address that the egress rule refuses"
 	}
 	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
 }
