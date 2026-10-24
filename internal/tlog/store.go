@@ -282,7 +282,8 @@ func (s *Store) load() error {
 
 // beyondHead checks the tiles beyond the tree head in the range that the Open
 // doc names. It returns the files to delete and the directories to sync. It
-// deletes nothing. It skips a group directory that is not there as a whole.
+// deletes nothing. It skips a group directory that is not there as a whole. It
+// lists each other group directory one time.
 // So the work depends on the bound and not on the size of the log.
 func (s *Store) beyondHead() (rm, dirs []string, err error) {
 	for l := 0; l <= maxLevel; l++ {
@@ -290,17 +291,27 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 		last := min(first+maxBatchTiles, maxTileN(l))
 		var group string
 		var groupOK bool
+		var present map[string]bool // the names in the group directory
+		has := func(name string) bool {
+			if present == nil { // the listing failed: ask for each name
+				return s.exists(name)
+			}
+			return present[path.Base(name)]
+		}
 		for n := first; n <= last; n++ {
 			t := tlog.Tile{H: TileHeight, L: l, N: n}
 			if g := path.Dir(path.Dir(tilePath(t, 1))); g != group {
-				group, groupOK = g, s.exists(g)
+				group, groupOK, present = g, s.exists(g), nil
+				if groupOK {
+					present = s.groupNames(g)
+				}
 			}
 			if !groupOK {
 				n += groupTiles - n%groupTiles - 1 // the last tile of the group
 				continue
 			}
 			partial, full := path.Dir(tilePath(t, 1)), tilePath(t, fullWidth)
-			if !s.exists(partial) && !s.exists(full) && !s.exists(full+tmpSuffix) {
+			if !has(partial) && !has(full) && !has(full+tmpSuffix) {
 				continue
 			}
 			if err := s.checkDirs(t); err != nil {
@@ -314,6 +325,21 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 		}
 	}
 	return rm, dirs, nil
+}
+
+// groupNames lists the group directory g one time. It returns nil if the
+// listing fails or the directory has more names than a group can hold. Then the
+// caller asks for each name with exists, as before.
+func (s *Store) groupNames(g string) map[string]bool {
+	names, err := s.names(g, 4*groupTiles)
+	if err != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
 }
 
 // exists returns false only if name is not there. Another error counts as
