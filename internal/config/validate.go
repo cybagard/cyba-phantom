@@ -658,7 +658,7 @@ func foldASCII(s string) string {
 }
 
 // checkBundlePath applies the rules of checkStorePath. Then it checks that the file name ends in .cbnd (SEC-23).
-// The directory compares fold the letters A-Z with foldASCII.
+// The keys, checkpoints and state-file compares fold A-Z with foldASCII.
 // It also checks that the directory is not the state directory and is not in the keys or checkpoints directory.
 // These new rules compare the path text only. checkStorePath resolves symlinks to check the state directory.
 // checkStorePath requires a path below the state directory, so the state directory is the only path above those two directories.

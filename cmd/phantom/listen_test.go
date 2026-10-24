@@ -131,9 +131,9 @@ func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Lo
 // ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
 // listener. Any other address goes to the real listen. So no port is closed and bound again.
 // It also gives an address for the ACME CA. The host is a name below .invalid.
-// That name is reserved (RFC 6761), and a resolver answers it with NXDOMAIN.
-// Go does not skip the DNS lookup for it. With no network, the lookup fails
-// in under 1 ms. With a network, the resolver sends one query.
+// RFC 6761 reserves that name, but Go still looks it up. It asks for A and
+// AAAA, for the name and for the name with each search domain. With no
+// network, the lookup fails in under 1 ms.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
