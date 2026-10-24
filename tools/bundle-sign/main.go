@@ -70,7 +70,7 @@ var (
 var b64 = base64.StdEncoding
 
 // main asks for SIGPIPE signals. Then a write to a broken pipe on stdout or
-// stderr fails with EPIPE, and the program does not exit with the signal.
+// stderr fails with EPIPE. The program does not exit with the signal.
 func main() {
 	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

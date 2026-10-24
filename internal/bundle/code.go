@@ -38,8 +38,8 @@ func (c Code) String() string {
 	return codeText[c]
 }
 
-// The errors of the signature and manifest steps. Each one is a fixed value with no input
-// bytes.
+// The errors of the signature and manifest steps. Each one is a fixed value
+// with no input bytes.
 var (
 	ErrBadSig          = errors.New("bundle: bad_sig")
 	ErrManifestInvalid = errors.New("bundle: manifest_invalid")
