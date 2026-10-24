@@ -502,7 +502,8 @@ func TestTU18_VkeyRefused(t *testing.T) {
 	}
 }
 
-// sigtermHelperEnv makes TestTU18_SigtermHelper run. Else the helper skips.
+// sigtermHelperEnv makes TestTU18_SigtermHelper run. If it is not set, the
+// helper skips.
 const sigtermHelperEnv = "PHANTOM_TEST_SIGTERM_HELPER"
 
 // TestTU18_SigtermDuringStart runs the real serve function in a child process

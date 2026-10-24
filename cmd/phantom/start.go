@@ -237,7 +237,7 @@ func (s *storePart) startCheckpointer(p startParams, d startDeps, lg *slog.Logge
 	if err != nil {
 		return err
 	}
-	// A FIFO at the name must not block the start. A symlink is refused.
+	// A FIFO at the name must not block the start. ReadFile refuses a symlink.
 	// ReadFile takes one name, so it reads in the keys directory.
 	// safefile.OpenRoot refuses a symlink at that directory.
 	keys, err := safefile.OpenRoot(s.root, filepath.Dir(tlog.VKeyName), safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny})
