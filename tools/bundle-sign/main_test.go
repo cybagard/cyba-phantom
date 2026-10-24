@@ -98,7 +98,8 @@ func TestTS20RoundTrip(t *testing.T) {
 	runFail(t, 1, errRead, "verify", p("trust"), p("a.cbnd"), p("big.sig"))
 }
 
-// T-S-20: sign refuses an archive of more than 8 MiB and makes no signature file.
+// T-S-20: sign refuses an archive of more than 8 MiB. It makes no signature
+// file.
 func TestTS20SignArchiveCap(t *testing.T) {
 	dir := t.TempDir()
 	p := func(n string) string { return filepath.Join(dir, n) }
@@ -215,8 +216,8 @@ func TestTS20Pack(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
 		t.Error("output file stays after a name error")
 	}
-	// A symlink in the directory, and a top-level name that ReadArchive refuses,
-	// give errPack and leave no output file.
+	// A symlink in the directory, and a top-level name that ReadArchive
+	// refuses, give errPack and leave no output file.
 	linked := filepath.Join(dir, "linked")
 	if err := os.MkdirAll(linked, 0o755); err != nil {
 		t.Fatal(err)

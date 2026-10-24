@@ -13,10 +13,10 @@
 // files below dir as a gzip tar archive with USTAR headers only. If a name does
 // not fit USTAR, pack gives an error and makes no output file. sign reads the
 // archive one time and writes the signature line. It reads a key file only
-// when the file is regular, belongs to the effective user, and no group or
-// other can use it. verify calls bundle.VerifySig with the keys of the trust
-// file. It does not check the manifest key ID. It prints the key IDs of the
-// valid lines.
+// when the file is regular and belongs to the effective user. The key file
+// must have no group or other bit. verify calls bundle.VerifySig with the
+// keys of the trust file. It does not check the manifest key ID. It prints the
+// key IDs of the valid lines.
 //
 // Every error text is fixed. Exit codes: 0 success, 1 failure, 2 usage.
 package main
