@@ -588,7 +588,7 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if err := s.checkDirs(t); err != nil {
 		return err
 	}
-	widths, _, err := s.partials(t)
+	widths, tmps, err := s.partials(t)
 	if err != nil {
 		return err
 	}
@@ -617,7 +617,7 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		// Each other file of the tile must agree in the covered hashes. This
 		// includes the file that the rename replaces. Check before the write,
 		// so that a bad file gives an error and no file changes.
-		if _, err := s.stale(t, 0, c); err != nil {
+		if _, err := s.staleFrom(t, 0, c, listing{widths, tmps, w, old}); err != nil {
 			return err
 		}
 		if err := s.writeFile(t.Path(), data); err != nil {
@@ -718,6 +718,22 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.staleFrom(t, keep, c, listing{widths, tmps, w, top})
+}
+
+// listing is what partials and widest return for one tile. WriteTile has it
+// already, so it gives it to staleFrom and does not list the directory again.
+type listing struct {
+	widths []int
+	tmps   []string
+	w      int
+	top    []byte
+}
+
+// staleFrom is stale for a tile that the caller has listed and read.
+func (s *Store) staleFrom(t tlog.Tile, keep, c int, l listing) ([]string, error) {
+	widths, tmps, w, top := l.widths, l.tmps, l.w, l.top
+	var err error
 	if w == fullWidth {
 		widths = append(widths, w)
 	}
