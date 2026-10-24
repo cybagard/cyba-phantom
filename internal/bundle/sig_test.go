@@ -56,6 +56,7 @@ func TestTS20ValidLinesVerify(t *testing.T) {
 func TestTS20BadSig(t *testing.T) {
 	priv, a := testKey(1, "a1")
 	privB, b := testKey(2, "b2")
+	privC, c3 := testKey(5, "c3")
 	privOut, _ := testKey(3, "")
 	privWrong, _ := testKey(4, "")
 	good := signed("a1", priv)
@@ -82,7 +83,7 @@ func TestTS20BadSig(t *testing.T) {
 		"S plus the group order":       {sigArchive, sigRow("a1", over)},
 		"non-canonical base64":         {sigArchive, pad},
 		"duplicate key ID":             {sigArchive, good + good},
-		"three lines":                  {sigArchive, good + signed("b2", priv) + signed("b3", priv)},
+		"three lines":                  {sigArchive, good + signed("b2", privB) + signed("c3", privC)},
 		"CR":                           {sigArchive, good[:len(good)-1] + "\r\n"},
 		"trailing space":               {sigArchive, good[:len(good)-1] + " \n"},
 		"empty line":                   {sigArchive, good + "\n"},
@@ -90,7 +91,7 @@ func TestTS20BadSig(t *testing.T) {
 		"bad trusted line, then valid": {sigArchive, signed("a1", privWrong) + signed("b2", privB)},
 		"valid line, then bad trusted": {sigArchive, signed("a1", priv) + signed("b2", privWrong)},
 	} {
-		ids, err := VerifySig(c.archive, []byte(c.sig), TrustSet{a, b})
+		ids, err := VerifySig(c.archive, []byte(c.sig), TrustSet{a, b, c3})
 		if code, ok := CodeOf(err); ids != nil || err != ErrBadSig || !ok || code != CodeBadSig || err.Error() != "bundle: bad_sig" {
 			t.Errorf("%s: %q, %v", name, ids, err)
 		}
@@ -101,7 +102,8 @@ func TestTS20BadSig(t *testing.T) {
 func FuzzTS20ParseSig(f *testing.F) {
 	priv, _ := testKey(1, "")
 	good := signed("a1", priv)
-	for _, s := range []string{good, good + signed("b2", priv), good + good, good + "\n", "", "a1 \n"} {
+	three := good + signed("b2", priv) + signed("c3", priv)
+	for _, s := range []string{good, good + signed("b2", priv), three, good + good, good + "\n", "", "a1 \n"} {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {

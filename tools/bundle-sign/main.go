@@ -9,11 +9,12 @@
 //
 // keygen makes a private key file with mode 0600. It never writes over a
 // file. It prints the public key line "<key_id> <base64>". That line is one
-// line of a trust file. keygen never prints the private key. pack writes the
-// files below dir as a gzip tar archive with USTAR headers only. If a name does
-// not fit USTAR, pack gives an error and makes no output file. sign reads the
-// archive one time and writes the signature line. It reads a key file only
-// when the file is regular and belongs to the effective user. The key file
+// line of a trust file. keygen never prints the private key. If keygen cannot
+// print the line, it removes the key file. pack writes the files below dir as
+// a gzip tar archive with USTAR headers only. If a name does not fit USTAR,
+// pack gives an error and makes no output file. sign reads the archive one
+// time and writes the signature line. It reads a key file only when the file
+// is regular, belongs to the effective user, and has one link. The key file
 // must have no group or other bit. verify calls bundle.VerifySig with the
 // keys of the trust file. It does not check the manifest key ID. It prints the
 // key IDs of the valid lines.
@@ -147,7 +148,9 @@ func keygen(a []string, out io.Writer) error {
 		err = writeNew(a[1], []byte(b64.EncodeToString(priv.Seed())+"\n"), 0o600)
 	}
 	if err == nil {
-		err = printLine(out, line)
+		if err = printLine(out, line); err != nil {
+			_ = os.Remove(a[1])
+		}
 	}
 	return err
 }

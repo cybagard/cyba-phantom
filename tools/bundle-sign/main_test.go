@@ -93,9 +93,22 @@ func TestTS20RoundTrip(t *testing.T) {
 	if code := run([]string{"verify", p("trust"), p("a.cbnd"), both}, failWriter{}, &errOut); code != 1 || errOut.String() != errWrite.Error()+"\n" {
 		t.Errorf("failed output: code %d, stderr %q", code, errOut.String())
 	}
-	// A signature file of more than 1 KiB is refused.
+	// verify refuses a signature file of more than 1 KiB.
 	write(t, p("big.sig"), strings.Repeat("a", 1025), 0o644)
 	runFail(t, 1, errRead, "verify", p("trust"), p("a.cbnd"), p("big.sig"))
+}
+
+// T-S-20: if keygen cannot print the public line, it fails with errWrite and
+// leaves no key file.
+func TestTS20KeygenRemovesKeyOnPrintFailure(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "k.key")
+	var errOut bytes.Buffer
+	if code := run([]string{"keygen", "k1", key}, failWriter{}, &errOut); code != 1 || errOut.String() != errWrite.Error()+"\n" {
+		t.Errorf("code %d, stderr %q", code, errOut.String())
+	}
+	if _, err := os.Stat(key); err == nil {
+		t.Error("key file stays after a print failure")
+	}
 }
 
 // T-S-20: sign refuses an archive of more than 8 MiB. It makes no signature
@@ -186,8 +199,8 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 
 // T-S-20: pack writes USTAR headers only. An archive with a name of more than
 // 100 bytes, in the prefix and name fields, passes ReadArchive. A name that
-// does not fit gives an error and leaves no output file. So does a path that
-// is not a regular file, or an archive that ReadArchive refuses.
+// does not fit gives an error and leaves no output file. So does a symlink
+// below traps/, or an archive that ReadArchive refuses.
 func TestTS20Pack(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
@@ -216,14 +229,16 @@ func TestTS20Pack(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
 		t.Error("output file stays after a name error")
 	}
-	// A symlink in the directory, and a top-level name that ReadArchive
-	// refuses, give errPack and leave no output file.
+	// A symlink below traps/ has a valid name and sits next to a manifest.
+	// The symlink is the only reason to refuse it. A top-level name that
+	// ReadArchive refuses is a second case. Each gives errPack and leaves no
+	// output file.
 	linked := filepath.Join(dir, "linked")
-	if err := os.MkdirAll(linked, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(linked, "traps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(linked, "manifest.json"), "{}", 0o644)
-	if err := os.Symlink(filepath.Join(linked, "manifest.json"), filepath.Join(linked, "link.json")); err != nil {
+	if err := os.Symlink(filepath.Join(linked, "manifest.json"), filepath.Join(linked, "traps", "link.json")); err != nil {
 		t.Fatal(err)
 	}
 	refused := filepath.Join(dir, "refused")
@@ -232,7 +247,7 @@ func TestTS20Pack(t *testing.T) {
 	}
 	write(t, filepath.Join(refused, "notallowed.bin"), "x", 0o644)
 	for name, srcDir := range map[string]string{"symlink": linked, "refused by ReadArchive": refused} {
-		outFile := filepath.Join(dir, "refuse.cbnd")
+		outFile := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".cbnd")
 		runFail(t, 1, errPack, "pack", srcDir, outFile)
 		if _, err := os.Stat(outFile); err == nil {
 			t.Errorf("%s: output file made", name)
