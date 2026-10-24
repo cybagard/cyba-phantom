@@ -992,7 +992,9 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	// sigSent tells the cleanup that the test sent the signal.
 	// sendSigterm empties sig before it sends. Thus the next value
 	// on sig is from this signal.
-	var sigSent bool
+	// late tells the cleanup that a receive timed out. The cleanup then waits
+	// once more for the delivery before signal.Stop runs.
+	var sigSent, late bool
 	sendSigterm := func() error {
 		select {
 		case <-sig:
@@ -1006,6 +1008,7 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		case <-sig:
 			return nil
 		case <-time.After(sigtermWait):
+			late = true
 			return fmt.Errorf("the test did not get SIGTERM within %v", sigtermWait)
 		}
 	}
@@ -1023,6 +1026,13 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		case <-r.done:
 		case <-time.After(sigtermWait):
 			t.Errorf("serve did not return %v after the cleanup freed it", sigtermWait)
+		}
+		if late {
+			select {
+			case <-sig:
+			case <-time.After(sigtermWait):
+				t.Errorf("SIGTERM did not arrive in %v more", sigtermWait)
+			}
 		}
 	})
 	r.startWait().until(t, waiting, false)
