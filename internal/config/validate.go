@@ -656,30 +656,53 @@ func checkBundlePath(l *loader, raw string) string {
 	if !strings.HasSuffix(raw, ".cbnd") {
 		return "the file name must end in .cbnd"
 	}
+	if filepath.Base(raw) == ".cbnd" {
+		return "the file name must have a character before .cbnd"
+	}
 	dir := filepath.Dir(raw)
 	if dir == l.stateRoot {
 		return "the directory must not be the state directory"
 	}
+	// The path has only ASCII characters now, so ToLower folds the ASCII letters only.
+	dir = strings.ToLower(dir)
 	for _, d := range []string{"keys", "checkpoints"} {
-		if inDir(dir, filepath.Join(l.stateRoot, d)) {
+		if inDir(dir, strings.ToLower(filepath.Join(l.stateRoot, d))) {
 			return "the directory must not be in the " + d + " directory"
+		}
+	}
+	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
+		if inDir(dir, strings.ToLower(filepath.Join(l.stateRoot, f))) {
+			return "the directory must not be or be in " + f
 		}
 	}
 	return ""
 }
 
 // bundleConflict returns a detail if the directory of the bundle.path value p is in or above
-// tlog.dir or acme.cache_dir, or if p is store.path (SEC-23). It compares the path text only.
+// tlog.dir or acme.cache_dir, is or is in store.path or a SQLite side file of it, or if p is
+// store.path (SEC-23). It compares the path text only, and it ignores the case of the ASCII letters.
 // A key that is not in vals failed its own check, so it is skipped.
 func bundleConflict(vals map[string]Value, p string) string {
+	p = strings.ToLower(p)
 	dir := filepath.Dir(p)
 	for _, k := range []string{"tlog.dir", "acme.cache_dir"} {
-		if v, ok := vals[k]; ok && (inDir(dir, v.Str) || inDir(v.Str, dir)) {
-			return "the directory must not be in or above " + k
+		if v, ok := vals[k]; ok {
+			s := strings.ToLower(v.Str)
+			if inDir(dir, s) || inDir(s, dir) {
+				return "the directory must not be in or above " + k
+			}
 		}
 	}
-	if v, ok := vals["store.path"]; ok && v.Str == p {
-		return "the path must not be store.path"
+	if v, ok := vals["store.path"]; ok {
+		s := strings.ToLower(v.Str)
+		if s == p {
+			return "the path must not be store.path"
+		}
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			if inDir(dir, s+suffix) {
+				return "the directory must not be or be in store.path or a file of it"
+			}
+		}
 	}
 	return ""
 }
