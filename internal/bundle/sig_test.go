@@ -98,7 +98,7 @@ func TestTS20BadSig(t *testing.T) {
 	}
 }
 
-// T-S-20: the parse accepts only the lines that make the same file again.
+// T-S-20: parseSig accepts only the lines that make the same file again.
 func FuzzTS20ParseSig(f *testing.F) {
 	priv, _ := testKey(1, "")
 	good := signed("a1", priv)
