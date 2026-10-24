@@ -1026,6 +1026,11 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 		{"in store.path-shm", s + "db-shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"directory is store.path-journal in other case", s + "DB-Journal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"directory like store.path", s + "db2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, ""},
+		{"checkpoint.state.tmp in other case", s + "Checkpoint.State.TMP/x.cbnd", nil, "be in checkpoint.state.tmp"},
+		{"directory is store.path-wal in other case", s + "DB-WAL/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path-shm in other case", s + "Db-Shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path in other case", s + "DB/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"tlog.dir with Kelvin sign", s + "k/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "K"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
