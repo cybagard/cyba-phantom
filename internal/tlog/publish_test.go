@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 	"golang.org/x/mod/sumdb/note"
 )
 
@@ -44,6 +46,7 @@ type fakeTarget struct {
 	status   int    // 0: 200
 	queue    []int  // the status of the next requests, before status; 0: 200
 	open     int    // connections that are not closed
+	conns    int    // connections that the server accepted
 	location string // sent with a 3xx status
 	big      bool   // a response body of 1 MiB
 	stall    chan struct{}
@@ -101,6 +104,7 @@ func newTarget(t *testing.T) *fakeTarget {
 		switch s {
 		case http.StateNew:
 			f.open++
+			f.conns++
 		case http.StateClosed, http.StateHijacked:
 			f.open--
 		}
@@ -128,6 +132,14 @@ func (f *fakeTarget) openConns() int {
 	return f.open
 }
 
+// connCount returns the number of connections that the server accepted. It does
+// not go down when a connection closes.
+func (f *fakeTarget) connCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns
+}
+
 func (f *fakeTarget) url() string {
 	if f.alias != "" {
 		return f.alias
@@ -143,6 +155,7 @@ type pubEnv struct {
 	clock  *fakeClock
 	pub    *Publisher
 	urls   []string
+	dialed []string // the listener address of each target, and its host
 }
 
 // newPub makes a spool and a publisher for the targets. The publisher trusts the
@@ -162,6 +175,10 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 	for _, f := range targets {
 		pool.AddCert(f.Certificate())
 		e.urls = append(e.urls, f.url())
+		addr := f.Listener.Addr().String()
+		host, _, err := net.SplitHostPort(addr)
+		must(t, err)
+		e.dialed = append(e.dialed, addr, host)
 		pt = append(pt, PublishTarget{f.url(), tokenVar})
 	}
 	var err error
@@ -169,6 +186,7 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 	must(t, err)
 	base := func(c *publishConfig) {
 		c.roots, c.now, c.jitter = pool, e.clock.now, func() float64 { return 0.5 }
+		c.dialer = egresstest.Dialer(t, dialTimeout, netip.MustParseAddr("127.0.0.1"))
 	}
 	e.pub, err = newPublisher(e.spool, pt, interval, lg, append([]publishOption{base}, opts...)...)
 	must(t, err)
@@ -182,10 +200,11 @@ func (e *pubEnv) add(t *testing.T, size uint64) {
 	must(t, e.spool.Add(size, msg))
 }
 
-// assertClean fails if s has the token, the response text, or a part of a URL.
+// assertClean fails if s has the token, the response text, a part of a URL, or
+// the address that the publisher dialed (also when the URL has an alias).
 func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 	t.Helper()
-	bad := []string{tokenMarker, respText}
+	bad := append([]string{tokenMarker, respText}, e.dialed...)
 	for _, raw := range e.urls {
 		u, err := url.Parse(raw)
 		must(t, err)
