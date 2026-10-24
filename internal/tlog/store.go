@@ -331,7 +331,7 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 // groupNames lists the group directory g one time. It returns nil if the
 // listing fails. It also returns nil if the directory has no owner search bit
 // or too many names. Then the caller asks for each name with exists. With no
-// owner search bit, the Lstat of a name below the directory fails, and exists
+// owner search bit, the Lstat of a name below the directory fails. Then exists
 // counts the name as there.
 func (s *Store) groupNames(g string) map[string]bool {
 	fi, err := s.dir.Lstat(g)
