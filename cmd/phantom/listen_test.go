@@ -762,7 +762,11 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 			stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
 			var news atomic.Int32
 			if c.newFails {
-				newACME = func(listener.ACMEParams) (*listener.ACME, error) { news.Add(1); return nil, errors.New("test error") }
+				// The value is not nil. So serve must reset it on the error.
+				newACME = func(listener.ACMEParams) (*listener.ACME, error) {
+					news.Add(1)
+					return &listener.ACME{}, errors.New("test error")
+				}
 			}
 			if c.cached {
 				ca, _ := cfg.Get("acme.ca")
