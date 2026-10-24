@@ -375,9 +375,8 @@ func (s *Store) syncRead(dirs []string) error {
 }
 
 // syncAll calls fsync on each distinct directory in dirs, and on its parents.
-// It calls fsync on a shared parent one time. For each directory, it starts at
-// the directory and goes up until it reaches a directory that it synced. So a
-// child is always synced before its parent.
+// It calls fsync on a shared parent only one time. For each directory, it
+// goes up the path and stops at the first directory that it synced before.
 func (s *Store) syncAll(dirs []string) error {
 	slices.Sort(dirs)
 	done := map[string]bool{}
