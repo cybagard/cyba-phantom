@@ -23,7 +23,7 @@ const (
 	maxDepth      = 8
 )
 
-// The fixed texts of the key rule and the tag rules. The tests use these constants.
+// The fixed texts of the key rule and the tag rules. The tests use them.
 const (
 	keyRule       = "the key must be 1 or more characters of a-z, 0-9 and _ only"
 	scalarTagRule = "the tag of a scalar must be str, int, bool, float or null"
