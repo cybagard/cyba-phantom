@@ -41,9 +41,9 @@ func TestTS11_CheckURLRules(t *testing.T) {
 }
 
 // TestTS11_CheckEgressLiterals checks that --check refuses an IP literal that
-// the egress rule refuses. It does this for each URL key, also a tls syslog
-// address, and for an smtp host, with exit 1. The error names the key. A
-// global literal and a loopback udp address pass (T-S-11, SEC-26).
+// the egress rule refuses. It does this for each URL key and an smtp host,
+// with exit 1. One URL key is a tls syslog address. The error names the key.
+// A global literal and a loopback udp address pass (T-S-11, SEC-26).
 func TestTS11_CheckEgressLiterals(t *testing.T) {
 	body := validBody(t)
 	sink := func(item string) string { return body + "alerts:\n  sinks:\n    - " + item + "\n" }

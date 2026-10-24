@@ -131,9 +131,9 @@ func (l *trackedListener) isBound() bool { return l.taken.Load() && !l.closed.Lo
 // ends. It replaces the listen seam until then. A listen call for the address of one of them gives that
 // listener. Any other address goes to the real listen. So no port is closed and bound again.
 // It also gives an address for the ACME CA. The host is a name below .invalid.
-// RFC 6761 reserves that name, but Go still looks it up. It asks for A and
-// AAAA, for the name and for the name with each search domain. With no
-// network, the lookup fails in under 1 ms.
+// RFC 6761 reserves that name, but Go still looks it up. On Linux, Go asks
+// for A and AAAA, for the name and for the name with each search domain.
+// With no network, the lookup fails in under 1 ms.
 func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 	t.Helper()
 	open := func() *trackedListener {
@@ -1046,8 +1046,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	}
 	// The child is a separate process and binds the https and http addresses itself. A separate process cannot
 	// take a test listener. So the test frees these two listeners, and the window between the close and the bind
-	// of the child stays. The CA name is below .invalid: a resolver answers it
-	// with NXDOMAIN, so the CA client fails.
+	// of the child stays. The CA name is below .invalid (see openListeners).
 	httpsLn, plainLn, caAddr := openListeners(t)
 	https, plain, ca := httpsLn.Addr().String(), plainLn.Addr().String(), "https://"+caAddr+"/directory"
 	httpsLn.Close()
