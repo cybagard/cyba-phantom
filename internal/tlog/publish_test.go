@@ -176,9 +176,9 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 		pool.AddCert(f.Certificate())
 		e.urls = append(e.urls, f.url())
 		addr := f.Listener.Addr().String()
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		must(t, err)
-		e.dialed = append(e.dialed, addr, host)
+		e.dialed = append(e.dialed, addr, host, port)
 		pt = append(pt, PublishTarget{f.url(), tokenVar})
 	}
 	var err error
@@ -787,7 +787,7 @@ func TestTS13_UntrustedCertificate(t *testing.T) {
 func TestTS13_LinkLocalRefused(t *testing.T) {
 	a := newTarget(t)
 	a.alias = "https://169.254.169.254/put"
-	e := newPub(t, time.Minute, []*fakeTarget{a})
+	e := newPub(t, time.Minute, []*fakeTarget{a}, releaseDialer)
 	e.add(t, 1)
 	err := e.spool.Publish(0, e.pub)
 	if !errors.Is(err, errPublishAddress) {

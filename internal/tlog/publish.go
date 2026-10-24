@@ -52,7 +52,8 @@ type PublishTarget struct{ URL, TokenEnv string }
 // publishOption changes the publisher. Only the tests use it, through
 // newPublisher. It sets the clock, the jitter, the timeout, the trusted roots,
 // the dial address, and the dialer. NewPublisher takes no option, so no caller
-// outside the package can change the dialer. Its dialer is egress.Dialer.
+// outside the package can change the dialer. The dialer of NewPublisher is
+// egress.Dialer.
 type publishOption func(*publishConfig)
 
 type publishConfig struct {

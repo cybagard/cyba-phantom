@@ -831,11 +831,11 @@ func openSkipsATileOutsideTheRange(t *testing.T) {
 
 // A log that Open accepts can have more than 8 million leaves. Its level 0
 // tiles are then in more than 32 group directories. Open must succeed. The
-// names that it reads depend on the
-// bound for the tiles beyond the head. They do not depend on the size of the
-// log. The test builds the tiles of level 1 and above from arbitrary hashes of
-// the subtrees of 256 leaves. It links one file for all tiles of level 0. Open
-// does not read the tiles of level 0, because the size is a multiple of 256.
+// names that it reads depend on the bound for the tiles beyond the head. They
+// do not depend on the size of the log. The test builds the tiles of level 1
+// and above from arbitrary hashes of the subtrees of 256 leaves. It links one
+// file for all tiles of level 0. Open does not read the tiles of level 0,
+// because the size is a multiple of 256.
 func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	const tiles = 33*groupTiles + 1
 	state, dir := newLogState(t)
@@ -1052,8 +1052,7 @@ func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
 	}
 	openStore(t, state)
 	for name, n := range counts {
-		// Open syncs the log directory one time before it loads the log.
-		if n > 1 && name != "." {
+		if n > 1 {
 			t.Errorf("fsync of %s: %d calls, want 1", name, n)
 		}
 	}
