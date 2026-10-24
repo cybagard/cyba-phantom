@@ -962,6 +962,7 @@ func goroutineBlocks() map[int]string {
 // gets the default action in the test process, also when a failed serve call removes the handler of serve before
 // the signal. The test wraps the waitStop seam. The wrapper tells the test that serve waits for the stop, and then
 // it holds serve until the test has sent SIGTERM. A serve that ends without the wait fails the test.
+// The test sends one SIGTERM only. The cleanup sends one if the body did not.
 func TestTI03_SigtermStopsServe(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
