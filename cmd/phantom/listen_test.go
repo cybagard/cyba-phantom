@@ -213,6 +213,8 @@ type running struct {
 }
 
 // launchServe runs serveWith until the test ends, and restores the standard log output at the end.
+// After a timeout in the cleanup, serve and its sockets stay in the process.
+// Later results in the same process are not reliable.
 func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
