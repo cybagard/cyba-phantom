@@ -1052,7 +1052,8 @@ func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
 	}
 	openStore(t, state)
 	for name, n := range counts {
-		if n > 1 && name != "." { // the sync of the log directory comes before the load
+		// Open syncs the log directory one time before it loads the log.
+		if n > 1 && name != "." {
 			t.Errorf("fsync of %s: %d calls, want 1", name, n)
 		}
 	}
