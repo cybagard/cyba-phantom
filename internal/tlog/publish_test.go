@@ -200,8 +200,9 @@ func (e *pubEnv) add(t *testing.T, size uint64) {
 	must(t, e.spool.Add(size, msg))
 }
 
-// assertClean fails if s has the token, the response text, a part of a URL, or
-// the address that the publisher dialed (also when the URL has an alias).
+// assertClean fails if s has the token, the response text, or a part of a URL.
+// It also fails if s has the address that the publisher dialed, also when the
+// URL has an alias.
 func (e *pubEnv) assertClean(t *testing.T, what, s string) {
 	t.Helper()
 	bad := append([]string{tokenMarker, respText}, e.dialed...)

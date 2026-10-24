@@ -12,9 +12,9 @@ import (
 // permitted test address.
 func releaseDialer(c *publishConfig) { c.dialer = egress.Dialer(dialTimeout) }
 
-// refusedPublish publishes one note and checks that the guard refuses it: the
-// error has the class address refused, the target sees no connection, and the
-// error and the log have no address of the target.
+// refusedPublish publishes one note and checks that the guard refuses it. The
+// error has the class address refused. The target sees no connection. The error
+// and the log have no address of the target.
 func refusedPublish(t *testing.T, e *pubEnv, p *Publisher, a *fakeTarget) {
 	t.Helper()
 	e.add(t, 1)
@@ -32,8 +32,8 @@ func refusedPublish(t *testing.T, e *pubEnv, p *Publisher, a *fakeTarget) {
 	e.assertClean(t, "log", e.logs.String())
 }
 
-// T-S-21, T-S-13: with the dialer of the release build, a publish to a
-// loopback test target is refused and the target sees no connection.
+// T-S-21, T-S-13: the dialer of the release build refuses a loopback test
+// target. The target sees no connection.
 func TestTS21_PublisherRefusesLoopbackTarget(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a}, releaseDialer)
@@ -41,7 +41,7 @@ func TestTS21_PublisherRefusesLoopbackTarget(t *testing.T) {
 }
 
 // T-S-13: the publisher has no address rule of its own. NewPublisher takes no
-// option, so it dials through the egress guard and refuses 127.0.0.1.
+// option. It dials through the egress guard and refuses 127.0.0.1.
 func TestTS13_NewPublisherRefusesLoopback(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})

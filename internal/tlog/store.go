@@ -170,8 +170,8 @@ type Store struct {
 // the root of the tree head. Open does not read the other tiles that the tree
 // head covers. A later change checks them with authenticated reads.
 // After a crash, Open tidies the tiles that it reads. Then at most one partial
-// file stays for each of them. Open also tidies the tiles beyond the tree head in a
-// bounded range. For each level, the range starts at the first tile that the
+// file stays for each of them. Open also tidies the tiles beyond the tree head
+// in a bounded range. For each level, the range starts at the first tile that the
 // tree head does not cover. It ends maxBatchTiles tiles above that tile. A
 // crash can leave such tiles. The number of names that Open reads depends on
 // this bound and not on the size of the log. Open does not list or tidy any
