@@ -155,7 +155,7 @@ type pubEnv struct {
 	clock  *fakeClock
 	pub    *Publisher
 	urls   []string
-	dialed []string // the listener address of each target, and its host
+	dialed []string // the listener address of each target, its host and its port
 }
 
 // newPub makes a spool and a publisher for the targets. The publisher trusts the

@@ -445,9 +445,9 @@ func TestTS13OpenRefusesGroupDirectoryWithNoSearchBit(t *testing.T) {
 	openErr(t, state, ruleRead)
 }
 
-// A group directory that is a link makes the store list and delete the files
-// of another directory. Open must refuse it. The listing of a link fails, so
-// Open asks for each name.
+// A group directory that is a link can point to another directory. Open must
+// refuse the link and delete no file in the other directory. The listing of a
+// link fails, so Open asks for each name.
 func TestTS13OpenRefusesGroupDirectoryLink(t *testing.T) {
 	state, dir := newLogState(t)
 	openStore(t, state).Close()

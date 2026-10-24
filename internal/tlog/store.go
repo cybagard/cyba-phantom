@@ -294,7 +294,7 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 		var groupOK bool
 		var present map[string]bool // the names in the group directory
 		has := func(name string) bool {
-			if present == nil { // the listing failed: ask for each name
+			if present == nil { // no usable listing: ask for each name
 				return s.exists(name)
 			}
 			return present[path.Base(name)]
@@ -330,8 +330,9 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 
 // groupNames lists the group directory g one time. It returns nil if the
 // listing fails. It also returns nil if the directory has no owner search bit
-// or too many names. Then the caller asks for each name with exists. The Lstat
-// of a name below a directory with no search bit fails.
+// or too many names. Then the caller asks for each name with exists. With no
+// owner search bit, the Lstat of a name below the directory fails, and exists
+// counts the name as there.
 func (s *Store) groupNames(g string) map[string]bool {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
@@ -480,13 +481,12 @@ func readNames(read []tlog.Tile, empty string) string {
 // covers. If not, the next Open would refuse the tree head. A newly covered
 // hash must be one that WriteTile accepted since the last SetHead. The root
 // computation does not read some newly covered full tiles. Each of them must
-// give its hash in the tile one level up. SetHead
-// refuses a size that gives new hashes to more than maxBatchTiles tiles. A
-// refused call changes no file, with one exception. The write can fail at the
-// rename of the head file or after it. Then the head file on disk can hold the
-// new size and root. The Store keeps the old tree head in memory. The error
-// matches ErrHeadOnDisk, and Log stops on it. The caller must close the Store
-// and open it again.
+// give its hash in the tile one level up. SetHead refuses a size that gives
+// new hashes to more than maxBatchTiles tiles. A refused call changes no
+// file, with one exception. The write can fail at the rename of the head file
+// or after it. Then the head file on disk can hold the new size and root. The
+// Store keeps the old tree head in memory. The error matches ErrHeadOnDisk,
+// and Log stops on it. The caller must close the Store and open it again.
 func (s *Store) SetHead(size int64, root tlog.Hash) error {
 	next := tlog.Tree{N: size, Hash: root}
 	switch {
@@ -754,9 +754,9 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 }
 
 // tileFiles is what partials and widest return for one tile. It holds the
-// widths, the temporary files, and the data of the widest file. WriteTile has
-// this listing. It gives the listing to staleFrom and does not list the
-// directory again.
+// widths, the temporary files, the width w of the widest file, and its data.
+// WriteTile has these values. It gives them to staleFrom, which then does not
+// list the directory again.
 type tileFiles struct {
 	widths []int
 	tmps   []string
