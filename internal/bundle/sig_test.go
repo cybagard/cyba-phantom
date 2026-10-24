@@ -55,6 +55,7 @@ func TestTS20ValidLinesVerify(t *testing.T) {
 // bad_sig. The text holds no input.
 func TestTS20BadSig(t *testing.T) {
 	priv, a := testKey(1, "a1")
+	privB, b := testKey(2, "b2")
 	privOut, _ := testKey(3, "")
 	privWrong, _ := testKey(4, "")
 	good := signed("a1", priv)
@@ -86,8 +87,10 @@ func TestTS20BadSig(t *testing.T) {
 		"trailing space":               {sigArchive, good[:len(good)-1] + " \n"},
 		"empty line":                   {sigArchive, good + "\n"},
 		"no final newline":             {sigArchive, good[:len(good)-1]},
+		"bad trusted line, then valid": {sigArchive, signed("a1", privWrong) + signed("b2", privB)},
+		"valid line, then bad trusted": {sigArchive, signed("a1", priv) + signed("b2", privWrong)},
 	} {
-		ids, err := VerifySig(c.archive, []byte(c.sig), TrustSet{a})
+		ids, err := VerifySig(c.archive, []byte(c.sig), TrustSet{a, b})
 		if code, ok := CodeOf(err); ids != nil || err != ErrBadSig || !ok || code != CodeBadSig || err.Error() != "bundle: bad_sig" {
 			t.Errorf("%s: %q, %v", name, ids, err)
 		}

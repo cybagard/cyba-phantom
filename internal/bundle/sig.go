@@ -48,8 +48,8 @@ func parseSig(b []byte) ([]sigLine, bool) {
 }
 
 // VerifySig checks the signature file sig over the archive. It returns the key
-// IDs of the valid lines in order. A line whose key ID is not in the
-// trust set is skipped. A line whose key ID is in the set and whose signature
+// IDs of the valid lines in order. It skips a line whose key ID is not in the
+// trust set. A line whose key ID is in the set and whose signature
 // does not verify gives ErrBadSig. A file that is not valid, or that has no
 // valid line, gives ErrBadSig too. The caller checks that the key IDs are the
 // ones that it needs. The function takes no key from the bundle.

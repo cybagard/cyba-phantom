@@ -148,9 +148,9 @@ func ReadArchive(b []byte) (*Archive, error) {
 	return readArchive(zr, checkEntry)
 }
 
-// readArchive reads the decoded bytes of an archive from src. It is the seam
-// of ReadArchive. A test gives it another source and another entry check. So
-// the test can reach the byte count alone.
+// readArchive reads the decoded bytes of an archive from src. ReadArchive calls
+// it. A test gives it another source and another entry check. So the test can
+// reach the byte count alone.
 func readArchive(src io.Reader, checkEntry func(*tar.Header) (string, error)) (*Archive, error) {
 	cr := &capReader{r: src}
 	tr := tar.NewReader(cr)

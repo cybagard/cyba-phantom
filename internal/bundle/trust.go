@@ -21,16 +21,15 @@ type TrustKey struct {
 	Class     Class
 }
 
-// TrustSet is the list of the keys that the loader trusts (SEC-24). The caller
-// gives it to the loader as a parameter. This package holds no set.
+// TrustSet is the list of the keys that a caller trusts (SEC-24). VerifySig
+// takes it as a parameter. This package holds no set.
 type TrustSet []TrustKey
 
 // ErrTrustSet is the error of TrustSet.Check. It holds no key bytes.
 var ErrTrustSet = errors.New("bundle: trust set is not valid")
 
 // Check gives ErrTrustSet for an entry with a key ID or class that is not
-// valid. It also gives it for a repeated key ID, or for a key in testKeys. A
-// test of the release set calls it with the test keys.
+// valid. It also gives it for a repeated key ID, or for a key in testKeys.
 func (t TrustSet) Check(testKeys [][32]byte) error {
 	seen := make(map[string]bool, len(t))
 	for _, k := range t {
