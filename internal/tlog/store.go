@@ -164,26 +164,27 @@ type Store struct {
 // relative to state. state.OpenRoot refuses a log directory that links out of
 // the state directory. Open also refuses a log directory that is a link inside
 // the state directory. This is because the fsync of the log directory refuses
-// a link. Open makes the directory (mode 0700) if it does not exist. The directory
-// must have no group or other permission bits. Open reads the tree head and
-// the tiles that the root computation reads. It checks that these tiles give
-// the root of the tree head. Open does not read the other tiles that the tree
-// head covers. A later change checks them with authenticated reads.
-// Open tidies the tiles that it reads. After a crash, at most one partial file
-// then stays for each of them. Open also tidies the tiles beyond the tree head
-// in a bounded range. For each level, the range starts at the first tile that
-// the tree head does not cover. It ends maxBatchTiles tiles above that tile.
-// A crash can leave such tiles. The number of names that Open reads depends on
-// this bound and not on the size of the log. Open does not list or tidy any
-// other tile. A directory with no tree head must be empty, or hold only the
-// temporary file of the tree head. Open writes a tree head of size 0 for it,
-// before any tile can be written. Open makes the loaded tree head durable. It
-// calls fsync on the log directory and on its parents before it reads, writes,
-// or deletes any file there. Then it calls fsync on the directories of the
-// tiles that it tidies. It deletes files only after all checks pass and these
-// fsync calls pass. If a check or one of these fsync calls fails, Open returns
-// an error and has deleted nothing. A delete can fail, or the fsync after the
-// deletes can fail. Then Open returns an error and it can have deleted files.
+// a link. Open makes the directory (mode 0700) if it does not exist. The
+// directory must have no group or other permission bits. Open reads the tree
+// head and the tiles that the root computation reads. It checks that these
+// tiles give the root of the tree head. Open does not read the other tiles
+// that the tree head covers. A later change checks them with authenticated
+// reads. Open tidies the tiles that it reads. After a crash, at most one
+// partial file then stays for each of them. Open also tidies the tiles beyond
+// the tree head in a bounded range. For each level, the range starts at the
+// first tile that the tree head does not cover. It ends maxBatchTiles tiles
+// above that tile. A crash can leave such tiles. The number of names that Open
+// reads depends on this bound and not on the size of the log. Open does not
+// list or tidy any other tile. A directory with no tree head must be empty,
+// or hold only the temporary file of the tree head. Open writes a tree head
+// of size 0 for it, before any tile can be written. Open makes the loaded
+// tree head durable. It calls fsync on the log directory and on its parents
+// before it reads, writes, or deletes any file there. Then it calls fsync on
+// the directories of the tiles that it tidies. It deletes files only after all
+// checks pass and these fsync calls pass. If a check or one of these fsync
+// calls fails, Open returns an error and has deleted nothing. A delete can
+// fail, or the fsync after the deletes can fail. Then Open returns an error
+// and it can have deleted files.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -328,9 +329,9 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 }
 
 // groupNames lists the group directory g one time. It returns nil if the
-// directory has no owner search bit, the listing fails, or the directory has
-// more names than a group can hold. Then the caller asks for each name with
-// exists. The Lstat of a name below a directory with no search bit fails.
+// listing fails. It also returns nil if the directory has no owner search bit
+// or too many names. Then the caller asks for each name with exists. The Lstat
+// of a name below a directory with no search bit fails.
 func (s *Store) groupNames(g string) map[string]bool {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
@@ -752,10 +753,10 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	return s.staleFrom(t, keep, c, tileFiles{widths, tmps, w, top})
 }
 
-// tileFiles is what partials and widest return for one tile: the widths, the
-// temporary files, and the data of the widest file. WriteTile has this
-// listing. It gives the listing to staleFrom and does not list the directory
-// again.
+// tileFiles is what partials and widest return for one tile. It holds the
+// widths, the temporary files, and the data of the widest file. WriteTile has
+// this listing. It gives the listing to staleFrom and does not list the
+// directory again.
 type tileFiles struct {
 	widths []int
 	tmps   []string
