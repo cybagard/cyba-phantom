@@ -41,6 +41,7 @@ func (c Code) String() string {
 // The errors of the manifest steps. Each one is a fixed value with no input
 // bytes.
 var (
+	ErrBadSig          = errors.New("bundle: bad_sig")
 	ErrManifestInvalid = errors.New("bundle: manifest_invalid")
 	ErrMinEngine       = errors.New("bundle: min_engine")
 	ErrExpired         = errors.New("bundle: expired")
@@ -52,6 +53,8 @@ func CodeOf(err error) (Code, bool) {
 	switch {
 	case errors.Is(err, ErrArchiveInvalid):
 		return CodeArchiveInvalid, true
+	case errors.Is(err, ErrBadSig):
+		return CodeBadSig, true
 	case errors.Is(err, ErrManifestInvalid):
 		return CodeManifestInvalid, true
 	case errors.Is(err, ErrMinEngine):

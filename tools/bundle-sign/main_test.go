@@ -1,0 +1,173 @@
+package main
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/bundle"
+)
+
+// exec runs a command and returns the stdout, the stderr and the exit code.
+func exec(args ...string) (string, string, int) {
+	var out, errOut bytes.Buffer
+	code := run(args, &out, &errOut)
+	return out.String(), errOut.String(), code
+}
+
+func runOK(t *testing.T, args ...string) string {
+	t.Helper()
+	if out, errText, code := exec(args...); code != 0 || errText != "" {
+		t.Fatalf("%s: code %d, stderr %q", args[0], code, errText)
+	} else {
+		return out
+	}
+	return ""
+}
+
+// runFail checks that a command fails with the exit code and the error.
+func runFail(t *testing.T, want int, err error, args ...string) {
+	t.Helper()
+	if _, errText, code := exec(args...); code != want || errText != err.Error()+"\n" {
+		t.Errorf("%s: code %d, stderr %q; want %d, %q", args[0], code, errText, want, err)
+	}
+}
+
+func write(t *testing.T, path, text string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(text), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// T-S-20: keygen and sign make a signature file that the loader check accepts.
+func TestTS20RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	write(t, p("a.cbnd"), "archive bytes", 0o644)
+	var trust []string
+	for _, id := range []string{"k1", "k2"} {
+		line := runOK(t, "keygen", id, p(id+".key"))
+		if fi, err := os.Stat(p(id + ".key")); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("key file %s: %v", id, err)
+		}
+		trust = append(trust, line)
+	}
+	write(t, p("trust"), strings.Join(trust, ""), 0o644)
+	runOK(t, "sign", "k1", p("k1.key"), p("a.cbnd"), p("one.sig"))
+	if got := runOK(t, "verify", p("trust"), p("a.cbnd"), p("one.sig")); got != "valid: k1\n" {
+		t.Errorf("verify one line: %q", got)
+	}
+	runOK(t, "sign", "k2", p("k2.key"), p("a.cbnd"), p("two.sig"))
+	both := p("both.sig")
+	one, _ := os.ReadFile(p("one.sig"))
+	two, _ := os.ReadFile(p("two.sig"))
+	write(t, both, string(one)+string(two), 0o644)
+	if got := runOK(t, "verify", p("trust"), p("a.cbnd"), both); got != "valid: k1 k2\n" {
+		t.Errorf("verify two lines: %q", got)
+	}
+	write(t, p("b.cbnd"), "other bytes", 0o644)
+	runFail(t, 1, errVerify, "verify", p("trust"), p("b.cbnd"), both)
+	runFail(t, 1, errWrite, "sign", "k1", p("k1.key"), p("a.cbnd"), p("one.sig"))
+	runFail(t, 1, errWrite, "keygen", "k3", p("k1.key"))
+	runFail(t, 2, errUsage, "sign", "k1")
+}
+
+// T-S-20: sign refuses a key file with a group or other bit, a symlink or a
+// second link. It makes no signature file.
+func TestTS20KeyFileIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	runOK(t, "keygen", "k1", p("k.key"))
+	write(t, p("a.cbnd"), "archive", 0o644)
+	write(t, p("h.key"), "x\n", 0o600)
+	for name, set := range map[string]func(){
+		"mode 0640": func() { _ = os.Chmod(p("k.key"), 0o640) },
+		"mode 0604": func() { _ = os.Chmod(p("k.key"), 0o604) },
+		"symlink":   func() { _ = os.Symlink(p("h.key"), p("k.key")) },
+		"hard link": func() { _ = os.Link(p("h.key"), p("k.key")) },
+		"not a key": func() { _ = os.WriteFile(p("k.key"), []byte("not a key\n"), 0o600) },
+	} {
+		_ = os.RemoveAll(p("k.key"))
+		set()
+		runFail(t, 1, errKey, "sign", "k1", p("k.key"), p("a.cbnd"), p("m.sig"))
+		if _, err := os.Stat(p("m.sig")); err == nil {
+			t.Errorf("%s: signature file made", name)
+		}
+	}
+}
+
+// T-S-20: a marker in the key file never appears in the output or in an error.
+// This holds for each command, with a key file in mode 0600 and in mode 0640.
+// The output of keygen does not hold the private key.
+func TestTS20KeyMarkerNeverAppears(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	seed := []byte("marker-seed-0123456789-abcdefgh!")
+	secrets := []string{string(seed), b64.EncodeToString(seed), b64.EncodeToString(ed25519.NewKeyFromSeed(seed))}
+	write(t, p("a.cbnd"), "archive", 0o644)
+	write(t, p("one.sig"), "k1 "+strings.Repeat("A", 86)+"==\n", 0o644)
+	for i, mode := range []os.FileMode{0o600, 0o640} {
+		write(t, p("m.key"), b64.EncodeToString(seed)+"\n", mode)
+		o := func(n string) string { return p(string(rune('a'+i)) + n) }
+		var all string
+		for _, args := range [][]string{
+			{"sign", "k1", p("m.key"), p("a.cbnd"), o("1.sig")},
+			{"keygen", "k1", p("m.key")},
+			{"verify", p("m.key"), p("a.cbnd"), p("one.sig")},
+			{"pack", p("m.key"), o("p.cbnd")},
+		} {
+			out, errText, _ := exec(args...)
+			all += out + errText
+		}
+		for _, s := range secrets {
+			if strings.Contains(all, s) {
+				t.Errorf("mode %v: output holds key bytes", mode)
+			}
+		}
+	}
+	line := runOK(t, "keygen", "k1", p("n.key"))
+	if text, _ := os.ReadFile(p("n.key")); strings.Contains(line, strings.TrimSpace(string(text))) {
+		t.Error("keygen printed the private key")
+	}
+}
+
+// T-S-20: pack writes USTAR headers only. An archive with a name of more than
+// 100 bytes, in the prefix and name fields, passes ReadArchive. A name that
+// does not fit gives an error and leaves no output file. So does a path that
+// is not a regular file, or an archive that ReadArchive refuses.
+func TestTS20Pack(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	deep := filepath.Join(src, "traps", strings.Repeat("d", 30), strings.Repeat("e", 30), strings.Repeat("f", 30))
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	long := filepath.Join(deep, "file-"+strings.Repeat("g", 30))
+	write(t, long, "long data", 0o644)
+	write(t, filepath.Join(src, "manifest.json"), "{}", 0o644)
+	out := filepath.Join(dir, "out.cbnd")
+	runOK(t, "pack", src, out)
+	b, _ := os.ReadFile(out)
+	a, err := bundle.ReadArchive(b)
+	rel, _ := filepath.Rel(src, long)
+	if data, ok := a.File(rel); err != nil || !ok || string(data) != "long data" || len(rel) <= 100 || a.Len() != 2 {
+		t.Fatalf("name of %d bytes: found %v, error %v", len(rel), ok, err)
+	}
+	runFail(t, 1, errWrite, "pack", src, out)
+	bad := filepath.Join(dir, "bad")
+	if err := os.MkdirAll(filepath.Join(bad, "traps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(bad, "traps", strings.Repeat("n", 101)), "x", 0o644)
+	runFail(t, 1, errName, "pack", bad, filepath.Join(dir, "bad.cbnd"))
+	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
+		t.Error("output file stays after a name error")
+	}
+}
