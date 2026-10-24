@@ -473,10 +473,9 @@ func readNames(read []tlog.Tile, empty string) string {
 // returned nil. SetHead refuses a size that is smaller than the stored size
 // and a size above maxSize. It refuses the call if the tiles no longer give
 // the stored tree head. It also refuses the call if the tiles do not give the
-// new one. It checks each tile that
-// the new root computation reads. It also checks each tile that the new tree
-// head covers for the first time. For each such tile, SetHead refuses a link in
-// the tile path, like WriteTile. The stored files of the tile must agree in the
+// new one. It checks each tile that the new root computation reads. It also
+// checks each tile that the new tree head covers for the first time. For each
+// such tile, SetHead refuses a link in the tile path, like WriteTile. The stored files of the tile must agree in the
 // hashes that the new tree head covers. If not, the next Open would refuse the
 // tree head. A newly covered hash must be one that WriteTile accepted since the
 // last SetHead. The root computation does not read some newly covered full
