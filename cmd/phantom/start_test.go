@@ -513,8 +513,15 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTU18_SigtermHelper$")
 	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
+	}
+	// A skipped helper or a pattern with no test also exits 0.
+	for _, w := range []string{"checkpointer does not start", safefile.ErrType.Error()} {
+		if !strings.Contains(string(out), w) {
+			t.Errorf("child output has no %q:\n%s", w, out)
+		}
 	}
 }
 
