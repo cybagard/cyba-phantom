@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,6 +109,63 @@ func TestTS20KeygenRemovesKeyOnPrintFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(key); err == nil {
 		t.Error("key file stays after a print failure")
+	}
+}
+
+const helperEnv = "BUNDLE_SIGN_TEST_MAIN"
+
+// TestMainHelper runs the real main in a child process. It does nothing in a
+// normal test run. The arguments of main follow "--" in os.Args.
+func TestMainHelper(t *testing.T) {
+	if os.Getenv(helperEnv) != "1" {
+		t.Skip("helper of TestTS20BrokenPipe")
+	}
+	for i, a := range os.Args {
+		if a == "--" {
+			os.Args = append([]string{os.Args[0]}, os.Args[i+1:]...)
+			break
+		}
+	}
+	main()
+}
+
+// T-S-20: a broken stdout pipe gives the fixed write error and exit code 1, not
+// the SIGPIPE exit. keygen removes the key file. This runs the real main in a
+// child process with the read end of its stdout pipe closed.
+func TestTS20BrokenPipe(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	write(t, p("a.cbnd"), "archive", 0o644)
+	trust := runOK(t, "keygen", "k1", p("k.key"))
+	write(t, p("trust"), trust, 0o644)
+	runOK(t, "sign", "k1", p("k.key"), p("a.cbnd"), p("a.sig"))
+	for name, args := range map[string][]string{
+		"keygen": {"keygen", "k2", p("new.key")},
+		"verify": {"verify", p("trust"), p("a.cbnd"), p("a.sig")},
+	} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Close()
+		var errOut bytes.Buffer
+		cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestMainHelper$", "--"}, args...)...)
+		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		cmd.Stdout, cmd.Stderr = w, &errOut
+		err = cmd.Run()
+		w.Close()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if code != 1 || errOut.String() != errWrite.Error()+"\n" {
+			t.Errorf("%s: code %d, stderr %q; want 1, %q", name, code, errOut.String(), errWrite.Error()+"\n")
+		}
+	}
+	if _, err := os.Stat(p("new.key")); err == nil {
+		t.Error("keygen: key file stays after a broken pipe")
 	}
 }
 
@@ -229,7 +287,7 @@ func TestTS20Pack(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
 		t.Error("output file stays after a name error")
 	}
-	// A symlink below traps/ has a valid name and sits next to a manifest.
+	// A symlink below traps/ has a valid name and is next to a manifest.
 	// The symlink is the only reason to refuse it. A top-level name that
 	// ReadArchive refuses is a second case. Each gives errPack and leaves no
 	// output file.
