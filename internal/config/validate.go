@@ -679,7 +679,7 @@ func checkBundlePath(l *loader, raw string) string {
 	return ""
 }
 
-// bundleConflict returns a detail if the directory of the bundle.path value p
+// bundleConflict returns a detail if the directory of p, a bundle.path value,
 // is in or above tlog.dir or acme.cache_dir. It also returns a detail if the
 // directory is store.path, a SQLite side file of it, or is in one of them.
 // It returns a detail if p is store.path (SEC-23). It compares the path text
