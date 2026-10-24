@@ -10,12 +10,13 @@
 // keygen makes a private key file with mode 0600. It never writes over a
 // file. It prints the public key line "<key_id> <base64>". That line is one
 // line of a trust file. keygen never prints the private key. pack writes the
-// files below dir as a gzip tar archive with USTAR headers only. A name that
-// does not fit USTAR gives an error before the output file is made. sign reads
-// the archive one time and writes the signature line. It reads a key file only
-// when the file is regular and only the owner can use it. verify makes the
-// check of the loader with the keys of the trust file. It prints the key IDs
-// of the valid lines.
+// files below dir as a gzip tar archive with USTAR headers only. If a name does
+// not fit USTAR, pack gives an error and makes no output file. sign reads the
+// archive one time and writes the signature line. It reads a key file only
+// when the file is regular, belongs to the effective user, and no group or
+// other can use it. verify calls bundle.VerifySig with the keys of the trust
+// file. It does not check the manifest key ID. It prints the key IDs of the
+// valid lines.
 //
 // Every error text is fixed. Exit codes: 0 success, 1 failure, 2 usage.
 package main
@@ -39,14 +40,20 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
-// maxFile is the cap of a bundle file. maxSmall is the cap of the other files.
+// maxFile is the cap of a bundle file. maxSig is the cap of a signature file.
+// maxSmall is the cap of the other files.
 const (
 	maxFile  = 8 << 20
+	maxSig   = 1 << 10
 	maxSmall = 4 << 10
 )
 
 var (
-	errUsage  = errors.New("bundle-sign: usage: see the command comment")
+	errUsage = errors.New(`bundle-sign: usage:
+  bundle-sign keygen <key_id> <key-file>
+  bundle-sign pack <dir> <out.cbnd>
+  bundle-sign sign <key_id> <key-file> <archive> <out.sig>
+  bundle-sign verify <trust-file> <archive> <sig-file>`)
 	errKeyID  = errors.New("bundle-sign: key ID is not valid")
 	errKey    = errors.New("bundle-sign: key file is not usable")
 	errRead   = errors.New("bundle-sign: cannot read an input file")
@@ -82,10 +89,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// readFile reads the regular file at path, with at most max bytes. A key file
-// must also have no group or other bit and one link. A failure gives fail.
-func readFile(path string, max int64, key bool, fail error) ([]byte, error) {
-	r := safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: max}
+// readFile reads the regular file at path, with at most limit bytes. A key file
+// must also belong to the effective user, have no group or other bit, and have
+// one link. A failure gives fail.
+func readFile(path string, limit int64, key bool, fail error) ([]byte, error) {
+	r := safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: limit}
 	if key {
 		r.Owner, r.Forbid, r.OneLink = safefile.OwnerSelf, 0o077, true
 	}
@@ -102,19 +110,28 @@ func readFile(path string, max int64, key bool, fail error) ([]byte, error) {
 }
 
 // writeNew makes the file at path with mode perm and writes b. It never
-// overwrites a file.
+// overwrites a file. If the write, the sync or the close fails, it removes the
+// file that it made.
 func writeNew(path string, b []byte, perm fs.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return errWrite
 	}
-	if _, err := f.Write(b); f.Close() != nil || err != nil {
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
 		return errWrite
 	}
 	return nil
 }
 
-// keyLine makes the public key line. The trust set parse checks the key ID.
+// keyLine makes the public key line. bundle.ParseKeyLine checks the key ID.
 func keyLine(keyID string, pub ed25519.PublicKey) (string, error) {
 	line := keyID + " " + b64.EncodeToString(pub)
 	if _, _, ok := bundle.ParseKeyLine(line); !ok {
@@ -130,9 +147,17 @@ func keygen(a []string, out io.Writer) error {
 		err = writeNew(a[1], []byte(b64.EncodeToString(priv.Seed())+"\n"), 0o600)
 	}
 	if err == nil {
-		_, err = fmt.Fprintln(out, line)
+		err = printLine(out, line)
 	}
 	return err
+}
+
+// printLine writes the text and a newline to out. A failure gives errWrite.
+func printLine(out io.Writer, text ...any) error {
+	if _, err := fmt.Fprintln(out, text...); err != nil {
+		return errWrite
+	}
+	return nil
 }
 
 // signLine makes one signature line. The key file holds the base64 text of a
@@ -185,7 +210,7 @@ func verify(a []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	sig, err := readFile(a[2], maxSmall, false, errRead)
+	sig, err := readFile(a[2], maxSig, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -193,11 +218,11 @@ func verify(a []string, out io.Writer) error {
 	if err != nil {
 		return errVerify
 	}
-	_, err = fmt.Fprintln(out, "valid:", strings.Join(ids, " "))
-	return err
+	return printLine(out, "valid:", strings.Join(ids, " "))
 }
 
-// pack builds the whole archive in memory, so a failure leaves no output file.
+// pack builds the whole archive in memory. writeNew removes a partial output
+// file. So a failure leaves no output file.
 func pack(a []string, _ io.Writer) error {
 	root, _ := filepath.Abs(a[0])
 	var buf bytes.Buffer

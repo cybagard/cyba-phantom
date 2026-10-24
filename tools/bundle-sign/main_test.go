@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,8 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
 
-// exec runs a command and returns the stdout, the stderr and the exit code.
-func exec(args ...string) (string, string, int) {
+// runCmd runs a command and returns the stdout, the stderr and the exit code.
+func runCmd(args ...string) (string, string, int) {
 	var out, errOut bytes.Buffer
 	code := run(args, &out, &errOut)
 	return out.String(), errOut.String(), code
@@ -20,18 +21,17 @@ func exec(args ...string) (string, string, int) {
 
 func runOK(t *testing.T, args ...string) string {
 	t.Helper()
-	if out, errText, code := exec(args...); code != 0 || errText != "" {
+	out, errText, code := runCmd(args...)
+	if code != 0 || errText != "" {
 		t.Fatalf("%s: code %d, stderr %q", args[0], code, errText)
-	} else {
-		return out
 	}
-	return ""
+	return out
 }
 
 // runFail checks that a command fails with the exit code and the error.
 func runFail(t *testing.T, want int, err error, args ...string) {
 	t.Helper()
-	if _, errText, code := exec(args...); code != want || errText != err.Error()+"\n" {
+	if _, errText, code := runCmd(args...); code != want || errText != err.Error()+"\n" {
 		t.Errorf("%s: code %d, stderr %q; want %d, %q", args[0], code, errText, want, err)
 	}
 }
@@ -46,7 +46,12 @@ func write(t *testing.T, path, text string, mode os.FileMode) {
 	}
 }
 
-// T-S-20: keygen and sign make a signature file that the loader check accepts.
+// failWriter is a writer that always fails.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("raw write error") }
+
+// T-S-20: keygen and sign make a signature file that VerifySig accepts.
 func TestTS20RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := func(n string) string { return filepath.Join(dir, n) }
@@ -77,24 +82,64 @@ func TestTS20RoundTrip(t *testing.T) {
 	runFail(t, 1, errWrite, "sign", "k1", p("k1.key"), p("a.cbnd"), p("one.sig"))
 	runFail(t, 1, errWrite, "keygen", "k3", p("k1.key"))
 	runFail(t, 2, errUsage, "sign", "k1")
+	for _, line := range []string{"bundle-sign keygen <key_id> <key-file>", "bundle-sign pack <dir> <out.cbnd>",
+		"bundle-sign sign <key_id> <key-file> <archive> <out.sig>", "bundle-sign verify <trust-file> <archive> <sig-file>"} {
+		if !strings.Contains(errUsage.Error(), line) {
+			t.Errorf("usage text lacks %q", line)
+		}
+	}
+	// An error of the output stream has the fixed text too.
+	var errOut bytes.Buffer
+	if code := run([]string{"verify", p("trust"), p("a.cbnd"), both}, failWriter{}, &errOut); code != 1 || errOut.String() != errWrite.Error()+"\n" {
+		t.Errorf("failed output: code %d, stderr %q", code, errOut.String())
+	}
+	// A signature file of more than 1 KiB is refused.
+	write(t, p("big.sig"), strings.Repeat("a", 1025), 0o644)
+	runFail(t, 1, errRead, "verify", p("trust"), p("a.cbnd"), p("big.sig"))
 }
 
-// T-S-20: sign refuses a key file with a group or other bit, a symlink or a
-// second link. It makes no signature file.
-func TestTS20KeyFileIsChecked(t *testing.T) {
+// T-S-20: sign refuses an archive of more than 8 MiB and makes no signature file.
+func TestTS20SignArchiveCap(t *testing.T) {
 	dir := t.TempDir()
 	p := func(n string) string { return filepath.Join(dir, n) }
 	runOK(t, "keygen", "k1", p("k.key"))
+	write(t, p("max.cbnd"), strings.Repeat("a", maxFile), 0o644)
+	runOK(t, "sign", "k1", p("k.key"), p("max.cbnd"), p("max.sig"))
+	write(t, p("big.cbnd"), strings.Repeat("a", maxFile+1), 0o644)
+	runFail(t, 1, errRead, "sign", "k1", p("k.key"), p("big.cbnd"), p("big.sig"))
+	if _, err := os.Stat(p("big.sig")); err == nil {
+		t.Error("signature file made for an archive over the cap")
+	}
+}
+
+// T-S-20: sign refuses a key file with a group or other bit, a symlink or a
+// second link. It makes no signature file. Each case starts from a valid key
+// file, so a case fails on its own rule. A valid key file in mode 0600 signs.
+func TestTS20KeyFileIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	runOK(t, "keygen", "k1", p("h.key"))
+	valid, err := os.ReadFile(p("h.key"))
+	must(err)
 	write(t, p("a.cbnd"), "archive", 0o644)
-	write(t, p("h.key"), "x\n", 0o600)
+	runOK(t, "sign", "k1", p("h.key"), p("a.cbnd"), p("ok.sig"))
 	for name, set := range map[string]func(){
-		"mode 0640": func() { _ = os.Chmod(p("k.key"), 0o640) },
-		"mode 0604": func() { _ = os.Chmod(p("k.key"), 0o604) },
-		"symlink":   func() { _ = os.Symlink(p("h.key"), p("k.key")) },
-		"hard link": func() { _ = os.Link(p("h.key"), p("k.key")) },
-		"not a key": func() { _ = os.WriteFile(p("k.key"), []byte("not a key\n"), 0o600) },
+		"mode 0640": func() { must(os.Chmod(p("k.key"), 0o640)) },
+		"mode 0604": func() { must(os.Chmod(p("k.key"), 0o604)) },
+		"symlink":   func() { must(os.Remove(p("k.key"))); must(os.Symlink(p("h.key"), p("k.key"))) },
+		"hard link": func() { must(os.Link(p("k.key"), p("second.key"))) },
+		"not a key": func() { must(os.WriteFile(p("k.key"), []byte("not a key\n"), 0o600)) },
 	} {
-		_ = os.RemoveAll(p("k.key"))
+		must(os.RemoveAll(p("k.key")))
+		must(os.RemoveAll(p("second.key")))
+		must(os.RemoveAll(p("m.sig")))
+		write(t, p("k.key"), string(valid), 0o600)
 		set()
 		runFail(t, 1, errKey, "sign", "k1", p("k.key"), p("a.cbnd"), p("m.sig"))
 		if _, err := os.Stat(p("m.sig")); err == nil {
@@ -123,7 +168,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 			{"verify", p("m.key"), p("a.cbnd"), p("one.sig")},
 			{"pack", p("m.key"), o("p.cbnd")},
 		} {
-			out, errText, _ := exec(args...)
+			out, errText, _ := runCmd(args...)
 			all += out + errText
 		}
 		for _, s := range secrets {
@@ -169,5 +214,27 @@ func TestTS20Pack(t *testing.T) {
 	runFail(t, 1, errName, "pack", bad, filepath.Join(dir, "bad.cbnd"))
 	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
 		t.Error("output file stays after a name error")
+	}
+	// A symlink in the directory, and a top-level name that ReadArchive refuses,
+	// give errPack and leave no output file.
+	linked := filepath.Join(dir, "linked")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(linked, "manifest.json"), "{}", 0o644)
+	if err := os.Symlink(filepath.Join(linked, "manifest.json"), filepath.Join(linked, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+	refused := filepath.Join(dir, "refused")
+	if err := os.MkdirAll(refused, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(refused, "notallowed.bin"), "x", 0o644)
+	for name, srcDir := range map[string]string{"symlink": linked, "refused by ReadArchive": refused} {
+		outFile := filepath.Join(dir, "refuse.cbnd")
+		runFail(t, 1, errPack, "pack", srcDir, outFile)
+		if _, err := os.Stat(outFile); err == nil {
+			t.Errorf("%s: output file made", name)
+		}
 	}
 }
