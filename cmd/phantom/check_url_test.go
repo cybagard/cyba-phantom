@@ -71,9 +71,11 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 	} {
 		for _, c := range files(host) {
 			code, se := check(c[1], c[2])
-			// The loader shows the value of some keys after the detail.
+			// Only alerts.sinks[0].host is a string key, not a URL key.
+			// The loader shows its value after ": value".
 			detail, _, _ := strings.Cut(se, ": value")
-			if code != 1 || !strings.Contains(se, "config: "+c[0]+" at ") || strings.Contains(detail, host) {
+			bare := strings.Trim(host, "[]")
+			if code != 1 || !strings.Contains(se, "config: "+c[0]+" at ") || !strings.Contains(se, "egress rule") || strings.Contains(detail, bare) {
 				t.Errorf("%s %s: exit %d, stderr %q", c[0], host, code, se)
 			}
 		}
