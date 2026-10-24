@@ -478,8 +478,9 @@ func readNames(read []tlog.Tile, empty string) string {
 // such tile, SetHead refuses a link in the tile path, like WriteTile. The
 // stored files of the tile must agree in the hashes that the new tree head
 // covers. If not, the next Open would refuse the tree head. A newly covered
-// hash must be one that WriteTile accepted since the last SetHead. The root computation does not read some newly covered full
-// tiles. Each of them must give its hash in the tile one level up. SetHead
+// hash must be one that WriteTile accepted since the last SetHead. The root
+// computation does not read some newly covered full tiles. Each of them must
+// give its hash in the tile one level up. SetHead
 // refuses a size that gives new hashes to more than maxBatchTiles tiles. A
 // refused call changes no file, with one exception. The write can fail at the
 // rename of the head file or after it. Then the head file on disk can hold the
