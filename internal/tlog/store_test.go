@@ -1033,6 +1033,34 @@ func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
 	}
 }
 
+// Open tidies the tiles beyond the head in two partial directories that share
+// their parents. It calls fsync on each of these directories one time.
+func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	for n := int64(1); n <= 2; n++ {
+		file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: n, W: 1}.Path())
+		mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+		mustNil(t, os.WriteFile(file, make([]byte, tlog.HashSize), fileMode))
+	}
+	counts := map[string]int{}
+	oldDir := syncDirFile
+	t.Cleanup(func() { syncDirFile = oldDir })
+	syncDirFile = func(f *os.File) error {
+		counts[f.Name()]++
+		return oldDir(f)
+	}
+	openStore(t, state)
+	for name, n := range counts {
+		if n > 1 && name != "." { // the sync of the log directory comes before the load
+			t.Errorf("fsync of %s: %d calls, want 1", name, n)
+		}
+	}
+	if len(counts) < 3 {
+		t.Fatalf("fsync calls: %v, want the shared parents and the partial directories", counts)
+	}
+}
+
 func TestTU07WriteDeletesLeftoverFilesOfTheTile(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)

@@ -349,11 +349,18 @@ func (s *Store) syncRead(dirs []string) error {
 }
 
 // syncAll calls fsync on each distinct directory in dirs, and on its parents.
+// It calls fsync on a shared parent one time. For each directory, it starts at
+// the directory and goes up until it reaches a directory that it synced. So a
+// child is always synced before its parent.
 func (s *Store) syncAll(dirs []string) error {
 	slices.Sort(dirs)
+	done := map[string]bool{}
 	for _, dir := range slices.Compact(dirs) {
-		if err := syncDirs(s.dir, dir); err != nil {
-			return newError(dir, ruleWrite)
+		for d := dir; !done[d]; d = path.Dir(d) {
+			if err := syncOneDir(s.dir, d); err != nil {
+				return newError(dir, ruleWrite)
+			}
+			done[d] = true
 		}
 	}
 	return nil
@@ -979,17 +986,21 @@ func (s *Store) writeFile(name string, data []byte) error {
 // syncDirs calls fsync on dir and on each parent of dir up to the root r.
 func syncDirs(r *os.Root, dir string) error {
 	for {
-		d, err := openDir(r, dir)
-		if err != nil {
-			return err
-		}
-		err = syncDirFile(d)
-		d.Close()
-		if err != nil || dir == "." {
+		if err := syncOneDir(r, dir); err != nil || dir == "." {
 			return err
 		}
 		dir = path.Dir(dir)
 	}
+}
+
+// syncOneDir calls fsync on dir only.
+func syncOneDir(r *os.Root, dir string) error {
+	d, err := openDir(r, dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return syncDirFile(d)
 }
 
 // tileReader gives tiles to tlog.TileHashReader. SaveTiles does nothing:
