@@ -278,8 +278,9 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if len(batch) == 0 && !w.counters.Pending() {
 		return nil
 	}
-	// One copy of each event. The evidence decision, the hash, the row and the
-	// drop lane use it. A later change to an event has no effect.
+	// One record copy of each event. The evidence decision, the hash, the row
+	// and the drop lane use it. The address for the session id of a refused row
+	// and the body prefix still come from the event.
 	recs := make([]event.Record, len(batch))
 	for j, e := range batch {
 		recs[j] = e.Record()
@@ -384,7 +385,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if evidence[j] && appendErr != nil {
 			continue
 		}
-		rec := recs[j] // the copy that write hashed
+		rec := recs[j] // the copy that write made
 		if rec.Kind == event.KindRefused {
 			// The row of a refused event gets a session id from the batch day
 			// key. The address and the JA4 text go to no column.

@@ -404,9 +404,8 @@ type dbOnly struct {
 // value that shares no memory that a caller can change. Strings share bytes
 // that cannot change. Go lets a caller assign a whole Event value. The queue
 // does not depend on Size after Enqueue, because it keeps the bytes that it
-// reserved. Code that uses reflect on the
-// unexported fields can reach the stored body prefix. No other package does
-// this.
+// reserved. Code that uses reflect on the unexported fields can reach the
+// stored body prefix. No other package does this.
 type Event struct {
 	record Record
 	db     dbOnly
