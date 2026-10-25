@@ -349,6 +349,13 @@ func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 	}
 }
 
+// TestTS16EgressGuardRefusesOtherRequests: the guard allows the CA and refuses
+// all other requests. This test depends on the order of the tests. It sets a
+// proxy in the environment. net/http reads that environment one time for each
+// process. If an earlier test made it read the environment first, the proxy
+// is empty here. Then the check of the proxy URL in the allowed cases cannot
+// see a guard that reads the environment. That check is full when the test
+// runs alone. The refused cases catch such a guard in any order.
 func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
 	t.Setenv("HTTP_PROXY", "http://proxy.test:3128")
