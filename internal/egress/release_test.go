@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -248,9 +249,63 @@ func releaseDepProblem(imp string) string {
 	return ""
 }
 
-// TestTS21ReleaseCommandsDoNotListTestSeam lists the dependencies of the
+// usesDepList tells if the dependency list covers the platform c. A host that
+// is not linux has other std packages. Thus only the linux targets use it.
+func usesDepList(c buildConfig) bool { return c.goos == "linux" }
+
+// readList gives the lines of the list file name in testdata.
+func readList(name string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n"), nil
+}
+
+// listProblems gives one text for each problem of a line. A line has a
+// problem when it is empty or the same as the line before it. A line also has
+// a problem when it sorts before the line before it in byte order. A line that
+// is not in used has a problem too.
+func listProblems(lines []string, used map[string]bool) []string {
+	var out []string
+	for i, l := range lines {
+		switch {
+		case l == "":
+			out = append(out, fmt.Sprintf("line %d is empty", i+1))
+		case i > 0 && l == lines[i-1]:
+			out = append(out, fmt.Sprintf("line %d repeats %s", i+1, l))
+		case i > 0 && l < lines[i-1]:
+			out = append(out, fmt.Sprintf("line %d, %s, is out of order", i+1, l))
+		}
+		if l != "" && !used[l] {
+			out = append(out, fmt.Sprintf("line %d, %s, is not used", i+1, l))
+		}
+	}
+	return out
+}
+
+// loadList gives the lines of the list file name in testdata and their set.
+func loadList(t *testing.T, name string) ([]string, map[string]bool) {
+	t.Helper()
+	lines, err := readList(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string]bool{}
+	for _, l := range lines {
+		set[l] = true
+	}
+	return lines, set
+}
+
+// TestTS21ReleaseCommandsDoNotListTestSeam gets the dependencies of the
 // release commands for each platform in releaseConfigs, with cgo off. It
-// fails on each dependency that depProblem names, and on a go workspace.
+// fails on each dependency that depProblem names, and on a go workspace. On a
+// platform with usesDepList, it fails on each package that is not on
+// release-deps.txt. It also fails on a line of the file that is not a
+// dependency on a linux platform.
+// The loop has no subtests. Thus the union of the platforms does not depend on
+// the -run filter.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	root := moduleRoot(t)
 	realRoot, err := realPath(root)
@@ -265,23 +320,89 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := []string{modPath + "/cmd/phantom", modPath + "/cmd/phantom-verify"}
+	lines, list := loadList(t, "release-deps.txt")
+	used := map[string]bool{}
 	for _, c := range releaseConfigs {
-		t.Run(c.name(), func(t *testing.T) {
-			ctx, deps := listDeps(t, root, c, commands...)
-			if err := contextError(ctx, c); err != nil {
-				t.Fatal(err)
+		ctx, deps := listDeps(t, root, c, commands...)
+		if err := contextError(ctx, c); err != nil {
+			t.Fatalf("%s: %v", c.name(), err)
+		}
+		for _, cmd := range commands {
+			if !slices.ContainsFunc(deps, func(d listedDep) bool { return d.Path == cmd }) {
+				t.Errorf("%s: go list -deps did not list %s", c.name(), cmd)
 			}
-			for _, cmd := range commands {
-				if !slices.ContainsFunc(deps, func(d listedDep) bool { return d.Path == cmd }) {
-					t.Errorf("go list -deps did not list %s", cmd)
-				}
+		}
+		for _, d := range deps {
+			if why := depProblem(realRoot, d); why != "" {
+				t.Errorf("%s: a release command depends on %s: %s", c.name(), d.Path, why)
 			}
-			for _, d := range deps {
-				if why := depProblem(realRoot, d); why != "" {
-					t.Errorf("a release command depends on %s: %s", d.Path, why)
-				}
+			if !usesDepList(c) || d.Module == modPath {
+				continue
 			}
-		})
+			used[d.Path] = true
+			if !list[d.Path] {
+				t.Errorf("%s: %s is not on release-deps.txt", c.name(), d.Path)
+			}
+		}
+	}
+	for _, p := range listProblems(lines, used) {
+		t.Errorf("release-deps.txt: %s", p)
+	}
+}
+
+// TestTS21ReleaseConfigsAreLinuxTargets checks that the linux platforms of
+// releaseConfigs are the linux targets of go tool dist list. The host platform
+// is the only one that does not use the dependency list.
+func TestTS21ReleaseConfigsAreLinuxTargets(t *testing.T) {
+	out, err := goCommand(t, moduleRoot(t), nil, "tool", "dist", "list").Output()
+	if err != nil {
+		t.Fatalf("go tool dist list: %v", err)
+	}
+	var want, got, other []string
+	for _, l := range strings.Fields(string(out)) {
+		if strings.HasPrefix(l, "linux/") {
+			want = append(want, l)
+		}
+	}
+	for _, c := range releaseConfigs {
+		if usesDepList(c) {
+			got = append(got, c.name())
+		} else {
+			other = append(other, c.name())
+		}
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("releaseConfigs has the linux targets %q, want %q", got, want)
+	}
+	if !slices.Equal(other, []string{"default"}) {
+		t.Errorf("platforms with no dependency list: %q, want the host only", other)
+	}
+}
+
+// TestTS21ReleaseListFormRules checks listProblems on lists with an order, a
+// repeat, an empty line and a line that is not used.
+func TestTS21ReleaseListFormRules(t *testing.T) {
+	used := map[string]bool{"a": true, "a/b": true, "b": true, "c": true, "B": true}
+	for name, tc := range map[string]struct {
+		lines []string
+		want  int
+	}{
+		"sorted":            {[]string{"a", "a/b", "b"}, 0},
+		"swapped":           {[]string{"b", "a", "c"}, 1},
+		"doubled":           {[]string{"a", "b", "b"}, 1},
+		"empty line":        {[]string{"a", "", "b"}, 1},
+		"empty last line":   {[]string{"a", "b", ""}, 1},
+		"byte order":        {[]string{"B", "a"}, 0},
+		"upper after lower": {[]string{"a", "B"}, 1},
+		"line not used":     {[]string{"a", "b", "z"}, 1},
+		"first not used":    {[]string{"0", "a"}, 1},
+		"all not used":      {[]string{"x", "y"}, 2},
+	} {
+		if got := listProblems(tc.lines, used); len(got) != tc.want {
+			t.Errorf("%s: %d problems %q, want %d", name, len(got), got, tc.want)
+		}
 	}
 }
 
@@ -425,6 +546,43 @@ func TestTS21ReleaseListRealError(t *testing.T) {
 	}
 }
 
+// TestTS21ReleaseListErrorWithFolder runs go list on a package that has an
+// error and a folder. On linux/amd64, parseDeps must report the error text.
+func TestTS21ReleaseListErrorWithFolder(t *testing.T) {
+	c := buildConfig{"linux", "amd64"}
+	pkg := modPath + "/internal/egress/testdata/excludedpkg"
+	args := []string{"list", "-e", "-deps", "-f", depFormat, pkg}
+	out, err := goCommand(t, moduleRoot(t), c.env(), args...).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	_, deps, problems, err := parseDeps(string(out), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(deps, func(d listedDep) bool { return d.Path == pkg })
+	if i < 0 || deps[i].Dir == "" {
+		t.Fatalf("go list gave %v, want the package %s with a folder", deps, pkg)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "build constraints exclude all Go files") {
+		t.Errorf("problems %q, want one with the error text of go list", problems)
+	}
+}
+
+// TestTS21ReleaseListNoFolder gives parseDeps a line with no folder and no
+// error. On linux/amd64 it must report that go list gives no folder.
+func TestTS21ReleaseListNoFolder(t *testing.T) {
+	c := buildConfig{"linux", "amd64"}
+	line := "linux/amd64/false\tx/p\t\t\t\t\t\n"
+	_, _, problems, err := parseDeps(line, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "x/p on linux/amd64: go list gives no folder") {
+		t.Errorf("problems %q, want x/p with no folder", problems)
+	}
+}
+
 // recorder is a testing.TB that records the errors instead of failing a test.
 // A call to Fatal or Fatalf records the error and ends the goroutine.
 type recorder struct {
@@ -469,6 +627,9 @@ func TestTS21ReleaseListDepsReports(t *testing.T) {
 		<-done
 		if got := len(r.errs) > 0; got != tc.want {
 			t.Errorf("%s: errors %q, want an error: %t", tc.c.name(), r.errs, tc.want)
+		}
+		if tc.want && (len(r.errs) != 1 || !strings.Contains(r.errs[0], missing+" on linux/amd64: go list reports the error ")) {
+			t.Errorf("%s: errors %q, want one that names %s and the reason", tc.c.name(), r.errs, missing)
 		}
 	}
 }
@@ -573,15 +734,6 @@ var egressBanned = map[string][]string{
 	"golang.org/x/sys/unix": {"Getenv", "Environ"},
 }
 
-// dialImports are the packages that dial through a proxy or with no address
-// rule. Code outside internal/egress must not import them.
-var dialImports = []string{
-	"golang.org/x/net/proxy", "golang.org/x/net/http2", "golang.org/x/net/icmp",
-	"golang.org/x/net/websocket", "golang.org/x/crypto/ssh", "github.com/miekg/dns",
-	"golang.org/x/net/quic", "golang.org/x/crypto/acme",
-	"golang.org/x/crypto/acme/autocert",
-}
-
 // dialerHooks are the fields of net.Dialer, http.Transport, http.Client and
 // httputil.ReverseProxy that hold the address rule or the proxy. Code outside
 // internal/egress must not write them.
@@ -615,14 +767,23 @@ func skippedDir(rel string) bool {
 // relative to root. It finds each symbolic link below root. It skips test
 // files and files in testdata and in folders that start with "." or "_". The
 // dependency test covers an import of a skipped folder, a symlink and a
-// replace.
-func scan(root string) ([]finding, error) {
-	return scanWith(root, filepath.WalkDir)
+// replace. When allowed is not nil, scan finds each import from outside the
+// module that is not in allowed. It also gives the set of all imports from
+// outside the module.
+func scan(root string, allowed map[string]bool) ([]finding, map[string]bool, error) {
+	return scanWith(root, allowed, filepath.WalkDir)
+}
+
+// inModule tells if the import path p is the module or is below it.
+func inModule(p string) bool {
+	return p == modPath || strings.HasPrefix(p, modPath+"/")
 }
 
 // scanWith is scan with the function walk, which walks the tree of root.
-func scanWith(root string, walk func(string, fs.WalkDirFunc) error) ([]finding, error) {
+func scanWith(root string, allowed map[string]bool,
+	walk func(string, fs.WalkDirFunc) error) ([]finding, map[string]bool, error) {
 	var out []finding
+	seen := map[string]bool{}
 	err := walk(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return walkError(root, p, err)
@@ -652,7 +813,8 @@ func scanWith(root string, walk func(string, fs.WalkDirFunc) error) ([]finding, 
 		if err != nil {
 			return walkError(root, p, err)
 		}
-		for _, x := range scanFile(fset, f, strings.HasPrefix(rel, "internal/egress/")) {
+		for _, x := range scanFile(fset, f, strings.HasPrefix(rel, "internal/egress/"),
+			allowed, seen) {
 			x.File = rel
 			out = append(out, x)
 		}
@@ -667,14 +829,16 @@ func scanWith(root string, walk func(string, fs.WalkDirFunc) error) ([]finding, 
 		}
 		return strings.Compare(a.Form, b.Form)
 	})
-	return out, err
+	return out, seen, err
 }
 
 // scanFile gives the findings in f, with no File. inEgress is true for a file
 // in internal/egress or below. The syntax tree has no types. Thus the scan
 // reads the package of a selector from the imports of the file. It finds the
-// fields of dialerHooks by name only.
-func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
+// fields of dialerHooks by name only. It adds each import from outside the
+// module to seen. When allowed is not nil, it finds each one not in allowed.
+func scanFile(fset *token.FileSet, f *ast.File, inEgress bool,
+	allowed, seen map[string]bool) []finding {
 	var out []finding
 	add := func(p token.Pos, form string) {
 		out = append(out, finding{Line: fset.Position(p).Line, Form: form})
@@ -691,8 +855,11 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 		if inEgress && slices.Contains(egressImports, p) {
 			add(imp.Pos(), "import "+p)
 		}
-		if !inEgress && slices.Contains(dialImports, p) {
-			add(imp.Pos(), "import "+p)
+		if p != "C" && !inModule(p) {
+			seen[p] = true
+			if allowed != nil && !allowed[p] {
+				add(imp.Pos(), "import "+p+" is not on the import list")
+			}
 		}
 		name := path.Base(p)
 		if imp.Name != nil {
@@ -914,14 +1081,80 @@ func transportForms(lit *ast.CompositeLit) []string {
 // module. The scan finds only the forms that the tables and cases of scanFile
 // list. A child process is not in the scan: os/exec, os.StartProcess or
 // syscall.ForkExec. A command can open a connection that the scan does not
-// see.
+// see. The test also fails on each import from outside the module that is not
+// on release-imports.txt. It fails on each form problem of that file too.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
-	found, err := scan(moduleRoot(t))
+	lines, list := loadList(t, "release-imports.txt")
+	found, seen, err := scan(moduleRoot(t), list)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range found {
 		t.Error(f)
+	}
+	for _, p := range listProblems(lines, seen) {
+		t.Errorf("release-imports.txt: %s", p)
+	}
+}
+
+// TestTS21ImportListFindsPlantedImports plants files that import a package
+// that is not on the list. The scan must find each one, in a folder outside
+// internal/egress and in internal/egress, for each form of the import. A path
+// that only starts with the module path is not in the module.
+func TestTS21ImportListFindsPlantedImports(t *testing.T) {
+	dir := t.TempDir()
+	list := map[string]bool{"net": true}
+	want := map[string]string{} // file to the path that the scan must find
+	for i, p := range []string{
+		"golang.org/x/net/context/ctxhttp", "github.com/mholt/acmez/v3/acme",
+		"golang.org/x/net/nettest", "net/http/httptest",
+		"github.com/letsencrypt/pebble/v2/va", "github.com/miekg/dns",
+		modPath + "-x/p", modPath + "x",
+	} {
+		for _, sub := range []string{"pkg", "internal/egress"} {
+			rel := sub + "/p" + strconv.Itoa(i) + ".go"
+			want[rel] = p
+			plantFile(t, dir, rel, "package p\n\nimport \""+p+"\"\n")
+		}
+	}
+	for form, imp := range map[string]string{
+		"blank": "_ \"example.org/a\"", "dot": ". \"example.org/b\"",
+		"alias": "x \"example.org/c\"",
+	} {
+		want["form_"+form+".go"] = strings.Trim(strings.Fields(imp)[1], `"`)
+		plantFile(t, dir, "form_"+form+".go", "package p\n\nimport "+imp+"\n")
+	}
+	plantFile(t, dir, "ok.go", "package p\n\nimport (\n\t\"net\"\n\t\""+modPath+
+		"\"\n\t\""+modPath+"/internal/x\"\n\t\"C\"\n)\n")
+	found, seen, err := scan(dir, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range found {
+		if f.Form == "import C" {
+			continue
+		}
+		got[f.File] = strings.TrimSuffix(strings.TrimPrefix(f.Form, "import "),
+			" is not on the import list")
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("found %q, want %q", got, want)
+	}
+	if seen["C"] || seen[modPath] || seen[modPath+"/internal/x"] || !seen["net"] {
+		t.Errorf("seen imports %v", seen)
+	}
+}
+
+// plantFile writes src to the file rel below dir.
+func plantFile(t *testing.T, dir, rel, src string) {
+	t.Helper()
+	p := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -931,13 +1164,7 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	dir := t.TempDir()
 	plant := func(rel, src string) {
 		t.Helper()
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		plantFile(t, dir, rel, src)
 	}
 	// file gives a file with the imports and the body.
 	file := func(imports, body string) string {
@@ -950,13 +1177,7 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 		want[rel] = forms
 	}
 
-	// The tables name the QUIC and ACME packages and the inherited sockets.
-	for _, p := range []string{"golang.org/x/net/quic", "golang.org/x/crypto/acme",
-		"golang.org/x/crypto/acme/autocert"} {
-		if !slices.Contains(dialImports, p) {
-			t.Errorf("dialImports lacks %s", p)
-		}
-	}
+	// The table names the inherited sockets.
 	for _, name := range []string{"FileConn", "FilePacketConn"} {
 		if !slices.Contains(banned["net"], name) {
 			t.Errorf("banned lacks net.%s", name)
@@ -1117,15 +1338,9 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 			file("\t. \""+p+"\"\n", ""), "dot import "+p)
 	}
 
-	// A directive, a proxy package, cgo, assembly, and code in internal/egress.
+	// A directive, cgo, assembly, and code in internal/egress.
 	plantWant("link.go", "package p\n\n//go:linkname f runtime.f\nfunc f()\n",
 		"go:linkname directive")
-	for _, p := range dialImports {
-		plantWant("import_"+strings.ReplaceAll(p, "/", "_")+".go",
-			file("\t\""+p+"\"\n", ""), "import "+p)
-		plant("internal/egress/import_"+strings.ReplaceAll(p, "/", "_")+".go",
-			file("\t\""+p+"\"\n", ""))
-	}
 	plantWant("cgo.go", file("\t\"C\"\n", ""), "import C")
 	plantWant("internal/egress/cgo.go", file("\t\"C\"\n", ""), "import C")
 	plantWant("asm.s", "TEXT ·f(SB),0,$0\n\tRET\n", "assembly file")
@@ -1175,7 +1390,7 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	plant("internal/egress/egresstest/write.go", file("\t\"net\"\n",
 		"func f(d *net.Dialer) { d.ControlContext = nil }"))
 
-	got, err := scan(dir)
+	got, _, err := scan(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1210,7 +1425,7 @@ func TestTS21ScanReportsFileThatDoesNotParse(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad.go"), []byte("not go"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scan(dir); err == nil {
+	if _, _, err := scan(dir, nil); err == nil {
 		t.Error("no error for a file that does not parse")
 	}
 }
@@ -1243,7 +1458,7 @@ func TestTS21ScanFindsSymlinks(t *testing.T) {
 			want = append(want, path.Join(d, name)+":1: symbolic link")
 		}
 	}
-	got, err := scan(dir)
+	got, _, err := scan(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1286,7 +1501,7 @@ func TestTS21ScanWalkError(t *testing.T) {
 			}
 			return fn(tc.p, nil, &fs.PathError{Op: "lstat", Path: tc.p, Err: tc.err})
 		}
-		if _, err := scanWith(dir, walk); (err != nil) != tc.wantErr {
+		if _, _, err := scanWith(dir, nil, walk); (err != nil) != tc.wantErr {
 			t.Errorf("%s: scan gave the error %v, want an error: %t", name, err, tc.wantErr)
 		}
 	}
