@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -125,13 +126,21 @@ var errDetailMembers = errors.New("event: detail has more than " + strconv.Itoa(
 // It does no encoding. The count comes first, so the loop never sees a map of
 // more than maxDetailMembers members. Each member needs at least len(name)+4
 // bytes of JSON text: two quotes, a colon and a value of one byte. A string
-// value adds its own length.
+// value adds its own length. It tests the names in sorted order, so a map
+// always gives the same error. The sorted names are in an array on the stack.
 func (d Detail) check() error {
 	if len(d) > maxDetailMembers {
 		return errDetailMembers
 	}
+	var buf [maxDetailMembers]string
+	names := buf[:0]
+	for n := range d {
+		names = append(names, n)
+	}
+	slices.Sort(names)
 	raw := 0
-	for n, v := range d {
+	for _, n := range names {
+		v := d[n]
 		if n == "" || len(n) > capName {
 			return errors.New("event: detail name is empty or too long")
 		}

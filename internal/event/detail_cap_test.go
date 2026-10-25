@@ -3,6 +3,7 @@ package event
 import (
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,9 +24,15 @@ func members(n int) Detail {
 // membersText returns the JSON text of n short members, made by hand because
 // Detail.JSON refuses more than 8.
 func membersText(n int) string {
+	return membersTextOf(n, func(i int) string { return strconv.Itoa(i) })
+}
+
+// membersTextOf returns the JSON text of n short members. val(i) gives the
+// JSON text of the value of member i.
+func membersTextOf(n int, val func(i int) string) string {
 	parts := make([]string, n)
 	for i := range parts {
-		parts[i] = fmt.Sprintf(`"m%d":%d`, i, i)
+		parts[i] = fmt.Sprintf(`"m%d":%s`, i, val(i))
 	}
 	return "{" + strings.Join(parts, ",") + "}"
 }
@@ -129,6 +136,27 @@ func TestTS24_DetailCountBeforeNames(t *testing.T) {
 	}
 }
 
+// T-S-24: a detail with two bad names gives the same error each time.
+// Detail.check tests the names in sorted order, so the empty name comes first.
+// The test calls ParseDetail and Detail.JSON 1 000 times, because map order is
+// random. For 8 valid members, Detail.check makes no allocation.
+func TestTS24_DetailNameErrorOrder(t *testing.T) {
+	const want = "event: detail name is empty or too long"
+	d := Detail{"": Int(0), "胁0": Int(0)}
+	for range 1000 {
+		if _, err := ParseDetail(`{"":0,"胁0":0}`); err == nil || err.Error() != want {
+			t.Fatalf("ParseDetail: error %v, want %q", err, want)
+		}
+		if _, err := d.JSON(); err == nil || err.Error() != want {
+			t.Fatalf("JSON: error %v, want %q", err, want)
+		}
+	}
+	eight := members(8)
+	if allocs := testing.AllocsPerRun(100, func() { _ = eight.check() }); allocs != 0 {
+		t.Errorf("check made %v allocations, want 0", allocs)
+	}
+}
+
 // T-S-24: NewEvent tests the number of members before it copies the map. For a
 // caller map of 9 or of 1 000 members it makes no allocation.
 func TestTS24_NewEventNoCopyAboveCap(t *testing.T) {
@@ -145,31 +173,39 @@ func TestTS24_NewEventNoCopyAboveCap(t *testing.T) {
 	}
 }
 
-// T-S-24: ParseDetail refuses the ninth member while it decodes. The test
-// compares two flat texts under 2 KB: 9 members and 150 members. The second
-// makes no more allocations than the first.
+// T-S-24: ParseDetail refuses the ninth member while it decodes. For each
+// type of value, the test compares two flat texts under 2 KB: 9 members and
+// 150 members. The second makes no more allocations than the first. The
+// types are int, string and bool.
 func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
-	long := membersText(150)
-	if len(long) >= MaxDetailBytes {
-		t.Fatalf("the text has %d bytes, want less than %d", len(long), MaxDetailBytes)
-	}
-	run := func(text string) float64 {
-		return testing.AllocsPerRun(10, func() {
-			if _, err := ParseDetail(text); err == nil || err.Error() != errMemberCap {
-				t.Errorf("ParseDetail: error %v, want %q", err, errMemberCap)
-			}
-		})
-	}
-	nine, many := run(membersText(9)), run(long)
-	t.Logf("allocations: 9 members %v, 150 members %v", nine, many)
-	if many > nine {
-		t.Errorf("150 members made %v allocations, 9 members made %v", many, nine)
+	for kind, val := range map[string]func(int) string{
+		"int":    strconv.Itoa,
+		"string": func(i int) string { return `"v` + strconv.Itoa(i) + `"` },
+		"bool":   func(i int) string { return strconv.FormatBool(i%2 == 0) },
+	} {
+		long := membersTextOf(150, val)
+		if len(long) >= MaxDetailBytes {
+			t.Fatalf("%s: the text has %d bytes, want less than %d", kind, len(long), MaxDetailBytes)
+		}
+		run := func(text string) float64 {
+			return testing.AllocsPerRun(10, func() {
+				if _, err := ParseDetail(text); err == nil || err.Error() != errMemberCap {
+					t.Errorf("%s: ParseDetail: error %v, want %q", kind, err, errMemberCap)
+				}
+			})
+		}
+		nine, many := run(membersTextOf(9, val)), run(long)
+		t.Logf("%s: allocations: 9 members %v, 150 members %v", kind, nine, many)
+		if many > nine {
+			t.Errorf("%s: 150 members made %v allocations, 9 members made %v", kind, many, nine)
+		}
 	}
 }
 
 // T-S-24: ParseDetail gives the member error only when it reads a ninth name
-// that the decoder accepts. A text of 8 members and then a fault gets the
-// text error. A text of 9 valid members gets the member error.
+// that the decoder accepts. A fault directly after 8 members gets the text
+// error. A text of 9 valid members gets the member error. An empty ninth name
+// gets the member error, also when a fault comes after it.
 func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 	const errText = "event: detail text is not a flat object"
 	eight := strings.TrimSuffix(membersText(8), "}")
@@ -180,6 +216,8 @@ func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 		"8 members and repeated name":  {eight + `,"m0":1}`, errText},
 		"8 members and closing brace":  {eight + "}", ""},
 		"9 valid members":              {membersText(9), errMemberCap},
+		"empty ninth name":             {eight + `,"":1}`, errMemberCap},
+		"empty ninth name and garbage": {eight + `,"":1 x}`, errMemberCap},
 	} {
 		d, err := ParseDetail(tc.text)
 		switch {
