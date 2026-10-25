@@ -336,7 +336,7 @@ func TestTS11_EmailMarks(t *testing.T) {
 				if !strings.Contains(err.Error(), emailRule) {
 					t.Errorf("the error does not give the rule: %q", err)
 				}
-				// Every error text has spaces, so the check skips the space mark.
+				// Each error text has spaces, so the check skips the space.
 				if m != " " && strings.Contains(err.Error(), m) {
 					t.Errorf("the error holds the character: %q", err)
 				}
