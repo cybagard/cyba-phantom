@@ -8,9 +8,11 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -23,9 +25,11 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/testutil"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
+	"github.com/cybagard/cyba-phantom/internal/verify"
 )
 
 // opens counts the calls that open the log and the store, and the runs of the
@@ -435,6 +439,128 @@ func TestTU18_VkeyMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// startBadVkey saves a key and moves its public key file to copy.vkey in the
+// state directory. prep makes the file at vpath. Then start must return in
+// 10 s, start no checkpointer, and log the error text want.
+func startBadVkey(t *testing.T, want error, prep func(vpath string) error) {
+	t.Helper()
+	p := testParams(t, "events.db")
+	savedKey(t, p)
+	vpath := filepath.Join(p.Root, tlog.VKeyName)
+	if err := os.Rename(vpath, filepath.Join(p.Root, "copy.vkey")); err != nil {
+		t.Fatal(err)
+	}
+	if err := prep(vpath); err != nil {
+		t.Fatal(err)
+	}
+	cnt := event.NewCounters()
+	q, err := event.NewQueue(8, cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *storePart, 1)
+	var buf bytes.Buffer
+	go func() { done <- start(p, q, cnt, realDeps, slog.New(slog.NewTextHandler(&buf, nil))) }()
+	select {
+	case s := <-done:
+		t.Cleanup(s.Stop)
+		if s.cp != nil {
+			t.Error("checkpointer started; want none")
+		}
+		for _, w := range []string{"checkpointer does not start", want.Error()} {
+			if !strings.Contains(buf.String(), w) {
+				t.Errorf("log %q; want %q", buf.String(), w)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("start did not return")
+	}
+}
+
+// TestTU18_VkeyFifo checks a FIFO at the public key file (T-U-18).
+func TestTU18_VkeyFifo(t *testing.T) {
+	startBadVkey(t, safefile.ErrType, func(v string) error { return syscall.Mkfifo(v, 0o600) })
+}
+
+// TestTU18_VkeyRefused checks a public key file that is a directory, a
+// symlink to a correct file, or over 1 KiB. Each gives its own error (T-U-18).
+func TestTU18_VkeyRefused(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		want error
+		prep func(vpath string) error
+	}{
+		{"directory", safefile.ErrType, func(v string) error { return os.Mkdir(v, 0o700) }},
+		{"symlink", safefile.ErrSymlink, func(v string) error { return os.Symlink("../copy.vkey", v) }},
+		{"over 1 KiB", safefile.ErrSize, func(v string) error {
+			return os.WriteFile(v, bytes.Repeat([]byte("k"), verify.MaxKeyBytes+1), 0o600)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) { startBadVkey(t, c.want, c.prep) })
+	}
+}
+
+// sigtermHelperEnv makes TestTU18_SigtermHelper run. If it is not set, the
+// helper skips.
+const sigtermHelperEnv = "PHANTOM_TEST_SIGTERM_HELPER"
+
+// TestTU18_SigtermDuringStart runs the real serve function in a child process
+// with a FIFO at the public key file. A SIGTERM during the start must end the
+// child with exit code 0 before the deadline (T-U-18).
+func TestTU18_SigtermDuringStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTU18_SigtermHelper$")
+	// The child ends with os.Exit, so its cleanup does not run.
+	// t.TempDir uses GOTMPDIR before TMPDIR. The test sets both to tmp,
+	// so the child makes its files in tmp, and the parent removes tmp.
+	tmp := t.TempDir()
+	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", "GOTMPDIR="+tmp, "TMPDIR="+tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
+	}
+	if ents, err := os.ReadDir(tmp); err != nil {
+		t.Fatal(err)
+	} else if len(ents) == 0 {
+		t.Fatal("the child made no directory below its TMPDIR")
+	}
+	// A skipped helper or a pattern with no test also exits 0.
+	for _, w := range []string{"checkpointer does not start", safefile.ErrType.Error()} {
+		if !strings.Contains(string(out), w) {
+			t.Errorf("child output has no %q:\n%s", w, out)
+		}
+	}
+}
+
+// TestTU18_SigtermHelper is the child of TestTU18_SigtermDuringStart. The
+// migrate step sends SIGTERM to the process, so the signal comes during start.
+func TestTU18_SigtermHelper(t *testing.T) {
+	if os.Getenv(sigtermHelperEnv) == "" {
+		t.Skip("child of TestTU18_SigtermDuringStart")
+	}
+	https, plain, ca := openListeners(t)
+	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+	p := tempState(t, cfg)
+	savedKey(t, p)
+	vpath := filepath.Join(p.Root, tlog.VKeyName)
+	if err := os.Remove(vpath); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(vpath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := realDeps
+	d.migrate = func(db *sql.DB, origin string) error {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Error(err)
+		}
+		return store.Migrate(db, origin)
+	}
+	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
+	os.Exit(serve(cfg, io.Discard, os.Stderr))
 }
 
 // rejectingKey has the name and the key hash of a key, and verifies no

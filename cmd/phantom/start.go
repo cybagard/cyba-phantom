@@ -17,6 +17,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 	"github.com/cybagard/cyba-phantom/internal/verify"
@@ -236,12 +237,19 @@ func (s *storePart) startCheckpointer(p startParams, d startDeps, lg *slog.Logge
 	if err != nil {
 		return err
 	}
-	f, err := s.root.Open(tlog.VKeyName)
+	// A FIFO at the name must not block the start. ReadFile refuses a symlink.
+	// ReadFile takes one name, so it reads in the keys directory.
+	// safefile.OpenRoot refuses a symlink at that directory.
+	keys, err := safefile.OpenRoot(s.root, filepath.Dir(tlog.VKeyName), safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny})
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	v, err := verify.ReadKey(f)
+	defer keys.Close()
+	b, err := safefile.ReadFile(keys, filepath.Base(tlog.VKeyName), safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: verify.MaxKeyBytes})
+	if err != nil {
+		return err
+	}
+	v, err := verify.ParseKey(b)
 	if err != nil {
 		return err
 	}

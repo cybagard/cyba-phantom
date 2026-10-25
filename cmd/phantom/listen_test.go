@@ -197,6 +197,8 @@ type running struct {
 }
 
 // launchServe runs serveWith until the test ends, and restores the standard log output at the end.
+// After a timeout in the cleanup, serve and its sockets stay in the process.
+// Later results in the same process are not reliable.
 func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
@@ -746,7 +748,11 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 			stopACME = func(a *listener.ACME) { stops.Add(1); a.Stop() }
 			var news atomic.Int32
 			if c.newFails {
-				newACME = func(listener.ACMEParams) (*listener.ACME, error) { news.Add(1); return nil, errors.New("test error") }
+				// The value is not nil. So serve must reset it on the error.
+				newACME = func(listener.ACMEParams) (*listener.ACME, error) {
+					news.Add(1)
+					return &listener.ACME{}, errors.New("test error")
+				}
 			}
 			if c.cached {
 				ca, _ := cfg.Get("acme.ca")
@@ -946,6 +952,7 @@ func goroutineBlocks() map[int]string {
 // gets the default action in the test process, also when a failed serve call removes the handler of serve before
 // the signal. The test wraps the waitStop seam. The wrapper tells the test that serve waits for the stop, and then
 // it holds serve until the test has sent SIGTERM. A serve that ends without the wait fails the test.
+// The test sends one SIGTERM only. The cleanup sends one if the body did not.
 func TestTI03_SigtermStopsServe(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -976,7 +983,9 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	// sigSent tells the cleanup that the test sent the signal.
 	// sendSigterm empties sig before it sends. Thus the next value
 	// on sig is from this signal.
-	var sigSent bool
+	// late tells the cleanup that a receive timed out. The cleanup then waits
+	// once more for the delivery before signal.Stop runs.
+	var sigSent, late bool
 	sendSigterm := func() error {
 		select {
 		case <-sig:
@@ -990,6 +999,7 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		case <-sig:
 			return nil
 		case <-time.After(sigtermWait):
+			late = true
 			return fmt.Errorf("the test did not get SIGTERM within %v", sigtermWait)
 		}
 	}
@@ -1007,6 +1017,13 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		case <-r.done:
 		case <-time.After(sigtermWait):
 			t.Errorf("serve did not return %v after the cleanup freed it", sigtermWait)
+		}
+		if late {
+			select {
+			case <-sig:
+			case <-time.After(sigtermWait):
+				t.Errorf("SIGTERM did not arrive in %v more", sigtermWait)
+			}
 		}
 	})
 	r.startWait().until(t, waiting, false)
