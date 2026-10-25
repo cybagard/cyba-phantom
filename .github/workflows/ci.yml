@@ -31,7 +31,7 @@
 #     integrity story for the workflow files themselves.
 #
 # Jobs:
-#   - lint: gofmt, go vet and comment line length;
+#   - lint: gofmt, go vet, comment line length and comment sentence length;
 #   - dco: sign-off and commit identity, on PRs only;
 #   - test: go test -race and the coverage gate;
 #   - oracle: the tar reader oracle, in the pinned golang container;
@@ -73,7 +73,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The line check fails only for comment lines that the PR changed.
+    # The line and sentence checks fail only for text that the PR changed.
     # On pull_request, the checkout has no ref, so it is the PR merge ref.
     # The job builds stelint, gofmt and go vet from that merge ref.
     # The file text that stelint reads comes from HEAD_SHA, the PR head.
@@ -89,7 +89,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: gofmt + go vet + comment line length
+      - name: gofmt + go vet + comment line and sentence length
         run: make lint BASE="$BASE_SHA" HEAD="$HEAD_SHA"
 
   dco:

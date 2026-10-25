@@ -639,6 +639,9 @@ func TestOwnCommentLinesAreShort(t *testing.T) {
 // ws returns n words that are not an end mark.
 func ws(n int) string { return strings.TrimSpace(strings.Repeat("w ", n)) }
 
+// wj returns n words that a separator joins.
+func wj(n int, sep string) string { return strings.TrimSuffix(strings.Repeat("w"+sep, n), sep) }
+
 // sentences runs the sentence rule and returns the hits as {first, last,
 // words}.
 func sentences(src string) []sentence { return longSentences([]byte(src)) }
@@ -739,6 +742,25 @@ func TestSentenceRules(t *testing.T) {
 		{"trailer line in any case", "// " + ws(20) + "\n// SIGNED-OFF-BY: A <a@example.com>\n", nil},
 		{"trailer line ends a sentence", "// " + ws(15) + "\n// Signed-off-by: A <a@example.com>\n// " + ws(15) + "\n", nil},
 		{"trailer name without a colon is text", "// " + ws(20) + "\n// Signed-off-by A <a@example.com>\n", []sentence{{1, 2, 23}}},
+		{"trailer token with text is text", "// Signed-off-by: " + ws(21) + ".\n", []sentence{{1, 1, 22}}},
+		{"trailer token with no space is text", "// co-authored-by:" + ws(21) + ".\n", []sentence{{1, 1, 21}}},
+		{"trailer token wraps a sentence", "// " + ws(15) + "\n// Signed-off-by: " + ws(15) + "\n", []sentence{{1, 2, 31}}},
+		{"trailer address on the next line is text", "// Signed-off-by: " + ws(21) + "\n// <a@example.com>\n", []sentence{{1, 2, 23}}},
+		{"trailer name of 20 words", "// Signed-off-by: " + ws(20) + " <a@example.com>\n", nil},
+		{"trailer name of 21 words is text", "// Signed-off-by: " + ws(21) + " <a@example.com>\n", []sentence{{1, 1, 23}}},
+		{"trailer address with two at signs is text", "// " + ws(20) + "\n// Signed-off-by: A <a@b@example.com>\n", []sentence{{1, 2, 23}}},
+		{"trailer text after the address is text", "// " + ws(20) + "\n// Signed-off-by: A <a@example.com> x\n", []sentence{{1, 2, 24}}},
+
+		// A space is each rune for which unicode.IsSpace is true.
+		{"no-break space at 20", "// " + wj(20, " ") + ".\n", nil},
+		{"no-break space at 21", "// " + wj(21, " ") + ".\n", []sentence{{1, 1, 21}}},
+		{"em space at 21", "// " + wj(21, " ") + ".\n", []sentence{{1, 1, 21}}},
+		{"vertical tab at 21", "// " + wj(21, "\v") + ".\n", []sentence{{1, 1, 21}}},
+		{"no-break space after a mark ends a sentence", "// " + ws(15) + ". " + ws(15) + ".\n", nil},
+		{"no-break space ends a link url", "// [a](x " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A "#" line in a code block is not a heading.
+		{"heading mark in a code block", "//\n//\t# " + ws(25) + "\n", nil},
 
 		// A link: the url is skipped, so a backtick in it does not open a span.
 		{"link url with a backtick at 20", "// [a](https://example.com/`x) " + ws(18) + " `q`.\n", nil},
@@ -771,6 +793,16 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"trailing comment is alone", "x := 1 // " + ws(11) + "\n// " + ws(10) + "\n", nil},
 		{"trailing comment is a text", "x := 1 // " + ws(21) + "\n", []sentence{{1, 1, 21}}},
 		{"line after a trailing comment starts a text", "x := 1 // a\n// " + ws(11) + "\n// " + ws(10) + "\n", []sentence{{2, 3, 21}}},
+		{"trailing comment continues at its column", "var x = 1 // " + ws(11) + "\n" + strings.Repeat(" ", 10) + "// " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"each next line at the column continues", "var x = 1 // " + ws(8) + "\n" + strings.Repeat(" ", 10) + "// " + ws(8) + "\n" + strings.Repeat(" ", 10) + "// " + ws(5) + ".\n", []sentence{{1, 3, 21}}},
+		{"trailing comment column counts a tab as 4", "\tx := 1 // " + ws(11) + "\n\t" + strings.Repeat(" ", 7) + "// " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"line at the indent column does not continue", "\ta int // the a\n\t// B is " + ws(17) + ".\n", nil},
+		{"line at another column is a text of its own", "var x = 1 // " + ws(11) + "\n// " + ws(10) + ".\n", nil},
+		{"line after a continuation at another column", "var x = 1 // a\n" + strings.Repeat(" ", 10) + "// b\n// " + ws(19) + ".\n", nil},
+		{"unknown directive splits before", "// " + ws(20) + "\n//go:noinline\n", nil},
+		{"unknown directive with a tool name splits", "// " + ws(20) + "\n//nolint:errcheck\n", nil},
+		{"unknown directive splits a text", "// " + ws(11) + "\n//go:noinline\n// " + ws(10) + "\n", nil},
+		{"unknown directive words count", "//nolint:errcheck " + ws(21) + ".\n", []sentence{{1, 1, 22}}},
 		{"indented comments join", "func f() {\n\t// " + ws(11) + "\n\t// " + ws(10) + "\n}\n", []sentence{{2, 3, 21}}},
 		{"directive splits", "// " + ws(11) + "\n//go:generate x\n// " + ws(10) + "\n", nil},
 		{"directive text is skipped", "//go:generate " + ws(30) + "\n", nil},
@@ -803,7 +835,7 @@ func TestSentenceTimeIsLinear(t *testing.T) {
 	// Each text has a mark that repeats and never closes. A search that
 	// starts again at each mark would take quadratic time and not finish.
 	n := 200000
-	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`"} {
+	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`", "[a]( ", "`a "} {
 		src := "// " + strings.Repeat(unit, n) + "\n"
 		done := make(chan []sentence, 1)
 		go func() { done <- sentences(src) }()
@@ -1012,5 +1044,104 @@ func TestDeletionThatJoinsNothingPasses(t *testing.T) {
 		"package a\n\n// "+ws(21)+".\nfunc f() {}\n\n")
 	if code != 0 {
 		t.Errorf("far deletion: code = %d, want 0; output:\n%s", code, out)
+	}
+}
+
+func TestAddedFenceOrBlankLineChecksTheText(t *testing.T) {
+	for _, c := range []struct{ name, before, after, want string }{
+		{
+			"fence above the first line",
+			"package a\n\n// intro.\n// ```\n// " + ws(21) + ".\n// ```\nfunc f() {}\n",
+			"package a\n\n// ```\n// intro.\n// ```\n// " + ws(21) + ".\n// ```\nfunc f() {}\n",
+			"a.go:6: 21 words (limit 20)\n",
+		},
+		{
+			"blank line inside the text",
+			"package a\n\n// intro.\n// " + ws(21) + ".\nfunc f() {}\n",
+			"package a\n\n// intro.\n//\n// " + ws(21) + ".\nfunc f() {}\n",
+			"a.go:5: 21 words (limit 20)\n",
+		},
+	} {
+		code, out := editRepo(t, c.before, c.after)
+		if code != 1 || !strings.Contains(out, c.want) {
+			t.Errorf("%s: code = %d, want 1 with %q; output:\n%s", c.name, code, c.want, out)
+		}
+	}
+}
+
+func TestAddedLineThatIsNotABreakChecksOnlyItsSentence(t *testing.T) {
+	// The long sentence has no changed line, and the new line is text.
+	code, out := editRepo(t,
+		"package a\n\n// intro.\n//\n// "+ws(21)+".\nfunc f() {}\n",
+		"package a\n\n// intro.\n// more.\n//\n// "+ws(21)+".\nfunc f() {}\n")
+	if code != 0 {
+		t.Errorf("code = %d, want 0; output:\n%s", code, out)
+	}
+}
+
+func TestDeletionThatTurnsCodeIntoProseFails(t *testing.T) {
+	for _, c := range []struct{ name, before, after string }{
+		{
+			"blank line before an indented line",
+			"package a\n\n// intro.\n//\n//\t" + ws(25) + "\nfunc f() {}\n",
+			"package a\n\n// intro.\n//\t" + ws(25) + "\nfunc f() {}\n",
+		},
+		{
+			"both fence lines",
+			"package a\n\n// intro.\n// ```\n//\t" + ws(25) + "\n// ```\nfunc f() {}\n",
+			"package a\n\n// intro.\n//\t" + ws(25) + "\nfunc f() {}\n",
+		},
+	} {
+		code, out := editRepo(t, c.before, c.after)
+		if code != 1 || !strings.Contains(out, "a.go:4: 25 words (limit 20)\n") {
+			t.Errorf("%s: code = %d, want 1; output:\n%s", c.name, code, out)
+		}
+	}
+}
+
+func TestDeletionBeforeACommentOfCodePasses(t *testing.T) {
+	// The line before the deletion is code, not a line of the comment.
+	code, out := editRepo(t,
+		"package a\n\nfunc g() {}\n\n// "+ws(21)+".\nfunc f() {}\n",
+		"package a\n\nfunc g() {}\n// "+ws(21)+".\nfunc f() {}\n")
+	if code != 0 {
+		t.Errorf("code = %d, want 0; output:\n%s", code, out)
+	}
+}
+
+func TestScanErrorIsRefused(t *testing.T) {
+	dir := newRepo(t)
+	writeFile(t, dir, "a.go", "package a\n")
+	base := commitAll(t, dir, "base")
+	// The raw string is not closed.
+	writeFile(t, dir, "a.go", "package a\n\nvar s = `\n// "+ws(21)+".\n")
+	head := commitAll(t, dir, "edit")
+	for _, args := range [][]string{{base, head}, {"-all"}} {
+		code, out, errOut := runLint(dir, args...)
+		if code != 2 || !strings.Contains(errOut, "stelint: a.go has a Go scan error: not parsed\n") {
+			t.Errorf("%v: code = %d, want 2; output:\n%s%s", args, code, out, errOut)
+		}
+	}
+}
+
+func TestASTDirectiveForm(t *testing.T) {
+	for lit, want := range map[string]bool{
+		"//go:noinline":     true,
+		"//nolint:errcheck": true,
+		"//line a.go:1 x":   true,
+		"//extern f":        true,
+		"//export f":        true,
+		"//a1:b":            true,
+		"// nolint:x":       false,
+		"//Go:x":            false,
+		"//go:":             false,
+		"//:x":              false,
+		"//line":            false,
+		"//go":              false,
+		"/*go:x*/":          false,
+	} {
+		if got := isASTDirective(lit); got != want {
+			t.Errorf("isASTDirective(%q) = %v, want %v", lit, got, want)
+		}
 	}
 }

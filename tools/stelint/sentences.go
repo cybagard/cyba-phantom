@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // maxWords is the longest sentence of a comment, in words.
@@ -40,21 +42,84 @@ func (t target) hasAny(first, last int) bool {
 // longSentences returns the sentences of the comments of src that have more
 // than maxWords words, in line order.
 func longSentences(src []byte) []sentence {
-	var out []sentence
-	for _, g := range commentGroups(src) {
+	out, _ := checkedSentences(src, target{all: true})
+	return out
+}
+
+// checkedSentences returns the sentences of src that have more than maxWords
+// words and that the target covers, in line order. A sentence is covered when
+// a line of it changed, or a deletion joined it, or a deletion came directly
+// before it in the same text. When a changed line of a text is a fence line or
+// a blank line, every sentence of the text is covered. scanErr is true when
+// go/scanner reported an error for src.
+func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
+	groups, scanErr := commentGroups(src)
+	for _, g := range groups {
+		whole := t.all || t.changedBreak(g)
 		for _, p := range paragraphs(g) {
-			out = append(out, p.long()...)
+			for _, s := range p.long() {
+				if whole || t.hasAny(s.first, s.last) || t.delBefore(s.first, g[0].line) {
+					out = append(out, s)
+				}
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].first < out[j].first })
-	return out
+	return out, scanErr
+}
+
+// delBefore reports whether a deletion came directly before line first, and
+// the line before the deletion is a line of the text that starts at line lo.
+func (t target) delBefore(first, lo int) bool {
+	if first-1 < lo {
+		return false
+	}
+	j := sort.SearchInts(t.dels, first-1)
+	return j < len(t.dels) && t.dels[j] == first-1
+}
+
+// changedBreak reports whether a changed line of the text is a fence line or a
+// blank line.
+func (t target) changedBreak(g []textLine) bool {
+	for _, l := range g {
+		s := strings.TrimSpace(l.text)
+		if (s == "" || strings.HasPrefix(s, "```")) && t.has(l.line) {
+			return true
+		}
+	}
+	return false
+}
+
+// isASTDirective reports whether a "//" comment has the directive form of
+// go/ast: "//line ", "//extern " or "//export " at the start, or "//", a name
+// of [a-z0-9], a colon and one of [a-z0-9].
+func isASTDirective(lit string) bool {
+	for _, p := range []string{"//line ", "//extern ", "//export "} {
+		if strings.HasPrefix(lit, p) {
+			return true
+		}
+	}
+	s, ok := strings.CutPrefix(lit, "//")
+	if !ok {
+		return false
+	}
+	name := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
+	i := 0
+	for i < len(s) && name(s[i]) {
+		i++
+	}
+	return i > 0 && i+1 < len(s) && s[i] == ':' && name(s[i+1])
 }
 
 // commentGroups returns the text of the comments of src. A run of "//"
 // comments on adjacent lines is one group, when each starts its line. A "//"
-// comment after code is a group of its own. So is each "/* */" comment. A
-// directive ends a group.
-func commentGroups(src []byte) [][]textLine {
+// comment after code is a group of its own. A "//" line that starts its line
+// continues the trailing comment on the line before, when it starts at the
+// same column. So does each next such line. Each "/* */" comment is a group of
+// its own. A directive ends a group. A directive that isDirective does not
+// know, but that has the go/ast form, is a group of its own. scanErr is true
+// when go/scanner reported an error.
+func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
 	fset := token.NewFileSet()
 	file := fset.AddFile("", fset.Base(), len(src))
@@ -62,9 +127,10 @@ func commentGroups(src []byte) [][]textLine {
 	s.Init(file, src, func(token.Position, string) {}, scanner.ScanComments)
 
 	var (
-		groups  [][]textLine
-		cur     []textLine
-		prevEnd int
+		cur      []textLine
+		prevEnd  int
+		trail    bool // cur starts with a comment after code
+		trailCol int
 	)
 	flush := func() {
 		if cur != nil {
@@ -90,21 +156,28 @@ func commentGroups(src []byte) [][]textLine {
 			groups = append(groups, blockLines(lit, p.Line))
 			continue
 		}
-		before := lines[p.Line-1][:min(p.Column-1, len(lines[p.Line-1]))]
-		full := strings.TrimSpace(before) == ""
-		if !full || cur == nil || prevEnd != p.Line-1 {
-			flush()
-		}
 		tl := textLine{strings.TrimSuffix(lit[2:], "\r"), p.Line}
-		if !full {
+		if isASTDirective(lit) {
+			flush()
 			groups = append(groups, []textLine{tl})
 			continue
 		}
-		cur = append(cur, tl)
+		before := lines[p.Line-1][:min(p.Column-1, len(lines[p.Line-1]))]
+		col := width(before)
+		switch {
+		case strings.TrimSpace(before) != "":
+			flush()
+			cur, trail, trailCol = []textLine{tl}, true, col
+		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol):
+			cur = append(cur, tl)
+		default:
+			flush()
+			cur, trail = []textLine{tl}, false
+		}
 		prevEnd = p.Line
 	}
 	flush()
-	return groups
+	return groups, s.ErrorCount > 0
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
@@ -206,13 +279,29 @@ func paragraphs(g []textLine) []*para {
 	return paras
 }
 
-// isTrailer reports whether a trimmed line is a commit trailer line: it starts
-// with "Signed-off-by:" or "Co-authored-by:" in any case.
+// isTrailer reports whether a trimmed line is a commit trailer line in its full
+// form: "Signed-off-by:" or "Co-authored-by:" in any case, a space, a name of 1
+// to 20 words, a space, and an address in "<" and ">" at the end of the line.
+// The name has no "<" or ">". The address has one "@" and no space, "<" or ">".
 func isTrailer(t string) bool {
 	for _, p := range []string{"signed-off-by:", "co-authored-by:"} {
-		if len(t) >= len(p) && strings.EqualFold(t[:len(p)], p) {
-			return true
+		if len(t) < len(p) || !strings.EqualFold(t[:len(p)], p) {
+			continue
 		}
+		rest, ok := strings.CutPrefix(t[len(p):], " ")
+		if !ok || !strings.HasSuffix(rest, ">") {
+			return false
+		}
+		i := strings.IndexByte(rest, '<')
+		if i < 1 || rest[i-1] != ' ' {
+			return false
+		}
+		name, addr := rest[:i-1], rest[i+1:len(rest)-1]
+		words := len(strings.Fields(name))
+		return words >= 1 && words <= 20 && strings.TrimSpace(name) == name &&
+			!strings.Contains(name, ">") &&
+			strings.Count(addr, "@") == 1 && !strings.ContainsAny(addr, "<>") &&
+			strings.IndexFunc(addr, unicode.IsSpace) < 0
 	}
 	return false
 }
@@ -273,7 +362,12 @@ func (p *para) add(text string, line int) {
 	p.buf = append(p.buf, text...)
 }
 
-func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+// spaceAt reports whether the rune that starts at byte i of b is a space, as
+// unicode.IsSpace reads it.
+func spaceAt(b []byte, i int) bool {
+	r, _ := utf8.DecodeRune(b[i:])
+	return unicode.IsSpace(r)
+}
 
 // long returns the sentences of the paragraph that are too long. The scan
 // reads each byte once. A search for a closing character starts at the scan
@@ -324,16 +418,17 @@ func (p *para) long() []sentence {
 	nextStop := func(i int) int {
 		if stop < i {
 			stop = i
-			for stop < len(b) && b[stop] != ')' && !isSpace(b[stop]) {
-				stop++
+			for stop < len(b) && b[stop] != ')' && !spaceAt(b, stop) {
+				_, n := utf8.DecodeRune(b[stop:])
+				stop += n
 			}
 		}
 		return stop
 	}
 	for i := 0; i < len(b); {
-		c := b[i]
+		c, n := utf8.DecodeRune(b[i:])
 		switch {
-		case isSpace(c):
+		case unicode.IsSpace(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
 			startWord(i)
@@ -350,13 +445,13 @@ func (p *para) long() []sentence {
 			continue
 		case c == '.' || c == '?' || c == '!':
 			startWord(i)
-			if i+1 == len(b) || isSpace(b[i+1]) {
+			if i+1 == len(b) || spaceAt(b, i+1) {
 				finish(i)
 			}
 		default:
 			startWord(i)
 		}
-		i++
+		i += n
 	}
 	if words > 0 {
 		finish(len(b) - 1)
