@@ -68,11 +68,11 @@
 // block. stelint does not count code.
 //
 // A word is a run of characters between spaces. A space is each rune for
-// which unicode.IsSpace is true, such as U+00A0. The link and code span
-// searches use the same rule. A code span in backticks is
+// which unicode.IsSpace is true, such as U+00A0. A code span in backticks is
 // one word, also when it has spaces. A "." in a code span does not end a
-// sentence. In a Markdown link, only the link text counts. A backtick or a
-// link with no closing mark is an ordinary character.
+// sentence. In a Markdown link, only the link text counts. A link whose URL
+// has a space is not a link. A backtick or a link with no closing mark is an
+// ordinary character.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So
