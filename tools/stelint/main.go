@@ -32,8 +32,10 @@
 // one text. This does not hold for a text that starts after code, with the
 // token at another column. After code, the code ends the text. A token adds no
 // words when no "//" text line of the text comes after it. Otherwise each
-// token before that line counts as one word. A comment with more text or other
-// characters is ordinary comment text. Examples are "//export F" and "//a:bX".
+// token before that line counts as one word. This holds also for a token that
+// starts the text, if the next "//" line is directly after it. A comment with
+// more text or other characters is ordinary comment text. Examples are
+// "//export F" and "//a:bX".
 //
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
@@ -78,11 +80,11 @@
 // for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
 // U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. Three more
 // kinds of rune are word breaks, as they render no gap. These are format
-// runes (category Cf, such as U+200B, U+2060, U+180E, U+00AD and U+1D173),
-// private-use runes (category Co) and U+17B5. They are not spaces. A sentence
-// end needs a space, a line end or the end of the text. So
-// "end.<U+200B>next" is not a sentence end. A code
-// span in backticks is one word, also when it has spaces. A "." in a code span
+// runes (category Cf, such as U+200B, U+2060, U+180E, U+00AD and U+1D173) and
+// private-use runes (category Co). U+17B4 and U+17B5 are also word breaks.
+// They are not spaces. A sentence end needs a space, a line end or the end of
+// the text. So "end.<U+200B>next" is not a sentence end. A code span in
+// backticks is one word, also when it has spaces. A "." in a code span
 // does not end a sentence. In a Markdown link, only the link text counts. A
 // link whose URL has a space is not a link. A backtick or a link with no
 // closing mark is an ordinary character.
