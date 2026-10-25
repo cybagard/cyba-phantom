@@ -29,6 +29,12 @@ RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install honnef.co/go/tools/cmd/staticc
  && CGO_ENABLED=0 go build -o /usr/local/bin/gosec github.com/securego/gosec/v2/cmd/gosec \
  && cd / && rm -rf /tmp/gosec && go clean -cache -modcache
 
+# Mutation test tool for make mutate. It is not part of make all.
+# We pin it by its module version, as the tools above.
+ARG GREMLINS_VERSION=v0.6.0
+RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION} \
+ && go clean -cache -modcache
+
 # The devcontainer runs without network, so govulncheck reads a copy of
 # the Go vulnerability database. The copy is not pinned: it is the
 # database of the day the image layer was built. GOVULNDB names it.
