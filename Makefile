@@ -28,7 +28,7 @@ test:
 	$(GO) test -race ./...
 
 lint:
-	@bad=$$(gofmt -l .); \
+	@bad=$$(gofmt -l .) || { echo "gofmt: gofmt -l . failed"; exit 1; }; \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \

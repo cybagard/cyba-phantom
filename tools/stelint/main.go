@@ -11,8 +11,8 @@
 // check. The file text comes from head.
 //
 // The second form checks the tracked Go files at head, except symbolic links.
-// It prints each hit and a total for each rule. It exits 0 unless git or an
-// input limit fails.
+// It prints each hit and a total for each rule. It exits 0, unless git fails,
+// an input is over a limit, or go/scanner reports an error.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -24,6 +24,16 @@
 // prose, so stelint skips it. It checks each other "//go:" or "//line"
 // comment.
 //
+// For the sentence rule, some comments have the go/ast directive form, and
+// isDirective does not know them. The form is "//", a name of a-z and 0-9, a
+// colon, and one of a-z and 0-9. A token is such a comment with no space after
+// "//". The text after the colon is part of the token. Spaces at the line end
+// do not count. A token adds no words. On a line of its own, it does not end
+// the text. The "//" lines before and after it are one text. This does not hold
+// for a text that starts after code, with the token at another column. After
+// code, the code ends the text. A comment with more text, such as "//export F",
+// is ordinary comment text.
+//
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
 // one column. A comment line that holds only an http:// or https:// URL can
@@ -33,8 +43,11 @@
 //
 // Adjacent "//" lines that each start their line are one text. A blank "//"
 // line, a line of code or a directive ends that text. A "//" comment after
-// code is a text of its own. Each "/* */" comment is also a text of its own.
-// In it the indent does not count. A "*" at the start of a line is removed.
+// code starts a text. A "//" line that starts the next line continues it, when
+// it starts at the same column. Each next line at that column also continues
+// it. A tab moves to the next multiple of 4 columns. A line at another column
+// starts a new text. Each "/* */" comment is also a text of its own. In it the
+// indent does not count. A "*" at the start of a line is removed.
 //
 // A sentence ends at ".", "?" or "!" before a space, a line end or the end of
 // the text. It also ends at a blank line, a heading, a list item, and the
@@ -47,8 +60,10 @@
 //
 // A table row starts with "|". Each cell ends a sentence. A separator row
 // has only "|", "-", ":" and spaces, and it has no cell. A trailer line
-// starts with "Signed-off-by:" or "Co-authored-by:", in any case. It does not
-// count, and it ends the sentence before it.
+// starts with "Signed-off-by:" or "Co-authored-by:", in any case. A space, a
+// name of 1 to 20 words, a space and an address in "<" and ">" follow. The
+// address ends the line. Each other line with such a start is text. A trailer
+// line does not count, and it ends the sentence before it.
 //
 // A code block is a run of lines with a tab or two spaces of indent. It
 // starts at the start of a text, after a blank line, after a heading, or
@@ -56,15 +71,23 @@
 // it starts with a list marker. A fence of three backticks also makes a code
 // block. stelint does not count code.
 //
-// A word is a run of characters between spaces. A code span in backticks is
+// A word is a run of characters between spaces. A space is each rune for
+// which unicode.IsSpace is true, such as U+00A0. A code span in backticks is
 // one word, also when it has spaces. A "." in a code span does not end a
-// sentence. In a Markdown link, only the link text counts. A backtick or a
-// link with no closing mark is an ordinary character.
+// sentence. In a Markdown link, only the link text counts. A link whose URL
+// has a space is not a link. A backtick or a link with no closing mark is an
+// ordinary character.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So
-// a deletion that joins two sentences into one long sentence is a hit. The
-// line rule checks only the changed lines that are still in the file.
+// a deletion that joins two sentences into one long sentence is a hit. A
+// deletion directly before the first line of a sentence also covers it. This
+// holds when the line before the deletion is in the same text. A fence line or
+// a blank "//" line can change how a text reads. When one is a changed line,
+// stelint checks every sentence of that text. Other changes can also turn code
+// into prose. An example is a blank line, a heading or a fence that becomes
+// text. stelint can miss such a change. The line rule checks only the changed
+// lines that are still in the file.
 //
 // # Output
 //
@@ -75,7 +98,9 @@
 //
 // A file over 1 MiB, or a git output over the output cap, is not parsed. A
 // hunk that ends after line 1048576 is not parsed. Each gives an error and
-// exit code 2. When base is empty, stelint prints one line that says the
+// exit code 2. A file for which go/scanner reports an error is also not
+// parsed. It gives an error line with the path, and exit code 2, in both
+// forms. When base is empty, stelint prints one line that says the
 // check did not run, and exits 0.
 //
 // stelint does not find quoted text, third-party text or legal text. The
@@ -87,7 +112,7 @@
 //
 //	0  pass, or the check did not run
 //	1  a changed line is too long, or a changed sentence has too many words
-//	2  usage, git or input limit error
+//	2  usage, git, input limit or scan error
 package main
 
 import (
@@ -133,17 +158,14 @@ type target struct {
 	dels  []int
 }
 
-// has reports whether the line is one that the check covers.
+// has reports whether the line is one that the check covers. The spans are in
+// line order, as git prints them.
 func (t target) has(line int) bool {
 	if t.all {
 		return true
 	}
-	for _, s := range t.spans {
-		if line >= s.start && line < s.start+s.n {
-			return true
-		}
-	}
-	return false
+	i := sort.Search(len(t.spans), func(i int) bool { return t.spans[i].start+t.spans[i].n > line })
+	return i < len(t.spans) && t.spans[i].start <= line
 }
 
 // hit is a comment line that is too long.
@@ -200,7 +222,8 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 type totals struct{ lines, lineFiles, sents, sentFiles int }
 
 // report prints every hit of every target and a total for each rule. It
-// exits 0, unless an input limit or git fails.
+// exits 0, unless git fails, an input is over a limit, or go/scanner reports
+// an error.
 func report(dir, head string, targets []target, stdout, stderr io.Writer) int {
 	n, err := scanTargets(dir, head, targets, stdout)
 	if err != nil {
@@ -241,6 +264,10 @@ func scanTargets(dir, head string, targets []target, stdout io.Writer) (n totals
 		if tooBig {
 			return totals{}, fmt.Errorf("%s is over %d bytes: not parsed", clean(t.path), maxFileBytes)
 		}
+		found, scanErr := checkedSentences(src, t)
+		if scanErr {
+			return totals{}, fmt.Errorf("%s has a Go scan error: not parsed", clean(t.path))
+		}
 		lines, sents := 0, 0
 		for _, h := range longLines(src) {
 			if !t.has(h.line) {
@@ -249,10 +276,7 @@ func scanTargets(dir, head string, targets []target, stdout io.Writer) (n totals
 			fmt.Fprintf(stdout, "%s:%d: %d columns (limit %d)\n", clean(t.path), h.line, h.cols, maxColumns)
 			lines++
 		}
-		for _, s := range longSentences(src) {
-			if !t.hasAny(s.first, s.last) {
-				continue
-			}
+		for _, s := range found {
 			fmt.Fprintf(stdout, "%s:%d: %d words (limit %d)\n", clean(t.path), s.first, s.words, maxWords)
 			sents++
 		}
