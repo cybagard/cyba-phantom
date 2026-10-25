@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 // Config is the input of New.
@@ -29,6 +31,12 @@ type Config struct {
 	// header lines and the blank line. New refuses a value below 8192.
 	// limits.header_bytes.
 	HeaderBytes int
+	// Queue takes the refused events of the server. New refuses nil.
+	Queue *event.Queue
+	// Counters takes the refused events that a cap drops. It must be the value
+	// that the Queue got from NewQueue. Then all drops of a client key add
+	// up. New refuses nil.
+	Counters *event.Counters
 }
 
 // minHeaderBytes is the smallest HeaderBytes. net/http reads 4096 bytes more
@@ -161,6 +169,7 @@ type Server struct {
 	t        timeouts
 	hdrBytes int
 	handlers handlerCount // the running handlers of all serve calls
+	refused  *refusedEmitter
 
 	mu     sync.Mutex
 	plain  []*http.Server // one for each ServePlain call
@@ -179,6 +188,9 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	if cfg.TLS == nil {
 		return nil, errors.New("listener: a TLS config is required")
 	}
+	if cfg.Queue == nil || cfg.Counters == nil {
+		return nil, errors.New("listener: a queue and counters are required")
+	}
 	if cfg.MaxConns < 1 {
 		return nil, errors.New("listener: max conns must be at least 1")
 	}
@@ -188,7 +200,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	if cfg.HeaderBytes < minHeaderBytes {
 		return nil, fmt.Errorf("listener: header bytes must be at least %d", minHeaderBytes)
 	}
-	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes}
+	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes, refused: newRefusedEmitter(cfg.Queue, cfg.Counters, monotonicSince())}
 	s.errLines.lines = make(chan struct{}, 1)
 	// http/1.1 comes first, so a client that offers both gets http/1.1. A client
 	// that offers only acme-tls/1 is a challenge client. If the list has no
@@ -347,13 +359,14 @@ func (s *Server) Close() error {
 // wait for a hijacked connection, only for its handler.
 //
 // Shutdown returns an error in three cases. In the first case, ctx ends before
-// http.Server.Shutdown finds each open connection closed or idle, or before the
-// running handlers return. net/http does this check at intervals of up to about
-// 0.5 s. In the second case, ctx ended before the call. In the third case, a
-// listener close gives an error. In each case Shutdown closes each connection
-// in the record of open connections at the socket below TLS, also each
-// hijacked connection. So a stalled close_notify write does not hold it. The
-// error is the error of ctx, or the error of the listener close.
+// http.Server.Shutdown finds each open connection closed or idle. Or it ends
+// before the running handlers return. net/http examines the connections at
+// intervals of up to about 0.5 s. In the second case, ctx ended before the
+// call. In the third case, a listener close gives an error. In each case
+// Shutdown closes, at the socket below TLS, each connection in the record of
+// open connections. This includes each hijacked connection. So a stalled
+// close_notify write does not hold it. The error is the error of ctx, or the
+// error of the listener close.
 //
 // When Shutdown returns nil, no handler runs. A hijacked connection whose
 // handler returned can still be open.
@@ -409,7 +422,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// Wait for the Shutdown calls above, so that none runs after this
 		// function returns.
 		<-done
-		_ = closeServers(servers)
+		s.sweep(servers)
 		err = ctx.Err()
 	}
 	if !s.handlers.waitIdle(ctx) {

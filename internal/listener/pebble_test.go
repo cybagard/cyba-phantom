@@ -157,7 +157,8 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 			mod(p)
 		}
 	})
-	s, err := New(Config{TLS: &tls.Config{GetCertificate: f.a.GetCertificate}, MaxConns: 64, HeaderBytes: testHeaderBytes}, okHandler)
+	q, c := testSinks(t, 16)
+	s, err := New(Config{TLS: &tls.Config{GetCertificate: f.a.GetCertificate}, MaxConns: 64, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}, okHandler)
 	mustNil(t, err)
 	// Count the connections that negotiated acme-tls/1, then run the real function.
 	next := s.srv.TLSNextProto[challengeProto]

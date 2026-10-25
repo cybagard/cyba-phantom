@@ -78,7 +78,8 @@ var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { 
 func newRig(t *testing.T, maxConns, headerBytes int, tm timeouts, h http.Handler) *rig {
 	t.Helper()
 	cert, pool := testCert(t)
-	s, err := newServer(Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: maxConns, HeaderBytes: headerBytes}, h, tm)
+	q, c := testSinks(t, 16)
+	s, err := newServer(Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: maxConns, HeaderBytes: headerBytes, Queue: q, Counters: c}, h, tm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +359,8 @@ func TestTS17HeaderValueCount(t *testing.T) {
 // connection slot, and a TLS config that sets NextProtos or GetConfigForClient.
 func TestTS17NewRefusals(t *testing.T) {
 	cert, _ := testCert(t)
-	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes}
+	q, c := testSinks(t, 16)
+	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
 	if _, err := New(cfg, nil); err == nil {
 		t.Error("nil handler: no error")
 	}
@@ -1366,32 +1368,21 @@ func inHTTPShutdown() bool {
 	}
 }
 
-// splitCtx gives http.Server.Shutdown the Done and Err of inHTTP. It gives all
-// other callers the Done and Err of the embedded context. With gate set, Done
-// blocks in http.Server.Shutdown until gate is closed. Its only test uses one
-// context for both, and the gate. The gate holds the Shutdown call of net/http
-// until after the context ends.
-type splitCtx struct {
+// gateCtx is a context whose Done blocks in http.Server.Shutdown until gate is
+// closed. All other callers get the Done of the embedded context at once. The
+// gate holds the Shutdown call of net/http until after the context ends. The
+// stack check is needed, because Server.Shutdown also calls Done and must not
+// block there.
+type gateCtx struct {
 	context.Context
-	inHTTP context.Context
-	gate   chan struct{}
+	gate chan struct{}
 }
 
-func (c splitCtx) Done() <-chan struct{} {
-	if !inHTTPShutdown() {
-		return c.Context.Done()
-	}
-	if c.gate != nil {
+func (c gateCtx) Done() <-chan struct{} {
+	if inHTTPShutdown() {
 		<-c.gate
 	}
-	return c.inHTTP.Done()
-}
-
-func (c splitCtx) Err() error {
-	if inHTTPShutdown() {
-		return c.inHTTP.Err()
-	}
-	return c.Context.Err()
+	return c.Context.Done()
 }
 
 // T-S-17: a handler that runs past the deadline of Shutdown and then calls
@@ -1868,7 +1859,7 @@ func TestTS17ShutdownWaitsForServerShutdownCalls(t *testing.T) {
 	base, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	res := make(chan error, 1)
-	go func() { res <- r.s.Shutdown(splitCtx{Context: base, inHTTP: base, gate: gate}) }()
+	go func() { res <- r.s.Shutdown(gateCtx{Context: base, gate: gate}) }()
 	select {
 	case err := <-res:
 		t.Fatalf("Shutdown returned %v while a Shutdown call of net/http still ran", err)
@@ -1890,7 +1881,8 @@ func TestTS17ShutdownWaitsForServerShutdownCalls(t *testing.T) {
 // "bare" runs the handler alone, and "wrapped" runs it through markRequest.
 func BenchmarkMarkRequest(b *testing.B) {
 	cert, _ := testCert(b)
-	s, err := newServer(Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 2, HeaderBytes: testHeaderBytes}, okHandler, defaultTimeouts)
+	q, c := testSinks(b, 16)
+	s, err := newServer(Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 2, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}, okHandler, defaultTimeouts)
 	if err != nil {
 		b.Fatal(err)
 	}
