@@ -115,9 +115,10 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // a failed start check, and a fork signal of the checkpoint row. A failed BEGIN
 // starts no transaction, and a later database error rolls the transaction back.
 // The events of a batch that ends with an error and no COMMIT count as drops.
-// The lane of a drop is the lane of the kind of the record copy of write.
-// After an assignment to a queued event, that lane can differ from the queue
-// lane. The writer keeps the first error (Err) and is not healthy (Healthy).
+// The lane of each of these drops is the lane of the kind in the record copy
+// that write made. After an assignment to a queued event, that lane can differ
+// from the queue lane. The writer keeps the first error (Err) and is not
+// healthy (Healthy).
 // It writes one log line with the fixed class of the error. It does not open
 // the log or the database again, and it does not end the process. Run does not
 // return the error. It

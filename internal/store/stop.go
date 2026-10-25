@@ -27,8 +27,9 @@ func (d *DropCount) Load() Drops {
 	return Drops{Bulk: d.bulk.Load(), Evidence: d.evidence.Load()}
 }
 
-// add counts one dropped event of kind k for its lane. The lane comes from the
-// kind, as in the queue.
+// add counts one dropped event of kind k. An evidence kind counts for the
+// evidence lane. Each other value of k counts for the bulk lane, also a kind
+// that is not known.
 func (d *DropCount) add(k event.Kind) {
 	if ok, err := k.IsEvidence(); err == nil && ok {
 		d.evidence.Add(1)

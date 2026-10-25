@@ -244,11 +244,11 @@ func TestTU18RecordIsReadOnceForHashAndRow(t *testing.T) {
 	}
 }
 
-// T-U-18: an assignment to an event in the transaction does not change its kind
-// for the writer. The batch has one evidence and one bulk event. The assignment
-// gives one of them the kind of the other. Each row keeps the kind of the first
-// value. Only the evidence row has a hash, a leaf and a record. If the COMMIT
-// fails, the drops count one bulk and one evidence event.
+// T-U-18: an assignment to an event after write makes its record copy does
+// not change its kind for the writer. The batch has one evidence and one bulk
+// event. The assignment gives one of them the kind of the other. Each row keeps
+// the kind of the first value. Only the evidence row has a hash, a leaf and a
+// record. If the COMMIT fails, the drops count one bulk and one evidence event.
 func TestTU18AssignedKindDoesNotChangeTheLane(t *testing.T) {
 	cases := []struct {
 		name    string
