@@ -830,12 +830,12 @@ func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
 	r.start()
 	r.fire()
 	wantCommits(t, r, 0)
-	want := "2026-03-01 " + r.w.dk.hmac(addr) + " 2"
+	want := "2026-03-01 " + r.w.dk.ipHMAC(addr) + " 2"
 	if got := r.ipCounters(); len(got) != 1 || got[0] != want || calls != 1 || r.app.tries != 0 || r.rows() != 0 {
 		t.Fatalf("ip_counter %q, want %q; %d clock reads, %d appender calls", got, want, calls, r.app.tries)
 	}
-	if r.w.dk.date != "2026-03-01" {
-		t.Fatalf("day key for %q", r.w.dk.date)
+	if r.w.dk.s().date != "2026-03-01" {
+		t.Fatalf("day key for %q", r.w.dk.s().date)
 	}
 	if syncMode != 1 || timings != 0 {
 		t.Fatalf("synchronous %d (want 1, NORMAL), %d timing calls (want 0)", syncMode, timings)

@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -148,13 +150,28 @@ func TestTU18StoredValuesEqualEventValues(t *testing.T) {
 					t.Errorf("%s: evidence columns %v %v", name, got.leaf, got.hash)
 				}
 			}
+			forms := addressForms(netip.MustParseAddr(clientIP))
 			for i, row := range r.dumpEvents() {
-				if strings.Contains(row, clientIP) {
-					t.Errorf("row %d holds the client IP", i)
+				for _, f := range forms {
+					if strings.Contains(row, f) {
+						t.Errorf("row %d holds the client IP as %q", i, f)
+					}
 				}
 			}
 		})
 	}
+}
+
+// addressForms returns the text of a and its raw 4 and 16 bytes. It also
+// returns the lower-case and upper-case hex of both.
+func addressForms(a netip.Addr) []string {
+	a4, a16 := a.Unmap().As4(), a.As16()
+	forms := []string{a.String(), string(a4[:]), string(a16[:])}
+	for _, b := range [][]byte{a4[:], a16[:]} {
+		h := hex.EncodeToString(b)
+		forms = append(forms, h, strings.ToUpper(h))
+	}
+	return forms
 }
 
 // dumpEvents returns the text of every column of every event row.
@@ -248,7 +265,7 @@ func TestTS15IPCounterHoldsNoAddress(t *testing.T) {
 	v6key := netip.MustParseAddr("2001:db8:abcd:1234::").As16()
 	m4, m4b := netip.MustParseAddr("192.0.2.99").As4(), netip.MustParseAddr("198.51.100.23").As4()
 	want := map[string]bool{
-		mac(r.w.dk.key, m4b[:]): true, mac(r.w.dk.key, m4[:]): true, mac(r.w.dk.key, v6key[:]): true,
+		mac(r.w.dk.s().key, m4b[:]): true, mac(r.w.dk.s().key, m4[:]): true, mac(r.w.dk.s().key, v6key[:]): true,
 	}
 	markers := []string{"198.51.100.23", "c6336417", "2001:db8", "20010db8abcd1234", "abcd:1234", "192.0.2.99", "c0000263", "::ffff"}
 	for _, c := range rows {
@@ -261,11 +278,20 @@ func TestTS15IPCounterHoldsNoAddress(t *testing.T) {
 			}
 		}
 	}
+	// A trigger makes the counter upsert fail, and nothing else. The same batch
+	// with no drop count works, so the error comes from countDrops.
+	if _, err := r.db.Exec("CREATE TRIGGER refuse_counter BEFORE INSERT ON ip_counter BEGIN SELECT RAISE(ABORT, 'refused'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.w.write([]*event.Event{rowEvent(t, event.KindRequest, false, 1)}); err != nil {
+		t.Fatalf("batch with no drop count: %v", err)
+	}
+	before := r.rows()
 	r.c.Drop(v4)
-	r.db.Close()
-	err := r.w.write([]*event.Event{rowEvent(t, event.KindRequest, false, 1)})
-	if err == nil {
-		t.Fatal("write to a closed database has no error")
+	err := r.w.write([]*event.Event{rowEvent(t, event.KindRequest, false, 2)})
+	wantRule(t, err, writerName, ruleDatabase)
+	if n := r.rows(); n != before {
+		t.Errorf("%d event rows, want %d: the failed batch is rolled back", n, before)
 	}
 	for _, m := range append(markers, v4.String(), v6.String()) {
 		if strings.Contains(strings.ToLower(err.Error()), m) {
@@ -284,7 +310,7 @@ func TestTS15DayKeyChangesWithTheDateInBothDirections(t *testing.T) {
 	for _, d := range []string{"2026-03-01T10:00:00Z", "2026-03-02T10:00:00Z", "2026-03-01T11:00:00Z", "2026-03-01T12:00:00Z"} {
 		r.c.Drop(a)
 		r.writeAt(day(d))
-		keys = append(keys, r.w.dk.key)
+		keys = append(keys, r.w.dk.s().key)
 	}
 	if keys[0] == keys[1] || keys[0] == keys[2] || keys[1] == keys[2] {
 		t.Fatal("a date change did not give a new key")
@@ -313,27 +339,38 @@ func TestTS15DayKeyChangesWithTheDateInBothDirections(t *testing.T) {
 // midnight at later reads.
 func TestTU18BatchUsesTheDateOfItsStart(t *testing.T) {
 	r := newRig(t, 100)
-	reads := 0
+	// The clock gives the start time until the writer makes the record bytes of
+	// the first evidence event. Then it gives a time after midnight. Thus a
+	// read after the first event gives the next date.
+	inRows := false
 	start := day("2026-03-01T23:59:59.999Z")
+	r.w.evidenceBytes = func(rec event.Record) ([]byte, error) {
+		inRows = true
+		return event.EvidenceBytes(rec)
+	}
 	r.w.clock = func() time.Time {
-		reads++
-		return start.Add(time.Duration(reads-1) * time.Second)
+		if inRows {
+			return start.Add(time.Second)
+		}
+		return start
 	}
 	r.c.Drop(netip.MustParseAddr("198.51.100.23"))
 	r.c.DropNoAddr()
-	batch := []*event.Event{rowEvent(t, event.KindRequest, false, 1), rowEvent(t, event.KindRequest, false, 2)}
-	if err := r.w.write(batch); err != nil {
+	batch := func(ts int64) []*event.Event {
+		return []*event.Event{rowEvent(t, event.KindCallback, false, ts), rowEvent(t, event.KindRequest, false, ts+1)}
+	}
+	if err := r.w.write(batch(1)); err != nil {
 		t.Fatal(err)
 	}
-	if reads != 1 {
-		t.Fatalf("the batch read the clock %d times", reads)
+	if !inRows {
+		t.Fatal("the batch made no evidence record")
 	}
 	rows := r.counterRows()
 	if len(rows) != 2 || rows[0].day != "2026-03-01" || rows[1].day != "2026-03-01" {
 		t.Fatalf("rows %+v", rows)
 	}
 	r.c.DropNoAddr()
-	if err := r.w.write(batch); err != nil {
+	if err := r.w.write(batch(3)); err != nil {
 		t.Fatal(err)
 	}
 	if rows = r.counterRows(); len(rows) != 3 || rows[2].day != "2026-03-02" {
@@ -365,30 +402,33 @@ func TestTU18OverflowRowAndSecondBatchAdd(t *testing.T) {
 	}
 }
 
-// T-S-15: the day key is in no file of the state directory: not in the
-// database, the WAL or the SHM file, in raw or in hex form.
+// T-S-15: the day key is in no file below the state directory, in raw or in hex
+// form. A file that cannot be read fails the test.
 func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 	r := newRig(t, 100)
-	var file string
-	if err := r.db.QueryRow("SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&file); err != nil {
-		t.Fatal(err)
-	}
 	a := netip.MustParseAddr("198.51.100.23")
 	r.c.Drop(a)
 	r.writeAt(day("2026-03-01T10:00:00Z"))
 	ip := a.As4()
-	known := mac(r.w.dk.key, ip[:]) // proves that the scan sees the data
+	known := mac(r.w.dk.s().key, ip[:]) // proves that the scan sees the data
 	scan := func(stage string) {
 		found := false
-		for _, f := range []string{file, file + "-wal", file + "-shm"} {
+		err := filepath.WalkDir(r.state, func(f string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
 			data, err := os.ReadFile(f)
 			if err != nil {
-				continue
+				return err
 			}
-			if bytes.Contains(data, r.w.dk.key[:]) || bytes.Contains(data, []byte(hex.EncodeToString(r.w.dk.key[:]))) {
+			if bytes.Contains(data, r.w.dk.s().key[:]) || bytes.Contains(data, []byte(hex.EncodeToString(r.w.dk.s().key[:]))) {
 				t.Errorf("%s: the day key is in %s", stage, f)
 			}
 			found = found || bytes.Contains(data, []byte(known))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", stage, err)
 		}
 		if !found {
 			t.Errorf("%s: the scan does not see the ip_hmac text", stage)
@@ -399,4 +439,40 @@ func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan("after the checkpoint")
+}
+
+// T-S-15: no verb of fmt prints a byte of the day key. This holds for a
+// dayKey, a *dayKey, a Writer and a *Writer.
+func TestTS15DayKeyIsNotPrinted(t *testing.T) {
+	r := newRig(t, 100)
+	s := r.w.dk.s()
+	s.date = "2026-03-01"
+	for i := range s.key {
+		s.key[i] = 0xb0 + byte(i)
+	}
+	k := s.key
+	needles := []string{
+		string(k[:8]), hex.EncodeToString(k[:8]), strings.ToUpper(hex.EncodeToString(k[:8])),
+		"176 177 178 179", `\xb0\xb1`, "0xb0, 0xb1",
+	}
+	holds := func(s string) bool {
+		for _, n := range needles {
+			if strings.Contains(s, n) {
+				return true
+			}
+		}
+		return false
+	}
+	// Interface copies the Writer with no lock copy in the source text.
+	writer := reflect.ValueOf(r.w).Elem().Interface()
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%d", "%q"} {
+		if !holds(fmt.Sprintf(verb, k)) {
+			t.Fatalf("%s: the check does not see the bytes of a bare key", verb)
+		}
+		for name, v := range map[string]any{"dayKey": r.w.dk, "*dayKey": &r.w.dk, "Writer": writer, "*Writer": r.w} {
+			if out := fmt.Sprintf(verb, v); holds(out) {
+				t.Errorf("%s of a %s holds the day key: %.200q", verb, name, out)
+			}
+		}
+	}
 }

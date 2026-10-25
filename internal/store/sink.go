@@ -72,7 +72,9 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 	if s.forked.Load() {
 		return fail(sinkName, ruleRowFork)
 	}
-	var stopErr error // one read of the writer state for all branches
+	// One read of the writer state for all branches. It is nil for a healthy
+	// writer.
+	var stopErr error
 	if s.w != nil {
 		stopErr = s.w.Err()
 	}
@@ -96,8 +98,9 @@ func (s *Sink) Add(size uint64, msg []byte) error {
 }
 
 // forkStop tells if stopErr, the error of a stopped writer, is a fork signal.
-// When the writer stopped for a fork signal, the sink sets its fork flag. This
-// also applies when the reply of the writer comes after the timer.
+// stopErr is nil for a healthy writer, and then forkStop returns false. When
+// the writer stopped for a fork signal, the sink sets its fork flag. This also
+// applies when the reply of the writer comes after the timer.
 func (s *Sink) forkStop(stopErr error) bool {
 	var e *Error
 	if !errors.As(stopErr, &e) || e.Rule != ruleFork {

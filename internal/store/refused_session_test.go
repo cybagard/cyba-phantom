@@ -79,8 +79,8 @@ func TestTS22SessionIDIsTheFunctionOfTheKeyAndTheJA4(t *testing.T) {
 	ids := r.refusedIDs(r.w, ja4, "198.51.100.23", "::ffff:198.51.100.23", "2001:db8:abcd:1234::1", "2001:db8:abcd:1234:ffff::9")
 	v4 := netip.MustParseAddr("198.51.100.23").As4()
 	v6 := netip.MustParseAddr("2001:db8:abcd:1234::").As16()
-	for i, want := range []string{wantID(r.w.dk.key, v4[:], ja4), wantID(r.w.dk.key, v4[:], ja4),
-		wantID(r.w.dk.key, v6[:], ja4), wantID(r.w.dk.key, v6[:], ja4)} {
+	for i, want := range []string{wantID(r.w.dk.s().key, v4[:], ja4), wantID(r.w.dk.s().key, v4[:], ja4),
+		wantID(r.w.dk.s().key, v6[:], ja4), wantID(r.w.dk.s().key, v6[:], ja4)} {
 		if ids[i] != want {
 			t.Errorf("event %d: session_id %q, want %q", i, ids[i], want)
 		}
@@ -103,7 +103,7 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	at := day("2026-03-01T10:00:00Z")
 	r.w.clock = func() time.Time { return at }
 	first := r.refusedIDs(r.w, "", ip)[0]
-	if first != wantID(r.w.dk.key, k[:], "") {
+	if first != wantID(r.w.dk.s().key, k[:], "") {
 		t.Errorf("session_id %q with an empty JA4 is not the defined value", first)
 	}
 	idBytes, err := base32.StdEncoding.WithPadding(base32.NoPadding).
@@ -111,7 +111,7 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ipMAC, err := hex.DecodeString(r.w.dk.hmac(netip.MustParseAddr(ip)))
+	ipMAC, err := hex.DecodeString(r.w.dk.ipHMAC(netip.MustParseAddr(ip)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 	if got.detail == nil || *got.detail != string(detail) || *got.detail != `{"reason":"bad_hello"}` {
 		t.Errorf("refused row: detail %v, want %s", got.detail, detail)
 	}
-	if want := wantID(r.w.dk.key, k[:], ja4); got.session == nil || *got.session != want {
+	if want := wantID(r.w.dk.s().key, k[:], ja4); got.session == nil || *got.session != want {
 		t.Errorf("refused row: session_id %v, want %q", got.session, want)
 	}
 	for col, null := range map[string]bool{

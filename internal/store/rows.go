@@ -46,7 +46,7 @@ func (w *Writer) countDrops(ctx context.Context, tx *sql.Tx, day string) error {
 	counts, overflow := w.counters.Snapshot()
 	for a, n := range counts {
 		if n > 0 {
-			if _, err := tx.ExecContext(ctx, upsertCounter, day, w.dk.hmac(a), n); err != nil {
+			if _, err := tx.ExecContext(ctx, upsertCounter, day, w.dk.ipHMAC(a), n); err != nil {
 				return fail(writerName, ruleDatabase)
 			}
 		}

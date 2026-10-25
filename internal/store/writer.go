@@ -86,7 +86,7 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, log: log, rows: make(chan rowRequest, 1)}
+	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, dk: newDayKey(), log: log, rows: make(chan rowRequest, 1)}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no

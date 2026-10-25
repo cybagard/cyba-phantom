@@ -85,9 +85,30 @@ func BenchmarkWriterLoad(b *testing.B) {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
 	}
 	for range b.N {
-		runLoad(b)
+		runLoad(b, false)
 	}
 }
+
+// BenchmarkWriterFlood feeds a burst of 2 * loadDepth events every 10 ms for
+// 3 s. A burst is more than the queue holds. So the queue drops events, and the
+// writer adds the drop counts to ip_counter. It fails when no event is dropped
+// or no counter row is written. The pass line for RSS is the same as for
+// BenchmarkWriterLoad. Run it only with -bench, in a 1 CPU / 512 MB container:
+//
+//	go test -run '^$' -bench BenchmarkWriterFlood -benchtime=1x ./internal/store
+func BenchmarkWriterFlood(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
+	for range b.N {
+		runLoad(b, true)
+	}
+}
+
+const (
+	floodBurst = 2 * loadDepth
+	floodTicks = 300
+)
 
 // loadLog is a test appender that is also an empty log for the start check.
 type loadLog struct {
@@ -95,7 +116,9 @@ type loadLog struct {
 	fakeLog
 }
 
-func runLoad(b *testing.B) {
+// runLoad feeds the writer at loadRate, or in bursts above the queue size when
+// flood is true.
+func runLoad(b *testing.B, flood bool) {
 	dir := b.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		b.Fatal(err)
@@ -128,11 +151,17 @@ func runLoad(b *testing.B) {
 	go func() { done <- w.Run(context.Background()) }()
 
 	total := loadRate * int(loadDuration/time.Second)
+	if flood {
+		total = floodBurst * floodTicks
+	}
 	start := time.Now()
 	tick := time.NewTicker(10 * time.Millisecond)
 	for fed := 0; fed < total; {
 		<-tick.C
 		due := min(total, int(time.Since(start).Seconds()*loadRate))
+		if flood {
+			due = fed + floodBurst
+		}
 		for ; fed < due; fed++ {
 			q.Enqueue(loadEvent(b, fed))
 		}
@@ -162,7 +191,15 @@ func runLoad(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	var counterRows int64
+	if err := db.QueryRow("SELECT count(*) FROM ip_counter").Scan(&counterRows); err != nil {
+		b.Fatal(err)
+	}
 	dropped := q.Dropped()
+	if flood && (dropped.Bulk+dropped.Evidence == 0 || counterRows == 0) {
+		b.Errorf("the flood dropped %d events and wrote %d ip_counter rows, want both above 0", dropped.Bulk+dropped.Evidence, counterRows)
+	}
+	b.ReportMetric(float64(counterRows), "ip_counter_rows")
 	lost := int64(total) - rows
 	perRow := float64(pages*pageSize) / float64(max(rows, 1))
 
