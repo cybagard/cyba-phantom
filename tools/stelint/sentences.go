@@ -50,8 +50,9 @@ func longSentences(src []byte) []sentence {
 // words and that the target covers, in line order. The target covers a
 // sentence when a line of it changed. It also does when a deletion joined it,
 // or came directly before it in the same text. A fence line or a blank line
-// can change a whole text. When one changed, the target covers every sentence
-// of the text. scanErr is true when go/scanner reported an error for src.
+// can change a whole text. When one is a changed line, the target covers every
+// sentence of the text. scanErr is true when go/scanner reported an error for
+// src.
 func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	groups, scanErr := commentGroups(src)
 	for _, g := range groups {
@@ -92,7 +93,7 @@ func (t target) changedBreak(g []textLine) bool {
 
 // isASTDirective reports whether a "//" comment has the directive form of
 // go/ast. The form is "//line ", "//extern " or "//export " at the start.
-// It is also "//", a name of [a-z0-9], a colon and one of [a-z0-9].
+// It is also "//", a name of a-z and 0-9, a colon, and one of a-z and 0-9.
 func isASTDirective(lit string) bool {
 	for _, p := range []string{"//line ", "//extern ", "//export "} {
 		if strings.HasPrefix(lit, p) {

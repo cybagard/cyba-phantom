@@ -11,8 +11,8 @@
 // check. The file text comes from head.
 //
 // The second form checks the tracked Go files at head, except symbolic links.
-// It prints each hit and a total for each rule. It exits 0 unless git, an
-// input limit or a scan error fails.
+// It prints each hit and a total for each rule. It exits 0, unless git fails,
+// an input is over a limit, or go/scanner reports an error.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -42,8 +42,8 @@
 // code starts a text. A "//" line that starts the next line continues it, when
 // it starts at the same column. Each next line at that column also continues
 // it. A tab moves to the next multiple of 4 columns. A line at another column
-// is a text of its own. Each "/* */" comment is also a text of its own. In it
-// the indent does not count. A "*" at the start of a line is removed.
+// starts a new text. Each "/* */" comment is also a text of its own. In it the
+// indent does not count. A "*" at the start of a line is removed.
 //
 // A sentence ends at ".", "?" or "!" before a space, a line end or the end of
 // the text. It also ends at a blank line, a heading, a list item, and the
@@ -81,9 +81,9 @@
 // holds when the line before the deletion is in the same text. A fence line or
 // a blank "//" line can change how a text reads. When one is a changed line,
 // stelint checks every sentence of that text. Other changes can also turn code
-// into prose, for example a heading that becomes text. stelint does not find
-// each such change. The line rule checks only the changed lines that are still
-// in the file.
+// into prose. An example is a blank line, a heading or a fence that becomes
+// text. stelint can miss such a change. The line rule checks only the changed
+// lines that are still in the file.
 //
 // # Output
 //
@@ -154,7 +154,8 @@ type target struct {
 	dels  []int
 }
 
-// has reports whether the line is one that the check covers.
+// has reports whether the line is one that the check covers. The spans are in
+// line order, as git prints them.
 func (t target) has(line int) bool {
 	if t.all {
 		return true
@@ -217,7 +218,8 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 type totals struct{ lines, lineFiles, sents, sentFiles int }
 
 // report prints every hit of every target and a total for each rule. It
-// exits 0, unless an input limit or git fails.
+// exits 0, unless git fails, an input is over a limit, or go/scanner reports
+// an error.
 func report(dir, head string, targets []target, stdout, stderr io.Writer) int {
 	n, err := scanTargets(dir, head, targets, stdout)
 	if err != nil {
