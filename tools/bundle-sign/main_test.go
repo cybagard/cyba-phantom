@@ -39,8 +39,8 @@ func runFail(t *testing.T, want int, err error, args ...string) {
 }
 
 // tempDir makes a private directory below the package directory. The key
-// directory rule needs that each parent has no group or other write bit. The
-// system temporary directory can have the sticky bit and mode 1777.
+// directory rule refuses a parent with a group or other write bit. The system
+// temporary directory can have the sticky bit and mode 1777.
 func tempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp(".", "tmp-")

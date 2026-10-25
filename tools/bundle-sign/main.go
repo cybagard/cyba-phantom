@@ -133,7 +133,7 @@ func readFile(path string, limit int64, key bool, fail error) ([]byte, error) {
 	return nil, fail
 }
 
-// The calls that write and sync. Tests replace these calls to make a failure.
+// Tests replace these write and sync calls to make a failure.
 var (
 	writeTo = (*os.File).Write
 	syncOne = (*os.File).Sync
