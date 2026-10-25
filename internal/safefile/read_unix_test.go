@@ -116,8 +116,9 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	}
 	// The rchar line of /proc/thread-self/io counts the bytes that the read
 	// system calls of this thread return. The test locks the thread, so no
-	// other goroutine reads on it. The first /proc read returns bytes that
-	// the second value counts. The test subtracts them from the difference.
+	// other goroutine reads on it. The test reads the rchar value before and
+	// after ReadAll. The second value also counts the bytes of the first
+	// /proc read. The test subtracts them.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	before, own := threadRchar(t)
