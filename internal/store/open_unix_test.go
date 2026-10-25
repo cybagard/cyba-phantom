@@ -158,9 +158,9 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// The read-only reopen runs after Open makes the file and before its Lstat.
-	// There the file is in the moved directory, and the path under data has no
-	// file.
+	// The hook runs in the second open, after Open makes the file and before
+	// the Lstat of the second open. Then the file is in the moved directory,
+	// and the path under data has no file.
 	var ran, inMoved bool
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 		if name != "events.db" {
@@ -184,7 +184,7 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 	if !inMoved {
 		t.Fatal("the new file is not in the moved directory, or data/events.db exists")
 	}
-	// Refuse removes the made file through the checked directory.
+	// refuse removes the made file through the checked directory.
 	if _, err := os.Lstat(filepath.Join(data+".moved", "events.db")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the made file is still in the moved directory: %v", err)
 	}

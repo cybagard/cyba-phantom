@@ -112,13 +112,14 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 	}
 }
 
-// T-S-15: the file checks of Open open the database file one time only. That
-// open is the one that Open holds for the life of the pool. For an existing
-// file, the watch is read in the hook that gets the held descriptor. It counts
-// the earlier opens. For a new file, the watch starts in that hook. A hook
-// reads the watch again right after the driver opens the first connection. So
-// the opens of the driver are not counted. After Open returns, the watch counts
-// 0 opens: no later check of Open opens the file.
+// T-S-15: for an existing file, the file checks of Open open the database
+// file one time only. That open is the one that Open holds for the life of
+// the pool. The watch is read in the hook that gets the held descriptor. For a
+// new file, the watch starts in that hook, so this row counts no earlier open.
+// A hook reads the watch again right after the driver opens the first
+// connection. After Open returns, the watch counts 0 opens. Thus no check of
+// Open after the driver open opens the file. The test does not count an open
+// between the held open and the driver open.
 func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	rows := []struct {
 		name, rel string

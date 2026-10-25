@@ -118,7 +118,8 @@ func changeDSN(s string) string {
 var beforeCreate func()
 
 // beforeRefuse is a test hook. Production code leaves it nil. A test sets it to
-// change the file system before refuse looks at the file at rel.
+// change the file system before refuse looks at the name in the checked
+// directory.
 var beforeRefuse func()
 
 // heap guards soft_heap_limit, which is a setting of the process.
@@ -175,8 +176,9 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	absent := checked == nil
 	var fi fs.FileInfo
 	var statErr error
-	// Each failed step calls refuse before it closes the held descriptor, the
-	// create descriptor or the pool. While one of them is open, the inode of
+	// Each failed step after Open makes or opens the file calls refuse. It
+	// calls refuse before it closes the held descriptor, the create descriptor
+	// or the pool. While one of them is open, the inode of
 	// the made file is not free. Thus a file that someone makes in that time
 	// cannot have the same inode. refuse removes the entry in dir when the
 	// Lstat shows the file that this call made. refuse does not find a change
