@@ -198,15 +198,16 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	}
 	// The descriptor stays open until the pool closes. While it is open, the
 	// inode of the file cannot be given to a new file. The open of an existing
-	// file does not block on a FIFO. A new file is made through dir, then
-	// opened read-only by a second call of safefile.Open. If the open of that
-	// call gets a permission error, the rule is "cannot be made". Any other
-	// error gives the rule "changed between the check and the open". A
-	// permission error can also come from a change of the file or its mode by
-	// another process. The result on disk is the same: refuse runs. Open
-	// checks that the second open gets the made file. Then the create
-	// descriptor, which can write, is closed. So the held descriptor cannot
-	// write, for a new file as for an existing file.
+	// file does not block on a FIFO. Open makes a new file through dir. Then a
+	// second call of safefile.Open opens it read-only. If the open of that call
+	// gets a permission error, the rule is "cannot be made". Any other error of
+	// that call gives the rule "changed between the check and the open". A
+	// change by another process can also cause a permission error. The change
+	// can be to the file, its mode, or the mode of its directory. The rule does
+	// not change refuse. Refuse removes the made file only if an Lstat of the
+	// name shows that file. Open checks that the second open gets the made
+	// file. Then Open closes the create descriptor, which can write. So the
+	// held descriptor cannot write, for a new file as for an existing file.
 	var held, created *os.File
 	if absent {
 		if beforeCreate != nil {
