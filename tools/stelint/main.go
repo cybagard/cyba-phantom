@@ -25,12 +25,14 @@
 // comment.
 //
 // For the sentence rule, some comments have the go/ast directive form, and
-// isDirective does not know them. The token is "//", a name of a-z and 0-9, a
-// colon, and one of a-z and 0-9. The comment is that token alone, with no space
-// after "//". Spaces at the line end do not count. Such a comment adds no
-// words. On a line of its own, it does not end the text. The "//" lines before
-// and after it are one text. After code, the code ends the text. A comment with
-// more text, such as "//export F", is ordinary comment text.
+// isDirective does not know them. The form is "//", a name of a-z and 0-9, a
+// colon, and one of a-z and 0-9. A token is such a comment with no space after
+// "//". The text after the colon is part of the token. Spaces at the line end
+// do not count. A token adds no words. On a line of its own, it does not end
+// the text. The "//" lines before and after it are one text. This does not hold
+// for a text that starts after code, with the token at another column. After
+// code, the code ends the text. A comment with more text, such as "//export F",
+// is ordinary comment text.
 //
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
