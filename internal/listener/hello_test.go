@@ -350,8 +350,8 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 }
 
 // T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
-// configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets the
-// 200 with no body of net/http. Over TLS it gives one request event and no
+// configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets
+// the 200 with no body of net/http. Over TLS it gives one request event and no
 // refused event. On the plain socket it gives no Location and no event.
 func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 	for _, tc := range []struct {
@@ -424,10 +424,10 @@ func BenchmarkHelloHandler(b *testing.B) {
 	}
 }
 
-// T-S-17: a cut of the Location never ends inside a %XX escape. The path is "/",
-// then pad "a" bytes, then 2100 bytes of a unit: "%2F" (kept), "<" (escaped to
-// "%3C") or "a". Each pad from 0 to 3 moves the end of the value inside the
-// last token.
+// T-S-17: a cut of the Location never ends inside a %XX escape. The path is
+// "/", then pad "a" bytes, then 2100 bytes of one unit. The unit is "%2F"
+// (kept), "<" (escaped to "%3C") or "a". Each pad from 0 to 3 moves the end of
+// the value inside the last token.
 func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 	for _, unit := range []string{"%2F", "<", "a"} {
 		for pad := 0; pad <= 3; pad++ {

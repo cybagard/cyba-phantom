@@ -11,7 +11,8 @@
 //
 // The package keeps a copy of the first ClientHello of each connection (FR-05).
 // The copy holds the cipher suites, extensions, signature schemes, groups,
-// versions and first ALPN value in arrays with a cap, so its size is fixed.
+// versions and first ALPN value. Each sits in an array with a cap, so the size
+// is fixed.
 //
 // The error log of the package counts lines and keeps no client data (SEC-22).
 package listener
