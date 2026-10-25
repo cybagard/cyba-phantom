@@ -262,9 +262,10 @@ func readList(name string) ([]string, error) {
 	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n"), nil
 }
 
-// listProblems gives one text for each problem of a line. A line has a problem
-// when it is empty, repeats the line before it, or is not in used. It also has
-// one when it is before the line before it in byte order.
+// listProblems gives one text for each problem of a line. A line has a
+// problem when it is empty or the same as the line before it. A line also has
+// a problem when it sorts before the line before it in byte order. A line that
+// is not in used has a problem too.
 func listProblems(lines []string, used map[string]bool) []string {
 	var out []string
 	for i, l := range lines {
@@ -297,11 +298,12 @@ func loadList(t *testing.T, name string) ([]string, map[string]bool) {
 	return lines, set
 }
 
-// TestTS21ReleaseCommandsDoNotListTestSeam lists the dependencies of the
+// TestTS21ReleaseCommandsDoNotListTestSeam gets the dependencies of the
 // release commands for each platform in releaseConfigs, with cgo off. It
 // fails on each dependency that depProblem names, and on a go workspace. On a
 // platform with usesDepList, it fails on each package that is not on
-// release-deps.txt. It also fails on a line of the file that no platform lists.
+// release-deps.txt. It also fails on a line of the file that is not a
+// dependency on a linux platform.
 // The loop has no subtests. Thus the union of the platforms does not depend on
 // the -run filter.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
@@ -766,7 +768,8 @@ func skippedDir(rel string) bool {
 // files and files in testdata and in folders that start with "." or "_". The
 // dependency test covers an import of a skipped folder, a symlink and a
 // replace. When allowed is not nil, scan finds each import from outside the
-// module that is not in allowed. It also gives the set of these imports.
+// module that is not in allowed. It also gives the set of all imports from
+// outside the module.
 func scan(root string, allowed map[string]bool) ([]finding, map[string]bool, error) {
 	return scanWith(root, allowed, filepath.WalkDir)
 }
@@ -1078,7 +1081,8 @@ func transportForms(lit *ast.CompositeLit) []string {
 // module. The scan finds only the forms that the tables and cases of scanFile
 // list. A child process is not in the scan: os/exec, os.StartProcess or
 // syscall.ForkExec. A command can open a connection that the scan does not
-// see.
+// see. The test also fails on each import from outside the module that is not
+// on release-imports.txt. It fails on each form problem of that file too.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
 	lines, list := loadList(t, "release-imports.txt")
 	found, seen, err := scan(moduleRoot(t), list)
