@@ -513,8 +513,9 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTU18_SigtermHelper$")
-	// The child ends with os.Exit, so its cleanup does not run. GOTMPDIR wins
-	// over TMPDIR, so both put its files in tmp, which the parent removes.
+	// The child ends with os.Exit, so its cleanup does not run.
+	// t.TempDir uses GOTMPDIR before TMPDIR. The test sets both to tmp,
+	// so the child makes its files in tmp, and the parent removes tmp.
 	tmp := t.TempDir()
 	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", "GOTMPDIR="+tmp, "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
