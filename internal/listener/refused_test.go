@@ -376,8 +376,8 @@ func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 
 // T-S-22: the caps of a server read a clock that runs from the start of the
 // server. The test moves the start back one hour and reads the clock. The
-// clock must be at least 1 h and at most 1 h plus the time since the read of
-// the wall clock before it.
+// clock must be 1 h or more. It must not exceed 1 h plus the time since an
+// earlier read of the wall clock.
 func TestTS22ServerClockRuns(t *testing.T) {
 	before := time.Now()
 	d := monotonicSince(time.Now().Add(-time.Hour))()
