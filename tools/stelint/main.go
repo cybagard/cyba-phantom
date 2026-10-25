@@ -25,14 +25,17 @@
 // comment.
 //
 // For the sentence rule, some comments have the go/ast directive form, and
-// isDirective does not know them. The form is "//", a name of a-z and 0-9, a
-// colon, and one of a-z and 0-9. A token is such a comment with no space after
-// "//". The text after the colon is part of the token. Spaces at the line end
-// do not count. A token adds no words. On a line of its own, it does not end
-// the text. The "//" lines before and after it are one text. This does not hold
-// for a text that starts after code, with the token at another column. After
-// code, the code ends the text. A comment with more text, such as "//export F",
-// is ordinary comment text.
+// isDirective does not know them. The form is "//", a name of a-z and 0-9, and
+// a colon. After the colon come a-z, 0-9, "," and "_", at least one. A token
+// is such a comment. Word breaks at the line end do not count. On a line of
+// its own, a token does not end the text. The "//" lines before and after it
+// are one text. In a text that starts after code, a token at another column
+// ends the text. After code, the code ends the text. A "//" line of the same
+// text can come directly after a token, also a blank "//" line. Then the token
+// counts as one word. Otherwise it adds no words. A run of adjacent token lines
+// can start the text. If a "//" text line follows the run directly, each token
+// of the run counts. A comment with more text or other characters is ordinary
+// comment text. Examples are "//export F" and "//a:bX".
 //
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
@@ -41,15 +44,15 @@
 //
 // # Sentences
 //
-// Adjacent "//" lines that each start their line are one text. A blank "//"
-// line, a line of code or a directive ends that text. A "//" comment after
-// code starts a text. A "//" line that starts the next line continues it, when
-// it starts at the same column. Each next line at that column also continues
-// it. A tab moves to the next multiple of 4 columns. A line at another column
-// starts a new text. In a text that starts after code, the indent of a line
-// does not make a code block. A fence of three backticks still does. Each
-// "/* */" comment is also a text of its own. In it the indent does not count.
-// A "*" at the start of a line is removed.
+// Adjacent "//" lines that each start their line are one text. A line of code
+// or a directive ends that text. A blank "//" line ends a paragraph, but not
+// the text. A "//" comment after code starts a text. A "//" line that starts
+// the next line continues it, when it starts at the same column. Each next
+// line at that column also continues it. A tab moves to the next multiple of
+// 4 columns. A line at another column starts a new text. In a text that starts
+// after code, the indent of a line does not make a code block. A fence of
+// three backticks still does. Each "/* */" comment is also a text of its own.
+// In it the indent does not count. A "*" at the start of a line is removed.
 //
 // A sentence ends at ".", "?" or "!" before a space, a line end or the end of
 // the text. It also ends at a blank line, a heading, a list item, and the
@@ -73,13 +76,21 @@
 // it starts with a list marker. A fence of three backticks also makes a code
 // block. stelint does not count code.
 //
-// A word is a run of characters between spaces. A space is each rune for
-// which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
-// U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. A code
-// span in backticks is one word, also when it has spaces. A "." in a code span
-// does not end a sentence. In a Markdown link, only the link text counts. A
-// link whose URL has a space is not a link. A backtick or a link with no
-// closing mark is an ordinary character.
+// A word is a run of characters between word breaks. A space is each rune
+// for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
+// U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. Each space
+// is a word break. Five more classes of rune are word breaks. Three are
+// control runes (category Cc), format runes (category Cf, such as U+200B) and
+// private-use runes (category Co). The other two are the variation selectors,
+// such as U+FE0F, and the other default-ignorable runes, such as U+034F. Most
+// of these classes render no gap. A word break at such a rune makes the hidden
+// words count. The tab (category Cc) and U+3164 (default-ignorable) are spaces
+// and are also in one of these classes. Only a space, a line end or the end of
+// the text ends a sentence after an end mark. So "end.<U+200B>next" is not a
+// sentence end. A code span in backticks is one word, also when it has spaces.
+// A "." in a code span does not end a sentence. In a Markdown link, only the
+// link text counts. A link whose URL has a word break is not a link. A
+// backtick or a link with no closing mark is an ordinary character.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So

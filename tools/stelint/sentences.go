@@ -22,7 +22,7 @@ type textLine struct {
 	text string
 	line int
 	// noCode is true when the line is in a text that starts after code. Its
-	// indent does not make a code block.
+	// indent does not make a code block. A token line has noCode false.
 	noCode bool
 }
 
@@ -95,24 +95,30 @@ func (t target) changedBreak(g []textLine) bool {
 }
 
 // isASTDirective reports whether a "//" comment is a go/ast directive token.
-// It starts with "//", a name of a-z and 0-9, a colon, and one of a-z and 0-9.
-// It has no space rune after "//", except at the end. A space is a rune for
-// which isBlank is true.
+// isASTDirective ignores the word breaks at the end. The comment starts with
+// "//", a name of a-z and 0-9, and a colon. After the colon, each byte is a-z,
+// 0-9, "," or "_", and there is at least one. Any other byte makes the comment
+// ordinary text.
 func isASTDirective(lit string) bool {
 	s, ok := strings.CutPrefix(lit, "//")
 	if !ok {
 		return false
 	}
-	s = strings.TrimRightFunc(s, isBlank)
-	if strings.IndexFunc(s, isBlank) >= 0 {
-		return false
-	}
+	s = strings.TrimRightFunc(s, isWordBreak)
 	name := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
 	i := 0
 	for i < len(s) && name(s[i]) {
 		i++
 	}
-	return i > 0 && i+1 < len(s) && s[i] == ':' && name(s[i+1])
+	if i == 0 || i+1 >= len(s) || s[i] != ':' {
+		return false
+	}
+	for _, c := range []byte(s[i+1:]) {
+		if !name(c) && c != ',' && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // commentGroups returns the text of the comments of src. A run of "//"
@@ -123,11 +129,14 @@ func isASTDirective(lit string) bool {
 // the group. A line of a group that starts after code has noCode set. So its
 // indent does not make a code block. Each "/* */" comment is a group of its
 // own. A directive ends a group. A comment that isDirective does not know, and
-// that is only a go/ast directive token, adds no words. On a line of its own,
-// it does not end the group. The next "//" line is adjacent to the line before
-// it. This does not hold for a group that starts after code, with the token at
-// another column. After code, the code ends the group. With more text, the
-// comment is ordinary comment text.
+// that is only a go/ast directive token, is a token. On a line of its own, a
+// token does not end the group. In a group that starts after code, a token at
+// another column ends the group. After code, the code ends the group. With more
+// text, the comment is ordinary comment text. A "//" line of the group can come
+// directly after a token, also a blank "//" line. Then the token counts as one
+// word. Otherwise it adds no words. A token line has noCode false. A run of
+// adjacent token lines can start the group. If a "//" text line follows the run
+// directly, each token of the run counts.
 // scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
@@ -138,6 +147,7 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 
 	var (
 		cur      []textLine
+		tokens   []textLine // tokens after cur, or before it when cur is nil
 		prevEnd  int
 		trail    bool // cur starts with a comment after code
 		trailCol int
@@ -147,6 +157,7 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 			groups = append(groups, cur)
 			cur = nil
 		}
+		tokens = nil
 	}
 	for {
 		pos, tok, lit := s.Scan()
@@ -170,13 +181,18 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 		before := lines[p.Line-1][:min(p.Column-1, len(lines[p.Line-1]))]
 		col := width(before)
 		if isASTDirective(lit) {
-			// The token adds no words. After code, the code ends the text.
-			// On a line of its own, the text goes on past the token.
-			if strings.TrimSpace(before) == "" && cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol) {
-				prevEnd = p.Line
-			} else {
+			// After code, the code ends the text. On a line of its own, the
+			// text goes on past the token. The token counts when it does.
+			if strings.TrimSpace(before) != "" {
+				flush()
+				continue
+			}
+			adjacent := prevEnd == p.Line-1
+			if !adjacent || cur != nil && trail && col != trailCol {
 				flush()
 			}
+			tokens = append(tokens, tl)
+			prevEnd = p.Line
 			continue
 		}
 		switch {
@@ -186,10 +202,16 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 			cur, trail, trailCol = []textLine{tl}, true, col
 		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol):
 			tl.noCode = trail
+			cur = append(cur, tokens...)
+			tokens = nil
 			cur = append(cur, tl)
 		default:
+			pending := tokens
+			if cur != nil || prevEnd != p.Line-1 {
+				pending = nil
+			}
 			flush()
-			cur, trail = []textLine{tl}, false
+			cur, trail = append(pending, tl), false
 		}
 		prevEnd = p.Line
 	}
@@ -300,7 +322,7 @@ func paragraphs(g []textLine) []*para {
 // form. The line starts with "Signed-off-by:" or "Co-authored-by:", in any
 // case. A space, a name of 1 to 20 words, a space and an address in "<" and ">"
 // follow. The address ends the line. The name has no "<" or ">". The address
-// has one "@" and no space, "<" or ">".
+// has one "@", and no word break, "<" or ">".
 func isTrailer(t string) bool {
 	for _, p := range []string{"signed-off-by:", "co-authored-by:"} {
 		if len(t) < len(p) || !strings.EqualFold(t[:len(p)], p) {
@@ -315,11 +337,11 @@ func isTrailer(t string) bool {
 			return false
 		}
 		name, addr := rest[:i-1], rest[i+1:len(rest)-1]
-		words := len(strings.FieldsFunc(name, isBlank))
-		return words >= 1 && words <= 20 && strings.TrimFunc(name, isBlank) == name &&
+		words := len(strings.FieldsFunc(name, isWordBreak))
+		return words >= 1 && words <= 20 && strings.TrimFunc(name, isWordBreak) == name &&
 			!strings.Contains(name, ">") &&
 			strings.Count(addr, "@") == 1 && !strings.ContainsAny(addr, "<>") &&
-			strings.IndexFunc(addr, isBlank) < 0
+			strings.IndexFunc(addr, isWordBreak) < 0
 	}
 	return false
 }
@@ -382,13 +404,29 @@ func (p *para) add(text string, line int) {
 
 // isBlank reports whether a rune is a space for the sentence rule. It is a
 // space when unicode.IsSpace is true. It is also a space for U+115F, U+1160,
-// U+2800, U+3164, U+FFA0 and U+1D159, which render blank.
+// U+2800, U+3164, U+FFA0 and U+1D159, which render blank. A sentence end needs
+// such a space. isWordBreak is the wider rule for the end of a word.
 func isBlank(r rune) bool {
 	switch r {
 	case '\u115F', '\u1160', '\u2800', '\u3164', '\uFFA0', '\U0001D159':
 		return true
 	}
 	return unicode.IsSpace(r)
+}
+
+// isWordBreak reports whether a rune breaks a word. It does for six classes.
+// The first is the runes of isBlank. The second is control runes (category
+// Cc). The third is format runes (category Cf, for example U+200B). The fourth
+// is private-use runes (category Co). The fifth is the variation selectors. The
+// sixth is the other default-ignorable runes, for example U+034F. Most of these
+// classes render no gap. A word break at such a rune makes the hidden words
+// count. Only the runes of isBlank are spaces. The tab (category Cc) and
+// U+3164 (default-ignorable) are spaces and are also in one of the other five
+// classes. Only a space, a line end or the end of the text ends a sentence
+// after an end mark.
+func isWordBreak(r rune) bool {
+	return isBlank(r) || unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co,
+		unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
 }
 
 // spaceAt reports whether the rune that starts at byte i of b is a space, as
@@ -443,12 +481,16 @@ func (p *para) long() []sentence {
 		}
 		return tick
 	}
-	// nextStop is the index of the first ")" or space from index i, or len(b).
+	// nextStop is the index of the first ")" or word break from index i. If
+	// there is none, it is len(b).
 	nextStop := func(i int) int {
 		if stop < i {
 			stop = i
-			for stop < len(b) && b[stop] != ')' && !spaceAt(b, stop) {
-				_, n := utf8.DecodeRune(b[stop:])
+			for stop < len(b) && b[stop] != ')' {
+				r, n := utf8.DecodeRune(b[stop:])
+				if isWordBreak(r) {
+					break
+				}
 				stop += n
 			}
 		}
@@ -457,7 +499,7 @@ func (p *para) long() []sentence {
 	for i := 0; i < len(b); {
 		c, n := utf8.DecodeRune(b[i:])
 		switch {
-		case isBlank(c):
+		case isWordBreak(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
 			startWord(i)
