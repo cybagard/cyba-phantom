@@ -11,8 +11,8 @@
 // "<key_id> <base64 seed>" and a newline. keygen never writes over a file. It
 // prints the public key line "<key_id> <base64>" first, then it makes the key
 // file. That line is one line of a trust file. keygen never prints the private
-// key. If keygen cannot print the line, it makes no key file. Of the outputs,
-// keygen refuses only the null device. It cannot detect another output that
+// key. If keygen cannot print the line, it makes no key file. For its stdout,
+// keygen refuses only the null device. It cannot detect another stdout that
 // drops the line. A line printed before a failure is not valid. When keygen
 // exits 1, the vendor discards the printed line.
 //

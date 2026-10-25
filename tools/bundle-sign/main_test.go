@@ -53,7 +53,7 @@ func tempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(abs) })
 	if checkKeyDir(filepath.Join(abs, "k.key")) != nil {
-		t.Fatalf("test directory %s is not usable: each parent of the checkout must belong to you or root, with no group or other write bit", abs)
+		t.Fatalf("test directory %s is not usable: each directory from / to the test directory must belong to you or root, with no group or other write bit", abs)
 	}
 	return abs
 }
