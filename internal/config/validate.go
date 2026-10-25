@@ -17,7 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
 )
@@ -285,14 +284,13 @@ func checkFetchURL(_ *loader, raw string) string {
 	return d
 }
 
+// emailRule is the fixed text for a character outside 0x21-0x7E.
+const emailRule = "the address must have only printable ASCII characters 0x21-0x7E"
+
+// checkEmail accepts one address of printable ASCII characters 0x21-0x7E.
 func checkEmail(_ *loader, raw string) string {
-	if strings.ContainsAny(raw, "\r\n") {
-		return "the address must not contain CR or LF"
-	}
-	if strings.ContainsFunc(raw, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
-	}) {
-		return "the address must not contain a control or format character"
+	if strings.ContainsFunc(raw, func(r rune) bool { return r < 0x21 || r > 0x7e }) {
+		return emailRule
 	}
 	a, err := mail.ParseAddress(raw)
 	if err != nil || a.Address != raw {
@@ -619,10 +617,12 @@ func checkStorePath(l *loader, raw string) string {
 // cacheConflict compares it with the other state directories.
 func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw) }
 
-// cacheConflict returns a detail if the acme.cache_dir value p is in or above a directory that the
-// sensor uses for other files (SEC-21). It compares the path text only. A key that is not in vals
-// failed its own check, so it is skipped.
+// cacheConflict returns a detail if the acme.cache_dir value p is in or above
+// a directory for other files (SEC-21). It compares the path text only.
+// It folds A-Z with foldASCII. A key that is not in vals failed its own
+// check, so it is skipped.
 func cacheConflict(l *loader, vals map[string]Value, p string) string {
+	p = foldASCII(p)
 	for _, k := range []string{"tlog.dir", "bundle.path"} {
 		v, ok := vals[k]
 		if !ok {
@@ -632,13 +632,13 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 		if k == "bundle.path" {
 			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
 		}
-		if inDir(p, v.Str) || inDir(v.Str, p) {
+		if s := foldASCII(v.Str); inDir(p, s) || inDir(s, p) {
 			return "the path must not be in or above " + name
 		}
 	}
 	// checkCacheDir already refuses the only path above these (the state directory), so no test reaches inDir(s, p).
 	for _, d := range []string{"keys", "checkpoints"} {
-		if s := filepath.Join(l.stateRoot, d); inDir(p, s) || inDir(s, p) {
+		if s := foldASCII(filepath.Join(l.stateRoot, d)); inDir(p, s) || inDir(s, p) {
 			return "the path must not be in or above the " + d + " directory"
 		}
 	}
@@ -763,8 +763,10 @@ func inDir(p, d string) bool {
 
 // storeConflict returns a detail if the store.path value p is in a directory that the sensor
 // uses for other files, or is one of its state files (SEC-20). It compares the path text only.
+// It folds the letters A-Z to a-z with foldASCII.
 // A key that is not in vals failed its own check, so it is skipped.
 func storeConflict(l *loader, vals map[string]Value, p string) string {
+	p = foldASCII(p)
 	for _, k := range []string{"tlog.dir", "acme.cache_dir", "bundle.path"} {
 		v, ok := vals[k]
 		if !ok {
@@ -774,17 +776,17 @@ func storeConflict(l *loader, vals map[string]Value, p string) string {
 		if k == "bundle.path" {
 			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
 		}
-		if inDir(p, v.Str) {
+		if inDir(p, foldASCII(v.Str)) {
 			return "the path must not be in " + name
 		}
 	}
 	for _, d := range []string{"keys", "checkpoints"} {
-		if inDir(p, filepath.Join(l.stateRoot, d)) {
+		if inDir(p, foldASCII(filepath.Join(l.stateRoot, d))) {
 			return "the path must not be in the " + d + " directory"
 		}
 	}
 	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
-		if p == filepath.Join(l.stateRoot, f) {
+		if p == foldASCII(filepath.Join(l.stateRoot, f)) {
 			return "the path must not be " + f
 		}
 	}
