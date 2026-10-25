@@ -27,7 +27,8 @@ func membersText(n int) string {
 	return membersTextOf(n, func(i int) string { return strconv.Itoa(i) })
 }
 
-// membersTextOf is membersText with the JSON text of each value from val.
+// membersTextOf returns the JSON text of n short members. val(i) gives the
+// JSON text of the value of member i.
 func membersTextOf(n int, val func(i int) string) string {
 	parts := make([]string, n)
 	for i := range parts {
@@ -135,10 +136,10 @@ func TestTS24_DetailCountBeforeNames(t *testing.T) {
 	}
 }
 
-// T-S-24: a detail with two bad names gives one error each time. The names are
-// tested in sorted order, so the empty name comes first. ParseDetail and
-// Detail.JSON are called 1 000 times, because map order is random. The check
-// makes no allocation.
+// T-S-24: a detail with two bad names gives the same error each time.
+// Detail.check tests the names in sorted order, so the empty name comes first.
+// The test calls ParseDetail and Detail.JSON 1 000 times, because map order is
+// random. For 8 valid members, Detail.check makes no allocation.
 func TestTS24_DetailNameErrorOrder(t *testing.T) {
 	const want = "event: detail name is empty or too long"
 	d := Detail{"": Int(0), "胁0": Int(0)}
@@ -172,10 +173,10 @@ func TestTS24_NewEventNoCopyAboveCap(t *testing.T) {
 	}
 }
 
-// T-S-24: ParseDetail refuses the ninth member while it decodes. The test
-// compares two flat texts under 2 KB: 9 members and 150 members. The second
-// makes no more allocations than the first. The test runs with int, string and
-// bool values. The stop does not depend on the type of the ninth value.
+// T-S-24: ParseDetail refuses the ninth member while it decodes. For each
+// type of value, the test compares two flat texts under 2 KB: 9 members and
+// 150 members. The second makes no more allocations than the first. The
+// types are int, string and bool.
 func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
 	for kind, val := range map[string]func(int) string{
 		"int":    strconv.Itoa,
@@ -202,8 +203,9 @@ func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
 }
 
 // T-S-24: ParseDetail gives the member error only when it reads a ninth name
-// that the decoder accepts. A text of 8 members and then a fault gets the
-// text error. A text of 9 valid members gets the member error.
+// that the decoder accepts. A fault directly after 8 members gets the text
+// error. A text of 9 valid members gets the member error. An empty ninth name
+// gets the member error, also when a fault comes after it.
 func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 	const errText = "event: detail text is not a flat object"
 	eight := strings.TrimSuffix(membersText(8), "}")

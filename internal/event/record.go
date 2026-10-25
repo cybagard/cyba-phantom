@@ -126,8 +126,8 @@ var errDetailMembers = errors.New("event: detail has more than " + strconv.Itoa(
 // It does no encoding. The count comes first, so the loop never sees a map of
 // more than maxDetailMembers members. Each member needs at least len(name)+4
 // bytes of JSON text: two quotes, a colon and a value of one byte. A string
-// value adds its own length. It tests the names in sorted order, so one map
-// always gives one error. The sorted names are in an array on the stack.
+// value adds its own length. It tests the names in sorted order, so a map
+// always gives the same error. The sorted names are in an array on the stack.
 func (d Detail) check() error {
 	if len(d) > maxDetailMembers {
 		return errDetailMembers
