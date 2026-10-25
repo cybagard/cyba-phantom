@@ -448,8 +448,8 @@ func walkError(root, p string, err error) error {
 	return err
 }
 
-// skippedDir tells if rel, a slash path below the scan root, is in a folder
-// that scan skips: testdata, or a folder that starts with "." or "_".
+// skippedDir tells if rel is in a folder that scan skips. The path rel is below
+// the scan root. A skipped folder is testdata or starts with "." or "_".
 func skippedDir(rel string) bool {
 	dir := path.Dir(rel)
 	if dir == "." {
