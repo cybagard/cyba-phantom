@@ -276,7 +276,8 @@ func TestTS15UnsafeFileIsRefused(t *testing.T) {
 			}
 			f.refused(t, "events.db", name, ruleLinks)
 		})
-		for _, mode := range []os.FileMode{0o640, 0o604, 0o666} {
+		for _, mode := range []os.FileMode{0o640, 0o604, 0o666,
+			0o600 | os.ModeSetuid, 0o600 | os.ModeSetgid, 0o600 | os.ModeSticky} {
 			t.Run(name+" mode "+mode.String(), func(t *testing.T) {
 				f := newFixture(t)
 				path := filepath.Join(f.state, name)

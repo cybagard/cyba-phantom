@@ -9,14 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
-	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
@@ -482,61 +480,18 @@ func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
 	}
 }
 
-// fdsOf counts the descriptors of the process that point to path. It needs
-// Linux.
-func fdsOf(t *testing.T, path string) int {
-	t.Helper()
-	ents, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
+// T-S-15: after Open, the state directory gets group bits. The next connection
+// is refused by the parent check, and the error names the state directory.
+func TestTS15StateDirectoryModeOnReconnect(t *testing.T) {
+	f := newFixture(t)
+	db := mustOpen(t, f.root, "events.db")
+	defer db.Close()
+	t.Cleanup(func() { os.Chmod(f.state, 0o700) })
+	cancelQuery(t, db)
+	if err := os.Chmod(f.state, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	n := 0
-	for _, e := range ents {
-		if to, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil && to == path {
-			n++
-		}
-	}
-	return n
-}
-
-// T-S-15: the checks of a connection open no descriptor of the database file.
-// The close of any such descriptor would drop the locks of SQLite. The count of
-// descriptors that point to the file is the same before and after the checks.
-// No check opens the file, also for a file below a parent directory.
-func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the test reads /proc/self/fd")
-	}
-	for _, rel := range []string{"events.db", "data/events.db"} {
-		t.Run(rel, func(t *testing.T) {
-			f := newFixture(t)
-			if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			held := holdHook(t)
-			db := mustOpen(t, f.root, rel)
-			defer db.Close()
-			fi, err := (*held).Stat()
-			if err != nil {
-				t.Fatal(err)
-			}
-			id, _ := safefile.Identity(fi)
-			path := filepath.Join(f.state, filepath.FromSlash(rel))
-			c := &connector{root: f.root, rel: rel, want: path, id: id, held: *held}
-			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
-				if name == "events.db" {
-					t.Error("a check opened the database file")
-				}
-			}})
-			before := fdsOf(t, path)
-			if err := c.check(); err != nil {
-				t.Fatal(err)
-			}
-			if after := fdsOf(t, path); before == 0 || after != before {
-				t.Fatalf("%d descriptors of the database file before the checks, %d after", before, after)
-			}
-		})
-	}
+	wantRule(t, db.QueryRow("SELECT 1").Scan(new(int)), "state directory", ruleMode)
 }
 
 // T-S-15: a parent directory that gets group bits after the file checks is

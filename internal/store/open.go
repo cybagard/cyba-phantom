@@ -308,7 +308,8 @@ func stateBase(root *os.Root) (string, error) {
 
 // refusal maps an error of package safefile to a fixed store rule for name. A
 // directory that is a link, is not a directory, or is absent breaks ruleParent.
-// A file that is a link or is not a regular file breaks ruleType.
+// A link that replaces a part while the root opens is a change, so it gives
+// ruleChanged. A file that is a link or is not a regular file breaks ruleType.
 func refusal(name string, err error, dir bool) error {
 	switch {
 	case errors.Is(err, safefile.ErrOwner):
@@ -331,7 +332,9 @@ func refusal(name string, err error, dir bool) error {
 
 // checkParents checks the state directory and each directory above rel with
 // the rule dirRule. The package does not say which directory failed. So on an
-// error the check runs again for each prefix of rel, to find the first one.
+// error the check runs again for each prefix of rel, to find the first one. If
+// no prefix fails at the second check, the directories changed between the two
+// checks. Then the error names the state directory.
 func checkParents(root *os.Root, rel string) error {
 	err := safefile.CheckParents(root, rel, dirRule)
 	if err == nil {
