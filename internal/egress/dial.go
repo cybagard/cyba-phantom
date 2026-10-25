@@ -20,6 +20,10 @@ func Dialer(timeout time.Duration) *net.Dialer {
 	return &net.Dialer{Timeout: timeout, ControlContext: control}
 }
 
+// errSyslogInput is the error for a bad input to SyslogDialer.
+var errSyslogInput = errors.New("egress: syslog exception needs a udp or tcp " +
+	"scheme and a loopback address with a port")
+
 // SyslogDialer gives a dialer for one syslog sink. The dialer permits the one
 // address and port of the sink only on the networks of scheme. Every other
 // dial gets the address rule. The scheme is "udp" or "tcp". The address is in
@@ -30,19 +34,19 @@ func SyslogDialer(
 	a := addr.Addr()
 	loopback := a.Is4() && loopback4.Contains(a) || a == netip.IPv6Loopback()
 	if (scheme != "udp" && scheme != "tcp") || !loopback || addr.Port() == 0 {
-		return nil, errors.New("egress: syslog exception needs a udp or tcp " +
-			"scheme and a loopback address with a port")
+		return nil, errSyslogInput
 	}
-	net4, net6 := scheme+"4", scheme+"6"
-	hook := func(
+	d := Dialer(timeout)
+	rule := d.ControlContext
+	d.ControlContext = func(
 		ctx context.Context, network, address string, c syscall.RawConn,
 	) error {
-		if network == net4 || network == net6 {
+		if proto, ok := protocol(network); ok && proto == scheme {
 			if ap, err := netip.ParseAddrPort(address); err == nil && ap == addr {
 				return nil
 			}
 		}
-		return control(ctx, network, address, c)
+		return rule(ctx, network, address, c)
 	}
-	return &net.Dialer{Timeout: timeout, ControlContext: hook}, nil
+	return d, nil
 }

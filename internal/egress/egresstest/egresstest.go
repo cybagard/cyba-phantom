@@ -54,7 +54,8 @@ func Dialer(t testing.TB, timeout time.Duration, permit ...netip.Addr) *net.Dial
 	return d
 }
 
-// Names is a set of host names with the addresses that a Resolver gives.
+// Names is a set of host names with the addresses that a Resolver gives. Make
+// it with NewNames. Set and Resolver panic on a zero Names.
 type Names struct {
 	mu    sync.Mutex
 	m     map[string][]netip.Addr
@@ -83,6 +84,7 @@ func NewNames(t testing.TB) *Names {
 // Set makes addrs the answers for name. Write name as a full name with a dot
 // at the end, in lower case. A later Set replaces the answers.
 func (n *Names) Set(name string, addrs ...netip.Addr) {
+	n.mustBeMade()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.m[name] = slices.Clone(addrs)
@@ -90,6 +92,7 @@ func (n *Names) Set(name string, addrs ...netip.Addr) {
 
 // Resolver gives a resolver that answers from n with no network.
 func (n *Names) Resolver() *net.Resolver {
+	n.mustBeMade()
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(context.Context, string, string) (net.Conn, error) {
@@ -100,6 +103,14 @@ func (n *Names) Resolver() *net.Resolver {
 			go n.serve(server)
 			return client, nil
 		},
+	}
+}
+
+// mustBeMade panics when NewNames did not make n. A zero Names skips the
+// check of testing.Testing, and its map is nil.
+func (n *Names) mustBeMade() {
+	if n.m == nil {
+		panic("egresstest: Names must come from NewNames")
 	}
 }
 

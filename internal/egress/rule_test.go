@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// The refused prefixes of the rule, written again here on purpose. The test
-// does not read the table of the code.
+// refusedPrefixes repeats the refused prefixes of the rule on purpose. The
+// test does not read the table of the code.
 var refusedPrefixes = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
 	"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
@@ -25,8 +25,8 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	return a
 }
 
-// wantNeighbour tells whether an address outside a prefix is permitted.
-func wantNeighbour(a netip.Addr) bool {
+// wantNeighbor tells if the rule permits an address outside a prefix.
+func wantNeighbor(a netip.Addr) bool {
 	if a.Is6() && !netip.MustParsePrefix("2000::/3").Contains(a) {
 		return false
 	}
@@ -48,12 +48,12 @@ func TestTS21RuleRefusesEachPrefixAtItsEdges(t *testing.T) {
 			}
 		}
 		if below := first.Prev(); below.IsValid() {
-			if got := Permitted(below); got != wantNeighbour(below) {
+			if got := Permitted(below); got != wantNeighbor(below) {
 				t.Errorf("%s: below %s: got %v", s, below, got)
 			}
 		}
 		if above := last.Next(); above.IsValid() {
-			if got := Permitted(above); got != wantNeighbour(above) {
+			if got := Permitted(above); got != wantNeighbor(above) {
 				t.Errorf("%s: above %s: got %v", s, above, got)
 			}
 		}

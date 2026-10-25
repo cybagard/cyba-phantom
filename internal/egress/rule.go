@@ -9,7 +9,7 @@ import (
 )
 
 // errRefused is the error that each refusal returns.
-var errRefused = errors.New("connection refused by the address rule")
+var errRefused = errors.New("egress rule refuses the address")
 
 // ErrRefused is the error for each refused address. Its text has no address,
 // name or port, so a client can log it. A change to this variable does not
@@ -17,8 +17,8 @@ var errRefused = errors.New("connection refused by the address rule")
 // refusal.
 var ErrRefused = errRefused
 
-// refused4 are the refused IPv4 prefixes. Each other IPv4 address is
-// permitted.
+// refused4 are the refused IPv4 prefixes. The rule permits each other IPv4
+// address.
 var refused4 = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("10.0.0.0/8"),
@@ -37,8 +37,8 @@ var refused4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
-// permitted6 is the only permitted IPv6 range. Every other IPv6 address is
-// refused, which includes IPv4-compatible and NAT64 addresses.
+// permitted6 is the only permitted IPv6 range. The rule refuses every other
+// IPv6 address, with the IPv4-compatible and NAT64 addresses.
 var permitted6 = netip.MustParsePrefix("2000::/3")
 
 // refused6 are the refused prefixes inside permitted6.
