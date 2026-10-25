@@ -25,14 +25,15 @@
 // comment.
 //
 // For the sentence rule, some comments have the go/ast directive form, and
-// isDirective does not know them. The form is "//", a name of a-z and 0-9, a
-// colon, and one of a-z and 0-9. A token is such a comment with no space after
-// "//". The text after the colon is part of the token. Spaces at the line end
-// do not count. A token adds no words. On a line of its own, it does not end
-// the text. The "//" lines before and after it are one text. This does not hold
-// for a text that starts after code, with the token at another column. After
-// code, the code ends the text. A comment with more text, such as "//export F",
-// is ordinary comment text.
+// isDirective does not know them. The form is "//", a name of a-z and 0-9, and
+// a colon. After the colon come a-z, 0-9, "," and "_", at least one. A token
+// is such a comment. Spaces at the line end do not count. On a line of its
+// own, a token does not end the text. The "//" lines before and after it are
+// one text. This does not hold for a text that starts after code, with the
+// token at another column. After code, the code ends the text. A token adds no
+// words when no "//" text line of the text comes after it. Otherwise each
+// token before that line counts as one word. A comment with more text or other
+// characters is ordinary comment text. Examples are "//export F" and "//a:bX".
 //
 // The count is for the full source line, with the indent. A tab moves to the
 // next multiple of 4 columns, as "expand -t4" does. Each other character is
@@ -73,9 +74,14 @@
 // it starts with a list marker. A fence of three backticks also makes a code
 // block. stelint does not count code.
 //
-// A word is a run of characters between spaces. A space is each rune for
-// which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
-// U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. A code
+// A word is a run of characters between word breaks. A word break is each rune
+// for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
+// U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. Three more
+// kinds of rune are word breaks, as they render no gap. These are format
+// runes (category Cf, such as U+200B, U+2060, U+180E, U+00AD and U+1D173),
+// private-use runes (category Co) and U+17B5. They are not spaces. A sentence
+// end needs a space, a line end or the end of the text. So
+// "end.<U+200B>next" is not a sentence end. A code
 // span in backticks is one word, also when it has spaces. A "." in a code span
 // does not end a sentence. In a Markdown link, only the link text counts. A
 // link whose URL has a space is not a link. A backtick or a link with no
