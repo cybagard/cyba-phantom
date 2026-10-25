@@ -298,8 +298,8 @@ func TestTS21TestDialerPermitsOnlyNamedLoopback(t *testing.T) {
 	mustRefuse(t, releaseDialer, "tcp", ln.Addr().String())
 }
 
-// TestTS21ZeroNamesFailsClearly checks Set and Resolver on a zero Names. It has
-// a nil map. Both must fail with a clear message.
+// TestTS21ZeroNamesFailsClearly checks Set and Resolver on a zero Names. A
+// zero Names has a nil map. Both must fail with a clear message.
 func TestTS21ZeroNamesFailsClearly(t *testing.T) {
 	for name, use := range map[string]func(*egresstest.Names){
 		"Set":      func(n *egresstest.Names) { n.Set("a.test.", loop4) },

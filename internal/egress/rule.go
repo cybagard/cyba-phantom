@@ -38,7 +38,7 @@ var refused4 = []netip.Prefix{
 }
 
 // permitted6 is the only permitted IPv6 range. The rule refuses every other
-// IPv6 address, with the IPv4-compatible and NAT64 addresses.
+// IPv6 address. These include the IPv4-compatible and NAT64 addresses.
 var permitted6 = netip.MustParsePrefix("2000::/3")
 
 // refused6 are the refused prefixes inside permitted6.

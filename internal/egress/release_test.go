@@ -431,9 +431,9 @@ var dialImports = []string{
 	"golang.org/x/net/websocket", "golang.org/x/crypto/ssh", "github.com/miekg/dns",
 }
 
-// dialerHooks are the fields of net.Dialer, http.Transport and http.Client
-// that hold the address rule or the proxy. Code outside internal/egress must
-// not write them.
+// dialerHooks are the fields of net.Dialer, http.Transport, http.Client and
+// httputil.ReverseProxy that hold the address rule or the proxy. Code outside
+// internal/egress must not write them.
 var dialerHooks = []string{
 	"ControlContext", "Control", "DialContext", "DialTLSContext", "DialTLS",
 	"Proxy", "Transport",
@@ -588,8 +588,8 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 
 	// pointed holds the types that follow a star. lits holds the type of each
 	// composite literal. newCall holds the type in each call of new. elided
-	// holds the literals with no type, which a slice, array or map literal
-	// types by its element type.
+	// holds the literals with no type. Each one gets the element type of the
+	// slice, array or map literal that holds it.
 	pointed := map[ast.Expr]bool{}
 	lits := map[ast.Expr]*ast.CompositeLit{}
 	newCall := map[ast.Expr]*ast.CallExpr{}
@@ -1107,7 +1107,8 @@ func TestTS21ScanWalkError(t *testing.T) {
 		"root that is gone":  {dir, fs.ErrNotExist, true},
 		"other error":        {filepath.Join(dir, "x"), errors.New("other"), true},
 	} {
-		// The fake walk visits the root and then reports tc.err for tc.p.
+		// The fake walk reports tc.err for tc.p. When tc.p is not the root, it
+		// visits the root first.
 		walk := func(r string, fn fs.WalkDirFunc) error {
 			if tc.p != r {
 				if err := fn(r, root, nil); err != nil {
