@@ -248,8 +248,8 @@ func TestTestsModeRuleLinesAreRules(t *testing.T) {
 	}
 }
 
-// Each fixture was checked with GNU make: "make -n perf" finds the rule,
-// or stops with "No rule to make target 'perf'".
+// GNU make agrees with each fixture. "make -n perf" finds the rule, or
+// stops with "No rule to make target 'perf'".
 func TestHasRuleMatchesMake(t *testing.T) {
 	for _, tc := range []struct {
 		name, makefile string

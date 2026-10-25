@@ -267,8 +267,8 @@ func TestCheckSpecDirLastNamedPartIsNotResolved(t *testing.T) {
 	}
 }
 
-// An argument that cannot be made absolute gives an error with the name
-// at the start, like the other errors of checkSpecDir.
+// An error from absPath starts with the argument, like the other errors
+// of checkSpecDir.
 func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if _, err := absPath(""); !errors.Is(err, fs.ErrNotExist) {
