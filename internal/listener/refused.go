@@ -49,18 +49,18 @@ func newRefusedEmitter(q *event.Queue, c *event.Counters, mono func() time.Durat
 	return &refusedEmitter{q: q, c: c, mono: mono, last: make(map[netip.Addr]time.Duration)}
 }
 
-// monotonicSince returns a clock that gives the time since now. time.Since
-// reads the monotonic clock.
-func monotonicSince() func() time.Duration {
-	start := time.Now()
+// monotonicSince returns a clock that gives the time since start. time.Since
+// reads the monotonic clock if start has a monotonic reading.
+func monotonicSince(start time.Time) func() time.Duration {
 	return func() time.Duration { return time.Since(start) }
 }
 
 // emit makes one refused event for the peer and puts it on the queue. It takes
 // the reason and the address of the connection, and no request value. A peer
 // that is not a valid *net.TCPAddr gets no event and adds one to the overflow
-// bucket. An emit over a cap adds one to the counter of its key, and no event
-// and no queue drop. The call never waits.
+// bucket. An emit over a cap makes no event and no queue drop. It adds one to
+// the counter of its key. When the counters hold 4096 keys and the key is new,
+// it adds one to the overflow bucket. The call never waits.
 func (r *refusedEmitter) emit(reason event.RefusedReason, peer net.Addr) {
 	t, ok := peer.(*net.TCPAddr)
 	if !ok {

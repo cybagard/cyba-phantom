@@ -126,6 +126,25 @@ func TestTS22TotalBucket(t *testing.T) {
 	g.want(t, 0, map[string]uint64{"192.0.2.1": 1}, 0)
 }
 
+// T-S-22: after an idle hour the bucket holds 5 tokens, not more. The clock
+// jumps, then 1000 emits of new keys give 5 events and 995 counted drops.
+func TestTS22BucketAfterIdle(t *testing.T) {
+	g := newRefusedRig(t, 1024)
+	for i := 1; i <= 5; i++ {
+		g.emit(0, fmt.Sprintf("192.0.2.%d", i))
+	}
+	g.want(t, 5, nil, 0)
+	drops := map[string]uint64{}
+	for i := range 1000 {
+		s := fmt.Sprintf("10.0.%d.%d", i>>8, i&255)
+		g.emit(time.Hour, s)
+		if i >= 5 {
+			drops[s] = 1
+		}
+	}
+	g.want(t, 5, drops, 0)
+}
+
 // T-S-22: a key that fails its window takes no token.
 func TestTS22WindowFailTakesNoToken(t *testing.T) {
 	g := newRefusedRig(t, 1024)
@@ -166,22 +185,23 @@ func TestTS22BucketRate(t *testing.T) {
 	}
 }
 
-// T-S-22, T-U-17: take 10^6 IPv6 /64 keys in 60 s at the full rate of the
-// bucket. The window map holds at most 305 entries. The counters hold at most
-// 4096 keys plus the overflow bucket. An old entry leaves the map.
+// T-S-22, T-U-17: take 5*10^5 IPv6 /64 keys in 120 s at more than the full rate
+// of the bucket. The run crosses the edge of the window, so old entries leave.
+// The window map holds at most 305 entries. The counters hold at most 4096 keys
+// plus the overflow bucket.
 func TestTS22MapBound(t *testing.T) {
-	const n = 1_000_000
+	const n = 500_000
 	g := newRefusedRig(t, 1024)
 	maxKeys := 0
 	for i := range n {
-		g.now = testWindow / n * time.Duration(i)
+		g.now = 2 * testWindow / n * time.Duration(i)
 		ip := [16]byte{0x20, 0x01, 0x0d, 0xb8, byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i), 0, 0, 0, 0, 0, 0, 0, 1}
 		g.r.emit(event.ReasonBadHello, &net.TCPAddr{IP: ip[:], Port: 443})
 		maxKeys = max(maxKeys, g.r.keys())
 	}
 	passed := len(g.q.Drain())
-	if passed < 300 || maxKeys > 305 || maxKeys != passed {
-		t.Errorf("%d events passed and the map held %d entries at most, want 300 to 305 and the same number", passed, maxKeys)
+	if passed < 600 || passed > 605 || maxKeys < 300 || maxKeys > 305 {
+		t.Errorf("%d events passed and the map held %d entries at most, want 600 to 605 and 300 to 305", passed, maxKeys)
 	}
 	counts, overflow := g.c.Snapshot()
 	var drops uint64
@@ -194,7 +214,7 @@ func TestTS22MapBound(t *testing.T) {
 	if d := g.q.Dropped(); d != (event.Dropped{}) {
 		t.Errorf("the queue counts drops %+v, want none", d)
 	}
-	g.emit(3*testWindow, "192.0.2.1")
+	g.emit(4*testWindow, "192.0.2.1")
 	if k := g.r.keys(); k != 1 {
 		t.Errorf("the map holds %d entries after a quiet 60 s, want 1", k)
 	}
@@ -346,6 +366,31 @@ func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 	}
 	if counts, _ := c.Snapshot(); counts[netip.MustParseAddr("192.0.2.1")] != 1 {
 		t.Errorf("counters %v, want one drop for 192.0.2.1", counts)
+	}
+	s.refused.emit(0, tcpAddr("192.0.2.2")) // the zero value is not a reason
+	if n := s.RefusedEventErrors(); n != 1 {
+		t.Errorf("RefusedEventErrors %d, want 1", n)
+	}
+}
+
+// T-S-22: the caps of a server read a clock that runs from the start of the
+// server. The test moves the start back one hour and reads the clock.
+func TestTS22ServerClockRuns(t *testing.T) {
+	if d := monotonicSince(time.Now().Add(-time.Hour))(); d < time.Hour {
+		t.Errorf("monotonicSince gives %v for a start one hour back, want at least 1h", d)
+	}
+	old := serverStart
+	t.Cleanup(func() { serverStart = old })
+	serverStart = func() time.Time { return time.Now().Add(-time.Hour) }
+	cert, _ := testCert(t)
+	q, c := testSinks(t, 16)
+	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
+	s, err := New(cfg, okHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := s.refused.mono(); d < time.Hour {
+		t.Errorf("the clock of the server gives %v, want at least 1h", d)
 	}
 }
 

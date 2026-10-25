@@ -33,9 +33,10 @@ type Config struct {
 	HeaderBytes int
 	// Queue takes the refused events of the server. New refuses nil.
 	Queue *event.Queue
-	// Counters takes the refused events that a cap drops. It must be the value
-	// that the Queue got from NewQueue. Then all drops of a client key add
-	// up. New refuses nil.
+	// Counters counts the refused events that the server drops. These are the
+	// events over a cap, and the emits with no valid peer address. It must
+	// be the value that the Queue got from NewQueue. Then all drops of a
+	// client key add up. New refuses nil.
 	Counters *event.Counters
 }
 
@@ -200,7 +201,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	if cfg.HeaderBytes < minHeaderBytes {
 		return nil, fmt.Errorf("listener: header bytes must be at least %d", minHeaderBytes)
 	}
-	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes, refused: newRefusedEmitter(cfg.Queue, cfg.Counters, monotonicSince())}
+	s := &Server{tls: cfg.TLS.Clone(), sem: make(chan struct{}, cfg.MaxConns), src: newSourceCap(cfg.MaxConns), rd: newReadLimit(cfg.HeaderBytes), t: t, hdrBytes: cfg.HeaderBytes, refused: newRefusedEmitter(cfg.Queue, cfg.Counters, monotonicSince(serverStart()))}
 	s.errLines.lines = make(chan struct{}, 1)
 	// http/1.1 comes first, so a client that offers both gets http/1.1. A client
 	// that offers only acme-tls/1 is a challenge client. If the list has no
@@ -359,9 +360,9 @@ func (s *Server) Close() error {
 // wait for a hijacked connection, only for its handler.
 //
 // Shutdown returns an error in three cases. In the first case, ctx ends before
-// http.Server.Shutdown finds each open connection closed or idle. Or it ends
-// before the running handlers return. net/http examines the connections at
-// intervals of up to about 0.5 s. In the second case, ctx ended before the
+// http.Server.Shutdown finds each open connection closed or idle. The same
+// holds when ctx ends before the running handlers return. net/http examines
+// the connections at intervals of up to about 0.5 s. In the second case, ctx ended before the
 // call. In the third case, a listener close gives an error. In each case
 // Shutdown closes, at the socket below TLS, each connection in the record of
 // open connections. This includes each hijacked connection. So a stalled
@@ -445,6 +446,14 @@ func (s *Server) sweep(servers []*http.Server) {
 	s.src.closeAll()
 	_ = closeServers(servers)
 }
+
+// RefusedEventErrors is the number of refused events for which NewEvent
+// returned an error. The server made no event for them.
+func (s *Server) RefusedEventErrors() uint64 { return s.refused.errs.Load() }
+
+// serverStart gives the start of the monotonic clock of the refused caps. A
+// test replaces it.
+var serverStart = time.Now
 
 // ErrorLines is the number of lines that the server wrote to its error log.
 // They include one line for each failed handshake. The log keeps no text.

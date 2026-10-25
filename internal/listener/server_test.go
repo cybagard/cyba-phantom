@@ -1371,8 +1371,8 @@ func inHTTPShutdown() bool {
 // gateCtx is a context whose Done blocks in http.Server.Shutdown until gate is
 // closed. All other callers get the Done of the embedded context at once. The
 // gate holds the Shutdown call of net/http until after the context ends. The
-// stack check is needed, because Server.Shutdown also calls Done and must not
-// block there.
+// stack of the caller tells the two cases apart, because Server.Shutdown also
+// calls Done and must not block there.
 type gateCtx struct {
 	context.Context
 	gate chan struct{}
