@@ -145,20 +145,35 @@ func listDeps(t *testing.T, root string, c buildConfig, pkgs ...string) (string,
 		}
 		t.Fatalf("go list -deps: %v", err)
 	}
+	ctx, deps, problems, err := parseDeps(string(out), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+	return ctx, deps
+}
+
+// parseDeps reads the output of go list with depFormat for the platform c. It
+// gives the build context and the packages. It also gives one text for each
+// package that listProblem refuses on a platform with completeList.
+func parseDeps(out string, c buildConfig) (string, []listedDep, []string, error) {
 	var ctx string
 	var deps []listedDep
-	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+	var problems []string
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) != 7 || (ctx != "" && f[0] != ctx) {
-			t.Fatalf("unexpected go list line %q", line)
+			return "", nil, nil, fmt.Errorf("unexpected go list line %q", line)
 		}
 		ctx = f[0]
 		if why := listProblem(f[2], f[6]); why != "" && completeList(c) {
-			t.Errorf("%s on %s: %s", f[1], c.name(), why)
+			problems = append(problems, fmt.Sprintf("%s on %s: %s", f[1], c.name(), why))
 		}
 		deps = append(deps, listedDep{f[1], f[2], f[3], f[4], f[5]})
 	}
-	return ctx, deps
+	return ctx, deps, problems, nil
 }
 
 // workspaceError gives an error when got, the value of go env GOWORK, shows a
@@ -385,8 +400,33 @@ func TestTS21ReleaseContextCheck(t *testing.T) {
 	}
 }
 
+// TestTS21ReleaseListRealError runs go list on a path that has no package.
+// parseDeps must report a problem for linux/amd64 and none for linux/386.
+func TestTS21ReleaseListRealError(t *testing.T) {
+	root := moduleRoot(t)
+	missing := modPath + "/internal/egress/testdata/nosuchpkg"
+	for _, tc := range []struct {
+		c    buildConfig
+		want int
+	}{{buildConfig{"linux", "amd64"}, 1}, {buildConfig{"linux", "386"}, 0}} {
+		args := []string{"list", "-e", "-deps", "-f", depFormat, missing}
+		out, err := goCommand(t, root, tc.c.env(), args...).Output()
+		if err != nil {
+			t.Fatalf("go list on %s: %v", tc.c.name(), err)
+		}
+		_, deps, problems, err := parseDeps(string(out), tc.c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(problems) != tc.want {
+			t.Errorf("%s: %d problems %q, want %d (deps %v)",
+				tc.c.name(), len(problems), problems, tc.want, deps)
+		}
+	}
+}
+
 // TestTS21ReleaseListCheck checks that listProblem fails on a package error
-// and on an empty folder, and that completeList names the three platforms.
+// and on an empty folder. It checks that completeList names three platforms.
 func TestTS21ReleaseListCheck(t *testing.T) {
 	for name, tc := range map[string]struct {
 		dir, errText string
