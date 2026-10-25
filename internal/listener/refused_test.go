@@ -401,7 +401,7 @@ func TestTS22ServerClockRuns(t *testing.T) {
 	}
 }
 
-// T-S-22: the production start of the clock is the time of the process. The
+// T-S-22: in production, the clock starts when New makes the server. The
 // test does not replace the start. The clock of a new server starts near zero.
 func TestTS22ProductionStart(t *testing.T) {
 	if d := time.Since(serverStart()); d < 0 || d > time.Minute {
