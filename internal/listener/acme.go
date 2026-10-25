@@ -463,18 +463,19 @@ func (a *ACME) Start(ctx context.Context) error {
 }
 
 // renewDue renews the cached certificate old of name. The renewal tries again
-// after a failure. The list of the causes that stop it is complete:
+// after a failure. If the stored certificate is missing, certmagic gets a new
+// certificate instead, with the same retries. The list of the causes that stop
+// it is complete:
 //   - it succeeds, also when the stored certificate needs no renewal now;
-//   - its retry time ends;
+//   - its retry time ends (certmagic sets 30 days as the longest);
 //   - ctx ends;
-//   - the stored certificate is missing, so certmagic does one obtain only;
-//   - the storage check fails, or the lock of the name is not acquired.
+//   - the storage check fails, with no retry;
+//   - the lock of the name fails, with no retry.
 //
-// The last two causes stop it at once, with no retry. It can run for a long
-// time, so it runs in its own goroutine. A renewal only writes the storage, so
-// on success the new certificate goes into the cache and replaces old. A
-// failure writes no line here. While it runs, a renewal of the same name at a
-// maintenance tick waits for it.
+// It can run for a long time, so it runs in its own goroutine. A renewal only
+// writes the storage, so on success the new certificate goes into the cache
+// and replaces old. A failure writes no line here. While it runs, a renewal of
+// the same name at a maintenance tick waits for it.
 func (a *ACME) renewDue(ctx context.Context, name string, old certmagic.Certificate) {
 	if err := a.cfg.RenewCertAsync(ctx, name, false); err != nil {
 		return

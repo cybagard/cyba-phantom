@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
+	"os/exec"
 	"path"
 	"slices"
 	"strings"
@@ -293,11 +295,12 @@ func BenchmarkGetCertificateTokenKeyRefused(b *testing.B) {
 	}
 }
 
-// issuerProxyRefuses reports whether the proxy function of iss refuses a request
-// to another host. It does not set a proxy in the environment. net/http reads
-// that environment one time for each process. So a test that sets it depends
-// on the order of the tests. The guard does not read the environment. The
-// environment function never gives errEgress, so it fails this check.
+// issuerProxyRefuses reports whether the proxy function of iss refuses a
+// request to another host. It does not set a proxy in the environment.
+// net/http reads that environment one time for each process. So a test that
+// sets it depends on the order of the tests. The guard does not read the
+// environment. The environment function never gives errEgress, so it fails
+// this check.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 	t.Helper()
 	if iss.HTTPProxy == nil {
@@ -310,7 +313,8 @@ func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 }
 
 func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
-	var given certmagic.Storage // the store that newTestACME made
+	// given is the store that newTestACME made.
+	var given certmagic.Storage
 	a := newTestACME(t, func(p *ACMEParams) { given = p.Storage; p.Port = 9443 })
 	cfg := a.cfg
 	wrap, _ := cfg.Storage.(*noTokenStorage)
@@ -349,16 +353,32 @@ func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 	}
 }
 
+// egressGuardChildEnv tells the test binary to run the checks of the egress
+// guard test in this process.
+const egressGuardChildEnv = "PHANTOM_TEST_EGRESS_GUARD_CHILD"
+
 // TestTS16EgressGuardRefusesOtherRequests: the guard allows the CA and refuses
-// all other requests. This test depends on the order of the tests. It sets a
-// proxy in the environment. net/http reads that environment one time for each
-// process. If an earlier test made it read the environment first, the proxy
-// is empty here. Then the check of the proxy URL in the allowed cases cannot
-// see a guard that reads the environment. That check is full when the test
-// runs alone. The refused cases catch such a guard in any order.
+// all other requests. net/http reads the proxy environment one time for each
+// process. An earlier test can make it read the environment first. Then a proxy
+// that this test sets later is not seen. So the checks run in a child process
+// of the test binary. The parent sets the proxy variables in the environment
+// of the child, and net/http reads them fresh there. A guard that reads the
+// environment then gives the proxy URL, and the child fails. The parent fails
+// when the child fails, and it prints the output of the child.
 func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
-	t.Setenv("HTTP_PROXY", "http://proxy.test:3128")
+	if os.Getenv(egressGuardChildEnv) == "" {
+		cmd := exec.Command(os.Args[0],
+			"-test.run=^TestTS16EgressGuardRefusesOtherRequests$", "-test.count=1")
+		cmd.Env = append(os.Environ(), egressGuardChildEnv+"=1",
+			"HTTPS_PROXY=http://proxy.test:3128", "HTTP_PROXY=http://proxy.test:3128",
+			"NO_PROXY=", "no_proxy=")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("the child process failed: %v\n%s", err, out)
+		}
+		t.Logf("child output:\n%s", out)
+		return
+	}
 	var mu sync.Mutex
 	var seen []string
 	a := newTestACME(t, func(p *ACMEParams) {
@@ -456,9 +476,9 @@ func TestTS16NameGateRefusesBeforeCertmagic(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -494,9 +514,9 @@ func TestTS16ACMETLSALPNForAConfiguredNameNeedsAnActiveChallenge(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -527,9 +547,9 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -792,9 +812,12 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 }
 
 func TestTS16NameGateRefusesAByteAbove0x7f(t *testing.T) {
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
-	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{"kiosk.test"}; p.Storage = cs })
+	var cs *countingStorage
+	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
+		p.Names = []string{"kiosk.test"}
+		p.Storage = cs
+	})
 	// U+212A KELVIN SIGN: a Unicode-aware ToLower maps it to "k".
 	names := []string{string(rune(0x212a)) + "iosk.test", "kiosk.testé", "\xffkiosk.test"}
 	for _, n := range names {

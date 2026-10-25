@@ -299,10 +299,9 @@ func (failingStorage) Load(context.Context, string) ([]byte, error) {
 }
 
 func TestTI03StartLoadsTheCacheBeforeItReturns(t *testing.T) {
-	st, _ := newStore(t)
 	a := newTestACME(t, func(p *ACMEParams) {
 		p.CA = "https://" + closedAddr(t)
-		p.Storage = &slowStorage{Storage: st, delay: 300 * time.Millisecond}
+		p.Storage = &slowStorage{Storage: p.Storage, delay: 300 * time.Millisecond}
 	})
 	want := seedCert(t, a, "decoy.test")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -319,10 +318,9 @@ func TestTI03StartLoadsTheCacheBeforeItReturns(t *testing.T) {
 
 func TestTI03StartLoadErrorWritesOneFixedLine(t *testing.T) {
 	var logs syncBuf
-	st, _ := newStore(t)
 	a := newTestACME(t, func(p *ACMEParams) {
 		p.CA = "https://" + closedAddr(t)
-		p.Storage = failingStorage{st}
+		p.Storage = failingStorage{p.Storage}
 		p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	})
 	ctx, cancel := context.WithCancel(context.Background())

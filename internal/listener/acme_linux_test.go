@@ -10,7 +10,9 @@ import (
 // The cache logger of certmagic is not readable from outside the package, so
 // the test reads standard error. With the default logger, the maintenance
 // goroutine writes a line at its start and at its stop. The test points file
-// descriptor 2 at a file while it makes and stops the cache.
+// descriptor 2 at a file while it makes and stops the cache. A crash or a
+// timeout panic in this window writes its trace to the file, not to the test
+// output.
 func TestTS16CacheLoggerWritesNothingToStderr(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "stderr")
 	mustNil(t, err)
@@ -30,6 +32,6 @@ func TestTS16CacheLoggerWritesNothingToStderr(t *testing.T) {
 	a.Stop()
 	restore()
 	if b, err := os.ReadFile(f.Name()); err != nil || len(b) != 0 {
-		t.Errorf("the cache wrote %q to stderr, %v; want nothing", b, err)
+		t.Errorf("stderr got %q, read error %v; want nothing", b, err)
 	}
 }
