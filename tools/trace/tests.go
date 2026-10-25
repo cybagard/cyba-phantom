@@ -20,14 +20,14 @@
 // A file that go test does not build does not count either. The file has
 // a name or a directory that starts with "_" or ".". Or it is in a nested
 // module. Or it is for another GOOS or GOARCH. Or a build constraint is
-// false, with the tag "race" set as in every CI test run. A build line that
-// does not parse gives a finding.
+// false, with the tag "race" set as in every CI test run. A build line or
+// a file header that does not parse gives a finding.
 //
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a target. The Makefile must have a line that starts with the target
-// name and a colon. The rest of the line is not a variable assignment.
-// A line that ends in a backslash goes on in the next line, as in make.
-// The tool does not run make.
+// name and a colon. The rest of the line must not be a variable assignment.
+// A line that ends in an odd number of backslashes continues in the next
+// line, as in make. The tool does not run make.
 //
 // Findings print test IDs, milestone IDs, row and line numbers, and counts.
 // A file path shows as "unlisted file <hash>" (printableName). No text of
@@ -294,7 +294,7 @@ func isNestedModule(dir string) bool {
 // GOARCH suffix and the build constraints must allow it. Every CI test run
 // sets the tag "race", so the check sets it too. The check reads data, the
 // same bytes that the parser reads. An error means that the file does not
-// count: go test does not run it.
+// count. Then go test fails the package with "setup failed".
 func isBuilt(dir, name string, data []byte) (bool, error) {
 	ctxt := build.Default
 	ctxt.BuildTags = append(slices.Clone(ctxt.BuildTags), "race")
@@ -361,7 +361,7 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 		}
 		built, buildErr := isBuilt(filepath.Dir(path), d.Name(), data)
 		if buildErr != nil {
-			findings = append(findings, fmt.Sprintf("tests: %s has a build line that does not parse", label))
+			findings = append(findings, fmt.Sprintf("tests: %s has a build line or file header that does not parse", label))
 			return nil
 		}
 		if !built {
@@ -487,13 +487,14 @@ func validTarget(s string) bool {
 // hasRule reports whether a line starts with "target:" and is a rule. A
 // variable assignment is not a rule: "target:=1", "target::=1" and the
 // target-specific form "target: X = 1". A line that ends in an odd number
-// of backslashes goes on in the next line, as in make.
+// of backslashes continues in the next line, as in make. As in make, one
+// CR before the LF is not part of the line.
 func hasRule(lines []string, target string) bool {
 	for i := 0; i < len(lines); i++ {
-		l := lines[i]
+		l := strings.TrimSuffix(lines[i], "\r")
 		for i+1 < len(lines) && continues(l) {
 			i++
-			l = l[:len(l)-1] + " " + lines[i]
+			l = l[:len(l)-1] + " " + strings.TrimSuffix(lines[i], "\r")
 		}
 		rest, ok := strings.CutPrefix(l, target+":")
 		if ok && !isAssignment(rest) {
@@ -509,11 +510,14 @@ func continues(line string) bool {
 }
 
 // isAssignment reports whether the text after a rule colon has a "=" before
-// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count.
+// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. A "$$"
+// is a literal "$" in make, so it opens no reference.
 func isAssignment(rest string) bool {
 	depth := 0
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {
+		case c == '$' && i+1 < len(rest) && rest[i+1] == '$':
+			i++
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
 			depth++
 		case depth > 0 && (c == ')' || c == '}'):

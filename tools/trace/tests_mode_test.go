@@ -248,6 +248,35 @@ func TestTestsModeRuleLinesAreRules(t *testing.T) {
 	}
 }
 
+// Each fixture was checked with GNU make: "make -n perf" finds the rule,
+// or stops with "No rule to make target 'perf'".
+func TestHasRuleMatchesMake(t *testing.T) {
+	for _, tc := range []struct {
+		name, makefile string
+		want           bool
+	}{
+		{"CR LF continuation then assignment", "perf: \\\r\nX = 1\n", false},
+		{"CR LF continuation then recipe", "perf: \\\r\n; true\n", true},
+		{"CR LF after the colon", "perf:\r\n", true},
+		{"CR LF double continuation", "perf: \\\r\n\\\r\nX = 1\n", false},
+		{"CR LF double continuation then recipe", "perf: \\\r\n\\\r\n; true\n", true},
+		{"CR LF continued comment", "# c \\\r\nperf:\n", false},
+		{"double continuation", "perf: \\\n\\\nX = 1\n", false},
+		{"backslash at the end of the file", "perf: \\", true},
+		{"backslash at the end of the last line", "perf: \\\n", true},
+		{"join adds a space", "per\\\nf:\n", false},
+		{"double dollar and parenthesis", "perf: $$(X=1)\n", false},
+		{"double dollar and brace", "perf: $${X=1}\n", false},
+		{"double dollar then reference", "perf: $$(X)=1\n", false},
+		{"double dollar then name", "perf: $$X=1\n", false},
+		{"three dollars", "perf: $$$(X)=1\n", false},
+	} {
+		if got := hasRule(strings.Split(tc.makefile, "\n"), "perf"); got != tc.want {
+			t.Errorf("%s: hasRule(%q) = %v, want %v", tc.name, tc.makefile, got, tc.want)
+		}
+	}
+}
+
 // A continued line does not change the line numbers of the file.
 func TestTestsModeContinuedLinesKeepMarkerLineNumbers(t *testing.T) {
 	files := defaultFiles()
@@ -447,16 +476,16 @@ func TestTestsModeBuiltFilesCount(t *testing.T) {
 	}
 }
 
-// A build line that does not parse gives a finding. The file does not
-// count: go test does not run it.
+// A build line or file header that does not parse gives a finding. The
+// file does not count. Then go test fails the package.
 func TestTestsModeBadBuildLineIsFindingAndDoesNotCount(t *testing.T) {
-	for _, line := range []string{"//go:build (", "//go:build ignore &&"} {
+	for _, line := range []string{"//go:build (", "//go:build ignore &&", "// a\x00b"} {
 		files := defaultFiles()
 		files["a_test.go"] = goTests("TestTU06")
 		files["bad_test.go"] = line + "\n\n" + goTests("TestTU01")
 		specDir, root := newTree(t, defaultRows[:1], files)
 		got := testsAt(t, specDir, root, "M-1")
-		wantTestsFinding(t, got, "tests: unlisted file", "has a build line that does not parse")
+		wantTestsFinding(t, got, "tests: unlisted file", "has a build line or file header that does not parse")
 		wantTestsFinding(t, got, "T-U-01", "no Go test")
 		if len(got) != 2 {
 			t.Errorf("%q: want two findings, got: %v", line, got)

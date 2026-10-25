@@ -42,11 +42,15 @@ var (
 // to change a file between the open and the read.
 var beforeRead func()
 
-// absPath makes path absolute, as the kernel resolves it. A relative path
-// starts at the working directory of the kernel: syscall.Getwd does not
-// read $PWD. A ".." after a name in path is resolved on disk, so a symlink
-// before it counts. An absolute path is only cleaned.
+// absPath makes path absolute. A relative path starts at the working
+// directory of the kernel: syscall.Getwd does not read $PWD. The function
+// resolves a ".." after a name on disk, so a symlink before it counts. It
+// never resolves the last named part. An absolute path is only cleaned.
+// An empty path is an error.
 func absPath(path string) (string, error) {
+	if path == "" {
+		return "", syscall.ENOENT
+	}
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path), nil
 	}
@@ -54,16 +58,31 @@ func absPath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	path = trimDirSuffix(path)
 	if !hasInnerDotDot(path) {
 		return filepath.Join(wd, path), nil
 	}
-	sep := string(filepath.Separator)
-	dir, last := filepath.Split(strings.TrimRight(wd+sep+path, sep))
+	dir, last := filepath.Split(wd + string(filepath.Separator) + path)
 	dir, err = filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, last), nil
+}
+
+// trimDirSuffix removes each "/" and "/." part at the end of a relative
+// path. A path of dots only, such as ".", stays as it is.
+func trimDirSuffix(path string) string {
+	for {
+		switch {
+		case len(path) > 1 && strings.HasSuffix(path, "/"):
+			path = path[:len(path)-1]
+		case strings.HasSuffix(path, "/."):
+			path = path[:len(path)-2]
+		default:
+			return path
+		}
+	}
 }
 
 // hasInnerDotDot reports whether path has a ".." after a name.
@@ -85,8 +104,8 @@ func hasInnerDotDot(path string) bool {
 
 // readCapped reads a regular file of at most maxFileBytes. It does not
 // follow a symlink at the last part. The file it opens must be the file it
-// checked. The open does not block on a FIFO swapped in between. A file
-// that changes size during the read is refused.
+// checked. The open does not block on a FIFO swapped in between. It
+// refuses a file that changes size during the read.
 func readCapped(path string) ([]byte, error) {
 	abs, err := absPath(path)
 	if err != nil {
@@ -133,11 +152,12 @@ func readFinding(name string, err error) string {
 	return ""
 }
 
-// checkSpecDir requires specDir to be a real directory, not a symlink.
+// checkSpecDir requires the last named part of specDir to be a real
+// directory, not a symlink. A trailing "/" or "/." does not change that.
 func checkSpecDir(specDir string) error {
 	abs, err := absPath(specDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", specDir, err)
 	}
 	f, _, err := safefile.OpenPath(abs, dirRule)
 	switch {

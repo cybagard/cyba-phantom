@@ -142,7 +142,7 @@ func TestTS23GrowPastCapDuringReadIsTooLarge(t *testing.T) {
 }
 
 // setBeforeRead sets the test hook of readCapped. The test cleanup removes it.
-func setBeforeRead(t *testing.T, hook func()) {
+func setBeforeRead(t testing.TB, hook func()) {
 	t.Helper()
 	beforeRead = hook
 	t.Cleanup(func() { beforeRead = nil })
@@ -150,7 +150,7 @@ func setBeforeRead(t *testing.T, hook func()) {
 
 // symlinkedCwd makes the tree below and returns the paths. The tree is
 // base/r/repo/spec (a directory), base/r/repo/spec/f.md (a file), and
-// base/h/L, a symlink to base/r/repo. The paths have no symlink.
+// base/h/L, a symlink to base/r/repo. Only link is a symlink.
 func symlinkedCwd(t *testing.T) (base, link string) {
 	t.Helper()
 	base, err := filepath.EvalSymlinks(t.TempDir())
@@ -203,7 +203,8 @@ func TestDotDotAfterSymlinkedWorkingDirectory(t *testing.T) {
 	}
 }
 
-// A ".." after a symlink in the argument is resolved on disk.
+// absPath resolves a ".." after a symlink in the argument on disk. It does
+// not resolve a symlink at any other part of a relative path.
 func TestDotDotAfterSymlinkInPath(t *testing.T) {
 	base, _ := symlinkedCwd(t)
 	h := filepath.Join(base, "h")
@@ -220,7 +221,9 @@ func TestDotDotAfterSymlinkInPath(t *testing.T) {
 		"L/../../h/L":    filepath.Join(base, "h", "L"),
 		"../h/L":         filepath.Join(base, "h", "L"),
 		"spec":           filepath.Join(h, "spec"),
+		"L/spec":         filepath.Join(h, "L", "spec"), // L stays a link
 		".":              h,
+		h + "/L/../repo": filepath.Join(h, "repo"), // text clean only
 	} {
 		if got, err := absPath(path); err != nil || got != want {
 			t.Errorf("absPath(%q) = %q, err %v, want %q", path, got, err, want)
@@ -231,5 +234,54 @@ func TestDotDotAfterSymlinkInPath(t *testing.T) {
 	}
 	if got, err := absPath("/a/../b/"); err != nil || got != "/b" {
 		t.Errorf("absolute path: %q, err %v", got, err)
+	}
+}
+
+// The last named part of the argument is never resolved. A trailing "/"
+// or "/." does not change that, with or without a ".." before it.
+func TestCheckSpecDirLastNamedPartIsNotResolved(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"spec", "a"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("spec", filepath.Join(dir, "slink")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	t.Chdir(dir)
+	for _, name := range []string{"slink/", "slink/.", "a/../slink/", "a/../slink/."} {
+		err := checkSpecDir(name)
+		want := name + ": spec dir must be a directory, not a symlink or file"
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: err %v, want %q", name, err, want)
+		}
+	}
+	for _, name := range []string{"spec/", "spec/.", ".", "a/../spec"} {
+		if err := checkSpecDir(name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// An argument that cannot be made absolute gives an error with the name
+// at the start, like the other errors of checkSpecDir.
+func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if _, err := absPath(""); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("absPath of an empty path: err %v, want ErrNotExist", err)
+	}
+	for name, want := range map[string]string{
+		"":                  ": no such file or directory",
+		"absent/../spec":    "absent/../spec: ",
+		"absent/../spec///": "absent/../spec///: ",
+	} {
+		err := checkSpecDir(name)
+		if err == nil || !errors.Is(err, fs.ErrNotExist) || !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("checkSpecDir(%q): err %v, want the prefix %q and ErrNotExist", name, err, want)
+		}
 	}
 }
