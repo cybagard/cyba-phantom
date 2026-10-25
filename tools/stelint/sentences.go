@@ -47,11 +47,11 @@ func longSentences(src []byte) []sentence {
 }
 
 // checkedSentences returns the sentences of src that have more than maxWords
-// words and that the target covers, in line order. A sentence is covered when
-// a line of it changed, or a deletion joined it, or a deletion came directly
-// before it in the same text. When a changed line of a text is a fence line or
-// a blank line, every sentence of the text is covered. scanErr is true when
-// go/scanner reported an error for src.
+// words and that the target covers, in line order. The target covers a
+// sentence when a line of it changed. It also does when a deletion joined it,
+// or came directly before it in the same text. A fence line or a blank line
+// can change a whole text. When one changed, the target covers every sentence
+// of the text. scanErr is true when go/scanner reported an error for src.
 func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	groups, scanErr := commentGroups(src)
 	for _, g := range groups {
@@ -68,8 +68,8 @@ func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	return out, scanErr
 }
 
-// delBefore reports whether a deletion came directly before line first, and
-// the line before the deletion is a line of the text that starts at line lo.
+// delBefore reports whether a deletion came directly before line first. The
+// line before the deletion must be a line of the text that starts at line lo.
 func (t target) delBefore(first, lo int) bool {
 	if first-1 < lo {
 		return false
@@ -91,8 +91,8 @@ func (t target) changedBreak(g []textLine) bool {
 }
 
 // isASTDirective reports whether a "//" comment has the directive form of
-// go/ast: "//line ", "//extern " or "//export " at the start, or "//", a name
-// of [a-z0-9], a colon and one of [a-z0-9].
+// go/ast. The form is "//line ", "//extern " or "//export " at the start.
+// It is also "//", a name of [a-z0-9], a colon and one of [a-z0-9].
 func isASTDirective(lit string) bool {
 	for _, p := range []string{"//line ", "//extern ", "//export "} {
 		if strings.HasPrefix(lit, p) {
@@ -113,12 +113,12 @@ func isASTDirective(lit string) bool {
 
 // commentGroups returns the text of the comments of src. A run of "//"
 // comments on adjacent lines is one group, when each starts its line. A "//"
-// comment after code is a group of its own. A "//" line that starts its line
-// continues the trailing comment on the line before, when it starts at the
-// same column. So does each next such line. Each "/* */" comment is a group of
-// its own. A directive ends a group. A directive that isDirective does not
-// know, but that has the go/ast form, is a group of its own. scanErr is true
-// when go/scanner reported an error.
+// comment after code starts a group. A "//" line that starts its line
+// continues it. This holds when the line is directly after the trailing
+// comment and starts at the same column. So does each next such line. Each
+// "/* */" comment is a group of its own. A directive ends a group. A directive
+// that isDirective does not know, but that has the go/ast form, is a group of
+// its own. scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
 	fset := token.NewFileSet()
@@ -280,9 +280,10 @@ func paragraphs(g []textLine) []*para {
 }
 
 // isTrailer reports whether a trimmed line is a commit trailer line in its full
-// form: "Signed-off-by:" or "Co-authored-by:" in any case, a space, a name of 1
-// to 20 words, a space, and an address in "<" and ">" at the end of the line.
-// The name has no "<" or ">". The address has one "@" and no space, "<" or ">".
+// form. The line starts with "Signed-off-by:" or "Co-authored-by:", in any
+// case. A space, a name of 1 to 20 words, a space and an address in "<" and ">"
+// follow. The address ends the line. The name has no "<" or ">". The address
+// has one "@" and no space, "<" or ">".
 func isTrailer(t string) bool {
 	for _, p := range []string{"signed-off-by:", "co-authored-by:"} {
 		if len(t) < len(p) || !strings.EqualFold(t[:len(p)], p) {

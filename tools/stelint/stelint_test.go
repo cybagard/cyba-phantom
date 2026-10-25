@@ -622,7 +622,7 @@ func TestParseDiffRefusesHunkPastFileLimit(t *testing.T) {
 
 func TestOwnCommentLinesAreShort(t *testing.T) {
 	// The tool reads its own source and test with its own rule.
-	for _, name := range []string{"main.go", "stelint_test.go"} {
+	for _, name := range []string{"main.go", "sentences.go", "stelint_test.go"} {
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
