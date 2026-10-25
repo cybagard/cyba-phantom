@@ -116,11 +116,9 @@ func isASTDirective(lit string) bool {
 // comments on adjacent lines is one group, when each starts its line. A "//"
 // comment after code starts a group. A "//" line that starts its line
 // continues it, when the line is directly after the group. The line must start
-// at the column of the trailing comment. It can also start at the indent column
-// of the code line. Then the last line of the group must not end with an end
-// mark. An end mark is ".", "?" or "!". Spaces at the end of that line do not
-// count. Each next such line also continues the group. In such a group, the
-// indent of a line is removed. So it does not make a code block. Each "/* */"
+// at the column of the trailing comment. Each next such line also continues
+// the group. A group that starts after code loses the indent of its lines. So
+// the indent does not make a code block in that group. Each "/* */"
 // comment is a group of its own. A directive ends a group. A comment that
 // isDirective does not know, and that is only a go/ast directive token, adds
 // no words. On a line of its own, it does not end the group. The next
@@ -136,11 +134,10 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	s.Init(file, src, func(token.Position, string) {}, scanner.ScanComments)
 
 	var (
-		cur       []textLine
-		prevEnd   int
-		trail     bool // cur starts with a comment after code
-		trailCol  int
-		indentCol int // the indent of the line of code
+		cur      []textLine
+		prevEnd  int
+		trail    bool // cur starts with a comment after code
+		trailCol int
 	)
 	flush := func() {
 		if cur != nil {
@@ -183,9 +180,7 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 		case strings.TrimSpace(before) != "":
 			flush()
 			cur, trail, trailCol = []textLine{unindent(tl)}, true, col
-			line := lines[p.Line-1]
-			indentCol = width(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
-		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol || col == indentCol && !endsSentence(cur[len(cur)-1].text)):
+		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol):
 			if trail {
 				tl = unindent(tl)
 			}
@@ -205,14 +200,6 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 func unindent(l textLine) textLine {
 	l.text = strings.TrimLeft(l.text, " \t")
 	return l
-}
-
-// endsSentence reports whether a line of text ends with ".", "?" or "!". Spaces
-// at the end of the line do not count. A space is a rune for which isBlank is
-// true.
-func endsSentence(text string) bool {
-	text = strings.TrimRightFunc(text, isBlank)
-	return text != "" && strings.IndexByte(".?!", text[len(text)-1]) >= 0
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
@@ -335,7 +322,7 @@ func isTrailer(t string) bool {
 		}
 		name, addr := rest[:i-1], rest[i+1:len(rest)-1]
 		words := len(strings.FieldsFunc(name, isBlank))
-		return words >= 1 && words <= 20 && strings.TrimSpace(name) == name &&
+		return words >= 1 && words <= 20 && strings.TrimFunc(name, isBlank) == name &&
 			!strings.Contains(name, ">") &&
 			strings.Count(addr, "@") == 1 && !strings.ContainsAny(addr, "<>") &&
 			strings.IndexFunc(addr, isBlank) < 0
@@ -401,10 +388,10 @@ func (p *para) add(text string, line int) {
 
 // isBlank reports whether a rune is a space for the sentence rule. It is a
 // space when unicode.IsSpace is true. It is also a space for U+115F, U+1160,
-// U+2800, U+3164 and U+FFA0, which render as blank.
+// U+2800, U+3164, U+FFA0 and U+1D159, which render blank.
 func isBlank(r rune) bool {
 	switch r {
-	case '\u115F', '\u1160', '\u2800', '\u3164', '\uFFA0':
+	case '\u115F', '\u1160', '\u2800', '\u3164', '\uFFA0', '\U0001D159':
 		return true
 	}
 	return unicode.IsSpace(r)

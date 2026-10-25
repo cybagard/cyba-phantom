@@ -45,15 +45,11 @@
 // line, a line of code or a directive ends that text. A "//" comment after
 // code starts a text. A "//" line that starts the next line continues it, when
 // it starts at the same column. Each next line at that column also continues
-// it. A tab moves to the next multiple of 4 columns. A line can also start at
-// the indent column of the line of code. That is the width of the spaces and
-// tabs at the start of that line. Then the last line of the text must not end
-// with an end mark. An end mark is ".", "?" or "!". Spaces at the end of that
-// line do not count. A line at another column starts a new text. In a text that
-// starts after code, the indent of a line does not make a code block. A fence
-// of three backticks still does. Each "/* */" comment is also a text of its
-// own. In it the indent does not count. A "*" at the start of a line is
-// removed.
+// it. A tab moves to the next multiple of 4 columns. A line at another column
+// starts a new text. In a text that starts after code, the indent of a line
+// does not make a code block. A fence of three backticks still does. Each
+// "/* */" comment is also a text of its own. In it the indent does not count.
+// A "*" at the start of a line is removed.
 //
 // A sentence ends at ".", "?" or "!" before a space, a line end or the end of
 // the text. It also ends at a blank line, a heading, a list item, and the
@@ -78,12 +74,12 @@
 // block. stelint does not count code.
 //
 // A word is a run of characters between spaces. A space is each rune for
-// which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800, U+3164
-// and U+FFA0 are also spaces, as they render blank. A code span in backticks
-// is one word, also when it has spaces. A "." in a code span does not end a
-// sentence. In a Markdown link, only the link text counts. A link whose URL
-// has a space is not a link. A backtick or a link with no closing mark is an
-// ordinary character.
+// which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
+// U+3164, U+FFA0 and U+1D159 are also spaces, as they render blank. A code
+// span in backticks is one word, also when it has spaces. A "." in a code span
+// does not end a sentence. In a Markdown link, only the link text counts. A
+// link whose URL has a space is not a link. A backtick or a link with no
+// closing mark is an ordinary character.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So
