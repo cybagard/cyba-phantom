@@ -3,7 +3,8 @@
 // package.
 package configtest
 
-// BadURL is an https URL that the config refuses, with a part of the detail.
+// BadURL is one URL that the config refuses. Name is the row name.
+// Detail is text that the refusal detail holds.
 type BadURL struct {
 	Name, URL, Detail string
 }

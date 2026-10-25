@@ -421,8 +421,8 @@ func TestTU10_URL(t *testing.T) {
 	runRows(t, badURLRows(), func(s string) string { _, d := parseURL(s, "https"); return d })
 }
 
-// badURLRows gives the rows of configtest.BadURLs.
-// TestTU10_URL uses them, and TestTS11_URLKeys uses the list.
+// badURLRows returns the entries of configtest.BadURLs as rows for runRows.
+// TestTU10_URL uses these rows.
 func badURLRows() []row {
 	var rows []row
 	for _, b := range configtest.BadURLs {

@@ -399,6 +399,7 @@ func TestTS11_CheckACME(t *testing.T) {
 		return "config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: " + detail + "\n" + strings.Join(more, "")
 	}
 	const bundleSide = "config: bundle.path at PHANTOM_BUNDLE_PATH: the directory must not be in or above acme.cache_dir\n"
+	const bundleSideDefault = "config: bundle.path at default: the directory must not be in or above acme.cache_dir\n"
 	rows := []struct {
 		name, file string
 		key        string // key is "" for a file that passes.
@@ -441,20 +442,28 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}, ""},
 		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}, ""},
 		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}, ""},
-		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}, ""},
-		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}, ""},
-		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}, ""},
+		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
+		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
+		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}, ""},
 		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
 		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
 		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
 		{"cache dir is keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Keys"}, ""},
 		{"cache dir is tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/TLOG"}, ""},
-		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"}, ""},
+		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
 		{"cache dir in checkpoints in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/CheckPoints/c"},
 			cacheRefused("the path must not be in or above the checkpoints directory")},
-		{"cache dir above tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/X/tlog"},
+		{"cache dir above tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/X/tlog"},
 			cacheRefused("the path must not be in or above tlog.dir")},
+		{"cache dir in other case above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/X", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"},
+			cacheRefused("the path must not be in or above tlog.dir")},
+		{"cache dir in other case above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/B", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 		{"cache dir in tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/t/c", "PHANTOM_TLOG_DIR=/var/lib/phantom/T"},
 			cacheRefused("the path must not be in or above tlog.dir")},
 		{"cache dir above the bundle directory, bundle.path set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/B/x/current.cbnd"},
@@ -485,8 +494,7 @@ func TestTS11_CheckACME(t *testing.T) {
 
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
 // from, and an smtp to. Each value holds one of the characters of
-// configtest.EmailMarks: a space, U+0001, U+0085, U+00A0, U+202E, U+2028,
-// U+2029, U+3000, or U+FE0F. The exit code is 1. Stderr names the key and
+// configtest.EmailMarks. The exit code is 1. Stderr names the key and
 // gives the rule. It does not hold the character (T-S-11).
 func TestTS11_CheckEmailMarks(t *testing.T) {
 	body := validBody(t)

@@ -127,7 +127,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 	}
 
 	// The parser also reads a CR as a line break. A terminal moves the cursor
-	// to the line start at a CR. A CR with an LF after it is a normal line end.
+	// to the line start at a CR. A CR with an LF after it is a normal line break.
 	for rest := b; ; {
 		i := bytes.IndexByte(rest, '\r')
 		if i < 0 {
