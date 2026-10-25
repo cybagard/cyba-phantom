@@ -24,10 +24,10 @@ var errQueueCounters = errors.New("event: queue needs a counters value from NewC
 
 // Queue is the bounded queue between the request path and the writer (SEC-15,
 // C2, C3). It has two lanes. The bulk lane has the capacity of the queue depth.
-// The evidence lane has the capacity max(1, depth/4). Enqueue puts an event with
-// one of the six evidence kinds in the evidence lane. It puts an event with a
-// request, beacon or refused kind in the bulk lane (Kind.IsEvidence). Enqueue
-// drops an event with a kind that is not known.
+// The evidence lane has the capacity max(1, depth/4). Enqueue puts an event
+// with one of the six evidence kinds in the evidence lane. It puts an event
+// with a request, beacon or refused kind in the bulk lane (Kind.IsEvidence).
+// Enqueue drops an event with a kind that is not known.
 //
 // Each lane has its own byte cap (ADR-019). The bytes that Enqueue reserved are
 // at most 24 MiB in the bulk lane. They are at most 8 MiB in the evidence lane.
@@ -233,10 +233,10 @@ type Bytes struct {
 }
 
 // Bytes returns the sum of the bytes that Enqueue reserved for the queued
-// events of each lane. A sum can be more than the reserved bytes of the events
-// that are now in the lane, for a short time. This occurs while a producer or
-// the consumer is between the byte update and the lane update. The bulk sum is
-// never more than 24 MiB. The evidence sum is never more than 8 MiB.
+// events of each lane. For a short time, a sum can be more than the reserved
+// bytes of the events in the lane. This occurs while a producer or the consumer
+// is between the byte update and the lane update. The bulk sum is never more
+// than 24 MiB. The evidence sum is never more than 8 MiB.
 func (q *Queue) Bytes() Bytes {
 	return Bytes{Bulk: q.bulkBytes.Load(), Evidence: q.evidenceBytes.Load()}
 }

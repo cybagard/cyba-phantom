@@ -115,10 +115,10 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 // a failed start check, and a fork signal of the checkpoint row. A failed BEGIN
 // starts no transaction, and a later database error rolls the transaction back.
 // The events of a batch that ends with an error and no COMMIT count as drops.
-// The lane of a drop is the lane of the kind of the record copy that write made.
+// The lane of a drop is the lane of the kind of the record copy of write.
 // After an assignment to a queued event, that lane can differ from the queue
-// lane. The writer keeps the first error (Err), is not healthy (Healthy),
-// and writes one log line with the fixed class of the error. It does not open
+// lane. The writer keeps the first error (Err) and is not healthy (Healthy).
+// It writes one log line with the fixed class of the error. It does not open
 // the log or the database again, and it does not end the process. Run does not
 // return the error. It
 // continues in the stopped state: it writes no row, calls no appender, and runs
@@ -225,8 +225,8 @@ func (w *Writer) shutdown(batch []*event.Event) {
 // events of the written batch can be freed. An error stops the writer. A stopped
 // writer writes nothing: flush drops the events and counts the drops. The lane
 // of each of these drops is the lane of e.Kind(). A batch that ends with an
-// error and no COMMIT is lost: write counts each of its events as a drop. The
-// lane of that drop is the lane of the kind of the record copy. Flush does not
+// error and no COMMIT is lost. write counts each of its events as a drop. The
+// lane of that drop is the lane of the kind of the record copy. flush does not
 // count a batch whose COMMIT succeeded.
 func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
@@ -244,10 +244,10 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 // first. For a batch with evidence it takes the one pool connection and sets
 // synchronous=FULL on it before BEGIN. It sets NORMAL again when the transaction
 // has ended, after a commit and after a rollback. A failure to set either value
-// is a database error. If write returns an error and the COMMIT did not succeed,
-// write counts each event of the batch as a drop. The lane of each drop is the
-// lane of the kind of the record copy of that event. A failed NORMAL after a
-// good COMMIT counts none, because the rows exist.
+// is a database error. Suppose write returns an error and the COMMIT did not
+// succeed. Then write counts each event of the batch as a drop. The lane of
+// each drop is the lane of the kind of the record copy of that event. A failed
+// NORMAL after a good COMMIT counts none, because the rows exist.
 //
 // In the transaction, the evidence hashes go to the appender in one call before
 // COMMIT. Row i of the evidence events gets leaf_index first+i. The insert loop
@@ -283,9 +283,9 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if len(batch) == 0 && !w.counters.Pending() {
 		return nil
 	}
-	// The writer makes one record copy of each event. The evidence decision, the
-	// hash, the row and the drop lane use it. The address for the session id of
-	// a refused row and the body prefix still come from the event.
+	// The writer makes one record copy of each event. The evidence decision,
+	// the hash, the row and the drop lane use it. The address for the session
+	// id of a refused row and the body prefix still come from the event.
 	recs := make([]event.Record, len(batch))
 	for j, e := range batch {
 		recs[j] = e.Record()
