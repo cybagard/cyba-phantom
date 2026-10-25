@@ -1142,6 +1142,8 @@ func TestFoldASCII(t *testing.T) {
 		{"Checkpoint.State", "checkpoint.state"},
 		{"keys", "keys"},
 		{"@[`{", "@[`{"},
+		{"AZ", "az"},
+		{"@AZ[", "@az["},
 		{"\u212A", "\u212A"},
 		{"\xc3\x89", "\xc3\x89"},
 		{"", ""},
