@@ -688,7 +688,8 @@ func TestTS14_StateLocked(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	held, err := os.Open(dir) // another open file: its lock conflicts in one process
+	// Another open file: its lock conflicts in one process.
+	held, err := os.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

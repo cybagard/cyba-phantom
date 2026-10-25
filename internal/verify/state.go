@@ -31,7 +31,7 @@ var (
 	ErrState        = errors.New("verify: the state is not valid")
 	ErrStateChanged = errors.New("verify: the state changed during the run")
 	ErrStateLocked  = &stateFault{"verify: another run holds the state lock: the state is not valid"}
-	ErrStateSync    = fmt.Errorf("verify: the state was written, but the directory sync failed: %w", ErrState)
+	ErrStateSync    = &stateFault{"verify: the state was written, but the directory sync failed: the state is not valid"}
 )
 
 // stateFault is a fault of the state with a fixed text. It matches ErrState.
@@ -104,9 +104,9 @@ func DefaultStateDir() (string, error) {
 // note that does not parse with v give ErrState too.
 //
 // LoadState refuses an existing directory or state file with a group or other
-// permission bit. It also refuses one that another user owns. It checks each
-// on the open descriptor. It checks the directory before it takes the lock.
-// Then it takes an exclusive lock on the directory.
+// permission bit. It also refuses one that another user owns. It checks the
+// directory and the file on the open descriptor. It checks the directory before
+// it takes the lock. Then it takes an exclusive lock on the directory.
 // If another run holds the lock, LoadState waits for at most opts.LockWait (30
 // seconds if it is zero) and then gives ErrStateLocked. A run holds the lock
 // until it closes the state. The kernel releases it when the process ends. A
@@ -167,13 +167,14 @@ var stateFileRule = safefile.Rule{
 	MaxSize: MaxNoteBytes,
 }
 
-// read reads the state file. It returns false if the file does not exist. Any
-// other fault gives ErrState. The safefile package opens the file without a
-// block and checks stateFileRule on the open descriptor. A symlink, a FIFO, or
-// a file with a second link is refused.
+// read reads the state file. It returns false only if the Lstat finds no file.
+// Each other fault gives ErrState, also a file that goes away after the check.
+// The safefile package opens the file without a block. It checks stateFileRule
+// on the open descriptor. read refuses a symlink, a FIFO, or a file with a
+// second link.
 func (s *State) read() ([]byte, bool, error) {
 	f, fi, err := safefile.Open(s.root, s.name, stateFileRule)
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, safefile.ErrExamine) && errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
 	if err != nil {

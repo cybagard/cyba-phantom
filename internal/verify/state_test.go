@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -616,24 +617,85 @@ func TestTS14_LockFault(t *testing.T) {
 	wantRefused(t, "flock fault", dir, v)
 }
 
-// swapForFifo makes a hook that runs after the check of the state file. It
-// replaces the file with a FIFO. The returned counter holds the swaps.
-func swapForFifo(t *testing.T, file string) *int {
+// swapAfterCheck makes a hook that runs swap after the check of the state file.
+// The returned slice holds the name of each check after which swap ran.
+func swapAfterCheck(t *testing.T, file string, swap func() error) *[]string {
 	t.Helper()
-	swaps := new(int)
+	swapped := new([]string)
 	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
 		if name != filepath.Base(file) {
 			return
 		}
-		*swaps++
-		if err := os.Remove(file); err != nil {
-			t.Error(err)
-		}
-		if err := syscall.Mkfifo(file, 0o600); err != nil {
+		*swapped = append(*swapped, name)
+		if err := swap(); err != nil {
 			t.Error(err)
 		}
 	}})
-	return swaps
+	return swapped
+}
+
+// stateSwap is a change of the state file after the check, and before the open.
+type stateSwap struct {
+	name string
+	fifo bool // the swap leaves a FIFO at the name
+	swap func(dir, file string) error
+}
+
+var stateSwaps = []stateSwap{
+	{"FIFO", true, func(_, file string) error {
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return syscall.Mkfifo(file, 0o600)
+	}},
+	{"file removed", false, func(_, file string) error { return os.Remove(file) }},
+	{"dangling symlink", false, func(_, file string) error {
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return os.Symlink("missing", file)
+	}},
+	{"symlink to another file", false, func(dir, file string) error {
+		if err := os.WriteFile(filepath.Join(dir, "other.note"), []byte("other"), 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return os.Symlink("other.note", file)
+	}},
+	{"new inode", false, func(dir, file string) error {
+		if err := os.Rename(file, filepath.Join(dir, "old.note")); err != nil {
+			return err
+		}
+		return os.WriteFile(file, []byte("new"), 0o600)
+	}},
+}
+
+// wantSwapRefused checks the result of a run in which a swap changed the state
+// file after the check. The swap ran once, for the state file only. The run
+// gave ErrState, left no temporary file, and did not write the note written.
+func wantSwapRefused(t *testing.T, tc stateSwap, dir, file string, swapped []string, err error, written []byte) {
+	t.Helper()
+	if want := []string{filepath.Base(file)}; err != ErrState || !slices.Equal(swapped, want) {
+		t.Errorf("error %v after swaps for %q, want ErrState after %q", err, swapped, want)
+	}
+	if tc.fifo {
+		wantOnlyFifo(t, dir)
+		return
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("the temporary file %s is left", e.Name())
+		}
+	}
+	if b, rerr := os.ReadFile(file); rerr == nil && written != nil && bytes.Equal(b, written) {
+		t.Error("the state file holds the new note")
+	}
 }
 
 // boundedCall runs f in a goroutine and fails the test if f blocks for 10
@@ -661,46 +723,50 @@ func wantOnlyFifo(t *testing.T, dir string) {
 	}
 }
 
-// T-S-14: a FIFO that replaces the state file after the check does not block
-// LoadState. LoadState gives ErrState.
-func TestTS14_FifoAfterCheck(t *testing.T) {
-	v, dir, file := stateWithFile(t)
-	swaps := swapForFifo(t, file)
-	var err error
-	boundedCall(t, func() {
-		var st *State
-		if st, err = LoadState(dir, v, StateOptions{}); st != nil {
-			st.Close()
-		}
-	})
-	if err != ErrState || *swaps != 1 {
-		t.Errorf("error %v after %d swaps, want ErrState after 1", err, *swaps)
+// T-S-14: a swap of the state file after the check gives ErrState in LoadState.
+// The swap is a FIFO, which does not block, or a removed file, a symlink, or a
+// new file. The run writes nothing.
+func TestTS14_SwapAfterCheck(t *testing.T) {
+	for _, tc := range stateSwaps {
+		t.Run(tc.name, func(t *testing.T) {
+			v, dir, file := stateWithFile(t)
+			swapped := swapAfterCheck(t, file, func() error { return tc.swap(dir, file) })
+			var err error
+			boundedCall(t, func() {
+				var st *State
+				if st, err = LoadState(dir, v, StateOptions{}); st != nil {
+					st.Close()
+				}
+			})
+			wantSwapRefused(t, tc, dir, file, *swapped, err, nil)
+		})
 	}
-	wantOnlyFifo(t, dir)
 }
 
-// T-S-14: a FIFO that replaces the state file after the check of the second
-// read does not block Update. Update gives ErrState and does not rename.
-func TestTS14_FifoAfterCheckInUpdate(t *testing.T) {
-	s, text := newKey(t, origin)
-	v, _ := ParseKey([]byte(text))
-	l, _ := realLog(t, 10)
-	dir := filepath.Join(t.TempDir(), "state")
-	file := filepath.Join(dir, StateFileName(v))
-	st, err := LoadState(dir, v, StateOptions{})
-	if err != nil {
-		t.Fatal(err)
+// T-S-14: the same swaps after the check of the second read give ErrState in
+// Update. Update does not rename.
+func TestTS14_SwapAfterCheckInUpdate(t *testing.T) {
+	for _, tc := range stateSwaps {
+		t.Run(tc.name, func(t *testing.T) {
+			s, text := newKey(t, origin)
+			v, _ := ParseKey([]byte(text))
+			l, _ := realLog(t, 10)
+			dir := filepath.Join(t.TempDir(), "state")
+			file := filepath.Join(dir, StateFileName(v))
+			st, err := LoadState(dir, v, StateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
+				t.Fatal(err)
+			}
+			swapped := swapAfterCheck(t, file, func() error { return tc.swap(dir, file) })
+			latest := checkpointAt(t, l, s, 10)
+			boundedCall(t, func() { _, err = st.Update(latest) })
+			wantSwapRefused(t, tc, dir, file, *swapped, err, latest)
+		})
 	}
-	defer st.Close()
-	if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
-		t.Fatal(err)
-	}
-	swaps := swapForFifo(t, file)
-	boundedCall(t, func() { _, err = st.Update(checkpointAt(t, l, s, 10)) })
-	if err != ErrState || *swaps != 1 {
-		t.Errorf("error %v after %d swaps, want ErrState after 1", err, *swaps)
-	}
-	wantOnlyFifo(t, dir)
 }
 
 // T-S-14: LoadState refuses a state file with a second hard link. Both names
@@ -751,11 +817,10 @@ func TestTS14_DefaultLockWait(t *testing.T) {
 	}
 }
 
-// T-S-14: the owner rule runs on the open state directory. A hook that names
-// the directory as owned by another user makes LoadState give ErrState.
-func TestTS14_OwnerRuleOnOpenDirectory(t *testing.T) {
-	v, dir, _ := stateWithFile(t)
-	fi, err := os.Stat(dir)
+// otherOwnerOf sets an OtherOwner hook that is true only for the FileID of path.
+func otherOwnerOf(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,16 +831,59 @@ func TestTS14_OwnerRuleOnOpenDirectory(t *testing.T) {
 	safefiletest.Set(t, safefiletest.Hooks{
 		OtherOwner: func(got safefile.FileID) bool { return got == id },
 	})
+}
+
+// T-S-14: an OtherOwner hook refuses the FileID of the state directory. Then
+// LoadState gives ErrState.
+func TestTS14_OwnerRuleOnOpenDirectory(t *testing.T) {
+	v, dir, _ := stateWithFile(t)
+	otherOwnerOf(t, dir)
 	wantRefused(t, "other owner", dir, v)
 }
 
-// T-S-14: the text of ErrStateLocked has the "verify:" prefix once. It still
-// matches ErrState.
-func TestTS14_LockedErrorText(t *testing.T) {
-	if n := strings.Count(ErrStateLocked.Error(), "verify:"); n != 1 {
-		t.Errorf("%q has the prefix %d times", ErrStateLocked, n)
+// T-S-14: an OtherOwner hook refuses the FileID of the state file. Then
+// LoadState gives ErrState, also when the run is not root.
+func TestTS14_OwnerRuleOnStateFile(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	otherOwnerOf(t, file)
+	wantRefused(t, "other owner", dir, v)
+}
+
+// T-S-14: a byte appended to the state file after the open gives ErrState.
+func TestTS14_FileGrowsAfterOpen(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(name string) {
+		if name != filepath.Base(file) {
+			return
+		}
+		f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if _, err := f.Write([]byte{'x'}); err != nil {
+			t.Error(err)
+		}
+		f.Close()
+	}})
+	st, err := LoadState(dir, v, StateOptions{})
+	if st != nil {
+		st.Close()
 	}
-	if !errors.Is(ErrStateLocked, ErrState) {
-		t.Error("ErrStateLocked does not match ErrState")
+	if err != ErrState {
+		t.Errorf("error %v, want ErrState", err)
+	}
+}
+
+// T-S-14: each text of a state fault has the "verify:" prefix once, and each
+// still matches ErrState.
+func TestTS14_LockedErrorText(t *testing.T) {
+	for name, err := range map[string]error{"locked": ErrStateLocked, "sync": ErrStateSync} {
+		if n := strings.Count(err.Error(), "verify:"); n != 1 {
+			t.Errorf("%s: %q has the prefix %d times", name, err, n)
+		}
+		if !errors.Is(err, ErrState) {
+			t.Errorf("%s: does not match ErrState", name)
+		}
 	}
 }

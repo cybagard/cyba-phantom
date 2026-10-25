@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -55,10 +56,18 @@ func TestTS14_StateUnsafe(t *testing.T) {
 			if !tc.fifo {
 				before = stateSnap(t, dir)
 			}
+			var swapped []string // the name of each check after which the swap ran
 			if tc.fifo {
 				safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(n string) {
-					if n == name && os.Remove(file) == nil {
-						syscall.Mkfifo(file, 0o600)
+					if n != name {
+						return
+					}
+					swapped = append(swapped, n)
+					if err := os.Remove(file); err != nil {
+						t.Error(err)
+					}
+					if err := syscall.Mkfifo(file, 0o600); err != nil {
+						t.Error(err)
 					}
 				}})
 			}
@@ -89,6 +98,9 @@ func TestTS14_StateUnsafe(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.fifo {
+				if !slices.Equal(swapped, []string{name}) {
+					t.Errorf("the swap ran after the checks of %q, want %q", swapped, name)
+				}
 				if len(entries) != 1 || entries[0].Type()&os.ModeNamedPipe == 0 {
 					t.Errorf("the state directory: %v", entries)
 				}
