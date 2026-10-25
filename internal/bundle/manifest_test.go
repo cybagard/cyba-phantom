@@ -381,8 +381,8 @@ func TestTU08CodeText(t *testing.T) {
 
 // T-U-08: the errors of the manifest steps are distinct and each has one code.
 func TestTU08CodeOf(t *testing.T) {
-	errs := []error{ErrArchiveInvalid, ErrManifestInvalid, ErrMinEngine, ErrExpired}
-	want := []Code{CodeArchiveInvalid, CodeManifestInvalid, CodeMinEngine, CodeExpired}
+	errs := []error{ErrArchiveInvalid, ErrManifestInvalid, ErrMinEngine, ErrExpired, ErrRollback}
+	want := []Code{CodeArchiveInvalid, CodeManifestInvalid, CodeMinEngine, CodeExpired, CodeRollback}
 	for i, err := range errs {
 		if code, ok := CodeOf(err); !ok || code != want[i] {
 			t.Errorf("%v: code %v, %v", err, code, ok)

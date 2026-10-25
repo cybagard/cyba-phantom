@@ -45,6 +45,7 @@ var (
 	ErrManifestInvalid = errors.New("bundle: manifest_invalid")
 	ErrMinEngine       = errors.New("bundle: min_engine")
 	ErrExpired         = errors.New("bundle: expired")
+	ErrRollback        = errors.New("bundle: rollback")
 )
 
 // CodeOf returns the rejection code of an error of this package. It gives false
@@ -61,6 +62,8 @@ func CodeOf(err error) (Code, bool) {
 		return CodeMinEngine, true
 	case errors.Is(err, ErrExpired):
 		return CodeExpired, true
+	case errors.Is(err, ErrRollback):
+		return CodeRollback, true
 	}
 	return 0, false
 }
