@@ -9,8 +9,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 var (
@@ -27,37 +30,115 @@ var knownSpecFiles = map[string]bool{
 	"README.md": true, "constitution-table.md": true, "manifest.json": true,
 }
 
+var (
+	// fileRule is the rule for a spec file or a source file. It needs a
+	// regular file of at most maxFileBytes. Owner and mode do not matter.
+	fileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: maxFileBytes}
+	// dirRule is the rule for the spec directory and the tree root.
+	dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny}
+)
+
+// beforeRead is nil in production. A test sets it, through setBeforeRead,
+// to change a file between the open and the read.
+var beforeRead func()
+
+// absPath makes path absolute. A relative path starts at the working
+// directory of the kernel: syscall.Getwd does not read $PWD. The function
+// resolves a ".." after a name on disk, so a symlink before it counts. It
+// removes each trailing "/" and "/." part, and then it does not resolve
+// the last part. A final ".." resolves the name before it. An absolute
+// path is only cleaned. An empty path is an error.
+func absPath(path string) (string, error) {
+	if path == "" {
+		return "", syscall.ENOENT
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	wd, err := syscall.Getwd()
+	if err != nil {
+		return "", err
+	}
+	path = trimDirSuffix(path)
+	if !hasInnerDotDot(path) {
+		return filepath.Join(wd, path), nil
+	}
+	dir, last := filepath.Split(wd + string(filepath.Separator) + path)
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, last), nil
+}
+
+// trimDirSuffix removes each "/" and "/." part at the end of a relative
+// path. A path of dots only, such as ".", stays as it is.
+func trimDirSuffix(path string) string {
+	for {
+		switch {
+		case len(path) > 1 && strings.HasSuffix(path, "/"):
+			path = path[:len(path)-1]
+		case strings.HasSuffix(path, "/."):
+			path = path[:len(path)-2]
+		default:
+			return path
+		}
+	}
+}
+
+// hasInnerDotDot reports whether path has a ".." after a name.
+func hasInnerDotDot(path string) bool {
+	named := false
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if named {
+				return true
+			}
+		default:
+			named = true
+		}
+	}
+	return false
+}
+
 // readCapped reads a regular file of at most maxFileBytes. It does not
-// follow symlinks: the file it opens must be the file it checked, and the
-// open does not block on a FIFO swapped in between.
+// follow a symlink at the last part. The file it opens must be the file it
+// checked. The open does not block on a FIFO swapped in between. It
+// refuses a file that changes size during the read.
 func readCapped(path string) ([]byte, error) {
-	before, err := os.Lstat(path)
+	abs, err := absPath(path)
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() {
-		return nil, errNotRegular
-	}
-	f, err := openNoBlock(path)
+	f, fi, err := safefile.OpenPath(abs, fileRule)
 	if err != nil {
-		return nil, err
+		return nil, readError(err)
 	}
 	defer f.Close()
-	after, err := f.Stat()
+	if beforeRead != nil {
+		beforeRead()
+	}
+	data, err := safefile.ReadAll(f, fi, fileRule)
 	if err != nil {
-		return nil, err
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, errNotRegular // replaced between the check and the open
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxFileBytes {
-		return nil, errTooLarge
+		return nil, readError(err)
 	}
 	return data, nil
+}
+
+// readError maps a safefile refusal to the errors that readFinding knows.
+// Any other error stays as it is.
+func readError(err error) error {
+	switch {
+	case errors.Is(err, safefile.ErrSymlink),
+		errors.Is(err, safefile.ErrType),
+		errors.Is(err, safefile.ErrChanged):
+		return errNotRegular
+	case errors.Is(err, safefile.ErrSize):
+		return errTooLarge
+	}
+	return err
 }
 
 // readFinding turns a rejected read into a finding. It returns "" for
@@ -72,16 +153,23 @@ func readFinding(name string, err error) string {
 	return ""
 }
 
-// checkSpecDir requires specDir to be a real directory, not a symlink.
+// checkSpecDir requires specDir to name a real directory. It refuses a
+// symlink at the last part, also with a trailing "/" or "/.". A final ".."
+// resolves the part before it. In an absolute path, it does not resolve a
+// ".." after a symlink: it only cleans the path.
 func checkSpecDir(specDir string) error {
-	fi, err := os.Lstat(specDir)
+	abs, err := absPath(specDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", specDir, err)
 	}
-	if !fi.IsDir() {
+	f, _, err := safefile.OpenPath(abs, dirRule)
+	switch {
+	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return errors.New(specDir + ": spec dir must be a directory, not a symlink or file")
+	case err != nil:
+		return fmt.Errorf("%s: %w", specDir, err)
 	}
-	return nil
+	return f.Close()
 }
 
 // printableName returns a known spec file name as is. Any other name

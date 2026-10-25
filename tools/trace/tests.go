@@ -13,13 +13,21 @@
 //
 // A Go test is a top-level func in a *_test.go file. Its name is TestT,
 // then the letter and the two digits of the ID. After the digits, the name
-// ends or has a character that is not an ASCII digit. Thus T-S-16 gives
-// TestTS16Anything. The tool finds the funcs with go/parser. Thus a name
-// in a string or a comment does not count.
+// ends or has a character that is not a digit (of any script). Thus T-S-16
+// gives TestTS16Anything. The tool finds the funcs with go/parser. Thus a
+// name in a string or a comment does not count.
+//
+// A file that go test does not build does not count either. The file has
+// a name or a directory that starts with "_" or ".". Or it is in a nested
+// module. Or it is for another GOOS or GOARCH. Or a build constraint is
+// false, with the tag "race" set as in every CI test run. A build line or
+// a file header that does not parse gives a finding.
 //
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a target. The Makefile must have a line that starts with the target
-// name and a colon, not followed by "=". The tool does not run make.
+// name and a colon. The rest of the line must not be a variable assignment.
+// A line that ends in an odd number of backslashes continues in the next
+// line, as in make. The tool does not run make.
 //
 // Findings print test IDs, milestone IDs, row and line numbers, and counts.
 // A file path shows as "unlisted file <hash>" (printableName). No text of
@@ -29,16 +37,22 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -261,9 +275,39 @@ func checkRows(rows []msRow, declared map[string]bool) []string {
 	return findings
 }
 
-// skipDir reports whether the walk skips a directory.
+// skipDir reports whether the walk skips a directory. The go tool ignores
+// a directory with a name that starts with "." or "_".
 func skipDir(name string) bool {
-	return name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".")
+	return name == "testdata" || name == "vendor" ||
+		strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+// isNestedModule reports whether dir has its own go.mod. The go tool does
+// not build such a directory as part of the module above it. A go.mod that
+// is a directory or a dangling symlink makes no module.
+func isNestedModule(dir string) bool {
+	fi, err := os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil && !fi.IsDir()
+}
+
+// isBuilt reports whether go test builds the file. The name, the GOOS and
+// GOARCH suffix and the build constraints must allow it. Every CI test run
+// sets the tag "race", so the check sets it too. The check reads data, the
+// same bytes that the parser reads. An error means that the file does not
+// count. Then go test fails the package with "setup failed".
+func isBuilt(dir, name string, data []byte) (bool, error) {
+	ctxt := build.Default
+	ctxt.BuildTags = append(slices.Clone(ctxt.BuildTags), "race")
+	ctxt.OpenFile = func(string) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	return ctxt.MatchFile(dir, name)
+}
+
+// parseTestFile parses one Go file. Each file has its own FileSet: a shared
+// set keeps the line table of every file for the whole walk.
+func parseTestFile(name string, data []byte) (*ast.File, error) {
+	return parser.ParseFile(token.NewFileSet(), name, data, parser.SkipObjectResolution)
 }
 
 // findTestFuncs walks root and returns the test IDs that have a Go test.
@@ -276,7 +320,6 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 	var findings []string
 	parsed := 0
 	unreadable := 0
-	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if path == root {
 			return err // an unreadable root is fatal
@@ -289,7 +332,7 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDir(d.Name()) {
+			if skipDir(d.Name()) || isNestedModule(path) {
 				return fs.SkipDir
 			}
 			return nil
@@ -316,7 +359,15 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 			unreadable++
 			return nil
 		}
-		file, parseErr := parser.ParseFile(fset, d.Name(), data, parser.SkipObjectResolution)
+		built, buildErr := isBuilt(filepath.Dir(path), d.Name(), data)
+		if buildErr != nil {
+			findings = append(findings, fmt.Sprintf("tests: %s has a build line or file header that does not parse", label))
+			return nil
+		}
+		if !built {
+			return nil
+		}
+		file, parseErr := parseTestFile(d.Name(), data)
 		if parseErr != nil {
 			findings = append(findings, fmt.Sprintf("tests: %s does not parse as Go", label))
 		}
@@ -360,7 +411,7 @@ func idFromTestName(name string) string {
 	if letter < 'A' || letter > 'Z' || d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9' {
 		return ""
 	}
-	if len(rest) > 3 && rest[3] >= '0' && rest[3] <= '9' {
+	if next, _ := utf8.DecodeRuneInString(rest[3:]); unicode.IsDigit(next) {
 		return ""
 	}
 	return fmt.Sprintf("T-%c-%c%c", letter, d1, d2)
@@ -433,12 +484,48 @@ func validTarget(s string) bool {
 	return true
 }
 
-// hasRule reports whether a line starts with "target:" and is a rule, not
-// a ":=" assignment.
+// hasRule reports whether a line starts with "target:" and is a rule. A
+// variable assignment is not a rule: "target:=1", "target::=1" and the
+// target-specific form "target: X = 1". A line that ends in an odd number
+// of backslashes continues in the next line, as in make. As in make, one
+// CR before the LF is not part of the line.
 func hasRule(lines []string, target string) bool {
-	for _, l := range lines {
+	for i := 0; i < len(lines); i++ {
+		l := strings.TrimSuffix(lines[i], "\r")
+		for i+1 < len(lines) && continues(l) {
+			i++
+			l = l[:len(l)-1] + " " + strings.TrimSuffix(lines[i], "\r")
+		}
 		rest, ok := strings.CutPrefix(l, target+":")
-		if ok && !strings.HasPrefix(rest, "=") {
+		if ok && !isAssignment(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// continues reports whether a line ends in an odd number of backslashes.
+func continues(line string) bool {
+	return (len(line)-len(strings.TrimRight(line, `\`)))%2 == 1
+}
+
+// isAssignment reports whether the text after a rule colon has a "=" before
+// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. A "$$"
+// is a literal "$" in make, so it opens no reference.
+func isAssignment(rest string) bool {
+	depth := 0
+	for i := 0; i < len(rest); i++ {
+		switch c := rest[i]; {
+		case c == '$' && i+1 < len(rest) && rest[i+1] == '$':
+			i++
+		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
+			depth++
+		case depth > 0 && (c == ')' || c == '}'):
+			depth--
+		case depth > 0:
+		case c == ';' || c == '#':
+			return false
+		case c == '=':
 			return true
 		}
 	}

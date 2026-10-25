@@ -202,6 +202,14 @@ func TestTestsModeMarkerForMissingTargetFails(t *testing.T) {
 		"# trace-test: T-P-07 perf\nbuild:\n\ttrue\n",
 		"# trace-test: T-P-07 perf\nperf-inner:\n\ttrue\n",
 		"# trace-test: T-P-07 perf\nperf := 1\n",
+		"# trace-test: T-P-07 perf\nperf:=1\n",
+		"# trace-test: T-P-07 perf\nperf::=1\n",
+		"# trace-test: T-P-07 perf\nperf: X = 1\n",
+		"# trace-test: T-P-07 perf\nperf: X := 1\n",
+		"# trace-test: T-P-07 perf\nperf: X?=1\n",
+		"# trace-test: T-P-07 perf\nperf: $(X)Y=1\n",
+		"# trace-test: T-P-07 perf\nperf: ${X}Y=1\n",
+		"# trace-test: T-P-07 perf\nperf: \\\nX = 1\n",
 		"# trace-test: T-P-07 perf\n\tperf:\n",
 		"# trace-test: T-P-07 perf\n",
 	} {
@@ -212,6 +220,69 @@ func TestTestsModeMarkerForMissingTargetFails(t *testing.T) {
 		wantTestsFinding(t, got, "T-P-07", "target")
 		wantTestsFinding(t, got, "T-P-07", "no marker")
 	}
+}
+
+func TestTestsModeRuleLinesAreRules(t *testing.T) {
+	for _, line := range []string{
+		"perf:",
+		"perf: build test",
+		"perf:: build",
+		"perf: $(OBJS:.c=.o)",
+		"perf: ${OBJS:.c=.o}",
+		"perf: build ; X=1",
+		"perf: # X=1",
+		"perf:\n\tX=1",
+		"perf: ) $(X=1)", // a stray closer does not lower the depth
+		"perf: } ${X=1}",
+		"perf: x$", // "$" at the end of the line
+		"perf: \\\n; true",
+		"perf: \\\\\nX = 1", // two backslashes do not continue the line
+	} {
+		files := defaultFiles()
+		files["Makefile"] = "# trace-test: T-P-07 perf\n" + line + "\n"
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		if hasFinding(got, "T-P-07") {
+			t.Errorf("%q is a rule: %v", line, got)
+		}
+	}
+}
+
+// GNU make agrees with each fixture. "make -n perf" finds the rule, or
+// stops with "No rule to make target 'perf'".
+func TestHasRuleMatchesMake(t *testing.T) {
+	for _, tc := range []struct {
+		name, makefile string
+		want           bool
+	}{
+		{"CR LF continuation then assignment", "perf: \\\r\nX = 1\n", false},
+		{"CR LF continuation then recipe", "perf: \\\r\n; true\n", true},
+		{"CR LF after the colon", "perf:\r\n", true},
+		{"CR LF double continuation", "perf: \\\r\n\\\r\nX = 1\n", false},
+		{"CR LF double continuation then recipe", "perf: \\\r\n\\\r\n; true\n", true},
+		{"CR LF continued comment", "# c \\\r\nperf:\n", false},
+		{"double continuation", "perf: \\\n\\\nX = 1\n", false},
+		{"backslash at the end of the file", "perf: \\", true},
+		{"backslash at the end of the last line", "perf: \\\n", true},
+		{"join adds a space", "per\\\nf:\n", false},
+		{"double dollar and parenthesis", "perf: $$(X=1)\n", false},
+		{"double dollar and brace", "perf: $${X=1}\n", false},
+		{"double dollar then reference", "perf: $$(X)=1\n", false},
+		{"double dollar then name", "perf: $$X=1\n", false},
+		{"three dollars", "perf: $$$(X)=1\n", false},
+	} {
+		if got := hasRule(strings.Split(tc.makefile, "\n"), "perf"); got != tc.want {
+			t.Errorf("%s: hasRule(%q) = %v, want %v", tc.name, tc.makefile, got, tc.want)
+		}
+	}
+}
+
+// A continued line does not change the line numbers of the file.
+func TestTestsModeContinuedLinesKeepMarkerLineNumbers(t *testing.T) {
+	files := defaultFiles()
+	files["Makefile"] = "x: \\\ny\n# trace-test: T-P-07\nperf:\n\ttrue\n"
+	specDir, root := newTree(t, defaultRows[:1], files)
+	wantTestsFinding(t, testsAt(t, specDir, root, "M-1"), "Makefile line 3", "malformed marker")
 }
 
 func TestTestsModeMalformedMarkerIsFinding(t *testing.T) {
@@ -308,6 +379,9 @@ func TestTestsModeNameMatchRules(t *testing.T) {
 		{"TestTU06Name", "T-U-06"},
 		{"TestTU061", ""},
 		{"TestTU0612", ""},
+		{"TestTU01١", ""},
+		{"TestTU01١x", ""},
+		{"TestTU01é", "T-U-01"},
 		{"TestTU6", ""},
 		{"TestTU", ""},
 		{"TestTu06", ""},
@@ -355,6 +429,136 @@ func TestTestsModeWalkSkipsAndDoesNotFollow(t *testing.T) {
 		t.Skipf("symlink: %v", err)
 	}
 	wantTestsFinding(t, testsAt(t, specDir, root, "M-1"), "T-U-01")
+}
+
+// A file that go test never builds gives no test ID.
+func TestTestsModeUnbuiltFilesDoNotCount(t *testing.T) {
+	ignored := "//go:build ignore\n\n" + goTests("TestTU01")
+	for name, content := range map[string]string{
+		"_x_test.go":               goTests("TestTU01"),
+		".x_test.go":               goTests("TestTU01"),
+		"_dir/x_test.go":           goTests("TestTU01"),
+		"pkg/_dir/deep/x_test.go":  goTests("TestTU01"),
+		"ignored_test.go":          ignored,
+		"a_plan9_test.go":          goTests("TestTU01"),
+		"b_test.go":                "//go:build plan9\n\n" + goTests("TestTU01"),
+		"norace_test.go":           "//go:build !race\n\n" + goTests("TestTU01"),
+		"nested/x_test.go":         goTests("TestTU01"),
+		"pkg/nested/sub/x_test.go": goTests("TestTU01"),
+	} {
+		files := defaultFiles()
+		files["a_test.go"] = goTests("TestTU06")
+		files["nested/go.mod"] = "module x\n"
+		files["pkg/nested/go.mod"] = "module x\n"
+		files[name] = content
+		specDir, root := newTree(t, defaultRows[:1], files)
+		wantTestsFinding(t, testsAt(t, specDir, root, "M-1"), "T-U-01", "no Go test")
+	}
+}
+
+func TestTestsModeBuiltFilesCount(t *testing.T) {
+	for name, content := range map[string]string{
+		"x_test.go":           "//go:build !plan9\n\n" + goTests("TestTU01"),
+		"y_test.go":           "//go:build unix || windows || js\n\n" + goTests("TestTU01"),
+		"race_test.go":        "//go:build race\n\n" + goTests("TestTU01"),
+		"sub/pkg/y_test.go":   goTests("TestTU01"),
+		"sub/dir_x/z_test.go": goTests("TestTU01"),
+	} {
+		files := defaultFiles()
+		files["a_test.go"] = goTests("TestTU06")
+		files["go.mod"] = "module x\n" // the go.mod of the root is not nested
+		files[name] = content
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		if hasFinding(got, "T-U-01") {
+			t.Errorf("%s: a built file must count, got: %v", name, got)
+		}
+	}
+}
+
+// A build line or file header that does not parse gives a finding. The
+// file does not count. Then go test fails the package.
+func TestTestsModeBadBuildLineIsFindingAndDoesNotCount(t *testing.T) {
+	for _, line := range []string{"//go:build (", "//go:build ignore &&", "// a\x00b"} {
+		files := defaultFiles()
+		files["a_test.go"] = goTests("TestTU06")
+		files["bad_test.go"] = line + "\n\n" + goTests("TestTU01")
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		wantTestsFinding(t, got, "tests: unlisted file", "has a build line or file header that does not parse")
+		wantTestsFinding(t, got, "T-U-01", "no Go test")
+		if len(got) != 2 {
+			t.Errorf("%q: want two findings, got: %v", line, got)
+		}
+	}
+}
+
+// A go.mod that is a directory or a dangling symlink makes no nested module:
+// the go tool builds that directory. A go.mod file or a link to one does.
+func TestTestsModeNestedModuleNeedsAGoModFile(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		setup  func(t *testing.T, dir string)
+		nested bool
+	}{
+		{"file", func(t *testing.T, dir string) { writeFile(t, dir, "go.mod", "module x\n") }, true},
+		{"directory", func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "go.mod"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"dangling symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink("absent", filepath.Join(dir, "go.mod")); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+		}, false},
+		{"symlink to a file", func(t *testing.T, dir string) {
+			writeFile(t, dir, "real.mod", "module x\n")
+			if err := os.Symlink("real.mod", filepath.Join(dir, "go.mod")); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			files := defaultFiles()
+			files["a_test.go"] = goTests("TestTU06")
+			files["sub/x_test.go"] = goTests("TestTU01")
+			specDir, root := newTree(t, defaultRows[:1], files)
+			c.setup(t, filepath.Join(root, "sub"))
+			if got := hasFinding(testsAt(t, specDir, root, "M-1"), "T-U-01"); got != c.nested {
+				t.Errorf("T-U-01 missing = %v, want %v", got, c.nested)
+			}
+		})
+	}
+}
+
+// The build check reads the bytes that the parser reads. A constraint in
+// the given bytes decides, not the file on disk.
+func TestTestsModeBuildCheckUsesTheGivenBytes(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "x_test.go", goTests("TestTU01"))
+	if built, err := isBuilt(dir, "x_test.go", []byte("//go:build ignore\n\npackage x\n")); built || err != nil {
+		t.Errorf("built %v, err %v: the check read the file on disk, not the given bytes", built, err)
+	}
+	if built, err := isBuilt(dir, "absent_test.go", []byte("package x\n")); !built || err != nil {
+		t.Errorf("built %v, err %v: the check needs no file on disk", built, err)
+	}
+}
+
+// Each file has its own FileSet, so the walk keeps no line table.
+func TestTestsModeParseUsesOwnFileSet(t *testing.T) {
+	src := []byte("package x\n")
+	a, err := parseTestFile("a_test.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := parseTestFile("b_test.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Package != b.Package {
+		t.Errorf("positions differ (%d, %d): the files share a FileSet", a.Package, b.Package)
+	}
 }
 
 func TestTestsModeWalkFindsNestedTests(t *testing.T) {

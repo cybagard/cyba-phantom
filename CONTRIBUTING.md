@@ -76,11 +76,14 @@ here only via the maintainer's sync PR, which also rotates the
   test ID in the rows from the top of the table down to the
   `TRACE_MILESTONE` row (in the `Makefile`) needs one of two things. The
   first is a top-level Go test in a `*_test.go` file. Its name starts with
-  `Test` and the ID without dashes, with no ASCII digit after it: T-S-16
-  gives `TestTS16...`. The second is a marker line
+  `Test` and the ID without dashes, with no digit after it (of any script):
+  T-S-16 gives `TestTS16...`. Files that `go test -race` does not build
+  do not count. A build line or file header that does not parse gives a
+  finding. The second is a marker line
   `# trace-test: <ID> <target>` in the `Makefile`. The tool checks only
-  that a line starts with `<target>:` and has no `=` right after the
-  colon. Review checks that the target checks the ID.
+  that a line starts with `<target>:` and that the rest of the line is not
+  a variable assignment. A line that ends in an odd number of backslashes
+  continues in the next line. Review checks that the target checks the ID.
 - `tools/mirror-diff.sh` checks the C1–C10 table in `AGENTS.md` against
   the golden `spec/constitution-table.md`.
 
