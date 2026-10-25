@@ -23,10 +23,11 @@ var errQueueDepth = errors.New("event: queue depth is out of range")
 var errQueueCounters = errors.New("event: queue needs a counters value from NewCounters")
 
 // Queue is the bounded queue between the request path and the writer (SEC-15,
-// C2, C3). It has two lanes. The bulk lane holds request, beacon and refused
-// events and has the capacity of the queue depth. The evidence lane holds the six
-// evidence kinds and has the capacity max(1, depth/4). The kind decides the
-// lane (Kind.IsEvidence). Enqueue drops an event with a kind that is not known.
+// C2, C3). It has two lanes. The bulk lane has the capacity of the queue depth.
+// The evidence lane has the capacity max(1, depth/4). Enqueue puts an event with
+// one of the six evidence kinds in the evidence lane. It puts an event with a
+// request, beacon or refused kind in the bulk lane (Kind.IsEvidence). Enqueue
+// drops an event with a kind that is not known.
 //
 // Each lane has its own byte cap (ADR-019). The bytes that Enqueue reserved are
 // at most 24 MiB in the bulk lane. They are at most 8 MiB in the evidence lane.
@@ -105,9 +106,10 @@ func reserve(sum *atomic.Int64, n, limit int64) bool {
 //   - the queue is closed
 //   - the event is not valid
 //
-// An event with Size() of 0 or less is not valid. The queue counts the bytes
-// that it reserves here. It subtracts the same number when the consumer takes
-// the event. A later change to the event, for example a whole-value
+// A nil event is not valid. An event with a kind that is not known is not
+// valid. An event with Size() of 0 or less is not valid. The queue counts the
+// bytes that it reserves here. It subtracts the same number when the consumer
+// takes the event. A later change to the event, for example a whole-value
 // assignment, cannot change the sum.
 //
 // Do not change e after Enqueue. Enqueue fixes the lane and the reserved bytes
@@ -185,7 +187,8 @@ func (q *Queue) TryTake() (*Event, bool) {
 // accepted event and after Close. A value can arrive when no event is left.
 // When a value arrives, the consumer does these steps:
 //  1. Call TryTake until it returns false.
-//  2. Call Closed. If it returns true, call Drain, then stop.
+//  2. Call Closed. If it returns true, call Drain, handle the events that
+//     Drain returns, then stop.
 //  3. Wait on the channel again.
 func (q *Queue) Ready() <-chan struct{} { return q.wake }
 
@@ -230,10 +233,10 @@ type Bytes struct {
 }
 
 // Bytes returns the sum of the bytes that Enqueue reserved for the queued
-// events of each lane. A sum can be more than the bytes of the events in the
-// lane for a short time. This occurs while a producer or the consumer is
-// between the byte update and the lane update. The bulk sum is never more than
-// 24 MiB. The evidence sum is never more than 8 MiB.
+// events of each lane. A sum can be more than the reserved bytes of the events
+// that are now in the lane, for a short time. This occurs while a producer or
+// the consumer is between the byte update and the lane update. The bulk sum is
+// never more than 24 MiB. The evidence sum is never more than 8 MiB.
 func (q *Queue) Bytes() Bytes {
 	return Bytes{Bulk: q.bulkBytes.Load(), Evidence: q.evidenceBytes.Load()}
 }

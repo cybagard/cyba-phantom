@@ -205,43 +205,55 @@ func TestTU18RecordErrorStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-U-18: an assignment to an event while the batch is in the transaction does
-// not change what the writer stores. The writer reads Record one time for each
-// event. So sha256(record) equals hash, and the record is the bytes of the
-// first value. The assignment runs in the writer goroutine, before AppendBatch.
+// T-U-18: the writer reads Record one time for each event. An assignment to
+// the event after that read changes neither the hash nor the record bytes of
+// the row. So sha256(record) equals hash, and the record is the bytes of the
+// first value. One case assigns in w.clock, after the copy and before the hash.
+// The other case assigns in beforeAppend, after the hash.
 func TestTU18RecordIsReadOnceForHashAndRow(t *testing.T) {
-	r := newRig(t, 100)
-	first, other := rowEvent(t, event.KindCallback, true, 1), rowEvent(t, event.KindCallback, false, 2)
-	want, err := event.EvidenceBytes(first.Record())
-	if err != nil {
-		t.Fatal(err)
+	seams := []struct {
+		name   string
+		assign func(w *Writer, f func())
+	}{
+		{"clock", func(w *Writer, f func()) { w.clock = func() time.Time { f(); return time.Now() } }},
+		{"beforeAppend", func(w *Writer, f func()) { w.beforeAppend = f }},
 	}
-	r.w.beforeAppend = func() { *first = *other }
-	if err := r.w.write([]*event.Event{first}); err != nil {
-		t.Fatal(err)
-	}
-	rows := r.stored()
-	if len(rows) != 1 {
-		t.Fatalf("%d rows, want 1", len(rows))
-	}
-	if sum := sha256.Sum256(rows[0].record); !bytes.Equal(sum[:], rows[0].hash) {
-		t.Errorf("sha256(record) %x is not hash %x", sum, rows[0].hash)
-	}
-	if !bytes.Equal(rows[0].record, want) {
-		t.Errorf("record is %s, want the bytes of the first value %s", rows[0].record, want)
+	for _, s := range seams {
+		t.Run(s.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			first, other := rowEvent(t, event.KindCallback, true, 1), rowEvent(t, event.KindCallback, false, 2)
+			want, err := event.EvidenceBytes(first.Record())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.assign(r.w, func() { *first = *other })
+			if err := r.w.write([]*event.Event{first}); err != nil {
+				t.Fatal(err)
+			}
+			rows := r.stored()
+			if len(rows) != 1 {
+				t.Fatalf("%d rows, want 1", len(rows))
+			}
+			if sum := sha256.Sum256(rows[0].record); !bytes.Equal(sum[:], rows[0].hash) {
+				t.Errorf("sha256(record) %x is not hash %x", sum, rows[0].hash)
+			}
+			if !bytes.Equal(rows[0].record, want) {
+				t.Errorf("record is %s, want the bytes of the first value %s", rows[0].record, want)
+			}
+		})
 	}
 }
 
 // T-U-18: an assignment to an event in the transaction does not change its kind
-// for the writer. The batch has one evidence and one bulk
-// event. The assignment gives one of them the kind of the other. Each row keeps
-// the kind of the first value. Only the evidence row has a hash, a leaf and a
-// record. If the COMMIT fails, the drops count one bulk and one evidence event.
+// for the writer. The batch has one evidence and one bulk event. The assignment
+// gives one of them the kind of the other. Each row keeps the kind of the first
+// value. Only the evidence row has a hash, a leaf and a record. If the COMMIT
+// fails, the drops count one bulk and one evidence event.
 func TestTU18AssignedKindDoesNotChangeTheLane(t *testing.T) {
 	cases := []struct {
-		name     string
-		target   int // index of the event that gets the new value
-		newValue event.Kind
+		name    string
+		target  int // index of the event that gets the new value
+		newKind event.Kind
 	}{
 		{"bulk event gets an evidence value", 1, event.KindCallback},
 		{"evidence event gets a bulk value", 0, event.KindRequest},
@@ -252,7 +264,7 @@ func TestTU18AssignedKindDoesNotChangeTheLane(t *testing.T) {
 				// The clock runs after the copy, before the evidence decision.
 				// beforeAppend runs after the hash.
 				t.Run(fmt.Sprintf("%s, COMMIT fails %v, clock %v", c.name, commitFails, viaClock), func(t *testing.T) {
-					testAssignedKind(t, c.target, c.newValue, commitFails, viaClock)
+					testAssignedKind(t, c.target, c.newKind, commitFails, viaClock)
 				})
 			}
 		}

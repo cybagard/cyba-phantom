@@ -430,11 +430,11 @@ func TestTU17_QueueBytesWithWholeValueAssignment(t *testing.T) {
 
 // T-U-06, T-S-12: Record returns a copy with its own pointers. A caller could
 // change a pointer or map field of Record or FP that the copy shares with the
-// event. The test walks both types with reflect. It compares two
-// copies of one event. A field that Record does not copy has the same pointer
-// in both. A new pointer or map field that Record does not copy fails the test.
-// A field of type any that holds a pointer is not checked. The test needs an
-// event with every field set.
+// event. The test walks both types with reflect. It compares two copies of one
+// event. A field that Record does not copy has the same pointer in both. A new
+// pointer or map field that Record does not copy fails the test. A field of
+// type any that holds a pointer is not checked. The test needs an event with
+// every field set.
 func TestTS12_RecordCopyHasNoSharedPointer(t *testing.T) {
 	var walk func(path string, orig, cp reflect.Value)
 	walk = func(path string, orig, cp reflect.Value) {
