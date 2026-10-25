@@ -39,7 +39,7 @@ func moduleRoot(t *testing.T) string {
 
 // goCommand makes a go tool command that runs in dir. GOFLAGS stops the tool
 // from changing go.mod. Each entry of env replaces the entry of the test.
-func goCommand(t *testing.T, dir string, env []string, args ...string) *exec.Cmd {
+func goCommand(t testing.TB, dir string, env []string, args ...string) *exec.Cmd {
 	t.Helper()
 	goTool, err := exec.LookPath("go")
 	if err != nil {
@@ -134,7 +134,7 @@ func listProblem(dir, errText string) string {
 // for pkgs in the platform c. The context is the same for each package. The
 // flag -e keeps the list for a platform where a dependency has no Go file.
 // On a platform with completeList, a package error or no folder fails t.
-func listDeps(t *testing.T, root string, c buildConfig, pkgs ...string) (string, []listedDep) {
+func listDeps(t testing.TB, root string, c buildConfig, pkgs ...string) (string, []listedDep) {
 	t.Helper()
 	args := append([]string{"list", "-e", "-deps", "-f", depFormat}, pkgs...)
 	out, err := goCommand(t, root, c.env(), args...).Output()
@@ -421,6 +421,54 @@ func TestTS21ReleaseListRealError(t *testing.T) {
 		if len(problems) != tc.want {
 			t.Errorf("%s: %d problems %q, want %d (deps %v)",
 				tc.c.name(), len(problems), problems, tc.want, deps)
+		}
+	}
+}
+
+// recorder is a testing.TB that records the errors instead of failing a test.
+// A call to Fatal or Fatalf records the error and ends the goroutine.
+type recorder struct {
+	testing.TB
+	errs []string
+}
+
+func (r *recorder) Helper() {}
+
+func (r *recorder) Error(args ...any) { r.errs = append(r.errs, fmt.Sprint(args...)) }
+
+func (r *recorder) Errorf(f string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(f, args...))
+}
+
+func (r *recorder) Fatal(args ...any) {
+	r.Error(args...)
+	runtime.Goexit()
+}
+
+func (r *recorder) Fatalf(f string, args ...any) {
+	r.Errorf(f, args...)
+	runtime.Goexit()
+}
+
+// TestTS21ReleaseListDepsReports calls listDeps with a recorder on a path that
+// has no package. It must record an error for linux/amd64 and none for
+// linux/386.
+func TestTS21ReleaseListDepsReports(t *testing.T) {
+	root := moduleRoot(t)
+	missing := modPath + "/internal/egress/testdata/nosuchpkg"
+	for _, tc := range []struct {
+		c    buildConfig
+		want bool
+	}{{buildConfig{"linux", "amd64"}, true}, {buildConfig{"linux", "386"}, false}} {
+		r := &recorder{TB: t}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			listDeps(r, root, tc.c, missing)
+		}()
+		<-done
+		if got := len(r.errs) > 0; got != tc.want {
+			t.Errorf("%s: errors %q, want an error: %t", tc.c.name(), r.errs, tc.want)
 		}
 	}
 }
