@@ -103,15 +103,37 @@ type listedDep struct {
 	ReplaceVersion string // version of the replacement, empty for a folder
 }
 
-// depFormat is the go list format. Each line has six fields, split by tabs.
+// depFormat is the go list format. Each line has seven fields, split by tabs.
+// The last field is the error of the package, quoted.
 const depFormat = "{{context.GOOS}}/{{context.GOARCH}}/{{context.CgoEnabled}}\t" +
 	"{{.ImportPath}}\t{{.Dir}}\t{{with .Module}}{{.Path}}{{end}}\t" +
 	"{{with .Module}}{{with .Replace}}{{.Path}}{{end}}{{end}}\t" +
-	"{{with .Module}}{{with .Replace}}{{.Version}}{{end}}{{end}}"
+	"{{with .Module}}{{with .Replace}}{{.Version}}{{end}}{{end}}\t" +
+	"{{with .Error}}{{printf \"%q\" .Err}}{{end}}"
+
+// completeList tells if the list for c must have no package error. Other
+// platforms can list a dependency that has no Go file for them.
+func completeList(c buildConfig) bool {
+	return c == buildConfig{"linux", "amd64"} || c == buildConfig{"linux", "arm64"} ||
+		c == buildConfig{}
+}
+
+// listProblem tells why the list for a platform with a complete list is not
+// good. It gives "" for a package with no error and a folder.
+func listProblem(dir, errText string) string {
+	switch {
+	case errText != "":
+		return "go list reports the error " + errText
+	case dir == "":
+		return "go list gives no folder"
+	}
+	return ""
+}
 
 // listDeps gives the build context and the packages that go list -deps finds
 // for pkgs in the platform c. The context is the same for each package. The
 // flag -e keeps the list for a platform where a dependency has no Go file.
+// On a platform with completeList, a package error or no folder fails t.
 func listDeps(t *testing.T, root string, c buildConfig, pkgs ...string) (string, []listedDep) {
 	t.Helper()
 	args := append([]string{"list", "-e", "-deps", "-f", depFormat}, pkgs...)
@@ -127,10 +149,13 @@ func listDeps(t *testing.T, root string, c buildConfig, pkgs ...string) (string,
 	var deps []listedDep
 	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 6 || (ctx != "" && f[0] != ctx) {
+		if len(f) != 7 || (ctx != "" && f[0] != ctx) {
 			t.Fatalf("unexpected go list line %q", line)
 		}
 		ctx = f[0]
+		if why := listProblem(f[2], f[6]); why != "" && completeList(c) {
+			t.Errorf("%s on %s: %s", f[1], c.name(), why)
+		}
 		deps = append(deps, listedDep{f[1], f[2], f[3], f[4], f[5]})
 	}
 	return ctx, deps
@@ -195,11 +220,13 @@ func releaseDepProblem(imp string) string {
 	if !ok {
 		return ""
 	}
-	if strings.HasPrefix(rel, "internal/egress/") {
+	// A file system that ignores case maps internal/EGRESS to internal/egress.
+	if strings.HasPrefix(strings.ToLower(rel), "internal/egress/") {
 		return "it is below internal/egress"
 	}
 	for _, el := range strings.Split(rel, "/") {
-		if el == "testdata" || strings.HasPrefix(el, "_") || strings.HasPrefix(el, ".") {
+		if strings.EqualFold(el, "testdata") || strings.HasPrefix(el, "_") ||
+			strings.HasPrefix(el, ".") {
 			return "its path has the element " + el
 		}
 	}
@@ -250,7 +277,12 @@ func TestTS21ReleaseDependencyRule(t *testing.T) {
 		modPath + "/internal/egress/egresstest":        true,
 		modPath + "/internal/egress/internal/seam":     true,
 		modPath + "/internal/egress/other":             true,
+		modPath + "/internal/EGRESS/egresstest":        true,
+		modPath + "/internal/Egress/egresstest":        true,
 		modPath + "/internal/zz/testdata/d":            true,
+		modPath + "/internal/zz/TESTDATA/d":            true,
+		modPath + "/internal/zz/TestData/d":            true,
+		modPath + "/TESTDATA":                          true,
 		modPath + "/internal/zz/_d":                    true,
 		modPath + "/internal/zz/.d":                    true,
 		modPath + "/testdata":                          true,
@@ -312,6 +344,10 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		{"link to the test seam", listedDep{modPath + "/internal/zzseam", in("internal/zzseam"), modPath, "", ""}, true},
 		{"link to a dot folder", listedDep{modPath + "/internal/zzlink", in("internal/zzlink"), modPath, "", ""}, true},
 		{"link out of the root", listedDep{modPath + "/internal/zzout", in("internal/zzout"), modPath, "", ""}, true},
+		{"upper-case test seam path", listedDep{modPath + "/internal/EGRESS/egresstest", in("internal/zz/ok"), modPath, "", ""}, true},
+		{"mixed-case test seam path", listedDep{modPath + "/internal/Egress/egresstest", in("internal/zz/ok"), modPath, "", ""}, true},
+		{"upper-case testdata path", listedDep{modPath + "/internal/zz/TESTDATA/x", in("internal/zz/ok"), modPath, "", ""}, true},
+		{"mixed-case testdata path", listedDep{modPath + "/internal/zz/TestData/x", in("internal/zz/ok"), modPath, "", ""}, true},
 		{"folder that does not exist", listedDep{modPath + "/internal/gone", in("internal/gone"), modPath, "", ""}, true},
 		{"local replace", listedDep{"example.org/zzx", in("internal/zz/testdata/x"), "example.org/zzx", "./internal/zz/testdata/x", ""}, true},
 		{"local replace outside the root", listedDep{"example.org/zzx", outside, "example.org/zzx", outside, ""}, true},
@@ -345,6 +381,30 @@ func TestTS21ReleaseContextCheck(t *testing.T) {
 	} {
 		if contextError(got, c) == nil {
 			t.Errorf("no error for the context %s", got)
+		}
+	}
+}
+
+// TestTS21ReleaseListCheck checks that listProblem fails on a package error
+// and on an empty folder, and that completeList names the three platforms.
+func TestTS21ReleaseListCheck(t *testing.T) {
+	for name, tc := range map[string]struct {
+		dir, errText string
+		bad          bool
+	}{
+		"package with a folder":  {"/src/p", "", false},
+		"package error":          {"/src/p", `"no Go files"`, true},
+		"empty folder":           {"", "", true},
+		"error and empty folder": {"", `"import cycle"`, true},
+	} {
+		if got := listProblem(tc.dir, tc.errText) != ""; got != tc.bad {
+			t.Errorf("%s: listProblem has a problem: %t, want %t", name, got, tc.bad)
+		}
+	}
+	for _, c := range releaseConfigs {
+		want := c.name() == "linux/amd64" || c.name() == "linux/arm64" || c.name() == "default"
+		if completeList(c) != want {
+			t.Errorf("completeList(%s) is %t, want %t", c.name(), !want, want)
 		}
 	}
 }
@@ -388,7 +448,7 @@ func (f finding) String() string {
 var banned = map[string][]string{
 	"net": {"Dial", "DialTimeout", "DialTCP", "DialUDP", "DialIP", "DialUnix",
 		"ListenPacket", "ListenUDP", "ListenIP", "ListenUnixgram",
-		"ListenMulticastUDP"},
+		"ListenMulticastUDP", "FileConn", "FilePacketConn"},
 	"crypto/tls": {"Dial", "DialWithDialer"},
 	"net/http": {"DefaultClient", "DefaultTransport", "Get", "Post", "PostForm",
 		"Head", "ProxyFromEnvironment", "ProxyURL"},
@@ -429,6 +489,8 @@ var egressBanned = map[string][]string{
 var dialImports = []string{
 	"golang.org/x/net/proxy", "golang.org/x/net/http2", "golang.org/x/net/icmp",
 	"golang.org/x/net/websocket", "golang.org/x/crypto/ssh", "github.com/miekg/dns",
+	"golang.org/x/net/quic", "golang.org/x/crypto/acme",
+	"golang.org/x/crypto/acme/autocert",
 }
 
 // dialerHooks are the fields of net.Dialer, http.Transport, http.Client and
@@ -761,7 +823,8 @@ func transportForms(lit *ast.CompositeLit) []string {
 
 // TestTS21SourceHasNoDialerOutsideGuard scans the non-test files of the
 // module. The scan finds only the forms that the tables and cases of scanFile
-// list.
+// list. A child process (os/exec) is not in the scan. A command can open a
+// connection that the scan does not see.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
 	found, err := scan(moduleRoot(t))
 	if err != nil {
@@ -795,6 +858,19 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 		t.Helper()
 		plant(rel, src)
 		want[rel] = forms
+	}
+
+	// The tables name the QUIC and ACME packages and the inherited sockets.
+	for _, p := range []string{"golang.org/x/net/quic", "golang.org/x/crypto/acme",
+		"golang.org/x/crypto/acme/autocert"} {
+		if !slices.Contains(dialImports, p) {
+			t.Errorf("dialImports lacks %s", p)
+		}
+	}
+	for _, name := range []string{"FileConn", "FilePacketConn"} {
+		if !slices.Contains(banned["net"], name) {
+			t.Errorf("banned lacks net.%s", name)
+		}
 	}
 
 	// Each banned name, with the package named by its own import.
@@ -910,6 +986,9 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 		"http.Transport literal without DialContext")
 	plantWant("elided_alias.go", file("\t\"net\"\n",
 		"type PD = *net.Dialer\n\nvar _ = []PD{{}}"),
+		"net.Dialer literal")
+	plantWant("elided_pointer_named.go", file("\t\"net\"\n",
+		"type ds []*net.Dialer\n\nvar _ = []*ds{{{}}}"),
 		"net.Dialer literal")
 	plantWant("elided_named_nested.go", file("\t\"net/http\"\n",
 		"type cs []*http.Client\ntype ncs [][]cs\n\nvar _ = ncs{{{{}}}}"),
