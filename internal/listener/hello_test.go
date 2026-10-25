@@ -3,9 +3,11 @@ package listener
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -344,6 +346,60 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 	r := evs[0].Record()
 	if *r.Method != "PRI" || *r.Status != 404 || r.FP != nil || evs[0].IP() != "127.0.0.1" {
 		t.Fatalf("event: %+v", r)
+	}
+}
+
+// T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
+// configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets the
+// 200 with no body of net/http. Over TLS it gives one request event and no
+// refused event. On the plain socket it gives no Location and no event.
+func TestTS17OptionsStarGoesToHandler(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		code int
+		body string
+	}{{"decoy.test", 405, methodBody}, {"unknown.test", 404, notFoundBody}} {
+		h, q, _ := newHelloQueue(t, 4)
+		rg := newRig(t, 8, testHeaderBytes, defaultTimeouts, h)
+		rg.serve(t)
+		ln := listenLoopback(t)
+		go func() { _ = rg.s.ServePlain(ln, NewRedirect(helloNames)) }()
+		for _, dial := range []func() (net.Conn, error){
+			func() (net.Conn, error) { return dialTLS(rg.addr, rg.clientConfig()) },
+			func() (net.Conn, error) { return dialTCP(ln.Addr().String()) },
+		} {
+			c, err := dial()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(c, "OPTIONS * HTTP/1.1\r\nHost: "+tc.host+"\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			allow := resp.Header.Get("Allow")
+			if resp.StatusCode != tc.code || string(body) != tc.body || resp.Header.Get("Location") != "" || (tc.code == 405) != (allow == "GET, HEAD") {
+				t.Fatalf("host %q: %d %q Allow %q", tc.host, resp.StatusCode, body, allow)
+			}
+			_ = c.Close()
+		}
+		// Shutdown waits until the server has seen the close of each client.
+		if err := rg.s.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("host %q: %d request events, want 1", tc.host, len(evs))
+		}
+		if r := evs[0].Record(); evs[0].Kind() != event.KindRequest || *r.Method != "OPTIONS" || *r.Path != "*" || *r.Status != int64(tc.code) {
+			t.Fatalf("host %q: event %+v", tc.host, r)
+		}
+		if n := len(rg.s.refused.q.Drain()); n != 0 {
+			t.Fatalf("host %q: %d other events on the server queue", tc.host, n)
+		}
 	}
 }
 
