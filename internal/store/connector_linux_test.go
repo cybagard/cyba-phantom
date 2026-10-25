@@ -33,9 +33,10 @@ func fdsOf(t *testing.T, path string) int {
 // watchOpens watches path for opens, from now on. The returned function reads
 // the queue without blocking and returns the number of open events it found.
 // It also watches the closes, but it does not count them. The kernel joins
-// equal events in a row that are not read yet. So open, close, open would give
-// one open event. A close between two opens keeps them apart. An open and a
-// close keep the count of descriptors. They still leave an event here.
+// equal events in a row that are not read yet. Without the close events, open,
+// close, open would give one open event. A close between two opens keeps them
+// apart. An open and a close keep the count of descriptors. They still leave an
+// event here.
 func watchOpens(t *testing.T, path string) func() int {
 	t.Helper()
 	fd, err := syscall.InotifyInit1(syscall.IN_NONBLOCK | syscall.IN_CLOEXEC)
