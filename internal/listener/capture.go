@@ -16,6 +16,9 @@ const (
 	maxALPN         = 255
 )
 
+// The counts are uint8, so a cap over 255 fails the build here.
+var _ = [...]uint8{maxCipherSuites, maxExtensions, maxSigSchemes, maxGroups, maxVersions, maxALPN}
+
 // Hello is the copy of the first ClientHello of a connection. The lists are
 // in wire order and keep GREASE values. All arrays have a fixed size, so the
 // copy has a fixed size.
@@ -98,14 +101,17 @@ func captureHello(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 }
 
 func (s *connState) capture(chi *tls.ClientHelloInfo) {
+	if s.hello.Load() != nil { // the first copy stays; CompareAndSwap covers a race
+		return
+	}
 	h := new(Hello)
-	var c [5]bool
-	h.nCiphers, c[0] = copyCapped(h.ciphers[:], chi.CipherSuites)
-	h.nExtensions, c[1] = copyCapped(h.extensions[:], chi.Extensions)
-	h.nSigSchemes, c[2] = copyCapped(h.sigSchemes[:], chi.SignatureSchemes)
-	h.nGroups, c[3] = copyCapped(h.groups[:], chi.SupportedCurves)
-	h.nVersions, c[4] = copyCapped(h.versions[:], chi.SupportedVersions)
-	h.cut = c[0] || c[1] || c[2] || c[3] || c[4]
+	var cut [5]bool
+	h.nCiphers, cut[0] = copyCapped(h.ciphers[:], chi.CipherSuites)
+	h.nExtensions, cut[1] = copyCapped(h.extensions[:], chi.Extensions)
+	h.nSigSchemes, cut[2] = copyCapped(h.sigSchemes[:], chi.SignatureSchemes)
+	h.nGroups, cut[3] = copyCapped(h.groups[:], chi.SupportedCurves)
+	h.nVersions, cut[4] = copyCapped(h.versions[:], chi.SupportedVersions)
+	h.cut = cut[0] || cut[1] || cut[2] || cut[3] || cut[4]
 	if len(chi.SupportedProtos) > 0 {
 		h.alpnLen = uint8(copy(h.alpn[:], chi.SupportedProtos[0]))
 	}

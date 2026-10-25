@@ -57,6 +57,20 @@ func reply(w http.ResponseWriter, code int, body string) int {
 
 func getOrHead(m string) bool { return m == http.MethodGet || m == http.MethodHead }
 
+// decide makes the choice of both handlers for the Host and method of r. It
+// returns the configured name, the status code and the body: 404 for a Host that
+// is not configured, else 405 for a method other than GET and HEAD, else 200.
+func (n names) decide(r *http.Request) (name string, code int, body string) {
+	name, ok := n.match(r.Host)
+	switch {
+	case !ok:
+		return "", http.StatusNotFound, notFoundBody
+	case !getOrHead(r.Method):
+		return name, http.StatusMethodNotAllowed, methodBody
+	}
+	return name, http.StatusOK, helloBody
+}
+
 // HelloHandler is the handler of the TLS socket. Each request gives one request
 // event.
 type HelloHandler struct {
@@ -77,12 +91,7 @@ func (h *HelloHandler) EventErrors() uint64 { return h.rec.errs.Load() }
 // configured name with GET or HEAD, 405 for another method, else 404. It
 // records one request event with the status code that it writes.
 func (h *HelloHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	code, body := http.StatusOK, helloBody
-	if _, ok := h.names.match(r.Host); !ok {
-		code, body = http.StatusNotFound, notFoundBody
-	} else if !getOrHead(r.Method) {
-		code, body = http.StatusMethodNotAllowed, methodBody
-	}
+	_, code, body := h.names.decide(r)
 	h.rec.record(r, code)
 	reply(w, code, body)
 }
@@ -96,59 +105,70 @@ func NewRedirect(list []string) *Redirect { return &Redirect{names: newNames(lis
 // ServeHTTP writes a 308 to the https form of the path for a configured name
 // with GET or HEAD, 405 for another method, else 404. It writes no event.
 func (h *Redirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name, ok := h.names.match(r.Host)
-	switch {
-	case !ok:
-		reply(w, http.StatusNotFound, notFoundBody)
-	case !getOrHead(r.Method):
-		reply(w, http.StatusMethodNotAllowed, methodBody)
-	default:
-		w.Header().Set("Location", location(name, r.URL.Path))
-		w.WriteHeader(http.StatusPermanentRedirect)
+	name, code, body := h.names.decide(r)
+	if code != http.StatusOK {
+		reply(w, code, body)
+		return
 	}
+	w.Header().Set("Location", location(name, r.URL))
+	w.WriteHeader(http.StatusPermanentRedirect)
 }
 
-// location makes the target of a redirect: the configured name and the path
-// with each segment escaped. It has no query. It is at most maxLocation bytes,
-// and a cut never splits a %XX escape.
-func location(name, path string) string {
-	// Escaping never makes a byte shorter, so the first maxLocation bytes of
-	// the path give the first maxLocation bytes of the result. The loop writes
-	// at most maxLocation+1 bytes, so that the cut below sees a value that is
-	// too long. The loop stops at the end of the path or when the builder holds
-	// more than maxLocation bytes.
-	if len(path) > maxLocation {
-		path = path[:maxLocation]
+// location makes the target of a redirect: the configured name and the path of
+// u with its escapes kept. It has no query. It never decodes an escape, so a
+// %2F stays %2F. It is at most maxLocation bytes, and a cut never splits a
+// token.
+//
+// The source is RawPath when it is set, else Path. In RawPath, a '%' with two
+// hex digits is one token, written with upper-case hex. '/' is copied. Each
+// other byte is written as url.PathEscape writes it alone; this includes a '%'
+// that starts no valid escape (and each '%' of Path), which gives "%25".
+func location(name string, u *url.URL) string {
+	src, raw := u.RawPath, u.RawPath != ""
+	if !raw {
+		src = u.Path
+	}
+	// Each token is at least as long as the source bytes that it takes, so the
+	// first maxLocation bytes of the source are enough.
+	if len(src) > maxLocation {
+		src = src[:maxLocation]
 	}
 	var b strings.Builder
-	// Each path byte escapes to at most 3 bytes, and one '/' can be added.
-	b.Grow(min(maxLocation+1, len("https://")+len(name)+1+3*len(path)))
+	// Each source byte makes at most 3 bytes, and the code adds at most one '/'.
+	b.Grow(min(maxLocation, len("https://")+len(name)+1+3*len(src)))
 	b.WriteString("https://")
 	b.WriteString(name)
-	if !strings.HasPrefix(path, "/") {
+	if !strings.HasPrefix(src, "/") {
 		b.WriteByte('/')
 	}
-	for b.Len() <= maxLocation {
-		seg, rest, more := strings.Cut(path, "/")
-		esc := url.PathEscape(seg)
-		if room := maxLocation + 1 - b.Len(); len(esc) > room {
-			esc = esc[:room]
+	var tok [3]byte
+	for i := 0; i < len(src); {
+		step, t := 1, tok[:1]
+		switch c := src[i]; {
+		case c == '/':
+			tok[0] = c
+		case c == '%' && raw && i+2 < len(src) && isHex(src[i+1]) && isHex(src[i+2]):
+			step, t = 3, tok[:3]
+			tok = [3]byte{'%', upperHex(src[i+1]), upperHex(src[i+2])}
+		default:
+			t = append(tok[:0], url.PathEscape(string([]byte{c}))...)
 		}
-		b.WriteString(esc)
-		if !more || b.Len() > maxLocation {
+		if b.Len()+len(t) > maxLocation {
 			break
 		}
-		b.WriteByte('/')
-		path = rest
+		b.Write(t)
+		i += step
 	}
-	loc := b.String()
-	if len(loc) > maxLocation {
-		loc = loc[:maxLocation]
-		if loc[maxLocation-1] == '%' {
-			loc = loc[:maxLocation-1]
-		} else if loc[maxLocation-2] == '%' {
-			loc = loc[:maxLocation-2]
-		}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func upperHex(c byte) byte {
+	if c >= 'a' {
+		return c - ('a' - 'A')
 	}
-	return loc
+	return c
 }
