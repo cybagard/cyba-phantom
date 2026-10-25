@@ -65,8 +65,8 @@ func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
 	}
 }
 
-// T-S-15: a file that is put at the name between the make and the second open
-// of a new file is refused. The hook moves the made file away and writes
+// T-S-15: Open refuses a new file if another file gets the name between the
+// make and the second open. The hook moves the made file away and writes
 // another file with mode 0600.
 func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
 	root, state, _ := newState(t)

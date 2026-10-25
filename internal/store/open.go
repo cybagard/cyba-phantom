@@ -113,8 +113,8 @@ func changeDSN(s string) string {
 }
 
 // beforeCreate is a test hook. Production code leaves it nil. A test sets it to
-// change the file system between the open of the parent directory and the make
-// of a new database file.
+// change the file system after Open opens the parent directory. This is before
+// Open makes a new database file.
 var beforeCreate func()
 
 // beforeRefuse is a test hook. Production code leaves it nil. A test sets it to
@@ -135,8 +135,8 @@ var heap struct {
 //     -shm and -journal files. A directory is real, owned by the sensor user,
 //     with no group or other bits. A file is absent or safe. A new database
 //     file is made through the checked parent directory with mode 0600. Then
-//     Open opens it again read-only, checks that both descriptors point to the
-//     same file, and closes the one that can write.
+//     Open opens it again read-only. It checks that both descriptors point to
+//     the same file, and closes the one that can write.
 //   - After the open, and on each new connection: database_list, the
 //     directories, the four files, and the identity of the database file. The
 //     file is the same file as before, and the path that SQLite opens leads to it.

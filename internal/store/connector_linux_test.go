@@ -141,9 +141,9 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	}
 }
 
-// T-S-15: when Open of a new file gets the held descriptor, one descriptor of
-// the process points to the database file. Open has closed the descriptor that
-// made the file. SQLite has not opened the file yet.
+// T-S-15: Open of a new file gets the held descriptor. At that time, one
+// descriptor of the process points to the database file. Open has closed the
+// descriptor that made the file. SQLite has not opened the file yet.
 func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 	root, state, _ := newState(t)
 	n := -1
