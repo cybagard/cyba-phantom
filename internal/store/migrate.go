@@ -113,6 +113,10 @@ func checkEvent(ctx context.Context, tx *sql.Tx, scripts []string) error {
 	return nil
 }
 
+// onMemory is a test hook. Production code leaves it nil. A test sets it to get
+// the database that newEventText opens in memory.
+var onMemory func(*sql.DB)
+
 // newEventText applies the scripts to a new database in memory. It returns the
 // text that this database stores for the event table, and closes the database.
 func newEventText(ctx context.Context, scripts []string) (string, error) {
@@ -121,6 +125,9 @@ func newEventText(ctx context.Context, scripts []string) (string, error) {
 		return "", err
 	}
 	defer mem.Close()
+	if onMemory != nil {
+		onMemory(mem)
+	}
 	mem.SetMaxOpenConns(1)
 	for _, s := range scripts {
 		if _, err := mem.ExecContext(ctx, s); err != nil {

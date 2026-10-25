@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"io/fs"
 	"os"
@@ -374,6 +375,18 @@ func TestTS15FailedStepInMemoryIsRefused(t *testing.T) {
 	wantRule(t, migrate(db, set, "o"), schemaName, ruleMigrate)
 	if content(t, db, file) != before {
 		t.Fatal("the refused database changed")
+	}
+}
+
+// T-S-15: the database in memory is closed when the step in memory ends.
+func TestTS15DatabaseInMemoryIsClosed(t *testing.T) {
+	var mem *sql.DB
+	setHook(t, &onMemory, func(db *sql.DB) { mem = db })
+	if _, err := newEventText(context.Background(), []string{firstMigration(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if mem == nil || mem.Ping() == nil {
+		t.Fatal("the database in memory is open after newEventText")
 	}
 }
 

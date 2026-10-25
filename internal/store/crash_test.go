@@ -135,7 +135,7 @@ func TestTI07CrashHelper(t *testing.T) {
 func checkEvidence(t *testing.T, db *sql.DB, l *tlog.Log) (size, rows int64) {
 	t.Helper()
 	var bad int
-	if err := db.QueryRow("SELECT count(*) FROM event WHERE kind NOT IN ('request','beacon') AND (hash IS NULL OR leaf_index IS NULL)").Scan(&bad); err != nil || bad != 0 {
+	if err := db.QueryRow("SELECT count(*) FROM event WHERE kind NOT IN ('request','beacon','refused') AND (hash IS NULL OR leaf_index IS NULL)").Scan(&bad); err != nil || bad != 0 {
 		t.Fatalf("%d evidence rows without a hash or a leaf: %v", bad, err)
 	}
 	size, _ = l.Head()

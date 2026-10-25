@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	_ "modernc.org/sqlite" // the CGO-free driver
 )
 
@@ -62,6 +63,17 @@ type Options struct {
 	// import internal/config.
 	Reserved []string
 }
+
+// forbidden are the mode bits that a directory or a file must not have. They
+// are all group and other bits, and the setuid, setgid and sticky bits.
+const forbidden = 0o077 | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+// The rules of the shared file checks (SEC-27). The owner is the effective
+// user.
+var (
+	dirRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelf, Forbid: forbidden}
+	fileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Forbid: forbidden, OneLink: true}
+)
 
 var (
 	fixedDirs  = []string{"keys", "checkpoints"}
@@ -144,13 +156,19 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if err := checkParents(root, rel); err != nil {
 		return nil, err
 	}
-	checked, err := checkFiles(root, rel)
+	dir, last, err := openDir(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer closeDir(root, dir)
+	checked, err := checkFiles(dir, last, rel)
 	if err != nil {
 		return nil, err
 	}
 	absent := checked == nil
 	// The descriptor stays open until the pool closes. While it is open, the
-	// inode of the file cannot be given to a new file.
+	// inode of the file cannot be given to a new file. The open of an existing
+	// file does not block on a FIFO.
 	var held *os.File
 	if absent {
 		held, err = root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -160,7 +178,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 			}
 			return nil, fail(rel, ruleCreate)
 		}
-	} else if held, err = openHeld(root, rel); err != nil {
+	} else if held, _, err = safefile.Open(dir, last, fileRule); err != nil {
 		return nil, fail(rel, ruleChanged)
 	}
 	if onHeld != nil {
@@ -288,79 +306,92 @@ func stateBase(root *os.Root) (string, error) {
 	return base, nil
 }
 
-// checkParents checks the state directory and each directory above rel. Each
-// must exist and be a real directory: Lstat does not follow a link. The owner
-// must be the user that runs the sensor. The mode must have no group or other
-// permission bits and no setuid, setgid or sticky bit.
-func checkParents(root *os.Root, rel string) error {
-	parts := strings.Split(rel, "/")
-	for i := 0; i < len(parts); i++ {
-		dir, name := ".", "state directory"
-		if i > 0 {
-			dir = strings.Join(parts[:i], "/")
-			name = dir
-		}
-		fi, err := root.Lstat(dir)
-		switch {
-		case errors.Is(err, fs.ErrNotExist), err == nil && !fi.IsDir():
-			return fail(name, ruleParent)
-		case err != nil:
-			return fail(name, ruleExamine)
-		}
-		if err := checkOwnerMode(name, fi); err != nil {
-			return err
-		}
+// refusal maps an error of package safefile to a fixed store rule for name. A
+// directory that is a link, is not a directory, or is absent breaks ruleParent.
+// A link that replaces a part while the root opens is a change, so it gives
+// ruleChanged. If that link leads out of the root, it gives ruleExamine. A file
+// that is a link or is not a regular file breaks ruleType.
+func refusal(name string, err error, dir bool) error {
+	switch {
+	case errors.Is(err, safefile.ErrOwner):
+		return fail(name, ruleOwner)
+	case errors.Is(err, safefile.ErrMode):
+		return fail(name, ruleMode)
+	case errors.Is(err, safefile.ErrLinks):
+		return fail(name, ruleLinks)
+	case errors.Is(err, safefile.ErrChanged):
+		return fail(name, ruleChanged)
+	case !dir && (errors.Is(err, safefile.ErrSymlink) || errors.Is(err, safefile.ErrType)):
+		return fail(name, ruleType)
+	case dir && (errors.Is(err, safefile.ErrSymlink) || errors.Is(err, safefile.ErrType) ||
+		errors.Is(err, fs.ErrNotExist)):
+		return fail(name, ruleParent)
 	}
-	return nil
+	// This also covers a system that the package does not support.
+	return fail(name, ruleExamine)
 }
 
-// checkFiles checks the database file and its -wal, -shm and -journal files.
-// Each is absent or a safe file. It returns the FileInfo of the database file
-// that it checked, or nil when that file is absent.
-func checkFiles(root *os.Root, rel string) (db fs.FileInfo, err error) {
+// checkParents checks the state directory and each directory above rel with
+// the rule dirRule. The package does not say which directory failed. So on an
+// error the check runs again for each prefix of rel, to find the first one. If
+// no prefix fails at the second check, the directories changed between the two
+// checks. Then the error names the state directory.
+func checkParents(root *os.Root, rel string) error {
+	err := safefile.CheckParents(root, rel, dirRule)
+	if err == nil {
+		return nil
+	}
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		name := "state directory"
+		if i > 0 {
+			name = strings.Join(parts[:i], "/")
+		}
+		if err := safefile.CheckParents(root, strings.Join(parts[:i+1], "/"), dirRule); err != nil {
+			return refusal(name, err, true)
+		}
+	}
+	return refusal("state directory", err, true)
+}
+
+// openDir opens the directory that holds rel and returns it with the last part
+// of rel. For a path with one part, it returns root itself. It opens no
+// descriptor of the database file.
+func openDir(root *os.Root, rel string) (dir *os.Root, base string, err error) {
+	i := strings.LastIndexByte(rel, '/')
+	if i < 0 {
+		return root, rel, nil
+	}
+	if dir, err = safefile.OpenRoot(root, rel[:i], dirRule); err != nil {
+		return nil, "", refusal(rel[:i], err, true)
+	}
+	return dir, rel[i+1:], nil
+}
+
+// closeDir closes a directory that openDir opened. It keeps root open.
+func closeDir(root, dir *os.Root) {
+	if dir != root {
+		dir.Close()
+	}
+}
+
+// checkFiles checks the database file and its -wal, -shm and -journal files in
+// dir with the rule fileRule. base is the last part of rel. Each file is absent
+// or a safe file. It returns the FileInfo of the database file that it checked,
+// or nil when that file is absent. It opens no file.
+func checkFiles(dir *os.Root, base, rel string) (db fs.FileInfo, err error) {
 	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-		name := rel + suffix
-		fi, err := root.Lstat(name)
-		if errors.Is(err, fs.ErrNotExist) {
+		fi, err := safefile.Check(dir, base+suffix, fileRule)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			continue
-		}
-		if err != nil {
-			return nil, fail(name, ruleExamine)
-		}
-		if err := checkFile(name, fi); err != nil {
-			return nil, err
-		}
-		if suffix == "" {
+		case err != nil:
+			return nil, refusal(rel+suffix, err, false)
+		case suffix == "":
 			db = fi
 		}
 	}
 	return db, nil
-}
-
-// checkFile returns the error for an existing file that is not safe, or nil.
-func checkFile(name string, fi fs.FileInfo) error {
-	if !fi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
-		return fail(name, ruleType)
-	}
-	if nlink, _, ok := fileFacts(fi); ok && nlink != 1 {
-		return fail(name, ruleLinks)
-	}
-	return checkOwnerMode(name, fi)
-}
-
-// checkOwnerMode checks the owner and the mode of a file or a directory. It
-// returns nil when both are safe, and an error when they are not.
-func checkOwnerMode(name string, fi fs.FileInfo) error {
-	_, uid, ok := fileFacts(fi)
-	switch {
-	case !ok:
-		return fail(name, ruleExamine) // fail closed
-	case int64(uid) != euid():
-		return fail(name, ruleOwner)
-	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)&^0o700 != 0:
-		return fail(name, ruleMode)
-	}
-	return nil
 }
 
 // dsn makes the connection string from fixed text and the checked path. The

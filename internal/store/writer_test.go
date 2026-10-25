@@ -387,9 +387,24 @@ func TestTU18EvidenceRowsHaveHashLeafAndRecord(t *testing.T) {
 	}
 	rows.Close() // the pool has one connection
 	var n int
-	q := "SELECT count(*) FROM event WHERE kind IN ('request', 'beacon') AND (hash IS NOT NULL OR leaf_index IS NOT NULL OR record IS NOT NULL)"
+	q := "SELECT count(*) FROM event WHERE kind IN ('request', 'beacon', 'refused') AND (hash IS NOT NULL OR leaf_index IS NOT NULL OR record IS NOT NULL)"
 	if err := r.db.QueryRow(q).Scan(&n); err != nil || n != 0 || r.rows() != 10 {
 		t.Fatalf("bulk rows with evidence columns: %d, %v", n, err)
+	}
+}
+
+// T-U-18: the writer stores a refused event as one bulk row of the kind
+// refused. The row has no hash, no leaf index and no record. The writer gives
+// the log no hash.
+func TestTU18RefusedEventIsStoredAsBulkRow(t *testing.T) {
+	r := newRig(t, 100)
+	if err := r.w.write([]*event.Event{refusedEvent(t, "198.51.100.23", "")}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	q := "SELECT count(*) FROM event WHERE kind = 'refused' AND hash IS NULL AND leaf_index IS NULL AND record IS NULL"
+	if err := r.db.QueryRow(q).Scan(&n); err != nil || n != 1 || r.rows() != 1 || len(r.app.calls) != 0 {
+		t.Fatalf("%d bulk rows of the kind refused, %d rows, %d log calls: %v", n, r.rows(), len(r.app.calls), err)
 	}
 }
 
