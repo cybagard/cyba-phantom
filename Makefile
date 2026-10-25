@@ -175,7 +175,8 @@ perf-inner:
 # the gremlins output. Then it prints each mutant that tests did not kill,
 # with its status, mutator and position. It also prints the Not covered count.
 # It does not fail on the efficacy value. It fails when PKG is empty, and
-# when gremlins fails. The target is not part of all.
+# when gremlins exits with a status that is not 0. make all does not run
+# the target.
 # Example: make mutate PKG=./internal/bundle
 mutate:
 	@if [ -z "$(PKG)" ]; then echo "usage: make mutate PKG=./internal/<pkg>"; exit 2; fi
