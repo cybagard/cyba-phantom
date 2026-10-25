@@ -30,8 +30,8 @@ func membersText(n int) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// recordBytes returns the heap bytes of one Record copy of e, the mean of a
-// fixed number of copies.
+// recordBytes returns the heap bytes of one Record copy of e: the average of
+// a fixed number of copies.
 func recordBytes(e *Event) int64 {
 	const runs = 1000
 	var before, after runtime.MemStats
@@ -145,9 +145,9 @@ func TestTS24_NewEventNoCopyAboveCap(t *testing.T) {
 	}
 }
 
-// T-S-24: ParseDetail refuses the ninth member while it decodes. A flat text
-// of more than 8 members and less than 2 KB makes no more allocations. The
-// comparison is with a text of 9 members.
+// T-S-24: ParseDetail refuses the ninth member while it decodes. The test
+// compares two flat texts under 2 KB: 9 members and 150 members. The second
+// makes no more allocations than the first.
 func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
 	long := membersText(150)
 	if len(long) >= MaxDetailBytes {
@@ -168,8 +168,8 @@ func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
 }
 
 // T-S-24: ParseDetail gives the member error only when it reads a ninth name
-// that the decoder accepts. A text of 8 members with a bad tail gets the text
-// error. A text of 9 valid members gets the member error.
+// that the decoder accepts. A text of 8 members and then a fault gets the
+// text error. A text of 9 valid members gets the member error.
 func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 	const errText = "event: detail text is not a flat object"
 	eight := strings.TrimSuffix(membersText(8), "}")
