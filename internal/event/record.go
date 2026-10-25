@@ -191,8 +191,8 @@ func ParseDetail(text string) (Detail, error) {
 			return nil, bad
 		}
 		// strict sets AllowDuplicateNames(false): the decoder refuses a
-		// repeated name. A map of 8 members and a new name token is then a
-		// ninth member. Stop here, before the decoder reads more members.
+		// repeated name. When the map has 8 members, a new name token starts
+		// a ninth member. Stop here, before the decoder reads more members.
 		if len(d) == maxDetailMembers {
 			return nil, errDetailMembers
 		}
