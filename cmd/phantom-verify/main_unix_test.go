@@ -7,10 +7,111 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
+
+// T-S-14: a state that fails the file rules gives exit 2 and a fixed message.
+// The state directory does not change. A FIFO swapped in after the check does
+// not block the command.
+func TestTS14_StateUnsafe(t *testing.T) {
+	s, keyText := testKey(t, origin)
+	l, _ := testLog(t, 10, `{"n":%d}`)
+	name := stateFile(t, keyText)
+	const want = "phantom-verify: state fault: the state cannot be used\n"
+	for label, tc := range map[string]struct {
+		setup func(t *testing.T, dir, file string)
+		fifo  bool // a FIFO replaces the file after the check
+	}{
+		"second link": {setup: func(t *testing.T, dir, file string) {
+			if err := os.Link(file, filepath.Join(dir, "second.note")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		"directory mode 0755": {setup: func(t *testing.T, dir, _ string) {
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		"FIFO after the check": {fifo: true},
+	} {
+		t.Run(label, func(t *testing.T) {
+			f := newFiles(t)
+			dir := filepath.Join(f.dir, "state")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, name)
+			if err := os.WriteFile(file, checkpointAt(t, l, s, 5), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.setup != nil {
+				tc.setup(t, dir, file)
+			}
+			var before string // a FIFO would block the listing
+			if !tc.fifo {
+				before = stateSnap(t, dir)
+			}
+			var swapped []string // each name after which the swap ran
+			if tc.fifo {
+				safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(n string) {
+					if n != name {
+						return
+					}
+					swapped = append(swapped, n)
+					if err := os.Remove(file); err != nil {
+						t.Error(err)
+					}
+					if err := syscall.Mkfifo(file, 0o600); err != nil {
+						t.Error(err)
+					}
+				}})
+			}
+			key := f.write("key", []byte(keyText))
+			cp := f.write("cp", checkpointAt(t, l, s, 10))
+			t.Setenv("XDG_STATE_HOME", f.dir)
+			type result struct {
+				code           int
+				stdout, stderr string
+			}
+			done := make(chan result, 1)
+			go func() {
+				var stdout, stderr bytes.Buffer
+				code := run([]string{"--key", key, "--checkpoint", cp, "--state", dir}, &stdout, &stderr)
+				done <- result{code, stdout.String(), stderr.String()}
+			}()
+			var r result
+			select {
+			case r = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the command blocked")
+			}
+			if r.code != 2 || r.stdout != "" || r.stderr != want {
+				t.Errorf("exit %d, stdout %q, stderr %q", r.code, r.stdout, r.stderr)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.fifo {
+				if !slices.Equal(swapped, []string{name}) {
+					t.Errorf("the swap ran after the checks of %q, want %q", swapped, name)
+				}
+				if len(entries) != 1 || entries[0].Type()&os.ModeNamedPipe == 0 {
+					t.Errorf("the state directory: %v", entries)
+				}
+				return
+			}
+			if after := stateSnap(t, dir); after != before {
+				t.Errorf("the state directory changed:\n%s\n%s", before, after)
+			}
+		})
+	}
+}
 
 // T-S-14: the command closes the state, and so frees the lock, before it reads
 // the event file. Run 1 blocks on a FIFO as event file. Run 2 on the same state

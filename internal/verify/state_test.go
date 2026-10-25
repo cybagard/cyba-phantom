@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
@@ -336,7 +339,8 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 		"state made, a link": {true, func(f string) error { return os.Symlink("x", f) }, "", ErrState},
 	} {
 		dir := t.TempDir()
-		if err := os.Chmod(dir, 0o700); err != nil { // t.TempDir makes the directory with the umask
+		// t.TempDir makes the directory with the umask.
+		if err := os.Chmod(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		file := filepath.Join(dir, StateFileName(v))
@@ -441,12 +445,13 @@ func wantRefused(t *testing.T, name, dir string, v note.Verifier) {
 	}
 }
 
-// T-S-14: a state directory with a group or other permission bit is refused.
-// The state file does not change.
+// T-S-14: LoadState refuses a state directory with a group or other permission
+// bit. The state file does not change.
 func TestTS14_SharedDirectory(t *testing.T) {
-	for _, mode := range []os.FileMode{0o755, 0o750} {
+	for _, mode := range []os.FileMode{0o755, 0o750, 0o701} {
 		v, dir, file := stateWithFile(t)
-		if err := os.Chmod(dir, mode); err != nil { // not Mkdir, so the umask does not change it
+		// Chmod, not Mkdir, so the umask does not change the mode.
+		if err := os.Chmod(dir, mode); err != nil {
 			t.Fatal(err)
 		}
 		wantRefused(t, mode.String(), dir, v)
@@ -456,7 +461,7 @@ func TestTS14_SharedDirectory(t *testing.T) {
 	}
 }
 
-// T-S-14: a state file with a group or other permission bit is refused.
+// T-S-14: LoadState refuses a state file with a group or other permission bit.
 func TestTS14_SharedFile(t *testing.T) {
 	for _, mode := range []os.FileMode{0o640, 0o604} {
 		v, dir, file := stateWithFile(t)
@@ -470,7 +475,8 @@ func TestTS14_SharedFile(t *testing.T) {
 	}
 }
 
-// T-S-14: a state directory or a state file that another user owns is refused.
+// T-S-14: LoadState refuses a state directory or a state file that another user
+// owns.
 func TestTS14_ForeignOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("os.Chown to another user needs root")
@@ -508,7 +514,8 @@ func TestTS14_MadeDirectoryLoadsAgain(t *testing.T) {
 func TestTS14_LockWaitLimit(t *testing.T) {
 	v, dir, file := stateWithFile(t)
 	before, _ := os.ReadFile(file)
-	held, err := os.Open(dir) // another open file: its lock conflicts in one process
+	// Another open file: its lock conflicts in one process.
+	held, err := os.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,4 +615,277 @@ func TestTS14_LockFault(t *testing.T) {
 	v, dir, _ := stateWithFile(t)
 	testutil.Set(t, &flock, func(int, int) error { return syscall.EBADF })
 	wantRefused(t, "flock fault", dir, v)
+}
+
+// swapAfterCheck makes a hook that runs swap after the check of the state file.
+// The returned slice holds the name of each check after which swap ran.
+func swapAfterCheck(t *testing.T, file string, swap func() error) *[]string {
+	t.Helper()
+	swapped := new([]string)
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name != filepath.Base(file) {
+			return
+		}
+		*swapped = append(*swapped, name)
+		if err := swap(); err != nil {
+			t.Error(err)
+		}
+	}})
+	return swapped
+}
+
+// stateSwap is a change of the state file after the check, and before the open.
+type stateSwap struct {
+	name string
+	fifo bool // the swap leaves a FIFO at the name
+	swap func(dir, file string) error
+}
+
+var stateSwaps = []stateSwap{
+	{"FIFO", true, func(_, file string) error {
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return syscall.Mkfifo(file, 0o600)
+	}},
+	{"file removed", false, func(_, file string) error { return os.Remove(file) }},
+	{"dangling symlink", false, func(_, file string) error {
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return os.Symlink("missing", file)
+	}},
+	{"symlink to another file", false, func(dir, file string) error {
+		if err := os.WriteFile(filepath.Join(dir, "other.note"), []byte("other"), 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+		return os.Symlink("other.note", file)
+	}},
+	{"new inode", false, func(dir, file string) error {
+		if err := os.Rename(file, filepath.Join(dir, "old.note")); err != nil {
+			return err
+		}
+		return os.WriteFile(file, []byte("new"), 0o600)
+	}},
+}
+
+// wantSwapRefused checks the result of a run in which a swap changed the state
+// file after the check. The swap ran once, for the state file only. The run
+// gave ErrState, left no temporary file, and did not write the note written.
+func wantSwapRefused(t *testing.T, tc stateSwap, dir, file string, swapped []string, err error, written []byte) {
+	t.Helper()
+	if want := []string{filepath.Base(file)}; err != ErrState || !slices.Equal(swapped, want) {
+		t.Errorf("error %v after swaps for %q, want ErrState after %q", err, swapped, want)
+	}
+	if tc.fifo {
+		wantOnlyFifo(t, dir)
+		return
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("the temporary file %s is left", e.Name())
+		}
+	}
+	if b, rerr := os.ReadFile(file); rerr == nil && written != nil && bytes.Equal(b, written) {
+		t.Error("the state file holds the new note")
+	}
+}
+
+// boundedCall runs f in a goroutine and fails the test if f blocks for 10
+// seconds.
+func boundedCall(t *testing.T, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call blocked")
+	}
+}
+
+// wantOnlyFifo checks that the directory holds one entry, the FIFO of the swap.
+func wantOnlyFifo(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Type()&os.ModeNamedPipe == 0 {
+		t.Errorf("the directory: %v, %v", entries, err)
+	}
+}
+
+// T-S-14: a swap of the state file after the check gives ErrState in LoadState.
+// The swap is a FIFO, which does not block, or a removed file, a symlink, or a
+// new file. The run writes nothing.
+func TestTS14_SwapAfterCheck(t *testing.T) {
+	for _, tc := range stateSwaps {
+		t.Run(tc.name, func(t *testing.T) {
+			v, dir, file := stateWithFile(t)
+			swapped := swapAfterCheck(t, file, func() error { return tc.swap(dir, file) })
+			var err error
+			boundedCall(t, func() {
+				var st *State
+				if st, err = LoadState(dir, v, StateOptions{}); st != nil {
+					st.Close()
+				}
+			})
+			wantSwapRefused(t, tc, dir, file, *swapped, err, nil)
+		})
+	}
+}
+
+// T-S-14: the same swaps after the check of the second read give ErrState in
+// Update. Update does not rename.
+func TestTS14_SwapAfterCheckInUpdate(t *testing.T) {
+	for _, tc := range stateSwaps {
+		t.Run(tc.name, func(t *testing.T) {
+			s, text := newKey(t, origin)
+			v, _ := ParseKey([]byte(text))
+			l, _ := realLog(t, 10)
+			dir := filepath.Join(t.TempDir(), "state")
+			file := filepath.Join(dir, StateFileName(v))
+			st, err := LoadState(dir, v, StateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
+				t.Fatal(err)
+			}
+			swapped := swapAfterCheck(t, file, func() error { return tc.swap(dir, file) })
+			latest := checkpointAt(t, l, s, 10)
+			boundedCall(t, func() { _, err = st.Update(latest) })
+			wantSwapRefused(t, tc, dir, file, *swapped, err, latest)
+		})
+	}
+}
+
+// T-S-14: LoadState refuses a state file with a second hard link. Both names
+// keep their bytes.
+func TestTS14_SecondLink(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	if err := os.Link(file, filepath.Join(dir, "second.note")); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "second link", dir, v)
+}
+
+// T-S-14: the mode of the state file changes between the load and the write.
+// Then Update gives ErrState, not ErrStateChanged. Nothing changes.
+func TestTS14_ModeChangedDuringRun(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 10)
+	dir := filepath.Join(t.TempDir(), "state")
+	file := filepath.Join(dir, StateFileName(v))
+	st, err := LoadState(dir, v, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, dir)
+	if _, err := st.Update(checkpointAt(t, l, s, 10)); err != ErrState {
+		t.Errorf("error %v, want ErrState", err)
+	}
+	if after := snapshot(t, dir); after != before {
+		t.Errorf("the directory changed:\n%s\n%s", before, after)
+	}
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Errorf("the file mode: %v, %v", fi, err)
+	}
+}
+
+// T-S-14: the lock wait is 30 seconds when StateOptions.LockWait is zero.
+func TestTS14_DefaultLockWait(t *testing.T) {
+	if defaultLockWait != 30*time.Second {
+		t.Errorf("defaultLockWait is %v, want 30s", defaultLockWait)
+	}
+}
+
+// otherOwnerOf sets an OtherOwner hook that is true only for the FileID of
+// path.
+func otherOwnerOf(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ok := safefile.Identity(fi)
+	if !ok {
+		t.Fatal("no identity")
+	}
+	safefiletest.Set(t, safefiletest.Hooks{
+		OtherOwner: func(got safefile.FileID) bool { return got == id },
+	})
+}
+
+// T-S-14: an OtherOwner hook refuses the FileID of the state directory. Then
+// LoadState gives ErrState.
+func TestTS14_OwnerRuleOnOpenDirectory(t *testing.T) {
+	v, dir, _ := stateWithFile(t)
+	otherOwnerOf(t, dir)
+	wantRefused(t, "other owner", dir, v)
+}
+
+// T-S-14: an OtherOwner hook refuses the FileID of the state file. Then
+// LoadState gives ErrState, also when the run is not root.
+func TestTS14_OwnerRuleOnStateFile(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	otherOwnerOf(t, file)
+	wantRefused(t, "other owner", dir, v)
+}
+
+// T-S-14: a byte appended to the state file after the open gives ErrState. The
+// hook runs before the fstat, so the parse of the note refuses the file.
+func TestTS14_FileGrowsAfterOpen(t *testing.T) {
+	v, dir, file := stateWithFile(t)
+	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(name string) {
+		if name != filepath.Base(file) {
+			return
+		}
+		f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if _, err := f.Write([]byte{'x'}); err != nil {
+			t.Error(err)
+		}
+		f.Close()
+	}})
+	st, err := LoadState(dir, v, StateOptions{})
+	if st != nil {
+		st.Close()
+	}
+	if err != ErrState {
+		t.Errorf("error %v, want ErrState", err)
+	}
+}
+
+// T-S-14: each text of a state fault has the "verify:" prefix once, and each
+// still matches ErrState.
+func TestTS14_LockedErrorText(t *testing.T) {
+	for name, err := range map[string]error{"locked": ErrStateLocked, "sync": ErrStateSync} {
+		if n := strings.Count(err.Error(), "verify:"); n != 1 {
+			t.Errorf("%s: %q has the prefix %d times", name, err, n)
+		}
+		if !errors.Is(err, ErrState) {
+			t.Errorf("%s: does not match ErrState", name)
+		}
+	}
 }
