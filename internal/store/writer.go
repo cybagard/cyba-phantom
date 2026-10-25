@@ -227,7 +227,7 @@ func (w *Writer) shutdown(batch []*event.Event) {
 func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		for _, e := range batch {
-			w.drops.add(e)
+			w.drops.add(e.Kind())
 		}
 	} else if err := w.write(batch); err != nil {
 		w.stop(err)
@@ -278,11 +278,17 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if len(batch) == 0 && !w.counters.Pending() {
 		return nil
 	}
+	// One copy of each event. The evidence decision, the hash, the row and the
+	// drop lane use it. A later change to an event has no effect.
+	recs := make([]event.Record, len(batch))
+	for j, e := range batch {
+		recs[j] = e.Record()
+	}
 	committed := false
 	defer func() {
 		if err != nil && !committed {
-			for _, e := range batch {
-				w.drops.add(e)
+			for _, rec := range recs {
+				w.drops.add(rec.Kind)
 			}
 		}
 	}()
@@ -298,15 +304,15 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	w.dk.use(day)
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
-	for j, e := range batch {
-		ok, err := e.Kind().IsEvidence()
+	for j, rec := range recs {
+		ok, err := rec.Kind.IsEvidence()
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
 		if !ok {
 			continue
 		}
-		h, err := event.HashEvidence(e.Record())
+		h, err := event.HashEvidence(rec)
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
@@ -330,7 +336,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 			}
 		}()
 	}
-	committed, err = w.transact(ctx, conn, batch, hs, evidence, day, begin)
+	committed, err = w.transact(ctx, conn, batch, recs, hs, evidence, day, begin)
 	return err
 }
 
@@ -338,7 +344,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 // Suppose AppendBatch returned nil and the transaction ends without a COMMIT.
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
 // one time.
-func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (committed bool, err error) {
+func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
 		if appended && !committed {
@@ -378,7 +384,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if evidence[j] && appendErr != nil {
 			continue
 		}
-		rec := e.Record() // one copy for the record bytes and the row
+		rec := recs[j] // the copy that write hashed
 		if rec.Kind == event.KindRefused {
 			// The row of a refused event gets a session id from the batch day
 			// key. The address and the JA4 text go to no column.

@@ -27,10 +27,10 @@ func (d *DropCount) Load() Drops {
 	return Drops{Bulk: d.bulk.Load(), Evidence: d.evidence.Load()}
 }
 
-// add counts one dropped event for its lane. The lane comes from the kind, as
-// in the queue.
-func (d *DropCount) add(e *event.Event) {
-	if ok, err := e.Kind().IsEvidence(); err == nil && ok {
+// add counts one dropped event of kind k for its lane. The lane comes from the
+// kind, as in the queue.
+func (d *DropCount) add(k event.Kind) {
+	if ok, err := k.IsEvidence(); err == nil && ok {
 		d.evidence.Add(1)
 		return
 	}
@@ -133,6 +133,6 @@ func discardAll(q *event.Queue, d *DropCount) {
 		if !ok {
 			return
 		}
-		d.add(e)
+		d.add(e.Kind())
 	}
 }
