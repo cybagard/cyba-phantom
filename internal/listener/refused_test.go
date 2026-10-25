@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -374,10 +375,14 @@ func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 }
 
 // T-S-22: the caps of a server read a clock that runs from the start of the
-// server. The test moves the start back one hour and reads the clock.
+// server. The test moves the start back one hour and reads the clock. The
+// clock must be at least 1 h and at most 1 h plus the time since the read of
+// the wall clock before it.
 func TestTS22ServerClockRuns(t *testing.T) {
-	if d := monotonicSince(time.Now().Add(-time.Hour))(); d < time.Hour {
-		t.Errorf("monotonicSince gives %v for a start one hour back, want at least 1h", d)
+	before := time.Now()
+	d := monotonicSince(time.Now().Add(-time.Hour))()
+	if limit := time.Hour + time.Since(before); d < time.Hour || d > limit {
+		t.Errorf("monotonicSince gives %v for a start one hour back, want 1h to %v", d, limit)
 	}
 	old := serverStart
 	t.Cleanup(func() { serverStart = old })
@@ -385,12 +390,42 @@ func TestTS22ServerClockRuns(t *testing.T) {
 	cert, _ := testCert(t)
 	q, c := testSinks(t, 16)
 	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
+	before = time.Now()
 	s, err := New(cfg, okHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := s.refused.mono(); d < time.Hour {
-		t.Errorf("the clock of the server gives %v, want at least 1h", d)
+	d = s.refused.mono()
+	if limit := time.Hour + time.Since(before); d < time.Hour || d > limit {
+		t.Errorf("the clock of the server gives %v, want 1h to %v", d, limit)
+	}
+}
+
+// T-S-22: the production start of the clock is the time of the process. The
+// test does not replace the start. The clock of a new server starts near zero.
+func TestTS22ProductionStart(t *testing.T) {
+	if d := time.Since(serverStart()); d < 0 || d > time.Minute {
+		t.Errorf("time since the production start is %v, want 0 to 1m", d)
+	}
+	cert, _ := testCert(t)
+	q, c := testSinks(t, 16)
+	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
+	t0 := time.Now()
+	s, err := New(cfg, okHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := s.refused.mono()
+	if limit := time.Since(t0); d < 0 || d > limit {
+		t.Errorf("the clock of a new server gives %v, want 0 to %v", d, limit)
+	}
+}
+
+// T-S-22: the production start has a monotonic reading, so a step of the wall
+// clock does not move the caps. Such a time prints " m=" in its string form.
+func TestTS22ProductionStartMonotonic(t *testing.T) {
+	if s := serverStart().String(); !strings.Contains(s, " m=") {
+		t.Errorf("the production start %q has no monotonic reading", s)
 	}
 }
 
