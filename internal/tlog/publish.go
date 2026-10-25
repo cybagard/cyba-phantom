@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 // Limits of the publisher (SEC-17).
@@ -49,8 +51,9 @@ type PublishTarget struct{ URL, TokenEnv string }
 
 // publishOption changes the publisher. Only the tests use it, through
 // newPublisher. It sets the clock, the jitter, the timeout, the trusted roots,
-// and the dial address. NewPublisher takes no option, so no caller outside the
-// package can change the dial address.
+// the dial address, and the dialer. NewPublisher takes no option, so no caller
+// outside the package can change the dialer. The dialer of NewPublisher is
+// egress.Dialer.
 type publishOption func(*publishConfig)
 
 type publishConfig struct {
@@ -59,6 +62,7 @@ type publishConfig struct {
 	now      func() time.Time
 	jitter   func() float64 // in [0, 1)
 	dialAddr func(string) string
+	dialer   *net.Dialer // nil: egress.Dialer
 }
 
 // endpoint is a target with the token that NewPublisher read.
@@ -91,8 +95,8 @@ type Publisher struct {
 // error if the interval is below 30 s. It returns an error if two targets have
 // the same URL. It returns an error if a token is empty or not set. It uses its
 // own transport, with no proxy and no redirect. The transport verifies TLS 1.2
-// or later. It does not connect to an unspecified, link-local, or multicast
-// address.
+// or later. It dials only through the egress guard (egress.Dialer), which
+// refuses a resolved address that the guard does not permit (SEC-26).
 func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger) (*Publisher, error) {
 	return newPublisher(spool, targets, interval, log)
 }
@@ -133,10 +137,14 @@ func newPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 		}
 		p.targets = append(p.targets, endpoint{t.URL, token})
 	}
-	dial := newDialer().DialContext
+	dialer := cfg.dialer
+	if dialer == nil {
+		dialer = egress.Dialer(dialTimeout)
+	}
+	dial := dialer.DialContext
 	if cfg.dialAddr != nil {
 		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return newDialer().DialContext(ctx, network, cfg.dialAddr(addr))
+			return dialer.DialContext(ctx, network, cfg.dialAddr(addr))
 		}
 	}
 	p.client = &http.Client{
@@ -210,7 +218,7 @@ func classify(err error) publishError {
 	switch {
 	case errors.Is(err, errPublishRedirect):
 		return errPublishRedirect
-	case errors.Is(err, errPublishAddress):
+	case errors.Is(err, egress.ErrRefused):
 		return errPublishAddress
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
 		return errPublishTimeout

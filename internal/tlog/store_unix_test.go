@@ -420,3 +420,57 @@ func TestTS13StaleTemporaryFileIsReplaced(t *testing.T) {
 		return s.SetHead(259, l.root(t, 259))
 	}))
 }
+
+// plantFile writes a file of size bytes at name below the log directory. It
+// makes the directories of the name.
+func plantFile(t *testing.T, dir, name string, size int) {
+	t.Helper()
+	file := filepath.Join(dir, "tlog", name)
+	mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+	mustNil(t, os.WriteFile(file, make([]byte, size), fileMode))
+}
+
+// A group directory with no search bit lists with no error, but the store
+// cannot read below it. Open must refuse it as it does with no listing.
+func TestTS13OpenRefusesGroupDirectoryWithNoSearchBit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can search a directory with mode 0600")
+	}
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	group := filepath.Join(dir, "tlog", "tile", "8", "0", "x001")
+	mustNil(t, os.MkdirAll(group, dirMode))
+	mustNil(t, os.Chmod(group, 0o600))
+	t.Cleanup(func() { os.Chmod(group, dirMode) })
+	openErr(t, state, ruleRead)
+}
+
+// A group directory that is a link can point to another directory. Open must
+// refuse the link. The listing of a link fails, so Open asks for each name.
+func TestTS13OpenRefusesGroupDirectoryLink(t *testing.T) {
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	plantFile(t, dir, "real/234.tmp", 3)
+	level := filepath.Join(dir, "tlog", "tile", "8", "0")
+	mustNil(t, os.MkdirAll(level, dirMode))
+	mustNil(t, os.Symlink("../../../real", filepath.Join(level, "x001")))
+	if e := openErr(t, state, ruleLink); e.Name != "tile/8/0/x001" {
+		t.Fatalf("name %q", e.Name)
+	}
+}
+
+// A group directory with more than 4*groupTiles names is too large to list.
+// Open must still delete the temporary file of a tile in the range.
+func TestTS13OpenTidiesGroupDirectoryWithManyNames(t *testing.T) {
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	for i := 0; i <= 4*groupTiles; i++ {
+		plantFile(t, dir, fmt.Sprintf("tile/8/0/x001/j%05d", i), 0)
+	}
+	plantFile(t, dir, "tile/8/0/x001/234.tmp", 3)
+	openStore(t, state).Close()
+	tmp := filepath.Join(dir, "tlog", "tile", "8", "0", "x001", "234.tmp")
+	if _, err := os.Lstat(tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the temporary file is still there: %v", err)
+	}
+}

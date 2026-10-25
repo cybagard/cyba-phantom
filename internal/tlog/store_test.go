@@ -829,12 +829,13 @@ func openSkipsATileOutsideTheRange(t *testing.T) {
 	}
 }
 
-// A valid log of more than 8 million leaves has level 0 tiles in more than 32
-// group directories. Open must succeed. The names that it reads depend on the
-// bound for the tiles beyond the head. They do not depend on the size of the
-// log. The test builds the tiles of level 1 and above from arbitrary hashes of
-// the subtrees of 256 leaves. It links one file for all tiles of level 0. Open
-// does not read the tiles of level 0, because the size is a multiple of 256.
+// A log that Open accepts can have more than 8 million leaves. Its level 0
+// tiles are then in more than 32 group directories. Open must succeed. The
+// names that it reads depend on the bound for the tiles beyond the head. They
+// do not depend on the size of the log. The test builds the tiles of level 1
+// and above from arbitrary hashes of the subtrees of 256 leaves. It links one
+// file for all tiles of level 0. Open does not read the tiles of level 0,
+// because the size is a multiple of 256.
 func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	const tiles = 33*groupTiles + 1
 	state, dir := newLogState(t)
@@ -1029,6 +1030,34 @@ func TestTU07OpenDeletesNarrowerPartialFile(t *testing.T) {
 	openStore(t, state)
 	if names := partialFiles(t, dir); !slices.Equal(names, []string{"5"}) {
 		t.Fatalf("files after Open: %v", names)
+	}
+}
+
+// Open tidies the tiles beyond the head in two partial directories that share
+// their parents. It calls fsync on each of these directories one time.
+func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	for n := int64(1); n <= 2; n++ {
+		file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: n, W: 1}.Path())
+		mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+		mustNil(t, os.WriteFile(file, make([]byte, tlog.HashSize), fileMode))
+	}
+	counts := map[string]int{}
+	oldDir := syncDirFile
+	t.Cleanup(func() { syncDirFile = oldDir })
+	syncDirFile = func(f *os.File) error {
+		counts[f.Name()]++
+		return oldDir(f)
+	}
+	openStore(t, state)
+	for name, n := range counts {
+		if n > 1 {
+			t.Errorf("fsync of %s: %d calls, want 1", name, n)
+		}
+	}
+	if len(counts) < 3 {
+		t.Fatalf("fsync calls: %v, want the shared parents and the partial directories", counts)
 	}
 }
 

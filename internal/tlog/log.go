@@ -141,7 +141,7 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 		return 0, newError("log", ruleFull)
 	}
 	// This is the bound of SetHead and WriteTile. The batch gives new hashes to
-	// exactly the tiles that it counts.
+	// exactly the tiles that batchTiles counts.
 	if batchTiles(n, n+int64(len(hs))) > maxBatchTiles {
 		return 0, newError("log", ruleBatch)
 	}
