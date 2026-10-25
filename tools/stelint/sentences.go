@@ -93,14 +93,15 @@ func (t target) changedBreak(g []textLine) bool {
 
 // isASTDirective reports whether a "//" comment is a go/ast directive token.
 // It starts with "//", a name of a-z and 0-9, a colon, and one of a-z and 0-9.
-// It has no space rune after "//", except at the end.
+// It has no space rune after "//", except at the end. A space is a rune for
+// which isBlank is true.
 func isASTDirective(lit string) bool {
 	s, ok := strings.CutPrefix(lit, "//")
 	if !ok {
 		return false
 	}
-	s = strings.TrimRightFunc(s, unicode.IsSpace)
-	if strings.IndexFunc(s, unicode.IsSpace) >= 0 {
+	s = strings.TrimRightFunc(s, isBlank)
+	if strings.IndexFunc(s, isBlank) >= 0 {
 		return false
 	}
 	name := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
@@ -114,11 +115,15 @@ func isASTDirective(lit string) bool {
 // commentGroups returns the text of the comments of src. A run of "//"
 // comments on adjacent lines is one group, when each starts its line. A "//"
 // comment after code starts a group. A "//" line that starts its line
-// continues it. This holds when the line is directly after the trailing
-// comment and starts at the same column. So does each next such line. Each
-// "/* */" comment is a group of its own. A directive ends a group. A comment
-// that isDirective does not know, and that is only a go/ast directive token,
-// adds no words. On a line of its own, it does not end the group. The next
+// continues it, when the line is directly after the group. The line must start
+// at the column of the trailing comment. It can also start at the indent column
+// of the code line. Then the last line of the group must not end with an end
+// mark. An end mark is ".", "?" or "!". Spaces at the end of that line do not
+// count. Each next such line also continues the group. In such a group, the
+// indent of a line is removed. So it does not make a code block. Each "/* */"
+// comment is a group of its own. A directive ends a group. A comment that
+// isDirective does not know, and that is only a go/ast directive token, adds
+// no words. On a line of its own, it does not end the group. The next
 // "//" line is adjacent to the line before it. This does not hold for a group
 // that starts after code, with the token at another column. After code, the
 // code ends the group. With more text, the comment is ordinary comment text.
@@ -131,10 +136,11 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	s.Init(file, src, func(token.Position, string) {}, scanner.ScanComments)
 
 	var (
-		cur      []textLine
-		prevEnd  int
-		trail    bool // cur starts with a comment after code
-		trailCol int
+		cur       []textLine
+		prevEnd   int
+		trail     bool // cur starts with a comment after code
+		trailCol  int
+		indentCol int // the indent of the line of code
 	)
 	flush := func() {
 		if cur != nil {
@@ -176,8 +182,13 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 		switch {
 		case strings.TrimSpace(before) != "":
 			flush()
-			cur, trail, trailCol = []textLine{tl}, true, col
-		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol):
+			cur, trail, trailCol = []textLine{unindent(tl)}, true, col
+			line := lines[p.Line-1]
+			indentCol = width(line[:len(line)-len(strings.TrimLeft(line, " \t"))])
+		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol || col == indentCol && !endsSentence(cur[len(cur)-1].text)):
+			if trail {
+				tl = unindent(tl)
+			}
 			cur = append(cur, tl)
 		default:
 			flush()
@@ -187,6 +198,20 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	}
 	flush()
 	return groups, s.ErrorCount > 0
+}
+
+// unindent removes the spaces and tabs at the start of a line of text. In a
+// text that starts after code, the indent does not make a code block.
+func unindent(l textLine) textLine {
+	l.text = strings.TrimLeft(l.text, " \t")
+	return l
+}
+
+// endsSentence reports whether a line of text ends with ".", "?" or "!". Spaces
+// at the end of the line do not count.
+func endsSentence(text string) bool {
+	text = strings.TrimRight(text, " ")
+	return text != "" && strings.IndexByte(".?!", text[len(text)-1]) >= 0
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
@@ -218,7 +243,8 @@ const (
 // rows and trailer lines. A line is code in a fence of three backticks. A line
 // with a tab or two spaces of indent is also code. This holds when no
 // paragraph or list item is open. In a code block, each indented line stays
-// code.
+// code. A text that starts after code has no indent in its lines, so it has no
+// code block by indent.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -307,11 +333,11 @@ func isTrailer(t string) bool {
 			return false
 		}
 		name, addr := rest[:i-1], rest[i+1:len(rest)-1]
-		words := len(strings.Fields(name))
+		words := len(strings.FieldsFunc(name, isBlank))
 		return words >= 1 && words <= 20 && strings.TrimSpace(name) == name &&
 			!strings.Contains(name, ">") &&
 			strings.Count(addr, "@") == 1 && !strings.ContainsAny(addr, "<>") &&
-			strings.IndexFunc(addr, unicode.IsSpace) < 0
+			strings.IndexFunc(addr, isBlank) < 0
 	}
 	return false
 }
@@ -372,11 +398,22 @@ func (p *para) add(text string, line int) {
 	p.buf = append(p.buf, text...)
 }
 
+// isBlank reports whether a rune is a space for the sentence rule. It is a
+// space when unicode.IsSpace is true. It is also a space for U+115F, U+1160,
+// U+2800, U+3164 and U+FFA0, which render as blank.
+func isBlank(r rune) bool {
+	switch r {
+	case 'ᅟ', 'ᅠ', '⠀', 'ㅤ', 'ﾠ':
+		return true
+	}
+	return unicode.IsSpace(r)
+}
+
 // spaceAt reports whether the rune that starts at byte i of b is a space, as
-// unicode.IsSpace reads it.
+// isBlank reads it.
 func spaceAt(b []byte, i int) bool {
 	r, _ := utf8.DecodeRune(b[i:])
-	return unicode.IsSpace(r)
+	return isBlank(r)
 }
 
 // long returns the sentences of the paragraph that are too long. The scan
@@ -438,7 +475,7 @@ func (p *para) long() []sentence {
 	for i := 0; i < len(b); {
 		c, n := utf8.DecodeRune(b[i:])
 		switch {
-		case unicode.IsSpace(c):
+		case isBlank(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
 			startWord(i)
