@@ -53,7 +53,7 @@ func tempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(abs) })
 	if checkKeyDir(filepath.Join(abs, "k.key")) != nil {
-		t.Fatalf("test directory %s is not usable: each parent of the checkout must have no group or other write bit", abs)
+		t.Fatalf("test directory %s is not usable: each parent of the checkout must belong to you or root, with no group or other write bit", abs)
 	}
 	return abs
 }
@@ -464,8 +464,9 @@ func TestTS20KeyDirIsChecked(t *testing.T) {
 }
 
 // T-S-20: keygen writes the key file in the directory that it checked. A path
-// with "lnk/.." names a private directory as text. The kernel follows lnk to a
-// directory with mode 0777. keygen and sign use the checked directory.
+// with "lnk/.." names a private directory as text. The kernel follows lnk and
+// then ".." to a directory with mode 0777. keygen and sign use the checked
+// directory.
 func TestTS20KeyPathIsOneDirectory(t *testing.T) {
 	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }

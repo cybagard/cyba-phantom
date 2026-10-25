@@ -11,10 +11,10 @@
 // "<key_id> <base64 seed>" and a newline. keygen never writes over a file. It
 // prints the public key line "<key_id> <base64>" first, then it makes the key
 // file. That line is one line of a trust file. keygen never prints the private
-// key. If keygen cannot print the line, it makes no key file. keygen refuses
-// only the null device. It cannot detect another output that drops the line.
-// A line printed before a failure is not valid. When keygen exits 1, the vendor
-// discards the printed line.
+// key. If keygen cannot print the line, it makes no key file. Of the outputs,
+// keygen refuses only the null device. It cannot detect another output that
+// drops the line. A line printed before a failure is not valid. When keygen
+// exits 1, the vendor discards the printed line.
 //
 // pack writes the files below dir as a gzip tar archive with USTAR headers
 // only. dir must have a regular file manifest.json at its top level. If a name
@@ -25,15 +25,17 @@
 // the file is regular, belongs to the effective user, and has one link. The
 // key file must have no group or other bit. keygen and sign check the
 // directories of the key file. Each must belong to the effective user or root.
-// Each must have no group or other write bit. verify calls bundle.VerifySig
-// with the keys of the trust file. It does not check the manifest key ID. It
-// prints the key IDs of the valid lines.
+// Each must have no group or other write bit. keygen and sign make the key
+// path absolute and clean it as text first. So "lnk/.." names the directory
+// that holds lnk, and a trailing "/" has no effect. verify calls
+// bundle.VerifySig with the keys of the trust file. It does not check the
+// manifest key ID. It prints the key IDs of the valid lines.
 //
-// After a failed write or file sync, the output file stays at the path with
-// size 0. After a failed close, directory open or directory sync, it stays
-// with its data. The tool does not remove a file by name. The tool does not
-// check the output directory. The user must use a directory that only the user
-// can write. Else another user can replace a name.
+// After a failed write or file sync, the tool tries to cut the output file to
+// size 0. After a failed close, or a failed open, sync or close of the
+// directory, the file stays with its data. The tool does not remove a file by
+// name. pack and sign do not check the directory of their output file. Use a
+// directory that only you can write. If not, another user can replace a name.
 //
 // Every error text is fixed. Exit codes: 0 success, 1 failure, 2 usage.
 package main
@@ -144,8 +146,8 @@ var (
 // overwrites a file. It syncs the file and then its directory. It never
 // removes a file by name. If the write or the file sync fails, it tries to
 // truncate the open file to size 0. If the truncate fails, the partial data
-// stays. The tool does not check the directory of the path. The user must use
-// a directory that only the user can write.
+// stays. writeNew does not check the directory of the path. The caller must
+// use a directory that only the user can write.
 func writeNew(path string, b []byte, perm fs.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
@@ -221,7 +223,7 @@ func keygen(a []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// One absolute path: the checked directory is the written directory.
+	// keygen uses one absolute path for the check and the write.
 	path, _ := filepath.Abs(a[1])
 	if err := checkKeyDir(path); err != nil {
 		return err
