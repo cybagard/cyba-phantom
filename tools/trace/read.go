@@ -45,8 +45,9 @@ var beforeRead func()
 // absPath makes path absolute. A relative path starts at the working
 // directory of the kernel: syscall.Getwd does not read $PWD. The function
 // resolves a ".." after a name on disk, so a symlink before it counts. It
-// never resolves the last named part. An absolute path is only cleaned.
-// An empty path is an error.
+// removes each trailing "/" and "/." part, and then it does not resolve
+// the last part. A final ".." resolves the name before it. An absolute
+// path is only cleaned. An empty path is an error.
 func absPath(path string) (string, error) {
 	if path == "" {
 		return "", syscall.ENOENT
@@ -152,8 +153,9 @@ func readFinding(name string, err error) string {
 	return ""
 }
 
-// checkSpecDir requires the last named part of specDir to be a real
-// directory, not a symlink. A trailing "/" or "/." does not change that.
+// checkSpecDir requires specDir to name a real directory. It refuses a
+// symlink at the last part, also with a trailing "/" or "/.". A final ".."
+// resolves the part before it.
 func checkSpecDir(specDir string) error {
 	abs, err := absPath(specDir)
 	if err != nil {
