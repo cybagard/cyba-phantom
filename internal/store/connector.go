@@ -67,11 +67,11 @@ func identityOf(rel string, fi fs.FileInfo, err error) (safefile.FileID, error) 
 }
 
 // check runs the parent checks and the file checks. It opens no descriptor of
-// the database file: the close of any descriptor of it would drop the locks of
-// SQLite. The database file must exist: if it is gone, the driver would make a
-// new file, so this is a refusal. The file must be the one that Open holds open.
-// The path that SQLite opens must lead to the same file as the path through the
-// root.
+// the database file. The close of any descriptor of it would drop the locks of
+// SQLite. The database file must exist. If it is gone, the driver would make a
+// new file, so this is a refusal. The file must be the one that Open holds
+// open. The path that SQLite opens must lead to the same file as the path
+// through the root.
 func (c *connector) check() error {
 	if err := checkParents(c.root, c.rel); err != nil {
 		return err

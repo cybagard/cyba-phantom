@@ -312,9 +312,9 @@ func TestTS15UnsafeFileIsRefused(t *testing.T) {
 	})
 }
 
-// otherOwnerOf sets the test hook of the shared file checks, so that the file
-// or directory at one path has another owner. The hook is true for the inode of
-// that path only. The returned function moves the hook to another path.
+// otherOwnerOf sets the test hook of the shared file checks. The file or
+// directory at one path then has another owner. The hook is true for the inode
+// of that path only. The returned function moves the hook to another path.
 func otherOwnerOf(t *testing.T) func(path string) {
 	t.Helper()
 	var target atomic.Pointer[safefile.FileID]
@@ -337,7 +337,7 @@ func otherOwnerOf(t *testing.T) func(path string) {
 }
 
 // T-S-15: a file with another owner is refused. The hook makes the owner of one
-// inode differ from the effective user, so the rule has a test that does not
+// inode differ from the effective user. So the rule has a test that does not
 // need root. The other inodes keep their owner.
 func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f := newFixture(t)
@@ -354,10 +354,10 @@ func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f.refused(t, "events.db", "state directory", ruleOwner)
 }
 
-// T-S-15: a FIFO that someone puts in place of the database file after the file
-// checks and before the open is refused, and Open returns. An open that can
-// block would wait for a writer of the FIFO. The FIFO comes after the Lstat of
-// the file check, or after the Lstat of the checked open.
+// T-S-15: a FIFO is refused when someone puts it in place of the database file.
+// This is after the file checks and before the open. Open returns. An open that
+// can block would wait for a writer of the FIFO. The FIFO comes after the Lstat
+// of the file check, or after the Lstat of the checked open.
 func TestTS15FifoAfterChecksIsRefused(t *testing.T) {
 	for _, when := range []string{"after the file check", "after the Lstat of the open"} {
 		t.Run(when, func(t *testing.T) {

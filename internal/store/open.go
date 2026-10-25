@@ -64,11 +64,12 @@ type Options struct {
 	Reserved []string
 }
 
-// forbidden are the mode bits that a directory or a file must not have: all
-// group and other bits, and the setuid, setgid and sticky bits.
+// forbidden are the mode bits that a directory or a file must not have. They
+// are all group and other bits, and the setuid, setgid and sticky bits.
 const forbidden = 0o077 | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
 
-// The rules of the shared file checks (SEC-27). The owner is the effective user.
+// The rules of the shared file checks (SEC-27). The owner is the effective
+// user.
 var (
 	dirRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelf, Forbid: forbidden}
 	fileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Forbid: forbidden, OneLink: true}
@@ -324,12 +325,13 @@ func refusal(name string, err error, dir bool) error {
 		errors.Is(err, fs.ErrNotExist)):
 		return fail(name, ruleParent)
 	}
-	return fail(name, ruleExamine) // also a system that the package does not support
+	// This also covers a system that the package does not support.
+	return fail(name, ruleExamine)
 }
 
 // checkParents checks the state directory and each directory above rel with
-// the rule dirRule. The package does not say which directory failed, so on an
-// error the check runs again for each prefix of rel to find the first one.
+// the rule dirRule. The package does not say which directory failed. So on an
+// error the check runs again for each prefix of rel, to find the first one.
 func checkParents(root *os.Root, rel string) error {
 	err := safefile.CheckParents(root, rel, dirRule)
 	if err == nil {

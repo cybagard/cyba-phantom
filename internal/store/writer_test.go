@@ -393,8 +393,9 @@ func TestTU18EvidenceRowsHaveHashLeafAndRecord(t *testing.T) {
 	}
 }
 
-// T-U-18: the writer stores a refused event as one bulk row of the kind refused,
-// with no hash, no leaf index and no record, and it gives the log no hash.
+// T-U-18: the writer stores a refused event as one bulk row of the kind
+// refused. The row has no hash, no leaf index and no record. The writer gives
+// the log no hash.
 func TestTU18RefusedEventIsStoredAsBulkRow(t *testing.T) {
 	r := newRig(t, 100)
 	if err := r.w.write([]*event.Event{refusedEvent(t, "198.51.100.23", "")}); err != nil {

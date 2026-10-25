@@ -459,7 +459,7 @@ func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
 	before := snapshot(t, f.outside)
 	renamed := false
 	// The hook runs at the start of the checked open, after the file checks.
-	// The checked open sees the new file only, so the compare of the identity
+	// The checked open sees the new file only. So the compare of the identity
 	// with the checked file finds the change.
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 		if name == "events.db" && !renamed {
@@ -482,7 +482,8 @@ func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
 	}
 }
 
-// fdsOf counts the descriptors of the process that point to path. It needs Linux.
+// fdsOf counts the descriptors of the process that point to path. It needs
+// Linux.
 func fdsOf(t *testing.T, path string) int {
 	t.Helper()
 	ents, err := os.ReadDir("/proc/self/fd")
@@ -500,8 +501,8 @@ func fdsOf(t *testing.T, path string) int {
 
 // T-S-15: the checks of a connection open no descriptor of the database file.
 // The close of any such descriptor would drop the locks of SQLite. The count of
-// descriptors that point to the file is the same before and after the checks,
-// and no check opens the file, also for a file below a parent directory.
+// descriptors that point to the file is the same before and after the checks.
+// No check opens the file, also for a file below a parent directory.
 func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the test reads /proc/self/fd")
