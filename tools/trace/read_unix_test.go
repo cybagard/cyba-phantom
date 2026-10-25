@@ -90,6 +90,31 @@ func TestReadCappedAndCheckSpecDirCloseTheirFiles(t *testing.T) {
 	}
 }
 
+// The directory rule has no owner or mode check. A spec directory may be
+// writable by all, or belong to another user.
+func TestCheckSpecDirAppliesNoOwnerOrModeRule(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSpecDir(dir); err != nil {
+		t.Errorf("mode 0777: %v", err)
+	}
+	st, err := os.Stat("/usr")
+	if err != nil || os.Getuid() == 0 {
+		t.Skip("no foreign-owned directory to check")
+	}
+	if owner, ok := st.Sys().(*syscall.Stat_t); !ok || int(owner.Uid) == os.Getuid() {
+		t.Skip("/usr has the same owner")
+	}
+	if err := checkSpecDir("/usr"); err != nil {
+		t.Errorf("directory of another owner: %v", err)
+	}
+}
+
 // The rule has no owner, mode or link-count check. A spec file may have
 // another owner, be group-writable, or have a second link.
 func TestReadCappedAppliesNoOwnerModeOrLinkRule(t *testing.T) {

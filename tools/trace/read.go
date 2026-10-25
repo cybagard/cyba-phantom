@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
@@ -36,16 +38,57 @@ var (
 	dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny}
 )
 
-// beforeRead is nil in production. A test sets it to change a file between
-// the open and the read.
+// beforeRead is nil in production. A test sets it, through setBeforeRead,
+// to change a file between the open and the read.
 var beforeRead func()
 
+// absPath makes path absolute, as the kernel resolves it. A relative path
+// starts at the working directory of the kernel: syscall.Getwd does not
+// read $PWD. A ".." after a name in path is resolved on disk, so a symlink
+// before it counts. An absolute path is only cleaned.
+func absPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	wd, err := syscall.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if !hasInnerDotDot(path) {
+		return filepath.Join(wd, path), nil
+	}
+	sep := string(filepath.Separator)
+	dir, last := filepath.Split(strings.TrimRight(wd+sep+path, sep))
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, last), nil
+}
+
+// hasInnerDotDot reports whether path has a ".." after a name.
+func hasInnerDotDot(path string) bool {
+	named := false
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if named {
+				return true
+			}
+		default:
+			named = true
+		}
+	}
+	return false
+}
+
 // readCapped reads a regular file of at most maxFileBytes. It does not
-// follow symlinks. The file it opens must be the file it checked. The open
-// does not block on a FIFO swapped in between. A file that changes size
-// during the read is refused.
+// follow a symlink at the last part. The file it opens must be the file it
+// checked. The open does not block on a FIFO swapped in between. A file
+// that changes size during the read is refused.
 func readCapped(path string) ([]byte, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := absPath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +135,7 @@ func readFinding(name string, err error) string {
 
 // checkSpecDir requires specDir to be a real directory, not a symlink.
 func checkSpecDir(specDir string) error {
-	abs, err := filepath.Abs(specDir)
+	abs, err := absPath(specDir)
 	if err != nil {
 		return err
 	}

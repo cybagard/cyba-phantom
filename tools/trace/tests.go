@@ -13,18 +13,21 @@
 //
 // A Go test is a top-level func in a *_test.go file. Its name is TestT,
 // then the letter and the two digits of the ID. After the digits, the name
-// ends or has a character that is not an ASCII digit. Thus T-S-16 gives
-// TestTS16Anything. The tool finds the funcs with go/parser. Thus a name
-// in a string or a comment does not count.
+// ends or has a character that is not a digit (of any script). Thus T-S-16
+// gives TestTS16Anything. The tool finds the funcs with go/parser. Thus a
+// name in a string or a comment does not count.
 //
-// A file that go test does not build does not count either. These files
-// have a name or a directory that starts with "_" or ".". They are in a
-// nested module. They are for another GOOS or GOARCH. Or a build constraint
-// is false.
+// A file that go test does not build does not count either. The file has
+// a name or a directory that starts with "_" or ".". Or it is in a nested
+// module. Or it is for another GOOS or GOARCH. Or a build constraint is
+// false, with the tag "race" set as in every CI test run. A build line that
+// does not parse gives a finding.
 //
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a target. The Makefile must have a line that starts with the target
-// name and a colon, not followed by "=". The tool does not run make.
+// name and a colon, and the rest of the line is not a variable assignment.
+// A line that ends in a backslash goes on in the next line, as in make.
+// The tool does not run make.
 //
 // Findings print test IDs, milestone IDs, row and line numbers, and counts.
 // A file path shows as "unlisted file <hash>" (printableName). No text of
@@ -45,6 +48,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -279,23 +283,25 @@ func skipDir(name string) bool {
 }
 
 // isNestedModule reports whether dir has its own go.mod. The go tool does
-// not build such a directory as part of the module above it.
+// not build such a directory as part of the module above it. A go.mod that
+// is a directory or a dangling symlink makes no module.
 func isNestedModule(dir string) bool {
-	_, err := os.Lstat(filepath.Join(dir, "go.mod"))
-	return err == nil
+	fi, err := os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil && !fi.IsDir()
 }
 
 // isBuilt reports whether go test builds the file. The name, the GOOS and
-// GOARCH suffix and the build constraints must allow it. The check reads
-// data, the same bytes that the parser reads. A file with an error counts
-// as built. The parser then reports it.
-func isBuilt(dir, name string, data []byte) bool {
+// GOARCH suffix and the build constraints must allow it. Every CI test run
+// sets the tag "race", so the check sets it too. The check reads data, the
+// same bytes that the parser reads. An error means that the file does not
+// count: go test does not run it.
+func isBuilt(dir, name string, data []byte) (bool, error) {
 	ctxt := build.Default
+	ctxt.BuildTags = append(slices.Clone(ctxt.BuildTags), "race")
 	ctxt.OpenFile = func(string) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
-	ok, err := ctxt.MatchFile(dir, name)
-	return ok || err != nil
+	return ctxt.MatchFile(dir, name)
 }
 
 // parseTestFile parses one Go file. Each file has its own FileSet: a shared
@@ -353,7 +359,12 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 			unreadable++
 			return nil
 		}
-		if !isBuilt(filepath.Dir(path), d.Name(), data) {
+		built, buildErr := isBuilt(filepath.Dir(path), d.Name(), data)
+		if buildErr != nil {
+			findings = append(findings, fmt.Sprintf("tests: %s has a build line that does not parse", label))
+			return nil
+		}
+		if !built {
 			return nil
 		}
 		file, parseErr := parseTestFile(d.Name(), data)
@@ -475,15 +486,26 @@ func validTarget(s string) bool {
 
 // hasRule reports whether a line starts with "target:" and is a rule. A
 // variable assignment is not a rule: "target:=1", "target::=1" and the
-// target-specific form "target: X = 1".
+// target-specific form "target: X = 1". A line that ends in an odd number
+// of backslashes goes on in the next line, as in make.
 func hasRule(lines []string, target string) bool {
-	for _, l := range lines {
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
+		for i+1 < len(lines) && continues(l) {
+			i++
+			l = l[:len(l)-1] + " " + lines[i]
+		}
 		rest, ok := strings.CutPrefix(l, target+":")
 		if ok && !isAssignment(rest) {
 			return true
 		}
 	}
 	return false
+}
+
+// continues reports whether a line ends in an odd number of backslashes.
+func continues(line string) bool {
+	return (len(line)-len(strings.TrimRight(line, `\`)))%2 == 1
 }
 
 // isAssignment reports whether the text after a rule colon has a "=" before
@@ -494,7 +516,6 @@ func isAssignment(rest string) bool {
 		switch c := rest[i]; {
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
 			depth++
-			i++
 		case depth > 0 && (c == ')' || c == '}'):
 			depth--
 		case depth > 0:

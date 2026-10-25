@@ -81,13 +81,17 @@ func TestCheckSpecDir(t *testing.T) {
 	}
 	for _, name := range []string{"file", "link"} {
 		err := checkSpecDir(name)
-		if err == nil || !strings.Contains(err.Error(), "spec dir must be a directory") {
-			t.Errorf("%s: err %v", name, err)
+		want := name + ": spec dir must be a directory, not a symlink or file"
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: err %v, want %q", name, err, want)
 		}
 	}
 	err := checkSpecDir("absent")
 	if !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), "must be a directory") {
-		t.Errorf("missing directory: err %v", err)
+		t.Fatalf("missing directory: err %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "absent: ") {
+		t.Errorf("missing directory: %q does not start with the name", err)
 	}
 }
 
@@ -107,13 +111,12 @@ func TestTS23FileChangedDuringReadIsRefused(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "f", "some text\n")
 		path := filepath.Join(dir, "f")
-		beforeRead = func() {
+		setBeforeRead(t, func() {
 			if err := change(path); err != nil {
 				t.Error(err)
 			}
-		}
+		})
 		_, err := readCapped(path)
-		beforeRead = nil
 		if !errors.Is(err, errNotRegular) {
 			t.Errorf("%s: err %v, want errNotRegular", name, err)
 		}
@@ -127,14 +130,106 @@ func TestTS23GrowPastCapDuringReadIsTooLarge(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "f", strings.Repeat("a", maxFileBytes))
 	path := filepath.Join(dir, "f")
-	beforeRead = func() {
+	setBeforeRead(t, func() {
 		if err := os.WriteFile(path, bytes.Repeat([]byte("a"), maxFileBytes+1), 0o644); err != nil {
 			t.Error(err)
 		}
-	}
+	})
 	_, err := readCapped(path)
-	beforeRead = nil
 	if !errors.Is(err, errTooLarge) {
 		t.Errorf("err %v, want errTooLarge", err)
+	}
+}
+
+// setBeforeRead sets the test hook of readCapped. The test cleanup removes it.
+func setBeforeRead(t *testing.T, hook func()) {
+	t.Helper()
+	beforeRead = hook
+	t.Cleanup(func() { beforeRead = nil })
+}
+
+// symlinkedCwd makes the tree below and returns the paths. The tree is
+// base/r/repo/spec (a directory), base/r/repo/spec/f.md (a file), and
+// base/h/L, a symlink to base/r/repo. The paths have no symlink.
+func symlinkedCwd(t *testing.T) (base, link string) {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := filepath.Join(base, "r", "repo", "spec")
+	if err := os.MkdirAll(spec, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(base, "h"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, spec, "f.md", "text\n")
+	link = filepath.Join(base, "h", "L")
+	if err := os.Symlink(filepath.Join(base, "r", "repo"), link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	return base, link
+}
+
+// The working directory was entered through a symlink: $PWD names the link.
+// A relative path starts at the real directory, as in the kernel.
+func TestRelativePathInSymlinkedWorkingDirectory(t *testing.T) {
+	_, link := symlinkedCwd(t)
+	t.Chdir(link)
+	if got, err := readCapped("spec/f.md"); err != nil || string(got) != "text\n" {
+		t.Errorf("readCapped: %q, err %v", got, err)
+	}
+	for _, dir := range []string{".", "spec"} {
+		if err := checkSpecDir(dir); err != nil {
+			t.Errorf("checkSpecDir(%q): %v", dir, err)
+		}
+	}
+}
+
+// A ".." after a symlinked working directory names the parent of the real
+// directory, not the parent of the link.
+func TestDotDotAfterSymlinkedWorkingDirectory(t *testing.T) {
+	base, link := symlinkedCwd(t)
+	t.Chdir(link)
+	if err := checkSpecDir("../repo/spec"); err != nil {
+		t.Errorf("checkSpecDir: %v", err)
+	}
+	if got, err := readCapped("../repo/spec/f.md"); err != nil || string(got) != "text\n" {
+		t.Errorf("readCapped: %q, err %v", got, err)
+	}
+	if got, err := absPath("../x"); err != nil || got != filepath.Join(base, "r", "x") {
+		t.Errorf("absPath: %q, err %v", got, err)
+	}
+}
+
+// A ".." after a symlink in the argument is resolved on disk.
+func TestDotDotAfterSymlinkInPath(t *testing.T) {
+	base, _ := symlinkedCwd(t)
+	h := filepath.Join(base, "h")
+	writeFile(t, h, "spec", "a file, not the spec directory")
+	t.Chdir(h)
+	if err := checkSpecDir("L/../repo/spec"); err != nil {
+		t.Errorf("checkSpecDir: %v", err)
+	}
+	for path, want := range map[string]string{
+		"L/..":           filepath.Join(base, "r"),
+		"L/../":          filepath.Join(base, "r"),
+		"L/../repo/spec": filepath.Join(base, "r", "repo", "spec"),
+		"L/./..":         filepath.Join(base, "r"),
+		"L/../../h/L":    filepath.Join(base, "h", "L"),
+		"../h/L":         filepath.Join(base, "h", "L"),
+		"spec":           filepath.Join(h, "spec"),
+		".":              h,
+	} {
+		if got, err := absPath(path); err != nil || got != want {
+			t.Errorf("absPath(%q) = %q, err %v, want %q", path, got, err, want)
+		}
+	}
+	if _, err := absPath("absent/../spec"); err == nil {
+		t.Error("absPath of a missing directory with ..: want an error")
+	}
+	if got, err := absPath("/a/../b/"); err != nil || got != "/b" {
+		t.Errorf("absolute path: %q, err %v", got, err)
 	}
 }
