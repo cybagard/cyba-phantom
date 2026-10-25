@@ -153,3 +153,34 @@ func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 		t.Fatalf("%d descriptors of the new database file, want 1", n)
 	}
 }
+
+// T-S-15: a refused open of a new file leaves no descriptor. The hook swaps
+// the made file for another file. Open refuses, and the process holds no
+// descriptor of either file.
+func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		if name != "events.db" {
+			return
+		}
+		if err := os.Rename(file, file+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("other file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("Open worked with a swapped file")
+	}
+	for _, p := range []string{file, file + ".moved"} {
+		if n := fdsOf(t, p); n != 0 {
+			t.Fatalf("%d descriptors of %s after the refusal, want 0", n, filepath.Base(p))
+		}
+	}
+}

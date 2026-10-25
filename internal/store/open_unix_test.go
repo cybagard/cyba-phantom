@@ -131,6 +131,10 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 	if !held {
 		t.Fatal("the new file is not in the moved directory, or data/events.db exists")
 	}
+	// Refuse removes the made file through the checked directory.
+	if _, err := os.Lstat(filepath.Join(data+".moved", "events.db")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the made file is still in the moved directory: %v", err)
+	}
 }
 
 // T-S-15: a symlink in a parent directory that appears after the file checks
