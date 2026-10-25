@@ -31,8 +31,26 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	}
 }
 
-// eventSchemaText is the fixed text of the event table and of its four indexes.
-const eventSchemaText = `CREATE TABLE event (
+// schemaText is the fixed text of the schema of a new database. It has each
+// statement as sqlite_master stores it, with no semicolon and no comment.
+const schemaText = `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+CREATE TABLE session (
+  id            TEXT PRIMARY KEY,
+  first_seen    INTEGER NOT NULL,
+  last_seen     INTEGER NOT NULL,
+  ip            TEXT,
+  ip_hmac       TEXT NOT NULL,
+  ja4           TEXT, h2_fp TEXT, ua TEXT, hdr_order_hash TEXT,
+  beacon_seen   INTEGER NOT NULL DEFAULT 0,
+  req_count     INTEGER NOT NULL DEFAULT 0,
+  band          TEXT NOT NULL CHECK (band IN ('human','crawler','agent-likely','agent-confirmed')),
+  score         INTEGER NOT NULL DEFAULT 0,
+  family        TEXT,
+  alerted_at    INTEGER
+)
+CREATE INDEX session_band_last ON session(band, last_seen)
+CREATE INDEX session_iphmac ON session(ip_hmac)
+CREATE TABLE event (
   id            INTEGER PRIMARY KEY,
   ts            INTEGER NOT NULL,
   session_id    TEXT REFERENCES session(id),
@@ -54,18 +72,40 @@ const eventSchemaText = `CREATE TABLE event (
 CREATE INDEX event_session ON event(session_id)
 CREATE INDEX event_ts ON event(ts)
 CREATE INDEX event_kind_ts ON event(kind, ts)
-CREATE UNIQUE INDEX event_leaf ON event(leaf_index) WHERE leaf_index IS NOT NULL`
+CREATE UNIQUE INDEX event_leaf ON event(leaf_index) WHERE leaf_index IS NOT NULL
+CREATE TABLE token (
+  token_id      TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL,
+  trap_id       TEXT NOT NULL,
+  issued_at     INTEGER NOT NULL,
+  first_cb_at   INTEGER,
+  cb_count      INTEGER NOT NULL DEFAULT 0
+)
+CREATE TABLE aggregate_day (
+  day TEXT NOT NULL, vhost TEXT NOT NULL, band TEXT NOT NULL, family TEXT,
+  sessions INTEGER NOT NULL, requests INTEGER NOT NULL, callbacks INTEGER NOT NULL,
+  PRIMARY KEY (day, vhost, band, family)
+)
+CREATE TABLE ip_counter (
+  day TEXT NOT NULL, ip_hmac TEXT NOT NULL, requests INTEGER NOT NULL, dropped INTEGER NOT NULL,
+  PRIMARY KEY (day, ip_hmac)
+)
+CREATE TABLE checkpoint (
+  tree_size INTEGER PRIMARY KEY CHECK (tree_size >= 1),
+  root_hash BLOB NOT NULL CHECK (typeof(root_hash) = 'blob' AND length(root_hash) = 32),
+  signed_note TEXT NOT NULL, created_at INTEGER NOT NULL
+)`
 
-// T-U-18: a new database has the fixed text of the event table and of its
-// indexes, not only the text of the embedded file.
-func TestTU18EventSchemaEqualsFixedText(t *testing.T) {
+// T-U-18: a new database has the fixed text of each table and index. The text
+// of the embedded file is not the only proof.
+func TestTU18SchemaEqualsFixedText(t *testing.T) {
 	var got string
-	q := "SELECT group_concat(sql, char(10)) FROM (SELECT sql FROM sqlite_master WHERE tbl_name = 'event' ORDER BY rowid)"
+	q := "SELECT group_concat(sql, char(10)) FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid)"
 	if err := migrated(t).QueryRow(q).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got != eventSchemaText {
-		t.Fatalf("the event schema differs from the fixed text:\n%s\n%s", got, eventSchemaText)
+	if got != schemaText {
+		t.Fatalf("the schema differs from the fixed text:\n%s\n%s", got, schemaText)
 	}
 }
 
@@ -81,19 +121,23 @@ func TestTU18OnlyFirstMigrationExists(t *testing.T) {
 	}
 }
 
-// T-S-22: the schema refuses a refused row with a hash, a leaf index or a
-// record, and takes a refused row with none of them.
+// T-S-22: the schema rejects a row of the `refused` kind with a hash, a leaf
+// index or a record. It takes a row of this kind with none of them.
 func TestTS22RefusedRowHasNoHashLeafOrRecord(t *testing.T) {
 	const ev = "INSERT INTO event (ts, kind, hash, leaf_index, record) VALUES (1, 'refused', ?, ?, ?)"
 	h := bytes.Repeat([]byte{7}, 32)
 	db := migrated(t)
-	for name, args := range map[string][]any{
-		"hash":       {h, nil, nil},
-		"leaf index": {nil, 7, nil},
-		"record":     {nil, nil, []byte("rec")},
+	for _, c := range []struct {
+		name string
+		args []any
+	}{
+		{"hash", []any{h, nil, nil}},
+		{"leaf index", []any{nil, 7, nil}},
+		{"record", []any{nil, nil, []byte("rec")}},
+		{"hash, leaf index and record", []any{h, 7, []byte("rec")}},
 	} {
-		if _, err := db.Exec(ev, args...); err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
-			t.Errorf("refused row with a %s: %v", name, err)
+		if _, err := db.Exec(ev, c.args...); err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+			t.Errorf("refused row with a %s: %v", c.name, err)
 		}
 	}
 	if _, err := db.Exec(ev, nil, nil, nil); err != nil {

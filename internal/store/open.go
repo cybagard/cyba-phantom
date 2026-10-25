@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -87,6 +88,18 @@ var afterVerify func()
 // the descriptor that Open holds open for the pool.
 var onHeld func(*os.File)
 
+// editDSN is a test hook. Production code leaves it nil. A test sets it to
+// change the connection string before the connector reads it.
+var editDSN func(string) string
+
+// changeDSN returns s, or the result of the hook editDSN when a test sets it.
+func changeDSN(s string) string {
+	if editDSN != nil {
+		return editDSN(s)
+	}
+	return s
+}
+
 // beforeRefuse is a test hook. Production code leaves it nil. A test sets it to
 // change the file system before refuse looks at the file at rel.
 var beforeRefuse func()
@@ -156,10 +169,12 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	fi, statErr := held.Stat()
 	// Each failed step calls refuse before it closes the held descriptor or
 	// the pool. While held is open, the inode of the made file is not free.
-	// Thus a file that someone makes later cannot have the same inode. refuse
-	// removes the entry at rel when the Lstat shows the file that this call
-	// made. refuse does not find a change of the entry between the Lstat and
-	// the Remove. If the Stat of the made file failed, refuse removes nothing.
+	// Thus a file that someone makes while held is open cannot have the same
+	// inode. refuse removes the entry at rel when the Lstat shows the file
+	// that this call made. refuse does not find a change of the entry between
+	// the Lstat and the Remove. If someone puts another file at rel in that
+	// window, refuse removes it. If the Stat of the made file failed, refuse
+	// removes nothing.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()
@@ -171,6 +186,12 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		}
 		return err
 	}
+	// refuseClose calls refuse first and then closes c.
+	refuseClose := func(err error, c io.Closer) error {
+		err = refuse(err)
+		c.Close()
+		return err
+	}
 	id, err := identityOf(rel, fi, statErr)
 	if err == nil && !absent {
 		if cid, _ := identityOf(rel, checked, nil); cid != id {
@@ -178,34 +199,26 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		}
 	}
 	if err != nil {
-		err = refuse(err)
-		held.Close()
-		return nil, err
+		return nil, refuseClose(err, held)
 	}
 	if afterChecks != nil {
 		afterChecks()
 	}
 	path := filepath.Join(base, filepath.FromSlash(rel))
-	conn, err := newConnector(root, rel, path, dsn(path, absent), held, id)
+	conn, err := newConnector(root, rel, path, changeDSN(dsn(path, absent)), held, id)
 	if err != nil {
-		err = refuse(err)
-		held.Close()
-		return nil, err
+		return nil, refuseClose(err, held)
 	}
 	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(1)
 	if err := verify(db, rel); err != nil {
-		err = refuse(err)
-		db.Close()
-		return nil, err
+		return nil, refuseClose(err, db)
 	}
 	if afterVerify != nil {
 		afterVerify()
 	}
 	if err := conn.check(); err != nil {
-		err = refuse(err)
-		db.Close()
-		return nil, err
+		return nil, refuseClose(err, db)
 	}
 	return db, nil
 }

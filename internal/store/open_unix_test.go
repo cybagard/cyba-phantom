@@ -109,12 +109,15 @@ func TestTS15RefusedOpenKeepsOtherFileWithSameName(t *testing.T) {
 // it puts the hook's file at the path. While Open holds the descriptor, the
 // hook's file cannot get the inode of the file that Open made. So refuse keeps
 // the hook's file. The rows fail Open at the first connection and at the
-// second checks.
+// second checks. A row also fails Open when it makes the connector.
 func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
 	rows := []struct {
 		name, rule string
 		fail       func(t *testing.T, file string)
 	}{
+		{"connector", ruleOpen, func(t *testing.T, file string) {
+			setHook(t, &editDSN, func(s string) string { return s + "&_pragma=%zz" })
+		}},
 		{"first connection", ruleMode, func(t *testing.T, file string) {
 			setHook(t, &afterChecks, func() {
 				if err := os.Chmod(file, 0o640); err != nil {
@@ -151,9 +154,25 @@ func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
 				t.Fatalf("refuse ran %d times, want 1", ran)
 			}
 			if b, err := os.ReadFile(file); err != nil || string(b) != content {
-				t.Fatalf("the new file is gone or changed: %q, %v", b, err)
+				t.Fatalf("the hook's file is gone or changed: %q, %v", b, err)
 			}
 		})
+	}
+}
+
+// T-S-15: if the Stat of the file that Open made fails, a refused open removes
+// nothing. The hook closes the held descriptor, so that its Stat fails.
+func TestTS15FailedStatKeepsMadeFile(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	setHook(t, &onHeld, func(f *os.File) { f.Close() })
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleExamine)
+	if fi, err := os.Lstat(file); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("the made file is gone: %v", err)
 	}
 }
 
