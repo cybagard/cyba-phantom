@@ -9,8 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"os"
+	"path/filepath"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 var (
@@ -27,37 +28,54 @@ var knownSpecFiles = map[string]bool{
 	"README.md": true, "constitution-table.md": true, "manifest.json": true,
 }
 
+var (
+	// fileRule is the rule for a spec file or a source file. It needs a
+	// regular file of at most maxFileBytes. Owner and mode do not matter.
+	fileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: maxFileBytes}
+	// dirRule is the rule for the spec directory and the tree root.
+	dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny}
+)
+
+// beforeRead is nil in production. A test sets it to change a file between
+// the open and the read.
+var beforeRead func()
+
 // readCapped reads a regular file of at most maxFileBytes. It does not
-// follow symlinks: the file it opens must be the file it checked, and the
-// open does not block on a FIFO swapped in between.
+// follow symlinks. The file it opens must be the file it checked. The open
+// does not block on a FIFO swapped in between. A file that changes size
+// during the read is refused.
 func readCapped(path string) ([]byte, error) {
-	before, err := os.Lstat(path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() {
-		return nil, errNotRegular
-	}
-	f, err := openNoBlock(path)
+	f, fi, err := safefile.OpenPath(abs, fileRule)
 	if err != nil {
-		return nil, err
+		return nil, readError(err)
 	}
 	defer f.Close()
-	after, err := f.Stat()
+	if beforeRead != nil {
+		beforeRead()
+	}
+	data, err := safefile.ReadAll(f, fi, fileRule)
 	if err != nil {
-		return nil, err
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, errNotRegular // replaced between the check and the open
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxFileBytes {
-		return nil, errTooLarge
+		return nil, readError(err)
 	}
 	return data, nil
+}
+
+// readError maps a safefile refusal to the errors that readFinding knows.
+// Any other error stays as it is.
+func readError(err error) error {
+	switch {
+	case errors.Is(err, safefile.ErrSymlink),
+		errors.Is(err, safefile.ErrType),
+		errors.Is(err, safefile.ErrChanged):
+		return errNotRegular
+	case errors.Is(err, safefile.ErrSize):
+		return errTooLarge
+	}
+	return err
 }
 
 // readFinding turns a rejected read into a finding. It returns "" for
@@ -74,14 +92,18 @@ func readFinding(name string, err error) string {
 
 // checkSpecDir requires specDir to be a real directory, not a symlink.
 func checkSpecDir(specDir string) error {
-	fi, err := os.Lstat(specDir)
+	abs, err := filepath.Abs(specDir)
 	if err != nil {
 		return err
 	}
-	if !fi.IsDir() {
+	f, _, err := safefile.OpenPath(abs, dirRule)
+	switch {
+	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return errors.New(specDir + ": spec dir must be a directory, not a symlink or file")
+	case err != nil:
+		return fmt.Errorf("%s: %w", specDir, err)
 	}
-	return nil
+	return f.Close()
 }
 
 // printableName returns a known spec file name as is. Any other name

@@ -17,6 +17,11 @@
 // TestTS16Anything. The tool finds the funcs with go/parser. Thus a name
 // in a string or a comment does not count.
 //
+// A file that go test does not build does not count either. These files
+// have a name or a directory that starts with "_" or ".". They are in a
+// nested module. They are for another GOOS or GOARCH. Or a build constraint
+// is false.
+//
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a target. The Makefile must have a line that starts with the target
 // name and a colon, not followed by "=". The tool does not run make.
@@ -29,16 +34,21 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -261,9 +271,37 @@ func checkRows(rows []msRow, declared map[string]bool) []string {
 	return findings
 }
 
-// skipDir reports whether the walk skips a directory.
+// skipDir reports whether the walk skips a directory. The go tool ignores
+// a directory with a name that starts with "." or "_".
 func skipDir(name string) bool {
-	return name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".")
+	return name == "testdata" || name == "vendor" ||
+		strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+// isNestedModule reports whether dir has its own go.mod. The go tool does
+// not build such a directory as part of the module above it.
+func isNestedModule(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, "go.mod"))
+	return err == nil
+}
+
+// isBuilt reports whether go test builds the file. The name, the GOOS and
+// GOARCH suffix and the build constraints must allow it. The check reads
+// data, the same bytes that the parser reads. A file with an error counts
+// as built. The parser then reports it.
+func isBuilt(dir, name string, data []byte) bool {
+	ctxt := build.Default
+	ctxt.OpenFile = func(string) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	ok, err := ctxt.MatchFile(dir, name)
+	return ok || err != nil
+}
+
+// parseTestFile parses one Go file. Each file has its own FileSet: a shared
+// set keeps the line table of every file for the whole walk.
+func parseTestFile(name string, data []byte) (*ast.File, error) {
+	return parser.ParseFile(token.NewFileSet(), name, data, parser.SkipObjectResolution)
 }
 
 // findTestFuncs walks root and returns the test IDs that have a Go test.
@@ -276,7 +314,6 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 	var findings []string
 	parsed := 0
 	unreadable := 0
-	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if path == root {
 			return err // an unreadable root is fatal
@@ -289,7 +326,7 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDir(d.Name()) {
+			if skipDir(d.Name()) || isNestedModule(path) {
 				return fs.SkipDir
 			}
 			return nil
@@ -316,7 +353,10 @@ func findTestFuncs(root string) (map[string]bool, []string, error) {
 			unreadable++
 			return nil
 		}
-		file, parseErr := parser.ParseFile(fset, d.Name(), data, parser.SkipObjectResolution)
+		if !isBuilt(filepath.Dir(path), d.Name(), data) {
+			return nil
+		}
+		file, parseErr := parseTestFile(d.Name(), data)
 		if parseErr != nil {
 			findings = append(findings, fmt.Sprintf("tests: %s does not parse as Go", label))
 		}
@@ -360,7 +400,7 @@ func idFromTestName(name string) string {
 	if letter < 'A' || letter > 'Z' || d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9' {
 		return ""
 	}
-	if len(rest) > 3 && rest[3] >= '0' && rest[3] <= '9' {
+	if next, _ := utf8.DecodeRuneInString(rest[3:]); unicode.IsDigit(next) {
 		return ""
 	}
 	return fmt.Sprintf("T-%c-%c%c", letter, d1, d2)
@@ -433,12 +473,34 @@ func validTarget(s string) bool {
 	return true
 }
 
-// hasRule reports whether a line starts with "target:" and is a rule, not
-// a ":=" assignment.
+// hasRule reports whether a line starts with "target:" and is a rule. A
+// variable assignment is not a rule: "target:=1", "target::=1" and the
+// target-specific form "target: X = 1".
 func hasRule(lines []string, target string) bool {
 	for _, l := range lines {
 		rest, ok := strings.CutPrefix(l, target+":")
-		if ok && !strings.HasPrefix(rest, "=") {
+		if ok && !isAssignment(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAssignment reports whether the text after a rule colon has a "=" before
+// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count.
+func isAssignment(rest string) bool {
+	depth := 0
+	for i := 0; i < len(rest); i++ {
+		switch c := rest[i]; {
+		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
+			depth++
+			i++
+		case depth > 0 && (c == ')' || c == '}'):
+			depth--
+		case depth > 0:
+		case c == ';' || c == '#':
+			return false
+		case c == '=':
 			return true
 		}
 	}
