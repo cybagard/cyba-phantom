@@ -25,7 +25,7 @@
 //
 // A marker is a Makefile line "# trace-test: T-P-07 perf". It names the ID
 // and a target. The Makefile must have a line that starts with the target
-// name and a colon, and the rest of the line is not a variable assignment.
+// name and a colon. The rest of the line is not a variable assignment.
 // A line that ends in a backslash goes on in the next line, as in make.
 // The tool does not run make.
 //

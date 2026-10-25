@@ -447,7 +447,7 @@ func TestTestsModeBuiltFilesCount(t *testing.T) {
 	}
 }
 
-// A build line that does not parse gives a finding, and the file does not
+// A build line that does not parse gives a finding. The file does not
 // count: go test does not run it.
 func TestTestsModeBadBuildLineIsFindingAndDoesNotCount(t *testing.T) {
 	for _, line := range []string{"//go:build (", "//go:build ignore &&"} {
