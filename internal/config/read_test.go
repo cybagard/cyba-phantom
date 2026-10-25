@@ -14,6 +14,9 @@ import (
 // sepRule is the fixed error text for a raw U+0085, U+2028 or U+2029.
 const sepRule = "contains U+0085, U+2028 or U+2029"
 
+// crRule is the fixed error text for a CR without an LF after it.
+const crRule = "contains a CR without an LF after it"
+
 func TestTS10_Read(t *testing.T) {
 	type row struct {
 		name     string
@@ -28,6 +31,8 @@ func TestTS10_Read(t *testing.T) {
 		ceiling int
 		// size is the expected input length for a file row. 0 means no check.
 		size int
+		// noEcho is text of the input that the error must not hold.
+		noEcho string
 	}
 
 	rows := []row{
@@ -53,6 +58,12 @@ func TestTS10_Read(t *testing.T) {
 		{name: "LineSeparator", input: "foo: bar\u2028baz", wantRule: sepRule, ceiling: 2},
 		{name: "ParagraphSeparator", input: "foo: bar\u2029baz", wantRule: sepRule, ceiling: 2},
 		{name: "HiddenKey", input: "acme:\n  email: a@b.example\u2028  ca: x\n", wantRule: sepRule, ceiling: 2},
+		{name: "LoneCR", input: "foo: bar\rbaz: qux\n", wantRule: crRule, ceiling: 2},
+		{name: "CRLast", input: "foo: bar\r", wantRule: crRule, ceiling: 2},
+		{name: "CRCRLF", input: "foo: bar\r\r\nbaz: qux\n", wantRule: crRule, ceiling: 2},
+		{name: "CRAfterCRLF", input: "foo: bar\r\nbaz: qux\rx: y\n", wantRule: crRule, ceiling: 2},
+		{name: "HiddenKeyCR", input: "acme:\n  email: a@b.example\r  ca: x\n", wantRule: crRule, noEcho: "a@b.example", ceiling: 2},
+		{name: "CRLF", input: "foo: bar\r\nbaz: qux\r\n", ceiling: 75},
 		{name: "SecondDocument", input: "foo: bar\n---\nbaz: qux", wantRule: "contains more than one document", ceiling: 120},
 		{name: "EmptyDocument", input: " ", wantRule: "empty document", ceiling: 2},
 		{name: "CommentsOnly", input: "# only a comment\n", wantRule: "empty document", ceiling: 34},
@@ -171,6 +182,10 @@ func TestTS10_Read(t *testing.T) {
 						if !doc.Sequences["s"] {
 							t.Error("expected path s to be a sequence")
 						}
+					} else if r.name == "CRLF" {
+						if doc.Leaves["foo"].Value != "bar" || doc.Leaves["baz"].Value != "qux" {
+							t.Errorf("expected keys foo and baz, got %v", doc.Leaves)
+						}
 					} else if r.name == "LiteralEnv" {
 						if doc.Leaves["foo"].Value != "${HOME}" {
 							t.Errorf("expected value %q, got %q", "${HOME}", doc.Leaves["foo"].Value)
@@ -186,6 +201,9 @@ func TestTS10_Read(t *testing.T) {
 					}
 					if r.isFile && !strings.Contains(err.Error(), fmt.Sprintf("%q", path)) {
 						t.Errorf("expected error containing the quoted file path %q, got %q", path, err.Error())
+					}
+					if r.noEcho != "" && strings.Contains(err.Error(), r.noEcho) {
+						t.Errorf("error should not contain %q, got %q", r.noEcho, err.Error())
 					}
 					if r.wantPath != "" && !strings.Contains(err.Error(), r.wantPath) {
 						t.Errorf("expected error containing path %q, got %q", r.wantPath, err.Error())

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/config/configtest"
 )
 
 // TestTS11_CheckURLRules checks that --check refuses a bad URL host and a URL
@@ -13,10 +15,8 @@ func TestTS11_CheckURLRules(t *testing.T) {
 	hook := func(u string) string {
 		return body + "alerts:\n  sinks:\n    - {type: webhook, url: \"" + u + "\", hmac_secret_env: ALERT_HMAC}\n"
 	}
-	for _, u := range []string{
-		"https://a..b/", "https://.example.com/", "https://169.254.169.254;/", "https://-h.example/", "https://h_x.example/",
-		"https://h.example/p?t=x", "https://h.example/p?",
-	} {
+	for _, bad := range configtest.BadURLs {
+		u := bad.URL
 		host, _, _ := strings.Cut(strings.TrimPrefix(u, "https://"), "/")
 		for _, c := range []struct{ key, file, env string }{
 			{"acme.ca", body, "PHANTOM_ACME_CA=" + u},
@@ -63,12 +63,10 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 			{"alerts.sinks[0].url", sink(`{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC}`), ""},
 			{"alerts.sinks[0].addr", sink(`{type: syslog, addr: "tls://` + host + `:6514"}`), ""},
 			{"alerts.sinks[0].host", sink(`{type: smtp, host: "smtp://` + host + `:25", from: a@b.example, to: [c@d.example]}`), ""},
+			{"alerts.sinks[0].host", sink(`{type: smtp, host: "smtps://` + host + `:465", from: a@b.example, to: [c@d.example]}`), ""},
 		}
 	}
-	for _, host := range []string{
-		"127.0.0.1", "10.0.0.1", "100.100.100.200", "169.254.169.254", "224.0.0.1", "[fd00:ec2::254]",
-		"[64:ff9b::a9fe:a9fe]", "[::169.254.169.254]", "[::ffff:10.0.0.1]", "[fec0::1]", "[2001:db8::1]",
-	} {
+	for _, host := range configtest.EgressLiterals {
 		for _, c := range files(host) {
 			code, se := check(c[1], c[2])
 			// Only alerts.sinks[0].host is a string key, not a URL key.
@@ -80,7 +78,7 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 			}
 		}
 	}
-	for _, host := range []string{"8.8.8.8", "[2606:4700::1111]"} {
+	for _, host := range configtest.GlobalLiterals {
 		for _, c := range files(host) {
 			if code, se := check(c[1], c[2]); code != 0 {
 				t.Errorf("%s %s: exit %d, stderr %q", c[0], host, code, se)

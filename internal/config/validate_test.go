@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/config/configtest"
 	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
@@ -293,15 +294,9 @@ func TestTU10_Email(t *testing.T) {
 	}, func(s string) string { return checkEmail(nil, s) })
 }
 
-// emailMarks are the characters that an email value must refuse (T-S-11).
-// They are a space, a C0 control, NEL, no-break space, and right-to-left
-// override. They are also line separator, paragraph separator, ideographic
-// space, and variation selector 16. Each is a rune value.
-var emailMarks = []rune{0x20, 0x01, 0x85, 0xa0, 0x202e, 0x2028, 0x2029, 0x3000, 0xfe0f}
-
 // TestTS11_EmailMarks checks that acme.email, smtp from, and smtp to refuse
-// each of the characters in emailMarks. The error names the key and gives the
-// rule. It does not hold the character (T-S-11).
+// each of the characters in configtest.EmailMarks. The error names the key and
+// gives the rule. It does not hold the character (T-S-11).
 func TestTS11_EmailMarks(t *testing.T) {
 	smtp := func(from, to string) string {
 		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "` + from + `", to: ["` + to + `"]}`)
@@ -309,7 +304,7 @@ func TestTS11_EmailMarks(t *testing.T) {
 	smtp2 := func(to string) string {
 		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "a@b.example", to: ["c@d.example", "` + to + `"]}`)
 	}
-	for _, mr := range emailMarks {
+	for _, mr := range configtest.EmailMarks {
 		m := string(mr)
 		// A double-quoted YAML scalar reads this escape.
 		esc := strconv.QuoteToASCII(m)
@@ -423,19 +418,17 @@ func TestTU10_URL(t *testing.T) {
 			}
 		})
 	}
-	runRows(t, badURLs, func(s string) string { _, d := parseURL(s, "https"); return d })
+	runRows(t, badURLRows(), func(s string) string { _, d := parseURL(s, "https"); return d })
 }
 
-// badURLs are https URLs that fail on a host rule or on the query rule.
-// TestTU10_URL and TestTS11_URLKeys use this list.
-var badURLs = []row{
-	{"empty label", "https://a..b/", "host name"},
-	{"leading dot", "https://.example.com/", "host name"},
-	{"semicolon", "https://169.254.169.254;/", "host name"},
-	{"leading hyphen", "https://-h.example/", "host name"},
-	{"underscore", "https://h_x.example/", "host name"},
-	{"query", "https://h.example/p?t=x", "query"},
-	{"empty query", "https://h.example/p?", "query"},
+// badURLRows gives the rows of configtest.BadURLs.
+// TestTU10_URL uses them, and TestTS11_URLKeys uses the list.
+func badURLRows() []row {
+	var rows []row
+	for _, b := range configtest.BadURLs {
+		rows = append(rows, row{b.Name, b.URL, b.Detail})
+	}
+	return rows
 }
 
 // TestTU10_CA checks the acme.ca values and the allow-list.
@@ -775,6 +768,49 @@ func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
 	}
 	return loadTest(writeConfig(t, file), env)
+}
+
+// TestTS10_LoadCRLF checks that a full valid config with CRLF line ends loads.
+// It gives the same values as the config with LF line ends. The load refuses
+// the config if one line end is a lone CR (T-S-10).
+func TestTS10_LoadCRLF(t *testing.T) {
+	lf, err := loadProd(t, base, listEnv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crlf, err := loadProd(t, strings.ReplaceAll(base, "\n", "\r\n"), listEnv...)
+	if err != nil {
+		t.Fatalf("CRLF line ends: got %v", err)
+	}
+	for _, key := range []string{"acme.email", "acme.names[0]", "tlog.origin"} {
+		a, aok := lf.Get(key)
+		b, bok := crlf.Get(key)
+		if !aok || !bok || a.Str == "" || a.Str != b.Str {
+			t.Errorf("%s: LF %q (%v), CRLF %q (%v)", key, a.Str, aok, b.Str, bok)
+		}
+	}
+	lone := strings.Replace(strings.ReplaceAll(base, "\n", "\r\n"), "\r\n", "\r", 1)
+	if _, err := loadProd(t, lone, listEnv...); err == nil || !strings.Contains(err.Error(), crRule) {
+		t.Errorf("lone CR: got %v", err)
+	}
+}
+
+// TestTS11_ConflictFoldsStateRoot checks that storeConflict and cacheConflict
+// fold the letters of the state directory too. The default state directory has
+// lower case letters only, so --check cannot test this (T-S-11).
+func TestTS11_ConflictFoldsStateRoot(t *testing.T) {
+	l := &loader{stateRoot: "/Srv/Phantom"}
+	runRows(t, []row{
+		{"keys", "/srv/phantom/keys/e.db", "the keys directory"},
+		{"checkpoints", "/srv/phantom/checkpoints/e.db", "the checkpoints directory"},
+		{"checkpoint.state", "/srv/phantom/checkpoint.state", "must not be checkpoint.state"},
+		{"checkpoint.state.tmp", "/srv/phantom/checkpoint.state.tmp", "must not be checkpoint.state.tmp"},
+		{"writer.stop", "/srv/phantom/writer.stop", "must not be writer.stop"},
+	}, func(p string) string { return storeConflict(l, nil, p) })
+	runRows(t, []row{
+		{"keys", "/srv/phantom/keys/c", "the keys directory"},
+		{"checkpoints", "/srv/phantom/checkpoints/c", "the checkpoints directory"},
+	}, func(p string) string { return cacheConflict(l, nil, p) })
 }
 
 // bound is one row of the 04 section 3 bounds table: values that pass, values that fail,
@@ -1592,12 +1628,12 @@ func TestTS10_ListSecrets(t *testing.T) {
 	}
 }
 
-// TestTS11_URLKeys checks that each URL in badURLs fails for each URL key. The
-// error names the key. The error text holds neither "example" nor "169.254"
-// (T-S-11).
+// TestTS11_URLKeys checks that each URL in configtest.BadURLs fails for each
+// URL key. The error names the key. The error text holds neither "example" nor
+// "169.254" (T-S-11).
 func TestTS11_URLKeys(t *testing.T) {
-	for _, bad := range badURLs {
-		u := bad.in
+	for _, bad := range configtest.BadURLs {
+		u := bad.URL
 		for _, r := range []struct{ key, file string }{
 			{"acme.ca", "acme:\n  email: sec@example.com\n  ca: \"" + u + "\"\n" + acmeNames + tlogLine},
 			{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"" + u + "\"\n"},
@@ -1612,12 +1648,6 @@ func TestTS11_URLKeys(t *testing.T) {
 			}
 		}
 	}
-}
-
-// egressLiterals are IP-literal hosts that the egress rule refuses (T-S-11).
-var egressLiterals = []string{
-	"127.0.0.1", "10.0.0.1", "100.100.100.200", "169.254.169.254", "224.0.0.1", "[fd00:ec2::254]",
-	"[64:ff9b::a9fe:a9fe]", "[::169.254.169.254]", "[::ffff:10.0.0.1]", "[fec0::1]", "[2001:db8::1]",
 }
 
 // egressKeyFiles returns one file for each key that holds an endpoint.
@@ -1636,11 +1666,12 @@ func egressKeyFiles(host string) [][2]string {
 	}
 }
 
-// TestTS11_EgressLiterals checks that each literal in egressLiterals fails
-// for each endpoint key, and that a global literal passes. The error names the
-// key and gives the fixed rule (T-S-11).
+// TestTS11_EgressLiterals checks that each literal in
+// configtest.EgressLiterals fails for each endpoint key, and that each literal
+// in configtest.GlobalLiterals passes. The error names the key and gives the
+// fixed rule (T-S-11).
 func TestTS11_EgressLiterals(t *testing.T) {
-	for _, lit := range egressLiterals {
+	for _, lit := range configtest.EgressLiterals {
 		for _, r := range egressKeyFiles(lit) {
 			_, err := loadProd(t, r[1], listEnv...)
 			if err == nil || !strings.Contains(err.Error(), "config: "+r[0]+" at ") || !strings.Contains(err.Error(), "egress rule") {
@@ -1648,7 +1679,7 @@ func TestTS11_EgressLiterals(t *testing.T) {
 			}
 		}
 	}
-	for _, lit := range []string{"8.8.8.8", "[2606:4700::1111]"} {
+	for _, lit := range configtest.GlobalLiterals {
 		for _, r := range egressKeyFiles(lit) {
 			if _, err := loadProd(t, r[1], listEnv...); err != nil {
 				t.Errorf("%s %s: got %v", r[0], lit, err)
