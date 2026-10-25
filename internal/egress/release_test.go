@@ -204,6 +204,9 @@ func depProblem(realRoot string, d listedDep) string {
 	if inModule(d.Path) && d.Module != modPath {
 		return "its module " + d.Module + " is not this module"
 	}
+	if inModuleFold(d.Path) && !inModule(d.Path) {
+		return "its path differs from the module path only in case"
+	}
 	if d.Replace != "" {
 		return "its module " + d.Module + " has a replace"
 	}
@@ -287,18 +290,23 @@ func listProblems(lines []string, used map[string]bool) []string {
 	return out
 }
 
-// loadList gives the lines of the list file name in testdata and their set.
-func loadList(t *testing.T, name string) ([]string, map[string]bool) {
+// loadList gives the lines of the list file name in testdata.
+func loadList(t *testing.T, name string) []string {
 	t.Helper()
 	lines, err := readList(name)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return lines
+}
+
+// lineSet gives the set of lines.
+func lineSet(lines []string) map[string]bool {
 	set := map[string]bool{}
 	for _, l := range lines {
 		set[l] = true
 	}
-	return lines, set
+	return set
 }
 
 // TestTS21ReleaseCommandsDoNotListTestSeam gets the dependencies of the
@@ -323,7 +331,6 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := []string{modPath + "/cmd/phantom", modPath + "/cmd/phantom-verify"}
-	lines, list := loadList(t, "release-deps.txt")
 	var all []platformDeps
 	for _, c := range releaseConfigs {
 		ctx, deps := listDeps(t, root, c, commands...)
@@ -337,7 +344,7 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 		}
 		all = append(all, platformDeps{c, deps})
 	}
-	checkDepList(t, realRoot, lines, list, all)
+	checkDepList(t, realRoot, loadList(t, "release-deps.txt"), all)
 }
 
 // platformDeps are the packages that go list -deps finds for one platform.
@@ -346,13 +353,30 @@ type platformDeps struct {
 	deps []listedDep
 }
 
-// checkDepList fails t on each dependency that depProblem names. On a
-// platform with usesDepList, it fails on each package that is not in list.
-// It also fails on each problem that listProblems finds in lines. The used
-// lines are the packages of those platforms.
-func checkDepList(t testing.TB, realRoot string, lines []string,
-	list map[string]bool, all []platformDeps) {
+// configNames gives the names of the platforms cs.
+func configNames(cs []buildConfig) []string {
+	var out []string
+	for _, c := range cs {
+		out = append(out, c.name())
+	}
+	return out
+}
+
+// checkDepList fails t on each dependency that depProblem names. It builds
+// the list from lines. It also fails when the platforms of all are not the
+// platforms of releaseConfigs, in the same order. The list check and the used
+// lines cover only the packages of other modules, on the platforms with
+// usesDepList. It also fails on each problem that listProblems finds in lines.
+func checkDepList(t testing.TB, realRoot string, lines []string, all []platformDeps) {
 	t.Helper()
+	list := lineSet(lines)
+	cs := make([]buildConfig, len(all))
+	for i, pd := range all {
+		cs[i] = pd.c
+	}
+	if !slices.Equal(cs, releaseConfigs) {
+		t.Errorf("platforms %q, want %q", configNames(cs), configNames(releaseConfigs))
+	}
 	used := map[string]bool{}
 	for _, pd := range all {
 		for _, d := range pd.deps {
@@ -374,9 +398,10 @@ func checkDepList(t testing.TB, realRoot string, lines []string,
 }
 
 // record runs f with a recorder in a new goroutine and gives the errors that
-// f records. A call to Fatal in f ends only that goroutine.
-func record(f func(testing.TB)) []string {
-	r := &recorder{}
+// f records. A call to Fatal in f ends only that goroutine. A method that the
+// recorder does not override goes to t.
+func record(t testing.TB, f func(testing.TB)) []string {
+	r := &recorder{TB: t}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -389,31 +414,57 @@ func record(f func(testing.TB)) []string {
 // TestTS21CheckDepListReports calls checkDepList on planted packages. It must
 // record a package that is not on the list and a package with a replace. It
 // must also record a line that no package uses. A host platform has no list
-// check.
+// check. The host platform has a package of the test seam, which depProblem
+// names. It also has a listed package that only the host lists, which is not
+// used. The test also drops the host platform from the input.
 func TestTS21CheckDepListReports(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
-	lines := []string{"example.org/lib/z", "example.org/rep/b"}
-	list := map[string]bool{lines[0]: true, lines[1]: true}
-	all := []platformDeps{
-		{buildConfig{"linux", "amd64"}, []listedDep{
-			{"example.org/lib/a", outside, "example.org/lib", "", ""},
-			{"example.org/rep/b", outside, "example.org/rep", outside, ""},
-			{"example.org/lib/z", outside, "example.org/lib", "", ""},
-		}},
-		{buildConfig{}, []listedDep{{"example.org/lib/h", outside, "example.org/lib", "", ""}}},
+	lines := []string{"example.org/lib/h", "example.org/lib/z", "example.org/rep/b"}
+	amd := []listedDep{
+		{"example.org/lib/a", outside, "example.org/lib", "", ""},
+		{"example.org/rep/b", outside, "example.org/rep", outside, ""},
+		{"example.org/lib/z", outside, "example.org/lib", "", ""},
+	}
+	host := []listedDep{
+		{modPath + "/internal/egress/egresstest", root, modPath, "", ""},
+		{"example.org/lib/h", outside, "example.org/lib", "", ""},
+	}
+	input := func(amdDeps []listedDep) []platformDeps {
+		var all []platformDeps
+		for _, c := range releaseConfigs {
+			pd := platformDeps{c: c}
+			switch c {
+			case buildConfig{"linux", "amd64"}:
+				pd.deps = amdDeps
+			case buildConfig{}:
+				pd.deps = host
+			}
+			all = append(all, pd)
+		}
+		return all
 	}
 	replace := "linux/amd64: a release command depends on example.org/rep/b: " +
 		"its module example.org/rep has a replace"
-	want := []string{"linux/amd64: example.org/lib/a is not on release-deps.txt", replace}
-	got := record(func(tb testing.TB) { checkDepList(tb, root, lines, list, all) })
-	if !slices.Equal(got, want) {
-		t.Errorf("errors %q, want %q", got, want)
-	}
-	all[0].deps = all[0].deps[1:2]
-	want = []string{replace, "release-deps.txt: line 1, example.org/lib/z, is not used"}
-	got = record(func(tb testing.TB) { checkDepList(tb, root, lines, list, all) })
-	if !slices.Equal(got, want) {
-		t.Errorf("errors %q, want %q", got, want)
+	seam := "default: a release command depends on " + modPath +
+		"/internal/egress/egresstest: it is below internal/egress"
+	unused := "release-deps.txt: line 1, example.org/lib/h, is not used"
+	for name, tc := range map[string]struct {
+		all  []platformDeps
+		want []string
+	}{
+		"not on the list": {input(amd), []string{
+			"linux/amd64: example.org/lib/a is not on release-deps.txt", replace, seam, unused}},
+		"line not used": {input(amd[1:2]), []string{replace, seam, unused,
+			"release-deps.txt: line 2, example.org/lib/z, is not used"}},
+		"platform dropped": {input(amd)[:len(releaseConfigs)-1], []string{
+			fmt.Sprintf("platforms %q, want %q", configNames(releaseConfigs[:len(releaseConfigs)-1]),
+				configNames(releaseConfigs)),
+			"linux/amd64: example.org/lib/a is not on release-deps.txt", replace, unused}},
+	} {
+		got := record(t, func(tb testing.TB) { checkDepList(tb, root, lines, tc.all) })
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: errors %q, want %q", name, got, tc.want)
+		}
 	}
 }
 
@@ -430,7 +481,7 @@ func TestTS21ReleaseConfigsAreLinuxTargets(t *testing.T) {
 
 // checkLinuxTargets fails t when the linux platforms of configs differ from
 // the linux targets in dist. Here dist is the output of go tool dist list. It
-// also fails when a second platform does not use the dependency list.
+// also fails unless the host is the only platform with no dependency list.
 func checkLinuxTargets(t testing.TB, dist string, configs []buildConfig) {
 	t.Helper()
 	var want, got, other []string
@@ -471,7 +522,7 @@ func TestTS21CheckLinuxTargetsReports(t *testing.T) {
 		"second host": {[]buildConfig{amd, arm, {}, {"darwin", "arm64"}}, []string{
 			`platforms with no dependency list: ["default" "darwin/arm64"], want the host only`}},
 	} {
-		got := record(func(tb testing.TB) { checkLinuxTargets(tb, dist, tc.configs) })
+		got := record(t, func(tb testing.TB) { checkLinuxTargets(tb, dist, tc.configs) })
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: errors %q, want %q", name, got, tc.want)
 		}
@@ -570,6 +621,9 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
+	below := listedDep{modPath + "/x/p", outside, modPath + "/x", "", ""}
+	variant := listedDep{"github.com/cybagard/Cyba-Phantom/egress/egresstest", outside,
+		"github.com/cybagard/Cyba-Phantom", "", ""}
 	for _, tc := range []struct {
 		name string
 		d    listedDep
@@ -591,7 +645,8 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		{"other module inside the root", listedDep{"example.org/zzx", in("internal/zz/ok"), "example.org/zzx", "", ""}, true},
 		{"replace with a module version", listedDep{"example.org/fork", outside, "example.org/lib", "example.org/fork", "v1.0.0"}, true},
 		{"other module outside the root", listedDep{"example.org/lib", outside, "example.org/lib", "", ""}, false},
-		{"module below the module path", listedDep{modPath + "/x/p", outside, modPath + "/x", "", ""}, true},
+		{"module below the module path", below, true},
+		{"case variant of the module path", variant, true},
 		{"module that starts with the module path", listedDep{modPath + "-x/p", outside, modPath + "-x", "", ""}, false},
 		{"standard library", listedDep{"net/http", outside, "", "", ""}, false},
 	} {
@@ -599,9 +654,17 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 			t.Errorf("%s: depProblem has a problem: %t, want %t", tc.name, got, tc.bad)
 		}
 	}
-	below := listedDep{modPath + "/x/p", outside, modPath + "/x", "", ""}
-	if why := depProblem(realRoot, below); !strings.Contains(why, modPath+"/x") {
-		t.Errorf("reason %q for a module below the module path, want the module name", why)
+	for name, tc := range map[string]struct {
+		d    listedDep
+		want string
+	}{
+		"module below the module path": {below, "its module " + modPath + "/x is not this module"},
+		"case variant of the module path": {variant,
+			"its path differs from the module path only in case"},
+	} {
+		if why := depProblem(realRoot, tc.d); why != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, why, tc.want)
+		}
 	}
 	for got, bad := range map[string]bool{
 		"": false, "\n": false, "off\n": false, top + "/go.work\n": true, "on": true,
@@ -725,18 +788,12 @@ func TestTS21ReleaseListDepsReports(t *testing.T) {
 		c    buildConfig
 		want bool
 	}{{buildConfig{"linux", "amd64"}, true}, {buildConfig{"linux", "386"}, false}} {
-		r := &recorder{TB: t}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			listDeps(r, root, tc.c, missing)
-		}()
-		<-done
-		if got := len(r.errs) > 0; got != tc.want {
-			t.Errorf("%s: errors %q, want an error: %t", tc.c.name(), r.errs, tc.want)
+		errs := record(t, func(tb testing.TB) { listDeps(tb, root, tc.c, missing) })
+		if got := len(errs) > 0; got != tc.want {
+			t.Errorf("%s: errors %q, want an error: %t", tc.c.name(), errs, tc.want)
 		}
-		if tc.want && (len(r.errs) != 1 || !strings.Contains(r.errs[0], missing+" on linux/amd64: go list reports the error ")) {
-			t.Errorf("%s: errors %q, want one that names %s and the reason", tc.c.name(), r.errs, missing)
+		if tc.want && (len(errs) != 1 || !strings.Contains(errs[0], missing+" on linux/amd64: go list reports the error ")) {
+			t.Errorf("%s: errors %q, want one that names %s and the reason", tc.c.name(), errs, missing)
 		}
 	}
 }
@@ -887,6 +944,12 @@ const notOnImportList = " is not on the import list"
 // inModule tells if the import path p is the module or is below it.
 func inModule(p string) bool {
 	return p == modPath || strings.HasPrefix(p, modPath+"/")
+}
+
+// inModuleFold is inModule with no regard to case.
+func inModuleFold(p string) bool {
+	n := len(modPath)
+	return len(p) >= n && strings.EqualFold(p[:n], modPath) && (len(p) == n || p[n] == '/')
 }
 
 // scanWith is scan with the function walk, which walks the tree of root.
@@ -1194,16 +1257,16 @@ func transportForms(lit *ast.CompositeLit) []string {
 // see. The test also fails on each import from outside the module that is not
 // on release-imports.txt. It fails on each form problem of that file too.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
-	lines, list := loadList(t, "release-imports.txt")
-	checkImportList(t, moduleRoot(t), lines, list)
+	checkImportList(t, moduleRoot(t), loadList(t, "release-imports.txt"))
 }
 
-// checkImportList scans the non-test files below root with the import list.
-// It fails t on each finding. It also fails on each problem that listProblems
-// finds in lines. The used lines are the imports that the scan saw.
-func checkImportList(t testing.TB, root string, lines []string, list map[string]bool) {
+// checkImportList scans the non-test files below root with the import list
+// that it builds from lines. It fails t on each finding and on a file that does
+// not parse. It also fails on each problem that listProblems finds in lines.
+// The used lines are the imports that the scan saw.
+func checkImportList(t testing.TB, root string, lines []string) {
 	t.Helper()
-	found, seen, err := scan(root, list)
+	found, seen, err := scan(root, lineSet(lines))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1222,14 +1285,24 @@ func TestTS21CheckImportListReports(t *testing.T) {
 	dir := t.TempDir()
 	plantFile(t, dir, "p/a.go", "package p\n\nimport (\n\t\"net\"\n\t\"example.org/a\"\n)\n")
 	lines := []string{"example.org/z", "net"}
-	list := map[string]bool{"example.org/z": true, "net": true}
 	want := []string{
 		"p/a.go:5: import example.org/a" + notOnImportList,
 		"release-imports.txt: line 1, example.org/z, is not used",
 	}
-	got := record(func(tb testing.TB) { checkImportList(tb, dir, lines, list) })
+	got := record(t, func(tb testing.TB) { checkImportList(tb, dir, lines) })
 	if !slices.Equal(got, want) {
 		t.Errorf("errors %q, want %q", got, want)
+	}
+}
+
+// TestTS21CheckImportListParseError plants a file that does not parse. The
+// helper must record one error that names the file.
+func TestTS21CheckImportListParseError(t *testing.T) {
+	dir := t.TempDir()
+	plantFile(t, dir, "p/bad.go", "package p\n\nimport (\n")
+	got := record(t, func(tb testing.TB) { checkImportList(tb, dir, []string{"net"}) })
+	if len(got) != 1 || !strings.Contains(got[0], "bad.go") {
+		t.Errorf("errors %q, want one that names bad.go", got)
 	}
 }
 
