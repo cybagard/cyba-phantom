@@ -1,9 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -170,12 +173,12 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 }
 
 // T-U-18: a record error (an event whose kind is not a kind) stops the writer.
-// Err holds the record class, the batch stores no row, and the events that come
+// Err holds the record class, and the batch stores no row. The events that come
 // later are taken out of the lanes and counted. Enqueue refuses an event with
-// kind 0 or Size 0, so the bad event cannot come from the lanes. The test
-// gives the writer a batch with the zero Event (kind 0) through flush, the
-// function that Run calls with each batch. The stopped writer then takes the
-// later events from the lanes.
+// kind 0 or Size 0. A later assignment can give a queued event kind 0. The
+// test gives the writer a batch with the zero Event (kind 0) through flush.
+// Run calls flush with each batch. The stopped writer then takes the later
+// events from the lanes.
 func TestTU18RecordErrorStopsTheWriter(t *testing.T) {
 	r := newRig(t, 100)
 	mk := func(k event.Kind, ts int64) *event.Event {
@@ -199,5 +202,106 @@ func TestTU18RecordErrorStopsTheWriter(t *testing.T) {
 	eventually(t, func() bool { return r.w.Stats().Dropped == want })
 	if err := stop(); !errors.Is(err, context.Canceled) || r.rows() != 0 {
 		t.Fatalf("Run returned %v, %d rows", err, r.rows())
+	}
+}
+
+// T-U-18: the writer reads Record one time for each event. An assignment to
+// the event after that read changes neither the hash nor the record bytes of
+// the row. So sha256(record) equals hash, and the record is the bytes of the
+// first value. One case assigns in w.clock, after the copy and before the hash.
+// The other case assigns in beforeAppend, after the hash.
+func TestTU18RecordIsReadOnceForHashAndRow(t *testing.T) {
+	seams := []struct {
+		name   string
+		assign func(w *Writer, f func())
+	}{
+		{"clock", func(w *Writer, f func()) { w.clock = func() time.Time { f(); return time.Now() } }},
+		{"beforeAppend", func(w *Writer, f func()) { w.beforeAppend = f }},
+	}
+	for _, s := range seams {
+		t.Run(s.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			first, other := rowEvent(t, event.KindCallback, true, 1), rowEvent(t, event.KindCallback, false, 2)
+			want, err := event.EvidenceBytes(first.Record())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.assign(r.w, func() { *first = *other })
+			if err := r.w.write([]*event.Event{first}); err != nil {
+				t.Fatal(err)
+			}
+			rows := r.stored()
+			if len(rows) != 1 {
+				t.Fatalf("%d rows, want 1", len(rows))
+			}
+			if sum := sha256.Sum256(rows[0].record); !bytes.Equal(sum[:], rows[0].hash) {
+				t.Errorf("sha256(record) %x is not hash %x", sum, rows[0].hash)
+			}
+			if !bytes.Equal(rows[0].record, want) {
+				t.Errorf("record is %s, want the bytes of the first value %s", rows[0].record, want)
+			}
+		})
+	}
+}
+
+// T-U-18: an assignment to an event after write makes its record copy does
+// not change its kind for the writer. The batch has one evidence and one bulk
+// event. The assignment gives one of them the kind of the other. Each row keeps
+// the kind of the first value. Only the evidence row has a hash, a leaf and a
+// record. If the COMMIT fails, the drops count one bulk and one evidence event.
+func TestTU18AssignedKindDoesNotChangeTheLane(t *testing.T) {
+	cases := []struct {
+		name    string
+		target  int // index of the event that gets the new value
+		newKind event.Kind
+	}{
+		{"bulk event gets an evidence value", 1, event.KindCallback},
+		{"evidence event gets a bulk value", 0, event.KindRequest},
+	}
+	for _, c := range cases {
+		for _, commitFails := range []bool{false, true} {
+			for _, viaClock := range []bool{false, true} {
+				// The clock runs after the copy, before the evidence decision.
+				// beforeAppend runs after the hash.
+				t.Run(fmt.Sprintf("%s, COMMIT fails %v, clock %v", c.name, commitFails, viaClock), func(t *testing.T) {
+					testAssignedKind(t, c.target, c.newKind, commitFails, viaClock)
+				})
+			}
+		}
+	}
+}
+
+func testAssignedKind(t *testing.T, target int, newKind event.Kind, commitFails, viaClock bool) {
+	r := newRig(t, 100)
+	batch := []*event.Event{rowEvent(t, event.KindCallback, true, 1), rowEvent(t, event.KindRequest, true, 2)}
+	newValue := rowEvent(t, newKind, false, 3)
+	assign := func() { *batch[target] = *newValue }
+	if viaClock {
+		r.w.clock = func() time.Time { assign(); return time.Now() }
+	} else {
+		r.w.beforeAppend = assign
+	}
+	if commitFails {
+		r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit failed") }
+	}
+	err := r.w.write(batch)
+	if commitFails {
+		if err == nil || r.w.Stats().Dropped != (Drops{Bulk: 1, Evidence: 1}) {
+			t.Fatalf("error %v, dropped %+v (want bulk 1, evidence 1)", err, r.w.Stats().Dropped)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := r.stored()
+	if len(rows) != 2 || rows[0].kind != "callback" || rows[1].kind != "request" {
+		t.Fatalf("rows %+v, want kinds callback and request", rows)
+	}
+	if rows[0].hash == nil || rows[0].leaf == nil || rows[0].record == nil {
+		t.Errorf("the evidence row lacks hash, leaf_index or record")
+	}
+	if rows[1].hash != nil || rows[1].leaf != nil || rows[1].record != nil {
+		t.Errorf("the bulk row has hash, leaf_index or record")
 	}
 }
