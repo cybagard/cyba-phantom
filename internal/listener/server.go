@@ -362,8 +362,9 @@ func (s *Server) Close() error {
 // Shutdown returns an error in three cases. In the first case, ctx ends before
 // http.Server.Shutdown finds each open connection closed or idle. The same
 // holds when ctx ends before the running handlers return. net/http examines
-// the connections at intervals of up to about 0.5 s. In the second case, ctx ended before the
-// call. In the third case, a listener close gives an error. In each case
+// the connections at intervals of up to about 0.5 s. In the second case, ctx
+// ended before the call. In the third case, a listener close gives an error.
+// In each case
 // Shutdown closes, at the socket below TLS, each connection in the record of
 // open connections. This includes each hijacked connection. So a stalled
 // close_notify write does not hold it. The error is the error of ctx, or the
