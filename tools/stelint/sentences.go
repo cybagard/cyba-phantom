@@ -419,10 +419,11 @@ func isBlank(r rune) bool {
 // Cc). The third is format runes (category Cf, for example U+200B). The fourth
 // is private-use runes (category Co). The fifth is the variation selectors. The
 // sixth is the other default-ignorable runes, for example U+034F. Most of these
-// classes render no gap. A word break there makes the hidden words count. Only
-// the runes of isBlank are spaces. The tab (category Cc) and U+3164
-// (default-ignorable) are spaces and are also in one of these classes. Only a
-// space, a line end or the end of the text ends a sentence after an end mark.
+// classes render no gap. A word break at such a rune makes the hidden words
+// count. Only the runes of isBlank are spaces. The tab (category Cc) and
+// U+3164 (default-ignorable) are spaces and are also in one of the other five
+// classes. Only a space, a line end or the end of the text ends a sentence
+// after an end mark.
 func isWordBreak(r rune) bool {
 	return isBlank(r) || unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co,
 		unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)

@@ -83,10 +83,10 @@
 // control runes (category Cc), format runes (category Cf, such as U+200B) and
 // private-use runes (category Co). The other two are the variation selectors,
 // such as U+FE0F, and the other default-ignorable runes, such as U+034F. Most
-// of these classes render no gap. A word break there makes the hidden words
-// count. The tab (category Cc) and U+3164 (default-ignorable) are spaces and
-// are also in one of these classes. Only a space, a line end or the end of the
-// text ends a sentence after an end mark. So "end.<U+200B>next" is not a
+// of these classes render no gap. A word break at such a rune makes the hidden
+// words count. The tab (category Cc) and U+3164 (default-ignorable) are spaces
+// and are also in one of these classes. Only a space, a line end or the end of
+// the text ends a sentence after an end mark. So "end.<U+200B>next" is not a
 // sentence end. A code span in backticks is one word, also when it has spaces.
 // A "." in a code span does not end a sentence. In a Markdown link, only the
 // link text counts. A link whose URL has a word break is not a link. A
