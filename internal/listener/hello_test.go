@@ -231,8 +231,8 @@ func readRequest(t *testing.T, target, host string) *http.Request {
 	return r
 }
 
-// T-S-17: the Location of the redirect keeps each escape of the request path and
-// decodes none. A "%2F" stays "%2F", and a byte that needs an escape gets one.
+// T-S-17: the Location of the redirect keeps each escape of the request path.
+// It decodes none, so "%2F" stays "%2F". A byte that needs an escape gets one.
 func TestTS17RedirectKeepsEscapes(t *testing.T) {
 	for _, tc := range []struct{ target, want string }{
 		{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
@@ -255,8 +255,8 @@ func TestTS17RedirectKeepsEscapes(t *testing.T) {
 	}
 }
 
-// T-S-17: a byte other than "/" and "%" gets the escape of url.PathEscape. A "%"
-// that starts no valid escape gets "%25", in RawPath and in Path.
+// T-S-17: a byte other than "/" and "%" gets the escape of url.PathEscape.
+// A "%" that starts no valid escape gets "%25", in RawPath and in Path.
 func TestTS17LocationEscapesEachByte(t *testing.T) {
 	for b := 0; b < 256; b++ {
 		if b == '/' || b == '%' {
@@ -424,10 +424,10 @@ func BenchmarkHelloHandler(b *testing.B) {
 	}
 }
 
-// T-S-17: a cut of the Location never ends inside a %XX escape. The path is "/"
-// + pad "a" bytes + 2100 bytes of a unit: "%2F" (kept), "<" (escaped to "%3C") or
-// "a". Each pad from 0 to 3 puts the end of the value at a different place in
-// the last token.
+// T-S-17: a cut of the Location never ends inside a %XX escape. The path is "/",
+// then pad "a" bytes, then 2100 bytes of a unit: "%2F" (kept), "<" (escaped to
+// "%3C") or "a". Each pad from 0 to 3 moves the end of the value inside the
+// last token.
 func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 	for _, unit := range []string{"%2F", "<", "a"} {
 		for pad := 0; pad <= 3; pad++ {

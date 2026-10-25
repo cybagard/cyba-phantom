@@ -260,9 +260,9 @@ func TestTU19FirstWins(t *testing.T) {
 	}
 }
 
-// helloSize is the size of a Hello: the uint16 arrays (800 bytes), the ALPN
-// array (255), five counts, the ALPN length and two flags (8), and one pad byte
-// for the 2-byte alignment: 1064.
+// helloSize is the size of a Hello: 1064 bytes. The uint16 arrays take 800. The
+// ALPN array takes 255. Five counts, the ALPN length and two flags take 8. One
+// pad byte keeps the 2-byte alignment.
 const helloSize = 2*(maxCipherSuites+maxExtensions+maxSigSchemes+maxGroups+maxVersions) + maxALPN + 8 + 1
 
 // T-U-19: the copy has a fixed size. The requirement is 1152 bytes or less, so
@@ -283,7 +283,7 @@ func TestTU19StoredCopyAllocatesNothing(t *testing.T) {
 	}
 }
 
-// ioCount counts Read and Write calls on ioListener connections while on is set.
+// ioCount counts Read and Write calls on ioListener conns while on is set.
 type ioCount struct {
 	on atomic.Bool
 	n  atomic.Int32

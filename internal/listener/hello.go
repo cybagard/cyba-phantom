@@ -58,8 +58,9 @@ func reply(w http.ResponseWriter, code int, body string) int {
 func getOrHead(m string) bool { return m == http.MethodGet || m == http.MethodHead }
 
 // decide makes the choice of both handlers for the Host and method of r. It
-// returns the configured name, the status code and the body: 404 for a Host that
-// is not configured, else 405 for a method other than GET and HEAD, else 200.
+// returns the configured name, the status code and the body. A Host that is not
+// configured gets 404. Else a method other than GET and HEAD gets 405. Else the
+// code is 200.
 func (n names) decide(r *http.Request) (name string, code int, body string) {
 	name, ok := n.match(r.Host)
 	switch {
@@ -121,20 +122,20 @@ func (h *Redirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 // The source is RawPath when it is set, else Path. In RawPath, a '%' with two
 // hex digits is one token, written with upper-case hex. '/' is copied. Each
-// other byte is written as url.PathEscape writes it alone; this includes a '%'
-// that starts no valid escape (and each '%' of Path), which gives "%25".
+// other byte is written as url.PathEscape writes it alone. So a '%' that starts
+// no valid escape, and each '%' of Path, gives "%25".
 func location(name string, u *url.URL) string {
 	src, raw := u.RawPath, u.RawPath != ""
 	if !raw {
 		src = u.Path
 	}
-	// Each token is at least as long as the source bytes that it takes, so the
+	// A token is as long as the source bytes that it takes or longer. So the
 	// first maxLocation bytes of the source are enough.
 	if len(src) > maxLocation {
 		src = src[:maxLocation]
 	}
 	var b strings.Builder
-	// Each source byte makes at most 3 bytes, and the code adds at most one '/'.
+	// A source byte makes at most 3 bytes. The code adds at most one '/'.
 	b.Grow(min(maxLocation, len("https://")+len(name)+1+3*len(src)))
 	b.WriteString("https://")
 	b.WriteString(name)

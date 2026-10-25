@@ -101,7 +101,8 @@ func captureHello(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 }
 
 func (s *connState) capture(chi *tls.ClientHelloInfo) {
-	if s.hello.Load() != nil { // the first copy stays; CompareAndSwap covers a race
+	// The first copy stays. CompareAndSwap below covers a race.
+	if s.hello.Load() != nil {
 		return
 	}
 	h := new(Hello)
