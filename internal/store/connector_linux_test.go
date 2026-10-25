@@ -113,26 +113,49 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 }
 
 // T-S-15: the file checks of Open open the database file one time only. That
-// open is the one that Open holds for the life of the pool. The watch is read
-// in the hook that gets the held descriptor. So it counts the earlier opens.
+// open is the one that Open holds for the life of the pool. For an existing
+// file, the watch is read in the hook that gets the held descriptor. It counts
+// the earlier opens. For a new file, the watch starts in that hook. A hook
+// reads the watch again right after the driver opens the first connection. So
+// the opens of the driver are not counted. After Open returns, the watch counts
+// 0 opens: no later check of Open opens the file.
 func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
-	for _, rel := range []string{"events.db", "data/events.db"} {
-		t.Run(rel, func(t *testing.T) {
-			f := newFixture(t)
-			if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
+	rows := []struct {
+		name, rel string
+		exists    bool
+		wantHeld  int // the opens up to the hook that gets the held descriptor
+	}{
+		{"events.db", "events.db", true, 1},
+		{"data/events.db", "data/events.db", true, 1},
+		{"new file", "events.db", false, 0},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			if err := os.Mkdir(filepath.Join(state, "data"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			mustOpen(t, f.root, rel).Close()
-			opens := watchOpens(t, filepath.Join(f.state, filepath.FromSlash(rel)))
+			path := filepath.Join(state, filepath.FromSlash(r.rel))
+			var opens func() int
+			if r.exists {
+				mustOpen(t, root, r.rel).Close()
+				opens = watchOpens(t, path)
+			}
 			n := -1
 			held := holdHook(t)
 			inner := onHeld
-			setHook(t, &onHeld, func(h *os.File) { inner(h); n = opens() })
-			setHook(t, &afterVerify, func() { opens() })
-			db := mustOpen(t, f.root, rel)
+			setHook(t, &onHeld, func(h *os.File) {
+				inner(h)
+				if opens == nil {
+					opens = watchOpens(t, path)
+				}
+				n = opens()
+			})
+			setHook(t, &afterDriverOpen, func() { opens() })
+			db := mustOpen(t, root, r.rel)
 			defer db.Close()
-			if *held == nil || n != 1 {
-				t.Fatalf("%d opens of the database file up to the held open, want 1", n)
+			if *held == nil || n != r.wantHeld {
+				t.Fatalf("%d opens of the database file up to the held open, want %d", n, r.wantHeld)
 			}
 			if n := opens(); n != 0 {
 				t.Fatalf("%d opens of the database file after the first connection", n)
@@ -156,27 +179,23 @@ func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 
 // T-S-15: a refused open of a new file leaves no descriptor. The hook swaps
 // the made file for another file. Open refuses, and the process holds no
-// descriptor of either file.
+// descriptor of either file. When refuse runs, the create descriptor of the
+// made file is still open.
 func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
 	root, state, _ := newState(t)
 	file := filepath.Join(state, "events.db")
-	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
-		if name != "events.db" {
-			return
-		}
-		if err := os.Rename(file, file+".moved"); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(file, []byte("other file"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}})
+	swapMadeFile(t, file)
+	made := -1
+	setHook(t, &beforeRefuse, func() { made = fdsOf(t, file+".moved") })
 	db, err := Open(root, "events.db", Options{})
 	if db != nil {
 		db.Close()
 	}
 	if err == nil {
 		t.Fatal("Open worked with a swapped file")
+	}
+	if made != 1 {
+		t.Fatalf("%d descriptors of the made file when refuse runs, want 1", made)
 	}
 	for _, p := range []string{file, file + ".moved"} {
 		if n := fdsOf(t, p); n != 0 {

@@ -181,8 +181,8 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// cannot have the same inode. refuse removes the entry in dir when the
 	// Lstat shows the file that this call made. refuse does not find a change
 	// of the entry between the Lstat and the Remove. If someone puts another
-	// file there in that window, refuse removes it. If the Stat of the made
-	// file failed, refuse removes nothing.
+	// file there in that window, refuse removes it. If a Stat of the made file
+	// fails, refuse removes nothing.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()
@@ -197,15 +197,15 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// The descriptor stays open until the pool closes. While it is open, the
 	// inode of the file cannot be given to a new file. The open of an existing
 	// file does not block on a FIFO. A new file is made through dir, then
-	// opened again read-only. The made file is the file of the second open.
-	// Then the create descriptor, which can write, is closed. So the held
+	// opened again read-only. Open checks that the second open gets the made
+	// file. Then the create descriptor, which can write, is closed. So the held
 	// descriptor cannot write, for a new file as for an existing file.
-	var held *os.File
+	var held, created *os.File
 	if absent {
 		if beforeCreate != nil {
 			beforeCreate()
 		}
-		created, err := dir.OpenFile(last, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		created, err = dir.OpenFile(last, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return nil, fail(rel, ruleChanged)
@@ -218,12 +218,14 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 			if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
 				err = fail(rel, ruleChanged)
 			} else if !os.SameFile(fi, hfi) {
-				held.Close()
 				err = fail(rel, ruleChanged)
 			}
 		}
 		if err != nil {
 			err = refuse(err)
+			if held != nil {
+				held.Close()
+			}
 		}
 		created.Close()
 		if err != nil {

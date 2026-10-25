@@ -65,12 +65,10 @@ func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
 	}
 }
 
-// T-S-15: Open refuses a new file if another file gets the name between the
-// make and the second open. The hook moves the made file away and writes
-// another file with mode 0600.
-func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
-	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
+// swapMadeFile sets the hook of the second open of a new file. The hook moves
+// the made file to file+".moved" and writes another file with mode 0600.
+func swapMadeFile(t *testing.T, file string) {
+	t.Helper()
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 		if name != "events.db" {
 			return
@@ -82,6 +80,14 @@ func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 	}})
+}
+
+// T-S-15: Open refuses a new file if another file gets the name before the
+// second open. The hook runs after Open makes the file. It moves the made file
+// away and writes another file with mode 0600.
+func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
+	root, state, _ := newState(t)
+	swapMadeFile(t, filepath.Join(state, "events.db"))
 	db, err := Open(root, "events.db", Options{})
 	if db != nil {
 		db.Close()
@@ -89,9 +95,55 @@ func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
 	wantRule(t, err, "events.db", ruleChanged)
 }
 
+// T-S-15: Open refuses a new file if the second open refuses it. The hook
+// changes the mode of the made file to 0644 before the second open. Open fails
+// with the changed rule, and refuse removes the made file.
+func TestTS15RefusedReopenRemovesMadeFile(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		if name != "events.db" {
+			return
+		}
+		if err := os.Chmod(file, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleChanged)
+	if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the made file stays at the name: %v", err)
+	}
+}
+
+// T-S-15: Open makes a new file only if no entry has the name. The hook writes
+// a file with mode 0600 after Open found no entry. Open fails with the changed
+// rule, and the file stays with its content.
+func TestTS15FileMadeBeforeCreateIsRefusedAndKept(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	const content = "other file"
+	setHook(t, &beforeCreate, func() {
+		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleChanged)
+	if b, err := os.ReadFile(file); err != nil || string(b) != content {
+		t.Fatalf("the file is gone or changed: %q, %v", b, err)
+	}
+}
+
 // T-S-15: the new database file is made in the directory that Open checked. The
-// hook swaps the parent directory after Open opened it and before the make. So
-// the path that SQLite opens leads to another file, and Open fails.
+// hook swaps the parent directory after Open opened it and before Open makes
+// the file. So the path that SQLite opens leads to another file. Open fails.
 func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 	root, state, _ := newState(t)
 	data := filepath.Join(state, "data")
@@ -106,17 +158,18 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// The read-only reopen runs after the make and before its Lstat. There the
-	// file is in the moved directory, and the path under data has no file.
-	var ran, held bool
+	// The read-only reopen runs after Open makes the file and before its Lstat.
+	// There the file is in the moved directory, and the path under data has no
+	// file.
+	var ran, inMoved bool
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 		if name != "events.db" {
 			return
 		}
-		_, inMoved := os.Lstat(filepath.Join(data+".moved", "events.db"))
+		_, moved := os.Lstat(filepath.Join(data+".moved", "events.db"))
 		_, inData := os.Lstat(filepath.Join(data, "events.db"))
 		ran = true
-		held = inMoved == nil && errors.Is(inData, fs.ErrNotExist)
+		inMoved = moved == nil && errors.Is(inData, fs.ErrNotExist)
 	}})
 	db, err := Open(root, "data/events.db", Options{})
 	if db != nil {
@@ -128,7 +181,7 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 	if !ran {
 		t.Fatal("the hook of the reopen did not run")
 	}
-	if !held {
+	if !inMoved {
 		t.Fatal("the new file is not in the moved directory, or data/events.db exists")
 	}
 	// Refuse removes the made file through the checked directory.
