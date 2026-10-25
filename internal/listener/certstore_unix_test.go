@@ -606,11 +606,11 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsBeforeTheRead(t *tes
 	if b != nil {
 		t.Errorf("Load returned %d bytes with an error", len(b))
 	}
-	// A read of the whole file allocates 32 MiB or more. A Load with the limit
-	// of 64 KiB + 1 byte allocates 144 KiB, and 286 KiB with the race detector.
-	// A Load with a limit of twice the cap allocates 304 KiB, and 606 KiB with
-	// the race detector. The constant readAllocMax is between these two numbers
-	// for each mode.
+	// A read of the whole file allocates 32 MiB or more. The limit is 64 KiB +
+	// 1 byte. A Load with this limit allocates 144 KiB, and 286 KiB with the
+	// race detector. A Load with a limit of twice the cap allocates 304 KiB,
+	// and 606 KiB with the race detector. The constant readAllocMax is between
+	// these two numbers for each mode.
 	n := after.TotalAlloc - before.TotalAlloc
 	t.Logf("Load allocated %d bytes", n)
 	if n > readAllocMax {
