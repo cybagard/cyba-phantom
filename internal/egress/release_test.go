@@ -82,14 +82,20 @@ func (c buildConfig) env() []string {
 	return env
 }
 
-// contextError gives an error when got is not the build context of c with cgo
-// off. got has the form GOOS/GOARCH/CgoEnabled.
-func contextError(got string, c buildConfig) error {
+// wantContext gives the build context of c with cgo off, in the form
+// GOOS/GOARCH/CgoEnabled.
+func wantContext(c buildConfig) string {
 	goos, goarch := c.goos, c.goarch
 	if goos == "" {
 		goos, goarch = runtime.GOOS, runtime.GOARCH
 	}
-	if want := goos + "/" + goarch + "/false"; got != want {
+	return goos + "/" + goarch + "/false"
+}
+
+// contextError gives an error when got is not the build context of c with cgo
+// off. got has the form GOOS/GOARCH/CgoEnabled.
+func contextError(got string, c buildConfig) error {
+	if want := wantContext(c); got != want {
 		return fmt.Errorf("go list used the build context %s, want %s", got, want)
 	}
 	return nil
@@ -200,6 +206,9 @@ func realPath(p string) (string, error) {
 func depProblem(realRoot string, d listedDep) string {
 	if why := releaseDepProblem(d.Path); why != "" {
 		return why
+	}
+	if inModule(d.Path) && d.Module == "" {
+		return "it has no module, and its path is in this module"
 	}
 	if inModule(d.Path) && d.Module != modPath {
 		return "its module " + d.Module + " is not this module"
@@ -334,22 +343,16 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	var all []platformDeps
 	for _, c := range releaseConfigs {
 		ctx, deps := listDeps(t, root, c, commands...)
-		if err := contextError(ctx, c); err != nil {
-			t.Fatalf("%s: %v", c.name(), err)
-		}
-		for _, cmd := range commands {
-			if !slices.ContainsFunc(deps, func(d listedDep) bool { return d.Path == cmd }) {
-				t.Errorf("%s: go list -deps did not list %s", c.name(), cmd)
-			}
-		}
-		all = append(all, platformDeps{c, deps})
+		all = append(all, platformDeps{c, ctx, deps})
 	}
-	checkDepList(t, realRoot, loadList(t, "release-deps.txt"), all)
+	checkDepList(t, realRoot, loadList(t, "release-deps.txt"), commands, all)
 }
 
-// platformDeps are the packages that go list -deps finds for one platform.
+// platformDeps are the build context and the packages that go list -deps
+// finds for one platform.
 type platformDeps struct {
 	c    buildConfig
+	ctx  string
 	deps []listedDep
 }
 
@@ -367,7 +370,9 @@ func configNames(cs []buildConfig) []string {
 // platforms of releaseConfigs, in the same order. The list check and the used
 // lines cover only the packages of other modules, on the platforms with
 // usesDepList. It also fails on each problem that listProblems finds in lines.
-func checkDepList(t testing.TB, realRoot string, lines []string, all []platformDeps) {
+// It fails when the build context of a platform is wrong (contextError). It
+// also fails when a platform does not list each path of cmds.
+func checkDepList(t testing.TB, realRoot string, lines []string, cmds []string, all []platformDeps) {
 	t.Helper()
 	list := lineSet(lines)
 	cs := make([]buildConfig, len(all))
@@ -379,6 +384,14 @@ func checkDepList(t testing.TB, realRoot string, lines []string, all []platformD
 	}
 	used := map[string]bool{}
 	for _, pd := range all {
+		if err := contextError(pd.ctx, pd.c); err != nil {
+			t.Errorf("%s: %v", pd.c.name(), err)
+		}
+		for _, cmd := range cmds {
+			if !slices.ContainsFunc(pd.deps, func(d listedDep) bool { return d.Path == cmd }) {
+				t.Errorf("%s: go list -deps did not list %s", pd.c.name(), cmd)
+			}
+		}
 		for _, d := range pd.deps {
 			if why := depProblem(realRoot, d); why != "" {
 				t.Errorf("%s: a release command depends on %s: %s", pd.c.name(), d.Path, why)
@@ -399,16 +412,39 @@ func checkDepList(t testing.TB, realRoot string, lines []string, all []platformD
 
 // record runs f with a recorder in a new goroutine and gives the errors that
 // f records. A call to Fatal in f ends only that goroutine. A method that the
-// recorder does not override goes to t.
+// recorder does not override goes to t. FailNow and SkipNow are not
+// overridden, so they act on the real test from another goroutine. A panic in
+// f is recorded as an error.
 func record(t testing.TB, f func(testing.TB)) []string {
 	r := &recorder{TB: t}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer func() {
+			if p := recover(); p != nil {
+				r.Error("panic: ", p)
+			}
+		}()
 		f(r)
 	}()
 	<-done
 	return r.errs
+}
+
+// TestTS21RecordPassesOtherMethods calls TempDir and Log, which the recorder
+// does not override, through record. They must work and record no error.
+func TestTS21RecordPassesOtherMethods(t *testing.T) {
+	var dir string
+	got := record(t, func(tb testing.TB) {
+		dir = tb.TempDir()
+		tb.Log("record passes Log to the test")
+	})
+	if len(got) != 0 {
+		t.Errorf("errors %q, want none", got)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Errorf("TempDir gave %q, want a folder: %v", dir, err)
+	}
 }
 
 // TestTS21CheckDepListReports calls checkDepList on planted packages. It must
@@ -418,7 +454,12 @@ func record(t testing.TB, f func(testing.TB)) []string {
 // names. It also has a listed package that only the host lists, which is not
 // used. The test also drops the host platform from the input.
 func TestTS21CheckDepListReports(t *testing.T) {
-	root, outside := t.TempDir(), t.TempDir()
+	root, err := realPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	cmd := modPath + "/cmd/x"
 	lines := []string{"example.org/lib/h", "example.org/lib/z", "example.org/rep/b"}
 	amd := []listedDep{
 		{"example.org/lib/a", outside, "example.org/lib", "", ""},
@@ -432,13 +473,14 @@ func TestTS21CheckDepListReports(t *testing.T) {
 	input := func(amdDeps []listedDep) []platformDeps {
 		var all []platformDeps
 		for _, c := range releaseConfigs {
-			pd := platformDeps{c: c}
+			pd := platformDeps{c: c, ctx: wantContext(c)}
 			switch c {
 			case buildConfig{"linux", "amd64"}:
 				pd.deps = amdDeps
 			case buildConfig{}:
 				pd.deps = host
 			}
+			pd.deps = append(pd.deps[:len(pd.deps):len(pd.deps)], listedDep{cmd, root, modPath, "", ""})
 			all = append(all, pd)
 		}
 		return all
@@ -448,6 +490,18 @@ func TestTS21CheckDepListReports(t *testing.T) {
 	seam := "default: a release command depends on " + modPath +
 		"/internal/egress/egresstest: it is below internal/egress"
 	unused := "release-deps.txt: line 1, example.org/lib/h, is not used"
+	notListed := "linux/amd64: example.org/lib/a is not on release-deps.txt"
+	with := func(f func([]platformDeps)) []platformDeps {
+		all := input(amd)
+		f(all)
+		return all
+	}
+	platforms := func(cs []buildConfig) string {
+		return fmt.Sprintf("platforms %q, want %q", configNames(cs), configNames(releaseConfigs))
+	}
+	swapped, relabelled := slices.Clone(releaseConfigs), slices.Clone(releaseConfigs)
+	swapped[0], swapped[1] = swapped[1], swapped[0]
+	relabelled[12] = buildConfig{"linux", "amd64"}
 	for name, tc := range map[string]struct {
 		all  []platformDeps
 		want []string
@@ -460,8 +514,18 @@ func TestTS21CheckDepListReports(t *testing.T) {
 			fmt.Sprintf("platforms %q, want %q", configNames(releaseConfigs[:len(releaseConfigs)-1]),
 				configNames(releaseConfigs)),
 			"linux/amd64: example.org/lib/a is not on release-deps.txt", replace, unused}},
+		"order swapped": {with(func(a []platformDeps) { a[0], a[1] = a[1], a[0] }), []string{
+			platforms(swapped), notListed, replace, seam, unused}},
+		"platform replaced": {with(func(a []platformDeps) {
+			a[12].c, a[12].ctx = relabelled[12], wantContext(relabelled[12])
+		}), []string{platforms(relabelled), notListed, replace, seam, unused}},
+		"wrong context": {with(func(a []platformDeps) { a[0].ctx = "linux/386/true" }), []string{
+			"linux/386: go list used the build context linux/386/true, want linux/386/false",
+			notListed, replace, seam, unused}},
+		"command not listed": {with(func(a []platformDeps) { a[0].deps = nil }), []string{
+			"linux/386: go list -deps did not list " + cmd, notListed, replace, seam, unused}},
 	} {
-		got := record(t, func(tb testing.TB) { checkDepList(tb, root, lines, tc.all) })
+		got := record(t, func(tb testing.TB) { checkDepList(tb, root, lines, []string{cmd}, tc.all) })
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: errors %q, want %q", name, got, tc.want)
 		}
@@ -519,6 +583,8 @@ func TestTS21CheckLinuxTargetsReports(t *testing.T) {
 		"complete": {[]buildConfig{amd, arm, {}}, nil},
 		"missing target": {[]buildConfig{amd, {}}, []string{
 			`releaseConfigs has the linux targets ["linux/amd64"], want ["linux/amd64" "linux/arm64"]`}},
+		"no host": {[]buildConfig{amd, arm}, []string{
+			`platforms with no dependency list: [], want the host only`}},
 		"second host": {[]buildConfig{amd, arm, {}, {"darwin", "arm64"}}, []string{
 			`platforms with no dependency list: ["default" "darwin/arm64"], want the host only`}},
 	} {
@@ -624,6 +690,9 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 	below := listedDep{modPath + "/x/p", outside, modPath + "/x", "", ""}
 	variant := listedDep{"github.com/cybagard/Cyba-Phantom/egress/egresstest", outside,
 		"github.com/cybagard/Cyba-Phantom", "", ""}
+	variantRoot := "github.com/cybagard/Cyba-Phantom"
+	sameReplace := listedDep{"example.org/lib", outside, "example.org/lib", "example.org/lib", "v1.1.0"}
+	noModule := listedDep{modPath + "/x/q", outside, "", "", ""}
 	for _, tc := range []struct {
 		name string
 		d    listedDep
@@ -647,6 +716,9 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		{"other module outside the root", listedDep{"example.org/lib", outside, "example.org/lib", "", ""}, false},
 		{"module below the module path", below, true},
 		{"case variant of the module path", variant, true},
+		{"case variant of the module root path", listedDep{variantRoot, outside, variantRoot, "", ""}, true},
+		{"replace to the same path with a version", sameReplace, true},
+		{"module path with no module", noModule, true},
 		{"module that starts with the module path", listedDep{modPath + "-x/p", outside, modPath + "-x", "", ""}, false},
 		{"standard library", listedDep{"net/http", outside, "", "", ""}, false},
 	} {
@@ -661,6 +733,10 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		"module below the module path": {below, "its module " + modPath + "/x is not this module"},
 		"case variant of the module path": {variant,
 			"its path differs from the module path only in case"},
+		"replace to the same path with a version": {sameReplace,
+			"its module example.org/lib has a replace"},
+		"module path with no module": {noModule,
+			"it has no module, and its path is in this module"},
 	} {
 		if why := depProblem(realRoot, tc.d); why != tc.want {
 			t.Errorf("%s: reason %q, want %q", name, why, tc.want)
