@@ -121,13 +121,13 @@ func isASTDirective(lit string) bool {
 // continues it, when the line is directly after the group. The line must start
 // at the column of the trailing comment. Each next such line also continues
 // the group. A line of a group that starts after code has noCode set. So its
-// indent does not make a code block. Each "/* */"
-// comment is a group of its own. A directive ends a group. A comment that
-// isDirective does not know, and that is only a go/ast directive token, adds
-// no words. On a line of its own, it does not end the group. The next
-// "//" line is adjacent to the line before it. This does not hold for a group
-// that starts after code, with the token at another column. After code, the
-// code ends the group. With more text, the comment is ordinary comment text.
+// indent does not make a code block. Each "/* */" comment is a group of its
+// own. A directive ends a group. A comment that isDirective does not know, and
+// that is only a go/ast directive token, adds no words. On a line of its own,
+// it does not end the group. The next "//" line is adjacent to the line before
+// it. This does not hold for a group that starts after code, with the token at
+// another column. After code, the code ends the group. With more text, the
+// comment is ordinary comment text.
 // scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
@@ -226,8 +226,7 @@ const (
 // rows and trailer lines. A line is code in a fence of three backticks. A line
 // with a tab or two spaces of indent is also code. This holds when no
 // paragraph or list item is open. In a code block, each indented line stays
-// code. A line with noCode set never starts a code block by its indent. It
-// continues an open paragraph or list item, or it starts a paragraph.
+// code. A line with noCode set never starts a code block by its indent.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
