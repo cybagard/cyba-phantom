@@ -849,7 +849,8 @@ func TestTS14_OwnerRuleOnStateFile(t *testing.T) {
 	wantRefused(t, "other owner", dir, v)
 }
 
-// T-S-14: a byte appended to the state file after the open gives ErrState.
+// T-S-14: a byte appended to the state file after the open gives ErrState. The
+// hook runs before the fstat, so the parse of the note refuses the file.
 func TestTS14_FileGrowsAfterOpen(t *testing.T) {
 	v, dir, file := stateWithFile(t)
 	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(name string) {
