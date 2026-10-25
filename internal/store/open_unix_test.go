@@ -8,9 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 // T-S-15: a new database file has mode 0600, and so have the WAL and SHM files
@@ -306,29 +312,107 @@ func TestTS15UnsafeFileIsRefused(t *testing.T) {
 	})
 }
 
-// T-S-15: a file with another owner is refused. The hook makes the effective
-// user differ from the owner, so the rule has a test that does not need root.
+// otherOwnerOf sets the test hook of the shared file checks, so that the file
+// or directory at one path has another owner. The hook is true for the inode of
+// that path only. The returned function moves the hook to another path.
+func otherOwnerOf(t *testing.T) func(path string) {
+	t.Helper()
+	var target atomic.Pointer[safefile.FileID]
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool {
+		want := target.Load()
+		return want != nil && *want == id
+	}})
+	return func(path string) {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, ok := safefile.Identity(fi)
+		if !ok {
+			t.Fatal("no identity")
+		}
+		target.Store(&id)
+	}
+}
+
+// T-S-15: a file with another owner is refused. The hook makes the owner of one
+// inode differ from the effective user, so the rule has a test that does not
+// need root. The other inodes keep their owner.
 func TestTS15OtherOwnerIsRefusedByHook(t *testing.T) {
 	f := newFixture(t)
-	facts := func(name string) func(fs.FileInfo) (uint64, uint64, bool) {
-		return func(fi fs.FileInfo) (uint64, uint64, bool) {
-			n, uid, ok := systemFacts(fi)
-			if fi.Name() == name {
-				uid++
-			}
-			return n, uid, ok
-		}
-	}
-	setHook(t, &fileFacts, facts("events.db"))
+	other := otherOwnerOf(t)
+	other(filepath.Join(f.state, "events.db"))
 	f.refused(t, "events.db", "events.db", ruleOwner)
-	// The same hook for the state directory and for a parent directory.
+	// The same hook for a parent directory and for the state directory.
 	if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fileFacts = facts("data")
+	other(filepath.Join(f.state, "data"))
 	f.refused(t, "data/events.db", "data", ruleOwner)
-	fileFacts = facts(".")
+	other(f.state)
 	f.refused(t, "events.db", "state directory", ruleOwner)
+}
+
+// T-S-15: a FIFO that someone puts in place of the database file after the file
+// checks and before the open is refused, and Open returns. An open that can
+// block would wait for a writer of the FIFO. The FIFO comes after the Lstat of
+// the file check, or after the Lstat of the checked open.
+func TestTS15FifoAfterChecksIsRefused(t *testing.T) {
+	for _, when := range []string{"after the file check", "after the Lstat of the open"} {
+		t.Run(when, func(t *testing.T) {
+			f := newFixture(t)
+			file := filepath.Join(f.state, "events.db")
+			fi, err := os.Stat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dbID, _ := safefile.Identity(fi)
+			var once sync.Once
+			swap := func() {
+				once.Do(func() {
+					if err := os.Remove(file); err != nil {
+						t.Error(err)
+					}
+					if err := syscall.Mkfifo(file, 0o600); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			h := safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool {
+				if id == dbID {
+					swap() // the Lstat of the file check is done
+				}
+				return false
+			}}
+			if strings.HasSuffix(when, "open") {
+				h = safefiletest.Hooks{AfterCheck: func(name string) {
+					if name == "events.db" {
+						swap()
+					}
+				}}
+			}
+			safefiletest.Set(t, h)
+			done := make(chan error, 1)
+			go func() {
+				db, err := Open(f.root, "events.db", Options{})
+				if db != nil {
+					db.Close()
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				wantRule(t, err, "events.db", ruleChanged)
+			case <-time.After(5 * time.Second):
+				// Open a writer, so that the blocked open ends.
+				if w, err := os.OpenFile(file, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+					w.Close()
+				}
+				t.Fatal("Open does not return for a FIFO at the database path")
+			}
+		})
+	}
 }
 
 // T-S-15: Open refuses a state directory or parent directory with group or

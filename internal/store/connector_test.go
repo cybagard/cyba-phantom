@@ -9,12 +9,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 // countConnects counts the calls of Connect until the end of the test.
@@ -281,8 +284,7 @@ func changeBeforeDriverOpen(t *testing.T, f *fixture, rel string, change func())
 	db := mustOpen(t, f.root, rel)
 	defer db.Close()
 	cancelQuery(t, db)
-	beforeDriverOpen = change
-	defer func() { beforeDriverOpen = nil }()
+	setHook(t, &beforeDriverOpen, change)
 	return db.QueryRow("SELECT 1").Scan(new(int))
 }
 
@@ -376,12 +378,17 @@ func TestTS15RemovedFileMadeAgainIsRefused(t *testing.T) {
 }
 
 // holdHook makes onHeld save the descriptor that Open holds, until the end of
-// the test.
+// the test. At the end, it closes the descriptor, so that a t.Fatal in a hook
+// does not keep it open.
 func holdHook(t *testing.T) **os.File {
 	t.Helper()
 	var held *os.File
-	onHeld = func(f *os.File) { held = f }
-	t.Cleanup(func() { onHeld = nil })
+	setHook(t, &onHeld, func(f *os.File) { held = f })
+	t.Cleanup(func() {
+		if held != nil {
+			held.Close()
+		}
+	})
 	return &held
 }
 
@@ -434,8 +441,7 @@ func TestTS15RefusedOpenClosesDescriptor(t *testing.T) {
 	t.Run("connection refused", func(t *testing.T) {
 		held := holdHook(t)
 		f := newFixture(t)
-		afterChecks = func() { replaceFile(t, filepath.Join(f.state, "events.db")) }
-		defer func() { afterChecks = nil }()
+		setHook(t, &afterChecks, func() { replaceFile(t, filepath.Join(f.state, "events.db")) })
 		_, err := Open(f.root, "events.db", Options{})
 		wantRule(t, err, "events.db", ruleChanged)
 		if *held == nil || !isClosed(*held) {
@@ -452,16 +458,17 @@ func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
 	clean := cleanDatabase(t)
 	before := snapshot(t, f.outside)
 	renamed := false
-	fileFacts = func(fi fs.FileInfo) (uint64, uint64, bool) {
-		if fi.Name() == "events.db" && !renamed {
-			renamed = true // the Lstat of the file is done: the rename comes after it
+	// The hook runs at the start of the checked open, after the file checks.
+	// The checked open sees the new file only, so the compare of the identity
+	// with the checked file finds the change.
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		if name == "events.db" && !renamed {
+			renamed = true
 			if err := os.Rename(clean, filepath.Join(f.state, "events.db")); err != nil {
 				t.Error(err)
 			}
 		}
-		return systemFacts(fi)
-	}
-	defer func() { fileFacts = systemFacts }()
+	}})
 	db, err := Open(f.root, "events.db", Options{})
 	if db != nil {
 		db.Close()
@@ -475,6 +482,62 @@ func TestTS15RenameInsideOpenIsRefused(t *testing.T) {
 	}
 }
 
+// fdsOf counts the descriptors of the process that point to path. It needs Linux.
+func fdsOf(t *testing.T, path string) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range ents {
+		if to, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil && to == path {
+			n++
+		}
+	}
+	return n
+}
+
+// T-S-15: the checks of a connection open no descriptor of the database file.
+// The close of any such descriptor would drop the locks of SQLite. The count of
+// descriptors that point to the file is the same before and after the checks,
+// and no check opens the file, also for a file below a parent directory.
+func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the test reads /proc/self/fd")
+	}
+	for _, rel := range []string{"events.db", "data/events.db"} {
+		t.Run(rel, func(t *testing.T) {
+			f := newFixture(t)
+			if err := os.Mkdir(filepath.Join(f.state, "data"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			held := holdHook(t)
+			db := mustOpen(t, f.root, rel)
+			defer db.Close()
+			fi, err := (*held).Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := safefile.Identity(fi)
+			path := filepath.Join(f.state, filepath.FromSlash(rel))
+			c := &connector{root: f.root, rel: rel, want: path, id: id, held: *held}
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == "events.db" {
+					t.Error("a check opened the database file")
+				}
+			}})
+			before := fdsOf(t, path)
+			if err := c.check(); err != nil {
+				t.Fatal(err)
+			}
+			if after := fdsOf(t, path); before == 0 || after != before {
+				t.Fatalf("%d descriptors of the database file before the checks, %d after", before, after)
+			}
+		})
+	}
+}
+
 // T-S-15: a parent directory that gets group bits after the file checks is
 // refused on the first connection, and the error names the directory.
 func TestTS15ParentChangeNamesTheDirectory(t *testing.T) {
@@ -483,8 +546,11 @@ func TestTS15ParentChangeNamesTheDirectory(t *testing.T) {
 	if err := os.Mkdir(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	afterChecks = func() { os.Chmod(data, 0o755) }
-	defer func() { afterChecks = nil }()
+	setHook(t, &afterChecks, func() {
+		if err := os.Chmod(data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
 	db, err := Open(root, "data/events.db", Options{})
 	if db != nil {
 		db.Close()

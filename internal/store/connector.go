@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"modernc.org/sqlite"
 )
 
@@ -18,9 +19,6 @@ var onConnect func()
 // it to change the file system between the checks and the open of the driver.
 var beforeDriverOpen func()
 
-// fileID is the device and the inode of a file.
-type fileID struct{ dev, ino uint64 }
-
 // connector opens each connection of the pool. Each new connection is checked.
 // The checks run before the driver opens it, except for the first connection,
 // which Open has just checked. They run again on the new connection, with the
@@ -30,15 +28,15 @@ type connector struct {
 	driver.Connector
 	root *os.Root
 	rel  string
-	want string   // the absolute path that database_list must give
-	id   fileID   // the identity of the database file that Open checked
-	held *os.File // the database file, open for the life of the pool
+	want string          // the absolute path that database_list must give
+	id   safefile.FileID // the identity of the database file that Open checked
+	held *os.File        // the database file, open for the life of the pool
 
 	// checked is true until the first Connect: Open has just run the checks.
 	checked atomic.Bool
 }
 
-func newConnector(root *os.Root, rel, path, dsn string, held *os.File, id fileID) (*connector, error) {
+func newConnector(root *os.Root, rel, path, dsn string, held *os.File, id safefile.FileID) (*connector, error) {
 	base, err := sqlite.NewConnector(dsn)
 	if err != nil {
 		return nil, fail(rel, ruleOpen)
@@ -57,26 +55,33 @@ func newConnector(root *os.Root, rel, path, dsn string, held *os.File, id fileID
 func (c *connector) Close() error { return c.held.Close() }
 
 // identityOf returns the device and the inode of a file from an Lstat result.
-func identityOf(rel string, fi fs.FileInfo, err error) (fileID, error) {
+func identityOf(rel string, fi fs.FileInfo, err error) (safefile.FileID, error) {
 	if err != nil {
-		return fileID{}, fail(rel, ruleExamine)
+		return safefile.FileID{}, fail(rel, ruleExamine)
 	}
-	dev, ino, ok := fileIdentity(fi)
+	id, ok := safefile.Identity(fi)
 	if !ok {
-		return fileID{}, fail(rel, ruleExamine) // fail closed
+		return safefile.FileID{}, fail(rel, ruleExamine) // fail closed
 	}
-	return fileID{dev, ino}, nil
+	return id, nil
 }
 
-// check runs the parent checks and the file checks. The database file must
-// exist: if it is gone, the driver would make a new file, so this is a refusal.
-// The file must be the one that Open holds open. The path that SQLite opens must
-// lead to the same file as the path through the root.
+// check runs the parent checks and the file checks. It opens no descriptor of
+// the database file: the close of any descriptor of it would drop the locks of
+// SQLite. The database file must exist: if it is gone, the driver would make a
+// new file, so this is a refusal. The file must be the one that Open holds open.
+// The path that SQLite opens must lead to the same file as the path through the
+// root.
 func (c *connector) check() error {
 	if err := checkParents(c.root, c.rel); err != nil {
 		return err
 	}
-	fi, err := checkFiles(c.root, c.rel)
+	dir, base, err := openDir(c.root, c.rel)
+	if err != nil {
+		return err
+	}
+	defer closeDir(c.root, dir)
+	fi, err := checkFiles(dir, base, c.rel)
 	if err != nil {
 		return err
 	}
