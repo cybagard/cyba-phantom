@@ -68,8 +68,8 @@ func (c buildConfig) name() string {
 	return c.goos + "/" + c.goarch
 }
 
-// env gives the environment entries that select the platform and turn cgo
-// off, as the release build of the Makefile does.
+// env gives the environment entries for the platform, with cgo off. The
+// release build of the Makefile does the same.
 func (c buildConfig) env() []string {
 	env := []string{"CGO_ENABLED=0"}
 	if c.goos != "" {
@@ -163,8 +163,8 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	}
 }
 
-// TestTS21ReleaseDependencyRule checks releaseDepProblem on the two paths of
-// the test seam, on other paths with a problem, and on permitted paths.
+// TestTS21ReleaseDependencyRule checks releaseDepProblem on the two test-seam
+// paths, on other paths with a problem and on permitted paths.
 func TestTS21ReleaseDependencyRule(t *testing.T) {
 	for imp, bad := range map[string]bool{
 		modPath + "/internal/egress/egresstest":        true,
