@@ -98,7 +98,7 @@ CREATE TABLE checkpoint (
 
 // T-U-18: a new database has the fixed text of each table and index. The text
 // of the embedded file is not the only proof.
-func TestTU18EventSchemaEqualsFixedText(t *testing.T) {
+func TestTU18SchemaEqualsFixedText(t *testing.T) {
 	var got string
 	q := "SELECT group_concat(sql, char(10)) FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid)"
 	if err := migrated(t).QueryRow(q).Scan(&got); err != nil {

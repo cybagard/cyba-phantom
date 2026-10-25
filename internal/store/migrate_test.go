@@ -250,8 +250,8 @@ func wantEventRefusal(t *testing.T, err error, db *sql.DB, file, before string) 
 	}
 }
 
-// T-S-15: a schema-1 database is refused when its event table text is not the
-// text of the binary. Nothing in it changes.
+// T-S-15: Migrate refuses a schema-1 database when its event table text differs
+// from the text of the binary. It changes nothing in the database.
 func TestTS15EventTableOfOtherTextIsRefused(t *testing.T) {
 	cur := firstMigration(t)
 	otherByte := strings.Replace(cur, "leaf_index >= 0", "leaf_index >= 1", 1)
@@ -330,8 +330,8 @@ func TestTS15EventCheckReadsTheTableOnly(t *testing.T) {
 	}
 }
 
-// T-S-15: the check runs after the migrations and before the commit. A pending
-// migration on a database with the earlier event text is refused with it.
+// T-S-15: Migrate checks the event text after the migrations and before the
+// commit. It refuses a pending migration on a database with the earlier text.
 func TestTS15EventCheckRunsBeforeCommitOfPendingMigration(t *testing.T) {
 	db, file := earlierDatabase(t)
 	before := content(t, db, file)
@@ -346,11 +346,46 @@ func TestTS15EventCheckRunsBeforeCommitOfPendingMigration(t *testing.T) {
 	}
 }
 
-// T-S-15: a database that Migrate made opens again with no error.
+// T-S-15: a database that Migrate made opens again, and migrates again, with
+// no error.
 func TestTS15DatabaseOfBinaryOpensAgain(t *testing.T) {
-	db := migrated(t)
-	if err := Migrate(db, "origin"); err != nil {
+	root, _, _ := newState(t)
+	first := mustOpen(t, root, "events.db")
+	if err := Migrate(first, "origin"); err != nil {
 		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := mustOpen(t, root, "events.db")
+	t.Cleanup(func() { second.Close() })
+	if err := Migrate(second, "origin"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// T-S-15: when the step in memory fails, migrate returns the migration rule and
+// changes nothing. The second statement of the script fails in memory only.
+func TestTS15FailedStepInMemoryIsRefused(t *testing.T) {
+	db, file := schemaOne(t, firstMigration(t))
+	before := content(t, db, file)
+	set := testSet(nil)
+	set["0001_schema_v1.sql"].Data = []byte("CREATE TABLE event (a); CREATE TABLE event (b);")
+	wantRule(t, migrate(db, set, "o"), schemaName, ruleMigrate)
+	if content(t, db, file) != before {
+		t.Fatal("the refused database changed")
+	}
+}
+
+// T-S-15: the step in memory applies all scripts, also a pending one that
+// changes the event table. A second run with the same scripts has no error.
+func TestTS15PendingChangeOfEventTableIsChecked(t *testing.T) {
+	db := migrated(t)
+	set := testSet(map[string]string{"0002_more.sql": "ALTER TABLE event ADD COLUMN z INTEGER"})
+	for i := 0; i < 2; i++ {
+		if err := migrate(db, set, "o"); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
 	}
 }
 
