@@ -185,12 +185,12 @@ func TestTS22BucketRate(t *testing.T) {
 	}
 }
 
-// T-S-22, T-U-17: take 5*10^5 IPv6 /64 keys in 120 s at more than the full rate
+// T-S-22, T-U-17: take 10^6 IPv6 /64 keys in 120 s at more than the full rate
 // of the bucket. The run crosses the edge of the window, so old entries leave.
 // The window map holds at most 305 entries. The counters hold at most 4096 keys
 // plus the overflow bucket.
 func TestTS22MapBound(t *testing.T) {
-	const n = 500_000
+	const n = 1_000_000
 	g := newRefusedRig(t, 1024)
 	maxKeys := 0
 	for i := range n {
