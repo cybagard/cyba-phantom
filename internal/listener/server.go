@@ -233,7 +233,10 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 		MaxHeaderBytes:      s.hdrBytes - 4096,
 		MaxHeaderValueCount: maxHeaderValues,
 		Protocols:           &p,
-		ErrorLog:            log.New(&s.errLines, "", 0),
+		// net/http answers "OPTIONS *" with 200 and no body, and skips the
+		// handler. That answer is a Go fingerprint and gives no request event.
+		DisableGeneralOptionsHandler: true,
+		ErrorLog:                     log.New(&s.errLines, "", 0),
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			if lc := limitConnOf(c); lc != nil {
 				ctx = context.WithValue(ctx, limitConnKey{}, lc)

@@ -3,9 +3,11 @@ package listener
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -218,19 +220,77 @@ func TestTS17RedirectEscapesSegments(t *testing.T) {
 	}
 }
 
-// T-S-17: a path that starts with two slashes, a slash and a backslash, or
-// their escaped forms, never changes the host of the redirect; the Location is
-// https and its host is the configured name.
+// readRequest parses a request for target and host, as the server does.
+func readRequest(t *testing.T, target, host string) *http.Request {
+	t.Helper()
+	raw := "GET " + target + " HTTP/1.1\r\nHost: " + host + "\r\n\r\n"
+	r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatalf("target %q: ReadRequest: %v", target, err)
+	}
+	return r
+}
+
+// T-S-17: the Location of the redirect keeps each escape of the request path.
+// It decodes none, so "%2F" stays "%2F". A byte that needs an escape gets one.
+func TestTS17RedirectKeepsEscapes(t *testing.T) {
+	for _, tc := range []struct{ target, want string }{
+		{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
+		{"/%2f%2fevil.example", "https://decoy.test/%2F%2Fevil.example"},
+		{"/%2e%2e/x", "https://decoy.test/%2E%2E/x"},
+		{"/%5cevil", "https://decoy.test/%5Cevil"},
+		{"/a%2Fb<c", "https://decoy.test/a%2Fb%3Cc"},
+		{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
+		{"/[x]", "https://decoy.test/%5Bx%5D"},
+		{"/%41", "https://decoy.test/%41"},
+		{"/a%252Fb", "https://decoy.test/a%252Fb"},
+		{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
+		{"/é", "https://decoy.test/%C3%A9"},
+		{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
+	} {
+		resp, _ := serveRaw(t, NewRedirect(helloNames), readRequest(t, tc.target, "decoy.test"))
+		if got := resp.Header.Get("Location"); resp.StatusCode != 308 || got != tc.want {
+			t.Errorf("target %q: status %d, Location %q, want %q", tc.target, resp.StatusCode, got, tc.want)
+		}
+	}
+}
+
+// T-S-17: a byte other than "/" and "%" gets the escape of url.PathEscape.
+// A "%" that starts no valid escape gets "%25", in RawPath and in Path.
+func TestTS17LocationEscapesEachByte(t *testing.T) {
+	for b := 0; b < 256; b++ {
+		if b == '/' || b == '%' {
+			continue
+		}
+		s := string([]byte{byte(b)})
+		if got, want := location("decoy.test", &url.URL{Path: "/" + s}), "https://decoy.test/"+url.PathEscape(s); got != want {
+			t.Errorf("byte %#x: %q, want %q", b, got, want)
+		}
+	}
+	for _, tc := range []struct {
+		u    url.URL
+		want string
+	}{
+		{url.URL{Path: "/%zz", RawPath: "/%zz"}, "https://decoy.test/%25zz"},
+		{url.URL{Path: "/a%", RawPath: "/a%"}, "https://decoy.test/a%25"},
+		{url.URL{Path: "/%41"}, "https://decoy.test/%2541"},
+	} {
+		if got := location("decoy.test", &tc.u); got != tc.want {
+			t.Errorf("RawPath %q, Path %q: %q, want %q", tc.u.RawPath, tc.u.Path, got, tc.want)
+		}
+	}
+}
+
+// T-S-17: the host of the redirect is always the configured name, never the
+// request Host. The request Host is DECOY.test:80, and the Location host is
+// decoy.test. A path with two slashes, a backslash, or their escaped forms does
+// not change the host.
 func TestTS17RedirectHostIsAlwaysConfigured(t *testing.T) {
 	for _, target := range []string{
 		"//evil.example", "/\\evil.example", "/%2F%2Fevil.example", "///evil.example", "/\\/evil.example",
+		"/%5Cevil.example", "/%5cevil.example", "/%2f%2fevil.example",
 	} {
-		raw := "GET " + target + " HTTP/1.1\r\nHost: decoy.test\r\n\r\n"
-		r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
-		if err != nil {
-			t.Fatalf("target %q: ReadRequest: %v", target, err)
-		}
-		resp, _ := serveRaw(t, NewRedirect(helloNames), r)
+		resp, _ := serveRaw(t, NewRedirect(helloNames), readRequest(t, target, "DECOY.test:80"))
 		loc := resp.Header.Get("Location")
 		t.Logf("target %q: status %d, Location %q", target, resp.StatusCode, loc)
 		if resp.StatusCode != 308 || loc == "" {
@@ -289,6 +349,60 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 	}
 }
 
+// T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
+// configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets
+// the 200 with no body of net/http. Over TLS it gives one request event and no
+// refused event. On the plain socket it gives no Location and no event.
+func TestTS17OptionsStarGoesToHandler(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		code int
+		body string
+	}{{"decoy.test", 405, methodBody}, {"unknown.test", 404, notFoundBody}} {
+		h, q, _ := newHelloQueue(t, 4)
+		rg := newRig(t, 8, testHeaderBytes, defaultTimeouts, h)
+		rg.serve(t)
+		ln := listenLoopback(t)
+		go func() { _ = rg.s.ServePlain(ln, NewRedirect(helloNames)) }()
+		for _, dial := range []func() (net.Conn, error){
+			func() (net.Conn, error) { return dialTLS(rg.addr, rg.clientConfig()) },
+			func() (net.Conn, error) { return dialTCP(ln.Addr().String()) },
+		} {
+			c, err := dial()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(c, "OPTIONS * HTTP/1.1\r\nHost: "+tc.host+"\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			allow := resp.Header.Get("Allow")
+			if resp.StatusCode != tc.code || string(body) != tc.body || resp.Header.Get("Location") != "" || (tc.code == 405) != (allow == "GET, HEAD") {
+				t.Fatalf("host %q: %d %q Allow %q", tc.host, resp.StatusCode, body, allow)
+			}
+			_ = c.Close()
+		}
+		// Shutdown waits until the server has seen the close of each client.
+		if err := rg.s.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("host %q: %d request events, want 1", tc.host, len(evs))
+		}
+		if r := evs[0].Record(); evs[0].Kind() != event.KindRequest || *r.Method != "OPTIONS" || *r.Path != "*" || *r.Status != int64(tc.code) {
+			t.Fatalf("host %q: event %+v", tc.host, r)
+		}
+		if n := len(rg.s.refused.q.Drain()); n != 0 {
+			t.Fatalf("host %q: %d other events on the server queue", tc.host, n)
+		}
+	}
+}
+
 // T-U-19: BenchmarkHelloHandler measures one request on the TLS handler: the
 // reply and the request event. The figure includes the httptest recorder.
 func BenchmarkHelloHandler(b *testing.B) {
@@ -310,50 +424,54 @@ func BenchmarkHelloHandler(b *testing.B) {
 	}
 }
 
-// T-S-17: a cut of the Location never ends inside a %XX escape. The path
-// "/" + pad + "<" * 700 has its "%" at byte 2047 (pad 0), 2046 (pad 2) and 2045
-// (pad 1) of the Location value, counted from 0. Each "<" is "%3C" and the
-// prefix "https://decoy.test/" has 19 bytes.
+// T-S-17: a cut of the Location never ends inside a %XX escape. The path is
+// "/", then pad "a" bytes, then 2100 copies of one unit. The unit is "%2F"
+// (kept), "<" (escaped to "%3C") or "a". For the two 3-byte units, the pads 0,
+// 1 and 2 give values of 2047, 2048 and 2046 bytes.
 func TestTS17LocationCutKeepsEscapes(t *testing.T) {
-	for _, pad := range []int{0, 1, 2} {
-		p := "/" + strings.Repeat("a", pad) + strings.Repeat("<", 700)
-		loc := location("decoy.test", p)
-		if len(loc) > maxLocation {
-			t.Fatalf("pad %d: length %d", pad, len(loc))
-		}
-		if strings.Contains(loc[len(loc)-2:], "%") {
-			t.Fatalf("pad %d: cut inside an escape: %q", pad, loc[len(loc)-4:])
-		}
-		u, err := url.Parse(loc)
-		if err != nil || u.Host != "decoy.test" {
-			t.Fatalf("pad %d: Location %q (%v)", pad, loc[len(loc)-8:], err)
+	for _, unit := range []string{"%2F", "<", "a"} {
+		for pad := 0; pad <= 3; pad++ {
+			u := &url.URL{RawPath: "/" + strings.Repeat("a", pad) + strings.Repeat(unit, 2100)}
+			loc := location("decoy.test", u)
+			if len(loc) > maxLocation || len(loc) < maxLocation-2 {
+				t.Fatalf("unit %q pad %d: length %d", unit, pad, len(loc))
+			}
+			if strings.Contains(loc[len(loc)-2:], "%") {
+				t.Fatalf("unit %q pad %d: cut inside an escape: %q", unit, pad, loc[len(loc)-4:])
+			}
+			if p, err := url.Parse(loc); err != nil || p.Host != "decoy.test" {
+				t.Fatalf("unit %q pad %d: Location %q (%v)", unit, pad, loc[len(loc)-8:], err)
+			}
 		}
 	}
 }
 
 // T-S-17: the work of location is bounded by maxLocation, not by the path.
-// Each case takes less than 16 KiB of heap in each run, and the short path
-// takes less than 256 B.
+// Each case has its own bound on the heap of one run (max, in bytes). No bound
+// is over 16 KiB, and the short path stays under 256 B.
 func TestTS17LocationWorkIsBounded(t *testing.T) {
-	for _, tc := range []struct{ name, path string }{
-		{"short", "/a/b"},
-		{"slash", strings.Repeat("/", 16384)}, {"escape", strings.Repeat("<", 16384)},
-		{"mixed", "/" + strings.Repeat("<", 238) + "/" + strings.Repeat("<", 16384)},
+	for _, tc := range []struct {
+		name, path string
+		max        int64
+	}{
+		{"short", "/a/b", 256},
+		{"slash", strings.Repeat("/", 16384), 4096},
+		{"escape", strings.Repeat("<", 16384), 16384},
+		{"mixed", "/" + strings.Repeat("<", 238) + "/" + strings.Repeat("<", 16384), 16384},
+		{"kept escape", strings.Repeat("%2f", 6000), 4096},
 	} {
+		u := &url.URL{Path: tc.path, RawPath: tc.path}
 		r := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				location("decoy.test", tc.path)
+				location("decoy.test", u)
 			}
 		})
 		t.Logf("%s: %d B/op, %d allocs/op", tc.name, r.AllocedBytesPerOp(), r.AllocsPerOp())
-		if got := r.AllocedBytesPerOp(); got >= 16*1024 {
-			t.Fatalf("%s: %d bytes in each run", tc.name, got)
+		if got := r.AllocedBytesPerOp(); got >= tc.max {
+			t.Fatalf("%s: %d bytes in each run, want less than %d", tc.name, got, tc.max)
 		}
-		if got := r.AllocedBytesPerOp(); tc.name == "short" && got >= 256 {
-			t.Fatalf("%s: %d bytes in each run, want less than 256", tc.name, got)
-		}
-		if loc := location("decoy.test", tc.path); len(loc) > maxLocation {
+		if loc := location("decoy.test", u); len(loc) > maxLocation {
 			t.Fatalf("%s: length %d", tc.name, len(loc))
 		}
 	}

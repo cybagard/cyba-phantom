@@ -79,11 +79,14 @@ type capRig struct {
 
 func newCapRig(t *testing.T, h http.Handler) *capRig {
 	t.Helper()
-	c := &capRig{rig: newRig(t, 8, testHeaderBytes, defaultTimeouts, h), got: make(chan *Hello, 8)}
+	c := &capRig{rig: newRig(t, 8, testHeaderBytes, defaultTimeouts, h), got: make(chan *Hello, 32)}
 	c.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 		c.calls.Add(1)
 		cfg, err := captureHello(chi)
-		c.got <- chi.Context().Value(stateKey{}).(*connState).hello.Load()
+		select {
+		case c.got <- HelloFrom(chi.Context()):
+		default: // the buffer is full: drop the value, do not block
+		}
 		return cfg, err
 	}
 	return c
@@ -151,6 +154,14 @@ func TestTU19ListCaps(t *testing.T) {
 	base := func() rawHello {
 		return rawHello{version: 0x0303, suites: []uint16{0xc02b}, exts: []rawExt{extVersions(0x0303)}}
 	}
+	// addExts adds n extensions with no data, after the supported_versions one.
+	addExts := func(n int) func(*rawHello) {
+		return func(h *rawHello) {
+			for _, id := range seq(0x4000, n) {
+				h.exts = append(h.exts, rawExt{id, nil})
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name string
 		mod  func(*rawHello)
@@ -160,20 +171,23 @@ func TestTU19ListCaps(t *testing.T) {
 	}{
 		{"suites", func(h *rawHello) { h.suites = seq(0x1000, 300) }, (*Hello).CipherSuites, seq(0x1000, maxCipherSuites), true},
 		{"suites at cap", func(h *rawHello) { h.suites = seq(0x1000, maxCipherSuites) }, (*Hello).CipherSuites, seq(0x1000, maxCipherSuites), false},
-		{"extensions", func(h *rawHello) {
-			for _, id := range seq(0x4000, 300) {
-				h.exts = append(h.exts, rawExt{id, nil})
-			}
-		}, (*Hello).Extensions, append([]uint16{43}, seq(0x4000, maxExtensions-1)...), true},
+		{"extensions", addExts(300), (*Hello).Extensions, append([]uint16{43}, seq(0x4000, maxExtensions-1)...), true},
+		{"extensions at cap", addExts(maxExtensions - 1), (*Hello).Extensions, append([]uint16{43}, seq(0x4000, maxExtensions-1)...), false},
 		{"signature schemes", func(h *rawHello) { h.exts = append(h.exts, extSigs(seq(0x0100, 100)...)) }, (*Hello).SignatureSchemes, seq(0x0100, maxSigSchemes), true},
+		{"signature schemes at cap", func(h *rawHello) { h.exts = append(h.exts, extSigs(seq(0x0100, maxSigSchemes)...)) }, (*Hello).SignatureSchemes, seq(0x0100, maxSigSchemes), false},
 		{"groups", func(h *rawHello) { h.exts = append(h.exts, extGroups(seq(0x0100, 100)...)) }, (*Hello).SupportedGroups, seq(0x0100, maxGroups), true},
+		{"groups at cap", func(h *rawHello) { h.exts = append(h.exts, extGroups(seq(0x0100, maxGroups)...)) }, (*Hello).SupportedGroups, seq(0x0100, maxGroups), false},
 		{"versions", func(h *rawHello) { h.exts = []rawExt{extVersions(seq(0x0300, 20)...)} }, (*Hello).SupportedVersions, seq(0x0300, maxVersions), true},
+		{"versions at cap", func(h *rawHello) { h.exts = []rawExt{extVersions(seq(0x0300, maxVersions)...)} }, (*Hello).SupportedVersions, seq(0x0300, maxVersions), false},
 	} {
 		h := base()
 		tc.mod(&h)
 		got := c.capture(t, h)
 		if !slices.Equal(tc.get(got), tc.want) || got.Cut() != tc.cut {
 			t.Errorf("%s: %d entries, cut %v; want %d, %v", tc.name, len(tc.get(got)), got.Cut(), len(tc.want), tc.cut)
+		}
+		if got.HasServerName() { // no row has a server_name extension
+			t.Errorf("%s: HasServerName is true with no server_name", tc.name)
 		}
 	}
 }
@@ -246,15 +260,83 @@ func TestTU19FirstWins(t *testing.T) {
 	}
 }
 
-// T-U-19: the copy has a fixed size. The arrays take 2 * (128 + 128 + 64 + 64
-// + 16) = 800 bytes. The ALPN array takes 255 bytes. Five list counts, the ALPN
-// length and two flags take 8 bytes more: 1063. One pad byte keeps the 2-byte
-// alignment: 1064. The criterion is 1152 bytes or less, so 1064 is in the
-// limit.
+// helloSize is the size of a Hello: 1064 bytes. The uint16 arrays take 800. The
+// ALPN array takes 255. Five counts, the ALPN length and two flags take 8. One
+// pad byte keeps the 2-byte alignment.
+const helloSize = 2*(maxCipherSuites+maxExtensions+maxSigSchemes+maxGroups+maxVersions) + maxALPN + 8 + 1
+
+// T-U-19: the copy has a fixed size. The requirement is 1152 bytes or less, so
+// helloSize is in the limit.
 func TestTU19FixedSize(t *testing.T) {
-	const want = 2*(128+128+64+64+16) + 255 + 8 + 1
-	if got := unsafe.Sizeof(Hello{}); got != want || want != 1064 {
-		t.Fatalf("size %d, want %d", got, want)
+	if got := unsafe.Sizeof(Hello{}); got != helloSize || got > 1152 {
+		t.Fatalf("size %d, want %d (at most 1152)", got, helloSize)
+	}
+}
+
+// T-U-19: a capture with a stored copy allocates nothing.
+func TestTU19StoredCopyAllocatesNothing(t *testing.T) {
+	s := withConnState(context.Background()).Value(stateKey{}).(*connState)
+	chi := &tls.ClientHelloInfo{CipherSuites: []uint16{1}}
+	s.capture(chi)
+	if n := testing.AllocsPerRun(100, func() { s.capture(chi) }); n != 0 {
+		t.Fatalf("%v allocations in capture with a stored copy", n)
+	}
+}
+
+// ioCount counts Read and Write calls on ioListener conns while on is set.
+type ioCount struct {
+	on atomic.Bool
+	n  atomic.Int32
+}
+
+type ioListener struct {
+	net.Listener
+	*ioCount
+}
+
+type ioConn struct {
+	net.Conn
+	*ioCount
+}
+
+func (l ioListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	return ioConn{c, l.ioCount}, err
+}
+
+func (c ioConn) Read(p []byte) (int, error) {
+	if c.on.Load() {
+		c.n.Add(1)
+	}
+	return c.Conn.Read(p)
+}
+
+func (c ioConn) Write(p []byte) (int, error) {
+	if c.on.Load() {
+		c.n.Add(1)
+	}
+	return c.Conn.Write(p)
+}
+
+// T-U-19: the callback does no I/O on the connection. The count runs only
+// while captureHello does.
+func TestTU19CallbackDoesNoIO(t *testing.T) {
+	var cnt ioCount
+	c := newCapRig(t, okHandler)
+	hook := c.s.tls.GetConfigForClient
+	c.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+		cnt.on.Store(true)
+		defer cnt.on.Store(false)
+		return hook(chi)
+	}
+	ln := listenLoopback(t)
+	c.addr = ln.Addr().String()
+	c.serveOn(t, ioListener{ln, &cnt})
+	if h := c.capture(t, rawHello{version: 0x0303, suites: []uint16{0xc02b}, exts: []rawExt{extSNI(testName)}}); !h.HasServerName() {
+		t.Fatal("no server name in the copy")
+	}
+	if got := cnt.n.Load(); got != 0 {
+		t.Fatalf("%d reads and writes on the connection in the callback, want 0", got)
 	}
 }
 
