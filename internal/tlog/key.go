@@ -162,13 +162,19 @@ func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.Fil
 	clear(b)
 
 	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
+	// A crash after the link can leave a copy of the key text.
+	if err := root.Remove(keyName + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Warn("checkpoint key temporary file cannot be removed")
+	}
 	checkVkey(root, log, vkey)
 	return signer, nil
 }
 
 // checkVkey writes the public key file again if it is missing. If the file
-// exists, checkVkey reads it with the rules of the key file and warns when its
-// text differs from vkey. The warnings have fixed text and never have file bytes.
+// exists, checkVkey reads it. It uses the Lstat, the open checks, and the 1 KiB
+// limit of the key file. It does not check the owner and the mode. It warns
+// when the text differs from vkey. The warnings have fixed text and never have
+// file bytes.
 func checkVkey(root *os.Root, log *slog.Logger, vkey string) {
 	const (
 		cannotCheck = "checkpoint public key file cannot be checked; the log has the correct key"
@@ -181,7 +187,7 @@ func checkVkey(root *os.Root, log *slog.Logger, vkey string) {
 			err = syncDir(root, keysDir)
 		}
 		if err != nil {
-			log.Warn("public key file cannot be written")
+			log.Warn("checkpoint public key file cannot be written")
 		}
 		return
 	}
@@ -202,6 +208,7 @@ func checkVkey(root *os.Root, log *slog.Logger, vkey string) {
 	case strings.TrimSpace(string(b)) != vkey:
 		log.Warn(differs)
 	}
+	clear(b)
 }
 
 // deriveVkey makes the verifier key text from the private key text: the name,
@@ -227,6 +234,30 @@ func deriveVkey(skey, origin string, signer note.Signer) (string, error) {
 	return vkey, nil
 }
 
+// errnoOf returns the system error of a *fs.PathError. The error text then has
+// no second path.
+func errnoOf(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
+}
+
+// mustBeAbsent returns nil if nothing is at name. An entry gives the rule
+// error. An Lstat error that is not "not exist" gives its own rule and keeps
+// the system error as the cause.
+func mustBeAbsent(root *os.Root, path, name, what string) error {
+	_, err := root.Lstat(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err == nil:
+		return keyError(path, what+" must not exist on the first start")
+	}
+	return fmt.Errorf("checkpoint key %s: %s cannot be examined: %w", path, what, errnoOf(err))
+}
+
 func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Signer, error) {
 	skey, vkey, err := note.GenerateKey(rand.Reader, origin)
 	if err != nil {
@@ -236,15 +267,16 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	if err != nil {
 		return nil, keyError(path, "cannot make a key for the configured origin")
 	}
-	if err := root.MkdirAll(keysDir, 0o700); err != nil {
-		return nil, fmt.Errorf("checkpoint key %s: cannot make the keys directory: %w", path, err)
-	}
 	// An entry at the public key path is an error. The write must not follow it.
-	if _, err := root.Lstat(vkeyName); !errors.Is(err, fs.ErrNotExist) {
-		return nil, keyError(path, "public key file must not exist on the first start")
+	if err := mustBeAbsent(root, path, vkeyName, "public key file"); err != nil {
+		return nil, err
 	}
-	if _, err := root.Lstat(stateName); !errors.Is(err, fs.ErrNotExist) {
-		return nil, keyError(path, "signer state must not exist on the first start")
+	if err := mustBeAbsent(root, path, stateName, "signer state"); err != nil {
+		return nil, err
+	}
+	// The refusals come first. A refused start leaves no keys directory.
+	if err := root.MkdirAll(keysDir, 0o700); err != nil {
+		return nil, fmt.Errorf("checkpoint key %s: cannot make the keys directory: %w", path, errnoOf(err))
 	}
 	if err := writeNew(root, keyName, skey); err != nil {
 		return nil, fmt.Errorf("checkpoint key %s: cannot write the key file: %w", path, err)
@@ -271,11 +303,23 @@ func createSigner(root *os.Root, log *slog.Logger, path, origin string) (note.Si
 	return signer, nil
 }
 
-// writeNew makes a new file with mode 0600 and syncs it. O_EXCL means that the
-// call never opens or replaces an existing entry, and never follows a symlink.
-// A failed write removes the file. Only this call made that file.
+// beforeLink is a test hook. Production code leaves it nil. A test sets it to
+// run after writeNew has synced the temporary file and before the link. An
+// error from the hook stops writeNew there.
+var beforeLink func() error
+
+// writeNew makes a new file with mode 0600. It writes a temporary file and
+// syncs it. Then it links the final name to the temporary file and removes the
+// temporary name. A crash leaves either no final name or a complete file.
+// link(2) fails if the final name exists, so the call never replaces an entry.
+// Remove deletes a symlink at the temporary name and not its target. A
+// temporary file that an earlier crash left goes away first.
 func writeNew(root *os.Root, name, text string) error {
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp := name + ".tmp"
+	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := root.OpenFile(tmp, createFlags, 0o600)
 	if err != nil {
 		return err
 	}
@@ -286,8 +330,14 @@ func writeNew(root *os.Root, name, text string) error {
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	if err != nil {
-		_ = root.Remove(name)
+	if err == nil && beforeLink != nil {
+		err = beforeLink()
+	}
+	if err == nil {
+		err = root.Link(tmp, name)
+	}
+	if rerr := root.Remove(tmp); err == nil {
+		err = rerr
 	}
 	return err
 }
