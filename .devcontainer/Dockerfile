@@ -1,6 +1,6 @@
 # Development container: the same Go toolchain as CI (golang:1.27.2), so
 # local and CI runs agree. The image holds the toolchain, the static
-# analysis tools, and a copy of the Go vulnerability database.
+# analysis tools, a mutation test tool, and the Go vulnerability database.
 #
 # Development only — the deployed sensor is a static binary with no
 # container dependency (C1).
@@ -28,6 +28,13 @@ RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install honnef.co/go/tools/cmd/staticc
  && go get github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION} golang.org/x/tools@${GOSEC_XTOOLS_VERSION} \
  && CGO_ENABLED=0 go build -o /usr/local/bin/gosec github.com/securego/gosec/v2/cmd/gosec \
  && cd / && rm -rf /tmp/gosec && go clean -cache -modcache
+
+# The make mutate target runs the gremlins mutation test tool.
+# make all does not run it. We pin the tool by its module version,
+# the same as the tools above.
+ARG GREMLINS_VERSION=v0.6.0
+RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION} \
+ && go clean -cache -modcache
 
 # The devcontainer runs without network, so govulncheck reads a copy of
 # the Go vulnerability database. The copy is not pinned: it is the

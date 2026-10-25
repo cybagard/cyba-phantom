@@ -16,7 +16,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage perf perf-inner fixtures clean
+.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage perf perf-inner fixtures mutate clean
 
 all: build lint test trace mirror-diff
 
@@ -170,6 +170,25 @@ perf-inner:
 	if [ -z "$$size" ]; then $(call skip,no stat for the size check); exit 0; fi; \
 	if [ "$$size" -gt 26214400 ]; then echo "perf FAIL: binary is $${size} bytes (> 25 MB)"; exit 1; fi; \
 	echo "perf: binary size $${size} bytes (<= 25 MB)"
+
+# The target runs gremlins mutation tests on the package in PKG. It prints
+# the gremlins output. Then it prints each mutant that tests did not kill,
+# with its status, mutator and position. It also prints the Not covered count.
+# It does not fail on the efficacy value. It fails when PKG is empty, and
+# when gremlins exits with a status that is not 0. make all does not run
+# the target.
+# Example: make mutate PKG=./internal/bundle
+mutate:
+	@if [ -z "$(PKG)" ]; then echo "usage: make mutate PKG=./internal/<pkg>"; exit 2; fi
+	@out=$$(mktemp) || exit 1; \
+	gremlins unleash $(PKG) --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$out" 2>&1; \
+	rc=$$?; \
+	cat "$$out"; \
+	if [ "$$rc" -ne 0 ]; then rm -f "$$out"; echo "mutate FAIL: gremlins exited with status $$rc"; exit "$$rc"; fi; \
+	echo "== not killed =="; \
+	grep -E '^ *(LIVED|TIMED OUT) ' "$$out" | sed -e 's/^ */not killed: /'; \
+	sed -n 's/.*\(Not covered: [0-9]*\).*/\1/p' "$$out" | head -n 1; \
+	rm -f "$$out"
 
 clean:
 	rm -rf bin cover*.out
