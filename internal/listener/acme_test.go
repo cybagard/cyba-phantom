@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -188,12 +187,7 @@ func testNames(t testing.TB) *egresstest.Names {
 // test stops the cache when it ends.
 func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
-	state, err := os.OpenRoot(t.TempDir())
-	mustNil(t, err)
-	t.Cleanup(func() { state.Close() })
-	st, err := Open(state, "acme/cache")
-	mustNil(t, err)
-	t.Cleanup(func() { st.Close() })
+	st, _ := newStore(t)
 	p := ACMEParams{
 		Names:   []string{"decoy.test"},
 		CA:      "https://ca.test/dir",
@@ -300,10 +294,12 @@ func BenchmarkGetCertificateTokenKeyRefused(b *testing.B) {
 }
 
 // issuerProxyRefuses reports whether the proxy function of iss refuses a request
-// to another host, with a proxy in the environment.
+// to another host. It does not set a proxy in the environment. net/http reads
+// that environment one time for each process. So a test that sets it depends
+// on the order of the tests. The guard does not read the environment. The
+// environment function never gives errEgress, so it fails this check.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 	t.Helper()
-	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
 	if iss.HTTPProxy == nil {
 		return false
 	}
@@ -314,12 +310,12 @@ func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 }
 
 func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
-	st, _ := newStore(t)
-	a := newTestACME(t, func(p *ACMEParams) { p.Storage = st; p.Port = 9443 })
+	var given certmagic.Storage // the store that newTestACME made
+	a := newTestACME(t, func(p *ACMEParams) { given = p.Storage; p.Port = 9443 })
 	cfg := a.cfg
 	wrap, _ := cfg.Storage.(*noTokenStorage)
-	if wrap == nil || wrap.Storage != certmagic.Storage(st) || len(cfg.Issuers) != 1 {
-		t.Fatalf("storage is the wrapper of the given storage: %v, issuers: %d", wrap != nil && wrap.Storage == certmagic.Storage(st), len(cfg.Issuers))
+	if wrap == nil || given == nil || wrap.Storage != given || len(cfg.Issuers) != 1 {
+		t.Fatalf("storage is the wrapper of the given storage: %v, issuers: %d", wrap != nil && wrap.Storage == given, len(cfg.Issuers))
 	}
 	iss, ok := cfg.Issuers[0].(*certmagic.ACMEIssuer)
 	if !ok {

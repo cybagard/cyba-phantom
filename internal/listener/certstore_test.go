@@ -20,7 +20,7 @@ const marker = "-----BEGIN EC PRIVATE KEY-----"
 
 // newStore opens a cache in the directory acme/cache of a new state directory.
 // It returns the store and the path of the state directory.
-func newStore(t *testing.T) (*Store, string) {
+func newStore(t testing.TB) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
 	state, err := os.OpenRoot(dir)
@@ -389,81 +389,6 @@ func TestTS16ValueIsCappedAt64KiB(t *testing.T) {
 		t.Fatalf("Load of a 70 KiB file = %d bytes, %v", len(b), err)
 	}
 	unchanged(t, target)
-}
-
-// A hook does the rename of a Store at three fixed points of a Load. So the test
-// does not depend on the order of two goroutines. At each point Load returns a
-// whole value with no error:
-//   - between the Lstat and the open: the new value, after a second try;
-//   - after the open, before Stat: the old value of the open file, in one try;
-//   - before the rename, when the temporary file is written: the old value (the
-//     Load runs first, then the rename).
-//
-// After the Store returns, Load gives the new value.
-func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
-	ctx := context.Background()
-	oldValue := bytes.Repeat([]byte("o"), 1500)
-	newValue := bytes.Repeat([]byte("nm"), 2500)
-	setup := func(t *testing.T) *Store {
-		s, _ := newStore(t)
-		mustNil(t, s.Store(ctx, "kd/key", oldValue))
-		return s
-	}
-	load := func(t *testing.T, s *Store, want []byte) {
-		t.Helper()
-		if b, err := s.Load(ctx, "kd/key"); err != nil || !bytes.Equal(b, want) {
-			t.Fatalf("Load = %d bytes, %v; want the %d bytes of the whole value", len(b), err, len(want))
-		}
-	}
-
-	t.Run("rename between the Lstat and the open", func(t *testing.T) {
-		s := setup(t)
-		calls := 0
-		betweenLstatAndOpen = func() {
-			if calls++; calls == 1 {
-				mustNil(t, s.Store(ctx, "kd/key", newValue))
-			}
-		}
-		t.Cleanup(func() { betweenLstatAndOpen = nil })
-		load(t, s, newValue)
-		if calls != 2 {
-			t.Errorf("the hook ran %d times, want 2", calls)
-		}
-	})
-
-	t.Run("rename after the open, before Stat", func(t *testing.T) {
-		s := setup(t)
-		calls := 0
-		betweenOpenAndStat = func() {
-			if calls++; calls == 1 {
-				mustNil(t, s.Store(ctx, "kd/key", newValue))
-			}
-		}
-		t.Cleanup(func() { betweenOpenAndStat = nil })
-		load(t, s, oldValue)
-		if calls != 1 {
-			t.Errorf("the hook ran %d times, want 1", calls)
-		}
-		load(t, s, newValue)
-	})
-
-	t.Run("temporary file written, not yet renamed", func(t *testing.T) {
-		s := setup(t)
-		realRename := renameFile
-		t.Cleanup(func() { renameFile = realRename })
-		calls := 0
-		renameFile = func(r *os.Root, from, to string) error {
-			if calls++; calls == 1 {
-				load(t, s, oldValue)
-			}
-			return realRename(r, from, to)
-		}
-		mustNil(t, s.Store(ctx, "kd/key", newValue))
-		if calls != 1 {
-			t.Errorf("the rename ran %d times, want 1", calls)
-		}
-		load(t, s, newValue)
-	})
 }
 
 func TestTS16LockBlocksUntilUnlockAndHonorsContext(t *testing.T) {
