@@ -438,6 +438,23 @@ func TestTS19SparseEntryIsRefused(t *testing.T) {
 	}
 }
 
+// T-S-19: the byte count refuses a meta header of size 0. Next reads that
+// header and the entry header in one call. The entry check here accepts each
+// header, so only the byte count can refuse the archive.
+func TestTS19ByteCountRefusesAnExtraBlock(t *testing.T) {
+	anyEntry := func(h *tar.Header) (string, error) { return h.Name, nil }
+	entry := buildTar(ent{name: markerPath, data: []byte(markerData)})
+	if a, err := readArchive(bytes.NewReader(entry), anyEntry); err != nil || a.Len() != 1 {
+		t.Fatalf("entry with no meta header: len %d, error %v", lenOf(a), err)
+	}
+	for _, typ := range []byte{tar.TypeXHeader, 'L', 'K'} {
+		tb := append(rawHdr("meta", typ, 0), entry...)
+		if a, err := readArchive(bytes.NewReader(tb), anyEntry); a != nil || err != ErrArchiveInvalid {
+			t.Errorf("meta header %q: archive %v, error %v", typ, a != nil, err)
+		}
+	}
+}
+
 // allocated returns the bytes that ReadArchive allocates for b, and its error.
 // runtime.GC runs first. TotalAlloc is the sum of all allocations, so it is an
 // upper bound of the peak heap.
