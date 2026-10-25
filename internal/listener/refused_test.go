@@ -375,18 +375,19 @@ func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 }
 
 // T-S-22: the caps of a server read a clock that runs from the start of the
-// server. The test moves the start back one hour and reads the clock. The
-// clock must be 1 h or more. It must not exceed 1 h plus the time since an
-// earlier read of the wall clock.
+// server. The test moves the start back by a time that is not a whole second.
+// The clock must be that time or more. It must not exceed that time plus the
+// time since an earlier read of the clock.
 func TestTS22ServerClockRuns(t *testing.T) {
+	const offset = time.Hour + 1234567891*time.Nanosecond
 	before := time.Now()
-	d := monotonicSince(time.Now().Add(-time.Hour))()
-	if limit := time.Hour + time.Since(before); d < time.Hour || d > limit {
-		t.Errorf("monotonicSince gives %v for a start one hour back, want 1h to %v", d, limit)
+	d := monotonicSince(time.Now().Add(-offset))()
+	if limit := offset + time.Since(before); d < offset || d > limit {
+		t.Errorf("monotonicSince gives %v for a start %v back, want %v to %v", d, offset, offset, limit)
 	}
 	old := serverStart
 	t.Cleanup(func() { serverStart = old })
-	serverStart = func() time.Time { return time.Now().Add(-time.Hour) }
+	serverStart = func() time.Time { return time.Now().Add(-offset) }
 	cert, _ := testCert(t)
 	q, c := testSinks(t, 16)
 	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
@@ -396,8 +397,8 @@ func TestTS22ServerClockRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	d = s.refused.mono()
-	if limit := time.Hour + time.Since(before); d < time.Hour || d > limit {
-		t.Errorf("the clock of the server gives %v, want 1h to %v", d, limit)
+	if limit := offset + time.Since(before); d < offset || d > limit {
+		t.Errorf("the clock of the server gives %v, want %v to %v", d, offset, limit)
 	}
 }
 
