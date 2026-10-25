@@ -112,8 +112,14 @@ func changeDSN(s string) string {
 	return s
 }
 
+// beforeCreate is a test hook. Production code leaves it nil. A test sets it to
+// change the file system after Open opens the parent directory. This is before
+// Open makes a new database file.
+var beforeCreate func()
+
 // beforeRefuse is a test hook. Production code leaves it nil. A test sets it to
-// change the file system before refuse looks at the file at rel.
+// change the file system before refuse looks at the name in the checked
+// directory.
 var beforeRefuse func()
 
 // heap guards soft_heap_limit, which is a setting of the process.
@@ -129,12 +135,14 @@ var heap struct {
 //   - Before the open: the path text, the directories, and the database, -wal,
 //     -shm and -journal files. A directory is real, owned by the sensor user,
 //     with no group or other bits. A file is absent or safe. A new database
-//     file is made through root with mode 0600.
+//     file is made through the checked parent directory with mode 0600. Then
+//     Open opens it again read-only. It checks that both descriptors point to
+//     the same file, and closes the one that can write.
 //   - After the open, and on each new connection: database_list, the
 //     directories, the four files, and the identity of the database file. The
 //     file is the same file as before, and the path that SQLite opens leads to it.
-//     Open keeps the database file open until the pool closes, so that it stays
-//     the same file.
+//     Open keeps the database file open, read-only, until the pool closes, so
+//     that it stays the same file.
 //
 // A failed check gives a fixed error and closes the database or connection.
 // A change that is made and undone between two checks is not found.
@@ -166,17 +174,64 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		return nil, err
 	}
 	absent := checked == nil
+	var fi fs.FileInfo
+	var statErr error
+	// Each failed step after Open makes or opens the file calls refuse. It
+	// calls refuse before it closes the held descriptor, the create descriptor
+	// or the pool. While one of them is open, the inode of
+	// the made file is not free. Thus a file that someone makes in that time
+	// cannot have the same inode. refuse removes the entry in dir when the
+	// Lstat shows the file that this call made. refuse does not find a change
+	// of the entry between the Lstat and the Remove. If someone puts another
+	// file there in that window, refuse removes it. If a Stat of the made file
+	// fails, refuse removes nothing.
+	refuse := func(err error) error {
+		if beforeRefuse != nil {
+			beforeRefuse()
+		}
+		if absent && statErr == nil {
+			if cur, lerr := dir.Lstat(last); lerr == nil && os.SameFile(cur, fi) {
+				_ = dir.Remove(last)
+			}
+		}
+		return err
+	}
 	// The descriptor stays open until the pool closes. While it is open, the
 	// inode of the file cannot be given to a new file. The open of an existing
-	// file does not block on a FIFO.
-	var held *os.File
+	// file does not block on a FIFO. A new file is made through dir, then
+	// opened again read-only. Open checks that the second open gets the made
+	// file. Then the create descriptor, which can write, is closed. So the held
+	// descriptor cannot write, for a new file as for an existing file.
+	var held, created *os.File
 	if absent {
-		held, err = root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if beforeCreate != nil {
+			beforeCreate()
+		}
+		created, err = dir.OpenFile(last, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return nil, fail(rel, ruleChanged)
 			}
 			return nil, fail(rel, ruleCreate)
+		}
+		fi, statErr = created.Stat()
+		var hfi fs.FileInfo
+		if _, err = identityOf(rel, fi, statErr); err == nil {
+			if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
+				err = fail(rel, ruleChanged)
+			} else if !os.SameFile(fi, hfi) {
+				err = fail(rel, ruleChanged)
+			}
+		}
+		if err != nil {
+			err = refuse(err)
+			if held != nil {
+				held.Close()
+			}
+		}
+		created.Close()
+		if err != nil {
+			return nil, err
 		}
 	} else if held, _, err = safefile.Open(dir, last, fileRule); err != nil {
 		return nil, fail(rel, ruleChanged)
@@ -184,26 +239,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if onHeld != nil {
 		onHeld(held)
 	}
-	fi, statErr := held.Stat()
-	// Each failed step calls refuse before it closes the held descriptor or
-	// the pool. While held is open, the inode of the made file is not free.
-	// Thus a file that someone makes while held is open cannot have the same
-	// inode. refuse removes the entry at rel when the Lstat shows the file
-	// that this call made. refuse does not find a change of the entry between
-	// the Lstat and the Remove. If someone puts another file at rel in that
-	// window, refuse removes it. If the Stat of the made file failed, refuse
-	// removes nothing.
-	refuse := func(err error) error {
-		if beforeRefuse != nil {
-			beforeRefuse()
-		}
-		if absent && statErr == nil {
-			if cur, lerr := root.Lstat(rel); lerr == nil && os.SameFile(cur, fi) {
-				_ = root.Remove(rel)
-			}
-		}
-		return err
-	}
+	fi, statErr = held.Stat()
 	// refuseClose calls refuse first and then closes c.
 	refuseClose := func(err error, c io.Closer) error {
 		err = refuse(err)

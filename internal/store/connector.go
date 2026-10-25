@@ -19,6 +19,10 @@ var onConnect func()
 // it to change the file system between the checks and the open of the driver.
 var beforeDriverOpen func()
 
+// afterDriverOpen is a test hook. Production code leaves it nil. A test sets
+// it to run right after the driver opens a connection without an error.
+var afterDriverOpen func()
+
 // connector opens each connection of the pool. Each new connection is checked.
 // The checks run before the driver opens it, except for the first connection,
 // which Open has just checked. They run again on the new connection, with the
@@ -120,6 +124,9 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	conn, err := c.Connector.Connect(ctx)
 	if err != nil {
 		return nil, fail(c.rel, ruleOpen)
+	}
+	if afterDriverOpen != nil {
+		afterDriverOpen()
 	}
 	err = c.location(ctx, conn)
 	if err == nil {
