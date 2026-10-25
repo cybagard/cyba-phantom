@@ -41,7 +41,7 @@ func watchOpens(t *testing.T, path string) func() int {
 	t.Helper()
 	fd, err := syscall.InotifyInit1(syscall.IN_NONBLOCK | syscall.IN_CLOEXEC)
 	if err != nil {
-		t.Skipf("inotify: %v", err)
+		t.Fatalf("inotify: %v", err)
 	}
 	t.Cleanup(func() { syscall.Close(fd) })
 	if _, err := syscall.InotifyAddWatch(fd, path, syscall.IN_OPEN|syscall.IN_CLOSE_NOWRITE|syscall.IN_CLOSE_WRITE); err != nil {
@@ -128,11 +128,28 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 			held := holdHook(t)
 			inner := onHeld
 			setHook(t, &onHeld, func(h *os.File) { inner(h); n = opens() })
+			setHook(t, &afterVerify, func() { opens() })
 			db := mustOpen(t, f.root, rel)
 			defer db.Close()
 			if *held == nil || n != 1 {
 				t.Fatalf("%d opens of the database file up to the held open, want 1", n)
 			}
+			if n := opens(); n != 0 {
+				t.Fatalf("%d opens of the database file after the first connection", n)
+			}
 		})
+	}
+}
+
+// T-S-15: when Open of a new file gets the held descriptor, one descriptor of
+// the process points to the database file. Open has closed the descriptor that
+// made the file. SQLite has not opened the file yet.
+func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
+	root, state, _ := newState(t)
+	n := -1
+	setHook(t, &onHeld, func(*os.File) { n = fdsOf(t, filepath.Join(state, "events.db")) })
+	mustOpen(t, root, "events.db").Close()
+	if n != 1 {
+		t.Fatalf("%d descriptors of the new database file, want 1", n)
 	}
 }

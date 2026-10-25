@@ -50,6 +50,70 @@ func TestTS15NewFileHasMode0600(t *testing.T) {
 	}
 }
 
+// T-S-15: the descriptor that Open holds for a new file is read-only. A write
+// through it fails.
+func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
+	root, _, _ := newState(t)
+	held := holdHook(t)
+	mustOpen(t, root, "events.db").Close()
+	if *held == nil {
+		t.Fatal("the hook got no descriptor")
+	}
+	if _, err := (*held).Write([]byte("x")); err == nil {
+		t.Fatal("a write through the held descriptor of a new file worked")
+	}
+}
+
+// T-S-15: a file that is put at the name between the make and the second open
+// of a new file is refused. The hook moves the made file away and writes
+// another file with mode 0600.
+func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		if name != "events.db" {
+			return
+		}
+		if err := os.Rename(file, file+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("other file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleChanged)
+}
+
+// T-S-15: the new database file is made in the directory that Open checked. The
+// hook swaps the parent directory after Open opened it and before the make. So
+// the path that SQLite opens leads to another file, and Open fails.
+func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
+	root, state, _ := newState(t)
+	data := filepath.Join(state, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setHook(t, &beforeCreate, func() {
+		if err := os.Rename(data, data+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(data, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+	db, err := Open(root, "data/events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("Open worked with a swapped parent directory")
+	}
+}
+
 // T-S-15: a symlink in a parent directory that appears after the file checks
 // changes the path that SQLite opens. Open finds it with database_list, closes
 // the database, and returns an error.
