@@ -2,6 +2,7 @@
 /bin/
 cover*.out
 internal/safefile/parents*/
+tools/bundle-sign/tmp-*/
 
 # dev tooling storage
 .kilo/
