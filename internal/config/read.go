@@ -118,8 +118,8 @@ func ReadBytes(b []byte) (*Doc, error) {
 		return nil, errors.New("config: contains UTF-8 BOM")
 	}
 
-	// The YAML parser reads each of these as a line break. An editor shows
-	// them as one line, so a second key can hide in it.
+	// The YAML parser reads each of these as a line break. An editor or a
+	// terminal can show the line as one line, so a second key can hide there.
 	for _, sep := range []rune{0x85, 0x2028, 0x2029} {
 		if bytes.ContainsRune(b, sep) {
 			return nil, errors.New("config: contains U+0085, U+2028 or U+2029")

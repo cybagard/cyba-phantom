@@ -617,10 +617,10 @@ func checkStorePath(l *loader, raw string) string {
 // cacheConflict compares it with the other state directories.
 func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw) }
 
-// cacheConflict returns a detail if the acme.cache_dir value p is in or above
-// a directory for other files (SEC-21). It compares the path text only.
-// It folds A-Z with foldASCII. A key that is not in vals failed its own
-// check, so it is skipped.
+// cacheConflict checks the acme.cache_dir value p (SEC-21). It returns a
+// detail if p is in or above a directory that the sensor uses for other
+// files. It compares the path text only. It folds A-Z with foldASCII. A key
+// that is not in vals failed its own check, so it is skipped.
 func cacheConflict(l *loader, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	for _, k := range []string{"tlog.dir", "bundle.path"} {

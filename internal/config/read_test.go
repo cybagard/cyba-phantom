@@ -270,6 +270,8 @@ func FuzzRead(f *testing.F) {
 		"foo: bar\x00baz",
 		"\xef\xbb\xbffoo: bar",
 		"foo: bar\u0085baz",
+		"foo: bar\xe2\x80\xa8baz",
+		"foo: bar\xe2\x80\xa9baz",
 		"foo: bar\n---\nbaz: qux",
 		"",
 		"foo: bar\n- baz",

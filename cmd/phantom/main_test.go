@@ -297,6 +297,10 @@ func TestTS11_CheckStorePath(t *testing.T) {
 		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "must not be in tlog.dir"},
 		{"acme.cache_dir set", s + "c/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c"}, "must not be in acme.cache_dir"},
 		{"bundle.path set", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x.cbnd"}, "must not be in the directory of bundle.path"},
+		{"keys in other case", s + "Keys/e.db", nil, "must not be in the keys directory"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"tlog.dir in other case", s + "TLOG/e.db", nil, "must not be in tlog.dir"},
+		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "must not be in tlog.dir"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(c.path, c.extra...)
@@ -429,6 +433,9 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
 		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
 		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
+		{"cache dir is keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Keys"}, ""},
+		{"cache dir is tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/TLOG"}, ""},
+		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {

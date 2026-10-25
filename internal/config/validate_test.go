@@ -276,6 +276,7 @@ func TestTU10_Email(t *testing.T) {
 		{"CRLF header", "a@example.com\r\nBcc: b@example.com", emailRule},
 		{"LF in middle", "a@example.com\nb@example.com", emailRule},
 		{"NEL", "a@example.com" + string(rune(0x85)), emailRule},
+		{"C1 control", "a@example.com" + string(rune(0x9f)), emailRule},
 		{"SOH", "a@example.com\x01", emailRule},
 		{"DEL", "a@example.com\x7f", emailRule},
 		{"no-break space", "a@example.com" + string(rune(0xa0)), emailRule},
@@ -305,6 +306,9 @@ func TestTS11_EmailMarks(t *testing.T) {
 	smtp := func(from, to string) string {
 		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "` + from + `", to: ["` + to + `"]}`)
 	}
+	smtp2 := func(to string) string {
+		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "a@b.example", to: ["c@d.example", "` + to + `"]}`)
+	}
 	for _, mr := range emailMarks {
 		m := string(mr)
 		// A double-quoted YAML scalar reads this escape.
@@ -318,6 +322,7 @@ func TestTS11_EmailMarks(t *testing.T) {
 			{"acme.email", base, []string{"PHANTOM_ACME_EMAIL=a@b.example" + m}},
 			{"alerts.sinks[0].from", smtp("a@b.example"+esc, "c@d.example"), nil},
 			{"alerts.sinks[0].to[0]", smtp("a@b.example", "c@d.example"+esc), nil},
+			{"alerts.sinks[0].to[1]", smtp2("e@f.example" + esc), nil},
 		} {
 			name := r.key + " " + esc
 			if r.env != nil {
@@ -331,7 +336,7 @@ func TestTS11_EmailMarks(t *testing.T) {
 				if !strings.Contains(err.Error(), emailRule) {
 					t.Errorf("the error does not give the rule: %q", err)
 				}
-				// The loader quotes the value, so a space shows as a space.
+				// Every error text has spaces, so the check skips the space mark.
 				if m != " " && strings.Contains(err.Error(), m) {
 					t.Errorf("the error holds the character: %q", err)
 				}
@@ -955,6 +960,9 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"checkpoint.state in other case", s + "Checkpoint.State", nil, "must not be checkpoint.state"},
 		{"checkpoint.state.tmp in other case", s + "CHECKPOINT.STATE.TMP", nil, "must not be checkpoint.state.tmp"},
 		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "in tlog.dir"},
+		{"acme.cache_dir set in other case", s + "cache/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "CACHE"}, "in acme.cache_dir"},
+		{"bundle dir set in other case", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x.cbnd"}, "directory of bundle.path"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1865,6 +1873,9 @@ func TestTS11_ACMECacheDir(t *testing.T) {
 		{"in keys in other case", s + "KEYS/c", nil, "keys directory"},
 		{"checkpoints in other case", s + "CHECKPOINTS", nil, "checkpoints directory"},
 		{"in checkpoints in other case", s + "Checkpoints/c", nil, "checkpoints directory"},
+		{"in tlog.dir set in other case", s + "logs/c", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "in or above tlog.dir"},
+		{"above tlog.dir set in other case", s + "a", []string{"PHANTOM_TLOG_DIR=" + s + "A/t"}, "in or above tlog.dir"},
+		{"above the bundle directory set in other case", s + "b", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x/current.cbnd"}, "directory of bundle.path"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
