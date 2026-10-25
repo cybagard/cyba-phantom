@@ -180,10 +180,15 @@ perf-inner:
 # when the gremlins output has no "Mutation testing completed" line.
 # A signal makes gremlins stop and exit 0, so this line shows a full run.
 # MUTATE_CAP is the time limit in seconds for each go command that gremlins
-# starts. It stops the test binary too. A stopped mutant shows as LIVED.
-# Gremlins and the tests write only in one new directory. The target fails
-# when this directory passes MUTATE_MAX_MIB MiB. The target removes it at
-# the end, and on EXIT, INT and TERM. make all does not run the target.
+# starts. A stopped mutant shows as LIVED. The cap also stops the test binary.
+# The target makes one new directory and sets TMPDIR and GOCACHE to it.
+# The target fails when this directory passes MUTATE_MAX_MIB MiB. The size
+# counts the files of gremlins, of the Go build cache and of the tests that
+# use TMPDIR. A test that writes to an absolute path is not counted.
+# MUTATE_CAP and MUTATE_MAX_MIB must be positive integers (exit 2 if not).
+# The target removes the directory at the end, and on EXIT, INT and TERM.
+# A cold build cache makes the first run longer. make all does not run
+# the target.
 # Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
 MUTATE_CAP ?= 600
 MUTATE_MAX_MIB ?= 10240
@@ -191,12 +196,13 @@ export MUTATE_CAP MUTATE_MAX_MIB
 mutate:
 	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-]" >&2; exit 2;; esac
+	@for v in "$$MUTATE_CAP" "$$MUTATE_MAX_MIB"; do case "$$v" in ""|0*|*[!0-9]*|???????????*) echo "mutate: MUTATE_CAP and MUTATE_MAX_MIB must be positive integers of at most 10 digits" >&2; exit 2;; esac; done
 	@d=$$(mktemp -d) || exit 1; g=; w=; \
-	trap 'kill $$g $$w 2>/dev/null; wait; pkill -f "$$d/"; rm -rf "$$d"' EXIT; \
+	trap 'kill $$g $$w 2>/dev/null; pkill -f "$$d/"; wait; rm -rf "$$d"' EXIT; \
 	trap 'exit 130' INT; trap 'exit 143' TERM; \
 	mkdir "$$d/bin"; \
 	printf '#!/bin/sh\ntimeout -k 5 %s %s "$$@"\nr=$$?\n[ $$r = 124 ] && echo >>%s/capped\nexit $$r\n' "$$MUTATE_CAP" "$$(command -v go)" "$$d" >"$$d/bin/go"; \
-	chmod +x "$$d/bin/go"; export TMPDIR="$$d" PATH="$$d/bin:$$PATH"; \
+	chmod +x "$$d/bin/go"; export TMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: each test run stops at $$MUTATE_CAP s; the run stops at $$MUTATE_MAX_MIB MiB of files"; \
 	gremlins unleash "$$PKG" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
 	( while sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); \
