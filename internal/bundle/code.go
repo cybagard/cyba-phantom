@@ -46,6 +46,7 @@ var (
 	ErrMinEngine       = errors.New("bundle: min_engine")
 	ErrExpired         = errors.New("bundle: expired")
 	ErrRollback        = errors.New("bundle: rollback")
+	ErrTemplateParse   = errors.New("bundle: template_parse")
 )
 
 // CodeOf returns the rejection code of an error of this package. It gives false
@@ -64,6 +65,8 @@ func CodeOf(err error) (Code, bool) {
 		return CodeExpired, true
 	case errors.Is(err, ErrRollback):
 		return CodeRollback, true
+	case errors.Is(err, ErrTemplateParse):
+		return CodeTemplateParse, true
 	}
 	return 0, false
 }

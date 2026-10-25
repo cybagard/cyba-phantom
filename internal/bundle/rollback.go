@@ -40,7 +40,7 @@ func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, 
 }
 
 // Record stores an accepted bundle as the version state. The loader calls it
-// after the swap. A bundle with the SHA-256 of the state causes no write. A
+// before the swap. A bundle with the SHA-256 of the state causes no write. A
 // state fault, or a bundle that Check would refuse as a rollback, gives an
 // error and no write.
 func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
