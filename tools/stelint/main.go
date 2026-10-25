@@ -78,11 +78,12 @@
 // is also checked when a change deleted lines between two of its lines. So
 // a deletion that joins two sentences into one long sentence is a hit. A
 // deletion directly before the first line of a sentence also covers it. This
-// holds when the line before the deletion is in the same text. So a deletion
-// that turns code into prose is a hit. A fence line or a blank "//" line can
-// change how a text reads. When one is a changed line, stelint checks every
-// sentence of that text. The line rule checks only the changed lines that are
-// still in the file.
+// holds when the line before the deletion is in the same text. A fence line or
+// a blank "//" line can change how a text reads. When one is a changed line,
+// stelint checks every sentence of that text. Other changes can also turn code
+// into prose, for example a heading that becomes text. stelint does not find
+// each such change. The line rule checks only the changed lines that are still
+// in the file.
 //
 // # Output
 //
