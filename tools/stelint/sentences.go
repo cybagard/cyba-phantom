@@ -91,17 +91,16 @@ func (t target) changedBreak(g []textLine) bool {
 	return false
 }
 
-// isASTDirective reports whether a "//" comment has the directive form of
-// go/ast. The form is "//line ", "//extern " or "//export " at the start.
-// It is also "//", a name of a-z and 0-9, a colon, and one of a-z and 0-9.
+// isASTDirective reports whether a "//" comment is a directive token alone.
+// The token is "//", a name of a-z and 0-9, a colon, and one of a-z and 0-9.
+// The comment has no space rune after "//". Spaces at the end do not count.
 func isASTDirective(lit string) bool {
-	for _, p := range []string{"//line ", "//extern ", "//export "} {
-		if strings.HasPrefix(lit, p) {
-			return true
-		}
-	}
 	s, ok := strings.CutPrefix(lit, "//")
 	if !ok {
+		return false
+	}
+	s = strings.TrimRightFunc(s, unicode.IsSpace)
+	if strings.IndexFunc(s, unicode.IsSpace) >= 0 {
 		return false
 	}
 	name := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
@@ -117,9 +116,10 @@ func isASTDirective(lit string) bool {
 // comment after code starts a group. A "//" line that starts its line
 // continues it. This holds when the line is directly after the trailing
 // comment and starts at the same column. So does each next such line. Each
-// "/* */" comment is a group of its own. A directive ends a group. A directive
-// that isDirective does not know, but that has the go/ast form, is a group of
-// its own. scanErr is true when go/scanner reported an error.
+// "/* */" comment is a group of its own. A directive ends a group. A comment
+// that isDirective does not know is its own group if it is only a go/ast
+// directive token. With more text, it is ordinary comment text.
+// scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
 	fset := token.NewFileSet()

@@ -803,6 +803,10 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"unknown directive with a tool name splits", "// " + ws(20) + "\n//nolint:errcheck\n", nil},
 		{"unknown directive splits a text", "// " + ws(11) + "\n//go:noinline\n// " + ws(10) + "\n", nil},
 		{"unknown directive words count", "//nolint:errcheck " + ws(21) + ".\n", []sentence{{1, 1, 22}}},
+		{"directive form with text joins", "// " + ws(20) + "\n//a:b " + ws(19) + ".\n", []sentence{{1, 2, 40}}},
+		{"directive token with trailing spaces splits", "// " + ws(20) + "\n//go:noinline   \n", nil},
+		{"directive token with a carriage return splits", "// " + ws(20) + "\n//go:noinline\r\n", nil},
+		{"export with a name is text", "// " + ws(20) + "\n//export F\n", []sentence{{1, 2, 22}}},
 		{"indented comments join", "func f() {\n\t// " + ws(11) + "\n\t// " + ws(10) + "\n}\n", []sentence{{2, 3, 21}}},
 		{"directive splits", "// " + ws(11) + "\n//go:generate x\n// " + ws(10) + "\n", nil},
 		{"directive text is skipped", "//go:generate " + ws(30) + "\n", nil},
@@ -1109,6 +1113,15 @@ func TestDeletionBeforeACommentOfCodePasses(t *testing.T) {
 	}
 }
 
+func TestDirectiveFormWithTextJoinsInDiff(t *testing.T) {
+	code, out := editRepo(t,
+		"package a\n\nfunc f() {\n}\n",
+		"package a\n\nfunc f() {\n\t// "+ws(20)+"\n\t//a:b "+ws(19)+".\n}\n")
+	if code != 1 || !strings.Contains(out, "a.go:4: 40 words (limit 20)\n") {
+		t.Errorf("code = %d, want 1; output:\n%s", code, out)
+	}
+}
+
 func TestScanErrorIsRefused(t *testing.T) {
 	dir := newRepo(t)
 	writeFile(t, dir, "a.go", "package a\n")
@@ -1126,19 +1139,23 @@ func TestScanErrorIsRefused(t *testing.T) {
 
 func TestASTDirectiveForm(t *testing.T) {
 	for lit, want := range map[string]bool{
-		"//go:noinline":     true,
-		"//nolint:errcheck": true,
-		"//line a.go:1 x":   true,
-		"//extern f":        true,
-		"//export f":        true,
-		"//a1:b":            true,
-		"// nolint:x":       false,
-		"//Go:x":            false,
-		"//go:":             false,
-		"//:x":              false,
-		"//line":            false,
-		"//go":              false,
-		"/*go:x*/":          false,
+		"//go:noinline":       true,
+		"//nolint:errcheck":   true,
+		"//go:noinline   ":    true,
+		"//a1:b":              true,
+		"//a:b w w.":          false,
+		"//nolint:errcheck w": false,
+		"//line a.go:1 x":     false,
+		"//extern f":          false,
+		"//export F":          false,
+		"//a:b\tw":            false,
+		"// nolint:x":         false,
+		"//Go:x":              false,
+		"//go:":               false,
+		"//:x":                false,
+		"//line":              false,
+		"//go":                false,
+		"/*go:x*/":            false,
 	} {
 		if got := isASTDirective(lit); got != want {
 			t.Errorf("isASTDirective(%q) = %v, want %v", lit, got, want)
