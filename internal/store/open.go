@@ -203,10 +203,10 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// call gets a permission error, the rule is "cannot be made". Any other
 	// error gives the rule "changed between the check and the open". A
 	// permission error can also come from a change of the file or its mode by
-	// another process. The result on disk is the same: refuse runs. Open checks
-	// that the second open gets the made file. Then the create descriptor, which
-	// can write, is closed. So the held descriptor cannot write, for a new file
-	// as for an existing file.
+	// another process. The result on disk is the same: refuse runs. Open
+	// checks that the second open gets the made file. Then the create
+	// descriptor, which can write, is closed. So the held descriptor cannot
+	// write, for a new file as for an existing file.
 	var held, created *os.File
 	if absent {
 		if beforeCreate != nil {

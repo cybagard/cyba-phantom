@@ -274,10 +274,9 @@ func skipIfReadsModeZero(t *testing.T) {
 	}
 }
 
-// T-S-15: Open of a new file gives the rule "changed between the check and the
-// open" unless the open of the second call gets a permission error. In the
-// first row, the made file is gone before that open. In the second row, the
-// Lstat before that open gets a permission error.
+// T-S-15: some errors of the second open of a new file give the rule
+// "changed". In the first row, the made file is gone before that open. In the
+// second row, the Lstat before that open gets a permission error.
 func TestTS15ChangeAtSecondOpenGivesChanged(t *testing.T) {
 	rows := []struct {
 		name string
