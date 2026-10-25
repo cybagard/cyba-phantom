@@ -513,10 +513,18 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTU18_SigtermHelper$")
-	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1")
+	// The child ends with os.Exit, so its cleanup does not run. GOTMPDIR wins
+	// over TMPDIR, so both put its files in tmp, which the parent removes.
+	tmp := t.TempDir()
+	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", "GOTMPDIR="+tmp, "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
+	}
+	if ents, err := os.ReadDir(tmp); err != nil {
+		t.Fatal(err)
+	} else if len(ents) == 0 {
+		t.Fatal("the child made no directory below its TMPDIR")
 	}
 	// A skipped helper or a pattern with no test also exits 0.
 	for _, w := range []string{"checkpointer does not start", safefile.ErrType.Error()} {
