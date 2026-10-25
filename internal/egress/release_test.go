@@ -588,8 +588,8 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 
 	// pointed holds the types that follow a star. lits holds the type of each
 	// composite literal. newCall holds the type in each call of new. elided
-	// holds the literals with no type. Each one gets the element type of the
-	// slice, array or map literal that holds it.
+	// holds the literals with no type. Each one gets the element type or the
+	// key type of the slice, array or map literal that holds it.
 	pointed := map[ast.Expr]bool{}
 	lits := map[ast.Expr]*ast.CompositeLit{}
 	newCall := map[ast.Expr]*ast.CallExpr{}
