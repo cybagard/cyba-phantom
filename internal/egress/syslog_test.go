@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,8 @@ func TestTS21SyslogDialerRefusesBadInput(t *testing.T) {
 		d, err := egress.SyslogDialer(tc.scheme, netip.MustParseAddrPort(tc.addr), time.Second)
 		if err == nil || d != nil {
 			t.Errorf("%s %s: got %v, %v", tc.scheme, tc.addr, d, err)
+		} else if !strings.HasPrefix(err.Error(), "egress:") {
+			t.Errorf("%s %s: error %q has no egress: prefix", tc.scheme, tc.addr, err)
 		}
 	}
 	d, err := egress.SyslogDialer("udp", netip.AddrPort{}, time.Second)
@@ -80,8 +83,8 @@ func TestTS21SyslogUDPException(t *testing.T) {
 	mustRefuse(t, d, "udp", mapped)
 	mustHookRefuse(t, d, "udp6", mapped)
 
-	prod := egress.Dialer(testTimeout)
-	mustRefuse(t, prod, "udp4", ap.String())
+	releaseDialer := egress.Dialer(testTimeout)
+	mustRefuse(t, releaseDialer, "udp4", ap.String())
 	noDatagram(t, uc)
 }
 
@@ -143,8 +146,8 @@ func TestTS21SyslogTCPException(t *testing.T) {
 	mustRefuse(t, d, "tcp6", netip.AddrPortFrom(loop6, ap.Port()+1).String())
 	mustRefuse(t, d, "tcp6", fmt.Sprintf("[::1%%eth0]:%d", ap.Port()))
 
-	prod := egress.Dialer(testTimeout)
-	mustRefuse(t, prod, "tcp6", ap.String())
+	releaseDialer := egress.Dialer(testTimeout)
+	mustRefuse(t, releaseDialer, "tcp6", ap.String())
 	noAccept(t, ln)
 }
 

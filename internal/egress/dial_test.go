@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -92,16 +93,23 @@ func noDatagram(t *testing.T, c *net.UDPConn) {
 	}
 }
 
+// dial makes one dial with d. It stops after testTimeout.
 func dial(d *net.Dialer, network, address string) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	return d.DialContext(ctx, network, address)
 }
 
+// mustRefuse fails t when d connects to address, or when the dial error is
+// not ErrRefused. A UDP dial sends no datagram. Thus, when a dial works, this
+// helper sends one byte, and noDatagram can find the dialer with no rule.
 func mustRefuse(t *testing.T, d *net.Dialer, network, address string) {
 	t.Helper()
 	c, err := dial(d, network, address)
 	if err == nil {
+		if _, werr := c.Write([]byte{0}); werr != nil {
+			t.Errorf("%s %s: write: %v", network, address, werr)
+		}
 		c.Close()
 		t.Errorf("%s %s: dial worked", network, address)
 	} else if !errors.Is(err, egress.ErrRefused) {
@@ -275,17 +283,39 @@ func TestTS21EgresstestRefusesNonLoopback(t *testing.T) {
 
 func TestTS21TestDialerPermitsOnlyNamedLoopback(t *testing.T) {
 	ln := listen(t, loop4)
-	prod := egress.Dialer(testTimeout)
-	mustRefuse(t, prod, "tcp", ln.Addr().String())
+	releaseDialer := egress.Dialer(testTimeout)
+	mustRefuse(t, releaseDialer, "tcp", ln.Addr().String())
 	noAccept(t, ln)
 
-	test := egresstest.Dialer(t, testTimeout, loop4)
-	c, err := dial(test, "tcp", ln.Addr().String())
+	testDialer := egresstest.Dialer(t, testTimeout, loop4)
+	c, err := dial(testDialer, "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
-	mustRefuse(t, test, "tcp", "[::1]:1")
-	mustRefuse(t, test, "tcp", "10.0.0.1:1")
-	mustRefuse(t, prod, "tcp", ln.Addr().String())
+	mustRefuse(t, testDialer, "tcp", "[::1]:1")
+	mustRefuse(t, testDialer, "tcp", "10.0.0.1:1")
+	mustRefuse(t, releaseDialer, "tcp", ln.Addr().String())
+}
+
+// TestTS21ZeroNamesFailsClearly checks Set and Resolver on a zero Names. A
+// zero Names has a nil map. Both must fail with a clear message.
+func TestTS21ZeroNamesFailsClearly(t *testing.T) {
+	for name, use := range map[string]func(*egresstest.Names){
+		"Set":      func(n *egresstest.Names) { n.Set("a.test.", loop4) },
+		"Resolver": func(n *egresstest.Names) { n.Resolver() },
+	} {
+		func() {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, "NewNames") {
+					t.Errorf("%s on a zero Names: panic %q lacks NewNames", name, msg)
+				}
+			}()
+			use(&egresstest.Names{})
+		}()
+	}
+	n := egresstest.NewNames(t)
+	n.Set("a.test.", loop4)
+	n.Resolver()
 }
