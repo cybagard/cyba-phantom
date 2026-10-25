@@ -56,7 +56,7 @@ func TestTS14_StateUnsafe(t *testing.T) {
 			if !tc.fifo {
 				before = stateSnap(t, dir)
 			}
-			var swapped []string // the name of each check after which the swap ran
+			var swapped []string // each name after which the swap ran
 			if tc.fifo {
 				safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(n string) {
 					if n != name {

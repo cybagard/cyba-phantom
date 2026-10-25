@@ -817,7 +817,8 @@ func TestTS14_DefaultLockWait(t *testing.T) {
 	}
 }
 
-// otherOwnerOf sets an OtherOwner hook that is true only for the FileID of path.
+// otherOwnerOf sets an OtherOwner hook that is true only for the FileID of
+// path.
 func otherOwnerOf(t *testing.T, path string) {
 	t.Helper()
 	fi, err := os.Stat(path)
