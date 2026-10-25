@@ -162,7 +162,7 @@ func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.Fil
 	clear(b)
 
 	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
-	// A crash after the link can leave a copy of the key text.
+	// A crash after the link can leave a second name of the key file.
 	if err := root.Remove(keyName + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.Warn("checkpoint key temporary file cannot be removed")
 	}

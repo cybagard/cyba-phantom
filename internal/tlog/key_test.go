@@ -354,8 +354,8 @@ func TestTS13_FirstStartLstatError(t *testing.T) {
 	}
 }
 
-// T-S-13: a load with no warning when it removes a temporary file, and when no
-// temporary file exists.
+// T-S-13: a load gives no warning when it removes a temporary file, or when
+// no temporary file exists.
 func TestTS13_LoadNoWarning(t *testing.T) {
 	root, dir, _ := firstStart(t)
 	log, buf := testLogger()
