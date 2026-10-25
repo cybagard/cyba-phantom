@@ -441,8 +441,8 @@ func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 	scan("after the checkpoint")
 }
 
-// T-S-15: no verb of fmt prints a byte of the day key. This holds for a
-// dayKey, a *dayKey, a Writer and a *Writer.
+// T-S-15: none of these fmt verbs prints a byte of the day key. This holds
+// for a dayKey, a *dayKey, a Writer and a *Writer.
 func TestTS15DayKeyIsNotPrinted(t *testing.T) {
 	r := newRig(t, 100)
 	s := r.w.dk.s()

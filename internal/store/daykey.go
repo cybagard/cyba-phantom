@@ -22,10 +22,13 @@ const overflowHMAC = "overflow"
 // is for one UTC date. The key never goes to a file, a log, an error or a
 // metric. Only the writer goroutine uses a dayKey.
 //
-// fmt cannot call Format on the unexported dk field of a Writer. It prints all
-// fields of a struct there. For a verb that does not fit, such as %s, it also
-// prints the target of a pointer. Thus the state is behind a func. fmt prints
-// only the address of a func, for every verb.
+// fmt cannot call Format on the unexported dk field of a Writer. Instead, it
+// prints each field of dk. For a verb that does not fit, such as %s, it also
+// prints the target of a pointer. Thus the state is behind a func. For a func,
+// fmt prints only an address or the func type.
+//
+// Make a dayKey only with newDayKey: the zero dayKey has no state. Do not copy
+// a dayKey, because the copy shares the key.
 type dayKey struct {
 	s func() *dayState
 }
