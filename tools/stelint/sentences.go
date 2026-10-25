@@ -21,6 +21,9 @@ type sentence struct{ first, last, words int }
 type textLine struct {
 	text string
 	line int
+	// noCode is true when the line is in a text that starts after code. Its
+	// indent does not make a code block.
+	noCode bool
 }
 
 // hasAny reports whether the check covers a sentence that runs from line first
@@ -117,8 +120,8 @@ func isASTDirective(lit string) bool {
 // comment after code starts a group. A "//" line that starts its line
 // continues it, when the line is directly after the group. The line must start
 // at the column of the trailing comment. Each next such line also continues
-// the group. A group that starts after code loses the indent of its lines. So
-// the indent does not make a code block in that group. Each "/* */"
+// the group. A line of a group that starts after code has noCode set. So its
+// indent does not make a code block. Each "/* */"
 // comment is a group of its own. A directive ends a group. A comment that
 // isDirective does not know, and that is only a go/ast directive token, adds
 // no words. On a line of its own, it does not end the group. The next
@@ -163,7 +166,7 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 			groups = append(groups, blockLines(lit, p.Line))
 			continue
 		}
-		tl := textLine{strings.TrimSuffix(lit[2:], "\r"), p.Line}
+		tl := textLine{text: strings.TrimSuffix(lit[2:], "\r"), line: p.Line}
 		before := lines[p.Line-1][:min(p.Column-1, len(lines[p.Line-1]))]
 		col := width(before)
 		if isASTDirective(lit) {
@@ -179,11 +182,10 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 		switch {
 		case strings.TrimSpace(before) != "":
 			flush()
-			cur, trail, trailCol = []textLine{unindent(tl)}, true, col
+			tl.noCode = true
+			cur, trail, trailCol = []textLine{tl}, true, col
 		case cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol):
-			if trail {
-				tl = unindent(tl)
-			}
+			tl.noCode = trail
 			cur = append(cur, tl)
 		default:
 			flush()
@@ -193,13 +195,6 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	}
 	flush()
 	return groups, s.ErrorCount > 0
-}
-
-// unindent removes the spaces and tabs at the start of a line of text. In a
-// text that starts after code, the indent does not make a code block.
-func unindent(l textLine) textLine {
-	l.text = strings.TrimLeft(l.text, " \t")
-	return l
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
@@ -213,7 +208,7 @@ func blockLines(lit string, line int) []textLine {
 		if i > 0 {
 			p = strings.TrimPrefix(p, "*")
 		}
-		out = append(out, textLine{p, line + i})
+		out = append(out, textLine{text: p, line: line + i})
 	}
 	return out
 }
@@ -231,8 +226,8 @@ const (
 // rows and trailer lines. A line is code in a fence of three backticks. A line
 // with a tab or two spaces of indent is also code. This holds when no
 // paragraph or list item is open. In a code block, each indented line stays
-// code. A text that starts after code has no indent in its lines, so it has no
-// code block by indent.
+// code. A line with noCode set never starts a code block by its indent. It
+// continues an open paragraph or list item, or it starts a paragraph.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -287,7 +282,7 @@ func paragraphs(g []textLine) []*para {
 			mode = modeList
 		case indented && (mode == modePara || mode == modeList):
 			add(t, l.line)
-		case indented:
+		case indented && !l.noCode:
 			end()
 			mode = modeCode
 		default:
