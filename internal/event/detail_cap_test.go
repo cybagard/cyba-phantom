@@ -72,9 +72,9 @@ func TestTS24_DetailMemberCap(t *testing.T) {
 
 // T-S-24: the event keeps a new map with only its members. A caller map that
 // held 1 000 members and now holds 1 is the first case. A detail of 8 members
-// is the second. In both, a Record copy takes at most 512 bytes more heap than
-// the Record copy of an event with no detail. A change to the caller map does
-// not change the event.
+// is the second. In both, a Record copy takes at most 512 bytes more heap.
+// The compare is with the Record copy of an event with no detail. A change to
+// the caller map does not change the event.
 func TestTS24_RecordCopyBound(t *testing.T) {
 	base := recordBytes(mustEvent(t, Input{Kind: KindCallback}))
 	shrunk := members(1000)
