@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -107,15 +108,29 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	if err := os.Truncate(p, big); err != nil {
 		t.Fatal(err)
 	}
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
-	_, err = ReadAll(f, fi, capRule)
-	runtime.ReadMemStats(&m1)
-	if !errors.Is(err, ErrSize) {
-		t.Errorf("err = %v, want ErrSize", err)
+	// The counter holds the bytes of the whole process. Other goroutines add
+	// noise, but noise only adds. The least of some runs is the read itself.
+	// A read without a limit allocates more than the size of the file.
+	const (
+		runs    = 7
+		maxRead = 64 << 10
+	)
+	least := uint64(math.MaxUint64)
+	for range runs {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		_, err = ReadAll(f, fi, capRule)
+		runtime.ReadMemStats(&m1)
+		if !errors.Is(err, ErrSize) {
+			t.Fatalf("err = %v, want ErrSize", err)
+		}
+		least = min(least, m1.TotalAlloc-m0.TotalAlloc)
 	}
-	if n := m1.TotalAlloc - m0.TotalAlloc; n >= 4<<10 {
-		t.Errorf("ReadAll allocated %d bytes, want less than 4 KiB", n)
+	if least >= maxRead {
+		t.Errorf("ReadAll allocated %d bytes, want less than %d", least, maxRead)
 	}
 }
 
