@@ -10,7 +10,7 @@
 // per-IP token bucket are not in this package.
 //
 // The package keeps a copy of the first ClientHello of each connection (FR-05).
-// The copy has an array with a cap for each list and for the first ALPN value,
-// so its size is fixed. The error log counts lines and keeps no client data
+// The copy has an array with a cap for each list and the first ALPN value. So
+// its size is fixed. The error log counts lines and keeps no client data
 // (SEC-22).
 package listener
