@@ -1,7 +1,6 @@
 # Development container: the same Go toolchain as CI (golang:1.27.2), so
 # local and CI runs agree. The image holds the toolchain, the static
-# analysis tools, a mutation test tool, and a copy of the Go vulnerability
-# database.
+# analysis tools, a mutation test tool, and the Go vulnerability database.
 #
 # Development only — the deployed sensor is a static binary with no
 # container dependency (C1).
