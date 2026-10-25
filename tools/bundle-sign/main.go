@@ -12,7 +12,9 @@
 // prints the public key line "<key_id> <base64>" first, then it makes the key
 // file. That line is one line of a trust file. keygen never prints the private
 // key. If keygen cannot print the line, it makes no key file. keygen refuses
-// when its output is the null device.
+// only the null device. It cannot detect another output that drops the line.
+// A line printed before a failure is not valid. When keygen exits 1, the vendor
+// discards the printed line.
 //
 // pack writes the files below dir as a gzip tar archive with USTAR headers
 // only. dir must have a regular file manifest.json at its top level. If a name
@@ -28,10 +30,10 @@
 // prints the key IDs of the valid lines.
 //
 // After a failed write or file sync, the output file stays at the path with
-// size 0. After a failed close or directory sync, it stays with its data. The
-// tool does not remove a file by name. The output directory
-// and the key directory must be private to the user. Else another user can
-// replace a name.
+// size 0. After a failed close, directory open or directory sync, it stays
+// with its data. The tool does not remove a file by name. The tool does not
+// check the output directory. The user must use a directory that only the user
+// can write. Else another user can replace a name.
 //
 // Every error text is fixed. Exit codes: 0 success, 1 failure, 2 usage.
 package main
@@ -131,7 +133,7 @@ func readFile(path string, limit int64, key bool, fail error) ([]byte, error) {
 	return nil, fail
 }
 
-// The calls that write and sync. A test replaces them to make a failure.
+// The calls that write and sync. Tests replace these calls to make a failure.
 var (
 	writeTo = (*os.File).Write
 	syncOne = (*os.File).Sync
@@ -140,9 +142,10 @@ var (
 
 // writeNew makes the file at path with mode perm and writes b. It never
 // overwrites a file. It syncs the file and then its directory. It never
-// removes a file by name. If the write or the file sync fails, it truncates
-// the open file to size 0. So the file stays at the path and is empty. The
-// directory of the path must be private to the user.
+// removes a file by name. If the write or the file sync fails, it tries to
+// truncate the open file to size 0. If the truncate fails, the partial data
+// stays. The tool does not check the directory of the path. The user must use
+// a directory that only the user can write.
 func writeNew(path string, b []byte, perm fs.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
@@ -218,16 +221,18 @@ func keygen(a []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := checkKeyDir(a[1]); err != nil {
+	// One absolute path: the checked directory is the written directory.
+	path, _ := filepath.Abs(a[1])
+	if err := checkKeyDir(path); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(a[1]); !errors.Is(err, fs.ErrNotExist) || isNull(out) {
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) || isNull(out) {
 		return errWrite
 	}
 	if err := printLine(out, line); err != nil {
 		return err
 	}
-	return writeNew(a[1], []byte(a[0]+" "+b64.EncodeToString(priv.Seed())+"\n"), 0o600)
+	return writeNew(path, []byte(a[0]+" "+b64.EncodeToString(priv.Seed())+"\n"), 0o600)
 }
 
 // printLine writes the text and a newline to out. A failure gives errWrite.

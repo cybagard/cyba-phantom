@@ -39,8 +39,8 @@ func runFail(t *testing.T, want int, err error, args ...string) {
 }
 
 // tempDir makes a private directory below the package directory. The key
-// directory rule needs that each parent has no group or other write bit.
-// t.TempDir is below /tmp, and /tmp has the sticky bit and mode 1777.
+// directory rule needs that each parent has no group or other write bit. The
+// system temporary directory can have the sticky bit and mode 1777.
 func tempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp(".", "tmp-")
@@ -52,6 +52,9 @@ func tempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(abs) })
+	if checkKeyDir(filepath.Join(abs, "k.key")) != nil {
+		t.Fatalf("test directory %s is not usable: each parent of the checkout must have no group or other write bit", abs)
+	}
 	return abs
 }
 
@@ -166,14 +169,11 @@ func helperCmd(args ...string) *exec.Cmd {
 // T-S-20: the helper variable in the environment does not break a test run. A
 // child test binary with the variable and with no "--" exits 0.
 func TestTS20HelperSkipsWithoutDashes(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^(TestMainHelper|TestTS20HelperSkipsAfter)$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainHelper$")
 	if code := childCode(t, cmd); code != 0 {
 		t.Errorf("exit code %d, want 0", code)
 	}
 }
-
-// TestTS20HelperSkipsAfter runs in the child of the test above.
-func TestTS20HelperSkipsAfter(t *testing.T) {}
 
 // T-S-20: keygen with the null device as output fails with errWrite and makes
 // no key file. The Go runtime opens the null device on a closed stdout.
@@ -416,7 +416,10 @@ func TestTS20KeyDirIsChecked(t *testing.T) {
 	p := func(n string) string { return filepath.Join(dir, n) }
 	write(t, p("a.cbnd"), "archive", 0o644)
 	runOK(t, "keygen", "k1", p("good.key"))
-	valid, _ := os.ReadFile(p("good.key"))
+	valid, err := os.ReadFile(p("good.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mode := range []os.FileMode{0o777, 0o757, 0o775} {
 		bad := p("bad")
 		if err := os.Mkdir(bad, 0o700); err != nil {
@@ -460,6 +463,68 @@ func TestTS20KeyDirIsChecked(t *testing.T) {
 	}
 }
 
+// T-S-20: keygen writes the key file in the directory that it checked. A path
+// with "lnk/.." names a private directory as text, but the kernel follows lnk
+// to a directory with mode 0777. keygen and sign use the checked directory.
+func TestTS20KeyPathIsOneDirectory(t *testing.T) {
+	dir := tempDir(t)
+	p := func(n string) string { return filepath.Join(dir, n) }
+	open := p("open")
+	for _, d := range []string{p("good"), filepath.Join(open, "sub")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(open, "sub"), p("good/lnk")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, p("a.cbnd"), "archive", 0o644)
+	key := p("good") + "/lnk/../k.key"
+	runOK(t, "keygen", "k1", key)
+	if fi, err := os.Stat(p("good/k.key")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("key file in the checked directory: %v, %v", fi, err)
+	}
+	noFile(t, filepath.Join(open, "k.key"))
+	noFile(t, filepath.Join(open, "sub", "k.key"))
+	runOK(t, "sign", "k1", key, p("a.cbnd"), p("m.sig"))
+}
+
+// T-S-20: keygen and sign accept a key directory that is a symlink to a
+// directory with mode 0700.
+func TestTS20KeyDirSymlinkToPrivate(t *testing.T) {
+	dir := tempDir(t)
+	p := func(n string) string { return filepath.Join(dir, n) }
+	if err := os.Mkdir(p("priv"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(p("priv"), p("plink")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, p("a.cbnd"), "archive", 0o644)
+	runOK(t, "keygen", "k1", p("plink/k.key"))
+	if _, err := os.Stat(p("priv/k.key")); err != nil {
+		t.Errorf("key file: %v", err)
+	}
+	runOK(t, "sign", "k1", p("plink/k.key"), p("a.cbnd"), p("m.sig"))
+}
+
+// T-S-20: keygen on a path that exists gives errWrite. It prints nothing and
+// does not change the file.
+func TestTS20KeygenRefusesExistingPath(t *testing.T) {
+	key := filepath.Join(tempDir(t), "k.key")
+	write(t, key, "old key text\n", 0o600)
+	out, errText, code := runCmd("keygen", "k1", key)
+	if code != 1 || errText != errWrite.Error()+"\n" || out != "" {
+		t.Errorf("code %d, stderr %q, stdout %q", code, errText, out)
+	}
+	if b, err := os.ReadFile(key); err != nil || string(b) != "old key text\n" {
+		t.Errorf("file %q, error %v; want the old bytes", b, err)
+	}
+}
+
 // T-S-20: pack refuses a directory with no regular file manifest.json at its
 // top level.
 func TestTS20PackNeedsManifest(t *testing.T) {
@@ -469,14 +534,22 @@ func TestTS20PackNeedsManifest(t *testing.T) {
 	// ReadArchive accepts traps/manifest.json, so only the manifest check
 	// refuses that directory.
 	traps := filepath.Join(dir, "traps")
-	for _, d := range []string{empty, filepath.Join(nested, "x"), filepath.Join(traps, "traps")} {
+	linked := filepath.Join(dir, "linked")
+	isDir := filepath.Join(dir, "isdir")
+	for _, d := range []string{empty, filepath.Join(nested, "x"), filepath.Join(traps, "traps"),
+		linked, filepath.Join(isDir, "manifest.json")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	write(t, filepath.Join(nested, "x", "manifest.json"), "{}", 0o644)
 	write(t, filepath.Join(traps, "traps", "manifest.json"), "{}", 0o644)
-	for _, src := range []string{empty, nested, traps} {
+	// manifest.json is a symlink to a regular file, or it is a directory.
+	write(t, filepath.Join(linked, "real.json"), "{}", 0o644)
+	if err := os.Symlink("real.json", filepath.Join(linked, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{empty, nested, traps, linked, isDir} {
 		out := filepath.Join(dir, filepath.Base(src)+".cbnd")
 		runFail(t, 1, errPack, "pack", src, out)
 		noFile(t, out)
@@ -490,8 +563,8 @@ func swap[T any](t *testing.T, v *T, to T) {
 	*v = to
 }
 
-// T-S-20: after a failed write or sync, writeNew leaves an empty file at the
-// path and gives errWrite. The directory is synced after the file.
+// T-S-20: after a failed write or file sync, writeNew leaves an empty file at
+// the path and gives errWrite. The directory is synced after the file.
 func TestTS20WriteNewFailure(t *testing.T) {
 	dir := tempDir(t)
 	failure := errors.New("injected")
@@ -506,10 +579,22 @@ func TestTS20WriteNewFailure(t *testing.T) {
 		if err := writeNew(path("dirsync"), []byte("data"), 0o600); err != errWrite {
 			t.Errorf("error %v", err)
 		}
+		// The file keeps its data after a failed directory sync.
+		if b, err := os.ReadFile(path("dirsync")); err != nil || string(b) != "data" {
+			t.Errorf("file %q, error %v; want data", b, err)
+		}
+		if fi, err := os.Stat(path("dirsync")); err != nil || fi.Size() != 4 {
+			t.Errorf("file %v, error %v; want size 4", fi, err)
+		}
 	})
 	// The write stores the data and then fails, so the file has data to cut.
 	t.Run("write", func(t *testing.T) {
-		swap(t, &writeTo, func(f *os.File, b []byte) (int, error) { f.Write(b); return 0, failure })
+		swap(t, &writeTo, func(f *os.File, b []byte) (int, error) {
+			if _, err := f.Write(b); err != nil {
+				t.Error(err)
+			}
+			return 0, failure
+		})
 		if err := writeNew(path("write"), []byte("data"), 0o600); err != errWrite {
 			t.Errorf("error %v", err)
 		}
