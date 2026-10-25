@@ -175,20 +175,41 @@ perf-inner:
 # the gremlins output. Then it prints each mutant that tests did not kill,
 # with its status, mutator and position. It also prints the Not covered count.
 # It does not fail on the efficacy value. It fails when PKG is empty, and
-# when gremlins exits with a status that is not 0. make all does not run
-# the target.
-# Example: make mutate PKG=./internal/bundle
+# it refuses a PKG with a character outside [A-Za-z0-9_./-] (exit 2).
+# It also fails when gremlins exits with a status that is not 0. It fails
+# when the gremlins output has no "Mutation testing completed" line.
+# A signal makes gremlins stop and exit 0, so this line shows a full run.
+# MUTATE_CAP is the time limit in seconds for each go command that gremlins
+# starts. It stops the test binary too. A stopped mutant shows as LIVED.
+# Gremlins and the tests write only in one new directory. The target fails
+# when this directory passes MUTATE_MAX_MIB MiB. The target removes it at
+# the end, and on EXIT, INT and TERM. make all does not run the target.
+# Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
+MUTATE_CAP ?= 600
+MUTATE_MAX_MIB ?= 10240
+export MUTATE_CAP MUTATE_MAX_MIB
 mutate:
-	@if [ -z "$(PKG)" ]; then echo "usage: make mutate PKG=./internal/<pkg>"; exit 2; fi
-	@out=$$(mktemp) || exit 1; \
-	gremlins unleash $(PKG) --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$out" 2>&1; \
-	rc=$$?; \
-	cat "$$out"; \
-	if [ "$$rc" -ne 0 ]; then rm -f "$$out"; echo "mutate FAIL: gremlins exited with status $$rc"; exit "$$rc"; fi; \
+	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
+	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-]" >&2; exit 2;; esac
+	@d=$$(mktemp -d) || exit 1; g=; w=; \
+	trap 'kill $$g $$w 2>/dev/null; wait; pkill -f "$$d/"; rm -rf "$$d"' EXIT; \
+	trap 'exit 130' INT; trap 'exit 143' TERM; \
+	mkdir "$$d/bin"; \
+	printf '#!/bin/sh\ntimeout -k 5 %s %s "$$@"\nr=$$?\n[ $$r = 124 ] && echo >>%s/capped\nexit $$r\n' "$$MUTATE_CAP" "$$(command -v go)" "$$d" >"$$d/bin/go"; \
+	chmod +x "$$d/bin/go"; export TMPDIR="$$d" PATH="$$d/bin:$$PATH"; \
+	echo "mutate: each test run stops at $$MUTATE_CAP s; the run stops at $$MUTATE_MAX_MIB MiB of files"; \
+	gremlins unleash "$$PKG" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
+	( while sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); \
+	if [ "$${s:-0}" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -f "$$d/"; break; fi; done ) & w=$$!; \
+	wait $$g; rc=$$?; kill $$w 2>/dev/null; \
+	cat "$$d/out"; \
+	[ -e "$$d/capped" ] && echo "mutate: $$(wc -l <"$$d/capped") test runs stopped at the $$MUTATE_CAP s cap" >&2; \
+	if [ -e "$$d/full" ]; then echo "mutate FAIL: files passed $$MUTATE_MAX_MIB MiB" >&2; exit 1; fi; \
+	if [ "$$rc" -ne 0 ]; then echo "mutate FAIL: gremlins exited with status $$rc" >&2; exit "$$rc"; fi; \
+	grep -q 'Mutation testing completed' "$$d/out" || { echo "mutate FAIL: gremlins stopped before the end of the run" >&2; exit 1; }; \
 	echo "== not killed =="; \
-	grep -E '^ *(LIVED|TIMED OUT) ' "$$out" | sed -e 's/^ */not killed: /'; \
-	sed -n 's/.*\(Not covered: [0-9]*\).*/\1/p' "$$out" | head -n 1; \
-	rm -f "$$out"
+	grep -E '^ *(LIVED|TIMED OUT) ' "$$d/out" | sed -e 's/^ */not killed: /'; \
+	sed -n 's/.*\(Not covered: [0-9]*\).*/\1/p' "$$d/out" | head -n 1
 
 clean:
 	rm -rf bin cover*.out
