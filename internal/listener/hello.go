@@ -121,9 +121,10 @@ func (h *Redirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // token.
 //
 // The source is RawPath when it is set, else Path. In RawPath, a '%' with two
-// hex digits is one token, written with upper-case hex. '/' is copied. Each
-// other byte is written as url.PathEscape writes it alone. So a '%' that starts
-// no valid escape, and each '%' of Path, gives "%25".
+// hex digits is one token, and the code writes its digits in upper case. The
+// code copies '/'. It writes each other byte as url.PathEscape writes that
+// byte alone. So a '%' that starts no valid escape, and each '%' of Path, gives
+// "%25".
 func location(name string, u *url.URL) string {
 	src, raw := u.RawPath, u.RawPath != ""
 	if !raw {

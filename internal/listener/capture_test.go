@@ -85,7 +85,7 @@ func newCapRig(t *testing.T, h http.Handler) *capRig {
 		cfg, err := captureHello(chi)
 		select {
 		case c.got <- HelloFrom(chi.Context()):
-		default: // the buffer holds more values than a test has handshakes
+		default: // the buffer is full: drop the value, do not block
 		}
 		return cfg, err
 	}

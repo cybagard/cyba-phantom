@@ -425,9 +425,9 @@ func BenchmarkHelloHandler(b *testing.B) {
 }
 
 // T-S-17: a cut of the Location never ends inside a %XX escape. The path is
-// "/", then pad "a" bytes, then 2100 bytes of one unit. The unit is "%2F"
-// (kept), "<" (escaped to "%3C") or "a". Each pad from 0 to 3 moves the end of
-// the value inside the last token.
+// "/", then pad "a" bytes, then 2100 copies of one unit. The unit is "%2F"
+// (kept), "<" (escaped to "%3C") or "a". For the two 3-byte units, the pads 0,
+// 1 and 2 give values of 2047, 2048 and 2046 bytes.
 func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 	for _, unit := range []string{"%2F", "<", "a"} {
 		for pad := 0; pad <= 3; pad++ {
