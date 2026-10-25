@@ -27,8 +27,9 @@
 // with the keys of the trust file. It does not check the manifest key ID. It
 // prints the key IDs of the valid lines.
 //
-// If a write fails after the output file exists, the file stays at the path
-// with size 0. The tool does not remove a file by name. The output directory
+// After a failed write or file sync, the output file stays at the path with
+// size 0. After a failed close or directory sync, it stays with its data. The
+// tool does not remove a file by name. The output directory
 // and the key directory must be private to the user. Else another user can
 // replace a name.
 //
@@ -307,8 +308,8 @@ func verify(a []string, out io.Writer) error {
 }
 
 // pack builds the whole archive in memory. An error before writeNew leaves no
-// output file. If writeNew fails after it made the file, the file stays with
-// size 0.
+// output file. If writeNew fails after it made the file, the file stays at the
+// path. The package comment says with what size.
 func pack(a []string, _ io.Writer) error {
 	root, _ := filepath.Abs(a[0])
 	if fi, err := os.Lstat(filepath.Join(root, "manifest.json")); err != nil || !fi.Mode().IsRegular() {
