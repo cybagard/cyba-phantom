@@ -185,13 +185,15 @@ perf-inner:
 # binary. A stopped mutant shows as LIVED. The limit also applies to the
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
-# The target makes one new directory and sets TMPDIR and GOCACHE to it.
+# The target makes one new directory. It sets TMPDIR to this directory,
+# and GOCACHE to a directory in it.
 # A check once each second compares the size of this directory with
 # MUTATE_MAX_MIB MiB. If the size is larger, the target stops gremlins and
 # fails. The directory can grow past the limit before the run stops.
 # The size does not include deleted files that a process still holds open.
 # It does not include files that a test writes to an absolute path.
 # MUTATE_CAP and MUTATE_MAX_MIB must be positive integers (exit 2 if not).
+# The target fails (exit 1) when go is not in PATH.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
 # The make all target does not run this target.
 # Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
