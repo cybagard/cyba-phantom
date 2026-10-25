@@ -408,10 +408,10 @@ func TestTU17_QueueClose(t *testing.T) {
 }
 
 // T-U-17: Ready tells the consumer about an accepted event. Six events are
-// never queued. One is a nil event. Four are events that NewEvent did not make
-// (Size 0): one of kind 0, one of kind 99, and two of a known kind. The last
-// one was made by NewEvent and has a Size that is not 0, so only the kind check
-// refuses it.
+// never queued. One is a nil event. Four are events that NewEvent did not
+// make (Size 0): one of kind 0, one of kind 99, and two of a known kind. The
+// last one was made by NewEvent and has a Size that is not 0. Only the kind
+// check refuses it.
 func TestTU17_QueueReadyAndInvalid(t *testing.T) {
 	q, c := mustQueue(t, 4, maxBulkBytes, maxEvidenceBytes)
 	select {

@@ -73,8 +73,8 @@ func TestTS24_DetailMemberCap(t *testing.T) {
 // T-S-24: the event keeps a new map with only its members. A caller map that
 // held 1 000 members and now holds 1 is the first case. A detail of 8 members
 // is the second. In both, a Record copy takes at most 512 bytes more heap than
-// the Record copy of an event with no detail. A change to the caller map does not change the
-// event.
+// the Record copy of an event with no detail. A change to the caller map does
+// not change the event.
 func TestTS24_RecordCopyBound(t *testing.T) {
 	base := recordBytes(mustEvent(t, Input{Kind: KindCallback}))
 	shrunk := members(1000)
@@ -102,9 +102,9 @@ func TestTS24_RecordCopyBound(t *testing.T) {
 	}
 }
 
-// T-S-24: ParseDetail tests the 2 KB cap of the text before it counts members.
-// The text is a valid flat object of more than 8 members, so only the text
-// check gives the text error.
+// T-S-24: ParseDetail tests the 2 KB cap of the text first. The text is a
+// valid flat object of more than 8 members. Only the text check gives the text
+// error.
 func TestTS24_ParseDetailTextCapFirst(t *testing.T) {
 	text := membersText(300)
 	if len(text) <= MaxDetailBytes {
