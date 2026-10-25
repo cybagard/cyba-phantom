@@ -473,17 +473,18 @@ func TestTS21ReleaseListDepsReports(t *testing.T) {
 	}
 }
 
-// TestTS21ReleaseListCheck checks that listProblem fails on a package error
-// and on an empty folder. It checks that completeList names three platforms.
+// TestTS21ReleaseListCheck checks that listProblem gives a problem for a
+// package error and for a package with no folder. It checks that completeList
+// names three platforms.
 func TestTS21ReleaseListCheck(t *testing.T) {
 	for name, tc := range map[string]struct {
 		dir, errText string
 		bad          bool
 	}{
-		"package with a folder":  {"/src/p", "", false},
-		"package error":          {"/src/p", `"no Go files"`, true},
-		"empty folder":           {"", "", true},
-		"error and empty folder": {"", `"import cycle"`, true},
+		"package with a folder": {"/src/p", "", false},
+		"package error":         {"/src/p", `"no Go files"`, true},
+		"no folder":             {"", "", true},
+		"error and no folder":   {"", `"import cycle"`, true},
 	} {
 		if got := listProblem(tc.dir, tc.errText) != ""; got != tc.bad {
 			t.Errorf("%s: listProblem has a problem: %t, want %t", name, got, tc.bad)
@@ -911,8 +912,9 @@ func transportForms(lit *ast.CompositeLit) []string {
 
 // TestTS21SourceHasNoDialerOutsideGuard scans the non-test files of the
 // module. The scan finds only the forms that the tables and cases of scanFile
-// list. A child process (os/exec) is not in the scan. A command can open a
-// connection that the scan does not see.
+// list. A child process is not in the scan: os/exec, os.StartProcess or
+// syscall.ForkExec. A command can open a connection that the scan does not
+// see.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
 	found, err := scan(moduleRoot(t))
 	if err != nil {
