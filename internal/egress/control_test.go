@@ -56,6 +56,9 @@ func TestTS21ErrRefusedText(t *testing.T) {
 	if text == "" || strings.ContainsAny(text, "0123456789:") {
 		t.Errorf("text %q has a digit or a colon", text)
 	}
+	if strings.HasPrefix(text, "connection refused") {
+		t.Errorf("text %q starts with the text of a socket error", text)
+	}
 }
 
 func TestTS21RefusalSurvivesOpError(t *testing.T) {

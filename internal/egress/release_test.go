@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,45 +51,161 @@ func goCommand(t *testing.T, dir string, env []string, args ...string) *exec.Cmd
 	return cmd
 }
 
+// buildConfig is a platform for the release build. An empty field is the
+// value of the host.
+type buildConfig struct{ goos, goarch string }
+
+// releaseConfigs are the platforms of the release build. The Makefile sets no
+// GOARCH, so the host platform counts too.
+var releaseConfigs = []buildConfig{
+	{"linux", "amd64"}, {"linux", "arm64"}, {"", ""},
+}
+
+func (c buildConfig) name() string {
+	if c.goos == "" {
+		return "default"
+	}
+	return c.goos + "/" + c.goarch
+}
+
+// env gives the environment entries that select the platform and turn cgo
+// off, as the release build of the Makefile does.
+func (c buildConfig) env() []string {
+	env := []string{"CGO_ENABLED=0"}
+	if c.goos != "" {
+		env = append(env, "GOOS="+c.goos, "GOARCH="+c.goarch)
+	}
+	return env
+}
+
+// contextError gives an error when got is not the build context of c with cgo
+// off. got has the form GOOS/GOARCH/CgoEnabled.
+func contextError(got string, c buildConfig) error {
+	goos, goarch := c.goos, c.goarch
+	if goos == "" {
+		goos, goarch = runtime.GOOS, runtime.GOARCH
+	}
+	if want := goos + "/" + goarch + "/false"; got != want {
+		return fmt.Errorf("go list used the build context %s, want %s", got, want)
+	}
+	return nil
+}
+
+// listDeps gives the build context and the import paths that go list -deps
+// finds for pkgs in the platform c. The context is the same for each path.
+func listDeps(t *testing.T, root string, c buildConfig, pkgs ...string) (string, []string) {
+	t.Helper()
+	args := append([]string{"list", "-deps", "-f",
+		"{{context.GOOS}}/{{context.GOARCH}}/{{context.CgoEnabled}} {{.ImportPath}}"}, pkgs...)
+	out, err := goCommand(t, root, c.env(), args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("go list -deps: %v\n%s", err, exitErr.Stderr)
+		}
+		t.Fatalf("go list -deps: %v", err)
+	}
+	var ctx string
+	var deps []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		got, imp, ok := strings.Cut(line, " ")
+		if !ok || (ctx != "" && got != ctx) {
+			t.Fatalf("unexpected go list line %q", line)
+		}
+		ctx = got
+		deps = append(deps, imp)
+	}
+	return ctx, deps
+}
+
+// releaseDepProblem tells why a release command must not depend on the
+// package imp. It gives "" for a package that a command may import. Only the
+// packages of this module have a problem.
+func releaseDepProblem(imp string) string {
+	rel, ok := strings.CutPrefix(imp, modPath+"/")
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(rel, "internal/egress/") {
+		return "it is below internal/egress"
+	}
+	for _, el := range strings.Split(rel, "/") {
+		if el == "testdata" || strings.HasPrefix(el, "_") || strings.HasPrefix(el, ".") {
+			return "its path has the element " + el
+		}
+	}
+	return ""
+}
+
+// TestTS21ReleaseCommandsDoNotListTestSeam lists the dependencies of the
+// release commands for each platform in releaseConfigs, with cgo off. It
+// fails on each dependency that releaseDepProblem names.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	root := moduleRoot(t)
 	commands := []string{modPath + "/cmd/phantom", modPath + "/cmd/phantom-verify"}
-	seams := []string{
-		modPath + "/internal/egress/egresstest",
-		modPath + "/internal/egress/internal/seam",
-	}
-	// The empty GOOS is the GOOS of the host.
-	for _, goos := range []string{"linux", ""} {
-		name, env := "default", []string(nil)
-		if goos != "" {
-			name, env = goos, []string{"GOOS=" + goos}
-		}
-		t.Run(name, func(t *testing.T) {
-			cmd := goCommand(t, root, env, append([]string{"list", "-deps"}, commands...)...)
-			out, err := cmd.Output()
-			if err != nil {
-				var exitErr *exec.ExitError
-				if errors.As(err, &exitErr) {
-					t.Fatalf("go list -deps: %v\n%s", err, exitErr.Stderr)
-				}
-				t.Fatalf("go list -deps: %v", err)
+	for _, c := range releaseConfigs {
+		t.Run(c.name(), func(t *testing.T) {
+			ctx, deps := listDeps(t, root, c, commands...)
+			if err := contextError(ctx, c); err != nil {
+				t.Fatal(err)
 			}
-			deps := strings.Fields(string(out))
-			for _, c := range commands {
-				if !slices.Contains(deps, c) {
-					t.Errorf("go list -deps did not list %s", c)
+			for _, cmd := range commands {
+				if !slices.Contains(deps, cmd) {
+					t.Errorf("go list -deps did not list %s", cmd)
 				}
 			}
-			for _, s := range seams {
-				if slices.Contains(deps, s) {
-					t.Errorf("a release command depends on %s", s)
+			for _, d := range deps {
+				if why := releaseDepProblem(d); why != "" {
+					t.Errorf("a release command depends on %s: %s", d, why)
 				}
 			}
 		})
 	}
 }
 
-// The notest command calls egresstest in a binary that is not a test binary.
+// TestTS21ReleaseDependencyRule checks releaseDepProblem on the two paths of
+// the test seam, on other paths with a problem, and on permitted paths.
+func TestTS21ReleaseDependencyRule(t *testing.T) {
+	for imp, bad := range map[string]bool{
+		modPath + "/internal/egress/egresstest":        true,
+		modPath + "/internal/egress/internal/seam":     true,
+		modPath + "/internal/egress/other":             true,
+		modPath + "/internal/zz/testdata/d":            true,
+		modPath + "/internal/zz/_d":                    true,
+		modPath + "/internal/zz/.d":                    true,
+		modPath + "/testdata":                          true,
+		modPath + "/internal/egress":                   false,
+		modPath + "/internal/egressx":                  false,
+		modPath + "/internal/zz/data":                  false,
+		modPath + "/cmd/phantom":                       false,
+		"example.org/other/testdata/d":                 false,
+		"example.org/other/internal/egress/egresstest": false,
+		"net/http": false,
+	} {
+		if got := releaseDepProblem(imp) != ""; got != bad {
+			t.Errorf("releaseDepProblem(%q) has a problem: %t, want %t", imp, got, bad)
+		}
+	}
+}
+
+// TestTS21ReleaseContextCheck checks that contextError fails when go list
+// ignores GOOS, GOARCH or CGO_ENABLED.
+func TestTS21ReleaseContextCheck(t *testing.T) {
+	c := buildConfig{"linux", "amd64"}
+	if err := contextError("linux/amd64/false", c); err != nil {
+		t.Errorf("same context: %v", err)
+	}
+	for _, got := range []string{
+		"linux/arm64/false", "darwin/amd64/false", "linux/amd64/true",
+	} {
+		if contextError(got, c) == nil {
+			t.Errorf("no error for the context %s", got)
+		}
+	}
+}
+
+// TestTS21EgresstestFailsOutsideTestBinary builds the notest command and runs
+// it. The command calls egresstest in a binary that is not a test binary.
 func TestTS21EgresstestFailsOutsideTestBinary(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "notest")
 	build := goCommand(t, moduleRoot(t), nil,
@@ -116,6 +233,7 @@ type finding struct {
 	Form string
 }
 
+// String gives the finding as file:line: form.
 func (f finding) String() string {
 	return fmt.Sprintf("%s:%d: %s", f.File, f.Line, f.Form)
 }
@@ -123,12 +241,17 @@ func (f finding) String() string {
 // banned lists, for each import path, the names that make or use a dialer
 // with no address rule.
 var banned = map[string][]string{
-	"net":        {"Dial", "DialTimeout", "DialTCP", "DialUDP", "DialIP", "DialUnix"},
+	"net": {"Dial", "DialTimeout", "DialTCP", "DialUDP", "DialIP", "DialUnix",
+		"ListenPacket", "ListenUDP", "ListenIP", "ListenUnixgram"},
 	"crypto/tls": {"Dial", "DialWithDialer"},
 	"net/http": {"DefaultClient", "DefaultTransport", "Get", "Post", "PostForm",
-		"Head"},
-	"net/smtp":   {"Dial", "SendMail"},
-	"log/syslog": {"Dial"},
+		"Head", "ProxyFromEnvironment", "ProxyURL"},
+	"net/smtp":        {"Dial", "SendMail"},
+	"log/syslog":      {"Dial"},
+	"net/textproto":   {"Dial"},
+	"net/rpc":         {"Dial", "DialHTTP", "DialHTTPPath"},
+	"net/rpc/jsonrpc": {"Dial"},
+	"syscall":         {"Socket", "Connect"},
 }
 
 // noRuleTypes lists the types whose value, with no pointer, dials with no
@@ -137,24 +260,46 @@ var banned = map[string][]string{
 var noRuleTypes = map[string][]string{
 	"net":        {"Dialer"},
 	"crypto/tls": {"Dialer"},
-	"net/http":   {"Transport"},
+	"net/http":   {"Transport", "Client"},
 }
 
 // egressImports are the packages that code in internal/egress must not import.
 var egressImports = []string{"os", "flag", "os/exec"}
 
-// dialerHooks are the fields of net.Dialer that hold the address rule.
-var dialerHooks = []string{"ControlContext", "Control"}
+// egressBanned lists the names that code in internal/egress must not use. They
+// read the environment, as the packages of egressImports do.
+var egressBanned = map[string][]string{
+	"syscall": {"Getenv", "Environ"},
+}
 
-// scan parses each .go file below root, except test files. It skips what the
-// go tool skips. Those are testdata directories and directories with a name
-// that starts with "." or "_". It gives the findings, with paths relative to
-// root.
+// proxyImport is the package that dials through a proxy. Code outside
+// internal/egress must not import it.
+const proxyImport = "golang.org/x/net/proxy"
+
+// dialerHooks are the fields of net.Dialer and http.Transport that hold the
+// address rule or the proxy. Code outside internal/egress must not write them.
+var dialerHooks = []string{
+	"ControlContext", "Control", "DialContext", "DialTLSContext", "DialTLS", "Proxy",
+}
+
+// walkError gives the error that stops the walk of root at p. An entry that
+// another test removes during the walk is not an error. The root must exist.
+func walkError(root, p string, err error) error {
+	if err != nil && p != root && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// scan parses each .go file below root, except test files. It skips the
+// folders testdata and the folders with a name that starts with "." or "_".
+// It gives the findings, with paths relative to root. A release command can
+// import such a folder. The dependency test covers that import.
 func scan(root string) ([]finding, error) {
 	var out []finding
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return walkError(root, p, err)
 		}
 		name := d.Name()
 		if d.IsDir() {
@@ -164,19 +309,23 @@ func scan(root string) ([]finding, error) {
 			}
 			return nil
 		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if strings.HasSuffix(name, ".s") || strings.HasSuffix(name, ".S") {
+			out = append(out, finding{File: rel, Line: 1, Form: "assembly file"})
+			return nil
+		}
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 		if err != nil {
-			return err
+			return walkError(root, p, err)
 		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
 		for _, x := range scanFile(fset, f, strings.HasPrefix(rel, "internal/egress/")) {
 			x.File = rel
 			out = append(out, x)
@@ -198,7 +347,7 @@ func scan(root string) ([]finding, error) {
 // scanFile gives the findings in f, with no File. inEgress is true for a file
 // in internal/egress or below. The syntax tree has no types. Thus the scan
 // reads the package of a selector from the imports of the file. It finds the
-// fields ControlContext and Control by name only.
+// fields of dialerHooks by name only.
 func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 	var out []finding
 	add := func(p token.Pos, form string) {
@@ -210,7 +359,13 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 		if err != nil {
 			continue
 		}
+		if p == "C" {
+			add(imp.Pos(), "import C")
+		}
 		if inEgress && slices.Contains(egressImports, p) {
+			add(imp.Pos(), "import "+p)
+		}
+		if !inEgress && p == proxyImport {
 			add(imp.Pos(), "import "+p)
 		}
 		name := path.Base(p)
@@ -234,25 +389,6 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 			}
 		}
 	}
-	if inEgress {
-		return out
-	}
-
-	// pointed holds the types that follow a star. lits holds the type of each
-	// composite literal.
-	pointed := map[ast.Expr]bool{}
-	lits := map[ast.Expr]*ast.CompositeLit{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.StarExpr:
-			pointed[n.X] = true
-		case *ast.CompositeLit:
-			if n.Type != nil {
-				lits[n.Type] = n
-			}
-		}
-		return true
-	})
 	// pkgName gives the import path and the name that n selects. An identifier
 	// that the file declares locally is not a package.
 	pkgName := func(n ast.Node) (pkg, name string) {
@@ -265,6 +401,78 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 		}
 		return "", ""
 	}
+	if inEgress {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if p, name := pkgName(n); slices.Contains(egressBanned[p], name) {
+				add(n.Pos(), path.Base(p)+"."+name)
+			}
+			return true
+		})
+		return out
+	}
+
+	// pointed holds the types that follow a star. lits holds the type of each
+	// composite literal. newCall holds the type in each call of new. elided
+	// holds the literals with no type, which a slice, array or map literal
+	// types by its element type.
+	pointed := map[ast.Expr]bool{}
+	lits := map[ast.Expr]*ast.CompositeLit{}
+	newCall := map[ast.Expr]*ast.CallExpr{}
+	elided := map[ast.Expr][]*ast.CompositeLit{}
+	var elide func(typ ast.Expr, lit *ast.CompositeLit)
+	// elideIn notes lit as a literal with no type of the element type typ.
+	elideIn := func(typ ast.Expr, lit *ast.CompositeLit) {
+		if s, ok := typ.(*ast.StarExpr); ok {
+			typ = s.X
+		}
+		switch typ.(type) {
+		case *ast.ArrayType, *ast.MapType:
+			elide(typ, lit)
+		default:
+			elided[typ] = append(elided[typ], lit)
+		}
+	}
+	// elide notes the elements of lit that have no type, for the literal type
+	// typ.
+	elide = func(typ ast.Expr, lit *ast.CompositeLit) {
+		var elem, key ast.Expr
+		switch t := typ.(type) {
+		case *ast.ArrayType:
+			elem = t.Elt
+		case *ast.MapType:
+			elem, key = t.Value, t.Key
+		default:
+			return
+		}
+		for _, e := range lit.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				if k, ok := kv.Key.(*ast.CompositeLit); ok && k.Type == nil && key != nil {
+					elideIn(key, k)
+				}
+				e = kv.Value
+			}
+			if c, ok := e.(*ast.CompositeLit); ok && c.Type == nil {
+				elideIn(elem, c)
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.StarExpr:
+			pointed[n.X] = true
+		case *ast.CompositeLit:
+			if n.Type != nil {
+				lits[n.Type] = n
+				elide(n.Type, n)
+			}
+		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" &&
+				id.Obj == nil && len(n.Args) == 1 {
+				newCall[n.Args[0]] = n
+			}
+		}
+		return true
+	})
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
@@ -273,29 +481,20 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 			switch {
 			case slices.Contains(banned[p], name):
 				add(n.Pos(), form)
-			case slices.Contains(noRuleTypes[p], name) && !pointed[n]:
-				lit := lits[n]
-				switch {
-				case lit == nil:
-					add(n.Pos(), form+" used with no pointer")
-				case p == "net/http":
-					for _, form := range transportForms(lit) {
-						add(n.Pos(), form)
+			case !slices.Contains(noRuleTypes[p], name):
+			case pointed[n]:
+				for _, lit := range elided[n] {
+					for _, x := range literalForms(p, name, lit) {
+						add(lit.Pos(), x)
 					}
-				default:
-					add(n.Pos(), form+" literal")
 				}
-			case p == "net/http" && name == "Client" && lits[n] != nil:
-				if !hasKey(lits[n], "Transport") {
-					add(n.Pos(), "http.Client literal without Transport")
-				}
-			}
-		case *ast.CallExpr:
-			// new(http.Client) uses http.DefaultTransport.
-			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" &&
-				id.Obj == nil && len(n.Args) == 1 {
-				if p, name := pkgName(n.Args[0]); p == "net/http" && name == "Client" {
-					add(n.Pos(), "new(http.Client)")
+			case newCall[n] != nil:
+				add(newCall[n].Pos(), "new("+form+")")
+			case lits[n] == nil:
+				add(n.Pos(), form+" used with no pointer")
+			default:
+				for _, x := range literalForms(p, name, lits[n]) {
+					add(n.Pos(), x)
 				}
 			}
 		case *ast.AssignStmt:
@@ -316,12 +515,29 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool) []finding {
 	return out
 }
 
-// hasKey tells if lit has an element with the field name key.
+// literalForms gives the findings for lit, a literal of the type name in the
+// package p. The type is one of noRuleTypes.
+func literalForms(p, name string, lit *ast.CompositeLit) []string {
+	switch {
+	case p == "net/http" && name == "Transport":
+		return transportForms(lit)
+	case p == "net/http" && name == "Client":
+		if !hasKey(lit, "Transport") {
+			return []string{"http.Client literal without Transport"}
+		}
+		return nil
+	}
+	return []string{path.Base(p) + "." + name + " literal"}
+}
+
+// hasKey tells if lit has an element with the field name key and a value
+// other than nil. A key with the value nil is the same as no key.
 func hasKey(lit *ast.CompositeLit, key string) bool {
 	for _, e := range lit.Elts {
 		if kv, ok := e.(*ast.KeyValueExpr); ok {
 			if id, ok := kv.Key.(*ast.Ident); ok && id.Name == key {
-				return true
+				v, isIdent := kv.Value.(*ast.Ident)
+				return !(isIdent && v.Name == "nil" && v.Obj == nil)
 			}
 		}
 	}
@@ -342,6 +558,9 @@ func transportForms(lit *ast.CompositeLit) []string {
 	return out
 }
 
+// TestTS21SourceHasNoDialerOutsideGuard scans the non-test files of the
+// module. The scan finds only the forms that the tables and cases of scanFile
+// list.
 func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
 	found, err := scan(moduleRoot(t))
 	if err != nil {
@@ -352,6 +571,8 @@ func TestTS21SourceHasNoDialerOutsideGuard(t *testing.T) {
 	}
 }
 
+// TestTS21ScanFindsPlantedFiles plants files in a temp directory. It checks
+// the forms that scan finds in each file, and the files that it skips.
 func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	dir := t.TempDir()
 	plant := func(rel, src string) {
@@ -396,7 +617,7 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	plantWant("net_dialer_lit.go", file("\t\"net\"\n", "var _ = &net.Dialer{}"),
 		"net.Dialer literal")
 	plantWant("net_dialer_new.go", file("\t\"net\"\n", "var _ = new(net.Dialer)"),
-		"net.Dialer used with no pointer")
+		"new(net.Dialer)")
 	plantWant("net_dialer_var.go", file("\t\"net\"\n", "var d net.Dialer"),
 		"net.Dialer used with no pointer")
 	plantWant("net_dialer_field.go", file("\t\"net\"\n",
@@ -405,70 +626,123 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	plantWant("tls_dialer_lit.go", file("\t\"crypto/tls\"\n", "var _ = &tls.Dialer{}"),
 		"tls.Dialer literal")
 	plantWant("tls_dialer_new.go", file("\t\"crypto/tls\"\n", "var _ = new(tls.Dialer)"),
-		"tls.Dialer used with no pointer")
+		"new(tls.Dialer)")
 	plantWant("transport_none.go", file("\t\"net/http\"\n", "var _ = &http.Transport{}"),
 		"http.Transport literal without DialContext")
+	plantWant("transport_nil.go", file("\t\"net/http\"\n",
+		"var _ = &http.Transport{DialContext: nil}"),
+		"http.Transport literal without DialContext")
 	plantWant("transport_tls_context.go", file("\t\"net/http\"\n",
-		"var _ = &http.Transport{DialContext: nil, DialTLSContext: nil}"),
+		"var _ = &http.Transport{DialContext: f, DialTLSContext: f}"),
 		"http.Transport literal with DialTLSContext")
 	plantWant("transport_tls.go", file("\t\"net/http\"\n",
-		"var _ = &http.Transport{DialContext: nil, DialTLS: nil}"),
+		"var _ = &http.Transport{DialContext: f, DialTLS: f}"),
 		"http.Transport literal with DialTLS")
 	plantWant("transport_new.go", file("\t\"net/http\"\n", "var _ = new(http.Transport)"),
-		"http.Transport used with no pointer")
+		"new(http.Transport)")
 	plantWant("transport_var.go", file("\t\"net/http\"\n", "var t http.Transport"),
 		"http.Transport used with no pointer")
 	plantWant("client_lit.go", file("\t\"net/http\"\n", "var _ = &http.Client{}"),
 		"http.Client literal without Transport")
+	plantWant("client_nil.go", file("\t\"net/http\"\n",
+		"var _ = &http.Client{Transport: nil}"),
+		"http.Client literal without Transport")
 	plantWant("client_new.go", file("\t\"net/http\"\n", "var _ = new(http.Client)"),
 		"new(http.Client)")
+	plantWant("client_var.go", file("\t\"net/http\"\n", "var c http.Client"),
+		"http.Client used with no pointer")
+	plantWant("client_field.go", file("\t\"net/http\"\n",
+		"type a struct{ c http.Client }\ntype b struct{ http.Client }"),
+		"http.Client used with no pointer", "http.Client used with no pointer")
 
-	// A write to the hook of a dialer.
+	// A literal with no type, in a slice, an array or a map.
+	plantWant("elided_dialer_slice.go", file("\t\"net\"\n", "var _ = []*net.Dialer{{}}"),
+		"net.Dialer literal")
+	plantWant("elided_dialer_array.go", file("\t\"net\"\n",
+		"var _ = [...]*net.Dialer{{}, {}}"),
+		"net.Dialer literal", "net.Dialer literal")
+	plantWant("elided_dialer_nested.go", file("\t\"net\"\n",
+		"var _ = [][]*net.Dialer{{{}}}"),
+		"net.Dialer literal")
+	plantWant("elided_dialer_value.go", file("\t\"net\"\n", "var _ = []net.Dialer{{}}"),
+		"net.Dialer used with no pointer")
+	plantWant("elided_transport_map.go", file("\t\"net/http\"\n",
+		"var _ = map[string]*http.Transport{\"a\": {}}"),
+		"http.Transport literal without DialContext")
+	plantWant("elided_client_slice.go", file("\t\"net/http\"\n",
+		"var _ = []*http.Client{{}}"),
+		"http.Client literal without Transport")
+
+	// A write to a field that holds the address rule or the proxy.
 	for _, tc := range []struct{ src, form string }{
 		{"d.ControlContext = nil", "write to ControlContext"},
 		{"d.Control = nil", "write to Control"},
+		{"d.DialContext = nil", "write to DialContext"},
+		{"d.DialTLSContext = nil", "write to DialTLSContext"},
+		{"d.DialTLS = nil", "write to DialTLS"},
+		{"d.Proxy = nil", "write to Proxy"},
 		{"_ = &d.ControlContext", "address of ControlContext"},
 		{"_ = &d.Control", "address of Control"},
+		{"_ = &d.DialContext", "address of DialContext"},
+		{"_ = &d.Proxy", "address of Proxy"},
 	} {
 		name := strings.NewReplacer(" ", "_", ".", "_", "=", "", "&", "").Replace(tc.src)
 		plantWant("write_"+name+".go",
-			file("", "type dialer struct{ Control, ControlContext func() }\n"+
+			file("", "type dialer struct{ Control, ControlContext, DialContext,\n"+
+				"\tDialTLSContext, DialTLS, Proxy func() }\n"+
 				"func f(d *dialer) {\n\t"+tc.src+"\n}"),
 			tc.form)
 	}
 
 	// A dot import of a package that makes dialers.
 	for p := range banned {
-		plantWant("dot_"+path.Base(p)+".go", file("\t. \""+p+"\"\n", ""),
-			"dot import "+p)
+		plantWant("dot_"+strings.ReplaceAll(p, "/", "_")+".go",
+			file("\t. \""+p+"\"\n", ""), "dot import "+p)
 	}
 
-	// A directive, and code in internal/egress.
+	// A directive, a proxy package, cgo, assembly, and code in internal/egress.
 	plantWant("link.go", "package p\n\n//go:linkname f runtime.f\nfunc f()\n",
 		"go:linkname directive")
+	plantWant("proxy_import.go", file("\t\""+proxyImport+"\"\n", ""),
+		"import "+proxyImport)
+	plantWant("cgo.go", file("\t\"C\"\n", ""), "import C")
+	plantWant("internal/egress/cgo.go", file("\t\"C\"\n", ""), "import C")
+	plantWant("asm.s", "TEXT ·f(SB),0,$0\n\tRET\n", "assembly file")
+	plantWant("internal/egress/asm.S", "TEXT ·f(SB),0,$0\n\tRET\n", "assembly file")
 	plantWant("internal/egress/link.go", "package egress\n\n//go:linkname f runtime.f\nfunc f()\n",
 		"go:linkname directive")
 	for _, imp := range egressImports {
 		plantWant("internal/egress/deep/"+path.Base(imp)+".go",
 			file("\t\""+imp+"\"\n", "var _ = "+path.Base(imp)+".Args"), "import "+imp)
 	}
+	plantWant("internal/egress/env.go", file("\t\"syscall\"\n",
+		"var _, _ = syscall.Getenv(\"X\")\nvar _ = syscall.Environ()"),
+		"syscall.Getenv", "syscall.Environ")
 
 	// The scan finds nothing in these files.
 	plant("x_test.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("testdata/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
+	plant("testdata/x.s", "TEXT ·f(SB),0,$0\n\tRET\n")
 	plant(".hidden/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("_skipped/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("comment.go", "package p\n\n// the text //go:linkname is not a directive\n"+
 		"/* //go:linkname is not a directive */\n")
-	plant("pointer.go", file("\t\"net\"\n", "type s struct{ d *net.Dialer }\n"+
-		"func f(d *net.Dialer) *net.Dialer { return d }"))
+	plant("pointer.go", file("\t\"net\"\n\t\"net/http\"\n",
+		"type s struct{ d *net.Dialer; t *http.Transport; c *http.Client }\n"+
+			"func f(d *net.Dialer) *net.Dialer { return d }"))
+	plant("elided_ok.go", file("\t\"net/http\"\n",
+		"var _ = []*http.Transport{{DialContext: f}}\n"+
+			"var _ = []*http.Client{{Transport: t}}"))
 	plant("transport_ok.go", file("\t\"net/http\"\n",
-		"var _ = &http.Transport{DialContext: nil}"))
-	plant("client_ok.go", file("\t\"net/http\"\n", "var _ = &http.Client{Transport: nil}"))
+		"var _ = &http.Transport{DialContext: f, DialTLSContext: nil}"))
+	plant("client_ok.go", file("\t\"net/http\"\n", "var _ = &http.Client{Transport: t}"))
 	plant("shadow.go", file("\t\"net\"\n", "func f(net struct{ Dial func() }) {\n"+
 		"\tnet.Dial()\n}"))
 	plant("not_hook.go", file("", "type c struct{ Control func() }\n"+
 		"func f(x c) func() { return x.Control }"))
+	plant("internal/egress/proxy.go", file("\t\""+proxyImport+"\"\n", ""))
+	plant("internal/egress/raw.go", file("\t\"syscall\"\n",
+		"func f(c syscall.RawConn) syscall.RawConn { return c }"))
 	plant("internal/egress/write.go", file("\t\"net\"\n",
 		"func f(d *net.Dialer) { d.ControlContext = nil; d.Control = nil\n"+
 			"\t_ = &d.Control; _ = &net.Dialer{} }"))
@@ -503,6 +777,8 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	}
 }
 
+// TestTS21ScanReportsFileThatDoesNotParse checks that scan gives an error for
+// a file that does not parse.
 func TestTS21ScanReportsFileThatDoesNotParse(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "bad.go"), []byte("not go"), 0o600); err != nil {
@@ -510,5 +786,24 @@ func TestTS21ScanReportsFileThatDoesNotParse(t *testing.T) {
 	}
 	if _, err := scan(dir); err == nil {
 		t.Error("no error for a file that does not parse")
+	}
+}
+
+// TestTS21ScanWalkError checks that walkError ignores only an entry that is
+// gone. It does not ignore the root, and it does not ignore another error.
+func TestTS21ScanWalkError(t *testing.T) {
+	gone := &fs.PathError{Op: "lstat", Path: "root/x", Err: fs.ErrNotExist}
+	other := errors.New("other")
+	if err := walkError("root", "root/x", gone); err != nil {
+		t.Errorf("entry that is gone: %v", err)
+	}
+	if err := walkError("root", "root", gone); err != gone {
+		t.Errorf("root that is gone: got %v", err)
+	}
+	if err := walkError("root", "root/x", other); err != other {
+		t.Errorf("other error: got %v", err)
+	}
+	if err := walkError("root", "root/x", nil); err != nil {
+		t.Errorf("no error: got %v", err)
 	}
 }

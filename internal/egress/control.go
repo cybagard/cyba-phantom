@@ -8,7 +8,7 @@ import (
 
 // control has the signature of net.Dialer.ControlContext. The dialer calls it
 // for each address, before it connects. It reads no environment, file or
-// config. Each refusal returns errRefused itself, with no address added.
+// config. Each refusal returns errRefused. This function adds no address to it.
 func control(
 	_ context.Context, network, address string, _ syscall.RawConn,
 ) error {

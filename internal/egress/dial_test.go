@@ -107,7 +107,9 @@ func mustRefuse(t *testing.T, d *net.Dialer, network, address string) {
 	t.Helper()
 	c, err := dial(d, network, address)
 	if err == nil {
-		c.Write([]byte{0})
+		if _, werr := c.Write([]byte{0}); werr != nil {
+			t.Errorf("%s %s: write: %v", network, address, werr)
+		}
 		c.Close()
 		t.Errorf("%s %s: dial worked", network, address)
 	} else if !errors.Is(err, egress.ErrRefused) {

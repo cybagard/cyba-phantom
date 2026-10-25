@@ -10,7 +10,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 )
 
-// fakeTB records a fatal call. Fatalf stops the goroutine as testing.T does.
+// fakeTB records a fatal call. Fatalf panics, and failed recovers the panic.
 type fakeTB struct {
 	testing.TB
 	failed bool
