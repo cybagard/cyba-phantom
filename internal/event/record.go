@@ -115,10 +115,21 @@ type Detail map[string]Value
 // encoder.
 var canonicalize = Canonical
 
-// check tests the names and a lower bound of the size. It does no encoding.
-// Each member needs at least len(name)+4 bytes of JSON text: two quotes, a
-// colon and a value of one byte. A string value adds its own length.
+// maxDetailMembers is the largest number of members of a Detail. With it a
+// copy of the map takes a bounded part of the heap.
+const maxDetailMembers = 8
+
+var errDetailMembers = errors.New("event: detail has more than " + strconv.Itoa(maxDetailMembers) + " members")
+
+// check tests the number of members, the names and a lower bound of the size.
+// It does no encoding. The count comes first, so the loop never sees a map of
+// more than maxDetailMembers members. Each member needs at least len(name)+4
+// bytes of JSON text: two quotes, a colon and a value of one byte. A string
+// value adds its own length.
 func (d Detail) check() error {
+	if len(d) > maxDetailMembers {
+		return errDetailMembers
+	}
 	raw := 0
 	for n, v := range d {
 		if n == "" || len(n) > capName {
@@ -506,14 +517,25 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	} else if in.Reason != 0 {
 		return nil, errReasonKind
 	}
-	if err := in.Detail.check(); err != nil {
+	// The count is tested before the copy. A map of more than maxDetailMembers
+	// members is never copied. The event keeps a new map made with only these
+	// members. A clone would keep the table size of the map of the caller.
+	if len(in.Detail) > maxDetailMembers {
+		return nil, errDetailMembers
+	}
+	var detail Detail
+	if in.Detail != nil {
+		detail = make(Detail, len(in.Detail))
+		maps.Copy(detail, in.Detail)
+	}
+	if err := detail.check(); err != nil {
 		return nil, err
 	}
 	r := Record{
 		TS: now().UnixMilli(), Kind: in.Kind, Session: text(in.Session, capID),
 		Vhost: text(in.Vhost, capVhost), Method: text(in.Method, capMethod),
 		Path: text(in.Path, capPath), TrapID: text(in.TrapID, capID),
-		TokenID: text(in.TokenID, capID), Detail: maps.Clone(in.Detail),
+		TokenID: text(in.TokenID, capID), Detail: detail,
 	}
 	if in.Status != nil {
 		st := *in.Status
