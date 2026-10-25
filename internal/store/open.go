@@ -199,7 +199,9 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// The descriptor stays open until the pool closes. While it is open, the
 	// inode of the file cannot be given to a new file. The open of an existing
 	// file does not block on a FIFO. A new file is made through dir, then
-	// opened again read-only. Open checks that the second open gets the made
+	// opened again read-only. If the second open gets a permission error, the
+	// rule is "cannot be made". Any other error of the second open gives the
+	// rule "changed". Open checks that the second open gets the made
 	// file. Then the create descriptor, which can write, is closed. So the held
 	// descriptor cannot write, for a new file as for an existing file.
 	var held, created *os.File
@@ -218,7 +220,11 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		var hfi fs.FileInfo
 		if _, err = identityOf(rel, fi, statErr); err == nil {
 			if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
-				err = fail(rel, ruleChanged)
+				if errors.Is(err, fs.ErrPermission) {
+					err = fail(rel, ruleCreate)
+				} else {
+					err = fail(rel, ruleChanged)
+				}
 			} else if !os.SameFile(fi, hfi) {
 				err = fail(rel, ruleChanged)
 			}
