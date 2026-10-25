@@ -9,10 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // The errors of the verifier state (ADR-021, decision 6). ErrState covers each
@@ -29,9 +30,16 @@ import (
 var (
 	ErrState        = errors.New("verify: the state is not valid")
 	ErrStateChanged = errors.New("verify: the state changed during the run")
-	ErrStateLocked  = fmt.Errorf("verify: another run holds the state lock: %w", ErrState)
+	ErrStateLocked  = &stateFault{"verify: another run holds the state lock: the state is not valid"}
 	ErrStateSync    = fmt.Errorf("verify: the state was written, but the directory sync failed: %w", ErrState)
 )
+
+// stateFault is a fault of the state with a fixed text. It matches ErrState.
+// Its text has the "verify:" prefix once.
+type stateFault struct{ text string }
+
+func (e *stateFault) Error() string { return e.text }
+func (e *stateFault) Unwrap() error { return ErrState }
 
 // StateOptions are the two values of LoadState that a test changes. The zero
 // value of each field gives the production behavior.
@@ -92,11 +100,13 @@ func DefaultStateDir() (string, error) {
 // LoadState opens the state directory and loads the state of the key v. It
 // makes a missing directory with mode 0700. If the file does not exist, this is
 // the first use, and Bytes is nil. A symlink, a file that is not regular, a
-// file past the note cap, and a note that does not parse with v give ErrState.
+// file with a second link, a file past the note cap, and a note that does not
+// parse with v give ErrState.
 //
 // LoadState refuses an existing directory or state file that has a group or
-// other permission bit, or that another user owns. It checks the directory
-// before it takes the lock. Then it takes an exclusive lock on the directory.
+// other permission bit, or that another user owns. It checks each on the open
+// descriptor. It checks the directory before it takes the lock. Then it takes
+// an exclusive lock on the directory.
 // If another run holds the lock, LoadState waits for at most opts.LockWait (30
 // seconds if it is zero) and then gives ErrStateLocked. A run holds the lock
 // until it closes the state. The kernel releases it when the process ends. A
@@ -146,28 +156,31 @@ func (s *State) Close() error {
 	return errors.Join(s.lock.Close(), s.root.Close())
 }
 
-// read reads the state file. It returns false if the file does not exist. The
-// file must be a regular file, and the open file must be the file that Lstat
-// saw. Root.Open follows a symlink that stays inside the root, so Lstat comes
-// first. The open uses O_NONBLOCK. Thus a FIFO that replaced the file after
-// Lstat does not block the open, and the SameFile check refuses it.
+// stateFileRule is the rule of the state file. It must be a regular file that
+// the user of the run owns, with no group or other permission bit, with one
+// link, and not larger than the note cap.
+var stateFileRule = safefile.Rule{
+	Type:    safefile.Regular,
+	Owner:   safefile.OwnerSelf,
+	Forbid:  0o077,
+	OneLink: true,
+	MaxSize: MaxNoteBytes,
+}
+
+// read reads the state file. It returns false if the file does not exist. Any
+// other fault gives ErrState. The safefile package opens the file without a
+// block and checks stateFileRule on the open descriptor. A symlink, a FIFO, or
+// a file with a second link is refused.
 func (s *State) read() ([]byte, bool, error) {
-	li, err := s.root.Lstat(s.name)
+	f, fi, err := safefile.Open(s.root, s.name, stateFileRule)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
-	if err != nil || !li.Mode().IsRegular() {
-		return nil, false, ErrState
-	}
-	f, err := s.root.OpenFile(s.name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, false, ErrState
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !os.SameFile(li, fi) || !trusted(fi) {
-		return nil, false, ErrState
-	}
-	b, err := readCapped(f, MaxNoteBytes)
+	b, err := safefile.ReadAll(f, fi, stateFileRule)
 	if err != nil {
 		return nil, false, ErrState
 	}
