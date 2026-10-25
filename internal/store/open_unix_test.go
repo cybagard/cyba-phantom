@@ -55,7 +55,8 @@ func TestTS15NewFileHasMode0600(t *testing.T) {
 func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
 	root, _, _ := newState(t)
 	held := holdHook(t)
-	mustOpen(t, root, "events.db").Close()
+	db := mustOpen(t, root, "events.db")
+	defer db.Close()
 	if *held == nil {
 		t.Fatal("the hook got no descriptor")
 	}
