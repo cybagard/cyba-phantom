@@ -112,14 +112,16 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 	}
 }
 
-// T-S-15: for an existing file, the file checks of Open open the database
-// file one time only. That open is the one that Open holds for the life of
-// the pool. The watch is read in the hook that gets the held descriptor. For a
-// new file, the watch starts in that hook, so this row counts no earlier open.
-// A hook reads the watch again right after the driver opens the first
-// connection. After Open returns, the watch counts 0 opens. Thus no check of
-// Open after the driver open opens the file. The test does not count an open
-// between the held open and the driver open.
+// T-S-15: apart from the create of a new file, the checks of Open open the
+// database file one time. That open is the one that Open holds for the life
+// of the pool. The watch is read in the hook that gets the held descriptor.
+// For a new file, the watch starts in that hook, so this row counts no earlier
+// open. A hook reads the watch and counts the descriptors again right after
+// the driver opens the first connection. The watch then shows 1 open: the open
+// of the driver. The count of descriptors is the count at the held open plus
+// 1: the driver connection. An open that stays open adds a descriptor. An open
+// that is closed again adds an open event. After Open returns, the watch shows
+// no open.
 func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	rows := []struct {
 		name, rel string
@@ -142,7 +144,7 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 				mustOpen(t, root, r.rel).Close()
 				opens = watchOpens(t, path)
 			}
-			n := -1
+			n, heldFds := -1, -1
 			held := holdHook(t)
 			inner := onHeld
 			setHook(t, &onHeld, func(h *os.File) {
@@ -151,12 +153,25 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 					opens = watchOpens(t, path)
 				}
 				n = opens()
+				heldFds = fdsOf(t, path)
 			})
-			setHook(t, &afterDriverOpen, func() { opens() })
+			driverOpens, driverFds := -1, -1
+			setHook(t, &afterDriverOpen, func() {
+				if c := opens(); driverOpens < 0 {
+					driverOpens = c
+					driverFds = fdsOf(t, path)
+				}
+			})
 			db := mustOpen(t, root, r.rel)
 			defer db.Close()
 			if *held == nil || n != r.wantHeld {
 				t.Fatalf("%d opens of the database file up to the held open, want %d", n, r.wantHeld)
+			}
+			if driverOpens != 1 {
+				t.Fatalf("%d opens of the database file between the held open and the first connection, want 1", driverOpens)
+			}
+			if driverFds != heldFds+1 {
+				t.Fatalf("%d descriptors of the database file at the first connection, want %d", driverFds, heldFds+1)
 			}
 			if n := opens(); n != 0 {
 				t.Fatalf("%d opens of the database file after the first connection", n)
@@ -181,13 +196,16 @@ func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 // T-S-15: a refused open of a new file leaves no descriptor. The hook swaps
 // the made file for another file. Open refuses, and the process holds no
 // descriptor of either file. When refuse runs, the create descriptor of the
-// made file is still open.
+// made file is still open. The held descriptor of the other file is open too.
 func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
 	root, state, _ := newState(t)
 	file := filepath.Join(state, "events.db")
 	swapMadeFile(t, file)
-	made := -1
-	setHook(t, &beforeRefuse, func() { made = fdsOf(t, file+".moved") })
+	made, other := -1, -1
+	setHook(t, &beforeRefuse, func() {
+		made = fdsOf(t, file+".moved")
+		other = fdsOf(t, file)
+	})
 	db, err := Open(root, "events.db", Options{})
 	if db != nil {
 		db.Close()
@@ -198,9 +216,106 @@ func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
 	if made != 1 {
 		t.Fatalf("%d descriptors of the made file when refuse runs, want 1", made)
 	}
+	if other != 1 {
+		t.Fatalf("%d descriptors of the other file when refuse runs, want 1", other)
+	}
 	for _, p := range []string{file, file + ".moved"} {
 		if n := fdsOf(t, p); n != 0 {
 			t.Fatalf("%d descriptors of %s after the refusal, want 0", n, filepath.Base(p))
 		}
+	}
+}
+
+// T-S-15: the second open of a new file gets a permission error. The umask
+// gives the made file mode 0000, so the read-only open fails. Open gives the
+// rule "cannot be made". It removes the made file and leaves no descriptor.
+// A process that can read a file with mode 0000 gets no error, so the test
+// skips then. Root and a process with CAP_DAC_OVERRIDE are such processes.
+func TestTS15UnreadableNewFileIsNotMade(t *testing.T) {
+	skipIfReadsModeZero(t)
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	old := syscall.Umask(0o777)
+	defer syscall.Umask(old)
+	made := -1
+	setHook(t, &beforeRefuse, func() { made = fdsOf(t, file) })
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db", ruleCreate)
+	if made != 1 {
+		t.Fatalf("%d descriptors of the made file when refuse runs, want 1", made)
+	}
+	if _, err := os.Lstat(file); !os.IsNotExist(err) {
+		t.Fatalf("the made file is still there: %v", err)
+	}
+	// After the remove, the link of a descriptor reads "<path> (deleted)".
+	for _, p := range []string{file, file + " (deleted)"} {
+		if n := fdsOf(t, p); n != 0 {
+			t.Fatalf("%d descriptors of the made file after the refusal, want 0", n)
+		}
+	}
+}
+
+// skipIfReadsModeZero skips the test if the process can open a file with mode
+// 0000 for reading. Then a permission error cannot happen.
+func skipIfReadsModeZero(t *testing.T) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "zero")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.Open(p); err == nil {
+		f.Close()
+		t.Skip("this process can read a file with mode 0000")
+	}
+}
+
+// T-S-15: in each row, the second check and open of a new file fails. Open
+// gives the rule "changed between the check and the open". In the first row,
+// the made file is gone before that open. In the second row, the Lstat before
+// that open gets a permission error.
+func TestTS15ChangeAtSecondOpenGivesChanged(t *testing.T) {
+	rows := []struct {
+		name string
+		hook func(t *testing.T, state, file string) safefiletest.Hooks
+	}{
+		{"made file removed after the check", func(t *testing.T, _, file string) safefiletest.Hooks {
+			return safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == "events.db" {
+					if err := os.Remove(file); err != nil {
+						t.Error(err)
+					}
+				}
+			}}
+		}},
+		{"no permission to examine the file", func(t *testing.T, state, _ string) safefiletest.Hooks {
+			skipIfReadsModeZero(t)
+			restore := func() { os.Chmod(state, 0o700) }
+			t.Cleanup(restore)
+			return safefiletest.Hooks{BeforeCheck: func(name string) {
+				if name == "events.db" {
+					if err := os.Chmod(state, 0o600); err != nil {
+						t.Error(err)
+					}
+				}
+			}}
+		}},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			safefiletest.Set(t, r.hook(t, state, filepath.Join(state, "events.db")))
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			os.Chmod(state, 0o700)
+			wantRule(t, err, "events.db", ruleChanged)
+		})
 	}
 }
