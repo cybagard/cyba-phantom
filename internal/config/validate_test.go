@@ -264,26 +264,40 @@ func TestTU10_Email(t *testing.T) {
 		{"plain", "sec@example.com", ""},
 		{"plus", "ops+canary@corp.example", ""},
 		{"empty", "", "one address"},
-		{"two", "a@example.com, b@example.com", "one address"},
-		{"display name", "Sec <sec@example.com>", "one address"},
+		{"two with a space", "a@example.com, b@example.com", emailRule},
+		{"two", "a@example.com,b@example.com", "one address"},
+		{"display name", "Sec <sec@example.com>", emailRule},
+		{"display name without a space", "Sec<sec@example.com>", "one address"},
 		{"angle only", "<sec@example.com>", "one address"},
 		{"no domain", "sec", "one address"},
-		{"space padding", " sec@example.com", "one address"},
-		{"LF", "sec@example.com\n", "CR or LF"},
-		{"CR", "sec@example.com\r", "CR or LF"},
-		{"CRLF header", "a@example.com\r\nBcc: b@example.com", "CR or LF"},
-		{"LF in middle", "a@example.com\nb@example.com", "CR or LF"},
-		{"NEL", "a@example.com\u0085", "control or format"},
-		{"SOH", "a@example.com\u0001", "control or format"},
-		{"right-to-left override", "a@example.com" + string(rune(0x202e)), "control or format"},
-		{"line separator", "a@example.com\u2028", "control or format"},
-		{"paragraph separator", "a@example.com\u2029", "control or format"},
+		{"space padding", " sec@example.com", emailRule},
+		{"LF", "sec@example.com\n", emailRule},
+		{"CR", "sec@example.com\r", emailRule},
+		{"CRLF header", "a@example.com\r\nBcc: b@example.com", emailRule},
+		{"LF in middle", "a@example.com\nb@example.com", emailRule},
+		{"NEL", "a@example.com" + string(rune(0x85)), emailRule},
+		{"C1 control", "a@example.com" + string(rune(0x9f)), emailRule},
+		{"SOH", "a@example.com\x01", emailRule},
+		{"DEL", "a@example.com\x7f", emailRule},
+		{"no-break space", "a@example.com" + string(rune(0xa0)), emailRule},
+		{"right-to-left override", "a@example.com" + string(rune(0x202e)), emailRule},
+		{"line separator", "a@example.com" + string(rune(0x2028)), emailRule},
+		{"paragraph separator", "a@example.com" + string(rune(0x2029)), emailRule},
+		{"ideographic space", "a@example.com" + string(rune(0x3000)), emailRule},
+		{"variation selector", "a@example.com" + string(rune(0xfe0f)), emailRule},
+		{"non-ASCII letter", "a@ex\xc3\xa4mple.com", emailRule},
+		{"invalid UTF-8", "a@example.com\xff", emailRule},
+		{"space inside", "a b@example.com", emailRule},
+		{"lowest allowed character", "!@example.com", ""},
+		{"highest allowed character", "~@example.com", ""},
 	}, func(s string) string { return checkEmail(nil, s) })
 }
 
-// emailMarks are the characters that an email value must refuse (T-S-11): NEL,
-// SOH, right-to-left override, line separator, and paragraph separator.
-var emailMarks = []string{"\u0085", "\u0001", "\u202e", "\u2028", "\u2029"}
+// emailMarks are the characters that an email value must refuse (T-S-11).
+// They are a space, a C0 control, NEL, no-break space, and right-to-left
+// override. They are also line separator, paragraph separator, ideographic
+// space, and variation selector 16. Each is a rune value.
+var emailMarks = []rune{0x20, 0x01, 0x85, 0xa0, 0x202e, 0x2028, 0x2029, 0x3000, 0xfe0f}
 
 // TestTS11_EmailMarks checks that acme.email, smtp from, and smtp to refuse
 // each of the characters in emailMarks. The error names the key and gives the
@@ -292,24 +306,38 @@ func TestTS11_EmailMarks(t *testing.T) {
 	smtp := func(from, to string) string {
 		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "` + from + `", to: ["` + to + `"]}`)
 	}
-	for _, m := range emailMarks {
+	smtp2 := func(to string) string {
+		return snk(`{type: smtp, host: "smtp://mail.example:587", from: "a@b.example", to: ["c@d.example", "` + to + `"]}`)
+	}
+	for _, mr := range emailMarks {
+		m := string(mr)
 		// A double-quoted YAML scalar reads this escape.
 		esc := strconv.QuoteToASCII(m)
 		esc = esc[1 : len(esc)-1]
-		for _, r := range []struct{ key, file string }{
-			{"acme.email", strings.Replace(base, "sec@example.com", `"a@b.example`+esc+`"`, 1)},
-			{"alerts.sinks[0].from", smtp("a@b.example"+esc, "c@d.example")},
-			{"alerts.sinks[0].to[0]", smtp("a@b.example", "c@d.example"+esc)},
+		for _, r := range []struct {
+			key, file string
+			env       []string
+		}{
+			{"acme.email", strings.Replace(base, "sec@example.com", `"a@b.example`+esc+`"`, 1), nil},
+			{"acme.email", base, []string{"PHANTOM_ACME_EMAIL=a@b.example" + m}},
+			{"alerts.sinks[0].from", smtp("a@b.example"+esc, "c@d.example"), nil},
+			{"alerts.sinks[0].to[0]", smtp("a@b.example", "c@d.example"+esc), nil},
+			{"alerts.sinks[0].to[1]", smtp2("e@f.example" + esc), nil},
 		} {
-			t.Run(r.key+" "+esc, func(t *testing.T) {
-				_, err := loadProd(t, r.file, listEnv...)
+			name := r.key + " " + esc
+			if r.env != nil {
+				name += " from the environment"
+			}
+			t.Run(name, func(t *testing.T) {
+				_, err := loadProd(t, r.file, append(r.env, listEnv...)...)
 				if err == nil || !strings.Contains(err.Error(), "config: "+r.key+" at ") {
 					t.Fatalf("got %v, want an error that names %s", err, r.key)
 				}
-				if !strings.Contains(err.Error(), "the address must not contain a control or format character") {
+				if !strings.Contains(err.Error(), emailRule) {
 					t.Errorf("the error does not give the rule: %q", err)
 				}
-				if strings.Contains(err.Error(), m) {
+				// Each error text has spaces, so the check skips the space.
+				if m != " " && strings.Contains(err.Error(), m) {
 					t.Errorf("the error holds the character: %q", err)
 				}
 			})
@@ -919,6 +947,22 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
 		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
 		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+		{"tlog.dir in other case", s + "TLOG/e.db", nil, "in tlog.dir"},
+		{"tlog.dir itself in other case", s + "Tlog", nil, "in tlog.dir"},
+		{"tlog.dir set, in other case", s + "Logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "logs"}, "in tlog.dir"},
+		{"acme.cache_dir in other case", s + "CERTS/e.db", nil, "in acme.cache_dir"},
+		{"acme.cache_dir set, in other case", s + "Cache/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "cache"}, "in acme.cache_dir"},
+		{"bundle dir in other case", s + "Bundle/e.db", nil, "directory of bundle.path"},
+		{"bundle dir set, in other case", s + "A/events.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "a/x.cbnd"}, "directory of bundle.path"},
+		{"bundle dir set, nested in other case", s + "A/b/events.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "a/x.cbnd"}, "directory of bundle.path"},
+		{"keys in other case", s + "Keys/e.db", nil, "keys directory"},
+		{"checkpoints in other case", s + "CHECKPOINTS/e.db", nil, "checkpoints directory"},
+		{"checkpoint.state in other case", s + "Checkpoint.State", nil, "must not be checkpoint.state"},
+		{"checkpoint.state.tmp in other case", s + "CHECKPOINT.STATE.TMP", nil, "must not be checkpoint.state.tmp"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "in tlog.dir"},
+		{"acme.cache_dir set in other case", s + "cache/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "CACHE"}, "in acme.cache_dir"},
+		{"bundle dir set in other case", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x.cbnd"}, "directory of bundle.path"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1030,7 +1074,7 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 		{"directory is store.path-wal in other case", s + "DB-WAL/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path-shm in other case", s + "Db-Shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path in other case", s + "DB/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
-		{"tlog.dir with Kelvin sign", s + "k/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "K"}, ""},
+		{"tlog.dir with Kelvin sign", s + "k/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "\u212A"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1052,6 +1096,23 @@ func TestTS11_BundlePathFailedKey(t *testing.T) {
 	_, err := loadProd(t, base, "PHANTOM_BUNDLE_PATH=/var/lib/phantom/current.cbnd")
 	if err == nil || !strings.Contains(err.Error(), "bundle.path") || strings.Contains(err.Error(), "store.path") {
 		t.Errorf("got %v", err)
+	}
+}
+
+// TestFoldASCII checks that foldASCII changes the letters A-Z only.
+func TestFoldASCII(t *testing.T) {
+	for _, r := range []struct{ in, want string }{
+		{"KEYS", "keys"},
+		{"Checkpoint.State", "checkpoint.state"},
+		{"keys", "keys"},
+		{"@[`{", "@[`{"},
+		{"\u212A", "\u212A"},
+		{"\xc3\x89", "\xc3\x89"},
+		{"", ""},
+	} {
+		if got := foldASCII(r.in); got != r.want {
+			t.Errorf("foldASCII(%q) = %q, want %q", r.in, got, r.want)
+		}
 	}
 }
 
@@ -1802,6 +1863,19 @@ func TestTS11_ACMECacheDir(t *testing.T) {
 		{"in keys", s + "keys/c", nil, "keys directory"},
 		{"checkpoints", s + "checkpoints", nil, "checkpoints directory"},
 		{"in checkpoints", s + "checkpoints/c", nil, "checkpoints directory"},
+		{"tlog.dir in other case", s + "TLOG", nil, "in or above tlog.dir"},
+		{"in tlog.dir in other case", s + "Tlog/c", nil, "in or above tlog.dir"},
+		{"above tlog.dir in other case", s + "A", []string{"PHANTOM_TLOG_DIR=" + s + "a/t"}, "in or above tlog.dir"},
+		{"bundle directory in other case", s + "BUNDLE", nil, "directory of bundle.path"},
+		{"in the bundle directory in other case", s + "Bundle/c", nil, "directory of bundle.path"},
+		{"above the bundle directory in other case", s + "B", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x/current.cbnd"}, "directory of bundle.path"},
+		{"keys in other case", s + "Keys", nil, "keys directory"},
+		{"in keys in other case", s + "KEYS/c", nil, "keys directory"},
+		{"checkpoints in other case", s + "CHECKPOINTS", nil, "checkpoints directory"},
+		{"in checkpoints in other case", s + "Checkpoints/c", nil, "checkpoints directory"},
+		{"in tlog.dir set in other case", s + "logs/c", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "in or above tlog.dir"},
+		{"above tlog.dir set in other case", s + "a", []string{"PHANTOM_TLOG_DIR=" + s + "A/t"}, "in or above tlog.dir"},
+		{"above the bundle directory set in other case", s + "b", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x/current.cbnd"}, "directory of bundle.path"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {

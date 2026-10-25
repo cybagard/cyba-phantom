@@ -297,6 +297,10 @@ func TestTS11_CheckStorePath(t *testing.T) {
 		{"tlog.dir set", s + "t2/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "t2"}, "must not be in tlog.dir"},
 		{"acme.cache_dir set", s + "c/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "c"}, "must not be in acme.cache_dir"},
 		{"bundle.path set", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x.cbnd"}, "must not be in the directory of bundle.path"},
+		{"keys in other case", s + "Keys/e.db", nil, "must not be in the keys directory"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"tlog.dir in other case", s + "TLOG/e.db", nil, "must not be in tlog.dir"},
+		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "must not be in tlog.dir"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(c.path, c.extra...)
@@ -429,6 +433,9 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
 		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
 		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
+		{"cache dir is keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Keys"}, ""},
+		{"cache dir is tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/TLOG"}, ""},
+		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -452,15 +459,15 @@ func TestTS11_CheckACME(t *testing.T) {
 }
 
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
-// from, and an smtp to. Each value holds U+0085, U+0001, U+202E, U+2028, or
-// U+2029. The exit code is 1. Stderr names the key and gives the rule. It
-// does not hold the character (T-S-11).
+// from, and an smtp to. Each value holds U+0085, U+0001, U+00A0, U+202E,
+// U+2028, or U+2029. The exit code is 1. Stderr names the key and gives the
+// rule. It does not hold the character (T-S-11).
 func TestTS11_CheckEmailMarks(t *testing.T) {
 	body := validBody(t)
 	smtp := func(from, to string) string {
 		return body + "alerts:\n  sinks:\n    - {type: smtp, host: \"smtp://mail.example.invalid:587\", from: \"" + from + "\", to: [\"" + to + "\"]}\n"
 	}
-	for _, m := range []rune{0x85, 0x01, 0x202e, 0x2028, 0x2029} {
+	for _, m := range []rune{0x85, 0x01, 0xa0, 0x202e, 0x2028, 0x2029} {
 		// A double-quoted YAML scalar reads this escape.
 		esc := fmt.Sprintf(`\u%04x`, m)
 		for _, r := range []struct{ key, file string }{
@@ -472,7 +479,7 @@ func TestTS11_CheckEmailMarks(t *testing.T) {
 				env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
 				var so, se strings.Builder
 				code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
-				rule := "the address must not contain a control or format character"
+				rule := "the address must have only printable ASCII characters 0x21-0x7E"
 				if code != 1 || !strings.Contains(se.String(), r.key) || !strings.Contains(se.String(), rule) || strings.ContainsRune(se.String(), m) {
 					t.Errorf("exit %d, stderr %q, want a refusal that names %q, gives the rule, and not the character", code, se.String(), r.key)
 				}
