@@ -83,11 +83,11 @@ func readState(root *os.Root) (*state, error) {
 	return st, nil
 }
 
-// writeState replaces the state file. It makes a temporary file with mode 0600,
-// writes it, and calls Sync and Close. Then it renames the file to the fixed
-// name and calls Sync on the directory. A temporary file that a crash left is
-// removed first, so it does not block the write. O_EXCL means that the write
-// never follows a symlink at the temporary name.
+// writeState replaces the state file. It makes a temporary file with mode 0600
+// less the umask. It writes the file, and calls Sync and Close. Then it renames
+// the file to the fixed name and calls Sync on the directory. First it removes
+// a temporary file that a crash left, so that file does not block the write.
+// O_EXCL means that the write never follows a symlink at the temporary name.
 func writeState(root *os.Root, st state) error {
 	if err := root.Remove(stateTempName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

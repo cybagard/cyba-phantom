@@ -85,7 +85,8 @@ func TestTS20Record(t *testing.T) {
 
 // T-S-20: a crash between the swap and the state write leaves the old state.
 // The next check accepts the running bundle again, because its version is
-// higher. The test makes the write fail with a directory at the temporary name.
+// higher. The test puts a directory with a file in it at the temporary name.
+// Record cannot remove it, so the write fails before it makes a new file.
 func TestTS20FailedWriteKeepsOldState(t *testing.T) {
 	dir, r := newDir(t)
 	putState(t, dir, stateJSON("2026.01.01-1", sumOf(1), "proprietary"), 0o600)

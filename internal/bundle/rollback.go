@@ -19,11 +19,12 @@ func NewRollback(root *os.Root) *Rollback { return &Rollback{root: root} }
 // Check decides if a bundle can load. m is its manifest, sum the SHA-256 of its
 // archive bytes, and class the class of its signing key. A state fault gives
 // ErrStateFault, for every bundle. The expiry check comes before the rollback
-// check. An expired bundle gives ErrExpired, with one exception. At start, the
-// bundle whose SHA-256 equals the version state is accepted after expires, and
-// expired is true. A lower version gives ErrRollback. So do the same version
-// with another SHA-256, and a reference bundle after a proprietary one. The
-// same SHA-256 is accepted. Check writes nothing.
+// check. An expired bundle gives ErrExpired, with one exception. At start,
+// Check accepts the bundle whose SHA-256 equals the version state, also after
+// the expiry time of its manifest. Then expired is true. A lower version gives
+// ErrRollback. So do the same version with another SHA-256, and a reference
+// bundle after a proprietary one. Check accepts the same SHA-256 again. Check
+// writes nothing.
 func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, start bool) (expired bool, err error) {
 	st, err := readState(r.root)
 	if err != nil {
