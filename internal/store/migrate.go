@@ -22,9 +22,11 @@ const (
 	ruleForeign = "has tables and no schema version"
 	ruleNewer   = "has a schema version above the newest migration"
 	ruleMigrate = "migration failed"
+	ruleEvent   = "has no event table of this binary"
 )
 
 const (
+	eventSQL     = "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'event'"
 	schemaName   = "database schema"
 	insertOrigin = "INSERT INTO meta (key, value) VALUES ('tlog_origin', ?)"
 	setVersion   = "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
@@ -67,7 +69,7 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	case have > len(scripts):
 		return fail(schemaName, ruleNewer)
 	case have == len(scripts):
-		return nil
+		return checkEvent(ctx, tx, scripts)
 	}
 	for _, s := range scripts[have:] {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
@@ -82,10 +84,52 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	if _, err := tx.ExecContext(ctx, setVersion, strconv.Itoa(len(scripts))); err != nil {
 		return fail(schemaName, ruleMigrate)
 	}
+	if err := checkEvent(ctx, tx, scripts); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fail(schemaName, ruleMigrate)
 	}
 	return nil
+}
+
+// checkEvent compares the stored text of the event table with the text that
+// the scripts store in a new database. It changes nothing in the database.
+func checkEvent(ctx context.Context, tx *sql.Tx, scripts []string) error {
+	want, err := newEventText(ctx, scripts)
+	if err != nil {
+		return fail(schemaName, ruleMigrate)
+	}
+	var got string
+	switch err := tx.QueryRowContext(ctx, eventSQL).Scan(&got); {
+	case err == sql.ErrNoRows:
+		return fail(schemaName, ruleEvent)
+	case err != nil:
+		return fail(schemaName, ruleMigrate)
+	}
+	if got != want {
+		return fail(schemaName, ruleEvent)
+	}
+	return nil
+}
+
+// newEventText applies the scripts to a new database in memory. It returns the
+// text that this database stores for the event table, and closes the database.
+func newEventText(ctx context.Context, scripts []string) (string, error) {
+	mem, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return "", err
+	}
+	defer mem.Close()
+	mem.SetMaxOpenConns(1)
+	for _, s := range scripts {
+		if _, err := mem.ExecContext(ctx, s); err != nil {
+			return "", err
+		}
+	}
+	var text string
+	err = mem.QueryRowContext(ctx, eventSQL).Scan(&text)
+	return text, err
 }
 
 // readScripts returns the SQL of the migrations. Name i (from 0) of the sorted

@@ -163,6 +163,9 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	// An entry in upper case matches a path in lower case.
 	_, err = Open(root, "tlog/events.db", Options{Reserved: []string{"TLOG"}})
 	wantRule(t, err, "store.path", ruleReserved)
+	// The letter Z folds too: it is the last letter of the range.
+	_, err = Open(root, "zone/events.db", Options{Reserved: []string{"ZONE"}})
+	wantRule(t, err, "store.path", ruleReserved)
 	// Only the ASCII letters fold: U+212A (Kelvin sign) is not the letter k.
 	_, err = Open(root, "kibana/events.db", Options{Reserved: []string{"\xe2\x84\xaaibana"}})
 	wantRule(t, err, "kibana", ruleParent)

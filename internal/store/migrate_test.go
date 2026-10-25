@@ -194,6 +194,166 @@ func TestTU18ExistingDatabaseWithOtherAutoVacuumIsRefused(t *testing.T) {
 	}
 }
 
+const eventRefusal = "store: database schema has no event table of this binary"
+
+// firstMigration returns the text of the embedded first migration.
+func firstMigration(t *testing.T) string {
+	t.Helper()
+	b, err := migrationFiles.ReadFile("migrations/0001_schema_v1.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// schemaOne runs script on a new database and adds the meta rows that Migrate
+// writes for schema version 1. It returns the database and its file.
+func schemaOne(t *testing.T, script string) (*sql.DB, string) {
+	t.Helper()
+	db, file := opened(t)
+	const meta = "INSERT INTO meta (key, value) VALUES ('tlog_origin', 'origin'), ('schema_version', '1')"
+	if _, err := db.Exec(script); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(meta); err != nil {
+		t.Fatal(err)
+	}
+	return db, file
+}
+
+// earlierDatabase makes a schema-1 database of the earlier binary. Its event
+// table has no 'refused' in the kind lists.
+func earlierDatabase(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	earlier := strings.ReplaceAll(firstMigration(t), "'refused',", "")
+	if strings.Contains(earlier, "'refused'") || earlier == firstMigration(t) {
+		t.Fatal("the earlier text still names the refused kind, or is the current text")
+	}
+	db, file := schemaOne(t, earlier)
+	_, err := db.Exec("INSERT INTO event (ts, kind) VALUES (1, 'refused')")
+	if err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Fatalf("the earlier event table takes a refused row: %v", err)
+	}
+	return db, file
+}
+
+// wantEventRefusal checks the full error text, and that the database file has
+// the same content as before.
+func wantEventRefusal(t *testing.T, err error, db *sql.DB, file, before string) {
+	t.Helper()
+	wantRule(t, err, schemaName, ruleEvent)
+	if err.Error() != eventRefusal {
+		t.Fatalf("error text %q, want %q", err, eventRefusal)
+	}
+	if content(t, db, file) != before {
+		t.Fatal("the refused database changed")
+	}
+}
+
+// T-S-15: a schema-1 database is refused when its event table text is not the
+// text of the binary. Nothing in it changes.
+func TestTS15EventTableOfOtherTextIsRefused(t *testing.T) {
+	cur := firstMigration(t)
+	otherByte := strings.Replace(cur, "leaf_index >= 0", "leaf_index >= 1", 1)
+	from, to := strings.Index(cur, "CREATE TABLE event"), strings.Index(cur, "CREATE TABLE token")
+	if otherByte == cur || from < 0 || to < from {
+		t.Fatal("the test cannot change the first migration")
+	}
+	noEvent := cur[:from] + cur[to:] + "CREATE INDEX event ON token (trap_id);"
+	cases := []struct {
+		name string
+		make func(t *testing.T) (*sql.DB, string)
+	}{
+		{"earlier text, no rows", earlierDatabase},
+		{"earlier text, one request row", func(t *testing.T) (*sql.DB, string) {
+			db, file := earlierDatabase(t)
+			if _, err := db.Exec("INSERT INTO event (ts, kind) VALUES (1, 'request')"); err != nil {
+				t.Fatal(err)
+			}
+			return db, file
+		}},
+		{"one other byte", func(t *testing.T) (*sql.DB, string) { return schemaOne(t, otherByte) }},
+		{"other letter case", func(t *testing.T) (*sql.DB, string) {
+			return schemaOne(t, strings.Replace(cur, "ts            INTEGER NOT NULL", "ts            INTEGER not null", 1))
+		}},
+		{"space after the event text", func(t *testing.T) (*sql.DB, string) {
+			// Only a write to sqlite_schema makes this text. It needs a
+			// connection with no defensive mode.
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			plain, err := sql.Open("sqlite", file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain.SetMaxOpenConns(1)
+			for _, q := range []string{
+				"PRAGMA auto_vacuum = INCREMENTAL", cur,
+				"INSERT INTO meta (key, value) VALUES ('tlog_origin', 'origin'), ('schema_version', '1')",
+				"PRAGMA writable_schema = ON",
+				"UPDATE sqlite_schema SET sql = sql || ' ' WHERE type = 'table' AND name = 'event'",
+			} {
+				if _, err := plain.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plain.Close()
+			db := mustOpen(t, root, "events.db")
+			t.Cleanup(func() { db.Close() })
+			return db, file
+		}},
+		{"no event table, index named event", func(t *testing.T) (*sql.DB, string) { return schemaOne(t, noEvent) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, file := c.make(t)
+			before := content(t, db, file)
+			wantEventRefusal(t, Migrate(db, "o"), db, file, before)
+		})
+	}
+}
+
+// T-S-15: the check reads the text of the table named event only. A trigger
+// named event, made before the table, does not change the result.
+func TestTS15EventCheckReadsTheTableOnly(t *testing.T) {
+	cur := firstMigration(t)
+	from := strings.Index(cur, "CREATE TABLE event")
+	if from < 0 {
+		t.Fatal("the first migration has no event table")
+	}
+	trigger := "CREATE TRIGGER event AFTER INSERT ON session BEGIN SELECT 1; END;\n"
+	db, _ := schemaOne(t, cur[:from]+trigger+cur[from:])
+	if err := Migrate(db, "o"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// T-S-15: the check runs after the migrations and before the commit. A pending
+// migration on a database with the earlier event text is refused with it.
+func TestTS15EventCheckRunsBeforeCommitOfPendingMigration(t *testing.T) {
+	db, file := earlierDatabase(t)
+	before := content(t, db, file)
+	set := testSet(map[string]string{"0002_more.sql": "CREATE TABLE more (a)"})
+	wantEventRefusal(t, migrate(db, set, "o"), db, file, before)
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'more'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("the new table is there: %d, %v", n, err)
+	}
+	if v := metaValue(t, db, "schema_version"); v != "1" {
+		t.Fatalf("schema_version %s, want 1", v)
+	}
+}
+
+// T-S-15: a database that Migrate made opens again with no error.
+func TestTS15DatabaseOfBinaryOpensAgain(t *testing.T) {
+	db := migrated(t)
+	if err := Migrate(db, "origin"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // T-U-18: no non-test Go file and no SQL file of the package has the SQL keyword
 // VACUUM, in any case.
 func TestTU18NoVacuumInSource(t *testing.T) {
