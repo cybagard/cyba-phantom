@@ -407,10 +407,11 @@ func TestTU17_QueueClose(t *testing.T) {
 	}
 }
 
-// T-U-17: Ready tells the consumer about an accepted event. Three events are
-// never queued. One is a nil event. One is an event that NewEvent did not make
-// (Size 0). One has a kind that is not known. The last one has a Size that is
-// not 0, so only the kind check refuses it.
+// T-U-17: Ready tells the consumer about an accepted event. Six events are
+// never queued. One is a nil event. Four are events that NewEvent did not make
+// (Size 0): one of kind 0, one of kind 99, and two of a known kind. The last
+// one was made by NewEvent and has a Size that is not 0, so only the kind check
+// refuses it.
 func TestTU17_QueueReadyAndInvalid(t *testing.T) {
 	q, c := mustQueue(t, 4, maxBulkBytes, maxEvidenceBytes)
 	select {
@@ -432,8 +433,8 @@ func TestTU17_QueueReadyAndInvalid(t *testing.T) {
 		q.Enqueue(literal(KindRequest, "198.51.100.2")) || q.Enqueue(literal(KindCallback, "")) {
 		t.Fatal("an invalid event was accepted")
 	}
-	// An event that NewEvent made, with a Size that is not 0, and then a kind
-	// that is not known.
+	// NewEvent makes this event, so its Size is not 0. The test then gives it a
+	// kind that is not known.
 	unknown := qEvent(t, KindRequest, "")
 	unknown.record.Kind = 99
 	if unknown.Size() <= 0 || q.Enqueue(unknown) {

@@ -116,14 +116,14 @@ type Detail map[string]Value
 var canonicalize = Canonical
 
 // maxDetailMembers is the largest number of members of a Detail. With it a
-// copy of the map takes a small, fixed part of the heap.
+// copy of the map takes a bounded part of the heap.
 const maxDetailMembers = 8
 
-var errDetailMembers = errors.New("event: detail has more than 8 members")
+var errDetailMembers = errors.New("event: detail has more than " + strconv.Itoa(maxDetailMembers) + " members")
 
 // check tests the number of members, the names and a lower bound of the size.
-// It does no encoding. The count comes first, so the loop never sees a large
-// map. Each member needs at least len(name)+4 bytes of JSON text: two quotes,
+// It does no encoding. The count comes first, so the loop never sees a map of
+// more than maxDetailMembers members. Each member needs at least len(name)+4 bytes of JSON text: two quotes,
 // a colon and a value of one byte. A string value adds its own length.
 func (d Detail) check() error {
 	if len(d) > maxDetailMembers {
@@ -516,7 +516,7 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	} else if in.Reason != 0 {
 		return nil, errReasonKind
 	}
-	// The count is tested before the copy, so a large map is never copied. The
+	// The count is tested before the copy, so a map of more than maxDetailMembers members is never copied. The
 	// event keeps a new map made with only these members. A clone would keep
 	// the table size of the map of the caller.
 	if len(in.Detail) > maxDetailMembers {
