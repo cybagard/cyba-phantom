@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/cybagard/cyba-phantom/internal/config"
+	"github.com/cybagard/cyba-phantom/internal/config/configtest"
 )
 
 type failNet struct{ t *testing.T }
@@ -301,6 +302,13 @@ func TestTS11_CheckStorePath(t *testing.T) {
 		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
 		{"tlog.dir in other case", s + "TLOG/e.db", nil, "must not be in tlog.dir"},
 		{"tlog.dir set in other case", s + "logs/e.db", []string{"PHANTOM_TLOG_DIR=" + s + "LOGS"}, "must not be in tlog.dir"},
+		{"acme.cache_dir in other case", s + "Certs/e.db", nil, "must not be in acme.cache_dir"},
+		{"directory of bundle.path in other case", s + "Bundle/e.db", nil, "must not be in the directory of bundle.path"},
+		{"checkpoints in other case", s + "CheckPoints/e.db", nil, "must not be in the checkpoints directory"},
+		{"checkpoint.state in other case", s + "Checkpoint.State", nil, "must not be checkpoint.state\n"},
+		{"checkpoint.state.tmp in other case", s + "CHECKPOINT.STATE.TMP", nil, "must not be checkpoint.state.tmp"},
+		{"acme.cache_dir set in other case", s + "c/e.db", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "C"}, "must not be in acme.cache_dir"},
+		{"bundle.path set in other case", s + "b/e.db", []string{"PHANTOM_BUNDLE_PATH=" + s + "B/x.cbnd"}, "must not be in the directory of bundle.path"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(c.path, c.extra...)
@@ -384,6 +392,14 @@ func TestTS11_CheckACME(t *testing.T) {
 		return "[" + strings.Join(l, ", ") + "]"
 	}
 	label := func(n int) string { return strings.Repeat("a", n) }
+	// cacheRefused returns the whole stderr of a refusal of acme.cache_dir by
+	// a path rule. Then it adds the lines of the other keys. Stderr must start
+	// with the line of acme.cache_dir, so a refusal by another key alone fails.
+	cacheRefused := func(detail string, more ...string) string {
+		return "config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: " + detail + "\n" + strings.Join(more, "")
+	}
+	const bundleSide = "config: bundle.path at PHANTOM_BUNDLE_PATH: the directory must not be in or above acme.cache_dir\n"
+	const bundleSideDefault = "config: bundle.path at default: the directory must not be in or above acme.cache_dir\n"
 	rows := []struct {
 		name, file string
 		key        string // key is "" for a file that passes.
@@ -426,16 +442,34 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}, ""},
 		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}, ""},
 		{"cache dir above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"}, ""},
-		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"}, ""},
-		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"}, ""},
-		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"}, ""},
+		{"cache dir is the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
+		{"cache dir in the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/bundle/c"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
+		{"cache dir above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 		{"cache dir is keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys"}, ""},
 		{"cache dir in keys", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/keys/c"}, ""},
 		{"cache dir is checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints"}, ""},
 		{"cache dir in checkpoints", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/checkpoints/c"}, ""},
 		{"cache dir is keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Keys"}, ""},
 		{"cache dir is tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/TLOG"}, ""},
-		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"}, ""},
+		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSideDefault)},
+		{"cache dir in checkpoints in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/CheckPoints/c"},
+			cacheRefused("the path must not be in or above the checkpoints directory")},
+		{"cache dir above tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/X/tlog"},
+			cacheRefused("the path must not be in or above tlog.dir")},
+		{"cache dir in other case above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/X", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"},
+			cacheRefused("the path must not be in or above tlog.dir")},
+		{"cache dir in other case above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/B", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
+		{"cache dir in tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/t/c", "PHANTOM_TLOG_DIR=/var/lib/phantom/T"},
+			cacheRefused("the path must not be in or above tlog.dir")},
+		{"cache dir above the bundle directory, bundle.path set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/B/x/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
+		{"cache dir in the bundle directory, bundle.path set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b/c", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/B/current.cbnd"},
+			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -459,15 +493,15 @@ func TestTS11_CheckACME(t *testing.T) {
 }
 
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
-// from, and an smtp to. Each value holds U+0085, U+0001, U+00A0, U+202E,
-// U+2028, or U+2029. The exit code is 1. Stderr names the key and gives the
-// rule. It does not hold the character (T-S-11).
+// from, and an smtp to. Each value holds one of the characters of
+// configtest.EmailMarks. The exit code is 1. Stderr names the key and
+// gives the rule. It does not hold the character (T-S-11).
 func TestTS11_CheckEmailMarks(t *testing.T) {
 	body := validBody(t)
 	smtp := func(from, to string) string {
 		return body + "alerts:\n  sinks:\n    - {type: smtp, host: \"smtp://mail.example.invalid:587\", from: \"" + from + "\", to: [\"" + to + "\"]}\n"
 	}
-	for _, m := range []rune{0x85, 0x01, 0xa0, 0x202e, 0x2028, 0x2029} {
+	for _, m := range configtest.EmailMarks {
 		// A double-quoted YAML scalar reads this escape.
 		esc := fmt.Sprintf(`\u%04x`, m)
 		for _, r := range []struct{ key, file string }{
@@ -480,7 +514,9 @@ func TestTS11_CheckEmailMarks(t *testing.T) {
 				var so, se strings.Builder
 				code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
 				rule := "the address must have only printable ASCII characters 0x21-0x7E"
-				if code != 1 || !strings.Contains(se.String(), r.key) || !strings.Contains(se.String(), rule) || strings.ContainsRune(se.String(), m) {
+				// Each error text has spaces, so the check skips the space.
+				leak := m != ' ' && strings.ContainsRune(se.String(), m)
+				if code != 1 || !strings.Contains(se.String(), r.key) || !strings.Contains(se.String(), rule) || leak {
 					t.Errorf("exit %d, stderr %q, want a refusal that names %q, gives the rule, and not the character", code, se.String(), r.key)
 				}
 			})
