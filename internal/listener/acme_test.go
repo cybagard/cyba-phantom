@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -364,17 +365,24 @@ const egressGuardChildEnv = "PHANTOM_TEST_EGRESS_GUARD_CHILD"
 // of the test binary. The parent sets the proxy variables in the environment
 // of the child, and net/http reads them fresh there. A guard that reads the
 // environment then gives the proxy URL, and the child fails. The parent fails
-// when the child fails, and it prints the output of the child.
+// when the child fails, and it prints the output of the child. The pattern
+// of the child comes from the name of this test. The parent also fails when
+// the output of the child has no PASS line for this test. A child that ran
+// no test then cannot pass.
 func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 	if os.Getenv(egressGuardChildEnv) == "" {
 		cmd := exec.Command(os.Args[0],
-			"-test.run=^TestTS16EgressGuardRefusesOtherRequests$", "-test.count=1")
+			"-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1",
+			"-test.v=true")
 		cmd.Env = append(os.Environ(), egressGuardChildEnv+"=1",
 			"HTTPS_PROXY=http://proxy.test:3128", "HTTP_PROXY=http://proxy.test:3128",
 			"NO_PROXY=", "no_proxy=")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("the child process failed: %v\n%s", err, out)
+		}
+		if !bytes.Contains(out, []byte("--- PASS: "+t.Name())) {
+			t.Fatalf("the child process did not run the checks:\n%s", out)
 		}
 		t.Logf("child output:\n%s", out)
 		return
