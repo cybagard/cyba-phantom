@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -107,16 +108,50 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	if err := os.Truncate(p, big); err != nil {
 		t.Fatal(err)
 	}
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
+	if runtime.GOOS != "linux" {
+		if _, err := ReadAll(f, fi, capRule); !errors.Is(err, ErrSize) {
+			t.Fatalf("err = %v, want ErrSize", err)
+		}
+		t.Skip("the read count needs /proc/thread-self/io")
+	}
+	// The rchar line of /proc/thread-self/io counts the bytes that the read
+	// system calls of this thread return. The test locks the thread, so no
+	// other goroutine reads on it. The test reads the rchar value before and
+	// after ReadAll. The second value also counts the bytes of the first
+	// /proc read. The test subtracts them.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	before, own := threadRchar(t)
 	_, err = ReadAll(f, fi, capRule)
-	runtime.ReadMemStats(&m1)
+	after, _ := threadRchar(t)
 	if !errors.Is(err, ErrSize) {
-		t.Errorf("err = %v, want ErrSize", err)
+		t.Fatalf("err = %v, want ErrSize", err)
 	}
-	if n := m1.TotalAlloc - m0.TotalAlloc; n >= 4<<10 {
-		t.Errorf("ReadAll allocated %d bytes, want less than 4 KiB", n)
+	if got, want := after-before-int64(own), capRule.MaxSize+1; got != want {
+		t.Errorf("ReadAll read %d bytes, want %d", got, want)
 	}
+}
+
+// threadRchar gives the rchar value of this thread, and the number of bytes
+// that the read of /proc/thread-self/io returned. It fails the test when it
+// finds no value.
+func threadRchar(t *testing.T) (rchar int64, n int) {
+	t.Helper()
+	b, err := os.ReadFile("/proc/thread-self/io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "rchar:"); ok {
+			rchar, err = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rchar, len(b)
+		}
+	}
+	t.Fatal("no rchar line in /proc/thread-self/io")
+	return 0, 0
 }
 
 func TestTS23_ReadAllStartsAtOffsetZero(t *testing.T) {
