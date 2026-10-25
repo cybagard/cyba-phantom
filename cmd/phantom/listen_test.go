@@ -13,11 +13,13 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -812,6 +814,36 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 				t.Errorf("exit %d, closed at return %v, client stops %d; want 0, [false false], %d, and a closed queue", r.code, closed(), stops.Load(), wantStops)
 			}
 		})
+	}
+}
+
+// TestTU17_ListenerGetsQueueCounters checks that serve gives the listener
+// the queue and the counters of that queue. After the queue is closed,
+// a dropped event adds one to the counters of the listener.
+func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
+	https, plain, ca := openListeners(t)
+	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+	var got listener.Config
+	oldNew := newServer
+	t.Cleanup(func() { newServer = oldNew })
+	newServer = func(c listener.Config, _ http.Handler) (*listener.Server, error) {
+		got = c
+		return nil, errors.New("test error")
+	}
+	var q *event.Queue
+	if code := serveWith(t.Context(), func() {}, cfg, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if q == nil || got.Queue != q || got.Counters == nil || !q.Closed() {
+		t.Fatalf("listener queue %p, queue %p, counters %p, closed %v; want the same queue, counters and a closed queue", got.Queue, q, got.Counters, q != nil && q.Closed())
+	}
+	e, err := event.NewEvent(nil, event.Input{Kind: event.KindRefused, Reason: event.ReasonBadHello, ClientIP: "192.0.2.7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Enqueue(e)
+	if counts, _ := got.Counters.Snapshot(); counts[netip.MustParseAddr("192.0.2.7")] != 1 {
+		t.Errorf("counters of the listener %v, want one drop for 192.0.2.7", counts)
 	}
 }
 

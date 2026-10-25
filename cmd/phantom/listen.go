@@ -84,6 +84,8 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		}},
 		MaxConns:    int(maxConns.Int),
 		HeaderBytes: int(headerBytes.Int),
+		Queue:       q,
+		Counters:    c,
 	}, listener.NewHelloHandler(names, q))
 	if err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
