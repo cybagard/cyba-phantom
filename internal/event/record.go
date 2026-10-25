@@ -190,6 +190,12 @@ func ParseDetail(text string) (Detail, error) {
 		if err != nil || tok.Kind() != '"' {
 			return nil, bad
 		}
+		// The decoder refuses a name that it read before. A full map and a
+		// new name token are thus a ninth member. Stop here, so a text of
+		// many members does not fill the map.
+		if len(d) == maxDetailMembers {
+			return nil, errDetailMembers
+		}
 		name := tok.String() // the next read makes the token invalid
 		if tok, err = dec.ReadToken(); err != nil {
 			return nil, bad

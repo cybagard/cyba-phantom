@@ -2,6 +2,7 @@ package event
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,15 +30,17 @@ func membersText(n int) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// recordBytes returns the heap bytes of one Record copy of e.
+// recordBytes returns the heap bytes of one Record copy of e, the mean of a
+// fixed number of copies.
 func recordBytes(e *Event) int64 {
-	r := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			sinkRecord = e.Record()
-		}
-	})
-	return r.AllocedBytesPerOp()
+	const runs = 1000
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		sinkRecord = e.Record()
+	}
+	runtime.ReadMemStats(&after)
+	return int64(after.TotalAlloc-before.TotalAlloc) / runs
 }
 
 // T-S-24: a detail has at most 8 members. NewEvent, Detail.JSON and ParseDetail
@@ -127,16 +130,83 @@ func TestTS24_DetailCountBeforeNames(t *testing.T) {
 }
 
 // T-S-24: NewEvent tests the number of members before it copies the map. For a
-// caller map of 1 000 members it makes no allocation.
+// caller map of 9 or of 1 000 members it makes no allocation.
 func TestTS24_NewEventNoCopyAboveCap(t *testing.T) {
-	in := Input{Kind: KindCallback, Detail: members(1000)}
-	allocs := testing.AllocsPerRun(10, func() {
-		if _, err := NewEvent(fixedClock(1), in); err == nil {
-			t.Error("NewEvent accepted 1000 members")
+	for _, n := range []int{9, 1000} {
+		in := Input{Kind: KindCallback, Detail: members(n)}
+		allocs := testing.AllocsPerRun(10, func() {
+			if _, err := NewEvent(fixedClock(1), in); err == nil {
+				t.Errorf("NewEvent accepted %d members", n)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("NewEvent of %d members made %v allocations, want 0", n, allocs)
 		}
-	})
-	if allocs != 0 {
-		t.Errorf("NewEvent of 1000 members made %v allocations, want 0", allocs)
+	}
+}
+
+// T-S-24: ParseDetail refuses the ninth member while it decodes. A flat text
+// of more than 8 members and less than 2 KB makes no more allocations. The
+// comparison is with a text of 9 members.
+func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
+	long := membersText(150)
+	if len(long) >= MaxDetailBytes {
+		t.Fatalf("the text has %d bytes, want less than %d", len(long), MaxDetailBytes)
+	}
+	run := func(text string) float64 {
+		return testing.AllocsPerRun(10, func() {
+			if _, err := ParseDetail(text); err == nil || err.Error() != errMemberCap {
+				t.Errorf("ParseDetail: error %v, want %q", err, errMemberCap)
+			}
+		})
+	}
+	nine, many := run(membersText(9)), run(long)
+	t.Logf("allocations: 9 members %v, 150 members %v", nine, many)
+	if many > nine {
+		t.Errorf("150 members made %v allocations, 9 members made %v", many, nine)
+	}
+}
+
+// T-S-24: ParseDetail gives the member error only when it reads a ninth name
+// that the decoder accepts. A text of 8 members with a bad tail gets the text
+// error. A text of 9 valid members gets the member error.
+func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
+	const errText = "event: detail text is not a flat object"
+	eight := strings.TrimSuffix(membersText(8), "}")
+	for name, tc := range map[string]struct{ text, want string }{
+		"8 members and trailing comma": {eight + ",}", errText},
+		"8 members and no brace":       {eight, errText},
+		"8 members and garbage":        {eight + " x}", errText},
+		"8 members and repeated name":  {eight + `,"m0":1}`, errText},
+		"8 members and closing brace":  {eight + "}", ""},
+		"9 valid members":              {membersText(9), errMemberCap},
+	} {
+		d, err := ParseDetail(tc.text)
+		switch {
+		case tc.want == "" && (err != nil || len(d) != 8):
+			t.Errorf("%s: %d members, %v, want 8 members", name, len(d), err)
+		case tc.want != "" && (err == nil || err.Error() != tc.want):
+			t.Errorf("%s: error %v, want %q", name, err, tc.want)
+		}
+	}
+}
+
+// T-S-24: a text of 2 048 bytes passes the text cap. A text of 2 049 bytes gets
+// the text error. Both are one member with a long string value.
+func TestTS24_ParseDetailTextCapBoundary(t *testing.T) {
+	text := func(n int) string {
+		return `{"a":"` + strings.Repeat("x", n-len(`{"a":""}`)) + `"}`
+	}
+	at, over := text(MaxDetailBytes), text(MaxDetailBytes+1)
+	if len(at) != MaxDetailBytes || len(over) != MaxDetailBytes+1 {
+		t.Fatalf("text lengths are %d and %d", len(at), len(over))
+	}
+	if d, err := ParseDetail(at); err != nil || len(d) != 1 {
+		t.Errorf("ParseDetail of %d bytes: %d members, %v", len(at), len(d), err)
+	}
+	const want = "event: detail text is not a flat object"
+	if _, err := ParseDetail(over); err == nil || err.Error() != want {
+		t.Errorf("ParseDetail of %d bytes: error %v, want %q", len(over), err, want)
 	}
 }
 
