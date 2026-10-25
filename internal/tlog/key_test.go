@@ -347,6 +347,47 @@ func TestTS13_FirstStartLstatError(t *testing.T) {
 	if n := strings.Count(err.Error(), dir); n != 1 {
 		t.Errorf("error names the path %d times; want 1: %v", n, err)
 	}
+	path := filepath.Join(dir, keyName)
+	want := "checkpoint key " + path + ": public key file cannot be examined: permission denied"
+	if err.Error() != want {
+		t.Errorf("got %q; want %q", err, want)
+	}
+}
+
+// T-S-13: a load with no warning when it removes a temporary file, and when no
+// temporary file exists.
+func TestTS13_LoadNoWarning(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	log, buf := testLogger()
+	_, err := loadWithin(t, root, log, testOrigin, true, 1)
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(dir, keyName+".tmp"), []byte("copy"), 0o600))
+	_, err = loadWithin(t, root, log, testOrigin, true, 1)
+	must(t, err)
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("the log has a warning: %s", buf)
+	}
+	if names := keysNames(t, dir); len(names) != 2 {
+		t.Errorf("keys has %v; want the key and the public key only", names)
+	}
+}
+
+// T-S-13: a temporary name that Remove cannot remove gives the exact warning.
+// The load succeeds. A directory that is not empty makes Remove fail for every
+// user.
+func TestTS13_TemporaryRemoveWarning(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	tmp := filepath.Join(dir, keyName+".tmp")
+	must(t, os.Mkdir(tmp, 0o700))
+	must(t, os.WriteFile(filepath.Join(tmp, "x"), []byte("x"), 0o600))
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+		t.Fatal(err)
+	}
+	want := "level=WARN msg=\"checkpoint key temporary file cannot be removed\"\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("the log has no exact warning: %s", buf)
+	}
 }
 
 // keysNames returns the names in the keys directory.
