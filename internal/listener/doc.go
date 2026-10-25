@@ -10,9 +10,7 @@
 // per-IP token bucket are not in this package.
 //
 // The package keeps a copy of the first ClientHello of each connection (FR-05).
-// The copy holds the cipher suites, extensions, signature schemes, groups,
-// versions and first ALPN value. Each sits in an array with a cap, so the size
-// is fixed.
-//
-// The error log of the package counts lines and keeps no client data (SEC-22).
+// The copy has an array with a cap for each list and for the first ALPN value,
+// so its size is fixed. The error log counts lines and keeps no client data
+// (SEC-22).
 package listener
