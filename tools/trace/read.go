@@ -155,7 +155,8 @@ func readFinding(name string, err error) string {
 
 // checkSpecDir requires specDir to name a real directory. It refuses a
 // symlink at the last part, also with a trailing "/" or "/.". A final ".."
-// resolves the part before it.
+// resolves the part before it. In an absolute path, it does not resolve a
+// ".." after a symlink: it only cleans the path.
 func checkSpecDir(specDir string) error {
 	abs, err := absPath(specDir)
 	if err != nil {
