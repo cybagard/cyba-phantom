@@ -22,7 +22,7 @@ type textLine struct {
 	text string
 	line int
 	// noCode is true when the line is in a text that starts after code. Its
-	// indent does not make a code block.
+	// indent does not make a code block. A token line has noCode false.
 	noCode bool
 }
 
@@ -95,10 +95,10 @@ func (t target) changedBreak(g []textLine) bool {
 }
 
 // isASTDirective reports whether a "//" comment is a go/ast directive token.
-// A rune for which isWordBreak is true is ignored at the end. The comment
-// starts with "//", a name of a-z and 0-9, and a colon. After the colon, each
-// byte is a-z, 0-9, "," or "_", and there is at least one. Any other byte makes
-// the comment ordinary text.
+// isASTDirective ignores the word breaks at the end. The comment starts with
+// "//", a name of a-z and 0-9, and a colon. After the colon, each byte is a-z,
+// 0-9, "," or "_", and there is at least one. Any other byte makes the comment
+// ordinary text.
 func isASTDirective(lit string) bool {
 	s, ok := strings.CutPrefix(lit, "//")
 	if !ok {
@@ -132,10 +132,11 @@ func isASTDirective(lit string) bool {
 // that is only a go/ast directive token, is a token. On a line of its own, a
 // token does not end the group. In a group that starts after code, a token at
 // another column ends the group. After code, the code ends the group. With more
-// text, the comment is ordinary comment text. A token in the middle of a group
-// counts as one word. A token at the end adds no words. A run of adjacent token
-// lines can start the group. If a "//" text line follows the run directly,
-// each token of the run counts.
+// text, the comment is ordinary comment text. A "//" line of the group can come
+// directly after a token, also a blank "//" line. Then the token counts as one
+// word. Otherwise it adds no words. A token line has noCode false. A run of
+// adjacent token lines can start the group. If a "//" text line follows the run
+// directly, each token of the run counts.
 // scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
@@ -417,13 +418,14 @@ func isBlank(r rune) bool {
 // The first is the runes of isBlank. The second is control runes (category
 // Cc). The third is format runes (category Cf, for example U+200B). The fourth
 // is private-use runes (category Co). The fifth is the variation selectors. The
-// sixth is the other default-ignorable runes, for example U+034F. These runes
-// render no gap, so they do not join the words around them. A sentence end
-// needs a space. For that, isBlank is the rule.
+// sixth is the other default-ignorable runes, for example U+034F. Most of these
+// runes render no gap, so they do not join the words around them. Only the
+// runes of isBlank are spaces, and only a space ends a sentence after an end
+// mark. Some control and default-ignorable runes are also spaces, such as the
+// tab and U+3164.
 func isWordBreak(r rune) bool {
-	return isBlank(r) || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) ||
-		unicode.Is(unicode.Co, r) || unicode.Is(unicode.Variation_Selector, r) ||
-		unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
+	return isBlank(r) || unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co,
+		unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
 }
 
 // spaceAt reports whether the rune that starts at byte i of b is a space, as
