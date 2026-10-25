@@ -208,9 +208,10 @@ func unindent(l textLine) textLine {
 }
 
 // endsSentence reports whether a line of text ends with ".", "?" or "!". Spaces
-// at the end of the line do not count.
+// at the end of the line do not count. A space is a rune for which isBlank is
+// true.
 func endsSentence(text string) bool {
-	text = strings.TrimRight(text, " ")
+	text = strings.TrimRightFunc(text, isBlank)
 	return text != "" && strings.IndexByte(".?!", text[len(text)-1]) >= 0
 }
 
@@ -403,7 +404,7 @@ func (p *para) add(text string, line int) {
 // U+2800, U+3164 and U+FFA0, which render as blank.
 func isBlank(r rune) bool {
 	switch r {
-	case 'ᅟ', 'ᅠ', '⠀', 'ㅤ', 'ﾠ':
+	case '\u115F', '\u1160', '\u2800', '\u3164', '\uFFA0':
 		return true
 	}
 	return unicode.IsSpace(r)

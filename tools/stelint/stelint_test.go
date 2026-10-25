@@ -768,6 +768,12 @@ func TestSentenceRules(t *testing.T) {
 		{"token then U+2800 and words is text", "//a:b⠀" + ws(20) + ".\n", []sentence{{1, 1, 21}}},
 		{"trailer name joined with U+2800 is text", "// Signed-off-by: " + wj(21, "⠀") + " <a@example.com>\n", []sentence{{1, 1, 23}}},
 
+		{"trailer address with a blank rune is text", "// Signed-off-by: " + ws(20) + " <a@example.com\u2800w>\n", []sentence{{1, 1, 23}}},
+		{"token then U+2800 and joined words is text", "//a:b\u2800" + wj(20, "\u2800") + ".\n", []sentence{{1, 1, 21}}},
+		{"token with U+2800 at its end adds no words", "// " + ws(20) + "\n//a:b\u2800\n", nil},
+		{"end mark before U+2800 ends the sentence", "// " + ws(15) + ".\u2800" + ws(15) + ".\n", nil},
+		{"U+2800 ends a link url", "// [a](x\u2800y) " + ws(20) + ".\n", []sentence{{1, 1, 22}}},
+
 		// A "#" line in a code block is not a heading.
 		{"heading mark in a code block", "//\n//\t# " + ws(25) + "\n", nil},
 
@@ -820,6 +826,13 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"end mark with spaces after it ends the trailing text", "var x = 1 // " + ws(11) + ".  \n// " + ws(10) + ".\n", nil},
 		{"second indent column line continues", "\tx := 1 // " + ws(7) + "\n\t// " + ws(7) + "\n\t// " + ws(7) + ".\n", []sentence{{1, 3, 21}}},
 		{"indent column line after a joined end mark", "\tx := 1 // " + ws(7) + "\n\t// " + ws(7) + ".\n\t// " + ws(7) + ".\n", nil},
+		{"indent line after an end mark is a doc comment", "\tx := 1 // a.\n\t//  " + ws(25) + ".\n", nil},
+		{"indent line after a question mark is a doc comment", "\tx := 1 // a?\n\t//  " + ws(25) + ".\n", nil},
+		{"indent line after an exclamation mark is a doc comment", "\tx := 1 // a!\n\t//  " + ws(25) + ".\n", nil},
+		{"indent line after an end mark and spaces is a doc comment", "\tx := 1 // a.  \n\t//  " + ws(25) + ".\n", nil},
+		{"indent line after an end mark and a tab is a doc comment", "\tx := 1 // a.\t\n\t//  " + ws(25) + ".\n", nil},
+		{"indent line without an end mark joins, indent removed", "\tx := 1 // a\n\t//  " + ws(25) + ".\n", []sentence{{1, 2, 26}}},
+		{"trailing text: blank line then indented line at the column", "\tx := 1 // a.\n\t" + strings.Repeat(" ", 7) + "//\n\t" + strings.Repeat(" ", 7) + "//  " + ws(25) + ".\n", []sentence{{3, 3, 25}}},
 		{"trailing text: indent does not make code", "\tx := 1 //  " + ws(25) + ".\n", []sentence{{1, 1, 25}}},
 		{"trailing text: tab does not make code", "\tx := 1 //\t" + ws(25) + ".\n", []sentence{{1, 1, 25}}},
 		{"trailing text: indented continuation counts", "\tx := 1 // " + ws(10) + "\n\t" + strings.Repeat(" ", 7) + "//  " + ws(15) + ".\n", []sentence{{1, 2, 25}}},
