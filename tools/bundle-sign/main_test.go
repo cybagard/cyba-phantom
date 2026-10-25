@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,6 +38,23 @@ func runFail(t *testing.T, want int, err error, args ...string) {
 	}
 }
 
+// tempDir makes a private directory below the package directory. The key
+// directory rule needs that each parent has no group or other write bit.
+// t.TempDir is below /tmp, and /tmp has the sticky bit and mode 1777.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", "tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(abs) })
+	return abs
+}
+
 func write(t *testing.T, path, text string, mode os.FileMode) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), mode); err != nil {
@@ -54,7 +72,7 @@ func (failWriter) Write([]byte) (int, error) { return 0, errors.New("raw write e
 
 // T-S-20: keygen and sign make a signature file that VerifySig accepts.
 func TestTS20RoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
 	write(t, p("a.cbnd"), "archive bytes", 0o644)
 	var trust []string
@@ -100,9 +118,9 @@ func TestTS20RoundTrip(t *testing.T) {
 }
 
 // T-S-20: if keygen cannot print the public line, it fails with errWrite and
-// leaves no key file.
-func TestTS20KeygenRemovesKeyOnPrintFailure(t *testing.T) {
-	key := filepath.Join(t.TempDir(), "k.key")
+// makes no key file.
+func TestTS20KeygenMakesNoKeyOnPrintFailure(t *testing.T) {
+	key := filepath.Join(tempDir(t), "k.key")
 	var errOut bytes.Buffer
 	if code := run([]string{"keygen", "k1", key}, failWriter{}, &errOut); code != 1 || errOut.String() != errWrite.Error()+"\n" {
 		t.Errorf("code %d, stderr %q", code, errOut.String())
@@ -117,23 +135,66 @@ const helperEnv = "BUNDLE_SIGN_TEST_MAIN"
 // TestMainHelper runs the real main in a child process. It does nothing in a
 // normal test run. The arguments of main follow "--" in os.Args.
 func TestMainHelper(t *testing.T) {
-	if os.Getenv(helperEnv) != "1" {
-		t.Skip("helper of TestTS20BrokenPipe")
+	i := slices.Index(os.Args, "--")
+	if os.Getenv(helperEnv) != "1" || i < 0 {
+		t.Skip("helper of the child-process tests")
 	}
-	for i, a := range os.Args {
-		if a == "--" {
-			os.Args = append([]string{os.Args[0]}, os.Args[i+1:]...)
-			break
-		}
-	}
+	os.Args = append([]string{os.Args[0]}, os.Args[i+1:]...)
 	main()
 }
 
+// childCode runs the real main in a child process and returns the exit code.
+func childCode(t *testing.T, cmd *exec.Cmd) int {
+	t.Helper()
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	switch err := cmd.Run().(type) {
+	case nil:
+		return 0
+	case *exec.ExitError:
+		return err.ExitCode()
+	default:
+		t.Fatal(err)
+		return -1
+	}
+}
+
+// helperCmd makes the command that runs main with args in a child process.
+func helperCmd(args ...string) *exec.Cmd {
+	return exec.Command(os.Args[0], append([]string{"-test.run=^TestMainHelper$", "--"}, args...)...)
+}
+
+// T-S-20: the helper variable in the environment does not break a test run. A
+// child test binary with the variable and with no "--" exits 0.
+func TestTS20HelperSkipsWithoutDashes(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^(TestMainHelper|TestTS20HelperSkipsAfter)$")
+	if code := childCode(t, cmd); code != 0 {
+		t.Errorf("exit code %d, want 0", code)
+	}
+}
+
+// TestTS20HelperSkipsAfter runs in the child of the test above.
+func TestTS20HelperSkipsAfter(t *testing.T) {}
+
+// T-S-20: keygen with the null device as output fails with errWrite and makes
+// no key file. The Go runtime opens the null device on a closed stdout.
+func TestTS20KeygenNullOutput(t *testing.T) {
+	key := filepath.Join(tempDir(t), "k.key")
+	var errOut bytes.Buffer
+	cmd := helperCmd("keygen", "k1", key)
+	cmd.Stdout, cmd.Stderr = nil, &errOut
+	if code := childCode(t, cmd); code != 1 || errOut.String() != errWrite.Error()+"\n" {
+		t.Errorf("code %d, stderr %q", code, errOut.String())
+	}
+	if _, err := os.Stat(key); err == nil {
+		t.Error("key file made with a null output")
+	}
+}
+
 // T-S-20: a broken stdout pipe gives the fixed write error and exit code 1, not
-// the SIGPIPE exit. keygen removes the key file. This runs the real main in a
+// the SIGPIPE exit. keygen makes no key file. This runs the real main in a
 // child process with the read end of its stdout pipe closed.
 func TestTS20BrokenPipe(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
 	write(t, p("a.cbnd"), "archive", 0o644)
 	trust := runOK(t, "keygen", "k1", p("k.key"))
@@ -149,17 +210,10 @@ func TestTS20BrokenPipe(t *testing.T) {
 		}
 		r.Close()
 		var errOut bytes.Buffer
-		cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestMainHelper$", "--"}, args...)...)
-		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		cmd := helperCmd(args...)
 		cmd.Stdout, cmd.Stderr = w, &errOut
-		err = cmd.Run()
+		code := childCode(t, cmd)
 		w.Close()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatal(err)
-		}
 		if code != 1 || errOut.String() != errWrite.Error()+"\n" {
 			t.Errorf("%s: code %d, stderr %q; want 1, %q", name, code, errOut.String(), errWrite.Error()+"\n")
 		}
@@ -172,7 +226,7 @@ func TestTS20BrokenPipe(t *testing.T) {
 // T-S-20: sign refuses an archive of more than 8 MiB. It makes no signature
 // file.
 func TestTS20SignArchiveCap(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
 	runOK(t, "keygen", "k1", p("k.key"))
 	write(t, p("max.cbnd"), strings.Repeat("a", maxFile), 0o644)
@@ -188,7 +242,7 @@ func TestTS20SignArchiveCap(t *testing.T) {
 // second link. It makes no signature file. Each case starts from a valid key
 // file, so a case fails on its own rule. A valid key file in mode 0600 signs.
 func TestTS20KeyFileIsChecked(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
 	must := func(err error) {
 		t.Helper()
@@ -224,14 +278,14 @@ func TestTS20KeyFileIsChecked(t *testing.T) {
 // This holds for each command, with a key file in mode 0600 and in mode 0640.
 // The output of keygen does not hold the private key.
 func TestTS20KeyMarkerNeverAppears(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
 	seed := []byte("marker-seed-0123456789-abcdefgh!")
 	secrets := []string{string(seed), b64.EncodeToString(seed), b64.EncodeToString(ed25519.NewKeyFromSeed(seed))}
 	write(t, p("a.cbnd"), "archive", 0o644)
 	write(t, p("one.sig"), "k1 "+strings.Repeat("A", 86)+"==\n", 0o644)
 	for i, mode := range []os.FileMode{0o600, 0o640} {
-		write(t, p("m.key"), b64.EncodeToString(seed)+"\n", mode)
+		write(t, p("m.key"), "k1 "+b64.EncodeToString(seed)+"\n", mode)
 		o := func(n string) string { return p(string(rune('a'+i)) + n) }
 		var all string
 		for _, args := range [][]string{
@@ -260,7 +314,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 // does not fit gives an error and leaves no output file. So does a symlink
 // below traps/, or an archive that ReadArchive refuses.
 func TestTS20Pack(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := filepath.Join(dir, "src")
 	deep := filepath.Join(src, "traps", strings.Repeat("d", 30), strings.Repeat("e", 30), strings.Repeat("f", 30))
 	if err := os.MkdirAll(deep, 0o755); err != nil {
@@ -282,6 +336,7 @@ func TestTS20Pack(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bad, "traps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	write(t, filepath.Join(bad, "manifest.json"), "{}", 0o644)
 	write(t, filepath.Join(bad, "traps", strings.Repeat("n", 101)), "x", 0o644)
 	runFail(t, 1, errName, "pack", bad, filepath.Join(dir, "bad.cbnd"))
 	if _, err := os.Stat(filepath.Join(dir, "bad.cbnd")); err == nil {
@@ -303,12 +358,171 @@ func TestTS20Pack(t *testing.T) {
 	if err := os.MkdirAll(refused, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	write(t, filepath.Join(refused, "manifest.json"), "{}", 0o644)
 	write(t, filepath.Join(refused, "notallowed.bin"), "x", 0o644)
 	for name, srcDir := range map[string]string{"symlink": linked, "refused by ReadArchive": refused} {
 		outFile := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".cbnd")
 		runFail(t, 1, errPack, "pack", srcDir, outFile)
 		if _, err := os.Stat(outFile); err == nil {
 			t.Errorf("%s: output file made", name)
+		}
+	}
+}
+
+func noFile(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); err == nil {
+		t.Errorf("file %s exists", path)
+	}
+}
+
+// T-S-20: sign refuses a key_id that is not the key ID in the key file. It
+// refuses a key file of another form. It makes no signature file.
+func TestTS20SignChecksKeyFileForm(t *testing.T) {
+	dir := tempDir(t)
+	p := func(n string) string { return filepath.Join(dir, n) }
+	write(t, p("a.cbnd"), "archive", 0o644)
+	runOK(t, "keygen", "k1", p("k1.key"))
+	runOK(t, "keygen", "k2", p("k2.key"))
+	runFail(t, 1, errKeyID, "sign", "k1", p("k2.key"), p("a.cbnd"), p("m.sig"))
+	noFile(t, p("m.sig"))
+	valid, _ := os.ReadFile(p("k1.key"))
+	id, seed, _ := strings.Cut(strings.TrimSuffix(string(valid), "\n"), " ")
+	// Each text is a wrong form. In order: old form, extra space, trailing
+	// space, CR, no newline, second line, short seed.
+	for _, text := range []string{
+		seed + "\n",
+		id + "  " + seed + "\n",
+		id + " " + seed + " \n",
+		id + " " + seed + "\r\n",
+		id + " " + seed,
+		id + " " + seed + "\n" + id + " " + seed + "\n",
+		id + " " + seed[:40] + "\n",
+	} {
+		write(t, p("f.key"), text, 0o600)
+		runFail(t, 1, errKey, "sign", "k1", p("f.key"), p("a.cbnd"), p("m.sig"))
+		noFile(t, p("m.sig"))
+		if err := os.Remove(p("f.key")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// T-S-20: keygen and sign refuse a key file in a directory with a group or
+// other write bit. They refuse it below such a directory. They refuse it
+// through a symlink to such a directory.
+func TestTS20KeyDirIsChecked(t *testing.T) {
+	dir := tempDir(t)
+	p := func(n string) string { return filepath.Join(dir, n) }
+	write(t, p("a.cbnd"), "archive", 0o644)
+	runOK(t, "keygen", "k1", p("good.key"))
+	valid, _ := os.ReadFile(p("good.key"))
+	for _, mode := range []os.FileMode{0o777, 0o757, 0o775} {
+		bad := p("bad")
+		if err := os.Mkdir(bad, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inner := filepath.Join(bad, "inner")
+		if err := os.Mkdir(inner, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(bad, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(bad, p("link")); err != nil {
+			t.Fatal(err)
+		}
+		for name, key := range map[string]string{
+			"directory": filepath.Join(bad, "k.key"), "parent": filepath.Join(inner, "k.key"),
+			"symlink": p("link/k.key"),
+		} {
+			write(t, key, string(valid), 0o600)
+			runFail(t, 1, errKey, "sign", "k1", key, p("a.cbnd"), p("m.sig"))
+			noFile(t, p("m.sig"))
+			if err := os.Remove(key); err != nil {
+				t.Fatal(err)
+			}
+			var errOut bytes.Buffer
+			if code := run([]string{"keygen", "k1", key}, &bytes.Buffer{}, &errOut); code != 1 || errOut.String() != errKey.Error()+"\n" {
+				t.Errorf("%s, mode %o: keygen code %d, stderr %q", name, mode, code, errOut.String())
+			}
+			noFile(t, key)
+		}
+		if err := os.Chmod(bad, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(p("link")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(bad); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// T-S-20: pack refuses a directory with no regular file manifest.json at its
+// top level.
+func TestTS20PackNeedsManifest(t *testing.T) {
+	dir := tempDir(t)
+	empty := filepath.Join(dir, "empty")
+	nested := filepath.Join(dir, "nested")
+	// ReadArchive accepts traps/manifest.json, so only the manifest check
+	// refuses that directory.
+	traps := filepath.Join(dir, "traps")
+	for _, d := range []string{empty, filepath.Join(nested, "x"), filepath.Join(traps, "traps")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(nested, "x", "manifest.json"), "{}", 0o644)
+	write(t, filepath.Join(traps, "traps", "manifest.json"), "{}", 0o644)
+	for _, src := range []string{empty, nested, traps} {
+		out := filepath.Join(dir, filepath.Base(src)+".cbnd")
+		runFail(t, 1, errPack, "pack", src, out)
+		noFile(t, out)
+	}
+}
+
+// swap replaces a seam for one test.
+func swap[T any](t *testing.T, v *T, to T) {
+	old := *v
+	t.Cleanup(func() { *v = old })
+	*v = to
+}
+
+// T-S-20: after a failed write or sync, writeNew leaves an empty file at the
+// path and gives errWrite. The directory is synced after the file.
+func TestTS20WriteNewFailure(t *testing.T) {
+	dir := tempDir(t)
+	failure := errors.New("injected")
+	path := func(n string) string { return filepath.Join(dir, n) }
+	var synced []string
+	swap(t, &syncDir, func(f *os.File) error { synced = append(synced, f.Name()); return nil })
+	if err := writeNew(path("ok"), []byte("data"), 0o600); err != nil || len(synced) != 1 || synced[0] != dir {
+		t.Errorf("success: error %v, directory syncs %v", err, synced)
+	}
+	t.Run("directory sync", func(t *testing.T) {
+		swap(t, &syncDir, func(*os.File) error { return failure })
+		if err := writeNew(path("dirsync"), []byte("data"), 0o600); err != errWrite {
+			t.Errorf("error %v", err)
+		}
+	})
+	// The write stores the data and then fails, so the file has data to cut.
+	t.Run("write", func(t *testing.T) {
+		swap(t, &writeTo, func(f *os.File, b []byte) (int, error) { f.Write(b); return 0, failure })
+		if err := writeNew(path("write"), []byte("data"), 0o600); err != errWrite {
+			t.Errorf("error %v", err)
+		}
+	})
+	t.Run("file sync", func(t *testing.T) {
+		swap(t, &syncOne, func(*os.File) error { return failure })
+		if err := writeNew(path("sync"), []byte("data"), 0o600); err != errWrite {
+			t.Errorf("error %v", err)
+		}
+	})
+	for _, n := range []string{"write", "sync"} {
+		if fi, err := os.Stat(path(n)); err != nil || fi.Size() != 0 {
+			t.Errorf("%s: file %v, error %v; want size 0", n, fi, err)
 		}
 	}
 }
