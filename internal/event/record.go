@@ -190,6 +190,12 @@ func ParseDetail(text string) (Detail, error) {
 		if err != nil || tok.Kind() != '"' {
 			return nil, bad
 		}
+		// strict sets AllowDuplicateNames(false): the decoder refuses a
+		// repeated name. When the map has 8 members, a new name token starts
+		// a ninth member. Stop here, before the decoder reads more members.
+		if len(d) == maxDetailMembers {
+			return nil, errDetailMembers
+		}
 		name := tok.String() // the next read makes the token invalid
 		if tok, err = dec.ReadToken(); err != nil {
 			return nil, bad
