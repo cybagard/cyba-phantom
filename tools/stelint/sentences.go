@@ -117,8 +117,10 @@ func isASTDirective(lit string) bool {
 // continues it. This holds when the line is directly after the trailing
 // comment and starts at the same column. So does each next such line. Each
 // "/* */" comment is a group of its own. A directive ends a group. A comment
-// that isDirective does not know is its own group if it is only a go/ast
-// directive token. With more text, it is ordinary comment text.
+// that isDirective does not know, and that is only a go/ast directive token,
+// adds no words. On a line of its own, it does not end the group. The next
+// "//" line is adjacent to the line before it. After code, the code ends the
+// group. With more text, the comment is ordinary comment text.
 // scanErr is true when go/scanner reported an error.
 func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 	lines := strings.Split(string(src), "\n")
@@ -158,13 +160,18 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 			continue
 		}
 		tl := textLine{strings.TrimSuffix(lit[2:], "\r"), p.Line}
-		if isASTDirective(lit) {
-			flush()
-			groups = append(groups, []textLine{tl})
-			continue
-		}
 		before := lines[p.Line-1][:min(p.Column-1, len(lines[p.Line-1]))]
 		col := width(before)
+		if isASTDirective(lit) {
+			// The token adds no words. After code, the code ends the text.
+			// On a line of its own, the text goes on past the token.
+			if strings.TrimSpace(before) == "" && cur != nil && prevEnd == p.Line-1 && (!trail || col == trailCol) {
+				prevEnd = p.Line
+			} else {
+				flush()
+			}
+			continue
+		}
 		switch {
 		case strings.TrimSpace(before) != "":
 			flush()
