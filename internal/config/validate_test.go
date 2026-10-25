@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 type row struct {
@@ -323,8 +326,8 @@ func TestTU10_URL(t *testing.T) {
 	}{
 		{"https", "https://acme.example/dir", []string{"https"}, ""},
 		{"port", "https://acme.example:14000/dir", []string{"https"}, ""},
-		{"ipv4", "https://192.0.2.1/dir", []string{"https"}, ""},
-		{"ipv6", "https://[2001:db8::1]/dir", []string{"https"}, ""},
+		{"ipv4", "https://8.8.8.8/dir", []string{"https"}, ""},
+		{"ipv6", "https://[2606:4700::1111]/dir", []string{"https"}, ""},
 		{"caller schemes", "tcp://h:514", []string{"udp", "tcp"}, ""},
 		{"tcp not allowed", "tcp://h:443", []string{"https"}, "scheme"},
 		{"http not allowed", "http://h/", []string{"https"}, "scheme"},
@@ -341,16 +344,16 @@ func TestTU10_URL(t *testing.T) {
 		{"empty user", "https://@h/", []string{"https"}, "user information"},
 		{"fragment", "https://h/#x", []string{"https"}, "fragment"},
 		{"empty fragment", "https://h/#", []string{"https"}, "fragment"},
-		{"link-local v4", "https://169.254.169.254/", []string{"https"}, "link-local"},
-		{"link-local v6", "https://[fe80::1]/", []string{"https"}, "link-local"},
-		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, "link-local"},
-		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, "link-local"},
-		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, ""},
-		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, "link-local"},
+		{"link-local v4", "https://169.254.169.254/", []string{"https"}, "egress rule"},
+		{"link-local v6", "https://[fe80::1]/", []string{"https"}, "egress rule"},
+		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, "egress rule"},
+		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, "egress rule"},
+		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, "egress rule"},
+		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, "egress rule"},
 		{"zone", "https://[fe80::1%25eth0]/", []string{"https"}, "zone"},
 		{"zone on global", "https://[2001:db8::1%25eth0]/", []string{"https"}, "zone"},
-		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, "unspecified"},
-		{"unspecified v6", "https://[::]/", []string{"https"}, "unspecified"},
+		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, "egress rule"},
+		{"unspecified v6", "https://[::]/", []string{"https"}, "egress rule"},
 		{"port 0", "https://h:0/", []string{"https"}, "port"},
 		{"port 65536", "https://h:65536/", []string{"https"}, "port"},
 		{"port leading zero", "https://example.com:0443/", []string{"https"}, "decimal"},
@@ -413,13 +416,14 @@ func TestTU10_CA(t *testing.T) {
 		{"letsencrypt", "letsencrypt", ""},
 		{"staging", "letsencrypt-staging", ""},
 		{"https", "https://ca.example/dir", ""},
-		{"https port", "https://127.0.0.1:14000/dir", ""},
+		{"https port", "https://8.8.8.8:14000/dir", ""},
+		{"loopback", "https://127.0.0.1:14000/dir", "egress rule"},
 		{"tcp", "tcp://ca.example:443", "scheme"},
 		{"http", "http://ca.example/dir", "scheme"},
 		{"other name", "zerossl", "scheme"},
 		{"case", "Letsencrypt", "scheme"},
 		{"empty", "", "scheme"},
-		{"link-local", "https://[fe81::]/dir", "link-local"},
+		{"link-local", "https://[fe81::]/dir", "egress rule"},
 		{"user", "https://u:p@ca.example/dir", "user information"},
 		{"port leading zero", "https://ca.example:0443/dir", "decimal"},
 		{"number host", "https://2852039166/dir", "number"},
@@ -441,7 +445,9 @@ func TestTU10_AllowList(t *testing.T) {
 		{"staging", "acme:\n  ca: letsencrypt-staging\n", []Endpoint{{"https", "acme-staging-v02.api.letsencrypt.org", "443"}}},
 		{"url", "acme:\n  ca: https://ca.example:14000/dir\n", []Endpoint{{"https", "ca.example", "14000"}}},
 		{"url default port", "acme:\n  ca: https://ca.example/dir\n", []Endpoint{{"https", "ca.example", "443"}}},
-		{"ipv6", "acme:\n  ca: \"https://[2001:db8::1]:8443/\"\n", []Endpoint{{"https", "2001:db8::1", "8443"}}},
+		{"ipv6", "acme:\n  ca: \"https://[2606:4700::1111]:8443/\"\n", []Endpoint{{"https", "2606:4700::1111", "8443"}}},
+		{"ipv6 long form", "acme:\n  ca: \"https://[2001:4860:0::8888]/\"\n", []Endpoint{{"https", "2001:4860::8888", "443"}}},
+		{"ipv4-mapped", "acme:\n  ca: \"https://[::ffff:8.8.8.8]/\"\n", []Endpoint{{"https", "8.8.8.8", "443"}}},
 		{"upper case host", "acme:\n  ca: https://CA.Example:14000/dir\n", []Endpoint{{"https", "ca.example", "14000"}}},
 	}
 	for _, r := range rows {
@@ -999,6 +1005,32 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 		{"checkpoints", s + "checkpoints/x.cbnd", nil, "checkpoints directory"},
 		{"in checkpoints", s + "checkpoints/a/x.cbnd", nil, "checkpoints directory"},
 		{"store.path", s + "b2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b2/x.cbnd"}, "must not be store.path"},
+		{"file name .cbnd alone", s + "bundle/.cbnd", nil, "character before .cbnd"},
+		{"file name one character", s + "bundle/a.cbnd", nil, ""},
+		{"keys in other case", s + "Keys/x.cbnd", nil, "keys directory"},
+		{"in checkpoints in other case", s + "CHECKPOINTS/a/x.cbnd", nil, "checkpoints directory"},
+		{"checkpoint.state", s + "checkpoint.state/x.cbnd", nil, "be in checkpoint.state"},
+		{"in checkpoint.state", s + "checkpoint.state/a/x.cbnd", nil, "be in checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp/x.cbnd", nil, "be in checkpoint.state.tmp"},
+		{"writer.stop", s + "writer.stop/x.cbnd", nil, "be in writer.stop"},
+		{"writer.stop in other case", s + "WRITER.STOP/x.cbnd", nil, "be in writer.stop"},
+		{"in checkpoint.state in other case", s + "Checkpoint.State/a/x.cbnd", nil, "be in checkpoint.state"},
+		{"name that starts like writer.stop", s + "writer.stop2/x.cbnd", nil, ""},
+		{"tlog.dir in other case", s + "TLOG/x.cbnd", nil, "in or above tlog.dir"},
+		{"acme.cache_dir in other case", s + "Certs/x.cbnd", nil, "in or above acme.cache_dir"},
+		{"store.path in other case", s + "B/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b/x.cbnd"}, "must not be store.path"},
+		{"directory is store.path", s + "db/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path in other case", s + "DB/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path", s + "db/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path-wal", s + "db-wal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path-shm", s + "db-shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory is store.path-journal in other case", s + "DB-Journal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"directory like store.path", s + "db2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, ""},
+		{"checkpoint.state.tmp in other case", s + "Checkpoint.State.TMP/x.cbnd", nil, "be in checkpoint.state.tmp"},
+		{"directory is store.path-wal in other case", s + "DB-WAL/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path-shm in other case", s + "Db-Shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"in store.path in other case", s + "DB/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
+		{"tlog.dir with Kelvin sign", s + "k/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "K"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1234,9 +1266,9 @@ func TestTS11_Lists(t *testing.T) {
 		{"webhook hmac 32 bytes", snk(hookItem), []string{"ALERT_HMAC=" + strings.Repeat("h", 32)}, ""},
 		{"syslog udp", snk(sysItem), nil, ""},
 		{"syslog tcp", snk(sys("tcp://127.0.0.1:514")), nil, ""},
-		{"syslog tls", snk(sys("tls://[2001:db8::1]:6514")), nil, ""},
+		{"syslog tls", snk(sys("tls://[2606:4700::1111]:6514")), nil, ""},
 		{"syslog tls host name", snk(sys("tls://log.example:6514")), nil, ""},
-		{"syslog tls loopback", snk(sys("tls://127.0.0.1:6514")), nil, ""},
+		{"syslog tls loopback", snk(sys("tls://127.0.0.1:6514")), nil, "alerts.sinks[0].addr"},
 		{"syslog udp 127.1.2.3", snk(sys("udp://127.1.2.3:514")), nil, ""},
 		{"syslog tcp 127.1.2.3", snk(sys("tcp://127.1.2.3:514")), nil, ""},
 		{"syslog udp ::1", snk(sys("udp://[::1]:514")), nil, ""},
@@ -1521,6 +1553,63 @@ func TestTS11_URLKeys(t *testing.T) {
 	}
 }
 
+// egressLiterals are IP-literal hosts that the egress rule refuses (T-S-11).
+var egressLiterals = []string{
+	"127.0.0.1", "10.0.0.1", "100.100.100.200", "169.254.169.254", "224.0.0.1", "[fd00:ec2::254]",
+	"[64:ff9b::a9fe:a9fe]", "[::169.254.169.254]", "[::ffff:10.0.0.1]", "[fec0::1]", "[2001:db8::1]",
+}
+
+// egressKeyFiles returns one file for each key that holds an endpoint.
+// The key has host. The first field is the key. A syslog address uses tls.
+func egressKeyFiles(host string) [][2]string {
+	sys := func(addr string) string { return `{type: syslog, addr: "` + addr + `"}` }
+	smtpHost := func(h string) string { return `{type: smtp, host: "` + h + `", from: a@b.example, to: [c@d.example]}` }
+	return [][2]string{
+		{"acme.ca", "acme:\n  email: sec@example.com\n  ca: \"https://" + host + "/d\"\n" + acmeNames + tlogLine},
+		{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"https://" + host + "/b\"\n"},
+		{"tlog.publish[0].url", pub(`{type: https-put, url: "https://` + host + `/p", token_env: CKPT_TOKEN}`)},
+		{"alerts.sinks[0].url", snk(`{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC}`)},
+		{"alerts.sinks[0].addr", snk(sys("tls://" + host + ":6514"))},
+		{"alerts.sinks[0].host", snk(smtpHost("smtp://" + host + ":25"))},
+		{"alerts.sinks[0].host", snk(smtpHost("smtps://" + host + ":465"))},
+	}
+}
+
+// TestTS11_EgressLiterals checks that each literal in egressLiterals fails
+// for each endpoint key, and that a global literal passes. The error names the
+// key and gives the fixed rule (T-S-11).
+func TestTS11_EgressLiterals(t *testing.T) {
+	for _, lit := range egressLiterals {
+		for _, r := range egressKeyFiles(lit) {
+			_, err := loadProd(t, r[1], listEnv...)
+			if err == nil || !strings.Contains(err.Error(), "config: "+r[0]+" at ") || !strings.Contains(err.Error(), "egress rule") {
+				t.Errorf("%s %s: got %v", r[0], lit, err)
+			}
+		}
+	}
+	for _, lit := range []string{"8.8.8.8", "[2606:4700::1111]"} {
+		for _, r := range egressKeyFiles(lit) {
+			if _, err := loadProd(t, r[1], listEnv...); err != nil {
+				t.Errorf("%s %s: got %v", r[0], lit, err)
+			}
+		}
+	}
+	for _, addr := range []string{"udp://127.0.0.1:514", "tcp://127.0.0.1:514", "udp://[::1]:514", "tcp://[::1]:514"} {
+		if _, err := loadProd(t, snk(`{type: syslog, addr: "`+addr+`"}`), listEnv...); err != nil {
+			t.Errorf("%s: got %v", addr, err)
+		}
+	}
+}
+
+// TestTS11_SystemNetRefusesLoopback checks that the Dialer of SystemNet
+// refuses a dial to a loopback address (T-S-21).
+func TestTS11_SystemNetRefusesLoopback(t *testing.T) {
+	_, err := SystemNet().Dialer.DialContext(context.Background(), "tcp", "127.0.0.1:9")
+	if !errors.Is(err, egress.ErrRefused) {
+		t.Errorf("got %v, want egress.ErrRefused", err)
+	}
+}
+
 // TestTS11_SinkEndpoints checks that each sink type of the alerts.sinks schema
 // gives its endpoint in AllowList. A type with no fixture or no endpoint
 // fails (C4, T-S-11).
@@ -1573,7 +1662,7 @@ func TestTS08_AllowList(t *testing.T) {
 		"    - " + `{type: webhook, url: "https://ckpt.example:443/hook", hmac_secret_env: ALERT_HMAC}` + "\n" +
 		"    - " + sysItem + "\n" +
 		"    - " + `{type: syslog, addr: "tcp://[::1]:514"}` + "\n" +
-		"    - " + `{type: syslog, addr: "tls://[2001:DB8::1]:6514"}` + "\n" +
+		"    - " + `{type: syslog, addr: "tls://[2606:4700::AAAA]:6514"}` + "\n" +
 		"    - " + mailItem + "\n" +
 		"    - " + `{type: smtp, host: "smtp://MAIL.example:587", from: a@b.example, to: [c@d.example]}` + "\n" +
 		"    - " + `{type: smtp, host: "smtps://mail.example:465", from: a@b.example, to: [c@d.example]}` + "\n" +
@@ -1584,7 +1673,8 @@ func TestTS08_AllowList(t *testing.T) {
 	}
 	want := []Endpoint{
 		{"https", "ca.example", "14000"}, {"https", "ckpt.example", "443"},
-		{"udp", "127.0.0.1", "514"}, {"tcp", "::1", "514"}, {"tls", "2001:db8::1", "6514"}, // A loopback sink is in the list (04 section 3).
+		{"udp", "127.0.0.1", "514"}, {"tcp", "::1", "514"}, {"tls", "2606:4700::aaaa", "6514"},
+		// A loopback sink is in the list (04 section 3).
 		{"smtp", "mail.example", "587"}, {"smtps", "mail.example", "465"}, {"https", "hook.example", "443"},
 	}
 	if got := c.AllowList(); !reflect.DeepEqual(got, want) {

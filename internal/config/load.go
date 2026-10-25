@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 type kind int
@@ -140,9 +142,10 @@ type Net struct {
 	Resolver Resolver
 }
 
-// SystemNet returns the Net with the system dialer and resolver.
+// SystemNet returns the Net with the egress dialer and the system resolver.
+// The dialer has no timeout.
 func SystemNet() Net {
-	return Net{Dialer: &net.Dialer{}, Resolver: net.DefaultResolver}
+	return Net{Dialer: egress.Dialer(0), Resolver: net.DefaultResolver}
 }
 
 // Load is LoadWith with the system dialer and resolver.

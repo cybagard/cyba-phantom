@@ -11,13 +11,6 @@ import (
 	"testing"
 )
 
-const (
-	keyRule       = "the key must be 1 or more characters of a-z, 0-9 and _ only"
-	scalarTagRule = "the tag of a scalar must be str, int, bool, float or null"
-	mapTagRule    = "the tag of a mapping must be map"
-	seqTagRule    = "the tag of a sequence must be seq"
-)
-
 func TestTS10_Read(t *testing.T) {
 	type row struct {
 		name     string
@@ -82,6 +75,9 @@ func TestTS10_Read(t *testing.T) {
 		{"LiteralEnv", "foo: ${HOME}", false, 0, 0, "", "", 94, 0},
 		{"ParseErrorLine", "a: 1\nb: [\n", false, 0, 0, "line 2", "", 118, 0},
 		{"UnknownAnchor", "a: *marker_XYZ", false, 0, 0, "invalid YAML", "", 98, 0},
+		{"KeyDigits", "1: x", false, 0, 0, "a key must be a string, not a number", "(root)", 98, 0},
+		{"PlainDate", "a: 2001-12-14", false, 0, 0, plainTagRule, "\"a\"", 112, 0},
+		{"TaggedDate", "a: !!timestamp 2001-12-14", false, 0, 0, scalarTagRule, "\"a\"", 112, 0},
 		{"ValidLarge", padded(64*1024 - 3), false, 0, 0, "", "", 132, 0},
 	}
 

@@ -2,7 +2,8 @@
 //
 // The sensor reads the config one time at start, with Load. The package has
 // no reload function. SIGHUP and the reload request reload the bundle, not
-// the config. A config change needs a restart. The package is unix only.
+// the config. A config change needs a restart. The package is unix only: on
+// another system, unix_only.go makes the build fail with a clear name.
 package config
 
 import (
@@ -20,6 +21,15 @@ import (
 const (
 	maxConfigSize = 64 * 1024
 	maxDepth      = 8
+)
+
+// The fixed texts of the key rule and the tag rules. The tests use them.
+const (
+	keyRule       = "the key must be 1 or more characters of a-z, 0-9 and _ only"
+	scalarTagRule = "the tag of a scalar must be str, int, bool, float or null"
+	plainTagRule  = "the value resolves to a tag that is not str, int, bool, float or null"
+	mapTagRule    = "the tag of a mapping must be map"
+	seqTagRule    = "the tag of a sequence must be seq"
 )
 
 // Leaf represents a scalar value in the configuration.
@@ -171,7 +181,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), n.Line, n.Column, tagRuleText(n.Kind))
+		return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), n.Line, n.Column, tagRuleText(n.Kind, n.Style&yaml.TaggedStyle != 0))
 	}
 
 	line := n.Line
@@ -196,11 +206,11 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 			}
 
 			if !isValidKey(key) {
-				return fmt.Errorf("config: %s: line %d column %d: the key must be 1 or more characters of a-z, 0-9 and _ only", formatPath(path), keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), keyNode.Line, keyNode.Column, keyRule)
 			}
 
 			if keyNode.Tag != "" && keyNode.Tag != "!!str" {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key tag is rejected", formatPath(path), keyNode.Line, keyNode.Column)
+				return fmt.Errorf("config: %s: line %d column %d: mapping key tag is rejected: a key must be a string, not a number, bool or null", formatPath(path), keyNode.Line, keyNode.Column)
 			}
 
 			if keyNode.Anchor != "" {
@@ -263,14 +273,19 @@ func isCoreTag(tag string, kind yaml.Kind) bool {
 }
 
 // tagRuleText gives the fixed text of the tag rule for a node kind.
-func tagRuleText(kind yaml.Kind) string {
-	switch kind {
-	case yaml.MappingNode:
-		return "the tag of a mapping must be map"
-	case yaml.SequenceNode:
-		return "the tag of a sequence must be seq"
+// The kinds here and in isCoreTag go together: change both.
+// written is true if the file has the tag.
+func tagRuleText(kind yaml.Kind, written bool) string {
+	switch {
+	case kind == yaml.MappingNode:
+		return mapTagRule
+	case kind == yaml.SequenceNode:
+		return seqTagRule
+	case !written:
+		return plainTagRule // For example, a plain date resolves to timestamp.
 	default:
-		return "the tag of a scalar must be str, int, bool, float or null"
+		// The parser sends no document, alias or zero-kind node here.
+		return scalarTagRule
 	}
 }
 

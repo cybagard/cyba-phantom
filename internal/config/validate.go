@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -338,14 +340,11 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		}
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		a0 := a.Unmap()
 		switch {
 		case a.Zone() != "":
 			return nil, "the URL host must not have a zone"
-		case a0.IsLinkLocalUnicast():
-			return nil, "the URL host must not be link-local"
-		case a0.IsUnspecified():
-			return nil, "the URL host must not be unspecified"
+		case !egress.Permitted(a):
+			return nil, "the URL host is an IP address that the egress rule refuses"
 		}
 	} else if !hostname.MatchString(host) {
 		return nil, "the URL host is not an IP address or a host name"
@@ -397,8 +396,9 @@ func endpoint(scheme, host, port string) Endpoint {
 }
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
-// in the exact case. The host is not empty. An IP literal has no zone and is not unspecified
-// or link-local. It returns a fixed detail on an error.
+// in the exact case. The host is not empty. An IP literal has no zone and
+// passes the egress rule, except for udp and tcp. It returns a fixed detail
+// on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -412,10 +412,10 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 		return Endpoint{}, "the host must not be empty"
 	case hp.addr.Zone() != "":
 		return Endpoint{}, "the host must not have a zone"
-	case hp.addr.Unmap().IsUnspecified():
-		return Endpoint{}, "the host must not be unspecified"
-	case hp.addr.Unmap().IsLinkLocalUnicast():
-		return Endpoint{}, "the host must not be link-local"
+	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
+		// A name passes here. checkSyslogAddr checks udp and tcp.
+	case !egress.Permitted(hp.addr):
+		return Endpoint{}, "the host is an IP address that the egress rule refuses"
 	}
 	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
 }
@@ -645,7 +645,20 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 	return ""
 }
 
+// foldASCII changes the letters A-Z in s to a-z. No other byte changes, so a
+// non-ASCII letter never matches an ASCII letter. This is not strings.ToLower.
+func foldASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
 // checkBundlePath applies the rules of checkStorePath. Then it checks that the file name ends in .cbnd (SEC-23).
+// The keys, checkpoints and state-file compares fold A-Z with foldASCII.
 // It also checks that the directory is not the state directory and is not in the keys or checkpoints directory.
 // These new rules compare the path text only. checkStorePath resolves symlinks to check the state directory.
 // checkStorePath requires a path below the state directory, so the state directory is the only path above those two directories.
@@ -657,30 +670,54 @@ func checkBundlePath(l *loader, raw string) string {
 	if !strings.HasSuffix(raw, ".cbnd") {
 		return "the file name must end in .cbnd"
 	}
+	if filepath.Base(raw) == ".cbnd" {
+		return "the file name must have a character before .cbnd"
+	}
 	dir := filepath.Dir(raw)
 	if dir == l.stateRoot {
 		return "the directory must not be the state directory"
 	}
+	dir = foldASCII(dir)
 	for _, d := range []string{"keys", "checkpoints"} {
-		if inDir(dir, filepath.Join(l.stateRoot, d)) {
+		if inDir(dir, foldASCII(filepath.Join(l.stateRoot, d))) {
 			return "the directory must not be in the " + d + " directory"
+		}
+	}
+	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
+		if inDir(dir, foldASCII(filepath.Join(l.stateRoot, f))) {
+			return "the directory must not be or be in " + f
 		}
 	}
 	return ""
 }
 
-// bundleConflict returns a detail if the directory of the bundle.path value p is in or above
-// tlog.dir or acme.cache_dir, or if p is store.path (SEC-23). It compares the path text only.
+// bundleConflict checks p, a bundle.path value. It returns a detail if the
+// directory of p is in or above tlog.dir or acme.cache_dir. It also returns
+// a detail if the directory is store.path, a SQLite side file of it, or in one.
+// It returns a detail if p is store.path (SEC-23). It compares the path text
+// only. It folds the letters A-Z to a-z with foldASCII and no other letter.
 // A key that is not in vals failed its own check, so it is skipped.
 func bundleConflict(vals map[string]Value, p string) string {
+	p = foldASCII(p)
 	dir := filepath.Dir(p)
 	for _, k := range []string{"tlog.dir", "acme.cache_dir"} {
-		if v, ok := vals[k]; ok && (inDir(dir, v.Str) || inDir(v.Str, dir)) {
-			return "the directory must not be in or above " + k
+		if v, ok := vals[k]; ok {
+			s := foldASCII(v.Str)
+			if inDir(dir, s) || inDir(s, dir) {
+				return "the directory must not be in or above " + k
+			}
 		}
 	}
-	if v, ok := vals["store.path"]; ok && v.Str == p {
-		return "the path must not be store.path"
+	if v, ok := vals["store.path"]; ok {
+		s := foldASCII(v.Str)
+		if s == p {
+			return "the path must not be store.path"
+		}
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			if inDir(dir, s+suffix) {
+				return "the directory must not be or be in store.path or a file of it"
+			}
+		}
 	}
 	return ""
 }

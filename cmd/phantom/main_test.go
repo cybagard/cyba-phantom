@@ -325,6 +325,11 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 	if code, se, _ := check(); code != 0 {
 		t.Errorf("default: exit %d, stderr %q", code, se)
 	}
+	for _, p := range []string{"db2/x.cbnd", "writer.stop2/x.cbnd"} {
+		if code, se, _ := check("PHANTOM_BUNDLE_PATH="+s+p, "PHANTOM_STORE_PATH="+s+"db"); code != 0 {
+			t.Errorf("%s: exit %d, stderr %q", p, code, se)
+		}
+	}
 	for _, c := range []struct {
 		name, path string
 		extra      []string
@@ -340,6 +345,12 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 		{"keys", s + "keys/x.cbnd", nil, "keys directory"},
 		{"checkpoints", s + "checkpoints/x.cbnd", nil, "checkpoints directory"},
 		{"store.path", s + "b2/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b2/x.cbnd"}, "must not be store.path"},
+		{"keys in other case", s + "Keys/x.cbnd", nil, "keys directory"},
+		{"writer.stop in other case", s + "WRITER.STOP/x.cbnd", nil, "be in writer.stop"},
+		{"file name .cbnd alone", s + "bundle/.cbnd", nil, "character before .cbnd"},
+		{"in checkpoint.state", s + "checkpoint.state/a/x.cbnd", nil, "be in checkpoint.state"},
+		{"store.path in other case", s + "B/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "b/x.cbnd"}, "must not be store.path"},
+		{"store.path-journal in other case", s + "DB-Journal/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, se, loadErr := check(append([]string{"PHANTOM_BUNDLE_PATH=" + c.path}, c.extra...)...)
