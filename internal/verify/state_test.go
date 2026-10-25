@@ -713,8 +713,8 @@ func TestTS14_SecondLink(t *testing.T) {
 	wantRefused(t, "second link", dir, v)
 }
 
-// T-S-14: if the mode of the state file changes between the load and the
-// write, Update gives ErrState, and not ErrStateChanged. Nothing changes.
+// T-S-14: the mode of the state file changes between the load and the write.
+// Then Update gives ErrState, not ErrStateChanged. Nothing changes.
 func TestTS14_ModeChangedDuringRun(t *testing.T) {
 	s, text := newKey(t, origin)
 	v, _ := ParseKey([]byte(text))

@@ -99,14 +99,14 @@ func DefaultStateDir() (string, error) {
 
 // LoadState opens the state directory and loads the state of the key v. It
 // makes a missing directory with mode 0700. If the file does not exist, this is
-// the first use, and Bytes is nil. A symlink, a file that is not regular, a
-// file with a second link, a file past the note cap, and a note that does not
-// parse with v give ErrState.
+// the first use, and Bytes is nil. These give ErrState: a symlink, a file that
+// is not regular, or a file with a second link. A file past the note cap and a
+// note that does not parse with v give ErrState too.
 //
-// LoadState refuses an existing directory or state file that has a group or
-// other permission bit, or that another user owns. It checks each on the open
-// descriptor. It checks the directory before it takes the lock. Then it takes
-// an exclusive lock on the directory.
+// LoadState refuses an existing directory or state file with a group or other
+// permission bit. It also refuses one that another user owns. It checks each
+// on the open descriptor. It checks the directory before it takes the lock.
+// Then it takes an exclusive lock on the directory.
 // If another run holds the lock, LoadState waits for at most opts.LockWait (30
 // seconds if it is zero) and then gives ErrStateLocked. A run holds the lock
 // until it closes the state. The kernel releases it when the process ends. A
@@ -156,9 +156,9 @@ func (s *State) Close() error {
 	return errors.Join(s.lock.Close(), s.root.Close())
 }
 
-// stateFileRule is the rule of the state file. It must be a regular file that
-// the user of the run owns, with no group or other permission bit, with one
-// link, and not larger than the note cap.
+// stateFileRule is the rule of the state file. The state file is a regular
+// file with one link, and the user of the run owns it. It has no group or
+// other permission bit, and it is not larger than the note cap.
 var stateFileRule = safefile.Rule{
 	Type:    safefile.Regular,
 	Owner:   safefile.OwnerSelf,
