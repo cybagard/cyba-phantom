@@ -464,8 +464,8 @@ func TestTS20KeyDirIsChecked(t *testing.T) {
 }
 
 // T-S-20: keygen writes the key file in the directory that it checked. A path
-// with "lnk/.." names a private directory as text, but the kernel follows lnk
-// to a directory with mode 0777. keygen and sign use the checked directory.
+// with "lnk/.." names a private directory as text. The kernel follows lnk to a
+// directory with mode 0777. keygen and sign use the checked directory.
 func TestTS20KeyPathIsOneDirectory(t *testing.T) {
 	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
