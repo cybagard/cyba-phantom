@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 // maxConnsPerSource is the number of open connections that one source key may
@@ -267,6 +269,14 @@ type limitConn struct {
 	budgetClosed bool // the budget or the pool closed the connection
 	acme         bool // the connection negotiated acme-tls/1
 	writes       int  // counted writes since a read with data or idle state
+
+	// These fields are the input of handshakeReason (SEC-22).
+	// gate is the reason of the name gate, or 0 if it did not refuse.
+	gate event.RefusedReason
+	// noCert is true when there is no certificate to give.
+	noCert bool
+	// lastData is true when the last read gave data, no error, no timeout.
+	lastData bool
 }
 
 // newLimitConn wraps c with a full first budget. The caller has the slot and
@@ -313,6 +323,7 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	ne, ok := err.(net.Error)
 	timeout := ok && ne.Timeout()
 	c.lastReadErr = err != nil && !timeout
+	c.lastData = n > 0 && err == nil
 	if n == 0 {
 		c.mu.Unlock()
 		return 0, err
@@ -405,6 +416,42 @@ func (c *limitConn) refusedRequest() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.writes >= 1 && !c.lastReadErr && !c.handled && !c.budgetClosed && !c.acme
+}
+
+// setGate records that the name gate refused the connection, with its reason.
+func (c *limitConn) setGate(r event.RefusedReason) {
+	c.mu.Lock()
+	c.gate = r
+	c.mu.Unlock()
+}
+
+// markNoCert records that the certificate callback failed and the name gate
+// did not refuse the connection. The listener has no certificate to give.
+func (c *limitConn) markNoCert() {
+	c.mu.Lock()
+	if c.gate == 0 {
+		c.noCert = true
+	}
+	c.mu.Unlock()
+}
+
+// handshakeReason gives the reason of the refused event for a connection whose
+// handshake failed (SEC-22). It gives none when the listener had no certificate
+// to give or the budget closed the connection. Else the name gate gives its
+// reason. Else the connection gives bad_hello when the last read gave data and
+// no error. A client that stopped gives no reason.
+func (c *limitConn) handshakeReason() (event.RefusedReason, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.noCert || c.budgetClosed:
+		return 0, false
+	case c.gate != 0:
+		return c.gate, true
+	case c.lastData:
+		return event.ReasonBadHello, true
+	}
+	return 0, false
 }
 
 // nextPeriod ends the period at an idle state. The late bytes are not part of

@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 const (
@@ -390,7 +391,9 @@ func portOf(u *url.URL) string {
 // listener. It calls certmagic only for a configured name. For no name or another
 // name, it returns a fixed error at once: no storage call, no request and no log
 // line. This also holds for ALPN acme-tls/1, which certmagic would answer with a
-// storage read for any name.
+// storage read for any name. When the name gate refuses, it also records the
+// reason (no_server_name or unknown_name) on the connection, for the refused
+// event.
 //
 // A handshake for a configured name whose ALPN list is exactly acme-tls/1 goes
 // to certmagic only while a challenge for that name is active in memory. If no
@@ -409,14 +412,16 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 	name := hello.ServerName
 	for i := 0; i < len(name); i++ {
 		if name[i] >= 0x80 {
-			a.refused.Add(1)
-			return nil, errName
+			return nil, a.refuseName(hello, event.ReasonUnknownName)
 		}
 	}
 	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	if _, ok := a.allowed[name]; !ok {
-		a.refused.Add(1)
-		return nil, errName
+		reason := event.ReasonUnknownName
+		if hello.ServerName == "" {
+			reason = event.ReasonNoServerName
+		}
+		return nil, a.refuseName(hello, reason)
 	}
 	if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto {
 		if _, active := a.challenge(name); !active {
@@ -427,6 +432,17 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 	h := *hello
 	h.ServerName = name
 	return a.cfg.GetCertificate(&h)
+}
+
+// refuseName counts a refusal of the name gate. It records the reason on the
+// connection of hello, if the hello has one. A hello that a test makes by hand
+// has no context.
+func (a *ACME) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason) error {
+	a.refused.Add(1)
+	if lc := helloConn(hello); lc != nil {
+		lc.setGate(reason)
+	}
+	return errName
 }
 
 // Refused returns the number of handshakes that GetCertificate refused: the
