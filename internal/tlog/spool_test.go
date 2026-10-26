@@ -273,7 +273,7 @@ func (e *spoolEnv) fill(t *testing.T, from, to uint64) {
 }
 
 // T-I-09: an entry that cannot be deleted gets one Warn line and one Rejected
-// count, also if Publish and Add both meet it, in each order.
+// count. This holds if Publish and Add both meet it, in each order.
 func TestTI09_StuckEntryOneLineForAllPaths(t *testing.T) {
 	e := newSpool(t)
 	stick := func(size uint64) {
@@ -363,9 +363,9 @@ func TestTI09_ListsInSteps(t *testing.T) {
 	}
 }
 
-// T-I-09: an entry that is not a regular file (a directory, a FIFO, a symlink)
-// is not a skipped note when the full spool deletes it. A regular note is. An
-// entry that is gone before drop runs does not stop it.
+// T-I-09: the full spool deletes an entry that is not a regular file (a
+// directory, a FIFO, a symlink). It is not a skipped note. A regular note is.
+// An entry that is gone before drop runs does not stop it.
 func TestTI09_DropCountsOnlyNotes(t *testing.T) {
 	e := newSpool(t)
 	drop := func(size uint64) {
