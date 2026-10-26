@@ -320,8 +320,8 @@ func TestTS20PermittedModesLoad(t *testing.T) {
 	}
 }
 
-// T-S-20: a path that is not "<name>.cbnd" with a name is refused, with a
-// signed bundle and signature file behind it.
+// T-S-20: a path that is not a relative path to a named .cbnd file is
+// refused. A signed bundle and signature file are behind it.
 func TestTS20PathFormsAreRefused(t *testing.T) {
 	e := running(t)
 	arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3)))})
