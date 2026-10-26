@@ -90,10 +90,11 @@ func writeState(root *os.Root, st state) error {
 
 // writeFile writes data to the file with this name and replaces an old file.
 // It makes a temporary file, with the name and ".tmp", and mode 0600 less the
-// umask. It writes the temporary file, and calls Sync and Close. Then it renames
-// the temporary file to name and calls Sync on the directory. First it removes a
-// temporary file that a crash left, so that file does not block the write.
-// O_EXCL means that the write never follows a symlink at the temporary name.
+// umask. It writes the temporary file, and calls Sync and Close. Then it
+// renames the temporary file to name and calls Sync on the directory. First it
+// removes a temporary file that a crash left, so that file does not block the
+// write. O_EXCL means that the write never follows a symlink at the temporary
+// name.
 func writeFile(root *os.Root, name string, data []byte) error {
 	tmp := name + ".tmp"
 	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {

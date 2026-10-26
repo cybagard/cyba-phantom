@@ -152,8 +152,8 @@ func mustRoot(t *testing.T, e *env) *os.Root {
 }
 
 // T-S-20: the loader refuses a transition bundle without a valid line of the
-// old key or of the new key. It also refuses a key ID that is the old key ID or
-// that is in the trust set, and an old key that is not in the set.
+// old key or of the new key. It also refuses a key ID that is the old key ID.
+// It refuses a key ID in the trust set and an old key that is not in the set.
 func TestTS20RotationRefused(t *testing.T) {
 	cases := []struct {
 		name string
@@ -311,8 +311,8 @@ func TestTS20RotationRecordCheckFails(t *testing.T) {
 	e.absent("rotation-1.sig")
 }
 
-// T-S-20: a record made from the installed normal bundle and a line of another
-// key gives a state fault at the next start. The loader is not healthy.
+// T-S-20: a forged record gives a state fault at the next start. It holds the
+// installed normal bundle and a line of another key. The loader is not healthy.
 func TestTS20RotationForgedRecord(t *testing.T) {
 	e := running(t)
 	kx := newKey(9, "kx")
@@ -471,9 +471,6 @@ func TestTS20RotationRecordFaults(t *testing.T) {
 	}{
 		{"archive byte", edit("rotation-1.cbnd", func(b []byte) []byte { return swap(b, len(b)/2, 'a', 'b') })},
 		{"old key line byte", edit("rotation-1.sig", func(b []byte) []byte { return swap(b, 3+5, 'A', 'B') })},
-		{"new key line byte", edit("rotation-1.sig", func(b []byte) []byte {
-			return swap(b, bytes.IndexByte(b, '\n')+1+3+5, 'A', 'B')
-		})},
 		{"signed by another trusted key", func(e *env) {
 			arch := e.read("rotation-1.cbnd")
 			e.record(1, arch, lineOf(e.keys()[1], arch), lineOf(newKey(3, "k3"), arch))

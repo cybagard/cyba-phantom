@@ -36,10 +36,10 @@ type chain struct {
 // rotate checks the rotation of a transition bundle against the chain c. m is
 // its manifest. archive and sig are its files. ids are the key IDs that
 // VerifySig gave for sig over archive with the set c.trust. The old key must be
-// one of them. The new key ID must not be in the set, and neither it nor the
-// new key can be one that an earlier record removed. The new key needs a line
-// that verifies. rotate gives the chain after the rotation, and the class of
-// the old key, which the new key has. The new key takes the place of the old key.
+// one of them. The new key ID must not be in the set. Neither the new key ID
+// nor the new key can be one that an earlier record removed. The new key needs
+// a line that verifies. rotate gives the chain after the rotation, with the
+// new key in the place of the old key. It also gives the class of the old key.
 func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chain, class Class, ok bool) {
 	r := m.Rotation
 	if r == nil || !slices.Contains(ids, r.From) {
@@ -60,7 +60,7 @@ func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chai
 
 // record applies one transition record to the chain. VerifySig hashes the
 // archive and verifies a line of a key of the set before the decompress. Only
-// the manifest of the archive stays. No expiry, engine or rollback rule applies.
+// the manifest of the archive stays. No expiry rule applies.
 func (c chain) record(archive, sig []byte, decompress func([]byte) (*Archive, error)) (chain, bool) {
 	ids, err := VerifySig(archive, sig, c.trust)
 	if err != nil {
@@ -84,10 +84,10 @@ func (c chain) record(archive, sig []byte, decompress func([]byte) (*Archive, er
 }
 
 // readChain reads the transition records 1, 2, ... in the bundle directory,
-// one at a time, with the read rule of a bundle file. It applies each one to the
-// compiled trust set. ErrStateFault is the result for a record that is not
-// valid, a file without its pair, a gap, a file that the read rule refuses, and
-// an entry at the name of record 9. readChain changes nothing on disk.
+// one at a time, with the read rule of a bundle file. It applies each one to
+// the compiled trust set. A bad record, a lone file, or a gap gives
+// ErrStateFault. So does a file that the read rule refuses. So does an entry at
+// the name of record 9. readChain changes nothing on disk.
 func readChain(root *os.Root, trust TrustSet, decompress func([]byte) (*Archive, error)) (chain, error) {
 	c := chain{trust: slices.Clone(trust)}
 	ended := false

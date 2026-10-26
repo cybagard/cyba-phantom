@@ -165,25 +165,25 @@ func (l *Loader) Healthy() bool {
 
 // Load reads the bundle and the signature file. It checks the bundle and makes
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: read,
-// chain check of the transition records, SHA-256, signature, archive, manifest,
-// key ID or rotation, engine, expiry and rollback, templates.
+// chain check, SHA-256, signature, archive, manifest, key ID or rotation,
+// engine, expiry and rollback, templates.
 // A transition record is the archive and the signature file of an accepted
-// transition bundle: rotation-<n>.cbnd and rotation-<n>.sig in the bundle
-// directory, n from 1 to 8. The chain check starts with the compiled trust set.
-// For each record in order, it verifies a line of a key of the set before it
-// decompresses the archive. Then it verifies the line of the new key, and
-// replaces the old key with the new key. The new key has the class of the old
-// key. The check applies no expiry, engine, rollback, template or seed rule to
-// a record. It runs when start is true, when no check ran before, and after
-// Load writes a record. Other loads use the trust set in memory and read no
-// record. A record that changes after a check is found at the next start. A
-// failed check gives ErrStateFault.
+// transition bundle. The files are rotation-<n>.cbnd and rotation-<n>.sig in
+// the bundle directory, n from 1 to 8. The chain check starts with the
+// compiled trust set. For each record, it verifies a line of a key of the set
+// before it decompresses the archive. Then it verifies the line of the new key.
+// The new key replaces the old key and has its class. The check applies no
+// expiry, engine, rollback, template or seed rule to a record. It runs when
+// start is true or when no check ran before. It also runs after Load writes a
+// record. Other loads use the trust set in memory and read no record. A record
+// that changes after a check is found at the next start. A failed check gives
+// ErrStateFault.
 // A transition bundle has a signature line of the old key and one of the new
 // key. Load checks its rotation member where it checks the key ID of a normal
 // bundle. An accepted new transition bundle writes its record before the
 // version state. If the check of the records or the write of the version state
-// then fails, Load removes the record, keeps the trust set as it was, and gives
-// ErrStateFault.
+// then fails, Load removes the record. It keeps the trust set as it was and
+// gives ErrStateFault.
 // The first failed check gives the one error. A rejected bundle changes no file
 // and not the running bundle. start is true for the load at start. An accepted
 // bundle that expired then loads, and Expired is true.
@@ -263,9 +263,8 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
 	// The record and the version state come before Store. A failed write
-	// leaves the running bundle. After a record, a failed check of the records
-	// or a failed write of the version state removes the record and keeps the
-	// trust set as it was.
+	// leaves the running bundle. After a record, a failed check or a failed
+	// write of the version state removes the record. The trust set stays.
 	n := len(c.sums) + 1
 	if newRotation {
 		if err := writeRecord(dir, n, archive, sig); err != nil {
