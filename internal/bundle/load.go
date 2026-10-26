@@ -262,9 +262,9 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
-	// The record and the version state come before Store. A failed write
-	// leaves the running bundle. A failed check or a failed write of the
-	// version state removes the record. Only that write restores the trust set.
+	// The record and the version state come before Store. A failed write leaves
+	// the running bundle. A failed check or version-state write removes the
+	// record. Only a failed version-state write restores the trust set.
 	n := len(c.sums) + 1
 	if newRotation {
 		if err := writeRecord(dir, n, archive, sig); err != nil {
