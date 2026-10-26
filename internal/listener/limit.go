@@ -376,8 +376,9 @@ const recordApplicationData = 23
 // writes: a client that reads the response can answer before Write returns. The
 // handshake writes before the first request is active. It also counts a write
 // of more than uncountedWriteMax bytes that starts with recordApplicationData.
-// A write that fails, also with a timeout, means that the client stopped. Then
-// lastData is false, so the connection gives no bad_hello.
+// A failed write, also a timeout, ends the handshake: crypto/tls reads no more.
+// Then lastData is false until the next read with data. So the connection gives
+// no bad_hello.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active
@@ -450,7 +451,7 @@ func (c *limitConn) markNoCert() {
 // certificate mark or the budget closed the connection. If not, the name gate
 // gives its reason. If not, it gives bad_hello when the last read gave data.
 // That read had no error, and no write failed after it. If not, it gives no
-// reason: the client stopped.
+// reason.
 func (c *limitConn) handshakeReason() (event.RefusedReason, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -67,9 +67,9 @@ func (g *gateRig) handshake(t *testing.T, cfg *tls.Config) {
 }
 
 // want waits for the close of the connection. It checks the refused events:
-// one with the reason, or none when reason is "". An event has no status, the
-// address 127.0.0.1 and no marker text in its record. It also checks the count
-// of the name gate and that the error log has exactly 1 line.
+// one with the reason, or none when reason is "". An event has no status and
+// no marker text in its record. Its address is 127.0.0.1. It also checks the
+// count of the name gate and that the error log has exactly 1 line.
 func (g *gateRig) want(t *testing.T, reason string, gate uint64) {
 	t.Helper()
 	waitClosed(t, g.closed)
