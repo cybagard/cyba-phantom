@@ -251,6 +251,33 @@ func TestReadBytesSizeLimit(t *testing.T) {
 	}
 }
 
+// TestTS10_ReadErrorFields checks that a reader error is a *ReadError.
+// It holds the key path, the line, the column, and the detail as fields.
+// The text of a file error escapes the path (T-S-10).
+func TestTS10_ReadErrorFields(t *testing.T) {
+	rows := []struct {
+		name, input string
+		want        ReadError
+	}{
+		{"node", "a:\n  b: 1\n  b: 2", ReadError{Path: "a.b", Line: 3, Column: 3, Detail: "duplicate key"}},
+		{"root", "\"\": 1", ReadError{Line: 1, Column: 1, Detail: keyRule}},
+		{"YAML", "a: 1\nb: [\n", ReadError{Line: 2, Detail: "invalid YAML"}},
+		{"fixed text", "- a", ReadError{Detail: "root must be a mapping"}},
+	}
+	for _, r := range rows {
+		_, err := ReadBytes([]byte(r.input))
+		var got *ReadError
+		if !errors.As(err, &got) || *got != r.want {
+			t.Errorf("%s: got %#v, want %#v", r.name, got, r.want)
+		}
+	}
+	_, err := ReadFile(filepath.Join(t.TempDir(), "\x1b[31m"))
+	var got *ReadError
+	if !errors.As(err, &got) || !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), "\x1b") {
+		t.Errorf("file error: got %q (%#v)", err, got)
+	}
+}
+
 // TestTS10_DuplicateKeyPosition checks that the duplicate-key error gives the
 // line and column of the second key, not of its value (T-S-10).
 func TestTS10_DuplicateKeyPosition(t *testing.T) {

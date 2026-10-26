@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"syscall"
 	"unicode/utf8"
 
@@ -31,6 +32,49 @@ const (
 	mapTagRule    = "the tag of a mapping must be map"
 	seqTagRule    = "the tag of a sequence must be seq"
 )
+
+// ReadError is an error of ReadFile or ReadBytes.
+// The fields hold the parts of the error, so a caller does not parse the text.
+// Error escapes the key path and the file path.
+type ReadError struct {
+	File   string // File is the path of the file for a file error, or "".
+	Path   string // Path is the key path for a node error (Column > 0).
+	Line   int    // Line is the line in the text, or 0.
+	Column int    // Column is the column in the text, or 0.
+	Detail string // Detail is a fixed text. It never holds text of the input.
+	Err    error  // Err is the system error for a file error, or nil.
+}
+
+func (e *ReadError) Error() string {
+	s := "config: "
+	if e.File != "" {
+		s += formatFilePath(e.File) + ": "
+	}
+	if e.Column > 0 {
+		s += formatPath(e.Path) + ": "
+	}
+	if e.Line > 0 {
+		s += "line " + strconv.Itoa(e.Line)
+		if e.Column > 0 {
+			s += " column " + strconv.Itoa(e.Column)
+		}
+		s += ": "
+	}
+	if e.Err != nil {
+		return s + e.Err.Error()
+	}
+	return s + e.Detail
+}
+
+func (e *ReadError) Unwrap() error { return e.Err }
+
+// readErr returns a ReadError that has a detail only.
+func readErr(detail string) error { return &ReadError{Detail: detail} }
+
+// nodeError returns a ReadError for the node at the key path.
+func nodeError(path string, line, col int, detail string) error {
+	return &ReadError{Path: path, Line: line, Column: col, Detail: detail}
+}
 
 // Leaf represents a scalar value in the configuration.
 type Leaf struct {
@@ -61,12 +105,12 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if info.Mode()&os.ModeType != 0 {
-		return nil, fmt.Errorf("config: %s: not a regular file", formatFilePath(path))
+		return nil, &ReadError{File: path, Detail: "not a regular file"}
 	}
 
 	mode := info.Mode()
 	if mode&0022 != 0 {
-		return nil, fmt.Errorf("config: %s: group or other writable", formatFilePath(path))
+		return nil, &ReadError{File: path, Detail: "group or other writable"}
 	}
 
 	uid, err := getUid(info)
@@ -75,7 +119,7 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if uid != 0 && uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("config: %s: the owner must be root or the current user", formatFilePath(path))
+		return nil, &ReadError{File: path, Detail: "the owner must be root or the current user"}
 	}
 
 	lr := io.LimitReader(f, maxConfigSize+1)
@@ -85,7 +129,7 @@ func ReadFile(path string) (*Doc, error) {
 	}
 
 	if len(b) > maxConfigSize {
-		return nil, fmt.Errorf("config: %s: the file is larger than 64 KiB", formatFilePath(path))
+		return nil, &ReadError{File: path, Detail: "the file is larger than 64 KiB"}
 	}
 
 	return ReadBytes(b)
@@ -101,28 +145,28 @@ var getUid = func(info os.FileInfo) (uint32, error) {
 // ReadBytes parses the configuration from a byte slice and returns a Doc.
 func ReadBytes(b []byte) (*Doc, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
-		return nil, errors.New("config: empty document")
+		return nil, readErr("empty document")
 	}
 	if len(b) > maxConfigSize {
-		return nil, errors.New("config: the input is larger than 64 KiB")
+		return nil, readErr("the input is larger than 64 KiB")
 	}
 	if !utf8.Valid(b) {
-		return nil, errors.New("config: invalid UTF-8 encoding")
+		return nil, readErr("invalid UTF-8 encoding")
 	}
 
 	if bytes.Contains(b, []byte("\x00")) {
-		return nil, errors.New("config: contains NUL byte")
+		return nil, readErr("contains NUL byte")
 	}
 
 	if bytes.HasPrefix(b, []byte("\xef\xbb\xbf")) {
-		return nil, errors.New("config: contains UTF-8 BOM")
+		return nil, readErr("contains UTF-8 BOM")
 	}
 
 	// The YAML parser reads each of these as a line break. An editor or a
 	// terminal can show the line as one line, so a second key can hide there.
 	for _, sep := range []rune{0x85, 0x2028, 0x2029} {
 		if bytes.ContainsRune(b, sep) {
-			return nil, errors.New("config: contains U+0085, U+2028 or U+2029")
+			return nil, readErr("contains U+0085, U+2028 or U+2029")
 		}
 	}
 
@@ -135,7 +179,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 			break
 		}
 		if i+1 == len(rest) || rest[i+1] != '\n' {
-			return nil, errors.New("config: contains a CR without an LF after it")
+			return nil, readErr("contains a CR without an LF after it")
 		}
 		rest = rest[i+2:]
 	}
@@ -144,27 +188,27 @@ func ReadBytes(b []byte) (*Doc, error) {
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, errors.New("config: empty document")
+			return nil, readErr("empty document")
 		}
 		return nil, wrapYamlError(err)
 	}
 
 	if doc.Kind != yaml.DocumentNode {
-		return nil, errors.New("config: not a YAML document")
+		return nil, readErr("not a YAML document")
 	}
 
 	var doc2 yaml.Node
 	if err := dec.Decode(&doc2); err != io.EOF {
-		return nil, errors.New("config: contains more than one document")
+		return nil, readErr("contains more than one document")
 	}
 
 	if len(doc.Content) == 0 {
-		return nil, errors.New("config: empty document")
+		return nil, readErr("empty document")
 	}
 
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
-		return nil, errors.New("config: root must be a mapping")
+		return nil, readErr("root must be a mapping")
 	}
 
 	res := &Doc{
@@ -185,25 +229,25 @@ func ReadBytes(b []byte) (*Doc, error) {
 // it is nil for the root and for a sequence item.
 func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 	if depth > maxDepth {
-		return fmt.Errorf("config: %s: line %d column %d: nesting exceeds limit of %d", formatPath(path), n.Line, n.Column, maxDepth)
+		return nodeError(path, n.Line, n.Column, "nesting exceeds limit of "+strconv.Itoa(maxDepth))
 	}
 
 	if key != nil {
 		if _, exists := doc.Leaves[path]; exists || doc.Mappings[path] || doc.Sequences[path] {
-			return fmt.Errorf("config: %s: line %d column %d: duplicate key", formatPath(path), key.Line, key.Column)
+			return nodeError(path, key.Line, key.Column, "duplicate key")
 		}
 	}
 
 	if n.Alias != nil {
-		return fmt.Errorf("config: %s: line %d column %d: alias nodes are rejected", formatPath(path), n.Line, n.Column)
+		return nodeError(path, n.Line, n.Column, "alias nodes are rejected")
 	}
 
 	if n.Anchor != "" {
-		return fmt.Errorf("config: %s: line %d column %d: anchors are rejected", formatPath(path), n.Line, n.Column)
+		return nodeError(path, n.Line, n.Column, "anchors are rejected")
 	}
 
 	if !isCoreTag(n.Tag, n.Kind) {
-		return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), n.Line, n.Column, tagRuleText(n.Kind, n.Style&yaml.TaggedStyle != 0))
+		return nodeError(path, n.Line, n.Column, tagRuleText(n.Kind, n.Style&yaml.TaggedStyle != 0))
 	}
 
 	line := n.Line
@@ -219,24 +263,24 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 			valNode := n.Content[i+1]
 
 			if keyNode.Kind != yaml.ScalarNode {
-				return fmt.Errorf("config: %s: line %d column %d: mapping keys must be scalars", formatPath(path), keyNode.Line, keyNode.Column)
+				return nodeError(path, keyNode.Line, keyNode.Column, "mapping keys must be scalars")
 			}
 
 			key := keyNode.Value
 			if key == "<<" {
-				return fmt.Errorf("config: %s: line %d column %d: merge keys are rejected", formatPath(path), keyNode.Line, keyNode.Column)
+				return nodeError(path, keyNode.Line, keyNode.Column, "merge keys are rejected")
 			}
 
 			if !isValidKey(key) {
-				return fmt.Errorf("config: %s: line %d column %d: %s", formatPath(path), keyNode.Line, keyNode.Column, keyRule)
+				return nodeError(path, keyNode.Line, keyNode.Column, keyRule)
 			}
 
 			if keyNode.Tag != "" && keyNode.Tag != "!!str" {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key tag is rejected: a key must be a string, not a number, bool or null", formatPath(path), keyNode.Line, keyNode.Column)
+				return nodeError(path, keyNode.Line, keyNode.Column, "mapping key tag is rejected: a key must be a string, not a number, bool or null")
 			}
 
 			if keyNode.Anchor != "" {
-				return fmt.Errorf("config: %s: line %d column %d: mapping key anchor is rejected", formatPath(path), keyNode.Line, keyNode.Column)
+				return nodeError(path, keyNode.Line, keyNode.Column, "mapping key anchor is rejected")
 			}
 
 			newPath := key
@@ -263,7 +307,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 
 	case yaml.ScalarNode:
 		if path == "" {
-			return errors.New("config: root must be a mapping")
+			return readErr("root must be a mapping")
 		}
 
 		doc.Leaves[path] = Leaf{
@@ -273,7 +317,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 		}
 
 	default:
-		return fmt.Errorf("config: %s: line %d column %d: unsupported node type", formatPath(path), n.Line, n.Column)
+		return nodeError(path, n.Line, n.Column, "unsupported node type")
 	}
 
 	return nil
@@ -345,15 +389,15 @@ func formatPath(path string) string {
 func formatOSError(path string, err error) error {
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) {
-		return fmt.Errorf("config: %s: %w", formatFilePath(pathErr.Path), errors.Unwrap(pathErr))
+		return &ReadError{File: pathErr.Path, Err: errors.Unwrap(pathErr)}
 	}
-	return fmt.Errorf("config: %s: %w", formatFilePath(path), err)
+	return &ReadError{File: path, Err: err}
 }
 
 func wrapYamlError(err error) error {
 	var line int
 	if n, parseErr := fmt.Sscanf(err.Error(), "yaml: line %d", &line); n < 1 || parseErr != nil {
-		return errors.New("config: invalid YAML")
+		return readErr("invalid YAML")
 	}
-	return fmt.Errorf("config: line %d: invalid YAML", line)
+	return &ReadError{Line: line, Detail: "invalid YAML"}
 }
