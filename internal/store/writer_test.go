@@ -123,8 +123,9 @@ func (r *rig) wait(done <-chan error) error {
 	}
 }
 
-// launchCancelable launches Run with a context that derives from ctx. If the
-// test fails first, a cleanup cancels that context, so Run ends.
+// launchCancelable makes a context from ctx and launches Run with it. A cleanup
+// cancels that context at the end of the test, so Run ends also when the test
+// fails.
 func (r *rig) launchCancelable(ctx context.Context) (<-chan error, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := r.launch(ctx)
@@ -606,9 +607,9 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 // runAfterStart starts the writer. It waits until the writer has passed the
 // start check and committed one event. Then it calls late and calls batch to
 // queue the events. It closes the queue and returns the result of Run. Thus
-// late can change the database, the appender or a hook of the writer. It does
-// this after the start check and before the batch is written. The stop function
-// that start gives also cancels the context of Run.
+// late runs after the start check and before the write of the batch. The
+// function late can change the database, the appender or a hook of the writer.
+// The stop function that start gives also cancels the context of Run.
 func (r *rig) runAfterStart(late, batch func()) error {
 	r.t.Helper()
 	stop := r.start()

@@ -10,16 +10,17 @@ import (
 )
 
 // Drops holds the numbers of dropped events for each lane. These are the
-// events that the stopped state dropped and the events of a rolled-back batch.
-// They are the values of the lane label of the metric
-// phantom_store_dropped_events_total.
+// events that the stopped state dropped. They also include each event of a
+// batch that ends with an error and no COMMIT. They are the values of the lane
+// label of the metric phantom_store_dropped_events_total.
 type Drops struct {
 	Bulk, Evidence uint64
 }
 
-// DropCount counts the events that Discard drops, and the events of a
-// rolled-back batch, for each lane. The zero value is ready for use. It is safe
-// for concurrent use.
+// DropCount counts the dropped events for each lane. These are the events that
+// Discard drops. They also include each event of a batch that ends with an
+// error and no COMMIT. The zero value is ready for use. It is safe for
+// concurrent use.
 type DropCount struct {
 	bulk, evidence atomic.Uint64
 }
@@ -49,8 +50,8 @@ type Stats struct {
 	// AppendBatch call. It is for phantom_tlog_orphan_leaves_total.
 	OrphanLeaves uint64
 	// Dropped counts the dropped events for each lane. These are the events
-	// that the stopped writer took out of the lanes. They also include the
-	// events of a rolled-back batch. It is for
+	// that the stopped writer took out of the lanes. They also include each
+	// event of a batch that ends with an error and no COMMIT. It is for
 	// phantom_store_dropped_events_total.
 	Dropped Drops
 }

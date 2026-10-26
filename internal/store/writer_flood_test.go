@@ -89,7 +89,8 @@ func TestTU18RowRequestIsServedUnderAFlood(t *testing.T) {
 	if err := stopRun(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	// The timer of the sink enforces this bound (rowTimeout, sink.go).
+	// The timer of the sink stops the wait after rowTimeout and returns an
+	// error (sink.go).
 	if res.err != nil || res.took > rowTimeout || r.rowCount() != 1 {
 		t.Fatalf("reply %v after %v, %d rows", res.err, res.took, r.rowCount())
 	}
@@ -138,9 +139,10 @@ func TestTU18StoppedWriterServesNoWaitingRow(t *testing.T) {
 	}
 }
 
-// T-U-18: a database error rolls the batch back and counts each event of the
-// batch as a drop for its lane. The batch has three bulk and two evidence
-// events. The start event of runAfterStart commits before the error.
+// T-U-18: each event of a batch that ends with an error and no COMMIT counts
+// as a drop. The drop counts for the lane of the event. The batch has three
+// bulk and two evidence events. The start event of runAfterStart commits
+// before the error.
 func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 	failCommit := func(*sql.Tx) error { return errors.New("commit failed") }
 	cases := []struct {
