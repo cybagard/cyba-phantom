@@ -20,6 +20,8 @@ var spoolTargets = []string{"https://a.test/put", "https://b.test/put"}
 // overfull is the newest size of a spool that gets 5 notes more than the bound.
 const overfull = maxSpoolNotes + 5
 
+var errTargetDown = errors.New("target down")
+
 // fakeSender records the sizes for each target. failAt makes one size fail for
 // a target until the test clears it.
 type fakeSender struct {
@@ -29,7 +31,7 @@ type fakeSender struct {
 
 func (f *fakeSender) Send(target string, size uint64, _ []byte) error {
 	if n, ok := f.failAt[target]; ok && n == size {
-		return errors.New("target down")
+		return errTargetDown
 	}
 	f.got[target] = append(f.got[target], size)
 	return nil
@@ -120,7 +122,7 @@ func TestTI09_OrderAndCursor(t *testing.T) {
 	}
 	b, err := os.ReadFile(filepath.Join(e.dir, e.cursorName(0)))
 	must(t, err)
-	if string(b) != "2" || !strings.HasPrefix(e.cursorName(0), "checkpoints/target-") || len(e.cursorName(0)) != len("checkpoints/target-")+16 {
+	if string(b) != "2" || !strings.HasPrefix(e.cursorName(0), spoolDir+"/"+cursorPrefix) || len(e.cursorName(0)) != len(spoolDir+"/"+cursorPrefix)+16 {
 		t.Fatalf("cursor file %q has %q, want 2", e.cursorName(0), b)
 	}
 	if want := []uint64{3, 4, 5}; !slices.Equal(e.files(t), want) {
@@ -532,7 +534,7 @@ func TestTI09_NewestRegularNoteStays(t *testing.T) {
 	dir := filepath.Join(e.dir, e.noteFile(3))
 	must(t, os.Mkdir(dir, 0o700))
 	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
-	for range 4 { // each call meets the directory and must keep note 2
+	for range 2 { // call 2 meets the directory again and keeps note 2
 		if err := e.Publish(0, f); err == nil {
 			t.Fatal("Publish hid the entry that is not a regular file")
 		}
@@ -560,8 +562,8 @@ func TestTS13_UnreadableNote(t *testing.T) {
 	f := newFake()
 	for i, target := range spoolTargets {
 		err := e.Publish(i, f)
-		if i == 0 && (err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "cannot be opened")) {
-			t.Fatalf("Publish(0) error = %v, want the file and the rule", err)
+		if i == 0 && (err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "cannot be opened") || !errors.Is(err, syscall.EACCES)) {
+			t.Fatalf("Publish(0) error = %v, want the file, the rule, and EACCES", err)
 		}
 		if !slices.Equal(f.got[target], []uint64{1, 3}) {
 			t.Fatalf("sent = %v", f.got)
@@ -613,10 +615,11 @@ func failAtNote2(t *testing.T, step string, err error) {
 	t.Cleanup(func() { faultAt = nil })
 }
 
-// T-S-13: an error to examine, open, or read a note can be no property of the
-// note (EMFILE, EPERM, EIO). Then the note is not bad. Publish keeps it and
+// T-S-13: an error to examine, open, or read a note can be not a property of
+// the note (EMFILE, EPERM, EIO). Then the note is not bad. Publish keeps it and
 // does not count it or send it. It stops for the target and returns an error
-// that names the file and the rule.
+// that names the file and the rule. EACCES is a property of the note only at
+// the open.
 func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 	for _, c := range []struct {
 		name, step, rule string
@@ -626,6 +629,8 @@ func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 		{"open-eperm", "open", "cannot be opened", syscall.EPERM},
 		{"examine-eio", "examine", "cannot be examined", syscall.EIO},
 		{"read-eio", "read", "cannot be read", syscall.EIO},
+		{"examine-eacces", "examine", "cannot be examined", syscall.EACCES},
+		{"read-eacces", "read", "cannot be read", syscall.EACCES},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newSpool(t)
@@ -646,24 +651,68 @@ func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 }
 
 // T-S-13: Publish returns the errors of the bad notes together with a later
-// error. errors.Is finds each one.
+// error, for each later error that can stop it: Send, the listing or the
+// cursor read in next, and the cursor read in advance. errors.Is finds
+// errBadNote and the error of the sender. The text has the cursor error,
+// because the cursor read does not keep the cause.
 func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
-	e := newSpool(t)
-	e.add(t, 1)
-	must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(2)), 0o700))
-	e.add(t, 3)
-	f := newFake()
-	f.failAt[spoolTargets[0]] = 3
-	err := e.Publish(0, f)
-	if !errors.Is(err, errBadNote) || err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "target down") {
-		t.Fatalf("Publish error = %v, want the entry error and the error of the sender", err)
+	// Notes 1 and 2 are bad entries. Note 3 is sent. Note 4 is not reached.
+	setup := func(t *testing.T) *spoolEnv {
+		e := newSpool(t)
+		must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(1)), 0o700))
+		must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(2)), 0o700))
+		e.add(t, 3)
+		e.add(t, 4)
+		return e
 	}
-	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || e.Stats().Rejected != 1 {
-		t.Fatalf("sent %v, rejected %d", f.got, e.Stats().Rejected)
+	check := func(t *testing.T, e *spoolEnv, err error, later string) {
+		t.Helper()
+		if !errors.Is(err, errBadNote) || err == nil || !strings.Contains(err.Error(), "1.note") ||
+			!strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), later) {
+			t.Fatalf("Publish error = %v, want both entry errors and %q", err, later)
+		}
+		if e.Stats().Rejected != 2 {
+			t.Fatalf("rejected = %d, want 2", e.Stats().Rejected)
+		}
+	}
+	t.Run("send", func(t *testing.T) {
+		e := setup(t)
+		f := newFake()
+		f.failAt[spoolTargets[0]] = 3
+		err := e.Publish(0, f)
+		if !errors.Is(err, errTargetDown) {
+			t.Fatalf("Publish error = %v, want the error of the sender", err)
+		}
+		check(t, e, err, "target down")
+	})
+	// The cursor of target 0 is examined in this order: next reads it, advance
+	// reads it after the send of note 3, and the second next reads it again.
+	for _, c := range []struct {
+		name string
+		call int
+	}{{"advance", 2}, {"next", 3}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := setup(t)
+			calls := 0
+			faultAt = func(step, name string) error {
+				if step == "examine" && name == e.cursorName(0) {
+					if calls++; calls == c.call {
+						return syscall.EIO
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { faultAt = nil })
+			f := newFake()
+			check(t, e, e.Publish(0, f), "cannot be examined")
+			if !slices.Equal(f.got[spoolTargets[0]], []uint64{3}) {
+				t.Fatalf("sent %v, want only note 3", f.got)
+			}
+		})
 	}
 }
 
-// T-S-13: a note that goes between the check and the open is not a bad note.
+// T-S-13: a note that goes before Publish can open it is not a bad note.
 // Publish does not count it. It stops for the target and returns an error that
 // says the note is gone before it is read.
 func TestTS13_NoteGoneAfterLstat(t *testing.T) {

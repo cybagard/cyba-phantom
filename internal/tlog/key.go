@@ -117,8 +117,8 @@ func openChecked(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.File
 	return f, fi, rule
 }
 
-// openCheckedCause is openChecked with one more result: the error of the open,
-// if the open failed.
+// openCheckedCause is openChecked with one more result: the error that
+// OpenFile returned, if it failed.
 func openCheckedCause(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string, error) {
 	if !lfi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
 		return nil, nil, "must be a regular file and not a symlink", nil

@@ -49,9 +49,9 @@ type Sender interface {
 
 // errBadNote marks a bad note. Publish does not send a bad note. It counts the
 // note and deletes it if it can. The cause is a property of the note. One cause
-// is not: a policy can make the open fail with EACCES, and that note is also
-// bad. Among the bad notes, Publish returns an error only for the causes of
-// entryError.
+// is not: a policy can refuse to open the note with EACCES, and that note is
+// also bad. Among the bad notes, Publish returns an error only for the causes
+// of entryError.
 var errBadNote = errors.New("bad note")
 
 // entryError is a bad note with a cause that Publish reports. The cause is an
@@ -62,8 +62,10 @@ type entryError struct{ error }
 
 func (entryError) Is(target error) bool { return target == errBadNote }
 
-// causedError is an error with a text that has no path. errors.Is and
-// errors.As also find cause.
+func (e entryError) Unwrap() error { return e.error }
+
+// causedError is an error with the text of its error field, not the text of
+// cause. errors.Is and errors.As also find cause.
 type causedError struct {
 	error
 	cause error
@@ -336,10 +338,10 @@ func (s *Spool) advance(i int, before cursor, size uint64) error {
 // verified reads a note and checks it. It returns errBadNote for a note that is
 // larger than 1 KiB or does not parse or verify. It also returns errBadNote for
 // a size that differs from the name. It returns entryError in two cases. One is
-// an entry that is not a
-// regular file (a symlink, a directory, a FIFO). The other is a regular note
-// that fails to open with EACCES. Any other error is not a property of the
-// note. verified returns it, with the file and the rule in the text.
+// an entry that is not a regular file (a symlink, a directory, a FIFO). The
+// other is a regular note that fails to open with EACCES. Any other error is
+// not a property of the note. verified returns it, with the file and the rule
+// in the text.
 func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
 	var msg []byte
@@ -395,8 +397,9 @@ func (s *Spool) readFile(name string) ([]byte, error) {
 	return s.readExamined(name, lfi)
 }
 
-// readExamined is readFile for a name that examine returned lfi for. An error
-// of the open is the cause of the returned error.
+// readExamined is readFile for a name that examine returned lfi for. If the
+// file does not open, the error from OpenFile is the cause of the returned
+// error.
 func (s *Spool) readExamined(name string, lfi fs.FileInfo) ([]byte, error) {
 	f, _, rule, cause := openCheckedCause(s.root, name, lfi)
 	if cause != nil {
