@@ -64,6 +64,11 @@ func TestTextSentenceBreaks(t *testing.T) {
 		{"code span in the middle", ws(12) + " `a. b` " + ws(12) + ".\n", 0},
 		{"code span over two lines", ws(12) + " `a\nb` " + ws(12) + ".\n", 0},
 		{"code span joined to a word", "x`a b`y " + ws(24) + ".\n", 0},
+		{"indented bar row after a blank line is a table row", "Text.\n\n  | " + ws(30) + " |\n", 1},
+		{"bar row with four spaces after a blank line is a table row", "Intro.\n\n    | " + ws(26) + " |\n", 1},
+		{"indented line after an item and a blank line is code", "- a\n\n      " + ws(30) + "\n", 0},
+		{"indented line of 26 words after an item is code", "- item.\n\n  " + ws(26) + "\n", 0},
+		{"indented line after an indented item is code", "  - a.\n\n  " + ws(26) + "\n", 0},
 		{"unclosed backtick is a character at 25", ws(24) + " `a.\n", 0},
 		{"unclosed backtick is a character at 26", ws(25) + " `a.\n", 1},
 	} {

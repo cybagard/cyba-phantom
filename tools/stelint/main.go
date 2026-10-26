@@ -20,9 +20,10 @@
 // git. It checks only the sentence rule, and it has no column rule. Each line
 // of the file is a line of text. A "\r" at the end of a line is removed.
 // The word count and the end marks are the same as for a comment, and the
-// limit is 25 words. A line that starts with a list marker, "#" or "|" always
-// ends the paragraph before it. In a comment, it can continue the paragraph.
-// The form takes exactly one file, and it does not combine with -all.
+// limit is 25 words. A line that starts with a list marker or "|" ends the
+// paragraph before it. So does a "#" line with no indent. In a comment, such a
+// line can continue the paragraph. The form takes exactly one file, and it
+// does not combine with -all.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -72,13 +73,16 @@
 // A heading starts with "#" and a space. A list item starts with a marker and
 // a space. The marker is "-", "*", "+", "•", or a number with "." or ")". An
 // indented line after a list item belongs to the item. An unindented line ends
-// the item and starts a paragraph, as in go/doc/comment. After a blank line, an
-// indented line stays in the item, if it is indented to the item text.
+// the item and starts a paragraph, as in go/doc/comment. In a comment, an
+// indented line stays in the item after a blank line. This holds if the marker
+// line has an indent. In a text file, an indented line after a blank line is
+// code.
 //
 // A line of an open paragraph can start with "#", a list marker or "|". In a
-// comment, it continues the paragraph, as go/doc/comment reads it. A line with
-// an indent, or a line after a line that ends with a colon, still starts a
-// block.
+// comment, such a line continues the paragraph, as go/doc/comment reads it.
+// This holds when it has no indent and the line before does not end with a
+// colon. Otherwise a list marker or "|" line starts a block. A "#" line after a
+// colon line also starts a block. An indented "#" line continues the paragraph.
 //
 // A table row starts with "|". Each cell ends a sentence. A separator row
 // has only "|", "-", ":" and spaces, and it has no cell. A trailer line
@@ -98,11 +102,13 @@
 //   - after a closing fence
 //   - after a code block
 //
-// After a list item and a blank line, a line indented to the item text is not
-// code. An indented "|" line in such a place is code, not a table row. In a
-// code block, an indented line stays code, also when it starts with a list
-// marker. A fence of three backticks also makes a code block. stelint does not
-// count code.
+// In a comment, a "|" line in the gap after a list item is item text. This
+// holds if the marker line has an indent. After a marker line with no indent,
+// an indented line in the gap is code. An indented "|" line at another place
+// where a code block can start is code, not a table row. In a text file, an
+// indented "|" line is a table row, except in a code block. In a code block, an
+// indented line stays code, also when it starts with a list marker. A fence of
+// three backticks also makes a code block. stelint does not count code.
 //
 // A word is a run of characters between word breaks. A space is each rune
 // for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
@@ -118,8 +124,11 @@
 // sentence end. A code span is one word, also when it has spaces. A run of n
 // backticks opens it. Only the next run of exactly n backticks closes it. A "."
 // in a code span does not end a sentence. In a Markdown link, only the link
-// text counts. After a space, the URL can have a title. The title is in double
-// quotes, single quotes or parentheses. A URL in "<" and ">" can have spaces.
+// text counts. After a space, a tab or a line end, the URL can have a title.
+// The title is in double quotes, single quotes or parentheses. It ends on its
+// own line. Only a space, a tab or a line end can stand between the URL and the
+// title. The same holds before the closing ")". A URL in "<" and ">" can have
+// spaces.
 // Otherwise a URL with a word break makes no link. A run of backticks with no
 // closing run is ordinary text. So is a link with no closing mark.
 //

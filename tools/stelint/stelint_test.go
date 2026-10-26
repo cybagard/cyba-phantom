@@ -753,8 +753,15 @@ func TestSentenceRules(t *testing.T) {
 		{"item paragraph after an intro", "// Intro.\n//\n//   - item one.\n//\n//     " + ws(25) + "\n", []sentence{{5, 5, 25}}},
 		{"item paragraph after two blank lines", "//   - item one.\n//\n//\n//     " + ws(25) + "\n", []sentence{{4, 4, 25}}},
 		{"item paragraph with two lines", "//   - item one.\n//\n//     " + ws(12) + "\n//     " + ws(12) + "\n", []sentence{{3, 4, 24}}},
-		{"indent less than the item text is code", "// Intro.\n//\n//   - item one.\n//\n//    " + ws(25) + "\n", nil},
-		{"item paragraph after a bullet item", "// • item.\n//\n//   " + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"indent less than the item text is an item paragraph", "// Intro.\n//\n//   - item one.\n//\n//    " + ws(25) + "\n", []sentence{{5, 5, 25}}},
+		{"indented line after a bullet item with no indent is code", "// • item.\n//\n//   " + ws(25) + "\n", nil},
+		{"tab line after an indented item is an item paragraph", "// Intro.\n//\n//   - a.\n//\n//\t" + ws(30) + "\n", []sentence{{5, 5, 30}}},
+		{"tab line after an item with two spaces is an item paragraph", "//  - a.\n//\n//\t" + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"tab line after a numbered item with no indent is code", "// 1. a.\n//\n//\t" + ws(30) + "\n", nil},
+		{"bar line after an indented item is item text", "// Intro.\n//\n//   - a.\n//\n//   | " + ws(30) + " |\n", []sentence{{5, 5, 32}}},
+		{"unindented line after an item and a blank line is a new paragraph", "//   - a.\n//\n// " + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"indented line after a paragraph that follows an item is code", "//   - a.\n//\n// Para.\n//\n//\t" + ws(30) + "\n", nil},
+		{"bar line after an item paragraph is a table row", "// Intro.\n//\n//   - a.\n//\n//   b.\n//   | " + ws(30) + " |\n", []sentence{{6, 6, 30}}},
 		{"item paragraph after a tab and a dash", "//\t- item.\n//\n//\t  " + ws(25) + "\n", []sentence{{3, 3, 25}}},
 		{"indented line after a heading after an item is code", "//   - item one.\n//\n// # H\n//     " + ws(25) + "\n", nil},
 
@@ -865,6 +872,17 @@ func TestSentenceRules(t *testing.T) {
 		{"angle destination with a space", "// [a](<u v>) " + ws(19) + ".\n", nil},
 		{"angle destination with a title", "// [a](<u v> \"t\") " + ws(19) + ".\n", nil},
 		{"angle destination with no end is not a link", "// [a](<u " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A title ends on its own line. Only a space, a tab or a line end
+		// stands between the parts of a link tail.
+		{"title over a line end is not a link", "// See [x](u \"" + ws(10) + "\n// " + ws(30) + "\") end.\n", []sentence{{1, 2, 43}}},
+		{"tab and line ends stand in a link tail", "// [a](u\t\"t u v\"\t) " + ws(19) + ".\n// [a](u\n// \"t u v\"\n// ) " + ws(19) + ".\n", nil},
+		{"no-break space before a title is not a link", "// [a](u \"t u\") " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"zero-width space before a title is not a link", "// [a](u​\"t u v\") " + ws(19) + ".\n", []sentence{{1, 1, 23}}},
+		{"zero-width space before the close is not a link", "// [a](u \"t\"​) " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"parenthesis title that holds an opening parenthesis is not a link", "// [a](u (t () " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"word directly after a link joins the link word", "// [a](u)b " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"span of two backticks before a span of one", "// ``a`` " + ws(30) + " `b`.\n", []sentence{{1, 1, 32}}},
 	}
 	for _, c := range cases {
 		got := sentences(c.src)
@@ -978,6 +996,8 @@ func TestSentenceTimeIsLinear(t *testing.T) {
 		"[a](<", "[](<x ", "[](x \"y", "[a]( ", "`a "} {
 		finishes(t, "// "+strings.Repeat(unit, n)+"\n")
 	}
+	// A title that runs over many lines.
+	finishes(t, "// "+strings.Repeat("[a](x \"\n// ", n)+"\n")
 	finishes(t, "// `"+strings.Repeat("a ", n)+"\n")
 	finishes(t, "// ``"+strings.Repeat("a ", n)+"\n")
 	// Many links share one destination, and the title never closes.
@@ -998,7 +1018,7 @@ func finishes(t *testing.T, src string) {
 	}
 }
 
-// ADR decision 10: a number, an ID, a path and a URL are each one word.
+// A number, an ID, a path and a URL are each one word.
 func TestNumberIDPathAndURLAreOneWord(t *testing.T) {
 	for _, w := range []string{"1.5", "FR-12", "./a/b.go", "https://example.com/x"} {
 		if got := sentences("// " + ws(19) + " " + w + ".\n"); len(got) != 0 {

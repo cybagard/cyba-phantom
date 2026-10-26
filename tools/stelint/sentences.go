@@ -270,17 +270,20 @@ const (
 // backticks. A line with a tab or two spaces of indent is also code. This holds
 // when no paragraph or list item is open. In a code block, each indented line
 // stays code. A line with noCode set never starts a code block by its indent.
-// A blank line after a list item keeps the item open. An indented line then
-// stays in the item, if it is as deep as the item text. When md is false, a
-// marker line continues an open paragraph. This does not hold after a line
-// that ends with a colon.
+// When md is false, three more rules hold. First, a marker line with no indent
+// continues an open paragraph. This does not hold after a line that ends with
+// a colon. Second, a blank line after a list item keeps the item open when the
+// marker line has an indent. Each indented line after the blank line is then
+// a paragraph of the item, also a "|" line. After a marker line with no
+// indent, such a line is code. Third, an indented "|" line where a code block
+// can start is code. When md is true, none of these rules holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
-		paras   []*para
-		cur     *para
-		mode    int
-		fence   bool
-		itemCol int // the column of the text of the last list item
+		paras      []*para
+		cur        *para
+		mode       int
+		fence      bool
+		itemIndent bool // the marker line of the last list item has an indent
 	)
 	end := func() {
 		if cur != nil {
@@ -299,7 +302,7 @@ func paragraphs(g []textLine, md bool) []*para {
 		indented := strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "  ")
 		rest, item := listItem(t)
 		cont := !md && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
-		codeStart := indented && !l.noCode && mode != modePara && mode != modeList
+		codeStart := !md && indented && !l.noCode && mode != modePara && mode != modeList
 		switch {
 		case strings.HasPrefix(t, "```"):
 			end()
@@ -308,7 +311,7 @@ func paragraphs(g []textLine, md bool) []*para {
 		case fence:
 		case t == "":
 			end()
-			if mode == modeList || mode == modeListGap {
+			if !md && (mode == modeList || mode == modeListGap) {
 				mode = modeListGap
 			} else {
 				mode = modeNone
@@ -333,8 +336,8 @@ func paragraphs(g []textLine, md bool) []*para {
 			end()
 			add(rest, l.line)
 			mode = modeList
-			itemCol = indentWidth(l.text) + utf8.RuneCountInString(t[:len(t)-len(rest)])
-		case indented && mode == modeListGap && indentWidth(l.text) >= itemCol:
+			itemIndent = indented
+		case indented && mode == modeListGap && itemIndent:
 			add(t, l.line)
 			mode = modeList
 		case indented && (mode == modePara || mode == modeList):
@@ -352,11 +355,6 @@ func paragraphs(g []textLine, md bool) []*para {
 	}
 	end()
 	return paras
-}
-
-// indentWidth counts the columns of the tabs and spaces that start s.
-func indentWidth(s string) int {
-	return width(s[:len(s)-len(strings.TrimLeft(s, " \t"))])
 }
 
 // isTrailer reports whether a trimmed line is a commit trailer line in its full
@@ -559,21 +557,21 @@ func (p *para) long(limit int) []sentence {
 		}
 		return stop
 	}
+	// blanks skips spaces, tabs and line ends from index i. It returns the
+	// index after them. CommonMark allows only these in a link tail. Another
+	// word break, such as U+00A0, makes no link.
 	blanks := func(i int) int {
-		for i < len(b) {
-			r, n := utf8.DecodeRune(b[i:])
-			if !isWordBreak(r) {
-				break
-			}
-			i += n
+		for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n') {
+			i++
 		}
 		return i
 	}
 	// tail is the end of a link after its destination, which ends at index i.
 	// It reads blanks, an optional title in '"', "'" or "()", blanks and ")".
-	// It returns the index after ")", or -1. The search for a title end
-	// starts at the opening mark. It stops at the next such mark. The last
-	// result is kept, as links can share a destination.
+	// It returns the index after ")", or -1. The title ends at its closing
+	// mark on the same line. The search for it starts at the opening mark. It
+	// stops at the next such mark or at a line end. The last result is kept,
+	// as links can share a destination.
 	tail := func(i int) (end int) {
 		if i == tailAt {
 			return tailEnd
@@ -595,8 +593,8 @@ func (p *para) long(limit int) []sentence {
 		default:
 			return -1
 		}
-		k := bytes.IndexAny(b[j+1:], marks)
-		if k < 0 || b[j+1+k] == '(' {
+		k := bytes.IndexAny(b[j+1:], marks+"\n")
+		if k < 0 || b[j+1+k] == '(' || b[j+1+k] == '\n' {
 			return -1
 		}
 		if e := blanks(j + k + 2); e < len(b) && b[e] == ')' {
