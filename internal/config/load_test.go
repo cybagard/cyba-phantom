@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +258,8 @@ func TestTS10_Scalars(t *testing.T) {
 		{"URL text to the last @", "", "PHANTOM_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
 		{"URL form without //", "", "PHANTOM_A_EVERY=https:u:SECRET@h", `: value "REDACTED@h"`},
 		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml:6: listen: column 3: ` + keyRule},
+		{"known env name twice", "", "PHANTOM_A_FLAG=true PHANTOM_A_FLAG=false", "PHANTOM_A_FLAG: the variable occurs more than one time"},
+		{"known env name twice, reader error", "a: [\n", "PHANTOM_A_FLAG=true PHANTOM_A_FLAG=false", "PHANTOM_A_FLAG: the variable occurs more than one time"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -283,7 +286,7 @@ func TestTS10_OldPrefixIgnored(t *testing.T) {
 
 // TestTS10_Secret checks that no error shows a secret value. The value is in
 // a value, a tag, a mapping key, or a key below a secret key.
-// Each error holds want.
+// The joined text of the errors holds want.
 func TestTS10_Secret(t *testing.T) {
 	useTestKeys(t)
 	const marker = "secret_marker_7f3a"
@@ -295,7 +298,7 @@ func TestTS10_Secret(t *testing.T) {
 		{"token:\n    " + marker + ":\n      x: !t 1", "a.token"}, {"token: [" + marker + ": !t 1]", "a.token"},
 	} {
 		_, err := loadTest(writeConfig(t, base+"a:\n  "+r.body+"\n"), []string{"PHANTOM_A_TOKEN=" + marker, "PHANTOM_A_PIN=" + marker})
-		// The join of the *Error values.
+		// Load joins the *Error values.
 		joined, ok := err.(interface{ Unwrap() []error })
 		if !ok {
 			t.Fatalf("%q: got %v, want a join of errors", r.body, err)
@@ -318,18 +321,21 @@ func TestTS10_NoUserName(t *testing.T) {
 	for _, v := range []struct{ in, user string }{
 		{"user:SECRET@tcp(h)/db", "user"},
 		{"ops@corp.example:SECRET@tcp(h)/db", "ops@corp.example"},
+		{"user:/pw@tcp(h)/db", "user"}, {"ops@corp.example:/pw@h", "ops@corp.example"},
+		{"user: pw@h", "user"}, {"user:\tpw@h", "user"}, {`user:\pw@h`, "user"},
+		{"user//x:pw@h", "user"}, {"mysql:user:pw@h", "user"},
 	} {
 		for _, name := range []string{"PHANTOM_BUNDLE_FETCH_URL", "PHANTOM_A_EVERY"} {
 			_, err := loadTest(writeConfig(t, base), []string{name + "=" + v.in})
 			if err == nil {
 				t.Fatalf("%s=%s: Load returned no error", name, v.in)
 			}
-			for _, s := range []string{"SECRET", v.user} {
+			for _, s := range []string{"SECRET", "pw", v.user} {
 				if strings.Contains(err.Error(), s) {
 					t.Errorf("%s=%s: the error shows %q: %v", name, v.in, s, err)
 				}
 			}
-			if name == "PHANTOM_A_EVERY" && !strings.Contains(err.Error(), `value "REDACTED@tcp(h)/db"`) {
+			if want := `value "REDACTED@` + v.in[strings.LastIndex(v.in, "@")+1:] + `"`; name == "PHANTOM_A_EVERY" && !strings.Contains(err.Error(), want) {
 				t.Errorf("%s=%s: the error does not show the redacted value: %v", name, v.in, err)
 			}
 		}
@@ -374,7 +380,7 @@ func TestTS10_ReaderError(t *testing.T) {
 		var e *Error // The first error in the join is the reader error.
 		if !errors.As(err, &e) || e.Line != r.line || e.Detail != r.detail || c != nil ||
 			!strings.Contains(err.Error(), "PHANTOM_NOPE: unknown PHANTOM_ variable") {
-			t.Errorf("%s: got config %v and error %v, want line %d and detail %q", r.name, c, err, r.line, r.detail)
+			t.Errorf("%s: got config %v and error %v, want line %d, detail %q, the unknown variable error, and no config", r.name, c, err, r.line, r.detail)
 		}
 	}
 }
@@ -403,15 +409,18 @@ func TestTS10_Escape(t *testing.T) {
 		{"https://u@p@h/x?to=ops@corp.example", "https://REDACTED@corp.example"},
 		{"HTTP://U:SECRET@h", "HTTP://REDACTED@h"},
 		{"//u:SECRET@h", "//REDACTED@h"},
-		{"x //u:a b\tc@host", "x //REDACTED@host"},
+		{"x //u:a b\tc@host", "REDACTED@host"},
 		{"https://h/x", "https://h/x"},
 		{`https:\\u:SECRET@h`, `https:\\\\REDACTED@h`},
 		{`https:/\/u:SECRET@h`, `https:/\\/REDACTED@h`},
-		{"https:/u:SECRET@h", "https:/REDACTED@h"},
+		{"https:/u:SECRET@h", "REDACTED@h"},
 		{"https:u:SECRET@h", "REDACTED@h"},
 		{"https:/\t/u:SECRET@h", `https:/\t/REDACTED@h`},
 		{"user:SECRET@tcp(h:3306)/db", "REDACTED@tcp(h:3306)/db"},
 		{"ops@corp.example:SECRET@tcp(h)/db", "REDACTED@tcp(h)/db"},
+		{"user:/pw@tcp(h)/db", "REDACTED@tcp(h)/db"}, {"ops@corp.example:/pw@h", "REDACTED@h"},
+		{"user: pw@h", "REDACTED@h"}, {"user:\tpw@h", "REDACTED@h"}, {`user:\pw@h`, "REDACTED@h"},
+		{"user//x:pw@h", "REDACTED@h"}, {"mysql:user:pw@h", "REDACTED@h"},
 		{"\u202e" + strings.Repeat("é", 40), `\u202e` + strings.Repeat(`\u00e9`, 9)},
 		{"bad\xff", `bad\xff`},
 	}
@@ -444,5 +453,30 @@ func TestTS10_EscapeCut(t *testing.T) {
 	}
 	if got, want := esc(strings.Repeat("a", 100), -64), cutMarker+strings.Repeat("a", 61); got != want {
 		t.Errorf("left cut = %q, want %q", got, want)
+	}
+	// Each result without the marker is a whole prefix or suffix of the full
+	// escape. A token (an escape or a character) is at each offset at the edge.
+	for _, tok := range []string{`\`, "\n", `"`, "\x1b", "é", "\U0010ffff"} {
+		for p := 50; p <= 70; p++ {
+			for n := 0; n <= 70; n++ {
+				in := strings.Repeat("a", p) + tok + strings.Repeat("a", n)
+				full := esc(in, 1<<20)
+				for _, max := range []int{64, -64} {
+					got := strings.TrimPrefix(esc(in, max), cutMarker)
+					if _, err := strconv.Unquote(`"` + got + `"`); err != nil ||
+						max > 0 && !strings.HasPrefix(full, got) || max < 0 && !strings.HasSuffix(full, got) {
+						t.Fatalf("esc(%d a, %q, %d a, %d) = %q: not a whole part of %q", p, tok, n, max, got, full)
+					}
+				}
+			}
+		}
+	}
+	// A small max gives no panic. The bound holds if max >= 0 or max <= -3.
+	for _, in := range []string{"", "a", "aaaa", "\x1bé\\\"", "\U0010ffff", strings.Repeat("a", 30)} {
+		for max := -20; max <= 20; max++ {
+			if got := esc(in, max); max >= 0 && len(got) > max || max <= -3 && len(got) > -max {
+				t.Errorf("esc(%q, %d) = %q: more than |max| bytes", in, max, got)
+			}
+		}
 	}
 }

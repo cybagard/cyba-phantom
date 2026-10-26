@@ -36,6 +36,8 @@ const (
 // ReadError is an error of ReadFile or ReadBytes.
 // The fields hold the parts of the error, so a caller does not parse the text.
 // Error escapes the key path and the file path.
+// Path can name a key below a secret key. Do not print a ReadError.
+// Use the errors of Load.
 type ReadError struct {
 	File   string // File is the path of the file for a file error, or "".
 	Path   string // Path is the key path for a node error (Column > 0).
@@ -47,7 +49,7 @@ type ReadError struct {
 
 func (e *ReadError) Error() string {
 	s := "config: "
-	if e.File != "" {
+	if e.File != "" || e.Err != nil {
 		s += formatFilePath(e.File) + ": "
 	}
 	if e.Column > 0 {

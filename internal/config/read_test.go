@@ -251,8 +251,30 @@ func TestReadBytesSizeLimit(t *testing.T) {
 	}
 }
 
+// TestTS10_ReadErrorText checks the exact text of each form of ReadError.Error.
+func TestTS10_ReadErrorText(t *testing.T) {
+	long := strings.Repeat("k", 70)
+	for _, r := range []struct {
+		e    ReadError
+		want string
+	}{
+		{ReadError{Path: "a.b", Line: 3, Column: 4, Detail: "duplicate key"}, `config: "a.b": line 3 column 4: duplicate key`},
+		{ReadError{Line: 1, Column: 1, Detail: "x"}, `config: (root): line 1 column 1: x`},
+		{ReadError{Path: long, Line: 1, Column: 1, Detail: "x"}, `config: "` + long[:64] + `": line 1 column 1: x`},
+		{ReadError{Line: 2, Detail: "invalid YAML"}, `config: line 2: invalid YAML`},
+		{ReadError{Detail: "empty document"}, `config: empty document`},
+		{ReadError{File: "/c.yaml", Detail: "not a regular file"}, `config: "/c.yaml": not a regular file`},
+		{ReadError{File: "/c.yaml", Err: syscall.ENOENT}, `config: "/c.yaml": no such file or directory`},
+		{ReadError{Err: syscall.ENOENT}, `config: "": no such file or directory`},
+	} {
+		if got := r.e.Error(); got != r.want {
+			t.Errorf("got %q, want %q", got, r.want)
+		}
+	}
+}
+
 // TestTS10_ReadErrorFields checks that a reader error is a *ReadError.
-// It holds the key path, the line, the column, and the detail as fields.
+// The error holds the key path, the line, the column, and the detail as fields.
 // The text of a file error escapes the path (T-S-10).
 func TestTS10_ReadErrorFields(t *testing.T) {
 	rows := []struct {

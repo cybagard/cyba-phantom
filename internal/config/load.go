@@ -435,18 +435,27 @@ var userinfo = regexp.MustCompile(`(?s)(:[/\\\s]*|[/\\]{2}).*@`)
 // cutMarker starts a text that esc cuts on the left.
 const cutMarker = "..."
 
+// scheme matches a URL scheme: a letter, then letters, digits, "+", "-" or ".".
+var scheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+
 // redact replaces the user information in s with "REDACTED@".
-// It keeps a scheme and the slashes after it.
-// A ":" with no slash after it can end a user name or a scheme.
-// So redact also removes all text before that ":".
+// It keeps the text before "REDACTED@" in two cases only.
+// In case 1, the text before the ":" is a URL scheme.
+// Also, the match has 2 or more slashes or backslashes after the ":".
+// In case 2, the match is two slashes or backslashes at the start of s.
+// In each other case, redact keeps no text before "REDACTED@".
 func redact(s string) string {
 	m := userinfo.FindStringSubmatchIndex(s)
 	if m == nil {
 		return s
 	}
-	keep := s[:m[3]]
-	if s[m[2]:m[3]] == ":" {
-		keep = ""
+	keep, g := "", s[m[2]:m[3]]
+	if g[0] == ':' {
+		if scheme.MatchString(s[:m[2]]) && strings.Count(g, "/")+strings.Count(g, `\`) >= 2 {
+			keep = s[:m[3]]
+		}
+	} else if m[2] == 0 {
+		keep = g
 	}
 	return keep + "REDACTED@" + s[m[1]:]
 }
@@ -455,8 +464,8 @@ func redact(s string) string {
 // It redacts the user information. Then it escapes control characters,
 // ANSI sequences, and non-ASCII runes. Last, it cuts the escaped text to
 // max bytes. It never cuts an escape sequence.
-// If max < 0, esc keeps the end of the text and starts it with cutMarker.
-// The result has at most |max| bytes.
+// If max < 0 and the cut removes text, the result starts with cutMarker.
+// If max >= 0 or max <= -3, the result has at most |max| bytes.
 func esc(s string, max int) string {
 	q := strconv.QuoteToASCII(redact(s))
 	q = q[1 : len(q)-1]
@@ -470,7 +479,7 @@ func esc(s string, max int) string {
 	if len(q) <= -max {
 		return q
 	}
-	for from := len(q) + max + len(cutMarker); i < from; {
+	for from := len(q) + max + len(cutMarker); i < from && i < len(q); {
 		i += escWidth(q[i:])
 	}
 	return cutMarker + q[i:]
