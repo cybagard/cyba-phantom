@@ -349,10 +349,10 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 // listing fails. It also returns nil if the directory has no owner search bit
 // or too many names. Then the caller asks for each name with exists. With no
 // owner search bit, the Lstat of a name below the directory can fail. Then
-// exists counts the name as there. A group or other bit on g, on a parent of
-// g, or on a directory entry that the listing reads is not a failed listing.
-// groupNames returns an *Error with the mode rule for it. It checks only the
-// names that the listing reads before its limit.
+// exists counts the name as there. A group or other bit is not a failed
+// listing. The bit can be on g, on a parent of g, or on a directory entry that
+// the listing reads. groupNames returns an *Error with the mode rule for it.
+// It checks only the names that the listing reads before its limit.
 func (s *Store) groupNames(g string) (map[string]bool, error) {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
@@ -621,13 +621,13 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
 // tree head with a temporary file and an atomic rename, and writes nothing if
-// a stored file has the data already. In that case, if the data has hashes
-// beyond the tree head, WriteTile calls fsync on the directories of the stored
-// file, because an earlier call can have failed after the rename. A stored file
-// that is wider than the data and differs beyond the tree head is stale:
-// WriteTile writes the new file first, then deletes the stale files. After the
-// write, the store deletes the narrower partial files, so that at most one
-// partial file stays.
+// a stored file has the data already. In that case, the data can have hashes
+// beyond the tree head. Then WriteTile calls fsync on the directories of the
+// stored file, because an earlier call can have failed after the rename. A
+// stored file can be wider than the data and differ beyond the tree head. Such
+// a file is stale. WriteTile writes the new file first, then deletes the stale
+// files. After the write, the store deletes the narrower partial files, so
+// that at most one partial file stays.
 // WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
 // the tree head between two calls of SetHead. WriteTile first checks each
 // directory of the tile path. Each must be a real directory and not a link.

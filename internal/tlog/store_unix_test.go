@@ -478,8 +478,8 @@ func TestTS13OpenTidiesGroupDirectoryWithManyNames(t *testing.T) {
 // A directory that Open lists must have no group or other bit. So must each
 // directory entry of the listing. Tile 0 of this log is full, so its
 // partial-tile directory is empty and Open reads no file there. The cases are
-// that directory, an entry of the partial-tile directory of tile 2, and the
-// empty group directory of level 2.
+// that directory and an entry of the partial-tile directory of tile 2. The
+// last case is the empty group directory of level 2.
 func TestTS13OpenRefusesListedDirectoryWithGroupOrOtherBits(t *testing.T) {
 	for _, name := range []string{"tile/8/0/000.p", "tile/8/0/002.p/x", "tile/8/2"} {
 		for _, mode := range []os.FileMode{0o750, 0o705} {
@@ -553,10 +553,10 @@ func TestTS13OpenGivesNotDirRuleForDirectoryReplacedBeforeFsync(t *testing.T) {
 	}
 }
 
-// The error names the directory whose check failed, also when it is a parent
-// of the directory that the fsync opens. A link out of the state directory
-// gets the link rule, and a parent that is a regular file gets the
-// not-a-directory rule.
+// The error names the directory whose check failed. This can be a parent of
+// the directory that the fsync opens. A link out of the state directory gets
+// the link rule. A parent that is a regular file gets the not-a-directory
+// rule.
 func TestTS13OpenNamesPartReplacedBeforeFsync(t *testing.T) {
 	outside := t.TempDir()
 	for _, c := range []struct {
