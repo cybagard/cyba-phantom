@@ -620,10 +620,11 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // that the tree head covers never changes: if data differs from a stored file
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
-// tree head with a temporary file and an atomic rename, and writes nothing if
+// tree head with a temporary file and an atomic rename. It writes nothing if
 // a stored file has the data already. In that case, the data can have hashes
 // beyond the tree head. Then WriteTile calls fsync on the directories of the
-// stored file, because an earlier call can have failed after the rename. A
+// stored file. This is because an earlier call can have failed after the
+// rename. A
 // stored file can be wider than the data and differ beyond the tree head. Such
 // a file is stale. WriteTile writes the new file first, then deletes the stale
 // files. After the write, the store deletes the narrower partial files, so
