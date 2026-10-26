@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 const marker = "-----BEGIN EC PRIVATE KEY-----"
@@ -532,11 +534,12 @@ func TestTS16LoadGivesTheChangedRuleWhenTheKeyFileIsTruncatedAfterTheOpen(t *tes
 	// The hook truncates the same file before Load calls Stat. The open file then
 	// has the size 700 when Load reads it. Load must not return the 700 bytes.
 	calls := 0
-	betweenOpenAndStat = func() {
-		calls++
-		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/kd/key"), 700))
-	}
-	t.Cleanup(func() { betweenOpenAndStat = nil })
+	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(name string) {
+		if name == "key" {
+			calls++
+			mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/kd/key"), 700))
+		}
+	}})
 	b, err := s.Load(ctx, "kd/key")
 	wantError(t, err, "load", ruleChanged)
 	if b != nil {
