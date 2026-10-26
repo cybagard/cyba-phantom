@@ -35,7 +35,8 @@ var _ logReader = (*tlog.Log)(nil)
 // Recovery holds what the writer needs at start and at a stop. State is the
 // state directory that Open used. Origin is tlog.origin. Log is the log that the
 // appender writes to. It must be the same log as the appender argument of
-// NewWriter. State and Log must not be nil. A nil *tlog.Log in Log is nil too.
+// NewWriter. State and Log must not be nil. The start check treats a nil
+// *tlog.Log in Log as no log.
 type Recovery struct {
 	State  *os.Root
 	Origin string

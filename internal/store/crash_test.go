@@ -113,7 +113,8 @@ func TestTI07CrashHelper(t *testing.T) {
 	committed := make(chan int, 4)
 	w.onCommit = func(n int) { committed <- n }
 	// The tick channel has no buffer, so a completed send proves that Run read
-	// the tick. The real ticker could fire between two enqueues and split a batch.
+	// the tick. The real ticker could fire between two enqueues and split a
+	// batch.
 	tick := make(chan time.Time)
 	w.tick = tick
 	crashEvents(t, q, goodBatch)
@@ -133,8 +134,7 @@ func TestTI07CrashHelper(t *testing.T) {
 // checkEvidence checks each evidence row against the log. It returns the log
 // size and the number of rows. It fails if a row does not verify.
 // The schema CHECK permits no evidence row without a hash and a leaf index, so
-// no query tests for one. The verify loop is the same as in evidence_test.go.
-// It stays here: a shared helper needs a change of that file.
+// no query tests for one. A similar verify loop is in evidence_test.go.
 func checkEvidence(t *testing.T, db *sql.DB, l *tlog.Log) (size, rows int64) {
 	t.Helper()
 	size, _ = l.Head()

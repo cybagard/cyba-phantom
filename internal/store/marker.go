@@ -27,8 +27,8 @@ func checkMarker(root *os.Root) error {
 
 // makeMarker makes the marker if it is absent. A marker that exists is a
 // success. When it makes the file, it calls fsync on the file. It calls fsync
-// on the directory after a new file or an old marker. A nil root, and any other
-// error from the file, return at once.
+// on the directory after a new file or a marker that exists. With a nil root or
+// another file error, it returns at once.
 func makeMarker(root *os.Root) error {
 	if root == nil {
 		return errors.New("no state directory")
