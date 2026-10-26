@@ -762,6 +762,8 @@ func TestSentenceRules(t *testing.T) {
 		{"unindented line after an item and a blank line is a new paragraph", "//   - a.\n//\n// " + ws(25) + "\n", []sentence{{3, 3, 25}}},
 		{"indented line after a paragraph that follows an item is code", "//   - a.\n//\n// Para.\n//\n//\t" + ws(30) + "\n", nil},
 		{"bar line after an item paragraph is a table row", "// Intro.\n//\n//   - a.\n//\n//   b.\n//   | " + ws(30) + " |\n", []sentence{{6, 6, 30}}},
+		{"second item paragraph after a blank line", "// Intro.\n//\n//   - a.\n//\n//     b.\n//\n//     " + ws(25) + "\n", []sentence{{7, 7, 25}}},
+		{"marker with no indent after an item paragraph starts an item", "// Intro.\n//\n//   - a.\n//\n//     b\n// - " + ws(20) + ".\n", nil},
 		{"item paragraph after a tab and a dash", "//\t- item.\n//\n//\t  " + ws(25) + "\n", []sentence{{3, 3, 25}}},
 		{"indented line after a heading after an item is code", "//   - item one.\n//\n// # H\n//     " + ws(25) + "\n", nil},
 
@@ -862,7 +864,6 @@ func TestSentenceRules(t *testing.T) {
 		{"parenthesis title with a parenthesis inside is not a link", "// [a](u (t (v)) " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
 		{"title right after an angle destination is not a link", "// [a](<u>\"t u v\") " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
 		{"link with blanks before the close", "// [a](u ) " + ws(19) + ".\n", nil},
-
 		{"title with no close is not a link, also before a paren", "// [a](u \") " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
 		{"link with a blank rune at the end", "// [a](u⠀\n", nil},
 
@@ -876,6 +877,7 @@ func TestSentenceRules(t *testing.T) {
 		// A title ends on its own line. Only a space, a tab or a line end
 		// stands between the parts of a link tail.
 		{"title over a line end is not a link", "// See [x](u \"" + ws(10) + "\n// " + ws(30) + "\") end.\n", []sentence{{1, 2, 43}}},
+		{"title that runs to a line end is not a link", "// [a](u \"t u v\n// ) " + ws(19) + ".\n", []sentence{{1, 2, 24}}},
 		{"tab and line ends stand in a link tail", "// [a](u\t\"t u v\"\t) " + ws(19) + ".\n// [a](u\n// \"t u v\"\n// ) " + ws(19) + ".\n", nil},
 		{"no-break space before a title is not a link", "// [a](u \"t u\") " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
 		{"zero-width space before a title is not a link", "// [a](u​\"t u v\") " + ws(19) + ".\n", []sentence{{1, 1, 23}}},
@@ -963,6 +965,7 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"directive text is skipped", "//go:generate " + ws(30) + "\n", nil},
 		{"block comment: lines of one text", "/*\n" + ws(11) + "\n" + ws(10) + "\n*/\n", []sentence{{2, 3, 21}}},
 		{"block comment: stars are removed", "/*\n * " + ws(11) + "\n * " + ws(10) + "\n */\n", []sentence{{2, 3, 21}}},
+		{"block comment: a marker line ends the paragraph", "/*\nIntro " + ws(10) + "\n  - " + ws(12) + ".\n*/\n", nil},
 		{"block comment at 20", "/* " + ws(20) + ". */\n", nil},
 		{"block comment at 21", "/* " + ws(21) + ". */\n", []sentence{{1, 1, 21}}},
 		{"block comment: indent does not make code", "/*\n\t" + ws(21) + ".\n*/\n", []sentence{{2, 2, 21}}},
@@ -1000,8 +1003,12 @@ func TestSentenceTimeIsLinear(t *testing.T) {
 	finishes(t, "// "+strings.Repeat("[a](x \"\n// ", n)+"\n")
 	finishes(t, "// `"+strings.Repeat("a ", n)+"\n")
 	finishes(t, "// ``"+strings.Repeat("a ", n)+"\n")
-	// Many links share one destination, and the title never closes.
+	// Many link openings share one destination end, and one title never
+	// closes.
 	finishes(t, "// "+strings.Repeat("[](", n)+" (y"+strings.Repeat(" a", n)+"\n")
+	// An angle destination link comes before each of these openings.
+	finishes(t, "// "+strings.Repeat("[](<>[](", n)+" \""+strings.Repeat("a", 8*n)+"\n")
+	finishes(t, "// "+strings.Repeat("[](<>[](", n)+" ("+strings.Repeat("a", 8*n)+"\n")
 	// Many spans: a search for a closing run must keep its position.
 	finishes(t, "// "+strings.Repeat("`a", 4*n)+"\n")
 }

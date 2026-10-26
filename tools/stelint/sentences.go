@@ -29,6 +29,8 @@ type textLine struct {
 	// noCode is true when the line is in a text that starts after code. Its
 	// indent does not make a code block. A token line has noCode false.
 	noCode bool
+	// block is true for a line of a "/* */" comment, which has no indent.
+	block bool
 }
 
 // hasAny reports whether the check covers a sentence that runs from line first
@@ -250,7 +252,7 @@ func blockLines(lit string, line int) []textLine {
 		if i > 0 {
 			p = strings.TrimPrefix(p, "*")
 		}
-		out = append(out, textLine{text: p, line: line + i})
+		out = append(out, textLine{text: p, line: line + i, block: true})
 	}
 	return out
 }
@@ -272,11 +274,13 @@ const (
 // stays code. A line with noCode set never starts a code block by its indent.
 // When md is false, three more rules hold. First, a marker line with no indent
 // continues an open paragraph. This does not hold after a line that ends with
-// a colon. Second, a blank line after a list item keeps the item open when the
-// marker line has an indent. Each indented line after the blank line is then
-// a paragraph of the item, also a "|" line. After a marker line with no
-// indent, such a line is code. Third, an indented "|" line where a code block
-// can start is code. When md is true, none of these rules holds.
+// a colon, or in a "/* */" comment. Second, a blank line after a list item
+// keeps the item open when the marker line has an indent. Each indented line
+// after the blank line is then a paragraph of the item, also a "|" line. An
+// indented marker line is the exception: it starts a new item. After a marker
+// line with no indent, an indented line is code, unless noCode is set for it.
+// Third, an indented "|" line where a code block can start is code. When md is
+// true, none of these rules holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
 		paras      []*para
@@ -301,7 +305,7 @@ func paragraphs(g []textLine, md bool) []*para {
 		t := strings.TrimSpace(l.text)
 		indented := strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "  ")
 		rest, item := listItem(t)
-		cont := !md && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
+		cont := !md && !l.block && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
 		codeStart := !md && indented && !l.noCode && mode != modePara && mode != modeList
 		switch {
 		case strings.HasPrefix(t, "```"):
@@ -478,8 +482,9 @@ func spaceAt(b []byte, i int) bool {
 // long returns the sentences of the paragraph that have more than limit words.
 // A code span in backticks is one word. A link counts only its text. A search
 // for a closing mark does not start again at each opening mark. It keeps its
-// position, or it stops at the next mark of its kind. So the time is linear in
-// the length of the text.
+// position, or it stops at the next mark of its kind. A link with an angle
+// destination keeps no result, as each ">" is read by one scan only. So the
+// time is linear in the length of the text.
 func (p *para) long(limit int) []sentence {
 	var (
 		out         []sentence
@@ -570,18 +575,13 @@ func (p *para) long(limit int) []sentence {
 	// It reads blanks, an optional title in '"', "'" or "()", blanks and ")".
 	// It returns the index after ")", or -1. The title ends at its closing
 	// mark on the same line. The search for it starts at the opening mark. It
-	// stops at the next such mark or at a line end. The last result is kept,
-	// as links can share a destination.
-	tail := func(i int) (end int) {
-		if i == tailAt {
-			return tailEnd
-		}
-		defer func() { tailAt, tailEnd = i, end }()
+	// stops at the next such mark or at a line end.
+	tail := func(i int) int {
 		j := blanks(i)
 		if j < len(b) && b[j] == ')' {
 			return j + 1
 		}
-		if j == i || j == len(b) {
+		if j == i {
 			return -1
 		}
 		marks := ""
@@ -613,9 +613,16 @@ func (p *para) long(limit int) []sentence {
 			if j == len(b) || b[j] != '>' {
 				return -1
 			}
+			// Each ">" ends one angle scan, so this path keeps no result.
 			return tail(j + 1)
 		}
-		return tail(nextStop(i))
+		// Links can share the end of a destination. Only this path keeps the
+		// last result of tail.
+		at := nextStop(i)
+		if at != tailAt {
+			tailAt, tailEnd = at, tail(at)
+		}
+		return tailEnd
 	}
 	for i := 0; i < len(b); {
 		c, n := utf8.DecodeRune(b[i:])
