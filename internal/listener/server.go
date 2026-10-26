@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,12 +22,9 @@ type Config struct {
 	// TLS gives the certificates. New refuses a config that sets NextProtos or
 	// GetConfigForClient, because the server sets both. The server clones the
 	// config, sets the ALPN list to http/1.1 and acme-tls/1, and sets the
-	// ClientHello capture. If GetCertificate is set, the server wraps it. Any
-	// error of it with no gate result gives no event. Examples are no
-	// certificate to give, and acme-tls/1 with no active challenge. A
-	// certificate that it returns lets a failed handshake give client_abort,
-	// when the client stops. A connection that negotiates acme-tls/1 gets no
-	// HTTP and closes after the handshake.
+	// ClientHello capture. If GetCertificate is set, the server wraps it; see
+	// withCertMarks. A connection that negotiates acme-tls/1 gets no HTTP and
+	// closes after the handshake.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
 	// all Serve and ServePlain calls. limits.max_conns.
@@ -261,7 +259,7 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 // withCertMarks wraps a certificate callback. Any error with no gate result
 // gives no event. Examples are no certificate to give, and acme-tls/1 with no
 // active challenge. A certificate marks the connection, so a client that then
-// stops gives client_abort. The mark is not made for a client that offers only
+// stops can give client_abort. The mark is not made when the hello negotiates
 // acme-tls/1.
 func withCertMarks(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -269,12 +267,19 @@ func withCertMarks(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) fun
 		if lc := helloConn(hello); lc != nil {
 			if err != nil {
 				lc.markNoCert()
-			} else if !onlyChallenge(hello) {
+			} else if !negotiatesChallenge(hello) {
 				lc.markCert()
 			}
 		}
 		return cert, err
 	}
+}
+
+// negotiatesChallenge tells if the handshake of hello picks acme-tls/1. The
+// server list has http/1.1 first, so crypto/tls picks acme-tls/1 only when the
+// client list has acme-tls/1 and no http/1.1.
+func negotiatesChallenge(hello *tls.ClientHelloInfo) bool {
+	return slices.Contains(hello.SupportedProtos, challengeProto) && !slices.Contains(hello.SupportedProtos, "http/1.1")
 }
 
 // limitConnKey is the context key of the limitConn of a request.

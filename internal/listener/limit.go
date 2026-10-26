@@ -276,12 +276,11 @@ type limitConn struct {
 	// noCert is true when the certificate callback failed and the name gate did
 	// not refuse the connection.
 	noCert bool
-	// cert is true when the certificate callback returned a certificate. The
-	// client did not offer only acme-tls/1.
+	// cert is true when the certificate callback returned a certificate and the
+	// hello does not negotiate acme-tls/1.
 	cert bool
 	// lastData is true when the last read gave data, no error, no timeout. A
-	// write that fails after that read sets it to false. So after a failed
-	// write, lastData stays false until the next read with data.
+	// write that fails after that read sets it to false.
 	lastData bool
 }
 
@@ -383,8 +382,8 @@ const recordApplicationData = 23
 // of more than uncountedWriteMax bytes that starts with recordApplicationData.
 // A failed write, also a timeout, ends the handshake: crypto/tls reads no more.
 // Then lastData is false until the next read with data. So a connection whose
-// certificate callback returned a certificate gives client_abort, not
-// bad_hello.
+// certificate callback returned a certificate can give client_abort, not
+// bad_hello. handshakeReason has the order of the rules.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active

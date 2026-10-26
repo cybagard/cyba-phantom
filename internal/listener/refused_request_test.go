@@ -547,28 +547,6 @@ func TestTS22FailedWriteClearsHelloData(t *testing.T) {
 	}
 }
 
-// T-S-22: the order of handshakeReason. The certificate mark gives client_abort
-// only when no other rule applies. The other rules are the no certificate mark,
-// a budget close, a gate reason, and a last read with data.
-func TestTS22HandshakeReasonOrder(t *testing.T) {
-	for name, tc := range map[string]struct {
-		mod  func(*limitConn)
-		want event.RefusedReason // 0 for none
-	}{
-		"certificate and no data": {func(*limitConn) {}, event.ReasonClientAbort},
-		"data":                    {func(c *limitConn) { c.lastData = true }, event.ReasonBadHello},
-		"gate":                    {func(c *limitConn) { c.gate = event.ReasonUnknownName }, event.ReasonUnknownName},
-		"no certificate mark":     {func(c *limitConn) { c.noCert = true }, 0},
-		"budget close":            {func(c *limitConn) { c.budgetClosed = true }, 0},
-	} {
-		c := &limitConn{cert: true}
-		tc.mod(c)
-		if r, ok := c.handshakeReason(); r != tc.want || ok != (tc.want != 0) {
-			t.Errorf("%s: reason %v, ok %v; want %v", name, r, ok, tc.want)
-		}
-	}
-}
-
 // appData returns n bytes that start with the record type application_data.
 func appData(n int) []byte {
 	p := make([]byte, n)
