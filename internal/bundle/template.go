@@ -39,9 +39,9 @@ func parseTemplates(a *Archive) (map[string]*template.Template, error) {
 	return parseWith(a, newTemplate)
 }
 
-// parseWith is parseTemplates with the constructor mk. The caps of all templates
-// are checked before the first Parse. The error is ErrTemplateParse. That error
-// holds no template text, because a parse error can quote the input.
+// parseWith is parseTemplates with the constructor mk. It checks the caps of
+// all templates before the first Parse. The error is ErrTemplateParse. That
+// error holds no template text, because a parse error can quote the input.
 func parseWith(a *Archive, mk func(string) *template.Template) (map[string]*template.Template, error) {
 	var names []string
 	var sumBytes, sumActions int

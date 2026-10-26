@@ -23,8 +23,8 @@ const fixtureDir = "../../test/fixtures/bundles"
 const vhostFile = "vhosts/h.example/index.tmpl"
 
 // bundleFixtures makes the bytes of each fixture file. Each one but
-// malformed.cbnd has a version above the running version 2, so that it passes
-// the checks before its own. malformed.cbnd has no valid manifest.
+// malformed.cbnd has a version above the running version 2. So it passes the
+// checks before its own. malformed.cbnd has no valid manifest.
 // The files hold no signature. The tests sign them with test keys.
 func bundleFixtures() map[string][]byte {
 	page := ent{name: vhostFile, data: []byte("<p>{{.Title}}</p>\n")}
