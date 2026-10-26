@@ -32,6 +32,7 @@ go/scanner
 go/token
 golang.org/x/mod/sumdb/note
 golang.org/x/mod/sumdb/tlog
+html/template
 io
 io/fs
 log

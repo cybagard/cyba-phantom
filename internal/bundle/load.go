@@ -86,7 +86,7 @@ type Loader struct {
 // path is in slash form, as "bundle/current.cbnd". The signature file has the
 // same name with ".sig" in place of ".cbnd". The caller keeps state open.
 func NewLoader(state *os.Root, path string, trust TrustSet) *Loader {
-	return &Loader{state: state, path: path, trust: trust, now: time.Now, decompress: ReadArchive}
+	return &Loader{state: state, path: path, trust: trust, now: time.Now, decompress: ReadArchive, template: parseTemplates}
 }
 
 // Current returns the running bundle, or nil before the first accept.
