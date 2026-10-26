@@ -29,10 +29,15 @@ const (
 // Open and Migrate, the queue, and the appender. The caller closes them after
 // Run returns. It also adds the drop counts of the queue to ip_counter.
 //
-// The writer stops for one of five causes: an append error, a database error, a
-// record error (the kind, the event hash or the record bytes of an event cannot
-// be made), a failed start check, or a fork signal of the checkpoint row (see
-// Run). Healthy, Err and Stats are safe to call from any goroutine.
+// The writer stops for one of five causes (see Run):
+//   - an append error.
+//   - a database error.
+//   - a record error: the kind, the event hash or the record bytes of an event
+//     cannot be made.
+//   - a failed start check.
+//   - a fork signal of the checkpoint row.
+//
+// Healthy, Err and Stats are safe to call from any goroutine.
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
@@ -66,6 +71,13 @@ type Writer struct {
 	// make an error that no real record gives after HashEvidence worked. Nil in
 	// production: the writer then calls event.EvidenceBytes.
 	evidenceBytes func(event.Record) ([]byte, error)
+	// beforePragma runs before each PRAGMA statement of write, with the text of
+	// the statement. An error from it is the error of that statement. A test
+	// sets it; nil in production.
+	beforePragma func(stmt string) error
+	// beforeBegin runs before BEGIN in transact. An error from it is a failed
+	// BEGIN. A test sets it; nil in production.
+	beforeBegin func() error
 
 	// beforeRowCommit runs on the transaction of a checkpoint row before COMMIT.
 	// An error from it is a failed COMMIT. A test sets it; nil in production.
@@ -91,40 +103,48 @@ func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, body
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
 // other writer. Run takes events with TryTake, evidence lane first, into one
-// batch. It writes the batch in one transaction when the batch has 500 events,
-// and at each tick when the batch is not empty. It holds one batch at a time and
-// starts no goroutine for an event. While the lanes stay non-empty, Run writes
-// at 500 events. After each such write it serves a waiting row request and a
-// waiting tick, with no wait, so a flood does not hold them.
+// batch. It writes the batch in one transaction when the batch has 500 events.
+// It also writes the batch at each tick when the batch is not empty. It holds
+// one batch at a time and starts no goroutine for an event. While the lanes
+// stay non-empty, Run writes at 500 events. After each such write it serves a
+// waiting row request and a waiting tick, with no wait. Thus a flood does not
+// hold them.
 //
 // Before the first write, Run does the start check (see start). A stop marker or
 // a failed check stops the writer, and Run goes to the stopped state at once.
 //
 // Normal shutdown: the caller stops the producers and calls Close on the queue.
-// Run then writes its batch, takes the events that are left with Drain, writes
-// them in batches of at most 500, and returns nil. The caller does not cancel
-// ctx until Run returns. If the queue is closed when ctx ends, Run does the same
-// shutdown.
+// Run then writes its batch and takes the events that are left with Drain. It
+// writes them in batches of at most 500 and returns nil. The caller does not
+// cancel ctx until Run returns. If the queue is closed when ctx ends, Run does
+// the same shutdown.
 //
 // If ctx ends and the queue is not closed, Run writes the batch that it already
 // has and returns ctx.Err(). The events that Run did not take stay in the lanes.
 // Thus a cancel without Close can leave events in the lanes.
 //
-// Each of these stops the writer: an append error, a database error, a record
-// error (the kind, the event hash or the record bytes of an event cannot be made),
-// a failed start check, and a fork signal of the checkpoint row. A failed BEGIN
-// starts no transaction, and a later database error rolls the transaction back.
-// The events of a batch that ends with an error and no COMMIT count as drops.
-// The lane of each of these drops is the lane of the kind in the record copy
-// that write made. After an assignment to a queued event, that lane can differ
-// from the queue lane. The writer keeps the first error (Err) and is not
-// healthy (Healthy).
-// It writes one log line with the fixed class of the error. It does not open
-// the log or the database again, and it does not end the process. Run does not
-// return the error. It
-// continues in the stopped state: it writes no row, calls no appender, and runs
-// the Discard loop, so that the lanes do not stay full. It returns nil after Close and
-// ctx.Err() after a cancel, as it does when it has not stopped.
+// Each of these stops the writer:
+//   - an append error.
+//   - a database error.
+//   - a record error: the kind, the event hash or the record bytes of an event
+//     cannot be made.
+//   - a failed start check.
+//   - a fork signal of the checkpoint row.
+//
+// A failed BEGIN starts no transaction. A later database error rolls the
+// transaction back. The events of a batch that ends with an error and no COMMIT
+// count as drops. The lane of each of these drops is the lane of the kind in
+// the record copy that write made. After an assignment to a queued event, that
+// lane can differ from the queue lane.
+//
+// The writer keeps the first error (Err) and is not healthy (Healthy). It
+// writes one log line with the fixed class of the error. It does not open the
+// log or the database again, and it does not end the process.
+//
+// Run does not return the error. It continues in the stopped state. In this
+// state it writes no row and calls no appender. It runs the Discard loop, so
+// that the lanes do not stay full. It returns nil after Close and ctx.Err()
+// after a cancel, as it does when it has not stopped.
 //
 // At each tick, also when the batch is empty, the writer checks the drop counts
 // of the queue. If there are any, it adds them to ip_counter (see write).
@@ -303,11 +323,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if w.timing != nil {
 		begin = time.Now()
 	}
-	now := time.Now
-	if w.clock != nil {
-		now = w.clock
-	}
-	day := now().UTC().Format(dayLayout)
+	day := w.now().UTC().Format(dayLayout)
 	w.dk.use(day)
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
@@ -334,16 +350,36 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	}
 	defer conn.Close()
 	if len(hs) > 0 {
-		if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+		if err := w.pragma(ctx, conn, "PRAGMA synchronous=FULL"); err != nil {
 			return fail(writerName, ruleDatabase)
 		}
 		defer func() {
-			if _, e := conn.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); e != nil && err == nil {
+			if e := w.pragma(ctx, conn, "PRAGMA synchronous=NORMAL"); e != nil && err == nil {
 				err = fail(writerName, ruleDatabase)
 			}
 		}()
 	}
 	committed, err = w.transact(ctx, conn, batch, recs, hs, evidence, day, begin)
+	return err
+}
+
+// now reads w.clock, or time.Now when a test sets no clock.
+func (w *Writer) now() time.Time {
+	if w.clock != nil {
+		return w.clock()
+	}
+	return time.Now()
+}
+
+// pragma runs one PRAGMA statement of write on conn. It calls beforePragma
+// first.
+func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error {
+	if w.beforePragma != nil {
+		if err := w.beforePragma(stmt); err != nil {
+			return err
+		}
+	}
+	_, err := conn.ExecContext(ctx, stmt)
 	return err
 }
 
@@ -358,7 +394,13 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			w.orphans.Add(uint64(len(hs)))
 		}
 	}()
-	tx, err := conn.BeginTx(ctx, nil)
+	var tx *sql.Tx
+	if w.beforeBegin != nil {
+		err = w.beforeBegin()
+	}
+	if err == nil {
+		tx, err = conn.BeginTx(ctx, nil)
+	}
 	if err != nil {
 		return false, fail(writerName, ruleDatabase)
 	}
@@ -502,12 +544,8 @@ func (w *Writer) storeRow(rq rowRequest) (err error) {
 	case !errors.Is(err, sql.ErrNoRows):
 		return fail(writerName, ruleDatabase)
 	}
-	now := time.Now
-	if w.clock != nil {
-		now = w.clock
-	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) VALUES (?, ?, ?, ?)",
-		rq.size, rq.root[:], string(rq.msg), now().UnixMilli()); err != nil {
+		rq.size, rq.root[:], string(rq.msg), w.now().UnixMilli()); err != nil {
 		return fail(writerName, ruleDatabase)
 	}
 	err = nil
