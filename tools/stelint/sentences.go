@@ -10,14 +10,15 @@ import (
 	"unicode/utf8"
 )
 
-// maxWords is the longest sentence of a comment, in words.
+// maxWords is the longest sentence of a comment or of a text file, in words.
 const maxWords = 20
 
-// sentence is a comment sentence that is too long. It runs from the line of
-// its first word to the line of its end mark.
+// sentence is a comment or text sentence that is too long. It runs from the
+// line of its first word to the line of its end mark.
 type sentence struct{ first, last, words int }
 
-// textLine is one line of comment text and the source line that holds it.
+// textLine is one line of comment text or of a text file, and the source line
+// that holds it.
 type textLine struct {
 	text string
 	line int
@@ -46,6 +47,22 @@ func (t target) hasAny(first, last int) bool {
 // than maxWords words, in line order.
 func longSentences(src []byte) []sentence {
 	out, _ := checkedSentences(src, target{all: true})
+	return out
+}
+
+// textSentences returns the sentences of a Markdown or plain-text file that
+// have more than maxWords words, in line order. Each file line is a text line
+// with its line number. A code span counts as no word.
+func textSentences(src []byte) []sentence {
+	var g []textLine
+	for i, l := range strings.Split(string(src), "\n") {
+		g = append(g, textLine{text: strings.TrimSuffix(l, "\r"), line: i + 1})
+	}
+	var out []sentence
+	for _, p := range paragraphs(g) {
+		p.text = true
+		out = append(out, p.long()...)
+	}
 	return out
 }
 
@@ -235,7 +252,7 @@ func blockLines(lit string, line int) []textLine {
 	return out
 }
 
-// Kinds of text in a comment, as paragraphs reads it.
+// Kinds of text in a comment or a text file, as paragraphs reads it.
 const (
 	modeNone = iota
 	modePara
@@ -243,12 +260,12 @@ const (
 	modeCode
 )
 
-// paragraphs splits the lines of a comment into paragraphs, headings, list
-// items and table cells. Each ends a sentence. It leaves out code, separator
-// rows and trailer lines. A line is code in a fence of three backticks. A line
-// with a tab or two spaces of indent is also code. This holds when no
-// paragraph or list item is open. In a code block, each indented line stays
-// code. A line with noCode set never starts a code block by its indent.
+// paragraphs splits the lines of a comment or a text file into paragraphs,
+// headings, list items and table cells. Each ends a sentence. It leaves out
+// code, separator rows and trailer lines. A line is code in a fence of three
+// backticks. A line with a tab or two spaces of indent is also code. This holds
+// when no paragraph or list item is open. In a code block, each indented line
+// stays code. A line with noCode set never starts a code block by its indent.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -390,6 +407,9 @@ func listItem(t string) (rest string, ok bool) {
 type para struct {
 	buf  []byte
 	segs []seg
+	// text is true for a Markdown or plain-text file. A code span in backticks
+	// then counts as no word. In a comment it counts as one word.
+	text bool
 }
 
 type seg struct{ off, line int }
@@ -449,6 +469,7 @@ func (p *para) long() []sentence {
 		inWord      bool
 		open        bool // a "[" is open: it can start a link
 		tick, stop  = -1, -1
+		spanEnd     = -1 // index after the last code span that has no word
 	)
 	lineAt := func(i int) int {
 		for cursor+1 < len(p.segs) && p.segs[cursor+1].off <= i {
@@ -502,8 +523,11 @@ func (p *para) long() []sentence {
 		case isWordBreak(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
-			startWord(i)
+			if !p.text {
+				startWord(i)
+			}
 			i = nextTick(i+1) + 1
+			spanEnd = i
 			continue
 		case c == '[':
 			open = true
@@ -515,7 +539,10 @@ func (p *para) long() []sentence {
 			i = nextStop(i+2) + 1
 			continue
 		case c == '.' || c == '?' || c == '!':
-			startWord(i)
+			// An end mark right after a code span is no word of its own.
+			if i != spanEnd {
+				startWord(i)
+			}
 			if i+1 == len(b) || spaceAt(b, i+1) {
 				finish(i)
 			}
