@@ -89,6 +89,7 @@ func TestTU18RowRequestIsServedUnderAFlood(t *testing.T) {
 	if err := stopRun(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
+	// The timer of the sink enforces this bound (rowTimeout, sink.go).
 	if res.err != nil || res.took > rowTimeout || r.rowCount() != 1 {
 		t.Fatalf("reply %v after %v, %d rows", res.err, res.took, r.rowCount())
 	}
@@ -139,40 +140,84 @@ func TestTU18StoppedWriterServesNoWaitingRow(t *testing.T) {
 
 // T-U-18: a database error rolls the batch back and counts each event of the
 // batch as a drop for its lane. The batch has three bulk and two evidence
-// events. The first event of each case commits before the error.
+// events. The start event of runAfterStart commits before the error.
 func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 	failCommit := func(*sql.Tx) error { return errors.New("commit failed") }
 	cases := []struct {
-		name string
-		late func(r *rig)
+		name   string
+		late   func(r *rig)
+		failed uint64 // the WriteFailed count
 	}{
-		{"error before BEGIN", func(r *rig) { r.db.Close() }},
-		{"insert error", func(r *rig) { r.app.next = -1 }},
-		{"COMMIT error", func(r *rig) { r.w.beforeCommit = failCommit }},
+		{"error at db.Conn", func(r *rig) { r.db.Close() }, 0},
+		{"PRAGMA synchronous=FULL error", func(r *rig) {
+			r.w.beforePragma = func(stmt string) error {
+				if stmt == "PRAGMA synchronous=FULL" {
+					return errors.New("pragma refused")
+				}
+				return nil
+			}
+		}, 0},
+		{"BEGIN error", func(r *rig) { r.w.beforeBegin = func() error { return errors.New("begin refused") } }, 0},
+		{"prepare error", func(r *rig) {
+			if _, err := r.db.Exec("ALTER TABLE event RENAME TO event_gone"); err != nil {
+				r.t.Fatal(err)
+			}
+		}, 0},
+		{"record bytes error", func(r *rig) {
+			r.w.evidenceBytes = func(event.Record) ([]byte, error) { return nil, errors.New("no bytes") }
+		}, 0},
+		{"insert error", func(r *rig) { r.app.next = -1 }, 0},
+		{"drop counts error", func(r *rig) {
+			if _, err := r.db.Exec("DROP TABLE ip_counter"); err != nil {
+				r.t.Fatal(err)
+			}
+			r.c.DropNoAddr()
+		}, 0},
+		{"COMMIT error", func(r *rig) { r.w.beforeCommit = failCommit }, 0},
 		{"COMMIT error after a failed append", func(r *rig) {
 			r.app.err = errors.New("log is stopped")
 			r.w.beforeCommit = failCommit
-		}},
+		}, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t, 100)
-			err := r.runAfterStart(func() { c.late(r) }, func() {
-				for i, k := range []event.Kind{event.KindRequest, event.KindCallback, event.KindBeacon, event.KindAlertSent, event.KindRequest} {
-					r.add(k, int64(i+1))
-				}
-			})
+			err := r.runAfterStart(func() { c.late(r) }, r.addMixedBatch)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := r.w.Stats().Dropped; got != (Drops{Bulk: 3, Evidence: 2}) || r.w.Healthy() || len(r.commits) != 0 {
-				t.Fatalf("dropped %+v (want bulk 3, evidence 2), healthy %v, %d commits of the batch", got, r.w.Healthy(), len(r.commits))
+			s := r.w.Stats()
+			if s.Dropped != (Drops{Bulk: 3, Evidence: 2}) || s.WriteFailed != c.failed || r.w.Healthy() || len(r.commits) != 0 {
+				t.Fatalf("stats %+v (want bulk 3, evidence 2, %d failed), healthy %v, %d commits of the batch", s, c.failed, r.w.Healthy(), len(r.commits))
 			}
 		})
 	}
 }
 
-// T-U-18: a record error (an event whose kind is not a kind) stops the writer.
+// T-U-18: after a full flush that stops the writer, Run leaves the take loop.
+// It goes to the stopped state, which takes no event before the next tick. The
+// test queues 1 200 events, and the COMMIT of the first batch of 500 fails. The
+// 700 other events stay in the lanes. Only the 500 of the batch count as drops.
+// A Run that stays in the take loop takes and drops them at once. The wait is a
+// bound: that Run needs far less than 100 ms for 700 events.
+func TestTU18StoppedWriterLeavesTheTakeLoop(t *testing.T) {
+	r := newRig(t, 4000)
+	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit failed") }
+	for i := range 1200 {
+		r.add(event.KindRequest, int64(i))
+	}
+	stopRun := r.start()
+	waitUntil(t, "the stop", func() bool { return !r.w.Healthy() })
+	time.Sleep(100 * time.Millisecond)
+	if got := r.w.Stats().Dropped; got != (Drops{Bulk: maxBatch}) || r.q.Bytes() == (event.Bytes{}) {
+		t.Fatalf("dropped %+v (want bulk 500), lanes empty %v", got, r.q.Bytes() == (event.Bytes{}))
+	}
+	if err := stopRun(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+// T-U-18: a record error (an event with the invalid kind 0) stops the writer.
 // Err holds the record class, and the batch stores no row. The events that come
 // later are taken out of the lanes and counted. Enqueue refuses an event with
 // kind 0 or Size 0. A later assignment can give a queued event kind 0. The
