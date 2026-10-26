@@ -214,6 +214,11 @@ func crossCheck(root string, vals map[string]Value) []error {
 			fail("acme.cache_dir", c, d)
 		}
 	}
+	if t, ok := vals["tlog.dir"]; ok {
+		if d := tlogConflict(root, vals, t.Str); d != "" {
+			fail("tlog.dir", t, d)
+		}
+	}
 	if b, ok := vals["bundle.path"]; ok {
 		if d := bundleConflict(vals, b.Str); d != "" {
 			fail("bundle.path", b, d)
@@ -605,7 +610,7 @@ func checkStorePath(l *loader, raw string) string {
 	}
 	rel, err := filepath.Rel(l.stateRoot, raw)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "the path must be below the state directory"
+		return "the path text must be below the state directory"
 	}
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		if part == "." || part == ".." || !storePart.MatchString(part) {
@@ -631,6 +636,27 @@ func cacheConflict(root string, vals map[string]Value, p string) string {
 	}
 	if n := dirClash(p, root, true); n != "" {
 		return "the path must not be in or above " + n
+	}
+	if f := fileClash(p, root, true); f != "" {
+		return "the path must not be or be in " + f
+	}
+	return ""
+}
+
+// tlogConflict checks the tlog.dir value p (SEC-11). It returns a detail if p
+// is in or above the path of another key or a state directory, or is a state
+// file. It compares the path text only. It folds A-Z with foldASCII. A key
+// that is not in vals failed its own check, so it is skipped.
+func tlogConflict(root string, vals map[string]Value, p string) string {
+	p = foldASCII(p)
+	if n := keyClash(p, vals, true, "acme.cache_dir", "bundle.path", "store.path"); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if n := dirClash(p, root, true); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if f := fileClash(p, root, false); f != "" {
+		return "the path must not be " + f
 	}
 	return ""
 }

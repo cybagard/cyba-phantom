@@ -87,7 +87,7 @@ var keys = []key{
 	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
 	// The lower bound is retention_days.raw: a cross-check.
 	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)},
-	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStatePath},
+	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStorePath},
 	{path: "tlog.origin", kind: kindString, req: true, check: checkOrigin},
 	{path: "tlog.checkpoint_interval", kind: kindDuration, def: "1h", check: durRange(time.Minute, 24*time.Hour)},
 	{path: "alerts.min_band", kind: kindString, def: "agent-likely", check: checkMinBand},
