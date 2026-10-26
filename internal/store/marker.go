@@ -10,10 +10,7 @@ import (
 // operator removes it.
 const markerName = "writer.stop"
 
-const (
-	ruleMarkerExists = "stop marker exists"
-	ruleMarkerRead   = "stop marker cannot be examined"
-)
+const ruleMarkerExists = "stop marker exists"
 
 // checkMarker refuses a start while the marker exists. Lstat does not follow a
 // link, so a symlink, a directory, or any other type is a marker. An error that
@@ -23,14 +20,15 @@ func checkMarker(root *os.Root) error {
 	case err == nil:
 		return fail(writerName, ruleMarkerExists)
 	case !errors.Is(err, fs.ErrNotExist):
-		return fail(writerName, ruleMarkerRead)
+		return fail(markerName, ruleExamine)
 	}
 	return nil
 }
 
 // makeMarker makes the marker if it is absent. A marker that exists is a
-// success. When it makes the file, it calls fsync on the file. It always calls
-// fsync on the directory. A nil root is an error.
+// success. When it makes the file, it calls fsync on the file. It calls fsync
+// on the directory after a new file or a marker that exists. With a nil root or
+// another file error, it returns at once.
 func makeMarker(root *os.Root) error {
 	if root == nil {
 		return errors.New("no state directory")

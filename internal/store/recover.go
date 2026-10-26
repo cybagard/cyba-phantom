@@ -35,7 +35,8 @@ var _ logReader = (*tlog.Log)(nil)
 // Recovery holds what the writer needs at start and at a stop. State is the
 // state directory that Open used. Origin is tlog.origin. Log is the log that the
 // appender writes to. It must be the same log as the appender argument of
-// NewWriter. State and Log must not be nil.
+// NewWriter. State and Log must not be nil. The start check treats a nil
+// *tlog.Log in Log as no log.
 type Recovery struct {
 	State  *os.Root
 	Origin string
@@ -45,7 +46,8 @@ type Recovery struct {
 // start runs before the first write. A stop marker or a failed check gives an
 // error, and the writer stops.
 func (w *Writer) start() error {
-	if w.rec.State == nil || w.rec.Log == nil {
+	l, typed := w.rec.Log.(*tlog.Log)
+	if w.rec.State == nil || w.rec.Log == nil || typed && l == nil {
 		return fail(writerName, ruleNoRecover)
 	}
 	if err := checkMarker(w.rec.State); err != nil {
@@ -60,6 +62,7 @@ func (w *Writer) start() error {
 // Leaves above the largest leaf_index are orphan leaves of a crash. They are
 // permitted, and the writer logs their number one time.
 func (w *Writer) checkLog() error {
+	// Not the context of Run: a cancel must not become a stop with a marker.
 	ctx := context.Background()
 	var origin string
 	switch err := w.db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = 'tlog_origin'").Scan(&origin); {
@@ -90,7 +93,11 @@ func (w *Writer) checkLog() error {
 			return fail(writerName, ruleLogRead)
 		}
 		var h tlog.EventHash
-		if len(hash) != len(h) || copy(h[:], hash) != len(h) || tlog.VerifyInclusion(h, leaf, size, root, proof) != nil {
+		if len(hash) != len(h) {
+			return fail(writerName, ruleLeafProof)
+		}
+		copy(h[:], hash)
+		if tlog.VerifyInclusion(h, leaf, size, root, proof) != nil {
 			return fail(writerName, ruleLeafProof)
 		}
 	}

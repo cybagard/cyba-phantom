@@ -403,7 +403,7 @@ func TestTS15PendingChangeOfEventTableIsChecked(t *testing.T) {
 }
 
 // T-U-18: no non-test Go file and no SQL file of the package has the SQL keyword
-// VACUUM, in any case.
+// VACUUM. The scan ignores the case of the letters.
 func TestTU18NoVacuumInSource(t *testing.T) {
 	word := regexp.MustCompile(`(?i)\bvacuum\b`)
 	if !word.MatchString("VACUUM;") || !word.MatchString("vacuum;") || word.MatchString("auto_vacuum incremental_vacuum") {
