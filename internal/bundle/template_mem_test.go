@@ -163,13 +163,13 @@ type ts25Case struct {
 	texts func() []string
 }
 
-// ts25Deep is false for a text with parentheses that does not reach depth 9 999.
+// ts25Deep is false for a text with parentheses but not to depth 9999.
 func ts25Deep(s string) bool {
 	return !strings.Contains(s, "((") || strings.Contains(s, strings.Repeat("(", ts25Depth))
 }
 
-// ts25Fills checks that each text is within one unit of its binding cap, and
-// that a text with the room for it reaches depth 9 999.
+// ts25Fills checks that each text is within one unit of its binding cap.
+// A text with room for parentheses must also reach depth 9999.
 func ts25Fills(size, acts, ub, ua int) func([]string) string {
 	return func(texts []string) string {
 		for _, s := range texts {
@@ -260,7 +260,7 @@ type ts25Result struct {
 }
 
 // TestTS25CapConstants checks that the caps in the code are the numbers of
-// SEC-29, so that a change of a cap fails T-S-25.
+// SEC-29. A change of a cap then fails T-S-25.
 func TestTS25CapConstants(t *testing.T) {
 	for _, c := range []struct {
 		name      string
