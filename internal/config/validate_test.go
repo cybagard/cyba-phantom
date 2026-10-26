@@ -806,11 +806,11 @@ func TestTS11_ConflictFoldsStateRoot(t *testing.T) {
 		{"checkpoint.state", "/srv/phantom/checkpoint.state", "must not be checkpoint.state"},
 		{"checkpoint.state.tmp", "/srv/phantom/checkpoint.state.tmp", "must not be checkpoint.state.tmp"},
 		{"writer.stop", "/srv/phantom/writer.stop", "must not be writer.stop"},
-	}, func(p string) string { return storeConflict(l, nil, p) })
+	}, func(p string) string { return storeConflict(l.stateRoot, nil, p) })
 	runRows(t, []row{
 		{"keys", "/srv/phantom/keys/c", "the keys directory"},
 		{"checkpoints", "/srv/phantom/checkpoints/c", "the checkpoints directory"},
-	}, func(p string) string { return cacheConflict(l, nil, p) })
+	}, func(p string) string { return cacheConflict(l.stateRoot, nil, p) })
 }
 
 // bound is one row of the 04 section 3 bounds table: values that pass, values that fail,

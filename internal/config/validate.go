@@ -165,7 +165,7 @@ func opsConflict(ops, l hostPort, name string) string {
 
 // crossCheck checks the rules that compare two keys. It skips a key that is not in vals.
 // The loader removes a key from vals if its value failed to parse or failed its check.
-func crossCheck(l *loader, vals map[string]Value) []error {
+func crossCheck(root string, vals map[string]Value) []error {
 	get := func(p string) (hostPort, Value, bool) {
 		v, ok := vals[p]
 		if !ok {
@@ -205,12 +205,12 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 		}
 	}
 	if s, ok := vals["store.path"]; ok {
-		if d := storeConflict(l, vals, s.Str); d != "" {
+		if d := storeConflict(root, vals, s.Str); d != "" {
 			fail("store.path", s, d)
 		}
 	}
 	if c, ok := vals["acme.cache_dir"]; ok {
-		if d := cacheConflict(l, vals, c.Str); d != "" {
+		if d := cacheConflict(root, vals, c.Str); d != "" {
 			fail("acme.cache_dir", c, d)
 		}
 	}
@@ -624,12 +624,12 @@ func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw)
 // detail if p is in or above a directory that the sensor uses for other
 // files. It compares the path text only. It folds A-Z with foldASCII. A key
 // that is not in vals failed its own check, so it is skipped.
-func cacheConflict(l *loader, vals map[string]Value, p string) string {
+func cacheConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	if n := keyClash(p, vals, true, "tlog.dir", "bundle.path"); n != "" {
 		return "the path must not be in or above " + n
 	}
-	if n := dirClash(p, l.stateRoot, true); n != "" {
+	if n := dirClash(p, root, true); n != "" {
 		return "the path must not be in or above " + n
 	}
 	return ""
@@ -797,15 +797,15 @@ func inDirText(p, d string) bool {
 // uses for other files, or is one of its state files (SEC-20). It compares the path text only.
 // It folds the letters A-Z to a-z with foldASCII.
 // A key that is not in vals failed its own check, so it is skipped.
-func storeConflict(l *loader, vals map[string]Value, p string) string {
+func storeConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	if n := keyClash(p, vals, false, "tlog.dir", "acme.cache_dir", "bundle.path"); n != "" {
 		return "the path must not be in " + n
 	}
-	if n := dirClash(p, l.stateRoot, false); n != "" {
+	if n := dirClash(p, root, false); n != "" {
 		return "the path must not be in " + n
 	}
-	if f := fileClash(p, l.stateRoot, false); f != "" {
+	if f := fileClash(p, root, false); f != "" {
 		return "the path must not be " + f
 	}
 	return ""

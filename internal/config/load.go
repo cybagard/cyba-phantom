@@ -291,7 +291,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 			errs = append(errs, keyError(k, raws[k.path], v.Source, v.Line, detail))
 		}
 	}
-	errs = append(errs, crossCheck(l, vals)...)
+	errs = append(errs, crossCheck(l.stateRoot, vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
