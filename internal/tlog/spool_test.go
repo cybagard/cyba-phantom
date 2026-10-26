@@ -223,6 +223,120 @@ func TestTI09_UndeletableOldest(t *testing.T) {
 	if notes != maxSpoolNotes {
 		t.Fatalf("%d regular notes on disk, want %d", notes, maxSpoolNotes)
 	}
+	if n := strings.Count(e.logs.String(), "cannot delete an entry"); n != 1 {
+		t.Fatalf("%d warning lines for the entry, want 1 for all the calls of Add:\n%s", n, e.logs)
+	}
+}
+
+// T-I-09: an entry that cannot be deleted is counted and logged one time, not
+// for each Publish call and target. When it can be deleted later, it is not
+// counted again. The spool forgets it when it is gone.
+func TestTI09_StuckEntryCountsOnce(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	dir := filepath.Join(e.dir, e.noteFile(2))
+	must(t, os.MkdirAll(filepath.Join(dir, "x"), 0o700))
+	f := newFake()
+	for _, i := range []int{0, 1, 0, 1} {
+		if err := e.Publish(i, f); err == nil {
+			t.Fatal("Publish hid the entry that is not a regular file")
+		}
+	}
+	if n := strings.Count(e.logs.String(), "cannot delete a note that must not be sent"); n != 1 || e.Stats().Rejected != 1 {
+		t.Fatalf("%d warning lines, rejected %d, want 1 and 1:\n%s", n, e.Stats().Rejected, e.logs)
+	}
+	must(t, os.Remove(filepath.Join(dir, "x")))
+	if err := e.Publish(0, f); err == nil {
+		t.Fatal("Publish hid the entry that is not a regular file")
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) || e.Stats().Rejected != 1 || len(e.stuck) != 0 {
+		t.Fatalf("entry: %v, rejected %d, stuck %v, want deleted, 1, none", err, e.Stats().Rejected, e.stuck)
+	}
+}
+
+// T-I-09: the spool lists checkpoints/ in steps of listStep names and lists the
+// names of all the steps.
+func TestTI09_ListsInSteps(t *testing.T) {
+	e := newSpool(t)
+	const count = 2*listStep + 1
+	want := make([]uint64, 0, count)
+	for size := uint64(1); size <= count; size++ {
+		must(t, os.WriteFile(filepath.Join(e.dir, e.noteFile(size)), nil, 0o600))
+		want = append(want, size)
+	}
+	if got := e.files(t); !slices.Equal(got, want) {
+		t.Fatalf("listed %d sizes, want %d", len(got), count)
+	}
+}
+
+// T-I-09: an entry that is not a regular file is not a skipped note when the
+// full spool deletes it. A regular note is.
+func TestTI09_DropCountsOnlyNotes(t *testing.T) {
+	e := newSpool(t)
+	must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(1)), 0o700))
+	for size := uint64(2); size <= maxSpoolNotes+1; size++ {
+		must(t, e.Add(size, []byte("x")))
+	}
+	if _, err := os.Lstat(filepath.Join(e.dir, e.noteFile(1))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("directory stays: %v", err)
+	}
+	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{0, 0}) {
+		t.Fatalf("skipped = %v after the directory, want none", st.Skipped)
+	}
+	must(t, e.Add(maxSpoolNotes+2, []byte("x")))
+	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{1, 1}) {
+		t.Fatalf("skipped = %v after a note, want 1 for each target", st.Skipped)
+	}
+}
+
+// T-S-13: a note name with a decimal above uint64 is never a size. The spool
+// deletes it and counts it one time. No target gets it.
+func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	big := filepath.Join(e.dir, spoolDir, "99999999999999999999"+noteSuffix)
+	must(t, os.WriteFile(big, []byte("x"), 0o600))
+	f := newFake()
+	for i := range spoolTargets {
+		must(t, e.Publish(i, f))
+	}
+	if _, err := os.Lstat(big); !errors.Is(err, os.ErrNotExist) || e.Stats().Rejected != 1 {
+		t.Fatalf("entry: %v, rejected %d, want deleted and 1", err, e.Stats().Rejected)
+	}
+	for _, target := range spoolTargets {
+		if !slices.Equal(f.got[target], []uint64{1}) {
+			t.Fatalf("sent = %v", f.got)
+		}
+	}
+	must(t, os.WriteFile(big, []byte("x"), 0o600)) // a new entry counts again
+	e.files(t)
+	if e.Stats().Rejected != 2 {
+		t.Fatalf("rejected = %d, want 2", e.Stats().Rejected)
+	}
+}
+
+// T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
+// and for a cursor. No write of that name must follow. A temporary entry that
+// cannot be deleted stays and gets a log line.
+func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
+	e := newSpool(t)
+	left := []string{"5.note.tmp", cursorPrefix + "0123456789abcdef.tmp"}
+	for _, name := range left {
+		must(t, os.WriteFile(filepath.Join(e.dir, spoolDir, name), []byte("x"), 0o600))
+	}
+	stays := filepath.Join(e.dir, spoolDir, "9.note.tmp")
+	must(t, os.MkdirAll(filepath.Join(stays, "x"), 0o700))
+	log, buf := testLogger()
+	_, err := OpenSpool(e.root, log, testOrigin, e.verifier, spoolTargets)
+	must(t, err)
+	for _, name := range left {
+		if _, err := os.Lstat(filepath.Join(e.dir, spoolDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stays: %v", name, err)
+		}
+	}
+	if _, err := os.Lstat(stays); err != nil || !strings.Contains(buf.String(), "9.note.tmp") {
+		t.Fatalf("entry: %v, log %q, want it kept and one log line", err, buf)
+	}
 }
 
 // T-S-13: an entry at a note name that is not a regular file (a directory, a

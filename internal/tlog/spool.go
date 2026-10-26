@@ -30,6 +30,13 @@ const (
 	maxSpoolNotes  = 1025
 	skipLogEvery   = time.Hour
 	cursorHexChars = 16
+	listStep       = 128 // names that one read of checkpoints/ returns at most
+)
+
+// Flags of Spool.stuck: what the spool already did for an entry.
+const (
+	stuckWarned   uint8 = 1 << iota // Add logged the entry
+	stuckRejected                   // the entry is in Rejected
 )
 
 // Sender is the interface between the spool and a publisher. It sends one note
@@ -64,7 +71,7 @@ func (c cursor) covers(size uint64) bool { return c.set && size <= c.size }
 // SpoolStats are the counters of a spool.
 type SpoolStats struct {
 	Skipped  []uint64 // for each target, in the order of the targets
-	Rejected uint64   // each time a target meets an entry that must not be sent
+	Rejected uint64   // entries that must not be sent, one time for each entry
 }
 
 // Spool holds the signed notes that wait for the publish targets. All calls
@@ -87,13 +94,19 @@ type Spool struct {
 	lastLog    []time.Time
 	rejected   uint64
 	publishing []bool // for each target: a Publish call runs
+
+	// stuck holds the entries that cannot be deleted, with flags for what the
+	// spool did for them. It has only entries of the last listing: sizes
+	// forgets an entry that is gone. Add keeps that listing near maxSpoolNotes.
+	stuck map[string]uint8
 }
 
 // OpenSpool opens the spool in root, the state directory that the caller
 // opened one time. It makes checkpoints/ (mode 0700) if it is missing. A
 // checkpoints entry that is not a real directory (a symlink, for example) is an
 // error. Every note is parsed with origin and verified with verifier before it
-// goes to a Sender (SEC-17).
+// goes to a Sender (SEC-17). It deletes every temporary file that a crash left
+// in checkpoints/.
 func OpenSpool(root *os.Root, log *slog.Logger, origin string, verifier note.Verifier, targets []string) (*Spool, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -110,8 +123,19 @@ func OpenSpool(root *os.Root, log *slog.Logger, origin string, verifier note.Ver
 		return nil, spoolError(spoolDir, "must be a real directory and not a symlink")
 	}
 	n := len(targets)
-	return &Spool{root: root, log: log, origin: origin, verifier: verifier, targets: slices.Clone(targets), now: time.Now,
-		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n), publishing: make([]bool, n)}, nil
+	s := &Spool{root: root, log: log, origin: origin, verifier: verifier, targets: slices.Clone(targets), now: time.Now,
+		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n), publishing: make([]bool, n),
+		stuck: map[string]uint8{}}
+	// A listing error shows again in the first Add or Publish.
+	_ = s.eachName(func(name string) {
+		if !strings.HasSuffix(name, spoolTmpSuffix) {
+			return
+		}
+		if err := root.Remove(spoolDir + "/" + name); err != nil {
+			log.Warn("checkpoint spool cannot delete a temporary file", "name", name)
+		}
+	})
+	return s, nil
 }
 
 func spoolError(name, rule string) error { return fmt.Errorf("checkpoint spool %s: %s", name, rule) }
@@ -146,9 +170,10 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 	}
 	// The bound counts every listed entry. If the oldest entry cannot be
 	// deleted, it stays and the loop continues with the next entry. The spool
-	// then holds that entry and up to 1025 other entries.
+	// then holds that entry and up to 1025 other entries. Add logs that entry
+	// one time.
 	for len(sizes) > maxSpoolNotes {
-		if err := s.drop(sizes[0]); err != nil {
+		if err := s.drop(sizes[0]); err != nil && s.first(noteName(sizes[0]), stuckWarned) {
 			s.log.Warn("checkpoint spool cannot delete an entry", "size", sizes[0])
 		}
 		sizes = sizes[1:]
@@ -254,15 +279,10 @@ func (s *Spool) next(i int, entryErrs *[]error, lim *limit) (cur cursor, size ui
 		var verr error
 		msg, verr = s.verified(size)
 		if errors.Is(verr, errBadNote) {
-			s.rejected++
 			if ee := (entryError{}); errors.As(verr, &ee) {
 				*entryErrs = append(*entryErrs, verr)
 			}
-			if err := s.remove(size); err != nil { // for example a directory that is not empty
-				s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "size", size)
-			} else {
-				s.log.Warn("checkpoint spool deleted a note that must not be sent", "size", size)
-			}
+			s.reject(noteName(size))
 			continue
 		}
 		return cur, size, msg, verr == nil, verr
@@ -368,29 +388,77 @@ func (s *Spool) readCursor(i int) (cursor, error) {
 // sizes lists the sizes in the names <canonical decimal>.note, smallest first.
 // It lists an entry of any type with such a name, also a directory. Publish
 // treats an entry that is not a regular file as a bad note. A name in another
-// form is skipped.
+// form is skipped. A name with a decimal above uint64 is no size: sizes
+// rejects that entry.
 func (s *Spool) sizes() ([]uint64, error) {
-	d, err := s.root.Open(spoolDir)
-	if err != nil {
-		return nil, spoolError(spoolDir, "cannot be opened")
-	}
-	defer d.Close()
-	names, err := d.Readdirnames(-1)
-	if err != nil {
-		return nil, spoolError(spoolDir, "cannot be listed")
+	for name := range s.stuck { // forget the entries that are gone
+		if _, err := s.root.Lstat(name); errors.Is(err, fs.ErrNotExist) {
+			delete(s.stuck, name)
+		}
 	}
 	var sizes []uint64
-	for _, name := range names {
+	err := s.eachName(func(name string) {
 		digits, ok := strings.CutSuffix(name, noteSuffix)
 		if !ok || !canonicalDecimal(digits) {
-			continue
+			return
 		}
-		if size, err := strconv.ParseUint(digits, 10, 64); err == nil {
+		if size, err := strconv.ParseUint(digits, 10, 64); err != nil {
+			s.reject(spoolDir + "/" + name)
+		} else {
 			sizes = append(sizes, size)
 		}
-	}
+	})
 	slices.Sort(sizes)
-	return sizes, nil
+	return sizes, err
+}
+
+// eachName calls fn for each name in checkpoints/. It reads listStep names at a
+// time, so one read has a bound.
+func (s *Spool) eachName(fn func(name string)) error {
+	d, err := s.root.Open(spoolDir)
+	if err != nil {
+		return spoolError(spoolDir, "cannot be opened")
+	}
+	defer d.Close()
+	for {
+		names, err := d.Readdirnames(listStep)
+		for _, name := range names {
+			fn(name)
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return spoolError(spoolDir, "cannot be listed")
+		}
+	}
+}
+
+// first reports true the first time that it marks name with flag.
+func (s *Spool) first(name string, flag uint8) bool {
+	seen := s.stuck[name]&flag != 0
+	s.stuck[name] |= flag
+	return !seen
+}
+
+// reject deletes an entry that must not be sent. It counts the entry and logs
+// it one time. An entry can stay because it cannot be deleted (a directory that
+// is not empty). A later call that meets it does not count it again.
+func (s *Spool) reject(name string) {
+	err := s.root.Remove(name)
+	stuck := err != nil && !errors.Is(err, fs.ErrNotExist)
+	first := s.first(name, stuckRejected)
+	if !stuck {
+		delete(s.stuck, name) // a new entry with this name counts again
+	}
+	if !first {
+		return
+	}
+	s.rejected++
+	if stuck {
+		s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "name", name)
+	} else {
+		s.log.Warn("checkpoint spool deleted a note that must not be sent", "name", name)
+	}
 }
 
 // replace writes name with replaceFile. The error has the rule and not the
@@ -441,12 +509,17 @@ func (s *Spool) remove(size uint64) error {
 
 // drop deletes the oldest entry because the spool is full. It deletes the entry
 // for every cursor state, also for a note that a target published. This keeps
-// the bound. Then drop counts the note as skipped for each target whose
-// cursor is below its size. A cursor that cannot be read counts as below,
-// because the spool cannot show that the target has the note.
+// the bound. If the entry was a regular note, drop counts it as skipped. It
+// counts it for each target whose cursor is below its size. A cursor that
+// cannot be read counts as below. The spool cannot show that the target has
+// the note.
 func (s *Spool) drop(size uint64) error {
+	fi, lerr := s.root.Lstat(noteName(size))
 	if err := s.remove(size); err != nil {
 		return err
+	}
+	if lerr == nil && !fi.Mode().IsRegular() {
+		return nil
 	}
 	for i := range s.targets {
 		if cur, err := s.readCursor(i); err != nil || !cur.covers(size) {
