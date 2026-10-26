@@ -52,8 +52,11 @@ func newRefusedEmitter(q *event.Queue, c *event.Counters, mono func() time.Durat
 // monotonicSince returns a clock that gives the time since start. time.Since
 // reads the monotonic clock if start has a monotonic reading.
 func monotonicSince(start time.Time) func() time.Duration {
-	return func() time.Duration { return time.Since(start) }
+	return func() time.Duration { return since(start) }
 }
+
+// since reads the clock for monotonicSince. A test replaces it.
+var since = time.Since
 
 // emit makes one refused event for the peer and puts it on the queue. It takes
 // the reason and the address of the connection, and no request value. A peer

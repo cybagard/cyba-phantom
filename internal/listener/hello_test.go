@@ -243,6 +243,9 @@ func TestTS17RedirectKeepsEscapes(t *testing.T) {
 		{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
 		{"/[x]", "https://decoy.test/%5Bx%5D"},
 		{"/%41", "https://decoy.test/%41"},
+		// The edges of the hex digit ranges: 9, a, f, A and F.
+		{"/%9a%2F", "https://decoy.test/%9A%2F"},
+		{"/%2F%A0", "https://decoy.test/%2F%A0"},
 		{"/a%252Fb", "https://decoy.test/a%252Fb"},
 		{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
 		{"/é", "https://decoy.test/%C3%A9"},
@@ -274,6 +277,10 @@ func TestTS17LocationEscapesEachByte(t *testing.T) {
 		{url.URL{Path: "/%zz", RawPath: "/%zz"}, "https://decoy.test/%25zz"},
 		{url.URL{Path: "/a%", RawPath: "/a%"}, "https://decoy.test/a%25"},
 		{url.URL{Path: "/%41"}, "https://decoy.test/%2541"},
+		// A partial escape at the end is not a token. A bad second digit is
+		// not a token.
+		{url.URL{Path: "/%2z", RawPath: "/%2z"}, "https://decoy.test/%252z"},
+		{url.URL{Path: "/a%4", RawPath: "/a%4"}, "https://decoy.test/a%254"},
 	} {
 		if got := location("decoy.test", &tc.u); got != tc.want {
 			t.Errorf("RawPath %q, Path %q: %q, want %q", tc.u.RawPath, tc.u.Path, got, tc.want)
@@ -453,6 +460,27 @@ func TestTS17LocationCutKeepsEscapes(t *testing.T) {
 				t.Fatalf("unit %q pad %d: Location %q (%v)", unit, pad, loc[len(loc)-8:], err)
 			}
 		}
+	}
+}
+
+// T-S-17: a cut stops at the first token that does not fit. A later byte that
+// fits is not written. The path has 2027 "a", then "<" (3 bytes, too long),
+// then "bb". The Location is 2046 bytes.
+func TestTS17LocationCutStopsAtFirstToken(t *testing.T) {
+	p := "/" + strings.Repeat("a", 2027) + "<bb"
+	for _, u := range []url.URL{{Path: p}, {Path: p, RawPath: p}} {
+		if got := len(location("decoy.test", &u)); got != 2046 {
+			t.Errorf("RawPath %t: length %d, want 2046", u.RawPath != "", got)
+		}
+	}
+}
+
+// T-S-17: location makes a fixed number of allocations for a path of 16384
+// "<", not one for each escaped byte.
+func TestTS17LocationAllocationsAreFixed(t *testing.T) {
+	u := &url.URL{Path: strings.Repeat("<", 16384)}
+	if got := testing.AllocsPerRun(10, func() { location("decoy.test", u) }); got != 1 {
+		t.Fatalf("%v allocations, want 1", got)
 	}
 }
 
