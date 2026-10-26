@@ -542,7 +542,7 @@ func wrapAfterDirs(op string, err error) error {
 }
 
 // Load returns the value at key. A file above the size cap is an error. If a
-// key file or a key directory changes after its check, Load starts again,
+// key file or key directory changes after its check, Load starts again,
 // at most loadTries times in all. If the file still changes, Load gives the rule
 // "file changed during the read". A replacement after the open does not matter:
 // Load returns the value of the open file.
