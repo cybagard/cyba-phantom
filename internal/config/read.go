@@ -220,7 +220,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 		Lines:     make(map[string]int),
 	}
 
-	if err := walkNode(root, nil, "", res, 0, bytes.Split(b, []byte("\n"))); err != nil {
+	if err := walkNode(root, nil, "", res, 0, &lineCursor{lines: bytes.Split(b, []byte("\n"))}); err != nil {
 		return nil, err
 	}
 
@@ -230,7 +230,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 // walkNode walks the node n at path. For a mapping entry, key is the key node;
 // it is nil for the root and for a sequence item.
 // src holds the lines of the file.
-func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src [][]byte) error {
+func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src *lineCursor) error {
 	if depth > maxDepth {
 		return nodeError(path, n.Line, n.Column, "nesting exceeds limit of "+strconv.Itoa(maxDepth))
 	}
@@ -335,16 +335,28 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src [][]byte)
 // Tag is "!!str" for a quoted or block scalar. The node starts at the tag.
 // A plain, quoted or block scalar cannot start with "!". Column counts
 // runes, so the function skips runes and does not copy the line.
-func bareTag(n *yaml.Node, src [][]byte) bool {
-	if n.Style&yaml.TaggedStyle != 0 || n.Line < 1 || n.Line > len(src) || n.Column < 1 {
+// The scalars of one line come in rising column order. So src resumes where
+// the last call stopped, and the cost for a line is linear.
+func bareTag(n *yaml.Node, src *lineCursor) bool {
+	if n.Style&yaml.TaggedStyle != 0 || n.Line < 1 || n.Line > len(src.lines) || n.Column < 1 {
 		return false
 	}
-	line := src[n.Line-1]
-	for i := 1; i < n.Column && len(line) > 0; i++ {
-		_, size := utf8.DecodeRune(line)
-		line = line[size:]
+	line := src.lines[n.Line-1]
+	if src.line != n.Line || n.Column < src.col {
+		src.line, src.col, src.off = n.Line, 1, 0
 	}
-	return len(line) > 0 && line[0] == '!'
+	for src.col < n.Column && src.off < len(line) {
+		_, size := utf8.DecodeRune(line[src.off:])
+		src.col, src.off, src.steps = src.col+1, src.off+size, src.steps+1
+	}
+	return src.off < len(line) && line[src.off] == '!'
+}
+
+// lineCursor holds the lines of the file. It also holds the last position
+// that bareTag read: line, column and byte offset. steps counts the runes read.
+type lineCursor struct {
+	lines                 [][]byte
+	line, col, off, steps int
 }
 
 func isCoreTag(tag string, kind yaml.Kind) bool {

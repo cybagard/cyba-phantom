@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // testDir holds a valid htpasswd file: the default path of the production table does not exist here.
@@ -451,6 +453,25 @@ func TestTS10_BareTagAlloc(t *testing.T) {
 	const budget = 128 << 20
 	if got := after.TotalAlloc - before.TotalAlloc; got > budget {
 		t.Errorf("ReadBytes allocated %d bytes, want at most %d", got, budget)
+	}
+}
+
+// TestTS10_BareTagSteps checks that bareTag reads each rune of a line one
+// time. A flow line with many scalars gives at most twice its length in
+// steps. A read from the line start for each scalar gives a square.
+func TestTS10_BareTagSteps(t *testing.T) {
+	line := "a: [" + strings.Repeat("1,", 32000) + "1]"
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(line), &node); err != nil {
+		t.Fatal(err)
+	}
+	doc := &Doc{Leaves: map[string]Leaf{}, Mappings: map[string]bool{}, Sequences: map[string]bool{}, Lines: map[string]int{}}
+	src := &lineCursor{lines: [][]byte{[]byte(line)}}
+	if err := walkNode(node.Content[0], nil, "", doc, 0, src); err != nil {
+		t.Fatal(err)
+	}
+	if src.steps > 2*len(line) {
+		t.Errorf("bareTag read %d runes of a line of %d bytes", src.steps, len(line))
 	}
 }
 
