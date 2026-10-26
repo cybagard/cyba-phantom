@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"html/template"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -89,6 +90,10 @@ type Loader struct {
 	trust TrustSet
 	cur   atomic.Pointer[Bundle]
 
+	// chain and chainErr hold the last chain check. loadMu guards them.
+	chain    *chain
+	chainErr error
+
 	// now, decompress and template are steps of the load. NewLoader sets
 	// them, and a test can replace one. now and decompress must not be nil.
 	// A nil template step keeps no template. afterRead is a hook for tests.
@@ -109,7 +114,8 @@ func NewLoader(state *os.Root, path string, trust TrustSet) *Loader {
 func (l *Loader) Current() *Bundle { return l.cur.Load() }
 
 // openDir opens the bundle directory of the path and gives the file name of the
-// bundle in it. The caller calls the func to close the directory.
+// bundle in it. The caller calls closeDir to close the directory. The error is
+// the error of the open, and Load turns it into ErrArchiveInvalid.
 func (l *Loader) openDir() (dir *os.Root, base string, closeDir func(), err error) {
 	dirName, base := ".", l.path
 	if i := strings.LastIndexByte(l.path, '/'); i >= 0 {
@@ -120,45 +126,74 @@ func (l *Loader) openDir() (dir *os.Root, base string, closeDir func(), err erro
 	}
 	d, err := safefile.OpenRoot(l.state, dirName, dirRule)
 	if err != nil {
-		return nil, "", nil, ErrArchiveInvalid
+		return nil, "", nil, err
 	}
 	return d, base, func() { d.Close() }, nil
 }
 
-// Healthy is false when the version state or a transition record is a fault.
-// It is also false when the bundle directory does not open. It changes
-// nothing on disk.
+// check runs the chain check and keeps the result in memory.
+func (l *Loader) check(dir *os.Root) error {
+	c, err := readChain(dir, l.trust, l.decompress)
+	if err != nil {
+		l.chain, l.chainErr = nil, err
+		return err
+	}
+	l.chain, l.chainErr = &c, nil
+	return nil
+}
+
+// Healthy is false when the last chain check failed or the version state is a
+// fault. It reads no record. A bundle directory that does not exist is healthy,
+// as at a first start. Any other error at the open of the directory is not
+// healthy. It changes nothing on disk.
 func (l *Loader) Healthy() bool {
 	loadMu.Lock()
 	defer loadMu.Unlock()
+	if l.chainErr != nil {
+		return false
+	}
 	dir, _, closeDir, err := l.openDir()
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	if err != nil {
 		return false
 	}
 	defer closeDir()
-	_, _, err = readChain(dir, l.trust)
-	return err == nil && NewRollback(dir).Healthy()
+	return NewRollback(dir).Healthy()
 }
 
 // Load reads the bundle and the signature file. It checks the bundle and makes
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: read,
-// transition records, SHA-256, signature, archive, manifest, key ID or
-// rotation, engine, expiry and rollback, templates. The transition records
-// in the bundle directory change the compiled trust set. Each record removes
-// an old key and adds a new key with the class of the old key. A transition
-// bundle has a signature line of the old key and one of the new key. Its
-// rotation member is checked at the place of the key ID. An accepted new
-// transition bundle writes its record before the version state. The first
-// failed check gives the one error. A rejected bundle changes no file and not
-// the running bundle. start is true for the load at start. An accepted bundle
-// that expired then loads, and Expired is true.
+// chain check of the transition records, SHA-256, signature, archive, manifest,
+// key ID or rotation, engine, expiry and rollback, templates.
+// A transition record is the archive and the signature file of an accepted
+// transition bundle: rotation-<n>.cbnd and rotation-<n>.sig in the bundle
+// directory, n from 1 to 8. The chain check starts with the compiled trust set.
+// For each record in order, it verifies a line of a key of the set before it
+// decompresses the archive. Then it verifies the line of the new key, and
+// replaces the old key with the new key. The new key has the class of the old
+// key. The check applies no expiry, engine, rollback, template or seed rule to
+// a record. It runs when start is true, when no check ran before, and after
+// Load writes a record. Other loads use the trust set in memory and read no
+// record. A record that changes after a check is found at the next start. A
+// failed check gives ErrStateFault.
+// A transition bundle has a signature line of the old key and one of the new
+// key. Load checks its rotation member where it checks the key ID of a normal
+// bundle. An accepted new transition bundle writes its record before the
+// version state. If the check of the records or the write of the version state
+// then fails, Load removes the record, keeps the trust set as it was, and gives
+// ErrStateFault.
+// The first failed check gives the one error. A rejected bundle changes no file
+// and not the running bundle. start is true for the load at start. An accepted
+// bundle that expired then loads, and Expired is true.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	loadMu.Lock()
 	defer loadMu.Unlock()
 	dir, base, closeDir, err := l.openDir()
 	if err != nil {
-		return nil, err
+		return nil, ErrArchiveInvalid
 	}
 	defer closeDir()
 	name, ok := strings.CutSuffix(base, ".cbnd")
@@ -176,12 +211,15 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	if l.afterRead != nil {
 		l.afterRead()
 	}
-	trust, sums, err := readChain(dir, l.trust)
-	if err != nil {
+	if start || (l.chain == nil && l.chainErr == nil) {
+		_ = l.check(dir)
+	}
+	if l.chainErr != nil {
 		return nil, ErrStateFault
 	}
+	c := *l.chain
 	sum := sha256.Sum256(archive)
-	ids, err := VerifySig(archive, sig, trust)
+	ids, err := VerifySig(archive, sig, c.trust)
 	if err != nil {
 		return nil, ErrBadSig
 	}
@@ -195,20 +233,19 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		return nil, ErrManifestInvalid
 	}
 	// A transition bundle that a record already holds loads by the normal rule.
-	newRotation := m.Rotation != nil && !slices.Contains(sums, sum)
+	newRotation := m.Rotation != nil && !slices.Contains(c.sums, sum)
 	var class Class
 	if newRotation {
-		lines, _ := parseSig(sig)
-		if _, ok := trust.rotated(m, sum, lines); !ok || len(sums) >= maxRotations {
+		var ok bool
+		if _, class, ok = c.rotate(m, archive, sig, ids); !ok || len(c.sums) >= maxRotations {
 			return nil, ErrBadSig
 		}
-		class = trust[trust.index(m.Rotation.From)].Class
 	} else {
-		i := trust.index(m.KeyID)
+		i := c.trust.index(m.KeyID)
 		if i < 0 || !slices.Contains(ids, m.KeyID) {
 			return nil, ErrBadSig
 		}
-		class = trust[i].Class
+		class = c.trust[i].Class
 	}
 	if err := m.CheckEngine(); err != nil {
 		return nil, ErrMinEngine
@@ -226,17 +263,33 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
 	// The record and the version state come before Store. A failed write
-	// leaves the running bundle.
+	// leaves the running bundle. After a record, a failed check of the records
+	// or a failed write of the version state removes the record and keeps the
+	// trust set as it was.
+	n := len(c.sums) + 1
 	if newRotation {
-		if err := writeRecord(dir, len(sums)+1, raw, sum, sig); err != nil {
+		if err := writeRecord(dir, n, archive, sig); err != nil {
+			return nil, ErrStateFault
+		}
+		if l.check(dir) != nil {
+			l.dropRecord(dir, n, &c)
 			return nil, ErrStateFault
 		}
 	}
 	if err := rb.Record(m, sum, class); err != nil {
+		if newRotation {
+			l.dropRecord(dir, n, &c)
+		}
 		return nil, fixed(err)
 	}
 	l.cur.Store(cand)
 	return cand, nil
+}
+
+// dropRecord removes record n and restores the chain prev in memory.
+func (l *Loader) dropRecord(dir *os.Root, n int, prev *chain) {
+	removeRecord(dir, n)
+	l.chain, l.chainErr = prev, nil
 }
 
 // fixed maps an error of Rollback to a fixed error of this package. The error

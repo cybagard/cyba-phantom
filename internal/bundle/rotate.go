@@ -1,9 +1,7 @@
 package bundle
 
 import (
-	"bytes"
-	"crypto/ed25519"
-	"encoding/hex"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -17,8 +15,8 @@ import (
 // holds (SEC-24).
 const maxRotations = 8
 
-// recordName gives the name of a file of transition record n. The "json" file
-// holds the manifest. The "sig" file holds the signature record.
+// recordName gives the name of a file of transition record n. ext is "cbnd"
+// for the archive of the transition bundle and "sig" for its signature file.
 func recordName(n int, ext string) string { return fmt.Sprintf("rotation-%d.%s", n, ext) }
 
 // index gives the position of the key with this ID, or -1.
@@ -26,92 +24,112 @@ func (t TrustSet) index(id string) int {
 	return slices.IndexFunc(t, func(k TrustKey) bool { return k.KeyID == id })
 }
 
-// rotated checks the rotation of a transition bundle against the trust set t.
-// m is its manifest and has a rotation member. sum is the SHA-256 of its
-// archive, and lines are its signature lines. The old key must be in t and the
-// new key ID must not be in t. This also refuses a rotation from a key ID to
-// itself. The old key and the new key each need a line that verifies. The new
-// key has the class of the old key. rotated gives the set after the rotation:
-// the old key is gone and the new key is in its place.
-func (t TrustSet) rotated(m *Manifest, sum [32]byte, lines []sigLine) (TrustSet, bool) {
+// chain is the result of a chain check: the compiled trust set with each
+// record applied. retired holds the keys that the records removed. sums holds
+// the archive SHA-256 of each record in order.
+type chain struct {
+	trust   TrustSet
+	retired TrustSet
+	sums    [][32]byte
+}
+
+// rotate checks the rotation of a transition bundle against the chain c. m is
+// its manifest. archive and sig are its files. ids are the key IDs that
+// VerifySig gave for sig over archive with the set c.trust. The old key must be
+// one of them. The new key ID must not be in the set, and neither it nor the
+// new key can be one that an earlier record removed. The new key needs a line
+// that verifies. rotate gives the chain after the rotation, and the class of
+// the old key, which the new key has. The new key takes the place of the old key.
+func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chain, class Class, ok bool) {
 	r := m.Rotation
-	i := t.index(r.From)
-	if i < 0 || t.index(m.KeyID) >= 0 {
-		return nil, false
+	if r == nil || !slices.Contains(ids, r.From) {
+		return chain{}, 0, false
 	}
-	msg := append([]byte("phantom-bundle-sig-v1\n"), sum[:]...)
-	verifies := func(id string, key [32]byte) bool {
-		j := slices.IndexFunc(lines, func(l sigLine) bool { return l.keyID == id })
-		return j >= 0 && ed25519.Verify(key[:], msg, lines[j].sig[:])
+	i := c.trust.index(r.From)
+	if i < 0 || c.trust.index(m.KeyID) >= 0 || c.retired.index(m.KeyID) >= 0 ||
+		slices.ContainsFunc(c.retired, func(k TrustKey) bool { return k.PublicKey == r.Key }) {
+		return chain{}, 0, false
 	}
-	if !verifies(r.From, t[i].PublicKey) || !verifies(m.KeyID, r.Key) {
-		return nil, false
+	if _, err := VerifySig(archive, sig, TrustSet{{KeyID: m.KeyID, PublicKey: r.Key}}); err != nil {
+		return chain{}, 0, false
 	}
-	next := slices.Clone(t)
-	next[i] = TrustKey{KeyID: m.KeyID, PublicKey: r.Key, Class: t[i].Class}
+	next = chain{trust: slices.Clone(c.trust), retired: append(slices.Clone(c.retired), c.trust[i]), sums: c.sums}
+	next.trust[i] = TrustKey{KeyID: m.KeyID, PublicKey: r.Key, Class: c.trust[i].Class}
+	return next, c.trust[i].Class, true
+}
+
+// record applies one transition record to the chain. VerifySig hashes the
+// archive and verifies a line of a key of the set before the decompress. Only
+// the manifest of the archive stays. No expiry, engine or rollback rule applies.
+func (c chain) record(archive, sig []byte, decompress func([]byte) (*Archive, error)) (chain, bool) {
+	ids, err := VerifySig(archive, sig, c.trust)
+	if err != nil {
+		return c, false
+	}
+	arch, err := decompress(archive)
+	if err != nil {
+		return c, false
+	}
+	raw, _ := arch.File("manifest.json")
+	m, err := ParseManifest(raw)
+	if err != nil {
+		return c, false
+	}
+	next, _, ok := c.rotate(m, archive, sig, ids)
+	if !ok {
+		return c, false
+	}
+	next.sums = append(next.sums, sha256.Sum256(archive))
 	return next, true
 }
 
-// readChain reads the transition records 1, 2, ... in the bundle directory.
-// It applies each one to the compiled trust set. It gives the effective set
-// and the archive SHA-256 of each record in order. ErrStateFault is the result
-// for a record that is not valid. It is also the result for a file without its
-// pair. A gap in the numbers gives it. So does a file that the state file rule
-// refuses. readChain changes nothing on disk.
-func readChain(root *os.Root, trust TrustSet) (TrustSet, [][32]byte, error) {
-	eff := slices.Clone(trust)
-	var sums [][32]byte
+// readChain reads the transition records 1, 2, ... in the bundle directory,
+// one at a time, with the read rule of a bundle file. It applies each one to the
+// compiled trust set. ErrStateFault is the result for a record that is not
+// valid, a file without its pair, a gap, a file that the read rule refuses, and
+// an entry at the name of record 9. readChain changes nothing on disk.
+func readChain(root *os.Root, trust TrustSet, decompress func([]byte) (*Archive, error)) (chain, error) {
+	c := chain{trust: slices.Clone(trust)}
 	ended := false
 	for n := 1; n <= maxRotations; n++ {
-		raw, errM := safefile.ReadFile(root, recordName(n, "json"), stateRule)
-		rec, errS := safefile.ReadFile(root, recordName(n, "sig"), stateRule)
-		if errors.Is(errM, fs.ErrNotExist) && errors.Is(errS, fs.ErrNotExist) {
+		archive, errA := safefile.ReadFile(root, recordName(n, "cbnd"), fileRule(MaxBundleBytes))
+		sig, errS := safefile.ReadFile(root, recordName(n, "sig"), fileRule(MaxSigBytes))
+		if errors.Is(errA, fs.ErrNotExist) && errors.Is(errS, fs.ErrNotExist) {
 			ended = true
 			continue
 		}
-		if ended || errM != nil || errS != nil {
-			return nil, nil, ErrStateFault
+		if ended || errA != nil || errS != nil {
+			return chain{}, ErrStateFault
 		}
-		m, sum, lines, ok := parseRecord(raw, rec)
-		if !ok {
-			return nil, nil, ErrStateFault
+		var ok bool
+		if c, ok = c.record(archive, sig, decompress); !ok {
+			return chain{}, ErrStateFault
 		}
-		if eff, ok = eff.rotated(m, sum, lines); !ok {
-			return nil, nil, ErrStateFault
-		}
-		sums = append(sums, sum)
 	}
-	return eff, sums, nil
+	for _, ext := range []string{"cbnd", "sig"} {
+		if _, err := root.Lstat(recordName(maxRotations+1, ext)); !errors.Is(err, fs.ErrNotExist) {
+			return chain{}, ErrStateFault
+		}
+	}
+	return c, nil
 }
 
-// parseRecord reads a record: the manifest of a transition bundle, and the
-// signature record. The signature record is a line with the archive SHA-256 in
-// lower-case hex, and then the signature file bytes.
-func parseRecord(raw, rec []byte) (m *Manifest, sum [32]byte, lines []sigLine, ok bool) {
-	line, sig, found := bytes.Cut(rec, []byte("\n"))
-	if !found || len(line) != hex.EncodedLen(len(sum)) {
-		return nil, sum, nil, false
+// writeRecord writes transition record n: the archive and the signature file of
+// the transition bundle. If a write fails, it removes the record.
+func writeRecord(root *os.Root, n int, archive, sig []byte) error {
+	err := writeFile(root, recordName(n, "cbnd"), archive)
+	if err == nil {
+		err = writeFile(root, recordName(n, "sig"), sig)
 	}
-	if _, err := hex.Decode(sum[:], line); err != nil || hex.EncodeToString(sum[:]) != string(line) {
-		return nil, sum, nil, false
-	}
-	m, err := ParseManifest(raw)
-	if err != nil || m.Rotation == nil {
-		return nil, sum, nil, false
-	}
-	lines, ok = parseSig(sig)
-	return m, sum, lines, ok
-}
-
-// writeRecord writes transition record n: the manifest bytes and the signature
-// record. If the second file fails, it removes the first.
-func writeRecord(root *os.Root, n int, manifest []byte, sum [32]byte, sig []byte) error {
-	if err := writeFile(root, recordName(n, "json"), manifest); err != nil {
-		return err
-	}
-	err := writeFile(root, recordName(n, "sig"), append(fmt.Appendf(nil, "%x\n", sum), sig...))
 	if err != nil {
-		_ = root.Remove(recordName(n, "json"))
+		removeRecord(root, n)
 	}
 	return err
+}
+
+// removeRecord removes the two files of transition record n.
+func removeRecord(root *os.Root, n int) {
+	for _, ext := range []string{"cbnd", "sig"} {
+		_ = root.Remove(recordName(n, ext))
+	}
 }

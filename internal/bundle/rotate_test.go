@@ -62,6 +62,21 @@ func (e *env) rotates(from, to rkey, version string) *Bundle {
 	return b
 }
 
+// record writes transition record n with these signature lines.
+func (e *env) record(n int, arch []byte, lines ...string) {
+	e.t.Helper()
+	e.write("bundle/"+recordName(n, "cbnd"), arch)
+	e.write("bundle/"+recordName(n, "sig"), []byte(strings.Join(lines, "")))
+}
+
+// read gives the bytes of a file of the bundle directory.
+func (e *env) read(name string) []byte {
+	e.t.Helper()
+	b, err := os.ReadFile(filepath.Join(e.state, "bundle", name))
+	must(e.t, err)
+	return b
+}
+
 func (e *env) absent(name string) {
 	e.t.Helper()
 	if _, err := os.Lstat(filepath.Join(e.state, "bundle", name)); err == nil {
@@ -77,16 +92,12 @@ func TestTS20RotationAccepted(t *testing.T) {
 	k1, k3 := e.keys()[0], newKey(3, "k3")
 	arch := transition(k1, k3, ver(3))
 	e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
-	sig, err := os.ReadFile(filepath.Join(e.state, "bundle/current.sig"))
-	must(t, err)
+	sig := e.read("current.sig")
 	b, err := e.l.Load(false)
 	must(t, err)
-	raw, _ := b.File("manifest.json")
-	json, _ := os.ReadFile(filepath.Join(e.state, "bundle/rotation-1.json"))
-	rec, _ := os.ReadFile(filepath.Join(e.state, "bundle/rotation-1.sig"))
-	if b.Manifest().Rotation == nil || b.Class() != ClassProprietary || !bytes.Equal(json, raw) ||
-		string(rec) != fmt.Sprintf("%x\n", b.SHA256())+string(sig) {
-		t.Errorf("bundle %+v; record %q %q", b.Manifest(), json, rec)
+	if b.Manifest().Rotation == nil || b.Class() != ClassProprietary ||
+		!bytes.Equal(e.read("rotation-1.cbnd"), arch) || !bytes.Equal(e.read("rotation-1.sig"), sig) {
+		t.Errorf("bundle %+v", b.Manifest())
 	}
 	if !e.l.Healthy() {
 		t.Error("not healthy")
@@ -96,10 +107,10 @@ func TestTS20RotationAccepted(t *testing.T) {
 	l2 := e.loader("bundle/current.cbnd")
 	e.rejects(l2, false, ErrBadSig)
 	e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
-	if b2, err := l2.Load(true); err != nil || b2.SHA256() != b.SHA256() {
+	if b2, err := l2.Load(true); err != nil || b2.SHA256() != b.SHA256() || !l2.Healthy() {
 		t.Fatalf("again: %v, %v", b2, err)
 	}
-	e.absent("rotation-2.json")
+	e.absent("rotation-2.cbnd")
 	e.absent("rotation-2.sig")
 	e.putBy(k3, ver(4))
 	if _, err := l2.Load(false); err != nil || !l2.Healthy() {
@@ -140,9 +151,9 @@ func mustRoot(t *testing.T, e *env) *os.Root {
 	return d
 }
 
-// T-S-20: a transition bundle needs a valid line of the old key and of the
-// new key. It is refused with a key ID that is the old key ID, or that is in
-// the trust set. It is refused with an old key that is not in the set.
+// T-S-20: the loader refuses a transition bundle without a valid line of the
+// old key or of the new key. It also refuses a key ID that is the old key ID or
+// that is in the trust set, and an old key that is not in the set.
 func TestTS20RotationRefused(t *testing.T) {
 	cases := []struct {
 		name string
@@ -218,9 +229,9 @@ func TestTS20RotationCheckOrder(t *testing.T) {
 	})
 }
 
-// T-S-20: eight transitions load, and the ninth is refused with no write.
-// After a restart the records apply in order. The key of the last record is
-// trusted and the first key is not.
+// T-S-20: the loader accepts eight transitions and refuses the ninth, with no
+// write. After a restart, it applies the records in order. It trusts the key of
+// the last record and does not trust the first key.
 func TestTS20NinthTransition(t *testing.T) {
 	e := running(t)
 	cur := e.keys()[0]
@@ -229,7 +240,7 @@ func TestTS20NinthTransition(t *testing.T) {
 		e.rotates(cur, next, ver(2+i))
 		cur = next
 	}
-	e.absent("rotation-9.json")
+	e.absent("rotation-9.cbnd")
 	next := newKey(30, "r9")
 	arch := transition(cur, next, ver(11))
 	e.put(arch, lineOf(cur, arch), lineOf(next, arch))
@@ -245,17 +256,17 @@ func TestTS20NinthTransition(t *testing.T) {
 	e.rejects(l2, false, ErrBadSig)
 }
 
-// T-S-20: a failed write of a record gives a state fault. The version state
-// and the files stay as they were. A failure of the second file removes the
-// first.
+// T-S-20: a failed write of a record or of the version state gives a state
+// fault. No record stays. The loader keeps the old key, also after a restart.
 func TestTS20RotationWriteFails(t *testing.T) {
-	for _, name := range []string{"rotation-1.json", "rotation-1.sig"} {
+	for _, name := range []string{"rotation-1.cbnd", "rotation-1.sig", StateName} {
 		t.Run(name, func(t *testing.T) {
 			e := running(t)
 			k1, k3 := e.keys()[0], newKey(3, "k3")
 			arch := transition(k1, k3, ver(3))
 			e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
-			must(t, os.MkdirAll(filepath.Join(e.state, "bundle", name+".tmp", "x"), 0o700))
+			blocker := filepath.Join(e.state, "bundle", name+".tmp")
+			must(t, os.MkdirAll(filepath.Join(blocker, "x"), 0o700))
 			st := mustRoot(t, e)
 			before, err := readState(st)
 			must(t, err)
@@ -265,11 +276,160 @@ func TestTS20RotationWriteFails(t *testing.T) {
 			if after, err := readState(st); err != nil || *after != *before {
 				t.Errorf("state %+v, %v", after, err)
 			}
-			e.absent("rotation-1.json")
-			if name == "rotation-1.json" {
-				e.absent("rotation-1.sig")
+			e.absent("rotation-1.cbnd")
+			e.absent("rotation-1.sig")
+			must(t, os.RemoveAll(blocker))
+			e.putBy(k1, ver(4))
+			if _, err := e.l.Load(false); err != nil {
+				t.Errorf("old key in memory: %v", err)
+			}
+			if _, err := e.loader("bundle/current.cbnd").Load(true); err != nil {
+				t.Errorf("old key after a restart: %v", err)
 			}
 		})
+	}
+}
+
+// T-S-20: a failed chain check after the write of a record removes the record
+// and gives a state fault. The loader keeps the old key.
+func TestTS20RotationRecordCheckFails(t *testing.T) {
+	e := running(t)
+	k1, k3 := e.keys()[0], newKey(3, "k3")
+	arch := transition(k1, k3, ver(3))
+	e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
+	calls := 0
+	e.l.decompress = func(b []byte) (*Archive, error) {
+		if calls++; calls > 1 {
+			return nil, ErrArchiveInvalid
+		}
+		return ReadArchive(b)
+	}
+	if _, err := e.l.Load(false); err != ErrStateFault {
+		t.Fatalf("got %v", err)
+	}
+	e.absent("rotation-1.cbnd")
+	e.absent("rotation-1.sig")
+}
+
+// T-S-20: a record made from the installed normal bundle and a line of another
+// key gives a state fault at the next start. The loader is not healthy.
+func TestTS20RotationForgedRecord(t *testing.T) {
+	e := running(t)
+	kx := newKey(9, "kx")
+	arch := e.read("current.cbnd")
+	e.record(1, arch, string(e.read("current.sig"))+lineOf(kx, arch))
+	l2 := e.loader("bundle/current.cbnd")
+	e.rejects(l2, true, ErrStateFault)
+	if l2.Healthy() {
+		t.Error("healthy")
+	}
+	e.putBy(kx, ver(3))
+	e.rejects(l2, false, ErrStateFault)
+}
+
+// T-S-20: a record archive with no line of a key of the set gives a state fault
+// before the decompress. The archive of one transition with the signature file
+// of another gives a state fault.
+func TestTS20RotationRecordSignatures(t *testing.T) {
+	e := running(t)
+	k1, k3, k4 := e.keys()[0], newKey(3, "k3"), newKey(4, "k4")
+	arch := transition(k1, k3, ver(3))
+	e.record(1, arch, lineOf(k3, arch))
+	if n := e.rejects(e.loader("bundle/current.cbnd"), true, ErrStateFault); n != 0 {
+		t.Errorf("%d decompress calls", n)
+	}
+	e = running(t)
+	e.rotates(k1, k3, ver(3))
+	e.rotates(k3, k4, ver(4))
+	e.write("bundle/rotation-2.sig", e.read("rotation-1.sig"))
+	e.rejects(e.loader("bundle/current.cbnd"), true, ErrStateFault)
+}
+
+// T-S-20: a record counts when its transition bundle has expired or has a
+// min_engine above the engine. After a restart, the new key loads, the old not.
+func TestTS20RotationRecordHasNoBundleRules(t *testing.T) {
+	for name, repl := range map[string][]string{"expired": expiredRepl, "min_engine": engineRepl} {
+		t.Run(name, func(t *testing.T) {
+			e := running(t)
+			k1, k3 := e.keys()[0], newKey(3, "k3")
+			arch := transition(k1, k3, ver(3), repl...)
+			e.record(1, arch, lineOf(k1, arch), lineOf(k3, arch))
+			e.putBy(k3, ver(4))
+			l2 := e.loader("bundle/current.cbnd")
+			if _, err := l2.Load(true); err != nil || !l2.Healthy() {
+				t.Fatalf("new key: %v", err)
+			}
+			e.putBy(k1, ver(5))
+			e.rejects(l2, false, ErrBadSig)
+		})
+	}
+}
+
+// T-S-20: the loader refuses a key ID or a key that an earlier record removed.
+// A new transition bundle gives bad_sig. A record gives a state fault.
+func TestTS20RotationRetiredKeys(t *testing.T) {
+	k1 := newKey(1, "k1")
+	for _, c := range []struct {
+		name string
+		to   rkey
+	}{
+		{"old ID, old key", k1},
+		{"old ID, other key", newKey(9, "k1")},
+		{"new ID, old key", rkey{"k5", k1.priv, k1.pub}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := running(t)
+			k3, to := newKey(3, "k3"), c.to
+			e.rotates(k1, k3, ver(3))
+			arch := transition(k3, to, ver(4))
+			e.put(arch, lineOf(k3, arch), lineOf(to, arch))
+			e.rejects(e.l, false, ErrBadSig)
+			e.record(2, arch, lineOf(k3, arch), lineOf(to, arch))
+			e.rejects(e.loader("bundle/current.cbnd"), true, ErrStateFault)
+		})
+	}
+}
+
+// T-S-20: a file or another entry at the name of record 9 gives a state fault.
+func TestTS20RotationNinthEntry(t *testing.T) {
+	for _, name := range []string{"rotation-9.cbnd", "rotation-9.sig"} {
+		t.Run(name, func(t *testing.T) {
+			e := running(t)
+			e.write("bundle/"+name, []byte("x"))
+			l2 := e.loader("bundle/current.cbnd")
+			e.rejects(l2, true, ErrStateFault)
+			if l2.Healthy() {
+				t.Error("healthy")
+			}
+		})
+	}
+}
+
+// T-S-20: a load that is not at start uses the trust set in memory and reads no
+// record. A record that changes after a check gives a fault at the next start.
+func TestTS20RotationChainInMemory(t *testing.T) {
+	e := running(t)
+	k3 := newKey(3, "k3")
+	e.rotates(e.keys()[0], k3, ver(3))
+	e.write("bundle/rotation-1.cbnd", []byte("changed"))
+	e.putBy(k3, ver(4))
+	if _, err := e.l.Load(false); err != nil || !e.l.Healthy() {
+		t.Fatalf("load or healthy after the change: %v", err)
+	}
+	l2 := e.loader("bundle/current.cbnd")
+	e.rejects(l2, true, ErrStateFault)
+	e.rejects(l2, false, ErrStateFault)
+}
+
+// T-S-20: a bundle directory that does not exist is healthy, as at a first
+// start. Another error at the open of the directory is not healthy.
+func TestTS20HealthyWithoutBundleDirectory(t *testing.T) {
+	e := newEnv(t)
+	must(t, os.Symlink("keys", filepath.Join(e.state, "b1")))
+	for path, want := range map[string]bool{"none/current.cbnd": true, "b1/current.cbnd": false} {
+		if got := e.loader(path).Healthy(); got != want {
+			t.Errorf("%s: healthy %v; want %v", path, got, want)
+		}
 	}
 }
 
@@ -309,22 +469,23 @@ func TestTS20RotationRecordFaults(t *testing.T) {
 		name string
 		do   func(e *env)
 	}{
-		{"manifest byte", edit("rotation-1.json", func(b []byte) []byte {
-			return bytes.Replace(b, []byte(`"from":"k1"`), []byte(`"from":"k2"`), 1)
+		{"archive byte", edit("rotation-1.cbnd", func(b []byte) []byte { return swap(b, len(b)/2, 'a', 'b') })},
+		{"old key line byte", edit("rotation-1.sig", func(b []byte) []byte { return swap(b, 3+5, 'A', 'B') })},
+		{"new key line byte", edit("rotation-1.sig", func(b []byte) []byte {
+			return swap(b, bytes.IndexByte(b, '\n')+1+3+5, 'A', 'B')
 		})},
-		{"manifest without rotation", edit("rotation-1.json", func([]byte) []byte { return []byte(mf(ver(3))) })},
-		{"sha line byte", edit("rotation-1.sig", func(b []byte) []byte { return swap(b, 0, '0', '1') })},
-		{"sha line upper case", edit("rotation-1.sig", func(b []byte) []byte {
-			i := bytes.IndexAny(b[:64], "abcdef")
-			b[i] -= 'a' - 'A'
-			return b
-		})},
-		{"sha line short", edit("rotation-1.sig", func(b []byte) []byte { return append(b[:63], b[64:]...) })},
-		{"signature line byte", edit("rotation-1.sig", func(b []byte) []byte { return swap(b, 65+3+5, 'A', 'B') })},
+		{"signed by another trusted key", func(e *env) {
+			arch := e.read("rotation-1.cbnd")
+			e.record(1, arch, lineOf(e.keys()[1], arch), lineOf(newKey(3, "k3"), arch))
+		}},
+		{"no rotation member", func(e *env) {
+			arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3)))})
+			e.record(1, arch, lineOf(e.keys()[0], arch))
+		}},
 		{"no .sig", file(os.Remove, "rotation-1.sig")},
-		{"no .json", file(os.Remove, "rotation-1.json")},
-		{"gap", file(rename, "rotation-1.json", "rotation-1.sig")},
-		{"json mode 0644", file(chmod, "rotation-1.json")},
+		{"no .cbnd", file(os.Remove, "rotation-1.cbnd")},
+		{"gap", file(rename, "rotation-1.cbnd", "rotation-1.sig")},
+		{"cbnd mode 0644", file(chmod, "rotation-1.cbnd")},
 		{"sig mode 0644", file(chmod, "rotation-1.sig")},
 		{"version state mode 0644", file(chmod, StateName)},
 	}
@@ -336,13 +497,11 @@ func TestTS20RotationRecordFaults(t *testing.T) {
 				t.Fatal("not healthy before the change")
 			}
 			c.do(e)
-			before := dirListing(t, e.state)
 			l2 := e.loader("bundle/current.cbnd")
-			if e.l.Healthy() || l2.Healthy() || dirListing(t, e.state) != before {
-				t.Error("healthy, or a file changed")
+			e.rejects(l2, true, ErrStateFault)
+			if l2.Healthy() {
+				t.Error("healthy")
 			}
-			e.rejects(e.l, false, ErrStateFault)
-			e.rejects(l2, false, ErrStateFault)
 		})
 	}
 }
