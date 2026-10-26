@@ -602,8 +602,8 @@ var storePart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // checkStorePath applies the rules of checkStatePath. Then it checks the path
 // text. A path that is equal to the state directory fails. A path that is not
-// below it in the path text fails. Each part below it has only A-Z a-z 0-9 . _ -
-// and is not "." or "..".
+// below it in the path text fails. Each part below it has only
+// A-Z a-z 0-9 . _ - and is not "." or "..".
 func checkStorePath(l *loader, raw string) string {
 	if d := checkStatePath(l, raw); d != "" {
 		return d
@@ -644,9 +644,10 @@ func cacheConflict(root string, vals map[string]Value, p string) string {
 }
 
 // tlogConflict checks the tlog.dir value p (SEC-11). It returns a detail if p
-// is in or above the path of another key or a state directory, or is a state
-// file. It compares the path text only. It folds A-Z with foldASCII. A key
-// that is not in vals failed its own check, so it is skipped.
+// is in or above the path of another key or a state directory. It also returns
+// a detail if p is a state file. It compares the path text only. It folds A-Z
+// with foldASCII. A key that is not in vals failed its own check, so it is
+// skipped.
 func tlogConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	if n := keyClash(p, vals, true, "acme.cache_dir", "bundle.path", "store.path"); n != "" {
@@ -813,8 +814,8 @@ func checkACMEName(_ *loader, raw string) string {
 // acmeLabel matches one label of an acme.names entry.
 var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// inDirText reports whether the clean path p is the clean path d or is below it.
-// It compares text only. The function under compares resolved paths.
+// inDirText reports whether the clean path p is the clean path d, or is below
+// it. It compares text only. The function under compares resolved paths.
 func inDirText(p, d string) bool {
 	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
 }

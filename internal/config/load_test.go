@@ -212,8 +212,8 @@ func TestTU10_Errors(t *testing.T) {
 	}
 }
 
-// TestTU10_ReaderErrorValues checks that after a reader error the load also
-// parses the value of each known variable, so one load shows all the errors.
+// TestTU10_ReaderErrorValues checks the load after a reader error. It also
+// parses the value of each known variable. So one load shows all the errors.
 func TestTU10_ReaderErrorValues(t *testing.T) {
 	useTestKeys(t)
 	_, err := loadTest(filepath.Join(t.TempDir(), "missing.yaml"), []string{"PHANTOM_A_PORT=017", "PHANTOM_A_FLAG=true"})
@@ -290,7 +290,8 @@ func useTestKeys(t *testing.T) {
 	t.Cleanup(func() { keys = old })
 }
 
-// TestTS10_Scalars checks strict scalars, unknown PHANTOM variables, and escaped values through Load.
+// TestTS10_Scalars checks strict scalars, unknown PHANTOM variables, and
+// escaped values through Load.
 func TestTS10_Scalars(t *testing.T) {
 	useTestKeys(t)
 	rows := []struct{ name, file, env, want string }{

@@ -193,7 +193,9 @@ func envName(path string) string {
 
 func keyError(k key, raw, src string, line int, detail string) error {
 	if k.secret || k.kind == kindURL {
-		raw = "" // An Error never holds a secret value or a URL: a URL can hold user information.
+		// An Error never holds a secret value or a URL.
+		// A URL can hold user information.
+		raw = ""
 	}
 	return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
 }
@@ -208,7 +210,8 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	}
 	doc, err := ReadFile(path)
 	if err != nil {
-		// A reader error does not hide the errors in variable names or in their values.
+		// A reader error does not hide the errors in variable names.
+		// It does not hide the errors in their values.
 		check := func(k key, name, raw string) error {
 			if _, detail := parse(k, raw, ""); detail != "" {
 				return keyError(k, raw, name, 0, detail)

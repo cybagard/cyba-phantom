@@ -320,8 +320,9 @@ func TestTS11_CheckStorePath(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckTLogDir checks that --check refuses a bad tlog.dir and a bad acme.cache_dir
-// with exit 1 and the error text of the load (SEC-11, SEC-21, T-S-11).
+// TestTS11_CheckTLogDir checks that --check refuses a bad tlog.dir and a bad
+// acme.cache_dir. The exit code is 1. The text is the error of the load
+// (SEC-11, SEC-21, T-S-11).
 func TestTS11_CheckTLogDir(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	file := writeFile(t, validBody(t))
@@ -422,7 +423,8 @@ func TestTS11_CheckACME(t *testing.T) {
 	}
 	const bundleSide = "config: bundle.path at PHANTOM_BUNDLE_PATH: the directory must not be in or above acme.cache_dir\n"
 	const bundleSideDefault = "config: bundle.path at default: the directory must not be in or above acme.cache_dir\n"
-	// The tlog.dir rule is in or above acme.cache_dir, so it gives its own error.
+	// The tlog.dir rule is in or above acme.cache_dir.
+	// So it gives its own error.
 	const tlogSide = "config: tlog.dir at PHANTOM_TLOG_DIR: the path must not be in or above acme.cache_dir\n"
 	const tlogSideDefault = "config: tlog.dir at default: the path must not be in or above acme.cache_dir\n"
 	rows := []struct {

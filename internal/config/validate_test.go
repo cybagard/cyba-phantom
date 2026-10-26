@@ -763,7 +763,8 @@ func TestTU10_URLOutput(t *testing.T) {
 func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	t.Helper()
 	const htpasswdEnv = "PHANTOM_OPS_BASIC_AUTH_HTPASSWD"
-	// The loader rejects a variable that is in env two times, so the default is set only if the caller does not set it.
+	// The loader rejects a variable that is in env two times.
+	// So the default is set only if the caller does not set it.
 	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
 	}
@@ -949,8 +950,9 @@ func TestTS11_StorePathText(t *testing.T) {
 	}
 }
 
-// tlogLines returns the line breaks that the load error holds if the store.path error is "in tlog.dir".
-// Then tlog.dir is in or above store.path, and it has its own error.
+// tlogLines returns the line breaks of the load error. The store.path error
+// can be "in tlog.dir". Then tlog.dir is in or above store.path, and it has
+// its own error.
 func tlogLines(want string) int {
 	if want == "in tlog.dir" {
 		return 1
@@ -1056,8 +1058,9 @@ func TestTS11_StorePathFailedKey(t *testing.T) {
 	}
 }
 
-// TestTS11_TLogDirText checks that tlog.dir has the path rules of store.path. The load gives one
-// error that names tlog.dir, also for the state directory and for a link that leads below it (SEC-11).
+// TestTS11_TLogDirText checks that tlog.dir has the path rules of store.path.
+// The load gives one error that names tlog.dir. This is also true for the
+// state directory and for a link that leads below it (SEC-11).
 func TestTS11_TLogDirText(t *testing.T) {
 	tr := newTree(t)
 	if err := os.Mkdir(tr.root+"/tlog", 0o700); err != nil {
@@ -1093,8 +1096,9 @@ func TestTS11_TLogDirText(t *testing.T) {
 	}
 }
 
-// TestTS11_TLogDirLoad checks that the load refuses a tlog.dir that is in or above the path of another key,
-// or is a state file. The compare folds A-Z. The error names tlog.dir (SEC-11).
+// TestTS11_TLogDirLoad checks that the load refuses a tlog.dir in or above the
+// path of another key. It also refuses a state file. The compare folds A-Z.
+// The error names tlog.dir (SEC-11).
 func TestTS11_TLogDirLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
@@ -1134,7 +1138,8 @@ func TestTS11_TLogDirLoad(t *testing.T) {
 			}
 		})
 	}
-	// The state directory fails its own check, so no other key names it in an error.
+	// The state directory fails its own check.
+	// So no other key names it in an error.
 	t.Run("state directory", func(t *testing.T) {
 		_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom")
 		if err == nil || !strings.Contains(err.Error(), "tlog.dir at ") || strings.Count(err.Error(), "\n") != 0 {
@@ -1223,8 +1228,9 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 	}
 }
 
-// TestTS11_BundlePathKelvinTLog checks that a tlog.dir with a Kelvin sign (U+212A) is not a K for the compares:
-// the part rule refuses it, and the error names tlog.dir only (SEC-23).
+// TestTS11_BundlePathKelvinTLog checks a tlog.dir with a Kelvin sign (U+212A).
+// It is not a K for the compares. The part rule refuses it. The error names
+// tlog.dir only (SEC-23).
 func TestTS11_BundlePathKelvinTLog(t *testing.T) {
 	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom/K", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/k/x.cbnd")
 	if err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: each path part") || strings.Count(err.Error(), "\n") != 0 {
@@ -1910,7 +1916,8 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"label of 63 bytes", namesFile(l63 + ".example"), "", ""},
 		{"name of 253 bytes", namesFile(name253), "", ""},
 		{"digits and hyphen", namesFile("a-1.b2-c.example"), "", ""},
-		// The rule refuses the names below home.arpa, not home.arpa. That name has two labels, so it loads.
+		// The rule refuses the names below home.arpa, not home.arpa.
+		// That name has two labels, so it loads.
 		{"home.arpa", namesFile("home.arpa"), "", ""},
 		{"0 names", namesFile(), "", key},
 		{"17 names", namesFile(many...), "", key},
@@ -1932,7 +1939,8 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"below local", namesFile("x.local"), "", key},
 		{"below internal", namesFile("x.internal"), "", key},
 		{"below home.arpa", namesFile("x.home.arpa"), "", key},
-		// The names local and internal have one label: the rule for two labels refuses them.
+		// The names local and internal have one label.
+		// The rule for two labels refuses them.
 		{"local", namesFile("local"), "", key},
 		{"internal", namesFile("internal"), "", key},
 		{"duplicate", namesFile("a.example.com", "b.example.com", "a.example.com"), "", key},
@@ -1961,8 +1969,9 @@ func TestTS11_ACMENames(t *testing.T) {
 	}
 }
 
-// TestTS11_ACMENamesTripleDuplicate checks that a name that is in the list 3 times gives one duplicate
-// error line, not one for each extra copy (SEC-21, T-S-11).
+// TestTS11_ACMENamesTripleDuplicate checks a name that is in the list 3 times.
+// It gives one duplicate error line, not one for each extra copy
+// (SEC-21, T-S-11).
 func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
 	_, err := loadProd(t, namesFile("a.example.com", "a.example.com", "a.example.com"))
 	if err == nil {
