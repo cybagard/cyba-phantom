@@ -18,9 +18,9 @@ type Drops struct {
 }
 
 // DropCount counts the dropped events for each lane. These are the events that
-// Discard drops. They also include each event of a batch that ends with an
-// error and no COMMIT. The zero value is ready for use. It is safe for
-// concurrent use.
+// Discard or a stopped writer drops. They also include each event of a batch
+// that ends with an error and no COMMIT. The zero value is ready for use. It
+// is safe for concurrent use.
 type DropCount struct {
 	bulk, evidence atomic.Uint64
 }
