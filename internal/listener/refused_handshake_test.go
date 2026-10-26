@@ -17,7 +17,7 @@ const (
 	noCertName = "nocert.test"
 )
 
-// gateRig is a server with the real name gate, wired as cmd/phantom does. It
+// gateRig is a server with the real name gate, set up as cmd/phantom does. It
 // has the configured name testName with a cached certificate, and the
 // configured name noCertName with none.
 type gateRig struct {
@@ -67,8 +67,9 @@ func (g *gateRig) handshake(t *testing.T, cfg *tls.Config) {
 }
 
 // want waits for the close of the connection. It checks the refused events:
-// one with the reason, or none when reason is "". It also checks the count of
-// the name gate and that the error log counted the failed handshake.
+// one with the reason, or none when reason is "". An event has no status, the
+// address 127.0.0.1 and no marker text in its record. It also checks the count
+// of the name gate and that the error log has exactly 1 line.
 func (g *gateRig) want(t *testing.T, reason string, gate uint64) {
 	t.Helper()
 	waitClosed(t, g.closed)
@@ -103,19 +104,18 @@ func clientCfg(name string, protos ...string) *tls.Config {
 
 // T-S-22: the name gate gives the reason, and its count goes up by one.
 func TestTS22GateReasons(t *testing.T) {
-	for _, tc := range []struct{ name, sni, reason string }{
-		{"no server name", "", "no_server_name"},
-		{"unknown name", otherName, "unknown_name"},
-		{"byte of 0x80 or more", "café.test", "unknown_name"},
-		{"unknown name with acme-tls/1", otherName, "unknown_name"},
+	for _, tc := range []struct {
+		name, sni, reason string
+		alpn              []string
+	}{
+		{"no server name", "", "no_server_name", nil},
+		{"unknown name", otherName, "unknown_name", nil},
+		{"byte of 0x80 or more", "café.test", "unknown_name", nil},
+		{"unknown name with acme-tls/1", otherName, "unknown_name", []string{challengeProto}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGateRig(t, defaultTimeouts, nil)
-			var protos []string
-			if strings.Contains(tc.name, "acme") {
-				protos = []string{challengeProto}
-			}
-			g.handshake(t, clientCfg(tc.sni, protos...))
+			g.handshake(t, clientCfg(tc.sni, tc.alpn...))
 			g.want(t, tc.reason, 1)
 		})
 	}
@@ -129,27 +129,38 @@ func TestTS22BadHello(t *testing.T) {
 		h.exts = append([]rawExt{extSNI(name)}, h.exts...)
 		return h.bytes()
 	}
-	// Versions 1.0 and 1.1 are not shared. The check runs before the gate.
+	// The hello has version 0x0301 and no supported_versions, so it offers only
+	// TLS 1.0. The version check runs before the gate.
 	noVersion := rawHello{version: 0x0301, suites: []uint16{0xc02f}}
+	// supported_versions holds only 0x0302: the TLS 1.3 form with no shared
+	// version. This check also runs before the gate.
+	noVersion13 := rawHello{version: 0x0303, suites: []uint16{0x1301}, exts: []rawExt{extVersions(0x0302), extGroups(29), extSigs(0x0804)}}
 	// TLS 1.3 picks the suite before the gate. TLS 1.2 picks it after the gate.
 	noSuite13 := rawHello{version: 0x0303, suites: []uint16{0xc02f}, exts: []rawExt{extVersions(0x0304), extGroups(29), extSigs(0x0804)}}
 	noSuite12 := rawHello{version: 0x0303, suites: []uint16{0x1301}, exts: []rawExt{extGroups(23), extSigs(0x0403)}}
 	for _, tc := range []struct {
 		name   string
+		noName bool // the case has no server name
 		send   func(*testing.T, *gateRig, string)
 		reason map[string]string // by name
 		gate   map[string]uint64
 	}{
-		{"not TLS", func(t *testing.T, g *gateRig, _ string) { g.write(t, []byte("GET / HTTP/1.0\r\n\r\n")) }, nil, nil},
-		{"hello that does not parse", func(t *testing.T, g *gateRig, _ string) { g.write(t, []byte{22, 3, 1, 0, 4, 1, 0, 0, 0}) }, nil, nil},
-		{"no shared version", func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noVersion)) }, nil, nil},
-		{"no shared suite, TLS 1.3", func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noSuite13)) }, nil, nil},
-		{"no shared suite, TLS 1.2", func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noSuite12)) },
+		{"not TLS", true, func(t *testing.T, g *gateRig, _ string) { g.write(t, []byte("GET / HTTP/1.0\r\n\r\n")) }, nil, nil},
+		{"hello that does not parse", true, func(t *testing.T, g *gateRig, _ string) { g.write(t, []byte{22, 3, 1, 0, 4, 1, 0, 0, 0}) }, nil, nil},
+		{"no shared version", false, func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noVersion)) }, nil, nil},
+		{"no shared version, TLS 1.3 form", false, func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noVersion13)) }, nil, nil},
+		{"no shared suite, TLS 1.3", false, func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noSuite13)) }, nil, nil},
+		{"no shared suite, TLS 1.2", false, func(t *testing.T, g *gateRig, n string) { g.write(t, hello(n, noSuite12)) },
 			map[string]string{otherName: "unknown_name"}, map[string]uint64{otherName: 1}},
-		{"ALPN that is not offered", func(t *testing.T, g *gateRig, n string) { g.handshake(t, clientCfg(n, "h2")) }, nil, nil},
+		{"ALPN that is not offered", false, func(t *testing.T, g *gateRig, n string) { g.handshake(t, clientCfg(n, "h2")) }, nil, nil},
+		{"ALPN that is not offered, TLS 1.2", false, func(t *testing.T, g *gateRig, n string) {
+			cfg := clientCfg(n, "h2")
+			cfg.MaxVersion = tls.VersionTLS12
+			g.handshake(t, cfg)
+		}, nil, nil},
 	} {
 		for _, name := range []string{testName, otherName} {
-			if tc.reason == nil && (tc.name == "not TLS" || tc.name == "hello that does not parse") && name == otherName {
+			if tc.noName && name == otherName {
 				continue // these have no name
 			}
 			t.Run(tc.name+", "+name, func(t *testing.T) {
@@ -166,15 +177,58 @@ func TestTS22BadHello(t *testing.T) {
 }
 
 // T-S-22: a TLS alert from the client after its ClientHello gives bad_hello, in
-// TLS 1.2 and in TLS 1.3. The client does not verify the certificate, so it
-// sends a bad_certificate alert. The connection stays open until the event is
-// read.
+// TLS 1.2 and in TLS 1.3. The client verifies the certificate. The verify
+// fails, because the test certificate has no trusted root, so the client sends
+// a bad_certificate alert. The connection stays open until the event is read.
 func TestTS22ClientAlertAfterHello(t *testing.T) {
 	for name, ver := range map[string]uint16{"TLS 1.2": tls.VersionTLS12, "TLS 1.3": tls.VersionTLS13} {
 		t.Run(name, func(t *testing.T) {
 			g := newGateRig(t, defaultTimeouts, nil)
 			g.handshake(t, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver})
 			g.want(t, "bad_hello", 0)
+		})
+	}
+}
+
+// hookConn keeps the bytes of each Write and fails it, so a client handshake
+// gives its ClientHello and stops.
+type hookConn struct {
+	net.Conn
+	sent []byte
+}
+
+func (h *hookConn) Write(p []byte) (int, error) {
+	h.sent = append(h.sent, p...)
+	return 0, net.ErrClosed
+}
+
+// T-S-22: a client that resets after a full ClientHello gives no event, in TLS
+// 1.2 and in TLS 1.3. The certificate callback waits until the reset is sent.
+// Then the flight write of the server fails, or a later read fails.
+func TestTS22ResetAfterHelloGivesNoEvent(t *testing.T) {
+	for name, ver := range map[string]uint16{"TLS 1.2": tls.VersionTLS12, "TLS 1.3": tls.VersionTLS13} {
+		t.Run(name, func(t *testing.T) {
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+			hc := &hookConn{Conn: a}
+			_ = tls.Client(hc, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver}).Handshake()
+			entered, release := make(chan struct{}), make(chan struct{})
+			g := newGateRig(t, defaultTimeouts, func(s *Server) {
+				get := s.tls.GetCertificate
+				s.tls.GetCertificate = func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					close(entered)
+					<-release
+					return get(h)
+				}
+			})
+			c := g.raw(t)
+			_, err := c.Write(hc.sent)
+			mustNil(t, err)
+			<-entered
+			mustNil(t, c.(*net.TCPConn).SetLinger(0))
+			mustNil(t, c.Close())
+			close(release)
+			g.want(t, "", 0)
 		})
 	}
 }

@@ -435,8 +435,7 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 }
 
 // refuseName counts a refusal of the name gate. It records the reason on the
-// connection of hello, if the hello has one. A hello that a test makes by hand
-// has no context.
+// connection of hello, if the hello has a context.
 func (a *ACME) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason) error {
 	a.refused.Add(1)
 	if lc := helloConn(hello); lc != nil {

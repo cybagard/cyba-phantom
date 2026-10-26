@@ -275,7 +275,8 @@ type limitConn struct {
 	gate event.RefusedReason
 	// noCert is true when there is no certificate to give.
 	noCert bool
-	// lastData is true when the last read gave data, no error, no timeout.
+	// lastData is true when the last read gave data, no error, no timeout. A
+	// write that fails after that read sets it to false.
 	lastData bool
 }
 
@@ -375,6 +376,8 @@ const recordApplicationData = 23
 // writes: a client that reads the response can answer before Write returns. The
 // handshake writes before the first request is active. It also counts a write
 // of more than uncountedWriteMax bytes that starts with recordApplicationData.
+// A write that fails, also with a timeout, means that the client stopped. Then
+// lastData is false, so the connection gives no bad_hello.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active
@@ -382,7 +385,13 @@ func (c *limitConn) Write(p []byte) (int, error) {
 		c.writes++
 	}
 	c.mu.Unlock()
-	return c.Conn.Write(p)
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		c.mu.Lock()
+		c.lastData = false
+		c.mu.Unlock()
+	}
+	return n, err
 }
 
 // startRequest marks a request without a body as active. A test calls it. The
@@ -426,7 +435,8 @@ func (c *limitConn) setGate(r event.RefusedReason) {
 }
 
 // markNoCert records that the certificate callback failed and the name gate
-// did not refuse the connection. The listener has no certificate to give.
+// did not refuse the connection. Either the listener has no certificate to
+// give, or the client offered only acme-tls/1 and no challenge is active.
 func (c *limitConn) markNoCert() {
 	c.mu.Lock()
 	if c.gate == 0 {
@@ -436,10 +446,11 @@ func (c *limitConn) markNoCert() {
 }
 
 // handshakeReason gives the reason of the refused event for a connection whose
-// handshake failed (SEC-22). It gives none when the listener had no certificate
-// to give or the budget closed the connection. Else the name gate gives its
-// reason. Else the connection gives bad_hello when the last read gave data and
-// no error. A client that stopped gives no reason.
+// handshake failed (SEC-22). It gives none when the connection has the no
+// certificate mark or the budget closed the connection. If not, the name gate
+// gives its reason. If not, it gives bad_hello when the last read gave data.
+// That read had no error, and no write failed after it. If not, it gives no
+// reason: the client stopped.
 func (c *limitConn) handshakeReason() (event.RefusedReason, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -515,6 +515,38 @@ type stubConn struct {
 func (f stubConn) Read([]byte) (int, error)    { return f.n, f.err }
 func (f stubConn) Write(p []byte) (int, error) { return len(p), nil }
 
+// failWrite is a stubConn whose Write gives err.
+type failWrite struct {
+	stubConn
+	err error
+}
+
+func (f failWrite) Write([]byte) (int, error) { return 0, f.err }
+
+// T-S-22: a write that fails after the last read with data clears the data
+// mark, so there is no bad_hello. A write that works keeps it.
+func TestTS22FailedWriteClearsHelloData(t *testing.T) {
+	for name, tc := range map[string]struct {
+		conn net.Conn
+		want bool
+	}{
+		"write fails":     {failWrite{stubConn{n: 5}, net.ErrClosed}, false},
+		"write times out": {failWrite{stubConn{n: 5}, os.ErrDeadlineExceeded}, false},
+		"write works":     {stubConn{n: 5}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lc := &limitConn{Conn: tc.conn, left: 100}
+			_, err := lc.Read(make([]byte, 10))
+			mustNil(t, err)
+			_, _ = lc.Write([]byte("flight"))
+			r, ok := lc.handshakeReason()
+			if ok != tc.want || (ok && r != event.ReasonBadHello) {
+				t.Errorf("reason %v, ok %v; want ok %v", r, ok, tc.want)
+			}
+		})
+	}
+}
+
 // appData returns n bytes that start with the record type application_data.
 func appData(n int) []byte {
 	p := make([]byte, n)

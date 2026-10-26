@@ -22,7 +22,8 @@ type Config struct {
 	// GetConfigForClient, because the server sets both. The server clones the
 	// config, sets the ALPN list to http/1.1 and acme-tls/1, and sets the
 	// ClientHello capture. If GetCertificate is set, the server wraps it to
-	// find a failure with no certificate to give. A connection that negotiates
+	// find an error with no gate result. That is no certificate to give, or
+	// acme-tls/1 with no active challenge. A connection that negotiates
 	// acme-tls/1 gets no HTTP and closes after the handshake.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
@@ -210,8 +211,9 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	s.tls.NextProtos = []string{"http/1.1", challengeProto}
 	s.tls.GetConfigForClient = captureHello
 	if get := s.tls.GetCertificate; get != nil {
-		// An error without a gate result means that the listener has no
-		// certificate to give. That is an operator fault and gives no event.
+		// An error without a gate result gives no event. Either the listener
+		// has no certificate to give, or the client offered only acme-tls/1 and
+		// no challenge is active.
 		s.tls.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			cert, err := get(hello)
 			if err != nil {
