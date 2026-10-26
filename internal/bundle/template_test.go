@@ -232,13 +232,20 @@ func TestTU08TemplateCaps(t *testing.T) {
 		{"template bytes", files(1, strings.Repeat("a", 64<<10)), 1},
 		{"template bytes, over", files(1, strings.Repeat("a", 64<<10+1)), 0},
 		{"template actions", files(1, act), 1},
-		{"template actions, over", files(1, act+"{{1}}"), 0},                                                                // 2 049 "{{"
-		{"template actions, over, in a comment", files(1, strings.Repeat("{{1}}", 2047)+"{{/* {{ */}}"), 0},                 // 2 049 "{{"
-		{"template actions, over, in a string", files(1, strings.Repeat("{{1}}", 2047)+`{{"{{"}}`), 0},                      // 2 049 "{{"
-		{"bundle actions, split", files(8, act), 8},                                                                         // 8 x 2 048 = 16 384 "{{"
-		{"bundle actions, split, over", append(files(8, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},                   // 16 385 "{{"
-		{"bundle bytes, split", files(8, strings.Repeat("a", 64<<10)), 8},                                                   // 8 x 64 KiB = 512 KiB
-		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", 64<<10)), tf("vhosts/h.example/z.tmpl", "a")), 0}, // 512 KiB + 1 byte
+		// 2 049 "{{"
+		{"template actions, over", files(1, act+"{{1}}"), 0},
+		// 2 049 "{{"
+		{"template actions, over, in a comment", files(1, strings.Repeat("{{1}}", 2047)+"{{/* {{ */}}"), 0},
+		// 2 049 "{{"
+		{"template actions, over, in a string", files(1, strings.Repeat("{{1}}", 2047)+`{{"{{"}}`), 0},
+		// 8 x 2 048 = 16 384 "{{"
+		{"bundle actions, split", files(8, act), 8},
+		// 16 385 "{{"
+		{"bundle actions, split, over", append(files(8, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},
+		// 8 x 64 KiB = 512 KiB
+		{"bundle bytes, split", files(8, strings.Repeat("a", 64<<10)), 8},
+		// 512 KiB + 1 byte
+		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", 64<<10)), tf("vhosts/h.example/z.tmpl", "a")), 0},
 		{"4 MiB of nested if", files(1, strings.Repeat("{{if 1}}", MaxEntryBytes/8)), 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
