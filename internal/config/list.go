@@ -214,8 +214,8 @@ func checkSecretEnv(minBytes int) func(*loader, string) string {
 		switch {
 		case !envVarName.MatchString(raw):
 			return "the value must be a variable name that matches ^[A-Z_][A-Z0-9_]*$"
-		case strings.HasPrefix(raw, "PHANTOM_"):
-			return "the variable name must not start with PHANTOM_"
+		case strings.HasPrefix(envFold(raw), "PHANTOM"):
+			return "the variable name must not start with PHANTOM"
 		}
 		v, n := "", 0
 		for _, kv := range l.env { // os.Environ holds one entry for each name.

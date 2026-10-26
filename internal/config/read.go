@@ -314,7 +314,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src [][]byte)
 		}
 
 		tag := n.Tag
-		if bareTag(n, src) || n.Style&yaml.TaggedStyle != 0 && n.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle) != 0 && tag != "!!str" {
+		if bareTag(n, src) || n.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) != 0 && tag != "!!str" {
 			tag = "!"
 		}
 		doc.Leaves[path] = Leaf{
@@ -331,14 +331,20 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src [][]byte)
 }
 
 // bareTag reports whether the file has the non-specific tag "!" before the
-// scalar n. The parser drops it: Tag and Style are as for a plain scalar.
-// The node starts at the tag. A plain or quoted scalar cannot start with "!".
+// scalar n. The parser drops it. Style is that of the scalar without the tag.
+// Tag is "!!str" for a quoted or block scalar. The node starts at the tag.
+// A plain, quoted or block scalar cannot start with "!". Column counts
+// runes, so the function skips runes and does not copy the line.
 func bareTag(n *yaml.Node, src [][]byte) bool {
-	if n.Style&yaml.TaggedStyle != 0 || n.Line < 1 || n.Line > len(src) {
+	if n.Style&yaml.TaggedStyle != 0 || n.Line < 1 || n.Line > len(src) || n.Column < 1 {
 		return false
 	}
-	r := []rune(string(src[n.Line-1]))
-	return n.Column >= 1 && n.Column <= len(r) && r[n.Column-1] == '!'
+	line := src[n.Line-1]
+	for i := 1; i < n.Column && len(line) > 0; i++ {
+		_, size := utf8.DecodeRune(line)
+		line = line[size:]
+	}
+	return len(line) > 0 && line[0] == '!'
 }
 
 func isCoreTag(tag string, kind yaml.Kind) bool {

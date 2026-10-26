@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -303,15 +304,19 @@ func TestTS10_Scalars(t *testing.T) {
 }
 
 // TestTS10_EnvNameForms checks the names that envFold reads as PHANTOM names.
-// They have no "_", a ".", leading white space, or invisible or full-width
-// characters. PHANTOMJS_BIN shows that the rule also refuses a name of
-// another program. A character next to the full-width range is not a form.
+// They have no "_", a ".", leading white space, or invisible, control,
+// combining or full-width characters. PHANTOMJS_BIN shows that the rule also
+// refuses a name of another program. A character next to the full-width range
+// is not a form.
 func TestTS10_EnvNameForms(t *testing.T) {
 	useTestKeys(t)
 	for _, name := range []string{
 		"PHANTOMX", "PHANTOM.X", " PHANTOM_X", "\tPHANTOM_X", "PHANTOM", "PHANTOMJS_BIN",
 		"PHANTOM\u200b_X", "\u200bPHANTOM_X", "\uff30HANTOM_X", "\uff30\uff28\uff21\uff2e\uff34\uff2f\uff2d_X",
 		"PHANTOM\uff3fX",
+		"\u3164PHANTOM_A_PORT", "\uffa0PHANTOM_A_PORT", "\u115fPHANTOM_A_PORT",
+		"PHANTOM\u034f_A_PORT", "P\u0301HANTOM_A_PORT", "P\u20ddHANTOM_A_PORT",
+		"PHANTOM\ufe0f_A_PORT", "\x1bPHANTOM_A_PORT", "\x01PHANTOM_A_PORT",
 	} {
 		_, err := loadTest(writeConfig(t, base), []string{name + "=1"})
 		if err == nil || !strings.Contains(err.Error(), "unknown PHANTOM_ variable") {
@@ -325,9 +330,10 @@ func TestTS10_EnvNameForms(t *testing.T) {
 	}
 }
 
-// TestTS10_WrittenTag checks the YAML tags of a file value through Load. The
-// non-specific tag "!" and a tag on a quoted scalar give an error that names
-// the key. A tag on a plain scalar stays valid.
+// TestTS10_WrittenTag checks the YAML tags of a file value through Load.
+// The tag "!" gives an error that names the key. So does a tag other than
+// "!!str" on a quoted or block scalar. A tag on a plain scalar stays valid.
+// So does "!!str" on a quoted or block scalar.
 func TestTS10_WrittenTag(t *testing.T) {
 	useTestKeys(t)
 	rows := []struct{ name, file, key, detail string }{
@@ -340,6 +346,9 @@ func TestTS10_WrittenTag(t *testing.T) {
 		{"quoted int tag", "a:\n  delta: !!int \"80\"\n", "a.delta", "the value is not a valid int"},
 		{"quoted bool tag", "a:\n  flag: !!bool 'true'\n", "a.flag", "the value is not a valid bool"},
 		{"quoted int tag, string", "listen:\n  http: !!int \"80\"\n", "listen.http", "the value is not a valid string"},
+		{"literal int tag", "a:\n  delta: !!int |-\n    80\n", "a.delta", "the value is not a valid int"},
+		{"folded int tag", "a:\n  delta: !!int >-\n    80\n", "a.delta", "the value is not a valid int"},
+		{"literal bool tag", "a:\n  flag: !!bool |-\n    true\n", "a.flag", "the value is not a valid bool"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -365,6 +374,95 @@ func TestTS10_WrittenTag(t *testing.T) {
 	}
 	if v, _ := c.Get("a.delta"); v.Int != 80 {
 		t.Errorf("a.delta = %+v, want 80", v)
+	}
+	for _, body := range []string{"!!str |-\n    :1\n", "|-\n    :1\n", "!!str >-\n    :1\n", "':1'\n"} {
+		c, err := loadTest(writeConfig(t, base+"listen:\n  http: "+body), nil)
+		if err != nil {
+			t.Fatalf("%q: %v", body, err)
+		}
+		if v, _ := c.Get("listen.http"); v.Str == "" {
+			t.Errorf("%q: listen.http is empty", body)
+		}
+	}
+}
+
+// hasKeyError reports whether err is a join with an *Error for key.
+func hasKeyError(err error, key string) bool {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return false
+	}
+	for _, e := range joined.Unwrap() {
+		if e, ok := e.(*Error); ok && e.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTS10_BareTagPosition checks the bare tag "!" on line 1, on the last
+// line without an LF, and at column 1. The reader gives the tag "!" and Load
+// refuses the key. An empty value at the end of a line gives an error, not a
+// panic.
+func TestTS10_BareTagPosition(t *testing.T) {
+	useTestKeys(t)
+	rows := []struct {
+		name, file, leaf, key string
+		bare                  bool
+	}{
+		{"line 1", "a: {delta: ! 80}\n", "a.delta", "a.delta", true},
+		{"last line, no LF", "a:\n  delta: ! 80", "a.delta", "a.delta", true},
+		{"column 1, flow sequence", "a: [\n! 80]\n", "a[0]", "", true},
+		{"column 1, flow mapping", "a: {delta:\n! 80}\n", "a.delta", "a.delta", true},
+		{"empty value, no LF", "a:\n  delta:", "a.delta", "a.delta", false},
+		{"empty value, next key", "a:\n  delta:\n  flag: true\n", "a.delta", "a.delta", false},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			doc, err := ReadBytes([]byte(r.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := doc.Leaves[r.leaf].Tag == "!"; got != r.bare {
+				t.Errorf("Leaf %s = %+v, want the bare tag: %v", r.leaf, doc.Leaves[r.leaf], r.bare)
+			}
+			if r.key == "" {
+				return
+			}
+			_, err = loadTest(writeConfig(t, r.file), nil)
+			if !hasKeyError(err, r.key) {
+				t.Errorf("got %v, want an error for %s", err, r.key)
+			}
+		})
+	}
+}
+
+// TestTS10_BareTagAlloc checks that the reader does not copy the line for each
+// scalar. A flow line of 64 KiB stays in a small byte budget. A copy for each
+// scalar needs gigabytes.
+func TestTS10_BareTagAlloc(t *testing.T) {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := ReadBytes([]byte("a: [" + strings.Repeat("1,", 32000) + "1]\n"))
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const budget = 128 << 20
+	if got := after.TotalAlloc - before.TotalAlloc; got > budget {
+		t.Errorf("ReadBytes allocated %d bytes, want at most %d", got, budget)
+	}
+}
+
+// TestTS10_SecretEnvPrefix checks that a *_env key refuses each name that
+// the environment check refuses, with or without "_".
+func TestTS10_SecretEnvPrefix(t *testing.T) {
+	for _, name := range []string{"PHANTOMTOKEN", "PHANTOM_TOKEN", "PHANTOM"} {
+		file := strings.Replace(base, "token_env: "+tokenVar, "token_env: "+name, 1)
+		_, err := loadTest(writeConfig(t, file), []string{name + "=" + strings.Repeat("t", 32)})
+		if !hasKeyError(err, "tlog.publish[0].token_env") {
+			t.Errorf("%s: got %v, want an error for tlog.publish[0].token_env", name, err)
+		}
 	}
 }
 

@@ -298,19 +298,26 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	return &Config{values: vals}, nil
 }
 
-// envFold returns name in upper case. It changes "-" to "_" and a full-width
-// form (U+FF01 to U+FF5E) to ASCII. It removes the format characters (for
-// example U+200B) and the white space at the start.
+// foldDrop holds the characters that envFold removes.
+var foldDrop = []*unicode.RangeTable{
+	unicode.Cf,
+	unicode.Mn,
+	unicode.Me,
+	unicode.Cc,
+	unicode.Other_Default_Ignorable_Code_Point,
+	unicode.Variation_Selector,
+}
+
+// envFold returns name in upper case. It changes a full-width form (U+FF01 to
+// U+FF5E) to ASCII. It removes the characters in foldDrop, for example U+200B
+// and the Hangul fillers. It also removes the white space at the start.
 func envFold(name string) string {
 	f := strings.Map(func(r rune) rune {
 		if r >= 0xFF01 && r <= 0xFF5E {
 			r -= 0xFEE0
 		}
-		switch {
-		case unicode.Is(unicode.Cf, r):
+		if unicode.IsOneOf(foldDrop, r) {
 			return -1
-		case r == '-':
-			return '_'
 		}
 		return unicode.ToUpper(r)
 	}, name)
@@ -440,9 +447,11 @@ func isBelow(s, p string) bool {
 // pathPart matches one part of a path: the text between the characters ".", "[", and "]".
 var pathPart = regexp.MustCompile(`[^.\[\]]+`)
 
-// secretItemPath cuts the path s after its first secret item name. A secret item name is the name
-// of a secret key in a list schema. The cut does not depend on the shape of the list or on the item type.
-// For example, "tlog.publish[0].token_env.x" and "token_env.x" give "tlog.publish[0].token_env" and "token_env".
+// secretItemPath cuts the path s after its first secret item name. A secret
+// item name is the name of a secret key in a list schema. The cut does not
+// depend on the shape of the list or on the item type.
+// For example, "tlog.publish[0].token_env.x" and "token_env.x" give
+// "tlog.publish[0].token_env" and "token_env".
 // If s has no secret item name, it returns "".
 func secretItemPath(s string, table []listKey) string {
 	for _, m := range pathPart.FindAllStringIndex(s, -1) {
