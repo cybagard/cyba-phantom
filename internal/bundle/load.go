@@ -182,8 +182,8 @@ func (l *Loader) Healthy() bool {
 // key. Load checks its rotation member where it checks the key ID of a normal
 // bundle. An accepted new transition bundle writes its record before the
 // version state. If the check of the records or the write of the version state
-// then fails, Load removes the record and gives ErrStateFault. A failed check
-// keeps its fault. A failed write of the version state restores the trust set.
+// fails, Load removes the record. It gives ErrStateFault. A failed check keeps
+// its fault. A failed write of the version state restores the trust set.
 // The first failed check gives the one error. A rejected bundle changes no file
 // and not the running bundle. start is true for the load at start. An accepted
 // bundle that expired then loads, and Expired is true.
@@ -262,9 +262,9 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
-	// The record and the version state come before Store. A failed write leaves
-	// the running bundle. After a record, a failed check or a failed write of the
-	// version state removes the record. Only a failed write restores the trust set.
+	// The record and the version state come before Store. A failed write
+	// leaves the running bundle. A failed check or a failed write of the
+	// version state removes the record. Only that write restores the trust set.
 	n := len(c.sums) + 1
 	if newRotation {
 		if err := writeRecord(dir, n, archive, sig); err != nil {

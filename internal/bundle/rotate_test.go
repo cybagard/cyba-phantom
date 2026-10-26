@@ -113,7 +113,7 @@ func (e *env) absent(n int) {
 func TestTS20RotationAccepted(t *testing.T) {
 	e := running(t)
 	k1, k3 := e.keys()[0], newKey(3, "k3")
-	// The pad makes the archive over 4 KiB, more than the cap of a signature file.
+	// The pad makes the archive larger than the cap of a signature file.
 	pad := make([]byte, 5000)
 	rand.NewChaCha8([32]byte{1}).Read(pad)
 	arch := build(transitionEnt(k1, k3, ver(3)), ent{name: "traps/pad", data: pad})
@@ -371,10 +371,10 @@ func TestTS20RotationRecordHasNoBundleRules(t *testing.T) {
 	}
 }
 
-// T-S-20: the loader refuses a key ID or a key that an earlier record removed,
-// and a new key that is a key of the set. A new transition bundle gives bad_sig.
-// A record gives a state fault. A fresh row has no earlier record: k1 is the
-// old key and is still in the set.
+// T-S-20: the loader refuses a new key or key ID that is in the set.
+// It also refuses one that an earlier record removed. A new transition bundle
+// gives bad_sig. A record gives a state fault. A fresh row has no earlier
+// record: k1 is the old key and is in the set.
 func TestTS20RotationRetiredKeys(t *testing.T) {
 	k1, k2 := newKey(1, "k1"), newKey(2, "k2")
 	for _, c := range []struct {
@@ -404,8 +404,8 @@ func TestTS20RotationRetiredKeys(t *testing.T) {
 	}
 }
 
-// T-S-20: a file or another entry at the name of record 9 gives a state fault,
-// also when no bundle file exists.
+// T-S-20: a file or another entry at the name of record 9 gives a state
+// fault. This holds when no bundle file exists.
 func TestTS20RotationNinthEntry(t *testing.T) {
 	for _, name := range []string{"rotation-9.cbnd", "rotation-9.sig"} {
 		t.Run(name, func(t *testing.T) {
