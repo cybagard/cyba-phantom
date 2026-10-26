@@ -57,7 +57,7 @@ var errBadNote = errors.New("bad note")
 // entryError is a bad note with a cause that Publish reports. The cause is an
 // entry that is not a regular file. It can also be a regular note that fails
 // to open with EACCES. Its text names the file and the rule. errors.Is reports
-// errBadNote for it.
+// errBadNote for it. errors.Is and errors.As also find the wrapped error.
 type entryError struct{ error }
 
 func (entryError) Is(target error) bool { return target == errBadNote }

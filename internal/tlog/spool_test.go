@@ -656,7 +656,8 @@ func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 // the sender. For the cursor errors the test matches the text. The cursor read
 // does not keep the cause.
 func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
-	// Notes 1 and 2 are bad entries. Note 3 is sent. Note 4 is not reached.
+	// Notes 1 and 2 are bad entries. Publish tries to send note 3. Note 4
+	// is not reached.
 	setup := func(t *testing.T) *spoolEnv {
 		e := newSpool(t)
 		must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(1)), 0o700))
