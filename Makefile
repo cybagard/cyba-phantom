@@ -109,10 +109,11 @@ coverage:
 # T-U-06: write the sha256 values of the hand-written canonical text into
 # internal/event/testdata. T-U-12: write the signed note into the golden
 # section of internal/tlog/verifier/testdata/notes.txt. Nobody edits those values by
-# hand (test/README).
+# hand (test/README). T-U-08: write the bundle files into test/fixtures/bundles.
 fixtures:
 	$(GO) test ./internal/event -run TestTU06 -update
 	$(GO) test ./internal/tlog/verifier -run TestTU12_Golden -update
+	$(GO) test ./internal/bundle -run TestTU08FixturesAreCurrent -update
 
 # T-P-07: two builds must hash identically; the binary is static and
 # <= 25 MB, built under the 07 §2 cgroup budget (1 vCPU / 512 MB).
