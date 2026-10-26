@@ -92,12 +92,12 @@ var (
 
 // refusal gives the Error for err, a refusal of package safefile. The shared
 // package decides that the file is refused. The listener chooses the text from
-// t. For a nil err, it gives nil. For an err that is not a safefile refusal, it
-// gives wrap of err. For a key file, a link count above 1 gives the link text
-// first. This is only for a refusal of the owner or of the mode. A refusal of
-// the mode has two texts. The first path of paths below r with a forbidden bit
-// chooses the text. The text comes from a second Lstat, so in a race it can
-// describe another file. The refusal stays.
+// t. For a key file, a link count above 1 gives the link text first, but only
+// for a refusal of the owner or of the mode. A refusal of the mode has two
+// texts. The first path of paths below r with a forbidden bit chooses the text.
+// The text comes from a second Lstat, so in a race it can describe another
+// file. The refusal stays. A nil err gives nil. An err that is not a refusal of
+// package safefile gives wrap of err.
 func refusal(op string, err error, t texts, r *os.Root, paths ...string) error {
 	var se *safefile.Error
 	if !errors.As(err, &se) {

@@ -1263,10 +1263,7 @@ func TestTS16LeftoverWalkSkipsADirectorySwappedAfterTheCheck(t *testing.T) {
 	kd := filepath.Join(dir, "acme/cache/kd")
 	fi, err := os.Lstat(kd)
 	mustNil(t, err)
-	id, ok := safefile.Identity(fi)
-	if !ok {
-		t.Fatalf("no file identity for %s", kd)
-	}
+	id, _ := safefile.Identity(fi)
 	swapped := false
 	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(f safefile.FileID) bool {
 		if f == id && !swapped {
@@ -1279,11 +1276,9 @@ func TestTS16LeftoverWalkSkipsADirectorySwappedAfterTheCheck(t *testing.T) {
 		return false
 	}})
 	s.removeTemporary(nil)
-	if !swapped {
-		t.Fatal("the hook did not swap kd")
-	}
-	if _, err := os.Lstat(filepath.Join(kd, tmpPrefix+"x")); err != nil {
-		t.Errorf("the swapped directory lost its leftover file: %v", err)
+	_, err = os.Lstat(filepath.Join(kd, tmpPrefix+"x"))
+	if !swapped || err != nil {
+		t.Errorf("swapped = %v, leftover file: %v; want true, nil", swapped, err)
 	}
 }
 
@@ -1307,26 +1302,21 @@ func TestTS16LoadTriesAgainWhenARefusedFileIsReplacedAfterTheCheck(t *testing.T)
 	}
 }
 
-// The key file does not change, but Open refuses the open file. The hook gives
-// another owner at the second check of the file: the first is the Lstat check,
-// the second is the check of the open file. Load must not try again.
+// The key file does not change. The hook gives another owner at the second owner
+// check of the file, the check of the open file. Load must not try again.
 func TestTS16LoadRefusesAKeyFileThatOnlyTheOpenFileFails(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
 	fi, err := os.Lstat(filepath.Join(dir, "acme/cache/key"))
 	mustNil(t, err)
-	id, ok := safefile.Identity(fi)
-	if !ok {
-		t.Fatal("no file identity for the key file")
-	}
+	id, _ := safefile.Identity(fi)
 	calls := 0
 	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(f safefile.FileID) bool {
-		if f != id {
-			return false
+		if f == id {
+			calls++
 		}
-		calls++
-		return calls == 2
+		return f == id && calls == 2
 	}})
 	_, err = s.Load(ctx, "key")
 	wantError(t, err, "load", ruleFileOwner)
