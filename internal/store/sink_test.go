@@ -231,12 +231,35 @@ func TestTU18SinkRowStopCountsTheEventsTheWriterTook(t *testing.T) {
 	err := r.sink.Add(4, r.note(4, 1))
 	wantRule(t, err, writerName, ruleDatabase)
 	eventually(t, func() bool { return !r.w.Healthy() })
+	// The writer flushes the batch before the discard loop reads a tick, so the
+	// counts are final when fire returns.
 	r.fire()
-	for end := time.Now().Add(waitFor); r.w.Stats().Dropped != (Drops{Bulk: 3, Evidence: 1}) && time.Now().Before(end); {
-		time.Sleep(time.Millisecond)
-	}
 	if got := r.w.Stats().Dropped; got != (Drops{Bulk: 3, Evidence: 1}) || r.rows() != 0 {
 		t.Errorf("dropped %+v (want bulk 3, evidence 1), event rows %d (want 0)", got, r.rows())
+	}
+}
+
+// T-U-18: a failed INSERT of the row gives the same result as a failed commit.
+// The sink gets an error with the database rule, and the spool gets no note.
+// No row exists. The writer stops with the database rule and leaves its marker.
+func TestTU18SinkFailedRowInsertStopsTheWriter(t *testing.T) {
+	r := newSinkRig(t)
+	if _, err := r.db.Exec("CREATE TRIGGER refuse_row BEFORE INSERT ON checkpoint BEGIN SELECT RAISE(ABORT, 'refused'); END"); err != nil {
+		t.Fatal(err)
+	}
+	stop := r.start()
+	err := r.sink.Add(4, r.note(4, 1))
+	wantRule(t, err, writerName, ruleDatabase)
+	if r.spool.count() != 0 || r.rowCount() != 0 {
+		t.Fatalf("failed insert: error %v, spool %d, rows %d", err, r.spool.count(), r.rowCount())
+	}
+	eventually(t, func() bool { return !r.w.Healthy() })
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if _, err := r.marker(); err != nil {
+		t.Errorf("no stop marker: %v", err)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 }
 
@@ -295,6 +318,26 @@ func TestTU18SinkTakesTheForkStateFromTheWriter(t *testing.T) {
 		if err := r.sink.Add(3, r.note(3, 1)); err == nil {
 			t.Fatal("a stopped writer with the fork rule gave no error")
 		}
+	}
+	if r.spool.count() != 0 || r.sink.RowMissing() != 0 {
+		t.Errorf("spool %d (want 0), missing %d (want 0)", r.spool.count(), r.sink.RowMissing())
+	}
+}
+
+// T-U-18: a request that ends with an error also gives the fork state of the
+// writer. Here the writer stops for a fork signal, and the reply is another
+// error, as when the timer ends first. The sink gives the fork rule. It takes
+// no later note.
+func TestTU18SinkRequestErrorTakesTheForkStateFromTheWriter(t *testing.T) {
+	r := newSinkRig(t)
+	go func() {
+		rq := <-r.w.rows
+		r.w.stop(fail(writerName, ruleFork))
+		rq.reply <- fail(sinkName, ruleRowReply)
+	}()
+	wantRule(t, r.sink.Add(3, r.note(3, 1)), sinkName, ruleRowFork)
+	if err := r.sink.Add(4, r.note(4, 1)); err == nil {
+		t.Error("the sink took a note after the fork signal")
 	}
 	if r.spool.count() != 0 || r.sink.RowMissing() != 0 {
 		t.Errorf("spool %d (want 0), missing %d (want 0)", r.spool.count(), r.sink.RowMissing())
