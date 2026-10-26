@@ -166,11 +166,12 @@ type Store struct {
 // the state directory. This is because the fsync of the log directory refuses
 // a link. Open makes the directory (mode 0700) if it does not exist. The
 // directory must have no group or other permission bits. So must each
-// directory that Open lists, and each directory entry of such a listing. Open
-// lists the group directories in the bounded range that is named below. It
-// also lists the .p directories of the tiles that it reads or tidies. It
-// checks only the names that a listing reads before its limit. It does not
-// list a group directory outside the range. Open reads the tree
+// directory that Open lists. So must each entry of such a listing that is a
+// directory and not a link. Open lists the group directories in the bounded
+// range that is named below. It also lists the .p directories of the tiles
+// that it reads or tidies. It checks only the entries that a listing reads
+// before it returns. It does not list a group directory outside the range.
+// Open reads the tree
 // head and the tiles that the root computation reads. It checks that these
 // tiles give the root of the tree head. Open does not read the other tiles
 // that the tree head covers. A later change checks them with authenticated
@@ -352,7 +353,7 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 // exists counts the name as there. A group or other bit is not a failed
 // listing. The bit can be on g, on a parent of g, or on a directory entry that
 // the listing reads. groupNames returns an *Error with the mode rule for it.
-// It checks only the names that the listing reads before its limit.
+// It checks only the entries that the listing reads before it returns.
 func (s *Store) groupNames(g string) (map[string]bool, error) {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
@@ -998,7 +999,7 @@ func openFailure(r *os.Root, name string, err error) error {
 
 // openOne opens the directory name and checks its type, its mode, and that it
 // is not a link: the open directory must be the one that Lstat gives for name.
-// An error holds the name of the part that failed.
+// The error of a failed check holds the name of the part that failed.
 func openOne(r *os.Root, name string) (*os.File, error) {
 	f, err := r.OpenFile(name, readFlags, 0)
 	if err != nil {

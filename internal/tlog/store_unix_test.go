@@ -476,7 +476,7 @@ func TestTS13OpenTidiesGroupDirectoryWithManyNames(t *testing.T) {
 }
 
 // A directory that Open lists must have no group or other bit. So must each
-// directory entry of the listing. Tile 0 of this log is full, so its
+// entry of the listing that is a directory. Tile 0 of this log is full, so its
 // partial-tile directory is empty and Open reads no file there. The cases are
 // that directory and an entry of the partial-tile directory of tile 2. The
 // last case is the empty group directory of level 2.
@@ -499,7 +499,7 @@ func TestTS13OpenRefusesListedDirectoryWithGroupOrOtherBits(t *testing.T) {
 	}
 }
 
-// swapBeforeSync makes the fsync of the n-th directory call swap first. A
+// swapBeforeSync makes the n-th call of syncDirFile run swap first. A
 // failed swap fails the test and the fsync. The hook runs off the test
 // goroutine, so it must not stop the test.
 func swapBeforeSync(t *testing.T, n int, swap func() error) {
@@ -556,7 +556,7 @@ func TestTS13OpenGivesNotDirRuleForDirectoryReplacedBeforeFsync(t *testing.T) {
 // The error names the directory whose check failed. This can be a parent of
 // the directory that the fsync opens. A link out of the state directory gets
 // the link rule. A parent that is a regular file gets the not-a-directory
-// rule.
+// rule. The last case is tile/8 replaced by a link inside the state directory.
 func TestTS13OpenNamesPartReplacedBeforeFsync(t *testing.T) {
 	outside := t.TempDir()
 	for _, c := range []struct {
