@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"errors"
@@ -153,6 +154,23 @@ func TestTU08RejectionCodes(t *testing.T) {
 			must(e.t, f(filepath.Join(e.state, "bundle")))
 		}
 	}
+	// transition makes a bundle of key k3 with a rotation member from k1. The
+	// signature file has the line of k3, and with both set, the line of k1.
+	transition := func(both bool) func(e *env) {
+		return func(e *env) {
+			priv3, k3 := testKey(3, "k3")
+			e.l.trust = append(TrustSet{}, e.trust...)
+			e.l.trust = append(e.l.trust, k3)
+			rotation := `"k3","rotation":` + rot("k1", key32(func(i int) byte { return byte(i) }))
+			arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3), `"k1"`, rotation))})
+			sig := sigRow("k3", ed25519.Sign(priv3, SigMessage(arch)))
+			if both {
+				sig = string(e.sign(arch)) + sig
+			}
+			e.write("bundle/current.cbnd", arch)
+			e.write("bundle/current.sig", []byte(sig))
+		}
+	}
 	cases := []struct {
 		name  string
 		setup func(e *env)
@@ -184,6 +202,12 @@ func TestTU08RejectionCodes(t *testing.T) {
 		{"key_id and min_engine", put(mf(ver(3), append([]string{`"k1"`, `"k2"`}, engineRepl...)...)), ErrBadSig, CodeBadSig},
 		{"min_engine and expired", put(mf(ver(3), append(engineRepl, expiredRepl...)...)), ErrMinEngine, CodeMinEngine},
 		{"expired and rollback", put(mf(ver(1), expiredRepl...)), ErrExpired, CodeExpired},
+		{"rollback and template_parse", func(e *env) {
+			put(mf(ver(1)))(e)
+			e.l.template = func(*Archive) error { return errors.New("stub") }
+		}, ErrRollback, CodeRollback},
+		{"rotation, new key line only", transition(false), ErrBadSig, CodeBadSig},
+		{"rotation, both lines", transition(true), ErrBadSig, CodeBadSig},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -241,7 +265,9 @@ func TestTS20OtherOwnerIsRefused(t *testing.T) {
 			must(t, err)
 			id, _ := safefile.Identity(fi)
 			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
-			e.rejects(e.l, false, ErrArchiveInvalid)
+			if n := e.rejects(e.l, false, ErrArchiveInvalid); n != 0 {
+				t.Errorf("%d decompress calls", n)
+			}
 		})
 		t.Run("chown "+name, func(t *testing.T) {
 			if os.Geteuid() != 0 {
@@ -249,8 +275,66 @@ func TestTS20OtherOwnerIsRefused(t *testing.T) {
 			}
 			e := running(t)
 			must(t, os.Chown(filepath.Join(e.state, "bundle", name), 12345, -1))
-			e.rejects(e.l, false, ErrArchiveInvalid)
+			if n := e.rejects(e.l, false, ErrArchiveInvalid); n != 0 {
+				t.Errorf("%d decompress calls", n)
+			}
 		})
+	}
+}
+
+// T-S-20: a file at the cap passes the read step. The bundle file then fails
+// in the archive step. The signature file fails in the signature step.
+func TestTS20FilesAtTheCap(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		size  int
+		want  error
+		calls int32
+	}{{"current.cbnd", 8 << 20, ErrArchiveInvalid, 1}, {"current.sig", 1 << 10, ErrBadSig, 0}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := running(t)
+			b := zeros(c.size)
+			e.write("bundle/"+c.name, b)
+			if c.name == "current.cbnd" {
+				e.write("bundle/current.sig", e.sign(b))
+			}
+			if n := e.rejects(e.l, false, c.want); n != c.calls {
+				t.Errorf("%d decompress calls; want %d", n, c.calls)
+			}
+		})
+	}
+}
+
+// T-S-20: a file with a mode that the rule permits loads.
+func TestTS20PermittedModesLoad(t *testing.T) {
+	for _, name := range []string{"current.cbnd", "current.sig"} {
+		for _, m := range []os.FileMode{0o640, 0o400, 0o601} {
+			t.Run(fmt.Sprintf("%s mode %o", name, m), func(t *testing.T) {
+				e := newEnv(t)
+				e.install("bundle/current", mf(ver(1)))
+				must(t, os.Chmod(filepath.Join(e.state, "bundle", name), m))
+				_, err := e.l.Load(false)
+				must(t, err)
+			})
+		}
+	}
+}
+
+// T-S-20: a path that is not "<name>.cbnd" with a name is refused, with a
+// signed bundle and signature file behind it.
+func TestTS20PathFormsAreRefused(t *testing.T) {
+	e := running(t)
+	arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3)))})
+	for _, c := range [][2]string{
+		{"bundle/x.bin", "bundle/x.bin.sig"},
+		{"bundle/.cbnd", "bundle/.sig"},
+		{"/bundle/current.cbnd", "/bundle/current.sig"},
+	} {
+		e.write(c[0], arch)
+		e.write(c[1], e.sign(arch))
+		if n := e.rejects(e.loader(c[0]), false, ErrArchiveInvalid); n != 0 {
+			t.Errorf("%s: %d decompress calls", c[0], n)
+		}
 	}
 }
 
@@ -291,7 +375,16 @@ func TestTS20FileChangedAfterRead(t *testing.T) {
 func TestTS20ManyGzipMembers(t *testing.T) {
 	e := newEnv(t)
 	first, empty := build(ent{name: "manifest.json", data: []byte(mf(ver(1)))}), gz(nil)
-	arch := append(first, bytes.Repeat(empty, (MaxBundleBytes-len(first))/len(empty))...)
+	arch := append(first, bytes.Repeat(empty, (8<<20-len(first))/len(empty)-1)...)
+	// The last member has a header comment that pads the file to the cap.
+	var last bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&last, gzip.BestSpeed)
+	zw.Comment = strings.Repeat("a", 8<<20-len(arch)-len(empty)-1)
+	must(t, zw.Close())
+	arch = append(arch, last.Bytes()...)
+	if len(arch) != 8<<20 {
+		t.Fatalf("file of %d bytes", len(arch))
+	}
 	e.write("bundle/current.cbnd", arch)
 	e.write("bundle/current.sig", e.sign(arch))
 	begin := time.Now()

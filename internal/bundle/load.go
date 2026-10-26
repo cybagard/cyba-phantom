@@ -75,7 +75,7 @@ type Loader struct {
 	trust TrustSet
 	cur   atomic.Pointer[Bundle]
 
-	// Hooks for tests. A nil hook is off, except now and decompress.
+	// Hooks for tests. A nil hook is off. now and decompress must not be nil.
 	now        func() time.Time
 	decompress func([]byte) (*Archive, error)
 	afterRead  func()
@@ -146,6 +146,10 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	}
 	i := slices.IndexFunc(l.trust, func(k TrustKey) bool { return k.KeyID == m.KeyID })
 	if i < 0 || !slices.Contains(ids, m.KeyID) {
+		return nil, ErrBadSig
+	}
+	// A transition bundle is refused until rotation support exists.
+	if m.Rotation != nil {
 		return nil, ErrBadSig
 	}
 	class := l.trust[i].Class
