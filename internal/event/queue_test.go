@@ -232,8 +232,11 @@ func TestTU17_QueueByteBudget(t *testing.T) {
 	small := qEvent(t, KindBeacon, "192.0.2.9")
 	budget := int64(2*big.Size() + small.Size())
 	q, c := mustQueue(t, 100, budget, maxEvidenceBytes)
-	if !q.Enqueue(big) || !q.Enqueue(big) {
-		t.Fatal("the budget holds two large events")
+	if !q.Enqueue(big) {
+		t.Fatal("the first large event is dropped")
+	}
+	if !q.Enqueue(big) {
+		t.Fatal("the second large event is dropped")
 	}
 	if q.Enqueue(big) {
 		t.Fatal("a third large event passed the budget")

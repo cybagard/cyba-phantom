@@ -276,8 +276,11 @@ func TestTU17_RefusedByteCap(t *testing.T) {
 		t.Fatalf("size %d", big.Size())
 	}
 	q, _ := mustQueue(t, 100, int64(2*big.Size()), maxEvidenceBytes)
-	if !q.Enqueue(big) || !q.Enqueue(big) {
-		t.Fatal("the cap holds two refused events")
+	if !q.Enqueue(big) {
+		t.Fatal("the first refused event is dropped")
+	}
+	if !q.Enqueue(big) {
+		t.Fatal("the second refused event is dropped")
 	}
 	if q.Bytes() != (Bytes{Bulk: int64(2 * big.Size())}) {
 		t.Errorf("sums %+v, want the size of two events in the bulk lane", q.Bytes())

@@ -237,19 +237,30 @@ func TestTU10_UnknownTwice(t *testing.T) {
 
 // TestTU10_NoReload checks that the package exports no reload function.
 func TestTU10_NoReload(t *testing.T) {
-	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pkg := range pkgs {
-		ast.Inspect(pkg, func(n ast.Node) bool {
+	fset := token.NewFileSet()
+	parsed := 0
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed++
+		ast.Inspect(file, func(n ast.Node) bool {
 			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.IsExported() && strings.Contains(strings.ToLower(fn.Name.Name), "reload") {
 				t.Errorf("exported reload function %s", fn.Name.Name)
 			}
 			return true
 		})
+	}
+	if parsed == 0 {
+		t.Error("no non-test .go file found")
 	}
 }
 
