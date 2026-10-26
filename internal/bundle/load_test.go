@@ -160,23 +160,22 @@ func TestTU08RejectionCodes(t *testing.T) {
 			must(e.t, f(filepath.Join(e.state, "bundle")))
 		}
 	}
-	// transition makes a bundle of key k3 with a rotation member from k1. The
-	// signature file has the line of k3, and with both set, the line of k1.
-	transition := func(both bool) func(e *env) {
+	// viaRotation makes a bundle of key k3 with a rotation member from k1. The
+	// signature file has the line of k3, and with both set, the line of k1. The
+	// line of k3 comes from the key that signs.
+	viaRotation := func(both bool, signs func(e *env) ed25519.PrivateKey) func(e *env) {
 		return func(e *env) {
-			priv3, k3 := testKey(3, "k3")
-			e.l.trust = append(TrustSet{}, e.trust...)
-			e.l.trust = append(e.l.trust, k3)
-			rotation := `"k3","rotation":` + rot("k1", key32(func(i int) byte { return byte(i) }))
-			arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3), `"k1"`, rotation))})
-			sig := sigRow("k3", ed25519.Sign(priv3, SigMessage(arch)))
+			k1, k3 := e.keys()[0], newKey(3, "k3")
+			arch := transition(k1, k3, ver(3))
+			lines := []string{sigRow("k3", ed25519.Sign(signs(e), SigMessage(arch)))}
 			if both {
-				sig = string(e.sign(arch)) + sig
+				lines = append([]string{lineOf(k1, arch)}, lines...)
 			}
-			e.write("bundle/current.cbnd", arch)
-			e.write("bundle/current.sig", []byte(sig))
+			e.put(arch, lines...)
 		}
 	}
+	k3Signs := func(*env) ed25519.PrivateKey { return newKey(3, "k3").priv }
+	k2Signs := func(e *env) ed25519.PrivateKey { return e.priv2 }
 	cases := []struct {
 		name  string
 		setup func(e *env)
@@ -217,8 +216,8 @@ func TestTU08RejectionCodes(t *testing.T) {
 			e.write("bundle/current.cbnd", arch)
 			e.write("bundle/current.sig", e.sign(arch))
 		}, ErrRollback, CodeRollback},
-		{"rotation, new key line only", transition(false), ErrBadSig, CodeBadSig},
-		{"rotation, both lines", transition(true), ErrBadSig, CodeBadSig},
+		{"rotation, new key line only", viaRotation(false, k3Signs), ErrBadSig, CodeBadSig},
+		{"rotation, new key line of another key", viaRotation(true, k2Signs), ErrBadSig, CodeBadSig},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

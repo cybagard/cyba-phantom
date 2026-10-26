@@ -108,33 +108,62 @@ func NewLoader(state *os.Root, path string, trust TrustSet) *Loader {
 // Current returns the running bundle, or nil before the first accept.
 func (l *Loader) Current() *Bundle { return l.cur.Load() }
 
-// Load reads the bundle and the signature file. It checks the bundle and makes
-// it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: read,
-// SHA-256, signature, archive, manifest, key ID, rotation, engine, expiry and
-// rollback, templates. The first failed check gives the one error. A rejected
-// bundle changes no file and not the running bundle. start is true for the
-// load at start: an accepted bundle that expired then loads, and Expired is
-// true.
-// The errors are fixed errors of this package. None holds a path or a byte.
-func (l *Loader) Load(start bool) (*Bundle, error) {
-	loadMu.Lock()
-	defer loadMu.Unlock()
+// openDir opens the bundle directory of the path and gives the file name of the
+// bundle in it. The caller calls the func to close the directory.
+func (l *Loader) openDir() (dir *os.Root, base string, closeDir func(), err error) {
 	dirName, base := ".", l.path
 	if i := strings.LastIndexByte(l.path, '/'); i >= 0 {
 		dirName, base = l.path[:i], l.path[i+1:]
 	}
+	if dirName == "." {
+		return l.state, base, func() {}, nil
+	}
+	d, err := safefile.OpenRoot(l.state, dirName, dirRule)
+	if err != nil {
+		return nil, "", nil, ErrArchiveInvalid
+	}
+	return d, base, func() { d.Close() }, nil
+}
+
+// Healthy is false when the version state or a transition record is a fault.
+// It is also false when the bundle directory does not open. It changes
+// nothing on disk.
+func (l *Loader) Healthy() bool {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	dir, _, closeDir, err := l.openDir()
+	if err != nil {
+		return false
+	}
+	defer closeDir()
+	_, _, err = readChain(dir, l.trust)
+	return err == nil && NewRollback(dir).Healthy()
+}
+
+// Load reads the bundle and the signature file. It checks the bundle and makes
+// it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: read,
+// transition records, SHA-256, signature, archive, manifest, key ID or
+// rotation, engine, expiry and rollback, templates. The transition records
+// in the bundle directory change the compiled trust set. Each record removes
+// an old key and adds a new key with the class of the old key. A transition
+// bundle has a signature line of the old key and one of the new key. Its
+// rotation member is checked at the place of the key ID. An accepted new
+// transition bundle writes its record before the version state. The first
+// failed check gives the one error. A rejected bundle changes no file and not
+// the running bundle. start is true for the load at start. An accepted bundle
+// that expired then loads, and Expired is true.
+// The errors are fixed errors of this package. None holds a path or a byte.
+func (l *Loader) Load(start bool) (*Bundle, error) {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	dir, base, closeDir, err := l.openDir()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDir()
 	name, ok := strings.CutSuffix(base, ".cbnd")
 	if !ok || name == "" {
 		return nil, ErrArchiveInvalid
-	}
-	dir := l.state
-	if dirName != "." {
-		d, err := safefile.OpenRoot(l.state, dirName, dirRule)
-		if err != nil {
-			return nil, ErrArchiveInvalid
-		}
-		defer d.Close()
-		dir = d
 	}
 	archive, err := safefile.ReadFile(dir, base, fileRule(MaxBundleBytes))
 	var sig []byte
@@ -147,8 +176,12 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	if l.afterRead != nil {
 		l.afterRead()
 	}
+	trust, sums, err := readChain(dir, l.trust)
+	if err != nil {
+		return nil, ErrStateFault
+	}
 	sum := sha256.Sum256(archive)
-	ids, err := VerifySig(archive, sig, l.trust)
+	ids, err := VerifySig(archive, sig, trust)
 	if err != nil {
 		return nil, ErrBadSig
 	}
@@ -161,15 +194,22 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	if err != nil {
 		return nil, ErrManifestInvalid
 	}
-	i := slices.IndexFunc(l.trust, func(k TrustKey) bool { return k.KeyID == m.KeyID })
-	if i < 0 || !slices.Contains(ids, m.KeyID) {
-		return nil, ErrBadSig
+	// A transition bundle that a record already holds loads by the normal rule.
+	newRotation := m.Rotation != nil && !slices.Contains(sums, sum)
+	var class Class
+	if newRotation {
+		lines, _ := parseSig(sig)
+		if _, ok := trust.rotated(m, sum, lines); !ok || len(sums) >= maxRotations {
+			return nil, ErrBadSig
+		}
+		class = trust[trust.index(m.Rotation.From)].Class
+	} else {
+		i := trust.index(m.KeyID)
+		if i < 0 || !slices.Contains(ids, m.KeyID) {
+			return nil, ErrBadSig
+		}
+		class = trust[i].Class
 	}
-	// A transition bundle is refused until rotation support exists.
-	if m.Rotation != nil {
-		return nil, ErrBadSig
-	}
-	class := l.trust[i].Class
 	if err := m.CheckEngine(); err != nil {
 		return nil, ErrMinEngine
 	}
@@ -185,7 +225,13 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
-	// Record comes before Store: a failed write leaves the running bundle.
+	// The record and the version state come before Store. A failed write
+	// leaves the running bundle.
+	if newRotation {
+		if err := writeRecord(dir, len(sums)+1, raw, sum, sig); err != nil {
+			return nil, ErrStateFault
+		}
+	}
 	if err := rb.Record(m, sum, class); err != nil {
 		return nil, fixed(err)
 	}

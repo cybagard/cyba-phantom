@@ -83,20 +83,27 @@ func readState(root *os.Root) (*state, error) {
 	return st, nil
 }
 
-// writeState replaces the state file. It makes a temporary file with mode 0600
-// less the umask. It writes the file, and calls Sync and Close. Then it renames
-// the file to the fixed name and calls Sync on the directory. First it removes
-// a temporary file that a crash left, so that file does not block the write.
-// O_EXCL means that the write never follows a symlink at the temporary name.
+// writeState replaces the version state file.
 func writeState(root *os.Root, st state) error {
-	if err := root.Remove(stateTempName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	return writeFile(root, StateName, fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
+}
+
+// writeFile replaces the file name with data. It makes a temporary file, with
+// the name and ".tmp", and mode 0600 less the umask. It writes the file, and
+// calls Sync and Close. Then it renames the file to name and calls Sync on the
+// directory. First it removes a temporary file that a crash left, so that file
+// does not block the write. O_EXCL means that the write never follows a symlink
+// at the temporary name.
+func writeFile(root *os.Root, name string, data []byte) error {
+	tmp := name + ".tmp"
+	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	f, err := root.OpenFile(stateTempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
+	_, err = f.Write(data)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -104,10 +111,10 @@ func writeState(root *os.Root, st state) error {
 		err = cerr
 	}
 	if err == nil {
-		err = root.Rename(stateTempName, StateName)
+		err = root.Rename(tmp, name)
 	}
 	if err != nil {
-		_ = root.Remove(stateTempName)
+		_ = root.Remove(tmp)
 		return err
 	}
 	d, err := root.Open(".")
