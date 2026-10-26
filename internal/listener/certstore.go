@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	"github.com/caddyserver/certmagic"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 const (
@@ -59,6 +61,90 @@ const (
 	ruleFileMode    = "file allows access for group or other"
 	ruleFileSpecial = "file has a setuid, setgid or sticky bit"
 )
+
+// forbidden is the set of mode bits that a file or directory must not have.
+const forbidden = otherBit | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+// The rules of the shared file checks. A key file has its size cap in
+// keyNameRule, and keyOpenRule is a copy of it. A check of a name finds a link
+// count above 1 with OneLink. The rule of the open file does not use OneLink.
+// A count of 0 is a file that a rename or a Delete removed after the open.
+// The shared rule refuses 0, so moreThanOneLink checks the open file.
+var (
+	cacheDirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelf, Forbid: forbidden}
+	keyNameRule  = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Forbid: forbidden,
+		OneLink: true, MaxSize: maxValue}
+	keyOpenRule = func() safefile.Rule { r := keyNameRule; r.OneLink = false; return r }()
+)
+
+// texts holds the rule texts of a directory or of a key file. For a key file,
+// links is true. Then a file with more than one link gives the text for links.
+// This text comes before the text for the owner or the mode.
+type texts struct {
+	notRegular, owner, mode, special, changed string
+	links                                     bool
+}
+
+var (
+	dirTexts  = texts{ruleNotDir, ruleOwner, ruleMode, ruleSpecial, ruleLink, false}
+	fileTexts = texts{ruleType, ruleFileOwner, ruleFileMode, ruleFileSpecial, ruleChanged, true}
+)
+
+// refusal gives the Error for err. A nil err gives nil. An err that is not a
+// refusal of package safefile gives wrap(op, err). For a safefile refusal, the
+// shared package decides the refusal. The listener chooses the text from t.
+// For a key file with more than one link, an owner or mode refusal gives the
+// link text. A mode refusal has two texts. The first path of paths
+// below r with a forbidden bit chooses the text. The text comes from a second
+// Lstat, so in a race it can describe another file. The refusal stays.
+func refusal(op string, err error, t texts, r *os.Root, paths ...string) error {
+	var se *safefile.Error
+	if !errors.As(err, &se) {
+		return wrap(op, err)
+	}
+	if t.links && (se.Reason == safefile.ErrOwner || se.Reason == safefile.ErrMode) {
+		if fi, err := r.Lstat(paths[0]); err == nil && moreThanOneLink(fi) {
+			return fail(op, ruleLinks)
+		}
+	}
+	switch se.Reason {
+	case safefile.ErrSymlink:
+		return fail(op, ruleLink)
+	case safefile.ErrType:
+		return fail(op, t.notRegular)
+	case safefile.ErrOwner:
+		return fail(op, t.owner)
+	case safefile.ErrMode:
+		for _, p := range paths {
+			if fi, err := r.Lstat(p); err == nil && fi.Mode()&forbidden != 0 {
+				if fi.Mode().Perm()&otherBit == 0 {
+					return fail(op, t.special)
+				}
+				break
+			}
+		}
+		return fail(op, t.mode)
+	case safefile.ErrLinks:
+		return fail(op, ruleLinks)
+	case safefile.ErrSize:
+		return fail(op, ruleSize)
+	case safefile.ErrChanged:
+		return fail(op, t.changed)
+	}
+	if se.Cause == nil {
+		return fail(op, ruleIO)
+	}
+	return wrap(op, se.Cause)
+}
+
+// dirError is wrap for an error of the directories on the path of a key. A file
+// in place of a directory means that the key cannot exist.
+func dirError(op string, err error) error {
+	if e := new(Error); errors.As(err, &e) && e.Rule == ruleNotDir {
+		return &Error{Op: op, Rule: ruleMissing, err: fs.ErrNotExist}
+	}
+	return wrap(op, err)
+}
 
 // Error names the operation that failed and the rule that failed. The text is
 // fixed. It never holds a key, a path, or the bytes of a file.
@@ -121,25 +207,9 @@ var (
 	renameFile  = (*os.Root).Rename
 )
 
-// beforeCheck is a test hook. Open calls it for each part of the path, before
-// the check of the part. It is nil in production.
-var beforeCheck func(part string)
-
-// betweenCheckAndOpen is a test hook. Open calls it for each part of the path,
-// after the check of the part and before it opens the part. It is nil in
-// production.
-var betweenCheckAndOpen func(part string)
-
-// betweenLstatAndOpen is a test hook. Load calls it after the Lstat of the key
-// file and before it opens the file. It is nil in production.
-var betweenLstatAndOpen func()
-
-// betweenOpenAndStat is a test hook. Load calls it after it opens the key file
-// and before it calls Stat on the open file. It is nil in production.
-var betweenOpenAndStat func()
-
 // betweenSizeCheckAndRead is a test hook. Load calls it after the size checks of
-// the open file and before it reads the file. It is nil in production.
+// the open file and before it reads the file. It is nil in production. The
+// shared package has no hook at this place.
 var betweenSizeCheckAndRead func()
 
 // beforeListChild is a test hook. List calls it with the key of a child
@@ -222,19 +292,27 @@ func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 // at the path parts. That directory is the cache directory or a directory below
 // it. The walk is best effort and returns no error. A name that it cannot remove
 // stays. The walk goes into a child that is a directory, not a symbolic link,
-// down to maxParts levels. It opens the child through the root and applies
-// dirRule to the open directory. A child that it cannot open, or that fails
-// dirRule, stays and the walk skips it. A ReadDir error ends the walk of that
+// down to maxParts levels. For a child, it does these steps in order. It makes
+// an Lstat. It applies the directory rule by Lstat. It opens the child through
+// the root. It compares the open directory with the Lstat. A child that fails a
+// step stays and the walk skips it. The walk does not find a mode change of the
+// same directory after the rule check. A ReadDir error ends the walk of that
 // directory only. The walk reads a directory 256 names at a time and keeps no
 // list of names. So the number of names does not matter. It calls fsync on a
 // directory only if it removed a name in it, and it ignores an fsync error.
+// The walk does not find a swap back around the rule check. Another directory
+// is there for the check, and the first one comes back for the open.
 func (s *Store) removeTemporary(parts []string) {
+	li, err := s.root.Lstat(rel(parts))
+	if err != nil || s.checkDirs(parts) != nil {
+		return
+	}
 	d, err := s.root.OpenFile(rel(parts), readFlags, 0)
 	if err != nil {
 		return
 	}
 	defer d.Close()
-	if fi, err := d.Stat(); err != nil || dirRule(fi) != nil {
+	if fi, err := d.Stat(); err != nil || !os.SameFile(li, fi) {
 		return
 	}
 	removed := false
@@ -261,97 +339,66 @@ func (s *Store) removeTemporary(parts []string) {
 	}
 }
 
-// openPart checks the directory part in r, makes it with mode 0700 if it is
-// missing, and opens it as a root. The opened directory must be the directory
-// that the check passed.
+// openPart makes the directory part in r with mode 0700. This Mkdir runs first,
+// at each call. Then safefile.OpenRoot checks the part and opens it. The
+// opened directory must be the directory that the check passed.
 func openPart(r *os.Root, part string) (*os.Root, error) {
-	if beforeCheck != nil {
-		beforeCheck(part)
-	}
-	fi, err := r.Lstat(part)
-	if errors.Is(err, fs.ErrNotExist) {
-		// Another Open can make the same directory first. Then the checks
-		// below apply to the directory that it made.
-		if err = r.Mkdir(part, dirMode); err == nil || errors.Is(err, fs.ErrExist) {
-			fi, err = r.Lstat(part)
-		}
-	}
-	if err != nil {
+	// Another Open can make the same directory first. Then the checks below
+	// apply to the directory that it made.
+	if err := r.Mkdir(part, dirMode); err != nil && !errors.Is(err, fs.ErrExist) {
 		return nil, err
 	}
-	if err := dirRule(fi); err != nil {
-		return nil, err
-	}
-	if betweenCheckAndOpen != nil {
-		betweenCheckAndOpen(part)
-	}
-	next, err := r.OpenRoot(part)
-	if err != nil {
-		return nil, err
-	}
-	opened, err := next.Stat(".")
-	if err != nil {
-		next.Close()
-		return nil, err
-	}
-	if !os.SameFile(fi, opened) {
-		next.Close()
-		return nil, fail("check", ruleLink)
-	}
-	return next, nil
+	next, err := safefile.OpenRoot(r, part, cacheDirRule)
+	return next, refusal("check", err, dirTexts, r, part)
 }
 
-// checkPath checks each directory on the path parts below r. When create is
-// true, it makes a missing directory with mode 0700 first.
-func checkPath(r *os.Root, parts []string, create bool) error {
-	p := ""
-	for _, part := range parts {
-		p = path.Join(p, part)
-		fi, err := r.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) && create {
-			// Another Store can make the same directory first. Then the checks
-			// below apply to the directory that it made.
-			if err = r.Mkdir(p, dirMode); err == nil || errors.Is(err, fs.ErrExist) {
-				fi, err = r.Lstat(p)
-			}
-		}
-		if err != nil {
-			return err
-		}
-		if err := dirRule(fi); err != nil {
-			return err
-		}
+// dirPaths gives "." and the path of each directory of parts below it.
+func dirPaths(parts []string) []string {
+	ps := []string{"."}
+	for i := range parts {
+		ps = append(ps, strings.Join(parts[:i+1], "/"))
 	}
-	return nil
+	return ps
 }
 
-// dirRule returns the error for a directory that the store must not use.
-func dirRule(fi fs.FileInfo) error {
-	switch {
-	case fi.Mode()&fs.ModeSymlink != 0:
-		return fail("check", ruleLink)
-	case !fi.IsDir():
-		return fail("check", ruleNotDir)
-	case !ownedByUs(fi):
-		return fail("check", ruleOwner)
-	case fi.Mode().Perm()&otherBit != 0:
-		return fail("check", ruleMode)
-	case fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0:
-		return fail("check", ruleSpecial)
-	}
-	return nil
+// checkDirs checks the cache directory and the directories of parts below it.
+func (s *Store) checkDirs(parts []string) error {
+	// The last part is a placeholder. CheckParents does not check it.
+	name := strings.Join(slices.Concat(parts, []string{"-"}), "/")
+	err := safefile.CheckParents(s.root, name, cacheDirRule)
+	return refusal("check", err, dirTexts, s.root, dirPaths(parts)...)
 }
 
-// dirs checks the cache directory and the directories of parts below it.
+// dirs checks the directories of parts. When create is true, it also makes each
+// missing one with mode 0700. It checks the parents of a directory first.
 func (s *Store) dirs(parts []string, create bool) error {
-	fi, err := s.root.Lstat(".")
-	if err != nil {
-		return err
+	for i := 0; create && i < len(parts); i++ {
+		if err := s.checkDirs(parts[:i]); err != nil {
+			return err
+		}
+		// Another Store can make the same directory first.
+		if err := s.root.Mkdir(rel(parts[:i+1]), dirMode); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
 	}
-	if err := dirRule(fi); err != nil {
-		return err
+	return s.checkDirs(parts)
+}
+
+// parent opens the directory of the last part of parts, after the check of the
+// cache directory. The caller closes the root that it gets. changed is true
+// when another directory replaced a part after its check. A link to another
+// directory in the cache also gives changed true.
+func (s *Store) parent(parts []string) (r *os.Root, changed bool, err error) {
+	if err := s.dirs(nil, false); err != nil {
+		return nil, false, err
 	}
-	return checkPath(s.root, parts, create)
+	dir := parts[:len(parts)-1]
+	if len(dir) == 0 {
+		r, err = s.root.OpenRoot(".")
+		return r, false, err
+	}
+	r, err = safefile.OpenRoot(s.root, strings.Join(dir, "/"), cacheDirRule)
+	return r, errors.Is(err, safefile.ErrChanged), refusal("check", err, dirTexts, s.root, dirPaths(dir)...)
 }
 
 // syncPath calls fsync on the directory r and on each directory of parts below
@@ -414,11 +461,7 @@ func (s *Store) info(ctx context.Context, op, key string) (fs.FileInfo, []string
 		return nil, nil, err
 	}
 	if err := s.dirs(parts[:len(parts)-1], false); err != nil {
-		// A file in place of a directory on the path: the key cannot exist.
-		if e := new(Error); errors.As(err, &e) && e.Rule == ruleNotDir {
-			return nil, nil, &Error{Op: op, Rule: ruleMissing, err: fs.ErrNotExist}
-		}
-		return nil, nil, wrap(op, err)
+		return nil, nil, dirError(op, err)
 	}
 	fi, err := s.root.Lstat(rel(parts))
 	if err != nil {
@@ -498,10 +541,12 @@ func wrapAfterDirs(op string, err error) error {
 }
 
 // Load returns the value at key. A file above the size cap is an error. If a
-// Store replaces the key file between the Lstat and the open, Load starts again,
+// key file or key directory changes after its check, Load starts again,
 // at most loadTries times in all. If the file still changes, Load gives the rule
 // "file changed during the read". A replacement after the open does not matter:
 // Load returns the value of the open file.
+// Load also starts again when safefile.Open refuses a file that has left the
+// name.
 //
 // A write in place of the key file (the same file) can change its size during
 // the Load. Then Load gives the rule "file changed during the read". When the
@@ -520,87 +565,57 @@ func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 }
 
 // load makes one try to read the value at key. It returns changed true when the
-// open file is not the file that Lstat gave.
+// key file or a key directory changed after its check. A file that
+// safefile.Open refuses and that has left the name gives it too.
 func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed bool, err error) {
-	fi, parts, err := s.info(ctx, op, key)
+	if err := stopped(ctx, op); err != nil {
+		return nil, false, err
+	}
+	parts, err := parseKey(op, key, false)
 	if err != nil {
 		return nil, false, err
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, fail(op, ruleType)
+	dir, dirChanged, err := s.parent(parts)
+	if dirChanged {
+		return nil, true, nil
+	} else if err != nil {
+		return nil, false, dirError(op, err)
 	}
-	if fi.Size() > maxValue {
-		return nil, false, fail(op, ruleSize)
-	}
-	if n, ok := linkCount(fi); !ok || n > 1 {
-		return nil, false, fail(op, ruleLinks)
-	}
-	if betweenLstatAndOpen != nil {
-		betweenLstatAndOpen()
-	}
-	f, err := s.root.OpenFile(rel(parts), readFlags, 0)
+	defer dir.Close()
+	name := parts[len(parts)-1]
+	fi, err := safefile.Check(dir, name, keyNameRule)
 	if err != nil {
-		return nil, false, wrap(op, err)
+		return nil, false, refusal(op, err, fileTexts, dir, name)
+	}
+	f, of, err := safefile.Open(dir, name, keyOpenRule)
+	if errors.Is(err, safefile.ErrChanged) {
+		return nil, true, nil
+	} else if err != nil {
+		if li, lerr := dir.Lstat(name); lerr != nil || !os.SameFile(fi, li) {
+			return nil, true, nil
+		}
+		return nil, false, refusal(op, err, fileTexts, dir, name)
 	}
 	defer f.Close()
-	if betweenOpenAndStat != nil {
-		betweenOpenAndStat()
-	}
-	// The open file must be the file that Lstat gave. If it is not, a Store has
-	// replaced the key file between the two calls.
-	of, err := f.Stat()
-	if err != nil {
-		return nil, false, wrap(op, err)
-	}
+	// The open file must be the file that the Lstat gave. If it is not, a Store
+	// has replaced the key file between the two calls.
 	if !os.SameFile(fi, of) {
 		return nil, true, nil
 	}
-	if err := keyFileRule(op, of); err != nil {
-		return nil, false, err
+	if moreThanOneLink(of) {
+		return nil, false, fail(op, ruleLinks)
 	}
 	// A write in place can change the size after the open. The size of the open
 	// file must be the size that Lstat gave, and the read must give that size.
 	// This is not a new try: a new try would read the changed file with no error.
-	if of.Size() > maxValue {
-		return nil, false, fail(op, ruleSize)
-	}
 	if of.Size() != fi.Size() {
 		return nil, false, fail(op, ruleChanged)
 	}
 	if betweenSizeCheckAndRead != nil {
 		betweenSizeCheckAndRead()
 	}
-	b, err = io.ReadAll(io.LimitReader(f, maxValue+1))
-	if err != nil {
-		return nil, false, wrap(op, err)
-	}
-	if len(b) > maxValue {
-		return nil, false, fail(op, ruleSize)
-	}
-	if int64(len(b)) != of.Size() {
-		return nil, false, fail(op, ruleChanged)
-	}
-	return b, false, nil
-}
-
-// keyFileRule returns the error for a regular key file that the store must not
-// use. Four rules apply. The file must have one hard link only. The effective
-// user must own it. It must have no group or other permission bit. It must have
-// no setuid, setgid or sticky bit. A count of 0 is a file that a rename or a
-// Delete removed after the open. The open file still holds the whole value.
-func keyFileRule(op string, fi fs.FileInfo) error {
-	n, ok := linkCount(fi)
-	switch {
-	case !ok || n > 1:
-		return fail(op, ruleLinks)
-	case !ownedByUs(fi):
-		return fail(op, ruleFileOwner)
-	case fi.Mode().Perm()&otherBit != 0:
-		return fail(op, ruleFileMode)
-	case fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0:
-		return fail(op, ruleFileSpecial)
-	}
-	return nil
+	b, err = safefile.ReadAll(f, of, keyOpenRule)
+	return b, false, refusal(op, err, fileTexts, dir, name)
 }
 
 // Delete deletes key. A directory key deletes every key below it. A missing key
@@ -624,19 +639,21 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // checkedInfo is info. For a key file it also applies the rules of Load: hard
 // links, owner, mode, the setuid, setgid or sticky bit, and size.
 func (s *Store) checkedInfo(ctx context.Context, op, key string) (fs.FileInfo, error) {
-	fi, _, err := s.info(ctx, op, key)
+	fi, parts, err := s.info(ctx, op, key)
 	if err != nil {
 		return nil, err
 	}
-	if fi.Mode().IsRegular() {
-		if err := keyFileRule(op, fi); err != nil {
-			return nil, err
-		}
-		if fi.Size() > maxValue {
-			return nil, fail(op, ruleSize)
-		}
+	if !fi.Mode().IsRegular() {
+		return fi, nil
 	}
-	return fi, nil
+	dir, _, err := s.parent(parts)
+	if err != nil {
+		return nil, dirError(op, err)
+	}
+	defer dir.Close()
+	name := parts[len(parts)-1]
+	fi, err = safefile.Check(dir, name, keyNameRule)
+	return fi, refusal(op, err, fileTexts, dir, name)
 }
 
 // Exists reports whether key is a file or a directory. A bad key, a symbolic
