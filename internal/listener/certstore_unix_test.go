@@ -763,7 +763,7 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 		}
 	})
 
-	// The first BeforeCheck call for the key comes from Open, after Load checked.
+	// The first BeforeCheck call for the key is from Open, after Load checked.
 	t.Run("rename between the Lstat of Load and the open", func(t *testing.T) {
 		s := setup(t)
 		calls := 0
@@ -1256,7 +1256,7 @@ func TestTS16ErrorsNeverHoldKeyMarkerBytes(t *testing.T) {
 	noMarker(t, err, "marker")
 }
 
-// A directory with mode 0777 replaces a key directory after the walk checked it.
+// A directory with mode 0777 replaces a key directory after the check.
 func TestTS16LeftoverWalkSkipsADirectorySwappedAfterTheCheck(t *testing.T) {
 	s, dir := newStore(t)
 	mustNil(t, s.Store(context.Background(), "kd/key", []byte("v")))
@@ -1298,8 +1298,8 @@ func TestTS16LoadTriesAgainWhenARefusedFileIsReplacedAfterTheCheck(t *testing.T)
 	}
 }
 
-// A key directory is replaced after its check: by a new directory (new try), by
-// a link to another directory (link rule), by a link to itself (accepted).
+// The hook replaces a key directory after its check. The new one is a new
+// directory, a link to another directory, or a link to itself.
 func TestTS16LoadHandlesAKeyDirectoryThatIsReplacedAfterTheCheck(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()

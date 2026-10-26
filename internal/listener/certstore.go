@@ -291,14 +291,14 @@ func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 // at the path parts. That directory is the cache directory or a directory below
 // it. The walk is best effort and returns no error. A name that it cannot remove
 // stays. The walk goes into a child that is a directory, not a symbolic link,
-// down to maxParts levels. For a child, it does these steps in order: Lstat,
-// the directory rule by Lstat, the open through the root, and a compare of the
-// open directory with the Lstat. A child that fails a step stays and the walk
-// skips it. The walk does not find a mode change of the same directory after
-// the rule check. A ReadDir error ends the walk of that directory only. The
-// walk reads a directory 256 names at a time and keeps no list of names. So
-// the number of names does not matter. It calls fsync on a directory only if it
-// removed a name in it, and it ignores an fsync error.
+// down to maxParts levels. For a child, it does these steps in order. It makes
+// an Lstat. It applies the directory rule by Lstat. It opens the child through
+// the root. It compares the open directory with the Lstat. A child that fails a
+// step stays and the walk skips it. The walk does not find a mode change of the
+// same directory after the rule check. A ReadDir error ends the walk of that
+// directory only. The walk reads a directory 256 names at a time and keeps no
+// list of names. So the number of names does not matter. It calls fsync on a
+// directory only if it removed a name in it, and it ignores an fsync error.
 func (s *Store) removeTemporary(parts []string) {
 	li, err := s.root.Lstat(rel(parts))
 	if err != nil || s.checkDirs(parts) != nil {
