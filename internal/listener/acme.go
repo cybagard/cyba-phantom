@@ -463,9 +463,9 @@ func (a *ACME) Start(ctx context.Context) error {
 }
 
 // renewDue renews the cached certificate old of name. The renewal tries again
-// after a failure. If the stored certificate is missing, certmagic gets a new
-// certificate instead, with the same retries. The list of the causes that stop
-// it is complete:
+// after a failure. If a stored file of the certificate is missing, certmagic
+// gets a new certificate instead, with the same retries. With the config of
+// NewACME, the list of the causes that stop it is complete:
 //   - it succeeds, also when the stored certificate needs no renewal now;
 //   - its retry time ends (certmagic sets 30 days as the longest);
 //   - ctx ends;

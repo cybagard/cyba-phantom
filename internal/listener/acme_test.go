@@ -300,8 +300,8 @@ func BenchmarkGetCertificateTokenKeyRefused(b *testing.B) {
 // request to another host. It does not set a proxy in the environment.
 // net/http reads that environment one time for each process. So a test that
 // sets it depends on the order of the tests. The guard does not read the
-// environment. The environment function never gives errEgress, so it fails
-// this check.
+// environment. A guard that calls http.ProxyFromEnvironment never gives
+// errEgress, so this check returns false.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 	t.Helper()
 	if iss.HTTPProxy == nil {
@@ -363,12 +363,12 @@ const egressGuardChildEnv = "PHANTOM_TEST_EGRESS_GUARD_CHILD"
 // process. An earlier test can make it read the environment first. Then a proxy
 // that this test sets later is not seen. So the checks run in a child process
 // of the test binary. The parent sets the proxy variables in the environment
-// of the child, and net/http reads them fresh there. A guard that reads the
-// environment then gives the proxy URL, and the child fails. The parent fails
-// when the child fails, and it prints the output of the child. The pattern
-// of the child comes from the name of this test. The parent also fails when
-// the output of the child has no PASS line for this test. A child that ran
-// no test then cannot pass.
+// of the child, and net/http reads them fresh there. In that case, a guard
+// that reads the environment gives the proxy URL, and the child fails. The
+// parent fails when the child fails, and it prints the output of the child.
+// The pattern of the child comes from the name of this test. The parent also
+// fails when the output of the child has no PASS line for this test. So a
+// child that ran no test cannot pass.
 func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 	if os.Getenv(egressGuardChildEnv) == "" {
 		cmd := exec.Command(os.Args[0],
