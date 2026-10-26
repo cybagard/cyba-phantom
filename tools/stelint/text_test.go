@@ -1,0 +1,132 @@
+package main
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// textFile writes a text file in a new directory and returns its path.
+func textFile(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, dir, "body.md", content)
+	return filepath.Join(dir, "body.md")
+}
+
+func TestTextReportsOnlyTheLongSentence(t *testing.T) {
+	path := textFile(t, ws(21)+".\n"+ws(20)+".\n")
+	code, out, errOut := runLint(t.TempDir(), "-text", path)
+	want := path + ":1: 21 words (limit 20)\n" +
+		"stelint FAIL: 1 sentence(s) over 20 words in " + path + "\n"
+	if code != 1 || out != want || errOut != "" {
+		t.Errorf("code = %d, out = %q, err = %q, want 1 and %q", code, out, errOut, want)
+	}
+}
+
+func TestTextReportsTheFirstLineOfASentence(t *testing.T) {
+	path := textFile(t, "Intro.\n\n"+ws(11)+"\n"+ws(11)+".\n")
+	_, out, _ := runLint(t.TempDir(), "-text", path)
+	if want := path + ":3: 22 words (limit 20)\n"; !strings.HasPrefix(out, want) {
+		t.Errorf("out = %q, want the prefix %q", out, want)
+	}
+}
+
+func TestTextPassPrintsASummary(t *testing.T) {
+	path := textFile(t, ws(20)+".\n")
+	code, out, _ := runLint(t.TempDir(), "-text", path)
+	if want := "stelint: no sentence over 20 words in " + path + "\n"; code != 0 || out != want {
+		t.Errorf("code = %d, out = %q, want 0 and %q", code, out, want)
+	}
+}
+
+func TestTextSentenceBreaks(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		hits      int
+	}{
+		{"two table cells of 15 words", "| " + ws(15) + " | " + ws(15) + " |\n", 0},
+		{"table separator row has no cell", "| --- | :-: |\n| " + ws(21) + " |\n", 1},
+		{"two list items of 12 words", "- " + ws(12) + "\n- " + ws(12) + "\n", 0},
+		{"numbered list items", "1. " + ws(12) + "\n2) " + ws(12) + "\n", 0},
+		{"heading then 12 words", "# " + ws(12) + "\n" + ws(12) + "\n", 0},
+		{"30 words in a fence", "```\n" + ws(30) + "\n```\n", 0},
+		{"30 words in an indented code block", "Text.\n\n    " + ws(30) + "\n", 0},
+		{"text after a fence still counts", "```\nx\n```\n" + ws(21) + "\n", 1},
+		{"trailer lines do not count", ws(15) + "\n\nSigned-off-by: A B <a@example.com>\n", 0},
+		{"20 words and a code span with spaces", ws(20) + " `a b c d`.\n", 0},
+		{"21 words and a code span with spaces", ws(21) + " `a b c d`.\n", 1},
+		{"code span in the middle", ws(10) + " `a. b` " + ws(10) + ".\n", 0},
+		{"code span over two lines", ws(10) + " `a\nb` " + ws(10) + ".\n", 0},
+		{"code span joined to a word", "x`a b`y " + ws(19) + ".\n", 0},
+		{"unclosed backtick is a character at 20", ws(19) + " `a.\n", 0},
+		{"unclosed backtick is a character at 21", ws(20) + " `a.\n", 1},
+	} {
+		path := textFile(t, tc.src)
+		code, out, _ := runLint(t.TempDir(), "-text", path)
+		want := 0
+		if tc.hits > 0 {
+			want = 1
+		}
+		if code != want || strings.Count(out, " words (limit 20)") != tc.hits {
+			t.Errorf("%s: code = %d, out = %q, want %d hit(s)", tc.name, code, out, tc.hits)
+		}
+	}
+}
+
+// A code span is one word in a comment, as TestSentenceRules shows. In a text
+// file it is no word. The same words decide both results.
+func TestCodeSpanIsOneWordInACommentOnly(t *testing.T) {
+	words := ws(20) + " `a b`.\n"
+	if got := sentences("// " + words); len(got) != 1 || got[0].words != 21 {
+		t.Errorf("comment: sentences = %v, want one with 21 words", got)
+	}
+	if got := textSentences([]byte(words)); len(got) != 0 {
+		t.Errorf("text: sentences = %v, want none", got)
+	}
+}
+
+func TestTextCRLFKeepsLineNumbers(t *testing.T) {
+	lf := "Intro.\n\n" + ws(21) + ".\n\n" + ws(22) + ".\n"
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+	pathLF := textFile(t, lf)
+	pathCRLF := textFile(t, crlf)
+	_, outLF, _ := runLint(t.TempDir(), "-text", pathLF)
+	_, outCRLF, _ := runLint(t.TempDir(), "-text", pathCRLF)
+	hits := func(out, path string) string { return strings.ReplaceAll(out, path, "P") }
+	if hits(outLF, pathLF) != hits(outCRLF, pathCRLF) ||
+		!strings.Contains(outCRLF, ":3: 21 words") || !strings.Contains(outCRLF, ":5: 22 words") {
+		t.Errorf("LF output %q differs from CRLF output %q", outLF, outCRLF)
+	}
+}
+
+func TestTextUsageAndReadErrorsExitTwo(t *testing.T) {
+	path := textFile(t, "ok.\n")
+	for _, args := range [][]string{
+		{"-text"},
+		{"-text", path, path},
+		{"-text", "-all", path},
+		{"-text", "-all"},
+		{"-text", filepath.Join(t.TempDir(), "missing.md")},
+		{"-text", t.TempDir()},
+	} {
+		if code, _, errOut := runLint(t.TempDir(), args...); code != 2 || errOut == "" {
+			t.Errorf("args %q: code = %d, err = %q, want 2 and a message", args, code, errOut)
+		}
+	}
+}
+
+func TestTextFileOverLimitIsRefused(t *testing.T) {
+	big := "word.\n"
+	path := textFile(t, big)
+	old := maxFileBytes
+	maxFileBytes = len(big) - 1
+	defer func() { maxFileBytes = old }()
+	if code, _, errOut := runLint(t.TempDir(), "-text", path); code != 2 || !strings.Contains(errOut, "not parsed") {
+		t.Errorf("over the limit: code = %d, err = %q, want 2", code, errOut)
+	}
+	maxFileBytes = len(big)
+	if code, _, _ := runLint(t.TempDir(), "-text", path); code != 0 {
+		t.Errorf("at the limit: code = %d, want 0", code)
+	}
+}

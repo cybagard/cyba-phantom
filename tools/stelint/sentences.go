@@ -49,6 +49,22 @@ func longSentences(src []byte) []sentence {
 	return out
 }
 
+// textSentences returns the sentences of a Markdown or plain-text file that
+// have more than maxWords words, in line order. Each file line is a text line
+// with its line number. A code span counts as no word.
+func textSentences(src []byte) []sentence {
+	var g []textLine
+	for i, l := range strings.Split(string(src), "\n") {
+		g = append(g, textLine{text: strings.TrimSuffix(l, "\r"), line: i + 1})
+	}
+	var out []sentence
+	for _, p := range paragraphs(g) {
+		p.text = true
+		out = append(out, p.long()...)
+	}
+	return out
+}
+
 // checkedSentences returns the sentences of src that have more than maxWords
 // words and that the target covers, in line order. The target covers a
 // sentence when a line of it changed. It also does when a deletion joined it,
@@ -390,6 +406,9 @@ func listItem(t string) (rest string, ok bool) {
 type para struct {
 	buf  []byte
 	segs []seg
+	// text is true for a Markdown or plain-text file. A code span in backticks
+	// then counts as no word. In a comment it counts as one word.
+	text bool
 }
 
 type seg struct{ off, line int }
@@ -449,6 +468,7 @@ func (p *para) long() []sentence {
 		inWord      bool
 		open        bool // a "[" is open: it can start a link
 		tick, stop  = -1, -1
+		spanEnd     = -1 // index after the last code span that has no word
 	)
 	lineAt := func(i int) int {
 		for cursor+1 < len(p.segs) && p.segs[cursor+1].off <= i {
@@ -502,8 +522,11 @@ func (p *para) long() []sentence {
 		case isWordBreak(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
-			startWord(i)
+			if !p.text {
+				startWord(i)
+			}
 			i = nextTick(i+1) + 1
+			spanEnd = i
 			continue
 		case c == '[':
 			open = true
@@ -515,7 +538,10 @@ func (p *para) long() []sentence {
 			i = nextStop(i+2) + 1
 			continue
 		case c == '.' || c == '?' || c == '!':
-			startWord(i)
+			// An end mark right after a code span is no word of its own.
+			if !(p.text && i == spanEnd && !inWord) {
+				startWord(i)
+			}
 			if i+1 == len(b) || spaceAt(b, i+1) {
 				finish(i)
 			}
