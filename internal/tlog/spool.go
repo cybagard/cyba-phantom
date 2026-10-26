@@ -35,7 +35,7 @@ const (
 
 // Flags of Spool.stuck: what the spool already did for an entry.
 const (
-	stuckWarned   uint8 = 1 << iota // Add logged the entry
+	stuckLogged   uint8 = 1 << iota // a path logged the entry
 	stuckRejected                   // the entry is in Rejected
 )
 
@@ -70,8 +70,10 @@ func (c cursor) covers(size uint64) bool { return c.set && size <= c.size }
 
 // SpoolStats are the counters of a spool.
 type SpoolStats struct {
-	Skipped  []uint64 // for each target, in the order of the targets
-	Rejected uint64   // entries that must not be sent, one time for each entry
+	Skipped []uint64 // for each target, in the order of the targets
+	// Rejected counts entries that must not be sent. A name counts one time
+	// until a listing shows that it is gone.
+	Rejected uint64
 }
 
 // Spool holds the signed notes that wait for the publish targets. All calls
@@ -96,8 +98,10 @@ type Spool struct {
 	publishing []bool // for each target: a Publish call runs
 
 	// stuck holds the entries that cannot be deleted, with flags for what the
-	// spool did for them. It has only entries of the last listing: sizes
-	// forgets an entry that is gone. Add keeps that listing near maxSpoolNotes.
+	// spool did for them. It has one entry for each entry in checkpoints/ that
+	// the spool could not delete. It forgets an entry at the next listing after
+	// the entry is gone. Only a user with write access to the state directory
+	// can make such entries.
 	stuck map[string]uint8
 }
 
@@ -126,15 +130,18 @@ func OpenSpool(root *os.Root, log *slog.Logger, origin string, verifier note.Ver
 	s := &Spool{root: root, log: log, origin: origin, verifier: verifier, targets: slices.Clone(targets), now: time.Now,
 		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n), publishing: make([]bool, n),
 		stuck: map[string]uint8{}}
-	// A listing error shows again in the first Add or Publish.
-	_ = s.eachName(func(name string) {
+	// If the listing fails, the sweep stops and logs one line. OpenSpool still
+	// succeeds. The first Add or Publish gives its own error.
+	if err := s.eachName(func(name string) {
 		if !strings.HasSuffix(name, spoolTmpSuffix) {
 			return
 		}
 		if err := root.Remove(spoolDir + "/" + name); err != nil {
 			log.Warn("checkpoint spool cannot delete a temporary file", "name", name)
 		}
-	})
+	}); err != nil {
+		log.Warn("checkpoint spool cannot list checkpoints/ to delete temporary files")
+	}
 	return s, nil
 }
 
@@ -171,9 +178,9 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 	// The bound counts every listed entry. If the oldest entry cannot be
 	// deleted, it stays and the loop continues with the next entry. The spool
 	// then holds that entry and up to 1025 other entries. Add logs that entry
-	// one time.
+	// if no path logged it.
 	for len(sizes) > maxSpoolNotes {
-		if err := s.drop(sizes[0]); err != nil && s.first(noteName(sizes[0]), stuckWarned) {
+		if err := s.drop(sizes[0]); err != nil && s.first(noteName(sizes[0]), stuckLogged) {
 			s.log.Warn("checkpoint spool cannot delete an entry", "size", sizes[0])
 		}
 		sizes = sizes[1:]
@@ -388,8 +395,9 @@ func (s *Spool) readCursor(i int) (cursor, error) {
 // sizes lists the sizes in the names <canonical decimal>.note, smallest first.
 // It lists an entry of any type with such a name, also a directory. Publish
 // treats an entry that is not a regular file as a bad note. A name in another
-// form is skipped. A name with a decimal above uint64 is no size: sizes
-// rejects that entry.
+// form is skipped. A decimal above uint64 is not a valid size: sizes rejects
+// that entry. Publish gives no error for it, also if sizes cannot delete it.
+// A note-name entry that is not a regular file gives an error.
 func (s *Spool) sizes() ([]uint64, error) {
 	for name := range s.stuck { // forget the entries that are gone
 		if _, err := s.root.Lstat(name); errors.Is(err, fs.ErrNotExist) {
@@ -440,20 +448,24 @@ func (s *Spool) first(name string, flag uint8) bool {
 	return !seen
 }
 
-// reject deletes an entry that must not be sent. It counts the entry and logs
-// it one time. An entry can stay because it cannot be deleted (a directory that
-// is not empty). A later call that meets it does not count it again.
+// reject deletes an entry that must not be sent. It counts the entry one time.
+// It logs the entry only if no path logged it. An entry can stay because it
+// cannot be deleted (a directory that is not empty). A later call that meets
+// it does not count it again.
 func (s *Spool) reject(name string) {
 	err := s.root.Remove(name)
 	stuck := err != nil && !errors.Is(err, fs.ErrNotExist)
-	first := s.first(name, stuckRejected)
+	counts := s.first(name, stuckRejected)
+	logs := s.first(name, stuckLogged)
 	if !stuck {
-		delete(s.stuck, name) // a new entry with this name counts again
+		delete(s.stuck, name) // gone: a new entry with this name counts
 	}
-	if !first {
+	if counts {
+		s.rejected++
+	}
+	if !logs {
 		return
 	}
-	s.rejected++
 	if stuck {
 		s.log.Warn("checkpoint spool cannot delete a note that must not be sent", "name", name)
 	} else {

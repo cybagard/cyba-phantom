@@ -245,6 +245,9 @@ func TestTI09_StuckEntryCountsOnce(t *testing.T) {
 	if n := strings.Count(e.logs.String(), "cannot delete a note that must not be sent"); n != 1 || e.Stats().Rejected != 1 {
 		t.Fatalf("%d warning lines, rejected %d, want 1 and 1:\n%s", n, e.Stats().Rejected, e.logs)
 	}
+	if !strings.Contains(e.logs.String(), "name=checkpoints/2.note") || strings.Contains(e.logs.String(), "deleted a note") {
+		t.Fatalf("the line has no name, or says deleted:\n%s", e.logs)
+	}
 	must(t, os.Remove(filepath.Join(dir, "x")))
 	if err := e.Publish(0, f); err == nil {
 		t.Fatal("Publish hid the entry that is not a regular file")
@@ -254,8 +257,99 @@ func TestTI09_StuckEntryCountsOnce(t *testing.T) {
 	}
 }
 
-// T-I-09: the spool lists checkpoints/ in steps of listStep names and lists the
-// names of all the steps.
+// downSender is a Sender that always fails.
+type downSender struct{}
+
+func (downSender) Send(string, uint64, []byte) error { return errors.New("target down") }
+
+// fill writes the signed notes from..to with no fsync. A full spool is quick.
+func (e *spoolEnv) fill(t *testing.T, from, to uint64) {
+	t.Helper()
+	for size := from; size <= to; size++ {
+		msg, err := SignCheckpoint(e.signer, size, testRoot())
+		must(t, err)
+		must(t, os.WriteFile(filepath.Join(e.dir, e.noteFile(size)), msg, 0o600))
+	}
+}
+
+// T-I-09: an entry that cannot be deleted gets one Warn line and one Rejected
+// count, also if Publish and Add both meet it, in each order.
+func TestTI09_StuckEntryOneLineForAllPaths(t *testing.T) {
+	e := newSpool(t)
+	stick := func(size uint64) {
+		must(t, os.MkdirAll(filepath.Join(e.dir, e.noteFile(size), "x"), 0o700))
+	}
+	publish := func() {
+		t.Helper()
+		for range 3 {
+			for i := range spoolTargets {
+				if err := e.Publish(i, downSender{}); err == nil {
+					t.Fatal("Publish hid the error")
+				}
+			}
+		}
+	}
+	stick(1) // Publish meets it first
+	publish()
+	stick(2) // Add meets it first
+	e.fill(t, 3, maxSpoolNotes+1)
+	for size := uint64(maxSpoolNotes + 2); size <= maxSpoolNotes+4; size++ {
+		e.add(t, size)
+	}
+	publish()
+	logs := e.logs.String()
+	lines := strings.Count(logs, "cannot delete an entry") + strings.Count(logs, "cannot delete a note that must not be sent")
+	if lines != 2 || e.Stats().Rejected != 2 || len(e.stuck) != 2 {
+		t.Fatalf("%d lines, rejected %d, stuck %v, want 2, 2, 2 entries:\n%s", lines, e.Stats().Rejected, e.stuck, logs)
+	}
+	if !strings.Contains(logs, "cannot delete a note that must not be sent\" name=checkpoints/1.note") || !strings.Contains(logs, "cannot delete an entry\" size=2") {
+		t.Fatalf("a line has no entry name:\n%s", logs)
+	}
+}
+
+// T-I-09: the spool forgets an entry that cannot be deleted when a listing
+// shows it gone. A new entry with that name gets a log line again.
+func TestTI09_ForgetsStuckEntryThatIsGone(t *testing.T) {
+	e := newSpool(t)
+	dir := filepath.Join(e.dir, e.noteFile(1))
+	stick := func() { must(t, os.MkdirAll(filepath.Join(dir, "x"), 0o700)) }
+	stick()
+	e.fill(t, 2, maxSpoolNotes+1)
+	e.add(t, maxSpoolNotes+2) // the full spool meets the entry
+	if len(e.stuck) != 1 || strings.Count(e.logs.String(), "cannot delete an entry") != 1 {
+		t.Fatalf("stuck %v, log:\n%s", e.stuck, e.logs)
+	}
+	must(t, os.RemoveAll(dir))
+	e.files(t)
+	if len(e.stuck) != 0 {
+		t.Fatalf("stuck %v after a listing, want none", e.stuck)
+	}
+	stick()
+	e.add(t, maxSpoolNotes+3)
+	if n := strings.Count(e.logs.String(), "cannot delete an entry"); n != 2 {
+		t.Fatalf("%d lines for the new entry, want 2 in all:\n%s", n, e.logs)
+	}
+}
+
+// T-S-13: if the sweep at open cannot list checkpoints/, OpenSpool still
+// succeeds and writes one log line with no path.
+func TestTS13_OpenLogsSweepListingError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can list a directory with mode 0300")
+	}
+	e := newSpool(t)
+	dir := filepath.Join(e.dir, spoolDir)
+	must(t, os.Chmod(dir, 0o300))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	log, buf := testLogger()
+	_, err := OpenSpool(e.root, log, testOrigin, e.verifier, spoolTargets)
+	must(t, err)
+	if n := strings.Count(buf.String(), "cannot list"); n != 1 || strings.Contains(buf.String(), e.dir) {
+		t.Fatalf("%d lines, want 1 with no path:\n%s", n, buf)
+	}
+}
+
+// T-I-09: the spool lists all names when there are more names than one step.
 func TestTI09_ListsInSteps(t *testing.T) {
 	e := newSpool(t)
 	const count = 2*listStep + 1
@@ -269,24 +363,38 @@ func TestTI09_ListsInSteps(t *testing.T) {
 	}
 }
 
-// T-I-09: an entry that is not a regular file is not a skipped note when the
-// full spool deletes it. A regular note is.
+// T-I-09: an entry that is not a regular file (a directory, a FIFO, a symlink)
+// is not a skipped note when the full spool deletes it. A regular note is. An
+// entry that is gone before drop runs does not stop it.
 func TestTI09_DropCountsOnlyNotes(t *testing.T) {
 	e := newSpool(t)
-	must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(1)), 0o700))
-	for size := uint64(2); size <= maxSpoolNotes+1; size++ {
-		must(t, e.Add(size, []byte("x")))
+	drop := func(size uint64) {
+		t.Helper()
+		e.mu.Lock() // Add holds the lock for drop
+		defer e.mu.Unlock()
+		must(t, e.drop(size))
 	}
-	if _, err := os.Lstat(filepath.Join(e.dir, e.noteFile(1))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("directory stays: %v", err)
+	for i, make := range []func(path string){
+		func(path string) { must(t, os.Mkdir(path, 0o700)) },
+		func(path string) { must(t, syscall.Mkfifo(path, 0o600)) },
+		func(path string) { mustSymlink(t, filepath.Join(e.dir, "target"), path) },
+	} {
+		path := filepath.Join(e.dir, e.noteFile(uint64(i+1)))
+		make(path)
+		drop(uint64(i + 1))
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("entry %d stays: %v", i+1, err)
+		}
+		if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{0, 0}) {
+			t.Fatalf("skipped = %v after entry %d, want none", st.Skipped, i+1)
+		}
 	}
-	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{0, 0}) {
-		t.Fatalf("skipped = %v after the directory, want none", st.Skipped)
-	}
-	must(t, e.Add(maxSpoolNotes+2, []byte("x")))
+	e.add(t, 4)
+	drop(4)
 	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{1, 1}) {
 		t.Fatalf("skipped = %v after a note, want 1 for each target", st.Skipped)
 	}
+	drop(5) // no entry
 }
 
 // T-S-13: a note name with a decimal above uint64 is never a size. The spool
@@ -313,11 +421,24 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 	if e.Stats().Rejected != 2 {
 		t.Fatalf("rejected = %d, want 2", e.Stats().Rejected)
 	}
+	// The names at the edge of 32 and 64 bits are sizes. One more is not.
+	const largest = 1<<64 - 1
+	for _, size := range []uint64{1 << 32, largest} {
+		must(t, os.WriteFile(filepath.Join(e.dir, e.noteFile(size)), []byte("x"), 0o600))
+	}
+	over := filepath.Join(e.dir, spoolDir, "18446744073709551616"+noteSuffix)
+	must(t, os.WriteFile(over, []byte("x"), 0o600))
+	if got := e.files(t); !slices.Equal(got, []uint64{1, 1 << 32, largest}) {
+		t.Fatalf("listed %v, want 1, 4294967296 and the largest uint64", got)
+	}
+	if _, err := os.Lstat(over); !errors.Is(err, os.ErrNotExist) || e.Stats().Rejected != 3 {
+		t.Fatalf("entry above uint64: %v, rejected %d, want deleted and 3", err, e.Stats().Rejected)
+	}
 }
 
 // T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
-// and for a cursor. No write of that name must follow. A temporary entry that
-// cannot be deleted stays and gets a log line.
+// and for a cursor. The spool deletes the file with no new write of that name.
+// A temporary entry that cannot be deleted stays and gets a log line.
 func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 	e := newSpool(t)
 	left := []string{"5.note.tmp", cursorPrefix + "0123456789abcdef.tmp"}
@@ -490,6 +611,10 @@ func TestTS13_BadNotesAreNotSent(t *testing.T) {
 	}
 	if st := e.Stats(); st.Rejected != 5 {
 		t.Fatalf("rejected = %d, want 5", st.Rejected)
+	}
+	logs := e.logs.String()
+	if n := strings.Count(logs, "deleted a note that must not be sent"); n != 5 || strings.Contains(logs, "cannot delete") || !strings.Contains(logs, "name=checkpoints/2.note") {
+		t.Fatalf("%d lines for deleted notes, want 5 with a name and no line for a stuck entry:\n%s", n, logs)
 	}
 	if got := e.files(t); !slices.Equal(got, []uint64{1, 7}) { // target 1 has not published
 		t.Fatalf("notes on disk = %v", got)
