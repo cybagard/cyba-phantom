@@ -1302,8 +1302,8 @@ func TestTS16LoadTriesAgainWhenARefusedFileIsReplacedAfterTheCheck(t *testing.T)
 	}
 }
 
-// The key file does not change. The hook gives another owner at the second owner
-// check of the file, the check of the open file. Load must not try again.
+// The key file does not change. The hook gives another owner at the second
+// owner check of the file, the check of the open file. Load must not try again.
 func TestTS16LoadRefusesAKeyFileThatOnlyTheOpenFileFails(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
