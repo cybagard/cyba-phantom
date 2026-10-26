@@ -524,10 +524,10 @@ func (s *Spool) remove(size uint64) error {
 // drop deletes the oldest entry because the spool is full. It deletes the entry
 // for every cursor state, also for a note that a target published. This keeps
 // the bound. drop counts the entry as skipped, except an entry that is not a
-// regular file. An entry that drop cannot examine counts as skipped. It
-// counts it for each target whose cursor is below its size. A cursor that
-// cannot be read counts as below. The spool cannot show that the target has
-// the note.
+// regular file. An entry that is gone before drop examines it counts as
+// skipped. drop counts it for each target whose cursor is below its size. A
+// cursor that cannot be read counts as below. The spool cannot show that the
+// target has the note.
 func (s *Spool) drop(size uint64) error {
 	fi, lerr := s.root.Lstat(noteName(size))
 	if err := s.remove(size); err != nil {
