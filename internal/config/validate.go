@@ -818,7 +818,7 @@ func checkACMEName(_ *loader, raw string) string {
 var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // inDirText reports whether the clean path p is the clean path d, or is below
-// it. It compares text only. The Go function checkStorePath compares
+// it. It compares text only. The function named under compares the
 // resolved paths.
 func inDirText(p, d string) bool {
 	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
