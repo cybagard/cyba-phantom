@@ -131,7 +131,9 @@ func OpenSpool(root *os.Root, log *slog.Logger, origin string, verifier note.Ver
 		skipped: make([]uint64, n), unlogged: make([]uint64, n), lastLog: make([]time.Time, n), publishing: make([]bool, n),
 		stuck: map[string]uint8{}}
 	// If the listing fails, the sweep stops and logs one line. OpenSpool still
-	// succeeds. The first Add or Publish gives its own error.
+	// succeeds. An Add or Publish that meets the same fault gives its own
+	// error. A temporary file that the sweep did not delete can stay until the
+	// next open.
 	if err := s.eachName(func(name string) {
 		if !strings.HasSuffix(name, spoolTmpSuffix) {
 			return
@@ -521,7 +523,8 @@ func (s *Spool) remove(size uint64) error {
 
 // drop deletes the oldest entry because the spool is full. It deletes the entry
 // for every cursor state, also for a note that a target published. This keeps
-// the bound. If the entry was a regular note, drop counts it as skipped. It
+// the bound. drop counts the entry as skipped, except an entry that is not a
+// regular file. An entry that drop cannot examine counts as skipped. It
 // counts it for each target whose cursor is below its size. A cursor that
 // cannot be read counts as below. The spool cannot show that the target has
 // the note.

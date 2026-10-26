@@ -262,7 +262,8 @@ type downSender struct{}
 
 func (downSender) Send(string, uint64, []byte) error { return errors.New("target down") }
 
-// fill writes the signed notes from..to with no fsync. A full spool is quick.
+// fill writes the signed notes from..to with no fsync. Thus the test fills
+// the spool quickly.
 func (e *spoolEnv) fill(t *testing.T, from, to uint64) {
 	t.Helper()
 	for size := from; size <= to; size++ {
@@ -364,7 +365,8 @@ func TestTI09_ListsInSteps(t *testing.T) {
 }
 
 // T-I-09: the full spool deletes an entry that is not a regular file (a
-// directory, a FIFO, a symlink). It is not a skipped note. A regular note is.
+// directory, a FIFO, a symlink). It is not a skipped note. A regular note is a
+// skipped note.
 // An entry that is gone before drop runs does not stop it.
 func TestTI09_DropCountsOnlyNotes(t *testing.T) {
 	e := newSpool(t)
@@ -421,7 +423,8 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 	if e.Stats().Rejected != 2 {
 		t.Fatalf("rejected = %d, want 2", e.Stats().Rejected)
 	}
-	// The names at the edge of 32 and 64 bits are sizes. One more is not.
+	// The names at the edge of 32 and 64 bits are sizes. The decimal after the
+	// largest uint64 is not a size.
 	const largest = 1<<64 - 1
 	for _, size := range []uint64{1 << 32, largest} {
 		must(t, os.WriteFile(filepath.Join(e.dir, e.noteFile(size)), []byte("x"), 0o600))
