@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"html/template"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -138,6 +139,11 @@ func (e *env) rejects(l *Loader, start bool, want error) int32 {
 	return e.n.Load() - n
 }
 
+// stubParse is a template step that fails.
+func stubParse(*Archive) (map[string]*template.Template, error) {
+	return nil, errors.New("stub")
+}
+
 // T-U-08: each code is a fixed error, and nothing on disk or in memory changes.
 // When two checks fail, the first check of the order gives the code.
 func TestTU08RejectionCodes(t *testing.T) {
@@ -195,7 +201,7 @@ func TestTU08RejectionCodes(t *testing.T) {
 		}, ErrRollback, CodeRollback},
 		{"template_parse", func(e *env) {
 			put(mf(ver(3)))(e)
-			e.l.template = func(*Archive) error { return errors.New("stub") }
+			e.l.template = stubParse
 		}, ErrTemplateParse, CodeTemplateParse},
 		{"state fault", fault(func(d string) error { return os.Chmod(filepath.Join(d, StateName), 0o644) }), ErrStateFault, 0},
 		{"state write fails", fault(func(d string) error { return os.MkdirAll(filepath.Join(d, stateTempName, "x"), 0o700) }), ErrStateFault, 0},
@@ -204,7 +210,12 @@ func TestTU08RejectionCodes(t *testing.T) {
 		{"expired and rollback", put(mf(ver(1), expiredRepl...)), ErrExpired, CodeExpired},
 		{"rollback and template_parse", func(e *env) {
 			put(mf(ver(1)))(e)
-			e.l.template = func(*Archive) error { return errors.New("stub") }
+			e.l.template = stubParse
+		}, ErrRollback, CodeRollback},
+		{"rollback and a bad template, real parse", func(e *env) {
+			arch := build(ent{name: "manifest.json", data: []byte(mf(ver(1)))}, ent{name: vhostFile, data: []byte("{{if}}")})
+			e.write("bundle/current.cbnd", arch)
+			e.write("bundle/current.sig", e.sign(arch))
 		}, ErrRollback, CodeRollback},
 		{"rotation, new key line only", transition(false), ErrBadSig, CodeBadSig},
 		{"rotation, both lines", transition(true), ErrBadSig, CodeBadSig},
