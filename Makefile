@@ -191,13 +191,16 @@ perf-inner:
 # The target makes one new directory. It sets TMPDIR and GOTMPDIR to this
 # directory. It sets GOCACHE and HOME to two directories in it. Values of
 # these variables from the caller do not apply to the run.
+# The target unsets XDG_CACHE_HOME and XDG_CONFIG_HOME.
+# Then os.UserCacheDir and os.UserConfigDir give paths in HOME.
 # A check once each second compares the size of this directory with
 # MUTATE_MAX_MIB MiB. If the size is larger, the target stops gremlins and
 # fails. The directory can grow past the limit before the run stops.
-# The target prints the largest size that this check saw, in MiB.
+# The target checks the size once more after gremlins ends. It fails if the
+# size is larger than the limit.
+# The target prints the largest size that these checks saw, in MiB.
 # The size does not include deleted files that a process still holds open.
 # It does not include files that a test writes to an absolute path.
-# It does not include files in the directory that XDG_CACHE_HOME names.
 # MUTATE_CAP and MUTATE_MAX_MIB must be positive integers (exit 2 if not).
 # The target fails (exit 1) when go is not in PATH.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
@@ -216,15 +219,18 @@ mutate:
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
 	mkdir "$$d/bin"; \
 	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
-	chmod +x "$$d/bin/go"; mkdir "$$d/home"; export MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
+	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME; export MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
 	gremlins unleash "$$PKG" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
 	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; \
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
 	wait $$g; rc=$$?; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
-	cat "$$d/out"; p=$$(cat "$$d/peak" 2>/dev/null); \
-	echo "mutate: largest size of the run directory: $$(( ($${p:-0} + 1023) / 1024 )) MiB"; \
+	s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
+	if [ "$$s" -gt "$$p" ]; then p=$$s; fi; \
+	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; fi; \
+	cat "$$d/out"; \
+	echo "mutate: largest size of the run directory: $$(( ($$p + 1023) / 1024 )) MiB"; \
 	[ -e "$$d/capped" ] && echo "mutate: go commands stopped at the time limit of $$MUTATE_CAP s: $$(wc -l <"$$d/capped")" >&2; \
 	if [ -e "$$d/full" ]; then echo "mutate FAIL: files are larger than $$MUTATE_MAX_MIB MiB" >&2; exit 1; fi; \
 	if [ "$$rc" -ne 0 ]; then echo "mutate FAIL: gremlins exited with status $$rc" >&2; exit "$$rc"; fi; \
