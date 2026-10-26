@@ -26,6 +26,7 @@ build:
 
 test:
 	$(GO) test -race ./...
+	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^TestTS25' ./internal/bundle
 
 lint:
 	@bad=$$(gofmt -l .) || { echo "gofmt: gofmt -l . failed"; exit 1; }; \
@@ -105,6 +106,7 @@ dco:
 # 07 §1 coverage gate (vacuous on internal/* in M-1; 80 % on tools/).
 coverage:
 	bash tools/coverage.sh
+	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^TestTS25' ./internal/bundle
 
 # T-U-06: write the sha256 values of the hand-written canonical text into
 # internal/event/testdata. T-U-12: write the signed note into the golden
