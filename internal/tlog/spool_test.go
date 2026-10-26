@@ -685,8 +685,8 @@ func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
 		}
 		check(t, e, err, "target down")
 	})
-	// Calls that examine the cursor of target 0: the first next, advance after
-	// the send of note 3, and the second next.
+	// Calls that examine the cursor of target 0, in order: the first next,
+	// advance, and the second next. Advance runs after the send of note 3.
 	for _, c := range []struct {
 		name string
 		call int
