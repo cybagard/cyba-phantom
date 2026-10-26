@@ -606,18 +606,19 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsBeforeTheRead(t *tes
 	if b != nil {
 		t.Errorf("Load returned %d bytes with an error", len(b))
 	}
-	// A read of the whole file allocates 32 MiB or more. A read of 64 KiB + 1
-	// byte allocates about 290 KiB in all with the race detector, and less without
-	// it. A read limit of four times the cap allocates about 630 KiB without the
-	// race detector and about 1.2 MiB with it.
+	// A read of the whole file allocates 32 MiB or more. The limit is 64 KiB +
+	// 1 byte. A Load with this limit allocates 144 to 154 KiB, and 286 to 296
+	// KiB with the race detector. A Load with a limit of twice the cap
+	// allocates 304 KiB, and 606 KiB with the race detector. The constant
+	// readAllocMax is between these two numbers for each mode.
 	n := after.TotalAlloc - before.TotalAlloc
 	t.Logf("Load allocated %d bytes", n)
-	if n > 384<<10 {
+	if n > readAllocMax {
 		t.Errorf("Load allocated %d bytes for a file that grew to 32 MiB", n)
 	}
 }
 
-func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatEvenIfOneLinkIsGoneAtTheOpen(t *testing.T) {
+func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatBeforeTheOpen(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	cache := filepath.Join(dir, "acme/cache")
@@ -664,6 +665,105 @@ func TestTS16LoadRefusesAKeyFileThatGetsASecondLinkAfterTheLstat(t *testing.T) {
 	if b != nil {
 		t.Errorf("Load returned %d bytes with an error", len(b))
 	}
+}
+
+// The hook adds a second name for the open key file after the open and before
+// Stat. Stat of the open file then shows two links. If Load called the hook
+// after Stat, it would not see the link and would return the value.
+func TestTS16LoadRefusesAKeyFileThatGetsASecondLinkAfterTheOpen(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	calls := 0
+	betweenOpenAndStat = func() {
+		calls++
+		mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
+	}
+	t.Cleanup(func() { betweenOpenAndStat = nil })
+	b, err := s.Load(ctx, "key")
+	if calls != 1 {
+		t.Errorf("the hook ran %d times, want 1", calls)
+	}
+	wantError(t, err, "load", ruleLinks)
+	if b != nil {
+		t.Errorf("Load returned %d bytes with an error", len(b))
+	}
+}
+
+// A hook does the rename of a Store at three fixed points of a Load. So the
+// test does not depend on the order of two goroutines. At each point Load
+// returns a whole value with no error:
+//   - between the Lstat and the open: the new value, after a second try;
+//   - after the open, before Stat: the old value of the open file, in one try;
+//   - before the rename, when the temporary file is written: the old value (the
+//     Load runs first, then the rename).
+//
+// After the Store returns, Load gives the new value.
+func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
+	ctx := context.Background()
+	oldValue := bytes.Repeat([]byte("o"), 1500)
+	newValue := bytes.Repeat([]byte("nm"), 2500)
+	setup := func(t *testing.T) *Store {
+		s, _ := newStore(t)
+		mustNil(t, s.Store(ctx, "kd/key", oldValue))
+		return s
+	}
+	load := func(t *testing.T, s *Store, want []byte) {
+		t.Helper()
+		if b, err := s.Load(ctx, "kd/key"); err != nil || !bytes.Equal(b, want) {
+			t.Fatalf("Load = %d bytes, %v; want the %d bytes of the whole value", len(b), err, len(want))
+		}
+	}
+
+	t.Run("rename between the Lstat and the open", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		betweenLstatAndOpen = func() {
+			if calls++; calls == 1 {
+				mustNil(t, s.Store(ctx, "kd/key", newValue))
+			}
+		}
+		t.Cleanup(func() { betweenLstatAndOpen = nil })
+		load(t, s, newValue)
+		if calls != 2 {
+			t.Errorf("the hook ran %d times, want 2", calls)
+		}
+	})
+
+	t.Run("rename after the open, before Stat", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		betweenOpenAndStat = func() {
+			if calls++; calls == 1 {
+				mustNil(t, s.Store(ctx, "kd/key", newValue))
+			}
+		}
+		t.Cleanup(func() { betweenOpenAndStat = nil })
+		load(t, s, oldValue)
+		if calls != 1 {
+			t.Errorf("the hook ran %d times, want 1", calls)
+		}
+		load(t, s, newValue)
+	})
+
+	t.Run("temporary file written, not yet renamed", func(t *testing.T) {
+		s := setup(t)
+		realRename := renameFile
+		t.Cleanup(func() { renameFile = realRename })
+		calls := 0
+		renameFile = func(r *os.Root, from, to string) error {
+			if calls++; calls == 1 {
+				load(t, s, oldValue)
+			}
+			return realRename(r, from, to)
+		}
+		mustNil(t, s.Store(ctx, "kd/key", newValue))
+		if calls != 1 {
+			t.Errorf("the rename ran %d times, want 1", calls)
+		}
+		load(t, s, newValue)
+	})
 }
 
 func TestTS16DeleteOfAKeyBelowAFileGivesNilAndTheKeyIsMissing(t *testing.T) {

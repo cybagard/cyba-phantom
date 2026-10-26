@@ -16,7 +16,9 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -188,12 +190,7 @@ func testNames(t testing.TB) *egresstest.Names {
 // test stops the cache when it ends.
 func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
-	state, err := os.OpenRoot(t.TempDir())
-	mustNil(t, err)
-	t.Cleanup(func() { state.Close() })
-	st, err := Open(state, "acme/cache")
-	mustNil(t, err)
-	t.Cleanup(func() { st.Close() })
+	st, _ := newStore(t)
 	p := ACMEParams{
 		Names:   []string{"decoy.test"},
 		CA:      "https://ca.test/dir",
@@ -299,11 +296,14 @@ func BenchmarkGetCertificateTokenKeyRefused(b *testing.B) {
 	}
 }
 
-// issuerProxyRefuses reports whether the proxy function of iss refuses a request
-// to another host, with a proxy in the environment.
+// issuerProxyRefuses reports whether the proxy function of iss refuses a
+// request to another host. It does not set a proxy in the environment.
+// net/http reads that environment one time for each process. So a test that
+// sets it depends on the order of the tests. The guard does not read the
+// environment. A guard that calls http.ProxyFromEnvironment never gives
+// errEgress, so this check returns false.
 func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 	t.Helper()
-	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
 	if iss.HTTPProxy == nil {
 		return false
 	}
@@ -314,12 +314,13 @@ func issuerProxyRefuses(t *testing.T, iss *certmagic.ACMEIssuer) bool {
 }
 
 func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
-	st, _ := newStore(t)
-	a := newTestACME(t, func(p *ACMEParams) { p.Storage = st; p.Port = 9443 })
+	// given is the store that newTestACME made.
+	var given certmagic.Storage
+	a := newTestACME(t, func(p *ACMEParams) { given = p.Storage; p.Port = 9443 })
 	cfg := a.cfg
 	wrap, _ := cfg.Storage.(*noTokenStorage)
-	if wrap == nil || wrap.Storage != certmagic.Storage(st) || len(cfg.Issuers) != 1 {
-		t.Fatalf("storage is the wrapper of the given storage: %v, issuers: %d", wrap != nil && wrap.Storage == certmagic.Storage(st), len(cfg.Issuers))
+	if wrap == nil || given == nil || wrap.Storage != given || len(cfg.Issuers) != 1 {
+		t.Fatalf("storage is the wrapper of the given storage: %v, issuers: %d", wrap != nil && wrap.Storage == given, len(cfg.Issuers))
 	}
 	iss, ok := cfg.Issuers[0].(*certmagic.ACMEIssuer)
 	if !ok {
@@ -353,9 +354,39 @@ func TestTS16ConfigHasOneIssuerForTheCA(t *testing.T) {
 	}
 }
 
+// egressGuardChildEnv tells the test binary to run the checks of the egress
+// guard test in this process.
+const egressGuardChildEnv = "PHANTOM_TEST_EGRESS_GUARD_CHILD"
+
+// TestTS16EgressGuardRefusesOtherRequests: the guard allows the CA and refuses
+// all other requests. net/http reads the proxy environment one time for each
+// process. An earlier test can make it read the environment first. Then a proxy
+// that this test sets later is not seen. So the checks run in a child process
+// of the test binary. The parent sets the proxy variables in the environment
+// of the child, and net/http reads them fresh there. In that case, a guard
+// that reads the environment gives the proxy URL, and the child fails. The
+// parent fails when the child fails, and it prints the output of the child.
+// The pattern of the child comes from the name of this test. The parent also
+// fails when the output of the child has no PASS line for this test. So a
+// child that ran no test cannot pass.
 func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "http://proxy.test:3128")
-	t.Setenv("HTTP_PROXY", "http://proxy.test:3128")
+	if os.Getenv(egressGuardChildEnv) == "" {
+		cmd := exec.Command(os.Args[0],
+			"-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1",
+			"-test.v=true")
+		cmd.Env = append(os.Environ(), egressGuardChildEnv+"=1",
+			"HTTPS_PROXY=http://proxy.test:3128", "HTTP_PROXY=http://proxy.test:3128",
+			"NO_PROXY=", "no_proxy=")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("the child process failed: %v\n%s", err, out)
+		}
+		if !bytes.Contains(out, []byte("--- PASS: "+t.Name())) {
+			t.Fatalf("the child process did not run the checks:\n%s", out)
+		}
+		t.Logf("child output:\n%s", out)
+		return
+	}
 	var mu sync.Mutex
 	var seen []string
 	a := newTestACME(t, func(p *ACMEParams) {
@@ -453,9 +484,9 @@ func TestTS16NameGateRefusesBeforeCertmagic(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -491,9 +522,9 @@ func TestTS16ACMETLSALPNForAConfiguredNameNeedsAnActiveChallenge(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -524,9 +555,9 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 	log.SetOutput(&std)
 	t.Cleanup(func() { log.SetOutput(old) })
 	var egress atomic.Int64
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
+	var cs *countingStorage
 	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		p.OnEgress = func(string) { egress.Add(1) }
@@ -789,9 +820,12 @@ func TestTS16NameGateAcceptsConfiguredNameVariants(t *testing.T) {
 }
 
 func TestTS16NameGateRefusesAByteAbove0x7f(t *testing.T) {
-	st, _ := newStore(t)
-	cs := &countingStorage{Storage: st}
-	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{"kiosk.test"}; p.Storage = cs })
+	var cs *countingStorage
+	a := newTestACME(t, func(p *ACMEParams) {
+		cs = &countingStorage{Storage: p.Storage}
+		p.Names = []string{"kiosk.test"}
+		p.Storage = cs
+	})
 	// U+212A KELVIN SIGN: a Unicode-aware ToLower maps it to "k".
 	names := []string{string(rune(0x212a)) + "iosk.test", "kiosk.testé", "\xffkiosk.test"}
 	for _, n := range names {
