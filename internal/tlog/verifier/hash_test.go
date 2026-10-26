@@ -55,11 +55,13 @@ var importAllowed = map[string]bool{
 	"strings":                     true,
 }
 
-// T-S-14: the package opens no file. The non-test files import only the
+// T-S-14: the package opens no file. The non-test .go files import only the
 // packages in importAllowed, and none of them is for files or system calls.
+// The test reads only .go files, so it does not check assembly files.
 // This is not the whole proof. The packages os, io/fs, and syscall are in the
-// dependency graph through the imports of golang.org/x/mod/sumdb/note, for
-// example fmt. So "opens no file" also rests on a review of the package code.
+// dependency graph through crypto/sha256, golang.org/x/mod/sumdb/note and
+// golang.org/x/mod/sumdb/tlog. So "opens no file" also rests on a review of
+// the package code.
 func TestTS14_NoFileImports(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	must(t, err)

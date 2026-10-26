@@ -298,7 +298,8 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 
 // spoolText returns the text of the spool errors in err, one after the other
 // with "; " between them. Each text has the relative name and the rule, with no
-// absolute path. It leaves out the errors of Send: Send logged them.
+// absolute path. It leaves out each publishError. Each error of Publisher.Send
+// has that type, and Send logs it.
 func spoolText(err error) string {
 	var texts []string
 	var walk func(error)
