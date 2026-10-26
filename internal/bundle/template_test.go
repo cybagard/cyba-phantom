@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"flag"
+	"fmt"
+	"html/template"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -16,10 +20,11 @@ var update = flag.Bool("update", false, "write the bundle fixtures into test/fix
 const fixtureDir = "../../test/fixtures/bundles"
 
 // vhostFile is the one template file of the fixtures.
-const vhostFile = "vhosts/h.example/index.html"
+const vhostFile = "vhosts/h.example/index.tmpl"
 
-// bundleFixtures makes the bytes of each fixture file. Each one has a version
-// above the running version 2, so that it passes the checks before its own.
+// bundleFixtures makes the bytes of each fixture file. Each one but
+// malformed.cbnd has a version above the running version 2, so that it passes
+// the checks before its own. malformed.cbnd has no valid manifest.
 // The files hold no signature. The tests sign them with test keys.
 func bundleFixtures() map[string][]byte {
 	page := ent{name: vhostFile, data: []byte("<p>{{.Title}}</p>\n")}
@@ -102,51 +107,172 @@ func TestTU08FixtureCodes(t *testing.T) {
 	}
 }
 
+func tf(name, text string) ent { return ent{name: name, data: []byte(text)} }
+
 // loadWith loads a signed bundle of version 3 that has these files, on a
-// running bundle. It gives the error of the load.
-func loadWith(t *testing.T, ents ...ent) error {
+// running bundle. With want set, the load must give that error through rejects,
+// and loadWith returns nil. Else it returns the accepted bundle.
+func loadWith(t *testing.T, want error, ents ...ent) *Bundle {
 	t.Helper()
 	e := running(t)
 	arch := build(append([]ent{{name: "manifest.json", data: []byte(mf(ver(3)))}}, ents...)...)
 	e.write("bundle/current.cbnd", arch)
 	e.write("bundle/current.sig", e.sign(arch))
-	_, err := e.l.Load(false)
-	return err
+	if want != nil {
+		e.rejects(e.l, false, want)
+		return nil
+	}
+	b, err := e.l.Load(false)
+	must(t, err)
+	return b
 }
 
-// T-U-08, SEC-23: a template that does not parse gives template_parse. A
-// valid template, a file outside vhosts/ and no template load.
+// T-U-08: a .tmpl file that does not parse gives template_parse. A valid
+// template, any other file, and no template load. The built-in functions of
+// text/template stay callable.
 func TestTU08TemplateParse(t *testing.T) {
-	f := func(name, text string) ent { return ent{name: name, data: []byte(text)} }
+	assets := strings.Repeat("{{", 50<<10)
 	for _, c := range []struct {
 		name string
 		ents []ent
 		want error
 	}{
-		{"syntax error", []ent{f(vhostFile, "{{if}}")}, ErrTemplateParse},
-		{"undefined function", []ent{f(vhostFile, "{{shell `id`}}")}, ErrTemplateParse},
-		{"one bad file of two", []ent{f(vhostFile, "ok"), f("vhosts/h.example/b.txt", "{{")}, ErrTemplateParse},
-		{"valid", []ent{f(vhostFile, "<p>{{.Title}}</p>")}, nil},
-		{"outside vhosts", []ent{f("traps/x.html", "{{if}}")}, nil},
+		{"syntax error", []ent{tf(vhostFile, "{{if}}")}, ErrTemplateParse},
+		{"undefined function", []ent{tf(vhostFile, "{{shell `id`}}")}, ErrTemplateParse},
+		{"one bad file of two", []ent{tf(vhostFile, "ok"), tf("vhosts/h.example/b.tmpl", "{{")}, ErrTemplateParse},
+		{"valid", []ent{tf(vhostFile, "<p>{{.Title}}</p>")}, nil},
+		{"call", []ent{tf(vhostFile, "{{call .F}}")}, nil},
+		{"printf", []ent{tf(vhostFile, `{{printf "%s" "x"}}`)}, nil},
+		{"outside vhosts", []ent{tf("traps/x.tmpl", "{{if}}")}, nil},
+		{"html asset", []ent{tf("vhosts/h.example/x.html", "{{if}}")}, nil},
+		{"upper case suffix", []ent{tf("vhosts/h.example/X.TMPL", "{{if}}")}, nil},
+		{"large asset", []ent{tf("vhosts/h.example/a.bin", assets)}, nil},
 		{"no template", nil, nil},
 	} {
+		t.Run(c.name, func(t *testing.T) { loadWith(t, c.want, c.ents...) })
+	}
+}
+
+// T-U-08: the kept set holds exactly the .tmpl files below vhosts/.
+func TestTU08KeptSet(t *testing.T) {
+	b := loadWith(t, nil, tf(vhostFile, "a"), tf("vhosts/h.example/sub/b.tmpl", "b"),
+		tf("vhosts/h.example/x.html", "{{if}}"), tf("vhosts/h.example/X.TMPL", "{{if}}"), tf("traps/t.tmpl", "t"))
+	want := []string{vhostFile, "vhosts/h.example/sub/b.tmpl"}
+	if got := slices.Sorted(maps.Keys(b.templates)); !slices.Equal(got, want) {
+		t.Errorf("kept %v; want %v", got, want)
+	}
+}
+
+// T-U-08: a kept template has the option and the function map of the
+// constructor. The test runs a copy. The loader runs no template.
+func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
+	engineFuncs["probe"] = func() string { return "ok" }
+	t.Cleanup(func() { delete(engineFuncs, "probe") })
+	b := loadWith(t, nil, tf(vhostFile, "{{probe}}"), tf("vhosts/h.example/m.tmpl", "{{.Missing}}"))
+	var sb strings.Builder
+	tp, ok := b.Template(vhostFile)
+	if !ok || tp.Execute(&sb, nil) != nil || sb.String() != "ok" {
+		t.Errorf("function map not kept: %v, %q", ok, sb.String())
+	}
+	m, _ := b.Template("vhosts/h.example/m.tmpl")
+	if err := m.Execute(io.Discard, map[string]any{}); err == nil {
+		t.Error("missingkey=error not kept")
+	}
+}
+
+// T-U-08: a caller of Template cannot change the kept template.
+func TestTU08TemplateIsACopy(t *testing.T) {
+	b := loadWith(t, nil, tf(vhostFile, "orig"))
+	c, _ := b.Template(vhostFile)
+	if c == b.templates[vhostFile] {
+		t.Fatal("Template returned the kept template")
+	}
+	_, err := c.Parse("changed")
+	must(t, err)
+	var sb strings.Builder
+	again, _ := b.Template(vhostFile)
+	must(t, again.Execute(&sb, nil))
+	if sb.String() != "orig" {
+		t.Errorf("kept template now gives %q", sb.String())
+	}
+	if _, ok := b.Template("vhosts/h.example/none.tmpl"); ok {
+		t.Error("a template that is not kept was found")
+	}
+}
+
+// parseCount parses these files and returns the number of templates that the
+// constructor made. It is the number of Parse calls.
+func parseCount(t *testing.T, ents ...ent) (int, map[string]*template.Template, error) {
+	t.Helper()
+	a, err := ReadArchive(build(ents...))
+	must(t, err)
+	n := 0
+	set, err := parseWith(a, func(name string) *template.Template { n++; return newTemplate(name) })
+	return n, set, err
+}
+
+// files makes n template files with this text.
+func files(n int, text string) []ent {
+	var out []ent
+	for i := range n {
+		out = append(out, tf(fmt.Sprintf("vhosts/h.example/%d.tmpl", i), text))
+	}
+	return out
+}
+
+// T-U-08: each cap holds at its value and refuses one byte or one "{{" more,
+// with no Parse call. The bundle caps are reached by a split over templates.
+func TestTU08TemplateCaps(t *testing.T) {
+	act := strings.Repeat("{{1}}", maxTemplateActions)
+	for _, c := range []struct {
+		name string
+		ents []ent
+		n    int // files that load at the cap
+	}{
+		{"template bytes", files(1, strings.Repeat("a", maxTemplateBytes)), 1},
+		{"template bytes, over", files(1, strings.Repeat("a", maxTemplateBytes+1)), 0},
+		{"template actions", files(1, act), 1},
+		{"template actions, over", files(1, act+"{{1}}"), 0},
+		{"bundle bytes, split", files(8, strings.Repeat("a", maxTemplateBytes)), 8},
+		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", maxTemplateBytes)), tf("vhosts/h.example/z.tmpl", "a")), 0},
+		{"bundle actions, split", files(4, act), 4},
+		{"bundle actions, split, over", append(files(4, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},
+		{"4 MiB of nested if", files(1, strings.Repeat("{{if 1}}", MaxEntryBytes/8)), 0},
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			if err := loadWith(t, c.ents...); err != c.want {
-				t.Errorf("got %v; want %v", err, c.want)
+			calls, set, err := parseCount(t, c.ents...)
+			if c.n == 0 && (err != ErrTemplateParse || calls != 0 || set != nil) {
+				t.Errorf("got %d calls, %v; want no Parse call and %v", calls, err, ErrTemplateParse)
+			}
+			if c.n > 0 && (err != nil || calls != c.n || len(set) != c.n) {
+				t.Errorf("got %d calls, %d kept, %v; want %d", calls, len(set), err, c.n)
 			}
 		})
 	}
 }
 
-// SEC-23: the parse gives the fixed error, with no template text.
+// SEC-23: the parse gives the fixed error, with no template text. The input is
+// an undefined function name, so that the error of html/template quotes it.
 func TestSEC23ParseErrorHoldsNoText(t *testing.T) {
-	err := loadWith(t, ent{name: vhostFile, data: []byte("{{" + markerData + "}}")})
+	text := "{{markerdata91c2}}"
+	if _, raw := newTemplate("x").Parse(text); raw == nil || !strings.Contains(raw.Error(), "markerdata91c2") {
+		t.Fatalf("the raw error %v does not quote the input", raw)
+	}
+	_, _, err := parseCount(t, tf(vhostFile, text))
 	if err != ErrTemplateParse || err.Error() != "bundle: template_parse" {
-		t.Errorf("got %q", err)
+		t.Errorf("parse gave %q", err)
+	}
+	e := running(t)
+	arch := build(tf("manifest.json", mf(ver(3))), tf(vhostFile, text))
+	e.write("bundle/current.cbnd", arch)
+	e.write("bundle/current.sig", e.sign(arch))
+	_, err = e.l.Load(false)
+	if err != ErrTemplateParse || err.Error() != "bundle: template_parse" || strings.Contains(err.Error(), "markerdata91c2") {
+		t.Errorf("load gave %q", err)
 	}
 }
 
-// T-U-08: the function map has the fixed list of names, and it is empty.
+// T-U-08: the function map has no names.
 func TestTU08EngineFuncKeys(t *testing.T) {
 	if keys := slices.Sorted(maps.Keys(engineFuncs)); len(keys) != 0 {
 		t.Errorf("function map keys %v; want none", keys)
@@ -156,8 +282,5 @@ func TestTU08EngineFuncKeys(t *testing.T) {
 // T-U-08: the parse does not execute a template. A template that fails when it
 // runs, with missingkey=error, loads.
 func TestTU08ParseDoesNotExecute(t *testing.T) {
-	text := "{{.Missing.Field}}{{index .A 99}}{{template \"gone\"}}"
-	if err := loadWith(t, ent{name: vhostFile, data: []byte(text)}); err != nil {
-		t.Errorf("got %v", err)
-	}
+	loadWith(t, nil, tf(vhostFile, "{{.Missing.Field}}{{index .A 99}}{{template \"gone\"}}"))
 }

@@ -3,6 +3,7 @@ package bundle
 import (
 	"crypto/sha256"
 	"errors"
+	"html/template"
 	"os"
 	"slices"
 	"strings"
@@ -40,6 +41,8 @@ type Bundle struct {
 	archive  *Archive
 	class    Class
 	expired  bool
+	// templates holds the parsed .tmpl files. No template runs at load.
+	templates map[string]*template.Template
 }
 
 // SHA256 returns the SHA-256 of the archive bytes. It is the identity of the
@@ -68,6 +71,17 @@ func (b *Bundle) File(name string) ([]byte, bool) {
 	return slices.Clone(data), ok
 }
 
+// Template returns a copy of the kept template with this archive name. A caller
+// can run the copy and cannot change the kept template.
+func (b *Bundle) Template(name string) (*template.Template, bool) {
+	t, ok := b.templates[name]
+	if !ok {
+		return nil, false
+	}
+	c, err := t.Clone()
+	return c, err == nil
+}
+
 // Loader loads the bundle at one path and holds the running bundle.
 type Loader struct {
 	state *os.Root
@@ -75,11 +89,13 @@ type Loader struct {
 	trust TrustSet
 	cur   atomic.Pointer[Bundle]
 
-	// Hooks for tests. A nil hook is off. now and decompress must not be nil.
+	// now, decompress and template are steps of the load. NewLoader sets
+	// them, and a test can replace one. now and decompress must not be nil.
+	// A nil template step keeps no template. afterRead is a hook for tests.
 	now        func() time.Time
 	decompress func([]byte) (*Archive, error)
 	afterRead  func()
-	template   func(*Archive) error
+	template   func(*Archive) (map[string]*template.Template, error)
 }
 
 // NewLoader gives a Loader for the bundle at path below the state root. The
@@ -162,10 +178,13 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 	if err != nil {
 		return nil, fixed(err)
 	}
-	if l.template != nil && l.template(arch) != nil {
-		return nil, ErrTemplateParse
+	var set map[string]*template.Template
+	if l.template != nil {
+		if set, err = l.template(arch); err != nil {
+			return nil, ErrTemplateParse
+		}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired}
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set}
 	// Record comes before Store: a failed write leaves the running bundle.
 	if err := rb.Record(m, sum, class); err != nil {
 		return nil, fixed(err)
