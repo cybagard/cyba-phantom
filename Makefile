@@ -215,9 +215,11 @@ perf-inner:
 # Before the final check and before the removal, the target makes each
 # directory in the run directory writable. It does not follow links.
 # It does not change the mode of a file.
+# It uses names relative to each directory, so a long path works.
+# It runs find with a fixed PATH. Find refuses -execdir with a relative PATH.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
-# Each signal trap first ignores these signals, so a second signal does not
-# stop the removal.
+# The cleanup ignores these four signals, also after a normal end.
+# It sends KILL to gremlins, so a signal does not stop the removal.
 # The make all target does not run this target.
 # Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
 MUTATE_CAP ?= 600
@@ -228,7 +230,7 @@ mutate:
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
 	@for v in "$$MUTATE_CAP" "$$MUTATE_MAX_MIB"; do case "$$v" in ""|0*|*[!0-9]*|???????????*) echo "mutate: MUTATE_CAP and MUTATE_MAX_MIB must be positive integers of at most 10 digits" >&2; exit 2;; esac; done
 	@d=$$(mktemp -d) || exit 1; g=; w=; \
-	trap 'kill $$g $$w 2>/dev/null; pkill -KILL -f "$$d/"; wait; find "$$d" -type d ! -perm -u=rwx -exec chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"' EXIT; \
+	trap 'trap "" HUP INT QUIT TERM; kill $$g $$w 2>/dev/null; pkill -KILL -f "$$d/"; kill -KILL $$g 2>/dev/null; wait; PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"' EXIT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 129' HUP; trap 'trap "" HUP INT QUIT TERM; exit 130' INT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 131' QUIT; trap 'trap "" HUP INT QUIT TERM; exit 143' TERM; \
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
@@ -244,7 +246,7 @@ mutate:
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
 	wait $$g; rc=$$?; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
-	find "$$d" -type d ! -perm -u=rwx -exec chmod u+rwx {} \; 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
+	PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
 	if [ "$$s" -gt "$$p" ]; then p=$$s; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; fi; \
 	cat "$$d/out"; [ -z "$$(tail -c 1 "$$d/out")" ] || echo; \
