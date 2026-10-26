@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"errors"
@@ -34,18 +33,22 @@ type env struct {
 	n     atomic.Int32
 }
 
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{t: t, state: t.TempDir()}
 	for _, d := range []string{"bundle", "keys", "tlog"} {
-		if err := os.Mkdir(filepath.Join(e.state, d), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.Mkdir(filepath.Join(e.state, d), 0o700))
 	}
 	var err error
-	if e.root, err = os.OpenRoot(e.state); err != nil {
-		t.Fatal(err)
-	}
+	e.root, err = os.OpenRoot(e.state)
+	must(t, err)
 	t.Cleanup(func() { e.root.Close() })
 	var tk, ref TrustKey
 	e.priv, tk = testKey(1, "k1")
@@ -81,9 +84,7 @@ func (e *env) sign(arch []byte) []byte {
 
 func (e *env) write(rel string, b []byte) {
 	e.t.Helper()
-	if err := os.WriteFile(filepath.Join(e.state, rel), b, 0o600); err != nil {
-		e.t.Fatal(err)
-	}
+	must(e.t, os.WriteFile(filepath.Join(e.state, rel), b, 0o600))
 }
 
 // install writes a signed bundle with this manifest as rel.cbnd and rel.sig.
@@ -100,9 +101,8 @@ func running(t *testing.T) *env {
 	t.Helper()
 	e := newEnv(t)
 	e.install("bundle/current", mf(ver(2)))
-	if _, err := e.l.Load(false); err != nil {
-		t.Fatal(err)
-	}
+	_, err := e.l.Load(false)
+	must(t, err)
 	return e
 }
 
@@ -110,25 +110,15 @@ func running(t *testing.T) *env {
 func dirListing(t *testing.T, dir string) string {
 	t.Helper()
 	var sb strings.Builder
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	must(t, filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(&sb, "%s %d %v %d", p, fi.Size(), fi.Mode(), fi.ModTime().UnixNano())
-		if fi.Mode().IsRegular() {
-			b, _ := os.ReadFile(p)
-			fmt.Fprintf(&sb, " %x", sha256.Sum256(b))
-		}
-		sb.WriteByte('\n')
+		fi, _ := d.Info()
+		b, _ := os.ReadFile(p)
+		fmt.Fprintf(&sb, "%s %d %v %d %x\n", p, fi.Size(), fi.Mode(), fi.ModTime().UnixNano(), sha256.Sum256(b))
 		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}))
 	return sb.String()
 }
 
@@ -147,12 +137,21 @@ func (e *env) rejects(l *Loader, start bool, want error) int32 {
 	return e.n.Load() - n
 }
 
-// T-U-08: each code that the load path gives. The error is a fixed value, and
-// the running bundle, the directory and the version state do not change.
+// T-U-08: each code is a fixed error, and nothing on disk or in memory changes.
+// When two checks fail, the first check of the order gives the code.
 func TestTU08RejectionCodes(t *testing.T) {
-	bad := func(e *env, arch, sig []byte) {
-		e.write("bundle/current.cbnd", arch)
-		e.write("bundle/current.sig", sig)
+	put := func(m string) func(e *env) { return func(e *env) { e.install("bundle/current", m) } }
+	badSig := func(arch []byte) func(e *env) {
+		return func(e *env) {
+			e.write("bundle/current.cbnd", arch)
+			e.write("bundle/current.sig", []byte(sigRow("k1", make([]byte, 64))))
+		}
+	}
+	fault := func(f func(dir string) error) func(e *env) {
+		return func(e *env) {
+			put(mf(ver(3)))(e)
+			must(e.t, f(filepath.Join(e.state, "bundle")))
+		}
 	}
 	cases := []struct {
 		name  string
@@ -160,65 +159,42 @@ func TestTU08RejectionCodes(t *testing.T) {
 		want  error
 		code  Code
 	}{
-		{"archive_invalid", func(e *env) { bad(e, []byte("not gzip"), e.sign([]byte("not gzip"))) }, ErrArchiveInvalid, CodeArchiveInvalid},
-		{"bad_sig", func(e *env) {
-			e.install("bundle/current", mf(ver(3)))
-			e.write("bundle/current.sig", []byte(sigRow("k1", make([]byte, 64))))
-		}, ErrBadSig, CodeBadSig},
-		{"manifest_invalid", func(e *env) { e.install("bundle/current", "{}") }, ErrManifestInvalid, CodeManifestInvalid},
-		{"min_engine", func(e *env) { e.install("bundle/current", mf(ver(3), engineRepl...)) }, ErrMinEngine, CodeMinEngine},
-		{"expired", func(e *env) { e.install("bundle/current", mf(ver(3), expiredRepl...)) }, ErrExpired, CodeExpired},
-		{"rollback", func(e *env) { e.install("bundle/current", mf(ver(1))) }, ErrRollback, CodeRollback},
+		{"archive_invalid", func(e *env) {
+			e.write("bundle/current.cbnd", []byte("not gzip"))
+			e.write("bundle/current.sig", e.sign([]byte("not gzip")))
+		}, ErrArchiveInvalid, CodeArchiveInvalid},
+		{"bad_sig", badSig(build(ent{name: "manifest.json", data: []byte(mf(ver(3)))})), ErrBadSig, CodeBadSig},
+		{"bad_sig, bomb", badSig(gz(zeros(16 << 20))), ErrBadSig, CodeBadSig},
+		{"bad_sig, not a tar", badSig(gz([]byte("not a tar"))), ErrBadSig, CodeBadSig},
+		{"manifest_invalid", put("{}"), ErrManifestInvalid, CodeManifestInvalid},
+		{"min_engine", put(mf(ver(3), engineRepl...)), ErrMinEngine, CodeMinEngine},
+		{"expired", put(mf(ver(3), expiredRepl...)), ErrExpired, CodeExpired},
+		{"rollback", put(mf(ver(1))), ErrRollback, CodeRollback},
 		{"rollback, reference key", func(e *env) {
 			arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3), `"k1"`, `"k2"`))})
-			bad(e, arch, []byte(sigRow("k2", ed25519.Sign(e.priv2, SigMessage(arch)))))
+			e.write("bundle/current.cbnd", arch)
+			e.write("bundle/current.sig", []byte(sigRow("k2", ed25519.Sign(e.priv2, SigMessage(arch)))))
 		}, ErrRollback, CodeRollback},
 		{"template_parse", func(e *env) {
-			e.install("bundle/current", mf(ver(3)))
+			put(mf(ver(3)))(e)
 			e.l.template = func(*Archive) error { return errors.New("stub") }
 		}, ErrTemplateParse, CodeTemplateParse},
-		{"state fault", func(e *env) {
-			e.install("bundle/current", mf(ver(3)))
-			if err := os.Chmod(filepath.Join(e.state, "bundle", StateName), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}, ErrStateFault, 0},
-		{"state write fails", func(e *env) {
-			e.install("bundle/current", mf(ver(3)))
-			tmp := filepath.Join(e.state, "bundle", stateTempName)
-			if err := os.MkdirAll(filepath.Join(tmp, "x"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}, ErrStateFault, 0},
+		{"state fault", fault(func(d string) error { return os.Chmod(filepath.Join(d, StateName), 0o644) }), ErrStateFault, 0},
+		{"state write fails", fault(func(d string) error { return os.MkdirAll(filepath.Join(d, stateTempName, "x"), 0o700) }), ErrStateFault, 0},
+		{"key_id and min_engine", put(mf(ver(3), append([]string{`"k1"`, `"k2"`}, engineRepl...)...)), ErrBadSig, CodeBadSig},
+		{"min_engine and expired", put(mf(ver(3), append(engineRepl, expiredRepl...)...)), ErrMinEngine, CodeMinEngine},
+		{"expired and rollback", put(mf(ver(1), expiredRepl...)), ErrExpired, CodeExpired},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := running(t)
 			c.setup(e)
-			e.rejects(e.l, false, c.want)
+			if n := e.rejects(e.l, false, c.want); n != 0 && strings.HasPrefix(c.name, "bad_sig") {
+				t.Errorf("%d decompress calls", n)
+			}
 			if code, ok := CodeOf(c.want); code != c.code || ok != (c.code != 0) {
 				t.Errorf("code %v, %v", code, ok)
 			}
-		})
-	}
-}
-
-// T-U-08: when two checks fail, the first check of the order gives the code.
-func TestTU08FirstFailureGivesTheCode(t *testing.T) {
-	cases := []struct {
-		name string
-		m    string
-		want error
-	}{
-		{"key_id and min_engine", mf(ver(3), append([]string{`"k1"`, `"k2"`}, engineRepl...)...), ErrBadSig},
-		{"min_engine and expired", mf(ver(3), append(engineRepl, expiredRepl...)...), ErrMinEngine},
-		{"expired and rollback", mf(ver(1), expiredRepl...), ErrExpired},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			e := running(t)
-			e.install("bundle/current", c.m)
-			e.rejects(e.l, false, c.want)
 		})
 	}
 }
@@ -246,9 +222,7 @@ func TestTS20FileRules(t *testing.T) {
 		for _, v := range variants {
 			t.Run(f.name+" "+v.name, func(t *testing.T) {
 				e := running(t)
-				if err := v.fn(filepath.Join(e.state, "bundle", f.name), f.max); err != nil {
-					t.Fatal(err)
-				}
+				must(t, v.fn(filepath.Join(e.state, "bundle", f.name), f.max))
 				if n := e.rejects(e.l, false, ErrArchiveInvalid); n != 0 {
 					t.Errorf("%d decompress calls", n)
 				}
@@ -258,33 +232,25 @@ func TestTS20FileRules(t *testing.T) {
 }
 
 // T-S-20: a file of another owner is refused. The hook marks one inode as
-// owned by another user, so the test runs as any user.
-func TestTS20OtherOwnerIsRefusedByHook(t *testing.T) {
+// owned by another user, so it runs as any user. The chown case needs root.
+func TestTS20OtherOwnerIsRefused(t *testing.T) {
 	for _, name := range []string{"current.cbnd", "current.sig"} {
-		t.Run(name, func(t *testing.T) {
+		t.Run("hook "+name, func(t *testing.T) {
 			e := running(t)
 			fi, err := os.Stat(filepath.Join(e.state, "bundle", name))
-			if err != nil {
-				t.Fatal(err)
-			}
+			must(t, err)
 			id, _ := safefile.Identity(fi)
 			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
 			e.rejects(e.l, false, ErrArchiveInvalid)
 		})
-	}
-}
-
-// T-S-20: a file that another user owns is refused. The test needs root.
-func TestTS20OtherOwnerIsRefused(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("the test must run as root to change the owner of a file")
-	}
-	for _, name := range []string{"current.cbnd", "current.sig"} {
-		e := running(t)
-		if err := os.Chown(filepath.Join(e.state, "bundle", name), 12345, -1); err != nil {
-			t.Fatal(err)
-		}
-		e.rejects(e.l, false, ErrArchiveInvalid)
+		t.Run("chown "+name, func(t *testing.T) {
+			if os.Geteuid() != 0 {
+				t.Skip("the test must run as root to change the owner of a file")
+			}
+			e := running(t)
+			must(t, os.Chown(filepath.Join(e.state, "bundle", name), 12345, -1))
+			e.rejects(e.l, false, ErrArchiveInvalid)
+		})
 	}
 }
 
@@ -301,68 +267,41 @@ func TestTS20DirectoryPartsAreRefused(t *testing.T) {
 		{"b3", "../" + filepath.Base(e.state) + "/keys", "b3/x.cbnd"},
 		{"bundle/sub", "../keys", "bundle/sub/x.cbnd"},
 	} {
-		if err := os.Symlink(c[1], filepath.Join(e.state, c[0])); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.Symlink(c[1], filepath.Join(e.state, c[0])))
 		if n := e.rejects(e.loader(c[2]), false, ErrArchiveInvalid); n != 0 {
 			t.Errorf("%s: %d decompress calls", c[2], n)
 		}
 	}
 }
 
-// T-S-20: a bad signature is checked before the decompress step. A gzip bomb
-// and a gzip stream that is not a tar give bad_sig, and nothing decompresses.
-func TestTS20BadSigBeforeDecompress(t *testing.T) {
-	for name, arch := range map[string][]byte{"bomb": gz(zeros(16 << 20)), "not a tar": gz([]byte("not a tar"))} {
-		t.Run(name, func(t *testing.T) {
-			e := running(t)
-			e.write("bundle/current.cbnd", arch)
-			e.write("bundle/current.sig", []byte(sigRow("k1", make([]byte, 64))))
-			if n := e.rejects(e.l, false, ErrBadSig); n != 0 {
-				t.Errorf("%d decompress calls", n)
-			}
-		})
-	}
-}
-
-// T-S-20: a file that changes after the read does not change the bundle. The
-// accepted bundle is the one that the loader read.
+// T-S-20: a file that changes after the read does not change the bundle.
 func TestTS20FileChangedAfterRead(t *testing.T) {
 	e := newEnv(t)
 	sum := e.install("bundle/current", mf(ver(1)))
 	e.l.afterRead = func() { e.install("bundle/current", mf(ver(2))) }
 	b, err := e.l.Load(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	if b.SHA256() != sum || b.Manifest().Version != ver(1) || e.l.Current() != b {
 		t.Errorf("accepted %x version %s", b.SHA256(), b.Manifest().Version)
 	}
 }
 
-// T-S-20: a signed bundle file at the cap that holds many empty gzip members
-// loads with one result. The test logs its wall time.
+// T-S-20: a signed bundle at the cap with many empty gzip members loads. The
+// test logs its wall time.
 func TestTS20ManyGzipMembers(t *testing.T) {
 	e := newEnv(t)
-	first := build(ent{name: "manifest.json", data: []byte(mf(ver(1)))})
-	var empty bytes.Buffer
-	if err := gzip.NewWriter(&empty).Close(); err != nil {
-		t.Fatal(err)
-	}
-	arch := append(first, bytes.Repeat(empty.Bytes(), (MaxBundleBytes-len(first))/empty.Len())...)
+	first, empty := build(ent{name: "manifest.json", data: []byte(mf(ver(1)))}), gz(nil)
+	arch := append(first, bytes.Repeat(empty, (MaxBundleBytes-len(first))/len(empty))...)
 	e.write("bundle/current.cbnd", arch)
 	e.write("bundle/current.sig", e.sign(arch))
 	begin := time.Now()
 	_, err := e.l.Load(false)
 	t.Logf("wall time %v for %d bytes", time.Since(begin), len(arch))
-	if err != nil {
-		t.Errorf("got %v", err)
-	}
+	must(t, err)
 }
 
-// T-S-20: at start, the accepted bundle loads after its expiry time and the
-// result says so. Another expired bundle, and a load that is not at start,
-// give expired.
+// T-S-20: at start, the accepted bundle loads after its expiry and says so.
+// A new expired bundle, and a load not at start, give expired.
 func TestTS20ExpiredBundleAtStart(t *testing.T) {
 	e := running(t)
 	e.l.now = func() time.Time { return testNow.AddDate(2, 0, 0) }
@@ -379,38 +318,30 @@ func TestTS20ExpiredBundleAtStart(t *testing.T) {
 func TestTU08ReadersSeeWholeBundles(t *testing.T) {
 	e := newEnv(t)
 	const gens = 8
-	type want struct {
-		sum      [32]byte
-		manifest string
-	}
-	wants := map[string]want{}
+	sums := map[string][32]byte{}
 	for i := 1; i <= gens; i++ {
-		m := mf(ver(i))
-		wants[ver(i)] = want{e.install(fmt.Sprintf("bundle/g%d", i), m), m}
+		sums[ver(i)] = e.install(fmt.Sprintf("bundle/g%d", i), mf(ver(i)))
 	}
 	e.l = e.loader("bundle/g1.cbnd")
-	if _, err := e.l.Load(false); err != nil {
-		t.Fatal(err)
-	}
+	_, err := e.l.Load(false)
+	must(t, err)
 	var stop atomic.Bool
 	var ready, done sync.WaitGroup
 	for range 4 {
 		ready.Add(1)
-		done.Add(1)
-		go func() {
-			defer done.Done()
+		done.Go(func() {
 			for first := true; first || !stop.Load(); first = false {
 				b := e.l.Current()
-				w := wants[b.Manifest().Version]
+				v := b.Manifest().Version
 				raw, _ := b.File("manifest.json")
-				if b.SHA256() != w.sum || string(raw) != w.manifest {
+				if b.SHA256() != sums[v] || string(raw) != mf(v) {
 					t.Errorf("mixed bundle: version %s", b.Manifest().Version)
 				}
 				if first {
 					ready.Done()
 				}
 			}
-		}()
+		})
 	}
 	ready.Wait()
 	for i := 2; i <= gens; i++ {
@@ -423,8 +354,8 @@ func TestTU08ReadersSeeWholeBundles(t *testing.T) {
 	done.Wait()
 }
 
-// T-U-08: two loads never run together. Loaders for bundles of rising versions
-// load at the same time. The version state holds the highest version.
+// T-U-08: two loads never run together. Loaders for rising versions load at
+// once, and the version state holds the highest version.
 func TestTU08LoadsAreSerialized(t *testing.T) {
 	e := newEnv(t)
 	const k = 6
@@ -435,19 +366,15 @@ func TestTU08LoadsAreSerialized(t *testing.T) {
 		e.install(fmt.Sprintf("bundle/b%d", i), mf(ver(i+1)))
 		l := e.loader(fmt.Sprintf("bundle/b%d.cbnd", i))
 		l.afterRead = runtime.Gosched
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_, errs[i] = l.Load(false)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
 	dir, err := e.root.OpenRoot("bundle")
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	defer dir.Close()
 	st, err := readState(dir)
 	if err != nil || st.Version != ver(k) || errs[k-1] != nil {

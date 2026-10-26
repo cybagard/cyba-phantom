@@ -98,10 +98,7 @@ func (l *Loader) Current() *Bundle { return l.cur.Load() }
 // templates. The first failed check gives the one error. A rejected bundle
 // changes no file and not the running bundle. start is true for the load at
 // start: an accepted bundle that expired then loads, and Expired is true.
-//
-// The errors are the fixed errors of this package: the errors with a code, and
-// ErrStateFault. A failed write of the state is ErrStateFault. No error holds
-// a path or a byte of the files.
+// The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	loadMu.Lock()
 	defer loadMu.Unlock()
