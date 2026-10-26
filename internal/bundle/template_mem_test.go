@@ -21,7 +21,7 @@ const (
 	ts25HWMMax   = 140_000_000
 	ts25KeptMax  = 56 << 20
 	ts25ParseMax = 5 * time.Second
-	ts25Held     = 16 << 20 // the file bytes and the running bundle
+	ts25Held     = 16 << 20 // file bytes and bytes of the bundle that runs
 	ts25GC       = 50
 	ts25Limit    = 256 << 20
 	ts25MixSmall = 1023 // templates of one action before the last template
@@ -35,6 +35,9 @@ const (
 	ts25TmplActs    = 2048
 	ts25BundleBytes = 524288
 	ts25BundleActs  = 16384
+	// The numbers of T-S-25 and the archive caps, not the code constants.
+	ts25EntryBytes   = 4 << 20
+	ts25DecodedBytes = 8 << 20
 )
 
 // ts25Splits are the numbers of templates, with the size and the "{{" count of
@@ -85,7 +88,8 @@ func ts25Parens(n int) string {
 	return "{{" + strings.Repeat("(", d) + "1" + strings.Repeat(" ", (n-5)%2) + strings.Repeat(")", d) + "}}"
 }
 
-// ts25ParensFill is actions of depth 9 999 and one last action for the rest.
+// ts25ParensFill is actions of depth 9 999 and two last actions for the rest.
+// The last two can be shallower when the rest is small.
 func ts25ParensFill(size int) string {
 	var b strings.Builder
 	for size > 0 {
@@ -153,7 +157,7 @@ func ts25Shapes() []ts25Shape {
 }
 
 // ts25Case kinds: "balanced" parses. "open" has no {{end}}, so the parse gives
-// an error after at least one constructor call. "over" is refused by a cap
+// an error after at least one constructor call. A cap refuses an "over" case
 // before the first constructor call.
 type ts25Case struct {
 	name  string
@@ -225,7 +229,7 @@ func ts25Cases() []ts25Case {
 		}
 	}
 	deep := ts25Parens(ts25MaxParen)
-	for _, m := range []struct{ name, open string }{{"mix_if", "{{if 1}}"}, {"mix_range", "{{range 1}}"}} {
+	for _, m := range []struct{ name, open string }{{"mix_if", "{{if 1}}"}, {"mix_range", "{{range 1}}"}, {"mix_with", "{{with 1}}"}} {
 		out = append(out, ts25Mix(m.name, "open", ts25TmplActs,
 			ts25Pad(strings.Repeat(m.open, ts25TmplActs-1)+deep, ts25TmplBytes)))
 	}
@@ -245,7 +249,7 @@ func ts25Cases() []ts25Case {
 		{"over_bundle_actions", func() []string {
 			return append(slices.Repeat([]string{act}, ts25BundleActs/ts25TmplActs), "{{1}}")
 		}},
-		{"nested_if_4MiB", func() []string { return []string{strings.Repeat("{{if 1}}", MaxEntryBytes/8)} }},
+		{"nested_if_4MiB", func() []string { return []string{strings.Repeat("{{if 1}}", ts25EntryBytes/8)} }},
 	} {
 		out = append(out, ts25Case{name: o.name, kind: "over", texts: o.texts})
 	}
@@ -270,6 +274,9 @@ func TestTS25CapConstants(t *testing.T) {
 		{"maxTemplateActions", maxTemplateActions, ts25TmplActs},
 		{"maxBundleBytes", maxBundleBytes, ts25BundleBytes},
 		{"maxBundleActions", maxBundleActions, ts25BundleActs},
+		{"MaxEntryBytes", MaxEntryBytes, ts25EntryBytes},
+		{"MaxDecodedBytes", MaxDecodedBytes, ts25DecodedBytes},
+		{"ts25Depth", ts25Depth, 9999},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s is %d; SEC-29 has %d", c.name, c.got, c.want)
@@ -349,8 +356,8 @@ func TestTS25TemplateParseMemory(t *testing.T) {
 	}
 }
 
-// TestTS25Child is the child process of one case. It skips unless
-// PHANTOM_TS25_CASE and the marker, which only the parent sets, are present.
+// TestTS25Child is the child process of one case. It skips if
+// PHANTOM_TS25_CASE or the marker is not set. Only the parent sets them.
 func TestTS25Child(t *testing.T) {
 	name := os.Getenv(ts25Env)
 	if name == "" || os.Getenv(ts25Marker) == "" {
@@ -395,7 +402,7 @@ func ts25Archive(texts []string) (*Archive, []byte) {
 		a.names = append(a.names, n)
 		total += len(s)
 	}
-	a.files["assets/fill.bin"] = bytes.Repeat([]byte("x"), MaxDecodedBytes-total)
+	a.files["assets/fill.bin"] = bytes.Repeat([]byte("x"), ts25DecodedBytes-total)
 	a.names = append(a.names, "assets/fill.bin")
 	slices.Sort(a.names)
 	return a, bytes.Repeat([]byte("y"), ts25Held)
