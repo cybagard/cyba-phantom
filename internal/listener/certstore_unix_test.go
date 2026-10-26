@@ -12,8 +12,12 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 func TestTS16NewFilesAreMode0600AndNewDirectoriesMode0700(t *testing.T) {
@@ -298,6 +302,10 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 			_, err := s.Load(ctx, "kd/key")
 			noMarker(t, err, "kd/key")
 			noMarker(t, s.Store(ctx, "kd/key2", nil), "kd/key2")
+			noMarker(t, s.Store(ctx, "kd/sub/key", nil), "kd/sub/key")
+			if _, err := os.Lstat(filepath.Join(cache, "kd/sub")); err == nil {
+				t.Error("Store made a directory inside a refused directory")
+			}
 			mustNil(t, os.Chmod(p, 0o700))
 		}
 	}
@@ -345,19 +353,26 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 
 // setOtherOwner makes the hook give another owner to the file or directory at
 // the host path p, and to no other inode. The hook stays until the test ends or
-// the next call.
+// the next call. A later call changes the inode, as one hook set is active.
 func setOtherOwner(t *testing.T, p string) {
 	t.Helper()
 	fi, err := os.Lstat(p)
 	mustNil(t, err)
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	id, ok := safefile.Identity(fi)
 	if !ok {
-		t.Fatalf("no Stat_t for %s", p)
+		t.Fatalf("no file identity for %s", p)
 	}
-	dev, ino := uint64(st.Dev), uint64(st.Ino)
-	otherOwner = func(d, i uint64) bool { return d == dev && i == ino }
-	t.Cleanup(func() { otherOwner = nil })
+	if otherOwnerID.Swap(&id) == nil {
+		safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(f safefile.FileID) bool {
+			o := otherOwnerID.Load()
+			return o != nil && *o == f
+		}})
+		t.Cleanup(func() { otherOwnerID.Store(nil) })
+	}
 }
+
+// otherOwnerID is the file that setOtherOwner gives another owner.
+var otherOwnerID atomic.Pointer[safefile.FileID]
 
 // A check is not enough if the directory changes after it. These tests change
 // the directory between two calls and between Open and the first call.
@@ -412,14 +427,13 @@ func TestTS16OpenRefusesADirectorySwappedForALinkAfterTheCheck(t *testing.T) {
 	other := filepath.Join(dir, "acme/other")
 	mustNil(t, os.Mkdir(other, 0o700))
 	cache := filepath.Join(dir, "acme/cache")
-	betweenCheckAndOpen = func(part string) {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(part string) {
 		if part != "cache" {
 			return
 		}
 		mustNil(t, os.Rename(cache, cache+"-real"))
 		mustNil(t, os.Symlink("other", cache))
-	}
-	t.Cleanup(func() { betweenCheckAndOpen = nil })
+	}})
 	s, err := Open(state, "acme/cache")
 	if err == nil {
 		// If Open accepted the link, this Store would reach the other directory.
@@ -441,14 +455,13 @@ func TestTS16OpenRefusesAParentSwappedForALinkAfterTheCheck(t *testing.T) {
 	// that passes every check, so only the link shows the swap.
 	other := filepath.Join(dir, "other")
 	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
-	betweenCheckAndOpen = func(part string) {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(part string) {
 		if part != "acme" {
 			return
 		}
 		mustNil(t, os.Rename(filepath.Join(dir, "acme"), filepath.Join(dir, "acme-real")))
 		mustNil(t, os.Symlink("other", filepath.Join(dir, "acme")))
-	}
-	t.Cleanup(func() { betweenCheckAndOpen = nil })
+	}})
 	s, err := Open(state, "acme/cache")
 	if err == nil {
 		// If Open accepted the link, this Store would reach the other directory.
@@ -471,14 +484,13 @@ func TestTS16OpenUsesTheDirectoryThatItOpenedForEarlierPartsWhenAParentChanges(t
 	// The hook swaps acme for a link to it before the check of cache.
 	other := filepath.Join(dir, "other")
 	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
-	beforeCheck = func(part string) {
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(part string) {
 		if part != "cache" {
 			return
 		}
 		mustNil(t, os.Rename(filepath.Join(dir, "acme"), filepath.Join(dir, "acme-real")))
 		mustNil(t, os.Symlink("other", filepath.Join(dir, "acme")))
-	}
-	t.Cleanup(func() { beforeCheck = nil })
+	}})
 	s, err := Open(state, "acme/cache")
 	mustNil(t, err)
 	defer s.Close()
@@ -488,6 +500,30 @@ func TestTS16OpenUsesTheDirectoryThatItOpenedForEarlierPartsWhenAParentChanges(t
 	}
 	if names, err := os.ReadDir(filepath.Join(other, "cache")); err != nil || len(names) != 0 {
 		t.Errorf("the other cache directory has %d names, %v; want none", len(names), err)
+	}
+}
+
+// The hook puts a new directory in place of the cache directory before the
+// check. Open checks the new one. At a later position, Open refuses it.
+func TestTS16OpenChecksTheDirectoryThatIsThereAtTheCheck(t *testing.T) {
+	dir := t.TempDir()
+	state, err := os.OpenRoot(dir)
+	mustNil(t, err)
+	defer state.Close()
+	cache := filepath.Join(dir, "acme/cache")
+	mustNil(t, os.MkdirAll(cache, 0o700))
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(part string) {
+		if part == "cache" {
+			mustNil(t, os.Rename(cache, cache+"-old"))
+			mustNil(t, os.Mkdir(cache, 0o700))
+		}
+	}})
+	s, err := Open(state, "acme/cache")
+	mustNil(t, err)
+	defer s.Close()
+	mustNil(t, s.Store(context.Background(), "key", []byte("v")))
+	if _, err := os.Lstat(filepath.Join(cache, "key")); err != nil {
+		t.Errorf("the new cache directory has no key file: %v", err)
 	}
 }
 
@@ -545,13 +581,12 @@ func TestTS16LoadDoesNotReturnTheBytesOfAnotherKeyWhenALinkReplacesTheKeyFile(t 
 	mustNil(t, s.Store(ctx, "key", []byte("own value")))
 	mustNil(t, s.Store(ctx, "other-key", []byte("value of another key")))
 	calls := 0
-	betweenLstatAndOpen = func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
 		if calls++; calls == 1 {
 			mustNil(t, os.Remove(filepath.Join(cache, "key")))
 			mustNil(t, os.Symlink("other-key", filepath.Join(cache, "key")))
 		}
-	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	}})
 	b, err := s.Load(ctx, "key")
 	if calls < 1 {
 		t.Errorf("the hook ran %d times, want 1 or more", calls)
@@ -569,14 +604,13 @@ func TestTS16LoadGivesTheChangedRuleWhenEveryTryFindsAnotherFile(t *testing.T) {
 	cache := filepath.Join(dir, "acme/cache")
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
 	calls := 0
-	betweenLstatAndOpen = func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
 		// A new file with its own inode replaces the key file at each try.
 		calls++
 		tmp := filepath.Join(cache, ".tmp-replace")
 		mustNil(t, os.WriteFile(tmp, []byte("v"), 0o600))
 		mustNil(t, os.Rename(tmp, filepath.Join(cache, "key")))
-	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	}})
 	b, err := s.Load(ctx, "key")
 	wantError(t, err, "load", ruleChanged)
 	if b != nil {
@@ -627,11 +661,10 @@ func TestTS16LoadRefusesAKeyFileWithTwoLinksAtTheLstatBeforeTheOpen(t *testing.T
 	// If Load went on to the open, the hook would remove the second name, and the
 	// open file would have one link.
 	calls := 0
-	betweenLstatAndOpen = func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
 		calls++
 		mustNil(t, os.Remove(filepath.Join(cache, "second-name")))
-	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	}})
 	b, err := s.Load(ctx, "key")
 	// Load refuses at the Lstat, so it stops before the point where it calls the
 	// hook.
@@ -652,11 +685,10 @@ func TestTS16LoadRefusesAKeyFileThatGetsASecondLinkAfterTheLstat(t *testing.T) {
 	// The key file has one link at the Lstat. The hook makes a second name for the
 	// same file, so the open file has two links.
 	calls := 0
-	betweenLstatAndOpen = func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
 		calls++
 		mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
-	}
-	t.Cleanup(func() { betweenLstatAndOpen = nil })
+	}})
 	b, err := s.Load(ctx, "key")
 	if calls != 1 {
 		t.Errorf("the hook ran %d times, want 1", calls)
@@ -676,11 +708,10 @@ func TestTS16LoadRefusesAKeyFileThatGetsASecondLinkAfterTheOpen(t *testing.T) {
 	cache := filepath.Join(dir, "acme/cache")
 	mustNil(t, s.Store(ctx, "key", []byte("v")))
 	calls := 0
-	betweenOpenAndStat = func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(string) {
 		calls++
 		mustNil(t, os.Link(filepath.Join(cache, "key"), filepath.Join(cache, "second-name")))
-	}
-	t.Cleanup(func() { betweenOpenAndStat = nil })
+	}})
 	b, err := s.Load(ctx, "key")
 	if calls != 1 {
 		t.Errorf("the hook ran %d times, want 1", calls)
@@ -719,12 +750,30 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 	t.Run("rename between the Lstat and the open", func(t *testing.T) {
 		s := setup(t)
 		calls := 0
-		betweenLstatAndOpen = func() {
-			if calls++; calls == 1 {
-				mustNil(t, s.Store(ctx, "kd/key", newValue))
+		safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+			if name == "key" {
+				if calls++; calls == 1 {
+					mustNil(t, s.Store(ctx, "kd/key", newValue))
+				}
 			}
+		}})
+		load(t, s, newValue)
+		if calls != 2 {
+			t.Errorf("the hook ran %d times, want 2", calls)
 		}
-		t.Cleanup(func() { betweenLstatAndOpen = nil })
+	})
+
+	// The first BeforeCheck call for the key is from Open, after Load checked.
+	t.Run("rename between the Lstat of Load and the open", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+			if name == "key" {
+				if calls++; calls == 1 {
+					mustNil(t, s.Store(ctx, "kd/key", newValue))
+				}
+			}
+		}})
 		load(t, s, newValue)
 		if calls != 2 {
 			t.Errorf("the hook ran %d times, want 2", calls)
@@ -734,12 +783,13 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 	t.Run("rename after the open, before Stat", func(t *testing.T) {
 		s := setup(t)
 		calls := 0
-		betweenOpenAndStat = func() {
-			if calls++; calls == 1 {
-				mustNil(t, s.Store(ctx, "kd/key", newValue))
+		safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(name string) {
+			if name == "key" {
+				if calls++; calls == 1 {
+					mustNil(t, s.Store(ctx, "kd/key", newValue))
+				}
 			}
-		}
-		t.Cleanup(func() { betweenOpenAndStat = nil })
+		}})
 		load(t, s, oldValue)
 		if calls != 1 {
 			t.Errorf("the hook ran %d times, want 1", calls)
@@ -951,7 +1001,8 @@ type badKeyFile struct {
 
 // badKeyFiles makes four key files that Load refuses. Two are the names of a file
 // with a second hard link in the cache ("inside" and "hl-inside"). One is a hard
-// link to the outside file. One is a file with mode 0644.
+// link to the outside file. The hook gives it another owner too, and the link
+// rule comes first. One is a file with mode 0644.
 func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
 	t.Helper()
 	cache := filepath.Join(dir, "acme/cache")
@@ -960,6 +1011,7 @@ func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
 	mustNil(t, os.Link(target, filepath.Join(cache, "hl-outside")))
 	mustNil(t, s.Store(context.Background(), "wide", []byte("v")))
 	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o644))
+	setOtherOwner(t, filepath.Join(cache, "hl-outside"))
 	return []badKeyFile{{"inside", ruleLinks}, {"hl-inside", ruleLinks}, {"hl-outside", ruleLinks}, {"wide", ruleFileMode}}
 }
 
@@ -1202,4 +1254,114 @@ func TestTS16ErrorsNeverHoldKeyMarkerBytes(t *testing.T) {
 	noMarker(t, err, "marker")
 	_, err = s.List(ctx, "dirkey", true)
 	noMarker(t, err, "marker")
+}
+
+// A directory with mode 0777 replaces a key directory after the check.
+func TestTS16LeftoverWalkSkipsADirectorySwappedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	mustNil(t, s.Store(context.Background(), "kd/key", []byte("v")))
+	kd := filepath.Join(dir, "acme/cache/kd")
+	fi, err := os.Lstat(kd)
+	mustNil(t, err)
+	id, _ := safefile.Identity(fi)
+	swapped := false
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(f safefile.FileID) bool {
+		if f == id && !swapped {
+			swapped = true
+			mustNil(t, os.Rename(kd, kd+"-old"))
+			mustNil(t, os.Mkdir(kd, 0o700))
+			mustNil(t, os.Chmod(kd, 0o777))
+			mustNil(t, os.WriteFile(filepath.Join(kd, tmpPrefix+"x"), nil, 0o600))
+		}
+		return false
+	}})
+	s.removeTemporary(nil)
+	_, err = os.Lstat(filepath.Join(kd, tmpPrefix+"x"))
+	if !swapped || err != nil {
+		t.Errorf("swapped = %v, leftover file: %v; want true, nil", swapped, err)
+	}
+}
+
+// The key gets mode 0644, so Open refuses it. Then a Store replaces the file.
+func TestTS16LoadTriesAgainWhenARefusedFileIsReplacedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "key", []byte("good1")))
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(string) {
+		if calls++; calls == 1 {
+			mustNil(t, os.Chmod(filepath.Join(dir, "acme/cache/key"), 0o644))
+		}
+	}, AfterOpen: func(string) {
+		if calls == 1 {
+			mustNil(t, s.Store(ctx, "key", []byte("good2")))
+		}
+	}})
+	if b, err := s.Load(ctx, "key"); err != nil || string(b) != "good2" {
+		t.Errorf("Load = %q, %v; want good2", b, err)
+	}
+}
+
+// The key file does not change. The hook gives another owner at the second
+// owner check of the file, the check of the open file. Load must not try again.
+func TestTS16LoadRefusesAKeyFileThatOnlyTheOpenFileFails(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	fi, err := os.Lstat(filepath.Join(dir, "acme/cache/key"))
+	mustNil(t, err)
+	id, _ := safefile.Identity(fi)
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(f safefile.FileID) bool {
+		if f == id {
+			calls++
+		}
+		return f == id && calls == 2
+	}})
+	_, err = s.Load(ctx, "key")
+	wantError(t, err, "load", ruleFileOwner)
+	if calls != 2 {
+		t.Errorf("the hook ran %d times for the key file; want 2", calls)
+	}
+}
+
+// The hook replaces a key directory after its check. The new one is a new
+// directory, a link to another directory, or a link to itself.
+func TestTS16LoadHandlesAKeyDirectoryThatIsReplacedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	p := func(kd string) string { return filepath.Join(dir, "acme/cache", kd) }
+	for _, kd := range []string{"a", "b", "c", "sibling"} {
+		mustNil(t, s.Store(ctx, kd+"/key", []byte(kd)))
+	}
+	var swap func()
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
+		if f := swap; f != nil {
+			swap = nil
+			f()
+		}
+	}})
+	swap = func() {
+		mustNil(t, os.Rename(p("a"), p("a-old")))
+		mustNil(t, os.Mkdir(p("a"), 0o700))
+		mustNil(t, os.WriteFile(p("a/key"), []byte("new"), 0o600))
+	}
+	b, err := s.Load(ctx, "a/key")
+	if err != nil || string(b) != "new" || swap != nil {
+		t.Errorf("Load of a new directory = %q, %v; want new", b, err)
+	}
+	swap = func() {
+		mustNil(t, os.Rename(p("b"), p("b-old")))
+		mustNil(t, os.Symlink("sibling", p("b")))
+	}
+	_, err = s.Load(ctx, "b/key")
+	wantError(t, err, "load", ruleLink)
+	swap = func() {
+		mustNil(t, os.Rename(p("c"), p("c-old")))
+		mustNil(t, os.Symlink("c-old", p("c")))
+	}
+	b, err = s.Load(ctx, "c/key")
+	if err != nil || string(b) != "c" || swap != nil {
+		t.Errorf("Load by a link to the checked directory = %q, %v; want c", b, err)
+	}
 }
