@@ -991,9 +991,9 @@ func TestSentenceCommentGroups(t *testing.T) {
 
 func TestSentenceTimeIsLinear(t *testing.T) {
 	// A unit repeats. A backtick unit closes in pairs. A link unit never
-	// forms a link. Two texts have one opening mark that never
-	// closes. A search that starts again at each mark would take quadratic
-	// time and not finish.
+	// forms a link. Some texts have one opening mark that never closes. A
+	// search that starts again at each mark would take quadratic time and
+	// not finish.
 	n := 200000
 	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`", "``a ", "[a](x \"", "[a](x '", "[a](x (",
 		"[a](<", "[](<x ", "[](x \"y", "[a]( ", "`a "} {

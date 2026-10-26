@@ -63,8 +63,9 @@
 // 4 columns. A line at another column starts a new text. In a text that starts
 // after code, the indent of a line does not make a code block. A fence of
 // three backticks still does. Each "/* */" comment is also a text of its own.
-// In it the indent does not count. A "*" at the start of a line is removed.
-// So a list marker, "#" or "|" line always ends the paragraph before it.
+// In it, the indent of a line does not count. A "*" at the start of a line is
+// removed, but the indent after the "*" counts. A list marker or "|" line ends
+// the paragraph before it. So does a "#" line with no indent.
 //
 // A sentence ends at ".", "?" or "!" before a space, a line end or the end of
 // the text. It also ends at a blank line, a heading, a list item, and the

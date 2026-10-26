@@ -29,7 +29,7 @@ type textLine struct {
 	// noCode is true when the line is in a text that starts after code. Its
 	// indent does not make a code block. A token line has noCode false.
 	noCode bool
-	// block is true for a line of a "/* */" comment, which has no indent.
+	// block is true for a line of a "/* */" comment.
 	block bool
 }
 
@@ -242,8 +242,8 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
-// the indent and a "*" at the start of a line. The indent does not count, so
-// a block comment has no code block that is found by its indent.
+// the indent and a "*" at the start of a line. The indent after the "*" stays,
+// so such a line can start a code block.
 func blockLines(lit string, line int) []textLine {
 	inner := strings.TrimSuffix(strings.TrimPrefix(lit, "/*"), "*/")
 	var out []textLine
@@ -272,15 +272,15 @@ const (
 // backticks. A line with a tab or two spaces of indent is also code. This holds
 // when no paragraph or list item is open. In a code block, each indented line
 // stays code. A line with noCode set never starts a code block by its indent.
-// When md is false, three more rules hold. First, a marker line with no indent
-// continues an open paragraph. This does not hold after a line that ends with
-// a colon, or in a "/* */" comment. Second, a blank line after a list item
-// keeps the item open when the marker line has an indent. Each indented line
-// after the blank line is then a paragraph of the item, also a "|" line. An
-// indented marker line is the exception: it starts a new item. After a marker
-// line with no indent, an indented line is code, unless noCode is set for it.
-// Third, an indented "|" line where a code block can start is code. When md is
-// true, none of these rules holds.
+// When md is false, three more rules hold. First, a list marker, "#" or "|"
+// line with no indent continues an open paragraph. This does not hold after a
+// line that ends with a colon, or in a "/* */" comment. Second, a blank line
+// after a list item keeps the item open when the marker line has an indent.
+// Each indented line after the blank line is then a paragraph of the item,
+// also a "|" line. An indented marker line is the exception: it starts a new
+// item. After a marker line with no indent, an indented line is code, unless
+// noCode is set for it. Third, an indented "|" line where a code block can
+// start is code. When md is true, none of these rules holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
 		paras      []*para
