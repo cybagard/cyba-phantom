@@ -197,6 +197,9 @@ func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 	syncFile = func(f *os.File) error {
 		if !holds(tmp) || holds(final) {
 			t.Error("file sync: the temporary file lacks the data, or the final file has it already")
+		} else {
+			// The data is in the temporary file now: the write is done.
+			steps = append(steps, "write temp")
 		}
 		steps = append(steps, "sync file")
 		return oldSync(f)
@@ -241,7 +244,23 @@ func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
 		steps := recordDurableSteps(t, log, tile.Path(), l.tileData(tile))
 		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
-		want := []string{"sync file", "rename", "sync dir tile/8/0/000.p", "sync dir tile/8/0",
+		want := []string{"write temp", "sync file", "rename", "sync dir tile/8/0/000.p",
+			"sync dir tile/8/0", "sync dir tile/8", "sync dir tile", "sync dir ."}
+		if !slices.Equal(*steps, want) {
+			t.Fatalf("got %q, want %q", *steps, want)
+		}
+	})
+	t.Run("full tile", func(t *testing.T) {
+		// A new store: no partial file is there to delete afterwards.
+		state, dir := newLogState(t)
+		s := openStore(t, state)
+		var l testLog
+		l.extend(t, fullWidth)
+		tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: fullWidth}
+		steps := recordDurableSteps(t, filepath.Join(dir, "tlog"), tile.Path(), l.tileData(tile))
+		mustNil(t, s.WriteTile(tile, l.tileData(tile)))
+		// The full tile and its temporary file are in the level directory.
+		want := []string{"write temp", "sync file", "rename", "sync dir tile/8/0",
 			"sync dir tile/8", "sync dir tile", "sync dir ."}
 		if !slices.Equal(*steps, want) {
 			t.Fatalf("got %q, want %q", *steps, want)
@@ -254,7 +273,7 @@ func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		copy(head[sizeLen:], root[:])
 		steps := recordDurableSteps(t, log, headName, head[:])
 		mustNil(t, s.SetHead(3, root))
-		want := []string{"sync file", "rename", "sync dir ."}
+		want := []string{"write temp", "sync file", "rename", "sync dir ."}
 		if !slices.Equal(*steps, want) {
 			t.Fatalf("got %q, want %q", *steps, want)
 		}
