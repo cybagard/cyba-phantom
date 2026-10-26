@@ -165,7 +165,8 @@ type Store struct {
 // the state directory. Open also refuses a log directory that is a link inside
 // the state directory. This is because the fsync of the log directory refuses
 // a link. Open makes the directory (mode 0700) if it does not exist. The
-// directory must have no group or other permission bits. Open reads the tree
+// directory must have no group or other permission bits. So must each
+// directory that Open lists below tile. Open reads the tree
 // head and the tiles that the root computation reads. It checks that these
 // tiles give the root of the tree head. Open does not read the other tiles
 // that the tree head covers. A later change checks them with authenticated
@@ -188,11 +189,11 @@ type Store struct {
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		if err = state.MkdirAll(dir, dirMode); err == nil {
-			err = syncDirs(state, dir)
-		}
-		if err != nil {
+		if err = state.MkdirAll(dir, dirMode); err != nil {
 			return nil, newError("tlog directory", ruleWrite)
+		}
+		if err = syncDirs(state, dir); err != nil {
+			return nil, newError("tlog directory", syncRule(err))
 		}
 		sub, err = state.OpenRoot(dir)
 	}
@@ -212,11 +213,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	// a refusal or a failed fsync here deletes and writes nothing.
 	if err := syncDirs(state, dir); err != nil {
 		sub.Close()
-		rule := ruleWrite
-		if errors.Is(err, errMode) || errors.Is(err, errLink) {
-			rule = fileRule(err)
-		}
-		return nil, newError("tlog directory", rule)
+		return nil, newError("tlog directory", syncRule(err))
 	}
 	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
 	if err := s.load(); err != nil {
@@ -304,7 +301,9 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 			if g := path.Dir(path.Dir(tilePath(t, 1))); g != group {
 				group, groupOK, present = g, s.exists(g), nil
 				if groupOK {
-					present = s.groupNames(g)
+					if present, err = s.groupNames(g); err != nil {
+						return nil, nil, err
+					}
 				}
 			}
 			if !groupOK {
@@ -332,21 +331,25 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 // listing fails. It also returns nil if the directory has no owner search bit
 // or too many names. Then the caller asks for each name with exists. With no
 // owner search bit, the Lstat of a name below the directory can fail. Then
-// exists counts the name as there.
-func (s *Store) groupNames(g string) map[string]bool {
+// exists counts the name as there. A mode error of a listed directory is not
+// a failed listing: groupNames returns it.
+func (s *Store) groupNames(g string) (map[string]bool, error) {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
-		return nil
+		return nil, nil
 	}
 	names, err := s.names(g, 4*groupTiles)
-	if err != nil {
-		return nil
+	var e *Error
+	if errors.As(err, &e) {
+		return nil, e
+	} else if err != nil {
+		return nil, nil
 	}
 	set := make(map[string]bool, len(names))
 	for _, name := range names {
 		set[name] = true
 	}
-	return set
+	return set, nil
 }
 
 // exists returns false only if name is not there. Another error counts as
@@ -390,7 +393,7 @@ func (s *Store) syncAll(dirs []string) error {
 	for _, dir := range slices.Compact(dirs) {
 		for d := dir; !done[d]; d = path.Dir(d) {
 			if err := syncOneDir(s.dir, d); err != nil {
-				return newError(dir, ruleWrite)
+				return newError(dir, syncRule(err))
 			}
 			done[d] = true
 		}
@@ -685,8 +688,11 @@ func tilePath(t tlog.Tile, w int) string {
 func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 	dir := path.Dir(tilePath(t, 1))
 	entries, err := s.names(dir, maxPartialNames)
+	var e *Error
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, nil
+	} else if errors.As(err, &e) {
+		return nil, nil, e
 	} else if err != nil {
 		return nil, nil, newError(dir, fileRule(err))
 	}
@@ -821,7 +827,9 @@ func (s *Store) remove(names []string) error {
 }
 
 // names lists the directory dir in batches. It returns errTooMany if the
-// directory has more than limit names.
+// directory has more than limit names. Open does not open a listed directory
+// again. So names checks its mode. A group or other bit gives an *Error with
+// the mode rule. The link rule refuses a listed link.
 func (s *Store) names(dir string, limit int) ([]string, error) {
 	d, err := openDir(s.dir, dir)
 	if err != nil {
@@ -832,6 +840,12 @@ func (s *Store) names(dir string, limit int) ([]string, error) {
 	for {
 		entries, err := d.ReadDir(256)
 		for _, e := range entries {
+			if e.IsDir() {
+				fi, ierr := e.Info()
+				if ierr == nil && fi.Mode().Perm()&otherBits != 0 {
+					return nil, newError(path.Join(dir, e.Name()), ruleMode)
+				}
+			}
 			names = append(names, e.Name())
 		}
 		switch {
@@ -966,6 +980,20 @@ func (s *Store) readFile(name string, n int) ([]byte, error) {
 		return nil, errLength
 	}
 	return b, nil
+}
+
+// syncRule returns the rule of an error of the fsync of a directory. A check
+// of the directory gives its own rule. Each other error is a write error.
+func syncRule(err error) string {
+	switch {
+	case errors.Is(err, errMode):
+		return ruleMode
+	case errors.Is(err, errLink):
+		return ruleLink
+	case errors.Is(err, errNotDir):
+		return ruleNotDir
+	}
+	return ruleWrite
 }
 
 func fileRule(err error) string {

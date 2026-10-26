@@ -474,3 +474,71 @@ func TestTS13OpenTidiesGroupDirectoryWithManyNames(t *testing.T) {
 		t.Fatalf("the temporary file is still there: %v", err)
 	}
 }
+
+// A directory that Open lists, but does not open again, must have no group or
+// other bit. Tile 0 of this log is full, so its partial-tile directory is
+// empty and Open reads no file there. Only a listing shows the directory.
+func TestTS13OpenRefusesListedDirectoryWithGroupOrOtherBits(t *testing.T) {
+	for _, name := range []string{"tile/8/0/000.p", "tile/8/0/002.p/x"} {
+		for _, mode := range []os.FileMode{0o750, 0o705} {
+			state, dir := newLogState(t)
+			s := openStore(t, state)
+			var l testLog
+			l.commit(t, s, 0, 100)
+			l.commit(t, s, 100, 600)
+			s.Close()
+			listed := filepath.Join(dir, "tlog", name)
+			mustNil(t, os.MkdirAll(listed, dirMode))
+			mustNil(t, os.Chmod(listed, mode))
+			if e := openErr(t, state, ruleMode); e.Name != name {
+				t.Fatalf("%s with mode %o: name %q", name, mode, e.Name)
+			}
+		}
+	}
+}
+
+// Each cause of a failed fsync of a directory has its own rule. The hook
+// replaces the partial-tile directory with a link before its fsync.
+func TestTS13OpenGivesLinkRuleForDirectoryReplacedBeforeFsync(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	level := filepath.Join(dir, "tlog", "tile", "8", "0")
+	oldDir := syncDirFile
+	t.Cleanup(func() { syncDirFile = oldDir })
+	var calls int
+	syncDirFile = func(f *os.File) error {
+		// Calls 1 and 2 sync the log directory and the state directory.
+		// Call 3 is the first one of the pass over the tiles.
+		if calls++; calls == 3 {
+			mustNil(t, os.Rename(filepath.Join(level, "000.p"), filepath.Join(level, "000.real")))
+			mustNil(t, os.Symlink("000.real", filepath.Join(level, "000.p")))
+		}
+		return oldDir(f)
+	}
+	if e := openErr(t, state, ruleLink); e.Name != "tile/8/0/000.p" {
+		t.Fatalf("name %q", e.Name)
+	}
+}
+
+// A state directory with a group bit gives the mode rule at the first Open.
+// This is the same rule as at the second Open.
+func TestTS13OpenGivesModeRuleForNewLogInStateWithGroupBit(t *testing.T) {
+	state, dir := newLogState(t)
+	mustNil(t, os.Chmod(dir, 0o750))
+	for range 2 {
+		if e := openErr(t, state, ruleMode); e.Name != "tlog directory" {
+			t.Fatalf("name %q", e.Name)
+		}
+	}
+}
+
+// A regular file in place of a group directory is an error with its own rule
+// and text.
+func TestTS13OpenRefusesFileInPlaceOfGroupDirectory(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	plantFile(t, dir, "tile/8/0/x001", 1)
+	e := openErr(t, state, ruleNotDir)
+	const want = "tlog: tile/8/0/x001: path part is not a directory"
+	if e.Name != "tile/8/0/x001" || e.Error() != want {
+		t.Fatalf("got %q, want %q", e.Error(), want)
+	}
+}
