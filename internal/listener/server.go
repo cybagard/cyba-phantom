@@ -24,8 +24,9 @@ type Config struct {
 	// ClientHello capture. If GetCertificate is set, the server wraps it. Any
 	// error of it with no gate result gives no event. Examples are no
 	// certificate to give, and acme-tls/1 with no active challenge. A
-	// connection that negotiates acme-tls/1 gets no HTTP and closes after the
-	// handshake.
+	// certificate that it returns lets a failed handshake give client_abort,
+	// when the client stops. A connection that negotiates acme-tls/1 gets no
+	// HTTP and closes after the handshake.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
 	// all Serve and ServePlain calls. limits.max_conns.
@@ -212,17 +213,7 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	s.tls.NextProtos = []string{"http/1.1", challengeProto}
 	s.tls.GetConfigForClient = captureHello
 	if get := s.tls.GetCertificate; get != nil {
-		// Any error with no gate result gives no event. Examples are no
-		// certificate to give, and acme-tls/1 with no active challenge.
-		s.tls.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			cert, err := get(hello)
-			if err != nil {
-				if lc := helloConn(hello); lc != nil {
-					lc.markNoCert()
-				}
-			}
-			return cert, err
-		}
+		s.tls.GetCertificate = withCertMarks(get)
 	}
 	s.srv = s.newHTTP(h)
 	// net/http also closes a TLS connection whose negotiated protocol has no
@@ -264,6 +255,25 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 			return withConnState(ctx)
 		},
 		ConnState: s.connHook,
+	}
+}
+
+// withCertMarks wraps a certificate callback. Any error with no gate result
+// gives no event. Examples are no certificate to give, and acme-tls/1 with no
+// active challenge. A certificate marks the connection, so a client that then
+// stops gives client_abort. The mark is not made for a client that offers only
+// acme-tls/1.
+func withCertMarks(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		cert, err := get(hello)
+		if lc := helloConn(hello); lc != nil {
+			if err != nil {
+				lc.markNoCert()
+			} else if !onlyChallenge(hello) {
+				lc.markCert()
+			}
+		}
+		return cert, err
 	}
 }
 
