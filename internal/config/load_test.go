@@ -334,8 +334,8 @@ func TestTS10_EnvNameForms(t *testing.T) {
 
 // TestTS10_WrittenTag checks the YAML tags of a file value through Load.
 // The tag "!" gives an error that names the key. So does a tag other than
-// "!!str" on a quoted or block scalar. A core tag on a plain scalar of its
-// kind stays valid, for example "!!int" on an int.
+// "!!str" on a quoted or block scalar. The kind tag of the key on a plain
+// scalar stays valid, for example "!!int 80" on an int key.
 // So does "!!str" on a quoted or block scalar.
 func TestTS10_WrittenTag(t *testing.T) {
 	useTestKeys(t)
