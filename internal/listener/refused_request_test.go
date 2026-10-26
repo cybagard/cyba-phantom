@@ -78,7 +78,7 @@ func count(b bool) int {
 }
 
 // T-S-22: a request head that net/http refuses before the handler gives one
-// refused event after the handshake. Five heads do this also after a served
+// refused event after the handshake. Six heads do this also after a served
 // request, in a second write and in the same write. The second head is above
 // the read budget of that period.
 func TestTS22RefusedRequestHeads(t *testing.T) {
@@ -88,6 +88,7 @@ func TestTS22RefusedRequestHeads(t *testing.T) {
 		pipelined bool
 	}{
 		{"malformed host", badHost, 400, true},
+		{"malformed request line", "GET /\r\n\r\n", 400, true}, // the smallest reply
 		{"head over the cap", head(testHeaderBytes + 4096 + 200), 431, false},
 		{"65 header values", "GET / HTTP/1.1\r\nHost: a\r\n" + strings.Repeat("X: v\r\n", 64) + "\r\n", 431, true},
 		{"unknown transfer encoding", "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: foo\r\n\r\n", 501, true},
@@ -255,7 +256,7 @@ var badMAC = append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
 // client close_notify record are such closes. So are a close over the read
 // budget, an acme-tls/1 connection and a close at shutdown. A record that makes
 // crypto/tls write an alert or a key update also gives no event. A refused head
-// on the plain socket gives no event. Two rows are known limits.
+// on the plain socket gives no event. The rows named known limit give one event.
 func TestTS22NoEvent(t *testing.T) {
 	served := func(t *testing.T, r *rig) *tls.Conn {
 		t.Helper()
@@ -316,6 +317,19 @@ func TestTS22NoEvent(t *testing.T) {
 		t.Cleanup(func() { _ = c.Close() })
 		return c
 	}
+	// cached offers session tickets: the server writes a ticket flight.
+	cached := func(t *testing.T, r *rig, ver uint16) *tls.Conn {
+		t.Helper()
+		cfg := r.clientConfig()
+		cfg.MaxVersion = ver
+		cfg.ClientSessionCache = tls.NewLRUClientSessionCache(2)
+		c, err := dialTLS(r.addr, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
 	mac := func(*testing.T, *recordWriter) []byte { return badMAC }
 	keyUpdateClose := func(t *testing.T, w *recordWriter) []byte {
 		return append(w.keyUpdate(t), w.records([]byte{1, 0}, 21)...)
@@ -323,6 +337,7 @@ func TestTS22NoEvent(t *testing.T) {
 	clientHello := func(_ *testing.T, w *recordWriter) []byte { return w.handshake([]byte{1, 0, 0, 0}) }
 	type24 := func(_ *testing.T, w *recordWriter) []byte { return w.records([]byte{1}, 24) }
 	alert := func(_ *testing.T, w *recordWriter) []byte { return w.records([]byte{2, 40}, 21) }
+	warning := func(_ *testing.T, w *recordWriter) []byte { return w.records([]byte{1, 42}, 21) }
 	for _, tc := range []struct {
 		name  string
 		tm    timeouts
@@ -347,13 +362,20 @@ func TestTS22NoEvent(t *testing.T) {
 			_, _ = io.WriteString(c, partial)
 			_ = c.Close()
 		}},
+		// Known limit. The same, for a client alert of any kind.
+		{"known limit: partial head, fatal alert", defaultTimeouts, nil, func(t *testing.T, r *rig) {
+			c, w, _ := dial13(t, r)
+			_, _ = c.NetConn().Write(append(w.data([]byte(partial)), alert(t, w)...))
+		}},
 		// Known limit. net/http answers a client alert with 400.
-		{"known limit: client alert as the first record", defaultTimeouts, nil, rec13(false, alert)},
+		{"known limit: client warning alert as the first record", defaultTimeouts, nil, rec13(false, warning)},
+		{"known limit: client fatal alert as the first record", defaultTimeouts, nil, rec13(false, alert)},
 		{"bad MAC", defaultTimeouts, nil, rec13(false, mac)},
 		{"bad MAC after a request", defaultTimeouts, nil, rec13(true, mac)},
 		{"KeyUpdate and close_notify", defaultTimeouts, nil, rec13(false, keyUpdateClose)},
 		{"KeyUpdate and close_notify after a request", defaultTimeouts, nil, rec13(true, keyUpdateClose)},
 		{"post-handshake ClientHello", defaultTimeouts, nil, rec13(false, clientHello)},
+		{"ClientHello after a served request", defaultTimeouts, nil, rec13(true, clientHello)},
 		{"record of inner type 24", defaultTimeouts, nil, rec13(false, type24)},
 		{"TLS 1.2, bad record, close", defaultTimeouts, nil, func(t *testing.T, r *rig) {
 			c := dial12(t, r)
@@ -361,6 +383,13 @@ func TestTS22NoEvent(t *testing.T) {
 			_ = c.Close()
 		}},
 		{"TLS 1.2, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) { closesWithin(t, dial12(t, r)) }},
+		// The server writes a ticket flight after the client Finished (TLS 1.2).
+		{"TLS 1.2 with a session cache, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
+			closesWithin(t, cached(t, r, tls.VersionTLS12))
+		}},
+		{"TLS 1.3 with a session cache, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
+			closesWithin(t, cached(t, r, tls.VersionTLS13))
+		}},
 		{"TLS 1.3, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
 			c, _, _ := dial13(t, r)
 			closesWithin(t, c.NetConn())
@@ -405,7 +434,7 @@ func TestTS22NoEvent(t *testing.T) {
 		{"acme-tls/1", defaultTimeouts, func(t *testing.T, r *rig) {
 			next := r.s.srv.TLSNextProto[challengeProto]
 			r.s.srv.TLSNextProto[challengeProto] = func(s *http.Server, c *tls.Conn, h http.Handler) {
-				_, _ = c.Write(make([]byte, refusalWriteMin+1))
+				_, _ = c.Write(appData(uncountedWriteMax + 1))
 				next(s, c, h)
 			}
 		}, func(t *testing.T, r *rig) {
@@ -484,24 +513,38 @@ type stubConn struct {
 func (f stubConn) Read([]byte) (int, error)    { return f.n, f.err }
 func (f stubConn) Write(p []byte) (int, error) { return len(p), nil }
 
+// appData returns n bytes that start with the record type application_data.
+func appData(n int) []byte {
+	p := make([]byte, n)
+	if n > 0 {
+		p[0] = recordApplicationData
+	}
+	return p
+}
+
 // T-S-22: each part of the refused-request condition is needed. A write counts
-// when it has more than refusalWriteMin bytes.
+// when it has more than uncountedWriteMax bytes and starts with an
+// application-data record type.
 func TestTS22RefusedRequestCondition(t *testing.T) {
+	counted := appData(uncountedWriteMax + 1)
+	handshake := append([]byte{22}, counted[1:]...)
 	for name, tc := range map[string]struct {
-		write int // size of the write
+		write []byte
 		mod   func(*limitConn)
 		want  bool
 	}{
-		"all parts":      {refusalWriteMin + 1, func(*limitConn) {}, true},
-		"handler mark":   {refusalWriteMin + 1, func(c *limitConn) { c.handled = true }, false},
-		"acme-tls/1":     {refusalWriteMin + 1, func(c *limitConn) { c.acme = true }, false},
-		"budget closed":  {refusalWriteMin + 1, func(c *limitConn) { c.budgetClosed = true }, false},
-		"read error":     {refusalWriteMin + 1, func(c *limitConn) { c.lastReadErr = true }, false},
-		"no write":       {0, func(*limitConn) {}, false},
-		"write at limit": {refusalWriteMin, func(*limitConn) {}, false},
+		"all parts":         {counted, func(*limitConn) {}, true},
+		"handler mark":      {counted, func(c *limitConn) { c.handled = true }, false},
+		"acme-tls/1":        {counted, func(c *limitConn) { c.acme = true }, false},
+		"budget closed":     {counted, func(c *limitConn) { c.budgetClosed = true }, false},
+		"read error":        {counted, func(c *limitConn) { c.lastReadErr = true }, false},
+		"no write":          {nil, func(*limitConn) {}, false},
+		"write at limit":    {appData(uncountedWriteMax), func(*limitConn) {}, false},
+		"other record type": {handshake, func(*limitConn) {}, false},
+		"read with data":    {counted, func(c *limitConn) { _, _ = c.Read(make([]byte, 1)) }, false},
 	} {
-		c := &limitConn{Conn: stubConn{}}
-		_, _ = c.Write(make([]byte, tc.write))
+		c := newLimitConn(stubConn{n: 1}, nil, newSourceCap(1), netip.Addr{}, newReadLimit(testHeaderBytes))
+		_, _ = c.Write(tc.write)
 		tc.mod(c)
 		if got := c.refusedRequest(); got != tc.want {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)

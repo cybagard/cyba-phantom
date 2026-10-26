@@ -349,19 +349,24 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// refusalWriteMin is the size of a write that refusedRequest counts: a write of
-// more than this many bytes. Each refusal reply of net/http is larger. An alert
-// or a key update record is smaller (SEC-22).
-const refusalWriteMin = 96
+// uncountedWriteMax is the largest size of a write that refusedRequest does not
+// count. It counts a write of more than this many bytes that starts with
+// recordApplicationData. After the handshake, a reply of net/http is such a
+// record of more than 96 bytes. An alert or a key update record is smaller. A
+// TLS 1.2 handshake flight starts with another record type (SEC-22).
+const uncountedWriteMax = 96
+
+// recordApplicationData is the TLS record type application_data.
+const recordApplicationData = 23
 
 // Write starts the late run when a request without a body is active, before it
 // writes: a client that reads the response can answer before Write returns. The
 // handshake writes before the first request is active. It also counts a write
-// of more than refusalWriteMin bytes.
+// of more than uncountedWriteMax bytes that starts with recordApplicationData.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active
-	if len(p) > refusalWriteMin {
+	if len(p) > uncountedWriteMax && p[0] == recordApplicationData {
 		c.writes++
 	}
 	c.mu.Unlock()
@@ -390,10 +395,11 @@ func (c *limitConn) markACME() {
 }
 
 // refusedRequest tells if net/http refused a request head before the handler
-// (SEC-22). The server made a counted write since the last read that gave data
-// and the last idle state. That write is the reply. The last read did not fail,
-// unless it timed out. No handler ran in this period. The budget did not close
-// the connection. The connection is not an acme-tls/1 connection.
+// (SEC-22). The server made a counted write since the later of the last read
+// with data and the last idle state. That write is the reply. The last read did
+// not fail, unless it timed out. No handler ran in this period. Neither the
+// budget nor the pool closed the connection. The connection is not an
+// acme-tls/1 connection.
 func (c *limitConn) refusedRequest() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
