@@ -297,11 +297,11 @@ func (s *Server) connHook(c net.Conn, st http.ConnState) {
 }
 
 // refusedAtClose makes one refused event when net/http refused a request head
-// before the handler (ADR-031 decision 4). Only a *tls.Conn with a complete
-// handshake counts. The rule does not use http.StateActive.
+// before the handler (SEC-22). Only a *tls.Conn with a complete handshake
+// counts. The rule does not use http.StateActive.
 func (s *Server) refusedAtClose(c net.Conn, lc *limitConn) {
 	tc, ok := c.(*tls.Conn)
-	if !ok || !tc.ConnectionState().HandshakeComplete || !lc.refusedRequest() {
+	if !ok || !lc.refusedRequest() || !tc.ConnectionState().HandshakeComplete {
 		return
 	}
 	s.mu.Lock()

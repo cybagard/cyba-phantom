@@ -261,15 +261,12 @@ type limitConn struct {
 	late    int64 // bytes in used that Read took after the late run started
 	lateOn  bool  // the late run started: all next bytes are late
 
-	// These fields tell a request head that net/http refused from other closes
-	// (SEC-22, refusedRequest).
-	handled     bool // a handler ran in this period
-	served      bool // a handler ran in an earlier period
-	lastEnd     bool // the last read failed, not with a timeout
-	lastTimeout bool // the last read failed with a timeout
-	budget      bool // the budget or the pool closed the connection
-	acme        bool // the connection negotiated acme-tls/1
-	writes      int  // writes since the last read with data or idle state
+	// These fields are the input of refusedRequest (SEC-22).
+	handled      bool // a handler ran in this period
+	lastReadErr  bool // the last read failed, not with a timeout
+	budgetClosed bool // the budget or the pool closed the connection
+	acme         bool // the connection negotiated acme-tls/1
+	writes       int  // counted writes since a read with data or idle state
 }
 
 // newLimitConn wraps c with a full first budget. The caller has the slot and
@@ -313,16 +310,16 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	p = p[:min(int64(len(p)), max(left, 1), keepAliveBytes)]
 	n, err := c.Conn.Read(p)
 	c.mu.Lock()
-	var ne net.Error
-	timeout := errors.As(err, &ne) && ne.Timeout()
-	c.lastEnd, c.lastTimeout = err != nil && !timeout, timeout
+	ne, ok := err.(net.Error)
+	timeout := ok && ne.Timeout()
+	c.lastReadErr = err != nil && !timeout
 	if n == 0 {
 		c.mu.Unlock()
 		return 0, err
 	}
 	c.writes = 0
 	if c.left <= 0 {
-		c.budget = true
+		c.budgetClosed = true
 		c.mu.Unlock()
 		_ = c.Close()
 		return 0, errBudgetRead
@@ -339,7 +336,7 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	refused := false
 	if over > 0 && !c.closed {
 		if refused = !c.rd.take(over); refused {
-			c.left, c.budget = 0, true
+			c.left, c.budgetClosed = 0, true
 		} else {
 			c.charged += over
 		}
@@ -352,23 +349,32 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// refusalWriteMin is the size of a write that refusedRequest counts: a write of
+// more than this many bytes. Each refusal reply of net/http is larger. An alert
+// or a key update record is smaller (SEC-22).
+const refusalWriteMin = 96
+
 // Write starts the late run when a request without a body is active, before it
 // writes: a client that reads the response can answer before Write returns. The
-// handshake writes before the first request is active.
+// handshake writes before the first request is active. It also counts a write
+// of more than refusalWriteMin bytes.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active
-	c.writes++
+	if len(p) > refusalWriteMin {
+		c.writes++
+	}
 	c.mu.Unlock()
 	return c.Conn.Write(p)
 }
 
-// startRequest marks a request without a body as active. The handler wrapper
-// calls it before the handler runs.
+// startRequest marks a request without a body as active. A test calls it. The
+// handler wrapper calls reachHandler.
 func (c *limitConn) startRequest() { c.reachHandler(true) }
 
 // reachHandler marks that a handler runs in this period, for each request. When
-// active is true, the request has no body and it also starts the late run.
+// active is true, the request has no body. Then the next Write starts the late
+// run.
 func (c *limitConn) reachHandler(active bool) {
 	c.mu.Lock()
 	c.handled = true
@@ -384,21 +390,14 @@ func (c *limitConn) markACME() {
 }
 
 // refusedRequest tells if net/http refused a request head before the handler
-// (SEC-22, ADR-031). The server wrote at least twice since the last read that
-// gave data and the last idle state. These writes are the reply and the close
-// alert. A close after a client close alert, or after a timeout, has one write.
-// The last read did not end with a client close or a reset. If it timed out,
-// the period has no byte and an earlier period served a request. Then net/http
-// has aborted its background read, and it parses a head from its buffer. No
-// handler ran in this period. The budget did not close the connection. The
-// connection is not an acme-tls/1 connection.
+// (SEC-22). The server made a counted write since the last read that gave data
+// and the last idle state. That write is the reply. The last read did not fail,
+// unless it timed out. No handler ran in this period. The budget did not close
+// the connection. The connection is not an acme-tls/1 connection.
 func (c *limitConn) refusedRequest() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.lastTimeout && (c.used > 0 || !c.served) {
-		return false
-	}
-	return c.writes >= 2 && !c.lastEnd && !c.handled && !c.budget && !c.acme
+	return c.writes >= 1 && !c.lastReadErr && !c.handled && !c.budgetClosed && !c.acme
 }
 
 // nextPeriod ends the period at an idle state. The late bytes are not part of
@@ -421,6 +420,6 @@ func (c *limitConn) nextPeriod() {
 	}
 	c.refund()
 	c.used, c.left, c.late, c.lateOn, c.active = late, c.rd.next-late, 0, false, false
-	c.served, c.handled, c.writes = c.served || c.handled, false, 0
+	c.handled, c.writes = false, 0
 	c.mu.Unlock()
 }

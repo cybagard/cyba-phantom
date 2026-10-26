@@ -6,7 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,8 +53,8 @@ func newClosedRig(t *testing.T, tm timeouts, h http.Handler) (*rig, <-chan struc
 	return r, watchClosed(r.s.srv)
 }
 
-// wantRefused checks that the server queue holds n refused events with the
-// reason refused_request and no status.
+// wantRefused checks that the server queue holds n refused events. Each has the
+// reason refused_request, no status and the address of the TCP peer.
 func wantRefused(t *testing.T, r *rig, n int) {
 	t.Helper()
 	evs := r.s.refused.q.Drain()
@@ -60,16 +63,24 @@ func wantRefused(t *testing.T, r *rig, n int) {
 	}
 	for _, e := range evs {
 		rec := e.Record()
-		if j, _ := rec.Detail.JSON(); e.Kind() != event.KindRefused || string(j) != `{"reason":"refused_request"}` || rec.Status != nil {
-			t.Errorf("event kind %v, detail %s; want refused, refused_request, no status", e.Kind(), j)
+		if j, _ := rec.Detail.JSON(); e.Kind() != event.KindRefused || string(j) != `{"reason":"refused_request"}` || rec.Status != nil || e.IP() != "127.0.0.1" {
+			t.Errorf("event kind %v, detail %s, address %s; want refused, refused_request, no status, 127.0.0.1", e.Kind(), j, e.IP())
 		}
 	}
 }
 
+// count is 1 for true and 0 for false.
+func count(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // T-S-22: a request head that net/http refuses before the handler gives one
 // refused event after the handshake. Five heads do this also after a served
-// request, in a second write and in the same write. The sixth is above the read
-// budget of that period.
+// request, in a second write and in the same write. The second head is above
+// the read budget of that period.
 func TestTS22RefusedRequestHeads(t *testing.T) {
 	for _, tc := range []struct {
 		name, req string
@@ -112,11 +123,89 @@ func TestTS22RefusedRequestHeads(t *testing.T) {
 				}
 				waitClosed(t, closed)
 				wantRefused(t, r, 1)
-				if n, want := len(q.Drain()), map[bool]int{false: 0, true: 1}[mode != "alone"]; n != want {
+				if n, want := len(q.Drain()), count(mode != "alone"); n != want {
 					t.Fatalf("%d request events, want %d", n, want)
 				}
 			})
 		}
+	}
+	t.Run("flushing handler, KeyUpdate in flight", testRefusedAfterFlush)
+}
+
+// tapListener gives each connection a tapConn.
+type tapListener struct {
+	net.Listener
+	got chan struct{}
+}
+
+func (l tapListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	return tapConn{c, l.got}, err
+}
+
+// tapConn signals on got after each socket read that gives data.
+type tapConn struct {
+	net.Conn
+	got chan struct{}
+}
+
+func (c tapConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		select {
+		case c.got <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// testRefusedAfterFlush: the handler flushes its response and waits. The client
+// sends a KeyUpdate that asks for no update while the response is in flight. A
+// refused head in the same write as the request still gives one event.
+func testRefusedAfterFlush(t *testing.T) {
+	h, q, _ := newHelloQueue(t, 16)
+	flushed, release := make(chan struct{}), make(chan struct{})
+	r, closed := newClosedRig(t, defaultTimeouts, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h.ServeHTTP(w, req)
+		w.(http.Flusher).Flush()
+		close(flushed)
+		<-release
+	}))
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(open)
+	got, ln := make(chan struct{}, 16), listenLoopback(t)
+	r.addr = ln.Addr().String()
+	r.serveOn(t, tapListener{ln, got})
+	raw, err := dialTCP(r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	_, w, _ := r.dialTLS13(t, raw)
+	_, _ = raw.Write(w.data([]byte(goodHead + badHost)))
+	waitSignal(t, flushed)
+	for len(got) > 0 {
+		<-got
+	}
+	_, _ = raw.Write(w.records([]byte{24, 0, 0, 1, 0}, 22))
+	waitSignal(t, got)
+	open()
+	waitClosed(t, closed)
+	wantRefused(t, r, 1)
+	if n := len(q.Drain()); n != 1 {
+		t.Fatalf("%d request events, want 1", n)
+	}
+}
+
+// waitSignal waits for a value on ch.
+func waitSignal(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no signal")
 	}
 }
 
@@ -159,10 +248,14 @@ func (h *holdConn) Close() error {
 	return h.Conn.Close()
 }
 
+// badMAC is a TLS record of application data with a wrong MAC.
+var badMAC = append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
+
 // T-S-22: these closes give no refused event. A timeout, a client close and a
 // client close_notify record are such closes. So are a close over the read
-// budget, an acme-tls/1 connection and a close at shutdown. A refused head on
-// the plain socket also gives no event. One row is a known limit.
+// budget, an acme-tls/1 connection and a close at shutdown. A record that makes
+// crypto/tls write an alert or a key update also gives no event. A refused head
+// on the plain socket gives no event. Two rows are known limits.
 func TestTS22NoEvent(t *testing.T) {
 	served := func(t *testing.T, r *rig) *tls.Conn {
 		t.Helper()
@@ -185,6 +278,51 @@ func TestTS22NoEvent(t *testing.T) {
 		c, w, cc := r.dialTLS13(t, raw(t, r))
 		return c, w, cc.n
 	}
+	// served13 sends a request in a record of the writer, so that the writer
+	// keeps its sequence number. Then it reads the reply.
+	served13 := func(t *testing.T, r *rig) (*tls.Conn, *recordWriter) {
+		t.Helper()
+		c, w, _ := dial13(t, r)
+		if _, err := c.NetConn().Write(w.data([]byte(goodHead))); err != nil {
+			t.Fatal(err)
+		}
+		if resp, err := http.ReadResponse(bufio.NewReader(c), nil); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("response %v, %v; want status 200", resp, err)
+		}
+		return c, w
+	}
+	// rec13 writes the records of build to a TLS 1.3 connection, in the first
+	// period or after a served request.
+	rec13 := func(after bool, build func(*testing.T, *recordWriter) []byte) func(*testing.T, *rig) {
+		return func(t *testing.T, r *rig) {
+			var c *tls.Conn
+			var w *recordWriter
+			if after {
+				c, w = served13(t, r)
+			} else {
+				c, w, _ = dial13(t, r)
+			}
+			_, _ = c.NetConn().Write(build(t, w))
+		}
+	}
+	dial12 := func(t *testing.T, r *rig, protos ...string) *tls.Conn {
+		t.Helper()
+		cfg := r.clientConfig(protos...)
+		cfg.MaxVersion = tls.VersionTLS12
+		c, err := dialTLS(r.addr, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	mac := func(*testing.T, *recordWriter) []byte { return badMAC }
+	keyUpdateClose := func(t *testing.T, w *recordWriter) []byte {
+		return append(w.keyUpdate(t), w.records([]byte{1, 0}, 21)...)
+	}
+	clientHello := func(_ *testing.T, w *recordWriter) []byte { return w.handshake([]byte{1, 0, 0, 0}) }
+	type24 := func(_ *testing.T, w *recordWriter) []byte { return w.records([]byte{1}, 24) }
+	alert := func(_ *testing.T, w *recordWriter) []byte { return w.records([]byte{2, 40}, 21) }
 	for _, tc := range []struct {
 		name  string
 		tm    timeouts
@@ -203,11 +341,29 @@ func TestTS22NoEvent(t *testing.T) {
 		}},
 		// Known limit. net/http answers a cut head with 400. The close_notify
 		// record is data below TLS, and crypto/tls reads no more after it. So
-		// nothing below TLS tells this close from a refused head.
+		// nothing below TLS shows a difference from a refused head.
 		{"known limit: partial head, close_notify", defaultTimeouts, nil, func(t *testing.T, r *rig) {
 			c := r.dial(t)
 			_, _ = io.WriteString(c, partial)
 			_ = c.Close()
+		}},
+		// Known limit. net/http answers a client alert with 400.
+		{"known limit: client alert as the first record", defaultTimeouts, nil, rec13(false, alert)},
+		{"bad MAC", defaultTimeouts, nil, rec13(false, mac)},
+		{"bad MAC after a request", defaultTimeouts, nil, rec13(true, mac)},
+		{"KeyUpdate and close_notify", defaultTimeouts, nil, rec13(false, keyUpdateClose)},
+		{"KeyUpdate and close_notify after a request", defaultTimeouts, nil, rec13(true, keyUpdateClose)},
+		{"post-handshake ClientHello", defaultTimeouts, nil, rec13(false, clientHello)},
+		{"record of inner type 24", defaultTimeouts, nil, rec13(false, type24)},
+		{"TLS 1.2, bad record, close", defaultTimeouts, nil, func(t *testing.T, r *rig) {
+			c := dial12(t, r)
+			_, _ = c.NetConn().Write(badMAC)
+			_ = c.Close()
+		}},
+		{"TLS 1.2, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) { closesWithin(t, dial12(t, r)) }},
+		{"TLS 1.3, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
+			c, _, _ := dial13(t, r)
+			closesWithin(t, c.NetConn())
 		}},
 		{"idle keep-alive timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
 			closesWithin(t, served(t, r))
@@ -244,11 +400,12 @@ func TestTS22NoEvent(t *testing.T) {
 				t.Fatalf("status %d, want a close with no reply", got)
 			}
 		}},
+		{"acme-tls/1, TLS 1.2", defaultTimeouts, nil, func(t *testing.T, r *rig) { dial12(t, r, challengeProto) }},
 		// The extra write gives the other parts of the condition.
 		{"acme-tls/1", defaultTimeouts, func(t *testing.T, r *rig) {
 			next := r.s.srv.TLSNextProto[challengeProto]
 			r.s.srv.TLSNextProto[challengeProto] = func(s *http.Server, c *tls.Conn, h http.Handler) {
-				_, _ = c.Write([]byte("x"))
+				_, _ = c.Write(make([]byte, refusalWriteMin+1))
 				next(s, c, h)
 			}
 		}, func(t *testing.T, r *rig) {
@@ -294,7 +451,7 @@ func TestTS22NoEvent(t *testing.T) {
 			r.serve(t)
 			tc.act(t, r)
 			waitClosed(t, closed)
-			wantRefused(t, r, map[bool]int{false: 0, true: 1}[strings.HasPrefix(tc.name, "known limit")])
+			wantRefused(t, r, count(strings.HasPrefix(tc.name, "known limit")))
 		})
 	}
 }
@@ -317,23 +474,50 @@ func TestTS22NeedsCompleteHandshake(t *testing.T) {
 	wantRefused(t, r, 0)
 }
 
-// T-S-22: each part of the refused-request condition is needed.
+// stubConn gives n bytes and err to each Read, and takes each Write.
+type stubConn struct {
+	net.Conn
+	n   int
+	err error
+}
+
+func (f stubConn) Read([]byte) (int, error)    { return f.n, f.err }
+func (f stubConn) Write(p []byte) (int, error) { return len(p), nil }
+
+// T-S-22: each part of the refused-request condition is needed. A write counts
+// when it has more than refusalWriteMin bytes.
 func TestTS22RefusedRequestCondition(t *testing.T) {
 	for name, tc := range map[string]struct {
-		mod  func(*limitConn)
-		want bool
+		write int // size of the write
+		mod   func(*limitConn)
+		want  bool
 	}{
-		"all parts":                        {func(*limitConn) {}, true},
-		"read error":                       {func(c *limitConn) { c.lastEnd = true }, false},
-		"budget close":                     {func(c *limitConn) { c.budget = true }, false},
-		"timeout, first period":            {func(c *limitConn) { c.lastTimeout = true }, false},
-		"timeout, bytes in the period":     {func(c *limitConn) { c.lastTimeout, c.served, c.used = true, true, 1 }, false},
-		"timeout, no byte, earlier served": {func(c *limitConn) { c.lastTimeout, c.served = true, true }, true},
+		"all parts":      {refusalWriteMin + 1, func(*limitConn) {}, true},
+		"handler mark":   {refusalWriteMin + 1, func(c *limitConn) { c.handled = true }, false},
+		"acme-tls/1":     {refusalWriteMin + 1, func(c *limitConn) { c.acme = true }, false},
+		"budget closed":  {refusalWriteMin + 1, func(c *limitConn) { c.budgetClosed = true }, false},
+		"read error":     {refusalWriteMin + 1, func(c *limitConn) { c.lastReadErr = true }, false},
+		"no write":       {0, func(*limitConn) {}, false},
+		"write at limit": {refusalWriteMin, func(*limitConn) {}, false},
 	} {
-		c := &limitConn{writes: 2}
+		c := &limitConn{Conn: stubConn{}}
+		_, _ = c.Write(make([]byte, tc.write))
 		tc.mod(c)
 		if got := c.refusedRequest(); got != tc.want {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// T-S-22: limitConn.Read allocates nothing, on a read with data and on a read
+// that times out.
+func TestLimitConnReadAllocatesNothing(t *testing.T) {
+	timeout := &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	for name, f := range map[string]stubConn{"data": {n: 1}, "timeout": {err: timeout}} {
+		c := newLimitConn(f, nil, newSourceCap(1), netip.Addr{}, newReadLimit(testHeaderBytes))
+		buf := make([]byte, 64)
+		if got := testing.AllocsPerRun(100, func() { _, _ = c.Read(buf) }); got != 0 {
+			t.Errorf("%s: %v allocations for each Read, want 0", name, got)
 		}
 	}
 }
