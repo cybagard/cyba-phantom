@@ -960,9 +960,10 @@ func tlogLines(want string) int {
 	return 0
 }
 
-// TestTS11_StorePathLoad checks that the load refuses a store.path in a directory of another key, or a state file,
-// and that the error names store.path. A path in tlog.dir also gives an
-// error on tlog.dir. Each row runs with the other key at its default and set (SEC-20).
+// TestTS11_StorePathLoad checks that the load refuses a store.path in a
+// directory of another key, or a state file. The error names store.path.
+// A path in tlog.dir also gives an error on tlog.dir. Each row runs with
+// the other key at its default and set (SEC-20).
 func TestTS11_StorePathLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
