@@ -469,7 +469,6 @@ func (p *para) long(limit int) []sentence {
 		inWord      bool
 		open        bool // a "[" is open: it can start a link
 		tick, stop  = -1, -1
-		spanEnd     = -1 // index after the last code span
 	)
 	lineAt := func(i int) int {
 		for cursor+1 < len(p.segs) && p.segs[cursor+1].off <= i {
@@ -525,7 +524,6 @@ func (p *para) long(limit int) []sentence {
 		case c == '`' && nextTick(i+1) < len(b):
 			startWord(i)
 			i = nextTick(i+1) + 1
-			spanEnd = i
 			continue
 		case c == '[':
 			open = true
@@ -537,10 +535,7 @@ func (p *para) long(limit int) []sentence {
 			i = nextStop(i+2) + 1
 			continue
 		case c == '.' || c == '?' || c == '!':
-			// An end mark right after a code span is no word of its own.
-			if i != spanEnd {
-				startWord(i)
-			}
+			startWord(i)
 			if i+1 == len(b) || spaceAt(b, i+1) {
 				finish(i)
 			}
