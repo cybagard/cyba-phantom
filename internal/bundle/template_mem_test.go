@@ -263,8 +263,8 @@ type ts25Result struct {
 	stack, nano           int64
 }
 
-// TestTS25CapConstants checks that the caps in the code are the numbers of
-// SEC-29. A change of a cap then fails T-S-25.
+// TestTS25CapConstants checks the caps in the code against SEC-29 and the
+// archive caps. It also checks the depth of 9 999. A change then fails T-S-25.
 func TestTS25CapConstants(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -279,7 +279,7 @@ func TestTS25CapConstants(t *testing.T) {
 		{"ts25Depth", ts25Depth, 9999},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d; SEC-29 has %d", c.name, c.got, c.want)
+			t.Errorf("%s is %d; T-S-25 needs %d", c.name, c.got, c.want)
 		}
 	}
 }
