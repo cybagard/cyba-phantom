@@ -213,14 +213,19 @@ func TestTU10_Errors(t *testing.T) {
 }
 
 // TestTU10_ReaderErrorValues checks the load after a reader error. It also
-// parses the value of each known variable. So one load shows all the errors.
+// shows the parse errors and the check errors of each known variable. It
+// runs no cross-check.
 func TestTU10_ReaderErrorValues(t *testing.T) {
 	useTestKeys(t)
-	_, err := loadTest(filepath.Join(t.TempDir(), "missing.yaml"), []string{"PHANTOM_A_PORT=017", "PHANTOM_A_FLAG=true"})
+	_, err := loadTest(filepath.Join(t.TempDir(), "missing.yaml"), []string{"PHANTOM_A_PORT=017", "PHANTOM_A_FLAG=true", "PHANTOM_LIMITS_MAX_CONNS=2001"})
 	if err == nil {
 		t.Fatal("got no error")
 	}
-	for _, want := range []string{": the file does not exist", "a.port at PHANTOM_A_PORT: an integer is a decimal literal only"} {
+	for _, want := range []string{
+		": the file does not exist",
+		"a.port at PHANTOM_A_PORT: an integer is a decimal literal only",
+		"limits.max_conns at PHANTOM_LIMITS_MAX_CONNS: the value must be in the range 1 to 2000",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("got %v, want %q", err, want)
 		}

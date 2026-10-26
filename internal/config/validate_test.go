@@ -950,9 +950,9 @@ func TestTS11_StorePathText(t *testing.T) {
 	}
 }
 
-// tlogLines returns the line breaks of the load error. The store.path error
-// can be "in tlog.dir". Then tlog.dir is in or above store.path, and it has
-// its own error.
+// tlogLines returns the number of line breaks that the load error has. The
+// store.path error can be "in tlog.dir". Then tlog.dir is in or above
+// store.path, and it has its own error.
 func tlogLines(want string) int {
 	if want == "in tlog.dir" {
 		return 1
@@ -961,7 +961,8 @@ func tlogLines(want string) int {
 }
 
 // TestTS11_StorePathLoad checks that the load refuses a store.path in a directory of another key, or a state file,
-// and that the error names store.path only. Each row runs with the other key at its default and set (SEC-20).
+// and that the error names store.path. A path in tlog.dir also gives an
+// error on tlog.dir. Each row runs with the other key at its default and set (SEC-20).
 func TestTS11_StorePathLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
@@ -1041,6 +1042,13 @@ func TestTS11_StorePathLoad(t *testing.T) {
 		}
 		if strings.Count(err.Error(), "\n") != 1 {
 			t.Errorf("got %v, want exactly two errors", err)
+		}
+	})
+	// store.path is above tlog.dir: only tlog.dir has an error.
+	t.Run("store.path above tlog.dir", func(t *testing.T) {
+		_, err := loadProd(t, base, "PHANTOM_STORE_PATH="+s+"a", "PHANTOM_TLOG_DIR="+s+"a/t")
+		if err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: the path must not be in or above store.path") || strings.Contains(err.Error(), "store.path at ") {
+			t.Errorf("got %v, want one error on tlog.dir", err)
 		}
 	})
 	t.Run("moved tlog dir, default store", func(t *testing.T) {
@@ -1124,6 +1132,8 @@ func TestTS11_TLogDirLoad(t *testing.T) {
 		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
 		{"keys in other case", s + "Keys", nil, "in or above the keys directory"},
 		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"in checkpoints in other case", s + "CHECKPOINTS/x", nil, "in or above the checkpoints directory"},
+		{"writer.stop with a capital", s + "Writer.Stop", nil, "must not be writer.stop"},
 		{"acme.cache_dir in other case", s + "CERTS", nil, "in or above acme.cache_dir"},
 		{"above acme.cache_dir in other case", s + "A", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "a/c"}, "in or above acme.cache_dir"},
 	}
@@ -1229,10 +1239,9 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 }
 
 // TestTS11_BundlePathKelvinTLog checks a tlog.dir with a Kelvin sign (U+212A).
-// It is not a K for the compares. The part rule refuses it. The error names
-// tlog.dir only (SEC-23).
-func TestTS11_BundlePathKelvinTLog(t *testing.T) {
-	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom/K", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/k/x.cbnd")
+// The part rule refuses it. The error names tlog.dir only (SEC-11).
+func TestTS11_TLogDirKelvin(t *testing.T) {
+	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom/\u212A", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/k/x.cbnd")
 	if err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: each path part") || strings.Count(err.Error(), "\n") != 0 {
 		t.Errorf("got %v, want one part-rule error on tlog.dir", err)
 	}

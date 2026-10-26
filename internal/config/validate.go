@@ -692,6 +692,9 @@ func keyClash(p string, vals map[string]Value, above bool, names ...string) stri
 
 // dirClash is like keyClash for the directories in stateDirs. It returns
 // the name, for example "the keys directory".
+// For tlogConflict and cacheConflict, the above half is a second check only.
+// Only the state directory is above keys and checkpoints.
+// checkStorePath refuses it first.
 func dirClash(p, root string, above bool) string {
 	for _, d := range stateDirs {
 		if s := foldASCII(filepath.Join(root, d)); inDirText(p, s) || above && inDirText(s, p) {
@@ -815,7 +818,8 @@ func checkACMEName(_ *loader, raw string) string {
 var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // inDirText reports whether the clean path p is the clean path d, or is below
-// it. It compares text only. The function under compares resolved paths.
+// it. It compares text only. The Go function checkStorePath compares
+// resolved paths.
 func inDirText(p, d string) bool {
 	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
 }

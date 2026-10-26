@@ -213,7 +213,11 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		// A reader error does not hide the errors in variable names.
 		// It does not hide the errors in their values.
 		check := func(k key, name, raw string) error {
-			if _, detail := parse(k, raw, ""); detail != "" {
+			_, detail := parse(k, raw, "")
+			if detail == "" && k.check != nil {
+				detail = k.check(l, raw)
+			}
+			if detail != "" {
 				return keyError(k, raw, name, 0, detail)
 			}
 			return nil
@@ -340,7 +344,7 @@ func envFold(name string) string {
 // envEach checks the names in env. If envFold of a name starts with PHANTOM,
 // the key table must contain it. So a name such as PHANTOMX has an error.
 // An unknown name gets the unknown-name error one time. A known name that
-// occurs again gets the repeat error. Its first use calls use. A non-nil
+// is in env again gets the repeat error. Its first use calls use. A non-nil
 // error of use is in the result.
 func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string) error) []error {
 	var errs []error
