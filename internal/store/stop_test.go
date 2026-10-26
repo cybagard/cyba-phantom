@@ -142,7 +142,7 @@ func TestTU18DiscardNeedsNoWriter(t *testing.T) {
 	var d DropCount
 	tick := make(chan time.Time)
 	done := make(chan error, 1)
-	go func() { done <- discard(context.Background(), q, &d, tick) }()
+	go func() { done <- discardLoop(context.Background(), q, &d, tick, func() {}) }()
 	for _, k := range []event.Kind{event.KindRequest, event.KindBeacon, event.KindCallback} {
 		e, err := event.NewEvent(nil, event.Input{Kind: k})
 		if err != nil || !q.Enqueue(e) {
@@ -173,12 +173,11 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 	const m = "zq9marker"
 	cases := []struct {
 		name  string
-		rule  string
 		late  bool // close the database after the start check
 		setup func(r *rig)
 	}{
-		{"closed database", ruleDatabase, true, func(r *rig) { r.db.Close() }},
-		{"refused row", ruleDatabase, false, func(r *rig) { r.app.next = -1 }},
+		{"closed database", true, func(r *rig) { r.db.Close() }},
+		{"refused row", false, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -210,7 +209,7 @@ func TestTU18StopLogsOneLineWithNoRowValue(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRule(t, r.w.Err(), writerName, c.rule)
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
 			text := out.String()
 			if n := strings.Count(text, "\n"); n != 1 || !strings.Contains(text, r.w.Err().Error()) {
 				t.Fatalf("%d log lines, want 1: %q", n, text)

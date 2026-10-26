@@ -366,8 +366,8 @@ func TestTI09_EntryErrorDoesNotBackOffTargets(t *testing.T) {
 			t.Errorf("target %d stored %v, want 1 3 with no wait after the entry error", i, stored)
 		}
 	}
-	if got := e.spool.Stats().Rejected; got != 4 { // 2 targets in 2 passes
-		t.Errorf("rejected = %d, want 4", got)
+	if got := e.spool.Stats().Rejected; got != 1 { // one entry
+		t.Errorf("rejected = %d, want 1", got)
 	}
 	if n := strings.Count(e.logs.String(), "refused an entry that is not a note"); n != 4 {
 		t.Errorf("log has %d lines for the entry, want one for each target and pass: %s", n, e.logs)

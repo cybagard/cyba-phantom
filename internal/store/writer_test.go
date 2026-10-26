@@ -123,10 +123,21 @@ func (r *rig) wait(done <-chan error) error {
 	}
 }
 
+// launchCancelable makes a context from ctx and launches Run with it. A cleanup
+// cancels that context at the end of the test, so Run ends also when the test
+// fails.
+func (r *rig) launchCancelable(ctx context.Context) (<-chan error, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := r.launch(ctx)
+	r.t.Cleanup(func() { r.stopRun(cancel) })
+	return done, cancel
+}
+
 // run calls Run and waits for it with a bound.
 func (r *rig) run(ctx context.Context) error {
 	r.t.Helper()
-	return r.wait(r.launch(ctx))
+	done, _ := r.launchCancelable(ctx)
+	return r.wait(done)
 }
 
 // gate makes the next AppendBatch call wait. ungate releases it. Call gate only
@@ -157,9 +168,7 @@ func (r *rig) stopRun(cancel context.CancelFunc) {
 // start runs the writer goroutine. The returned function stops it. If the test
 // fails first, the cleanup releases the gate and cancels ctx, so Run ends.
 func (r *rig) start() (stop func() error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := r.launch(ctx)
-	r.t.Cleanup(func() { r.stopRun(cancel) })
+	done, cancel := r.launchCancelable(context.Background())
 	return func() error {
 		cancel()
 		return r.wait(done)
@@ -361,6 +370,9 @@ func TestTU18EvidenceRowsHaveHashLeafAndRecord(t *testing.T) {
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
+	if s := r.w.Stats(); s.OrphanLeaves != 0 {
+		t.Fatalf("%d orphan leaves after good batches", s.OrphanLeaves)
+	}
 	if len(r.app.calls) != 2 || len(r.app.calls[0]) != 2 || len(r.app.calls[1]) != 3 ||
 		r.app.firsts[0] != 100 || r.app.firsts[1] != 102 {
 		t.Fatalf("appender calls %v at %v", r.app.calls, r.app.firsts)
@@ -502,7 +514,7 @@ func TestTU18CloseWhileRunning(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, 100)
-			done := r.launch(context.Background())
+			done, _ := r.launchCancelable(context.Background())
 			for i := int64(0); i < 10; i++ {
 				r.add(event.KindRequest, i)
 			}
@@ -592,10 +604,12 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 	}
 }
 
-// runAfterStart starts the writer and waits until it has passed the start check
-// and committed one event. Then it calls late, calls batch to queue the events,
-// closes the queue, and returns the result of Run. Thus late changes the world
-// after the start check and before the batch is written.
+// runAfterStart starts the writer. It waits until the writer has passed the
+// start check and committed one event. Then it calls late and calls batch to
+// queue the events. It closes the queue and returns the result of Run. Thus
+// late runs after the start check and before the write of the batch. The
+// function late can change the database, the appender or a hook of the writer.
+// The stop function that start gives also cancels the context of Run.
 func (r *rig) runAfterStart(late, batch func()) error {
 	r.t.Helper()
 	stop := r.start()
@@ -621,13 +635,12 @@ func (r *rig) runAfterStart(late, batch func()) error {
 func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
 		name    string
-		rule    string
 		late    bool // close the database after the start check
 		orphans uint64
 		setup   func(r *rig)
 	}{
-		{"closed database", ruleDatabase, true, 0, func(r *rig) { r.db.Close() }},
-		{"refused row", ruleDatabase, false, 1, func(r *rig) { r.app.next = -1 }},
+		{"closed database", true, 0, func(r *rig) { r.db.Close() }},
+		{"refused row", false, 1, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -648,7 +661,7 @@ func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRule(t, r.w.Err(), writerName, c.rule)
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
 			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != c.orphans {
 				t.Fatalf("healthy %v, %d commits, stats %+v", r.w.Healthy(), len(r.commits), r.w.Stats())
 			}
@@ -691,10 +704,10 @@ func (r *rig) ipCounters() (out []string) {
 	return out
 }
 
-// T-U-18: take a good AppendBatch call. After it, an error of the record bytes,
-// of an insert, of the drop counts or of the COMMIT counts each leaf of the
-// batch as an orphan leaf. The writer stops and no row of the batch exists. The
-// batch has three evidence events.
+// T-U-18: take a good AppendBatch call. After it, four errors each count each
+// leaf of the batch as an orphan leaf. They are the errors of the record bytes,
+// of an insert, of the drop counts and of the COMMIT. The writer stops and no
+// row of the batch exists. The batch has three evidence events.
 func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -871,9 +884,9 @@ func TestTU18ShutdownWritesTheCountsInMemory(t *testing.T) {
 }
 
 // T-U-18: the last batch at Close has an event, and a drop is counted after the
-// snapshot of that batch. The last step of the shutdown, a flush of an empty
-// batch, writes this late count: one ip_counter row, the overflow row, with
-// dropped 1, and nothing pending.
+// snapshot of that batch. The last step of the shutdown is a flush of an empty
+// batch. It writes this late count. The result is one ip_counter row, the
+// overflow row, with dropped 1, and nothing pending.
 func TestTU18ShutdownLastStepWritesLateCounts(t *testing.T) {
 	r := newRig(t, 100)
 	dropped := false
@@ -892,6 +905,63 @@ func TestTU18ShutdownLastStepWritesLateCounts(t *testing.T) {
 	got := r.ipCounters()
 	if len(got) != 1 || !strings.HasSuffix(got[0], " "+overflowHMAC+" 1") || r.c.Pending() {
 		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+}
+
+// T-U-18: the COMMIT of the last batch at Close fails while a drop count is
+// pending. The test counts the drop after the snapshot of that batch. The
+// writer stops inside the shutdown. Its last flush then writes no ip_counter
+// row, and the count stays pending.
+func TestTU18ShutdownCommitErrorStopsTheWriter(t *testing.T) {
+	r := newRig(t, 100)
+	calls := 0
+	r.w.beforeCommit = func(*sql.Tx) error {
+		if calls++; calls == 1 {
+			r.c.DropNoAddr()
+			return errors.New("commit refused")
+		}
+		return nil
+	}
+	r.add(event.KindRequest, 1)
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if got := r.ipCounters(); len(got) != 0 || !r.c.Pending() || r.rows() != 0 || calls != 1 {
+		t.Fatalf("ip_counter %q, pending %v, %d rows, %d COMMIT tries", got, r.c.Pending(), r.rows(), calls)
+	}
+	if got := r.w.Stats().Dropped; got != (Drops{Bulk: 1}) {
+		t.Fatalf("dropped %+v, want bulk 1", got)
+	}
+}
+
+// T-U-18: the PRAGMA synchronous=NORMAL after a good COMMIT fails. The writer
+// stops, but the rows exist, so no event of the batch counts as a drop. The
+// batch has three bulk and two evidence events.
+func TestTU18FailedNormalAfterCommitDropsNothing(t *testing.T) {
+	r := newRig(t, 100)
+	r.w.beforePragma = func(stmt string) error {
+		if stmt == "PRAGMA synchronous=NORMAL" {
+			return errors.New("pragma refused")
+		}
+		return nil
+	}
+	r.addMixedBatch()
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if s := r.w.Stats(); s.Dropped != (Drops{}) || s.OrphanLeaves != 0 || r.rows() != 5 || r.evidenceRows() != 2 || len(r.commits) != 1 {
+		t.Fatalf("stats %+v, %d rows, %d evidence rows, %d commits", s, r.rows(), r.evidenceRows(), len(r.commits))
+	}
+}
+
+// addMixedBatch queues three bulk and two evidence events.
+func (r *rig) addMixedBatch() {
+	for i, k := range []event.Kind{event.KindRequest, event.KindCallback, event.KindBeacon, event.KindAlertSent, event.KindRequest} {
+		r.add(k, int64(i+1))
 	}
 }
 
