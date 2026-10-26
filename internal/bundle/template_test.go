@@ -223,7 +223,7 @@ func files(n int, text string) []ent {
 // T-U-08: each cap holds at its value and refuses one byte or one "{{" more,
 // with no Parse call. The bundle caps are reached by a split over templates.
 func TestTU08TemplateCaps(t *testing.T) {
-	act := strings.Repeat("{{1}}", maxTemplateActions)
+	act := strings.Repeat("{{1}}", 2048)
 	for _, c := range []struct {
 		name string
 		ents []ent
@@ -232,11 +232,11 @@ func TestTU08TemplateCaps(t *testing.T) {
 		{"template bytes", files(1, strings.Repeat("a", maxTemplateBytes)), 1},
 		{"template bytes, over", files(1, strings.Repeat("a", maxTemplateBytes+1)), 0},
 		{"template actions", files(1, act), 1},
-		{"template actions, over", files(1, act+"{{1}}"), 0},
+		{"template actions, over", files(1, act+"{{1}}"), 0}, // 2 049
+		{"bundle actions, split", files(8, act), 8},          // 16 384
 		{"bundle bytes, split", files(8, strings.Repeat("a", maxTemplateBytes)), 8},
 		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", maxTemplateBytes)), tf("vhosts/h.example/z.tmpl", "a")), 0},
-		{"bundle actions, split", files(4, act), 4},
-		{"bundle actions, split, over", append(files(4, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},
+		{"bundle actions, split, over", append(files(8, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},
 		{"4 MiB of nested if", files(1, strings.Repeat("{{if 1}}", MaxEntryBytes/8)), 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -248,6 +248,23 @@ func TestTU08TemplateCaps(t *testing.T) {
 				t.Errorf("got %d calls, %d kept, %v; want %d", calls, len(set), err, c.n)
 			}
 		})
+	}
+}
+
+// T-U-08: a template at the "{{" cap has 2 047 open "if" levels, 9 999 nested
+// parentheses and no "end". The parse reaches the end of the input. It gives
+// the fixed error, and the process runs on.
+func TestTU08NestedTemplateParseError(t *testing.T) {
+	text := strings.Repeat("{{if 1}}", 2047) + "{{" + strings.Repeat("(", 9999) + "1" + strings.Repeat(")", 9999) + "}}"
+	if len(text) > 64<<10 || strings.Count(text, "{{") != 2048 {
+		t.Fatalf("text has %d bytes and %d \"{{\"; want at most 64 KiB and 2048", len(text), strings.Count(text, "{{"))
+	}
+	if _, raw := newTemplate("x").Parse(text); raw == nil || !strings.Contains(raw.Error(), "unexpected EOF") {
+		t.Fatalf("raw error %v; want unexpected EOF", raw)
+	}
+	calls, set, err := parseCount(t, files(1, text)...)
+	if err != ErrTemplateParse || calls != 1 || set != nil {
+		t.Errorf("got %d calls, %v; want 1 Parse call and %v", calls, err, ErrTemplateParse)
 	}
 }
 
