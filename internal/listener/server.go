@@ -21,8 +21,11 @@ type Config struct {
 	// TLS gives the certificates. New refuses a config that sets NextProtos or
 	// GetConfigForClient, because the server sets both. The server clones the
 	// config, sets the ALPN list to http/1.1 and acme-tls/1, and sets the
-	// ClientHello capture. A connection that negotiates acme-tls/1 gets no HTTP
-	// and closes after the handshake.
+	// ClientHello capture. If GetCertificate is set, the server wraps it. Any
+	// error of it with no gate result gives no event. Examples are no
+	// certificate to give, and acme-tls/1 with no active challenge. A
+	// connection that negotiates acme-tls/1 gets no HTTP and closes after the
+	// handshake.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
 	// all Serve and ServePlain calls. limits.max_conns.
@@ -208,6 +211,19 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	// acme-tls/1, crypto/tls refuses that client before it calls GetCertificate.
 	s.tls.NextProtos = []string{"http/1.1", challengeProto}
 	s.tls.GetConfigForClient = captureHello
+	if get := s.tls.GetCertificate; get != nil {
+		// Any error with no gate result gives no event. Examples are no
+		// certificate to give, and acme-tls/1 with no active challenge.
+		s.tls.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			cert, err := get(hello)
+			if err != nil {
+				if lc := helloConn(hello); lc != nil {
+					lc.markNoCert()
+				}
+			}
+			return cert, err
+		}
+	}
 	s.srv = s.newHTTP(h)
 	// net/http also closes a TLS connection whose negotiated protocol has no
 	// TLSNextProto function, without HTTP. This entry makes that behavior
@@ -265,6 +281,17 @@ func limitConnOf(c net.Conn) *limitConn {
 	return lc
 }
 
+// helloConn returns the limitConn of the connection of hello, or nil. A hello
+// that a test makes by hand has a nil context.
+func helloConn(hello *tls.ClientHelloInfo) *limitConn {
+	ctx := hello.Context()
+	if ctx == nil {
+		return nil
+	}
+	lc, _ := ctx.Value(limitConnKey{}).(*limitConn)
+	return lc
+}
+
 // markRequest wraps h. It counts h as a running handler of s. The count goes
 // down in a defer, because net/http recovers a panic of h outside this wrapper.
 // Before h runs, it marks the request on its limitConn. A request without a
@@ -284,8 +311,8 @@ func (s *Server) markRequest(h http.Handler) http.Handler {
 // period of the connection. A connection that read more than keepAliveBytes in
 // its period closes, so it gets no keep-alive. It also closes a connection with
 // more than keepAliveBytes late bytes. At a close, it makes the refused event
-// of a refused request head. It must not wait on the network. It does not
-// change a connection of another type.
+// of a failed handshake or of a refused request head. It must not wait on the
+// network. It does not change a connection of another type.
 func (s *Server) connHook(c net.Conn, st http.ConnState) {
 	switch lc := limitConnOf(c); {
 	case lc == nil:
@@ -296,19 +323,30 @@ func (s *Server) connHook(c net.Conn, st http.ConnState) {
 	}
 }
 
-// refusedAtClose makes one refused event when net/http refused a request head
-// before the handler (SEC-22). Only a *tls.Conn with a complete handshake
-// counts. The rule does not use http.StateActive.
+// refusedAtClose makes at most one refused event for a *tls.Conn (SEC-22).
+// After a complete handshake, it does so when net/http refused a request head
+// before the handler. The rule does not use http.StateActive. After a failed
+// handshake, the reason comes from handshakeReason. The server makes no event
+// while it closes.
 func (s *Server) refusedAtClose(c net.Conn, lc *limitConn) {
 	tc, ok := c.(*tls.Conn)
-	if !ok || !lc.refusedRequest() || !tc.ConnectionState().HandshakeComplete {
+	if !ok {
+		return
+	}
+	reason := event.ReasonRefusedRequest
+	if tc.ConnectionState().HandshakeComplete {
+		ok = lc.refusedRequest()
+	} else {
+		reason, ok = lc.handshakeReason()
+	}
+	if !ok {
 		return
 	}
 	s.mu.Lock()
 	closing := s.closed
 	s.mu.Unlock()
 	if !closing {
-		s.refused.emit(event.ReasonRefusedRequest, c.RemoteAddr())
+		s.refused.emit(reason, c.RemoteAddr())
 	}
 }
 
