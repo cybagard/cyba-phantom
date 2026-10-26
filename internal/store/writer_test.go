@@ -634,13 +634,12 @@ func (r *rig) runAfterStart(late, batch func()) error {
 func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 	cases := []struct {
 		name    string
-		rule    string
 		late    bool // close the database after the start check
 		orphans uint64
 		setup   func(r *rig)
 	}{
-		{"closed database", ruleDatabase, true, 0, func(r *rig) { r.db.Close() }},
-		{"refused row", ruleDatabase, false, 1, func(r *rig) { r.app.next = -1 }},
+		{"closed database", true, 0, func(r *rig) { r.db.Close() }},
+		{"refused row", false, 1, func(r *rig) { r.app.next = -1 }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -661,7 +660,7 @@ func TestTU18DatabaseErrorsRollBackTheBatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRule(t, r.w.Err(), writerName, c.rule)
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
 			if r.w.Healthy() || len(r.commits) != 0 || r.w.Stats().OrphanLeaves != c.orphans {
 				t.Fatalf("healthy %v, %d commits, stats %+v", r.w.Healthy(), len(r.commits), r.w.Stats())
 			}

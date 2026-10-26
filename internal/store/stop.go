@@ -102,8 +102,8 @@ func Discard(ctx context.Context, q *event.Queue, d *DropCount) error {
 	return discardLoop(ctx, q, d, t.C, func() {})
 }
 
-// discardLoop is discard with a function that runs at each tick, before the
-// drop. The writer uses it to try again to make the stop marker.
+// discardLoop is the loop of Discard, with a function that runs at each tick
+// before the drop. The writer uses it to try again to make the stop marker.
 func discardLoop(ctx context.Context, q *event.Queue, d *DropCount, tick <-chan time.Time, onTick func()) error {
 	for {
 		select {
