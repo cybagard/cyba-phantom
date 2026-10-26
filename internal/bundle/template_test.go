@@ -229,14 +229,16 @@ func TestTU08TemplateCaps(t *testing.T) {
 		ents []ent
 		n    int // files that load at the cap
 	}{
-		{"template bytes", files(1, strings.Repeat("a", maxTemplateBytes)), 1},
-		{"template bytes, over", files(1, strings.Repeat("a", maxTemplateBytes+1)), 0},
+		{"template bytes", files(1, strings.Repeat("a", 64<<10)), 1},
+		{"template bytes, over", files(1, strings.Repeat("a", 64<<10+1)), 0},
 		{"template actions", files(1, act), 1},
-		{"template actions, over", files(1, act+"{{1}}"), 0}, // 2 049
-		{"bundle actions, split", files(8, act), 8},          // 16 384
-		{"bundle bytes, split", files(8, strings.Repeat("a", maxTemplateBytes)), 8},
-		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", maxTemplateBytes)), tf("vhosts/h.example/z.tmpl", "a")), 0},
-		{"bundle actions, split, over", append(files(8, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},
+		{"template actions, over", files(1, act+"{{1}}"), 0},                                                                // 2 049 "{{"
+		{"template actions, over, in a comment", files(1, strings.Repeat("{{1}}", 2047)+"{{/* {{ */}}"), 0},                 // 2 049 "{{"
+		{"template actions, over, in a string", files(1, strings.Repeat("{{1}}", 2047)+`{{"{{"}}`), 0},                      // 2 049 "{{"
+		{"bundle actions, split", files(8, act), 8},                                                                         // 8 x 2 048 = 16 384 "{{"
+		{"bundle actions, split, over", append(files(8, act), tf("vhosts/h.example/z.tmpl", "{{1}}")), 0},                   // 16 385 "{{"
+		{"bundle bytes, split", files(8, strings.Repeat("a", 64<<10)), 8},                                                   // 8 x 64 KiB = 512 KiB
+		{"bundle bytes, split, over", append(files(8, strings.Repeat("a", 64<<10)), tf("vhosts/h.example/z.tmpl", "a")), 0}, // 512 KiB + 1 byte
 		{"4 MiB of nested if", files(1, strings.Repeat("{{if 1}}", MaxEntryBytes/8)), 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -253,18 +255,18 @@ func TestTU08TemplateCaps(t *testing.T) {
 
 // T-U-08: a template at the "{{" cap has 2 047 open "if" levels, 9 999 nested
 // parentheses and no "end". The parse reaches the end of the input. It gives
-// the fixed error, and the process runs on.
+// the fixed error, and the process does not stop.
 func TestTU08NestedTemplateParseError(t *testing.T) {
 	text := strings.Repeat("{{if 1}}", 2047) + "{{" + strings.Repeat("(", 9999) + "1" + strings.Repeat(")", 9999) + "}}"
 	if len(text) > 64<<10 || strings.Count(text, "{{") != 2048 {
-		t.Fatalf("text has %d bytes and %d \"{{\"; want at most 64 KiB and 2048", len(text), strings.Count(text, "{{"))
+		t.Fatalf("text has %d bytes and %d \"{{\"; want at most 64 KiB and 2 048", len(text), strings.Count(text, "{{"))
 	}
 	if _, raw := newTemplate("x").Parse(text); raw == nil || !strings.Contains(raw.Error(), "unexpected EOF") {
 		t.Fatalf("raw error %v; want unexpected EOF", raw)
 	}
 	calls, set, err := parseCount(t, files(1, text)...)
 	if err != ErrTemplateParse || calls != 1 || set != nil {
-		t.Errorf("got %d calls, %v; want 1 Parse call and %v", calls, err, ErrTemplateParse)
+		t.Errorf("got %d calls, %v, set %v; want 1 Parse call, %v and no set", calls, err, set, ErrTemplateParse)
 	}
 }
 
