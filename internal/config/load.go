@@ -246,8 +246,8 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	// File: each node must be a known key or section. The errors come
-	// sorted by line, then by path.
+	// File: each node must be a known key or section. The loader reads the
+	// nodes in order of line, then path. The errors have the same order.
 	paths := slices.Collect(maps.Keys(doc.Lines))
 	slices.SortFunc(paths, func(a, b string) int {
 		return cmp.Or(cmp.Compare(doc.Lines[a], doc.Lines[b]), cmp.Compare(a, b))

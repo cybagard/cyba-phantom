@@ -333,8 +333,11 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src *lineCurs
 // bareTag reports whether the file has the non-specific tag "!" before the
 // scalar n. The parser drops it. Style is that of the scalar without the tag.
 // Tag is "!!str" for a quoted or block scalar. The node starts at the tag.
-// A plain, quoted or block scalar cannot start with "!". Column counts
-// runes, so the function skips runes and does not copy the line.
+// A plain, quoted or block scalar cannot start with "!". An empty value can
+// have the position of the next node. If that node starts with "!", the
+// empty value gets the tag "!". Load refuses an empty value for each kind
+// in any case. Column counts runes, so the function skips runes and does
+// not copy the line.
 // The scalars of one line come in rising column order. So src resumes where
 // the last call stopped, and the cost for a line is linear.
 func bareTag(n *yaml.Node, src *lineCursor) bool {

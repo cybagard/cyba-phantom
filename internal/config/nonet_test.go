@@ -25,8 +25,9 @@ import (
 //   - a dot import of net or syscall;
 //   - an import of net/http, net/smtp, net/rpc, crypto/tls, golang.org/x/net, or a path
 //     below one of them;
-//   - a selector X.Y where X is the local name of the syscall import and Y is Socket,
-//     Socketpair, Connect, Bind, Listen, Sendto, or Sendmsg.
+//   - a selector X.Y where X is the local name of the import of the package
+//     syscall. Y is Socket, Socketpair, Connect, Bind, Listen, Sendto, or
+//     Sendmsg.
 //
 // The test does not detect every way to use the network. It misses, for
 // example, a parenthesised call (SystemNet)() and a function value of

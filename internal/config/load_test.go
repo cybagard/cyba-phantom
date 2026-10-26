@@ -334,7 +334,8 @@ func TestTS10_EnvNameForms(t *testing.T) {
 
 // TestTS10_WrittenTag checks the YAML tags of a file value through Load.
 // The tag "!" gives an error that names the key. So does a tag other than
-// "!!str" on a quoted or block scalar. A tag on a plain scalar stays valid.
+// "!!str" on a quoted or block scalar. A core tag on a plain scalar of its
+// kind stays valid, for example "!!int" on an int.
 // So does "!!str" on a quoted or block scalar.
 func TestTS10_WrittenTag(t *testing.T) {
 	useTestKeys(t)
@@ -440,8 +441,8 @@ func TestTS10_BareTagPosition(t *testing.T) {
 }
 
 // TestTS10_BareTagAlloc checks that the reader does not copy the line for each
-// scalar. A flow line of 64 KiB stays in a small byte budget. A copy for each
-// scalar needs gigabytes.
+// scalar. A flow line of about 64 000 bytes stays in a small byte budget.
+// A copy for each scalar needs gigabytes.
 func TestTS10_BareTagAlloc(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -456,9 +457,9 @@ func TestTS10_BareTagAlloc(t *testing.T) {
 	}
 }
 
-// TestTS10_BareTagSteps checks that bareTag reads each rune of a line one
-// time. A flow line with many scalars gives at most twice its length in
-// steps. A read from the line start for each scalar gives a square.
+// TestTS10_BareTagSteps checks that the rune reads of bareTag on one line
+// stay linear. A flow line with many scalars gives at most twice its length
+// in steps. A read from the line start for each scalar gives a square.
 func TestTS10_BareTagSteps(t *testing.T) {
 	line := "a: [" + strings.Repeat("1,", 32000) + "1]"
 	var node yaml.Node
