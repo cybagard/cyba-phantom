@@ -284,8 +284,8 @@ func TestTS10_OldPrefixIgnored(t *testing.T) {
 	}
 }
 
-// TestTS10_Secret checks that no error shows a secret value. The value is in
-// a value, a tag, a mapping key, or a key below a secret key.
+// TestTS10_Secret checks that no error shows the secret. The secret is in a
+// YAML value, a tag, a mapping key, or a key below a secret key.
 // The joined text of the errors holds want.
 func TestTS10_Secret(t *testing.T) {
 	useTestKeys(t)
@@ -314,8 +314,8 @@ func TestTS10_Secret(t *testing.T) {
 	}
 }
 
-// TestTS10_NoUserName checks that a value with no scheme loses the user name.
-// It checks a URL key, which prints no value, and a key that prints its value.
+// TestTS10_NoUserName checks values in which the text before the ":" is not a
+// URL scheme, or fewer than 2 slashes or backslashes follow the ":".
 func TestTS10_NoUserName(t *testing.T) {
 	useTestKeys(t)
 	for _, v := range []struct{ in, user string }{
@@ -418,11 +418,11 @@ func TestTS10_Escape(t *testing.T) {
 		{"https:/\t/u:SECRET@h", `https:/\t/REDACTED@h`},
 		{"user:SECRET@tcp(h:3306)/db", "REDACTED@tcp(h:3306)/db"},
 		{"ops@corp.example:SECRET@tcp(h)/db", "REDACTED@tcp(h)/db"},
-		{"user:/pw@tcp(h)/db", "REDACTED@tcp(h)/db"}, {"ops@corp.example:/pw@h", "REDACTED@h"},
-		{"user: pw@h", "REDACTED@h"}, {"user:\tpw@h", "REDACTED@h"}, {`user:\pw@h`, "REDACTED@h"},
-		{"user//x:pw@h", "REDACTED@h"}, {"mysql:user:pw@h", "REDACTED@h"},
+		{"user:/pw@tcp(h)/db", "REDACTED@tcp(h)/db"}, {"ops@corp.example:/pw@h", "REDACTED@h"}, {"ops@corp.example://pw@h", "REDACTED@h"},
+		{"user: pw@h", "REDACTED@h"}, {"user:\tpw@h", "REDACTED@h"}, {`user:\pw@h`, "REDACTED@h"}, {"1user://pw@h", "REDACTED@h"},
+		{"user//x:pw@h", "REDACTED@h"}, {"mysql:user:pw@h", "REDACTED@h"}, {"ht tps://u:pw@h", "REDACTED@h"},
 		{"\u202e" + strings.Repeat("é", 40), `\u202e` + strings.Repeat(`\u00e9`, 9)},
-		{"bad\xff", `bad\xff`},
+		{"bad\xff", `bad\xff`}, {"x.y://u:pw@h", "x.y://REDACTED@h"},
 	}
 	for _, r := range rows {
 		got := esc(r.in, 64)
@@ -435,8 +435,8 @@ func TestTS10_Escape(t *testing.T) {
 	}
 }
 
-// TestTS10_EscapeCut checks the cut. The result is not empty and has at most
-// |max| bytes. Only a left cut starts with the cut marker.
+// TestTS10_EscapeCut checks the cut for these max values. The result is not
+// empty and has at most |max| bytes. Only a left cut starts with the marker.
 func TestTS10_EscapeCut(t *testing.T) {
 	for _, in := range []string{
 		strings.Repeat("\x80", 100), strings.Repeat("\U0010ffff", 100), strings.Repeat("\x1b", 100), strings.Repeat("a", 100),
@@ -454,8 +454,8 @@ func TestTS10_EscapeCut(t *testing.T) {
 	if got, want := esc(strings.Repeat("a", 100), -64), cutMarker+strings.Repeat("a", 61); got != want {
 		t.Errorf("left cut = %q, want %q", got, want)
 	}
-	// Each result without the marker is a whole prefix or suffix of the full
-	// escape. A token (an escape or a character) is at each offset at the edge.
+	// After the marker is removed, each result is a whole prefix or suffix of the
+	// full escape. The loops put each token at each offset near the cut edge.
 	for _, tok := range []string{`\`, "\n", `"`, "\x1b", "é", "\U0010ffff"} {
 		for p := 50; p <= 70; p++ {
 			for n := 0; n <= 70; n++ {

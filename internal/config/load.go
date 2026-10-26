@@ -278,8 +278,8 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 
 // envEach checks the names in env. If a name starts with PHANTOM_ (in upper
 // case, with "-" changed to "_"), the key table must contain it.
-// It returns an error for each unknown name and each repeated name.
-// For the first use of a known name, it calls use, if use is not nil.
+// An unknown name gets the unknown-name error each time. A known name that
+// occurs again gets the repeat error. A first use calls use, if use is set.
 func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string)) []error {
 	var errs []error
 	seen := make(map[string]bool)
@@ -440,8 +440,8 @@ var scheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
 
 // redact replaces the user information in s with "REDACTED@".
 // It keeps the text before "REDACTED@" in two cases only.
-// In case 1, the text before the ":" is a URL scheme.
-// Also, the match has 2 or more slashes or backslashes after the ":".
+// In case 1, both conditions are true: the text before the ":" is a URL
+// scheme. And 2 or more slashes or backslashes follow the ":".
 // In case 2, the match is two slashes or backslashes at the start of s.
 // In each other case, redact keeps no text before "REDACTED@".
 func redact(s string) string {
@@ -461,9 +461,9 @@ func redact(s string) string {
 }
 
 // esc is the one escaper for printed text (SEC-07).
-// It redacts the user information. Then it escapes control characters,
-// ANSI sequences, and non-ASCII runes. Last, it cuts the escaped text to
-// max bytes. It never cuts an escape sequence.
+// It redacts the user information. Then it escapes control characters
+// (with the ESC byte of an ANSI sequence), quotes, backslashes, and non-ASCII
+// runes. It cuts the result to max bytes. It never cuts an escape sequence.
 // If max < 0 and the cut removes text, the result starts with cutMarker.
 // If max >= 0 or max <= -3, the result has at most |max| bytes.
 func esc(s string, max int) string {
