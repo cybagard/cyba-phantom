@@ -763,7 +763,7 @@ func TestTU10_URLOutput(t *testing.T) {
 func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	t.Helper()
 	const htpasswdEnv = "PHANTOM_OPS_BASIC_AUTH_HTPASSWD"
-	// The loader rejects a variable that occurs two times, so the default is set only if the caller does not set it.
+	// The loader rejects a variable that is in env two times, so the default is set only if the caller does not set it.
 	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
 	}
@@ -1628,7 +1628,7 @@ func TestTU10_ListKeys(t *testing.T) {
 	}
 	for _, name := range []string{"PHANTOM_TLOG_PUBLISH", "PHANTOM_TLOG_PUBLISH_0_URL", "PHANTOM_ALERTS_SINKS", "PHANTOM_ALERTS_SINKS_0_TYPE", "PHANTOM_ALERTS_SINKS_2_TO"} {
 		_, err := loadProd(t, file, append([]string{name + "=x"}, append([]string{"OTHER_TOKEN=x"}, listEnv...)...)...)
-		if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM_ variable") {
+		if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM variable") {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
@@ -1910,7 +1910,7 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"label of 63 bytes", namesFile(l63 + ".example"), "", ""},
 		{"name of 253 bytes", namesFile(name253), "", ""},
 		{"digits and hyphen", namesFile("a-1.b2-c.example"), "", ""},
-		// The row bars the names below home.arpa, not home.arpa: it has two labels, so it loads.
+		// The rule refuses the names below home.arpa, not home.arpa. That name has two labels, so it loads.
 		{"home.arpa", namesFile("home.arpa"), "", ""},
 		{"0 names", namesFile(), "", key},
 		{"17 names", namesFile(many...), "", key},
@@ -1932,7 +1932,7 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"below local", namesFile("x.local"), "", key},
 		{"below internal", namesFile("x.internal"), "", key},
 		{"below home.arpa", namesFile("x.home.arpa"), "", key},
-		// The names local and internal have one label: the rule for two labels bars them.
+		// The names local and internal have one label: the rule for two labels refuses them.
 		{"local", namesFile("local"), "", key},
 		{"internal", namesFile("internal"), "", key},
 		{"duplicate", namesFile("a.example.com", "b.example.com", "a.example.com"), "", key},
@@ -1940,7 +1940,7 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"not a string", strings.Replace(base, "[decoy.example.com]", "[12]", 1), "", "acme.names[0]"},
 		{"not a list", strings.Replace(base, "[decoy.example.com]", "decoy.example.com", 1), "", key},
 		{"missing", strings.Replace(base, acmeNames, "", 1), "", key},
-		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM_ variable"},
+		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM variable"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1961,8 +1961,8 @@ func TestTS11_ACMENames(t *testing.T) {
 	}
 }
 
-// TestTS11_ACMENamesTripleDuplicate checks that a name that occurs 3 times gives one duplicate error
-// line, not one for each extra occurrence (SEC-21, T-S-11).
+// TestTS11_ACMENamesTripleDuplicate checks that a name that is in the list 3 times gives one duplicate
+// error line, not one for each extra copy (SEC-21, T-S-11).
 func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
 	_, err := loadProd(t, namesFile("a.example.com", "a.example.com", "a.example.com"))
 	if err == nil {
