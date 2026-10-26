@@ -88,8 +88,8 @@ func ts25Parens(n int) string {
 	return "{{" + strings.Repeat("(", d) + "1" + strings.Repeat(" ", (n-5)%2) + strings.Repeat(")", d) + "}}"
 }
 
-// ts25ParensFill is actions of depth 9 999 and two last actions for the rest.
-// The last two can be shallower when the rest is small.
+// ts25ParensFill is actions of depth 9 999, then one action for the rest. If
+// the rest is 1 to 4 bytes, the last two actions share it and are shallower.
 func ts25ParensFill(size int) string {
 	var b strings.Builder
 	for size > 0 {
@@ -392,7 +392,7 @@ func TestTS25Child(t *testing.T) {
 }
 
 // ts25Archive makes an archive with one file for each text. A fill file brings
-// it to MaxDecodedBytes. The second result is the rest of the 24 MiB.
+// it to ts25DecodedBytes (8 MiB). The second result is the rest of the 24 MiB.
 func ts25Archive(texts []string) (*Archive, []byte) {
 	a := &Archive{files: map[string][]byte{}}
 	total := 0
