@@ -25,7 +25,8 @@ const (
 	ts25GC       = 50
 	ts25Limit    = 256 << 20
 	ts25MixSmall = 1023 // templates of one action before the last template
-	ts25MaxParen = 2*9999 + 5
+	ts25Depth    = 9999
+	ts25MaxParen = 2*ts25Depth + 5
 )
 
 // The caps of SEC-29 as numbers. The code constants must equal them.
@@ -162,12 +163,19 @@ type ts25Case struct {
 	texts func() []string
 }
 
-// ts25Fills checks that each text is within one unit of its binding cap.
+// ts25Deep is false for a text with parentheses that does not reach depth 9 999.
+func ts25Deep(s string) bool {
+	return !strings.Contains(s, "((") || strings.Contains(s, strings.Repeat("(", ts25Depth))
+}
+
+// ts25Fills checks that each text is within one unit of its binding cap, and
+// that a text with the room for it reaches depth 9 999.
 func ts25Fills(size, acts, ub, ua int) func([]string) string {
 	return func(texts []string) string {
 		for _, s := range texts {
-			if n := strings.Count(s, "{{"); size-len(s) >= ub && acts-n >= ua {
-				return fmt.Sprintf("a text has %d bytes and %d \"{{\"; the caps are %d and %d", len(s), n, size, acts)
+			if n := strings.Count(s, "{{"); size-len(s) >= ub && acts-n >= ua || size >= 2*ts25Depth+5 && !ts25Deep(s) {
+				return fmt.Sprintf("a text has %d bytes and %d \"{{\" (caps %d and %d) or too little depth",
+					len(s), n, size, acts)
 			}
 		}
 		return ""
@@ -182,8 +190,8 @@ func ts25MixFills(acts int) func([]string) string {
 		for _, s := range texts {
 			total += len(s)
 		}
-		if n := strings.Count(last, "{{"); total != ts25BundleBytes || len(last) != ts25TmplBytes || n != acts {
-			return fmt.Sprintf("the bundle has %d bytes, the last template %d bytes and %d \"{{\"",
+		if n := strings.Count(last, "{{"); total != ts25BundleBytes || len(last) != ts25TmplBytes || n != acts || !ts25Deep(last) {
+			return fmt.Sprintf("the bundle has %d bytes, the last template %d bytes and %d \"{{\", or too little depth",
 				total, len(last), n)
 		}
 		return ""
