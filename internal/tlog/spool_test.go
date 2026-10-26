@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +16,9 @@ import (
 )
 
 var spoolTargets = []string{"https://a.test/put", "https://b.test/put"}
+
+// overfull is the newest size of a spool that gets 5 notes more than the bound.
+const overfull = maxSpoolNotes + 5
 
 // fakeSender records the sizes for each target. failAt makes one size fail for
 // a target until the test clears it.
@@ -79,17 +81,20 @@ func TestTI09_SpoolFiles(t *testing.T) {
 	e.add(t, 7)
 	want, err := SignCheckpoint(e.signer, 7, testRoot())
 	must(t, err)
-	got, err := os.ReadFile(filepath.Join(e.dir, "checkpoints", "7.note"))
+	// The on-disk name is fixed. Keep the literal, so that a change of spoolDir
+	// fails this test.
+	const onDisk = "checkpoints"
+	got, err := os.ReadFile(filepath.Join(e.dir, onDisk, "7.note"))
 	must(t, err)
 	if !bytes.Equal(got, want) {
 		t.Fatal("note on disk differs from the signed note")
 	}
-	for path, mode := range map[string]os.FileMode{"checkpoints": 0o700, "checkpoints/7.note": 0o600} {
+	for path, mode := range map[string]os.FileMode{onDisk: 0o700, onDisk + "/7.note": 0o600} {
 		if fi, err := os.Stat(filepath.Join(e.dir, path)); err != nil || fi.Mode().Perm() != mode {
 			t.Fatalf("%s: mode %v, err %v, want %v", path, fi.Mode().Perm(), err, mode)
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(e.dir, "checkpoints"))
+	entries, err := os.ReadDir(filepath.Join(e.dir, onDisk))
 	must(t, err)
 	if len(entries) != 1 {
 		t.Fatalf("spool has %d entries, want only 7.note", len(entries))
@@ -140,11 +145,11 @@ func TestTI09_Bound(t *testing.T) {
 	e.add(t, 1)
 	e.add(t, 2)
 	must(t, e.Publish(0, newFake())) // target 0 has 1 and 2; target 1 has nothing
-	for size := uint64(3); size <= 1030; size++ {
+	for size := uint64(3); size <= overfull; size++ {
 		must(t, e.Add(size, []byte("x"))) // Add does not verify
 	}
 	sizes := e.files(t)
-	if len(sizes) != maxSpoolNotes || sizes[0] != 6 || sizes[len(sizes)-1] != 1030 {
+	if len(sizes) != maxSpoolNotes || sizes[0] != 6 || sizes[len(sizes)-1] != overfull {
 		t.Fatalf("spool has %d notes from %d to %d", len(sizes), sizes[0], sizes[len(sizes)-1])
 	}
 	if st := e.Stats(); !slices.Equal(st.Skipped, []uint64{3, 5}) { // sizes 3,4,5 and 1..5
@@ -163,15 +168,14 @@ func TestTI09_Bound(t *testing.T) {
 	}
 }
 
-// T-I-09: a cursor file that cannot be read does not stop the bound. Add
-// does not fail, the spool keeps at most 1025 notes, and each dropped note is
-// skipped for that target. That target gets an error from Publish. The other
-// target publishes.
+// T-I-09: a cursor file that cannot be read does not keep the spool above the
+// bound. Add does not fail and the spool keeps at most 1025 notes. Each
+// dropped note counts as skipped for that target. That target gets an error
+// from Publish. The other target publishes.
 func TestTI09_BadCursorKeepsBound(t *testing.T) {
 	e := newSpool(t)
 	must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte("x"), 0o600))
-	const last = maxSpoolNotes + 5
-	for size := uint64(1); size <= last; size++ {
+	for size := uint64(1); size <= overfull; size++ {
 		e.add(t, size)
 	}
 	if sizes := e.files(t); len(sizes) != maxSpoolNotes || sizes[0] != 6 {
@@ -185,7 +189,7 @@ func TestTI09_BadCursorKeepsBound(t *testing.T) {
 		t.Fatalf("Publish(0): err %v, sent %v", err, f.got)
 	}
 	must(t, e.Publish(1, f))
-	if got := f.got[spoolTargets[1]]; len(got) != maxSpoolNotes || got[len(got)-1] != last {
+	if got := f.got[spoolTargets[1]]; len(got) != maxSpoolNotes || got[len(got)-1] != overfull {
 		t.Fatalf("target 1 got %d notes", len(got))
 	}
 }
@@ -209,7 +213,7 @@ func TestTI09_UndeletableOldest(t *testing.T) {
 	dir := filepath.Join(e.dir, e.noteFile(1))
 	must(t, os.Mkdir(dir, 0o700))
 	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
-	for size := uint64(2); size <= 1030; size++ {
+	for size := uint64(2); size <= overfull; size++ {
 		must(t, e.Add(size, []byte("x")))
 	}
 	notes := 0
@@ -282,7 +286,7 @@ func TestTI09_StuckEntryOneLineForAllPaths(t *testing.T) {
 	}
 	publish := func() {
 		t.Helper()
-		for range 3 {
+		for range 3 { // each target meets the stuck entry more than once
 			for i := range spoolTargets {
 				if err := e.Publish(i, downSender{}); err == nil {
 					t.Fatal("Publish hid the error")
@@ -376,13 +380,13 @@ func TestTI09_DropCountsOnlyNotes(t *testing.T) {
 		defer e.mu.Unlock()
 		must(t, e.drop(size))
 	}
-	for i, make := range []func(path string){
+	for i, create := range []func(path string){
 		func(path string) { must(t, os.Mkdir(path, 0o700)) },
 		func(path string) { must(t, syscall.Mkfifo(path, 0o600)) },
 		func(path string) { mustSymlink(t, filepath.Join(e.dir, "target"), path) },
 	} {
 		path := filepath.Join(e.dir, e.noteFile(uint64(i+1)))
-		make(path)
+		create(path)
 		drop(uint64(i + 1))
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("entry %d stays: %v", i+1, err)
@@ -441,11 +445,15 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 
 // T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
 // and for a cursor. The spool deletes the file with no new write of that name.
-// A temporary entry that cannot be deleted stays and gets a log line.
+// A temporary entry that cannot be deleted stays and gets a log line. A name
+// that does not end in .tmp stays.
 func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 	e := newSpool(t)
-	left := []string{"5.note.tmp", cursorPrefix + "0123456789abcdef.tmp"}
-	for _, name := range left {
+	e.add(t, 5) // a signed note: the sweep keeps it
+	const cursor = cursorPrefix + "0123456789abcdef"
+	kept := []string{"5.note", cursor, "5.note.tmpx"}
+	left := []string{"5.note.tmp", cursor + ".tmp"}
+	for _, name := range append(left, kept[1:]...) {
 		must(t, os.WriteFile(filepath.Join(e.dir, spoolDir, name), []byte("x"), 0o600))
 	}
 	stays := filepath.Join(e.dir, spoolDir, "9.note.tmp")
@@ -458,6 +466,11 @@ func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 			t.Fatalf("%s stays: %v", name, err)
 		}
 	}
+	for _, name := range kept {
+		if _, err := os.Lstat(filepath.Join(e.dir, spoolDir, name)); err != nil {
+			t.Fatalf("%s is not a temporary file, but the sweep removed it: %v", name, err)
+		}
+	}
 	if _, err := os.Lstat(stays); err != nil || !strings.Contains(buf.String(), "9.note.tmp") {
 		t.Fatalf("entry: %v, log %q, want it kept and one log line", err, buf)
 	}
@@ -468,7 +481,7 @@ func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 // cannot be deleted, it is counted. The targets continue with the next notes, and
 // Publish returns an error that names the file and the rule.
 func TestTS13_NonRegularNote(t *testing.T) {
-	for name, make := range map[string]func(t *testing.T, path string){
+	for name, create := range map[string]func(t *testing.T, path string){
 		"directory": func(t *testing.T, path string) { must(t, os.Mkdir(path, 0o700)) },
 		"fifo":      func(t *testing.T, path string) { must(t, syscall.Mkfifo(path, 0o600)) },
 		"directory-not-empty": func(t *testing.T, path string) {
@@ -480,7 +493,7 @@ func TestTS13_NonRegularNote(t *testing.T) {
 			e := newSpool(t)
 			e.add(t, 1)
 			path := filepath.Join(e.dir, e.noteFile(2))
-			make(t, path)
+			create(t, path)
 			e.add(t, 3)
 			f := newFake()
 			kept := name == "directory-not-empty"
@@ -519,7 +532,7 @@ func TestTI09_NewestRegularNoteStays(t *testing.T) {
 	dir := filepath.Join(e.dir, e.noteFile(3))
 	must(t, os.Mkdir(dir, 0o700))
 	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
-	for range 4 {
+	for range 4 { // each call meets the directory and must keep note 2
 		if err := e.Publish(0, f); err == nil {
 			t.Fatal("Publish hid the entry that is not a regular file")
 		}
@@ -532,9 +545,9 @@ func TestTI09_NewestRegularNoteStays(t *testing.T) {
 	}
 }
 
-// T-S-13: a regular note that the open refuses with permission denied (mode
-// 0000) is a bad note. It is not sent and it is deleted. Publish continues with the next notes and returns
-// an error that names the file and the rule.
+// T-S-13: a regular note that fails to open with EACCES (mode 0000) is a bad
+// note. It is not sent and it is deleted. Publish continues with the next notes
+// and returns an error that names the file and the rule.
 func TestTS13_UnreadableNote(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can open a file with mode 0000")
@@ -589,8 +602,94 @@ func TestTS13_OpenErrorIsNotABadNote(t *testing.T) {
 	}
 }
 
+// failAtNote2 sets faultAt to return err at step for note 2 only.
+func failAtNote2(t *testing.T, step string, err error) {
+	faultAt = func(s, name string) error {
+		if s == step && name == noteName(2) {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() { faultAt = nil })
+}
+
+// T-S-13: an error to examine, open, or read a note can be no property of the
+// note (EMFILE, EPERM, EIO). Then the note is not bad. Publish keeps it and
+// does not count it or send it. It stops for the target and returns an error
+// that names the file and the rule.
+func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
+	for _, c := range []struct {
+		name, step, rule string
+		err              error
+	}{
+		{"open-emfile", "open", "cannot be opened", syscall.EMFILE},
+		{"open-eperm", "open", "cannot be opened", syscall.EPERM},
+		{"examine-eio", "examine", "cannot be examined", syscall.EIO},
+		{"read-eio", "read", "cannot be read", syscall.EIO},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newSpool(t)
+			for size := uint64(1); size <= 3; size++ {
+				e.add(t, size)
+			}
+			failAtNote2(t, c.step, c.err)
+			f := newFake()
+			err := e.Publish(0, f)
+			if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), c.rule) {
+				t.Fatalf("Publish error = %v, want the file and the rule", err)
+			}
+			if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || !slices.Equal(e.files(t), []uint64{1, 2, 3}) || e.Stats().Rejected != 0 {
+				t.Fatalf("sent %v, on disk %v, rejected %d", f.got, e.files(t), e.Stats().Rejected)
+			}
+		})
+	}
+}
+
+// T-S-13: Publish returns the errors of the bad notes together with a later
+// error. errors.Is finds each one.
+func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
+	e := newSpool(t)
+	e.add(t, 1)
+	must(t, os.Mkdir(filepath.Join(e.dir, e.noteFile(2)), 0o700))
+	e.add(t, 3)
+	f := newFake()
+	f.failAt[spoolTargets[0]] = 3
+	err := e.Publish(0, f)
+	if !errors.Is(err, errBadNote) || err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "target down") {
+		t.Fatalf("Publish error = %v, want the entry error and the error of the sender", err)
+	}
+	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || e.Stats().Rejected != 1 {
+		t.Fatalf("sent %v, rejected %d", f.got, e.Stats().Rejected)
+	}
+}
+
+// T-S-13: a note that goes between the check and the open is not a bad note.
+// Publish does not count it. It stops for the target and returns an error that
+// says the note is gone before it is read.
+func TestTS13_NoteGoneAfterLstat(t *testing.T) {
+	e := newSpool(t)
+	for size := uint64(1); size <= 3; size++ {
+		e.add(t, size)
+	}
+	calls := 0
+	afterLstat = func() { // the reads are note 1, the cursor, and note 2
+		if calls++; calls == 3 {
+			must(t, os.Remove(filepath.Join(e.dir, e.noteFile(2))))
+		}
+	}
+	t.Cleanup(func() { afterLstat = nil })
+	f := newFake()
+	err := e.Publish(0, f)
+	if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "is gone before it is read") || strings.Contains(err.Error(), "cannot be opened") {
+		t.Fatalf("Publish error = %v, want the file and the rule", err)
+	}
+	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || !slices.Equal(e.files(t), []uint64{1, 3}) || e.Stats().Rejected != 0 {
+		t.Fatalf("sent %v, on disk %v, rejected %d", f.got, e.files(t), e.Stats().Rejected)
+	}
+}
+
 // T-S-13: a note that does not parse or verify is not given to the sender. It
-// is deleted and counted. The good notes still go out in order.
+// is deleted and counted. The good notes are still sent in order.
 func TestTS13_BadNotesAreNotSent(t *testing.T) {
 	e := newSpool(t)
 	otherSigner, _ := noteKeys(t, testOrigin, 2) // same origin, other key
@@ -641,7 +740,7 @@ func TestTS13_SymlinkOut(t *testing.T) {
 	t.Run("directory", func(t *testing.T) {
 		reset(t)
 		root, dir := newState(t)
-		mustSymlink(t, outside, filepath.Join(dir, "checkpoints"))
+		mustSymlink(t, outside, filepath.Join(dir, spoolDir))
 		_, verifier := noteKeys(t, testOrigin, 1)
 		if _, err := OpenSpool(root, nil, testOrigin, verifier, spoolTargets); err == nil {
 			t.Fatal("OpenSpool followed a directory symlink")
@@ -682,9 +781,7 @@ func TestTS13_SymlinkOut(t *testing.T) {
 	})
 }
 
-func (e *spoolEnv) noteFile(size uint64) string {
-	return "checkpoints/" + strconv.FormatUint(size, 10) + ".note"
-}
+func (e *spoolEnv) noteFile(size uint64) string { return noteName(size) }
 
 // gateSender is a Sender for tests with several goroutines. Send tells the test
 // that it is entered. It then waits for release (a nil release does not wait),
@@ -791,8 +888,8 @@ func TestTS13FailedSendKeepsCursor(t *testing.T) {
 	}
 }
 
-// T-S-13: a second Publish for one target returns at once while the first one
-// sends. No size goes out two times, also not after the cursor moved.
+// T-S-13: a second Publish for one target returns immediately while the first
+// one sends. No size is sent two times, also not after the cursor moved.
 func TestTS13SecondPublishSendsNothing(t *testing.T) {
 	e := newSpool(t)
 	for _, size := range []uint64{1, 2, 3} {
@@ -807,7 +904,7 @@ func TestTS13SecondPublishSendsNothing(t *testing.T) {
 	case err := <-second:
 		if err == nil {
 			close(g.release)
-			t.Fatal("the second Publish entered Send")
+			t.Fatal("the second Publish returned no error")
 		}
 	case <-time.After(time.Second):
 		close(g.release)
@@ -843,7 +940,7 @@ func TestTS13CursorChangeIsAnError(t *testing.T) {
 
 // T-S-13: the sizes for one target increase, also when Add adds notes during
 // Send. The first call sends only the note of its first listing. The second call
-// sends the notes that Add added, in order. No size goes out two times.
+// sends the notes that Add added, in order. No size is sent two times.
 func TestTS13SizesIncreaseWhileAddRuns(t *testing.T) {
 	e := newSpool(t)
 	e.add(t, 1)
@@ -864,7 +961,7 @@ func TestTS13SizesIncreaseWhileAddRuns(t *testing.T) {
 		t.Fatalf("sent after the second call = %v, want 1 2 3", got)
 	}
 	if len(slices.Compact(slices.Clone(got))) != len(got) {
-		t.Fatalf("a size went out two times: %v", got)
+		t.Fatalf("a size was sent two times: %v", got)
 	}
 }
 
