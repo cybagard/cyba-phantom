@@ -18,9 +18,7 @@ func FuzzTU07Proofs(f *testing.F) {
 	for _, s := range [][3]uint16{{1, 0, 0}, {2, 1, 1}, {3, 1, 2}, {256, 255, 128}, {257, 256, 256}, {513, 7, 300}} {
 		f.Add(s[0], s[1], s[2])
 	}
-	oldFile, oldDir := syncFile, syncDirFile
-	syncFile, syncDirFile = func(*os.File) error { return nil }, func(*os.File) error { return nil }
-	f.Cleanup(func() { syncFile, syncDirFile = oldFile, oldDir })
+	withoutSync(f)
 	dir := filepath.Join(f.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		f.Fatal(err)

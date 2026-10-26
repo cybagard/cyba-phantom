@@ -22,11 +22,8 @@ import (
 // returned function turns fsync on again. The test end calls it too.
 func withoutSync(t testing.TB) (restore func()) {
 	t.Helper()
-	oldFile, oldDir := syncFile, syncDirFile
-	syncFile, syncDirFile = func(*os.File) error { return nil }, func(*os.File) error { return nil }
-	restore = func() { syncFile, syncDirFile = oldFile, oldDir }
-	t.Cleanup(restore)
-	return restore
+	nop := func(*os.File) error { return nil }
+	return setHooks(t, hooks{file: nop, dir: nop})
 }
 
 // checkProofs checks the inclusion proof of leaf index in the tree of size

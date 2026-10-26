@@ -182,7 +182,7 @@ func TestTU07HeadIsWrittenLast(t *testing.T) {
 
 // recordDurableSteps replaces the calls that make a write durable with hooks
 // that record their order. Each hook also checks the state of the files at its
-// step. The test restores the real calls when it ends.
+// step. The test restores the earlier calls when it ends.
 func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 	t.Helper()
 	var steps []string
@@ -192,9 +192,7 @@ func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 		b, err := os.ReadFile(file)
 		return err == nil && bytes.Equal(b, data)
 	}
-	oldSync, oldDir, oldRename := syncFile, syncDirFile, renameFile
-	t.Cleanup(func() { syncFile, syncDirFile, renameFile = oldSync, oldDir, oldRename })
-	syncFile = func(f *os.File) error {
+	file := func(f *os.File) error {
 		if !holds(tmp) || holds(final) {
 			t.Error("file sync: the temporary file lacks the data, or the final file has it already")
 		} else {
@@ -202,16 +200,16 @@ func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 			steps = append(steps, "write temp")
 		}
 		steps = append(steps, "sync file")
-		return oldSync(f)
+		return realSync(f)
 	}
-	renameFile = func(r *os.Root, from, to string) error {
+	rename := func(r *os.Root, from, to string) error {
 		if from != name+tmpSuffix || to != name || !holds(tmp) || holds(final) {
 			t.Errorf("rename %s to %s: wrong names or state", from, to)
 		}
 		steps = append(steps, "rename")
-		return oldRename(r, from, to)
+		return realRename(r, from, to)
 	}
-	syncDirFile = func(f *os.File) error {
+	dir := func(f *os.File) error {
 		if _, err := os.Lstat(tmp); err == nil || !holds(final) {
 			t.Error("directory sync: the temporary file is there, or the final file lacks the data")
 		}
@@ -226,13 +224,53 @@ func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 				break
 			}
 		}
-		return oldDir(f)
+		return realSync(f)
 	}
+	setHooks(t, hooks{file: file, dir: dir, rename: rename})
 	return &steps
 }
 
-// A tile or the tree head is durable in this order: write of the temporary
-// file, fsync of the file, rename, fsync of the directory and of each parent.
+// The real calls. A hook of a test calls them when it only records or checks.
+var (
+	realSync   = (*os.File).Sync
+	realRename = (*os.Root).Rename
+)
+
+// hooks holds the calls that setHooks replaces. A nil field keeps the call.
+type hooks struct {
+	file   func(*os.File) error                 // fsync of a file
+	dir    func(*os.File) error                 // fsync of a directory
+	rename func(*os.Root, string, string) error // rename of a file
+}
+
+// setHooks is the only code of the tests that sets the durability calls of the
+// store. It sets the calls in h and restores the earlier calls when t ends. The
+// returned function restores them earlier. The calls are package state. Two
+// parallel tests that use them at the same time can race. t.Setenv panics if
+// the test or an ancestor is parallel. t.Parallel panics after a call of
+// setHooks. A parallel subtest of a test that calls setHooks is not refused.
+// A fuzz test can call setHooks too.
+func setHooks(t testing.TB, h hooks) (restore func()) {
+	t.Helper()
+	t.Setenv("TLOG_TEST_HOOKS", "1")
+	oldFile, oldDir, oldRename := syncFile, syncDirFile, renameFile
+	restore = func() { syncFile, syncDirFile, renameFile = oldFile, oldDir, oldRename }
+	t.Cleanup(restore)
+	if h.file != nil {
+		syncFile = h.file
+	}
+	if h.dir != nil {
+		syncDirFile = h.dir
+	}
+	if h.rename != nil {
+		renameFile = h.rename
+	}
+	return restore
+}
+
+// A tile or the tree head is durable in this order. First, the store writes the
+// temporary file and calls fsync on it. Then it renames the file. Last, it
+// calls fsync on the directory and on each parent.
 func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
@@ -713,7 +751,7 @@ func TestTU07SetHeadRefusesHashesThatThisStoreDidNotWrite(t *testing.T) {
 	mustNil(t, err)
 	err = s.SetHead(4, l.root(t, 4))
 	var e *Error
-	if !errors.As(err, &e) || e.Rule != ruleUnwrit {
+	if !errors.As(err, &e) || e.Rule != ruleUnwritten {
 		t.Fatalf("got %v", err)
 	}
 	if after, _ := os.ReadFile(headFile); !bytes.Equal(after, before) {
@@ -1063,12 +1101,10 @@ func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
 		mustNil(t, os.WriteFile(file, make([]byte, tlog.HashSize), fileMode))
 	}
 	counts := map[string]int{}
-	oldDir := syncDirFile
-	t.Cleanup(func() { syncDirFile = oldDir })
-	syncDirFile = func(f *os.File) error {
+	setHooks(t, hooks{dir: func(f *os.File) error {
 		counts[f.Name()]++
-		return oldDir(f)
-	}
+		return realSync(f)
+	}})
 	openStore(t, state)
 	for name, n := range counts {
 		if n > 1 {
@@ -1181,12 +1217,12 @@ func TestTU07SetHeadChecksEveryNewlyCoveredTile(t *testing.T) {
 	}{
 		{"tiles of a lost batch that the caller did not write", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
 			// The caller writes only the tiles that the root computation reads.
-			return l, func(x tlog.Tile) bool { return x.L == 0 && x.W == fullWidth }, ruleUnwrit
+			return l, func(x tlog.Tile) bool { return x.L == 0 && x.W == fullWidth }, ruleUnwritten
 		}, false},
 		{"full tile of a lost batch next to other records", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
 			o := l.fork(t, 3, "other")
 			o.extend(t, to)
-			return o, func(x tlog.Tile) bool { return x.L == 0 && x.N == 1 }, ruleUnwrit
+			return o, func(x tlog.Tile) bool { return x.L == 0 && x.N == 1 }, ruleUnwritten
 		}, false},
 		{"partial file with other records next to a full tile", func(t *testing.T, l *testLog) (*testLog, func(tlog.Tile) bool, string) {
 			return l, func(tlog.Tile) bool { return false }, ruleRewrite
@@ -1334,17 +1370,14 @@ func TestTU07BatchBoundEdge(t *testing.T) {
 // error is the test TestTU18AppendErrorWithTheMarkCountsOrphanLeaves in
 // internal/store.
 func TestTS13HeadRenameErrorAfterRenameIsMarked(t *testing.T) {
-	old := renameFile
-	t.Cleanup(func() { renameFile = old })
 	// failAfterRename makes each rename do its work and then return an error.
 	failAfterRename := func(t *testing.T) {
-		t.Cleanup(func() { renameFile = old })
-		renameFile = func(r *os.Root, from, to string) error {
-			if err := old(r, from, to); err != nil {
+		setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+			if err := realRename(r, from, to); err != nil {
 				return err
 			}
 			return errors.New("injected")
-		}
+		}})
 	}
 	t.Run("store head", func(t *testing.T) {
 		state, dir := newLogState(t)
@@ -1367,15 +1400,15 @@ func TestTS13HeadRenameErrorAfterRenameIsMarked(t *testing.T) {
 	t.Run("log append", func(t *testing.T) {
 		state, dir := newLogState(t)
 		l := openTestLog(t, state)
-		renameFile = func(r *os.Root, from, to string) error {
-			err := old(r, from, to)
+		restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+			err := realRename(r, from, to)
 			if err == nil && to == headName {
 				err = errors.New("injected")
 			}
 			return err
-		}
+		}})
 		_, err := l.Append(testEvent(0))
-		renameFile = old
+		restore()
 		if !errors.Is(err, ErrHeadOnDisk) {
 			t.Fatalf("got %v, want the mark", err)
 		}
