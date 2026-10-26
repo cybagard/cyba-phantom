@@ -141,9 +141,11 @@ func runLoad(b *testing.B, flood bool) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	lg := &loadLog{testAppender: &testAppender{}} // the appender and the log are one object
+	// The appender and the log are one object.
+	lg := &loadLog{testAppender: &testAppender{}}
 	w := NewWriter(db, q, lg, c, false, nil, Recovery{State: root, Origin: "origin", Log: lg})
-	var batches, commits []time.Duration // the writer goroutine appends; read after Run returns
+	// The writer goroutine appends. Read after Run returns.
+	var batches, commits []time.Duration
 	w.timing = func(batch, commit time.Duration) {
 		batches, commits = append(batches, batch), append(commits, commit)
 	}

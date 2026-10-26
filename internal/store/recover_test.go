@@ -181,8 +181,9 @@ func TestTI07DatabaseReadErrorAtStartStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-I-07: a writer with no state directory or no log stops at the start of Run. It
-// does not panic.
+// T-I-07: a writer with no state directory or no log stops at the start of
+// Run. A nil *tlog.Log is no log. The writer does not panic. With no state
+// directory, it logs one line for the stop marker that it cannot make.
 func TestTI07NilRecoveryStopsTheWriter(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -190,18 +191,29 @@ func TestTI07NilRecoveryStopsTheWriter(t *testing.T) {
 	}{
 		{"both nil", func(*rig) Recovery { return Recovery{} }},
 		{"no log", func(r *rig) Recovery { return Recovery{State: r.root, Origin: "origin"} }},
+		{"nil log pointer", func(r *rig) Recovery {
+			return Recovery{State: r.root, Origin: "origin", Log: (*tlog.Log)(nil)}
+		}},
 		{"no state", func(r *rig) Recovery { return Recovery{Origin: "origin", Log: r.lg} }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t, 100)
 			out := r.logTo()
-			r.w = NewWriter(r.db, r.q, r.app, r.c, false, slog.New(slog.NewTextHandler(out, nil)), c.rec(r))
+			rec := c.rec(r)
+			r.w = NewWriter(r.db, r.q, r.app, r.c, false, slog.New(slog.NewTextHandler(out, nil)), rec)
 			r.w.tick = r.tick
 			r.finish()
 			if r.w.Healthy() || r.app.tries != 0 || r.rows() != 0 {
 				t.Fatalf("healthy %v, %d appends, %d rows", r.w.Healthy(), r.app.tries, r.rows())
 			}
 			wantRule(t, r.w.Err(), writerName, ruleNoRecover)
+			want := 0
+			if rec.State == nil {
+				want = 1
+			}
+			if n := out.count("cannot make the stop marker"); n != want {
+				t.Fatalf("%d marker lines, want %d, log:\n%s", n, want, out.b.String())
+			}
 		})
 	}
 }
@@ -234,6 +246,18 @@ func TestTI07OrphanLeavesAreLoggedOnce(t *testing.T) {
 	}
 	if !n.w.Healthy() || out.count("orphan leaves") != 1 || out.count("count=2") != 1 || leaf != 5 {
 		t.Fatalf("healthy %v, newest leaf %d, log:\n%s", n.w.Healthy(), leaf, out.b.String())
+	}
+}
+
+// T-I-07: a start check with no orphan leaf writes no orphan line.
+func TestTI07NoOrphanLeavesWritesNoLogLine(t *testing.T) {
+	l, r := realLog(t), newRig(t, 100)
+	r.seed(l, 3)
+	n := r.restart(l, l, "origin")
+	out := n.logTo()
+	n.finish()
+	if !n.w.Healthy() || out.count("orphan leaves") != 0 {
+		t.Fatalf("healthy %v, log:\n%s", n.w.Healthy(), out.b.String())
 	}
 }
 
@@ -315,7 +339,7 @@ func TestTI07MarkerIsTriedAgainAtEachTick(t *testing.T) {
 	r.w.rec.State = closed // every use of this root fails
 	r.start()
 	eventually(t, func() bool { return out.count("cannot make the stop marker") == 1 })
-	wantRule(t, r.w.Err(), writerName, ruleMarkerRead)
+	wantRule(t, r.w.Err(), markerName, ruleExamine)
 	// A tick drops the event after the marker step. The drop shows that the step
 	// has ended, so the next change of the root is not a race.
 	tick := func(drops uint64) {
