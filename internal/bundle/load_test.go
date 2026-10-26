@@ -218,7 +218,7 @@ func TestTS20FileRules(t *testing.T) {
 	for _, f := range []struct {
 		name string
 		max  int
-	}{{"current.cbnd", MaxBundleBytes}, {"current.sig", MaxSigBytes}} {
+	}{{"current.cbnd", 8 << 20}, {"current.sig", 1 << 10}} {
 		for _, v := range variants {
 			t.Run(f.name+" "+v.name, func(t *testing.T) {
 				e := running(t)
