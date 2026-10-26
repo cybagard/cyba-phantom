@@ -19,9 +19,10 @@
 // The third form reads one Markdown or plain-text file from disk, not from
 // git. It checks only the sentence rule, and it has no column rule. Each line
 // of the file is a line of text. A "\r" at the end of a line is removed.
-// The sentence breaks and the word count are the same as for a comment, but
-// the limit is 25 words. The form takes exactly one file, and it does not
-// combine with -all.
+// The word count and the end marks are the same as for a comment, and the
+// limit is 25 words. A line that starts with a list marker, "#" or "|" always
+// ends the paragraph before it. In a comment, it can continue the paragraph.
+// The form takes exactly one file, and it does not combine with -all.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -70,7 +71,14 @@
 //
 // A heading starts with "#" and a space. A list item starts with a marker and
 // a space. The marker is "-", "*", "+", "•", or a number with "." or ")". An
-// indented line after a list item belongs to the item.
+// indented line after a list item belongs to the item. An unindented line ends
+// the item and starts a paragraph, as in go/doc/comment. After a blank line, an
+// indented line stays in the item, if it is indented to the item text.
+//
+// A line of an open paragraph can start with "#", a list marker or "|". In a
+// comment, it continues the paragraph, as go/doc/comment reads it. A line with
+// an indent, or a line after a line that ends with a colon, still starts a
+// block.
 //
 // A table row starts with "|". Each cell ends a sentence. A separator row
 // has only "|", "-", ":" and spaces, and it has no cell. A trailer line
@@ -80,10 +88,21 @@
 // line does not count, and it ends the sentence before it.
 //
 // A code block is a run of lines with a tab or two spaces of indent. It
-// starts at the start of a text, after a blank line, after a heading, or
-// after a code block. In a code block, an indented line stays code, also when
-// it starts with a list marker. A fence of three backticks also makes a code
-// block. stelint does not count code.
+// starts in one of these places:
+//
+//   - at the start of a text
+//   - after a blank line
+//   - after a heading
+//   - after a table row
+//   - after a trailer line
+//   - after a closing fence
+//   - after a code block
+//
+// After a list item and a blank line, a line indented to the item text is not
+// code. An indented "|" line in such a place is code, not a table row. In a
+// code block, an indented line stays code, also when it starts with a list
+// marker. A fence of three backticks also makes a code block. stelint does not
+// count code.
 //
 // A word is a run of characters between word breaks. A space is each rune
 // for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
@@ -96,10 +115,13 @@
 // words count. The tab (category Cc) and U+3164 (default-ignorable) are spaces
 // and are also in one of these classes. Only a space, a line end or the end of
 // the text ends a sentence after an end mark. So "end.<U+200B>next" is not a
-// sentence end. A code span in backticks is one word, also when it has spaces.
-// A "." in a code span does not end a sentence. In a Markdown link, only the
-// link text counts. A link whose URL has a word break is not a link. A
-// backtick or a link with no closing mark is an ordinary character.
+// sentence end. A code span is one word, also when it has spaces. A run of n
+// backticks opens it. Only the next run of exactly n backticks closes it. A "."
+// in a code span does not end a sentence. In a Markdown link, only the link
+// text counts. After a space, the URL can have a title. The title is in double
+// quotes, single quotes or parentheses. A URL in "<" and ">" can have spaces.
+// Otherwise a URL with a word break makes no link. A run of backticks with no
+// closing run is ordinary text. So is a link with no closing mark.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So
