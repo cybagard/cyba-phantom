@@ -339,10 +339,11 @@ func (s *Store) groupNames(g string) (map[string]bool, error) {
 		return nil, nil
 	}
 	names, err := s.names(g, 4*groupTiles)
-	var e *Error
-	if errors.As(err, &e) {
-		return nil, e
-	} else if err != nil {
+	if err != nil {
+		var e *Error
+		if errors.As(err, &e) {
+			return nil, e
+		}
 		return nil, nil
 	}
 	set := make(map[string]bool, len(names))
@@ -688,12 +689,13 @@ func tilePath(t tlog.Tile, w int) string {
 func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 	dir := path.Dir(tilePath(t, 1))
 	entries, err := s.names(dir, maxPartialNames)
-	var e *Error
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, nil
-	} else if errors.As(err, &e) {
-		return nil, nil, e
-	} else if err != nil {
+	if err != nil {
+		var e *Error
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil
+		} else if errors.As(err, &e) {
+			return nil, nil, e
+		}
 		return nil, nil, newError(dir, fileRule(err))
 	}
 	for _, name := range entries {
