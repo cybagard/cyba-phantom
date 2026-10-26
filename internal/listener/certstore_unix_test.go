@@ -302,6 +302,10 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 			_, err := s.Load(ctx, "kd/key")
 			noMarker(t, err, "kd/key")
 			noMarker(t, s.Store(ctx, "kd/key2", nil), "kd/key2")
+			noMarker(t, s.Store(ctx, "kd/sub/key", nil), "kd/sub/key")
+			if _, err := os.Lstat(filepath.Join(cache, "kd/sub")); err == nil {
+				t.Error("Store made a directory inside a refused directory")
+			}
 			mustNil(t, os.Chmod(p, 0o700))
 		}
 	}
@@ -349,8 +353,7 @@ func TestTS16DirectoryModeAndOwnerAreChecked(t *testing.T) {
 
 // setOtherOwner makes the hook give another owner to the file or directory at
 // the host path p, and to no other inode. The hook stays until the test ends or
-// the next call. The first call of a test sets the hook with safefiletest.Set.
-// A later call changes the inode, because only one hook set can be active.
+// the next call. A later call changes the inode, as one hook set is active.
 func setOtherOwner(t *testing.T, p string) {
 	t.Helper()
 	fi, err := os.Lstat(p)
@@ -500,9 +503,8 @@ func TestTS16OpenUsesTheDirectoryThatItOpenedForEarlierPartsWhenAParentChanges(t
 	}
 }
 
-// The hook replaces the cache directory with a new directory before the check.
-// Open checks and opens the new directory. The hook runs at the BeforeCheck
-// position. At a later position, Open refuses the replacement.
+// The hook puts a new directory in place of the cache directory before the
+// check. Open checks the new one. At a later position, Open refuses it.
 func TestTS16OpenChecksTheDirectoryThatIsThereAtTheCheck(t *testing.T) {
 	dir := t.TempDir()
 	state, err := os.OpenRoot(dir)
@@ -761,6 +763,23 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 		}
 	})
 
+	// The first BeforeCheck call for the key comes from Open, after Load checked.
+	t.Run("rename between the Lstat of Load and the open", func(t *testing.T) {
+		s := setup(t)
+		calls := 0
+		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+			if name == "key" {
+				if calls++; calls == 1 {
+					mustNil(t, s.Store(ctx, "kd/key", newValue))
+				}
+			}
+		}})
+		load(t, s, newValue)
+		if calls != 2 {
+			t.Errorf("the hook ran %d times, want 2", calls)
+		}
+	})
+
 	t.Run("rename after the open, before Stat", func(t *testing.T) {
 		s := setup(t)
 		calls := 0
@@ -982,7 +1001,8 @@ type badKeyFile struct {
 
 // badKeyFiles makes four key files that Load refuses. Two are the names of a file
 // with a second hard link in the cache ("inside" and "hl-inside"). One is a hard
-// link to the outside file. One is a file with mode 0644.
+// link to the outside file. The hook gives it another owner too, and the link
+// rule comes first. One is a file with mode 0644.
 func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
 	t.Helper()
 	cache := filepath.Join(dir, "acme/cache")
@@ -991,6 +1011,7 @@ func badKeyFiles(t *testing.T, s *Store, dir, target string) []badKeyFile {
 	mustNil(t, os.Link(target, filepath.Join(cache, "hl-outside")))
 	mustNil(t, s.Store(context.Background(), "wide", []byte("v")))
 	mustNil(t, os.Chmod(filepath.Join(cache, "wide"), 0o644))
+	setOtherOwner(t, filepath.Join(cache, "hl-outside"))
 	return []badKeyFile{{"inside", ruleLinks}, {"hl-inside", ruleLinks}, {"hl-outside", ruleLinks}, {"wide", ruleFileMode}}
 }
 
@@ -1233,4 +1254,87 @@ func TestTS16ErrorsNeverHoldKeyMarkerBytes(t *testing.T) {
 	noMarker(t, err, "marker")
 	_, err = s.List(ctx, "dirkey", true)
 	noMarker(t, err, "marker")
+}
+
+// A directory with mode 0777 replaces a key directory after the walk checked it.
+func TestTS16LeftoverWalkSkipsADirectorySwappedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	mustNil(t, s.Store(context.Background(), "kd/key", []byte("v")))
+	kd := filepath.Join(dir, "acme/cache/kd")
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(safefile.FileID) bool {
+		// Calls 1 and 2 are for the cache directory, call 3 is for kd.
+		if calls++; calls == 3 {
+			mustNil(t, os.Rename(kd, kd+"-old"))
+			mustNil(t, os.Mkdir(kd, 0o700))
+			mustNil(t, os.Chmod(kd, 0o777))
+			mustNil(t, os.WriteFile(filepath.Join(kd, tmpPrefix+"x"), nil, 0o600))
+		}
+		return false
+	}})
+	s.removeTemporary(nil)
+	if _, err := os.Lstat(filepath.Join(kd, tmpPrefix+"x")); err != nil {
+		t.Errorf("the swapped directory lost its leftover file: %v", err)
+	}
+}
+
+// The key gets mode 0644, so Open refuses it. Then a Store replaces the file.
+func TestTS16LoadTriesAgainWhenARefusedFileIsReplacedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "key", []byte("good1")))
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(string) {
+		if calls++; calls == 1 {
+			mustNil(t, os.Chmod(filepath.Join(dir, "acme/cache/key"), 0o644))
+		}
+	}, AfterOpen: func(string) {
+		if calls == 1 {
+			mustNil(t, s.Store(ctx, "key", []byte("good2")))
+		}
+	}})
+	if b, err := s.Load(ctx, "key"); err != nil || string(b) != "good2" {
+		t.Errorf("Load = %q, %v; want good2", b, err)
+	}
+}
+
+// A key directory is replaced after its check: by a new directory (new try), by
+// a link to another directory (link rule), by a link to itself (accepted).
+func TestTS16LoadHandlesAKeyDirectoryThatIsReplacedAfterTheCheck(t *testing.T) {
+	s, dir := newStore(t)
+	ctx := context.Background()
+	p := func(kd string) string { return filepath.Join(dir, "acme/cache", kd) }
+	for _, kd := range []string{"a", "b", "c", "sibling"} {
+		mustNil(t, s.Store(ctx, kd+"/key", []byte(kd)))
+	}
+	var swap func()
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
+		if f := swap; f != nil {
+			swap = nil
+			f()
+		}
+	}})
+	swap = func() {
+		mustNil(t, os.Rename(p("a"), p("a-old")))
+		mustNil(t, os.Mkdir(p("a"), 0o700))
+		mustNil(t, os.WriteFile(p("a/key"), []byte("new"), 0o600))
+	}
+	b, err := s.Load(ctx, "a/key")
+	if err != nil || string(b) != "new" || swap != nil {
+		t.Errorf("Load of a new directory = %q, %v; want new", b, err)
+	}
+	swap = func() {
+		mustNil(t, os.Rename(p("b"), p("b-old")))
+		mustNil(t, os.Symlink("sibling", p("b")))
+	}
+	_, err = s.Load(ctx, "b/key")
+	wantError(t, err, "load", ruleLink)
+	swap = func() {
+		mustNil(t, os.Rename(p("c"), p("c-old")))
+		mustNil(t, os.Symlink("c-old", p("c")))
+	}
+	b, err = s.Load(ctx, "c/key")
+	if err != nil || string(b) != "c" || swap != nil {
+		t.Errorf("Load by a link to the checked directory = %q, %v; want c", b, err)
+	}
 }
