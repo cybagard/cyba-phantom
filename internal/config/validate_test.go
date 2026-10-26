@@ -1239,7 +1239,7 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 	}
 }
 
-// TestTS11_BundlePathKelvinTLog checks a tlog.dir with a Kelvin sign (U+212A).
+// TestTS11_TLogDirKelvin checks a tlog.dir with a Kelvin sign (U+212A).
 // The part rule refuses it. The error names tlog.dir only (SEC-11).
 func TestTS11_TLogDirKelvin(t *testing.T) {
 	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom/\u212A", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/k/x.cbnd")

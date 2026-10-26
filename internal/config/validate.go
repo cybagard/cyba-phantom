@@ -693,8 +693,8 @@ func keyClash(p string, vals map[string]Value, above bool, names ...string) stri
 // dirClash is like keyClash for the directories in stateDirs. It returns
 // the name, for example "the keys directory".
 // For tlogConflict and cacheConflict, the above half is a second check only.
-// Only the state directory is above keys and checkpoints.
-// checkStorePath refuses it first.
+// Only the state directory and its parents are above keys and checkpoints.
+// checkStorePath refuses each of them first.
 func dirClash(p, root string, above bool) string {
 	for _, d := range stateDirs {
 		if s := foldASCII(filepath.Join(root, d)); inDirText(p, s) || above && inDirText(s, p) {
