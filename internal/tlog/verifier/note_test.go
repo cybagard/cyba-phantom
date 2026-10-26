@@ -40,8 +40,9 @@ func noteKeys(t *testing.T, name string, seedByte byte) (note.Signer, note.Verif
 	return signer, verifier
 }
 
-// signRaw signs text with signer and builds the note bytes by hand, for texts
-// that note.Sign refuses.
+// signRaw signs text with signer and builds the note bytes by hand. note.Sign
+// checks only the final LF of the text and the signer name. signRaw checks
+// neither.
 func signRaw(t *testing.T, signer note.Signer, text string) []byte {
 	t.Helper()
 	sig, err := signer.Sign([]byte(text))
@@ -286,8 +287,9 @@ func TestTU12_Rejects(t *testing.T) {
 	})
 
 	// Bytes that the strict parser refuses. In the first four cases note.Open
-	// refuses the note (a control character other than LF, or invalid UTF-8),
-	// so note.Sign cannot make it and the note is built by hand.
+	// refuses the note (a control character other than LF, or invalid UTF-8).
+	// note.Sign checks only the final LF and the signer name. The test builds
+	// each note by hand with signRaw.
 	body := func(origin, size, root string) string { return origin + "\n" + size + "\n" + root + "\n" }
 	for _, tc := range []struct {
 		name, want string

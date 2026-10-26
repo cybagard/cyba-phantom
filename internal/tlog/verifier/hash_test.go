@@ -42,8 +42,24 @@ func TestTS14_ParseHash(t *testing.T) {
 	}
 }
 
-// T-S-14: the package opens no file. The non-test files import none of the
-// packages for files and system calls.
+// importAllowed lists the packages that the non-test files import directly.
+// A new import needs a new line here, so that a review sees it.
+var importAllowed = map[string]bool{
+	"bytes":                       true,
+	"crypto/sha256":               true,
+	"encoding/base64":             true,
+	"errors":                      true,
+	"golang.org/x/mod/sumdb/note": true,
+	"golang.org/x/mod/sumdb/tlog": true,
+	"strconv":                     true,
+	"strings":                     true,
+}
+
+// T-S-14: the package opens no file. The non-test files import only the
+// packages in importAllowed, and none of them is for files or system calls.
+// This is not the whole proof. The packages os, io/fs, and syscall are in the
+// dependency graph through the imports of golang.org/x/mod/sumdb/note, for
+// example fmt. So "opens no file" also rests on a review of the package code.
 func TestTS14_NoFileImports(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	must(t, err)
@@ -58,8 +74,8 @@ func TestTS14_NoFileImports(t *testing.T) {
 		for _, imp := range af.Imports {
 			path, err := strconv.Unquote(imp.Path.Value)
 			must(t, err)
-			if path == "os" || path == "io/fs" || path == "syscall" {
-				t.Errorf("%s imports %q", f, path)
+			if !importAllowed[path] {
+				t.Errorf("%s imports %q, which is not in the allow list", f, path)
 			}
 		}
 	}

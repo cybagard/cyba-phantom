@@ -120,9 +120,13 @@ func TestTI09_OrderAndCursor(t *testing.T) {
 	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1, 2}) || !slices.Equal(f.got[spoolTargets[1]], []uint64{1, 2, 3, 4, 5}) {
 		t.Fatalf("sent = %v", f.got)
 	}
+	// The cursor name is fixed on disk. Keep the literal, so that a change of
+	// cursorPrefix fails this test. A rename loses the cursors of every target
+	// at an upgrade.
+	const onDiskCursor = "checkpoints/target-"
 	b, err := os.ReadFile(filepath.Join(e.dir, e.cursorName(0)))
 	must(t, err)
-	if string(b) != "2" || !strings.HasPrefix(e.cursorName(0), spoolDir+"/"+cursorPrefix) || len(e.cursorName(0)) != len(spoolDir+"/"+cursorPrefix)+16 {
+	if string(b) != "2" || !strings.HasPrefix(e.cursorName(0), onDiskCursor) || len(e.cursorName(0)) != len(onDiskCursor)+16 {
 		t.Fatalf("cursor file %q has %q, want 2", e.cursorName(0), b)
 	}
 	if want := []uint64{3, 4, 5}; !slices.Equal(e.files(t), want) {
