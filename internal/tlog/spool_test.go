@@ -615,11 +615,11 @@ func failAtNote2(t *testing.T, step string, err error) {
 	t.Cleanup(func() { faultAt = nil })
 }
 
-// T-S-13: an error to examine, open, or read a note can be not a property of
-// the note (EMFILE, EPERM, EIO). Then the note is not bad. Publish keeps it and
+// T-S-13: some errors to examine, open, or read a note are not a property of
+// the note (EMFILE, EPERM, EIO). Then the note is not bad. Publish keeps it. It
 // does not count it or send it. It stops for the target and returns an error
-// that names the file and the rule. EACCES is a property of the note only at
-// the open.
+// that names the file and the rule. EACCES is a property of the note only when
+// the spool opens it.
 func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 	for _, c := range []struct {
 		name, step, rule string
@@ -651,10 +651,10 @@ func TestTS13_ErrorNotOfTheNoteKeepsIt(t *testing.T) {
 }
 
 // T-S-13: Publish returns the errors of the bad notes together with a later
-// error, for each later error that can stop it: Send, the listing or the
-// cursor read in next, and the cursor read in advance. errors.Is finds
-// errBadNote and the error of the sender. The text has the cursor error,
-// because the cursor read does not keep the cause.
+// error. The later error comes from Send, from the cursor read in next, or
+// from the cursor read in advance. errors.Is finds errBadNote and the error of
+// the sender. For the cursor errors the test matches the text. The cursor read
+// does not keep the cause.
 func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
 	// Notes 1 and 2 are bad entries. Note 3 is sent. Note 4 is not reached.
 	setup := func(t *testing.T) *spoolEnv {
@@ -685,8 +685,8 @@ func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
 		}
 		check(t, e, err, "target down")
 	})
-	// The cursor of target 0 is examined in this order: next reads it, advance
-	// reads it after the send of note 3, and the second next reads it again.
+	// Calls that examine the cursor of target 0: the first next, advance after
+	// the send of note 3, and the second next.
 	for _, c := range []struct {
 		name string
 		call int
