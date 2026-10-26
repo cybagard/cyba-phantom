@@ -88,7 +88,8 @@ func TestTS22RefusedRequestHeads(t *testing.T) {
 		pipelined bool
 	}{
 		{"malformed host", badHost, 400, true},
-		{"malformed request line", "GET /\r\n\r\n", 400, true}, // the smallest reply
+		// The smallest reply of net/http is this bare 400.
+		{"malformed request line", "GET /\r\n\r\n", 400, true},
 		{"head over the cap", head(testHeaderBytes + 4096 + 200), 431, false},
 		{"65 header values", "GET / HTTP/1.1\r\nHost: a\r\n" + strings.Repeat("X: v\r\n", 64) + "\r\n", 431, true},
 		{"unknown transfer encoding", "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: foo\r\n\r\n", 501, true},
@@ -256,7 +257,7 @@ var badMAC = append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
 // client close_notify record are such closes. So are a close over the read
 // budget, an acme-tls/1 connection and a close at shutdown. A record that makes
 // crypto/tls write an alert or a key update also gives no event. A refused head
-// on the plain socket gives no event. The rows named known limit give one event.
+// on the plain socket gives no event. A row named known limit gives one.
 func TestTS22NoEvent(t *testing.T) {
 	served := func(t *testing.T, r *rig) *tls.Conn {
 		t.Helper()
@@ -383,7 +384,7 @@ func TestTS22NoEvent(t *testing.T) {
 			_ = c.Close()
 		}},
 		{"TLS 1.2, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) { closesWithin(t, dial12(t, r)) }},
-		// The server writes a ticket flight after the client Finished (TLS 1.2).
+		// TLS 1.2: a ticket flight follows the client Finished.
 		{"TLS 1.2 with a session cache, timeout", shortTimeouts(), nil, func(t *testing.T, r *rig) {
 			closesWithin(t, cached(t, r, tls.VersionTLS12))
 		}},
