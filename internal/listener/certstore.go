@@ -300,8 +300,8 @@ func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 // directory only. The walk reads a directory 256 names at a time and keeps no
 // list of names. So the number of names does not matter. It calls fsync on a
 // directory only if it removed a name in it, and it ignores an fsync error.
-// The walk does not find a swap back either. Another directory is there for
-// the rule check, and the first one comes back for the open.
+// The walk does not find a swap back around the rule check. Another directory
+// is there for the check, and the first one comes back for the open.
 func (s *Store) removeTemporary(parts []string) {
 	li, err := s.root.Lstat(rel(parts))
 	if err != nil || s.checkDirs(parts) != nil {
@@ -387,7 +387,7 @@ func (s *Store) dirs(parts []string, create bool) error {
 // parent opens the directory of the last part of parts, after the check of the
 // cache directory. The caller closes the root that it gets. changed is true
 // when another directory replaced a part after its check. A link to another
-// directory in the cache gives it too.
+// directory in the cache also gives changed true.
 func (s *Store) parent(parts []string) (r *os.Root, changed bool, err error) {
 	if err := s.dirs(nil, false); err != nil {
 		return nil, false, err
