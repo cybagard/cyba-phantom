@@ -314,8 +314,8 @@ func TestTS10_Secret(t *testing.T) {
 	}
 }
 
-// TestTS10_NoUserName checks values with no URL scheme before the ":", or
-// with fewer than 2 slashes or backslashes after it.
+// TestTS10_NoUserName checks that each value loses its user name. No value
+// has a URL scheme before the ":" and 2 or more slashes or backslashes after.
 func TestTS10_NoUserName(t *testing.T) {
 	useTestKeys(t)
 	for _, v := range []struct{ in, user string }{
