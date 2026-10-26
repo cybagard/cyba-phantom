@@ -32,6 +32,8 @@ type loader struct {
 	stateRoot string   // stateRoot is the directory that state paths must stay under after symlink resolution.
 	euid      int      // euid is the user that runs the sensor.
 	env       []string // env is the environment that the *_env keys name. The loader does not read the process environment.
+	// net is the network access that LoadWith gets.
+	net Net
 }
 
 func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.Geteuid()} }

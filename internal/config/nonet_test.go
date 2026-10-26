@@ -13,11 +13,13 @@ import (
 )
 
 // TestTS10_NoSystemNetwork (SEC-11) parses the non-test files of internal/config and fails
-// on the forms below. The local name of an import is the alias if there is one, so nn is
-// the local name of net in nn "net". The test fails on:
-//   - a selector X.Y where X is the local name of the net import and Y is not Conn, outside
-//     the declaration of the function SystemNet. One exemption: net.SplitHostPort in the
-//     file validate.go. It parses a string and opens no socket;
+// on the forms below. The local name of an import is its alias, if any.
+// So in nn "net", the local name of the import of the package net is nn.
+// The test fails on:
+//   - a selector X.Y outside the declaration of the function SystemNet.
+//     X is the local name of the import of the package net, and Y is not
+//     Conn. One exemption: net.SplitHostPort in the file validate.go.
+//     It parses a string and opens no socket;
 //   - a call expression whose function is the identifier SystemNet, outside the declaration
 //     of the function Load;
 //   - a dot import of net or syscall;
@@ -26,10 +28,12 @@ import (
 //   - a selector X.Y where X is the local name of the syscall import and Y is Socket,
 //     Socketpair, Connect, Bind, Listen, Sendto, or Sendmsg.
 //
-// The test does not detect every way to use the network, for example a parenthesised call
-// (SystemNet)() or a function value of SystemNet, or the packages net/textproto,
-// log/syslog, os/exec, or syscall.Syscall. The proof that --check uses no network is the
-// injected-network tests: TestTS10_CheckNoDial and TestTS10_CheckWiring.
+// The test does not detect every way to use the network. It misses, for
+// example, a parenthesised call (SystemNet)() and a function value of
+// SystemNet. It also misses the packages net/textproto, log/syslog and
+// os/exec, and the function syscall.Syscall.
+// The proof that --check uses no network is the injected-network tests:
+// TestTS10_CheckNoDial and TestTS10_CheckWiring.
 func TestTS10_NoSystemNetwork(t *testing.T) {
 	sockets := []string{"Socket", "Socketpair", "Connect", "Bind", "Listen", "Sendto", "Sendmsg"}
 	files, err := filepath.Glob("*.go")
@@ -45,7 +49,8 @@ func TestTS10_NoSystemNetwork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		local := map[string]string{} // local name of net and syscall
+		// local holds the local names of the packages net and syscall.
+		local := map[string]string{}
 		for _, imp := range f.Imports {
 			p, _ := strconv.Unquote(imp.Path.Value)
 			for _, b := range []string{"net/http", "net/smtp", "net/rpc", "crypto/tls", "golang.org/x/net"} {

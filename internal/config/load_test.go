@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,8 +85,12 @@ func loadTest(path string, env []string) (*Config, error) {
 	return Load(path, append([]string{tokenVar + "=" + strings.Repeat("t", 32)}, env...))
 }
 
+// testNet is a Net with a stub in each field. LoadWith accepts it.
+var testNet = Net{Dialer: stubNet{}, Resolver: stubNet{}}
+
 // TestTU10_Precedence checks default < file < env and the source of each value.
 func TestTU10_Precedence(t *testing.T) {
+	useTestKeys(t)
 	rows := []struct {
 		name, file, env, key string
 		want                 Value
@@ -103,7 +108,7 @@ func TestTU10_Precedence(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			c, err := load(writeConfig(t, r.file), append(strings.Fields(r.env), tokenVar+"=token"), testKeys, Net{})
+			c, err := LoadWith(writeConfig(t, r.file), append(strings.Fields(r.env), tokenVar+"=token"), testNet)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -204,6 +209,29 @@ func TestTU10_Errors(t *testing.T) {
 	}
 }
 
+// TestTU10_RequiredParseError checks a required key that is set but does not
+// parse. It gets the parse error only. It gets no required-key error.
+func TestTU10_RequiredParseError(t *testing.T) {
+	useTestKeys(t)
+	_, err := loadTest(writeConfig(t, "acme:\n  email: 5\n"+acmeNames+tlogLine), nil)
+	if err == nil || !strings.Contains(err.Error(), "acme.email at "+cfg[len(cfg)-64:]+":2: the value is not a valid string") {
+		t.Fatalf("got %v, want the parse error", err)
+	}
+	if strings.Contains(err.Error(), "required") {
+		t.Errorf("the key is set, but the error says it is required: %v", err)
+	}
+}
+
+// TestTU10_UnknownTwice checks that an unknown PHANTOM_ name that occurs two
+// times in env gives one error.
+func TestTU10_UnknownTwice(t *testing.T) {
+	useTestKeys(t)
+	_, err := loadTest(writeConfig(t, base), []string{"PHANTOM_NOPE=1", "PHANTOM_NOPE=2"})
+	if err == nil || strings.Count(err.Error(), "PHANTOM_NOPE") != 1 {
+		t.Errorf("got %v, want one error for PHANTOM_NOPE", err)
+	}
+}
+
 // TestTU10_NoReload checks that the package exports no reload function.
 func TestTU10_NoReload(t *testing.T) {
 	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(fi os.FileInfo) bool {
@@ -243,6 +271,9 @@ func TestTS10_Scalars(t *testing.T) {
 		{"float into int", "a:\n  delta: 1.5\n", "", "the value is not a valid int"},
 		{"quoted int", "a:\n  port: \"8080\"\n", "", "the value is not a valid uint"},
 		{"tagged int", "a:\n  port: !!int x\n", "", "decimal literal only"},
+		{"plus sign", "a:\n  delta: +5\n", "", "decimal literal only"},
+		{"0o prefix", "a:\n  delta: 0o17\n", "", "decimal literal only"},
+		{"minus zero", "a:\n  delta: -0\n", "", "decimal literal only"},
 		{"null", "a:\n  every: ~\n", "", "the value is not a valid duration"},
 		{"duration number", "a:\n  every: 5\n", "", "the value is not a valid duration"},
 		{"env octal", "", "PHANTOM_A_PORT=017", "decimal literal only"},
@@ -268,6 +299,105 @@ func TestTS10_Scalars(t *testing.T) {
 				t.Errorf("got %v, want %q", err, r.want)
 			}
 		})
+	}
+}
+
+// TestTS10_EnvNameForms checks the names that envFold reads as PHANTOM names.
+// They have no "_", a ".", leading white space, or invisible or full-width
+// characters. PHANTOMJS_BIN shows that the rule also refuses a name of
+// another program. A character next to the full-width range is not a form.
+func TestTS10_EnvNameForms(t *testing.T) {
+	useTestKeys(t)
+	for _, name := range []string{
+		"PHANTOMX", "PHANTOM.X", " PHANTOM_X", "\tPHANTOM_X", "PHANTOM", "PHANTOMJS_BIN",
+		"PHANTOM\u200b_X", "\u200bPHANTOM_X", "\uff30HANTOM_X", "\uff30\uff28\uff21\uff2e\uff34\uff2f\uff2d_X",
+		"PHANTOM\uff3fX",
+	} {
+		_, err := loadTest(writeConfig(t, base), []string{name + "=1"})
+		if err == nil || !strings.Contains(err.Error(), "unknown PHANTOM_ variable") {
+			t.Errorf("%q: got %v, want the unknown-name error", name, err)
+		}
+	}
+	for _, name := range []string{"PHANTO_X", "XPHANTOM_X", "!PHANTOM_X", "\uff00PHANTOM_X", "\uff5fPHANTOM_X"} {
+		if _, err := loadTest(writeConfig(t, base), []string{name + "=1"}); err != nil {
+			t.Errorf("%q: got %v, want no error", name, err)
+		}
+	}
+}
+
+// TestTS10_WrittenTag checks the YAML tags of a file value through Load. The
+// non-specific tag "!" and a tag on a quoted scalar give an error that names
+// the key. A tag on a plain scalar stays valid.
+func TestTS10_WrittenTag(t *testing.T) {
+	useTestKeys(t)
+	rows := []struct{ name, file, key, detail string }{
+		{"bare tag, int", "a:\n  delta: ! 80\n", "a.delta", "the value is not a valid int"},
+		{"bare tag, flow", "a: {delta: ! 80}\n", "a.delta", "the value is not a valid int"},
+		{"bare tag, quoted int", "a:\n  port: ! \"80\"\n", "a.port", "the value is not a valid uint"},
+		{"bare tag, string", "listen:\n  http: ! \":1\"\n", "listen.http", "the value is not a valid string"},
+		{"bare tag, plain string", "listen:\n  http: ! x\n", "listen.http", "the value is not a valid string"},
+		{"bare tag, bool", "a:\n  flag: ! true\n", "a.flag", "the value is not a valid bool"},
+		{"quoted int tag", "a:\n  delta: !!int \"80\"\n", "a.delta", "the value is not a valid int"},
+		{"quoted bool tag", "a:\n  flag: !!bool 'true'\n", "a.flag", "the value is not a valid bool"},
+		{"quoted int tag, string", "listen:\n  http: !!int \"80\"\n", "listen.http", "the value is not a valid string"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadTest(writeConfig(t, base+r.file), nil)
+			joined, ok := err.(interface{ Unwrap() []error })
+			if !ok {
+				t.Fatalf("got %v, want a join of errors", err)
+			}
+			found := false
+			for _, e := range joined.Unwrap() {
+				if e, ok := e.(*Error); ok && e.Key == r.key && e.Detail == r.detail {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("got %v, want an error for %s: %s", err, r.key, r.detail)
+			}
+		})
+	}
+	c, err := loadTest(writeConfig(t, base+"a:\n  delta: !!int 80\nlisten:\n  http: !!str \":1\"\n"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := c.Get("a.delta"); v.Int != 80 {
+		t.Errorf("a.delta = %+v, want 80", v)
+	}
+}
+
+// TestTS10_Unreadable checks the detail for a file that the loader cannot
+// read because of its mode.
+func TestTS10_Unreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file with mode 0000: no permission error")
+	}
+	p := writeConfig(t, base)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadTest(p, nil)
+	var e *Error
+	if !errors.As(err, &e) || e.Detail != "permission denied" {
+		t.Errorf("got %v, want the detail %q", err, "permission denied")
+	}
+}
+
+// TestTS10_NetReachesLoader checks that LoadWith gives its Net to the loader,
+// not a zero Net. A test key check reads the Net.
+func TestTS10_NetReachesLoader(t *testing.T) {
+	var got Net
+	old := keys
+	keys = append(slices.Clone(testKeys), key{path: "a.probe", kind: kindString, def: "x",
+		check: func(l *loader, _ string) string { got = l.net; return "" }})
+	t.Cleanup(func() { keys = old })
+	if _, err := LoadWith(writeConfig(t, base), []string{tokenVar + "=token"}, testNet); err != nil {
+		t.Fatal(err)
+	}
+	if got != testNet {
+		t.Errorf("the loader has %+v, want %+v", got, testNet)
 	}
 }
 

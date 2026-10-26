@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
 )
@@ -27,7 +28,9 @@ const (
 	kindBytes
 	kindDuration
 	kindPath
-	kindURL // kindURL is a key whose value is never printed in an error: it can hold user information.
+	// kindURL is a key whose value is never printed in an error. It can
+	// hold user information.
+	kindURL
 )
 
 var kindNames = [...]string{"string", "bool", "int", "uint", "byte size", "duration", "path", "URL"}
@@ -35,13 +38,19 @@ var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str"
 
 // key is one row of the key table.
 type key struct {
-	path     string
-	kind     kind
-	def      string                             // def is the default value, parsed like an override.
-	req      bool                               // req marks a required key: the file or the environment must set it.
-	secret   bool                               // secret marks a key whose value is never printed.
-	maxItems int                                // maxItems > 0 marks a key in a list item that holds 1 to maxItems scalars in a list.
-	check    func(l *loader, raw string) string // check returns a fixed detail if a parsed value breaks a rule, or "".
+	path string
+	kind kind
+	// def is the default value, parsed like an override.
+	def string
+	// req marks a required key: the file or the environment must set it.
+	req bool
+	// secret marks a key whose value is never printed.
+	secret bool
+	// maxItems > 0 marks a key in a list item that holds 1 to maxItems
+	// scalars in a list.
+	maxItems int
+	// check returns a fixed detail if a parsed value breaks a rule, or "".
+	check func(l *loader, raw string) string
 	// endpoint, if set, parses the value as an outbound endpoint for AllowList.
 	endpoint endpointParser
 }
@@ -50,8 +59,9 @@ type key struct {
 // It returns a fixed detail on an error.
 type endpointParser func(raw string) (Endpoint, string)
 
-// keys is the production key table (04 section 3). It holds the scalar keys. The list
-// keys are in the table lists. The loader adds the item keys to its table when it reads the lists (expandLists).
+// keys is the production key table (04 section 3). It holds the scalar
+// keys. The list keys are in the table lists. The loader adds the item
+// keys to its table when it reads the lists (expandLists).
 var keys = []key{
 	{path: "listen.http", kind: kindString, def: ":80", check: checkListen},
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
@@ -62,18 +72,21 @@ var keys = []key{
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkCacheDir},
 	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkBundlePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
-	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)}, // The bounds apply also if fetch_url is empty.
+	// The bounds apply also if fetch_url is empty.
+	{path: "bundle.fetch_interval", kind: kindDuration, def: "6h", check: durRange(15*time.Minute, 7*24*time.Hour)},
 	{path: "limits.max_conns", kind: kindInt, def: "2000", check: intRange(1, 2000)},
 	{path: "limits.body_bytes", kind: kindBytes, def: "65536", check: intRange(1, 65536)},
 	{path: "limits.header_bytes", kind: kindBytes, def: "16384", check: intRange(8192, 16384)},
 	{path: "limits.per_ip_rps", kind: kindInt, def: "50", check: intRange(1, 1000)},
-	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)}, // The lower bound is per_ip_rps: a cross-check.
+	// The lower bound is per_ip_rps: a cross-check.
+	{path: "limits.per_ip_burst", kind: kindInt, def: "200", check: intRange(1, 5000)},
 	{path: "limits.queue_depth", kind: kindInt, def: "4096", check: intRange(1, 8192)},
 	{path: "store.path", kind: kindPath, def: "/var/lib/phantom/events.db", check: checkStorePath},
 	{path: "store.max_bytes", kind: kindBytes, def: "10737418240", check: intRange(268435456, math.MaxInt64)},
 	{path: "store.retention_days.ip", kind: kindInt, def: "7", check: intRange(1, 7)},
 	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
-	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)}, // The lower bound is retention_days.raw: a cross-check.
+	// The lower bound is retention_days.raw: a cross-check.
+	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)},
 	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStatePath},
 	{path: "tlog.origin", kind: kindString, req: true, check: checkOrigin},
 	{path: "tlog.checkpoint_interval", kind: kindDuration, def: "1h", check: durRange(time.Minute, 24*time.Hour)},
@@ -156,8 +169,9 @@ func Load(path string, env []string) (*Config, error) {
 // overrides in env (use os.Environ()). Precedence: default < file < env.
 // LoadWith returns all errors together and never returns a partial config.
 // LoadWith returns an error if n.Dialer or n.Resolver is nil.
-// LoadWith passes n to load. No code in load uses n yet. A later network use must go
-// through n. TestTS10_NoSystemNetwork fails on the source forms listed in its doc
+// LoadWith passes n to load, which keeps it in the loader. No key check
+// uses n yet. A later network use must go through n.
+// TestTS10_NoSystemNetwork fails on the source forms listed in its doc
 // comment. It does not detect every way to use the network.
 func LoadWith(path string, env []string, n Net) (*Config, error) {
 	if n.Dialer == nil {
@@ -178,7 +192,7 @@ func envName(path string) string {
 }
 
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
-	l.env = env
+	l.env, l.net = env, n
 	byPath := make(map[string]key, len(table))
 	byEnv := make(map[string]key, len(table))
 	for _, k := range table {
@@ -192,6 +206,9 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	}
 	vals := make(map[string]Value)
 	raws := make(map[string]string) // raws holds the text of each value in vals.
+	// failed marks a key whose last value fails to parse. The parse error
+	// replaces the required-key error.
+	failed := make(map[string]bool)
 	var errs []error
 	keyError := func(k key, raw, src string, line int, detail string) error {
 		if k.secret || k.kind == kindURL {
@@ -199,9 +216,11 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 		return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
 	}
-	// set parses one value. A later source replaces an earlier one. A value that fails to parse is removed.
+	// set parses one value. A later source replaces an earlier one.
+	// If the value fails to parse, set removes the key from vals.
 	set := func(k key, raw, tag, src string, line int) {
 		v, detail := parse(k, raw, tag)
+		failed[k.path] = detail != ""
 		if detail == "" {
 			v.Source, v.Line = src, line
 			vals[k.path], raws[k.path] = v, raw
@@ -218,7 +237,8 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 
 	// Lists: the list keys have no PHANTOM_ override, so byEnv does not hold the item keys.
 	// The loader handles an item key like a scalar key from here: set, required, and check.
-	itemKeys, listErrs := expandLists(doc, path, lists) // The loader reports listErrs after the required scalar keys.
+	// The loader reports listErrs after the required scalar keys.
+	itemKeys, listErrs := expandLists(doc, path, lists)
 	table = append(slices.Clone(table), itemKeys...)
 	for _, k := range itemKeys {
 		if leaf, ok := doc.Leaves[k.path]; ok {
@@ -226,7 +246,8 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	// File: each node must be a known key or section. Errors come in file order.
+	// File: each node must be a known key or section. The errors come
+	// sorted by line, then by path.
 	paths := slices.Collect(maps.Keys(doc.Lines))
 	slices.SortFunc(paths, func(a, b string) int {
 		return cmp.Or(cmp.Compare(doc.Lines[a], doc.Lines[b]), cmp.Compare(a, b))
@@ -253,12 +274,13 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	errs = append(errs, envEach(env, byEnv, func(k key, name, raw string) { set(k, raw, "", name, 0) })...)
 
 	for _, k := range table {
-		if _, ok := vals[k.path]; k.req && !ok {
+		if _, ok := vals[k.path]; k.req && !ok && !failed[k.path] {
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
 		}
 	}
 	errs = append(errs, listErrs...)
-	// Each check runs one time, on the effective value. A key that fails is removed from vals.
+	// Each check runs one time, on the effective value. The loader removes
+	// a key that fails from vals.
 	for _, k := range table {
 		v, ok := vals[k.path]
 		if !ok || k.check == nil {
@@ -276,20 +298,40 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	return &Config{values: vals}, nil
 }
 
-// envEach checks the names in env. If a name starts with PHANTOM_ (in upper
-// case, with "-" changed to "_"), the key table must contain it.
-// An unknown name gets the unknown-name error each time. A known name that
+// envFold returns name in upper case. It changes "-" to "_" and a full-width
+// form (U+FF01 to U+FF5E) to ASCII. It removes the format characters (for
+// example U+200B) and the white space at the start.
+func envFold(name string) string {
+	f := strings.Map(func(r rune) rune {
+		if r >= 0xFF01 && r <= 0xFF5E {
+			r -= 0xFEE0
+		}
+		switch {
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		case r == '-':
+			return '_'
+		}
+		return unicode.ToUpper(r)
+	}, name)
+	return strings.TrimLeftFunc(f, unicode.IsSpace)
+}
+
+// envEach checks the names in env. If envFold of a name starts with PHANTOM,
+// the key table must contain it. So a name such as PHANTOMX has an error.
+// An unknown name gets the unknown-name error one time. A known name that
 // occurs again gets the repeat error. Its first use calls use, if use is set.
 func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string)) []error {
 	var errs []error
 	seen := make(map[string]bool)
 	for _, kv := range env {
 		name, raw, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(strings.ToUpper(strings.ReplaceAll(name, "-", "_")), "PHANTOM_") {
+		if !strings.HasPrefix(envFold(name), "PHANTOM") {
 			continue
 		}
 		k, ok := byEnv[name]
 		switch {
+		case !ok && seen[name]:
 		case !ok:
 			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM_ variable"})
 		case seen[name]:
