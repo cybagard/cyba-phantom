@@ -234,8 +234,9 @@ func TestTS13WriteTileRefusesDirectoryLinkPlantedAfterOpen(t *testing.T) {
 	}
 }
 
-// A directory link that appears after WriteTile must not let SetHead read a
-// newly covered tile through it, also when no root computation reads the tile.
+// A directory link can appear after WriteTile. SetHead must not read a newly
+// covered tile through that link. This holds also when no root computation
+// reads the tile.
 func TestTS13SetHeadRefusesDirectoryLinkOverNewlyCoveredTile(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -504,18 +505,16 @@ func TestTS13OpenRefusesListedDirectoryWithGroupOrOtherBits(t *testing.T) {
 // goroutine, so it must not stop the test.
 func swapBeforeSync(t *testing.T, n int, swap func() error) {
 	t.Helper()
-	old := syncDirFile
-	t.Cleanup(func() { syncDirFile = old })
 	var calls int
-	syncDirFile = func(f *os.File) error {
+	setHooks(t, hooks{dir: func(f *os.File) error {
 		if calls++; calls == n {
 			if err := swap(); err != nil {
 				t.Error(err)
 				return err
 			}
 		}
-		return old(f)
-	}
+		return realSync(f)
+	}})
 }
 
 // Each cause of a failed fsync of a directory has its own rule. The hook
