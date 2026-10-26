@@ -188,15 +188,16 @@ perf-inner:
 # binary. A stopped mutant shows as LIVED. The limit also applies to the
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
-# The target makes one new directory. The caller TMPDIR only selects where
-# the directory is made. The target sets TMPDIR and GOTMPDIR to this
-# directory. It sets GOCACHE and HOME to two directories in it. The caller
-# values of these variables do not apply to the run.
+# The target makes one new directory in the caller TMPDIR. It sets TMPDIR
+# and GOTMPDIR to this directory. It sets GOCACHE and HOME to two
+# directories in it. The caller values of these variables do not apply to
+# the run.
 # The target unsets XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_STATE_HOME and
 # XDG_DATA_HOME.
 # Then os.UserCacheDir and os.UserConfigDir give paths in HOME.
-# The target keeps the caller GOPATH, GOMODCACHE and GOENV. The module cache
-# is outside the directory, so the size does not include it.
+# The target keeps the caller GOPATH, GOMODCACHE and GOENV. If go env gives
+# an empty GOENV, the target sets GOENV to off, so go uses no go env file.
+# The module cache is outside the directory, so the size does not include it.
 # A check once each second compares the size of this directory with
 # MUTATE_MAX_MIB MiB. If the size is larger, the target stops gremlins and
 # fails. The directory can grow past the limit before the run stops.
@@ -209,10 +210,14 @@ perf-inner:
 # baseline run. That run has the package source directory as its working
 # directory.
 # MUTATE_CAP and MUTATE_MAX_MIB must be positive integers (exit 2 if not).
-# The target fails (exit 1) when go is not in PATH.
-# The target makes the directory writable before the final check and before
-# the removal.
+# The target fails (exit 1) when go is not in PATH. It also fails (exit 1)
+# when go env fails or gives an empty GOPATH or GOMODCACHE.
+# Before the final check and before the removal, the target makes each
+# directory in the run directory writable. It does not follow links.
+# It does not change the mode of a file.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
+# Each signal trap first ignores these signals, so a second signal does not
+# stop the removal.
 # The make all target does not run this target.
 # Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
 MUTATE_CAP ?= 600
@@ -223,10 +228,13 @@ mutate:
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
 	@for v in "$$MUTATE_CAP" "$$MUTATE_MAX_MIB"; do case "$$v" in ""|0*|*[!0-9]*|???????????*) echo "mutate: MUTATE_CAP and MUTATE_MAX_MIB must be positive integers of at most 10 digits" >&2; exit 2;; esac; done
 	@d=$$(mktemp -d) || exit 1; g=; w=; \
-	trap 'kill $$g $$w 2>/dev/null; pkill -KILL -f "$$d/"; wait; chmod -R u+rwx "$$d" 2>/dev/null; rm -rf "$$d"' EXIT; \
-	trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 131' QUIT; trap 'exit 143' TERM; \
+	trap 'kill $$g $$w 2>/dev/null; pkill -KILL -f "$$d/"; wait; find "$$d" -type d ! -perm -u=rwx -exec chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"' EXIT; \
+	trap 'trap "" HUP INT QUIT TERM; exit 129' HUP; trap 'trap "" HUP INT QUIT TERM; exit 130' INT; \
+	trap 'trap "" HUP INT QUIT TERM; exit 131' QUIT; trap 'trap "" HUP INT QUIT TERM; exit 143' TERM; \
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
-	gopath=$$("$$go" env GOPATH); gomodcache=$$("$$go" env GOMODCACHE); goenv=$$("$$go" env GOENV); \
+	gopath=$$("$$go" env GOPATH) && gomodcache=$$("$$go" env GOMODCACHE) && goenv=$$("$$go" env GOENV) || { echo "mutate: go env failed" >&2; exit 1; }; \
+	[ -n "$$gopath" ] && [ -n "$$gomodcache" ] || { echo "mutate: go env gives an empty GOPATH or GOMODCACHE" >&2; exit 1; }; \
+	[ -n "$$goenv" ] || goenv=off; \
 	mkdir "$$d/bin"; \
 	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
 	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
@@ -236,7 +244,7 @@ mutate:
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
 	wait $$g; rc=$$?; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
-	chmod -R u+rwx "$$d" 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
+	find "$$d" -type d ! -perm -u=rwx -exec chmod u+rwx {} \; 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
 	if [ "$$s" -gt "$$p" ]; then p=$$s; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; fi; \
 	cat "$$d/out"; [ -z "$$(tail -c 1 "$$d/out")" ] || echo; \
