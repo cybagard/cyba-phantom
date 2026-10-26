@@ -1,5 +1,5 @@
-// Command stelint checks two limits in Go comments. A comment line has at most
-// 80 columns. A comment sentence has at most 20 words.
+// Command stelint checks two limits in Go comments, and one in a text file. A
+// comment line has at most 80 columns. A sentence has at most 20 words.
 //
 // Usage:
 //

@@ -10,14 +10,15 @@ import (
 	"unicode/utf8"
 )
 
-// maxWords is the longest sentence of a comment, in words.
+// maxWords is the longest sentence of a comment or of a text file, in words.
 const maxWords = 20
 
-// sentence is a comment sentence that is too long. It runs from the line of
-// its first word to the line of its end mark.
+// sentence is a comment or text sentence that is too long. It runs from the
+// line of its first word to the line of its end mark.
 type sentence struct{ first, last, words int }
 
-// textLine is one line of comment text and the source line that holds it.
+// textLine is one line of comment text or of a text file, and the source line
+// that holds it.
 type textLine struct {
 	text string
 	line int
@@ -251,7 +252,7 @@ func blockLines(lit string, line int) []textLine {
 	return out
 }
 
-// Kinds of text in a comment, as paragraphs reads it.
+// Kinds of text in a comment or a text file, as paragraphs reads it.
 const (
 	modeNone = iota
 	modePara
@@ -259,12 +260,12 @@ const (
 	modeCode
 )
 
-// paragraphs splits the lines of a comment into paragraphs, headings, list
-// items and table cells. Each ends a sentence. It leaves out code, separator
-// rows and trailer lines. A line is code in a fence of three backticks. A line
-// with a tab or two spaces of indent is also code. This holds when no
-// paragraph or list item is open. In a code block, each indented line stays
-// code. A line with noCode set never starts a code block by its indent.
+// paragraphs splits the lines of a comment or a text file into paragraphs,
+// headings, list items and table cells. Each ends a sentence. It leaves out
+// code, separator rows and trailer lines. A line is code in a fence of three
+// backticks. A line with a tab or two spaces of indent is also code. This holds
+// when no paragraph or list item is open. In a code block, each indented line
+// stays code. A line with noCode set never starts a code block by its indent.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -539,7 +540,7 @@ func (p *para) long() []sentence {
 			continue
 		case c == '.' || c == '?' || c == '!':
 			// An end mark right after a code span is no word of its own.
-			if !(p.text && i == spanEnd && !inWord) {
+			if i != spanEnd {
 				startWord(i)
 			}
 			if i+1 == len(b) || spaceAt(b, i+1) {

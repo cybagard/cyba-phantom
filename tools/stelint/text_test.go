@@ -46,14 +46,16 @@ func TestTextSentenceBreaks(t *testing.T) {
 		hits      int
 	}{
 		{"two table cells of 15 words", "| " + ws(15) + " | " + ws(15) + " |\n", 0},
-		{"table separator row has no cell", "| --- | :-: |\n| " + ws(21) + " |\n", 1},
+		{"a row after a separator row still counts", "| --- | :-: |\n| " + ws(21) + " |\n", 1},
 		{"two list items of 12 words", "- " + ws(12) + "\n- " + ws(12) + "\n", 0},
 		{"numbered list items", "1. " + ws(12) + "\n2) " + ws(12) + "\n", 0},
 		{"heading then 12 words", "# " + ws(12) + "\n" + ws(12) + "\n", 0},
+		{"heading after text", ws(12) + "\n# " + ws(12) + "\n", 0},
 		{"30 words in a fence", "```\n" + ws(30) + "\n```\n", 0},
+		{"a backtick in a fence", "```\n` " + ws(25) + "\n```\n", 0},
 		{"30 words in an indented code block", "Text.\n\n    " + ws(30) + "\n", 0},
 		{"text after a fence still counts", "```\nx\n```\n" + ws(21) + "\n", 1},
-		{"trailer lines do not count", ws(15) + "\n\nSigned-off-by: A B <a@example.com>\n", 0},
+		{"a trailer line ends the sentence", ws(17) + "\nSigned-off-by: A B <a@example.com>\n", 0},
 		{"20 words and a code span with spaces", ws(20) + " `a b c d`.\n", 0},
 		{"21 words and a code span with spaces", ws(21) + " `a b c d`.\n", 1},
 		{"code span in the middle", ws(10) + " `a. b` " + ws(10) + ".\n", 0},
@@ -102,17 +104,49 @@ func TestTextCRLFKeepsLineNumbers(t *testing.T) {
 
 func TestTextUsageAndReadErrorsExitTwo(t *testing.T) {
 	path := textFile(t, "ok.\n")
-	for _, args := range [][]string{
-		{"-text"},
-		{"-text", path, path},
-		{"-text", "-all", path},
-		{"-text", "-all"},
-		{"-text", filepath.Join(t.TempDir(), "missing.md")},
-		{"-text", t.TempDir()},
+	for _, tc := range []struct {
+		args  []string
+		usage bool
+	}{
+		{[]string{"-text"}, true},
+		{[]string{"-text", path, path}, true},
+		{[]string{"-text", "-all", path}, true},
+		{[]string{"-text", "-all"}, true},
+		{[]string{"-text", filepath.Join(t.TempDir(), "missing.md")}, false},
+		{[]string{"-text", t.TempDir()}, false},
 	} {
-		if code, _, errOut := runLint(t.TempDir(), args...); code != 2 || errOut == "" {
-			t.Errorf("args %q: code = %d, err = %q, want 2 and a message", args, code, errOut)
+		code, _, errOut := runLint(t.TempDir(), tc.args...)
+		if code != 2 || errOut == "" {
+			t.Errorf("args %q: code = %d, err = %q, want 2 and a message", tc.args, code, errOut)
 		}
+		if tc.usage && !strings.Contains(errOut, "usage: stelint -text <file>") {
+			t.Errorf("args %q: err = %q, want the usage line", tc.args, errOut)
+		}
+	}
+}
+
+func TestTextEndlessFileIsRefused(t *testing.T) {
+	code, _, errOut := runLint(t.TempDir(), "-text", "/dev/zero")
+	if code != 2 || !strings.Contains(errOut, "not parsed") {
+		t.Errorf("/dev/zero: code = %d, err = %q, want 2 and not parsed", code, errOut)
+	}
+}
+
+func TestTextFileNameIsEscaped(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a\x1bb.md", ws(21)+".\n")
+	path := filepath.Join(dir, "a\x1bb.md")
+	esc := strings.ReplaceAll(path, "\x1b", `\u001b`)
+	_, out, _ := runLint(t.TempDir(), "-text", path)
+	if want := esc + ":1: 21 words (limit 20)\n"; !strings.HasPrefix(out, want) || strings.Contains(out, "\x1b") {
+		t.Errorf("out = %q, want the prefix %q and no ESC byte", out, want)
+	}
+	old := maxFileBytes
+	maxFileBytes = 1
+	defer func() { maxFileBytes = old }()
+	_, _, errOut := runLint(t.TempDir(), "-text", path)
+	if want := "stelint: " + esc + " is over"; !strings.HasPrefix(errOut, want) || strings.Contains(errOut, "\x1b") {
+		t.Errorf("err = %q, want the prefix %q and no ESC byte", errOut, want)
 	}
 }
 
