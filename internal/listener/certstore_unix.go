@@ -18,33 +18,13 @@ const readFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscal
 // createFlags makes a new file. The open fails if the name exists.
 const createFlags = os.O_WRONLY | os.O_CREATE | os.O_EXCL | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
 
-// otherOwner is a test hook. When it is not nil, ownedByUs gives it the device and
-// the inode of a file or a directory. If it gives true, ownedByUs returns false.
-// So a test gives another owner to one inode only, with no need for root. It is
-// nil in production.
-var otherOwner func(dev, ino uint64) bool
-
-// ownedByUs reports whether the effective user owns the file. It returns false
-// when the system gives no owner.
-func ownedByUs(fi fs.FileInfo) bool {
+// moreThanOneLink reports whether the file has more than one hard link. It also
+// returns true when the system gives no count. A count of 0 is a file that a
+// rename or a Delete removed after the open. The open file still holds the
+// whole value. The shared rule refuses 0, so this check is not in that rule.
+func moreThanOneLink(fi fs.FileInfo) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
-	}
-	if otherOwner != nil && otherOwner(uint64(st.Dev), uint64(st.Ino)) {
-		return false
-	}
-	return int64(st.Uid) == int64(os.Geteuid())
-}
-
-// linkCount returns the number of hard links of the file. It returns false when
-// the system gives no count.
-func linkCount(fi fs.FileInfo) (uint64, bool) {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return uint64(st.Nlink), true
+	return !ok || st.Nlink > 1
 }
 
 // isLoop reports whether err is ELOOP. ELOOP comes back when a name has more

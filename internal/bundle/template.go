@@ -13,11 +13,11 @@ const (
 	templateSuffix = ".tmpl"
 )
 
-// The caps of the templates, in bytes and in "{{" counts. The loader checks
-// them before it parses the first template.
+// The caps of the templates, in bytes and in "{{" counts (SEC-29). The loader
+// checks them before it parses the first template.
 const (
 	maxTemplateBytes   = 64 << 10
-	maxTemplateActions = 4096
+	maxTemplateActions = 2048
 	maxBundleBytes     = 512 << 10
 	maxBundleActions   = 16384
 )

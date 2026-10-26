@@ -1,10 +1,12 @@
-// Command stelint checks two limits in Go comments. A comment line has at most
-// 80 columns. A comment sentence has at most 20 words.
+// Command stelint checks two limits in Go comments, and one in a text file. A
+// comment line has at most 80 columns. A comment sentence has at most 20
+// words. A sentence in a text file has at most 25.
 //
 // Usage:
 //
 //	stelint <base> <head>
 //	stelint -all [head]
+//	stelint -text <file>
 //
 // The first form fails only for text that changed between base and head. The
 // changed lines come from "git diff base...head", the same range as the dco
@@ -13,6 +15,13 @@
 // The second form checks the tracked Go files at head, except symbolic links.
 // It prints each hit and a total for each rule. It exits 0, unless git fails,
 // an input is over a limit, or go/scanner reports an error.
+//
+// The third form reads one Markdown or plain-text file from disk, not from
+// git. It checks only the sentence rule, and it has no column rule. Each line
+// of the file is a line of text. A "\r" at the end of a line is removed.
+// The sentence breaks and the word count are the same as for a comment, but
+// the limit is 25 words. The form takes exactly one file, and it does not
+// combine with -all.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -107,8 +116,8 @@
 //
 // A long line prints as "path:line: <n> columns (limit 80)". A long sentence
 // prints as "path:line: <n> words (limit 20)", with the line of its first
-// word. Paths come from a pull request, so stelint prints no raw control
-// character.
+// word. In the third form the limit is 25. Paths come from a pull request, so
+// stelint prints no raw control character.
 //
 // A file over 1 MiB, or a git output over the output cap, is not parsed. A
 // hunk that ends after line 1048576 is not parsed. Each gives an error and
@@ -118,15 +127,16 @@
 // check did not run, and exits 0.
 //
 // stelint does not find quoted text, third-party text or legal text. The
-// writing standard does not count them, but stelint counts them. It does not
-// check text outside Go comments, such as Markdown files, strings and commit
-// messages.
+// writing standard does not count them, but stelint counts them. Only the
+// third form checks a file that is not Go code. Without it, stelint does not
+// check text outside Go comments, such as strings and commit messages.
 //
 // Exit codes:
 //
 //	0  pass, or the check did not run
 //	1  a changed line is too long, or a changed sentence has too many words
-//	2  usage, git, input limit or scan error
+//	   (third form: a sentence in the file has too many words)
+//	2  usage, git, input limit, read or scan error
 package main
 
 import (
@@ -190,10 +200,18 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("stelint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	all := fs.Bool("all", false, "check every tracked file at head and exit 0")
+	text := fs.Bool("text", false, "check the sentences of one text file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
+	if *text {
+		if *all || len(rest) != 1 {
+			fmt.Fprintln(stderr, "usage: stelint -text <file>")
+			return 2
+		}
+		return checkText(rest[0], stdout, stderr)
+	}
 	base, head := "", "HEAD"
 	switch {
 	case *all && len(rest) <= 1:
@@ -203,7 +221,7 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 	case !*all && len(rest) == 2:
 		base, head = rest[0], rest[1]
 	default:
-		fmt.Fprintln(stderr, "usage: stelint <base> <head> | stelint -all [head]")
+		fmt.Fprintln(stderr, "usage: stelint <base> <head> | stelint -all [head] | stelint -text <file>")
 		return 2
 	}
 	if strings.HasPrefix(base, "-") || strings.HasPrefix(head, "-") || head == "" {
@@ -264,6 +282,37 @@ func check(dir, base, head string, targets []target, stdout, stderr io.Writer) i
 	}
 	fmt.Fprintf(stdout, "stelint: no changed comment line over %d columns and no changed sentence over %d words in %.12s...%.12s\n",
 		maxColumns, maxWords, clean(base), clean(head))
+	return 0
+}
+
+// checkText prints the sentences of one text file that have too many words. It
+// exits 1 when there is a hit, and 2 when the file cannot be read or is over
+// maxFileBytes.
+func checkText(path string, stdout, stderr io.Writer) int {
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "stelint: %s\n", clean(err.Error()))
+		return 2
+	}
+	defer f.Close()
+	src, err := io.ReadAll(io.LimitReader(f, int64(maxFileBytes)+1))
+	if err != nil {
+		fmt.Fprintf(stderr, "stelint: %s\n", clean(err.Error()))
+		return 2
+	}
+	if len(src) > maxFileBytes {
+		fmt.Fprintf(stderr, "stelint: %s is over %d bytes: not parsed\n", clean(path), maxFileBytes)
+		return 2
+	}
+	found := textSentences(src)
+	for _, s := range found {
+		fmt.Fprintf(stdout, "%s:%d: %d words (limit %d)\n", clean(path), s.first, s.words, maxTextWords)
+	}
+	if len(found) > 0 {
+		fmt.Fprintf(stdout, "stelint FAIL: %d sentence(s) over %d words in %s\n", len(found), maxTextWords, clean(path))
+		return 1
+	}
+	fmt.Fprintf(stdout, "stelint: no sentence over %d words in %s\n", maxTextWords, clean(path))
 	return 0
 }
 

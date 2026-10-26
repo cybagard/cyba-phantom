@@ -214,7 +214,11 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	// explicit in this package, and tests use it to count the challenge
 	// connections.
 	s.srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){
-		challengeProto: func(*http.Server, *tls.Conn, http.Handler) {},
+		challengeProto: func(_ *http.Server, c *tls.Conn, _ http.Handler) {
+			if lc := limitConnOf(c); lc != nil {
+				lc.markACME()
+			}
+		},
 	}
 	return s, nil
 }
@@ -243,7 +247,7 @@ func (s *Server) newHTTP(h http.Handler) *http.Server {
 			}
 			return withConnState(ctx)
 		},
-		ConnState: periodHook,
+		ConnState: s.connHook,
 	}
 }
 
@@ -263,30 +267,48 @@ func limitConnOf(c net.Conn) *limitConn {
 
 // markRequest wraps h. It counts h as a running handler of s. The count goes
 // down in a defer, because net/http recovers a panic of h outside this wrapper.
-// Before h runs, it marks a request without a body as active on its limitConn. A
-// request with a body never starts a late run.
+// Before h runs, it marks the request on its limitConn. A request without a
+// body is also active. A request with a body never starts a late run.
 func (s *Server) markRequest(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.handlers.enter()
 		defer s.handlers.leave()
-		if lc, ok := r.Context().Value(limitConnKey{}).(*limitConn); ok && r.Body == http.NoBody {
-			lc.startRequest()
+		if lc, ok := r.Context().Value(limitConnKey{}).(*limitConn); ok {
+			lc.reachHandler(r.Body == http.NoBody)
 		}
 		h.ServeHTTP(w, r)
 	})
 }
 
-// periodHook is the ConnState hook. It starts the next read period of a
-// connection that becomes idle. A connection that read more than keepAliveBytes
-// in its period closes, so it gets no keep-alive. It also closes a connection
-// with more than keepAliveBytes late bytes. It must not wait on the network. A
-// connection of another type is left as it is.
-func periodHook(c net.Conn, st http.ConnState) {
-	if st != http.StateIdle {
+// connHook is the ConnState hook. At an idle state, it starts the next read
+// period of the connection. A connection that read more than keepAliveBytes in
+// its period closes, so it gets no keep-alive. It also closes a connection with
+// more than keepAliveBytes late bytes. At a close, it makes the refused event
+// of a refused request head. It must not wait on the network. It does not
+// change a connection of another type.
+func (s *Server) connHook(c net.Conn, st http.ConnState) {
+	switch lc := limitConnOf(c); {
+	case lc == nil:
+	case st == http.StateIdle:
+		lc.nextPeriod()
+	case st == http.StateClosed:
+		s.refusedAtClose(c, lc)
+	}
+}
+
+// refusedAtClose makes one refused event when net/http refused a request head
+// before the handler (SEC-22). Only a *tls.Conn with a complete handshake
+// counts. The rule does not use http.StateActive.
+func (s *Server) refusedAtClose(c net.Conn, lc *limitConn) {
+	tc, ok := c.(*tls.Conn)
+	if !ok || !lc.refusedRequest() || !tc.ConnectionState().HandshakeComplete {
 		return
 	}
-	if lc := limitConnOf(c); lc != nil {
-		lc.nextPeriod()
+	s.mu.Lock()
+	closing := s.closed
+	s.mu.Unlock()
+	if !closing {
+		s.refused.emit(event.ReasonRefusedRequest, c.RemoteAddr())
 	}
 }
 

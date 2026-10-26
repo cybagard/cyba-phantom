@@ -10,14 +10,19 @@ import (
 	"unicode/utf8"
 )
 
-// maxWords is the longest sentence of a comment, in words.
-const maxWords = 20
+// maxWords is the longest sentence of a comment, in words. maxTextWords is the
+// longest sentence of a text file.
+const (
+	maxWords     = 20
+	maxTextWords = 25
+)
 
-// sentence is a comment sentence that is too long. It runs from the line of
-// its first word to the line of its end mark.
+// sentence is a comment or text sentence that is too long. It runs from the
+// line of its first word to the line of its end mark.
 type sentence struct{ first, last, words int }
 
-// textLine is one line of comment text and the source line that holds it.
+// textLine is one line of comment text or of a text file, and the source line
+// that holds it.
 type textLine struct {
 	text string
 	line int
@@ -49,6 +54,21 @@ func longSentences(src []byte) []sentence {
 	return out
 }
 
+// textSentences returns the sentences of a Markdown or plain-text file that
+// have more than maxTextWords words, in line order. Each file line is a text
+// line with its line number.
+func textSentences(src []byte) []sentence {
+	var g []textLine
+	for i, l := range strings.Split(string(src), "\n") {
+		g = append(g, textLine{text: strings.TrimSuffix(l, "\r"), line: i + 1})
+	}
+	var out []sentence
+	for _, p := range paragraphs(g) {
+		out = append(out, p.long(maxTextWords)...)
+	}
+	return out
+}
+
 // checkedSentences returns the sentences of src that have more than maxWords
 // words and that the target covers, in line order. The target covers a
 // sentence when a line of it changed. It also does when a deletion joined it,
@@ -61,7 +81,7 @@ func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	for _, g := range groups {
 		whole := t.all || t.changedBreak(g)
 		for _, p := range paragraphs(g) {
-			for _, s := range p.long() {
+			for _, s := range p.long(maxWords) {
 				if whole || t.hasAny(s.first, s.last) || t.delBefore(s.first, g[0].line) {
 					out = append(out, s)
 				}
@@ -235,7 +255,7 @@ func blockLines(lit string, line int) []textLine {
 	return out
 }
 
-// Kinds of text in a comment, as paragraphs reads it.
+// Kinds of text in a comment or a text file, as paragraphs reads it.
 const (
 	modeNone = iota
 	modePara
@@ -243,12 +263,12 @@ const (
 	modeCode
 )
 
-// paragraphs splits the lines of a comment into paragraphs, headings, list
-// items and table cells. Each ends a sentence. It leaves out code, separator
-// rows and trailer lines. A line is code in a fence of three backticks. A line
-// with a tab or two spaces of indent is also code. This holds when no
-// paragraph or list item is open. In a code block, each indented line stays
-// code. A line with noCode set never starts a code block by its indent.
+// paragraphs splits the lines of a comment or a text file into paragraphs,
+// headings, list items and table cells. Each ends a sentence. It leaves out
+// code, separator rows and trailer lines. A line is code in a fence of three
+// backticks. A line with a tab or two spaces of indent is also code. This holds
+// when no paragraph or list item is open. In a code block, each indented line
+// stays code. A line with noCode set never starts a code block by its indent.
 func paragraphs(g []textLine) []*para {
 	var (
 		paras []*para
@@ -436,11 +456,11 @@ func spaceAt(b []byte, i int) bool {
 	return isBlank(r)
 }
 
-// long returns the sentences of the paragraph that are too long. The scan
-// reads each byte once. A search for a closing character starts at the scan
-// position. The result is kept for the next search. So the time is linear in
-// the length of the text.
-func (p *para) long() []sentence {
+// long returns the sentences of the paragraph that have more than limit words.
+// A code span in backticks is one word. The scan reads each byte once. A
+// search for a closing character starts at the scan position. The result is
+// kept for the next search. So the time is linear in the length of the text.
+func (p *para) long(limit int) []sentence {
 	var (
 		out         []sentence
 		b           = p.buf
@@ -466,7 +486,7 @@ func (p *para) long() []sentence {
 		}
 	}
 	finish := func(i int) {
-		if words > maxWords {
+		if words > limit {
 			out = append(out, sentence{from, lineAt(i), words})
 		}
 		words, inWord = 0, false

@@ -19,6 +19,10 @@ make all
 
 The build uses Go 1.27.2 (pinned in the `Makefile`).
 
+## Verifier
+
+`phantom-verify` checks a signed checkpoint, and that an event is in the log. It is supported on Linux. On macOS, its state directory must have no extended ACL (`ls -le` shows none). The verifier checks only the permission bits and the owner of the state directory and the state file. See `spec/04-interfaces.md` §7.
+
 ## Open and closed parts
 
 All code in this repository is Apache-2.0. Live trap templates, fingerprint tables, and scoring rules are content. They are not in this repository; they ship as signed bundles.

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -46,18 +47,31 @@ type Sender interface {
 	Send(target string, size uint64, note []byte) error
 }
 
-// errBadNote marks a bad note: a note that Publish deletes, counts, and does not
-// send. The cause is always a property of the note. Publish returns an error
-// only for the two causes of entryError.
+// errBadNote marks a bad note. Publish does not send a bad note. It counts the
+// note and deletes it if it can. The cause is a property of the note. One cause
+// is not: a policy can refuse to open the note with EACCES, and that note is
+// also bad. Among the bad notes, Publish returns an error only for the causes
+// of entryError.
 var errBadNote = errors.New("bad note")
 
 // entryError is a bad note with a cause that Publish reports. The cause is an
-// entry that is not a regular file, or a regular note that the open refuses
-// with permission denied. Its text names the file and the rule. errors.Is
-// reports errBadNote for it.
+// entry that is not a regular file. It can also be a regular note that fails
+// to open with EACCES. Its text names the file and the rule. errors.Is reports
+// errBadNote for it. errors.Is and errors.As also find the wrapped error.
 type entryError struct{ error }
 
 func (entryError) Is(target error) bool { return target == errBadNote }
+
+func (e entryError) Unwrap() error { return e.error }
+
+// causedError is an error with the text of its error field, not the text of
+// cause. errors.Is and errors.As also find cause.
+type causedError struct {
+	error
+	cause error
+}
+
+func (e causedError) Unwrap() error { return e.cause }
 
 // cursor is the last size that a target published. set is false before the
 // first success.
@@ -196,16 +210,18 @@ func (s *Spool) Add(size uint64, msg []byte) error {
 // Send, Publish stops and returns it; a later call sends that note again. A
 // bad note does not stop Publish. Publish does not send it, deletes it if it
 // can, counts it, and continues with the next notes. For the causes of
-// entryError, Publish then returns an error. Any other error to examine, open,
-// or read a note is not a bad note. Publish keeps the note, does not count it,
-// stops for this target, and returns an error that names the file and the rule.
+// entryError, Publish then returns an error. If a later error stops Publish, it
+// returns that error joined with the errors of the bad notes. Any other error
+// to examine, open, or read a note is not a bad note. Publish keeps the note
+// and does not count it. It stops for this target and returns an error that
+// names the file and the rule.
 //
 // Publish handles one note in each cycle. It holds the lock to read the cursor
 // and the note, and to handle a bad note. It calls Send with no lock. It holds
 // the lock again to check the cursor and to write it. If the cursor changed
 // during Send, Publish does not write it and returns an error. At the end,
 // Publish holds the lock to delete the notes that every target published. A
-// second call for a target returns an error at once while a call for that
+// second call for a target returns an error immediately while a call for that
 // target runs. It sends nothing. While Send runs, Add can drop the note that
 // Send sends because the spool is full. Add counts it as skipped for this
 // target. If Send then succeeds, the cursor moves to that size.
@@ -236,16 +252,17 @@ func (s *Spool) Publish(i int, send Sender) error {
 	for {
 		cur, size, msg, found, err := s.next(i, &entryErrs, &lim)
 		if err != nil {
-			return err
+			return errors.Join(append(entryErrs, err)...)
 		}
 		if !found {
 			return errors.Join(entryErrs...)
 		}
 		if err := send.Send(s.targets[i], size, msg); err != nil {
-			return fmt.Errorf("checkpoint spool: send of size %d to target %d failed: %w", size, i, err)
+			err = fmt.Errorf("checkpoint spool: send of size %d to target %d failed: %w", size, i, err)
+			return errors.Join(append(entryErrs, err)...)
 		}
 		if err := s.advance(i, cur, size); err != nil {
-			return err
+			return errors.Join(append(entryErrs, err)...)
 		}
 	}
 }
@@ -259,9 +276,9 @@ type limit struct {
 
 // next finds the first note after the cursor of target i that is not bad and is
 // not above the limit. It holds s.mu. The first call sets the limit to the
-// largest size in its listing. next handles each bad note on the way. If no note
-// is left, it deletes the notes that every target published and gives found as
-// false.
+// largest size in its listing. next handles each bad note when it finds it. If
+// no note is left, it deletes the notes that every target published, and found
+// is false.
 func (s *Spool) next(i int, entryErrs *[]error, lim *limit) (cur cursor, size uint64, msg []byte, found bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -318,24 +335,30 @@ func (s *Spool) advance(i int, before cursor, size uint64) error {
 	return s.replace(s.cursorName(i), strconv.FormatUint(size, 10))
 }
 
-// verified reads a note and checks it. It gives errBadNote for a note that is
-// larger than 1 KiB, does not parse or verify, or has another size than its name
-// gives. It gives entryError for an entry that is not a regular file (a symlink,
-// a directory, a FIFO) and for a note that the open refuses with permission
-// denied. Any other error is not a property of the note. verified returns it,
-// with the file and the rule in the text.
+// verified reads a note and checks it. It returns errBadNote for a note that is
+// larger than 1 KiB or does not parse or verify. It also returns errBadNote for
+// a size that differs from the name. It returns entryError in two cases. One is
+// an entry that is not a regular file (a symlink, a directory, a FIFO). The
+// other is a regular note that fails to open with EACCES. Any other error is
+// not a property of the note. verified returns it, with the file and the rule
+// in the text.
 func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
-	if fi, err := s.root.Lstat(name); err == nil && !fi.Mode().IsRegular() {
-		return nil, entryError{spoolError(name, "must be a regular file and not a symlink")}
-	} else if err == nil && fi.Size() > maxNoteSize {
-		return nil, errBadNote
+	var msg []byte
+	fi, err := s.examine(name)
+	if err == nil {
+		switch {
+		case !fi.Mode().IsRegular():
+			return nil, entryError{spoolError(name, "must be a regular file and not a symlink")}
+		case fi.Size() > maxNoteSize:
+			return nil, errBadNote
+		}
+		msg, err = s.readExamined(name, fi)
 	}
-	msg, err := s.readFile(name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, spoolError(name, "is gone before it is read")
-	case err != nil && s.denied(name):
+	case errors.Is(err, syscall.EACCES):
 		return nil, entryError{err}
 	case err != nil:
 		return nil, err
@@ -346,32 +369,49 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 	return msg, nil
 }
 
-// denied reports whether the open of name fails with permission denied.
-// openChecked does not return the cause of an open error.
-func (s *Spool) denied(name string) bool {
-	f, err := s.root.OpenFile(name, readFlags, 0)
+// examine runs Lstat on name. A missing file gives the error of the system, so
+// that a caller can test for fs.ErrNotExist.
+func (s *Spool) examine(name string) (fs.FileInfo, error) {
+	err := fault("examine", name)
+	var fi fs.FileInfo
 	if err == nil {
-		f.Close()
+		fi, err = s.root.Lstat(name)
 	}
-	return errors.Is(err, fs.ErrPermission)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, err
+	case err != nil:
+		return nil, spoolError(name, "cannot be examined")
+	}
+	return fi, nil
 }
 
 // readFile reads a regular file of at most 1 KiB through the root. A symlink
-// is an error and its target is not opened. A missing file gives the error of
-// the system, so that a caller can test for fs.ErrNotExist.
+// is an error and its target is not opened. A missing file gives an error for
+// which errors.Is finds fs.ErrNotExist.
 func (s *Spool) readFile(name string) ([]byte, error) {
-	lfi, err := s.root.Lstat(name)
-	if errors.Is(err, fs.ErrNotExist) {
+	lfi, err := s.examine(name)
+	if err != nil {
 		return nil, err
-	} else if err != nil {
-		return nil, spoolError(name, "cannot be examined")
 	}
-	f, _, rule := openChecked(s.root, name, lfi)
-	if rule != "" {
+	return s.readExamined(name, lfi)
+}
+
+// readExamined is readFile for a name that examine returned lfi for. If the
+// file does not open, the error from OpenFile is the cause of the returned
+// error.
+func (s *Spool) readExamined(name string, lfi fs.FileInfo) ([]byte, error) {
+	f, _, rule, cause := openCheckedCause(s.root, name, lfi)
+	if cause != nil {
+		return nil, causedError{spoolError(name, rule), cause}
+	} else if rule != "" {
 		return nil, spoolError(name, rule)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, maxNoteSize+1))
+	if err == nil {
+		err = fault("read", name)
+	}
 	if err != nil || len(b) > maxNoteSize {
 		return nil, spoolError(name, "cannot be read within 1 KiB")
 	}
@@ -578,7 +618,7 @@ func (s *Spool) collect(sizes []uint64) {
 	}
 	for _, size := range sizes {
 		if size != newest && size <= published {
-			_ = s.remove(size)
+			_ = s.remove(size) // the note stays for a later collect
 		}
 	}
 }

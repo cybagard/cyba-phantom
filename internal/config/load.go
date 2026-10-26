@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
 )
@@ -179,16 +178,17 @@ func envName(path string) string {
 }
 
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
-	doc, err := ReadFile(path)
-	if err != nil {
-		return nil, errors.Join(readError(path, err, table, lists))
-	}
 	l.env = env
 	byPath := make(map[string]key, len(table))
 	byEnv := make(map[string]key, len(table))
 	for _, k := range table {
 		byPath[k.path] = k
 		byEnv[envName(k.path)] = k
+	}
+	doc, err := ReadFile(path)
+	if err != nil {
+		// A reader error does not hide the errors in variable names.
+		return nil, errors.Join(append([]error{readError(path, err, table, lists)}, envEach(env, byEnv, nil)...)...)
 	}
 	vals := make(map[string]Value)
 	raws := make(map[string]string) // raws holds the text of each value in vals.
@@ -250,25 +250,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	// Env: if a name, in upper case and with "-" changed to "_", starts with PHANTOM_,
-	// the key table must contain it.
-	seen := make(map[string]bool)
-	for _, kv := range env {
-		name, raw, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(strings.ToUpper(strings.ReplaceAll(name, "-", "_")), "PHANTOM_") {
-			continue
-		}
-		k, ok := byEnv[name]
-		switch {
-		case !ok:
-			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM_ variable"})
-		case seen[name]:
-			errs = append(errs, &Error{Source: name, Detail: "the variable occurs more than one time"})
-		default:
-			set(k, raw, "", name, 0)
-		}
-		seen[name] = true
-	}
+	errs = append(errs, envEach(env, byEnv, func(k key, name, raw string) { set(k, raw, "", name, 0) })...)
 
 	for _, k := range table {
 		if _, ok := vals[k.path]; k.req && !ok {
@@ -292,6 +274,32 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		return nil, errors.Join(errs...)
 	}
 	return &Config{values: vals}, nil
+}
+
+// envEach checks the names in env. If a name starts with PHANTOM_ (in upper
+// case, with "-" changed to "_"), the key table must contain it.
+// An unknown name gets the unknown-name error each time. A known name that
+// occurs again gets the repeat error. Its first use calls use, if use is set.
+func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string)) []error {
+	var errs []error
+	seen := make(map[string]bool)
+	for _, kv := range env {
+		name, raw, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(strings.ToUpper(strings.ReplaceAll(name, "-", "_")), "PHANTOM_") {
+			continue
+		}
+		k, ok := byEnv[name]
+		switch {
+		case !ok:
+			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM_ variable"})
+		case seen[name]:
+			errs = append(errs, &Error{Source: name, Detail: "the variable occurs more than one time"})
+		case use != nil:
+			use(k, name, raw)
+		}
+		seen[name] = true
+	}
+	return errs
 }
 
 // parse checks the YAML tag of a file value (tag is "" for a default or an override),
@@ -343,33 +351,43 @@ func parent(p string) string {
 	return ""
 }
 
-// readError changes a reader error into an Error. A wrapped system error becomes
-// a fixed message. It removes the reader's quotes, so esc escapes the text one time only.
-// A key below a secret key can be the secret value, so readError changes its path to the path of the secret key.
-// The tables are parameters, so readError does not read the global tables.
+// readError changes a reader error into an Error. A wrapped system error
+// becomes a fixed message. A ReadError gives its line and its detail.
+// For a node, it also gives the key path and the column.
+// A key below a secret key can be the secret value. So readError changes
+// its path to the path of the secret key.
+// The tables are parameters: readError does not read the global tables.
 func readError(path string, err error, table []key, listTable []listKey) error {
-	detail := "the loader cannot read the file"
+	e := &Error{Source: path, Detail: "the loader cannot read the file"}
+	var re *ReadError
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		detail = "the file does not exist"
+		e.Detail = "the file does not exist"
 	case errors.Is(err, fs.ErrPermission):
-		detail = "permission denied"
-	case errors.Unwrap(err) == nil:
-		detail = strings.TrimPrefix(strings.TrimPrefix(err.Error(), "config: "), strconv.Quote(path)+": ")
-		detail = quoted.ReplaceAllStringFunc(detail, func(q string) string {
-			s, _ := strconv.Unquote(q)
-			if i := slices.IndexFunc(table, func(k key) bool {
-				return k.secret && isBelow(s, k.path)
-			}); i >= 0 {
-				return table[i].path
-			}
-			if p := secretItemPath(s, listTable); p != "" {
-				return p
-			}
-			return s
-		})
+		e.Detail = "permission denied"
+	case errors.As(err, &re) && re.Err == nil:
+		e.Detail, e.Line = re.Detail, re.Line
+		if re.Column > 0 {
+			e.Detail = cut(secretPath(re.Path, table, listTable)) + ": column " + strconv.Itoa(re.Column) + ": " + re.Detail
+		}
 	}
-	return &Error{Source: path, Detail: detail}
+	return e
+}
+
+// secretPath returns the key path p. If p is below a secret key or has a
+// secret item name, it returns the path of that secret.
+// For the root, it returns "(root)".
+func secretPath(p string, table []key, listTable []listKey) string {
+	if i := slices.IndexFunc(table, func(k key) bool { return k.secret && isBelow(p, k.path) }); i >= 0 {
+		return table[i].path
+	}
+	if s := secretItemPath(p, listTable); s != "" {
+		return s
+	}
+	if p == "" {
+		return "(root)"
+	}
+	return p
 }
 
 // isBelow reports whether the path s is below the key p: s has the prefix p+"." or p+"[".
@@ -407,33 +425,73 @@ func isSecretItemName(name string, table []listKey) bool {
 	return false
 }
 
-var quoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-
-// userinfo matches a start and all text after it to the last "@" in the value. The start
-// is the first of these in the value: a ":" with all slashes, backslashes, and white space
-// after it, or two characters that are each a slash or a backslash. Thus the rule also
-// removes a password after a backslash, after one slash or no slash, and in "user:password@host".
-// A more precise rule can miss a password form, so the loader accepts that it removes too much.
+// userinfo matches user information and all text to the last "@" in the value.
+// The start of a match is the first of two forms in the value.
+// Form 1 is a ":" with all slashes, backslashes, and white space after it.
+// Form 2 is two characters that are each a slash or a backslash.
+// A more precise rule can miss a password form, so the loader removes too much.
 var userinfo = regexp.MustCompile(`(?s)(:[/\\\s]*|[/\\]{2}).*@`)
 
-// esc is the one escaper for printed text (SEC-07). It keeps the start that userinfo matches
-// and replaces the text after it, to the last "@", with "REDACTED@". Then it cuts the text to
-// max bytes on a rune boundary (max < 0: keep the last -max bytes), and escapes control
-// characters, ANSI sequences, and non-ASCII runes.
-func esc(s string, max int) string {
-	s = userinfo.ReplaceAllString(s, "${1}REDACTED@")
-	if n := len(s) + max; max < 0 && n > 0 {
-		for n < len(s) && !utf8.RuneStart(s[n]) {
-			n++
-		}
-		s = s[n:]
-	} else if max >= 0 && len(s) > max {
-		n := max
-		for n > 0 && !utf8.RuneStart(s[n]) {
-			n--
-		}
-		s = s[:n]
+// cutMarker starts a text that esc cuts on the left.
+const cutMarker = "..."
+
+// scheme matches a URL scheme: a letter, then letters, digits, "+", "-" or ".".
+var scheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+
+// redact replaces the user information in s with "REDACTED@".
+// It keeps the text before "REDACTED@" in two cases only.
+// Case 1 needs two conditions. The text before the ":" is a URL scheme.
+// Also, 2 or more slashes or backslashes follow the ":".
+// In case 2, the match is two slashes or backslashes at the start of s.
+// In each other case, redact keeps no text before "REDACTED@".
+func redact(s string) string {
+	m := userinfo.FindStringSubmatchIndex(s)
+	if m == nil {
+		return s
 	}
-	q := strconv.QuoteToASCII(s)
-	return q[1 : len(q)-1]
+	keep, g := "", s[m[2]:m[3]]
+	if g[0] == ':' {
+		if scheme.MatchString(s[:m[2]]) && strings.Count(g, "/")+strings.Count(g, `\`) >= 2 {
+			keep = s[:m[3]]
+		}
+	} else if m[2] == 0 {
+		keep = g
+	}
+	return keep + "REDACTED@" + s[m[1]:]
+}
+
+// esc is the one escaper for printed text (SEC-07).
+// It redacts the user information. Then it escapes control characters (also
+// the ESC of ANSI sequences), double quotes, backslashes, non-ASCII runes and
+// invalid bytes. Then it cuts the result. It never cuts an escape sequence.
+// If max < 0 and the cut removes text, the result starts with cutMarker.
+// If max >= 0 or max <= -3, the result has at most |max| bytes.
+func esc(s string, max int) string {
+	q := strconv.QuoteToASCII(redact(s))
+	q = q[1 : len(q)-1]
+	i := 0
+	if max >= 0 {
+		for i < len(q) && i+escWidth(q[i:]) <= max {
+			i += escWidth(q[i:])
+		}
+		return q[:i]
+	}
+	if len(q) <= -max {
+		return q
+	}
+	for from := len(q) + max + len(cutMarker); i < from && i < len(q); {
+		i += escWidth(q[i:])
+	}
+	return cutMarker + q[i:]
+}
+
+// escWidth returns the byte width of the character or escape at the start of q.
+func escWidth(q string) int {
+	if q[0] != '\\' || len(q) < 2 {
+		return 1
+	}
+	if i := strings.IndexByte("xuU", q[1]); i >= 0 {
+		return [...]int{4, 6, 10}[i]
+	}
+	return 2
 }

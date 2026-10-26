@@ -96,20 +96,43 @@ func checkKeysDir(root *os.Root, path string) (bool, error) {
 // change the file system between the Lstat and the open.
 var afterLstat func()
 
+// faultAt is a test hook. Production code leaves it nil. A test sets it to
+// return an error for a step of a name. The steps are "examine", "open", and
+// "read".
+var faultAt func(step, name string) error
+
+func fault(step, name string) error {
+	if faultAt == nil {
+		return nil
+	}
+	return faultAt(step, name)
+}
+
 // openChecked opens name for read and compares the open file with lfi, the
 // Lstat result of the same name. os.Root adds O_NOFOLLOW itself, but it still
 // follows a symlink that stays inside the root. The os.SameFile comparison
 // finds such a change. The returned string is the failed rule, or empty.
 func openChecked(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string) {
+	f, fi, rule, _ := openCheckedCause(root, name, lfi)
+	return f, fi, rule
+}
+
+// openCheckedCause is openChecked with one more result: the error that
+// OpenFile returned, if it failed.
+func openCheckedCause(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string, error) {
 	if !lfi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
-		return nil, nil, "must be a regular file and not a symlink"
+		return nil, nil, "must be a regular file and not a symlink", nil
 	}
 	if afterLstat != nil {
 		afterLstat()
 	}
-	f, err := root.OpenFile(name, readFlags, 0)
+	err := fault("open", name)
+	var f *os.File
+	if err == nil {
+		f, err = root.OpenFile(name, readFlags, 0)
+	}
 	if err != nil {
-		return nil, nil, "cannot be opened"
+		return nil, nil, "cannot be opened", err
 	}
 	fi, err := f.Stat() // the open file, not the name
 	rule := ""
@@ -125,9 +148,9 @@ func openChecked(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.File
 	}
 	if rule != "" {
 		f.Close()
-		return nil, nil, rule
+		return nil, nil, rule, nil
 	}
-	return f, fi, ""
+	return f, fi, "", nil
 }
 
 func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.FileInfo) (note.Signer, error) {
