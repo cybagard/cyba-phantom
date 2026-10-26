@@ -140,7 +140,7 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 		}
 		cases = append(cases, struct{ rel, rule string }{rel, rule})
 	}
-	for _, r := range []string{"é", "日", "‮", "\U0001F600"} {
+	for _, r := range []string{"é", "日", "\U0000202e", "\U0001F600"} {
 		cases = append(cases, struct{ rel, rule string }{"x" + r + ".db", ruleChars})
 	}
 	for _, c := range cases {
