@@ -94,10 +94,11 @@ func (l *Loader) Current() *Bundle { return l.cur.Load() }
 
 // Load reads the bundle and the signature file. It checks the bundle and makes
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: read,
-// SHA-256, signature, archive, manifest, key ID, engine, expiry and rollback,
-// templates. The first failed check gives the one error. A rejected bundle
-// changes no file and not the running bundle. start is true for the load at
-// start: an accepted bundle that expired then loads, and Expired is true.
+// SHA-256, signature, archive, manifest, key ID, rotation, engine, expiry and
+// rollback, templates. The first failed check gives the one error. A rejected
+// bundle changes no file and not the running bundle. start is true for the
+// load at start: an accepted bundle that expired then loads, and Expired is
+// true.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	loadMu.Lock()
