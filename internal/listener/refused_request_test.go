@@ -79,8 +79,8 @@ func count(b bool) int {
 
 // T-S-22: a request head that net/http refuses before the handler gives one
 // refused event after the handshake. Six heads do this also after a served
-// request, in a second write and in the same write. The second head is above
-// the read budget of that period.
+// request, in a second write and in the same write. The head over the cap runs
+// only alone: after a served request it is above the read budget.
 func TestTS22RefusedRequestHeads(t *testing.T) {
 	for _, tc := range []struct {
 		name, req string
@@ -363,7 +363,7 @@ func TestTS22NoEvent(t *testing.T) {
 			_, _ = io.WriteString(c, partial)
 			_ = c.Close()
 		}},
-		// Known limit. The same, for a client alert of any kind.
+		// Known limit. The same, for a fatal alert from the client.
 		{"known limit: partial head, fatal alert", defaultTimeouts, nil, func(t *testing.T, r *rig) {
 			c, w, _ := dial13(t, r)
 			_, _ = c.NetConn().Write(append(w.data([]byte(partial)), alert(t, w)...))
@@ -431,7 +431,8 @@ func TestTS22NoEvent(t *testing.T) {
 			}
 		}},
 		{"acme-tls/1, TLS 1.2", defaultTimeouts, nil, func(t *testing.T, r *rig) { dial12(t, r, challengeProto) }},
-		// The extra write gives the other parts of the condition.
+		// The injected write is a counted write. So only the acme check stops
+		// the event.
 		{"acme-tls/1", defaultTimeouts, func(t *testing.T, r *rig) {
 			next := r.s.srv.TLSNextProto[challengeProto]
 			r.s.srv.TLSNextProto[challengeProto] = func(s *http.Server, c *tls.Conn, h http.Handler) {

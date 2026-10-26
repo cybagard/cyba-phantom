@@ -284,8 +284,8 @@ func (s *Server) markRequest(h http.Handler) http.Handler {
 // period of the connection. A connection that read more than keepAliveBytes in
 // its period closes, so it gets no keep-alive. It also closes a connection with
 // more than keepAliveBytes late bytes. At a close, it makes the refused event
-// of a refused request head. It must not wait on the network. A connection of
-// another type is left as it is.
+// of a refused request head. It must not wait on the network. It does not
+// change a connection of another type.
 func (s *Server) connHook(c net.Conn, st http.ConnState) {
 	switch lc := limitConnOf(c); {
 	case lc == nil:

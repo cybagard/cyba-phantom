@@ -349,11 +349,12 @@ func (c *limitConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// uncountedWriteMax is the largest size of a write that refusedRequest does not
-// count. It counts a write of more than this many bytes that starts with
-// recordApplicationData. After the handshake, a reply of net/http is such a
-// record of more than 96 bytes. An alert or a key update record is smaller. A
-// TLS 1.2 handshake flight starts with another record type (SEC-22).
+// uncountedWriteMax is the largest size of an application-data write that is
+// not counted. Write counts a write of more than uncountedWriteMax bytes that
+// starts with recordApplicationData. After the handshake, a reply of net/http
+// is such a record of more than 96 bytes. An alert or a key update record is
+// smaller. A TLS 1.2 handshake flight starts with another record type
+// (SEC-22).
 const uncountedWriteMax = 96
 
 // recordApplicationData is the TLS record type application_data.

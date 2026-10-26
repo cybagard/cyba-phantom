@@ -351,9 +351,9 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 
 // T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
 // configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets
-// the 200 with no body of net/http. Over TLS it gives one request event and no
-// refused event, also with "Connection: close". On the plain socket it gives
-// no Location and no event.
+// the 200 with no body of net/http. Over TLS each request gives one request
+// event and no refused event, also with "Connection: close". On the plain
+// socket it gives no Location and no event.
 func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 	for _, tc := range []struct {
 		host string
