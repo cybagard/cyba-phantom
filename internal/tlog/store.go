@@ -620,24 +620,22 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // that the tree head covers never changes: if data differs from a stored file
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
-// tree head with a temporary file and an atomic rename. It writes nothing if
-// a stored file has the data already. In that case, the data can have hashes
+// tree head with a temporary file and an atomic rename. It writes nothing if a
+// stored file has the data already. In that case, the data can have hashes
 // beyond the tree head. Then WriteTile calls fsync on the directories of the
 // stored file. This is because an earlier call can have failed after the
-// rename. A
-// stored file can be wider than the data and differ beyond the tree head. Such
-// a file is stale. WriteTile writes the new file first, then deletes the stale
-// files. After the write, the store deletes the narrower partial files, so
-// that at most one partial file stays.
-// WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
-// the tree head between two calls of SetHead. WriteTile first checks each
-// directory of the tile path. Each must be a real directory and not a link.
-// This check comes before any write, rename, or delete. WriteTile also lists
-// the .p directory of the tile. A directory entry there with a group or other
-// bit gives the mode rule. WriteTile also checks the other files of the tile
-// before it writes. Each must agree with the stored
-// file in the hashes that the tree head covers. A bad file gives an error and
-// no file changes.
+// rename. A stored file can be wider than the data and differ beyond the tree
+// head. Such a file is stale. WriteTile writes the new file first, then deletes
+// the stale files. After the write, the store deletes the narrower partial
+// files, so that at most one partial file stays. WriteTile accepts at most
+// maxBatchTiles different tiles with hashes beyond the tree head between two
+// calls of SetHead. WriteTile first checks each directory of the tile path.
+// Each must be a real directory and not a link. This check comes before any
+// write, rename, or delete. WriteTile also lists the .p directory of the tile.
+// A directory entry there with a group or other bit gives the mode rule.
+// WriteTile also checks the other files of the tile before it writes. Each must
+// agree with the stored file in the hashes that the tree head covers. A bad
+// file gives an error and no file changes.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
