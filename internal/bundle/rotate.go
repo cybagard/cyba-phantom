@@ -36,9 +36,9 @@ type chain struct {
 // rotate checks the rotation of a transition bundle against the chain c. m is
 // its manifest. archive and sig are its files. ids are the key IDs that
 // VerifySig gave for sig over archive with the set c.trust. The old key must be
-// one of them. The new key ID must not be in the set. Neither the new key ID
-// nor the new key can be one that an earlier record removed. The new key needs
-// a line that verifies. rotate gives the chain after the rotation, with the
+// one of them. The new key ID must not be in the set. The new key ID and the
+// new key can be neither one of the set nor one that a record removed. The new
+// key needs a line that verifies. rotate gives the chain after the rotation, with the
 // new key in the place of the old key. It also gives the class of the old key.
 func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chain, class Class, ok bool) {
 	r := m.Rotation
@@ -46,8 +46,8 @@ func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chai
 		return chain{}, 0, false
 	}
 	i := c.trust.index(r.From)
-	if i < 0 || c.trust.index(m.KeyID) >= 0 || c.retired.index(m.KeyID) >= 0 ||
-		slices.ContainsFunc(c.retired, func(k TrustKey) bool { return k.PublicKey == r.Key }) {
+	if c.trust.index(m.KeyID) >= 0 || c.retired.index(m.KeyID) >= 0 ||
+		slices.ContainsFunc(slices.Concat(c.retired, c.trust), func(k TrustKey) bool { return k.PublicKey == r.Key }) {
 		return chain{}, 0, false
 	}
 	if _, err := VerifySig(archive, sig, TrustSet{{KeyID: m.KeyID, PublicKey: r.Key}}); err != nil {
