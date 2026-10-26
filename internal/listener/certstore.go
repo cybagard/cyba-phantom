@@ -90,14 +90,13 @@ var (
 	fileTexts = texts{ruleType, ruleFileOwner, ruleFileMode, ruleFileSpecial, ruleChanged, true}
 )
 
-// refusal gives the Error for err, a refusal of package safefile. The shared
-// package decides that the file is refused. The listener chooses the text from
-// t. For a key file, a link count above 1 gives the link text first. A refusal
-// of the mode has two texts. The first path of paths below r with a forbidden
-// bit chooses the text. The text comes from a second Lstat, so in a race it can
-// describe another file. The refusal stays. A nil err gives nil. An err that
-// is not a refusal of package safefile gives wrap of err. The link text comes
-// first only for a refusal of the owner or of the mode.
+// refusal gives the Error for err. A nil err gives nil. An err that is not a
+// refusal of package safefile gives wrap(op, err). For a safefile refusal, the
+// shared package decides the refusal. The listener chooses the text from t.
+// For a key file with more than one link, an owner or mode refusal gives the
+// link text. A mode refusal has two texts. The first path of paths
+// below r with a forbidden bit chooses the text. The text comes from a second
+// Lstat, so in a race it can describe another file. The refusal stays.
 func refusal(op string, err error, t texts, r *os.Root, paths ...string) error {
 	var se *safefile.Error
 	if !errors.As(err, &se) {
@@ -301,8 +300,8 @@ func (s *Store) Close() error { return wrap("close", s.root.Close()) }
 // directory only. The walk reads a directory 256 names at a time and keeps no
 // list of names. So the number of names does not matter. It calls fsync on a
 // directory only if it removed a name in it, and it ignores an fsync error.
-// The walk does not find a swap away and back to the first directory around the
-// rule check either.
+// The walk does not find a swap back either. Another directory is there for
+// the rule check, and the first one comes back for the open.
 func (s *Store) removeTemporary(parts []string) {
 	li, err := s.root.Lstat(rel(parts))
 	if err != nil || s.checkDirs(parts) != nil {
@@ -387,8 +386,8 @@ func (s *Store) dirs(parts []string, create bool) error {
 
 // parent opens the directory of the last part of parts, after the check of the
 // cache directory. The caller closes the root that it gets. changed is true
-// when another directory replaced a part after its check.
-// A link to another directory also gives it.
+// when another directory replaced a part after its check. A link to another
+// directory in the cache gives it too.
 func (s *Store) parent(parts []string) (r *os.Root, changed bool, err error) {
 	if err := s.dirs(nil, false); err != nil {
 		return nil, false, err
@@ -546,7 +545,8 @@ func wrapAfterDirs(op string, err error) error {
 // at most loadTries times in all. If the file still changes, Load gives the rule
 // "file changed during the read". A replacement after the open does not matter:
 // Load returns the value of the open file.
-// Load also starts again when a refused file is no longer at the name.
+// Load also starts again when safefile.Open refuses a file that has left the
+// name.
 //
 // A write in place of the key file (the same file) can change its size during
 // the Load. Then Load gives the rule "file changed during the read". When the
@@ -565,8 +565,8 @@ func (s *Store) Load(ctx context.Context, key string) ([]byte, error) {
 }
 
 // load makes one try to read the value at key. It returns changed true when the
-// key file or a key directory changed after its check. A refused file that is
-// no longer at the name gives it too.
+// key file or a key directory changed after its check. A file that
+// safefile.Open refuses and that has left the name gives it too.
 func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed bool, err error) {
 	if err := stopped(ctx, op); err != nil {
 		return nil, false, err
