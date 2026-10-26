@@ -519,6 +519,27 @@ func TestTS13OpenGivesLinkRuleForDirectoryReplacedBeforeFsync(t *testing.T) {
 	}
 }
 
+// A directory replaced by a regular file before its fsync gives the
+// not-a-directory rule and names the directory.
+func TestTS13OpenGivesNotDirRuleForDirectoryReplacedBeforeFsync(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	level := filepath.Join(dir, "tlog", "tile", "8", "0")
+	oldDir := syncDirFile
+	t.Cleanup(func() { syncDirFile = oldDir })
+	var calls int
+	syncDirFile = func(f *os.File) error {
+		// Call 3 is the first fsync of the pass over the tiles.
+		if calls++; calls == 3 {
+			mustNil(t, os.Rename(filepath.Join(level, "000.p"), filepath.Join(level, "000.real")))
+			mustNil(t, os.WriteFile(filepath.Join(level, "000.p"), []byte("x"), 0o600))
+		}
+		return oldDir(f)
+	}
+	if e := openErr(t, state, ruleNotDir); e.Name != "tile/8/0/000.p" {
+		t.Fatalf("name %q", e.Name)
+	}
+}
+
 // A state directory with a group bit gives the mode rule at the first Open.
 // This is the same rule as at the second Open.
 func TestTS13OpenGivesModeRuleForNewLogInStateWithGroupBit(t *testing.T) {
