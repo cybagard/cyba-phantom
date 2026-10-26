@@ -1,5 +1,6 @@
 // Command stelint checks two limits in Go comments, and one in a text file. A
-// comment line has at most 80 columns. A sentence has at most 20 words.
+// comment line has at most 80 columns. A comment sentence has at most 20
+// words. A sentence in a text file has at most 25.
 //
 // Usage:
 //
@@ -18,9 +19,9 @@
 // The third form reads one Markdown or plain-text file from disk, not from
 // git. It checks only the sentence rule, and it has no column rule. Each line
 // of the file is a line of text. A "\r" at the end of a line is removed.
-// The sentence breaks are the same as for a comment. In this form, a code span
-// in backticks counts as no word. The form takes exactly one file, and it does
-// not combine with -all.
+// The sentence breaks and the word count are the same as for a comment, but
+// the limit is 25 words. The form takes exactly one file, and it does not
+// combine with -all.
 //
 // A comment line is each source line that holds comment text. These are a
 // "//" line, a "//" comment after code, and each line of a "/* */" comment.
@@ -95,10 +96,10 @@
 // words count. The tab (category Cc) and U+3164 (default-ignorable) are spaces
 // and are also in one of these classes. Only a space, a line end or the end of
 // the text ends a sentence after an end mark. So "end.<U+200B>next" is not a
-// sentence end. In a comment, a code span in backticks is one word, also when
-// it has spaces. A "." in a code span does not end a sentence. In a Markdown
-// link, only the link text counts. A link whose URL has a word break is not a
-// link. A backtick or a link with no closing mark is an ordinary character.
+// sentence end. A code span in backticks is one word, also when it has spaces.
+// A "." in a code span does not end a sentence. In a Markdown link, only the
+// link text counts. A link whose URL has a word break is not a link. A
+// backtick or a link with no closing mark is an ordinary character.
 //
 // A sentence is checked when at least one line of it is a changed line. It
 // is also checked when a change deleted lines between two of its lines. So
@@ -115,8 +116,8 @@
 //
 // A long line prints as "path:line: <n> columns (limit 80)". A long sentence
 // prints as "path:line: <n> words (limit 20)", with the line of its first
-// word. Paths come from a pull request, so stelint prints no raw control
-// character.
+// word. In the third form the limit is 25. Paths come from a pull request, so
+// stelint prints no raw control character.
 //
 // A file over 1 MiB, or a git output over the output cap, is not parsed. A
 // hunk that ends after line 1048576 is not parsed. Each gives an error and
@@ -305,13 +306,13 @@ func checkText(path string, stdout, stderr io.Writer) int {
 	}
 	found := textSentences(src)
 	for _, s := range found {
-		fmt.Fprintf(stdout, "%s:%d: %d words (limit %d)\n", clean(path), s.first, s.words, maxWords)
+		fmt.Fprintf(stdout, "%s:%d: %d words (limit %d)\n", clean(path), s.first, s.words, maxTextWords)
 	}
 	if len(found) > 0 {
-		fmt.Fprintf(stdout, "stelint FAIL: %d sentence(s) over %d words in %s\n", len(found), maxWords, clean(path))
+		fmt.Fprintf(stdout, "stelint FAIL: %d sentence(s) over %d words in %s\n", len(found), maxTextWords, clean(path))
 		return 1
 	}
-	fmt.Fprintf(stdout, "stelint: no sentence over %d words in %s\n", maxWords, clean(path))
+	fmt.Fprintf(stdout, "stelint: no sentence over %d words in %s\n", maxTextWords, clean(path))
 	return 0
 }
 

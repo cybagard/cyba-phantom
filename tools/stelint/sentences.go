@@ -10,8 +10,12 @@ import (
 	"unicode/utf8"
 )
 
-// maxWords is the longest sentence of a comment or of a text file, in words.
-const maxWords = 20
+// maxWords is the longest sentence of a comment, in words. maxTextWords is the
+// longest sentence of a text file.
+const (
+	maxWords     = 20
+	maxTextWords = 25
+)
 
 // sentence is a comment or text sentence that is too long. It runs from the
 // line of its first word to the line of its end mark.
@@ -51,8 +55,8 @@ func longSentences(src []byte) []sentence {
 }
 
 // textSentences returns the sentences of a Markdown or plain-text file that
-// have more than maxWords words, in line order. Each file line is a text line
-// with its line number. A code span counts as no word.
+// have more than maxTextWords words, in line order. Each file line is a text
+// line with its line number.
 func textSentences(src []byte) []sentence {
 	var g []textLine
 	for i, l := range strings.Split(string(src), "\n") {
@@ -60,8 +64,7 @@ func textSentences(src []byte) []sentence {
 	}
 	var out []sentence
 	for _, p := range paragraphs(g) {
-		p.text = true
-		out = append(out, p.long()...)
+		out = append(out, p.long(maxTextWords)...)
 	}
 	return out
 }
@@ -78,7 +81,7 @@ func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	for _, g := range groups {
 		whole := t.all || t.changedBreak(g)
 		for _, p := range paragraphs(g) {
-			for _, s := range p.long() {
+			for _, s := range p.long(maxWords) {
 				if whole || t.hasAny(s.first, s.last) || t.delBefore(s.first, g[0].line) {
 					out = append(out, s)
 				}
@@ -407,9 +410,6 @@ func listItem(t string) (rest string, ok bool) {
 type para struct {
 	buf  []byte
 	segs []seg
-	// text is true for a Markdown or plain-text file. A code span in backticks
-	// then counts as no word. In a comment it counts as one word.
-	text bool
 }
 
 type seg struct{ off, line int }
@@ -456,11 +456,11 @@ func spaceAt(b []byte, i int) bool {
 	return isBlank(r)
 }
 
-// long returns the sentences of the paragraph that are too long. The scan
-// reads each byte once. A search for a closing character starts at the scan
-// position. The result is kept for the next search. So the time is linear in
-// the length of the text.
-func (p *para) long() []sentence {
+// long returns the sentences of the paragraph that have more than limit words.
+// A code span in backticks is one word. The scan reads each byte once. A
+// search for a closing character starts at the scan position. The result is
+// kept for the next search. So the time is linear in the length of the text.
+func (p *para) long(limit int) []sentence {
 	var (
 		out         []sentence
 		b           = p.buf
@@ -469,7 +469,6 @@ func (p *para) long() []sentence {
 		inWord      bool
 		open        bool // a "[" is open: it can start a link
 		tick, stop  = -1, -1
-		spanEnd     = -1 // index after the last code span that has no word
 	)
 	lineAt := func(i int) int {
 		for cursor+1 < len(p.segs) && p.segs[cursor+1].off <= i {
@@ -487,7 +486,7 @@ func (p *para) long() []sentence {
 		}
 	}
 	finish := func(i int) {
-		if words > maxWords {
+		if words > limit {
 			out = append(out, sentence{from, lineAt(i), words})
 		}
 		words, inWord = 0, false
@@ -523,11 +522,8 @@ func (p *para) long() []sentence {
 		case isWordBreak(c):
 			inWord = false
 		case c == '`' && nextTick(i+1) < len(b):
-			if !p.text {
-				startWord(i)
-			}
+			startWord(i)
 			i = nextTick(i+1) + 1
-			spanEnd = i
 			continue
 		case c == '[':
 			open = true
@@ -539,10 +535,7 @@ func (p *para) long() []sentence {
 			i = nextStop(i+2) + 1
 			continue
 		case c == '.' || c == '?' || c == '!':
-			// An end mark right after a code span is no word of its own.
-			if i != spanEnd {
-				startWord(i)
-			}
+			startWord(i)
 			if i+1 == len(b) || spaceAt(b, i+1) {
 				finish(i)
 			}
