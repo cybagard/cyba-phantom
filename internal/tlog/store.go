@@ -41,7 +41,7 @@ const (
 	// A partial-tile directory holds at most 255 widths and 255 temporary
 	// files. A longer listing is an error. names reads 256 names in each
 	// batch. It stops after the first batch that takes the total above this
-	// bound. So one listing reads and keeps at most 1280 names.
+	// bound. So one partial-tile listing reads and keeps at most 1280 names.
 	maxPartialNames = 1024
 
 	// maxBatchTiles is the number of different tiles with new hashes that one
@@ -101,7 +101,7 @@ var (
 
 	// The calls that make a write durable. The code calls them through these
 	// variables, so that a test can record their order. Only the helper
-	// setHooks in store_test.go sets them. It restores the real calls.
+	// setHooks in store_test.go sets them. It restores the earlier calls.
 	syncFile    = (*os.File).Sync
 	syncDirFile = (*os.File).Sync
 	renameFile  = (*os.Root).Rename
@@ -169,35 +169,32 @@ type Store struct {
 // the tile paths, the root is the log directory. Open also refuses a log
 // directory that is a link inside the state directory. This is because openOne
 // refuses a link when Open calls fsync on the log directory. Open makes the
-// directory (mode 0700) if it does not exist. The
-// directory must have no group or other permission bits. So must each
-// directory that Open lists. So must each entry of such a listing that is a
-// directory and not a link. Open lists the group directories in the bounded
-// range that is named below. It also lists the .p directories of the tiles
-// that it reads or tidies. It checks only the entries that a listing reads
-// before it returns. It does not list a group directory outside the range.
-// Open reads the tree
-// head and the tiles that the root computation reads. It checks that these
-// tiles give the root of the tree head. Open does not read the other tiles
-// that the tree head covers. Each proof call checks the tiles that it reads
-// against the tree head.
-// Open tidies the tiles that it reads. After a crash, at most one
-// partial file then stays for each of them. Open also tidies the tiles beyond
-// the tree head in a bounded range. For each level, the range starts at the
-// first tile that the tree head does not cover. It ends maxBatchTiles tiles
-// above that tile. A crash can leave such tiles. The number of names that Open
-// reads depends on this bound and not on the size of the log. Open does not
-// list or tidy any other tile. A directory with no tree head must be empty,
-// or hold only the temporary file of the tree head. Open writes a tree head
-// of size 0 for it, before any tile can be written. Open makes the loaded
-// tree head durable. It calls fsync on the log directory and on its parents
-// up to the state directory. It does this before it reads, writes, or deletes
-// any file there. Then it calls fsync on
-// the directories of the tiles that it tidies. It deletes files only after all
-// checks pass and these fsync calls pass. If a check or one of these fsync
-// calls fails, Open returns an error and has deleted nothing. A delete can
-// fail, or the fsync after the deletes can fail. Then Open returns an error
-// and it can have deleted files.
+// directory (mode 0700) if it does not exist. The directory must have no group
+// or other permission bits. So must each directory that Open lists. So must
+// each entry of such a listing that is a directory and not a link. Open lists
+// the group directories in the bounded range that is named below. It also lists
+// the .p directories of the tiles that it reads or tidies. It checks only the
+// entries that a listing reads before it returns. It does not list a group
+// directory outside the range. Open reads the tree head and the tiles that the
+// root computation reads. It checks that these tiles give the root of the tree
+// head. Open does not read the other tiles that the tree head covers.
+// Log.RootAt, Log.ProveInclusion and Log.ProveConsistency check each tile that
+// they read against the tree head. Open tidies the tiles that it reads. After a
+// crash, at most one partial file then stays for each of them. Open also tidies
+// the tiles beyond the tree head in a bounded range. For each level, the range
+// starts at the first tile that the tree head does not cover. It ends
+// maxBatchTiles tiles above that tile. A crash can leave such tiles. The number
+// of names that Open reads depends on this bound and not on the size of the
+// log. Open does not list or tidy any other tile. A directory with no tree head
+// must be empty, or hold only the temporary file of the tree head. Open writes
+// a tree head of size 0 for it, before any tile can be written. Open makes the
+// loaded tree head durable. It calls fsync on the log directory and on its
+// parents up to the state directory. It does this before it reads, writes, or
+// deletes any file there. Then it calls fsync on the directories of the tiles
+// that it tidies. It deletes files only after all checks pass and these fsync
+// calls pass. If a check or one of these fsync calls fails, Open returns an
+// error and deletes no file. A delete can fail, or the fsync after the deletes
+// can fail. Then Open returns an error, and some files can be deleted.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -629,22 +626,23 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // that the tree head covers never changes: if data differs from a stored file
 // in a covered hash, the call returns an error. A tile that the tree head
 // covers in full is never written again. WriteTile replaces hashes beyond the
-// tree head with a temporary file and an atomic rename. It writes nothing if a
-// stored file has the data already and the data has hashes beyond the tree
-// head. Then WriteTile calls fsync on the directories of the stored file. An
-// earlier call may have failed after the rename.
-// A stored file can be wider than the data and differ beyond the tree
-// head. Such a file is stale. WriteTile writes the new file first, then deletes
-// the stale files. After the write, the store deletes the narrower partial
-// files, so that at most one partial file stays. WriteTile accepts at most
-// maxBatchTiles different tiles with hashes beyond the tree head between two
-// calls of SetHead. WriteTile first checks each directory of the tile path.
-// Each must be a real directory and not a link. This check comes before any
-// write, rename, or delete. WriteTile also lists the .p directory of the tile.
-// A directory entry there with a group or other bit gives the mode rule.
-// WriteTile also checks the other files of the tile before it writes. Each must
-// agree with the stored file in the hashes that the tree head covers. A bad
-// file gives an error and no file changes.
+// tree head with a temporary file and an atomic rename. It writes nothing if
+// the tree head covers all of data. It also writes nothing if a stored file has
+// the data already. If that data has hashes beyond the tree head, WriteTile
+// calls fsync on the directories of the stored file. If an earlier call failed
+// after the rename, this fsync makes the rename durable. A stored file can be
+// wider than the data and differ beyond the tree head. Such a file is stale.
+// WriteTile writes the new file first, then deletes the stale files. After the
+// write, the store deletes the narrower partial files, so that at most one
+// partial file stays. WriteTile accepts at most maxBatchTiles different tiles
+// with hashes beyond the tree head between two calls of SetHead. WriteTile
+// first checks each directory of the tile path. Each must be a real directory
+// and not a link. This check comes before any write, rename, or delete.
+// WriteTile also lists the .p directory of the tile. A directory entry there
+// with a group or other bit gives the mode rule. WriteTile also checks the
+// other files of the tile before it writes. Each must agree with the stored
+// file in the hashes that the tree head covers. A bad file gives an error and
+// no file changes.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	if t.H != TileHeight || t.L < 0 || t.L > maxLevel || t.N < 0 ||
 		t.N > maxTileN(t.L) || t.W < 1 ||
@@ -678,9 +676,10 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 	switch {
 	case t.W <= c:
 	case t.W < w && bytes.Equal(data, old[:len(data)]), t.W == w && bytes.Equal(data, old):
-		// The stored file has the data and this call writes nothing. An earlier
-		// call may have renamed the file and then failed to sync its
-		// directory. The head must not cover the hashes before that sync works.
+		// The stored file has the data and this call writes nothing. If an
+		// earlier call renamed the file and then failed to sync its directory,
+		// this fsync makes the rename durable. The head must not cover the
+		// hashes before that sync works.
 		if err := syncDirs(s.dir, path.Dir(name)); err != nil {
 			return newError(name, ruleWrite)
 		}

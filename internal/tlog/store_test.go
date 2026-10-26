@@ -182,7 +182,7 @@ func TestTU07HeadIsWrittenLast(t *testing.T) {
 
 // recordDurableSteps replaces the calls that make a write durable with hooks
 // that record their order. Each hook also checks the state of the files at its
-// step. The test restores the real calls when it ends.
+// step. The test restores the earlier calls when it ends.
 func recordDurableSteps(t *testing.T, log, name string, data []byte) *[]string {
 	t.Helper()
 	var steps []string
@@ -245,10 +245,11 @@ type hooks struct {
 
 // setHooks is the only code of the tests that sets the durability calls of the
 // store. It sets the calls in h and restores the earlier calls when t ends. The
-// returned function restores them earlier. The calls are package state, so two
-// parallel tests that use them would race. t.Setenv makes such a test fail at
-// once. It panics if the test or an ancestor is parallel. t.Parallel panics
-// after it. A fuzz test can use it too.
+// returned function restores them earlier. The calls are package state. Two
+// parallel tests that use them at the same time can race. t.Setenv panics if
+// the test or an ancestor is parallel. t.Parallel panics after a call of
+// setHooks. A parallel subtest of a test that calls setHooks is not refused.
+// A fuzz test can call setHooks too.
 func setHooks(t testing.TB, h hooks) (restore func()) {
 	t.Helper()
 	t.Setenv("TLOG_TEST_HOOKS", "1")

@@ -328,7 +328,7 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 }
 
 // failRename makes each rename to the file name fail. The returned function
-// stops the fault. The test restores the real calls when it ends.
+// stops the fault. The test restores the earlier calls when it ends.
 func failRename(t testing.TB, name string) (stop func()) {
 	t.Helper()
 	return setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
@@ -341,7 +341,7 @@ func failRename(t testing.TB, name string) (stop func()) {
 
 // failDirSyncAfterRename makes the next fsync of a directory fail after the
 // rename of the file name works. The returned function stops the fault.
-// The test restores the real calls when it ends.
+// The test restores the earlier calls when it ends.
 func failDirSyncAfterRename(t *testing.T, name string) (stop func()) {
 	t.Helper()
 	armed := false
@@ -923,6 +923,7 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 			l := openTestLog(t, state)
 			appendTo(t, l, 0, 255)
 			size, root := l.Head()
+			// Save the calls. restore then stops the fault that c.fault sets.
 			restore := setHooks(t, hooks{})
 			c.fault(t)
 			_, first := l.AppendBatch(batchOf(255, 300))
@@ -1013,7 +1014,7 @@ func syncedAs(f *os.File, log string, names []string) string {
 }
 
 // hookDirSync calls fn for each fsync of a directory in names. If fn returns an
-// error, the fsync fails. The returned function restores the real call. The
+// error, the fsync fails. The returned function restores the earlier call. The
 // test restores it when it ends too.
 func hookDirSync(t *testing.T, log string, names []string, fn func(name string) error) (restore func()) {
 	t.Helper()
