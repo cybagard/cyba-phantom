@@ -1136,7 +1136,7 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 			t.Fatal(err)
 		}
 		l, err := OpenLog(state, "tlog")
-		wantOpenError(t, l, err, "tlog directory", ruleMode)
+		wantOpenError(t, l, err, "state directory", ruleMode)
 		check()
 	})
 

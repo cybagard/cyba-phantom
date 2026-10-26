@@ -166,7 +166,11 @@ type Store struct {
 // the state directory. This is because the fsync of the log directory refuses
 // a link. Open makes the directory (mode 0700) if it does not exist. The
 // directory must have no group or other permission bits. So must each
-// directory that Open lists below tile. Open reads the tree
+// directory that Open lists, and each directory entry of such a listing. Open
+// lists the group directories in the bounded range that is named below. It
+// also lists the .p directories of the tiles that it reads or tidies. It
+// checks only the names that a listing reads before its limit. It does not
+// list a group directory outside the range. Open reads the tree
 // head and the tiles that the root computation reads. It checks that these
 // tiles give the root of the tree head. Open does not read the other tiles
 // that the tree head covers. A later change checks them with authenticated
@@ -193,7 +197,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 			return nil, newError("tlog directory", ruleWrite)
 		}
 		if err = syncDirs(state, dir); err != nil {
-			return nil, newError("tlog directory", syncRule(err))
+			return nil, newError(syncName(err, dir), syncRule(err))
 		}
 		sub, err = state.OpenRoot(dir)
 	}
@@ -213,7 +217,7 @@ func Open(state *os.Root, dir string) (*Store, error) {
 	// a refusal or a failed fsync here deletes and writes nothing.
 	if err := syncDirs(state, dir); err != nil {
 		sub.Close()
-		return nil, newError("tlog directory", syncRule(err))
+		return nil, newError(syncName(err, dir), syncRule(err))
 	}
 	s := &Store{dir: sub, head: tlog.Tree{Hash: emptyRoot}, written: map[tlog.Tile]int{}}
 	if err := s.load(); err != nil {
@@ -221,6 +225,20 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// syncName returns the name of the directory whose check failed in a call of
+// syncDirs for the log directory dir. It is "tlog directory" for dir itself,
+// "state directory" for the state directory, and else the path below it.
+func syncName(err error, dir string) string {
+	switch n := dirName(err, dir); n {
+	case dir:
+		return "tlog directory"
+	case ".":
+		return "state directory"
+	default:
+		return n
+	}
 }
 
 // Close closes the log directory.
@@ -331,8 +349,10 @@ func (s *Store) beyondHead() (rm, dirs []string, err error) {
 // listing fails. It also returns nil if the directory has no owner search bit
 // or too many names. Then the caller asks for each name with exists. With no
 // owner search bit, the Lstat of a name below the directory can fail. Then
-// exists counts the name as there. A mode error of a listed directory is not
-// a failed listing: groupNames returns it.
+// exists counts the name as there. A group or other bit on g, on a parent of
+// g, or on a directory entry that the listing reads is not a failed listing.
+// groupNames returns an *Error with the mode rule for it. It checks only the
+// names that the listing reads before its limit.
 func (s *Store) groupNames(g string) (map[string]bool, error) {
 	fi, err := s.dir.Lstat(g)
 	if err != nil || fi.Mode()&0o100 == 0 {
@@ -341,8 +361,11 @@ func (s *Store) groupNames(g string) (map[string]bool, error) {
 	names, err := s.names(g, 4*groupTiles)
 	if err != nil {
 		var e *Error
-		if errors.As(err, &e) {
+		switch {
+		case errors.As(err, &e):
 			return nil, e
+		case errors.Is(err, errMode):
+			return nil, newError(dirName(err, g), ruleMode)
 		}
 		return nil, nil
 	}
@@ -394,7 +417,7 @@ func (s *Store) syncAll(dirs []string) error {
 	for _, dir := range slices.Compact(dirs) {
 		for d := dir; !done[d]; d = path.Dir(d) {
 			if err := syncOneDir(s.dir, d); err != nil {
-				return newError(dir, syncRule(err))
+				return newError(dirName(err, d), syncRule(err))
 			}
 			done[d] = true
 		}
@@ -600,15 +623,18 @@ func tileKey(t tlog.Tile) tlog.Tile {
 // tree head with a temporary file and an atomic rename, and writes nothing if
 // a stored file has the data already. In that case, if the data has hashes
 // beyond the tree head, WriteTile calls fsync on the directories of the stored
-// file, because an earlier call can have failed after the rename. A stored file that is wider than the
-// data and differs beyond the tree head is stale: WriteTile writes the new
-// file first, then deletes the stale files. After the write, the store
-// deletes the narrower partial files, so that at most one partial file stays.
+// file, because an earlier call can have failed after the rename. A stored file
+// that is wider than the data and differs beyond the tree head is stale:
+// WriteTile writes the new file first, then deletes the stale files. After the
+// write, the store deletes the narrower partial files, so that at most one
+// partial file stays.
 // WriteTile accepts at most maxBatchTiles different tiles with hashes beyond
 // the tree head between two calls of SetHead. WriteTile first checks each
 // directory of the tile path. Each must be a real directory and not a link.
-// This check comes before any write, rename, or delete. WriteTile also checks
-// the other files of the tile before it writes. Each must agree with the stored
+// This check comes before any write, rename, or delete. WriteTile also lists
+// the .p directory of the tile. A directory entry there with a group or other
+// bit gives the mode rule. WriteTile also checks the other files of the tile
+// before it writes. Each must agree with the stored
 // file in the hashes that the tree head covers. A bad file gives an error and
 // no file changes.
 func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
@@ -829,9 +855,11 @@ func (s *Store) remove(names []string) error {
 }
 
 // names lists the directory dir in batches. It returns errTooMany if the
-// directory has more than limit names. Open does not open a listed directory
-// again. So names checks its mode. A group or other bit gives an *Error with
-// the mode rule. The link rule refuses a listed link.
+// directory has more than limit names. openDir checks the mode of dir and of
+// its parents. names also checks each entry for which IsDir is true. It uses
+// the information that the listing read, with no other Lstat. A group or other
+// bit gives an *Error with the mode rule. names does not check a link entry.
+// It checks only the entries that it reads before it returns.
 func (s *Store) names(dir string, limit int) ([]string, error) {
 	d, err := openDir(s.dir, dir)
 	if err != nil {
@@ -929,12 +957,53 @@ func openDir(r *os.Root, name string) (*os.File, error) {
 	return f, nil
 }
 
+// dirError is the error of a directory check. It holds the name of the
+// directory whose check failed. This can be a parent of the directory that
+// the caller opened.
+type dirError struct {
+	dir string
+	err error
+}
+
+func (e *dirError) Error() string { return e.err.Error() }
+func (e *dirError) Unwrap() error { return e.err }
+
+// dirName returns the name that err holds, or def if err holds none.
+func dirName(err error, def string) string {
+	var d *dirError
+	if errors.As(err, &d) {
+		return d.dir
+	}
+	return def
+}
+
+// openFailure explains the failed open of the directory name. It checks each
+// part of name from the root. The first link gives errLink. The first part that
+// is not a directory gives errNotDir. Else it keeps err.
+func openFailure(r *os.Root, name string, err error) error {
+	p := ""
+	for _, part := range strings.Split(name, "/") {
+		p = path.Join(p, part)
+		fi, lerr := r.Lstat(p)
+		switch {
+		case lerr != nil:
+			return &dirError{name, err}
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return &dirError{p, errLink}
+		case !fi.IsDir():
+			return &dirError{p, errNotDir}
+		}
+	}
+	return &dirError{name, err}
+}
+
 // openOne opens the directory name and checks its type, its mode, and that it
 // is not a link: the open directory must be the one that Lstat gives for name.
+// An error holds the name of the part that failed.
 func openOne(r *os.Root, name string) (*os.File, error) {
 	f, err := r.OpenFile(name, readFlags, 0)
 	if err != nil {
-		return nil, err
+		return nil, openFailure(r, name, err)
 	}
 	fi, err := f.Stat()
 	switch {
@@ -950,7 +1019,7 @@ func openOne(r *os.Root, name string) (*os.File, error) {
 	}
 	if err != nil {
 		f.Close()
-		return nil, err
+		return nil, &dirError{name, err}
 	}
 	return f, nil
 }
