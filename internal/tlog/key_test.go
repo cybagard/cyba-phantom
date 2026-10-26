@@ -322,6 +322,166 @@ func TestTS13_FirstStartRefusesExistingState(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, stateName)); string(b) != "old state" || !errors.Is(keyErr, fs.ErrNotExist) {
 		t.Errorf("state %q, key file error %v; want the state unchanged and no key file", b, keyErr)
 	}
+	if _, err := os.Lstat(filepath.Join(dir, keysDir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("keys directory: %v; want not exist after a refused start", err)
+	}
+}
+
+// T-S-13: an Lstat error that is not "not exist" gives its own rule and keeps
+// the system error. The error names the path one time. The test removes all
+// permissions of keys, so that the Lstat of a name below it fails.
+func TestTS13_FirstStartLstatError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root, dir := firstStartKeysDir(t)
+	must(t, os.Chmod(filepath.Join(dir, keysDir), 0))
+	t.Cleanup(func() { os.Chmod(filepath.Join(dir, keysDir), 0o700) })
+	_, err := createSigner(root, nil, filepath.Join(dir, keyName), testOrigin)
+	if err == nil || !strings.Contains(err.Error(), "public key file cannot be examined") {
+		t.Fatalf("got %v; want the cannot-be-examined rule", err)
+	}
+	if strings.Contains(err.Error(), "must not exist") || !errors.Is(err, syscall.EACCES) {
+		t.Errorf("got %v; want the permission error as the cause", err)
+	}
+	if n := strings.Count(err.Error(), dir); n != 1 {
+		t.Errorf("error names the path %d times; want 1: %v", n, err)
+	}
+	path := filepath.Join(dir, keyName)
+	want := "checkpoint key " + path + ": public key file cannot be examined: permission denied"
+	if err.Error() != want {
+		t.Errorf("got %q; want %q", err, want)
+	}
+}
+
+// T-S-13: a load gives no warning when it removes a temporary file, or when
+// no temporary file exists.
+func TestTS13_LoadNoWarning(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	log, buf := testLogger()
+	_, err := loadWithin(t, root, log, testOrigin, true, 1)
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(dir, keyName+".tmp"), []byte("copy"), 0o600))
+	_, err = loadWithin(t, root, log, testOrigin, true, 1)
+	must(t, err)
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("the log has a warning: %s", buf)
+	}
+	if names := keysNames(t, dir); len(names) != 2 {
+		t.Errorf("keys has %v; want the key and the public key only", names)
+	}
+}
+
+// T-S-13: a temporary name that Remove cannot remove gives the exact warning.
+// The load succeeds. A directory that is not empty makes Remove fail for every
+// user.
+func TestTS13_TemporaryRemoveWarning(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	tmp := filepath.Join(dir, keyName+".tmp")
+	must(t, os.Mkdir(tmp, 0o700))
+	must(t, os.WriteFile(filepath.Join(tmp, "x"), []byte("x"), 0o600))
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+		t.Fatal(err)
+	}
+	want := "level=WARN msg=\"checkpoint key temporary file cannot be removed\"\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("the log has no exact warning: %s", buf)
+	}
+}
+
+// keysNames returns the names in the keys directory.
+func keysNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, keysDir))
+	must(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// T-S-13: a failure after the sync and before the link leaves no final key
+// name. The next first start makes a key, and a reload loads it.
+func TestTS13_CrashBeforeLink(t *testing.T) {
+	root, dir := newState(t)
+	called := false
+	beforeLink = func() error {
+		called = true
+		tmp, err := os.ReadFile(filepath.Join(dir, keyName+".tmp"))
+		if err != nil || !strings.HasPrefix(string(tmp), "PRIVATE+KEY+") {
+			t.Errorf("temporary file %q, error %v; want the synced key text", tmp, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, keyName)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("final key name: %v; want not exist before the link", err)
+		}
+		return errors.New("injected crash")
+	}
+	t.Cleanup(func() { beforeLink = nil })
+	if s, err := loadWithin(t, root, nil, testOrigin, false, 0); err == nil || s != nil {
+		t.Fatalf("got signer %v, error %v; want an error", s, err)
+	}
+	if !called {
+		t.Fatal("the test hook did not run")
+	}
+	if names := keysNames(t, dir); len(names) != 0 {
+		t.Errorf("keys has %v; want no file after the failure", names)
+	}
+	beforeLink = nil
+	s1, err := loadWithin(t, root, nil, testOrigin, false, 0)
+	must(t, err)
+	s2, err := loadWithin(t, root, nil, testOrigin, true, 1)
+	must(t, err)
+	if s1.KeyHash() != s2.KeyHash() {
+		t.Error("the reload loaded another key")
+	}
+}
+
+// T-S-13: temporary files that a crash left do not stop the first start. A
+// symlink at a temporary name does not lead the write to its target. A start
+// that succeeds leaves no temporary file.
+func TestTS13_LeftoverTemporaryFiles(t *testing.T) {
+	root, dir := firstStartKeysDir(t)
+	other := filepath.Join(dir, "other")
+	must(t, os.WriteFile(other, []byte("other"), 0o600))
+	leftover := filepath.Join(dir, keyName+".tmp")
+	must(t, os.WriteFile(leftover, []byte(newKeyText(t, testOrigin)), 0o644))
+	mustSymlink(t, "../other", filepath.Join(dir, vkeyName+".tmp"))
+	_, err := loadWithin(t, root, nil, testOrigin, false, 0)
+	must(t, err)
+	if b, _ := os.ReadFile(other); string(b) != "other" {
+		t.Errorf("the target of the symlink changed to %q", b)
+	}
+	if names := keysNames(t, dir); len(names) != 2 {
+		t.Errorf("keys has %v; want the key and the public key only", names)
+	}
+	// A crash after the link leaves a copy by a good key. A start removes it.
+	must(t, os.WriteFile(leftover, []byte("copy"), 0o600))
+	_, err = loadWithin(t, root, nil, testOrigin, true, 1)
+	must(t, err)
+	if names := keysNames(t, dir); len(names) != 2 {
+		t.Errorf("keys has %v after a load; want no temporary file", names)
+	}
+}
+
+// T-S-13: a failed write of the public key on the load path gives a warning
+// with the checkpoint prefix. The start succeeds.
+func TestTS13_VkeyWriteWarning(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	must(t, os.Remove(filepath.Join(dir, vkeyName)))
+	beforeLink = func() error { return errors.New("injected failure") }
+	t.Cleanup(func() { beforeLink = nil })
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "level=WARN msg=\"checkpoint public key file cannot be written\"\n") {
+		t.Errorf("the log has no exact warning: %s", buf)
+	}
+	if names := keysNames(t, dir); len(names) != 1 {
+		t.Errorf("keys has %v; want the key file only", names)
+	}
 }
 
 // T-S-13: the key is missing and the log has a signed checkpoint or leaves.
@@ -460,8 +620,8 @@ func TestTS13_VkeyIsKeyFile(t *testing.T) {
 }
 
 // T-S-13: on the first start, a symlink at the public key path gives an error.
-// The write does not follow the symlink, the target does not change, and no
-// key file is made.
+// The write does not follow the symlink, the target does not change, and the
+// function makes no key file.
 func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 	root, dir := firstStartKeysDir(t)
 	target := filepath.Join(dir, "other-state")
