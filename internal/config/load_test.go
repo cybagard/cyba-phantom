@@ -192,7 +192,7 @@ func TestTU10_Errors(t *testing.T) {
 		`config: foo at ` + p + `:5: unknown key`,
 		`config: ops at ` + p + `:7: the section needs a mapping`,
 		`config: acme.email at ` + p + `:9: the key needs a scalar value`,
-		`config: PHANTOM_NOPE: unknown PHANTOM_ variable`,
+		`config: PHANTOM_NOPE: unknown PHANTOM variable`,
 		`config: acme.email at ` + p + `: the key is required`,
 		`config: tlog.origin at ` + p + `: the key is required`,
 		`config: acme.names at ` + p + `: the key is required`,
@@ -212,6 +212,29 @@ func TestTU10_Errors(t *testing.T) {
 	}
 }
 
+// TestTU10_ReaderErrorValues checks the load after a reader error. It also
+// shows the parse errors and the check errors of each known variable. It
+// runs no cross-check.
+func TestTU10_ReaderErrorValues(t *testing.T) {
+	useTestKeys(t)
+	_, err := loadTest(filepath.Join(t.TempDir(), "missing.yaml"), []string{"PHANTOM_A_PORT=017", "PHANTOM_A_FLAG=true", "PHANTOM_LIMITS_MAX_CONNS=2001"})
+	if err == nil {
+		t.Fatal("got no error")
+	}
+	for _, want := range []string{
+		": the file does not exist",
+		"a.port at PHANTOM_A_PORT: an integer is a decimal literal only",
+		"limits.max_conns at PHANTOM_LIMITS_MAX_CONNS: the value must be in the range 1 to 2000",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("got %v, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "a.flag") {
+		t.Errorf("a good value gives an error: %v", err)
+	}
+}
+
 // TestTU10_RequiredParseError checks a required key that is set but does not
 // parse. It gets the parse error only. It gets no required-key error.
 func TestTU10_RequiredParseError(t *testing.T) {
@@ -225,8 +248,8 @@ func TestTU10_RequiredParseError(t *testing.T) {
 	}
 }
 
-// TestTU10_UnknownTwice checks that an unknown PHANTOM_ name that occurs two
-// times in env gives one error.
+// TestTU10_UnknownTwice checks that an unknown PHANTOM_ name that is in env
+// two times gives one error.
 func TestTU10_UnknownTwice(t *testing.T) {
 	useTestKeys(t)
 	_, err := loadTest(writeConfig(t, base), []string{"PHANTOM_NOPE=1", "PHANTOM_NOPE=2"})
@@ -272,7 +295,8 @@ func useTestKeys(t *testing.T) {
 	t.Cleanup(func() { keys = old })
 }
 
-// TestTS10_Scalars checks strict scalars, unknown PHANTOM_ variables, and escaped values through Load.
+// TestTS10_Scalars checks strict scalars, unknown PHANTOM variables, and
+// escaped values through Load.
 func TestTS10_Scalars(t *testing.T) {
 	useTestKeys(t)
 	rows := []struct{ name, file, env, want string }{
@@ -295,11 +319,12 @@ func TestTS10_Scalars(t *testing.T) {
 		{"env range", "", "PHANTOM_A_SIZE=99999999999999999999", "out of range"},
 		{"bool into string", "listen:\n  https: true\n", "", "the value is not a valid string"},
 		{"octal into string", "listen:\n  http: 017\n", "", "the value is not a valid string"},
-		{"unknown env", "", "PHANTOM_LISTEN_HTTPX=:1", "PHANTOM_LISTEN_HTTPX: unknown PHANTOM_ variable"},
-		{"lower case env", "", "phantom_listen_http=:1", "phantom_listen_http: unknown PHANTOM_ variable"},
-		{"mixed case env", "", "Phantom_Listen_Http=:1", "Phantom_Listen_Http: unknown PHANTOM_ variable"},
-		{"dash env", "", "PHANTOM-LISTEN-HTTP=:1", "PHANTOM-LISTEN-HTTP: unknown PHANTOM_ variable"},
-		{"ESC in env name", "", "PHANTOM_X\x1b[2J=1", `PHANTOM_X\x1b[2J: unknown PHANTOM_ variable`},
+		{"unknown env", "", "PHANTOM_LISTEN_HTTPX=:1", "PHANTOM_LISTEN_HTTPX: unknown PHANTOM variable"},
+		{"lower case env", "", "phantom_listen_http=:1", "phantom_listen_http: unknown PHANTOM variable"},
+		{"mixed case env", "", "Phantom_Listen_Http=:1", "Phantom_Listen_Http: unknown PHANTOM variable"},
+		{"dash env", "", "PHANTOM-LISTEN-HTTP=:1", "PHANTOM-LISTEN-HTTP: unknown PHANTOM variable"},
+		{"name of another program", "", "PHANTOMJS_BIN=x", "PHANTOMJS_BIN: unknown PHANTOM variable"},
+		{"ESC in env name", "", "PHANTOM_X\x1b[2J=1", `PHANTOM_X\x1b[2J: unknown PHANTOM variable`},
 		{"URL text to the last @", "", "PHANTOM_A_EVERY=https://user:p/w@host", `: value "https://REDACTED@host"`},
 		{"URL form without //", "", "PHANTOM_A_EVERY=https:u:SECRET@h", `: value "REDACTED@h"`},
 		{"reader key not printed", "listen:\n  \"\\e[2J\": 1\n", "", `/config.yaml:6: listen: column 3: ` + keyRule},
@@ -332,7 +357,7 @@ func TestTS10_EnvNameForms(t *testing.T) {
 		"PHANTOM\ufe0f_A_PORT", "\x1bPHANTOM_A_PORT", "\x01PHANTOM_A_PORT",
 	} {
 		_, err := loadTest(writeConfig(t, base), []string{name + "=1"})
-		if err == nil || !strings.Contains(err.Error(), "unknown PHANTOM_ variable") {
+		if err == nil || !strings.Contains(err.Error(), "unknown PHANTOM variable") {
 			t.Errorf("%q: got %v, want the unknown-name error", name, err)
 		}
 	}
@@ -616,7 +641,7 @@ func TestTS10_LeftCut(t *testing.T) {
 	_, err := loadTest(path, []string{name + "=1"})
 	for _, want := range []string{
 		"zz at ..." + path[len(path)-61:] + ":5: unknown key",
-		"config: ..." + name[len(name)-61:] + ": unknown PHANTOM_ variable",
+		"config: ..." + name[len(name)-61:] + ": unknown PHANTOM variable",
 	} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("got %v, want %q", err, want)
@@ -640,7 +665,7 @@ func TestTS10_ReaderError(t *testing.T) {
 		c, err := loadTest(writeConfig(t, r.file), []string{"PHANTOM_NOPE=1"})
 		var e *Error // The first error in the join is the reader error.
 		if !errors.As(err, &e) || e.Line != r.line || e.Detail != r.detail || c != nil ||
-			!strings.Contains(err.Error(), "PHANTOM_NOPE: unknown PHANTOM_ variable") {
+			!strings.Contains(err.Error(), "PHANTOM_NOPE: unknown PHANTOM variable") {
 			t.Errorf("%s: got config %v and error %v, want line %d, detail %q, the unknown variable error, and no config", r.name, c, err, r.line, r.detail)
 		}
 	}

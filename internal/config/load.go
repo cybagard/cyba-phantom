@@ -87,7 +87,7 @@ var keys = []key{
 	{path: "store.retention_days.raw", kind: kindInt, def: "30", check: intRange(1, 30)},
 	// The lower bound is retention_days.raw: a cross-check.
 	{path: "store.retention_days.events", kind: kindInt, def: "90", check: intRange(1, 90)},
-	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStatePath},
+	{path: "tlog.dir", kind: kindPath, def: "/var/lib/phantom/tlog", check: checkStorePath},
 	{path: "tlog.origin", kind: kindString, req: true, check: checkOrigin},
 	{path: "tlog.checkpoint_interval", kind: kindDuration, def: "1h", check: durRange(time.Minute, 24*time.Hour)},
 	{path: "alerts.min_band", kind: kindString, def: "agent-likely", check: checkMinBand},
@@ -191,6 +191,15 @@ func envName(path string) string {
 	return "PHANTOM_" + strings.ToUpper(strings.ReplaceAll(path, ".", "_"))
 }
 
+func keyError(k key, raw, src string, line int, detail string) error {
+	if k.secret || k.kind == kindURL {
+		// An Error never holds a secret value or a URL.
+		// A URL can hold user information.
+		raw = ""
+	}
+	return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
+}
+
 func (l *loader) load(path string, env []string, table []key, n Net) (*Config, error) {
 	l.env, l.net = env, n
 	byPath := make(map[string]key, len(table))
@@ -202,7 +211,18 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	doc, err := ReadFile(path)
 	if err != nil {
 		// A reader error does not hide the errors in variable names.
-		return nil, errors.Join(append([]error{readError(path, err, table, lists)}, envEach(env, byEnv, nil)...)...)
+		// It does not hide the errors in their values.
+		check := func(k key, name, raw string) error {
+			_, detail := parse(k, raw, "")
+			if detail == "" && k.check != nil {
+				detail = k.check(l, raw)
+			}
+			if detail != "" {
+				return keyError(k, raw, name, 0, detail)
+			}
+			return nil
+		}
+		return nil, errors.Join(append([]error{readError(path, err, table, lists)}, envEach(env, byEnv, check)...)...)
 	}
 	vals := make(map[string]Value)
 	raws := make(map[string]string) // raws holds the text of each value in vals.
@@ -210,12 +230,6 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	// replaces the required-key error.
 	failed := make(map[string]bool)
 	var errs []error
-	keyError := func(k key, raw, src string, line int, detail string) error {
-		if k.secret || k.kind == kindURL {
-			raw = "" // An Error never holds a secret value or a URL: a URL can hold user information.
-		}
-		return &Error{Key: k.path, Source: src, Line: line, Detail: detail, Value: raw}
-	}
 	// set parses one value. A later source replaces an earlier one.
 	// If the value fails to parse, set removes the key from vals.
 	set := func(k key, raw, tag, src string, line int) {
@@ -271,7 +285,10 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 
-	errs = append(errs, envEach(env, byEnv, func(k key, name, raw string) { set(k, raw, "", name, 0) })...)
+	errs = append(errs, envEach(env, byEnv, func(k key, name, raw string) error {
+		set(k, raw, "", name, 0)
+		return nil
+	})...)
 
 	for _, k := range table {
 		if _, ok := vals[k.path]; k.req && !ok && !failed[k.path] {
@@ -291,7 +308,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 			errs = append(errs, keyError(k, raws[k.path], v.Source, v.Line, detail))
 		}
 	}
-	errs = append(errs, crossCheck(l, vals)...)
+	errs = append(errs, crossCheck(l.stateRoot, vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
@@ -327,8 +344,9 @@ func envFold(name string) string {
 // envEach checks the names in env. If envFold of a name starts with PHANTOM,
 // the key table must contain it. So a name such as PHANTOMX has an error.
 // An unknown name gets the unknown-name error one time. A known name that
-// occurs again gets the repeat error. Its first use calls use, if use is set.
-func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string)) []error {
+// is in env again gets the repeat error. Its first use calls use. A non-nil
+// error of use is in the result.
+func envEach(env []string, byEnv map[string]key, use func(k key, name, raw string) error) []error {
 	var errs []error
 	seen := make(map[string]bool)
 	for _, kv := range env {
@@ -340,11 +358,13 @@ func envEach(env []string, byEnv map[string]key, use func(k key, name, raw strin
 		switch {
 		case !ok && seen[name]:
 		case !ok:
-			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM_ variable"})
+			errs = append(errs, &Error{Source: name, Detail: "unknown PHANTOM variable"})
 		case seen[name]:
 			errs = append(errs, &Error{Source: name, Detail: "the variable occurs more than one time"})
-		case use != nil:
-			use(k, name, raw)
+		default:
+			if err := use(k, name, raw); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		seen[name] = true
 	}

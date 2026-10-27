@@ -286,7 +286,7 @@ func TestTS11_CheckStorePath(t *testing.T) {
 		{"space", s + "my events.db", nil, "each path part below"},
 		{"non-ASCII letter", s + "évents.db", nil, "each path part below"},
 		{"parent part", s + "a/../events.db", nil, "the path must be clean"},
-		{"state directory", "/var/lib/phantom", nil, "the path must be below the state directory"},
+		{"state directory", "/var/lib/phantom", nil, "the path text must be below the state directory"},
 		{"tlog.dir", s + "tlog/e.db", nil, "must not be in tlog.dir"},
 		{"acme.cache_dir", s + "certs/e.db", nil, "must not be in acme.cache_dir"},
 		{"directory of bundle.path", s + "bundle/e.db", nil, "must not be in the directory of bundle.path"},
@@ -315,6 +315,29 @@ func TestTS11_CheckStorePath(t *testing.T) {
 			_, after, found := strings.Cut(se, "store.path at PHANTOM_STORE_PATH: ")
 			if code != 1 || !found || !strings.Contains(after, c.detail) || loadErr == "" || se != loadErr+"\n" {
 				t.Errorf("exit %d, stderr %q, load error %q; want detail %q", code, se, loadErr, c.detail)
+			}
+		})
+	}
+}
+
+// TestTS11_CheckTLogDir checks that --check refuses a bad tlog.dir and a bad
+// acme.cache_dir. The exit code is 1. The text is the error of the load
+// (SEC-11, SEC-21, T-S-11).
+func TestTS11_CheckTLogDir(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	file := writeFile(t, validBody(t))
+	for _, c := range []struct{ name, env, key, detail string }{
+		{"tlog.dir is the state directory", "PHANTOM_TLOG_DIR=/var/lib/phantom", "tlog.dir at PHANTOM_TLOG_DIR: ", "the path text must be below the state directory"},
+		{"tlog.dir in other case", "PHANTOM_TLOG_DIR=" + s + "Keys", "tlog.dir at PHANTOM_TLOG_DIR: ", "must not be in or above the keys directory"},
+		{"acme.cache_dir in other case", "PHANTOM_ACME_CACHE_DIR=" + s + "WRITER.STOP", "acme.cache_dir at PHANTOM_ACME_CACHE_DIR: ", "must not be or be in writer.stop"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), c.env}
+			var so, se strings.Builder
+			code := run([]string{"--check", file}, env, &so, &se)
+			_, loadErr := config.Load(file, env)
+			if _, after, found := strings.Cut(se.String(), c.key); code != 1 || !found || !strings.Contains(after, c.detail) || loadErr == nil || se.String() != loadErr.Error()+"\n" {
+				t.Errorf("exit %d, stderr %q, load error %v; want %q%q", code, se.String(), loadErr, c.key, c.detail)
 			}
 		})
 	}
@@ -400,6 +423,10 @@ func TestTS11_CheckACME(t *testing.T) {
 	}
 	const bundleSide = "config: bundle.path at PHANTOM_BUNDLE_PATH: the directory must not be in or above acme.cache_dir\n"
 	const bundleSideDefault = "config: bundle.path at default: the directory must not be in or above acme.cache_dir\n"
+	// The tlog.dir rule is in or above acme.cache_dir.
+	// So it gives its own error.
+	const tlogSide = "config: tlog.dir at PHANTOM_TLOG_DIR: the path must not be in or above acme.cache_dir\n"
+	const tlogSideDefault = "config: tlog.dir at default: the path must not be in or above acme.cache_dir\n"
 	rows := []struct {
 		name, file string
 		key        string // key is "" for a file that passes.
@@ -437,7 +464,7 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}, ""},
 		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}, ""},
 		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"},
-			"config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path must be below the state directory: value \"/var/lib/phantom\"\n"},
+			"config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path text must be below the state directory: value \"/var/lib/phantom\"\n"},
 		{"cache dir is a sibling", body, "", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/certs2"}, ""},
 		{"cache dir is tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog"}, ""},
 		{"cache dir in tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/tlog/c"}, ""},
@@ -455,7 +482,7 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir is keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Keys"}, ""},
 		{"cache dir is tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/TLOG"}, ""},
 		{"cache dir in tlog.dir in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Tlog/c"},
-			cacheRefused("the path must not be in or above tlog.dir")},
+			cacheRefused("the path must not be in or above tlog.dir", tlogSideDefault)},
 		{"cache dir in keys in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/KEYS/c"},
 			cacheRefused("the path must not be in or above the keys directory")},
 		{"cache dir in the bundle directory in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/Bundle/c"},
@@ -463,13 +490,13 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"cache dir in checkpoints in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/CheckPoints/c"},
 			cacheRefused("the path must not be in or above the checkpoints directory")},
 		{"cache dir above tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/x", "PHANTOM_TLOG_DIR=/var/lib/phantom/X/tlog"},
-			cacheRefused("the path must not be in or above tlog.dir")},
+			cacheRefused("the path must not be in or above tlog.dir", tlogSide)},
 		{"cache dir in other case above tlog.dir", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/X", "PHANTOM_TLOG_DIR=/var/lib/phantom/x/tlog"},
-			cacheRefused("the path must not be in or above tlog.dir")},
+			cacheRefused("the path must not be in or above tlog.dir", tlogSide)},
 		{"cache dir in other case above the bundle directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/B", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/b/x/current.cbnd"},
 			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 		{"cache dir in tlog.dir set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/t/c", "PHANTOM_TLOG_DIR=/var/lib/phantom/T"},
-			cacheRefused("the path must not be in or above tlog.dir")},
+			cacheRefused("the path must not be in or above tlog.dir", tlogSide)},
 		{"cache dir above the bundle directory, bundle.path set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/B/x/current.cbnd"},
 			cacheRefused("the path must not be in or above the directory of bundle.path", bundleSide)},
 		{"cache dir in the bundle directory, bundle.path set in other case", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/b/c", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/B/current.cbnd"},

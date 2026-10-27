@@ -117,7 +117,8 @@ func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []e
 			continue
 		}
 		seen[leaf.Value]++
-		if l.unique && seen[leaf.Value] == 2 { // One error for each duplicate value.
+		// The error is for the second copy of a value only.
+		if l.unique && seen[leaf.Value] == 2 {
 			fail(l.path, "the list must not hold an entry two times")
 		}
 		out = append(out, k)

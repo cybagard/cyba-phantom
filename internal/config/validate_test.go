@@ -763,7 +763,8 @@ func TestTU10_URLOutput(t *testing.T) {
 func loadProd(t *testing.T, file string, env ...string) (*Config, error) {
 	t.Helper()
 	const htpasswdEnv = "PHANTOM_OPS_BASIC_AUTH_HTPASSWD"
-	// The loader rejects a variable that occurs two times, so the default is set only if the caller does not set it.
+	// The loader rejects a variable that is in env two times.
+	// So the default is set only if the caller does not set it.
 	if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, htpasswdEnv+"=") }) {
 		env = append([]string{htpasswdEnv + "=" + filepath.Join(testDir, "htpasswd")}, env...)
 	}
@@ -806,11 +807,11 @@ func TestTS11_ConflictFoldsStateRoot(t *testing.T) {
 		{"checkpoint.state", "/srv/phantom/checkpoint.state", "must not be checkpoint.state"},
 		{"checkpoint.state.tmp", "/srv/phantom/checkpoint.state.tmp", "must not be checkpoint.state.tmp"},
 		{"writer.stop", "/srv/phantom/writer.stop", "must not be writer.stop"},
-	}, func(p string) string { return storeConflict(l, nil, p) })
+	}, func(p string) string { return storeConflict(l.stateRoot, nil, p) })
 	runRows(t, []row{
 		{"keys", "/srv/phantom/keys/c", "the keys directory"},
 		{"checkpoints", "/srv/phantom/checkpoints/c", "the checkpoints directory"},
-	}, func(p string) string { return cacheConflict(l, nil, p) })
+	}, func(p string) string { return cacheConflict(l.stateRoot, nil, p) })
 }
 
 // bound is one row of the 04 section 3 bounds table: values that pass, values that fail,
@@ -937,7 +938,7 @@ func TestTS11_StorePathText(t *testing.T) {
 		{"colon", in("events:db"), partDetail},
 		{"backslash", in(`a\b`), partDetail},
 		{"dot dot part", in("a/../events.db"), "clean"}, // The rule that runs first refuses the part.
-		{"state root", tr.root, "must be below the state directory"},
+		{"state root", tr.root, "the path text must be below the state directory"},
 		{"sibling of the root", tr.root + "-evil/events.db", "not under the state directory"},
 		{"outside", tr.outside + "/events.db", "not under the state directory"},
 		{"relative", "events.db", "absolute"},
@@ -949,8 +950,20 @@ func TestTS11_StorePathText(t *testing.T) {
 	}
 }
 
-// TestTS11_StorePathLoad checks that the load refuses a store.path in a directory of another key, or a state file,
-// and that the error names store.path only. Each row runs with the other key at its default and set (SEC-20).
+// tlogLines returns the number of line breaks that the load error has. The
+// store.path error can be "in tlog.dir". Then tlog.dir is in or above
+// store.path, and it has its own error.
+func tlogLines(want string) int {
+	if want == "in tlog.dir" {
+		return 1
+	}
+	return 0
+}
+
+// TestTS11_StorePathLoad checks that the load refuses a store.path in a
+// directory of another key, or a state file. The error names store.path.
+// A path in tlog.dir also gives an error on tlog.dir. Each row runs with
+// the other key at its default and set (SEC-20).
 func TestTS11_StorePathLoad(t *testing.T) {
 	const s = "/var/lib/phantom/"
 	rows := []struct {
@@ -1007,8 +1020,10 @@ func TestTS11_StorePathLoad(t *testing.T) {
 			case r.want == "" && err != nil, r.want != "" && err == nil:
 				t.Fatalf("got %v, want %q", err, r.want)
 			case err == nil:
-			case !strings.Contains(err.Error(), "store.path at PHANTOM_STORE_PATH: ") || !strings.Contains(err.Error(), r.want) || strings.Contains(err.Error(), "\n"):
-				t.Errorf("got %v, want one error on store.path with %q", err, r.want)
+			case !strings.Contains(err.Error(), "store.path at PHANTOM_STORE_PATH: ") || !strings.Contains(err.Error(), r.want):
+				t.Errorf("got %v, want an error on store.path with %q", err, r.want)
+			case strings.Count(err.Error(), "\n") != tlogLines(r.want):
+				t.Errorf("got %v, want no error on another key but tlog.dir", err)
 			}
 		})
 	}
@@ -1030,6 +1045,13 @@ func TestTS11_StorePathLoad(t *testing.T) {
 			t.Errorf("got %v, want exactly two errors", err)
 		}
 	})
+	// store.path is above tlog.dir: only tlog.dir has an error.
+	t.Run("store.path above tlog.dir", func(t *testing.T) {
+		_, err := loadProd(t, base, "PHANTOM_STORE_PATH="+s+"a", "PHANTOM_TLOG_DIR="+s+"a/t")
+		if err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: the path must not be in or above store.path") || strings.Contains(err.Error(), "store.path at ") {
+			t.Errorf("got %v, want one error on tlog.dir", err)
+		}
+	})
 	t.Run("moved tlog dir, default store", func(t *testing.T) {
 		if _, err := loadProd(t, base, "PHANTOM_TLOG_DIR="+s+"t2"); err != nil {
 			t.Error(err)
@@ -1043,6 +1065,98 @@ func TestTS11_StorePathFailedKey(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "store.path") || !strings.Contains(err.Error(), "tlog.dir") {
 		t.Errorf("got %v", err)
 	}
+}
+
+// TestTS11_TLogDirText checks that tlog.dir has the path rules of store.path.
+// The load gives one error that names tlog.dir. This is also true for the
+// state directory and for a link that leads below it (SEC-11).
+func TestTS11_TLogDirText(t *testing.T) {
+	tr := newTree(t)
+	if err := os.Mkdir(tr.root+"/tlog", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(tr.root+"/tlog", tr.outside+"/ln"); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct{ name, dir, want string }{
+		{"below the root", tr.root + "/tlog", ""},
+		{"state directory", tr.root, "the path text must be below the state directory"},
+		{"link that leads below the root", tr.outside + "/ln", "the path text must be below the state directory"},
+		{"space", tr.root + "/t l", "each path part"},
+		{"question mark", tr.root + "/t?", "each path part"},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			env := []string{
+				"PHANTOM_OPS_BASIC_AUTH_HTPASSWD=" + filepath.Join(testDir, "htpasswd"),
+				tokenVar + "=" + strings.Repeat("t", 32),
+				"PHANTOM_ACME_CACHE_DIR=" + tr.root + "/certs",
+				"PHANTOM_BUNDLE_PATH=" + tr.root + "/bundle/current.cbnd",
+				"PHANTOM_STORE_PATH=" + tr.root + "/events.db",
+				"PHANTOM_TLOG_DIR=" + r.dir,
+			}
+			_, err := tr.l.load(writeConfig(t, base), env, keys, testNet)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: "+r.want) || strings.Contains(err.Error(), "\n")):
+				t.Errorf("got %v, want one error on tlog.dir with %q", err, r.want)
+			}
+		})
+	}
+}
+
+// TestTS11_TLogDirLoad checks that the load refuses a tlog.dir in or above the
+// path of another key. It also refuses a state file. The compare folds A-Z.
+// The error names tlog.dir (SEC-11).
+func TestTS11_TLogDirLoad(t *testing.T) {
+	const s = "/var/lib/phantom/"
+	rows := []struct {
+		name, dir string
+		with      []string
+		want      string // want is "" for a value that loads.
+	}{
+		{"default", s + "tlog", nil, ""},
+		{"name that starts like keys", s + "keys2", nil, ""},
+		{"name that starts like writer.stop", s + "writer.stop2", nil, ""},
+		{"acme.cache_dir", s + "certs", nil, "in or above acme.cache_dir"},
+		{"in acme.cache_dir", s + "certs/t", nil, "in or above acme.cache_dir"},
+		{"above acme.cache_dir", s + "a", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "a/c"}, "in or above acme.cache_dir"},
+		{"bundle directory", s + "bundle", nil, "in or above the directory of bundle.path"},
+		{"above the bundle directory", s + "b", []string{"PHANTOM_BUNDLE_PATH=" + s + "b/x/current.cbnd"}, "in or above the directory of bundle.path"},
+		{"store.path", s + "events.db", nil, "in or above store.path"},
+		{"above store.path", s + "d", []string{"PHANTOM_STORE_PATH=" + s + "d/e.db"}, "in or above store.path"},
+		{"keys", s + "keys", nil, "in or above the keys directory"},
+		{"in keys", s + "keys/t", nil, "in or above the keys directory"},
+		{"checkpoints", s + "checkpoints", nil, "in or above the checkpoints directory"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be checkpoint.state.tmp"},
+		{"writer.stop", s + "writer.stop", nil, "must not be writer.stop"},
+		{"keys in other case", s + "Keys", nil, "in or above the keys directory"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be writer.stop"},
+		{"in checkpoints in other case", s + "CHECKPOINTS/x", nil, "in or above the checkpoints directory"},
+		{"writer.stop with a capital", s + "Writer.Stop", nil, "must not be writer.stop"},
+		{"acme.cache_dir in other case", s + "CERTS", nil, "in or above acme.cache_dir"},
+		{"above acme.cache_dir in other case", s + "A", []string{"PHANTOM_ACME_CACHE_DIR=" + s + "a/c"}, "in or above acme.cache_dir"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, base, append([]string{"PHANTOM_TLOG_DIR=" + r.dir}, r.with...)...)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: the path must not be "+strings.TrimPrefix(r.want, "must not be "))):
+				t.Errorf("got %v, want an error on tlog.dir with %q", err, r.want)
+			}
+		})
+	}
+	// The state directory fails its own check.
+	// So no other key names it in an error.
+	t.Run("state directory", func(t *testing.T) {
+		_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom")
+		if err == nil || !strings.Contains(err.Error(), "tlog.dir at ") || strings.Count(err.Error(), "\n") != 0 {
+			t.Errorf("got %v, want one error on tlog.dir", err)
+		}
+	})
 }
 
 // TestTS11_BundlePathLoad checks that the load refuses a bundle.path with a bad path part, file name, or directory (SEC-23).
@@ -1110,7 +1224,6 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 		{"directory is store.path-wal in other case", s + "DB-WAL/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path-shm in other case", s + "Db-Shm/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
 		{"in store.path in other case", s + "DB/a/x.cbnd", []string{"PHANTOM_STORE_PATH=" + s + "db"}, "or a file of it"},
-		{"tlog.dir with Kelvin sign", s + "k/x.cbnd", []string{"PHANTOM_TLOG_DIR=" + s + "\u212A"}, ""},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1123,6 +1236,15 @@ func TestTS11_BundlePathLoad(t *testing.T) {
 				t.Errorf("got %v, want an error on bundle.path with %q", err, r.want)
 			}
 		})
+	}
+}
+
+// TestTS11_TLogDirKelvin checks a tlog.dir with a Kelvin sign (U+212A).
+// The part rule refuses it. The error names tlog.dir only (SEC-11).
+func TestTS11_TLogDirKelvin(t *testing.T) {
+	_, err := loadProd(t, base, "PHANTOM_TLOG_DIR=/var/lib/phantom/\u212A", "PHANTOM_BUNDLE_PATH=/var/lib/phantom/k/x.cbnd")
+	if err == nil || !strings.Contains(err.Error(), "tlog.dir at PHANTOM_TLOG_DIR: each path part") || strings.Count(err.Error(), "\n") != 0 {
+		t.Errorf("got %v, want one part-rule error on tlog.dir", err)
 	}
 }
 
@@ -1522,7 +1644,7 @@ func TestTU10_ListKeys(t *testing.T) {
 	}
 	for _, name := range []string{"PHANTOM_TLOG_PUBLISH", "PHANTOM_TLOG_PUBLISH_0_URL", "PHANTOM_ALERTS_SINKS", "PHANTOM_ALERTS_SINKS_0_TYPE", "PHANTOM_ALERTS_SINKS_2_TO"} {
 		_, err := loadProd(t, file, append([]string{name + "=x"}, append([]string{"OTHER_TOKEN=x"}, listEnv...)...)...)
-		if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM_ variable") {
+		if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM variable") {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
@@ -1804,7 +1926,8 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"label of 63 bytes", namesFile(l63 + ".example"), "", ""},
 		{"name of 253 bytes", namesFile(name253), "", ""},
 		{"digits and hyphen", namesFile("a-1.b2-c.example"), "", ""},
-		// The row bars the names below home.arpa, not home.arpa: it has two labels, so it loads.
+		// The rule refuses the names below home.arpa, not home.arpa.
+		// That name has two labels, so it loads.
 		{"home.arpa", namesFile("home.arpa"), "", ""},
 		{"0 names", namesFile(), "", key},
 		{"17 names", namesFile(many...), "", key},
@@ -1826,7 +1949,8 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"below local", namesFile("x.local"), "", key},
 		{"below internal", namesFile("x.internal"), "", key},
 		{"below home.arpa", namesFile("x.home.arpa"), "", key},
-		// The names local and internal have one label: the rule for two labels bars them.
+		// The names local and internal have one label.
+		// The rule for two labels refuses them.
 		{"local", namesFile("local"), "", key},
 		{"internal", namesFile("internal"), "", key},
 		{"duplicate", namesFile("a.example.com", "b.example.com", "a.example.com"), "", key},
@@ -1834,7 +1958,7 @@ func TestTS11_ACMENames(t *testing.T) {
 		{"not a string", strings.Replace(base, "[decoy.example.com]", "[12]", 1), "", "acme.names[0]"},
 		{"not a list", strings.Replace(base, "[decoy.example.com]", "decoy.example.com", 1), "", key},
 		{"missing", strings.Replace(base, acmeNames, "", 1), "", key},
-		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM_ variable"},
+		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM variable"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1855,8 +1979,9 @@ func TestTS11_ACMENames(t *testing.T) {
 	}
 }
 
-// TestTS11_ACMENamesTripleDuplicate checks that a name that occurs 3 times gives one duplicate error
-// line, not one for each extra occurrence (SEC-21, T-S-11).
+// TestTS11_ACMENamesTripleDuplicate checks a name that is in the list 3 times.
+// It gives one duplicate error line, not one for each extra copy
+// (SEC-21, T-S-11).
 func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
 	_, err := loadProd(t, namesFile("a.example.com", "a.example.com", "a.example.com"))
 	if err == nil {
@@ -1896,6 +2021,11 @@ func TestTS11_ACMECacheDir(t *testing.T) {
 		{"in keys", s + "keys/c", nil, "keys directory"},
 		{"checkpoints", s + "checkpoints", nil, "checkpoints directory"},
 		{"in checkpoints", s + "checkpoints/c", nil, "checkpoints directory"},
+		{"checkpoint.state", s + "checkpoint.state", nil, "must not be or be in checkpoint.state"},
+		{"checkpoint.state.tmp", s + "checkpoint.state.tmp", nil, "must not be or be in checkpoint.state.tmp"},
+		{"in checkpoint.state.tmp", s + "checkpoint.state.tmp/c", nil, "must not be or be in checkpoint.state.tmp"},
+		{"writer.stop in other case", s + "WRITER.STOP", nil, "must not be or be in writer.stop"},
+		{"name that starts like writer.stop", s + "writer.stop2", nil, ""},
 		{"tlog.dir in other case", s + "TLOG", nil, "in or above tlog.dir"},
 		{"in tlog.dir in other case", s + "Tlog/c", nil, "in or above tlog.dir"},
 		{"above tlog.dir in other case", s + "A", []string{"PHANTOM_TLOG_DIR=" + s + "a/t"}, "in or above tlog.dir"},

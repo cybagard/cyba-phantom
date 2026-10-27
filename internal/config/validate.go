@@ -165,7 +165,7 @@ func opsConflict(ops, l hostPort, name string) string {
 
 // crossCheck checks the rules that compare two keys. It skips a key that is not in vals.
 // The loader removes a key from vals if its value failed to parse or failed its check.
-func crossCheck(l *loader, vals map[string]Value) []error {
+func crossCheck(root string, vals map[string]Value) []error {
 	get := func(p string) (hostPort, Value, bool) {
 		v, ok := vals[p]
 		if !ok {
@@ -205,13 +205,18 @@ func crossCheck(l *loader, vals map[string]Value) []error {
 		}
 	}
 	if s, ok := vals["store.path"]; ok {
-		if d := storeConflict(l, vals, s.Str); d != "" {
+		if d := storeConflict(root, vals, s.Str); d != "" {
 			fail("store.path", s, d)
 		}
 	}
 	if c, ok := vals["acme.cache_dir"]; ok {
-		if d := cacheConflict(l, vals, c.Str); d != "" {
+		if d := cacheConflict(root, vals, c.Str); d != "" {
 			fail("acme.cache_dir", c, d)
+		}
+	}
+	if t, ok := vals["tlog.dir"]; ok {
+		if d := tlogConflict(root, vals, t.Str); d != "" {
+			fail("tlog.dir", t, d)
 		}
 	}
 	if b, ok := vals["bundle.path"]; ok {
@@ -595,16 +600,17 @@ func checkStatePath(l *loader, raw string) string {
 // storePart matches one path part of store.path below the state directory (SEC-20).
 var storePart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// checkStorePath applies the rules of checkStatePath. Then it checks the path text below the
-// state directory: each part has only A-Z a-z 0-9 . _ - and is not "." or "..". It does not
-// resolve symlinks. A path that it cannot compare with the state directory fails (ADR-013).
+// checkStorePath applies the rules of checkStatePath. Then it checks the path
+// text. A path that is equal to the state directory fails. A path that is not
+// below it in the path text fails. Each part below it has only
+// A-Z a-z 0-9 . _ - and is not "." or "..".
 func checkStorePath(l *loader, raw string) string {
 	if d := checkStatePath(l, raw); d != "" {
 		return d
 	}
 	rel, err := filepath.Rel(l.stateRoot, raw)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "the path must be below the state directory"
+		return "the path text must be below the state directory"
 	}
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		if part == "." || part == ".." || !storePart.MatchString(part) {
@@ -623,9 +629,52 @@ func checkCacheDir(l *loader, raw string) string { return checkStorePath(l, raw)
 // detail if p is in or above a directory that the sensor uses for other
 // files. It compares the path text only. It folds A-Z with foldASCII. A key
 // that is not in vals failed its own check, so it is skipped.
-func cacheConflict(l *loader, vals map[string]Value, p string) string {
+func cacheConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
-	for _, k := range []string{"tlog.dir", "bundle.path"} {
+	if n := keyClash(p, vals, true, "tlog.dir", "bundle.path"); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if n := dirClash(p, root, true); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if f := fileClash(p, root, true); f != "" {
+		return "the path must not be or be in " + f
+	}
+	return ""
+}
+
+// tlogConflict checks the tlog.dir value p (SEC-11). It returns a detail if p
+// is in or above the path of another key or a state directory. It also returns
+// a detail if p is a state file. It compares the path text only. It folds A-Z
+// with foldASCII. A key that is not in vals failed its own check, so it is
+// skipped.
+func tlogConflict(root string, vals map[string]Value, p string) string {
+	p = foldASCII(p)
+	if n := keyClash(p, vals, true, "acme.cache_dir", "bundle.path", "store.path"); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if n := dirClash(p, root, true); n != "" {
+		return "the path must not be in or above " + n
+	}
+	if f := fileClash(p, root, false); f != "" {
+		return "the path must not be " + f
+	}
+	return ""
+}
+
+// stateDirs and stateFiles are the names in the state directory that
+// other keys must not use.
+var (
+	stateDirs  = []string{"keys", "checkpoints"}
+	stateFiles = []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"}
+)
+
+// keyClash returns the name of the first key in names with a value in vals
+// that p is in. If above is set, it also checks if p is above the value.
+// The value of bundle.path is its directory. The caller folds p. A key that
+// is not in vals is skipped.
+func keyClash(p string, vals map[string]Value, above bool, names ...string) string {
+	for _, k := range names {
 		v, ok := vals[k]
 		if !ok {
 			continue
@@ -634,14 +683,33 @@ func cacheConflict(l *loader, vals map[string]Value, p string) string {
 		if k == "bundle.path" {
 			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
 		}
-		if s := foldASCII(v.Str); inDir(p, s) || inDir(s, p) {
-			return "the path must not be in or above " + name
+		if s := foldASCII(v.Str); inDirText(p, s) || above && inDirText(s, p) {
+			return name
 		}
 	}
-	// checkCacheDir already refuses the only path above these (the state directory), so no test reaches inDir(s, p).
-	for _, d := range []string{"keys", "checkpoints"} {
-		if s := foldASCII(filepath.Join(l.stateRoot, d)); inDir(p, s) || inDir(s, p) {
-			return "the path must not be in or above the " + d + " directory"
+	return ""
+}
+
+// dirClash is like keyClash for the directories in stateDirs. It returns
+// the name, for example "the keys directory".
+// For tlogConflict and cacheConflict, the above half is a second check only.
+// Only the state directory and its parents are above keys and checkpoints.
+// checkStorePath refuses each of them first.
+func dirClash(p, root string, above bool) string {
+	for _, d := range stateDirs {
+		if s := foldASCII(filepath.Join(root, d)); inDirText(p, s) || above && inDirText(s, p) {
+			return "the " + d + " directory"
+		}
+	}
+	return ""
+}
+
+// fileClash returns the first name in stateFiles that p is. If below is set,
+// it also checks if p is below the file. The caller folds p.
+func fileClash(p, root string, below bool) string {
+	for _, f := range stateFiles {
+		if s := foldASCII(filepath.Join(root, f)); p == s || below && inDirText(p, s) {
+			return f
 		}
 	}
 	return ""
@@ -680,15 +748,11 @@ func checkBundlePath(l *loader, raw string) string {
 		return "the directory must not be the state directory"
 	}
 	dir = foldASCII(dir)
-	for _, d := range []string{"keys", "checkpoints"} {
-		if inDir(dir, foldASCII(filepath.Join(l.stateRoot, d))) {
-			return "the directory must not be in the " + d + " directory"
-		}
+	if n := dirClash(dir, l.stateRoot, false); n != "" {
+		return "the directory must not be in " + n
 	}
-	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
-		if inDir(dir, foldASCII(filepath.Join(l.stateRoot, f))) {
-			return "the directory must not be or be in " + f
-		}
+	if f := fileClash(dir, l.stateRoot, true); f != "" {
+		return "the directory must not be or be in " + f
 	}
 	return ""
 }
@@ -702,13 +766,8 @@ func checkBundlePath(l *loader, raw string) string {
 func bundleConflict(vals map[string]Value, p string) string {
 	p = foldASCII(p)
 	dir := filepath.Dir(p)
-	for _, k := range []string{"tlog.dir", "acme.cache_dir"} {
-		if v, ok := vals[k]; ok {
-			s := foldASCII(v.Str)
-			if inDir(dir, s) || inDir(s, dir) {
-				return "the directory must not be in or above " + k
-			}
-		}
+	if n := keyClash(dir, vals, true, "tlog.dir", "acme.cache_dir"); n != "" {
+		return "the directory must not be in or above " + n
 	}
 	if v, ok := vals["store.path"]; ok {
 		s := foldASCII(v.Str)
@@ -716,7 +775,7 @@ func bundleConflict(vals map[string]Value, p string) string {
 			return "the path must not be store.path"
 		}
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			if inDir(dir, s+suffix) {
+			if inDirText(dir, s+suffix) {
 				return "the directory must not be or be in store.path or a file of it"
 			}
 		}
@@ -758,8 +817,10 @@ func checkACMEName(_ *loader, raw string) string {
 // acmeLabel matches one label of an acme.names entry.
 var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// inDir reports whether the clean path p is the clean path d or is below it. It compares text only.
-func inDir(p, d string) bool {
+// inDirText reports whether the clean path p is the clean path d, or is below
+// it. It compares text only. The function named under compares the
+// resolved paths.
+func inDirText(p, d string) bool {
 	return p == d || strings.HasPrefix(p, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
 }
 
@@ -767,30 +828,16 @@ func inDir(p, d string) bool {
 // uses for other files, or is one of its state files (SEC-20). It compares the path text only.
 // It folds the letters A-Z to a-z with foldASCII.
 // A key that is not in vals failed its own check, so it is skipped.
-func storeConflict(l *loader, vals map[string]Value, p string) string {
+func storeConflict(root string, vals map[string]Value, p string) string {
 	p = foldASCII(p)
-	for _, k := range []string{"tlog.dir", "acme.cache_dir", "bundle.path"} {
-		v, ok := vals[k]
-		if !ok {
-			continue
-		}
-		name := k
-		if k == "bundle.path" {
-			v.Str, name = filepath.Dir(v.Str), "the directory of bundle.path"
-		}
-		if inDir(p, foldASCII(v.Str)) {
-			return "the path must not be in " + name
-		}
+	if n := keyClash(p, vals, false, "tlog.dir", "acme.cache_dir", "bundle.path"); n != "" {
+		return "the path must not be in " + n
 	}
-	for _, d := range []string{"keys", "checkpoints"} {
-		if inDir(p, foldASCII(filepath.Join(l.stateRoot, d))) {
-			return "the path must not be in the " + d + " directory"
-		}
+	if n := dirClash(p, root, false); n != "" {
+		return "the path must not be in " + n
 	}
-	for _, f := range []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"} {
-		if p == foldASCII(filepath.Join(l.stateRoot, f)) {
-			return "the path must not be " + f
-		}
+	if f := fileClash(p, root, false); f != "" {
+		return "the path must not be " + f
 	}
 	return ""
 }
