@@ -395,15 +395,16 @@ func portOf(u *url.URL) string {
 // reason (no_server_name or unknown_name) on the connection, for the refused
 // event.
 //
-// A handshake for a configured name whose ALPN list is exactly acme-tls/1 goes
-// to certmagic only while a challenge for that name is active in memory. If no
-// challenge is active, the handshake fails at once with errNoChallenge: no
-// storage call, no request and no log line. Refused counts these refusals
-// together with the refusals of the name gate. The condition is the same as the
-// condition of certmagic (one protocol, the exact string). Thus this check does
-// not refuse a handshake with two protocols. This process writes no distributed
-// token file (DisableDistributedSolvers), so only an in-memory challenge can be
-// valid. A challenge can end between this check and the lookup of certmagic. Then
+// This rule is for a handshake with a configured name and an ALPN list of
+// exactly acme-tls/1. Such a handshake goes to certmagic only while a challenge
+// for that name is active in memory. If no challenge is active, the handshake
+// fails at once with errNoChallenge. It makes no storage call, no request and
+// no log line. Refused counts these refusals together with the refusals of the
+// name gate. The condition is the same as the condition of certmagic (one
+// protocol, the exact string). Thus this check does not refuse a handshake
+// with two protocols. This process writes no distributed token file
+// (DisableDistributedSolvers), so only an in-memory challenge can be valid.
+// A challenge can end between this check and the lookup of certmagic. Then
 // certmagic looks up the token file, and the storage refuses that key with no
 // read.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {

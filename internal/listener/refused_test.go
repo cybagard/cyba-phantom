@@ -402,6 +402,27 @@ func TestTS22ServerClockRuns(t *testing.T) {
 	}
 }
 
+// T-S-22: the clock reads the time source at each call. A source gives 5s and
+// then 7s. Two reads of the clock give 5s and 7s, so the clock does not freeze.
+func TestTS22ClockReadsSourceEachCall(t *testing.T) {
+	start := time.Now()
+	reads := []time.Duration{5 * time.Second, 7 * time.Second}
+	old := since
+	t.Cleanup(func() { since = old })
+	since = func(s time.Time) time.Duration {
+		if !s.Equal(start) {
+			t.Errorf("the source got start %v, want %v", s, start)
+		}
+		d := reads[0]
+		reads = reads[1:]
+		return d
+	}
+	mono := monotonicSince(start)
+	if a, b := mono(), mono(); a != 5*time.Second || b != 7*time.Second {
+		t.Errorf("two reads give %v and %v, want 5s and 7s", a, b)
+	}
+}
+
 // T-S-22: in production, the clock starts when New makes the server. The
 // test does not replace the start. The clock of a new server starts near zero.
 func TestTS22ProductionStart(t *testing.T) {

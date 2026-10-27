@@ -512,6 +512,7 @@ func TestTS21ProductionRuleRefusesLoopbackCA(t *testing.T) {
 			front := func(h http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reqs.Add(1); h.ServeHTTP(w, r) })
 			}
+			var wantHost string // the host:port of the CA that the guard sees
 			f := newIssueFixture(t, "refused.phantom.test", front, func(p *ACMEParams) {
 				p.egressRule, p.egressResolver = nil, nil // production values
 				p.Logger = slog.New(slog.NewTextHandler(&logs, nil))
@@ -520,14 +521,17 @@ func TestTS21ProductionRuleRefusesLoopbackCA(t *testing.T) {
 					mustNil(t, err)
 					p.CA, p.egressResolver = "https://"+caName+":"+ca.Port()+"/dir", names.Resolver()
 				}
+				ca, err := url.Parse(p.CA)
+				mustNil(t, err)
+				wantHost = ca.Host
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			mustNil(t, f.a.Start(ctx))
 			for deadline := time.Now().Add(10 * time.Second); len(f.egress.hosts()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 			}
-			if len(f.egress.hosts()) == 0 {
-				t.Fatal("the guard saw no request")
+			if got := f.egress.hosts(); !slices.Equal(got, []string{wantHost}) {
+				t.Fatalf("the guard saw %v, want only %s", got, wantHost)
 			}
 			// While Start retries, it holds the lock for
 			// refused.phantom.test. Thus the synchronous obtain uses

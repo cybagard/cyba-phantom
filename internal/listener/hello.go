@@ -153,7 +153,12 @@ func location(name string, u *url.URL) string {
 			step, t = 3, tok[:3]
 			tok = [3]byte{'%', upperHex(src[i+1]), upperHex(src[i+2])}
 		default:
-			t = append(tok[:0], url.PathEscape(string([]byte{c}))...)
+			if keptByte(c) {
+				tok[0] = c
+			} else {
+				t = tok[:3]
+				tok = [3]byte{'%', hexDigits[c>>4], hexDigits[c&15]}
+			}
 		}
 		if b.Len()+len(t) > maxLocation {
 			break
@@ -162,6 +167,15 @@ func location(name string, u *url.URL) string {
 		i += step
 	}
 	return b.String()
+}
+
+const hexDigits = "0123456789ABCDEF"
+
+// keptByte reports whether url.PathEscape writes c as it is: a letter, a digit
+// or one of "-._~$&+:=@".
+func keptByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.IndexByte("-._~$&+:=@", c) >= 0
 }
 
 func isHex(c byte) bool {

@@ -1750,6 +1750,14 @@ func TestTS17CloseKeepsHijackedConnectionOpen(t *testing.T) {
 	if n := r.s.running(); n != 1 {
 		t.Fatalf("%d handlers run after Close, want 1", n)
 	}
+	// The client close ends the handler read. The test waits for it, so no
+	// read of the handler runs after the test.
+	_ = c.Close()
+	select {
+	case <-h.result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler read did not end after the client closed")
+	}
 }
 
 // T-S-17: the context is done at the call. A stalled TLS connection closes
