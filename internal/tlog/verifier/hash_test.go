@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"go/parser"
 	"go/token"
-	"path/filepath"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -57,14 +57,26 @@ var importAllowed = map[string]bool{
 
 // T-S-14: the package opens no file. The non-test .go files import only the
 // packages in importAllowed, and none of them is for files or system calls.
-// The test reads only .go files, so it does not check assembly files.
+// The test also fails for each file in the directory that is not a .go file.
+// Examples are assembly, C and .syso, with any GOOS or GOARCH suffix. Such a
+// file can make a system call with no import. A subdirectory is not read.
 // This is not the whole proof. The packages os, io/fs, and syscall are in the
 // dependency graph through crypto/sha256, golang.org/x/mod/sumdb/note and
 // golang.org/x/mod/sumdb/tlog. So "opens no file" also rests on a review of
 // the package code.
 func TestTS14_NoFileImports(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	entries, err := os.ReadDir(".")
 	must(t, err)
+	var files []string
+	for _, e := range entries {
+		switch {
+		case e.IsDir():
+		case strings.HasSuffix(e.Name(), ".go"):
+			files = append(files, e.Name())
+		default:
+			t.Errorf("%s is not a .go file; the package takes no other source file", e.Name())
+		}
+	}
 	checked := 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {

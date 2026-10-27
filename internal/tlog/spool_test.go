@@ -2,6 +2,8 @@ package tlog
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -124,10 +126,14 @@ func TestTI09_OrderAndCursor(t *testing.T) {
 	// cursorPrefix fails this test. A rename loses the cursors of every target
 	// at an upgrade.
 	const onDiskCursor = "checkpoints/target-"
-	b, err := os.ReadFile(filepath.Join(e.dir, e.cursorName(0)))
+	// The test computes the name itself: 16 lowercase hex of the SHA-256 of
+	// the target URL.
+	sum := sha256.Sum256([]byte(spoolTargets[0]))
+	name := onDiskCursor + hex.EncodeToString(sum[:8])
+	b, err := os.ReadFile(filepath.Join(e.dir, name))
 	must(t, err)
-	if string(b) != "2" || !strings.HasPrefix(e.cursorName(0), onDiskCursor) || len(e.cursorName(0)) != len(onDiskCursor)+16 {
-		t.Fatalf("cursor file %q has %q, want 2", e.cursorName(0), b)
+	if string(b) != "2" || e.cursorName(0) != name {
+		t.Fatalf("cursor file %q has %q, want 2 (cursorName %q)", name, b, e.cursorName(0))
 	}
 	if want := []uint64{3, 4, 5}; !slices.Equal(e.files(t), want) {
 		t.Fatalf("notes on disk = %v, want %v (2 and 1 published by every target)", e.files(t), want)

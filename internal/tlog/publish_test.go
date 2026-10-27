@@ -324,6 +324,16 @@ func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	e := newPub(t, time.Minute, []*fakeTarget{down, up})
 	e.add(t, 1)
 	e.pub.pass()
+	// Send logs the failure. The pass adds no second line of class spool.
+	var failed []string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, "checkpoint publish failed") {
+			failed = append(failed, l)
+		}
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0], "target=0 ") || strings.Contains(e.logs.String(), "class=spool") {
+		t.Fatalf("want one failure line for target 0 and none of class spool: %s", e.logs)
+	}
 	e.add(t, 2)
 	e.pub.pass() // the backoff of the down target has not ended
 	downAttempts, _, _ := down.got()
