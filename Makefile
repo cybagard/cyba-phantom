@@ -198,8 +198,8 @@ perf-inner:
 # The target keeps the caller GOPATH, GOMODCACHE and GOENV. If go env gives
 # an empty GOENV, the target sets GOENV to off, so go uses no go env file.
 # The target adds -count=1 to the caller GOFLAGS, read with go env GOFLAGS.
-# This turns the test cache off. A cached run keeps a large test log of the
-# files that the tests open, for each passing run, in GOCACHE.
+# This turns the test cache off. For each passing run, go test keeps a large
+# test log in GOCACHE. The log names the files that the tests open.
 # The module cache is outside the directory, so the size does not include it.
 # A check once each second compares the size of this directory with
 # MUTATE_MAX_MIB MiB. If the size is larger, the target stops gremlins and
@@ -228,12 +228,12 @@ perf-inner:
 # MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
 # or newlines. It is empty by default.
 # Each entry becomes one --exclude-files=<entry> argument.
-# If the list is not empty, the target prints it before gremlins starts.
+# If the value is not empty, the target prints it before gremlins starts.
 # Gremlins matches an entry against the file path relative to PKG.
 # The match is not anchored, so use ^ and $ for a whole name.
 # The shell does not expand or split an entry. Write "$$" for a "$" on the
-# make command line, because make reads a "$" and the next character as a
-# variable. In the environment, write a single "$".
+# make command line, because make reads a "$" and the text after it as a
+# variable reference. In the environment, write a single "$".
 # An entry that does not compile makes gremlins fail, so the target fails.
 # The make all target does not run this target.
 # Example: make mutate PKG=./internal/tlog MUTATE_EXCLUDE='^spool ^store'
