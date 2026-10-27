@@ -3,11 +3,16 @@ package listener
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 const (
@@ -73,6 +78,20 @@ func (g *gateRig) handshake(t *testing.T, cfg *tls.Config) {
 func (g *gateRig) want(t *testing.T, reason string, gate uint64) {
 	t.Helper()
 	waitClosed(t, g.closed)
+	g.events(t, reason)
+	if n := g.a.Refused(); n != gate {
+		t.Errorf("the name gate refused %d, want %d", n, gate)
+	}
+	if n := g.s.ErrorLines(); n != 1 {
+		t.Errorf("%d error log lines, want 1", n)
+	}
+}
+
+// events checks the refused events: exactly one with the reason, or none when
+// reason is "". The detail is exactly the reason, the status is nil, and the
+// address is 127.0.0.1. The record has no marker text.
+func (g *gateRig) events(t *testing.T, reason string) {
+	t.Helper()
 	evs := g.s.refused.q.Drain()
 	if reason == "" {
 		if len(evs) != 0 {
@@ -89,12 +108,6 @@ func (g *gateRig) want(t *testing.T, reason string, gate uint64) {
 		if s := fmt.Sprintf("%+v", rec); strings.Contains(s, "marker") {
 			t.Errorf("the event holds client text: %s", s)
 		}
-	}
-	if n := g.a.Refused(); n != gate {
-		t.Errorf("the name gate refused %d, want %d", n, gate)
-	}
-	if n := g.s.ErrorLines(); n != 1 {
-		t.Errorf("%d error log lines, want 1", n)
 	}
 }
 
@@ -202,48 +215,176 @@ func (h *hookConn) Write(p []byte) (int, error) {
 	return 0, net.ErrClosed
 }
 
-// T-S-22: a client that resets after a full ClientHello gives no event, in TLS
-// 1.2 and in TLS 1.3. The certificate callback waits until the reset is sent.
-// Then the flight write of the server fails, or a later read fails.
-func TestTS22ResetAfterHelloGivesNoEvent(t *testing.T) {
-	for name, ver := range map[string]uint16{"TLS 1.2": tls.VersionTLS12, "TLS 1.3": tls.VersionTLS13} {
-		t.Run(name, func(t *testing.T) {
-			a, b := net.Pipe()
-			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
-			hc := &hookConn{Conn: a}
-			_ = tls.Client(hc, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver}).Handshake()
-			entered, release := make(chan struct{}), make(chan struct{})
-			g := newGateRig(t, defaultTimeouts, func(s *Server) {
-				get := s.tls.GetCertificate
-				s.tls.GetCertificate = func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					close(entered)
-					<-release
-					return get(h)
-				}
-			})
-			c := g.raw(t)
-			_, err := c.Write(hc.sent)
-			mustNil(t, err)
-			<-entered
+// clientHello returns the bytes of the ClientHello of a Go client for testName.
+// The hello has the TLS version ver and the ALPN list protos.
+func clientHello(ver uint16, protos ...string) []byte {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close(); _ = b.Close() }()
+	hc := &hookConn{Conn: a}
+	_ = tls.Client(hc, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver, NextProtos: protos}).Handshake()
+	return hc.sent
+}
+
+// T-S-22: a parsed ClientHello with a configured name gives client_abort. Then
+// the client closes, resets, or lets the handshake deadline end. Each stop runs
+// in TLS 1.2 and in TLS 1.3. The certificate callback waits until the stop is
+// sent, so the reset cannot drop the hello. The flight write of the server
+// fails, or a later read fails or times out. The ALPN list has a marker, as in
+// T-S-17.
+func TestTS22ClientAbort(t *testing.T) {
+	stops := []struct {
+		name string
+		tm   timeouts
+		do   func(t *testing.T, c net.Conn, release func())
+	}{
+		{"close", defaultTimeouts, func(t *testing.T, c net.Conn, release func()) { mustNil(t, c.Close()); release() }},
+		{"reset", defaultTimeouts, func(t *testing.T, c net.Conn, release func()) {
 			mustNil(t, c.(*net.TCPConn).SetLinger(0))
 			mustNil(t, c.Close())
-			close(release)
-			g.want(t, "", 0)
+			release()
+		}},
+		{"deadline", shortTimeouts(), func(t *testing.T, c net.Conn, release func()) { release(); closesWithin(t, c) }},
+	}
+	for name, ver := range map[string]uint16{"TLS 1.2": tls.VersionTLS12, "TLS 1.3": tls.VersionTLS13} {
+		for _, stop := range stops {
+			t.Run(name+", "+stop.name, func(t *testing.T) {
+				entered, wait := make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				release := func() { once.Do(func() { close(wait) }) }
+				t.Cleanup(release)
+				g := newGateRig(t, stop.tm, func(s *Server) {
+					get := s.tls.GetCertificate
+					s.tls.GetCertificate = func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+						close(entered)
+						<-wait
+						return get(h)
+					}
+				})
+				c := g.raw(t)
+				_, err := c.Write(clientHello(ver, "http/1.1", markerALPN))
+				mustNil(t, err)
+				<-entered
+				stop.do(t, c, release)
+				g.want(t, "client_abort", 0)
+			})
+		}
+	}
+}
+
+// T-S-22: a client stops after the certificate callback returned a certificate.
+// The ALPN list of the hello decides. A list that negotiates acme-tls/1 gives
+// no event: it has acme-tls/1 and no http/1.1. Any other list gives
+// client_abort.
+// The test reads a byte of the server flight before the close, so the
+// certificate callback has returned.
+func TestTS22ALPNAndClientAbort(t *testing.T) {
+	cert, _ := testCert(t)
+	for _, tc := range []struct {
+		name   string
+		protos []string
+		reason string // "" for no event
+	}{
+		{"acme-tls/1", []string{challengeProto}, ""},
+		{"acme-tls/1 twice", []string{challengeProto, challengeProto}, ""},
+		{"unknown protocol, then acme-tls/1", []string{"x-probe", challengeProto}, ""},
+		{"http/1.1", []string{"http/1.1"}, "client_abort"},
+		{"acme-tls/1, then http/1.1", []string{challengeProto, "http/1.1"}, "client_abort"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGateRig(t, defaultTimeouts, func(s *Server) {
+				s.tls.GetCertificate = withCertMarks(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil })
+			})
+			c := g.raw(t)
+			_, err := c.Write(clientHello(tls.VersionTLS13, tc.protos...))
+			mustNil(t, err)
+			_, err = c.Read(make([]byte, 1))
+			mustNil(t, err)
+			mustNil(t, c.Close())
+			g.want(t, tc.reason, 0)
+		})
+	}
+}
+
+// T-S-22: the order of handshakeReason. The certificate mark gives client_abort
+// only when no other rule applies. The other rules are the no certificate mark,
+// a budget close, a gate reason, and a last read with data.
+func TestTS22HandshakeReasonOrder(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mod  func(*limitConn)
+		want event.RefusedReason // 0 for none
+	}{
+		"certificate and no data": {func(*limitConn) {}, event.ReasonClientAbort},
+		"data":                    {func(c *limitConn) { c.lastData = true }, event.ReasonBadHello},
+		"gate":                    {func(c *limitConn) { c.gate = event.ReasonUnknownName }, event.ReasonUnknownName},
+		"no certificate mark":     {func(c *limitConn) { c.noCert = true }, 0},
+		"budget close":            {func(c *limitConn) { c.budgetClosed = true }, 0},
+	} {
+		c := &limitConn{cert: true}
+		tc.mod(c)
+		if r, ok := c.handshakeReason(); r != tc.want || ok != (tc.want != 0) {
+			t.Errorf("%s: reason %v, ok %v; want %v", name, r, ok, tc.want)
+		}
+	}
+}
+
+// T-S-22: a close over the connection cap or the source cap gives no event.
+// The server closes that connection in Accept, before TLS. The connections that
+// held the slots then close, and a bad hello gives a known event as a barrier.
+// Only that event is in the queue.
+func TestTS22CapClosesGiveNoEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		slots, holds int
+	}{
+		{"connection cap", 2, 2},
+		{"source cap", 2 * maxConnsPerSource, maxConnsPerSource},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGateRig(t, defaultTimeouts, func(s *Server) {
+				s.sem, s.src = make(chan struct{}, tc.slots), newSourceCap(tc.slots)
+			})
+			held := make([]net.Conn, tc.holds)
+			for i := range held {
+				held[i] = g.raw(t)
+			}
+			closesWithin(t, g.raw(t))
+			for _, c := range held {
+				_ = c.Close()
+			}
+			for range held {
+				waitClosed(t, g.closed)
+			}
+			g.write(t, []byte("GET / HTTP/1.0\r\n\r\n"))
+			waitClosed(t, g.closed)
+			g.events(t, "bad_hello")
 		})
 	}
 }
 
 // T-S-22: these give no event. A connection that read no byte. A partial
 // ClientHello with a close, or with a handshake deadline. A configured name
-// with no cached certificate. A failure at shutdown.
+// with no cached certificate. A server with no ACME client. A hello that offers
+// only acme-tls/1 for a configured name with no active challenge. A hello over
+// the read budget. A budget close after the certificate callback returned a
+// certificate. A failure at shutdown.
 func TestTS22HandshakeGuards(t *testing.T) {
 	part := hello13()[:20]
+	hello := clientHello(tls.VersionTLS13)
 	for _, tc := range []struct {
 		name string
 		tm   timeouts
 		pre  func(*Server)
 		send func(*testing.T, *gateRig)
 	}{
+		{"no ACME client", defaultTimeouts, func(s *Server) {
+			s.tls.GetCertificate = withCertMarks(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, errors.New("no client") })
+		}, func(t *testing.T, g *gateRig) { g.handshake(t, clientCfg(testName)) }},
+		{"acme-tls/1, no active challenge", defaultTimeouts, nil, func(t *testing.T, g *gateRig) { g.handshake(t, clientCfg(testName, challengeProto)) }},
+		{"hello over the budget", defaultTimeouts, func(s *Server) { s.rd.first = 20 }, func(t *testing.T, g *gateRig) { g.write(t, hello13()) }},
+		{"budget close after the certificate", defaultTimeouts, func(s *Server) { s.rd.first = int64(len(hello)) + 50 }, func(t *testing.T, g *gateRig) {
+			// A record header for 16384 bytes, then more bytes than the budget.
+			g.write(t, append(append(slices.Clone(hello), 23, 3, 3, 0x40, 0), make([]byte, 200)...))
+		}},
 		{"no byte, close", defaultTimeouts, nil, func(t *testing.T, g *gateRig) { _ = g.raw(t).Close() }},
 		{"partial hello, close", defaultTimeouts, nil, func(t *testing.T, g *gateRig) {
 			c := g.raw(t)

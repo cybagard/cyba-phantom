@@ -193,9 +193,7 @@ func TestTS13InclusionCheck(t *testing.T) {
 
 func TestTU07CacheHoldsOneTileForEachLevel(t *testing.T) {
 	// The test does not need fsync. It checks the cache and the root.
-	oldFile, oldDir := syncFile, syncDirFile
-	syncFile, syncDirFile = func(*os.File) error { return nil }, func(*os.File) error { return nil }
-	t.Cleanup(func() { syncFile, syncDirFile = oldFile, oldDir })
+	withoutSync(t)
 	state, _ := newLogState(t)
 	l := openTestLog(t, state)
 	var events []EventHash
@@ -296,16 +294,10 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 	l := openTestLog(t, state)
 	events := appendTo(t, l, 0, 255)
 	size, root := l.Head()
-	old := renameFile
-	t.Cleanup(func() { renameFile = old })
-	for _, fail := range []string{"tile", headName} { // a tile write, then the head write
-		renameFile = func(r *os.Root, from, to string) error {
-			if (fail == headName) == (to == headName) {
-				return errors.New("injected")
-			}
-			return old(r, from, to)
-		}
-		// The append to size 256 changes the tiles of level 0 and level 1.
+	// The append to size 256 writes the full tile 0 of level 0 first. Fail that
+	// tile write, then the head write.
+	for _, fail := range []string{"tile/8/0/000", headName} {
+		restore := failRename(t, fail)
 		_, first := l.Append(testEvent(255))
 		if first == nil {
 			t.Fatalf("%s failure: Append returned nil", fail)
@@ -314,7 +306,7 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 			t.Fatalf("%s failure: head changed to %d, %x", fail, s2, r2)
 		}
 		// The log refuses each later Append with the same error, also when the writes work.
-		renameFile = old
+		restore()
 		if _, err := l.Append(testEvent(255)); !sameStop(err, first) {
 			t.Fatalf("%s failure: next Append gave %v, want %v", fail, err, first)
 		}
@@ -335,30 +327,39 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 	}
 }
 
+// failRename makes each rename to the file name fail. The returned function
+// stops the fault. The test restores the earlier calls when it ends.
+func failRename(t testing.TB, name string) (stop func()) {
+	t.Helper()
+	return setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+		if to == name {
+			return errors.New("injected")
+		}
+		return realRename(r, from, to)
+	}})
+}
+
 // failDirSyncAfterRename makes the next fsync of a directory fail after the
 // rename of the file name works. The returned function stops the fault.
-// The test restores the real calls when it ends.
+// The test restores the earlier calls when it ends.
 func failDirSyncAfterRename(t *testing.T, name string) (stop func()) {
 	t.Helper()
-	oldRename, oldDir := renameFile, syncDirFile
-	stop = func() { renameFile, syncDirFile = oldRename, oldDir }
-	t.Cleanup(stop)
 	armed := false
-	renameFile = func(r *os.Root, from, to string) error {
-		err := oldRename(r, from, to)
+	rename := func(r *os.Root, from, to string) error {
+		err := realRename(r, from, to)
 		if err == nil && to == name {
 			armed = true
 		}
 		return err
 	}
-	syncDirFile = func(f *os.File) error {
+	dir := func(f *os.File) error {
 		if armed {
 			armed = false
 			return errors.New("injected")
 		}
-		return oldDir(f)
+		return realSync(f)
 	}
-	return stop
+	return setHooks(t, hooks{dir: dir, rename: rename})
 }
 
 // diskHead reads the tree head file of the log below dir.
@@ -427,17 +428,14 @@ func TestTU07TileDirectorySyncFailureThenReopenSyncsTheTileBeforeTheHead(t *test
 	stop()
 	l.Close()
 
-	oldRename, oldDir := renameFile, syncDirFile
-	t.Cleanup(func() { renameFile, syncDirFile = oldRename, oldDir })
-
 	// If the fsync of the tile directory fails again, Append returns an error
 	// and does not write the head.
 	l = openTestLog(t, state)
-	syncDirFile = func(*os.File) error { return errors.New("injected") }
+	restore := setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
 	if _, err := l.Append(testEvent(256)); err == nil {
 		t.Fatal("Append returned nil after the failed fsync of the retry")
 	}
-	syncDirFile = oldDir
+	restore()
 	if size, _ := diskHead(t, dir); size != 256 {
 		t.Fatalf("head on disk has size %d, want 256", size)
 	}
@@ -446,16 +444,17 @@ func TestTU07TileDirectorySyncFailureThenReopenSyncsTheTileBeforeTheHead(t *test
 	// If the fsync works, it comes before the write of the head.
 	l = openTestLog(t, state)
 	var steps []string
-	renameFile = func(r *os.Root, from, to string) error {
+	renameHook := func(r *os.Root, from, to string) error {
 		if to == headName {
 			steps = append(steps, "head")
 		}
-		return oldRename(r, from, to)
+		return realRename(r, from, to)
 	}
-	syncDirFile = func(f *os.File) error {
+	dirHook := func(f *os.File) error {
 		steps = append(steps, "sync "+f.Name())
-		return oldDir(f)
+		return realSync(f)
 	}
+	setHooks(t, hooks{dir: dirHook, rename: renameHook})
 	if idx, err := l.Append(testEvent(256)); err != nil || idx != 256 {
 		t.Fatalf("Append gave %d, %v", idx, err)
 	}
@@ -488,12 +487,10 @@ func TestTU07NarrowWriteSyncsTheDirectoryOfTheKeptWiderFile(t *testing.T) {
 	// The tile is 001.p/1 and the kept file is 001.p/3. If each fsync of a
 	// directory fails, the error names the kept file and the head stays.
 	const kept = "tile/8/0/001.p/3"
-	oldRename, oldDir := renameFile, syncDirFile
-	t.Cleanup(func() { renameFile, syncDirFile = oldRename, oldDir })
 	l = openTestLog(t, state)
-	syncDirFile = func(*os.File) error { return errors.New("injected") }
+	restore := setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
 	_, err := l.Append(testEvent(256))
-	syncDirFile = oldDir
+	restore()
 	var e *Error
 	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != kept {
 		t.Fatalf("Append gave %v, want the rule %q for %s", err, ruleWrite, kept)
@@ -509,16 +506,17 @@ func TestTU07NarrowWriteSyncsTheDirectoryOfTheKeptWiderFile(t *testing.T) {
 	// If the fsync works, it comes before the write of the head.
 	l = openTestLog(t, state)
 	var steps []string
-	renameFile = func(r *os.Root, from, to string) error {
+	renameHook := func(r *os.Root, from, to string) error {
 		if to == headName {
 			steps = append(steps, "head")
 		}
-		return oldRename(r, from, to)
+		return realRename(r, from, to)
 	}
-	syncDirFile = func(f *os.File) error {
+	dirHook := func(f *os.File) error {
 		steps = append(steps, "sync "+f.Name())
-		return oldDir(f)
+		return realSync(f)
 	}
+	setHooks(t, hooks{dir: dirHook, rename: renameHook})
 	if idx, err := l.Append(testEvent(256)); err != nil || idx != 256 {
 		t.Fatalf("Append gave %d, %v", idx, err)
 	}
@@ -672,9 +670,7 @@ func checkProof(t *testing.T, l *Log, i int) {
 
 func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 	// The test does not need fsync. It checks the tiles, the head, and the reopen.
-	oldFile, oldDir := syncFile, syncDirFile
-	syncFile, syncDirFile = func(*os.File) error { return nil }, func(*os.File) error { return nil }
-	t.Cleanup(func() { syncFile, syncDirFile = oldFile, oldDir })
+	withoutSync(t)
 	// The batch from 0 fills tile 0. The batch from 100 fills tile 0 and tile 1.
 	for _, start := range []int{0, 100} {
 		t.Run(fmt.Sprint("start", start), func(t *testing.T) {
@@ -685,19 +681,17 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			ref := openTestLog(t, refState)
 			appendTo(t, ref, 0, start+500)
 
-			oldRename := renameFile
-			t.Cleanup(func() { renameFile = oldRename })
 			heads, tileWrites := 0, 0
-			renameFile = func(r *os.Root, from, to string) error {
+			restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
 				if to == headName {
 					heads++
 				} else {
 					tileWrites++
 				}
-				return oldRename(r, from, to)
-			}
+				return realRename(r, from, to)
+			}})
 			first, err := l.AppendBatch(batchOf(start, start+500))
-			renameFile = oldRename
+			restore()
 			if err != nil || first != int64(start) || heads != 1 {
 				t.Fatalf("AppendBatch gave %d, %v after %d head writes, want %d, nil, 1", first, err, heads, start)
 			}
@@ -813,11 +807,9 @@ func TestTS13StoppedLogAfterTileWriteFailureIsNotMarked(t *testing.T) {
 	state, _ := newLogState(t)
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 255)
-	old := renameFile
-	t.Cleanup(func() { renameFile = old })
-	renameFile = func(*os.Root, string, string) error { return errors.New("injected") }
+	restore := setHooks(t, hooks{rename: func(*os.Root, string, string) error { return errors.New("injected") }})
 	_, first := l.AppendBatch(batchOf(255, 300))
-	renameFile = old
+	restore()
 	_, next := l.AppendBatch(batchOf(255, 300))
 	if first == nil || next == nil || errors.Is(first, ErrHeadOnDisk) || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, first) {
 		t.Fatalf("first error %v, next error %v: want the same error with no mark", first, next)
@@ -862,13 +854,9 @@ func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
 	appendTo(t, l, 0, 255)
 	size, root := l.Head()
 	logDir := filepath.Join(dir, "tlog")
-	old := renameFile
-	t.Cleanup(func() {
-		renameFile = old
-		os.Chmod(logDir, dirMode)
-	})
-	renameFile = func(r *os.Root, from, to string) error {
-		err := old(r, from, to)
+	t.Cleanup(func() { os.Chmod(logDir, dirMode) })
+	restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
+		err := realRename(r, from, to)
 		if err == nil && to == headName {
 			// The open of a directory with group access fails.
 			err = os.Chmod(logDir, 0o750)
@@ -877,9 +865,9 @@ func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
 			}
 		}
 		return err
-	}
+	}})
 	_, err := l.AppendBatch(batchOf(255, 300))
-	renameFile = old
+	restore()
 	var e *Error
 	if !errors.Is(err, ErrHeadOnDisk) || !errors.As(err, &e) || e.Rule != ruleWrite {
 		t.Fatalf("AppendBatch gave %v, want the rule %q with the mark", err, ruleWrite)
@@ -904,15 +892,15 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 	// the head.
 	failTileRename := func(nth int) func(t *testing.T) {
 		return func(t *testing.T) {
-			old, tiles := renameFile, 0
-			renameFile = func(r *os.Root, from, to string) error {
+			tiles := 0
+			setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
 				if to != headName {
 					if tiles++; tiles == nth {
 						return errors.New("injected")
 					}
 				}
-				return old(r, from, to)
-			}
+				return realRename(r, from, to)
+			}})
 		}
 	}
 	batchRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
@@ -926,15 +914,7 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 		{"level 1 tile 0 rename", failTileRename(2), false},
 		{"level 0 tile 1 rename", failTileRename(3), false},
 		{"level 0 tile 1 directory sync", func(t *testing.T) { failDirSyncAfterRename(t, "tile/8/0/001.p/44") }, false},
-		{"head rename", func(t *testing.T) {
-			old := renameFile
-			renameFile = func(r *os.Root, from, to string) error {
-				if to == headName {
-					return errors.New("injected")
-				}
-				return old(r, from, to)
-			}
-		}, false},
+		{"head rename", func(t *testing.T) { failRename(t, headName) }, false},
 		// The rename of the head works and the fsync of its directory fails.
 		{"head directory sync", func(t *testing.T) { failDirSyncAfterRename(t, headName) }, true},
 	} {
@@ -943,11 +923,11 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 			l := openTestLog(t, state)
 			appendTo(t, l, 0, 255)
 			size, root := l.Head()
-			oldRename, oldDir := renameFile, syncDirFile
-			t.Cleanup(func() { renameFile, syncDirFile = oldRename, oldDir })
+			// Save the calls. restore then stops the fault that c.fault sets.
+			restore := setHooks(t, hooks{})
 			c.fault(t)
 			_, first := l.AppendBatch(batchOf(255, 300))
-			renameFile, syncDirFile = oldRename, oldDir
+			restore()
 			if first == nil {
 				t.Fatal("AppendBatch returned nil")
 			}
@@ -1034,22 +1014,18 @@ func syncedAs(f *os.File, log string, names []string) string {
 }
 
 // hookDirSync calls fn for each fsync of a directory in names. If fn returns an
-// error, the fsync fails. The returned function restores the real call. The
+// error, the fsync fails. The returned function restores the earlier call. The
 // test restores it when it ends too.
 func hookDirSync(t *testing.T, log string, names []string, fn func(name string) error) (restore func()) {
 	t.Helper()
-	old := syncDirFile
-	restore = func() { syncDirFile = old }
-	t.Cleanup(restore)
-	syncDirFile = func(f *os.File) error {
+	return setHooks(t, hooks{dir: func(f *os.File) error {
 		if d := syncedAs(f, log, names); d != "" {
 			if err := fn(d); err != nil {
 				return err
 			}
 		}
-		return old(f)
-	}
-	return restore
+		return realSync(f)
+	}})
 }
 
 // failDirSync makes each fsync of the directory name fail.
@@ -1191,18 +1167,11 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 		log := filepath.Join(dir, "tlog")
 		l := openTestLog(t, state)
 		appendTo(t, l, 0, 255)
-		oldRename := renameFile
-		t.Cleanup(func() { renameFile = oldRename })
-		renameFile = func(r *os.Root, from, to string) error {
-			if to == headName {
-				return errors.New("injected")
-			}
-			return oldRename(r, from, to)
-		}
+		restore := failRename(t, headName)
 		if _, err := l.Append(testEvent(255)); err == nil {
 			t.Fatal("Append returned nil after the failed write of the tree head")
 		}
-		renameFile = oldRename
+		restore()
 		l.Close()
 		if err := os.Remove(filepath.Join(log, "tile/8/0/000.p")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)

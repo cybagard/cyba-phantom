@@ -81,7 +81,7 @@ func nodeError(path string, line, col int, detail string) error {
 // Leaf represents a scalar value in the configuration.
 type Leaf struct {
 	Value string
-	Tag   string // Tag is the resolved tag.
+	Tag   string // Tag is the resolved tag, or "!" for a refused written tag.
 	Line  int
 }
 
@@ -220,7 +220,7 @@ func ReadBytes(b []byte) (*Doc, error) {
 		Lines:     make(map[string]int),
 	}
 
-	if err := walkNode(root, nil, "", res, 0); err != nil {
+	if err := walkNode(root, nil, "", res, 0, &lineCursor{lines: bytes.Split(b, []byte("\n"))}); err != nil {
 		return nil, err
 	}
 
@@ -229,7 +229,8 @@ func ReadBytes(b []byte) (*Doc, error) {
 
 // walkNode walks the node n at path. For a mapping entry, key is the key node;
 // it is nil for the root and for a sequence item.
-func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
+// src holds the lines of the file.
+func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int, src *lineCursor) error {
 	if depth > maxDepth {
 		return nodeError(path, n.Line, n.Column, "nesting exceeds limit of "+strconv.Itoa(maxDepth))
 	}
@@ -290,7 +291,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 				newPath = path + "." + key
 			}
 
-			if err := walkNode(valNode, keyNode, newPath, doc, depth+1); err != nil {
+			if err := walkNode(valNode, keyNode, newPath, doc, depth+1, src); err != nil {
 				return err
 			}
 		}
@@ -302,7 +303,7 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 			if path == "" {
 				newPath = fmt.Sprintf("[%d]", i)
 			}
-			if err := walkNode(child, nil, newPath, doc, depth+1); err != nil {
+			if err := walkNode(child, nil, newPath, doc, depth+1, src); err != nil {
 				return err
 			}
 		}
@@ -312,9 +313,13 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 			return readErr("root must be a mapping")
 		}
 
+		tag := n.Tag
+		if bareTag(n, src) || n.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) != 0 && tag != "!!str" {
+			tag = "!"
+		}
 		doc.Leaves[path] = Leaf{
 			Value: n.Value,
-			Tag:   n.Tag,
+			Tag:   tag,
 			Line:  n.Line,
 		}
 
@@ -323,6 +328,38 @@ func walkNode(n, key *yaml.Node, path string, doc *Doc, depth int) error {
 	}
 
 	return nil
+}
+
+// bareTag reports whether the file has the non-specific tag "!" before the
+// scalar n. The parser drops it. Style is that of the scalar without the tag.
+// Tag is "!!str" for a quoted or block scalar. The node starts at the tag.
+// A plain, quoted or block scalar cannot start with "!". An empty value can
+// have the position of the next node. If that node starts with "!", the
+// empty value gets the tag "!". Load refuses an empty value for each kind
+// in any case. Column counts runes, so the function skips runes and does
+// not copy the line.
+// The scalars of one line come in rising column order. So src resumes where
+// the last call stopped, and the cost for a line is linear.
+func bareTag(n *yaml.Node, src *lineCursor) bool {
+	if n.Style&yaml.TaggedStyle != 0 || n.Line < 1 || n.Line > len(src.lines) || n.Column < 1 {
+		return false
+	}
+	line := src.lines[n.Line-1]
+	if src.line != n.Line || n.Column < src.col {
+		src.line, src.col, src.off = n.Line, 1, 0
+	}
+	for src.col < n.Column && src.off < len(line) {
+		_, size := utf8.DecodeRune(line[src.off:])
+		src.col, src.off, src.steps = src.col+1, src.off+size, src.steps+1
+	}
+	return src.off < len(line) && line[src.off] == '!'
+}
+
+// lineCursor holds the lines of the file. It also holds the last position
+// that bareTag read: line, column and byte offset. steps counts the runes read.
+type lineCursor struct {
+	lines                 [][]byte
+	line, col, off, steps int
 }
 
 func isCoreTag(tag string, kind yaml.Kind) bool {

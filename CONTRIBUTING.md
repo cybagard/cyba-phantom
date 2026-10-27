@@ -53,11 +53,13 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    software shows to users. This text is error messages, log messages,
    and help text. Keep a sentence to at most 25 words in other prose.
    Keep a code comment line to at most 80 columns, with a tab as 4
-   columns. The command `make lint` checks the two comment limits in Go
-   files, except files below `testdata`. It checks the lines that you
-   change, and each sentence that has a changed line or that a deletion
-   joins. Review checks all other comments and prose. Do not edit the
-   synced `spec/` files. See `GOVERNANCE.md`.
+   columns. The count is for the full source line, with the indent. A
+   comment line that holds only a URL can be longer. The command
+   `make lint` checks the two comment limits in Go files, except files
+   below `testdata`. It checks the lines that you change, and each
+   sentence that has a changed line or that a deletion joins. Review
+   checks all other comments and prose. Do not edit the synced `spec/`
+   files. See `GOVERNANCE.md`.
 
 ## Spec documents (`spec/`)
 

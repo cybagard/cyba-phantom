@@ -423,7 +423,7 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 		}
 		return nil, a.refuseName(hello, reason)
 	}
-	if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto {
+	if onlyChallenge(hello) {
 		if _, active := a.challenge(name); !active {
 			a.refused.Add(1)
 			return nil, errNoChallenge
@@ -432,6 +432,11 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 	h := *hello
 	h.ServerName = name
 	return a.cfg.GetCertificate(&h)
+}
+
+// onlyChallenge tells if the ALPN list of hello is exactly acme-tls/1.
+func onlyChallenge(hello *tls.ClientHelloInfo) bool {
+	return len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto
 }
 
 // refuseName counts a refusal of the name gate. It records the reason on the

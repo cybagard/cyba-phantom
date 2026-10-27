@@ -273,8 +273,12 @@ type limitConn struct {
 	// These fields are the input of handshakeReason (SEC-22).
 	// gate is the reason of the name gate, or 0 if it did not refuse.
 	gate event.RefusedReason
-	// noCert is true when there is no certificate to give.
+	// noCert is true when the certificate callback failed and the name gate did
+	// not refuse the connection.
 	noCert bool
+	// cert is true when the certificate callback returned a certificate and the
+	// hello does not negotiate acme-tls/1.
+	cert bool
 	// lastData is true when the last read gave data, no error, no timeout. A
 	// write that fails after that read sets it to false.
 	lastData bool
@@ -377,8 +381,9 @@ const recordApplicationData = 23
 // handshake writes before the first request is active. It also counts a write
 // of more than uncountedWriteMax bytes that starts with recordApplicationData.
 // A failed write, also a timeout, ends the handshake: crypto/tls reads no more.
-// Then lastData is false until the next read with data. So the connection gives
-// no bad_hello.
+// Then lastData is false until the next read with data. So a connection whose
+// certificate callback returned a certificate can give client_abort, not
+// bad_hello. handshakeReason has the order of the rules.
 func (c *limitConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.lateOn = c.lateOn || c.active
@@ -436,8 +441,8 @@ func (c *limitConn) setGate(r event.RefusedReason) {
 }
 
 // markNoCert records that the certificate callback failed and the name gate
-// did not refuse the connection. Either the listener has no certificate to
-// give, or the client offered only acme-tls/1 and no challenge is active.
+// did not refuse the connection. Examples are no certificate to give, and
+// acme-tls/1 with no active challenge.
 func (c *limitConn) markNoCert() {
 	c.mu.Lock()
 	if c.gate == 0 {
@@ -446,12 +451,21 @@ func (c *limitConn) markNoCert() {
 	c.mu.Unlock()
 }
 
+// markCert records that the certificate callback returned a certificate.
+func (c *limitConn) markCert() {
+	c.mu.Lock()
+	c.cert = true
+	c.mu.Unlock()
+}
+
 // handshakeReason gives the reason of the refused event for a connection whose
 // handshake failed (SEC-22). It gives none when the connection has the no
 // certificate mark or the budget closed the connection. If not, the name gate
 // gives its reason. If not, it gives bad_hello when the last read gave data.
-// That read had no error, and no write failed after it. If not, it gives no
-// reason.
+// That read had no error, and no write failed after it. If not, it gives
+// client_abort when the certificate callback returned a certificate. Then the
+// client closed, reset, or let the deadline end the handshake. If not, it gives
+// no reason.
 func (c *limitConn) handshakeReason() (event.RefusedReason, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -462,6 +476,8 @@ func (c *limitConn) handshakeReason() (event.RefusedReason, bool) {
 		return c.gate, true
 	case c.lastData:
 		return event.ReasonBadHello, true
+	case c.cert:
+		return event.ReasonClientAbort, true
 	}
 	return 0, false
 }

@@ -733,8 +733,39 @@ func TestSentenceRules(t *testing.T) {
 		{"table cell at 20", "// | " + ws(20) + " | a |\n", nil},
 		{"table rows end", "// | " + ws(10) + " | " + ws(10) + " |\n// | " + ws(10) + " | " + ws(10) + " |\n", nil},
 		{"separator row is not counted", "// | a | b |\n// | " + strings.Repeat("- ", 21) + "|\n// |:-:|\n// | c | d |\n", nil},
-		{"table ends a paragraph", "// " + ws(12) + "\n// | " + ws(12) + " |\n", nil},
-		{"table cell hit line", "// a\n// | b | " + ws(21) + " |\n", []sentence{{2, 2, 21}}},
+		{"table after a colon line ends the paragraph", "// " + ws(12) + ":\n// | " + ws(12) + " |\n", nil},
+		{"table cell hit line", "// a\n//\n// | b | " + ws(21) + " |\n", []sentence{{3, 3, 21}}},
+		{"indented bar line in a paragraph is a table row", "// " + ws(12) + "\n//  | " + ws(30) + " |\n", []sentence{{2, 2, 30}}},
+		{"indented bar line in a list item is a table row", "// - a\n//   | " + ws(30) + " |\n", []sentence{{2, 2, 30}}},
+		{"indented bar line at the start of a code block is code", "// Intro.\n//\n//\t| " + ws(25) + " |\n", nil},
+
+		// A wrapped line with a marker continues the paragraph.
+		{"wrapped line with a dash continues", "// " + ws(10) + "\n// - " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"wrapped line with a number and a period continues", "// " + ws(20) + "\n// 2024. a.\n", []sentence{{1, 2, 21}}},
+		{"wrapped line with a heading mark continues", "// " + ws(10) + "\n// # " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
+		{"wrapped line with a bar continues", "// " + ws(15) + "\n// | " + ws(15) + "\n", []sentence{{1, 2, 31}}},
+		{"wrapped line with a marker after a colon line starts an item", "// " + ws(15) + ":\n// - " + ws(15) + "\n", nil},
+		{"indented marker after a paragraph line starts an item", "// " + ws(11) + "\n//   - " + ws(10) + ".\n", nil},
+		{"unindented line after a list item is a new paragraph", "// - " + ws(11) + "\n// " + ws(10) + ".\n", nil},
+
+		// A paragraph of a list item, after a blank line.
+		{"item paragraph after a blank line", "//   - item one.\n//\n//     " + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"item paragraph after an intro", "// Intro.\n//\n//   - item one.\n//\n//     " + ws(25) + "\n", []sentence{{5, 5, 25}}},
+		{"item paragraph after two blank lines", "//   - item one.\n//\n//\n//     " + ws(25) + "\n", []sentence{{4, 4, 25}}},
+		{"item paragraph with two lines", "//   - item one.\n//\n//     " + ws(12) + "\n//     " + ws(12) + "\n", []sentence{{3, 4, 24}}},
+		{"indent less than the item text is an item paragraph", "// Intro.\n//\n//   - item one.\n//\n//    " + ws(25) + "\n", []sentence{{5, 5, 25}}},
+		{"indented line after a bullet item with no indent is code", "// • item.\n//\n//   " + ws(25) + "\n", nil},
+		{"tab line after an indented item is an item paragraph", "// Intro.\n//\n//   - a.\n//\n//\t" + ws(30) + "\n", []sentence{{5, 5, 30}}},
+		{"tab line after an item with two spaces is an item paragraph", "//  - a.\n//\n//\t" + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"tab line after a numbered item with no indent is code", "// 1. a.\n//\n//\t" + ws(30) + "\n", nil},
+		{"bar line after an indented item is item text", "// Intro.\n//\n//   - a.\n//\n//   | " + ws(30) + " |\n", []sentence{{5, 5, 32}}},
+		{"unindented line after an item and a blank line is a new paragraph", "//   - a.\n//\n// " + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"indented line after a paragraph that follows an item is code", "//   - a.\n//\n// Para.\n//\n//\t" + ws(30) + "\n", nil},
+		{"bar line after an item paragraph is a table row", "// Intro.\n//\n//   - a.\n//\n//   b.\n//   | " + ws(30) + " |\n", []sentence{{6, 6, 30}}},
+		{"second item paragraph after a blank line", "// Intro.\n//\n//   - a.\n//\n//     b.\n//\n//     " + ws(25) + "\n", []sentence{{7, 7, 25}}},
+		{"marker with no indent after an item paragraph starts an item", "// Intro.\n//\n//   - a.\n//\n//     b\n// - " + ws(20) + ".\n", nil},
+		{"item paragraph after a tab and a dash", "//\t- item.\n//\n//\t  " + ws(25) + "\n", []sentence{{3, 3, 25}}},
+		{"indented line after a heading after an item is code", "//   - item one.\n//\n// # H\n//     " + ws(25) + "\n", nil},
 
 		// A trailer line is not counted and it ends the sentence before it.
 		{"trailer line at 20", "// " + ws(20) + "\n// Signed-off-by: A B <a@example.com>\n", nil},
@@ -811,6 +842,49 @@ func TestSentenceRules(t *testing.T) {
 		{"link url with a backtick at 20", "// [a](https://example.com/`x) " + ws(18) + " `q`.\n", nil},
 		{"link url with a backtick at 21", "// [a](https://example.com/`x) " + ws(19) + " `q`.\n", []sentence{{1, 1, 21}}},
 		{"a bracket pair links once", "// [a](x) b](u`v) " + ws(30) + " `q`.\n", nil},
+
+		// A code block starts after a table row, a trailer and a fence.
+		{"code block after a table row", "// | a |\n//  " + ws(25) + "\n", nil},
+		{"code block after a trailer line", "// Signed-off-by: A <a@example.com>\n//  " + ws(25) + "\n", nil},
+		{"code block after a closing fence", "// ```\n// a\n// ```\n//  " + ws(25) + "\n", nil},
+
+		// A run of n backticks opens a span. Only a run of n closes it.
+		{"double backtick span is one word", "// " + ws(10) + " ``a. b`` " + ws(10) + ".\n", []sentence{{1, 1, 21}}},
+		{"double backtick span with a single backtick inside", "// `` a ` b `` " + ws(19) + ".\n", nil},
+		{"triple backtick span with a double run inside", "// ```a`` b``` " + ws(19) + ".\n", nil},
+		{"run with no equal run is characters", "// ``a `b` " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A link title in double quotes, single quotes or parentheses.
+		{"link with a double-quote title", "// [a](https://e.org \"t u v\") " + ws(19) + ".\n", nil},
+		{"link with a single-quote title", "// [a](https://e.org 't u v') " + ws(19) + ".\n", nil},
+		{"link with a parenthesis title", "// [a](https://e.org (t u v)) " + ws(19) + ".\n", nil},
+		{"link with a title at 21", "// [a](u \"t u\") " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"title with no closing quote is not a link", "// [a](u \"t " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
+		{"title with no close after it is not a link", "// [a](u \"t\" x) " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
+		{"parenthesis title with a parenthesis inside is not a link", "// [a](u (t (v)) " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
+		{"title right after an angle destination is not a link", "// [a](<u>\"t u v\") " + ws(18) + ".\n", []sentence{{1, 1, 21}}},
+		{"link with blanks before the close", "// [a](u ) " + ws(19) + ".\n", nil},
+		{"title with no close is not a link, also before a paren", "// [a](u \") " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
+		{"link with a blank rune at the end", "// [a](u⠀\n", nil},
+
+		// A destination in angle brackets can hold spaces.
+		{"angle destination over a line end is not a link", "// [a](<u\n// v>) " + ws(19) + ".\n", []sentence{{1, 2, 21}}},
+		{"angle destination with an angle bracket is not a link", "// [a](<u <v>) " + ws(19) + ".\n", []sentence{{1, 1, 21}}},
+		{"angle destination with a space", "// [a](<u v>) " + ws(19) + ".\n", nil},
+		{"angle destination with a title", "// [a](<u v> \"t\") " + ws(19) + ".\n", nil},
+		{"angle destination with no end is not a link", "// [a](<u " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+
+		// A title ends on its own line. Only a space, a tab or a line end
+		// stands between the parts of a link tail.
+		{"title over a line end is not a link", "// See [x](u \"" + ws(10) + "\n// " + ws(30) + "\") end.\n", []sentence{{1, 2, 43}}},
+		{"title that runs to a line end is not a link", "// [a](u \"t u v\n// ) " + ws(19) + ".\n", []sentence{{1, 2, 24}}},
+		{"tab and line ends stand in a link tail", "// [a](u\t\"t u v\"\t) " + ws(19) + ".\n// [a](u\n// \"t u v\"\n// ) " + ws(19) + ".\n", nil},
+		{"no-break space before a title is not a link", "// [a](u \"t u\") " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"zero-width space before a title is not a link", "// [a](u​\"t u v\") " + ws(19) + ".\n", []sentence{{1, 1, 23}}},
+		{"zero-width space before the close is not a link", "// [a](u \"t\"​) " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"parenthesis title that holds an opening parenthesis is not a link", "// [a](u (t () " + ws(19) + ".\n", []sentence{{1, 1, 22}}},
+		{"word directly after a link joins the link word", "// [a](u)b " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"span of two backticks before a span of one", "// ``a`` " + ws(30) + " `b`.\n", []sentence{{1, 1, 32}}},
 	}
 	for _, c := range cases {
 		got := sentences(c.src)
@@ -848,6 +922,7 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"trailing text: indented line after a numbered item belongs to the item", "\tx := 1 // 1. " + ws(11) + "\n\t" + strings.Repeat(" ", 7) + "//    " + ws(10) + ".\n", []sentence{{1, 2, 21}}},
 		{"trailing text: indented # line continues the paragraph", "\tx := 1 // " + ws(11) + "\n\t" + strings.Repeat(" ", 7) + "//   # " + ws(10) + ".\n", []sentence{{1, 2, 22}}},
 		{"trailing text: blank line then indented line at the column", "\tx := 1 // a.\n\t" + strings.Repeat(" ", 7) + "//\n\t" + strings.Repeat(" ", 7) + "//  " + ws(25) + ".\n", []sentence{{3, 3, 25}}},
+		{"trailing text: indented bar line after a blank line is a table row", "\tx := 1 // a.\n\t" + strings.Repeat(" ", 7) + "//\n\t" + strings.Repeat(" ", 7) + "//  | " + ws(30) + " |\n", []sentence{{3, 3, 30}}},
 		{"trailing text: indent does not make code", "\tx := 1 //  " + ws(25) + ".\n", []sentence{{1, 1, 25}}},
 		{"trailing text: tab does not make code", "\tx := 1 //\t" + ws(25) + ".\n", []sentence{{1, 1, 25}}},
 		{"trailing text: indented continuation counts", "\tx := 1 // " + ws(10) + "\n\t" + strings.Repeat(" ", 7) + "//  " + ws(15) + ".\n", []sentence{{1, 2, 25}}},
@@ -890,6 +965,7 @@ func TestSentenceCommentGroups(t *testing.T) {
 		{"directive text is skipped", "//go:generate " + ws(30) + "\n", nil},
 		{"block comment: lines of one text", "/*\n" + ws(11) + "\n" + ws(10) + "\n*/\n", []sentence{{2, 3, 21}}},
 		{"block comment: stars are removed", "/*\n * " + ws(11) + "\n * " + ws(10) + "\n */\n", []sentence{{2, 3, 21}}},
+		{"block comment: a marker line ends the paragraph", "/*\nIntro " + ws(10) + "\n  - " + ws(12) + ".\n*/\n", nil},
 		{"block comment at 20", "/* " + ws(20) + ". */\n", nil},
 		{"block comment at 21", "/* " + ws(21) + ". */\n", []sentence{{1, 1, 21}}},
 		{"block comment: indent does not make code", "/*\n\t" + ws(21) + ".\n*/\n", []sentence{{2, 2, 21}}},
@@ -914,17 +990,49 @@ func TestSentenceCommentGroups(t *testing.T) {
 }
 
 func TestSentenceTimeIsLinear(t *testing.T) {
-	// Each text has a mark that repeats and never closes. A search that
-	// starts again at each mark would take quadratic time and not finish.
+	// A unit repeats. A backtick unit closes in pairs. A link unit never
+	// forms a link. Some texts have one opening mark that never closes. A
+	// search that starts again at each mark would take quadratic time and
+	// not finish.
 	n := 200000
-	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`", "[a]( ", "`a "} {
-		src := "// " + strings.Repeat(unit, n) + "\n"
-		done := make(chan []sentence, 1)
-		go func() { done <- sentences(src) }()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Fatalf("unit %q: no result after 20 s", unit)
+	for _, unit := range []string{"[a](", "](", "[](x", "`a ", "[a]( ", "x`", "``a ", "[a](x \"", "[a](x '", "[a](x (",
+		"[a](<", "[](<x ", "[](x \"y", "[a]( ", "`a "} {
+		finishes(t, "// "+strings.Repeat(unit, n)+"\n")
+	}
+	// A title that runs over many lines.
+	finishes(t, "// "+strings.Repeat("[a](x \"\n// ", n)+"\n")
+	finishes(t, "// `"+strings.Repeat("a ", n)+"\n")
+	finishes(t, "// ``"+strings.Repeat("a ", n)+"\n")
+	// Many link openings share one destination end, and one title never
+	// closes.
+	finishes(t, "// "+strings.Repeat("[](", n)+" (y"+strings.Repeat(" a", n)+"\n")
+	// An angle destination link comes before each of these openings.
+	finishes(t, "// "+strings.Repeat("[](<>[](", n)+" \""+strings.Repeat("a", 8*n)+"\n")
+	finishes(t, "// "+strings.Repeat("[](<>[](", n)+" ("+strings.Repeat("a", 8*n)+"\n")
+	// Many spans: a search for a closing run must keep its position.
+	finishes(t, "// "+strings.Repeat("`a", 4*n)+"\n")
+}
+
+// finishes fails the test when the sentence rule takes over 20 s for src.
+func finishes(t *testing.T, src string) {
+	t.Helper()
+	done := make(chan []sentence, 1)
+	go func() { done <- sentences(src) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("text %.12q: no result after 20 s", src)
+	}
+}
+
+// A number, an ID, a path and a URL are each one word.
+func TestNumberIDPathAndURLAreOneWord(t *testing.T) {
+	for _, w := range []string{"1.5", "FR-12", "./a/b.go", "https://example.com/x"} {
+		if got := sentences("// " + ws(19) + " " + w + ".\n"); len(got) != 0 {
+			t.Errorf("%q at 20 words: got %v, want none", w, got)
+		}
+		if got := sentences("// " + ws(20) + " " + w + ".\n"); len(got) != 1 || got[0].words != 21 {
+			t.Errorf("%q at 21 words: got %v, want one with 21 words", w, got)
 		}
 	}
 }

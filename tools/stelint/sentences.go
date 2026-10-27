@@ -29,6 +29,8 @@ type textLine struct {
 	// noCode is true when the line is in a text that starts after code. Its
 	// indent does not make a code block. A token line has noCode false.
 	noCode bool
+	// block is true for a line of a "/* */" comment.
+	block bool
 }
 
 // hasAny reports whether the check covers a sentence that runs from line first
@@ -63,7 +65,7 @@ func textSentences(src []byte) []sentence {
 		g = append(g, textLine{text: strings.TrimSuffix(l, "\r"), line: i + 1})
 	}
 	var out []sentence
-	for _, p := range paragraphs(g) {
+	for _, p := range paragraphs(g, true) {
 		out = append(out, p.long(maxTextWords)...)
 	}
 	return out
@@ -80,7 +82,7 @@ func checkedSentences(src []byte, t target) (out []sentence, scanErr bool) {
 	groups, scanErr := commentGroups(src)
 	for _, g := range groups {
 		whole := t.all || t.changedBreak(g)
-		for _, p := range paragraphs(g) {
+		for _, p := range paragraphs(g, false) {
 			for _, s := range p.long(maxWords) {
 				if whole || t.hasAny(s.first, s.last) || t.delBefore(s.first, g[0].line) {
 					out = append(out, s)
@@ -240,8 +242,8 @@ func commentGroups(src []byte) (groups [][]textLine, scanErr bool) {
 }
 
 // blockLines returns the lines of a "/* */" comment. It removes the markers,
-// the indent and a "*" at the start of a line. The indent does not count, so
-// a block comment has no code block that is found by its indent.
+// the indent and a "*" at the start of a line. The indent after the "*" stays,
+// so such a line can start a code block.
 func blockLines(lit string, line int) []textLine {
 	inner := strings.TrimSuffix(strings.TrimPrefix(lit, "/*"), "*/")
 	var out []textLine
@@ -250,7 +252,7 @@ func blockLines(lit string, line int) []textLine {
 		if i > 0 {
 			p = strings.TrimPrefix(p, "*")
 		}
-		out = append(out, textLine{text: p, line: line + i})
+		out = append(out, textLine{text: p, line: line + i, block: true})
 	}
 	return out
 }
@@ -260,6 +262,7 @@ const (
 	modeNone = iota
 	modePara
 	modeList
+	modeListGap // a blank line after a list item
 	modeCode
 )
 
@@ -269,12 +272,22 @@ const (
 // backticks. A line with a tab or two spaces of indent is also code. This holds
 // when no paragraph or list item is open. In a code block, each indented line
 // stays code. A line with noCode set never starts a code block by its indent.
-func paragraphs(g []textLine) []*para {
+// When md is false, three more rules hold. First, a list marker, "#" or "|"
+// line with no indent continues an open paragraph. This does not hold after a
+// line that ends with a colon, or in a "/* */" comment. Second, a blank line
+// after a list item keeps the item open when the marker line has an indent.
+// Each indented line after the blank line is then a paragraph of the item,
+// also a "|" line. An indented marker line is the exception: it starts a new
+// item. After a marker line with no indent, an indented line is code, unless
+// noCode is set for it. Third, an indented "|" line where a code block can
+// start is code. When md is true, none of these rules holds.
+func paragraphs(g []textLine, md bool) []*para {
 	var (
-		paras []*para
-		cur   *para
-		mode  int
-		fence bool
+		paras      []*para
+		cur        *para
+		mode       int
+		fence      bool
+		itemIndent bool // the marker line of the last list item has an indent
 	)
 	end := func() {
 		if cur != nil {
@@ -292,6 +305,8 @@ func paragraphs(g []textLine) []*para {
 		t := strings.TrimSpace(l.text)
 		indented := strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "  ")
 		rest, item := listItem(t)
+		cont := !md && !l.block && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
+		codeStart := !md && indented && !l.noCode && mode != modePara && mode != modeList
 		switch {
 		case strings.HasPrefix(t, "```"):
 			end()
@@ -300,9 +315,13 @@ func paragraphs(g []textLine) []*para {
 		case fence:
 		case t == "":
 			end()
-			mode = modeNone
+			if !md && (mode == modeList || mode == modeListGap) {
+				mode = modeListGap
+			} else {
+				mode = modeNone
+			}
 		case indented && mode == modeCode:
-		case !indented && isHeading(t):
+		case !indented && isHeading(t) && !cont:
 			end()
 			add(t, l.line)
 			end()
@@ -310,16 +329,20 @@ func paragraphs(g []textLine) []*para {
 		case isTrailer(t):
 			end()
 			mode = modeNone
-		case strings.HasPrefix(t, "|"):
+		case strings.HasPrefix(t, "|") && !codeStart && !cont:
 			end()
 			mode = modeNone
 			for _, cell := range tableCells(t) {
 				add(cell, l.line)
 				end()
 			}
-		case item:
+		case item && !cont:
 			end()
 			add(rest, l.line)
+			mode = modeList
+			itemIndent = indented
+		case indented && mode == modeListGap && itemIndent:
+			add(t, l.line)
 			mode = modeList
 		case indented && (mode == modePara || mode == modeList):
 			add(t, l.line)
@@ -457,9 +480,11 @@ func spaceAt(b []byte, i int) bool {
 }
 
 // long returns the sentences of the paragraph that have more than limit words.
-// A code span in backticks is one word. The scan reads each byte once. A
-// search for a closing character starts at the scan position. The result is
-// kept for the next search. So the time is linear in the length of the text.
+// A code span in backticks is one word. A link counts only its text. A search
+// for a closing mark does not start again at each opening mark. It keeps its
+// position, or it stops at the next mark of its kind. A link with an angle
+// destination keeps no result, as each ">" is read by one scan only. So the
+// time is linear in the length of the text.
 func (p *para) long(limit int) []sentence {
 	var (
 		out         []sentence
@@ -468,7 +493,11 @@ func (p *para) long(limit int) []sentence {
 		words, from int
 		inWord      bool
 		open        bool // a "[" is open: it can start a link
-		tick, stop  = -1, -1
+		stop        = -1
+		runs        map[int][]int // the starts of the backtick runs, by length
+		used        = map[int]int{}
+		tailAt      = -1 // the last index that tail read, and its result
+		tailEnd     int
 	)
 	lineAt := func(i int) int {
 		for cursor+1 < len(p.segs) && p.segs[cursor+1].off <= i {
@@ -491,15 +520,32 @@ func (p *para) long(limit int) []sentence {
 		}
 		words, inWord = 0, false
 	}
-	// nextTick is the index of the first backtick from index i, or len(b).
-	nextTick := func(i int) int {
-		if tick < i {
-			tick = len(b)
-			if j := bytes.IndexByte(b[min(i, len(b)):], '`'); j >= 0 {
-				tick = i + j
+	// closer is the start of the first run of exactly n backticks from index
+	// i, or -1. The runs are found once. Each length has its own position,
+	// and a search only moves it forward.
+	closer := func(n, i int) int {
+		if runs == nil {
+			runs = map[int][]int{}
+			for j := 0; j < len(b); j++ {
+				if b[j] == '`' {
+					k := j
+					for k < len(b) && b[k] == '`' {
+						k++
+					}
+					runs[k-j] = append(runs[k-j], j)
+					j = k - 1
+				}
 			}
 		}
-		return tick
+		l, k := runs[n], used[n]
+		for k < len(l) && l[k] < i {
+			k++
+		}
+		used[n] = k
+		if k < len(l) {
+			return l[k]
+		}
+		return -1
 	}
 	// nextStop is the index of the first ")" or word break from index i. If
 	// there is none, it is len(b).
@@ -516,24 +562,97 @@ func (p *para) long(limit int) []sentence {
 		}
 		return stop
 	}
+	// blanks skips spaces, tabs and line ends from index i. It returns the
+	// index after them. CommonMark allows only these in a link tail. Another
+	// word break, such as U+00A0, makes no link.
+	blanks := func(i int) int {
+		for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n') {
+			i++
+		}
+		return i
+	}
+	// tail is the end of a link after its destination, which ends at index i.
+	// It reads blanks, an optional title in '"', "'" or "()", blanks and ")".
+	// It returns the index after ")", or -1. The title ends at its closing
+	// mark on the same line. The search for it starts at the opening mark. It
+	// stops at the next such mark or at a line end.
+	tail := func(i int) int {
+		j := blanks(i)
+		if j < len(b) && b[j] == ')' {
+			return j + 1
+		}
+		if j == i {
+			return -1
+		}
+		marks := ""
+		switch b[j] {
+		case '"', '\'':
+			marks = string(b[j])
+		case '(':
+			marks = "()"
+		default:
+			return -1
+		}
+		k := bytes.IndexAny(b[j+1:], marks+"\n")
+		if k < 0 || b[j+1+k] == '(' || b[j+1+k] == '\n' {
+			return -1
+		}
+		if e := blanks(j + k + 2); e < len(b) && b[e] == ')' {
+			return e + 1
+		}
+		return -1
+	}
+	// linkEnd is the index after the ")" of a link, or -1. The index i is the
+	// start of the destination, after "](".
+	linkEnd := func(i int) int {
+		if i < len(b) && b[i] == '<' {
+			j := i + 1
+			for j < len(b) && b[j] != '>' && b[j] != '<' && b[j] != '\n' {
+				j++
+			}
+			if j == len(b) || b[j] != '>' {
+				return -1
+			}
+			// Each ">" ends one angle scan, so this path keeps no result.
+			return tail(j + 1)
+		}
+		// Links can share the end of a destination. Only this path keeps the
+		// last result of tail.
+		at := nextStop(i)
+		if at != tailAt {
+			tailAt, tailEnd = at, tail(at)
+		}
+		return tailEnd
+	}
 	for i := 0; i < len(b); {
 		c, n := utf8.DecodeRune(b[i:])
 		switch {
 		case isWordBreak(c):
 			inWord = false
-		case c == '`' && nextTick(i+1) < len(b):
+		case c == '`':
+			// A run of k backticks opens a span. Only the next run of k
+			// closes it. With none, the run is ordinary text.
 			startWord(i)
-			i = nextTick(i+1) + 1
+			k := 1
+			for i+k < len(b) && b[i+k] == '`' {
+				k++
+			}
+			i += k
+			if e := closer(k, i); e >= 0 {
+				i = e + k
+			}
 			continue
 		case c == '[':
 			open = true
 			startWord(i)
-		case c == ']' && open && i+1 < len(b) && b[i+1] == '(' && nextStop(i+2) < len(b) && b[nextStop(i+2)] == ')':
+		case c == ']' && open && i+1 < len(b) && b[i+1] == '(':
 			// Only the link text counts: skip "](url)".
 			startWord(i)
-			open = false
-			i = nextStop(i+2) + 1
-			continue
+			if e := linkEnd(i + 2); e >= 0 {
+				open = false
+				i = e
+				continue
+			}
 		case c == '.' || c == '?' || c == '!':
 			startWord(i)
 			if i+1 == len(b) || spaceAt(b, i+1) {

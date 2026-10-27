@@ -47,7 +47,9 @@ These limits apply to prose:
 - A sentence in text that the software shows to users has at most 20
   words. This text is error messages, log messages, and help text.
 - A sentence in other prose has at most 25 words.
-- A code comment line has at most 80 columns. A tab is 4 columns.
+- A code comment line has at most 80 columns. A tab is 4 columns. The
+  count is for the full source line, with the indent. A comment line
+  that holds only a URL can be longer.
 
 A sentence ends at `.`, `?` or `!` before a space, a line end or the end
 of the text. It also ends at the end of a paragraph, a heading, a list

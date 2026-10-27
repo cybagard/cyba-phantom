@@ -143,9 +143,7 @@ func splitRow(line string) []string {
 	if !strings.HasPrefix(line, "|") {
 		return nil
 	}
-	if strings.HasSuffix(line, "|") {
-		line = line[:len(line)-1]
-	}
+	line = strings.TrimSuffix(line, "|")
 	line = strings.TrimPrefix(line, "|")
 	cells := strings.Split(line, "|")
 	for i, c := range cells {
@@ -200,7 +198,7 @@ func parseTestPlan(text string, findings *[]string) []test {
 	seen := map[string]bool{}
 	for _, line := range strings.Split(text, "\n") {
 		cells := splitRow(line)
-		if cells == nil || len(cells) < 2 {
+		if len(cells) < 2 {
 			continue
 		}
 		if !testIDRE.MatchString(cells[0]) {
@@ -246,11 +244,11 @@ func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
 	for i, line := range lines {
 		cells := splitRow(line)
 		switch {
-		case cells != nil && len(cells) == 3 && cells[0] == "Req" && cells[1] == "Design" && cells[2] == "Tests":
+		case len(cells) == 3 && cells[0] == "Req" && cells[1] == "Design" && cells[2] == "Tests":
 			groups = append(groups, matGroup{header: i, sep: -1, first: -1})
 			cur = len(groups) - 1
 			rowOpen = false
-		case cells != nil && len(cells) == 3 && isRowID(cells[0]):
+		case len(cells) == 3 && isRowID(cells[0]):
 			if cur < 0 {
 				*findings = append(*findings, fmt.Sprintf("08-traceability: row %s lies outside a table (line %d)", cells[0], i+1))
 				continue
@@ -263,7 +261,7 @@ func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
 			g.rows = append(g.rows, r)
 			all = append(all, r)
 			rowOpen = true
-		case cells != nil && len(cells) == 3 && isSepRow(cells):
+		case len(cells) == 3 && isSepRow(cells):
 			if cur >= 0 && groups[cur].sep < 0 {
 				groups[cur].sep = i
 			}
