@@ -222,16 +222,17 @@ perf-inner:
 # The cleanup ignores these four signals, also after a normal end. Thus a
 # signal does not stop the removal. It sends KILL to gremlins, so a stopped
 # gremlins does not block the removal.
-# MUTATE_EXCLUDE is a list of regular expressions, separated by spaces. It is
-# empty by default. Each entry becomes one --exclude-files=<entry> argument.
+# MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
+# or newlines. It is empty by default.
+# Each entry becomes one --exclude-files=<entry> argument.
 # Gremlins matches an entry against the file path relative to PKG.
 # The match is not anchored, so use ^ and $ for a whole name.
 # The shell does not expand or split an entry. Write "$$" for a "$" on the
-# make command line, because make reads "$|" there as a variable.
-# In the environment, write a single "$".
+# make command line, because make reads a "$" and the next character as a
+# variable. In the environment, write a single "$".
 # An entry that does not compile makes gremlins fail, so the target fails.
 # The make all target does not run this target.
-# Example: make mutate PKG=./internal/tlog MUTATE_EXCLUDE='^spool .*_gen\.go$$'
+# Example: make mutate PKG=./internal/tlog MUTATE_EXCLUDE='^spool ^store'
 MUTATE_CAP ?= 600
 MUTATE_MAX_MIB ?= 10240
 MUTATE_EXCLUDE ?=
