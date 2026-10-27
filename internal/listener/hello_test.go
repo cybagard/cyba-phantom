@@ -243,7 +243,7 @@ func TestTS17RedirectKeepsEscapes(t *testing.T) {
 		{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
 		{"/[x]", "https://decoy.test/%5Bx%5D"},
 		{"/%41", "https://decoy.test/%41"},
-		// The edges of the hex digit ranges: 9, a, f, A and F.
+		// These rows hold the hex digit edges 9, a, A and F.
 		{"/%9a%2F", "https://decoy.test/%9A%2F"},
 		{"/%2F%A0", "https://decoy.test/%2F%A0"},
 		{"/a%252Fb", "https://decoy.test/a%252Fb"},
