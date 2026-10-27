@@ -197,6 +197,9 @@ perf-inner:
 # Then os.UserCacheDir and os.UserConfigDir give paths in HOME.
 # The target keeps the caller GOPATH, GOMODCACHE and GOENV. If go env gives
 # an empty GOENV, the target sets GOENV to off, so go uses no go env file.
+# The target adds -count=1 to the caller GOFLAGS, read with go env GOFLAGS.
+# This turns the test cache off. For each passing run, go test keeps a large
+# test log in GOCACHE. The log names the files that the tests open.
 # The module cache is outside the directory, so the size does not include it.
 # A check once each second compares the size of this directory with
 # MUTATE_MAX_MIB MiB. If the size is larger, the target stops gremlins and
@@ -222,11 +225,22 @@ perf-inner:
 # The cleanup ignores these four signals, also after a normal end. Thus a
 # signal does not stop the removal. It sends KILL to gremlins, so a stopped
 # gremlins does not block the removal.
+# MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
+# or newlines. It is empty by default.
+# Each entry becomes one --exclude-files=<entry> argument.
+# If the value is not empty, the target prints it before gremlins starts.
+# Gremlins matches an entry against the file path relative to PKG.
+# The match is not anchored, so use ^ and $ for a whole name.
+# The shell does not expand or split an entry. Write "$$" for a "$" on the
+# make command line, because make reads a "$" and the text after it as a
+# variable reference. In the environment, write a single "$".
+# An entry that does not compile makes gremlins fail, so the target fails.
 # The make all target does not run this target.
-# Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
+# Example: make mutate PKG=./internal/tlog MUTATE_EXCLUDE='^spool ^store'
 MUTATE_CAP ?= 600
 MUTATE_MAX_MIB ?= 10240
-export MUTATE_CAP MUTATE_MAX_MIB
+MUTATE_EXCLUDE ?=
+export MUTATE_CAP MUTATE_MAX_MIB MUTATE_EXCLUDE
 mutate:
 	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
@@ -236,14 +250,16 @@ mutate:
 	trap 'trap "" HUP INT QUIT TERM; exit 129' HUP; trap 'trap "" HUP INT QUIT TERM; exit 130' INT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 131' QUIT; trap 'trap "" HUP INT QUIT TERM; exit 143' TERM; \
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
-	gopath=$$("$$go" env GOPATH) && gomodcache=$$("$$go" env GOMODCACHE) && goenv=$$("$$go" env GOENV) || { echo "mutate: go env failed" >&2; exit 1; }; \
+	gopath=$$("$$go" env GOPATH) && gomodcache=$$("$$go" env GOMODCACHE) && goenv=$$("$$go" env GOENV) && goflags=$$("$$go" env GOFLAGS) || { echo "mutate: go env failed" >&2; exit 1; }; \
 	[ -n "$$gopath" ] && [ -n "$$gomodcache" ] || { echo "mutate: go env gives an empty GOPATH or GOMODCACHE" >&2; exit 1; }; \
 	[ -n "$$goenv" ] || goenv=off; \
 	mkdir "$$d/bin"; \
 	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
-	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
+	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
-	gremlins unleash "$$PKG" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
+	[ -z "$$MUTATE_EXCLUDE" ] || printf 'mutate: files excluded by MUTATE_EXCLUDE: %s\n' "$$MUTATE_EXCLUDE"; \
+	set -f; set --; for e in $$MUTATE_EXCLUDE; do set -- "$$@" "--exclude-files=$$e"; done; set +f; \
+	gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
 	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; \
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
