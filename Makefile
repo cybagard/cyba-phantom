@@ -216,10 +216,12 @@ perf-inner:
 # directory in the run directory writable. It does not follow links.
 # It does not change the mode of a file.
 # It uses names relative to each directory, so a long path works.
-# It runs find with a fixed PATH. Find refuses -execdir with a relative PATH.
+# It runs find with a fixed PATH, because find refuses -execdir when PATH
+# has a relative or an empty entry.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
-# The cleanup ignores these four signals, also after a normal end.
-# It sends KILL to gremlins, so a signal does not stop the removal.
+# The cleanup ignores these four signals, also after a normal end. Thus a
+# signal does not stop the removal. It sends KILL to gremlins, so a stopped
+# gremlins does not block the removal.
 # The make all target does not run this target.
 # Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
 MUTATE_CAP ?= 600
