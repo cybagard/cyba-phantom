@@ -222,11 +222,20 @@ perf-inner:
 # The cleanup ignores these four signals, also after a normal end. Thus a
 # signal does not stop the removal. It sends KILL to gremlins, so a stopped
 # gremlins does not block the removal.
+# MUTATE_EXCLUDE is a list of regular expressions, separated by spaces. It is
+# empty by default. Each entry becomes one --exclude-files=<entry> argument.
+# Gremlins matches an entry against the file path relative to PKG.
+# The match is not anchored, so use ^ and $ for a whole name.
+# The shell does not expand or split an entry. Write "$$" for a "$" on the
+# make command line, because make reads "$|" there as a variable.
+# In the environment, write a single "$".
+# An entry that does not compile makes gremlins fail, so the target fails.
 # The make all target does not run this target.
-# Example: make mutate PKG=./internal/bundle MUTATE_CAP=60
+# Example: make mutate PKG=./internal/tlog MUTATE_EXCLUDE='^spool .*_gen\.go$$'
 MUTATE_CAP ?= 600
 MUTATE_MAX_MIB ?= 10240
-export MUTATE_CAP MUTATE_MAX_MIB
+MUTATE_EXCLUDE ?=
+export MUTATE_CAP MUTATE_MAX_MIB MUTATE_EXCLUDE
 mutate:
 	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
@@ -243,7 +252,8 @@ mutate:
 	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
 	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
-	gremlins unleash "$$PKG" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
+	set -f; set --; for e in $$MUTATE_EXCLUDE; do set -- "$$@" "--exclude-files=$$e"; done; set +f; \
+	gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
 	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; \
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
