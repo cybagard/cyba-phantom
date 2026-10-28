@@ -45,7 +45,7 @@ func validBody(t *testing.T) string {
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\n  names: [decoy.example.com]\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
+	return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example.invalid\"\n  names: [decoy.host.zz]\nops:\n  basic_auth_htpasswd: " + strconv.Quote(p) + "\ntlog:\n  origin: test/origin\n  publish:\n    - {type: https-put, url: \"https://ckpt.example.invalid/put\", token_env: CKPT_TOKEN}\n"
 }
 
 // TestTS10_Usage checks that a run with no argument exits 2 and prints the fixed usage line.
@@ -402,19 +402,29 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 // limits.header_bytes outside 8192 to 16384. Each gives exit 1.
 // Stderr names the key. The test also checks that --check accepts the
 // edges. A row for a fixed refusal checks the whole stderr
-// (SEC-21, SEC-02, T-S-11, T-U-10).
+// (SEC-21, SEC-31, SEC-02, T-S-11, T-S-27, T-U-10).
 func TestTS11_CheckACME(t *testing.T) {
 	body := validBody(t)
-	names := func(list string) string { return strings.Replace(body, "[decoy.example.com]", list, 1) }
+	names := func(list string) string { return strings.Replace(body, "[decoy.host.zz]", list, 1) }
 	// many returns a list of n distinct names; label returns a label of n bytes.
 	many := func(n int) string {
 		var l []string
 		for i := range n {
-			l = append(l, "n"+strconv.Itoa(i)+".example")
+			l = append(l, "n"+strconv.Itoa(i)+".host.zz")
 		}
 		return "[" + strings.Join(l, ", ") + "]"
 	}
 	label := func(n int) string { return strings.Repeat("a", n) }
+	// certs returns the body with a tls.certs entry for name. Without names, it
+	// has no acme.names and no acme.email.
+	certs := func(name string, withNames bool) string {
+		b := body
+		if !withNames {
+			b = strings.Replace(b, "  email: sec@example.com\n", "", 1)
+			b = strings.Replace(b, "  names: [decoy.host.zz]\n", "", 1)
+		}
+		return b + "tls:\n  certs: [{name: " + name + ", cert_file: /etc/phantom/a.pem, key_file: /etc/phantom/a.key}]\n"
+	}
 	// cacheRefused returns the whole stderr of a refusal of acme.cache_dir by
 	// a path rule. Then it adds the lines of the other keys. Stderr must start
 	// with the line of acme.cache_dir, so a refusal by another key alone fails.
@@ -440,28 +450,32 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"header 16385", body, "limits.header_bytes", []string{"PHANTOM_LIMITS_HEADER_BYTES=16385"}, ""},
 		{"no names", names("[]"), "acme.names", nil, ""},
 		{"17 names", names(many(17)), "acme.names", nil, ""},
-		{"upper case", names("[Decoy.example.com]"), "acme.names", nil, ""},
-		{"wildcard", names(`["*.example.com"]`), "acme.names", nil, ""},
+		{"upper case", names("[Decoy.host.zz]"), "acme.names", nil, ""},
+		{"wildcard", names(`["*.host.zz"]`), "acme.names", nil, ""},
 		{"IP literal", names("[192.0.2.1]"), "acme.names", nil, ""},
 		{"IPv6 literal", names(`["2001:db8::1"]`), "acme.names", nil, ""},
-		{"trailing dot", names("[decoy.example.com.]"), "acme.names", nil, ""},
+		{"trailing dot", names("[decoy.host.zz.]"), "acme.names", nil, ""},
 		{"one label", names("[decoy]"), "acme.names", nil, ""},
-		{"label of 64 bytes", names("[" + label(64) + ".example]"), "acme.names", nil, ""},
-		{"leading hyphen", names("[-decoy.example.com]"), "acme.names", nil, ""},
+		{"label of 64 bytes", names("[" + label(64) + ".zz]"), "acme.names", nil, ""},
+		{"leading hyphen", names("[-decoy.host.zz]"), "acme.names", nil, ""},
 		{"localhost", names("[localhost]"), "acme.names", nil, ""},
 		{"x.localhost", names("[x.localhost]"), "acme.names", nil, ""},
 		{"x.local", names("[x.local]"), "acme.names", nil, ""},
-		{"internal name", names("[x.internal]"), "acme.names", nil, ""},
+		// The valid body has an https acme.ca, so this name passes.
+		{"internal name", names("[x.internal]"), "", nil, ""},
 		{"x.home.arpa", names("[x.home.arpa]"), "acme.names", nil, ""},
 		{"local", names("[local]"), "acme.names", nil, ""},
 		{"internal", names("[internal]"), "acme.names", nil, ""},
 		{"name of 254 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(62) + "]"), "acme.names", nil, ""},
-		{"home.arpa", names("[home.arpa]"), "", nil, ""},
+		{"home.arpa", names("[home.arpa]"), "acme.names", nil, ""},
 		{"16 names", names(many(16)), "", nil, ""},
-		{"label of 63 bytes", names("[" + label(63) + ".example]"), "", nil, ""},
+		{"label of 63 bytes", names("[" + label(63) + ".zz]"), "", nil, ""},
 		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil, ""},
-		{"duplicate", names("[a.example, a.example]"), "acme.names", nil, ""},
-		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.example"}, ""},
+		{"duplicate", names("[a.host.zz, a.host.zz]"), "acme.names", nil, ""},
+		{"tls.certs only", certs("a.host.zz", false), "", nil, ""},
+		{"tls.certs special-use name", certs("x.test", true), "tls.certs[0].name", nil, ""},
+		{"name in acme.names and tls.certs", certs("decoy.host.zz", true), "tls.certs[0].name", nil, ""},
+		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.host.zz"}, ""},
 		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}, ""},
 		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"},
 			"config: acme.cache_dir at PHANTOM_ACME_CACHE_DIR: the path text must be below the state directory: value \"/var/lib/phantom\"\n"},

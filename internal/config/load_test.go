@@ -77,7 +77,7 @@ const (
 	tokenVar   = "CKPT_TOKEN"
 	tlogLine   = "tlog: {origin: test/origin, publish: [{type: https-put, url: \"https://ckpt.example/put\", token_env: " + tokenVar + "}]}\n"
 	tlogOrigin = tlogLine + "\n"
-	acmeNames  = "  names: [decoy.example.com]\n"
+	acmeNames  = "  names: [decoy.host.zz]\n"
 	base       = "acme:\n  email: sec@example.com\n" + acmeNames + tlogLine
 )
 
@@ -193,10 +193,9 @@ func TestTU10_Errors(t *testing.T) {
 		`config: ops at ` + p + `:7: the section needs a mapping`,
 		`config: acme.email at ` + p + `:9: the key needs a scalar value`,
 		`config: PHANTOM_NOPE: unknown PHANTOM variable`,
-		`config: acme.email at ` + p + `: the key is required`,
 		`config: tlog.origin at ` + p + `: the key is required`,
-		`config: acme.names at ` + p + `: the key is required`,
 		`config: tlog.publish at ` + p + `: the key is required`,
+		`config: acme.names at ` + p + `: acme.names and tls.certs need 1 to 16 names in total`,
 	}, "\n")
 	if err.Error() != want {
 		t.Errorf("got\n%v\nwant\n%v", err, want)
