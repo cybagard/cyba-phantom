@@ -2055,8 +2055,8 @@ func TestTS11_SpecialUseNames(t *testing.T) {
 
 // TestTS11_InternalNames checks the rule for an internal name. It is
 // always allowed in tls.certs, and in acme.names only when acme.ca is an
-// https URL (SEC-31, T-S-11, T-S-27). The PHANTOM_ACME_CA value, not the
-// file, decides which CA is in use.
+// https URL (SEC-31, T-S-11, T-S-27). When PHANTOM_ACME_CA is set, its
+// value decides which CA is in use, not the file.
 func TestTS11_InternalNames(t *testing.T) {
 	https := "acme:\n  ca: \"https://ca.host.zz/dir\"\n"
 	httpsEmail := https + "  email: sec@example.com\n"
@@ -2154,9 +2154,9 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 	}
 }
 
-// TestTS11_DecoyErrors checks the text of two errors of the compare of
-// names (T-S-11). An error of the compare gives the file line. A name that
-// fails its own check gets no error of the compare (a repeat).
+// TestTS11_DecoyErrors checks the full text of a compare error, with its
+// file line (T-S-11). It also checks that a name that fails its own check
+// gets no repeat error.
 func TestTS11_DecoyErrors(t *testing.T) {
 	t.Run("full text with the line", func(t *testing.T) {
 		file := certsFile("acme:\n  email: sec@example.com\n  names: [a.host.zz]\n", certItem("a.host.zz"))

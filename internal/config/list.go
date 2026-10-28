@@ -22,8 +22,8 @@ type listKey struct {
 	unique   bool             // unique marks a list of scalars with no duplicate entry.
 }
 
-// maxDecoyNames is the most decoy names: the bound of acme.names, of tls.certs,
-// and of the two lists in total.
+// maxDecoyNames is the maximum number of decoy names. It bounds
+// acme.names, tls.certs and the two lists in total.
 const maxDecoyNames = 16
 
 // lists is the production list table. The key table holds the scalar keys.
