@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"log"
 	"log/slog"
@@ -20,7 +21,7 @@ import (
 )
 
 const (
-	warnMsg    = `level=WARN msg="static certificate expires in less than 14 days" name=`
+	warnMsg    = `level=WARN msg="static certificate expires in less than 14 days or has expired" name=`
 	staticName = "static.test"
 	day        = 24 * time.Hour
 )
@@ -58,7 +59,8 @@ func handshakeGet(get func(*tls.ClientHelloInfo) (*tls.Certificate, error), sni 
 
 // sourceWithACME returns a source with the static entries and an ACME client
 // for decoy.test. The storage counts reads and OnEgress counts requests.
-func sourceWithACME(t *testing.T, entries ...StaticEntry) (*CertSource, *countingStorage, *atomic.Int64) {
+// The client logs to logger when it is not nil.
+func sourceWithACME(t *testing.T, logger *slog.Logger, entries ...StaticEntry) (*CertSource, *countingStorage, *atomic.Int64) {
 	t.Helper()
 	var cs *countingStorage
 	var egress atomic.Int64
@@ -66,6 +68,9 @@ func sourceWithACME(t *testing.T, entries ...StaticEntry) (*CertSource, *countin
 		cs = &countingStorage{Storage: p.Storage}
 		p.Storage = cs
 		p.OnEgress = func(string) { egress.Add(1) }
+		if logger != nil {
+			p.Logger = logger
+		}
 	})
 	src, err := NewCertSource(entries, a)
 	mustNil(t, err)
@@ -74,7 +79,8 @@ func sourceWithACME(t *testing.T, entries ...StaticEntry) (*CertSource, *countin
 
 // T-S-27, T-S-16: a static name serves its leaf from the first handshake.
 // It makes no ACME request and no cache read.
-// This holds with and without an ACME client.
+// This holds with and without an ACME client. The cache of the client holds
+// another certificate for the static name. A route through it would serve that.
 func TestTS27StaticServesLeaf(t *testing.T) {
 	for _, withACME := range []bool{true, false} {
 		t.Run(map[bool]string{true: "acme", false: "nil acme"}[withACME], func(t *testing.T) {
@@ -83,7 +89,18 @@ func TestTS27StaticServesLeaf(t *testing.T) {
 			var cs *countingStorage
 			var egress *atomic.Int64
 			if withACME {
-				src, cs, egress = sourceWithACME(t, e)
+				src, cs, egress = sourceWithACME(t, nil, e)
+				other := seedCert(t, src.acme, staticName)
+				_, err := src.acme.cfg.CacheManagedCertificate(context.Background(), staticName)
+				mustNil(t, err)
+				// Control: the client serves its cached certificate for the name.
+				c, err := src.acme.cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: staticName})
+				if err != nil || !bytes.Equal(c.Certificate[0], other) || bytes.Equal(other, e.Cert.Certificate[0]) {
+					t.Fatalf("control: the client does not serve its cached certificate: %v", err)
+				}
+				cs.reads.Store(0)
+				cs.calls.Store(0)
+				egress.Store(0)
 			} else {
 				var err error
 				src, err = NewCertSource([]StaticEntry{e}, nil)
@@ -136,14 +153,22 @@ func TestTS27StaticNameVariants(t *testing.T) {
 
 // T-S-16: the refusals of the gate give the reason through a real server, also
 // with no ACME client. A static name with acme-tls/1 gives no event. An ACME
-// name goes to the ACME client.
+// name goes to the ACME client. A name that is not a decoy name makes no
+// storage call, no request and no log line, also with acme-tls/1.
 func TestTS16SourceGateReasons(t *testing.T) {
 	for _, withACME := range []bool{true, false} {
 		t.Run(map[bool]string{true: "acme", false: "nil acme"}[withACME], func(t *testing.T) {
+			var logs, std syncBuf
+			old := log.Writer()
+			log.SetOutput(&std)
+			t.Cleanup(func() { log.SetOutput(old) })
 			e := staticEntry(t, staticName, 0)
 			var src *CertSource
+			var cs *countingStorage
+			var egress *atomic.Int64
 			if withACME {
-				src, _, _ = sourceWithACME(t, e)
+				logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+				src, cs, egress = sourceWithACME(t, logger, e)
 			} else {
 				var err error
 				src, err = NewCertSource([]StaticEntry{e}, nil)
@@ -156,6 +181,8 @@ func TestTS16SourceGateReasons(t *testing.T) {
 				{"", "no_server_name", nil},
 				{otherName, "unknown_name", nil},
 				{"café.test", "unknown_name", nil},
+				{otherName, "unknown_name", []string{challengeProto}},
+				{"café.test", "unknown_name", []string{challengeProto}},
 				{staticName, "", []string{challengeProto}},
 				{staticName, "", []string{"h2", challengeProto}},
 			} {
@@ -172,9 +199,15 @@ func TestTS16SourceGateReasons(t *testing.T) {
 					t.Errorf("%q %v: Refused went up by %d, want 1", tc.sni, tc.alpn, got)
 				}
 			}
+			if withACME && (cs.reads.Load() != 0 || cs.calls.Load() != 0 || egress.Load() != 0) {
+				t.Errorf("storage reads %d, calls %d, ACME requests %d; want 0", cs.reads.Load(), cs.calls.Load(), egress.Load())
+			}
+			if logs.String() != "" || std.String() != "" {
+				t.Errorf("log output: %q %q", logs.String(), std.String())
+			}
 		})
 	}
-	src, _, _ := sourceWithACME(t, staticEntry(t, staticName, 0))
+	src, _, _ := sourceWithACME(t, nil, staticEntry(t, staticName, 0))
 	before := src.Refused()
 	hello := &tls.ClientHelloInfo{ServerName: "decoy.test", SupportedProtos: []string{challengeProto}}
 	if _, err := src.GetCertificate(hello); !errors.Is(err, errNoChallenge) || src.acme.Refused() != 1 || src.Refused() != before+1 {
@@ -199,18 +232,22 @@ func TestTS27SourceConstructorRefusals(t *testing.T) {
 		{"duplicate by case", []StaticEntry{e, {Name: "STATIC.test.", Cert: e.Cert}}, nil, ErrSourceDup},
 		{"no leaf", []StaticEntry{noLeaf}, nil, ErrSourceEntry},
 		{"no name", []StaticEntry{{Cert: e.Cert}}, nil, ErrSourceEntry},
+		{"byte 0x80 in the name", []StaticEntry{{Name: "a\x80.test", Cert: e.Cert}}, nil, ErrSourceEntry},
 	} {
 		if _, err := NewCertSource(tc.entries, tc.acme); err != tc.want {
 			t.Errorf("%s: err %v, want %v", tc.name, err, tc.want)
 		}
 	}
-	// The source keeps its own copy: a change of the caller does not reach it.
+	// The source keeps its own copy of the DER bytes: a change of the caller
+	// does not reach it.
+	want := bytes.Clone(e.Cert.Certificate[0])
 	entries := []StaticEntry{e}
 	src, err := NewCertSource(entries, nil)
 	mustNil(t, err)
 	entries[0].Name = "changed.test"
+	entries[0].Cert.Certificate[0][0] ^= 0xff
 	entries[0].Cert.Certificate[0] = nil
-	if c, err := src.GetCertificate(&tls.ClientHelloInfo{ServerName: staticName}); err != nil || c.Certificate[0] == nil {
+	if c, err := src.GetCertificate(&tls.ClientHelloInfo{ServerName: staticName}); err != nil || !bytes.Equal(c.Certificate[0], want) {
 		t.Errorf("the source shares the entries of the caller: %v", err)
 	}
 }
@@ -240,6 +277,9 @@ func warnRun(t *testing.T, src *CertSource, now time.Time, ticks int) (start, en
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := src.warnExpiry(ctx, logger)
+	if every == 0 {
+		t.Fatal("the code did not use the ticker hook")
+	}
 	start = buf.String()
 	for range ticks {
 		// The loop takes this only after it wrote the lines of the last tick.
@@ -283,6 +323,25 @@ func TestTS27ExpiryWarning(t *testing.T) {
 	}
 }
 
+// T-S-27: a leaf whose NotAfter is before the real clock is served. The leaf
+// is parsed at a time inside its period.
+func TestTS27ServesLeafAfterNotAfterOnTheRealClock(t *testing.T) {
+	der, keyPEM := leafSpec{
+		dns: []string{staticName}, notBefore: -10 * 365 * day, notAfter: -9 * 365 * day,
+	}.build(t)
+	c, err := ParseStatic(staticName, blockPEM("CERTIFICATE", der), keyPEM, staticNow.Add(-9*365*day-time.Hour))
+	mustNil(t, err)
+	if !c.Leaf.NotAfter.Before(time.Now()) {
+		t.Fatal("the leaf does not end before the real clock")
+	}
+	src, err := NewCertSource([]StaticEntry{{Name: staticName, Cert: c}}, nil)
+	mustNil(t, err)
+	st, err := handshakeGet(src.GetCertificate, staticName)
+	if err != nil || len(st.PeerCertificates) == 0 || !st.PeerCertificates[0].Equal(c.Leaf) {
+		t.Errorf("err %v, or the peer certificate is not the expired leaf", err)
+	}
+}
+
 // T-S-27: only the name that is near expiry gets the line.
 func TestTS27ExpiryWarningNamesOnlyTheLeafNearExpiry(t *testing.T) {
 	src, err := NewCertSource([]StaticEntry{staticEntry(t, "far.test", 60*day), staticEntry(t, "near.test", 5*day)}, nil)
@@ -305,6 +364,17 @@ func TestTS27ExpiryWarningEndsWithContext(t *testing.T) {
 		t.Fatal("the goroutine ended before the context")
 	default:
 	}
+	cancel()
+	<-done
+}
+
+// T-S-27: a nil logger discards the lines of a leaf that is due.
+func TestTS27ExpiryWarningNilLogger(t *testing.T) {
+	src, err := NewCertSource([]StaticEntry{staticEntry(t, staticName, time.Hour)}, nil)
+	mustNil(t, err)
+	src.now = func() time.Time { return staticNow.Add(2 * time.Hour) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := src.warnExpiry(ctx, nil)
 	cancel()
 	<-done
 }
@@ -347,18 +417,20 @@ func TestTS27NoKeyMarkers(t *testing.T) {
 	_, end, _, _ := warnRun(t, src, staticNow.Add(2*time.Hour), 1)
 	texts = append(texts, end, std.String())
 
-	der, err := x509.MarshalPKCS8PrivateKey(staticKeySet().p256)
+	key := staticKeySet().p256
+	der, err := x509.MarshalPKCS8PrivateKey(key)
 	mustNil(t, err)
-	b64 := base64.StdEncoding.EncodeToString(der)
-	var windows []string
-	for i := 0; i+16 <= len(b64); i++ {
-		windows = append(windows, b64[i:i+16])
+	markers := []string{"PRIVATE KEY", "BEGIN", key.D.String(), string(der)}
+	for _, text := range []string{base64.StdEncoding.EncodeToString(der), hex.EncodeToString(der)} {
+		for i := 0; i+16 <= len(text); i++ {
+			markers = append(markers, text[i:i+16])
+		}
 	}
 	if !slices.ContainsFunc(texts, func(s string) bool { return strings.Contains(s, staticName) }) {
 		t.Fatal("the test saw no output")
 	}
 	for _, s := range texts {
-		for _, m := range append([]string{"PRIVATE KEY", "BEGIN"}, windows...) {
+		for _, m := range markers {
 			if strings.Contains(s, m) {
 				t.Errorf("output %q holds %q", s, m)
 			}

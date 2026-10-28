@@ -19,7 +19,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
-	"slices"
 	"sync/atomic"
 	"time"
 
@@ -230,7 +229,7 @@ func matches(priv, pub any) bool {
 
 // CertSource errors. They are fixed and hold no name, file text or key.
 var (
-	ErrSourceEntry   = errors.New("certificate source: an entry has no name or no parsed leaf")
+	ErrSourceEntry   = errors.New("certificate source: an entry has an empty name, a name with a byte above 0x7f, or no parsed leaf")
 	ErrSourceDup     = errors.New("certificate source: a static name comes two times")
 	ErrSourceOverlap = errors.New("certificate source: a name is both a static name and an ACME name")
 	errStaticALPN    = errors.New("listener: static certificate: acme-tls/1 is not served for a static name")
@@ -269,8 +268,14 @@ type CertSource struct {
 
 // NewCertSource returns the source for entries and for acme.
 // The acme value is nil when there is no acme.names entry.
-// The source keeps its own copy of the entries.
-// It refuses an entry with no name or with no Leaf.
+// Each entry must be the result of ParseStatic for its name. The source does
+// not check the key, the name rule of the config or the leaf again.
+// It compares names in lower case with one trailing dot removed, as the gate
+// does. NewACME instead refuses upper case and a trailing dot.
+// The source copies the slice of entries, the slice of DER slices and each
+// DER slice. Leaf and the private key are shared with the caller.
+// It refuses an entry with an empty name, a name with a byte above 0x7f,
+// or no Leaf.
 // It refuses a static name that comes two times.
 // It refuses a static name that is also an ACME name.
 func NewCertSource(entries []StaticEntry, acme *ACME) (*CertSource, error) {
@@ -289,7 +294,10 @@ func NewCertSource(entries []StaticEntry, acme *ACME) (*CertSource, error) {
 			}
 		}
 		c := e.Cert
-		c.Certificate = slices.Clone(c.Certificate)
+		c.Certificate = make([][]byte, len(e.Cert.Certificate))
+		for i, der := range e.Cert.Certificate {
+			c.Certificate[i] = bytes.Clone(der)
+		}
 		s.static[name] = &c
 		s.order = append(s.order, name)
 	}
@@ -332,13 +340,10 @@ func (s *CertSource) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificat
 			return s.acme.GetCertificate(hello)
 		}
 	}
-	reason := event.ReasonUnknownName
-	if hello.ServerName == "" {
-		reason = event.ReasonNoServerName
-	}
-	return nil, s.refuseName(hello, reason)
+	return nil, s.refuseName(hello, gateReason(hello.ServerName))
 }
 
+// refuseName counts a refusal of the name gate and records its reason.
 func (s *CertSource) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason) error {
 	s.refused.Add(1)
 	recordGate(hello, reason)
@@ -348,9 +353,12 @@ func (s *CertSource) refuseName(hello *tls.ClientHelloInfo, reason event.Refused
 // WarnExpiry writes the expiry warnings to logger at once.
 // It writes them again each 24 hours until ctx ends.
 // A leaf with less than 14 days left gets one Warn line.
-// An expired leaf gets the same line.
+// An expired leaf gets the same line. It has one fixed message for both cases.
 // The line has a fixed message and the attribute name.
-// The line holds no date, serial or file text.
+// The line holds no expiry date, serial or file text. The log handler adds
+// its own time.
+// The ctx must not be nil. Call WarnExpiry one time: a second call starts a
+// second loop.
 // WarnExpiry starts one goroutine.
 func (s *CertSource) WarnExpiry(ctx context.Context, logger *slog.Logger) {
 	s.warnExpiry(ctx, logger)
@@ -393,7 +401,7 @@ func (s *CertSource) warnExpiry(ctx context.Context, logger *slog.Logger) <-chan
 func (s *CertSource) warnOnce(logger *slog.Logger, now time.Time) {
 	for _, name := range s.order {
 		if s.static[name].Leaf.NotAfter.Sub(now) < expiryWarnWithin {
-			logger.Warn("static certificate expires in less than 14 days", "name", name)
+			logger.Warn("static certificate expires in less than 14 days or has expired", "name", name)
 		}
 	}
 }

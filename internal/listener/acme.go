@@ -455,11 +455,7 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 		return nil, a.refuseName(hello, event.ReasonUnknownName)
 	}
 	if _, ok := a.allowed[name]; !ok {
-		reason := event.ReasonUnknownName
-		if hello.ServerName == "" {
-			reason = event.ReasonNoServerName
-		}
-		return nil, a.refuseName(hello, reason)
+		return nil, a.refuseName(hello, gateReason(hello.ServerName))
 	}
 	if onlyChallenge(hello) {
 		if _, active := a.challenge(name); !active {
@@ -498,6 +494,15 @@ func (a *ACME) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason
 	a.refused.Add(1)
 	recordGate(hello, reason)
 	return errName
+}
+
+// gateReason is the reason of a name gate refusal: no_server_name for an empty
+// server name, else unknown_name.
+func gateReason(serverName string) event.RefusedReason {
+	if serverName == "" {
+		return event.ReasonNoServerName
+	}
+	return event.ReasonUnknownName
 }
 
 // recordGate records the reason of a name gate refusal on the connection of
