@@ -145,8 +145,8 @@ func TestTS11_CheckLiteralHostList(t *testing.T) {
 					}
 					return
 				}
-				// A parse error of the smtp host key shows the value
-				// after ": value".
+				// No row here gives a parse error. A parse error of the
+				// smtp host key shows the value after ": value".
 				detail, _, _ := strings.Cut(se.String(), ": value")
 				if code != 1 || !strings.Contains(se.String(), "config: "+k.key+" at ") || strings.Contains(detail, r.host) {
 					t.Errorf("exit %d, stderr %q", code, se.String())

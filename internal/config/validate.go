@@ -521,11 +521,11 @@ func endpoint(scheme, host, port string) Endpoint {
 }
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one
-// of schemes, in the exact case. The host is not empty. An IP literal has no
-// zone. This function does not check it against the egress rule. For tls,
-// smtp and smtps, literalCheck does it. For udp and tcp, checkSyslogAddr
-// permits only a loopback literal. A name passes. It returns a fixed detail
-// on an error.
+// of schemes, in the exact case. The host is not empty. parseEndpoint passes
+// a name. An IP literal has no zone. parseEndpoint does not check the literal
+// against the egress rule. For tls, smtp and smtps, literalCheck does it. For
+// udp and tcp, checkSyslogAddr permits only a loopback literal.
+// parseEndpoint returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
