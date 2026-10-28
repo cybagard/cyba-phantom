@@ -329,12 +329,12 @@ func lineSet(lines []string) map[string]bool {
 // Each program has the package runtime. Thus a list without runtime fails,
 // for example a list cut to the two commands. A cut list that keeps runtime
 // and the commands still passes.
-// No test of this package fails on these changes of this function:
+// These changes of this function can pass each test of this package:
 //   - A copy of the deps of one platform to another platform. A dep entry
 //     has no platform, so checkDepList cannot see whose list it gets. A
 //     copy between two linux platforms fails only when a line of
 //     release-deps.txt loses its last user.
-//   - The real context replaced by wantContext. A right go list gives that
+//   - wantContext in place of the real context. A right go list gives that
 //     same value, so only a wrong go list differs. A unit case tests the
 //     context check of checkDepList, not this function.
 //   - A cut of the commands, in the variable or in the checkDepList call.
