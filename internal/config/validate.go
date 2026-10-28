@@ -1036,19 +1036,18 @@ func storeConflict(root string, vals map[string]Value, p string) string {
 	return ""
 }
 
-// These are the rules of the htpasswd file and of each directory on its way.
-// The file rule has no mode. The check reads the mode from the open file.
-// So it can give a text for group write, other write and other read.
+// htpasswdFileRule is the open rule of the htpasswd file. htpasswdDirRule is
+// the rule of each directory on the way of the htpasswd file, acme.ca_root,
+// cert_file and key_file. The open rule has no mode. checkFile reads the mode
+// from the open file. So it can give a text for group write, other write and
+// other read.
 var (
 	htpasswdFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true}
 	htpasswdDirRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
 )
 
-// checkHtpasswd applies the file rules (04 section 3). The detail is fixed
-// text. The loader shows the path in the Value field. The check looks at each
-// directory from "/" to the file. This includes the directories of a symlink
-// on the way and of its target. It opens the file one time. Then it reads the
-// type, owner, and mode from the open file, as ReadFile does.
+// checkHtpasswd applies the file rules to the htpasswd file (04 section 3).
+// The check refuses a file that other can read.
 func checkHtpasswd(_ *loader, raw string) string {
 	return checkFile(raw, "htpasswd file", htpasswdFileRule, true)
 }
@@ -1056,12 +1055,12 @@ func checkHtpasswd(_ *loader, raw string) string {
 // maxPEMFile is the maximum size of a root, certificate or key file.
 const maxPEMFile = 64 << 10
 
-// pemFileRule is the file rule of acme.ca_root, cert_file and key_file. It is
-// the htpasswd rule with a size cap.
+// pemFileRule is the open rule of acme.ca_root, cert_file and key_file. It is
+// the htpasswd open rule with a size cap. checkFile adds the mode rules.
 var pemFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true, MaxSize: maxPEMFile}
 
 // checkCARoot applies the file rules to acme.ca_root (SEC-31). An empty value
-// means no root file. The file may be readable by other.
+// means no root file. The check accepts a file that other can read.
 func checkCARoot(_ *loader, raw string) string {
 	if raw == "" {
 		return ""
@@ -1070,7 +1069,7 @@ func checkCARoot(_ *loader, raw string) string {
 }
 
 // checkCertFile applies the file rules to a tls.certs cert_file (SEC-31).
-// The file may be readable by other.
+// The check accepts a file that other can read.
 func checkCertFile(_ *loader, raw string) string {
 	return checkFile(raw, "certificate file", pemFileRule, false)
 }
@@ -1096,7 +1095,12 @@ func caRootCheck(vals map[string]Value) []error {
 }
 
 // checkFile applies the file rules of rule to raw. The name is in each fixed
-// detail text. The check refuses other-read only if noOtherRead is set.
+// detail text. The loader shows the path in the Value field. The check looks
+// at each directory from "/" to the file. This includes the directories of a
+// symlink on the way and of its target. It opens the file one time. Then it
+// reads the type, owner, and mode from the open file, as ReadFile does. The
+// check refuses other-read only when noOtherRead is true. The size text is for
+// the cap of pemFileRule. The htpasswd rule has no size cap.
 func checkFile(raw, name string, rule safefile.Rule, noOtherRead bool) string {
 	if d := checkPathForm(raw); d != "" {
 		return d

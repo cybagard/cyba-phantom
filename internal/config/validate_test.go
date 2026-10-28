@@ -2535,7 +2535,9 @@ func certItem(name string) string {
 
 // certPath and keyPath are files below testDir that pass the file rules.
 // One is a certificate file with mode 0644. The other is a key file with
-// mode 0600. The rules read no content, so the files are empty.
+// mode 0600. The rules read no content, so the files are empty. The chmod
+// sets the other-read bit, which a umask can clear. A umask cannot add a bit,
+// so the key file needs no chmod.
 var certPath, keyPath = func() (string, string) {
 	c, k := filepath.Join(testDir, "static.pem"), filepath.Join(testDir, "static.key")
 	if err := os.WriteFile(c, nil, 0o644); err != nil {
@@ -2897,6 +2899,7 @@ func TestTS27_FileModes(t *testing.T) {
 				{"0640", file("g-read", 0o640, 10), ""},
 				{"0644", file("o-read", 0o644, 10), otherRead},
 				{"0604", file("o-read2", 0o604, 10), otherRead},
+				// The file rules read no content, so an empty file passes them.
 				{"empty", file("empty", 0o600, 0), ""},
 				{"symlink to a good file", link("l-good", good), ""},
 				{"symlink to a file with other read", link("l-or", file("l-or-t", 0o644, 10)), otherRead},
