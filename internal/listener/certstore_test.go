@@ -621,15 +621,28 @@ func TestTS16ListSkipsAChildDirectoryThatADeleteRemovesDuringTheList(t *testing.
 	}
 }
 
+func TestTS16FailingHooksOfOneStoreDoNotFailAWriteOfAnotherStore(t *testing.T) {
+	a, _ := newStore(t)
+	b, _ := newStore(t)
+	ctx := context.Background()
+	fail := func(*os.File) error { return errors.New(failText) }
+	a.hooks.syncFile = fail
+	a.hooks.syncDirFile = fail
+	a.hooks.renameFile = func(*os.Root, string, string) error { return errors.New(failText) }
+	mustNil(t, b.Store(ctx, "kd/key", []byte("v")))
+	if err := a.Store(ctx, "kd/key", []byte("v")); err == nil {
+		t.Error("Store with failing hooks gave no error")
+	}
+}
+
 func TestTS16StoreGivesTheFileRuleWhenADeleteRemovesTheKeyDirectory(t *testing.T) {
 	s, dir := newStore(t)
 	ctx := context.Background()
 	mustNil(t, s.Store(ctx, "kd/key", []byte("old")))
 	// The hook removes the key directory after the checks of Store and before the
 	// rename. The rename then fails with ENOENT.
-	realRename := renameFile
-	t.Cleanup(func() { renameFile = realRename })
-	renameFile = func(r *os.Root, from, to string) error {
+	realRename := s.hooks.renameFile
+	s.hooks.renameFile = func(r *os.Root, from, to string) error {
 		mustNil(t, os.RemoveAll(filepath.Join(dir, "acme/cache/kd")))
 		return realRename(r, from, to)
 	}

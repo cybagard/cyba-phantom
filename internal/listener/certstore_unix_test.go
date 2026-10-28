@@ -79,9 +79,8 @@ func TestTS16WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		return "", false
 	}
 	var steps []string
-	oldSync, oldDir, oldRename := syncFile, syncDirFile, renameFile
-	t.Cleanup(func() { syncFile, syncDirFile, renameFile = oldSync, oldDir, oldRename })
-	syncFile = func(f *os.File) error {
+	oldSync, oldDir, oldRename := s.hooks.syncFile, s.hooks.syncDirFile, s.hooks.renameFile
+	s.hooks.syncFile = func(f *os.File) error {
 		tmp, ok := tmpFile()
 		if !ok || !holds(tmp, "new") || !holds(final, "old") {
 			t.Error("file sync: the temporary file lacks the value, or the key has it already")
@@ -93,7 +92,7 @@ func TestTS16WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		steps = append(steps, "sync file")
 		return oldSync(f)
 	}
-	renameFile = func(r *os.Root, from, to string) error {
+	s.hooks.renameFile = func(r *os.Root, from, to string) error {
 		tmp, ok := tmpFile()
 		if !ok || filepath.Dir(from) != "kd/ca" || !strings.HasPrefix(filepath.Base(from), tmpPrefix) ||
 			filepath.Base(tmp) != filepath.Base(from) || to != key || !holds(tmp, "new") || !holds(final, "old") {
@@ -102,7 +101,7 @@ func TestTS16WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 		steps = append(steps, "rename")
 		return oldRename(r, from, to)
 	}
-	syncDirFile = func(f *os.File) error {
+	s.hooks.syncDirFile = func(f *os.File) error {
 		if _, ok := tmpFile(); ok || !holds(final, "new") {
 			t.Error("directory sync: the temporary file is there, or the key lacks the value")
 		}
@@ -147,9 +146,7 @@ func TestTS16FailedRenameLeavesNoTemporaryFileAndGivesAnError(t *testing.T) {
 	s, dir := newStore(t)
 	const key = "kd/ca/key"
 	mustNil(t, s.Store(context.Background(), key, []byte("old")))
-	old := renameFile
-	t.Cleanup(func() { renameFile = old })
-	renameFile = func(*os.Root, string, string) error { return errors.New(failText) }
+	s.hooks.renameFile = func(*os.Root, string, string) error { return errors.New(failText) }
 	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
 	names, err := os.ReadDir(filepath.Join(dir, "acme/cache/kd/ca"))
 	if err != nil || len(names) != 1 || names[0].Name() != "key" {
@@ -164,9 +161,7 @@ func TestTS16FailedFileSyncFailsStore(t *testing.T) {
 	s, dir := newStore(t)
 	const key = "kd/ca/key"
 	mustNil(t, s.Store(context.Background(), key, []byte("old")))
-	old := syncFile
-	t.Cleanup(func() { syncFile = old })
-	syncFile = func(*os.File) error { return errors.New(failText) }
+	s.hooks.syncFile = func(*os.File) error { return errors.New(failText) }
 	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
 	if b, err := os.ReadFile(filepath.Join(dir, "acme/cache", key)); err != nil || string(b) != "old" {
 		t.Errorf("the key holds %q, %v; want old", b, err)
@@ -179,9 +174,7 @@ func TestTS16FailedFileSyncFailsStore(t *testing.T) {
 func TestTS16FailedDirectorySyncFailsStore(t *testing.T) {
 	s, _ := newStore(t)
 	const key = "kd/ca/key"
-	old := syncDirFile
-	t.Cleanup(func() { syncDirFile = old })
-	syncDirFile = func(*os.File) error { return errors.New(failText) }
+	s.hooks.syncDirFile = func(*os.File) error { return errors.New(failText) }
 	seamError(t, s.Store(context.Background(), key, []byte("new")), key)
 }
 
@@ -538,9 +531,8 @@ func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 	mustNil(t, os.MkdirAll(filepath.Join(other, "cache"), 0o700))
 	var realAcme, realCache fs.FileInfo
 	var steps []string
-	old := syncDirFile
-	t.Cleanup(func() { syncDirFile = old })
-	syncDirFile = func(f *os.File) error {
+	hooks := osHooks()
+	hooks.syncDirFile = func(f *os.File) error {
 		if realAcme == nil {
 			var err error
 			realAcme, err = os.Stat(filepath.Join(dir, "acme"))
@@ -562,9 +554,9 @@ func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 			step = "state"
 		}
 		steps = append(steps, step)
-		return old(f)
+		return (*os.File).Sync(f)
 	}
-	s, err := Open(state, "acme/cache")
+	s, err := openWith(state, "acme/cache", hooks)
 	if err == nil {
 		s.Close()
 	}
@@ -799,10 +791,9 @@ func TestTS16LoadDuringStoreOfTheSameKeyGivesAWholeValue(t *testing.T) {
 
 	t.Run("temporary file written, not yet renamed", func(t *testing.T) {
 		s := setup(t)
-		realRename := renameFile
-		t.Cleanup(func() { renameFile = realRename })
+		realRename := s.hooks.renameFile
 		calls := 0
-		renameFile = func(r *os.Root, from, to string) error {
+		s.hooks.renameFile = func(r *os.Root, from, to string) error {
 			if calls++; calls == 1 {
 				load(t, s, oldValue)
 			}

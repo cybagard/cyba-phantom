@@ -190,7 +190,8 @@ func stopped(ctx context.Context, op string) error {
 // Store is a certmagic.Storage and certmagic.Locker. It is safe for use by many
 // goroutines. The locks are in memory, so they work for one process only.
 type Store struct {
-	root *os.Root
+	root  *os.Root
+	hooks storeHooks
 
 	mu    sync.Mutex
 	locks map[string]chan struct{} // one channel for each held lock; Unlock closes it
@@ -198,14 +199,23 @@ type Store struct {
 
 var _ certmagic.Storage = (*Store)(nil)
 
-// The calls that make a write durable. The code calls them through these
-// variables, so that a test can record their order. A test must restore the
-// real functions.
-var (
-	syncFile    = (*os.File).Sync
-	syncDirFile = (*os.File).Sync
-	renameFile  = (*os.Root).Rename
-)
+// storeHooks are the calls that make a write durable. A Store calls them
+// through its own value, so that a test can record their order on one Store
+// with no effect on another Store. osHooks gives the real functions.
+type storeHooks struct {
+	syncFile    func(*os.File) error
+	syncDirFile func(*os.File) error
+	renameFile  func(*os.Root, string, string) error
+}
+
+// osHooks returns the real functions of the os package.
+func osHooks() storeHooks {
+	return storeHooks{
+		syncFile:    (*os.File).Sync,
+		syncDirFile: (*os.File).Sync,
+		renameFile:  (*os.Root).Rename,
+	}
+}
 
 // betweenSizeCheckAndRead is a test hook. Load calls it after the size checks of
 // the open file and before it reads the file. It is nil in production. The
@@ -246,6 +256,12 @@ var beforeListChild func(key string)
 // every part, also when the part existed before, so the directories on the path
 // are durable when Open returns.
 func Open(state *os.Root, dir string) (*Store, error) {
+	return openWith(state, dir, osHooks())
+}
+
+// openWith is Open with the durable-write calls of hooks. The Store keeps
+// hooks, and Open itself calls them. A test sets them through openWith.
+func openWith(state *os.Root, dir string, hooks storeHooks) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
 		return nil, fail(op, ruleCachePath)
@@ -267,14 +283,14 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		roots = append(roots, next)
 	}
 	root := roots[len(roots)-1]
-	s := &Store{root: root, locks: map[string]chan struct{}{}}
+	s := &Store{root: root, hooks: hooks, locks: map[string]chan struct{}{}}
 	if err := s.dirs(nil, false); err != nil {
 		closeOpened()
 		return nil, wrap(op, err)
 	}
 	s.removeTemporary(nil)
 	for i := len(roots) - 1; i >= 0; i-- {
-		if err := syncPath(roots[i], nil); err != nil {
+		if err := hooks.syncPath(roots[i], nil); err != nil {
 			closeOpened()
 			return nil, wrap(op, err)
 		}
@@ -335,7 +351,7 @@ func (s *Store) removeTemporary(parts []string) {
 		}
 	}
 	if removed {
-		_ = syncDirFile(d)
+		_ = s.hooks.syncDirFile(d)
 	}
 }
 
@@ -405,13 +421,13 @@ func (s *Store) parent(parts []string) (r *os.Root, changed bool, err error) {
 // it, the deepest first. It opens each directory by its path below r. The path
 // of r itself is ".". Open calls syncPath with no parts on each root of its walk.
 // This includes roots[0], the state root of the caller.
-func syncPath(r *os.Root, parts []string) error {
+func (h storeHooks) syncPath(r *os.Root, parts []string) error {
 	for i := len(parts); i >= 0; i-- {
 		f, err := r.OpenFile(rel(parts[:i]), readFlags, 0)
 		if err != nil {
 			return err
 		}
-		err = syncDirFile(f)
+		err = h.syncDirFile(f)
 		f.Close()
 		if err != nil {
 			return err
@@ -514,19 +530,19 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	}
 	_, err = f.Write(value)
 	if err == nil {
-		err = syncFile(f)
+		err = s.hooks.syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = renameFile(s.root, tmp, name)
+		err = s.hooks.renameFile(s.root, tmp, name)
 	}
 	if err != nil {
 		s.root.Remove(tmp)
 		return wrapAfterDirs(op, err)
 	}
-	return wrapAfterDirs(op, syncPath(s.root, dir))
+	return wrapAfterDirs(op, s.hooks.syncPath(s.root, dir))
 }
 
 // wrapAfterDirs is wrap for a call that runs after the check of the directories
@@ -633,7 +649,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := s.root.RemoveAll(rel(parts)); err != nil {
 		return wrap(op, err)
 	}
-	return wrap(op, syncPath(s.root, parts[:len(parts)-1]))
+	return wrap(op, s.hooks.syncPath(s.root, parts[:len(parts)-1]))
 }
 
 // checkedInfo is info. For a key file it also applies the rules of Load: hard

@@ -453,7 +453,7 @@ func TestTS21GuardComparesLiteralsAsAddresses(t *testing.T) {
 		mustNil(t, err)
 		req, err := http.NewRequest(http.MethodGet, c.req, nil)
 		mustNil(t, err)
-		u, err := egressGuard(ca, nil, rule, testNames(t).Resolver())(req)
+		u, err := egressGuard(ca, nil, rule, testNames(t).Resolver(), nil)(req)
 		if (err != nil) != c.refuse || u != nil || !slices.Equal(calls, c.calls) {
 			t.Errorf("%s vs %s: proxy = %v, %v; rule saw %v; want refuse = %v, %v", c.ca, c.req, u, err, calls, c.refuse, c.calls)
 		}
@@ -479,9 +479,40 @@ func TestTS21GuardChecksEveryAddressOfAName(t *testing.T) {
 		mustNil(t, err)
 		req, err := http.NewRequest(http.MethodGet, "https://"+c.name+"/dir", nil)
 		mustNil(t, err)
-		u, err := egressGuard(ca, nil, egress.Permitted, names.Resolver())(req)
+		u, err := egressGuard(ca, nil, egress.Permitted, names.Resolver(), nil)(req)
 		if (err != nil) != c.refuse || u != nil || (err != nil && err != errEgress) {
 			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.refuse)
+		}
+	}
+}
+
+// TestTS21GuardRefusesAnAddressOfANameWithAZone: the hosts file can give a
+// zone. The production rule refuses it, also for an IPv4 address, where the
+// zone cannot stay in a netip.Addr.
+func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
+	item, err := egress.ItemDialer(nil, 443, "tcp", 0)
+	mustNil(t, err)
+	rule := itemRule(item, 443)
+	for _, c := range []struct {
+		name string
+		ip   net.IPAddr
+		want bool // refused
+	}{
+		{"global v6 with zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888"), Zone: "eth0"}, true},
+		{"mapped v4 with zone", net.IPAddr{IP: net.ParseIP("::ffff:8.8.8.8"), Zone: "eth0"}, true},
+		{"4-byte v4 with zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4(), Zone: "eth0"}, true},
+		{"bad length", net.IPAddr{IP: net.IP{8, 8, 8}}, true},
+		{"global v6 no zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888")}, false},
+		{"4-byte v4 no zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4()}, false},
+	} {
+		ca, err := url.Parse("https://ca.test/")
+		mustNil(t, err)
+		req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
+		mustNil(t, err)
+		lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{c.ip}, nil }
+		u, err := egressGuard(ca, nil, rule, net.DefaultResolver, lookup)(req)
+		if (err != nil) != c.want || u != nil || (err != nil && err != errEgress) {
+			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.want)
 		}
 	}
 }
