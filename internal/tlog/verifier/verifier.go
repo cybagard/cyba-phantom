@@ -33,11 +33,13 @@ const (
 const ruleInclusion = "proof does not match the event hash, the index, and the tree head"
 
 // Error names the file that failed and the rule that failed. The name is never
-// empty. This package makes errors with fixed words as names. The log package
-// (internal/tlog) makes errors of the same type with the fixed words "log",
-// "tlog directory", "tile", "root", "consistency proof", and "inclusion proof"
-// as names, and with other names: a tile path, the name of the tree head, a
-// directory, or a comma-separated list of tile paths.
+// empty. This package makes errors with the fixed name "inclusion proof". The
+// log package (internal/tlog) makes errors of the same type. Its fixed names
+// are "log", "tlog directory", "state directory", "tile", and "root". Four more
+// fixed names are "consistency proof", "inclusion proof", "proof", and "head".
+// Its other names are a directory path, a tile file path, or a temporary file
+// path with the ".tmp" suffix. A name can also be a comma-separated list of
+// tile paths.
 type Error struct {
 	Name string
 	Rule string

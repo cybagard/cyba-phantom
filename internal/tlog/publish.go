@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
@@ -279,7 +280,7 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 			continue
 		}
 		if !errors.As(err, new(publishError)) { // Send logged the others
-			p.log.Warn("checkpoint publish failed", "target", i, "status", 0, "class", "spool")
+			p.log.Warn("checkpoint publish failed", "target", i, "status", 0, "class", "spool", "error", spoolText(err))
 		}
 		p.backoff(i, p.now())
 	}
@@ -293,6 +294,26 @@ func (p *Publisher) pass() (wait time.Duration, pending bool) {
 		}
 	}
 	return wait, pending
+}
+
+// spoolText returns the text of the spool errors in err, one after the other
+// with "; " between them. Each text has the relative name and the rule, with no
+// absolute path. It leaves out each publishError. Each error of Publisher.Send
+// has that type, and Send logs it.
+func spoolText(err error) string {
+	var texts []string
+	var walk func(error)
+	walk = func(e error) {
+		if joined, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, part := range joined.Unwrap() {
+				walk(part)
+			}
+		} else if !errors.As(e, new(publishError)) {
+			texts = append(texts, e.Error())
+		}
+	}
+	walk(err)
+	return strings.Join(texts, "; ")
 }
 
 // entryCount returns the number of errors in err if Spool.Publish returned only

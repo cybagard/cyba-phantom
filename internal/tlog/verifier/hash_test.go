@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"go/parser"
 	"go/token"
-	"path/filepath"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,11 +42,41 @@ func TestTS14_ParseHash(t *testing.T) {
 	}
 }
 
-// T-S-14: the package opens no file. The non-test files import none of the
-// packages for files and system calls.
+// importAllowed lists the packages that the non-test files import directly.
+// A new import needs a new line here, so that a review sees it.
+var importAllowed = map[string]bool{
+	"bytes":                       true,
+	"crypto/sha256":               true,
+	"encoding/base64":             true,
+	"errors":                      true,
+	"golang.org/x/mod/sumdb/note": true,
+	"golang.org/x/mod/sumdb/tlog": true,
+	"strconv":                     true,
+	"strings":                     true,
+}
+
+// T-S-14: the package opens no file. The non-test .go files import only the
+// packages in importAllowed, and none of them is for files or system calls.
+// The test also fails for each file in the directory that is not a .go file.
+// Examples are assembly, C and .syso, with any GOOS or GOARCH suffix. Such a
+// file can make a system call with no import. A subdirectory is not read.
+// This is not the whole proof. The packages os, io/fs, and syscall are in the
+// dependency graph through crypto/sha256, golang.org/x/mod/sumdb/note and
+// golang.org/x/mod/sumdb/tlog. So "opens no file" also rests on a review of
+// the package code.
 func TestTS14_NoFileImports(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	entries, err := os.ReadDir(".")
 	must(t, err)
+	var files []string
+	for _, e := range entries {
+		switch {
+		case e.IsDir():
+		case strings.HasSuffix(e.Name(), ".go"):
+			files = append(files, e.Name())
+		default:
+			t.Errorf("%s is not a .go file; the package takes no other source file", e.Name())
+		}
+	}
 	checked := 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -58,8 +88,8 @@ func TestTS14_NoFileImports(t *testing.T) {
 		for _, imp := range af.Imports {
 			path, err := strconv.Unquote(imp.Path.Value)
 			must(t, err)
-			if path == "os" || path == "io/fs" || path == "syscall" {
-				t.Errorf("%s imports %q", f, path)
+			if !importAllowed[path] {
+				t.Errorf("%s imports %q, which is not in the allow list", f, path)
 			}
 		}
 	}

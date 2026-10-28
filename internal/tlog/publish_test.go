@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -323,6 +324,16 @@ func TestTI09_DownTargetDoesNotBlockOthers(t *testing.T) {
 	e := newPub(t, time.Minute, []*fakeTarget{down, up})
 	e.add(t, 1)
 	e.pub.pass()
+	// Send logs the failure. The pass adds no second line of class spool.
+	var failed []string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, "checkpoint publish failed") {
+			failed = append(failed, l)
+		}
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0], "target=0 ") || strings.Contains(e.logs.String(), "class=spool") {
+		t.Fatalf("want one failure line for target 0 and none of class spool: %s", e.logs)
+	}
 	e.add(t, 2)
 	e.pub.pass() // the backoff of the down target has not ended
 	downAttempts, _, _ := down.got()
@@ -397,6 +408,55 @@ func TestTI09_EntryCount(t *testing.T) {
 		if got := entryCount(tc.err); got != tc.want {
 			t.Errorf("%s: entryCount = %d, want %d", name, got, tc.want)
 		}
+	}
+}
+
+// T-I-09: a kept note with a persistent open error gives one Warn line. The
+// line has the spool error text: the relative name and the rule of each error.
+// It has no absolute path and no text of Send. The entry before the note joins
+// its error.
+func TestTI09_SpoolErrorWarnHasNameAndRule(t *testing.T) {
+	e := newPub(t, time.Minute, []*fakeTarget{newTarget(t)})
+	must(t, os.MkdirAll(filepath.Join(e.dir, noteName(1), "inner"), 0o700))
+	e.add(t, 2)
+	faultAt = func(step, name string) error {
+		if step == "open" && name == noteName(2) {
+			return &fs.PathError{Op: "open", Path: filepath.Join(e.dir, name), Err: syscall.EMFILE}
+		}
+		return nil
+	}
+	t.Cleanup(func() { faultAt = nil })
+	e.pub.pass()
+	var lines []string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, "checkpoint publish failed") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("log has %d Warn lines, want 1: %s", len(lines), e.logs)
+	}
+	want := `error="checkpoint spool checkpoints/1.note: must be a regular file and not a symlink; ` +
+		`checkpoint spool checkpoints/2.note: cannot be opened"`
+	if !strings.Contains(lines[0], want) || !strings.Contains(lines[0], `class=spool`) {
+		t.Errorf("Warn line = %s, want %s", lines[0], want)
+	}
+	for _, bad := range []string{e.dir, "send of size", "publish:", "EMFILE", "too many open files"} {
+		if strings.Contains(lines[0], bad) {
+			t.Errorf("Warn line has %q: %s", bad, lines[0])
+		}
+	}
+}
+
+// T-I-09: spoolText leaves out the errors of Send and keeps the others.
+func TestTI09_SpoolTextSkipsSend(t *testing.T) {
+	spool := errors.New("checkpoint spool checkpoints/2.note: cannot be opened")
+	send := fmt.Errorf("checkpoint spool: send of size 2 to target 0 failed: %w", errPublishTransport)
+	if got := spoolText(errors.Join(spool, send)); got != spool.Error() {
+		t.Errorf("spoolText = %q, want %q", got, spool)
+	}
+	if got := spoolText(send); got != "" {
+		t.Errorf("spoolText(send) = %q, want empty", got)
 	}
 }
 
