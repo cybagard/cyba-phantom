@@ -275,8 +275,9 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		},
 	})
 	cfg.Store(a.cfg)
-	// A nil TrustedRoots would take certmagic.DefaultACME.TrustedRoots, and the
-	// sensor never reads that value.
+	// With no CARoots, TrustedRoots is nil. certmagic then takes the roots of
+	// certmagic.DefaultACME. The sensor does not set them, so the client uses
+	// the roots of the system.
 	var roots *x509.CertPool
 	if p.CARoots != nil {
 		roots = p.CARoots.pool

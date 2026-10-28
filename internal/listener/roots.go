@@ -25,9 +25,9 @@ type ACMERoots struct {
 }
 
 const (
-	pemBegin   = "-----BEGIN "
-	pemSpace   = " \t\r\n"
-	pemCertTyp = "CERTIFICATE"
+	rootsBegin    = "-----BEGIN "
+	rootsSpace    = " \t\r\n"
+	rootsCertType = "CERTIFICATE"
 )
 
 // ParseACMERoots parses the bytes of the acme.ca_root file. The file has one or
@@ -38,21 +38,21 @@ func ParseACMERoots(data []byte) (*ACMERoots, error) {
 	pool := x509.NewCertPool()
 	count := 0
 	for rest := data; ; count++ {
-		rest = bytes.TrimLeft(rest, pemSpace)
+		rest = bytes.TrimLeft(rest, rootsSpace)
 		if len(rest) == 0 {
 			break
 		}
 		// pem.Decode skips text before a block, so check each block start.
-		if !bytes.HasPrefix(rest, []byte(pemBegin)) {
+		if !bytes.HasPrefix(rest, []byte(rootsBegin)) {
 			return nil, errRootsText
 		}
 		block, after := pem.Decode(rest)
-		if block == nil || bytes.Count(rest[:len(rest)-len(after)], []byte(pemBegin)) != 1 {
+		if block == nil || bytes.Count(rest[:len(rest)-len(after)], []byte(rootsBegin)) != 1 {
 			return nil, errRootsText
 		}
 		rest = after
 		switch {
-		case block.Type != pemCertTyp:
+		case block.Type != rootsCertType:
 			return nil, errRootsType
 		case len(block.Headers) != 0:
 			return nil, errRootsHeader
