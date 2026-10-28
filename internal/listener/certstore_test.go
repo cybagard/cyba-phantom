@@ -634,37 +634,20 @@ func openHooked(t *testing.T, hooks storeHooks) *Store {
 
 func TestTS16AHookOfOneStoreIsNeverCalledByAnotherStore(t *testing.T) {
 	ctx := context.Background()
-	// Each case sets one failing hook on store A. It counts the calls.
+	// Each case sets one hook on store A. After the opens, the hook counts its
+	// calls and fails. The hook does no real call: no test needs one.
 	for _, c := range []struct {
 		name string
 		set  func(h *storeHooks, call func() error)
 	}{
 		{"syncFile", func(h *storeHooks, call func() error) {
-			real := h.syncFile
-			h.syncFile = func(f *os.File) error {
-				if err := call(); err != nil {
-					return err
-				}
-				return real(f)
-			}
+			h.syncFile = func(*os.File) error { return call() }
 		}},
 		{"syncDirFile", func(h *storeHooks, call func() error) {
-			real := h.syncDirFile
-			h.syncDirFile = func(f *os.File) error {
-				if err := call(); err != nil {
-					return err
-				}
-				return real(f)
-			}
+			h.syncDirFile = func(*os.File) error { return call() }
 		}},
 		{"renameFile", func(h *storeHooks, call func() error) {
-			real := h.renameFile
-			h.renameFile = func(r *os.Root, from, to string) error {
-				if err := call(); err != nil {
-					return err
-				}
-				return real(r, from, to)
-			}
+			h.renameFile = func(*os.Root, string, string) error { return call() }
 		}},
 	} {
 		for _, aFirst := range []bool{true, false} {
