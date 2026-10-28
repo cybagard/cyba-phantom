@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -25,8 +26,7 @@ const staticHost = "decoy.internal"
 // A read of the real clock then fails the tests.
 var staticNow = time.Date(2030, 6, 15, 12, 0, 0, 0, time.UTC)
 
-// staticKeys are the keys of the tests. RSA keys are slow, so the binary makes
-// them one time.
+// staticKeys are the keys of the tests.
 type staticKeys struct {
 	rsa2048, rsa4096  *rsa.PrivateKey
 	p256, p256b, p384 *ecdsa.PrivateKey
@@ -36,6 +36,7 @@ type staticKeys struct {
 	issuerDER         []byte
 }
 
+// staticKeySet makes the keys one time for the binary, as RSA keys are slow.
 var staticKeySet = sync.OnceValue(func() *staticKeys {
 	must := func(err error) {
 		if err != nil {
@@ -189,7 +190,11 @@ func TestTS27StaticPEMRefusals(t *testing.T) {
 		{"key type with a shorter suffix", certPEM, pemOf("E KEY", []byte("x")), ErrStaticType},
 		{"text before key", certPEM, cat([]byte(marker+"\n"), keyPEM), ErrStaticText},
 		{"header in key file", certPEM, keyWithHeader, ErrStaticHeader},
-		{"encrypted key does not parse", certPEM, pemOf("ENCRYPTED PRIVATE KEY", []byte(marker)), ErrStaticKey},
+		{"white space only key file", certPEM, []byte(" \t\r\n \n"), ErrStaticCount},
+		{"encrypted key type", certPEM, pemOf("ENCRYPTED PRIVATE KEY", []byte(marker)), ErrStaticType},
+		{"key type with a prefix word", certPEM, pemOf("IGNORE THIS PRIVATE KEY", kb.Bytes), ErrStaticType},
+		{"unknown key type with a valid body", certPEM, pemOf("X PRIVATE KEY", kb.Bytes), ErrStaticType},
+		{"key type with a CR", certPEM, pemOf("\rRSA PRIVATE KEY", kb.Bytes), ErrStaticType},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -222,6 +227,7 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 	}{
 		{"other name", leafSpec{}, "other.internal", staticNow, ErrStaticName},
 		{"name only in the common name", leafSpec{cn: staticHost, dns: []string{}}, staticHost, staticNow, ErrStaticName},
+		{"name in the SAN, other common name", leafSpec{cn: "other.internal", dns: []string{staticHost}}, staticHost, staticNow, nil},
 		{"key of another leaf, same type", leafSpec{pub: &ks.p256b.PublicKey}, staticHost, staticNow, ErrStaticMismatch},
 		{"key of another leaf, other type", leafSpec{pub: ks.ed.Public()}, staticHost, staticNow, ErrStaticMismatch},
 		{"expired", leafSpec{}, staticHost, staticNow.Add(hour + time.Second), ErrStaticExpired},
@@ -261,7 +267,8 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 	}
 }
 
-// T-S-27: the old key forms read, and the leaf is the first block of a chain.
+// T-S-27: ParseStatic reads the PKCS1 and SEC1 key forms, and it takes the
+// leaf from the first block of a chain.
 func TestTS27StaticChainAndForms(t *testing.T) {
 	ks := staticKeySet()
 	der, keyPEM := leafSpec{}.build(t)
@@ -288,5 +295,99 @@ func TestTS27StaticChainAndForms(t *testing.T) {
 	}
 	if _, err := ParseStatic(staticHost, pemOf("CERTIFICATE", ecDER), pemOf("EC PRIVATE KEY", sec1), staticNow); err != nil {
 		t.Fatalf("SEC1 key: %v", err)
+	}
+}
+
+// T-S-27: the block type selects one key form, and a key that does not encode
+// back to the bytes of the block is refused.
+func TestTS27StaticKeyEncoding(t *testing.T) {
+	ks := staticKeySet()
+	must := func(der []byte, err error) []byte {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	extra := asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagOctetString, Bytes: []byte("extra")}
+
+	type pkcs8Form struct {
+		Version int
+		Algo    pkix.AlgorithmIdentifier
+		Key     []byte
+	}
+	type pkcs8Extra struct {
+		Version int
+		Algo    pkix.AlgorithmIdentifier
+		Key     []byte
+		Extra   asn1.RawValue
+	}
+	type sec1Form struct {
+		Version int
+		Key     []byte
+		Curve   asn1.ObjectIdentifier `asn1:"optional,explicit,tag:0"`
+		Public  asn1.BitString        `asn1:"optional,explicit,tag:1"`
+	}
+	type sec1Extra struct {
+		Version int
+		Key     []byte
+		Curve   asn1.ObjectIdentifier `asn1:"optional,explicit,tag:0"`
+		Public  asn1.BitString        `asn1:"optional,explicit,tag:1"`
+		Extra   asn1.RawValue
+	}
+
+	p8 := must(x509.MarshalPKCS8PrivateKey(ks.p256))
+	sec1 := must(x509.MarshalECPrivateKey(ks.p256))
+	pkcs1 := x509.MarshalPKCS1PrivateKey(ks.rsa2048)
+	rsaP8 := must(x509.MarshalPKCS8PrivateKey(ks.rsa2048))
+
+	var p8Form pkcs8Form
+	if _, err := asn1.Unmarshal(p8, &p8Form); err != nil {
+		t.Fatal(err)
+	}
+	var sec1Parsed sec1Form
+	if _, err := asn1.Unmarshal(sec1, &sec1Parsed); err != nil {
+		t.Fatal(err)
+	}
+	// The inner key octets of the PKCS8 key hold the SEC1 key and a second one.
+	innerTwice := p8Form
+	innerTwice.Key = append(bytes.Clone(sec1), sec1...)
+	p8ExtraElem := pkcs8Extra{p8Form.Version, p8Form.Algo, p8Form.Key, extra}
+	sec1ExtraElem := sec1Extra{sec1Parsed.Version, sec1Parsed.Key, sec1Parsed.Curve, sec1Parsed.Public, extra}
+
+	rows := []struct {
+		name string
+		key  any // the key of the leaf
+		typ  string
+		der  []byte
+		want error // nil: the key passes
+	}{
+		{"PKCS8 key passes", ks.p256, "PRIVATE KEY", p8, nil},
+		{"PKCS1 key passes", ks.rsa2048, "RSA PRIVATE KEY", pkcs1, nil},
+		{"SEC1 key passes", ks.p256, "EC PRIVATE KEY", sec1, nil},
+		{"two PKCS8 keys in one block", ks.p256, "PRIVATE KEY", append(bytes.Clone(p8), p8...), ErrStaticKey},
+		{"two SEC1 keys in one block", ks.p256, "EC PRIVATE KEY", append(bytes.Clone(sec1), sec1...), ErrStaticKey},
+		{"PKCS8 key and trailing bytes", ks.p256, "PRIVATE KEY", append(bytes.Clone(p8), 0), ErrStaticKey},
+		{"PKCS1 key and trailing bytes", ks.rsa2048, "RSA PRIVATE KEY", append(bytes.Clone(pkcs1), 0), ErrStaticKey},
+		{"PKCS8 key with a second key in the inner key octets", ks.p256, "PRIVATE KEY", must(asn1.Marshal(innerTwice)), ErrStaticKey},
+		{"PKCS8 key with an extra element in the sequence", ks.p256, "PRIVATE KEY", must(asn1.Marshal(p8ExtraElem)), ErrStaticKey},
+		{"SEC1 key with an extra element in the sequence", ks.p256, "EC PRIVATE KEY", must(asn1.Marshal(sec1ExtraElem)), ErrStaticKey},
+		{"PKCS1 key under the PKCS8 type", ks.rsa2048, "PRIVATE KEY", pkcs1, ErrStaticKey},
+		{"PKCS8 key under the PKCS1 type", ks.rsa2048, "RSA PRIVATE KEY", rsaP8, ErrStaticKey},
+		{"PKCS8 key under the SEC1 type", ks.p256, "EC PRIVATE KEY", p8, ErrStaticKey},
+		{"SEC1 key under the PKCS8 type", ks.p256, "PRIVATE KEY", sec1, ErrStaticKey},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			der, _ := leafSpec{key: r.key}.build(t)
+			_, err := ParseStatic(staticHost, pemOf("CERTIFICATE", der), pemOf(r.typ, r.der), staticNow)
+			if r.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			noFileText(t, err, r.want)
+		})
 	}
 }

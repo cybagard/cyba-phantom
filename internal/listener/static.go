@@ -16,11 +16,10 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"strings"
 	"time"
 )
 
-// The refusals of ParseStatic. A caller tests them with errors.Is.
+// ParseStatic returns these refusals. A caller tests them with errors.Is.
 var (
 	ErrStaticText     = errors.New("static certificate: text outside the PEM blocks")
 	ErrStaticHeader   = errors.New("static certificate: PEM block has a header")
@@ -38,18 +37,23 @@ var (
 
 const (
 	pemBegin   = "-----BEGIN "
-	keySuffix  = "PRIVATE KEY"
+	pkcs8Type  = "PRIVATE KEY"
+	pkcs1Type  = "RSA PRIVATE KEY"
+	sec1Type   = "EC PRIVATE KEY"
 	minRSABits = 2048
 	maxRSABits = 4096
 )
 
 // ParseStatic reads the files of one static certificate.
 // The certificate file holds CERTIFICATE blocks only, the leaf first.
-// The key file holds one block, a private key.
+// The key file holds one block, a private key. The block type is
+// PRIVATE KEY (PKCS8), RSA PRIVATE KEY (PKCS1) or EC PRIVATE KEY (SEC1),
+// and the type names the form of the key. The key must encode back to the
+// same bytes in that form.
 // In both files, a block has no header.
 // Outside the blocks, only the bytes space, tab, CR and LF are permitted.
-// The leaf is valid for name at now. Only the DNS names count, not the
-// Common Name.
+// The leaf is valid for name at now. Only the SAN entries (DNS names and IP
+// addresses) count, not the Common Name.
 // The leaf is not a CA certificate. Its key is RSA with 2048 to 4096 bits,
 // ECDSA P-256 or P-384, or Ed25519. The key matches the leaf.
 // The result has the leaf parsed.
@@ -82,18 +86,20 @@ func ParseStatic(
 		}
 		out.Certificate = append(out.Certificate, b.Bytes)
 	}
-	if !strings.HasSuffix(keyBlocks[0].Type, keySuffix) {
+	switch keyBlocks[0].Type {
+	case pkcs8Type, pkcs1Type, sec1Type:
+	default:
 		return tls.Certificate{}, ErrStaticType
-	}
-	key, err := parseStaticKey(keyBlocks[0].Bytes)
-	if err != nil {
-		return tls.Certificate{}, err
 	}
 	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageCertSign != 0 {
 		return tls.Certificate{}, ErrStaticCA
 	}
 	if !permittedKey(leaf.PublicKey) {
 		return tls.Certificate{}, ErrStaticKeyKind
+	}
+	key, err := parseStaticKey(keyBlocks[0].Type, keyBlocks[0].Bytes)
+	if err != nil {
+		return tls.Certificate{}, err
 	}
 	if leaf.VerifyHostname(name) != nil {
 		return tls.Certificate{}, ErrStaticName
@@ -115,7 +121,7 @@ func ParseStatic(
 // readBlocks decodes all PEM blocks of data.
 // pem.Decode skips text before a block, also a BEGIN line with a bad body.
 // So each block must start at the first byte after the white space.
-// It must also hold one BEGIN line.
+// The text that pem.Decode reads for a block must also hold one BEGIN line.
 func readBlocks(data []byte) ([]*pem.Block, error) {
 	var blocks []*pem.Block
 	for {
@@ -139,22 +145,51 @@ func readBlocks(data []byte) ([]*pem.Block, error) {
 	}
 }
 
-// parseStaticKey reads the PKCS1, PKCS8 and SEC1 forms.
-// The library error is not returned. It can hold the text of the key.
-func parseStaticKey(der []byte) (any, error) {
-	if k, err := x509.ParsePKCS1PrivateKey(der); err == nil {
-		return k, nil
-	}
-	if k, err := x509.ParsePKCS8PrivateKey(der); err == nil {
-		switch k.(type) {
-		case *rsa.PrivateKey, *ecdsa.PrivateKey, ed25519.PrivateKey:
-			return k, nil
+// parseStaticKey reads the key in the one form that the block type names:
+// PKCS8, PKCS1 or SEC1. It does not try another form.
+// The Go parsers ignore bytes and ASN.1 elements at the end of a sequence.
+// So parseStaticKey encodes the key again in the same form and refuses
+// a key whose encoding differs from der.
+// It does not return the library error, which can hold the text of the key.
+func parseStaticKey(typ string, der []byte) (any, error) {
+	var key any
+	var again []byte
+	var err error
+	switch typ {
+	case pkcs8Type:
+		key, err = x509.ParsePKCS8PrivateKey(der)
+		if err != nil {
+			return nil, ErrStaticKey
 		}
+		switch key.(type) {
+		case *rsa.PrivateKey, *ecdsa.PrivateKey, ed25519.PrivateKey:
+		default:
+			return nil, ErrStaticKey
+		}
+		again, err = x509.MarshalPKCS8PrivateKey(key)
+	case pkcs1Type:
+		k, perr := x509.ParsePKCS1PrivateKey(der)
+		if perr != nil {
+			return nil, ErrStaticKey
+		}
+		key, again = k, x509.MarshalPKCS1PrivateKey(k)
+	case sec1Type:
+		k, perr := x509.ParseECPrivateKey(der)
+		if perr != nil {
+			return nil, ErrStaticKey
+		}
+		key = k
+		again, err = x509.MarshalECPrivateKey(k)
+	default:
+		return nil, ErrStaticType
 	}
-	if k, err := x509.ParseECPrivateKey(der); err == nil {
-		return k, nil
+	if err != nil {
+		return nil, ErrStaticKey
 	}
-	return nil, ErrStaticKey
+	if !bytes.Equal(again, der) {
+		return nil, ErrStaticKey
+	}
+	return key, nil
 }
 
 // permittedKey is true for RSA of 2048 to 4096 bits, ECDSA P-256 or P-384,
