@@ -272,7 +272,8 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 	}
 }
 
-// T-S-27: the leaf checks run before the key parse.
+// T-S-27: the CA check and the key size check of the leaf run before the
+// key parse.
 // A weak leaf or a CA leaf gives its own error, also when the key block does
 // not parse.
 func TestTS27StaticCheckOrder(t *testing.T) {
