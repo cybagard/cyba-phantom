@@ -320,8 +320,9 @@ func TestTS21ZeroNamesFailsClearly(t *testing.T) {
 	n.Resolver()
 }
 
-// itemDialer makes an item dialer for port 443 over tcp, with the entries.
-func itemDialer(t *testing.T, entries ...string) *net.Dialer {
+// tcp443ItemDialer makes an item dialer for port 443 over tcp. It has the
+// entries as its list.
+func tcp443ItemDialer(t *testing.T, entries ...string) *net.Dialer {
 	t.Helper()
 	var list []netip.Prefix
 	for _, e := range entries {
@@ -338,27 +339,62 @@ func itemDialer(t *testing.T, entries ...string) *net.Dialer {
 	return d
 }
 
-// A permitted private dial fails in the network, not in the guard. The host
-// may also have a route and connect, so a connection is not an error here.
+var errStopDial = errors.New("test: stop before the connect")
+
+// A permitted private dial passes the guard. A wrapper around the guard
+// records the call and stops the dial, so no connect happens.
 func TestTS26ItemDialPermittedIsNotGuardError(t *testing.T) {
 	names := egresstest.NewNames(t)
 	names.Set("listed.test.", netip.MustParseAddr("10.1.2.3"))
-	d := itemDialer(t, "10.0.0.0/8")
-	d.Resolver = names.Resolver()
 	for _, address := range []string{"10.1.2.3:443", "listed.test.:443"} {
-		c, err := dial(d, "tcp", address)
-		if err == nil {
-			c.Close()
-		} else if errors.Is(err, egress.ErrRefused) {
-			t.Errorf("%s: permitted dial gave the guard error", address)
+		d := tcp443ItemDialer(t, "10.0.0.0/8")
+		d.Resolver = names.Resolver()
+		guard := d.ControlContext
+		var mu sync.Mutex
+		var calls []string
+		d.ControlContext = func(
+			ctx context.Context, network, address string, c syscall.RawConn,
+		) error {
+			err := guard(ctx, network, address, c)
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, fmt.Sprintf("%s %s nil=%t",
+				network, address, err == nil))
+			if err != nil {
+				return err
+			}
+			return errStopDial
 		}
+		_, err := dial(d, "tcp", address)
+		if !errors.Is(err, errStopDial) || errors.Is(err, egress.ErrRefused) {
+			t.Errorf("%s: dial error is %v", address, err)
+		}
+		mu.Lock()
+		if want := "tcp4 10.1.2.3:443 nil=true"; !slices.Contains(calls, want) {
+			t.Errorf("%s: guard calls %q lack %q", address, calls, want)
+		}
+		mu.Unlock()
+	}
+}
+
+func TestTS26ItemDialerFields(t *testing.T) {
+	d := tcp443ItemDialer(t, "10.0.0.0/8")
+	if d.Timeout != time.Second {
+		t.Errorf("Timeout is %v", d.Timeout)
+	}
+	if d.ControlContext == nil {
+		t.Error("no ControlContext")
+	}
+	if d.Control != nil || d.LocalAddr != nil || d.Resolver != nil ||
+		d.FallbackDelay != 0 {
+		t.Errorf("unexpected field set: %+v", d)
 	}
 }
 
 func TestTS26ItemDialRefusedIsGuardError(t *testing.T) {
 	names := egresstest.NewNames(t)
 	names.Set("listed.test.", netip.MustParseAddr("10.1.2.3"))
-	d := itemDialer(t, "10.0.0.0/8")
+	d := tcp443ItemDialer(t, "10.0.0.0/8")
 	d.Resolver = names.Resolver()
 	mustRefuse(t, d, "tcp", "10.1.2.3:444")
 	mustRefuse(t, d, "udp", "10.1.2.3:443")
@@ -366,14 +402,14 @@ func TestTS26ItemDialRefusedIsGuardError(t *testing.T) {
 	mustRefuse(t, d, "tcp", "100.100.100.200:443")
 	mustRefuse(t, d, "tcp", "listed.test.:444")
 	mustRefuse(t, egress.Dialer(testTimeout), "tcp", "10.1.2.3:443")
-	other := itemDialer(t, "192.168.0.0/16")
+	other := tcp443ItemDialer(t, "192.168.0.0/16")
 	other.Resolver = names.Resolver()
 	mustRefuse(t, other, "tcp", "10.1.2.3:443")
 	mustRefuse(t, other, "tcp", "listed.test.:443")
 }
 
 func TestTS26ItemRefusalTextHasNoAddress(t *testing.T) {
-	d := itemDialer(t, "10.0.0.0/8")
+	d := tcp443ItemDialer(t, "10.0.0.0/8")
 	for _, tc := range []struct{ network, address string }{
 		{"tcp4", "10.1.2.3:444"},
 		{"udp4", "10.1.2.3:443"},

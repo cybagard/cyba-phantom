@@ -5,8 +5,8 @@ import (
 	"net/netip"
 )
 
-// The errors for a bad list entry. Each text has no entry, so a loader can
-// add the key of the entry and log the result.
+// The errors for a bad list entry. No error text holds the entry text. Thus, a
+// loader can add the key of the entry and log the error.
 var (
 	errEntryParse    = errors.New("egress: list entry is not an address or a prefix")
 	errEntryZone     = errors.New("egress: list entry has a zone")
@@ -81,10 +81,12 @@ func checkEntry(p netip.Prefix) error {
 }
 
 // itemPermits applies the guard order of an item dialer to the address a.
-// The caller sets onItem when the dial uses the port and the protocol of the
-// item. The zone check comes before the unmap, because Unmap drops the zone.
-// The never-list comes before the rule and the list.
-func itemPermits(list []netip.Prefix, a netip.Addr, onItem bool) bool {
+// The caller sets portAndProtoMatch when the port and the protocol of the dial
+// are those of the item. The zone check comes before the unmap, because Unmap
+// drops the zone. The never-list comes before the rule and the list.
+func itemPermits(
+	list []netip.Prefix, a netip.Addr, portAndProtoMatch bool,
+) bool {
 	if a.Zone() != "" {
 		return false
 	}
@@ -95,5 +97,5 @@ func itemPermits(list []netip.Prefix, a netip.Addr, onItem bool) bool {
 	if Permitted(a) {
 		return true
 	}
-	return onItem && inAny(list, a)
+	return portAndProtoMatch && inAny(list, a)
 }

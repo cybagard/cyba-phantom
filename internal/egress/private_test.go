@@ -163,6 +163,11 @@ func TestTS26ItemControlPortAndProtocol(t *testing.T) {
 		{"tcp6", "[::ffff:10.1.2.3]:444", false},
 		{"tcp", "10.1.2.3:443", false},
 		{"ip4", "10.1.2.3:443", false},
+		{"tcp", "11.0.0.1:443", false},
+		{"ip4", "11.0.0.1:443", false},
+		{"udp", "11.0.0.1:443", false},
+		{"", "11.0.0.1:443", false},
+		{"tcp4", "11.0.0.1", false},
 		{"tcp4", "10.1.2.3", false},
 		{"tcp4", "", false},
 	} {
@@ -206,7 +211,11 @@ func TestTS26ItemControlNeverListWins(t *testing.T) {
 		"169.254.169.254:443", "127.0.0.1:443", "[::1]:443", "[fe80::1]:443",
 		"224.0.0.1:443", "[ff02::1]:443", "0.0.0.0:443", "[::]:443",
 	} {
-		if err := step(d, "tcp4", a); err != ErrRefused {
+		network := "tcp6"
+		if !strings.Contains(a, "[") {
+			network = "tcp4"
+		}
+		if err := step(d, network, a); err != ErrRefused {
 			t.Errorf("%s: got %v", a, err)
 		}
 	}
@@ -236,7 +245,11 @@ func TestTS26ItemWithoutListRefusesPrivate(t *testing.T) {
 		"10.1.2.3:443", "172.16.0.1:443", "192.168.1.1:443",
 		"100.64.0.1:443", "[fd00::1]:443", "[::ffff:10.1.2.3]:443",
 	} {
-		if err := step(d, "tcp4", a); err != ErrRefused {
+		network := "tcp6"
+		if !strings.Contains(a, "[") {
+			network = "tcp4"
+		}
+		if err := step(d, network, a); err != ErrRefused {
 			t.Errorf("%s: got %v", a, err)
 		}
 	}

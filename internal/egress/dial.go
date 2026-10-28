@@ -59,8 +59,9 @@ var errItemInput = errors.New("egress: item dialer needs a port that is not 0 " 
 // ItemDialer gives a dialer for one endpoint item. Besides the address rule,
 // the dialer permits an address in list. It does so only on the port and the
 // protocol of the item. The list is a part of this dialer only. The protocol
-// is "tcp" or "udp". Each entry must pass the entry rule of ParsePrivateEntry.
-// The dialer keeps a copy of the list. The never-list wins over an entry.
+// is "tcp" or "udp". ItemDialer refuses a list with an entry that fails the
+// entry rule of ParsePrivateEntry. It gives the error of that rule. The
+// dialer keeps a copy of the list. The never-list wins over an entry.
 func ItemDialer(
 	list []netip.Prefix, port uint16, proto string, timeout time.Duration,
 ) (*net.Dialer, error) {
@@ -77,12 +78,8 @@ func ItemDialer(
 	d.ControlContext = func(
 		_ context.Context, network, address string, _ syscall.RawConn,
 	) error {
-		np, ok := protocol(network)
+		np, ap, ok := parseDial(network, address)
 		if !ok {
-			return errRefused
-		}
-		ap, err := netip.ParseAddrPort(address)
-		if err != nil {
 			return errRefused
 		}
 		if !itemPermits(list, ap.Addr(), ap.Port() == port && np == proto) {
