@@ -38,10 +38,35 @@ func writeFile(t *testing.T, body string) string {
 	return p
 }
 
+// fixtureDirEnv names the directory for the fixture files of a child process.
+const fixtureDirEnv = "CYBA_TEST_FIXTURE_DIR"
+
+// pkgDir is the package directory. A test can change the working directory.
+var pkgDir = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	return wd
+}()
+
 // validBody returns a config file that passes all validators. The htpasswd file must exist.
+// The file is in a private directory below the package directory. The htpasswd
+// rule refuses a parent with a group or other write bit. The system
+// temporary directory can have mode 1777. A child process that ends with
+// os.Exit gets its directory in fixtureDirEnv, so its parent removes it.
 func validBody(t *testing.T) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "htpasswd")
+	base := pkgDir
+	if d := os.Getenv(fixtureDirEnv); d != "" {
+		base = d
+	}
+	d, err := os.MkdirTemp(base, "tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	p := filepath.Join(d, "htpasswd")
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

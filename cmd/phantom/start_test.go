@@ -517,7 +517,13 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	// t.TempDir uses GOTMPDIR before TMPDIR. The test sets both to tmp,
 	// so the child makes its files in tmp, and the parent removes tmp.
 	tmp := t.TempDir()
-	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", "GOTMPDIR="+tmp, "TMPDIR="+tmp)
+	// The htpasswd file of the child is below the package directory.
+	fixtures, err := os.MkdirTemp(pkgDir, "tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(fixtures) })
+	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", fixtureDirEnv+"="+fixtures, "GOTMPDIR="+tmp, "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)

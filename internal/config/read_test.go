@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 // sepRule is the fixed error text for a raw U+0085, U+2028 or U+2029.
@@ -19,13 +21,14 @@ const crRule = "contains a CR without an LF after it"
 
 func TestTS10_Read(t *testing.T) {
 	type row struct {
-		name     string
-		input    string
-		isFile   bool
-		mode     os.FileMode
-		uid      uint32
-		wantRule string
-		wantPath string
+		name   string
+		input  string
+		isFile bool
+		mode   os.FileMode
+		// otherOwner makes the check see the file as a file of another owner.
+		otherOwner bool
+		wantRule   string
+		wantPath   string
 		// ceiling is the allocation limit. Each ceiling is at least 1.25
 		// times the count that go test -race measured in the devcontainer.
 		ceiling int
@@ -76,7 +79,7 @@ func TestTS10_Read(t *testing.T) {
 		{name: "Over64KiB", input: padded(64*1024 + 1), isFile: true, wantRule: "the file is larger than 64 KiB", ceiling: 54, size: 65537},
 		{name: "OtherWritable", input: "foo: bar", isFile: true, mode: 0602, wantRule: "group or other writable", ceiling: 20},
 		{name: "GroupWritable", input: "foo: bar", isFile: true, mode: 0620, wantRule: "group or other writable", ceiling: 20},
-		{name: "WrongOwner", input: "foo: bar", isFile: true, mode: 0644, uid: 12345, wantRule: "the owner must be root or the current user", ceiling: 20},
+		{name: "WrongOwner", input: "foo: bar", isFile: true, mode: 0644, otherOwner: true, wantRule: "the owner must be root or the current user", ceiling: 20},
 		{name: "FIFO", input: "foo: bar", isFile: true, wantRule: "not a regular file", ceiling: 20},
 		{name: "MissingFile", input: "foo: bar", isFile: true, wantRule: "no such file", ceiling: 18},
 		{name: "Unreadable", input: "foo: bar", isFile: true, wantRule: "permission denied", ceiling: 18},
@@ -146,12 +149,8 @@ func TestTS10_Read(t *testing.T) {
 					}
 				}
 
-				origGetUid := getUid
-				if r.uid != 0 {
-					getUid = func(info os.FileInfo) (uint32, error) {
-						return r.uid, nil
-					}
-					defer func() { getUid = origGetUid }()
+				if r.otherOwner {
+					otherOwner(t, path)
 				}
 
 				doc, err = ReadFile(path)
@@ -376,4 +375,262 @@ func FuzzRead(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ReadBytes(b)
 	})
+}
+
+// writeFile writes body to a new file in a private directory and sets its
+// mode. The mode call follows the write, so the umask does not change it.
+func writeFile(t *testing.T, dir, name, body string, mode os.FileMode) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// afterCheckCount counts the calls of the hook that runs between the check and
+// the open. A refusal before the open does not call it.
+func afterCheckCount(t *testing.T) *int {
+	t.Helper()
+	n := new(int)
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { *n++ }})
+	return n
+}
+
+// loadDetail loads path as the config file, as --check does. The Net has no
+// network. It gives the detail of the file error.
+func loadDetail(t *testing.T, path string) string {
+	t.Helper()
+	useTestKeys(t)
+	_, err := LoadWith(path, []string{tokenVar + "=token"}, testNet)
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("got %v, want an *Error", err)
+	}
+	return e.Detail
+}
+
+// TestTS10_ConfigNotRegular checks that a FIFO and a device node as the config
+// path are refused before the open (T-S-10).
+func TestTS10_ConfigNotRegular(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat("/dev/null"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		t.Fatalf("/dev/null is not a character device: %v", err)
+	}
+	for _, r := range []struct{ name, path string }{
+		{"FIFO", fifo}, {"device node", "/dev/null"}, {"directory", dir},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			opened := afterCheckCount(t)
+			_, err := ReadFile(r.path)
+			if want := fmt.Sprintf("config: %q: not a regular file", r.path); err == nil || err.Error() != want {
+				t.Errorf("got %v, want %q", err, want)
+			}
+			if *opened != 0 {
+				t.Error("the file was opened")
+			}
+			if got := loadDetail(t, r.path); got != "not a regular file" {
+				t.Errorf("Load: got detail %q", got)
+			}
+			if *opened != 0 {
+				t.Error("Load opened the file")
+			}
+		})
+	}
+}
+
+// TestTS10_ConfigSwap checks that a file that replaces the config file between
+// the check and the open is refused (T-S-10). The new file can be a regular
+// file or a FIFO.
+func TestTS10_ConfigSwap(t *testing.T) {
+	const want = "the file changed during the read"
+	for _, r := range []struct {
+		name string
+		swap func(t *testing.T, dir, p string)
+	}{
+		{"other file", func(t *testing.T, dir, p string) {
+			if err := os.Rename(writeFile(t, dir, "new.yaml", "foo: bar", 0o600), p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"FIFO", func(t *testing.T, dir, p string) {
+			fifo := filepath.Join(dir, "new-fifo")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(fifo, p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		for _, viaLoad := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s load %v", r.name, viaLoad), func(t *testing.T) {
+				dir := t.TempDir()
+				p := writeFile(t, dir, "config.yaml", "foo: bar", 0o600)
+				swapped := false
+				safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+					if name == p && !swapped {
+						swapped = true
+						r.swap(t, dir, p)
+					}
+				}})
+				var got string
+				if viaLoad {
+					got = loadDetail(t, p)
+				} else {
+					_, err := ReadFile(p)
+					var re *ReadError
+					if !errors.As(err, &re) {
+						t.Fatalf("got %v", err)
+					}
+					got = re.Detail
+				}
+				if !swapped || got != want {
+					t.Errorf("swapped %v, detail %q, want %q", swapped, got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestTS10_ConfigSymlink checks that a symlink to a regular file loads
+// (T-S-10).
+func TestTS10_ConfigSymlink(t *testing.T) {
+	useTestKeys(t)
+	dir := t.TempDir()
+	real := writeFile(t, dir, "real.yaml", base, 0o600)
+	abs := filepath.Join(dir, "abs.yaml")
+	rel := filepath.Join(dir, "rel.yaml")
+	chain := filepath.Join(dir, "chain.yaml")
+	for link, target := range map[string]string{abs: real, rel: "real.yaml", chain: abs} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{abs, rel, chain} {
+		if _, err := ReadFile(p); err != nil {
+			t.Errorf("ReadFile(%s): %v", filepath.Base(p), err)
+		}
+		if _, err := LoadWith(p, []string{tokenVar + "=token"}, testNet); err != nil {
+			t.Errorf("LoadWith(%s): %v", filepath.Base(p), err)
+		}
+	}
+	// A link to a file that is group-writable gets the rule of the target.
+	bad := writeFile(t, dir, "bad.yaml", base, 0o620)
+	link := filepath.Join(dir, "bad-link.yaml")
+	if err := os.Symlink(bad, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(link); err == nil || !strings.Contains(err.Error(), "group or other writable") {
+		t.Errorf("link to a group-writable file: got %v", err)
+	}
+	// A link loop keeps the system cause.
+	loop := filepath.Join(dir, "loop.yaml")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(loop); !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("link loop: got %v", err)
+	}
+}
+
+// TestTS10_ConfigRelativePath checks that a relative config path loads and that
+// an error shows the path as the user gave it.
+func TestTS10_ConfigRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "c.yaml", "foo: bar", 0o600)
+	writeFile(t, dir, "wide.yaml", "foo: bar", 0o666)
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	for _, p := range []string{"c.yaml", "./c.yaml", "sub/../c.yaml", "sub/../sub/../c.yaml"} {
+		if _, err := ReadFile(p); err != nil {
+			t.Errorf("ReadFile(%q): %v", p, err)
+		}
+	}
+	for _, r := range []struct{ path, want string }{
+		{"wide.yaml", `config: "wide.yaml": group or other writable`},
+		{"missing.yaml", `config: "missing.yaml": no such file or directory`},
+		{"sub/missing.yaml", `config: "sub/missing.yaml": no such file or directory`},
+		{"", `config: "": no such file or directory`},
+		{"sub/.", `config: "sub/.": not a regular file`},
+		{"sub/", `config: "sub/": not a regular file`},
+		{"sub/..", `config: "sub/..": not a regular file`},
+		{"c.yaml/x", `config: "c.yaml/x": not a directory`},
+	} {
+		if _, err := ReadFile(r.path); err == nil || err.Error() != r.want {
+			t.Errorf("ReadFile(%q): got %v, want %q", r.path, err, r.want)
+		}
+	}
+}
+
+// TestTS10_ConfigModeOwner checks the mode and owner rules of the config
+// file (T-S-10). It also runs them through LoadWith, as --check does.
+func TestTS10_ConfigModeOwner(t *testing.T) {
+	const (
+		writable = "group or other writable"
+		owner    = "the owner must be root or the current user"
+	)
+	dir := t.TempDir()
+	for _, r := range []struct {
+		name       string
+		mode       os.FileMode
+		otherOwner bool
+		want       string // "" is for a file that loads
+	}{
+		{"0600", 0o600, false, ""},
+		{"0644", 0o644, false, ""},
+		{"group write 0620", 0o620, false, writable},
+		{"other write 0602", 0o602, false, writable},
+		{"other owner", 0o600, true, owner},
+		// The owner rule runs before the mode rule.
+		// A file with both faults gets the owner text.
+		{"other owner and group write", 0o660, true, owner},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			p := writeFile(t, dir, strings.ReplaceAll(r.name, " ", "_")+".yaml", base, r.mode)
+			if r.otherOwner {
+				otherOwner(t, p)
+			}
+			_, err := ReadFile(p)
+			var re *ReadError
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("ReadFile: %v", err)
+			case r.want != "" && (!errors.As(err, &re) || re.Detail != r.want || re.File != p || err.Error() != fmt.Sprintf("config: %q: %s", p, r.want)):
+				t.Errorf("ReadFile: got %v, want %q", err, r.want)
+			}
+			useTestKeys(t)
+			_, err = LoadWith(p, []string{tokenVar + "=token"}, testNet)
+			var e *Error
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("LoadWith: %v", err)
+			case r.want != "" && (!errors.As(err, &e) || e.Detail != r.want || e.Source != p):
+				t.Errorf("LoadWith: got %v, want the detail %q", err, r.want)
+			}
+		})
+	}
+}
+
+// TestTS10_ConfigTooLarge checks that the size text is fixed and that the size
+// is measured on the open file.
+func TestTS10_ConfigTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "big.yaml", padded(64*1024+1), 0o600)
+	_, err := ReadFile(p)
+	if want := fmt.Sprintf("config: %q: the file is larger than 64 KiB", p); err == nil || err.Error() != want {
+		t.Errorf("got %v, want %q", err, want)
+	}
+	if got := loadDetail(t, p); got != "the file is larger than 64 KiB" {
+		t.Errorf("Load: got detail %q", got)
+	}
 }

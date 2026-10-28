@@ -20,8 +20,15 @@ import (
 )
 
 // testDir holds a valid htpasswd file: the default path of the production table does not exist here.
+// It is below the package directory, not the system temporary directory.
+// The htpasswd rule refuses a parent with a group or other write bit.
+// The system temporary directory can have mode 1777.
+// TestMain removes testDir.
 var testDir = func() string {
-	d, err := os.MkdirTemp("", "config-test")
+	d, err := os.MkdirTemp(".", "config-test-")
+	if err == nil {
+		d, err = filepath.Abs(d)
+	}
 	if err == nil {
 		err = os.WriteFile(filepath.Join(d, "htpasswd"), nil, 0o600)
 	}

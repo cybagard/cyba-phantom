@@ -15,10 +15,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -30,13 +30,12 @@ const DefaultStateRoot = defaultStateRoot
 // loader holds the settings that the validators use. A test sets them to use a temporary directory.
 type loader struct {
 	stateRoot string   // stateRoot is the directory that state paths must stay under after symlink resolution.
-	euid      int      // euid is the user that runs the sensor.
 	env       []string // env is the environment that the *_env keys name. The loader does not read the process environment.
 	// net is the network access that LoadWith gets.
 	net Net
 }
 
-func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.Geteuid()} }
+func newLoader() *loader { return &loader{stateRoot: defaultStateRoot} }
 
 // hostname matches host name labels that a dot separates. A label is not empty.
 var hostname = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
@@ -987,32 +986,44 @@ func storeConflict(root string, vals map[string]Value, p string) string {
 	return ""
 }
 
-// checkHtpasswd applies the file rules (04 section 3). The detail is fixed text. The
-// loader shows the path in the Value field. The check opens the resolved file one time,
-// then reads the type, owner, and mode from the open file, as ReadFile does.
-func checkHtpasswd(l *loader, raw string) string {
+// The rules of the htpasswd file and of each directory on its way.
+// The file rule has no mode. The check reads the mode from the open file.
+// So it can give a text for group write, other write and other read.
+var (
+	htpasswdFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true}
+	htpasswdDirRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
+)
+
+// checkHtpasswd applies the file rules (04 section 3). The detail is fixed
+// text. The loader shows the path in the Value field. The check looks at each
+// directory from "/" to the file. This includes the directories of a symlink
+// on the way and of its target. It opens the file one time. Then it reads the
+// type, owner, and mode from the open file, as ReadFile does.
+func checkHtpasswd(_ *loader, raw string) string {
 	if d := checkPathForm(raw); d != "" {
 		return d
 	}
-	r, err := filepath.EvalSymlinks(raw)
-	if err != nil {
+	if err := safefile.CheckPathParents(raw, htpasswdDirRule); err != nil {
+		switch {
+		case errors.Is(err, safefile.ErrOwner), errors.Is(err, safefile.ErrMode):
+			return "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+		case errors.Is(err, safefile.ErrName):
+			return "the htpasswd file is not a regular file"
+		}
 		return "the htpasswd file cannot be resolved"
 	}
-	f, err := os.OpenFile(r, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
+	f, fi, err := safefile.OpenPath(raw, htpasswdFileRule)
+	switch {
+	case errors.Is(err, safefile.ErrType), errors.Is(err, safefile.ErrName):
+		return "the htpasswd file is not a regular file"
+	case errors.Is(err, safefile.ErrOwner):
+		return "the owner of the htpasswd file is not root or the sensor user"
+	case errors.Is(err, safefile.ErrOpen), errors.Is(err, safefile.ErrChanged):
 		return "the htpasswd file cannot be opened"
+	case err != nil:
+		return "the htpasswd file cannot be resolved"
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	switch {
-	case err != nil:
-		return "the htpasswd file cannot be read"
-	case !fi.Mode().IsRegular():
-		return "the htpasswd file is not a regular file"
-	}
-	if uid, ok := fileOwner(fi); !ok || (uid != 0 && int(uid) != l.euid) {
-		return "the owner of the htpasswd file is not root or the sensor user"
-	}
 	switch perm := fi.Mode().Perm(); {
 	case perm&0o020 != 0:
 		return "the htpasswd file is writable by group"

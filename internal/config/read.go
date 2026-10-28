@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -93,55 +94,79 @@ type Doc struct {
 	Lines     map[string]int  // Lines holds the line of each node by path; for a mapping entry, the line of the key
 }
 
+// configRule is the rule for the config file. A symlink at the path is
+// followed. The owner must be root or the current user. The file must have
+// no group or other write bit.
+var configRule = safefile.Rule{
+	Type:      safefile.Regular,
+	Owner:     safefile.OwnerSelfOrRoot,
+	Forbid:    0o022,
+	MaxSize:   maxConfigSize,
+	FollowEnd: true,
+}
+
 // ReadFile reads the configuration file at path and returns a Doc.
+// The shared safe-file package opens the file. It refuses a FIFO or a device
+// before the open. It also refuses a file that changes between the check and
+// the open. A file with a wrong owner and a wrong mode gets the owner text.
 func ReadFile(path string) (*Doc, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	abs, err := absolute(path)
 	if err != nil {
 		return nil, formatOSError(path, err)
+	}
+	f, fi, err := safefile.OpenPath(abs, configRule)
+	if err != nil {
+		return nil, fileError(path, err)
 	}
 	defer f.Close()
 
-	info, err := f.Stat()
+	b, err := safefile.ReadAll(f, fi, configRule)
 	if err != nil {
-		return nil, formatOSError(path, err)
-	}
-
-	if info.Mode()&os.ModeType != 0 {
-		return nil, &ReadError{File: path, Detail: "not a regular file"}
-	}
-
-	mode := info.Mode()
-	if mode&0022 != 0 {
-		return nil, &ReadError{File: path, Detail: "group or other writable"}
-	}
-
-	uid, err := getUid(info)
-	if err != nil {
-		return nil, formatOSError(path, err)
-	}
-
-	if uid != 0 && uid != uint32(os.Geteuid()) {
-		return nil, &ReadError{File: path, Detail: "the owner must be root or the current user"}
-	}
-
-	lr := io.LimitReader(f, maxConfigSize+1)
-	b, err := io.ReadAll(lr)
-	if err != nil {
-		return nil, formatOSError(path, err)
-	}
-
-	if len(b) > maxConfigSize {
-		return nil, &ReadError{File: path, Detail: "the file is larger than 64 KiB"}
+		return nil, fileError(path, err)
 	}
 
 	return ReadBytes(b)
 }
 
-var getUid = func(info os.FileInfo) (uint32, error) {
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		return stat.Uid, nil
+// absolute gives path as an absolute path for the safe-file package. A relative
+// path gets the working directory in front of it. It does not clean the path,
+// so the kernel resolves each dot-dot and symlink as it does for the open.
+func absolute(path string) (string, error) {
+	if path == "" {
+		return "", &os.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
 	}
-	return 0, errors.New("failed to get owner uid")
+	if path[0] == '/' {
+		return path, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return wd + "/" + path, nil
+}
+
+// fileError gives the ReadError for a refusal of the safe-file package. The
+// path is the one that the user gave.
+func fileError(path string, err error) error {
+	var se *safefile.Error
+	if !errors.As(err, &se) {
+		return formatOSError(path, err)
+	}
+	switch {
+	case errors.Is(err, safefile.ErrType), errors.Is(err, safefile.ErrName):
+		return &ReadError{File: path, Detail: "not a regular file"}
+	case errors.Is(err, safefile.ErrMode):
+		return &ReadError{File: path, Detail: "group or other writable"}
+	case errors.Is(err, safefile.ErrOwner):
+		return &ReadError{File: path, Detail: "the owner must be root or the current user"}
+	case errors.Is(err, safefile.ErrSize):
+		return &ReadError{File: path, Detail: "the file is larger than 64 KiB"}
+	case errors.Is(err, safefile.ErrChanged):
+		return &ReadError{File: path, Detail: "the file changed during the read"}
+	case se.Cause != nil:
+		return formatOSError(path, se.Cause)
+	}
+	return &ReadError{File: path, Detail: "the file cannot be read"}
 }
 
 // ReadBytes parses the configuration from a byte slice and returns a Doc.
