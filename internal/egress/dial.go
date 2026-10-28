@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"syscall"
 	"time"
 )
@@ -47,6 +48,44 @@ func SyslogDialer(
 			}
 		}
 		return rule(ctx, network, address, c)
+	}
+	return d, nil
+}
+
+// errItemInput is the error for a bad port or protocol in ItemDialer.
+var errItemInput = errors.New("egress: item dialer needs a port that is not 0 " +
+	"and a tcp or udp protocol")
+
+// ItemDialer gives a dialer for one endpoint item. Besides the address rule,
+// the dialer permits an address in list. It does so only on the port and the
+// protocol of the item. The list is a part of this dialer only. The protocol
+// is "tcp" or "udp". ItemDialer refuses a list with an entry that fails the
+// entry rule of ParsePrivateEntry. It gives the error of that rule. The
+// dialer keeps a copy of the list. The never-list wins over an entry.
+func ItemDialer(
+	list []netip.Prefix, port uint16, proto string, timeout time.Duration,
+) (*net.Dialer, error) {
+	if port == 0 || (proto != "tcp" && proto != "udp") {
+		return nil, errItemInput
+	}
+	for _, p := range list {
+		if err := checkEntry(p); err != nil {
+			return nil, err
+		}
+	}
+	list = slices.Clone(list)
+	d := Dialer(timeout)
+	d.ControlContext = func(
+		_ context.Context, network, address string, _ syscall.RawConn,
+	) error {
+		np, ap, ok := parseDial(network, address)
+		if !ok {
+			return errRefused
+		}
+		if !itemPermits(list, ap.Addr(), ap.Port() == port && np == proto) {
+			return errRefused
+		}
+		return nil
 	}
 	return d, nil
 }

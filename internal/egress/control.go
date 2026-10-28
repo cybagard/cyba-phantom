@@ -12,14 +12,20 @@ import (
 func control(
 	_ context.Context, network, address string, _ syscall.RawConn,
 ) error {
-	if _, ok := protocol(network); !ok {
-		return errRefused
-	}
-	ap, err := netip.ParseAddrPort(address)
-	if err != nil || !Permitted(ap.Addr()) {
+	_, ap, ok := parseDial(network, address)
+	if !ok || !Permitted(ap.Addr()) {
 		return errRefused
 	}
 	return nil
+}
+
+// parseDial maps the network with protocol and parses the address. It gives
+// false when the network is not permitted or the address does not parse. The
+// caller must test the boolean: the address is set when only the network fails.
+func parseDial(network, address string) (string, netip.AddrPort, bool) {
+	proto, ok := protocol(network)
+	ap, err := netip.ParseAddrPort(address)
+	return proto, ap, ok && err == nil
 }
 
 // protocol gives "tcp" or "udp" for the four networks that the rule permits:
