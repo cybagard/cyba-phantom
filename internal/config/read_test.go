@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
@@ -528,8 +530,9 @@ func TestTS10_ConfigSymlink(t *testing.T) {
 	if err := os.Symlink(bad, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadFile(link); err == nil || !strings.Contains(err.Error(), "group or other writable") {
-		t.Errorf("link to a group-writable file: got %v", err)
+	wantBad := fmt.Sprintf("config: %q: group or other writable", link)
+	if _, err := ReadFile(link); err == nil || err.Error() != wantBad {
+		t.Errorf("link to a group-writable file: got %v, want %q", err, wantBad)
 	}
 	// A link loop keeps the system cause.
 	loop := filepath.Join(dir, "loop.yaml")
@@ -547,13 +550,31 @@ func TestTS10_ConfigRelativePath(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "c.yaml", "foo: bar", 0o600)
 	writeFile(t, dir, "wide.yaml", "foo: bar", 0o666)
+	// lnk is a link to a directory at another depth. The kernel resolves
+	// "lnk/.." to x, not to the directory of lnk.
+	if err := os.MkdirAll(filepath.Join(dir, "x", "deep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "x"), "c.yaml", "foo: x", 0o600)
+	if err := os.Symlink("x/deep", filepath.Join(dir, "lnk")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	for _, p := range []string{"c.yaml", "./c.yaml", "sub/../c.yaml", "sub/../sub/../c.yaml"} {
-		if _, err := ReadFile(p); err != nil {
+	for _, p := range []string{"c.yaml", "./c.yaml", "sub/../c.yaml", "sub/../sub/../c.yaml", "lnk/../c.yaml"} {
+		doc, err := ReadFile(p)
+		if err != nil {
 			t.Errorf("ReadFile(%q): %v", p, err)
+			continue
+		}
+		want := "bar"
+		if p == "lnk/../c.yaml" {
+			want = "x"
+		}
+		if got := doc.Leaves["foo"].Value; got != want {
+			t.Errorf("ReadFile(%q): foo is %q, want %q", p, got, want)
 		}
 	}
 	for _, r := range []struct{ path, want string }{
@@ -565,6 +586,9 @@ func TestTS10_ConfigRelativePath(t *testing.T) {
 		{"sub/", `config: "sub/": not a regular file`},
 		{"sub/..", `config: "sub/..": not a regular file`},
 		{"c.yaml/x", `config: "c.yaml/x": not a directory`},
+		// A path that ends in a slash keeps the text of the open.
+		{"missing/", `config: "missing/": no such file or directory`},
+		{"c.yaml/", `config: "c.yaml/": not a directory`},
 	} {
 		if _, err := ReadFile(r.path); err == nil || err.Error() != r.want {
 			t.Errorf("ReadFile(%q): got %v, want %q", r.path, err, r.want)
@@ -621,8 +645,8 @@ func TestTS10_ConfigModeOwner(t *testing.T) {
 	}
 }
 
-// TestTS10_ConfigTooLarge checks that the size text is fixed and that the size
-// is measured on the open file.
+// TestTS10_ConfigTooLarge checks that a file of 64 KiB plus one byte gives the
+// fixed size text, through ReadFile and through Load.
 func TestTS10_ConfigTooLarge(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "big.yaml", padded(64*1024+1), 0o600)
@@ -632,5 +656,37 @@ func TestTS10_ConfigTooLarge(t *testing.T) {
 	}
 	if got := loadDetail(t, p); got != "the file is larger than 64 KiB" {
 		t.Errorf("Load: got detail %q", got)
+	}
+}
+
+// TestTS10_ConfigProcSize checks that a file whose size in fstat differs from
+// the bytes of the read is refused. /proc/self/status has size 0 and holds
+// bytes (T-S-10). The safe-file hooks have no hook before the read, so the test
+// cannot make a file grow during the read.
+func TestTS10_ConfigProcSize(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux has a /proc file with size 0 and bytes on read")
+	}
+	const p = "/proc/self/status"
+	_, err := ReadFile(p)
+	if want := fmt.Sprintf("config: %q: the file changed during the read", p); err == nil || err.Error() != want {
+		t.Errorf("got %v, want %q", err, want)
+	}
+}
+
+// TestTS10_RuleValues checks the values of the three file rules. The owner
+// must be root or the current user for each rule.
+func TestTS10_RuleValues(t *testing.T) {
+	for _, r := range []struct {
+		name      string
+		got, want safefile.Rule
+	}{
+		{"config file", configRule, safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022, MaxSize: 64 * 1024, FollowEnd: true}},
+		{"htpasswd file", htpasswdFileRule, safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true}},
+		{"htpasswd directory", htpasswdDirRule, safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}},
+	} {
+		if r.got != r.want {
+			t.Errorf("%s: got %+v, want %+v", r.name, r.got, r.want)
+		}
 	}
 }

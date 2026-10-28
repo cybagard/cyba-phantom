@@ -763,7 +763,7 @@ func TestTU10_FileThroughLoad(t *testing.T) {
 	}
 }
 
-// The fixed texts of the htpasswd rules. The tests compare them in full.
+// These are the fixed texts of the htpasswd rules. The tests compare them in full.
 const (
 	htpasswdKey       = "ops.basic_auth_htpasswd"
 	htpasswdResolve   = "the htpasswd file cannot be resolved"
@@ -811,25 +811,31 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 	d := pkgTempDir(t)
 	file := func(name string, mode os.FileMode) string { return writeFile(t, d, name, "u:hash\n", mode) }
 	good := file("good", 0o600)
+	link := func(name, target string) string {
+		p := filepath.Join(d, name)
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 	for _, r := range []struct {
 		name, path, want string
 	}{
 		{"0600", good, ""},
 		{"0400", file("r", 0o400), ""},
 		{"0640", file("g-read", 0o640), ""},
-		{"symlink to a regular file", func() string {
-			p := filepath.Join(d, "link")
-			if err := os.Symlink(good, p); err != nil {
-				t.Fatal(err)
-			}
-			return p
-		}(), ""},
+		{"symlink to a regular file", link("link", good), ""},
 		{"group write 0620", file("gw", 0o620), htpasswdGroupW},
 		{"other write 0602", file("ow", 0o602), htpasswdOtherW},
 		{"all write 0666", file("aw", 0o666), htpasswdGroupW},
 		{"other read 0604", file("or", 0o604), htpasswdOtherR},
+		{"other read and write 0606", file("orw", 0o606), htpasswdOtherW},
 		{"directory", d, htpasswdNotFile},
 		{"missing", filepath.Join(d, "missing"), htpasswdResolve},
+		{"a regular file in the middle", filepath.Join(good, "x"), htpasswdResolve},
+		// The parent walk passes these. The stat of OpenPath gives ENOTDIR.
+		{"link to a file and a slash", link("to-file-slash", good+"/"), htpasswdResolve},
+		{"link to a file and a dot", link("to-file-dot", good+"/."), htpasswdResolve},
 		{"root directory", "/", htpasswdNotFile},
 	} {
 		t.Run(r.name, func(t *testing.T) { htpasswdBoth(t, r.path, r.want) })
@@ -887,14 +893,12 @@ func TestTS10_HtpasswdNotRegular(t *testing.T) {
 					opened++
 				}
 			}})
-			// "/dev" can have a mode that the directory rule refuses.
-			if r.path == "/dev/null" {
-				if got := checkHtpasswd(&loader{}, r.path); got != htpasswdNotFile && got != htpasswdDirDetail {
-					t.Errorf("check: got %q", got)
-				}
-			} else {
-				htpasswdBoth(t, r.path, htpasswdNotFile)
+			// "/dev" can have a mode that the directory rule refuses. Then the
+			// row cannot reach the type rule.
+			if err := safefile.CheckPathParents(r.path, htpasswdDirRule); err != nil {
+				t.Skipf("the directory rule refuses a parent of %s: %v", r.path, err)
 			}
+			htpasswdBoth(t, r.path, htpasswdNotFile)
 			if opened != 0 {
 				t.Error("the file was opened")
 			}
@@ -2490,6 +2494,9 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 		})
 	}
 	c := loadWants(t, both(0, 1), "")
+	if c == nil {
+		t.Fatalf("the load of one certificate failed")
+	}
 	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != "/etc/phantom/a.pem" {
 		t.Errorf("got %+v, %v", v, ok)
 	}

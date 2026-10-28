@@ -986,7 +986,7 @@ func storeConflict(root string, vals map[string]Value, p string) string {
 	return ""
 }
 
-// The rules of the htpasswd file and of each directory on its way.
+// These are the rules of the htpasswd file and of each directory on its way.
 // The file rule has no mode. The check reads the mode from the open file.
 // So it can give a text for group write, other write and other read.
 var (

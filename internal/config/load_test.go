@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -38,7 +39,16 @@ var testDir = func() string {
 	return d
 }()
 
+// TestMain stops the run when a directory above the package has a group or
+// other write bit or another owner. The htpasswd file rule refuses each
+// fixture below such a directory, and many tests would fail with other texts.
 func TestMain(m *testing.M) {
+	// The file name is for the walk: it checks the package directory and above.
+	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "load_test.go"), htpasswdDirRule); err != nil {
+		fmt.Fprintf(os.Stderr, "the tests need a checkout whose parent directories have no group or other write bit and are owned by root or the current user: %v\n", err)
+		os.RemoveAll(testDir)
+		os.Exit(1)
+	}
 	code := m.Run()
 	os.RemoveAll(testDir)
 	os.Exit(code)

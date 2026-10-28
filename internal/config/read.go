@@ -116,13 +116,13 @@ func ReadFile(path string) (*Doc, error) {
 	}
 	f, fi, err := safefile.OpenPath(abs, configRule)
 	if err != nil {
-		return nil, fileError(path, err)
+		return nil, fileError(path, abs, err)
 	}
 	defer f.Close()
 
 	b, err := safefile.ReadAll(f, fi, configRule)
 	if err != nil {
-		return nil, fileError(path, err)
+		return nil, fileError(path, abs, err)
 	}
 
 	return ReadBytes(b)
@@ -138,22 +138,41 @@ func absolute(path string) (string, error) {
 	if path[0] == '/' {
 		return path, nil
 	}
-	wd, err := os.Getwd()
+	// os.Getwd can return $PWD, which can be a symlink path. The kernel
+	// resolves a relative open against the inode of the working directory.
+	wd, err := syscall.Getwd()
 	if err != nil {
 		return "", err
 	}
 	return wd + "/" + path, nil
 }
 
+// nameError gives the ReadError for a path that ends in "/", "/." or "/..".
+// The text is that of the open that the loader made before. A stat of abs
+// gives the system error, or "not a regular file" for a directory. The error
+// shows the path that the user gave.
+func nameError(path, abs string) error {
+	if _, err := os.Stat(abs); err != nil {
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return formatOSError(path, err)
+	}
+	return &ReadError{File: path, Detail: "not a regular file"}
+}
+
 // fileError gives the ReadError for a refusal of the safe-file package. The
-// path is the one that the user gave.
-func fileError(path string, err error) error {
+// path is the one that the user gave. abs is the path that the package got.
+func fileError(path, abs string, err error) error {
 	var se *safefile.Error
 	if !errors.As(err, &se) {
 		return formatOSError(path, err)
 	}
 	switch {
-	case errors.Is(err, safefile.ErrType), errors.Is(err, safefile.ErrName):
+	case errors.Is(err, safefile.ErrName):
+		return nameError(path, abs)
+	case errors.Is(err, safefile.ErrType):
 		return &ReadError{File: path, Detail: "not a regular file"}
 	case errors.Is(err, safefile.ErrMode):
 		return &ReadError{File: path, Detail: "group or other writable"}

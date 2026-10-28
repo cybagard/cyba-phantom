@@ -3,6 +3,9 @@
 cover*.out
 internal/safefile/parents*/
 tools/bundle-sign/tmp-*/
+internal/config/config-test-*/
+internal/config/tmp-*/
+cmd/phantom/tmp-*/
 
 # dev tooling storage
 .kilo/
