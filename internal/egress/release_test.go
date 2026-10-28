@@ -1034,31 +1034,32 @@ func walkError(root, p string, err error) error {
 	return err
 }
 
-// skippedDir tells if rel is in a folder that scan skips. The path rel is below
-// the scan root. A skipped folder is testdata or starts with "." or "_".
-func skippedDir(rel string) bool {
+// inDirMatching tells if a folder of rel has a name that match accepts. The
+// last element of rel is the entry itself, so it does not count.
+func inDirMatching(rel string, match func(name string) bool) bool {
 	dir := path.Dir(rel)
 	if dir == "." {
 		return false
 	}
-	return slices.ContainsFunc(strings.Split(dir, "/"), func(el string) bool {
+	return slices.ContainsFunc(strings.Split(dir, "/"), match)
+}
+
+// skippedDir tells if rel is in a folder that scan skips. The path rel is below
+// the scan root. A skipped folder is testdata or starts with "." or "_".
+func skippedDir(rel string) bool {
+	return inDirMatching(rel, func(el string) bool {
 		return el == "testdata" || strings.HasPrefix(el, ".") || strings.HasPrefix(el, "_")
 	})
 }
 
 // fixtureDirPrefix starts the name of a temporary folder that other tests make
-// below their package folder. Its name has only digits after the prefix.
+// below their package folder. The folder name has only digits after the prefix.
 const fixtureDirPrefix = "_tmp-"
 
 // inFixtureDir tells if a folder of rel is a test fixture folder. The name of
-// the folder is fixtureDirPrefix and one or more ASCII digits. The last
-// element of rel is the entry itself, so it does not count.
+// the folder is fixtureDirPrefix and one or more ASCII digits.
 func inFixtureDir(rel string) bool {
-	dir := path.Dir(rel)
-	if dir == "." {
-		return false
-	}
-	return slices.ContainsFunc(strings.Split(dir, "/"), func(el string) bool {
+	return inDirMatching(rel, func(el string) bool {
 		digits, ok := strings.CutPrefix(el, fixtureDirPrefix)
 		return ok && digits != "" && strings.Trim(digits, "0123456789") == ""
 	})
@@ -1829,6 +1830,7 @@ func TestTS21ScanFixtureDirSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	for _, d := range []string{
 		"sub", "_tmp-1/a", "_tmp-12", "_tmp-x", "_tmp-", "tmp-1", "_tmp-1x", "x_tmp-1",
+		"_tmp-\U00000661", "_tmp-\U0000ff11", "pkg/_tmp-1",
 	} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			t.Fatal(err)
@@ -1836,17 +1838,20 @@ func TestTS21ScanFixtureDirSymlinks(t *testing.T) {
 	}
 	// Each target is relative to the folder of the link.
 	for link, target := range map[string]string{
-		"_tmp-1/l":        "../sub",
-		"_tmp-1/a/link":   "../../sub",
-		"_tmp-12/l":       "../sub",
-		"_tmp-x/l":        "../sub",
-		"_tmp-/l":         "../sub",
-		"tmp-1/l":         "../sub",
-		"_tmp-1x/l":       "../sub",
-		"x_tmp-1/l":       "../sub",
-		"sub/_tmp-1":      "..",
-		"sub/to_fixture":  "../_tmp-1",
-		"sub/to_fixture2": "../_tmp-1/a/link",
+		"_tmp-1/l":          "../sub",
+		"_tmp-1/a/link":     "../../sub",
+		"_tmp-12/l":         "../sub",
+		"_tmp-x/l":          "../sub",
+		"_tmp-/l":           "../sub",
+		"tmp-1/l":           "../sub",
+		"_tmp-1x/l":         "../sub",
+		"x_tmp-1/l":         "../sub",
+		"_tmp-\U00000661/l": "../sub",
+		"_tmp-\U0000ff11/l": "../sub",
+		"pkg/_tmp-1/l":      "../../sub",
+		"sub/_tmp-1":        "..",
+		"sub/to_fixture":    "../_tmp-1",
+		"sub/to_fixture2":   "../_tmp-1/a/link",
 	} {
 		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
 			t.Fatal(err)
@@ -1856,6 +1861,8 @@ func TestTS21ScanFixtureDirSymlinks(t *testing.T) {
 		"_tmp-/l:1: symbolic link",
 		"_tmp-1x/l:1: symbolic link",
 		"_tmp-x/l:1: symbolic link",
+		"_tmp-\U00000661/l:1: symbolic link",
+		"_tmp-\U0000ff11/l:1: symbolic link",
 		"sub/_tmp-1:1: symbolic link",
 		"sub/to_fixture2:1: symbolic link",
 		"sub/to_fixture:1: symbolic link",

@@ -1,7 +1,7 @@
 # build artifacts
 /bin/
 cover*.out
-internal/safefile/parents*/
+internal/safefile/_tmp-*/
 tools/bundle-sign/_tmp-*/
 internal/config/config-test-*/
 internal/config/_tmp-*/
