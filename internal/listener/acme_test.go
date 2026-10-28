@@ -1096,8 +1096,17 @@ func TestTS27RootsParseIsStrict(t *testing.T) {
 }
 
 // TestTS27IssuerGetsTheRootsOfTheField: the issuer trusts the pool of the
-// field, or nil with no field. The global default is not used.
+// field, or nil with no field. The global default has no roots after NewACME.
+// NewACME refuses a zero-value field, which has no pool.
 func TestTS27IssuerGetsTheRootsOfTheField(t *testing.T) {
+	st, _ := newStore(t)
+	_, err := NewACME(ACMEParams{
+		Names: []string{"decoy.test"}, CA: "https://ca.test/dir", Storage: st, Host: "127.0.0.1", Port: 8443,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CARoots: &ACMERoots{},
+	})
+	if !errors.Is(err, errRootsNotParsed) {
+		t.Errorf("zero-value roots: NewACME error = %v, want errRootsNotParsed", err)
+	}
 	roots := mustRoots(t, pemOf("CERTIFICATE", testCertDER(t, 1, nil), nil))
 	for _, c := range []struct {
 		label string
@@ -1205,29 +1214,42 @@ func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http
 
 // TestTS26ProxyAppliesThePrivateList: the production check permits an address
 // of the list on the CA port. It uses the guard order of the egress package.
+// Two rows have a list and a request to the CA name on another port, and to
+// another name. The guard refuses both.
 func TestTS26ProxyAppliesThePrivateList(t *testing.T) {
 	for _, c := range []struct {
 		label  string
 		ca     string
+		reqURL string // empty means the CA URL
 		list   []string
 		addrs  []string
+		other  bool // the addresses are also the answer for other.test
 		refuse bool
 	}{
-		{"private address in the list", "https://ca.test/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, false},
-		{"metadata address in the list", "https://ca.test/dir", []string{"100.64.0.0/10"}, []string{"100.100.100.200"}, true},
-		{"mapped address in the list", "https://ca.test/dir", []string{"10.0.0.0/8"}, []string{"::ffff:10.1.2.3"}, false},
-		{"no list", "https://ca.test/dir", nil, []string{"10.1.2.3"}, true},
-		{"one address out of the list", "https://ca.test/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3", "169.254.169.254"}, true},
-		{"literal in the list", "https://10.1.2.3/dir", []string{"10.0.0.0/8"}, nil, false},
-		{"literal with no list", "https://10.1.2.3/dir", nil, nil, true},
+		{"private address in the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, false, false},
+		{"metadata address inside a list prefix", "https://ca.test/dir", "", []string{"100.64.0.0/10"}, []string{"100.100.100.200"}, false, true},
+		{"mapped address in the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"::ffff:10.1.2.3"}, false, false},
+		{"no list", "https://ca.test/dir", "", nil, []string{"10.1.2.3"}, false, true},
+		{"one address out of the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"10.1.2.3", "169.254.169.254"}, false, true},
+		{"literal in the list", "https://10.1.2.3/dir", "", []string{"10.0.0.0/8"}, nil, false, false},
+		{"literal with no list", "https://10.1.2.3/dir", "", nil, nil, false, true},
+		{"CA name on another port", "https://ca.test/dir", "https://ca.test:444/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, false, true},
+		{"other name in the list", "https://ca.test/dir", "https://other.test/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, true, true},
 	} {
 		dns := &stubDNS{answers: map[string][]netip.Addr{}}
 		for _, s := range c.addrs {
 			dns.answers["ca.test."] = append(dns.answers["ca.test."], netip.MustParseAddr(s))
+			if c.other {
+				dns.answers["other.test."] = append(dns.answers["other.test."], netip.MustParseAddr(s))
+			}
 		}
 		proxy, err := prodProxy(t, c.ca, c.list, dns)
 		mustNil(t, err)
-		req, err := http.NewRequest(http.MethodGet, c.ca, nil)
+		reqURL := c.reqURL
+		if reqURL == "" {
+			reqURL = c.ca
+		}
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 		mustNil(t, err)
 		u, err := proxy(req)
 		if (err != nil) != c.refuse || u != nil || (err != nil && err != errEgress) {
@@ -1239,9 +1261,9 @@ func TestTS26ProxyAppliesThePrivateList(t *testing.T) {
 	}
 }
 
-// TestTS26NameBelowInvalidHasNoLookup: a host that is invalid, or below it,
-// is refused with no query. The suffix compare needs a dot. Other names get a
-// query.
+// TestTS26NameBelowInvalidHasNoLookup: the guard refuses a host that is
+// invalid or below it, and sends no query. The suffix compare needs a dot. The
+// guard sends a query for each other name.
 func TestTS26NameBelowInvalidHasNoLookup(t *testing.T) {
 	for _, c := range []struct {
 		ca, reqHost string

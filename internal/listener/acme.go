@@ -40,6 +40,8 @@ var (
 	errEgress = errors.New("listener: acme: request is not for the configured CA")
 	errName   = errors.New("listener: acme: server name is not configured")
 
+	errRootsNotParsed = errors.New("listener: acme: the CA roots are not from ParseACMERoots")
+
 	errNoChallenge = errors.New("listener: acme: no active challenge for the server name")
 )
 
@@ -59,7 +61,8 @@ type ACMEParams struct {
 
 	// CARoots are the roots that the ACME client trusts for the CA
 	// (acme.ca_root). Nil means no acme.ca_root, and then the client uses the
-	// roots of the system.
+	// roots of the system. NewACME refuses a value that ParseACMERoots did not
+	// make.
 	CARoots *ACMERoots
 
 	// CAPrivate is the acme.ca_private list. The guard permits an address of
@@ -69,9 +72,9 @@ type ACMEParams struct {
 	// egressRule and egressResolver are test hooks. Only tests in this package
 	// set them. egressRule replaces the address rule. egressResolver replaces
 	// the resolver that looks up the name of the CA. Both are nil in
-	// production, and then the client uses egress.Permitted and
-	// net.DefaultResolver. No config key, flag, environment variable, or other
-	// input sets them.
+	// production. Then the client uses the item rule of the egress package
+	// with the CAPrivate list (itemRule). It uses net.DefaultResolver. No
+	// config key, flag, environment variable, or other input sets them.
 	egressRule     func(netip.Addr) bool
 	egressResolver *net.Resolver
 
@@ -209,6 +212,9 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	case p.Storage == nil || p.Logger == nil || p.Port < 1 || p.Port > 65535:
 		return nil, errors.New("listener: acme: storage or logger is not set, or the port is not 1 to 65535")
 	}
+	if p.CARoots != nil && p.CARoots.pool == nil {
+		return nil, errRootsNotParsed
+	}
 	a := &ACME{names: slices.Clone(p.Names), allowed: map[string]struct{}{}, logger: p.Logger, challenge: certmagic.GetACMEChallenge}
 	for _, n := range a.names {
 		if !validName(n) {
@@ -220,12 +226,14 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		a.allowed[n] = struct{}{}
 	}
 	// The egress package has the only copy of the guard order.
-	port, _ := strconv.Atoi(portOf(ca))
-	item, err := egress.ItemDialer(p.CAPrivate, uint16(port), "tcp", 0)
+	// The parse cannot fail: validPort checked the port above.
+	port64, _ := strconv.ParseUint(portOf(ca), 10, 16)
+	port := uint16(port64)
+	item, err := egress.ItemDialer(p.CAPrivate, port, "tcp", 0)
 	if err != nil {
 		return nil, err
 	}
-	rule, resolver := itemRule(item, uint16(port)), p.egressResolver
+	rule, resolver := itemRule(item, port), p.egressResolver
 	if hook := p.egressRule; hook != nil {
 		rule = func(a netip.Addr) bool { return hook(a.Unmap()) }
 	}
@@ -332,13 +340,12 @@ func isLoggedEvent(event string) bool {
 // An address with a zone is refused. A name is compared as lower-case text.
 //
 // After that, the host must pass rule. For an IP literal, rule checks the
-// parsed address, with no lookup. A name below invalid is refused with no
-// lookup. Any other name is looked up with resolver. The
-// request is refused when the lookup fails, gives no address, or gives an
-// address that rule refuses. Each
-// refusal gives errEgress, which holds no address, name or port. The function
-// never gives a proxy, so it never uses a proxy from the environment. seen may
-// be nil.
+// parsed address, with no lookup. The guard refuses a name below invalid with
+// no lookup. It looks up each other name with resolver. It refuses the request
+// when the lookup fails, gives no address, or gives an address that rule
+// refuses. Each refusal gives errEgress, which holds no address, name or port.
+// The function never gives a proxy, so it never uses a proxy from the
+// environment. seen may be nil.
 //
 // The transport calls the function for each new connection and for each
 // HTTP/1.1 request. A request on a pooled HTTP/2 connection to the same
