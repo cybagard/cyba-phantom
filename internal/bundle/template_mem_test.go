@@ -386,8 +386,8 @@ func TestTS25Child(t *testing.T) {
 	stack := after.StackSys
 	runtime.GC()
 	runtime.ReadMemStats(&after)
-	// Read every byte of the fill file and of hold after the parse. A byte
-	// that the child never wrote does not count.
+	// The child reads every byte of the fill file and of hold after the
+	// parse. A byte that the child never wrote does not count.
 	held := bytes.Count(hold, []byte("y"))
 	for n, b := range a.files {
 		if n == "assets/fill.bin" {

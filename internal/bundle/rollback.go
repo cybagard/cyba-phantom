@@ -42,14 +42,15 @@ func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, 
 }
 
 // errStateInput is the error for a version or a class that the state cannot
-// hold. A Manifest that code builds by hand can cause it. So can a class that
-// is not in classText.
+// hold. A Manifest that code builds by hand can cause it. A class that is not
+// in classText also causes it.
 var errStateInput = errors.New("bundle: version or class not valid for the state")
 
 // Record stores an accepted bundle as the version state. The loader calls it
 // before the swap. A state fault or a rollback gives an error and no write.
-// A version or class that readState refuses gives an error and no write too.
-// This holds also for the SHA-256 of the state. Then a valid bundle causes
+// A version that validVersion refuses, or a class that is not in classText,
+// gives an error and no write. Record checks them also for a bundle with the
+// SHA-256 of the state. Such a bundle with a valid version and class causes
 // no write.
 func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	st, err := readState(r.root)
