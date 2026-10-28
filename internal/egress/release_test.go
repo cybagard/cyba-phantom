@@ -326,9 +326,11 @@ func lineSet(lines []string) map[string]bool {
 // dependency on a linux platform.
 // The loop has no subtests. Thus the union of the platforms does not depend on
 // the -run filter.
-// Each program has the package runtime. Thus a platform with a cut list fails.
-// Three changes of this function stay live. Here is why for each one:
-//   - The deps of one linux platform go to another. The two platforms list
+// Each program has the package runtime. Thus a list without runtime fails,
+// for example a list cut to the two commands. A cut list that keeps runtime
+// and the commands still passes.
+// Three other changes of this function stay live. Here is why for each one:
+//   - The deps of linux/amd64 go to linux/s390x. The two platforms list
 //     the same packages, so the data does not change.
 //   - The context is replaced by wantContext. A right go list gives that
 //     same value, so only a wrong go list differs. The wrong context case of
