@@ -1,4 +1,4 @@
-// The static certificate read (SEC-31, SEC-21) makes one tls.Certificate.
+// ParseStatic (SEC-31, SEC-21) makes one tls.Certificate.
 // Its input is the bytes of a certificate file and of a key file.
 // It opens no file. It does not serve, log or warn.
 // Each refusal is a fixed error. No error text holds a byte of a file,
@@ -54,8 +54,9 @@ const (
 // Outside the blocks, only the bytes space, tab, CR and LF are permitted.
 // The leaf is valid for name at now. Only the SAN entries (DNS names and IP
 // addresses) count, not the Common Name.
-// The leaf is not a CA certificate. Its key is RSA with 2048 to 4096 bits,
-// ECDSA P-256 or P-384, or Ed25519. The key matches the leaf.
+// The leaf is not a CA certificate. The public key of the leaf is RSA with
+// 2048 to 4096 bits, ECDSA P-256 or P-384, or Ed25519.
+// The private key of the key file matches the leaf.
 // The result has the leaf parsed.
 func ParseStatic(
 	name string, certPEM, keyPEM []byte, now time.Time,
@@ -85,11 +86,6 @@ func ParseStatic(
 			leaf = c
 		}
 		out.Certificate = append(out.Certificate, b.Bytes)
-	}
-	switch keyBlocks[0].Type {
-	case pkcs8Type, pkcs1Type, sec1Type:
-	default:
-		return tls.Certificate{}, ErrStaticType
 	}
 	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageCertSign != 0 {
 		return tls.Certificate{}, ErrStaticCA
@@ -147,9 +143,10 @@ func readBlocks(data []byte) ([]*pem.Block, error) {
 
 // parseStaticKey reads the key in the one form that the block type names:
 // PKCS8, PKCS1 or SEC1. It does not try another form.
-// The Go parsers ignore bytes and ASN.1 elements at the end of a sequence.
+// The PKCS8 and SEC1 parsers ignore bytes and elements after the key.
 // So parseStaticKey encodes the key again in the same form and refuses
 // a key whose encoding differs from der.
+// A block type that names no form gives ErrStaticType.
 // It does not return the library error, which can hold the text of the key.
 func parseStaticKey(typ string, der []byte) (any, error) {
 	var key any
@@ -168,14 +165,16 @@ func parseStaticKey(typ string, der []byte) (any, error) {
 		}
 		again, err = x509.MarshalPKCS8PrivateKey(key)
 	case pkcs1Type:
-		k, perr := x509.ParsePKCS1PrivateKey(der)
-		if perr != nil {
+		var k *rsa.PrivateKey
+		k, err = x509.ParsePKCS1PrivateKey(der)
+		if err != nil {
 			return nil, ErrStaticKey
 		}
 		key, again = k, x509.MarshalPKCS1PrivateKey(k)
 	case sec1Type:
-		k, perr := x509.ParseECPrivateKey(der)
-		if perr != nil {
+		var k *ecdsa.PrivateKey
+		k, err = x509.ParseECPrivateKey(der)
+		if err != nil {
 			return nil, ErrStaticKey
 		}
 		key = k

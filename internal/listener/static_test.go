@@ -3,6 +3,7 @@ package listener
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -31,7 +32,7 @@ type staticKeys struct {
 	rsa2048, rsa4096  *rsa.PrivateKey
 	p256, p256b, p384 *ecdsa.PrivateKey
 	p224, p521        *ecdsa.PrivateKey
-	ed                ed25519.PrivateKey
+	ed, ed2           ed25519.PrivateKey
 	issuer            *ecdsa.PrivateKey
 	issuerDER         []byte
 }
@@ -57,6 +58,8 @@ var staticKeySet = sync.OnceValue(func() *staticKeys {
 		must(err)
 	}
 	_, k.ed, err = ed25519.GenerateKey(rand.Reader)
+	must(err)
+	_, k.ed2, err = ed25519.GenerateKey(rand.Reader)
 	must(err)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test issuer"},
@@ -230,6 +233,8 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 		{"name in the SAN, other common name", leafSpec{cn: "other.internal", dns: []string{staticHost}}, staticHost, staticNow, nil},
 		{"key of another leaf, same type", leafSpec{pub: &ks.p256b.PublicKey}, staticHost, staticNow, ErrStaticMismatch},
 		{"key of another leaf, other type", leafSpec{pub: ks.ed.Public()}, staticHost, staticNow, ErrStaticMismatch},
+		{"RSA key of another RSA leaf", leafSpec{key: ks.rsa2048, pub: fakeRSA(2048)}, staticHost, staticNow, ErrStaticMismatch},
+		{"Ed25519 key of another Ed25519 leaf", leafSpec{key: ks.ed, pub: ks.ed2.Public()}, staticHost, staticNow, ErrStaticMismatch},
 		{"expired", leafSpec{}, staticHost, staticNow.Add(hour + time.Second), ErrStaticExpired},
 		{"not valid yet", leafSpec{}, staticHost, staticNow.Add(-hour - time.Second), ErrStaticNotYet},
 		{"valid at not before", leafSpec{}, staticHost, staticNow.Add(-hour), nil},
@@ -263,6 +268,28 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 			if cert.Leaf == nil || !bytes.Equal(cert.Leaf.Raw, der) || cert.PrivateKey == nil {
 				t.Fatal("result has no leaf or no key")
 			}
+		})
+	}
+}
+
+// T-S-27: the leaf checks run before the key parse.
+// A weak leaf or a CA leaf gives its own error, also when the key block does
+// not parse.
+func TestTS27StaticCheckOrder(t *testing.T) {
+	badKey := pemOf("PRIVATE KEY", []byte("not a key"))
+	rows := []struct {
+		name string
+		spec leafSpec
+		want error
+	}{
+		{"RSA 1024 leaf and a key that does not parse", leafSpec{pub: fakeRSA(1024)}, ErrStaticKeyKind},
+		{"CA leaf and a key that does not parse", leafSpec{isCA: true}, ErrStaticCA},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			der, _ := r.spec.build(t)
+			_, err := ParseStatic(staticHost, pemOf("CERTIFICATE", der), badKey, staticNow)
+			noFileText(t, err, r.want)
 		})
 	}
 }
@@ -340,6 +367,11 @@ func TestTS27StaticKeyEncoding(t *testing.T) {
 	sec1 := must(x509.MarshalECPrivateKey(ks.p256))
 	pkcs1 := x509.MarshalPKCS1PrivateKey(ks.rsa2048)
 	rsaP8 := must(x509.MarshalPKCS8PrivateKey(ks.rsa2048))
+	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x25519P8 := must(x509.MarshalPKCS8PrivateKey(x25519))
 
 	var p8Form pkcs8Form
 	if _, err := asn1.Unmarshal(p8, &p8Form); err != nil {
@@ -376,6 +408,7 @@ func TestTS27StaticKeyEncoding(t *testing.T) {
 		{"PKCS8 key under the PKCS1 type", ks.rsa2048, "RSA PRIVATE KEY", rsaP8, ErrStaticKey},
 		{"PKCS8 key under the SEC1 type", ks.p256, "EC PRIVATE KEY", p8, ErrStaticKey},
 		{"SEC1 key under the PKCS8 type", ks.p256, "PRIVATE KEY", sec1, ErrStaticKey},
+		{"PKCS8 X25519 key", ks.p256, "PRIVATE KEY", x25519P8, ErrStaticKey},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
