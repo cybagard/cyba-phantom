@@ -3,13 +3,21 @@ package listener
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"log/slog"
+	"math/big"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -979,5 +987,305 @@ func TestTS16EventLinesHoldTheConfiguredNameOnly(t *testing.T) {
 	}
 	if a.cfg.ShouldEmitFunc("tls_get_certificate") || !a.cfg.ShouldEmitFunc("cert_obtained") {
 		t.Error("ShouldEmitFunc gives the wrong answer")
+	}
+}
+
+// testKey is the key of all test certificates. It is one P-256 key for each
+// test binary.
+var testKey = sync.OnceValue(func() *ecdsa.PrivateKey {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return k
+})
+
+// testCertDER makes a self-signed CA certificate with the serial number serial.
+// mod changes the template first.
+func testCertDER(t testing.TB, serial int64, mod func(*x509.Certificate)) []byte {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(serial),
+		Subject:               pkix.Name{CommonName: "test root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	if mod != nil {
+		mod(tmpl)
+	}
+	der, err := x509.CreateCertificate(crand.Reader, tmpl, tmpl, &testKey().PublicKey, testKey())
+	mustNil(t, err)
+	return der
+}
+
+// pemOf returns the PEM text of one block.
+func pemOf(typ string, der []byte, headers map[string]string) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: typ, Headers: headers, Bytes: der})
+}
+
+// certPEM returns the PEM text of a certificate.
+func certPEM(c *x509.Certificate) []byte { return pemOf("CERTIFICATE", c.Raw, nil) }
+
+// mustRoots parses text with the strict parse of the roots.
+func mustRoots(t testing.TB, text []byte) *ACMERoots {
+	t.Helper()
+	r, err := ParseACMERoots(text)
+	mustNil(t, err)
+	return r
+}
+
+// TestTS27RootsParseIsStrict: only certificate blocks of CA certificates pass.
+// Each refusal is one fixed error, and its text holds no byte of the file.
+func TestTS27RootsParseIsStrict(t *testing.T) {
+	const mark = "MARKSTRING"
+	ca1 := pemOf("CERTIFICATE", testCertDER(t, 1, nil), nil)
+	ca2 := pemOf("CERTIFICATE", testCertDER(t, 2, nil), nil)
+	leaf := pemOf("CERTIFICATE", testCertDER(t, 3, func(c *x509.Certificate) { c.IsCA = false }), nil)
+	noBC := pemOf("CERTIFICATE", testCertDER(t, 4, func(c *x509.Certificate) { c.BasicConstraintsValid = false }), nil)
+	key, err := x509.MarshalPKCS8PrivateKey(testKey())
+	mustNil(t, err)
+	join := func(parts ...[]byte) []byte { return slices.Concat(parts...) }
+	for _, c := range []struct {
+		label string
+		text  []byte
+		want  error
+	}{
+		{"leaf", leaf, errRootsNotCA},
+		{"CA without valid basic constraints", noBC, errRootsNotCA},
+		{"CA then leaf", join(ca1, leaf), errRootsNotCA},
+		{"other block", pemOf("OTHER", []byte(mark), nil), errRootsType},
+		{"private key", pemOf("PRIVATE KEY", key, nil), errRootsType},
+		{"text before", join([]byte(mark+"\n"), ca1), errRootsText},
+		{"text after", join(ca1, []byte(mark+"\n")), errRootsText},
+		{"bad begin line before a block", join([]byte("-----BEGIN JUNK-----\n"+mark+"\n"), ca1), errRootsText},
+		{"no-break space before", join([]byte("\u00a0"), ca1), errRootsText},
+		{"two no-break spaces before", join([]byte("\u00a0\u00a0"), ca1), errRootsText},
+		{"no-break space between blocks", join(ca1, []byte("\u00a0"), ca2), errRootsText},
+		{"header", pemOf("CERTIFICATE", testCertDER(t, 5, nil), map[string]string{"Mark": mark}), errRootsHeader},
+		{"empty", nil, errRootsEmpty},
+		{"only space", []byte(" \t\r\n"), errRootsEmpty},
+		{"block that does not parse", pemOf("CERTIFICATE", []byte(mark), nil), errRootsParse},
+	} {
+		r, err := ParseACMERoots(c.text)
+		if r != nil || !errors.Is(err, c.want) {
+			t.Errorf("%s: got %v, %v; want %v", c.label, r, err, c.want)
+			continue
+		}
+		for _, bad := range []string{"-----", "CERTIFICATE", "PRIVATE", "OTHER", "JUNK", mark} {
+			if strings.Contains(err.Error(), bad) {
+				t.Errorf("%s: error text holds %q: %v", c.label, bad, err)
+			}
+		}
+	}
+	two := mustRoots(t, join(ca1, []byte("\n\n"), ca2))
+	want := x509.NewCertPool()
+	for _, p := range [][]byte{ca1, ca2} {
+		b, _ := pem.Decode(p)
+		cert, err := x509.ParseCertificate(b.Bytes)
+		mustNil(t, err)
+		want.AddCert(cert)
+	}
+	if !two.pool.Equal(want) {
+		t.Error("the pool of two blocks does not hold both certificates")
+	}
+	mustRoots(t, ca1)
+	mustRoots(t, bytes.ReplaceAll(ca1, []byte("\n"), []byte("\r\n")))
+}
+
+// TestTS27IssuerGetsTheRootsOfTheField: the issuer trusts the pool of the
+// field, or nil with no field. The global default has no roots after NewACME.
+// NewACME refuses a zero-value field, which has no pool.
+func TestTS27IssuerGetsTheRootsOfTheField(t *testing.T) {
+	st, _ := newStore(t)
+	_, err := NewACME(ACMEParams{
+		Names: []string{"decoy.test"}, CA: "https://ca.test/dir", Storage: st, Host: "127.0.0.1", Port: 8443,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CARoots: &ACMERoots{},
+	})
+	if !errors.Is(err, errRootsNotParsed) {
+		t.Errorf("zero-value roots: NewACME error = %v, want errRootsNotParsed", err)
+	}
+	roots := mustRoots(t, pemOf("CERTIFICATE", testCertDER(t, 1, nil), nil))
+	for _, c := range []struct {
+		label string
+		field *ACMERoots
+		want  *x509.CertPool
+	}{{"roots", roots, roots.pool}, {"nil", nil, nil}} {
+		a := newTestACME(t, func(p *ACMEParams) { p.CARoots = c.field })
+		if got := a.cfg.Issuers[0].(*certmagic.ACMEIssuer).TrustedRoots; got != c.want {
+			t.Errorf("%s: TrustedRoots = %p, want %p", c.label, got, c.want)
+		}
+		if certmagic.DefaultACME.TrustedRoots != nil {
+			t.Errorf("%s: the default ACME issuer has roots", c.label)
+		}
+	}
+}
+
+// stubDNS is a resolver that answers from memory and counts its Dial calls.
+// Unlike egresstest.Names, it can answer with an IPv4-mapped address.
+type stubDNS struct {
+	dials   atomic.Int64
+	answers map[string][]netip.Addr // lower-case names with a dot at the end
+}
+
+func (s *stubDNS) resolver() *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		s.dials.Add(1)
+		client, server := net.Pipe()
+		go s.serve(server)
+		return client, nil
+	}}
+}
+
+func (s *stubDNS) serve(c net.Conn) {
+	defer c.Close()
+	for {
+		var size [2]byte
+		if _, err := io.ReadFull(c, size[:]); err != nil {
+			return
+		}
+		q := make([]byte, binary.BigEndian.Uint16(size[:]))
+		if _, err := io.ReadFull(c, q); err != nil {
+			return
+		}
+		var name strings.Builder
+		i := 12
+		for ; q[i] != 0; i += int(q[i]) + 1 {
+			name.Write(q[i+1 : i+1+int(q[i])])
+			name.WriteByte('.')
+		}
+		end := i + 5
+		qtype := binary.BigEndian.Uint16(q[end-4:])
+		addrs, known := s.answers[strings.ToLower(name.String())]
+		var rdata [][]byte
+		for _, a := range addrs {
+			if qtype == 1 && a.Is4() {
+				rdata = append(rdata, a.AsSlice())
+			} else if qtype == 28 && a.Is6() {
+				rdata = append(rdata, a.AsSlice()) // 16 bytes, also if mapped
+			}
+		}
+		flags := uint16(0x8180)
+		if !known {
+			flags |= 3
+		}
+		resp := slices.Clone(q[:2])
+		resp = binary.BigEndian.AppendUint16(resp, flags)
+		resp = binary.BigEndian.AppendUint16(resp, 1)
+		resp = binary.BigEndian.AppendUint16(resp, uint16(len(rdata)))
+		resp = append(resp, 0, 0, 0, 0)
+		resp = append(resp, q[12:end]...)
+		for _, r := range rdata {
+			resp = append(resp, 0xc0, 12)
+			resp = binary.BigEndian.AppendUint16(resp, qtype)
+			resp = append(resp, 0, 1, 0, 0, 0, 0)
+			resp = binary.BigEndian.AppendUint16(resp, uint16(len(r)))
+			resp = append(resp, r...)
+		}
+		out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
+		if _, err := c.Write(append(out, resp...)); err != nil {
+			return
+		}
+	}
+}
+
+// prodProxy returns the proxy function of the issuer. It has the production
+// address rule, the CA ca, the list and the resolver of dns. It returns the
+// error of NewACME.
+func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http.Request) (*url.URL, error), error) {
+	t.Helper()
+	st, _ := newStore(t)
+	var prefixes []netip.Prefix
+	for _, s := range list {
+		prefixes = append(prefixes, netip.MustParsePrefix(s))
+	}
+	a, err := NewACME(ACMEParams{
+		Names: []string{"decoy.test"}, CA: ca, Storage: st, Host: "127.0.0.1", Port: 8443,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CAPrivate: prefixes, egressResolver: dns.resolver(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(a.Stop)
+	return a.cfg.Issuers[0].(*certmagic.ACMEIssuer).HTTPProxy, nil
+}
+
+// TestTS26ProxyAppliesThePrivateList: the production check permits an address
+// of the list on the CA port. It uses the guard order of the egress package.
+// Two rows have a list and a request to the CA name on another port, and to
+// another name. The guard refuses both.
+func TestTS26ProxyAppliesThePrivateList(t *testing.T) {
+	for _, c := range []struct {
+		label  string
+		ca     string
+		reqURL string // empty means the CA URL
+		list   []string
+		addrs  []string
+		other  bool // the addresses are also the answer for other.test
+		refuse bool
+	}{
+		{"private address in the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, false, false},
+		{"metadata address inside a list prefix", "https://ca.test/dir", "", []string{"100.64.0.0/10"}, []string{"100.100.100.200"}, false, true},
+		{"mapped address in the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"::ffff:10.1.2.3"}, false, false},
+		{"no list", "https://ca.test/dir", "", nil, []string{"10.1.2.3"}, false, true},
+		{"one address out of the list", "https://ca.test/dir", "", []string{"10.0.0.0/8"}, []string{"10.1.2.3", "169.254.169.254"}, false, true},
+		{"literal in the list", "https://10.1.2.3/dir", "", []string{"10.0.0.0/8"}, nil, false, false},
+		{"literal with no list", "https://10.1.2.3/dir", "", nil, nil, false, true},
+		{"CA name on another port", "https://ca.test/dir", "https://ca.test:444/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, false, true},
+		{"other name in the list", "https://ca.test/dir", "https://other.test/dir", []string{"10.0.0.0/8"}, []string{"10.1.2.3"}, true, true},
+	} {
+		dns := &stubDNS{answers: map[string][]netip.Addr{}}
+		for _, s := range c.addrs {
+			dns.answers["ca.test."] = append(dns.answers["ca.test."], netip.MustParseAddr(s))
+			if c.other {
+				dns.answers["other.test."] = append(dns.answers["other.test."], netip.MustParseAddr(s))
+			}
+		}
+		proxy, err := prodProxy(t, c.ca, c.list, dns)
+		mustNil(t, err)
+		reqURL := c.reqURL
+		if reqURL == "" {
+			reqURL = c.ca
+		}
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		mustNil(t, err)
+		u, err := proxy(req)
+		if (err != nil) != c.refuse || u != nil || (err != nil && err != errEgress) {
+			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.label, u, err, c.refuse)
+		}
+	}
+	if _, err := prodProxy(t, "https://ca.test/dir", []string{"8.8.8.0/24"}, &stubDNS{}); err == nil {
+		t.Error("NewACME took a list entry that is not private")
+	}
+}
+
+// TestTS26NameBelowInvalidHasNoLookup: the guard refuses a host that is
+// invalid or below it, and sends no query. The suffix compare needs a dot. The
+// guard sends a query for each other name.
+func TestTS26NameBelowInvalidHasNoLookup(t *testing.T) {
+	for _, c := range []struct {
+		ca, reqHost string
+		lookup      bool
+	}{
+		{"invalid", "invalid", false},
+		{"ca.phantom.invalid", "ca.phantom.invalid", false},
+		{"ca.phantom.invalid.", "ca.phantom.invalid.", false},
+		{"ca.phantom.invalid", "CA.Phantom.INVALID", false},
+		{"ca.xinvalid", "ca.xinvalid", true},
+		{"xinvalid", "xinvalid", true},
+		{"invalid.example.test", "invalid.example.test", true},
+	} {
+		dns := &stubDNS{answers: map[string][]netip.Addr{}}
+		dns.answers[strings.ToLower(c.ca)+"."] = []netip.Addr{netip.MustParseAddr("10.1.2.3")}
+		proxy, err := prodProxy(t, "https://"+c.ca+"/dir", []string{"10.0.0.0/8"}, dns)
+		mustNil(t, err)
+		req, err := http.NewRequest(http.MethodGet, "https://"+c.reqHost+"/dir", nil)
+		mustNil(t, err)
+		_, err = proxy(req)
+		if n := dns.dials.Load(); (n > 0) != c.lookup || (!c.lookup && err != errEgress) {
+			t.Errorf("%s: Dial calls = %d, error = %v; want a lookup = %v", c.reqHost, n, err, c.lookup)
+		}
 	}
 }

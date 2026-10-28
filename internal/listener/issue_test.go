@@ -304,6 +304,39 @@ func TestTS16RetryAfterARefusedOrderStaysOnThePebbleAuthority(t *testing.T) {
 	f.onlyPebble(t, "after the retry")
 }
 
+// TestTS27ClientTrustsOnlyTheConfiguredRoots: with the certificate of the
+// directory server as root, the client gets a certificate. With another root,
+// the TLS handshake fails and Pebble gets no HTTP request.
+func TestTS27ClientTrustsOnlyTheConfiguredRoots(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), issueLimit)
+	t.Cleanup(cancel)
+	t.Run("configured root", func(t *testing.T) {
+		f := newIssueFixture(t, "root.phantom.test", nil, nil)
+		mustNil(t, f.a.cfg.ObtainCertSync(ctx, f.name))
+		_, err := f.a.cfg.CacheManagedCertificate(ctx, f.name)
+		mustNil(t, err)
+		f.verifyToPebble(t, f.waitChain(t, 10*time.Second, func(*x509.Certificate) bool { return true }))
+	})
+	t.Run("other root", func(t *testing.T) {
+		var reqs atomic.Int64
+		front := func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reqs.Add(1); h.ServeHTTP(w, r) })
+		}
+		other := mustRoots(t, pemOf("CERTIFICATE", testCertDER(t, 9, nil), nil))
+		f := newIssueFixture(t, "other.phantom.test", front, func(p *ACMEParams) { p.CARoots = other })
+		err := f.a.cfg.ObtainCertSync(ctx, f.name)
+		if err == nil || errors.Is(err, errEgress) || strings.Contains(err.Error(), errEgress.Error()) {
+			t.Fatalf("obtain error is not a TLS error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "unknown authority") {
+			t.Errorf("obtain error is not an unknown authority error: %v", err)
+		}
+		if n := reqs.Load(); n != 0 {
+			t.Errorf("Pebble got %d HTTP requests", n)
+		}
+	})
+}
+
 // TestTS16RedirectToAnotherPortIsRefused: the CA answers the directory request
 // with a redirect to another loopback port. The guard sees that authority and
 // refuses it, so the target gets no connection.
@@ -321,12 +354,11 @@ func TestTS16RedirectToAnotherPortIsRefused(t *testing.T) {
 		http.Redirect(w, r, target.URL+"/dir", http.StatusFound)
 	}))
 	t.Cleanup(redirector.Close)
-	roots := x509.NewCertPool()
-	roots.AddCert(redirector.Certificate())
-	roots.AddCert(target.Certificate()) // the target would be trusted, so only the guard can refuse it
+	// The target would be trusted, so only the guard can refuse it.
+	roots := mustRoots(t, slices.Concat(certPEM(redirector.Certificate()), certPEM(target.Certificate())))
 	var egress egressSet
 	a := newTestACME(t, func(p *ACMEParams) {
-		p.CA, p.OnEgress, p.trustedRoots = redirector.URL+"/dir", egress.record, roots
+		p.CA, p.OnEgress, p.CARoots = redirector.URL+"/dir", egress.record, roots
 	})
 	err := a.cfg.ObtainCertSync(context.Background(), "decoy.test")
 	if !errors.Is(err, errEgress) && (err == nil || !strings.Contains(err.Error(), errEgress.Error())) {

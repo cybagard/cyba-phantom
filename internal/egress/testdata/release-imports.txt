@@ -19,6 +19,7 @@ encoding/hex
 encoding/json
 encoding/json/jsontext
 encoding/json/v2
+encoding/pem
 errors
 flag
 fmt
