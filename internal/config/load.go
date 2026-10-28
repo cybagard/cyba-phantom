@@ -46,6 +46,9 @@ type key struct {
 	req bool
 	// secret marks a key whose value is never printed.
 	secret bool
+	// reqIf, if set, makes the key required only when it returns true
+	// for the file.
+	reqIf func(doc *Doc) bool
 	// maxItems > 0 marks a key in a list item that holds 1 to maxItems
 	// scalars in a list.
 	maxItems int
@@ -67,7 +70,9 @@ var keys = []key{
 	{path: "listen.https", kind: kindString, def: ":443", check: checkListen},
 	{path: "ops.listen", kind: kindString, def: "127.0.0.1:9443", check: checkOpsListen},
 	{path: "ops.basic_auth_htpasswd", kind: kindPath, def: "/etc/phantom/htpasswd", check: checkHtpasswd},
-	{path: "acme.email", kind: kindString, req: true, check: checkEmail},
+	// The account contact is for the ACME client, so it is required
+	// only with acme.names.
+	{path: "acme.email", kind: kindString, req: true, reqIf: func(doc *Doc) bool { return count(doc, "acme.names") > 0 }, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkCacheDir},
 	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkBundlePath},
@@ -291,7 +296,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	})...)
 
 	for _, k := range table {
-		if _, ok := vals[k.path]; k.req && !ok && !failed[k.path] {
+		if _, ok := vals[k.path]; k.req && !ok && !failed[k.path] && (k.reqIf == nil || k.reqIf(doc)) {
 			errs = append(errs, &Error{Key: k.path, Source: path, Detail: "the key is required"})
 		}
 	}
@@ -309,6 +314,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 		}
 	}
 	errs = append(errs, crossCheck(l.stateRoot, vals)...)
+	errs = append(errs, decoyCheck(doc, path, vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
@@ -408,9 +414,11 @@ func parse(k key, raw, tag string) (Value, string) {
 // decimal matches a decimal literal: no "+", no leading 0, no "-0", no base prefix, no "_".
 var decimal = regexp.MustCompile(`^(0|-?[1-9][0-9]*)$`)
 
-// isSection reports whether p is the root or a section of the table.
+// isSection reports whether p is the root or a section of the table or
+// of a list key.
 func isSection(p string, table []key) bool {
-	return p == "" || slices.ContainsFunc(table, func(k key) bool { return strings.HasPrefix(k.path, p+".") })
+	return p == "" || slices.ContainsFunc(table, func(k key) bool { return strings.HasPrefix(k.path, p+".") }) ||
+		slices.ContainsFunc(lists, func(l listKey) bool { return strings.HasPrefix(l.path, p+".") })
 }
 
 func parent(p string) string {

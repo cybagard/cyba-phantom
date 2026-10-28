@@ -44,7 +44,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
-const decoyName = "decoy.example.com"
+const decoyName = "decoy.host.zz"
 
 // syncBuf is a writer that the serve goroutine and the test use at the same time.
 type syncBuf struct {

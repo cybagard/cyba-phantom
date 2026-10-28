@@ -1915,50 +1915,42 @@ func TestTS11_ACMENames(t *testing.T) {
 	name253 := strings.Join([]string{l63, l63, l63, strings.Repeat("a", 61)}, ".")
 	var many []string
 	for i := range 17 {
-		many = append(many, fmt.Sprintf("h%d.example.com", i))
+		many = append(many, fmt.Sprintf("h%d.host.zz", i))
 	}
 	const key = "acme.names"
 	rows := []struct {
 		name, file, env, want string // want is "" for a file that loads.
 	}{
-		{"1 name", namesFile("decoy.example.com"), "", ""},
+		{"1 name", namesFile("decoy.host.zz"), "", ""},
 		{"16 names", namesFile(many[:16]...), "", ""},
-		{"label of 63 bytes", namesFile(l63 + ".example"), "", ""},
+		{"label of 63 bytes", namesFile(l63 + ".zz"), "", ""},
 		{"name of 253 bytes", namesFile(name253), "", ""},
-		{"digits and hyphen", namesFile("a-1.b2-c.example"), "", ""},
-		// The rule refuses the names below home.arpa, not home.arpa.
-		// That name has two labels, so it loads.
-		{"home.arpa", namesFile("home.arpa"), "", ""},
+		{"digits and hyphen", namesFile("a-1.b2-c.zz"), "", ""},
 		{"0 names", namesFile(), "", key},
 		{"17 names", namesFile(many...), "", key},
-		{"upper-case letter", namesFile("Decoy.example.com"), "", key},
-		{"wildcard", namesFile("*.example.com"), "", key},
+		{"upper-case letter", namesFile("Decoy.host.zz"), "", key},
+		{"wildcard", namesFile("*.host.zz"), "", key},
 		{"IPv4 literal", namesFile("192.0.2.1"), "", key},
 		{"IPv6 literal", namesFile("2001:db8::1"), "", key},
-		{"trailing dot", namesFile("decoy.example.com."), "", key},
-		{"empty label", namesFile("decoy..example.com"), "", key},
+		{"trailing dot", namesFile("decoy.host.zz."), "", key},
+		{"empty label", namesFile("decoy..host.zz"), "", key},
 		{"one label", namesFile("decoy"), "", key},
-		{"label of 64 bytes", namesFile(l63 + "a.example"), "", key},
+		{"label of 64 bytes", namesFile(l63 + "a.zz"), "", key},
 		{"name of 254 bytes", namesFile(name253 + "a"), "", key},
-		{"leading hyphen", namesFile("-decoy.example.com"), "", key},
-		{"trailing hyphen", namesFile("decoy-.example.com"), "", key},
-		{"underscore", namesFile("de_coy.example.com"), "", key},
-		{"non-ASCII", namesFile("dé.example.com"), "", key},
-		{"localhost", namesFile("localhost"), "", key},
-		{"below localhost", namesFile("x.localhost"), "", key},
-		{"below local", namesFile("x.local"), "", key},
-		{"below internal", namesFile("x.internal"), "", key},
-		{"below home.arpa", namesFile("x.home.arpa"), "", key},
+		{"leading hyphen", namesFile("-decoy.host.zz"), "", key},
+		{"trailing hyphen", namesFile("decoy-.host.zz"), "", key},
+		{"underscore", namesFile("de_coy.host.zz"), "", key},
+		{"non-ASCII", namesFile("dé.host.zz"), "", key},
 		// The names local and internal have one label.
 		// The rule for two labels refuses them.
 		{"local", namesFile("local"), "", key},
 		{"internal", namesFile("internal"), "", key},
-		{"duplicate", namesFile("a.example.com", "b.example.com", "a.example.com"), "", key},
-		{"not a scalar", strings.Replace(base, "[decoy.example.com]", "[[a]]", 1), "", "acme.names[0]"},
-		{"not a string", strings.Replace(base, "[decoy.example.com]", "[12]", 1), "", "acme.names[0]"},
-		{"not a list", strings.Replace(base, "[decoy.example.com]", "decoy.example.com", 1), "", key},
+		{"duplicate", namesFile("a.host.zz", "b.host.zz", "a.host.zz"), "", key},
+		{"not a scalar", strings.Replace(base, "[decoy.host.zz]", "[[a]]", 1), "", "acme.names[0]"},
+		{"not a string", strings.Replace(base, "[decoy.host.zz]", "[12]", 1), "", "acme.names[0]"},
+		{"not a list", strings.Replace(base, "[decoy.host.zz]", "decoy.host.zz", 1), "", key},
 		{"missing", strings.Replace(base, acmeNames, "", 1), "", key},
-		{"override", base, "PHANTOM_ACME_NAMES=decoy.example.com", "PHANTOM_ACME_NAMES: unknown PHANTOM variable"},
+		{"override", base, "PHANTOM_ACME_NAMES=decoy.host.zz", "PHANTOM_ACME_NAMES: unknown PHANTOM variable"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1983,12 +1975,218 @@ func TestTS11_ACMENames(t *testing.T) {
 // It gives one duplicate error line, not one for each extra copy
 // (SEC-21, T-S-11).
 func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
-	_, err := loadProd(t, namesFile("a.example.com", "a.example.com", "a.example.com"))
+	_, err := loadProd(t, namesFile("a.host.zz", "a.host.zz", "a.host.zz"))
 	if err == nil {
 		t.Fatal("got no error")
 	}
 	if n := strings.Count(err.Error(), "the list must not hold an entry two times"); n != 1 {
 		t.Errorf("got %d duplicate errors, want 1: %v", n, err)
+	}
+}
+
+// certItem returns one tls.certs entry for name, with valid paths.
+func certItem(name string) string {
+	return "{name: " + strconv.Quote(name) + ", cert_file: /etc/phantom/a.pem, key_file: /etc/phantom/a.key}"
+}
+
+// certsFile returns a config with the tls.certs entries. The head is the
+// text of the acme section ("" for none). The tlog section is the one of
+// base.
+func certsFile(head string, entries ...string) string {
+	return head + "tls:\n  certs: [" + strings.Join(entries, ", ") + "]\n" + tlogLine
+}
+
+// loadWants loads file. If want is "", the file must load. Else the load
+// must fail with an error that holds want, and no config comes back.
+func loadWants(t *testing.T, file, want string, env ...string) *Config {
+	t.Helper()
+	c, err := loadProd(t, file, env...)
+	switch {
+	case want == "" && err != nil:
+		t.Errorf("got %v", err)
+	case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+		t.Errorf("got %v, want an error with %q", err, want)
+	case want != "" && c != nil:
+		t.Error("a config came back with the error")
+	}
+	return c
+}
+
+// TestTS11_SpecialUseNames checks the name rule in acme.names and
+// tls.certs (SEC-21, T-S-11). Both lists refuse each name of the
+// special-use list and each name below one. They also refuse a name with
+// a number as last label. The list is a copy of the spec, so a change of
+// one entry in the code fails here.
+func TestTS11_SpecialUseNames(t *testing.T) {
+	zones := []string{
+		"alt", "example", "example.com", "example.net", "example.org", "invalid", "local", "localhost", "onion", "test",
+		"home.arpa", "6tisch.arpa", "eap.arpa", "eap-noob.arpa", "ipv4only.arpa", "resolver.arpa", "service.arpa",
+		"10.in-addr.arpa", "168.192.in-addr.arpa", "254.169.in-addr.arpa", "170.0.0.192.in-addr.arpa", "171.0.0.192.in-addr.arpa",
+		"8.e.f.ip6.arpa", "9.e.f.ip6.arpa", "a.e.f.ip6.arpa", "b.e.f.ip6.arpa",
+	}
+	for i := 16; i <= 31; i++ {
+		zones = append(zones, strconv.Itoa(i)+".172.in-addr.arpa")
+	}
+	refused := []string{"127.1", "0x7f.1", "a.123", "a.0x7f", "x.1.10.in-addr.arpa", "1.10.in-addr.arpa"}
+	for _, z := range zones {
+		refused = append(refused, "x."+z, "x.y."+z)
+		if strings.Contains(z, ".") {
+			refused = append(refused, z)
+		}
+	}
+	passed := []string{"15.172.in-addr.arpa", "32.172.in-addr.arpa", "a.123a", "x.host.zz", "examplee.com", "xexample.com", "x.test.zz", "arpa.zz"}
+	for _, list := range []struct{ name, key string }{{"acme.names", "acme.names[0]"}, {"tls.certs", "tls.certs[0].name"}} {
+		file := func(name string) string {
+			if list.name == "acme.names" {
+				return namesFile(name)
+			}
+			return certsFile("", certItem(name))
+		}
+		t.Run(list.name, func(t *testing.T) {
+			for _, n := range refused {
+				t.Run("refused "+n, func(t *testing.T) { loadWants(t, file(n), list.key+" at") })
+			}
+			for _, n := range passed {
+				t.Run("passes "+n, func(t *testing.T) { loadWants(t, file(n), "") })
+			}
+		})
+	}
+}
+
+// TestTS11_InternalNames checks the rule for an internal name. It is
+// always allowed in tls.certs, and in acme.names only when acme.ca is an
+// https URL (T-S-11, T-S-27).
+func TestTS11_InternalNames(t *testing.T) {
+	https := "acme:\n  ca: \"https://ca.host.zz/dir\"\n"
+	httpsEmail := https + "  email: sec@example.com\n"
+	names := func(head string) string { return head + "  names: [x.internal]\n" + tlogLine }
+	rows := []struct{ name, file, want string }{
+		{"tls.certs, default CA", certsFile("", certItem("x.internal")), ""},
+		{"tls.certs, letsencrypt-staging", certsFile("acme:\n  ca: letsencrypt-staging\n", certItem("x.internal")), ""},
+		{"tls.certs, https CA", certsFile(https, certItem("x.internal")), ""},
+		{"tls.certs, below internal", certsFile("", certItem("a.b.internal")), ""},
+		{"acme.names, https CA", names(httpsEmail), ""},
+		{"acme.names, default CA", names("acme:\n  email: sec@example.com\n"), "acme.names[0] at"},
+		{"acme.names, letsencrypt", names("acme:\n  email: sec@example.com\n  ca: letsencrypt\n"), "acme.names[0] at"},
+		{"acme.names, letsencrypt-staging", names("acme:\n  email: sec@example.com\n  ca: letsencrypt-staging\n"), "acme.names[0] at"},
+		{"acme.names, other name with letsencrypt", namesFile("x.host.zz"), ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) { loadWants(t, r.file, r.want) })
+	}
+}
+
+// TestTS11_DecoyNameCount checks the count and the compare of names
+// (T-S-11). There are 1 to 16 names over both lists. A name is in one
+// list only, and tls.certs has no repeat.
+func TestTS11_DecoyNameCount(t *testing.T) {
+	head := "acme:\n  email: sec@example.com\n"
+	list := func(prefix string, from, to int) []string {
+		var l []string
+		for i := from; i < to; i++ {
+			l = append(l, fmt.Sprintf("%s%d.host.zz", prefix, i))
+		}
+		return l
+	}
+	both := func(nNames, nCerts int) string {
+		var items []string
+		for _, n := range list("c", 0, nCerts) {
+			items = append(items, certItem(n))
+		}
+		q := make([]string, 0, nNames)
+		for _, n := range list("n", 0, nNames) {
+			q = append(q, strconv.Quote(n))
+		}
+		file := head
+		if nNames > 0 {
+			file += "  names: [" + strings.Join(q, ", ") + "]\n"
+		}
+		return certsFile(file, items...)
+	}
+	rows := []struct{ name, file, want string }{
+		{"0 names", certsFile(""), "acme.names at"},
+		{"1 certificate", both(0, 1), ""},
+		{"16 certificates", both(0, 16), ""},
+		{"16 over both lists", both(8, 8), ""},
+		{"16 names and 0 certificates", both(16, 0), ""},
+		{"17 over both lists", both(9, 8), "acme.names at"},
+		{"17 over both lists, 16 names", both(16, 1), "acme.names at"},
+		{"17 certificates", both(0, 17), "tls.certs at"},
+		{"a name in both lists", certsFile(head+"  names: [a.host.zz]\n", certItem("a.host.zz")), "tls.certs[0].name at"},
+		{"the second certificate is in names", certsFile(head+"  names: [a.host.zz]\n", certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[1].name at"},
+		{"a name two times in tls.certs", certsFile("", certItem("a.host.zz"), certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[2].name at"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) { loadWants(t, r.file, r.want) })
+	}
+	c := loadWants(t, both(0, 1), "")
+	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != "/etc/phantom/a.pem" {
+		t.Errorf("got %+v, %v", v, ok)
+	}
+}
+
+// TestTS11_ACMEEmail checks that acme.email is required only with
+// acme.names (T-S-11).
+func TestTS11_ACMEEmail(t *testing.T) {
+	rows := []struct{ name, file, want string }{
+		{"tls.certs only, no email", certsFile("", certItem("a.host.zz")), ""},
+		{"names, no email", strings.Replace(base, "  email: sec@example.com\n", "", 1), "acme.email at"},
+		{"names, bad email, no required error", strings.Replace(base, "sec@example.com", "a b", 1), "acme.email at"},
+		{"certificates and names, no email", certsFile("acme:\n  names: [n.host.zz]\n", certItem("a.host.zz")), "acme.email at"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, r.file)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), r.want)):
+				t.Errorf("got %v, want an error with %q", err, r.want)
+			}
+			if err != nil && r.name == "names, bad email, no required error" && strings.Contains(err.Error(), "the key is required") {
+				t.Errorf("a bad acme.email also gives a required error: %v", err)
+			}
+		})
+	}
+	t.Run("email from the environment", func(t *testing.T) {
+		loadWants(t, strings.Replace(base, "  email: sec@example.com\n", "", 1), "", "PHANTOM_ACME_EMAIL=sec@example.com")
+	})
+}
+
+// TestTS11_TLSCertsShape checks the shape of tls.certs. It is a list of
+// mappings with name, cert_file and key_file. There is no type key and
+// no override, and the paths are absolute and clean. Each error names
+// its key (T-S-11, T-S-27).
+func TestTS11_TLSCertsShape(t *testing.T) {
+	ok := certItem("a.host.zz")
+	with := func(v string) string { return base + "tls:\n  certs: " + v + "\n" }
+	rows := []struct{ name, file, env, want string }{
+		{"valid", with("[" + ok + "]"), "", ""},
+		{"empty list with names", with("[]"), "", ""},
+		{"not a list", with("x"), "", "tls.certs at"},
+		{"section is not a mapping", base + "tls: [x]\n", "", "tls at"},
+		{"entry is not a mapping", with("[x]"), "", "tls.certs[0] at"},
+		{"entry is a list", with("[[a]]"), "", "tls.certs[0] at"},
+		{"no name", with("[{cert_file: /a.pem, key_file: /a.key}]"), "", "tls.certs[0].name at"},
+		{"no cert_file", with(`[{name: a.host.zz, key_file: /a.key}]`), "", "tls.certs[0].cert_file at"},
+		{"no key_file", with(`[{name: a.host.zz, cert_file: /a.pem}]`), "", "tls.certs[0].key_file at"},
+		{"unknown key", with(`[{name: a.host.zz, cert_file: /a.pem, key_file: /a.key, extra: 1}]`), "", "tls.certs[0].extra at"},
+		{"type key", with(`[{type: static, name: a.host.zz, cert_file: /a.pem, key_file: /a.key}]`), "", "tls.certs[0].type at"},
+		{"relative cert_file", with(`[{name: a.host.zz, cert_file: a.pem, key_file: /a.key}]`), "", "tls.certs[0].cert_file at"},
+		{"relative key_file", with(`[{name: a.host.zz, cert_file: /a.pem, key_file: a.key}]`), "", "tls.certs[0].key_file at"},
+		{"unclean cert_file", with(`[{name: a.host.zz, cert_file: /x/../a.pem, key_file: /a.key}]`), "", "tls.certs[0].cert_file at"},
+		{"name is a list", with(`[{name: [a], cert_file: /a.pem, key_file: /a.key}]`), "", "tls.certs[0].name at"},
+		{"second entry bad", with("[" + ok + ", " + certItem("Bad.host.zz") + "]"), "", "tls.certs[1].name at"},
+		{"override", base, "PHANTOM_TLS_CERTS=x", "PHANTOM_TLS_CERTS: unknown PHANTOM variable"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			var env []string
+			if r.env != "" {
+				env = append(env, r.env)
+			}
+			loadWants(t, r.file, r.want, env...)
+		})
 	}
 }
 

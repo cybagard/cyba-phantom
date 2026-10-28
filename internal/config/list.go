@@ -17,13 +17,21 @@ type listKey struct {
 	min, max int
 	req      bool             // req marks a required list: the file must set it.
 	schemas  map[string][]key // schemas holds the keys of an item by type. The path of a key is its name in the item.
+	fields   []key            // fields is the schema of an untyped item.
 	item     *key             // item, if set, makes the list a list of scalars: each entry has this key and no schemas.
 	unique   bool             // unique marks a list of scalars with no duplicate entry.
 }
 
 // lists is the production list table. The key table holds the scalar keys.
 var lists = []listKey{
-	{path: "acme.names", min: 1, max: 16, req: true, unique: true, item: &key{kind: kindString, check: checkACMEName}},
+	// An acme.names entry may be an internal name. decoyCheck refuses
+	// it unless acme.ca is an https URL.
+	{path: "acme.names", min: 0, max: 16, unique: true, item: &key{kind: kindString, check: checkDecoyName}},
+	{path: "tls.certs", min: 0, max: 16, fields: []key{
+		{path: "name", kind: kindString, req: true, check: checkDecoyName},
+		{path: "cert_file", kind: kindPath, req: true, check: checkAbsPath},
+		{path: "key_file", kind: kindPath, req: true, check: checkAbsPath},
+	}},
 	{path: "tlog.publish", min: 1, max: 4, req: true, schemas: map[string][]key{
 		"https-put": {
 			{path: "url", kind: kindURL, req: true, check: checkHTTPS},
@@ -133,24 +141,32 @@ func expandItem(doc *Doc, file string, l listKey, ip string) (out []key, errs []
 		fail(ip, "the item needs a mapping")
 		return
 	}
-	names := slices.Sorted(maps.Keys(l.schemas))
-	typeKey := key{path: ip + ".type", kind: kindString, req: true, check: func(_ *loader, raw string) string {
-		if _, ok := l.schemas[raw]; !ok {
-			return "the type must be " + strings.Join(names, ", ")
+	// A list with fields has no type key, so a type key is an unknown key.
+	schema, typePath := l.fields, ""
+	if schema == nil {
+		names := slices.Sorted(maps.Keys(l.schemas))
+		typeKey := key{path: ip + ".type", kind: kindString, req: true, check: func(_ *loader, raw string) string {
+			if _, ok := l.schemas[raw]; !ok {
+				return "the type must be " + strings.Join(names, ", ")
+			}
+			return ""
+		}}
+		if _, present := doc.Lines[typeKey.path]; present && !isScalar(doc, typeKey.path) {
+			fail(typeKey.path, "the key needs a scalar value")
+			return
 		}
-		return ""
-	}}
-	if _, present := doc.Lines[typeKey.path]; present && !isScalar(doc, typeKey.path) {
-		fail(typeKey.path, "the key needs a scalar value")
-		return
-	}
-	out = append(out, typeKey)
-	schema, ok := l.schemas[doc.Leaves[typeKey.path].Value]
-	if !ok {
-		return // The type key reports the error. Without a type, the loader does not know the other keys.
+		out = append(out, typeKey)
+		var ok bool
+		schema, ok = l.schemas[doc.Leaves[typeKey.path].Value]
+		if !ok {
+			// The type key reports the error. Without a type, the
+			// loader does not know the other keys.
+			return
+		}
+		typePath = typeKey.path
 	}
 	for _, c := range children(doc, ip) {
-		if c != typeKey.path && !slices.ContainsFunc(schema, func(f key) bool { return ip+"."+f.path == c }) {
+		if c != typePath && !slices.ContainsFunc(schema, func(f key) bool { return ip+"."+f.path == c }) {
 			fail(c, "unknown key")
 		}
 	}

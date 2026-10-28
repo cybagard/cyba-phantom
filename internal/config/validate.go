@@ -783,9 +783,33 @@ func bundleConflict(vals map[string]Value, p string) string {
 	return ""
 }
 
-// checkACMEName checks one entry of acme.names (SEC-21): a DNS name in lower case with
-// at least two labels, and not an IP literal or an internal name.
-func checkACMEName(_ *loader, raw string) string {
+// specialUse holds the names of the IANA special-use domain names
+// registry (SEC-21). A decoy name is none of them and is not below one.
+var specialUse = func() []string {
+	l := []string{
+		"alt", "example", "example.com", "example.net", "example.org", "invalid", "local", "localhost", "onion", "test",
+		"home.arpa", "6tisch.arpa", "eap.arpa", "eap-noob.arpa", "ipv4only.arpa", "resolver.arpa", "service.arpa",
+		"10.in-addr.arpa", "168.192.in-addr.arpa", "254.169.in-addr.arpa", "170.0.0.192.in-addr.arpa", "171.0.0.192.in-addr.arpa",
+		"8.e.f.ip6.arpa", "9.e.f.ip6.arpa", "a.e.f.ip6.arpa", "b.e.f.ip6.arpa",
+	}
+	for i := 16; i <= 31; i++ {
+		l = append(l, strconv.Itoa(i)+".172.in-addr.arpa")
+	}
+	return l
+}()
+
+// isBelowName reports whether name is zone or is below it.
+func isBelowName(name, zone string) bool { return name == zone || strings.HasSuffix(name, "."+zone) }
+
+// internalName reports whether name is internal or below it.
+func internalName(name string) bool { return isBelowName(name, "internal") }
+
+// checkDecoyName checks one decoy name (SEC-21). The name is a DNS name
+// in lower case with at least two labels. It is not an IP literal.
+// Its last label is not a number. It is not a name of the special-use
+// list and not below one. An internal name passes this check, because
+// the rule for it needs the value of acme.ca (decoyCheck).
+func checkDecoyName(_ *loader, raw string) string {
 	if len(raw) > 253 {
 		return "the name must have at most 253 bytes"
 	}
@@ -806,12 +830,65 @@ func checkACMEName(_ *loader, raw string) string {
 			return "each label must have only a-z 0-9 - and must not start or end with -"
 		}
 	}
-	for _, internal := range []string{"localhost", "local", "internal", "home.arpa"} {
-		if strings.HasSuffix(raw, "."+internal) {
-			return "the name must not be below localhost, local, internal or home.arpa"
-		}
+	switch {
+	case numericLabel(raw):
+		return "the last label must not be a number"
+	case slices.ContainsFunc(specialUse, func(z string) bool { return isBelowName(raw, z) }):
+		return "the name must not be a special-use name or below one"
 	}
 	return ""
+}
+
+// checkAbsPath checks that a path is absolute and clean.
+func checkAbsPath(_ *loader, raw string) string { return checkPathForm(raw) }
+
+// decoyCheck checks the rules that compare the decoy names of acme.names
+// and tls.certs. It reads the entries that passed their own check. It
+// skips the total when a list has a shape error (expandLists reports it).
+func decoyCheck(doc *Doc, file string, vals map[string]Value) []error {
+	var errs []error
+	fail := func(p, detail string) {
+		errs = append(errs, &Error{Key: p, Source: file, Line: doc.Lines[p], Detail: detail})
+	}
+	nNames, nCerts := count(doc, "acme.names"), count(doc, "tls.certs")
+	shaped := func(p string, n int) bool {
+		_, present := doc.Lines[p]
+		return n <= 16 && (!present || doc.Sequences[p])
+	}
+	if total := nNames + nCerts; shaped("acme.names", nNames) && shaped("tls.certs", nCerts) && (total < 1 || total > 16) {
+		fail("acme.names", "acme.names and tls.certs need 1 to 16 names in total")
+	}
+	// An internal name needs a CA that is an https URL. The rule is
+	// skipped if acme.ca failed its own check.
+	ca, caOK := vals["acme.ca"]
+	_, directory := caDirectories[ca.Str]
+	inNames := make(map[string]bool, nNames)
+	for i := range nNames {
+		p := fmt.Sprintf("acme.names[%d]", i)
+		v, ok := vals[p]
+		if !ok {
+			continue
+		}
+		inNames[v.Str] = true
+		if caOK && directory && internalName(v.Str) {
+			fail(p, "an internal name needs an acme.ca that is an https URL")
+		}
+	}
+	inCerts := make(map[string]bool, nCerts)
+	for i := range nCerts {
+		p := fmt.Sprintf("tls.certs[%d].name", i)
+		v, ok := vals[p]
+		switch {
+		case !ok:
+		case inNames[v.Str]:
+			fail(p, "the name must not be in acme.names too")
+		case inCerts[v.Str]:
+			fail(p, "the name must not be in tls.certs two times")
+		default:
+			inCerts[v.Str] = true
+		}
+	}
+	return errs
 }
 
 // acmeLabel matches one label of an acme.names entry.
