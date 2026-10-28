@@ -46,8 +46,8 @@ type key struct {
 	req bool
 	// secret marks a key whose value is never printed.
 	secret bool
-	// reqIf, if set, makes the key required only when it returns true
-	// for the file.
+	// reqIf, if set, is a second condition for req.
+	// The key is required only when req is set and reqIf returns true.
 	reqIf func(doc *Doc) bool
 	// maxItems > 0 marks a key in a list item that holds 1 to maxItems
 	// scalars in a list.

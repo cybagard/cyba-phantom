@@ -853,10 +853,10 @@ func decoyCheck(doc *Doc, file string, vals map[string]Value) []error {
 	nNames, nCerts := count(doc, "acme.names"), count(doc, "tls.certs")
 	shaped := func(p string, n int) bool {
 		_, present := doc.Lines[p]
-		return n <= 16 && (!present || doc.Sequences[p])
+		return n <= maxDecoyNames && (!present || doc.Sequences[p])
 	}
-	if total := nNames + nCerts; shaped("acme.names", nNames) && shaped("tls.certs", nCerts) && (total < 1 || total > 16) {
-		fail("acme.names", "acme.names and tls.certs need 1 to 16 names in total")
+	if total := nNames + nCerts; shaped("acme.names", nNames) && shaped("tls.certs", nCerts) && (total < 1 || total > maxDecoyNames) {
+		fail("acme.names", "acme.names and tls.certs need 1 to "+strconv.Itoa(maxDecoyNames)+" names in total")
 	}
 	// A CA name such as letsencrypt is not an https URL. An internal
 	// name in acme.names is then refused. A failed acme.ca is not in
@@ -891,7 +891,7 @@ func decoyCheck(doc *Doc, file string, vals map[string]Value) []error {
 	return errs
 }
 
-// acmeLabel matches one label of an acme.names entry.
+// acmeLabel matches one label of a decoy name.
 var acmeLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // inDirText reports whether the clean path p is the clean path d, or is below

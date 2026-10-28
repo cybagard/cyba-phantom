@@ -402,7 +402,7 @@ func TestTS11_CheckBundlePath(t *testing.T) {
 // limits.header_bytes outside 8192 to 16384. Each gives exit 1.
 // Stderr names the key. The test also checks that --check accepts the
 // edges. A row for a fixed refusal checks the whole stderr
-// (SEC-21, SEC-02, T-S-11, T-U-10).
+// (SEC-21, SEC-31, SEC-02, T-S-11, T-S-27, T-U-10).
 func TestTS11_CheckACME(t *testing.T) {
 	body := validBody(t)
 	names := func(list string) string { return strings.Replace(body, "[decoy.host.zz]", list, 1) }
@@ -415,6 +415,16 @@ func TestTS11_CheckACME(t *testing.T) {
 		return "[" + strings.Join(l, ", ") + "]"
 	}
 	label := func(n int) string { return strings.Repeat("a", n) }
+	// certs returns the body with a tls.certs entry for name. Without names, it
+	// has no acme.names and no acme.email.
+	certs := func(name string, withNames bool) string {
+		b := body
+		if !withNames {
+			b = strings.Replace(b, "  email: sec@example.com\n", "", 1)
+			b = strings.Replace(b, "  names: [decoy.host.zz]\n", "", 1)
+		}
+		return b + "tls:\n  certs: [{name: " + name + ", cert_file: /etc/phantom/a.pem, key_file: /etc/phantom/a.key}]\n"
+	}
 	// cacheRefused returns the whole stderr of a refusal of acme.cache_dir by
 	// a path rule. Then it adds the lines of the other keys. Stderr must start
 	// with the line of acme.cache_dir, so a refusal by another key alone fails.
@@ -462,6 +472,9 @@ func TestTS11_CheckACME(t *testing.T) {
 		{"label of 63 bytes", names("[" + label(63) + ".zz]"), "", nil, ""},
 		{"name of 253 bytes", names("[" + label(63) + "." + label(63) + "." + label(63) + "." + label(61) + "]"), "", nil, ""},
 		{"duplicate", names("[a.host.zz, a.host.zz]"), "acme.names", nil, ""},
+		{"tls.certs only", certs("a.host.zz", false), "", nil, ""},
+		{"tls.certs special-use name", certs("x.test", true), "tls.certs[0].name", nil, ""},
+		{"name in acme.names and tls.certs", certs("decoy.host.zz", true), "tls.certs[0].name", nil, ""},
 		{"names override", body, "PHANTOM_ACME_NAMES", []string{"PHANTOM_ACME_NAMES=a.host.zz"}, ""},
 		{"cache dir with a space", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom/my certs"}, ""},
 		{"cache dir is the state directory", body, "acme.cache_dir", []string{"PHANTOM_ACME_CACHE_DIR=/var/lib/phantom"},

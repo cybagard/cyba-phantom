@@ -2013,7 +2013,7 @@ func loadWants(t *testing.T, file, want string, env ...string) *Config {
 }
 
 // TestTS11_SpecialUseNames checks the name rule in acme.names and
-// tls.certs (SEC-21, T-S-11). Both lists refuse each name of the
+// tls.certs (SEC-21, SEC-31, T-S-11). Both lists refuse each name of the
 // special-use list and each name below one. They also refuse a name with
 // a number as last label. The list is a copy of the spec, so a change of
 // one entry in the code fails here.
@@ -2027,7 +2027,7 @@ func TestTS11_SpecialUseNames(t *testing.T) {
 	for i := 16; i <= 31; i++ {
 		zones = append(zones, strconv.Itoa(i)+".172.in-addr.arpa")
 	}
-	refused := []string{"127.1", "0x7f.1", "a.123", "a.0x7f", "x.1.10.in-addr.arpa", "1.10.in-addr.arpa"}
+	refused := []string{"127.1", "0x7f.1", "a.123", "a.0x7f", "a.0x0", "a.0x10", "a.0x", "x.1.10.in-addr.arpa", "1.10.in-addr.arpa"}
 	for _, z := range zones {
 		refused = append(refused, "x."+z, "x.y."+z)
 		if strings.Contains(z, ".") {
@@ -2055,29 +2055,36 @@ func TestTS11_SpecialUseNames(t *testing.T) {
 
 // TestTS11_InternalNames checks the rule for an internal name. It is
 // always allowed in tls.certs, and in acme.names only when acme.ca is an
-// https URL (T-S-11, T-S-27).
+// https URL (SEC-31, T-S-11, T-S-27). The PHANTOM_ACME_CA value, not the
+// file, decides which CA is in use.
 func TestTS11_InternalNames(t *testing.T) {
 	https := "acme:\n  ca: \"https://ca.host.zz/dir\"\n"
 	httpsEmail := https + "  email: sec@example.com\n"
 	names := func(head string) string { return head + "  names: [x.internal]\n" + tlogLine }
-	rows := []struct{ name, file, want string }{
-		{"tls.certs, default CA", certsFile("", certItem("x.internal")), ""},
-		{"tls.certs, letsencrypt-staging", certsFile("acme:\n  ca: letsencrypt-staging\n", certItem("x.internal")), ""},
-		{"tls.certs, https CA", certsFile(https, certItem("x.internal")), ""},
-		{"tls.certs, below internal", certsFile("", certItem("a.b.internal")), ""},
-		{"acme.names, https CA", names(httpsEmail), ""},
-		{"acme.names, default CA", names("acme:\n  email: sec@example.com\n"), "acme.names[0] at"},
-		{"acme.names, letsencrypt", names("acme:\n  email: sec@example.com\n  ca: letsencrypt\n"), "acme.names[0] at"},
-		{"acme.names, letsencrypt-staging", names("acme:\n  email: sec@example.com\n  ca: letsencrypt-staging\n"), "acme.names[0] at"},
-		{"acme.names, other name with letsencrypt", namesFile("x.host.zz"), ""},
+	rows := []struct {
+		name, file, want string
+		env              []string
+	}{
+		{"tls.certs, default CA", certsFile("", certItem("x.internal")), "", nil},
+		{"tls.certs, letsencrypt-staging", certsFile("acme:\n  ca: letsencrypt-staging\n", certItem("x.internal")), "", nil},
+		{"tls.certs, https CA", certsFile(https, certItem("x.internal")), "", nil},
+		{"tls.certs, below internal", certsFile("", certItem("a.b.internal")), "", nil},
+		{"acme.names, https CA", names(httpsEmail), "", nil},
+		{"acme.names, default CA", names("acme:\n  email: sec@example.com\n"), "acme.names[0] at", nil},
+		{"acme.names, letsencrypt", names("acme:\n  email: sec@example.com\n  ca: letsencrypt\n"), "acme.names[0] at", nil},
+		{"acme.names, letsencrypt-staging", names("acme:\n  email: sec@example.com\n  ca: letsencrypt-staging\n"), "acme.names[0] at", nil},
+		{"acme.names, other name with letsencrypt", namesFile("x.host.zz"), "", nil},
+		{"acme.names, second entry, default CA", namesFile("a.host.zz", "x.internal"), "acme.names[1] at", nil},
+		{"acme.names, https file CA, letsencrypt in the environment", names(httpsEmail), "acme.names[0] at", []string{"PHANTOM_ACME_CA=letsencrypt"}},
+		{"acme.names, default file CA, https in the environment", names("acme:\n  email: sec@example.com\n"), "", []string{"PHANTOM_ACME_CA=https://ca.host.zz/dir"}},
 	}
 	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) { loadWants(t, r.file, r.want) })
+		t.Run(r.name, func(t *testing.T) { loadWants(t, r.file, r.want, r.env...) })
 	}
 }
 
 // TestTS11_DecoyNameCount checks the count and the compare of names
-// (T-S-11). There are 1 to 16 names over both lists. A name is in one
+// (SEC-31, T-S-11, T-S-27). There are 1 to 16 names over both lists. A name is in one
 // list only, and tls.certs has no repeat.
 func TestTS11_DecoyNameCount(t *testing.T) {
 	head := "acme:\n  email: sec@example.com\n"
@@ -2114,6 +2121,7 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 		{"17 certificates", both(0, 17), "tls.certs at"},
 		{"a name in both lists", certsFile(head+"  names: [a.host.zz]\n", certItem("a.host.zz")), "tls.certs[0].name at"},
 		{"the second certificate is in names", certsFile(head+"  names: [a.host.zz]\n", certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[1].name at"},
+		{"the first certificate is in names, second entry", certsFile(head+"  names: [a.host.zz, b.host.zz]\n", certItem("b.host.zz")), "tls.certs[0].name at"},
 		{"a name two times in tls.certs", certsFile("", certItem("a.host.zz"), certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[2].name at"},
 	}
 	for _, r := range rows {
@@ -2126,6 +2134,8 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 		{"17 certificates", both(0, 17), "tls.certs at"},
 		{"names not a list", strings.Replace(base, "[decoy.host.zz]", "x", 1), "acme.names at"},
 		{"certificates not a list", "tls:\n  certs: x\n" + tlogLine, "tls.certs at"},
+		{"names a mapping", strings.Replace(base, "[decoy.host.zz]", "{a: b}", 1), "acme.names at"},
+		{"certificates a mapping", "tls:\n  certs: {a: b}\n" + tlogLine, "tls.certs at"},
 	}
 	for _, r := range shape {
 		t.Run("no total error, "+r.name, func(t *testing.T) {
@@ -2144,8 +2154,36 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 	}
 }
 
+// TestTS11_DecoyErrors checks the text of two errors of the compare of
+// names (T-S-11). An error of the compare gives the file line. A name that
+// fails its own check gets no error of the compare (a repeat).
+func TestTS11_DecoyErrors(t *testing.T) {
+	t.Run("full text with the line", func(t *testing.T) {
+		file := certsFile("acme:\n  email: sec@example.com\n  names: [a.host.zz]\n", certItem("a.host.zz"))
+		_, err := loadProd(t, file)
+		want := "config: tls.certs[0].name at " + cfg + ":5: the name must not be in acme.names too"
+		if err == nil || err.Error() != want {
+			t.Errorf("got %v, want %q", err, want)
+		}
+	})
+	t.Run("a failed name two times", func(t *testing.T) {
+		_, err := loadProd(t, certsFile("", certItem("Bad.host.zz"), certItem("Bad.host.zz")))
+		if err == nil {
+			t.Fatal("got no error")
+		}
+		for _, k := range []string{"tls.certs[0].name at", "tls.certs[1].name at"} {
+			if !strings.Contains(err.Error(), k) {
+				t.Errorf("got %v, want an error with %q", err, k)
+			}
+		}
+		if strings.Contains(err.Error(), "two times") {
+			t.Errorf("got a repeat error: %v", err)
+		}
+	})
+}
+
 // TestTS11_ACMEEmail checks that acme.email is required only with
-// acme.names (T-S-11).
+// acme.names (T-S-11, T-S-27).
 func TestTS11_ACMEEmail(t *testing.T) {
 	rows := []struct{ name, file, want string }{
 		{"tls.certs only, no email", certsFile("", certItem("a.host.zz")), ""},
@@ -2175,7 +2213,7 @@ func TestTS11_ACMEEmail(t *testing.T) {
 // TestTS11_TLSCertsShape checks the shape of tls.certs. It is a list of
 // mappings with name, cert_file and key_file. There is no type key and
 // no override, and the paths are absolute and clean. Each error names
-// its key (T-S-11, T-S-27).
+// its key (SEC-31, T-S-11, T-S-27).
 func TestTS11_TLSCertsShape(t *testing.T) {
 	ok := certItem("a.host.zz")
 	with := func(v string) string { return base + "tls:\n  certs: " + v + "\n" }

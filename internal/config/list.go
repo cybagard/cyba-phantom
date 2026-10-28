@@ -22,12 +22,16 @@ type listKey struct {
 	unique   bool             // unique marks a list of scalars with no duplicate entry.
 }
 
+// maxDecoyNames is the most decoy names: the bound of acme.names, of tls.certs,
+// and of the two lists in total.
+const maxDecoyNames = 16
+
 // lists is the production list table. The key table holds the scalar keys.
 var lists = []listKey{
 	// An acme.names entry may be an internal name. decoyCheck refuses
 	// it unless acme.ca is an https URL.
-	{path: "acme.names", min: 0, max: 16, unique: true, item: &key{kind: kindString, check: checkDecoyName}},
-	{path: "tls.certs", min: 0, max: 16, fields: []key{
+	{path: "acme.names", min: 0, max: maxDecoyNames, unique: true, item: &key{kind: kindString, check: checkDecoyName}},
+	{path: "tls.certs", min: 0, max: maxDecoyNames, fields: []key{
 		{path: "name", kind: kindString, req: true, check: checkDecoyName},
 		{path: "cert_file", kind: kindPath, req: true, check: checkAbsPath},
 		{path: "key_file", kind: kindPath, req: true, check: checkAbsPath},
