@@ -140,7 +140,7 @@ func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []erro
 }
 
 // repeated counts the form of raw in seen. It reports true for the second
-// copy of a form only, so a form that occurs 3 times gives one error.
+// copy of a form only. Thus a form that occurs 3 times gives one error.
 func repeated(seen map[string]int, k key, raw string) bool {
 	form, ok := raw, true
 	if k.canon != nil {
