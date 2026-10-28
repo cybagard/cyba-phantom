@@ -1050,37 +1050,87 @@ var (
 // on the way and of its target. It opens the file one time. Then it reads the
 // type, owner, and mode from the open file, as ReadFile does.
 func checkHtpasswd(_ *loader, raw string) string {
+	return checkFile(raw, "htpasswd file", htpasswdFileRule, true)
+}
+
+// maxPEMFile is the maximum size of a root, certificate or key file.
+const maxPEMFile = 64 << 10
+
+// pemFileRule is the file rule of acme.ca_root, cert_file and key_file. It is
+// the htpasswd rule with a size cap.
+var pemFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true, MaxSize: maxPEMFile}
+
+// checkCARoot applies the file rules to acme.ca_root (SEC-31). An empty value
+// means no root file. The file may be readable by other.
+func checkCARoot(_ *loader, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return checkFile(raw, "CA root file", pemFileRule, false)
+}
+
+// checkCertFile applies the file rules to a tls.certs cert_file (SEC-31).
+// The file may be readable by other.
+func checkCertFile(_ *loader, raw string) string {
+	return checkFile(raw, "certificate file", pemFileRule, false)
+}
+
+// checkKeyFile applies the file rules to a tls.certs key_file (SEC-31). The
+// file must not be readable by other.
+func checkKeyFile(_ *loader, raw string) string {
+	return checkFile(raw, "key file", pemFileRule, true)
+}
+
+// caRootCheck refuses acme.ca_root when acme.ca is a CA name such as
+// letsencrypt. The root file is for an https URL only (SEC-31). The error
+// names acme.ca_root. A key that failed its own check is not in vals.
+func caRootCheck(vals map[string]Value) []error {
+	r, ok := vals["acme.ca_root"]
+	if !ok || r.Str == "" {
+		return nil
+	}
+	if _, name := caDirectories[vals["acme.ca"].Str]; !name {
+		return nil
+	}
+	return []error{&Error{Key: "acme.ca_root", Source: r.Source, Line: r.Line, Detail: "the file needs an acme.ca that is an https URL"}}
+}
+
+// checkFile applies the file rules of rule to raw. The name is in each fixed
+// detail text. The check refuses other-read only if noOtherRead is set.
+func checkFile(raw, name string, rule safefile.Rule, noOtherRead bool) string {
 	if d := checkPathForm(raw); d != "" {
 		return d
 	}
 	if err := safefile.CheckPathParents(raw, htpasswdDirRule); err != nil {
 		switch {
 		case errors.Is(err, safefile.ErrOwner), errors.Is(err, safefile.ErrMode):
-			return "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+			return "a directory of the " + name + " is writable by group or other, or its owner is not root or the sensor user"
 		case errors.Is(err, safefile.ErrName):
-			return "the htpasswd file is not a regular file"
+			return "the " + name + " is not a regular file"
 		}
-		return "the htpasswd file cannot be resolved"
+		return "the " + name + " cannot be resolved"
 	}
-	f, fi, err := safefile.OpenPath(raw, htpasswdFileRule)
+	f, fi, err := safefile.OpenPath(raw, rule)
 	switch {
 	case errors.Is(err, safefile.ErrType), errors.Is(err, safefile.ErrName):
-		return "the htpasswd file is not a regular file"
+		return "the " + name + " is not a regular file"
 	case errors.Is(err, safefile.ErrOwner):
-		return "the owner of the htpasswd file is not root or the sensor user"
+		return "the owner of the " + name + " is not root or the sensor user"
+	case errors.Is(err, safefile.ErrSize):
+		return "the " + name + " is larger than 64 KiB"
 	case errors.Is(err, safefile.ErrOpen), errors.Is(err, safefile.ErrChanged):
-		return "the htpasswd file cannot be opened"
+		return "the " + name + " cannot be opened"
 	case err != nil:
-		return "the htpasswd file cannot be resolved"
+		return "the " + name + " cannot be resolved"
 	}
 	defer f.Close()
 	switch perm := fi.Mode().Perm(); {
 	case perm&0o020 != 0:
-		return "the htpasswd file is writable by group"
+		return "the " + name + " is writable by group"
 	case perm&0o002 != 0:
-		return "the htpasswd file is writable by other"
-	case perm&0o004 != 0:
-		return "the htpasswd file is readable by other"
+		return "the " + name + " is writable by other"
+	case noOtherRead && perm&0o004 != 0:
+		return "the " + name + " is readable by other"
 	}
 	return ""
 }

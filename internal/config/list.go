@@ -53,8 +53,8 @@ var lists = []listKey{
 	{path: "acme.names", min: 0, max: maxDecoyNames, unique: true, item: &key{kind: kindString, check: checkDecoyName}},
 	{path: "tls.certs", min: 0, max: maxDecoyNames, fields: []key{
 		{path: "name", kind: kindString, req: true, check: checkDecoyName},
-		{path: "cert_file", kind: kindPath, req: true, check: checkAbsPath},
-		{path: "key_file", kind: kindPath, req: true, check: checkAbsPath},
+		{path: "cert_file", kind: kindPath, req: true, check: checkCertFile},
+		{path: "key_file", kind: kindPath, req: true, check: checkKeyFile},
 	}},
 	{path: "tlog.publish", min: 1, max: 4, req: true, schemas: map[string][]key{
 		"https-put": {
