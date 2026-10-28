@@ -31,10 +31,13 @@ const (
 	// kindURL is a key whose value is never printed in an error. It can
 	// hold user information.
 	kindURL
+	// kindEntry is the kind of a private list entry. Its value is never
+	// printed in an error.
+	kindEntry
 )
 
-var kindNames = [...]string{"string", "bool", "int", "uint", "byte size", "duration", "path", "URL"}
-var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str", "!!str", "!!str"}
+var kindNames = [...]string{"string", "bool", "int", "uint", "byte size", "duration", "path", "URL", "IP address or prefix"}
+var kindTags = [...]string{"!!str", "!!bool", "!!int", "!!int", "!!int", "!!str", "!!str", "!!str", "!!str"}
 
 // key is one row of the key table.
 type key struct {
@@ -49,9 +52,18 @@ type key struct {
 	// reqIf, if set, is a second condition for req.
 	// The key is required only when req is set and reqIf returns true.
 	reqIf func(doc *Doc) bool
-	// maxItems > 0 marks a key in a list item that holds 1 to maxItems
-	// scalars in a list.
+	// maxItems > 0 marks a key in a list item that holds a list of
+	// scalars. The list has 1 to maxItems entries, or 0 to maxItems
+	// with optList.
 	maxItems int
+	// optList marks a list in an item that may be absent or empty.
+	optList bool
+	// unique marks a list in an item with no duplicate entry.
+	unique bool
+	// canon, if set, gives the form of an entry for the duplicate check.
+	// Two entries with one form are duplicates. An entry with no form
+	// is not counted. Without canon, the entry text is the form.
+	canon func(raw string) (string, bool)
 	// check returns a fixed detail if a parsed value breaks a rule, or "".
 	check func(l *loader, raw string) string
 	// endpoint, if set, parses the value as an outbound endpoint for AllowList.
@@ -197,8 +209,8 @@ func envName(path string) string {
 }
 
 func keyError(k key, raw, src string, line int, detail string) error {
-	if k.secret || k.kind == kindURL {
-		// An Error never holds a secret value or a URL.
+	if k.secret || k.kind == kindURL || k.kind == kindEntry {
+		// An Error never holds a secret value, a URL or a private list entry.
 		// A URL can hold user information.
 		raw = ""
 	}
@@ -315,6 +327,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	}
 	errs = append(errs, crossCheck(l.stateRoot, vals)...)
 	errs = append(errs, decoyCheck(doc, path, vals)...)
+	errs = append(errs, privateCheck(doc, path, vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

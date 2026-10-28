@@ -537,6 +537,97 @@ func TestTS11_CheckACME(t *testing.T) {
 	}
 }
 
+// afterFile returns the text of s after the config file name. The temporary
+// directory name holds the test name, so the leak check skips it.
+func afterFile(s string) string {
+	_, rest, _ := strings.Cut(s, "config.yaml")
+	return rest
+}
+
+// TestTS26_CheckPrivateLists checks that --check applies the private list
+// rules. A refusal exits 1 and names the key of the entry. For a ninth
+// entry, a duplicate, or a list that its item cannot use, it names the
+// list. A row with a leak text checks that stderr does not hold it. A valid
+// list passes (SEC-30, T-S-26, T-S-11).
+func TestTS26_CheckPrivateLists(t *testing.T) {
+	body := validBody(t)
+	acme := func(list string) string {
+		return strings.Replace(body, "  names: [decoy.host.zz]\n", "  names: [decoy.host.zz]\n  ca_private: "+list+"\n", 1)
+	}
+	publish := func(list string) string {
+		return strings.Replace(body, "token_env: CKPT_TOKEN}", "token_env: CKPT_TOKEN, private: "+list+"}", 1)
+	}
+	bundle := func(url, list string) string {
+		return body + "bundle:\n" + url + "  fetch_private: " + list + "\n"
+	}
+	const nine = `[10.0.0.1, 10.0.0.2, 10.0.0.3, 10.0.0.4, 10.0.0.5, 10.0.0.6, 10.0.0.7, 10.0.0.8, 10.0.0.9]`
+	const fetch = "  fetch_url: \"https://bundle.example.invalid/x\"\n"
+	sink := func(item string) string { return body + "alerts:\n  sinks:\n    - " + item + "\n" }
+	syslog := func(addr, list string) string {
+		return sink(`{type: syslog, addr: "` + addr + `", private: ` + list + "}")
+	}
+	webhook := func(list string) string {
+		return sink(`{type: webhook, url: "https://hook.example.invalid/x", hmac_secret_env: HMAC_KEY, private: ` + list + "}")
+	}
+	smtp := func(list string) string {
+		return sink(`{type: smtp, host: "smtp://mail.example.invalid:587", from: a@example.com, to: [b@example.com], private: ` + list + "}")
+	}
+	// The key is "" for a file that passes. The stderr of a refusal must not
+	// hold the leak text. An empty leak means no check for that row.
+	type checkRow struct{ name, file, key, leak string }
+	rows := []checkRow{
+		{"acme list", acme(`["10.0.0.0/8", "fc00::/7"]`), "", ""},
+		{"acme empty list", acme(`[]`), "", ""},
+		{"acme host name", acme(`[corp.internal.zz]`), "acme.ca_private[0]", "corp.internal.zz"},
+		{"acme port", acme(`["10.0.0.1:443"]`), "acme.ca_private[0]", "10.0.0.1:443"},
+		{"acme nine", acme(nine), "acme.ca_private", "10.0.0.9"},
+		{"acme duplicate", acme(`[10.0.0.1, 10.0.0.1]`), "acme.ca_private", ""},
+		{"acme duplicate in two spellings", acme(`[10.0.0.1, "10.0.0.1/32"]`), "acme.ca_private", "10.0.0.1/32"},
+		{"acme duplicate in other case", acme(`["fd00::a", "FD00::A"]`), "acme.ca_private", "FD00::A"},
+		{"acme wide entry", acme(`["0.0.0.0/0"]`), "acme.ca_private[0]", "0.0.0.0/0"},
+		{"acme letsencrypt", strings.Replace(acme(`[10.0.0.1]`), `"https://ca.example.invalid"`, "letsencrypt", 1), "acme.ca_private", ""},
+		{"publish list", publish(`["10.1.0.0/16"]`), "", ""},
+		{"publish metadata range", publish(`["169.254.0.0/16"]`), "tlog.publish[0].private[0]", "169.254.0.0/16"},
+		{"publish nine", publish(nine), "tlog.publish[0].private", "10.0.0.9"},
+		{"publish duplicate", publish(`[10.0.0.1, 10.0.0.1]`), "tlog.publish[0].private", ""},
+		{"bundle list", bundle(fetch, `[10.0.0.1]`), "", ""},
+		{"bundle no fetch_url", bundle("", `[10.0.0.1]`), "bundle.fetch_private", ""},
+		{"bundle bad entry", bundle(fetch, `["10.0.0.1/8"]`), "bundle.fetch_private[0]", "10.0.0.1/8"},
+		{"udp sink list", syslog("udp://127.0.0.1:514", `[10.0.0.1]`), "alerts.sinks[0].private", ""},
+		{"tcp sink list", syslog("tcp://127.0.0.1:514", `[10.0.0.1]`), "alerts.sinks[0].private", ""},
+		{"udp sink empty list", syslog("udp://127.0.0.1:514", `[]`), "alerts.sinks[0].private", ""},
+		{"tls sink list", syslog("tls://logs.example.invalid:6514", `[10.0.0.1]`), "", ""},
+		{"webhook list", webhook(`[10.0.0.1]`), "", ""},
+		{"webhook bad entry", webhook(`["192.0.2.1"]`), "alerts.sinks[0].private[0]", "192.0.2.1"},
+		{"smtp list", smtp(`[10.0.0.1]`), "", ""},
+		{"smtp duplicate", smtp(`[10.0.0.1, "10.0.0.1/32"]`), "alerts.sinks[0].private", "10.0.0.1/32"},
+	}
+	// These entries are the refused entries of the load test.
+	for _, e := range []string{"0.0.0.0/0", "::/0", "198.18.0.0/15", "192.0.2.1", "64:ff9b::/96", "2002::/16",
+		"fec0::/10", "::ffff:10.0.0.0/104", "fe80::1%eth0", "10.0.0.1/8", "127.0.0.1", "100.0.0.0/8"} {
+		leak := e
+		if len(e) < 8 { // ::/0 is too short for a fair check.
+			leak = ""
+		}
+		rows = append(rows, checkRow{"entry " + e, acme(`["` + e + `"]`), "acme.ca_private[0]", leak})
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "HMAC_KEY=" + strings.Repeat("h", 32)}
+			var so, se strings.Builder
+			code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
+			switch {
+			case r.key == "" && (code != 0 || se.Len() != 0):
+				t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
+			case r.key != "" && (code != 1 || !strings.Contains(se.String(), "config: "+r.key+" at ")):
+				t.Errorf("exit %d, stderr %q; want exit 1 and a refusal that names %q", code, se.String(), r.key)
+			case r.leak != "" && strings.Contains(afterFile(se.String()), r.leak):
+				t.Errorf("stderr %q holds the entry", se.String())
+			}
+		})
+	}
+}
+
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
 // from, and an smtp to. Each value holds one of the characters of
 // configtest.EmailMarks. The exit code is 1. Stderr names the key and

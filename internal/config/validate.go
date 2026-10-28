@@ -227,6 +227,74 @@ func crossCheck(root string, vals map[string]Value) []error {
 	return errs
 }
 
+// checkPrivateEntry checks one entry of a private list with the egress
+// entry rule (SEC-30). The detail holds no part of the entry.
+func checkPrivateEntry(_ *loader, raw string) string {
+	if _, err := egress.ParsePrivateEntry(raw); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// privateCheck checks that each private list key in the file is on an item
+// that can use a list. An empty list is also refused on an item that cannot
+// use a list. An absent key is valid. The error names the list key. An item
+// key that failed its own check is not in vals, so the loader skips it.
+func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
+	var errs []error
+	refuse := func(list, detail string) {
+		errs = append(errs, &Error{Key: list, Source: file, Line: doc.Lines[list], Detail: detail})
+	}
+	has := func(list string) bool { _, ok := doc.Lines[list]; return ok }
+	if u, ok := vals["bundle.fetch_url"]; ok && u.Str == "" && has("bundle.fetch_private") {
+		refuse("bundle.fetch_private", "the list needs a bundle.fetch_url that is not empty")
+	}
+	// A CA name such as letsencrypt is not an https URL.
+	if _, name := caDirectories[vals["acme.ca"].Str]; name && has("acme.ca_private") {
+		refuse("acme.ca_private", "the list needs an acme.ca that is an https URL")
+	}
+	for i := range maxSinks {
+		item := fmt.Sprintf("alerts.sinks[%d]", i)
+		addr, ok := vals[item+".addr"]
+		if !ok || !has(item+".private") {
+			continue
+		}
+		if e, d := syslogEndpoint(addr.Str); d == "" && e.Scheme != "tls" {
+			refuse(item+".private", "the list needs a syslog address with the scheme tls")
+		}
+	}
+	return errs
+}
+
+// privatePath matches the paths that PrivateList accepts. N is a decimal
+// index with no leading zero.
+var privatePath = regexp.MustCompile(`^(acme\.ca_private|bundle\.fetch_private|(tlog\.publish|alerts\.sinks)\[(0|[1-9][0-9]*)\](\.private)?)$`)
+
+// PrivateList returns the parsed entries of one private list. The path is
+// acme.ca_private, bundle.fetch_private, or an item such as tlog.publish[1]
+// or alerts.sinks[0], with or without the suffix .private. Any other path
+// gives nil. It never merges two lists. The result is a new slice.
+func (c *Config) PrivateList(path string) []netip.Prefix {
+	if !privatePath.MatchString(path) {
+		return nil
+	}
+	if strings.HasSuffix(path, "]") {
+		path += ".private"
+	}
+	var out []netip.Prefix
+	for i := 0; ; i++ {
+		v, ok := c.values[fmt.Sprintf("%s[%d]", path, i)]
+		if !ok {
+			return out
+		}
+		p, err := egress.ParsePrivateEntry(v.Str)
+		if err != nil {
+			return out
+		}
+		out = append(out, p)
+	}
+}
+
 // belowFloor checks that the value of key is not less than the value of floor.
 // It skips the check if key or floor is not in vals. If key is at default, the
 // operator set floor: the error names floor.
