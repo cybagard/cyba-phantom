@@ -200,8 +200,8 @@ type Store struct {
 var _ certmagic.Storage = (*Store)(nil)
 
 // storeHooks are the calls that make a write durable. A Store calls them
-// through its own value, so that a test can record their order on one Store
-// with no effect on another Store. osHooks gives the real functions.
+// through its own value. So a test can record their order on one Store with no
+// effect on another Store. osHooks gives the real functions.
 type storeHooks struct {
 	syncFile    func(*os.File) error
 	syncDirFile func(*os.File) error
