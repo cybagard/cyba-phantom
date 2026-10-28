@@ -319,3 +319,76 @@ func TestTS21ZeroNamesFailsClearly(t *testing.T) {
 	n.Set("a.test.", loop4)
 	n.Resolver()
 }
+
+// itemDialer makes an item dialer for port 443 over tcp, with the entries.
+func itemDialer(t *testing.T, entries ...string) *net.Dialer {
+	t.Helper()
+	var list []netip.Prefix
+	for _, e := range entries {
+		p, err := egress.ParsePrivateEntry(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		list = append(list, p)
+	}
+	d, err := egress.ItemDialer(list, 443, "tcp", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A permitted private dial fails in the network, not in the guard. The host
+// may also have a route and connect, so a connection is not an error here.
+func TestTS26ItemDialPermittedIsNotGuardError(t *testing.T) {
+	names := egresstest.NewNames(t)
+	names.Set("listed.test.", netip.MustParseAddr("10.1.2.3"))
+	d := itemDialer(t, "10.0.0.0/8")
+	d.Resolver = names.Resolver()
+	for _, address := range []string{"10.1.2.3:443", "listed.test.:443"} {
+		c, err := dial(d, "tcp", address)
+		if err == nil {
+			c.Close()
+		} else if errors.Is(err, egress.ErrRefused) {
+			t.Errorf("%s: permitted dial gave the guard error", address)
+		}
+	}
+}
+
+func TestTS26ItemDialRefusedIsGuardError(t *testing.T) {
+	names := egresstest.NewNames(t)
+	names.Set("listed.test.", netip.MustParseAddr("10.1.2.3"))
+	d := itemDialer(t, "10.0.0.0/8")
+	d.Resolver = names.Resolver()
+	mustRefuse(t, d, "tcp", "10.1.2.3:444")
+	mustRefuse(t, d, "udp", "10.1.2.3:443")
+	mustRefuse(t, d, "tcp", "172.16.0.1:443")
+	mustRefuse(t, d, "tcp", "100.100.100.200:443")
+	mustRefuse(t, d, "tcp", "listed.test.:444")
+	mustRefuse(t, egress.Dialer(testTimeout), "tcp", "10.1.2.3:443")
+	other := itemDialer(t, "192.168.0.0/16")
+	other.Resolver = names.Resolver()
+	mustRefuse(t, other, "tcp", "10.1.2.3:443")
+	mustRefuse(t, other, "tcp", "listed.test.:443")
+}
+
+func TestTS26ItemRefusalTextHasNoAddress(t *testing.T) {
+	d := itemDialer(t, "10.0.0.0/8")
+	for _, tc := range []struct{ network, address string }{
+		{"tcp4", "10.1.2.3:444"},
+		{"udp4", "10.1.2.3:443"},
+		{"tcp4", "172.16.0.1:443"},
+		{"tcp4", "100.100.100.200:443"},
+	} {
+		err := d.ControlContext(context.Background(), tc.network, tc.address, nil)
+		if !errors.Is(err, egress.ErrRefused) {
+			t.Fatalf("%s %s: got %v", tc.network, tc.address, err)
+		}
+		host, port, _ := net.SplitHostPort(tc.address)
+		if text := err.Error(); strings.Contains(text, host) ||
+			strings.Contains(text, port) {
+			t.Errorf("%s %s: text %q has the address or the port",
+				tc.network, tc.address, text)
+		}
+	}
+}
