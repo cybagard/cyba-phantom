@@ -151,10 +151,9 @@ func absolute(path string) (string, error) {
 }
 
 // nameError gives the ReadError for a path that ends in "/", "/." or "/..".
-// The text is the text of a plain open of the path. This holds when the user
-// can search each parent of the working directory. A stat of abs gives the
-// system error, or "not a regular file" for a directory. The error shows the
-// path that the user gave.
+// The text is the text of a plain open of the path. The limits in the comment
+// of absolute also apply. A stat of abs gives the system error, or "not a
+// regular file" for a directory. The error shows the path that the user gave.
 func nameError(path, abs string) error {
 	if _, err := os.Stat(abs); err != nil {
 		var pe *os.PathError
