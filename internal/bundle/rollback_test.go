@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,6 +81,90 @@ func TestTS20Record(t *testing.T) {
 	}
 	if _, err := r.Check(manifestOf("2026.01.01-2", farExp), sumOf(1), ClassProprietary, farNow, false); err != ErrRollback {
 		t.Errorf("old bundle after Record: %v", err)
+	}
+}
+
+// T-S-20: Record refuses a version or a class that readState refuses. At a
+// first start it writes nothing, and Healthy stays true.
+func TestTS20RecordRefusesInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		class   Class
+	}{
+		{"empty version", "", ClassProprietary},
+		{"bad version", "bad", ClassProprietary},
+		{"class 0", "2026.01.01-1", Class(0)},
+		{"unknown class", "2026.01.01-1", Class(99)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, r := newDir(t)
+			if err := r.Record(manifestOf(c.version, farExp), sumOf(1), c.class); !errors.Is(err, errStateInput) {
+				t.Errorf("Record: %v", err)
+			}
+			if snapshot(t, dir) != "none" {
+				t.Error("Record wrote a state file")
+			}
+			if _, err := os.Lstat(filepath.Join(dir, stateTempName)); err == nil {
+				t.Error("a temporary file is left")
+			}
+			if !r.Healthy() {
+				t.Error("not healthy")
+			}
+		})
+	}
+}
+
+// T-S-20: Record refuses a version or a class that readState refuses, also
+// when the SHA-256 is that of the state. The state file does not change.
+func TestTS20RecordRefusesInputSameSum(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		class   Class
+	}{
+		{"bad version", "bad", ClassProprietary},
+		{"class 0", "2026.01.01-5", Class(0)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, r := newDir(t)
+			putState(t, dir, goodRec, 0o600)
+			before := snapshot(t, dir)
+			if err := r.Record(manifestOf(c.version, farExp), sumOf(1), c.class); !errors.Is(err, errStateInput) {
+				t.Errorf("Record: %v", err)
+			}
+			if snapshot(t, dir) != before {
+				t.Error("the state file changed")
+			}
+			if !r.Healthy() {
+				t.Error("not healthy")
+			}
+		})
+	}
+}
+
+// T-S-20: a hand-built Manifest can have a short version. When a state with
+// another SHA-256 exists, Check and Record give an error and do not panic.
+// The state file does not change.
+func TestTS20ShortVersion(t *testing.T) {
+	for _, v := range []string{"", "2026", "2026.01.01", "2026.01.01-", "2026.01.01-0", "2030.01.01-0", "2030.02.30-1"} {
+		t.Run(v, func(t *testing.T) {
+			dir, r := newDir(t)
+			putState(t, dir, goodRec, 0o600)
+			before := snapshot(t, dir)
+			m := manifestOf(v, farExp)
+			if _, err := r.Check(m, sumOf(2), ClassProprietary, farNow, false); !errors.Is(err, errStateInput) {
+				t.Errorf("Check: %v", err)
+			}
+			if err := r.Record(m, sumOf(2), ClassProprietary); !errors.Is(err, errStateInput) {
+				t.Errorf("Record: %v", err)
+			}
+			if snapshot(t, dir) != before {
+				t.Error("the state file changed")
+			}
+		})
 	}
 }
 

@@ -88,6 +88,18 @@ func writeState(root *os.Root, st state) error {
 	return writeFile(root, StateName, fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
 }
 
+// tempFile is the part of the temporary file that writeFile uses after it
+// creates that file.
+type tempFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+// wrapTemp is nil, except in a test. A test sets it to make Write, Sync or
+// Close of the temporary file fail.
+var wrapTemp func(*os.File) tempFile
+
 // writeFile writes data to the file with this name and replaces an old file.
 // It makes a temporary file, with the name and ".tmp", and mode 0600 less the
 // umask. It writes the temporary file, and calls Sync and Close. Then it
@@ -104,11 +116,15 @@ func writeFile(root *os.Root, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
+	var w tempFile = f
+	if wrapTemp != nil {
+		w = wrapTemp(f)
 	}
-	if cerr := f.Close(); err == nil {
+	_, err = w.Write(data)
+	if err == nil {
+		err = w.Sync()
+	}
+	if cerr := w.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {

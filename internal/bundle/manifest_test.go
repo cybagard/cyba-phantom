@@ -129,8 +129,8 @@ func refusedManifests() []mcase {
 		"1.0.0-rc1", " 1.0.0", "1.0.0 ", "1,0,0", "1.0.0\x5cn"} {
 		cs = append(cs, mcase{"min_engine " + v, with("min_engine", q(v))})
 	}
-	// Each case of expires is an instant after created and within 366 days of
-	// it, so that only the form rule refuses it.
+	// Each expires value reads as a time after created and within 366 days.
+	// Only the form rule refuses it.
 	for _, n := range []struct{ name, day, prev, year string }{
 		{"created", "2026-09-19", "2026-09-18", "2026"},
 		{"expires", "2027-01-01", "2026-12-31", "2027"},

@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"errors"
 	"os"
 	"time"
 )
@@ -23,8 +24,9 @@ func NewRollback(root *os.Root) *Rollback { return &Rollback{root: root} }
 // Check accepts the bundle whose SHA-256 equals the version state, also after
 // the expiry time of its manifest. Then expired is true. A lower version gives
 // ErrRollback. So do the same version with another SHA-256, and a reference
-// bundle after a proprietary one. Check accepts the same SHA-256 again. Check
-// writes nothing.
+// bundle after a proprietary one. A version that validVersion refuses gives an
+// error when a state with another SHA-256 exists. Check accepts the same
+// SHA-256 again. Check writes nothing.
 func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, start bool) (expired bool, err error) {
 	st, err := readState(r.root)
 	if err != nil {
@@ -39,10 +41,17 @@ func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, 
 	return expired, st.allows(m.Version, sum, class)
 }
 
+// errStateInput is the error for a version or a class that the state cannot
+// hold. A Manifest that code builds by hand can cause it. A class that is not
+// in classText also causes it.
+var errStateInput = errors.New("bundle: version or class not valid for the state")
+
 // Record stores an accepted bundle as the version state. The loader calls it
-// before the swap. A bundle with the SHA-256 of the state causes no write. A
-// state fault, or a bundle that Check would refuse as a rollback, gives an
-// error and no write.
+// before the swap. A state fault or a rollback gives an error and no write.
+// A version that validVersion refuses, or a class that is not in classText,
+// gives an error and no write. Record checks them also for a bundle with the
+// SHA-256 of the state. Such a bundle with a valid version and class causes
+// no write.
 func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	st, err := readState(r.root)
 	if err != nil {
@@ -50,6 +59,9 @@ func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	}
 	if err := st.allows(m.Version, sum, class); err != nil {
 		return err
+	}
+	if !validVersion(m.Version) || classText[class] == "" {
+		return errStateInput
 	}
 	if st != nil && st.SHA256 == sum {
 		return nil
@@ -67,6 +79,9 @@ func (r *Rollback) Healthy() bool {
 func (st *state) allows(version string, sum [32]byte, class Class) error {
 	if st == nil || st.SHA256 == sum {
 		return nil
+	}
+	if !validVersion(version) {
+		return errStateInput
 	}
 	if compareVersion(version, st.Version) <= 0 || (class == ClassReference && st.Class == ClassProprietary) {
 		return ErrRollback
