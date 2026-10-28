@@ -167,7 +167,7 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 	return newPubLists(t, interval, targets, nil, opts...)
 }
 
-// newPubLists is newPub with the private list of each target. lists may be nil
+// newPubLists is newPub with the private list of each target. lists can be nil
 // or shorter than targets; a target with no entry has no list.
 func newPubLists(t *testing.T, interval time.Duration, targets []*fakeTarget, lists [][]netip.Prefix, opts ...publishOption) *pubEnv {
 	t.Helper()
@@ -661,20 +661,26 @@ func TestTS13_FailedTargetWaitsForTheFloor(t *testing.T) {
 
 // T-I-09: the defaults are the limits of SEC-17.
 func TestTI09_Limits(t *testing.T) {
-	a := newTarget(t)
-	e := newPub(t, time.Minute, []*fakeTarget{a})
-	p, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}}, time.Minute, nil)
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	targets := []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}, {URL: b.url(), TokenEnv: tokenVar}}
+	p, err := NewPublisher(e.spool, targets, time.Minute, nil)
 	must(t, err)
-	tr := p.clients[0].Transport.(*http.Transport)
-	if p.timeout != 30*time.Second || tr.TLSHandshakeTimeout != 10*time.Second || tr.ResponseHeaderTimeout != 10*time.Second || tr.MaxIdleConnsPerHost != 1 {
-		t.Fatalf("limits: %v %v %v %v", p.timeout, tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout, tr.MaxIdleConnsPerHost)
+	if p.timeout != 30*time.Second || len(p.clients) != 2 {
+		t.Fatalf("limits: timeout %v, %d clients, want 30 s and 2", p.timeout, len(p.clients))
 	}
-	if tr.IdleConnTimeout != 90*time.Second || tr.MaxResponseHeaderBytes != 16<<10 {
-		t.Fatalf("limits: idle timeout %v, header bytes %d, want 90 s and 16 KiB", tr.IdleConnTimeout, tr.MaxResponseHeaderBytes)
-	}
-	if tr.Proxy != nil || p.clients[0].CheckRedirect == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
-		tr.TLSClientConfig.InsecureSkipVerify || tr.TLSClientConfig.RootCAs != nil {
-		t.Fatal("the transport must have no proxy, no redirect, verified TLS 1.2 or later, and the system roots")
+	for i, c := range p.clients {
+		tr := c.Transport.(*http.Transport)
+		if tr.TLSHandshakeTimeout != 10*time.Second || tr.ResponseHeaderTimeout != 10*time.Second || tr.MaxIdleConnsPerHost != 1 || tr.MaxIdleConns != 1 {
+			t.Fatalf("target %d limits: %v %v %v %v", i, tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout, tr.MaxIdleConnsPerHost, tr.MaxIdleConns)
+		}
+		if tr.IdleConnTimeout != 90*time.Second || tr.MaxResponseHeaderBytes != 16<<10 {
+			t.Fatalf("target %d limits: idle timeout %v, header bytes %d, want 90 s and 16 KiB", i, tr.IdleConnTimeout, tr.MaxResponseHeaderBytes)
+		}
+		if tr.Proxy != nil || c.CheckRedirect == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
+			tr.TLSClientConfig.InsecureSkipVerify || tr.TLSClientConfig.RootCAs != nil {
+			t.Fatalf("target %d: the transport must have no proxy, no redirect, verified TLS 1.2 or later, and the system roots", i)
+		}
 	}
 	if _, err := NewPublisher(e.spool, nil, time.Minute, nil); err == nil {
 		t.Fatal("targets that differ from the spool must be an error")
@@ -927,24 +933,27 @@ func TestTS13_TokenAndErrors(t *testing.T) {
 	}
 }
 
-// T-I-09: Run publishes after Notify and ends when the context ends.
+// T-I-09: Run publishes to each target after Notify. When the context ends, Run
+// stops and closes the idle connection of each target.
 func TestTI09_RunPublishesAndStops(t *testing.T) {
-	a := newTarget(t)
-	e := newPub(t, time.Minute, []*fakeTarget{a})
+	targets := []*fakeTarget{newTarget(t), newTarget(t)}
+	e := newPub(t, time.Minute, targets)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.pub.Run(ctx); close(done) }()
 	e.add(t, 1)
 	e.pub.Notify()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
-		if _, stored, _ := a.got(); len(stored) == 1 {
-			break
-		} else if time.Now().After(deadline) {
-			t.Fatal("Run did not publish the note")
+	for i, f := range targets {
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+			if _, stored, _ := f.got(); len(stored) == 1 {
+				break
+			} else if time.Now().After(deadline) {
+				t.Fatalf("Run did not publish the note to target %d", i)
+			}
 		}
-	}
-	if n := a.openConns(); n != 1 {
-		t.Fatalf("open connections while Run waits = %d, want the 1 idle connection", n)
+		if n := f.openConns(); n != 1 {
+			t.Fatalf("target %d: open connections while Run waits = %d, want the 1 idle connection", i, n)
+		}
 	}
 	cancel()
 	select {
@@ -952,9 +961,11 @@ func TestTI09_RunPublishesAndStops(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not stop")
 	}
-	for deadline := time.Now().Add(10 * time.Second); a.openConns() != 0; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("Run did not close the idle connection")
+	for i, f := range targets {
+		for deadline := time.Now().Add(10 * time.Second); f.openConns() != 0; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("Run did not close the idle connection of target %d", i)
+			}
 		}
 	}
 }

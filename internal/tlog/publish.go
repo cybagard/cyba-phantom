@@ -109,7 +109,8 @@ type Publisher struct {
 // verifies TLS 1.2 or later. Each target has its own item dialer
 // (egress.ItemDialer). The dialer has the port of the URL and the private list
 // of that target. The guard refuses a resolved address that the rules do not
-// permit (SEC-26). It returns an error if a dialer cannot be made.
+// permit (SEC-26). It returns an error if the URL or the port of a target is
+// not valid. It returns an error if ItemDialer refuses the port or the list.
 func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger) (*Publisher, error) {
 	return newPublisher(spool, targets, interval, log)
 }
@@ -281,7 +282,7 @@ func (p *Publisher) Notify() {
 
 // Run publishes until ctx ends. It starts with one pass, then waits for Notify
 // or for the next target whose backoff ends. When it returns, it closes the idle
-// connections of the transport.
+// connections of the transport of each target.
 func (p *Publisher) Run(ctx context.Context) {
 	defer func() {
 		for _, c := range p.clients {
