@@ -2121,7 +2121,7 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 		{"17 certificates", both(0, 17), "tls.certs at"},
 		{"a name in both lists", certsFile(head+"  names: [a.host.zz]\n", certItem("a.host.zz")), "tls.certs[0].name at"},
 		{"the second certificate is in names", certsFile(head+"  names: [a.host.zz]\n", certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[1].name at"},
-		{"the first certificate is in names, second entry", certsFile(head+"  names: [a.host.zz, b.host.zz]\n", certItem("b.host.zz")), "tls.certs[0].name at"},
+		{"the certificate is the second name", certsFile(head+"  names: [a.host.zz, b.host.zz]\n", certItem("b.host.zz")), "tls.certs[0].name at"},
 		{"a name two times in tls.certs", certsFile("", certItem("a.host.zz"), certItem("b.host.zz"), certItem("a.host.zz")), "tls.certs[2].name at"},
 	}
 	for _, r := range rows {
