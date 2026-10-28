@@ -329,14 +329,17 @@ func lineSet(lines []string) map[string]bool {
 // Each program has the package runtime. Thus a list without runtime fails,
 // for example a list cut to the two commands. A cut list that keeps runtime
 // and the commands still passes.
-// Three other changes of this function stay live. Here is why for each one:
-//   - The deps of linux/amd64 go to linux/s390x. The two platforms list
-//     the same packages, so the data does not change.
-//   - The context is replaced by wantContext. A right go list gives that
-//     same value, so only a wrong go list differs. The wrong context case of
-//     TestTS21CheckDepListReports covers it.
-//   - The commands are nil or cut. The same variable feeds listDeps, so a
-//     test has no value to compare with. The not listed cases cover the check.
+// No test of this package fails on these changes of this function:
+//   - A copy of the deps of one platform to another platform. A dep entry
+//     has no platform, so checkDepList cannot see whose list it gets. A
+//     copy between two linux platforms fails only when a line of
+//     release-deps.txt loses its last user.
+//   - The real context replaced by wantContext. A right go list gives that
+//     same value, so only a wrong go list differs. A unit case tests the
+//     context check of checkDepList, not this function.
+//   - A cut of the commands, in the variable or in the checkDepList call.
+//     Nothing compares them with the commands that the Makefile builds. Unit
+//     cases test the command check of checkDepList, not this function.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	root := moduleRoot(t)
 	realRoot, err := realPath(root)
@@ -473,7 +476,8 @@ func TestTS21RecordPassesOtherMethods(t *testing.T) {
 //   - "line not used" leaves only the replace package on linux/amd64.
 //   - "platform dropped" drops the host platform.
 //   - "order swapped" swaps the first two platforms.
-//   - "platform replaced" gives the s390x slot the name linux/amd64.
+//   - "platform replaced" gives the s390x slot the name and the context of
+//     linux/amd64.
 //   - "wrong context" gives linux/386 the context of a build with cgo on.
 //   - "command not listed" gives linux/386 no deps, not even the command.
 //   - "command missing" cuts the command from linux/amd64, which still lists
