@@ -86,6 +86,9 @@ var keys = []key{
 	// only with acme.names.
 	{path: "acme.email", kind: kindString, req: true, reqIf: func(doc *Doc) bool { return count(doc, "acme.names") > 0 }, check: checkEmail},
 	{path: "acme.ca", kind: kindURL, def: "letsencrypt", check: checkCA},
+	// The root file is for an https acme.ca only. caRootCheck refuses
+	// acme.ca_root when acme.ca is a CA name.
+	{path: "acme.ca_root", kind: kindPath, check: checkCARoot},
 	{path: "acme.cache_dir", kind: kindPath, def: "/var/lib/phantom/certs", check: checkCacheDir},
 	{path: "bundle.path", kind: kindPath, def: "/var/lib/phantom/bundle/current.cbnd", check: checkBundlePath},
 	{path: "bundle.fetch_url", kind: kindURL, check: checkFetchURL},
@@ -328,6 +331,7 @@ func (l *loader) load(path string, env []string, table []key, n Net) (*Config, e
 	errs = append(errs, crossCheck(l.stateRoot, vals)...)
 	errs = append(errs, decoyCheck(doc, path, vals)...)
 	errs = append(errs, privateCheck(doc, path, vals)...)
+	errs = append(errs, caRootCheck(vals)...)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

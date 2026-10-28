@@ -505,7 +505,9 @@ func TestTS11_CheckACME(t *testing.T) {
 			b = strings.Replace(b, "  email: sec@example.com\n", "", 1)
 			b = strings.Replace(b, "  names: [decoy.host.zz]\n", "", 1)
 		}
-		return b + "tls:\n  certs: [{name: " + name + ", cert_file: /etc/phantom/a.pem, key_file: /etc/phantom/a.key}]\n"
+		d := fixtureDir(t)
+		cert, key := writeFixture(t, d, "static.pem", 0o644), writeFixture(t, d, "static.key", 0o600)
+		return b + "tls:\n  certs: [{name: " + name + ", cert_file: " + strconv.Quote(cert) + ", key_file: " + strconv.Quote(key) + "}]\n"
 	}
 	// cacheRefused returns the whole stderr of a refusal of acme.cache_dir by
 	// a path rule. Then it adds the lines of the other keys. Stderr must start
