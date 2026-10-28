@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/cybagard/cyba-phantom/internal/egress"
 )
 
 // listKey is one list key (04 section 3). Each item is a mapping. Its type key selects
@@ -35,10 +37,10 @@ const (
 
 // privateEntry is the key of one entry of a private list (SEC-30). Its kind
 // keeps the entry text out of an error.
-var privateEntry = key{kind: kindURL, check: checkPrivateEntry}
+var privateEntry = key{kind: kindEntry, check: checkPrivateEntry, canon: privateForm}
 
 // privateList is the optional list of one item. It may be absent or empty.
-var privateList = key{path: "private", kind: kindURL, maxItems: maxPrivate, optList: true, unique: true, check: checkPrivateEntry}
+var privateList = key{path: "private", kind: kindEntry, maxItems: maxPrivate, optList: true, unique: true, check: checkPrivateEntry, canon: privateForm}
 
 // lists is the production list table. The key table holds the scalar keys.
 var lists = []listKey{
@@ -137,6 +139,27 @@ func expandLists(doc *Doc, file string, table []listKey) (out []key, errs []erro
 	return out, errs
 }
 
+// repeated counts the form of raw in seen. It reports true for the second
+// copy of a form only, so a form that occurs 3 times gives one error.
+func repeated(seen map[string]int, k key, raw string) bool {
+	form, ok := raw, true
+	if k.canon != nil {
+		form, ok = k.canon(raw)
+	}
+	if !ok {
+		return false
+	}
+	seen[form]++
+	return seen[form] == 2
+}
+
+// privateForm gives the prefix of a private list entry, as text. An entry
+// that the entry rule refuses has no form: its own check reports it.
+func privateForm(raw string) (string, bool) {
+	p, err := egress.ParsePrivateEntry(raw)
+	return p.String(), err == nil
+}
+
 // expandScalars expands the entries of the list of scalars l. Each entry is a key with the
 // check of l.item. An entry that is not a scalar is an error on the entry. A duplicate entry is an error on the list key.
 func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []error) {
@@ -150,9 +173,7 @@ func expandScalars(doc *Doc, file string, l listKey, n int) (out []key, errs []e
 			fail(k.path, "the key needs a scalar value")
 			continue
 		}
-		seen[leaf.Value]++
-		// The error is for the second copy of a value only.
-		if l.unique && seen[leaf.Value] == 2 {
+		if l.unique && repeated(seen, k, leaf.Value) {
 			fail(l.path, "the list must not hold an entry two times")
 		}
 		out = append(out, k)
@@ -224,9 +245,7 @@ func expandItem(doc *Doc, file string, l listKey, ip string) (out []key, errs []
 					fail(e.path, "the key needs a scalar value")
 					continue
 				}
-				seen[leaf.Value]++
-				// The error is for the second copy of a value only.
-				if f.unique && seen[leaf.Value] == 2 {
+				if f.unique && repeated(seen, e, leaf.Value) {
 					fail(f.path, "the list must not hold an entry two times")
 				}
 				out = append(out, e)

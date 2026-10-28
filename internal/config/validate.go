@@ -224,7 +224,7 @@ func crossCheck(root string, vals map[string]Value) []error {
 			fail("bundle.path", b, d)
 		}
 	}
-	return append(errs, privateCheck(vals)...)
+	return errs
 }
 
 // checkPrivateEntry checks one entry of a private list with the egress
@@ -236,16 +236,16 @@ func checkPrivateEntry(_ *loader, raw string) string {
 	return ""
 }
 
-// privateCheck checks that each non-empty private list has an item that
-// can use it. An empty list passes: it adds no address. The error names
-// the list key. A key that failed its own check is not in vals.
-func privateCheck(vals map[string]Value) []error {
+// privateCheck checks that each private list key in the file is on an item
+// that can use a list. An empty list is also refused on an item that cannot
+// use a list. An absent key is valid. The error names the list key. An item
+// key that failed its own check is not in vals, so the loader skips it.
+func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 	var errs []error
 	refuse := func(list, detail string) {
-		first := vals[list+"[0]"]
-		errs = append(errs, &Error{Key: list, Source: first.Source, Line: first.Line, Detail: detail})
+		errs = append(errs, &Error{Key: list, Source: file, Line: doc.Lines[list], Detail: detail})
 	}
-	has := func(list string) bool { _, ok := vals[list+"[0]"]; return ok }
+	has := func(list string) bool { _, ok := doc.Lines[list]; return ok }
 	if u, ok := vals["bundle.fetch_url"]; ok && u.Str == "" && has("bundle.fetch_private") {
 		refuse("bundle.fetch_private", "the list needs a bundle.fetch_url that is not empty")
 	}
@@ -266,10 +266,18 @@ func privateCheck(vals map[string]Value) []error {
 	return errs
 }
 
-// PrivateList returns the parsed entries of one private list. The path
-// is a list key (for example acme.ca_private) or an item (for example
-// tlog.publish[1]). It never merges two lists. The result is a new slice.
+// privatePath matches the paths that PrivateList accepts. N is a decimal
+// index with no leading zero.
+var privatePath = regexp.MustCompile(`^(acme\.ca_private|bundle\.fetch_private|(tlog\.publish|alerts\.sinks)\[(0|[1-9][0-9]*)\](\.private)?)$`)
+
+// PrivateList returns the parsed entries of one private list. The path is
+// acme.ca_private, bundle.fetch_private, or an item such as tlog.publish[1]
+// or alerts.sinks[0], with or without the suffix .private. Any other path
+// gives nil. It never merges two lists. The result is a new slice.
 func (c *Config) PrivateList(path string) []netip.Prefix {
+	if !privatePath.MatchString(path) {
+		return nil
+	}
 	if strings.HasSuffix(path, "]") {
 		path += ".private"
 	}
