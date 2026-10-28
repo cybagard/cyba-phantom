@@ -1927,9 +1927,9 @@ func TestTS26_LiteralHostList(t *testing.T) {
 }
 
 // TestTS26_LiteralHostListIndex checks the list of an item by its index.
-// It does this in alerts.sinks and tlog.publish, up to the last index of
-// each. A literal passes with the list at its own index. With no list, or
-// with the list at another index, the error names the key (T-S-26).
+// It tries index 0, index 1 and the last index of alerts.sinks and
+// tlog.publish. A literal passes with the list at its own index. With no
+// list, or with the list at another index, the error names the key (T-S-26).
 func TestTS26_LiteralHostListIndex(t *testing.T) {
 	const host, list = "10.1.2.3", "10.0.0.0/8"
 	kinds := []struct {

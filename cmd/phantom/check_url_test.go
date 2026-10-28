@@ -42,9 +42,9 @@ func TestTS11_CheckURLRules(t *testing.T) {
 
 // TestTS11_CheckLiteralHostList checks six endpoint keys. A literal host
 // passes --check with exit 0 if the list of its own item holds it. With the
-// list on another item only, the exit is 1. A never-list host also exits 1,
-// with its class in the list. The error names the key and shows no part of
-// the host (T-S-11, T-S-26).
+// list on another item only, the exit is 1. The exit is also 1 for a
+// never-list host, with its class in the list. The error names the key and
+// shows no part of the host (T-S-11, T-S-26).
 func TestTS11_CheckLiteralHostList(t *testing.T) {
 	body := validBody(t)
 	priv := func(l string) string {
@@ -145,7 +145,8 @@ func TestTS11_CheckLiteralHostList(t *testing.T) {
 					}
 					return
 				}
-				// The smtp host key shows its value after ": value".
+				// A parse error of the smtp host key shows the value
+				// after ": value".
 				detail, _, _ := strings.Cut(se.String(), ": value")
 				if code != 1 || !strings.Contains(se.String(), "config: "+k.key+" at ") || strings.Contains(detail, r.host) {
 					t.Errorf("exit %d, stderr %q", code, se.String())
