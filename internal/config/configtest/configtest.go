@@ -24,6 +24,7 @@ var BadURLs = []BadURL{
 var EgressLiterals = []string{
 	"127.0.0.1", "10.0.0.1", "100.100.100.200", "169.254.169.254", "224.0.0.1", "[fd00:ec2::254]",
 	"[64:ff9b::a9fe:a9fe]", "[::169.254.169.254]", "[::ffff:10.0.0.1]", "[fec0::1]", "[2001:db8::1]",
+	"[fe80::1]", "[fe81::]", "[febf::1]", "[::ffff:169.254.169.254]", "0.0.0.0", "[::]",
 }
 
 // GlobalLiterals are IP-literal hosts that the egress rule permits (T-S-11).

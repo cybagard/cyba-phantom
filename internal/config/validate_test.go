@@ -369,7 +369,8 @@ func TestTU10_URL(t *testing.T) {
 		{"fragment", "https://h/#x", []string{"https"}, "fragment"},
 		{"empty fragment", "https://h/#", []string{"https"}, "fragment"},
 		// parseURL accepts a literal that the egress rule refuses.
-		// literalCheck refuses it (TestTS11_EgressLiterals).
+		// literalCheck refuses it: TestTS11_EgressLiterals at load and
+		// TestTS11_CheckEgressLiterals through --check.
 		{"link-local v4", "https://169.254.169.254/", []string{"https"}, ""},
 		{"link-local v6", "https://[fe80::1]/", []string{"https"}, ""},
 		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, ""},
@@ -441,7 +442,8 @@ func TestTU10_CA(t *testing.T) {
 		{"staging", "letsencrypt-staging", ""},
 		{"https", "https://ca.example/dir", ""},
 		{"https port", "https://8.8.8.8:14000/dir", ""},
-		// literalCheck refuses the loopback and link-local rows.
+		// literalCheck refuses the loopback and link-local rows:
+		// TestTS11_EgressLiterals and TestTS11_CheckEgressLiterals.
 		{"loopback", "https://127.0.0.1:14000/dir", ""},
 		{"tcp", "tcp://ca.example:443", "scheme"},
 		{"http", "http://ca.example/dir", "scheme"},
@@ -1834,7 +1836,7 @@ type litKind struct {
 	file              func(host, list string, own bool) string
 }
 
-// litKinds returns the six endpoint kinds, with smtps as a seventh row.
+// litKinds returns seven rows: one for each endpoint kind and scheme.
 func litKinds() []litKind {
 	sinks := func(lit func(h string) string, other string) func(string, string, bool) string {
 		return func(h, l string, own bool) string {
@@ -1902,6 +1904,7 @@ func TestTS26_LiteralHostList(t *testing.T) {
 		{"cloud metadata v4, class list", "100.100.100.200", "100.64.0.0/10", false},
 		{"cloud metadata v6, class list", "[fd00:ec2::254]", "fd00::/8", false},
 		{"cloud metadata v4, entry for it", "100.100.100.200", "100.100.100.200", false},
+		{"cloud metadata v6, entry for it", "[fd00:ec2::254]", "fd00:ec2::254", false},
 		{"benchmark range", "198.18.0.1", "10.0.0.0/8", false},
 		{"link-local", "169.254.169.254", "10.0.0.0/8", false},
 		{"loopback", "127.0.0.1", "10.0.0.0/8", false},
@@ -1919,6 +1922,60 @@ func TestTS26_LiteralHostList(t *testing.T) {
 				}
 				wantKey(t, err, k.key, r.host)
 			})
+		}
+	}
+}
+
+// TestTS26_LiteralHostListIndex checks the list of an item by its index.
+// It does this in alerts.sinks and tlog.publish, up to the last index of
+// each. A literal passes with the list at its own index. With no list, or
+// with the list at another index, the error names the key (T-S-26).
+func TestTS26_LiteralHostListIndex(t *testing.T) {
+	const host, list = "10.1.2.3", "10.0.0.0/8"
+	kinds := []struct {
+		name, key string
+		n         int
+		file      func(items ...string) string
+		item      func(h string) string
+	}{
+		{"alerts.sinks", "alerts.sinks[%d].url", listMax("alerts.sinks"), snk, func(h string) string {
+			return fmt.Sprintf(`{type: webhook, url: "https://%s/h", hmac_secret_env: ALERT_HMAC}`, h)
+		}},
+		{"tlog.publish", "tlog.publish[%d].url", listMax("tlog.publish"), pub, func(h string) string {
+			return fmt.Sprintf(`{type: https-put, url: "https://%s/p", token_env: CKPT_TOKEN}`, h)
+		}},
+	}
+	for _, k := range kinds {
+		for _, at := range []int{0, 1, k.n - 1} {
+			other := 0
+			if at == 0 {
+				other = 1
+			}
+			// listAt is the index of the list, or -1 for no list.
+			for _, listAt := range []int{at, -1, other} {
+				t.Run(fmt.Sprintf("%s/%d/list at %d", k.name, at, listAt), func(t *testing.T) {
+					var items []string
+					for i := 0; i <= max(at, listAt); i++ {
+						h := fmt.Sprintf("f%d.example", i)
+						if i == at {
+							h = host
+						}
+						it := k.item(h)
+						if i == listAt {
+							it = withList(it, list)
+						}
+						items = append(items, it)
+					}
+					_, err := loadProd(t, k.file(items...), listEnv...)
+					if listAt == at {
+						if err != nil {
+							t.Errorf("got %v", err)
+						}
+						return
+					}
+					wantKey(t, err, fmt.Sprintf(k.key, at), host)
+				})
+			}
 		}
 	}
 }

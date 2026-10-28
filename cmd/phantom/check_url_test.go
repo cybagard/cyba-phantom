@@ -40,35 +40,117 @@ func TestTS11_CheckURLRules(t *testing.T) {
 	}
 }
 
-// TestTS11_CheckLiteralHostList checks that --check lets an IP-literal host
-// pass when the list of its own item holds it (exit 0). With the list on
-// another item only, it exits 1. The error names the key and shows no part of
+// TestTS11_CheckLiteralHostList checks six endpoint keys. A literal host
+// passes --check with exit 0 if the list of its own item holds it. With the
+// list on another item only, the exit is 1. A never-list host also exits 1,
+// with its class in the list. The error names the key and shows no part of
 // the host (T-S-11, T-S-26).
 func TestTS11_CheckLiteralHostList(t *testing.T) {
 	body := validBody(t)
-	const host, list = "10.1.2.3", "10.0.0.0/8"
-	hook := `{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC`
-	other := `{type: syslog, addr: "udp://127.0.0.1:514"`
-	sink := func(a, b string) string {
-		return body + "alerts:\n  sinks:\n    - " + a + "}\n    - " + b + "}\n"
-	}
-	okPub := `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN`
-	pubs := func(a, b string) string { return strings.Replace(body, okPub+"}", a+"}\n    - "+b+"}", 1) }
-	lit := `{type: https-put, url: "https://` + host + `/p", token_env: CKPT_TOKEN`
-	rows := []struct{ key, own, elsewhere string }{
-		{"alerts.sinks[0].url", sink(hook+", private: ["+list+"]", other), sink(hook, other+", private: ["+list+"]")},
-		{"tlog.publish[0].url", pubs(lit+", private: ["+list+"]", okPub), pubs(lit, okPub+", private: ["+list+"]")},
-	}
-	for _, r := range rows {
-		env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
-		var so, se strings.Builder
-		if code := run([]string{"--check", writeFile(t, r.own)}, env, &so, &se); code != 0 {
-			t.Errorf("%s own list: exit %d, stderr %q", r.key, code, se.String())
+	priv := func(l string) string {
+		if l == "" {
+			return ""
 		}
-		se.Reset()
-		code := run([]string{"--check", writeFile(t, r.elsewhere)}, env, &so, &se)
-		if code != 1 || !strings.Contains(se.String(), "config: "+r.key+" at ") || strings.Contains(se.String(), host) {
-			t.Errorf("%s other list: exit %d, stderr %q", r.key, code, se.String())
+		return ", private: [" + l + "]"
+	}
+	hook := func(h, l string) string {
+		return `{type: webhook, url: "https://` + h + `/h", hmac_secret_env: ALERT_HMAC` + priv(l) + `}`
+	}
+	mail := func(h, l string) string {
+		return `{type: smtp, host: "smtp://` + h + `:25", from: a@b.example, to: [c@d.example]` + priv(l) + `}`
+	}
+	sinks := func(items ...string) string {
+		return body + "alerts:\n  sinks:\n    - " + strings.Join(items, "\n    - ") + "\n"
+	}
+	bundle := func(h, l string) string {
+		out := body + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n"
+		if l != "" {
+			out += "  fetch_private: [" + l + "]\n"
+		}
+		return out
+	}
+	okPub := `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN}`
+	pubs := func(h, l string) string {
+		it := `{type: https-put, url: "https://` + h + `/p", token_env: CKPT_TOKEN` + priv(l) + `}`
+		return strings.Replace(body, okPub, it+"\n    - "+okPub, 1)
+	}
+	// file returns the file and the environment. The list is on the item of
+	// the host if own is true, else on another item.
+	kinds := []struct {
+		key  string
+		file func(host, list string, own bool) (string, string)
+	}{
+		{"acme.ca", func(h, l string, own bool) (string, string) {
+			env := "PHANTOM_ACME_CA=https://" + h + "/d"
+			if own {
+				ca := "  ca: \"https://ca.example.invalid\"\n"
+				return strings.Replace(body, ca, ca+"  ca_private: ["+l+"]\n", 1), env
+			}
+			return bundle("b.example", l), env
+		}},
+		{"bundle.fetch_url", func(h, l string, own bool) (string, string) {
+			if own {
+				return bundle(h, l), ""
+			}
+			return bundle(h, "") + "alerts:\n  sinks:\n    - " + hook("hook.example", l) + "\n", ""
+		}},
+		{"tlog.publish[0].url", func(h, l string, own bool) (string, string) {
+			if own {
+				return pubs(h, l), ""
+			}
+			return strings.Replace(pubs(h, ""), okPub, strings.TrimSuffix(okPub, "}")+priv(l)+"}", 1), ""
+		}},
+		{"alerts.sinks[0].url", func(h, l string, own bool) (string, string) {
+			if own {
+				return sinks(hook(h, l), mail("mail.example", "")), ""
+			}
+			return sinks(hook(h, ""), mail("mail.example", l)), ""
+		}},
+		{"alerts.sinks[0].addr", func(h, l string, own bool) (string, string) {
+			sys := func(l string) string {
+				return `{type: syslog, addr: "tls://` + h + `:6514"` + priv(l) + `}`
+			}
+			if own {
+				return sinks(sys(l), hook("hook.example", "")), ""
+			}
+			return sinks(sys(""), hook("hook.example", l)), ""
+		}},
+		{"alerts.sinks[0].host", func(h, l string, own bool) (string, string) {
+			if own {
+				return sinks(mail(h, l), hook("hook.example", "")), ""
+			}
+			return sinks(mail(h, ""), hook("hook.example", l)), ""
+		}},
+	}
+	for _, k := range kinds {
+		for _, r := range []struct {
+			name, host, list string
+			own, passes      bool
+		}{
+			{"own list", "10.1.2.3", "10.0.0.0/8", true, true},
+			{"list on another item", "10.1.2.3", "10.0.0.0/8", false, false},
+			{"never-list host", "100.100.100.200", "100.64.0.0/10", true, false},
+		} {
+			t.Run(k.key+"/"+r.name, func(t *testing.T) {
+				file, extra := k.file(r.host, r.list, r.own)
+				env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+				if extra != "" {
+					env = append(env, extra)
+				}
+				var so, se strings.Builder
+				code := run([]string{"--check", writeFile(t, file)}, env, &so, &se)
+				if r.passes {
+					if code != 0 {
+						t.Errorf("exit %d, stderr %q", code, se.String())
+					}
+					return
+				}
+				// The smtp host key shows its value after ": value".
+				detail, _, _ := strings.Cut(se.String(), ": value")
+				if code != 1 || !strings.Contains(se.String(), "config: "+k.key+" at ") || strings.Contains(detail, r.host) {
+					t.Errorf("exit %d, stderr %q", code, se.String())
+				}
+			})
 		}
 	}
 }

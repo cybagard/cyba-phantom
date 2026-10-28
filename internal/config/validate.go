@@ -239,7 +239,8 @@ func checkPrivateEntry(_ *loader, raw string) string {
 // privateCheck checks that each private list key in the file is on an item
 // that can use a list. An empty list is also refused on an item that cannot
 // use a list. An absent key is valid. The error names the list key. An item
-// key that failed its own check is not in vals, so the loader skips it.
+// key that failed its own check is not in vals, so the loader skips it. It
+// also calls literalCheck for the IP-literal endpoint hosts.
 func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 	var errs []error
 	refuse := func(list, detail string) {
@@ -270,7 +271,7 @@ func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 // literal that the egress rule refuses, because a key check sees no other
 // key. Here the host must be in the private list of its own item, and not
 // on the never-list (SEC-30). The error names the endpoint key and holds no
-// part of the host. A key that failed is not in vals, so it is skipped.
+// part of the host. A key that failed is not in vals, so the check skips it.
 func literalCheck(vals map[string]Value) []error {
 	c := &Config{values: vals}
 	var errs []error
@@ -287,15 +288,17 @@ func literalCheck(vals map[string]Value) []error {
 		}
 		if !egress.ItemPermitted(c.PrivateList(list), a) {
 			errs = append(errs, &Error{Key: key, Source: v.Source, Line: v.Line,
-				Detail: "the host is an IP address that the egress rule refuses, and the private list of the item does not allow it"})
+				Detail: "the host is an IP address that the egress rule and the private list of the item do not permit"})
 		}
 	}
 	check("acme.ca", "acme.ca_private", func(raw string) (Endpoint, string) { return urlEndpoint(CADirectory(raw)) })
 	check("bundle.fetch_url", "bundle.fetch_private", urlEndpoint)
-	// A list has at most maxSinks items, and a missing key is skipped.
-	for i := range maxSinks {
+	// Each list has its own maximum. The check skips a missing key.
+	for i := range listMax("tlog.publish") {
 		pub := fmt.Sprintf("tlog.publish[%d]", i)
 		check(pub+".url", pub+".private", urlEndpoint)
+	}
+	for i := range maxSinks {
 		item := fmt.Sprintf("alerts.sinks[%d]", i)
 		for _, f := range sinkSchemas[vals[item+".type"].Str] {
 			if f.endpoint != nil {
@@ -304,6 +307,17 @@ func literalCheck(vals map[string]Value) []error {
 		}
 	}
 	return errs
+}
+
+// listMax returns the maximum number of items of the list at path in the
+// production list table.
+func listMax(path string) int {
+	for _, l := range lists {
+		if l.path == path {
+			return l.max
+		}
+	}
+	return 0
 }
 
 // privatePath matches the paths that PrivateList accepts. N is a decimal
@@ -507,9 +521,10 @@ func endpoint(scheme, host, port string) Endpoint {
 }
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
-// in the exact case. The host is not empty. An IP literal has no zone and
-// is not checked against the egress rule: literalCheck does it. It returns a
-// fixed detail on an error.
+// in the exact case. The host is not empty. An IP literal has no zone. This
+// function does not check it against the egress rule. For tls, smtp and smtps,
+// literalCheck does it. For udp and tcp, checkSyslogAddr does it. A name
+// passes. It returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -523,9 +538,6 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 		return Endpoint{}, "the host must not be empty"
 	case hp.addr.Zone() != "":
 		return Endpoint{}, "the host must not have a zone"
-	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
-		// A name passes here. checkSyslogAddr checks udp and tcp.
-		// literalCheck applies the egress rule to the other literals.
 	}
 	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
 }

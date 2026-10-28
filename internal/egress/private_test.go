@@ -136,6 +136,14 @@ func TestTS26ItemPermitted(t *testing.T) {
 		}
 		return out
 	}
+	// raw makes entries with no entry rule, as a caller can.
+	raw := func(s ...string) []netip.Prefix {
+		var out []netip.Prefix
+		for _, e := range s {
+			out = append(out, netip.MustParsePrefix(e))
+		}
+		return out
+	}
 	tests := []struct {
 		name string
 		list []netip.Prefix
@@ -151,6 +159,9 @@ func TestTS26ItemPermitted(t *testing.T) {
 		{"never-list v6", list("fd00::/8"), "fd00:ec2::254", false},
 		{"zone", list("fd00::/8"), "fd00::1%eth0", false},
 		{"outside every class", list("10.0.0.0/8"), "198.18.0.1", false},
+		{"v4 default route list", raw("0.0.0.0/0"), "198.18.0.1", false},
+		{"v6 default route list", raw("::/0"), "2001:db8::1", false},
+		{"one bad entry, one good entry", append(list("10.0.0.0/8"), raw("0.0.0.0/0")...), "10.1.2.3", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
