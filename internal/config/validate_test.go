@@ -2119,6 +2119,25 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { loadWants(t, r.file, r.want) })
 	}
+	// A list with a shape error gets its own error and no total error.
+	const total = "need 1 to 16 names in total"
+	shape := []struct{ name, file, key string }{
+		{"17 names", both(17, 0), "acme.names at"},
+		{"17 certificates", both(0, 17), "tls.certs at"},
+		{"names not a list", strings.Replace(base, "[decoy.host.zz]", "x", 1), "acme.names at"},
+		{"certificates not a list", "tls:\n  certs: x\n" + tlogLine, "tls.certs at"},
+	}
+	for _, r := range shape {
+		t.Run("no total error, "+r.name, func(t *testing.T) {
+			_, err := loadProd(t, r.file)
+			if err == nil || !strings.Contains(err.Error(), r.key) {
+				t.Fatalf("got %v, want an error with %q", err, r.key)
+			}
+			if strings.Contains(err.Error(), total) {
+				t.Errorf("got a total error: %v", err)
+			}
+		})
+	}
 	c := loadWants(t, both(0, 1), "")
 	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != "/etc/phantom/a.pem" {
 		t.Errorf("got %+v, %v", v, ok)

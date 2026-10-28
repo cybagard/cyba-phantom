@@ -858,10 +858,10 @@ func decoyCheck(doc *Doc, file string, vals map[string]Value) []error {
 	if total := nNames + nCerts; shaped("acme.names", nNames) && shaped("tls.certs", nCerts) && (total < 1 || total > 16) {
 		fail("acme.names", "acme.names and tls.certs need 1 to 16 names in total")
 	}
-	// An internal name needs a CA that is an https URL. The rule is
-	// skipped if acme.ca failed its own check.
-	ca, caOK := vals["acme.ca"]
-	_, directory := caDirectories[ca.Str]
+	// A CA name such as letsencrypt is not an https URL. An internal
+	// name in acme.names is then refused. A failed acme.ca is not in
+	// vals, so it is not a CA name and the rule does not apply.
+	_, directory := caDirectories[vals["acme.ca"].Str]
 	inNames := make(map[string]bool, nNames)
 	for i := range nNames {
 		p := fmt.Sprintf("acme.names[%d]", i)
@@ -870,7 +870,7 @@ func decoyCheck(doc *Doc, file string, vals map[string]Value) []error {
 			continue
 		}
 		inNames[v.Str] = true
-		if caOK && directory && internalName(v.Str) {
+		if directory && internalName(v.Str) {
 			fail(p, "an internal name needs an acme.ca that is an https URL")
 		}
 	}
