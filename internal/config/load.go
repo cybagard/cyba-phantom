@@ -210,7 +210,7 @@ func envName(path string) string {
 
 func keyError(k key, raw, src string, line int, detail string) error {
 	if k.secret || k.kind == kindURL || k.kind == kindEntry {
-		// An Error never holds a secret value or a URL.
+		// An Error never holds a secret value, a URL or a private list entry.
 		// A URL can hold user information.
 		raw = ""
 	}
