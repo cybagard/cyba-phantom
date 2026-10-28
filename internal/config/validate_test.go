@@ -548,7 +548,7 @@ var pkgDir = func() string {
 // root.
 func pkgTempDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp(pkgDir, "tmp-")
+	d, err := os.MkdirTemp(pkgDir, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1200,6 +1200,7 @@ var scalarBounds = []bound{
 	{key: "ops.basic_auth_htpasswd", pass: []string{filepath.Join(testDir, "htpasswd")}, fail: []string{"htpasswd", testDir + "/./htpasswd", filepath.Join(testDir, "missing"), groupWritable}},
 	{key: "acme.email", pass: []string{"a@b.example"}, fail: []string{"a@b.example\nBcc: c@d.example", "a@b.example, c@d.example", ""}},
 	{key: "acme.ca", pass: []string{"letsencrypt", "letsencrypt-staging", "https://ca.example/dir"}, fail: []string{"http://ca.example/dir", "https://u:p@ca.example/", "https://169.254.169.254/"}},
+	{key: "acme.ca_root", pass: []string{"", certPath}, fail: []string{"root.pem", filepath.Join(testDir, "missing"), groupWritable}, with: []string{"PHANTOM_ACME_CA=https://ca.example/dir"}},
 	{key: "acme.cache_dir", pass: []string{"/var/lib/phantom/certs"}, fail: []string{"/var/lib/other", "var/lib/phantom", "/var/lib/phantom/../x"}},
 	{key: "bundle.path", pass: []string{"/var/lib/phantom/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/phantom/b/../../x"}},
 	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
@@ -2529,8 +2530,27 @@ func TestTS11_ACMENamesTripleDuplicate(t *testing.T) {
 
 // certItem returns one tls.certs entry for name, with valid paths.
 func certItem(name string) string {
-	return "{name: " + strconv.Quote(name) + ", cert_file: /etc/phantom/a.pem, key_file: /etc/phantom/a.key}"
+	return "{name: " + strconv.Quote(name) + ", cert_file: " + strconv.Quote(certPath) + ", key_file: " + strconv.Quote(keyPath) + "}"
 }
+
+// certPath and keyPath are files below testDir that pass the file rules.
+// One is a certificate file with mode 0644. The other is a key file with
+// mode 0600. The rules read no content, so the files are empty. The chmod
+// sets the other-read bit, which a umask can clear. A umask cannot add a bit,
+// so the key file needs no chmod.
+var certPath, keyPath = func() (string, string) {
+	c, k := filepath.Join(testDir, "static.pem"), filepath.Join(testDir, "static.key")
+	if err := os.WriteFile(c, nil, 0o644); err != nil {
+		panic(err)
+	}
+	if err := os.Chmod(c, 0o644); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(k, nil, 0o600); err != nil {
+		panic(err)
+	}
+	return c, k
+}()
 
 // certsFile returns a config with the tls.certs entries. The head is the
 // text of the acme section ("" for none). The tlog section is the one of
@@ -2695,7 +2715,7 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 	if c == nil {
 		t.Fatalf("the load of one certificate failed")
 	}
-	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != "/etc/phantom/a.pem" {
+	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != certPath {
 		t.Errorf("got %+v, %v", v, ok)
 	}
 }
@@ -2762,7 +2782,10 @@ func TestTS11_ACMEEmail(t *testing.T) {
 // its key (SEC-31, T-S-11, T-S-27).
 func TestTS11_TLSCertsShape(t *testing.T) {
 	ok := certItem("a.host.zz")
-	with := func(v string) string { return base + "tls:\n  certs: " + v + "\n" }
+	// The rows name /a.pem and /a.key. The files of the other key pass the
+	// file rules, so each row fails for its own reason only.
+	paths := strings.NewReplacer("/a.pem", certPath, "/a.key", keyPath)
+	with := func(v string) string { return base + "tls:\n  certs: " + paths.Replace(v) + "\n" }
 	rows := []struct{ name, file, env, want string }{
 		{"valid", with("[" + ok + "]"), "", ""},
 		{"empty list with names", with("[]"), "", ""},
@@ -2790,6 +2813,316 @@ func TestTS11_TLSCertsShape(t *testing.T) {
 			}
 			loadWants(t, r.file, r.want, env...)
 		})
+	}
+}
+
+// fileKeyCase is one of the three keys with a file rule: acme.ca_root, and
+// cert_file and key_file of tls.certs[0] (SEC-31).
+type fileKeyCase struct {
+	key, name   string // name is in the fixed texts: "the <name> is ..."
+	noOtherRead bool   // noOtherRead marks the key that refuses other-read.
+	check       func(*loader, string) string
+	// load loads a config where the key has the value path and all other
+	// files pass the rules. It returns the load error.
+	load func(t *testing.T, path string) error
+}
+
+var fileKeyCases = []fileKeyCase{
+	{"acme.ca_root", "CA root file", false, checkCARoot, func(t *testing.T, path string) error {
+		_, err := loadProd(t, base, "PHANTOM_ACME_CA=https://ca.host.zz/dir", "PHANTOM_ACME_CA_ROOT="+path)
+		return err
+	}},
+	{"tls.certs[0].cert_file", "certificate file", false, checkCertFile, func(t *testing.T, path string) error {
+		_, err := loadProd(t, certsFile("", "{name: a.host.zz, cert_file: "+strconv.Quote(path)+", key_file: "+strconv.Quote(keyPath)+"}"))
+		return err
+	}},
+	{"tls.certs[0].key_file", "key file", true, checkKeyFile, func(t *testing.T, path string) error {
+		_, err := loadProd(t, certsFile("", "{name: a.host.zz, cert_file: "+strconv.Quote(certPath)+", key_file: "+strconv.Quote(path)+"}"))
+		return err
+	}},
+}
+
+// both checks the detail of the key check and of the load for path. An empty
+// want means that both pass. The load error must name the key.
+func (c fileKeyCase) both(t *testing.T, path, want string) {
+	t.Helper()
+	if got := c.check(&loader{}, path); got != want {
+		t.Errorf("check: got %q, want %q", got, want)
+	}
+	err := c.load(t, path)
+	switch {
+	case want == "" && err != nil:
+		t.Errorf("load: got %v", err)
+	case want != "" && (err == nil || !strings.Contains(err.Error(), c.key+" at ") || !strings.Contains(err.Error(), want)):
+		t.Errorf("load: got %v, want an error of %s with %q", err, c.key, want)
+	}
+}
+
+// text returns the fixed text "the <name> <rest>".
+func (c fileKeyCase) text(rest string) string { return "the " + c.name + " " + rest }
+
+// dirText is the fixed text of the directory rule.
+func (c fileKeyCase) dirText() string {
+	return "a directory of the " + c.name + " is writable by group or other, or its owner is not root or the sensor user"
+}
+
+// TestTS27_FileModes checks the mode, type and size rules of the three file
+// keys, with the fixed text of each. Only key_file must not be readable by
+// other. The cap is 64 KiB: 65536 bytes pass and 65537 are refused. Each case
+// runs through the key check and through the load (SEC-31, T-S-27).
+func TestTS27_FileModes(t *testing.T) {
+	for _, c := range fileKeyCases {
+		t.Run(c.key, func(t *testing.T) {
+			d := pkgTempDir(t)
+			file := func(name string, mode os.FileMode, size int64) string {
+				return writeFile(t, d, name, strings.Repeat("x", int(size)), mode)
+			}
+			link := func(name, target string) string {
+				p := filepath.Join(d, name)
+				if err := os.Symlink(target, p); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}
+			fifo := filepath.Join(d, "fifo")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			otherRead := ""
+			if c.noOtherRead {
+				otherRead = c.text("is readable by other")
+			}
+			good := file("good", 0o600, 10)
+			for _, r := range []struct{ name, path, want string }{
+				{"0600", good, ""},
+				{"0400", file("r", 0o400, 10), ""},
+				{"0640", file("g-read", 0o640, 10), ""},
+				{"0644", file("o-read", 0o644, 10), otherRead},
+				{"0604", file("o-read2", 0o604, 10), otherRead},
+				// The file rules read no content, so an empty file passes them.
+				{"empty", file("empty", 0o600, 0), ""},
+				{"symlink to a good file", link("l-good", good), ""},
+				{"symlink to a file with other read", link("l-or", file("l-or-t", 0o644, 10)), otherRead},
+				{"group write 0620", file("gw", 0o620, 10), c.text("is writable by group")},
+				{"group write 0660", file("gw2", 0o660, 10), c.text("is writable by group")},
+				{"other write 0602", file("ow", 0o602, 10), c.text("is writable by other")},
+				{"other write 0606", file("ow2", 0o606, 10), c.text("is writable by other")},
+				{"all write 0666", file("aw", 0o666, 10), c.text("is writable by group")},
+				{"65536 bytes", file("max", 0o600, 65536), ""},
+				{"65537 bytes", file("over", 0o600, 65537), c.text("is larger than 64 KiB")},
+				{"2 MiB", file("big", 0o600, 2<<20), c.text("is larger than 64 KiB")},
+				{"symlink to a file over 64 KiB", link("l-over", file("over2", 0o600, 65537)), c.text("is larger than 64 KiB")},
+				{"FIFO", fifo, c.text("is not a regular file")},
+				{"symlink to a FIFO", link("l-fifo", fifo), c.text("is not a regular file")},
+				{"directory", d, c.text("is not a regular file")},
+				{"missing", filepath.Join(d, "missing"), c.text("cannot be resolved")},
+				{"dangling symlink", link("l-dangling", filepath.Join(d, "missing")), c.text("cannot be resolved")},
+			} {
+				t.Run(r.name, func(t *testing.T) { c.both(t, r.path, r.want) })
+			}
+		})
+	}
+}
+
+// TestTS27_FileOwner checks that a file of another owner is refused, also
+// through a symlink to it. The owner rule runs before the mode rule
+// (SEC-31, T-S-27).
+func TestTS27_FileOwner(t *testing.T) {
+	for _, c := range fileKeyCases {
+		t.Run(c.key, func(t *testing.T) {
+			d := pkgTempDir(t)
+			want := "the owner of the " + c.name + " is not root or the sensor user"
+			t.Run("file", func(t *testing.T) {
+				p := writeFile(t, d, "other", "", 0o600)
+				otherOwner(t, p)
+				c.both(t, p, want)
+			})
+			t.Run("file and all write", func(t *testing.T) {
+				p := writeFile(t, d, "other-wide", "", 0o666)
+				otherOwner(t, p)
+				c.both(t, p, want)
+			})
+			t.Run("symlink to a file of another owner", func(t *testing.T) {
+				target := writeFile(t, d, "other-target", "", 0o600)
+				link := filepath.Join(d, "other-link")
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				otherOwner(t, target)
+				c.both(t, link, want)
+			})
+		})
+	}
+}
+
+// TestTS27_FileParents checks the directory rule of the three file keys.
+// A group or other write bit, mode 1777 and another owner are refused.
+// This holds for the directory of the file and for a higher one. It also
+// holds for the directory of a symlink on the way and of a symlink target
+// (SEC-31, T-S-27).
+func TestTS27_FileParents(t *testing.T) {
+	type tree struct{ root, file string }
+	chmod := func(t *testing.T, p string, m os.FileMode) {
+		t.Helper()
+		if err := os.Chmod(p, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range fileKeyCases {
+		// build makes root/a/b/f. The tree is private.
+		build := func(t *testing.T) tree {
+			root := pkgTempDir(t)
+			for _, p := range []string{"a", "a/b"} {
+				if err := os.Mkdir(filepath.Join(root, p), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return tree{root, writeFile(t, filepath.Join(root, "a/b"), "f", "", 0o600)}
+		}
+		symlink := func(t *testing.T, target, link string) {
+			t.Helper()
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Run(c.key, func(t *testing.T) {
+			for _, m := range []struct {
+				name string
+				mode os.FileMode
+			}{{"group write", 0o770}, {"other write", 0o707}, {"mode 1777", os.ModeSticky | 0o777}} {
+				t.Run("parent "+m.name, func(t *testing.T) {
+					tr := build(t)
+					chmod(t, filepath.Join(tr.root, "a/b"), m.mode)
+					c.both(t, tr.file, c.dirText())
+				})
+				t.Run("higher parent "+m.name, func(t *testing.T) {
+					tr := build(t)
+					chmod(t, filepath.Join(tr.root, "a"), m.mode)
+					c.both(t, tr.file, c.dirText())
+				})
+				t.Run("directory of the symlink on the way "+m.name, func(t *testing.T) {
+					tr := build(t)
+					if err := os.Mkdir(filepath.Join(tr.root, "l"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					link := filepath.Join(tr.root, "l", "link")
+					symlink(t, filepath.Join(tr.root, "a/b"), link)
+					path := filepath.Join(link, "f")
+					c.both(t, path, "")
+					chmod(t, filepath.Join(tr.root, "l"), m.mode)
+					c.both(t, path, c.dirText())
+				})
+				t.Run("parent of the symlink target "+m.name, func(t *testing.T) {
+					tr := build(t)
+					link := filepath.Join(tr.root, "link")
+					symlink(t, tr.file, link)
+					c.both(t, link, "")
+					chmod(t, filepath.Join(tr.root, "a/b"), m.mode)
+					c.both(t, link, c.dirText())
+				})
+			}
+			t.Run("private tree", func(t *testing.T) { c.both(t, build(t).file, "") })
+			t.Run("parent of another owner", func(t *testing.T) {
+				tr := build(t)
+				otherOwner(t, filepath.Join(tr.root, "a/b"))
+				c.both(t, tr.file, c.dirText())
+			})
+			t.Run("higher parent of another owner", func(t *testing.T) {
+				tr := build(t)
+				otherOwner(t, filepath.Join(tr.root, "a"))
+				c.both(t, tr.file, c.dirText())
+			})
+			t.Run("directory of the symlink target, other owner", func(t *testing.T) {
+				tr := build(t)
+				link := filepath.Join(tr.root, "link")
+				symlink(t, "a/b", link)
+				otherOwner(t, filepath.Join(tr.root, "a"))
+				c.both(t, filepath.Join(link, "f"), c.dirText())
+			})
+		})
+	}
+}
+
+// TestTS27_FileFormAndDetail checks the path form rules for each key. It also
+// checks that the detail holds no part of the path (SEC-31, T-S-27).
+func TestTS27_FileFormAndDetail(t *testing.T) {
+	for _, c := range fileKeyCases {
+		t.Run(c.key, func(t *testing.T) {
+			d := pkgTempDir(t)
+			good := writeFile(t, d, "good", "", 0o600)
+			for _, r := range []struct{ name, path, want string }{
+				{"relative", "good.pem", "absolute"},
+				{"not clean", d + "/../" + filepath.Base(d) + "/good", "clean"},
+				{"NUL", good + "\x00", "NUL"},
+			} {
+				t.Run(r.name, func(t *testing.T) {
+					if got := c.check(&loader{}, r.path); !strings.Contains(got, r.want) {
+						t.Errorf("got %q, want %q", got, r.want)
+					}
+				})
+			}
+			// A detail never holds the path.
+			for _, p := range []string{filepath.Join(d, "missing"), d, good + "x"} {
+				if got := c.check(&loader{}, p); strings.Contains(got, d) {
+					t.Errorf("the detail %q holds the path", got)
+				}
+			}
+		})
+	}
+}
+
+// TestTS11_CARootNeedsHTTPS checks that acme.ca_root is accepted only with an
+// https acme.ca. With letsencrypt, letsencrypt-staging and the default
+// acme.ca (letsencrypt) the load fails and the error names acme.ca_root
+// (SEC-31, T-S-11).
+func TestTS11_CARootNeedsHTTPS(t *testing.T) {
+	root := writeFile(t, pkgTempDir(t), "root.pem", "", 0o644)
+	file := func(ca string) string {
+		head := "acme:\n  email: sec@example.com\n  ca_root: " + strconv.Quote(root) + "\n"
+		if ca != "" {
+			head += "  ca: " + ca + "\n"
+		}
+		return head + acmeNames + tlogLine
+	}
+	rows := []struct {
+		name, file, want string
+		env              []string
+	}{
+		{"https CA", file(`"https://ca.host.zz/dir"`), "", nil},
+		{"letsencrypt", file("letsencrypt"), "acme.ca_root at", nil},
+		{"letsencrypt-staging", file("letsencrypt-staging"), "acme.ca_root at", nil},
+		{"default CA", file(""), "acme.ca_root at", nil},
+		{"https CA in the file, letsencrypt in the environment", file(`"https://ca.host.zz/dir"`), "acme.ca_root at", []string{"PHANTOM_ACME_CA=letsencrypt-staging"}},
+		{"default CA in the file, https in the environment", file(""), "", []string{"PHANTOM_ACME_CA=https://ca.host.zz/dir"}},
+		{"root from the environment, letsencrypt", base, "acme.ca_root at", []string{"PHANTOM_ACME_CA_ROOT=" + root}},
+		{"root from the environment, https", base, "", []string{"PHANTOM_ACME_CA=https://ca.host.zz/dir", "PHANTOM_ACME_CA_ROOT=" + root}},
+		{"no root, letsencrypt", base, "", nil},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			c := loadWants(t, r.file, r.want, r.env...)
+			if r.want == "" && c == nil {
+				t.Fatal("no config")
+			}
+		})
+	}
+	t.Run("the value is the path", func(t *testing.T) {
+		c := loadWants(t, file(`"https://ca.host.zz/dir"`), "")
+		if v, ok := c.Get("acme.ca_root"); !ok || v.Str != root {
+			t.Errorf("got %+v, %v", v, ok)
+		}
+	})
+}
+
+// TestTS11_CARootFileFails checks that a bad root file fails with an https
+// acme.ca. With a CA name it gives one error only, not two (SEC-31, T-S-11,
+// T-S-27).
+func TestTS11_CARootFileFails(t *testing.T) {
+	missing := filepath.Join(pkgTempDir(t), "missing")
+	loadWants(t, base, "acme.ca_root at", "PHANTOM_ACME_CA=https://ca.host.zz/dir", "PHANTOM_ACME_CA_ROOT="+missing)
+	_, err := loadProd(t, base, "PHANTOM_ACME_CA_ROOT="+missing)
+	if err == nil || strings.Count(err.Error(), "acme.ca_root at") != 1 {
+		t.Errorf("got %v, want one error of acme.ca_root", err)
 	}
 }
 
