@@ -675,8 +675,8 @@ func TestTS16AHookOfOneStoreIsNeverCalledByAnotherStore(t *testing.T) {
 				if err := a.Store(ctx, "kd/key", []byte("v")); err == nil || calls == 0 {
 					t.Errorf("Store of A = %v after %d calls of its hook; want an error", err, calls)
 				}
-				// A Store with a failing directory fsync has written the key. So the
-				// Delete of A calls the same fsync again.
+				// A Store with a failing directory fsync has written the key. So
+				// the Delete of A calls the same fsync again.
 				if c.name == "syncDirFile" {
 					if err := a.Delete(ctx, "kd/key"); err == nil {
 						t.Error("Delete of A gave no error")
