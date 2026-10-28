@@ -46,7 +46,7 @@ func TestTS13_NewPublisherRefusesLoopback(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})
 	lg, buf := testLogger()
-	p, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}}, time.Minute, lg)
+	p, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}}, time.Minute, lg)
 	must(t, err)
 	e.logs = buf
 	refusedPublish(t, e, p, a)
