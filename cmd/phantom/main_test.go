@@ -15,7 +15,25 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/config/configtest"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
+
+// TestMain stops the run when a directory above the package has a group or
+// other write bit or another owner. The htpasswd directory rule refuses each
+// fixture below such a directory, and many tests would fail with other texts.
+func TestMain(m *testing.M) {
+	// The file name is for the walk: it checks the package directory and above.
+	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "main_test.go"), dirRule); err != nil {
+		fmt.Fprintf(os.Stderr, "the tests need a checkout whose parent directories have no group or other write bit and are owned by root or the current user: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+// dirRule is the rule for a directory of the htpasswd file. The owner is root
+// or the current user. The mode has no group or other write bit. It is a
+// copy of htpasswdDirRule in internal/config.
+var dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
 
 type failNet struct{ t *testing.T }
 
@@ -38,10 +56,35 @@ func writeFile(t *testing.T, body string) string {
 	return p
 }
 
+// fixtureDirEnv names the directory for the fixture files of a child process.
+const fixtureDirEnv = "CYBA_TEST_FIXTURE_DIR"
+
+// pkgDir is the package directory. A test can change the working directory.
+var pkgDir = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	return wd
+}()
+
 // validBody returns a config file that passes all validators. The htpasswd file must exist.
+// The file is in a private directory below the package directory. The htpasswd
+// rule refuses a parent with a group or other write bit. The system
+// temporary directory can have mode 1777. A child process that ends with
+// os.Exit gets its directory in fixtureDirEnv, so its parent removes it.
 func validBody(t *testing.T) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "htpasswd")
+	base := pkgDir
+	if d := os.Getenv(fixtureDirEnv); d != "" {
+		base = d
+	}
+	d, err := os.MkdirTemp(base, "tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	p := filepath.Join(d, "htpasswd")
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +195,45 @@ func TestTS10_CheckNoDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireNoNet(t, "noNet", noNet{}, noNet{})
+}
+
+// TestTS10_CheckFileRules checks two refusals of --check. One is a config file
+// that other users can write. The other is an htpasswd file below a directory
+// that every user can write. Each gives exit 1 and the text of the load
+// (T-S-10).
+func TestTS10_CheckFileRules(t *testing.T) {
+	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
+	t.Run("config file 0602", func(t *testing.T) {
+		file := writeFile(t, validBody(t))
+		if err := os.Chmod(file, 0o602); err != nil {
+			t.Fatal(err)
+		}
+		var so, se strings.Builder
+		code := run([]string{"--check", file}, env, &so, &se)
+		if code != 1 || !strings.Contains(se.String(), "group or other writable") {
+			t.Errorf("exit %d, stderr %q; want exit 1 and \"group or other writable\"", code, se.String())
+		}
+	})
+	t.Run("htpasswd file below a 0777 directory", func(t *testing.T) {
+		d, err := os.MkdirTemp(pkgDir, "tmp-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(d) })
+		if err := os.Chmod(d, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(d, "htpasswd")
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var so, se strings.Builder
+		code := run([]string{"--check", writeFile(t, validBody(t))}, append(env, "PHANTOM_OPS_BASIC_AUTH_HTPASSWD="+p), &so, &se)
+		const dir = "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+		if code != 1 || !strings.Contains(se.String(), "ops.basic_auth_htpasswd") || !strings.Contains(se.String(), dir) {
+			t.Errorf("exit %d, stderr %q; want exit 1, the key and %q", code, se.String(), dir)
+		}
+	})
 }
 
 // TestTS10_CheckExec runs the binary. A valid file gives exit 0. An invalid
