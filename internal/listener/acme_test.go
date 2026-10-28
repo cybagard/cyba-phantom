@@ -486,13 +486,10 @@ func TestTS21GuardChecksEveryAddressOfAName(t *testing.T) {
 	}
 }
 
-// TestTS21GuardRefusesAnAddressOfANameWithAZone: the hosts file can give a
-// zone. The production rule refuses it, also for an IPv4 address, where the
-// zone cannot stay in a netip.Addr.
+// TestTS21GuardRefusesAnAddressOfANameWithAZone: the lookup can give a zone.
+// The production rule refuses it, also for an IPv4 address, where the zone
+// cannot stay in a netip.Addr. The test takes the proxy of the issuer.
 func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
-	item, err := egress.ItemDialer(nil, 443, "tcp", 0)
-	mustNil(t, err)
-	rule := itemRule(item, 443)
 	for _, c := range []struct {
 		name string
 		ip   net.IPAddr
@@ -501,19 +498,34 @@ func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
 		{"global v6 with zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888"), Zone: "eth0"}, true},
 		{"mapped v4 with zone", net.IPAddr{IP: net.ParseIP("::ffff:8.8.8.8"), Zone: "eth0"}, true},
 		{"4-byte v4 with zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4(), Zone: "eth0"}, true},
-		{"bad length", net.IPAddr{IP: net.IP{8, 8, 8}}, true},
 		{"global v6 no zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888")}, false},
+		{"mapped v4 no zone", net.IPAddr{IP: net.ParseIP("::ffff:8.8.8.8")}, false},
 		{"4-byte v4 no zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4()}, false},
 	} {
-		ca, err := url.Parse("https://ca.test/")
+		lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{c.ip}, nil }
+		proxy, err := prodProxyLookup(t, "https://ca.test/dir", nil, &stubDNS{}, lookup)
 		mustNil(t, err)
 		req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
 		mustNil(t, err)
-		lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{c.ip}, nil }
-		u, err := egressGuard(ca, nil, rule, net.DefaultResolver, lookup)(req)
+		u, err := proxy(req)
 		if (err != nil) != c.want || u != nil || (err != nil && err != errEgress) {
 			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.want)
 		}
+	}
+}
+
+// TestTS21GuardRefusesAnAddressOfBadLength: the guard refuses an address that
+// has 3 bytes. The proxy of the issuer cannot test this row.
+func TestTS21GuardRefusesAnAddressOfBadLength(t *testing.T) {
+	item, err := egress.ItemDialer(nil, 443, "tcp", 0)
+	mustNil(t, err)
+	ca, err := url.Parse("https://ca.test/")
+	mustNil(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
+	mustNil(t, err)
+	lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{{IP: net.IP{8, 8, 8}}}, nil }
+	if u, err := egressGuard(ca, nil, itemRule(item, 443), net.DefaultResolver, lookup)(req); err != errEgress || u != nil {
+		t.Errorf("proxy = %v, %v; want errEgress", u, err)
 	}
 }
 
@@ -1227,6 +1239,13 @@ func (s *stubDNS) serve(c net.Conn) {
 // error of NewACME.
 func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http.Request) (*url.URL, error), error) {
 	t.Helper()
+	return prodProxyLookup(t, ca, list, dns, nil)
+}
+
+// prodProxyLookup is prodProxy with the lookup hook. If lookup is not nil, it
+// replaces the lookup call.
+func prodProxyLookup(t *testing.T, ca string, list []string, dns *stubDNS, lookup func(context.Context, string) ([]net.IPAddr, error)) (func(*http.Request) (*url.URL, error), error) {
+	t.Helper()
 	st, _ := newStore(t)
 	var prefixes []netip.Prefix
 	for _, s := range list {
@@ -1234,7 +1253,7 @@ func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http
 	}
 	a, err := NewACME(ACMEParams{
 		Names: []string{"decoy.test"}, CA: ca, Storage: st, Host: "127.0.0.1", Port: 8443,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CAPrivate: prefixes, egressResolver: dns.resolver(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CAPrivate: prefixes, egressResolver: dns.resolver(), egressLookup: lookup,
 	})
 	if err != nil {
 		return nil, err
