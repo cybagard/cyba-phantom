@@ -2084,8 +2084,8 @@ func TestTS11_InternalNames(t *testing.T) {
 }
 
 // TestTS11_DecoyNameCount checks the count and the compare of names
-// (SEC-31, T-S-11, T-S-27). There are 1 to 16 names over both lists. A name is in one
-// list only, and tls.certs has no repeat.
+// (SEC-31, T-S-11, T-S-27). There are 1 to 16 names over both lists. A
+// name is in one list only, and tls.certs has no repeat.
 func TestTS11_DecoyNameCount(t *testing.T) {
 	head := "acme:\n  email: sec@example.com\n"
 	list := func(prefix string, from, to int) []string {
