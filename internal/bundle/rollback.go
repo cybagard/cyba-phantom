@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"errors"
 	"os"
 	"time"
 )
@@ -39,10 +40,15 @@ func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, 
 	return expired, st.allows(m.Version, sum, class)
 }
 
+// errStateInput is the error for a version or a class that the state cannot
+// hold. A manifest from ParseManifest has a valid version, so only a Manifest
+// that code builds by hand can cause it.
+var errStateInput = errors.New("bundle: version or class not valid for the state")
+
 // Record stores an accepted bundle as the version state. The loader calls it
-// before the swap. A bundle with the SHA-256 of the state causes no write. A
-// state fault, or a bundle that Check would refuse as a rollback, gives an
-// error and no write.
+// before the swap. A bundle with the SHA-256 of the state causes no write.
+// A state fault or a rollback gives an error and no write. So does a version
+// or class that readState would refuse.
 func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	st, err := readState(r.root)
 	if err != nil {
@@ -53,6 +59,9 @@ func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	}
 	if st != nil && st.SHA256 == sum {
 		return nil
+	}
+	if !validVersion(m.Version) || classText[class] == "" {
+		return errStateInput
 	}
 	return writeState(r.root, state{Version: m.Version, SHA256: sum, Class: class})
 }
@@ -67,6 +76,9 @@ func (r *Rollback) Healthy() bool {
 func (st *state) allows(version string, sum [32]byte, class Class) error {
 	if st == nil || st.SHA256 == sum {
 		return nil
+	}
+	if !validVersion(version) {
+		return errStateInput
 	}
 	if compareVersion(version, st.Version) <= 0 || (class == ClassReference && st.Class == ClassProprietary) {
 		return ErrRollback

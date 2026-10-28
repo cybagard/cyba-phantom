@@ -83,6 +83,61 @@ func TestTS20Record(t *testing.T) {
 	}
 }
 
+// T-S-20: Record refuses a version or a class that readState refuses. At a
+// first start it writes nothing, and Healthy stays true.
+func TestTS20RecordRefusesInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		class   Class
+	}{
+		{"empty version", "", ClassProprietary},
+		{"bad version", "bad", ClassProprietary},
+		{"class 0", "2026.01.01-1", Class(0)},
+		{"unknown class", "2026.01.01-1", Class(99)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, r := newDir(t)
+			if err := r.Record(manifestOf(c.version, farExp), sumOf(1), c.class); err == nil {
+				t.Error("Record accepted the input")
+			}
+			if snapshot(t, dir) != "none" {
+				t.Error("Record wrote a state file")
+			}
+			if _, err := os.Lstat(filepath.Join(dir, stateTempName)); err == nil {
+				t.Error("a temporary file is left")
+			}
+			if !r.Healthy() {
+				t.Error("not healthy")
+			}
+		})
+	}
+}
+
+// T-S-20: a hand-built Manifest can have a short version. When a state with
+// another SHA-256 exists, Check and Record give an error and do not panic.
+// The state file does not change.
+func TestTS20ShortVersion(t *testing.T) {
+	for _, v := range []string{"", "2026", "2026.01.01", "2026.01.01-", "2026.01.01-0"} {
+		t.Run(v, func(t *testing.T) {
+			dir, r := newDir(t)
+			putState(t, dir, goodRec, 0o600)
+			before := snapshot(t, dir)
+			m := manifestOf(v, farExp)
+			if _, err := r.Check(m, sumOf(2), ClassProprietary, farNow, false); err == nil {
+				t.Error("Check accepted the version")
+			}
+			if err := r.Record(m, sumOf(2), ClassProprietary); err == nil {
+				t.Error("Record accepted the version")
+			}
+			if snapshot(t, dir) != before {
+				t.Error("the state file changed")
+			}
+		})
+	}
+}
+
 // T-S-20: a crash between the swap and the state write leaves the old state.
 // The next check accepts the running bundle again, because its version is
 // higher. The test puts a directory with a file in it at the temporary name.
