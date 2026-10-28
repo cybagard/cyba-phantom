@@ -57,10 +57,14 @@ type ACMEParams struct {
 	// request that it sees, before it decides. It is nil in production.
 	OnEgress func(host string)
 
-	// trustedRoots is the pool of root certificates that the ACME client trusts
-	// for the CA. It is a test hook; only tests in this package set it. It is nil
-	// in production, and then the client uses the roots of the system.
-	trustedRoots *x509.CertPool
+	// CARoots are the roots that the ACME client trusts for the CA
+	// (acme.ca_root). Nil means no acme.ca_root, and then the client uses the
+	// roots of the system.
+	CARoots *ACMERoots
+
+	// CAPrivate is the acme.ca_private list. The guard permits an address of
+	// the list for the CA port. Nil or empty means no list.
+	CAPrivate []netip.Prefix
 
 	// egressRule and egressResolver are test hooks. Only tests in this package
 	// set them. egressRule replaces the address rule. egressResolver replaces
@@ -215,9 +219,15 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		}
 		a.allowed[n] = struct{}{}
 	}
-	rule, resolver := p.egressRule, p.egressResolver
-	if rule == nil {
-		rule = egress.Permitted
+	// The egress package has the only copy of the guard order.
+	port, _ := strconv.Atoi(portOf(ca))
+	item, err := egress.ItemDialer(p.CAPrivate, uint16(port), "tcp", 0)
+	if err != nil {
+		return nil, err
+	}
+	rule, resolver := itemRule(item, uint16(port)), p.egressResolver
+	if hook := p.egressRule; hook != nil {
+		rule = func(a netip.Addr) bool { return hook(a.Unmap()) }
 	}
 	if resolver == nil {
 		resolver = net.DefaultResolver
@@ -265,6 +275,12 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		},
 	})
 	cfg.Store(a.cfg)
+	// A nil TrustedRoots would take certmagic.DefaultACME.TrustedRoots, and the
+	// sensor never reads that value.
+	var roots *x509.CertPool
+	if p.CARoots != nil {
+		roots = p.CARoots.pool
+	}
 	a.cfg.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(a.cfg, certmagic.ACMEIssuer{
 		CA:                        p.CA,
 		TestCA:                    p.CA, // if not set, certmagic uses the staging host of a known CA
@@ -276,7 +292,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 		AltTLSALPNPort:            p.Port,
 		Logger:                    zap.NewNop(),
 		HTTPProxy:                 guard,
-		TrustedRoots:              p.trustedRoots,
+		TrustedRoots:              roots,
 	})}
 	return a, nil
 }
@@ -315,7 +331,8 @@ func isLoggedEvent(event string) bool {
 // An address with a zone is refused. A name is compared as lower-case text.
 //
 // After that, the host must pass rule. For an IP literal, rule checks the
-// parsed address, with no lookup. A name is looked up with resolver. The
+// parsed address, with no lookup. A name below invalid is refused with no
+// lookup. Any other name is looked up with resolver. The
 // request is refused when the lookup fails, gives no address, or gives an
 // address that rule refuses. Each
 // refusal gives errEgress, which holds no address, name or port. The function
@@ -343,16 +360,33 @@ func egressGuard(ca *url.URL, seen func(host string), rule func(netip.Addr) bool
 			}
 			return nil, nil
 		}
+		// RFC 6761: a name below invalid has no lookup.
+		if host := strings.TrimSuffix(name, "."); host == "invalid" || strings.HasSuffix(host, ".invalid") {
+			return nil, errEgress
+		}
 		addrs, err := resolver.LookupNetIP(r.Context(), "ip", name)
 		if err != nil || len(addrs) == 0 {
 			return nil, errEgress
 		}
 		for _, a := range addrs {
-			if !rule(a.Unmap()) {
+			// No Unmap here: the rule unmaps after its zone check.
+			if !rule(a) {
 				return nil, errEgress
 			}
 		}
 		return nil, nil
+	}
+}
+
+// itemRule returns the address rule of production. It uses the guard order of
+// the egress package. The list of d applies on port, with protocol tcp.
+func itemRule(d *net.Dialer, port uint16) func(netip.Addr) bool {
+	return func(a netip.Addr) bool {
+		network := "tcp6"
+		if a.Is4() {
+			network = "tcp4"
+		}
+		return d.ControlContext(context.Background(), network, netip.AddrPortFrom(a, port).String(), nil) == nil
 	}
 }
 

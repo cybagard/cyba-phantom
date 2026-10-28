@@ -34,7 +34,7 @@ const newOrderPath = "/order-plz"
 type pebbleRig struct {
 	dir   string         // the directory URL, with an IP authority
 	host  string         // host:port of the directory
-	trust *x509.CertPool // a pool that holds the certificate of the directory server (ACMEParams.trustedRoots)
+	trust *ACMERoots     // roots with the directory server certificate
 	root  *x509.CertPool // the root that issues the certificates
 }
 
@@ -91,8 +91,7 @@ func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handl
 	srv := httptest.NewUnstartedServer(mux)
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	r := &pebbleRig{dir: srv.URL + pebbleWFE.DirectoryPath, host: strings.TrimPrefix(srv.URL, "https://"), trust: x509.NewCertPool(), root: x509.NewCertPool()}
-	r.trust.AddCert(srv.Certificate())
+	r := &pebbleRig{dir: srv.URL + pebbleWFE.DirectoryPath, host: strings.TrimPrefix(srv.URL, "https://"), trust: mustRoots(t, certPEM(srv.Certificate())), root: x509.NewCertPool()}
 	resp, err := srv.Client().Get(srv.URL + pebbleWFE.RootCertPath + "0")
 	mustNil(t, err)
 	defer resp.Body.Close()
@@ -152,7 +151,7 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 	f := &issueFixture{name: name, addr: l.Addr().String(), egress: &egressSet{}, rig: newPebbleRig(t, port, front)}
 	f.a = newTestACME(t, func(p *ACMEParams) {
 		p.Names, p.CA, p.Host, p.Port = []string{name}, f.rig.dir, "127.0.0.1", port
-		p.OnEgress, p.trustedRoots = f.egress.record, f.rig.trust
+		p.OnEgress, p.CARoots = f.egress.record, f.rig.trust
 		if mod != nil {
 			mod(p)
 		}
