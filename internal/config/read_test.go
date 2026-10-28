@@ -645,8 +645,8 @@ func TestTS10_ConfigModeOwner(t *testing.T) {
 	}
 }
 
-// TestTS10_ConfigTooLarge checks that a file of 64 KiB plus one byte gives the
-// fixed size text, through ReadFile and through Load.
+// TestTS10_ConfigTooLarge checks the size text. A file of 64 KiB plus one byte
+// gives the fixed text, through ReadFile and through Load.
 func TestTS10_ConfigTooLarge(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "big.yaml", padded(64*1024+1), 0o600)

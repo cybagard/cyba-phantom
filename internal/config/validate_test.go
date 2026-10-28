@@ -763,7 +763,8 @@ func TestTU10_FileThroughLoad(t *testing.T) {
 	}
 }
 
-// These are the fixed texts of the htpasswd rules. The tests compare them in full.
+// These are the fixed texts of the htpasswd rules.
+// The tests compare them in full.
 const (
 	htpasswdKey       = "ops.basic_auth_htpasswd"
 	htpasswdResolve   = "the htpasswd file cannot be resolved"

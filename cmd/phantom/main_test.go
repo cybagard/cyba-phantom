@@ -30,8 +30,8 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// dirRule is the rule for a directory of the htpasswd file: the owner is root
-// or the current user, and the mode has no group or other write bit.
+// dirRule is the rule for a directory of the htpasswd file. The owner is root
+// or the current user. The mode has no group or other write bit.
 var dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
 
 type failNet struct{ t *testing.T }
@@ -196,9 +196,10 @@ func TestTS10_CheckNoDial(t *testing.T) {
 	requireNoNet(t, "noNet", noNet{}, noNet{})
 }
 
-// TestTS10_CheckFileRules checks that --check refuses a config file that other
-// users can write, and an htpasswd file below a directory that every user can
-// write. Each gives exit 1 and the text of the load (T-S-10).
+// TestTS10_CheckFileRules checks two refusals of --check. One is a config file
+// that other users can write. The other is an htpasswd file below a directory
+// that every user can write. Each gives exit 1 and the text of the load
+// (T-S-10).
 func TestTS10_CheckFileRules(t *testing.T) {
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
 	t.Run("config file 0602", func(t *testing.T) {
