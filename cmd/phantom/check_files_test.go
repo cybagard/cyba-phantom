@@ -17,7 +17,7 @@ import (
 // The system temporary directory can have mode 1777.
 func fixtureDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp(pkgDir, "tmp-")
+	d, err := os.MkdirTemp(pkgDir, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}
