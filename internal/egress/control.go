@@ -20,7 +20,7 @@ func control(
 }
 
 // parseDial maps the network with protocol and parses the address. It gives
-// false when the network is not permitted or the address has no port. The
+// false when the network is not permitted or the address does not parse. The
 // caller must test the boolean: the address is set when only the network fails.
 func parseDial(network, address string) (string, netip.AddrPort, bool) {
 	proto, ok := protocol(network)
