@@ -3,9 +3,12 @@ bytes
 cmp
 compress/gzip
 context
+crypto/ecdsa
 crypto/ed25519
+crypto/elliptic
 crypto/hmac
 crypto/rand
+crypto/rsa
 crypto/sha256
 crypto/tls
 crypto/x509

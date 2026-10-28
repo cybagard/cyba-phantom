@@ -12,7 +12,10 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,14 +50,18 @@ const (
 )
 
 // PublishTarget is one tlog.publish entry. TokenEnv names the variable that
-// holds the bearer token.
-type PublishTarget struct{ URL, TokenEnv string }
+// holds the bearer token. Private is the private list of the target. The
+// publisher applies it to this target only. A nil or empty list means no list.
+type PublishTarget struct {
+	URL, TokenEnv string
+	Private       []netip.Prefix
+}
 
 // publishOption changes the publisher. Only the tests use it, through
 // newPublisher. It sets the clock, the jitter, the timeout, the trusted roots,
-// the dial address, and the dialer. NewPublisher takes no option, so no caller
-// outside the package can change the dialer. The dialer of NewPublisher is
-// egress.Dialer.
+// the dial address, and the dialers. NewPublisher takes no option, so no caller
+// outside the package can change a dialer. The dialer of each target in
+// NewPublisher is egress.ItemDialer with the list of that target.
 type publishOption func(*publishConfig)
 
 type publishConfig struct {
@@ -63,7 +70,10 @@ type publishConfig struct {
 	now      func() time.Time
 	jitter   func() float64 // in [0, 1)
 	dialAddr func(string) string
-	dialer   *net.Dialer // nil: egress.Dialer
+	// A dialer that is not nil replaces each dialer. Then dialerFor, if it is
+	// not nil, changes the dialer of target i.
+	dialer    *net.Dialer
+	dialerFor func(int, *net.Dialer) *net.Dialer
 }
 
 // endpoint is a target with the token that NewPublisher read.
@@ -82,7 +92,7 @@ type Publisher struct {
 	spool    *Spool
 	targets  []endpoint
 	state    []backoffState // only the Run goroutine uses this field; Send also runs on the Run goroutine
-	client   *http.Client
+	clients  []*http.Client // one for each target, each with its own transport
 	interval time.Duration
 	timeout  time.Duration
 	log      *slog.Logger
@@ -95,9 +105,12 @@ type Publisher struct {
 // It reads each token from its environment variable one time. It returns an
 // error if the interval is below 30 s. It returns an error if two targets have
 // the same URL. It returns an error if a token is empty or not set. It uses its
-// own transport, with no proxy and no redirect. The transport verifies TLS 1.2
-// or later. It dials only through the egress guard (egress.Dialer), which
-// refuses a resolved address that the guard does not permit (SEC-26).
+// own transport for each target, with no proxy and no redirect. The transport
+// verifies TLS 1.2 or later. Each target has its own item dialer
+// (egress.ItemDialer). The dialer has the port of the URL and the private list
+// of that target. The guard refuses a resolved address that the rules do not
+// permit (SEC-26). It returns an error if the URL or the port of a target is
+// not valid. It returns an error if ItemDialer refuses the port or the list.
 func NewPublisher(spool *Spool, targets []PublishTarget, interval time.Duration, log *slog.Logger) (*Publisher, error) {
 	return newPublisher(spool, targets, interval, log)
 }
@@ -137,10 +150,38 @@ func newPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 			return nil, refuse("the token of target %d is empty or not set", i)
 		}
 		p.targets = append(p.targets, endpoint{t.URL, token})
+		c, err := targetClient(i, t, &cfg)
+		if err != nil {
+			return nil, err
+		}
+		p.clients = append(p.clients, c)
 	}
-	dialer := cfg.dialer
-	if dialer == nil {
-		dialer = egress.Dialer(dialTimeout)
+	return p, nil
+}
+
+// targetClient makes the client of target i. Its dialer has the private list of
+// that target only. Its transport is its own, so no idle connection moves from
+// one target to another. The errors have no URL, address, or token.
+func targetClient(i int, t PublishTarget, cfg *publishConfig) (*http.Client, error) {
+	port := uint64(443)
+	u, err := url.Parse(t.URL)
+	if err != nil {
+		return nil, refuse("the URL of target %d is not valid", i)
+	}
+	if s := u.Port(); s != "" {
+		if port, err = strconv.ParseUint(s, 10, 16); err != nil {
+			return nil, refuse("the port of target %d is not valid", i)
+		}
+	}
+	dialer, err := egress.ItemDialer(t.Private, uint16(port), "tcp", dialTimeout)
+	if err != nil {
+		return nil, refuse("the port or the private list of target %d is not valid", i)
+	}
+	if cfg.dialer != nil {
+		dialer = cfg.dialer
+	}
+	if cfg.dialerFor != nil {
+		dialer = cfg.dialerFor(i, dialer)
 	}
 	dial := dialer.DialContext
 	if cfg.dialAddr != nil {
@@ -148,7 +189,7 @@ func newPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 			return dialer.DialContext(ctx, network, cfg.dialAddr(addr))
 		}
 	}
-	p.client = &http.Client{
+	return &http.Client{
 		Transport: &http.Transport{
 			Proxy:                  nil,
 			DialContext:            dial,
@@ -157,13 +198,12 @@ func newPublisher(spool *Spool, targets []PublishTarget, interval time.Duration,
 			ResponseHeaderTimeout:  publishHeaderTimeout,
 			MaxResponseHeaderBytes: maxResponseHeader,
 			IdleConnTimeout:        idleConnTimeout,
-			MaxIdleConns:           len(targets),
+			MaxIdleConns:           1,
 			MaxIdleConnsPerHost:    1,
 			ForceAttemptHTTP2:      true,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errPublishRedirect },
-	}
-	return p, nil
+	}, nil
 }
 
 // Send puts one note to target. It returns nil only for a 2xx response. Every
@@ -189,7 +229,7 @@ func (p *Publisher) Send(target string, _ uint64, note []byte) error {
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+p.targets[i].token)
-	resp, err := p.client.Do(req)
+	resp, err := p.clients[i].Do(req)
 	status := 0
 	if resp != nil { // also set for a refused redirect, with the body closed
 		status = resp.StatusCode
@@ -242,9 +282,13 @@ func (p *Publisher) Notify() {
 
 // Run publishes until ctx ends. It starts with one pass, then waits for Notify
 // or for the next target whose backoff ends. When it returns, it closes the idle
-// connections of the transport.
+// connections of the transport of each target.
 func (p *Publisher) Run(ctx context.Context) {
-	defer p.client.CloseIdleConnections()
+	defer func() {
+		for _, c := range p.clients {
+			c.CloseIdleConnections()
+		}
+	}()
 	for {
 		wait, pending := p.pass()
 		var tick <-chan time.Time
