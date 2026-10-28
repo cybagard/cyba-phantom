@@ -267,8 +267,8 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 	}
 }
 
-// T-S-27: ParseStatic reads the PKCS1 and SEC1 key forms, and it takes the
-// leaf from the first block of a chain.
+// T-S-27: ParseStatic reads the PKCS1 and SEC1 key forms.
+// It takes the leaf from the first block of a chain.
 func TestTS27StaticChainAndForms(t *testing.T) {
 	ks := staticKeySet()
 	der, keyPEM := leafSpec{}.build(t)
@@ -298,8 +298,8 @@ func TestTS27StaticChainAndForms(t *testing.T) {
 	}
 }
 
-// T-S-27: the block type selects one key form, and a key that does not encode
-// back to the bytes of the block is refused.
+// T-S-27: the block type selects one key form.
+// ParseStatic refuses a key that does not encode back to the block bytes.
 func TestTS27StaticKeyEncoding(t *testing.T) {
 	ks := staticKeySet()
 	must := func(der []byte, err error) []byte {

@@ -46,10 +46,10 @@ const (
 
 // ParseStatic reads the files of one static certificate.
 // The certificate file holds CERTIFICATE blocks only, the leaf first.
-// The key file holds one block, a private key. The block type is
-// PRIVATE KEY (PKCS8), RSA PRIVATE KEY (PKCS1) or EC PRIVATE KEY (SEC1),
-// and the type names the form of the key. The key must encode back to the
-// same bytes in that form.
+// The key file holds one block, a private key.
+// The block type is PRIVATE KEY (PKCS8), RSA PRIVATE KEY (PKCS1) or
+// EC PRIVATE KEY (SEC1). The type names the form of the key.
+// The key must encode back to the same bytes in that form.
 // In both files, a block has no header.
 // Outside the blocks, only the bytes space, tab, CR and LF are permitted.
 // The leaf is valid for name at now. Only the SAN entries (DNS names and IP
