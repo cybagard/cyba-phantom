@@ -19,7 +19,7 @@ import (
 )
 
 // TestMain stops the run when a directory above the package has a group or
-// other write bit or another owner. The htpasswd file rule refuses each
+// other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.
@@ -31,7 +31,8 @@ func TestMain(m *testing.M) {
 }
 
 // dirRule is the rule for a directory of the htpasswd file. The owner is root
-// or the current user. The mode has no group or other write bit.
+// or the current user. The mode has no group or other write bit. It is a
+// copy of htpasswdDirRule in internal/config.
 var dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
 
 type failNet struct{ t *testing.T }

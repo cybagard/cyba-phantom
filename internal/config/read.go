@@ -130,7 +130,10 @@ func ReadFile(path string) (*Doc, error) {
 
 // absolute gives path as an absolute path for the safe-file package. A relative
 // path gets the working directory in front of it. It does not clean the path,
-// so the kernel resolves each dot-dot and symlink as it does for the open.
+// so the kernel resolves each dot-dot and symlink. The walk from "/" needs
+// search permission on each parent of the working directory. A plain
+// relative open does not need it. The full path must also fit the length
+// limit of the kernel.
 func absolute(path string) (string, error) {
 	if path == "" {
 		return "", &os.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
@@ -148,7 +151,7 @@ func absolute(path string) (string, error) {
 }
 
 // nameError gives the ReadError for a path that ends in "/", "/." or "/..".
-// The text is that of the open that the loader made before. A stat of abs
+// The text is the text of a plain open of the path. A stat of abs
 // gives the system error, or "not a regular file" for a directory. The error
 // shows the path that the user gave.
 func nameError(path, abs string) error {

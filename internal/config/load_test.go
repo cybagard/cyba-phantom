@@ -40,7 +40,7 @@ var testDir = func() string {
 }()
 
 // TestMain stops the run when a directory above the package has a group or
-// other write bit or another owner. The htpasswd file rule refuses each
+// other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.

@@ -834,8 +834,9 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 		{"directory", d, htpasswdNotFile},
 		{"missing", filepath.Join(d, "missing"), htpasswdResolve},
 		{"a regular file in the middle", filepath.Join(good, "x"), htpasswdResolve},
-		// The parent walk passes these. The stat of OpenPath gives ENOTDIR.
+		// The parent walk passes the slash row. The stat of OpenPath fails.
 		{"link to a file and a slash", link("to-file-slash", good+"/"), htpasswdResolve},
+		// The parent walk refuses the dot row: the file is not a directory.
 		{"link to a file and a dot", link("to-file-dot", good+"/."), htpasswdResolve},
 		{"root directory", "/", htpasswdNotFile},
 	} {
