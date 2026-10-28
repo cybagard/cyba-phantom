@@ -326,6 +326,20 @@ func lineSet(lines []string) map[string]bool {
 // dependency on a linux platform.
 // The loop has no subtests. Thus the union of the platforms does not depend on
 // the -run filter.
+// Each program has the package runtime. Thus a list without runtime fails,
+// for example a list cut to the two commands. A cut list that keeps runtime
+// and the commands still passes.
+// These changes of this function can pass each test of this package:
+//   - A copy of the deps of one platform to another platform. A dep entry
+//     has no platform, so checkDepList cannot see whose list it gets. A
+//     copy between two linux platforms fails only when a line of
+//     release-deps.txt loses its last user.
+//   - wantContext in place of the real context. A right go list gives that
+//     same value, so only a wrong go list differs. A unit case tests the
+//     context check of checkDepList, not this function.
+//   - A cut of the commands, in the variable or in the checkDepList call.
+//     Nothing compares them with the commands that the Makefile builds. Unit
+//     cases test the command check of checkDepList, not this function.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	root := moduleRoot(t)
 	realRoot, err := realPath(root)
@@ -344,6 +358,11 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	for _, c := range releaseConfigs {
 		ctx, deps := listDeps(t, root, c, commands...)
 		all = append(all, platformDeps{c, ctx, deps})
+	}
+	for _, pd := range all {
+		if !slices.ContainsFunc(pd.deps, func(d listedDep) bool { return d.Path == "runtime" }) {
+			t.Errorf("%s: go list -deps did not list runtime", pd.c.name())
+		}
 	}
 	checkDepList(t, realRoot, loadList(t, "release-deps.txt"), commands, all)
 }
@@ -447,12 +466,22 @@ func TestTS21RecordPassesOtherMethods(t *testing.T) {
 	}
 }
 
-// TestTS21CheckDepListReports calls checkDepList on planted packages. It must
-// record a package that is not on the list and a package with a replace. It
-// must also record a line that no package uses. A host platform has no list
-// check. The host platform has a package of the test seam, which depProblem
-// names. It also has a listed package that only the host lists, which is not
-// used. The test also drops the host platform from the input.
+// TestTS21CheckDepListReports calls checkDepList on planted packages. The
+// input adds the command package to the deps of each platform. The platform
+// linux/amd64 has a package that is not on the list and a package with a
+// replace. A host platform has no list check. The host platform has a package
+// of the test seam, which depProblem names. It also has a listed package that
+// only the host lists, which is not used. Each case changes the input:
+//   - "not on the list" keeps the input.
+//   - "line not used" leaves only the replace package on linux/amd64.
+//   - "platform dropped" drops the host platform.
+//   - "order swapped" swaps the first two platforms.
+//   - "platform replaced" gives the s390x slot the name and the context of
+//     linux/amd64.
+//   - "wrong context" gives linux/386 the context of a build with cgo on.
+//   - "command not listed" gives linux/386 no deps, not even the command.
+//   - "command missing" cuts the command from linux/amd64, which still lists
+//     other packages.
 func TestTS21CheckDepListReports(t *testing.T) {
 	root, err := realPath(t.TempDir())
 	if err != nil {
@@ -524,6 +553,8 @@ func TestTS21CheckDepListReports(t *testing.T) {
 			notListed, replace, seam, unused}},
 		"command not listed": {with(func(a []platformDeps) { a[0].deps = nil }), []string{
 			"linux/386: go list -deps did not list " + cmd, notListed, replace, seam, unused}},
+		"command missing": {with(func(a []platformDeps) { a[1].deps = a[1].deps[:len(a[1].deps)-1] }), []string{
+			"linux/amd64: go list -deps did not list " + cmd, notListed, replace, seam, unused}},
 	} {
 		got := record(t, func(tb testing.TB) { checkDepList(tb, root, lines, []string{cmd}, tc.all) })
 		if !slices.Equal(got, tc.want) {
