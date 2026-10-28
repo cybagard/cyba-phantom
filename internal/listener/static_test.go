@@ -124,10 +124,11 @@ func (s leafSpec) build(t *testing.T) (certDER, keyPEM []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return certDER, pemOf("PRIVATE KEY", keyDER)
+	return certDER, blockPEM("PRIVATE KEY", keyDER)
 }
 
-func pemOf(typ string, der []byte) []byte {
+// blockPEM returns the PEM text of one block with no header.
+func blockPEM(typ string, der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
 }
 
@@ -153,8 +154,8 @@ func noFileText(t *testing.T, err, want error, markers ...string) {
 func TestTS27StaticPEMRefusals(t *testing.T) {
 	const marker = "MARKERTEXT7"
 	der, keyPEM := leafSpec{}.build(t)
-	certPEM := pemOf("CERTIFICATE", der)
-	other := pemOf(marker, []byte("x"))
+	certPEM := blockPEM("CERTIFICATE", der)
+	other := blockPEM(marker, []byte("x"))
 	junk := []byte("-----BEGIN JUNK-----\n" + marker + "!!\n")
 	withHeader := pem.EncodeToMemory(&pem.Block{
 		Type: "CERTIFICATE", Bytes: der, Headers: map[string]string{marker: marker},
@@ -164,7 +165,7 @@ func TestTS27StaticPEMRefusals(t *testing.T) {
 		Type: "PRIVATE KEY", Bytes: kb.Bytes, Headers: map[string]string{marker: marker},
 	})
 	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
-	badDER := pemOf("CERTIFICATE", []byte(marker))
+	badDER := blockPEM("CERTIFICATE", []byte(marker))
 	rows := []struct {
 		name      string
 		cert, key []byte
@@ -188,16 +189,16 @@ func TestTS27StaticPEMRefusals(t *testing.T) {
 		{"empty key file", certPEM, nil, ErrStaticCount},
 		{"certificate as key file", certPEM, certPEM, ErrStaticType},
 		{"other block in key file", certPEM, other, ErrStaticType},
-		{"key type with a longer suffix", certPEM, pemOf("PRIVATE KEYS", []byte("x")), ErrStaticType},
-		{"public key as key file", certPEM, pemOf("PUBLIC KEY", []byte("x")), ErrStaticType},
-		{"key type with a shorter suffix", certPEM, pemOf("E KEY", []byte("x")), ErrStaticType},
+		{"key type with a longer suffix", certPEM, blockPEM("PRIVATE KEYS", []byte("x")), ErrStaticType},
+		{"public key as key file", certPEM, blockPEM("PUBLIC KEY", []byte("x")), ErrStaticType},
+		{"key type with a shorter suffix", certPEM, blockPEM("E KEY", []byte("x")), ErrStaticType},
 		{"text before key", certPEM, cat([]byte(marker+"\n"), keyPEM), ErrStaticText},
 		{"header in key file", certPEM, keyWithHeader, ErrStaticHeader},
 		{"white space only key file", certPEM, []byte(" \t\r\n \n"), ErrStaticCount},
-		{"encrypted key type", certPEM, pemOf("ENCRYPTED PRIVATE KEY", []byte(marker)), ErrStaticType},
-		{"key type with a prefix word", certPEM, pemOf("IGNORE THIS PRIVATE KEY", kb.Bytes), ErrStaticType},
-		{"unknown key type with a valid body", certPEM, pemOf("X PRIVATE KEY", kb.Bytes), ErrStaticType},
-		{"key type with a CR", certPEM, pemOf("\rRSA PRIVATE KEY", kb.Bytes), ErrStaticType},
+		{"encrypted key type", certPEM, blockPEM("ENCRYPTED PRIVATE KEY", []byte(marker)), ErrStaticType},
+		{"key type with a prefix word", certPEM, blockPEM("IGNORE THIS PRIVATE KEY", kb.Bytes), ErrStaticType},
+		{"unknown key type with a valid body", certPEM, blockPEM("X PRIVATE KEY", kb.Bytes), ErrStaticType},
+		{"key type with a CR", certPEM, blockPEM("\rRSA PRIVATE KEY", kb.Bytes), ErrStaticType},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -257,7 +258,7 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			der, keyPEM := r.spec.build(t)
-			cert, err := ParseStatic(r.host, pemOf("CERTIFICATE", der), keyPEM, r.now)
+			cert, err := ParseStatic(r.host, blockPEM("CERTIFICATE", der), keyPEM, r.now)
 			if r.want != nil {
 				noFileText(t, err, r.want, staticHost, "other.internal")
 				return
@@ -277,7 +278,7 @@ func TestTS27StaticLeafChecks(t *testing.T) {
 // A weak leaf or a CA leaf gives its own error, also when the key block does
 // not parse.
 func TestTS27StaticCheckOrder(t *testing.T) {
-	badKey := pemOf("PRIVATE KEY", []byte("not a key"))
+	badKey := blockPEM("PRIVATE KEY", []byte("not a key"))
 	rows := []struct {
 		name string
 		spec leafSpec
@@ -289,7 +290,7 @@ func TestTS27StaticCheckOrder(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			der, _ := r.spec.build(t)
-			_, err := ParseStatic(staticHost, pemOf("CERTIFICATE", der), badKey, staticNow)
+			_, err := ParseStatic(staticHost, blockPEM("CERTIFICATE", der), badKey, staticNow)
 			noFileText(t, err, r.want)
 		})
 	}
@@ -300,7 +301,7 @@ func TestTS27StaticCheckOrder(t *testing.T) {
 func TestTS27StaticChainAndForms(t *testing.T) {
 	ks := staticKeySet()
 	der, keyPEM := leafSpec{}.build(t)
-	leafPEM, issuerPEM := pemOf("CERTIFICATE", der), pemOf("CERTIFICATE", ks.issuerDER)
+	leafPEM, issuerPEM := blockPEM("CERTIFICATE", der), blockPEM("CERTIFICATE", ks.issuerDER)
 	cert, err := ParseStatic(staticHost, append(bytes.Clone(leafPEM), issuerPEM...), keyPEM, staticNow)
 	if err != nil {
 		t.Fatal(err)
@@ -312,8 +313,8 @@ func TestTS27StaticChainAndForms(t *testing.T) {
 	noFileText(t, err, ErrStaticCA)
 
 	rsaDER, _ := leafSpec{key: ks.rsa2048}.build(t)
-	pkcs1 := pemOf("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(ks.rsa2048))
-	if _, err := ParseStatic(staticHost, pemOf("CERTIFICATE", rsaDER), pkcs1, staticNow); err != nil {
+	pkcs1 := blockPEM("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(ks.rsa2048))
+	if _, err := ParseStatic(staticHost, blockPEM("CERTIFICATE", rsaDER), pkcs1, staticNow); err != nil {
 		t.Fatalf("PKCS1 key: %v", err)
 	}
 	ecDER, _ := leafSpec{key: ks.p384}.build(t)
@@ -321,7 +322,7 @@ func TestTS27StaticChainAndForms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseStatic(staticHost, pemOf("CERTIFICATE", ecDER), pemOf("EC PRIVATE KEY", sec1), staticNow); err != nil {
+	if _, err := ParseStatic(staticHost, blockPEM("CERTIFICATE", ecDER), blockPEM("EC PRIVATE KEY", sec1), staticNow); err != nil {
 		t.Fatalf("SEC1 key: %v", err)
 	}
 }
@@ -414,7 +415,7 @@ func TestTS27StaticKeyEncoding(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			der, _ := leafSpec{key: r.key}.build(t)
-			_, err := ParseStatic(staticHost, pemOf("CERTIFICATE", der), pemOf(r.typ, r.der), staticNow)
+			_, err := ParseStatic(staticHost, blockPEM("CERTIFICATE", der), blockPEM(r.typ, r.der), staticNow)
 			if r.want == nil {
 				if err != nil {
 					t.Fatal(err)
