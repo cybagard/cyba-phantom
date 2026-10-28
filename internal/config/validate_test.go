@@ -17,6 +17,8 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/config/configtest"
 	"github.com/cybagard/cyba-phantom/internal/egress"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 type row struct {
@@ -368,16 +370,19 @@ func TestTU10_URL(t *testing.T) {
 		{"empty user", "https://@h/", []string{"https"}, "user information"},
 		{"fragment", "https://h/#x", []string{"https"}, "fragment"},
 		{"empty fragment", "https://h/#", []string{"https"}, "fragment"},
-		{"link-local v4", "https://169.254.169.254/", []string{"https"}, "egress rule"},
-		{"link-local v6", "https://[fe80::1]/", []string{"https"}, "egress rule"},
-		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, "egress rule"},
-		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, "egress rule"},
-		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, "egress rule"},
-		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, "egress rule"},
+		// parseURL accepts a literal that the egress rule refuses.
+		// literalCheck refuses it: TestTS11_EgressLiterals at load and
+		// TestTS11_CheckEgressLiterals through --check.
+		{"link-local v4", "https://169.254.169.254/", []string{"https"}, ""},
+		{"link-local v6", "https://[fe80::1]/", []string{"https"}, ""},
+		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, ""},
+		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, ""},
+		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, ""},
+		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, ""},
 		{"zone", "https://[fe80::1%25eth0]/", []string{"https"}, "zone"},
 		{"zone on global", "https://[2001:db8::1%25eth0]/", []string{"https"}, "zone"},
-		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, "egress rule"},
-		{"unspecified v6", "https://[::]/", []string{"https"}, "egress rule"},
+		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, ""},
+		{"unspecified v6", "https://[::]/", []string{"https"}, ""},
 		{"port 0", "https://h:0/", []string{"https"}, "port"},
 		{"port 65536", "https://h:65536/", []string{"https"}, "port"},
 		{"port leading zero", "https://example.com:0443/", []string{"https"}, "decimal"},
@@ -439,13 +444,15 @@ func TestTU10_CA(t *testing.T) {
 		{"staging", "letsencrypt-staging", ""},
 		{"https", "https://ca.example/dir", ""},
 		{"https port", "https://8.8.8.8:14000/dir", ""},
-		{"loopback", "https://127.0.0.1:14000/dir", "egress rule"},
+		// literalCheck refuses the loopback and link-local rows:
+		// TestTS11_EgressLiterals and TestTS11_CheckEgressLiterals.
+		{"loopback", "https://127.0.0.1:14000/dir", ""},
 		{"tcp", "tcp://ca.example:443", "scheme"},
 		{"http", "http://ca.example/dir", "scheme"},
 		{"other name", "zerossl", "scheme"},
 		{"case", "Letsencrypt", "scheme"},
 		{"empty", "", "scheme"},
-		{"link-local", "https://[fe81::]/dir", "egress rule"},
+		{"link-local", "https://[fe81::]/dir", ""},
 		{"user", "https://u:p@ca.example/dir", "user information"},
 		{"port leading zero", "https://ca.example:0443/dir", "decimal"},
 		{"number host", "https://2852039166/dir", "number"},
@@ -513,18 +520,74 @@ type tree struct {
 
 func newTree(t *testing.T) tree {
 	t.Helper()
-	d, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := pkgTempDir(t)
 	tr := tree{root: filepath.Join(d, "state"), outside: filepath.Join(d, "outside")}
 	for _, p := range []string{tr.root, tr.root + "-evil", tr.outside} {
 		if err := os.Mkdir(p, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	tr.l = &loader{stateRoot: tr.root, euid: os.Geteuid()}
+	tr.l = &loader{stateRoot: tr.root}
 	return tr
+}
+
+// pkgDir is the package directory. A test can change the working directory, so
+// pkgTempDir does not use ".".
+var pkgDir = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	return wd
+}()
+
+// pkgTempDir makes a private directory below the package directory, with no
+// symlink in its path. The system temporary directory can have mode 1777.
+// The htpasswd rule refuses a parent with a group or other write bit.
+// The directories from "/" to the package directory must belong to you or
+// root.
+func pkgTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp(pkgDir, "tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.EvalSymlinks(d)
+	if err != nil {
+		os.RemoveAll(d)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(abs) })
+	if err := safefile.CheckPathParents(abs, htpasswdDirRule); err != nil {
+		t.Fatalf("test directory %s is not usable: each directory from / to it must belong to you or root, with no group or other write bit: %v", abs, err)
+	}
+	return abs
+}
+
+// fileID gives the device and inode of path.
+func fileID(t *testing.T, path string) safefile.FileID {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ok := safefile.Identity(fi)
+	if !ok {
+		t.Fatal("no identity")
+	}
+	return id
+}
+
+// otherOwner makes the check see each path as a file of another owner.
+// One test hook set is active at a time. A test that calls otherOwner does
+// not run in parallel.
+func otherOwner(t *testing.T, paths ...string) {
+	t.Helper()
+	ids := make([]safefile.FileID, len(paths))
+	for i, p := range paths {
+		ids[i] = fileID(t, p)
+	}
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool { return slices.Contains(ids, id) }})
 }
 
 // TestTU10_StatePath checks that acme.cache_dir stays under the state root after symlink resolution.
@@ -630,16 +693,10 @@ func TestTU10_Htpasswd(t *testing.T) {
 	}
 
 	t.Run("owner", func(t *testing.T) {
-		other := &loader{stateRoot: tr.root, euid: os.Geteuid() + 1}
-		got := checkHtpasswd(other, good)
-		if os.Geteuid() == 0 {
-			if got != "" {
-				t.Errorf("root owner: got %q", got)
-			}
-			return
-		}
-		if !strings.Contains(got, "owner") {
-			t.Errorf("got %q, want an owner error", got)
+		otherOwner(t, good)
+		const want = "the owner of the htpasswd file is not root or the sensor user"
+		if got := checkHtpasswd(tr.l, good); got != want {
+			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 }
@@ -674,7 +731,7 @@ func TestTU10_HtpasswdOpen(t *testing.T) {
 // text.
 func TestTU10_HtpasswdValueOnly(t *testing.T) {
 	useTestKeys(t)
-	p := filepath.Join(t.TempDir(), strings.Repeat("n", 90))
+	p := filepath.Join(pkgTempDir(t), strings.Repeat("n", 90))
 	_, err := loadTest(writeConfig(t, base+"ops:\n  basic_auth_htpasswd: "+p+"\n"), nil)
 	if err == nil {
 		t.Fatal("no error")
@@ -709,6 +766,300 @@ func TestTU10_FileThroughLoad(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ops.basic_auth_htpasswd") || !strings.Contains(err.Error(), "writable by group") {
 		t.Errorf("got %v", err)
 	}
+}
+
+// These are the fixed texts of the htpasswd rules.
+// The tests compare them in full.
+const (
+	htpasswdKey       = "ops.basic_auth_htpasswd"
+	htpasswdResolve   = "the htpasswd file cannot be resolved"
+	htpasswdOpen      = "the htpasswd file cannot be opened"
+	htpasswdNotFile   = "the htpasswd file is not a regular file"
+	htpasswdOwner     = "the owner of the htpasswd file is not root or the sensor user"
+	htpasswdGroupW    = "the htpasswd file is writable by group"
+	htpasswdOtherW    = "the htpasswd file is writable by other"
+	htpasswdOtherR    = "the htpasswd file is readable by other"
+	htpasswdDirDetail = "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+)
+
+// htpasswdThrough sets path as the htpasswd value, as --check does. The Net
+// has no network. It gives the detail of the error of the key. It checks that
+// the error names the key and the value.
+func htpasswdThrough(t *testing.T, path string) string {
+	t.Helper()
+	useTestKeys(t)
+	_, err := LoadWith(writeConfig(t, base), []string{tokenVar + "=token", "PHANTOM_OPS_BASIC_AUTH_HTPASSWD=" + path}, testNet)
+	if err == nil {
+		return ""
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Key != htpasswdKey || e.Source != "PHANTOM_OPS_BASIC_AUTH_HTPASSWD" || e.Value != path {
+		t.Fatalf("got %#v, want an error of %s from the variable with the value %q", err, htpasswdKey, path)
+	}
+	return e.Detail
+}
+
+// htpasswdBoth checks the detail of checkHtpasswd and of the load for path.
+func htpasswdBoth(t *testing.T, path, want string) {
+	t.Helper()
+	if got := checkHtpasswd(&loader{}, path); got != want {
+		t.Errorf("check: got %q, want %q", got, want)
+	}
+	if got := htpasswdThrough(t, path); got != want {
+		t.Errorf("load: got %q, want %q", got, want)
+	}
+}
+
+// TestTS10_HtpasswdFileRules checks the type, owner and mode rules of the
+// htpasswd file, with the fixed text of each (T-S-10). It also runs them
+// through LoadWith.
+func TestTS10_HtpasswdFileRules(t *testing.T) {
+	d := pkgTempDir(t)
+	file := func(name string, mode os.FileMode) string { return writeFile(t, d, name, "u:hash\n", mode) }
+	good := file("good", 0o600)
+	link := func(name, target string) string {
+		p := filepath.Join(d, name)
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, r := range []struct {
+		name, path, want string
+	}{
+		{"0600", good, ""},
+		{"0400", file("r", 0o400), ""},
+		{"0640", file("g-read", 0o640), ""},
+		{"symlink to a regular file", link("link", good), ""},
+		{"group write 0620", file("gw", 0o620), htpasswdGroupW},
+		{"other write 0602", file("ow", 0o602), htpasswdOtherW},
+		{"all write 0666", file("aw", 0o666), htpasswdGroupW},
+		{"other read 0604", file("or", 0o604), htpasswdOtherR},
+		{"other read and write 0606", file("orw", 0o606), htpasswdOtherW},
+		{"directory", d, htpasswdNotFile},
+		{"missing", filepath.Join(d, "missing"), htpasswdResolve},
+		{"a regular file in the middle", filepath.Join(good, "x"), htpasswdResolve},
+		// The parent walk passes the slash row. The stat of OpenPath fails.
+		{"link to a file and a slash", link("to-file-slash", good+"/"), htpasswdResolve},
+		// The parent walk refuses the dot row: the file is not a directory.
+		{"link to a file and a dot", link("to-file-dot", good+"/."), htpasswdResolve},
+		{"root directory", "/", htpasswdNotFile},
+	} {
+		t.Run(r.name, func(t *testing.T) { htpasswdBoth(t, r.path, r.want) })
+	}
+	t.Run("other owner", func(t *testing.T) {
+		p := file("other-owner", 0o600)
+		otherOwner(t, p)
+		htpasswdBoth(t, p, htpasswdOwner)
+	})
+	t.Run("other owner and all write", func(t *testing.T) {
+		// The owner rule runs before the mode rule.
+		p := file("other-owner-wide", 0o666)
+		otherOwner(t, p)
+		htpasswdBoth(t, p, htpasswdOwner)
+	})
+	t.Run("link to a file of another owner", func(t *testing.T) {
+		target := file("other-owner-target", 0o600)
+		link := filepath.Join(d, "other-owner-link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		otherOwner(t, target)
+		htpasswdBoth(t, link, htpasswdOwner)
+	})
+	t.Run("link loop", func(t *testing.T) {
+		p := filepath.Join(d, "loop")
+		if err := os.Symlink(p, p); err != nil {
+			t.Fatal(err)
+		}
+		htpasswdBoth(t, p, htpasswdResolve)
+	})
+	t.Run("no read permission", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root can open a file that has no read permission")
+		}
+		htpasswdBoth(t, file("write-only", 0o200), htpasswdOpen)
+	})
+}
+
+// TestTS10_HtpasswdNotRegular checks that a FIFO and a device node are refused
+// before the open (T-S-10).
+func TestTS10_HtpasswdNotRegular(t *testing.T) {
+	d := pkgTempDir(t)
+	fifo := filepath.Join(d, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct{ name, path string }{{"FIFO", fifo}, {"device node", "/dev/null"}} {
+		t.Run(r.name, func(t *testing.T) {
+			// The load also reads the config file.
+			// So the hook counts the path of the row only.
+			opened := 0
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == r.path {
+					opened++
+				}
+			}})
+			// "/dev" can have a mode that the directory rule refuses. Then the
+			// row cannot reach the type rule.
+			if err := safefile.CheckPathParents(r.path, htpasswdDirRule); err != nil {
+				t.Skipf("the directory rule refuses a parent of %s: %v", r.path, err)
+			}
+			htpasswdBoth(t, r.path, htpasswdNotFile)
+			if opened != 0 {
+				t.Error("the file was opened")
+			}
+		})
+	}
+}
+
+// TestTS10_HtpasswdSwap checks that a file that replaces the htpasswd file
+// between the check and the open is refused (T-S-10).
+func TestTS10_HtpasswdSwap(t *testing.T) {
+	for _, viaLoad := range []bool{false, true} {
+		t.Run(fmt.Sprintf("load %v", viaLoad), func(t *testing.T) {
+			d := pkgTempDir(t)
+			p := writeFile(t, d, "htpasswd", "u:hash\n", 0o600)
+			swapped := false
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == p && !swapped {
+					swapped = true
+					if err := os.Rename(writeFile(t, d, "new", "u:hash\n", 0o600), p); err != nil {
+						t.Error(err)
+					}
+				}
+			}})
+			var got string
+			if viaLoad {
+				got = htpasswdThrough(t, p)
+			} else {
+				got = checkHtpasswd(&loader{}, p)
+			}
+			if !swapped || got != htpasswdOpen {
+				t.Errorf("swapped %v, detail %q, want %q", swapped, got, htpasswdOpen)
+			}
+		})
+	}
+}
+
+// TestTS10_HtpasswdParents checks the directory rule for the htpasswd file.
+// A group or other write bit, mode 1777 and another owner are refused. This
+// holds for the directory of the file and for each directory higher up. It
+// also holds for the directories of a symlink on the way and of its target.
+// Each case also runs through LoadWith (T-S-10).
+func TestTS10_HtpasswdParents(t *testing.T) {
+	type tree struct{ root, file string }
+	// build makes root/a/b/htpasswd. The tree is private.
+	build := func(t *testing.T) tree {
+		root := pkgTempDir(t)
+		for _, p := range []string{"a", "a/b"} {
+			if err := os.Mkdir(filepath.Join(root, p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tree{root, writeFile(t, filepath.Join(root, "a/b"), "htpasswd", "u:hash\n", 0o600)}
+	}
+	chmod := func(t *testing.T, p string, m os.FileMode) {
+		if err := os.Chmod(p, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	badModes := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"group write", 0o770}, {"other write", 0o707}, {"mode 1777", os.ModeSticky | 0o777},
+	}
+	for _, m := range badModes {
+		t.Run("parent "+m.name, func(t *testing.T) {
+			tr := build(t)
+			chmod(t, filepath.Join(tr.root, "a/b"), m.mode)
+			htpasswdBoth(t, tr.file, htpasswdDirDetail)
+		})
+		t.Run("higher parent "+m.name, func(t *testing.T) {
+			tr := build(t)
+			chmod(t, filepath.Join(tr.root, "a"), m.mode)
+			htpasswdBoth(t, tr.file, htpasswdDirDetail)
+		})
+		t.Run("directory of the symlink on the way "+m.name, func(t *testing.T) {
+			tr := build(t)
+			// root/l/link -> root/a/b. The directory "l" holds the link.
+			if err := os.Mkdir(filepath.Join(tr.root, "l"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(tr.root, "l", "link")
+			if err := os.Symlink(filepath.Join(tr.root, "a/b"), link); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(link, "htpasswd")
+			htpasswdBoth(t, path, "")
+			chmod(t, filepath.Join(tr.root, "l"), m.mode)
+			htpasswdBoth(t, path, htpasswdDirDetail)
+		})
+		t.Run("parent of the symlink target "+m.name, func(t *testing.T) {
+			tr := build(t)
+			// root/link -> root/a/b. The directory "a" is above the target.
+			link := filepath.Join(tr.root, "link")
+			if err := os.Symlink("a/b", link); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(link, "htpasswd")
+			htpasswdBoth(t, path, "")
+			chmod(t, filepath.Join(tr.root, "a"), m.mode)
+			htpasswdBoth(t, path, htpasswdDirDetail)
+		})
+		t.Run("parent of the target of a last symlink "+m.name, func(t *testing.T) {
+			tr := build(t)
+			// root/link -> root/a/b/htpasswd. The link is the last part.
+			link := filepath.Join(tr.root, "link")
+			if err := os.Symlink(tr.file, link); err != nil {
+				t.Fatal(err)
+			}
+			htpasswdBoth(t, link, "")
+			chmod(t, filepath.Join(tr.root, "a/b"), m.mode)
+			htpasswdBoth(t, link, htpasswdDirDetail)
+		})
+	}
+	t.Run("parent of another owner", func(t *testing.T) {
+		tr := build(t)
+		otherOwner(t, filepath.Join(tr.root, "a/b"))
+		htpasswdBoth(t, tr.file, htpasswdDirDetail)
+	})
+	t.Run("higher parent of another owner", func(t *testing.T) {
+		tr := build(t)
+		otherOwner(t, filepath.Join(tr.root, "a"))
+		htpasswdBoth(t, tr.file, htpasswdDirDetail)
+	})
+	t.Run("directory of the symlink on the way, other owner", func(t *testing.T) {
+		tr := build(t)
+		if err := os.Mkdir(filepath.Join(tr.root, "l"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(tr.root, "l", "link")
+		if err := os.Symlink(filepath.Join(tr.root, "a/b"), link); err != nil {
+			t.Fatal(err)
+		}
+		otherOwner(t, filepath.Join(tr.root, "l"))
+		htpasswdBoth(t, filepath.Join(link, "htpasswd"), htpasswdDirDetail)
+	})
+	t.Run("parent of the symlink target, other owner", func(t *testing.T) {
+		tr := build(t)
+		link := filepath.Join(tr.root, "link")
+		if err := os.Symlink("a/b", link); err != nil {
+			t.Fatal(err)
+		}
+		otherOwner(t, filepath.Join(tr.root, "a"))
+		htpasswdBoth(t, filepath.Join(link, "htpasswd"), htpasswdDirDetail)
+	})
+	t.Run("private tree", func(t *testing.T) {
+		htpasswdBoth(t, build(t).file, "")
+	})
+	t.Run("directory of the file with a bad mode, file missing", func(t *testing.T) {
+		// The directory rule runs before the file is looked at.
+		tr := build(t)
+		chmod(t, filepath.Join(tr.root, "a/b"), 0o770)
+		htpasswdBoth(t, filepath.Join(tr.root, "a/b/missing"), htpasswdDirDetail)
+	})
 }
 
 // TestTU10_URLOutput checks that a URL-kind value that fails is not printed, and that
@@ -945,7 +1296,7 @@ func TestTS11_StorePathText(t *testing.T) {
 		{"relative", "events.db", "absolute"},
 	}, func(s string) string { return checkStorePath(tr.l, s) })
 	// The rule applies only below the state directory: it does not check the parts of the root.
-	spaced := &loader{stateRoot: tr.root + "/a b?", euid: os.Geteuid()}
+	spaced := &loader{stateRoot: tr.root + "/a b?"}
 	if d := checkStorePath(spaced, spaced.stateRoot+"/events.db"); d != "" {
 		t.Errorf("state root with a space: %q", d)
 	}
@@ -1818,6 +2169,197 @@ func TestTS11_EgressLiterals(t *testing.T) {
 	}
 }
 
+// withList adds a private list to a flow mapping item.
+func withList(item, list string) string {
+	return strings.TrimSuffix(item, "}") + ", private: [" + list + "]}"
+}
+
+// litKind is one endpoint kind. file returns a config whose endpoint host is
+// host. The list is on the item of the endpoint if own is true, else on
+// another item. scheme and port are those of the AllowList endpoint.
+type litKind struct {
+	key, scheme, port string
+	file              func(host, list string, own bool) string
+}
+
+// litKinds returns seven rows: one for each endpoint kind and scheme.
+func litKinds() []litKind {
+	sinks := func(lit func(h string) string, other string) func(string, string, bool) string {
+		return func(h, l string, own bool) string {
+			a, b := lit(h), other
+			if own {
+				a = withList(a, l)
+			} else {
+				b = withList(b, l)
+			}
+			return snk(a, b)
+		}
+	}
+	smtp := func(scheme, port string) func(string, string, bool) string {
+		return sinks(func(h string) string {
+			return `{type: smtp, host: "` + scheme + `://` + h + `:` + port + `", from: a@b.example, to: [c@d.example]}`
+		}, hookItem)
+	}
+	return []litKind{
+		{"acme.ca", "https", "443", func(h, l string, own bool) string {
+			ca, bundle := "", ""
+			if own {
+				ca = "  ca_private: [" + l + "]\n"
+			} else {
+				bundle = "bundle:\n  fetch_url: \"https://b.example/x\"\n  fetch_private: [" + l + "]\n"
+			}
+			return "acme:\n  email: sec@example.com\n  ca: \"https://" + h + "/d\"\n" + ca + acmeNames + tlogLine + bundle
+		}},
+		{"bundle.fetch_url", "https", "443", func(h, l string, own bool) string {
+			if own {
+				return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n  fetch_private: [" + l + "]\n"
+			}
+			return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n" + "alerts:\n  sinks:\n    - " + withList(hookItem, l) + "\n"
+		}},
+		{"tlog.publish[1].url", "https", "443", func(h, l string, own bool) string {
+			lit := `{type: https-put, url: "https://` + h + `/p", token_env: CKPT_TOKEN}`
+			if own {
+				return pub(pubItem, withList(lit, l))
+			}
+			return pub(withList(pubItem, l), lit)
+		}},
+		{"alerts.sinks[0].url", "https", "443", sinks(func(h string) string {
+			return `{type: webhook, url: "https://` + h + `/h", hmac_secret_env: ALERT_HMAC}`
+		}, mailItem)},
+		{"alerts.sinks[0].addr", "tls", "6514", sinks(func(h string) string {
+			return `{type: syslog, addr: "tls://` + h + `:6514"}`
+		}, hookItem)},
+		{"alerts.sinks[0].host", "smtp", "25", smtp("smtp", "25")},
+		{"alerts.sinks[0].host", "smtps", "465", smtp("smtps", "465")},
+	}
+}
+
+// TestTS26_LiteralHostList checks an IP-literal endpoint host that the egress
+// rule refuses. It passes only if the list of its own item holds it. The
+// never-list must not hold it. The error names the key one time and shows no
+// part of the host (T-S-26, T-S-11).
+func TestTS26_LiteralHostList(t *testing.T) {
+	rows := []struct {
+		name, host, list string
+		passes           bool
+	}{
+		{"v4 in list", "10.1.2.3", "10.0.0.0/8", true},
+		{"v6 in list", "[fd00::1]", "fd00::/8", true},
+		{"mapped in list", "[::ffff:10.1.2.3]", "10.0.0.0/8", true},
+		{"in a private class, not in list", "10.1.2.3", "192.168.0.0/16", false},
+		{"cloud metadata v4, class list", "100.100.100.200", "100.64.0.0/10", false},
+		{"cloud metadata v6, class list", "[fd00:ec2::254]", "fd00::/8", false},
+		{"cloud metadata v4, entry for it", "100.100.100.200", "100.100.100.200", false},
+		{"cloud metadata v6, entry for it", "[fd00:ec2::254]", "fd00:ec2::254", false},
+		{"benchmark range", "198.18.0.1", "10.0.0.0/8", false},
+		{"link-local", "169.254.169.254", "10.0.0.0/8", false},
+		{"loopback", "127.0.0.1", "10.0.0.0/8", false},
+	}
+	for _, k := range litKinds() {
+		for _, r := range rows {
+			t.Run(k.key+"/"+k.scheme+"/"+r.name, func(t *testing.T) {
+				_, err := loadProd(t, k.file(r.host, r.list, true), listEnv...)
+				if r.passes {
+					if err != nil {
+						t.Errorf("own list: got %v", err)
+					}
+					// The same list on another item does not help.
+					_, err = loadProd(t, k.file(r.host, r.list, false), listEnv...)
+				}
+				wantKey(t, err, k.key, r.host)
+			})
+		}
+	}
+}
+
+// TestTS26_LiteralHostListIndex checks the list of an item by its index.
+// It tries index 0, index 1 and the last index of alerts.sinks and
+// tlog.publish. A literal passes with the list at its own index. With no
+// list, or with the list at another index, the error names the key (T-S-26).
+func TestTS26_LiteralHostListIndex(t *testing.T) {
+	const host, list = "10.1.2.3", "10.0.0.0/8"
+	kinds := []struct {
+		name, key string
+		n         int
+		file      func(items ...string) string
+		item      func(h string) string
+	}{
+		{"alerts.sinks", "alerts.sinks[%d].url", listMax("alerts.sinks"), snk, func(h string) string {
+			return fmt.Sprintf(`{type: webhook, url: "https://%s/h", hmac_secret_env: ALERT_HMAC}`, h)
+		}},
+		{"tlog.publish", "tlog.publish[%d].url", listMax("tlog.publish"), pub, func(h string) string {
+			return fmt.Sprintf(`{type: https-put, url: "https://%s/p", token_env: CKPT_TOKEN}`, h)
+		}},
+	}
+	for _, k := range kinds {
+		for _, at := range []int{0, 1, k.n - 1} {
+			other := 0
+			if at == 0 {
+				other = 1
+			}
+			// listAt is the index of the list, or -1 for no list.
+			for _, listAt := range []int{at, -1, other} {
+				t.Run(fmt.Sprintf("%s/%d/list at %d", k.name, at, listAt), func(t *testing.T) {
+					var items []string
+					for i := 0; i <= max(at, listAt); i++ {
+						h := fmt.Sprintf("f%d.example", i)
+						if i == at {
+							h = host
+						}
+						it := k.item(h)
+						if i == listAt {
+							it = withList(it, list)
+						}
+						items = append(items, it)
+					}
+					_, err := loadProd(t, k.file(items...), listEnv...)
+					if listAt == at {
+						if err != nil {
+							t.Errorf("got %v", err)
+						}
+						return
+					}
+					wantKey(t, err, fmt.Sprintf(k.key, at), host)
+				})
+			}
+		}
+	}
+}
+
+// wantKey checks that err is one error for key, with no part of host.
+func wantKey(t *testing.T, err error, key, host string) {
+	t.Helper()
+	if err == nil || strings.Count(err.Error(), "config: "+key+" at ") != 1 {
+		t.Errorf("want one error for %s, got %v", key, err)
+		return
+	}
+	if strings.Contains(err.Error(), strings.Trim(host, "[]")) {
+		t.Errorf("the error shows the host: %v", err)
+	}
+}
+
+// TestTS26_LiteralHostListAllowList checks that a literal that passes by its
+// list is in AllowList, in canonical form (C4, T-S-26).
+func TestTS26_LiteralHostListAllowList(t *testing.T) {
+	for _, k := range litKinds() {
+		for _, r := range []struct{ host, list, want string }{
+			{"10.1.2.3", "10.0.0.0/8", "10.1.2.3"},
+			{"[fd00::1]", "fd00::/8", "fd00::1"},
+			{"[::ffff:10.1.2.3]", "10.0.0.0/8", "10.1.2.3"},
+		} {
+			t.Run(k.key+"/"+k.scheme+"/"+r.want, func(t *testing.T) {
+				c, err := loadProd(t, k.file(r.host, r.list, true), listEnv...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := (Endpoint{k.scheme, r.want, k.port}); !slices.Contains(c.AllowList(), want) {
+					t.Errorf("AllowList %+v lacks %+v", c.AllowList(), want)
+				}
+			})
+		}
+	}
+}
+
 // TestTS11_SystemNetRefusesLoopback checks that the Dialer of SystemNet
 // refuses a dial to a loopback address (T-S-21).
 func TestTS11_SystemNetRefusesLoopback(t *testing.T) {
@@ -2150,6 +2692,9 @@ func TestTS11_DecoyNameCount(t *testing.T) {
 		})
 	}
 	c := loadWants(t, both(0, 1), "")
+	if c == nil {
+		t.Fatalf("the load of one certificate failed")
+	}
 	if v, ok := c.Get("tls.certs[0].cert_file"); !ok || v.Str != "/etc/phantom/a.pem" {
 		t.Errorf("got %+v, %v", v, ok)
 	}

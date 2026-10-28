@@ -80,6 +80,21 @@ func checkEntry(p netip.Prefix) error {
 	return errEntryClass
 }
 
+// ItemPermitted tells if the guard of an item with the private list lets the
+// item connect to the address a. The order is the order of the item dialer:
+// zone, unmap, never-list, the rule, then the list. The list applies for any
+// port and protocol, so a caller uses it only for the endpoint of the item.
+// An entry that the entry rule refuses makes the result false. The loader uses
+// it for an IP-literal host, so that it has the same never-list as the dialer.
+func ItemPermitted(list []netip.Prefix, a netip.Addr) bool {
+	for _, p := range list {
+		if checkEntry(p) != nil {
+			return false
+		}
+	}
+	return itemPermits(list, a, true)
+}
+
 // itemPermits applies the guard order of an item dialer to the address a.
 // The caller sets portAndProtoMatch when the port and the protocol of the dial
 // are those of the item. The zone check comes before the unmap, because Unmap

@@ -15,10 +15,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // defaultStateRoot is the directory that state paths must stay under.
@@ -30,13 +30,12 @@ const DefaultStateRoot = defaultStateRoot
 // loader holds the settings that the validators use. A test sets them to use a temporary directory.
 type loader struct {
 	stateRoot string   // stateRoot is the directory that state paths must stay under after symlink resolution.
-	euid      int      // euid is the user that runs the sensor.
 	env       []string // env is the environment that the *_env keys name. The loader does not read the process environment.
 	// net is the network access that LoadWith gets.
 	net Net
 }
 
-func newLoader() *loader { return &loader{stateRoot: defaultStateRoot, euid: os.Geteuid()} }
+func newLoader() *loader { return &loader{stateRoot: defaultStateRoot} }
 
 // hostname matches host name labels that a dot separates. A label is not empty.
 var hostname = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
@@ -239,7 +238,8 @@ func checkPrivateEntry(_ *loader, raw string) string {
 // privateCheck checks that each private list key in the file is on an item
 // that can use a list. An empty list is also refused on an item that cannot
 // use a list. An absent key is valid. The error names the list key. An item
-// key that failed its own check is not in vals, so the loader skips it.
+// key that failed its own check is not in vals, so the loader skips it. It
+// also calls literalCheck for the IP-literal endpoint hosts.
 func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 	var errs []error
 	refuse := func(list, detail string) {
@@ -263,7 +263,60 @@ func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 			refuse(item+".private", "the list needs a syslog address with the scheme tls")
 		}
 	}
+	return append(errs, literalCheck(vals)...)
+}
+
+// literalCheck checks each IP-literal endpoint host. The key checks accept a
+// literal that the egress rule refuses, because a key check sees no other
+// key. Here the host must be in the private list of its own item, and not
+// on the never-list (SEC-30). The error names the endpoint key and holds no
+// part of the host. A key that failed is not in vals, so the check skips it.
+func literalCheck(vals map[string]Value) []error {
+	c := &Config{values: vals}
+	var errs []error
+	check := func(key, list string, ep func(string) (Endpoint, string)) {
+		v, ok := vals[key]
+		if !ok {
+			return
+		}
+		e, d := ep(v.Str)
+		a, err := netip.ParseAddr(e.Host)
+		// A list never changes the rule for udp and tcp: loopback only.
+		if d != "" || err != nil || e.Scheme == "udp" || e.Scheme == "tcp" {
+			return
+		}
+		if !egress.ItemPermitted(c.PrivateList(list), a) {
+			errs = append(errs, &Error{Key: key, Source: v.Source, Line: v.Line,
+				Detail: "the host is an IP address that the egress rule and the private list of the item do not permit"})
+		}
+	}
+	check("acme.ca", "acme.ca_private", func(raw string) (Endpoint, string) { return urlEndpoint(CADirectory(raw)) })
+	check("bundle.fetch_url", "bundle.fetch_private", urlEndpoint)
+	// Each list has its own maximum. The check skips a missing key.
+	for i := range listMax("tlog.publish") {
+		pub := fmt.Sprintf("tlog.publish[%d]", i)
+		check(pub+".url", pub+".private", urlEndpoint)
+	}
+	for i := range maxSinks {
+		item := fmt.Sprintf("alerts.sinks[%d]", i)
+		for _, f := range sinkSchemas[vals[item+".type"].Str] {
+			if f.endpoint != nil {
+				check(item+"."+f.path, item+".private", f.endpoint)
+			}
+		}
+	}
 	return errs
+}
+
+// listMax returns the maximum number of items of the list at path in the
+// production list table.
+func listMax(path string) int {
+	for _, l := range lists {
+		if l.path == path {
+			return l.max
+		}
+	}
+	return 0
 }
 
 // privatePath matches the paths that PrivateList accepts. N is a decimal
@@ -413,11 +466,9 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		}
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		switch {
-		case a.Zone() != "":
+		// literalCheck applies the egress rule and the list.
+		if a.Zone() != "" {
 			return nil, "the URL host must not have a zone"
-		case !egress.Permitted(a):
-			return nil, "the URL host is an IP address that the egress rule refuses"
 		}
 	} else if !hostname.MatchString(host) {
 		return nil, "the URL host is not an IP address or a host name"
@@ -468,10 +519,12 @@ func endpoint(scheme, host, port string) Endpoint {
 	return Endpoint{Scheme: scheme, Host: host, Port: port}
 }
 
-// parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
-// in the exact case. The host is not empty. An IP literal has no zone and
-// passes the egress rule, except for udp and tcp. It returns a fixed detail
-// on an error.
+// parseEndpoint parses a scheme, "://", and host:port. The scheme must be one
+// of schemes, in the exact case. The host is not empty. parseEndpoint passes
+// a name. An IP literal has no zone. parseEndpoint does not check the literal
+// against the egress rule. For tls, smtp and smtps, literalCheck does it. For
+// udp and tcp, checkSyslogAddr permits only a loopback literal.
+// parseEndpoint returns a fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -485,10 +538,6 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 		return Endpoint{}, "the host must not be empty"
 	case hp.addr.Zone() != "":
 		return Endpoint{}, "the host must not have a zone"
-	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
-		// A name passes here. checkSyslogAddr checks udp and tcp.
-	case !egress.Permitted(hp.addr):
-		return Endpoint{}, "the host is an IP address that the egress rule refuses"
 	}
 	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
 }
@@ -987,32 +1036,44 @@ func storeConflict(root string, vals map[string]Value, p string) string {
 	return ""
 }
 
-// checkHtpasswd applies the file rules (04 section 3). The detail is fixed text. The
-// loader shows the path in the Value field. The check opens the resolved file one time,
-// then reads the type, owner, and mode from the open file, as ReadFile does.
-func checkHtpasswd(l *loader, raw string) string {
+// These are the rules of the htpasswd file and of each directory on its way.
+// The file rule has no mode. The check reads the mode from the open file.
+// So it can give a text for group write, other write and other read.
+var (
+	htpasswdFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true}
+	htpasswdDirRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
+)
+
+// checkHtpasswd applies the file rules (04 section 3). The detail is fixed
+// text. The loader shows the path in the Value field. The check looks at each
+// directory from "/" to the file. This includes the directories of a symlink
+// on the way and of its target. It opens the file one time. Then it reads the
+// type, owner, and mode from the open file, as ReadFile does.
+func checkHtpasswd(_ *loader, raw string) string {
 	if d := checkPathForm(raw); d != "" {
 		return d
 	}
-	r, err := filepath.EvalSymlinks(raw)
-	if err != nil {
+	if err := safefile.CheckPathParents(raw, htpasswdDirRule); err != nil {
+		switch {
+		case errors.Is(err, safefile.ErrOwner), errors.Is(err, safefile.ErrMode):
+			return "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+		case errors.Is(err, safefile.ErrName):
+			return "the htpasswd file is not a regular file"
+		}
 		return "the htpasswd file cannot be resolved"
 	}
-	f, err := os.OpenFile(r, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
+	f, fi, err := safefile.OpenPath(raw, htpasswdFileRule)
+	switch {
+	case errors.Is(err, safefile.ErrType), errors.Is(err, safefile.ErrName):
+		return "the htpasswd file is not a regular file"
+	case errors.Is(err, safefile.ErrOwner):
+		return "the owner of the htpasswd file is not root or the sensor user"
+	case errors.Is(err, safefile.ErrOpen), errors.Is(err, safefile.ErrChanged):
 		return "the htpasswd file cannot be opened"
+	case err != nil:
+		return "the htpasswd file cannot be resolved"
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	switch {
-	case err != nil:
-		return "the htpasswd file cannot be read"
-	case !fi.Mode().IsRegular():
-		return "the htpasswd file is not a regular file"
-	}
-	if uid, ok := fileOwner(fi); !ok || (uid != 0 && int(uid) != l.euid) {
-		return "the owner of the htpasswd file is not root or the sensor user"
-	}
 	switch perm := fi.Mode().Perm(); {
 	case perm&0o020 != 0:
 		return "the htpasswd file is writable by group"
