@@ -369,7 +369,7 @@ func TestTS27ExpiryWarningEndsWithContext(t *testing.T) {
 	<-done
 }
 
-// T-S-27: a nil logger discards the lines of a leaf that is due.
+// T-S-27: with a nil logger and a leaf that is due, the loop does not panic.
 func TestTS27ExpiryWarningNilLogger(t *testing.T) {
 	src, err := NewCertSource([]StaticEntry{staticEntry(t, staticName, time.Hour)}, nil)
 	mustNil(t, err)

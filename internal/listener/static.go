@@ -273,7 +273,8 @@ type CertSource struct {
 // It compares names in lower case with one trailing dot removed, as the gate
 // does. NewACME instead refuses upper case and a trailing dot.
 // The source copies the slice of entries, the slice of DER slices and each
-// DER slice. Leaf and the private key are shared with the caller.
+// DER slice. Leaf (also Leaf.Raw) and the private key are shared with the
+// caller.
 // It refuses an entry with an empty name, a name with a byte above 0x7f,
 // or no Leaf.
 // It refuses a static name that comes two times.
