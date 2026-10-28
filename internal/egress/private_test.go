@@ -122,6 +122,45 @@ func TestTS26NeverListEdges(t *testing.T) {
 	}
 }
 
+// TestTS26ItemPermitted checks the order of ItemPermitted: zone, unmap,
+// never-list, the rule, then the list.
+func TestTS26ItemPermitted(t *testing.T) {
+	list := func(s ...string) []netip.Prefix {
+		var out []netip.Prefix
+		for _, e := range s {
+			p, err := ParsePrivateEntry(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, p)
+		}
+		return out
+	}
+	tests := []struct {
+		name string
+		list []netip.Prefix
+		addr string
+		want bool
+	}{
+		{"in list", list("10.0.0.0/8"), "10.1.2.3", true},
+		{"mapped in list", list("10.0.0.0/8"), "::ffff:10.1.2.3", true},
+		{"not in list", list("192.168.0.0/16"), "10.1.2.3", false},
+		{"no list", nil, "10.1.2.3", false},
+		{"global without list", nil, "8.8.8.8", true},
+		{"never-list beats the list", list("100.100.100.200"), "100.100.100.200", false},
+		{"never-list v6", list("fd00::/8"), "fd00:ec2::254", false},
+		{"zone", list("fd00::/8"), "fd00::1%eth0", false},
+		{"outside every class", list("10.0.0.0/8"), "198.18.0.1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ItemPermitted(tt.list, netip.MustParseAddr(tt.addr)); got != tt.want {
+				t.Errorf("ItemPermitted(%s) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
 // itemDialer makes an item dialer from the entries. It fails t on an error.
 func itemDialer(t *testing.T, port uint16, proto string, list ...string) *net.Dialer {
 	t.Helper()

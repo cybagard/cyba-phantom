@@ -40,6 +40,39 @@ func TestTS11_CheckURLRules(t *testing.T) {
 	}
 }
 
+// TestTS11_CheckLiteralHostList checks that --check lets an IP-literal host
+// pass when the list of its own item holds it (exit 0). With the list on
+// another item only, it exits 1. The error names the key and shows no part of
+// the host (T-S-11, T-S-26).
+func TestTS11_CheckLiteralHostList(t *testing.T) {
+	body := validBody(t)
+	const host, list = "10.1.2.3", "10.0.0.0/8"
+	hook := `{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC`
+	other := `{type: syslog, addr: "udp://127.0.0.1:514"`
+	sink := func(a, b string) string {
+		return body + "alerts:\n  sinks:\n    - " + a + "}\n    - " + b + "}\n"
+	}
+	okPub := `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN`
+	pubs := func(a, b string) string { return strings.Replace(body, okPub+"}", a+"}\n    - "+b+"}", 1) }
+	lit := `{type: https-put, url: "https://` + host + `/p", token_env: CKPT_TOKEN`
+	rows := []struct{ key, own, elsewhere string }{
+		{"alerts.sinks[0].url", sink(hook+", private: ["+list+"]", other), sink(hook, other+", private: ["+list+"]")},
+		{"tlog.publish[0].url", pubs(lit+", private: ["+list+"]", okPub), pubs(lit, okPub+", private: ["+list+"]")},
+	}
+	for _, r := range rows {
+		env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+		var so, se strings.Builder
+		if code := run([]string{"--check", writeFile(t, r.own)}, env, &so, &se); code != 0 {
+			t.Errorf("%s own list: exit %d, stderr %q", r.key, code, se.String())
+		}
+		se.Reset()
+		code := run([]string{"--check", writeFile(t, r.elsewhere)}, env, &so, &se)
+		if code != 1 || !strings.Contains(se.String(), "config: "+r.key+" at ") || strings.Contains(se.String(), host) {
+			t.Errorf("%s other list: exit %d, stderr %q", r.key, code, se.String())
+		}
+	}
+}
+
 // TestTS11_CheckEgressLiterals checks that --check refuses an IP literal that
 // the egress rule refuses. It does this for each URL key and for an smtp and
 // an smtps host, with exit 1. One URL key is a tls syslog address. The error

@@ -368,16 +368,18 @@ func TestTU10_URL(t *testing.T) {
 		{"empty user", "https://@h/", []string{"https"}, "user information"},
 		{"fragment", "https://h/#x", []string{"https"}, "fragment"},
 		{"empty fragment", "https://h/#", []string{"https"}, "fragment"},
-		{"link-local v4", "https://169.254.169.254/", []string{"https"}, "egress rule"},
-		{"link-local v6", "https://[fe80::1]/", []string{"https"}, "egress rule"},
-		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, "egress rule"},
-		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, "egress rule"},
-		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, "egress rule"},
-		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, "egress rule"},
+		// parseURL accepts a literal that the egress rule refuses.
+		// literalCheck refuses it (TestTS11_EgressLiterals).
+		{"link-local v4", "https://169.254.169.254/", []string{"https"}, ""},
+		{"link-local v6", "https://[fe80::1]/", []string{"https"}, ""},
+		{"inside fe80::/10", "https://[fe81::]/", []string{"https"}, ""},
+		{"top of fe80::/10", "https://[febf::1]/", []string{"https"}, ""},
+		{"outside fe80::/10", "https://[fec0::1]/", []string{"https"}, ""},
+		{"v4 mapped link-local", "https://[::ffff:169.254.169.254]/", []string{"https"}, ""},
 		{"zone", "https://[fe80::1%25eth0]/", []string{"https"}, "zone"},
 		{"zone on global", "https://[2001:db8::1%25eth0]/", []string{"https"}, "zone"},
-		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, "egress rule"},
-		{"unspecified v6", "https://[::]/", []string{"https"}, "egress rule"},
+		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, ""},
+		{"unspecified v6", "https://[::]/", []string{"https"}, ""},
 		{"port 0", "https://h:0/", []string{"https"}, "port"},
 		{"port 65536", "https://h:65536/", []string{"https"}, "port"},
 		{"port leading zero", "https://example.com:0443/", []string{"https"}, "decimal"},
@@ -439,13 +441,14 @@ func TestTU10_CA(t *testing.T) {
 		{"staging", "letsencrypt-staging", ""},
 		{"https", "https://ca.example/dir", ""},
 		{"https port", "https://8.8.8.8:14000/dir", ""},
-		{"loopback", "https://127.0.0.1:14000/dir", "egress rule"},
+		// literalCheck refuses the loopback and link-local rows.
+		{"loopback", "https://127.0.0.1:14000/dir", ""},
 		{"tcp", "tcp://ca.example:443", "scheme"},
 		{"http", "http://ca.example/dir", "scheme"},
 		{"other name", "zerossl", "scheme"},
 		{"case", "Letsencrypt", "scheme"},
 		{"empty", "", "scheme"},
-		{"link-local", "https://[fe81::]/dir", "egress rule"},
+		{"link-local", "https://[fe81::]/dir", ""},
 		{"user", "https://u:p@ca.example/dir", "user information"},
 		{"port leading zero", "https://ca.example:0443/dir", "decimal"},
 		{"number host", "https://2852039166/dir", "number"},
@@ -1814,6 +1817,142 @@ func TestTS11_EgressLiterals(t *testing.T) {
 	for _, addr := range []string{"udp://127.0.0.1:514", "tcp://127.0.0.1:514", "udp://[::1]:514", "tcp://[::1]:514"} {
 		if _, err := loadProd(t, snk(`{type: syslog, addr: "`+addr+`"}`), listEnv...); err != nil {
 			t.Errorf("%s: got %v", addr, err)
+		}
+	}
+}
+
+// withList adds a private list to a flow mapping item.
+func withList(item, list string) string {
+	return strings.TrimSuffix(item, "}") + ", private: [" + list + "]}"
+}
+
+// litKind is one endpoint kind. file returns a config whose endpoint host is
+// host. The list is on the item of the endpoint if own is true, else on
+// another item. scheme and port are those of the AllowList endpoint.
+type litKind struct {
+	key, scheme, port string
+	file              func(host, list string, own bool) string
+}
+
+// litKinds returns the six endpoint kinds, with smtps as a seventh row.
+func litKinds() []litKind {
+	sinks := func(lit func(h string) string, other string) func(string, string, bool) string {
+		return func(h, l string, own bool) string {
+			a, b := lit(h), other
+			if own {
+				a = withList(a, l)
+			} else {
+				b = withList(b, l)
+			}
+			return snk(a, b)
+		}
+	}
+	smtp := func(scheme, port string) func(string, string, bool) string {
+		return sinks(func(h string) string {
+			return `{type: smtp, host: "` + scheme + `://` + h + `:` + port + `", from: a@b.example, to: [c@d.example]}`
+		}, hookItem)
+	}
+	return []litKind{
+		{"acme.ca", "https", "443", func(h, l string, own bool) string {
+			ca, bundle := "", ""
+			if own {
+				ca = "  ca_private: [" + l + "]\n"
+			} else {
+				bundle = "bundle:\n  fetch_url: \"https://b.example/x\"\n  fetch_private: [" + l + "]\n"
+			}
+			return "acme:\n  email: sec@example.com\n  ca: \"https://" + h + "/d\"\n" + ca + acmeNames + tlogLine + bundle
+		}},
+		{"bundle.fetch_url", "https", "443", func(h, l string, own bool) string {
+			if own {
+				return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n  fetch_private: [" + l + "]\n"
+			}
+			return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n" + "alerts:\n  sinks:\n    - " + withList(hookItem, l) + "\n"
+		}},
+		{"tlog.publish[1].url", "https", "443", func(h, l string, own bool) string {
+			lit := `{type: https-put, url: "https://` + h + `/p", token_env: CKPT_TOKEN}`
+			if own {
+				return pub(pubItem, withList(lit, l))
+			}
+			return pub(withList(pubItem, l), lit)
+		}},
+		{"alerts.sinks[0].url", "https", "443", sinks(func(h string) string {
+			return `{type: webhook, url: "https://` + h + `/h", hmac_secret_env: ALERT_HMAC}`
+		}, mailItem)},
+		{"alerts.sinks[0].addr", "tls", "6514", sinks(func(h string) string {
+			return `{type: syslog, addr: "tls://` + h + `:6514"}`
+		}, hookItem)},
+		{"alerts.sinks[0].host", "smtp", "25", smtp("smtp", "25")},
+		{"alerts.sinks[0].host", "smtps", "465", smtp("smtps", "465")},
+	}
+}
+
+// TestTS26_LiteralHostList checks an IP-literal endpoint host that the egress
+// rule refuses. It passes only if the list of its own item holds it. The
+// never-list must not hold it. The error names the key one time and shows no
+// part of the host (T-S-26, T-S-11).
+func TestTS26_LiteralHostList(t *testing.T) {
+	rows := []struct {
+		name, host, list string
+		passes           bool
+	}{
+		{"v4 in list", "10.1.2.3", "10.0.0.0/8", true},
+		{"v6 in list", "[fd00::1]", "fd00::/8", true},
+		{"mapped in list", "[::ffff:10.1.2.3]", "10.0.0.0/8", true},
+		{"in a private class, not in list", "10.1.2.3", "192.168.0.0/16", false},
+		{"cloud metadata v4, class list", "100.100.100.200", "100.64.0.0/10", false},
+		{"cloud metadata v6, class list", "[fd00:ec2::254]", "fd00::/8", false},
+		{"cloud metadata v4, entry for it", "100.100.100.200", "100.100.100.200", false},
+		{"benchmark range", "198.18.0.1", "10.0.0.0/8", false},
+		{"link-local", "169.254.169.254", "10.0.0.0/8", false},
+		{"loopback", "127.0.0.1", "10.0.0.0/8", false},
+	}
+	for _, k := range litKinds() {
+		for _, r := range rows {
+			t.Run(k.key+"/"+k.scheme+"/"+r.name, func(t *testing.T) {
+				_, err := loadProd(t, k.file(r.host, r.list, true), listEnv...)
+				if r.passes {
+					if err != nil {
+						t.Errorf("own list: got %v", err)
+					}
+					// The same list on another item does not help.
+					_, err = loadProd(t, k.file(r.host, r.list, false), listEnv...)
+				}
+				wantKey(t, err, k.key, r.host)
+			})
+		}
+	}
+}
+
+// wantKey checks that err is one error for key, with no part of host.
+func wantKey(t *testing.T, err error, key, host string) {
+	t.Helper()
+	if err == nil || strings.Count(err.Error(), "config: "+key+" at ") != 1 {
+		t.Errorf("want one error for %s, got %v", key, err)
+		return
+	}
+	if strings.Contains(err.Error(), strings.Trim(host, "[]")) {
+		t.Errorf("the error shows the host: %v", err)
+	}
+}
+
+// TestTS26_LiteralHostListAllowList checks that a literal that passes by its
+// list is in AllowList, in canonical form (C4, T-S-26).
+func TestTS26_LiteralHostListAllowList(t *testing.T) {
+	for _, k := range litKinds() {
+		for _, r := range []struct{ host, list, want string }{
+			{"10.1.2.3", "10.0.0.0/8", "10.1.2.3"},
+			{"[fd00::1]", "fd00::/8", "fd00::1"},
+			{"[::ffff:10.1.2.3]", "10.0.0.0/8", "10.1.2.3"},
+		} {
+			t.Run(k.key+"/"+k.scheme+"/"+r.want, func(t *testing.T) {
+				c, err := loadProd(t, k.file(r.host, r.list, true), listEnv...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := (Endpoint{k.scheme, r.want, k.port}); !slices.Contains(c.AllowList(), want) {
+					t.Errorf("AllowList %+v lacks %+v", c.AllowList(), want)
+				}
+			})
 		}
 	}
 }

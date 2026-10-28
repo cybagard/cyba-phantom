@@ -263,6 +263,46 @@ func privateCheck(doc *Doc, file string, vals map[string]Value) []error {
 			refuse(item+".private", "the list needs a syslog address with the scheme tls")
 		}
 	}
+	return append(errs, literalCheck(vals)...)
+}
+
+// literalCheck checks each IP-literal endpoint host. The key checks accept a
+// literal that the egress rule refuses, because a key check sees no other
+// key. Here the host must be in the private list of its own item, and not
+// on the never-list (SEC-30). The error names the endpoint key and holds no
+// part of the host. A key that failed is not in vals, so it is skipped.
+func literalCheck(vals map[string]Value) []error {
+	c := &Config{values: vals}
+	var errs []error
+	check := func(key, list string, ep func(string) (Endpoint, string)) {
+		v, ok := vals[key]
+		if !ok {
+			return
+		}
+		e, d := ep(v.Str)
+		a, err := netip.ParseAddr(e.Host)
+		// A list never changes the rule for udp and tcp: loopback only.
+		if d != "" || err != nil || e.Scheme == "udp" || e.Scheme == "tcp" {
+			return
+		}
+		if !egress.ItemPermitted(c.PrivateList(list), a) {
+			errs = append(errs, &Error{Key: key, Source: v.Source, Line: v.Line,
+				Detail: "the host is an IP address that the egress rule refuses, and the private list of the item does not allow it"})
+		}
+	}
+	check("acme.ca", "acme.ca_private", func(raw string) (Endpoint, string) { return urlEndpoint(CADirectory(raw)) })
+	check("bundle.fetch_url", "bundle.fetch_private", urlEndpoint)
+	// A list has at most maxSinks items, and a missing key is skipped.
+	for i := range maxSinks {
+		pub := fmt.Sprintf("tlog.publish[%d]", i)
+		check(pub+".url", pub+".private", urlEndpoint)
+		item := fmt.Sprintf("alerts.sinks[%d]", i)
+		for _, f := range sinkSchemas[vals[item+".type"].Str] {
+			if f.endpoint != nil {
+				check(item+"."+f.path, item+".private", f.endpoint)
+			}
+		}
+	}
 	return errs
 }
 
@@ -413,11 +453,9 @@ func parseURL(raw string, schemes ...string) (*url.URL, string) {
 		}
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		switch {
-		case a.Zone() != "":
+		// literalCheck applies the egress rule and the list.
+		if a.Zone() != "" {
 			return nil, "the URL host must not have a zone"
-		case !egress.Permitted(a):
-			return nil, "the URL host is an IP address that the egress rule refuses"
 		}
 	} else if !hostname.MatchString(host) {
 		return nil, "the URL host is not an IP address or a host name"
@@ -470,8 +508,8 @@ func endpoint(scheme, host, port string) Endpoint {
 
 // parseEndpoint parses a scheme, "://", and host:port. The scheme must be one of schemes,
 // in the exact case. The host is not empty. An IP literal has no zone and
-// passes the egress rule, except for udp and tcp. It returns a fixed detail
-// on an error.
+// is not checked against the egress rule: literalCheck does it. It returns a
+// fixed detail on an error.
 func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 	scheme, raw, ok := strings.Cut(raw, "://")
 	if !ok || !slices.Contains(schemes, scheme) {
@@ -487,8 +525,7 @@ func parseEndpoint(raw string, schemes []string) (Endpoint, string) {
 		return Endpoint{}, "the host must not have a zone"
 	case !hp.addr.IsValid() || scheme == "udp" || scheme == "tcp":
 		// A name passes here. checkSyslogAddr checks udp and tcp.
-	case !egress.Permitted(hp.addr):
-		return Endpoint{}, "the host is an IP address that the egress rule refuses"
+		// literalCheck applies the egress rule to the other literals.
 	}
 	return endpoint(scheme, hp.host, strconv.Itoa(hp.port)), ""
 }
