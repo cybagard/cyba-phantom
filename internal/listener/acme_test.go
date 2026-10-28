@@ -487,8 +487,9 @@ func TestTS21GuardChecksEveryAddressOfAName(t *testing.T) {
 }
 
 // TestTS21GuardRefusesAnAddressOfANameWithAZone: the lookup can give a zone.
-// The production rule refuses it, also for an IPv4 address, where the zone
-// cannot stay in a netip.Addr. The test takes the proxy of the issuer.
+// The production rule refuses the zone rows of the 16-byte addresses. The
+// check of the guard refuses the 4-byte IPv4 row, where the zone cannot stay in
+// a netip.Addr. The test takes the proxy of the issuer.
 func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -515,16 +516,16 @@ func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
 }
 
 // TestTS21GuardRefusesAnAddressOfBadLength: the guard refuses an address that
-// has 3 bytes. The proxy of the issuer cannot test this row.
+// has 3 bytes. The rule permits every address. The test checks the guard, not
+// the rule, so the check of the guard must refuse the address.
 func TestTS21GuardRefusesAnAddressOfBadLength(t *testing.T) {
-	item, err := egress.ItemDialer(nil, 443, "tcp", 0)
-	mustNil(t, err)
+	permitAll := func(netip.Addr) bool { return true }
 	ca, err := url.Parse("https://ca.test/")
 	mustNil(t, err)
 	req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
 	mustNil(t, err)
 	lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{{IP: net.IP{8, 8, 8}}}, nil }
-	if u, err := egressGuard(ca, nil, itemRule(item, 443), net.DefaultResolver, lookup)(req); err != errEgress || u != nil {
+	if u, err := egressGuard(ca, nil, permitAll, net.DefaultResolver, lookup)(req); err != errEgress || u != nil {
 		t.Errorf("proxy = %v, %v; want errEgress", u, err)
 	}
 }

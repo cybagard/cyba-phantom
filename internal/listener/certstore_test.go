@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -576,11 +577,10 @@ func TestTS16LoadRefusesAKeyFileWhoseSizeChangesAfterTheSizeChecksAndBeforeTheRe
 			s, dir := newStore(t)
 			mustNil(t, s.Store(ctx, "kd/key", bytes.Repeat([]byte("v"), 1500)))
 			calls := 0
-			betweenSizeCheckAndRead = func() {
+			s.hooks.betweenSizeCheckAndRead = func() {
 				calls++
 				c.change(t, filepath.Join(dir, "acme/cache/kd/key"))
 			}
-			t.Cleanup(func() { betweenSizeCheckAndRead = nil })
 			b, err := s.Load(ctx, "kd/key")
 			wantError(t, err, "load", c.rule)
 			if b != nil {
@@ -600,13 +600,12 @@ func TestTS16ListSkipsAChildDirectoryThatADeleteRemovesDuringTheList(t *testing.
 		mustNil(t, s.Store(ctx, k, []byte("v")))
 	}
 	calls := 0
-	beforeListChild = func(key string) {
+	s.hooks.beforeListChild = func(key string) {
 		if key == "d2" {
 			calls++
 			mustNil(t, os.RemoveAll(filepath.Join(dir, "acme/cache/d2")))
 		}
 	}
-	t.Cleanup(func() { beforeListChild = nil })
 	keys, err := s.List(ctx, "", true)
 	slices.Sort(keys)
 	if err != nil || !slices.Equal(keys, []string{"d1/a", "d3/c"}) {
@@ -621,17 +620,129 @@ func TestTS16ListSkipsAChildDirectoryThatADeleteRemovesDuringTheList(t *testing.
 	}
 }
 
-func TestTS16FailingHooksOfOneStoreDoNotFailAWriteOfAnotherStore(t *testing.T) {
-	a, _ := newStore(t)
-	b, _ := newStore(t)
+// openHooked opens a cache in a new state directory with hooks.
+func openHooked(t *testing.T, hooks storeHooks) *Store {
+	t.Helper()
+	state, err := os.OpenRoot(t.TempDir())
+	mustNil(t, err)
+	t.Cleanup(func() { state.Close() })
+	s, err := openWith(state, "acme/cache", hooks)
+	mustNil(t, err)
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestTS16AHookOfOneStoreIsNeverCalledByAnotherStore(t *testing.T) {
 	ctx := context.Background()
-	fail := func(*os.File) error { return errors.New(failText) }
-	a.hooks.syncFile = fail
-	a.hooks.syncDirFile = fail
-	a.hooks.renameFile = func(*os.Root, string, string) error { return errors.New(failText) }
-	mustNil(t, b.Store(ctx, "kd/key", []byte("v")))
-	if err := a.Store(ctx, "kd/key", []byte("v")); err == nil {
-		t.Error("Store with failing hooks gave no error")
+	// Each case sets one failing hook on store A. It counts the calls.
+	for _, c := range []struct {
+		name string
+		set  func(h *storeHooks, call func() error)
+	}{
+		{"syncFile", func(h *storeHooks, call func() error) {
+			real := h.syncFile
+			h.syncFile = func(f *os.File) error {
+				if err := call(); err != nil {
+					return err
+				}
+				return real(f)
+			}
+		}},
+		{"syncDirFile", func(h *storeHooks, call func() error) {
+			real := h.syncDirFile
+			h.syncDirFile = func(f *os.File) error {
+				if err := call(); err != nil {
+					return err
+				}
+				return real(f)
+			}
+		}},
+		{"renameFile", func(h *storeHooks, call func() error) {
+			real := h.renameFile
+			h.renameFile = func(r *os.Root, from, to string) error {
+				if err := call(); err != nil {
+					return err
+				}
+				return real(r, from, to)
+			}
+		}},
+	} {
+		for _, aFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/a first=%v", c.name, aFirst), func(t *testing.T) {
+				calls, armed := 0, false
+				ha := osHooks()
+				c.set(&ha, func() error {
+					if calls++; armed {
+						return errors.New(failText)
+					}
+					return nil
+				})
+				var a, b *Store
+				if aFirst {
+					a, b = openHooked(t, ha), openHooked(t, osHooks())
+				} else {
+					b, a = openHooked(t, osHooks()), openHooked(t, ha)
+				}
+				calls, armed = 0, true
+				mustNil(t, b.Store(ctx, "kd/key", []byte("v")))
+				mustNil(t, b.Delete(ctx, "kd/key"))
+				if calls != 0 {
+					t.Errorf("a write of store B called the hook of store A %d times", calls)
+				}
+				if err := a.Store(ctx, "kd/key", []byte("v")); err == nil || calls == 0 {
+					t.Errorf("Store of A = %v after %d calls of its hook; want an error", err, calls)
+				}
+				// A Store with a failing directory fsync has written the key. So the
+				// Delete of A calls the same fsync again.
+				if c.name == "syncDirFile" {
+					if err := a.Delete(ctx, "kd/key"); err == nil {
+						t.Error("Delete of A gave no error")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestTS16OpenRemovesATemporaryFileThroughTheHooksOfItsOwnStore(t *testing.T) {
+	first, second := 0, 0
+	count := func(n *int) storeHooks {
+		h := osHooks()
+		real := h.syncDirFile
+		h.syncDirFile = func(f *os.File) error { *n++; return real(f) }
+		return h
+	}
+	openHooked(t, count(&first))
+	first = 0
+	state, err := os.OpenRoot(t.TempDir())
+	mustNil(t, err)
+	t.Cleanup(func() { state.Close() })
+	cache := filepath.Join(state.Name(), "acme/cache")
+	mustNil(t, os.MkdirAll(cache, 0o700))
+	mustNil(t, os.WriteFile(filepath.Join(cache, tmpPrefix+"x"), nil, 0o600))
+	s, err := openWith(state, "acme/cache", count(&second))
+	mustNil(t, err)
+	s.Close()
+	// The walk calls fsync on three directories. The removal adds one call.
+	if first != 0 || second != 4 {
+		t.Errorf("fsync calls: first store %d, second store %d; want 0 and 4", first, second)
+	}
+}
+
+// The test pins the real functions, so that a no-op hook set cannot pass.
+func TestTS16OsHooksAreTheFunctionsOfTheOsPackage(t *testing.T) {
+	h := osHooks()
+	for _, c := range []struct {
+		name      string
+		got, want any
+	}{
+		{"syncFile", h.syncFile, (*os.File).Sync},
+		{"syncDirFile", h.syncDirFile, (*os.File).Sync},
+		{"renameFile", h.renameFile, (*os.Root).Rename},
+	} {
+		if reflect.ValueOf(c.got).Pointer() != reflect.ValueOf(c.want).Pointer() {
+			t.Errorf("%s is not the function of the os package", c.name)
+		}
 	}
 }
 

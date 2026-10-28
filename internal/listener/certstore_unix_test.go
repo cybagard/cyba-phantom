@@ -532,6 +532,7 @@ func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 	var realAcme, realCache fs.FileInfo
 	var steps []string
 	hooks := osHooks()
+	realSyncDir := hooks.syncDirFile
 	hooks.syncDirFile = func(f *os.File) error {
 		if realAcme == nil {
 			var err error
@@ -554,7 +555,7 @@ func TestTS16OpenCallsFsyncOnlyOnDirectoriesThatTheWalkOpened(t *testing.T) {
 			step = "state"
 		}
 		steps = append(steps, step)
-		return (*os.File).Sync(f)
+		return realSyncDir(f)
 	}
 	s, err := openWith(state, "acme/cache", hooks)
 	if err == nil {
@@ -620,10 +621,9 @@ func TestTS16LoadReadsAtMost64KiBPlusOneByteOfAFileThatGrowsBeforeTheRead(t *tes
 	// The file grows after the size checks of the open file and before the read.
 	// The size checks have passed, so only the read limit bounds the memory. The
 	// file is sparse, so the growth costs no disk.
-	betweenSizeCheckAndRead = func() {
+	s.hooks.betweenSizeCheckAndRead = func() {
 		mustNil(t, os.Truncate(filepath.Join(dir, "acme/cache/key"), 32<<20))
 	}
-	t.Cleanup(func() { betweenSizeCheckAndRead = nil })
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	b, err := s.Load(ctx, "key")
