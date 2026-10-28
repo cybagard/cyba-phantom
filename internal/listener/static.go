@@ -3,11 +3,13 @@
 // It opens no file. It does not serve, log or warn.
 // Each refusal is a fixed error. No error text holds a byte of a file,
 // a PEM type line, a library error text or a key.
+// CertSource (below) serves the result and warns about its expiry.
 
 package listener
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -16,7 +18,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"log/slog"
+	"slices"
+	"sync/atomic"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
 // ParseStatic returns these refusals. A caller tests them with errors.Is.
@@ -219,4 +226,174 @@ func matches(priv, pub any) bool {
 		return p.Equal(pub)
 	}
 	return false
+}
+
+// CertSource errors. They are fixed and hold no name, file text or key.
+var (
+	ErrSourceEntry   = errors.New("certificate source: an entry has no name or no parsed leaf")
+	ErrSourceDup     = errors.New("certificate source: a static name comes two times")
+	ErrSourceOverlap = errors.New("certificate source: a name is both a static name and an ACME name")
+	errStaticALPN    = errors.New("listener: static certificate: acme-tls/1 is not served for a static name")
+)
+
+const (
+	// expiryWarnWithin is the time left below which a leaf gets the warning.
+	expiryWarnWithin = 14 * 24 * time.Hour
+	// expiryWarnEvery is the time between two rounds of warnings.
+	expiryWarnEvery = 24 * time.Hour
+)
+
+// StaticEntry is one static certificate: the decoy name and the result of
+// ParseStatic for it (with Leaf set).
+type StaticEntry struct {
+	Name string
+	Cert tls.Certificate
+}
+
+// CertSource is the certificate source of the decoy listener. The decoy names
+// are its static names and the names of its ACME client. A static name gets its
+// stored certificate, with no call to the ACME client or its cache. It opens no
+// file.
+type CertSource struct {
+	static  map[string]*tls.Certificate
+	order   []string // static names, in the order of the entries
+	acme    *ACME    // nil when there is no ACME name
+	refused atomic.Uint64
+
+	// now and newTicker are test hooks. Only tests in this package set them.
+	// They are time.Now and a time.Ticker in production. No config key, flag or
+	// environment variable sets them.
+	now       func() time.Time
+	newTicker func(time.Duration) (<-chan time.Time, func())
+}
+
+// NewCertSource returns the source for entries and for acme.
+// The acme value is nil when there is no acme.names entry.
+// The source keeps its own copy of the entries.
+// It refuses an entry with no name or with no Leaf.
+// It refuses a static name that comes two times.
+// It refuses a static name that is also an ACME name.
+func NewCertSource(entries []StaticEntry, acme *ACME) (*CertSource, error) {
+	s := &CertSource{static: make(map[string]*tls.Certificate, len(entries)), acme: acme}
+	for _, e := range entries {
+		name, ok := normalizeServerName(e.Name)
+		if !ok || name == "" || e.Cert.Leaf == nil {
+			return nil, ErrSourceEntry
+		}
+		if _, dup := s.static[name]; dup {
+			return nil, ErrSourceDup
+		}
+		if acme != nil {
+			if _, both := acme.allowed[name]; both {
+				return nil, ErrSourceOverlap
+			}
+		}
+		c := e.Cert
+		c.Certificate = slices.Clone(c.Certificate)
+		s.static[name] = &c
+		s.order = append(s.order, name)
+	}
+	return s, nil
+}
+
+// Refused returns the number of handshakes that the source refused.
+// It counts the name gate refusals, the acme-tls/1 handshakes for a static
+// name, and the refusals of the ACME client.
+func (s *CertSource) Refused() uint64 {
+	n := s.refused.Load()
+	if s.acme != nil {
+		n += s.acme.Refused()
+	}
+	return n
+}
+
+// GetCertificate is the tls.Config.GetCertificate function of the decoy
+// listener.
+// A name that is not a decoy name gets a fixed error. It makes no storage
+// call, no request and no log line. It records the reason on the connection.
+// A static name gets its stored certificate at once, also after the leaf
+// expired.
+// A static name that negotiates acme-tls/1 fails and records no gate reason.
+// An ACME name goes to the ACME client.
+func (s *CertSource) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	name, ok := normalizeServerName(hello.ServerName)
+	if !ok {
+		return nil, s.refuseName(hello, event.ReasonUnknownName)
+	}
+	if cert, isStatic := s.static[name]; isStatic {
+		if negotiatesChallenge(hello) {
+			s.refused.Add(1)
+			return nil, errStaticALPN
+		}
+		return cert, nil
+	}
+	if s.acme != nil {
+		if _, isACME := s.acme.allowed[name]; isACME {
+			return s.acme.GetCertificate(hello)
+		}
+	}
+	reason := event.ReasonUnknownName
+	if hello.ServerName == "" {
+		reason = event.ReasonNoServerName
+	}
+	return nil, s.refuseName(hello, reason)
+}
+
+func (s *CertSource) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason) error {
+	s.refused.Add(1)
+	recordGate(hello, reason)
+	return errName
+}
+
+// WarnExpiry writes the expiry warnings to logger at once.
+// It writes them again each 24 hours until ctx ends.
+// A leaf with less than 14 days left gets one Warn line.
+// An expired leaf gets the same line.
+// The line has a fixed message and the attribute name.
+// The line holds no date, serial or file text.
+// WarnExpiry starts one goroutine.
+func (s *CertSource) WarnExpiry(ctx context.Context, logger *slog.Logger) {
+	s.warnExpiry(ctx, logger)
+}
+
+// warnExpiry is WarnExpiry. The channel that it returns closes when the
+// goroutine has ended.
+func (s *CertSource) warnExpiry(ctx context.Context, logger *slog.Logger) <-chan struct{} {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	now, newTicker := s.now, s.newTicker
+	if now == nil {
+		now = time.Now
+	}
+	if newTicker == nil {
+		newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTicker(d)
+			return t.C, t.Stop
+		}
+	}
+	s.warnOnce(logger, now())
+	tick, stop := newTicker(expiryWarnEvery)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick:
+				s.warnOnce(logger, now())
+			}
+		}
+	}()
+	return done
+}
+
+func (s *CertSource) warnOnce(logger *slog.Logger, now time.Time) {
+	for _, name := range s.order {
+		if s.static[name].Leaf.NotAfter.Sub(now) < expiryWarnWithin {
+			logger.Warn("static certificate expires in less than 14 days", "name", name)
+		}
+	}
 }
