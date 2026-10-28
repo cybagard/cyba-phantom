@@ -224,7 +224,67 @@ func crossCheck(root string, vals map[string]Value) []error {
 			fail("bundle.path", b, d)
 		}
 	}
+	return append(errs, privateCheck(vals)...)
+}
+
+// checkPrivateEntry checks one entry of a private list with the egress
+// entry rule (SEC-30). The detail holds no part of the entry.
+func checkPrivateEntry(_ *loader, raw string) string {
+	if _, err := egress.ParsePrivateEntry(raw); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// privateCheck checks that each non-empty private list has an item that
+// can use it. An empty list passes: it adds no address. The error names
+// the list key. A key that failed its own check is not in vals.
+func privateCheck(vals map[string]Value) []error {
+	var errs []error
+	refuse := func(list, detail string) {
+		first := vals[list+"[0]"]
+		errs = append(errs, &Error{Key: list, Source: first.Source, Line: first.Line, Detail: detail})
+	}
+	has := func(list string) bool { _, ok := vals[list+"[0]"]; return ok }
+	if u, ok := vals["bundle.fetch_url"]; ok && u.Str == "" && has("bundle.fetch_private") {
+		refuse("bundle.fetch_private", "the list needs a bundle.fetch_url that is not empty")
+	}
+	// A CA name such as letsencrypt is not an https URL.
+	if _, name := caDirectories[vals["acme.ca"].Str]; name && has("acme.ca_private") {
+		refuse("acme.ca_private", "the list needs an acme.ca that is an https URL")
+	}
+	for i := range maxSinks {
+		item := fmt.Sprintf("alerts.sinks[%d]", i)
+		addr, ok := vals[item+".addr"]
+		if !ok || !has(item+".private") {
+			continue
+		}
+		if e, d := syslogEndpoint(addr.Str); d == "" && e.Scheme != "tls" {
+			refuse(item+".private", "the list needs a syslog address with the scheme tls")
+		}
+	}
 	return errs
+}
+
+// PrivateList returns the parsed entries of one private list. The path
+// is a list key (for example acme.ca_private) or an item (for example
+// tlog.publish[1]). It never merges two lists. The result is a new slice.
+func (c *Config) PrivateList(path string) []netip.Prefix {
+	if strings.HasSuffix(path, "]") {
+		path += ".private"
+	}
+	var out []netip.Prefix
+	for i := 0; ; i++ {
+		v, ok := c.values[fmt.Sprintf("%s[%d]", path, i)]
+		if !ok {
+			return out
+		}
+		p, err := egress.ParsePrivateEntry(v.Str)
+		if err != nil {
+			return out
+		}
+		out = append(out, p)
+	}
 }
 
 // belowFloor checks that the value of key is not less than the value of floor.

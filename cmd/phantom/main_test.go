@@ -537,6 +537,60 @@ func TestTS11_CheckACME(t *testing.T) {
 	}
 }
 
+// TestTS26_CheckPrivateLists checks that --check applies the private list
+// rules. A refusal exits 1 and names the key of the entry. For a ninth
+// entry, a duplicate, or a list that its item cannot use, it names the
+// list. Stderr never holds the entry. A valid list passes (SEC-30, T-S-26,
+// T-S-11).
+func TestTS26_CheckPrivateLists(t *testing.T) {
+	body := validBody(t)
+	acme := func(list string) string {
+		return strings.Replace(body, "  names: [decoy.host.zz]\n", "  names: [decoy.host.zz]\n  ca_private: "+list+"\n", 1)
+	}
+	publish := func(list string) string {
+		return strings.Replace(body, "token_env: CKPT_TOKEN}", "token_env: CKPT_TOKEN, private: "+list+"}", 1)
+	}
+	bundle := func(url, list string) string {
+		return body + "bundle:\n" + url + "  fetch_private: " + list + "\n"
+	}
+	const nine = `[10.0.0.1, 10.0.0.2, 10.0.0.3, 10.0.0.4, 10.0.0.5, 10.0.0.6, 10.0.0.7, 10.0.0.8, 10.0.0.9]`
+	const fetch = "  fetch_url: \"https://bundle.example.invalid/x\"\n"
+	// The key is "" for a file that passes.
+	rows := []struct{ name, file, key string }{
+		{"acme list", acme(`["10.0.0.0/8", "fc00::/7"]`), ""},
+		{"acme empty list", acme(`[]`), ""},
+		{"acme host name", acme(`[corp.internal.zz]`), "acme.ca_private[0]"},
+		{"acme port", acme(`["10.0.0.1:443"]`), "acme.ca_private[0]"},
+		{"acme nine", acme(nine), "acme.ca_private"},
+		{"acme duplicate", acme(`[10.0.0.1, 10.0.0.1]`), "acme.ca_private"},
+		{"acme wide entry", acme(`["0.0.0.0/0"]`), "acme.ca_private[0]"},
+		{"publish list", publish(`["10.1.0.0/16"]`), ""},
+		{"publish metadata range", publish(`["169.254.0.0/16"]`), "tlog.publish[0].private[0]"},
+		{"publish nine", publish(nine), "tlog.publish[0].private"},
+		{"publish duplicate", publish(`[10.0.0.1, 10.0.0.1]`), "tlog.publish[0].private"},
+		{"bundle list", bundle(fetch, `[10.0.0.1]`), ""},
+		{"bundle no fetch_url", bundle("", `[10.0.0.1]`), "bundle.fetch_private"},
+		{"bundle bad entry", bundle(fetch, `["10.0.0.1/8"]`), "bundle.fetch_private[0]"},
+		{"udp sink list", body + "alerts:\n  sinks:\n    - {type: syslog, addr: \"udp://127.0.0.1:514\", private: [10.0.0.1]}\n", "alerts.sinks[0].private"},
+		{"tls sink list", body + "alerts:\n  sinks:\n    - {type: syslog, addr: \"tls://logs.example.invalid:6514\", private: [10.0.0.1]}\n", ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
+			var so, se strings.Builder
+			code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
+			switch {
+			case r.key == "" && (code != 0 || se.Len() != 0):
+				t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
+			case r.key != "" && (code != 1 || !strings.Contains(se.String(), "config: "+r.key+" at ")):
+				t.Errorf("exit %d, stderr %q; want exit 1 and a refusal that names %q", code, se.String(), r.key)
+			case strings.Contains(se.String(), "corp.internal.zz"):
+				t.Errorf("stderr %q holds the entry", se.String())
+			}
+		})
+	}
+}
+
 // TestTS11_CheckEmailMarks checks that --check refuses an acme.email, an smtp
 // from, and an smtp to. Each value holds one of the characters of
 // configtest.EmailMarks. The exit code is 1. Stderr names the key and

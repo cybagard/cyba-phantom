@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2309,5 +2310,203 @@ func TestTS11_ACMECacheDir(t *testing.T) {
 				t.Errorf("got %v, want an error on acme.cache_dir with %q", err, r.want)
 			}
 		})
+	}
+}
+
+const (
+	hmacVar    = "HMAC_KEY"
+	publishURL = `url: "https://ckpt.example/put", token_env: ` + tokenVar
+)
+
+// privateFile returns a config that puts list (a YAML flow list) in the
+// private list at key. The file meets the cross rules. For an alert sink,
+// kind is the sink type.
+func privateFile(key, kind, list string) string {
+	switch key {
+	case "acme.ca_private":
+		return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example/dir\"\n  ca_private: " + list + "\n" + acmeNames + tlogLine
+	case "bundle.fetch_private":
+		return base + "bundle:\n  fetch_url: \"https://bundle.example/x\"\n  fetch_private: " + list + "\n"
+	case "tlog.publish[0].private":
+		return "acme:\n  email: sec@example.com\n" + acmeNames +
+			"tlog: {origin: test/origin, publish: [{type: https-put, " + publishURL + ", private: " + list + "}]}\n"
+	}
+	sinks := map[string]string{
+		"webhook": `{type: webhook, url: "https://hook.example/x", hmac_secret_env: ` + hmacVar + ", private: " + list + "}",
+		"syslog":  `{type: syslog, addr: "tls://logs.example:6514", private: ` + list + "}",
+		"smtp":    `{type: smtp, host: "smtp://mail.example:587", from: a@example.com, to: [b@example.com], private: ` + list + "}",
+	}
+	return base + "alerts:\n  sinks:\n    - " + sinks[kind] + "\n"
+}
+
+// TestTS26_PrivateLoad checks the load rows of the four private list keys
+// and of each item type (SEC-30, T-S-26). The error
+// names the entry. For a ninth entry or a duplicate, it names the list.
+// It never holds the entry.
+func TestTS26_PrivateLoad(t *testing.T) {
+	hmac := hmacVar + "=" + strings.Repeat("h", 32)
+	targets := []struct{ name, key, kind string }{
+		{"acme.ca_private", "acme.ca_private", ""},
+		{"bundle.fetch_private", "bundle.fetch_private", ""},
+		{"tlog.publish", "tlog.publish[0].private", ""},
+		{"webhook", "alerts.sinks[0].private", "webhook"},
+		{"syslog", "alerts.sinks[0].private", "syslog"},
+		{"smtp", "alerts.sinks[0].private", "smtp"},
+	}
+	nine := `["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9"]`
+	rows := []struct {
+		name, list string
+		bad        string // bad is "", "list" or "entry".
+	}{
+		{"one address", `["10.1.2.3"]`, ""},
+		{"empty", `[]`, ""},
+		{"eight", strings.Replace(nine, `, "10.0.0.9"`, "", 1), ""},
+		{"each class", `["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7", "fd00::1"]`, ""},
+		{"nine", nine, "list"},
+		{"duplicate", `["10.0.0.1", "10.0.0.2", "10.0.0.1"]`, "list"},
+		{"host name", `["internal.corp.example"]`, "entry"},
+		{"port", `["10.0.0.1:443"]`, "entry"},
+		{"not a scalar", `[[a]]`, "entry"},
+	}
+	for _, e := range []string{"0.0.0.0/0", "::/0", "198.18.0.0/15", "192.0.2.1", "64:ff9b::/96", "2002::/16",
+		"fec0::/10", "::ffff:10.0.0.0/104", "fe80::1%eth0", "10.0.0.1/8", "127.0.0.1", "100.0.0.0/8"} {
+		rows = append(rows, struct{ name, list, bad string }{"entry " + e, `["` + e + `"]`, "entry"})
+	}
+	for _, tg := range targets {
+		for _, r := range rows {
+			t.Run(tg.name+"/"+r.name, func(t *testing.T) {
+				_, err := loadProd(t, privateFile(tg.key, tg.kind, r.list), hmac)
+				want := map[string]string{"": "", "list": tg.key, "entry": tg.key + "[0]"}[r.bad]
+				switch {
+				case r.bad == "" && err != nil:
+					t.Errorf("got %v", err)
+				case r.bad != "" && !hasKeyError(err, want):
+					t.Errorf("got %v, want an error on %s", err, want)
+				case r.bad != "" && strings.Contains(err.Error(), "internal.corp"):
+					t.Errorf("the error holds the entry: %v", err)
+				}
+			})
+		}
+	}
+	t.Run("absent in an item", func(t *testing.T) {
+		if _, err := loadProd(t, base); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("not a list", func(t *testing.T) {
+		_, err := loadProd(t, privateFile("tlog.publish[0].private", "", `"10.0.0.1"`))
+		if !hasKeyError(err, "tlog.publish[0].private") {
+			t.Errorf("got %v", err)
+		}
+	})
+	t.Run("smtp to stays 1 to 16 entries", func(t *testing.T) {
+		f := strings.Replace(privateFile("alerts.sinks[0].private", "smtp", "[]"), "to: [b@example.com]", "to: []", 1)
+		if _, err := loadProd(t, f); !hasKeyError(err, "alerts.sinks[0].to") {
+			t.Errorf("got %v", err)
+		}
+	})
+}
+
+// TestTS11_PrivateCross checks the rules that tie a private list to its
+// item. The list needs a fetch_url, an https acme.ca, or a tls syslog
+// address. An empty list passes, because it adds no address (SEC-30,
+// T-S-11).
+func TestTS11_PrivateCross(t *testing.T) {
+	acme := func(ca, list string) string {
+		if ca != "" {
+			ca = "  ca: " + ca + "\n"
+		}
+		return "acme:\n  email: sec@example.com\n" + ca + "  ca_private: " + list + "\n" + acmeNames + tlogLine
+	}
+	bundle := func(url, list string) string { return base + "bundle:\n" + url + "  fetch_private: " + list + "\n" }
+	sinks := func(addr0, addr1 string) string {
+		item := func(a string) string { return `    - {type: syslog, addr: "` + a + `", private: ["10.0.0.1"]}` + "\n" }
+		return base + "alerts:\n  sinks:\n" + item(addr0) + item(addr1)
+	}
+	const l = `["10.0.0.1"]`
+	rows := []struct{ name, file, want string }{
+		{"fetch_url empty", bundle(`  fetch_url: ""`+"\n", l), "bundle.fetch_private"},
+		{"fetch_url absent", bundle("", l), "bundle.fetch_private"},
+		{"fetch_url set", bundle("  fetch_url: \"https://bundle.example/x\"\n", l), ""},
+		{"empty list, fetch_url empty", bundle("", "[]"), ""},
+		{"ca default", acme("", l), "acme.ca_private"},
+		{"ca letsencrypt", acme("letsencrypt", l), "acme.ca_private"},
+		{"ca letsencrypt-staging", acme("letsencrypt-staging", l), "acme.ca_private"},
+		{"ca https URL", acme(`"https://ca.example/dir"`, l), ""},
+		{"empty list, letsencrypt", acme("letsencrypt", "[]"), ""},
+		{"udp sink", sinks("tls://logs.example:6514", "udp://127.0.0.1:514"), "alerts.sinks[1].private"},
+		{"tcp sink", sinks("tcp://127.0.0.1:514", "tls://logs.example:6514"), "alerts.sinks[0].private"},
+		{"tls sinks", sinks("tls://logs.example:6514", "tls://logs2.example:6514"), ""},
+		{"empty list, udp sink", strings.Replace(sinks("udp://127.0.0.1:514", "tls://logs.example:6514"), `private: ["10.0.0.1"]`, "private: []", 1), ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			_, err := loadProd(t, r.file)
+			switch {
+			case r.want == "" && err != nil:
+				t.Errorf("got %v", err)
+			case r.want != "" && !hasKeyError(err, r.want):
+				t.Errorf("got %v, want an error on %s", err, r.want)
+			case r.want != "" && strings.Count(err.Error(), "\n") != 0:
+				t.Errorf("got more than one error: %v", err)
+			}
+		})
+	}
+}
+
+// TestTS11_PrivateNoEnv checks that no private list has a PHANTOM_
+// override. The name for each list is an unknown variable (SEC-30,
+// T-S-11).
+func TestTS11_PrivateNoEnv(t *testing.T) {
+	for _, name := range []string{"PHANTOM_ACME_CA_PRIVATE", "PHANTOM_BUNDLE_FETCH_PRIVATE",
+		"PHANTOM_TLOG_PUBLISH_0_PRIVATE", "PHANTOM_ALERTS_SINKS_0_PRIVATE"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadProd(t, base, name+"=10.0.0.0/8")
+			if err == nil || !strings.Contains(err.Error(), name+": unknown PHANTOM variable") {
+				t.Errorf("got %v", err)
+			}
+		})
+	}
+}
+
+// TestTS26_PrivateListAccessor checks that PrivateList gives the entries of
+// one item only, and that the caller gets a copy (SEC-30, T-S-26).
+func TestTS26_PrivateListAccessor(t *testing.T) {
+	file := "acme:\n  email: sec@example.com\n  ca: \"https://ca.example/dir\"\n  ca_private: [\"10.0.0.0/8\", \"192.168.1.5\"]\n" + acmeNames +
+		"tlog: {origin: test/origin, publish: [\n" +
+		"  {type: https-put, " + publishURL + ", private: [\"172.16.0.0/12\"]},\n" +
+		"  {type: https-put, " + publishURL + ", private: [\"10.9.0.0/16\", \"fc00::1\"]},\n" +
+		"  {type: https-put, " + publishURL + "}]}\n"
+	c, err := loadProd(t, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfx := func(s ...string) []netip.Prefix {
+		var out []netip.Prefix
+		for _, e := range s {
+			out = append(out, netip.MustParsePrefix(e))
+		}
+		return out
+	}
+	for _, r := range []struct {
+		path string
+		want []netip.Prefix
+	}{
+		{"acme.ca_private", pfx("10.0.0.0/8", "192.168.1.5/32")},
+		{"tlog.publish[0]", pfx("172.16.0.0/12")},
+		{"tlog.publish[1]", pfx("10.9.0.0/16", "fc00::1/128")},
+		{"tlog.publish[2]", nil},
+		{"tlog.publish[3]", nil},
+		{"bundle.fetch_private", nil},
+		{"acme.names", nil},
+	} {
+		if got := c.PrivateList(r.path); !slices.Equal(got, r.want) {
+			t.Errorf("PrivateList(%q) = %v, want %v", r.path, got, r.want)
+		}
+	}
+	got := c.PrivateList("tlog.publish[1]")
+	got[0] = netip.Prefix{}
+	if again := c.PrivateList("tlog.publish[1]"); !slices.Equal(again, pfx("10.9.0.0/16", "fc00::1/128")) {
+		t.Errorf("a change of the result changed the config: %v", again)
 	}
 }

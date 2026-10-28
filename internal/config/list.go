@@ -26,8 +26,26 @@ type listKey struct {
 // acme.names, tls.certs and the two lists in total.
 const maxDecoyNames = 16
 
+// maxPrivate is the maximum number of entries in one private list.
+// maxSinks is the maximum number of alert sinks.
+const (
+	maxPrivate = 8
+	maxSinks   = 8
+)
+
+// privateEntry is the key of one entry of a private list (SEC-30). Its kind
+// keeps the entry text out of an error.
+var privateEntry = key{kind: kindURL, check: checkPrivateEntry}
+
+// privateList is the optional list of one item. It may be absent or empty.
+var privateList = key{path: "private", kind: kindURL, maxItems: maxPrivate, optList: true, unique: true, check: checkPrivateEntry}
+
 // lists is the production list table. The key table holds the scalar keys.
 var lists = []listKey{
+	// The private lists have no PHANTOM_ override, like each list key.
+	// privateCheck refuses a list that its item cannot use.
+	{path: "acme.ca_private", min: 0, max: maxPrivate, unique: true, item: &privateEntry},
+	{path: "bundle.fetch_private", min: 0, max: maxPrivate, unique: true, item: &privateEntry},
 	// An acme.names entry may be an internal name. decoyCheck refuses
 	// it unless acme.ca is an https URL.
 	{path: "acme.names", min: 0, max: maxDecoyNames, unique: true, item: &key{kind: kindString, check: checkDecoyName}},
@@ -40,20 +58,24 @@ var lists = []listKey{
 		"https-put": {
 			{path: "url", kind: kindURL, req: true, check: checkHTTPS},
 			{path: "token_env", kind: kindString, req: true, secret: true, check: checkSecretEnv(1)},
+			privateList,
 		},
 	}},
-	{path: "alerts.sinks", min: 0, max: 8, schemas: map[string][]key{
+	{path: "alerts.sinks", min: 0, max: maxSinks, schemas: map[string][]key{
 		"webhook": {
 			{path: "url", kind: kindURL, req: true, check: checkHTTPS, endpoint: urlEndpoint},
 			{path: "hmac_secret_env", kind: kindString, req: true, secret: true, check: checkSecretEnv(32)}, // SEC-06
+			privateList,
 		},
 		"syslog": {
 			{path: "addr", kind: kindURL, req: true, check: checkSyslogAddr, endpoint: syslogEndpoint},
+			privateList,
 		},
 		"smtp": {
 			{path: "host", kind: kindString, req: true, check: checkSMTPHost, endpoint: smtpEndpoint},
 			{path: "from", kind: kindString, req: true, check: checkEmail},
 			{path: "to", kind: kindString, req: true, maxItems: 16, check: checkEmail},
+			privateList,
 		},
 	}},
 }
@@ -177,23 +199,35 @@ func expandItem(doc *Doc, file string, l listKey, ip string) (out []key, errs []
 	for _, f := range schema {
 		f.path = ip + "." + f.path
 		_, present := doc.Lines[f.path]
+		lo := 1
+		if f.optList {
+			lo = 0
+		}
 		switch {
+		case f.maxItems > 0 && !present && f.optList: // Valid: no list.
 		case f.maxItems > 0 && !present:
 			errs = append(errs, &Error{Key: f.path, Source: file, Line: doc.Lines[ip], Detail: "the key is required"})
 		case f.maxItems > 0 && !doc.Sequences[f.path]:
 			fail(f.path, "the key needs a list")
 		case f.maxItems > 0:
 			n := count(doc, f.path)
-			if n < 1 || n > f.maxItems {
-				fail(f.path, "the list needs 1 to "+strconv.Itoa(f.maxItems)+" entries")
+			if n < lo || n > f.maxItems {
+				fail(f.path, "the list needs "+strconv.Itoa(lo)+" to "+strconv.Itoa(f.maxItems)+" entries")
 				continue
 			}
+			seen := make(map[string]int, n)
 			for j := range n {
 				e := f
 				e.path, e.req, e.maxItems = fmt.Sprintf("%s[%d]", f.path, j), false, 0
-				if !isScalar(doc, e.path) {
+				leaf, ok := doc.Leaves[e.path]
+				if !ok {
 					fail(e.path, "the key needs a scalar value")
 					continue
+				}
+				seen[leaf.Value]++
+				// The error is for the second copy of a value only.
+				if f.unique && seen[leaf.Value] == 2 {
+					fail(f.path, "the list must not hold an entry two times")
 				}
 				out = append(out, e)
 			}

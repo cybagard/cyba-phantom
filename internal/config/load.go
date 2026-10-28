@@ -52,6 +52,10 @@ type key struct {
 	// maxItems > 0 marks a key in a list item that holds 1 to maxItems
 	// scalars in a list.
 	maxItems int
+	// optList marks a list in an item that may be absent or empty.
+	optList bool
+	// unique marks a list in an item with no duplicate entry.
+	unique bool
 	// check returns a fixed detail if a parsed value breaks a rule, or "".
 	check func(l *loader, raw string) string
 	// endpoint, if set, parses the value as an outbound endpoint for AllowList.
