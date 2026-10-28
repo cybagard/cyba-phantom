@@ -164,6 +164,13 @@ type pubEnv struct {
 // gives the delay with no change.
 func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ...publishOption) *pubEnv {
 	t.Helper()
+	return newPubLists(t, interval, targets, nil, opts...)
+}
+
+// newPubLists is newPub with the private list of each target. lists may be nil
+// or shorter than targets; a target with no entry has no list.
+func newPubLists(t *testing.T, interval time.Duration, targets []*fakeTarget, lists [][]netip.Prefix, opts ...publishOption) *pubEnv {
+	t.Helper()
 	root, dir := newState(t)
 	if os.Getenv(tokenVar) == "" { // the constructor needs a token
 		t.Setenv(tokenVar, tokenMarker)
@@ -173,14 +180,18 @@ func newPub(t *testing.T, interval time.Duration, targets []*fakeTarget, opts ..
 	pool := x509.NewCertPool()
 	e := &pubEnv{dir: dir, signer: signer, logs: buf, clock: &fakeClock{time.Unix(1_700_000_000, 0)}}
 	var pt []PublishTarget
-	for _, f := range targets {
+	for i, f := range targets {
 		pool.AddCert(f.Certificate())
 		e.urls = append(e.urls, f.url())
 		addr := f.Listener.Addr().String()
 		host, port, err := net.SplitHostPort(addr)
 		must(t, err)
 		e.dialed = append(e.dialed, addr, host, port)
-		pt = append(pt, PublishTarget{f.url(), tokenVar})
+		var list []netip.Prefix
+		if i < len(lists) {
+			list = lists[i]
+		}
+		pt = append(pt, PublishTarget{URL: f.url(), TokenEnv: tokenVar, Private: list})
 	}
 	var err error
 	e.spool, err = OpenSpool(root, lg, testOrigin, verifier, e.urls)
@@ -652,16 +663,16 @@ func TestTS13_FailedTargetWaitsForTheFloor(t *testing.T) {
 func TestTI09_Limits(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})
-	p, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}}, time.Minute, nil)
+	p, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}}, time.Minute, nil)
 	must(t, err)
-	tr := p.client.Transport.(*http.Transport)
+	tr := p.clients[0].Transport.(*http.Transport)
 	if p.timeout != 30*time.Second || tr.TLSHandshakeTimeout != 10*time.Second || tr.ResponseHeaderTimeout != 10*time.Second || tr.MaxIdleConnsPerHost != 1 {
 		t.Fatalf("limits: %v %v %v %v", p.timeout, tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout, tr.MaxIdleConnsPerHost)
 	}
 	if tr.IdleConnTimeout != 90*time.Second || tr.MaxResponseHeaderBytes != 16<<10 {
 		t.Fatalf("limits: idle timeout %v, header bytes %d, want 90 s and 16 KiB", tr.IdleConnTimeout, tr.MaxResponseHeaderBytes)
 	}
-	if tr.Proxy != nil || p.client.CheckRedirect == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
+	if tr.Proxy != nil || p.clients[0].CheckRedirect == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
 		tr.TLSClientConfig.InsecureSkipVerify || tr.TLSClientConfig.RootCAs != nil {
 		t.Fatal("the transport must have no proxy, no redirect, verified TLS 1.2 or later, and the system roots")
 	}
@@ -676,14 +687,14 @@ func TestTI09_NewPublisherRefusesBadInput(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})
 	for _, interval := range []time.Duration{0, -time.Minute} {
-		if _, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}}, interval, nil); err == nil {
+		if _, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}}, interval, nil); err == nil {
 			t.Errorf("interval %v: want an error", interval)
 		}
 	}
 	const unsetVar, emptyVar = "TLOG_TEST_PUBLISH_NOT_SET", "TLOG_TEST_PUBLISH_EMPTY"
 	t.Setenv(emptyVar, "")
 	for _, name := range []string{unsetVar, emptyVar} {
-		_, err := NewPublisher(e.spool, []PublishTarget{{a.url(), name}}, time.Minute, nil)
+		_, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: name}}, time.Minute, nil)
 		if err == nil {
 			t.Fatalf("token variable %s: want an error", name)
 		}
@@ -703,7 +714,7 @@ func TestTI09_NewPublisherRefusesBadInput(t *testing.T) {
 func TestTS13_NewPublisherIntervalFloor(t *testing.T) {
 	a := newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a})
-	targets := []PublishTarget{{a.url(), tokenVar}}
+	targets := []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}}
 	for _, interval := range []time.Duration{time.Nanosecond, backoffStart - time.Second, backoffStart - time.Nanosecond} {
 		if _, err := NewPublisher(e.spool, targets, interval, nil); err == nil {
 			t.Errorf("interval %v: want an error", interval)
@@ -731,7 +742,7 @@ func TestTS13_NewPublisherRefusesDuplicateURLs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var targets []PublishTarget
 			for _, u := range urls {
-				targets = append(targets, PublishTarget{u, tokenVar})
+				targets = append(targets, PublishTarget{URL: u, TokenEnv: tokenVar})
 			}
 			spool, err := OpenSpool(root, nil, testOrigin, verifier, urls)
 			must(t, err)
@@ -742,7 +753,7 @@ func TestTS13_NewPublisherRefusesDuplicateURLs(t *testing.T) {
 			e.assertClean(t, "error", err.Error())
 		})
 	}
-	_, err := NewPublisher(e.spool, []PublishTarget{{a.url(), tokenVar}, {b.url(), tokenVar}}, time.Minute, nil)
+	_, err := NewPublisher(e.spool, []PublishTarget{{URL: a.url(), TokenEnv: tokenVar}, {URL: b.url(), TokenEnv: tokenVar}}, time.Minute, nil)
 	must(t, err) // two different URLs are not a duplicate
 }
 
