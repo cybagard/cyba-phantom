@@ -342,7 +342,7 @@ func TestTS23_PathParents(t *testing.T) {
 		t.Fatalf("the checkout must be below directories with no group or other "+
 			"write bit: %v", err)
 	}
-	top, err := os.MkdirTemp(wd, "parents")
+	top, err := os.MkdirTemp(wd, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}

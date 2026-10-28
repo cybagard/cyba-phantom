@@ -518,7 +518,7 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	// so the child makes its files in tmp, and the parent removes tmp.
 	tmp := t.TempDir()
 	// The htpasswd file of the child is below the package directory.
-	fixtures, err := os.MkdirTemp(pkgDir, "tmp-")
+	fixtures, err := os.MkdirTemp(pkgDir, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}
