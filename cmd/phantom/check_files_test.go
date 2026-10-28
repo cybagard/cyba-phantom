@@ -7,6 +7,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 // fixtureDir makes a private directory below the package directory.
@@ -89,20 +92,60 @@ func TestTS27_CheckFileRules(t *testing.T) {
 		{"key file FIFO", withCert(goodCert, fifo), key, "the key file is not a regular file"},
 		{"key file below a 0777 directory", withCert(goodCert, inOpen), key, "a directory of the key file is writable by group or other, or its owner is not root or the sensor user"},
 	}
+	// A symlink to a file of another owner. The hook makes the check see
+	// the target as a file of another owner. The rows run as any user.
+	// A control row has the same symlink and no hook. A row then fails only
+	// by the owner rule. One hook set is active at a time. These rows do
+	// not run in parallel.
+	link := func(name, target string) string {
+		p := filepath.Join(d, name)
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	rootTarget, certTarget, keyTarget := writeFixture(t, d, "r-target", 0o644), writeFixture(t, d, "c-target", 0o644), writeFixture(t, d, "k-target", 0o600)
+	rootLink, certLink, keyLink := link("r-link", rootTarget), link("c-link", certTarget), link("k-link", keyTarget)
+	ownerRows := []struct{ name, file, target, key, detail string }{
+		{"root symlink to a file of another owner", withRoot(rootLink), rootTarget, root, "the owner of the CA root file is not root or the sensor user"},
+		{"cert symlink to a file of another owner", withCert(certLink, goodKey), certTarget, cert, "the owner of the certificate file is not root or the sensor user"},
+		{"key symlink to a file of another owner", withCert(goodCert, keyLink), keyTarget, key, "the owner of the key file is not root or the sensor user"},
+		{"root symlink, same owner", withRoot(rootLink), "", "", ""},
+		{"cert symlink, same owner", withCert(certLink, goodKey), "", "", ""},
+		{"key symlink, same owner", withCert(goodCert, keyLink), "", "", ""},
+	}
+	check := func(t *testing.T, file, key, detail string) {
+		t.Helper()
+		env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
+		var so, se strings.Builder
+		code := run([]string{"--check", writeFile(t, file)}, env, &so, &se)
+		if key == "" {
+			if code != 0 || se.Len() != 0 {
+				t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
+			}
+			return
+		}
+		if code != 1 || !strings.Contains(se.String(), key+" at ") || !strings.Contains(se.String(), detail) {
+			t.Errorf("exit %d, stderr %q; want exit 1, the key %q and %q", code, se.String(), key, detail)
+		}
+	}
 	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) { check(t, r.file, r.key, r.detail) })
+	}
+	for _, r := range ownerRows {
 		t.Run(r.name, func(t *testing.T) {
-			env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}
-			var so, se strings.Builder
-			code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se)
-			if r.key == "" {
-				if code != 0 || se.Len() != 0 {
-					t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
+			if r.target != "" {
+				fi, err := os.Stat(r.target)
+				if err != nil {
+					t.Fatal(err)
 				}
-				return
+				id, ok := safefile.Identity(fi)
+				if !ok {
+					t.Fatal("no identity")
+				}
+				safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(got safefile.FileID) bool { return got == id }})
 			}
-			if code != 1 || !strings.Contains(se.String(), r.key+" at ") || !strings.Contains(se.String(), r.detail) {
-				t.Errorf("exit %d, stderr %q; want exit 1, the key %q and %q", code, se.String(), r.key, r.detail)
-			}
+			check(t, r.file, r.key, r.detail)
 		})
 	}
 }
