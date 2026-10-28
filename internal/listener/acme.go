@@ -450,21 +450,12 @@ func portOf(u *url.URL) string {
 // certmagic looks up the token file, and the storage refuses that key with no
 // read.
 func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	// ToLower maps U+212A KELVIN SIGN to "k". The loop refuses each byte of 0x80
-	// or more first, so ToLower changes only ASCII letters.
-	name := hello.ServerName
-	for i := 0; i < len(name); i++ {
-		if name[i] >= 0x80 {
-			return nil, a.refuseName(hello, event.ReasonUnknownName)
-		}
+	name, ok := normalizeServerName(hello.ServerName)
+	if !ok {
+		return nil, a.refuseName(hello, event.ReasonUnknownName)
 	}
-	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	if _, ok := a.allowed[name]; !ok {
-		reason := event.ReasonUnknownName
-		if hello.ServerName == "" {
-			reason = event.ReasonNoServerName
-		}
-		return nil, a.refuseName(hello, reason)
+		return nil, a.refuseName(hello, gateReason(hello.ServerName))
 	}
 	if onlyChallenge(hello) {
 		if _, active := a.challenge(name); !active {
@@ -477,6 +468,21 @@ func (a *ACME) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 	return a.cfg.GetCertificate(&h)
 }
 
+// normalizeServerName returns the form of a server name that the name gate
+// compares: lower case, with one trailing dot removed. It returns false for a
+// name with a byte of 0x80 or more.
+// ToLower maps U+212A KELVIN SIGN to "k".
+// The loop refuses each such byte first, so ToLower changes only ASCII
+// letters.
+func normalizeServerName(name string) (string, bool) {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 0x80 {
+			return "", false
+		}
+	}
+	return strings.TrimSuffix(strings.ToLower(name), "."), true
+}
+
 // onlyChallenge tells if the ALPN list of hello is exactly acme-tls/1.
 func onlyChallenge(hello *tls.ClientHelloInfo) bool {
 	return len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == challengeProto
@@ -486,10 +492,25 @@ func onlyChallenge(hello *tls.ClientHelloInfo) bool {
 // connection of hello, if the hello has a context.
 func (a *ACME) refuseName(hello *tls.ClientHelloInfo, reason event.RefusedReason) error {
 	a.refused.Add(1)
+	recordGate(hello, reason)
+	return errName
+}
+
+// gateReason is the reason of a name gate refusal: no_server_name for an empty
+// server name, else unknown_name.
+func gateReason(serverName string) event.RefusedReason {
+	if serverName == "" {
+		return event.ReasonNoServerName
+	}
+	return event.ReasonUnknownName
+}
+
+// recordGate records the reason of a name gate refusal on the connection of
+// hello, if the hello has a context.
+func recordGate(hello *tls.ClientHelloInfo, reason event.RefusedReason) {
 	if lc := helloConn(hello); lc != nil {
 		lc.setGate(reason)
 	}
-	return errName
 }
 
 // Refused returns the number of handshakes that GetCertificate refused: the
