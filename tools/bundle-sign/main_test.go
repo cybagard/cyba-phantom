@@ -43,7 +43,7 @@ func runFail(t *testing.T, want int, err error, args ...string) {
 // temporary directory can have the sticky bit and mode 1777.
 func tempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp(".", "tmp-")
+	dir, err := os.MkdirTemp(".", "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}

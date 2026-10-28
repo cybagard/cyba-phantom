@@ -79,7 +79,7 @@ func validBody(t *testing.T) string {
 	if d := os.Getenv(fixtureDirEnv); d != "" {
 		base = d
 	}
-	d, err := os.MkdirTemp(base, "tmp-")
+	d, err := os.MkdirTemp(base, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestTS10_CheckFileRules(t *testing.T) {
 		}
 	})
 	t.Run("htpasswd file below a 0777 directory", func(t *testing.T) {
-		d, err := os.MkdirTemp(pkgDir, "tmp-")
+		d, err := os.MkdirTemp(pkgDir, "_tmp-")
 		if err != nil {
 			t.Fatal(err)
 		}

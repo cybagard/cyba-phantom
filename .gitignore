@@ -1,11 +1,11 @@
 # build artifacts
 /bin/
 cover*.out
-internal/safefile/parents*/
-tools/bundle-sign/tmp-*/
+internal/safefile/_tmp-*/
+tools/bundle-sign/_tmp-*/
 internal/config/config-test-*/
-internal/config/tmp-*/
-cmd/phantom/tmp-*/
+internal/config/_tmp-*/
+cmd/phantom/_tmp-*/
 
 # dev tooling storage
 .kilo/

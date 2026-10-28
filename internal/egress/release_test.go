@@ -697,6 +697,7 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		filepath.Join(root, "internal", "zz", ".real"),
 		filepath.Join(root, "internal", "zz", "ok"),
 		filepath.Join(root, "internal", "zz", "testdata", "x"),
+		filepath.Join(root, "internal", "zz", "_tmp-1"),
 		outside,
 	} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -708,6 +709,9 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		"zzlink": filepath.Join("zz", ".real"),
 		"zzfine": filepath.Join("zz", "ok"),
 		"zzout":  outside,
+		// The planted link is below a folder that scan ignores.
+		filepath.Join("zz", "_tmp-1", "l"): filepath.Join("..", "..", "egress", "egresstest"),
+		"zztmp":                            filepath.Join("zz", "_tmp-1", "l"),
 	} {
 		if err := os.Symlink(target, filepath.Join(root, "internal", name)); err != nil {
 			t.Fatal(err)
@@ -734,6 +738,8 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		{"link to a folder with no problem", listedDep{modPath + "/internal/zzfine", in("internal/zzfine"), modPath, "", ""}, false},
 		{"link to the test seam", listedDep{modPath + "/internal/zzseam", in("internal/zzseam"), modPath, "", ""}, true},
 		{"link to a dot folder", listedDep{modPath + "/internal/zzlink", in("internal/zzlink"), modPath, "", ""}, true},
+		{"planted link below a fixture folder", listedDep{modPath + "/internal/zz/_tmp-1/l", in("internal/zz/_tmp-1/l"), modPath, "", ""}, true},
+		{"link to a planted link below a fixture folder", listedDep{modPath + "/internal/zztmp", in("internal/zztmp"), modPath, "", ""}, true},
 		{"link out of the root", listedDep{modPath + "/internal/zzout", in("internal/zzout"), modPath, "", ""}, true},
 		{"upper-case test seam path", listedDep{modPath + "/internal/EGRESS/egresstest", in("internal/zz/ok"), modPath, "", ""}, true},
 		{"mixed-case test seam path", listedDep{modPath + "/internal/Egress/egresstest", in("internal/zz/ok"), modPath, "", ""}, true},
@@ -768,6 +774,12 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 			"its module example.org/lib has a replace"},
 		"module path with no module": {noModule,
 			"it has no module, and its path is in this module"},
+		"planted link below a fixture folder": {
+			listedDep{modPath + "/internal/zz/_tmp-1/l", in("internal/zz/_tmp-1/l"), modPath, "", ""},
+			"its path has the element _tmp-1"},
+		"link to a planted link below a fixture folder": {
+			listedDep{modPath + "/internal/zztmp", in("internal/zztmp"), modPath, "", ""},
+			"its real path is " + modPath + "/internal/egress/egresstest: it is below internal/egress"},
 	} {
 		if why := depProblem(realRoot, tc.d); why != tc.want {
 			t.Errorf("%s: reason %q, want %q", name, why, tc.want)
@@ -1022,25 +1034,44 @@ func walkError(root, p string, err error) error {
 	return err
 }
 
-// skippedDir tells if rel is in a folder that scan skips. The path rel is below
-// the scan root. A skipped folder is testdata or starts with "." or "_".
-func skippedDir(rel string) bool {
+// inDirMatching tells if a folder of rel has a name that match accepts. The
+// last element of rel is the entry itself, so it does not count.
+func inDirMatching(rel string, match func(name string) bool) bool {
 	dir := path.Dir(rel)
 	if dir == "." {
 		return false
 	}
-	return slices.ContainsFunc(strings.Split(dir, "/"), func(el string) bool {
+	return slices.ContainsFunc(strings.Split(dir, "/"), match)
+}
+
+// skippedDir tells if rel is in a folder that scan skips. The path rel is below
+// the scan root. A skipped folder is testdata or starts with "." or "_".
+func skippedDir(rel string) bool {
+	return inDirMatching(rel, func(el string) bool {
 		return el == "testdata" || strings.HasPrefix(el, ".") || strings.HasPrefix(el, "_")
 	})
 }
 
+// fixtureDirPrefix starts the name of a temporary folder that other tests make
+// below their package folder. The folder name has only digits after the prefix.
+const fixtureDirPrefix = "_tmp-"
+
+// inFixtureDir tells if a folder of rel is a test fixture folder. The name of
+// the folder is fixtureDirPrefix and one or more ASCII digits.
+func inFixtureDir(rel string) bool {
+	return inDirMatching(rel, func(el string) bool {
+		digits, ok := strings.CutPrefix(el, fixtureDirPrefix)
+		return ok && digits != "" && strings.Trim(digits, "0123456789") == ""
+	})
+}
+
 // scan parses the .go files below root and gives the findings, with paths
-// relative to root. It finds each symbolic link below root. It skips test
-// files and files in testdata and in folders that start with "." or "_". The
-// dependency test covers an import of a skipped folder, a symlink and a
-// replace. When allowed is not nil, scan finds each import from outside the
-// module that is not in allowed. It also gives the set of all imports from
-// outside the module.
+// relative to root. It finds each symbolic link below root, but not a link
+// below a fixture folder. It skips test files and files in testdata and in
+// folders that start with "." or "_". The dependency test covers an import of
+// a skipped folder, a symlink and a replace. When allowed is not nil, scan
+// finds each import from outside the module that is not in allowed. It also
+// gives the set of all imports from outside the module.
 func scan(root string, allowed map[string]bool) ([]finding, map[string]bool, error) {
 	return scanWith(root, allowed, filepath.WalkDir)
 }
@@ -1075,6 +1106,9 @@ func scanWith(root string, allowed map[string]bool,
 		rel = filepath.ToSlash(rel)
 		name := d.Name()
 		if p != root && d.Type()&fs.ModeSymlink != 0 {
+			if inFixtureDir(rel) {
+				return nil
+			}
 			out = append(out, finding{File: rel, Line: 1, Form: "symbolic link"})
 			return nil
 		}
@@ -1783,6 +1817,66 @@ func TestTS21ScanFindsSymlinks(t *testing.T) {
 		gotText = append(gotText, f.String())
 	}
 	slices.Sort(want)
+	slices.Sort(gotText)
+	if !slices.Equal(gotText, want) {
+		t.Errorf("found %q, want %q", gotText, want)
+	}
+}
+
+// TestTS21ScanFixtureDirSymlinks checks that scan ignores a symbolic link only
+// below a folder named "_tmp-" and digits. A link named like that folder is a
+// finding. A link to that folder is a finding.
+func TestTS21ScanFixtureDirSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{
+		"sub", "_tmp-1/a", "_tmp-12", "_tmp-x", "_tmp-", "tmp-1", "_tmp-1x", "x_tmp-1",
+		"_tmp-\U00000661", "_tmp-\U0000ff11", "pkg/_tmp-1",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each target is relative to the folder of the link.
+	for link, target := range map[string]string{
+		"_tmp-1/l":          "../sub",
+		"_tmp-1/a/link":     "../../sub",
+		"_tmp-12/l":         "../sub",
+		"_tmp-x/l":          "../sub",
+		"_tmp-/l":           "../sub",
+		"tmp-1/l":           "../sub",
+		"_tmp-1x/l":         "../sub",
+		"x_tmp-1/l":         "../sub",
+		"_tmp-\U00000661/l": "../sub",
+		"_tmp-\U0000ff11/l": "../sub",
+		"pkg/_tmp-1/l":      "../../sub",
+		"sub/_tmp-1":        "..",
+		"sub/to_fixture":    "../_tmp-1",
+		"sub/to_fixture2":   "../_tmp-1/a/link",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{
+		"_tmp-/l:1: symbolic link",
+		"_tmp-1x/l:1: symbolic link",
+		"_tmp-x/l:1: symbolic link",
+		"_tmp-\U00000661/l:1: symbolic link",
+		"_tmp-\U0000ff11/l:1: symbolic link",
+		"sub/_tmp-1:1: symbolic link",
+		"sub/to_fixture2:1: symbolic link",
+		"sub/to_fixture:1: symbolic link",
+		"tmp-1/l:1: symbolic link",
+		"x_tmp-1/l:1: symbolic link",
+	}
+	got, _, err := scan(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotText []string
+	for _, f := range got {
+		gotText = append(gotText, f.String())
+	}
 	slices.Sort(gotText)
 	if !slices.Equal(gotText, want) {
 		t.Errorf("found %q, want %q", gotText, want)

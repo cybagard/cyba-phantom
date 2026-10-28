@@ -548,7 +548,7 @@ var pkgDir = func() string {
 // root.
 func pkgTempDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp(pkgDir, "tmp-")
+	d, err := os.MkdirTemp(pkgDir, "_tmp-")
 	if err != nil {
 		t.Fatal(err)
 	}
