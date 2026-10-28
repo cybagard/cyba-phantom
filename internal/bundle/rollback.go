@@ -24,8 +24,9 @@ func NewRollback(root *os.Root) *Rollback { return &Rollback{root: root} }
 // Check accepts the bundle whose SHA-256 equals the version state, also after
 // the expiry time of its manifest. Then expired is true. A lower version gives
 // ErrRollback. So do the same version with another SHA-256, and a reference
-// bundle after a proprietary one. Check accepts the same SHA-256 again. Check
-// writes nothing.
+// bundle after a proprietary one. A version that validVersion refuses gives an
+// error when a state with another SHA-256 exists. Check accepts the same
+// SHA-256 again. Check writes nothing.
 func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, start bool) (expired bool, err error) {
 	st, err := readState(r.root)
 	if err != nil {
@@ -41,14 +42,15 @@ func (r *Rollback) Check(m *Manifest, sum [32]byte, class Class, now time.Time, 
 }
 
 // errStateInput is the error for a version or a class that the state cannot
-// hold. A manifest from ParseManifest has a valid version, so only a Manifest
-// that code builds by hand can cause it.
+// hold. A Manifest that code builds by hand can cause it. So can a class that
+// is not in classText.
 var errStateInput = errors.New("bundle: version or class not valid for the state")
 
 // Record stores an accepted bundle as the version state. The loader calls it
-// before the swap. A bundle with the SHA-256 of the state causes no write.
-// A state fault or a rollback gives an error and no write. So does a version
-// or class that readState would refuse.
+// before the swap. A state fault or a rollback gives an error and no write.
+// A version or class that readState refuses gives an error and no write too.
+// This holds also for the SHA-256 of the state. Then a valid bundle causes
+// no write.
 func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	st, err := readState(r.root)
 	if err != nil {
@@ -57,11 +59,11 @@ func (r *Rollback) Record(m *Manifest, sum [32]byte, class Class) error {
 	if err := st.allows(m.Version, sum, class); err != nil {
 		return err
 	}
-	if st != nil && st.SHA256 == sum {
-		return nil
-	}
 	if !validVersion(m.Version) || classText[class] == "" {
 		return errStateInput
+	}
+	if st != nil && st.SHA256 == sum {
+		return nil
 	}
 	return writeState(r.root, state{Version: m.Version, SHA256: sum, Class: class})
 }

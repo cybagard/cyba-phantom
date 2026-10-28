@@ -88,8 +88,8 @@ func writeState(root *os.Root, st state) error {
 	return writeFile(root, StateName, fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
 }
 
-// tempFile is the part of the temporary file that writeFile uses after the
-// create.
+// tempFile is the part of the temporary file that writeFile uses after it
+// creates that file.
 type tempFile interface {
 	Write([]byte) (int, error)
 	Sync() error

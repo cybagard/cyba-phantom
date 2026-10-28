@@ -124,7 +124,10 @@ func TestTS20StateFault(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, _ := safefile.Identity(fi)
+		id, ok := safefile.Identity(fi)
+		if !ok {
+			t.Skip("this platform gives no file identity")
+		}
 		safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
 		wantFault(t, r, dir, snapshot(t, dir))
 	})
@@ -241,8 +244,8 @@ func (w faultyTemp) Close() error {
 	return err
 }
 
-// T-S-20: a write can fail after the create. Then it gives an error, leaves
-// no temporary file, and keeps the old state file.
+// T-S-20: a write can fail after writeFile creates the temporary file. Then
+// Record gives an error, leaves no temporary file, and keeps the old state.
 func TestTS20WriteFileFailsAfterCreate(t *testing.T) {
 	for _, step := range []string{"write", "sync", "close"} {
 		t.Run(step, func(t *testing.T) {
@@ -266,8 +269,11 @@ func TestTS20WriteFileFailsAfterCreate(t *testing.T) {
 		_, r := newDir(t)
 		wrapTemp = func(f *os.File) tempFile { return faultyTemp{f, "none"} }
 		t.Cleanup(func() { wrapTemp = nil })
-		if err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary); err != nil || !r.Healthy() {
+		if err := r.Record(manifestOf("2030.01.01-1", farExp), sumOf(2), ClassProprietary); err != nil {
 			t.Errorf("Record: %v", err)
+		}
+		if !r.Healthy() {
+			t.Error("not healthy after the write")
 		}
 	})
 }

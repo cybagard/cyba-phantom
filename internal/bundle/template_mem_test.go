@@ -323,8 +323,8 @@ func TestTS25TemplateParseMemory(t *testing.T) {
 			took := time.Duration(r.nano)
 			t.Logf("case %s: VmHWM %.1f MB, kept %.1f MiB, StackSys %.1f MiB, parse %.2f s",
 				c.name, float64(r.hwm)/1e6, float64(r.kept)/(1<<20), float64(r.stack)/(1<<20), took.Seconds())
-			if r.held != 24<<20 {
-				t.Errorf("child holds %d bytes of bundle data; T-S-25 needs %d", r.held, 24<<20)
+			if r.held != ts25DecodedBytes+ts25Held {
+				t.Errorf("child holds %d bytes of bundle data; T-S-25 needs %d", r.held, ts25DecodedBytes+ts25Held)
 			}
 			if r.gc != ts25GC || r.limit != ts25Limit {
 				t.Errorf("child GC percent %d and memory limit %d; want %d and %d", r.gc, r.limit, ts25GC, ts25Limit)
@@ -386,9 +386,15 @@ func TestTS25Child(t *testing.T) {
 	stack := after.StackSys
 	runtime.GC()
 	runtime.ReadMemStats(&after)
-	held := len(hold)
-	for _, b := range a.files {
-		held += len(b)
+	// Read every byte of the fill file and of hold after the parse. A byte
+	// that the child never wrote does not count.
+	held := bytes.Count(hold, []byte("y"))
+	for n, b := range a.files {
+		if n == "assets/fill.bin" {
+			held += bytes.Count(b, []byte("x"))
+		} else {
+			held += len(b)
+		}
 	}
 	fmt.Printf("TS25 calls=%d perr=%t hwm=%d kept=%d stack=%d ns=%d set=%d gc=%d limit=%d held=%d\n",
 		calls, err == ErrTemplateParse, ts25VmHWM(t), int64(after.HeapInuse)-int64(before.HeapInuse),
