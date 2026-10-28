@@ -93,7 +93,7 @@ func TestTS27StaticServesLeaf(t *testing.T) {
 				other := seedCert(t, src.acme, staticName)
 				_, err := src.acme.cfg.CacheManagedCertificate(context.Background(), staticName)
 				mustNil(t, err)
-				// Control: the client serves its cached certificate for the name.
+				// Control: the client serves its cached certificate here.
 				c, err := src.acme.cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: staticName})
 				if err != nil || !bytes.Equal(c.Certificate[0], other) || bytes.Equal(other, e.Cert.Certificate[0]) {
 					t.Fatalf("control: the client does not serve its cached certificate: %v", err)
@@ -152,9 +152,10 @@ func TestTS27StaticNameVariants(t *testing.T) {
 }
 
 // T-S-16: the refusals of the gate give the reason through a real server, also
-// with no ACME client. A static name with acme-tls/1 gives no event. An ACME
-// name goes to the ACME client. A name that is not a decoy name makes no
-// storage call, no request and no log line, also with acme-tls/1.
+// with no ACME client. A static name with acme-tls/1 gives no event.
+// An ACME name goes to the ACME client.
+// A name that is not a decoy name makes no storage call, no request and no
+// log line, also with acme-tls/1.
 func TestTS16SourceGateReasons(t *testing.T) {
 	for _, withACME := range []bool{true, false} {
 		t.Run(map[bool]string{true: "acme", false: "nil acme"}[withACME], func(t *testing.T) {
