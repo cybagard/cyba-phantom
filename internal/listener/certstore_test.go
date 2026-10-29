@@ -635,7 +635,8 @@ func openHooked(t *testing.T, hooks storeHooks) *Store {
 func TestTS16AHookOfOneStoreIsNeverCalledByAnotherStore(t *testing.T) {
 	ctx := context.Background()
 	// Each case sets one hook on store A. After the opens, the hook counts its
-	// calls and fails. The hook does no real call: no test needs one.
+	// calls and fails. The hook does not call the os function, because the
+	// test needs only the count and the error.
 	for _, c := range []struct {
 		name string
 		set  func(h *storeHooks, call func() error)
@@ -676,7 +677,7 @@ func TestTS16AHookOfOneStoreIsNeverCalledByAnotherStore(t *testing.T) {
 					t.Errorf("Store of A = %v after %d calls of its hook; want an error", err, calls)
 				}
 				// A Store with a failing directory fsync has written the key.
-				// So the Delete of A calls the same fsync again.
+				// The Delete of A then calls the same failing fsync.
 				if c.name == "syncDirFile" {
 					if err := a.Delete(ctx, "kd/key"); err == nil {
 						t.Error("Delete of A gave no error")
@@ -712,7 +713,8 @@ func TestTS16OpenRemovesATemporaryFileThroughTheHooksOfItsOwnStore(t *testing.T)
 	}
 }
 
-// The test pins the real functions, so that a no-op hook set cannot pass.
+// TestTS16OsHooksAreTheFunctionsOfTheOsPackage pins the real functions, so
+// that a no-op hook set cannot pass.
 func TestTS16OsHooksAreTheFunctionsOfTheOsPackage(t *testing.T) {
 	h := osHooks()
 	for _, c := range []struct {

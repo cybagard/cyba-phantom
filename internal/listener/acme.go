@@ -347,9 +347,11 @@ func isLoggedEvent(event string) bool {
 // no lookup. It looks up each other name with resolver, or with lookup if that
 // is not nil. It gives rule each address with its zone, because the hosts file
 // can give a zone. The guard refuses the request if the lookup fails or gives
-// no address. It also refuses the request in these cases. An address does not
-// parse (AddrFromSlice fails). An IPv4 address has a zone. Rule refuses an
-// address. Each refusal gives errEgress, which holds no address, name or port.
+// no address. It refuses the request if an address does not parse
+// (AddrFromSlice fails). It refuses the request if an IPv4 address has a
+// zone, because the zone cannot stay in that address. It refuses the request
+// if rule refuses an address. Each refusal gives errEgress, which holds no
+// address, name or port.
 // The function never gives a proxy, so it never uses a proxy from the
 // environment. seen may be nil.
 //
