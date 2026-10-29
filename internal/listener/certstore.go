@@ -190,7 +190,8 @@ func stopped(ctx context.Context, op string) error {
 // Store is a certmagic.Storage and certmagic.Locker. It is safe for use by many
 // goroutines. The locks are in memory, so they work for one process only.
 type Store struct {
-	root *os.Root
+	root  *os.Root
+	hooks storeHooks
 
 	mu    sync.Mutex
 	locks map[string]chan struct{} // one channel for each held lock; Unlock closes it
@@ -198,23 +199,30 @@ type Store struct {
 
 var _ certmagic.Storage = (*Store)(nil)
 
-// The calls that make a write durable. The code calls them through these
-// variables, so that a test can record their order. A test must restore the
-// real functions.
-var (
-	syncFile    = (*os.File).Sync
-	syncDirFile = (*os.File).Sync
-	renameFile  = (*os.Root).Rename
-)
+// storeHooks are the calls that make a write durable, and two test hooks.
+// Each Store has its own hooks. A test that changes the hooks of one Store does
+// not change another Store. osHooks gives the real functions.
+type storeHooks struct {
+	syncFile    func(*os.File) error
+	syncDirFile func(*os.File) error
+	renameFile  func(*os.Root, string, string) error
 
-// betweenSizeCheckAndRead is a test hook. Load calls it after the size checks of
-// the open file and before it reads the file. It is nil in production. The
-// shared package has no hook at this place.
-var betweenSizeCheckAndRead func()
+	// betweenSizeCheckAndRead: Load calls it after the size checks of the open
+	// file and before it reads the file. It is nil in production.
+	betweenSizeCheckAndRead func()
+	// beforeListChild: List calls it with the key of a child directory, before
+	// it goes into the directory. It is nil in production.
+	beforeListChild func(key string)
+}
 
-// beforeListChild is a test hook. List calls it with the key of a child
-// directory, before it goes into the directory. It is nil in production.
-var beforeListChild func(key string)
+// osHooks returns the real functions of the os package.
+func osHooks() storeHooks {
+	return storeHooks{
+		syncFile:    (*os.File).Sync,
+		syncDirFile: (*os.File).Sync,
+		renameFile:  (*os.Root).Rename,
+	}
+}
 
 // Open opens the cache directory dir below the state directory. The path dir is
 // relative to state. Open makes the directories of dir (mode 0700) if they do
@@ -246,6 +254,12 @@ var beforeListChild func(key string)
 // every part, also when the part existed before, so the directories on the path
 // are durable when Open returns.
 func Open(state *os.Root, dir string) (*Store, error) {
+	return openWith(state, dir, osHooks())
+}
+
+// openWith is Open with the hooks given. The Store keeps hooks, and openWith
+// itself calls them.
+func openWith(state *os.Root, dir string, hooks storeHooks) (*Store, error) {
 	const op = "open"
 	if !fs.ValidPath(dir) || dir == "." {
 		return nil, fail(op, ruleCachePath)
@@ -267,14 +281,14 @@ func Open(state *os.Root, dir string) (*Store, error) {
 		roots = append(roots, next)
 	}
 	root := roots[len(roots)-1]
-	s := &Store{root: root, locks: map[string]chan struct{}{}}
+	s := &Store{root: root, hooks: hooks, locks: map[string]chan struct{}{}}
 	if err := s.dirs(nil, false); err != nil {
 		closeOpened()
 		return nil, wrap(op, err)
 	}
 	s.removeTemporary(nil)
 	for i := len(roots) - 1; i >= 0; i-- {
-		if err := syncPath(roots[i], nil); err != nil {
+		if err := hooks.syncPath(roots[i], nil); err != nil {
 			closeOpened()
 			return nil, wrap(op, err)
 		}
@@ -335,7 +349,7 @@ func (s *Store) removeTemporary(parts []string) {
 		}
 	}
 	if removed {
-		_ = syncDirFile(d)
+		_ = s.hooks.syncDirFile(d)
 	}
 }
 
@@ -401,17 +415,17 @@ func (s *Store) parent(parts []string) (r *os.Root, changed bool, err error) {
 	return r, errors.Is(err, safefile.ErrChanged), refusal("check", err, dirTexts, s.root, dirPaths(dir)...)
 }
 
-// syncPath calls fsync on the directory r and on each directory of parts below
-// it, the deepest first. It opens each directory by its path below r. The path
-// of r itself is ".". Open calls syncPath with no parts on each root of its walk.
-// This includes roots[0], the state root of the caller.
-func syncPath(r *os.Root, parts []string) error {
+// syncPath calls h.syncDirFile on the directory r and on each directory of
+// parts below it, the deepest first. It opens each directory by its path below
+// r. The path of r itself is ".". openWith calls syncPath with no parts on each
+// root of its walk. This includes roots[0], the state root of the caller.
+func (h storeHooks) syncPath(r *os.Root, parts []string) error {
 	for i := len(parts); i >= 0; i-- {
 		f, err := r.OpenFile(rel(parts[:i]), readFlags, 0)
 		if err != nil {
 			return err
 		}
-		err = syncDirFile(f)
+		err = h.syncDirFile(f)
 		f.Close()
 		if err != nil {
 			return err
@@ -514,19 +528,19 @@ func (s *Store) Store(ctx context.Context, key string, value []byte) error {
 	}
 	_, err = f.Write(value)
 	if err == nil {
-		err = syncFile(f)
+		err = s.hooks.syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = renameFile(s.root, tmp, name)
+		err = s.hooks.renameFile(s.root, tmp, name)
 	}
 	if err != nil {
 		s.root.Remove(tmp)
 		return wrapAfterDirs(op, err)
 	}
-	return wrapAfterDirs(op, syncPath(s.root, dir))
+	return wrapAfterDirs(op, s.hooks.syncPath(s.root, dir))
 }
 
 // wrapAfterDirs is wrap for a call that runs after the check of the directories
@@ -611,8 +625,8 @@ func (s *Store) load(ctx context.Context, op, key string) (b []byte, changed boo
 	if of.Size() != fi.Size() {
 		return nil, false, fail(op, ruleChanged)
 	}
-	if betweenSizeCheckAndRead != nil {
-		betweenSizeCheckAndRead()
+	if s.hooks.betweenSizeCheckAndRead != nil {
+		s.hooks.betweenSizeCheckAndRead()
 	}
 	b, err = safefile.ReadAll(f, of, keyOpenRule)
 	return b, false, refusal(op, err, fileTexts, dir, name)
@@ -633,7 +647,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := s.root.RemoveAll(rel(parts)); err != nil {
 		return wrap(op, err)
 	}
-	return wrap(op, syncPath(s.root, parts[:len(parts)-1]))
+	return wrap(op, s.hooks.syncPath(s.root, parts[:len(parts)-1]))
 }
 
 // checkedInfo is info. For a key file it also applies the rules of Load: hard
@@ -727,8 +741,8 @@ func (s *Store) list(op string, parts []string, recursive bool, keys *[]string, 
 			case !e.IsDir() && !e.Type().IsRegular():
 				return fail(op, ruleType)
 			case e.IsDir() && recursive:
-				if beforeListChild != nil {
-					beforeListChild(strings.Join(child, "/"))
+				if s.hooks.beforeListChild != nil {
+					s.hooks.beforeListChild(strings.Join(child, "/"))
 				}
 				// A Delete can remove the child after the read of its parent. Then
 				// the child is skipped, as if List did not read it.

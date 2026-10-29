@@ -453,7 +453,7 @@ func TestTS21GuardComparesLiteralsAsAddresses(t *testing.T) {
 		mustNil(t, err)
 		req, err := http.NewRequest(http.MethodGet, c.req, nil)
 		mustNil(t, err)
-		u, err := egressGuard(ca, nil, rule, testNames(t).Resolver())(req)
+		u, err := egressGuard(ca, nil, rule, testNames(t).Resolver(), nil)(req)
 		if (err != nil) != c.refuse || u != nil || !slices.Equal(calls, c.calls) {
 			t.Errorf("%s vs %s: proxy = %v, %v; rule saw %v; want refuse = %v, %v", c.ca, c.req, u, err, calls, c.refuse, c.calls)
 		}
@@ -479,10 +479,54 @@ func TestTS21GuardChecksEveryAddressOfAName(t *testing.T) {
 		mustNil(t, err)
 		req, err := http.NewRequest(http.MethodGet, "https://"+c.name+"/dir", nil)
 		mustNil(t, err)
-		u, err := egressGuard(ca, nil, egress.Permitted, names.Resolver())(req)
+		u, err := egressGuard(ca, nil, egress.Permitted, names.Resolver(), nil)(req)
 		if (err != nil) != c.refuse || u != nil || (err != nil && err != errEgress) {
 			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.refuse)
 		}
+	}
+}
+
+// TestTS21GuardRefusesAnAddressOfANameWithAZone: the lookup can give a zone.
+// The production rule refuses the zone rows of the 16-byte addresses. The
+// check of the guard refuses the 4-byte IPv4 row, where the zone cannot stay in
+// a netip.Addr. The test takes the proxy of the issuer.
+func TestTS21GuardRefusesAnAddressOfANameWithAZone(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		ip   net.IPAddr
+		want bool // refused
+	}{
+		{"global v6 with zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888"), Zone: "eth0"}, true},
+		{"mapped v4 with zone", net.IPAddr{IP: net.ParseIP("::ffff:8.8.8.8"), Zone: "eth0"}, true},
+		{"4-byte v4 with zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4(), Zone: "eth0"}, true},
+		{"global v6 no zone", net.IPAddr{IP: net.ParseIP("2001:4860:4860::8888")}, false},
+		{"mapped v4 no zone", net.IPAddr{IP: net.ParseIP("::ffff:8.8.8.8")}, false},
+		{"4-byte v4 no zone", net.IPAddr{IP: net.IPv4(8, 8, 8, 8).To4()}, false},
+	} {
+		lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{c.ip}, nil }
+		proxy, err := prodProxyLookup(t, "https://ca.test/dir", nil, &stubDNS{}, lookup)
+		mustNil(t, err)
+		req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
+		mustNil(t, err)
+		u, err := proxy(req)
+		if (err != nil) != c.want || u != nil || (err != nil && err != errEgress) {
+			t.Errorf("%s: proxy = %v, %v; want refuse = %v", c.name, u, err, c.want)
+		}
+	}
+}
+
+// TestTS21GuardRefusesAnAddressOfBadLength: the guard refuses an address that
+// has 3 bytes. The rule permits every address. The test checks the guard, not
+// the rule, so the check of the guard must refuse the address.
+func TestTS21GuardRefusesAnAddressOfBadLength(t *testing.T) {
+	permitAll := func(netip.Addr) bool { return true }
+	ca, err := url.Parse("https://ca.test/")
+	mustNil(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://ca.test/dir", nil)
+	mustNil(t, err)
+	lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{{IP: net.IP{8, 8, 8}}}, nil }
+	if u, err := egressGuard(ca, nil, permitAll, net.DefaultResolver, lookup)(req); err != errEgress || u != nil {
+		t.Errorf("proxy = %v, %v; want errEgress", u, err)
 	}
 }
 
@@ -1196,6 +1240,13 @@ func (s *stubDNS) serve(c net.Conn) {
 // error of NewACME.
 func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http.Request) (*url.URL, error), error) {
 	t.Helper()
+	return prodProxyLookup(t, ca, list, dns, nil)
+}
+
+// prodProxyLookup is prodProxy with the lookup hook. If lookup is not nil, it
+// replaces the lookup call.
+func prodProxyLookup(t *testing.T, ca string, list []string, dns *stubDNS, lookup func(context.Context, string) ([]net.IPAddr, error)) (func(*http.Request) (*url.URL, error), error) {
+	t.Helper()
 	st, _ := newStore(t)
 	var prefixes []netip.Prefix
 	for _, s := range list {
@@ -1203,7 +1254,7 @@ func prodProxy(t *testing.T, ca string, list []string, dns *stubDNS) (func(*http
 	}
 	a, err := NewACME(ACMEParams{
 		Names: []string{"decoy.test"}, CA: ca, Storage: st, Host: "127.0.0.1", Port: 8443,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CAPrivate: prefixes, egressResolver: dns.resolver(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), CAPrivate: prefixes, egressResolver: dns.resolver(), egressLookup: lookup,
 	})
 	if err != nil {
 		return nil, err

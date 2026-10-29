@@ -69,14 +69,17 @@ type ACMEParams struct {
 	// the list for the CA port. Nil or empty means no list.
 	CAPrivate []netip.Prefix
 
-	// egressRule and egressResolver are test hooks. Only tests in this package
-	// set them. egressRule replaces the address rule. egressResolver replaces
-	// the resolver that looks up the name of the CA. Both are nil in
-	// production. Then the client uses the item rule of the egress package
-	// with the CAPrivate list (itemRule). It uses net.DefaultResolver. No
-	// config key, flag, environment variable, or other input sets them.
+	// egressRule, egressResolver and egressLookup are test hooks. Only tests in
+	// this package set them. egressRule replaces the address rule.
+	// egressResolver replaces the resolver that looks up the name of the CA.
+	// egressLookup replaces the lookup call itself, so that a test can give
+	// an address with a zone. All are nil in production. Then the client uses
+	// the item rule of the egress package with the CAPrivate list (itemRule).
+	// It uses net.DefaultResolver. No config key, flag, environment variable,
+	// or other input sets them.
 	egressRule     func(netip.Addr) bool
 	egressResolver *net.Resolver
+	egressLookup   func(ctx context.Context, host string) ([]net.IPAddr, error)
 
 	// maintenanceInterval is the time between two renewal checks, and between two
 	// OCSP checks, of the certificate cache. It is a test hook; only tests in this
@@ -240,7 +243,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	guard := egressGuard(ca, p.OnEgress, rule, resolver)
+	guard := egressGuard(ca, p.OnEgress, rule, resolver, p.egressLookup)
 
 	// The key of the issuer below. The wrapper needs it before certmagic.New.
 	issuerKey := (&certmagic.ACMEIssuer{CA: p.CA}).IssuerKey()
@@ -341,9 +344,14 @@ func isLoggedEvent(event string) bool {
 //
 // After that, the host must pass rule. For an IP literal, rule checks the
 // parsed address, with no lookup. The guard refuses a name below invalid with
-// no lookup. It looks up each other name with resolver. It refuses the request
-// when the lookup fails, gives no address, or gives an address that rule
-// refuses. Each refusal gives errEgress, which holds no address, name or port.
+// no lookup. It looks up each other name with resolver, or with lookup if that
+// is not nil. It gives rule each address with its zone, because the hosts file
+// can give a zone. The guard refuses the request if the lookup fails or gives
+// no address. It refuses the request if an address does not parse
+// (AddrFromSlice fails). It refuses the request if an IPv4 address has a
+// zone, because the zone cannot stay in that address. It refuses the request
+// if rule refuses an address. Each refusal gives errEgress, which holds no
+// address, name or port.
 // The function never gives a proxy, so it never uses a proxy from the
 // environment. seen may be nil.
 //
@@ -351,7 +359,7 @@ func isLoggedEvent(event string) bool {
 // HTTP/1.1 request. A request on a pooled HTTP/2 connection to the same
 // authority does not call it. The function allowed that authority when the
 // transport made the connection.
-func egressGuard(ca *url.URL, seen func(host string), rule func(netip.Addr) bool, resolver *net.Resolver) func(*http.Request) (*url.URL, error) {
+func egressGuard(ca *url.URL, seen func(host string), rule func(netip.Addr) bool, resolver *net.Resolver, lookup func(context.Context, string) ([]net.IPAddr, error)) func(*http.Request) (*url.URL, error) {
 	scheme, port := strings.ToLower(ca.Scheme), portOf(ca)
 	caAddr, caName, caOK := hostOf(ca)
 	return func(r *http.Request) (*url.URL, error) {
@@ -372,13 +380,25 @@ func egressGuard(ca *url.URL, seen func(host string), rule func(netip.Addr) bool
 		if host := strings.TrimSuffix(name, "."); host == "invalid" || strings.HasSuffix(host, ".invalid") {
 			return nil, errEgress
 		}
-		addrs, err := resolver.LookupNetIP(r.Context(), "ip", name)
+		var addrs []net.IPAddr
+		var err error
+		if lookup != nil {
+			addrs, err = lookup(r.Context(), name)
+		} else {
+			addrs, err = resolver.LookupIPAddr(r.Context(), name)
+		}
 		if err != nil || len(addrs) == 0 {
 			return nil, errEgress
 		}
-		for _, a := range addrs {
+		for _, ip := range addrs {
+			a, ok := netip.AddrFromSlice(ip.IP)
+			// WithZone does nothing for an IPv4 address. Refuse it, so that
+			// the zone is not lost.
+			if !ok || (ip.Zone != "" && a.Is4()) {
+				return nil, errEgress
+			}
 			// No Unmap here: the rule unmaps after its zone check.
-			if !rule(a) {
+			if !rule(a.WithZone(ip.Zone)) {
 				return nil, errEgress
 			}
 		}
