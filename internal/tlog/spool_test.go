@@ -761,9 +761,9 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 }
 
 // T-S-13: a fault of checkpoints/ between the cursor read and the note read is
-// not a property of the note. A swap of the name for an in-root symlink, and a
-// mode 0, each stop Publish with an error that names the note. Publish sends
-// nothing, counts no bad note, and deletes no note.
+// not a property of the note. An in-root symlink in its place and a mode 0 each
+// stop Publish with an error that names the note. Publish sends nothing,
+// counts no bad note, and deletes no note.
 func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -791,7 +791,7 @@ func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
 			var notes string
 			opens := 0
 			safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
-				// The first open of checkpoints/ is for the cursor, the second for note 1.
+				// The first open is for the cursor, the second for note 1.
 				if name == spoolDir {
 					if opens++; opens == 2 {
 						notes = tc.fault(t, e.dir)

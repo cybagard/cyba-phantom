@@ -304,8 +304,8 @@ func TestTS13_KeyLinkIsTemporaryName(t *testing.T) {
 }
 
 // T-S-13: a FIFO renamed over a key file or the state after the check is a
-// changed file, and the read refuses it. The call does not block. The public
-// key gives a warning and the load goes on.
+// changed file. The read refuses it. The call does not block. The public key
+// gives a warning and the load goes on.
 func TestTS13_FifoSwapAfterCheck(t *testing.T) {
 	for _, name := range []string{keyName, vkeyName, stateName} {
 		t.Run(name, func(t *testing.T) {

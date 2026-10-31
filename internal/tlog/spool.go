@@ -353,7 +353,8 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
 	msg, err := s.readFile(name)
 	switch {
-	case errors.Is(err, safefile.ErrExamine): // a fault of checkpoints/ has the cause of its refusal
+	case errors.Is(err, safefile.ErrExamine):
+		// A fault of checkpoints/ keeps the cause of its refusal.
 		return nil, err
 	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return nil, entryError{err}
