@@ -174,6 +174,18 @@ func TestTS13_KeyFileRules(t *testing.T) {
 			must(t, os.Rename(filepath.Join(dir, "tlog", keysDir), filepath.Join(dir, "tlog", "k")))
 			mustSymlink(t, "tlog/k", filepath.Join(dir, keysDir))
 		}, good, "keys must be a real directory and not a symlink"},
+		{"keys is a regular file", func(t *testing.T, dir string) {
+			must(t, os.WriteFile(filepath.Join(dir, keysDir), nil, 0o600))
+		}, "", "keys must be a real directory and not a symlink"},
+		{"keys swapped during its open", func(t *testing.T, dir string) {
+			putKey(t, dir, good, 0o600)
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == keysDir {
+					must(t, os.Rename(filepath.Join(dir, keysDir), filepath.Join(dir, "keys.old")))
+					must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
+				}
+			}})
+		}, good, "keys changed between the check and the open"},
 		{"FIFO at the key path", func(t *testing.T, dir string) {
 			must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
 			mustFifo(t, filepath.Join(dir, keyName))
@@ -257,7 +269,7 @@ func TestTS13_OwnerMismatch(t *testing.T) {
 }
 
 // T-S-13: a key file of 1024 bytes loads. A signer state of maxNoteSize bytes
-// is read, and one byte more is refused.
+// is read, and the read refuses one byte more.
 func TestTS13_SizeLimits(t *testing.T) {
 	good := newKeyText(t, testOrigin)
 	root, dir := newState(t)
@@ -291,9 +303,9 @@ func TestTS13_KeyLinkIsTemporaryName(t *testing.T) {
 	}
 }
 
-// T-S-13: a FIFO renamed over a key file or the state after the check is
-// refused as a changed file. The call does not block. The public key gives a
-// warning and the load goes on.
+// T-S-13: a FIFO renamed over a key file or the state after the check is a
+// changed file, and the read refuses it. The call does not block. The public
+// key gives a warning and the load goes on.
 func TestTS13_FifoSwapAfterCheck(t *testing.T) {
 	for _, name := range []string{keyName, vkeyName, stateName} {
 		t.Run(name, func(t *testing.T) {
@@ -323,8 +335,8 @@ func TestTS13_FifoSwapAfterCheck(t *testing.T) {
 }
 
 // T-S-13: a keys directory that an in-root symlink replaces after the check is
-// not read through. The key, the temporary name, and the public key use the
-// directory that the check opened.
+// not read through. The key and the public key use the directory that the check
+// opened. The rewrite of the public key logs no warning.
 func TestTS13_KeysSwapAfterCheck(t *testing.T) {
 	root, dir, _ := firstStart(t)
 	s0, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1)
@@ -339,8 +351,12 @@ func TestTS13_KeysSwapAfterCheck(t *testing.T) {
 			mustSymlink(t, "evil", filepath.Join(dir, keysDir))
 		}
 	}})
-	s, err := loadWithin(t, root, nil, testOrigin, true, 1)
+	log, buf := testLogger()
+	s, err := loadWithin(t, root, log, testOrigin, true, 1)
 	must(t, err)
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("the log has a warning: %s", buf)
+	}
 	if s.KeyHash() != s0.KeyHash() {
 		t.Error("the load read the key through the swapped name")
 	}
@@ -766,6 +782,32 @@ func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, keyName)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("key file: %v; want not exist", err)
+	}
+}
+
+// T-S-13: a public key file of maxKeySize bytes is read. One of maxKeySize + 1
+// bytes cannot be checked: the load goes on with a warning.
+func TestTS13_VkeySizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pad  int
+		warn bool
+	}{{"at the limit", 0, false}, {"above the limit", 1, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, dir, _ := firstStart(t)
+			vpath := filepath.Join(dir, vkeyName)
+			vkey, err := os.ReadFile(vpath)
+			must(t, err)
+			text := strings.TrimSpace(string(vkey))
+			must(t, os.WriteFile(vpath, []byte(text+strings.Repeat("\n", maxKeySize+tc.pad-len(text))), 0o600))
+			log, buf := testLogger()
+			if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if warned := strings.Contains(buf.String(), "public key file cannot be checked"); warned != tc.warn || strings.Contains(buf.String(), "level=WARN") != tc.warn {
+				t.Errorf("warning %v, want %v; log %s", warned, tc.warn, buf)
+			}
+		})
 	}
 }
 
