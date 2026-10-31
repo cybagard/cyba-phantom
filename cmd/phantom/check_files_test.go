@@ -1,16 +1,117 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/config"
+	"github.com/cybagard/cyba-phantom/internal/listener"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
+
+// The test keys and the root. They are ECDSA P-256, made once.
+var (
+	pkiOnce                             sync.Once
+	pkiRoot                             *x509.Certificate
+	pkiRootKey, pkiLeafKey, pkiOtherKey *ecdsa.PrivateKey
+)
+
+func pkiInit() {
+	pkiOnce.Do(func() {
+		gen := func() *ecdsa.PrivateKey {
+			k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				panic(err)
+			}
+			return k
+		}
+		pkiRootKey, pkiLeafKey, pkiOtherKey = gen(), gen(), gen()
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test root"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &pkiRootKey.PublicKey, pkiRootKey)
+		if err == nil {
+			pkiRoot, err = x509.ParseCertificate(der)
+		}
+		if err != nil {
+			panic(err)
+		}
+	})
+}
+
+func certBlock(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// rootPEM is the PEM of the test root, a CA certificate.
+func rootPEM(t *testing.T) []byte {
+	t.Helper()
+	pkiInit()
+	return certBlock(pkiRoot.Raw)
+}
+
+// certPEM is a leaf of pkiLeafKey for name.
+// It is valid from now+from to now+to.
+func certPEM(t *testing.T, name string, from, to time.Duration) []byte {
+	t.Helper()
+	pkiInit()
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
+		NotBefore: time.Now().Add(from), NotAfter: time.Now().Add(to), KeyUsage: x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, pkiRoot, &pkiLeafKey.PublicKey, pkiRootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certBlock(der)
+}
+
+// goodCertPEM is a leaf for name that is valid for 90 days.
+func goodCertPEM(t *testing.T, name string) []byte {
+	return certPEM(t, name, -time.Hour, 90*24*time.Hour)
+}
+
+func keyPEM(t *testing.T, k *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+// leafKeyPEM is the key file that matches the leaf of certPEM.
+func leafKeyPEM(t *testing.T) []byte {
+	pkiInit()
+	return keyPEM(t, pkiLeafKey)
+}
+
+// writePEM writes data to a file with exactly mode and returns its path.
+func writePEM(t *testing.T, dir, name string, data []byte, mode os.FileMode) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 // fixtureDir makes a private directory below the package directory.
 // The file rules refuse a parent with a group or other write bit.
@@ -52,13 +153,10 @@ func TestTS27_CheckFileRules(t *testing.T) {
 		return body + "tls:\n  certs: [{name: a.host.zz, cert_file: " + strconv.Quote(cert) + ", key_file: " + strconv.Quote(key) + "}]\n"
 	}
 	d := fixtureDir(t)
-	goodCert, goodKey := writeFixture(t, d, "good.pem", 0o644), writeFixture(t, d, "good.key", 0o600)
+	goodCert, goodKey := writePEM(t, d, "good.pem", goodCertPEM(t, "a.host.zz"), 0o644), writePEM(t, d, "good.key", leafKeyPEM(t), 0o600)
+	// A big file is a root file with space bytes after the block.
 	big := func(name string, size int, mode os.FileMode) string {
-		p := writeFixture(t, d, name, mode)
-		if err := os.Truncate(p, int64(size)); err != nil {
-			t.Fatal(err)
-		}
-		return p
+		return writePEM(t, d, name, append(rootPEM(t), bytes.Repeat([]byte(" "), size-len(rootPEM(t)))...), mode)
 	}
 	fifo := filepath.Join(d, "fifo")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -71,7 +169,7 @@ func TestTS27_CheckFileRules(t *testing.T) {
 	inOpen := writeFixture(t, open, "in-open", 0o600)
 	const root, cert, key = "acme.ca_root", "tls.certs[0].cert_file", "tls.certs[0].key_file"
 	rows := []struct{ name, file, key, detail string }{
-		{"root file 0644", withRoot(writeFixture(t, d, "r0644", 0o644)), "", ""},
+		{"root file 0644", withRoot(writePEM(t, d, "r0644", rootPEM(t), 0o644)), "", ""},
 		{"root file 65536 bytes", withRoot(big("r-max", 65536, 0o600)), "", ""},
 		{"cert file 0644", withCert(goodCert, goodKey), "", ""},
 		{"root file other write", withRoot(writeFixture(t, d, "r-ow", 0o602)), root, "the CA root file is writable by other"},
@@ -104,7 +202,7 @@ func TestTS27_CheckFileRules(t *testing.T) {
 		}
 		return p
 	}
-	rootTarget, certTarget, keyTarget := writeFixture(t, d, "r-target", 0o644), writeFixture(t, d, "c-target", 0o644), writeFixture(t, d, "k-target", 0o600)
+	rootTarget, certTarget, keyTarget := writePEM(t, d, "r-target", rootPEM(t), 0o644), writePEM(t, d, "c-target", goodCertPEM(t, "a.host.zz"), 0o644), writePEM(t, d, "k-target", leafKeyPEM(t), 0o600)
 	rootLink, certLink, keyLink := link("r-link", rootTarget), link("c-link", certTarget), link("k-link", keyTarget)
 	ownerRows := []struct{ name, file, target, key, detail string }{
 		{"root symlink to a file of another owner", withRoot(rootLink), rootTarget, root, "the owner of the CA root file is not root or the sensor user"},
@@ -155,7 +253,7 @@ func TestTS27_CheckFileRules(t *testing.T) {
 // stderr names acme.ca_root. An https acme.ca passes (SEC-31, T-S-11).
 func TestTS11_CheckCARoot(t *testing.T) {
 	body := validBody(t)
-	root := writeFixture(t, fixtureDir(t), "root.pem", 0o644)
+	root := writePEM(t, fixtureDir(t), "root.pem", rootPEM(t), 0o644)
 	const caLine = "  ca: \"https://ca.example.invalid\"\n"
 	line := "  ca_root: " + strconv.Quote(root) + "\n"
 	rows := []struct {
@@ -178,5 +276,156 @@ func TestTS11_CheckCARoot(t *testing.T) {
 				t.Errorf("exit %d, stderr %q; want exit 0 and no stderr", code, se.String())
 			}
 		})
+	}
+}
+
+// contentBody returns a config text with entries in tls.certs.
+// A root path adds acme.ca_root.
+func contentBody(t *testing.T, root string, entries ...[2]string) string {
+	body := validBody(t)
+	if root != "" {
+		const caLine = "  ca: \"https://ca.example.invalid\"\n"
+		body = strings.Replace(body, caLine, caLine+"  ca_root: "+strconv.Quote(root)+"\n", 1)
+	}
+	var items []string
+	for i, e := range entries {
+		items = append(items, "{name: "+[]string{"a", "b"}[i]+".host.zz, cert_file: "+strconv.Quote(e[0])+", key_file: "+strconv.Quote(e[1])+"}")
+	}
+	if len(items) > 0 {
+		body += "tls:\n  certs: [" + strings.Join(items, ", ") + "]\n"
+	}
+	return body
+}
+
+// runMode runs the sensor in --check mode or in start mode.
+// In start mode, serve is a stub. It returns the exit code, stdout, stderr,
+// and the number of serve calls.
+func runMode(t *testing.T, check bool, body string) (code int, so, se string, calls int) {
+	t.Helper()
+	old := serve
+	t.Cleanup(func() { serve = old })
+	serve = func(*config.Config, io.Writer, io.Writer) int { calls++; return 0 }
+	args := []string{writeFile(t, body)}
+	if check {
+		args = append([]string{"--check"}, args...)
+	}
+	var o, e strings.Builder
+	code = run(args, []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, &o, &e)
+	return code, o.String(), e.String(), calls
+}
+
+// TestTS27_CheckContent checks that --check and the start refuse a bad
+// static or root file. The exit is 1 and the start calls no serve.
+// Stderr is one line. It names the key of the file that causes the error.
+// The line has no PEM line and no path. It has no byte of the marker.
+// The marker is in the bad file (SEC-31, T-S-27, T-S-11).
+func TestTS27_CheckContent(t *testing.T) {
+	const marker = "MARKER-7f3a91"
+	const keyForms = "static certificate: key does not parse; the key file has one block of type PRIVATE KEY (PKCS8), " +
+		"RSA PRIVATE KEY (PKCS1) or EC PRIVATE KEY (SEC1)"
+	good, key := goodCertPEM(t, "a.host.zz"), leafKeyPEM(t)
+	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	block := func(typ string) []byte { return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: []byte(marker)}) }
+	const certKey, keyKey, entry, root = "tls.certs[0].cert_file: ", "tls.certs[0].key_file: ", "tls.certs[0]: ", "acme.ca_root: "
+	rows := []struct {
+		name            string
+		cert, key, root []byte
+		want            string
+	}{
+		{"leaf for another name", goodCertPEM(t, "c.host.zz"), key, nil, certKey + listener.ErrStaticName.Error()},
+		{"expired leaf", certPEM(t, "a.host.zz", -48*time.Hour, -time.Hour), key, nil, certKey + listener.ErrStaticExpired.Error()},
+		{"leaf not valid yet", certPEM(t, "a.host.zz", time.Hour, 48*time.Hour), key, nil, certKey + listener.ErrStaticNotYet.Error()},
+		{"CA certificate as leaf", rootPEM(t), key, nil, certKey + listener.ErrStaticCA.Error()},
+		{"cert block that does not parse", block("CERTIFICATE"), key, nil, certKey + listener.ErrStaticCert.Error()},
+		{"key of another leaf", good, keyPEM(t, pkiOtherKey), nil, entry + listener.ErrStaticMismatch.Error()},
+		{"key block that does not parse", good, block("PRIVATE KEY"), nil, keyKey + keyForms},
+		{"cert file with a PRIVATE KEY block", cat(good, key), key, nil, entry + listener.ErrStaticType.Error()},
+		{"text before a block", cat([]byte(marker+"\n"), good), key, nil, entry + listener.ErrStaticText.Error()},
+		{"key file with two blocks", good, cat(key, key), nil, entry + listener.ErrStaticCount.Error()},
+		{"empty cert file", nil, key, nil, entry + listener.ErrStaticCount.Error()},
+		{"root file with a non-CA certificate", good, key, good, root + "listener: acme: a certificate of the root file is not a CA certificate"},
+		{"root file with an OTHER block", good, key, block("OTHER"), root + "listener: acme: the root file has a block that is not a certificate"},
+	}
+	for _, mode := range []string{"check", "start"} {
+		for _, r := range rows {
+			t.Run(mode+"/"+r.name, func(t *testing.T) {
+				d := fixtureDir(t)
+				rootPath := ""
+				if r.root != nil {
+					rootPath = writePEM(t, d, "root.pem", r.root, 0o644)
+				}
+				body := contentBody(t, rootPath, [2]string{writePEM(t, d, "c.pem", r.cert, 0o644), writePEM(t, d, "k.key", r.key, 0o600)})
+				code, so, se, calls := runMode(t, mode == "check", body)
+				if code != 1 || calls != 0 || so != "" || se != "phantom: "+r.want+"\n" {
+					t.Errorf("exit %d, serve calls %d, stdout %q, stderr %q; want exit 1, no serve, the line %q", code, calls, so, se, r.want)
+				}
+				for _, bad := range []string{"-----", d, marker} {
+					if strings.Contains(se, bad) {
+						t.Errorf("stderr holds %q: %q", bad, se)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestTS27_CheckContentGood checks that a good entry and a good root pass in
+// both modes. The start calls serve one time.
+func TestTS27_CheckContentGood(t *testing.T) {
+	for _, mode := range []string{"check", "start"} {
+		t.Run(mode, func(t *testing.T) {
+			d := fixtureDir(t)
+			body := contentBody(t, writePEM(t, d, "root.pem", rootPEM(t), 0o644),
+				[2]string{writePEM(t, d, "c.pem", goodCertPEM(t, "a.host.zz"), 0o644), writePEM(t, d, "k.key", leafKeyPEM(t), 0o600)})
+			code, so, se, calls := runMode(t, mode == "check", body)
+			wantCalls, wantOut := 1, ""
+			if mode == "check" {
+				wantCalls, wantOut = 0, "phantom: config is valid\n"
+			}
+			if code != 0 || se != "" || calls != wantCalls || so != wantOut {
+				t.Errorf("exit %d, stderr %q, stdout %q, serve calls %d", code, se, so, calls)
+			}
+		})
+	}
+}
+
+// TestTS27_CheckContentReportsAll checks that each failing key gets its line.
+// The order is the root, then the entries. The check does not stop early.
+func TestTS27_CheckContentReportsAll(t *testing.T) {
+	d := fixtureDir(t)
+	key := leafKeyPEM(t)
+	body := contentBody(t, writePEM(t, d, "root.pem", goodCertPEM(t, "a.host.zz"), 0o644),
+		[2]string{writePEM(t, d, "c0.pem", certPEM(t, "a.host.zz", -48*time.Hour, -time.Hour), 0o644), writePEM(t, d, "k0.key", key, 0o600)},
+		[2]string{writePEM(t, d, "c1.pem", goodCertPEM(t, "c.host.zz"), 0o644), writePEM(t, d, "k1.key", key, 0o600)})
+	code, _, se, _ := runMode(t, true, body)
+	want := "phantom: acme.ca_root: listener: acme: a certificate of the root file is not a CA certificate\n" +
+		"phantom: tls.certs[0].cert_file: " + listener.ErrStaticExpired.Error() + "\n" +
+		"phantom: tls.certs[1].cert_file: " + listener.ErrStaticName.Error() + "\n"
+	if code != 1 || se != want {
+		t.Errorf("exit %d, stderr %q, want exit 1 and %q", code, se, want)
+	}
+}
+
+// TestTS27_CheckContentReadError checks the line for a file that cannot be
+// read. The line has the key and no path. The load passes, then the files go.
+func TestTS27_CheckContentReadError(t *testing.T) {
+	d := fixtureDir(t)
+	root, cert, key := writePEM(t, d, "root.pem", rootPEM(t), 0o644), writePEM(t, d, "c.pem", goodCertPEM(t, "a.host.zz"), 0o644), writePEM(t, d, "k.key", leafKeyPEM(t), 0o600)
+	cfg, err := config.Load(writeFile(t, contentBody(t, root, [2]string{cert, key})), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{root, cert, key} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var se strings.Builder
+	if checkContent(cfg, time.Now(), &se) {
+		t.Error("checkContent passed with no files")
+	}
+	want := "phantom: acme.ca_root: the file cannot be read\nphantom: tls.certs[0].cert_file: the file cannot be read\nphantom: tls.certs[0].key_file: the file cannot be read\n"
+	if se.String() != want {
+		t.Errorf("stderr %q, want %q", se.String(), want)
 	}
 }

@@ -156,6 +156,43 @@ func TestTS11_CheckLiteralHostList(t *testing.T) {
 	}
 }
 
+// TestTS11_CheckPrintsPrivateLists checks that --check prints each entry of
+// each private list with its key path. The lists have a fixed order and the
+// valid line is last. An entry in a non-canonical form prints as the
+// canonical prefix. With no list, the output is the valid line (T-S-11).
+func TestTS11_CheckPrintsPrivateLists(t *testing.T) {
+	body := validBody(t)
+	const ca = "  ca: \"https://ca.example.invalid\"\n"
+	const okPub = `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN}`
+	const valid = "phantom: config is valid\n"
+	file := strings.Replace(body, ca, ca+"  ca_private: [\"10.0.0.0/8\", \"fd00:0::/8\"]\n", 1)
+	file = strings.Replace(file, okPub, `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN, private: ["192.168.1.0/24", "172.16.0.0/12"]}`+
+		"\n    - {type: https-put, url: \"https://ckpt2.example.invalid/p\", token_env: CKPT_TOKEN, private: [\"10.9.0.0/16\"]}", 1)
+	file += "bundle:\n  fetch_url: \"https://b.example/b\"\n  fetch_private: [\"192.168.1.0/24\"]\n" +
+		"alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example/h\", hmac_secret_env: ALERT_HMAC}\n" +
+		"    - {type: webhook, url: \"https://hook2.example/h\", hmac_secret_env: ALERT_HMAC, private: [\"10.20.0.0/16\"]}\n"
+	want := "acme.ca_private[0]: 10.0.0.0/8\nacme.ca_private[1]: fd00::/8\n" +
+		"bundle.fetch_private[0]: 192.168.1.0/24\n" +
+		"tlog.publish[0].private[0]: 192.168.1.0/24\ntlog.publish[0].private[1]: 172.16.0.0/12\n" +
+		"tlog.publish[1].private[0]: 10.9.0.0/16\n" +
+		"alerts.sinks[1].private[0]: 10.20.0.0/16\n" + valid
+	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+	for _, r := range []struct{ name, file, want string }{
+		{"all lists", file, want},
+		{"no list", body, valid},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			var so, se strings.Builder
+			if code := run([]string{"--check", writeFile(t, r.file)}, env, &so, &se); code != 0 || se.Len() != 0 {
+				t.Fatalf("exit %d, stderr %q", code, se.String())
+			}
+			if so.String() != r.want {
+				t.Errorf("stdout %q, want %q", so.String(), r.want)
+			}
+		})
+	}
+}
+
 // TestTS11_CheckEgressLiterals checks that --check refuses an IP literal that
 // the egress rule refuses. It does this for each URL key and for an smtp and
 // an smtps host, with exit 1. One URL key is a tls syslog address. The error
