@@ -170,12 +170,14 @@ func TestTS11_CheckPrintsPrivateLists(t *testing.T) {
 		"\n    - {type: https-put, url: \"https://ckpt2.example.invalid/p\", token_env: CKPT_TOKEN, private: [\"10.9.0.0/16\"]}", 1)
 	file += "bundle:\n  fetch_url: \"https://b.example/b\"\n  fetch_private: [\"192.168.1.0/24\"]\n" +
 		"alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example/h\", hmac_secret_env: ALERT_HMAC}\n" +
-		"    - {type: webhook, url: \"https://hook2.example/h\", hmac_secret_env: ALERT_HMAC, private: [\"10.20.0.0/16\"]}\n"
+		"    - {type: webhook, url: \"https://hook2.example/h\", hmac_secret_env: ALERT_HMAC, private: [\"10.20.0.0/16\"]}\n" +
+		"    - {type: syslog, addr: \"tls://logs.example.invalid:6514\", private: [\"10.30.0.0/16\"]}\n"
 	want := "acme.ca_private[0]: 10.0.0.0/8\nacme.ca_private[1]: fd00::/8\n" +
 		"bundle.fetch_private[0]: 192.168.1.0/24\n" +
 		"tlog.publish[0].private[0]: 192.168.1.0/24\ntlog.publish[0].private[1]: 172.16.0.0/12\n" +
 		"tlog.publish[1].private[0]: 10.9.0.0/16\n" +
-		"alerts.sinks[1].private[0]: 10.20.0.0/16\n" + valid
+		"alerts.sinks[1].private[0]: 10.20.0.0/16\n" +
+		"alerts.sinks[2].private[0]: 10.30.0.0/16\n" + valid
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
 	for _, r := range []struct{ name, file, want string }{
 		{"all lists", file, want},

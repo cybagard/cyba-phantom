@@ -89,8 +89,8 @@ func printPrivateLists(cfg *config.Config, w io.Writer) {
 	}
 }
 
-// The rules of the files. They are the rules of the config loader. The key
-// file also has no other read. checkContent applies them again to the file
+// These are the file rules of the config loader. The key file rule also
+// forbids a read by other. checkContent applies them again to each file
 // that it reads.
 var (
 	parentRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
@@ -129,9 +129,12 @@ func staticLine(entry string, err error) string {
 }
 
 // checkContent reads acme.ca_root and the files of each tls.certs entry and
-// parses them at now. For each failing key it writes one line to stderr with
-// the key path and a fixed text. It does not stop at the first failure.
-// It returns false when one key failed. It keeps no parsed value.
+// parses them at now. A file that cannot be read gives one line for that
+// file, and its entry is not parsed. ParseStatic returns its first error
+// only. A parsed entry thus gives at most one line, also when both files are
+// bad. A line has the key path and a fixed text. The check does not stop at
+// the first failure. It returns false when it wrote a line. It keeps no
+// parsed value.
 func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) bool {
 	ok := true
 	fail := func(line string) {
