@@ -25,7 +25,8 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
-// The test root and the test keys are made once. The keys are ECDSA P-256.
+// The test root and the test keys are made once. pkiRootKey, pkiLeafKey and
+// pkiOtherKey are ECDSA P-256.
 // pkiP224Key is ECDSA P-224, a key type that a static leaf may not have.
 var (
 	pkiOnce                             sync.Once
@@ -406,9 +407,9 @@ func TestTS27_CheckContentGood(t *testing.T) {
 	}
 }
 
-// TestTS27_CheckContentReportsAll checks that each failing file or entry
-// gets one line. The order is the root, then the entries. The check does not
-// stop at the first failure.
+// TestTS27_CheckContentReportsAll checks that the root and each failing entry
+// give one line each. The order is the root, then the entries. The check does
+// not stop at the first failure.
 func TestTS27_CheckContentReportsAll(t *testing.T) {
 	d := fixtureDir(t)
 	key := leafKeyPEM(t)
