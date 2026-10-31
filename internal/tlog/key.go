@@ -28,7 +28,7 @@ const (
 )
 
 // The rules of the files that this package reads. A note, a cursor, and the
-// signer state have no owner and mode rule: they only have a type and a size.
+// signer state have no owner and mode rule. They only have a type and a size.
 var (
 	keysDirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelf, Forbid: 0o077}
 	keyRule     = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Exact: 0o600, OneLink: true, MaxSize: maxKeySize}
@@ -119,8 +119,8 @@ func keyError(path, rule string) error {
 
 // checkKeysDir opens the keys directory and returns it as a root. The caller
 // closes it. A missing directory gives nil and no error. An entry that is not
-// a real directory (a symlink, for example), a directory with group or other
-// bits, or a directory of another owner is an error.
+// a real directory (a symlink, for example) is an error. A directory with
+// group or other bits is an error. A directory of another owner is an error.
 func checkKeysDir(root *os.Root, path string) (*os.Root, error) {
 	keys, err := safefile.OpenRoot(root, keysDir, keysDirRule)
 	switch {

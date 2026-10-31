@@ -370,9 +370,9 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 
 // readFile reads a regular file of at most maxNoteSize bytes of checkpoints/.
 // The name has the form checkpoints/<file>. The error has the file and the
-// rule in its text, and the refusal of safefile as its cause: errors.Is finds
-// the reason and the system error. A missing file gives an error for which
-// errors.Is finds fs.ErrNotExist.
+// rule in its text. It has the refusal of safefile as its cause, so errors.Is
+// finds the reason and the system error. A missing file gives an error for
+// which errors.Is finds fs.ErrNotExist.
 func (s *Spool) readFile(name string) ([]byte, error) {
 	if fault("examine", name) != nil {
 		return nil, spoolError(name, "cannot be examined")
@@ -387,8 +387,9 @@ func (s *Spool) readFile(name string) ([]byte, error) {
 	return b, nil
 }
 
-// read opens checkpoints/ again and reads the file below it, so that a swap of
-// the directory name has no effect. The steps "open" and "read" are test hooks.
+// read opens checkpoints/ again and reads the file below it. A swap of the
+// directory name then has no effect. The steps "open" and "read" are test
+// hooks.
 func (s *Spool) read(name string) ([]byte, error) {
 	if err := fault("open", name); err != nil {
 		return nil, &safefile.Error{Reason: safefile.ErrOpen, Cause: err}

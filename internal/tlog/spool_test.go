@@ -759,7 +759,7 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 	}
 }
 
-// T-S-13: a note or a cursor of maxNoteSize bytes is read, and one of
+// T-S-13: a note or a cursor of maxNoteSize bytes is read. One of
 // maxNoteSize + 1 bytes is refused for its size.
 func TestTS13_NoteSizeLimit(t *testing.T) {
 	e := newSpool(t)
