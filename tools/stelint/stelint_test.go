@@ -441,7 +441,7 @@ func TestAllHelpNamesTheSkipsAndTheErrorExit(t *testing.T) {
 			line = lines[i+1]
 		}
 	}
-	for _, want := range []string{"Go files", "symbolic links", "testdata", "exit 2", "else 0", "git", "limit", "scan"} {
+	for _, want := range []string{"Go files", "symbolic links", "testdata", "exit 2", "else 0", "git", "limit", "scan", "input over a limit"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("-all help %q does not name %q", line, want)
 		}

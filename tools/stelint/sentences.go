@@ -282,9 +282,10 @@ const (
 // also a "|" line. An indented marker line is the exception: it starts a new
 // item. After a marker line with no indent, an indented line is code, unless
 // noCode is set for it. Third, an indented "|" line where a code block can
-// start is code. In a "/* */" comment, this holds only in a list gap. At the
-// other places, such a line is a table row. When md is true, none of these
-// rules holds.
+// start is code. In a "/* */" comment, such a line is a table row. Two places
+// are the exception. In a list gap, the rules above hold as in a "//" comment.
+// In a code block, the line stays code. When md is true, none of these rules
+// holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
 		paras      []*para
@@ -314,6 +315,7 @@ func paragraphs(g []textLine, md bool) []*para {
 			// A tab moves to the next multiple of 4 columns.
 			codeIndent = tab || strings.HasPrefix(l.text, "    ") ||
 				strings.HasPrefix(strings.TrimLeft(l.text, " "), "\t")
+			indented = indented || codeIndent
 		}
 		rest, item := listItem(t)
 		cont := !md && !l.block && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))

@@ -112,13 +112,14 @@
 // text. This holds if the marker line has an indent. An unindented "|" line
 // there is a table row. After a marker line with no indent, an indented line
 // in the gap is code. An indented "|" line at another place where a code block
-// can start is code, not a table row. In a "/* */" comment, this holds only
-// in a list gap. There the rules above hold as in a "//" comment. At the other
-// places, such a line is a table row. In a text file, an indented "|" line is
-// a table row, except in a code block. In a code block, an indented line
-// stays code, also when it starts with a list marker. A fence of three
-// backticks also makes a code block. It opens only when no backtick follows
-// its first run of backticks. stelint does not count code.
+// can start is code, not a table row. In a "/* */" comment, such a line is a
+// table row. Two places are the exception. In a list gap, the rules above
+// hold as in a "//" comment. In a code block, the line stays code. In a text
+// file, an indented "|" line is a table row, except in a code block. In a
+// code block, an indented line stays code, also when it starts with a list
+// marker. A fence of three backticks also makes a code block. It opens only
+// when no backtick follows its first run of backticks. stelint does not count
+// code.
 //
 // A word is a run of characters between word breaks. A space is each rune
 // for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
