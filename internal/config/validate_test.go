@@ -721,9 +721,22 @@ func TestTU10_HtpasswdOpen(t *testing.T) {
 	if err := os.Chmod(p, 0o200); err != nil {
 		t.Fatal(err)
 	}
+	skipIfReadable(t, p)
 	if got := checkHtpasswd(tr.l, p); !strings.Contains(got, "cannot be opened") {
 		t.Errorf("file with no read permission: got %q", got)
 	}
+}
+
+// skipIfReadable skips the test when this user can still read p. Some bind
+// mounts do not apply the mode bits of the host file.
+func skipIfReadable(t *testing.T, p string) {
+	t.Helper()
+	f, err := os.Open(p)
+	if err != nil {
+		return
+	}
+	f.Close()
+	t.Skip("the file system lets this user read a file with no read permission")
 }
 
 // TestTU10_HtpasswdValueOnly checks three things (T-U-10). The Value field
@@ -878,7 +891,9 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root can open a file that has no read permission")
 		}
-		htpasswdBoth(t, file("write-only", 0o200), htpasswdOpen)
+		p := file("write-only", 0o200)
+		skipIfReadable(t, p)
+		htpasswdBoth(t, p, htpasswdOpen)
 	})
 }
 
