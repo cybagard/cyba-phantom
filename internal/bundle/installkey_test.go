@@ -16,6 +16,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 var ikKEM = hpke.DHKEM(ecdh.X25519())
@@ -110,20 +113,19 @@ func ikRead(t *testing.T, dir, name string) string {
 	return string(b)
 }
 
-// T-S-20: the first call makes both files with mode 0600, also under a umask
-// that removes the owner write bit. It sets the umask, so no t.Parallel.
+// T-S-20: the first call makes keys with mode 0700 and both files with mode
+// 0600, also under a umask that removes the owner write bit. It sets the
+// umask, so no t.Parallel.
 func TestTS20InstallKeyMade(t *testing.T) {
 	for _, umask := range []int{0o022, 0o277} {
 		dir, root := ikDir(t)
-		// A umask can strip a new directory, so the test makes it.
-		ikMust(t, os.Mkdir(filepath.Join(dir, "keys"), 0o700))
 		ikLogs(t)
 		old := syscall.Umask(umask)
 		key, err := LoadOrCreateInstallKey(root)
 		syscall.Umask(old)
 		ikMust(t, err)
-		for _, n := range []string{"install.key", "install.pub"} {
-			if fi, err := os.Lstat(filepath.Join(dir, "keys", n)); err != nil || fi.Mode() != 0o600 {
+		for n, want := range map[string]os.FileMode{"keys": os.ModeDir | 0o700, "keys/install.key": 0o600, "keys/install.pub": 0o600} {
+			if fi, err := os.Lstat(filepath.Join(dir, n)); err != nil || fi.Mode() != want {
 				t.Errorf("umask %o: %s: %v %v", umask, n, fi, err)
 			}
 		}
@@ -137,8 +139,8 @@ func TestTS20InstallKeyMade(t *testing.T) {
 }
 
 // T-S-20: the second call returns the same key and changes nothing. A seal to
-// install.pub opens with the key. After a crash between the two writes, the
-// next call writes install.pub again.
+// install.pub opens with the key. After a crash between the two files, the
+// next call saves install.pub again.
 func TestTS20InstallKeyReload(t *testing.T) {
 	dir, root := ikDir(t)
 	first, err := LoadOrCreateInstallKey(root)
@@ -171,31 +173,37 @@ func TestTS20InstallKeyReload(t *testing.T) {
 // T-S-20: each fault changes no file, makes no key, and leaves no key byte in
 // the error or the log. KEY and PUB in a text stand for the file text of a key.
 func TestTS20InstallKeyFaults(t *testing.T) {
+	const textRule = "install.key must be the base64 text of a 32-byte key"
 	cases := []struct {
 		name, key, pub, want string // want: text in the error
 		keyMode, pubMode     os.FileMode
 		extra                func(t *testing.T, keys, key string)
 	}{
-		{name: "group read bit", key: "KEY", keyMode: 0o640},
-		{name: "other read bit", key: "KEY", keyMode: 0o604},
+		{name: "group read bit", key: "KEY", keyMode: 0o640, want: "install.key safefile: file has the wrong mode"},
+		{name: "other read bit", key: "KEY", keyMode: 0o604, want: "install.key safefile: file has the wrong mode"},
 		{name: "larger than 1 KiB", key: strings.Repeat("A", 1024) + "\n", want: "too large"},
-		{name: "bad base64", key: "!!!!\n"},
-		{name: "no newline", key: "KEY-"},
-		{name: "two newlines", key: "KEY\n"},
-		{name: "wrong length", key: "KEY31"},
+		{name: "bad base64", key: "!!!!\n", want: textRule},
+		{name: "no newline", key: "KEY-", want: textRule},
+		{name: "two newlines", key: "KEY\n", want: textRule},
+		{name: "wrong length", key: "KEY31", want: textRule},
 		{name: "public key only", pub: "PUB", want: "no new key is made"},
-		{name: "public key of another key", key: "KEY", pub: "OTHER"},
-		{name: "public key with a group write bit", key: "KEY", pub: "PUB", pubMode: 0o620},
-		{name: "public key with bad text", key: "KEY", pub: "bad\n"},
-		{name: "symlink", extra: func(t *testing.T, keys, key string) {
+		{name: "public key of another key", key: "KEY", pub: "OTHER", want: "install.pub is not the public key"},
+		{name: "public key with a group write bit", key: "KEY", pub: "PUB", pubMode: 0o620, want: "install.pub safefile: file has the wrong mode"},
+		{name: "public key with bad text", key: "KEY", pub: "bad\n", want: "install.pub must be the base64 text"},
+		{name: "symlink", want: "symbolic link", extra: func(t *testing.T, keys, key string) {
 			ikMust(t, os.Mkdir(keys, 0o700), os.WriteFile(keys+"/real.key", []byte(key), 0o600), os.Symlink("real.key", keys+"/install.key"))
 		}},
-		{name: "second hard link", key: "KEY", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Link(keys+"/install.key", keys+"/copy")) }},
-		{name: "dangling link as public key", extra: func(t *testing.T, keys, _ string) {
+		{name: "second hard link", key: "KEY", want: "more than one link", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Link(keys+"/install.key", keys+"/copy")) }},
+		{name: "dangling link as public key", want: "no new key is made", extra: func(t *testing.T, keys, _ string) {
 			ikMust(t, os.Mkdir(keys, 0o700), os.Symlink("gone", keys+"/install.pub"))
 		}},
-		{name: "keys is a symlink", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Mkdir(keys+"-x", 0o700), os.Symlink("keys-x", keys)) }},
-		{name: "keys is a file", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.WriteFile(keys, nil, 0o600)) }},
+		{name: "keys is a symlink", want: "symbolic link", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Mkdir(keys+"-x", 0o700), os.Symlink("keys-x", keys)) }},
+		{name: "keys is a file", want: "wrong type", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.WriteFile(keys, nil, 0o600)) }},
+		{name: "keys with a group bit", key: "KEY", want: "keys safefile: file has the wrong mode", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Chmod(keys, 0o750)) }},
+		{name: "keys with all bits", key: "KEY", want: "keys safefile: file has the wrong mode", extra: func(t *testing.T, keys, _ string) { ikMust(t, os.Chmod(keys, 0o777)) }},
+		{name: "keys of another owner", key: "KEY", want: "keys safefile: file has the wrong owner", extra: func(t *testing.T, keys, _ string) { ikOtherOwner(t, keys) }},
+		{name: "key of another owner", key: "KEY", want: "install.key safefile: file has the wrong owner", extra: func(t *testing.T, keys, _ string) { ikOtherOwner(t, keys+"/install.key") }},
+		{name: "public key of another owner", key: "KEY", pub: "PUB", want: "install.pub safefile: file has the wrong owner", extra: func(t *testing.T, keys, _ string) { ikOtherOwner(t, keys+"/install.pub") }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -233,7 +241,8 @@ func TestTS20InstallKeyFaults(t *testing.T) {
 	}
 }
 
-// T-S-20: a file that appears at a write step is not replaced. The write fails.
+// T-S-20: a file that appears at the create or the link step stays. The call
+// fails, and only the planted file stays below keys.
 func TestTS20InstallKeyNoReplace(t *testing.T) {
 	for _, step := range []string{"create", "link"} {
 		t.Run(step, func(t *testing.T) {
@@ -244,13 +253,121 @@ func TestTS20InstallKeyNoReplace(t *testing.T) {
 					ikMust(t, os.WriteFile(planted, []byte("planted"), 0o600))
 				}
 			}
-			t.Cleanup(func() { installStep = func(string, string) {} })
+			t.Cleanup(func() { installStep = nil })
 			if key, err := LoadOrCreateInstallKey(root); key != nil || !errors.Is(err, ErrInstallKeyFault) {
 				t.Fatalf("key %v, error %v", key, err)
 			}
-			if b, err := os.ReadFile(planted); err != nil || string(b) != "planted" {
-				t.Errorf("planted file: %q %v", b, err)
+			b, err := os.ReadFile(planted)
+			ents, err2 := os.ReadDir(filepath.Dir(planted))
+			ikMust(t, err2)
+			if err != nil || string(b) != "planted" || len(ents) != 1 || ents[0].Name() != filepath.Base(planted) {
+				t.Errorf("planted file: %q %v; entries %v", b, err, ents)
 			}
 		})
+	}
+}
+
+// ikOtherOwner makes safefile treat the file at path as one of another owner.
+func ikOtherOwner(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	ikMust(t, err)
+	id, ok := safefile.Identity(fi)
+	if !ok {
+		t.Skip("this platform gives no file identity")
+	}
+	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
+}
+
+// T-S-20: keys that another directory replaces between the check and the open
+// is a fault, and no file appears in the other directory.
+func TestTS20InstallKeySwapped(t *testing.T) {
+	dir, root := ikDir(t)
+	ikMust(t, os.Mkdir(filepath.Join(dir, "keys"), 0o700), os.Mkdir(filepath.Join(dir, "other"), 0o700))
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
+		ikMust(t, os.Remove(filepath.Join(dir, "keys")), os.Symlink("other", filepath.Join(dir, "keys")))
+	}})
+	key, err := LoadOrCreateInstallKey(root)
+	ents, err2 := os.ReadDir(filepath.Join(dir, "other"))
+	ikMust(t, err2)
+	if key != nil || !errors.Is(err, ErrInstallKeyFault) || !strings.Contains(err.Error(), "changed during the check") || len(ents) != 0 {
+		t.Errorf("key %v, error %v, files in the other directory %v", key, err, ents)
+	}
+}
+
+// T-S-20: a leftover temporary name goes away, also as a link of a key file.
+func TestTS20InstallKeyLeftover(t *testing.T) {
+	for _, c := range []struct {
+		name, tmp string
+		key, pub  bool
+	}{
+		{"link of the key", "install.key.tmp", true, false},
+		{"link of the public key", "install.pub.tmp", true, true},
+		{"text and no files", "install.key.tmp", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, root := ikDir(t)
+			priv, pub := ikKey(t)
+			keys := filepath.Join(dir, "keys")
+			if c.key {
+				ikPlant(t, dir, "install.key", ikText(priv), 0o600)
+			}
+			if c.pub {
+				ikPlant(t, dir, "install.pub", ikText(pub), 0o600)
+			}
+			if c.key {
+				ikMust(t, os.Link(filepath.Join(keys, strings.TrimSuffix(c.tmp, ".tmp")), filepath.Join(keys, c.tmp)))
+			} else {
+				ikPlant(t, dir, c.tmp, "leftover\n", 0o600)
+			}
+			key, err := LoadOrCreateInstallKey(root)
+			ikMust(t, err)
+			got, _ := key.Bytes()
+			if c.key && !bytes.Equal(got, priv) || ikRead(t, dir, "install.key") != ikText(got) || ikRead(t, dir, "install.pub") != ikText(key.PublicKey().Bytes()) {
+				t.Error("the key or a file is wrong")
+			}
+			for _, n := range []string{"install.key", "install.pub"} {
+				if fi, err := os.Lstat(filepath.Join(keys, n)); err != nil || fi.Sys().(*syscall.Stat_t).Nlink != 1 {
+					t.Errorf("%s: %v %v", n, fi, err)
+				}
+			}
+			ikWalk(t, dir, ikMarkers(got)) // a temporary file is an error
+		})
+	}
+}
+
+// T-S-20: install.pub may have the read bits of group and other.
+func TestTS20InstallKeyPublicRead(t *testing.T) {
+	dir, root := ikDir(t)
+	priv, pub := ikKey(t)
+	ikPlant(t, dir, "install.key", ikText(priv), 0o600)
+	ikPlant(t, dir, "install.pub", ikText(pub), 0o644)
+	before := ikWalk(t, dir, ikMarkers(priv), "install.pub")
+	key, err := LoadOrCreateInstallKey(root)
+	ikMust(t, err)
+	if got, _ := key.Bytes(); !bytes.Equal(got, priv) || ikWalk(t, dir, ikMarkers(priv), "install.pub") != before {
+		t.Error("the key or a file is wrong")
+	}
+}
+
+// T-S-20: a call leaves no open file descriptor. It sets no t.Parallel, as
+// another test can open a file at the same time.
+func TestTS20InstallKeyDescriptors(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	count := func() int {
+		ents, err := os.ReadDir("/proc/self/fd")
+		ikMust(t, err)
+		return len(ents)
+	}
+	_, root := ikDir(t)
+	before := count()
+	for i := range 2 {
+		_, err := LoadOrCreateInstallKey(root)
+		ikMust(t, err)
+		if after := count(); after != before {
+			t.Errorf("call %d: %d descriptors before, %d after", i+1, before, after)
+		}
 	}
 }
