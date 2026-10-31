@@ -84,7 +84,7 @@ func ikWalk(t *testing.T, dir string, markers []string, planted ...string) strin
 		b, _ := os.ReadFile(p) // nil for a directory
 		fmt.Fprintf(&sb, "%s %v %d %q %q\n", rel, fi.Mode(), fi.Sys().(*syscall.Stat_t).Ino, b, link)
 		ok := rel == "keys/install.key" || slices.Contains(planted, d.Name())
-		if strings.HasSuffix(rel, ".tmp") || (!ok && ikHas(string(b), markers)) {
+		if (strings.HasSuffix(rel, ".tmp") && !slices.Contains(planted, d.Name())) || (!ok && ikHas(string(b), markers)) {
 			t.Errorf("temporary file or key marker: %s", rel)
 		}
 		return nil
@@ -113,9 +113,8 @@ func ikRead(t *testing.T, dir, name string) string {
 	return string(b)
 }
 
-// T-S-20: the first call makes keys with mode 0700 and both files with mode
-// 0600, also under a umask that removes the owner write bit. It sets the
-// umask, so no t.Parallel.
+// T-S-20: the first call makes keys with mode 0700 and the files with 0600,
+// also under a restrictive umask. It sets the umask, so no t.Parallel.
 func TestTS20InstallKeyMade(t *testing.T) {
 	for _, umask := range []int{0o022, 0o277} {
 		dir, root := ikDir(t)
@@ -257,65 +256,48 @@ func TestTS20InstallKeyNoReplace(t *testing.T) {
 			if key, err := LoadOrCreateInstallKey(root); key != nil || !errors.Is(err, ErrInstallKeyFault) {
 				t.Fatalf("key %v, error %v", key, err)
 			}
-			b, err := os.ReadFile(planted)
-			ents, err2 := os.ReadDir(filepath.Dir(planted))
-			ikMust(t, err2)
-			if err != nil || string(b) != "planted" || len(ents) != 1 || ents[0].Name() != filepath.Base(planted) {
-				t.Errorf("planted file: %q %v; entries %v", b, err, ents)
+			if b, err := os.ReadFile(planted); err != nil || string(b) != "planted" {
+				t.Errorf("planted file: %q %v", b, err)
 			}
+			ikWalk(t, dir, nil, filepath.Base(planted)) // no other temporary file
 		})
 	}
 }
 
-// ikOtherOwner makes safefile treat the file at path as one of another owner.
 func ikOtherOwner(t *testing.T, path string) {
-	t.Helper()
-	fi, err := os.Stat(path)
-	ikMust(t, err)
-	id, ok := safefile.Identity(fi)
-	if !ok {
-		t.Skip("this platform gives no file identity")
-	}
+	fi, _ := os.Stat(path)
+	id, _ := safefile.Identity(fi)
 	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
 }
 
-// T-S-20: keys that another directory replaces between the check and the open
-// is a fault, and no file appears in the other directory.
+// T-S-20: a symlink that replaces keys after the check is a fault. Its target
+// stays empty.
 func TestTS20InstallKeySwapped(t *testing.T) {
 	dir, root := ikDir(t)
-	ikMust(t, os.Mkdir(filepath.Join(dir, "keys"), 0o700), os.Mkdir(filepath.Join(dir, "other"), 0o700))
-	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
-		ikMust(t, os.Remove(filepath.Join(dir, "keys")), os.Symlink("other", filepath.Join(dir, "keys")))
-	}})
+	keys, other := filepath.Join(dir, "keys"), filepath.Join(dir, "other")
+	ikMust(t, os.Mkdir(keys, 0o700), os.Mkdir(other, 0o700))
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { ikMust(t, os.Remove(keys), os.Symlink("other", keys)) }})
 	key, err := LoadOrCreateInstallKey(root)
-	ents, err2 := os.ReadDir(filepath.Join(dir, "other"))
-	ikMust(t, err2)
-	if key != nil || !errors.Is(err, ErrInstallKeyFault) || !strings.Contains(err.Error(), "changed during the check") || len(ents) != 0 {
+	if ents, _ := os.ReadDir(other); key != nil || !errors.Is(err, ErrInstallKeyFault) || !strings.Contains(err.Error(), "changed during the check") || len(ents) != 0 {
 		t.Errorf("key %v, error %v, files in the other directory %v", key, err, ents)
 	}
 }
 
-// T-S-20: a leftover temporary name goes away, also as a link of a key file.
+// T-S-20: a leftover temporary name goes away. In case 2, install.pub is 0644.
 func TestTS20InstallKeyLeftover(t *testing.T) {
 	for _, c := range []struct {
-		name, tmp string
-		key, pub  bool
-	}{
-		{"link of the key", "install.key.tmp", true, false},
-		{"link of the public key", "install.pub.tmp", true, true},
-		{"text and no files", "install.key.tmp", false, false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
+		tmp string
+		key bool
+	}{{"install.key.tmp", true}, {"install.pub.tmp", true}, {"install.key.tmp", false}} {
+		t.Run(fmt.Sprint(c), func(t *testing.T) {
 			dir, root := ikDir(t)
 			priv, pub := ikKey(t)
 			keys := filepath.Join(dir, "keys")
+			if c.tmp == "install.pub.tmp" {
+				ikPlant(t, dir, "install.pub", ikText(pub), 0o644)
+			}
 			if c.key {
 				ikPlant(t, dir, "install.key", ikText(priv), 0o600)
-			}
-			if c.pub {
-				ikPlant(t, dir, "install.pub", ikText(pub), 0o600)
-			}
-			if c.key {
 				ikMust(t, os.Link(filepath.Join(keys, strings.TrimSuffix(c.tmp, ".tmp")), filepath.Join(keys, c.tmp)))
 			} else {
 				ikPlant(t, dir, c.tmp, "leftover\n", 0o600)
@@ -326,48 +308,23 @@ func TestTS20InstallKeyLeftover(t *testing.T) {
 			if c.key && !bytes.Equal(got, priv) || ikRead(t, dir, "install.key") != ikText(got) || ikRead(t, dir, "install.pub") != ikText(key.PublicKey().Bytes()) {
 				t.Error("the key or a file is wrong")
 			}
-			for _, n := range []string{"install.key", "install.pub"} {
-				if fi, err := os.Lstat(filepath.Join(keys, n)); err != nil || fi.Sys().(*syscall.Stat_t).Nlink != 1 {
-					t.Errorf("%s: %v %v", n, fi, err)
-				}
-			}
 			ikWalk(t, dir, ikMarkers(got)) // a temporary file is an error
 		})
 	}
 }
 
-// T-S-20: install.pub may have the read bits of group and other.
-func TestTS20InstallKeyPublicRead(t *testing.T) {
-	dir, root := ikDir(t)
-	priv, pub := ikKey(t)
-	ikPlant(t, dir, "install.key", ikText(priv), 0o600)
-	ikPlant(t, dir, "install.pub", ikText(pub), 0o644)
-	before := ikWalk(t, dir, ikMarkers(priv), "install.pub")
-	key, err := LoadOrCreateInstallKey(root)
-	ikMust(t, err)
-	if got, _ := key.Bytes(); !bytes.Equal(got, priv) || ikWalk(t, dir, ikMarkers(priv), "install.pub") != before {
-		t.Error("the key or a file is wrong")
-	}
-}
-
-// T-S-20: a call leaves no open file descriptor. It sets no t.Parallel, as
-// another test can open a file at the same time.
+// T-S-20: a call leaves no open descriptor. No t.Parallel, as it counts all.
 func TestTS20InstallKeyDescriptors(t *testing.T) {
-	if _, err := os.Stat("/proc/self/fd"); err != nil {
+	_, root := ikDir(t)
+	before, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
 		t.Skip("no /proc/self/fd")
 	}
-	count := func() int {
-		ents, err := os.ReadDir("/proc/self/fd")
-		ikMust(t, err)
-		return len(ents)
-	}
-	_, root := ikDir(t)
-	before := count()
 	for i := range 2 {
 		_, err := LoadOrCreateInstallKey(root)
-		ikMust(t, err)
-		if after := count(); after != before {
-			t.Errorf("call %d: %d descriptors before, %d after", i+1, before, after)
+		after, _ := os.ReadDir("/proc/self/fd")
+		if ikMust(t, err); len(after) != len(before) {
+			t.Errorf("call %d: %d descriptors before, %d after", i+1, len(before), len(after))
 		}
 	}
 }

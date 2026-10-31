@@ -58,7 +58,6 @@ func installKEM() hpke.KEM { return hpke.DHKEM(ecdh.X25519()) }
 func LoadOrCreateInstallKey(state *os.Root) (hpke.PrivateKey, error) {
 	_, err := state.Lstat(installKeysDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		// A umask can remove bits at the mkdir, so Chmod sets mode 0700.
 		if err = state.MkdirAll(installKeysDir, 0o700); err == nil {
 			err = state.Chmod(installKeysDir, 0o700)
 		}
