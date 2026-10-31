@@ -113,7 +113,7 @@
 // there is a table row. After a marker line with no indent, an indented line
 // in the gap is code. An indented "|" line at another place where a code block
 // can start is code, not a table row. In a "/* */" comment, an indented "|"
-// line is a table row. Two places are the exception. In a list gap, the rules
+// line is a table row. There are two exceptions. In a list gap, the rules
 // above hold as in a "//" comment. In a code block, the line stays code. In a
 // text file, an indented "|" line is a table row, except in a code block. In
 // a code block, an indented line stays code, also when it starts with a list
