@@ -271,9 +271,9 @@ const (
 // code, separator rows and trailer lines. A line is code in a fence of three
 // backticks. A fence opens only when no backtick follows its first run of
 // backticks. A line with a tab or two spaces of indent is also code. When md
-// is true, it needs a tab or four spaces. This holds when no paragraph or list
-// item is open. In a code block, each indented line stays code. A line with
-// noCode set never starts a code block by its indent.
+// is true, it needs four spaces, or a tab after up to three spaces. This holds
+// when no paragraph or list item is open. In a code block, each indented line
+// stays code. A line with noCode set never starts a code block by its indent.
 // When md is false, three more rules hold. First, a list marker, "#" or "|"
 // line with no indent continues an open paragraph. This does not hold after a
 // line that ends with a colon, or in a "/* */" comment. Second, a blank line
@@ -282,8 +282,9 @@ const (
 // also a "|" line. An indented marker line is the exception: it starts a new
 // item. After a marker line with no indent, an indented line is code, unless
 // noCode is set for it. Third, an indented "|" line where a code block can
-// start is code. A "/* */" line is not such a line. When md is true, none of
-// these rules holds.
+// start is code. In a "/* */" comment, this holds only in a list gap. At the
+// other places, such a line is a table row. When md is true, none of these
+// rules holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
 		paras      []*para
@@ -306,18 +307,22 @@ func paragraphs(g []textLine, md bool) []*para {
 	}
 	for _, l := range g {
 		t := strings.TrimSpace(l.text)
-		indented := strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "  ")
-		deep := indented
+		tab := strings.HasPrefix(l.text, "\t")
+		indented := tab || strings.HasPrefix(l.text, "  ")
+		codeIndent := indented
 		if md {
-			deep = strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "    ")
+			// A tab moves to the next multiple of 4 columns.
+			codeIndent = tab || strings.HasPrefix(l.text, "    ") ||
+				strings.HasPrefix(strings.TrimLeft(l.text, " "), "\t")
 		}
 		rest, item := listItem(t)
 		cont := !md && !l.block && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
-		codeStart := !md && !l.block && indented && !l.noCode && mode != modePara && mode != modeList
-		opens := strings.HasPrefix(t, "```") &&
+		codeStart := !md && indented && !l.noCode && mode != modePara &&
+			mode != modeList && !(l.block && mode == modeNone)
+		fenceLine := strings.HasPrefix(t, "```") &&
 			(fence || !strings.Contains(strings.TrimLeft(t, "`"), "`"))
 		switch {
-		case opens:
+		case fenceLine:
 			end()
 			fence = !fence
 			mode = modeNone
@@ -355,7 +360,7 @@ func paragraphs(g []textLine, md bool) []*para {
 			mode = modeList
 		case indented && (mode == modePara || mode == modeList):
 			add(t, l.line)
-		case deep && !l.noCode:
+		case codeIndent && !l.noCode:
 			end()
 			mode = modeCode
 		default:
