@@ -737,7 +737,7 @@ func TestSentenceRules(t *testing.T) {
 		{"code block with two spaces", "//\n//  " + ws(30) + "\n", nil},
 		{"comment line with two spaces after a blank line is code", "// Text.\n//\n//  " + ws(30) + ".\n", nil},
 		{"bar row in a block comment is a table row", "/*\n * Text.\n *\n *  | " + ws(30) + " |\n */", []sentence{{4, 4, 30}}},
-		{"indented bar row after a list gap in a block comment is item text", "/*\n * - a\n *\n *  | " + ws(30) + " |\n */", nil},
+		{"indented bar row after an unindented item and a blank line in a block comment is code", "/*\n * - a\n *\n *  | " + ws(30) + " |\n */", nil},
 		{"indented marker and bar row in a block comment list gap", "/*\n *  - " + ws(5) + "\n *\n *  | " + ws(15) + " | " + ws(15) + "\n */", []sentence{{4, 4, 32}}},
 		{"backticks with a later backtick are no fence", "// ```x``` " + ws(30) + ".\n// " + ws(30) + ".\n", []sentence{{1, 1, 31}, {2, 2, 30}}},
 		{"fence with an info string is a fence", "// ```go\n// " + ws(30) + "\n// ```\n", nil},
