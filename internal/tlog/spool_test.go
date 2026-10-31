@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 var spoolTargets = []string{"https://a.test/put", "https://b.test/put"}
@@ -569,7 +572,19 @@ func TestTS13_UnreadableNote(t *testing.T) {
 		e.add(t, size)
 	}
 	must(t, os.Chmod(filepath.Join(e.dir, e.noteFile(2)), 0))
+	opens := 0
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == "2.note" {
+			opens++
+		}
+	}})
 	f := newFake()
+	defer func() {
+		// The first Publish deletes the note. Its cause needs no second open.
+		if opens != 1 {
+			t.Errorf("%d opens of the note, want 1", opens)
+		}
+	}()
 	for i, target := range spoolTargets {
 		err := e.Publish(i, f)
 		if i == 0 && (err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "cannot be opened") || !errors.Is(err, syscall.EACCES)) {
@@ -596,14 +611,12 @@ func TestTS13_OpenErrorIsNotABadNote(t *testing.T) {
 		e.add(t, size)
 	}
 	path := filepath.Join(e.dir, e.noteFile(2))
-	calls := 0
-	afterLstat = func() { // the reads are note 1, the cursor, and note 2
-		if calls++; calls == 3 {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == "2.note" {
 			must(t, os.WriteFile(path+".swap", nil, 0o600))
 			must(t, os.Rename(path+".swap", path))
 		}
-	}
-	t.Cleanup(func() { afterLstat = nil })
+	}})
 	f := newFake()
 	err := e.Publish(0, f)
 	if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "changed between") {
@@ -731,13 +744,11 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 	for size := uint64(1); size <= 3; size++ {
 		e.add(t, size)
 	}
-	calls := 0
-	afterLstat = func() { // the reads are note 1, the cursor, and note 2
-		if calls++; calls == 3 {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == "2.note" {
 			must(t, os.Remove(filepath.Join(e.dir, e.noteFile(2))))
 		}
-	}
-	t.Cleanup(func() { afterLstat = nil })
+	}})
 	f := newFake()
 	err := e.Publish(0, f)
 	if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "is gone before it is read") || strings.Contains(err.Error(), "cannot be opened") {
@@ -745,6 +756,41 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 	}
 	if !slices.Equal(f.got[spoolTargets[0]], []uint64{1}) || !slices.Equal(e.files(t), []uint64{1, 3}) || e.Stats().Rejected != 0 {
 		t.Fatalf("sent %v, on disk %v, rejected %d", f.got, e.files(t), e.Stats().Rejected)
+	}
+}
+
+// T-S-13: a note or a cursor of maxNoteSize bytes is read, and one of
+// maxNoteSize + 1 bytes is refused for its size.
+func TestTS13_NoteSizeLimit(t *testing.T) {
+	e := newSpool(t)
+	for _, name := range []string{noteName(5), e.cursorName(0)} {
+		must(t, os.WriteFile(filepath.Join(e.dir, name), bytes.Repeat([]byte("x"), maxNoteSize), 0o600))
+		if b, err := e.readFile(name); err != nil || len(b) != maxNoteSize {
+			t.Errorf("%s at the limit: %d bytes, %v; want the bytes", name, len(b), err)
+		}
+		must(t, os.WriteFile(filepath.Join(e.dir, name), bytes.Repeat([]byte("x"), maxNoteSize+1), 0o600))
+		if _, err := e.readFile(name); !errors.Is(err, safefile.ErrSize) || !strings.Contains(err.Error(), "must not be larger than 1 KiB") {
+			t.Errorf("%s above the limit: %v; want the size error", name, err)
+		}
+	}
+}
+
+// T-S-13: a FIFO that replaces a note after the check is refused as an
+// entry that is not a regular file, and Publish returns.
+func TestTS13_NoteFifoSwapAfterCheck(t *testing.T) {
+	e := newSpool(t)
+	for size := uint64(1); size <= 2; size++ {
+		e.add(t, size)
+	}
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == "2.note" {
+			must(t, os.Remove(filepath.Join(e.dir, e.noteFile(2))))
+			mustFifo(t, filepath.Join(e.dir, e.noteFile(2)))
+		}
+	}})
+	err := within(t, func() error { return e.Publish(0, newFake()) })
+	if err == nil || !strings.Contains(err.Error(), "2.note: must be a regular file") {
+		t.Errorf("Publish error = %v, want the type error", err)
 	}
 }
 

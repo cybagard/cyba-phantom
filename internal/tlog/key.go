@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -14,15 +13,55 @@ import (
 	"strings"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // The key files are at fixed names below the state directory (ADR-020).
 const (
 	keysDir    = "keys"
-	keyName    = "keys/checkpoint.key"
-	vkeyName   = "keys/checkpoint.vkey"
+	keyFile    = "checkpoint.key"
+	vkeyFile   = "checkpoint.vkey"
+	keyName    = keysDir + "/" + keyFile
+	vkeyName   = keysDir + "/" + vkeyFile
 	maxKeySize = 1024
 )
+
+// The rules of the files that this package reads. A note, a cursor, and the
+// signer state have no owner and mode rule: they only have a type and a size.
+var (
+	keysDirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelf, Forbid: 0o077}
+	keyRule     = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Exact: 0o600, OneLink: true, MaxSize: maxKeySize}
+	vkeyRule    = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: maxKeySize}
+	noteRule    = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerAny, MaxSize: maxNoteSize}
+)
+
+// ruleText gives the fixed text of a refusal of safefile for a file with the
+// size limit capBytes. It has no path and no file bytes.
+func ruleText(err error, capBytes int64) string {
+	switch {
+	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
+		return "must be a regular file and not a symlink"
+	case errors.Is(err, safefile.ErrOwner):
+		return "must be owned by the user that runs the sensor"
+	case errors.Is(err, safefile.ErrMode):
+		return fmt.Sprintf("mode must be exactly %04o", keyRule.Exact)
+	case errors.Is(err, safefile.ErrLinks):
+		return "must have one link only"
+	case errors.Is(err, safefile.ErrSize):
+		return fmt.Sprintf("must not be larger than %d KiB", capBytes>>10)
+	case errors.Is(err, safefile.ErrChanged):
+		return "changed between the check and the read"
+	case errors.Is(err, safefile.ErrOpen):
+		return "cannot be opened"
+	}
+	return "cannot be read"
+}
+
+// missing reports a file that safefile did not find.
+func missing(err error) bool {
+	return errors.Is(err, safefile.ErrExamine) && errors.Is(err, fs.ErrNotExist)
+}
 
 // VKeyName is the public key file below the state directory, for the code
 // outside this package.
@@ -53,15 +92,16 @@ func LoadOrCreateSigner(root *os.Root, log *slog.Logger, origin string, signed b
 		log = slog.New(slog.DiscardHandler)
 	}
 	path := filepath.Join(root.Name(), keyName)
-	keysExist, err := checkKeysDir(root, path)
+	keys, err := checkKeysDir(root, path)
 	if err != nil {
 		return nil, err
 	}
-	if keysExist {
-		fi, err := root.Lstat(keyName)
+	if keys != nil {
+		defer keys.Close()
+		_, err := keys.Lstat(keyFile)
 		switch {
 		case err == nil:
-			return loadSigner(root, log, path, origin, fi)
+			return loadSigner(keys, log, path, origin)
 		case !errors.Is(err, fs.ErrNotExist):
 			return nil, keyError(path, "cannot be examined")
 		}
@@ -77,24 +117,28 @@ func keyError(path, rule string) error {
 	return fmt.Errorf("checkpoint key %s: %s", path, rule)
 }
 
-// checkKeysDir reports whether the keys directory exists. An entry that is
-// not a real directory (a symlink, for example) is an error.
-func checkKeysDir(root *os.Root, path string) (bool, error) {
-	fi, err := root.Lstat(keysDir)
+// checkKeysDir opens the keys directory and returns it as a root. The caller
+// closes it. A missing directory gives nil and no error. An entry that is not
+// a real directory (a symlink, for example), a directory with group or other
+// bits, or a directory of another owner is an error.
+func checkKeysDir(root *os.Root, path string) (*os.Root, error) {
+	keys, err := safefile.OpenRoot(root, keysDir, keysDirRule)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return false, nil
-	case err != nil:
-		return false, keyError(path, "keys directory cannot be examined")
-	case !fi.IsDir():
-		return false, keyError(path, "keys must be a real directory and not a symlink")
+	case err == nil:
+		return keys, nil
+	case missing(err):
+		return nil, nil
+	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
+		return nil, keyError(path, "keys must be a real directory and not a symlink")
+	case errors.Is(err, safefile.ErrOwner):
+		return nil, keyError(path, "keys must be owned by the user that runs the sensor")
+	case errors.Is(err, safefile.ErrMode):
+		return nil, keyError(path, "keys must not allow group or other access")
+	case errors.Is(err, safefile.ErrChanged):
+		return nil, keyError(path, "keys changed between the check and the open")
 	}
-	return true, nil
+	return nil, keyError(path, "keys directory cannot be examined")
 }
-
-// afterLstat is a test hook. Production code leaves it nil. A test sets it to
-// change the file system between the Lstat and the open.
-var afterLstat func()
 
 // faultAt is a test hook. Production code leaves it nil. A test sets it to
 // return an error for a step of a name. The steps are "examine", "open", and
@@ -108,66 +152,18 @@ func fault(step, name string) error {
 	return faultAt(step, name)
 }
 
-// openChecked opens name for read and compares the open file with lfi, the
-// Lstat result of the same name. os.Root adds O_NOFOLLOW itself, but it still
-// follows a symlink that stays inside the root. The os.SameFile comparison
-// finds such a change. The returned string is the failed rule, or empty.
-func openChecked(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string) {
-	f, fi, rule, _ := openCheckedCause(root, name, lfi)
-	return f, fi, rule
-}
-
-// openCheckedCause is openChecked with one more result: the error that
-// OpenFile returned, if it failed.
-func openCheckedCause(root *os.Root, name string, lfi fs.FileInfo) (*os.File, fs.FileInfo, string, error) {
-	if !lfi.Mode().IsRegular() { // also a symlink: Lstat does not follow it
-		return nil, nil, "must be a regular file and not a symlink", nil
+// loadSigner loads the key below keys, the keys directory that the caller
+// checked and opened. Every later access goes through keys, so a swap of the
+// directory name after the check has no effect.
+func loadSigner(keys *os.Root, log *slog.Logger, path, origin string) (note.Signer, error) {
+	// A crash after the link can leave a second name of the key file. The key
+	// rule needs one link, so the temporary name goes before the check.
+	if err := keys.Remove(keyFile + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Warn("checkpoint key temporary file cannot be removed")
 	}
-	if afterLstat != nil {
-		afterLstat()
-	}
-	err := fault("open", name)
-	var f *os.File
-	if err == nil {
-		f, err = root.OpenFile(name, readFlags, 0)
-	}
+	b, err := safefile.ReadFile(keys, keyFile, keyRule)
 	if err != nil {
-		return nil, nil, "cannot be opened", err
-	}
-	fi, err := f.Stat() // the open file, not the name
-	rule := ""
-	switch {
-	case err != nil:
-		rule = "cannot be examined"
-	case !os.SameFile(lfi, fi):
-		rule = "changed between the check and the open"
-	case !fi.Mode().IsRegular():
-		rule = "must be a regular file"
-	case fi.Size() > maxKeySize:
-		rule = "must not be larger than 1 KiB"
-	}
-	if rule != "" {
-		f.Close()
-		return nil, nil, rule, nil
-	}
-	return f, fi, "", nil
-}
-
-func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.FileInfo) (note.Signer, error) {
-	f, fi, rule := openChecked(root, keyName, lfi)
-	if rule != "" {
-		return nil, keyError(path, rule)
-	}
-	defer f.Close()
-	switch {
-	case !ownedByEUID(fi):
-		return nil, keyError(path, "must be owned by the user that runs the sensor")
-	case fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0o600:
-		return nil, keyError(path, "mode must be exactly 0600")
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxKeySize+1))
-	if err != nil || len(b) > maxKeySize {
-		return nil, keyError(path, "cannot be read within 1 KiB")
+		return nil, keyError(path, ruleText(err, maxKeySize))
 	}
 	signer, err := note.NewSigner(string(b)) // the error text of note stays out of our error
 	if err != nil {
@@ -185,48 +181,30 @@ func loadSigner(root *os.Root, log *slog.Logger, path, origin string, lfi fs.Fil
 	clear(b)
 
 	log.Info("checkpoint signing key loaded", "name", origin, "key_hash", fmt.Sprintf("%08x", signer.KeyHash()), "vkey", vkey)
-	// A crash after the link can leave a second name of the key file.
-	if err := root.Remove(keyName + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Warn("checkpoint key temporary file cannot be removed")
-	}
-	checkVkey(root, log, vkey)
+	checkVkey(keys, log, vkey)
 	return signer, nil
 }
 
 // checkVkey writes the public key file again if it is missing. If the file
-// exists, checkVkey reads it. It uses the Lstat, the open checks, and the 1 KiB
-// limit of the key file. It does not check the owner and the mode. It warns
-// when the text differs from vkey. The warnings have fixed text and never have
-// file bytes.
-func checkVkey(root *os.Root, log *slog.Logger, vkey string) {
+// exists, checkVkey reads it with the type and size rule of the key file. It
+// does not check the owner and the mode. It warns when the text differs from
+// vkey. The warnings have fixed text and never have file bytes.
+func checkVkey(keys *os.Root, log *slog.Logger, vkey string) {
 	const (
 		cannotCheck = "checkpoint public key file cannot be checked; the log has the correct key"
 		differs     = "checkpoint public key file differs from the key; the log has the correct key"
 	)
-	fi, err := root.Lstat(vkeyName)
-	if errors.Is(err, fs.ErrNotExist) {
-		err = writeNew(root, vkeyName, vkey+"\n")
+	b, err := safefile.ReadFile(keys, vkeyFile, vkeyRule)
+	switch {
+	case missing(err):
+		err = writeNew(keys, vkeyFile, vkey+"\n")
 		if err == nil {
-			err = syncDir(root, keysDir)
+			err = syncDir(keys, ".")
 		}
 		if err != nil {
 			log.Warn("checkpoint public key file cannot be written")
 		}
-		return
-	}
-	if err != nil {
-		log.Warn(cannotCheck)
-		return
-	}
-	f, _, rule := openChecked(root, vkeyName, fi)
-	if rule != "" {
-		log.Warn(cannotCheck)
-		return
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxKeySize+1))
-	switch {
-	case err != nil || len(b) > maxKeySize:
+	case err != nil:
 		log.Warn(cannotCheck)
 	case strings.TrimSpace(string(b)) != vkey:
 		log.Warn(differs)
