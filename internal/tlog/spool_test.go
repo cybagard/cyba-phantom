@@ -775,22 +775,26 @@ func TestTS13_NoteSizeLimit(t *testing.T) {
 	}
 }
 
-// T-S-13: a FIFO that replaces a note after the check is refused as an
-// entry that is not a regular file, and Publish returns.
+// T-S-13: a FIFO renamed over a note after the check is refused as a changed
+// file. Publish does not block. The note is kept.
 func TestTS13_NoteFifoSwapAfterCheck(t *testing.T) {
 	e := newSpool(t)
 	for size := uint64(1); size <= 2; size++ {
 		e.add(t, size)
 	}
+	fifo := filepath.Join(e.dir, "swap.fifo")
+	mustFifo(t, fifo)
 	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
 		if name == "2.note" {
-			must(t, os.Remove(filepath.Join(e.dir, e.noteFile(2))))
-			mustFifo(t, filepath.Join(e.dir, e.noteFile(2)))
+			must(t, os.Rename(fifo, filepath.Join(e.dir, e.noteFile(2))))
 		}
 	}})
 	err := within(t, func() error { return e.Publish(0, newFake()) })
-	if err == nil || !strings.Contains(err.Error(), "2.note: must be a regular file") {
-		t.Errorf("Publish error = %v, want the type error", err)
+	if err == nil || !errors.Is(err, safefile.ErrChanged) || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "changed between") {
+		t.Errorf("Publish error = %v, want the changed-file error for 2.note", err)
+	}
+	if _, err := os.Lstat(filepath.Join(e.dir, e.noteFile(2))); err != nil {
+		t.Errorf("note 2 after Publish: %v; want it kept", err)
 	}
 }
 

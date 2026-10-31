@@ -291,17 +291,18 @@ func TestTS13_KeyLinkIsTemporaryName(t *testing.T) {
 	}
 }
 
-// T-S-13: a FIFO that replaces the key, the public key, or the signer state
-// after the check is refused, and the call returns. The public key gives a
+// T-S-13: a FIFO renamed over a key file or the state after the check is
+// refused as a changed file. The call does not block. The public key gives a
 // warning and the load goes on.
 func TestTS13_FifoSwapAfterCheck(t *testing.T) {
 	for _, name := range []string{keyName, vkeyName, stateName} {
 		t.Run(name, func(t *testing.T) {
 			root, dir, _ := firstStart(t)
+			fifo := filepath.Join(dir, name+".fifo")
+			mustFifo(t, fifo)
 			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(got string) {
 				if got == filepath.Base(name) {
-					must(t, os.Remove(filepath.Join(dir, name)))
-					mustFifo(t, filepath.Join(dir, name))
+					must(t, os.Rename(fifo, filepath.Join(dir, name)))
 				}
 			}})
 			log, buf := testLogger()
@@ -314,8 +315,8 @@ func TestTS13_FifoSwapAfterCheck(t *testing.T) {
 				return err
 			})
 			if warned := strings.Contains(buf.String(), "public key file cannot be checked"); (name == vkeyName) != (err == nil) || warned != (name == vkeyName) ||
-				(err != nil && !strings.Contains(err.Error(), "must be a regular file")) {
-				t.Errorf("error %v, log %s; want the type error (a warning for the public key)", err, buf)
+				(err != nil && !strings.Contains(err.Error(), "changed between the check and the read")) {
+				t.Errorf("error %v, log %s; want the changed-file error (a warning for the public key)", err, buf)
 			}
 		})
 	}
