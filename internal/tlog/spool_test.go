@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -759,8 +760,64 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 	}
 }
 
+// T-S-13: a fault of checkpoints/ between the cursor read and the note read is
+// not a property of the note. A swap of the name for an in-root symlink, and a
+// mode 0, each stop Publish with an error that names the note. Publish sends
+// nothing, counts no bad note, and deletes no note.
+func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault func(t *testing.T, dir string) (notes string)
+	}{
+		{"symlink", func(t *testing.T, dir string) string {
+			must(t, os.Rename(filepath.Join(dir, spoolDir), filepath.Join(dir, spoolDir+".real")))
+			mustSymlink(t, spoolDir+".real", filepath.Join(dir, spoolDir))
+			return spoolDir + ".real"
+		}},
+		{"mode 0", func(t *testing.T, dir string) string {
+			if os.Geteuid() == 0 {
+				t.Skip("root can open a directory with mode 0")
+			}
+			p := filepath.Join(dir, spoolDir)
+			t.Cleanup(func() { _ = os.Chmod(p, 0o700) })
+			must(t, os.Chmod(p, 0))
+			return spoolDir
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSpool(t)
+			e.add(t, 1)
+			e.add(t, 2)
+			var notes string
+			opens := 0
+			safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+				// The first open of checkpoints/ is for the cursor, the second for note 1.
+				if name == spoolDir {
+					if opens++; opens == 2 {
+						notes = tc.fault(t, e.dir)
+					}
+				}
+			}})
+			f := newFake()
+			err := e.Publish(0, f)
+			if err == nil || !strings.Contains(err.Error(), "1.note") || errors.Is(err, errBadNote) || errors.As(err, new(entryError)) {
+				t.Fatalf("Publish error = %v, want an error for 1.note that is not a bad note", err)
+			}
+			if len(f.got) != 0 || e.Stats().Rejected != 0 {
+				t.Errorf("sent %v, rejected %d; want nothing", f.got, e.Stats().Rejected)
+			}
+			must(t, os.Chmod(filepath.Join(e.dir, notes), 0o700))
+			for size := uint64(1); size <= 2; size++ {
+				if _, err := os.Lstat(filepath.Join(e.dir, notes, path.Base(e.noteFile(size)))); err != nil {
+					t.Errorf("note %d: %v; want it kept", size, err)
+				}
+			}
+		})
+	}
+}
+
 // T-S-13: a note or a cursor of maxNoteSize bytes is read. One of
-// maxNoteSize + 1 bytes is refused for its size.
+// maxNoteSize + 1 bytes is too large, and the read refuses it.
 func TestTS13_NoteSizeLimit(t *testing.T) {
 	e := newSpool(t)
 	for _, name := range []string{noteName(5), e.cursorName(0)} {
@@ -775,8 +832,8 @@ func TestTS13_NoteSizeLimit(t *testing.T) {
 	}
 }
 
-// T-S-13: a FIFO renamed over a note after the check is refused as a changed
-// file. Publish does not block. The note is kept.
+// T-S-13: a FIFO renamed over a note after the check is a changed file, and
+// Publish refuses it. Publish does not block. The note is kept.
 func TestTS13_NoteFifoSwapAfterCheck(t *testing.T) {
 	e := newSpool(t)
 	for size := uint64(1); size <= 2; size++ {

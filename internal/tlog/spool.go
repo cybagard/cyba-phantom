@@ -353,6 +353,8 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
 	msg, err := s.readFile(name)
 	switch {
+	case errors.Is(err, safefile.ErrExamine): // a fault of checkpoints/ has the cause of its refusal
+		return nil, err
 	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return nil, entryError{err}
 	case errors.Is(err, safefile.ErrSize):
@@ -382,7 +384,7 @@ func (s *Spool) readFile(name string) ([]byte, error) {
 	case missing(err), errors.Is(err, safefile.ErrOpen) && errors.Is(err, fs.ErrNotExist):
 		return nil, causedError{spoolError(name, "is gone before it is read"), err}
 	case err != nil:
-		return nil, causedError{spoolError(name, ruleText(err, maxNoteSize)), err}
+		return nil, causedError{spoolError(name, ruleText(err, noteRule)), err}
 	}
 	return b, nil
 }
@@ -399,7 +401,7 @@ func (s *Spool) read(name string) ([]byte, error) {
 	case missing(err):
 		return nil, err
 	case err != nil: // not a property of the note
-		return nil, &safefile.Error{Reason: safefile.ErrExamine}
+		return nil, &safefile.Error{Reason: safefile.ErrExamine, Cause: err}
 	}
 	defer dir.Close()
 	b, err := safefile.ReadFile(dir, path.Base(name), noteRule)

@@ -37,19 +37,22 @@ var (
 )
 
 // ruleText gives the fixed text of a refusal of safefile for a file with the
-// size limit capBytes. It has no path and no file bytes.
-func ruleText(err error, capBytes int64) string {
+// rule r. It has no path and no file bytes.
+func ruleText(err error, r safefile.Rule) string {
 	switch {
 	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return "must be a regular file and not a symlink"
 	case errors.Is(err, safefile.ErrOwner):
 		return "must be owned by the user that runs the sensor"
 	case errors.Is(err, safefile.ErrMode):
-		return fmt.Sprintf("mode must be exactly %04o", keyRule.Exact)
+		if r.Exact == 0 {
+			return "has a mode that is not permitted"
+		}
+		return fmt.Sprintf("mode must be exactly %04o", r.Exact)
 	case errors.Is(err, safefile.ErrLinks):
 		return "must have one link only"
 	case errors.Is(err, safefile.ErrSize):
-		return fmt.Sprintf("must not be larger than %d KiB", capBytes>>10)
+		return fmt.Sprintf("must not be larger than %d KiB", r.MaxSize>>10)
 	case errors.Is(err, safefile.ErrChanged):
 		return "changed between the check and the read"
 	case errors.Is(err, safefile.ErrOpen):
@@ -163,7 +166,7 @@ func loadSigner(keys *os.Root, log *slog.Logger, path, origin string) (note.Sign
 	}
 	b, err := safefile.ReadFile(keys, keyFile, keyRule)
 	if err != nil {
-		return nil, keyError(path, ruleText(err, maxKeySize))
+		return nil, keyError(path, ruleText(err, keyRule))
 	}
 	signer, err := note.NewSigner(string(b)) // the error text of note stays out of our error
 	if err != nil {

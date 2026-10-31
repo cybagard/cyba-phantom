@@ -329,7 +329,7 @@ func readState(root *os.Root) (msg []byte, ok bool, err error) {
 	case missing(err):
 		return nil, false, nil
 	case err != nil:
-		return nil, false, causedError{stateError(ruleText(err, maxNoteSize), nil), err}
+		return nil, false, causedError{stateError(ruleText(err, noteRule), nil), err}
 	}
 	return b, true, nil
 }
