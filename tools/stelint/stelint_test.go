@@ -431,6 +431,23 @@ func TestUnknownBaseIsAnError(t *testing.T) {
 	}
 }
 
+func TestAllHelpNamesTheSkipsAndTheErrorExit(t *testing.T) {
+	_, _, errOut := runLint(t.TempDir(), "-h")
+	// The flag package prints the name on one line and the help on the next.
+	var line string
+	lines := strings.Split(errOut, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "-all" && i+1 < len(lines) {
+			line = lines[i+1]
+		}
+	}
+	for _, want := range []string{"Go files", "symbolic links", "testdata", "exit 2"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("-all help %q does not name %q", line, want)
+		}
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	dir, _ := baseRepo(t)
 	for _, args := range [][]string{
@@ -718,6 +735,10 @@ func TestSentenceRules(t *testing.T) {
 		{"code block is not counted", "// " + ws(5) + ".\n//\n//\t" + ws(30) + "\n//\n// " + ws(20) + ".\n", nil},
 		{"text after a code block at 21", "// " + ws(5) + ".\n//\n//\t" + ws(30) + "\n//\n// " + ws(21) + ".\n", []sentence{{5, 5, 21}}},
 		{"code block with two spaces", "//\n//  " + ws(30) + "\n", nil},
+		{"comment line with two spaces after a blank line is code", "// Text.\n//\n//  " + ws(30) + ".\n", nil},
+		{"bar row in a block comment is a table row", "/*\n * Text.\n *\n *  | " + ws(30) + " |\n */", []sentence{{4, 4, 30}}},
+		{"backticks with a later backtick are no fence", "// ```x``` " + ws(30) + ".\n// " + ws(30) + ".\n", []sentence{{1, 1, 31}, {2, 2, 30}}},
+		{"fence with an info string is a fence", "// ```go\n// " + ws(30) + "\n// ```\n", nil},
 		{"code block ends the text before it", "// " + ws(15) + ":\n//\n//\t" + ws(30) + "\n", nil},
 		{"fenced code block", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(20) + ".\n", nil},
 		{"text after a fence at 21", "// ```\n// " + ws(30) + "\n// ```\n// " + ws(21) + ".\n", []sentence{{4, 4, 21}}},
@@ -873,6 +894,7 @@ func TestSentenceRules(t *testing.T) {
 		{"angle destination with a space", "// [a](<u v>) " + ws(19) + ".\n", nil},
 		{"angle destination with a title", "// [a](<u v> \"t\") " + ws(19) + ".\n", nil},
 		{"angle destination with no end is not a link", "// [a](<u " + ws(20) + ".\n", []sentence{{1, 1, 21}}},
+		{"angle destination with a close on the next line is not a link", "// [a](<u " + ws(10) + "\n// ) " + ws(15) + ".\n", []sentence{{1, 2, 27}}},
 
 		// A title ends on its own line. Only a space, a tab or a line end
 		// stands between the parts of a link tail.

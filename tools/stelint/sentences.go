@@ -269,9 +269,11 @@ const (
 // paragraphs splits the lines of a comment or a text file into paragraphs,
 // headings, list items and table cells. Each ends a sentence. It leaves out
 // code, separator rows and trailer lines. A line is code in a fence of three
-// backticks. A line with a tab or two spaces of indent is also code. This holds
-// when no paragraph or list item is open. In a code block, each indented line
-// stays code. A line with noCode set never starts a code block by its indent.
+// backticks. A fence opens only when no backtick follows its first run of
+// backticks. A line with a tab or two spaces of indent is also code. When md
+// is true, it needs a tab or four spaces. This holds when no paragraph or list
+// item is open. In a code block, each indented line stays code. A line with
+// noCode set never starts a code block by its indent.
 // When md is false, three more rules hold. First, a list marker, "#" or "|"
 // line with no indent continues an open paragraph. This does not hold after a
 // line that ends with a colon, or in a "/* */" comment. Second, a blank line
@@ -280,7 +282,8 @@ const (
 // also a "|" line. An indented marker line is the exception: it starts a new
 // item. After a marker line with no indent, an indented line is code, unless
 // noCode is set for it. Third, an indented "|" line where a code block can
-// start is code. When md is true, none of these rules holds.
+// start is code. A "/* */" line is not such a line. When md is true, none of
+// these rules holds.
 func paragraphs(g []textLine, md bool) []*para {
 	var (
 		paras      []*para
@@ -304,11 +307,17 @@ func paragraphs(g []textLine, md bool) []*para {
 	for _, l := range g {
 		t := strings.TrimSpace(l.text)
 		indented := strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "  ")
+		deep := indented
+		if md {
+			deep = strings.HasPrefix(l.text, "\t") || strings.HasPrefix(l.text, "    ")
+		}
 		rest, item := listItem(t)
 		cont := !md && !l.block && mode == modePara && !indented && !bytes.HasSuffix(cur.buf, []byte(":"))
-		codeStart := !md && indented && !l.noCode && mode != modePara && mode != modeList
+		codeStart := !md && !l.block && indented && !l.noCode && mode != modePara && mode != modeList
+		opens := strings.HasPrefix(t, "```") &&
+			(fence || !strings.Contains(strings.TrimLeft(t, "`"), "`"))
 		switch {
-		case strings.HasPrefix(t, "```"):
+		case opens:
 			end()
 			fence = !fence
 			mode = modeNone
@@ -346,7 +355,7 @@ func paragraphs(g []textLine, md bool) []*para {
 			mode = modeList
 		case indented && (mode == modePara || mode == modeList):
 			add(t, l.line)
-		case indented && !l.noCode:
+		case deep && !l.noCode:
 			end()
 			mode = modeCode
 		default:
