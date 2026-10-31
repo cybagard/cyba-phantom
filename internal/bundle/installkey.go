@@ -51,12 +51,13 @@ func installKEM() hpke.KEM { return hpke.DHKEM(ecdh.X25519()) }
 // key is a fault. install.key must be a regular file. Its owner is the user
 // that runs the sensor, or root. It has no group or other bit, one link, and
 // at most 1 KiB. The directory keys must be a real directory of the same user,
-// with no group or other bit. A refused file or directory causes no change,
-// except the removal above and a new keys directory. When a later step fails,
-// the keys directory and each linked file stay. Then the next call writes
-// install.pub if install.key is linked and install.pub is not. It makes a new
-// key if install.key is absent. A new file has mode 0600, also under a
-// restrictive umask. The function logs nothing and emits no event.
+// with no group or other bit. When the function refuses a file or directory,
+// it changes nothing else. It can still remove a leftover name and make the
+// keys directory. When a later step fails, the keys directory and each linked
+// file stay. Then the next call writes install.pub if install.key is linked
+// and install.pub is not. If no file is linked, it makes a new key. A new file
+// has mode 0600, also under a restrictive umask. The function logs nothing and
+// emits no event.
 func LoadOrCreateInstallKey(state *os.Root) (hpke.PrivateKey, error) {
 	_, err := state.Lstat(installKeysDir)
 	if errors.Is(err, fs.ErrNotExist) {
