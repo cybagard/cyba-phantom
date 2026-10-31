@@ -43,17 +43,19 @@ func installKEM() hpke.KEM { return hpke.DHKEM(ecdh.X25519()) }
 // A read is strict. The text must be the base64 form of the decoded bytes and
 // one newline. The decoded bytes must have the length of an X25519 key.
 //
-// The function removes a leftover install.key.tmp or install.pub.tmp first.
-// It never replaces install.key or install.pub. It makes a new key only when
-// both files are absent. An entry at install.pub with no install.key is a
-// fault. A valid install.key with no install.pub gets its public key file
-// again. A public key file for another key is a fault. install.key must be a
-// regular file. Its owner is the user that runs the sensor, or root. It has no
-// group or other bit, one link, and at most 1 KiB. The directory keys must be
-// a real directory of the same user, with no group or other bit. After the
-// removal, a check or a read that fails changes no file. If the function fails
-// after it made the keys directory or linked install.key, those stay. The next
-// call then writes install.pub again. A new file has mode 0600, also under a
+// After the check of the keys directory, the function removes a leftover
+// install.key.tmp or install.pub.tmp. It never replaces install.key or
+// install.pub. It makes a new key only when both files are absent. An entry at
+// install.pub with no install.key is a fault. A valid install.key with no
+// install.pub gets its public key file again. A public key file for another
+// key is a fault. install.key must be a regular file. Its owner is the user
+// that runs the sensor, or root. It has no group or other bit, one link, and
+// at most 1 KiB. The directory keys must be a real directory of the same user,
+// with no group or other bit. A refused file or directory causes no change,
+// except the removal above and a new keys directory. When a later step fails,
+// the keys directory and each linked file stay. Then the next call writes
+// install.pub if install.key is linked and install.pub is not. It makes a new
+// key if install.key is absent. A new file has mode 0600, also under a
 // restrictive umask. The function logs nothing and emits no event.
 func LoadOrCreateInstallKey(state *os.Root) (hpke.PrivateKey, error) {
 	_, err := state.Lstat(installKeysDir)

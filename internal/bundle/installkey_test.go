@@ -240,8 +240,8 @@ func TestTS20InstallKeyFaults(t *testing.T) {
 	}
 }
 
-// T-S-20: a file that appears at the create or the link step stays. The call
-// fails, and only the planted file stays below keys.
+// T-S-20: a file that appears at the "create" step or the "link" step stays.
+// The call fails. No other temporary file stays below keys.
 func TestTS20InstallKeyNoReplace(t *testing.T) {
 	for _, step := range []string{"create", "link"} {
 		t.Run(step, func(t *testing.T) {
