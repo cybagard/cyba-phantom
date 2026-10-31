@@ -259,7 +259,7 @@ func TestTS20InstallKeyNoReplace(t *testing.T) {
 			if b, err := os.ReadFile(planted); err != nil || string(b) != "planted" {
 				t.Errorf("planted file: %q %v", b, err)
 			}
-			ikWalk(t, dir, nil, filepath.Base(planted)) // no other temporary file
+			ikWalk(t, dir, nil, filepath.Base(planted)) // no other .tmp
 		})
 	}
 }
