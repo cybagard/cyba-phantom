@@ -458,6 +458,72 @@ func TestTS23_RulesOnOpenFile(t *testing.T) {
 	}
 }
 
+// chmodAfterOpen sets the AfterOpen hook to change the mode of p to m.
+func chmodAfterOpen(t *testing.T, p string, m fs.FileMode) {
+	t.Helper()
+	safefiletest.Set(t, safefiletest.Hooks{AfterOpen: func(string) {
+		if err := os.Chmod(p, m); err != nil {
+			t.Error(err)
+		}
+	}})
+}
+
+// A refused Open or OpenPath closes the file that it opened. The test does not
+// run the garbage collector. But a finalizer can close a leaked file before the
+// test counts again. Then the test does not see the leak.
+func TestTS23_RefusedOpenClosesTheFile(t *testing.T) {
+	r, dir := root(t)
+	file(t, dir, "f", 0o600)
+	p := filepath.Join(dir, "f")
+	rule := base
+	rule.Forbid = 0o077
+	chmodAfterOpen(t, p, 0o660)
+	before := openFDs(t)
+	if f, _, err := Open(r, "f", rule); !errors.Is(err, ErrMode) || f != nil {
+		t.Errorf("Open: %v, %v, want ErrMode", f, err)
+	}
+	if after := openFDs(t); after != before {
+		t.Errorf("Open: open files: %d before, %d after", before, after)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f, _, err := OpenPath(p, rule); !errors.Is(err, ErrMode) || f != nil {
+		t.Errorf("OpenPath: %v, %v, want ErrMode", f, err)
+	}
+	if after := openFDs(t); after != before {
+		t.Errorf("OpenPath: open files: %d before, %d after", before, after)
+	}
+}
+
+// Open and OpenPath give the FileInfo of the open file after the hook. They
+// do not give the FileInfo of the check.
+func TestTS23_ReturnedFileInfoIsOfTheOpenFile(t *testing.T) {
+	r, dir := root(t)
+	file(t, dir, "f", 0o600)
+	p := filepath.Join(dir, "f")
+	chmodAfterOpen(t, p, 0o640)
+	f, fi, err := Open(r, "f", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if got := fi.Mode().Perm(); got != 0o640 {
+		t.Errorf("Open: mode %o, want 640", got)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, fi, err = OpenPath(p, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if got := fi.Mode().Perm(); got != 0o640 {
+		t.Errorf("OpenPath: mode %o, want 640", got)
+	}
+}
+
 // A hook cannot turn a refusal into a pass.
 func TestTS23_HookCannotGrant(t *testing.T) {
 	r, dir := root(t)

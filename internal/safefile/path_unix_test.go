@@ -204,7 +204,7 @@ func TestTS23_OpenPathEndForms(t *testing.T) {
 			t.Errorf("CheckPathParents %q: err = %v, want ErrName", filepath.Base(p), err)
 		}
 	}
-	// The link itself is still refused or followed by the rule.
+	// The rule still refuses or follows the link itself.
 	dirRule := rules["dir"]
 	if err := openWithin(t, ln, dirRule); !errors.Is(err, ErrSymlink) {
 		t.Errorf("link without FollowEnd: err = %v, want ErrSymlink", err)
@@ -447,14 +447,14 @@ func TestTS23_PathParents(t *testing.T) {
 	// A chain of links: lN points to l(N-1), and l1 points to the directory ok.
 	chain := mkdir(t, filepath.Join(top, "chain"), 0o755)
 	link(t, ok, filepath.Join(chain, "l1"))
-	for i := 2; i <= maxLinks+1; i++ {
+	for i := 2; i <= 41; i++ {
 		link(t, "l"+strconv.Itoa(i-1), filepath.Join(chain, "l"+strconv.Itoa(i)))
 	}
 	chainPath := func(n int) string {
 		return filepath.Join(chain, "l"+strconv.Itoa(n), "f")
 	}
-	if err := CheckPathParents(chainPath(maxLinks), parentRule); err != nil {
-		t.Errorf("%d links: %v", maxLinks, err)
+	if err := CheckPathParents(chainPath(40), parentRule); err != nil {
+		t.Errorf("40 links: %v", err)
 	}
 
 	for _, c := range []struct {
@@ -462,7 +462,7 @@ func TestTS23_PathParents(t *testing.T) {
 		rule Rule
 		want error
 	}{
-		{chainPath(maxLinks + 1), parentRule, ErrSymlink},
+		{chainPath(41), parentRule, ErrSymlink},
 		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, FollowEnd: true}, ErrRule},
 		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, OneLink: true}, ErrRule},
 		{filepath.Join(ok, "f"), Rule{Type: Dir, Owner: OwnerSelf, MaxSize: 1}, ErrRule},
