@@ -91,10 +91,11 @@ type ACMEParams struct {
 	// in production, and then certmagic uses its default interval.
 	ocspInterval time.Duration
 
-	// onMaintenance is a test hook. certmagic requests the config of a managed
-	// certificate at each renewal check and at each OCSP check. This function
-	// runs at each request. It must not block. It is nil in production. No
-	// config key, flag, environment variable, or other input sets it.
+	// onMaintenance is a test hook. certmagic requests the config of each
+	// managed certificate at each renewal check and at each OCSP check. This
+	// function runs at each request. It must not block. It is nil in
+	// production. No config key, flag, environment variable, or other input
+	// sets it.
 	onMaintenance func()
 }
 
