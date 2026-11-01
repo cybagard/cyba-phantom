@@ -470,7 +470,7 @@ func chmodAfterOpen(t *testing.T, p string, m fs.FileMode) {
 
 // A refused Open or OpenPath closes the file that it opened. The test does not
 // run the garbage collector. But a finalizer can close a leaked file before the
-// second count. Then the test does not see the leak.
+// test counts again. Then the test does not see the leak.
 func TestTS23_RefusedOpenClosesTheFile(t *testing.T) {
 	r, dir := root(t)
 	file(t, dir, "f", 0o600)
