@@ -130,11 +130,9 @@ func TestTU08SeedInvalid(t *testing.T) {
 			e.rejects(l, false, ErrSeedInvalid)
 		})
 	}
-	if code, ok := CodeOf(ErrSeedInvalid); !ok || code != CodeSeedInvalid || code.String() != "seed_invalid" {
-		t.Errorf("code %v %v", code, ok)
-	}
-	if ErrSeedInvalid.Error() != "bundle: seed_invalid" {
-		t.Errorf("error text %q", ErrSeedInvalid)
+	code, ok := CodeOf(ErrSeedInvalid)
+	if !ok || code != CodeSeedInvalid || code.String() != "seed_invalid" || ErrSeedInvalid.Error() != "bundle: seed_invalid" {
+		t.Errorf("code %v %v, error %q", code, ok, ErrSeedInvalid)
 	}
 	t.Run("nil install key", func(t *testing.T) {
 		e := newEnv(t)
@@ -143,9 +141,8 @@ func TestTU08SeedInvalid(t *testing.T) {
 	})
 }
 
-// T-S-20: a valid bundle of each class opens its seed. The seed is a copy.
-// File gives no seed file. The plain archive entry is zero, and the sealed
-// archive entry stays.
+// T-S-20: a valid bundle of each class opens its seed, a copy. File gives no
+// seed file. The plain archive entry is zero, and the sealed entry stays.
 func TestTS20SeedOpened(t *testing.T) {
 	for _, k := range []func(*env) rkey{keyOne, keyTwo} {
 		e, l, in, key := seeded(t, k)
@@ -188,7 +185,8 @@ func TestTS20SeedInfo(t *testing.T) {
 	}
 }
 
-// T-S-20: a seed prints a fixed text and gives no byte to fmt, json and slog.
+// T-S-20: a seed prints a fixed text and gives no byte to fmt, json, slog and
+// gob.
 func TestTS20SeedPrint(t *testing.T) {
 	s := seedBytes(bytes.Clone(seedA))
 	var out []string
@@ -221,21 +219,13 @@ func TestTS20SeedPrint(t *testing.T) {
 		t.Errorf("seedText %q", seedText)
 	}
 	for _, v := range []any{s, &s} {
+		var buf bytes.Buffer
+		err := gob.NewEncoder(&buf).Encode(v) // gob refuses a seed and writes no byte
+		if err == nil || ikHas(err.Error()+buf.String(), seedMarkers(seedA)) {
+			t.Errorf("%T: gob error %v, output %q", v, err, buf.String())
+		}
 		if str, ok := v.(fmt.Stringer); !ok || str.String() != seedText {
 			t.Errorf("%T is not a Stringer with seedText", v)
-		}
-	}
-}
-
-// T-S-20: encoding/gob refuses a seed, as a value and as a pointer, and
-// writes and reports no byte of it.
-func TestTS20SeedGob(t *testing.T) {
-	s := seedBytes(bytes.Clone(seedA))
-	for _, v := range []any{s, &s} {
-		var buf bytes.Buffer
-		err := gob.NewEncoder(&buf).Encode(v)
-		if err == nil || ikHas(err.Error()+buf.String(), seedMarkers(seedA)) {
-			t.Errorf("%T: error %v, output %q", v, err, buf.String())
 		}
 	}
 }
@@ -245,9 +235,8 @@ func seedMarkers(b []byte) []string {
 	return append(ikMarkers(b), strings.ToUpper(hex.EncodeToString(b)), strconv.Quote(string(b)), fmt.Sprintf("%q", b))
 }
 
-// T-S-20: a reference bundle with a valid plain seed loads with a nil install
-// key. Bundle.File gives no entry below secrets/, also not an entry that is
-// not a seed file.
+// T-S-20: a reference bundle with a plain seed loads with a nil install key.
+// File gives no entry below secrets/, also not one that is no seed file.
 func TestTS20SeedReference(t *testing.T) {
 	e := newEnv(t)
 	e.putSeeded(keyTwo(e), ver(2), plainEnt(seedA), ent{name: "secrets/a", data: []byte("a")})
@@ -264,16 +253,11 @@ func TestTS20SeedReference(t *testing.T) {
 }
 
 // T-S-20: a candidate that passes the seed step and fails a later write keeps
-// no seed, and the running bundle keeps its seed. The blocker is a directory
-// in place of the temporary file of the write, as in TestTS20RotationWriteFails.
-// The first row fails the version state. The second fails the record of a
-// transition bundle, which is another return in Load.
+// no seed. The blocker is a directory in place of the temporary file, as in
+// TestTS20RotationWriteFails. The row of the record is another return in Load.
 func TestTS20SeedRejectedCleared(t *testing.T) {
-	for _, c := range []struct {
-		blocker    string
-		transition bool
-	}{{StateName, false}, {"rotation-1.cbnd", true}} {
-		t.Run(c.blocker, func(t *testing.T) {
+	for blocker, transition := range map[string]bool{StateName: false, "rotation-1.cbnd": true} {
+		t.Run(blocker, func(t *testing.T) {
 			e, install := newEnv(t), testInstall(t, 1)
 			k1, l := e.keys()[0], e.seedLoader(install)
 			var opened *seedBytes
@@ -286,19 +270,18 @@ func TestTS20SeedRejectedCleared(t *testing.T) {
 			e.putSeeded(k1, ver(2), e.good(install, k1, ver(2), seedA))
 			_, err := l.Load(false)
 			must(t, err)
-			first := opened
-			if c.transition {
+			if transition {
 				k3 := newKey(3, "k3")
 				arch := build(transitionEnt(k1, k3, ver(3)), sealedEnt(sealTo(t, install, ver(3), "k3", seedB)))
 				e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
 			} else {
 				e.putSeeded(k1, ver(3), e.good(install, k1, ver(3), seedB))
 			}
-			must(t, os.MkdirAll(filepath.Join(e.state, "bundle", c.blocker+".tmp", "x"), 0o700))
+			must(t, os.MkdirAll(filepath.Join(e.state, "bundle", blocker+".tmp", "x"), 0o700))
 			if _, err := l.Load(false); err != ErrStateFault {
 				t.Fatalf("got %v", err)
 			}
-			if opened == first || !bytes.Equal(*opened, zeros(seedSize)) {
+			if !bytes.Equal(*opened, zeros(seedSize)) {
 				t.Errorf("the seed of the rejected candidate is %v", opened)
 			}
 			if !bytes.Equal(*l.Current().seed, seedA) {
