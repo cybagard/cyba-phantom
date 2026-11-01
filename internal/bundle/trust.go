@@ -30,8 +30,9 @@ type TrustSet []TrustKey
 var ErrTrustSet = errors.New("bundle: trust set is not valid")
 
 // smallOrderY holds the y values of the points of small order on Ed25519. Each
-// is 32 bytes in hex with the sign bit clear. They are 0, 1, p-1, c and p-c.
-// p is 2^255-19. The last two are the unreduced forms p and p+1 of 0 and 1.
+// is 32 bytes in hex with the sign bit clear. The first five are 0, 1, p-1, c
+// and p-c. p is 2^255-19. c is the y value of a point of order 8. The last two
+// are the unreduced forms p and p+1 of 0 and 1.
 var smallOrderY = [...]string{
 	"0000000000000000000000000000000000000000000000000000000000000000",
 	"0100000000000000000000000000000000000000000000000000000000000000",

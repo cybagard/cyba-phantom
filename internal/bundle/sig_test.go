@@ -120,7 +120,8 @@ func FuzzTS20ParseSig(f *testing.F) {
 }
 
 // T-S-20: Check refuses a duplicate key ID, a test key, and a key ID or class
-// that is not valid. ParseKeyLine reads a valid public key line only.
+// that is not valid. Check and ParseKeyLine refuse each key of small order
+// (SEC-24). A key next to one passes. ParseKeyLine reads a valid line only.
 func TestTS20TrustSet(t *testing.T) {
 	_, a := testKey(1, "a1")
 	_, b := testKey(2, "b2")
@@ -135,8 +136,8 @@ func TestTS20TrustSet(t *testing.T) {
 		"two keys":              {TrustSet{a, b}, [][32]byte{{9}}, true},
 		"one key ID twice":      {TrustSet{a, dup}, nil, false},
 		"test key":              {TrustSet{a, b}, [][32]byte{{9}, b.PublicKey}, false},
-		"key ID with a capital": {TrustSet{{KeyID: "A", Class: ClassReference}}, nil, false},
-		"no class":              {TrustSet{{KeyID: "a"}}, nil, false},
+		"key ID with a capital": {TrustSet{{KeyID: "A", PublicKey: a.PublicKey, Class: ClassReference}}, nil, false},
+		"no class":              {TrustSet{{KeyID: "a", PublicKey: a.PublicKey}}, nil, false},
 	} {
 		if err := c.set.Check(c.test); (err == nil) != c.ok || (err != nil && err != ErrTrustSet) {
 			t.Errorf("%s: %v", name, err)

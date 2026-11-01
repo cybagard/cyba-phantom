@@ -203,30 +203,51 @@ func TestTS20RotationRefused(t *testing.T) {
 	}
 }
 
-// T-S-20, SEC-24: a small-order key as the new key of a transition bundle is
-// refused. This holds also when the line of that key verifies. The line has R
-// as the base point and S as 1. It verifies for some archives, so the test
-// changes the version until it does. The old key signs. No record is written.
-func TestTS20SmallOrderRotationKey(t *testing.T) {
-	sig := append([]byte{0x58}, bytes.Repeat([]byte{0x66}, 31)...)
+// forged gives the archive of a transition bundle from k1 to the new key. The
+// key is of small order. It also gives a line of that key that verifies. The
+// line has R as the base point and S as 1. It verifies for some archives, so
+// forged changes the version until it does.
+func forged(t *testing.T, k1 rkey, key [32]byte) (arch, sig []byte) {
+	t.Helper()
+	sig = append([]byte{0x58}, bytes.Repeat([]byte{0x66}, 31)...)
 	sig = append(sig, 1)
 	sig = append(sig, make([]byte, 31)...)
+	for n := 3; n < 3+256; n++ {
+		if a := transition(k1, rkey{id: "k3", pub: key}, ver(n)); ed25519.Verify(key[:], SigMessage(a), sig) {
+			return a, sig
+		}
+	}
+	t.Fatal("no archive of 256 verifies with the forged line")
+	return nil, nil
+}
+
+// T-S-20, SEC-24: a small-order key as the new key of a transition bundle is
+// refused. This holds also when the line of that key verifies. The old key
+// signs. No record is written.
+func TestTS20SmallOrderRotationKey(t *testing.T) {
 	for _, key := range smallOrderKeys(t) {
 		t.Run(fmt.Sprintf("%x", key[:2]), func(t *testing.T) {
 			e := running(t)
-			k1, evil := e.keys()[0], rkey{id: "k3", pub: key}
-			var arch []byte
-			for n := 3; n < 3+256 && arch == nil; n++ {
-				if a := transition(k1, evil, ver(n)); ed25519.Verify(key[:], SigMessage(a), sig) {
-					arch = a
-				}
-			}
-			if arch == nil {
-				t.Fatal("no archive of 256 verifies with the forged line")
-			}
+			k1 := e.keys()[0]
+			arch, sig := forged(t, k1, key)
 			e.put(arch, lineOf(k1, arch), sigRow("k3", sig))
 			e.rejects(e.l, false, ErrBadSig)
 			e.absent(1)
+		})
+	}
+}
+
+// T-S-20, SEC-24: a stored transition record with a small-order new key gives
+// a state fault at the next start. This holds also when the line of that key
+// verifies. The loader is not healthy.
+func TestTS20SmallOrderRecord(t *testing.T) {
+	for _, key := range smallOrderKeys(t) {
+		t.Run(fmt.Sprintf("%x", key[:2]), func(t *testing.T) {
+			e := running(t)
+			k1 := e.keys()[0]
+			arch, sig := forged(t, k1, key)
+			e.record(1, arch, lineOf(k1, arch), sigRow("k3", sig))
+			e.fault(e.loader("bundle/current.cbnd"), true)
 		})
 	}
 }

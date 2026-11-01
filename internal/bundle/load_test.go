@@ -350,9 +350,10 @@ func TestTS20PathFormsAreRefused(t *testing.T) {
 	}
 }
 
-// T-S-20: a path with the archive name of a transition record is refused. Here
-// n is 1 to 9, and the ASCII case does not count. The refusal comes before any
-// read, also when the chain check would fail. Other names load.
+// T-S-20: a path with the archive name of a transition record is refused. The
+// name is "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not
+// count. The refusal comes before any read, also when the chain check would
+// fail. Other names load.
 func TestTS20RecordNamesAreRefused(t *testing.T) {
 	e := running(t)
 	k1, k3 := e.keys()[0], newKey(3, "k3")
@@ -365,11 +366,27 @@ func TestTS20RecordNamesAreRefused(t *testing.T) {
 			t.Errorf("%s: %v", p, err)
 		}
 	}
+	// Each n has a file, so a name that the check misses is read.
+	var refused []string
+	for n := 1; n <= 9; n++ {
+		name := recordName(n, "cbnd")
+		switch n % 3 {
+		case 0:
+			name = strings.ToUpper(strings.TrimSuffix(name, ".cbnd")) + ".cbnd"
+		case 2:
+			name = "R" + name[1:]
+		}
+		refused = append(refused, "bundle/"+name)
+		if n > 1 {
+			e.write("bundle/"+strings.TrimSuffix(name, ".cbnd")+".sig", []byte(lineOf(k3, arch)))
+			e.write("bundle/"+name, arch)
+		}
+	}
 	for _, badMode := range []bool{false, true} {
 		if badMode {
 			must(t, os.Chmod(filepath.Join(e.state, "bundle", "rotation-1.sig"), 0o666))
 		}
-		for _, p := range []string{"bundle/rotation-1.cbnd", "bundle/Rotation-8.cbnd", "bundle/ROTATION-9.cbnd", "rotation-2.cbnd"} {
+		for _, p := range refused {
 			l, read := e.loader(p), false
 			l.afterRead = func() { read = true }
 			if n := e.rejects(l, true, ErrArchiveInvalid); n != 0 || read {
