@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,4 +285,163 @@ func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 			t.Errorf("checkSpecDir(%q): err %v, want the prefix %q and ErrNotExist", name, err, want)
 		}
 	}
+}
+
+// planted enters base/h and plants a decoy spec directory and tree at
+// h/repo. filepath.Clean turns "L/../repo/spec" into the decoy path. The
+// kernel resolves it to r/repo/spec. It returns r/repo and a function that
+// returns a snapshot of the decoy.
+func planted(t *testing.T) (string, func() map[string]string) {
+	t.Helper()
+	base, _ := symlinkedCwd(t)
+	h := filepath.Join(base, "h")
+	decoy := filepath.Join(h, "repo")
+	if err := os.MkdirAll(filepath.Join(decoy, "spec"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"01-prd.md", "07-test-plan.md", "08-traceability.md", "stray.md"} {
+		writeFile(t, filepath.Join(decoy, "spec"), n, "decoy "+n+"\n")
+	}
+	writeFile(t, filepath.Join(decoy, "spec"), "manifest.json", `{"synced":"2000-01-01","files":{}}`+"\n")
+	writeFile(t, decoy, "Makefile", "perf:\n")
+	t.Chdir(h)
+	snap := func() map[string]string {
+		got := map[string]string{}
+		err := filepath.WalkDir(decoy, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(p)
+			got[p] = string(data)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	return filepath.Join(base, "r", "repo"), snap
+}
+
+func wantDecoyUnchanged(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	if !maps.Equal(before, after) {
+		t.Errorf("the decoy tree changed:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
+// With "L/../repo/spec", the matrix check reads r/repo/spec and prints the
+// argument as typed.
+func TestMatrixReadsTheResolvedSpecDir(t *testing.T) {
+	repo, snap := planted(t)
+	spec := filepath.Join(repo, "spec")
+	writeFile(t, spec, "01-prd.md", base01)
+	writeFile(t, spec, "07-test-plan.md", base07)
+	writeFile(t, spec, "08-traceability.md", base08)
+	before := snap()
+	got, err := runMatrix("L/../repo/spec")
+	if err != nil || len(got) != 0 {
+		t.Errorf("runMatrix: findings %v, err %v, want none", got, err)
+	}
+	writeFile(t, spec, "08-traceability.md", strings.ReplaceAll(base08, "\n", "\r\n"))
+	want := "L/../repo/spec/08-traceability.md: contains CRLF line endings; re-normalize to LF"
+	got, err = runMatrix("L/../repo/spec")
+	if err != nil || len(got) != 1 || got[0] != want {
+		t.Errorf("runMatrix: findings %q, err %v, want %q", got, err, want)
+	}
+	writeFile(t, spec, "08-traceability.md", base08)
+	writeFile(t, spec, "07-test-plan.md", strings.ReplaceAll(base07, "\n", "\r\n"))
+	want = "L/../repo/spec/07-test-plan.md: contains CRLF line endings; re-normalize to LF"
+	got, err = runMatrix("L/../repo/spec")
+	if err != nil || len(got) != 1 || got[0] != want {
+		t.Errorf("runMatrix: findings %q, err %v, want %q", got, err, want)
+	}
+	if err := os.Remove(filepath.Join(spec, "01-prd.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = runMatrix("L/../repo/spec"); err == nil || !strings.HasPrefix(err.Error(), "L/../repo/spec/01-prd.md: ") {
+		t.Errorf("runMatrix with a missing file: err %v, want the typed name", err)
+	}
+	wantDecoyUnchanged(t, before, snap())
+}
+
+// The stamp check and the --write use r/repo/spec only.
+func TestStampReadsAndWritesTheResolvedSpecDir(t *testing.T) {
+	repo, snap := planted(t)
+	spec := filepath.Join(repo, "spec")
+	writeFile(t, spec, "01-prd.md", base01)
+	before := snap()
+	if got, err := runStamp("L/../repo/spec", true); err != nil || len(got) != 0 {
+		t.Fatalf("runStamp --write: findings %v, err %v", got, err)
+	}
+	wantDecoyUnchanged(t, before, snap())
+	if got, err := runStamp(spec, false); err != nil || len(got) != 0 {
+		t.Errorf("the real manifest: findings %v, err %v, want none", got, err)
+	}
+	if got, err := runStamp("L/../repo/spec", false); err != nil || len(got) != 0 {
+		t.Errorf("runStamp check: findings %v, err %v, want none", got, err)
+	}
+	writeFile(t, spec, "01-prd.md", "changed\n")
+	got, err := runStamp("L/../repo/spec", false)
+	if err != nil || len(got) != 1 || got[0] != "spec: 01-prd.md changed since the sync stamp" {
+		t.Errorf("runStamp check: findings %q, err %v, want the 01-prd.md change", got, err)
+	}
+	wantDecoyUnchanged(t, before, snap())
+}
+
+// An error of --write names the typed argument and the system cause. It
+// holds no part of the resolved path.
+func TestStampWriteErrorNamesTheTypedDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode")
+	}
+	repo, _ := planted(t)
+	spec := filepath.Join(repo, "spec")
+	writeFile(t, spec, "01-prd.md", base01)
+	if err := os.Chmod(spec, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(spec, 0o755) })
+	_, err := runStamp("L/../repo/spec", true)
+	want := "stamp: cannot write L/../repo/spec/manifest.json: permission denied"
+	if err == nil || err.Error() != want {
+		t.Errorf("runStamp: err %v, want %q", err, want)
+	}
+	if err != nil && strings.Contains(err.Error(), filepath.Dir(filepath.Dir(repo))) {
+		t.Errorf("the error holds the resolved path: %v", err)
+	}
+}
+
+// A directory that does not exist gives an error with the typed name, and
+// no part of the resolved path.
+func TestHashDirErrorNamesTheTypedDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "absent")
+	_, _, _, err := hashDir(dir, "typed/spec")
+	want := `cannot read spec dir "typed/spec": no such file or directory`
+	if err == nil || err.Error() != want {
+		t.Errorf("hashDir: err %v, want %q", err, want)
+	}
+}
+
+// Tests mode reads the spec file, the Makefile and the walk root below
+// r/repo only.
+func TestTestsModeReadsTheResolvedDirs(t *testing.T) {
+	repo, snap := planted(t)
+	files := defaultFiles()
+	files["spec/07-test-plan.md"] = plan07Head + defaultRows[0] + "\n"
+	for name, content := range files {
+		writeFile(t, repo, name, content)
+	}
+	before := snap()
+	got, err := runTests("L/../repo/spec", "L/../repo", "M-1")
+	if err != nil || len(got) != 0 {
+		t.Errorf("runTests: findings %v, err %v, want none", got, err)
+	}
+	writeFile(t, filepath.Join(repo, "spec"), "07-test-plan.md", strings.ReplaceAll(plan07Head+defaultRows[0]+"\n", "\n", "\r\n"))
+	want := "L/../repo/spec/07-test-plan.md: contains CRLF line endings; re-normalize to LF"
+	got, err = runTests("L/../repo/spec", "L/../repo", "M-1")
+	if err != nil || len(got) != 1 || got[0] != want {
+		t.Errorf("runTests: findings %q, err %v, want %q", got, err, want)
+	}
+	wantDecoyUnchanged(t, before, snap())
 }

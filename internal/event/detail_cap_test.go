@@ -136,11 +136,11 @@ func TestTS24_DetailCountBeforeNames(t *testing.T) {
 	}
 }
 
-// T-S-24: a detail with two bad names gives the same error each time.
+// T-U-06: a detail with two bad names gives the same error each time.
 // Detail.check tests the names in sorted order, so the empty name comes first.
 // The test calls ParseDetail and Detail.JSON 1 000 times, because map order is
 // random. For 8 valid members, Detail.check makes no allocation.
-func TestTS24_DetailNameErrorOrder(t *testing.T) {
+func TestTU06_DetailNameErrorOrder(t *testing.T) {
 	const want = "event: detail name is empty or too long"
 	d := Detail{"": Int(0), "胁0": Int(0)}
 	for range 1000 {
@@ -216,6 +216,10 @@ func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 		"8 members and repeated name":  {eight + `,"m0":1}`, errText},
 		"8 members and closing brace":  {eight + "}", ""},
 		"9 valid members":              {membersText(9), errMemberCap},
+		"ninth value null":             {eight + `,"m8":null}`, errMemberCap},
+		"ninth value false":            {eight + `,"m8":false}`, errMemberCap},
+		"ninth value object":           {eight + `,"m8":{"a":1}}`, errMemberCap},
+		"ninth value array":            {eight + `,"m8":[1]}`, errMemberCap},
 		"empty ninth name":             {eight + `,"":1}`, errMemberCap},
 		"empty ninth name and garbage": {eight + `,"":1 x}`, errMemberCap},
 	} {

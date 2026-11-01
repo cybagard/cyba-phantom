@@ -30,9 +30,11 @@ const maxDecoyNames = 16
 
 // maxPrivate is the maximum number of entries in one private list.
 // maxSinks is the maximum number of alert sinks.
+// maxPublish is the maximum number of tlog.publish items.
 const (
 	maxPrivate = 8
 	maxSinks   = 8
+	maxPublish = 4
 )
 
 // privateEntry is the key of one entry of a private list (SEC-30). Its kind
@@ -56,7 +58,7 @@ var lists = []listKey{
 		{path: "cert_file", kind: kindPath, req: true, check: checkCertFile},
 		{path: "key_file", kind: kindPath, req: true, check: checkKeyFile},
 	}},
-	{path: "tlog.publish", min: 1, max: 4, req: true, schemas: map[string][]key{
+	{path: "tlog.publish", min: 1, max: maxPublish, req: true, schemas: map[string][]key{
 		"https-put": {
 			{path: "url", kind: kindURL, req: true, check: checkHTTPS},
 			{path: "token_env", kind: kindString, req: true, secret: true, check: checkSecretEnv(1)},

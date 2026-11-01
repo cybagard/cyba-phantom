@@ -125,7 +125,7 @@ func TestTS14_StateUnlockedBeforeEvent(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// If the test fails early, run 1 still blocks until a reader opens the FIFO.
+	// If the test fails early, run 1 blocks until a writer opens the FIFO.
 	// The test opens and closes the FIFO, so that the run can return.
 	t.Cleanup(func() {
 		if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
