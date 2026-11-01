@@ -73,21 +73,7 @@ func OpenPath(path string, r Rule) (*os.File, fs.FileInfo, error) {
 	if err != nil {
 		return nil, nil, openError(err)
 	}
-	call(h.AfterOpen, path)
-	fi, err := f.Stat()
-	switch {
-	case err != nil:
-		err = fail(ErrExamine, err)
-	case !os.SameFile(si, fi):
-		err = fail(ErrChanged, nil)
-	default:
-		err = checkOpen(fi, r, h)
-	}
-	if err != nil {
-		_ = f.Close()
-		return nil, nil, err
-	}
-	return f, fi, nil
+	return checkOpened(f, path, si, r, h)
 }
 
 // CheckPathParents applies dir to "/" and to each directory that the walk of
@@ -95,14 +81,14 @@ func OpenPath(path string, r Rule) (*os.File, fs.FileInfo, error) {
 // each symlink, also at the last part, up to 40 links. So it checks the
 // directories of the path as written, of each symlink, and of each target. It
 // does not apply dir to the last part. It uses Lstat and Readlink and opens
-// nothing. The walk resolves each symlink from its Readlink text. A /proc
-// magic link, for example /proc/self/root, is resolved as text, not as the
-// object behind it. A missing part gives ErrExamine, and the cause holds
-// fs.ErrNotExist. A part on the way that is not a directory gives ErrType.
-// More than 40 links give ErrSymlink. A path that is not absolute gives
-// ErrName. A path that ends in "/", "/." or "/.." gives ErrName too. A rule
-// that is not valid, or not for a directory, gives ErrRule. A rule with
-// FollowEnd, OneLink or MaxSize gives ErrRule too.
+// nothing. The walk resolves each symlink from its Readlink text. It resolves
+// a /proc magic link, for example /proc/self/root, as text. It does not use
+// the object behind the link. A missing part gives ErrExamine, and the cause
+// holds fs.ErrNotExist. A part on the way that is not a directory gives
+// ErrType. More than 40 links give ErrSymlink. A path that is not absolute
+// gives ErrName. A path that ends in "/", "/." or "/.." gives ErrName too.
+// A rule that is not valid, or not for a directory, gives ErrRule. A rule
+// with FollowEnd, OneLink or MaxSize gives ErrRule too.
 func CheckPathParents(path string, dir Rule) error {
 	if !dir.valid() || dir.Type != Dir ||
 		dir.FollowEnd || dir.OneLink || dir.MaxSize != 0 {

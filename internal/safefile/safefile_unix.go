@@ -38,10 +38,7 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if name == "" || strings.Contains(name, "/") {
 		return nil, nil, fail(ErrName, nil)
 	}
-	h := seam.Current()
-	if h == nil {
-		h = &seam.Hooks{}
-	}
+	h := hooks()
 	call(h.BeforeCheck, name)
 	li, err := root.Lstat(name)
 	if err != nil {
@@ -62,12 +59,25 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	if err != nil {
 		return nil, nil, openError(err)
 	}
+	return checkOpened(f, name, li, r, h)
+}
+
+// checkOpened checks the open file f of name against the FileInfo checked. It
+// runs the AfterOpen hook, the identity compare and the whole rule. On an
+// error it closes f.
+func checkOpened(
+	f *os.File,
+	name string,
+	checked fs.FileInfo,
+	r Rule,
+	h *seam.Hooks,
+) (*os.File, fs.FileInfo, error) {
 	call(h.AfterOpen, name)
 	fi, err := f.Stat()
 	switch {
 	case err != nil:
 		err = fail(ErrExamine, err)
-	case !os.SameFile(li, fi):
+	case !os.SameFile(checked, fi):
 		err = fail(ErrChanged, nil)
 	default:
 		err = checkOpen(fi, r, h)
