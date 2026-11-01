@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
@@ -123,6 +125,10 @@ type Loader struct {
 	afterRead  func()
 	template   func(*Archive) (map[string]*template.Template, error)
 	seed       func(*Archive, Class, *Manifest) (*seedBytes, error)
+
+	// events and log are set by SetEvents. loadMu guards them. Each can be nil.
+	events *event.Queue
+	log    *slog.Logger
 }
 
 // NewLoader gives a Loader for the bundle at path below the state root. The
@@ -220,8 +226,15 @@ func (l *Loader) Healthy() bool {
 // bundle that expired then loads, and Expired is true.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
-	loadMu.Lock()
-	defer loadMu.Unlock()
+	if start {
+		return l.LoadFrom(SourceStart)
+	}
+	return l.LoadFrom(SourceReload)
+}
+
+// load is Load without the lock and without the event. loadMu is held. It sets
+// sum when it has read the bundle file and the signature file.
+func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	dir, base, closeDir, err := l.openDir()
 	if err != nil {
 		return nil, ErrArchiveInvalid
@@ -250,6 +263,7 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		l.afterRead()
 	}
 	sum := sha256.Sum256(archive)
+	*rd = digest{sum, true}
 	ids, err := VerifySig(archive, sig, c.trust)
 	if err != nil {
 		return nil, ErrBadSig
