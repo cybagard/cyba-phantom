@@ -56,7 +56,7 @@ func TestTS23_NoControllingTerminal(t *testing.T) {
 }
 
 // ttyChild runs in a session with no controlling terminal. It swaps a link to
-// a terminal device in after the check, and wants an error and no new
+// a terminal device in after the check. It wants an error and no new
 // controlling terminal. Open and OpenPath want ErrChanged. OpenRoot wants
 // ErrType, because O_DIRECTORY makes the kernel refuse the terminal.
 func ttyChild(t *testing.T, row, name string) {

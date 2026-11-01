@@ -110,8 +110,8 @@ func openPart(cur *os.Root, part string, dir Rule, h *seam.Hooks) (*os.Root, err
 // probePart opens part of cur without blocking and compares the open
 // directory with the Lstat result li. The open refuses a FIFO, a terminal or
 // any other file that is not a directory before it can block. The open
-// follows a link at the part if the link stays in cur, and the compare with
-// li then refuses another directory. The descriptor is closed on every path.
+// follows a link at the part if the link stays in cur. The compare with li
+// then refuses another directory. The descriptor is closed on every path.
 // os.Root opens a part with neither O_DIRECTORY nor O_NONBLOCK, so openPart
 // calls this function before cur.OpenRoot.
 func probePart(cur *os.Root, part string, li fs.FileInfo, h *seam.Hooks) error {
