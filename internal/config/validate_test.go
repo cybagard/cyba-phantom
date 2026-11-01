@@ -792,7 +792,7 @@ const (
 	htpasswdGroupW    = "the htpasswd file is writable by group"
 	htpasswdOtherW    = "the htpasswd file is writable by other"
 	htpasswdOtherR    = "the htpasswd file is readable by other"
-	htpasswdDirDetail = "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+	htpasswdDirDetail = "a directory of the htpasswd file is writable by group or other, or has the wrong owner"
 )
 
 // htpasswdThrough sets path as the htpasswd value, as --check does. The Net
@@ -837,10 +837,29 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 		}
 		return p
 	}
+	// l1 points to a directory with a good file. Each lN points to l(N-1).
+	chain := filepath.Join(d, "chain")
+	target := filepath.Join(d, "chain-target")
+	for _, dir := range []string{chain, target} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, target, "chain-file", "u:hash\n", 0o600)
+	prev := target
+	for i := 1; i <= 41; i++ {
+		p := filepath.Join(chain, fmt.Sprintf("l%d", i))
+		if err := os.Symlink(prev, p); err != nil {
+			t.Fatal(err)
+		}
+		prev = p
+	}
 	for _, r := range []struct {
 		name, path, want string
 	}{
 		{"0600", good, ""},
+		{"40 links in the parents", filepath.Join(chain, "l40", "chain-file"), ""},
+		{"41 links in the parents", filepath.Join(chain, "l41", "chain-file"), htpasswdResolve},
 		{"0400", file("r", 0o400), ""},
 		{"0640", file("g-read", 0o640), ""},
 		{"symlink to a regular file", link("link", good), ""},
@@ -2300,10 +2319,10 @@ func TestTS26_LiteralHostListIndex(t *testing.T) {
 		file      func(items ...string) string
 		item      func(h string) string
 	}{
-		{"alerts.sinks", "alerts.sinks[%d].url", listMax("alerts.sinks"), snk, func(h string) string {
+		{"alerts.sinks", "alerts.sinks[%d].url", 8, snk, func(h string) string {
 			return fmt.Sprintf(`{type: webhook, url: "https://%s/h", hmac_secret_env: ALERT_HMAC}`, h)
 		}},
-		{"tlog.publish", "tlog.publish[%d].url", listMax("tlog.publish"), pub, func(h string) string {
+		{"tlog.publish", "tlog.publish[%d].url", 4, pub, func(h string) string {
 			return fmt.Sprintf(`{type: https-put, url: "https://%s/p", token_env: CKPT_TOKEN}`, h)
 		}},
 	}
@@ -2878,7 +2897,7 @@ func (c fileKeyCase) text(rest string) string { return "the " + c.name + " " + r
 
 // dirText is the fixed text of the directory rule.
 func (c fileKeyCase) dirText() string {
-	return "a directory of the " + c.name + " is writable by group or other, or its owner is not root or the sensor user"
+	return "a directory of the " + c.name + " is writable by group or other, or has the wrong owner"
 }
 
 // TestTS27_FileModes checks the mode, type and size rules of the three file

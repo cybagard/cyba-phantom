@@ -293,7 +293,7 @@ func literalCheck(vals map[string]Value) []error {
 	check("acme.ca", "acme.ca_private", func(raw string) (Endpoint, string) { return urlEndpoint(CADirectory(raw)) })
 	check("bundle.fetch_url", "bundle.fetch_private", urlEndpoint)
 	// Each list has its own maximum. The check skips a missing key.
-	for i := range listMax("tlog.publish") {
+	for i := range maxPublish {
 		pub := fmt.Sprintf("tlog.publish[%d]", i)
 		check(pub+".url", pub+".private", urlEndpoint)
 	}
@@ -306,17 +306,6 @@ func literalCheck(vals map[string]Value) []error {
 		}
 	}
 	return errs
-}
-
-// listMax returns the maximum number of items of the list at path in the
-// production list table.
-func listMax(path string) int {
-	for _, l := range lists {
-		if l.path == path {
-			return l.max
-		}
-	}
-	return 0
 }
 
 // privatePath matches the paths that PrivateList accepts. N is a decimal
@@ -1108,7 +1097,7 @@ func checkFile(raw, name string, rule safefile.Rule, noOtherRead bool) string {
 	if err := safefile.CheckPathParents(raw, htpasswdDirRule); err != nil {
 		switch {
 		case errors.Is(err, safefile.ErrOwner), errors.Is(err, safefile.ErrMode):
-			return "a directory of the " + name + " is writable by group or other, or its owner is not root or the sensor user"
+			return "a directory of the " + name + " is writable by group or other, or has the wrong owner"
 		case errors.Is(err, safefile.ErrName):
 			return "the " + name + " is not a regular file"
 		}
