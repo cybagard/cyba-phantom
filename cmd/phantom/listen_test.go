@@ -902,7 +902,9 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 // for example of a sql.Tx or sql.Rows. It does this only when
 // openersOK is true: every connectionOpener passed the check.
 // It also skips the goroutines of the runtime, for example the
-// finalizer goroutine. Limit: the test does not find a leaked
+// finalizer goroutine and the cleanup goroutines. A file or root
+// open adds a cleanup, and that can start a cleanup goroutine.
+// Limit: the test does not find a leaked
 // sql.Tx or sql.Rows of a second database that serve closes.
 // Every other new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
@@ -967,10 +969,33 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 		if _, ok := openers[id]; ok {
 			continue // checked above
 		}
-		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || strings.Contains(block, "\ncreated by runtime.") {
+		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || runtimeGoroutine(block) {
 			continue
 		}
 		t.Errorf("goroutine %d started in serve and is still running after serve returned:\n%s", id, block)
+	}
+}
+
+// runtimeGoroutine reports whether a stack block is a goroutine of the
+// runtime. Either the runtime started it, or it is a cleanup goroutine.
+// The cleanup goroutine has no "created by" line.
+func runtimeGoroutine(block string) bool {
+	return strings.Contains(block, "\ncreated by runtime.") || strings.Contains(block, "\nruntime.runCleanups(")
+}
+
+func TestRuntimeGoroutine(t *testing.T) {
+	for _, c := range []struct {
+		name, block string
+		want        bool
+	}{
+		{"cleanup goroutine", "goroutine 20 [runnable]:\nruntime.runCleanups()\n\t/usr/local/go/src/runtime/mcleanup.go:745 +0x154", true},
+		{"cleanup function running", "goroutine 21 [running]:\nos.(*file).close(0x0)\n\t/usr/local/go/src/os/file_unix.go:1 +0x1\nruntime.runCleanups()\n\t/usr/local/go/src/runtime/mcleanup.go:745 +0x154", true},
+		{"started by the runtime", "goroutine 5 [sleep]:\nruntime.gopark()\n\t/usr/local/go/src/runtime/proc.go:1 +0x1\ncreated by runtime.gcenable in goroutine 1\n\t/usr/local/go/src/runtime/mgc.go:1 +0x1", true},
+		{"leak of serve", "goroutine 30 [select]:\nruntime.gopark()\n\t/usr/local/go/src/runtime/proc.go:1 +0x1\nmain.leak()\n\t/src/cmd/phantom/listen.go:1 +0x1\ncreated by main.serveWith in goroutine 9\n\t/src/cmd/phantom/listen.go:2 +0x1", false},
+	} {
+		if got := runtimeGoroutine(c.block); got != c.want {
+			t.Errorf("%s: runtimeGoroutine = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
