@@ -3,8 +3,10 @@
 package safefile
 
 import (
+	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile/internal/seam"
 )
@@ -37,12 +39,17 @@ func walkArgs(root *os.Root, name string, dir Rule) ([]string, error) {
 }
 
 // OpenRoot opens the directory name below root, one part at a time. For each
-// part it runs the Lstat, the type rule, and the open. Then it compares the
-// open directory with the Lstat result. Then it runs the whole rule on the
-// open directory. A link at a part gives ErrSymlink or ErrChanged. If another
-// directory replaces a part after its check, OpenRoot gives ErrChanged. The
-// rule dir must be a rule for a directory. The caller closes the root that it
-// gets.
+// part it runs the Lstat and the type rule. Then it opens the part without
+// blocking and compares that descriptor with the Lstat result. Then it opens
+// the root and compares it with the Lstat result too. Then it runs the whole
+// rule on the open directory. A link at a part gives ErrSymlink or ErrChanged.
+// If another directory replaces a part after its check, OpenRoot gives
+// ErrChanged. A FIFO, a terminal or another non-directory can replace a part
+// after its check. The open does not block, and OpenRoot gives ErrType.
+// A swap after the first open and before the root open is still possible. The
+// window is smaller, but it is not closed. A FIFO swapped in there can still
+// block the root open. The rule dir must be a rule for a directory. The caller
+// closes the root that it gets.
 func OpenRoot(root *os.Root, name string, dir Rule) (*os.Root, error) {
 	ps, err := walkArgs(root, name, dir)
 	if err != nil {
@@ -75,6 +82,9 @@ func openPart(cur *os.Root, part string, dir Rule, h *seam.Hooks) (*os.Root, err
 		return nil, err
 	}
 	call(h.AfterCheck, part)
+	if err := probePart(cur, part, li, h); err != nil {
+		return nil, err
+	}
 	next, err := cur.OpenRoot(part)
 	if err != nil {
 		return nil, openError(err)
@@ -93,6 +103,30 @@ func openPart(cur *os.Root, part string, dir Rule, h *seam.Hooks) (*os.Root, err
 		return nil, err
 	}
 	return next, nil
+}
+
+// probePart opens part of cur without blocking and compares the open
+// directory with the Lstat result li. The open refuses a FIFO, a terminal or
+// any other file that is not a directory before it can block. The descriptor
+// is closed on every path. os.Root opens a part with neither O_DIRECTORY nor
+// O_NONBLOCK, so openPart calls this function before cur.OpenRoot.
+func probePart(cur *os.Root, part string, li fs.FileInfo, h *seam.Hooks) error {
+	const flags = os.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NONBLOCK |
+		syscall.O_NOFOLLOW | syscall.O_NOCTTY
+	f, err := cur.OpenFile(part, flags, 0)
+	if err != nil {
+		return openError(err)
+	}
+	defer f.Close()
+	call(h.AfterOpen, part)
+	fi, err := f.Stat()
+	if err != nil {
+		return fail(ErrExamine, err)
+	}
+	if !os.SameFile(li, fi) {
+		return fail(ErrChanged, nil)
+	}
+	return nil
 }
 
 // CheckParents applies dir to "." and to each directory above the last part
