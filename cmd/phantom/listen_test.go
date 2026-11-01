@@ -747,7 +747,7 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 		{
 			name:      "cache is a file",
 			line:      "phantom: certificate cache does not open",
-			startLine: "phantom: started — certificate client did not start",
+			startLine: "phantom: started — bundle not healthy — certificate client did not start",
 			breakIt: func(t *testing.T, p *startParams) {
 				if err := os.WriteFile(filepath.Join(p.Root, p.CacheDir), nil, 0o600); err != nil {
 					t.Fatal(err)
@@ -757,20 +757,20 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 		{
 			name:      "no state directory",
 			line:      "phantom: state directory does not open",
-			startLine: "phantom: started — store not healthy — certificate client did not start",
+			startLine: "phantom: started — store not healthy — bundle not healthy — certificate client did not start",
 			noState:   true,
 			breakIt:   func(_ *testing.T, p *startParams) { p.Root = filepath.Join(p.Root, "missing") },
 		},
 		{
 			name:      "client make fails",
 			line:      "phantom: certificate client does not start",
-			startLine: "phantom: started — certificate client did not start",
+			startLine: "phantom: started — bundle not healthy — certificate client did not start",
 			newFails:  true,
 		},
 		{
 			name:      "client start fails",
 			line:      "phantom: certificate client does not start",
-			startLine: "phantom: started — certificate client start failed",
+			startLine: "phantom: started — bundle not healthy — certificate client start failed",
 			cached:    true,
 		},
 	} {
@@ -806,15 +806,20 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 			r := launchServe(t, cfg, p, depsWithQueue(&q))
 			r.waitStarted(t)
 			// The store start writes its own line first: the error with the path, or the checkpoint key line.
+			// The bundle load writes its line next: no file, or no store.
 			// The test drops the time attribute and the key value.
-			want := []string{fmt.Sprintf("level=INFO msg=%q name=%s", "checkpoint signing key made", p.Origin), c.line}
+			want := []string{fmt.Sprintf("level=INFO msg=%q name=%s", "checkpoint signing key made", p.Origin),
+				`level=WARN msg="bundle rejected" source=start reason=archive_invalid`, c.line}
 			if c.noState {
 				want[0] = fmt.Sprintf("level=ERROR msg=%q error=%q", "state directory does not open", "open "+p.Root+": no such file or directory")
+				want[1] = `level=ERROR msg="bundle does not load: store is not running"`
 			}
 			got := strings.Split(strings.TrimSuffix(r.err.String(), "\n"), "\n")
-			if !strings.HasPrefix(got[0], "phantom:") {
-				_, got[0], _ = strings.Cut(got[0], " ")
-				got[0], _, _ = strings.Cut(got[0], " vkey=")
+			for i := range got {
+				if !strings.HasPrefix(got[i], "phantom:") {
+					_, got[i], _ = strings.Cut(got[i], " ")
+					got[i], _, _ = strings.Cut(got[i], " vkey=")
+				}
 			}
 			if !slices.Equal(got, want) || r.out.String() != c.startLine+"\n" {
 				t.Errorf("stderr lines %q, stdout %q; want %q and %q", got, r.out.String(), want, c.startLine+"\n")
@@ -1317,7 +1322,7 @@ func status(t *testing.T, url, host string) int {
 
 // TestTS27_StartStaticOnly starts a config with tls.certs and no acme.names.
 // The start makes no client, no cache and no ACME request.
-// The start line is exactly "phantom: started". Stderr has no client text.
+// The start line has no client text. Stderr has no client text.
 // The static name gets its leaf, the hello handler and the redirect (T-S-27).
 // The gate refuses a name that is not a decoy name, and an empty name.
 // The error is not errNoClient, and the source counts each refusal.
@@ -1336,8 +1341,10 @@ func TestTS27_StartStaticOnly(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(m.p.Root, m.p.CacheDir)); err == nil {
 		t.Error("the start made a certificate cache")
 	}
-	if got := m.r.out.String(); got != "phantom: started\n" {
-		t.Errorf("start line %q, want %q", got, "phantom: started\n")
+	// The state has no bundle, so the start line has the bundle text only.
+	const want = "phantom: started — bundle not healthy\n"
+	if got := m.r.out.String(); got != want {
+		t.Errorf("start line %q, want %q", got, want)
 	}
 	if strings.Contains(m.r.err.String(), "certificate client") {
 		t.Errorf("stderr %q has the text certificate client", m.r.err.String())
@@ -1481,17 +1488,36 @@ func TestTS27_StartExpiryWarning(t *testing.T) {
 }
 
 // TestTS27_StartBadEntry checks the start with an entry that
-// the source refuses. The start ends with exit 1.
+// the source refuses. The start ends with exit 1. The client stops once,
+// before the queue closes. The cache and both listen sockets are closed.
 func TestTS27_StartBadEntry(t *testing.T) {
-	https, plain, ca := openListeners(t)
-	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+	httpsLn, plainLn, ca := openListeners(t)
+	cfg := serveCfg(t, httpsLn.Addr().String(), plainLn.Addr().String(), ca)
 	var stderr strings.Builder
 	c := content{static: []listener.StaticEntry{{Name: staticName}}} // no Leaf
+	var q *event.Queue
+	var cache certmagic.Storage
+	var stops atomic.Int32
+	var closedAtStop bool
+	oldNew, oldStart, oldStop := newACME, startACME, stopACME
+	t.Cleanup(func() { newACME, startACME, stopACME = oldNew, oldStart, oldStop })
+	newACME = func(p listener.ACMEParams) (*listener.ACME, error) { cache = p.Storage; return oldNew(p) }
+	startACME = func(context.Context, *listener.ACME) error { return nil }
+	stopACME = func(a *listener.ACME) { stops.Add(1); closedAtStop = q.Closed(); a.Stop() }
 	// A start that does not fail ends at the timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
-	if code := serveWith(ctx, cancel, cfg, c, tempState(t, cfg), realDeps, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
+	if code := serveWith(ctx, cancel, cfg, c, tempState(t, cfg), depsWithQueue(&q), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
 		t.Errorf("exit %d, stderr %q, want exit 1 and the fixed line", code, stderr.String())
+	}
+	if stops.Load() != 1 || closedAtStop || q == nil || !q.Closed() {
+		t.Errorf("client stops %d, queue closed at the stop %v, queue closed at return %v; want 1, false, true", stops.Load(), closedAtStop, q != nil && q.Closed())
+	}
+	if cache == nil || cache.Store(t.Context(), "k", []byte("v")) == nil {
+		t.Error("the certificate cache is still open")
+	}
+	if !httpsLn.closed.Load() || !plainLn.closed.Load() {
+		t.Errorf("listeners closed %v %v; want true true", httpsLn.closed.Load(), plainLn.closed.Load())
 	}
 }
 
