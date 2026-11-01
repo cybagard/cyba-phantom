@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
@@ -207,6 +209,164 @@ func TestTS23_OpenRootClosesRoots(t *testing.T) {
 	}
 	if after := openFDs(t); after != before {
 		t.Errorf("open files after a rule error: %d before, %d after", before, after)
+	}
+}
+
+func mkFIFO(q string) error { return syscall.Mkfifo(q, 0o600) }
+func mkDir(q string) error  { return os.Mkdir(q, 0o700) }
+
+// swapPart replaces the part of a/b/c, once, at AfterCheck or at AfterOpen.
+// mk makes the new file. It has a new inode, because the old directory
+// moves to "old" and still exists.
+func swapPart(t *testing.T, dir, part string, afterOpen bool, mk func(string) error) {
+	t.Helper()
+	paths := map[string]string{"a": "a", "b": "a/b", "c": "a/b/c"}
+	swap := func(name string) {
+		if name != part {
+			return
+		}
+		q, p := filepath.Join(dir, "q"), filepath.Join(dir, paths[name])
+		if err := mk(q); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(p, filepath.Join(dir, "old")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(q, p); err != nil {
+			t.Error(err)
+		}
+	}
+	h := safefiletest.Hooks{AfterCheck: swap}
+	if afterOpen {
+		h = safefiletest.Hooks{AfterOpen: swap}
+	}
+	safefiletest.Set(t, h)
+}
+
+// timedRoot runs OpenRoot, closes the root and fails the test when it takes 2 s
+// or more.
+func timedRoot(t *testing.T, r *os.Root, name string) error {
+	t.Helper()
+	type result struct {
+		sub *os.Root
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sub, err := OpenRoot(r, name, dirRule)
+		done <- result{sub, err}
+	}()
+	select {
+	case res := <-done:
+		if res.sub != nil {
+			res.sub.Close()
+		}
+		return res.err
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenRoot did not return before the deadline")
+		return nil
+	}
+}
+
+// A FIFO has no directory type, so the first open refuses it with ENOTDIR
+// before it can block. That gives ErrType.
+func TestTS23_OpenRootFIFOSwapAfterCheckNoBlock(t *testing.T) {
+	for _, part := range []string{"a", "b", "c"} {
+		t.Run(part, func(t *testing.T) {
+			r, dir := root(t)
+			tree(t, dir)
+			swapPart(t, dir, part, false, mkFIFO)
+			if err := timedRoot(t, r, "a/b/c"); !errors.Is(err, ErrType) {
+				t.Errorf("err = %v, want ErrType", err)
+			}
+		})
+	}
+}
+
+// The link stays in the root and points to a FIFO next to the part. The first
+// open follows it and refuses the FIFO with ENOTDIR, so it does not block.
+func TestTS23_OpenRootFIFOLinkSwapAfterCheckNoBlock(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	if err := mkFIFO(filepath.Join(dir, "p")); err != nil {
+		t.Fatal(err)
+	}
+	swapPart(t, dir, "a", false, func(q string) error {
+		return os.Symlink("p", q)
+	})
+	if err := timedRoot(t, r, "a/b/c"); !errors.Is(err, ErrType) {
+		t.Errorf("err = %v, want ErrType", err)
+	}
+}
+
+// The swap comes after the first open. The descriptor is of the checked
+// directory, so only the compare of the root with the Lstat result refuses.
+func TestTS23_OpenRootSwapAfterOpen(t *testing.T) {
+	for _, part := range []string{"a", "b", "c"} {
+		t.Run(part, func(t *testing.T) {
+			r, dir := root(t)
+			tree(t, dir)
+			swapPart(t, dir, part, true, mkDir)
+			if err := timedRoot(t, r, "a/b/c"); !errors.Is(err, ErrChanged) {
+				t.Errorf("err = %v, want ErrChanged", err)
+			}
+		})
+	}
+}
+
+// The swap comes after the check. It is undone after the first open. The root
+// open then gets the checked directory. So the compare of the first descriptor
+// with the Lstat result is what refuses.
+func TestTS23_OpenRootFirstCompareRefuses(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	p, old := filepath.Join(dir, "a"), filepath.Join(dir, "old")
+	safefiletest.Set(t, safefiletest.Hooks{
+		AfterCheck: func(string) {
+			if err := os.Rename(p, old); err != nil {
+				t.Error(err)
+			}
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Error(err)
+			}
+		},
+		AfterOpen: func(string) {
+			if err := os.Rename(p, filepath.Join(dir, "new")); err != nil {
+				t.Error(err)
+			}
+			if err := os.Rename(old, p); err != nil {
+				t.Error(err)
+			}
+		},
+	})
+	if err := timedRoot(t, r, "a"); !errors.Is(err, ErrChanged) {
+		t.Errorf("err = %v, want ErrChanged", err)
+	}
+}
+
+func TestTS23_OpenRootSwapClosesDescriptors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		afterOpen bool
+		mk        func(string) error
+		want      error
+	}{
+		{"fifo after check", false, mkFIFO, ErrType},
+		{"directory after check", false, mkDir, ErrChanged},
+		{"directory after open", true, mkDir, ErrChanged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, dir := root(t)
+			tree(t, dir)
+			swapPart(t, dir, "b", tc.afterOpen, tc.mk)
+			before := openFDs(t)
+			if err := timedRoot(t, r, "a/b/c"); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if after := openFDs(t); after != before {
+				t.Errorf("open files: %d before, %d after", before, after)
+			}
+		})
 	}
 }
 
