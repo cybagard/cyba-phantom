@@ -29,10 +29,11 @@ const seedText = "[seed]"
 // does not take, fmt prints the bytes of a pointer there.
 type seedBytes []byte
 
-// seedRef holds the *seedBytes of a Bundle. A print of a seedRef or a *seedRef
-// gives seedText, except under %T, %p and %w. In an unexported struct field,
-// fmt cannot call Format. There fmt prints p as an address, so it prints no
-// seed byte.
+// seedRef holds the *seedBytes of a Bundle. Hold it only through a pointer.
+// A print of a *seedRef gives seedText, except under %T, %p and %w. In an
+// unexported struct field, fmt cannot call Format. There a *seedRef prints
+// no seed byte. A seedRef value there prints the seed bytes under %s and
+// other verbs that a pointer does not take.
 type seedRef struct{ p *seedBytes }
 
 func (seedRef) Format(f fmt.State, _ rune) { fmt.Fprint(f, seedText) }

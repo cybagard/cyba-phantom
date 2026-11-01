@@ -46,16 +46,16 @@ type Bundle struct {
 	expired  bool
 	// templates holds the parsed .tmpl files. No template runs at load.
 	templates map[string]*template.Template
-	// seed is the token seed. It is a seedRef, so that a Bundle value in an
-	// unexported struct field prints no seed byte. It is nil only when a test
-	// turns the seed step off.
+	// seed is the token seed, behind a pointer to a seedRef. A Bundle value
+	// in an unexported struct field then prints no seed byte. It is nil only
+	// when a test turns the seed step off.
 	seed *seedRef
 }
 
 // Format prints the version and the SHA-256 of the bundle. It prints no seed.
 // The value receiver covers Bundle and *Bundle. fmt does not call Format under
 // %w or for a Bundle value in an unexported struct field. In that field, the
-// seedRef keeps the seed out of the print.
+// *seedRef keeps the seed out of the print.
 func (b Bundle) Format(f fmt.State, _ rune) {
 	fmt.Fprintf(f, "bundle{version:%s sha256:%x}", b.manifest.Version, b.sum)
 }

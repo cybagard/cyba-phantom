@@ -214,7 +214,7 @@ func TestTS20SeedPrint(t *testing.T) {
 	}
 	// A loaded Bundle of each class gives no seed byte in eight forms, under
 	// 28 verbs. Under a verb other than %w, %T and %p, a Bundle and a *Bundle
-	// print their version and SHA-256. A seedRef prints seedText.
+	// print their version and SHA-256. A *seedRef prints seedText.
 	all := []string{"%v", "%+v", "%#v", "%s", "%q", "%t", "%e", "%E", "%f", "%F", "%g", "%G", "%c", "%U",
 		"%O", "%o", "%b", "%x", "%X", "%d", "%w", "%p", "%T", "%z", "%!", "%10s", "%-8q", "%08v"}
 	for _, k := range []func(*env) rkey{keyOne, keyTwo} {
