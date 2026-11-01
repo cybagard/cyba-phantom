@@ -366,8 +366,9 @@ func TestTS20RecordNamesAreRefused(t *testing.T) {
 			t.Errorf("%s: %v", p, err)
 		}
 	}
-	// Each refused n from 2 to 9 has a file. No file has a lower-case record
-	// name, so the chain is whole. A name that the check misses is read.
+	// Each refused n from 2 to 9 has a file. No file other than record 1 has a
+	// lower-case record name, so the chain is whole. A name that the check
+	// misses is read.
 	var refused []string
 	for n := 1; n <= 9; n++ {
 		name := recordName(n, "cbnd")
