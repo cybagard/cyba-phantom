@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -222,6 +223,22 @@ func TestTestsModeMarkerForMissingTargetFails(t *testing.T) {
 	}
 }
 
+// A .RECIPEPREFIX line is one finding, and no marker counts.
+func TestTestsModeRecipePrefixIsFinding(t *testing.T) {
+	for _, mk := range []string{
+		".RECIPEPREFIX := p\nx:\nperf:\n",
+		"override .RECIPEPREFIX = >\nperf:\n",
+		"$(eval .RECIPEPREFIX=p)\nperf:\n",
+	} {
+		files := defaultFiles()
+		files["Makefile"] = "# trace-test: T-P-07 perf\n" + mk
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		wantTestsFinding(t, got, "Makefile line", ".RECIPEPREFIX")
+		wantTestsFinding(t, got, "T-P-07", "no marker")
+	}
+}
+
 func TestTestsModeRuleLinesAreRules(t *testing.T) {
 	for _, line := range []string{
 		"perf:",
@@ -270,6 +287,11 @@ func TestHasRuleMatchesMake(t *testing.T) {
 		{"double dollar then reference", "perf: $$(X)=1\n", false},
 		{"double dollar then name", "perf: $$X=1\n", false},
 		{"three dollars", "perf: $$$(X)=1\n", false},
+		{"dollar and semicolon", "perf: $;X=1\n", false},
+		{"dollar and hash", "perf: $#X=1\n", false},
+		{"dollar between names", "perf: a$;b=1\n", false},
+		{"double dollar then semicolon", "perf: $$;X=1\n", true},
+		{"dollar at the end", "perf: x$\n", true},
 	} {
 		if got := hasRule(strings.Split(tc.makefile, "\n"), "perf"); got != tc.want {
 			t.Errorf("%s: hasRule(%q) = %v, want %v", tc.name, tc.makefile, got, tc.want)
@@ -813,10 +835,27 @@ func TestTestsModeRunManyFindingsAreCapped(t *testing.T) {
 // root into a new directory: *_test.go files, the Makefile, and 07.
 func copyRealTree(t *testing.T) string {
 	t.Helper()
-	src := filepath.Join("..", "..")
+	return copyTree(t, filepath.Join("..", ".."))
+}
+
+// copyTreeHook is nil in production. A test sets it to change the tree
+// after the walk lists a directory. It gets the path of each entry.
+var copyTreeHook func(path string)
+
+// copyTree copies the files of src that tests mode reads into a new
+// directory. The test of another package can remove an entry below src
+// during the walk. copyTree skips an entry that is gone. src must exist.
+func copyTree(t *testing.T, src string) string {
+	t.Helper()
 	dst := t.TempDir()
 	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if copyTreeHook != nil {
+			copyTreeHook(path)
+		}
 		if err != nil {
+			if path != src && errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		rel, _ := filepath.Rel(src, path)
@@ -831,6 +870,9 @@ func copyRealTree(t *testing.T) string {
 			return nil
 		}
 		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -844,6 +886,32 @@ func copyRealTree(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dst
+}
+
+// A directory that goes away after the walk lists it does not fail the copy.
+func TestCopyTreeSkipsAnEntryThatIsGone(t *testing.T) {
+	src := t.TempDir()
+	for _, name := range []string{"a/x_test.go", "b/y_test.go"} {
+		if err := os.MkdirAll(filepath.Join(src, filepath.Dir(name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, src, name, "package x\n")
+	}
+	copyTreeHook = func(path string) {
+		if path == filepath.Join(src, "a") {
+			if err := os.RemoveAll(filepath.Join(src, "b")); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { copyTreeHook = nil })
+	dst := copyTree(t, src)
+	if _, err := os.Stat(filepath.Join(dst, "a", "x_test.go")); err != nil {
+		t.Errorf("the copy lacks the file of a: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "b")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the copy holds b: err %v", err)
+	}
 }
 
 func TestTestsModeRealTreeNeedsTheMarker(t *testing.T) {

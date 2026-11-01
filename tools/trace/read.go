@@ -153,23 +153,31 @@ func readFinding(name string, err error) string {
 	return ""
 }
 
-// checkSpecDir requires specDir to name a real directory. It refuses a
-// symlink at the last part, also with a trailing "/" or "/.". A final ".."
-// resolves the part before it. In an absolute path, it does not resolve a
-// ".." after a symlink: it only cleans the path.
-func checkSpecDir(specDir string) error {
+// resolveSpecDir requires specDir to name a real directory. It returns the
+// absolute path that it checked. A caller joins this path, not specDir, so
+// that one run reads the directory that it checked. It refuses a symlink at
+// the last part, also with a trailing "/" or "/.". A final ".." resolves the
+// part before it. In an absolute path, it does not resolve a ".." after a
+// symlink: it only cleans the path.
+func resolveSpecDir(specDir string) (string, error) {
 	abs, err := absPath(specDir)
 	if err != nil {
-		return fmt.Errorf("%s: %w", specDir, err)
+		return "", fmt.Errorf("%s: %w", specDir, err)
 	}
 	f, _, err := safefile.OpenPath(abs, dirRule)
 	switch {
 	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
-		return errors.New(specDir + ": spec dir must be a directory, not a symlink or file")
+		return "", errors.New(specDir + ": spec dir must be a directory, not a symlink or file")
 	case err != nil:
-		return fmt.Errorf("%s: %w", specDir, err)
+		return "", fmt.Errorf("%s: %w", specDir, err)
 	}
-	return f.Close()
+	return abs, f.Close()
+}
+
+// checkSpecDir requires specDir to name a real directory.
+func checkSpecDir(specDir string) error {
+	_, err := resolveSpecDir(specDir)
+	return err
 }
 
 // printableName returns a known spec file name as is. Any other name

@@ -32,14 +32,12 @@ func sha256Hex(data []byte) string {
 // hashDir maps every regular file in specDir (except manifest.json) to
 // its SHA-256. Subdirectories are findings: spec/ must be flat. A
 // non-nil error means the directory itself is unreadable.
-func hashDir(specDir string) (map[string]string, map[string]bool, []string, error) {
+// The dir argument is the resolved directory. Errors print specDir.
+func hashDir(dir, specDir string) (map[string]string, map[string]bool, []string, error) {
 	hashes := map[string]string{}
 	flagged := map[string]bool{} // names that already have a finding
 	var findings []string
-	if err := checkSpecDir(specDir); err != nil {
-		return nil, nil, nil, err
-	}
-	entries, err := os.ReadDir(specDir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
 	}
@@ -55,7 +53,7 @@ func hashDir(specDir string) (map[string]string, map[string]bool, []string, erro
 		// Names and errors are PR-controlled: a finding carries an
 		// allow-listed name only, never raw error text.
 		name := printableName(e.Name())
-		data, err := readCapped(filepath.Join(specDir, e.Name()))
+		data, err := readCapped(filepath.Join(dir, e.Name()))
 		if f := readFinding("spec: "+name, err); f != "" {
 			findings = append(findings, f)
 			flagged[e.Name()] = true
@@ -74,7 +72,11 @@ func hashDir(specDir string) (map[string]string, map[string]bool, []string, erro
 // runStamp verifies (or, with write, rotates) the sync stamp. It returns
 // findings and a fatal error only for an unreadable spec directory.
 func runStamp(specDir string, write bool) ([]string, error) {
-	hashes, flagged, findings, err := hashDir(specDir)
+	dir, err := resolveSpecDir(specDir)
+	if err != nil {
+		return nil, err
+	}
+	hashes, flagged, findings, err := hashDir(dir, specDir)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +92,7 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		// Never write through a symlink: an existing manifest.json must be
 		// a regular file. Write a temp file and rename it into place, so a
 		// symlink swapped in after the check is replaced, not followed.
-		target := filepath.Join(specDir, "manifest.json")
+		target := filepath.Join(dir, "manifest.json")
 		if fi, err := os.Lstat(target); err == nil && !fi.Mode().IsRegular() {
 			return findings, fmt.Errorf("stamp: manifest.json is not a regular file")
 		}
@@ -100,7 +102,7 @@ func runStamp(specDir string, write bool) ([]string, error) {
 		return findings, nil
 	}
 
-	data, err := readCapped(filepath.Join(specDir, "manifest.json"))
+	data, err := readCapped(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		return append(findings, "spec: manifest.json is missing, not a regular file, unreadable, or over the size cap"), nil
 	}
