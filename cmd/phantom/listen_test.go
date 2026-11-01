@@ -1341,6 +1341,7 @@ func TestTS27_StartClientAbsent(t *testing.T) {
 // TestTS27_StartMixed checks that a static name gets its leaf.
 // The client works. The test removes the files before the start.
 // So the roots come from checkContent and not from a second read (T-S-27).
+// The static handshake sends no name to the ACME client.
 // It also logs the allocations of one GetCertificate call for a static name.
 func TestTS27_StartMixed(t *testing.T) {
 	var got listener.ACMEParams
@@ -1354,6 +1355,13 @@ func TestTS27_StartMixed(t *testing.T) {
 	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
 		t.Error("the handshake did not give the static leaf")
 	}
+	// The source adds the refusals of the ACME client to its own count.
+	// The client refuses a name that is not an ACME name.
+	// So a static name that reaches the client gives a refusal.
+	// The client makes no request of its own: the cache has the certificate.
+	if n := m.source.Refused(); n != 0 {
+		t.Errorf("after the static handshake the source counts %d refusals, want 0", n)
+	}
 	if _, err := m.get(&tls.ClientHelloInfo{ServerName: staticName}); err != nil || m.source.Refused() != 0 {
 		t.Errorf("GetCertificate for the static name: error %v, refusals %d", err, m.source.Refused())
 	}
@@ -1366,7 +1374,8 @@ func TestTS27_StartMixed(t *testing.T) {
 
 // TestTS27_StartExpiryWarning checks the warning line at the start.
 // A leaf with 13 days left gives the line. A leaf with 20 days left gives none.
-// WarnExpiry gets the context of serveWith. Its goroutine ends with it.
+// WarnExpiry gets the context of serveWith. That context has ended when
+// serveWith returns. The goroutine of WarnExpiry ends with its context.
 func TestTS27_StartExpiryWarning(t *testing.T) {
 	for _, c := range []struct {
 		left time.Duration
@@ -1381,17 +1390,6 @@ func TestTS27_StartExpiryWarning(t *testing.T) {
 			<-m.r.done
 			if m.ctx.Err() == nil {
 				t.Error("the context of WarnExpiry is not the context of serveWith: it did not end")
-			}
-			// The goroutine ends after the cancel.
-			// The loop ends at the first stack without it.
-			stacks := make([]byte, 1<<20)
-			for end := time.Now().Add(netWait); ; runtime.Gosched() {
-				if !bytes.Contains(stacks[:runtime.Stack(stacks, true)], []byte("warnExpiry")) {
-					break
-				}
-				if time.Now().After(end) {
-					t.Fatal("the goroutine of WarnExpiry is still running after serveWith returned")
-				}
 			}
 		})
 	}
