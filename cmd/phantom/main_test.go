@@ -147,7 +147,10 @@ func TestTS10_CheckWiring(t *testing.T) {
 	const valid = "phantom: config is valid\n"
 	var got config.Net
 	old := loadWith
-	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) { got = n; return nil, nil }
+	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) {
+		got = n
+		return &config.Config{}, nil
+	}
 	t.Cleanup(func() { loadWith = old })
 	starts := 0
 	oldServe := serve
@@ -506,7 +509,7 @@ func TestTS11_CheckACME(t *testing.T) {
 			b = strings.Replace(b, "  names: [decoy.host.zz]\n", "", 1)
 		}
 		d := fixtureDir(t)
-		cert, key := writeFixture(t, d, "static.pem", 0o644), writeFixture(t, d, "static.key", 0o600)
+		cert, key := writePEM(t, d, "static.pem", goodCertPEM(t, name), 0o644), writePEM(t, d, "static.key", leafKeyPEM(t), 0o600)
 		return b + "tls:\n  certs: [{name: " + name + ", cert_file: " + strconv.Quote(cert) + ", key_file: " + strconv.Quote(key) + "}]\n"
 	}
 	// cacheRefused returns the whole stderr of a refusal of acme.cache_dir by

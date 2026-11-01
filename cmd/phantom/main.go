@@ -4,6 +4,8 @@
 // It starts the store, the writer and the checkpointer. It starts the certificate client
 // and the decoy listener. Then it waits for SIGINT or SIGTERM.
 // "phantom --check <path>" only validates the file (FR-12). Both modes use the same load function.
+// Both modes read acme.ca_root and the tls.certs files and name a bad key.
+// --check prints each private list entry with its key path.
 // --check opens no socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
 package main
 
@@ -17,8 +19,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/config"
+	"github.com/cybagard/cyba-phantom/internal/listener"
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 func main() {
@@ -43,7 +48,11 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	if !checkContent(cfg, time.Now(), stderr) {
+		return 1
+	}
 	if *check {
+		printPrivateLists(cfg, stdout)
 		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
@@ -58,6 +67,112 @@ var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
 	defer stop()
 	p, d := serveSetup(paramsOf(cfg))
 	return serveWith(ctx, stop, cfg, p, d, stdout, stderr)
+}
+
+// printPrivateLists writes one line for each entry of each private list.
+// The line has the key path and the canonical prefix of the entry.
+func printPrivateLists(cfg *config.Config, w io.Writer) {
+	paths := []string{"acme.ca_private", "bundle.fetch_private"}
+	for _, list := range []string{"tlog.publish", "alerts.sinks"} {
+		for i := 0; ; i++ {
+			item := fmt.Sprintf("%s[%d]", list, i)
+			if _, ok := cfg.Get(item + ".type"); !ok {
+				break
+			}
+			paths = append(paths, item+".private")
+		}
+	}
+	for _, path := range paths {
+		for i, pfx := range cfg.PrivateList(path) {
+			fmt.Fprintf(w, "%s[%d]: %s\n", path, i, pfx)
+		}
+	}
+}
+
+// These are the file rules of the config loader. The key file rule also
+// forbids a read by other. checkContent applies them again to each file
+// that it reads.
+var (
+	parentRule  = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerSelfOrRoot, Forbid: 0o022}
+	pemRule     = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true, MaxSize: 64 << 10, Forbid: 0o022}
+	keyFileRule = safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelfOrRoot, FollowEnd: true, MaxSize: 64 << 10, Forbid: 0o026}
+)
+
+// readPEM reads a file with the rules of the loader. Its error has no path.
+func readPEM(path string, rule safefile.Rule) ([]byte, error) {
+	if err := safefile.CheckPathParents(path, parentRule); err != nil {
+		return nil, err
+	}
+	f, fi, err := safefile.OpenPath(path, rule)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return safefile.ReadAll(f, fi, rule)
+}
+
+// keyForms is the text of the accepted key forms.
+const keyForms = "the key file has one block of type PRIVATE KEY (PKCS8), RSA PRIVATE KEY (PKCS1) or EC PRIVATE KEY (SEC1)"
+
+// staticLine returns the line for an error of ParseStatic. It names the key
+// that can cause the error: one file, or the entry when both files can.
+func staticLine(entry string, err error) string {
+	switch {
+	case errors.Is(err, listener.ErrStaticKey):
+		return "phantom: " + entry + ".key_file: " + err.Error() + "; " + keyForms
+	case errors.Is(err, listener.ErrStaticCert), errors.Is(err, listener.ErrStaticCA),
+		errors.Is(err, listener.ErrStaticKeyKind), errors.Is(err, listener.ErrStaticName),
+		errors.Is(err, listener.ErrStaticNotYet), errors.Is(err, listener.ErrStaticExpired):
+		return "phantom: " + entry + ".cert_file: " + err.Error()
+	}
+	return "phantom: " + entry + ": " + err.Error()
+}
+
+// checkContent reads acme.ca_root and the files of each tls.certs entry and
+// parses them at now. A file that cannot be read gives one line for that
+// file, and its entry is not parsed. ParseStatic returns its first error
+// only. A parsed entry thus gives at most one line, also when both files are
+// bad. A line has the key path and a fixed text. The check does not stop at
+// the first failure. It returns false when it wrote a line. It keeps no
+// parsed value.
+func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) bool {
+	ok := true
+	fail := func(line string) {
+		fmt.Fprintln(stderr, line)
+		ok = false
+	}
+	read := func(key, path string, rule safefile.Rule) ([]byte, bool) {
+		b, err := readPEM(path, rule)
+		if err != nil {
+			fail("phantom: " + key + ": the file cannot be read")
+		}
+		return b, err == nil
+	}
+	if v, _ := cfg.Get("acme.ca_root"); v.Str != "" {
+		if data, got := read("acme.ca_root", v.Str, pemRule); got {
+			if _, err := listener.ParseACMERoots(data); err != nil {
+				fail("phantom: acme.ca_root: " + err.Error())
+			}
+		}
+	}
+	for i := 0; ; i++ {
+		entry := fmt.Sprintf("tls.certs[%d]", i)
+		name, found := cfg.Get(entry + ".name")
+		if !found {
+			break
+		}
+		cf, _ := cfg.Get(entry + ".cert_file")
+		kf, _ := cfg.Get(entry + ".key_file")
+		certPEM, certOK := read(entry+".cert_file", cf.Str, pemRule)
+		keyPEM, keyOK := read(entry+".key_file", kf.Str, keyFileRule)
+		if !certOK || !keyOK {
+			continue
+		}
+		if _, err := listener.ParseStatic(name.Str, certPEM, keyPEM, now); err != nil {
+			fail(staticLine(entry, err))
+		}
+	}
+	return ok
 }
 
 // loadWith is the one load function of both modes. A test replaces it to see the Net.
