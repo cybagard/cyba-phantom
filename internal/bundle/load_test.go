@@ -350,6 +350,73 @@ func TestTS20PathFormsAreRefused(t *testing.T) {
 	}
 }
 
+// T-S-20: a path with the archive name of a transition record is refused. The
+// name is "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not
+// count. The refusal comes before any read, also when the chain check would
+// fail. Other names load.
+func TestTS20RecordNamesAreRefused(t *testing.T) {
+	e := running(t)
+	k1, k3 := e.keys()[0], newKey(3, "k3")
+	e.rotates(k1, k3, ver(3))
+	arch := build(ent{name: "manifest.json", data: []byte(mf(ver(4), `"k1"`, q("k3")))})
+	for _, p := range []string{"bundle/rotation-10.cbnd", "bundle/rotation-01.cbnd", "bundle/rotation-0.cbnd", "bundle/xrotation-1.cbnd"} {
+		e.write(p, arch)
+		e.write(strings.TrimSuffix(p, ".cbnd")+".sig", []byte(lineOf(k3, arch)))
+		if _, err := e.loader(p).Load(false); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	// Each refused n from 2 to 9 has a file. No file other than record 1 has a
+	// lower-case record name, so the chain is whole. A name that the check
+	// misses is read.
+	var refused []string
+	for n := 1; n <= 9; n++ {
+		name := recordName(n, "cbnd")
+		switch n % 3 {
+		case 0:
+			name = strings.ToUpper(strings.TrimSuffix(name, ".cbnd")) + ".cbnd"
+		case 1:
+			if n > 1 {
+				name = "rO" + name[2:]
+			}
+		case 2:
+			name = "R" + name[1:]
+		}
+		refused = append(refused, "bundle/"+name)
+		if n > 1 {
+			e.write("bundle/"+strings.TrimSuffix(name, ".cbnd")+".sig", []byte(lineOf(k3, arch)))
+			e.write("bundle/"+name, arch)
+		}
+	}
+	e.putBy(k3, ver(5))
+	if l := e.loader("bundle/current.cbnd"); !l.Healthy() {
+		t.Fatal("the chain is not healthy before the refused names")
+	} else if _, err := l.Load(true); err != nil || !l.Healthy() {
+		t.Fatalf("the chain check fails before the refused names: %v", err)
+	}
+	for _, badMode := range []bool{false, true} {
+		if badMode {
+			must(t, os.Chmod(filepath.Join(e.state, "bundle", "rotation-1.sig"), 0o666))
+		}
+		for _, p := range refused {
+			l, read := e.loader(p), false
+			l.afterRead = func() { read = true }
+			if n := e.rejects(l, true, ErrArchiveInvalid); n != 0 || read {
+				t.Errorf("%s, bad mode %v: %d decompress calls, read %v", p, badMode, n, read)
+			}
+			// A load that is not at start is refused too.
+			if n := e.rejects(l, false, ErrArchiveInvalid); n != 0 || read {
+				t.Errorf("%s, bad mode %v, reload: %d decompress calls, read %v", p, badMode, n, read)
+			}
+			l, read = e.loader(p), false
+			l.afterRead = func() { read = true }
+			if n := e.rejects(l, false, ErrArchiveInvalid); n != 0 || read {
+				t.Errorf("%s, bad mode %v, new loader: %d decompress calls, read %v", p, badMode, n, read)
+			}
+		}
+	}
+}
+
 // T-S-20: a symlink at a directory part of the bundle path is refused. A valid
 // bundle is behind each link, and no file below keys/ or tlog/ changes.
 func TestTS20DirectoryPartsAreRefused(t *testing.T) {

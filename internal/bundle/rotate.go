@@ -19,6 +19,24 @@ const maxRotations = 8
 // for the archive of the transition bundle and "sig" for its signature file.
 func recordName(n int, ext string) string { return fmt.Sprintf("rotation-%d.%s", n, ext) }
 
+// isRecordName tells if base is the archive name of a transition record, or
+// of record maxRotations+1, which readChain also reads. The ASCII case of the
+// letters does not count.
+func isRecordName(base string) bool {
+	b := []byte(base)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	for n := 1; n <= maxRotations+1; n++ {
+		if string(b) == recordName(n, "cbnd") {
+			return true
+		}
+	}
+	return false
+}
+
 // index gives the position of the key with this ID, or -1.
 func (t TrustSet) index(id string) int {
 	return slices.IndexFunc(t, func(k TrustKey) bool { return k.KeyID == id })
@@ -39,10 +57,11 @@ type chain struct {
 // one of them. rotate refuses a new key ID or a new key that is in the set
 // or that a record removed. The new key needs a line that verifies. rotate
 // gives the chain after the rotation, with the new key in the place of the
-// old key. It also gives the class of the old key.
+// old key. It also gives the class of the old key. rotate refuses a new key of
+// small order.
 func (c chain) rotate(m *Manifest, archive, sig []byte, ids []string) (next chain, class Class, ok bool) {
 	r := m.Rotation
-	if r == nil || !slices.Contains(ids, r.From) {
+	if r == nil || smallOrder(r.Key) || !slices.Contains(ids, r.From) {
 		return chain{}, 0, false
 	}
 	i := c.trust.index(r.From)

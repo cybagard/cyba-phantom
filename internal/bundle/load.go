@@ -224,6 +224,9 @@ func (l *Loader) Healthy() bool {
 // The first failed check gives the one error. A rejected bundle changes no file
 // and not the running bundle. start is true for the load at start. An accepted
 // bundle that expired then loads, and Expired is true.
+// A path with the archive name of a record gives ErrArchiveInvalid. The name is
+// "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not count. Load
+// checks this before the chain check and before any read.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	if start {
@@ -241,7 +244,7 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	}
 	defer closeDir()
 	name, ok := strings.CutSuffix(base, ".cbnd")
-	if !ok || name == "" {
+	if !ok || name == "" || isRecordName(base) {
 		return nil, ErrArchiveInvalid
 	}
 	if start || (l.chain == nil && l.chainErr == nil) {

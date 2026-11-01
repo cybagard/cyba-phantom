@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"math/big"
 	"slices"
 	"strings"
@@ -119,7 +120,8 @@ func FuzzTS20ParseSig(f *testing.F) {
 }
 
 // T-S-20: Check refuses a duplicate key ID, a test key, and a key ID or class
-// that is not valid. ParseKeyLine reads a valid public key line only.
+// that is not valid. Check and ParseKeyLine refuse each key of small order
+// (SEC-24). A key next to one passes. ParseKeyLine reads a valid line only.
 func TestTS20TrustSet(t *testing.T) {
 	_, a := testKey(1, "a1")
 	_, b := testKey(2, "b2")
@@ -134,8 +136,8 @@ func TestTS20TrustSet(t *testing.T) {
 		"two keys":              {TrustSet{a, b}, [][32]byte{{9}}, true},
 		"one key ID twice":      {TrustSet{a, dup}, nil, false},
 		"test key":              {TrustSet{a, b}, [][32]byte{{9}, b.PublicKey}, false},
-		"key ID with a capital": {TrustSet{{KeyID: "A", Class: ClassReference}}, nil, false},
-		"no class":              {TrustSet{{KeyID: "a"}}, nil, false},
+		"key ID with a capital": {TrustSet{{KeyID: "A", PublicKey: a.PublicKey, Class: ClassReference}}, nil, false},
+		"no class":              {TrustSet{{KeyID: "a", PublicKey: a.PublicKey}}, nil, false},
 	} {
 		if err := c.set.Check(c.test); (err == nil) != c.ok || (err != nil && err != ErrTrustSet) {
 			t.Errorf("%s: %v", name, err)
@@ -148,6 +150,52 @@ func TestTS20TrustSet(t *testing.T) {
 	if _, _, ok := ParseKeyLine(line + " "); ok {
 		t.Error("line with a trailing space is accepted")
 	}
+	for _, k := range smallOrderKeys(t) {
+		set := TrustSet{{KeyID: "a1", PublicKey: k, Class: ClassProprietary}}
+		if err := set.Check(nil); err != ErrTrustSet {
+			t.Errorf("small-order key %x in a set: %v", k, err)
+		}
+		if _, _, ok := ParseKeyLine("a1 " + base64.StdEncoding.EncodeToString(k[:])); ok {
+			t.Errorf("small-order key %x in a key line", k)
+		}
+	}
+	// A key next to a small-order key is not one.
+	near := smallOrderKeys(t)[6]
+	near[0] ^= 1
+	for _, k := range [][32]byte{{2}, near} {
+		set := TrustSet{{KeyID: "a1", PublicKey: k, Class: ClassProprietary}}
+		_, _, ok := ParseKeyLine("a1 " + base64.StdEncoding.EncodeToString(k[:]))
+		if err := set.Check(nil); err != nil || !ok {
+			t.Errorf("near key %x: %v, %v", k, err, ok)
+		}
+	}
+}
+
+// smallOrderKeys gives the 14 encodings of the points of small order. They
+// are seven y values, each with the sign bit 0 and 1.
+func smallOrderKeys(t *testing.T) [][32]byte {
+	t.Helper()
+	ff := strings.Repeat("ff", 30) + "7f"
+	var keys [][32]byte
+	for _, y := range []string{
+		strings.Repeat("00", 32),
+		"01" + strings.Repeat("00", 31),
+		"ec" + ff,
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+		"ed" + ff,
+		"ee" + ff,
+	} {
+		raw, err := hex.DecodeString(y)
+		if err != nil || len(raw) != 32 {
+			t.Fatalf("y %q: %v", y, err)
+		}
+		k := [32]byte(raw)
+		keys = append(keys, k)
+		k[31] |= 0x80
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // T-S-20: SigKeyIDs gives the key IDs in order, and false for a file that is
