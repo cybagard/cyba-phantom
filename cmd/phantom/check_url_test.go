@@ -145,10 +145,7 @@ func TestTS11_CheckLiteralHostList(t *testing.T) {
 					}
 					return
 				}
-				// No row here gives a parse error. A parse error of the
-				// smtp host key shows the value after ": value".
-				detail, _, _ := strings.Cut(se.String(), ": value")
-				if code != 1 || !strings.Contains(se.String(), "config: "+k.key+" at ") || strings.Contains(detail, r.host) {
+				if code != 1 || !strings.Contains(se.String(), "config: "+k.key+" at ") || strings.Contains(se.String(), r.host) {
 					t.Errorf("exit %d, stderr %q", code, se.String())
 				}
 			})
@@ -225,11 +222,8 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 	for _, host := range configtest.EgressLiterals {
 		for _, c := range files(host) {
 			code, se := check(c[1], c[2])
-			// Only alerts.sinks[0].host is a string key, not a URL key.
-			// The loader shows its value after ": value".
-			detail, _, _ := strings.Cut(se, ": value")
 			bare := strings.Trim(host, "[]")
-			if code != 1 || !strings.Contains(se, "config: "+c[0]+" at ") || !strings.Contains(se, "egress rule") || strings.Contains(detail, bare) {
+			if code != 1 || !strings.Contains(se, "config: "+c[0]+" at ") || !strings.Contains(se, "egress rule") || strings.Contains(se, bare) {
 				t.Errorf("%s %s: exit %d, stderr %q", c[0], host, code, se)
 			}
 		}

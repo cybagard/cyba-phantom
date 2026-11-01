@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -792,7 +793,7 @@ const (
 	htpasswdGroupW    = "the htpasswd file is writable by group"
 	htpasswdOtherW    = "the htpasswd file is writable by other"
 	htpasswdOtherR    = "the htpasswd file is readable by other"
-	htpasswdDirDetail = "a directory of the htpasswd file is writable by group or other, or its owner is not root or the sensor user"
+	htpasswdDirDetail = "a directory of the htpasswd file is group- or other-writable, or not owned by root or the sensor user"
 )
 
 // htpasswdThrough sets path as the htpasswd value, as --check does. The Net
@@ -837,6 +838,22 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 		}
 		return p
 	}
+	// l1 points to a directory with a good file. Each lN points to l(N-1).
+	chain := filepath.Join(d, "chain")
+	target := filepath.Join(d, "chain-target")
+	for _, dir := range []string{chain, target} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, target, "chain-file", "u:hash\n", 0o600)
+	prev := target
+	for i := 1; i <= 41; i++ {
+		prev = link(filepath.Join("chain", fmt.Sprintf("l%d", i)), prev)
+	}
+	if got, err := os.Readlink(filepath.Join(chain, "l41")); err != nil || got != filepath.Join(chain, "l40") {
+		t.Fatalf("l41 points to %q, error %v, want %q", got, err, filepath.Join(chain, "l40"))
+	}
 	for _, r := range []struct {
 		name, path, want string
 	}{
@@ -860,6 +877,13 @@ func TestTS10_HtpasswdFileRules(t *testing.T) {
 	} {
 		t.Run(r.name, func(t *testing.T) { htpasswdBoth(t, r.path, r.want) })
 	}
+	t.Run("40 and 41 links in the parents", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("the 40 links row needs the Linux limit of 40 links")
+		}
+		htpasswdBoth(t, filepath.Join(chain, "l40", "chain-file"), "")
+		htpasswdBoth(t, filepath.Join(chain, "l41", "chain-file"), htpasswdResolve)
+	})
 	t.Run("other owner", func(t *testing.T) {
 		p := file("other-owner", 0o600)
 		otherOwner(t, p)
@@ -2294,16 +2318,17 @@ func TestTS26_LiteralHostList(t *testing.T) {
 // list, or with the list at another index, the error names the key (T-S-26).
 func TestTS26_LiteralHostListIndex(t *testing.T) {
 	const host, list = "10.1.2.3", "10.0.0.0/8"
+	// 8 and 4 are the list maximums of 04 section 3, not the constants.
 	kinds := []struct {
 		name, key string
 		n         int
 		file      func(items ...string) string
 		item      func(h string) string
 	}{
-		{"alerts.sinks", "alerts.sinks[%d].url", listMax("alerts.sinks"), snk, func(h string) string {
+		{"alerts.sinks", "alerts.sinks[%d].url", 8, snk, func(h string) string {
 			return fmt.Sprintf(`{type: webhook, url: "https://%s/h", hmac_secret_env: ALERT_HMAC}`, h)
 		}},
-		{"tlog.publish", "tlog.publish[%d].url", listMax("tlog.publish"), pub, func(h string) string {
+		{"tlog.publish", "tlog.publish[%d].url", 4, pub, func(h string) string {
 			return fmt.Sprintf(`{type: https-put, url: "https://%s/p", token_env: CKPT_TOKEN}`, h)
 		}},
 	}
@@ -2878,7 +2903,7 @@ func (c fileKeyCase) text(rest string) string { return "the " + c.name + " " + r
 
 // dirText is the fixed text of the directory rule.
 func (c fileKeyCase) dirText() string {
-	return "a directory of the " + c.name + " is writable by group or other, or its owner is not root or the sensor user"
+	return "a directory of the " + c.name + " is group- or other-writable, or not owned by root or the sensor user"
 }
 
 // TestTS27_FileModes checks the mode, type and size rules of the three file
