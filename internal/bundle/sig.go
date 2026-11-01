@@ -47,6 +47,53 @@ func parseSig(b []byte) ([]sigLine, bool) {
 	return lines, true
 }
 
+// SigKeyIDs gives the key IDs of the lines of a signature file, in order. It
+// checks the form only, not a signature. ok is false when the file is not
+// valid.
+func SigKeyIDs(sig []byte) (ids []string, ok bool) {
+	lines, ok := parseSig(sig)
+	for _, l := range lines {
+		ids = append(ids, l.keyID)
+	}
+	return ids, ok
+}
+
+// CheckSigned applies the signature and key rule of the loader (SEC-24). It
+// checks an archive and its signature file against the trust set. It does not
+// check min_engine against the engine version or the expiry against the clock.
+// It does not check the version state, the seed or the transition records.
+// The order is: signature, archive, manifest, then rotation or key ID. A
+// transition bundle needs the line of the old key, which is trusted, and the
+// line of the new key. Any other bundle needs a valid line of its manifest key
+// ID. CheckSigned gives the key IDs that verified. For a transition bundle,
+// the list ends with the new key ID. A failed step gives ErrBadSig,
+// ErrArchiveInvalid or ErrManifestInvalid.
+func CheckSigned(archive, sig []byte, trust TrustSet) ([]string, error) {
+	ids, err := VerifySig(archive, sig, trust)
+	if err != nil {
+		return nil, ErrBadSig
+	}
+	arch, err := ReadArchive(archive)
+	if err != nil {
+		return nil, ErrArchiveInvalid
+	}
+	raw, _ := arch.File("manifest.json")
+	m, err := ParseManifest(raw)
+	if err != nil {
+		return nil, ErrManifestInvalid
+	}
+	if m.Rotation != nil {
+		if _, _, ok := (chain{trust: trust}).rotate(m, archive, sig, ids); !ok {
+			return nil, ErrBadSig
+		}
+		return append(ids, m.KeyID), nil
+	}
+	if trust.index(m.KeyID) < 0 || !slices.Contains(ids, m.KeyID) {
+		return nil, ErrBadSig
+	}
+	return ids, nil
+}
+
 // VerifySig checks the signature file sig over the archive. It returns the key
 // IDs of the valid lines in order. It skips a line whose key ID is not in the
 // trust set. A line whose key ID is in the set and whose signature does not
