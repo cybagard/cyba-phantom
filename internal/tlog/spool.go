@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // SpoolDirName is the spool directory below the state directory, for the code
@@ -33,6 +36,10 @@ const (
 	cursorHexChars = 16
 	listStep       = 128 // names that one read of checkpoints/ returns at most
 )
+
+// spoolDirRule is the rule of checkpoints/ when the spool reads a file below
+// it: a real directory. It has no owner and mode rule.
+var spoolDirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny}
 
 // Flags of Spool.stuck: what the spool already did for an entry.
 const (
@@ -336,29 +343,25 @@ func (s *Spool) advance(i int, before cursor, size uint64) error {
 }
 
 // verified reads a note and checks it. It returns errBadNote for a note that is
-// larger than 1 KiB or does not parse or verify. It also returns errBadNote for
-// a size that differs from the name. It returns entryError in two cases. One is
-// an entry that is not a regular file (a symlink, a directory, a FIFO). The
-// other is a regular note that fails to open with EACCES. Any other error is
-// not a property of the note. verified returns it, with the file and the rule
-// in the text.
+// larger than maxNoteSize or does not parse or verify. It also returns
+// errBadNote for a size that differs from the name. It returns entryError in
+// two cases. One is an entry that is not a regular file (a symlink, a
+// directory, a FIFO). The other is a regular note that fails to open with
+// EACCES. Any other error is not a property of the note. verified returns it,
+// with the file and the rule in the text.
 func (s *Spool) verified(size uint64) ([]byte, error) {
 	name := noteName(size)
-	var msg []byte
-	fi, err := s.examine(name)
-	if err == nil {
-		switch {
-		case !fi.Mode().IsRegular():
-			return nil, entryError{spoolError(name, "must be a regular file and not a symlink")}
-		case fi.Size() > maxNoteSize:
-			return nil, errBadNote
-		}
-		msg, err = s.readExamined(name, fi)
-	}
+	msg, err := s.readFile(name)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, spoolError(name, "is gone before it is read")
-	case errors.Is(err, syscall.EACCES):
+	case errors.Is(err, safefile.ErrExamine):
+		// safefile could not examine the file or its directory.
+		// That is not a property of the note.
+		return nil, err
+	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
+		return nil, entryError{err}
+	case errors.Is(err, safefile.ErrSize):
+		return nil, errBadNote
+	case errors.Is(err, safefile.ErrOpen) && errors.Is(err, syscall.EACCES):
 		return nil, entryError{err}
 	case err != nil:
 		return nil, err
@@ -369,53 +372,49 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 	return msg, nil
 }
 
-// examine runs Lstat on name. A missing file gives the error of the system, so
-// that a caller can test for fs.ErrNotExist.
-func (s *Spool) examine(name string) (fs.FileInfo, error) {
-	err := fault("examine", name)
-	var fi fs.FileInfo
-	if err == nil {
-		fi, err = s.root.Lstat(name)
-	}
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, err
-	case err != nil:
-		return nil, spoolError(name, "cannot be examined")
-	}
-	return fi, nil
-}
-
-// readFile reads a regular file of at most 1 KiB through the root. A symlink
-// is an error and its target is not opened. A missing file gives an error for
+// readFile reads a regular file of at most maxNoteSize bytes of checkpoints/.
+// The name has the form checkpoints/<file>. The error has the file and the
+// rule in its text. It has the refusal of safefile as its cause, so errors.Is
+// finds the reason and the system error. A missing file gives an error for
 // which errors.Is finds fs.ErrNotExist.
 func (s *Spool) readFile(name string) ([]byte, error) {
-	lfi, err := s.examine(name)
-	if err != nil {
-		return nil, err
+	if fault("examine", name) != nil {
+		return nil, spoolError(name, "cannot be examined")
 	}
-	return s.readExamined(name, lfi)
-}
-
-// readExamined is readFile for a name that examine returned lfi for. If the
-// file does not open, the error from OpenFile is the cause of the returned
-// error.
-func (s *Spool) readExamined(name string, lfi fs.FileInfo) ([]byte, error) {
-	f, _, rule, cause := openCheckedCause(s.root, name, lfi)
-	if cause != nil {
-		return nil, causedError{spoolError(name, rule), cause}
-	} else if rule != "" {
-		return nil, spoolError(name, rule)
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxNoteSize+1))
-	if err == nil {
-		err = fault("read", name)
-	}
-	if err != nil || len(b) > maxNoteSize {
-		return nil, spoolError(name, "cannot be read within 1 KiB")
+	b, err := s.read(name)
+	switch {
+	case missing(err), errors.Is(err, safefile.ErrOpen) && errors.Is(err, fs.ErrNotExist):
+		return nil, causedError{spoolError(name, "is gone before it is read"), err}
+	case errors.Is(err, safefile.ErrExamine):
+		return nil, causedError{spoolError(name, "cannot be read"), err}
+	case err != nil:
+		return nil, causedError{spoolError(name, ruleText(err, noteRule)), err}
 	}
 	return b, nil
+}
+
+// read opens checkpoints/ again and reads the file below it. A swap of the
+// directory name then has no effect. The steps "open" and "read" are test
+// hooks.
+func (s *Spool) read(name string) ([]byte, error) {
+	if err := fault("open", name); err != nil {
+		return nil, &safefile.Error{Reason: safefile.ErrOpen, Cause: err}
+	}
+	dir, err := safefile.OpenRoot(s.root, spoolDir, spoolDirRule)
+	switch {
+	case missing(err):
+		return nil, err
+	case err != nil: // not a property of the note
+		return nil, &safefile.Error{Reason: safefile.ErrExamine, Cause: err}
+	}
+	defer dir.Close()
+	b, err := safefile.ReadFile(dir, path.Base(name), noteRule)
+	if err == nil {
+		if err = fault("read", name); err != nil {
+			err = &safefile.Error{Reason: safefile.ErrExamine, Cause: err}
+		}
+	}
+	return b, err
 }
 
 func (s *Spool) readCursor(i int) (cursor, error) {

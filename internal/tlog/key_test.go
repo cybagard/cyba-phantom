@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 const testOrigin = "phantom/test"
@@ -138,6 +141,22 @@ func TestTS13_KeyFileRules(t *testing.T) {
 	}{
 		{"mode 0640", func(t *testing.T, dir string) { putKey(t, dir, good, 0o640) }, good, "mode must be exactly 0600"},
 		{"mode 0604", func(t *testing.T, dir string) { putKey(t, dir, good, 0o604) }, good, "mode must be exactly 0600"},
+		{"mode 0700", func(t *testing.T, dir string) { putKey(t, dir, good, 0o700) }, good, "mode must be exactly 0600"},
+		{"second hard link", func(t *testing.T, dir string) {
+			putKey(t, dir, good, 0o600)
+			must(t, os.Link(filepath.Join(dir, keyName), filepath.Join(dir, keysDir, "copy.key")))
+		}, good, "must have one link only"},
+		{"keys with a group bit", func(t *testing.T, dir string) {
+			putKey(t, dir, good, 0o600)
+			must(t, os.Chmod(filepath.Join(dir, keysDir), 0o750))
+		}, good, "keys must not allow group or other access"},
+		{"keys with an other bit", func(t *testing.T, dir string) {
+			putKey(t, dir, good, 0o600)
+			must(t, os.Chmod(filepath.Join(dir, keysDir), 0o701))
+		}, good, "keys must not allow group or other access"},
+		{"1025 bytes", func(t *testing.T, dir string) {
+			putKey(t, dir, good+strings.Repeat("\n", maxKeySize+1-len(good)), 0o600)
+		}, good, "must not be larger than 1 KiB"},
 		{"mode 0400", func(t *testing.T, dir string) { putKey(t, dir, good, 0o400) }, good, "mode must be exactly 0600"},
 		{"larger than 1 KiB", func(t *testing.T, dir string) { putKey(t, dir, good+strings.Repeat("\n", 1100), 0o600) }, good, "must not be larger than 1 KiB"},
 		{"wrong key name", func(t *testing.T, dir string) { putKey(t, dir, newKeyText(t, "other/origin"), 0o600) }, "", "key name must equal the configured origin"},
@@ -155,6 +174,18 @@ func TestTS13_KeyFileRules(t *testing.T) {
 			must(t, os.Rename(filepath.Join(dir, "tlog", keysDir), filepath.Join(dir, "tlog", "k")))
 			mustSymlink(t, "tlog/k", filepath.Join(dir, keysDir))
 		}, good, "keys must be a real directory and not a symlink"},
+		{"keys is a regular file", func(t *testing.T, dir string) {
+			must(t, os.WriteFile(filepath.Join(dir, keysDir), nil, 0o600))
+		}, "", "keys must be a real directory and not a symlink"},
+		{"keys swapped during its open", func(t *testing.T, dir string) {
+			putKey(t, dir, good, 0o600)
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+				if name == keysDir {
+					must(t, os.Rename(filepath.Join(dir, keysDir), filepath.Join(dir, "keys.old")))
+					must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
+				}
+			}})
+		}, good, "keys changed between the check and the open"},
 		{"FIFO at the key path", func(t *testing.T, dir string) {
 			must(t, os.Mkdir(filepath.Join(dir, keysDir), 0o700))
 			mustFifo(t, filepath.Join(dir, keyName))
@@ -205,19 +236,135 @@ func TestTS13_SymlinkOutside(t *testing.T) {
 	}
 }
 
-// T-S-13: the owner must be the effective user. The test changes the test
-// hook, because it cannot make a file of another owner without root.
-func TestTS13_OwnerMismatch(t *testing.T) {
-	root, dir := newState(t)
-	putKey(t, dir, newKeyText(t, testOrigin), 0o600)
-	if _, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1); err != nil {
-		t.Fatalf("own file: %v", err)
+// otherOwner is a hook that makes the file or directory at path look like it
+// has another owner. The test cannot make such a file without root.
+func otherOwner(t *testing.T, path string) func(safefile.FileID) bool {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	must(t, err)
+	want, ok := safefile.Identity(fi)
+	if !ok {
+		t.Fatal("no identity")
 	}
-	old := geteuid
-	geteuid = func() int { return os.Geteuid() + 1 }
-	t.Cleanup(func() { geteuid = old })
-	if _, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1); err == nil || !strings.Contains(err.Error(), "owned by") {
-		t.Fatalf("got %v; want an owner error", err)
+	return func(id safefile.FileID) bool { return id == want }
+}
+
+// T-S-13: the owner of the key file and of the keys directory must be the
+// effective user.
+func TestTS13_OwnerMismatch(t *testing.T) {
+	for _, tc := range []struct{ name, path, rule string }{
+		{"key file", keyName, "checkpoint key"},
+		{"keys directory", keysDir, "keys must be owned by the user that runs the sensor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, dir := newState(t)
+			putKey(t, dir, newKeyText(t, testOrigin), 0o600)
+			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: otherOwner(t, filepath.Join(dir, tc.path))})
+			_, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1)
+			if err == nil || !strings.Contains(err.Error(), "owned by the user that runs the sensor") || !strings.Contains(err.Error(), tc.rule) {
+				t.Fatalf("got %v; want an owner error", err)
+			}
+		})
+	}
+}
+
+// T-S-13: a key file of 1024 bytes loads. The load reads a signer state of
+// maxNoteSize bytes and refuses one byte more.
+func TestTS13_SizeLimits(t *testing.T) {
+	good := newKeyText(t, testOrigin)
+	root, dir := newState(t)
+	putKey(t, dir, good+strings.Repeat("\n", maxKeySize-len(good)), 0o600)
+	if _, err := loadWithin(t, root, nil, testOrigin, true, 1); err != nil {
+		t.Errorf("key of %d bytes: %v", maxKeySize, err)
+	}
+	path := filepath.Join(dir, stateName)
+	must(t, os.WriteFile(path, bytes.Repeat([]byte("x"), maxNoteSize), 0o600))
+	if b, ok, err := readState(root); err != nil || !ok || len(b) != maxNoteSize {
+		t.Errorf("state at the limit: %d bytes, %v, %v", len(b), ok, err)
+	}
+	must(t, os.WriteFile(path, bytes.Repeat([]byte("x"), maxNoteSize+1), 0o600))
+	if _, _, err := readState(root); !errors.Is(err, safefile.ErrSize) || !strings.Contains(err.Error(), "must not be larger than 1 KiB") {
+		t.Errorf("state above the limit: %v", err)
+	}
+}
+
+// T-S-13: a key file whose second hard link is the temporary name of the write
+// is a crash leftover. The load removes the name before the check.
+func TestTS13_KeyLinkIsTemporaryName(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	tmp := filepath.Join(dir, keyName+".tmp")
+	must(t, os.Link(filepath.Join(dir, keyName), tmp))
+	log, buf := testLogger()
+	if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+		t.Fatalf("got %v; want the signer to load", err)
+	}
+	if _, err := os.Lstat(tmp); !errors.Is(err, fs.ErrNotExist) || strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("temporary name: %v; log %s; want not exist and no warning", err, buf)
+	}
+}
+
+// T-S-13: a FIFO renamed over a key file or the state after the check is a
+// changed file. The read refuses it. The call does not block. The public key
+// gives a warning and the load goes on.
+func TestTS13_FifoSwapAfterCheck(t *testing.T) {
+	for _, name := range []string{keyName, vkeyName, stateName} {
+		t.Run(name, func(t *testing.T) {
+			root, dir, _ := firstStart(t)
+			fifo := filepath.Join(dir, name+".fifo")
+			mustFifo(t, fifo)
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(got string) {
+				if got == filepath.Base(name) {
+					must(t, os.Rename(fifo, filepath.Join(dir, name)))
+				}
+			}})
+			log, buf := testLogger()
+			err := within(t, func() error {
+				if name == stateName {
+					_, _, err := SignerState(root)
+					return err
+				}
+				_, err := LoadOrCreateSigner(root, log, testOrigin, true, 1)
+				return err
+			})
+			if warned := strings.Contains(buf.String(), "public key file cannot be checked"); (name == vkeyName) != (err == nil) || warned != (name == vkeyName) ||
+				(err != nil && !strings.Contains(err.Error(), "changed between the check and the read")) {
+				t.Errorf("error %v, log %s; want the changed-file error (a warning for the public key)", err, buf)
+			}
+		})
+	}
+}
+
+// T-S-13: a keys directory that an in-root symlink replaces after the check is
+// not read through. The key and the public key use the directory that the check
+// opened. The rewrite of the public key logs no warning.
+func TestTS13_KeysSwapAfterCheck(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	s0, err := LoadOrCreateSigner(root, nil, testOrigin, true, 1)
+	must(t, err)
+	evil := filepath.Join(dir, "evil")
+	must(t, os.Mkdir(evil, 0o700))
+	must(t, os.WriteFile(filepath.Join(evil, keyFile), []byte(newKeyText(t, testOrigin)), 0o600))
+	must(t, os.Remove(filepath.Join(dir, vkeyName)))
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == keyFile {
+			must(t, os.Rename(filepath.Join(dir, keysDir), filepath.Join(dir, "real")))
+			mustSymlink(t, "evil", filepath.Join(dir, keysDir))
+		}
+	}})
+	log, buf := testLogger()
+	s, err := loadWithin(t, root, log, testOrigin, true, 1)
+	must(t, err)
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("the log has a warning: %s", buf)
+	}
+	if s.KeyHash() != s0.KeyHash() {
+		t.Error("the load read the key through the swapped name")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "real", vkeyFile)); err != nil {
+		t.Errorf("public key file in the checked directory: %v; want it written", err)
+	}
+	if _, err := os.Lstat(filepath.Join(evil, vkeyFile)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("public key file in the swapped directory: %v; want not exist", err)
 	}
 }
 
@@ -533,12 +680,11 @@ func TestTS13_NoKeyOutput(t *testing.T) {
 	putKey(t, dir, text, 0o600)
 	_, err = LoadOrCreateSigner(root, log, "another/origin", true, 1) // wrong name
 	errs = append(errs, err)
-	geteuidOld := geteuid
-	t.Cleanup(func() { geteuid = geteuidOld })
-	geteuid = func() int { return os.Geteuid() + 1 }
-	_, err = LoadOrCreateSigner(root, log, testOrigin, true, 1) // wrong owner
-	geteuid = geteuidOld
-	errs = append(errs, err)
+	t.Run("wrong owner", func(t *testing.T) {
+		safefiletest.Set(t, safefiletest.Hooks{OtherOwner: otherOwner(t, filepath.Join(dir, keyName))})
+		_, err := LoadOrCreateSigner(root, log, testOrigin, true, 1)
+		errs = append(errs, err)
+	})
 
 	// The public key file has hostile content: the private key text.
 	must(t, os.Remove(filepath.Join(dir, vkeyName)))
@@ -639,6 +785,32 @@ func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 	}
 }
 
+// T-S-13: the load reads a public key file of maxKeySize bytes. It cannot check
+// one of maxKeySize + 1 bytes and goes on with a warning.
+func TestTS13_VkeySizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pad  int
+		warn bool
+	}{{"at the limit", 0, false}, {"above the limit", 1, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, dir, _ := firstStart(t)
+			vpath := filepath.Join(dir, vkeyName)
+			vkey, err := os.ReadFile(vpath)
+			must(t, err)
+			text := strings.TrimSpace(string(vkey))
+			must(t, os.WriteFile(vpath, []byte(text+strings.Repeat("\n", maxKeySize+tc.pad-len(text))), 0o600))
+			log, buf := testLogger()
+			if _, err := loadWithin(t, root, log, testOrigin, true, 1); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if warned := strings.Contains(buf.String(), "public key file cannot be checked"); warned != tc.warn || strings.Contains(buf.String(), "level=WARN") != tc.warn {
+				t.Errorf("warning %v, want %v; log %s", warned, tc.warn, buf)
+			}
+		})
+	}
+}
+
 // T-S-13: a FIFO at the public key path does not block the load path, and the
 // first start refuses it.
 func TestTS13_VkeyFifo(t *testing.T) {
@@ -668,17 +840,18 @@ func TestTS13_SwapAfterLstat(t *testing.T) {
 	must(t, os.WriteFile(other, []byte(newKeyText(t, testOrigin)), 0o600))
 	must(t, os.Chmod(other, 0o600))
 	called := false
-	afterLstat = func() {
-		called = true
-		must(t, os.Remove(filepath.Join(dir, keyName)))
-		mustSymlink(t, "other.key", filepath.Join(dir, keyName))
-	}
-	t.Cleanup(func() { afterLstat = nil })
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+		if name == keyFile {
+			called = true
+			must(t, os.Remove(filepath.Join(dir, keyName)))
+			mustSymlink(t, "other.key", filepath.Join(dir, keyName))
+		}
+	}})
 	s, err := loadWithin(t, root, nil, testOrigin, true, 1)
 	if !called {
 		t.Fatal("the test hook did not run")
 	}
-	if err == nil || s != nil || !strings.Contains(err.Error(), keyName) || !strings.Contains(err.Error(), "changed between the check and the open") {
+	if err == nil || s != nil || !strings.Contains(err.Error(), keyName) || !strings.Contains(err.Error(), "changed between the check and the read") {
 		t.Fatalf("got signer %v, error %v; want the rule error", s, err)
 	}
 }

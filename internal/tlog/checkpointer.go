@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"strconv"
@@ -16,6 +14,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // stateName is the signer state: the bytes of the last signed checkpoint note.
@@ -322,22 +322,14 @@ func stateError(rule string, cause error) error {
 
 // readState reads the signer state through root. A missing file gives ok false.
 // A symlink or a file that is not regular is an error, and so is a file above
-// 1 KiB. The note is not verified here.
+// maxNoteSize bytes. The note is not verified here.
 func readState(root *os.Root) (msg []byte, ok bool, err error) {
-	lfi, err := root.Lstat(stateName)
-	if errors.Is(err, fs.ErrNotExist) {
+	b, err := safefile.ReadFile(root, stateName, noteRule)
+	switch {
+	case missing(err):
 		return nil, false, nil
-	} else if err != nil {
-		return nil, false, stateError("cannot be examined", err)
-	}
-	f, _, rule := openChecked(root, stateName, lfi)
-	if rule != "" {
-		return nil, false, stateError(rule, nil)
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxNoteSize+1))
-	if err != nil || len(b) > maxNoteSize {
-		return nil, false, stateError("cannot be read within 1 KiB", err)
+	case err != nil:
+		return nil, false, causedError{stateError(ruleText(err, noteRule), nil), err}
 	}
 	return b, true, nil
 }
