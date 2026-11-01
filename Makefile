@@ -207,7 +207,7 @@ perf-inner:
 # It copies the module to src in this directory, with all files as they are.
 # The copy is a tar file and its extract. It is about twice the module with
 # untracked files and .git. No size check runs during the copy and the
-# pre-check. Their files stay, and the later checks count them.
+# pre-check. The extract and the pre-check files stay. Later checks count them.
 # If a tar command fails, the target prints one line and fails (exit 1).
 # Gremlins starts in the copy. The module root of gremlins is then the copy.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
