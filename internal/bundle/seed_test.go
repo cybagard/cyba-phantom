@@ -212,9 +212,9 @@ func TestTS20SeedPrint(t *testing.T) {
 	if !strings.HasSuffix(text.String(), " msg=m seed=[seed]\n") {
 		t.Errorf("text handler: %q", text.String())
 	}
-	// A loaded Bundle prints its version and SHA-256 for a verb of the list. A
-	// Bundle, a *Bundle and a seedRef print no seed byte for a verb of the list
-	// or for %w, also in an unexported struct field.
+	// A loaded Bundle prints its version and SHA-256 for a verb of the list.
+	// A Bundle, a *Bundle and a seedRef print no seed byte under a verb of the
+	// list or %w. This holds in an unexported struct field too.
 	_, l, _, _ := seeded(t, keyOne)
 	b := l.Current()
 	want := fmt.Sprintf("bundle{version:%s sha256:%x}", ver(2), b.SHA256())

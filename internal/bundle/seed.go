@@ -25,13 +25,14 @@ const seedText = "[seed]"
 // pointer. encoding/json and encoding.TextMarshaler users get seedText.
 // encoding/gob gets an error. encoding/binary and a conversion to []byte give
 // the raw bytes. fmt cannot call a method of a value in an unexported struct
-// field and prints the bytes there. Under %s and the other verbs that are not
-// valid for a pointer, fmt also prints the bytes of a pointer in such a field.
+// field and prints the bytes there. Under %s and other verbs that a pointer
+// does not take, fmt prints the bytes of a pointer there.
 type seedBytes []byte
 
 // seedRef holds the *seedBytes of a Bundle. A print of a seedRef or a *seedRef
-// gives seedText. In an unexported struct field, fmt cannot call Format. There
-// fmt prints p as an address, so it prints no seed byte.
+// gives seedText, except under %T, %p and %w. In an unexported struct field,
+// fmt cannot call Format. There fmt prints p as an address, so it prints no
+// seed byte.
 type seedRef struct{ p *seedBytes }
 
 func (seedRef) Format(f fmt.State, _ rune) { fmt.Fprint(f, seedText) }
