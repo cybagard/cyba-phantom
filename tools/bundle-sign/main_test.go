@@ -800,15 +800,14 @@ func TestTS20SealRefusals(t *testing.T) {
 		name, pub, version, id string
 		err                    error
 	}{
-		{"not canonical", loose + "\n", testVersion, "k1", errKey},
-		{"short key", b64.EncodeToString(make([]byte, 31)) + "\n", testVersion, "k1", errKey},
-		{"no newline", enc, testVersion, "k1", errKey},
+		{"not canonical", loose + "\n", testVersion, "k1", errSeal},
+		{"short key", b64.EncodeToString(make([]byte, 31)) + "\n", testVersion, "k1", errSeal},
+		{"no newline", enc, testVersion, "k1", errSeal},
 		{"version", enc + "\n", "2026.10.01", "k1", errSeal},
 		{"key ID", enc + "\n", testVersion, "K1", errSeal},
 		{"no file", "", testVersion, "k1", errRead},
 	} {
-		pub := r.p("pub")
-		_ = os.Remove(pub)
+		pub := r.p("pub-" + strings.ReplaceAll(c.name, " ", "-"))
 		if c.pub != "" {
 			write(t, pub, c.pub, 0o644)
 		}

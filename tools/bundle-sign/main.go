@@ -335,7 +335,7 @@ func seal(a []string, _ io.Writer) error {
 	enc, ok := strings.CutSuffix(string(text), "\n")
 	pub, err := b64.DecodeString(enc)
 	if !ok || err != nil || len(pub) != 32 || b64.EncodeToString(pub) != enc {
-		return errKey
+		return errSeal
 	}
 	sealed, err := bundle.SealSeed(pub, a[1], a[2])
 	if err != nil {
