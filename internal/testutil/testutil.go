@@ -11,9 +11,9 @@ import (
 // pollEvery is the time between two checks of the condition in WaitFor.
 const pollEvery = time.Millisecond
 
-// WaitFor waits until cond is true, and fails the test if it is not true when
+// WaitFor waits until cond is true. It fails the test if cond is not true when
 // limit has passed. Use it where a test has no channel to wait on. It checks
-// cond one more time at the limit, so a slow machine does not give a false
+// cond one more time at the limit. A slow machine then does not give a false
 // failure when cond became true just before the limit.
 func WaitFor(t testing.TB, cond func() bool, limit time.Duration) {
 	t.Helper()

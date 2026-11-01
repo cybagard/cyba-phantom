@@ -38,7 +38,7 @@ type Config struct {
 	// Counters counts the refused events that the server drops. These are the
 	// events over a cap, and the emits with no valid peer address. It must
 	// be the value that the Queue got from NewQueue. Then all drops of a
-	// client key add up. New refuses nil.
+	// client key add up. New refuses nil and any other value.
 	Counters *event.Counters
 }
 
@@ -193,6 +193,9 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	}
 	if cfg.Queue == nil || cfg.Counters == nil {
 		return nil, errors.New("listener: a queue and counters are required")
+	}
+	if cfg.Counters != cfg.Queue.Counters() {
+		return nil, errors.New("listener: the counters must be the counters of the queue")
 	}
 	if cfg.MaxConns < 1 {
 		return nil, errors.New("listener: max conns must be at least 1")

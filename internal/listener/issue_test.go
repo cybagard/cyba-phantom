@@ -498,22 +498,23 @@ func TestTS16OCSPStaysOffAfterMaintenanceTicks(t *testing.T) {
 	var hits atomic.Int64
 	ocsp := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	t.Cleanup(ocsp.Close)
-	// certmagic asks for the config of the certificate at the start of each renewal check and of each OCSP check,
-	// before it does the work of that check. Both checks run at the same interval, so each tick gives two asks.
-	// When the count is above 2*ticks, the OCSP check ran about ticks times, and the work of all but the last
-	// check is done.
+	// certmagic requests the config of the certificate at the start of each
+	// OCSP check. It does this before the work of that check. Only the OCSP
+	// interval is short here, so the renewal check does not run. Each request
+	// is then one OCSP check. When the count is above ticks, the checks before
+	// the last one have done their work.
 	const ticks = 20
-	var asks atomic.Int64
+	var requests atomic.Int64
 	f := newIssueFixture(t, "ocsp.phantom.test", nil, func(p *ACMEParams) {
-		p.maintenanceInterval = 50 * time.Millisecond
-		p.onMaintenance = func() { asks.Add(1) }
+		p.ocspInterval = 50 * time.Millisecond
+		p.onMaintenance = func() { requests.Add(1) }
 	})
 	seeded := seedOCSPChain(t, f.a, f.name, ocsp.URL)
 	startIssue(t, f)
 	if ch, err := f.chain(); err != nil || !ch[0].Equal(seeded) {
 		t.Fatalf("Start did not serve the seeded certificate: %v", err)
 	}
-	testutil.WaitFor(t, func() bool { return asks.Load() > 2*ticks }, issueLimit)
+	testutil.WaitFor(t, func() bool { return requests.Load() > ticks }, issueLimit)
 	if hits.Load() != 0 {
 		t.Errorf("OCSP server got %d requests", hits.Load())
 	}

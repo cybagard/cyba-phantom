@@ -81,15 +81,19 @@ type ACMEParams struct {
 	egressResolver *net.Resolver
 	egressLookup   func(ctx context.Context, host string) ([]net.IPAddr, error)
 
-	// maintenanceInterval is the time between two renewal checks, and between two
-	// OCSP checks, of the certificate cache. It is a test hook; only tests in this
-	// package set it. It is zero in production, and then certmagic uses its default
-	// intervals.
+	// maintenanceInterval is the time between two renewal checks of the
+	// certificate cache. It is a test hook; only tests in this package set it.
+	// It is zero in production, and then certmagic uses its default interval.
 	maintenanceInterval time.Duration
 
-	// onMaintenance is a test hook. certmagic asks for the config of each managed
-	// certificate at each renewal check and at each OCSP check, and this function
-	// runs at each of those asks. It must not block. It is nil in production. No
+	// ocspInterval is the time between two OCSP checks of the certificate
+	// cache. It is a test hook; only tests in this package set it. It is zero
+	// in production, and then certmagic uses its default interval.
+	ocspInterval time.Duration
+
+	// onMaintenance is a test hook. certmagic requests the config of a managed
+	// certificate at each renewal check and at each OCSP check. This function
+	// runs at each request. It must not block. It is nil in production. No
 	// config key, flag, environment variable, or other input sets it.
 	onMaintenance func()
 }
@@ -256,7 +260,7 @@ func NewACME(p ACMEParams) (*ACME, error) {
 			return cfg.Load(), nil
 		},
 		RenewCheckInterval: p.maintenanceInterval,
-		OCSPCheckInterval:  p.maintenanceInterval,
+		OCSPCheckInterval:  p.ocspInterval,
 		Logger:             zap.NewNop(),
 	})
 	a.cfg = certmagic.New(a.cache, certmagic.Config{
