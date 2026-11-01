@@ -393,8 +393,8 @@ func wantError(t *testing.T, err error, rule, name string) {
 	}
 }
 
-// T-S-13: a tile directory that gets a group or other bit after Open gives the
-// mode rule with the name of the directory. The log stops.
+// T-S-13: a tile directory can get a group or other bit after Open. A proof
+// then gives the mode rule with the name of the directory. The log stops.
 func TestTS13TileDirectoryModeChangeAfterOpenStopsTheLog(t *testing.T) {
 	withoutSync(t)
 	l, file, _ := tileLog(t, 600, "tile/8/0/000")
@@ -406,8 +406,8 @@ func TestTS13TileDirectoryModeChangeAfterOpenStopsTheLog(t *testing.T) {
 	}
 }
 
-// T-S-13: a directory of a tile path that another directory replaces during
-// the walk gives the link rule with the name of the directory.
+// T-S-13: another directory can replace a directory of a tile path during the
+// walk. This gives the link rule with the name of the directory.
 func TestTS13TileDirectoryReplacedDuringTheWalkIsALink(t *testing.T) {
 	withoutSync(t)
 	l, file, _ := tileLog(t, 600, "tile/8/0/002.p/88")
@@ -423,8 +423,8 @@ func TestTS13TileDirectoryReplacedDuringTheWalkIsALink(t *testing.T) {
 	wantError(t, err, ruleLink, "tile/8/0/002.p")
 }
 
-// T-S-13: a link at another temporary name of a tile, which a process plants
-// after Open, makes WriteTile fail before it writes the new file.
+// T-S-13: a process can plant a link at another temporary name of a tile
+// after Open. WriteTile then fails before it writes the new file.
 func TestTS13WriteTileRefusesLinkAtAnotherTemporaryName(t *testing.T) {
 	state, dir := committedLog(t, 3)
 	s := openStore(t, state)
