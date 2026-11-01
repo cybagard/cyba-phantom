@@ -60,7 +60,7 @@ var ErrSealSeed = errors.New("bundle: seed cannot be sealed")
 // only a bundle of this version and key ID opens the result. The seed never
 // leaves the function. It is not returned, logged or put in an error. The
 // function clears it before it returns. A version, key ID or key that is not
-// valid gives ErrSealSeed.
+// valid gives ErrSealSeed. A failure of hpke.Seal also gives ErrSealSeed.
 func SealSeed(pub []byte, version, keyID string) ([]byte, error) {
 	key, err := installKEM().NewPublicKey(pub)
 	if err != nil || !validVersion(version) || !validKeyID(keyID) {

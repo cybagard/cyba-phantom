@@ -32,9 +32,10 @@
 // that holds lnk, and a trailing "/" has no effect.
 //
 // cosign adds the second line of a transition bundle. sig-file must hold
-// exactly one valid line, and key_id must not be the key ID of that line.
-// cosign makes the new line like sign, with the same key file rules. It writes
-// the old line and the new line to out.sig.
+// one line of the signature form, and key_id must not be the key ID of that
+// line. cosign does not verify that line or read the manifest. cosign makes
+// the new line like sign, with the same key file rules. It writes the old line
+// and the new line to out.sig. Run verify after cosign.
 //
 // seal makes the file secrets/token.key for a proprietary bundle. install.pub
 // is the public key file of the sensor: canonical base64 of 32 bytes and a
@@ -42,10 +43,12 @@
 // in bundle.SealSeed. The tool never holds it and never prints it. A seal for
 // one version or key ID does not open in a bundle of another.
 //
-// verify calls bundle.CheckSigned with the keys of the trust file, the check
-// of the loader. A transition bundle needs the line of a key of the trust file
-// and the line of its new key. Another bundle needs a valid line of its
-// manifest key ID. verify prints the key IDs that verified.
+// verify calls bundle.CheckSigned with the keys of the trust file. That is the
+// signature and key rule of the loader. verify does not know the transition
+// records of a sensor. It does not check the engine, the dates or the seed.
+// A transition bundle needs the line of a key of the trust file and the line
+// of its new key. Another bundle needs a valid line of its manifest key ID.
+// verify prints the key IDs that verified.
 //
 // After a failed write or file sync, the tool tries to cut the output file to
 // size 0. After a failed close, or a failed open, sync or close of the

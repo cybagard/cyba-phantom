@@ -58,12 +58,14 @@ func SigKeyIDs(sig []byte) (ids []string, ok bool) {
 	return ids, ok
 }
 
-// CheckSigned checks an archive and its signature file with the rule of the
-// loader, against the trust set (SEC-24). The order is: signature, archive,
-// manifest, then rotation or key ID. A transition bundle needs the line of the
-// old key, which is trusted, and the line of the new key. Any other bundle
-// needs a valid line of its manifest key ID. CheckSigned gives the key IDs
-// that verified. For a transition bundle, the list ends with the new key ID.
+// CheckSigned applies the signature and key rule of the loader (SEC-24). It
+// checks an archive and its signature file against the trust set. It does not
+// check the engine, the dates, the seed or the transition records. The order
+// is: signature, archive, manifest, then rotation or key ID. A transition
+// bundle needs the line of the old key, which is trusted, and the line of the
+// new key. Any other bundle needs a valid line of its manifest key ID.
+// CheckSigned gives the key IDs that verified. For a transition bundle, the
+// list ends with the new key ID.
 // A failed step gives ErrBadSig, ErrArchiveInvalid or ErrManifestInvalid.
 func CheckSigned(archive, sig []byte, trust TrustSet) ([]string, error) {
 	ids, err := VerifySig(archive, sig, trust)
