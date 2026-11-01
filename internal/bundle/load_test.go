@@ -62,7 +62,9 @@ func newEnv(t *testing.T) *env {
 }
 
 func (e *env) loader(path string) *Loader {
-	l := NewLoader(e.root, path, e.trust)
+	l := NewLoader(e.root, path, e.trust, nil)
+	// These archives hold no seed file. seedLoader runs the seed step.
+	l.seed = nil
 	l.now = func() time.Time { return testNow }
 	l.decompress = func(b []byte) (*Archive, error) { e.n.Add(1); return ReadArchive(b) }
 	return l

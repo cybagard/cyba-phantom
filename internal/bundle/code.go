@@ -47,6 +47,7 @@ var (
 	ErrExpired         = errors.New("bundle: expired")
 	ErrRollback        = errors.New("bundle: rollback")
 	ErrTemplateParse   = errors.New("bundle: template_parse")
+	ErrSeedInvalid     = errors.New("bundle: seed_invalid")
 )
 
 // CodeOf returns the rejection code of an error of this package. It gives false
@@ -67,6 +68,8 @@ func CodeOf(err error) (Code, bool) {
 		return CodeRollback, true
 	case errors.Is(err, ErrTemplateParse):
 		return CodeTemplateParse, true
+	case errors.Is(err, ErrSeedInvalid):
+		return CodeSeedInvalid, true
 	}
 	return 0, false
 }
