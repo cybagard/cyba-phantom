@@ -665,7 +665,8 @@ func TestTI03_ColdStart(t *testing.T) {
 	r := launchServe(t, cfg, p, realDeps)
 	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
 	r.waitStarted(t)
-	// With no static entry, serveWith does not call WarnExpiry. It writes the start line after that point.
+	// With no static entry, serveWith does not call WarnExpiry.
+	// It writes the start line after that point.
 	if n := warns.Load(); n != 0 {
 		t.Errorf("WarnExpiry called %d times with no static entry, want 0", n)
 	}
@@ -1278,8 +1279,8 @@ func (m *mixed) leaf(t *testing.T, name string) []byte {
 	return conn.ConnectionState().PeerCertificates[0].Raw
 }
 
-// refuses checks that GetCertificate fails for each name with a gate
-// reason: the error is not errNoClient and the source counts one refusal.
+// refuses checks that GetCertificate fails for each name with a gate reason.
+// The error is not errNoClient. The source counts one refusal.
 func (m *mixed) refuses(t *testing.T, names ...string) {
 	t.Helper()
 	for _, name := range names {
