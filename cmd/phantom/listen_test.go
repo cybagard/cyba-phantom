@@ -223,6 +223,28 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	return r
 }
 
+// launchViaServe runs the real serve function with c until the test ends.
+// The serveSetup seam gives it p and realDeps. The waitStop seam holds serve
+// until r.cancel runs, so the test needs no signal.
+func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) *running {
+	oldLog, oldSetup, oldWait := log.Writer(), serveSetup, waitStop
+	t.Cleanup(func() { log.SetOutput(oldLog); serveSetup, waitStop = oldSetup, oldWait })
+	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
+	hold := make(chan struct{})
+	waitStop = func(context.Context) { <-hold }
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
+	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
+	t.Cleanup(func() {
+		r.cancel()
+		select {
+		case <-r.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return %v after the cancel at the end of the test", sigtermWait)
+		}
+	})
+	return r
+}
+
 // captureServer wraps newServer until the test ends. The returned function gives the server that serveWith made.
 func captureServer(t *testing.T) func() *listener.Server {
 	var srv *listener.Server
@@ -633,9 +655,20 @@ func TestTI03_ColdStart(t *testing.T) {
 	ca, _ := cfg.Get("acme.ca")
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
+	var warns atomic.Int32
+	oldWarn := warnCerts
+	t.Cleanup(func() { warnCerts = oldWarn })
+	warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
+		warns.Add(1)
+		oldWarn(s, ctx, lg)
+	}
 	r := launchServe(t, cfg, p, realDeps)
 	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
 	r.waitStarted(t)
+	// With no static entry, serveWith does not call WarnExpiry. It writes the start line after that point.
+	if n := warns.Load(); n != 0 {
+		t.Errorf("WarnExpiry called %d times with no static entry, want 0", n)
+	}
 	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err).Close()
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
 }
@@ -1146,6 +1179,8 @@ type mixOpt struct {
 	left    time.Duration // time left of the leaf; 0 is 90 days
 	remove  bool          // remove the fixture files after checkContent
 	seed    bool          // seed the cache, so the client makes no order
+	// viaServe starts the real serve function, not serveWith.
+	viaServe bool
 }
 
 // mixed is a running sensor with one static name.
@@ -1219,7 +1254,11 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		m.get = cc.TLS.GetCertificate
 		return oldServer(cc, h)
 	}
-	m.r = launchContent(t, cfg, c, p, realDeps)
+	if o.viaServe {
+		m.r = launchViaServe(t, cfg, c, p)
+	} else {
+		m.r = launchContent(t, cfg, c, p, realDeps)
+	}
 	m.r.waitStarted(t)
 	if m.source == nil {
 		t.Fatalf("serveWith did not call WarnExpiry; stderr %q", m.r.err.String())
@@ -1311,6 +1350,22 @@ func TestTS27_StartStaticOnly(t *testing.T) {
 	}
 	if code := status(t, "http://"+m.plain+"/", staticName); code != http.StatusPermanentRedirect {
 		t.Errorf("redirect status %d for the static name, want 308", code)
+	}
+}
+
+// TestTS27_ServeStaticLeaf starts the real serve function with parsed content.
+// A handshake for the static name gives the static leaf. The test removes the
+// files before the start, so serve uses the parsed values. serve returns 0
+// after the cancel through the waitStop seam (T-S-27).
+func TestTS27_ServeStaticLeaf(t *testing.T) {
+	m := startMixed(t, mixOpt{remove: true, viaServe: true})
+	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
+		t.Error("the handshake did not give the static leaf")
+	}
+	m.r.cancel()
+	<-m.r.done
+	if m.r.code != 0 {
+		t.Errorf("serve returned %d, want 0; stderr %q", m.r.code, m.r.err.String())
 	}
 }
 

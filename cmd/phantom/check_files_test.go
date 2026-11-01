@@ -325,6 +325,32 @@ func runMode(t *testing.T, check bool, body string) (code int, so, se string, ca
 	return code, o.String(), e.String(), calls
 }
 
+// TestTS27_RunPassesContent checks that run gives serve the parsed content.
+// The config has acme.ca_root and one tls.certs entry. The serve stub gets
+// roots and one static entry with the name of that entry (T-S-27).
+func TestTS27_RunPassesContent(t *testing.T) {
+	d := fixtureDir(t)
+	rp := writePEM(t, d, "root.pem", rootPEM(t), 0o644)
+	cp := writePEM(t, d, "c.pem", certPEM(t, staticName, -time.Hour, 90*24*time.Hour), 0o644)
+	kp := writePEM(t, d, "k.key", leafKeyPEM(t), 0o600)
+	var got content
+	calls := 0
+	old := serve
+	t.Cleanup(func() { serve = old })
+	serve = func(_ *config.Config, c content, _, _ io.Writer) int { got = c; calls++; return 0 }
+	var o, e strings.Builder
+	args := []string{writeFile(t, contentBody(t, rp, [2]string{cp, kp}))}
+	if code := run(args, []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, &o, &e); code != 0 || calls != 1 {
+		t.Fatalf("exit %d, serve calls %d, stderr %q", code, calls, e.String())
+	}
+	if got.roots == nil {
+		t.Error("serve got no roots")
+	}
+	if len(got.static) != 1 || got.static[0].Name != staticName {
+		t.Errorf("serve got static entries %v, want one for %q", got.static, staticName)
+	}
+}
+
 // TestTS27_CheckContent checks that --check and the start refuse a bad
 // static or root file. The exit is 1 and the start calls no serve.
 // Stderr is one line. It names the key of the file that causes the error.
