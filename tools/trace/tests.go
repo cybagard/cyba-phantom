@@ -81,10 +81,11 @@ type marker struct {
 
 // runTests runs the tests mode over one spec directory and one tree.
 func runTests(specDir, root, milestone string) ([]string, error) {
-	if err := checkSpecDir(specDir); err != nil {
+	dir, err := resolveSpecDir(specDir)
+	if err != nil {
 		return nil, err
 	}
-	text, findings, err := loadSpec(filepath.Join(specDir, "07-test-plan.md"))
+	text, findings, err := loadSpecAs(filepath.Join(dir, "07-test-plan.md"), specDir+"/07-test-plan.md")
 	if err != nil {
 		return nil, err
 	}
@@ -115,12 +116,16 @@ func runTests(specDir, root, milestone string) ([]string, error) {
 	}
 	findings = append(findings, checkRows(rows, declared)...)
 
-	have, walkFindings, err := findTestFuncs(root)
+	tree, err := resolveSpecDir(root)
+	if err != nil {
+		return nil, err
+	}
+	have, walkFindings, err := findTestFuncs(tree)
 	if err != nil {
 		return nil, err
 	}
 	findings = append(findings, walkFindings...)
-	marked, markFindings, err := findMarkers(filepath.Join(root, "Makefile"))
+	marked, markFindings, err := findMarkers(filepath.Join(tree, "Makefile"))
 	if err != nil {
 		return nil, err
 	}
@@ -311,11 +316,9 @@ func parseTestFile(name string, data []byte) (*ast.File, error) {
 }
 
 // findTestFuncs walks root and returns the test IDs that have a Go test.
-// It does not follow symlinks. It parses at most maxTestFiles files.
+// The root is the directory that resolveSpecDir returned. It does not
+// follow symlinks. It parses at most maxTestFiles files.
 func findTestFuncs(root string) (map[string]bool, []string, error) {
-	if err := checkSpecDir(root); err != nil {
-		return nil, nil, err
-	}
 	have := map[string]bool{}
 	var findings []string
 	parsed := 0
@@ -418,7 +421,10 @@ func idFromTestName(name string) string {
 }
 
 // findMarkers reads the marker lines of the Makefile. It returns the IDs
-// that a marker covers. A missing Makefile has no markers.
+// that a marker covers. A missing Makefile has no markers. A line with
+// .RECIPEPREFIX is one finding, and then no marker counts. A name built from
+// parts, such as .RECIPE$(E)PREFIX, escapes this check. So does a
+// .RECIPEPREFIX set in an included file.
 func findMarkers(path string) (map[string]bool, []string, error) {
 	data, err := readCapped(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -431,6 +437,11 @@ func findMarkers(path string) (map[string]bool, []string, error) {
 		return nil, nil, errors.New("cannot read the Makefile")
 	}
 	lines := strings.Split(string(data), "\n")
+	for i, l := range lines {
+		if strings.Contains(l, ".RECIPEPREFIX") {
+			return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d uses .RECIPEPREFIX; no marker counts", i+1)}, nil
+		}
+	}
 	var markers []marker
 	var findings []string
 	for i, l := range lines {
@@ -510,19 +521,20 @@ func continues(line string) bool {
 }
 
 // isAssignment reports whether the text after a rule colon has a "=" before
-// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. A "$$"
-// is a literal "$" in make, so it opens no reference.
+// any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. Make reads
+// "$" and one more character as a reference. isAssignment skips that
+// character outside a reference only.
 func isAssignment(rest string) bool {
 	depth := 0
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {
-		case c == '$' && i+1 < len(rest) && rest[i+1] == '$':
-			i++
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
 			depth++
 		case depth > 0 && (c == ')' || c == '}'):
 			depth--
 		case depth > 0:
+		case c == '$' && i+1 < len(rest):
+			i++
 		case c == ';' || c == '#':
 			return false
 		case c == '=':

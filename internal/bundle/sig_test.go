@@ -149,3 +149,62 @@ func TestTS20TrustSet(t *testing.T) {
 		t.Error("line with a trailing space is accepted")
 	}
 }
+
+// T-S-20: SigKeyIDs gives the key IDs in order, and false for a file that is
+// not valid.
+func TestTS20SigKeyIDs(t *testing.T) {
+	privA, _ := testKey(1, "a1")
+	privB, _ := testKey(2, "b2")
+	a, b := signed("a1", privA), signed("b2", privB)
+	for _, c := range []struct {
+		sig  string
+		want []string
+		ok   bool
+	}{
+		{"", nil, false}, {a, []string{"a1"}, true}, {b + a, []string{"b2", "a1"}, true},
+		{a + b + a, nil, false}, {a + a, nil, false}, {"junk\n", nil, false},
+	} {
+		if got, ok := SigKeyIDs([]byte(c.sig)); ok != c.ok || !slices.Equal(got, c.want) {
+			t.Errorf("%q: %q, %v", c.sig, got, ok)
+		}
+	}
+}
+
+// T-S-20: CheckSigned applies the rule of the loader. A normal bundle needs a
+// line of its key ID. A transition bundle needs the old and the new line.
+func TestTS20CheckSigned(t *testing.T) {
+	privOld, old := testKey(1, "k1")
+	privNew, newKey := testKey(2, "k2")
+	privOther, _ := testKey(3, "k3")
+	manifest := func(m string) []byte { return build(ent{name: "manifest.json", data: []byte(m)}) }
+	normal := func(id string) []byte { return manifest(mf(ver(2), `"k1"`, q(id))) }
+	pubText := base64.StdEncoding.EncodeToString(newKey.PublicKey[:])
+	transition := manifest(strings.NewReplacer(`"k1"`, `"k2"`, `"zz"`, `"k1"`).Replace(with("rotation", rot("zz", pubText))))
+	line := func(id string, priv ed25519.PrivateKey, arch []byte) string {
+		return sigRow(id, ed25519.Sign(priv, SigMessage(arch)))
+	}
+	for _, c := range []struct {
+		name  string
+		arch  []byte
+		sig   string
+		trust TrustSet
+		want  []string
+		err   error
+	}{
+		{"normal", normal("k1"), line("k1", privOld, normal("k1")), TrustSet{old}, []string{"k1"}, nil},
+		{"transition", transition, line("k1", privOld, transition) + line("k2", privNew, transition), TrustSet{old}, []string{"k1", "k2"}, nil},
+		{"no new line", transition, line("k1", privOld, transition), TrustSet{old}, nil, ErrBadSig},
+		{"no old line", transition, line("k2", privNew, transition), TrustSet{old}, nil, ErrBadSig},
+		{"key ID not in the set", normal("k2"), line("k1", privOld, normal("k2")), TrustSet{old}, nil, ErrBadSig},
+		{"key ID not the signer", normal("k2"), line("k1", privOld, normal("k2")), TrustSet{old, newKey}, nil, ErrBadSig},
+		{"bad file", normal("k1"), "junk\n", TrustSet{old}, nil, ErrBadSig},
+		{"bad archive", []byte("x"), line("k1", privOld, []byte("x")), TrustSet{old}, nil, ErrArchiveInvalid},
+		{"bad manifest", manifest("{}"), line("k1", privOld, manifest("{}")), TrustSet{old}, nil, ErrManifestInvalid},
+		{"other line", transition, line("k3", privOther, transition), TrustSet{old}, nil, ErrBadSig},
+	} {
+		got, err := CheckSigned(c.arch, []byte(c.sig), c.trust)
+		if err != c.err || !slices.Equal(got, c.want) {
+			t.Errorf("%s: %q, %v; want %q, %v", c.name, got, err, c.want, c.err)
+		}
+	}
+}

@@ -84,6 +84,10 @@ func newQueue(depth int, bulkCap, evidenceCap int64, c *Counters) (*Queue, error
 	}, nil
 }
 
+// Counters returns the counters that NewQueue got. It returns nil for a
+// zero-value Queue.
+func (q *Queue) Counters() *Counters { return q.counters }
+
 // reserve adds n bytes to sum if the result stays within limit. The
 // compare-and-swap loop never lets the sum pass the limit, also when many
 // producers run.

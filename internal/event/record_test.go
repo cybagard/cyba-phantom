@@ -356,6 +356,24 @@ func TestTS12_ManyDetailMembers(t *testing.T) {
 	}
 }
 
+// T-S-12: Detail.check reads the string length of each value for the size
+// bound. The long value is on the second sorted name. The marshaled text is
+// also too large, so the test calls check directly. The encoder gets no input.
+func TestTS12_DetailSizeBoundReadsValue(t *testing.T) {
+	seen := watchEncoder(t)
+	const want = "event: detail is too large"
+	d := Detail{"a": Int(0), "b": Str(strings.Repeat("x", 2045))}
+	if err := d.check(); err == nil || err.Error() != want {
+		t.Errorf("check: error %v, want %q", err, want)
+	}
+	if _, err := d.JSON(); err == nil || err.Error() != want {
+		t.Errorf("JSON: error %v, want %q", err, want)
+	}
+	if len(*seen) != 0 {
+		t.Errorf("the encoder got input of lengths %v", *seen)
+	}
+}
+
 // T-S-12: the largest event has a fixed size; the encoder input is bounded by
 // the record caps.
 func TestTS12_LargestEvent(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -265,8 +266,13 @@ func TestTS20InstallKeyNoReplace(t *testing.T) {
 }
 
 func ikOtherOwner(t *testing.T, path string) {
-	fi, _ := os.Stat(path)
-	id, _ := safefile.Identity(fi)
+	t.Helper()
+	fi, err := os.Stat(path)
+	ikMust(t, err)
+	id, ok := safefile.Identity(fi)
+	if !ok {
+		t.Skip("this platform gives no file identity")
+	}
 	safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(o safefile.FileID) bool { return o == id }})
 }
 
@@ -278,7 +284,9 @@ func TestTS20InstallKeySwapped(t *testing.T) {
 	ikMust(t, os.Mkdir(keys, 0o700), os.Mkdir(other, 0o700))
 	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) { ikMust(t, os.Remove(keys), os.Symlink("other", keys)) }})
 	key, err := LoadOrCreateInstallKey(root)
-	if ents, _ := os.ReadDir(other); key != nil || !errors.Is(err, ErrInstallKeyFault) || !strings.Contains(err.Error(), "changed during the check") || len(ents) != 0 {
+	ents, rerr := os.ReadDir(other)
+	ikMust(t, rerr)
+	if key != nil || !errors.Is(err, ErrInstallKeyFault) || !strings.Contains(err.Error(), "changed during the check") || len(ents) != 0 {
 		t.Errorf("key %v, error %v, files in the other directory %v", key, err, ents)
 	}
 }
@@ -316,15 +324,24 @@ func TestTS20InstallKeyLeftover(t *testing.T) {
 // T-S-20: a call leaves no open descriptor. No t.Parallel, as it counts all.
 func TestTS20InstallKeyDescriptors(t *testing.T) {
 	_, root := ikDir(t)
+	// Best effort: the finalizers run later. The set compare is the check.
+	runtime.GC()
 	before, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Skip("no /proc/self/fd")
 	}
+	open := map[string]bool{}
+	for _, e := range before {
+		open[e.Name()] = true
+	}
 	for i := range 2 {
 		_, err := LoadOrCreateInstallKey(root)
-		after, _ := os.ReadDir("/proc/self/fd")
-		if ikMust(t, err); len(after) != len(before) {
-			t.Errorf("call %d: %d descriptors before, %d after", i+1, len(before), len(after))
+		after, rerr := os.ReadDir("/proc/self/fd")
+		ikMust(t, err, rerr)
+		for _, e := range after {
+			if !open[e.Name()] {
+				t.Errorf("call %d: descriptor %s is new", i+1, e.Name())
+			}
 		}
 	}
 }

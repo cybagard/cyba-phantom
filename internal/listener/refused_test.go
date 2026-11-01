@@ -340,15 +340,19 @@ func TestTS22NewEventErrorCount(t *testing.T) {
 	g.want(t, 0, nil, 0)
 }
 
-// T-S-22: New refuses a nil queue and nil counters. It gives the emitter the
-// queue and the counters of its config.
+// T-S-22: New refuses a nil queue, nil counters, and counters that are not
+// the counters of the queue. It gives the emitter the queue and the counters
+// of its config.
 func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 	cert, _ := testCert(t)
 	q, c := testSinks(t, 1024)
 	cfg := Config{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxConns: 1, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}
 	for name, mod := range map[string]func(*Config){
-		"no queue":    func(c *Config) { c.Queue = nil },
-		"no counters": func(c *Config) { c.Counters = nil },
+		"no queue":            func(c *Config) { c.Queue = nil },
+		"no counters":         func(c *Config) { c.Counters = nil },
+		"other counters":      func(c *Config) { c.Counters = event.NewCounters() },
+		"zero-value queue":    func(c *Config) { c.Queue = &event.Queue{} },
+		"zero-value counters": func(c *Config) { c.Counters = &event.Counters{} },
 	} {
 		bad := cfg
 		mod(&bad)
