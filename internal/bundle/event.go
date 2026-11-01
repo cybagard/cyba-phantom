@@ -120,8 +120,8 @@ func (l *Loader) report(src Source, sum digest, b *Bundle, err error) {
 	for _, m := range ms {
 		d[m.name] = event.Str(m.value)
 	}
-	// NewEvent cannot fail here: the detail has at most four members, each a
-	// bounded enum, 64 hex digits, or a checked version or key ID.
+	// NewEvent cannot fail here. The detail has at most four members. Each is
+	// a bounded enum, 64 hex digits, or a checked version or key ID.
 	e, _ := event.NewEvent(l.now, event.Input{Kind: kind, Detail: d})
 	l.events.Enqueue(e)
 }

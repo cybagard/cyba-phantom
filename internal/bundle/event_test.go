@@ -218,9 +218,9 @@ func TestTU08ManifestMarkersStayOut(t *testing.T) {
 	}
 }
 
-// T-U-08, T-S-19: real archive, template and manifest errors, with marker text
-// in the input, give a fixed error, one event and one log line. The marker text
-// and the ESC byte are not in the record, the log or the error.
+// T-U-08, T-S-19: real archive, template and manifest errors have marker text
+// in the input. Each gives a fixed error, one event and one log line. The
+// marker text and the ESC byte are not in the record, the log or the error.
 func TestTU08ErrorTextMarkersStayOut(t *testing.T) {
 	man := ent{name: "manifest.json", data: []byte(mf(ver(3)))}
 	badMan := func(data string) []byte { return build(ent{name: man.name, data: []byte(data)}) }
