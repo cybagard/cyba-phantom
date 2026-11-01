@@ -243,8 +243,8 @@ func seedMarkers(b []byte) []string {
 }
 
 // T-S-20: a reference bundle with a plain seed loads with a nil install key.
-// File gives no entry for a name below secrets/, and none for a file of that
-// directory that is not a seed file.
+// File gives no entry for a name below secrets/. That holds also for a file
+// there that is not a seed file.
 func TestTS20SeedReference(t *testing.T) {
 	e := newEnv(t)
 	e.putSeeded(keyTwo(e), ver(2), plainEnt(seedA), ent{name: "secrets/a", data: []byte("a")})

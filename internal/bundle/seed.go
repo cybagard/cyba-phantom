@@ -19,13 +19,13 @@ const (
 const seedText = "[seed]"
 
 // seedBytes is the token seed in memory. fmt gives seedText for each verb
-// except %T and %p, which give the type name and an address, and except %w,
-// where fmt calls no method and prints the bytes of a seed passed directly.
-// encoding/json and encoding.TextMarshaler users get seedText. encoding/gob
-// gets an error. encoding/binary and a conversion to []byte give the raw
-// bytes. fmt cannot call a method of a value in an unexported struct field and
-// prints the bytes there, so Bundle holds a *seedBytes: fmt prints a pointer
-// field as an address.
+// except %T and %p, which give the type name and an address. It also differs
+// for %w: fmt calls no method there and prints the bytes of a seed passed
+// directly. encoding/json and encoding.TextMarshaler users get seedText.
+// encoding/gob gets an error. encoding/binary and a conversion to []byte give
+// the raw bytes. fmt cannot call a method of a value in an unexported struct
+// field and prints the bytes there. So Bundle holds a *seedBytes, and fmt
+// prints a pointer field as an address.
 type seedBytes []byte
 
 func (seedBytes) Format(f fmt.State, _ rune)   { fmt.Fprint(f, seedText) }
