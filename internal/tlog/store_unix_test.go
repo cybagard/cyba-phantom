@@ -797,7 +797,7 @@ func TestTS13OpenRefusesFileThatChangesSizeBeforeTheSizeCheck(t *testing.T) {
 
 // T-S-13: a tile or the head that grows or shrinks during the read is refused.
 // The change is in the OtherOwner hook, after the size check and before the
-// read. A tile that grew gives the length rule and a head that grew gives the
+// read. A tile that grew gives the length rule. A head that grew gives the
 // rule of a head that is not valid. A tile or head that shrank gives the
 // changed rule.
 func TestTS13OpenRefusesFileThatChangesSizeDuringTheRead(t *testing.T) {
