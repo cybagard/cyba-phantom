@@ -203,6 +203,34 @@ func TestTS20RotationRefused(t *testing.T) {
 	}
 }
 
+// T-S-20, SEC-24: a small-order key as the new key of a transition bundle is
+// refused. This holds also when the line of that key verifies. The line has R
+// as the base point and S as 1. It verifies for some archives, so the test
+// changes the version until it does. The old key signs. No record is written.
+func TestTS20SmallOrderRotationKey(t *testing.T) {
+	sig := append([]byte{0x58}, bytes.Repeat([]byte{0x66}, 31)...)
+	sig = append(sig, 1)
+	sig = append(sig, make([]byte, 31)...)
+	for _, key := range smallOrderKeys(t) {
+		t.Run(fmt.Sprintf("%x", key[:2]), func(t *testing.T) {
+			e := running(t)
+			k1, evil := e.keys()[0], rkey{id: "k3", pub: key}
+			var arch []byte
+			for n := 3; n < 3+256 && arch == nil; n++ {
+				if a := transition(k1, evil, ver(n)); ed25519.Verify(key[:], SigMessage(a), sig) {
+					arch = a
+				}
+			}
+			if arch == nil {
+				t.Fatal("no archive of 256 verifies with the forged line")
+			}
+			e.put(arch, lineOf(k1, arch), sigRow("k3", sig))
+			e.rejects(e.l, false, ErrBadSig)
+			e.absent(1)
+		})
+	}
+}
+
 // T-S-20: the rotation checks come before the engine and rollback checks.
 // A bundle with both lines gets the engine or version error only after it
 // passes the rotation checks. Nothing is written.

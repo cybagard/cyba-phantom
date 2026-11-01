@@ -350,6 +350,35 @@ func TestTS20PathFormsAreRefused(t *testing.T) {
 	}
 }
 
+// T-S-20: a path with the archive name of a transition record is refused. Here
+// n is 1 to 9, and the ASCII case does not count. The refusal comes before any
+// read, also when the chain check would fail. Other names load.
+func TestTS20RecordNamesAreRefused(t *testing.T) {
+	e := running(t)
+	k1, k3 := e.keys()[0], newKey(3, "k3")
+	e.rotates(k1, k3, ver(3))
+	arch := build(ent{name: "manifest.json", data: []byte(mf(ver(4), `"k1"`, q("k3")))})
+	for _, p := range []string{"bundle/rotation-10.cbnd", "bundle/rotation-01.cbnd", "bundle/rotation-0.cbnd", "bundle/xrotation-1.cbnd"} {
+		e.write(p, arch)
+		e.write(strings.TrimSuffix(p, ".cbnd")+".sig", []byte(lineOf(k3, arch)))
+		if _, err := e.loader(p).Load(false); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	for _, badMode := range []bool{false, true} {
+		if badMode {
+			must(t, os.Chmod(filepath.Join(e.state, "bundle", "rotation-1.sig"), 0o666))
+		}
+		for _, p := range []string{"bundle/rotation-1.cbnd", "bundle/Rotation-8.cbnd", "bundle/ROTATION-9.cbnd", "rotation-2.cbnd"} {
+			l, read := e.loader(p), false
+			l.afterRead = func() { read = true }
+			if n := e.rejects(l, true, ErrArchiveInvalid); n != 0 || read {
+				t.Errorf("%s, bad mode %v: %d decompress calls, read %v", p, badMode, n, read)
+			}
+		}
+	}
+}
+
 // T-S-20: a symlink at a directory part of the bundle path is refused. A valid
 // bundle is behind each link, and no file below keys/ or tlog/ changes.
 func TestTS20DirectoryPartsAreRefused(t *testing.T) {
