@@ -358,7 +358,7 @@ func TestTS12_ManyDetailMembers(t *testing.T) {
 
 // T-S-12: Detail.check reads the string length of each value for the size
 // bound. The long value is on the second sorted name. The marshaled text is
-// also too large, so the test calls check directly. No encoder input occurs.
+// also too large, so the test calls check directly. The encoder gets no input.
 func TestTS12_DetailSizeBoundReadsValue(t *testing.T) {
 	seen := watchEncoder(t)
 	const want = "event: detail is too large"
