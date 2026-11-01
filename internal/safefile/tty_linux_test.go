@@ -20,10 +20,12 @@ import (
 // value is the row. The variable with the suffix _NAME holds the /dev name.
 const ttyEnv = "SAFEFILE_TTY_ROW"
 
-// TestTS23_NoControllingTerminal checks that Open and OpenPath open with
-// O_NOCTTY. A session leader with no controlling terminal gets one when it
-// opens a terminal device without that flag. Each row runs in its own child,
-// because a process gets a controlling terminal only once.
+// TestTS23_NoControllingTerminal checks that Open, OpenPath and OpenRoot do
+// not make a terminal the controlling terminal. Open and OpenPath use
+// O_NOCTTY. OpenRoot uses O_DIRECTORY, which refuses a terminal. A session
+// leader with no controlling terminal gets one when it opens a terminal
+// device without such a guard. Each row runs in its own child, because a
+// process gets a controlling terminal only once.
 func TestTS23_NoControllingTerminal(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("only root can make an entry in /dev")
@@ -32,12 +34,13 @@ func TestTS23_NoControllingTerminal(t *testing.T) {
 		ttyChild(t, row, os.Getenv(ttyEnv+"_NAME"))
 		return
 	}
-	for _, row := range []string{"Open", "OpenPath"} {
+	for _, row := range []string{"Open", "OpenPath", "OpenRoot"} {
 		t.Run(row, func(t *testing.T) {
 			name := fmt.Sprintf("safefile-tty-%d-%s", os.Getpid(), row)
 			t.Cleanup(func() {
 				os.Remove("/dev/" + name)
 				os.Remove("/dev/q" + name)
+				os.Remove("/dev/old" + name)
 			})
 			cmd := exec.Command(os.Args[0], "-test.v",
 				"-test.run=^TestTS23_NoControllingTerminal$")
@@ -53,8 +56,9 @@ func TestTS23_NoControllingTerminal(t *testing.T) {
 }
 
 // ttyChild runs in a session with no controlling terminal. It swaps a link to
-// a terminal device in after the check, and wants ErrChanged and no new
-// controlling terminal.
+// a terminal device in after the check, and wants an error and no new
+// controlling terminal. Open and OpenPath want ErrChanged. OpenRoot wants
+// ErrType, because O_DIRECTORY makes the kernel refuse the terminal.
 func ttyChild(t *testing.T, row, name string) {
 	sid, _, e := syscall.RawSyscall(syscall.SYS_GETSID, 0, 0, 0)
 	if e != 0 || int(sid) != os.Getpid() {
@@ -117,6 +121,30 @@ func ttyChild(t *testing.T, row, name string) {
 		f, fi, err := OpenPath(p, rule)
 		if err = verdict(t, f, fi, err); !errors.Is(err, ErrChanged) {
 			t.Errorf("OpenPath: err = %v, want ErrChanged", err)
+		}
+	case "OpenRoot":
+		r, err := os.OpenRoot("/dev")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		if err := os.Mkdir("/dev/"+name, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		swapAfterCheck(t, func(string) {
+			if err := os.Symlink(pts, "/dev/q"+name); err != nil {
+				t.Error(err)
+			}
+			if err := os.Rename("/dev/"+name, "/dev/old"+name); err != nil {
+				t.Error(err)
+			}
+			if err := os.Rename("/dev/q"+name, "/dev/"+name); err != nil {
+				t.Error(err)
+			}
+		})
+		rule := Rule{Type: Dir, Owner: OwnerSelf}
+		if _, err := OpenRoot(r, name, rule); !errors.Is(err, ErrType) {
+			t.Errorf("OpenRoot: err = %v, want ErrType", err)
 		}
 	default:
 		t.Fatalf("unknown row %q", row)

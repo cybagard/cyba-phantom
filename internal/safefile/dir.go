@@ -42,14 +42,16 @@ func walkArgs(root *os.Root, name string, dir Rule) ([]string, error) {
 // part it runs the Lstat and the type rule. Then it opens the part without
 // blocking and compares that descriptor with the Lstat result. Then it opens
 // the root and compares it with the Lstat result too. Then it runs the whole
-// rule on the open directory. A link at a part gives ErrSymlink or ErrChanged.
-// If another directory replaces a part after its check, OpenRoot gives
-// ErrChanged. A FIFO, a terminal or another non-directory can replace a part
-// after its check. The open does not block, and OpenRoot gives ErrType.
-// A swap after the first open and before the root open is still possible. The
-// window is smaller, but it is not closed. A FIFO swapped in there can still
-// block the root open. The rule dir must be a rule for a directory. The caller
-// closes the root that it gets.
+// rule on the open directory. A link at a part at the check gives ErrSymlink.
+// Another directory swapped in after the check gives ErrChanged. A link to
+// another directory gives ErrChanged too. A link to the checked directory
+// opens it. A FIFO, a device, a socket or a regular file swapped in gives
+// ErrType, and the open does not block. A link that leaves the parent
+// directory of the part gives ErrOpen. A swap after the first open and before
+// the root open is still possible. A FIFO swapped in there can still block the
+// root open. A terminal swapped in there can still become the controlling
+// terminal. The window is smaller, but it is not closed. The rule dir must be
+// a rule for a directory. The caller closes the root that it gets.
 func OpenRoot(root *os.Root, name string, dir Rule) (*os.Root, error) {
 	ps, err := walkArgs(root, name, dir)
 	if err != nil {
@@ -107,9 +109,11 @@ func openPart(cur *os.Root, part string, dir Rule, h *seam.Hooks) (*os.Root, err
 
 // probePart opens part of cur without blocking and compares the open
 // directory with the Lstat result li. The open refuses a FIFO, a terminal or
-// any other file that is not a directory before it can block. The descriptor
-// is closed on every path. os.Root opens a part with neither O_DIRECTORY nor
-// O_NONBLOCK, so openPart calls this function before cur.OpenRoot.
+// any other file that is not a directory before it can block. The open
+// follows a link at the part if the link stays in cur, and the compare with
+// li then refuses another directory. The descriptor is closed on every path.
+// os.Root opens a part with neither O_DIRECTORY nor O_NONBLOCK, so openPart
+// calls this function before cur.OpenRoot.
 func probePart(cur *os.Root, part string, li fs.FileInfo, h *seam.Hooks) error {
 	const flags = os.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NONBLOCK |
 		syscall.O_NOFOLLOW | syscall.O_NOCTTY

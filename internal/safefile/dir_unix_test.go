@@ -216,7 +216,7 @@ func mkFIFO(q string) error { return syscall.Mkfifo(q, 0o600) }
 func mkDir(q string) error  { return os.Mkdir(q, 0o700) }
 
 // swapPart replaces the part of a/b/c, once, at AfterCheck or at AfterOpen.
-// The new file is made by mk. It has a new inode, because the old directory
+// mk makes the new file. It has a new inode, because the old directory
 // moves to "old" and still exists.
 func swapPart(t *testing.T, dir, part string, afterOpen bool, mk func(string) error) {
 	t.Helper()
@@ -280,6 +280,22 @@ func TestTS23_OpenRootFIFOSwapAfterCheckNoBlock(t *testing.T) {
 				t.Errorf("err = %v, want ErrType", err)
 			}
 		})
+	}
+}
+
+// The link stays in the root and points to a FIFO next to the part. The first
+// open follows it and refuses the FIFO with ENOTDIR, so it does not block.
+func TestTS23_OpenRootFIFOLinkSwapAfterCheckNoBlock(t *testing.T) {
+	r, dir := root(t)
+	tree(t, dir)
+	if err := mkFIFO(filepath.Join(dir, "p")); err != nil {
+		t.Fatal(err)
+	}
+	swapPart(t, dir, "a", false, func(q string) error {
+		return os.Symlink("p", q)
+	})
+	if err := timedRoot(t, r, "a/b/c"); !errors.Is(err, ErrType) {
+		t.Errorf("err = %v, want ErrType", err)
 	}
 }
 
