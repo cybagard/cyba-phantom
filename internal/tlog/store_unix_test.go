@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -749,35 +750,83 @@ func changeTile(t *testing.T, step, base string, change func()) {
 	safefiletest.Set(t, h)
 }
 
-// T-S-13: a tile or the head that grows or shrinks during the read is refused
-// with the length rule. The head gives the rule of a head that is not valid.
-func TestTS13OpenRefusesFileThatGrowsOrShrinksDuringTheRead(t *testing.T) {
-	for _, c := range []struct{ name, file, rule string }{
-		{"tile grows", "tile/8/0/000.p/3", ruleLength},
-		{"tile shrinks", "tile/8/0/000.p/3", ruleLength},
-		{"head grows", headName, ruleHead},
-		{"head shrinks", headName, ruleHead},
+// growFile appends one byte to file. shrinkFile cuts file to 10 bytes.
+func growFile(t *testing.T, file string) {
+	t.Helper()
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte{1}); err != nil {
+		t.Error(err)
+	}
+}
+
+func shrinkFile(t *testing.T, file string) {
+	t.Helper()
+	if err := os.Truncate(file, 10); err != nil {
+		t.Error(err)
+	}
+}
+
+// T-S-13: a tile or the head that grows or shrinks after the open and before
+// the size check is refused. The change is in the AfterOpen hook, so the size
+// check sees the new size. This is not a change during the read.
+func TestTS13OpenRefusesFileThatChangesSizeBeforeTheSizeCheck(t *testing.T) {
+	for _, c := range []struct {
+		name, file, rule string
+		change           func(*testing.T, string)
+	}{
+		{"tile grows", "tile/8/0/000.p/3", ruleLength, growFile},
+		{"tile shrinks", "tile/8/0/000.p/3", ruleLength, shrinkFile},
+		{"head grows", headName, ruleHead, growFile},
+		{"head shrinks", headName, ruleHead, shrinkFile},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state, dir := committedLog(t, 3)
 			file := filepath.Join(dir, "tlog", c.file)
-			changeTile(t, "AfterOpen", filepath.Base(c.file), func() {
-				if strings.HasSuffix(c.name, "grows") {
-					f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
-					if err != nil {
-						t.Error(err)
-						return
-					}
-					defer f.Close()
-					if _, err := f.Write([]byte{1}); err != nil {
-						t.Error(err)
-					}
-				} else if err := os.Truncate(file, 10); err != nil {
-					t.Error(err)
-				}
-			})
+			changeTile(t, "AfterOpen", filepath.Base(c.file), func() { c.change(t, file) })
 			if e := openErr(t, state, c.rule); e.Name != c.file {
 				t.Fatalf("name %q", e.Name)
+			}
+		})
+	}
+}
+
+// T-S-13: a tile or the head that grows or shrinks during the read is refused.
+// The change is in the OtherOwner hook, after the size check and before the
+// read. A tile that grew gives the length rule and a head that grew gives the
+// rule of a head that is not valid. A tile or head that shrank gives the
+// changed rule.
+func TestTS13OpenRefusesFileThatChangesSizeDuringTheRead(t *testing.T) {
+	for _, c := range []struct {
+		name, file, rule string
+		change           func(*testing.T, string)
+	}{
+		{"tile grows", "tile/8/0/000.p/3", ruleLength, growFile},
+		{"tile shrinks", "tile/8/0/000.p/3", ruleChanged, shrinkFile},
+		{"head grows", headName, ruleHead, growFile},
+		{"head shrinks", headName, ruleChanged, shrinkFile},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := committedLog(t, 3)
+			file := filepath.Join(dir, "tlog", c.file)
+			is := otherOwner(t, file)
+			var done bool
+			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool {
+				if is(id) && !done {
+					done = true
+					c.change(t, file)
+				}
+				return false
+			}})
+			if e := openErr(t, state, c.rule); e.Name != c.file {
+				t.Fatalf("name %q", e.Name)
+			}
+			if !done {
+				t.Fatal("the hook did not run")
 			}
 		})
 	}

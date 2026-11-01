@@ -451,7 +451,7 @@ func TestTU07TileDirectorySyncFailureThenReopenSyncsTheTileBeforeTheHead(t *test
 		return realRename(r, from, to)
 	}
 	dirHook := func(f *os.File) error {
-		steps = append(steps, "sync "+f.Name())
+		steps = append(steps, "sync "+filepath.Clean(f.Name()))
 		return realSync(f)
 	}
 	setHooks(t, hooks{dir: dirHook, rename: renameHook})
@@ -513,7 +513,7 @@ func TestTU07NarrowWriteSyncsTheDirectoryOfTheKeptWiderFile(t *testing.T) {
 		return realRename(r, from, to)
 	}
 	dirHook := func(f *os.File) error {
-		steps = append(steps, "sync "+f.Name())
+		steps = append(steps, "sync "+filepath.Clean(f.Name()))
 		return realSync(f)
 	}
 	setHooks(t, hooks{dir: dirHook, rename: renameHook})

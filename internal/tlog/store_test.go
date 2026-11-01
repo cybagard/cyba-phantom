@@ -1102,13 +1102,20 @@ func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
 	}
 	counts := map[string]int{}
 	setHooks(t, hooks{dir: func(f *os.File) error {
-		counts[f.Name()]++
+		counts[filepath.Clean(f.Name())]++
 		return realSync(f)
 	}})
 	openStore(t, state)
+	// Open calls fsync on the log directory two times: for the tree head, and
+	// with the directories that it tidies. The file names were different before.
+	logDir := filepath.Join(dir, "tlog")
 	for name, n := range counts {
-		if n > 1 {
-			t.Errorf("fsync of %s: %d calls, want 1", name, n)
+		want := 1
+		if name == logDir {
+			want = 2
+		}
+		if n != want {
+			t.Errorf("fsync of %s: %d calls, want %d", name, n, want)
 		}
 	}
 	if len(counts) < 3 {

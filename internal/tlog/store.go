@@ -1008,20 +1008,9 @@ func openDir(r *os.Root, name string) (*os.File, error) {
 		return nil, dirFailure(r, name, err)
 	}
 	defer sub.Close()
-	// Open the name again, so that the file has the name of the directory. It
-	// must be the directory that safefile checked.
-	f, err := r.OpenFile(name, readFlags, 0)
-	if err == nil {
-		var fi, si fs.FileInfo
-		if fi, err = f.Stat(); err == nil {
-			if si, err = sub.Stat("."); err == nil && !os.SameFile(fi, si) {
-				err = errLink
-			}
-		}
-		if err != nil {
-			f.Close()
-		}
-	}
+	// Return the directory that safefile checked. A second open of name could
+	// give another directory.
+	f, err := sub.Open(".")
 	if err != nil {
 		return nil, &dirError{name, err}
 	}
