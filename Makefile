@@ -189,18 +189,22 @@ perf-inner:
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
 # The target makes one new directory in TMPDIR, with mktemp -d, and prints the
-# path. The package tests refuse other checkouts, so TMPDIR must name a
-# directory whose parents have no group or other write bit. The target
-# refuses to run (exit 2) if a parent of the run directory has one of these
-# bits. It also refuses (exit 2) if the run directory is below the module
+# path. It uses the resolved path of this directory from then on.
+# TMPDIR and each of its parents up to / must have no group or other write
+# bit. Each must have an owner that is root or the current user.
+# The package tests refuse a checkout below a directory that breaks this rule.
+# The target refuses to run (exit 2) if one of them breaks it. The message
+# names the run directory, the parent and the uid of its owner.
+# It also refuses (exit 2) if the run directory is below the module
 # root, because the copy would include the run directory.
-# It copies the module to src in this directory, with all files as they are,
-# and starts gremlins there. The module root of gremlins is then the copy.
+# It copies the module to src in this directory, with all files as they are.
+# If a tar command fails, the target prints one line and fails (exit 1).
+# Gremlins starts in the copy. The module root of gremlins is then the copy.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
 # tests fail, it prints the output and fails (exit 1) before any mutation.
-# It sets TMPDIR to the run directory. It sets GOCACHE and HOME to two
-# directories in it. The caller values of these variables do not apply to
-# the run.
+# It sets TMPDIR and GOTMPDIR to the run directory. It sets GOCACHE and HOME
+# to two directories in it. The caller values of these variables do not
+# apply to the run.
 # The target unsets XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_STATE_HOME and
 # XDG_DATA_HOME.
 # Then os.UserCacheDir and os.UserConfigDir give paths in HOME.
@@ -218,9 +222,6 @@ perf-inner:
 # The target prints the largest size that these checks saw, in MiB.
 # The size does not include deleted files that a process still holds open.
 # It does not include files that a test writes to an absolute path.
-# It does not include files that a test writes to a relative path in the
-# baseline run. That run has the package source directory as its working
-# directory.
 # MUTATE_CAP and MUTATE_MAX_MIB must be positive integers (exit 2 if not).
 # The target fails (exit 1) when go is not in PATH. It also fails (exit 1)
 # when go env fails or gives an empty GOPATH or GOMODCACHE.
@@ -234,9 +235,13 @@ perf-inner:
 # The cleanup ignores these four signals, also after a normal end. Thus a
 # signal does not stop the removal. It sends KILL to every process in the
 # session of gremlins, so a stopped process does not block the removal.
-# The go command has no run directory in its arguments. It stayed alive
-# after the match by name and wrote the cache trim file after the removal.
-# The target then tries the removal again until the directory is gone.
+# The go commands that gremlins starts have no run directory in their
+# arguments, so pkill -f "$d/" does not find them. The session KILL does.
+# The target then tries the removal up to 50 times, 0.1 s apart. If the
+# directory is still there, it prints one line that names it.
+# A KILL of the recipe shell leaves the run directory. A watcher in the
+# session of gremlins and of the first go test sees that the shell is gone.
+# The session then stops within about one second.
 # MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
 # or newlines. It is empty by default.
 # Each entry becomes one --exclude-files=<entry> argument.
@@ -253,18 +258,20 @@ MUTATE_CAP ?= 600
 MUTATE_MAX_MIB ?= 10240
 MUTATE_EXCLUDE ?=
 export MUTATE_CAP MUTATE_MAX_MIB MUTATE_EXCLUDE
+MUTATE_SESSION = setsid sh -c 'p=$$1; s=$$$$; shift; ( while kill -0 $$p 2>/dev/null; do sleep 1; done; pkill -KILL -s $$s ) & exec "$$@"' sh $$$$
 mutate:
 	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
 	@for v in "$$MUTATE_CAP" "$$MUTATE_MAX_MIB"; do case "$$v" in ""|0*|*[!0-9]*|???????????*) echo "mutate: MUTATE_CAP and MUTATE_MAX_MIB must be positive integers of at most 10 digits" >&2; exit 2;; esac; done
-	@d=$$(mktemp -d) || exit 1; g=; w=; \
-	trap 'trap "" HUP INT QUIT TERM; kill $$g $$w 2>/dev/null; [ -z "$$g" ] || pkill -KILL -s $$g; pkill -KILL -f "$$d/"; kill -KILL $$g 2>/dev/null; wait; n=0; while [ -e "$$d" ]; do [ $$n -lt 50 ] || break; PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"; n=$$((n + 1)); [ ! -e "$$d" ] || sleep 0.1; done' EXIT; \
+	@d=$$(mktemp -d) || exit 1; g=; w=; c=$$(cd "$$d" && pwd -P) && [ -n "$$c" ] || { rmdir "$$d"; exit 1; }; d=$$c; \
+	trap 'trap "" HUP INT QUIT TERM; kill $$g $$w 2>/dev/null; [ -z "$$g" ] || pkill -KILL -s $$g; pkill -KILL -f "$$d/"; kill -KILL $$g 2>/dev/null; wait; n=0; while [ -e "$$d" ]; do [ $$n -lt 50 ] || break; PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"; n=$$((n + 1)); [ ! -e "$$d" ] || sleep 0.1; done; [ ! -e "$$d" ] || echo "mutate: run directory $$d is still there after 50 tries" >&2' EXIT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 129' HUP; trap 'trap "" HUP INT QUIT TERM; exit 130' INT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 131' QUIT; trap 'trap "" HUP INT QUIT TERM; exit 143' TERM; \
-	p=$$(cd "$$d/.." && pwd -P); while :; do \
-		case "$$(ls -ldL "$$p" | cut -c6,9)" in *w*) echo "mutate: run directory $$d: parent $$p has a group or other write bit; set TMPDIR to a private directory" >&2; exit 2;; esac; \
-		[ "$$p" != / ] || break; p=$$(dirname "$$p"); done; \
-	r=$$(pwd -P); case "$$(cd "$$d" && pwd -P)/" in "$$r"/*) echo "mutate: run directory $$d is below the module root; set TMPDIR to a directory outside it" >&2; exit 2;; esac; \
+	q=$$(cd "$$d/.." && pwd -P); u=$$(id -u); while :; do \
+		case "$$(ls -ldL "$$q" | cut -c6,9)" in *w*) echo "mutate: run directory $$d: parent $$q has a group or other write bit; set TMPDIR to a private directory" >&2; exit 2;; esac; \
+		o=$$(stat -c %u "$$q" 2>/dev/null || stat -f %u "$$q" 2>/dev/null); case "$$o" in 0|"$$u") ;; *) echo "mutate: run directory $$d: parent $$q has owner uid $$o, not root or the current user; set TMPDIR to a private directory" >&2; exit 2;; esac; \
+		[ "$$q" != / ] || break; q=$$(dirname "$$q"); done; \
+	mr=$$(pwd -P); case "$$d/" in "$$mr"/*) echo "mutate: run directory $$d is below the module root; set TMPDIR to a directory outside it" >&2; exit 2;; esac; \
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
 	gopath=$$("$$go" env GOPATH) && gomodcache=$$("$$go" env GOMODCACHE) && goenv=$$("$$go" env GOENV) && goflags=$$("$$go" env GOFLAGS) || { echo "mutate: go env failed" >&2; exit 1; }; \
 	[ -n "$$gopath" ] && [ -n "$$gomodcache" ] || { echo "mutate: go env gives an empty GOPATH or GOMODCACHE" >&2; exit 1; }; \
@@ -274,17 +281,17 @@ mutate:
 	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: run directory $$d"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
-	mkdir "$$d/src"; tar -cf - . | tar -xf - -C "$$d/src"; \
-	( cd "$$d/src" && exec setsid go test "$$PKG" ) >"$$d/pre" 2>&1 & g=$$!; wait $$g; rc=$$?; g=; \
+	mkdir "$$d/src" && tar -cf "$$d/m.tar" . && tar -xf "$$d/m.tar" -C "$$d/src" && rm "$$d/m.tar" || { echo "mutate FAIL: the copy of the module failed (status $$?), no test done" >&2; exit 1; }; \
+	( cd "$$d/src" && exec $(MUTATE_SESSION) go test "$$PKG" ) >"$$d/pre" 2>&1 & g=$$!; wait $$g; rc=$$?; pkill -KILL -s $$g; g=; \
 	if [ "$$rc" -ne 0 ]; then cat "$$d/pre"; echo "mutate FAIL: go test $$PKG failed in the copy (status $$rc), no mutation done" >&2; exit 1; fi; \
 	[ -z "$$MUTATE_EXCLUDE" ] || printf 'mutate: files excluded by MUTATE_EXCLUDE: %s\n' "$$MUTATE_EXCLUDE"; \
 	set -f; set --; for e in $$MUTATE_EXCLUDE; do set -- "$$@" "--exclude-files=$$e"; done; set +f; \
-	( cd "$$d/src" && exec setsid gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments ) >"$$d/out" 2>&1 & g=$$!; \
-	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sck "$$d" 2>/dev/null | tail -n 1 | cut -f1); s=$${s:-0}; \
+	( cd "$$d/src" && exec $(MUTATE_SESSION) gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments ) >"$$d/out" 2>&1 & g=$$!; \
+	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; \
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -s $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
-	wait $$g; rc=$$?; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
-	PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; s=$$(du -sck "$$d" 2>/dev/null | tail -n 1 | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
+	wait $$g; rc=$$?; pkill -KILL -s $$g; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
+	PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
 	if [ "$$s" -gt "$$p" ]; then p=$$s; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; fi; \
 	cat "$$d/out"; [ -z "$$(tail -c 1 "$$d/out")" ] || echo; \
