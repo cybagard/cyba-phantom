@@ -306,19 +306,140 @@ func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
 	}
 }
 
-// T-S-15: if the Stat of the file that Open made fails, a refused open removes
-// nothing. The hook closes the held descriptor, so that its Stat fails.
-func TestTS15FailedStatKeepsMadeFile(t *testing.T) {
-	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
-	setHook(t, &onHeld, func(f *os.File) { f.Close() })
+// failStatOnce makes the first Stat of the create descriptor fail.
+func failStatOnce(t *testing.T) {
+	failed := false
+	setHook(t, &afterStatCreated, func(fi fs.FileInfo, err error) (fs.FileInfo, error) {
+		if !failed {
+			failed, fi, err = true, nil, errors.New("stat failed")
+		}
+		return fi, err
+	})
+}
+
+// openFails runs Open with the hooks that a test set. It wants the rule.
+func openFails(t *testing.T, root *os.Root, rule string) {
+	t.Helper()
 	db, err := Open(root, "events.db", Options{})
 	if db != nil {
 		db.Close()
 	}
-	wantRule(t, err, "events.db", ruleExamine)
+	wantRule(t, err, "events.db", rule)
+}
+
+// T-S-15: a failure after Open makes the file removes the file. No -wal or -shm
+// file of the refused open stays.
+func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
+	rows := []struct {
+		name, rule string
+		fail       func(t *testing.T, file string)
+	}{
+		{"held stat", ruleExamine, func(t *testing.T, file string) {
+			setHook(t, &onHeld, func(f *os.File) { f.Close() })
+		}},
+		{"create stat once", ruleExamine, func(t *testing.T, file string) {
+			failStatOnce(t)
+		}},
+		{"connector", ruleOpen, func(t *testing.T, file string) {
+			setHook(t, &editDSN, func(s string) string { return s + "&_pragma=%zz" })
+		}},
+		{"first connection", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterChecks, func() {
+				if err := os.Chmod(file, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+		{"second checks", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterVerify, func() {
+				if err := os.Chmod(file, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			r.fail(t, file)
+			openFails(t, root, r.rule)
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				if _, err := os.Lstat(file + suffix); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("events.db%s stays: %v", suffix, err)
+				}
+			}
+		})
+	}
+}
+
+// T-S-15: if no Stat of the made file works, Open cannot prove that the entry
+// is its file. A refused open keeps the entry.
+func TestTS15UnprovenMadeFileStays(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	setHook(t, &afterStatCreated, func(fs.FileInfo, error) (fs.FileInfo, error) {
+		return nil, errors.New("stat failed")
+	})
+	openFails(t, root, ruleExamine)
 	if fi, err := os.Lstat(file); err != nil || !fi.Mode().IsRegular() {
-		t.Fatalf("the made file is gone: %v", err)
+		t.Fatalf("the entry is gone: %v", err)
+	}
+}
+
+// T-S-15: Open never removes a file that it did not make. A refused open keeps
+// an old good database and an empty file, with the same content and identity.
+func TestTS15ExistingFileStaysOnFailure(t *testing.T) {
+	setups := map[string]func(t *testing.T, root *os.Root, file string){
+		"good database": func(t *testing.T, root *os.Root, file string) {
+			db := mustOpen(t, root, "events.db")
+			if _, err := db.Exec("CREATE TABLE t (x)"); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+		},
+		"empty file": func(t *testing.T, root *os.Root, file string) {
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	fails := map[string]struct {
+		rule string
+		set  func(t *testing.T)
+	}{
+		"held stat": {ruleExamine, func(t *testing.T) {
+			setHook(t, &onHeld, func(f *os.File) { f.Close() })
+		}},
+		"connector": {ruleOpen, func(t *testing.T) {
+			setHook(t, &editDSN, func(s string) string { return s + "&_pragma=%zz" })
+		}},
+	}
+	for sn, setup := range setups {
+		for fn, f := range fails {
+			t.Run(sn+"/"+fn, func(t *testing.T) {
+				root, state, _ := newState(t)
+				file := filepath.Join(state, "events.db")
+				setup(t, root, file)
+				before, err := os.Lstat(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.set(t)
+				openFails(t, root, f.rule)
+				after, err := os.Lstat(file)
+				if err != nil || !os.SameFile(before, after) {
+					t.Fatalf("the file is gone or replaced: %v", err)
+				}
+				if got, err := os.ReadFile(file); err != nil || string(got) != string(want) {
+					t.Fatalf("the content changed: %v", err)
+				}
+			})
+		}
 	}
 }
 

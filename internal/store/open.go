@@ -122,6 +122,40 @@ var beforeCreate func()
 // directory.
 var beforeRefuse func()
 
+// afterStatCreated is a test hook. Production code leaves it nil. A test sets
+// it to replace the result of each Stat of the create descriptor.
+var afterStatCreated func(fs.FileInfo, error) (fs.FileInfo, error)
+
+// statCreated returns the Stat of the create descriptor f. A failed Stat gives
+// a nil FileInfo.
+func statCreated(f *os.File) (fs.FileInfo, error) {
+	fi, err := f.Stat()
+	if afterStatCreated != nil {
+		fi, err = afterStatCreated(fi, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return fi, nil
+}
+
+// statOpen returns the identity of the made file from the first Stat that
+// succeeds on a descriptor of it. It gives nil if each Stat fails. A nil or
+// closed descriptor fails.
+func statOpen(created, held *os.File) fs.FileInfo {
+	if created != nil {
+		if fi, err := statCreated(created); err == nil {
+			return fi
+		}
+	}
+	if held != nil {
+		if fi, err := held.Stat(); err == nil {
+			return fi
+		}
+	}
+	return nil
+}
+
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
 	sync.Mutex
@@ -174,23 +208,30 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		return nil, err
 	}
 	absent := checked == nil
-	var fi fs.FileInfo
-	var statErr error
+	// made is the identity of the file that this call makes. It stays nil
+	// for an existing file.
+	var made fs.FileInfo
+	var held, created *os.File
 	// Each failed step after Open makes or opens the file calls refuse. It
 	// calls refuse before it closes the held descriptor, the create descriptor
 	// or the pool. While one of them is open, the inode of
 	// the made file is not free. Thus a file that someone makes in that time
 	// cannot have the same inode. refuse removes the entry in dir when the
-	// Lstat shows the file that this call made. refuse does not find a change
+	// Lstat shows the file that this call made. The held Stat does not change
+	// made. If the Stat of the create descriptor failed, refuse makes one
+	// more Stat of a descriptor that is open. If no Stat of the made file
+	// succeeds, refuse removes nothing. refuse does not find a change
 	// of the entry between the Lstat and the Remove. If someone puts another
-	// file there in that window, refuse removes it. If a Stat of the made file
-	// fails, refuse removes nothing.
+	// file there in that window, refuse removes it.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()
 		}
-		if absent && statErr == nil {
-			if cur, lerr := dir.Lstat(last); lerr == nil && os.SameFile(cur, fi) {
+		if absent && made == nil {
+			made = statOpen(created, held)
+		}
+		if absent && made != nil {
+			if cur, lerr := dir.Lstat(last); lerr == nil && os.SameFile(cur, made) {
 				_ = dir.Remove(last)
 			}
 		}
@@ -208,7 +249,8 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// name shows that file. Open checks that the second open gets the made
 	// file. Then Open closes the create descriptor, which can write. So the
 	// held descriptor cannot write, for a new file as for an existing file.
-	var held, created *os.File
+	// Open keeps the identity of the made file from the Stat of the create
+	// descriptor. Open does not take it again from the held descriptor.
 	if absent {
 		if beforeCreate != nil {
 			beforeCreate()
@@ -220,16 +262,17 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 			}
 			return nil, fail(rel, ruleCreate)
 		}
-		fi, statErr = created.Stat()
+		var statErr error
+		made, statErr = statCreated(created)
 		var hfi fs.FileInfo
-		if _, err = identityOf(rel, fi, statErr); err == nil {
+		if _, err = identityOf(rel, made, statErr); err == nil {
 			if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
 				if errors.Is(err, safefile.ErrOpen) && errors.Is(err, fs.ErrPermission) {
 					err = fail(rel, ruleCreate)
 				} else {
 					err = fail(rel, ruleChanged)
 				}
-			} else if !os.SameFile(fi, hfi) {
+			} else if !os.SameFile(made, hfi) {
 				err = fail(rel, ruleChanged)
 			}
 		}
@@ -249,7 +292,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if onHeld != nil {
 		onHeld(held)
 	}
-	fi, statErr = held.Stat()
+	fi, statErr := held.Stat()
 	// refuseClose calls refuse first and then closes c.
 	refuseClose := func(err error, c io.Closer) error {
 		err = refuse(err)
