@@ -78,7 +78,13 @@ type matGroup struct {
 // LF-normalized text, any cap/CRLF findings, and a fatal error for a
 // missing or unreadable file.
 func loadSpec(path string) (string, []string, error) {
-	data, err := readCapped(path)
+	return loadSpecAs(path, path)
+}
+
+// loadSpecAs reads the file at readPath. Findings and errors print path, the
+// display name. The read uses readPath only.
+func loadSpecAs(readPath, path string) (string, []string, error) {
+	data, err := readCapped(readPath)
 	if f := readFinding(path, err); f != "" {
 		return "", []string{f}, nil
 	}
@@ -112,20 +118,21 @@ func loadSpec(path string) (string, []string, error) {
 
 // runMatrix runs the full C10 check over one spec directory.
 func runMatrix(specDir string) ([]string, error) {
-	if err := checkSpecDir(specDir); err != nil {
+	dir, err := resolveSpecDir(specDir)
+	if err != nil {
 		return nil, err
 	}
-	prd, f, err := loadSpec(filepath.Join(specDir, "01-prd.md"))
+	prd, f, err := loadSpecAs(filepath.Join(dir, "01-prd.md"), specDir+"/01-prd.md")
 	findings := append([]string(nil), f...)
 	if err != nil {
 		return findings, err
 	}
-	tp, f, err := loadSpec(filepath.Join(specDir, "07-test-plan.md"))
+	tp, f, err := loadSpecAs(filepath.Join(dir, "07-test-plan.md"), specDir+"/07-test-plan.md")
 	findings = append(findings, f...)
 	if err != nil {
 		return findings, err
 	}
-	mat, f, err := loadSpec(filepath.Join(specDir, "08-traceability.md"))
+	mat, f, err := loadSpecAs(filepath.Join(dir, "08-traceability.md"), specDir+"/08-traceability.md")
 	findings = append(findings, f...)
 	if err != nil {
 		return findings, err
