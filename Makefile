@@ -190,6 +190,8 @@ perf-inner:
 # must be larger than a full build of the package and its tests.
 # The target makes one new directory in TMPDIR, with mktemp -d, and prints the
 # path. It resolves TMPDIR first and makes the directory in the resolved path.
+# If TMPDIR is unset or empty, the target uses /tmp. If it cannot change to
+# TMPDIR, it fails (exit 1).
 # The rule below applies to the resolved TMPDIR (symlinks resolved) and to
 # each of its parents up to /.
 # Each must have no group or other write bit. Each must have an owner that is
@@ -204,8 +206,8 @@ perf-inner:
 # The copy would include the run directory.
 # It copies the module to src in this directory, with all files as they are.
 # The copy is a tar file and its extract. It is about twice the module with
-# untracked files and .git. The copy and the pre-check run before the size
-# watch, so the size limit does not apply to them.
+# untracked files and .git. No size check runs during the copy and the
+# pre-check. Their files stay, and the later checks count them.
 # If a tar command fails, the target prints one line and fails (exit 1).
 # Gremlins starts in the copy. The module root of gremlins is then the copy.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
@@ -248,13 +250,14 @@ perf-inner:
 # The target then tries the removal up to 50 times, 0.1 s apart. If the
 # directory is still there, it prints one line that names it.
 # After a normal end, this line does not change the exit status (0).
-# A KILL of the recipe shell or of the make process group (for example
-# timeout -s KILL make) leaves the run directory. There are two sessions,
-# the first go test and then gremlins. Each has its own watcher.
+# A KILL of the recipe shell leaves the run directory. A KILL of the make
+# process group (for example timeout -s KILL make) also leaves it.
+# There are two sessions, the first go test and then gremlins. Each has its
+# own watcher.
 # The watcher sees that the shell is gone. The session then stops within
 # about one second.
 # A KILL of the make pid alone does not stop the recipe shell. The run goes on
-# and ends as normal, as on main.
+# and ends as normal.
 # MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
 # or newlines. It is empty by default.
 # Each entry becomes one --exclude-files=<entry> argument.
