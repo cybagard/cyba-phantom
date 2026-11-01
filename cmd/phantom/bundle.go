@@ -7,14 +7,14 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
-// releaseTrust is the trust set of the release build. It holds public keys
+// releaseTrust returns the trust set of the release build. It holds public keys
 // only and no test key (ADR-027). It is empty until the reference public key
-// is known.
-var releaseTrust = bundle.TrustSet{}
+// is known. Each call returns a new list.
+func releaseTrust() bundle.TrustSet { return bundle.TrustSet{} }
 
 // The seams of the bundle start. A test replaces them.
 var (
-	bundleTrust = func() bundle.TrustSet { return releaseTrust }
+	bundleTrust = releaseTrust
 	newLoader   = bundle.NewLoader
 )
 
@@ -22,8 +22,8 @@ var (
 // load ran.
 type bundlePart struct{ l *bundle.Loader }
 
-// Healthy tells if the bundle part works. The start accepted a bundle.
-// The state of the loader is not a fault.
+// Healthy is true only when the start accepted a bundle and the state of
+// the loader is not a fault.
 func (b *bundlePart) Healthy() bool {
 	return b.l != nil && b.l.Current() != nil && b.l.Healthy()
 }

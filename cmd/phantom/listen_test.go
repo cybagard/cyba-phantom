@@ -168,9 +168,11 @@ func openListeners(t *testing.T) (https, plain *trackedListener, ca string) {
 }
 
 // serveCfg loads a config with the two listen addresses and the address of the ACME CA.
-func serveCfg(t *testing.T, https, plain, ca string) *config.Config {
+// extra holds more env entries.
+func serveCfg(t *testing.T, https, plain, ca string, extra ...string) *config.Config {
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS=" + https, "PHANTOM_LISTEN_HTTP=" + plain,
 		"PHANTOM_ACME_CA=https://" + ca + "/directory"}
+	env = append(env, extra...)
 	cfg, err := config.Load(writeFile(t, validBody(t)), env)
 	if err != nil {
 		t.Fatal(err)
@@ -898,15 +900,13 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 // The close of a sql.DB cancels its connectionOpener goroutine but does not wait for it. The test skips a
 // connectionOpener only when it belongs to the captured store database, and that database is closed with no
 // open connection. Any other connectionOpener fails the test.
-// The test also skips the other goroutines of database/sql,
-// for example of a sql.Tx or sql.Rows. It does this only when
-// openersOK is true: every connectionOpener passed the check.
-// It also skips the goroutines of the runtime, for example the
-// finalizer goroutine and the cleanup goroutines. A file or root
-// open adds a cleanup, and that can start a cleanup goroutine.
-// Limit: the test does not find a leaked
-// sql.Tx or sql.Rows of a second database that serve closes.
-// Every other new goroutine fails the test.
+// The test also skips the other goroutines of database/sql, for example of a
+// sql.Tx or sql.Rows. It does this only when openersOK is true: every
+// connectionOpener passed the check. It also skips the goroutines of the
+// runtime, for example the finalizer goroutine and the cleanup goroutines. A
+// file or root open adds a cleanup, and that can start a cleanup goroutine.
+// Limit: the test does not find a leaked sql.Tx or sql.Rows of a second
+// database that serve closes. Every other new goroutine fails the test.
 func TestTI03_ServerFailureExits1(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
@@ -983,7 +983,7 @@ func runtimeGoroutine(block string) bool {
 	return strings.Contains(block, "\ncreated by runtime.") || strings.Contains(block, "\nruntime.runCleanups(")
 }
 
-func TestRuntimeGoroutine(t *testing.T) {
+func TestTI03_RuntimeGoroutine(t *testing.T) {
 	for _, c := range []struct {
 		name, block string
 		want        bool
@@ -1513,7 +1513,7 @@ func TestTS27_StartExpiryWarning(t *testing.T) {
 }
 
 // TestTS27_StartBadEntry checks the start with an entry that
-// the source refuses. The start ends with exit 1. The client stops once,
+// the source refuses. The start ends with exit 1. The client stops one time,
 // before the queue closes. The cache and both listen sockets are closed.
 func TestTS27_StartBadEntry(t *testing.T) {
 	httpsLn, plainLn, ca := openListeners(t)
