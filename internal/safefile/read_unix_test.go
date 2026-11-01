@@ -114,7 +114,7 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	}
 	// This check reads the process-wide TotalAlloc counter. The bound is
 	// far above the noise of other goroutines. The check finds a buffer of
-	// more than 1/16 of the file size. The rchar check below is exact.
+	// 1/16 of the file size or more. The rchar check below is exact.
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	if _, err := ReadAll(f, fi, capRule); !errors.Is(err, ErrSize) {

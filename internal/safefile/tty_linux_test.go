@@ -80,7 +80,7 @@ func ttyChild(t *testing.T, row, name string) {
 			t.Fatal(err)
 		}
 		defer r.Close()
-		// O_EXCL and O_NOFOLLOW: a link at the name is not followed.
+		// O_EXCL and O_NOFOLLOW: the open does not follow a link at the name.
 		w, err := os.OpenFile("/dev/"+name,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
