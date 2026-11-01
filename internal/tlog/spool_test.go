@@ -768,12 +768,13 @@ func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fault func(t *testing.T, dir string) (notes string)
+		cause error
 	}{
 		{"symlink", func(t *testing.T, dir string) string {
 			must(t, os.Rename(filepath.Join(dir, spoolDir), filepath.Join(dir, spoolDir+".real")))
 			mustSymlink(t, spoolDir+".real", filepath.Join(dir, spoolDir))
 			return spoolDir + ".real"
-		}},
+		}, safefile.ErrSymlink},
 		{"mode 0", func(t *testing.T, dir string) string {
 			if os.Geteuid() == 0 {
 				t.Skip("root can open a directory with mode 0")
@@ -782,7 +783,7 @@ func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
 			t.Cleanup(func() { _ = os.Chmod(p, 0o700) })
 			must(t, os.Chmod(p, 0))
 			return spoolDir
-		}},
+		}, syscall.EACCES},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newSpool(t)
@@ -800,8 +801,11 @@ func TestTS13_SpoolDirFaultKeepsNotes(t *testing.T) {
 			}})
 			f := newFake()
 			err := e.Publish(0, f)
-			if err == nil || !strings.Contains(err.Error(), "1.note") || errors.Is(err, errBadNote) || errors.As(err, new(entryError)) {
+			if err == nil || !strings.Contains(err.Error(), "1.note: cannot be read") || strings.Contains(err.Error(), "regular file") || errors.Is(err, errBadNote) || errors.As(err, new(entryError)) {
 				t.Fatalf("Publish error = %v, want an error for 1.note that is not a bad note", err)
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Errorf("Publish error = %v, want the cause %v", err, tc.cause)
 			}
 			if len(f.got) != 0 || e.Stats().Rejected != 0 {
 				t.Errorf("sent %v, rejected %d; want nothing", f.got, e.Stats().Rejected)
@@ -852,6 +856,69 @@ func TestTS13_NoteFifoSwapAfterCheck(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(e.dir, e.noteFile(2))); err != nil {
 		t.Errorf("note 2 after Publish: %v; want it kept", err)
+	}
+}
+
+// T-S-13: Publish counts and deletes a note that is too large and an entry that
+// is not a regular file. A note that grows after the check is a bad note and
+// gives no error. An unreadable large note and a self-loop symlink swapped in
+// after the check each give an entry error. The next good note is sent.
+func TestTS13_NoteSizeAndSwapRows(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, e *spoolEnv) func(name string)
+		wantErr func(err error) bool
+	}{
+		{"grows after the check", func(t *testing.T, e *spoolEnv) func(string) {
+			return func(name string) {
+				if name != "2.note" {
+					return
+				}
+				f, err := os.OpenFile(filepath.Join(e.dir, e.noteFile(2)), os.O_APPEND|os.O_WRONLY, 0)
+				must(t, err)
+				_, err = f.Write(bytes.Repeat([]byte("x"), maxNoteSize))
+				must(t, err)
+				must(t, f.Close())
+			}
+		}, func(err error) bool { return err == nil }},
+		{"large with mode 0", func(t *testing.T, e *spoolEnv) func(string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root can open a file with mode 0000")
+			}
+			p := filepath.Join(e.dir, e.noteFile(2))
+			must(t, os.WriteFile(p, bytes.Repeat([]byte("x"), maxNoteSize+1), 0o600))
+			must(t, os.Chmod(p, 0))
+			return nil
+		}, func(err error) bool { return errors.Is(err, syscall.EACCES) }},
+		{"self-loop symlink swapped in", func(t *testing.T, e *spoolEnv) func(string) {
+			return func(name string) {
+				if name != "2.note" {
+					return
+				}
+				tmp := filepath.Join(e.dir, spoolDir, "loop")
+				must(t, os.Symlink(name, tmp))
+				must(t, os.Rename(tmp, filepath.Join(e.dir, e.noteFile(2))))
+			}
+		}, func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), "must be a regular file and not a symlink")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSpool(t)
+			for size := uint64(1); size <= 3; size++ {
+				e.add(t, size)
+			}
+			hook := tc.prepare(t, e)
+			safefiletest.Set(t, safefiletest.Hooks{AfterCheck: hook})
+			f := newFake()
+			err := within(t, func() error { return e.Publish(0, f) })
+			if !tc.wantErr(err) {
+				t.Errorf("Publish error = %v", err)
+			}
+			if !slices.Equal(f.got[spoolTargets[0]], []uint64{1, 3}) || !slices.Equal(e.files(t), []uint64{1, 3}) || e.Stats().Rejected != 1 {
+				t.Errorf("sent %v, on disk %v, rejected %d", f.got, e.files(t), e.Stats().Rejected)
+			}
+		})
 	}
 }
 

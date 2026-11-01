@@ -268,8 +268,8 @@ func TestTS13_OwnerMismatch(t *testing.T) {
 	}
 }
 
-// T-S-13: a key file of 1024 bytes loads. A signer state of maxNoteSize bytes
-// is read, and the read refuses one byte more.
+// T-S-13: a key file of 1024 bytes loads. The load reads a signer state of
+// maxNoteSize bytes and refuses one byte more.
 func TestTS13_SizeLimits(t *testing.T) {
 	good := newKeyText(t, testOrigin)
 	root, dir := newState(t)
@@ -785,8 +785,8 @@ func TestTS13_VkeySymlinkAtFirstStart(t *testing.T) {
 	}
 }
 
-// T-S-13: a public key file of maxKeySize bytes is read. One of maxKeySize + 1
-// bytes cannot be checked: the load goes on with a warning.
+// T-S-13: the load reads a public key file of maxKeySize bytes. It cannot check
+// one of maxKeySize + 1 bytes and goes on with a warning.
 func TestTS13_VkeySizeLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name string

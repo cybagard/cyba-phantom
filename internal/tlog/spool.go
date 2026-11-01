@@ -354,7 +354,8 @@ func (s *Spool) verified(size uint64) ([]byte, error) {
 	msg, err := s.readFile(name)
 	switch {
 	case errors.Is(err, safefile.ErrExamine):
-		// A fault of checkpoints/ keeps the cause of its refusal.
+		// safefile could not examine the file or its directory.
+		// That is not a property of the note.
 		return nil, err
 	case errors.Is(err, safefile.ErrSymlink), errors.Is(err, safefile.ErrType):
 		return nil, entryError{err}
@@ -384,6 +385,8 @@ func (s *Spool) readFile(name string) ([]byte, error) {
 	switch {
 	case missing(err), errors.Is(err, safefile.ErrOpen) && errors.Is(err, fs.ErrNotExist):
 		return nil, causedError{spoolError(name, "is gone before it is read"), err}
+	case errors.Is(err, safefile.ErrExamine):
+		return nil, causedError{spoolError(name, "cannot be read"), err}
 	case err != nil:
 		return nil, causedError{spoolError(name, ruleText(err, noteRule)), err}
 	}
