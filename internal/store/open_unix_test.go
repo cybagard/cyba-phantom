@@ -317,7 +317,8 @@ func failStatOnce(t *testing.T) {
 	})
 }
 
-// openFails runs Open with the hooks that a test set. It wants the rule.
+// openFails runs Open with the hooks that a test set. The test fails if the
+// error does not have the rule.
 func openFails(t *testing.T, root *os.Root, rule string) {
 	t.Helper()
 	db, err := Open(root, "events.db", Options{})
@@ -387,8 +388,9 @@ func TestTS15UnprovenMadeFileStays(t *testing.T) {
 	}
 }
 
-// T-S-15: Open never removes a file that it did not make. A refused open keeps
-// an old good database and an empty file, with the same content and identity.
+// T-S-15: a refused open keeps a file that was there before Open: an old
+// good database or an empty file. Each row fails the held Stat or the
+// connector. Each file keeps its content and identity.
 func TestTS15ExistingFileStaysOnFailure(t *testing.T) {
 	setups := map[string]func(t *testing.T, root *os.Root, file string){
 		"good database": func(t *testing.T, root *os.Root, file string) {

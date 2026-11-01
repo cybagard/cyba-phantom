@@ -197,15 +197,17 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	var held, created *os.File
 	// Each failed step after Open makes or opens the file calls refuse. It
 	// calls refuse before it closes the held descriptor, the create descriptor
-	// or the pool. While one of them is open, the inode of
-	// the made file is not free. Thus a file that someone makes in that time
-	// cannot have the same inode. refuse removes the entry in dir when the
-	// Lstat shows the file that this call made. The held Stat does not change
-	// made. If the first Stat of the create descriptor failed, refuse makes one
-	// more Stat of it. The create descriptor is still open then. If that Stat
-	// fails too, refuse removes nothing. refuse does not find a change
-	// of the entry between the Lstat and the Remove. If someone puts another
-	// file there in that window, refuse removes it.
+	// or the pool. While one of them is open, the inode of the made file is
+	// not free. Thus a file that someone makes in that time cannot have the
+	// same inode. refuse removes the entry in dir when the Lstat shows the
+	// file that this call made. Open keeps the identity of the made file from
+	// the Stat of the create descriptor. The held Stat does not change it.
+	// Only the refuse call in the create block can find made nil. Then the
+	// first Stat of the create descriptor failed, and that descriptor is still
+	// open. refuse makes one more Stat of it. If that Stat fails too, refuse
+	// removes nothing. refuse does not find a change of the entry between the
+	// Lstat and the Remove. If someone puts another file there in that window,
+	// refuse removes it.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()
@@ -234,8 +236,6 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// name shows that file. Open checks that the second open gets the made
 	// file. Then Open closes the create descriptor, which can write. So the
 	// held descriptor cannot write, for a new file as for an existing file.
-	// Open keeps the identity of the made file from the Stat of the create
-	// descriptor. Open does not take it again from the held descriptor.
 	if absent {
 		if beforeCreate != nil {
 			beforeCreate()
