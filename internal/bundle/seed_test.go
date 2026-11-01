@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,7 +189,8 @@ func TestTS20SeedInfo(t *testing.T) {
 func TestTS20SeedPrint(t *testing.T) {
 	s := seedBytes(bytes.Clone(seedA))
 	var out []string
-	for _, v := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%o", "%b", "%c", "%e"}
+	for _, v := range verbs {
 		for _, o := range []string{fmt.Sprintf(v, s), fmt.Sprintf(v, &s)} {
 			if o != seedText {
 				t.Errorf("%s: %q", v, o)
@@ -212,8 +212,14 @@ func TestTS20SeedPrint(t *testing.T) {
 	if !strings.HasSuffix(text.String(), " msg=m seed=[seed]\n") {
 		t.Errorf("text handler: %q", text.String())
 	}
-	if o := fmt.Sprintf("%+v", &Bundle{seed: &s}); ikHas(o, seedMarkers(seedA)) {
-		t.Errorf("print of a Bundle: %q", o)
+	// A loaded Bundle prints no seed byte for a verb of the list or for %w.
+	_, l, _, _ := seeded(t, keyOne)
+	for _, v := range append(verbs, "%w") {
+		for _, o := range []string{fmt.Sprintf(v, *l.Current()), fmt.Sprintf(v, l.Current())} {
+			if ikHas(o, seedMarkers(seedA)) {
+				t.Errorf("print of a Bundle with %s: %q", v, o)
+			}
+		}
 	}
 	if seedText != "[seed]" {
 		t.Errorf("seedText %q", seedText)
@@ -230,13 +236,15 @@ func TestTS20SeedPrint(t *testing.T) {
 	}
 }
 
-// seedMarkers gives the raw, base64, lower hex, upper hex and quoted form of b.
+// seedMarkers gives the raw, base64, lower hex, upper hex, quoted and decimal
+// form of b.
 func seedMarkers(b []byte) []string {
-	return append(ikMarkers(b), strings.ToUpper(hex.EncodeToString(b)), strconv.Quote(string(b)), fmt.Sprintf("%q", b))
+	return append(ikMarkers(b), strings.ToUpper(hex.EncodeToString(b)), fmt.Sprintf("%q", b), fmt.Sprint(b))
 }
 
 // T-S-20: a reference bundle with a plain seed loads with a nil install key.
-// File gives no entry below secrets/, also not one that is no seed file.
+// File gives no entry for a name below secrets/, and none for a file of that
+// directory that is not a seed file.
 func TestTS20SeedReference(t *testing.T) {
 	e := newEnv(t)
 	e.putSeeded(keyTwo(e), ver(2), plainEnt(seedA), ent{name: "secrets/a", data: []byte("a")})
@@ -252,14 +260,24 @@ func TestTS20SeedReference(t *testing.T) {
 	}
 }
 
-// T-S-20: a candidate that passes the seed step and fails a later write keeps
+// T-S-20: a candidate that passes the seed step and fails a later step keeps
 // no seed. The blocker is a directory in place of the temporary file, as in
-// TestTS20RotationWriteFails. The row of the record is another return in Load.
+// TestTS20RotationWriteFails. The rotation-1.cbnd row fails the record write.
+// The check row fails the record check after the record write, as in
+// TestTS20RotationRecordCheckFails.
 func TestTS20SeedRejectedCleared(t *testing.T) {
-	for blocker, transition := range map[string]bool{StateName: false, "rotation-1.cbnd": true} {
-		t.Run(blocker, func(t *testing.T) {
+	for name, c := range map[string]struct {
+		blocker    string
+		transition bool
+		check      bool
+	}{
+		"state":           {StateName, false, false},
+		"rotation-1.cbnd": {"rotation-1.cbnd", true, false},
+		"check":           {"", true, true},
+	} {
+		t.Run(name, func(t *testing.T) {
 			e, install := newEnv(t), testInstall(t, 1)
-			k1, l := e.keys()[0], e.seedLoader(install)
+			k1, l := keyOne(e), e.seedLoader(install)
 			var opened *seedBytes
 			step := l.seed
 			l.seed = func(a *Archive, class Class, m *Manifest) (*seedBytes, error) {
@@ -270,14 +288,25 @@ func TestTS20SeedRejectedCleared(t *testing.T) {
 			e.putSeeded(k1, ver(2), e.good(install, k1, ver(2), seedA))
 			_, err := l.Load(false)
 			must(t, err)
-			if transition {
+			if c.transition {
 				k3 := newKey(3, "k3")
 				arch := build(transitionEnt(k1, k3, ver(3)), sealedEnt(sealTo(t, install, ver(3), "k3", seedB)))
 				e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
 			} else {
 				e.putSeeded(k1, ver(3), e.good(install, k1, ver(3), seedB))
 			}
-			must(t, os.MkdirAll(filepath.Join(e.state, "bundle", blocker+".tmp", "x"), 0o700))
+			if c.blocker != "" {
+				must(t, os.MkdirAll(filepath.Join(e.state, "bundle", c.blocker+".tmp", "x"), 0o700))
+			}
+			if c.check {
+				calls := 0
+				l.decompress = func(b []byte) (*Archive, error) {
+					if calls++; calls > 1 {
+						return nil, ErrArchiveInvalid
+					}
+					return ReadArchive(b)
+				}
+			}
 			if _, err := l.Load(false); err != ErrStateFault {
 				t.Fatalf("got %v", err)
 			}
@@ -307,7 +336,7 @@ func TestTS20SeedMarkers(t *testing.T) {
 	for i, f := range [][]ent{
 		{sealedEnt(sealTo(t, in, ver(2), "k1", seedA))},
 		{sealedEnt(sealTo(t, in, ver(3), "k1", seedB))},
-		{plainEnt(pattern(32, 13, 9))}, // rejected; no marker
+		{plainEnt(pattern(seedSize, 13, 9))}, // rejected; no marker
 	} {
 		e.putSeeded(k, ver(2+i), f...)
 		_, err := l.Load(false)

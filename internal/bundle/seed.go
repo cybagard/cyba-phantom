@@ -15,14 +15,17 @@ const (
 	seedSize       = 32
 )
 
-// seedText is the one text that a seed prints for each verb and encoding.
+// seedText is the text that fmt, json, text and slog users get for a seed.
 const seedText = "[seed]"
 
 // seedBytes is the token seed in memory. fmt gives seedText for each verb
-// except %T and %p, which give the type name and an address. encoding/json
-// and encoding.TextMarshaler users get seedText. encoding/gob gets an error.
-// fmt cannot call a method of a value in an unexported struct field. It
-// prints the bytes there, so Bundle holds a *seedBytes.
+// except %T and %p, which give the type name and an address, and except %w,
+// where fmt calls no method and prints the bytes of a seed passed directly.
+// encoding/json and encoding.TextMarshaler users get seedText. encoding/gob
+// gets an error. encoding/binary and a conversion to []byte give the raw
+// bytes. fmt cannot call a method of a value in an unexported struct field and
+// prints the bytes there, so Bundle holds a *seedBytes: fmt prints a pointer
+// field as an address.
 type seedBytes []byte
 
 func (seedBytes) Format(f fmt.State, _ rune)   { fmt.Fprint(f, seedText) }
@@ -39,7 +42,8 @@ func seedInfo(version, keyID string) []byte {
 
 // openSeed gives the seed of a bundle of this class. A reference bundle holds
 // the plain file, and a proprietary bundle holds the sealed file, never both.
-// The seed is a copy, not a part of the archive bytes. Any failure gives
+// The seed is a copy, not a part of the archive bytes. It zeroes the archive
+// entry of a plain seed after the copy. Any failure gives
 // ErrSeedInvalid, which holds no byte and no error of the HPKE code.
 func openSeed(a *Archive, class Class, m *Manifest, install hpke.PrivateKey) (*seedBytes, error) {
 	plain, hasPlain := a.File(seedPlainName)
@@ -51,8 +55,8 @@ func openSeed(a *Archive, class Class, m *Manifest, install hpke.PrivateKey) (*s
 	case class == ClassReference && hasPlain:
 		seed = slices.Clone(plain)
 		// This is the one place that changes an archive entry. The entry is
-		// a second copy of the seed. The zeroing of a replaced bundle would
-		// miss it.
+		// a second copy of the seed. The zero step after a swap does not reach
+		// this entry.
 		clear(plain)
 	case class == ClassProprietary && hasSealed && install != nil:
 		seed, _ = hpke.Open(install, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), seedInfo(m.Version, m.KeyID), sealed)

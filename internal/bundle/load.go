@@ -4,6 +4,7 @@ import (
 	"crypto/hpke"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"os"
@@ -45,9 +46,15 @@ type Bundle struct {
 	expired  bool
 	// templates holds the parsed .tmpl files. No template runs at load.
 	templates map[string]*template.Template
-	// seed is the token seed. A pointer keeps its bytes out of a print of the
-	// Bundle. It is nil only when a test turns the seed step off.
+	// seed is the token seed. fmt prints a pointer field as an address, not as
+	// the bytes. It is nil only when a test turns the seed step off.
 	seed *seedBytes
+}
+
+// Format prints the version and the SHA-256 of the bundle for each verb. It
+// prints no seed. The value receiver covers Bundle and *Bundle.
+func (b Bundle) Format(f fmt.State, _ rune) {
+	fmt.Fprintf(f, "bundle{version:%s sha256:%x}", b.manifest.Version, b.sum)
 }
 
 // SHA256 returns the SHA-256 of the archive bytes. It is the identity of the
