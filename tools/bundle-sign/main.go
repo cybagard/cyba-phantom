@@ -45,10 +45,11 @@
 //
 // verify calls bundle.CheckSigned with the keys of the trust file. That is the
 // signature and key rule of the loader. verify does not know the transition
-// records of a sensor. It does not check the engine, the dates or the seed.
-// A transition bundle needs the line of a key of the trust file and the line
-// of its new key. Another bundle needs a valid line of its manifest key ID.
-// verify prints the key IDs that verified.
+// records of a sensor. It does not check min_engine against the engine version
+// or the expiry against the clock. It does not check the version state or the
+// seed. A transition bundle needs the line of a key of the trust file and the
+// line of its new key. Another bundle needs a valid line of its manifest key
+// ID. verify prints the key IDs that verified.
 //
 // After a failed write or file sync, the tool tries to cut the output file to
 // size 0. After a failed close, or a failed open, sync or close of the
