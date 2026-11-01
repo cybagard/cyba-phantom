@@ -48,7 +48,8 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if !checkContent(cfg, time.Now(), stderr) {
+	c, ok := checkContent(cfg, time.Now(), stderr)
+	if !ok {
 		return 1
 	}
 	if *check {
@@ -56,17 +57,17 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
-	return serve(cfg, stdout, stderr)
+	return serve(cfg, c, stdout, stderr)
 }
 
 // serve runs the sensor until SIGINT or SIGTERM (see serveWith). A test replaces it.
 // serve sets the signal handler before the start, so it catches a signal
 // during the start.
-var serve = func(cfg *config.Config, stdout, stderr io.Writer) int {
+var serve = func(cfg *config.Config, c content, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	p, d := serveSetup(paramsOf(cfg))
-	return serveWith(ctx, stop, cfg, p, d, stdout, stderr)
+	return serveWith(ctx, stop, cfg, c, p, d, stdout, stderr)
 }
 
 // printPrivateLists writes one line for each entry of each private list.
@@ -133,10 +134,10 @@ func staticLine(entry string, err error) string {
 // file, and its entry is not parsed. ParseStatic returns its first error
 // only. A parsed entry thus gives at most one line, also when both files are
 // bad. A line has the key path and a fixed text. The check does not stop at
-// the first failure. It returns false when it wrote a line. It keeps no
-// parsed value.
-func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) bool {
-	ok := true
+// the first failure. It returns false when it wrote a line.
+// It returns the parsed values for the start, so the start reads no file again.
+func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) (c content, ok bool) {
+	ok = true
 	fail := func(line string) {
 		fmt.Fprintln(stderr, line)
 		ok = false
@@ -150,7 +151,9 @@ func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) bool {
 	}
 	if v, _ := cfg.Get("acme.ca_root"); v.Str != "" {
 		if data, got := read("acme.ca_root", v.Str, pemRule); got {
-			if _, err := listener.ParseACMERoots(data); err != nil {
+			var err error
+			if c.roots, err = listener.ParseACMERoots(data); err != nil {
+				c.roots = nil
 				fail("phantom: acme.ca_root: " + err.Error())
 			}
 		}
@@ -168,11 +171,23 @@ func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) bool {
 		if !certOK || !keyOK {
 			continue
 		}
-		if _, err := listener.ParseStatic(name.Str, certPEM, keyPEM, now); err != nil {
+		cert, err := listener.ParseStatic(name.Str, certPEM, keyPEM, now)
+		if err != nil {
 			fail(staticLine(entry, err))
+			continue
 		}
+		c.static = append(c.static, listener.StaticEntry{Name: name.Str, Cert: cert})
 	}
-	return ok
+	return c, ok
+}
+
+// content holds the values that checkContent parsed.
+// roots is nil without acme.ca_root.
+// static has one entry for each tls.certs entry that parsed.
+// When checkContent returns ok, all entries parsed.
+type content struct {
+	roots  *listener.ACMERoots
+	static []listener.StaticEntry
 }
 
 // loadWith is the one load function of both modes. A test replaces it to see the Net.

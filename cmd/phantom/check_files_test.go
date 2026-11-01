@@ -315,7 +315,7 @@ func runMode(t *testing.T, check bool, body string) (code int, so, se string, ca
 	t.Helper()
 	old := serve
 	t.Cleanup(func() { serve = old })
-	serve = func(*config.Config, io.Writer, io.Writer) int { calls++; return 0 }
+	serve = func(*config.Config, content, io.Writer, io.Writer) int { calls++; return 0 }
 	args := []string{writeFile(t, body)}
 	if check {
 		args = append([]string{"--check"}, args...)
@@ -323,6 +323,32 @@ func runMode(t *testing.T, check bool, body string) (code int, so, se string, ca
 	var o, e strings.Builder
 	code = run(args, []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, &o, &e)
 	return code, o.String(), e.String(), calls
+}
+
+// TestTS27_RunPassesContent checks that run gives serve the parsed content.
+// The config has acme.ca_root and one tls.certs entry. The serve stub gets
+// roots and one static entry with the name of that entry (T-S-27).
+func TestTS27_RunPassesContent(t *testing.T) {
+	d := fixtureDir(t)
+	rp := writePEM(t, d, "root.pem", rootPEM(t), 0o644)
+	cp := writePEM(t, d, "c.pem", certPEM(t, staticName, -time.Hour, 90*24*time.Hour), 0o644)
+	kp := writePEM(t, d, "k.key", leafKeyPEM(t), 0o600)
+	var got content
+	calls := 0
+	old := serve
+	t.Cleanup(func() { serve = old })
+	serve = func(_ *config.Config, c content, _, _ io.Writer) int { got = c; calls++; return 0 }
+	var o, e strings.Builder
+	args := []string{writeFile(t, contentBody(t, rp, [2]string{cp, kp}))}
+	if code := run(args, []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, &o, &e); code != 0 || calls != 1 {
+		t.Fatalf("exit %d, serve calls %d, stderr %q", code, calls, e.String())
+	}
+	if got.roots == nil {
+		t.Error("serve got no roots")
+	}
+	if len(got.static) != 1 || got.static[0].Name != staticName {
+		t.Errorf("serve got static entries %v, want one for %q", got.static, staticName)
+	}
 }
 
 // TestTS27_CheckContent checks that --check and the start refuse a bad
@@ -456,6 +482,14 @@ func TestTS27_CheckContentReadError(t *testing.T) {
 			otherOwner(t, o)
 			must(t, os.Remove(k), os.Symlink(o, k))
 		}},
+		{"cert replaced by a link to a file of another owner", []string{cert}, func(t *testing.T, d, r, c, k string) {
+			o := writePEM(t, d, "other.pem", goodCertPEM(t, "a.host.zz"), 0o644)
+			otherOwner(t, o)
+			must(t, os.Remove(c), os.Symlink(o, c))
+		}},
+		{"key over 64 KiB", []string{key}, func(t *testing.T, d, r, c, k string) {
+			writePEM(t, d, filepath.Base(k), append(leafKeyPEM(t), bytes.Repeat([]byte(" "), 65537-len(leafKeyPEM(t)))...), 0o600)
+		}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -471,7 +505,7 @@ func TestTS27_CheckContentReadError(t *testing.T) {
 				want += "phantom: " + k + ": the file cannot be read\n"
 			}
 			var se strings.Builder
-			if ok := checkContent(cfg, time.Now(), &se); ok != (want == "") || se.String() != want {
+			if _, ok := checkContent(cfg, time.Now(), &se); ok != (want == "") || se.String() != want {
 				t.Errorf("ok %v, stderr %q, want %q", ok, se.String(), want)
 			}
 		})

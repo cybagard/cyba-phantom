@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +24,18 @@ import (
 
 var errNoClient = errors.New("no certificate client")
 
+// normalName returns a server name in lower case with one trailing dot
+// removed. It returns false for a name with a byte of 0x80 or more.
+// The certificate source applies the same rule: it refuses such a name.
+func normalName(name string) (string, bool) {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 0x80 {
+			return "", false
+		}
+	}
+	return strings.TrimSuffix(strings.ToLower(name), "."), true
+}
+
 // shutdownTime is the time that the servers get to end their open connections at the stop.
 const shutdownTime = 5 * time.Second
 
@@ -31,6 +45,7 @@ var (
 	newACME   = listener.NewACME
 	startACME = func(ctx context.Context, a *listener.ACME) error { return a.Start(ctx) }
 	stopACME  = (*listener.ACME).Stop
+	warnCerts = (*listener.CertSource).WarnExpiry
 	served    = func() {} // runs after Serve or ServePlain returned
 	listen    = net.Listen
 	waitStop  = func(ctx context.Context) { <-ctx.Done() } // serve waits here until the stop
@@ -38,8 +53,20 @@ var (
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
-// serveWith runs the sensor on the state of p until ctx ends. The start order is: the queue, the two listen
-// sockets, the store part, the decoy server, the certificate cache and client, then the serve calls.
+// serveWith runs the sensor on the state of p until ctx ends.
+// The start order is: the queue, the two listen sockets, the store part,
+// and the decoy server.
+// Then: the cache and client, when acme.names is set.
+// Then: the certificate source.
+// Then: WarnExpiry, when there is a static entry.
+// Then: the serve calls.
+// The decoy names are the acme.names entries and then the tls.certs names.
+// c holds the parsed static certificates and roots.
+// With no acme.names entry, no cache opens and no client starts.
+// A static name gets its certificate from c.
+// When the client is absent, an ACME name fails with errNoClient.
+// It records no gate reason. A static name is still served.
+// WarnExpiry runs with ctx when c holds a static certificate.
 // A bind error ends the start before the store part opens a file.
 // The stop is the reverse. Both serve calls return. Then the client stops, the cache closes,
 // and the store part closes the queue. Thus no handler adds an event to a closed queue.
@@ -49,10 +76,10 @@ var (
 // gives exit 1 at once.
 // A serve call that ends with an error also gives exit 1, after the stop.
 // stop is the cancel function of ctx.
-func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config, p startParams, d startDeps, stdout, stderr io.Writer) int {
-	c := event.NewCounters()
+func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
+	counters := event.NewCounters()
 	depth, _ := cfg.Get("limits.queue_depth")
-	q, err := event.NewQueue(int(depth.Int), c)
+	q, err := event.NewQueue(int(depth.Int), counters)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -61,7 +88,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	if !ok {
 		return 1
 	}
-	s := start(p, q, c, d, slog.New(slog.NewTextHandler(stderr, nil)))
+	s := start(p, q, counters, d, slog.New(slog.NewTextHandler(stderr, nil)))
 	var names []string
 	for i := 0; ; i++ {
 		v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
@@ -70,23 +97,38 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		}
 		names = append(names, v.Str)
 	}
+	decoys := slices.Clone(names)
+	acmeNames := make(map[string]bool, len(names))
+	for _, n := range names {
+		if key, ok := normalName(n); ok {
+			acmeNames[key] = true
+		}
+	}
+	for _, e := range c.static {
+		decoys = append(decoys, e.Name)
+	}
 	maxConns, _ := cfg.Get("limits.max_conns")
 	headerBytes, _ := cfg.Get("limits.header_bytes")
 	var cache *listener.Store
-	var acme *listener.ACME // nil when the client does not exist
-	// The handshake runs only after Serve, which starts after acme is set.
+	var acme *listener.ACME         // nil when the client does not exist
+	var source *listener.CertSource // set before the serve calls
+	// The handshake runs only after Serve, which starts after source is set.
 	srv, err := newServer(listener.Config{
 		TLS: &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if acme == nil {
-				return nil, errNoClient
+				// A name that normalName refuses is no ACME name.
+				// The source refuses it with its gate reason.
+				if key, ok := normalName(h.ServerName); ok && acmeNames[key] {
+					return nil, errNoClient
+				}
 			}
-			return acme.GetCertificate(h)
+			return source.GetCertificate(h)
 		}},
 		MaxConns:    int(maxConns.Int),
 		HeaderBytes: int(headerBytes.Int),
 		Queue:       q,
-		Counters:    c,
-	}, listener.NewHelloHandler(names, q))
+		Counters:    counters,
+	}, listener.NewHelloHandler(decoys, q))
 	if err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
 		httpsLn.Close()
@@ -116,6 +158,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		if acme, err = newACME(listener.ACMEParams{
 			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
 			Host: host, Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
+			CARoots: c.roots, CAPrivate: cfg.PrivateList("acme.ca_private"),
 		}); err != nil {
 			acme = nil
 			return clientLine
@@ -125,9 +168,28 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		}
 		return ""
 	}
-	certLine := startCerts()
+	certLine := ""
+	if len(names) > 0 {
+		certLine = startCerts()
+	}
 	if certLine != "" {
 		fmt.Fprintln(stderr, certLine)
+	}
+	if source, err = listener.NewCertSource(c.static, acme); err != nil {
+		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
+		httpsLn.Close()
+		httpLn.Close()
+		if acme != nil {
+			stopACME(acme)
+		}
+		if cache != nil {
+			cache.Close()
+		}
+		s.Stop()
+		return 1
+	}
+	if len(c.static) > 0 {
+		warnCerts(source, ctx, slog.New(slog.NewTextHandler(stderr, nil)))
 	}
 	var wg sync.WaitGroup
 	var failed atomic.Bool // a serve call ended with an error: the exit code is 1, so a supervisor restarts the sensor
@@ -142,7 +204,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		})
 	}
 	serveOne(func() error { return srv.Serve(httpsLn) })
-	serveOne(func() error { return srv.ServePlain(httpLn, listener.NewRedirect(names)) })
+	serveOne(func() error { return srv.ServePlain(httpLn, listener.NewRedirect(decoys)) })
 	startLine := "phantom: started"
 	if !s.Healthy() {
 		startLine += " — store not healthy"

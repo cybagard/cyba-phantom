@@ -202,13 +202,40 @@ type running struct {
 // After a timeout in the cleanup, serve and its sockets stay in the process.
 // Later results in the same process are not reliable.
 func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *running {
+	return launchContent(t, cfg, content{}, p, d)
+}
+
+// launchContent is launchServe with the parsed values c.
+func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
-	go func() { r.code = serveWith(ctx, cancel, cfg, p, d, r.out, &r.err); close(r.done) }()
+	go func() { r.code = serveWith(ctx, cancel, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
+		select {
+		case <-r.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return %v after the cancel at the end of the test", sigtermWait)
+		}
+	})
+	return r
+}
+
+// launchViaServe runs the real serve function with c until the test ends.
+// The serveSetup seam gives it p and realDeps. The waitStop seam holds serve
+// until r.cancel runs, so the test needs no signal.
+func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) *running {
+	oldLog, oldSetup, oldWait := log.Writer(), serveSetup, waitStop
+	t.Cleanup(func() { log.SetOutput(oldLog); serveSetup, waitStop = oldSetup, oldWait })
+	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
+	hold := make(chan struct{})
+	waitStop = func(context.Context) { <-hold }
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
+	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
+	t.Cleanup(func() {
+		r.cancel()
 		select {
 		case <-r.done:
 		case <-time.After(sigtermWait):
@@ -628,9 +655,21 @@ func TestTI03_ColdStart(t *testing.T) {
 	ca, _ := cfg.Get("acme.ca")
 	der := seedCache(t, p, ca.Str)
 	before := runtime.NumGoroutine()
+	var warns atomic.Int32
+	oldWarn := warnCerts
+	t.Cleanup(func() { warnCerts = oldWarn })
+	warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
+		warns.Add(1)
+		oldWarn(s, ctx, lg)
+	}
 	r := launchServe(t, cfg, p, realDeps)
 	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
 	r.waitStarted(t)
+	// With no static entry, serveWith does not call WarnExpiry.
+	// It writes the start line after that point.
+	if n := warns.Load(); n != 0 {
+		t.Errorf("WarnExpiry called %d times with no static entry, want 0", n)
+	}
 	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err).Close()
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
 }
@@ -831,7 +870,7 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 		return nil, errors.New("test error")
 	}
 	var q *event.Queue
-	if code := serveWith(t.Context(), func() {}, cfg, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
+	if code := serveWith(t.Context(), func() {}, cfg, content{}, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if q == nil || got.Queue != q || got.Counters == nil || !q.Closed() {
@@ -872,7 +911,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
 	before := goroutineBlocks()
-	code := serveWith(t.Context(), func() {}, cfg, p, d, &stdout, &stderr)
+	code := serveWith(t.Context(), func() {}, cfg, content{}, p, d, &stdout, &stderr)
 	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
@@ -1008,7 +1047,7 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 		oldWait(ctx)
 	}
 	r := &running{done: make(chan struct{}), out: newStartWriter()}
-	go func() { r.code = serve(cfg, r.out, &r.err); close(r.done) }()
+	go func() { r.code = serve(cfg, content{}, r.out, &r.err); close(r.done) }()
 	// sendSigterm sends one SIGTERM and waits until sig gets it.
 	// A SIGTERM that comes after signal.Stop ends the process.
 	// Thus the test waits for each delivery before it continues.
@@ -1127,6 +1166,332 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 	<-exited
 	if waitErr != nil {
 		t.Errorf("after SIGTERM: %v; stderr %q", waitErr, errb.String())
+	}
+}
+
+const staticName = "a.host.zz"
+
+// mixOpt sets the config that startMixed starts.
+type mixOpt struct {
+	acme    bool          // keep the acme.names entry
+	name    string        // the acme.names entry; "" keeps decoyName
+	root    bool          // set acme.ca_root
+	private string        // the acme.ca_private list, or ""
+	left    time.Duration // time left of the leaf; 0 is 90 days
+	remove  bool          // remove the fixture files after checkContent
+	seed    bool          // seed the cache, so the client makes no order
+	// viaServe starts the real serve function, not serveWith.
+	viaServe bool
+}
+
+// mixed is a running sensor with one static name.
+// source and ctx come from the WarnExpiry seam.
+// get is the GetCertificate function of the server.
+type mixed struct {
+	r            *running
+	cfg          *config.Config
+	c            content
+	p            startParams
+	https, plain string
+	source       *listener.CertSource
+	ctx          context.Context
+	get          func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+}
+
+// startMixed loads the config of o and parses the files with checkContent.
+// Then it starts serveWith with the parsed values.
+func startMixed(t *testing.T, o mixOpt) *mixed {
+	t.Helper()
+	https, plain, ca := openListeners(t)
+	d := fixtureDir(t)
+	if o.left == 0 {
+		o.left = 90 * 24 * time.Hour
+	}
+	rp := writePEM(t, d, "root.pem", rootPEM(t), 0o644)
+	cp := writePEM(t, d, "c.pem", certPEM(t, staticName, -time.Hour, o.left), 0o644)
+	kp := writePEM(t, d, "k.key", leafKeyPEM(t), 0o600)
+	body := contentBody(t, "", [2]string{cp, kp})
+	if !o.acme {
+		body = strings.Replace(body, "  names: [decoy.host.zz]\n", "", 1)
+	} else if o.name != "" {
+		body = strings.Replace(body, "names: [decoy.host.zz]", "names: ["+o.name+"]", 1)
+	}
+	extra := ""
+	if o.root {
+		extra += "  ca_root: " + strconv.Quote(rp) + "\n"
+	}
+	if o.private != "" {
+		extra += "  ca_private: [" + o.private + "]\n"
+	}
+	const caLine = "  ca: \"https://ca.example.invalid\"\n"
+	body = strings.Replace(body, caLine, caLine+extra, 1)
+	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS=" + https.Addr().String(),
+		"PHANTOM_LISTEN_HTTP=" + plain.Addr().String(), "PHANTOM_ACME_CA=https://" + ca + "/directory"}
+	cfg, err := config.Load(writeFile(t, body), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var se strings.Builder
+	c, ok := checkContent(cfg, time.Now(), &se)
+	if !ok {
+		t.Fatalf("checkContent: %q", se.String())
+	}
+	if o.remove {
+		must(t, os.Remove(rp), os.Remove(cp), os.Remove(kp))
+	}
+	p := tempState(t, cfg)
+	if o.seed {
+		caURL, _ := cfg.Get("acme.ca")
+		seedCache(t, p, caURL.Str)
+	}
+	m := &mixed{cfg: cfg, c: c, p: p, https: https.Addr().String(), plain: plain.Addr().String()}
+	oldWarn, oldServer := warnCerts, newServer
+	t.Cleanup(func() { warnCerts, newServer = oldWarn, oldServer })
+	warnCerts = func(s *listener.CertSource, ctx context.Context, lg *slog.Logger) {
+		m.source, m.ctx = s, ctx
+		oldWarn(s, ctx, lg)
+	}
+	newServer = func(cc listener.Config, h http.Handler) (*listener.Server, error) {
+		m.get = cc.TLS.GetCertificate
+		return oldServer(cc, h)
+	}
+	if o.viaServe {
+		m.r = launchViaServe(t, cfg, c, p)
+	} else {
+		m.r = launchContent(t, cfg, c, p, realDeps)
+	}
+	m.r.waitStarted(t)
+	if m.source == nil {
+		t.Fatalf("serveWith did not call WarnExpiry; stderr %q", m.r.err.String())
+	}
+	return m
+}
+
+// leaf makes a TLS handshake for name at the https listener.
+// It returns the DER bytes of the certificate.
+func (m *mixed) leaf(t *testing.T, name string) []byte {
+	t.Helper()
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: netWait}, "tcp", m.https, &tls.Config{ServerName: name, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("handshake for %q: %v; stderr %q", name, err, m.r.err.String())
+	}
+	defer conn.Close()
+	return conn.ConnectionState().PeerCertificates[0].Raw
+}
+
+// refuses checks that GetCertificate fails for each name with a gate reason.
+// The error is not errNoClient. The source counts one refusal.
+func (m *mixed) refuses(t *testing.T, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		before := m.source.Refused()
+		_, err := m.get(&tls.ClientHelloInfo{ServerName: name})
+		if err == nil || errors.Is(err, errNoClient) {
+			t.Errorf("GetCertificate(%q) error %v, want a gate error", name, err)
+		}
+		if n := m.source.Refused() - before; n != 1 {
+			t.Errorf("GetCertificate(%q) counted %d refusals, want 1", name, n)
+		}
+	}
+}
+
+// status makes a GET with the Host header host at url.
+// It returns the status code and follows no redirect.
+func status(t *testing.T, url, host string) int {
+	t.Helper()
+	tr := &http.Transport{DisableKeepAlives: true, TLSClientConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true}}
+	defer tr.CloseIdleConnections()
+	cl := &http.Client{Transport: tr, Timeout: netWait, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestTS27_StartStaticOnly starts a config with tls.certs and no acme.names.
+// The start makes no client, no cache and no ACME request.
+// The start line is exactly "phantom: started". Stderr has no client text.
+// The static name gets its leaf, the hello handler and the redirect (T-S-27).
+// The gate refuses a name that is not a decoy name, and an empty name.
+// The error is not errNoClient, and the source counts each refusal.
+// The test removes the fixture files before the start.
+// So the start reads no file again.
+func TestTS27_StartStaticOnly(t *testing.T) {
+	var news, starts atomic.Int32
+	oldNew, oldStart := newACME, startACME
+	t.Cleanup(func() { newACME, startACME = oldNew, oldStart })
+	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { news.Add(1); return oldNew(ap) }
+	startACME = func(ctx context.Context, a *listener.ACME) error { starts.Add(1); return oldStart(ctx, a) }
+	m := startMixed(t, mixOpt{remove: true})
+	if news.Load() != 0 || starts.Load() != 0 {
+		t.Errorf("newACME calls %d, startACME calls %d, want 0 and 0", news.Load(), starts.Load())
+	}
+	if _, err := os.Lstat(filepath.Join(m.p.Root, m.p.CacheDir)); err == nil {
+		t.Error("the start made a certificate cache")
+	}
+	if got := m.r.out.String(); got != "phantom: started\n" {
+		t.Errorf("start line %q, want %q", got, "phantom: started\n")
+	}
+	if strings.Contains(m.r.err.String(), "certificate client") {
+		t.Errorf("stderr %q has the text certificate client", m.r.err.String())
+	}
+	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
+		t.Error("the handshake did not give the static leaf")
+	}
+	m.refuses(t, "other.host.zz", "")
+	if code := status(t, "https://"+m.https+"/", staticName); code != http.StatusOK {
+		t.Errorf("hello handler status %d for the static name, want 200", code)
+	}
+	if code := status(t, "http://"+m.plain+"/", staticName); code != http.StatusPermanentRedirect {
+		t.Errorf("redirect status %d for the static name, want 308", code)
+	}
+}
+
+// TestTS27_ServeStaticLeaf starts the real serve function with parsed content.
+// A handshake for the static name gives the static leaf. The test removes the
+// files before the start, so serve uses the parsed values. serve returns 0
+// after the cancel through the waitStop seam (T-S-27).
+func TestTS27_ServeStaticLeaf(t *testing.T) {
+	m := startMixed(t, mixOpt{remove: true, viaServe: true})
+	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
+		t.Error("the handshake did not give the static leaf")
+	}
+	m.r.cancel()
+	<-m.r.done
+	if m.r.code != 0 {
+		t.Errorf("serve returned %d, want 0; stderr %q", m.r.code, m.r.err.String())
+	}
+}
+
+// TestTS27_StartClientParams checks the roots and the private list.
+// serveWith gives them to NewACME.
+// Names has the acme.names entries only, not the static name (T-S-27).
+func TestTS27_StartClientParams(t *testing.T) {
+	for _, o := range []mixOpt{{acme: true, seed: true, root: true, private: `"10.0.0.0/8", "192.168.0.0/16"`}, {acme: true, seed: true}} {
+		t.Run(fmt.Sprintf("root %v private %q", o.root, o.private), func(t *testing.T) {
+			var got listener.ACMEParams
+			oldNew := newACME
+			t.Cleanup(func() { newACME = oldNew })
+			newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+			m := startMixed(t, o)
+			if (got.CARoots != nil) != o.root {
+				t.Errorf("CARoots nil = %v, want %v", got.CARoots == nil, !o.root)
+			}
+			if want := m.cfg.PrivateList("acme.ca_private"); !slices.Equal(got.CAPrivate, want) || (len(want) > 0) != (o.private != "") {
+				t.Errorf("CAPrivate %v, want %v", got.CAPrivate, want)
+			}
+			if want := []string{decoyName}; !slices.Equal(got.Names, want) {
+				t.Errorf("Names %q, want %q", got.Names, want)
+			}
+		})
+	}
+}
+
+// TestTS27_StartClientAbsent checks a mixed config whose client is absent.
+// A handshake for the ACME name fails with errNoClient.
+// The source counts no gate refusal. The static name gets its leaf (T-S-27).
+// The ACME name compare ignores case and one trailing dot.
+// A name that is not an ACME name, and an empty name, go to the source.
+// The source refuses them: the error is not errNoClient, and it counts each.
+// That holds for a name with a byte of 0x80 or more: U+212A is no "k".
+func TestTS27_StartClientAbsent(t *testing.T) {
+	oldNew := newACME
+	t.Cleanup(func() { newACME = oldNew })
+	newACME = func(listener.ACMEParams) (*listener.ACME, error) { return nil, errors.New("test error") }
+	const acmeName = "kdecoy.host.zz"
+	m := startMixed(t, mixOpt{acme: true, name: acmeName})
+	for _, name := range []string{acmeName, "KDECOY.host.zz", acmeName + ".", "Kdecoy.Host.ZZ."} {
+		if _, err := m.get(&tls.ClientHelloInfo{ServerName: name}); !errors.Is(err, errNoClient) {
+			t.Errorf("GetCertificate(%q) error %v, want errNoClient", name, err)
+		}
+	}
+	if n := m.source.Refused(); n != 0 {
+		t.Errorf("the source counted %d refusals, want 0", n)
+	}
+	// The last name is acmeName with U+212A KELVIN SIGN in place of "k".
+	m.refuses(t, "other.host.zz", "", "K"+acmeName[1:])
+	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
+		t.Error("the handshake did not give the static leaf")
+	}
+}
+
+// TestTS27_StartMixed checks that a static name gets its leaf.
+// The client works. The test removes the files before the start.
+// So the roots come from checkContent and not from a second read (T-S-27).
+// The static handshake sends no name to the ACME client.
+// It fails when one GetCertificate call for a static name makes more than
+// 1 allocation.
+func TestTS27_StartMixed(t *testing.T) {
+	var got listener.ACMEParams
+	oldNew := newACME
+	t.Cleanup(func() { newACME = oldNew })
+	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return oldNew(ap) }
+	m := startMixed(t, mixOpt{acme: true, seed: true, root: true, remove: true})
+	if got.CARoots == nil {
+		t.Error("CARoots is nil: the start did not use the parsed roots")
+	}
+	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
+		t.Error("the handshake did not give the static leaf")
+	}
+	// The source adds the refusals of the ACME client to its own count.
+	// The client refuses a name that is not an ACME name.
+	// So a static name that reaches the client gives a refusal.
+	// The seed is a guard only: the result does not depend on it.
+	if n := m.source.Refused(); n != 0 {
+		t.Errorf("after the static handshake the source counts %d refusals, want 0", n)
+	}
+	if _, err := m.get(&tls.ClientHelloInfo{ServerName: staticName}); err != nil || m.source.Refused() != 0 {
+		t.Errorf("GetCertificate for the static name: error %v, refusals %d", err, m.source.Refused())
+	}
+	if allocs := testing.AllocsPerRun(100, func() { m.get(&tls.ClientHelloInfo{ServerName: staticName}) }); allocs > 1 {
+		t.Errorf("GetCertificate for a static name makes %v allocations, want at most 1", allocs)
+	} else {
+		t.Logf("GetCertificate for a static name: %v allocs/op", allocs)
+	}
+}
+
+// TestTS27_StartExpiryWarning checks the warning line at the start.
+// A leaf with 13 days left gives the line. A leaf with 20 days left gives none.
+// WarnExpiry gets the context of serveWith. That context has ended when
+// serveWith returns. The goroutine of WarnExpiry ends with its context.
+func TestTS27_StartExpiryWarning(t *testing.T) {
+	for _, c := range []struct {
+		left time.Duration
+		warn bool
+	}{{13 * 24 * time.Hour, true}, {20 * 24 * time.Hour, false}} {
+		t.Run(c.left.String(), func(t *testing.T) {
+			m := startMixed(t, mixOpt{left: c.left})
+			if got := strings.Contains(m.r.err.String(), "static certificate expires in less than 14 days or has expired"); got != c.warn {
+				t.Errorf("warning line %v, want %v; stderr %q", got, c.warn, m.r.err.String())
+			}
+			m.r.cancel()
+			<-m.r.done
+			if m.ctx.Err() == nil {
+				t.Error("the context of WarnExpiry is not the context of serveWith: it did not end")
+			}
+		})
+	}
+}
+
+// TestTS27_StartBadEntry checks the start with an entry that
+// the source refuses. The start ends with exit 1.
+func TestTS27_StartBadEntry(t *testing.T) {
+	https, plain, ca := openListeners(t)
+	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+	var stderr strings.Builder
+	c := content{static: []listener.StaticEntry{{Name: staticName}}} // no Leaf
+	// A start that does not fail ends at the timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), netWait)
+	defer cancel()
+	if code := serveWith(ctx, cancel, cfg, c, tempState(t, cfg), realDeps, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
+		t.Errorf("exit %d, stderr %q, want exit 1 and the fixed line", code, stderr.String())
 	}
 }
 
