@@ -741,15 +741,29 @@ func TestTS13_EntryErrorJoinsLaterError(t *testing.T) {
 // Publish does not count it. It stops for the target and returns an error that
 // says the note is gone before it is read.
 func TestTS13_NoteGoneAfterLstat(t *testing.T) {
+	noteGone(t, func(remove func(string)) safefiletest.Hooks {
+		return safefiletest.Hooks{AfterCheck: remove}
+	})
+}
+
+// T-S-13: a note that is removed before the Lstat gives the same error.
+func TestTS13_NoteGoneBeforeLstat(t *testing.T) {
+	noteGone(t, func(remove func(string)) safefiletest.Hooks {
+		return safefiletest.Hooks{BeforeCheck: remove}
+	})
+}
+
+// noteGone removes note 2 in the hook that hooks returns.
+func noteGone(t *testing.T, hooks func(remove func(string)) safefiletest.Hooks) {
 	e := newSpool(t)
 	for size := uint64(1); size <= 3; size++ {
 		e.add(t, size)
 	}
-	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(name string) {
+	safefiletest.Set(t, hooks(func(name string) {
 		if name == "2.note" {
 			must(t, os.Remove(filepath.Join(e.dir, e.noteFile(2))))
 		}
-	}})
+	}))
 	f := newFake()
 	err := e.Publish(0, f)
 	if err == nil || !strings.Contains(err.Error(), "2.note") || !strings.Contains(err.Error(), "is gone before it is read") || strings.Contains(err.Error(), "cannot be opened") {
