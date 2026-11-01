@@ -1081,10 +1081,9 @@ func dirFailure(r *os.Root, name string, err error) error {
 // opens the directory with safefile and reads the file below it. A later swap
 // of a directory name has no effect. A missing directory gives its error at
 // once. A directory that safefile refuses gives an error that holds the name
-// of the failed part. safefile refuses a link at
-// the name, and a file with another owner or with a group or other bit. It
-// refuses a file that changes in size while it is read. The head file is in the
-// log directory itself.
+// of the failed part. safefile refuses a link at the name, and a file with
+// another owner or with a group or other bit. It refuses a file that changes
+// in size while it is read. The head file is in the log directory itself.
 func (s *Store) readFile(name string, n int) ([]byte, error) {
 	r := s.dir
 	if d := path.Dir(name); d != "." {
