@@ -78,9 +78,10 @@
 // the item and starts a paragraph, as in go/doc/comment. In a comment, an
 // indented line stays in the item after a blank line. This holds if the marker
 // line has an indent. An indented marker line is the exception: it is a new
-// item. In a text file, an indented line after a blank line is code. Two
-// exceptions: an indented marker line is a new item, and an indented "|" line
-// is a table row.
+// item. In a text file, a line after a blank line is code at four spaces of
+// indent. It is also code at a tab after up to three spaces. Two exceptions:
+// an indented marker line is a new item, and an indented "|" line is a table
+// row. Another line with two or three spaces of indent is text.
 //
 // A line of an open paragraph can start with "#", a list marker or "|". In a
 // "//" comment, such a line continues the paragraph, as go/doc/comment reads
@@ -95,8 +96,9 @@
 // address ends the line. Each other line with such a start is text. A trailer
 // line does not count, and it ends the sentence before it.
 //
-// A code block is a run of lines with a tab or two spaces of indent. It
-// starts in one of these places:
+// A code block is a run of lines with a tab or two spaces of indent. In a
+// text file, it starts only at four spaces, or at a tab after up to three
+// spaces. It starts in one of these places:
 //
 //   - at the start of a text
 //   - after a blank line
@@ -110,10 +112,14 @@
 // text. This holds if the marker line has an indent. An unindented "|" line
 // there is a table row. After a marker line with no indent, an indented line
 // in the gap is code. An indented "|" line at another place where a code block
-// can start is code, not a table row. In a text file, an indented "|" line is
-// a table row, except in a code block. In a code block, an indented line stays
-// code, also when it starts with a list marker. A fence of three backticks
-// also makes a code block. stelint does not count code.
+// can start is code, not a table row. In a "/* */" comment, an indented "|"
+// line is a table row. There are two exceptions. In a list gap, the rules
+// above hold as in a "//" comment. In a code block, the line stays code. In a
+// text file, an indented "|" line is a table row, except in a code block. In
+// a code block, an indented line stays code, also when it starts with a list
+// marker. A fence of three backticks also makes a code block. It opens only
+// when no backtick follows its first run of backticks. stelint does not count
+// code.
 //
 // A word is a run of characters between word breaks. A space is each rune
 // for which unicode.IsSpace is true, such as U+00A0. U+115F, U+1160, U+2800,
@@ -234,7 +240,7 @@ type hit struct{ line, cols int }
 func run(args []string, dir string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("stelint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	all := fs.Bool("all", false, "check every tracked file at head and exit 0")
+	all := fs.Bool("all", false, "check the tracked Go files at head, except symbolic links and files below testdata. A git error, an input over a limit or a scan error gives exit 2, else 0")
 	text := fs.Bool("text", false, "check the sentences of one text file")
 	if err := fs.Parse(args); err != nil {
 		return 2
