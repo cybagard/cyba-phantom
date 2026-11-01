@@ -139,23 +139,6 @@ func statCreated(f *os.File) (fs.FileInfo, error) {
 	return fi, nil
 }
 
-// statOpen returns the identity of the made file from the first Stat that
-// succeeds on a descriptor of it. It gives nil if each Stat fails. A nil or
-// closed descriptor fails.
-func statOpen(created, held *os.File) fs.FileInfo {
-	if created != nil {
-		if fi, err := statCreated(created); err == nil {
-			return fi
-		}
-	}
-	if held != nil {
-		if fi, err := held.Stat(); err == nil {
-			return fi
-		}
-	}
-	return nil
-}
-
 // heap guards soft_heap_limit, which is a setting of the process.
 var heap struct {
 	sync.Mutex
@@ -218,21 +201,23 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// the made file is not free. Thus a file that someone makes in that time
 	// cannot have the same inode. refuse removes the entry in dir when the
 	// Lstat shows the file that this call made. The held Stat does not change
-	// made. If the Stat of the create descriptor failed, refuse makes one
-	// more Stat of a descriptor that is open. If no Stat of the made file
-	// succeeds, refuse removes nothing. refuse does not find a change
+	// made. If the first Stat of the create descriptor failed, refuse makes one
+	// more Stat of it. The create descriptor is still open then. If that Stat
+	// fails too, refuse removes nothing. refuse does not find a change
 	// of the entry between the Lstat and the Remove. If someone puts another
 	// file there in that window, refuse removes it.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
 			beforeRefuse()
 		}
-		if absent && made == nil {
-			made = statOpen(created, held)
-		}
-		if absent && made != nil {
-			if cur, lerr := dir.Lstat(last); lerr == nil && os.SameFile(cur, made) {
-				_ = dir.Remove(last)
+		if absent {
+			if made == nil {
+				made, _ = statCreated(created)
+			}
+			if made != nil {
+				if cur, lerr := dir.Lstat(last); lerr == nil && os.SameFile(cur, made) {
+					_ = dir.Remove(last)
+				}
 			}
 		}
 		return err
