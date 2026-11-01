@@ -88,6 +88,7 @@ const (
 	ruleNotDir   = "path part is not a directory"
 	ruleOwner    = "file is not owned by the user that runs the sensor"
 	ruleChanged  = "file changed while it was read"
+	ruleFileLink = "file is a link"
 
 	ruleUnwritten = "tile of the new tree head was not written by this store"
 )
@@ -172,11 +173,12 @@ type Store struct {
 // directory that is a link inside the state directory. This is because openDir
 // refuses a link when Open calls fsync on the log directory. Open refuses a
 // tile file or the head file that is a link. This includes a link inside the
-// log directory and a link to another tile file. It refuses such a file that
-// has another owner than the user that runs the sensor. It refuses a file with
-// a group or other bit. It refuses a file that is not of the exact size of its
-// width. It refuses a file that changes in size while Open reads it. Open does
-// these checks for the files of the tidy range beyond the tree head too. It
+// log directory and a link to another tile file. It refuses a tile file or the
+// head file that has another owner than the user that runs the sensor. It
+// refuses a file with a group or other bit. It refuses a file that is not of
+// the exact size of its width. It refuses a file that changes in size while
+// Open reads it. Open does these checks for the files of the tidy range
+// beyond the tree head too. It
 // also refuses a link at a temporary name that the tidy deletes with no read.
 // A later tile read in a proof or in a root read gives the same errors. Then
 // the log stops. Open makes the directory (mode 0700) if it does not exist.
@@ -271,7 +273,7 @@ func (s *Store) load() error {
 	case errors.Is(err, errLength):
 		return newError(headName, ruleHead)
 	case err != nil:
-		return newError(headName, fileRule(err))
+		return newError(dirName(err, headName), fileRule(err))
 	}
 	size := binary.BigEndian.Uint64(b)
 	if size > maxSize {
@@ -698,7 +700,7 @@ func (s *Store) WriteTile(t tlog.Tile, data []byte) error {
 		// Each other file of the tile must agree in the covered hashes. This
 		// includes the file that the rename replaces. Check before the write,
 		// so that a bad file gives an error and no file changes.
-		if _, err := s.staleFrom(t, 0, c, tileFiles{widths, tmps, w, old}); err != nil {
+		if _, err := s.staleFrom(t, 0, c, tileFiles{widths, tmps, w, old, true}); err != nil {
 			return err
 		}
 		if err := s.writeFile(t.Path(), data); err != nil {
@@ -778,7 +780,7 @@ func (s *Store) widest(t tlog.Tile, widths []int) (tileFile, error) {
 		b, err = s.readFile(tilePath(t, w), w*tlog.HashSize)
 	}
 	if err != nil {
-		return tileFile{}, newError(tilePath(t, w), fileRule(err))
+		return tileFile{}, newError(dirName(err, tilePath(t, w)), fileRule(err))
 	}
 	return tileFile{w, b, tilePath(t, w)}, nil
 }
@@ -800,7 +802,7 @@ func (s *Store) tidy(t tlog.Tile, keep int) error {
 // the files differ only beyond the tree head. The kept file must hold all c
 // covered hashes. A file in the result must have the same covered hashes. If
 // not, stale returns an error, because the file can be the only copy of covered
-// hashes. stale deletes nothing.
+// hashes. stale refuses a link in the result. It deletes nothing.
 func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	widths, tmps, err := s.partials(t)
 	if err != nil {
@@ -810,31 +812,25 @@ func (s *Store) stale(t tlog.Tile, keep, c int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	rm, err := s.staleFrom(t, keep, c, tileFiles{widths, tmps, top.w, top.data})
-	if err != nil {
-		return nil, err
-	}
-	// remove deletes these files with no read. A link is not a stale file.
-	for _, name := range rm {
-		if fi, err := s.dir.Lstat(name); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-			return nil, newError(name, ruleRead)
-		}
-	}
-	return rm, nil
+	return s.staleFrom(t, keep, c, tileFiles{widths, tmps, top.w, top.data, false})
 }
 
 // tileFiles is what partials and widest return for one tile. It holds the
 // widths, the temporary files, the width w of the widest file, and its data.
 // WriteTile has these values. It gives them to staleFrom, which then does not
-// list the directory again.
+// list the directory again. If writing is true, the caller writes the file of
+// t next. A link at the temporary name of that file is then no error, because
+// writeFile replaces it.
 type tileFiles struct {
-	widths []int
-	tmps   []string
-	w      int
-	top    []byte
+	widths  []int
+	tmps    []string
+	w       int
+	top     []byte
+	writing bool
 }
 
-// staleFrom is stale for a tile that the caller has listed and read.
+// staleFrom is stale for a tile that the caller has listed and read. It
+// refuses a link in the result, because remove deletes the files with no read.
 func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, error) {
 	widths, tmps, w, top := l.widths, l.tmps, l.w, l.top
 	var err error
@@ -843,7 +839,7 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, erro
 	}
 	if keep > 0 && keep != w {
 		if top, err = s.readFile(tilePath(t, keep), keep*tlog.HashSize); err != nil {
-			return nil, newError(tilePath(t, keep), fileRule(err))
+			return nil, newError(dirName(err, tilePath(t, keep)), fileRule(err))
 		}
 		w = keep
 	}
@@ -864,13 +860,22 @@ func (s *Store) staleFrom(t tlog.Tile, keep, c int, l tileFiles) ([]string, erro
 		file := tilePath(t, p)
 		b, err := s.readFile(file, p*tlog.HashSize)
 		if err != nil {
-			return nil, newError(file, fileRule(err))
+			return nil, newError(dirName(err, file), fileRule(err))
 		}
 		n := min(p, c) * tlog.HashSize
 		if !bytes.Equal(b[:n], top[:n]) {
 			return nil, newError(file, ruleRewrite)
 		}
 		rm = append(rm, file)
+	}
+	// remove deletes these files with no read. A link is not a stale file.
+	for _, name := range rm {
+		if l.writing && name == t.Path()+tmpSuffix {
+			continue
+		}
+		if fi, err := s.dir.Lstat(name); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			return nil, newError(name, ruleFileLink)
+		}
 	}
 	return rm, nil
 }
@@ -966,17 +971,19 @@ func (s *Store) readTile(t tlog.Tile) ([]byte, error) {
 		case err == nil:
 			return b[:want*tlog.HashSize], nil
 		case !errors.Is(err, fs.ErrNotExist):
-			return nil, newError(file, fileRule(err))
+			return nil, newError(dirName(err, file), fileRule(err))
 		}
 	}
 	return nil, newError(tilePath(t, want), ruleMissing)
 }
 
-// The rules of safefile. A tile file and the head file are regular files. The
-// user owns them, and they have no group or other bit. The size is the exact
-// size that the caller wants. A directory has no owner rule.
+// dirRule is the rule of safefile for a directory. A directory has no owner
+// rule and no group or other bit.
 var dirRule = safefile.Rule{Type: safefile.Dir, Owner: safefile.OwnerAny, Forbid: otherBits}
 
+// fileSafeRule is the rule of safefile for a tile file or the head file. It is
+// a regular file that the user owns, with no group or other bit. The size is
+// the exact size n.
 func fileSafeRule(n int) safefile.Rule {
 	return safefile.Rule{Type: safefile.Regular, Owner: safefile.OwnerSelf, Forbid: otherBits, MaxSize: int64(n)}
 }
@@ -1017,8 +1024,8 @@ func openDir(r *os.Root, name string) (*os.File, error) {
 	return f, nil
 }
 
-// dirReason gives the error that syncRule and fileRule know for the refusal
-// of a directory check. Another error stays as it is.
+// dirReason gives the error that syncRule knows for the refusal of a directory
+// check. A changed directory counts as a link. Another error stays as it is.
 func dirReason(err error) error {
 	switch {
 	case errors.Is(err, safefile.ErrMode):
@@ -1053,12 +1060,16 @@ func dirName(err error, def string) string {
 
 // dirFailure explains the failed open of the directory name. It opens each
 // part of name from the root with the rule. The first part that fails gives
-// the name and the error. Else it keeps err for name.
+// the name and the error. A missing directory keeps the full name. Else it
+// keeps err for name.
 func dirFailure(r *os.Root, name string, err error) error {
 	p := ""
 	for _, part := range strings.Split(name, "/") {
 		p = path.Join(p, part)
 		sub, perr := safefile.OpenRoot(r, p, dirRule)
+		if errors.Is(perr, fs.ErrNotExist) {
+			break
+		}
 		if perr != nil {
 			return &dirError{p, dirReason(perr)}
 		}
@@ -1068,16 +1079,18 @@ func dirFailure(r *os.Root, name string, err error) error {
 }
 
 // readFile reads the regular file name, which must have exactly n bytes. It
-// opens the directory of the file again, so that a swap of a directory name
-// has no effect. safefile refuses a link at the name, and a file with another
-// owner or with a group or other bit. It refuses a file that changes in size
-// while it is read. The head file is in the log directory itself.
+// opens the directory with safefile and reads the file below it. A later swap
+// of a directory name has no effect. A directory that safefile refuses gives
+// an error that holds the name of the failed part. safefile refuses a link at
+// the name, and a file with another owner or with a group or other bit. It
+// refuses a file that changes in size while it is read. The head file is in the
+// log directory itself.
 func (s *Store) readFile(name string, n int) ([]byte, error) {
 	r := s.dir
 	if d := path.Dir(name); d != "." {
 		sub, err := safefile.OpenRoot(s.dir, d, dirRule)
 		if err != nil {
-			return nil, dirReason(err)
+			return nil, dirFailure(s.dir, d, err)
 		}
 		defer sub.Close()
 		r = sub
@@ -1124,6 +1137,8 @@ func fileRule(err error) string {
 		return ruleTooMany
 	case errors.Is(err, errLink):
 		return ruleLink
+	case errors.Is(err, safefile.ErrSymlink):
+		return ruleFileLink
 	}
 	return ruleRead
 }

@@ -1107,7 +1107,7 @@ func TestTU07OpenSyncsSharedParentsOnce(t *testing.T) {
 	}})
 	openStore(t, state)
 	// Open calls fsync on the log directory two times: for the tree head and
-	// for the tidy. The two calls had two different names before.
+	// for the tidy.
 	logDir := filepath.Join(dir, "tlog")
 	for name, n := range counts {
 		want := 1

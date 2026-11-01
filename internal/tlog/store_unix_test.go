@@ -82,7 +82,7 @@ func TestTS13TileSymlinkOutOfStateDirectory(t *testing.T) {
 	mustNil(t, os.WriteFile(outside, good, 0o644))
 	linkOut(t, dir, tile.Path(), outside)
 	before := outsideFiles(t, dir)
-	if e := openErr(t, state, ruleRead); e.Name != tile.Path() {
+	if e := openErr(t, state, ruleFileLink); e.Name != tile.Path() {
 		t.Fatalf("name %q", e.Name)
 	}
 
@@ -97,7 +97,7 @@ func TestTS13TileSymlinkOutOfStateDirectory(t *testing.T) {
 	s := &Store{dir: sub, written: map[tlog.Tile]int{}}
 	defer s.Close()
 	var e *Error
-	if err := s.WriteTile(wide, l.tileData(wide)); !errors.As(err, &e) || e.Rule != ruleRead || e.Name != wide.Path() {
+	if err := s.WriteTile(wide, l.tileData(wide)); !errors.As(err, &e) || e.Rule != ruleFileLink || e.Name != wide.Path() {
 		t.Fatalf("write: %v", err)
 	}
 	if _, err := os.Lstat(created); !errors.Is(err, fs.ErrNotExist) {
@@ -339,7 +339,7 @@ func TestTS13HeadSymlinkOutOfStateDirectory(t *testing.T) {
 	mustNil(t, os.WriteFile(outside, good, fileMode))
 	linkOut(t, dir, headName, outside)
 	before := outsideFiles(t, dir)
-	if e := openErr(t, state, ruleRead); e.Name != headName {
+	if e := openErr(t, state, ruleFileLink); e.Name != headName {
 		t.Fatalf("name %q", e.Name)
 	}
 	if now, _ := os.ReadFile(outside); !bytes.Equal(now, good) || outsideFiles(t, dir) != before {
@@ -377,8 +377,65 @@ func TestTS13TileDirectoryWithGroupOrOtherBitsIsAnError(t *testing.T) {
 		for _, mode := range []os.FileMode{0o777, 0o750, 0o705} {
 			state, dir := committedLog(t, 3)
 			mustNil(t, os.Chmod(filepath.Join(dir, "tlog", name), mode))
-			openErr(t, state, ruleMode)
+			if e := openErr(t, state, ruleMode); e.Name != name {
+				t.Fatalf("mode %o: name %q, want %q", mode, e.Name, name)
+			}
 		}
+	}
+}
+
+// wantError fails the test if err is not an *Error with the rule and the name.
+func wantError(t *testing.T, err error, rule, name string) {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != rule || e.Name != name {
+		t.Fatalf("error %v, want rule %q for %q", err, rule, name)
+	}
+}
+
+// T-S-13: a tile directory that gets a group or other bit after Open gives the
+// mode rule with the name of the directory. The log stops.
+func TestTS13TileDirectoryModeChangeAfterOpenStopsTheLog(t *testing.T) {
+	withoutSync(t)
+	l, file, _ := tileLog(t, 600, "tile/8/0/000")
+	mustNil(t, os.Chmod(filepath.Dir(file), 0o750))
+	_, first := l.ProveInclusion(5, 600)
+	wantError(t, first, ruleMode, "tile/8/0")
+	if _, err := l.Append(testEvent(600)); err != first {
+		t.Fatalf("append: error %v, want %v", err, first)
+	}
+}
+
+// T-S-13: a directory of a tile path that another directory replaces during
+// the walk gives the link rule with the name of the directory.
+func TestTS13TileDirectoryReplacedDuringTheWalkIsALink(t *testing.T) {
+	withoutSync(t)
+	l, file, _ := tileLog(t, 600, "tile/8/0/002.p/88")
+	dir := filepath.Dir(file)
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: changeAt("002.p", func() {
+		if err := os.Rename(dir, dir+".old"); err != nil {
+			t.Error(err)
+		} else if err := os.Mkdir(dir, dirMode); err != nil {
+			t.Error(err)
+		}
+	})})
+	_, err := l.RootAt(600)
+	wantError(t, err, ruleLink, "tile/8/0/002.p")
+}
+
+// T-S-13: a link at another temporary name of a tile, which a process plants
+// after Open, makes WriteTile fail before it writes the new file.
+func TestTS13WriteTileRefusesLinkAtAnotherTemporaryName(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	s := openStore(t, state)
+	var l testLog
+	l.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	const tmp = "tile/8/0/000.p/9.tmp"
+	mustNil(t, os.Symlink("3", filepath.Join(dir, "tlog", tmp)))
+	wantError(t, s.WriteTile(wide, l.tileData(wide)), ruleFileLink, tmp)
+	if _, err := os.Lstat(filepath.Join(dir, "tlog", wide.Path())); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("WriteTile wrote the new file: %v", err)
 	}
 }
 
@@ -680,7 +737,7 @@ func TestTS13TileLinkInsideLogDirectoryStopsTheLog(t *testing.T) {
 			mustNil(t, os.Rename(file, file+".real"))
 			mustNil(t, os.Symlink(target, file))
 			proof, first := l.ProveInclusion(5, 600)
-			e := wantTileError(t, len(proof), first, ruleRead)
+			e := wantTileError(t, len(proof), first, ruleFileLink)
 			if e.Name != "tile/8/0/000" {
 				t.Fatalf("name %q", e.Name)
 			}
@@ -689,13 +746,15 @@ func TestTS13TileLinkInsideLogDirectoryStopsTheLog(t *testing.T) {
 			}
 		})
 	}
-	// Open reads the partial tile of a log of 3 leaves.
-	state, dir := committedLog(t, 3)
-	file := filepath.Join(dir, "tlog", "tile/8/0/000.p/3")
-	mustNil(t, os.Rename(file, file+".real"))
-	mustNil(t, os.Symlink("3.real", file))
-	if e := openErr(t, state, ruleRead); e.Name != "tile/8/0/000.p/3" {
-		t.Fatalf("name %q", e.Name)
+	// Open reads the partial tile of a log of 3 leaves, and the head.
+	for _, name := range []string{"tile/8/0/000.p/3", headName} {
+		state, dir := committedLog(t, 3)
+		file := filepath.Join(dir, "tlog", name)
+		mustNil(t, os.Rename(file, file+".real"))
+		mustNil(t, os.Symlink(filepath.Base(name)+".real", file))
+		if e := openErr(t, state, ruleFileLink); e.Name != name {
+			t.Fatalf("name %q", e.Name)
+		}
 	}
 }
 
@@ -705,23 +764,28 @@ func TestTS13TileLinkInsideLogDirectoryStopsTheLog(t *testing.T) {
 func TestTS13OpenRefusesLinkBeyondTheHead(t *testing.T) {
 	tile := tlog.Tile{H: TileHeight, L: 0, N: 1500}
 	full, part := tilePath(tile, fullWidth), func(w int) string { return tilePath(tile, w) }
-	for _, c := range []struct{ name, link, keep string }{
-		{"full name", full, ""},
-		{"partial name", part(10), part(44)},
-		{"partial temporary name", part(44) + tmpSuffix, part(44)},
-		{"full temporary name", full + tmpSuffix, ""},
+	for _, c := range []struct{ name, link, keep, to string }{
+		{"full name", full, "", "zzz"},
+		{"partial name", part(10), part(44), "zzz"},
+		{"partial temporary name", part(44) + tmpSuffix, part(44), "zzz"},
+		{"full temporary name", full + tmpSuffix, "", "zzz"},
+		{"link to a file of the same directory", part(44), "", part(45)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state, dir := committedLog(t, 3)
-			plantFile(t, dir, "zzz", fullWidth*tlog.HashSize)
+			size := fullWidth * tlog.HashSize
+			if c.to != "zzz" {
+				size = 45 * tlog.HashSize // the size that its own name wants
+			}
+			plantFile(t, dir, c.to, size)
 			if c.keep != "" {
 				plantFile(t, dir, c.keep, 44*tlog.HashSize)
 			}
-			linkOut(t, dir, c.link, filepath.Join(dir, "tlog", "zzz"))
-			if e := openErr(t, state, ruleRead); e.Name != c.link {
+			linkOut(t, dir, c.link, filepath.Join(dir, "tlog", c.to))
+			if e := openErr(t, state, ruleFileLink); e.Name != c.link {
 				t.Fatalf("name %q", e.Name)
 			}
-			for _, name := range []string{"zzz", c.keep, c.link} {
+			for _, name := range []string{c.to, c.keep, c.link} {
 				if name == "" {
 					continue
 				}
@@ -733,24 +797,18 @@ func TestTS13OpenRefusesLinkBeyondTheHead(t *testing.T) {
 	}
 }
 
-// changeTile runs change one time, after safefile opens the file or checks it.
-func changeTile(t *testing.T, step, base string, change func()) {
-	t.Helper()
+// changeAt returns a hook that runs change one time, for the name base.
+func changeAt(base string, change func()) func(string) {
 	var done bool
-	run := func(name string) {
+	return func(name string) {
 		if name == base && !done {
 			done = true
 			change()
 		}
 	}
-	h := safefiletest.Hooks{AfterOpen: run}
-	if step == "AfterCheck" {
-		h = safefiletest.Hooks{AfterCheck: run}
-	}
-	safefiletest.Set(t, h)
 }
 
-// growFile appends one byte to file. shrinkFile cuts file to 10 bytes.
+// growFile appends one byte to file.
 func growFile(t *testing.T, file string) {
 	t.Helper()
 	f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
@@ -764,6 +822,7 @@ func growFile(t *testing.T, file string) {
 	}
 }
 
+// shrinkFile cuts file to 10 bytes.
 func shrinkFile(t *testing.T, file string) {
 	t.Helper()
 	if err := os.Truncate(file, 10); err != nil {
@@ -771,64 +830,43 @@ func shrinkFile(t *testing.T, file string) {
 	}
 }
 
-// T-S-13: a tile or the head that grows or shrinks after the open and before
-// the size check is refused. The change is in the AfterOpen hook, so the size
-// check sees the new size. This is not a change during the read.
-func TestTS13OpenRefusesFileThatChangesSizeBeforeTheSizeCheck(t *testing.T) {
-	for _, c := range []struct {
-		name, file, rule string
-		change           func(*testing.T, string)
-	}{
-		{"tile grows", "tile/8/0/000.p/3", ruleLength, growFile},
-		{"tile shrinks", "tile/8/0/000.p/3", ruleLength, shrinkFile},
-		{"head grows", headName, ruleHead, growFile},
-		{"head shrinks", headName, ruleHead, shrinkFile},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			state, dir := committedLog(t, 3)
-			file := filepath.Join(dir, "tlog", c.file)
-			changeTile(t, "AfterOpen", filepath.Base(c.file), func() { c.change(t, file) })
-			if e := openErr(t, state, c.rule); e.Name != c.file {
-				t.Fatalf("name %q", e.Name)
-			}
-		})
-	}
-}
-
-// T-S-13: a tile or the head that grows or shrinks during the read is refused.
-// The change is in the OtherOwner hook, after the size check and before the
-// read. A tile that grew gives the length rule. A head that grew gives the
-// rule of a head that is not valid. A tile or head that shrank gives the
+// T-S-13: a tile or the head that grows or shrinks is refused. The AfterOpen
+// hook changes it before the fstat, so the size check sees the new size. The
+// OtherOwner hook changes it after the fstat records the size, before the size
+// check and the read. A tile that grew gives the length rule. A head that grew
+// gives the head rule. A tile or head that shrank in the read gives the
 // changed rule.
-func TestTS13OpenRefusesFileThatChangesSizeDuringTheRead(t *testing.T) {
+func TestTS13OpenRefusesFileThatChangesSize(t *testing.T) {
 	for _, c := range []struct {
-		name, file, rule string
-		change           func(*testing.T, string)
+		name, file, open, read string
+		change                 func(*testing.T, string)
 	}{
-		{"tile grows", "tile/8/0/000.p/3", ruleLength, growFile},
-		{"tile shrinks", "tile/8/0/000.p/3", ruleChanged, shrinkFile},
-		{"head grows", headName, ruleHead, growFile},
-		{"head shrinks", headName, ruleChanged, shrinkFile},
+		{"tile grows", "tile/8/0/000.p/3", ruleLength, ruleLength, growFile},
+		{"tile shrinks", "tile/8/0/000.p/3", ruleLength, ruleChanged, shrinkFile},
+		{"head grows", headName, ruleHead, ruleHead, growFile},
+		{"head shrinks", headName, ruleHead, ruleChanged, shrinkFile},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			state, dir := committedLog(t, 3)
-			file := filepath.Join(dir, "tlog", c.file)
-			is := otherOwner(t, file)
-			var done bool
-			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool {
-				if is(id) && !done {
-					done = true
-					c.change(t, file)
+		for _, when := range []string{"before the size check", "during the read"} {
+			t.Run(c.name+" "+when, func(t *testing.T) {
+				state, dir := committedLog(t, 3)
+				file, base := filepath.Join(dir, "tlog", c.file), filepath.Base(c.file)
+				run := changeAt(base, func() { c.change(t, file) })
+				h, rule := safefiletest.Hooks{AfterOpen: run}, c.open
+				if when == "during the read" {
+					is := otherOwner(t, file)
+					h, rule = safefiletest.Hooks{OtherOwner: func(id safefile.FileID) bool {
+						if is(id) {
+							run(base)
+						}
+						return false
+					}}, c.read
 				}
-				return false
-			}})
-			if e := openErr(t, state, c.rule); e.Name != c.file {
-				t.Fatalf("name %q", e.Name)
-			}
-			if !done {
-				t.Fatal("the hook did not run")
-			}
-		})
+				safefiletest.Set(t, h)
+				if e := openErr(t, state, rule); e.Name != c.file {
+					t.Fatalf("name %q", e.Name)
+				}
+			})
+		}
 	}
 }
 
@@ -840,13 +878,13 @@ func TestTS13OpenRefusesTileReplacedAfterTheCheck(t *testing.T) {
 	file := filepath.Join(dir, "tlog", name)
 	b, err := os.ReadFile(file)
 	mustNil(t, err)
-	changeTile(t, "AfterCheck", "3", func() {
+	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: changeAt("3", func() {
 		if err := os.WriteFile(file+".new", b, fileMode); err != nil {
 			t.Error(err)
 		} else if err := os.Rename(file+".new", file); err != nil {
 			t.Error(err)
 		}
-	})
+	})})
 	if e := openErr(t, state, ruleChanged); e.Name != name {
 		t.Fatalf("name %q", e.Name)
 	}

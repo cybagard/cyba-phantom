@@ -746,7 +746,7 @@ func TestTS13_NoteGoneAfterLstat(t *testing.T) {
 	})
 }
 
-// T-S-13: a note that goes before the Lstat gives the same error.
+// T-S-13: a note that is removed before the Lstat gives the same error.
 func TestTS13_NoteGoneBeforeLstat(t *testing.T) {
 	noteGone(t, func(remove func(string)) safefiletest.Hooks {
 		return safefiletest.Hooks{BeforeCheck: remove}

@@ -459,7 +459,7 @@ func TestTS13TileLinkOutOfTheStateDirectoryGivesAnErrorNotAProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			n, err := c.run(l)
-			if e := wantTileError(t, n, err, ruleRead); e.Name != c.tile {
+			if e := wantTileError(t, n, err, ruleFileLink); e.Name != c.tile {
 				t.Fatalf("name %q, want %q", e.Name, c.tile)
 			}
 			if after, err := os.ReadFile(outside); err != nil || !bytes.Equal(after, b) {
