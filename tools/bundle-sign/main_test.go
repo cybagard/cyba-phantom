@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/hpke"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
@@ -68,6 +71,19 @@ func write(t *testing.T, path, text string, mode os.FileMode) {
 	}
 }
 
+// packBundle packs a bundle with a valid manifest of key ID k1. verify reads
+// the manifest, so its archive must be a real bundle.
+func packBundle(t *testing.T, dir, out string) {
+	t.Helper()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(src, "manifest.json"), `{"version":"2026.10.01-1","min_engine":"1.0.0",`+
+		`"created":"2026-10-01T00:00:00Z","expires":"2027-01-01T00:00:00Z","key_id":"k1"}`, 0o644)
+	runOK(t, "pack", src, out)
+}
+
 // failWriter is a writer that always fails.
 type failWriter struct{}
 
@@ -77,7 +93,7 @@ func (failWriter) Write([]byte) (int, error) { return 0, errors.New("raw write e
 func TestTS20RoundTrip(t *testing.T) {
 	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
-	write(t, p("a.cbnd"), "archive bytes", 0o644)
+	packBundle(t, dir, p("a.cbnd"))
 	var trust []string
 	for _, id := range []string{"k1", "k2"} {
 		line := runOK(t, "keygen", id, p(id+".key"))
@@ -105,7 +121,9 @@ func TestTS20RoundTrip(t *testing.T) {
 	runFail(t, 1, errWrite, "keygen", "k3", p("k1.key"))
 	runFail(t, 2, errUsage, "sign", "k1")
 	for _, line := range []string{"bundle-sign keygen <key_id> <key-file>", "bundle-sign pack <dir> <out.cbnd>",
-		"bundle-sign sign <key_id> <key-file> <archive> <out.sig>", "bundle-sign verify <trust-file> <archive> <sig-file>"} {
+		"bundle-sign sign <key_id> <key-file> <archive> <out.sig>",
+		"bundle-sign cosign <key_id> <key-file> <archive> <sig-file> <out.sig>",
+		"bundle-sign seal <install.pub> <version> <key_id> <out-file>", "bundle-sign verify <trust-file> <archive> <sig-file>"} {
 		if !strings.Contains(errUsage.Error(), line) {
 			t.Errorf("usage text lacks %q", line)
 		}
@@ -196,7 +214,7 @@ func TestTS20KeygenNullOutput(t *testing.T) {
 func TestTS20BrokenPipe(t *testing.T) {
 	dir := tempDir(t)
 	p := func(n string) string { return filepath.Join(dir, n) }
-	write(t, p("a.cbnd"), "archive", 0o644)
+	packBundle(t, dir, p("a.cbnd"))
 	trust := runOK(t, "keygen", "k1", p("k.key"))
 	write(t, p("trust"), trust, 0o644)
 	runOK(t, "sign", "k1", p("k.key"), p("a.cbnd"), p("a.sig"))
@@ -610,5 +628,191 @@ func TestTS20WriteNewFailure(t *testing.T) {
 		if fi, err := os.Stat(path(n)); err != nil || fi.Size() != 0 {
 			t.Errorf("%s: file %v, error %v; want size 0", n, fi, err)
 		}
+	}
+}
+
+const testVersion = "2026.10.01-1"
+
+// rig is a state directory with an install key, and a work directory.
+type rig struct {
+	t       *testing.T
+	dir     string
+	state   string
+	root    *os.Root
+	install hpke.PrivateKey
+}
+
+func newRig(t *testing.T) *rig {
+	t.Helper()
+	state := t.TempDir()
+	for _, d := range []string{"bundle", "keys", "tlog"} {
+		if err := os.Mkdir(filepath.Join(state, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	key, err := bundle.LoadOrCreateInstallKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &rig{t, tempDir(t), state, root, key}
+}
+
+func (r *rig) p(name string) string { return filepath.Join(r.dir, name) }
+
+// build seals a seed for sealVer and id, and packs it with a manifest.
+func (r *rig) build(name, rotation, id, sealVer string) {
+	r.t.Helper()
+	src := r.p(name + ".d")
+	if err := os.MkdirAll(filepath.Join(src, "secrets"), 0o755); err != nil {
+		r.t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	const stamp = "2006-01-02T15:04:05Z"
+	manifest := fmt.Sprintf(`{"version":%q,"min_engine":"1.0.0","created":%q,"expires":%q,"key_id":%q%s}`,
+		testVersion, now.Add(-time.Hour).Format(stamp), now.Add(24*time.Hour).Format(stamp), id, rotation)
+	write(r.t, filepath.Join(src, "manifest.json"), manifest, 0o644)
+	pub := filepath.Join(r.state, "keys", "install.pub")
+	runOK(r.t, "seal", pub, sealVer, id, filepath.Join(src, "secrets", "token.key"))
+	runOK(r.t, "pack", src, r.p(name+".cbnd"))
+}
+
+// load copies the files into the bundle directory with mode 0600. Then it
+// loads them with the trust lines and the install key.
+func (r *rig) load(key hpke.PrivateKey, archive, sig string, lines ...string) (*bundle.Bundle, error) {
+	r.t.Helper()
+	var trust bundle.TrustSet
+	for _, l := range lines {
+		id, pub, ok := bundle.ParseKeyLine(strings.TrimSpace(l))
+		if !ok {
+			r.t.Fatalf("trust line %q", l)
+		}
+		trust = append(trust, bundle.TrustKey{KeyID: id, PublicKey: pub, Class: bundle.ClassProprietary})
+	}
+	for ext, from := range map[string]string{".cbnd": archive, ".sig": sig} {
+		b, err := os.ReadFile(from)
+		if err == nil {
+			err = os.WriteFile(filepath.Join(r.state, "bundle", "current"+ext), b, 0o600)
+		}
+		if err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	return bundle.NewLoader(r.root, "bundle/current.cbnd", trust, key).Load(true)
+}
+
+// T-S-20: sign with the old key, then cosign with the new key. The loader
+// accepts the file for a transition bundle. verify accepts it with the old
+// key. verify refuses the one-line file.
+func TestTS20CosignTransition(t *testing.T) {
+	r := newRig(t)
+	oldLine := runOK(t, "keygen", "k1", r.p("old.key"))
+	newLine := runOK(t, "keygen", "k2", r.p("new.key"))
+	r.build("t", `,"rotation":{"from":"k1","key":"`+strings.Fields(newLine)[1]+`"}`, "k2", testVersion)
+	runOK(t, "sign", "k1", r.p("old.key"), r.p("t.cbnd"), r.p("one.sig"))
+	runOK(t, "cosign", "k2", r.p("new.key"), r.p("t.cbnd"), r.p("one.sig"), r.p("two.sig"))
+	b, err := r.load(r.install, r.p("t.cbnd"), r.p("two.sig"), oldLine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := b.Manifest(); m.KeyID != "k2" {
+		t.Errorf("loaded key ID %q", m.KeyID)
+	}
+	write(t, r.p("trust"), oldLine, 0o644)
+	if got := runOK(t, "verify", r.p("trust"), r.p("t.cbnd"), r.p("two.sig")); got != "valid: k1 k2\n" {
+		t.Errorf("verify: %q", got)
+	}
+	runFail(t, 1, errVerify, "verify", r.p("trust"), r.p("t.cbnd"), r.p("one.sig"))
+}
+
+// T-S-20: cosign refuses a key file with a group or other bit. It refuses a
+// signature file of two lines or of a wrong form. It refuses a key ID that is
+// in the file. It makes no output file.
+func TestTS20CosignRefusals(t *testing.T) {
+	r := newRig(t)
+	write(t, r.p("a.cbnd"), "archive", 0o644)
+	for _, id := range []string{"k1", "k2", "k3"} {
+		runOK(t, "keygen", id, r.p(id+".key"))
+	}
+	runOK(t, "sign", "k1", r.p("k1.key"), r.p("a.cbnd"), r.p("one.sig"))
+	runOK(t, "sign", "k2", r.p("k2.key"), r.p("a.cbnd"), r.p("two.sig"))
+	one, _ := os.ReadFile(r.p("one.sig"))
+	two, _ := os.ReadFile(r.p("two.sig"))
+	write(t, r.p("both.sig"), string(one)+string(two), 0o644)
+	write(t, r.p("bad.sig"), "junk\n", 0o644)
+	key, _ := os.ReadFile(r.p("k3.key"))
+	write(t, r.p("m640.key"), string(key), 0o640)
+	write(t, r.p("m604.key"), string(key), 0o604)
+	for _, c := range []struct {
+		name, id, key, sig string
+		err                error
+	}{
+		{"mode 0640", "k3", "m640.key", "one.sig", errKey},
+		{"mode 0604", "k3", "m604.key", "one.sig", errKey},
+		{"two lines", "k3", "k3.key", "both.sig", errSig},
+		{"key ID in the file", "k1", "k1.key", "one.sig", errKeyID},
+		{"bad file", "k3", "k3.key", "bad.sig", errSig},
+		{"no file", "k3", "k3.key", "none.sig", errRead},
+	} {
+		runFail(t, 1, c.err, "cosign", c.id, r.p(c.key), r.p("a.cbnd"), r.p(c.sig), r.p("out.sig"))
+		noFile(t, r.p("out.sig"))
+	}
+}
+
+// T-S-20: a seed that seal writes opens with the install key of the sensor.
+// It gives seed_invalid for another install key and for another version.
+func TestTS20SealOpensWithInstallKey(t *testing.T) {
+	r := newRig(t)
+	line := runOK(t, "keygen", "k1", r.p("k.key"))
+	r.build("a", "", "k1", testVersion)
+	r.build("v", "", "k1", "2026.10.01-2")
+	for _, n := range []string{"a", "v"} {
+		runOK(t, "sign", "k1", r.p("k.key"), r.p(n+".cbnd"), r.p(n+".sig"))
+	}
+	for name, c := range map[string]struct {
+		key     hpke.PrivateKey
+		archive string
+	}{"other install key": {newRig(t).install, "a"}, "other version": {r.install, "v"}} {
+		_, err := r.load(c.key, r.p(c.archive+".cbnd"), r.p(c.archive+".sig"), line)
+		if code, ok := bundle.CodeOf(err); !ok || code != bundle.CodeSeedInvalid {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := r.load(r.install, r.p("a.cbnd"), r.p("a.sig"), line); err != nil {
+		t.Errorf("install key of the sensor: %v", err)
+	}
+}
+
+// T-S-20: seal refuses a public key file of a wrong form. It refuses a version
+// or key ID that is not valid. It makes no output file.
+func TestTS20SealRefusals(t *testing.T) {
+	r := newRig(t)
+	good, _ := os.ReadFile(filepath.Join(r.state, "keys", "install.pub"))
+	enc := strings.TrimSuffix(string(good), "\n")
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	// The last base64 character has two unused bits. Set one of them.
+	loose := enc[:42] + string(alphabet[strings.IndexByte(alphabet, enc[42])^1]) + "="
+	for _, c := range []struct {
+		name, pub, version, id string
+		err                    error
+	}{
+		{"not canonical", loose + "\n", testVersion, "k1", errKey},
+		{"short key", b64.EncodeToString(make([]byte, 31)) + "\n", testVersion, "k1", errKey},
+		{"no newline", enc, testVersion, "k1", errKey},
+		{"version", enc + "\n", "2026.10.01", "k1", errSeal},
+		{"key ID", enc + "\n", testVersion, "K1", errSeal},
+		{"no file", "", testVersion, "k1", errRead},
+	} {
+		pub := r.p("pub")
+		_ = os.Remove(pub)
+		if c.pub != "" {
+			write(t, pub, c.pub, 0o644)
+		}
+		runFail(t, 1, c.err, "seal", pub, c.version, c.id, r.p("out.key"))
+		noFile(t, r.p("out.key"))
 	}
 }

@@ -5,6 +5,8 @@
 //	bundle-sign keygen <key_id> <key-file>
 //	bundle-sign pack <dir> <out.cbnd>
 //	bundle-sign sign <key_id> <key-file> <archive> <out.sig>
+//	bundle-sign cosign <key_id> <key-file> <archive> <sig-file> <out.sig>
+//	bundle-sign seal <install.pub> <version> <key_id> <out-file>
 //	bundle-sign verify <trust-file> <archive> <sig-file>
 //
 // keygen makes a private key file with mode 0600. The file holds one line:
@@ -27,9 +29,23 @@
 // directories of the key file. Each must belong to the effective user or root.
 // Each must have no group or other write bit. keygen and sign make the key
 // path absolute and clean it as text first. So "lnk/.." names the directory
-// that holds lnk, and a trailing "/" has no effect. verify calls
-// bundle.VerifySig with the keys of the trust file. It does not check the
-// manifest key ID. It prints the key IDs of the valid lines.
+// that holds lnk, and a trailing "/" has no effect.
+//
+// cosign adds the second line of a transition bundle. sig-file must hold
+// exactly one valid line, and key_id must not be the key ID of that line.
+// cosign makes the new line like sign, with the same key file rules. It writes
+// the old line and the new line to out.sig.
+//
+// seal makes the file secrets/token.key for a proprietary bundle. install.pub
+// is the public key file of the sensor: canonical base64 of 32 bytes and a
+// newline. version and key_id are the values of the manifest. The seed is made
+// in bundle.SealSeed. The tool never holds it and never prints it. A seal for
+// one version or key ID does not open in a bundle of another.
+//
+// verify calls bundle.CheckSigned with the keys of the trust file, the check
+// of the loader. A transition bundle needs the line of a key of the trust file
+// and the line of its new key. Another bundle needs a valid line of its
+// manifest key ID. verify prints the key IDs that verified.
 //
 // After a failed write or file sync, the tool tries to cut the output file to
 // size 0. After a failed close, or a failed open, sync or close of the
@@ -74,8 +90,12 @@ var (
   bundle-sign keygen <key_id> <key-file>
   bundle-sign pack <dir> <out.cbnd>
   bundle-sign sign <key_id> <key-file> <archive> <out.sig>
+  bundle-sign cosign <key_id> <key-file> <archive> <sig-file> <out.sig>
+  bundle-sign seal <install.pub> <version> <key_id> <out-file>
   bundle-sign verify <trust-file> <archive> <sig-file>`)
 	errKeyID  = errors.New("bundle-sign: key ID is not valid")
+	errSig    = errors.New("bundle-sign: signature file is not valid")
+	errSeal   = errors.New("bundle-sign: version, key ID or install key is not valid")
 	errKey    = errors.New("bundle-sign: key file is not usable")
 	errRead   = errors.New("bundle-sign: cannot read an input file")
 	errWrite  = errors.New("bundle-sign: cannot write the output file")
@@ -98,7 +118,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cmds := map[string]struct {
 		n  int
 		do func(a []string, out io.Writer) error
-	}{"keygen": {2, keygen}, "pack": {2, pack}, "sign": {4, sign}, "verify": {3, verify}}
+	}{"keygen": {2, keygen}, "pack": {2, pack}, "sign": {4, sign},
+		"cosign": {5, cosign}, "seal": {4, seal}, "verify": {3, verify}}
 	err := errUsage
 	if len(args) > 0 {
 		if c, ok := cmds[args[0]]; ok && len(args) == c.n+1 {
@@ -284,6 +305,45 @@ func sign(a []string, _ io.Writer) error {
 	return err
 }
 
+func cosign(a []string, _ io.Writer) error {
+	prev, err := readFile(a[3], maxSig, false, errRead)
+	if err != nil {
+		return err
+	}
+	ids, ok := bundle.SigKeyIDs(prev)
+	if !ok || len(ids) != 1 {
+		return errSig
+	}
+	if ids[0] == a[0] {
+		return errKeyID
+	}
+	line, err := signLine(a[0], a[1], a[2])
+	if err != nil {
+		return err
+	}
+	return writeNew(a[4], append(prev, line...), 0o644)
+}
+
+// seal reads the install public key. The text is the canonical base64 of 32
+// bytes and a newline. bundle.SealSeed makes the seed and seals it, so this
+// tool never holds the seed.
+func seal(a []string, _ io.Writer) error {
+	text, err := readFile(a[0], maxSmall, false, errRead)
+	if err != nil {
+		return err
+	}
+	enc, ok := strings.CutSuffix(string(text), "\n")
+	pub, err := b64.DecodeString(enc)
+	if !ok || err != nil || len(pub) != 32 || b64.EncodeToString(pub) != enc {
+		return errKey
+	}
+	sealed, err := bundle.SealSeed(pub, a[1], a[2])
+	if err != nil {
+		return errSeal
+	}
+	return writeNew(a[3], sealed, 0o644)
+}
+
 func verify(a []string, out io.Writer) error {
 	text, err := readFile(a[0], maxSmall, false, errRead)
 	if err != nil {
@@ -307,7 +367,7 @@ func verify(a []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ids, err := bundle.VerifySig(archive, sig, trust)
+	ids, err := bundle.CheckSigned(archive, sig, trust)
 	if err != nil {
 		return errVerify
 	}

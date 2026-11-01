@@ -370,3 +370,47 @@ func TestTS20SeedMarkers(t *testing.T) {
 	}
 	ikWalk(t, e.state, markers)
 }
+
+// T-S-20: SealSeed makes a seed that hpke.Open opens with the info of this
+// version and key ID. A seed is new at each call. A wrong key, version or
+// key ID does not open it. Each wrong input gives the one error.
+func TestTS20SealSeed(t *testing.T) {
+	k := testInstall(t, 1)
+	pub := k.PublicKey().Bytes()
+	open := func(key hpke.PrivateKey, version, id string, ct []byte) ([]byte, error) {
+		return hpke.Open(key, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), seedInfo(version, id), ct)
+	}
+	ct, err := SealSeed(pub, ver(2), "k1")
+	must(t, err)
+	seed, err := open(k, ver(2), "k1", ct)
+	if err != nil || len(seed) != seedSize {
+		t.Fatalf("open: %d bytes, %v", len(seed), err)
+	}
+	again, err := SealSeed(pub, ver(2), "k1")
+	must(t, err)
+	if seed2, _ := open(k, ver(2), "k1", again); bytes.Equal(seed, seed2) {
+		t.Error("two seals hold the same seed")
+	}
+	for name, f := range map[string]func() ([]byte, error){
+		"version":     func() ([]byte, error) { return open(k, ver(3), "k1", ct) },
+		"key ID":      func() ([]byte, error) { return open(k, ver(2), "k2", ct) },
+		"install key": func() ([]byte, error) { return open(testInstall(t, 2), ver(2), "k1", ct) },
+	} {
+		if got, err := f(); err == nil || got != nil {
+			t.Errorf("%s: other value opens the seed", name)
+		}
+	}
+	for _, c := range []struct {
+		name    string
+		pub     []byte
+		version string
+		id      string
+	}{
+		{"version", pub, "2026.02.30-1", "k1"}, {"key ID", pub, ver(2), "K1"},
+		{"short key", pub[:31], ver(2), "k1"}, {"no key", nil, ver(2), "k1"},
+	} {
+		if got, err := SealSeed(c.pub, c.version, c.id); got != nil || err != ErrSealSeed {
+			t.Errorf("%s: %q, %v", c.name, got, err)
+		}
+	}
+}

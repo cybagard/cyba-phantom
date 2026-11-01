@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"crypto/hpke"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"slices"
@@ -48,6 +49,31 @@ func (seedBytes) GobEncode() ([]byte, error)   { return nil, errors.New("bundle:
 // version and the key ID. A zero byte comes before each part after the label.
 func seedInfo(version, keyID string) []byte {
 	return []byte("phantom-bundle-seed-v1\x00" + version + "\x00" + keyID)
+}
+
+// ErrSealSeed is the error of SealSeed. It holds no byte of an input.
+var ErrSealSeed = errors.New("bundle: seed cannot be sealed")
+
+// SealSeed makes a new random seed and seals it to the install public key.
+// pub is the 32 bytes of an X25519 key (SEC-25). version and keyID are the
+// manifest values of the bundle. It uses the info function of openSeed. So
+// only a bundle of this version and key ID opens the result. The seed never
+// leaves the function. It is not returned, logged or put in an error. The
+// function clears it before it returns. A version, key ID or key that is not
+// valid gives ErrSealSeed.
+func SealSeed(pub []byte, version, keyID string) ([]byte, error) {
+	key, err := installKEM().NewPublicKey(pub)
+	if err != nil || !validVersion(version) || !validKeyID(keyID) {
+		return nil, ErrSealSeed
+	}
+	seed := make([]byte, seedSize)
+	defer clear(seed)
+	_, _ = rand.Read(seed)
+	sealed, err := hpke.Seal(key, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), seedInfo(version, keyID), seed)
+	if err != nil {
+		return nil, ErrSealSeed
+	}
+	return sealed, nil
 }
 
 // openSeed gives the seed of a bundle of this class. A reference bundle holds
