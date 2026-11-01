@@ -212,28 +212,27 @@ func TestTS20SeedPrint(t *testing.T) {
 	if !strings.HasSuffix(text.String(), " msg=m seed=[seed]\n") {
 		t.Errorf("text handler: %q", text.String())
 	}
-	// A loaded Bundle prints its version and SHA-256 for a verb of the list.
-	// A Bundle, a *Bundle and a seedRef print no seed byte under a verb of the
-	// list or %w. This holds in an unexported struct field too.
-	_, l, _, _ := seeded(t, keyOne)
-	b := l.Current()
-	want := fmt.Sprintf("bundle{version:%s sha256:%x}", ver(2), b.SHA256())
-	for _, v := range append(verbs, "%w") {
-		for _, o := range []string{fmt.Sprintf(v, *b), fmt.Sprintf(v, b)} {
-			if v != "%w" && o != want || ikHas(o, seedMarkers(seedA)) {
-				t.Errorf("print of a Bundle with %s: %q", v, o)
+	// A loaded Bundle of each class gives no seed byte in eight forms, under 28
+	// verbs. Under a verb other than %w, %T and %p, a Bundle and a *Bundle print
+	// their version and SHA-256, and a seedRef prints seedText.
+	all := []string{"%v", "%+v", "%#v", "%s", "%q", "%t", "%e", "%E", "%f", "%F", "%g", "%G", "%c", "%U",
+		"%O", "%o", "%b", "%x", "%X", "%d", "%w", "%p", "%T", "%z", "%!", "%10s", "%-8q", "%08v"}
+	for _, k := range []func(*env) rkey{keyOne, keyTwo} {
+		_, l, _, _ := seeded(t, k)
+		b := l.Current()
+		want := fmt.Sprintf("bundle{version:%s sha256:%x}", ver(2), b.SHA256())
+		for _, v := range all {
+			exact := v != "%w" && v != "%T" && v != "%p"
+			forms := []any{*b, b, struct{ b Bundle }{*b}, struct{ b *Bundle }{b}, struct{ B Bundle }{*b},
+				[]Bundle{*b}, []any{b}, &b}
+			for i, f := range forms {
+				if o := fmt.Sprintf(v, f); ikHas(o, seedMarkers(seedA)) || exact && i < 2 && o != want {
+					t.Errorf("print of form %d with %s: %q", i, v, o)
+				}
 			}
-		}
-		for _, o := range []string{
-			fmt.Sprintf(v, struct{ b Bundle }{*b}), fmt.Sprintf(v, struct{ b *Bundle }{b}),
-			fmt.Sprintf(v, *b.seed), fmt.Sprintf(v, b.seed),
-		} {
-			if ikHas(o, seedMarkers(seedA)) {
-				t.Errorf("print with %s: %q", v, o)
+			if o := fmt.Sprintf(v, b.seed); exact && o != seedText {
+				t.Errorf("print of a seedRef with %s: %q", v, o)
 			}
-		}
-		if v != "%w" && fmt.Sprintf(v, b.seed) != seedText {
-			t.Errorf("print of a seedRef with %s: %q", v, fmt.Sprintf(v, b.seed))
 		}
 	}
 	if seedText != "[seed]" {
