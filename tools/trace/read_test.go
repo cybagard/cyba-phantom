@@ -348,6 +348,13 @@ func TestMatrixReadsTheResolvedSpecDir(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != want {
 		t.Errorf("runMatrix: findings %q, err %v, want %q", got, err, want)
 	}
+	writeFile(t, spec, "08-traceability.md", base08)
+	writeFile(t, spec, "07-test-plan.md", strings.ReplaceAll(base07, "\n", "\r\n"))
+	want = "L/../repo/spec/07-test-plan.md: contains CRLF line endings; re-normalize to LF"
+	got, err = runMatrix("L/../repo/spec")
+	if err != nil || len(got) != 1 || got[0] != want {
+		t.Errorf("runMatrix: findings %q, err %v, want %q", got, err, want)
+	}
 	if err := os.Remove(filepath.Join(spec, "01-prd.md")); err != nil {
 		t.Fatal(err)
 	}
@@ -379,6 +386,40 @@ func TestStampReadsAndWritesTheResolvedSpecDir(t *testing.T) {
 		t.Errorf("runStamp check: findings %q, err %v, want the 01-prd.md change", got, err)
 	}
 	wantDecoyUnchanged(t, before, snap())
+}
+
+// An error of --write names the typed argument and the system cause. It
+// holds no part of the resolved path.
+func TestStampWriteErrorNamesTheTypedDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode")
+	}
+	repo, _ := planted(t)
+	spec := filepath.Join(repo, "spec")
+	writeFile(t, spec, "01-prd.md", base01)
+	if err := os.Chmod(spec, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(spec, 0o755) })
+	_, err := runStamp("L/../repo/spec", true)
+	want := "stamp: cannot write L/../repo/spec/manifest.json: permission denied"
+	if err == nil || err.Error() != want {
+		t.Errorf("runStamp: err %v, want %q", err, want)
+	}
+	if err != nil && strings.Contains(err.Error(), filepath.Dir(filepath.Dir(repo))) {
+		t.Errorf("the error holds the resolved path: %v", err)
+	}
+}
+
+// An unreadable directory is an error with the typed name and no path of
+// the resolved directory.
+func TestHashDirErrorNamesTheTypedDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "absent")
+	_, _, _, err := hashDir(dir, "typed/spec")
+	want := `cannot read spec dir "typed/spec": no such file or directory`
+	if err == nil || err.Error() != want {
+		t.Errorf("hashDir: err %v, want %q", err, want)
+	}
 }
 
 // Tests mode reads the spec file, the Makefile and the walk root below

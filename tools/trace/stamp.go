@@ -10,10 +10,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 )
 
@@ -29,17 +31,17 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// hashDir maps every regular file in specDir (except manifest.json) to
-// its SHA-256. Subdirectories are findings: spec/ must be flat. A
+// hashDir maps every regular file in dir (except manifest.json) to its
+// SHA-256. It reads dir, the resolved directory. Errors name specDir, the
+// typed argument. Subdirectories are findings: spec/ must be flat. A
 // non-nil error means the directory itself is unreadable.
-// The dir argument is the resolved directory. Errors print specDir.
 func hashDir(dir, specDir string) (map[string]string, map[string]bool, []string, error) {
 	hashes := map[string]string{}
 	flagged := map[string]bool{} // names that already have a finding
 	var findings []string
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("cannot read spec dir %q: %v", specDir, err)
+		return nil, nil, nil, fmt.Errorf("cannot read spec dir %q%s", specDir, errCause(err))
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -97,7 +99,7 @@ func runStamp(specDir string, write bool) ([]string, error) {
 			return findings, fmt.Errorf("stamp: manifest.json is not a regular file")
 		}
 		if err := writeReplace(target, append(out, '\n')); err != nil {
-			return findings, fmt.Errorf("stamp: cannot write manifest.json: %v", err)
+			return findings, fmt.Errorf("stamp: cannot write %s/manifest.json%s", specDir, errCause(err))
 		}
 		return findings, nil
 	}
@@ -139,6 +141,16 @@ func runStamp(specDir string, write bool) ([]string, error) {
 
 // syncDateRE is the only accepted form of the manifest sync date.
 var syncDateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// errCause returns ": " and the system cause of err, or "" when err has no
+// syscall.Errno. The error text of a file error holds the resolved path.
+func errCause(err error) string {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return ": " + errno.Error()
+	}
+	return ""
+}
 
 // writeReplace writes data to a temp file in the target's directory, then
 // renames it over target. Rename replaces a symlink; it never follows one.

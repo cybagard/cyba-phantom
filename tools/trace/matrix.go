@@ -81,8 +81,8 @@ func loadSpec(path string) (string, []string, error) {
 	return loadSpecAs(path, path)
 }
 
-// loadSpecAs reads the file at readPath. Findings and errors print
-// the name path.
+// loadSpecAs reads the file at readPath. Findings and errors print path, the
+// display name. The read uses readPath only.
 func loadSpecAs(readPath, path string) (string, []string, error) {
 	data, err := readCapped(readPath)
 	if f := readFinding(path, err); f != "" {

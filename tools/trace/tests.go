@@ -423,7 +423,8 @@ func idFromTestName(name string) string {
 // findMarkers reads the marker lines of the Makefile. It returns the IDs
 // that a marker covers. A missing Makefile has no markers. A line with
 // .RECIPEPREFIX is one finding, and then no marker counts. A name built from
-// parts, such as .RECIPE$(E)PREFIX, is not seen.
+// parts, such as .RECIPE$(E)PREFIX, escapes this check. So does a
+// .RECIPEPREFIX set in an included file.
 func findMarkers(path string) (map[string]bool, []string, error) {
 	data, err := readCapped(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -521,18 +522,19 @@ func continues(line string) bool {
 
 // isAssignment reports whether the text after a rule colon has a "=" before
 // any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. Make reads
-// "$" and one more character as a reference, so that character is skipped.
+// "$" and one more character as a reference. isAssignment skips that
+// character outside a reference only.
 func isAssignment(rest string) bool {
 	depth := 0
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {
-		case c == '$' && i+1 < len(rest) && rest[i+1] != '(' && rest[i+1] != '{':
-			i++
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
 			depth++
 		case depth > 0 && (c == ')' || c == '}'):
 			depth--
 		case depth > 0:
+		case c == '$' && i+1 < len(rest):
+			i++
 		case c == ';' || c == '#':
 			return false
 		case c == '=':

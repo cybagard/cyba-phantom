@@ -292,6 +292,11 @@ func TestHasRuleMatchesMake(t *testing.T) {
 		{"dollar between names", "perf: a$;b=1\n", false},
 		{"double dollar then semicolon", "perf: $$;X=1\n", true},
 		{"dollar at the end", "perf: x$\n", true},
+		{"close after dollar in a reference", "perf: $(X$)Y=1\n", false},
+		{"brace close after dollar", "perf: ${X$}Y=1\n", false},
+		{"close after dollar between names", "perf: a$(b$)c=1\n", false},
+		{"close after dollar then name", "perf: $(a$)b=1\n", false},
+		{"double dollar in a reference", "perf: $(a$$)b=1\n", false},
 	} {
 		if got := hasRule(strings.Split(tc.makefile, "\n"), "perf"); got != tc.want {
 			t.Errorf("%s: hasRule(%q) = %v, want %v", tc.name, tc.makefile, got, tc.want)
@@ -838,8 +843,8 @@ func copyRealTree(t *testing.T) string {
 	return copyTree(t, filepath.Join("..", ".."))
 }
 
-// copyTreeHook is nil in production. A test sets it to change the tree
-// after the walk lists a directory. It gets the path of each entry.
+// copyTreeHook is nil unless a test sets it. The hook changes the tree
+// during the walk. It gets the path of each entry before the walk reads it.
 var copyTreeHook func(path string)
 
 // copyTree copies the files of src that tests mode reads into a new
@@ -848,7 +853,15 @@ var copyTreeHook func(path string)
 func copyTree(t *testing.T, src string) string {
 	t.Helper()
 	dst := t.TempDir()
-	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	if err := walkCopy(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	return dst
+}
+
+// walkCopy does the walk of copyTree and returns its error.
+func walkCopy(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if copyTreeHook != nil {
 			copyTreeHook(path)
 		}
@@ -882,10 +895,35 @@ func copyTree(t *testing.T, src string) string {
 		}
 		return os.WriteFile(out, data, 0o644)
 	})
-	if err != nil {
-		t.Fatal(err)
+}
+
+// The walk skips a file that is gone after it lists the file. The walk
+// fails when the root is gone.
+func TestWalkCopyGoneEntries(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "x_test.go", "package x\n")
+	writeFile(t, src, "y_test.go", "package x\n")
+	copyTreeHook = func(path string) {
+		if path == filepath.Join(src, "x_test.go") {
+			if err := os.Remove(path); err != nil {
+				t.Error(err)
+			}
+		}
 	}
-	return dst
+	t.Cleanup(func() { copyTreeHook = nil })
+	dst := t.TempDir()
+	if err := walkCopy(src, dst); err != nil {
+		t.Fatalf("a file that is gone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "y_test.go")); err != nil {
+		t.Errorf("the copy lacks y_test.go: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "x_test.go")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the copy holds x_test.go: err %v", err)
+	}
+	if err := walkCopy(filepath.Join(src, "gone"), t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a root that is gone: err %v, want ErrNotExist", err)
+	}
 }
 
 // A directory that goes away after the walk lists it does not fail the copy.
