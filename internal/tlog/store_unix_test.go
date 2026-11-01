@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -628,5 +629,176 @@ func TestTS13OpenRefusesFileInPlaceOfGroupDirectory(t *testing.T) {
 	const want = "tlog: tile/8/0/x001: path part is not a directory"
 	if e.Name != "tile/8/0/x001" || e.Error() != want {
 		t.Fatalf("got %q, want %q", e.Error(), want)
+	}
+}
+
+// T-S-13: a tile file or the head file with another owner makes Open fail.
+func TestTS13OpenRefusesTileOrHeadWithOtherOwner(t *testing.T) {
+	for _, name := range []string{headName, "tile/8/0/000.p/3"} {
+		t.Run(name, func(t *testing.T) {
+			state, dir := committedLog(t, 3)
+			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: otherOwner(t, filepath.Join(dir, "tlog", name))})
+			if e := openErr(t, state, ruleOwner); e.Name != name {
+				t.Fatalf("name %q", e.Name)
+			}
+		})
+	}
+}
+
+// T-S-13: a tile with another owner that a proof or a root read reads stops the
+// log. Each later call returns the same error.
+func TestTS13TileWithOtherOwnerStopsTheLog(t *testing.T) {
+	withoutSync(t)
+	for _, c := range []struct {
+		name, tile string
+		read       func(l *Log) error
+	}{
+		{"proof", "tile/8/0/000", func(l *Log) error { _, err := l.ProveInclusion(5, 600); return err }},
+		{"root", "tile/8/0/002.p/88", func(l *Log) error { _, err := l.RootAt(600); return err }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, file, _ := tileLog(t, 600, c.tile)
+			safefiletest.Set(t, safefiletest.Hooks{OtherOwner: otherOwner(t, file)})
+			first := c.read(l)
+			wantTileError(t, 0, first, ruleOwner)
+			if _, err := l.Append(testEvent(600)); err != first {
+				t.Fatalf("append: error %v, want %v", err, first)
+			}
+		})
+	}
+}
+
+// T-S-13: a tile name that is a link inside the log directory is refused.
+// This is also true when it points to another tile file. A proof gives the
+// error.
+func TestTS13TileLinkInsideLogDirectoryStopsTheLog(t *testing.T) {
+	withoutSync(t)
+	for _, target := range []string{"000.real", "001"} {
+		t.Run(target, func(t *testing.T) {
+			l, file, _ := tileLog(t, 600, "tile/8/0/000")
+			mustNil(t, os.Rename(file, file+".real"))
+			mustNil(t, os.Symlink(target, file))
+			proof, first := l.ProveInclusion(5, 600)
+			e := wantTileError(t, len(proof), first, ruleRead)
+			if e.Name != "tile/8/0/000" {
+				t.Fatalf("name %q", e.Name)
+			}
+			if _, err := l.Append(testEvent(600)); err != first {
+				t.Fatalf("append: error %v, want %v", err, first)
+			}
+		})
+	}
+	// Open reads the partial tile of a log of 3 leaves.
+	state, dir := committedLog(t, 3)
+	file := filepath.Join(dir, "tlog", "tile/8/0/000.p/3")
+	mustNil(t, os.Rename(file, file+".real"))
+	mustNil(t, os.Symlink("3.real", file))
+	if e := openErr(t, state, ruleRead); e.Name != "tile/8/0/000.p/3" {
+		t.Fatalf("name %q", e.Name)
+	}
+}
+
+// T-S-13: Open refuses a link at a name of the tidy range beyond the tree
+// head. The names are the full name, a partial name, and a temporary name.
+// Open deletes no file. It keeps the link and the stored file of the tile.
+func TestTS13OpenRefusesLinkBeyondTheHead(t *testing.T) {
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 1500}
+	full, part := tilePath(tile, fullWidth), func(w int) string { return tilePath(tile, w) }
+	for _, c := range []struct{ name, link, keep string }{
+		{"full name", full, ""},
+		{"partial name", part(10), part(44)},
+		{"partial temporary name", part(44) + tmpSuffix, part(44)},
+		{"full temporary name", full + tmpSuffix, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := committedLog(t, 3)
+			plantFile(t, dir, "zzz", fullWidth*tlog.HashSize)
+			if c.keep != "" {
+				plantFile(t, dir, c.keep, 44*tlog.HashSize)
+			}
+			linkOut(t, dir, c.link, filepath.Join(dir, "tlog", "zzz"))
+			if e := openErr(t, state, ruleRead); e.Name != c.link {
+				t.Fatalf("name %q", e.Name)
+			}
+			for _, name := range []string{"zzz", c.keep, c.link} {
+				if name == "" {
+					continue
+				}
+				if _, err := os.Lstat(filepath.Join(dir, "tlog", name)); err != nil {
+					t.Errorf("Open deleted %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+// changeTile runs change one time, after safefile opens the file or checks it.
+func changeTile(t *testing.T, step, base string, change func()) {
+	t.Helper()
+	var done bool
+	run := func(name string) {
+		if name == base && !done {
+			done = true
+			change()
+		}
+	}
+	h := safefiletest.Hooks{AfterOpen: run}
+	if step == "AfterCheck" {
+		h = safefiletest.Hooks{AfterCheck: run}
+	}
+	safefiletest.Set(t, h)
+}
+
+// T-S-13: a tile or the head that grows or shrinks during the read is refused
+// with the length rule. The head gives the rule of a head that is not valid.
+func TestTS13OpenRefusesFileThatGrowsOrShrinksDuringTheRead(t *testing.T) {
+	for _, c := range []struct{ name, file, rule string }{
+		{"tile grows", "tile/8/0/000.p/3", ruleLength},
+		{"tile shrinks", "tile/8/0/000.p/3", ruleLength},
+		{"head grows", headName, ruleHead},
+		{"head shrinks", headName, ruleHead},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := committedLog(t, 3)
+			file := filepath.Join(dir, "tlog", c.file)
+			changeTile(t, "AfterOpen", filepath.Base(c.file), func() {
+				if strings.HasSuffix(c.name, "grows") {
+					f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer f.Close()
+					if _, err := f.Write([]byte{1}); err != nil {
+						t.Error(err)
+					}
+				} else if err := os.Truncate(file, 10); err != nil {
+					t.Error(err)
+				}
+			})
+			if e := openErr(t, state, c.rule); e.Name != c.file {
+				t.Fatalf("name %q", e.Name)
+			}
+		})
+	}
+}
+
+// T-S-13: a tile that another file replaces after the check is refused. A
+// rename puts in a new file, so the file has another inode.
+func TestTS13OpenRefusesTileReplacedAfterTheCheck(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	name := "tile/8/0/000.p/3"
+	file := filepath.Join(dir, "tlog", name)
+	b, err := os.ReadFile(file)
+	mustNil(t, err)
+	changeTile(t, "AfterCheck", "3", func() {
+		if err := os.WriteFile(file+".new", b, fileMode); err != nil {
+			t.Error(err)
+		} else if err := os.Rename(file+".new", file); err != nil {
+			t.Error(err)
+		}
+	})
+	if e := openErr(t, state, ruleChanged); e.Name != name {
+		t.Fatalf("name %q", e.Name)
 	}
 }
