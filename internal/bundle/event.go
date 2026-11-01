@@ -49,27 +49,31 @@ type digest struct {
 // hex returns the 64 lower-case hex digits of the digest.
 func (d digest) hex() string { return hex.EncodeToString(d.v[:]) }
 
-// newEvent makes the event of one load. It takes typed values only. These are
-// the kind, the rejection code, the source and the digest. For an accept, they
-// also include the version and key ID that the manifest check accepted. No
-// error text and no member of a rejected manifest goes into the event. The
-// event has no session.
-func newEvent(now event.Clock, kind event.Kind, code Code, src Source, sum digest, version, keyID string) (*event.Event, error) {
-	d := event.Detail{"source": event.Str(src.String())}
+// member is one name and value of a load. The event detail and the log line
+// of the load both hold these members.
+type member struct{ name, value string }
+
+// members gives the members of one load. The values come from the source, the
+// digest, the rejection code, and the accepted bundle b. A nil b with a zero
+// code gives the source and the digest only. No error text and no member of a
+// rejected manifest is in the list.
+func members(src Source, sum digest, b *Bundle, code Code) []member {
+	ms := []member{{"source", src.String()}}
 	if sum.ok {
-		d["sha256"] = event.Str(sum.hex())
+		ms = append(ms, member{"sha256", sum.hex()})
 	}
-	if kind == event.KindBundleRejected {
-		d["reason"] = event.Str(code.String())
-	} else {
-		d["version"], d["key_id"] = event.Str(version), event.Str(keyID)
+	switch {
+	case b != nil:
+		ms = append(ms, member{"version", b.manifest.Version}, member{"key_id", b.manifest.KeyID})
+	case code != 0:
+		ms = append(ms, member{"reason", code.String()})
 	}
-	return event.NewEvent(now, event.Input{Kind: kind, Detail: d})
+	return ms
 }
 
-// SetEvents makes the loader send one event for each load to q. It also writes
-// one log line for each load to log. A nil q sends no event. A nil log writes
-// no line. The log lines have fixed text and typed values only.
+// SetEvents sets the queue and the log of the loader. A nil q sends no event.
+// A nil log writes no line. The log lines have fixed text and typed values
+// only.
 func (l *Loader) SetEvents(q *event.Queue, log *slog.Logger) {
 	loadMu.Lock()
 	defer loadMu.Unlock()
@@ -77,10 +81,13 @@ func (l *Loader) SetEvents(q *event.Queue, log *slog.Logger) {
 }
 
 // LoadFrom is Load for this source. Load(true) is LoadFrom(SourceStart).
-// Load(false) is LoadFrom(SourceReload). Then it sends one bundle_load event
-// for an accept or one bundle_rejected event for a rejection. It also writes
-// one log line. A state fault is no rejection code. It gives a log line and no
-// event. A value that is not a Source reads nothing and gives ErrSource.
+// Load(false) is LoadFrom(SourceReload).
+//
+// When SetEvents gave a queue, LoadFrom sends one bundle_load event for an
+// accept or one bundle_rejected event for a rejection. When SetEvents gave a
+// log, it writes one log line. A state fault is no rejection code. It gives a
+// log line and no event. A value that is not a Source reads nothing and gives
+// ErrSource.
 func (l *Loader) LoadFrom(src Source) (*Bundle, error) {
 	if src < SourceStart || src > SourceFetch {
 		return nil, ErrSource
@@ -95,36 +102,37 @@ func (l *Loader) LoadFrom(src Source) (*Bundle, error) {
 
 // report sends the event and writes the log line of one load.
 func (l *Loader) report(src Source, sum digest, b *Bundle, err error) {
-	attrs := []slog.Attr{slog.String("source", src.String())}
-	if sum.ok {
-		attrs = append(attrs, slog.String("sha256", sum.hex()))
-	}
-	kind, code, version, keyID := event.KindBundleLoad, Code(0), "", ""
-	msg, level := "bundle loaded", slog.LevelInfo
-	if err == nil {
-		version, keyID = b.manifest.Version, b.manifest.KeyID
-		attrs = append(attrs, slog.String("version", version), slog.String("key_id", keyID))
-	} else if c, ok := CodeOf(err); ok {
+	kind, code, msg, level := event.KindBundleLoad, Code(0), "bundle loaded", slog.LevelInfo
+	if err != nil {
+		c, ok := CodeOf(err)
+		if !ok {
+			l.logMembers(slog.LevelError, "bundle state fault", members(src, sum, nil, 0))
+			return
+		}
 		kind, code, msg, level = event.KindBundleRejected, c, "bundle rejected", slog.LevelWarn
-		attrs = append(attrs, slog.String("reason", c.String()))
-	} else {
-		l.logAttrs(slog.LevelError, "bundle state fault", attrs)
-		return
 	}
-	l.logAttrs(level, msg, attrs)
+	ms := members(src, sum, b, code)
+	l.logMembers(level, msg, ms)
 	if l.events == nil {
 		return
 	}
-	e, eerr := newEvent(l.now, kind, code, src, sum, version, keyID)
-	if eerr != nil {
-		l.logAttrs(slog.LevelWarn, "bundle event not made", attrs)
-		return
+	d := make(event.Detail, len(ms))
+	for _, m := range ms {
+		d[m.name] = event.Str(m.value)
 	}
+	// NewEvent cannot fail here: the detail has at most four members, each a
+	// bounded enum, 64 hex digits, or a checked version or key ID.
+	e, _ := event.NewEvent(l.now, event.Input{Kind: kind, Detail: d})
 	l.events.Enqueue(e)
 }
 
-func (l *Loader) logAttrs(level slog.Level, msg string, attrs []slog.Attr) {
-	if l.log != nil {
-		l.log.LogAttrs(context.Background(), level, msg, attrs...)
+func (l *Loader) logMembers(level slog.Level, msg string, ms []member) {
+	if l.log == nil {
+		return
 	}
+	attrs := make([]slog.Attr, len(ms))
+	for i, m := range ms {
+		attrs[i] = slog.String(m.name, m.value)
+	}
+	l.log.LogAttrs(context.Background(), level, msg, attrs...)
 }
