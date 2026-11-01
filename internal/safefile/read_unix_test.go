@@ -108,10 +108,20 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 	if err := os.Truncate(p, big); err != nil {
 		t.Fatal(err)
 	}
+	// This check reads the process-wide TotalAlloc counter. Its bound is
+	// coarse: 4 MiB is far above the noise of other goroutines. The rchar
+	// check below is the exact one. This one finds a buffer sized from the
+	// file size.
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	if _, err := ReadAll(f, fi, capRule); !errors.Is(err, ErrSize) {
+		t.Fatalf("err = %v, want ErrSize", err)
+	}
+	runtime.ReadMemStats(&m1)
+	if d := m1.TotalAlloc - m0.TotalAlloc; d >= big/2 {
+		t.Errorf("ReadAll allocated %d bytes, want less than %d", d, big/2)
+	}
 	if runtime.GOOS != "linux" {
-		if _, err := ReadAll(f, fi, capRule); !errors.Is(err, ErrSize) {
-			t.Fatalf("err = %v, want ErrSize", err)
-		}
 		t.Skip("the read count needs /proc/thread-self/io")
 	}
 	// The rchar line of /proc/thread-self/io counts the bytes that the read
