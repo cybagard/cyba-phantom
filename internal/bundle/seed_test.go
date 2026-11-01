@@ -151,19 +151,19 @@ func TestTS20SeedOpened(t *testing.T) {
 			name = seedPlainName
 		}
 		raw, _ := b.archive.File(name)
-		if _, ok := b.File(name); ok || b.seed == nil || !bytes.Equal(*b.seed, seedA) ||
+		if _, ok := b.File(name); ok || b.seed == nil || !bytes.Equal(*b.seed.p, seedA) ||
 			bytes.Equal(raw, zeros(len(raw))) != (key.id == "k2") {
 			t.Fatalf("%s: seed or entry wrong", key.id)
 		}
-		if &(*b.seed)[0] == &raw[0] {
+		if &(*b.seed.p)[0] == &raw[0] {
 			t.Errorf("%s: the seed is a part of the archive bytes", key.id)
 		}
 		// A swap zeroes the old seed and keeps the new one.
-		old := *b.seed
+		old := *b.seed.p
 		e.putSeeded(key, ver(3), e.good(in, key, ver(3), seedB))
 		nb, err := l.Load(false)
 		must(t, err)
-		if !bytes.Equal(old, zeros(seedSize)) || !bytes.Equal(*nb.seed, seedB) {
+		if !bytes.Equal(old, zeros(seedSize)) || !bytes.Equal(*nb.seed.p, seedB) {
 			t.Errorf("%s: after the swap the old seed %v or the new seed is wrong", key.id, old)
 		}
 	}
@@ -179,7 +179,7 @@ func TestTS20SeedInfo(t *testing.T) {
 	e.putSeeded(keyOne(e), ver(2), sealedEnt(ct))
 	b, err := e.seedLoader(in).Load(false)
 	must(t, err)
-	if !bytes.Equal(*b.seed, seedA) {
+	if !bytes.Equal(*b.seed.p, seedA) {
 		t.Error("the seed differs")
 	}
 }
@@ -189,7 +189,7 @@ func TestTS20SeedInfo(t *testing.T) {
 func TestTS20SeedPrint(t *testing.T) {
 	s := seedBytes(bytes.Clone(seedA))
 	var out []string
-	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%o", "%b", "%c", "%e"}
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%o", "%b", "%c", "%e", "%t", "%U", "%g"}
 	for _, v := range verbs {
 		for _, o := range []string{fmt.Sprintf(v, s), fmt.Sprintf(v, &s)} {
 			if o != seedText {
@@ -212,13 +212,28 @@ func TestTS20SeedPrint(t *testing.T) {
 	if !strings.HasSuffix(text.String(), " msg=m seed=[seed]\n") {
 		t.Errorf("text handler: %q", text.String())
 	}
-	// A loaded Bundle prints no seed byte for a verb of the list or for %w.
+	// A loaded Bundle prints its version and SHA-256 for a verb of the list. A
+	// Bundle, a *Bundle and a seedRef print no seed byte for a verb of the list
+	// or for %w, also in an unexported struct field.
 	_, l, _, _ := seeded(t, keyOne)
+	b := l.Current()
+	want := fmt.Sprintf("bundle{version:%s sha256:%x}", ver(2), b.SHA256())
 	for _, v := range append(verbs, "%w") {
-		for _, o := range []string{fmt.Sprintf(v, *l.Current()), fmt.Sprintf(v, l.Current())} {
-			if ikHas(o, seedMarkers(seedA)) {
+		for _, o := range []string{fmt.Sprintf(v, *b), fmt.Sprintf(v, b)} {
+			if v != "%w" && o != want || ikHas(o, seedMarkers(seedA)) {
 				t.Errorf("print of a Bundle with %s: %q", v, o)
 			}
+		}
+		for _, o := range []string{
+			fmt.Sprintf(v, struct{ b Bundle }{*b}), fmt.Sprintf(v, struct{ b *Bundle }{b}),
+			fmt.Sprintf(v, *b.seed), fmt.Sprintf(v, b.seed),
+		} {
+			if ikHas(o, seedMarkers(seedA)) {
+				t.Errorf("print with %s: %q", v, o)
+			}
+		}
+		if v != "%w" && fmt.Sprintf(v, b.seed) != seedText {
+			t.Errorf("print of a seedRef with %s: %q", v, fmt.Sprintf(v, b.seed))
 		}
 	}
 	if seedText != "[seed]" {
@@ -243,14 +258,14 @@ func seedMarkers(b []byte) []string {
 }
 
 // T-S-20: a reference bundle with a plain seed loads with a nil install key.
-// File gives no entry for a name below secrets/. That holds also for a file
-// there that is not a seed file.
+// File gives no entry for a name below secrets/. This is also true for a file
+// below secrets/ that is not a seed file.
 func TestTS20SeedReference(t *testing.T) {
 	e := newEnv(t)
 	e.putSeeded(keyTwo(e), ver(2), plainEnt(seedA), ent{name: "secrets/a", data: []byte("a")})
 	b, err := e.seedLoader(nil).Load(false)
 	must(t, err)
-	if b.seed == nil || !bytes.Equal(*b.seed, seedA) {
+	if b.seed == nil || !bytes.Equal(*b.seed.p, seedA) {
 		t.Error("the seed differs")
 	}
 	for _, name := range []string{"secrets/a", seedPlainName, seedSealedName} {
@@ -261,9 +276,10 @@ func TestTS20SeedReference(t *testing.T) {
 }
 
 // T-S-20: a candidate that passes the seed step and fails a later step keeps
-// no seed. The blocker is a directory in place of the temporary file, as in
-// TestTS20RotationWriteFails. The rotation-1.cbnd row fails the record write.
-// The check row fails the record check after the record write, as in
+// no seed. The state and rotation-1.cbnd rows put a directory in place of the
+// temporary file, as in TestTS20RotationWriteFails. The state row fails the
+// version-state write. The rotation-1.cbnd row fails the record write. The
+// check row fails the record check after the record write, as in
 // TestTS20RotationRecordCheckFails.
 func TestTS20SeedRejectedCleared(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -313,8 +329,11 @@ func TestTS20SeedRejectedCleared(t *testing.T) {
 			if !bytes.Equal(*opened, zeros(seedSize)) {
 				t.Errorf("the seed of the rejected candidate is %v", opened)
 			}
-			if !bytes.Equal(*l.Current().seed, seedA) {
+			if !bytes.Equal(*l.Current().seed.p, seedA) {
 				t.Error("the running seed changed")
+			}
+			if c.check {
+				e.absent(1)
 			}
 		})
 	}
