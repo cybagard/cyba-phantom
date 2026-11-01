@@ -186,19 +186,19 @@ func TestTS27_CheckFileRules(t *testing.T) {
 		{"root file group write", withRoot(writeFixture(t, d, "r-gw", 0o620)), root, "the CA root file is writable by group"},
 		{"root file 65537 bytes", withRoot(big("r-over", 65537, 0o600)), root, "the CA root file is larger than 64 KiB"},
 		{"root file FIFO", withRoot(fifo), root, "the CA root file is not a regular file"},
-		{"root file below a 0777 directory", withRoot(inOpen), root, "a directory of the CA root file is writable by group or other, or has the wrong owner"},
+		{"root file below a 0777 directory", withRoot(inOpen), root, "a directory of the CA root file is group- or other-writable, or not owned by root or the sensor user"},
 		{"root file missing", withRoot(filepath.Join(d, "missing")), root, "the CA root file cannot be resolved"},
 		{"cert file other write", withCert(writeFixture(t, d, "c-ow", 0o602), goodKey), cert, "the certificate file is writable by other"},
 		{"cert file group write", withCert(writeFixture(t, d, "c-gw", 0o620), goodKey), cert, "the certificate file is writable by group"},
 		{"cert file 65537 bytes", withCert(big("c-over", 65537, 0o600), goodKey), cert, "the certificate file is larger than 64 KiB"},
 		{"cert file FIFO", withCert(fifo, goodKey), cert, "the certificate file is not a regular file"},
-		{"cert file below a 0777 directory", withCert(inOpen, goodKey), cert, "a directory of the certificate file is writable by group or other, or has the wrong owner"},
+		{"cert file below a 0777 directory", withCert(inOpen, goodKey), cert, "a directory of the certificate file is group- or other-writable, or not owned by root or the sensor user"},
 		{"key file other read", withCert(goodCert, writeFixture(t, d, "k-or", 0o644)), key, "the key file is readable by other"},
 		{"key file other write", withCert(goodCert, writeFixture(t, d, "k-ow", 0o602)), key, "the key file is writable by other"},
 		{"key file group write", withCert(goodCert, writeFixture(t, d, "k-gw", 0o620)), key, "the key file is writable by group"},
 		{"key file 65537 bytes", withCert(goodCert, big("k-over", 65537, 0o600)), key, "the key file is larger than 64 KiB"},
 		{"key file FIFO", withCert(goodCert, fifo), key, "the key file is not a regular file"},
-		{"key file below a 0777 directory", withCert(goodCert, inOpen), key, "a directory of the key file is writable by group or other, or has the wrong owner"},
+		{"key file below a 0777 directory", withCert(goodCert, inOpen), key, "a directory of the key file is group- or other-writable, or not owned by root or the sensor user"},
 	}
 	// A symlink to a file of another owner. The hook makes the check see
 	// the target as a file of another owner. The rows run as any user.

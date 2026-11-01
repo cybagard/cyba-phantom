@@ -232,7 +232,7 @@ func TestTS10_CheckFileRules(t *testing.T) {
 		}
 		var so, se strings.Builder
 		code := run([]string{"--check", writeFile(t, validBody(t))}, append(env, "PHANTOM_OPS_BASIC_AUTH_HTPASSWD="+p), &so, &se)
-		const dir = "a directory of the htpasswd file is writable by group or other, or has the wrong owner"
+		const dir = "a directory of the htpasswd file is group- or other-writable, or not owned by root or the sensor user"
 		if code != 1 || !strings.Contains(se.String(), "ops.basic_auth_htpasswd") || !strings.Contains(se.String(), dir) {
 			t.Errorf("exit %d, stderr %q; want exit 1, the key and %q", code, se.String(), dir)
 		}

@@ -1097,7 +1097,7 @@ func checkFile(raw, name string, rule safefile.Rule, noOtherRead bool) string {
 	if err := safefile.CheckPathParents(raw, htpasswdDirRule); err != nil {
 		switch {
 		case errors.Is(err, safefile.ErrOwner), errors.Is(err, safefile.ErrMode):
-			return "a directory of the " + name + " is writable by group or other, or has the wrong owner"
+			return "a directory of the " + name + " is group- or other-writable, or not owned by root or the sensor user"
 		case errors.Is(err, safefile.ErrName):
 			return "the " + name + " is not a regular file"
 		}
