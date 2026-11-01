@@ -178,36 +178,35 @@ type Store struct {
 // refuses a file with a group or other bit. It refuses a file that is not of
 // the exact size of its width. It refuses a file that changes in size while
 // Open reads it. Open does these checks for the files of the tidy range
-// beyond the tree head too. It
-// also refuses a link at a temporary name that the tidy deletes with no read.
-// A later tile read in a proof or in a root read gives the same errors. Then
-// the log stops. Open makes the directory (mode 0700) if it does not exist.
-// The directory must have no group or other permission bits. So must each
-// directory that Open lists. So must
-// each entry of such a listing that is a directory and not a link. Open lists
-// the group directories in the bounded range that is named below. It also lists
-// the .p directories of the tiles that it reads or tidies. It checks only the
-// entries that a listing reads before it returns. It does not list a group
-// directory outside the range. Open reads the tree head and the tiles that the
-// root computation reads. It checks that these tiles give the root of the tree
-// head. Open does not read the other tiles that the tree head covers.
-// Log.RootAt, Log.ProveInclusion and Log.ProveConsistency check each tile that
-// they read against the tree head. Open tidies the tiles that it reads. After a
-// crash, at most one partial file then stays for each of them. Open also tidies
-// the tiles beyond the tree head in a bounded range. For each level, the range
-// starts at the first tile that the tree head does not cover. It ends
-// maxBatchTiles tiles above that tile. A crash can leave such tiles. The number
-// of names that Open reads depends on this bound and not on the size of the
-// log. Open does not list or tidy any other tile. A directory with no tree head
-// must be empty, or hold only the temporary file of the tree head. Open writes
-// a tree head of size 0 for it, before any tile can be written. Open makes the
-// loaded tree head durable. It calls fsync on the log directory and on its
-// parents up to the state directory. It does this before it reads, writes, or
-// deletes any file there. Then it calls fsync on the directories of the tiles
-// that it tidies. It deletes files only after all checks pass and these fsync
-// calls pass. If a check or one of these fsync calls fails, Open returns an
-// error and deletes no file. A delete can fail, or the fsync after the deletes
-// can fail. Then Open returns an error, and some files can be deleted.
+// beyond the tree head too. It also refuses a link at a temporary name that
+// the tidy deletes with no read. A later tile read in a proof or in a root
+// read gives the same errors. Then the log stops. Open makes the directory
+// (mode 0700) if it does not exist. The directory must have no group or other
+// permission bits. So must each directory that Open lists. So must each entry
+// of such a listing that is a directory and not a link. Open lists the group
+// directories in the bounded range that is named below. It also lists the .p
+// directories of the tiles that it reads or tidies. It checks only the entries
+// that a listing reads before it returns. It does not list a group directory
+// outside the range. Open reads the tree head and the tiles that the root
+// computation reads. It checks that these tiles give the root of the tree head.
+// Open does not read the other tiles that the tree head covers. Log.RootAt,
+// Log.ProveInclusion and Log.ProveConsistency check each tile that they read
+// against the tree head. Open tidies the tiles that it reads. After a crash, at
+// most one partial file then stays for each of them. Open also tidies the tiles
+// beyond the tree head in a bounded range. For each level, the range starts at
+// the first tile that the tree head does not cover. It ends maxBatchTiles tiles
+// above that tile. A crash can leave such tiles. The number of names that Open
+// reads depends on this bound and not on the size of the log. Open does not
+// list or tidy any other tile. A directory with no tree head must be empty, or
+// hold only the temporary file of the tree head. Open writes a tree head of
+// size 0 for it, before any tile can be written. Open makes the loaded tree
+// head durable. It calls fsync on the log directory and on its parents up to
+// the state directory. It does this before it reads, writes, or deletes any
+// file there. Then it calls fsync on the directories of the tiles that it
+// tidies. It deletes files only after all checks pass and these fsync calls
+// pass. If a check or one of these fsync calls fails, Open returns an error
+// and deletes no file. A delete can fail, or the fsync after the deletes can
+// fail. Then Open returns an error, and some files can be deleted.
 func Open(state *os.Root, dir string) (*Store, error) {
 	sub, err := state.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -273,7 +272,7 @@ func (s *Store) load() error {
 	case errors.Is(err, errLength):
 		return newError(headName, ruleHead)
 	case err != nil:
-		return newError(dirName(err, headName), fileRule(err))
+		return newError(headName, fileRule(err))
 	}
 	size := binary.BigEndian.Uint64(b)
 	if size > maxSize {
@@ -743,7 +742,7 @@ func (s *Store) partials(t tlog.Tile) (widths []int, tmps []string, err error) {
 		} else if errors.As(err, &e) {
 			return nil, nil, e
 		}
-		return nil, nil, newError(dir, fileRule(err))
+		return nil, nil, newError(dirName(err, dir), fileRule(err))
 	}
 	for _, name := range entries {
 		base, isTmp := strings.CutSuffix(name, tmpSuffix)
@@ -1080,8 +1079,9 @@ func dirFailure(r *os.Root, name string, err error) error {
 
 // readFile reads the regular file name, which must have exactly n bytes. It
 // opens the directory with safefile and reads the file below it. A later swap
-// of a directory name has no effect. A directory that safefile refuses gives
-// an error that holds the name of the failed part. safefile refuses a link at
+// of a directory name has no effect. A missing directory gives its error at
+// once. A directory that safefile refuses gives an error that holds the name
+// of the failed part. safefile refuses a link at
 // the name, and a file with another owner or with a group or other bit. It
 // refuses a file that changes in size while it is read. The head file is in the
 // log directory itself.
@@ -1089,6 +1089,9 @@ func (s *Store) readFile(name string, n int) ([]byte, error) {
 	r := s.dir
 	if d := path.Dir(name); d != "." {
 		sub, err := safefile.OpenRoot(s.dir, d, dirRule)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, dirFailure(s.dir, d, err)
 		}

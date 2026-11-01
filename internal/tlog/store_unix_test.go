@@ -439,6 +439,22 @@ func TestTS13WriteTileRefusesLinkAtAnotherTemporaryName(t *testing.T) {
 	}
 }
 
+// T-S-13: a directory that safefile refuses gives its own name in WriteTile.
+// A directory that is missing keeps the full name.
+func TestTS13DirectoryNamesInWriteTileAndOpenDir(t *testing.T) {
+	state, dir := committedLog(t, 3)
+	s := openStore(t, state)
+	var l testLog
+	l.extend(t, 5)
+	wide := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 5}
+	mustNil(t, os.Chmod(filepath.Join(dir, "tlog", "tile/8/0"), 0o750))
+	wantError(t, s.WriteTile(wide, l.tileData(wide)), ruleMode, "tile/8/0")
+	_, err := openDir(s.dir, "tile/8/9/000.p")
+	if got := dirName(err, ""); got != "tile/8/9/000.p" || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("name %q, error %v", got, err)
+	}
+}
+
 // The store deletes a stale temporary file first and makes the new one with
 // O_EXCL, so a link, a FIFO, or a file with another mode does not stay.
 func TestTS13StaleTemporaryFileIsReplaced(t *testing.T) {
@@ -755,6 +771,17 @@ func TestTS13TileLinkInsideLogDirectoryStopsTheLog(t *testing.T) {
 		if e := openErr(t, state, ruleFileLink); e.Name != name {
 			t.Fatalf("name %q", e.Name)
 		}
+	}
+	// Open also refuses a link at the temporary name of the width that it read.
+	state, dir := committedLog(t, 3)
+	const tmp = "tile/8/0/000.p/3.tmp"
+	link := filepath.Join(dir, "tlog", tmp)
+	mustNil(t, os.Symlink("3", link))
+	if e := openErr(t, state, ruleFileLink); e.Name != tmp {
+		t.Fatalf("name %q", e.Name)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("Open deleted the link: %v", err)
 	}
 }
 
