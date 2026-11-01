@@ -191,10 +191,11 @@ func TestTS23_ReadAllOtherFile(t *testing.T) {
 	r, dir := root(t)
 	put(t, dir, "checked", "01234")
 	put(t, dir, "other", "abcde")
-	_, fi, err := Open(r, "checked", capRule)
+	cf, fi, err := Open(r, "checked", capRule)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cf.Close()
 	f, err := os.Open(filepath.Join(dir, "other"))
 	if err != nil {
 		t.Fatal(err)
@@ -209,10 +210,11 @@ func TestTS23_ReadAllOtherFile(t *testing.T) {
 func TestTS23_ReadAllFIFO(t *testing.T) {
 	r, dir := root(t)
 	put(t, dir, "checked", "01234")
-	_, fi, err := Open(r, "checked", capRule)
+	cf, fi, err := Open(r, "checked", capRule)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cf.Close()
 	pipe := filepath.Join(dir, "p")
 	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
 		t.Fatal(err)
@@ -494,10 +496,11 @@ func TestTS23_ErrorTextHoldsNoPathOrBytes(t *testing.T) {
 	}
 
 	// A write-only file passes the stat and the identity check. Its read fails.
-	_, fi, err = Open(r, "ok", rule)
+	okf, fi, err := Open(r, "ok", rule)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer okf.Close()
 	wf, err := os.OpenFile(filepath.Join(dir, "ok"), os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
