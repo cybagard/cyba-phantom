@@ -315,7 +315,7 @@ func runMode(t *testing.T, check bool, body string) (code int, so, se string, ca
 	t.Helper()
 	old := serve
 	t.Cleanup(func() { serve = old })
-	serve = func(*config.Config, io.Writer, io.Writer) int { calls++; return 0 }
+	serve = func(*config.Config, content, io.Writer, io.Writer) int { calls++; return 0 }
 	args := []string{writeFile(t, body)}
 	if check {
 		args = append([]string{"--check"}, args...)
@@ -456,6 +456,14 @@ func TestTS27_CheckContentReadError(t *testing.T) {
 			otherOwner(t, o)
 			must(t, os.Remove(k), os.Symlink(o, k))
 		}},
+		{"cert replaced by a link to a file of another owner", []string{cert}, func(t *testing.T, d, r, c, k string) {
+			o := writePEM(t, d, "other.pem", goodCertPEM(t, "a.host.zz"), 0o644)
+			otherOwner(t, o)
+			must(t, os.Remove(c), os.Symlink(o, c))
+		}},
+		{"key over 64 KiB", []string{key}, func(t *testing.T, d, r, c, k string) {
+			writePEM(t, d, filepath.Base(k), append(leafKeyPEM(t), bytes.Repeat([]byte(" "), 65537-len(leafKeyPEM(t)))...), 0o600)
+		}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -471,7 +479,7 @@ func TestTS27_CheckContentReadError(t *testing.T) {
 				want += "phantom: " + k + ": the file cannot be read\n"
 			}
 			var se strings.Builder
-			if ok := checkContent(cfg, time.Now(), &se); ok != (want == "") || se.String() != want {
+			if _, ok := checkContent(cfg, time.Now(), &se); ok != (want == "") || se.String() != want {
 				t.Errorf("ok %v, stderr %q, want %q", ok, se.String(), want)
 			}
 		})

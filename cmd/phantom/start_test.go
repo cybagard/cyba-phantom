@@ -566,7 +566,7 @@ func TestTU18_SigtermHelper(t *testing.T) {
 		return store.Migrate(db, origin)
 	}
 	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
-	os.Exit(serve(cfg, io.Discard, os.Stderr))
+	os.Exit(serve(cfg, content{}, io.Discard, os.Stderr))
 }
 
 // rejectingKey has the name and the key hash of a key, and verifies no
