@@ -200,8 +200,9 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 // test queues 1 200 events, and the COMMIT of the first batch of 500 fails. The
 // 700 other events stay in the lanes. Only the 500 of the batch count as drops.
 // A Run that stays in the take loop takes and drops them at once. The test
-// waits for the stop marker. The 100 ms bound starts when that marker
-// exists. That Run needs far less than 100 ms for 700 events.
+// waits until the writer has made the stop marker, and the 100 ms bound
+// starts then. A Run that stays in the take loop needs far less than 100 ms
+// for 700 events.
 func TestTU18StoppedWriterLeavesTheTakeLoop(t *testing.T) {
 	r := newRig(t, 4000)
 	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit failed") }
