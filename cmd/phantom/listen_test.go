@@ -1140,6 +1140,7 @@ const staticName = "a.host.zz"
 // mixOpt sets the config that startMixed starts.
 type mixOpt struct {
 	acme    bool          // keep the acme.names entry
+	name    string        // the acme.names entry; "" keeps decoyName
 	root    bool          // set acme.ca_root
 	private string        // the acme.ca_private list, or ""
 	left    time.Duration // time left of the leaf; 0 is 90 days
@@ -1176,6 +1177,8 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 	body := contentBody(t, "", [2]string{cp, kp})
 	if !o.acme {
 		body = strings.Replace(body, "  names: [decoy.host.zz]\n", "", 1)
+	} else if o.name != "" {
+		body = strings.Replace(body, "names: [decoy.host.zz]", "names: ["+o.name+"]", 1)
 	}
 	extra := ""
 	if o.root {
@@ -1236,6 +1239,22 @@ func (m *mixed) leaf(t *testing.T, name string) []byte {
 	return conn.ConnectionState().PeerCertificates[0].Raw
 }
 
+// refuses checks that GetCertificate fails for each name with a gate
+// reason: the error is not errNoClient and the source counts one refusal.
+func (m *mixed) refuses(t *testing.T, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		before := m.source.Refused()
+		_, err := m.get(&tls.ClientHelloInfo{ServerName: name})
+		if err == nil || errors.Is(err, errNoClient) {
+			t.Errorf("GetCertificate(%q) error %v, want a gate error", name, err)
+		}
+		if n := m.source.Refused() - before; n != 1 {
+			t.Errorf("GetCertificate(%q) counted %d refusals, want 1", name, n)
+		}
+	}
+}
+
 // status makes a GET with the Host header host at url.
 // It returns the status code and follows no redirect.
 func status(t *testing.T, url, host string) int {
@@ -1259,7 +1278,9 @@ func status(t *testing.T, url, host string) int {
 // TestTS27_StartStaticOnly starts a config with tls.certs and no acme.names.
 // The start makes no client, no cache and no ACME request.
 // The start line is exactly "phantom: started". Stderr has no client text.
-// The gate, the hello handler and the redirect use the static name (T-S-27).
+// The static name gets its leaf, the hello handler and the redirect (T-S-27).
+// The gate refuses a name that is not a decoy name, and an empty name.
+// The error is not errNoClient, and the source counts each refusal.
 // The test removes the fixture files before the start.
 // So the start reads no file again.
 func TestTS27_StartStaticOnly(t *testing.T) {
@@ -1284,6 +1305,7 @@ func TestTS27_StartStaticOnly(t *testing.T) {
 	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
 		t.Error("the handshake did not give the static leaf")
 	}
+	m.refuses(t, "other.host.zz", "")
 	if code := status(t, "https://"+m.https+"/", staticName); code != http.StatusOK {
 		t.Errorf("hello handler status %d for the static name, want 200", code)
 	}
@@ -1320,12 +1342,16 @@ func TestTS27_StartClientParams(t *testing.T) {
 // A handshake for the ACME name fails with errNoClient.
 // The source counts no gate refusal. The static name gets its leaf (T-S-27).
 // The ACME name compare ignores case and one trailing dot.
+// A name that is not an ACME name, and an empty name, go to the source.
+// The source refuses them: the error is not errNoClient, and it counts each.
+// That holds for a name with a byte of 0x80 or more: U+212A is no "k".
 func TestTS27_StartClientAbsent(t *testing.T) {
 	oldNew := newACME
 	t.Cleanup(func() { newACME = oldNew })
 	newACME = func(listener.ACMEParams) (*listener.ACME, error) { return nil, errors.New("test error") }
-	m := startMixed(t, mixOpt{acme: true})
-	for _, name := range []string{decoyName, "DECOY.host.zz", decoyName + ".", "Decoy.Host.ZZ."} {
+	const acmeName = "kdecoy.host.zz"
+	m := startMixed(t, mixOpt{acme: true, name: acmeName})
+	for _, name := range []string{acmeName, "KDECOY.host.zz", acmeName + ".", "Kdecoy.Host.ZZ."} {
 		if _, err := m.get(&tls.ClientHelloInfo{ServerName: name}); !errors.Is(err, errNoClient) {
 			t.Errorf("GetCertificate(%q) error %v, want errNoClient", name, err)
 		}
@@ -1333,6 +1359,8 @@ func TestTS27_StartClientAbsent(t *testing.T) {
 	if n := m.source.Refused(); n != 0 {
 		t.Errorf("the source counted %d refusals, want 0", n)
 	}
+	// The last name is acmeName with U+212A KELVIN SIGN in place of "k".
+	m.refuses(t, "other.host.zz", "", "K"+acmeName[1:])
 	if !bytes.Equal(m.leaf(t, staticName), m.c.static[0].Cert.Leaf.Raw) {
 		t.Error("the handshake did not give the static leaf")
 	}
@@ -1342,7 +1370,8 @@ func TestTS27_StartClientAbsent(t *testing.T) {
 // The client works. The test removes the files before the start.
 // So the roots come from checkContent and not from a second read (T-S-27).
 // The static handshake sends no name to the ACME client.
-// It also logs the allocations of one GetCertificate call for a static name.
+// It fails when one GetCertificate call for a static name makes more than
+// 1 allocation.
 func TestTS27_StartMixed(t *testing.T) {
 	var got listener.ACMEParams
 	oldNew := newACME
@@ -1358,7 +1387,7 @@ func TestTS27_StartMixed(t *testing.T) {
 	// The source adds the refusals of the ACME client to its own count.
 	// The client refuses a name that is not an ACME name.
 	// So a static name that reaches the client gives a refusal.
-	// The client makes no request of its own: the cache has the certificate.
+	// The seed is a guard only: the result does not depend on it.
 	if n := m.source.Refused(); n != 0 {
 		t.Errorf("after the static handshake the source counts %d refusals, want 0", n)
 	}

@@ -183,7 +183,8 @@ func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) (c conten
 
 // content holds the values that checkContent parsed.
 // roots is nil without acme.ca_root.
-// static has one entry for each tls.certs entry.
+// static has one entry for each tls.certs entry that parsed.
+// When checkContent returns ok, all entries parsed.
 type content struct {
 	roots  *listener.ACMERoots
 	static []listener.StaticEntry

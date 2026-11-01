@@ -24,10 +24,16 @@ import (
 
 var errNoClient = errors.New("no certificate client")
 
-// normalName returns a server name in lower case with one trailing dot removed.
-// The certificate source compares names in the same way.
-func normalName(name string) string {
-	return strings.TrimSuffix(strings.ToLower(name), ".")
+// normalName returns a server name in lower case with one trailing dot
+// removed. It returns false for a name with a byte of 0x80 or more.
+// The certificate source applies the same rule: it refuses such a name.
+func normalName(name string) (string, bool) {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 0x80 {
+			return "", false
+		}
+	}
+	return strings.TrimSuffix(strings.ToLower(name), "."), true
 }
 
 // shutdownTime is the time that the servers get to end their open connections at the stop.
@@ -47,8 +53,13 @@ var (
 	serveSetup = func(p startParams) (startParams, startDeps) { return p, realDeps }
 )
 
-// serveWith runs the sensor on the state of p until ctx ends. The start order is: the queue, the two listen
-// sockets, the store part, the decoy server, the certificate cache and client, then the serve calls.
+// serveWith runs the sensor on the state of p until ctx ends.
+// The start order is: the queue, the two listen sockets, the store part,
+// and the decoy server.
+// Then: the cache and client, when acme.names is set.
+// Then: the certificate source.
+// Then: WarnExpiry, when there is a static entry.
+// Then: the serve calls.
 // The decoy names are the acme.names entries and then the tls.certs names.
 // c holds the parsed static certificates and roots.
 // With no acme.names entry, no cache opens and no client starts.
@@ -89,7 +100,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	decoys := slices.Clone(names)
 	acmeNames := make(map[string]bool, len(names))
 	for _, n := range names {
-		acmeNames[normalName(n)] = true
+		if key, ok := normalName(n); ok {
+			acmeNames[key] = true
+		}
 	}
 	for _, e := range c.static {
 		decoys = append(decoys, e.Name)
@@ -102,8 +115,12 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	// The handshake runs only after Serve, which starts after source is set.
 	srv, err := newServer(listener.Config{
 		TLS: &tls.Config{GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if acme == nil && acmeNames[normalName(h.ServerName)] {
-				return nil, errNoClient
+			if acme == nil {
+				// A name that normalName refuses is no ACME name.
+				// The source refuses it with its gate reason.
+				if key, ok := normalName(h.ServerName); ok && acmeNames[key] {
+					return nil, errNoClient
+				}
 			}
 			return source.GetCertificate(h)
 		}},
@@ -158,8 +175,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	if certLine != "" {
 		fmt.Fprintln(stderr, certLine)
 	}
-	var serr error
-	if source, serr = listener.NewCertSource(c.static, acme); serr != nil {
+	if source, err = listener.NewCertSource(c.static, acme); err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
 		httpsLn.Close()
 		httpLn.Close()
