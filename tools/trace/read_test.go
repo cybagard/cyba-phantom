@@ -288,8 +288,9 @@ func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 }
 
 // planted enters base/h and plants a decoy spec directory and tree at
-// h/repo. A text clean of "L/../repo/spec" names the decoy. The disk names
-// r/repo/spec. It returns r/repo and a snapshot of the decoy.
+// h/repo. filepath.Clean turns "L/../repo/spec" into the decoy path. The
+// kernel resolves it to r/repo/spec. It returns r/repo and a function that
+// returns a snapshot of the decoy.
 func planted(t *testing.T) (string, func() map[string]string) {
 	t.Helper()
 	base, _ := symlinkedCwd(t)
@@ -411,8 +412,8 @@ func TestStampWriteErrorNamesTheTypedDir(t *testing.T) {
 	}
 }
 
-// An unreadable directory is an error with the typed name and no path of
-// the resolved directory.
+// A directory that does not exist gives an error with the typed name, and
+// no part of the resolved path.
 func TestHashDirErrorNamesTheTypedDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "absent")
 	_, _, _, err := hashDir(dir, "typed/spec")
