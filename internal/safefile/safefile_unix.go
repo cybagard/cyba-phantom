@@ -62,11 +62,16 @@ func Open(root *os.Root, name string, r Rule) (*os.File, fs.FileInfo, error) {
 	return checkOpened(f, name, li, r, h)
 }
 
-// checkOpened checks the open file f of name against the checked fi. It runs
-// the AfterOpen hook, the identity compare and the whole rule. On an error it
-// closes f.
-func checkOpened(f *os.File, name string, checked fs.FileInfo, r Rule,
-	h *seam.Hooks) (*os.File, fs.FileInfo, error) {
+// checkOpened checks the open file f of name against the FileInfo checked. It
+// runs the AfterOpen hook, the identity compare and the whole rule. On an
+// error it closes f.
+func checkOpened(
+	f *os.File,
+	name string,
+	checked fs.FileInfo,
+	r Rule,
+	h *seam.Hooks,
+) (*os.File, fs.FileInfo, error) {
 	call(h.AfterOpen, name)
 	fi, err := f.Stat()
 	switch {

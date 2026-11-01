@@ -103,23 +103,26 @@ func TestTS23_ReadAllLimitsTheRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	// Open passed the file at the cap. The file then grows to 8 MiB.
-	const big = 8 << 20
+	// Open passed the file at the cap. The file then grows to 64 MiB. It is
+	// sparse, so the test writes no data.
+	const (
+		big        = 64 << 20
+		allocBound = 4 << 20
+	)
 	if err := os.Truncate(p, big); err != nil {
 		t.Fatal(err)
 	}
-	// This check reads the process-wide TotalAlloc counter. Its bound is
-	// coarse: 4 MiB is far above the noise of other goroutines. The rchar
-	// check below is the exact one. This one finds a buffer sized from the
-	// file size.
+	// This check reads the process-wide TotalAlloc counter. The bound is
+	// far above the noise of other goroutines. The check finds a buffer of
+	// more than 1/16 of the file size. The rchar check below is exact.
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	if _, err := ReadAll(f, fi, capRule); !errors.Is(err, ErrSize) {
 		t.Fatalf("err = %v, want ErrSize", err)
 	}
 	runtime.ReadMemStats(&m1)
-	if d := m1.TotalAlloc - m0.TotalAlloc; d >= big/2 {
-		t.Errorf("ReadAll allocated %d bytes, want less than %d", d, big/2)
+	if d := m1.TotalAlloc - m0.TotalAlloc; d >= allocBound {
+		t.Errorf("ReadAll allocated %d bytes, want less than %d", d, allocBound)
 	}
 	if runtime.GOOS != "linux" {
 		t.Skip("the read count needs /proc/thread-self/io")

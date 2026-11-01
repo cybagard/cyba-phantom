@@ -35,7 +35,10 @@ func TestTS23_NoControllingTerminal(t *testing.T) {
 	for _, row := range []string{"Open", "OpenPath"} {
 		t.Run(row, func(t *testing.T) {
 			name := fmt.Sprintf("safefile-tty-%d-%s", os.Getpid(), row)
-			t.Cleanup(func() { os.Remove("/dev/" + name) })
+			t.Cleanup(func() {
+				os.Remove("/dev/" + name)
+				os.Remove("/dev/q" + name)
+			})
 			cmd := exec.Command(os.Args[0], "-test.v",
 				"-test.run=^TestTS23_NoControllingTerminal$")
 			cmd.Env = append(os.Environ(), ttyEnv+"="+row, ttyEnv+"_NAME="+name)
@@ -53,6 +56,14 @@ func TestTS23_NoControllingTerminal(t *testing.T) {
 // a terminal device in after the check, and wants ErrChanged and no new
 // controlling terminal.
 func ttyChild(t *testing.T, row, name string) {
+	sid, _, e := syscall.RawSyscall(syscall.SYS_GETSID, 0, 0, 0)
+	if e != 0 || int(sid) != os.Getpid() {
+		t.Fatalf("session %d, %v, want a session leader (pid %d)",
+			sid, e, os.Getpid())
+	}
+	if tty := ttyNr(t); tty != "0" {
+		t.Fatalf("tty_nr = %s before the open, want 0", tty)
+	}
 	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -69,9 +80,13 @@ func ttyChild(t *testing.T, row, name string) {
 			t.Fatal(err)
 		}
 		defer r.Close()
-		if err := os.WriteFile("/dev/"+name, nil, 0o600); err != nil {
+		// O_EXCL and O_NOFOLLOW: a link at the name is not followed.
+		w, err := os.OpenFile("/dev/"+name,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
 			t.Fatal(err)
 		}
+		w.Close()
 		t.Cleanup(func() { os.Remove("/dev/" + name) })
 		swapAfterCheck(t, func(string) {
 			if err := os.Symlink(pts, "/dev/q"+name); err != nil {
