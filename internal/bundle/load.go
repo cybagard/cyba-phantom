@@ -233,7 +233,7 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 }
 
 // load is Load without the lock and without the event. loadMu is held. It sets
-// sum when it has read the bundle file and the signature file.
+// rd when it has read the bundle file and the signature file.
 func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	dir, base, closeDir, err := l.openDir()
 	if err != nil {

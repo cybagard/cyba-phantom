@@ -233,7 +233,7 @@ func TestTU08ErrorTextMarkersStayOut(t *testing.T) {
 		want error
 	}{
 		{"template parse", tmpl("{{" + markerData + " \x1b\n}}"), ErrTemplateParse},
-		{"template call", tmpl(`{{template "` + markerData + `"}}{{`), ErrTemplateParse},
+		{"template unclosed", tmpl(`{{template "` + markerData + `"}}{{`), ErrTemplateParse},
 		{"entry name", build(man, ent{name: "../" + markerName, data: []byte(markerData)}), ErrArchiveInvalid},
 		{"tar garbage", gz([]byte(markerData + strings.Repeat("\x1b", 1024))), ErrArchiveInvalid},
 		{"json syntax", badMan("{\x1b" + markerData), ErrManifestInvalid},
@@ -258,7 +258,7 @@ func TestTU08ErrorTextMarkersStayOut(t *testing.T) {
 				t.Errorf("event reason %q, log %v; want %q", r, lines[0], code)
 			}
 			for _, s := range []string{raw[0], p.buf.String(), err.Error()} {
-				for _, m := range []string{markerName, markerData, "FORGED", "\x1b"} {
+				for _, m := range []string{markerName, markerData, "FORGED", "\x1b", `\u001b`, `\x1b`} {
 					if strings.Contains(s, m) {
 						t.Errorf("marker %q in %q", m, s)
 					}
@@ -402,18 +402,18 @@ func TestTU08Sources(t *testing.T) {
 	if a, b := detail(t, evs[0])["source"], detail(t, evs[1])["source"]; a != "start" || b != "reload" {
 		t.Errorf("sources %q, %q", a, b)
 	}
-	for i, s := range []string{"start", "signal", "reload", "fetch", "unknown"} {
-		if got := Source(i + 1).String(); got != s {
-			t.Errorf("Source(%d) = %q, want %q", i+1, got, s)
+	for i, s := range []string{"unknown", "start", "signal", "reload", "fetch", "unknown"} {
+		if got := Source(i).String(); got != s {
+			t.Errorf("Source(%d) = %q, want %q", i, got, s)
 		}
 	}
 	e.l.SetEvents(nil, nil)
 	if _, err := e.l.LoadFrom(SourceFetch); err != nil {
 		t.Error(err)
 	}
-	e.l.SetEvents(nil, slog.New(slog.DiscardHandler))
+	e.l.SetEvents(nil, slog.New(slog.NewTextHandler(p.buf, nil)))
 	e.write("bundle/current.sig", []byte(sigRow("k1", ed25519.Sign(e.priv2, nil))))
-	if _, err := e.l.LoadFrom(SourceFetch); err != ErrBadSig {
-		t.Error(err)
+	if _, err := e.l.LoadFrom(SourceFetch); err != ErrBadSig || strings.Count(p.buf.String(), "reason=bad_sig") != 1 || strings.Count(p.buf.String(), "source=fetch") != 1 {
+		t.Error(err, p.buf.String())
 	}
 }

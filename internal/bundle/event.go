@@ -126,6 +126,7 @@ func (l *Loader) report(src Source, sum digest, b *Bundle, err error) {
 	l.events.Enqueue(e)
 }
 
+// logMembers writes one log line with the members as attributes.
 func (l *Loader) logMembers(level slog.Level, msg string, ms []member) {
 	if l.log == nil {
 		return
