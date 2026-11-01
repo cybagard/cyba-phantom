@@ -220,7 +220,7 @@ func TestTS20SeedPrint(t *testing.T) {
 	}
 	for _, v := range []any{s, &s} {
 		var buf bytes.Buffer
-		err := gob.NewEncoder(&buf).Encode(v) // gob refuses a seed and writes no byte
+		err := gob.NewEncoder(&buf).Encode(v) // gob refuses a seed
 		if err == nil || ikHas(err.Error()+buf.String(), seedMarkers(seedA)) {
 			t.Errorf("%T: gob error %v, output %q", v, err, buf.String())
 		}

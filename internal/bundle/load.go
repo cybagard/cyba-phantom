@@ -289,7 +289,8 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, seed: seed}
-	// A candidate that fails a later step keeps no seed. Only an accepted one does.
+	// A candidate that fails a later step keeps no seed. Only an accepted
+	// candidate does.
 	reject := func(err error) (*Bundle, error) {
 		if seed != nil {
 			clear(*seed)
