@@ -55,9 +55,9 @@ var (
 
 // serveWith runs the sensor on the state of p until ctx ends.
 // The start order is: the queue, the two listen sockets, the store part,
-// and the decoy server.
+// the bundle part, and the decoy server.
+// The bundle part loads only when the store part has a writer.
 // Then: the cache and client, when acme.names is set.
-// The bundle loads right after the store part, before the other steps.
 // Then: the certificate source.
 // Then: WarnExpiry, when there is a static entry.
 // Then: the serve calls.
