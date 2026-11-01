@@ -70,8 +70,12 @@ func (b *Bundle) Class() Class { return b.class }
 // Expired is true for a bundle that loaded at start after its expiry time.
 func (b *Bundle) Expired() bool { return b.expired }
 
-// File returns a copy of the bytes of an archive entry.
+// File returns a copy of the bytes of an archive entry. It gives nil and false
+// for each name below "secrets/", as the bundle owns the seed in memory.
 func (b *Bundle) File(name string) ([]byte, bool) {
+	if strings.HasPrefix(name, "secrets/") {
+		return nil, false
+	}
 	data, ok := b.archive.File(name)
 	return slices.Clone(data), ok
 }
@@ -100,7 +104,7 @@ type Loader struct {
 	chain    *chain
 	chainErr error
 
-	// now, decompress and template are steps of the load. NewLoader sets
+	// now, decompress, template and seed are steps of the load. NewLoader sets
 	// them, and a test can replace one. now and decompress must not be nil.
 	// A nil template step keeps no template, and a nil seed step keeps no seed.
 	// afterRead is a hook for tests.
@@ -115,7 +119,7 @@ type Loader struct {
 // path is in slash form, as "bundle/current.cbnd". The signature file has the
 // same name with ".sig" in place of ".cbnd". The caller keeps state open.
 // install is the install key, which opens the sealed seed of a proprietary
-// bundle. With a nil install key, a proprietary bundle is not accepted.
+// bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
 	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates}
 	l.seed = func(a *Archive, c Class, m *Manifest) (*seedBytes, error) { return openSeed(a, c, m, l.install) }
@@ -181,8 +185,9 @@ func (l *Loader) Healthy() bool {
 // engine, expiry and rollback, templates, seed.
 // The seed is the plain file of a reference bundle. In a proprietary bundle it
 // is the sealed file, opened with the install key. Another form, both, none,
-// or a size other than 32 bytes gives ErrSeedInvalid. The seed stays in memory
-// and is zeroed after a swap.
+// or a size other than 32 bytes gives ErrSeedInvalid. The seed stays in memory.
+// After a swap, Load zeroes the seed of the replaced bundle. A candidate that
+// fails a later step keeps no seed.
 // A transition record is the archive and the signature file of an accepted
 // transition bundle. The files are rotation-<n>.cbnd and rotation-<n>.sig in
 // the bundle directory, n from 1 to 8. The chain check starts with the
@@ -284,24 +289,31 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, seed: seed}
-	// The record and the version state come before Store. A failed write leaves
+	// A candidate that fails a later step keeps no seed. Only an accepted one does.
+	reject := func(err error) (*Bundle, error) {
+		if seed != nil {
+			clear(*seed)
+		}
+		return nil, err
+	}
+	// The record and the version state come before Swap. A failed write leaves
 	// the running bundle. A failed check or version-state write removes the
 	// record. Only a failed version-state write restores the trust set.
 	n := len(c.sums) + 1
 	if newRotation {
 		if err := writeRecord(dir, n, archive, sig); err != nil {
-			return nil, ErrStateFault
+			return reject(ErrStateFault)
 		}
 		if l.check(dir) != nil {
 			removeRecord(dir, n)
-			return nil, ErrStateFault
+			return reject(ErrStateFault)
 		}
 	}
 	if err := rb.Record(m, sum, class); err != nil {
 		if newRotation {
 			l.dropRecord(dir, n, &c)
 		}
-		return nil, fixed(err)
+		return reject(fixed(err))
 	}
 	// Zero the seed of the replaced bundle, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {

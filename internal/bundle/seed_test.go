@@ -3,10 +3,14 @@ package bundle
 import (
 	"bytes"
 	"crypto/hpke"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +27,8 @@ func pattern(n int, mul, add byte) []byte {
 }
 
 var (
-	seedA = pattern(32, 7, 3)
-	seedB = pattern(32, 11, 5)
+	seedA = pattern(seedSize, 7, 3)
+	seedB = pattern(seedSize, 11, 5)
 )
 
 func testInstall(t *testing.T, add byte) hpke.PrivateKey {
@@ -89,30 +93,30 @@ func TestTU08SeedInvalid(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		two   bool // the reference key signs
-		files func(e *env, in hpke.PrivateKey) []ent
+		files func(in hpke.PrivateKey) []ent
 	}{
-		{"other install key", false, func(e *env, _ hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, other, ver(3), "k1", seedA))} }},
-		{"changed ciphertext", false, func(e *env, in hpke.PrivateKey) []ent {
+		{"other install key", false, func(hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, other, ver(3), "k1", seedA))} }},
+		{"changed ciphertext", false, func(in hpke.PrivateKey) []ent {
 			return []ent{sealedEnt(flip(sealTo(t, in, ver(3), "k1", seedA)))}
 		}},
-		{"other version in info", false, func(e *env, in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(4), "k1", seedA))} }},
-		{"other key ID in info", false, func(e *env, in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(3), "k2", seedA))} }},
-		{"plain seed in proprietary", false, func(*env, hpke.PrivateKey) []ent { return []ent{plainEnt(seedA)} }},
-		{"sealed seed in reference", true, func(e *env, in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(3), "k2", seedA))} }},
-		{"no seed, proprietary", false, func(*env, hpke.PrivateKey) []ent { return nil }},
-		{"no seed, reference", true, func(*env, hpke.PrivateKey) []ent { return nil }},
-		{"both files, proprietary", false, func(e *env, in hpke.PrivateKey) []ent {
+		{"other version in info", false, func(in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(4), "k1", seedA))} }},
+		{"other key ID in info", false, func(in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(3), "k2", seedA))} }},
+		{"plain seed in proprietary", false, func(hpke.PrivateKey) []ent { return []ent{plainEnt(seedA)} }},
+		{"sealed seed in reference", true, func(in hpke.PrivateKey) []ent { return []ent{sealedEnt(sealTo(t, in, ver(3), "k2", seedA))} }},
+		{"no seed, proprietary", false, func(hpke.PrivateKey) []ent { return nil }},
+		{"no seed, reference", true, func(hpke.PrivateKey) []ent { return nil }},
+		{"both files, proprietary", false, func(in hpke.PrivateKey) []ent {
 			return []ent{plainEnt(seedA), sealedEnt(sealTo(t, in, ver(3), "k1", seedA))}
 		}},
-		{"both files, reference", true, func(e *env, in hpke.PrivateKey) []ent {
+		{"both files, reference", true, func(in hpke.PrivateKey) []ent {
 			return []ent{plainEnt(seedA), sealedEnt(sealTo(t, in, ver(3), "k2", seedA))}
 		}},
-		{"plain 31", true, func(*env, hpke.PrivateKey) []ent { return []ent{plainEnt(seedA[:31])} }},
-		{"plain 33", true, func(*env, hpke.PrivateKey) []ent { return []ent{plainEnt(append(bytes.Clone(seedA), 1))} }},
-		{"sealed 31", false, func(e *env, in hpke.PrivateKey) []ent {
+		{"plain 31", true, func(hpke.PrivateKey) []ent { return []ent{plainEnt(seedA[:31])} }},
+		{"plain 33", true, func(hpke.PrivateKey) []ent { return []ent{plainEnt(append(bytes.Clone(seedA), 1))} }},
+		{"sealed 31", false, func(in hpke.PrivateKey) []ent {
 			return []ent{sealedEnt(sealTo(t, in, ver(3), "k1", seedA[:31]))}
 		}},
-		{"sealed 33", false, func(e *env, in hpke.PrivateKey) []ent {
+		{"sealed 33", false, func(in hpke.PrivateKey) []ent {
 			return []ent{sealedEnt(sealTo(t, in, ver(3), "k1", append(bytes.Clone(seedA), 1)))}
 		}},
 	} {
@@ -122,12 +126,15 @@ func TestTU08SeedInvalid(t *testing.T) {
 				k = keyTwo
 			}
 			e, l, in, key := seeded(t, k)
-			e.putSeeded(key, ver(3), c.files(e, in)...)
+			e.putSeeded(key, ver(3), c.files(in)...)
 			e.rejects(l, false, ErrSeedInvalid)
-			if code, ok := CodeOf(ErrSeedInvalid); !ok || code != CodeSeedInvalid || code.String() != "seed_invalid" {
-				t.Errorf("code %v %v", code, ok)
-			}
 		})
+	}
+	if code, ok := CodeOf(ErrSeedInvalid); !ok || code != CodeSeedInvalid || code.String() != "seed_invalid" {
+		t.Errorf("code %v %v", code, ok)
+	}
+	if ErrSeedInvalid.Error() != "bundle: seed_invalid" {
+		t.Errorf("error text %q", ErrSeedInvalid)
 	}
 	t.Run("nil install key", func(t *testing.T) {
 		e := newEnv(t)
@@ -136,8 +143,9 @@ func TestTU08SeedInvalid(t *testing.T) {
 	})
 }
 
-// T-S-20: a valid bundle of each class opens its seed. The seed is a copy, and
-// the sealed archive entry stays.
+// T-S-20: a valid bundle of each class opens its seed. The seed is a copy.
+// File gives no seed file. The plain archive entry is zero, and the sealed
+// archive entry stays.
 func TestTS20SeedOpened(t *testing.T) {
 	for _, k := range []func(*env) rkey{keyOne, keyTwo} {
 		e, l, in, key := seeded(t, k)
@@ -146,11 +154,11 @@ func TestTS20SeedOpened(t *testing.T) {
 		if key.id == "k2" {
 			name = seedPlainName
 		}
-		file, ok := b.File(name)
-		if b.seed == nil || !bytes.Equal(*b.seed, seedA) || !ok || bytes.Equal(file, seedA) != (key.id == "k2") {
+		raw, _ := b.archive.File(name)
+		if _, ok := b.File(name); ok || b.seed == nil || !bytes.Equal(*b.seed, seedA) ||
+			bytes.Equal(raw, zeros(len(raw))) != (key.id == "k2") {
 			t.Fatalf("%s: seed or entry wrong", key.id)
 		}
-		raw, _ := b.archive.File(name)
 		if &(*b.seed)[0] == &raw[0] {
 			t.Errorf("%s: the seed is a part of the archive bytes", key.id)
 		}
@@ -159,7 +167,7 @@ func TestTS20SeedOpened(t *testing.T) {
 		e.putSeeded(key, ver(3), e.good(in, key, ver(3), seedB))
 		nb, err := l.Load(false)
 		must(t, err)
-		if !bytes.Equal(old, make([]byte, 32)) || !bytes.Equal(*nb.seed, seedB) {
+		if !bytes.Equal(old, zeros(seedSize)) || !bytes.Equal(*nb.seed, seedB) {
 			t.Errorf("%s: after the swap the old seed %v or the new seed is wrong", key.id, old)
 		}
 	}
@@ -203,14 +211,101 @@ func TestTS20SeedPrint(t *testing.T) {
 			t.Errorf("print: %q", o)
 		}
 	}
+	if !strings.HasSuffix(text.String(), " msg=m seed=[seed]\n") {
+		t.Errorf("text handler: %q", text.String())
+	}
 	if o := fmt.Sprintf("%+v", &Bundle{seed: &s}); ikHas(o, seedMarkers(seedA)) {
 		t.Errorf("print of a Bundle: %q", o)
 	}
+	if seedText != "[seed]" {
+		t.Errorf("seedText %q", seedText)
+	}
+	for _, v := range []any{s, &s} {
+		if str, ok := v.(fmt.Stringer); !ok || str.String() != seedText {
+			t.Errorf("%T is not a Stringer with seedText", v)
+		}
+	}
 }
 
-// seedMarkers gives the raw, base64, lower hex and upper hex form of b.
+// T-S-20: encoding/gob refuses a seed, as a value and as a pointer, and
+// writes and reports no byte of it.
+func TestTS20SeedGob(t *testing.T) {
+	s := seedBytes(bytes.Clone(seedA))
+	for _, v := range []any{s, &s} {
+		var buf bytes.Buffer
+		err := gob.NewEncoder(&buf).Encode(v)
+		if err == nil || ikHas(err.Error()+buf.String(), seedMarkers(seedA)) {
+			t.Errorf("%T: error %v, output %q", v, err, buf.String())
+		}
+	}
+}
+
+// seedMarkers gives the raw, base64, lower hex, upper hex and quoted form of b.
 func seedMarkers(b []byte) []string {
-	return append(ikMarkers(b), strings.ToUpper(hex.EncodeToString(b)))
+	return append(ikMarkers(b), strings.ToUpper(hex.EncodeToString(b)), strconv.Quote(string(b)), fmt.Sprintf("%q", b))
+}
+
+// T-S-20: a reference bundle with a valid plain seed loads with a nil install
+// key. Bundle.File gives no entry below secrets/, also not an entry that is
+// not a seed file.
+func TestTS20SeedReference(t *testing.T) {
+	e := newEnv(t)
+	e.putSeeded(keyTwo(e), ver(2), plainEnt(seedA), ent{name: "secrets/a", data: []byte("a")})
+	b, err := e.seedLoader(nil).Load(false)
+	must(t, err)
+	if b.seed == nil || !bytes.Equal(*b.seed, seedA) {
+		t.Error("the seed differs")
+	}
+	for _, name := range []string{"secrets/a", seedPlainName, seedSealedName} {
+		if data, ok := b.File(name); ok || data != nil {
+			t.Errorf("File(%q) gives %q, %v", name, data, ok)
+		}
+	}
+}
+
+// T-S-20: a candidate that passes the seed step and fails a later write keeps
+// no seed, and the running bundle keeps its seed. The blocker is a directory
+// in place of the temporary file of the write, as in TestTS20RotationWriteFails.
+// The first row fails the version state. The second fails the record of a
+// transition bundle, which is another return in Load.
+func TestTS20SeedRejectedCleared(t *testing.T) {
+	for _, c := range []struct {
+		blocker    string
+		transition bool
+	}{{StateName, false}, {"rotation-1.cbnd", true}} {
+		t.Run(c.blocker, func(t *testing.T) {
+			e, install := newEnv(t), testInstall(t, 1)
+			k1, l := e.keys()[0], e.seedLoader(install)
+			var opened *seedBytes
+			step := l.seed
+			l.seed = func(a *Archive, class Class, m *Manifest) (*seedBytes, error) {
+				s, err := step(a, class, m)
+				opened = s
+				return s, err
+			}
+			e.putSeeded(k1, ver(2), e.good(install, k1, ver(2), seedA))
+			_, err := l.Load(false)
+			must(t, err)
+			first := opened
+			if c.transition {
+				k3 := newKey(3, "k3")
+				arch := build(transitionEnt(k1, k3, ver(3)), sealedEnt(sealTo(t, install, ver(3), "k3", seedB)))
+				e.put(arch, lineOf(k1, arch), lineOf(k3, arch))
+			} else {
+				e.putSeeded(k1, ver(3), e.good(install, k1, ver(3), seedB))
+			}
+			must(t, os.MkdirAll(filepath.Join(e.state, "bundle", c.blocker+".tmp", "x"), 0o700))
+			if _, err := l.Load(false); err != ErrStateFault {
+				t.Fatalf("got %v", err)
+			}
+			if opened == first || !bytes.Equal(*opened, zeros(seedSize)) {
+				t.Errorf("the seed of the rejected candidate is %v", opened)
+			}
+			if !bytes.Equal(*l.Current().seed, seedA) {
+				t.Error("the running seed changed")
+			}
+		})
+	}
 }
 
 // T-S-20: run a load, a swap and a rejection. No seed or key marker is in an

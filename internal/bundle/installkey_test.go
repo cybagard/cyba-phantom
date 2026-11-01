@@ -324,7 +324,8 @@ func TestTS20InstallKeyLeftover(t *testing.T) {
 // T-S-20: a call leaves no open descriptor. No t.Parallel, as it counts all.
 func TestTS20InstallKeyDescriptors(t *testing.T) {
 	_, root := ikDir(t)
-	runtime.GC() // run the finalizers of earlier tests first
+	// Best effort: the finalizers run later. The set compare is the check.
+	runtime.GC()
 	before, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Skip("no /proc/self/fd")

@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"crypto/hpke"
+	"errors"
 	"fmt"
 	"slices"
 )
@@ -17,13 +18,18 @@ const (
 // seedText is the one text that a seed prints for each verb and encoding.
 const seedText = "[seed]"
 
-// seedBytes is the token seed in memory. Every way to print or encode it gives
-// seedText and no byte of the seed.
+// seedBytes is the token seed in memory. fmt gives seedText for each verb
+// except %T and %p, which give the type name and an address. encoding/json
+// and encoding.TextMarshaler users get seedText. encoding/gob gets an error.
+// fmt cannot call a method of a value in an unexported struct field. It
+// prints the bytes there, so Bundle holds a *seedBytes.
 type seedBytes []byte
 
 func (seedBytes) Format(f fmt.State, _ rune)   { fmt.Fprint(f, seedText) }
+func (seedBytes) String() string               { return seedText }
 func (seedBytes) MarshalJSON() ([]byte, error) { return []byte(`"` + seedText + `"`), nil }
 func (seedBytes) MarshalText() ([]byte, error) { return []byte(seedText), nil }
+func (seedBytes) GobEncode() ([]byte, error)   { return nil, errors.New("bundle: seed is not encodable") }
 
 // seedInfo is the HPKE info of a sealed seed. It holds a fixed label, the
 // version and the key ID. A zero byte comes before each part after the label.
@@ -41,8 +47,13 @@ func openSeed(a *Archive, class Class, m *Manifest, install hpke.PrivateKey) (*s
 	var seed []byte
 	switch {
 	case hasPlain == hasSealed:
+		// No seed file, or both files: no seed.
 	case class == ClassReference && hasPlain:
 		seed = slices.Clone(plain)
+		// This is the one place that changes an archive entry. The entry is
+		// a second copy of the seed. The zeroing of a replaced bundle would
+		// miss it.
+		clear(plain)
 	case class == ClassProprietary && hasSealed && install != nil:
 		seed, _ = hpke.Open(install, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), seedInfo(m.Version, m.KeyID), sealed)
 	}
