@@ -188,10 +188,21 @@ perf-inner:
 # binary. A stopped mutant shows as LIVED. The limit also applies to the
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
-# The target makes one new directory in the caller TMPDIR. It sets TMPDIR
-# and GOTMPDIR to this directory. It sets GOCACHE and HOME to two
+# The target makes one new directory .mutate-run.* in the module root. Tests
+# need a checkout whose parent directories have no group or other write bit,
+# so the directory is not in /tmp. The target prints the path.
+# It copies the module to src in this directory, with all files as they are,
+# and starts gremlins there. The module root of gremlins is then the copy,
+# not the checkout that holds the run directory.
+# Before gremlins starts, the target runs go test on PKG in the copy. If the
+# tests fail, it prints the output and fails (exit 1) before any mutation.
+# It sets TMPDIR to the run directory. It sets GOCACHE and HOME to two
 # directories in it. The caller values of these variables do not apply to
 # the run.
+# The module root can be on a shared file system that ignores the mode of a
+# file. Go gives GOTMPDIR to the tests as their TMPDIR. Thus the target makes
+# a second directory in the caller TMPDIR and sets GOTMPDIR to it. The size
+# check, the size limit and the removal include this directory.
 # The target unsets XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_STATE_HOME and
 # XDG_DATA_HOME.
 # Then os.UserCacheDir and os.UserConfigDir give paths in HOME.
@@ -223,8 +234,11 @@ perf-inner:
 # has a relative or an empty entry.
 # The target removes the directory on EXIT, HUP, INT, QUIT and TERM.
 # The cleanup ignores these four signals, also after a normal end. Thus a
-# signal does not stop the removal. It sends KILL to gremlins, so a stopped
-# gremlins does not block the removal.
+# signal does not stop the removal. It sends KILL to every process in the
+# session of gremlins, so a stopped process does not block the removal.
+# The go command has no run directory in its arguments. It stayed alive
+# after the match by name and wrote the cache trim file after the removal.
+# The target then tries the removal again until the directory is gone.
 # MUTATE_EXCLUDE is a list of regular expressions, separated by spaces, tabs
 # or newlines. It is empty by default.
 # Each entry becomes one --exclude-files=<entry> argument.
@@ -245,8 +259,8 @@ mutate:
 	@[ -n "$$PKG" ] || { echo "usage: make mutate PKG=./internal/<pkg>" >&2; exit 2; }
 	@case "$$PKG" in -*|*[!A-Za-z0-9_./-]*) echo "mutate: PKG must use only [A-Za-z0-9_./-] and must not start with -" >&2; exit 2;; esac
 	@for v in "$$MUTATE_CAP" "$$MUTATE_MAX_MIB"; do case "$$v" in ""|0*|*[!0-9]*|???????????*) echo "mutate: MUTATE_CAP and MUTATE_MAX_MIB must be positive integers of at most 10 digits" >&2; exit 2;; esac; done
-	@d=$$(mktemp -d) || exit 1; g=; w=; \
-	trap 'trap "" HUP INT QUIT TERM; kill $$g $$w 2>/dev/null; pkill -KILL -f "$$d/"; kill -KILL $$g 2>/dev/null; wait; PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d"' EXIT; \
+	@t=$$(mktemp -d) || exit 1; d=$$(mktemp -d "$$(pwd)/.mutate-run.XXXXXX") || { rm -rf "$$t"; exit 1; }; g=; w=; \
+	trap 'trap "" HUP INT QUIT TERM; kill $$g $$w 2>/dev/null; [ -z "$$g" ] || pkill -KILL -s $$g; pkill -KILL -f "$$d/"; kill -KILL $$g 2>/dev/null; wait; n=0; while [ -e "$$d" ] || [ -e "$$t" ]; do [ $$n -lt 50 ] || break; PATH=/usr/bin:/bin find "$$d" "$$t" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; rm -rf "$$d" "$$t"; n=$$((n + 1)); [ ! -e "$$d" ] && [ ! -e "$$t" ] || sleep 0.1; done' EXIT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 129' HUP; trap 'trap "" HUP INT QUIT TERM; exit 130' INT; \
 	trap 'trap "" HUP INT QUIT TERM; exit 131' QUIT; trap 'trap "" HUP INT QUIT TERM; exit 143' TERM; \
 	go=$$(command -v go); [ -n "$$go" ] || { echo "mutate: go is not in PATH" >&2; exit 1; }; \
@@ -255,16 +269,20 @@ mutate:
 	[ -n "$$goenv" ] || goenv=off; \
 	mkdir "$$d/bin"; \
 	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
-	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
+	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$t" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
+	echo "mutate: run directory $$d"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
+	mkdir "$$d/src"; tar -cf - --exclude='./.mutate-run.*' . | tar -xf - -C "$$d/src"; \
+	( cd "$$d/src" && exec setsid go test "$$PKG" ) >"$$d/pre" 2>&1 & g=$$!; wait $$g; rc=$$?; g=; \
+	if [ "$$rc" -ne 0 ]; then cat "$$d/pre"; echo "mutate FAIL: go test $$PKG failed in the copy (status $$rc), no mutation done" >&2; exit 1; fi; \
 	[ -z "$$MUTATE_EXCLUDE" ] || printf 'mutate: files excluded by MUTATE_EXCLUDE: %s\n' "$$MUTATE_EXCLUDE"; \
 	set -f; set --; for e in $$MUTATE_EXCLUDE; do set -- "$$@" "--exclude-files=$$e"; done; set +f; \
-	gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments >"$$d/out" 2>&1 & g=$$!; \
-	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; \
+	( cd "$$d/src" && exec setsid gremlins unleash "$$PKG" "$$@" --workers 4 --timeout-coefficient 100 --invert-logical --invert-assignments --remove-self-assignments ) >"$$d/out" 2>&1 & g=$$!; \
+	( m=0; while kill -0 $$g 2>/dev/null && sleep 1; do s=$$(du -sck "$$d" "$$t" 2>/dev/null | tail -n 1 | cut -f1); s=$${s:-0}; \
 	if [ "$$s" -gt "$$m" ]; then m=$$s; echo "$$m" >"$$d/peak"; fi; \
-	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
+	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; kill $$g; pkill -KILL -s $$g; pkill -KILL -f "$$d/"; break; fi; done ) & w=$$!; \
 	wait $$g; rc=$$?; g=; kill $$w 2>/dev/null; wait $$w 2>/dev/null; w=; \
-	PATH=/usr/bin:/bin find "$$d" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; s=$$(du -sk "$$d" 2>/dev/null | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
+	PATH=/usr/bin:/bin find "$$d" "$$t" -type d ! -perm -u=rwx -execdir chmod u+rwx {} \; 2>/dev/null; s=$$(du -sck "$$d" "$$t" 2>/dev/null | tail -n 1 | cut -f1); s=$${s:-0}; p=$$(cat "$$d/peak" 2>/dev/null); p=$${p:-0}; \
 	if [ "$$s" -gt "$$p" ]; then p=$$s; fi; \
 	if [ "$$s" -gt $$((MUTATE_MAX_MIB * 1024)) ]; then : >"$$d/full"; fi; \
 	cat "$$d/out"; [ -z "$$(tail -c 1 "$$d/out")" ] || echo; \
