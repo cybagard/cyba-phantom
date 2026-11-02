@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 const (
@@ -547,6 +548,25 @@ func TestTS22FailedWriteClearsHelloData(t *testing.T) {
 	}
 }
 
+// T-S-22: the data mark is true only for a read with data and no error. A
+// read of no data, and a read of data with an error, give client_abort.
+func TestTS22DataMarkNeedsDataAndNoError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		conn stubConn
+		want event.RefusedReason
+	}{
+		"no data":        {stubConn{}, event.ReasonClientAbort},
+		"data and error": {stubConn{n: 5, err: io.EOF}, event.ReasonClientAbort},
+		"data":           {stubConn{n: 5}, event.ReasonBadHello},
+	} {
+		lc := &limitConn{Conn: tc.conn, left: 100, cert: true}
+		_, _ = lc.Read(make([]byte, 10))
+		if r, ok := lc.handshakeReason(); !ok || r != tc.want {
+			t.Errorf("%s: reason %v, ok %v; want %v", name, r, ok, tc.want)
+		}
+	}
+}
+
 // appData returns n bytes that start with the record type application_data.
 func appData(n int) []byte {
 	p := make([]byte, n)
@@ -596,5 +616,24 @@ func TestLimitConnReadAllocatesNothing(t *testing.T) {
 		if got := testing.AllocsPerRun(100, func() { _, _ = c.Read(buf) }); got != 0 {
 			t.Errorf("%s: %v allocations for each Read, want 0", name, got)
 		}
+	}
+}
+
+// T-S-18: newReadLimit sets the first budget to the hello budget, the header
+// bytes and the slack. It sets each next budget to the header bytes and slack.
+func TestTS18ReadLimitBudgets(t *testing.T) {
+	rd := newReadLimit(testHeaderBytes)
+	if want := int64(testHeaderBytes + budgetSlack); rd.next != want || rd.first != helloBudget+want {
+		t.Errorf("first %d, next %d; want %d, %d", rd.first, rd.next, helloBudget+want, want)
+	}
+}
+
+// T-S-18: a Read with budget left does not call the zero-budget hook.
+func TestTS18ReadWithBudgetLeftSkipsHook(t *testing.T) {
+	calls := 0
+	testutil.Set(t, &readAtZero, func() { calls++ })
+	c := newLimitConn(stubConn{n: 1}, nil, newSourceCap(1), netip.Addr{}, newReadLimit(testHeaderBytes))
+	if _, err := c.Read(make([]byte, 8)); err != nil || calls != 0 {
+		t.Errorf("error %v, %d hook calls, want none", err, calls)
 	}
 }
