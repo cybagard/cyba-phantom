@@ -596,6 +596,101 @@ func TestTS10_ConfigRelativePath(t *testing.T) {
 	}
 }
 
+// TestTS10_ConfigRelativePathRefused checks two relative config paths that
+// ReadFile refuses because of the full path. os.Open of each path works.
+func TestTS10_ConfigRelativePathRefused(t *testing.T) {
+	t.Run("unsearchable parent", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root searches each directory: no permission error")
+		}
+		a := filepath.Join(t.TempDir(), "a")
+		b := filepath.Join(a, "b")
+		if err := os.MkdirAll(b, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, b, "c.yaml", "foo: bar", 0o600)
+		t.Chdir(b)
+		if err := os.Chmod(a, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(a, 0o700) })
+		f, err := os.Open("c.yaml")
+		if err != nil {
+			t.Fatalf("a plain relative open: %v", err)
+		}
+		_ = f.Close()
+		if _, err := os.Stat(b); !errors.Is(err, fs.ErrPermission) {
+			t.Skipf("stat of the full path: got %v, the rule is not applied here", err)
+		}
+		const want = `config: "c.yaml": permission denied`
+		if _, err := ReadFile("c.yaml"); err == nil || err.Error() != want {
+			t.Errorf("ReadFile: got %v, want %q", err, want)
+		}
+	})
+	t.Run("path over the length limit", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		wd, err := syscall.Getwd()
+		for err == nil && len(wd) < 3700 {
+			if err = os.Mkdir(strings.Repeat("d", 200), 0o700); err == nil {
+				err = os.Chdir(strings.Repeat("d", 200))
+			}
+			if err == nil {
+				wd, err = syscall.Getwd()
+			}
+		}
+		// The last directory gives a working directory of at most 3990 bytes.
+		last := strings.Repeat("d", min(200, 3989-len(wd)))
+		if err == nil {
+			if err = os.Mkdir(last, 0o700); err == nil {
+				err = os.Chdir(last)
+			}
+		}
+		if err == nil {
+			wd, err = syscall.Getwd()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := strings.Repeat("f", 200)
+		writeFile(t, ".", name, "foo: bar", 0o600)
+		if n := len(wd) + 1 + len(name); n <= 4096 {
+			t.Fatalf("full path is %d bytes, want more than 4096", n)
+		}
+		f, err := os.Open(name)
+		if err != nil {
+			t.Fatalf("a plain relative open: %v", err)
+		}
+		_ = f.Close()
+		_, err = ReadFile(name)
+		if !errors.Is(err, syscall.ENAMETOOLONG) || !strings.HasSuffix(err.Error(), "file name too long") {
+			t.Errorf("ReadFile: got %v, want file name too long", err)
+		}
+	})
+}
+
+// TestTS10_ReadNestingAndKeyDigits checks the depth limit of a flow sequence
+// and that a digit in a key name stays valid.
+func TestTS10_ReadNestingAndKeyDigits(t *testing.T) {
+	doc, err := ReadBytes([]byte("a: [[[[[[[1]]]]]]]"))
+	if err != nil {
+		t.Fatalf("7 levels: %v", err)
+	}
+	if _, ok := doc.Leaves["a"+strings.Repeat("[0]", 7)]; !ok {
+		t.Errorf("7 levels: leaves %v", doc.Leaves)
+	}
+	_, err = ReadBytes([]byte("a: [[[[[[[[1]]]]]]]]"))
+	if err == nil || !strings.HasSuffix(err.Error(), "nesting exceeds limit of 8") {
+		t.Errorf("8 levels: got %v, want nesting exceeds limit of 8", err)
+	}
+	doc, err = ReadBytes([]byte("a9: 1"))
+	if err != nil {
+		t.Fatalf("a9: %v", err)
+	}
+	if _, ok := doc.Leaves["a9"]; !ok {
+		t.Errorf("a9: leaves %v", doc.Leaves)
+	}
+}
+
 // TestTS10_ConfigModeOwner checks the mode and owner rules of the config
 // file (T-S-10). It also runs them through LoadWith, as --check does.
 func TestTS10_ConfigModeOwner(t *testing.T) {

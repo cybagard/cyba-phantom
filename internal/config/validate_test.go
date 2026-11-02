@@ -385,6 +385,8 @@ func TestTU10_URL(t *testing.T) {
 		{"unspecified v4", "https://0.0.0.0/", []string{"https"}, ""},
 		{"unspecified v6", "https://[::]/", []string{"https"}, ""},
 		{"port 0", "https://h:0/", []string{"https"}, "port"},
+		{"port 1", "https://h:1/", []string{"https"}, ""},
+		{"port 65535", "https://h:65535/", []string{"https"}, ""},
 		{"port 65536", "https://h:65536/", []string{"https"}, "port"},
 		{"port leading zero", "https://example.com:0443/", []string{"https"}, "decimal"},
 		{"port sign", "https://example.com:+443/", []string{"https"}, "not a valid URL"},
@@ -402,6 +404,8 @@ func TestTU10_URL(t *testing.T) {
 		{"hex last label loopback", "https://127.0.0.0x1/", []string{"https"}, "number"},
 		{"hex last label upper case", "https://10.0.0.0XA/", []string{"https"}, "number"},
 		{"hex last label, empty hex part", "https://10.0.0.0x/", []string{"https"}, "number"},
+		{"hex last label, F is a digit", "https://10.0.0.0xF/", []string{"https"}, "number"},
+		{"hex name, g is not a digit", "https://a.0xg/", []string{"https"}, ""},
 		{"hex name 0x0.st", "https://0x0.st/", []string{"https"}, ""},
 		{"hex name 0x.org", "https://0x.org/", []string{"https"}, ""},
 		{"hex name 0xcafe", "https://0xcafe.example.com/", []string{"https"}, ""},
@@ -411,6 +415,7 @@ func TestTU10_URL(t *testing.T) {
 		{"full-width unspecified", "https://０．０．０．０/", []string{"https"}, "ASCII"},
 		{"percent-encoded full-width", "https://%EF%BC%91%EF%BC%96%EF%BC%99.254.169.254/", []string{"https"}, "ASCII"},
 		{"non-ASCII name", "https://例え.jp/", []string{"https"}, "ASCII"},
+		{"lowest non-ASCII byte", "https://a%80b/", []string{"https"}, "ASCII"},
 		{"name with digits", "https://a1.example/", []string{"https"}, ""},
 		{"upper case name", "https://CA.Example:443/", []string{"https"}, ""},
 		{"name with dot at end", "https://h.example./", []string{"https"}, "host name"},
@@ -609,6 +614,10 @@ func TestTU10_StatePath(t *testing.T) {
 	dangling := link("dangling", filepath.Join(tr.outside, "missing"))
 	loop := link("loop", filepath.Join(tr.root, "loop"))
 	rel := link("rel", "../outside")
+	file := filepath.Join(tr.root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	const outsideDetail = "not under the state directory"
 	runRows(t, []row{
@@ -629,6 +638,7 @@ func TestTU10_StatePath(t *testing.T) {
 		{"dangling symlink to outside", dangling, "cannot resolve"},
 		{"below dangling symlink", filepath.Join(dangling, "x"), "cannot resolve"},
 		{"symlink loop", loop, "cannot resolve"},
+		{"below a regular file", filepath.Join(file, "x"), "cannot resolve"},
 		{"not clean", tr.root + "/certs/../../outside", "clean"},
 		{"relative", "state/certs", "absolute"},
 		{"NUL", tr.root + "/a\x00b", "NUL"},
