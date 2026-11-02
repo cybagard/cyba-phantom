@@ -22,18 +22,21 @@
 //
 // The spec directory defaults to "spec".
 //
-// Known limits of the Makefile check in the tests mode. Each one fails open:
-// trace counts a marker that make cannot run. The findMarkers comment lists
-// more limits.
+// The Makefile check in the tests mode has known limits. Limits 1, 3 and 4
+// fail open: trace counts a marker that make cannot run. The findMarkers
+// comment lists more limits.
 //
-//   - A rule line in a false conditional branch, or in a define body, counts
-//     as a rule. Make stops with "No rule to make target".
-//   - Make drops a NUL byte, the rest of its line and the line end. So make
-//     joins two lines. Trace reads two lines, and may see a rule that make
-//     does not see.
-//   - A reference that make cannot end counts as a rule if a ";" comes
-//     first or the openers are mixed. Make stops with "unterminated
-//     variable reference".
+//  1. A rule line in a false conditional branch counts as a rule. A rule
+//     line in a define body counts too, if make does not evaluate the body.
+//     Make does not see the rule.
+//  2. Make drops a NUL byte, the rest of its line and the line end. Thus
+//     make joins two lines, but trace reads two lines. Trace can see a rule
+//     that make does not see, or miss a rule that make sees.
+//  3. A recipe can hold a reference that make cannot end. A rule line can
+//     hold such a reference after mixed "(" and "{" openers. Then trace can
+//     count the rule, but make stops with "unterminated variable reference".
+//  4. Trace checks only that the rule line exists. It does not check that
+//     make can run the target.
 //
 // Exit codes: 0 in sync, 1 findings, 2 usage or unreadable input.
 package main
