@@ -405,3 +405,23 @@ func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
 		t.Fatalf("Run returned %v after the cancel", err)
 	}
 }
+
+// T-I-07: makeMarker gives an error in a state directory that is gone.
+// OpenFile gives the error: Open of "." and Sync work on that directory.
+func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeMarker(root); err == nil {
+		t.Fatal("makeMarker gave nil in a removed directory")
+	}
+}

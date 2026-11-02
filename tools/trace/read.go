@@ -162,6 +162,11 @@ func readFinding(name string, err error) string {
 func resolveSpecDir(specDir string) (string, error) {
 	abs, err := absPath(specDir)
 	if err != nil {
+		// The text of a path error holds the resolved path. Keep the errno.
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			err = errno
+		}
 		return "", fmt.Errorf("%s: %w", specDir, err)
 	}
 	f, _, err := safefile.OpenPath(abs, dirRule)
