@@ -442,6 +442,7 @@ func TestTS21GuardComparesLiteralsAsAddresses(t *testing.T) {
 		{"https://[2001:DB8:0::1]/", "https://[2001:db8::1]/", []netip.Addr{other}, true},
 		{"https://[::ffff:8.8.8.8]/", "https://8.8.8.8/", []netip.Addr{global}, false},
 		{"https://8.8.8.8/", "https://[::ffff:8.8.8.8]/", []netip.Addr{global}, false},
+		{"https://8.8.8.8/", "https://[::ffff:8.8.8.8%25eth0]/", nil, true},
 		{"https://8.8.8.8/", "https://8.8.4.4/", nil, true},
 		{"https://[fe80::1%25eth0]/", "https://[fe80::1%25eth0]/", nil, true},
 		{"https://[fe80::1%25eth0]/", "https://[fe80::1]/", nil, true},
@@ -526,6 +527,26 @@ func TestTS21GuardRefusesAnAddressOfBadLength(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{{IP: net.IP{8, 8, 8}}}, nil }
 	if u, err := egressGuard(ca, nil, permitAll, net.DefaultResolver, lookup)(req); err != errEgress || u != nil {
 		t.Errorf("proxy = %v, %v; want errEgress", u, err)
+	}
+}
+
+// T-S-21: a lookup with no address and no error is refused. The guard folds
+// "Z" of the request host to "z" before it compares the host with the CA.
+func TestTS21GuardRefusesNoAddressAndFoldsUpperZ(t *testing.T) {
+	permitAll := func(netip.Addr) bool { return true }
+	var addrs []net.IPAddr
+	lookup := func(context.Context, string) ([]net.IPAddr, error) { return addrs, nil }
+	ca, err := url.Parse("https://z.test/")
+	mustNil(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://Z.TEST/dir", nil)
+	mustNil(t, err)
+	guard := egressGuard(ca, nil, permitAll, net.DefaultResolver, lookup)
+	if u, err := guard(req); err != errEgress || u != nil {
+		t.Errorf("no address: proxy = %v, %v; want errEgress", u, err)
+	}
+	addrs = []net.IPAddr{{IP: net.IPv4(8, 8, 8, 8)}}
+	if u, err := guard(req); err != nil || u != nil {
+		t.Errorf("name Z.TEST: proxy = %v, %v; want none", u, err)
 	}
 }
 
@@ -894,6 +915,16 @@ func TestTS16NameGateRefusesAByteAbove0x7f(t *testing.T) {
 	}
 }
 
+// T-S-16: validPort accepts an empty string and the ports 1 to 65535.
+func TestTS16ValidPort(t *testing.T) {
+	for s, want := range map[string]bool{"": true, "1": true, "65535": true,
+		"0": false, "-1": false, "65536": false, "x": false} {
+		if got := validPort(s); got != want {
+			t.Errorf("validPort(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
 func TestTS16NewACMERefusesBadInput(t *testing.T) {
 	st, _ := newStore(t)
 	for _, c := range []struct {
@@ -909,6 +940,9 @@ func TestTS16NewACMERefusesBadInput(t *testing.T) {
 		}},
 		{"empty name", func(p *ACMEParams) { p.Names = []string{"decoy.test", ""} }},
 		{"upper-case letter", func(p *ACMEParams) { p.Names = []string{"Decoy.test"} }},
+		{"first upper-case letter", func(p *ACMEParams) { p.Names = []string{"A.test"} }},
+		{"last upper-case letter", func(p *ACMEParams) { p.Names = []string{"Z.test"} }},
+		{"byte 0x80", func(p *ACMEParams) { p.Names = []string{"\x80.test"} }},
 		{"byte above 0x7f", func(p *ACMEParams) { p.Names = []string{"décoy.test"} }},
 		{"trailing dot", func(p *ACMEParams) { p.Names = []string{"decoy.test."} }},
 		{"duplicate name", func(p *ACMEParams) { p.Names = []string{"decoy.test", "other.test", "decoy.test"} }},
@@ -1024,6 +1058,11 @@ func TestTS16EventLinesHoldTheConfiguredNameOnly(t *testing.T) {
 	}))
 	mustNil(t, a.cfg.OnEvent(context.Background(), "cert_obtaining", map[string]any{"identifier": "client-chosen.test"}))
 	out := logs.String()
+	// T-S-16: cert_failed logs at WARN and cert_obtaining at INFO.
+	if !strings.Contains(out, "level=WARN msg=\"acme certificate event\" event=cert_failed") ||
+		!strings.Contains(out, "level=INFO msg=\"acme certificate event\" event=cert_obtaining") {
+		t.Errorf("log levels: %q", out)
+	}
 	if !strings.Contains(out, "event=cert_failed name=decoy.test") || strings.Contains(out, "203.0.113.9") ||
 		strings.Contains(out, "/private/path") || strings.Contains(out, "client-chosen") {
 		t.Errorf("log lines: %q", out)

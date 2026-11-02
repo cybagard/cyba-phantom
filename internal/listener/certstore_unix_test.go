@@ -599,7 +599,9 @@ func TestTS16LoadGivesTheChangedRuleWhenEveryTryFindsAnotherFile(t *testing.T) {
 	calls := 0
 	safefiletest.Set(t, safefiletest.Hooks{AfterCheck: func(string) {
 		// A new file with its own inode replaces the key file at each try.
-		calls++
+		if calls++; calls > loadTries {
+			t.Fatalf("Load made try %d, want at most %d", calls, loadTries)
+		}
 		tmp := filepath.Join(cache, ".tmp-replace")
 		mustNil(t, os.WriteFile(tmp, []byte("v"), 0o600))
 		mustNil(t, os.Rename(tmp, filepath.Join(cache, "key")))

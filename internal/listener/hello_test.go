@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
@@ -404,7 +405,10 @@ func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 			}
 		}
 		// Shutdown waits for the close of the plain client.
-		if err := rg.s.Shutdown(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := rg.s.Shutdown(ctx)
+		cancel()
+		if err != nil {
 			t.Fatal(err)
 		}
 		evs := q.Drain()
@@ -475,12 +479,17 @@ func TestTS17LocationCutStopsAtFirstToken(t *testing.T) {
 	}
 }
 
-// T-S-17: location makes a fixed number of allocations for a path of 16384
-// "<", not one for each escaped byte.
+// T-S-17: location makes one allocation for each path, not one for each
+// escaped byte. The path "<<" fills the Grow hint, which is 1 byte above a size
+// class of the allocator. A hint 2 bytes short then needs a second allocation.
+// The rows "" and "<" give one allocation also with a hint 2 bytes short.
+// maxLocation sets the hint of the long path.
 func TestTS17LocationAllocationsAreFixed(t *testing.T) {
-	u := &url.URL{Path: strings.Repeat("<", 16384)}
-	if got := testing.AllocsPerRun(10, func() { location("decoy.test", u) }); got != 1 {
-		t.Fatalf("%v allocations, want 1", got)
+	for _, p := range []string{"", "<", "<<", strings.Repeat("<", 16384)} {
+		u := &url.URL{Path: p}
+		if got := testing.AllocsPerRun(10, func() { location("decoy.test", u) }); got != 1 {
+			t.Fatalf("path of %d bytes: %v allocations, want 1", len(p), got)
+		}
 	}
 }
 

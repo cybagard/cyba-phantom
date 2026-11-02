@@ -157,6 +157,21 @@ func TestTS16EndedContextGivesAnErrorWithTheContextIdentity(t *testing.T) {
 	}
 }
 
+// T-S-16: Open works with a cache directory of one part, as cmd/phantom uses.
+func TestTS16OpenAcceptsAOnePartCacheDirectory(t *testing.T) {
+	state, err := os.OpenRoot(t.TempDir())
+	mustNil(t, err)
+	defer state.Close()
+	s, err := Open(state, "certs")
+	mustNil(t, err)
+	defer s.Close()
+	ctx := context.Background()
+	mustNil(t, s.Store(ctx, "key", []byte("v")))
+	if b, err := s.Load(ctx, "key"); err != nil || string(b) != "v" {
+		t.Fatalf("Load = %q, %v", b, err)
+	}
+}
+
 func TestTS16OpenRefusesABadCacheDirectoryPath(t *testing.T) {
 	dir := t.TempDir()
 	state, err := os.OpenRoot(dir)
@@ -229,7 +244,7 @@ func TestTS16BadKeysAreRefused(t *testing.T) {
 		}
 	}
 	// 8 parts and 255 bytes are the limit and work.
-	for _, key := range []string{"1/2/3/4/5/6/7/8", strings.Repeat("a", 255), "A-z_0.9@h"} {
+	for _, key := range []string{"1/2/3/4/5/6/7/8", strings.Repeat("a", 255), "A-z_0.9@h", "Z"} {
 		mustNil(t, s.Store(ctx, key, []byte("x")))
 	}
 	if _, err := s.List(ctx, "a/..", false); err == nil {
