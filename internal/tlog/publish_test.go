@@ -502,6 +502,26 @@ func TestTI09_BackoffEndDuringOtherSend(t *testing.T) {
 	if _, stored, _ := a.got(); !slices.Equal(stored, []uint64{1}) {
 		t.Fatalf("target 0 stored %v, want 1", stored)
 	}
+	if strings.Contains(e.logs.String(), "refused an entry") {
+		t.Fatalf("a pass with no bad entry logged a refused entry: %s", e.logs)
+	}
+}
+
+// T-I-09: the wait of a pass is the time to the earliest backoff end.
+func TestTI09_PassWaitsForTheEarliestBackoffEnd(t *testing.T) {
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	e.add(t, 1)
+	e.pub.state[0].next = e.clock.t.Add(60 * time.Second)
+	e.pub.state[1].next = e.clock.t.Add(30 * time.Second)
+	if wait, pending := e.pub.pass(); !pending || wait != 30*time.Second {
+		t.Fatalf("pass = %v, %v, want 30s and pending", wait, pending)
+	}
+	for i, f := range []*fakeTarget{a, b} {
+		if attempts, _, _ := f.got(); len(attempts) != 0 {
+			t.Fatalf("target %d had attempts %v, want none", i, attempts)
+		}
+	}
 }
 
 // T-I-09: backoff of 30 s that doubles up to min(interval, 1 h), jitter of
