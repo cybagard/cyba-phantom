@@ -164,15 +164,16 @@
 //   - A closing fence line with text after its backticks closes the fence. A
 //     shorter run of backticks also closes it. Then the real closing line
 //     opens a new fence. CommonMark does not close the fence at those lines.
-//   - stelint does not know a "~~~" fence. So a backtick fence line in a "~~~"
-//     block opens a fence.
+//   - stelint does not know a "~~~" fence. It counts the words in a "~~~"
+//     block. A backtick fence line in that block opens a fence.
 //   - Directly after a line of an indented code block, a line with two or
 //     three spaces of indent stays code. CommonMark reads it as text.
 //   - A fence line with four or more spaces of indent, or a tab, opens or
 //     closes a fence. Outside a list item, CommonMark does not read that line
 //     as a fence.
 //   - Directly after a line of a list item, a text line with no indent or one
-//     space ends the item. CommonMark reads it as part of the item paragraph.
+//     space ends the item. When the item ends in a paragraph, CommonMark reads
+//     the line as part of it.
 //
 // In a Go file, gofmt can put the next line of a trailing comment at the indent
 // column. stelint reads the two lines as two texts. So it counts no sentence
