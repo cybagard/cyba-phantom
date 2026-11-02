@@ -279,9 +279,7 @@ func TestTU07ReopenContinuesFromTheSameHead(t *testing.T) {
 		size, root := l.Head()
 		l.Close()
 		l = openTestLog(t, state)
-		if s2, r2 := l.Head(); s2 != size || r2 != root {
-			t.Fatalf("reopen at %d: size %d, root %x", n, s2, r2)
-		}
+		checkHead(t, fmt.Sprint("reopen at ", n), l.Head, size, root)
 	}
 	events = append(events, appendTo(t, l, len(events), len(events)+1)...)
 	if want := rfcRoot(rfcLeaves(events)); rootOf(l) != tlog.Hash(want) {
@@ -298,27 +296,21 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 	// tile write, then the head write.
 	for _, fail := range []string{"tile/8/0/000", headName} {
 		restore := failRename(t, fail)
-		_, first := l.Append(testEvent(255))
-		if first == nil {
+		_, stopErr := l.Append(testEvent(255))
+		if stopErr == nil {
 			t.Fatalf("%s failure: Append returned nil", fail)
 		}
-		if s2, r2 := l.Head(); s2 != size || r2 != root {
-			t.Fatalf("%s failure: head changed to %d, %x", fail, s2, r2)
-		}
+		checkHead(t, fail+" failure", l.Head, size, root)
 		// The log refuses each later Append with the same error, also when the writes work.
 		restore()
-		if _, err := l.Append(testEvent(255)); !sameStop(err, first) {
-			t.Fatalf("%s failure: next Append gave %v, want %v", fail, err, first)
+		if _, err := l.Append(testEvent(255)); !sameStop(err, stopErr) {
+			t.Fatalf("%s failure: next Append gave %v, want %v", fail, err, stopErr)
 		}
-		if s2, r2 := l.Head(); s2 != size || r2 != root {
-			t.Fatalf("%s failure: head changed to %d, %x", fail, s2, r2)
-		}
+		checkHead(t, fail+" failure", l.Head, size, root)
 		// A reopen loads the state on disk, and the append works again.
 		l.Close()
 		l = openTestLog(t, state)
-		if s2, r2 := l.Head(); s2 != size || r2 != root {
-			t.Fatalf("%s failure: reopen gave %d, %x", fail, s2, r2)
-		}
+		checkHead(t, fail+" reopen", l.Head, size, root)
 	}
 	appendTo(t, l, 255, 256)
 	events = append(events, testEvent(255))
@@ -331,12 +323,33 @@ func TestTU07FailedWriteKeepsTheOldHead(t *testing.T) {
 // stops the fault. The test restores the earlier calls when it ends.
 func failRename(t testing.TB, name string) (stop func()) {
 	t.Helper()
+	return failRenameIf(t, func(to string) bool { return to == name })
+}
+
+// failRenameIf makes each rename fail for which fail returns true. fail gets
+// the new name of the file. The returned function stops the fault.
+func failRenameIf(t testing.TB, fail func(to string) bool) (stop func()) {
+	t.Helper()
 	return setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
-		if to == name {
+		if fail(to) {
 			return errors.New("injected")
 		}
 		return realRename(r, from, to)
 	}})
+}
+
+// checkHead fails t if get does not give the wanted size and root. get is
+// l.Head, l.store.TreeHead, or the result of onDisk.
+func checkHead(t *testing.T, what string, get func() (int64, tlog.Hash), size int64, root tlog.Hash) {
+	t.Helper()
+	if s, r := get(); s != size || r != root {
+		t.Fatalf("%s: head %d, %x, want %d, %x", what, s, r, size, root)
+	}
+}
+
+// onDisk returns a reader of the head file below dir, for checkHead.
+func onDisk(t *testing.T, dir string) func() (int64, tlog.Hash) {
+	return func() (int64, tlog.Hash) { return diskHead(t, dir) }
 }
 
 // failDirSyncAfterRename makes the next fsync of a directory fail after the
@@ -384,29 +397,21 @@ func TestTU07HeadRenameThenDirectorySyncFailureStopsAppends(t *testing.T) {
 	size, root := l.Head()
 	stop := failDirSyncAfterRename(t, headName)
 	a, b := testEvent(1000), testEvent(2000)
-	_, first := l.Append(a)
+	_, stopErr := l.Append(a)
 	stop()
-	if first == nil {
+	if stopErr == nil {
 		t.Fatal("Append returned nil after the failed fsync")
 	}
-	if s2, r2 := l.Head(); s2 != size || r2 != root {
-		t.Fatalf("head in memory changed to %d, %x", s2, r2)
-	}
+	checkHead(t, "head in memory", l.Head, size, root)
 	rootA := tlog.Hash(rfcRoot(rfcLeaves(append(slices.Clone(events), a))))
-	if s2, r2 := diskHead(t, dir); s2 != size+1 || r2 != rootA {
-		t.Fatalf("head on disk is %d, %x, want %d, %x", s2, r2, size+1, rootA)
+	checkHead(t, "head on disk", onDisk(t, dir), size+1, rootA)
+	if _, err := l.Append(b); !sameStop(err, stopErr) {
+		t.Fatalf("next Append gave %v, want %v", err, stopErr)
 	}
-	if _, err := l.Append(b); !sameStop(err, first) {
-		t.Fatalf("next Append gave %v, want %v", err, first)
-	}
-	if s2, r2 := diskHead(t, dir); s2 != size+1 || r2 != rootA {
-		t.Fatalf("head on disk changed to %d, %x", s2, r2)
-	}
+	checkHead(t, "head on disk after the next Append", onDisk(t, dir), size+1, rootA)
 	l.Close()
 	l = openTestLog(t, state)
-	if s2, r2 := l.Head(); s2 != size+1 || r2 != rootA {
-		t.Fatalf("reopen gave %d, %x, want %d, %x", s2, r2, size+1, rootA)
-	}
+	checkHead(t, "reopen", l.Head, size+1, rootA)
 	tile, err := l.store.readTile(tlog.Tile{H: TileHeight, N: 0, W: int(size) + 1})
 	leaf := LeafHash(a)
 	if err != nil || !bytes.Equal(tile[size*tlog.HashSize:], leaf[:]) {
@@ -441,8 +446,14 @@ func TestTU07TileDirectorySyncFailureThenReopenSyncsTheTileBeforeTheHead(t *test
 	}
 	l.Close()
 
-	// If the fsync works, it comes before the write of the head.
 	l = openTestLog(t, state)
+	appendSyncsTileBeforeHead(t, l)
+}
+
+// appendSyncsTileBeforeHead appends event 256. It checks that the fsync of the
+// partial tile directory comes before the write of the head.
+func appendSyncsTileBeforeHead(t *testing.T, l *Log) {
+	t.Helper()
 	var steps []string
 	renameHook := func(r *os.Root, from, to string) error {
 		if to == headName {
@@ -495,36 +506,13 @@ func TestTU07NarrowWriteSyncsTheDirectoryOfTheKeptWiderFile(t *testing.T) {
 	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != kept {
 		t.Fatalf("Append gave %v, want the rule %q for %s", err, ruleWrite, kept)
 	}
-	if s2, r2 := l.Head(); s2 != size || r2 != root {
-		t.Fatalf("head in memory changed to %d, %x", s2, r2)
-	}
-	if s2, r2 := diskHead(t, dir); s2 != size || r2 != root {
-		t.Fatalf("head on disk covers the hash: %d, %x", s2, r2)
-	}
+	checkHead(t, "head in memory", l.Head, size, root)
+	checkHead(t, "head on disk", onDisk(t, dir), size, root)
 	l.Close()
 
 	// If the fsync works, it comes before the write of the head.
 	l = openTestLog(t, state)
-	var steps []string
-	renameHook := func(r *os.Root, from, to string) error {
-		if to == headName {
-			steps = append(steps, "head")
-		}
-		return realRename(r, from, to)
-	}
-	dirHook := func(f *os.File) error {
-		steps = append(steps, "sync "+filepath.Clean(f.Name()))
-		return realSync(f)
-	}
-	setHooks(t, hooks{dir: dirHook, rename: renameHook})
-	if idx, err := l.Append(testEvent(256)); err != nil || idx != 256 {
-		t.Fatalf("Append gave %d, %v", idx, err)
-	}
-	tileSync := slices.IndexFunc(steps, func(s string) bool { return strings.HasSuffix(s, "tile/8/0/001.p") })
-	head := slices.Index(steps, "head")
-	if tileSync < 0 || head < 0 || tileSync > head {
-		t.Fatalf("steps %q: want the fsync of the tile directory before the head", steps)
-	}
+	appendSyncsTileBeforeHead(t, l)
 	events = append(events, testEvent(256))
 	if want := rfcRoot(rfcLeaves(events)); rootOf(l) != tlog.Hash(want) || sizeOf(l) != 257 {
 		t.Fatalf("after the retry: size %d, root %x, want %x", sizeOf(l), rootOf(l), want)
@@ -560,12 +548,8 @@ func TestTU07NarrowWriteOverAStaleWiderFileFailsTheDirectorySync(t *testing.T) {
 	if !errors.As(err, &e) || e.Rule != ruleWrite || e.Name != narrow {
 		t.Fatalf("Append gave %v, want the rule %q for %s", err, ruleWrite, narrow)
 	}
-	if s2, r2 := l.Head(); s2 != size || r2 != root {
-		t.Fatalf("head in memory changed to %d, %x", s2, r2)
-	}
-	if s2, r2 := diskHead(t, dir); s2 != size || r2 != root {
-		t.Fatalf("head on disk covers the hashes: %d, %x", s2, r2)
-	}
+	checkHead(t, "head in memory", l.Head, size, root)
+	checkHead(t, "head on disk", onDisk(t, dir), size, root)
 	l.Close()
 
 	l = openTestLog(t, state)
@@ -681,7 +665,7 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			ref := openTestLog(t, refState)
 			appendTo(t, ref, 0, start+500)
 
-			heads, tileWrites := 0, 0
+			heads, tileWrites, dirSyncs := 0, 0, 0
 			restore := setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
 				if to == headName {
 					heads++
@@ -689,6 +673,9 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 					tileWrites++
 				}
 				return realRename(r, from, to)
+			}, dir: func(*os.File) error {
+				dirSyncs++
+				return nil
 			}})
 			first, err := l.AppendBatch(batchOf(start, start+500))
 			restore()
@@ -701,18 +688,19 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			if want := map[int]int{0: 3, 100: 4}[start]; tileWrites != want {
 				t.Fatalf("AppendBatch wrote %d tiles, want %d", tileWrites, want)
 			}
-			size, root := ref.Head()
-			if s2, r2 := l.Head(); s2 != size || r2 != root {
-				t.Fatalf("batch head %d, %x, want %d, %x", s2, r2, size, root)
+			// A second write of a tile skips the rename but syncs the
+			// directories. So the count of syncs shows a repeated write.
+			if want := map[int]int{0: 15, 100: 24}[start]; dirSyncs != want {
+				t.Fatalf("AppendBatch synced directories %d times, want %d", dirSyncs, want)
 			}
+			size, root := ref.Head()
+			checkHead(t, "batch", l.Head, size, root)
 			checkCache(t, l)
 
 			// The reopen reads the full tile, and the proof reads a leaf inside it.
 			l.Close()
 			l = openTestLog(t, state)
-			if s2, r2 := l.Head(); s2 != size || r2 != root {
-				t.Fatalf("reopen head %d, %x, want %d, %x", s2, r2, size, root)
-			}
+			checkHead(t, "reopen", l.Head, size, root)
 			checkProof(t, l, 200)
 			checkProof(t, l, start+499)
 			if start == 100 {
@@ -720,32 +708,37 @@ func TestTU07BatchGivesTheHeadOfSingleAppends(t *testing.T) {
 			}
 			appendTo(t, l, start+500, start+501)
 			appendTo(t, ref, start+500, start+501)
-			if s2, r2 := l.Head(); s2 != size+1 || r2 != rootOf(ref) {
-				t.Fatalf("head after the next append %d, %x", s2, r2)
-			}
+			checkHead(t, "next append", l.Head, size+1, rootOf(ref))
 		})
 	}
 }
 
 func TestTU07BatchEdges(t *testing.T) {
-	state, _ := newLogState(t)
+	state, dir := newLogState(t)
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 3)
 	size, root := l.Head()
 	if first, err := l.AppendBatch(nil); err != nil || first != size {
 		t.Fatalf("empty batch gave %d, %v", first, err)
 	}
-	if s2, r2 := l.Head(); s2 != size || r2 != root {
-		t.Fatal("an empty batch changed the head")
-	}
+	checkHead(t, "empty batch", l.Head, size, root)
 	// A batch that does not fit, or has too many tiles, is refused before any write.
 	l.size = maxSize - 1
 	var e *Error
 	if _, err := l.AppendBatch(batchOf(0, 2)); !errors.As(err, &e) || e.Rule != ruleFull || errors.Is(err, ErrHeadOnDisk) {
 		t.Fatalf("a batch above the largest size gave %v, want the rule %q with no mark", err, ruleFull)
 	}
+	// One leaf fits at the largest size minus one. The tiles in memory are
+	// those of a small log. So the cache check refuses it before a write.
+	logDir := filepath.Join(dir, "tlog")
+	before := snapshot(t, logDir)
+	if _, err := l.AppendBatch(batchOf(0, 1)); !errors.As(err, &e) || e.Rule != ruleCache || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch of one leaf at the largest size minus one gave %v, want the rule %q", err, ruleCache)
+	}
+	if l.err != nil || snapshot(t, logDir) != before {
+		t.Fatalf("a refused batch stopped the log (%v) or changed a file", l.err)
+	}
 	l.size = 0
-	e = nil
 	if _, err := l.AppendBatch(make([]EventHash, maxBatchTiles*fullWidth+1)); !errors.As(err, &e) || e.Rule != ruleBatch || errors.Is(err, ErrHeadOnDisk) {
 		t.Fatalf("a batch with too many leaves gave %v, want the rule %q with no mark", err, ruleBatch)
 	}
@@ -754,10 +747,48 @@ func TestTU07BatchEdges(t *testing.T) {
 	}
 }
 
-// sameStop reports whether err and first hold the same *Error.
-func sameStop(err, first error) bool {
+// sameStop reports whether err and stopErr hold the same *Error.
+func sameStop(err, stopErr error) bool {
 	var a, b *Error
-	return errors.As(err, &a) && errors.As(first, &b) && a == b
+	return errors.As(err, &a) && errors.As(stopErr, &b) && a == b
+}
+
+// A batch with exactly maxBatchTiles changed tiles passes the check of the
+// tile count. The tiles in memory do not match the tree, so the batch stops
+// at the cache check, before a write. A batch with one leaf more fails the
+// check of the tile count. Neither batch changes a file.
+func TestTU07BatchAtTheTileBoundPassesTheTileCheck(t *testing.T) {
+	state, dir := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 3)
+	l.tiles[0].n++
+	const end = 4079 * fullWidth
+	if got := batchTiles(3, end); got != maxBatchTiles {
+		t.Fatalf("the batch changes %d tiles, want %d", got, maxBatchTiles)
+	}
+	logDir := filepath.Join(dir, "tlog")
+	before := snapshot(t, logDir)
+	var e *Error
+	_, err := l.AppendBatch(make([]EventHash, end-3))
+	if !errors.As(err, &e) || e.Rule != ruleCache || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch at the tile bound gave %v, want the rule %q", err, ruleCache)
+	}
+	if snapshot(t, logDir) != before {
+		t.Fatal("a refused batch changed a file")
+	}
+
+	// One leaf over the bound changes one tile more than the store accepts.
+	const over = end + 1
+	if got := batchTiles(3, over); got != maxBatchTiles+1 {
+		t.Fatalf("the batch changes %d tiles, want %d", got, maxBatchTiles+1)
+	}
+	_, err = l.AppendBatch(make([]EventHash, over-3))
+	if !errors.As(err, &e) || e.Rule != ruleBatch || errors.Is(err, ErrHeadOnDisk) {
+		t.Fatalf("a batch over the tile bound gave %v, want the rule %q with no mark", err, ruleBatch)
+	}
+	if l.err != nil || snapshot(t, logDir) != before {
+		t.Fatalf("a refused batch stopped the log (%v) or changed a file", l.err)
+	}
 }
 
 // A batch that fits the leaf limit but changes more tiles than the store
@@ -807,12 +838,12 @@ func TestTS13StoppedLogAfterTileWriteFailureIsNotMarked(t *testing.T) {
 	state, _ := newLogState(t)
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 255)
-	restore := setHooks(t, hooks{rename: func(*os.Root, string, string) error { return errors.New("injected") }})
-	_, first := l.AppendBatch(batchOf(255, 300))
+	restore := failRenameIf(t, func(string) bool { return true })
+	_, stopErr := l.AppendBatch(batchOf(255, 300))
 	restore()
 	_, next := l.AppendBatch(batchOf(255, 300))
-	if first == nil || next == nil || errors.Is(first, ErrHeadOnDisk) || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, first) {
-		t.Fatalf("first error %v, next error %v: want the same error with no mark", first, next)
+	if stopErr == nil || next == nil || errors.Is(stopErr, ErrHeadOnDisk) || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, stopErr) {
+		t.Fatalf("stop error %v, next error %v: want the same error with no mark", stopErr, next)
 	}
 }
 
@@ -822,10 +853,10 @@ func TestTS13StoppedLogAfterMarkedFailureIsNotMarked(t *testing.T) {
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 255)
 	failDirSyncAfterRename(t, headName)
-	_, first := l.AppendBatch(batchOf(255, 300))
+	_, stopErr := l.AppendBatch(batchOf(255, 300))
 	_, next := l.AppendBatch(batchOf(255, 300))
-	if !errors.Is(first, ErrHeadOnDisk) || next == nil || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, first) {
-		t.Fatalf("first error %v, next error %v: want a mark on the first only", first, next)
+	if !errors.Is(stopErr, ErrHeadOnDisk) || next == nil || errors.Is(next, ErrHeadOnDisk) || !sameStop(next, stopErr) {
+		t.Fatalf("stop error %v, next error %v: want a mark on the stop error only", stopErr, next)
 	}
 }
 
@@ -872,35 +903,35 @@ func TestTS13HeadDirectoryOpenFailureAfterRenameIsMarked(t *testing.T) {
 	if !errors.Is(err, ErrHeadOnDisk) || !errors.As(err, &e) || e.Rule != ruleWrite {
 		t.Fatalf("AppendBatch gave %v, want the rule %q with the mark", err, ruleWrite)
 	}
-	if s2, r2 := l.Head(); s2 != size || r2 != root {
-		t.Fatalf("head in memory changed to %d, %x", s2, r2)
-	}
+	checkHead(t, "head in memory", l.Head, size, root)
 	// The Store keeps the old tree head, while the head file holds the new one.
-	if s2, r2 := l.store.TreeHead(); s2 != size || r2 != root {
-		t.Fatalf("store head in memory changed to %d, %x", s2, r2)
-	}
+	checkHead(t, "store head", l.store.TreeHead, size, root)
 	wantRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
-	if s2, r2 := diskHead(t, dir); s2 != 300 || r2 != wantRoot {
-		t.Fatalf("head on disk is %d, %x, want 300, %x", s2, r2, wantRoot)
-	}
+	checkHead(t, "head on disk", onDisk(t, dir), 300, wantRoot)
 }
 
-func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
-	// The batch from size 255 to size 300 writes the tiles in the order in which
-	// the batch first changes them: tile 0 of level 0 with 256 hashes, tile 0 of
-	// level 1 with one hash, and tile 1 of level 0 with 44 hashes. Then it writes
-	// the head.
+func TestTS13BatchWriteFailureKeepsTheHeadInMemory(t *testing.T) {
+	// The batch from size 255 to size 300 writes the tiles in the order of
+	// their first change. First is tile 0 of level 0 with 256 hashes. Next is
+	// tile 0 of level 1 with one hash. Last is tile 1 of level 0 with 44
+	// hashes. Then the batch writes the head.
+
+	// failed is the name of the file whose rename failTileRename made fail.
+	var failed string
 	failTileRename := func(nth int) func(t *testing.T) {
 		return func(t *testing.T) {
 			tiles := 0
-			setHooks(t, hooks{rename: func(r *os.Root, from, to string) error {
-				if to != headName {
-					if tiles++; tiles == nth {
-						return errors.New("injected")
-					}
+			failRenameIf(t, func(to string) bool {
+				if to == headName {
+					return false
 				}
-				return realRename(r, from, to)
-			}})
+				tiles++
+				fail := tiles == nth
+				if fail {
+					failed = to
+				}
+				return fail
+			})
 		}
 	}
 	batchRoot := tlog.Hash(rfcRoot(rfcLeaves(batchOf(0, 300))))
@@ -909,16 +940,19 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 		fault func(t *testing.T)
 		// covers is true when the head on disk covers the batch after the failure.
 		covers bool
+		// file is the file whose rename fails, for the cases of failTileRename.
+		file string
 	}{
-		{"level 0 tile 0 rename", failTileRename(1), false},
-		{"level 1 tile 0 rename", failTileRename(2), false},
-		{"level 0 tile 1 rename", failTileRename(3), false},
-		{"level 0 tile 1 directory sync", func(t *testing.T) { failDirSyncAfterRename(t, "tile/8/0/001.p/44") }, false},
-		{"head rename", func(t *testing.T) { failRename(t, headName) }, false},
+		{"level 0 tile 0 rename", failTileRename(1), false, "tile/8/0/000"},
+		{"level 1 tile 0 rename", failTileRename(2), false, "tile/8/1/000.p/1"},
+		{"level 0 tile 1 rename", failTileRename(3), false, "tile/8/0/001.p/44"},
+		{"level 0 tile 1 directory sync", func(t *testing.T) { failDirSyncAfterRename(t, "tile/8/0/001.p/44") }, false, ""},
+		{"head rename", func(t *testing.T) { failRename(t, headName) }, false, ""},
 		// The rename of the head works and the fsync of its directory fails.
-		{"head directory sync", func(t *testing.T) { failDirSyncAfterRename(t, headName) }, true},
+		{"head directory sync", func(t *testing.T) { failDirSyncAfterRename(t, headName) }, true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			failed = ""
 			state, dir := newLogState(t)
 			l := openTestLog(t, state)
 			appendTo(t, l, 0, 255)
@@ -926,10 +960,13 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 			// Save the calls. restore then stops the fault that c.fault sets.
 			restore := setHooks(t, hooks{})
 			c.fault(t)
-			_, first := l.AppendBatch(batchOf(255, 300))
+			_, stopErr := l.AppendBatch(batchOf(255, 300))
 			restore()
-			if first == nil {
+			if stopErr == nil {
 				t.Fatal("AppendBatch returned nil")
+			}
+			if failed != c.file {
+				t.Fatalf("the failed rename was of %q, want %q", failed, c.file)
 			}
 			// The head in memory is always the old head. The head on disk is the old
 			// head, or it covers the batch.
@@ -943,33 +980,27 @@ func TestTS13BatchWriteFailureKeepsTheOldHead(t *testing.T) {
 				if loaded {
 					wantSize, wantRoot = diskSize, diskRoot
 				}
-				if s2, r2 := l.Head(); s2 != wantSize || r2 != wantRoot {
-					t.Fatalf("%s: head %d, %x, want %d, %x", what, s2, r2, wantSize, wantRoot)
-				}
-				if s2, r2 := diskHead(t, dir); s2 != diskSize || r2 != diskRoot {
-					t.Fatalf("%s: head on disk %d, %x, want %d, %x", what, s2, r2, diskSize, diskRoot)
-				}
+				checkHead(t, what, l.Head, wantSize, wantRoot)
+				checkHead(t, what+", on disk", onDisk(t, dir), diskSize, diskRoot)
 			}
 			check(l, "after the failure", false)
 			// The Store keeps the old tree head in each case.
-			if s2, r2 := l.store.TreeHead(); s2 != size || r2 != root {
-				t.Fatalf("store head in memory changed to %d, %x", s2, r2)
-			}
+			checkHead(t, "store head", l.store.TreeHead, size, root)
 			// A rename error can come after the rename took effect. So an error
 			// of the head rename has the mark, also if the old head is on disk.
 			marked := c.covers || c.name == "head rename"
-			if got := errors.Is(first, ErrHeadOnDisk); got != marked {
-				t.Fatalf("errors.Is(first, ErrHeadOnDisk) = %v, want %v", got, marked)
+			if got := errors.Is(stopErr, ErrHeadOnDisk); got != marked {
+				t.Fatalf("errors.Is(stopErr, ErrHeadOnDisk) = %v, want %v", got, marked)
 			}
 			// The log refuses each later call with the same error, also when the writes work.
-			if _, err := l.Append(testEvent(255)); !sameStop(err, first) {
-				t.Fatalf("next Append gave %v, want %v", err, first)
+			if _, err := l.Append(testEvent(255)); !sameStop(err, stopErr) {
+				t.Fatalf("next Append gave %v, want %v", err, stopErr)
 			}
-			if _, err := l.AppendBatch(batchOf(255, 256)); !sameStop(err, first) {
-				t.Fatalf("next AppendBatch gave %v, want %v", err, first)
+			if _, err := l.AppendBatch(batchOf(255, 256)); !sameStop(err, stopErr) {
+				t.Fatalf("next AppendBatch gave %v, want %v", err, stopErr)
 			}
-			if _, err := l.AppendBatch(nil); !sameStop(err, first) {
-				t.Fatalf("next empty AppendBatch gave %v, want %v", err, first)
+			if _, err := l.AppendBatch(nil); !sameStop(err, stopErr) {
+				t.Fatalf("next empty AppendBatch gave %v, want %v", err, stopErr)
 			}
 			check(l, "after the refused calls", false)
 
@@ -1154,9 +1185,7 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 		wantOpenError(t, l, err, "tile/8/0/001.p", ruleWrite)
 		restore()
 		l = openTestLog(t, state)
-		if s2, r2 := l.Head(); s2 != size || r2 != root {
-			t.Fatalf("reopen gave %d, %x, want %d, %x", s2, r2, size, root)
-		}
+		checkHead(t, "reopen", l.Head, size, root)
 	})
 
 	// The Append of event 255 writes the full tile, and then the write of the
