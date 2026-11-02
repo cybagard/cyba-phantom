@@ -203,9 +203,9 @@ func TestTI09_SkipSummaryComesAtTheHourEdge(t *testing.T) {
 		must(t, e.drop(size))
 	}
 	t0 := time.Unix(1_700_000_000, 0)
-	// A step of skipLogEvery-1 is the last time before the edge, so it adds
-	// no line. A step of exactly skipLogEvery is the edge, so it adds one
-	// line for each target.
+	// A drop at t0 plus skipLogEvery-1 is the last time before the edge, so
+	// it adds no line. A drop at exactly t0 plus skipLogEvery is the edge, so
+	// it adds one line for each target.
 	for i, c := range []struct {
 		at    time.Time
 		lines int

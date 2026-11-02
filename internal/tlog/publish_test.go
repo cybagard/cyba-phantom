@@ -511,6 +511,7 @@ func TestTI09_BackoffEndDuringOtherSend(t *testing.T) {
 func TestTI09_PassWaitsForTheEarliestBackoffEnd(t *testing.T) {
 	a, b := newTarget(t), newTarget(t)
 	e := newPub(t, time.Minute, []*fakeTarget{a, b})
+	e.add(t, 1)
 	e.pub.state[0].next = e.clock.t.Add(60 * time.Second)
 	e.pub.state[1].next = e.clock.t.Add(30 * time.Second)
 	if wait, pending := e.pub.pass(); !pending || wait != 30*time.Second {
