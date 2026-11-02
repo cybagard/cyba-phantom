@@ -892,6 +892,27 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 	}
 }
 
+// T-S-13: deriveVkey refuses a key text and an origin that loadSigner never
+// passes to it, and it does not panic.
+func TestTS13_DeriveVkeyRefusals(t *testing.T) {
+	skey := newKeyText(t, testOrigin)
+	signer, err := note.NewSigner(skey)
+	must(t, err)
+	vkey, err := deriveVkey(skey, testOrigin, signer)
+	must(t, err)
+	if _, err := note.NewVerifier(vkey); err != nil {
+		t.Fatalf("the public key %q is not accepted: %v", vkey, err)
+	}
+	for _, c := range []struct{ name, skey, origin string }{
+		{"origin that note refuses", skey, "a b"},
+		{"key of 3 bytes", "PRIVATE+KEY+" + testOrigin + "+00000000+AQAA", testOrigin},
+	} {
+		if got, err := deriveVkey(c.skey, c.origin, signer); err == nil || got != "" {
+			t.Errorf("%s: public key %q, error %v; want an error", c.name, got, err)
+		}
+	}
+}
+
 // T-S-13: os.Root.OpenFile follows a relative symlink that stays inside the
 // root, so the key load compares the file before and after the open. With
 // O_NONBLOCK, the open of a FIFO returns and the file is not a regular file.

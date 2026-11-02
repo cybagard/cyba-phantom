@@ -340,10 +340,32 @@ func failRenameIf(t testing.TB, fail func(to string) bool) (stop func()) {
 
 // checkHead fails t if get does not give the wanted size and root. get is
 // l.Head, l.store.TreeHead, or the result of onDisk.
-func checkHead(t *testing.T, what string, get func() (int64, tlog.Hash), size int64, root tlog.Hash) {
+func checkHead(t testing.TB, what string, get func() (int64, tlog.Hash), size int64, root tlog.Hash) {
 	t.Helper()
 	if s, r := get(); s != size || r != root {
 		t.Fatalf("%s: head %d, %x, want %d, %x", what, s, r, size, root)
+	}
+}
+
+// fatalSpy counts the calls of Fatalf and does not stop the test.
+type fatalSpy struct {
+	testing.TB
+	fatals int
+}
+
+func (s *fatalSpy) Helper()               {}
+func (s *fatalSpy) Fatalf(string, ...any) { s.fatals++ }
+
+func TestTS13CheckHeadComparesTheRootAndTheSize(t *testing.T) {
+	get := func() (int64, tlog.Hash) { return 3, tlog.Hash{1} }
+	spy := &fatalSpy{TB: t}
+	checkHead(spy, "same head", get, 3, tlog.Hash{1})
+	if spy.fatals != 0 {
+		t.Fatalf("a matching head recorded %d failures", spy.fatals)
+	}
+	checkHead(spy, "other root", get, 3, tlog.Hash{2})
+	if spy.fatals != 1 {
+		t.Fatalf("the same size with another root recorded %d failures, want 1", spy.fatals)
 	}
 }
 
@@ -718,7 +740,11 @@ func TestTU07BatchEdges(t *testing.T) {
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 3)
 	size, root := l.Head()
-	if first, err := l.AppendBatch(nil); err != nil || first != size {
+	// An empty batch writes nothing, so a failed rename does not reach it.
+	restore := failRenameIf(t, func(string) bool { return true })
+	first, err := l.AppendBatch(nil)
+	restore()
+	if err != nil || first != size {
 		t.Fatalf("empty batch gave %d, %v", first, err)
 	}
 	checkHead(t, "empty batch", l.Head, size, root)
@@ -830,6 +856,62 @@ func TestTS13TilesInMemoryThatDoNotMatchAreNotMarked(t *testing.T) {
 	}
 	if snapshot(t, logDir) != before {
 		t.Fatal("a refused batch changed a file")
+	}
+	// A tile of the right number with one hash too many is refused as well.
+	l.tiles[0].n--
+	l.tiles[0].data = append(slices.Clone(l.tiles[0].data), make([]byte, tlog.HashSize)...)
+	_, err = l.AppendBatch(batchOf(3, 5))
+	if !errors.As(err, &e) || e.Rule != ruleCache || errors.Is(err, ErrHeadOnDisk) || l.err != nil {
+		t.Fatalf("AppendBatch gave %v (log error %v), want the rule %q with no mark", err, l.err, ruleCache)
+	}
+	if snapshot(t, logDir) != before {
+		t.Fatal("a refused batch changed a file")
+	}
+}
+
+// The hash read of the cache and the tile save of the loader stop at the top
+// level.
+func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
+	var tiles [maxLevel + 1]tileBuf
+	tiles[maxLevel] = tileBuf{0, make([]byte, tlog.HashSize)}
+	view := cacheView{&tiles}
+	top := tlog.StoredHashIndex(maxLevel*TileHeight, 0)
+	if hs, err := view.ReadHashes([]int64{top}); err != nil || len(hs) != 1 {
+		t.Fatalf("a hash at level %d gave %v, %v", maxLevel, hs, err)
+	}
+	var e *Error
+	above := tlog.StoredHashIndex((maxLevel+1)*TileHeight, 0)
+	if _, err := view.ReadHashes([]int64{above}); !errors.As(err, &e) || e.Rule != ruleCache {
+		t.Fatalf("a hash at level %d gave %v, want the rule %q", maxLevel+1, err, ruleCache)
+	}
+
+	var saved [maxLevel + 1]tileBuf
+	r := &loader{tiles: &saved}
+	data := [][]byte{{1}, {2}, {3}}
+	r.SaveTiles([]tlog.Tile{{L: maxLevel, N: 7}, {L: maxLevel + 1}, {L: -1}}, data)
+	if saved[maxLevel].n != 7 || !bytes.Equal(saved[maxLevel].data, data[0]) {
+		t.Fatalf("the tile at level %d is %+v", maxLevel, saved[maxLevel])
+	}
+}
+
+// A failed batch keeps the spare capacity of the level 0 buffer as it was.
+func TestTS13FailedBatchKeepsTheTileBuffers(t *testing.T) {
+	state, _ := newLogState(t)
+	l := openTestLog(t, state)
+	appendTo(t, l, 0, 255)
+	old := l.tiles[0].data
+	buf := make([]byte, len(old), len(old)+tlog.HashSize*fullWidth)
+	copy(buf, old)
+	l.tiles[0].data = buf
+	want := slices.Clone(buf[:cap(buf)])
+	restore := failRenameIf(t, func(string) bool { return true })
+	_, err := l.AppendBatch(batchOf(255, 300))
+	restore()
+	if err == nil {
+		t.Fatal("the batch with failing renames gave no error")
+	}
+	if !bytes.Equal(buf[:cap(buf)], want) {
+		t.Fatal("a failed batch wrote into the buffer of the log")
 	}
 }
 
