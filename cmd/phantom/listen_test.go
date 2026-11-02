@@ -213,9 +213,9 @@ func cpuTime() time.Duration {
 }
 
 // slow gives the time of the start line and the CPU time of the process, both
-// since begin. A low CPU time means the process did not run. It can have waited
-// for a CPU or for the disk. The pressure shows the kind of wait that the
-// kernel counted.
+// since begin. A low CPU time means that the process did not run for most of
+// the time. It waited, for example for a CPU or for the disk. The pressure
+// shows the kind of wait that the kernel counted.
 // Call it after the start line.
 func (r *running) slow() string {
 	cpu := fmt.Sprintf(", process CPU time %v since begin", cpuTime()-r.cpu)
@@ -258,6 +258,7 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) 
 	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
+	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
 	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
