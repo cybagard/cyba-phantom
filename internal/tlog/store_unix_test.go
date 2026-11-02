@@ -520,7 +520,8 @@ func TestTS13OpenRefusesGroupDirectoryWithNoSearchBit(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(group, dirMode) })
 	openErr(t, state, ruleRead)
 
-	// The parent has no search bit. The Lstat of the group fails, with no Mode.
+	// The parent has no search bit. Then the Lstat of the group fails, and it
+	// gives no file info.
 	state, dir = newLogState(t)
 	openStore(t, state).Close()
 	level := filepath.Join(dir, "tlog", "tile", "8")

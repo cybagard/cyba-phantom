@@ -427,7 +427,7 @@ func TestTS13HugeTreeSizeIsAnError(t *testing.T) {
 		if want := "tile/8/6/000.p/1"; !errors.As(err, &e) || e.Rule != ruleMissing || e.Name != want {
 			t.Fatalf("got %v, want the rule %q for %s", err, ruleMissing, want)
 		}
-		// verify refuses a size outside the range itself.
+		// A direct call of verify refuses a size outside the range.
 		empty, _ := newLogState(t)
 		s := openStore(t, empty)
 		for _, n := range []int64{-1, maxSize + 1} {
@@ -833,8 +833,8 @@ func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
 	mustNil(t, s.WriteTile(tile, make([]byte, 3*tlog.HashSize)))
 }
 
-// A write of a tile that the tree head covers in full writes nothing. It does
-// not count as a tile of the batch.
+// WriteTile does not count a tile that the tree head covers in full as a tile
+// of the batch.
 func TestTU07WriteOfCoveredTileIsNotCounted(t *testing.T) {
 	state, _ := newLogState(t)
 	s := openStore(t, state)
@@ -989,8 +989,8 @@ func subtreeLog(t *testing.T, tiles int, level0 bool) (*os.Root, string, int64, 
 }
 
 // Open skips a group directory that is not there. It then goes on at the first
-// tile of the next group. The test misses the group of tile 1005 and has tile
-// 2000 in the next group.
+// tile of the next group. Here the group of tile 1005 is not there, and tile
+// 2000 is in the next group.
 func TestTS13OpenJumpsToTheNextGroupAfterAMissingGroup(t *testing.T) {
 	state, dir, size, root := subtreeLog(t, groupTiles+5, false)
 	partial := filepath.Join(dir, "tlog", "tile", "8", "0", "x002", "000.p")
@@ -1429,8 +1429,9 @@ func TestTS13SetHeadChecksNewTileAgainstTheLevelAbove(t *testing.T) {
 	}
 }
 
-// A full tile of the level below maxLevel is checked against the tile of level
-// maxLevel. Here the hash in the upper tile does not match the lower tile.
+// checkAbove checks a full tile of the level below maxLevel against the tile
+// of level maxLevel. Here the hash in the upper tile does not match the lower
+// tile.
 func TestTS13CheckAboveReachesTheHighestLevel(t *testing.T) {
 	state, dir := newLogState(t)
 	s := openStore(t, state)
