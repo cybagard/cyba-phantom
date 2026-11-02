@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,6 +291,47 @@ func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
 	}
 }
 
+// T-U-18: a failed PRAGMA synchronous=NORMAL after the row stops the writer. A
+// fork signal keeps its own rule, because the first error wins.
+func TestTU18SinkFailedPragmaAfterTheRowStopsTheWriter(t *testing.T) {
+	cases := []struct {
+		name             string
+		good, size       uint64
+		root             byte
+		errName, errRule string
+		writerRule       string
+	}{
+		{"database", 3, 4, 1, writerName, ruleDatabase, ruleDatabase},
+		{"fork", 5, 5, 2, sinkName, ruleRowFork, ruleFork},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newSinkRig(t)
+			var armed atomic.Bool
+			r.w.beforePragma = func(stmt string) error {
+				if armed.Load() && stmt == "PRAGMA synchronous=NORMAL" {
+					return errors.New("pragma failed")
+				}
+				return nil
+			}
+			stop := r.start()
+			if err := r.sink.Add(c.good, r.note(c.good, 1)); err != nil {
+				t.Fatal(err)
+			}
+			armed.Store(true)
+			wantRule(t, r.sink.Add(c.size, r.note(c.size, c.root)), c.errName, c.errRule)
+			eventually(t, func() bool { return !r.w.Healthy() })
+			wantRule(t, r.w.Err(), writerName, c.writerRule)
+			if r.spool.count() != 1 {
+				t.Errorf("spool %d (want 1)", r.spool.count())
+			}
+			if err := stop(); !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // T-U-18: a writer that is not healthy, and no writer, give the verified note to
 // the spool with no row, and the sink counts it.
 func TestTU18SinkStoppedOrMissingWriterGivesTheSpoolTheNote(t *testing.T) {
@@ -306,6 +348,14 @@ func TestTU18SinkStoppedOrMissingWriterGivesTheSpoolTheNote(t *testing.T) {
 	}
 	if err := none.Add(3, []byte("junk")); err == nil || none.RowMissing() != 1 {
 		t.Errorf("a note that does not verify: error %v, missing %d", err, none.RowMissing())
+	}
+	// The largest size that a row holds is accepted; the next size is refused.
+	if err := none.Add(math.MaxInt64, r.note(math.MaxInt64, 1)); err != nil || r.spool.count() != 3 {
+		t.Errorf("size MaxInt64: error %v, spool %d (want nil, 3)", err, r.spool.count())
+	}
+	wantRule(t, none.Add(1<<63, r.note(1<<63, 1)), sinkName, ruleSize)
+	if r.spool.count() != 3 {
+		t.Errorf("spool %d (want 3)", r.spool.count())
 	}
 }
 

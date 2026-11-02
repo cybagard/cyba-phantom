@@ -63,7 +63,10 @@ func content(t *testing.T, db *sql.DB, file string) string {
 func TestTU18MigrationNamesAreChecked(t *testing.T) {
 	db, file := opened(t)
 	before := content(t, db, file)
+	dangling := testSet(nil)
+	dangling["0002_b.sql"] = &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("gone")}
 	bad := []fstest.MapFS{
+		dangling,
 		testSet(map[string]string{"0003_c.sql": "SELECT 1"}),
 		testSet(map[string]string{"0002_b.sql": "SELECT 1", "0002_c.sql": "SELECT 1"}),
 		testSet(map[string]string{"2_b.sql": "SELECT 1"}),
@@ -135,6 +138,8 @@ func TestTU18RefusedDatabasesAreNotChanged(t *testing.T) {
 		{"no meta", "CREATE TABLE t (a); INSERT INTO t VALUES (1)", ruleForeign},
 		{"no version", meta + "INSERT INTO meta VALUES ('install_id', 'x')", ruleForeign},
 		{"text version", meta + "INSERT INTO meta VALUES ('schema_version', 'x')", ruleForeign},
+		{"zero version", meta + "INSERT INTO meta VALUES ('schema_version', '0')", ruleForeign},
+		{"negative version", meta + "INSERT INTO meta VALUES ('schema_version', '-1')", ruleForeign},
 	}
 	for _, c := range cases {
 		db, file := opened(t)

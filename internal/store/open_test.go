@@ -173,6 +173,40 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	// rules; the parent check then refuses it because it does not exist.
 	_, err = Open(root, "tlog2/events.db", opt)
 	wantRule(t, err, "tlog2", ruleParent)
+	// The first and last permitted bytes of each range pass the path rules.
+	_, err = Open(root, "Z09/events.db", opt)
+	wantRule(t, err, "Z09", ruleParent)
+}
+
+// T-S-15: a state directory path with a symlink part is resolved. The driver
+// opens the resolved path, and the location check accepts it.
+func TestTS15StatePathWithSymlinkIsResolved(t *testing.T) {
+	top, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, link := filepath.Join(top, "state"), filepath.Join(top, "link")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("state", link); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	db := mustOpen(t, root, "events.db")
+	defer db.Close()
+	var seq int
+	var name, file string
+	if err := db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(state, "events.db"); name != "main" || file != want {
+		t.Fatalf("database_list gives %q %q, want main %q", name, file, want)
+	}
 }
 
 // T-S-15: a state directory path with ? or # would reach the driver as a

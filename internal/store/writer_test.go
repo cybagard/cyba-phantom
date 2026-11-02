@@ -855,6 +855,30 @@ func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
 	}
 }
 
+// T-U-18: a write gives the timing hook the time of the batch and of its
+// commit. Both are real times of this call. The commit is part of the batch.
+func TestTU18WriteGivesTheTimingHookRealTimes(t *testing.T) {
+	r := newRig(t, 100)
+	var batchTime, commitTime time.Duration
+	var calls int
+	r.w.timing = func(batch, commit time.Duration) {
+		batchTime, commitTime = batch, commit
+		calls++
+	}
+	e, err := event.NewEvent(time.Now, event.Input{Kind: event.KindRequest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := time.Now()
+	if err := r.w.write([]*event.Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(begin)
+	if calls != 1 || commitTime < 0 || commitTime > batchTime || batchTime > elapsed {
+		t.Fatalf("%d calls; commit %v, batch %v, elapsed %v (want 0 <= commit <= batch <= elapsed)", calls, commitTime, batchTime, elapsed)
+	}
+}
+
 // T-U-18: at a tick with an empty queue and no pending count, the writer runs no
 // transaction.
 func TestTU18TickWithNoPendingCountRunsNoTransaction(t *testing.T) {
