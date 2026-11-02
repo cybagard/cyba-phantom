@@ -192,6 +192,20 @@ func workspaceError(got string) error {
 	return nil
 }
 
+// vendorError gives an error when the module root has a vendor entry. With a
+// vendor folder, go build can use other packages than the go list of this
+// test.
+func vendorError(root string) error {
+	_, err := os.Lstat(filepath.Join(root, "vendor"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("vendor entry in the module root: %w", err)
+	}
+	return errors.New("the module root has a vendor entry")
+}
+
 // realPath gives the absolute path of p with each symbolic link resolved.
 func realPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
@@ -320,8 +334,9 @@ func lineSet(lines []string) map[string]bool {
 
 // TestTS21ReleaseCommandsDoNotListTestSeam gets the dependencies of the
 // release commands for each platform in releaseConfigs, with cgo off. It
-// fails on each dependency that depProblem names, and on a go workspace. On a
-// platform with usesDepList, it fails on each package that is not on
+// fails on each dependency that depProblem names, on a go workspace, and on a
+// vendor entry in the root.
+// On a platform with usesDepList, it fails on each package that is not on
 // release-deps.txt. It also fails on a line of the file that is not a
 // dependency on a linux platform.
 // The loop has no subtests. Thus the union of the platforms does not depend on
@@ -340,6 +355,8 @@ func lineSet(lines []string) map[string]bool {
 //   - A cut of the commands, in the variable or in the checkDepList call.
 //     Nothing compares them with the commands that the Makefile builds. Unit
 //     cases test the command check of checkDepList, not this function.
+//   - A cut of the vendorError call. The module root has no vendor entry, so
+//     only the unit rows test vendorError.
 func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 	root := moduleRoot(t)
 	realRoot, err := realPath(root)
@@ -351,6 +368,9 @@ func TestTS21ReleaseCommandsDoNotListTestSeam(t *testing.T) {
 		t.Fatalf("go env GOWORK: %v", err)
 	}
 	if err := workspaceError(string(work)); err != nil {
+		t.Fatal(err)
+	}
+	if err := vendorError(root); err != nil {
 		t.Fatal(err)
 	}
 	commands := []string{modPath + "/cmd/phantom", modPath + "/cmd/phantom-verify"}
@@ -791,6 +811,58 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 		if has := workspaceError(got) != nil; has != bad {
 			t.Errorf("workspaceError(%q) has an error: %t, want %t", got, has, bad)
 		}
+	}
+}
+
+// TestTS21ReleaseVendorEntry checks vendorError on planted module roots. A
+// vendor folder, file, link and dangling link each give an error. A root that
+// is a regular file also gives an error, as Lstat cannot read its vendor entry.
+func TestTS21ReleaseVendorEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, root string)
+		bad   bool
+	}{
+		{"no entry", func(*testing.T, string) {}, false},
+		{"folder with an empty modules.txt", func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "vendor"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "vendor", "modules.txt"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"regular file", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "vendor"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"link to a folder", func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "real"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real", filepath.Join(root, "vendor")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"dangling link", func(t *testing.T, root string) {
+			if err := os.Symlink("gone", filepath.Join(root, "vendor")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+	} {
+		root := t.TempDir()
+		tc.plant(t, root)
+		if has := vendorError(root) != nil; has != tc.bad {
+			t.Errorf("%s: vendorError has an error: %t, want %t", tc.name, has, tc.bad)
+		}
+	}
+	file := filepath.Join(t.TempDir(), "root")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if vendorError(file) == nil {
+		t.Error("root that is a regular file: vendorError has no error, want one")
 	}
 }
 
@@ -1715,6 +1787,10 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 	plant("testdata/x.s", "TEXT ·f(SB),0,$0\n\tRET\n")
 	plant(".hidden/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("_skipped/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
+	// The skipped folder is not the direct parent folder of these files.
+	for _, p := range []string{"x/_skip/y/a.go", "x/testdata/y/a.go", "x/.hide/y/a.go"} {
+		plant(p, file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
+	}
 	plant("comment.go", "package p\n\n// the text //go:linkname is not a directive\n"+
 		"/* //go:linkname is not a directive */\n")
 	plant("pointer.go", file("\t\"net\"\n\t\"net/http\"\n",
