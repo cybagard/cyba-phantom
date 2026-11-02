@@ -187,7 +187,7 @@ func TestTI03StartDoesNotWaitForTheCA(t *testing.T) {
 // T-I-01: a cached certificate that is due for renewal starts its renewal when
 // Start runs. Start does not wait for the CA. The CA accepts connections and
 // never answers. Start returns within 500 ms. The guard sees a request to the
-// CA within 5 s, but the maintenance tick of the cache is 10 minutes away. A
+// CA within 5 s. The maintenance tick of the cache is 10 minutes away. A
 // handshake still gets the cached certificate.
 func TestTI01StartWithADueCertificateStartsTheRenewalWithoutWaiting(t *testing.T) {
 	ca := blackholeAddr(t)

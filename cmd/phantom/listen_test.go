@@ -62,7 +62,7 @@ type startWriter struct {
 	text    syncBuf
 	started chan struct{}
 	signal  sync.Once // closes started one time
-	at      time.Time // the time of the start line; read it after started is closed
+	at      time.Time // the start line time; read it after started closes
 }
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
@@ -211,8 +211,8 @@ func cpuTime() time.Duration {
 	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
 }
 
-// slow tells a miss of the wall time limit from a starved process: the time of the start line and the
-// CPU time of the process, both since begin. A CPU time far below the wall time means the process had no CPU.
+// slow gives the time of the start line and the CPU time of the process, both
+// since begin. A CPU time far below the wall time means the process had no CPU.
 // Call it after the start line.
 func (r *running) slow() string {
 	return fmt.Sprintf("; start line %v after begin, process CPU time %v since begin", r.out.at.Sub(r.begin), cpuTime()-r.cpu)
@@ -649,8 +649,8 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 }
 
 // coldHandshake makes one TLS handshake for decoyName at https. It checks that the handshake ends at most 2 s
-// after begin and gives the certificate der. The caller closes the connection. When the check fails, the text
-// of slow is in the message.
+// after begin and gives the certificate der. The caller closes the connection.
+// When the check fails, the message has the text of slow.
 func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf, slow func() string) *tls.Conn {
 	t.Helper()
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})

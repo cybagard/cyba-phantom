@@ -353,7 +353,7 @@ func TestTS22NewWiresQueueAndCounters(t *testing.T) {
 		"other counters":      func(c *Config) { c.Counters = event.NewCounters() },
 		"zero-value queue":    func(c *Config) { c.Queue = &event.Queue{} },
 		"zero-value counters": func(c *Config) { c.Counters = &event.Counters{} },
-		// The counters of a zero-value queue are nil, so they match nil counters.
+		// A zero-value queue has nil counters, so they match nil counters.
 		"zero-value queue, no counters": func(c *Config) { c.Queue, c.Counters = &event.Queue{}, nil },
 	} {
 		bad := cfg

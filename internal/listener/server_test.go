@@ -603,8 +603,8 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// A Close that gives a slot back two times empties the semaphore. A spare
-		// token keeps this Close from waiting on it, so the test can fail.
+		// A double release empties the semaphore. A spare token keeps this
+		// Close from waiting on it, so the test can fail.
 		t.Cleanup(func() {
 			select {
 			case sem <- struct{}{}:
@@ -1375,9 +1375,9 @@ func TestTS17OpenConnectionRecord(t *testing.T) {
 }
 
 // T-S-17: a TCP connection from the address of the sensor sends no byte and
-// closes, like the self-check of certmagic before a challenge. It gives no
-// request event and no ClientHello capture. The test logs the change of the
-// error lines and of the slots in use.
+// closes. This is like the self-check of certmagic before a challenge. It
+// gives no request event and no ClientHello capture. The test logs the change
+// of the error lines and of the slots in use.
 func TestTS17SelfDialGivesNoEventAndNoCapture(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 16)
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
