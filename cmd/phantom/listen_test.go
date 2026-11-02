@@ -62,6 +62,7 @@ type startWriter struct {
 	text    syncBuf
 	started chan struct{}
 	signal  sync.Once // closes started one time
+	at      time.Time // the start line time; read it after started closes
 }
 
 func newStartWriter() *startWriter { return &startWriter{started: make(chan struct{})} }
@@ -85,7 +86,7 @@ func (w *startWriter) hasStarted() bool {
 func (w *startWriter) Write(p []byte) (int, error) {
 	n, err := w.text.Write(p)
 	if !w.hasStarted() && strings.Contains(w.text.String(), "phantom: started") {
-		w.signal.Do(func() { close(w.started) })
+		w.signal.Do(func() { w.at = time.Now(); close(w.started) })
 	}
 	return n, err
 }
@@ -198,6 +199,23 @@ type running struct {
 	out    *startWriter
 	err    syncBuf
 	begin  time.Time
+	cpu    time.Duration // the CPU time of the process at begin
+}
+
+// cpuTime is the CPU time (user and system) that this process used so far.
+func cpuTime() time.Duration {
+	var ru syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &ru) != nil {
+		return 0
+	}
+	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
+}
+
+// slow gives the time of the start line and the CPU time of the process, both
+// since begin. A low CPU time means the process did not run. It had no CPU, or
+// it waited. Call it after the start line.
+func (r *running) slow() string {
+	return fmt.Sprintf("; start line %v after begin, process CPU time %v since begin", r.out.at.Sub(r.begin), cpuTime()-r.cpu)
 }
 
 // launchServe runs serveWith until the test ends, and restores the standard log output at the end.
@@ -212,7 +230,7 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	ctx, cancel := context.WithCancel(t.Context())
-	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
+	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime()}
 	go func() { r.code = serveWith(ctx, cancel, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
@@ -234,7 +252,7 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) 
 	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
-	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now()}
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime()}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
@@ -632,14 +650,15 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 
 // coldHandshake makes one TLS handshake for decoyName at https. It checks that the handshake ends at most 2 s
 // after begin and gives the certificate der. The caller closes the connection.
-func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf) *tls.Conn {
+// When the check fails, the message has the text of slow.
+func coldHandshake(t *testing.T, https string, begin time.Time, der []byte, stderr *syncBuf, slow func() string) *tls.Conn {
 	t.Helper()
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", https, &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("handshake: %v; stderr %q", err, stderr.String())
 	}
 	if d := time.Since(begin); d > 2*time.Second {
-		t.Errorf("handshake after %v, want at most 2s", d)
+		t.Errorf("handshake after %v, want at most 2s%s", d, slow())
 	}
 	if !bytes.Equal(conn.ConnectionState().PeerCertificates[0].Raw, der) {
 		t.Error("the handshake did not give the cached certificate")
@@ -672,7 +691,7 @@ func TestTI03_ColdStart(t *testing.T) {
 	if n := warns.Load(); n != 0 {
 		t.Errorf("WarnExpiry called %d times with no static entry, want 0", n)
 	}
-	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err).Close()
+	defer coldHandshake(t, https.Addr().String(), r.begin, der, &r.err, r.slow).Close()
 	t.Logf("goroutines: %d before the start, %d after it", before, runtime.NumGoroutine())
 }
 
@@ -833,7 +852,7 @@ func TestTI03_OpenFailureKeepsServe(t *testing.T) {
 				t.Errorf("redirect: %v, %v; want 308", resp, err)
 			}
 			if c.cached {
-				coldHandshake(t, https, r.begin, der, &r.err).Close()
+				coldHandshake(t, https, r.begin, der, &r.err, r.slow).Close()
 			} else {
 				srv := server()
 				lines := srv.ErrorLines()
@@ -1191,7 +1210,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		ended: exited,
 		info:  func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) },
 	}.until(t, out.started, true)
-	coldHandshake(t, https, begin, der, errb).Close()
+	coldHandshake(t, https, begin, der, errb, func() string { return "" }).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
 	<-exited
 	if waitErr != nil {
