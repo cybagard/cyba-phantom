@@ -9,15 +9,15 @@ import (
 	"strings"
 )
 
-// The caps and names of a route map (SEC-32).
+// The name and the caps of a route map, and the caps of a vhost name (SEC-32).
 const (
-	routeMapName   = "routes.json"
-	maxRouteMapLen = 64 << 10
-	maxRoutes      = 256
-	maxPathBytes   = 256
-	maxHeaderSlots = 4
-	maxHostBytes   = 253
-	maxLabelBytes  = 63
+	routeMapName     = "routes.json"
+	maxRouteMapBytes = 64 << 10
+	maxRoutes        = 256
+	maxPathBytes     = 256
+	maxHeaderSlots   = 4
+	maxHostBytes     = 253
+	maxLabelBytes    = 63
 )
 
 // routeTypes are the content types that a route can have. The match is exact.
@@ -27,8 +27,8 @@ var routeTypes = []string{
 	"image/svg+xml", "image/x-icon",
 }
 
-// Route is one route of a vhost. One of Template and Asset is empty. Both are
-// full archive names.
+// Route is one route of a vhost. One of Template and Asset is empty. The other
+// is a full archive name.
 type Route struct {
 	Path, Template, Asset, Type string
 	Headers                     []HeaderSlot
@@ -75,9 +75,10 @@ type rawSlot struct {
 	Trap maybe[string] `json:"trap"`
 }
 
-// parseRoutes parses the route map of each vhost of the archive. A file must
-// not be directly below vhosts/. Each vhost needs a valid name and a route map.
-// The error holds no byte of the archive.
+// parseRoutes parses the route map of each vhost of the archive. A host name
+// that is the second name part of a file below vhosts/ is a vhost. A file must
+// not be directly below vhosts/. Each vhost needs a valid name and a
+// routes.json file. The error holds no byte of the archive.
 func parseRoutes(a *Archive, set map[string]*template.Template) (map[string]RouteMap, error) {
 	out := map[string]RouteMap{}
 	for _, name := range a.Names() {
@@ -104,7 +105,7 @@ func parseRoutes(a *Archive, set map[string]*template.Template) (map[string]Rout
 // empty b, which is not an object.
 func parseRouteMap(a *Archive, set map[string]*template.Template, host string, b []byte) (RouteMap, bool) {
 	var raw rawRouteMap
-	if len(b) > maxRouteMapLen || json.Unmarshal(b, &raw, parseOpts...) != nil {
+	if len(b) > maxRouteMapBytes || json.Unmarshal(b, &raw, parseOpts...) != nil {
 		return RouteMap{}, false
 	}
 	prefix := templateDir + host + "/"
@@ -143,9 +144,10 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, host string, b
 	return rm, true
 }
 
-// validPath reports whether p is a route path: 1 to 256 bytes of / A-Z a-z 0-9
-// . _ -, with a first byte "/". The path "/" is the root. In another path, no
-// segment is empty, "." or "..".
+// validPath reports whether p is a route path. It has 1 to 256 bytes. The
+// first byte is "/". Each other byte is a letter A-Z or a-z, a digit, or one
+// of `/ . _ -`. The path "/" alone is the root. In another path, no segment is
+// empty, "." or "..".
 func validPath(p string) bool {
 	if len(p) < 1 || len(p) > maxPathBytes || p[0] != '/' ||
 		strings.ContainsFunc(p, func(c rune) bool { return !strings.ContainsRune("/._-", c) && !alnum(c) }) {

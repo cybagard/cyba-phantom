@@ -216,8 +216,9 @@ func (l *Loader) Healthy() bool {
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: chain
 // check, read, SHA-256, signature, archive, manifest, key ID or rotation,
 // engine, expiry and rollback. Then: templates, route maps, seed.
-// Each vhost directory below vhosts/ holds a routes.json file. A file directly
-// in vhosts/, a bad vhost name or a bad route map gives ErrContentInvalid.
+// A host name that is the second name part of a file below vhosts/ is a vhost.
+// Each vhost has a routes.json file. A file directly in vhosts/, a bad vhost
+// name or a bad route map gives ErrContentInvalid.
 // The seed is the plain file of a reference bundle. In a proprietary bundle it
 // is the sealed file, opened with the install key. Another form, both, none,
 // or a size other than 32 bytes gives ErrSeedInvalid. The seed stays in memory.

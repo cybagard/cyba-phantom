@@ -365,8 +365,8 @@ func withRoutes(ents []ent) []ent {
 	return out
 }
 
-// site is the files of the tests. It has two vhosts, and the name of one is a
-// prefix of the name of the other. It has a template outside vhosts/.
+// site gives the files of the tests. It has two vhosts, and the name of one is
+// a prefix of the name of the other. It has a template outside vhosts/.
 func site(routes string) []ent {
 	return []ent{
 		tf(hostDir+"index.tmpl", "i"), tf(hostDir+"a.png", "p"), tf(hostDir+"sub/b.png", "q"),
@@ -376,11 +376,12 @@ func site(routes string) []ent {
 	}
 }
 
-// refuse loads each route map of hosts h.example and expects content_invalid.
+// refuse loads each route map for the host h.example and expects
+// content_invalid. The name of a subtest is the text, cut at 200 bytes.
 func refuse(t *testing.T, texts ...string) {
 	t.Helper()
-	for i, text := range texts {
-		t.Run(fmt.Sprintf("%d %.40s", i, text), func(t *testing.T) { loadRaw(t, ErrContentInvalid, nil, site(text)...) })
+	for _, text := range texts {
+		t.Run(fmt.Sprintf("%.200s", text), func(t *testing.T) { loadRaw(t, ErrContentInvalid, nil, site(text)...) })
 	}
 }
 
@@ -405,8 +406,12 @@ func TestTU08RouteMapRefused(t *testing.T) {
 		more(`,"routes":[`+route+`]`), more(`,"x":1`), `{"Routes":[`+route+`]}`, doc(`"Path":"/a"`, ti, ty),
 		ok+"x", ok+ok, `{}`, `{"routes":[]}`, manyRoutes(257), more(`,"not_found":null`))
 	refuse(t, `{"routes":null}`, doc(pa, ti, ty, `"headers":null`), doc(pa, `"template":null`, png, ty),
-		doc(pa, ti, ty, `"headers":[{"name":null,"trap":"t"}]`))
-	for _, p := range []string{"", "a", "/a b", "/a%41", "/a?x", "//x", "/a/", "/a//b", "/./a", "/a/..", "/" + strings.Repeat("a", 256)} {
+		doc(pa, ti, ty, `"headers":[{"name":null,"trap":"t"}]`), doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":null}]`),
+		doc(`"path":null`, ti, ty))
+	refuse(t, doc(pa, `"path":"/b"`, ti, ty), doc(pa, ti, ty, `"x":1`), doc(pa, ti, `"Type":"text/html; charset=utf-8"`),
+		doc(pa, ti, ty, `"headers":[{"name":"X-A","name":"X-B","trap":"t"}]`), rt("null"),
+		doc(pa, ti, ty, `"headers":[null]`))
+	for _, p := range []string{"", "a", "/a b", "/:", "/a%41", "/a?x", "//x", "/a/", "/a//b", "/./a", "/a/..", "/" + strings.Repeat("a", 256)} {
 		refuse(t, doc(`"path":"`+p+`"`, ti, ty))
 	}
 	refuse(t, rt(route, route))
@@ -454,9 +459,10 @@ func TestTU08RouteForms(t *testing.T) {
 		l63 + ".x": true, l64 + ".x": false, "h.example.": false, "h": false, "": false, "h.1": false,
 		"z09a.example": true, "h@.example": false, "h[.example": false, "h`.example": false,
 		"h{.example": false, "h:.example": false,
+		"h/.example": false,
 	} {
 		if got := validHost(host); got != want {
-			t.Errorf("validHost(%.20q) = %v", host, got)
+			t.Errorf("validHost of %d bytes %q = %v; want %v", len(host), host, got, want)
 		}
 	}
 	for path, want := range map[string]bool{
@@ -465,9 +471,10 @@ func TestTU08RouteForms(t *testing.T) {
 		"": false, "a": false, "//": false, "/a/": false, "/.": false, "/..": false, "/a b": false,
 		"/%": false, "/\x00": false, "/é": false, "/azAZ09": true,
 		"/@": false, "/[": false, "/`": false, "/{": false,
+		"/:": false,
 	} {
 		if got := validPath(path); got != want {
-			t.Errorf("validPath(%.20q) = %v", path, got)
+			t.Errorf("validPath of %d bytes %q = %v; want %v", len(path), path, got, want)
 		}
 	}
 }
@@ -546,6 +553,21 @@ func TestTU08RouteMapAccepted(t *testing.T) {
 	}
 	if nb := loadWith(t, nil, tf("traps/x.json", "{}")); len(nb.Vhosts()) != 0 {
 		t.Errorf("a bundle with no vhost has vhosts %v", nb.Vhosts())
+	}
+}
+
+// T-U-08: Vhosts gives the names in sorted order, not in map order.
+func TestTU08RouteVhostsSorted(t *testing.T) {
+	var ents []ent
+	var want []string
+	for i := range 40 {
+		h := fmt.Sprintf("h%02d.example", i*7%40)
+		want = append(want, h)
+		ents = append(ents, tf(templateDir+h+"/index.tmpl", "i"))
+	}
+	b := loadRaw(t, nil, nil, withRoutes(ents)...)
+	if got, sorted := b.Vhosts(), slices.Sorted(slices.Values(want)); !slices.Equal(got, sorted) {
+		t.Errorf("vhosts: %d names, start %q; want %d names, start %q", len(got), got[:min(3, len(got))], len(sorted), sorted[:3])
 	}
 }
 
