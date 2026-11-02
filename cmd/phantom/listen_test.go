@@ -1169,17 +1169,27 @@ const sigtermWait = shutdownTime + 10*time.Second
 // TestTI03_StopWaitsForOpenConnection opens a TLS connection and sends
 // a request head that is not complete. Then it cancels serve.
 // Serve must wait for the open connection, up to shutdownTime. The test
-// checks the first second after the cancel. Serve must return soon after
-// the client closes the connection, before shutdownTime ends (NFR-05).
+// checks the first second after the cancel. The servers must stop soon after
+// the client closes the connection, before shutdownTime ends. Serve must
+// then return with exit 0 (NFR-05).
 func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	https, plain, caAddr := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), caAddr)
 	p := tempState(t, cfg)
 	ca, _ := cfg.Get("acme.ca")
-	der := seedCache(t, p, ca.Str)
+	seedCache(t, p, ca.Str)
+	// serve calls stopACME after the servers stopped,
+	// and before the store closes.
+	stopped := make(chan time.Time, 1)
+	oldStop := stopACME
+	t.Cleanup(func() { stopACME = oldStop })
+	stopACME = func(a *listener.ACME) { stopped <- time.Now(); oldStop(a) }
 	r := launchServe(t, cfg, p, realDeps)
 	r.waitStarted(t)
-	conn := coldHandshake(t, https.Addr().String(), r.begin, der, &r.err, r.slow)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", https.Addr().String(), &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("handshake: %v; stderr %q", err, r.err.String())
+	}
 	defer conn.Close() // Each path closes the connection, also after a t.Fatal.
 	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: " + decoyName + "\r\n")); err != nil {
 		t.Fatal(err)
@@ -1191,10 +1201,19 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	case <-time.After(time.Second):
 	}
 	conn.Close()
+	closed := time.Now()
 	select {
 	case <-r.done:
-	case <-time.After(shutdownTime / 2):
-		t.Fatalf("serve did not return %v after the client closed", shutdownTime/2)
+	case <-time.After(sigtermWait):
+		t.Fatalf("serve did not return %v after the client closed", sigtermWait)
+	}
+	select {
+	case at := <-stopped:
+		if d := at.Sub(closed); d >= shutdownTime/2 {
+			t.Errorf("the servers stopped %v after the client closed, want less than %v", d, shutdownTime/2)
+		}
+	default:
+		t.Error("serve did not call stopACME")
 	}
 	if r.code != 0 {
 		t.Errorf("exit %d, want 0", r.code)
