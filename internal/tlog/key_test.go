@@ -903,9 +903,17 @@ func TestTS13_DeriveVkeyRefusals(t *testing.T) {
 	if _, err := note.NewVerifier(vkey); err != nil {
 		t.Fatalf("the public key %q is not accepted: %v", vkey, err)
 	}
+	// The same seed with another algorithm byte gives the same public key and
+	// key hash. Only the algorithm check refuses it.
+	parts := strings.SplitN(skey, "+", 5)
+	raw, err := base64.StdEncoding.DecodeString(parts[4])
+	must(t, err)
+	raw[0] = 2
+	parts[4] = base64.StdEncoding.EncodeToString(raw)
 	for _, c := range []struct{ name, skey, origin string }{
 		{"origin that note refuses", skey, "a b"},
 		{"key of 3 bytes", "PRIVATE+KEY+" + testOrigin + "+00000000+AQAA", testOrigin},
+		{"algorithm byte 2", strings.Join(parts, "+"), testOrigin},
 	} {
 		if got, err := deriveVkey(c.skey, c.origin, signer); err == nil || got != "" {
 			t.Errorf("%s: public key %q, error %v; want an error", c.name, got, err)

@@ -175,6 +175,9 @@ func TestTI09_Bound(t *testing.T) {
 		t.Fatalf("%d summary lines, want one for each target:\n%s", n, e.logs)
 	}
 	for line := range strings.Lines(strings.TrimSpace(e.logs.String())) {
+		if !strings.Contains(line, "notes were skipped") {
+			continue
+		}
 		if !strings.HasSuffix(strings.TrimSpace(line), "skipped=1 skipped_total=1") {
 			t.Fatalf("summary line %q does not end with the first counts", line)
 		}
@@ -193,18 +196,30 @@ func TestTI09_Bound(t *testing.T) {
 // after the last line, and not before.
 func TestTI09_SkipSummaryComesAtTheHourEdge(t *testing.T) {
 	e := newSpool(t)
+	drop := func(size uint64) {
+		t.Helper()
+		e.mu.Lock() // Add holds the lock for drop
+		defer e.mu.Unlock()
+		must(t, e.drop(size))
+	}
 	t0 := time.Unix(1_700_000_000, 0)
-	for i, at := range []time.Time{t0, t0.Add(skipLogEvery - 1), t0.Add(skipLogEvery)} {
-		e.now = func() time.Time { return at }
+	// A step of skipLogEvery-1 is the last time before the edge, so it adds
+	// no line. A step of exactly skipLogEvery is the edge, so it adds one
+	// line for each target.
+	for i, c := range []struct {
+		at    time.Time
+		lines int
+	}{
+		{t0, 2},
+		{t0.Add(skipLogEvery - 1), 2},
+		{t0.Add(skipLogEvery), 4},
+	} {
+		e.now = func() time.Time { return c.at }
 		size := uint64(i + 1)
 		e.add(t, size)
-		e.mu.Lock() // Add holds the lock for drop
-		err := e.drop(size)
-		e.mu.Unlock()
-		must(t, err)
-		want := []int{2, 2, 4}[i]
-		if n := strings.Count(e.logs.String(), "notes were skipped"); n != want {
-			t.Fatalf("%d summary lines after the drop at step %d, want %d", n, i, want)
+		drop(size)
+		if n := strings.Count(e.logs.String(), "notes were skipped"); n != c.lines {
+			t.Fatalf("%d summary lines after the drop at step %d, want %d", n, i, c.lines)
 		}
 	}
 }
@@ -219,14 +234,19 @@ func TestTI09_PublishOfAnEmptySpoolSendsNothing(t *testing.T) {
 }
 
 // T-I-09: a cursor file with a leading zero is not a canonical decimal size,
-// although it parses.
+// although it parses. A cursor above the largest size is not one, and it does
+// not parse.
 func TestTI09_NonCanonicalCursorIsAnError(t *testing.T) {
-	e := newSpool(t)
-	e.add(t, 1)
-	must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte("01"), 0o600))
-	f := newFake()
-	if err := e.Publish(0, f); err == nil || !strings.Contains(err.Error(), "canonical decimal") || len(f.got) != 0 {
-		t.Fatalf("Publish(0): err %v, sent %v", err, f.got)
+	for _, cursor := range []string{"01", "18446744073709551616"} {
+		t.Run(cursor, func(t *testing.T) {
+			e := newSpool(t)
+			e.add(t, 1)
+			must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte(cursor), 0o600))
+			f := newFake()
+			if err := e.Publish(0, f); err == nil || !strings.Contains(err.Error(), "canonical decimal") || len(f.got) != 0 {
+				t.Fatalf("Publish(0): err %v, sent %v", err, f.got)
+			}
+		})
 	}
 }
 

@@ -509,11 +509,17 @@ func TestTI09_BackoffEndDuringOtherSend(t *testing.T) {
 
 // T-I-09: the wait of a pass is the time to the earliest backoff end.
 func TestTI09_PassWaitsForTheEarliestBackoffEnd(t *testing.T) {
-	e := newPub(t, time.Minute, []*fakeTarget{newTarget(t), newTarget(t)})
+	a, b := newTarget(t), newTarget(t)
+	e := newPub(t, time.Minute, []*fakeTarget{a, b})
 	e.pub.state[0].next = e.clock.t.Add(60 * time.Second)
 	e.pub.state[1].next = e.clock.t.Add(30 * time.Second)
 	if wait, pending := e.pub.pass(); !pending || wait != 30*time.Second {
 		t.Fatalf("pass = %v, %v, want 30s and pending", wait, pending)
+	}
+	for i, f := range []*fakeTarget{a, b} {
+		if attempts, _, _ := f.got(); len(attempts) != 0 {
+			t.Fatalf("target %d had attempts %v, want none", i, attempts)
+		}
 	}
 }
 

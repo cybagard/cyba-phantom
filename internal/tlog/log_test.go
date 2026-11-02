@@ -353,7 +353,6 @@ type fatalSpy struct {
 	fatals int
 }
 
-func (s *fatalSpy) Helper()               {}
 func (s *fatalSpy) Fatalf(string, ...any) { s.fatals++ }
 
 func TestTS13CheckHeadComparesTheRootAndTheSize(t *testing.T) {
@@ -366,6 +365,10 @@ func TestTS13CheckHeadComparesTheRootAndTheSize(t *testing.T) {
 	checkHead(spy, "other root", get, 3, tlog.Hash{2})
 	if spy.fatals != 1 {
 		t.Fatalf("the same size with another root recorded %d failures, want 1", spy.fatals)
+	}
+	checkHead(spy, "other size", get, 4, tlog.Hash{1})
+	if spy.fatals != 2 {
+		t.Fatalf("another size with the same root recorded %d failures in all, want 2", spy.fatals)
 	}
 }
 
@@ -740,7 +743,8 @@ func TestTU07BatchEdges(t *testing.T) {
 	l := openTestLog(t, state)
 	appendTo(t, l, 0, 3)
 	size, root := l.Head()
-	// An empty batch writes nothing, so a failed rename does not reach it.
+	// The rename hook is on during the empty batch. An empty batch that
+	// writes fails here.
 	restore := failRenameIf(t, func(string) bool { return true })
 	first, err := l.AppendBatch(nil)
 	restore()
@@ -873,10 +877,11 @@ func TestTS13TilesInMemoryThatDoNotMatchAreNotMarked(t *testing.T) {
 // level.
 func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 	var tiles [maxLevel + 1]tileBuf
-	tiles[maxLevel] = tileBuf{0, make([]byte, tlog.HashSize)}
+	hash := bytes.Repeat([]byte{7}, tlog.HashSize)
+	tiles[maxLevel] = tileBuf{0, hash}
 	view := cacheView{&tiles}
 	top := tlog.StoredHashIndex(maxLevel*TileHeight, 0)
-	if hs, err := view.ReadHashes([]int64{top}); err != nil || len(hs) != 1 {
+	if hs, err := view.ReadHashes([]int64{top}); err != nil || len(hs) != 1 || !bytes.Equal(hs[0][:], hash) {
 		t.Fatalf("a hash at level %d gave %v, %v", maxLevel, hs, err)
 	}
 	var e *Error
@@ -894,24 +899,33 @@ func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 	}
 }
 
-// A failed batch keeps the spare capacity of the level 0 buffer as it was.
+// A failed batch keeps the spare capacity of the level 0 and level 1 buffers
+// as it was.
 func TestTS13FailedBatchKeepsTheTileBuffers(t *testing.T) {
 	state, _ := newLogState(t)
 	l := openTestLog(t, state)
-	appendTo(t, l, 0, 255)
-	old := l.tiles[0].data
-	buf := make([]byte, len(old), len(old)+tlog.HashSize*fullWidth)
-	copy(buf, old)
-	l.tiles[0].data = buf
-	want := slices.Clone(buf[:cap(buf)])
+	// At 511 leaves, the level 0 tile holds 255 hashes and the level 1 tile
+	// holds 1. The batch adds to both. A batch that adds to a buffer
+	// without a copy writes into its spare capacity.
+	appendTo(t, l, 0, 511)
+	var bufs, wants [2][]byte
+	for lv := range bufs {
+		old := l.tiles[lv].data
+		bufs[lv] = make([]byte, len(old), len(old)+tlog.HashSize*fullWidth)
+		copy(bufs[lv], old)
+		l.tiles[lv].data = bufs[lv]
+		wants[lv] = slices.Clone(bufs[lv][:cap(bufs[lv])])
+	}
 	restore := failRenameIf(t, func(string) bool { return true })
-	_, err := l.AppendBatch(batchOf(255, 300))
+	_, err := l.AppendBatch(batchOf(511, 560))
 	restore()
 	if err == nil {
 		t.Fatal("the batch with failing renames gave no error")
 	}
-	if !bytes.Equal(buf[:cap(buf)], want) {
-		t.Fatal("a failed batch wrote into the buffer of the log")
+	for lv, buf := range bufs {
+		if !bytes.Equal(buf[:cap(buf)], wants[lv]) {
+			t.Fatalf("a failed batch wrote into the level %d buffer of the log", lv)
+		}
 	}
 }
 
