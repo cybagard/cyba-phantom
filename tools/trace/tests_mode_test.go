@@ -239,6 +239,52 @@ func TestTestsModeRecipePrefixIsFinding(t *testing.T) {
 	}
 }
 
+// An include line is one finding, and no marker counts. A comment line with
+// the word include is not a finding. Make joins a continued line first, so
+// a comment line can hold the word on its second physical line.
+func TestTestsModeIncludeIsFinding(t *testing.T) {
+	for _, line := range []string{
+		"include r.mk", "-include r.mk", "sinclude r.mk", "$(eval include r.mk)",
+		"include\tr.mk", "include\\\nr.mk", "-include \\\n r.mk",
+	} {
+		files := defaultFiles()
+		files["Makefile"] = "# trace-test: T-P-07 perf\n" + line + "\nx:\nperf:\n"
+		files["r.mk"] = ".RECIPEPREFIX := p\n"
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		wantTestsFinding(t, got, "Makefile line 2", "include")
+		wantTestsFinding(t, got, "T-P-07", "no marker")
+	}
+	for _, line := range []string{"  # include r.mk", "# c \\\ninclude r.mk"} {
+		files := defaultFiles()
+		files["Makefile"] = "# trace-test: T-P-07 perf\n" + line + "\nperf:\n"
+		specDir, root := newTree(t, defaultRows[:1], files)
+		wantTestsClean(t, specDir, root, "M-1")
+	}
+}
+
+// A GNUmakefile or makefile in the tree root is one finding: make reads it
+// before the Makefile.
+func TestTestsModeOtherMakefileIsFinding(t *testing.T) {
+	for _, name := range []string{"GNUmakefile", "makefile"} {
+		files := defaultFiles()
+		files[name] = "x:\n"
+		specDir, root := newTree(t, defaultRows[:1], files)
+		got := testsAt(t, specDir, root, "M-1")
+		wantTestsFinding(t, got, name, "no marker counts")
+		wantTestsFinding(t, got, "T-P-07", "no marker")
+	}
+	files := defaultFiles()
+	files["o.mk"] = "x:\n"
+	specDir, root := newTree(t, defaultRows[:1], files)
+	if err := os.Symlink("o.mk", filepath.Join(root, "GNUmakefile")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	got := testsAt(t, specDir, root, "M-1")
+	wantTestsFinding(t, got, "GNUmakefile", "no marker counts")
+	wantTestsFinding(t, got, "T-P-07", "no marker")
+}
+
 func TestTestsModeRuleLinesAreRules(t *testing.T) {
 	for _, line := range []string{
 		"perf:",
@@ -266,7 +312,8 @@ func TestTestsModeRuleLinesAreRules(t *testing.T) {
 }
 
 // GNU make agrees with each fixture. "make -n perf" finds the rule, or
-// stops with "No rule to make target 'perf'".
+// stops with "No rule to make target 'perf'" or with "unterminated variable
+// reference".
 func TestHasRuleMatchesMake(t *testing.T) {
 	for _, tc := range []struct {
 		name, makefile string
@@ -297,6 +344,19 @@ func TestHasRuleMatchesMake(t *testing.T) {
 		{"close after dollar between names", "perf: a$(b$)c=1\n", false},
 		{"close after dollar then name", "perf: $(a$)b=1\n", false},
 		{"double dollar in a reference", "perf: $(a$$)b=1\n", false},
+		{"brace closer in a paren reference", "perf: $(};)X=1\n", false},
+		{"paren closer in a brace reference", "perf: ${)#}X=1\n", false},
+		{"paren closer in a brace reference, semicolon", "perf: ${);}X=1\n", false},
+		{"brace closer in a paren reference, hash", "perf: $(}#)X=1\n", false},
+		{"plain paren in a paren reference", "perf: $(a(b)c;d)=1\n", false},
+		{"plain paren in a paren reference, hash", "perf: $(a(b)c#d)=1\n", false},
+		{"plain brace in a brace reference", "perf: ${a{b}c;d}=1\n", false},
+		{"brace opener in a paren reference", "perf: $(a$${b)c;d}=1\n", true},
+		{"paren opener in a brace reference", "perf: ${a$$(b}c;d)=1\n", true},
+		{"paren reference with no closer", "perf: $(x=1\n", false},
+		{"brace reference with no closer", "perf: ${x=1\n", false},
+		{"semicolon in a reference with no closer", "perf: $(x;y=1\n", false},
+		{"reference with no closer after a name", "perf: a $(x\n", false},
 	} {
 		if got := hasRule(strings.Split(tc.makefile, "\n"), "perf"); got != tc.want {
 			t.Errorf("%s: hasRule(%q) = %v, want %v", tc.name, tc.makefile, got, tc.want)
