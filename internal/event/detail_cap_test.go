@@ -209,6 +209,13 @@ func TestTS24_ParseDetailStopsAtNinthMember(t *testing.T) {
 func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 	const errText = "event: detail text is not a flat object"
 	eight := strings.TrimSuffix(membersText(8), "}")
+	// A top-level array is not an object. Nine pairs reach the member cap only
+	// when the decoder wrongly reads the array as members.
+	array := `["m0",0`
+	for i := 1; i < 9; i++ {
+		array += `,"m` + strconv.Itoa(i) + `",0`
+	}
+	array += "]"
 	for name, tc := range map[string]struct{ text, want string }{
 		"8 members and trailing comma": {eight + ",}", errText},
 		"8 members and no brace":       {eight, errText},
@@ -222,6 +229,7 @@ func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 		"ninth value array":            {eight + `,"m8":[1]}`, errMemberCap},
 		"empty ninth name":             {eight + `,"":1}`, errMemberCap},
 		"empty ninth name and garbage": {eight + `,"":1 x}`, errMemberCap},
+		"array of 9 pairs":             {array, errText},
 	} {
 		d, err := ParseDetail(tc.text)
 		switch {
