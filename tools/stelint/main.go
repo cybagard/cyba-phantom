@@ -153,6 +153,35 @@
 // text. stelint can miss such a change. The line rule checks only the changed
 // lines that are still in the file.
 //
+// # Known limits
+//
+// In a text file, stelint reads some Markdown differently from CommonMark:
+//
+//   - After a blank line, a list item paragraph at four or more columns of
+//     indent is code to stelint. A tab moves to the next multiple of four
+//     columns. stelint does not count the words of that paragraph, or of a
+//     heading there. CommonMark can read them as part of the item.
+//   - A closing fence line with text after its backticks closes the fence. A
+//     shorter run of backticks also closes it. Then the real closing line
+//     opens a new fence. CommonMark does not close the fence at those lines.
+//   - stelint does not know a "~~~" fence. It counts the words in a "~~~"
+//     block. A backtick fence line in that block opens a fence.
+//   - Directly after a line of an indented code block, a line with two or
+//     three spaces of indent stays code. CommonMark reads it as text.
+//   - A fence line with four or more spaces of indent, or a tab, opens or
+//     closes a fence. Outside a list item, CommonMark does not read that line
+//     as a fence.
+//   - Directly after a line of a list item, a text line with no indent or one
+//     space ends the item. When the item ends in a paragraph, CommonMark reads
+//     the line as part of it.
+//
+// In a Go file, gofmt can put the next line of a trailing comment at the indent
+// column. stelint reads the two lines as two texts. So it counts no sentence
+// across them, but a reader can read one sentence.
+//
+// Other sections name more limits, for example changes that turn code into
+// prose.
+//
 // # Output
 //
 // A long line prints as "path:line: <n> columns (limit 80)". A long sentence
