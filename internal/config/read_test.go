@@ -596,8 +596,8 @@ func TestTS10_ConfigRelativePath(t *testing.T) {
 	}
 }
 
-// TestTS10_ConfigRelativePathRefused checks two cases of a relative config
-// path. The full path is refused there, but a plain relative open works.
+// TestTS10_ConfigRelativePathRefused checks two relative config paths that
+// ReadFile refuses because of the full path. os.Open of each path works.
 func TestTS10_ConfigRelativePathRefused(t *testing.T) {
 	t.Run("unsearchable parent", func(t *testing.T) {
 		if os.Geteuid() == 0 {
@@ -638,7 +638,7 @@ func TestTS10_ConfigRelativePathRefused(t *testing.T) {
 				wd, err = syscall.Getwd()
 			}
 		}
-		// The last directory brings the working directory to 3990 bytes.
+		// The last directory gives a working directory of at most 3990 bytes.
 		last := strings.Repeat("d", min(200, 3989-len(wd)))
 		if err == nil {
 			if err = os.Mkdir(last, 0o700); err == nil {

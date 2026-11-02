@@ -510,8 +510,9 @@ func TestTS10_BareTagAlloc(t *testing.T) {
 }
 
 // TestTS10_BareTagSteps checks that the rune reads of bareTag on one line
-// stay linear. A flow line with many scalars gives at most twice its length
-// in steps. A read from the line start for each scalar gives a square.
+// stay linear. A flow line with many scalars gives one step for each rune
+// before its last scalar. A read from the line start for each scalar gives
+// a square.
 func TestTS10_BareTagSteps(t *testing.T) {
 	line := "a: [" + strings.Repeat("1,", 32000) + "1]"
 	var node yaml.Node
