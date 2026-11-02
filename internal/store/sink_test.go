@@ -349,7 +349,7 @@ func TestTU18SinkStoppedOrMissingWriterGivesTheSpoolTheNote(t *testing.T) {
 	if err := none.Add(3, []byte("junk")); err == nil || none.RowMissing() != 1 {
 		t.Errorf("a note that does not verify: error %v, missing %d", err, none.RowMissing())
 	}
-	// The largest size that a row holds is accepted; the next size is refused.
+	// The sink accepts the largest size that a row holds and refuses the next.
 	if err := none.Add(math.MaxInt64, r.note(math.MaxInt64, 1)); err != nil || r.spool.count() != 3 {
 		t.Errorf("size MaxInt64: error %v, spool %d (want nil, 3)", err, r.spool.count())
 	}

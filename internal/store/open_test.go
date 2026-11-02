@@ -173,12 +173,12 @@ func TestTS15RefusedPathsOpenNothing(t *testing.T) {
 	// rules; the parent check then refuses it because it does not exist.
 	_, err = Open(root, "tlog2/events.db", opt)
 	wantRule(t, err, "tlog2", ruleParent)
-	// The first and last permitted bytes of each range pass the path rules.
+	// The edge bytes Z, 0 and 9 pass the path rules.
 	_, err = Open(root, "Z09/events.db", opt)
 	wantRule(t, err, "Z09", ruleParent)
 }
 
-// T-S-15: a state directory path with a symlink part is resolved. The driver
+// T-S-15: Open resolves a symlink part of the state directory path. The driver
 // opens the resolved path, and the location check accepts it.
 func TestTS15StatePathWithSymlinkIsResolved(t *testing.T) {
 	top, err := filepath.EvalSymlinks(t.TempDir())

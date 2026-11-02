@@ -406,8 +406,8 @@ func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
 	}
 }
 
-// T-I-07: the marker is not made in a state directory that is gone. The error
-// of the file make is the result, not the open of the directory.
+// T-I-07: makeMarker gives an error in a state directory that is gone.
+// OpenFile gives the error: Open of "." and Sync work on that directory.
 func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "gone")
 	if err := os.Mkdir(dir, 0o700); err != nil {
