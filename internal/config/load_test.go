@@ -526,6 +526,9 @@ func TestTS10_BareTagSteps(t *testing.T) {
 	if src.steps > 2*len(line) {
 		t.Errorf("bareTag read %d runes of a line of %d bytes", src.steps, len(line))
 	}
+	if want := len(line) - 2; src.steps != want {
+		t.Errorf("bareTag read %d runes, want %d", src.steps, want)
+	}
 }
 
 // TestTS10_SecretEnvPrefix checks that a *_env key refuses each name that
