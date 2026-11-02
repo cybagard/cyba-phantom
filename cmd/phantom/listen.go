@@ -55,7 +55,8 @@ var (
 
 // serveWith runs the sensor on the state of p until ctx ends.
 // The start order is: the queue, the two listen sockets, the store part,
-// and the decoy server.
+// the bundle part, and the decoy server.
+// The bundle part loads only when the store part has a writer.
 // Then: the cache and client, when acme.names is set.
 // Then: the certificate source.
 // Then: WarnExpiry, when there is a static entry.
@@ -88,7 +89,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	if !ok {
 		return 1
 	}
-	s := start(p, q, counters, d, slog.New(slog.NewTextHandler(stderr, nil)))
+	lg := slog.New(slog.NewTextHandler(stderr, nil))
+	s := start(p, q, counters, d, lg)
+	b := startBundle(p, s, q, lg)
 	var names []string
 	for i := 0; ; i++ {
 		v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
@@ -208,6 +211,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 	startLine := "phantom: started"
 	if !s.Healthy() {
 		startLine += " — store not healthy"
+	}
+	if !b.Healthy() {
+		startLine += " — bundle not healthy"
 	}
 	if certLine != "" && acme != nil {
 		startLine += " — certificate client start failed"

@@ -30,6 +30,7 @@ const stateDir = config.DefaultStateRoot
 type startParams struct {
 	Root, StorePath, TlogDir, Origin string
 	CacheDir                         string // the certificate cache directory
+	BundlePath                       string // the bundle file, in slash form
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
@@ -78,7 +79,7 @@ func paramsOf(cfg *config.Config) startParams {
 	bp, _ := cfg.Get("privacy.store_body_prefix")
 	return startParams{
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),
-		CacheDir: rel(str("acme.cache_dir")),
+		CacheDir: rel(str("acme.cache_dir")), BundlePath: rel(str("bundle.path")),
 		Reserved: []string{rel(str("tlog.dir")), rel(str("acme.cache_dir")), rel(filepath.Dir(str("bundle.path")))},
 		Interval: iv.Dur, BodyPrefix: bp.Bool,
 	}

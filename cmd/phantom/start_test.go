@@ -793,7 +793,7 @@ func TestParamsOf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := startParams{Root: "/var/lib/phantom", StorePath: "events.db", TlogDir: "tlog", Origin: "test/origin", CacheDir: "certs",
+	want := startParams{Root: "/var/lib/phantom", StorePath: "events.db", TlogDir: "tlog", Origin: "test/origin", CacheDir: "certs", BundlePath: "bundle/current.cbnd",
 		Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, BodyPrefix: true}
 	if got := paramsOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("params %+v, want %+v", got, want)

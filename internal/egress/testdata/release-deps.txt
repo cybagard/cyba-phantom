@@ -1,3 +1,4 @@
+archive/tar
 bufio
 bytes
 cmp
@@ -150,6 +151,8 @@ golang.org/x/text/unicode/norm
 hash
 hash/crc32
 hash/fnv
+html
+html/template
 internal/abi
 internal/asan
 internal/bisect
@@ -247,6 +250,7 @@ net/url
 os
 os/exec
 os/signal
+os/user
 path
 path/filepath
 reflect
@@ -261,6 +265,8 @@ strings
 sync
 sync/atomic
 syscall
+text/template
+text/template/parse
 time
 unicode
 unicode/utf16
