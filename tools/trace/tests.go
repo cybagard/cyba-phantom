@@ -428,7 +428,8 @@ func idFromTestName(name string) string {
 // parts, such as .RECIPE$(E)PREFIX or include$(S), escapes these checks.
 // Makefiles from MAKEFILES or from make options also escape them. Makefile
 // text from $(file ...), $(shell ...) or the load directive also escapes
-// these checks.
+// these checks. Make drops a NUL byte, the rest of its line and the line
+// end. A NUL byte can thus hide a word from these checks.
 func findMarkers(path string) (map[string]bool, []string, error) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
@@ -558,8 +559,9 @@ func continues(line string) bool {
 // isAssignment reports whether the text after a rule colon has a "=" before
 // any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. Make reads
 // "$" and one more character as a reference. isAssignment skips that
-// character outside a reference only. A reference with no closer counts as
-// an assignment: make stops on it, so the line is not a rule.
+// character outside a reference only. A reference that opens before any ";"
+// or "#" and has no closer counts as an assignment. Make stops on such a
+// line, so the line is not a rule.
 func isAssignment(rest string) bool {
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {

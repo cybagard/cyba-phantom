@@ -288,8 +288,9 @@ func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 }
 
 // A missing name after ".." gives the typed argument and the errno only.
-// The link L is valid.
-// The error holds no part of the resolved path, and it keeps ErrNotExist.
+// The link L is valid. The root L/../gone gives the safefile reason, not
+// an errno. The error holds no part of the resolved path, and it keeps
+// ErrNotExist.
 func TestSpecDirErrorHoldsOnlyTheErrno(t *testing.T) {
 	base, _ := symlinkedCwd(t)
 	spec := filepath.Join(base, "r", "repo", "spec")
