@@ -16,8 +16,9 @@ const (
 // FuzzTU07Proofs checks the inclusion proof and the consistency proof for a
 // random tree size from 1 to 10 000. One log serves all inputs. It grows to the
 // largest size that an input needs. A proof for a smaller size is still valid
-// in the larger log. The log grows with AppendBatch calls. The size of each
-// call is random, from 1 to fuzzMaxBatch. The last call stops at the tree
+// in the larger log. The log grows with AppendBatch calls. Each input gives a
+// random batch size from 1 to fuzzMaxBatch. Each call of that input adds that
+// number of leaves. The last call can add fewer, so that the log has the tree
 // size. Thus a batch can cross a tile border. The seeds stop at size 2000, so
 // that go test stays fast.
 func FuzzTU07Proofs(f *testing.F) {
