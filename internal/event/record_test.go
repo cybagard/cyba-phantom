@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -371,6 +372,66 @@ func TestTS12_DetailSizeBoundReadsValue(t *testing.T) {
 	}
 	if len(*seen) != 0 {
 		t.Errorf("the encoder got input of lengths %v", *seen)
+	}
+}
+
+const errDetailTooLarge = "event: detail is too large"
+
+// T-S-12: a value of quotes passes check, but each quote needs 2 bytes in the
+// marshaled text. JSON refuses the text before the encoder gets it.
+func TestTS12_DetailMarshaledSizeBound(t *testing.T) {
+	seen := watchEncoder(t)
+	d := Detail{"a": Str(strings.Repeat(`"`, 1100))}
+	if err := d.check(); err != nil {
+		t.Errorf("check: %v", err)
+	}
+	if _, err := d.JSON(); err == nil || err.Error() != errDetailTooLarge {
+		t.Errorf("JSON: error %q, want %q", err, errDetailTooLarge)
+	}
+	if len(*seen) != 0 {
+		t.Errorf("the encoder got input of lengths %v", *seen)
+	}
+}
+
+// T-S-12: check adds the lower bounds of all members. A sum equal to the cap
+// passes check, and a sum past the cap does not.
+func TestTS12_DetailSumBound(t *testing.T) {
+	x := func(n int) Value { return Str(strings.Repeat("x", n)) }
+	d := Detail{"a": x(1100), "b": x(1100)}
+	if err := d.check(); err == nil || err.Error() != errDetailTooLarge {
+		t.Errorf("two members: error %q, want %q", err, errDetailTooLarge)
+	}
+	d = Detail{"a": x(2043)}
+	if err := d.check(); err != nil {
+		t.Errorf("sum 2048: %v", err)
+	}
+	if _, err := d.JSON(); err == nil || err.Error() != errDetailTooLarge {
+		t.Errorf("JSON of 2051 bytes: error %q, want %q", err, errDetailTooLarge)
+	}
+	d = Detail{"a": x(2044)}
+	if err := d.check(); err == nil || err.Error() != errDetailTooLarge {
+		t.Errorf("sum 2049: error %q, want %q", err, errDetailTooLarge)
+	}
+}
+
+// T-S-12: a name of 64 bytes and the names " " and "~" are the bounds.
+// JSON accepts them, and ParseDetail reads the text back. The names "\x1f" and
+// "\x7f" are one past the bounds, and JSON refuses them.
+func TestTS12_DetailNameBounds(t *testing.T) {
+	for _, n := range []string{"\x1f", "\x7f"} {
+		_, err := Detail{n: Int(1)}.JSON()
+		if want := "event: detail name is not printable ASCII"; err == nil || err.Error() != want {
+			t.Errorf("name %q: error %q, want %q", n, err, want)
+		}
+	}
+	d := Detail{strings.Repeat("n", 64): Int(1), " ": Int(1), "~": Int(1)}
+	b, err := d.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseDetail(string(b))
+	if err != nil || !maps.Equal(got, d) {
+		t.Errorf("ParseDetail: %v, %v, want %v", got, err, d)
 	}
 }
 

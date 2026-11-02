@@ -186,6 +186,19 @@ func TestTS12_ErrorText(t *testing.T) {
 	}
 }
 
+// T-S-12: the error text gives the offset of the first invalid byte. The offset
+// counts bytes, not runes: the 2-byte "é" counts 2.
+func TestTS12_InvalidUTF8Offset(t *testing.T) {
+	for in, want := range map[string]string{
+		"{\"a\":\"\xff\"}": "event: invalid UTF-8 at offset 6",
+		"{\"é\":\"\xff\"}": "event: invalid UTF-8 at offset 7",
+	} {
+		if _, err := Canonical([]byte(in)); err == nil || err.Error() != want {
+			t.Errorf("%q: error %v, want %q", in, err, want)
+		}
+	}
+}
+
 // A valid U+FFFD is data. Canonical keeps it as it is.
 func TestTS12_ReplacementCharKept(t *testing.T) {
 	got, err := Canonical([]byte(`{"a":"` + bs + `ufffd","b":"` + "\xef\xbf\xbd" + `"}`))
