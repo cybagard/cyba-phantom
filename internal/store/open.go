@@ -209,7 +209,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	db, err := open(root, rel, opt, &made, false, guard)
 	if err != nil && made != nil && guard != nil {
 		// open leaves the guard open only when it fails before its own
-		// descriptor of the file is open. Then it has not removed the made file.
+		// descriptor of the file is open. Then it did not remove the made file.
 		// The guard holds the inode, so the Lstat below cannot find a new file.
 		// A later failure is cleaned up in open, while a descriptor holds the
 		// inode.
@@ -281,7 +281,7 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 		return nil, refuse(fail(rel, ruleChanged))
 	}
 	if *kept != nil && !create {
-		// SQLite has not opened these names yet. A file here is not of this call.
+		// SQLite has not opened these names yet. A file here is not from us.
 		for _, s := range suffixes[1:] {
 			if _, err := dir.Lstat(last + s); !errors.Is(err, fs.ErrNotExist) {
 				return nil, refuse(fail(rel+s, ruleOrphan))

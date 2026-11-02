@@ -284,9 +284,9 @@ func TestTS15SideFileRefusalKeepsLeftover(t *testing.T) {
 	}
 }
 
-// T-S-15: a regular -wal file and a symlink -journal that someone puts in place
-// after the made file left the real name stay. Open removes no file that SQLite
-// did not make.
+// T-S-15: someone puts a regular -wal file and a symlink -journal in place. This
+// is after the made file left the real name. Both stay. Open removes no file
+// that SQLite did not make.
 func TestTS15PlantedSideFilesStay(t *testing.T) {
 	root, state, _ := newState(t)
 	file := filepath.Join(state, "events.db")
@@ -360,9 +360,9 @@ func TestTS15FileAtTemporaryNameBeforeOpenIsKept(t *testing.T) {
 	file := filepath.Join(state, "data", "events.db"+tempSuffix)
 	const content = "other file"
 	calls := 0
-	// The hook runs before each check of the directory data. Call 1 is the check
-	// in Open. Call 2 is the check in open for the temporary name. It is after
-	// the leftover removal and before the check of the files.
+	// The hook runs before each check of the directory data. Call 1 is the
+	// check in Open. Call 2 is the check in open for the temporary name. It is
+	// after the leftover removal and before the check of the files.
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 		if name == "data" {
 			if calls++; calls == 2 {

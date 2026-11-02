@@ -215,8 +215,8 @@ func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 }
 
 // T-S-15: after Open, the process holds a lock on the database file. A new
-// descriptor sees the conflict. A close of a descriptor of the file after
-// SQLite opens it drops the locks of the process, and the test would find none.
+// descriptor sees the conflict. Suppose Open closes a descriptor of the file
+// after SQLite opens it. That close drops the locks, and the test finds none.
 func TestTS15PoolHoldsFileLockAfterOpen(t *testing.T) {
 	const getlk = 36 // F_OFD_GETLK
 	for _, existing := range []bool{false, true} {
