@@ -47,6 +47,7 @@ func TestTextSentenceBreaks(t *testing.T) {
 	}{
 		{"two table cells of 15 words", "| " + ws(15) + " | " + ws(15) + " |\n", 0},
 		{"a row after a separator row still counts", "| --- | :-: |\n| " + ws(26) + " |\n", 1},
+		{"known limit: a lazy continuation line ends the item", "- " + ws(15) + "\n" + ws(15) + ".\n", 0},
 		{"two list items of 13 words", "- " + ws(13) + "\n- " + ws(13) + "\n", 0},
 		{"numbered list items of 13 words", "1. " + ws(13) + "\n2) " + ws(13) + "\n", 0},
 		{"heading then 13 words", "# " + ws(13) + "\n" + ws(13) + "\n", 0},
