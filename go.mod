@@ -1,6 +1,6 @@
 module github.com/cybagard/cyba-phantom
 
-// The build pins the exact release via GOTOOLCHAIN=go1.27.2 (Makefile,
+// The build pins the exact release via GOTOOLCHAIN=go1.27.3 (Makefile,
 // CI env): every build runs the same Go, downloaded with Go's checksum
 // verification when the local toolchain differs. This is what makes the
 // two-build hash compare (T-P-07) meaningful. M-1 has four dependencies:
@@ -22,7 +22,7 @@ module github.com/cybagard/cyba-phantom
 // v1.60.1 embeds SQLite 3.53.4; a bump names the new embedded SQLite
 // version and its sqlite.org CVE check. The second require block holds
 // the indirect modules.
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/caddyserver/certmagic v0.25.6

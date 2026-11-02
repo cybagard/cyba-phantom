@@ -11,7 +11,7 @@
 #     via GOTOOLCHAIN (go.mod declares the minimum only — a toolchain line
 #     equal to the go line is stripped by go mod tidy), downloaded with
 #     Go's checksum verification; no setup-go action, zero dependencies;
-#   - one container image: the oracle job runs in golang:1.27.2 from
+#   - one container image: the oracle job runs in golang:1.27.3 from
 #     Docker Hub, pinned by digest (the base image of .devcontainer);
 #   - gate checkers (dco, trace, mirror-diff) are built from an explicit
 #     checkout of the PR base branch (a ref-less checkout on
@@ -67,7 +67,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GOTOOLCHAIN: go1.27.2
+  GOTOOLCHAIN: go1.27.3
 
 jobs:
   lint:
@@ -184,7 +184,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     container:
-      image: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+      image: golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
     steps:
       - *checkout
 
