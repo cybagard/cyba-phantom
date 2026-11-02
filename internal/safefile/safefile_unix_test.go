@@ -440,6 +440,70 @@ func TestTS23_FileSwapAfterCheck(t *testing.T) {
 	}
 }
 
+// A file that replaces a checked directory gives ErrType, not ErrChanged.
+// O_DIRECTORY makes the kernel refuse a file that is not a directory.
+func TestTS23_FileSwapForDirGivesErrType(t *testing.T) {
+	rule := Rule{Type: Dir, Owner: OwnerSelf}
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T, r *os.Root, dir string) error
+	}{
+		{"Open", func(t *testing.T, r *os.Root, dir string) error {
+			return open(t, r, "d", rule)
+		}},
+		{"OpenPath", func(t *testing.T, r *os.Root, dir string) error {
+			return openWithin(t, filepath.Join(dir, "d"), rule)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, dir := root(t)
+			if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			file(t, dir, "f", 0o600)
+			swapAfterCheck(t, func(string) {
+				d := filepath.Join(dir, "d")
+				if err := os.Rename(d, filepath.Join(dir, "old")); err != nil {
+					t.Error(err)
+				}
+				if err := os.Rename(filepath.Join(dir, "f"), d); err != nil {
+					t.Error(err)
+				}
+			})
+			err := tc.open(t, r, dir)
+			if !errors.Is(err, ErrType) {
+				t.Errorf("err = %v, want ErrType", err)
+			}
+			if !errors.Is(err, syscall.ENOTDIR) {
+				t.Errorf("err = %v, want ENOTDIR", err)
+			}
+		})
+	}
+}
+
+// For a Dir rule, O_NOFOLLOW makes OpenPath refuse a last link that is swapped
+// in after the check. Linux gives ENOTDIR (ErrType). Another unix kernel can
+// give ELOOP (ErrSymlink). Both refuse the link.
+func TestTS23_OpenPathLinkSwapForDirIsRefused(t *testing.T) {
+	_, dir := root(t)
+	d := filepath.Join(dir, "d")
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	swapAfterCheck(t, func(string) {
+		if err := os.Rename(d, filepath.Join(dir, "old")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink("old", d); err != nil {
+			t.Error(err)
+		}
+	})
+	err := openWithin(t, d, Rule{Type: Dir, Owner: OwnerSelf})
+	if !errors.Is(err, ErrType) && !errors.Is(err, ErrSymlink) {
+		t.Errorf("err = %v, want ErrType or ErrSymlink", err)
+	}
+}
+
 func TestTS23_RulesOnOpenFile(t *testing.T) {
 	r, dir := root(t)
 	file(t, dir, "f", 0o600)
