@@ -212,8 +212,8 @@ func cpuTime() time.Duration {
 }
 
 // slow gives the time of the start line and the CPU time of the process, both
-// since begin. A CPU time far below the wall time means the process had no CPU.
-// Call it after the start line.
+// since begin. A low CPU time means the process did not run. It had no CPU, or
+// it waited. Call it after the start line.
 func (r *running) slow() string {
 	return fmt.Sprintf("; start line %v after begin, process CPU time %v since begin", r.out.at.Sub(r.begin), cpuTime()-r.cpu)
 }

@@ -869,7 +869,7 @@ func (c *readCountConn) Read(p []byte) (int, error) {
 
 // T-S-17: the TLS socket and the plain socket share the slots. When one socket
 // holds all of them, a connection on the other socket closes before a read.
-// The plain socket counts its reads. The TLS socket counts its ClientHellos.
+// Each socket counts its reads. The TLS socket also counts its ClientHellos.
 func TestTS17SlotsSharedByPlainAndTLS(t *testing.T) {
 	const slots = 2
 	t.Run("TLS holds the slots", func(t *testing.T) {
@@ -898,15 +898,16 @@ func TestTS17SlotsSharedByPlainAndTLS(t *testing.T) {
 			hellos.Add(1)
 			return captureHello(chi)
 		}
-		r.serve(t)
+		ln := &readCountListener{Listener: listenLoopback(t)}
+		r.serveOn(t, ln)
 		plain, _ := r.servePlain(t, okHandler)
 		for range slots {
 			dialPlain(t, plain, 1)
 		}
 		waitFor(t, "slots taken", func() bool { return len(r.s.sem) == slots })
-		expectCapClose(t, r, r.addr, 1)
-		if hellos.Load() != 0 || r.s.SourceCapCloses() != 0 {
-			t.Fatalf("ClientHellos %d, source cap closes %d; want 0 and 0", hellos.Load(), r.s.SourceCapCloses())
+		expectCapClose(t, r, ln.Addr().String(), 1)
+		if hellos.Load() != 0 || ln.reads.Load() != 0 || r.s.SourceCapCloses() != 0 {
+			t.Fatalf("ClientHellos %d, reads %d, source cap closes %d; want 0, 0 and 0", hellos.Load(), ln.reads.Load(), r.s.SourceCapCloses())
 		}
 	})
 }
@@ -956,24 +957,43 @@ func TestTS18ReadPoolSharedByPlainAndTLS(t *testing.T) {
 	}
 }
 
-// T-S-17: the error log drops its text. The server writes nothing to the
-// standard error.
+// T-S-17: the error log drops its text. The TLS server and a plain server write
+// nothing to the standard error or to the standard logger. The test changes the
+// global os.Stderr and the standard logger, so it must not use t.Parallel.
 func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
 	rd, wr, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rd.Close()
-	prev := os.Stderr
-	os.Stderr = wr
-	t.Cleanup(func() { os.Stderr = prev })
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.servePlain(t, okHandler)
+	waitFor(t, "plain server registered", func() bool {
+		r.s.mu.Lock()
+		defer r.s.mu.Unlock()
+		return len(r.s.plain) == 1
+	})
+	r.s.mu.Lock()
+	plainLog := r.s.plain[0].ErrorLog
+	r.s.mu.Unlock()
+	if plainLog == nil {
+		t.Fatal("the plain server has no error log")
+	}
+	prevErr, prevLog := os.Stderr, log.Writer()
+	restore := func() {
+		os.Stderr = prevErr
+		log.SetOutput(prevLog)
+	}
+	t.Cleanup(restore)
+	os.Stderr = wr
+	log.SetOutput(wr)
 	r.s.srv.ErrorLog.Print("marker-text")
-	os.Stderr = prev
+	plainLog.Print("marker-text")
+	restore()
 	_ = wr.Close()
 	got, _ := io.ReadAll(rd)
-	if r.s.ErrorLines() != 1 || len(got) != 0 {
-		t.Fatalf("error lines %d, bytes on stderr %q; want 1 and none", r.s.ErrorLines(), got)
+	if r.s.ErrorLines() != 2 || len(got) != 0 {
+		t.Fatalf("error lines %d, bytes on stderr %q; want 2 and none", r.s.ErrorLines(), got)
 	}
 }
 
