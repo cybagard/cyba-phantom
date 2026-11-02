@@ -426,7 +426,9 @@ func idFromTestName(name string) string {
 // finding. Then no marker counts. A GNUmakefile or makefile in the tree root
 // is one finding too. Make reads it before the Makefile. A name built from
 // parts, such as .RECIPE$(E)PREFIX or include$(S), escapes these checks.
-// Makefiles from MAKEFILES or from make options also escape them.
+// Makefiles from MAKEFILES or from make options also escape them. Makefile
+// text from $(file ...), $(shell ...) or the load directive also escapes
+// these checks.
 func findMarkers(path string) (map[string]bool, []string, error) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
@@ -452,12 +454,17 @@ func findMarkers(path string) (map[string]bool, []string, error) {
 		if strings.Contains(l, ".RECIPEPREFIX") {
 			return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d uses .RECIPEPREFIX; no marker counts", i+1)}, nil
 		}
+	}
+	for i := 0; i < len(lines); i++ {
+		first := i + 1
+		var l string
+		l, i = logicalLine(lines, i)
 		if strings.HasPrefix(strings.TrimSpace(l), "#") {
 			continue
 		}
 		for _, w := range strings.Fields(l) {
 			if w == "include" || w == "-include" || w == "sinclude" {
-				return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d has an include; no marker counts", i+1)}, nil
+				return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d has an include; no marker counts", first)}, nil
 			}
 		}
 	}
@@ -521,17 +528,26 @@ func validTarget(s string) bool {
 // CR before the LF is not part of the line.
 func hasRule(lines []string, target string) bool {
 	for i := 0; i < len(lines); i++ {
-		l := strings.TrimSuffix(lines[i], "\r")
-		for i+1 < len(lines) && continues(l) {
-			i++
-			l = l[:len(l)-1] + " " + strings.TrimSuffix(lines[i], "\r")
-		}
+		var l string
+		l, i = logicalLine(lines, i)
 		rest, ok := strings.CutPrefix(l, target+":")
 		if ok && !isAssignment(rest) {
 			return true
 		}
 	}
 	return false
+}
+
+// logicalLine returns the line at lines[i] and the index of its last
+// physical line. As in make, it drops one CR before each LF. A line that
+// continues loses its last backslash and joins the next line with a space.
+func logicalLine(lines []string, i int) (string, int) {
+	l := strings.TrimSuffix(lines[i], "\r")
+	for i+1 < len(lines) && continues(l) {
+		i++
+		l = l[:len(l)-1] + " " + strings.TrimSuffix(lines[i], "\r")
+	}
+	return l, i
 }
 
 // continues reports whether a line ends in an odd number of backslashes.
@@ -542,12 +558,15 @@ func continues(line string) bool {
 // isAssignment reports whether the text after a rule colon has a "=" before
 // any ";" or "#". A "=" inside "$(...)" or "${...}" does not count. Make reads
 // "$" and one more character as a reference. isAssignment skips that
-// character outside a reference only.
+// character outside a reference only. A reference with no closer counts as
+// an assignment: make stops on it, so the line is not a rule.
 func isAssignment(rest string) bool {
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
-			i = referenceEnd(rest, i+1)
+			if i = referenceEnd(rest, i+1); i < 0 {
+				return true
+			}
 		case c == '$' && i+1 < len(rest):
 			i++
 		case c == ';' || c == '#':
@@ -561,8 +580,8 @@ func isAssignment(rest string) bool {
 
 // referenceEnd returns the index of the closer of the reference that opens
 // at s[open]. Like make, it counts only that opener and its closer, plain
-// or after a "$". It ignores every other character. An open reference ends
-// at the last character.
+// or after a "$". It ignores every other character. It returns -1 when the
+// reference has no closer.
 func referenceEnd(s string, open int) int {
 	opener, closer := s[open], byte(')')
 	if opener == '{' {
@@ -580,5 +599,5 @@ func referenceEnd(s string, open int) int {
 			}
 		}
 	}
-	return len(s) - 1
+	return -1
 }

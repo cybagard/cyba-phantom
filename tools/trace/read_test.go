@@ -287,7 +287,8 @@ func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 	}
 }
 
-// A broken link before ".." gives the typed argument and the errno only.
+// A missing name after ".." gives the typed argument and the errno only.
+// The link L is valid.
 // The error holds no part of the resolved path, and it keeps ErrNotExist.
 func TestSpecDirErrorHoldsOnlyTheErrno(t *testing.T) {
 	base, _ := symlinkedCwd(t)
@@ -296,14 +297,16 @@ func TestSpecDirErrorHoldsOnlyTheErrno(t *testing.T) {
 	t.Chdir(filepath.Join(base, "h"))
 	const gone = "L/../gone"
 	runs := map[string]func() error{
-		"runMatrix": func() error { _, err := runMatrix(gone + "/spec"); return err },
-		"runStamp":  func() error { _, err := runStamp(gone+"/spec", false); return err },
-		"runTests":  func() error { _, err := runTests("L/../repo/spec", gone+"/tree", "M-1"); return err },
+		"runMatrix":     func() error { _, err := runMatrix(gone + "/spec"); return err },
+		"runStamp":      func() error { _, err := runStamp(gone+"/spec", false); return err },
+		"runTests":      func() error { _, err := runTests("L/../repo/spec", gone+"/tree", "M-1"); return err },
+		"runTests root": func() error { _, err := runTests("L/../repo/spec", gone, "M-1"); return err },
 	}
 	want := map[string]string{
-		"runMatrix": gone + "/spec: no such file or directory",
-		"runStamp":  gone + "/spec: no such file or directory",
-		"runTests":  gone + "/tree: no such file or directory",
+		"runMatrix":     gone + "/spec: no such file or directory",
+		"runStamp":      gone + "/spec: no such file or directory",
+		"runTests":      gone + "/tree: no such file or directory",
+		"runTests root": gone + ": safefile: file cannot be examined",
 	}
 	for name, run := range runs {
 		err := run()
