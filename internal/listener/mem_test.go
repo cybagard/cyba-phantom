@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 const (
@@ -33,11 +35,12 @@ const (
 	// The mix has three kinds of connection. For each connection, a pool holder
 	// keeps about 100 KB. A record-header connection keeps about 55 KB. A
 	// near-limit kept-open connection keeps about 34 KB. A holder reads 30 000
-	// bytes and charges 30 000 - 4 096 = 25 904 bytes to the pool. 320 holders
-	// charge 8 289 280 bytes. That is below the pool, 8 388 608 bytes, so the
-	// pool refuses no holder. The pool does not bound the record-header
-	// connections, so they fill the rest. Ten near-limit connections stay open,
-	// so the mix has all three kinds.
+	// bytes (holderBytes). It charges all but keepAliveBytes of them to the
+	// pool. 320 holders charge mixPool bytes, 8 289 280 with the present
+	// values. That is below the pool, 8 388 608 bytes, so the pool refuses no
+	// holder. The pool does not bound the record-header connections, so they
+	// fill the rest. Ten near-limit connections stay open, so the mix has all
+	// three kinds.
 	mixHolders    = 320
 	mixHeaders    = 1670
 	holderBytes   = 30000
@@ -82,6 +85,8 @@ func mixKind(i int) string {
 }
 
 // tp09Get sends a request with a head of n bytes and checks for the status 200.
+// It does not use roundTrip of server_test.go. That function sets a deadline
+// of 5 s, which is too short for 2 000 connections that start together.
 func tp09Get(c net.Conn, n int) error {
 	_ = c.SetDeadline(time.Now().Add(60 * time.Second))
 	if _, err := io.WriteString(c, head(n)); err != nil {
@@ -280,8 +285,9 @@ func memNow() uint64 {
 	return m.HeapInuse + m.StackInuse
 }
 
-// procStatus reads a size in bytes from /proc/self/status (Linux): key is
-// VmRSS: or VmHWM:, the resident set size and its peak.
+// procStatus reads a size in bytes from /proc/self/status (Linux). The key is
+// VmRSS: or VmHWM:, the resident set size and its peak. The store package has
+// its own copy (rows_bench_test.go). A package cannot import a test helper.
 func procStatus(t *testing.T, key string) uint64 {
 	t.Helper()
 	b, err := os.ReadFile("/proc/self/status")
@@ -346,10 +352,101 @@ func samplePeaks(s *Server) func() peaks {
 	return func() peaks { close(done); return <-res }
 }
 
-// settle waits until the open count and the pool stay the same for 1.5 s, and
-// returns them.
-func (s *Server) settle(t *testing.T) (open int, pool int64) {
+// procField returns field n (from 0) of a row of /proc/net/tcp, or nil.
+func procField(row []byte, n int) []byte {
+	for i := 0; ; i++ {
+		row = bytes.TrimLeft(row, " ")
+		if len(row) == 0 {
+			return nil
+		}
+		end := bytes.IndexByte(row, ' ')
+		if end < 0 {
+			end = len(row)
+		}
+		if i == n {
+			return row[:end]
+		}
+		row = row[end:]
+	}
+}
+
+// portSuffix returns the end of a local address in /proc/net/tcp for the port
+// of addr: ":1F90" for the port 8080.
+func portSuffix(t *testing.T, addr string) []byte {
 	t.Helper()
+	_, port, err := net.SplitHostPort(addr)
+	mustNil(t, err)
+	n, err := strconv.Atoi(port)
+	mustNil(t, err)
+	return []byte(fmt.Sprintf(":%04X", n))
+}
+
+// TestTP09UnreadBytesShowInTheReceiveQueue: a client sends 5 bytes, and the
+// receive queue of the server socket has them. Then hasUnread is true. When
+// the server has read the bytes, hasUnread is false. So settle does not
+// return while a server read of a record header is open.
+func TestTP09UnreadBytesShowInTheReceiveQueue(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the check reads /proc, which only Linux has")
+	}
+	ln := listenLoopback(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	client, err := net.Dial("tcp", ln.Addr().String())
+	mustNil(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	server, err := ln.Accept()
+	mustNil(t, err)
+	t.Cleanup(func() { _ = server.Close() })
+	suffix, buf := portSuffix(t, ln.Addr().String()), make([]byte, 4096)
+	if hasUnread(t, suffix, buf) {
+		t.Fatal("hasUnread is true before the client sent a byte")
+	}
+	_, err = client.Write([]byte{23, 3, 3, 0x41, 0x00}) // a record header
+	mustNil(t, err)
+	testutil.WaitFor(t, func() bool { return hasUnread(t, suffix, buf) }, 5*time.Second)
+	_, err = io.ReadFull(server, make([]byte, 5))
+	mustNil(t, err)
+	if hasUnread(t, suffix, buf) {
+		t.Error("hasUnread is true after the server read the bytes")
+	}
+}
+
+// hasUnread tells if bytes wait in the receive queue of a TCP socket. The local
+// address of the socket ends with portSuffix (Linux). A connection that the
+// server has not accepted counts in the queue of the listening socket. A byte
+// that the server has not read counts in the queue of its connection. When
+// this is false, each server read of the bytes that the clients sent has
+// ended. It makes no garbage, because the heap that the test samples must not
+// grow with the wait. buf is the scratch space for one row.
+func hasUnread(t *testing.T, portSuffix, buf []byte) bool {
+	t.Helper()
+	f, err := os.Open("/proc/self/net/tcp")
+	mustNil(t, err)
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(buf, len(buf))
+	sc.Scan() // the header row
+	for sc.Scan() {
+		row := sc.Bytes()
+		if !bytes.HasSuffix(procField(row, 1), portSuffix) {
+			continue
+		}
+		queues := procField(row, 4) // tx_queue:rx_queue, in hex
+		if i := bytes.IndexByte(queues, ':'); i >= 0 && len(bytes.Trim(queues[i+1:], "0")) != 0 {
+			return true
+		}
+	}
+	mustNil(t, sc.Err())
+	return false
+}
+
+// settle waits until the open count and the pool stay the same for 1.5 s. In
+// that time, no byte that a client sent may wait for the server to read it.
+// It returns the open count and the pool. The addr is the address of the
+// listening socket.
+func (s *Server) settle(t *testing.T, addr string) (open int, pool int64) {
+	t.Helper()
+	suffix, buf := portSuffix(t, addr), make([]byte, 4096)
 	last, lastPool := -1, int64(-1)
 	deadline := time.Now().Add(60 * time.Second)
 	for same := 0; same < 15; {
@@ -358,7 +455,7 @@ func (s *Server) settle(t *testing.T) (open int, pool int64) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		open, pool = len(s.sem), s.rd.pool.Load()
-		if open == last && pool == lastPool {
+		if open == last && pool == lastPool && !hasUnread(t, suffix, buf) {
 			same++
 		} else {
 			same = 0
@@ -388,8 +485,10 @@ func (s *Server) settle(t *testing.T) (open int, pool int64) {
 //     most 140 MB. RSS and peak RSS are at most 180 MB.
 //   - hello_4k, record_header, mix: the connections stay open. The open count
 //     is 2 000. The settled heap and stack are at most 140 MB. RSS and peak RSS
-//     are at most 180 MB. The peak heap is only logged: for the mix it is near
-//     140 MB and it changes from run to run.
+//     are at most 180 MB. The peak heap is only logged. For the mix it is
+//     about 140 MB, and above it in some runs (142.6, 140.5 and 142.8 MB
+//     measured).
+//   - every form but the mix: the pool is 0 after the settle.
 //   - mix: the pool holds exactly mixPool bytes, so the pool refuses no holder.
 func TestTP09(t *testing.T) {
 	if os.Getenv("PHANTOM_TP09") != "1" {
@@ -415,7 +514,7 @@ func TestTP09(t *testing.T) {
 		resetPeakRSS(t)
 		stopPeaks := samplePeaks(r.s)
 		stop := startClients(t, r.addr, f.name)
-		open, pool := r.s.settle(t)
+		open, pool := r.s.settle(t, r.addr)
 		peak := stopPeaks()
 		heap := float64(int64(memNow())-int64(before)) / 1e6
 		rss, peakRSS := float64(procStatus(t, "VmRSS:"))/1e6, float64(procStatus(t, "VmHWM:"))/1e6
@@ -428,7 +527,13 @@ func TestTP09(t *testing.T) {
 			heapMax = 5
 		}
 		pass := heap <= heapMax && rss <= rssMax && peakRSS <= rssMax && open == f.want
-		pass = pass && (f.want != 0 || peakHeap <= 140) && (f.name != "mix" || pool == mixPool)
+		// A closed connection gives its charge back. The other forms that stay
+		// open read at most keepAliveBytes.
+		wantPool := int64(0)
+		if f.name == "mix" {
+			wantPool = mixPool
+		}
+		pass = pass && (f.want != 0 || peakHeap <= 140) && pool == wantPool
 		t.Logf("TP09 form=%s conns=%d open=%d pool=%d heap+stack=%.1f rss=%.1f peak_open=%d peak_heap+stack=%.1f peak_rss=%.1f pass=%t",
 			f.name, tp09Conns, open, pool, heap, rss, peak.open, peakHeap, peakRSS, pass)
 		if !pass {

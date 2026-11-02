@@ -7,9 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/letsencrypt/pebble/v2/core"
 
 	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 	"github.com/cybagard/cyba-phantom/internal/testutil"
@@ -37,13 +39,11 @@ import (
 
 const issueLimit = 120 * time.Second // the most time that the listener can take to obtain a certificate
 
-// startIssue calls Start with a context that ends with the test.
+// startIssue calls Start with the context of the test.
 func startIssue(t *testing.T, f *issueFixture) time.Time {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	begin := time.Now()
-	mustNil(t, f.a.Start(ctx))
+	mustNil(t, f.a.Start(t.Context()))
 	return begin
 }
 
@@ -263,9 +263,7 @@ func TestTI01RenewsACachedCertificateWithTwentyNineDaysLeft(t *testing.T) {
 	seeded, err := x509.ParseCertificate(seedCertFor(t, f.a, f.name, now.Add(-61*24*time.Hour), now.Add(29*24*time.Hour), nil))
 	mustNil(t, err)
 	startIssue(t, f)
-	if ch, err := f.chain(); err != nil || !ch[0].Equal(seeded) {
-		t.Fatalf("Start did not serve the cached certificate: %v", err)
-	}
+	f.requireServes(t, seeded, "after Start")
 	begin := time.Now()
 	chain := f.waitChain(t, issueLimit, func(leaf *x509.Certificate) bool { return !leaf.Equal(seeded) })
 	t.Logf("replacement served %v after the first handshake", time.Since(begin))
@@ -275,6 +273,66 @@ func TestTI01RenewsACachedCertificateWithTwentyNineDaysLeft(t *testing.T) {
 	f.verifyToPebble(t, chain)
 	f.onlyPebble(t, "after renewal")
 	f.requireALPN(t)
+}
+
+// retryAfterOneSecond is a ResponseWriter that sets Retry-After to 1 s.
+type retryAfterOneSecond struct{ http.ResponseWriter }
+
+func (w retryAfterOneSecond) WriteHeader(code int) {
+	w.Header().Set("Retry-After", "1")
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w retryAfterOneSecond) Write(b []byte) (int, error) {
+	w.Header().Set("Retry-After", "1")
+	return w.ResponseWriter.Write(b)
+}
+
+// shortRenewalInfoPoll makes Pebble ask the client to read renewalInfo again
+// after 1 s, not after 6 hours. A change of the renewal window then reaches
+// the client in the run time of a test. The rest of the answer is the one
+// of Pebble.
+func shortRenewalInfoPoll(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "renewalInfo") {
+			w = retryAfterOneSecond{w}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// TestTI01RenewsAPebbleCertificateThroughARIWithoutReplaces: Pebble issues a
+// certificate. Then Pebble tells the client, in the renewalInfo answer for
+// that certificate, that the renewal window is in the past. This is the same
+// override as the management endpoint /set-renewal-info/. The certificate has
+// 90 days of life, so only this window can start a renewal. At a maintenance
+// tick, the client reads the new window and renews. The order of the new
+// certificate has no replaces field. This is the designed behavior. The
+// issuer has the directory of the CA as its test directory. So certmagic
+// treats each order as a test order and does not send replaces. The
+// maintenance loop still reads renewalInfo.
+func TestTI01RenewsAPebbleCertificateThroughARIWithoutReplaces(t *testing.T) {
+	f := newIssueFixture(t, "ari.phantom.test", shortRenewalInfoPoll, func(p *ACMEParams) { p.maintenanceInterval = time.Second })
+	startIssue(t, f)
+	first := f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })[0]
+	now := time.Now().UTC()
+	window := fmt.Sprintf(`{"suggestedWindow":{"start":%q,"end":%q}}`, now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
+	mustNil(t, f.rig.db.SetARIResponse(first.SerialNumber, window))
+	chain := f.waitChain(t, issueLimit, func(leaf *x509.Certificate) bool { return !leaf.Equal(first) })
+	f.verifyToPebble(t, chain)
+	// Pebble stores the order by serial after it issues the certificate.
+	var order *core.Order
+	testutil.WaitFor(t, func() bool {
+		var err error
+		order, err = f.rig.db.GetOrderByIssuedSerial(hex.EncodeToString(chain[0].SerialNumber.Bytes()))
+		return err == nil
+	}, issueLimit)
+	order.RLock()
+	defer order.RUnlock()
+	if order.Replaces != "" {
+		t.Errorf("the renewal order has replaces %q; want none", order.Replaces)
+	}
+	f.onlyPebble(t, "after the renewal through ARI")
 }
 
 // TestTS16RetryAfterARefusedOrderStaysOnThePebbleAuthority: Pebble refuses the
@@ -356,7 +414,7 @@ func TestTS16RedirectToAnotherPortIsRefused(t *testing.T) {
 	t.Cleanup(redirector.Close)
 	// The target would be trusted, so only the guard can refuse it.
 	roots := mustRoots(t, slices.Concat(certPEM(redirector.Certificate()), certPEM(target.Certificate())))
-	var egress egressSet
+	var egress egressRecorder
 	a := newTestACME(t, func(p *ACMEParams) {
 		p.CA, p.OnEgress, p.CARoots = redirector.URL+"/dir", egress.record, roots
 	})
@@ -404,11 +462,13 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
-	before := listeningInodes(t)
+	before := mustListeningSockets(t)
 	if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.addr) {
 		t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, f.addr)
 	}
-	var samples int
+	// The goroutine writes these. finish reads them after done.
+	var samples, failed int
+	var lastErr error
 	var extra []string
 	quit, done := make(chan struct{}), make(chan struct{})
 	go func() { // no t.Fatal here
@@ -419,12 +479,15 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 				stop = true
 			case <-time.After(time.Millisecond):
 			}
-			if now, err := listeningSockets(); err == nil {
-				samples++
-				for inode, addr := range now {
-					if _, ok := before[inode]; !ok && !slices.Contains(extra, addr) {
-						extra = append(extra, addr)
-					}
+			now, err := listeningSockets()
+			if err != nil {
+				failed, lastErr = failed+1, err
+				continue
+			}
+			samples++
+			for inode, addr := range now {
+				if _, ok := before[inode]; !ok && !slices.Contains(extra, addr) {
+					extra = append(extra, addr)
 				}
 			}
 		}
@@ -434,7 +497,10 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 		once.Do(func() {
 			close(quit)
 			<-done
-			t.Logf("%d samples of the listening sockets", samples)
+			t.Logf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", samples, failed, lastErr)
+			if samples == 0 {
+				t.Error("no sample of the listening sockets was read, so the check saw nothing")
+			}
 			if len(extra) != 0 {
 				t.Errorf("new listening sockets since before Start: %v", extra)
 			}
@@ -444,8 +510,10 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	startIssue(t, f)
 	f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })
 	finish()
+	// Pebble ran a real TLS-ALPN validation on the decoy socket in the window.
+	f.requireALPN(t)
 	decoyHoldsSolver("after the certificate")
-	for inode, addr := range listeningInodes(t) {
+	for inode, addr := range mustListeningSockets(t) {
 		if _, ok := before[inode]; !ok {
 			t.Errorf("new listening socket %s (inode %s) after the certificate", addr, inode)
 		}
@@ -474,19 +542,8 @@ func seedOCSPChain(t *testing.T, a *ACME, name, ocspURL string) *x509.Certificat
 	mustNil(t, err)
 	leaf, err := x509.ParseCertificate(leafDER)
 	mustNil(t, err)
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	mustNil(t, err)
-	meta, err := json.Marshal(certmagic.CertificateResource{SANs: []string{name}})
-	mustNil(t, err)
 	chain := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})...)
-	ik := a.cfg.Issuers[0].(*certmagic.ACMEIssuer).IssuerKey()
-	for k, v := range map[string][]byte{
-		certmagic.StorageKeys.SiteCert(ik, name):       chain,
-		certmagic.StorageKeys.SitePrivateKey(ik, name): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-		certmagic.StorageKeys.SiteMeta(ik, name):       meta,
-	} {
-		mustNil(t, a.cfg.Storage.Store(context.Background(), k, v))
-	}
+	storeSeed(t, a, name, chain, key)
 	return leaf
 }
 
@@ -511,9 +568,7 @@ func TestTS16OCSPStaysOffAfterMaintenanceTicks(t *testing.T) {
 	})
 	seeded := seedOCSPChain(t, f.a, f.name, ocsp.URL)
 	startIssue(t, f)
-	if ch, err := f.chain(); err != nil || !ch[0].Equal(seeded) {
-		t.Fatalf("Start did not serve the seeded certificate: %v", err)
-	}
+	f.requireServes(t, seeded, "after Start")
 	testutil.WaitFor(t, func() bool { return requests.Load() > ticks }, issueLimit)
 	if hits.Load() != 0 {
 		t.Errorf("OCSP server got %d requests", hits.Load())

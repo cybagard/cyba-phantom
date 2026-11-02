@@ -395,11 +395,10 @@ func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 		t.Logf("child output:\n%s", out)
 		return
 	}
-	var mu sync.Mutex
-	var seen []string
+	var egress egressRecorder
 	a := newTestACME(t, func(p *ACMEParams) {
 		p.CA = "https://CA.test:443/dir"
-		p.OnEgress = func(h string) { mu.Lock(); seen = append(seen, h); mu.Unlock() }
+		p.OnEgress = egress.record
 	})
 	iss := a.cfg.Issuers[0].(*certmagic.ACMEIssuer)
 	for who, proxy := range map[string]func(*http.Request) (*url.URL, error){"acme": iss.HTTPProxy, "ocsp": a.cfg.OCSP.HTTPProxy} {
@@ -425,7 +424,7 @@ func TestTS16EgressGuardRefusesOtherRequests(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 12 || !slices.Contains(seen, "other.test") {
+	if seen := egress.calls(); len(seen) != 12 || !slices.Contains(seen, "other.test") {
 		t.Errorf("the hook saw %v", seen)
 	}
 }
