@@ -8,15 +8,27 @@ import (
 	"golang.org/x/mod/sumdb/tlog"
 )
 
-const fuzzMaxSize = 10000
+const (
+	fuzzMaxSize  = 10000
+	fuzzMaxBatch = 600
+)
 
 // FuzzTU07Proofs checks the inclusion proof and the consistency proof for a
 // random tree size from 1 to 10 000. One log serves all inputs. It grows to the
-// largest size that an input needs, and a proof for a smaller size is still
-// valid in the larger log. The seeds are small, so that go test stays fast.
+// largest size that an input needs. A proof for a smaller size is still valid
+// in the larger log. The log grows with AppendBatch calls. Each call has a
+// random size from 1 to fuzzMaxBatch, so a batch can cross a tile border. The
+// seeds are small, so that go test stays fast.
 func FuzzTU07Proofs(f *testing.F) {
-	for _, s := range [][3]uint16{{1, 0, 0}, {2, 1, 1}, {3, 1, 2}, {256, 255, 128}, {257, 256, 256}, {513, 7, 300}} {
-		f.Add(s[0], s[1], s[2])
+	// The fields are size, index, old size, and batch size. The size and the
+	// batch size are the field plus 1. The seeds have a batch of 1, batches
+	// that cross a tile border, and batches larger than 256.
+	seeds := [][4]uint16{
+		{1, 0, 0, 0}, {2, 1, 1, 0}, {3, 1, 2, 2}, {300, 255, 128, 250},
+		{257, 256, 256, 1}, {513, 7, 300, 300}, {1000, 500, 700, 600},
+	}
+	for _, s := range seeds {
+		f.Add(s[0], s[1], s[2], s[3])
 	}
 	withoutSync(f)
 	dir := filepath.Join(f.TempDir(), "state")
@@ -33,13 +45,16 @@ func FuzzTU07Proofs(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Cleanup(func() { l.Close() })
-	f.Fuzz(func(t *testing.T, sizeIn, indexIn, oldIn uint16) {
+	f.Fuzz(func(t *testing.T, sizeIn, indexIn, oldIn, batchIn uint16) {
 		size := 1 + int64(sizeIn)%fuzzMaxSize
 		index, old := int64(indexIn)%size, int64(oldIn)%(size+1)
-		for n, _ := l.Head(); n < size; n++ {
-			if _, err := l.Append(testEvent(int(n))); err != nil {
-				t.Fatal(err)
+		batch := 1 + int64(batchIn)%fuzzMaxBatch
+		for n, _ := l.Head(); n < size; {
+			end := min(n+batch, size)
+			if first, err := l.AppendBatch(batchOf(int(n), int(end))); err != nil || first != n {
+				t.Fatalf("batch %d to %d: index %d, error %v", n, end, first, err)
 			}
+			n = end
 		}
 		root, err := l.RootAt(size)
 		if err != nil {

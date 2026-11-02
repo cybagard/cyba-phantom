@@ -99,20 +99,21 @@ func (l *Log) Append(h EventHash) (int64, error) {
 	return l.AppendBatch([]EventHash{h})
 }
 
-// AppendBatch adds one leaf for each event hash, in order, and returns the index
+// AppendBatch adds one leaf for each event hash, in order. It returns the index
 // of the first leaf. It writes each tile that the batch changes one time, with
 // its final width. Then it writes the tree head one time. A tile that the batch
-// fills is written in full. This is also true when the batch goes on into the
+// fills is written in full. This is also true when the batch continues in the
 // next tile. The size and the root in memory change only after the tree head is
-// durable. An empty batch writes nothing and returns the size. If the batch does
-// not fit in the log, AppendBatch returns an error before it writes. It does the
-// same if the batch changes more tiles than the store accepts for one tree head.
+// durable. An empty batch writes nothing and returns the size. If the batch is
+// too large for the log, AppendBatch returns an error before it writes. It does
+// the same if the batch changes more tiles than the store accepts for one tree
+// head.
 //
 // If a write fails, AppendBatch returns an error and the log stops. The size and
 // the root in memory do not change. The log then refuses each later Append and
-// AppendBatch with the same error, except that it removes the mark ErrHeadOnDisk
-// (see below). A proof or root read that finds a bad tile stops the log in the
-// same way.
+// AppendBatch with the same error. That error has no ErrHeadOnDisk mark (see
+// below). A proof or root read that finds a bad tile stops the log in the same
+// way.
 //
 // The tree head on disk depends on the failure. If a tile write fails, the old
 // tree head stays on disk. This is also true if the write of the head file
@@ -145,16 +146,13 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	if batchTiles(n, n+int64(len(hs))) > maxBatchTiles {
 		return 0, newError("log", ruleBatch)
 	}
-	// Work on a copy of the tiles. The batch copies a buffer when it first
-	// changes it, so the buffers of the log stay as they are until the head is durable.
+	// Use a copy of the tiles. The batch copies a buffer when it first changes
+	// it. The buffers of the log do not change until the head is durable.
 	work := l.tiles
 	var owned [maxLevel + 1]bool
-	type slot struct {
-		lv int
-		n  int64
-	}
-	final := map[slot][]byte{} // the last data of each tile that the batch changes
-	var order []slot
+	// final holds the last data of each tile that the batch changes.
+	final := map[tlog.Tile][]byte{}
+	var order []tlog.Tile
 	for j, h := range hs {
 		size := n + int64(j)
 		stored, err := tlog.StoredHashes(size, h[:], cacheView{&work})
@@ -177,11 +175,11 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 				}
 			}
 			work[lv], owned[lv] = tileBuf{k / fullWidth, append(data, hash[:]...)}, true
-			s := slot{lv, k / fullWidth}
-			if _, ok := final[s]; !ok {
-				order = append(order, s)
+			key := tlog.Tile{H: TileHeight, L: lv, N: k / fullWidth}
+			if _, ok := final[key]; !ok {
+				order = append(order, key)
 			}
-			final[s] = work[lv].data
+			final[key] = work[lv].data
 		}
 	}
 	end := n + int64(len(hs))
@@ -189,9 +187,9 @@ func (l *Log) AppendBatch(hs []EventHash) (int64, error) {
 	if err != nil {
 		return 0, newError("log", ruleCache)
 	}
-	for _, s := range order {
-		data := final[s]
-		t := tlog.Tile{H: TileHeight, L: s.lv, N: s.n, W: len(data) / tlog.HashSize}
+	for _, t := range order {
+		data := final[t]
+		t.W = len(data) / tlog.HashSize
 		if err := l.store.WriteTile(t, data); err != nil {
 			return 0, l.stop(err)
 		}
