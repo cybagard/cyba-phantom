@@ -3,6 +3,9 @@
 package store
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -193,18 +196,107 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 // T-S-15: Open of a new file gets the held descriptor of the made file at the
 // temporary name. At that time, one descriptor of the process points to the
 // file. Open has closed the descriptor that made the file. SQLite has not
-// opened the file yet. Only the first call of the hook counts.
+// opened the file yet. The second call is the open of the real name. Then the
+// guard of Open and the held descriptor point to the file: 2 descriptors.
 func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 	root, state, _ := newState(t)
-	n := -1
+	n, real := -1, -1
 	setHook(t, &onHeld, func(*os.File) {
 		if n < 0 {
 			n = fdsOf(t, filepath.Join(state, "events.db"+tempSuffix))
+		} else {
+			real = fdsOf(t, filepath.Join(state, "events.db"))
 		}
 	})
 	mustOpen(t, root, "events.db").Close()
-	if n != 1 {
-		t.Fatalf("%d descriptors of the new database file, want 1", n)
+	if n != 1 || real != 2 {
+		t.Fatalf("%d descriptors at the first open and %d at the second, want 1 and 2", n, real)
+	}
+}
+
+// T-S-15: after Open, the process holds a lock on the database file. A new
+// descriptor sees the conflict. A close of a descriptor of the file after
+// SQLite opens it drops the locks of the process, and the test would find none.
+func TestTS15PoolHoldsFileLockAfterOpen(t *testing.T) {
+	const getlk = 36 // F_OFD_GETLK
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint("existing ", existing), func(t *testing.T) {
+			root, state, _ := newState(t)
+			if existing {
+				mustOpen(t, root, "events.db").Close()
+			}
+			db := mustOpen(t, root, "events.db")
+			defer db.Close()
+			var one int
+			if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(filepath.Join(state, "events.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			lk := syscall.Flock_t{Type: syscall.F_WRLCK}
+			if _, _, e := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), getlk, uintptr(unsafe.Pointer(&lk))); e != 0 {
+				t.Fatal(e)
+			}
+			if lk.Type == syscall.F_UNLCK {
+				t.Fatal("the process holds no lock on the database file")
+			}
+		})
+	}
+}
+
+// T-S-15: a refused start leaves no descriptor of the made file. The row
+// "at the rename" refuses at the temporary name, with a file at the real name.
+// The row "side file" puts a symlink at the -journal name after the rename. The
+// check of the real name refuses it with the type rule, and Open removes the
+// made file. The symlink stays. A removed file shows as "(deleted)" in /proc.
+func TestTS15RefusedStartLeavesNoDescriptor(t *testing.T) {
+	for _, r := range []struct{ name, set, rule string }{
+		{"at the rename", "events.db", ruleChanged},
+		{"side file", "events.db-journal", ruleType},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			plant := func() {
+				var err error
+				if r.set == "events.db" {
+					err = os.WriteFile(file, []byte("other file"), 0o600)
+				} else {
+					err = os.Symlink("target", file+"-journal")
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}
+			if r.name == "side file" {
+				onDirSync(t, plant)
+			} else {
+				setHook(t, &beforeRename, plant)
+			}
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, r.set, r.rule)
+			if _, err := os.Lstat(filepath.Join(state, r.set)); err != nil {
+				t.Fatalf("the planted file is gone: %v", err)
+			}
+			for _, p := range []string{file, file + tempSuffix} {
+				for _, name := range []string{p, p + " (deleted)"} {
+					if n := fdsOf(t, name); n != 0 {
+						t.Errorf("%d descriptors of %s after the refusal", n, filepath.Base(name))
+					}
+				}
+			}
+			if r.name == "side file" {
+				if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the made file stays: %v", err)
+				}
+			}
+		})
 	}
 }
 

@@ -34,18 +34,7 @@ func removeIfMade(dir *os.Root, made fs.FileInfo, names ...string) {
 	}
 }
 
-// removeSideFiles removes the -wal, -shm and -journal files of last in dir. It
-// does that only when the database file last is absent. Before newDatabase made
-// the file, it found none of them.
-func removeSideFiles(dir *os.Root, last string) {
-	if _, err := dir.Lstat(last); errors.Is(err, fs.ErrNotExist) {
-		for _, s := range suffixes[1:] {
-			_ = dir.Remove(last + s)
-		}
-	}
-}
-
-// renamed gives the name to to an error that has the name from. So an error of
+// renamed replaces the name from with the name to in an error. So an error of
 // the temporary file names the file of store.path. An error of a side file of
 // the temporary file keeps its name.
 func renamed(err error, from, to string) error {
@@ -87,17 +76,19 @@ func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo
 	if err != nil && !absent {
 		return nil, nil, fail(rel, ruleExamine)
 	}
-	for _, s := range suffixes[1:] {
-		if _, err := dir.Lstat(last + s); absent && !errors.Is(err, fs.ErrNotExist) {
-			if err != nil {
-				return nil, nil, fail(rel+s, ruleExamine)
+	if absent {
+		for _, s := range suffixes[1:] {
+			if _, err := dir.Lstat(last + s); !errors.Is(err, fs.ErrNotExist) {
+				if err != nil {
+					return nil, nil, fail(rel+s, ruleExamine)
+				}
+				return nil, nil, fail(rel+s, ruleOrphan)
 			}
-			return nil, nil, fail(rel+s, ruleOrphan)
 		}
 	}
 	for _, s := range suffixes {
 		if err := dir.Remove(tmpLast + s); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, fail(tmp, ruleRemove)
+			return nil, nil, fail(tmp+s, ruleRemove)
 		}
 	}
 	if !absent {

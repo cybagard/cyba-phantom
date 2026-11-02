@@ -264,6 +264,124 @@ func TestTS15SideFileWithoutDatabaseIsRefused(t *testing.T) {
 	}
 }
 
+// T-S-15: a side file at the real name makes Open refuse before it removes a
+// leftover temporary file. The state directory does not change.
+func TestTS15SideFileRefusalKeepsLeftover(t *testing.T) {
+	root, state, _ := newState(t)
+	for _, n := range []string{"events.db-wal", "events.db" + tempSuffix} {
+		if err := os.WriteFile(filepath.Join(state, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := snapshot(t, state)
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db-wal", ruleOrphan)
+	if after := snapshot(t, state); after != before {
+		t.Fatalf("Open changed the files:\n%s\nbefore:\n%s", after, before)
+	}
+}
+
+// T-S-15: a regular -wal file and a symlink -journal that someone puts in place
+// after the made file left the real name stay. Open removes no file that SQLite
+// did not make.
+func TestTS15PlantedSideFilesStay(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	onDirSync(t, func() {
+		for _, err := range []error{
+			os.Rename(file, file+".moved"),
+			os.WriteFile(file+"-wal", []byte("planted"), 0o600),
+			os.Symlink("target", file+"-journal"),
+		} {
+			if err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db-journal", ruleType)
+	if b, err := os.ReadFile(file + "-wal"); err != nil || string(b) != "planted" {
+		t.Fatalf("the -wal file is gone or changed: %q, %v", b, err)
+	}
+	if _, err := os.Lstat(file + "-journal"); err != nil {
+		t.Fatalf("the -journal symlink is gone: %v", err)
+	}
+}
+
+// T-S-15: a -wal file that appears at the real name after the create is not
+// read into the new database. Open refuses, removes the made file, and keeps
+// the -wal file. The hook runs before the rename or at the sync of the
+// directory after it.
+func TestTS15SideFilePutAfterCreateIsRefusedAndKept(t *testing.T) {
+	for _, when := range []string{"before the rename", "after the rename"} {
+		t.Run(when, func(t *testing.T) {
+			root, state, _ := newState(t)
+			file := filepath.Join(state, "events.db")
+			plant := func() {
+				if err := os.WriteFile(file+"-wal", []byte("planted"), 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+			if when == "before the rename" {
+				setHook(t, &beforeRename, plant)
+			} else {
+				onDirSync(t, plant)
+			}
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "events.db-wal", ruleOrphan)
+			if b, err := os.ReadFile(file + "-wal"); err != nil || string(b) != "planted" {
+				t.Fatalf("the -wal file is gone or changed: %q, %v", b, err)
+			}
+			for _, s := range []string{"", tempSuffix} {
+				if _, err := os.Lstat(file + s); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("events.db%s stays: %v", s, err)
+				}
+			}
+		})
+	}
+}
+
+// T-S-15: a file at the temporary name after the leftover removal is not a file
+// that open makes. open refuses and the file keeps its content.
+func TestTS15FileAtTemporaryNameBeforeOpenIsKept(t *testing.T) {
+	root, state, _ := newState(t)
+	if err := os.Mkdir(filepath.Join(state, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(state, "data", "events.db"+tempSuffix)
+	const content = "other file"
+	calls := 0
+	// The hook runs before each check of the directory data. Call 1 is the check
+	// in Open. Call 2 is the check in open for the temporary name. It is after
+	// the leftover removal and before the check of the files.
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		if name == "data" {
+			if calls++; calls == 2 {
+				if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	}})
+	db, err := Open(root, "data/events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "data/events.db", ruleChanged)
+	if b, err := os.ReadFile(file); err != nil || string(b) != content {
+		t.Fatalf("the file is gone or changed: %q, %v", b, err)
+	}
+}
+
 // T-S-15: the made file can leave the real name before Open opens that name.
 // Open then makes no file at the real name, and it refuses. The made file is at
 // neither name now, so it stays.
@@ -332,7 +450,7 @@ func TestTS15OtherFileAtTemporaryNameAfterPoolCloseIsKept(t *testing.T) {
 }
 
 // T-S-15: an error about a side file of the temporary file keeps the temporary
-// name. A symlink put at the -wal name after the first checks makes it.
+// name. A symlink put at the -wal name after the first checks causes the error.
 func TestTS15ErrorOfTemporarySideFileKeepsItsName(t *testing.T) {
 	root, state, _ := newState(t)
 	setHook(t, &afterChecks, nth(1, func() {
@@ -374,7 +492,7 @@ func TestTS15FileAtRealNameBeforeRenameIsKept(t *testing.T) {
 	const content = "other file"
 	setHook(t, &beforeRename, func() {
 		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
 	})
 	openFails(t, root, ruleChanged)

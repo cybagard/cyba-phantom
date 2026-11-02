@@ -200,18 +200,22 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		return nil, err
 	}
 	if guard != nil {
-		// The guard holds the inode of the made file. open closes it when its
-		// own descriptor of the file is open. The deferred close runs after
-		// removeIfMade for a failure before that point.
+		// The guard holds the inode of the made file. open closes it as soon as
+		// its own descriptor of the file is open. This close is after the last
+		// failure that open does not clean up. The deferred close is for the
+		// failures before that point.
 		defer guard.Close()
 	}
 	db, err := open(root, rel, opt, &made, false, guard)
-	if err != nil && made != nil {
-		// The file at last is the file that newDatabase made. A file that is
-		// not that file stays. If the database file is gone, SQLite can leave
-		// its -wal and -shm files. The next start would refuse them.
-		removeIfMade(dir, made, last)
-		removeSideFiles(dir, last)
+	if err != nil && made != nil && guard != nil {
+		// open leaves the guard open only when it fails before its own
+		// descriptor of the file is open. Then it has not removed the made file.
+		// The guard holds the inode, so the Lstat below cannot find a new file.
+		// A later failure is cleaned up in open, while a descriptor holds the
+		// inode.
+		if _, serr := guard.Stat(); serr == nil {
+			removeIfMade(dir, made, last)
+		}
 	}
 	return db, err
 }
@@ -222,6 +226,8 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 // of the new file. For any other call, an absent file is an error. guard is
 // nil, or a descriptor that holds the inode of kept. open closes it when its
 // own read-only descriptor of the file is open, before SQLite opens the file.
+// A failure after that close removes the made file in open. A failure before
+// it leaves the guard open, and the caller removes the made file.
 func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool, guard *os.File) (*sql.DB, error) {
 	base, err := stateBase(root)
 	if err != nil {
@@ -240,23 +246,24 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 		return nil, err
 	}
 	absent := checked == nil
-	// made is the identity of the file that this call makes. It can be the file
-	// that the caller made, in kept. It stays nil for an existing file.
+	// made is the identity of the file that this call makes. On the open of the
+	// real name it is the file that the caller made, in kept. It is nil for a
+	// file that no call made, which this call must not remove.
 	made := *kept
 	var held, created *os.File
 	var hfi fs.FileInfo
-	// Each failed step after open makes or opens the file calls refuse. It
-	// calls refuse before it closes the held descriptor, the create descriptor
-	// or the pool. While one of them is open, the inode of the made file is
-	// not free. Thus a file that someone makes in that time cannot have the
-	// same inode. refuse removes the entry in dir when the Lstat shows the
-	// file that this call made. open keeps the identity of the made file from
-	// the Stat of the create descriptor. The held Stat does not change it.
-	// Only the refuse call in the create block can find made nil. Then the
-	// first Stat of the create descriptor failed, and that descriptor is still
-	// open. refuse makes one more Stat of it. If that Stat fails too, refuse
-	// removes nothing. refuse does not find a change of the entry between the
-	// Lstat and the Remove. If someone puts another file there in that window,
+	// Each failed step after the held descriptor or the create descriptor is
+	// open calls refuse. It calls refuse before it closes the held descriptor,
+	// the create descriptor or the pool. While one of them is open, the inode
+	// of the made file is not free. Thus a file that someone makes in that
+	// time cannot have the same inode. refuse removes the entry in dir when
+	// the Lstat shows the file that this call made. open keeps the identity of
+	// the made file from the Stat of the create descriptor. The held Stat does
+	// not change it. The refuse call can find made nil when the first Stat of
+	// the create descriptor failed. That descriptor is still open. Then refuse
+	// makes one more Stat of it. If that Stat fails too, refuse removes
+	// nothing. refuse does not find a change of the entry between the Lstat
+	// and the Remove. If someone puts another file there in that window,
 	// refuse removes it.
 	refuse := func(err error) error {
 		if beforeRefuse != nil {
@@ -272,6 +279,14 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 	}
 	if absent != create {
 		return nil, refuse(fail(rel, ruleChanged))
+	}
+	if *kept != nil && !create {
+		// SQLite has not opened these names yet. A file here is not of this call.
+		for _, s := range suffixes[1:] {
+			if _, err := dir.Lstat(last + s); !errors.Is(err, fs.ErrNotExist) {
+				return nil, refuse(fail(rel+s, ruleOrphan))
+			}
+		}
 	}
 	// The descriptor stays open until the pool closes. While it is open, the
 	// inode of the file cannot be given to a new file. The open of an existing
@@ -330,10 +345,23 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 		onHeld(held)
 	}
 	fi, statErr := held.Stat()
-	// refuseClose calls refuse first and then closes c.
+	// refuseClose calls refuse first and then closes c. SQLite can leave its
+	// -wal and -shm files when the database file is gone. So refuseClose
+	// removes the entries that were there before the close, if this call made
+	// the database file. It removes them by identity. It never removes a
+	// -journal file, which a WAL database does not make.
 	refuseClose := func(err error, c io.Closer) error {
+		var side [2]fs.FileInfo
+		for i, s := range suffixes[1:3] {
+			side[i], _ = dir.Lstat(last + s)
+		}
 		err = refuse(err)
 		c.Close()
+		for i, s := range suffixes[1:3] {
+			if made != nil && side[i] != nil {
+				removeIfMade(dir, side[i], last+s)
+			}
+		}
 		return err
 	}
 	id, err := identityOf(rel, fi, statErr)
@@ -346,7 +374,8 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 		return nil, refuseClose(err, held)
 	}
 	if guard != nil {
-		// held keeps the inode now. A close after SQLite opens drops its locks.
+		// held keeps the inode now. A close after SQLite opens drops the locks
+		// of the process.
 		guard.Close()
 	}
 	if afterChecks != nil {

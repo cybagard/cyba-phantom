@@ -67,7 +67,7 @@ func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
 
 // swapMadeFile sets the hook of the second open of a new file. The hook moves
 // the made file to file+".moved" and writes another file with mode 0600. The
-// made file has the temporary name until the first write is done.
+// made file has the temporary name until the rename.
 func swapMadeFile(t *testing.T, file string) {
 	t.Helper()
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
@@ -402,7 +402,7 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 			file := filepath.Join(state, "events.db")
 			r.fail(t, file)
 			openFails(t, root, r.rule)
-			for _, suffix := range []string{"", "-wal", "-shm"} {
+			for _, suffix := range suffixes {
 				for _, name := range []string{file, file + tempSuffix} {
 					if _, err := os.Lstat(name + suffix); !errors.Is(err, fs.ErrNotExist) {
 						t.Fatalf("%s stays: %v", filepath.Base(name+suffix), err)
