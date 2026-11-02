@@ -155,23 +155,31 @@
 //
 // # Known limits
 //
-// In a text file, stelint reads some Markdown differently from CommonMark. A
-// paragraph of a list item, after a blank line and at 4 spaces of indent, is
-// code to stelint. It does not count the paragraph. CommonMark reads it as
-// text. A closing fence line with text after its backticks closes the fence in
-// stelint. Then the real closing line opens a new fence. CommonMark does not
-// close the fence at the line with text. stelint does not know a "~~~" fence.
-// So a backtick fence line in a "~~~" block opens a fence. After an indented
-// code block, a line with 2 or 3 spaces of indent stays code in stelint.
-// CommonMark reads it as text. A fence line with 4 or more spaces of indent
-// opens a fence in stelint. After a blank line, and not in a list item,
-// CommonMark reads that line as code. A line with no indent, directly after a
-// list item line, ends the item in stelint. CommonMark reads it as part of the
-// item.
+// In a text file, stelint reads some Markdown differently from CommonMark:
 //
-// In a Go file, a trailing comment can continue on the next line, in its gofmt
-// form. stelint reads the two lines as two texts, so it counts no sentence
-// across them. A reader can read them as one sentence.
+//   - After a blank line, a list item paragraph at four or more columns of
+//     indent is code to stelint. A tab moves to the next multiple of four
+//     columns. stelint does not count the words of that paragraph, or of a
+//     heading there. CommonMark can read them as part of the item.
+//   - A closing fence line with text after its backticks closes the fence. A
+//     shorter run of backticks also closes it. Then the real closing line
+//     opens a new fence. CommonMark does not close the fence at those lines.
+//   - stelint does not know a "~~~" fence. So a backtick fence line in a "~~~"
+//     block opens a fence.
+//   - Directly after a line of an indented code block, a line with two or
+//     three spaces of indent stays code. CommonMark reads it as text.
+//   - A fence line with four or more spaces of indent, or a tab, opens or
+//     closes a fence. Outside a list item, CommonMark does not read that line
+//     as a fence.
+//   - Directly after a line of a list item, a text line with no indent or one
+//     space ends the item. CommonMark reads it as part of the item paragraph.
+//
+// In a Go file, gofmt can put the next line of a trailing comment at the indent
+// column. stelint reads the two lines as two texts. So it counts no sentence
+// across them, but a reader can read one sentence.
+//
+// Other sections name more limits, for example changes that turn code into
+// prose.
 //
 // # Output
 //
