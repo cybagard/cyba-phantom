@@ -193,7 +193,8 @@ func workspaceError(got string) error {
 }
 
 // vendorError gives an error when the module root has a vendor entry. With a
-// vendor folder, the build lists other packages than go list does.
+// vendor folder, go build can use other packages than the go list of this
+// test.
 func vendorError(root string) error {
 	_, err := os.Lstat(filepath.Join(root, "vendor"))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -202,7 +203,7 @@ func vendorError(root string) error {
 	if err != nil {
 		return fmt.Errorf("vendor entry in the module root: %w", err)
 	}
-	return fmt.Errorf("the module root has a vendor entry")
+	return errors.New("the module root has a vendor entry")
 }
 
 // realPath gives the absolute path of p with each symbolic link resolved.
@@ -814,7 +815,8 @@ func TestTS21ReleaseDepProblem(t *testing.T) {
 }
 
 // TestTS21ReleaseVendorEntry checks vendorError on planted module roots. A
-// vendor folder, file, link and dangling link each give an error.
+// vendor folder, file, link and dangling link each give an error. A root that
+// is a regular file also gives an error, as Lstat cannot read its vendor entry.
 func TestTS21ReleaseVendorEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -854,6 +856,13 @@ func TestTS21ReleaseVendorEntry(t *testing.T) {
 		if has := vendorError(root) != nil; has != tc.bad {
 			t.Errorf("%s: vendorError has an error: %t, want %t", tc.name, has, tc.bad)
 		}
+	}
+	file := filepath.Join(t.TempDir(), "root")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if vendorError(file) == nil {
+		t.Error("root that is a regular file: vendorError has no error, want one")
 	}
 }
 
