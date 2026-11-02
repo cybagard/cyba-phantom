@@ -1166,6 +1166,40 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 // for its delivery. It is longer than shutdownTime.
 const sigtermWait = shutdownTime + 10*time.Second
 
+// TestTI03_StopWaitsForOpenConnection opens a TLS connection and sends
+// a request head that is not complete. Then it cancels serve.
+// Serve must not return while the connection is open. It must return
+// after the client closes the connection (NFR-05).
+func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
+	https, plain, caAddr := openListeners(t)
+	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), caAddr)
+	p := tempState(t, cfg)
+	ca, _ := cfg.Get("acme.ca")
+	der := seedCache(t, p, ca.Str)
+	r := launchServe(t, cfg, p, realDeps)
+	r.waitStarted(t)
+	conn := coldHandshake(t, https.Addr().String(), r.begin, der, &r.err, r.slow)
+	defer conn.Close() // Each path closes the connection, also a t.Fatal.
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: " + decoyName + "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	r.cancel()
+	select {
+	case <-r.done:
+		t.Fatal("serve returned while a connection was open")
+	case <-time.After(time.Second):
+	}
+	conn.Close()
+	select {
+	case <-r.done:
+	case <-time.After(sigtermWait):
+		t.Fatalf("serve did not return %v after the client closed", sigtermWait)
+	}
+	if r.code != 0 {
+		t.Errorf("exit %d, want 0", r.code)
+	}
+}
+
 // TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
 // that no one answers. A TLS handshake with the cached certificate must work at most 2 s after the process start.
 // SIGTERM must end the process with exit 0 (NFR-05). The test needs root, because /var/lib/phantom is the state directory.
