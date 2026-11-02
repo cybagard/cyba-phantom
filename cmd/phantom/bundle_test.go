@@ -350,12 +350,17 @@ func TestTU08_HealthFollowsLoaderState(t *testing.T) {
 	}
 }
 
+// benchRoutes is a route map with one route to the first template.
+const benchRoutes = `{"routes":[{"path":"/","template":"vhosts/h.example/0000.tmpl",` +
+	`"type":"text/html; charset=utf-8"}]}`
+
 // BenchmarkStartLargeBundle starts the store part and the bundle part with a
 // bundle near the caps. The case files has two random files of 4 MiB less
 // 4 KiB. The case templates has 8 templates of 65 535 bytes. Its first random
 // file is 600 KiB smaller than in the case files. The bundle file has at most
 // 8 MiB. It reports the growth of the heap in use after a GC, from before the
 // start to after the load. The bundle bytes of the test are not in the value.
+// The case templates also has a route map for its vhost.
 func BenchmarkStartLargeBundle(b *testing.B) {
 	big := func(name string, size int) tarFile {
 		d := make([]byte, size)
@@ -371,6 +376,9 @@ func BenchmarkStartLargeBundle(b *testing.B) {
 			for i := range c.tmpls {
 				text := "{{print" + strings.Repeat(" 1", (64<<10-9)/2) + "}}"
 				files = append(files, tarFile{fmt.Sprintf("vhosts/h.example/%04d.tmpl", i), []byte(text)})
+			}
+			if c.tmpls > 0 {
+				files = append(files, tarFile{"vhosts/h.example/routes.json", []byte(benchRoutes)})
 			}
 			arch := archiveOf(b, referenceFiles(files...)...)
 			if len(arch) > bundle.MaxBundleBytes {
