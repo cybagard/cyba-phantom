@@ -123,6 +123,45 @@ func (e *ckEnv) refused(t *testing.T, c *Checkpointer, before []byte) {
 	}
 }
 
+// Open and SetHead end in a short time on a log with 512 leaves. This test must
+// stay the first test of the package, so that -failfast stops a hang here.
+func TestTU07OpenEndsInBoundedTime(t *testing.T) {
+	const size = 2 * fullWidth
+	var l testLog
+	l.extend(t, size)
+	root := l.root(t, size)
+	tiles := tlog.NewTiles(TileHeight, 0, size)
+	state, _ := newLogState(t)
+	err := within(t, func() error {
+		s, err := Open(state, "tlog")
+		if err != nil {
+			return err
+		}
+		for _, tile := range tiles {
+			if err = s.WriteTile(tile, l.tileData(tile)); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			err = s.SetHead(size, root)
+		}
+		if cerr := s.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		s, err = Open(state, "tlog")
+		if err != nil {
+			return err
+		}
+		return s.Close()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTU12SignsAtEachTickOnlyWhenTheSizeChanged(t *testing.T) {
 	e := newEnv(t, 3)
 	ticks := make(chan time.Time)

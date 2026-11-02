@@ -519,6 +519,17 @@ func TestTS13OpenRefusesGroupDirectoryWithNoSearchBit(t *testing.T) {
 	mustNil(t, os.Chmod(group, 0o600))
 	t.Cleanup(func() { os.Chmod(group, dirMode) })
 	openErr(t, state, ruleRead)
+
+	// The parent has no search bit. The Lstat of the group fails, with no Mode.
+	state, dir = newLogState(t)
+	openStore(t, state).Close()
+	level := filepath.Join(dir, "tlog", "tile", "8")
+	mustNil(t, os.MkdirAll(filepath.Join(level, "0"), dirMode))
+	mustNil(t, os.Chmod(level, 0o600))
+	t.Cleanup(func() { os.Chmod(level, dirMode) })
+	if e := openErr(t, state, ruleRead); e.Name != "tile/8/0" {
+		t.Fatalf("name %q", e.Name)
+	}
 }
 
 // A group directory that is a link can point to another directory. Open must
