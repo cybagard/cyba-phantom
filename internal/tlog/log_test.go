@@ -755,7 +755,8 @@ func sameStop(err, stopErr error) bool {
 
 // A batch with exactly maxBatchTiles changed tiles passes the check of the
 // tile count. The tiles in memory do not match the tree, so the batch stops
-// at the cache check, before a write.
+// at the cache check, before a write. A batch with one leaf more fails the
+// check of the tile count. Neither batch changes a file.
 func TestTU07BatchAtTheTileBoundPassesTheTileCheck(t *testing.T) {
 	state, dir := newLogState(t)
 	l := openTestLog(t, state)
@@ -914,6 +915,7 @@ func TestTS13BatchWriteFailureKeepsTheHeadInMemory(t *testing.T) {
 	// their first change. First is tile 0 of level 0 with 256 hashes. Next is
 	// tile 0 of level 1 with one hash. Last is tile 1 of level 0 with 44
 	// hashes. Then the batch writes the head.
+
 	// failed is the name of the file whose rename failTileRename made fail.
 	var failed string
 	failTileRename := func(nth int) func(t *testing.T) {
