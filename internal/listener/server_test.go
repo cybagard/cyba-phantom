@@ -977,9 +977,9 @@ func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
 	}
 }
 
-// T-S-18: the read budget is the same on the plain socket. After a first request,
-// a head of header_bytes bytes gets 200 and a head of header_bytes + 2000 bytes
-// closes the connection with no response, on both sockets.
+// T-S-18: the read budget is the same on the plain socket. On both sockets, a
+// first request comes first. Then a head of header_bytes bytes gets 200. A head
+// of header_bytes + 2000 bytes closes the connection with no response.
 func TestTS18PlainReadBudget(t *testing.T) {
 	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
 	l := r.watchPeriods()
