@@ -200,6 +200,8 @@ type running struct {
 	err    syncBuf
 	begin  time.Time
 	cpu    time.Duration // the CPU time of the process at begin
+	// pressure is the io and cpu pressure at begin.
+	pressure pressure
 }
 
 // cpuTime is the CPU time (user and system) that this process used so far.
@@ -213,9 +215,10 @@ func cpuTime() time.Duration {
 
 // slow gives the time of the start line and the CPU time of the process, both
 // since begin. A low CPU time means the process did not run. It had no CPU, or
-// it waited. Call it after the start line.
+// it waited. The io and cpu pressure show which one.
+// Call it after the start line.
 func (r *running) slow() string {
-	return fmt.Sprintf("; start line %v after begin, process CPU time %v since begin", r.out.at.Sub(r.begin), cpuTime()-r.cpu)
+	return fmt.Sprintf("; start line %v after begin, process CPU time %v since begin", r.out.at.Sub(r.begin), cpuTime()-r.cpu) + r.pressure.note()
 }
 
 // launchServe runs serveWith until the test ends, and restores the standard log output at the end.
@@ -230,7 +233,7 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	ctx, cancel := context.WithCancel(t.Context())
-	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime()}
+	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: readPressure()}
 	go func() { r.code = serveWith(ctx, cancel, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
@@ -252,7 +255,7 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) 
 	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
-	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime()}
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: readPressure()}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
@@ -1248,7 +1251,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		"PHANTOM_LISTEN_HTTP="+plain, "PHANTOM_ACME_CA="+ca)
 	out, errb := newStartWriter(), &syncBuf{}
 	cmd.Stdout, cmd.Stderr = out, errb
-	begin := time.Now()
+	psi, begin := readPressure(), time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -1264,7 +1267,8 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		ended: exited,
 		info:  func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) },
 	}.until(t, out.started, true)
-	coldHandshake(t, https, begin, der, errb, func() string { return "" }).Close()
+	slow := func() string { return fmt.Sprintf("; start line %v after begin%s", out.at.Sub(begin), psi.note()) }
+	coldHandshake(t, https, begin, der, errb, slow).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
 	<-exited
 	if waitErr != nil {
