@@ -114,11 +114,11 @@ surface.
 
 ## Developing locally
 
-The build runs Go 1.27.3 exactly: `go.mod` sets the minimum and the
-`Makefile`/CI pin the release via `GOTOOLCHAIN` (Go downloads it with
-checksum verification when your local toolchain differs). If you do not
-have Go at all, use the devcontainer — it runs the same pinned toolchain
-as CI:
+The build runs Go 1.27.3 exactly. `go.mod` sets the minimum, and the
+`Makefile` and CI pin the release via `GOTOOLCHAIN`. When your local
+toolchain differs, Go downloads that release with checksum verification.
+If you do not have Go at all, use the devcontainer — it runs the same
+pinned toolchain as CI:
 
 ```sh
 docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile .devcontainer

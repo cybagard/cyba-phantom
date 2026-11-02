@@ -1,8 +1,8 @@
 module github.com/cybagard/cyba-phantom
 
 // The build pins the exact release via GOTOOLCHAIN=go1.27.3 (Makefile,
-// CI env): every build runs the same Go, downloaded with Go's checksum
-// verification when the local toolchain differs. This is what makes the
+// CI env). Every build runs the same Go. When the local toolchain differs,
+// Go downloads that release with checksum verification. This makes the
 // two-build hash compare (T-P-07) meaningful. M-1 has four dependencies:
 // the YAML parser go.yaml.in/yaml/v3 (SEC-11); golang.org/x/mod for
 // the tlog tiles and proofs and the signed checkpoint notes (sumdb/tlog,
