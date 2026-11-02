@@ -23,12 +23,13 @@
 // The spec directory defaults to "spec".
 //
 // The Makefile check in the tests mode has known limits. Limits 1, 3 and 4
-// fail open: trace counts a marker that make cannot run. The findMarkers
-// comment lists more limits.
+// fail open: trace counts a marker that make cannot run. Limit 2 can fail
+// open or closed. The findMarkers comment lists more limits.
 //
-//  1. A rule line in a false conditional branch counts as a rule. A rule
-//     line in a define body counts too, if make does not evaluate the body.
-//     Make does not see the rule.
+//  1. A rule line in a false conditional branch counts as a rule, but make
+//     does not see it. A rule line in a define body counts too. Make sees
+//     that rule only if it reads the body as makefile text, for example
+//     with $(eval).
 //  2. Make drops a NUL byte, the rest of its line and the line end. Thus
 //     make joins two lines, but trace reads two lines. Trace can see a rule
 //     that make does not see, or miss a rule that make sees.
