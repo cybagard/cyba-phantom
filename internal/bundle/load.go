@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -48,6 +49,8 @@ type Bundle struct {
 	expired  bool
 	// templates holds the parsed .tmpl files. No template runs at load.
 	templates map[string]*template.Template
+	// routes holds the route map of each vhost, by host name.
+	routes map[string]RouteMap
 	// seed is the token seed, behind a pointer to a seedRef. A Bundle value
 	// in an unexported struct field then prints no seed byte. It is nil only
 	// when a test turns the seed step off.
@@ -75,6 +78,20 @@ func (b *Bundle) Manifest() Manifest {
 	}
 	return m
 }
+
+// Routes returns a copy of the route map of a vhost. A caller cannot change the
+// kept map.
+func (b *Bundle) Routes(host string) (RouteMap, bool) {
+	rm, ok := b.routes[host]
+	rm.Routes = slices.Clone(rm.Routes)
+	for i := range rm.Routes {
+		rm.Routes[i].Headers = slices.Clone(rm.Routes[i].Headers)
+	}
+	return rm, ok
+}
+
+// Vhosts returns the sorted names of the vhosts that have a route map.
+func (b *Bundle) Vhosts() []string { return slices.Sorted(maps.Keys(b.routes)) }
 
 // Class returns the class of the key that signed the bundle.
 func (b *Bundle) Class() Class { return b.class }
@@ -198,7 +215,9 @@ func (l *Loader) Healthy() bool {
 // Load reads the bundle and the signature file. It checks the bundle and makes
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: chain
 // check, read, SHA-256, signature, archive, manifest, key ID or rotation,
-// engine, expiry and rollback, templates, seed.
+// engine, expiry and rollback. Then: templates, route maps, seed.
+// Each vhost directory below vhosts/ holds a routes.json file. A file directly
+// in vhosts/, a bad vhost name or a bad route map gives ErrContentInvalid.
 // The seed is the plain file of a reference bundle. In a proprietary bundle it
 // is the sealed file, opened with the install key. Another form, both, none,
 // or a size other than 32 bytes gives ErrSeedInvalid. The seed stays in memory.
@@ -309,6 +328,12 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 			return nil, ErrTemplateParse
 		}
 	}
+	// The route step runs also when the template step is nil. The set is then
+	// empty.
+	routes, err := parseRoutes(arch, set)
+	if err != nil {
+		return nil, err
+	}
 	var seed *seedBytes
 	if l.seed != nil {
 		if seed, err = l.seed(arch, class, m); err != nil {
@@ -319,7 +344,7 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	if seed != nil {
 		ref = &seedRef{seed}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, seed: ref}
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, seed: ref}
 	// A candidate that fails a later step keeps no seed. Only an accepted
 	// candidate does.
 	reject := func(err error) (*Bundle, error) {

@@ -361,12 +361,12 @@ func TestTU08OneCodeForEachFailure(t *testing.T) {
 	}
 }
 
-// T-U-08: the eight codes, with their text.
+// T-U-08: the nine codes, with their text.
 func TestTU08CodeText(t *testing.T) {
 	want := []string{"archive_invalid", "bad_sig", "manifest_invalid", "min_engine", "expired", "rollback",
-		"template_parse", "seed_invalid"}
+		"template_parse", "seed_invalid", "content_invalid"}
 	codes := []Code{CodeArchiveInvalid, CodeBadSig, CodeManifestInvalid, CodeMinEngine, CodeExpired,
-		CodeRollback, CodeTemplateParse, CodeSeedInvalid}
+		CodeRollback, CodeTemplateParse, CodeSeedInvalid, CodeContentInvalid}
 	for i, c := range codes {
 		if c.String() != want[i] {
 			t.Errorf("code %d: %q, want %q", c, c.String(), want[i])

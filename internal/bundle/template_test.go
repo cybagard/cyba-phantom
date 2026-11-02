@@ -32,7 +32,7 @@ func bundleFixtures() map[string][]byte {
 		return build(append([]ent{{name: "manifest.json", data: []byte(manifest)}}, more...)...)
 	}
 	return map[string][]byte{
-		"valid.cbnd":         mk(mf(ver(3)), page),
+		"valid.cbnd":         mk(mf(ver(3)), page, tf("vhosts/h.example/routes.json", routeJSON(vhostFile))),
 		"badsig.cbnd":        mk(mf(ver(3))),
 		"expired.cbnd":       mk(mf(ver(3), expiredRepl...)),
 		"minengine.cbnd":     mk(mf(ver(3), engineRepl...)),
@@ -112,9 +112,19 @@ func tf(name, text string) ent { return ent{name: name, data: []byte(text)} }
 // loadWith loads a signed bundle of version 3 that has these files, on a
 // running bundle. With want set, the load must give that error through rejects,
 // and loadWith returns nil. Else it returns the accepted bundle.
+// It adds a valid route map for each vhost of the files.
 func loadWith(t *testing.T, want error, ents ...ent) *Bundle {
 	t.Helper()
+	return loadRaw(t, want, nil, withRoutes(ents)...)
+}
+
+// loadRaw is loadWith with no added route map. setup can change the env first.
+func loadRaw(t *testing.T, want error, setup func(*env), ents ...ent) *Bundle {
+	t.Helper()
 	e := running(t)
+	if setup != nil {
+		setup(e)
+	}
 	arch := build(append([]ent{{name: "manifest.json", data: []byte(mf(ver(3)))}}, ents...)...)
 	e.write("bundle/current.cbnd", arch)
 	e.write("bundle/current.sig", e.sign(arch))

@@ -2,7 +2,7 @@ package bundle
 
 import "errors"
 
-// Code is a rejection code of the bundle loader (FR-02). There are eight
+// Code is a rejection code of the bundle loader (FR-02). There are nine
 // codes, and each failure gives exactly one of them.
 type Code uint8
 
@@ -16,6 +16,7 @@ const (
 	CodeRollback
 	CodeTemplateParse
 	CodeSeedInvalid
+	CodeContentInvalid
 )
 
 var codeText = [...]string{
@@ -27,10 +28,11 @@ var codeText = [...]string{
 	CodeRollback:        "rollback",
 	CodeTemplateParse:   "template_parse",
 	CodeSeedInvalid:     "seed_invalid",
+	CodeContentInvalid:  "content_invalid",
 }
 
 // String returns the text of the code, for example "min_engine". A value that
-// is not one of the eight codes gives "unknown".
+// is not one of the nine codes gives "unknown".
 func (c Code) String() string {
 	if c < 1 || int(c) >= len(codeText) {
 		return "unknown"
@@ -48,6 +50,7 @@ var (
 	ErrRollback        = errors.New("bundle: rollback")
 	ErrTemplateParse   = errors.New("bundle: template_parse")
 	ErrSeedInvalid     = errors.New("bundle: seed_invalid")
+	ErrContentInvalid  = errors.New("bundle: content_invalid")
 )
 
 // CodeOf returns the rejection code of an error of this package. It gives false
@@ -70,6 +73,8 @@ func CodeOf(err error) (Code, bool) {
 		return CodeTemplateParse, true
 	case errors.Is(err, ErrSeedInvalid):
 		return CodeSeedInvalid, true
+	case errors.Is(err, ErrContentInvalid):
+		return CodeContentInvalid, true
 	}
 	return 0, false
 }
