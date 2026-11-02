@@ -112,19 +112,19 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 	}
 }
 
-// T-S-15: apart from the create of a new file, the checks of Open open the
-// database file one time. That open is the one that Open holds for the life
-// of the pool. The watch is read in the hook that gets the held descriptor.
-// The rows of an existing file test the open of that file. The row of a new
-// file tests the second open of the made file at the temporary name. The watch
-// starts in the first call of that hook, so the row counts no earlier open. It
-// reads only the first call. The open after the rename is the open of an
-// existing file. A hook reads the watch and counts the descriptors again right
-// after the driver opens the first connection. The watch then shows 1 open:
-// the open of the driver. The count of descriptors is the count at the held
-// open plus 1: the driver connection. An open that stays open adds a
-// descriptor. An open that is closed again adds an open event. After Open
-// returns, the watch of an existing file shows no open.
+// T-S-15: the checks of Open open a database file one time, apart from the
+// create of a new file. That open is the one that Open holds for the life of
+// the pool. The hook that gets the held descriptor reads the watch. The first
+// two rows use an existing file. The watch counts 1 open up to that hook. The
+// row "new file" reads the first call of the hook only. That call is the open
+// of the made file at the temporary name. The watch starts in that call, so the
+// row counts no earlier open. It does not count the open after the rename.
+// A hook reads the watch and counts the descriptors again right after the
+// driver opens the first connection. The watch then shows 1 open: the open of
+// the driver. The count of descriptors is the count at the held open plus 1:
+// the driver connection. An open that stays open adds a descriptor. An open
+// that is closed again adds an open event. After Open returns, the watch of an
+// existing file shows no open.
 func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	rows := []struct {
 		name, rel string
@@ -190,13 +190,18 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	}
 }
 
-// T-S-15: Open of a new file gets the held descriptor. At that time, one
-// descriptor of the process points to the database file. Open has closed the
-// descriptor that made the file. SQLite has not opened the file yet.
+// T-S-15: Open of a new file gets the held descriptor of the made file at the
+// temporary name. At that time, one descriptor of the process points to the
+// file. Open has closed the descriptor that made the file. SQLite has not
+// opened the file yet. Only the first call of the hook counts.
 func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 	root, state, _ := newState(t)
 	n := -1
-	setHook(t, &onHeld, func(*os.File) { n = fdsOf(t, filepath.Join(state, "events.db")) })
+	setHook(t, &onHeld, func(*os.File) {
+		if n < 0 {
+			n = fdsOf(t, filepath.Join(state, "events.db"+tempSuffix))
+		}
+	})
 	mustOpen(t, root, "events.db").Close()
 	if n != 1 {
 		t.Fatalf("%d descriptors of the new database file, want 1", n)

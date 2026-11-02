@@ -379,6 +379,14 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 		{"renamed file, second checks", ruleMode, func(t *testing.T, file string) {
 			setHook(t, &afterVerify, nth(2, chmodTo(t, file)))
 		}},
+		{"sync of the file", ruleCreate, func(t *testing.T, file string) {
+			setHook(t, &syncFile, func(f *os.File) error {
+				if fi, err := f.Stat(); err == nil && !fi.IsDir() {
+					return errors.New("sync failed")
+				}
+				return f.Sync()
+			})
+		}},
 		{"sync of the directory", ruleCreate, func(t *testing.T, file string) {
 			setHook(t, &syncFile, func(f *os.File) error {
 				if fi, err := f.Stat(); err == nil && fi.IsDir() {

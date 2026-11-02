@@ -4,22 +4,20 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"strings"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 )
 
 // tempSuffix is added to the last part of store.path. A new database has this
-// name until its first write is done. A killed start can leave the file.
+// name until the rename. A killed start can leave the file.
 const tempSuffix = ".new"
-
-const ruleClear = "cannot be removed"
 
 // suffixes are the names of a database file and the files that SQLite makes
 // from it.
 var suffixes = []string{"", "-wal", "-shm", "-journal"}
 
-// syncFile calls fsync. A test replaces it to see the order of the steps.
+// syncFile calls fsync on a file and on a directory. A test replaces it to see
+// the order of the steps, or to make a sync fail.
 var syncFile = (*os.File).Sync
 
 // beforeRename is a test hook. Production code leaves it nil. A test sets it to
@@ -36,23 +34,39 @@ func removeIfMade(dir *os.Root, made fs.FileInfo, names ...string) {
 	}
 }
 
-// renamed replaces the prefix from in the name of err with to. So an error of
-// the temporary file names the file of store.path.
+// removeSideFiles removes the -wal, -shm and -journal files of last in dir. It
+// does that only when the database file last is absent. Before newDatabase made
+// the file, it found none of them.
+func removeSideFiles(dir *os.Root, last string) {
+	if _, err := dir.Lstat(last); errors.Is(err, fs.ErrNotExist) {
+		for _, s := range suffixes[1:] {
+			_ = dir.Remove(last + s)
+		}
+	}
+}
+
+// renamed gives the name to to an error that has the name from. So an error of
+// the temporary file names the file of store.path. An error of a side file of
+// the temporary file keeps its name.
 func renamed(err error, from, to string) error {
 	var e *Error
-	if errors.As(err, &e) && strings.HasPrefix(e.Name, from) {
-		return fail(to+strings.TrimPrefix(e.Name, from), e.Rule)
+	if errors.As(err, &e) && e.Name == from {
+		return fail(to, e.Rule)
 	}
 	return err
 }
 
-// newDatabase removes the files that a killed start left under the temporary
-// name. It does that only if each of them passes fileRule. If one fails, it
-// removes nothing. Then, if the database file is absent, it makes the database
-// under the temporary name. It does the first write and closes the pool. It
-// syncs the file, renames it to the real name, and syncs dir. All of this is
-// before Open opens the database for use. It returns the identity of the file
-// that it made. It returns nil when the database file was there before.
+// newDatabase checks the files that a killed start left under the temporary
+// name. If one fails fileRule, it refuses and removes nothing. If the database
+// file is absent, it refuses when a -wal, -shm or -journal file is at the real
+// name. Then it removes the leftover files. If the database file is absent, it
+// makes the database under the temporary name. It does the first write and
+// closes the pool. It syncs the file, renames it to the real name, and syncs
+// dir. All of this is before Open opens the database for use.
+//
+// It returns the identity of the file that it made, and a read-only descriptor
+// of that file. The caller closes the descriptor. Both are nil when the
+// database file was there before.
 //
 // A file that is at the real name before the call is never renamed or removed.
 // A file that appears there before the rename is kept, and the call fails. The
@@ -61,32 +75,48 @@ func renamed(err error, from, to string) error {
 // can write in the checked directory. A failure removes the file that this call
 // made, but only when the entry is that file. If someone replaces the entry
 // after the Lstat and before the Remove, removeIfMade removes the new file.
-// While the pool is closed, the inode of the made file is not held open.
-func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo, error) {
+// The descriptor holds the inode of the made file from the read-only reopen.
+// The inode is not held from the close of the first pool to that reopen.
+func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo, *os.File, error) {
 	tmp, tmpLast := rel+tempSuffix, last+tempSuffix
 	if _, err := checkFiles(dir, tmpLast, tmp); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	_, err := dir.Lstat(last)
+	absent := errors.Is(err, fs.ErrNotExist)
+	if err != nil && !absent {
+		return nil, nil, fail(rel, ruleExamine)
+	}
+	for _, s := range suffixes[1:] {
+		if _, err := dir.Lstat(last + s); absent && !errors.Is(err, fs.ErrNotExist) {
+			if err != nil {
+				return nil, nil, fail(rel+s, ruleExamine)
+			}
+			return nil, nil, fail(rel+s, ruleOrphan)
+		}
 	}
 	for _, s := range suffixes {
 		if err := dir.Remove(tmpLast + s); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fail(tmp, ruleClear)
+			return nil, nil, fail(tmp, ruleRemove)
 		}
 	}
-	if _, err := dir.Lstat(last); !errors.Is(err, fs.ErrNotExist) {
-		if err != nil {
-			return nil, fail(rel, ruleExamine)
-		}
-		return nil, nil // open checks the file
+	if !absent {
+		return nil, nil, nil // open checks the file
 	}
 	var made fs.FileInfo
-	db, err := open(root, tmp, opt, &made)
+	db, err := open(root, tmp, opt, &made, true, nil)
 	if err != nil {
-		return nil, renamed(err, tmp, rel)
+		return nil, nil, renamed(err, tmp, rel)
 	}
-	// drop removes the file that this call made, at either name.
-	drop := func(rule string) (fs.FileInfo, error) {
+	var f *os.File
+	// drop removes the file that this call made, at either name. Then it
+	// closes the descriptor.
+	drop := func(rule string) (fs.FileInfo, *os.File, error) {
 		removeIfMade(dir, made, tmpLast, last)
-		return nil, fail(rel, rule)
+		if f != nil {
+			f.Close()
+		}
+		return nil, nil, fail(rel, rule)
 	}
 	// The close of the last connection writes the WAL into the database file
 	// and removes the -wal and -shm files. SQLite finds them by the file name.
@@ -97,7 +127,6 @@ func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo
 	if err != nil {
 		return drop(ruleChanged)
 	}
-	defer f.Close()
 	if !os.SameFile(made, fi) {
 		return drop(ruleChanged)
 	}
@@ -123,5 +152,5 @@ func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo
 	if err != nil {
 		return drop(ruleCreate)
 	}
-	return made, nil
+	return made, f, nil
 }

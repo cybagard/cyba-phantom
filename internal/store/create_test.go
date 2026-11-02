@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
 )
 
 const (
@@ -207,6 +209,157 @@ func TestTS15UnsafeLeftoverIsRefusedAndKept(t *testing.T) {
 			wantRule(t, err, r.name, r.rule)
 			if after := snapshot(t, filepath.Dir(state)); after != before {
 				t.Fatalf("Open changed the files:\n%s\nbefore:\n%s", after, before)
+			}
+		})
+	}
+}
+
+// onDirSync sets the sync hook so that f runs at the sync of the directory.
+func onDirSync(t *testing.T, f func()) {
+	t.Helper()
+	setHook(t, &syncFile, func(file *os.File) error {
+		if fi, err := file.Stat(); err == nil && fi.IsDir() {
+			f()
+		}
+		return file.Sync()
+	})
+}
+
+// T-S-15: a -wal, -shm or -journal file at the real name, with no database
+// file, makes Open refuse. Open makes nothing and removes nothing. Else SQLite
+// could read the content of the file into the new database.
+func TestTS15SideFileWithoutDatabaseIsRefused(t *testing.T) {
+	// A valid -wal file of another database. It is copied while that database
+	// is open.
+	other, otherState, _ := newState(t)
+	db := mustOpen(t, other, "events.db")
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE planted (x)"); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.ReadFile(filepath.Join(otherState, "events.db-wal"))
+	if err != nil || len(wal) == 0 {
+		t.Fatalf("no -wal content: %d bytes, %v", len(wal), err)
+	}
+	for _, s := range suffixes[1:] {
+		t.Run(s, func(t *testing.T) {
+			root, state, _ := newState(t)
+			content := []byte("side file")
+			if s == "-wal" {
+				content = wal
+			}
+			if err := os.WriteFile(filepath.Join(state, "events.db"+s), content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshot(t, state)
+			db, err := Open(root, "events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "events.db"+s, ruleOrphan)
+			if after := snapshot(t, state); after != before {
+				t.Fatalf("Open changed the files:\n%s\nbefore:\n%s", after, before)
+			}
+		})
+	}
+}
+
+// T-S-15: the made file can leave the real name before Open opens that name.
+// Open then makes no file at the real name, and it refuses. The made file is at
+// neither name now, so it stays.
+func TestTS15MadeFileMovedAfterRenameIsNotMadeAgain(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	onDirSync(t, func() {
+		if err := os.Rename(file, file+".moved"); err != nil {
+			t.Error(err)
+		}
+	})
+	openFails(t, root, ruleChanged)
+	if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a file is at the real name: %v", err)
+	}
+	if _, err := os.Lstat(file + ".moved"); err != nil {
+		t.Fatalf("the moved file is gone: %v", err)
+	}
+}
+
+// T-S-15: if another file takes the real name after the rename, Open refuses.
+// The other file is not the made file, so it stays.
+func TestTS15OtherFileAtRealNameAfterRenameIsKept(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db")
+	const content = "other file"
+	onDirSync(t, func() {
+		if err := os.WriteFile(file+".other", []byte(content), 0o600); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(file+".other", file); err != nil {
+			t.Error(err)
+		}
+	})
+	openFails(t, root, ruleChanged)
+	if b, err := os.ReadFile(file); err != nil || string(b) != content {
+		t.Fatalf("the other file is gone or changed: %q, %v", b, err)
+	}
+}
+
+// T-S-15: if another file takes the temporary name before the reopen of the
+// made file, Open refuses. The other file stays at the temporary name.
+func TestTS15OtherFileAtTemporaryNameAfterPoolCloseIsKept(t *testing.T) {
+	root, state, _ := newState(t)
+	file := filepath.Join(state, "events.db"+tempSuffix)
+	const content = "other file"
+	calls := 0
+	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
+		// Call 1 is the second open in open. Call 2 is the reopen.
+		if name != filepath.Base(file) {
+			return
+		}
+		if calls++; calls == 2 {
+			if err := os.WriteFile(file+".other", []byte(content), 0o600); err != nil {
+				t.Error(err)
+			}
+			if err := os.Rename(file+".other", file); err != nil {
+				t.Error(err)
+			}
+		}
+	}})
+	openFails(t, root, ruleChanged)
+	if b, err := os.ReadFile(file); err != nil || string(b) != content {
+		t.Fatalf("the other file is gone or changed: %q, %v", b, err)
+	}
+}
+
+// T-S-15: an error about a side file of the temporary file keeps the temporary
+// name. A symlink put at the -wal name after the first checks makes it.
+func TestTS15ErrorOfTemporarySideFileKeepsItsName(t *testing.T) {
+	root, state, _ := newState(t)
+	setHook(t, &afterChecks, nth(1, func() {
+		if err := os.Symlink("target", filepath.Join(state, "events.db"+tempSuffix+"-wal")); err != nil {
+			t.Error(err)
+		}
+	}))
+	db, err := Open(root, "events.db", Options{})
+	if db != nil {
+		db.Close()
+	}
+	wantRule(t, err, "events.db"+tempSuffix+"-wal", ruleType)
+}
+
+// T-S-15: Open refuses a store.path when its temporary name is a reserved path.
+// The case of the letters does not matter. Open makes no file.
+func TestTS15ReservedTemporaryNameIsRefused(t *testing.T) {
+	for _, reserved := range []string{"events.db" + tempSuffix, "EVENTS.DB.NEW"} {
+		t.Run(reserved, func(t *testing.T) {
+			root, state, _ := newState(t)
+			db, err := Open(root, "events.db", Options{Reserved: []string{reserved}})
+			if db != nil {
+				db.Close()
+			}
+			wantRule(t, err, "store.path", ruleReserved)
+			if es, err := os.ReadDir(state); err != nil || len(es) != 0 {
+				t.Fatalf("Open made files: %v, %v", es, err)
 			}
 		})
 	}
