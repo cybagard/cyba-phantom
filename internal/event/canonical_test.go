@@ -186,8 +186,8 @@ func TestTS12_ErrorText(t *testing.T) {
 	}
 }
 
-// T-S-12: the error text gives the offset of the first invalid byte. A 2-byte
-// rune before the byte moves the offset by 2.
+// T-S-12: the error text gives the offset of the first invalid byte. The offset
+// counts bytes, not runes: the 2-byte "é" counts 2.
 func TestTS12_InvalidUTF8Offset(t *testing.T) {
 	for in, want := range map[string]string{
 		"{\"a\":\"\xff\"}": "event: invalid UTF-8 at offset 6",

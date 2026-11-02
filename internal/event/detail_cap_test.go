@@ -210,7 +210,7 @@ func TestTS24_ParseDetailNinthNameOnly(t *testing.T) {
 	const errText = "event: detail text is not a flat object"
 	eight := strings.TrimSuffix(membersText(8), "}")
 	// A top-level array is not an object. Nine pairs reach the member cap only
-	// when the decoder wrongly reads the array as members.
+	// when the first-token check of ParseDetail lets the array into the loop.
 	array := `["m0",0`
 	for i := 1; i < 9; i++ {
 		array += `,"m` + strconv.Itoa(i) + `",0`
