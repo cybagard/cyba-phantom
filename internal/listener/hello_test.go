@@ -482,8 +482,9 @@ func TestTS17LocationCutStopsAtFirstToken(t *testing.T) {
 // T-S-17: location makes one allocation for each path, not one for each
 // escaped byte. The path "<<" fills the Grow hint, which is 1 byte above a size
 // class of the allocator. A hint 2 bytes short then needs a second allocation.
+// The other rows give one allocation also with a hint that is short.
 func TestTS17LocationAllocationsAreFixed(t *testing.T) {
-	for _, p := range []string{"", "<<", strings.Repeat("<", 16384)} {
+	for _, p := range []string{"", "<", "<<", strings.Repeat("<", 16384)} {
 		u := &url.URL{Path: p}
 		if got := testing.AllocsPerRun(10, func() { location("decoy.test", u) }); got != 1 {
 			t.Fatalf("path of %d bytes: %v allocations, want 1", len(p), got)
