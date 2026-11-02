@@ -136,7 +136,11 @@ func TestTU12SignsAtEachTickOnlyWhenTheSizeChanged(t *testing.T) {
 		done := make(chan struct{})
 		run, stop := context.WithCancel(ctx)
 		go func() { c.Run(run); close(done) }()
-		ticks <- time.Time{}
+		select {
+		case ticks <- time.Time{}:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Run did not take the test tick")
+		}
 		stop()
 		<-done
 	}
@@ -227,7 +231,12 @@ func TestTS13RunEndsWhilePublishSends(t *testing.T) {
 		t.Fatal("Run did not end within 300 ms")
 	}
 	close(g.release)
-	must(t, <-published)
+	select {
+	case err := <-published:
+		must(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Publish did not return after the release")
+	}
 }
 
 func TestTU12StartRefusals(t *testing.T) {
@@ -324,6 +333,17 @@ func TestTS13GuardRefusesAndStopsUntilRestart(t *testing.T) {
 			e.refused(t, c, before)
 		})
 	}
+}
+
+// A verifier of another key stops the checkpointer. It writes no state and
+// gives no note to the sink.
+func TestTS13VerifierOfAnotherKeyRefusesTheNewNote(t *testing.T) {
+	e := newEnv(t, 3)
+	c := e.mustStart(t)
+	_, c.verifier = noteKeys(t, testOrigin, 2)
+	before := e.saved()
+	c.sign()
+	e.refused(t, c, before)
 }
 
 func TestTS13BadStoredNoteIsNotHealthy(t *testing.T) {

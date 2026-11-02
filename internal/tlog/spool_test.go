@@ -174,6 +174,14 @@ func TestTI09_Bound(t *testing.T) {
 	if n := strings.Count(e.logs.String(), "notes were skipped"); n != 2 {
 		t.Fatalf("%d summary lines, want one for each target:\n%s", n, e.logs)
 	}
+	for line := range strings.Lines(strings.TrimSpace(e.logs.String())) {
+		if !strings.Contains(line, "notes were skipped") {
+			continue
+		}
+		if !strings.HasSuffix(strings.TrimSpace(line), "skipped=1 skipped_total=1") {
+			t.Fatalf("summary line %q does not end with the first counts", line)
+		}
+	}
 	if strings.Contains(e.logs.String(), "a.test") {
 		t.Fatal("log has a target URL")
 	}
@@ -181,6 +189,84 @@ func TestTI09_Bound(t *testing.T) {
 	must(t, e.Add(1031, []byte("x")))
 	if n := strings.Count(e.logs.String(), "notes were skipped"); n != 4 {
 		t.Fatalf("%d summary lines after one hour, want 4", n)
+	}
+}
+
+// T-I-09: the summary line of a target comes again at exactly one hour
+// after the last line, and not before.
+func TestTI09_SkipSummaryComesAtTheHourEdge(t *testing.T) {
+	e := newSpool(t)
+	drop := func(size uint64) {
+		t.Helper()
+		e.mu.Lock() // Add holds the lock for drop
+		defer e.mu.Unlock()
+		must(t, e.drop(size))
+	}
+	t0 := time.Unix(1_700_000_000, 0)
+	// A drop at t0 plus skipLogEvery-1 is the last time before the edge, so
+	// it adds no line. A drop at exactly t0 plus skipLogEvery is the edge, so
+	// it adds one line for each target.
+	for i, c := range []struct {
+		at    time.Time
+		lines int
+	}{
+		{t0, 2},
+		{t0.Add(skipLogEvery - 1), 2},
+		{t0.Add(skipLogEvery), 4},
+	} {
+		e.now = func() time.Time { return c.at }
+		size := uint64(i + 1)
+		e.add(t, size)
+		drop(size)
+		if n := strings.Count(e.logs.String(), "notes were skipped"); n != c.lines {
+			t.Fatalf("%d summary lines after the drop at step %d, want %d", n, i, c.lines)
+		}
+	}
+}
+
+// T-I-09: an empty spool has nothing to publish.
+func TestTI09_PublishOfAnEmptySpoolSendsNothing(t *testing.T) {
+	e := newSpool(t)
+	f := newFake()
+	if err := e.Publish(0, f); err != nil || len(f.got) != 0 {
+		t.Fatalf("Publish: err %v, sent %v", err, f.got)
+	}
+}
+
+// T-I-09: a cursor file with a leading zero is not a canonical decimal size,
+// although it parses. A cursor above the largest size is not one, and it does
+// not parse.
+func TestTI09_NonCanonicalCursorIsAnError(t *testing.T) {
+	for _, cursor := range []string{"01", "18446744073709551616"} {
+		t.Run(cursor, func(t *testing.T) {
+			e := newSpool(t)
+			e.add(t, 1)
+			must(t, os.WriteFile(filepath.Join(e.dir, e.cursorName(0)), []byte(cursor), 0o600))
+			f := newFake()
+			if err := e.Publish(0, f); err == nil || !strings.Contains(err.Error(), "canonical decimal") || len(f.got) != 0 {
+				t.Fatalf("Publish(0): err %v, sent %v", err, f.got)
+			}
+		})
+	}
+}
+
+// T-I-09: the spool deletes no note while there is no target, or while a target
+// has no cursor.
+func TestTI09_CollectKeepsNotesWithNoTargetOrNoCursor(t *testing.T) {
+	root, _ := newState(t)
+	_, verifier := noteKeys(t, testOrigin, 1)
+	bare, err := OpenSpool(root, nil, testOrigin, verifier, nil)
+	must(t, err)
+	must(t, bare.Add(1, []byte("x")))
+	must(t, bare.Add(2, []byte("x")))
+	if got, err := bare.sizes(); err != nil || !slices.Equal(got, []uint64{1, 2}) {
+		t.Fatalf("spool with no target holds %v, %v, want 1 and 2", got, err)
+	}
+	e := newSpool(t)
+	must(t, e.Add(0, []byte("x")))
+	must(t, e.Add(1, []byte("x")))
+	if got := e.files(t); !slices.Equal(got, []uint64{0, 1}) {
+		t.Fatalf("spool with no cursor holds %v, want 0 and 1", got)
 	}
 }
 
@@ -457,6 +543,19 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 	if _, err := os.Lstat(over); !errors.Is(err, os.ErrNotExist) || e.Stats().Rejected != 3 {
 		t.Fatalf("entry above uint64: %v, rejected %d, want deleted and 3", err, e.Stats().Rejected)
 	}
+	// A name that is not <decimal>.note is not listed and not rejected.
+	other := []string{"x" + noteSuffix, "7"}
+	for _, name := range other {
+		must(t, os.WriteFile(filepath.Join(e.dir, spoolDir, name), []byte("x"), 0o600))
+	}
+	if got := e.files(t); !slices.Equal(got, []uint64{1, 1 << 32, largest}) || e.Stats().Rejected != 3 {
+		t.Fatalf("listed %v, rejected %d, want the same list and 3", got, e.Stats().Rejected)
+	}
+	for _, name := range other {
+		if _, err := os.Lstat(filepath.Join(e.dir, spoolDir, name)); err != nil {
+			t.Fatalf("entry %q: %v, want it kept", name, err)
+		}
+	}
 }
 
 // T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
@@ -545,6 +644,9 @@ func TestTI09_NewestRegularNoteStays(t *testing.T) {
 	f := newFake()
 	must(t, e.Publish(0, f))
 	must(t, e.Publish(1, f))
+	if got := e.files(t); !slices.Equal(got, []uint64{2}) {
+		t.Fatalf("notes on disk = %v, want only 2 after both targets sent 1 and 2", got)
+	}
 	dir := filepath.Join(e.dir, e.noteFile(3))
 	must(t, os.Mkdir(dir, 0o700))
 	must(t, os.WriteFile(filepath.Join(dir, "x"), nil, 0o600))
