@@ -213,8 +213,9 @@ func cpuTime() time.Duration {
 }
 
 // slow gives the time of the start line and the CPU time of the process, both
-// since begin. A low CPU time means the process did not run. It waited for a
-// CPU or for the disk. The pressure shows which wait the kernel counted.
+// since begin. A low CPU time means the process did not run. It can have waited
+// for a CPU or for the disk. The pressure shows the kind of wait that the
+// kernel counted.
 // Call it after the start line.
 func (r *running) slow() string {
 	cpu := fmt.Sprintf(", process CPU time %v since begin", cpuTime()-r.cpu)
@@ -233,8 +234,9 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	ctx, cancel := context.WithCancel(t.Context())
-	pressure := readPressure()
-	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: pressure}
+	// The read is before begin on purpose, so the window has only serve.
+	atBegin := readPressure()
+	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
 	go func() { r.code = serveWith(ctx, cancel, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
@@ -256,8 +258,8 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) 
 	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
-	pressure := readPressure()
-	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: pressure}
+	atBegin := readPressure()
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
@@ -691,7 +693,7 @@ func TestTI03_ColdStart(t *testing.T) {
 	r := launchServe(t, cfg, p, realDeps)
 	// The wait comes first, so an early end of serve shows as "ended before the start line", not as a handshake error.
 	r.waitStarted(t)
-	wantPressure(t, r)
+	defer wantPressure(t, r)
 	// With no static entry, serveWith does not call WarnExpiry.
 	// It writes the start line after that point.
 	if n := warns.Load(); n != 0 {
@@ -1254,7 +1256,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		"PHANTOM_LISTEN_HTTP="+plain, "PHANTOM_ACME_CA="+ca)
 	out, errb := newStartWriter(), &syncBuf{}
 	cmd.Stdout, cmd.Stderr = out, errb
-	pressure, begin := readPressure(), time.Now()
+	atBegin, begin := readPressure(), time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -1270,7 +1272,7 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		ended: exited,
 		info:  func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) },
 	}.until(t, out.started, true)
-	slow := func() string { return pressure.startNote(out.at.Sub(begin), "") }
+	slow := func() string { return atBegin.startNote(out.at.Sub(begin), "") }
 	coldHandshake(t, https, begin, der, errb, slow).Close()
 	cmd.Process.Signal(syscall.SIGTERM)
 	<-exited

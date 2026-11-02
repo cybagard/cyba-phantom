@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -179,14 +180,25 @@ func TestTI03_PressureNote(t *testing.T) {
 }
 
 // TestTI03_SlowText checks the failure text of a slow start. It has the start
-// line time, the CPU time, and the pressure, in this order (NFR-05).
+// line time, the CPU time, and the pressure, in this order. It reads the CPU
+// time and the pressure at the time of the call (NFR-05).
 func TestTI03_SlowText(t *testing.T) {
-	r := &running{out: newStartWriter(), begin: time.Now()}
+	hostIO := readStall("/proc/pressure/io").ok
+	// A begin CPU time one hour ahead gives a negative CPU time since begin.
+	r := &running{out: newStartWriter(), begin: time.Now(), cpu: cpuTime() + time.Hour, pressure: pressure{stall{0, true}, stall{0, true}, stall{0, true}, stall{0, true}}}
 	r.out.at = r.begin.Add(time.Second)
 	got := r.slow()
-	for _, want := range []string{"; start line 1s after begin, process CPU time ", " since begin; io pressure ", " since begin"} {
+	for _, want := range []string{"; start line 1s after begin, process CPU time -", " since begin; io pressure ", " since begin"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("slow text %q has no %q", got, want)
 		}
+	}
+	if !hostIO {
+		return
+	}
+	// The host io stall total since boot is above 0, and begin is 0.
+	m := regexp.MustCompile(`io pressure [^,]*, (\S+) \(host\)`).FindStringSubmatch(got)
+	if m == nil || m[1] == "not" || m[1] == "0s" || strings.HasPrefix(m[1], "-") {
+		t.Errorf("slow text %q: want a host io pressure above 0", got)
 	}
 }
