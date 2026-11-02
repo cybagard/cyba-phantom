@@ -44,6 +44,12 @@ ADR-013 defines the rules below (SEC-11, SEC-12, SEC-13).
 
 **Files.** The config file and the htpasswd file must be regular files after symlink resolution. They must not be writable by group or other. Their owner must be root or the user that runs the sensor. The htpasswd file must not be readable by other. Each directory above the htpasswd file, up to `/`, must be owned by root or the user that runs the sensor and must not be writable by group or other. This applies to the directories of the path as written, of each symlink on the way, and of the path after symlink resolution. There is no exception for a directory with the sticky bit (ADR-013). `acme.ca_root` and the `cert_file` and `key_file` of each `tls.certs` entry have the same rules as the htpasswd file, also for the directories. Each of these files has at most 64 KiB. A `key_file` is not readable by other (SEC-31, ADR-034).
 
+The loader also refuses three cases that a plain open reads (ADR-013 amendment of 2026-11-01). Each refusal stops the start, also in `--check`:
+
+- The path of the htpasswd file, or of a file with its rules, goes through more than 40 symlinks, also in its directories. The error says that the file cannot be resolved.
+- The size of the config file in `fstat` is not the number of bytes that the read gives, for example `/proc/self/status` (size 0). The error says that the file changed during the read.
+- A relative config path is read as the working directory, a `/` and the path, from `/`. Thus the loader refuses it when the user cannot search a parent directory of the working directory. It also refuses it when that full path is over the length limit of the kernel.
+
 **Errors.** An error names the key path (for example `limits.body_bytes`) and its source (file line, or the environment variable name). An error for a `*_env` key names the key path and the file line only. It never shows the variable name or the variable value, because an operator can paste a secret in place of a name (SEC-13). An error shows a value only for a non-secret key, escaped (SEC-07) and cut to 64 bytes. The loader does not pass parser error text through unchanged.
 
 **Bounds.** A value outside its range is an error. The loader never clamps a value.
