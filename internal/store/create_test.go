@@ -284,9 +284,9 @@ func TestTS15SideFileRefusalKeepsLeftover(t *testing.T) {
 	}
 }
 
-// T-S-15: someone puts a regular -wal file and a symlink -journal in place. This
-// is after the made file left the real name. Both stay. Open removes no file
-// that SQLite did not make.
+// T-S-15: someone puts a regular -wal file and a symlink -journal in place.
+// This is after the made file left the real name. Both stay. Open removes no
+// file that SQLite did not make.
 func TestTS15PlantedSideFilesStay(t *testing.T) {
 	root, state, _ := newState(t)
 	file := filepath.Join(state, "events.db")
