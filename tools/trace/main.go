@@ -22,6 +22,19 @@
 //
 // The spec directory defaults to "spec".
 //
+// Known limits of the Makefile check in the tests mode. Each one fails open:
+// trace counts a marker that make cannot run. The findMarkers comment lists
+// more limits.
+//
+//   - A rule line in a false conditional branch, or in a define body, counts
+//     as a rule. Make stops with "No rule to make target".
+//   - Make drops a NUL byte, the rest of its line and the line end. So make
+//     joins two lines. Trace reads two lines, and may see a rule that make
+//     does not see.
+//   - A reference that make cannot end counts as a rule if a ";" comes
+//     first or the openers are mixed. Make stops with "unterminated
+//     variable reference".
+//
 // Exit codes: 0 in sync, 1 findings, 2 usage or unreadable input.
 package main
 

@@ -364,6 +364,23 @@ func TestHasRuleMatchesMake(t *testing.T) {
 	}
 }
 
+// These rows are known gaps, not matches. Make stops on each row with
+// "unterminated variable reference", but hasRule finds a rule. See the Known
+// limits in the package comment.
+func TestHasRuleKnownGapUnterminatedReference(t *testing.T) {
+	for _, tc := range []struct {
+		name, makefile string
+	}{
+		{"brace opener in a paren reference", "perf: $(a${b)c;d}=1\n"},
+		{"paren opener in a brace reference", "perf: ${a$(b}c;d)=1\n"},
+		{"semicolon before a reference with no closer", "x:\nperf: ; echo $(x\n"},
+	} {
+		if !hasRule(strings.Split(tc.makefile, "\n"), "perf") {
+			t.Errorf("%s: hasRule(%q) = false, want true", tc.name, tc.makefile)
+		}
+	}
+}
+
 // A continued line does not change the line numbers of the file.
 func TestTestsModeContinuedLinesKeepMarkerLineNumbers(t *testing.T) {
 	files := defaultFiles()
