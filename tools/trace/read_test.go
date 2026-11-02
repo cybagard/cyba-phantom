@@ -287,6 +287,32 @@ func TestCheckSpecDirAbsPathErrorsCarryTheName(t *testing.T) {
 	}
 }
 
+// A broken link before ".." gives the typed argument and the errno only.
+// The error holds no part of the resolved path, and it keeps ErrNotExist.
+func TestSpecDirErrorHoldsOnlyTheErrno(t *testing.T) {
+	base, _ := symlinkedCwd(t)
+	spec := filepath.Join(base, "r", "repo", "spec")
+	writeFile(t, spec, "07-test-plan.md", plan07Head+defaultRows[0]+"\n")
+	t.Chdir(filepath.Join(base, "h"))
+	const gone = "L/../gone"
+	runs := map[string]func() error{
+		"runMatrix": func() error { _, err := runMatrix(gone + "/spec"); return err },
+		"runStamp":  func() error { _, err := runStamp(gone+"/spec", false); return err },
+		"runTests":  func() error { _, err := runTests("L/../repo/spec", gone+"/tree", "M-1"); return err },
+	}
+	want := map[string]string{
+		"runMatrix": gone + "/spec: no such file or directory",
+		"runStamp":  gone + "/spec: no such file or directory",
+		"runTests":  gone + "/tree: no such file or directory",
+	}
+	for name, run := range runs {
+		err := run()
+		if err == nil || err.Error() != want[name] || !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: err %v, want %q and ErrNotExist", name, err, want[name])
+		}
+	}
+}
+
 // planted enters base/h and plants a decoy spec directory and tree at
 // h/repo. filepath.Clean turns "L/../repo/spec" into the decoy path. The
 // kernel resolves it to r/repo/spec. It returns r/repo and a function that

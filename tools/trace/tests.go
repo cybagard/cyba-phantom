@@ -422,10 +422,21 @@ func idFromTestName(name string) string {
 
 // findMarkers reads the marker lines of the Makefile. It returns the IDs
 // that a marker covers. A missing Makefile has no markers. A line with
-// .RECIPEPREFIX is one finding, and then no marker counts. A name built from
-// parts, such as .RECIPE$(E)PREFIX, escapes this check. So does a
-// .RECIPEPREFIX set in an included file.
+// .RECIPEPREFIX, or with an include, -include or sinclude word, is one
+// finding. Then no marker counts. A GNUmakefile or makefile in the tree root
+// is one finding too. Make reads it before the Makefile. A name built from
+// parts, such as .RECIPE$(E)PREFIX or include$(S), escapes these checks.
+// Makefiles from MAKEFILES or from make options also escape them.
 func findMarkers(path string) (map[string]bool, []string, error) {
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return nil, nil, errors.New("cannot list the tree root")
+	}
+	for _, e := range entries {
+		if n := e.Name(); n == "GNUmakefile" || n == "makefile" {
+			return map[string]bool{}, []string{"tests: the tree root has a " + n + "; make reads it first; no marker counts"}, nil
+		}
+	}
 	data, err := readCapped(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]bool{}, nil, nil
@@ -440,6 +451,14 @@ func findMarkers(path string) (map[string]bool, []string, error) {
 	for i, l := range lines {
 		if strings.Contains(l, ".RECIPEPREFIX") {
 			return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d uses .RECIPEPREFIX; no marker counts", i+1)}, nil
+		}
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		for _, w := range strings.Fields(l) {
+			if w == "include" || w == "-include" || w == "sinclude" {
+				return map[string]bool{}, []string{fmt.Sprintf("tests: Makefile line %d has an include; no marker counts", i+1)}, nil
+			}
 		}
 	}
 	var markers []marker
@@ -525,14 +544,10 @@ func continues(line string) bool {
 // "$" and one more character as a reference. isAssignment skips that
 // character outside a reference only.
 func isAssignment(rest string) bool {
-	depth := 0
 	for i := 0; i < len(rest); i++ {
 		switch c := rest[i]; {
 		case c == '$' && i+1 < len(rest) && (rest[i+1] == '(' || rest[i+1] == '{'):
-			depth++
-		case depth > 0 && (c == ')' || c == '}'):
-			depth--
-		case depth > 0:
+			i = referenceEnd(rest, i+1)
 		case c == '$' && i+1 < len(rest):
 			i++
 		case c == ';' || c == '#':
@@ -542,4 +557,28 @@ func isAssignment(rest string) bool {
 		}
 	}
 	return false
+}
+
+// referenceEnd returns the index of the closer of the reference that opens
+// at s[open]. Like make, it counts only that opener and its closer, plain
+// or after a "$". It ignores every other character. An open reference ends
+// at the last character.
+func referenceEnd(s string, open int) int {
+	opener, closer := s[open], byte(')')
+	if opener == '{' {
+		closer = '}'
+	}
+	depth := 1
+	for j := open + 1; j < len(s); j++ {
+		switch s[j] {
+		case opener:
+			depth++
+		case closer:
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return len(s) - 1
 }
