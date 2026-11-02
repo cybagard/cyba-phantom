@@ -2,7 +2,9 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,14 +12,14 @@ import (
 )
 
 // stall is the stalled time of one pressure file.
-// ok is false when no file could be read.
+// ok is false when the file is missing or its text is not valid.
 type stall struct {
 	d  time.Duration
 	ok bool
 }
 
-// pressure holds the io and the cpu stall of the cgroup, or of the host.
-type pressure struct{ io, cpu stall }
+// pressure holds the io and the cpu stall of the cgroup and of the host.
+type pressure struct{ ioCgroup, ioHost, cpuCgroup, cpuHost stall }
 
 // parsePressure gives the "total=" value of the "some" line of a pressure file.
 // The value is in microseconds.
@@ -38,36 +40,56 @@ func parsePressure(text string) (time.Duration, error) {
 	return 0, errors.New("no some line")
 }
 
-// readStall reads the pressure file of kind ("io" or "cpu").
-// The cgroup file comes first, then the host file.
-func readStall(kind string) stall {
-	for _, path := range []string{"/sys/fs/cgroup/" + kind + ".pressure", "/proc/pressure/" + kind} {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if d, err := parsePressure(string(b)); err == nil {
-			return stall{d, true}
-		}
+// readStall reads the pressure file at path. A missing file or a text that
+// does not parse gives a stall with ok false.
+func readStall(path string) stall {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return stall{}
 	}
-	return stall{}
+	d, err := parsePressure(string(b))
+	return stall{d, err == nil}
 }
 
-func readPressure() pressure { return pressure{io: readStall("io"), cpu: readStall("cpu")} }
+// readPressure reads the io and cpu pressure files of the cgroup and the host.
+func readPressure() pressure {
+	return pressure{
+		ioCgroup:  readStall("/sys/fs/cgroup/io.pressure"),
+		ioHost:    readStall("/proc/pressure/io"),
+		cpuCgroup: readStall("/sys/fs/cgroup/cpu.pressure"),
+		cpuHost:   readStall("/proc/pressure/cpu"),
+	}
+}
 
-// since gives the stall from begin to now, or "not readable".
-func (now stall) since(begin stall) string {
-	if !now.ok || !begin.ok {
+// since gives the stall from begin to s, or "not readable".
+func (s stall) since(begin stall) string {
+	if !s.ok || !begin.ok {
 		return "not readable"
 	}
-	return (now.d - begin.d).String()
+	return (s.d - begin.d).String()
 }
 
-// note gives the io and the cpu pressure since begin. A process that waits
+// note gives the io and the cpu pressure from p to now. A process that waits
 // for the disk or for a CPU has a low CPU time. The stall shows which one.
-func (begin pressure) note() string {
-	now := readPressure()
-	return "; io pressure " + now.io.since(begin.io) + ", cpu pressure " + now.cpu.since(begin.cpu) + " since begin"
+func (p pressure) note(now pressure) string {
+	return fmt.Sprintf("; io pressure %s (cgroup), %s (host); cpu pressure %s (cgroup), %s (host) since begin",
+		now.ioCgroup.since(p.ioCgroup), now.ioHost.since(p.ioHost),
+		now.cpuCgroup.since(p.cpuCgroup), now.cpuHost.since(p.cpuHost))
+}
+
+// startNote gives the start line time, then extra, then the pressure note.
+// The pressure is the one at begin. The note reads the pressure now.
+func (p pressure) startNote(line time.Duration, extra string) string {
+	return fmt.Sprintf("; start line %v after begin%s", line, extra) + p.note(readPressure())
+}
+
+// wantPressure checks that r has the host io pressure at begin when the host
+// has the file. On a host without the file, it checks nothing.
+func wantPressure(t *testing.T, r *running) {
+	t.Helper()
+	if readStall("/proc/pressure/io").ok && !r.pressure.ioHost.ok {
+		t.Error("the host io pressure was readable, but r.pressure has none")
+	}
 }
 
 // TestTI03_ParsePressure checks that the parse reads the total of the some
@@ -80,6 +102,7 @@ func TestTI03_ParsePressure(t *testing.T) {
 	}{
 		{"some and full", "some avg10=0.00 avg60=0.00 avg300=0.00 total=42\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=7\n", 42 * time.Microsecond, false},
 		{"full first", "full avg10=0.00 total=7\nsome avg10=0.00 total=42\n", 42 * time.Microsecond, false},
+		{"above 2^32", "some avg10=0.00 total=9999999999\n", 9999999999 * time.Microsecond, false},
 		{"no some line", "full avg10=0.00 avg60=0.00 avg300=0.00 total=7\n", 0, true},
 		{"no total", "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 total=7\n", 0, true},
 		{"empty", "", 0, true},
@@ -91,24 +114,75 @@ func TestTI03_ParsePressure(t *testing.T) {
 	}
 }
 
-// TestTI03_PressureNote checks the stall text, with a value and with
-// "not readable" (NFR-05).
-func TestTI03_PressureNote(t *testing.T) {
-	if got := (stall{3 * time.Millisecond, true}).since(stall{time.Millisecond, true}); got != "2ms" {
-		t.Errorf("since = %q, want 2ms", got)
+// TestTI03_ReadStall checks that readStall reads one file. A file with no
+// total and a missing file give ok false (NFR-05).
+func TestTI03_ReadStall(t *testing.T) {
+	dir := t.TempDir()
+	good, bad := filepath.Join(dir, "good"), filepath.Join(dir, "bad")
+	if err := os.WriteFile(good, []byte("some avg10=0.00 total=42\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := (stall{}).since(stall{time.Millisecond, true}); got != "not readable" {
-		t.Errorf("since = %q, want not readable", got)
+	if err := os.WriteFile(bad, []byte("some avg10=0.00\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readStall(good); got != (stall{42 * time.Microsecond, true}) {
+		t.Errorf("valid file: got %+v, want 42µs with ok", got)
+	}
+	if got := readStall(bad); got.ok {
+		t.Errorf("file with no total: got %+v, want ok false", got)
+	}
+	if got := readStall(filepath.Join(dir, "missing")); got.ok {
+		t.Errorf("missing file: got %+v, want ok false", got)
 	}
 }
 
-// TestTI03_SlowText checks the failure text of a slow start (NFR-05).
-// It has the start line time, the CPU time, and the io and cpu pressure.
+// TestTI03_ReadPressure checks that each value of readPressure comes from its
+// own file. A stall total never falls, so the value lies between two reads of
+// that file. A file that this host does not have gives no check (NFR-05).
+func TestTI03_ReadPressure(t *testing.T) {
+	paths := [4]string{"/sys/fs/cgroup/io.pressure", "/proc/pressure/io", "/sys/fs/cgroup/cpu.pressure", "/proc/pressure/cpu"}
+	var before [4]stall
+	for i, path := range paths {
+		before[i] = readStall(path)
+	}
+	got := readPressure()
+	for i, path := range paths {
+		after := readStall(path)
+		v := [4]stall{got.ioCgroup, got.ioHost, got.cpuCgroup, got.cpuHost}[i]
+		if before[i].ok && (!v.ok || v.d < before[i].d || v.d > after.d) {
+			t.Errorf("%s: before %v, readPressure %+v, after %v", path, before[i].d, v, after.d)
+		}
+	}
+}
+
+// TestTI03_PressureNote checks the text with a distinct value in each place.
+// It also checks "not readable" for a begin or a now with no value (NFR-05).
+func TestTI03_PressureNote(t *testing.T) {
+	ms := func(n time.Duration) stall { return stall{n * time.Millisecond, true} }
+	begin := pressure{ms(1), ms(1), ms(1), ms(1)}
+	now := pressure{ms(3), ms(5), ms(7), ms(9)}
+	want := "; io pressure 2ms (cgroup), 4ms (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
+	if got := begin.note(now); got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+	want = "; io pressure not readable (cgroup), 4ms (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
+	if got := (pressure{ioHost: ms(1), cpuCgroup: ms(1), cpuHost: ms(1)}).note(now); got != want {
+		t.Errorf("begin not readable: note = %q, want %q", got, want)
+	}
+	want = "; io pressure 2ms (cgroup), not readable (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
+	now.ioHost = stall{}
+	if got := begin.note(now); got != want {
+		t.Errorf("now not readable: note = %q, want %q", got, want)
+	}
+}
+
+// TestTI03_SlowText checks the failure text of a slow start. It has the start
+// line time, the CPU time, and the pressure, in this order (NFR-05).
 func TestTI03_SlowText(t *testing.T) {
-	r := &running{out: newStartWriter(), begin: time.Now(), pressure: pressure{}}
+	r := &running{out: newStartWriter(), begin: time.Now()}
 	r.out.at = r.begin.Add(time.Second)
 	got := r.slow()
-	for _, want := range []string{"start line 1s after begin", "process CPU time ", "; io pressure ", ", cpu pressure ", " since begin"} {
+	for _, want := range []string{"; start line 1s after begin, process CPU time ", " since begin; io pressure ", " since begin"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("slow text %q has no %q", got, want)
 		}
