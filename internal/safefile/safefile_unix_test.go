@@ -481,6 +481,29 @@ func TestTS23_FileSwapForDirGivesErrType(t *testing.T) {
 	}
 }
 
+// For a Dir rule, O_NOFOLLOW makes OpenPath refuse a last link that is swapped
+// in after the check. Linux gives ENOTDIR (ErrType). Another unix kernel can
+// give ELOOP (ErrSymlink). Both refuse the link.
+func TestTS23_OpenPathLinkSwapForDirIsRefused(t *testing.T) {
+	_, dir := root(t)
+	d := filepath.Join(dir, "d")
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	swapAfterCheck(t, func(string) {
+		if err := os.Rename(d, filepath.Join(dir, "old")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink("old", d); err != nil {
+			t.Error(err)
+		}
+	})
+	err := openWithin(t, d, Rule{Type: Dir, Owner: OwnerSelf})
+	if !errors.Is(err, ErrType) && !errors.Is(err, ErrSymlink) {
+		t.Errorf("err = %v, want ErrType or ErrSymlink", err)
+	}
+}
+
 func TestTS23_RulesOnOpenFile(t *testing.T) {
 	r, dir := root(t)
 	file(t, dir, "f", 0o600)
