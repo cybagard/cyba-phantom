@@ -91,3 +91,64 @@ func BenchmarkAppendUnderProofs(b *testing.B) {
 	}
 	b.ReportMetric(float64(calls.Load())/float64(b.N), "proofcalls/op")
 }
+
+// appendBenchLeaves is the log size before the timed calls. appendBenchBatch is
+// the writer batch size in internal/store.
+const (
+	appendBenchLeaves = 1000
+	appendBenchBatch  = 500
+)
+
+// benchLog opens a new log with appendBenchLeaves leaves. The log grows only by
+// b.N calls. Each call changes few tiles, far below maxBatchTiles. The log
+// stays far below maxSize.
+func benchLog(b *testing.B) *Log {
+	withoutSync(b)
+	dir := filepath.Join(b.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	state, err := os.OpenRoot(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { state.Close() })
+	l, err := OpenLog(state, "tlog")
+	if err == nil {
+		b.Cleanup(func() { l.Close() })
+		_, err = l.AppendBatch(batchOf(0, appendBenchLeaves))
+	}
+	if err != nil {
+		b.Fatal(err)
+	}
+	return l
+}
+
+// BenchmarkAppend measures one Append for each iteration. The fsync calls are
+// off. The ns/op has the file writes and renames, but no fsync time.
+func BenchmarkAppend(b *testing.B) {
+	l := benchLog(b)
+	h := testEvent(appendBenchLeaves)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := l.Append(h); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkAppendBatch measures one AppendBatch of appendBenchBatch hashes for
+// each iteration. The fsync calls are off. The ns/op has the file writes and
+// renames, but no fsync time.
+func BenchmarkAppendBatch(b *testing.B) {
+	l := benchLog(b)
+	hs := batchOf(0, appendBenchBatch)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := l.AppendBatch(hs); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
