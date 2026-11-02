@@ -1169,8 +1169,8 @@ const sigtermWait = shutdownTime + 10*time.Second
 // TestTI03_StopWaitsForOpenConnection opens a TLS connection and sends
 // a request head that is not complete. Then it cancels serve.
 // Serve must wait for the open connection, up to shutdownTime. The test
-// checks the first second after the cancel. Serve must return after the
-// client closes the connection (NFR-05).
+// checks the first second after the cancel. Serve must return soon after
+// the client closes the connection, before shutdownTime ends (NFR-05).
 func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	https, plain, caAddr := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), caAddr)
@@ -1193,8 +1193,8 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	conn.Close()
 	select {
 	case <-r.done:
-	case <-time.After(sigtermWait):
-		t.Fatalf("serve did not return %v after the client closed", sigtermWait)
+	case <-time.After(shutdownTime / 2):
+		t.Fatalf("serve did not return %v after the client closed", shutdownTime/2)
 	}
 	if r.code != 0 {
 		t.Errorf("exit %d, want 0", r.code)
