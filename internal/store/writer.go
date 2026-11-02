@@ -71,9 +71,9 @@ type Writer struct {
 	// make an error that no real record gives after HashEvidence worked. Nil in
 	// production: the writer then calls event.EvidenceBytes.
 	evidenceBytes func(event.Record) ([]byte, error)
-	// beforePragma runs before each PRAGMA statement of write, with the text of
-	// the statement. An error from it is the error of that statement. A test
-	// sets it; nil in production.
+	// beforePragma runs before each PRAGMA statement of write and of storeRow,
+	// with the text of the statement. An error from it is the error of that
+	// statement. A test sets it; nil in production.
 	beforePragma func(stmt string) error
 	// beforeBegin runs before BEGIN in transact. An error from it is a failed
 	// BEGIN. A test sets it; nil in production.
@@ -371,8 +371,8 @@ func (w *Writer) now() time.Time {
 	return time.Now()
 }
 
-// pragma runs one PRAGMA statement of write on conn. It calls beforePragma
-// first.
+// pragma runs one PRAGMA statement of write or of storeRow on conn. It calls
+// beforePragma first.
 func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error {
 	if w.beforePragma != nil {
 		if err := w.beforePragma(stmt); err != nil {
@@ -521,11 +521,11 @@ func (w *Writer) storeRow(rq rowRequest) (err error) {
 		return fail(writerName, ruleDatabase)
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+	if err := w.pragma(ctx, conn, "PRAGMA synchronous=FULL"); err != nil {
 		return fail(writerName, ruleDatabase)
 	}
 	defer func() {
-		if _, e := conn.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); e != nil && err == nil {
+		if e := w.pragma(ctx, conn, "PRAGMA synchronous=NORMAL"); e != nil && err == nil {
 			err = fail(writerName, ruleDatabase)
 		}
 	}()
