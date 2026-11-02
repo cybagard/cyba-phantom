@@ -900,7 +900,7 @@ func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 }
 
 // A failed batch keeps the spare capacity of the level 0 and level 1 buffers
-// as it was.
+// as they were.
 func TestTS13FailedBatchKeepsTheTileBuffers(t *testing.T) {
 	state, _ := newLogState(t)
 	l := openTestLog(t, state)
