@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"slices"
 	"strconv"
@@ -36,6 +39,7 @@ type pebbleRig struct {
 	host  string         // host:port of the directory
 	trust *ACMERoots     // roots with the directory server certificate
 	root  *x509.CertPool // the root that issues the certificates
+	db    *pebbleDB.MemoryStore
 }
 
 // newPebbleRig starts Pebble. Its validation connects to port tlsPort of the
@@ -91,7 +95,7 @@ func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handl
 	srv := httptest.NewUnstartedServer(mux)
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	r := &pebbleRig{dir: srv.URL + pebbleWFE.DirectoryPath, host: strings.TrimPrefix(srv.URL, "https://"), trust: mustRoots(t, certPEM(srv.Certificate())), root: x509.NewCertPool()}
+	r := &pebbleRig{dir: srv.URL + pebbleWFE.DirectoryPath, host: strings.TrimPrefix(srv.URL, "https://"), trust: mustRoots(t, certPEM(srv.Certificate())), root: x509.NewCertPool(), db: db}
 	resp, err := srv.Client().Get(srv.URL + pebbleWFE.RootCertPath + "0")
 	mustNil(t, err)
 	defer resp.Body.Close()
@@ -103,37 +107,38 @@ func newPebbleRig(t *testing.T, tlsPort int, front func(http.Handler) http.Handl
 	return r
 }
 
-// egressSet records the distinct authorities that the egress guard sees.
-type egressSet struct {
+// egressRecorder records the authorities that the egress guard sees, in the
+// order of the calls. It is the one egress recorder of the package tests.
+type egressRecorder struct {
 	mu   sync.Mutex
-	seen map[string]struct{}
+	seen []string
 }
 
-func (e *egressSet) record(host string) {
+func (e *egressRecorder) record(host string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.seen == nil {
-		e.seen = map[string]struct{}{}
-	}
-	e.seen[host] = struct{}{}
+	e.seen = append(e.seen, host)
 }
 
-func (e *egressSet) hosts() []string {
+// calls returns each recorded authority, one for each call of the guard.
+func (e *egressRecorder) calls() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	h := make([]string, 0, len(e.seen))
-	for k := range e.seen {
-		h = append(h, k)
-	}
+	return slices.Clone(e.seen)
+}
+
+// hosts returns the distinct authorities, sorted.
+func (e *egressRecorder) hosts() []string {
+	h := e.calls()
 	slices.Sort(h)
-	return h
+	return slices.Compact(h)
 }
 
 // issueFixture is an ACME with a decoy socket and a Pebble that it uses.
 type issueFixture struct {
 	a      *ACME
 	rig    *pebbleRig
-	egress *egressSet
+	egress *egressRecorder
 	name   string
 	addr   string       // host:port of the decoy socket
 	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
@@ -148,7 +153,7 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 	mustNil(t, err)
 	t.Cleanup(func() { l.Close() })
 	port := l.Addr().(*net.TCPAddr).Port
-	f := &issueFixture{name: name, addr: l.Addr().String(), egress: &egressSet{}, rig: newPebbleRig(t, port, front)}
+	f := &issueFixture{name: name, addr: l.Addr().String(), egress: &egressRecorder{}, rig: newPebbleRig(t, port, front)}
 	f.a = newTestACME(t, func(p *ACMEParams) {
 		p.Names, p.CA, p.Host, p.Port = []string{name}, f.rig.dir, "127.0.0.1", port
 		p.OnEgress, p.CARoots = f.egress.record, f.rig.trust
@@ -159,7 +164,12 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 	q, c := testSinks(t, 16)
 	s, err := New(Config{TLS: &tls.Config{GetCertificate: f.a.GetCertificate}, MaxConns: 64, HeaderBytes: testHeaderBytes, Queue: q, Counters: c}, okHandler)
 	mustNil(t, err)
-	// Count the connections that negotiated acme-tls/1, then run the real function.
+	// Count the connections that negotiated acme-tls/1. Then run the real
+	// function. The Config of the Server has no hook for this count, and a
+	// hook there would be a product change. The count must be of handshakes
+	// that ended well. A hook in the TLS config sees each hello that offers
+	// acme-tls/1, also when the handshake fails. TLSNextProto runs only after
+	// a good handshake, so the test wraps it.
 	next := s.srv.TLSNextProto[challengeProto]
 	s.srv.TLSNextProto[challengeProto] = func(sv *http.Server, c *tls.Conn, h http.Handler) {
 		f.alpn.Add(1)
@@ -179,6 +189,19 @@ func (f *issueFixture) chain() ([]*x509.Certificate, error) {
 	}
 	defer c.Close()
 	return c.ConnectionState().PeerCertificates, nil
+}
+
+// requireServes fails the test unless the decoy socket serves the certificate
+// want. The message tells a failed handshake from another leaf.
+func (f *issueFixture) requireServes(t *testing.T, want *x509.Certificate, what string) {
+	t.Helper()
+	ch, err := f.chain()
+	if err != nil {
+		t.Fatalf("%s: handshake failed: %v", what, err)
+	}
+	if !ch[0].Equal(want) {
+		t.Fatalf("%s: served serial %v, subject %q; want serial %v", what, ch[0].SerialNumber, ch[0].Subject, want.SerialNumber)
+	}
 }
 
 // waitChain polls the decoy socket until it serves a chain that pred accepts, or
@@ -225,17 +248,17 @@ func (f *issueFixture) requireALPN(t *testing.T) {
 	}
 }
 
-// listeningInodes returns the inodes of the TCP sockets in the LISTEN state that
-// this process holds, with their local address. It reads /proc.
-func listeningInodes(t *testing.T) map[string]string {
+// mustListeningSockets is listeningSockets that fails the test on an error.
+func mustListeningSockets(t *testing.T) map[string]string {
 	t.Helper()
 	out, err := listeningSockets()
 	mustNil(t, err)
 	return out
 }
 
-// listeningSockets is listeningInodes with an error result, for a goroutine. An
-// IPv4 address is host:port; an IPv6 address stays as /proc writes it.
+// listeningSockets returns the inodes of the TCP sockets in the LISTEN state
+// that this process holds. The value of each inode is the local address as
+// host:port. It reads /proc. It returns an error, so a goroutine can use it.
 func listeningSockets() (map[string]string, error) {
 	fds, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
@@ -268,14 +291,44 @@ func listeningSockets() (map[string]string, error) {
 	return out, nil
 }
 
-// procAddr turns a local address of /proc/net/tcp ("0100007F:1F90") into
-// "127.0.0.1:8080". It returns any other form as it is.
+// procAddr turns a local address of /proc/net/tcp ("0100007F:1F90") or of
+// /proc/net/tcp6 into "127.0.0.1:8080". An IPv4-mapped address becomes an
+// IPv4 address. Any other form stays as it is. The kernel prints each 32-bit
+// word of the address with %08X (get_tcp4_sock, get_tcp6_sock). That is a
+// number in the byte order of the host, so the decode uses
+// binary.NativeEndian. No test runs on a big-endian host.
 func procAddr(s string) string {
 	ip, port, _ := strings.Cut(s, ":")
 	b, err := hex.DecodeString(ip)
 	n, perr := strconv.ParseUint(port, 16, 16)
-	if err != nil || perr != nil || len(b) != 4 {
+	if err != nil || perr != nil || (len(b) != 4 && len(b) != 16) {
 		return s
 	}
-	return net.JoinHostPort(net.IPv4(b[3], b[2], b[1], b[0]).String(), strconv.FormatUint(n, 10))
+	for i := 0; i < len(b); i += 4 {
+		binary.NativeEndian.PutUint32(b[i:], binary.BigEndian.Uint32(b[i:]))
+	}
+	addr, _ := netip.AddrFromSlice(b)
+	return net.JoinHostPort(addr.Unmap().String(), strconv.FormatUint(n, 10))
+}
+
+// TestTS16ProcAddrDecodesIPv4AndIPv6 builds the /proc form of an address. It
+// writes the form as the kernel does. Then it checks that procAddr gives the
+// address back.
+func TestTS16ProcAddrDecodesIPv4AndIPv6(t *testing.T) {
+	for _, c := range []struct{ ip, want string }{
+		{"127.0.0.1", "127.0.0.1:8080"},
+		{"::", "[::]:8080"},
+		{"::1", "[::1]:8080"},
+		{"2001:db8::1", "[2001:db8::1]:8080"},
+		{"::ffff:10.0.0.1", "10.0.0.1:8080"},
+	} {
+		b := netip.MustParseAddr(c.ip).AsSlice()
+		var in strings.Builder
+		for i := 0; i < len(b); i += 4 {
+			fmt.Fprintf(&in, "%08X", binary.NativeEndian.Uint32(b[i:]))
+		}
+		if got := procAddr(in.String() + ":1F90"); got != c.want {
+			t.Errorf("procAddr(%s:1F90) = %q, want %q", in.String(), got, c.want)
+		}
+	}
 }

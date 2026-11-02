@@ -3,7 +3,6 @@ package listener
 import (
 	"context"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 )
@@ -22,12 +21,11 @@ func TestTS16OCSPIsOffForACachedCertificateWithAnOCSPURL(t *testing.T) {
 		{"stapling on (control)", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var seen []string
+			var seen egressRecorder
 			addr := closedAddr(t)
 			a := newTestACME(t, func(p *ACMEParams) {
 				p.CA = "https://" + addr
-				p.OnEgress = func(h string) { mu.Lock(); seen = append(seen, h); mu.Unlock() }
+				p.OnEgress = seen.record
 			})
 			// The "stapling off" case keeps the value that NewACME sets.
 			if c.stapling {
@@ -44,10 +42,8 @@ func TestTS16OCSPIsOffForACachedCertificateWithAnOCSPURL(t *testing.T) {
 			if _, err := a.cfg.CacheManagedCertificate(ctx, "decoy.test"); err != nil {
 				t.Fatal(err)
 			}
-			mu.Lock()
-			defer mu.Unlock()
 			// The background work may call the guard for the closed CA port.
-			other := slices.DeleteFunc(slices.Clone(seen), func(h string) bool { return h == addr })
+			other := slices.DeleteFunc(seen.hosts(), func(h string) bool { return h == addr })
 			if c.stapling && len(other) == 0 {
 				t.Error("control: the OCSP request did not reach the guard")
 			}

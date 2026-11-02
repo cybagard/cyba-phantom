@@ -53,19 +53,26 @@ func seedCertFor(t testing.TB, a *ACME, name string, notBefore, notAfter time.Ti
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	mustNil(t, err)
+	storeSeed(t, a, name, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), key)
+	return der
+}
+
+// storeSeed stores the PEM chain, the key and the metadata of name in the
+// storage of a. It uses the keys that certmagic reads for the issuer of a.
+func storeSeed(t testing.TB, a *ACME, name string, chainPEM []byte, key *ecdsa.PrivateKey) {
+	t.Helper()
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	mustNil(t, err)
 	meta, err := json.Marshal(certmagic.CertificateResource{SANs: []string{name}})
 	mustNil(t, err)
 	ik := a.cfg.Issuers[0].(*certmagic.ACMEIssuer).IssuerKey()
 	for k, v := range map[string][]byte{
-		certmagic.StorageKeys.SiteCert(ik, name):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		certmagic.StorageKeys.SiteCert(ik, name):       chainPEM,
 		certmagic.StorageKeys.SitePrivateKey(ik, name): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
 		certmagic.StorageKeys.SiteMeta(ik, name):       meta,
 	} {
 		mustNil(t, a.cfg.Storage.Store(context.Background(), k, v))
 	}
-	return der
 }
 
 // closedAddr returns a loopback address with no listener. A connection to it is
@@ -80,12 +87,11 @@ func closedAddr(t *testing.T) string {
 }
 
 func TestTI03ColdStartServesTheCachedCertificateWithoutNetwork(t *testing.T) {
-	var mu sync.Mutex
-	var egress []string
+	var egress egressRecorder
 	addr := closedAddr(t)
 	a := newTestACME(t, func(p *ACMEParams) {
 		p.CA = "https://" + addr
-		p.OnEgress = func(h string) { mu.Lock(); egress = append(egress, h); mu.Unlock() }
+		p.OnEgress = egress.record
 	})
 	want := seedCert(t, a, "decoy.test")
 
@@ -103,9 +109,7 @@ func TestTI03ColdStartServesTheCachedCertificateWithoutNetwork(t *testing.T) {
 		t.Fatalf("start to the end of the handshake took %v", elapsed)
 	}
 	// The background work may call the guard. It may name the closed CA port only.
-	mu.Lock()
-	defer mu.Unlock()
-	for _, h := range egress {
+	for _, h := range egress.hosts() {
 		if h != addr {
 			t.Errorf("a request went to %q, not to the CA", h)
 		}
