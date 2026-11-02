@@ -70,7 +70,9 @@ func (s stall) since(begin stall) string {
 }
 
 // note gives the io and the cpu pressure from p to now. A process that waits
-// for the disk or for a CPU has a low CPU time. The stall shows which one.
+// for the disk or for a CPU has a low CPU time. The pressure counts any stalled
+// task of the cgroup or the host. It shows the kind of wait that the kernel
+// counted, not proof.
 func (p pressure) note(now pressure) string {
 	return fmt.Sprintf("; io pressure %s (cgroup), %s (host); cpu pressure %s (cgroup), %s (host) since begin",
 		now.ioCgroup.since(p.ioCgroup), now.ioHost.since(p.ioHost),
@@ -159,17 +161,17 @@ func TestTI03_ReadPressure(t *testing.T) {
 // It also checks "not readable" for a begin or a now with no value (NFR-05).
 func TestTI03_PressureNote(t *testing.T) {
 	ms := func(n time.Duration) stall { return stall{n * time.Millisecond, true} }
-	begin := pressure{ms(1), ms(1), ms(1), ms(1)}
-	now := pressure{ms(3), ms(5), ms(7), ms(9)}
-	want := "; io pressure 2ms (cgroup), 4ms (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
+	begin := pressure{ms(1), ms(2), ms(3), ms(4)}
+	now := pressure{ms(4), ms(8), ms(12), ms(16)}
+	want := "; io pressure 3ms (cgroup), 6ms (host); cpu pressure 9ms (cgroup), 12ms (host) since begin"
 	if got := begin.note(now); got != want {
 		t.Errorf("note = %q, want %q", got, want)
 	}
-	want = "; io pressure not readable (cgroup), 4ms (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
-	if got := (pressure{ioHost: ms(1), cpuCgroup: ms(1), cpuHost: ms(1)}).note(now); got != want {
+	want = "; io pressure not readable (cgroup), 6ms (host); cpu pressure 9ms (cgroup), 12ms (host) since begin"
+	if got := (pressure{ioHost: ms(2), cpuCgroup: ms(3), cpuHost: ms(4)}).note(now); got != want {
 		t.Errorf("begin not readable: note = %q, want %q", got, want)
 	}
-	want = "; io pressure 2ms (cgroup), not readable (host); cpu pressure 6ms (cgroup), 8ms (host) since begin"
+	want = "; io pressure 3ms (cgroup), not readable (host); cpu pressure 9ms (cgroup), 12ms (host) since begin"
 	now.ioHost = stall{}
 	if got := begin.note(now); got != want {
 		t.Errorf("now not readable: note = %q, want %q", got, want)
