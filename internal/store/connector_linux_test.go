@@ -115,13 +115,16 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 // T-S-15: apart from the create of a new file, the checks of Open open the
 // database file one time. That open is the one that Open holds for the life
 // of the pool. The watch is read in the hook that gets the held descriptor.
-// For a new file, the watch starts in that hook, so this row counts no earlier
-// open. A hook reads the watch and counts the descriptors again right after
-// the driver opens the first connection. The watch then shows 1 open: the open
-// of the driver. The count of descriptors is the count at the held open plus
-// 1: the driver connection. An open that stays open adds a descriptor. An open
-// that is closed again adds an open event. After Open returns, the watch shows
-// no open.
+// The rows of an existing file test the open of that file. The row of a new
+// file tests the second open of the made file at the temporary name. The watch
+// starts in the first call of that hook, so the row counts no earlier open. It
+// reads only the first call. The open after the rename is the open of an
+// existing file. A hook reads the watch and counts the descriptors again right
+// after the driver opens the first connection. The watch then shows 1 open:
+// the open of the driver. The count of descriptors is the count at the held
+// open plus 1: the driver connection. An open that stays open adds a
+// descriptor. An open that is closed again adds an open event. After Open
+// returns, the watch of an existing file shows no open.
 func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	rows := []struct {
 		name, rel string
@@ -130,6 +133,7 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	}{
 		{"events.db", "events.db", true, 1},
 		{"data/events.db", "data/events.db", true, 1},
+		{"new file", "events.db", false, 0},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -138,6 +142,9 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := filepath.Join(state, filepath.FromSlash(r.rel))
+			if !r.exists {
+				path += tempSuffix // the name at the first open
+			}
 			var opens func() int
 			if r.exists {
 				mustOpen(t, root, r.rel).Close()
@@ -148,6 +155,9 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 			inner := onHeld
 			setHook(t, &onHeld, func(h *os.File) {
 				inner(h)
+				if n >= 0 {
+					return // the open of the renamed file
+				}
 				if opens == nil {
 					opens = watchOpens(t, path)
 				}
@@ -156,10 +166,11 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 			})
 			driverOpens, driverFds := -1, -1
 			setHook(t, &afterDriverOpen, func() {
-				if c := opens(); driverOpens < 0 {
-					driverOpens = c
-					driverFds = fdsOf(t, path)
+				if driverOpens >= 0 {
+					return
 				}
+				driverOpens = opens()
+				driverFds = fdsOf(t, path)
 			})
 			db := mustOpen(t, root, r.rel)
 			defer db.Close()
@@ -172,7 +183,7 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 			if driverFds != heldFds+1 {
 				t.Fatalf("%d descriptors of the database file at the first connection, want %d", driverFds, heldFds+1)
 			}
-			if n := opens(); n != 0 {
+			if n := opens(); r.exists && n != 0 {
 				t.Fatalf("%d opens of the database file after the first connection", n)
 			}
 		})
@@ -285,19 +296,19 @@ func TestTS15ChangeAtSecondOpenGivesChanged(t *testing.T) {
 	}{
 		{"made file removed after the check", func(t *testing.T, _, file string) safefiletest.Hooks {
 			return safefiletest.Hooks{AfterCheck: func(name string) {
-				if name == "events.db" {
+				if name == filepath.Base(file) {
 					if err := os.Remove(file); err != nil {
 						t.Error(err)
 					}
 				}
 			}}
 		}},
-		{"no permission to examine the file", func(t *testing.T, state, _ string) safefiletest.Hooks {
+		{"no permission to examine the file", func(t *testing.T, state, file string) safefiletest.Hooks {
 			skipIfReadsModeZero(t)
 			restore := func() { os.Chmod(state, 0o700) }
 			t.Cleanup(restore)
 			return safefiletest.Hooks{BeforeCheck: func(name string) {
-				if name == "events.db" {
+				if name == filepath.Base(file) {
 					if err := os.Chmod(state, 0o600); err != nil {
 						t.Error(err)
 					}
@@ -308,7 +319,7 @@ func TestTS15ChangeAtSecondOpenGivesChanged(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			root, state, _ := newState(t)
-			safefiletest.Set(t, r.hook(t, state, filepath.Join(state, "events.db")))
+			safefiletest.Set(t, r.hook(t, state, filepath.Join(state, "events.db"+tempSuffix)))
 			db, err := Open(root, "events.db", Options{})
 			if db != nil {
 				db.Close()
