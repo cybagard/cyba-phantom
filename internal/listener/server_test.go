@@ -2018,6 +2018,42 @@ func TestTS17ShutdownWaitsForServerShutdownCalls(t *testing.T) {
 	}
 }
 
+// failClose is a listener whose Close closes the real listener and gives err.
+// It closes accepted at its first Accept.
+type failClose struct {
+	net.Listener
+	err      error
+	accepted chan struct{}
+	once     sync.Once
+}
+
+func (l *failClose) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.accepted) })
+	return l.Listener.Accept()
+}
+
+func (l *failClose) Close() error {
+	_ = l.Listener.Close()
+	return l.err
+}
+
+// T-S-17: closeServers closes each server and gives the first close error.
+func TestTS17CloseServersGivesFirstError(t *testing.T) {
+	errA, errB := errors.New("close a"), errors.New("close b")
+	var servers []*http.Server
+	for _, err := range []error{nil, errA, errB} {
+		l := &failClose{Listener: listenLoopback(t), err: err, accepted: make(chan struct{})}
+		hs := &http.Server{}
+		servers = append(servers, hs)
+		go func() { _ = hs.Serve(l) }()
+		// Serve tracks the listener before its first Accept.
+		<-l.accepted
+	}
+	if got := closeServers(servers); got != errA {
+		t.Fatalf("closeServers gave %v, want %v", got, errA)
+	}
+}
+
 // BenchmarkMarkRequest measures the handler wrapper of a request, with no
 // network. The request carries a limitConn, so the wrapper also marks it active.
 // "bare" runs the handler alone, and "wrapped" runs it through markRequest.
