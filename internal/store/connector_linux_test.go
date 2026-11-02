@@ -130,7 +130,6 @@ func TestTS15OpenChecksOpenTheDatabaseOnce(t *testing.T) {
 	}{
 		{"events.db", "events.db", true, 1},
 		{"data/events.db", "data/events.db", true, 1},
-		{"new file", "events.db", false, 0},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -199,7 +198,7 @@ func TestTS15NewFileHasOneDescriptorAtHeldOpen(t *testing.T) {
 // made file is still open. The held descriptor of the other file is open too.
 func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
 	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
+	file := filepath.Join(state, "events.db"+tempSuffix)
 	swapMadeFile(t, file)
 	made, other := -1, -1
 	setHook(t, &beforeRefuse, func() {
@@ -234,7 +233,7 @@ func TestTS15RefusedNewFileLeavesNoDescriptor(t *testing.T) {
 func TestTS15UnreadableNewFileIsNotMade(t *testing.T) {
 	skipIfReadsModeZero(t)
 	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
+	file := filepath.Join(state, "events.db"+tempSuffix)
 	old := syscall.Umask(0o777)
 	defer syscall.Umask(old)
 	made := -1

@@ -156,8 +156,9 @@ var heap struct {
 //     Open opens it again read-only. It checks that both descriptors point to
 //     the same file, and closes the one that can write.
 //   - After the open, and on each new connection: database_list, the
-//     directories, the four files, and the identity of the database file. The
-//     file is the same file as before, and the path that SQLite opens leads to it.
+//     directories and the four files. Also the identity of the database file.
+//     The file is the same file as before.
+//     The path that SQLite opens leads to it.
 //     Open keeps the database file open, read-only, until the pool closes, so
 //     that it stays the same file.
 //
@@ -170,10 +171,41 @@ var heap struct {
 // the database file.
 //
 // The returned pool has one connection. An error is an *Error with a fixed rule.
+//
+// A new database is made under a temporary name and renamed after its first
+// write (see newDatabase). Open then opens it as it opens an existing file.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if err := checkPath(rel, opt); err != nil {
 		return nil, err
 	}
+	if err := checkPath(rel+tempSuffix, opt); err != nil {
+		return nil, err
+	}
+	if err := checkParents(root, rel); err != nil {
+		return nil, err
+	}
+	dir, last, err := openDir(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer closeDir(root, dir)
+	made, err := newDatabase(root, dir, rel, last, opt)
+	if err != nil {
+		return nil, err
+	}
+	db, err := open(root, rel, opt, &made)
+	if err != nil && made != nil {
+		// The file at last is the file that newDatabase made. A file that is
+		// not that file stays.
+		removeIfMade(dir, made, last)
+	}
+	return db, err
+}
+
+// open opens the database at rel. kept points to the identity of a file that
+// this call must find at rel, or to nil. When open makes a new file, it sets
+// kept to the identity of that file.
+func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo) (*sql.DB, error) {
 	base, err := stateBase(root)
 	if err != nil {
 		return nil, err
@@ -195,6 +227,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	// for an existing file.
 	var made fs.FileInfo
 	var held, created *os.File
+	var hfi fs.FileInfo
 	// Each failed step after Open makes or opens the file calls refuse. It
 	// calls refuse before it closes the held descriptor, the create descriptor
 	// or the pool. While one of them is open, the inode of the made file is
@@ -249,7 +282,7 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		}
 		var statErr error
 		made, statErr = statCreated(created)
-		var hfi fs.FileInfo
+		*kept = made
 		if _, err = identityOf(rel, made, statErr); err == nil {
 			if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
 				if errors.Is(err, safefile.ErrOpen) && errors.Is(err, fs.ErrPermission) {
@@ -271,7 +304,10 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		if err != nil {
 			return nil, err
 		}
-	} else if held, _, err = safefile.Open(dir, last, fileRule); err != nil {
+	} else if held, hfi, err = safefile.Open(dir, last, fileRule); err != nil {
+		return nil, fail(rel, ruleChanged)
+	} else if *kept != nil && !os.SameFile(*kept, hfi) {
+		held.Close()
 		return nil, fail(rel, ruleChanged)
 	}
 	if onHeld != nil {
@@ -454,7 +490,7 @@ func closeDir(root, dir *os.Root) {
 // or a safe file. It returns the FileInfo of the database file that it checked,
 // or nil when that file is absent. It opens no file.
 func checkFiles(dir *os.Root, base, rel string) (db fs.FileInfo, err error) {
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+	for _, suffix := range suffixes {
 		fi, err := safefile.Check(dir, base+suffix, fileRule)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
