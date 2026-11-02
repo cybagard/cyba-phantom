@@ -452,6 +452,8 @@ func TestTU08RouteForms(t *testing.T) {
 		"h.example": true, "a.b": true, "h-1.example": true, "h.x1": true, "h.1x": true, "1.x": true, "h.12a": true,
 		l63 + "." + l63 + "." + l63 + "." + l61: true, l63 + "." + l63 + "." + l63 + "." + l61 + "a": false,
 		l63 + ".x": true, l64 + ".x": false, "h.example.": false, "h": false, "": false, "h.1": false,
+		"z09a.example": true, "h@.example": false, "h[.example": false, "h`.example": false,
+		"h{.example": false, "h:.example": false,
 	} {
 		if got := validHost(host); got != want {
 			t.Errorf("validHost(%.20q) = %v", host, got)
@@ -461,7 +463,8 @@ func TestTU08RouteForms(t *testing.T) {
 		"/": true, "/a": true, "/.well-known/x": true, "/a.b_c-D/9": true, "/..a": true, "/a..": true,
 		"/" + strings.Repeat("a", 255): true, "/" + strings.Repeat("a", 256): false,
 		"": false, "a": false, "//": false, "/a/": false, "/.": false, "/..": false, "/a b": false,
-		"/%": false, "/\x00": false, "/é": false,
+		"/%": false, "/\x00": false, "/é": false, "/azAZ09": true,
+		"/@": false, "/[": false, "/`": false, "/{": false,
 	} {
 		if got := validPath(path); got != want {
 			t.Errorf("validPath(%.20q) = %v", path, got)
@@ -478,6 +481,8 @@ func TestTU08RouteLimits(t *testing.T) {
 		doc(`"path":"/`+strings.Repeat("a", 255)+`"`, ti, ty), doc(`"path":"/"`, ti, ty)} {
 		loadRaw(t, nil, nil, site(text)...)
 	}
+	loadRaw(t, nil, nil, site(doc(`"path":"/azAZ09"`, ti, ty))...)
+	loadRaw(t, nil, nil, withRoutes([]ent{tf(templateDir+"z09a.example/index.tmpl", "i")})...)
 }
 
 // T-U-08: a route goes to a template of the parsed set only. With no template
