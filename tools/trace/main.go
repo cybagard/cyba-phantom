@@ -27,7 +27,7 @@
 // open or closed. The findMarkers comment lists more limits.
 //
 //  1. A rule line in a false conditional branch counts as a rule, but make
-//     does not see it. A rule line in a define body counts too. Make sees
+//     does not see it. A rule line in a define body also counts. Make sees
 //     that rule only if it reads the body as makefile text, for example
 //     with $(eval).
 //  2. Make drops a NUL byte, the rest of its line and the line end. Thus
