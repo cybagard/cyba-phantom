@@ -558,9 +558,10 @@ func TestTS18PipelinedHeadSplitWrite(t *testing.T) {
 	}
 }
 
-// T-S-17: all Serve calls of one server share max_conns. With max_conns 1, a
-// connection on the second listener closes before the handshake while the
-// connection on the first listener is open, and it serves after that one closes.
+// T-S-17: all Serve calls of one server share max_conns. Here max_conns is 1.
+// A connection on the second listener closes before the handshake while the
+// first listener has an open connection. After the first connection closes,
+// the second listener serves.
 func TestTS17ConnectionCapSharedByServeCalls(t *testing.T) {
 	r := newRig(t, 1, testHeaderBytes, defaultTimeouts, okHandler)
 	first := r.serve(t)
@@ -588,7 +589,8 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := newSourceCap(2)
-	l := newLimitListener(ln, make(chan struct{}, 2), src, newReadLimit(testHeaderBytes))
+	sem := make(chan struct{}, 2)
+	l := newLimitListener(ln, sem, src, newReadLimit(testHeaderBytes))
 	defer l.Close()
 	var served []net.Conn
 	for range 2 {
@@ -601,7 +603,15 @@ func TestTS17DoubleCloseReleasesOneSlot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = c.Close() })
+		// A Close that gives a slot back two times empties the semaphore. A spare
+		// token keeps this Close from waiting on it, so the test can fail.
+		t.Cleanup(func() {
+			select {
+			case sem <- struct{}{}:
+			default:
+			}
+			_ = c.Close()
+		})
 		served = append(served, c)
 	}
 	_ = served[0].Close()
@@ -775,8 +785,8 @@ func countingHandler(n *atomic.Int32) http.Handler {
 }
 
 // T-S-17: a client that offers only acme-tls/1 completes the handshake and gets
-// no HTTP: the server closes the connection, sends no byte and gives no request
-// event, also when the client sends a request.
+// no HTTP. The server closes the connection and sends no byte. It gives no
+// request event, also when the client sends a request.
 func TestTS17ChallengeProtoGetsNoHTTP(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 16)
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
@@ -833,30 +843,61 @@ func TestTS17ALPNListKeepsHTTP11(t *testing.T) {
 	}
 }
 
+// readCountListener counts the reads of the connections that it accepts.
+type readCountListener struct {
+	net.Listener
+	reads atomic.Int32
+}
+
+func (l *readCountListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &readCountConn{Conn: c, n: &l.reads}, nil
+}
+
+type readCountConn struct {
+	net.Conn
+	n *atomic.Int32
+}
+
+func (c *readCountConn) Read(p []byte) (int, error) {
+	c.n.Add(1)
+	return c.Conn.Read(p)
+}
+
 // T-S-17: the TLS socket and the plain socket share the slots. When one socket
 // holds all of them, a connection on the other socket closes before a read.
+// The plain socket counts its reads. The TLS socket counts its ClientHellos.
 func TestTS17SlotsSharedByPlainAndTLS(t *testing.T) {
 	const slots = 2
 	t.Run("TLS holds the slots", func(t *testing.T) {
 		var served atomic.Int32
 		r := newRig(t, slots, testHeaderBytes, defaultTimeouts, countingHandler(&served))
 		r.serve(t)
-		plain, _ := r.servePlain(t, countingHandler(&served))
+		ln := &readCountListener{Listener: listenLoopback(t)}
+		go func() { _ = r.s.ServePlain(ln, countingHandler(&served)) }()
 		for range slots {
 			r.dial(t)
 		}
 		waitFor(t, "slots taken", func() bool { return len(r.s.sem) == slots })
-		over := dialPlain(t, plain, 1)
+		over := dialPlain(t, ln.Addr().String(), 1)
 		_, _ = io.WriteString(over, head(0))
 		if d := closesWithin(t, over); d > closeBound {
 			t.Fatalf("close took %v, want at most %v", d, closeBound)
 		}
-		if served.Load() != 0 || r.s.SourceCapCloses() != 0 {
-			t.Fatalf("requests served %d, source cap closes %d; want 0 and 0", served.Load(), r.s.SourceCapCloses())
+		if served.Load() != 0 || ln.reads.Load() != 0 || r.s.SourceCapCloses() != 0 {
+			t.Fatalf("requests served %d, reads %d, source cap closes %d; want 0, 0 and 0", served.Load(), ln.reads.Load(), r.s.SourceCapCloses())
 		}
 	})
 	t.Run("plain holds the slots", func(t *testing.T) {
 		r := newRig(t, slots, testHeaderBytes, defaultTimeouts, okHandler)
+		var hellos atomic.Int32
+		r.s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			hellos.Add(1)
+			return captureHello(chi)
+		}
 		r.serve(t)
 		plain, _ := r.servePlain(t, okHandler)
 		for range slots {
@@ -864,8 +905,8 @@ func TestTS17SlotsSharedByPlainAndTLS(t *testing.T) {
 		}
 		waitFor(t, "slots taken", func() bool { return len(r.s.sem) == slots })
 		expectCapClose(t, r, r.addr, 1)
-		if r.s.SourceCapCloses() != 0 {
-			t.Fatalf("source cap closes %d, want 0", r.s.SourceCapCloses())
+		if hellos.Load() != 0 || r.s.SourceCapCloses() != 0 {
+			t.Fatalf("ClientHellos %d, source cap closes %d; want 0 and 0", hellos.Load(), r.s.SourceCapCloses())
 		}
 	})
 }
@@ -895,6 +936,47 @@ func TestTS17SourceCapSharedByPlainAndTLS(t *testing.T) {
 	}
 }
 
+// T-S-18: the TLS socket and the plain socket share the read pool. A TLS
+// connection fills the pool. Then a plain connection with a charged read
+// closes. Before that, the same read on the plain socket gets 200.
+func TestTS18ReadPoolSharedByPlainAndTLS(t *testing.T) {
+	const charge = 8192
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.serve(t)
+	plain, _ := r.servePlain(t, okHandler)
+	if got := status(dialPlain(t, plain, 1), keepAliveBytes+1000); got != 200 {
+		t.Fatalf("plain head with a charged read, pool not full: status %d, want 200", got)
+	}
+	waitFor(t, "pool empty", func() bool { return r.s.rd.pool.Load() == 0 })
+	r.s.rd.pool.Store(poolBytes - charge)
+	r.dialReading(t, 2, keepAliveBytes+charge)
+	waitFor(t, "pool at its limit", func() bool { return r.s.rd.pool.Load() == poolBytes })
+	if got := status(dialPlain(t, plain, 3), keepAliveBytes+1000); got != 0 {
+		t.Fatalf("plain head with a charged read, pool full: status %d, want a close", got)
+	}
+}
+
+// T-S-17: the error log drops its text. The server writes nothing to the
+// standard error.
+func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+	prev := os.Stderr
+	os.Stderr = wr
+	t.Cleanup(func() { os.Stderr = prev })
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	r.s.srv.ErrorLog.Print("marker-text")
+	os.Stderr = prev
+	_ = wr.Close()
+	got, _ := io.ReadAll(rd)
+	if r.s.ErrorLines() != 1 || len(got) != 0 {
+		t.Fatalf("error lines %d, bytes on stderr %q; want 1 and none", r.s.ErrorLines(), got)
+	}
+}
+
 // T-S-18: the read budget is the same on the plain socket. After a first request,
 // a head of header_bytes bytes gets 200 and a head of header_bytes + 2000 bytes
 // closes the connection with no response, on both sockets.
@@ -905,8 +987,8 @@ func TestTS18PlainReadBudget(t *testing.T) {
 	plain, _ := r.servePlain(t, okHandler)
 	// Only the TLS connection waits for the idle state. A TLS read can take a
 	// whole record. So a large head that arrives before the idle state is late
-	// and closes the connection. The background read of net/http on a plain
-	// connection takes 1 byte. So no plain head is late by more than 1 byte.
+	// and closes the connection. TestTS18PlainSocketLateBytes shows the late
+	// bytes of the plain socket.
 	var tlsIdle int
 	for name, k := range map[string]struct {
 		dial func() net.Conn
@@ -933,6 +1015,36 @@ func TestTS18PlainReadBudget(t *testing.T) {
 		if got := status(over, testHeaderBytes+2000); got != 0 {
 			t.Errorf("%s: head over the budget: status %d, want a close", name, got)
 		}
+	}
+}
+
+// T-S-18: the late rule runs on the plain socket. A client sends its next head
+// after the response starts. The background read of net/http takes 1 byte of
+// it, and that byte is late. The rest of the head waits in the socket, so no
+// plain head is late by more than 1 byte.
+func TestTS18PlainSocketLateBytes(t *testing.T) {
+	const wantLate = 1
+	r := newRig(t, 8, testHeaderBytes, defaultTimeouts, okHandler)
+	conns := make(chan *limitConn, 1)
+	release := make(chan struct{})
+	defer close(release)
+	plain, _ := r.servePlain(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conns <- req.Context().Value(limitConnKey{}).(*limitConn)
+		_, _ = io.WriteString(w, "ok")
+		w.(http.Flusher).Flush() // the first Write starts the late run
+		<-release
+	}))
+	c := dialPlain(t, plain, 1)
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, head(0))
+	if _, err := http.ReadResponse(bufio.NewReader(c), nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(c, head(3000))
+	lc := <-conns
+	waitFor(t, "the late byte", func() bool { return lc.readBytes() > int64(len(head(0))) })
+	if got := lc.idleSnapshot(); got.late != wantLate || got.used != int64(len(head(0))) {
+		t.Fatalf("plain socket: %d late bytes and %d other bytes, want %d and %d", got.late, got.used, wantLate, len(head(0)))
 	}
 }
 
@@ -1042,8 +1154,8 @@ func TestTS17ShutdownWaitsForBothSockets(t *testing.T) {
 	}
 }
 
-// T-S-17: a request that is still open when the context of Shutdown ends is
-// closed on both sockets, and Shutdown returns at the deadline with its error.
+// T-S-17: a request is still open when the context of Shutdown ends. Shutdown
+// closes it on both sockets and returns its error at the deadline.
 func TestTS17ShutdownClosesOpenConnectionsAtTheDeadline(t *testing.T) {
 	const deadline = 300 * time.Millisecond
 	bh := blockingHandler{started: make(chan struct{}, 2), release: make(chan struct{})}
@@ -1262,10 +1374,10 @@ func TestTS17OpenConnectionRecord(t *testing.T) {
 	})
 }
 
-// T-S-17: a TCP connection from the address of the sensor that sends no byte and
-// closes, like the self-check of certmagic before a challenge, gives no request
-// event and no ClientHello capture. The test logs the change of the error lines
-// and of the slots in use.
+// T-S-17: a TCP connection from the address of the sensor sends no byte and
+// closes, like the self-check of certmagic before a challenge. It gives no
+// request event and no ClientHello capture. The test logs the change of the
+// error lines and of the slots in use.
 func TestTS17SelfDialGivesNoEventAndNoCapture(t *testing.T) {
 	h, q, _ := newHelloQueue(t, 16)
 	r := newRig(t, 4, testHeaderBytes, defaultTimeouts, h)
