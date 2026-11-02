@@ -416,8 +416,9 @@ func TestTP09UnreadBytesShowInTheReceiveQueue(t *testing.T) {
 // server has not accepted counts in the queue of the listening socket. A byte
 // that the server has not read counts in the queue of its connection. When
 // this is false, each server read of the bytes that the clients sent has
-// ended. It makes no garbage, because the heap that the test samples must not
-// grow with the wait. buf is the scratch space for one row.
+// ended. buf is the scratch space for one row. The caller gives it, so a
+// call does not allocate a row buffer. A call still makes a few small
+// allocations. The test samples the heap, so the wait must allocate little.
 func hasUnread(t *testing.T, portSuffix, buf []byte) bool {
 	t.Helper()
 	f, err := os.Open("/proc/self/net/tcp")
