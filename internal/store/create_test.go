@@ -188,13 +188,13 @@ func TestTS15RefusedOpenOfExistingDatabaseKeepsItsSideFiles(t *testing.T) {
 var fdCheck func(t *testing.T, paths ...string)
 
 // refusedStart is one refused start. plant lists the files that exist before
-// Open: a name that ends with "/" is a directory, a content with "->" is a
-// symlink, a content with "=>" is a hard link to the file named in the rest.
-// then runs at the point on ("rename", "sync" of the directory, "checks"), or
-// at the second check of the name onName. Open must fail with the rule for
-// errName. A file in kept stays, with its content if it is not empty. A file in
-// gone does not exist. With same, no file changes. With noFds, no descriptor
-// points to the real or the temporary file.
+// Open. A name that ends with "/" is a directory. A content with "->" is a
+// symlink. A content with "=>" is a hard link to the file named in the rest.
+// then runs at the point on ("rename", "sync" of the directory, "checks"). It
+// can also run at the second check of the name onName. Open must fail with the
+// rule for errName. A file in kept stays, with its content if it is not empty.
+// A file in gone does not exist. With same, no file changes. With noFds, no
+// descriptor points to the real or the temporary file.
 type refusedStart struct {
 	name, rel, errName, rule string
 	opt                      Options
@@ -231,7 +231,7 @@ func (r refusedStart) run(t *testing.T) {
 		setHook(t, &afterChecks, nth(1, call))
 	}
 	if r.onName != "" {
-		second := nth(2, call) // call 1 is the open of the made file, call 2 the reopen
+		second := nth(2, call) // call 1 is open, call 2 is the reopen
 		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 			if name == r.onName {
 				second()
