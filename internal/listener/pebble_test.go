@@ -293,9 +293,10 @@ func listeningSockets() (map[string]string, error) {
 
 // procAddr turns a local address of /proc/net/tcp ("0100007F:1F90") or of
 // /proc/net/tcp6 into "127.0.0.1:8080". An IPv4-mapped address becomes an
-// IPv4 address. Any other form stays as it is. /proc writes each 32-bit word
-// of the address as a number in the byte order of the host. So the decode
-// uses binary.NativeEndian, and it holds on a big-endian host too.
+// IPv4 address. Any other form stays as it is. The kernel prints each 32-bit
+// word of the address with %08X (get_tcp4_sock, get_tcp6_sock). That is a
+// number in the byte order of the host, so the decode uses
+// binary.NativeEndian. No test runs on a big-endian host.
 func procAddr(s string) string {
 	ip, port, _ := strings.Cut(s, ":")
 	b, err := hex.DecodeString(ip)

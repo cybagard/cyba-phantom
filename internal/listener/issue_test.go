@@ -307,10 +307,9 @@ func shortRenewalInfoPoll(next http.Handler) http.Handler {
 // override as the management endpoint /set-renewal-info/. The certificate has
 // 90 days of life, so only this window can start a renewal. At a maintenance
 // tick, the client reads the new window and renews. The order of the new
-// certificate has no replaces field. This is the designed behavior. The
-// issuer has the directory of the CA as its test directory. So certmagic
-// treats each order as a test order and does not send replaces. The
-// maintenance loop still reads renewalInfo.
+// certificate has no replaces field. NewACME sets the test directory of the
+// issuer to the CA directory. certmagic sends no replaces in an order to its
+// test directory. The maintenance loop still reads renewalInfo.
 func TestTI01RenewsAPebbleCertificateThroughARIWithoutReplaces(t *testing.T) {
 	f := newIssueFixture(t, "ari.phantom.test", shortRenewalInfoPoll, func(p *ACMEParams) { p.maintenanceInterval = time.Second })
 	startIssue(t, f)

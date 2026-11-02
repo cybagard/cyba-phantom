@@ -486,9 +486,8 @@ func (s *Server) settle(t *testing.T, addr string) (open int, pool int64) {
 //     most 140 MB. RSS and peak RSS are at most 180 MB.
 //   - hello_4k, record_header, mix: the connections stay open. The open count
 //     is 2 000. The settled heap and stack are at most 140 MB. RSS and peak RSS
-//     are at most 180 MB. The peak heap is only logged. For the mix it is
-//     about 140 MB, and above it in some runs (142.6, 140.5 and 142.8 MB
-//     measured).
+//     are at most 180 MB. The peak heap is only logged. For the mix it
+//     changes from run to run. Runs measured from 129.9 to 153.0 MB.
 //   - every form but the mix: the pool is 0 after the settle.
 //   - mix: the pool holds exactly mixPool bytes, so the pool refuses no holder.
 func TestTP09(t *testing.T) {
