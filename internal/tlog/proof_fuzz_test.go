@@ -16,16 +16,17 @@ const (
 // FuzzTU07Proofs checks the inclusion proof and the consistency proof for a
 // random tree size from 1 to 10 000. One log serves all inputs. It grows to the
 // largest size that an input needs. A proof for a smaller size is still valid
-// in the larger log. The log grows with AppendBatch calls. Each call has a
-// random size from 1 to fuzzMaxBatch, so a batch can cross a tile border. The
-// seeds are small, so that go test stays fast.
+// in the larger log. The log grows with AppendBatch calls. Each call has at
+// most a random size from 1 to fuzzMaxBatch, so a batch can cross a tile
+// border. The seeds stop at size 2000, so that go test stays fast.
 func FuzzTU07Proofs(f *testing.F) {
-	// The fields are size, index, old size, and batch size. The size and the
-	// batch size are the field plus 1. The seeds have a batch of 1, batches
-	// that cross a tile border, and batches larger than 256.
+	// The fields are size, index, old size, and batch size. The size is
+	// 1 + field % 10000. The batch size is 1 + field % 600. The seeds share
+	// one log. They have a batch of 1 and size 257. They also have a call of
+	// 300 hashes that crosses a tile border, and a call of 600 hashes.
 	seeds := [][4]uint16{
 		{1, 0, 0, 0}, {2, 1, 1, 0}, {3, 1, 2, 2}, {300, 255, 128, 250},
-		{257, 256, 256, 1}, {513, 7, 300, 300}, {1000, 500, 700, 600},
+		{256, 255, 128, 0}, {999, 500, 700, 299}, {1999, 1500, 1200, 599},
 	}
 	for _, s := range seeds {
 		f.Add(s[0], s[1], s[2], s[3])

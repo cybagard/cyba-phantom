@@ -111,9 +111,9 @@ func (l *Log) Append(h EventHash) (int64, error) {
 //
 // If a write fails, AppendBatch returns an error and the log stops. The size and
 // the root in memory do not change. The log then refuses each later Append and
-// AppendBatch with the same error. That error has no ErrHeadOnDisk mark (see
-// below). A proof or root read that finds a bad tile stops the log in the same
-// way.
+// AppendBatch with an error that has no ErrHeadOnDisk mark. The first error
+// can have the mark (see below). A proof or root read that finds a bad tile
+// stops the log in the same way.
 //
 // The tree head on disk depends on the failure. If a tile write fails, the old
 // tree head stays on disk. This is also true if the write of the head file

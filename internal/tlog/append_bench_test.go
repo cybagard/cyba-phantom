@@ -100,7 +100,8 @@ const (
 )
 
 // benchLog opens a new log with appendBenchLeaves leaves. The log grows only by
-// b.N calls, which stays far below maxBatchTiles and maxSize.
+// b.N calls. Each call changes few tiles, far below maxBatchTiles. The log
+// stays far below maxSize.
 func benchLog(b *testing.B) *Log {
 	withoutSync(b)
 	dir := filepath.Join(b.TempDir(), "state")
@@ -124,7 +125,7 @@ func benchLog(b *testing.B) *Log {
 }
 
 // BenchmarkAppend measures one Append for each iteration. The fsync calls are
-// off, so ns/op is CPU and allocation work and not fsync time.
+// off. The ns/op has the file writes and renames, but no fsync time.
 func BenchmarkAppend(b *testing.B) {
 	l := benchLog(b)
 	h := testEvent(appendBenchLeaves)
@@ -138,8 +139,8 @@ func BenchmarkAppend(b *testing.B) {
 }
 
 // BenchmarkAppendBatch measures one AppendBatch of appendBenchBatch hashes for
-// each iteration. The fsync calls are off, so ns/op is CPU and allocation work
-// and not fsync time.
+// each iteration. The fsync calls are off. The ns/op has the file writes and
+// renames, but no fsync time.
 func BenchmarkAppendBatch(b *testing.B) {
 	l := benchLog(b)
 	hs := batchOf(0, appendBenchBatch)
