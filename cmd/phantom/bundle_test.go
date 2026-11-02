@@ -352,10 +352,10 @@ func TestTU08_HealthFollowsLoaderState(t *testing.T) {
 
 // BenchmarkStartLargeBundle starts the store part and the bundle part with a
 // bundle near the caps. The case files has two random files of 4 MiB less
-// 4 KiB. The case templates has 8 templates of 64 KiB and 600 KiB less of
-// random bytes. The bundle file has at most 8 MiB. It reports the growth of
-// the heap in use after a GC, from before the start to after the load. The
-// bundle bytes of the test are not in the value.
+// 4 KiB. The case templates has 8 templates of 65 535 bytes. Its first random
+// file is 600 KiB smaller than in the case files. The bundle file has at most
+// 8 MiB. It reports the growth of the heap in use after a GC, from before the
+// start to after the load. The bundle bytes of the test are not in the value.
 func BenchmarkStartLargeBundle(b *testing.B) {
 	big := func(name string, size int) tarFile {
 		d := make([]byte, size)
