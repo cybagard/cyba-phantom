@@ -147,6 +147,9 @@ type Loader struct {
 	// install opens the sealed seed of a proprietary bundle. It can be nil.
 	install hpke.PrivateKey
 	cur     atomic.Pointer[Bundle]
+	// ring holds the key sets of the running bundle and of the bundle that it
+	// replaced. A new Loader has an empty ring.
+	ring *token.Ring
 
 	// chain and chainErr hold the last chain check. loadMu guards them.
 	chain    *chain
@@ -175,12 +178,19 @@ type Loader struct {
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
 	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
+	// The ring reads l.now at each call, so a test can replace the clock.
+	l.ring = token.NewRing(func() time.Time { return l.now() })
 	l.seed = func(a *Archive, c Class, m *Manifest) (*seedBytes, error) { return openSeed(a, c, m, l.install) }
 	return l
 }
 
 // Current returns the running bundle, or nil before the first accept.
 func (l *Loader) Current() *Bundle { return l.cur.Load() }
+
+// Ring returns the token ring of the loader. At each accepted load, the key set
+// of the new bundle becomes current. The key set of the replaced bundle stays
+// for 25 h. A bundle with no key set takes the current place with none.
+func (l *Loader) Ring() *token.Ring { return l.ring }
 
 // openDir opens the bundle directory of the path and gives the file name of the
 // bundle in it. The caller calls closeDir to close the directory. The error is
@@ -421,6 +431,9 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 		}
 		return reject(fixed(err))
 	}
+	// The ring changes first, so a token of the new bundle verifies as soon as
+	// the bundle runs.
+	l.ring.Swap(cand.tokens)
 	// Zero the seed of the replaced bundle, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {
 		clear(*old.seed.p)
