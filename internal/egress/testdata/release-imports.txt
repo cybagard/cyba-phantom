@@ -3,6 +3,8 @@ bytes
 cmp
 compress/gzip
 context
+crypto/aes
+crypto/cipher
 crypto/ecdh
 crypto/ecdsa
 crypto/ed25519
@@ -12,6 +14,7 @@ crypto/hpke
 crypto/rand
 crypto/rsa
 crypto/sha256
+crypto/subtle
 crypto/tls
 crypto/x509
 database/sql
