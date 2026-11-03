@@ -34,9 +34,11 @@ type gateRig struct {
 	closed <-chan struct{}
 }
 
-// fenceStorage is a storage that can refuse its writes. The obtain job of
-// certmagic for noCertName writes a test file in the storage. It can run after
-// the test ends.
+// fenceStorage wraps the storage of a gate rig. At cleanup, it waits for the
+// writes in progress, then it refuses all writes. The obtain job of certmagic
+// for noCertName can still write at cleanup. A write that starts after cancel
+// fails in the cert store. A write in progress can still create a file while
+// the state directory is removed.
 type fenceStorage struct {
 	certmagic.Storage
 	mu     sync.RWMutex
@@ -85,7 +87,8 @@ func newGateRig(t *testing.T, tm timeouts, pre func(*Server)) *gateRig {
 		p.Names = []string{testName, noCertName}
 		fence.Storage, p.Storage = p.Storage, fence
 	})
-	// This runs before the removal of the state directory, after cancel.
+	// This cleanup runs after cancel and before the removal of the state
+	// directory.
 	t.Cleanup(func() { a.Stop(); fence.fence(t) })
 	seedCert(t, a, testName)
 	ctx, cancel := context.WithCancel(context.Background())
