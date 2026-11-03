@@ -117,8 +117,9 @@ func TestTS15KilledStartLeavesNoFileAtRealName(t *testing.T) {
 
 // T-S-15: Open syncs the file under the temporary name, renames it, and syncs
 // the directory of the file. No temporary file stays. The database has
-// auto_vacuum 2. The test runs for a file in the state directory and for a
-// file in a directory below it.
+// auto_vacuum 2. The page size is 4096, the size that leftoverMax uses. The
+// test runs for a file in the state directory and for a file in a directory
+// below it.
 func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 	for _, rel := range []string{"events.db", "data/events.db"} {
 		t.Run(rel, func(t *testing.T) {
@@ -146,6 +147,10 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 			if !reflect.DeepEqual(steps, want) || err != nil || vacuum != 2 {
 				t.Fatalf("sync steps %q, want %q; auto_vacuum %d, %v", steps, want, vacuum, err)
 			}
+			var page int64
+			if err := db.QueryRow("PRAGMA page_size").Scan(&page); err != nil || page != leftoverMax[0] {
+				t.Fatalf("page_size %d, %v; want %d, the page size of leftoverMax", page, err, leftoverMax[0])
+			}
 			for _, s := range suffixes {
 				if !gone(file + tempSuffix + s) {
 					t.Errorf("%s%s%s stays", rel, tempSuffix, s)
@@ -156,22 +161,25 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 }
 
 // T-S-15: a leftover next to an existing database is removed, with its side
-// files. The database stays the same file, with its table.
+// files. Each file is at its limit. The -shm file has no limit, and the test
+// gives it 32768 bytes. The database stays the same file, with its table. The
+// path has a directory.
 func TestTS15LeftoverNextToExistingDatabaseIsRemoved(t *testing.T) {
 	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
-	db := mustOpen(t, root, "events.db")
+	must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
+	file := filepath.Join(state, "data", "events.db")
+	db := mustOpen(t, root, "data/events.db")
 	_, err := db.Exec("CREATE TABLE t (x)")
 	db.Close()
 	before, _ := os.Lstat(file)
-	for _, s := range suffixes {
-		put(t, file+tempSuffix+s, "x")
+	for i, size := range []int{4096, 32, 32768, 4616} {
+		put(t, file+tempSuffix+suffixes[i], strings.Repeat("x", size))
 	}
-	db = mustOpen(t, root, "events.db")
+	db = mustOpen(t, root, "data/events.db")
 	defer db.Close()
 	for _, s := range suffixes {
 		if !gone(file + tempSuffix + s) {
-			t.Errorf("events.db%s%s stays", tempSuffix, s)
+			t.Errorf("data/events.db%s%s stays", tempSuffix, s)
 		}
 	}
 	after, serr := os.Lstat(file)
@@ -201,6 +209,44 @@ func TestTS15RefusedOpenOfExistingDatabaseKeepsItsSideFiles(t *testing.T) {
 		if after, err := os.Lstat(file + s); fi == nil || err != nil || !os.SameFile(fi, after) {
 			t.Errorf("events.db%s is gone or replaced: %v", s, err)
 		}
+	}
+}
+
+// T-S-15: a migrated database at the temporary name can hold store data. Open
+// keeps it and refuses. The data is in the main file if the pool is closed.
+// It is in the -wal file if the pool is open. The real name stays absent.
+func TestTS15LeftoverWithStoreDataIsKept(t *testing.T) {
+	for _, c := range []struct {
+		name, errName string
+		closed        bool
+	}{{"pool closed", "data/events.db.new", true}, {"pool open", "data/events.db.new-wal", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			root, state, _ := newState(t)
+			must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
+			old := mustOpen(t, root, "data/events.db.new")
+			defer old.Close()
+			must(t, Migrate(old, "origin"))
+			if c.closed {
+				must(t, old.Close())
+			}
+			before := snapshot(t, filepath.Dir(state))
+			// The file has no read mode during Open. If the test does not
+			// run as root, a read open fails. So the rule comes from the size,
+			// not from an open of the file.
+			leftover := filepath.Join(state, filepath.FromSlash(c.errName))
+			fi, err := os.Lstat(leftover)
+			must(t, err)
+			must(t, os.Chmod(leftover, 0o200))
+			db, err := Open(root, "data/events.db", Options{})
+			if db != nil {
+				db.Close()
+			}
+			must(t, os.Chmod(leftover, fi.Mode().Perm()))
+			wantRule(t, err, c.errName, ruleData)
+			if after := snapshot(t, filepath.Dir(state)); after != before || !gone(filepath.Join(state, "data", "events.db")) {
+				t.Fatalf("Open changed the files or made the database:\n%s\nbefore:\n%s", after, before)
+			}
+		})
 	}
 }
 
@@ -353,10 +399,20 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 			then: func(t *testing.T, at func(string) string) { hook(t, os.Symlink("target", at(tmpName+"-wal"))) }},
 		{name: "reserved temporary name, other case", errName: "store.path", rule: ruleReserved, same: true,
 			opt: Options{Reserved: []string{"EVENTS.DB.NEW"}}},
-		{name: "file at the real name before the rename", errName: "events.db", rule: ruleChanged, on: "rename",
-			kept: other, noFds: true,
-			gone: []string{tmpName, tmpName + "-wal", tmpName + "-shm", tmpName + "-journal"},
-			then: func(t *testing.T, at func(string) string) { put(t, at("events.db"), "other file") }},
+		{name: "file at the real name before the rename", rel: "data/events.db", errName: "data/events.db",
+			rule: ruleChanged, on: "rename", plant: [][2]string{{"data/", ""}}, noFds: true,
+			kept: map[string]string{"data/events.db": "other file"},
+			gone: []string{"data/" + tmpName, "data/" + tmpName + "-wal", "data/" + tmpName + "-shm", "data/" + tmpName + "-journal"},
+			then: func(t *testing.T, at func(string) string) { put(t, at("data/events.db"), "other file") }},
+		{name: "leftover database above one page", rel: "data/events.db", errName: "data/" + tmpName,
+			rule: ruleData, same: true, plant: [][2]string{{"data/", ""}, {"data/events.db", "x"},
+				{"data/" + tmpName, strings.Repeat("x", 4097)}}},
+		{name: "leftover wal above its header", rel: "data/events.db", errName: "data/" + tmpName + "-wal",
+			rule: ruleData, same: true, plant: [][2]string{{"data/", ""}, {"data/" + tmpName + "-wal", strings.Repeat("x", 33)}}},
+		{name: "leftover journal above one page record", rel: "data/events.db", errName: "data/" + tmpName + "-journal",
+			rule: ruleData, same: true, plant: [][2]string{{"data/", ""}, {"data/" + tmpName + "-journal", strings.Repeat("x", 4617)}}},
+		{name: "leftover wal symlink in a directory", rel: "data/events.db", errName: "data/" + tmpName + "-wal",
+			rule: ruleType, same: true, plant: [][2]string{{"data/", ""}, {"data/" + tmpName + "-wal", "->target"}}},
 		{name: "journal symlink after the rename", rel: "data/events.db", errName: "data/events.db-journal",
 			rule: ruleType, on: "sync", plant: [][2]string{{"data/", ""}}, noFds: true,
 			kept: map[string]string{"data/events.db-journal": ""}, gone: []string{"data/events.db"},

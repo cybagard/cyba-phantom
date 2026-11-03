@@ -41,6 +41,7 @@ const (
 	ruleLocation   = "opened at a path other than the checked path"
 	ruleOrphan     = "exists without the database file"
 	ruleRemove     = "cannot be removed"
+	ruleData       = "may hold store data"
 )
 
 // Error is a refused store operation. Name is the file, the config key, or the
@@ -179,8 +180,11 @@ var heap struct {
 // write (see newDatabase). Open then opens it as it opens an existing file.
 // Open removes a leftover <store.path>.new file and its -wal, -shm and -journal
 // files. It does this also next to an existing database. If one of them fails
-// the file rules, Open refuses and removes nothing. Open also refuses when the
-// real name has a -wal, -shm or -journal file and no database file.
+// the file rules, Open refuses and removes nothing. Open also refuses a
+// leftover file that is larger than its limit in leftoverMax. Such a file can
+// hold store data. The limit is for each file. The -shm file has no limit.
+// Open also refuses when the real name has a -wal, -shm or -journal file and
+// no database file.
 func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 	if err := checkPath(rel, opt); err != nil {
 		return nil, err
