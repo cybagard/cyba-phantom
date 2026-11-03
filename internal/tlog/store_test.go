@@ -245,11 +245,12 @@ type hooks struct {
 	rename func(*os.Root, string, string) error // rename of a file
 }
 
-// Only setHooks sets the durability calls of the store, the key files, the
-// signer state, and the spool. It sets the calls in h and restores the
-// earlier calls when t ends. The returned function restores them earlier. The
-// calls are package state. Two parallel tests that use them at the same time
-// can race. t.Setenv panics if the test or an ancestor is parallel.
+// Only setHooks sets the hooks. Two hooks replace the fsync calls of the
+// store, the key files, the signer state and the spool. The third hook
+// replaces the rename of the store. setHooks sets the calls in h and restores
+// the earlier calls when t ends. The returned function restores them earlier.
+// The calls are package state. Two parallel tests that use them at the same
+// time can race. t.Setenv panics if the test or an ancestor is parallel.
 // t.Parallel panics after a call of setHooks. A parallel subtest of a test
 // that calls setHooks is not refused. A fuzz test can call setHooks too.
 func setHooks(t testing.TB, h hooks) (restore func()) {

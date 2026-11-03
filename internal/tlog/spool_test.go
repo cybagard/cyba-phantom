@@ -603,8 +603,8 @@ func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
 	}
 }
 
-// T-S-13: Add syncs the temporary file of the note and then the checkpoints
-// directory. It syncs no other file and no other directory.
+// T-S-13: Add syncs the temporary file of the note and the checkpoints
+// directory, one time each. It syncs no other file and no other directory.
 func TestTS13_AddSyncsTheNoteFileAndTheSpoolDirectory(t *testing.T) {
 	e := newSpool(t)
 	msg, err := SignCheckpoint(e.signer, 5, testRoot())
