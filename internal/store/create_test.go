@@ -200,9 +200,10 @@ var fdCheck func(t *testing.T, paths ...string)
 // symlink. A content with "=>" is a hard link to the file named in the rest.
 // then runs at the point on ("rename", "sync" of the directory, "checks",
 // "verify", "dsn"). It can also run at the second check of the name onName.
-// Open must fail with the rule for errName. A file in kept stays, with its content if it is not empty.
-// A file in gone does not exist. With same, no file changes. With noFds, no
-// descriptor points to the real or the temporary file.
+// Open must fail with the rule for errName. A file in kept stays, with its
+// content if it is not empty. A file in gone does not exist. With same, no
+// file changes. With noFds, no descriptor points to the real or the temporary
+// file.
 type refusedStart struct {
 	name, rel, errName, rule string
 	opt                      Options
