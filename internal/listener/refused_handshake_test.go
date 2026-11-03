@@ -37,8 +37,8 @@ type gateRig struct {
 // fenceStorage wraps the storage of a gate rig. At cleanup, it waits for the
 // writes in progress, then it refuses all writes. The obtain job of certmagic
 // for noCertName can still write at cleanup. A write that starts after cancel
-// fails in the cert store. A write in progress can still create a file while
-// the state directory is removed.
+// fails in the cert store. Without the wait, a write in progress can create a
+// file while the state directory is removed.
 type fenceStorage struct {
 	certmagic.Storage
 	mu     sync.RWMutex
