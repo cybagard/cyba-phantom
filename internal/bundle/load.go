@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -128,15 +129,43 @@ func (b *Bundle) File(name string) ([]byte, bool) {
 	return slices.Clone(data), ok
 }
 
-// Template returns a copy of the kept template with this archive name. A caller
-// can run the copy and cannot change the kept template.
-func (b *Bundle) Template(name string) (*template.Template, bool) {
+// ErrNoTemplate is the error of Execute for a name that is not a kept template.
+var ErrNoTemplate = errors.New("bundle: no template")
+
+// Execute runs the kept template with this archive name and writes the page to
+// w. It makes no copy of the template. html/template permits parallel calls on
+// one template. The first call escapes the tree. After it, a Clone fails.
+// An unknown name gives ErrNoTemplate and writes no byte.
+func (b *Bundle) Execute(w io.Writer, name string, data Page) error {
 	t, ok := b.templates[name]
 	if !ok {
-		return nil, false
+		return ErrNoTemplate
 	}
-	c, err := t.Clone()
-	return c, err == nil
+	return t.Execute(w, data)
+}
+
+// Asset is a read-only view of the bytes of an archive entry. It gives no
+// access to the bytes but a write.
+type Asset struct{ data []byte }
+
+// Len returns the number of bytes of the entry.
+func (a Asset) Len() int { return len(a.data) }
+
+// WriteTo writes the bytes of the entry to w. It makes no copy.
+func (a Asset) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(a.data)
+	return int64(n), err
+}
+
+// Asset returns a view of the bytes of an archive entry below "vhosts/" whose
+// name does not end in ".tmpl". A route rule picks assets the same way. It
+// gives false for each other name. A call copies no byte.
+func (b *Bundle) Asset(name string) (Asset, bool) {
+	if !strings.HasPrefix(name, templateDir) || strings.HasSuffix(name, templateSuffix) {
+		return Asset{}, false
+	}
+	data, ok := b.archive.File(name)
+	return Asset{data}, ok
 }
 
 // Loader loads the bundle at one path and holds the running bundle.
