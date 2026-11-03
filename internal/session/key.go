@@ -43,6 +43,10 @@ func NewDayKey() *DayKey {
 	return &DayKey{cur: func() *atomic.Pointer[state] { return p }}
 }
 
+// beforeSwap is nil in production. A test sets it to run code between the Load
+// and the CompareAndSwap in At. Thus the swap fails at a known time.
+var beforeSwap func(cur *atomic.Pointer[state])
+
 func keyOf(s *state) Key {
 	return Key{s: func() *state { return s }}
 }
@@ -62,6 +66,9 @@ func (d *DayKey) At(t time.Time) Key {
 			return keyOf(old)
 		}
 		n := newState(date)
+		if beforeSwap != nil {
+			beforeSwap(cur)
+		}
 		if cur.CompareAndSwap(old, n) {
 			return keyOf(n)
 		}

@@ -37,11 +37,12 @@ const sessionPrefix = "phantom-session-v1"
 // sessionEncoding is the base32 form of a session id: no padding.
 var sessionEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
-// SessionID returns the session id of a refused event. The id is the first 16
-// bytes of HMAC-SHA256 over the prefix, 0x00, the client key and the JA4 text.
-// It is lower-case base32 with no padding. ip is the client address text. It
-// returns nil when ip is empty or is not an address, and for the zero Key. It
-// never returns the text of a parse error, because that text holds the input.
+// SessionID returns the session id of a client, for the writer and for the
+// request path. The id is the first 16 bytes of HMAC-SHA256 over the prefix,
+// 0x00, the client key and the JA4 text. It is lower-case base32 with no
+// padding. ip is the client address text. It returns nil when ip is empty or is
+// not an address, and for the zero Key. It never returns the text of a parse
+// error, because that text holds the input.
 func (k Key) SessionID(ip, ja4 string) *string {
 	s := k.st()
 	if s == nil {

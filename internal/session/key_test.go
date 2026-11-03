@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -156,8 +158,54 @@ func TestTU24ZeroKeyComputesNothing(t *testing.T) {
 	}
 }
 
+// T-U-24: a goroutine that loses the swap uses the winner's state when the date
+// is equal. It swaps again when the date is not equal. The hook makes the swap
+// fail on every run.
+func TestTU24LoserOfTheSwap(t *testing.T) {
+	t.Cleanup(func() { beforeSwap = nil })
+	const date = "2026-03-01"
+	when := at("2026-03-01T10:00:00Z")
+
+	for _, c := range []struct {
+		name, winnerDate string
+		sameDate         bool
+	}{
+		{"equal date", date, true},
+		{"other date", "2026-03-05", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := NewDayKey()
+			winner := newState(c.winnerDate)
+			calls := 0
+			beforeSwap = func(cur *atomic.Pointer[state]) {
+				calls++
+				if calls == 1 {
+					cur.Store(winner)
+				}
+			}
+			got := d.At(when).st()
+			if got.date != date {
+				t.Fatalf("date %q, want %q", got.date, date)
+			}
+			if c.sameDate {
+				if got != winner || calls != 1 {
+					t.Errorf("loser did not use the winner: %d swaps", calls)
+				}
+				return
+			}
+			if got == winner || calls != 2 {
+				t.Errorf("loser did not swap again: %d swaps", calls)
+			}
+			if d.cur().Load() != got {
+				t.Error("the second swap did not publish the new state")
+			}
+		})
+	}
+}
+
 type box struct {
 	d  *DayKey
+	dv DayKey
 	k  Key
 	kp *Key
 }
@@ -174,6 +222,7 @@ func TestTU24KeyIsNotPrinted(t *testing.T) {
 		string(m[:8]), hex.EncodeToString(m[:8]),
 		strings.ToUpper(hex.EncodeToString(m[:8])),
 		"176 177 178 179", `\xb0\xb1`, "0xb0, 0xb1", "b0b1b2b3",
+		"176,177,178,179", base64.StdEncoding.EncodeToString(m[:6]),
 	}
 	holds := func(s string) bool {
 		for _, n := range needles {
@@ -184,8 +233,8 @@ func TestTU24KeyIsNotPrinted(t *testing.T) {
 		return false
 	}
 	values := map[string]any{
-		"DayKey": d, "Key": k, "*Key": &k, "box": box{d, k, &k},
-		"*box": &box{d, k, &k},
+		"*DayKey": d, "DayKey": *d, "Key": k, "*Key": &k,
+		"box": box{d, *d, k, &k}, "*box": &box{d, *d, k, &k},
 	}
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%d", "%q"} {
 		if !holds(fmt.Sprintf(verb, m)) {
@@ -216,6 +265,18 @@ func TestTU24KeyIsNotPrinted(t *testing.T) {
 	}
 	if !holds(string(m[:])) || !holds(fmt.Sprint(m)) {
 		t.Fatal("the check does not see the bytes of a bare key")
+	}
+	for _, v := range []any{m, m[:]} {
+		out, err := json.Marshal(v)
+		if err != nil || !holds(string(out)) {
+			t.Fatalf("the check does not see the json of a bare key: %.60q", out)
+		}
+	}
+	var ctlText, ctlJS bytes.Buffer
+	slog.New(slog.NewTextHandler(&ctlText, nil)).Info("x", "v", m)
+	slog.New(slog.NewJSONHandler(&ctlJS, nil)).Info("x", "v", m)
+	if !holds(ctlText.String()) || !holds(ctlJS.String()) {
+		t.Fatal("the check does not see the bare key in a log")
 	}
 	if holds(text.String()) || holds(js.String()) {
 		t.Errorf("a log holds the key: %.200q %.200q", text.String(), js.String())
