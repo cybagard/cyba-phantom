@@ -93,6 +93,7 @@ type Writer struct {
 // directory, the origin, and the log for the appends, the start check and the
 // stop marker. rec.State and rec.Log must not be nil: a nil one stops the
 // writer at the start of Run. The other pointer arguments must not be nil.
+// q must come from event.NewQueue. A zero-value Queue has no counters.
 func NewWriter(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

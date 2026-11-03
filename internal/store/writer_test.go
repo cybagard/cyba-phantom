@@ -64,7 +64,7 @@ type rig struct {
 	app     *testAppender
 	root    *os.Root // the state directory
 	state   string   // its path
-	lg      *fakeLog // the one log of the writer; it appends through app
+	lg      *fakeLog // the fake log of the rig; it appends through app
 	tick    chan time.Time
 	commits chan int
 	exited  chan struct{} // closed when the last launched Run returns

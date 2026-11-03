@@ -292,7 +292,7 @@ func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
 }
 
 // T-U-18: a failed PRAGMA synchronous=FULL before the row stops the writer. The
-// row is not made and the spool gets no note.
+// writer makes no row and puts no note in the spool.
 func TestTU18SinkFailedPragmaBeforeTheRowStopsTheWriter(t *testing.T) {
 	r := newSinkRig(t)
 	r.w.beforePragma = func(stmt string) error {
