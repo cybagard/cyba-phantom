@@ -188,10 +188,10 @@ func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.Private
 func (l *Loader) Current() *Bundle { return l.cur.Load() }
 
 // Ring returns the token ring of the loader. At each accepted load of another
-// bundle, the key set of the new bundle becomes current. The key set of the
-// replaced bundle stays until the next such load, and at most for 25 h. A
-// load of the same bundle does not change the ring. A bundle with no key set
-// puts no key set in the current place.
+// bundle, the key set of the new bundle becomes current. The replaced key set
+// stays until the next such load or the 25 h end of the ring. A load of the
+// same bundle does not change the ring. A bundle with no key set puts no key
+// set in the current place.
 func (l *Loader) Ring() *token.Ring { return l.ring }
 
 // openDir opens the bundle directory of the path and gives the file name of the
@@ -434,8 +434,9 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 		return reject(fixed(err))
 	}
 	// A load of the same bundle keeps its key set and the ring. A swap would
-	// drop the key set of the bundle that it replaced before. For another
-	// bundle, the ring changes before the running bundle.
+	// drop the key set of the bundle that the running bundle replaced. For
+	// another bundle, the ring changes before the loader replaces the running
+	// bundle.
 	if run := l.cur.Load(); run != nil && run.sum == cand.sum {
 		cand.tokens = run.tokens
 	} else {

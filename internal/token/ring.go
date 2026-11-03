@@ -29,7 +29,8 @@ const replacedFor = 25 * time.Hour
 // The clock is the wall clock, which the time unit of a token needs. Swap
 // sets the 25 h end from the same clock. A clock from time.Now has a
 // monotonic reading, so a step of the wall clock does not move the end. The
-// monotonic clock can stop while the host sleeps. Then the end comes later.
+// monotonic clock can stop while the host sleeps. Then the end comes later
+// than 25 h of wall time.
 type Ring struct{ *ringState }
 
 type ringState struct {
