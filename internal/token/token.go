@@ -8,7 +8,9 @@ package token
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
@@ -62,7 +64,21 @@ var (
 	ErrIndex    = errors.New("token: trap index out of range")
 	ErrTraps    = errors.New("token: trap list must hold 1 to 1024 ids")
 	ErrKey      = errors.New("token: key is not valid")
+	ErrSeed     = errors.New("token: seed is empty")
 )
+
+// keyInfo is the HKDF info of the AES key (ADR-036 decision 4). A zero byte
+// comes after the label. keyBytes is the length of the AES-128 key.
+const (
+	keyInfo  = "phantom-token-v1\x00aes-128"
+	keyBytes = 16
+)
+
+// deriveKey derives the AES key from the seed. The seed is the secret and the
+// bundle SHA-256 is the salt. A test replaces it to see the key slice.
+var deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, seed, sum[:], keyInfo, keyBytes)
+}
 
 // zeroCheck is the value that the 56 check bits must have.
 var zeroCheck [Size - fieldBytes]byte
@@ -73,11 +89,18 @@ var scratch = sync.Pool{New: func() any { return new([2 * Size]byte) }}
 
 // KeySet mints and verifies the tokens of one key. It holds the cipher, a
 // copy of the trap ids and the mint counter. It has no exported field. A
-// KeySet is safe for concurrent use. Do not copy it.
-type KeySet struct {
+// KeySet is safe for concurrent use. Do not copy it. The fields are behind one
+// pointer. A struct with a *KeySet in an unexported field prints an address
+// under %s and %q. It prints no trap id.
+type KeySet struct{ *keySetState }
+
+type keySetState struct {
 	block   cipher.Block
 	traps   []string
 	counter atomic.Uint64
+	// ref is 1 for a key set of a reference bundle, else 0. Verify selects on
+	// it with crypto/subtle, so it is an int.
+	ref int
 }
 
 // redacted is the text that Format writes for every verb.
@@ -89,6 +112,40 @@ const redacted = "token.KeySet"
 // field.
 func (k *KeySet) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte(redacted))
+}
+
+// NewKeySet makes a key set from the token seed of a bundle. The key is
+// HKDF-SHA-256 of the seed, with the bundle SHA-256 as salt. The index of a
+// trap is its position in traps. reference is true for a bundle of the
+// reference class. An empty seed gives ErrSeed. A bad trap count gives
+// ErrTraps, before any derivation. A failed derivation gives ErrKey. The
+// function clears the derived key bytes before it returns. The cipher keeps
+// the key in its key schedule, and crypto/aes has no call that clears it. No
+// error holds a byte of the seed.
+func NewKeySet(seed []byte, sum [32]byte, traps []string, reference bool) (*KeySet, error) {
+	if len(seed) == 0 {
+		return nil, ErrSeed
+	}
+	if len(traps) == 0 || len(traps) > maxTraps {
+		return nil, ErrTraps
+	}
+	key, err := deriveKey(seed, sum)
+	defer clear(key)
+	if err != nil {
+		return nil, ErrKey
+	}
+	b, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, ErrKey
+	}
+	k, err := newKeySetBlock(b, traps)
+	if err != nil {
+		return nil, err
+	}
+	if reference {
+		k.ref = 1
+	}
+	return k, nil
 }
 
 // newKeySet makes a key set from an AES-128 key and the trap ids. The index
@@ -112,7 +169,7 @@ func newKeySetBlock(b cipher.Block, traps []string) (*KeySet, error) {
 	}
 	var s [8]byte
 	_, _ = rand.Read(s[:]) // rand.Read never gives an error.
-	k := &KeySet{block: b, traps: slices.Clone(traps)}
+	k := &KeySet{&keySetState{block: b, traps: slices.Clone(traps)}}
 	k.counter.Store(binary.BigEndian.Uint64(s[:]) & counterMask)
 	return k, nil
 }
@@ -151,7 +208,7 @@ func unpack(b []byte) (index, unit, counter uint64) {
 // can allocate a small, bounded amount of memory.
 func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 	var out [Size]byte
-	if k == nil || k.block == nil {
+	if k == nil || k.keySetState == nil || k.block == nil {
 		return out, ErrNoKeySet
 	}
 	if index < 0 || index >= len(k.traps) {
@@ -176,6 +233,8 @@ type Result struct {
 	Trap string // the trap id
 	Unit uint32 // the time unit of the mint
 	Set  int    // the position of the matching key set in the ring
+	// Reference is true when the matching key set is of a reference bundle.
+	Reference bool
 }
 
 // Verify checks a token against the key sets of the ring. It decrypts the
@@ -188,9 +247,9 @@ type Result struct {
 func Verify(ring []*KeySet, tok [Size]byte) Result {
 	buf := scratch.Get().(*[2 * Size]byte)
 	in, out := buf[:Size], buf[Size:]
-	var matched, set, index, unit int
+	var matched, set, index, unit, reference int
 	for i, k := range ring {
-		if k == nil || k.block == nil {
+		if k == nil || k.keySetState == nil || k.block == nil {
 			continue
 		}
 		copy(in, tok[:])
@@ -203,6 +262,7 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 		set = subtle.ConstantTimeSelect(ok, i, set)
 		index = subtle.ConstantTimeSelect(ok, int(idx), index)
 		unit = subtle.ConstantTimeSelect(ok, int(un), unit)
+		reference = subtle.ConstantTimeSelect(ok, k.ref, reference)
 	}
 	// Without this, the pool keeps the plaintext fields and the token bytes.
 	// The buffer holds no key.
@@ -211,5 +271,5 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 	if matched == 0 {
 		return Result{}
 	}
-	return Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set}
+	return Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set, Reference: reference == 1}
 }

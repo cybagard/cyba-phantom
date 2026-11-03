@@ -9,6 +9,7 @@ crypto/ecdh
 crypto/ecdsa
 crypto/ed25519
 crypto/elliptic
+crypto/hkdf
 crypto/hmac
 crypto/hpke
 crypto/rand

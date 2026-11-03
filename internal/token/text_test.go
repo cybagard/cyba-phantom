@@ -111,8 +111,12 @@ func TestTU01_TextBitFlips(t *testing.T) {
 	for bit := 0; bit < textLen*8; bit++ {
 		b := []byte(s)
 		b[bit/8] ^= 1 << (bit % 8)
-		if got, ok := Parse(string(b)); ok && got == tok {
+		got, ok := Parse(string(b))
+		if ok && got == tok {
 			t.Fatalf("flip of bit %d gives the same token", bit)
+		}
+		if ok && Verify([]*KeySet{k}, got).OK {
+			t.Fatalf("flip of bit %d gives a token that verifies", bit)
 		}
 	}
 }
