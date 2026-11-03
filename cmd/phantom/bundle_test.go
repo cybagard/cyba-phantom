@@ -350,8 +350,9 @@ func TestTU08_HealthFollowsLoaderState(t *testing.T) {
 	}
 }
 
-// tmplBytes is the size of a template of the benchmark. The trap file adds 64
-// bytes of instruction templates to the sum of the bundle cap of 512 KiB.
+// tmplBytes is the size of a template of the benchmark. The 64 instruction
+// templates of the trap file add 64 bytes to the byte sum of all templates
+// (SEC-29, 512 KiB). Each of 8 templates gives up 16 bytes: 8 x 16 >= 64.
 const tmplBytes = 64<<10 - 16
 
 // benchRoutes is a route map with one route to the first template.
@@ -363,10 +364,9 @@ const benchRoutes = `{"routes":[{"path":"/","template":"vhosts/h.example/0000.tm
 // 4 KiB. The case templates has 8 templates of 65 520 bytes. Each one has 64
 // actions that the load check permits. It also has a trap file. Its first
 // random file is 600 KiB smaller than in the case files. The bundle file has at
-// most
-// 8 MiB. It reports the growth of the heap in use after a GC, from before the
-// start to after the load. The bundle bytes of the test are not in the value.
-// The case templates also has a route map for its vhost.
+// most 8 MiB. It reports the growth of the heap in use after a GC, from before
+// the start to after the load. The bundle bytes of the test are not in the
+// value. The case templates also has a route map for its vhost.
 func BenchmarkStartLargeBundle(b *testing.B) {
 	big := func(name string, size int) tarFile {
 		d := make([]byte, size)

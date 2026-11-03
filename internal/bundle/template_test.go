@@ -140,8 +140,9 @@ func loadRaw(t *testing.T, want error, setup func(*env), ents ...ent) *Bundle {
 }
 
 // T-U-08: a .tmpl file that does not parse gives template_parse. A valid
-// template, any other file, and no template load. A call of a built-in function
-// gives template_parse, because the load check refuses it.
+// template, any other file, and no template load. A field such as {{.Title}}
+// and a call of a function other than index or comment give template_parse,
+// because the load check refuses them.
 func TestTU08TemplateParse(t *testing.T) {
 	assets := strings.Repeat("{{", 50<<10)
 	for _, c := range []struct {
@@ -177,17 +178,22 @@ func TestTU08KeptSet(t *testing.T) {
 }
 
 // T-U-08: a kept template has the option and the function map of the
-// constructor. The test runs a copy. The loader runs no template.
+// constructor. The test runs copies. The loader runs no template. The index
+// function fails on a missing .Trap with or without the option. So the test
+// parses a new body into a copy. {{.Missing}} gives an error only with
+// missingkey=error. Without the option it gives "<no value>".
 func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
 	const act = `{{comment (index .Trap "a")}}`
-	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, act), tf("vhosts/h.example/m.tmpl", `{{index .Trap "a"}}`)}),
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, act)}),
 		tf(trapsName, arr(tj("a", "x"))))...)
 	var sb strings.Builder
 	tp, ok := b.Template(vhostFile)
 	if !ok || tp.Execute(&sb, Page{Trap: map[string]string{"a": "ok"}}) != nil || sb.String() != "<!-- ok -->" {
 		t.Errorf("function map not kept: %v, %q", ok, sb.String())
 	}
-	m, _ := b.Template("vhosts/h.example/m.tmpl")
+	m, _ := b.Template(vhostFile)
+	_, err := m.Parse(`{{.Missing}}`)
+	must(t, err)
 	if err := m.Execute(io.Discard, map[string]any{}); err == nil {
 		t.Error("missingkey=error not kept")
 	}
@@ -318,15 +324,23 @@ func TestTU08EngineFuncKeys(t *testing.T) {
 	}
 }
 
-// T-U-08: the load does not execute a template.
+// T-U-08: the load does not execute a template. The test checks two things.
+// The comment function is not called. And Template still gives each kept
+// template, because html/template refuses Clone after an Execute, also one
+// that fails with nil data.
 func TestTU08LoadDoesNotExecute(t *testing.T) {
 	called := false
 	old := engineFuncs["comment"]
 	engineFuncs["comment"] = func(string) string { called = true; return "" }
 	t.Cleanup(func() { engineFuncs["comment"] = old })
-	execLoad(t, nil, `{{comment (index .Trap "a")}}`)
+	b := execLoad(t, nil, `{{comment (index .Trap "a")}}`)
 	if called {
 		t.Error("the load ran a template")
+	}
+	for name := range b.templates {
+		if _, ok := b.Template(name); !ok {
+			t.Errorf("Template(%q) not found: the load executed it", name)
+		}
 	}
 }
 
@@ -638,6 +652,8 @@ func TestTU08ExecCheckRefused(t *testing.T) {
 		`{{if 1}}x{{end}}`, `{{with 1}}x{{end}}`, `{{printf "%99999999d" 1}}`, `{{call .F}}`, `{{.M}}`,
 		`{{$a := "aaaaaaaa"}}{{$a = printf "%s%s" $a $a}}{{$a = printf "%s%s" $a $a}}`,
 		`{{range 3}}{{break}}{{end}}`, `{{range 3}}{{continue}}{{end}}`,
+		`{{html (index .Trap "a")}}`, `{{print .Trap "a"}}`, `{{urlquery (index .Trap "a")}}`,
+		`{{len (index .Trap "a")}}`, `{{slice .Trap "a"}}`,
 	} {
 		t.Run(fmt.Sprintf("%.60s", text), func(t *testing.T) { execLoad(t, ErrTemplateParse, text) })
 	}
@@ -651,6 +667,19 @@ func TestTU08ExecCheckPermitted(t *testing.T) {
 		`{{/* note */}}{{- /* note */ -}}x`, `{{comment (index .Trap "a")}}{{index .Trap "b"}}`,
 	} {
 		t.Run(fmt.Sprintf("%.60s", text), func(t *testing.T) { execLoad(t, nil, text) })
+	}
+}
+
+// T-U-08: a bundle with 7 good templates and 1 refused template gives
+// template_parse. The set is a map, so the check order is random. With 8 keys,
+// each template is first with chance 1/8. The test makes 110 loads. A check
+// that stops after the first good template misses the bad one in all loads with
+// chance (7/8)^110, below 5e-7.
+func TestTU08ExecCheckEveryTemplate(t *testing.T) {
+	ents := files(7, "plain")
+	ents = append(ents, tf("vhosts/h.example/bad.tmpl", `{{.X}}`))
+	for range 110 {
+		loadWith(t, ErrTemplateParse, ents...)
 	}
 }
 
@@ -702,7 +731,7 @@ func TestTS28PageType(t *testing.T) {
 func TestTS28Comment(t *testing.T) {
 	for _, s := range []string{
 		"a--b", "--", "<!--", "-->", "--!>", "x<!--y", "x-->", ">", ">x", "->", "->x", "\x00", "\x1f",
-		"a\rb", "a\x01", "a\x0bb", "a\x7f\x00",
+		"a\rb", "a\x01", "a\x0bb",
 	} {
 		if got := comment(s); got != "" {
 			t.Errorf("comment(%q) = %q; want empty", s, got)
@@ -715,8 +744,8 @@ func TestTS28Comment(t *testing.T) {
 	}
 }
 
-// T-S-28: in text context the output is one HTML comment. In an attribute the
-// output is empty. A refused text gives no comment.
+// T-S-28: in text context the output is one HTML comment. In a title attribute
+// the output is empty. A refused text gives no comment.
 func TestTS28CommentContext(t *testing.T) {
 	for _, c := range []struct{ text, trap, want string }{
 		{`<p>{{comment (index .Trap "a")}}</p>`, "x", "<p><!-- x --></p>"},

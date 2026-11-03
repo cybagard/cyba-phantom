@@ -104,12 +104,13 @@ func parseWith(a *Archive, mk func(string) *template.Template) (map[string]*temp
 // maxTemplateIDs is the number of trap ids that one template can use.
 const maxTemplateIDs = 64
 
-// checkExec checks each kept template (SEC-32). A tree holds text, comments and
-// two forms of action: {{index .Trap "id"}} and {{comment (index .Trap "id")}}.
-// The id is the id of a trap of traps.json. A template uses an id at most one
-// time. A set of more than one template, and a template with no tree, are
-// refused. The check matches the shape at the first level only. It does not
-// walk into the arguments, so a deep nesting costs no deep walk. The error
+// checkExec checks each kept template (SEC-32). A tree holds text and two forms
+// of action: {{index .Trap "id"}} and {{comment (index .Trap "id")}}. The parse
+// drops template comments, so no comment node is in a tree. The id is the id
+// of a trap of traps.json. A template uses an id at most one time. A set of
+// more than one template, and a template with no tree, are refused. The check
+// matches the shape at the first level only. It does not walk into the
+// arguments, so a deep nesting costs no deep walk. The error
 // holds no byte of the archive.
 func checkExec(set map[string]*template.Template, traps []Trap) error {
 	known := make(map[string]bool, len(traps))
