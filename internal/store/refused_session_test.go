@@ -173,8 +173,8 @@ func TestTS22WriterUsesTheSharedDayKey(t *testing.T) {
 }
 
 // T-S-22: two writers with one holder give one id to one client at one date.
-// A writer from NewWriter and a writer with a nil holder each have their own
-// holder. Thus they give other ids.
+// Each writer from NewWriter and each writer with a nil holder has a new
+// holder. Thus each gives an id of its own.
 func TestTS22WritersShareOneIDOnlyWithOneHolder(t *testing.T) {
 	r := newRig(t, 100)
 	h := session.NewDayKey()
@@ -186,17 +186,28 @@ func TestTS22WritersShareOneIDOnlyWithOneHolder(t *testing.T) {
 		w.clock = clock
 		return w
 	}
-	plain := NewWriter(r.db, r.q, false, nil, r.w.rec)
-	plain.clock = clock
+	newPlain := func() *Writer {
+		w := NewWriter(r.db, r.q, false, nil, r.w.rec)
+		w.clock = clock
+		return w
+	}
 	id1 := r.refusedIDs(newW(h), ja4, ip)[0]
 	id2 := r.refusedIDs(newW(h), ja4, ip)[0]
 	if want := h.At(at).SessionID(ip, ja4); want == nil || id1 != *want || id2 != id1 {
 		t.Errorf("ids %q and %q, want one id from h", id1, id2)
 	}
-	nilID := r.refusedIDs(newW(nil), ja4, ip)[0]
-	plainID := r.refusedIDs(plain, ja4, ip)[0]
-	if nilID == "" || plainID == "" || nilID == id1 || plainID == id1 || nilID == plainID {
-		t.Errorf("ids %q (nil holder) and %q (NewWriter) must differ from %q and from each other", nilID, plainID, id1)
+	others := []string{
+		r.refusedIDs(newW(nil), ja4, ip)[0],
+		r.refusedIDs(newW(nil), ja4, ip)[0],
+		r.refusedIDs(newPlain(), ja4, ip)[0],
+		r.refusedIDs(newPlain(), ja4, ip)[0],
+	}
+	seen := map[string]bool{id1: true}
+	for i, id := range others {
+		if id == "" || seen[id] {
+			t.Errorf("id %d is %q: it must differ from the id under h and the other ids (nil, nil, NewWriter, NewWriter): %q", i, id, others)
+		}
+		seen[id] = true
 	}
 }
 
