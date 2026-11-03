@@ -1,6 +1,6 @@
 // Package session holds the day key of the session id and of ip_hmac. The
-// writer and the request path take the key from one DayKey. Thus both compute
-// the same values for one UTC date.
+// writer and the request path must take the key from one DayKey. Thus both
+// compute the same values for one UTC date.
 package session
 
 import (
@@ -31,7 +31,7 @@ func newState(date string) *state {
 // There is no exported field and no accessor for the key bytes.
 //
 // A DayKey is safe for use by many goroutines. Make one with NewDayKey: the
-// zero DayKey has a nil pointer inside and At panics on it.
+// zero DayKey has a nil func inside and At panics on it.
 type DayKey struct {
 	cur func() *atomic.Pointer[state]
 }
@@ -51,9 +51,14 @@ func keyOf(s *state) Key {
 	return Key{s: func() *state { return s }}
 }
 
-// At returns the key for the UTC date of t. Sometimes that date is not the
-// date of the current key, in either direction. Then At makes a new key and
-// drops the old one. Thus a clock step back never brings an old key back.
+// At returns the key for the UTC date of t. When that date is not the date of
+// the current key, in either direction, At makes a new key. It drops its
+// reference to the old key. Thus a clock step back never brings an old key
+// back.
+//
+// Pass the time that you read just before the call. A time of an earlier date
+// makes a new key for that date. The next use of the current date makes
+// another new key.
 //
 // When two goroutines see one new date at one time, both get the same key. The
 // returned Key stays the same after a later date change.
@@ -71,10 +76,6 @@ func (d *DayKey) At(t time.Time) Key {
 		}
 		if cur.CompareAndSwap(old, n) {
 			return keyOf(n)
-		}
-		// Another goroutine won. Use its state when its date is ours.
-		if w := cur.Load(); w != nil && w.date == date {
-			return keyOf(w)
 		}
 	}
 }

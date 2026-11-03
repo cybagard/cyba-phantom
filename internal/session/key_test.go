@@ -15,19 +15,20 @@ import (
 	"time"
 )
 
-func at(s string) time.Time {
-	t, err := time.Parse(time.RFC3339, s)
+func at(t *testing.T, s string) time.Time {
+	t.Helper()
+	tm, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
-	return t
+	return tm
 }
 
 func keyBytes(k Key) [32]byte { return k.st().key }
 
 // T-U-24: a new holder has a new key. The key has 32 bytes, not all zero.
 func TestTU24NewHolderHasNewKey(t *testing.T) {
-	when := at("2026-03-01T10:00:00Z")
+	when := at(t, "2026-03-01T10:00:00Z")
 	a, b := keyBytes(NewDayKey().At(when)), keyBytes(NewDayKey().At(when))
 	if a == b {
 		t.Fatal("two holders gave one key for one date")
@@ -43,26 +44,30 @@ func TestTU24NewHolderHasNewKey(t *testing.T) {
 // its key after a date change.
 func TestTU24KeyFollowsTheUTCDate(t *testing.T) {
 	d := NewDayKey()
-	k1 := d.At(at("2026-03-01T00:00:00Z"))
-	if again := d.At(at("2026-03-01T23:59:59Z")); keyBytes(again) != keyBytes(k1) {
+	k1 := d.At(at(t, "2026-03-01T00:00:00Z"))
+	if again := d.At(at(t, "2026-03-01T23:59:59Z")); keyBytes(again) != keyBytes(k1) {
 		t.Error("the key changed inside one date")
 	}
-	k2 := d.At(at("2026-03-02T00:00:00Z"))
+	k2 := d.At(at(t, "2026-03-02T00:00:00Z"))
 	if keyBytes(k2) == keyBytes(k1) {
 		t.Error("the key did not change at the next date")
 	}
-	k3 := d.At(at("2026-03-01T12:00:00Z"))
+	k3 := d.At(at(t, "2026-03-01T12:00:00Z"))
 	if keyBytes(k3) == keyBytes(k1) || keyBytes(k3) == keyBytes(k2) {
 		t.Error("a clock step back gave an old key")
 	}
-	if d.At(at("2026-03-01T01:00:00Z")).st() != k3.st() {
+	if d.At(at(t, "2026-03-01T01:00:00Z")).st() != k3.st() {
 		t.Error("the key changed inside one date after a step back")
 	}
 	if keyBytes(k1) == [32]byte{} || k1.st().date != "2026-03-01" {
 		t.Errorf("the snapshot changed: date %q", k1.st().date)
 	}
 	const ip = "198.51.100.23"
-	if *k1.SessionID(ip, "") == *k2.SessionID(ip, "") {
+	id1, id2 := k1.SessionID(ip, ""), k2.SessionID(ip, "")
+	if id1 == nil || id2 == nil {
+		t.Fatal("no id")
+	}
+	if *id1 == *id2 {
 		t.Error("the ids of two dates are equal")
 	}
 }
@@ -77,15 +82,16 @@ func TestTU24DateIsUTC(t *testing.T) {
 	if k.st().date != "2026-03-02" {
 		t.Fatalf("date %q, want 2026-03-02", k.st().date)
 	}
-	if d.At(at("2026-03-02T05:00:00Z")).st() != k.st() {
+	if d.At(at(t, "2026-03-02T05:00:00Z")).st() != k.st() {
 		t.Error("one UTC date gave two keys")
 	}
-	if d.At(at("2026-03-01T10:00:00Z")).st() == k.st() {
+	if d.At(at(t, "2026-03-01T10:00:00Z")).st() == k.st() {
 		t.Error("two UTC dates gave one key")
 	}
 }
 
-func atAll(d *DayKey, times []time.Time) []Key {
+func atAll(t *testing.T, d *DayKey, times []time.Time) []Key {
+	t.Helper()
 	keys := make([]Key, len(times))
 	ids := make([]*string, len(times))
 	start := make(chan struct{})
@@ -103,8 +109,12 @@ func atAll(d *DayKey, times []time.Time) []Key {
 	close(start)
 	wg.Wait()
 	for i, k := range keys {
-		if *ids[i] != *k.SessionID("198.51.100.23", "") {
-			panic("a snapshot changed")
+		again := k.SessionID("198.51.100.23", "")
+		if ids[i] == nil || again == nil {
+			t.Fatal("no id")
+		}
+		if *ids[i] != *again {
+			t.Fatal("a snapshot changed")
 		}
 	}
 	return keys
@@ -114,7 +124,7 @@ func atAll(d *DayKey, times []time.Time) []Key {
 // one new date has one key. Goroutines that see one new date share one key.
 func TestTU24ConcurrentDateChange(t *testing.T) {
 	d := NewDayKey()
-	before, after := at("2026-03-01T10:00:00Z"), at("2026-03-02T10:00:00Z")
+	before, after := at(t, "2026-03-01T10:00:00Z"), at(t, "2026-03-02T10:00:00Z")
 	d.At(before)
 	mixed := make([]time.Time, 8)
 	for i := range mixed {
@@ -123,7 +133,7 @@ func TestTU24ConcurrentDateChange(t *testing.T) {
 			mixed[i] = after
 		}
 	}
-	atAll(d, mixed)
+	atAll(t, d, mixed)
 	final := d.At(after)
 	for _, k := range []Key{d.At(after), d.At(after.Add(time.Hour))} {
 		if k.st() != final.st() {
@@ -131,12 +141,12 @@ func TestTU24ConcurrentDateChange(t *testing.T) {
 		}
 	}
 	// All goroutines see the date change together: they get one key.
-	next := at("2026-03-03T10:00:00Z")
+	next := at(t, "2026-03-03T10:00:00Z")
 	same := make([]time.Time, 8)
 	for i := range same {
 		same[i] = next
 	}
-	keys := atAll(d, same)
+	keys := atAll(t, d, same)
 	for _, k := range keys {
 		if k.st() != keys[0].st() {
 			t.Fatal("goroutines of one new date have different keys")
@@ -164,7 +174,7 @@ func TestTU24ZeroKeyComputesNothing(t *testing.T) {
 func TestTU24LoserOfTheSwap(t *testing.T) {
 	t.Cleanup(func() { beforeSwap = nil })
 	const date = "2026-03-01"
-	when := at("2026-03-01T10:00:00Z")
+	when := at(t, "2026-03-01T10:00:00Z")
 
 	for _, c := range []struct {
 		name, winnerDate string
@@ -213,7 +223,13 @@ type box struct {
 // T-U-24: no fmt verb, slog handler or JSON encoder gives a byte of the key.
 func TestTU24KeyIsNotPrinted(t *testing.T) {
 	d := NewDayKey()
-	k := d.At(at("2026-03-01T10:00:00Z"))
+	k := d.At(at(t, "2026-03-01T10:00:00Z"))
+	if got := fmt.Sprint(d); got != "session.DayKey{}" {
+		t.Errorf("Sprint of a *DayKey = %q", got)
+	}
+	if got := fmt.Sprint(k); got != "session.Key{}" {
+		t.Errorf("Sprint of a Key = %q", got)
+	}
 	for i := range k.st().key {
 		k.st().key[i] = 0xb0 + byte(i)
 	}

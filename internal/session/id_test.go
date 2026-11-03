@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 const ja4 = "t13d1516h2_8daaf6152771_b186095e22b6"
@@ -43,22 +44,28 @@ func TestTU24KnownAnswers(t *testing.T) {
 			t.Errorf("SessionID(%q, %q) = %s, want %s", c.ip, c.ja4, got, c.want)
 		}
 	}
-	const want = "4ff51d11fd449b46527592dcdb030e5da99d8d10a889ab725754c2631720d5b8"
-	if got := k.IPHMAC(netip.MustParseAddr("2001:db8:abcd:1234::")); got != want {
-		t.Errorf("IPHMAC = %s, want %s", got, want)
+	for _, c := range []struct{ ip, want string }{
+		{"2001:db8:abcd:1234::", "4ff51d11fd449b46527592dcdb030e5da99d8d10a889ab725754c2631720d5b8"},
+		{"198.51.100.23", "55f9a91f887826a0569aa50da3f71a541c542da9a3d4441ad0eca0a921d9b312"},
+	} {
+		if got := k.IPHMAC(netip.MustParseAddr(c.ip)); got != c.want {
+			t.Errorf("IPHMAC(%q) = %s, want %s", c.ip, got, c.want)
+		}
 	}
 }
 
 // T-U-24: the vectors of the store tests. A mapped IPv4 address has the id of
 // its IPv4 form. Two IPv6 addresses in one /64 have one id.
 func TestTU24SessionIDVectors(t *testing.T) {
-	k := NewDayKey().At(at("2026-03-01T10:00:00Z"))
+	k := NewDayKey().At(at(t, "2026-03-01T10:00:00Z"))
+	shape := regexp.MustCompile(`^[a-z2-7]{26}$`)
 	id := func(ip, j string) string {
+		t.Helper()
 		s := k.SessionID(ip, j)
 		if s == nil {
 			t.Fatalf("no id for %q", ip)
 		}
-		if !regexp.MustCompile(`^[a-z2-7]{26}$`).MatchString(*s) {
+		if !shape.MatchString(*s) {
 			t.Errorf("id %q is not 26 lower-case base32 characters", *s)
 		}
 		return *s
@@ -85,7 +92,7 @@ func TestTU24SessionIDVectors(t *testing.T) {
 // T-U-24: the id differs from the first 16 bytes of ip_hmac of the same key,
 // also with an empty JA4. A bad or empty address has no id.
 func TestTU24SessionIDDiffersFromIPHMAC(t *testing.T) {
-	k := NewDayKey().At(at("2026-03-01T10:00:00Z"))
+	k := NewDayKey().At(at(t, "2026-03-01T10:00:00Z"))
 	const ip = "192.0.2.77"
 	got, err := hex.DecodeString(k.IPHMAC(netip.MustParseAddr(ip)))
 	if err != nil || len(got) != 32 {
@@ -106,6 +113,16 @@ func BenchmarkSessionID(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = k.SessionID("198.51.100.23", ja4)
+	}
+}
+
+func BenchmarkAt(b *testing.B) {
+	d := NewDayKey()
+	when := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	d.At(when)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = d.At(when)
 	}
 }
 
