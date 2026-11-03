@@ -39,6 +39,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/egress"
 	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
+	"github.com/cybagard/cyba-phantom/internal/testutil"
 )
 
 // syncBuf is a bytes.Buffer that many goroutines can write.
@@ -220,7 +221,7 @@ func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	a, err := NewACME(p)
 	mustNil(t, err)
 	// This cleanup runs before the removal of the state directory.
-	t.Cleanup(func() { a.Stop(); fence.fence(t) })
+	t.Cleanup(func() { a.Stop(); fence.fence(t, fenceBound) })
 	return a
 }
 
@@ -595,11 +596,12 @@ type blockStore struct {
 	certmagic.Storage
 	entered, release chan struct{}
 	calls            atomic.Int32
+	once             sync.Once
 }
 
 func (b *blockStore) Store(context.Context, string, []byte) error {
 	b.calls.Add(1)
-	close(b.entered)
+	b.once.Do(func() { close(b.entered) })
 	<-b.release
 	return nil
 }
@@ -619,7 +621,7 @@ func TestTS16FenceWaitsForAStoreThenRefusesWrites(t *testing.T) {
 	go func() { stored <- f.Store(ctx, "k", nil) }()
 	<-inner.entered
 	fenced := make(chan struct{})
-	go func() { f.fence(t); close(fenced) }()
+	go func() { f.fence(t, fenceBound); close(fenced) }()
 	select {
 	case <-fenced:
 		t.Fatal("the fence returned while a Store was in progress")
@@ -640,6 +642,117 @@ func TestTS16FenceWaitsForAStoreThenRefusesWrites(t *testing.T) {
 	}
 	if n := inner.calls.Load(); n != 1 {
 		t.Errorf("the inner storage got %d calls, want 1", n)
+	}
+}
+
+// boundTB records the Errorf calls of fence, so a test can check them.
+type boundTB struct {
+	testing.TB
+	msgs []string
+}
+
+func (b *boundTB) Errorf(format string, args ...any) {
+	b.msgs = append(b.msgs, fmt.Sprintf(format, args...))
+}
+
+// The fence gives up when a write does not end within its bound. It reports
+// this with one Errorf call that names the bound. It does not wait longer.
+func TestTS16FenceReportsAWriteThatDoesNotEnd(t *testing.T) {
+	inner := &blockStore{entered: make(chan struct{}), release: make(chan struct{})}
+	f := &fenceStorage{Storage: inner}
+	stored := make(chan error, 1)
+	go func() { stored <- f.Store(context.Background(), "k", nil) }()
+	<-inner.entered
+	rec := &boundTB{TB: t}
+	returned := make(chan struct{})
+	go func() { f.fence(rec, 50*time.Millisecond); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fence did not return after its bound")
+	}
+	close(inner.release)
+	mustNil(t, <-stored)
+	if len(rec.msgs) != 1 || !strings.Contains(rec.msgs[0], "did not end within 50ms") {
+		t.Errorf("Errorf calls: %q, want one that names the bound of 50ms", rec.msgs)
+	}
+}
+
+// gatedStore passes each call to its storage. While on is set, Store closes
+// entered once, then it waits until release closes.
+type gatedStore struct {
+	certmagic.Storage
+	on               atomic.Bool
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (g *gatedStore) Store(ctx context.Context, k string, v []byte) error {
+	if !g.on.Load() {
+		return g.Storage.Store(ctx, k, v)
+	}
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return nil
+}
+
+// When a test with newTestACME ends, the cleanup stops the cache first. Then it
+// fences the store. A write in progress holds the fence, and the maintenance of
+// the cache must stop in that time. After the cleanup, Store and Delete give
+// fs.ErrClosed, and the write in progress has ended with no error.
+func TestTS16TestACMEStopsThenFencesAtCleanup(t *testing.T) {
+	var ticks atomic.Int64
+	var fence *fenceStorage
+	gate := &gatedStore{entered: make(chan struct{}), release: make(chan struct{})}
+	bodyEnded, watched := make(chan struct{}), make(chan struct{})
+	var ticked bool // set before watched closes
+	stored := make(chan error, 1)
+	ok := t.Run("rig", func(t *testing.T) {
+		// The watcher lets the write end after the cleanup has had time to stop
+		// the cache. Without it, a missing cleanup would leave the write open.
+		go func() {
+			defer close(watched)
+			defer close(gate.release)
+			<-bodyEnded
+			time.Sleep(250 * time.Millisecond)
+			before := ticks.Load()
+			time.Sleep(250 * time.Millisecond)
+			ticked = ticks.Load() != before
+		}()
+		defer close(bodyEnded)
+		a := newTestACME(t, func(p *ACMEParams) {
+			fence = p.Storage.(*fenceStorage)
+			gate.Storage, fence.Storage = fence.Storage, gate
+			p.ocspInterval = 10 * time.Millisecond
+			p.onMaintenance = func() { ticks.Add(1) }
+		})
+		seedCert(t, a, "decoy.test")
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		mustNil(t, a.Start(ctx))
+		testutil.WaitFor(t, func() bool { return ticks.Load() > 0 }, 10*time.Second)
+		gate.on.Store(true)
+		go func() { stored <- fence.Store(ctx, "k", nil) }()
+		<-gate.entered
+	})
+	if !ok {
+		return
+	}
+	select {
+	case <-watched:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cleanup did not end")
+	}
+	if ticked {
+		t.Error("the cache still ran its maintenance while the fence waited")
+	}
+	mustNil(t, <-stored)
+	ctx := context.Background()
+	if err := fence.Store(ctx, "k", nil); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Store after the cleanup: %v, want fs.ErrClosed", err)
+	}
+	if err := fence.Delete(ctx, "k"); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Delete after the cleanup: %v, want fs.ErrClosed", err)
 	}
 }
 

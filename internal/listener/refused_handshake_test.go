@@ -1,10 +1,12 @@
 package listener
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -62,8 +64,13 @@ func (f *fenceStorage) Delete(ctx context.Context, k string) error {
 	return f.write(func() error { return f.Storage.Delete(ctx, k) })
 }
 
-// fence waits for the writes that started. Then it refuses all later writes.
-func (f *fenceStorage) fence(tb testing.TB) {
+// fenceBound is the time that a test ACME client gives to the writes in
+// progress at cleanup.
+const fenceBound = 10 * time.Second
+
+// fence waits for the writes that started, for at most bound. Then it refuses
+// all later writes.
+func (f *fenceStorage) fence(tb testing.TB, bound time.Duration) {
 	tb.Helper()
 	done := make(chan struct{})
 	go func() {
@@ -74,8 +81,8 @@ func (f *fenceStorage) fence(tb testing.TB) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		tb.Error("a storage write did not end within 10 s")
+	case <-time.After(bound):
+		tb.Errorf("a storage write did not end within %v", bound)
 	}
 }
 
@@ -117,6 +124,17 @@ func (g *gateRig) write(t *testing.T, b []byte) {
 func (g *gateRig) handshake(t *testing.T, cfg *tls.Config) {
 	t.Helper()
 	_ = tls.Client(g.raw(t), cfg).Handshake()
+}
+
+// refused does a client handshake that the server must refuse. It stops the
+// test at once when the handshake works, as it does when the server resumes a
+// session. The connection stays open.
+func (g *gateRig) refused(t *testing.T, cfg *tls.Config) {
+	t.Helper()
+	c := tls.Client(g.raw(t), cfg)
+	if err := c.Handshake(); err == nil {
+		t.Fatalf("the handshake worked (session resumed: %v); the server must refuse it", c.ConnectionState().DidResume)
+	}
 }
 
 // want waits for the close of the connection. It checks the refused events:
@@ -330,7 +348,7 @@ func TestTS16TicketForAnotherNameIsRefused(t *testing.T) {
 				g.events(t, "")
 				cfg := clientCfg(otherName, proto)
 				cfg.MinVersion, cfg.MaxVersion, cfg.ClientSessionCache = ver, ver, cache
-				g.handshake(t, cfg)
+				g.refused(t, cfg)
 				g.want(t, "unknown_name", 1)
 			})
 		}
@@ -357,17 +375,55 @@ func TestTS22ClientAbortWithASessionCache(t *testing.T) {
 	}
 }
 
-// T-S-22: a client that stops after a HelloRetryRequest gives no event.
-// Known limit: the client stops before the name gate runs.
+// helloRetryRandom is the fixed random value of a HelloRetryRequest (RFC 8446,
+// section 4.1.3).
+var helloRetryRandom = []byte{
+	0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+	0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+}
+
+// readHandshakeRecord reads the first record of c before a deadline. It checks
+// that this is a handshake record with a ServerHello, and it returns the
+// random value of the ServerHello.
+func readHandshakeRecord(t *testing.T, c net.Conn) []byte {
+	t.Helper()
+	mustNil(t, c.SetReadDeadline(time.Now().Add(5*time.Second)))
+	head := make([]byte, 5)
+	if _, err := io.ReadFull(c, head); err != nil {
+		t.Fatalf("read of the record header: %v", err)
+	}
+	body := make([]byte, int(head[3])<<8|int(head[4]))
+	if _, err := io.ReadFull(c, body); err != nil {
+		t.Fatalf("read of the record body: %v", err)
+	}
+	if head[0] != 22 || len(body) < 38 || body[0] != 2 {
+		t.Fatalf("record type %d, %d bytes, handshake type %d; want a ServerHello in a handshake record", head[0], len(body), body[0])
+	}
+	return body[6:38]
+}
+
+// T-S-22: a client that stops after a HelloRetryRequest gives no event. The
+// first record is a HelloRetryRequest, for a configured name, for an unknown
+// name, and for no name. Known limit: the client stops before the name gate
+// runs.
 func TestTS22NoEventAfterHelloRetryRequest(t *testing.T) {
-	g := newGateRig(t, defaultTimeouts, nil)
-	c := g.raw(t)
-	_, err := c.Write(rawHello{version: 0x0303, suites: []uint16{0x1301}, exts: []rawExt{extSNI(testName), extVersions(0x0304), extGroups(29), extSigs(0x0804)}}.bytes())
-	mustNil(t, err)
-	_, err = c.Read(make([]byte, 1))
-	mustNil(t, err)
-	mustNil(t, c.Close())
-	g.want(t, "", 0)
+	for _, name := range []string{testName, otherName, ""} {
+		t.Run("name "+name, func(t *testing.T) {
+			g := newGateRig(t, defaultTimeouts, nil)
+			c := g.raw(t)
+			exts := []rawExt{extVersions(0x0304), extGroups(29), extSigs(0x0804)}
+			if name != "" {
+				exts = append([]rawExt{extSNI(name)}, exts...)
+			}
+			_, err := c.Write(rawHello{version: 0x0303, suites: []uint16{0x1301}, exts: exts}.bytes())
+			mustNil(t, err)
+			if got := readHandshakeRecord(t, c); !bytes.Equal(got, helloRetryRandom) {
+				t.Errorf("random value %x, want the value of a HelloRetryRequest", got)
+			}
+			mustNil(t, c.Close())
+			g.want(t, "", 0)
+		})
+	}
 }
 
 // T-S-22: a parsed ClientHello with a configured name gives client_abort. Then
