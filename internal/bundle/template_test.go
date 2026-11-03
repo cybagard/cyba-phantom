@@ -912,8 +912,8 @@ func TestTS28AssetView(t *testing.T) {
 		}
 	}
 	// The load refuses each of these names. "vhostsx/a.png" and "vhosts" fail
-	// with archive_invalid. "vhosts/a.png" fails with content_invalid (the route
-	// rule). So the test sets the files by hand.
+	// with archive_invalid. "vhosts/a.png" fails with content_invalid (the
+	// route rule). So the test sets the files by hand.
 	odd := &Bundle{archive: &Archive{files: map[string][]byte{"vhostsx/a.png": []byte("x"), "vhosts": []byte("y"), "vhosts/a.png": []byte("z")}}}
 	for name, want := range map[string]bool{"vhostsx/a.png": false, "vhosts": false, "vhosts/a.png": true} {
 		if _, ok := odd.Asset(name); ok != want {
