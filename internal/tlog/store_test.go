@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,25 @@ func TestTU07WriteOrderIsTempFsyncRenameDirectoryFsync(t *testing.T) {
 	})
 }
 
+// A failed fsync of the temporary file gives an error. The store does not
+// rename the file, so no tile file is there.
+func TestTU07FailedFileFsyncWritesNoTile(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.extend(t, 3)
+	setHooks(t, hooks{file: func(*os.File) error { return errors.New("injected") }})
+	tile := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	err := s.WriteTile(tile, l.tileData(tile))
+	var e *Error
+	if !errors.As(err, &e) || e.Rule != ruleWrite {
+		t.Fatalf("got %v, want the rule %q", err, ruleWrite)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "tlog", tile.Path())); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the tile file is there: %v", err)
+	}
+}
+
 // A new log has a tree head of size 0 before the first tile is written.
 func TestTU07OpenWritesEmptyHead(t *testing.T) {
 	state, dir := newLogState(t)
@@ -395,6 +415,28 @@ func TestTS13HugeTreeSizeIsAnError(t *testing.T) {
 			t.Fatalf("SetHead(%d): %v", size, err)
 		}
 	}
+	t.Run("limit", func(t *testing.T) {
+		state, dir := newLogState(t)
+		openStore(t, state).Close()
+		var b [headSize]byte
+		binary.BigEndian.PutUint64(b[:], maxSize)
+		mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", headName), b[:], fileMode))
+		// A head of exactly maxSize is valid. Its top tile is missing.
+		err := within(t, func() error { _, err := Open(state, "tlog"); return err })
+		var e *Error
+		if want := "tile/8/6/000.p/1"; !errors.As(err, &e) || e.Rule != ruleMissing || e.Name != want {
+			t.Fatalf("got %v, want the rule %q for %s", err, ruleMissing, want)
+		}
+		// A direct call of verify refuses a size outside the range.
+		empty, _ := newLogState(t)
+		s := openStore(t, empty)
+		for _, n := range []int64{-1, maxSize + 1} {
+			_, err := s.verify(tlog.Tree{N: n})
+			if !errors.As(err, &e) || e.Rule != ruleSize {
+				t.Fatalf("verify(%d): %v", n, err)
+			}
+		}
+	})
 }
 
 // within runs f and fails the test if f does not return in a short time.
@@ -791,6 +833,26 @@ func TestTU07WriteTileCountsTilesOfOneBatch(t *testing.T) {
 	mustNil(t, s.WriteTile(tile, make([]byte, 3*tlog.HashSize)))
 }
 
+// WriteTile does not count a tile that the tree head covers in full as a tile
+// of the batch.
+func TestTU07WriteOfCoveredTileIsNotCounted(t *testing.T) {
+	state, _ := newLogState(t)
+	s := openStore(t, state)
+	var l testLog
+	l.commit(t, s, 0, 3)
+	for i := range maxBatchTiles - 1 {
+		s.written[tlog.Tile{H: TileHeight, L: 0, N: int64(i) + 1000}] = 1
+	}
+	old := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
+	next := tlog.Tile{H: TileHeight, L: 0, N: 1, W: 1}
+	for _, c := range []struct {
+		tile tlog.Tile
+		data []byte
+	}{{old, l.tileData(old)}, {next, make([]byte, tlog.HashSize)}, {old, l.tileData(old)}} {
+		mustNil(t, s.WriteTile(c.tile, c.data))
+	}
+}
+
 // dirNames returns the names in the directory dir.
 func dirNames(t *testing.T, dir string) []string {
 	t.Helper()
@@ -812,20 +874,21 @@ func TestTS13OpenTidiesTilesBeyondTheHeadOnlyInRange(t *testing.T) {
 	var a testLog
 	a.commit(t, s, 0, 256) // the first tile beyond the head is tile 1
 	s.Close()
-	plant := func(n int64) string {
+	plant := func(l int, n int64) string {
 		var partial string
 		for _, w := range []int{3, 5} {
-			file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: 0, N: n, W: w}.Path())
+			file := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: l, N: n, W: w}.Path())
 			partial = filepath.Dir(file)
 			mustNil(t, os.MkdirAll(partial, dirMode))
 			mustNil(t, os.WriteFile(file, make([]byte, w*tlog.HashSize), fileMode))
 		}
 		return partial
 	}
-	first, last := plant(1), plant(1+maxBatchTiles)
-	outside := plant(2 + maxBatchTiles)
+	first, last := plant(0, 1), plant(0, 1+maxBatchTiles)
+	top := plant(maxLevel, 0) // the highest level is in the range too
+	outside := plant(0, 2+maxBatchTiles)
 	openStore(t, state)
-	for _, p := range []string{first, last} {
+	for _, p := range []string{first, last, top} {
 		if got := dirNames(t, p); !slices.Equal(got, []string{"5"}) {
 			t.Fatalf("files of %s after Open: %v", p, got)
 		}
@@ -886,15 +949,12 @@ func openSkipsATileOutsideTheRange(t *testing.T) {
 	}
 }
 
-// A log that Open accepts can have more than 8 million leaves. Its level 0
-// tiles are then in more than 32 group directories. Open must succeed. The
-// names that it reads depend on the bound for the tiles beyond the head. They
-// do not depend on the size of the log. The test builds the tiles of level 1
-// and above from arbitrary hashes of the subtrees of 256 leaves. It links one
-// file for all tiles of level 0. Open does not read the tiles of level 0,
-// because the size is a multiple of 256.
-func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
-	const tiles = 33*groupTiles + 1
+// subtreeLog makes a log of the given number of subtrees of 256 leaves. It
+// builds the tiles of level 1 and above from arbitrary hashes of the subtrees.
+// With level0, it links one file for all tiles of level 0. Open does not read
+// the tiles of level 0, because the size is a multiple of 256.
+func subtreeLog(t *testing.T, tiles int, level0 bool) (*os.Root, string, int64, tlog.Hash) {
+	t.Helper()
 	state, dir := newLogState(t)
 	openStore(t, state).Close()
 	var m testLog // the tree over the hashes of the subtrees of 256 leaves
@@ -910,6 +970,9 @@ func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	mustNil(t, os.WriteFile(base, make([]byte, fullWidth*tlog.HashSize), fileMode))
 	for _, tile := range tlog.NewTiles(TileHeight, 0, size) {
 		file := filepath.Join(log, tile.Path())
+		if tile.L == 0 && !level0 {
+			continue
+		}
 		mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
 		if tile.L == 0 {
 			mustNil(t, os.Link(base, file))
@@ -920,8 +983,38 @@ func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
 	}
 	mustNil(t, os.Remove(base))
 	head := binary.BigEndian.AppendUint64(nil, uint64(size))
-	root := m.root(t, tiles)
+	root := m.root(t, int64(tiles))
 	mustNil(t, os.WriteFile(filepath.Join(log, headName), append(head, root[:]...), fileMode))
+	return state, dir, size, root
+}
+
+// Open skips a group directory that is not there. It then goes on at the first
+// tile of the next group. Here the group of tile 1005 is not there, and tile
+// 2000 is in the next group.
+func TestTS13OpenJumpsToTheNextGroupAfterAMissingGroup(t *testing.T) {
+	state, dir, size, root := subtreeLog(t, groupTiles+5, false)
+	partial := filepath.Join(dir, "tlog", "tile", "8", "0", "x002", "000.p")
+	for _, w := range []int{3, 5} {
+		file := filepath.Join(partial, strconv.Itoa(w))
+		mustNil(t, os.MkdirAll(partial, dirMode))
+		mustNil(t, os.WriteFile(file, make([]byte, w*tlog.HashSize), fileMode))
+	}
+	if n, got := openStore(t, state).TreeHead(); n != size || got != root {
+		t.Fatalf("Open gave %d, %x", n, got)
+	}
+	if got := dirNames(t, partial); !slices.Equal(got, []string{"5"}) {
+		t.Fatalf("files of tile 2000 after Open: %v", got)
+	}
+}
+
+// A log that Open accepts can have more than 8 million leaves. Its level 0
+// tiles are then in more than 32 group directories. Open must succeed. The
+// names that it reads depend on the bound for the tiles beyond the head. They
+// do not depend on the size of the log.
+func TestTS13OpenSucceedsWhenTilesSpanManyGroupDirectories(t *testing.T) {
+	const tiles = 33*groupTiles + 1
+	state, dir, size, root := subtreeLog(t, tiles, true)
+	log := filepath.Join(dir, "tlog")
 	groups := 0
 	for _, name := range dirNames(t, filepath.Join(log, "tile", "8", "0")) {
 		if strings.HasPrefix(name, "x") {
@@ -1012,6 +1105,12 @@ func TestTU07TileCoordinateBound(t *testing.T) {
 		var e *Error
 		if bad := errors.As(err, &e) && e.Rule == ruleTile; bad != c.fail {
 			t.Errorf("level %d, tile %d: %v", c.l, c.n, err)
+		}
+	}
+	for _, tile := range []tlog.Tile{{H: TileHeight - 1, W: 1}, {H: TileHeight, L: -1, W: 1}} {
+		var e *Error
+		if err := s.WriteTile(tile, one); !errors.As(err, &e) || e.Rule != ruleTile {
+			t.Errorf("height %d, level %d: %v", tile.H, tile.L, err)
 		}
 	}
 }
@@ -1171,11 +1270,11 @@ func TestTU07PartialNameMustBeTheWidth(t *testing.T) {
 	l.put(t, s, 3, 5)
 	s.Close()
 	narrow := tlog.Tile{H: TileHeight, L: 0, N: 0, W: 3}
-	for _, name := range []string{"03", "+3", "3x"} {
+	for _, name := range []string{"03", "+3", "3x", "0", "256"} {
 		mustNil(t, os.WriteFile(filepath.Join(dir, "tlog", filepath.Dir(narrow.Path()), name), l.tileData(narrow), fileMode))
 	}
 	openStore(t, state)
-	if names := partialFiles(t, dir); !slices.Equal(names, []string{"+3", "03", "3x", "5"}) {
+	if names := partialFiles(t, dir); !slices.Equal(names, []string{"+3", "0", "03", "256", "3x", "5"}) {
 		t.Fatalf("files after Open: %v", names)
 	}
 }
@@ -1330,6 +1429,24 @@ func TestTS13SetHeadChecksNewTileAgainstTheLevelAbove(t *testing.T) {
 	}
 }
 
+// checkAbove checks a full tile of the level below maxLevel against the tile
+// of level maxLevel. Here the hash in the upper tile does not match the lower
+// tile.
+func TestTS13CheckAboveReachesTheHighestLevel(t *testing.T) {
+	state, dir := newLogState(t)
+	s := openStore(t, state)
+	for name, hashes := range map[string]int{"tile/8/5/000": fullWidth, "tile/8/6/000.p/1": 1} {
+		file := filepath.Join(dir, "tlog", name)
+		mustNil(t, os.MkdirAll(filepath.Dir(file), dirMode))
+		mustNil(t, os.WriteFile(file, make([]byte, hashes*tlog.HashSize), fileMode))
+	}
+	err := s.checkAbove(tlog.Tile{H: TileHeight, L: maxLevel - 1, W: fullWidth}, maxSize)
+	var e *Error
+	if want := "tile/8/5/000,tile/8/6/000.p/1"; !errors.As(err, &e) || e.Rule != ruleRoot || e.Name != want {
+		t.Fatalf("got %v, want the rule %q for %s", err, ruleRoot, want)
+	}
+}
+
 // SetHead, WriteTile, and Log.AppendBatch use one bound: at most maxBatchTiles
 // tiles get new hashes between two tree heads.
 func TestTU07BatchBoundEdge(t *testing.T) {
@@ -1342,6 +1459,11 @@ func TestTU07BatchBoundEdge(t *testing.T) {
 	}
 	if n := len(tlog.NewTiles(TileHeight, 0, edge+1)); int64(n) != batchTiles(0, edge+1) {
 		t.Fatalf("batchTiles differs from NewTiles: %d", n)
+	}
+	// The last leaf changes one tile on each level up to maxLevel.
+	top := len(tlog.NewTiles(TileHeight, maxSize-1, maxSize))
+	if n := batchTiles(maxSize-1, maxSize); n != 7 || n != int64(top) {
+		t.Fatalf("batchTiles at the largest size: %d, NewTiles: %d", n, top)
 	}
 	rule := func(err error) string {
 		var e *Error
