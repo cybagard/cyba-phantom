@@ -149,7 +149,7 @@ func TestTU01_RoundTrip(t *testing.T) {
 			}
 			// A second key set from the same key has no shared state.
 			other := newSet(t, testKey, tc.traps)
-			want := Result{OK: true, Trap: traps(tc.traps)[tc.index], Unit: tc.unit, Set: First}
+			want := Result{OK: true, Trap: traps(tc.traps)[tc.index], Unit: tc.unit, Set: First, Counter: tc.counter}
 			if got := Verify([]*KeySet{other}, tok); got != want {
 				t.Fatalf("Verify = %+v, want %+v", got, want)
 			}
@@ -312,7 +312,11 @@ func TestTU01_Ring(t *testing.T) {
 			got := Verify(ring, tok)
 			want := Result{}
 			if tc.wantOK {
-				want = Result{OK: true, Trap: "set-" + strconv.Itoa(tc.wantSet), Set: tc.wantSet}
+				// Use the inner cipher, so the Decrypt count stays exact.
+				var plain [Size]byte
+				counters[tc.from].Block.Decrypt(plain[:], tok[:])
+				_, _, c := unpack(plain[:])
+				want = Result{OK: true, Trap: "set-" + strconv.Itoa(tc.wantSet), Set: tc.wantSet, Counter: c}
 			}
 			if got != want {
 				t.Errorf("Verify = %+v, want %+v", got, want)
@@ -330,7 +334,8 @@ func TestTU01_Ring(t *testing.T) {
 func TestTU01_RingBounds(t *testing.T) {
 	a, b := newSet(t, testKey, 2), newSet(t, otherKey, 8)
 	tok, _ := b.Mint(5, epoch)
-	want := Result{OK: true, Trap: "trap-5", Set: Second}
+	_, _, c := open(b, tok)
+	want := Result{OK: true, Trap: "trap-5", Set: Second, Counter: c}
 	if got := Verify([]*KeySet{a, b}, tok); got != want {
 		t.Errorf("index 5 of B: Verify = %+v, want %+v", got, want)
 	}
@@ -640,6 +645,25 @@ func TestTU01_NoAllocs(t *testing.T) {
 	}
 	if n := testing.AllocsPerRun(1000, func() { _ = Verify(ring, tok) }); n != 0 {
 		t.Errorf("Verify allocates %v times", n)
+	}
+	idx, out := make([]int, MaxRange), make([][Size]byte, MaxRange)
+	for i := range idx {
+		idx[i] = i % 4
+	}
+	if n := testing.AllocsPerRun(1000, func() { _, _ = ring[0].MintRange(idx, epoch, out) }); n != 0 {
+		t.Errorf("MintRange allocates %v times", n)
+	}
+}
+
+func BenchmarkMintRange(b *testing.B) {
+	k := newSet(b, testKey, 4)
+	idx, out := make([]int, MaxRange), make([][Size]byte, MaxRange)
+	for i := range idx {
+		idx[i] = i % 4
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = k.MintRange(idx, epoch, out)
 	}
 }
 
