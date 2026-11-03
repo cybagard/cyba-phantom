@@ -46,12 +46,13 @@ func fullInput(k event.Kind) event.Input {
 	return in
 }
 
-// bigInput sets every field to the longest value that the caps allow.
+// bigInput sets every field to the longest value that the caps allow. The path
+// is quotes: a control byte in a path is only %XX, so quotes are longer.
 func bigInput(k event.Kind) event.Input {
 	ctl := strings.Repeat("\x01", 300) // a control byte is 6 bytes in canonical form
 	status := int64(-(1<<53 - 1))
 	in := event.Input{
-		Kind: k, Vhost: ctl + strings.Repeat("a", 253), Method: ctl, Path: strings.Repeat("\x01", 2100),
+		Kind: k, Vhost: ctl + strings.Repeat("a", 253), Method: ctl, Path: strings.Repeat("\"", 2100),
 		TrapID: ctl, TokenID: ctl, Status: &status, Surface: event.SurfaceHeader,
 		JA4: ctl, H2: ctl, Hdr: ctl, Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))},
 		ClientIP: "2001:db8:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000),
@@ -241,14 +242,14 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 	}
 }
 
-// T-U-17: a queue holds events near the maximum size (at least 4/5 of
-// MaxEventBytes). A caller tries to change each event after the enqueue. The
-// byte sum of the queue stays the sum of Size over the accepted events, and it
-// never passes the byte caps of the lanes. These caps are 24 MiB for the bulk
-// lane and 8 MiB for the evidence lane, as the Queue documentation says. The
-// first case uses the depth 4, so that the lane lengths drop the events. The
-// second case uses the largest depth (MaxQueueDepth), so that the byte caps and
-// not the lane lengths drop the events.
+// T-U-17: a queue holds large events (at least half of MaxEventBytes). A
+// caller tries to change each event after the enqueue. The byte sum of the
+// queue stays the sum of Size over the accepted events. It never passes the
+// byte caps of the lanes. The Queue documentation gives these caps: 24 MiB
+// for the bulk lane and 8 MiB for the evidence lane. The first case uses the
+// depth 4, so that the lane lengths drop the events. The second case uses the
+// largest depth (MaxQueueDepth). Thus the byte caps, not the lane lengths,
+// drop the events.
 func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 	const bulkCap, evidenceCap = 24 << 20, 8 << 20
 	for _, c := range []struct {
@@ -258,7 +259,7 @@ func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 		byBytes bool
 	}{
 		{"small depth", 4, 12, false},
-		{"byte cap drops", event.MaxQueueDepth, 1100, true},
+		{"byte cap drops", event.MaxQueueDepth, 1700, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			q, err := event.NewQueue(c.depth, event.NewCounters())
@@ -281,8 +282,8 @@ func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 				for i, k := range []event.Kind{event.KindRequest, event.KindCallback} {
 					e := mustEvent(t, at(1), bigInput(k))
 					size := e.Size()
-					if size < event.MaxEventBytes*4/5 || size > event.MaxEventBytes {
-						t.Fatalf("size %d is not near %d", size, event.MaxEventBytes)
+					if size < event.MaxEventBytes/2 || size > event.MaxEventBytes {
+						t.Fatalf("size %d is not in [%d, %d]", size, event.MaxEventBytes/2, event.MaxEventBytes)
 					}
 					if q.Enqueue(e) {
 						snaps[e] = take(t, e)
@@ -407,10 +408,10 @@ func TestTU17_QueueBytesWithWholeValueAssignment(t *testing.T) {
 		}
 		zero(t, q)
 		var trueSum int64 // the sum of Size over the queued events
-		for range 1100 {
+		for range 1700 {
 			e := mustEvent(t, at(1), bigInput(event.KindRequest))
-			if size := e.Size(); size < event.MaxEventBytes*4/5 {
-				t.Fatalf("size %d is not near %d", size, event.MaxEventBytes)
+			if size := e.Size(); size < event.MaxEventBytes/2 {
+				t.Fatalf("size %d is under %d", size, event.MaxEventBytes/2)
 			}
 			if q.Enqueue(e) {
 				trueSum += int64(e.Size())

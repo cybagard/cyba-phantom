@@ -81,6 +81,54 @@ func TestTU19RequestsGiveEvents(t *testing.T) {
 	}
 }
 
+var requestPathRows = []struct{ target, want string }{
+	{"/a%2Fb<c", "/a%2Fb%3Cc"},
+	{"/a%0ab", "/a%0Ab"},
+	{"/a%7f", "/a%7F"},
+	{"/%2541", "/%2541"},
+	{"/é", "/%C3%A9"},
+}
+
+// T-U-21: the stored path of a request event keeps each escape of the request
+// target with upper-case hex digits. It decodes none, and it holds no control
+// byte or non-ASCII byte.
+func TestTU21RequestEventPath(t *testing.T) {
+	for _, tc := range requestPathRows {
+		h, q, _ := newHelloQueue(t, 4)
+		serveRaw(t, h, readRequest(t, tc.target, "decoy.test"))
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("target %q: %d events, want 1", tc.target, len(evs))
+		}
+		if got := *evs[0].Record().Path; got != tc.want {
+			t.Errorf("target %q: stored path %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}
+
+// T-U-21: event.RequestPath and location make the same path for each byte
+// after "/". They also do this for the five URLs in this test, for
+// requestPathRows and for redirectEscapeRows.
+func TestTU21RequestPathMatchesLocation(t *testing.T) {
+	us := []*url.URL{{Path: "/%41"}, {Path: "/%zz", RawPath: "/%zz"}, {Path: "/a%", RawPath: "/a%"},
+		{Path: "/%2z", RawPath: "/%2z"}, {Path: "/a%4", RawPath: "/a%4"}}
+	for b := 0; b < 256; b++ {
+		us = append(us, &url.URL{Path: "/" + string([]byte{byte(b)})})
+	}
+	for _, tc := range requestPathRows {
+		us = append(us, readRequest(t, tc.target, "decoy.test").URL)
+	}
+	for _, tc := range redirectEscapeRows {
+		us = append(us, readRequest(t, tc.target, "decoy.test").URL)
+	}
+	for _, u := range us {
+		want := strings.TrimPrefix(location("decoy.test", u), "https://decoy.test")
+		if got := event.RequestPath(u.RawPath, u.Path); got != want {
+			t.Errorf("RawPath %q, Path %q: RequestPath %q, location %q", u.RawPath, u.Path, got, want)
+		}
+	}
+}
+
 // T-U-19: a full queue drops the event and counts the drop for its lane and
 // key. The response bytes do not change.
 func TestTU19FullQueueSameResponse(t *testing.T) {
@@ -232,26 +280,32 @@ func readRequest(t *testing.T, target, host string) *http.Request {
 	return r
 }
 
+// redirectEscapeRows are the targets of TestTS17RedirectKeepsEscapes, with the
+// Location that the redirect gives. TestTU21RequestPathMatchesLocation also
+// uses them.
+var redirectEscapeRows = []struct{ target, want string }{
+	{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
+	{"/%2f%2fevil.example", "https://decoy.test/%2F%2Fevil.example"},
+	{"/%2e%2e/x", "https://decoy.test/%2E%2E/x"},
+	{"/%5cevil", "https://decoy.test/%5Cevil"},
+	{"/a%2Fb<c", "https://decoy.test/a%2Fb%3Cc"},
+	{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
+	{"/[x]", "https://decoy.test/%5Bx%5D"},
+	{"/%41", "https://decoy.test/%41"},
+	// These rows hold the hex digit edges 9, a, A and F.
+	{"/%9a%2F", "https://decoy.test/%9A%2F"},
+	{"/%2F%A0", "https://decoy.test/%2F%A0"},
+	{"/a%252Fb", "https://decoy.test/a%252Fb"},
+	{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
+	{"/é", "https://decoy.test/%C3%A9"},
+	{"/%c3%a9", "https://decoy.test/%C3%A9"},
+	{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
+}
+
 // T-S-17: the Location of the redirect keeps each escape of the request path.
 // It decodes none, so "%2F" stays "%2F". A byte that needs an escape gets one.
 func TestTS17RedirectKeepsEscapes(t *testing.T) {
-	for _, tc := range []struct{ target, want string }{
-		{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
-		{"/%2f%2fevil.example", "https://decoy.test/%2F%2Fevil.example"},
-		{"/%2e%2e/x", "https://decoy.test/%2E%2E/x"},
-		{"/%5cevil", "https://decoy.test/%5Cevil"},
-		{"/a%2Fb<c", "https://decoy.test/a%2Fb%3Cc"},
-		{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
-		{"/[x]", "https://decoy.test/%5Bx%5D"},
-		{"/%41", "https://decoy.test/%41"},
-		// These rows hold the hex digit edges 9, a, A and F.
-		{"/%9a%2F", "https://decoy.test/%9A%2F"},
-		{"/%2F%A0", "https://decoy.test/%2F%A0"},
-		{"/a%252Fb", "https://decoy.test/a%252Fb"},
-		{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
-		{"/é", "https://decoy.test/%C3%A9"},
-		{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
-	} {
+	for _, tc := range redirectEscapeRows {
 		resp, _ := serveRaw(t, NewRedirect(helloNames), readRequest(t, tc.target, "decoy.test"))
 		if got := resp.Header.Get("Location"); resp.StatusCode != 308 || got != tc.want {
 			t.Errorf("target %q: status %d, Location %q, want %q", tc.target, resp.StatusCode, got, tc.want)
@@ -360,8 +414,9 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 // T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
 // configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets
 // the 200 with no body of net/http. Over TLS each request gives one request
-// event and no refused event, also with "Connection: close". On the plain
-// socket it gives no Location and no event.
+// event and no refused event, also with "Connection: close". The stored path
+// is %2A: the code escapes '*' and adds no leading '/'. On the plain socket it
+// gives no Location and no event.
 func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 	for _, tc := range []struct {
 		host string
@@ -416,7 +471,7 @@ func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 			t.Fatalf("host %q: %d request events, want 2", tc.host, len(evs))
 		}
 		for _, e := range evs {
-			if r := e.Record(); e.Kind() != event.KindRequest || *r.Method != "OPTIONS" || *r.Path != "*" || *r.Status != int64(tc.code) {
+			if r := e.Record(); e.Kind() != event.KindRequest || *r.Method != "OPTIONS" || *r.Path != "%2A" || *r.Status != int64(tc.code) {
 				t.Fatalf("host %q: event %+v", tc.host, r)
 			}
 		}

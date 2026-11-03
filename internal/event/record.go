@@ -484,16 +484,89 @@ func dup[T any](p *T) *T {
 // MaxEventBytes is the largest value of Size.
 const MaxEventBytes = maxEventSize
 
+const hexDigits = "0123456789ABCDEF"
+
+// RequestPath returns the stored form of a request path. The source is rawPath
+// when it is not empty, else path. In rawPath only, a '%' with two hex digits
+// is one token. The code writes its digits in upper case and never decodes it.
+// The code copies '/'. It writes each other byte as url.PathEscape writes that
+// byte alone, so each other '%' gives "%25". The code adds no leading '/'. The
+// result has at most capPath bytes and ends before the first token that does
+// not fit.
+func RequestPath(rawPath, path string) string {
+	src, raw := rawPath, rawPath != ""
+	if !raw {
+		src = path
+	}
+	var b strings.Builder
+	b.Grow(min(capPath, 3*len(src)))
+	var tok [3]byte
+	step := 1
+	for i := 0; i < len(src); i += step {
+		step = 1
+		t := tok[:1]
+		switch c := src[i]; {
+		case c == '/':
+			tok[0] = c
+		case c == '%' && raw && i+2 < len(src) && isHex(src[i+1]) && isHex(src[i+2]):
+			step, t = 3, tok[:3]
+			tok = [3]byte{'%', upperHex(src[i+1]), upperHex(src[i+2])}
+		case keptByte(c):
+			tok[0] = c
+		default:
+			t = tok[:3]
+			tok = [3]byte{'%', hexDigits[c>>4], hexDigits[c&15]}
+		}
+		if b.Len()+len(t) > capPath {
+			break
+		}
+		b.Write(t)
+	}
+	return b.String()
+}
+
+// keptByte reports whether url.PathEscape writes c as it is: a letter, a digit
+// or one of "-._~$&+:=@".
+func keptByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.IndexByte("-._~$&+:=@", c) >= 0
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func upperHex(c byte) byte {
+	if c >= 'a' {
+		return c - ('a' - 'A')
+	}
+	return c
+}
+
 // text makes a request-derived string valid: each byte of an invalid UTF-8
 // sequence becomes %XX with upper-case hex. Then it cuts the result at a
 // character boundary to max bytes. An empty result is absent (nil). It stops
 // reading when the output is long enough, so the work is bounded by max.
-func text(s string, max int) *string {
+//
+// In path mode, each byte 0x00-0x1F and 0x7F also becomes %XX. The cut is by
+// token: a valid rune or an escape. The code stops before the first token that
+// does not fit, so it never splits an escape that it writes.
+func text(s string, max int, path bool) *string {
 	var b strings.Builder
+	var esc [3]byte
 	for i := 0; i < len(s) && b.Len() < max; {
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if r == utf8.RuneError && n == 1 {
-			fmt.Fprintf(&b, "%%%02X", s[i])
+		isEsc := r == utf8.RuneError && n == 1 || path && (r < 0x20 || r == 0x7F)
+		w := n
+		if isEsc {
+			w = 3
+		}
+		if path && b.Len()+w > max {
+			break
+		}
+		if isEsc {
+			esc = [3]byte{'%', hexDigits[s[i]>>4], hexDigits[s[i]&15]}
+			b.Write(esc[:])
 		} else {
 			b.WriteString(s[i : i+n])
 		}
@@ -547,10 +620,10 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 		return nil, err
 	}
 	r := Record{
-		TS: now().UnixMilli(), Kind: in.Kind, Session: text(in.Session, capID),
-		Vhost: text(in.Vhost, capVhost), Method: text(in.Method, capMethod),
-		Path: text(in.Path, capPath), TrapID: text(in.TrapID, capID),
-		TokenID: text(in.TokenID, capID), Detail: detail,
+		TS: now().UnixMilli(), Kind: in.Kind, Session: text(in.Session, capID, false),
+		Vhost: text(in.Vhost, capVhost, false), Method: text(in.Method, capMethod, false),
+		Path: text(in.Path, capPath, true), TrapID: text(in.TrapID, capID, false),
+		TokenID: text(in.TokenID, capID, false), Detail: detail,
 	}
 	if in.Status != nil {
 		st := *in.Status
@@ -560,7 +633,7 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 		sf := in.Surface
 		r.Surface = &sf
 	}
-	if fp := (FP{text(in.JA4, capFP), text(in.H2, capFP), text(in.Hdr, capFP)}); fp != (FP{}) {
+	if fp := (FP{text(in.JA4, capFP, false), text(in.H2, capFP, false), text(in.Hdr, capFP, false)}); fp != (FP{}) {
 		r.FP = &fp
 	}
 	db := dbOnly{bodyPrefix: append([]byte(nil), in.BodyPrefix[:min(len(in.BodyPrefix), MaxBodyPrefix)]...)}

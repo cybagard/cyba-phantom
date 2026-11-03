@@ -5,19 +5,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"fmt"
 	"maps"
 	"math"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // largestRecord is the length of the largest canonical record, as measured by
 // TestTS12_LargestEvent. That test builds the record.
-const largestRecord = 19620
+const largestRecord = 11428
 
 func sp(s string) *string { return &s }
 
@@ -192,29 +196,38 @@ func TestTU06_StoredRowRebuild(t *testing.T) {
 // character boundary; one value goes to the DB row and the record; ts comes
 // from the sensor clock.
 func TestTS12_StringConstruction(t *testing.T) {
-	if got := *text("a\xff\xc3(\xed\xa0\x80z", 99); got != "a%FF%C3(%ED%A0%80z" {
+	if got := *text("a\xff\xc3(\xed\xa0\x80z", 99, false); got != "a%FF%C3(%ED%A0%80z" {
 		t.Errorf("escape: %q", got)
 	}
-	if got := *text("é€😀", 4); got != "é" { // the cut at 4 falls inside €
+	if got := *text("é€😀", 4, false); got != "é" { // the cut is inside €
 		t.Errorf("cut: %q", got)
 	}
-	if got := *text("é€😀", 5); got != "é€" {
+	if got := *text("é€😀", 5, false); got != "é€" {
 		t.Errorf("cut: %q", got)
 	}
-	if text("", 5) != nil {
+	if text("", 5, false) != nil {
 		t.Error("an empty string is not absent")
 	}
 	caps := map[string]int{"vhost": capVhost, "method": capMethod, "path": capPath, "id": capID, "fp": capFP}
+	// A valid U+FFFD is not a repair. Other fields cut at a rune boundary.
+	for _, path := range []bool{false, true} {
+		if got := *text("a�b", 99, path); got != "a�b" {
+			t.Errorf("U+FFFD, path %v: %q", path, got)
+		}
+	}
+	if got := *text(strings.Repeat("a", 62)+"\xff", 64, false); got != strings.Repeat("a", 62)+"%F" {
+		t.Errorf("escape at the cap: %q", got)
+	}
 	long := strings.Repeat("\xff", 5000)
 	for name, c := range caps {
-		got := *text(long, c)
+		got := *text(long, c, false)
 		if len(got) > c || len(got) < c-2 || !strings.HasPrefix(got, "%FF") {
 			t.Errorf("%s: length %d", name, len(got))
 		}
 	}
 	long = strings.Repeat("😀", 5000)
 	for name, c := range caps {
-		if got := *text(long, c); len(got) != c/4*4 {
+		if got := *text(long, c, false); len(got) != c/4*4 {
 			t.Errorf("%s: length %d", name, len(got))
 		}
 	}
@@ -233,6 +246,188 @@ func TestTS12_StringConstruction(t *testing.T) {
 	}
 	if _, err := NewEvent(nil, Input{Kind: 0}); err == nil {
 		t.Error("an unknown kind is accepted")
+	}
+}
+
+// T-U-21: RequestPath keeps each escape of the raw path with upper-case hex
+// digits and never decodes it. A '%' that starts no escape gives %25, and so
+// does each '%' of a path with no raw path.
+func TestTU21RequestPath(t *testing.T) {
+	for _, c := range []struct{ raw, path, want string }{
+		{"/a%2Fb<c", "/a/b<c", "/a%2Fb%3Cc"},
+		{"/a%0ab", "/a\nb", "/a%0Ab"},
+		{"/a%7f", "/a\x7f", "/a%7F"},
+		{"/%zz", "/%zz", "/%25zz"},
+		{"/a%", "/a%", "/a%25"},
+		{"/a%4", "/a%4", "/a%254"},
+		{"", "/%41", "/%2541"},
+		{"/%2541", "/%41", "/%2541"},
+		{"", "*", "%2A"},
+		{"", "", ""},
+		{"/%9a%2F", "/\x9a/", "/%9A%2F"},
+		{"/%2F%A0", "//\xa0", "/%2F%A0"},
+		{"/%z4", "/%z4", "/%25z4"},
+		{"/%4z", "/%4z", "/%254z"},
+		{"/%c3%a9", "/é", "/%C3%A9"},
+	} {
+		if got := RequestPath(c.raw, c.path); got != c.want {
+			t.Errorf("RequestPath(%q, %q) = %q, want %q", c.raw, c.path, got, c.want)
+		}
+	}
+}
+
+// T-U-21: after "/", each byte 0x00-0x1F, 0x7F and 0x80-0xFF gives %XX with
+// upper-case hex. RequestPath copies '/' and writes '%' as %25. Each other
+// byte gives what url.PathEscape gives for that byte alone.
+func TestTU21RequestPathEachByte(t *testing.T) {
+	for c := range 256 {
+		s := "/" + string([]byte{byte(c)})
+		want := "/" + url.PathEscape(s[1:])
+		switch c {
+		case '/':
+			want = "//"
+		case '%':
+			want = "/%25"
+		}
+		if got := RequestPath("", s); got != want {
+			t.Errorf("byte %d: path gives %q, want %q", c, got, want)
+		}
+		if got := RequestPath(s, ""); got != want {
+			t.Errorf("byte %d: raw path gives %q, want %q", c, got, want)
+		}
+	}
+}
+
+// T-U-21: RequestPath cuts a path over 2048 bytes before the first token that
+// does not fit. The code writes no later token, and the cut is never inside an
+// escape.
+func TestTU21RequestPathCut(t *testing.T) {
+	for _, unit := range []string{"%2F", "<", "a"} {
+		for pad := range 4 {
+			raw := "/" + strings.Repeat("a", pad) + strings.Repeat(unit, 3000)
+			got := RequestPath(raw, "")
+			n := 1 + pad
+			want := n + (capPath-n)/3*3
+			if unit == "a" {
+				want = capPath
+			}
+			if len(got) != want || len(got) < 2046 || strings.Contains(got[len(got)-2:], "%") {
+				t.Errorf("unit %q, pad %d: length %d, want %d", unit, pad, len(got), want)
+			}
+		}
+	}
+	// The token "<" needs 3 bytes and does not fit. The later "b" would fit.
+	long := "/" + strings.Repeat("a", 2046) + "<bb"
+	if got := RequestPath("", long); len(got) != 2047 || strings.Contains(got, "%") {
+		t.Errorf("length %d, want 2047 and no escape", len(got))
+	}
+	// A source of 1 MiB must not give a buffer of 3 MiB. Ten calls allocate
+	// under 1 MiB.
+	src := "/" + strings.Repeat("a", 1<<20)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range 10 {
+		RequestPath(src, "")
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got >= 1<<20 {
+		t.Errorf("10 calls on 1 MiB allocate %d bytes, want under 1 MiB", got)
+	}
+}
+
+// T-U-21: NewEvent writes each byte 0x00-0x1F and 0x7F of the path as %XX with
+// upper-case hex. The cut never splits such an escape.
+func TestTU21ConstructionEscapesControlBytes(t *testing.T) {
+	path := func(s string) string { return *mustEvent(t, Input{Kind: KindRequest, Path: s}).Record().Path }
+	for c := range 0x80 {
+		want := "a" + string(rune(c)) + "b"
+		if c < 0x20 || c == 0x7F {
+			want = fmt.Sprintf("a%%%02Xb", c)
+		}
+		if got := path("a" + string(rune(c)) + "b"); got != want {
+			t.Errorf("byte %d: stored %q, want %q", c, got, want)
+		}
+	}
+	if got, want := path(strings.Repeat("a", 2046)+"\x01b"), strings.Repeat("a", 2046); got != want {
+		t.Errorf("cut: stored %d bytes, want %d", len(got), len(want))
+	}
+	if got, want := path(strings.Repeat("\x01", 2100)), strings.Repeat("%01", 682); got != want {
+		t.Errorf("long: stored %d bytes, want %d", len(got), len(want))
+	}
+	// A repair escape at the cut follows the rule of a control byte escape.
+	for _, c := range []struct{ in, want string }{
+		{strings.Repeat("a", 2047) + "\xff", strings.Repeat("a", 2047)},
+		{strings.Repeat("a", 2046) + "\xffb", strings.Repeat("a", 2046)},
+	} {
+		if got := path(c.in); got != c.want {
+			t.Errorf("repair at the cut: stored %d bytes, want %d", len(got), len(c.want))
+		}
+	}
+	for c := range 0x80 {
+		if c >= 0x20 && c != 0x7F {
+			continue
+		}
+		if got, want := path(strings.Repeat("a", 2046)+string(rune(c))+"b"), strings.Repeat("a", 2046); got != want {
+			t.Errorf("byte %d at the cut: stored %d bytes, want %d", c, len(got), len(want))
+		}
+		if got, want := path(strings.Repeat("a", 2045)+string(rune(c))), strings.Repeat("a", 2045)+fmt.Sprintf("%%%02X", c); got != want {
+			t.Errorf("byte %d before the cap: stored %d bytes, want %d", c, len(got), len(want))
+		}
+	}
+}
+
+// T-U-21: for any Path, the stored path has no control byte, has at most 2048
+// bytes and is valid UTF-8. RecordFromRow accepts a row with that path and
+// returns the same path.
+func FuzzTU21Path(f *testing.F) {
+	for _, s := range []string{"/a%2Fb%3Cc", "/a%0Ab", "/a%7F", "/%2541", "/é", "/a\x01b", "\x7f\xff",
+		strings.Repeat("\x01", 2100), strings.Repeat("a", 2046) + "\x01b", strings.Repeat("a", 2047) + "\xff"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		rec := mustEvent(t, Input{Kind: KindRequest, Path: s}).Record()
+		if rec.Path == nil {
+			return
+		}
+		p := *rec.Path
+		if len(p) > capPath || !utf8.ValidString(p) || strings.IndexFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7F }) >= 0 {
+			t.Errorf("stored path %q breaks a rule", p)
+		}
+		back, err := RecordFromRow(Row{TS: rec.TS, Kind: rec.Kind.String(), Path: rec.Path})
+		if err != nil {
+			t.Fatalf("RecordFromRow: %v", err)
+		}
+		if back.Path == nil || *back.Path != p {
+			t.Errorf("RecordFromRow path %v, want %q", back.Path, p)
+		}
+	})
+}
+
+// T-U-21: one url.PathUnescape of the stored value gives the decoded request
+// path, also when the cut shortens the value.
+func TestTU21PathDecodes(t *testing.T) {
+	for _, c := range []struct{ raw, path, want string }{
+		{"/a%2Fb<c", "/a/b<c", "/a/b<c"},
+		{"/a%0ab", "/a\nb", "/a\nb"},
+		{"/a%7f", "/a\x7f", "/a\x7f"},
+		{"/%zz", "/%zz", "/%zz"},
+		{"/a%", "/a%", "/a%"},
+		{"", "/%41", "/%41"},
+		{"/%2541", "/%41", "/%41"},
+		{"/\xc3\xa9", "/é", "/é"},
+	} {
+		stored := *mustEvent(t, Input{Kind: KindRequest, Path: RequestPath(c.raw, c.path)}).Record().Path
+		if got, err := url.PathUnescape(stored); err != nil || got != c.want {
+			t.Errorf("%q: decode of %q gives %q, %v, want %q", c.raw, stored, got, err, c.want)
+		}
+	}
+	stored := *mustEvent(t, Input{Kind: KindRequest, Path: RequestPath("/"+strings.Repeat("%2F", 1000), "")}).Record().Path
+	if got, err := url.PathUnescape(stored); err != nil || got != strings.Repeat("/", 683) {
+		t.Errorf("cut value: decode gives %d bytes, %v", len(got), err)
+	}
+	stored = *mustEvent(t, Input{Kind: KindRequest, Path: strings.Repeat("\x01", 2100)}).Record().Path
+	if got, err := url.PathUnescape(stored); err != nil || got != strings.Repeat("\x01", 682) {
+		t.Errorf("NewEvent cut value: decode gives %d bytes, %v", len(got), err)
 	}
 }
 
@@ -454,7 +649,7 @@ func TestTS12_LargestEvent(t *testing.T) {
 		{"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", maxIPText},
 	} {
 		e, err := NewEvent(fixedClock(-maxInt), Input{Kind: KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
-			Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+			Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
 			Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
 			Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
 			ClientIP: c.ip, BodyPrefix: make([]byte, 9000)})
@@ -470,8 +665,9 @@ func TestTS12_LargestEvent(t *testing.T) {
 			t.Fatalf("ip %q: record %d, prefix %d, size %d", c.ip, len(b), len(e.BodyPrefix()), e.Size())
 		}
 		// The pinned size is the length of the canonical bytes of the record above.
-		// Each text field is as long as its cap allows, and each control byte is a
-		// 6-byte escape. The test measured the value; a change of a cap changes it.
+		// Each text field is as long as its cap allows. Each control byte is a
+		// 6-byte escape, and each quote of the path is 2 bytes. The test
+		// measured the value; a change of a cap changes it.
 		if len(b) != largestRecord || e.Size() != len(b)+MaxBodyPrefix+len(ip) {
 			t.Errorf("ip %q: largest record is %d bytes, event is %d", c.ip, len(b), e.Size())
 		}
