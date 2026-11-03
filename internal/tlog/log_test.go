@@ -899,9 +899,9 @@ func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 	}
 }
 
-// T-U-07: the first hash at level 5 comes with leaf 1<<40 - 1, and the first
-// hash at level 6 comes with leaf 1<<48 - 1. For each size, tiles made by hand
-// for the levels below the new level put the log one leaf before that size.
+// T-U-07: leaf 1<<40 - 1 gives the first hash at level 5. Leaf 1<<48 - 1 gives
+// the first hash at level 6. Tiles made by hand at the levels below the new
+// level put the log one leaf before each size.
 func TestTU07BatchReachesLevels5And6(t *testing.T) {
 	for _, c := range []struct {
 		name   string
