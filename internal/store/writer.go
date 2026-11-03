@@ -96,6 +96,10 @@ type Writer struct {
 
 	// rows takes the requests of the checkpoint sink. Only Run reads it.
 	rows chan rowRequest
+
+	// sessions holds the sessions of the batch in progress. The writer
+	// empties it at the start of each transaction.
+	sessions sessionBatch
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
@@ -413,7 +417,9 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // transact is the transaction of write. It returns true when the COMMIT worked.
 // Suppose AppendBatch returned nil and the transaction ends without a COMMIT.
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
-// one time.
+// one time. After the insert loop, it adds one session row for each session of
+// the request and refused rows. A known session keeps its first address and
+// JA4. onCommit gets the count of event rows, not of session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
@@ -455,6 +461,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 	}
 	i, rows := 0, 0
+	w.sessions.reset()
 	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
 		if evidence[j] && appendErr != nil {
@@ -463,7 +470,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		rec := recs[j] // the copy that write made
 		if rec.Kind == event.KindRefused {
 			// The row of a refused event gets a session id from the batch day
-			// key. The address and the JA4 text go to no column.
+			// key. The address and the JA4 text go to the session row only.
 			var ja4 string
 			if rec.FP != nil && rec.FP.JA4 != nil {
 				ja4 = *rec.FP.JA4
@@ -486,6 +493,10 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			return false, err
 		}
 		rows++
+		w.sessions.add(rec, e.IP())
+	}
+	if err := w.upsertSessions(ctx, tx, key); err != nil {
+		return false, err
 	}
 	if err := w.countDrops(ctx, tx, day, key); err != nil {
 		return false, err
