@@ -292,10 +292,9 @@ func TestTU17_QueueByteBudgetConcurrent(t *testing.T) {
 }
 
 // T-U-17: large bulk events of at least half of MaxEventBytes fill the byte
-// cap of the bulk lane, and the evidence lane still accepts every callback
-// event (SEC-15, ADR-019). The bulk lane has room by count, so the byte cap
-// causes the drops. The test runs at the default depth and at the largest
-// depth.
+// cap of the bulk lane. The evidence lane still accepts every callback event
+// (SEC-15, ADR-019). The bulk lane has room by count, so the byte cap causes
+// the drops. The test runs at the default depth and at the largest depth.
 func TestTU17_QueueLaneByteCaps(t *testing.T) {
 	big := qBigEvent(t, KindRequest)
 	small := qEvent(t, KindBeacon, "192.0.2.1")
