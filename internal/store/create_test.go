@@ -4,6 +4,7 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -157,6 +159,31 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// T-S-15: a write to page 1 of a new database makes a -journal file. Its size
+// is the -journal limit in leftoverMax. The WAL switch of Open removes its
+// journal before a hook can run. So the test uses the settings of Open,
+// without WAL. It reads the journal file while the write is open.
+func TestTS15CreateJournalSizeIsTheLeftoverLimit(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "events.db")
+	db, err := sql.Open("sqlite", strings.Replace(dsn(file, true), "&_pragma=journal_mode(WAL)", "", 1))
+	must(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, err = db.Exec("CREATE TABLE t (x)")
+	must(t, err)
+	tx, err := db.Begin()
+	must(t, err)
+	defer tx.Rollback()
+	_, err = tx.Exec("PRAGMA user_version=1") // changes page 1 only
+	must(t, err)
+	j := slices.Index(suffixes[:], "-journal")
+	fi, err := os.Stat(file + suffixes[j])
+	must(t, err)
+	if want := leftoverMax[j]; fi.Size() != want {
+		t.Fatalf("journal size %d, want %d, the -journal limit of leftoverMax", fi.Size(), want)
 	}
 }
 
