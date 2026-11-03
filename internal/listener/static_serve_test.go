@@ -421,7 +421,9 @@ func TestTS27NoKeyMarkers(t *testing.T) {
 	key := staticKeySet().p256
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	mustNil(t, err)
-	markers := []string{"PRIVATE KEY", "BEGIN", key.D.String(), string(der)}
+	scalar, err := key.Bytes()
+	mustNil(t, err)
+	markers := []string{"PRIVATE KEY", "BEGIN", new(big.Int).SetBytes(scalar).String(), string(der)}
 	for _, text := range []string{base64.StdEncoding.EncodeToString(der), hex.EncodeToString(der)} {
 		for i := 0; i+16 <= len(text); i++ {
 			markers = append(markers, text[i:i+16])
