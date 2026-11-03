@@ -74,3 +74,4 @@ text/template/parse
 time
 unicode
 unicode/utf8
+weak

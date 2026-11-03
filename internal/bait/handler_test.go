@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"weak"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -230,15 +231,17 @@ func TestTU20Assets(t *testing.T) {
 		}
 		for _, m := range []string{http.MethodGet, http.MethodHead} {
 			w := serve(t, h, raw(t, m+" "+rt.path+" HTTP/1.1\r\nHost: example.com\r\n\r\n"))
-			hd := w.Header()
 			body := rt.body
 			if m == http.MethodHead {
 				body = ""
 			}
-			if w.Code != 200 || w.Body.String() != body || hd.Get("Content-Type") != rt.typ ||
-				hd.Get("X-Content-Type-Options") != "nosniff" || hd.Get("Content-Length") != strconv.Itoa(len(rt.body)) ||
-				len(hd["Server"]) != 0 {
-				t.Errorf("%s %s: code %d body %q header %v", m, rt.path, w.Code, w.Body.String(), hd)
+			want := http.Header{
+				"Content-Type":           {rt.typ},
+				"X-Content-Type-Options": {"nosniff"},
+				"Content-Length":         {strconv.Itoa(len(rt.body))},
+			}
+			if w.Code != 200 || w.Body.String() != body || !reflect.DeepEqual(w.Header(), want) {
+				t.Errorf("%s %s: code %d body %q header %v, want header %v", m, rt.path, w.Code, w.Body.String(), w.Header(), want)
 			}
 		}
 	}
@@ -287,8 +290,8 @@ func TestTU20OneBundle(t *testing.T) {
 			t.Fatalf("request %d: %d calls, body %q, want %q", i+1, src.calls, w.Body.String(), want)
 		}
 	}
-	if p := h.sites.Load(); p.cur.b != second || p.prev.b != first {
-		t.Error("the handler keeps a bundle that is not the last or the one before")
+	if st := h.sites.Load(); st.cur.b != second || st.retired[0] != weak.Make(first) {
+		t.Error("the handler keeps a bundle that is not the last, or does not retire the first")
 	}
 }
 
@@ -374,8 +377,10 @@ func TestTS02Method(t *testing.T) {
 	r := get("/", "other.example")
 	r.Method = http.MethodPost
 	wantFixed(t, "unknown host", serve(t, h, r))
-	if w := serve(t, h, raw(t, "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n")); w.Code != 405 {
-		t.Errorf("OPTIONS *: code %d, want 405", w.Code)
+	w := serve(t, h, raw(t, "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+	want := http.Header{"Content-Type": {text}, "X-Content-Type-Options": {"nosniff"}, "Allow": {"GET, HEAD"}}
+	if w.Code != 405 || w.Body.String() != "method not allowed\n" || !reflect.DeepEqual(w.Header(), want) {
+		t.Errorf("OPTIONS *: code %d body %q header %v, want the fixed 405 page", w.Code, w.Body.String(), w.Header())
 	}
 }
 

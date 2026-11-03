@@ -3,6 +3,7 @@ package bait
 import (
 	"net/http"
 	"sync/atomic"
+	"weak"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
@@ -13,9 +14,9 @@ var (
 	methodBody   = []byte("method not allowed\n")
 )
 
-// Header values of the responses. The fixed pages use textType and allow.
-// The fixed pages and the asset responses use nosniff. No code may change an
-// element of these slices, because each response shares them.
+// Header values of the responses. The fixed pages use textType. Only the 405
+// page uses allow. The fixed pages and the asset responses use nosniff. Do not
+// change an element of these slices. Each response shares them.
 var (
 	textType = []string{"text/plain; charset=utf-8"}
 	nosniff  = []string{"nosniff"}
@@ -27,18 +28,28 @@ type Source interface {
 	Current() *bundle.Bundle
 }
 
-// pair holds the current slot and the slot that it replaced.
-type pair struct{ cur, prev *slot }
+// retiredKept is the number of replaced bundles that the handler remembers.
+const retiredKept = 4
+
+// state is the cache of the handler. cur holds the running bundle and its
+// site. retired holds weak pointers to the last replaced bundles, newest first.
+// A weak pointer does not keep a bundle in memory.
+type state struct {
+	cur     *slot
+	retired [retiredKept]weak.Pointer[bundle.Bundle]
+}
 
 // Handler serves the routes of the running bundle.
 type Handler struct {
 	src      Source
 	fallback http.Handler
-	// sites holds the sites of the current and the previous bundle. The
-	// handler keeps no other site.
-	sites atomic.Pointer[pair]
+	// sites holds the state. The handler keeps no other bundle or site.
+	sites atomic.Pointer[state]
 	// builds counts the builds of a site table. A test reads it.
 	builds atomic.Int64
+	// hook runs between the Load and the CompareAndSwap of siteOf. It is nil
+	// in production. A test sets it.
+	hook func()
 }
 
 // New returns a handler for the bundle of src. With no running bundle, fallback
@@ -50,24 +61,33 @@ func New(src Source, fallback http.Handler) *Handler {
 	return &Handler{src: src, fallback: fallback}
 }
 
-// siteOf returns the site of b. A bundle that is neither cur nor prev becomes
-// cur, and the old cur becomes prev. A request for prev installs nothing.
+// siteOf returns the site of b. The handler keeps the running bundle only. A
+// replaced bundle gets a site for its own request, and the handler does not keep
+// it. A request in flight keeps its bundle and site in its local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
-		p := h.sites.Load()
-		if p != nil {
-			if p.cur.b == b {
-				return p.cur.site()
+		st := h.sites.Load()
+		if st != nil {
+			if st.cur.b == b {
+				return st.cur.site()
 			}
-			if p.prev != nil && p.prev.b == b {
-				return p.prev.site()
+			w := weak.Make(b)
+			for _, r := range st.retired {
+				if r == w {
+					h.builds.Add(1)
+					return buildSite(b)
+				}
 			}
 		}
-		n := &pair{cur: &slot{b: b, count: &h.builds}}
-		if p != nil {
-			n.prev = p.cur
+		n := &state{cur: &slot{b: b, count: &h.builds}}
+		if st != nil {
+			n.retired[0] = weak.Make(st.cur.b)
+			copy(n.retired[1:], st.retired[:retiredKept-1])
 		}
-		if h.sites.CompareAndSwap(p, n) {
+		if h.hook != nil {
+			h.hook()
+		}
+		if h.sites.CompareAndSwap(st, n) {
 			return n.cur.site()
 		}
 	}
