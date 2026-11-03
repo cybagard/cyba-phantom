@@ -66,11 +66,12 @@ func TestTS15HeldDescriptorOfNewFileIsReadOnly(t *testing.T) {
 }
 
 // swapMadeFile sets the hook of the second open of a new file. The hook moves
-// the made file to file+".moved" and writes another file with mode 0600.
+// the made file to file+".moved" and writes another file with mode 0600. The
+// made file has the temporary name until the rename.
 func swapMadeFile(t *testing.T, file string) {
 	t.Helper()
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
-		if name != "events.db" {
+		if name != filepath.Base(file) {
 			return
 		}
 		if err := os.Rename(file, file+".moved"); err != nil {
@@ -87,7 +88,7 @@ func swapMadeFile(t *testing.T, file string) {
 // away and writes another file with mode 0600.
 func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
 	root, state, _ := newState(t)
-	swapMadeFile(t, filepath.Join(state, "events.db"))
+	swapMadeFile(t, filepath.Join(state, "events.db"+tempSuffix))
 	db, err := Open(root, "events.db", Options{})
 	if db != nil {
 		db.Close()
@@ -100,9 +101,9 @@ func TestTS15OtherFileBetweenCreateAndReopenIsRefused(t *testing.T) {
 // with the changed rule, and refuse removes the made file.
 func TestTS15RefusedReopenRemovesMadeFile(t *testing.T) {
 	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
+	file := filepath.Join(state, "events.db"+tempSuffix)
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
-		if name != "events.db" {
+		if name != filepath.Base(file) {
 			return
 		}
 		if err := os.Chmod(file, 0o644); err != nil {
@@ -162,12 +163,13 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 	// the Lstat of the second open. Then the file is in the moved directory,
 	// and the path under data has no file.
 	var ran, inMoved bool
+	const tmp = "events.db" + tempSuffix
 	safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
-		if name != "events.db" {
+		if name != tmp {
 			return
 		}
-		_, moved := os.Lstat(filepath.Join(data+".moved", "events.db"))
-		_, inData := os.Lstat(filepath.Join(data, "events.db"))
+		_, moved := os.Lstat(filepath.Join(data+".moved", tmp))
+		_, inData := os.Lstat(filepath.Join(data, tmp))
 		ran = true
 		inMoved = moved == nil && errors.Is(inData, fs.ErrNotExist)
 	}})
@@ -182,10 +184,10 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 		t.Fatal("the hook of the reopen did not run")
 	}
 	if !inMoved {
-		t.Fatal("the new file is not in the moved directory, or data/events.db exists")
+		t.Fatal("the new file is not in the moved directory, or data/events.db.new exists")
 	}
 	// refuse removes the made file through the checked directory.
-	if _, err := os.Lstat(filepath.Join(data+".moved", "events.db")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(data+".moved", tmp)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the made file is still in the moved directory: %v", err)
 	}
 }
@@ -279,7 +281,7 @@ func TestTS15RefuseRunsBeforeCloseOfDescriptor(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			root, state, _ := newState(t)
-			file := filepath.Join(state, "events.db")
+			file := filepath.Join(state, "events.db"+tempSuffix)
 			r.fail(t, file)
 			ran := 0
 			setHook(t, &beforeRefuse, func() {
@@ -328,8 +330,39 @@ func openFails(t *testing.T, root *os.Root, rule string) {
 	wantRule(t, err, "events.db", rule)
 }
 
-// T-S-15: a failure after Open makes the file removes the file. No -wal or -shm
-// file of the refused open stays.
+// nth returns a function that runs f at its n-th call and at no other call.
+func nth(n int, f func()) func() {
+	calls := 0
+	return func() {
+		if calls++; calls == n {
+			f()
+		}
+	}
+}
+
+// chmod640 returns a function that sets the mode of file to 0640.
+func chmod640(t *testing.T, file string) func() {
+	return func() {
+		if err := os.Chmod(file, 0o640); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// failSync makes the sync of a directory, or of a file, fail.
+func failSync(t *testing.T, dir bool) {
+	t.Helper()
+	setHook(t, &syncFile, func(f *os.File) error {
+		if fi, err := f.Stat(); err == nil && fi.IsDir() == dir {
+			return errors.New("sync failed")
+		}
+		return f.Sync()
+	})
+}
+
+// T-S-15: a failure after Open makes the file removes the file, at the
+// temporary name or at the real name. No -wal or -shm file of the refused open
+// stays.
 func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 	rows := []struct {
 		name, rule string
@@ -345,19 +378,20 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 			setHook(t, &editDSN, func(s string) string { return s + "&_pragma=%zz" })
 		}},
 		{"first connection", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterChecks, func() {
-				if err := os.Chmod(file, 0o640); err != nil {
-					t.Fatal(err)
-				}
-			})
+			setHook(t, &afterChecks, nth(1, chmod640(t, file+tempSuffix)))
 		}},
 		{"second checks", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterVerify, func() {
-				if err := os.Chmod(file, 0o640); err != nil {
-					t.Fatal(err)
-				}
-			})
+			setHook(t, &afterVerify, nth(1, chmod640(t, file+tempSuffix)))
 		}},
+		// The second call of a hook is the open of the renamed file.
+		{"renamed file, first connection", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterChecks, nth(2, chmod640(t, file)))
+		}},
+		{"renamed file, second checks", ruleMode, func(t *testing.T, file string) {
+			setHook(t, &afterVerify, nth(2, chmod640(t, file)))
+		}},
+		{"sync of the file", ruleCreate, func(t *testing.T, _ string) { failSync(t, false) }},
+		{"sync of the directory", ruleCreate, func(t *testing.T, _ string) { failSync(t, true) }},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -365,9 +399,11 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 			file := filepath.Join(state, "events.db")
 			r.fail(t, file)
 			openFails(t, root, r.rule)
-			for _, suffix := range []string{"", "-wal", "-shm"} {
-				if _, err := os.Lstat(file + suffix); !errors.Is(err, fs.ErrNotExist) {
-					t.Fatalf("events.db%s stays: %v", suffix, err)
+			for _, suffix := range suffixes {
+				for _, name := range []string{file, file + tempSuffix} {
+					if _, err := os.Lstat(name + suffix); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("%s stays: %v", filepath.Base(name+suffix), err)
+					}
 				}
 			}
 		})
@@ -378,7 +414,7 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 // is its file. A refused open keeps the entry.
 func TestTS15UnprovenMadeFileStays(t *testing.T) {
 	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
+	file := filepath.Join(state, "events.db"+tempSuffix)
 	setHook(t, &afterStatCreated, func(fs.FileInfo, error) (fs.FileInfo, error) {
 		return nil, errors.New("stat failed")
 	})
