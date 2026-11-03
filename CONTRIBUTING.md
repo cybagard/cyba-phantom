@@ -121,7 +121,8 @@ If you do not have Go at all, use the devcontainer — it runs the same
 pinned toolchain as CI:
 
 ```sh
-docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile .devcontainer
+docker build -t cyba-phantom-dev -f .devcontainer/Dockerfile \
+  --build-arg VULNDB_FETCHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .devcontainer
 docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
 ```
 
