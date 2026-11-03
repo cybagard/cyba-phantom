@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -186,36 +188,31 @@ func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
 	const act = `{{comment (index .Trap "a")}}`
 	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, act)}),
 		tf(trapsName, arr(tj("a", "x"))))...)
+	// Clone first: a Clone fails after the first Execute.
+	m, err := b.templates[vhostFile].Clone()
+	must(t, err)
 	var sb strings.Builder
-	tp, ok := b.Template(vhostFile)
-	if !ok || tp.Execute(&sb, Page{Trap: map[string]string{"a": "ok"}}) != nil || sb.String() != "<!-- ok -->" {
-		t.Errorf("function map not kept: %v, %q", ok, sb.String())
+	if err := b.Execute(&sb, vhostFile, Page{Trap: map[string]string{"a": "ok"}}); err != nil || sb.String() != "<!-- ok -->" {
+		t.Errorf("function map not kept: %v, %q", err, sb.String())
 	}
-	m, _ := b.Template(vhostFile)
-	_, err := m.Parse(`{{.Missing}}`)
+	_, err = m.Parse(`{{.Missing}}`)
 	must(t, err)
 	if err := m.Execute(io.Discard, map[string]any{}); err == nil {
 		t.Error("missingkey=error not kept")
 	}
 }
 
-// T-U-08: a caller of Template cannot change the kept template.
-func TestTU08TemplateIsACopy(t *testing.T) {
+// T-U-08: Execute leaves the kept template unchanged. The kept template is the
+// same pointer after each call, and a second call gives the same output.
+func TestTU08ExecuteKeepsTheTemplate(t *testing.T) {
 	b := loadWith(t, nil, tf(vhostFile, "orig"))
-	c, _ := b.Template(vhostFile)
-	if c == b.templates[vhostFile] {
-		t.Fatal("Template returned the kept template")
-	}
-	_, err := c.Parse("changed")
-	must(t, err)
-	var sb strings.Builder
-	again, _ := b.Template(vhostFile)
-	must(t, again.Execute(&sb, nil))
-	if sb.String() != "orig" {
-		t.Errorf("kept template now gives %q", sb.String())
-	}
-	if _, ok := b.Template("vhosts/h.example/none.tmpl"); ok {
-		t.Error("a template that is not kept was found")
+	kept := b.templates[vhostFile]
+	for range 2 {
+		var sb strings.Builder
+		must(t, b.Execute(&sb, vhostFile, Page{}))
+		if sb.String() != "orig" || b.templates[vhostFile] != kept {
+			t.Errorf("Execute gave %q; kept template %p, want %p", sb.String(), b.templates[vhostFile], kept)
+		}
 	}
 }
 
@@ -325,9 +322,9 @@ func TestTU08EngineFuncKeys(t *testing.T) {
 }
 
 // T-U-08: the load does not execute a template. The test checks two things.
-// The comment function is not called. And Template still gives each kept
-// template. This is because html/template refuses Clone after an Execute, also
-// one that fails with nil data.
+// The load does not call the comment function. And each kept template still
+// clones, because html/template refuses Clone after an Execute, also one that
+// fails with nil data.
 func TestTU08LoadDoesNotExecute(t *testing.T) {
 	called := false
 	old := engineFuncs["comment"]
@@ -337,9 +334,9 @@ func TestTU08LoadDoesNotExecute(t *testing.T) {
 	if called {
 		t.Error("the load ran a template")
 	}
-	for name := range b.templates {
-		if _, ok := b.Template(name); !ok {
-			t.Errorf("Template(%q) not found: the load executed it", name)
+	for name, tp := range b.templates {
+		if _, err := tp.Clone(); err != nil {
+			t.Errorf("Clone of %q failed: the load executed it", name)
 		}
 	}
 }
@@ -763,9 +760,8 @@ func TestTS28CommentContext(t *testing.T) {
 	}
 	for _, c := range cases {
 		b := execLoadIDs(t, nil, c.text, "a")
-		tp, _ := b.Template(vhostFile)
 		var sb strings.Builder
-		must(t, tp.Execute(&sb, Page{Trap: map[string]string{"a": c.trap}}))
+		must(t, b.Execute(&sb, vhostFile, Page{Trap: map[string]string{"a": c.trap}}))
 		if sb.String() != c.want {
 			t.Errorf("%s with %q gave %q; want %q", c.text, c.trap, sb.String(), c.want)
 		}
@@ -787,11 +783,226 @@ func TestTS28SlotForms(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := execLoadIDs(t, nil, text, "a")
-			tp, _ := b.Template(vhostFile)
 			var sb strings.Builder
-			if err := tp.Execute(&sb, Page{Trap: map[string]string{"a": "hello"}}); err != nil || !strings.Contains(sb.String(), "hello") {
+			if err := b.Execute(&sb, vhostFile, Page{Trap: map[string]string{"a": "hello"}}); err != nil || !strings.Contains(sb.String(), "hello") {
 				t.Errorf("execute gave %q, %v", sb.String(), err)
 			}
 		})
 	}
+}
+
+// slotPage gives the text of a page with n trap slots and the ids. The slots
+// are a text slot, an attribute slot and a comment slot in turn. Each slot
+// follows about 250 bytes of text.
+func slotPage(n int) (string, []string) {
+	var sb strings.Builder
+	var ids []string
+	for i := range n {
+		id := fmt.Sprintf("i%d", i)
+		ids = append(ids, id)
+		sb.WriteString("<p>" + strings.Repeat("filler text ", 20) + "</p>\n")
+		switch i % 3 {
+		case 0:
+			fmt.Fprintf(&sb, `<b>{{index .Trap %q}}</b>`, id)
+		case 1:
+			fmt.Fprintf(&sb, `<i title="{{index .Trap %q}}"></i>`, id)
+		default:
+			fmt.Fprintf(&sb, `{{comment (index .Trap %q)}}`, id)
+		}
+	}
+	return sb.String(), ids
+}
+
+// slotValues gives a Page with a text for each id.
+func slotValues(ids []string, v string) Page {
+	p := Page{Trap: map[string]string{}}
+	for _, id := range ids {
+		p.Trap[id] = v
+	}
+	return p
+}
+
+// T-S-28: 16 000 parallel calls of Execute on one bundle give each its exact
+// output. The page has the three action forms. Each call has its own Page and
+// its own writer. The calls start together, and the first one escapes the tree.
+func TestTS28ExecuteParallel(t *testing.T) {
+	const text = `<p>{{index .Trap "a"}}</p><i title="{{index .Trap "b"}}"></i>{{comment (index .Trap "c")}}`
+	b := execLoadIDs(t, nil, text, "a", "b", "c")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range 16000 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v := fmt.Sprintf("g%d", i)
+			page := Page{Trap: map[string]string{"a": v + "a", "b": v + "b", "c": v + "c"}}
+			want := fmt.Sprintf(`<p>%sa</p><i title="%sb"></i><!-- %sc -->`, v, v, v)
+			var sb strings.Builder
+			<-start
+			if err := b.Execute(&sb, vhostFile, page); err != nil || sb.String() != want {
+				t.Errorf("call %d gave %q, %v; want %q", i, sb.String(), err, want)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// T-S-28: a call of Execute allocates at most 1.1 times the direct Execute of
+// the kept template. A clone for each call would show: it allocates for each
+// node.
+func TestTS28ExecuteAllocs(t *testing.T) {
+	text, ids := slotPage(64)
+	b := execLoadIDs(t, nil, text, ids...)
+	page := slotValues(ids, "v")
+	must(t, b.Execute(io.Discard, vhostFile, page))
+	kept := b.templates[vhostFile]
+	run := func(f func() error) float64 {
+		return testing.AllocsPerRun(50, func() { must(t, f()) })
+	}
+	via := run(func() error { return b.Execute(io.Discard, vhostFile, page) })
+	direct := run(func() error { return kept.Execute(io.Discard, page) })
+	t.Logf("page of %d bytes: Execute %v allocations; direct %v", len(text), via, direct)
+	if via > 1.1*direct {
+		t.Errorf("Execute allocates %v; the direct value is %v", via, direct)
+	}
+}
+
+// T-S-28: a name that is not a kept template gives ErrNoTemplate and no byte.
+func TestTS28ExecuteUnknownName(t *testing.T) {
+	b := loadWith(t, nil, tf(vhostFile, "page"), tf("vhosts/h.example/a.png", "p"))
+	for _, name := range []string{"", "vhosts/h.example/none.tmpl", "vhosts/h.example/a.png", "manifest.json", "vhosts/h.example/index.TMPL"} {
+		var buf bytes.Buffer
+		if err := b.Execute(&buf, name, Page{}); !errors.Is(err, ErrNoTemplate) || buf.Len() != 0 {
+			t.Errorf("Execute(%q) gave %v and %q; want ErrNoTemplate and no byte", name, err, buf.String())
+		}
+	}
+	if ErrNoTemplate.Error() != "bundle: no template" {
+		t.Errorf("error text %q", ErrNoTemplate)
+	}
+}
+
+var assetSink Asset
+
+// T-S-28: an asset below vhosts/ is a view of the archive bytes. WriteTo writes
+// them, Len counts them, and a call allocates nothing and copies nothing. Each
+// other name gives false.
+func TestTS28AssetView(t *testing.T) {
+	bin := []byte("\x89PNG asset bytes")
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(hostDir+"a.png", string(bin)), tf(hostDir+"sub/b.png", "q")}),
+		tf("secrets/token.seed", "seed"), tf(trapsName, arr(tj("t", "x"))))...)
+	for _, name := range []string{hostDir + "a.png", hostDir + "sub/b.png", hostDir + routeMapName} {
+		a, ok := b.Asset(name)
+		raw, _ := b.archive.File(name)
+		var buf bytes.Buffer
+		n, err := a.WriteTo(&buf)
+		if !ok || len(raw) == 0 || a.Len() != len(raw) || err != nil || n != int64(len(raw)) || !bytes.Equal(buf.Bytes(), raw) {
+			t.Errorf("Asset(%q) = %v, len %d, wrote %q (%d, %v); want %q", name, ok, a.Len(), buf.Bytes(), n, err, raw)
+		}
+		if &a.data[0] != &raw[0] {
+			t.Errorf("Asset(%q) is a copy of the archive bytes", name)
+		}
+		if got := testing.AllocsPerRun(100, func() { assetSink, _ = b.Asset(name) }); got != 0 {
+			t.Errorf("Asset(%q) allocates %v", name, got)
+		}
+	}
+	for _, name := range []string{"manifest.json", "secrets/token.seed", trapsName, vhostFile, hostDir + "none.png", "vhosts/none.png", "", "vhosts/", "vhosts", "/vhosts/h.example/a.png"} {
+		if a, ok := b.Asset(name); ok || a.Len() != 0 {
+			t.Errorf("Asset(%q) = len %d, %v; want false", name, a.Len(), ok)
+		}
+	}
+	// The load refuses each of these names. "vhostsx/a.png" and "vhosts" fail
+	// with archive_invalid. "vhosts/a.png" fails with content_invalid, because
+	// the route step refuses a file directly in vhosts/. So the test sets the
+	// files by hand.
+	odd := &Bundle{archive: &Archive{files: map[string][]byte{"vhostsx/a.png": []byte("x"), "vhosts": []byte("y"), "vhosts/a.png": []byte("z")}}}
+	for name, want := range map[string]bool{"vhostsx/a.png": false, "vhosts": false, "vhosts/a.png": true} {
+		if _, ok := odd.Asset(name); ok != want {
+			t.Errorf("Asset(%q) = %v; want %v", name, ok, want)
+		}
+	}
+}
+
+// recWriter records the slice that Write gets. It writes nothing.
+type recWriter struct{ got []byte }
+
+func (r *recWriter) Write(p []byte) (int, error) { r.got = p; return len(p), nil }
+
+// shortWriter reports one byte as written and returns err. It stores nothing.
+type shortWriter struct{ err error }
+
+func (s shortWriter) Write([]byte) (int, error) { return 1, s.err }
+
+// T-S-28: WriteTo makes no copy. The bytes that the writer gets start at the
+// same address as the archive file and have the same length. A WriteTo call
+// to io.Discard allocates nothing.
+func TestTS28AssetWriteToMakesNoCopy(t *testing.T) {
+	const name = hostDir + "a.png"
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(name, "\x89PNG asset bytes")}),
+		tf(trapsName, arr(tj("t", "x"))))...)
+	a, ok := b.Asset(name)
+	raw, _ := b.archive.File(name)
+	if !ok || len(raw) == 0 {
+		t.Fatalf("Asset(%q) = %v, len %d", name, ok, len(raw))
+	}
+	var rec recWriter
+	if _, err := a.WriteTo(&rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.got) != len(raw) || &rec.got[0] != &raw[0] {
+		t.Errorf("the writer got a copy of the archive bytes: len %d, want %d", len(rec.got), len(raw))
+	}
+	if got := testing.AllocsPerRun(100, func() { _, _ = a.WriteTo(io.Discard) }); got != 0 {
+		t.Errorf("WriteTo allocates %v", got)
+	}
+}
+
+// T-S-28: on a short write, WriteTo returns the count and the error of the
+// writer.
+func TestTS28AssetWriteToShortWrite(t *testing.T) {
+	const name = hostDir + "a.png"
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(name, "\x89PNG asset bytes")}),
+		tf(trapsName, arr(tj("t", "x"))))...)
+	a, _ := b.Asset(name)
+	boom := errors.New("boom")
+	n, err := a.WriteTo(shortWriter{boom})
+	if n != 1 || !errors.Is(err, boom) {
+		t.Errorf("WriteTo gave (%d, %v); want (1, boom)", n, err)
+	}
+}
+
+// BenchmarkExecute compares the kept template with a clone for each call (the
+// old path). The clone case clones a template that never ran.
+func BenchmarkExecute(b *testing.B) {
+	text, ids := slotPage(64)
+	page := slotValues(ids, "v")
+	parse := func() *template.Template {
+		tp, err := newTemplate(vhostFile).Parse(text)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return tp
+	}
+	b.Run("kept", func(b *testing.B) {
+		bd := &Bundle{templates: map[string]*template.Template{vhostFile: parse()}}
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := bd.Execute(io.Discard, vhostFile, page); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("clone", func(b *testing.B) {
+		fresh := parse()
+		b.ReportAllocs()
+		for b.Loop() {
+			c, err := fresh.Clone()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := c.Execute(io.Discard, page); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
