@@ -12,9 +12,9 @@ const replacedFor = 25 * time.Hour
 
 // Ring holds the key set of the running bundle and the key set of the bundle
 // that it replaced (ADR-036). It holds key sets only, never a
-// bundle. A Ring is safe for concurrent use. Do not copy it. A new Ring is
-// empty. A restart makes a new Ring, so it has one key set after the first
-// Swap.
+// bundle. A Ring is safe for concurrent use. A copy of a Ring shares its
+// state. A new Ring is empty. A restart makes a new Ring, so it has one key
+// set after the first Swap.
 //
 // A Swap makes the new key set current. The current key set becomes the
 // replaced one, and the key set that was replaced leaves the ring. The
@@ -26,9 +26,10 @@ const replacedFor = 25 * time.Hour
 // This keeps the rule: the ring holds the running bundle and the bundle that
 // it replaced, and nothing older.
 //
-// The clock is the wall clock, which the time unit of a token needs. The 25 h
-// count from the Swap with the same clock. A clock from time.Now has a
-// monotonic reading, so a step of the wall clock does not move the end.
+// The clock is the wall clock, which the time unit of a token needs. Swap
+// sets the 25 h end from the same clock. A clock from time.Now has a
+// monotonic reading, so a step of the wall clock does not move the end. The
+// monotonic clock can stop while the host sleeps. Then the end comes later.
 type Ring struct{ *ringState }
 
 type ringState struct {
@@ -54,8 +55,8 @@ func NewRing(now func() time.Time) *Ring {
 }
 
 // Swap makes next the current key set. The old current key set becomes the
-// replaced one, for 25 h. One atomic store swaps the ring, so a Verify sees
-// the ring before or after a Swap and nothing between.
+// replaced one, for 25 h. One compare-and-swap of a pointer changes the ring.
+// Thus a Verify sees the ring before or after a Swap and nothing between.
 func (r *Ring) Swap(next *KeySet) {
 	until := r.now().Add(replacedFor)
 	for {
