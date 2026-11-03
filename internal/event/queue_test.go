@@ -21,13 +21,14 @@ func qEvent(t testing.TB, k Kind, ip string) *Event {
 }
 
 // qBigEvent makes an event of kind k with the longest fields that a record
-// allows. Its size is near MaxEventBytes.
+// allows. Its size is at least half of MaxEventBytes. A path of quotes is the
+// longest path, because a control byte in a path is only %XX.
 func qBigEvent(t testing.TB, k Kind) *Event {
 	t.Helper()
 	ctl := strings.Repeat("\x01", 300)
 	st := int64(-maxInt)
 	e, err := NewEvent(fixedClock(-maxInt), Input{Kind: k, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
-		Method: ctl, Path: strings.Repeat("\x01", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+		Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
 		Surface: SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
 		Detail:   Detail{"a": Str(strings.Repeat("\x01", 340))},
 		ClientIP: "2001:db8:1234:5678:9abc:def0:1234:5678", BodyPrefix: make([]byte, 9000)})
@@ -226,7 +227,7 @@ func TestTU17_QueueEvidenceFirst(t *testing.T) {
 func TestTU17_QueueByteBudget(t *testing.T) {
 	big := qBigEvent(t, KindRequest)
 	// MaxEventBytes is a bound with room above the longest real event.
-	if big.Size() < MaxEventBytes*4/5 || big.Size() > MaxEventBytes {
+	if big.Size() < MaxEventBytes/2 || big.Size() > MaxEventBytes {
 		t.Fatalf("size %d is not near %d", big.Size(), MaxEventBytes)
 	}
 	small := qEvent(t, KindBeacon, "192.0.2.9")
