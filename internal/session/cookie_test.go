@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/sha256"
 	"net/http"
 	"strings"
 	"testing"
@@ -48,6 +49,37 @@ func TestTU24RoundTrip(t *testing.T) {
 	got, ok = k2.CheckCookie(k2.CookieValue(id))
 	if !ok || got != *want {
 		t.Errorf("round trip = %q, %v, want %q", got, ok, *want)
+	}
+}
+
+// T-U-24: a valid value with each of the 32 characters of the alphabet is
+// accepted, and the parse takes it.
+func TestTU24AlphabetCharacters(t *testing.T) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+	k := seqKey()
+	seen := map[byte]bool{}
+	for n := 0; n < 4000 && len(seen) < len(alphabet); n++ {
+		sum := sha256.Sum256([]byte{byte(n), byte(n >> 8)})
+		var id [idLen]byte
+		copy(id[:], sum[:])
+		v := k.CookieValue(id)
+		want := strings.ToLower(sessionEncoding.EncodeToString(id[:]))
+		got, ok := k.CheckCookie(v)
+		if !ok || got != want {
+			t.Fatalf("CheckCookie(%q) = %q, %v, want %q", v, got, ok, want)
+		}
+		p, ok := CookieFromHeader(hdr("sid=" + v))
+		if !ok || p != v {
+			t.Fatalf("CookieFromHeader(%q) = %q, %v", v, p, ok)
+		}
+		for i := 0; i < len(v); i++ {
+			seen[v[i]] = true
+		}
+	}
+	for i := 0; i < len(alphabet); i++ {
+		if !seen[alphabet[i]] {
+			t.Errorf("character %q did not occur in any value", alphabet[i])
+		}
 	}
 }
 
