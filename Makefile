@@ -63,7 +63,8 @@ stelint-report:
 GOVULNDB ?= https://vuln.go.dev
 # The info file records when the image fetched the file:// database copy.
 # The target fails when that copy is older than the age limit in days.
-# A missing or bad info file also counts govulncheck as failed.
+# A missing info file, or one without exactly one valid fetched line,
+# also counts govulncheck as failed.
 # VULNDB_NOW is a time in seconds since 1970. Empty means the current time.
 # VULNDB_INFO, VULNDB_MAX_AGE_DAYS and VULNDB_NOW are for tests.
 VULNDB_TIME_RE := [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z
