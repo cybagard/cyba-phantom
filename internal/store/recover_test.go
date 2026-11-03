@@ -433,3 +433,58 @@ func TestTI07MarkerFailsInARemovedDirectory(t *testing.T) {
 		t.Fatal("makeMarker gave nil in a removed directory")
 	}
 }
+
+// T-I-07: a failed close of the new marker file is an error. The writer logs
+// one line and does not count the marker as made.
+func TestTI07MarkerCloseFails(t *testing.T) {
+	errClose := errors.New("close failed")
+	ran := 0
+	setHook(t, &closeFile, func(f *os.File) error {
+		ran++
+		f.Close()
+		return errClose
+	})
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var out bytes.Buffer
+	w := &Writer{rec: Recovery{State: root}, log: slog.New(slog.NewTextHandler(&out, nil))}
+	w.ensureMarker()
+	if ran != 1 || w.markerMade.Load() || !w.markerLogged.Load() ||
+		strings.Count(out.String(), "cannot make the stop marker") != 1 {
+		t.Fatalf("close ran %d, made %v, log:\n%s", ran, w.markerMade.Load(), out.String())
+	}
+	if err := makeMarker(root); err != nil {
+		t.Fatalf("makeMarker with a marker that exists: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root.Name(), markerName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeMarker(root); !errors.Is(err, errClose) {
+		t.Fatalf("makeMarker gave %v, want the close error", err)
+	}
+}
+
+// T-I-07: a failed open of the state directory, after the marker file is made,
+// is an error.
+func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
+	errOpen := errors.New("open failed")
+	ran := 0
+	setHook(t, &openStateDir, func(*os.Root, string) (*os.File, error) {
+		ran++
+		return nil, errOpen
+	})
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := makeMarker(root); !errors.Is(err, errOpen) || ran != 1 {
+		t.Fatalf("makeMarker gave %v after %d opens, want the open error", err, ran)
+	}
+	if _, err := root.Lstat(markerName); err != nil {
+		t.Fatalf("the marker file is not there: %v", err)
+	}
+}
