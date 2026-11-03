@@ -34,11 +34,11 @@ type gateRig struct {
 	closed <-chan struct{}
 }
 
-// fenceStorage wraps the storage of a gate rig. At cleanup, it waits for the
-// writes in progress, then it refuses all writes. The obtain job of certmagic
-// for noCertName can still write at cleanup. A write that starts after cancel
-// fails in the cert store. Without the wait, a write in progress can create a
-// file while the state directory is removed.
+// fenceStorage wraps the storage of a test ACME client. At cleanup, it waits
+// for the writes in progress, then it refuses all writes. The obtain job of
+// certmagic can still write at cleanup. A write that starts after cancel fails
+// in the cert store. Without the wait, a write in progress can create a file
+// while the state directory is removed.
 type fenceStorage struct {
 	certmagic.Storage
 	mu     sync.RWMutex
@@ -63,8 +63,8 @@ func (f *fenceStorage) Delete(ctx context.Context, k string) error {
 }
 
 // fence waits for the writes that started. Then it refuses all later writes.
-func (f *fenceStorage) fence(t *testing.T) {
-	t.Helper()
+func (f *fenceStorage) fence(tb testing.TB) {
+	tb.Helper()
 	done := make(chan struct{})
 	go func() {
 		f.mu.Lock()
@@ -75,21 +75,14 @@ func (f *fenceStorage) fence(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Error("a storage write did not end within 10 s")
+		tb.Error("a storage write did not end within 10 s")
 	}
 }
 
 // newGateRig serves a gate rig. pre can change the server before it serves.
 func newGateRig(t *testing.T, tm timeouts, pre func(*Server)) *gateRig {
 	t.Helper()
-	fence := &fenceStorage{}
-	a := newTestACME(t, func(p *ACMEParams) {
-		p.Names = []string{testName, noCertName}
-		fence.Storage, p.Storage = p.Storage, fence
-	})
-	// This cleanup runs after cancel and before the removal of the state
-	// directory.
-	t.Cleanup(func() { a.Stop(); fence.fence(t) })
+	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{testName, noCertName} })
 	seedCert(t, a, testName)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -271,13 +264,110 @@ func (h *hookConn) Write(p []byte) (int, error) {
 }
 
 // clientHello returns the bytes of the ClientHello of a Go client for testName.
-// The hello has the TLS version ver and the ALPN list protos.
-func clientHello(ver uint16, protos ...string) []byte {
+// The hello has the TLS version ver, the session cache cache (nil for none),
+// and the ALPN list protos.
+func clientHello(ver uint16, cache tls.ClientSessionCache, protos ...string) []byte {
 	a, b := net.Pipe()
 	defer func() { _ = a.Close(); _ = b.Close() }()
 	hc := &hookConn{Conn: a}
-	_ = tls.Client(hc, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver, NextProtos: protos}).Handshake()
+	_ = tls.Client(hc, &tls.Config{ServerName: testName, MinVersion: ver, MaxVersion: ver, NextProtos: protos, ClientSessionCache: cache, InsecureSkipVerify: true}).Handshake()
 	return hc.sent
+}
+
+// oneSlot is a client session cache with one slot. Get gives its session for
+// each key. Put keeps a non-nil session.
+type oneSlot struct{ cs *tls.ClientSessionState }
+
+func (o *oneSlot) Get(string) (*tls.ClientSessionState, bool) { return o.cs, o.cs != nil }
+
+func (o *oneSlot) Put(_ string, cs *tls.ClientSessionState) {
+	if cs != nil {
+		o.cs = cs
+	}
+}
+
+// fullGet does a full handshake for name with the TLS version ver and the
+// session cache, then one GET. It waits for the close of the connection.
+func (g *gateRig) fullGet(t *testing.T, name string, ver uint16, cache tls.ClientSessionCache) {
+	t.Helper()
+	cfg := clientCfg(name, "http/1.1")
+	cfg.MinVersion, cfg.MaxVersion, cfg.ClientSessionCache = ver, ver, cache
+	c, err := dialTLS(g.addr, cfg)
+	mustNil(t, err)
+	if got := status(c, 0); got != 200 {
+		t.Fatalf("status %d, want 200", got)
+	}
+	mustNil(t, c.Close())
+	waitClosed(t, g.closed)
+}
+
+var tlsVersions = map[string]uint16{"TLS 1.2": tls.VersionTLS12, "TLS 1.3": tls.VersionTLS13}
+
+// T-S-16: the server gives no session ticket. A client cache stays empty after
+// a full handshake and a GET, in TLS 1.2 and in TLS 1.3.
+func TestTS16NoSessionTicket(t *testing.T) {
+	for name, ver := range tlsVersions {
+		t.Run(name, func(t *testing.T) {
+			g := newGateRig(t, defaultTimeouts, nil)
+			cache := tls.NewLRUClientSessionCache(1)
+			g.fullGet(t, testName, ver, cache)
+			if cs, ok := cache.Get(testName); ok || cs != nil {
+				t.Error("the client cache holds a session")
+			}
+		})
+	}
+}
+
+// T-S-16: a cache with a session of testName cannot skip the name gate for
+// another name. This holds for both ALPN lists and both TLS versions.
+func TestTS16TicketForAnotherNameIsRefused(t *testing.T) {
+	for name, ver := range tlsVersions {
+		for _, proto := range []string{"http/1.1", challengeProto} {
+			t.Run(name+", "+proto, func(t *testing.T) {
+				g := newGateRig(t, defaultTimeouts, nil)
+				cache := &oneSlot{}
+				g.fullGet(t, testName, ver, cache)
+				g.events(t, "")
+				cfg := clientCfg(otherName, proto)
+				cfg.MinVersion, cfg.MaxVersion, cfg.ClientSessionCache = ver, ver, cache
+				g.handshake(t, cfg)
+				g.want(t, "unknown_name", 1)
+			})
+		}
+	}
+}
+
+// T-S-22: a client with a session cache stops after its hello. The event is
+// client_abort, in TLS 1.2 and in TLS 1.3.
+func TestTS22ClientAbortWithASessionCache(t *testing.T) {
+	for name, ver := range tlsVersions {
+		t.Run(name, func(t *testing.T) {
+			g := newGateRig(t, defaultTimeouts, nil)
+			cache := &oneSlot{}
+			g.fullGet(t, testName, ver, cache)
+			g.events(t, "")
+			c := g.raw(t)
+			_, err := c.Write(clientHello(ver, cache, "http/1.1"))
+			mustNil(t, err)
+			_, err = c.Read(make([]byte, 1))
+			mustNil(t, err)
+			mustNil(t, c.Close())
+			g.want(t, "client_abort", 0)
+		})
+	}
+}
+
+// T-S-22: a client that stops after a HelloRetryRequest gives no event.
+// Known limit: the client stops before the name gate runs.
+func TestTS22NoEventAfterHelloRetryRequest(t *testing.T) {
+	g := newGateRig(t, defaultTimeouts, nil)
+	c := g.raw(t)
+	_, err := c.Write(rawHello{version: 0x0303, suites: []uint16{0x1301}, exts: []rawExt{extSNI(testName), extVersions(0x0304), extGroups(29), extSigs(0x0804)}}.bytes())
+	mustNil(t, err)
+	_, err = c.Read(make([]byte, 1))
+	mustNil(t, err)
+	mustNil(t, c.Close())
+	g.want(t, "", 0)
 }
 
 // T-S-22: a parsed ClientHello with a configured name gives client_abort. Then
@@ -316,7 +406,7 @@ func TestTS22ClientAbort(t *testing.T) {
 					}
 				})
 				c := g.raw(t)
-				_, err := c.Write(clientHello(ver, "http/1.1", markerALPN))
+				_, err := c.Write(clientHello(ver, nil, "http/1.1", markerALPN))
 				mustNil(t, err)
 				<-entered
 				stop.do(t, c, release)
@@ -350,7 +440,7 @@ func TestTS22ALPNAndClientAbort(t *testing.T) {
 				s.tls.GetCertificate = withCertMarks(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil })
 			})
 			c := g.raw(t)
-			_, err := c.Write(clientHello(tls.VersionTLS13, tc.protos...))
+			_, err := c.Write(clientHello(tls.VersionTLS13, nil, tc.protos...))
 			mustNil(t, err)
 			_, err = c.Read(make([]byte, 1))
 			mustNil(t, err)
@@ -424,7 +514,7 @@ func TestTS22CapClosesGiveNoEvent(t *testing.T) {
 // certificate. A failure at shutdown.
 func TestTS22HandshakeGuards(t *testing.T) {
 	part := hello13()[:20]
-	hello := clientHello(tls.VersionTLS13)
+	hello := clientHello(tls.VersionTLS13, nil)
 	for _, tc := range []struct {
 		name string
 		tm   timeouts

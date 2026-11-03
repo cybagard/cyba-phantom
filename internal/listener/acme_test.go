@@ -195,15 +195,18 @@ func testNames(t testing.TB) *egresstest.Names {
 // the default CA name only, with a global address. A seeded certificate that
 // needs no renewal makes no request. A test of the production rule sets
 // egressRule to nil. It sets egressResolver to nil or to a test resolver. The
-// test stops the cache when it ends.
+// test stops the cache when it ends. The store is fenced first, so mod can wrap
+// it. At cleanup, the fence waits for the writes in progress, then it refuses
+// all writes.
 func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	t.Helper()
 	st, _ := newStore(t)
+	fence := &fenceStorage{Storage: st}
 	p := ACMEParams{
 		Names:   []string{"decoy.test"},
 		CA:      "https://ca.test/dir",
 		Email:   "ops@example.test",
-		Storage: st,
+		Storage: fence,
 		Host:    "127.0.0.1",
 		Port:    8443,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -216,7 +219,8 @@ func newTestACME(t testing.TB, mod func(*ACMEParams)) *ACME {
 	}
 	a, err := NewACME(p)
 	mustNil(t, err)
-	t.Cleanup(a.Stop)
+	// This cleanup runs before the removal of the state directory.
+	t.Cleanup(func() { a.Stop(); fence.fence(t) })
 	return a
 }
 
@@ -547,6 +551,95 @@ func TestTS21GuardRefusesNoAddressAndFoldsUpperZ(t *testing.T) {
 	addrs = []net.IPAddr{{IP: net.IPv4(8, 8, 8, 8)}}
 	if u, err := guard(req); err != nil || u != nil {
 		t.Errorf("name Z.TEST: proxy = %v, %v; want none", u, err)
+	}
+}
+
+// T-I-01: a certificate that needs no renewal stays in the cache, and a
+// handshake for it works. The renewal makes no request and gives the same hash.
+func TestTI01RenewDueKeepsACertificateThatNeedsNoRenewal(t *testing.T) {
+	a := newTestACME(t, nil)
+	seedCert(t, a, testName)
+	ctx := context.Background()
+	old, err := a.cfg.CacheManagedCertificate(ctx, testName)
+	mustNil(t, err)
+	a.renewDue(ctx, testName, old)
+	if got := a.cache.AllMatchingCertificates(testName); len(got) != 1 || got[0].Hash() != old.Hash() {
+		t.Errorf("%d certificates in the cache, want the old one", len(got))
+	}
+	if _, err := handshake(a, testName, "http/1.1"); err != nil {
+		t.Errorf("handshake: %v", err)
+	}
+}
+
+// T-S-21: the guard folds ASCII only. U+212A folds to k under Unicode rules.
+// The guard must not take it as the CA name.
+func TestTS21GuardFoldsASCIIOnly(t *testing.T) {
+	var lookups int
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		lookups++
+		return []net.IPAddr{{IP: net.IPv4(8, 8, 8, 8)}}, nil
+	}
+	ca, err := url.Parse("https://kiosk.test/")
+	mustNil(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://%E2%84%AAiosk.test/dir", nil)
+	mustNil(t, err)
+	permitAll := func(netip.Addr) bool { return true }
+	if u, err := egressGuard(ca, nil, permitAll, net.DefaultResolver, lookup)(req); err != errEgress || u != nil || lookups != 0 {
+		t.Errorf("proxy = %v, %v, %d lookups; want errEgress and none", u, err, lookups)
+	}
+}
+
+// blockStore is a storage whose Store waits until release closes. It counts the
+// calls that reach it.
+type blockStore struct {
+	certmagic.Storage
+	entered, release chan struct{}
+	calls            atomic.Int32
+}
+
+func (b *blockStore) Store(context.Context, string, []byte) error {
+	b.calls.Add(1)
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+func (b *blockStore) Delete(context.Context, string) error {
+	b.calls.Add(1)
+	return nil
+}
+
+// The fence of the test storage waits for a Store in progress. After it, Store
+// and Delete give fs.ErrClosed and the inner storage gets no call.
+func TestTS16FenceWaitsForAStoreThenRefusesWrites(t *testing.T) {
+	inner := &blockStore{entered: make(chan struct{}), release: make(chan struct{})}
+	f := &fenceStorage{Storage: inner}
+	ctx := context.Background()
+	stored := make(chan error, 1)
+	go func() { stored <- f.Store(ctx, "k", nil) }()
+	<-inner.entered
+	fenced := make(chan struct{})
+	go func() { f.fence(t); close(fenced) }()
+	select {
+	case <-fenced:
+		t.Fatal("the fence returned while a Store was in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(inner.release)
+	select {
+	case <-fenced:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fence did not return after the Store ended")
+	}
+	mustNil(t, <-stored)
+	if err := f.Store(ctx, "k", nil); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Store after the fence: %v, want fs.ErrClosed", err)
+	}
+	if err := f.Delete(ctx, "k"); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Delete after the fence: %v, want fs.ErrClosed", err)
+	}
+	if n := inner.calls.Load(); n != 1 {
+		t.Errorf("the inner storage got %d calls, want 1", n)
 	}
 }
 

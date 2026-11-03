@@ -24,7 +24,7 @@ type Config struct {
 	// config, sets the ALPN list to http/1.1 and acme-tls/1, and sets the
 	// ClientHello capture. If GetCertificate is set, the server wraps it; see
 	// withCertMarks. A connection that negotiates acme-tls/1 gets no HTTP and
-	// closes after the handshake.
+	// closes after the handshake. The server also turns session tickets off.
 	TLS *tls.Config
 	// MaxConns is the maximum number of open connections of the server, for
 	// all Serve and ServePlain calls. limits.max_conns.
@@ -213,6 +213,9 @@ func newServer(cfg Config, h http.Handler, t timeouts) (*Server, error) {
 	// acme-tls/1, crypto/tls refuses that client before it calls GetCertificate.
 	s.tls.NextProtos = []string{"http/1.1", challengeProto}
 	s.tls.GetConfigForClient = captureHello
+	// A resumed TLS 1.3 handshake skips GetCertificate, so it skips the name
+	// gate and the certificate mark.
+	s.tls.SessionTicketsDisabled = true
 	if get := s.tls.GetCertificate; get != nil {
 		s.tls.GetCertificate = withCertMarks(get)
 	}

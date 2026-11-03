@@ -192,8 +192,13 @@ func TestTS16SourceGateReasons(t *testing.T) {
 				mustNil(t, err)
 				g := &gateRig{rig: &rig{s: s}, closed: watchClosed(s.srv)}
 				g.serve(t)
+				// A static ticket must not skip the gate for the row.
+				cache := &oneSlot{}
+				g.fullGet(t, staticName, tls.VersionTLS13, cache)
 				before := src.Refused()
-				g.handshake(t, clientCfg(tc.sni, tc.alpn...))
+				cfg := clientCfg(tc.sni, tc.alpn...)
+				cfg.ClientSessionCache = cache
+				g.handshake(t, cfg)
 				waitClosed(t, g.closed)
 				g.events(t, tc.reason)
 				if got := src.Refused() - before; got != 1 {
