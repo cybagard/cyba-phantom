@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,8 @@ func bundleWith(tb testing.TB, tag string) *bundle.Bundle {
 		"manifest.json": fmt.Sprintf(`{"version":"2026.11.01-1","min_engine":"1.0.0","created":%q,"expires":%q,"key_id":"t1"}`,
 			time.Now().Add(-time.Hour).UTC().Format("2006-01-02T15:04:05Z"), time.Now().Add(24*time.Hour).UTC().Format("2006-01-02T15:04:05Z")),
 		"secrets/token.seed":              strings.Repeat("\x09", 32),
+		"score/a":                         "score\n",
+		"fp/a":                            "fp\n",
 		"traps/traps.json":                `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x"}]`,
 		"vhosts/example.com/routes.json":  routesJSON("example.com", exampleRoutes),
 		"vhosts/example.com/unrouted.txt": "unrouted\n",
@@ -131,7 +134,7 @@ func TestTU20SiteTable(t *testing.T) {
 		t.Errorf("traps = %v", s.traps)
 	}
 
-	h := New(&swap{list: []*bundle.Bundle{b}}, nil)
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
 	for range 5 {
 		if got := serve(t, h, get("/", "example.com")).Code; got != 200 {
 			t.Fatalf("code = %d", got)
@@ -145,5 +148,57 @@ func TestTU20SiteTable(t *testing.T) {
 	serve(t, h, get("/", "example.com"))
 	if n := h.builds.Load(); n != 2 {
 		t.Fatalf("builds after a new bundle = %d, want 2", n)
+	}
+}
+
+// TestTU20SiteInterleave checks that a request for the previous bundle
+// installs nothing. Two bundles that alternate build two sites.
+func TestTU20SiteInterleave(t *testing.T) {
+	b1, b2 := newBundle(t), newBundle(t)
+	h := New(&swap{}, &fallbackFn{})
+	var first *site
+	for i, b := range []*bundle.Bundle{b1, b2, b1, b2, b1} {
+		s := h.siteOf(b)
+		if b == b1 {
+			if first == nil {
+				first = s
+			} else if s != first {
+				t.Errorf("call %d: another site for the first bundle", i)
+			}
+		}
+	}
+	if n := h.builds.Load(); n != 2 {
+		t.Fatalf("builds = %d, want 2", n)
+	}
+}
+
+// TestTU20SiteParallel checks that parallel first requests for one new bundle
+// build one site, in each of 50 rounds.
+func TestTU20SiteParallel(t *testing.T) {
+	const workers = 32
+	h := New(&swap{}, &fallbackFn{})
+	for round := 1; round <= 50; round++ {
+		b := newBundle(t)
+		start := make(chan struct{})
+		got := make([]*site, workers)
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				got[i] = h.siteOf(b)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if n := h.builds.Load(); n != int64(round) {
+			t.Fatalf("round %d: builds = %d, want %d", round, n, round)
+		}
+		for i, s := range got {
+			if s != got[0] {
+				t.Fatalf("round %d: worker %d got another site", round, i)
+			}
+		}
 	}
 }

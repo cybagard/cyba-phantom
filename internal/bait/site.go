@@ -25,12 +25,12 @@ type entry struct {
 type site struct {
 	// hosts maps a vhost name to a map from an escaped route path to a route.
 	hosts map[string]map[string]*entry
-	// traps is the one Traps call of the build.
+	// traps holds the result of one Traps call.
 	traps []bundle.Trap
 }
 
 // buildSite makes the table of b. It takes the asset names only from the
-// route map of each vhost.
+// route map of each vhost. A route whose asset is missing is left out.
 func buildSite(b *bundle.Bundle) *site {
 	s := &site{hosts: map[string]map[string]*entry{}, traps: b.Traps()}
 	for _, host := range b.Vhosts() {
@@ -75,10 +75,13 @@ func (sl *slot) site() *site {
 	return sl.s
 }
 
+// maxHost is the size in bytes of the longest host name.
+const maxHost = 253
+
 // foldHost removes a port from host and changes A-Z to a-z. It returns false
-// for a host with a byte of 0x80 or more, or over 253 bytes. The result is in
-// buf, so a lookup does not allocate.
-func foldHost(host string, buf *[253]byte) ([]byte, bool) {
+// for a host with a byte of 0x80 or more, or over maxHost bytes. The result is
+// in buf, so a lookup does not allocate.
+func foldHost(host string, buf *[maxHost]byte) ([]byte, bool) {
 	for i := 0; i < len(host); i++ {
 		if host[i] >= 0x80 {
 			return nil, false

@@ -13,8 +13,9 @@ var (
 	methodBody   = []byte("method not allowed\n")
 )
 
-// Header values of the fixed pages and of each asset response. A response
-// uses these slices as they are.
+// Header values of the responses. The fixed pages use textType and allow.
+// The fixed pages and the asset responses use nosniff. No code may change an
+// element of these slices, because each response shares them.
 var (
 	textType = []string{"text/plain; charset=utf-8"}
 	nosniff  = []string{"nosniff"}
@@ -26,35 +27,49 @@ type Source interface {
 	Current() *bundle.Bundle
 }
 
+// pair holds the current slot and the slot that it replaced.
+type pair struct{ cur, prev *slot }
+
 // Handler serves the routes of the running bundle.
 type Handler struct {
 	src      Source
 	fallback http.Handler
-	// last is the slot of the last bundle that a request saw. It is the only
-	// site that the handler keeps.
-	last atomic.Pointer[slot]
+	// sites holds the sites of the current and the previous bundle. The
+	// handler keeps no other site.
+	sites atomic.Pointer[pair]
 	// builds counts the builds of a site table. A test reads it.
 	builds atomic.Int64
 }
 
 // New returns a handler for the bundle of src. With no running bundle, fallback
-// serves the request.
+// serves the request. It panics when src or fallback is nil.
 func New(src Source, fallback http.Handler) *Handler {
+	if src == nil || fallback == nil {
+		panic("bait: New needs a source and a fallback handler")
+	}
 	return &Handler{src: src, fallback: fallback}
 }
 
-// siteOf returns the site of b. The build runs one time for each bundle.
+// siteOf returns the site of b. A bundle that is neither cur nor prev becomes
+// cur, and the old cur becomes prev. A request for prev installs nothing.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
-		p := h.last.Load()
-		if p == nil || p.b != b {
-			n := &slot{b: b, count: &h.builds}
-			if !h.last.CompareAndSwap(p, n) {
-				continue
+		p := h.sites.Load()
+		if p != nil {
+			if p.cur.b == b {
+				return p.cur.site()
 			}
-			p = n
+			if p.prev != nil && p.prev.b == b {
+				return p.prev.site()
+			}
 		}
-		return p.site()
+		n := &pair{cur: &slot{b: b, count: &h.builds}}
+		if p != nil {
+			n.prev = p.cur
+		}
+		if h.sites.CompareAndSwap(p, n) {
+			return n.cur.site()
+		}
 	}
 }
 
@@ -72,15 +87,16 @@ func reply(w http.ResponseWriter, code int, body []byte) {
 
 // ServeHTTP reads the running bundle one time. A request then uses only that
 // bundle. The order of the steps is host, method and path. A host with no
-// vhost or a path with no route gets the fixed 404 page. A method other than
-// GET and HEAD gets the fixed 405 page. The handler never reads the body.
+// vhost, a path with no route and a template route get the fixed 404 page.
+// A method other than GET and HEAD gets the fixed 405 page. The handler never
+// reads the body.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b := h.src.Current()
 	if b == nil {
 		h.fallback.ServeHTTP(w, r)
 		return
 	}
-	var buf [253]byte
+	var buf [maxHost]byte
 	name, ok := foldHost(r.Host, &buf)
 	routes, found := h.siteOf(b).hosts[string(name)]
 	if !ok || !found {

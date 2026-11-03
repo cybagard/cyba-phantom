@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,18 +53,70 @@ func serve(tb testing.TB, h http.Handler, r *http.Request) *httptest.ResponseRec
 }
 
 func newHandler(tb testing.TB) *Handler {
-	return New(&swap{list: []*bundle.Bundle{newBundle(tb)}}, nil)
+	return New(&swap{list: []*bundle.Bundle{newBundle(tb)}}, &fallbackFn{})
+}
+
+// helloHandler returns the listener handler for example.com.
+func helloHandler(tb testing.TB) *listener.HelloHandler {
+	q, err := event.NewQueue(event.MinQueueDepth, event.NewCounters())
+	mustOK(tb, err)
+	return listener.NewHelloHandler([]string{"example.com"}, q)
 }
 
 const notFoundPage = "not found\n"
 
-// wantFixed checks the fixed 404 page: bytes and headers.
+// wantFixed checks the fixed 404 page: bytes and the exact header map.
 func wantFixed(t *testing.T, name string, w *httptest.ResponseRecorder) {
 	t.Helper()
-	h := w.Header()
-	if w.Code != 404 || w.Body.String() != notFoundPage || h.Get("Content-Type") != text ||
-		h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Server") != "" {
-		t.Errorf("%s: code %d body %q header %v, want the fixed 404 page", name, w.Code, w.Body.String(), h)
+	want := http.Header{"Content-Type": {text}, "X-Content-Type-Options": {"nosniff"}}
+	if w.Code != 404 || w.Body.String() != notFoundPage || !reflect.DeepEqual(w.Header(), want) {
+		t.Errorf("%s: code %d body %q header %v, want the fixed 404 page", name, w.Code, w.Body.String(), w.Header())
+	}
+}
+
+// TestTU20FixedPages checks that the fixed 404 and 405 pages have the status,
+// the body and the exact header map of the listener pages.
+func TestTU20FixedPages(t *testing.T) {
+	h, hello := newHandler(t), helloHandler(t)
+	for _, c := range []struct {
+		code         int
+		method, host string
+	}{
+		{404, http.MethodGet, "other.example"},
+		{405, http.MethodPost, "example.com"},
+	} {
+		req := func() *http.Request {
+			r := get("/", c.host)
+			r.Method = c.method
+			return r
+		}
+		got, want := serve(t, h, req()), serve(t, hello, req())
+		if want.Code != c.code {
+			t.Fatalf("listener code %d, want %d", want.Code, c.code)
+		}
+		if got.Code != want.Code || got.Body.String() != want.Body.String() ||
+			!reflect.DeepEqual(got.Header(), want.Header()) {
+			t.Errorf("%d page: code %d body %q header %v, want body %q header %v",
+				c.code, got.Code, got.Body.String(), got.Header(), want.Body.String(), want.Header())
+		}
+	}
+}
+
+// TestTU20NewNil checks that New refuses a nil source and a nil fallback.
+func TestTU20NewNil(t *testing.T) {
+	fb := &fallbackFn{}
+	for name, f := range map[string]func(){
+		"nil fallback": func() { New(&swap{}, nil) },
+		"nil source":   func() { New(nil, fb) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: New did not panic", name)
+				}
+			}()
+			f()
+		}()
 	}
 }
 
@@ -103,6 +156,7 @@ func TestTU20Host(t *testing.T) {
 		{"http://example.com/", "other.example", "<p>index</p>\n"},
 		{"http://other.example/", "example.com", ""},
 		{"http://EXAMPLE.com:80/b", "x.example", "route b\n"},
+		{"http://\xe2\x84\xaailo.example/", "kilo.example", ""},
 	} {
 		w := serve(t, h, raw(t, "GET "+c.line+" HTTP/1.1\r\nHost: "+c.host+"\r\n\r\n"))
 		if c.want == "" {
@@ -119,10 +173,10 @@ func TestTU20Host(t *testing.T) {
 func TestTU20HostLength(t *testing.T) {
 	rep := strings.Repeat
 	long := "Z" + rep("a", 62) + "." + rep("B", 63) + "." + rep("c", 63) + "." + rep("D", 61)
-	if len(long) != 253 {
+	if len(long) != maxHost {
 		t.Fatalf("test host has %d bytes", len(long))
 	}
-	var buf [253]byte
+	var buf [maxHost]byte
 	got, ok := foldHost(long+":8089", &buf)
 	if want := strings.ToLower(long); !ok || string(got) != want {
 		t.Errorf("253 bytes with a port: ok %v, got %q", ok, got)
@@ -211,6 +265,10 @@ func TestTS02NeverServed(t *testing.T) {
 		{"kilo.example", "/traps/traps.json"},
 		{"kilo.example", "/routes.json"},
 		{"kilo.example", "/only.txt"},
+		{"example.com", "/score/a"},
+		{"example.com", "/fp/a"},
+		{"kilo.example", "/score/a"},
+		{"kilo.example", "/fp/a"},
 	} {
 		wantFixed(t, c.host+c.target, serve(t, h, get(c.target, c.host)))
 	}
@@ -222,15 +280,15 @@ func TestTS02NeverServed(t *testing.T) {
 func TestTU20OneBundle(t *testing.T) {
 	first, second := bundleWith(t, ""), bundleWith(t, "-second")
 	src := &swap{list: []*bundle.Bundle{first, second}}
-	h := New(src, nil)
+	h := New(src, &fallbackFn{})
 	for i, want := range []string{"<p>index</p>\n", "<p>index-second</p>\n"} {
 		w := serve(t, h, get("/", "example.com"))
 		if src.calls != i+1 || w.Body.String() != want {
 			t.Fatalf("request %d: %d calls, body %q, want %q", i+1, src.calls, w.Body.String(), want)
 		}
 	}
-	if h.last.Load().b != second {
-		t.Error("the handler keeps a bundle that is not the last bundle")
+	if p := h.sites.Load(); p.cur.b != second || p.prev.b != first {
+		t.Error("the handler keeps a bundle that is not the last or the one before")
 	}
 }
 
@@ -251,9 +309,7 @@ func TestTU20NoBundle(t *testing.T) {
 		t.Errorf("code %d, fallback calls %d", w.Code, fb.calls)
 	}
 
-	q, err := event.NewQueue(event.MinQueueDepth, event.NewCounters())
-	mustOK(t, err)
-	h = New(&swap{}, listener.NewHelloHandler([]string{"example.com"}, q))
+	h = New(&swap{}, helloHandler(t))
 	w := serve(t, h, get("/", "example.com"))
 	if w.Code != 200 || w.Body.String() != "hello\n" || w.Header().Get("Content-Type") != text ||
 		w.Header().Get("X-Content-Type-Options") != "nosniff" {
@@ -284,9 +340,21 @@ func (c *countBody) Close() error { return nil }
 
 // TestTS02Method checks the methods other than GET and HEAD. They get the
 // fixed 405 page with Allow, and the handler reads no body byte. The host
-// check comes first, so an unknown host gets the 404 page.
+// check comes first, so an unknown host gets the 404 page. GET and HEAD read no
+// body byte either.
 func TestTS02Method(t *testing.T) {
 	h := newHandler(t)
+	for _, m := range []string{http.MethodGet, http.MethodHead} {
+		for _, target := range []string{"/style.css", "/nope", "/t"} {
+			body := &countBody{}
+			r := get(target, "example.com")
+			r.Method, r.Body = m, body
+			serve(t, h, r)
+			if body.calls != 0 {
+				t.Errorf("%s %s: %d body reads", m, target, body.calls)
+			}
+		}
+	}
 	for _, m := range []string{"POST", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "get"} {
 		for _, target := range []string{"/", "/t", "/nope", "/a%2Fb"} {
 			body := &countBody{}
