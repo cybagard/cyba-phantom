@@ -11,7 +11,7 @@
 | `GET /proof/{event_id}` | JSON inclusion proof + latest checkpoint |
 | `GET /metrics` | Prometheus text (FR-15) |
 | `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise. Each tile-read error stops the tlog: a changed, short or missing tile, and also a mode error or an I/O error. The tlog stays not healthy until the operator opens the log again (SEC-16) |
-| `POST /reload` | bundle reload (also SIGHUP) |
+| `POST /reload` | bundle reload (also SIGHUP); coalesced, and two swaps are at least 30 s apart (SEC-34) |
 
 ## 3. Config (`/etc/phantom/config.yaml`)
 ```yaml
@@ -69,7 +69,7 @@ The loader also refuses three cases that a plain open reads (ADR-013 amendment o
 | `bundle.path` | `/var/lib/phantom/bundle/current.cbnd` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -`; the file name ends in `.cbnd`, with at least one character before `.cbnd`; its directory is not `/var/lib/phantom` itself and is not in or above `tlog.dir`, `acme.cache_dir`, `keys/` or `checkpoints/`; its directory is not `checkpoint.state`, `checkpoint.state.tmp`, `writer.stop`, `store.path`, or `store.path` with `-wal`, `-shm` or `-journal` added, and is not in one of them; not `store.path`. These compares ignore the case of the ASCII letters (for example `Keys/x.cbnd` or `WRITER.STOP/x.cbnd` is refused, and `B/x.cbnd` is refused with a `store.path` of `b/x.cbnd`). The signature file has the same name with `.sig` in place of `.cbnd`. The config loader checks the path text only; the bundle loader checks the files when it opens them (SEC-23, ADR-027) |
 | `tlog.dir` | `/var/lib/phantom/tlog` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; not `/var/lib/phantom` itself; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -`; not in or above `acme.cache_dir`, the directory of `bundle.path`, `store.path`, `keys/` or `checkpoints/`; not `checkpoint.state`, `checkpoint.state.tmp` or `writer.stop`. These compares ignore the case of the ASCII letters (for example `/var/lib/phantom/Keys` is refused). The loader checks the path text only (ADR-013) |
 | `store.path` | `/var/lib/phantom/events.db` | absolute, clean, no NUL; under `/var/lib/phantom` after symlink resolution; in the path text, below `/var/lib/phantom`, each path part has only `A–Z a–z 0–9 . _ -` (thus no `?`, `#` or `..`); not in `tlog.dir`, `acme.cache_dir`, the directory of `bundle.path`, `keys/` or `checkpoints/`; not `checkpoint.state`, `checkpoint.state.tmp` or `writer.stop`. These compares ignore the case of the ASCII letters (for example `Keys/events.db` is refused). The loader checks the path text only; the store checks the files when it opens them (SEC-20, ADR-022) |
-| `bundle.fetch_url` | `""` (off) | empty, or an `https` URL |
+| `bundle.fetch_url` | `""` (off) | empty, or an `https` URL whose path ends in `.cbnd`, with at least one character before `.cbnd` in its last part. The signature file is the same URL with `.sig` in place of that `.cbnd` (SEC-34, ADR-037) |
 | `bundle.fetch_private` | `[]` | 0–8 private entries for `bundle.fetch_url` (private lists, below); an error when `bundle.fetch_url` is empty (SEC-30, ADR-034) |
 | `bundle.fetch_interval` | `6h` | 15m–7d, also when `bundle.fetch_url` is empty |
 | `limits.max_conns` | 2000 | 1–2000 (SEC-02) |
