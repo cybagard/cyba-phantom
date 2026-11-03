@@ -495,7 +495,8 @@ func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
 }
 
 // T-I-07: a failed fsync of the new marker file, or of the state directory, is
-// an error. The marker file is closed in both cases.
+// an error. makeMarker closes the marker file in both cases. It closes the
+// directory when it opens it.
 func TestTI07MarkerSyncFails(t *testing.T) {
 	for _, failDir := range []bool{false, true} {
 		name := "file"
@@ -504,7 +505,7 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			errSync := errors.New("sync failed")
-			var files, dirs, closed int
+			var files, dirs, fileCloses, dirCloses int
 			setHook(t, &syncFile, func(f *os.File) error {
 				fi, err := f.Stat()
 				if err != nil {
@@ -522,7 +523,13 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 				return f.Sync()
 			})
 			setHook(t, &closeFile, func(f *os.File) error {
-				closed++
+				if fi, err := f.Stat(); err != nil {
+					t.Error(err)
+				} else if fi.IsDir() {
+					dirCloses++
+				} else {
+					fileCloses++
+				}
 				return f.Close()
 			})
 			root, err := os.OpenRoot(t.TempDir())
@@ -535,9 +542,10 @@ func TestTI07MarkerSyncFails(t *testing.T) {
 				wantDirs = 1
 			}
 			if err := makeMarker(root); !errors.Is(err, errSync) ||
-				files != 1 || dirs != wantDirs || closed != 1 {
-				t.Fatalf("makeMarker gave %v, file syncs %d, directory syncs %d, closes %d",
-					err, files, dirs, closed)
+				files != 1 || dirs != wantDirs ||
+				fileCloses != 1 || dirCloses != wantDirs {
+				t.Fatalf("makeMarker gave %v, syncs %d+%d, closes %d+%d (file+directory)",
+					err, files, dirs, fileCloses, dirCloses)
 			}
 		})
 	}
