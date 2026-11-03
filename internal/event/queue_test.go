@@ -228,7 +228,7 @@ func TestTU17_QueueByteBudget(t *testing.T) {
 	big := qBigEvent(t, KindRequest)
 	// MaxEventBytes is a bound with room above the longest real event.
 	if big.Size() < MaxEventBytes/2 || big.Size() > MaxEventBytes {
-		t.Fatalf("size %d is not near %d", big.Size(), MaxEventBytes)
+		t.Fatalf("size %d is not in [%d, %d]", big.Size(), MaxEventBytes/2, MaxEventBytes)
 	}
 	small := qEvent(t, KindBeacon, "192.0.2.9")
 	budget := int64(2*big.Size() + small.Size())
@@ -291,10 +291,11 @@ func TestTU17_QueueByteBudgetConcurrent(t *testing.T) {
 	}
 }
 
-// T-U-17: large bulk events near MaxEventBytes fill the byte cap of the bulk lane, and the
-// evidence lane still accepts every callback event (SEC-15, ADR-019). The bulk
-// lane has room by count, so the byte cap causes the drops. The test runs at
-// the default depth and at the largest depth.
+// T-U-17: large bulk events of at least half of MaxEventBytes fill the byte
+// cap of the bulk lane, and the evidence lane still accepts every callback
+// event (SEC-15, ADR-019). The bulk lane has room by count, so the byte cap
+// causes the drops. The test runs at the default depth and at the largest
+// depth.
 func TestTU17_QueueLaneByteCaps(t *testing.T) {
 	big := qBigEvent(t, KindRequest)
 	small := qEvent(t, KindBeacon, "192.0.2.1")

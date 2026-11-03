@@ -283,7 +283,7 @@ func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 					e := mustEvent(t, at(1), bigInput(k))
 					size := e.Size()
 					if size < event.MaxEventBytes/2 || size > event.MaxEventBytes {
-						t.Fatalf("size %d is not near %d", size, event.MaxEventBytes)
+						t.Fatalf("size %d is not in [%d, %d]", size, event.MaxEventBytes/2, event.MaxEventBytes)
 					}
 					if q.Enqueue(e) {
 						snaps[e] = take(t, e)
@@ -411,7 +411,7 @@ func TestTU17_QueueBytesWithWholeValueAssignment(t *testing.T) {
 		for range 1700 {
 			e := mustEvent(t, at(1), bigInput(event.KindRequest))
 			if size := e.Size(); size < event.MaxEventBytes/2 {
-				t.Fatalf("size %d is not near %d", size, event.MaxEventBytes)
+				t.Fatalf("size %d is under %d", size, event.MaxEventBytes/2)
 			}
 			if q.Enqueue(e) {
 				trueSum += int64(e.Size())

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,15 @@ func TestTS12_StringConstruction(t *testing.T) {
 		t.Error("an empty string is not absent")
 	}
 	caps := map[string]int{"vhost": capVhost, "method": capMethod, "path": capPath, "id": capID, "fp": capFP}
+	// A valid U+FFFD is not a repair. Other fields cut at a rune boundary.
+	for _, path := range []bool{false, true} {
+		if got := *text("a�b", 99, path); got != "a�b" {
+			t.Errorf("U+FFFD, path %v: %q", path, got)
+		}
+	}
+	if got := *text(strings.Repeat("a", 62)+"\xff", 64, false); got != strings.Repeat("a", 62)+"%F" {
+		t.Errorf("escape at the cap: %q", got)
+	}
 	long := strings.Repeat("\xff", 5000)
 	for name, c := range caps {
 		got := *text(long, c, false)
@@ -254,6 +264,10 @@ func TestTU21RequestPath(t *testing.T) {
 		{"/%2541", "/%41", "/%2541"},
 		{"", "*", "%2A"},
 		{"", "", ""},
+		{"/%9a%2F", "/\x9a/", "/%9A%2F"},
+		{"/%2F%A0", "//\xa0", "/%2F%A0"},
+		{"/%z4", "/%z4", "/%25z4"},
+		{"/%4z", "/%4z", "/%254z"},
 	} {
 		if got := RequestPath(c.raw, c.path); got != c.want {
 			t.Errorf("RequestPath(%q, %q) = %q, want %q", c.raw, c.path, got, c.want)
@@ -305,6 +319,18 @@ func TestTU21RequestPathCut(t *testing.T) {
 	if got := RequestPath("", long); len(got) != 2047 || strings.Contains(got, "%") {
 		t.Errorf("length %d, want 2047 and no escape", len(got))
 	}
+	// A source of 1 MiB must not give a buffer of 3 MiB. Ten reads allocate
+	// under 1 MiB.
+	src := "/" + strings.Repeat("a", 1<<20)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range 10 {
+		RequestPath(src, "")
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got >= 1<<20 {
+		t.Errorf("10 reads of 1 MiB allocate %d bytes, want under 1 MiB", got)
+	}
 }
 
 // T-U-21: NewEvent writes each byte 0x00-0x1F and 0x7F of the path as %XX with
@@ -326,13 +352,33 @@ func TestTU21ConstructionEscapesControlBytes(t *testing.T) {
 	if got, want := path(strings.Repeat("\x01", 2100)), strings.Repeat("%01", 682); got != want {
 		t.Errorf("long: stored %d bytes, want %d", len(got), len(want))
 	}
+	// A repair escape at the cut follows the rule of a control byte escape.
+	for _, c := range []struct{ in, want string }{
+		{strings.Repeat("a", 2047) + "\xff", strings.Repeat("a", 2047)},
+		{strings.Repeat("a", 2046) + "\xffb", strings.Repeat("a", 2046)},
+	} {
+		if got := path(c.in); got != c.want {
+			t.Errorf("repair at the cut: stored %d bytes, want %d", len(got), len(c.want))
+		}
+	}
+	for c := range 0x80 {
+		if c >= 0x20 && c != 0x7F {
+			continue
+		}
+		if got, want := path(strings.Repeat("a", 2046)+string(rune(c))+"b"), strings.Repeat("a", 2046); got != want {
+			t.Errorf("byte %d at the cut: stored %d bytes, want %d", c, len(got), len(want))
+		}
+		if got, want := path(strings.Repeat("a", 2045)+string(rune(c))), strings.Repeat("a", 2045)+fmt.Sprintf("%%%02X", c); got != want {
+			t.Errorf("byte %d before the cap: stored %d bytes, want %d", c, len(got), len(want))
+		}
+	}
 }
 
 // T-U-21: for any Path, the stored path has no control byte, has at most 2048
 // bytes and is valid UTF-8. The row of the event is accepted.
 func FuzzTU21Path(f *testing.F) {
 	for _, s := range []string{"/a%2Fb%3Cc", "/a%0Ab", "/a%7F", "/%2541", "/é", "/a\x01b", "\x7f\xff",
-		strings.Repeat("\x01", 2100), strings.Repeat("a", 2046) + "\x01b"} {
+		strings.Repeat("\x01", 2100), strings.Repeat("a", 2046) + "\x01b", strings.Repeat("a", 2047) + "\xff"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -344,8 +390,12 @@ func FuzzTU21Path(f *testing.F) {
 		if len(p) > capPath || !utf8.ValidString(p) || strings.IndexFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7F }) >= 0 {
 			t.Errorf("stored path %q breaks a rule", p)
 		}
-		if _, err := RecordFromRow(Row{TS: rec.TS, Kind: rec.Kind.String(), Path: rec.Path}); err != nil {
-			t.Errorf("RecordFromRow: %v", err)
+		back, err := RecordFromRow(Row{TS: rec.TS, Kind: rec.Kind.String(), Path: rec.Path})
+		if err != nil {
+			t.Fatalf("RecordFromRow: %v", err)
+		}
+		if back.Path == nil || *back.Path != p {
+			t.Errorf("RecordFromRow path %v, want %q", back.Path, p)
 		}
 	})
 }
@@ -371,6 +421,10 @@ func TestTU21PathDecodes(t *testing.T) {
 	stored := *mustEvent(t, Input{Kind: KindRequest, Path: RequestPath("/"+strings.Repeat("%2F", 1000), "")}).Record().Path
 	if got, err := url.PathUnescape(stored); err != nil || got != strings.Repeat("/", 683) {
 		t.Errorf("cut value: decode gives %d bytes, %v", len(got), err)
+	}
+	stored = *mustEvent(t, Input{Kind: KindRequest, Path: strings.Repeat("\x01", 2100)}).Record().Path
+	if got, err := url.PathUnescape(stored); err != nil || got != strings.Repeat("\x01", 682) {
+		t.Errorf("NewEvent cut value: decode gives %d bytes, %v", len(got), err)
 	}
 }
 

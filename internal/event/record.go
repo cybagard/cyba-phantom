@@ -484,7 +484,7 @@ func dup[T any](p *T) *T {
 // MaxEventBytes is the largest value of Size.
 const MaxEventBytes = maxEventSize
 
-const hexUpper = "0123456789ABCDEF"
+const hexDigits = "0123456789ABCDEF"
 
 // RequestPath returns the stored form of a request path. The source is rawPath
 // when it is not empty, else path. In rawPath only, a '%' with two hex digits
@@ -515,7 +515,7 @@ func RequestPath(rawPath, path string) string {
 			tok[0] = c
 		default:
 			t = tok[:3]
-			tok = [3]byte{'%', hexUpper[c>>4], hexUpper[c&15]}
+			tok = [3]byte{'%', hexDigits[c>>4], hexDigits[c&15]}
 		}
 		if b.Len()+len(t) > capPath {
 			break
@@ -550,7 +550,7 @@ func upperHex(c byte) byte {
 //
 // In path mode, each byte 0x00-0x1F and 0x7F also becomes %XX. The cut is by
 // token: a valid rune or an escape. The code stops before the first token that
-// does not fit, so it never splits an escape.
+// does not fit, so it never splits an escape that it writes.
 func text(s string, max int, path bool) *string {
 	var b strings.Builder
 	var esc [3]byte
@@ -565,7 +565,7 @@ func text(s string, max int, path bool) *string {
 			break
 		}
 		if isEsc {
-			esc = [3]byte{'%', hexUpper[s[i]>>4], hexUpper[s[i]&15]}
+			esc = [3]byte{'%', hexDigits[s[i]>>4], hexDigits[s[i]&15]}
 			b.Write(esc[:])
 		} else {
 			b.WriteString(s[i : i+n])
