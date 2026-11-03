@@ -31,12 +31,15 @@ type Page struct{ Trap map[string]string }
 var engineFuncs = template.FuncMap{"comment": comment}
 
 // comment gives s as one HTML comment. It gives "" for an unsafe text.
-// A text is unsafe if it holds "--". This also covers "<!--", "-->" and
-// "--!>". A text is also unsafe if it starts with ">" or "->". Last, a text is
-// unsafe if it holds a byte below 0x20 other than tab and LF.
+// A text is unsafe if it holds "--" or "<". This also covers "<!--", "-->"
+// and "--!>". A text is also unsafe if it starts with ">" or "->".
+// A text is also unsafe if it holds a control character other than tab and
+// LF. That is a byte below 0x20, the byte 0x7F, or a code point U+0080 to
+// U+009F. The check decodes UTF-8. A byte that is not in a valid sequence is
+// not a control character.
 func comment(s string) template.HTML {
-	if strings.Contains(s, "--") || strings.HasPrefix(s, ">") || strings.HasPrefix(s, "->") ||
-		strings.ContainsFunc(s, func(c rune) bool { return c < 0x20 && c != '\t' && c != '\n' }) {
+	if strings.Contains(s, "--") || strings.Contains(s, "<") || strings.HasPrefix(s, ">") || strings.HasPrefix(s, "->") ||
+		strings.ContainsFunc(s, func(c rune) bool { return c < 0x20 && c != '\t' && c != '\n' || 0x7f <= c && c <= 0x9f }) {
 		return ""
 	}
 	return template.HTML("<!-- " + s + " -->")

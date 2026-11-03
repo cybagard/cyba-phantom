@@ -78,7 +78,8 @@ type rawSlot struct {
 // parseRoutes parses the route map of each vhost of the archive. A host name
 // that is the second name part of a file below vhosts/ is a vhost. A file must
 // not be directly below vhosts/. Each vhost needs a valid name and a
-// routes.json file. A header slot needs a valid name and the id of a trap. The
+// routes.json file. A header slot needs a valid name and the id of a trap. Two
+// slots of one route do not have the same name, with ASCII case ignored. The
 // error holds no byte of the archive.
 func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (map[string]RouteMap, error) {
 	ids := map[string]bool{}
@@ -140,6 +141,10 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 		route := Route{Path: r.Path.v, Template: r.Template.v, Asset: r.Asset.v, Type: r.Type.v}
 		for _, s := range r.Headers.v {
 			if !s.Name.set || !s.Trap.set || !validHeaderName(s.Name.v) || !ids[s.Trap.v] {
+				return RouteMap{}, false
+			}
+			// Slot names of one route must differ by more than ASCII case.
+			if slices.ContainsFunc(route.Headers, func(h HeaderSlot) bool { return strings.EqualFold(h.Name, s.Name.v) }) {
 				return RouteMap{}, false
 			}
 			route.Headers = append(route.Headers, HeaderSlot{s.Name.v, s.Trap.v})
