@@ -191,6 +191,16 @@ func TestTS15WriterAfterReconnect(t *testing.T) {
 			if bad {
 				waitUntil(t, "the stop", func() bool { return !r.w.Healthy() })
 				wantRule(t, r.w.Err(), writerName, ruleDatabase)
+				// The writer is not healthy before it makes the stop marker.
+				// A cancel does not end the fsync of the marker. Wait for the
+				// first try, with no time bound of this test. Fail if the
+				// writer did not make the marker.
+				for !r.w.markerMade.Load() && !r.w.markerLogged.Load() {
+					time.Sleep(time.Millisecond)
+				}
+				if !r.w.markerMade.Load() {
+					t.Fatal("the writer did not make the stop marker")
+				}
 			} else {
 				r.commit()
 			}
