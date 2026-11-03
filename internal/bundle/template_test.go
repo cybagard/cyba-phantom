@@ -373,6 +373,7 @@ func site(routes string) []ent {
 		tf(hostDir+"UP.TMPL", "u"), tf(hostDir+routeMapName, routes),
 		tf(otherDir+"o.tmpl", "o"), tf(otherDir+"o.png", "o"), tf(otherDir+routeMapName, routeJSON(otherDir+"o.tmpl")),
 		tf("traps/t.tmpl", "t"),
+		tf(trapsName, arr(tj("t", "x"), tj("t1", "x"), tj("t2", "x"), tj("t3", "x"), tj("t4", "x"))),
 	}
 }
 
