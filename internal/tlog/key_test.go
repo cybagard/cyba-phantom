@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -454,6 +455,58 @@ func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, stateName)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("signer state: %v; want not exist (a key with no state is a fault)", err)
+	}
+}
+
+// T-S-13: a first start syncs each new file before the link. Then it syncs the
+// keys directory and the state directory.
+func TestTS13_FirstStartSyncsEachFileAndDirectory(t *testing.T) {
+	root, _ := newState(t)
+	var files, dirs []string
+	record := func(list *[]string) func(*os.File) error {
+		return func(f *os.File) error {
+			*list = append(*list, filepath.Base(f.Name()))
+			return realSync(f)
+		}
+	}
+	setHooks(t, hooks{file: record(&files), dir: record(&dirs)})
+	if _, err := loadWithin(t, root, nil, testOrigin, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	wantFiles := []string{"checkpoint.key.tmp", "checkpoint.vkey.tmp", "checkpoint.state.tmp.tmp"}
+	if !slices.Equal(files, wantFiles) {
+		t.Errorf("file syncs %q, want %q", files, wantFiles)
+	}
+	if want := []string{keysDir, ".", "."}; !slices.Equal(dirs, want) {
+		t.Errorf("directory syncs %q, want %q", dirs, want)
+	}
+}
+
+// T-S-13: a failed sync of a key file or of a directory is an error of the
+// first start. A failed file sync leaves no key file.
+func TestTS13_FirstStartSyncFailures(t *testing.T) {
+	fail := func(*os.File) error { return errors.New("injected") }
+	for _, c := range []struct {
+		name string
+		h    hooks
+		want string
+	}{
+		{"file", hooks{file: fail}, "cannot write the key file"},
+		{"dir", hooks{dir: fail}, "cannot sync the directory"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, dir := newState(t)
+			setHooks(t, c.h)
+			s, err := loadWithin(t, root, nil, testOrigin, false, 0)
+			if err == nil || s != nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got signer %v, error %v; want %q", s, err, c.want)
+			}
+			if c.name == "file" {
+				if names := keysNames(t, dir); len(names) != 0 {
+					t.Errorf("keys directory has %q; want it empty", names)
+				}
+			}
+		})
 	}
 }
 

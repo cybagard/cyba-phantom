@@ -899,6 +899,30 @@ func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 	}
 }
 
+// T-U-07: the first hash at level 5 comes with leaf 1<<40 - 1. Tiles made by
+// hand put the log one leaf before that size.
+func TestTU07BatchReachesLevel5(t *testing.T) {
+	state, dir := newLogState(t)
+	openStore(t, state).Close()
+	const size = 1<<40 - 1
+	var tiles [maxLevel + 1]tileBuf
+	for lv := 0; lv < maxLevel; lv++ {
+		n := (int64(size) >> (8 * lv)) / fullWidth
+		tiles[lv] = tileBuf{n, bytes.Repeat([]byte{byte(lv + 1)}, (fullWidth-1)*tlog.HashSize)}
+		path := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: lv, N: n, W: fullWidth - 1}.Path())
+		must(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		must(t, os.WriteFile(path, tiles[lv].data, 0o600))
+	}
+	root, err := tlog.TreeHash(size, cacheView{&tiles})
+	must(t, err)
+	head := binary.BigEndian.AppendUint64(nil, size)
+	must(t, os.WriteFile(filepath.Join(dir, "tlog", headName), append(head, root[:]...), 0o600))
+	l := openTestLog(t, state)
+	if i, err := l.AppendBatch(batchOf(0, 1)); err != nil || i != size || l.size != size+1 {
+		t.Fatalf("got index %d, error %v, size %d; want %d, nil, %d", i, err, l.size, int64(size), int64(size)+1)
+	}
+}
+
 // A failed batch keeps the spare capacity of the level 0 and level 1 buffers
 // as they were.
 func TestTS13FailedBatchKeepsTheTileBuffers(t *testing.T) {

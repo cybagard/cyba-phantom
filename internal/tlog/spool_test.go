@@ -558,6 +558,18 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 	}
 }
 
+// T-S-13: a failed sync of the spool directory is an error of Add.
+func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
+	e := newSpool(t)
+	msg, err := SignCheckpoint(e.signer, 5, testRoot())
+	must(t, err)
+	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
+	const want = "checkpoint spool checkpoints/5.note: directory cannot be synced"
+	if err := e.Add(5, msg); err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
 // T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
 // and for a cursor. The spool deletes the file with no new write of that name.
 // A temporary entry that cannot be deleted stays and gets a log line. A name
