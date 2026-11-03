@@ -117,6 +117,9 @@ func TestTU21RequestPathMatchesLocation(t *testing.T) {
 	for _, tc := range requestPathRows {
 		us = append(us, readRequest(t, tc.target, "decoy.test").URL)
 	}
+	for _, tc := range redirectEscapeRows {
+		us = append(us, readRequest(t, tc.target, "decoy.test").URL)
+	}
 	for _, u := range us {
 		want := strings.TrimPrefix(location("decoy.test", u), "https://decoy.test")
 		if got := event.RequestPath(u.RawPath, u.Path); got != want {
@@ -276,26 +279,31 @@ func readRequest(t *testing.T, target, host string) *http.Request {
 	return r
 }
 
+// redirectEscapeRows are the targets of TestTS17RedirectKeepsEscapes, with the
+// Location that the redirect gives. TestTU21RequestPathMatchesLocation also
+// uses them.
+var redirectEscapeRows = []struct{ target, want string }{
+	{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
+	{"/%2f%2fevil.example", "https://decoy.test/%2F%2Fevil.example"},
+	{"/%2e%2e/x", "https://decoy.test/%2E%2E/x"},
+	{"/%5cevil", "https://decoy.test/%5Cevil"},
+	{"/a%2Fb<c", "https://decoy.test/a%2Fb%3Cc"},
+	{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
+	{"/[x]", "https://decoy.test/%5Bx%5D"},
+	{"/%41", "https://decoy.test/%41"},
+	// These rows hold the hex digit edges 9, a, A and F.
+	{"/%9a%2F", "https://decoy.test/%9A%2F"},
+	{"/%2F%A0", "https://decoy.test/%2F%A0"},
+	{"/a%252Fb", "https://decoy.test/a%252Fb"},
+	{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
+	{"/é", "https://decoy.test/%C3%A9"},
+	{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
+}
+
 // T-S-17: the Location of the redirect keeps each escape of the request path.
 // It decodes none, so "%2F" stays "%2F". A byte that needs an escape gets one.
 func TestTS17RedirectKeepsEscapes(t *testing.T) {
-	for _, tc := range []struct{ target, want string }{
-		{"/..%2F..%2Fevilmark", "https://decoy.test/..%2F..%2Fevilmark"},
-		{"/%2f%2fevil.example", "https://decoy.test/%2F%2Fevil.example"},
-		{"/%2e%2e/x", "https://decoy.test/%2E%2E/x"},
-		{"/%5cevil", "https://decoy.test/%5Cevil"},
-		{"/a%2Fb<c", "https://decoy.test/a%2Fb%3Cc"},
-		{"/..%2F<mark>", "https://decoy.test/..%2F%3Cmark%3E"},
-		{"/[x]", "https://decoy.test/%5Bx%5D"},
-		{"/%41", "https://decoy.test/%41"},
-		// These rows hold the hex digit edges 9, a, A and F.
-		{"/%9a%2F", "https://decoy.test/%9A%2F"},
-		{"/%2F%A0", "https://decoy.test/%2F%A0"},
-		{"/a%252Fb", "https://decoy.test/a%252Fb"},
-		{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
-		{"/é", "https://decoy.test/%C3%A9"},
-		{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
-	} {
+	for _, tc := range redirectEscapeRows {
 		resp, _ := serveRaw(t, NewRedirect(helloNames), readRequest(t, tc.target, "decoy.test"))
 		if got := resp.Header.Get("Location"); resp.StatusCode != 308 || got != tc.want {
 			t.Errorf("target %q: status %d, Location %q, want %q", tc.target, resp.StatusCode, got, tc.want)
