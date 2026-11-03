@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/session"
 )
 
 // The statements are constants. Every value is a bound parameter.
@@ -42,11 +43,11 @@ func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, 
 // countDrops takes the drop counts of the queue and adds each count to the
 // dropped column of the row (day, ip_hmac). A new row gets 0 requests. The
 // overflow bucket has the fixed ip_hmac text.
-func (w *Writer) countDrops(ctx context.Context, tx *sql.Tx, day string) error {
+func (w *Writer) countDrops(ctx context.Context, tx *sql.Tx, day string, key session.Key) error {
 	counts, overflow := w.counters.Snapshot()
 	for a, n := range counts {
 		if n > 0 {
-			if _, err := tx.ExecContext(ctx, upsertCounter, day, w.dk.ipHMAC(a), n); err != nil {
+			if _, err := tx.ExecContext(ctx, upsertCounter, day, key.IPHMAC(a), n); err != nil {
 				return fail(writerName, ruleDatabase)
 			}
 		}

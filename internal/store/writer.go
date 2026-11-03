@@ -9,10 +9,17 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
 
 const (
+	// dayLayout is the layout of the UTC date that keys ip_counter.day.
+	dayLayout = "2006-01-02"
+
+	// overflowHMAC is the ip_hmac value of the overflow bucket of the counters.
+	overflowHMAC = "overflow"
+
 	// maxBatch and flushEvery are the batch limits (SEC-15, NFR-02): the writer
 	// commits at 500 events or after 250 ms.
 	maxBatch   = 500
@@ -27,7 +34,9 @@ const (
 
 // Writer is the one writer of the event table. It uses the database pool from
 // Open and Migrate, the queue, and the log. The caller closes them after
-// Run returns. It also adds the drop counts of the queue to ip_counter.
+// Run returns. It also adds the drop counts of the queue to ip_counter. The
+// day key comes from one session.DayKey, shared with the request path when
+// the caller gives it to NewWriterWithDayKey.
 //
 // The writer stops for one of five causes (see Run):
 //   - an append error.
@@ -44,8 +53,11 @@ type Writer struct {
 	rec        Recovery
 	counters   *event.Counters
 	bodyPrefix bool // privacy.store_body_prefix
-	dk         dayKey
-	log        *slog.Logger
+	// dk is the one holder of the day key. It is the holder that the caller
+	// gave to NewWriterWithDayKey, so the request path can share it. Else it
+	// is a holder that the writer made. It is never nil.
+	dk  *session.DayKey
+	log *slog.Logger
 
 	stopErr              atomic.Pointer[error] // the first error; nil while the writer runs
 	writeFailed, orphans atomic.Uint64
@@ -95,10 +107,22 @@ type Writer struct {
 // writer at the start of Run. The other pointer arguments must not be nil.
 // q must come from event.NewQueue. A zero-value Queue has no counters.
 func NewWriter(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
+	return NewWriterWithDayKey(db, q, bodyPrefix, log, rec, session.NewDayKey())
+}
+
+// NewWriterWithDayKey is NewWriter with the day key holder as the last
+// argument. The writer takes its key from dk. The writer and the request path
+// can share dk. Then both compute the same session id and ip_hmac for one UTC
+// date. A nil dk makes the writer use a new holder of its own, as NewWriter
+// does.
+func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.Logger, rec Recovery, dk *session.DayKey) *Writer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Writer{db: db, q: q, rec: rec, counters: q.Counters(), bodyPrefix: bodyPrefix, dk: newDayKey(), log: log, rows: make(chan rowRequest, 1)}
+	if dk == nil {
+		dk = session.NewDayKey()
+	}
+	return &Writer{db: db, q: q, rec: rec, counters: q.Counters(), bodyPrefix: bodyPrefix, dk: dk, log: log, rows: make(chan rowRequest, 1)}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -323,8 +347,11 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	if w.timing != nil {
 		begin = time.Now()
 	}
-	day := w.now().UTC().Format(dayLayout)
-	w.dk.use(day)
+	// The batch uses one date and one key for all its rows, also when it ends
+	// after midnight.
+	now := w.now()
+	key := w.dk.At(now)
+	day := now.UTC().Format(dayLayout)
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
 	for j, rec := range recs {
@@ -359,7 +386,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 			}
 		}()
 	}
-	committed, err = w.transact(ctx, conn, batch, recs, hs, evidence, day, begin)
+	committed, err = w.transact(ctx, conn, batch, recs, hs, evidence, day, key, begin)
 	return err
 }
 
@@ -387,7 +414,7 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // Suppose AppendBatch returned nil and the transaction ends without a COMMIT.
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
 // one time.
-func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, begin time.Time) (committed bool, err error) {
+func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
 		if appended && !committed {
@@ -441,7 +468,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			if rec.FP != nil && rec.FP.JA4 != nil {
 				ja4 = *rec.FP.JA4
 			}
-			rec.Session = w.dk.sessionID(e.IP(), ja4)
+			rec.Session = key.SessionID(e.IP(), ja4)
 		}
 		if evidence[j] {
 			evBytes := event.EvidenceBytes
@@ -460,7 +487,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		rows++
 	}
-	if err := w.countDrops(ctx, tx, day); err != nil {
+	if err := w.countDrops(ctx, tx, day, key); err != nil {
 		return false, err
 	}
 	var commitAt time.Time

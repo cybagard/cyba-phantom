@@ -839,17 +839,20 @@ func TestTU18TickWithPendingCountWritesCounterRow(t *testing.T) {
 		return time.Date(2026, 3, 2, 0, 0, 1, 0, time.UTC)
 	}
 	addr := netip.MustParseAddr("192.0.2.7")
+	ip4 := addr.As4()
+	key := seedKeys(t, 1)[0]
 	r.c.Drop(addr)
 	r.c.Drop(addr)
 	r.start()
 	r.fire()
 	wantCommits(t, r, 0)
-	want := "2026-03-01 " + r.w.dk.ipHMAC(addr) + " 2"
+	want := "2026-03-01 " + mac(key, ip4[:]) + " 2"
 	if got := r.ipCounters(); len(got) != 1 || got[0] != want || calls != 1 || r.app.tries != 0 || r.rows() != 0 {
 		t.Fatalf("ip_counter %q, want %q; %d clock reads, %d appender calls", got, want, calls, r.app.tries)
 	}
-	if r.w.dk.s().date != "2026-03-01" {
-		t.Fatalf("day key for %q", r.w.dk.s().date)
+	// The holder keeps the key of 2026-03-01: At of that date makes no new key.
+	if got := r.w.dk.At(day("2026-03-01T12:00:00Z")).IPHMAC(addr); got != mac(key, ip4[:]) {
+		t.Fatal("the day key is not for 2026-03-01")
 	}
 	if syncMode != 1 || timings != 0 {
 		t.Fatalf("synchronous %d (want 1, NORMAL), %d timing calls (want 0)", syncMode, timings)
