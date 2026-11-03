@@ -26,7 +26,7 @@ build:
 
 test:
 	$(GO) test -race ./...
-	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^TestTS25' ./internal/bundle
+	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^(TestTS25|TestTP10)' ./internal/bundle
 
 lint:
 	@bad=$$(gofmt -l .) || { echo "gofmt: gofmt -l . failed"; exit 1; }; \

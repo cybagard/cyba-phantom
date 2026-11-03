@@ -66,6 +66,7 @@ func (e *env) loader(path string) *Loader {
 	// These archives hold no seed file. seedLoader runs the seed step.
 	l.seed = nil
 	l.now = func() time.Time { return testNow }
+	noGap(l)
 	l.decompress = func(b []byte) (*Archive, error) { e.n.Add(1); return ReadArchive(b) }
 	return l
 }

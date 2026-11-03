@@ -87,12 +87,15 @@ func (l *Loader) SetEvents(q *event.Queue, log *slog.Logger) {
 // accept or one bundle_rejected event for a rejection. When SetEvents gave a
 // log, it writes one log line. A state fault is no rejection code. It gives a
 // log line and no event. A value that is not a Source reads nothing and gives
-// ErrSource.
+// ErrSource. A source other than SourceStart starts at least 30 s after the
+// last swap. It waits without the load lock. SourceStart does not wait. Only a
+// swap sets the time of the last swap, so a rejection and a state fault start
+// no wait.
 func (l *Loader) LoadFrom(src Source) (*Bundle, error) {
 	if src < SourceStart || src > SourceFetch {
 		return nil, ErrSource
 	}
-	loadMu.Lock()
+	l.lock(src)
 	defer loadMu.Unlock()
 	var sum digest
 	b, err := l.load(src == SourceStart, &sum)
