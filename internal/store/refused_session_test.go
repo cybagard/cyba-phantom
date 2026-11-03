@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/session"
 )
 
 // refusedEvent makes a refused event for the client address ip and the JA4 text
@@ -74,13 +75,14 @@ func wantID(key [32]byte, k []byte, ja4 string) string {
 // has the id of its IPv4 form. Two IPv6 addresses in one /64 have one id.
 func TestTS22SessionIDIsTheFunctionOfTheKeyAndTheJA4(t *testing.T) {
 	r := newRig(t, 100)
+	key := seedKeys(t, 1)[0]
 	r.w.clock = func() time.Time { return day("2026-03-01T10:00:00Z") }
 	const ja4 = "t13d1516h2_8daaf6152771_b186095e22b6"
 	ids := r.refusedIDs(r.w, ja4, "198.51.100.23", "::ffff:198.51.100.23", "2001:db8:abcd:1234::1", "2001:db8:abcd:1234:ffff::9")
 	v4 := netip.MustParseAddr("198.51.100.23").As4()
 	v6 := netip.MustParseAddr("2001:db8:abcd:1234::").As16()
-	for i, want := range []string{wantID(r.w.dk.s().key, v4[:], ja4), wantID(r.w.dk.s().key, v4[:], ja4),
-		wantID(r.w.dk.s().key, v6[:], ja4), wantID(r.w.dk.s().key, v6[:], ja4)} {
+	for i, want := range []string{wantID(key, v4[:], ja4), wantID(key, v4[:], ja4),
+		wantID(key, v6[:], ja4), wantID(key, v6[:], ja4)} {
 		if ids[i] != want {
 			t.Errorf("event %d: session_id %q, want %q", i, ids[i], want)
 		}
@@ -98,12 +100,13 @@ func TestTS22SessionIDIsTheFunctionOfTheKeyAndTheJA4(t *testing.T) {
 // has no id.
 func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	r := newRig(t, 100)
+	key := seedKeys(t, 1)[0]
 	const ip = "192.0.2.77"
 	k := netip.MustParseAddr(ip).As4()
 	at := day("2026-03-01T10:00:00Z")
 	r.w.clock = func() time.Time { return at }
 	first := r.refusedIDs(r.w, "", ip)[0]
-	if first != wantID(r.w.dk.s().key, k[:], "") {
+	if first != wantID(key, k[:], "") {
 		t.Errorf("session_id %q with an empty JA4 is not the defined value", first)
 	}
 	idBytes, err := base32.StdEncoding.WithPadding(base32.NoPadding).
@@ -111,7 +114,7 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ipMAC, err := hex.DecodeString(r.w.dk.ipHMAC(netip.MustParseAddr(ip)))
+	ipMAC, err := hex.DecodeString(mac(key, k[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +139,73 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 	}
 }
 
+// T-S-22, T-S-15: a writer with a shared holder takes the key that another user
+// of the holder made. One batch takes the key of its start date. The clock
+// reads the next date after the start.
+func TestTS22WriterUsesTheSharedDayKey(t *testing.T) {
+	r := newRig(t, 100)
+	h := session.NewDayKey()
+	const ip, ja4 = "198.51.100.23", "t13d1516h2_8daaf6152771_b186095e22b6"
+	a := netip.MustParseAddr(ip)
+	start := day("2026-03-01T23:59:59Z")
+	k := h.At(start) // another user of h makes the key first
+	w := NewWriterWithDayKey(r.db, r.q, false, nil, r.w.rec, h)
+	reads := 0
+	w.clock = func() time.Time {
+		if reads++; reads > 1 {
+			return start.Add(time.Minute)
+		}
+		return start
+	}
+	r.c.Drop(a)
+	ids := r.refusedIDs(w, ja4, ip)
+	want := k.SessionID(ip, ja4)
+	if want == nil || ids[0] != *want {
+		t.Errorf("session_id %q, want the id of the key of h", ids[0])
+	}
+	rows := r.counterRows()
+	if len(rows) != 1 || rows[0].day != "2026-03-01" || rows[0].hmac != k.IPHMAC(a) {
+		t.Errorf("ip_counter rows %+v, want one row with the ip_hmac of the key of h", rows)
+	}
+	if reads != 1 {
+		t.Errorf("%d clock reads in one batch, want 1", reads)
+	}
+}
+
+// T-S-22: two writers with one holder give one id to one client at one date.
+// A writer from NewWriter and a writer with a nil holder each have their own
+// holder. Thus they give other ids.
+func TestTS22WritersShareOneIDOnlyWithOneHolder(t *testing.T) {
+	r := newRig(t, 100)
+	h := session.NewDayKey()
+	const ip, ja4 = "198.51.100.23", "t13d1516h2_8daaf6152771_b186095e22b6"
+	at := day("2026-03-01T10:00:00Z")
+	clock := func() time.Time { return at }
+	newW := func(dk *session.DayKey) *Writer {
+		w := NewWriterWithDayKey(r.db, r.q, false, nil, r.w.rec, dk)
+		w.clock = clock
+		return w
+	}
+	plain := NewWriter(r.db, r.q, false, nil, r.w.rec)
+	plain.clock = clock
+	id1 := r.refusedIDs(newW(h), ja4, ip)[0]
+	id2 := r.refusedIDs(newW(h), ja4, ip)[0]
+	if want := h.At(at).SessionID(ip, ja4); want == nil || id1 != *want || id2 != id1 {
+		t.Errorf("ids %q and %q, want one id from h", id1, id2)
+	}
+	nilID := r.refusedIDs(newW(nil), ja4, ip)[0]
+	plainID := r.refusedIDs(plain, ja4, ip)[0]
+	if nilID == "" || plainID == "" || nilID == id1 || plainID == id1 || nilID == plainID {
+		t.Errorf("ids %q (nil holder) and %q (NewWriter) must differ from %q and from each other", nilID, plainID, id1)
+	}
+}
+
 // T-U-18: a refused row keeps the event values in each column except
 // session_id, also with store_body_prefix true. A request row keeps the session
 // of its record: the writer makes an id for no other kind.
 func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 	r := newRig(t, 100)
+	key := seedKeys(t, 1)[0]
 	r.w.bodyPrefix = true
 	r.w.clock = func() time.Time { return day("2026-03-01T10:00:00Z") }
 	const ja4 = "t13d1516h2_8daaf6152771_b186095e22b6"
@@ -164,7 +229,7 @@ func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 	if got.detail == nil || *got.detail != string(detail) || *got.detail != `{"reason":"bad_hello"}` {
 		t.Errorf("refused row: detail %v, want %s", got.detail, detail)
 	}
-	if want := wantID(r.w.dk.s().key, k[:], ja4); got.session == nil || *got.session != want {
+	if want := wantID(key, k[:], ja4); got.session == nil || *got.session != want {
 		t.Errorf("refused row: session_id %v, want %q", got.session, want)
 	}
 	for col, null := range map[string]bool{

@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/cryptotest"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -241,6 +243,23 @@ func mac(key [32]byte, b []byte) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// seedKeys gives the bytes of the next n keys that a DayKey makes. The next
+// new keys of any DayKey have these bytes, in this order. Nothing may read
+// crypto/rand between this call and the At calls that make the keys. Thus a
+// test that calls seedKeys cannot be parallel.
+func seedKeys(t *testing.T, n int) [][32]byte {
+	t.Helper()
+	cryptotest.SetGlobalRandom(t, 7)
+	keys := make([][32]byte, n)
+	for i := range keys {
+		if _, err := rand.Read(keys[i][:]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cryptotest.SetGlobalRandom(t, 7)
+	return keys
+}
+
 func day(s string) time.Time {
 	d, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
@@ -253,6 +272,7 @@ func day(s string) time.Time {
 // error of the store holds none. ip_hmac is the HMAC of the client key.
 func TestTS15IPCounterHoldsNoAddress(t *testing.T) {
 	r := newRig(t, 100)
+	key := seedKeys(t, 1)[0]
 	v4, v6, mapped := netip.MustParseAddr("198.51.100.23"), netip.MustParseAddr("2001:db8:abcd:1234:5678::9"), netip.MustParseAddr("::ffff:192.0.2.99")
 	for _, a := range []netip.Addr{v4, v6, mapped} {
 		r.c.Drop(a)
@@ -265,7 +285,7 @@ func TestTS15IPCounterHoldsNoAddress(t *testing.T) {
 	v6key := netip.MustParseAddr("2001:db8:abcd:1234::").As16()
 	m4, m4b := netip.MustParseAddr("192.0.2.99").As4(), netip.MustParseAddr("198.51.100.23").As4()
 	want := map[string]bool{
-		mac(r.w.dk.s().key, m4b[:]): true, mac(r.w.dk.s().key, m4[:]): true, mac(r.w.dk.s().key, v6key[:]): true,
+		mac(key, m4b[:]): true, mac(key, m4[:]): true, mac(key, v6key[:]): true,
 	}
 	markers := []string{"198.51.100.23", "c6336417", "2001:db8", "20010db8abcd1234", "abcd:1234", "192.0.2.99", "c0000263", "::ffff"}
 	for _, c := range rows {
@@ -306,17 +326,13 @@ func TestTS15DayKeyChangesWithTheDateInBothDirections(t *testing.T) {
 	r := newRig(t, 100)
 	a := netip.MustParseAddr("198.51.100.23")
 	ip := a.As4()
-	var keys [][32]byte
+	// Each date change makes the next key of the seed. The step back to the
+	// first date makes the third key and not the first one. The last batch has
+	// the date of the third batch, so it adds to the row of the third key.
+	keys := seedKeys(t, 3)
 	for _, d := range []string{"2026-03-01T10:00:00Z", "2026-03-02T10:00:00Z", "2026-03-01T11:00:00Z", "2026-03-01T12:00:00Z"} {
 		r.c.Drop(a)
 		r.writeAt(day(d))
-		keys = append(keys, r.w.dk.s().key)
-	}
-	if keys[0] == keys[1] || keys[0] == keys[2] || keys[1] == keys[2] {
-		t.Fatal("a date change did not give a new key")
-	}
-	if keys[2] != keys[3] {
-		t.Fatal("the key changed inside one date")
 	}
 	want := map[string]int64{
 		"2026-03-01 " + mac(keys[0], ip[:]): 1,
@@ -407,10 +423,11 @@ func TestTU18OverflowRowAndSecondBatchAdd(t *testing.T) {
 func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 	r := newRig(t, 100)
 	a := netip.MustParseAddr("198.51.100.23")
+	key := seedKeys(t, 1)[0]
 	r.c.Drop(a)
 	r.writeAt(day("2026-03-01T10:00:00Z"))
 	ip := a.As4()
-	known := mac(r.w.dk.s().key, ip[:]) // proves that the scan sees the data
+	known := mac(key, ip[:]) // proves that the scan sees the data
 	scan := func(stage string) {
 		found := false
 		err := filepath.WalkDir(r.state, func(f string, d fs.DirEntry, err error) error {
@@ -421,7 +438,7 @@ func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if bytes.Contains(data, r.w.dk.s().key[:]) || bytes.Contains(data, []byte(hex.EncodeToString(r.w.dk.s().key[:]))) {
+			if bytes.Contains(data, key[:]) || bytes.Contains(data, []byte(hex.EncodeToString(key[:]))) {
 				t.Errorf("%s: the day key is in %s", stage, f)
 			}
 			found = found || bytes.Contains(data, []byte(known))
@@ -442,18 +459,19 @@ func TestTS15DayKeyIsNotOnDisk(t *testing.T) {
 }
 
 // T-S-15: none of these fmt verbs prints a byte of the day key. This holds
-// for a dayKey, a *dayKey, a Writer and a *Writer.
+// for a session.DayKey, a *session.DayKey, a session.Key, a Writer and a
+// *Writer. The needles come from the known bytes of the key.
 func TestTS15DayKeyIsNotPrinted(t *testing.T) {
 	r := newRig(t, 100)
-	s := r.w.dk.s()
-	s.date = "2026-03-01"
-	for i := range s.key {
-		s.key[i] = 0xb0 + byte(i)
+	k := seedKeys(t, 1)[0]
+	sk := r.w.dk.At(day("2026-03-01T10:00:00Z"))
+	if got := sk.IPHMAC(netip.MustParseAddr("192.0.2.1")); got != mac(k, []byte{192, 0, 2, 1}) {
+		t.Fatal("the key of the holder is not the known key")
 	}
-	k := s.key
 	needles := []string{
 		string(k[:8]), hex.EncodeToString(k[:8]), strings.ToUpper(hex.EncodeToString(k[:8])),
-		"176 177 178 179", `\xb0\xb1`, "0xb0, 0xb1",
+		fmt.Sprintf("%d %d %d %d", k[0], k[1], k[2], k[3]),
+		strings.Trim(fmt.Sprintf("%q", k[:8]), `"`), fmt.Sprintf("0x%x, 0x%x", k[0], k[1]),
 	}
 	holds := func(s string) bool {
 		for _, n := range needles {
@@ -469,7 +487,7 @@ func TestTS15DayKeyIsNotPrinted(t *testing.T) {
 		if !holds(fmt.Sprintf(verb, k)) {
 			t.Fatalf("%s: the check does not see the bytes of a bare key", verb)
 		}
-		for name, v := range map[string]any{"dayKey": r.w.dk, "*dayKey": &r.w.dk, "Writer": writer, "*Writer": r.w} {
+		for name, v := range map[string]any{"DayKey": *r.w.dk, "*DayKey": r.w.dk, "Key": sk, "Writer": writer, "*Writer": r.w} {
 			if out := fmt.Sprintf(verb, v); holds(out) {
 				t.Errorf("%s of a %s holds the day key: %.200q", verb, name, out)
 			}
