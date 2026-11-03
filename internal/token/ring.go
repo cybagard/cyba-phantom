@@ -117,7 +117,8 @@ func (r *Ring) Verify(tok [Size]byte) Result {
 
 // Format writes one fixed text for each verb that fmt gives it. The text
 // holds no key set, no trap id and no counter. Only a *Ring uses Format. fmt
-// does not call it for a *Ring in an unexported struct field.
+// does not call it for a *Ring in an unexported struct field. The test shows
+// that such a field still prints no trap id and no counter.
 func (r *Ring) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte("token.Ring"))
 }

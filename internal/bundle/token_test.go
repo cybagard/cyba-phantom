@@ -264,6 +264,36 @@ func TestTU22_BundleRing(t *testing.T) {
 	ringCheck(t, l, "running bundle after 25 h", t2, token.First)
 }
 
+// T-U-22: a load of the same bundle again is an accept. It leaves the ring
+// and the key set of the running bundle. The 25 h end counts from the first
+// load of the running bundle.
+func TestTU22_BundleRingSameBundle(t *testing.T) {
+	e := newEnv(t)
+	l, two := e.seedLoader(nil), keyTwo(e)
+	first := testNow
+	now := first
+	l.now = func() time.Time { return now }
+	tA, _ := e.loadTokens(l, two, 2, plainEnt(seedA), "a").Tokens().Mint(0, now)
+	b := e.loadTokens(l, two, 3, plainEnt(seedB), "b")
+	tB, _ := b.Tokens().Mint(0, now)
+	now = now.Add(time.Hour)
+	again, err := l.Load(false)
+	must(t, err)
+	if l.Current() != again || again.Tokens() != b.Tokens() {
+		t.Error("the same bundle again has another key set")
+	}
+	ringCheck(t, l, "replaced bundle", tA, token.Second)
+	ringCheck(t, l, "running bundle", tB, token.First)
+	if l.Ring().Len() != 2 {
+		t.Errorf("ring holds %d key sets", l.Ring().Len())
+	}
+	now = first.Add(25*time.Hour - time.Nanosecond)
+	ringCheck(t, l, "just before 25 h", tA, token.Second)
+	now = first.Add(25 * time.Hour)
+	ringCheck(t, l, "25 h after the first load", tA, -1)
+	ringCheck(t, l, "running bundle after 25 h", tB, token.First)
+}
+
 // T-U-22: a load of a bundle with no key set puts no key set in the current
 // place. The ring keeps the replaced key set. A second such load empties it.
 func TestTU22_BundleRingNoKeySet(t *testing.T) {

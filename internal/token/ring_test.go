@@ -232,13 +232,18 @@ func TestTS29_RingFormat(t *testing.T) {
 	r.Swap(k)
 	r.futures.Store(987654321)
 	type wrap struct{ R *Ring }
+	// fmt does not call Format for a field that is not exported.
+	type hidden struct{ r *Ring }
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
-		for _, arg := range []any{r, wrap{r}, &wrap{r}} {
+		for _, arg := range []any{r, wrap{r}, &wrap{r}, hidden{r}, &hidden{r}} {
 			got := fmt.Sprintf(verb, arg)
-			if !strings.Contains(got, "token.Ring") {
+			_, isHidden := arg.(hidden)
+			_, isHiddenPtr := arg.(*hidden)
+			if !strings.Contains(got, "token.Ring") && !isHidden && !isHiddenPtr {
 				t.Errorf("%s of %T gives %q", verb, arg, got)
 			}
-			for _, m := range []string{"trap-", "987654321", "4886718345", "123456789"} {
+			// 4886718345 is 0x123456789 and 987654321 is 0x3ADE68B1.
+			for _, m := range []string{"trap-", "987654321", "4886718345", "123456789", "3ade68b1", "3ADE68B1"} {
 				if strings.Contains(got, m) {
 					t.Errorf("%s of %T holds %q: %q", verb, arg, m, got)
 				}

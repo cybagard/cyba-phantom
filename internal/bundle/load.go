@@ -431,9 +431,14 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 		}
 		return reject(fixed(err))
 	}
-	// The ring changes first, so a token of the new bundle verifies as soon as
-	// the bundle runs.
-	l.ring.Swap(cand.tokens)
+	// The same bundle again keeps its key set and the ring. A swap would drop
+	// the key set of the bundle that it really replaced. Else the ring changes
+	// first, so a token of the new bundle verifies as soon as the bundle runs.
+	if run := l.cur.Load(); run != nil && run.sum == cand.sum {
+		cand.tokens = run.tokens
+	} else {
+		l.ring.Swap(cand.tokens)
+	}
 	// Zero the seed of the replaced bundle, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {
 		clear(*old.seed.p)
