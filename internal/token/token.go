@@ -284,6 +284,9 @@ type Result struct {
 	Counter uint64
 	// Reference is true when the matching key set is of a reference bundle.
 	Reference bool
+	// Stale and Future give the window class of the token. Only Ring.Verify
+	// sets them. A future token is also stale. They never change OK.
+	Stale, Future bool
 }
 
 // Verify checks a token against the key sets of the ring. It decrypts the

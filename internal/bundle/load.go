@@ -184,6 +184,9 @@ type Loader struct {
 	// install opens the sealed seed of a proprietary bundle. It can be nil.
 	install hpke.PrivateKey
 	cur     atomic.Pointer[Bundle]
+	// ring holds the key sets of the running bundle and of the bundle that it
+	// replaced. A new Loader has an empty ring.
+	ring *token.Ring
 
 	// chain and chainErr hold the last chain check. loadMu guards them.
 	chain    *chain
@@ -212,12 +215,21 @@ type Loader struct {
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
 	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
+	// The ring reads l.now at each call, so a test can replace the clock.
+	l.ring = token.NewRing(func() time.Time { return l.now() })
 	l.seed = func(a *Archive, c Class, m *Manifest) (*seedBytes, error) { return openSeed(a, c, m, l.install) }
 	return l
 }
 
 // Current returns the running bundle, or nil before the first accept.
 func (l *Loader) Current() *Bundle { return l.cur.Load() }
+
+// Ring returns the token ring of the loader. At each accepted load of another
+// bundle, the key set of the new bundle becomes current. The replaced key set
+// stays until the next such load or the 25 h end of the ring. A load of the
+// same bundle does not change the ring. A bundle with no key set puts no key
+// set in the current place.
+func (l *Loader) Ring() *token.Ring { return l.ring }
 
 // openDir opens the bundle directory of the path and gives the file name of the
 // bundle in it. The caller calls closeDir to close the directory. The error is
@@ -457,6 +469,15 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 			l.dropRecord(dir, n, &c)
 		}
 		return reject(fixed(err))
+	}
+	// A load of the same bundle keeps its key set and the ring. A swap would
+	// drop the key set of the bundle that the running bundle replaced. For
+	// another bundle, the ring changes before the loader replaces the running
+	// bundle.
+	if run := l.cur.Load(); run != nil && run.sum == cand.sum {
+		cand.tokens = run.tokens
+	} else {
+		l.ring.Swap(cand.tokens)
 	}
 	// Zero the seed of the replaced bundle, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {
