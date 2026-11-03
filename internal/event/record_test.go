@@ -268,6 +268,7 @@ func TestTU21RequestPath(t *testing.T) {
 		{"/%2F%A0", "//\xa0", "/%2F%A0"},
 		{"/%z4", "/%z4", "/%25z4"},
 		{"/%4z", "/%4z", "/%254z"},
+		{"/%c3%a9", "/é", "/%C3%A9"},
 	} {
 		if got := RequestPath(c.raw, c.path); got != c.want {
 			t.Errorf("RequestPath(%q, %q) = %q, want %q", c.raw, c.path, got, c.want)
@@ -276,8 +277,8 @@ func TestTU21RequestPath(t *testing.T) {
 }
 
 // T-U-21: after "/", each byte 0x00-0x1F, 0x7F and 0x80-0xFF gives %XX with
-// upper-case hex. '/' is copied, '%' gives %25, and each other byte gives what
-// url.PathEscape gives for that byte alone.
+// upper-case hex. RequestPath copies '/', '%' gives %25, and each other byte
+// gives what url.PathEscape gives for that byte alone.
 func TestTU21RequestPathEachByte(t *testing.T) {
 	for c := range 256 {
 		s := "/" + string([]byte{byte(c)})
@@ -297,8 +298,9 @@ func TestTU21RequestPathEachByte(t *testing.T) {
 	}
 }
 
-// T-U-21: a path over 2048 bytes is cut before the first token that does not
-// fit. The code writes no later token, and the cut is never inside an escape.
+// T-U-21: RequestPath cuts a path over 2048 bytes before the first token that
+// does not fit. The code writes no later token, and the cut is never inside an
+// escape.
 func TestTU21RequestPathCut(t *testing.T) {
 	for _, unit := range []string{"%2F", "<", "a"} {
 		for pad := range 4 {
@@ -319,7 +321,7 @@ func TestTU21RequestPathCut(t *testing.T) {
 	if got := RequestPath("", long); len(got) != 2047 || strings.Contains(got, "%") {
 		t.Errorf("length %d, want 2047 and no escape", len(got))
 	}
-	// A source of 1 MiB must not give a buffer of 3 MiB. Ten reads allocate
+	// A source of 1 MiB must not give a buffer of 3 MiB. Ten calls allocate
 	// under 1 MiB.
 	src := "/" + strings.Repeat("a", 1<<20)
 	var before, after runtime.MemStats
@@ -329,7 +331,7 @@ func TestTU21RequestPathCut(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	if got := after.TotalAlloc - before.TotalAlloc; got >= 1<<20 {
-		t.Errorf("10 reads of 1 MiB allocate %d bytes, want under 1 MiB", got)
+		t.Errorf("10 calls on 1 MiB allocate %d bytes, want under 1 MiB", got)
 	}
 }
 
@@ -375,7 +377,7 @@ func TestTU21ConstructionEscapesControlBytes(t *testing.T) {
 }
 
 // T-U-21: for any Path, the stored path has no control byte, has at most 2048
-// bytes and is valid UTF-8. The row of the event is accepted.
+// bytes and is valid UTF-8. RecordFromRow accepts the row of the event.
 func FuzzTU21Path(f *testing.F) {
 	for _, s := range []string{"/a%2Fb%3Cc", "/a%0Ab", "/a%7F", "/%2541", "/é", "/a\x01b", "\x7f\xff",
 		strings.Repeat("\x01", 2100), strings.Repeat("a", 2046) + "\x01b", strings.Repeat("a", 2047) + "\xff"} {

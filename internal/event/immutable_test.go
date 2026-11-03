@@ -242,14 +242,14 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 	}
 }
 
-// T-U-17: a queue holds events near the maximum size (at least half of
-// MaxEventBytes). A caller tries to change each event after the enqueue. The
-// byte sum of the queue stays the sum of Size over the accepted events, and it
-// never passes the byte caps of the lanes. These caps are 24 MiB for the bulk
-// lane and 8 MiB for the evidence lane, as the Queue documentation says. The
-// first case uses the depth 4, so that the lane lengths drop the events. The
-// second case uses the largest depth (MaxQueueDepth), so that the byte caps and
-// not the lane lengths drop the events.
+// T-U-17: a queue holds large events (at least half of MaxEventBytes). A
+// caller tries to change each event after the enqueue. The byte sum of the
+// queue stays the sum of Size over the accepted events, and it never passes
+// the byte caps of the lanes. These caps are 24 MiB for the bulk lane and
+// 8 MiB for the evidence lane, as the Queue documentation says. The first
+// case uses the depth 4, so that the lane lengths drop the events. The second
+// case uses the largest depth (MaxQueueDepth), so that the byte caps and not
+// the lane lengths drop the events.
 func TestTU17_QueueBytesWithChangedEvents(t *testing.T) {
 	const bulkCap, evidenceCap = 24 << 20, 8 << 20
 	for _, c := range []struct {
