@@ -350,14 +350,20 @@ func TestTU08_HealthFollowsLoaderState(t *testing.T) {
 	}
 }
 
+// tmplBytes is the size of a template of the benchmark. The trap file adds 64
+// bytes of instruction templates to the sum of the bundle cap of 512 KiB.
+const tmplBytes = 64<<10 - 16
+
 // benchRoutes is a route map with one route to the first template.
 const benchRoutes = `{"routes":[{"path":"/","template":"vhosts/h.example/0000.tmpl",` +
 	`"type":"text/html; charset=utf-8"}]}`
 
 // BenchmarkStartLargeBundle starts the store part and the bundle part with a
 // bundle near the caps. The case files has two random files of 4 MiB less
-// 4 KiB. The case templates has 8 templates of 65 535 bytes. Its first random
-// file is 600 KiB smaller than in the case files. The bundle file has at most
+// 4 KiB. The case templates has 8 templates of 65 520 bytes. Each one has 64
+// actions that the load check permits. It also has a trap file. Its first
+// random file is 600 KiB smaller than in the case files. The bundle file has at
+// most
 // 8 MiB. It reports the growth of the heap in use after a GC, from before the
 // start to after the load. The bundle bytes of the test are not in the value.
 // The case templates also has a route map for its vhost.
@@ -373,12 +379,23 @@ func BenchmarkStartLargeBundle(b *testing.B) {
 	}{{"files", 4<<20 - 4<<10, 0}, {"templates", 4<<20 - 4<<10 - 600<<10, 8}} {
 		b.Run(c.name, func(b *testing.B) {
 			files := []tarFile{big("traps/a.bin", c.first), big("traps/b.bin", 4<<20-4<<10)}
+			// Each template has the most actions that the load check permits:
+			// 64 of {{index .Trap "<id>"}}. The rest is text.
+			var ids, actions []string
+			for i := range 64 {
+				id := fmt.Sprintf("t%02d", i)
+				ids = append(ids, fmt.Sprintf(`{"id":%q,"slot":"hidden-p","surface":"path",`+
+					`"visibility":"human-visible","instruction_template":"x"}`, id))
+				actions = append(actions, fmt.Sprintf(`{{index .Trap %q}}`, id))
+			}
+			acts := strings.Join(actions, "")
 			for i := range c.tmpls {
-				text := "{{print" + strings.Repeat(" 1", (64<<10-9)/2) + "}}"
+				text := acts + strings.Repeat("a", tmplBytes-len(acts))
 				files = append(files, tarFile{fmt.Sprintf("vhosts/h.example/%04d.tmpl", i), []byte(text)})
 			}
 			if c.tmpls > 0 {
-				files = append(files, tarFile{"vhosts/h.example/routes.json", []byte(benchRoutes)})
+				files = append(files, tarFile{"vhosts/h.example/routes.json", []byte(benchRoutes)},
+					tarFile{"traps/traps.json", []byte("[" + strings.Join(ids, ",") + "]")})
 			}
 			arch := archiveOf(b, referenceFiles(files...)...)
 			if len(arch) > bundle.MaxBundleBytes {

@@ -66,6 +66,7 @@ sync
 sync/atomic
 syscall
 testing
+text/template/parse
 time
 unicode
 unicode/utf8

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 var update = flag.Bool("update", false, "write the bundle fixtures into test/fixtures/bundles")
@@ -28,7 +29,7 @@ const vhostFile = "vhosts/h.example/index.tmpl"
 // checks before its own. malformed.cbnd has no valid manifest.
 // The files hold no signature. The tests sign them with test keys.
 func bundleFixtures() map[string][]byte {
-	page := ent{name: vhostFile, data: []byte("<p>{{.Title}}</p>\n")}
+	page := ent{name: vhostFile, data: []byte("<p>plain page</p>\n")}
 	mk := func(manifest string, more ...ent) []byte {
 		return build(append([]ent{{name: "manifest.json", data: []byte(manifest)}}, more...)...)
 	}
@@ -139,8 +140,8 @@ func loadRaw(t *testing.T, want error, setup func(*env), ents ...ent) *Bundle {
 }
 
 // T-U-08: a .tmpl file that does not parse gives template_parse. A valid
-// template, any other file, and no template load. The built-in functions of
-// text/template stay callable.
+// template, any other file, and no template load. A call of a built-in function
+// gives template_parse, because the load check refuses it.
 func TestTU08TemplateParse(t *testing.T) {
 	assets := strings.Repeat("{{", 50<<10)
 	for _, c := range []struct {
@@ -151,9 +152,10 @@ func TestTU08TemplateParse(t *testing.T) {
 		{"syntax error", []ent{tf(vhostFile, "{{if}}")}, ErrTemplateParse},
 		{"undefined function", []ent{tf(vhostFile, "{{shell `id`}}")}, ErrTemplateParse},
 		{"one bad file of two", []ent{tf(vhostFile, "ok"), tf("vhosts/h.example/b.tmpl", "{{")}, ErrTemplateParse},
-		{"valid", []ent{tf(vhostFile, "<p>{{.Title}}</p>")}, nil},
-		{"call", []ent{tf(vhostFile, "{{call .F}}")}, nil},
-		{"printf", []ent{tf(vhostFile, `{{printf "%s" "x"}}`)}, nil},
+		{"valid", []ent{tf(vhostFile, "<p>plain</p>")}, nil},
+		{"field", []ent{tf(vhostFile, "<p>{{.Title}}</p>")}, ErrTemplateParse},
+		{"call", []ent{tf(vhostFile, "{{call .F}}")}, ErrTemplateParse},
+		{"printf", []ent{tf(vhostFile, `{{printf "%s" "x"}}`)}, ErrTemplateParse},
 		{"outside vhosts", []ent{tf("traps/x.tmpl", "{{if}}")}, nil},
 		{"html asset", []ent{tf("vhosts/h.example/x.html", "{{if}}")}, nil},
 		{"upper case suffix", []ent{tf("vhosts/h.example/X.TMPL", "{{if}}")}, nil},
@@ -177,12 +179,12 @@ func TestTU08KeptSet(t *testing.T) {
 // T-U-08: a kept template has the option and the function map of the
 // constructor. The test runs a copy. The loader runs no template.
 func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
-	engineFuncs["probe"] = func() string { return "ok" }
-	t.Cleanup(func() { delete(engineFuncs, "probe") })
-	b := loadWith(t, nil, tf(vhostFile, "{{probe}}"), tf("vhosts/h.example/m.tmpl", "{{.Missing}}"))
+	const act = `{{comment (index .Trap "a")}}`
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, act), tf("vhosts/h.example/m.tmpl", `{{index .Trap "a"}}`)}),
+		tf(trapsName, arr(tj("a", "x"))))...)
 	var sb strings.Builder
 	tp, ok := b.Template(vhostFile)
-	if !ok || tp.Execute(&sb, nil) != nil || sb.String() != "ok" {
+	if !ok || tp.Execute(&sb, Page{Trap: map[string]string{"a": "ok"}}) != nil || sb.String() != "<!-- ok -->" {
 		t.Errorf("function map not kept: %v, %q", ok, sb.String())
 	}
 	m, _ := b.Template("vhosts/h.example/m.tmpl")
@@ -309,17 +311,23 @@ func TestSEC23ParseErrorHoldsNoText(t *testing.T) {
 	}
 }
 
-// T-U-08: the function map has no names.
+// T-U-08: the function map has the one name comment.
 func TestTU08EngineFuncKeys(t *testing.T) {
-	if keys := slices.Sorted(maps.Keys(engineFuncs)); len(keys) != 0 {
-		t.Errorf("function map keys %v; want none", keys)
+	if keys := slices.Sorted(maps.Keys(engineFuncs)); !slices.Equal(keys, []string{"comment"}) {
+		t.Errorf("function map keys %v; want [comment]", keys)
 	}
 }
 
-// T-U-08: the parse does not execute a template. A template that fails when it
-// runs, with missingkey=error, loads.
-func TestTU08ParseDoesNotExecute(t *testing.T) {
-	loadWith(t, nil, tf(vhostFile, "{{.Missing.Field}}{{index .A 99}}{{template \"gone\"}}"))
+// T-U-08: the load does not execute a template.
+func TestTU08LoadDoesNotExecute(t *testing.T) {
+	called := false
+	old := engineFuncs["comment"]
+	engineFuncs["comment"] = func(string) string { called = true; return "" }
+	t.Cleanup(func() { engineFuncs["comment"] = old })
+	execLoad(t, nil, `{{comment (index .Trap "a")}}`)
+	if called {
+		t.Error("the load ran a template")
+	}
 }
 
 const (
@@ -582,5 +590,170 @@ func TestTU08ContentInvalidCode(t *testing.T) {
 		if c, _ := CodeOf(other); c == CodeContentInvalid {
 			t.Errorf("%v has the code of ErrContentInvalid", other)
 		}
+	}
+}
+
+// execLoad loads one template with this text and the traps a and b, and wants
+// the error want. Else it returns the accepted bundle.
+func execLoad(t *testing.T, want error, text string) *Bundle {
+	return execLoadIDs(t, want, text, "a", "b")
+}
+
+// execLoadIDs is execLoad with the traps of these ids.
+func execLoadIDs(t *testing.T, want error, text string, ids ...string) *Bundle {
+	t.Helper()
+	var traps []string
+	for _, id := range ids {
+		traps = append(traps, tj(id, "x"))
+	}
+	return loadRaw(t, want, nil, withRoutes([]ent{tf(vhostFile, text), tf(trapsName, arr(traps...))})...)
+}
+
+// manyIDs gives the text of n actions with n different ids, and the ids.
+func manyIDs(n int) (string, []string) {
+	var text strings.Builder
+	var ids []string
+	for i := range n {
+		ids = append(ids, fmt.Sprintf("i%d", i))
+		fmt.Fprintf(&text, `{{index .Trap "i%d"}}`, i)
+	}
+	return text.String(), ids
+}
+
+// T-U-08: each form that the execution check refuses gives template_parse.
+func TestTU08ExecCheckRefused(t *testing.T) {
+	idx := `{{index .Trap "a"}}`
+	for _, text := range []string{
+		`{{index .Trap "a" "b"}}`, `{{index .Trap}}`, `{{index .Other "a"}}`, `{{index .Trap.X "a"}}`,
+		`{{index . "a"}}`, `{{index $.Trap "a"}}`, `{{index .Trap 1}}`, `{{index .Trap .Trap}}`,
+		`{{len .Trap}}`, `{{html "x"}}`, `{{$x := index .Trap "a"}}`, `{{$x := index .Trap "a"}}{{$x = index .Trap "b"}}`,
+		`{{index .Trap "a" | comment}}`, `{{comment (index .Trap "a" | html)}}`, `{{comment "x"}}`,
+		`{{comment .Trap}}`, `{{comment (index .Trap "a") "x"}}`, `{{comment (comment (index .Trap "a"))}}`,
+		`{{comment (index .Trap "a" "b")}}`, `{{comment ($x := index .Trap "a")}}`, `{{(index .Trap "a")}}`,
+		`{{(index .Trap "a").X}}`, `{{.Trap}}`, `{{.Trap.a}}`, `{{.}}`, `{{$}}`, `{{"x"}}`, `{{1}}`,
+		idx + idx, idx + `{{comment (index .Trap "a")}}`, `{{index .Trap "zz"}}`, `{{index .Trap ""}}`,
+		`{{define "x"}}a{{end}}b`, `{{define "x"}}a{{end}}`, `{{block "x" .}}a{{end}}`,
+		`{{define "r"}}{{template "r" .}}{{end}}`, `{{template "x"}}`,
+		`{{range 100000000}}{{end}}`, `{{range 1000}}{{range 1000}}{{range 1000}}x{{end}}{{end}}{{end}}`,
+		`{{if 1}}x{{end}}`, `{{with 1}}x{{end}}`, `{{printf "%99999999d" 1}}`, `{{call .F}}`, `{{.M}}`,
+		`{{$a := "aaaaaaaa"}}{{$a = printf "%s%s" $a $a}}{{$a = printf "%s%s" $a $a}}`,
+		`{{range 3}}{{break}}{{end}}`, `{{range 3}}{{continue}}{{end}}`,
+	} {
+		t.Run(fmt.Sprintf("%.60s", text), func(t *testing.T) { execLoad(t, ErrTemplateParse, text) })
+	}
+}
+
+// T-U-08: the permitted forms load. A trim marker and a comment are permitted.
+func TestTU08ExecCheckPermitted(t *testing.T) {
+	for _, text := range []string{
+		"", "plain", `{{index .Trap "a"}}`, `{{- index .Trap "a" -}}`, `x {{- comment (index .Trap "a") -}} y`,
+		`{{ index  .Trap "a" }}`, "{{index .Trap `a`}}", `{{index .Trap "a"}}{{index .Trap "b"}}`,
+		`{{/* note */}}{{- /* note */ -}}x`, `{{comment (index .Trap "a")}}{{index .Trap "b"}}`,
+	} {
+		t.Run(fmt.Sprintf("%.60s", text), func(t *testing.T) { execLoad(t, nil, text) })
+	}
+}
+
+// T-U-08: a template uses 64 ids and not 65.
+func TestTU08ExecCheckIDCount(t *testing.T) {
+	text, ids := manyIDs(64)
+	execLoadIDs(t, nil, text, ids...)
+	text, ids = manyIDs(65)
+	execLoadIDs(t, ErrTemplateParse, text, ids...)
+}
+
+// T-U-08: a bundle with no trap file has no id, so each action is refused.
+func TestTU08ExecCheckNoTrapFile(t *testing.T) {
+	loadWith(t, ErrTemplateParse, tf(vhostFile, `{{index .Trap "a"}}`))
+	loadWith(t, nil, tf(vhostFile, "plain"))
+}
+
+// T-U-08: a deep nesting around index is refused and takes no deep walk.
+func TestTU08ExecCheckDeepNesting(t *testing.T) {
+	text := "{{" + strings.Repeat("(", 9999) + `index .Trap "a"` + strings.Repeat(")", 9999) + "}}"
+	start := time.Now()
+	execLoad(t, ErrTemplateParse, text)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("the load took %v", d)
+	}
+}
+
+// T-U-08: the trap file form check runs first. A template that fails the check
+// together with a bad route map gives template_parse.
+func TestTU08ExecCheckOrder(t *testing.T) {
+	bad := `{{.X}}`
+	loadRaw(t, ErrContentInvalid, nil, tf(vhostFile, bad), tf(hostDir+routeMapName, routeJSON(vhostFile)), tf(trapsName, "{}"))
+	loadRaw(t, ErrTemplateParse, nil, tf(vhostFile, bad), tf(hostDir+routeMapName, "x"))
+	loadRaw(t, ErrContentInvalid, nil, tf(vhostFile, "ok"), tf(hostDir+routeMapName, "x"))
+}
+
+// T-S-28: Page has one field, Trap, and no method.
+func TestTS28PageType(t *testing.T) {
+	typ := reflect.TypeFor[Page]()
+	if typ.NumField() != 1 || typ.Field(0).Name != "Trap" || typ.Field(0).Type != reflect.TypeFor[map[string]string]() {
+		t.Errorf("Page is %v; want one field Trap of map[string]string", typ)
+	}
+	if typ.NumMethod() != 0 || reflect.TypeFor[*Page]().NumMethod() != 0 {
+		t.Error("Page or *Page has a method")
+	}
+}
+
+// T-S-28: comment gives one HTML comment, or "" for a text that is not safe.
+func TestTS28Comment(t *testing.T) {
+	for _, s := range []string{
+		"a--b", "--", "<!--", "-->", "--!>", "x<!--y", "x-->", ">", ">x", "->", "->x", "\x00", "\x1f",
+		"a\rb", "a\x01", "a\x0bb", "a\x7f\x00",
+	} {
+		if got := comment(s); got != "" {
+			t.Errorf("comment(%q) = %q; want empty", s, got)
+		}
+	}
+	for _, s := range []string{"", "x", " ", "a b", "a\tb", "a\nb", "a>b", "a->b", "-x", "-", "a-b", "<p>", "é"} {
+		if got, want := comment(s), "<!-- "+s+" -->"; string(got) != want {
+			t.Errorf("comment(%q) = %q; want %q", s, got, want)
+		}
+	}
+}
+
+// T-S-28: in text context the output is one HTML comment. In an attribute the
+// output is empty. A refused text gives no comment.
+func TestTS28CommentContext(t *testing.T) {
+	for _, c := range []struct{ text, trap, want string }{
+		{`<p>{{comment (index .Trap "a")}}</p>`, "x", "<p><!-- x --></p>"},
+		{`<p>{{comment (index .Trap "a")}}</p>`, "a--b", "<p></p>"},
+		{`<p>{{comment (index .Trap "a")}}</p>`, "--><script>", "<p></p>"},
+		{`<a title="{{comment (index .Trap "a")}}">`, "x", `<a title="">`},
+	} {
+		b := execLoadIDs(t, nil, c.text, "a")
+		tp, _ := b.Template(vhostFile)
+		var sb strings.Builder
+		must(t, tp.Execute(&sb, Page{Trap: map[string]string{"a": c.trap}}))
+		if sb.String() != c.want {
+			t.Errorf("%s with %q gave %q; want %q", c.text, c.trap, sb.String(), c.want)
+		}
+	}
+}
+
+// T-S-28: the eight in-page slot forms load and run with a Page.
+func TestTS28SlotForms(t *testing.T) {
+	const a = `{{index .Trap "a"}}`
+	for name, text := range map[string]string{
+		"hidden p":     `<p hidden>` + a + `</p>`,
+		"html comment": `{{comment (index .Trap "a")}}`,
+		"meta":         `<meta name="description" content="` + a + `">`,
+		"alt":          `<img alt="` + a + `" src="/x.png">`,
+		"aria-label":   `<div aria-label="` + a + `"></div>`,
+		"nofollow":     `<a rel="nofollow" href="/x">` + a + `</a>`,
+		"json-ld":      `<script type="application/ld+json">{"description":"` + a + `"}</script>`,
+		"noscript":     `<noscript>` + a + `</noscript>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := execLoadIDs(t, nil, text, "a")
+			tp, _ := b.Template(vhostFile)
+			var sb strings.Builder
+			if err := tp.Execute(&sb, Page{Trap: map[string]string{"a": "hello"}}); err != nil || !strings.Contains(sb.String(), "hello") {
+				t.Errorf("execute gave %q, %v", sb.String(), err)
+			}
+		})
 	}
 }
