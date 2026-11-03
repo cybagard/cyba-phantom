@@ -212,8 +212,8 @@ func TestTU18StoppedWriterLeavesTheTakeLoop(t *testing.T) {
 	stopRun := r.start()
 	waitUntil(t, "the stop marker", r.w.markerMade.Load)
 	time.Sleep(100 * time.Millisecond)
-	if got := r.w.Stats().Dropped; got != (Drops{Bulk: maxBatch}) || r.q.Bytes() == (event.Bytes{}) {
-		t.Fatalf("dropped %+v (want bulk 500), lanes empty %v", got, r.q.Bytes() == (event.Bytes{}))
+	if got := r.w.Stats().Dropped; got != (Drops{Bulk: maxBatch}) || r.q.Bytes() == (event.Bytes{}) || r.w.Healthy() {
+		t.Fatalf("dropped %+v (want bulk 500), lanes empty %v, healthy %v", got, r.q.Bytes() == (event.Bytes{}), r.w.Healthy())
 	}
 	if err := stopRun(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)

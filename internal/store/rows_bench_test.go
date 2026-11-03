@@ -110,12 +110,6 @@ const (
 	floodTicks = 300
 )
 
-// loadLog is a test appender that is also an empty log for the start check.
-type loadLog struct {
-	*testAppender
-	fakeLog
-}
-
 // runLoad feeds the writer at loadRate, or in bursts above the queue size when
 // flood is true.
 func runLoad(b *testing.B, flood bool) {
@@ -142,8 +136,8 @@ func runLoad(b *testing.B, flood bool) {
 		b.Fatal(err)
 	}
 	// The appender and the log are one object.
-	lg := &loadLog{testAppender: &testAppender{}}
-	w := NewWriter(db, q, lg, c, false, nil, Recovery{State: root, Origin: "origin", Log: lg})
+	lg := &fakeLog{testAppender: &testAppender{}}
+	w := NewWriter(db, q, false, nil, Recovery{State: root, Origin: "origin", Log: lg})
 	// The writer goroutine appends. Read after Run returns.
 	var batches, commits []time.Duration
 	w.timing = func(batch, commit time.Duration) {

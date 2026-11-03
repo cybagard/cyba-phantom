@@ -291,6 +291,28 @@ func TestTU18SinkDatabaseErrorBeforeTheCommitStopsTheWriter(t *testing.T) {
 	}
 }
 
+// T-U-18: a failed PRAGMA synchronous=FULL before the row stops the writer. The
+// row is not made and the spool gets no note.
+func TestTU18SinkFailedPragmaBeforeTheRowStopsTheWriter(t *testing.T) {
+	r := newSinkRig(t)
+	r.w.beforePragma = func(stmt string) error {
+		if stmt == "PRAGMA synchronous=FULL" {
+			return errors.New("pragma failed")
+		}
+		return nil
+	}
+	stop := r.start()
+	wantRule(t, r.sink.Add(4, r.note(4, 1)), writerName, ruleDatabase)
+	if r.spool.count() != 0 || r.rowCount() != 0 {
+		t.Errorf("spool %d, rows %d (want 0, 0)", r.spool.count(), r.rowCount())
+	}
+	eventually(t, func() bool { return !r.w.Healthy() })
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
 // T-U-18: a failed PRAGMA synchronous=NORMAL after the row stops the writer. A
 // fork signal keeps its own rule, because the first error wins.
 func TestTU18SinkFailedPragmaAfterTheRowStopsTheWriter(t *testing.T) {

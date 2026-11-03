@@ -95,7 +95,7 @@ func TestTI07CrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := NewWriter(db, q, l, c, false, nil, Recovery{State: root, Origin: "origin", Log: l})
+	w := NewWriter(db, q, false, nil, Recovery{State: root, Origin: "origin", Log: l})
 	var calls atomic.Int32
 	crash := func() {
 		if calls.Add(1) == 2 {
@@ -219,7 +219,7 @@ func TestTI07WriterCrashKeepsEvidenceVerifiable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := NewWriter(db, q, l, cnt, false, nil, Recovery{State: root, Origin: "origin", Log: l})
+			w := NewWriter(db, q, false, nil, Recovery{State: root, Origin: "origin", Log: l})
 			crashEvents(t, q, newBatch)
 			q.Close()
 			done := make(chan error, 1)

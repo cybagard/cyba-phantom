@@ -29,7 +29,7 @@ func TestTU08EventRowsHaveLeafIndex(t *testing.T) {
 	c := event.NewCounters()
 	q, err := event.NewQueue(8, c)
 	must(t, err)
-	w := store.NewWriter(db, q, log, c, false, nil, store.Recovery{State: e.root, Origin: "origin", Log: log})
+	w := store.NewWriter(db, q, false, nil, store.Recovery{State: e.root, Origin: "origin", Log: log})
 	e.l.SetEvents(q, nil)
 	sum3 := e.install("bundle/current", mf(ver(3)))
 	_, err1 := e.l.LoadFrom(SourceFetch)

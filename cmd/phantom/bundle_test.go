@@ -333,7 +333,7 @@ func startBoth(tb testing.TB, arch []byte) (dir string, bp *bundlePart, stop fun
 	q, err := event.NewQueue(16, c)
 	mustOK(tb, err)
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := start(p, q, c, realDeps, lg)
+	s := start(p, q, realDeps, lg)
 	return dir, startBundle(p, s, q, lg), s.Stop
 }
 

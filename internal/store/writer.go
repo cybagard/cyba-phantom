@@ -26,7 +26,7 @@ const (
 )
 
 // Writer is the one writer of the event table. It uses the database pool from
-// Open and Migrate, the queue, and the appender. The caller closes them after
+// Open and Migrate, the queue, and the log. The caller closes them after
 // Run returns. It also adds the drop counts of the queue to ip_counter.
 //
 // The writer stops for one of five causes (see Run):
@@ -41,7 +41,6 @@ const (
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
-	app        appender
 	rec        Recovery
 	counters   *event.Counters
 	bodyPrefix bool // privacy.store_body_prefix
@@ -88,17 +87,17 @@ type Writer struct {
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
-// hashes in app. The writer adds the drop counts of c to ip_counter. It stores
-// the body prefix of an event only when bodyPrefix is true. It writes one line to
-// log when it stops; a nil log writes nothing. rec gives the state directory, the
-// origin, and the log for the start check and the stop marker. rec.State and
-// rec.Log must not be nil: a nil one stops the writer at the start of Run. The
-// other pointer arguments must not be nil.
-func NewWriter(db *sql.DB, q *event.Queue, app appender, c *event.Counters, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
+// hashes in rec.Log. The writer adds the drop counts of q to ip_counter. It
+// stores the body prefix of an event only when bodyPrefix is true. It writes
+// one line to log when it stops; a nil log writes nothing. rec gives the state
+// directory, the origin, and the log for the appends, the start check and the
+// stop marker. rec.State and rec.Log must not be nil: a nil one stops the
+// writer at the start of Run. The other pointer arguments must not be nil.
+func NewWriter(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.Logger, rec Recovery) *Writer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Writer{db: db, q: q, app: app, rec: rec, counters: c, bodyPrefix: bodyPrefix, dk: newDayKey(), log: log, rows: make(chan rowRequest, 1)}
+	return &Writer{db: db, q: q, rec: rec, counters: q.Counters(), bodyPrefix: bodyPrefix, dk: newDayKey(), log: log, rows: make(chan rowRequest, 1)}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -417,7 +416,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if w.beforeAppend != nil {
 			w.beforeAppend()
 		}
-		if first, err = w.app.AppendBatch(hs); err != nil {
+		if first, err = w.rec.Log.AppendBatch(hs); err != nil {
 			appendErr = fail(writerName, ruleAppend)
 			w.writeFailed.Add(uint64(len(hs)))
 			if errors.Is(err, tlog.ErrHeadOnDisk) {

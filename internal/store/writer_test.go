@@ -64,7 +64,7 @@ type rig struct {
 	app     *testAppender
 	root    *os.Root // the state directory
 	state   string   // its path
-	lg      *fakeLog // what the start check reads
+	lg      *fakeLog // the one log of the writer; it appends through app
 	tick    chan time.Time
 	commits chan int
 	exited  chan struct{} // closed when the last launched Run returns
@@ -83,9 +83,10 @@ func newRig(t *testing.T, depth int) *rig {
 	if err := Migrate(db, "origin"); err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, q: q, c: c, db: db, app: &testAppender{next: 100}, root: root, state: state,
-		lg: &fakeLog{}, tick: make(chan time.Time), commits: make(chan int, 64)}
-	r.w = NewWriter(r.db, q, r.app, c, false, nil, Recovery{State: root, Origin: "origin", Log: r.lg})
+	app := &testAppender{next: 100}
+	r := &rig{t: t, q: q, c: c, db: db, app: app, root: root, state: state,
+		lg: &fakeLog{testAppender: app}, tick: make(chan time.Time), commits: make(chan int, 64)}
+	r.w = NewWriter(r.db, q, false, nil, Recovery{State: root, Origin: "origin", Log: r.lg})
 	r.w.tick = r.tick
 	r.w.onCommit = func(n int) { r.commits <- n }
 	return r
