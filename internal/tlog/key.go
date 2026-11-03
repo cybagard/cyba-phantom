@@ -329,7 +329,7 @@ func writeNew(root *os.Root, name, text string) error {
 	}
 	_, err = f.WriteString(text)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -351,7 +351,7 @@ func syncDir(root *os.Root, name string) error {
 	if err != nil {
 		return err
 	}
-	err = d.Sync()
+	err = syncDirFile(d)
 	if cerr := d.Close(); err == nil {
 		err = cerr
 	}

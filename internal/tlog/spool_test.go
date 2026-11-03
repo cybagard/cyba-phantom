@@ -591,6 +591,41 @@ func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 	}
 }
 
+// T-S-13: a failed sync of the spool directory is an error of Add.
+func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
+	e := newSpool(t)
+	msg, err := SignCheckpoint(e.signer, 5, testRoot())
+	must(t, err)
+	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
+	const want = "checkpoint spool checkpoints/5.note: directory cannot be synced"
+	if err := e.Add(5, msg); err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+// T-S-13: Add syncs the temporary file of the note and the checkpoints
+// directory, one time each. It syncs no other file and no other directory.
+func TestTS13_AddSyncsTheNoteFileAndTheSpoolDirectory(t *testing.T) {
+	e := newSpool(t)
+	msg, err := SignCheckpoint(e.signer, 5, testRoot())
+	must(t, err)
+	var files, dirs []string
+	record := func(list *[]string) func(*os.File) error {
+		return func(f *os.File) error {
+			*list = append(*list, filepath.Base(f.Name()))
+			return realSync(f)
+		}
+	}
+	setHooks(t, hooks{file: record(&files), dir: record(&dirs)})
+	must(t, e.Add(5, msg))
+	if want := []string{"5.note.tmp.tmp"}; !slices.Equal(files, want) {
+		t.Errorf("file syncs %q, want %q", files, want)
+	}
+	if want := []string{spoolDir}; !slices.Equal(dirs, want) {
+		t.Errorf("directory syncs %q, want %q", dirs, want)
+	}
+}
+
 // T-S-13: an entry at a note name that is not a regular file (a directory, a
 // FIFO, a symlink) is not given to the sender. It is deleted and counted. If it
 // cannot be deleted, it is counted. The targets continue with the next notes, and

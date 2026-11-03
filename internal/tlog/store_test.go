@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -244,13 +245,14 @@ type hooks struct {
 	rename func(*os.Root, string, string) error // rename of a file
 }
 
-// setHooks is the only code of the tests that sets the durability calls of the
-// store. It sets the calls in h and restores the earlier calls when t ends. The
-// returned function restores them earlier. The calls are package state. Two
-// parallel tests that use them at the same time can race. t.Setenv panics if
-// the test or an ancestor is parallel. t.Parallel panics after a call of
-// setHooks. A parallel subtest of a test that calls setHooks is not refused.
-// A fuzz test can call setHooks too.
+// Only setHooks sets the hooks. Two hooks replace the fsync calls of the
+// store, the key files, the signer state and the spool. The third hook
+// replaces the rename of the store. setHooks sets the calls in h and restores
+// the earlier calls when t ends. The returned function restores them earlier.
+// The calls are package state. Two parallel tests that use them at the same
+// time can race. t.Setenv panics if the test or an ancestor is parallel.
+// t.Parallel panics after a call of setHooks. A parallel subtest of a test
+// that calls setHooks is not refused. A fuzz test can call setHooks too.
 func setHooks(t testing.TB, h hooks) (restore func()) {
 	t.Helper()
 	t.Setenv("TLOG_TEST_HOOKS", "1")
@@ -267,6 +269,23 @@ func setHooks(t testing.TB, h hooks) (restore func()) {
 		renameFile = h.rename
 	}
 	return restore
+}
+
+// T-U-07: without setHooks, the durability calls are the functions of the os
+// package. A call that does nothing cannot pass.
+func TestTU07DurabilityHooksAreTheFunctionsOfTheOsPackage(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		got, want any
+	}{
+		{"syncFile", syncFile, (*os.File).Sync},
+		{"syncDirFile", syncDirFile, (*os.File).Sync},
+		{"renameFile", renameFile, (*os.Root).Rename},
+	} {
+		if reflect.ValueOf(c.got).Pointer() != reflect.ValueOf(c.want).Pointer() {
+			t.Errorf("%s is not the function of the os package", c.name)
+		}
+	}
 }
 
 // A tile or the tree head is durable in this order. First, the store writes the
@@ -335,6 +354,9 @@ func TestTU07FailedFileFsyncWritesNoTile(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "tlog", tile.Path())); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the tile file is there: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "tlog", tile.Path()+tmpSuffix)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the temporary file is there: %v", err)
 	}
 }
 
@@ -464,8 +486,13 @@ func TestTU07FullTileIsNeverWrittenAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fiBefore, err := os.Stat(file)
+	mustNil(t, err)
 	if err := s.WriteTile(tile, before); err != nil {
 		t.Fatalf("same bytes: %v", err)
+	}
+	if fiAfter, err := os.Stat(file); err != nil || !os.SameFile(fiBefore, fiAfter) {
+		t.Fatalf("the same bytes made a new file: %v", err)
 	}
 	other := bytes.Clone(before)
 	other[0] ^= 1

@@ -899,6 +899,42 @@ func TestTS13LevelBoundsOfTheCacheAndTheLoader(t *testing.T) {
 	}
 }
 
+// T-U-07: leaf 1<<40 - 1 gives the first hash at level 5. Leaf 1<<48 - 1 gives
+// the first hash at level 6. Each case makes tiles by hand below the new
+// level. The log then has the case size, and the test appends one leaf.
+func TestTU07BatchReachesLevels5And6(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		size   int64
+		levels int // the new level: hand tiles are at the levels below it
+	}{
+		{"level 5", 1<<40 - 1, 5},
+		{"level 6", 1<<48 - 1, 6},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, dir := newLogState(t)
+			openStore(t, state).Close()
+			size := c.size
+			var tiles [maxLevel + 1]tileBuf
+			for lv := 0; lv < c.levels; lv++ {
+				n := (size >> (TileHeight * lv)) / fullWidth
+				tiles[lv] = tileBuf{n, bytes.Repeat([]byte{byte(lv + 1)}, (fullWidth-1)*tlog.HashSize)}
+				path := filepath.Join(dir, "tlog", tlog.Tile{H: TileHeight, L: lv, N: n, W: fullWidth - 1}.Path())
+				must(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				must(t, os.WriteFile(path, tiles[lv].data, 0o600))
+			}
+			root, err := tlog.TreeHash(size, cacheView{&tiles})
+			must(t, err)
+			head := binary.BigEndian.AppendUint64(nil, uint64(size))
+			must(t, os.WriteFile(filepath.Join(dir, "tlog", headName), append(head, root[:]...), 0o600))
+			l := openTestLog(t, state)
+			if i, err := l.AppendBatch(batchOf(0, 1)); err != nil || i != size || l.size != size+1 {
+				t.Fatalf("got index %d, error %v, size %d; want %d, nil, %d", i, err, l.size, size, size+1)
+			}
+		})
+	}
+}
+
 // A failed batch keeps the spare capacity of the level 0 and level 1 buffers
 // as they were.
 func TestTS13FailedBatchKeepsTheTileBuffers(t *testing.T) {
