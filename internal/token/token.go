@@ -120,8 +120,8 @@ func (k *KeySet) Format(f fmt.State, _ rune) {
 // reference class. An empty seed gives ErrSeed. A bad trap count gives
 // ErrTraps, before any derivation. A failed derivation gives ErrKey. The
 // function clears the derived key bytes before it returns. The cipher keeps
-// its own key schedule until the garbage collector frees it. No error holds a
-// byte of the seed.
+// the key in its key schedule, and crypto/aes has no call that clears it. No
+// error holds a byte of the seed.
 func NewKeySet(seed []byte, sum [32]byte, traps []string, reference bool) (*KeySet, error) {
 	if len(seed) == 0 {
 		return nil, ErrSeed
