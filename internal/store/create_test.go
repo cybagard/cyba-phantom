@@ -265,8 +265,8 @@ func (r refusedStart) run(t *testing.T) {
 		})
 	}
 	if r.onName != "" {
-		// Calls of a directory name are the openDir calls of Open and of open.
-		// Calls of a file name are the second open of open and the reopen.
+		// The hook sees a directory name in openDir of Open, open and each pool
+		// check. It sees the temporary name at the second open and the reopen.
 		second := nth(2, call)
 		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 			if name == r.onName {

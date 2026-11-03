@@ -348,10 +348,10 @@ func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool
 	// refuseClose is for a failure after SQLite opened the file. It calls
 	// refuse first and then closes c. SQLite can leave its -wal and -shm files
 	// when the database file is gone. So refuseClose removes the entries that
-	// are there when the pool closes, if this call made the database file. It
-	// removes them by identity. An entry that another process puts there after
-	// the side-file check and before the close is removed too. It never
-	// removes a -journal file, which a WAL database does not make.
+	// are there just before the pool closes, if this call made the database
+	// file. It removes them by identity. An entry that another process puts
+	// there after the side-file check and before the close is removed too. It
+	// never removes a -journal file, which a WAL database does not make.
 	refuseClose := func(err error, c io.Closer) error {
 		var side [2]fs.FileInfo
 		for i, s := range suffixes[1:3] {
