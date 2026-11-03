@@ -417,8 +417,8 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // transact is the transaction of write. It returns true when the COMMIT worked.
 // Suppose AppendBatch returned nil and the transaction ends without a COMMIT.
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
-// one time. After the insert loop, it adds one session row for each session of
-// the request and refused rows. A known session keeps its first address and
+// one time. After the insert loop, it upserts one session row for each session
+// of the request and refused rows. A known session keeps its first address and
 // JA4. onCommit gets the count of event rows, not of session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false

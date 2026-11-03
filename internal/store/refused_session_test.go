@@ -31,6 +31,22 @@ func refusedEvent(t *testing.T, ip, ja4 string) *event.Event {
 	return e
 }
 
+// counterHMAC returns the expected ip_hmac of the address ip: the HMAC of its
+// counter key under key.
+func counterHMAC(t *testing.T, key [32]byte, ip string) string {
+	t.Helper()
+	k, ok := event.CounterKey(netip.MustParseAddr(ip))
+	if !ok {
+		t.Fatalf("no counter key for %s", ip)
+	}
+	if k.Is4() {
+		b := k.As4()
+		return mac(key, b[:])
+	}
+	b := k.As16()
+	return mac(key, b[:])
+}
+
 // refusedIDs writes one refused event for each ip with w. It returns the stored
 // session ids in order. A NULL gives "".
 func (r *rig) refusedIDs(w *Writer, ja4 string, ips ...string) []string {
@@ -267,8 +283,10 @@ func TestTU18RefusedRowColumnsEqualEventValues(t *testing.T) {
 // row only. The session table has one row for each client key of the batch.
 // No other session column, no column of another table, no log line and no
 // returned error holds a marker.
-func TestTU18RefusedEventStoresNoAddress(t *testing.T) {
+func TestTU18RefusedAddressOnlyInSessionRow(t *testing.T) {
 	r := newRig(t, 100)
+	key := seedKeys(t, 1)[0]
+	r.w.clock = func() time.Time { return day("2026-03-01T10:00:00Z") }
 	const ja4Marker = "ja4mk7x2q9"
 	var logs bytes.Buffer
 	r.w.log = slog.New(slog.NewTextHandler(&logs, nil))
@@ -324,6 +342,15 @@ func TestTU18RefusedEventStoresNoAddress(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i, v := range vals {
+				if n == "session" && cols[i] == "ip_hmac" {
+					// A random HMAC can hold a marker by chance. Compare it
+					// with the HMAC of the counter key of the row address.
+					ip := fmt.Sprint(vals[slices.Index(cols, "ip")])
+					if got, want := fmt.Sprint(v), counterHMAC(t, key, ip); got != want {
+						t.Errorf("session ip_hmac %v for %s, want %s", got, ip, want)
+					}
+					continue
+				}
 				if n == "session" && (cols[i] == "ip" || cols[i] == "ja4") {
 					// These columns hold the address and the JA4 text. The
 					// checks below compare them with the event values.
