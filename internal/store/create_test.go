@@ -332,8 +332,7 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 			then: plantWal, kept: map[string]string{"events.db-wal": "planted"}, gone: []string{"events.db", tmpName},
 			noFds: true},
 		{name: "planted journal before a failed check", rel: "data/events.db", errName: "data/events.db",
-			rule: ruleMode, on: "verify", plant: [][2]string{{"data/", ""}},
-			kept: map[string]string{"data/events.db-journal": "planted"},
+			rule: ruleMode, on: "verify", plant: [][2]string{{"data/", ""}}, kept: map[string]string{"data/events.db-journal": "planted"},
 			gone: []string{"data/events.db", "data/events.db-wal", "data/events.db-shm"},
 			then: func(t *testing.T, at func(string) string) {
 				put(t, at("data/events.db-journal"), "planted")
