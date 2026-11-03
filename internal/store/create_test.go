@@ -212,7 +212,7 @@ func TestTS15RefusedOpenOfExistingDatabaseKeepsItsSideFiles(t *testing.T) {
 	}
 }
 
-// T-S-15: a migrated database at the temporary name may hold store data. Open
+// T-S-15: a migrated database at the temporary name can hold store data. Open
 // keeps it and refuses. The data is in the main file if the pool is closed.
 // It is in the -wal file if the pool is open. The real name stays absent.
 func TestTS15LeftoverWithStoreDataIsKept(t *testing.T) {
@@ -230,8 +230,9 @@ func TestTS15LeftoverWithStoreDataIsKept(t *testing.T) {
 				must(t, old.Close())
 			}
 			before := snapshot(t, filepath.Dir(state))
-			// The file has no read mode during Open. A read open fails, so the
-			// rule comes from the size and not from an open of the file.
+			// The file has no read mode during Open. If the test does not
+			// run as root, a read open fails. So the rule comes from the size,
+			// not from an open of the file.
 			leftover := filepath.Join(state, filepath.FromSlash(c.errName))
 			fi, err := os.Lstat(leftover)
 			must(t, err)
