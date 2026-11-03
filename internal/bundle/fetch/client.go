@@ -57,7 +57,7 @@ type Client struct {
 	archiveURL, sigURL string
 	archive, sig       *http.Client
 	transport          *http.Transport
-	itemDialer         *net.Dialer // from egress.ItemDialer, also when a test replaces the transport dialer
+	itemDialer         *net.Dialer // always from egress.ItemDialer
 	log                *slog.Logger
 	now                func() time.Time
 	cfg                settings
