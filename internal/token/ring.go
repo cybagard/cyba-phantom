@@ -26,11 +26,10 @@ const replacedFor = 25 * time.Hour
 // This keeps the rule: the ring holds the running bundle and the bundle that
 // it replaced, and nothing older.
 //
-// The clock is the wall clock, which the time unit of a token needs. Swap
-// sets the 25 h end from the same clock. A clock from time.Now has a
-// monotonic reading, so a step of the wall clock does not move the end. The
-// monotonic clock can stop while the host sleeps. Then the end comes later
-// than 25 h of wall time.
+// The clock is the wall clock, which the time unit of a token needs. The end
+// is 25 h of wall time after the Swap. Swap strips the monotonic reading of
+// the clock from the end. A step of the wall clock moves the end: forward
+// makes it earlier, and back makes it later.
 type Ring struct{ *ringState }
 
 type ringState struct {
@@ -59,7 +58,8 @@ func NewRing(now func() time.Time) *Ring {
 // replaced one, for 25 h. One compare-and-swap of a pointer changes the ring.
 // Thus a Verify sees the ring before or after a Swap and nothing between.
 func (r *Ring) Swap(next *KeySet) {
-	until := r.now().Add(replacedFor)
+	// Round(0) strips the monotonic reading, so Before compares wall time.
+	until := r.now().Round(0).Add(replacedFor)
 	for {
 		old := r.cur.Load()
 		s := &snapshot{until: until}

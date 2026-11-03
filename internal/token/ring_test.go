@@ -130,6 +130,44 @@ func TestTU22_RingSwap(t *testing.T) {
 	}
 }
 
+// T-U-22: a token with no match gets no class and no count. The clock is
+// before the epoch, where the unit of a zero token is a future unit. The two
+// tokens are the zero token and a token of a key set that is not in the ring.
+func TestTU22_NoMatchNoClass(t *testing.T) {
+	sets, toks := keys(t, 2)
+	r := NewRing(func() time.Time { return epoch.Add(-48 * time.Hour) })
+	r.Swap(sets[0])
+	for name, tok := range map[string][Size]byte{"zero token": {}, "other key set": toks[1]} {
+		if got := r.Verify(tok); got != (Result{}) || r.Futures() != 0 {
+			t.Errorf("%s: Verify = %+v, Futures = %d", name, got, r.Futures())
+		}
+	}
+}
+
+// T-U-22: the 25 h end is wall time. The clock has a monotonic reading, as
+// time.Now has. The stored end has none. The replaced key set verifies at 25 h
+// minus 1 ns, and it gives no token at 25 h.
+func TestTU22_RingEndWallTime(t *testing.T) {
+	sets, toks := keys(t, 2)
+	base := time.Now()
+	var d time.Duration
+	r := NewRing(func() time.Time { return base.Add(d) })
+	r.Swap(sets[0])
+	r.Swap(sets[1])
+	if until := r.cur.Load().until; until != until.Round(0) {
+		t.Errorf("the end %v has a monotonic reading", until)
+	}
+	for _, tc := range []struct {
+		d  time.Duration
+		ok bool
+	}{{replacedFor - time.Nanosecond, true}, {replacedFor, false}} {
+		d = tc.d
+		if got := r.Verify(toks[0]); got.OK != tc.ok {
+			t.Errorf("at %v: Verify = %+v", tc.d, got)
+		}
+	}
+}
+
 // T-U-22: after 100 swaps the ring holds 2 key sets, the last two. A new ring
 // is a restart: it holds the key set of the first load, and no older one.
 func TestTU22_RingHundredSwaps(t *testing.T) {
