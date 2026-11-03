@@ -1,12 +1,12 @@
-# Development container: the same Go toolchain as CI (golang:1.27.2), so
+# Development container: the same Go toolchain as CI (golang:1.27.3), so
 # local and CI runs agree. The image holds the toolchain, the static
 # analysis tools, a mutation test tool, and the Go vulnerability database.
 #
 # Development only — the deployed sensor is a static binary with no
 # container dependency (C1).
-# Pinned by digest (multi-arch index of golang:1.27.2); bump both together.
+# Pinned by digest (multi-arch index of golang:1.27.3); bump both together.
 # The oracle job of .github/workflows/ci.yml uses the same digest.
-FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+FROM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
 
 # Static analysis tools (SEC-09). We pin each tool by its module
 # version. go install and go get check each module against the Go

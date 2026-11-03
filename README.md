@@ -17,7 +17,7 @@ Goals for v1 (not all built yet):
 make all
 ```
 
-The build uses Go 1.27.2 (pinned in the `Makefile`).
+The build uses Go 1.27.3 (pinned in the `Makefile`).
 
 ## Verifier
 
