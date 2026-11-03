@@ -78,7 +78,8 @@ type rawSlot struct {
 // parseRoutes parses the route map of each vhost of the archive. A host name
 // that is the second name part of a file below vhosts/ is a vhost. A file must
 // not be directly below vhosts/. Each vhost needs a valid name and a
-// routes.json file. A header slot needs a valid name and the id of a trap. The
+// routes.json file. A header slot needs a valid name and the id of a trap. Two
+// slots of one route do not have the same name, with ASCII case ignored. The
 // error holds no byte of the archive.
 func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (map[string]RouteMap, error) {
 	ids := map[string]bool{}
