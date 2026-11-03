@@ -110,8 +110,8 @@ const maxTemplateIDs = 64
 // of a trap of traps.json. A template uses an id at most one time. A set of
 // more than one template, and a template with no tree, are refused. The check
 // matches the shape at the first level only. It does not walk into the
-// arguments, so a deep nesting costs no deep walk. The error
-// holds no byte of the archive.
+// arguments, so a deep nesting costs no deep walk. The error holds no byte of
+// the archive.
 func checkExec(set map[string]*template.Template, traps []Trap) error {
 	known := make(map[string]bool, len(traps))
 	for _, tr := range traps {

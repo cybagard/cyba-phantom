@@ -181,7 +181,7 @@ func TestTU08KeptSet(t *testing.T) {
 // constructor. The test runs copies. The loader runs no template. The index
 // function fails on a missing .Trap with or without the option. So the test
 // parses a new body into a copy. {{.Missing}} gives an error only with
-// missingkey=error. Without the option it gives "<no value>".
+// missingkey=error. Without the option it gives no error.
 func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
 	const act = `{{comment (index .Trap "a")}}`
 	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, act)}),
