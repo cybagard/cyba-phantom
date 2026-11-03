@@ -59,7 +59,7 @@ func goListing(raw []byte) listing {
 			return l
 		}
 		kind := byte(hdr.Typeflag)
-		if kind == tar.TypeReg || kind == tar.TypeRegA {
+		if kind == tar.TypeReg {
 			kind = 'f'
 		} else if kind == tar.TypeDir {
 			kind = 'd'
