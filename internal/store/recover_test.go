@@ -441,7 +441,9 @@ func TestTI07MarkerCloseFails(t *testing.T) {
 	ran := 0
 	setHook(t, &closeFile, func(f *os.File) error {
 		ran++
-		f.Close()
+		if err := f.Close(); err != nil {
+			t.Error(err)
+		}
 		return errClose
 	})
 	root, err := os.OpenRoot(t.TempDir())
@@ -472,8 +474,11 @@ func TestTI07MarkerCloseFails(t *testing.T) {
 func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
 	errOpen := errors.New("open failed")
 	ran := 0
-	setHook(t, &openStateDir, func(*os.Root, string) (*os.File, error) {
+	setHook(t, &openStateDir, func(_ *os.Root, name string) (*os.File, error) {
 		ran++
+		if name != "." {
+			t.Errorf("the hook got the name %q, want %q", name, ".")
+		}
 		return nil, errOpen
 	})
 	root, err := os.OpenRoot(t.TempDir())
@@ -486,5 +491,54 @@ func TestTI07MarkerDirectoryOpenFails(t *testing.T) {
 	}
 	if _, err := root.Lstat(markerName); err != nil {
 		t.Fatalf("the marker file is not there: %v", err)
+	}
+}
+
+// T-I-07: a failed fsync of the new marker file, or of the state directory, is
+// an error. The marker file is closed in both cases.
+func TestTI07MarkerSyncFails(t *testing.T) {
+	for _, failDir := range []bool{false, true} {
+		name := "file"
+		if failDir {
+			name = "directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			errSync := errors.New("sync failed")
+			var files, dirs, closed int
+			setHook(t, &syncFile, func(f *os.File) error {
+				fi, err := f.Stat()
+				if err != nil {
+					t.Error(err)
+					return err
+				}
+				if !fi.IsDir() {
+					files++
+				} else {
+					dirs++
+				}
+				if fi.IsDir() == failDir {
+					return errSync
+				}
+				return f.Sync()
+			})
+			setHook(t, &closeFile, func(f *os.File) error {
+				closed++
+				return f.Close()
+			})
+			root, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			wantDirs := 0
+			if failDir {
+				wantDirs = 1
+			}
+			if err := makeMarker(root); !errors.Is(err, errSync) ||
+				files != 1 || dirs != wantDirs || closed != 1 {
+				t.Fatalf("makeMarker gave %v, file syncs %d, directory syncs %d, closes %d",
+					err, files, dirs, closed)
+			}
+		})
 	}
 }

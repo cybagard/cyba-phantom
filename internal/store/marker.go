@@ -13,7 +13,8 @@ const markerName = "writer.stop"
 const ruleMarkerExists = "stop marker exists"
 
 // closeFile closes the marker file. openStateDir opens the state directory
-// for its fsync. A test replaces either one to make that step fail.
+// for its fsync. Both calls of fsync use syncFile. A test replaces these test
+// hooks to make a step fail.
 var (
 	closeFile    = (*os.File).Close
 	openStateDir = (*os.Root).Open
@@ -42,7 +43,7 @@ func makeMarker(root *os.Root) error {
 	}
 	f, err := root.OpenFile(markerName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 		if e := closeFile(f); err == nil {
 			err = e
 		}
@@ -57,7 +58,7 @@ func makeMarker(root *os.Root) error {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	return syncFile(d)
 }
 
 // ensureMarker makes the marker once. If it fails, it logs one line, and the
