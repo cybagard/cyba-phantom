@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -128,15 +129,51 @@ func (b *Bundle) File(name string) ([]byte, bool) {
 	return slices.Clone(data), ok
 }
 
-// Template returns a copy of the kept template with this archive name. A caller
-// can run the copy and cannot change the kept template.
-func (b *Bundle) Template(name string) (*template.Template, bool) {
+// ErrNoTemplate is the error of Execute for a name that is not a kept template.
+var ErrNoTemplate = errors.New("bundle: no template")
+
+// Execute runs the kept template with this archive name and writes the page to
+// w. It makes no copy of the template. html/template permits parallel calls on
+// one template. The first call escapes the tree. After it, a Clone fails.
+// An unknown name gives ErrNoTemplate and writes no byte.
+func (b *Bundle) Execute(w io.Writer, name string, data Page) error {
 	t, ok := b.templates[name]
 	if !ok {
-		return nil, false
+		return ErrNoTemplate
 	}
-	c, err := t.Clone()
-	return c, err == nil
+	return t.Execute(w, data)
+}
+
+// Asset is a view of the bytes of an archive entry. It has no method that
+// changes or returns the bytes. The only access is WriteTo, which hands the
+// kept bytes to a writer.
+type Asset struct{ data []byte }
+
+// Len returns the number of bytes of the entry.
+func (a Asset) Len() int { return len(a.data) }
+
+// WriteTo writes the bytes of the entry to w. It makes no copy: it passes the
+// kept bytes themselves to w.Write. The io.Writer contract says that Write
+// must not change these bytes or store them. A writer that breaks the contract
+// can change the kept bytes.
+func (a Asset) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(a.data)
+	return int64(n), err
+}
+
+// Asset returns a view of the bytes of an archive entry below "vhosts/" whose
+// name does not end in ".tmpl". It checks only that prefix and that suffix. It
+// does not check which vhost the name is below. So it also gives a file of any
+// vhost and the routes.json of each vhost. The asset rule of a route map
+// accepts only a file below the directory of its own vhost. A caller must take
+// asset names from the route map of the vhost. Asset gives false for each
+// other name. A call copies no byte.
+func (b *Bundle) Asset(name string) (Asset, bool) {
+	if !strings.HasPrefix(name, templateDir) || strings.HasSuffix(name, templateSuffix) {
+		return Asset{}, false
+	}
+	data, ok := b.archive.File(name)
+	return Asset{data}, ok
 }
 
 // Loader loads the bundle at one path and holds the running bundle.
