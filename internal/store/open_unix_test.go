@@ -341,10 +341,17 @@ func nth(n int, f func()) func() {
 }
 
 // chmod640 returns a function that sets the mode of file to 0640.
-func chmod640(file string) func() { return func() { _ = os.Chmod(file, 0o640) } }
+func chmod640(t *testing.T, file string) func() {
+	return func() {
+		if err := os.Chmod(file, 0o640); err != nil {
+			t.Error(err)
+		}
+	}
+}
 
 // failSync makes the sync of a directory, or of a file, fail.
 func failSync(t *testing.T, dir bool) {
+	t.Helper()
 	setHook(t, &syncFile, func(f *os.File) error {
 		if fi, err := f.Stat(); err == nil && fi.IsDir() == dir {
 			return errors.New("sync failed")
@@ -371,17 +378,17 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 			setHook(t, &editDSN, func(s string) string { return s + "&_pragma=%zz" })
 		}},
 		{"first connection", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterChecks, nth(1, chmod640(file+tempSuffix)))
+			setHook(t, &afterChecks, nth(1, chmod640(t, file+tempSuffix)))
 		}},
 		{"second checks", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterVerify, nth(1, chmod640(file+tempSuffix)))
+			setHook(t, &afterVerify, nth(1, chmod640(t, file+tempSuffix)))
 		}},
 		// The call 2 of a hook is the open of the renamed file.
 		{"renamed file, first connection", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterChecks, nth(2, chmod640(file)))
+			setHook(t, &afterChecks, nth(2, chmod640(t, file)))
 		}},
 		{"renamed file, second checks", ruleMode, func(t *testing.T, file string) {
-			setHook(t, &afterVerify, nth(2, chmod640(file)))
+			setHook(t, &afterVerify, nth(2, chmod640(t, file)))
 		}},
 		{"sync of the file", ruleCreate, func(t *testing.T, _ string) { failSync(t, false) }},
 		{"sync of the directory", ruleCreate, func(t *testing.T, _ string) { failSync(t, true) }},
