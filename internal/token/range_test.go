@@ -131,6 +131,57 @@ func TestTU01_RangeWrap(t *testing.T) {
 			t.Errorf("token %d: Verify = %+v, want %+v", i, got, w)
 		}
 	}
+	// The raw counter can be at its top or past 2^42, as after a real wrap.
+	for _, tc := range []struct {
+		name  string
+		raw   uint64
+		n     int
+		first uint64
+	}{
+		{"raw counter at the top", counterMask, 3, 0},
+		{"raw counter past 2^42", 1<<42 + 5, 2, 6},
+	} {
+		k.counter.Store(tc.raw)
+		out := make([][Size]byte, tc.n)
+		first, err := k.MintRange(cycle(tc.n, 2), epoch, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != tc.first {
+			t.Errorf("%s: first = %d, want %d", tc.name, first, tc.first)
+		}
+		for i, tok := range out {
+			w := Result{OK: true, Trap: traps(2)[i%2], Counter: tc.first + uint64(i)}
+			if got := Verify([]*KeySet{k}, tok); got != w {
+				t.Errorf("%s, token %d: Verify = %+v, want %+v", tc.name, i, got, w)
+			}
+		}
+	}
+}
+
+func TestTU01_ScratchIsCleared(t *testing.T) {
+	k := newSet(t, testKey, 2)
+	tok, _ := k.Mint(1, epoch)
+	calls := []struct {
+		name string
+		call func()
+	}{
+		{"MintRange", func() {
+			_, _ = k.MintRange(cycle(MaxRange, 2), epoch, make([][Size]byte, MaxRange))
+		}},
+		{"Mint", func() { _, _ = k.Mint(1, epoch) }},
+		{"Verify", func() { Verify([]*KeySet{k}, tok) }},
+	}
+	for _, c := range calls {
+		for range 100 {
+			c.call()
+			b := scratch.Get().(*[2 * Size]byte)
+			if *b != [2 * Size]byte{} {
+				t.Fatalf("%s: the scratch buffer is not zero", c.name)
+			}
+			scratch.Put(b)
+		}
+	}
 }
 
 func TestTU01_RangeRefusals(t *testing.T) {

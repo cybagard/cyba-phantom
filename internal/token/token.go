@@ -239,11 +239,12 @@ func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 // counter first+i, masked to 42 bits, and writes the token to out[i]. It
 // gives ErrRange for an empty list, for more than MaxRange indexes, and for
 // an out slice of another length. It gives ErrIndex for an index that is not
-// a trap. A refused call moves no counter and writes nothing to out. The
-// counter can pass 2^42-1 inside a range and wrap to 0. The caller sees this
-// from first and the length. It does not allocate in steady state.
-// After a GC, or under the race detector, the buffer pool can allocate a
-// small, bounded amount of memory.
+// a trap. A refused call moves no counter and writes nothing to out.
+// The caller must not change indexes during the call. The counter can pass
+// 2^42-1 inside a range and wrap to 0. The caller sees this from first and
+// the length. It does not allocate in steady state. After a GC, or under the
+// race detector, the buffer pool can allocate a small, bounded amount of
+// memory.
 func (k *KeySet) MintRange(indexes []int, at time.Time, out [][Size]byte) (first uint64, err error) {
 	if k == nil || k.keySetState == nil || k.block == nil {
 		return 0, ErrNoKeySet
