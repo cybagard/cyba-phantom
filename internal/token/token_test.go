@@ -439,7 +439,7 @@ func TestTU01_NewKeySetClearsKey(t *testing.T) {
 	if !bytes.Equal(short, make([]byte, 5)) {
 		t.Errorf("short key after the cipher error: %x", short)
 	}
-	// A bad trap list refuses the call before any key exists.
+	// The largest trap list is allowed and clears its key.
 	calls, kept = 0, nil
 	deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
 		calls++
@@ -447,7 +447,15 @@ func TestTU01_NewKeySetClearsKey(t *testing.T) {
 		kept = key
 		return key, err
 	}
-	for _, n := range []int{0, 1025} {
+	if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(maxTraps), false); k == nil || err != nil {
+		t.Errorf("%d traps: %v, %v", maxTraps, k, err)
+	}
+	if calls != 1 || len(kept) != 16 || !bytes.Equal(kept, make([]byte, 16)) {
+		t.Errorf("%d traps derived %d keys, kept %x", maxTraps, calls, kept)
+	}
+	// A bad trap list refuses the call before any key exists.
+	calls, kept = 0, nil
+	for _, n := range []int{0, maxTraps + 1} {
 		if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(n), false); k != nil || !errors.Is(err, ErrTraps) {
 			t.Errorf("%d traps: %v, %v", n, k, err)
 		}
