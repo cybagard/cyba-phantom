@@ -153,8 +153,9 @@ type Asset struct{ data []byte }
 func (a Asset) Len() int { return len(a.data) }
 
 // WriteTo writes the bytes of the entry to w. It makes no copy: it passes the
-// kept bytes themselves to w.Write. They stay unchanged only if w keeps the
-// io.Writer rule. Write must not change them and must not keep them.
+// kept bytes themselves to w.Write. The io.Writer contract says that Write
+// must not change these bytes or store them. A writer that breaks the contract
+// can change the kept bytes.
 func (a Asset) WriteTo(w io.Writer) (int64, error) {
 	n, err := w.Write(a.data)
 	return int64(n), err
@@ -163,10 +164,10 @@ func (a Asset) WriteTo(w io.Writer) (int64, error) {
 // Asset returns a view of the bytes of an archive entry below "vhosts/" whose
 // name does not end in ".tmpl". It checks only that prefix and that suffix. It
 // does not check which vhost the name is below. So it also gives a file of any
-// vhost and the routes.json of each vhost. The route rule accepts only a file
-// below the directory of the route's own vhost. A caller must take asset names
-// from the route map of the vhost. Asset gives false for each other name. A
-// call copies no byte.
+// vhost and the routes.json of each vhost. The asset rule of a route map
+// accepts only a file below the directory of its own vhost. A caller must take
+// asset names from the route map of the vhost. Asset gives false for each
+// other name. A call copies no byte.
 func (b *Bundle) Asset(name string) (Asset, bool) {
 	if !strings.HasPrefix(name, templateDir) || strings.HasSuffix(name, templateSuffix) {
 		return Asset{}, false

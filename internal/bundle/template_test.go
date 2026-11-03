@@ -912,8 +912,9 @@ func TestTS28AssetView(t *testing.T) {
 		}
 	}
 	// The load refuses each of these names. "vhostsx/a.png" and "vhosts" fail
-	// with archive_invalid. "vhosts/a.png" fails with content_invalid (the
-	// route rule). So the test sets the files by hand.
+	// with archive_invalid. "vhosts/a.png" fails with content_invalid, because
+	// the route step refuses a file directly in vhosts/. So the test sets the
+	// files by hand.
 	odd := &Bundle{archive: &Archive{files: map[string][]byte{"vhostsx/a.png": []byte("x"), "vhosts": []byte("y"), "vhosts/a.png": []byte("z")}}}
 	for name, want := range map[string]bool{"vhostsx/a.png": false, "vhosts": false, "vhosts/a.png": true} {
 		if _, ok := odd.Asset(name); ok != want {
@@ -927,14 +928,14 @@ type recWriter struct{ got []byte }
 
 func (r *recWriter) Write(p []byte) (int, error) { r.got = p; return len(p), nil }
 
-// shortWriter writes one byte and returns err.
+// shortWriter reports one byte as written and returns err. It stores nothing.
 type shortWriter struct{ err error }
 
 func (s shortWriter) Write([]byte) (int, error) { return 1, s.err }
 
 // T-S-28: WriteTo makes no copy. The bytes that the writer gets start at the
-// same address as the archive file and have the same length. A call to an
-// io.Discard writer allocates nothing.
+// same address as the archive file and have the same length. A WriteTo call
+// to io.Discard allocates nothing.
 func TestTS28AssetWriteToMakesNoCopy(t *testing.T) {
 	const name = hostDir + "a.png"
 	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(name, "\x89PNG asset bytes")}),
