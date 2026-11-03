@@ -116,8 +116,9 @@ func TestTS15ChecksOpenNoDescriptorOfDatabase(t *testing.T) {
 // open is the one that Open holds for the life of the pool. The watch is read
 // in the hook that gets the held descriptor. For a new file, the row checks
 // only the first call of the hook: the open of the made file at the temporary
-// name. The watch starts in that call, so the row counts no earlier open. A hook reads the watch and counts the descriptors again right
-// after the driver opens the first connection. The watch then shows 1 open: the
+// name. The watch starts in that call, so the row counts no earlier open.
+// A hook reads the watch and counts the descriptors again right after the
+// driver opens the first connection. The watch then shows 1 open: the
 // open of the driver. The count of descriptors is the count at the held open
 // plus 1: the driver connection. An open that stays open adds a descriptor. An
 // open that is closed again adds an open event. After Open returns, the watch

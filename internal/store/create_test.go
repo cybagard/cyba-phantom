@@ -211,8 +211,8 @@ var fdCheck func(t *testing.T, paths ...string)
 // Open. A name that ends with "/" is a directory. A content with "->" is a
 // symlink. A content with "=>" is a hard link to the file named in the rest.
 // then runs at the point on ("rename", "sync" of the directory, "checks",
-// "checks2", "verify", "dsn"). It can also run at the second check of the name onName.
-// Open must fail with the rule for errName. A file in kept stays, with its
+// "checks2", "verify", "dsn"). It can also run at the second check of the name
+// onName. Open must fail with the rule for errName. A file in kept stays, with its
 // content if it is not empty. A file in gone does not exist. With same, no
 // file changes. With noFds, no descriptor points to the real or the temporary
 // file.
