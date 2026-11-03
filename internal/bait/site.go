@@ -10,8 +10,8 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
 
-// entry is one route of a vhost, ready to serve. Only an asset route sets asset,
-// isAsset and the header values.
+// entry is one route of a vhost, ready to serve. Only an asset route sets
+// asset, isAsset and the header values.
 type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
@@ -30,7 +30,8 @@ type site struct {
 }
 
 // buildSite makes the table of b. It takes the asset names only from the
-// route map of each vhost. The build leaves out a route whose asset is missing.
+// route map of each vhost. The build leaves out a route whose asset is
+// missing.
 func buildSite(b *bundle.Bundle) *site {
 	s := &site{hosts: map[string]map[string]*entry{}, traps: b.Traps()}
 	for _, host := range b.Vhosts() {
@@ -79,9 +80,9 @@ func (sl *slot) site() *site {
 const maxHost = 253
 
 // foldHost removes a port from host and changes A-Z to a-z. It also removes a
-// ":" with no digits at the end. It returns false for a host with a byte of 0x80
-// or more, or over maxHost bytes. The result is in buf, so a lookup does not
-// allocate.
+// ":" with no digits at the end. It returns false for a host with a byte of
+// 0x80 or more, or over maxHost bytes. The result is in buf, so a lookup does
+// not allocate.
 func foldHost(host string, buf *[maxHost]byte) ([]byte, bool) {
 	for i := 0; i < len(host); i++ {
 		if host[i] >= 0x80 {

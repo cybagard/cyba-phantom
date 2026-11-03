@@ -256,7 +256,7 @@ func TestTU20SiteLostSwap(t *testing.T) {
 }
 
 // TestTU20SiteServe checks that each response has the content of the bundle
-// that its request got, also when the source goes back to a replaced bundle.
+// that its request got. The source also goes back to a replaced bundle.
 func TestTU20SiteServe(t *testing.T) {
 	b1, b2, b3 := bundleWith(t, "-1"), bundleWith(t, "-2"), bundleWith(t, "-3")
 	list := []*bundle.Bundle{b1, b2, b1, b3, b2}

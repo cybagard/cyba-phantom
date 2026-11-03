@@ -61,9 +61,9 @@ func New(src Source, fallback http.Handler) *Handler {
 	return &Handler{src: src, fallback: fallback}
 }
 
-// siteOf returns the site of b. The handler keeps the running bundle only. A
-// replaced bundle gets a site for its own request, and the handler does not keep
-// it. A request in flight keeps its bundle and site in its local variables.
+// siteOf returns the site of b. The handler keeps the running bundle only.
+// A replaced bundle gets a site for its own request. The handler does not keep
+// that site. A request in flight keeps its bundle and site in local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
