@@ -358,8 +358,9 @@ func TestTU01_Copy(t *testing.T) {
 	}
 }
 
-// The known answer for NewKeySet. OpenSSL computed the key, not Go. The seed
-// is the bytes 0x01 to 0x20. The salt is 32 bytes of 0xaa.
+// These constants hold the known answer for NewKeySet. OpenSSL computed the
+// key, not Go. The seed is the bytes 0x01 to 0x20. The salt is 32 bytes of
+// 0xaa.
 const (
 	katKey   = "f9b515888dac9e08583ee19b3e0aacab"
 	katBlock = "87abc4dfb358b2375d71f189ca5458a0" // AES-128 of the zero block
@@ -430,15 +431,29 @@ func TestTU01_NewKeySetClearsKey(t *testing.T) {
 	if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(1), false); k != nil || !errors.Is(err, ErrKey) {
 		t.Errorf("derivation error: %v, %v", k, err)
 	}
-	deriveKey = func([]byte, [32]byte) ([]byte, error) { return make([]byte, 5), nil }
+	short := bytes.Repeat([]byte{7}, 5)
+	deriveKey = func([]byte, [32]byte) ([]byte, error) { return short, nil }
 	if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(1), false); k != nil || !errors.Is(err, ErrKey) {
 		t.Errorf("short key: %v, %v", k, err)
 	}
-	deriveKey = orig
+	if !bytes.Equal(short, make([]byte, 5)) {
+		t.Errorf("short key after the cipher error: %x", short)
+	}
+	// A bad trap list refuses the call before any key exists.
+	calls, kept = 0, nil
+	deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
+		calls++
+		key, err := orig(seed, sum)
+		kept = key
+		return key, err
+	}
 	for _, n := range []int{0, 1025} {
 		if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(n), false); k != nil || !errors.Is(err, ErrTraps) {
 			t.Errorf("%d traps: %v, %v", n, k, err)
 		}
+	}
+	if calls != 0 || !bytes.Equal(kept, make([]byte, len(kept))) {
+		t.Errorf("a bad trap list derived %d keys, last %x", calls, kept)
 	}
 }
 
@@ -515,7 +530,7 @@ func TestTS29_Format(t *testing.T) {
 		}
 		outs = append(outs, got)
 	}
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x"} {
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
 		outs = append(outs, fmt.Sprintf(verb, w), fmt.Sprintf(verb, &w))
 	}
 	jk, err1 := json.Marshal(k)
@@ -546,10 +561,16 @@ func TestTS29_Format(t *testing.T) {
 }
 
 // TestTS29_ErrorsHoldNoSecret checks the errors of the package and of
-// NewKeySet. None holds the key, the seed or a trap id.
+// NewKeySet. None holds the key, the seed, a trap id or a token.
 func TestTS29_ErrorsHoldNoSecret(t *testing.T) {
 	key, _ := hex.DecodeString(katKey)
 	bad := append(append(markers(key), markers(katSeed())...), "trap-0")
+	tok, err := newDerived(t, katSeed(), sumOf(0xaa), 1, false).Mint(0, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad = append(bad, markers(tok[:])...)
+	bad = append(bad, Text(tok))
 	_, e1 := NewKeySet(nil, sumOf(0xaa), traps(1), false)
 	_, e2 := NewKeySet(katSeed(), sumOf(0xaa), nil, false)
 	for _, err := range []error{ErrNoKeySet, ErrIndex, ErrTraps, ErrKey, ErrSeed, e1, e2} {

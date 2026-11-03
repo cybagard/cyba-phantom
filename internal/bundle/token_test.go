@@ -1,9 +1,12 @@
 package bundle
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cybagard/cyba-phantom/internal/token"
@@ -75,9 +78,15 @@ func TestTS29_BundleTokensRejected(t *testing.T) {
 	}
 }
 
-// T-S-29: a bundle with no seed has no key set. A bundle with a seed and no
-// trap file has none and loads.
+// T-S-29: with the seed step off (a test seam), a bundle has no key set. A
+// bundle with a seed and no trap file has none and loads. With the real seed
+// step, a bundle with traps and no seed file gives ErrSeedInvalid.
 func TestTS29_BundleNoTokens(t *testing.T) {
+	e0 := newEnv(t)
+	e0.putSeeded(keyTwo(e0), ver(2), trapEnts(arr(tj("a", "x")))...)
+	if b, err := e0.seedLoader(nil).Load(false); b != nil || err != ErrSeedInvalid {
+		t.Errorf("no seed file: %v, %v", b, err)
+	}
 	e := newEnv(t)
 	e.putSeeded(keyOne(e), ver(2), trapEnts(arr(tj("a", "x")))...)
 	b, err := e.l.Load(false)
@@ -86,7 +95,7 @@ func TestTS29_BundleNoTokens(t *testing.T) {
 	e2.putSeeded(keyTwo(e2), ver(2), plainEnt(seedA))
 	b2, err := e2.seedLoader(nil).Load(false)
 	must(t, err)
-	for name, ks := range map[string]*token.KeySet{"no seed": b.Tokens(), "no trap": b2.Tokens()} {
+	for name, ks := range map[string]*token.KeySet{"seed step off": b.Tokens(), "no trap": b2.Tokens()} {
 		if ks != nil {
 			t.Errorf("%s: key set %v", name, ks)
 		}
@@ -99,31 +108,90 @@ func TestTS29_BundleNoTokens(t *testing.T) {
 	}
 }
 
-// T-S-29: the key set of the running bundle mints while a new bundle loads
-// and its seed is zero. The tokens still verify under the old key set.
+// T-S-29: the key set of the running bundle mints while a new bundle loads.
+// The mints overlap the load. The tokens still verify under the old key set.
 func TestTS29_BundleTokensRace(t *testing.T) {
 	e := newEnv(t)
 	l, two := e.seedLoader(nil), keyTwo(e)
 	old := e.loadTokens(l, two, 2, plainEnt(seedA), "a", "b").Tokens()
+	e.putSeeded(two, ver(3), trapEntsWith(plainEnt(seedB), "c", "d")...)
+	started, stop, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var late atomic.Int64 // mints that began after the load read the file
 	var toks [][token.Size]byte
-	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for range 500 {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			after := false
+			select {
+			case <-started:
+				after = true
+			default:
+			}
 			tok, err := old.Mint(1, testNow)
 			if err != nil {
 				t.Error(err)
 				return
 			}
 			toks = append(toks, tok)
+			if after {
+				late.Add(1)
+			}
 		}
 	}()
-	e.loadTokens(l, two, 3, plainEnt(seedB), "c", "d")
+	// The load waits here until the goroutine has minted after the read.
+	l.afterRead = func() {
+		close(started)
+		for late.Load() == 0 {
+			select {
+			case <-done:
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}
+	b, err := l.Load(false)
+	close(stop)
 	<-done
+	must(t, err)
+	if late.Load() == 0 {
+		t.Error("no mint overlapped the load")
+	}
+	if l.Current() != b || b.Manifest().Version != ver(3) || b.Tokens() == old {
+		t.Error("the running bundle is not the new bundle")
+	}
 	for _, tok := range toks {
 		if got := token.Verify([]*token.KeySet{old}, tok); !got.OK || got.Trap != "b" {
 			t.Fatalf("Verify gives %+v", got)
 		}
+	}
+}
+
+// T-S-29: a key set step that fails refuses the candidate with ErrSeedInvalid.
+// The running bundle stays. The seed that the step kept is zero after Load.
+func TestTS29_BundleKeySetFails(t *testing.T) {
+	e := newEnv(t)
+	l, two := e.seedLoader(nil), keyTwo(e)
+	run := e.loadTokens(l, two, 2, plainEnt(seedA), "a")
+	var kept, seen []byte
+	l.keySet = func(seed []byte, _ [32]byte, _ []string, _ bool) (*token.KeySet, error) {
+		kept, seen = seed, bytes.Clone(seed)
+		return nil, errors.New("stub")
+	}
+	e.putSeeded(two, ver(3), trapEntsWith(plainEnt(seedB), "c")...)
+	if b, err := l.Load(false); b != nil || err != ErrSeedInvalid {
+		t.Fatalf("got %v, %v", b, err)
+	}
+	if l.Current() != run || run.Tokens() == nil {
+		t.Error("the running bundle changed")
+	}
+	if !bytes.Equal(seen, seedB) || !bytes.Equal(kept, make([]byte, len(seedB))) {
+		t.Errorf("seed seen %x, kept seed after Load %x", seen, kept)
 	}
 }
 
@@ -135,8 +203,9 @@ func TestTU01_BundleTrapIndex(t *testing.T) {
 	l, two := e.seedLoader(nil), keyTwo(e)
 	first := e.loadTokens(l, two, 2, plainEnt(seedA), "a", "b").Tokens()
 	second := e.loadTokens(l, two, 3, plainEnt(seedA), "b", "a").Tokens()
-	t1, _ := first.Mint(0, testNow)
-	t2, _ := second.Mint(0, testNow)
+	t1, err1 := first.Mint(0, testNow)
+	t2, err2 := second.Mint(0, testNow)
+	must(t, errors.Join(err1, err2))
 	for _, c := range []struct {
 		name string
 		ring *token.KeySet
@@ -147,6 +216,8 @@ func TestTU01_BundleTrapIndex(t *testing.T) {
 			t.Errorf("%s: Verify gives %+v", c.name, got)
 		}
 	}
+	// The two bundles have another SHA-256, so another salt and key. This check
+	// shows the key of each bundle, not the trap order.
 	if token.Verify([]*token.KeySet{second}, t1).OK || token.Verify([]*token.KeySet{first}, t2).OK {
 		t.Error("a token verifies under the key set of the other bundle")
 	}

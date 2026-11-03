@@ -105,8 +105,8 @@ func (b *Bundle) Traps() []Trap {
 	return out
 }
 
-// Tokens returns the key set of the bundle. It is nil when the bundle has no
-// seed or no trap. No call gives the seed or the key.
+// Tokens returns the key set of the bundle. It is nil when the seed step is off
+// (a test seam) or the bundle has no trap. No call gives the seed or the key.
 func (b *Bundle) Tokens() *token.KeySet { return b.tokens }
 
 // Vhosts returns the sorted names of the vhosts that have a route map.
@@ -152,15 +152,16 @@ type Loader struct {
 	chain    *chain
 	chainErr error
 
-	// now, decompress, template and seed are steps of the load. NewLoader sets
-	// them, and a test can replace one. now and decompress must not be nil.
-	// A nil template step keeps no template, and a nil seed step keeps no seed.
-	// afterRead is a hook for tests.
+	// now, decompress, template, seed and keySet are steps of the load.
+	// NewLoader sets them, and a test can replace one. now, decompress and
+	// keySet must not be nil. A nil template step keeps no template, and a nil
+	// seed step keeps no seed. afterRead is a hook for tests.
 	now        func() time.Time
 	decompress func([]byte) (*Archive, error)
 	afterRead  func()
 	template   func(*Archive) (map[string]*template.Template, error)
 	seed       func(*Archive, Class, *Manifest) (*seedBytes, error)
+	keySet     func([]byte, [32]byte, []string, bool) (*token.KeySet, error)
 
 	// events and log are set by SetEvents. loadMu guards them. Each can be nil.
 	events *event.Queue
@@ -173,7 +174,7 @@ type Loader struct {
 // install is the install key, which opens the sealed seed of a proprietary
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
-	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates}
+	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
 	l.seed = func(a *Archive, c Class, m *Manifest) (*seedBytes, error) { return openSeed(a, c, m, l.install) }
 	return l
 }
@@ -236,8 +237,9 @@ func (l *Loader) Healthy() bool {
 // check, read, SHA-256, signature, archive, manifest, key ID or rotation,
 // engine, expiry and rollback. Then: trap file, templates, route maps, seed.
 // With a seed and a trap, Load makes the key set of the tokens. It uses the
-// seed, the SHA-256 and the trap ids in file order. A failure gives
-// ErrSeedInvalid. A bundle with no seed or no trap has no key set.
+// seed, the SHA-256 and the trap ids in file order. A failure of the key set
+// step gives ErrSeedInvalid. The key set is nil when the seed step is off (a
+// test seam) or the bundle has no trap.
 // A trap file of a bad form gives ErrContentInvalid. A bundle with no trap file
 // has no trap. A route header slot then gives ErrContentInvalid.
 // A host name that is the second name part of a file below vhosts/ is a vhost.
@@ -376,6 +378,14 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 			return nil, ErrSeedInvalid
 		}
 	}
+	// A candidate that fails a later step keeps no seed. Only an accepted
+	// candidate does.
+	reject := func(err error) (*Bundle, error) {
+		if seed != nil {
+			clear(*seed)
+		}
+		return nil, err
+	}
 	var ref *seedRef
 	var tokens *token.KeySet
 	if seed != nil {
@@ -386,21 +396,12 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 			for i, t := range traps {
 				ids[i] = t.ID
 			}
-			if tokens, err = token.NewKeySet(*seed, sum, ids, class == ClassReference); err != nil {
-				clear(*seed)
-				return nil, ErrSeedInvalid
+			if tokens, err = l.keySet(*seed, sum, ids, class == ClassReference); err != nil {
+				return reject(ErrSeedInvalid)
 			}
 		}
 	}
 	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref, tokens: tokens}
-	// A candidate that fails a later step keeps no seed. Only an accepted
-	// candidate does.
-	reject := func(err error) (*Bundle, error) {
-		if seed != nil {
-			clear(*seed)
-		}
-		return nil, err
-	}
 	// The record and the version state come before Swap. A failed write leaves
 	// the running bundle. A failed check or version-state write removes the
 	// record. Only a failed version-state write restores the trust set.

@@ -90,8 +90,8 @@ var scratch = sync.Pool{New: func() any { return new([2 * Size]byte) }}
 // KeySet mints and verifies the tokens of one key. It holds the cipher, a
 // copy of the trap ids and the mint counter. It has no exported field. A
 // KeySet is safe for concurrent use. Do not copy it. The fields are behind one
-// pointer. So a struct with a *KeySet in an unexported field prints an
-// address under %s. It prints no trap id.
+// pointer. A struct with a *KeySet in an unexported field prints an address
+// under %s and %q. It prints no trap id.
 type KeySet struct{ *keySetState }
 
 type keySetState struct {
@@ -117,12 +117,17 @@ func (k *KeySet) Format(f fmt.State, _ rune) {
 // NewKeySet makes a key set from the token seed of a bundle. The key is
 // HKDF-SHA-256 of the seed, with the bundle SHA-256 as salt. The index of a
 // trap is its position in traps. reference is true for a bundle of the
-// reference class. An empty seed gives ErrSeed. A failed derivation gives
-// ErrKey. The function clears the key before it returns. No error holds a
+// reference class. An empty seed gives ErrSeed. A bad trap count gives
+// ErrTraps, before any derivation. A failed derivation gives ErrKey. The
+// function clears the derived key bytes before it returns. The cipher keeps
+// its own key schedule until the garbage collector frees it. No error holds a
 // byte of the seed.
 func NewKeySet(seed []byte, sum [32]byte, traps []string, reference bool) (*KeySet, error) {
 	if len(seed) == 0 {
 		return nil, ErrSeed
+	}
+	if len(traps) == 0 || len(traps) > maxTraps {
+		return nil, ErrTraps
 	}
 	key, err := deriveKey(seed, sum)
 	defer clear(key)
