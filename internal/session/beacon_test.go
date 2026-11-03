@@ -35,7 +35,8 @@ func refTag(key []byte, sid string, ms []byte) []byte {
 	return m.Sum(nil)[:10]
 }
 
-// T-U-25: a ticket has 26 bytes of the alphabet and checks in the window.
+// T-U-25: a ticket has 26 bytes of the alphabet, and the check accepts it
+// in the window.
 func TestTU25RoundTrip(t *testing.T) {
 	k := seqKey()
 	v := k.BeaconTicket(knownID, beaconTime)
@@ -50,7 +51,8 @@ func TestTU25RoundTrip(t *testing.T) {
 	}
 }
 
-// T-U-25: a ticket made at time zero checks at time zero and in the window.
+// T-U-25: the check accepts a ticket of time zero at time zero and in the
+// window.
 func TestTU25EpochZero(t *testing.T) {
 	k := seqKey()
 	v := k.BeaconTicket(knownID, time.UnixMilli(0))
@@ -99,7 +101,7 @@ func refusals(t testing.TB) []refusal {
 	other := NewDayKey().At(beaconTime)
 	last := alphaIndex(v[25])
 	rs := []refusal{
-		{"another session", k, v, "aaaqeayeaudaocajbifqydiob5", beaconTime},
+		{"another session", k, v, "aaaqeayeaudaocajbifqydioba", beaconTime},
 		{"another key", k, other.BeaconTicket(knownID, beaconTime), knownID, beaconTime},
 		{"age 5001 ms", k, v, knownID, beaconTime.Add(5001 * time.Millisecond)},
 		{"future 1 ms", k, v, knownID, beaconTime.Add(-time.Millisecond)},
@@ -111,6 +113,7 @@ func refusals(t testing.TB) []refusal {
 		{"outside alphabet", k, v[:5] + "1" + v[6:], knownID, beaconTime},
 		{"sid 25 bytes", k, v, knownID[:25], beaconTime},
 		{"sid 27 bytes", k, v, knownID + "a", beaconTime},
+		{"sid 27 bytes, time zero", k, k.BeaconTicket(knownID, time.UnixMilli(0)), knownID + "\x00", time.UnixMilli(0)},
 		{"zero Key", Key{}, v, knownID, beaconTime},
 	}
 	for i := 0; i < 128; i++ {
@@ -121,7 +124,7 @@ func refusals(t testing.TB) []refusal {
 	return rs
 }
 
-// T-U-25: each bad ticket, session, key or time is refused.
+// T-U-25: the check refuses each bad ticket, session, key or time.
 func TestTU25Refused(t *testing.T) {
 	for _, r := range refusals(t) {
 		if r.key.CheckBeaconTicket(r.ticket, r.sid, r.now) {
@@ -130,7 +133,7 @@ func TestTU25Refused(t *testing.T) {
 	}
 }
 
-// T-U-25: the make function gives no ticket for a bad input.
+// T-U-25: BeaconTicket gives no ticket for a bad input.
 func TestTU25MakeRefused(t *testing.T) {
 	k := seqKey()
 	for name, v := range map[string]string{

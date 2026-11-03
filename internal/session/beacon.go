@@ -22,7 +22,7 @@ const (
 
 // beaconTag returns the first 10 bytes of HMAC-SHA256 over the prefix, 0x00,
 // the session id and ms. It uses RFC 2104 with stack buffers, because
-// crypto/hmac allocates. The key is shorter than one block.
+// crypto/hmac.New allocates. The key is shorter than one block.
 func (s *state) beaconTag(sid string, ms []byte) (tag [tagLen]byte) {
 	var in [sha256Block + len(beaconPrefix) + 1 + sessionIDLen + msBytes]byte
 	var out [sha256Block + sha256.Size]byte
@@ -49,8 +49,10 @@ func (s *state) beaconTag(sid string, ms []byte) (tag [tagLen]byte) {
 
 // BeaconTicket returns the beacon ticket of a session id at a time. The ticket
 // is lower-case base32 with no padding, of 6 bytes of Unix time in ms and a
-// 10-byte tag. It returns an empty text in three cases. The Key is the zero
-// Key. The session id is not 26 bytes. The time is before 1970 or from 2^48 ms.
+// 10-byte tag. It returns an empty text when:
+//   - the Key is the zero Key;
+//   - the session id is not 26 bytes;
+//   - the time is before 1970, or at or after 2^48 ms.
 func (k Key) BeaconTicket(sid string, now time.Time) string {
 	s := k.st()
 	ms := now.UnixMilli()
@@ -75,8 +77,9 @@ func (k Key) BeaconTicket(sid string, now time.Time) string {
 
 // CheckBeaconTicket reports whether a ticket is valid for a session id at a
 // time. The ticket must have the form that BeaconTicket makes, a valid tag and
-// an age from 0 to 5000 ms. It allocates nothing and keeps no state. The zero
-// Key accepts no ticket.
+// an age from 0 to 5000 ms. It returns false for a session id that is not 26
+// bytes. It allocates nothing and keeps no state. The zero Key accepts no
+// ticket.
 func (k Key) CheckBeaconTicket(ticket, sid string, now time.Time) bool {
 	s := k.st()
 	nowMS := now.UnixMilli()
