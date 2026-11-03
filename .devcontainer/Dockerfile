@@ -39,7 +39,8 @@ RUN GOBIN=/usr/local/bin CGO_ENABLED=0 go install github.com/go-gremlins/gremlin
 # The devcontainer runs without network, so govulncheck reads a copy of
 # the Go vulnerability database. GOVULNDB names it. The source is
 # vuln.go.dev, and the data has the CC BY 4.0 license.
-# Each build sets VULNDB_FETCHED. A new value fetches the latest copy.
+# A build with a new VULNDB_FETCHED value fetches the latest copy. A
+# build without it can use the copy of an earlier build.
 # /opt/govulndb.info records the SHA-256 of the zip, the modified value
 # of the index, and the download time. make check refuses an image that
 # fetched its copy more than 7 days ago.
@@ -49,7 +50,8 @@ RUN echo "cache key ${VULNDB_FETCHED}" \
  && fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
  && python3 -I -m zipfile -e /tmp/vulndb.zip /opt/govulndb \
  && sha=$(sha256sum /tmp/vulndb.zip | cut -d' ' -f1) \
- && modified=$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' /opt/govulndb/index/db.json) \
+ && test -n "$sha" \
+ && modified=$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' /opt/govulndb/index/db.json | head -n 1 | tr -cd '0-9A-Za-z:.+-') \
  && test -n "$modified" \
  && printf 'sha256 %s\nmodified %s\nfetched %s\n' "$sha" "$modified" "$fetched" > /opt/govulndb.info \
  && rm /tmp/vulndb.zip \
