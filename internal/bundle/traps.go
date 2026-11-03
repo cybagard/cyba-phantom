@@ -89,11 +89,29 @@ func validTrapID(s string) bool {
 		!strings.ContainsFunc(s, func(c rune) bool { return c != '-' && (c < '0' || c > '9') && (c < 'a' || c > 'z') })
 }
 
+// reservedHeaders are names that a header slot must not have. The match
+// ignores ASCII case.
+var reservedHeaders = []string{"X-Content-Type-Options", "X-Frame-Options", "X-XSS-Protection", "X-Sendfile"}
+
+// reservedHeaderPrefixes are the starts of names that a header slot must not
+// have. The match ignores ASCII case.
+var reservedHeaderPrefixes = []string{"X-Accel-", "X-Forwarded-"}
+
 // validHeaderName reports whether s is "X-" and 1 to 32 bytes of A-Z a-z 0-9 -.
+// It is false for a name that equals X-Content-Type-Options, X-Frame-Options,
+// X-XSS-Protection or X-Sendfile. It is false for a name that starts with
+// X-Accel- or X-Forwarded-. These matches ignore ASCII case. The character
+// check comes first, so the fold only sees ASCII.
 func validHeaderName(s string) bool {
 	rest, ok := strings.CutPrefix(s, "X-")
-	return ok && len(rest) >= 1 && len(rest) <= maxHeaderNameLen &&
-		!strings.ContainsFunc(rest, func(c rune) bool { return c != '-' && !alnum(c) })
+	if !ok || len(rest) < 1 || len(rest) > maxHeaderNameLen ||
+		strings.ContainsFunc(rest, func(c rune) bool { return c != '-' && !alnum(c) }) {
+		return false
+	}
+	return !slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(s, r) }) &&
+		!slices.ContainsFunc(reservedHeaderPrefixes, func(p string) bool {
+			return len(s) >= len(p) && strings.EqualFold(s[:len(p)], p)
+		})
 }
 
 // compileTraps parses the instruction template of each trap with the

@@ -446,7 +446,8 @@ func TestTU08RouteMapRefused(t *testing.T) {
 		refuse(t, doc(pa, target, ty))
 	}
 	refuse(t, doc(pa, ty), doc(pa, ti), doc(pa, ti, `"type":"text/xml"`), doc(pa, ti, `"type":"Application/JSON"`), doc(ti, ty))
-	for _, slots := range []string{"", strings.Repeat(slotJSON+",", 4) + slotJSON, `{"name":"X-A","trap":"t","x":1}`,
+	for _, slots := range []string{"", strings.Join([]string{slotJSON, `{"name":"X-B","trap":"t"}`, `{"name":"X-C","trap":"t"}`,
+		`{"name":"X-D","trap":"t"}`, `{"name":"X-E","trap":"t"}`}, ","), `{"name":"X-A","trap":"t","x":1}`,
 		`{"trap":"t"}`, `{"name":"X-A"}`, `{"name":1,"trap":"t"}`} {
 		refuse(t, doc(pa, ti, ty, `"headers":[`+slots+`]`))
 	}
@@ -505,7 +506,7 @@ func TestTU08RouteForms(t *testing.T) {
 // T-U-08: the size and count limits hold exactly.
 func TestTU08RouteLimits(t *testing.T) {
 	slots := func(n int) string {
-		return doc(pa, ti, ty, `"headers":[`+strings.TrimSuffix(strings.Repeat(slotJSON+",", n), ",")+`]`)
+		return doc(pa, ti, ty, slotsOf([]string{"X-A", "X-B", "X-C", "X-D"}[:n]...))
 	}
 	for _, text := range []string{spaced(doc(pa, ti, ty), 65536), manyRoutes(256), slots(1), slots(4),
 		doc(`"path":"/`+strings.Repeat("a", 255)+`"`, ti, ty), doc(`"path":"/"`, ti, ty)} {
@@ -731,13 +732,13 @@ func TestTS28PageType(t *testing.T) {
 func TestTS28Comment(t *testing.T) {
 	for _, s := range []string{
 		"a--b", "--", "<!--", "-->", "--!>", "x<!--y", "x-->", ">", ">x", "->", "->x", "\x00", "\x1f",
-		"a\rb", "a\x01", "a\x0bb",
+		"a\rb", "a\x01", "a\x0bb", "<", "a<b", "<p>", "</noscript>", "\x7f", "a\x7fb", "\u0080", "\u009f", "a\u0085b",
 	} {
 		if got := comment(s); got != "" {
 			t.Errorf("comment(%q) = %q; want empty", s, got)
 		}
 	}
-	for _, s := range []string{"", "x", " ", "a b", "a\tb", "a\nb", "a>b", "a->b", "-x", "-", "a-b", "<p>", "é"} {
+	for _, s := range []string{"", "x", " ", "a b", "a\tb", "a\nb", "a>b", "a->b", "-x", "-", "a-b", "é", "~", "ÿ", "\xc2\xa0", "\x80", "\xc2"} {
 		if got, want := comment(s), "<!-- "+s+" -->"; string(got) != want {
 			t.Errorf("comment(%q) = %q; want %q", s, got, want)
 		}
@@ -747,12 +748,20 @@ func TestTS28Comment(t *testing.T) {
 // T-S-28: in text context the output is one HTML comment. In a title attribute
 // the output is empty. A refused text gives no comment.
 func TestTS28CommentContext(t *testing.T) {
-	for _, c := range []struct{ text, trap, want string }{
+	type row struct{ text, trap, want string }
+	cases := []row{
 		{`<p>{{comment (index .Trap "a")}}</p>`, "x", "<p><!-- x --></p>"},
 		{`<p>{{comment (index .Trap "a")}}</p>`, "a--b", "<p></p>"},
 		{`<p>{{comment (index .Trap "a")}}</p>`, "--><script>", "<p></p>"},
 		{`<a title="{{comment (index .Trap "a")}}">`, "x", `<a title="">`},
-	} {
+	}
+	// An end tag in a trap text does not end a raw text element.
+	for _, el := range []string{"noscript", "xmp", "iframe", "noembed", "noframes"} {
+		text := "<" + el + `>{{comment (index .Trap "a")}}</` + el + ">"
+		cases = append(cases, row{text, "</" + el + "><b>x</b>", "<" + el + "></" + el + ">"},
+			row{text, "x", "<" + el + "><!-- x --></" + el + ">"})
+	}
+	for _, c := range cases {
 		b := execLoadIDs(t, nil, c.text, "a")
 		tp, _ := b.Template(vhostFile)
 		var sb strings.Builder

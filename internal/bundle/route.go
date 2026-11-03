@@ -142,6 +142,10 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 			if !s.Name.set || !s.Trap.set || !validHeaderName(s.Name.v) || !ids[s.Trap.v] {
 				return RouteMap{}, false
 			}
+			// Slot names of one route must differ by more than ASCII case.
+			if slices.ContainsFunc(route.Headers, func(h HeaderSlot) bool { return strings.EqualFold(h.Name, s.Name.v) }) {
+				return RouteMap{}, false
+			}
 			route.Headers = append(route.Headers, HeaderSlot{s.Name.v, s.Trap.v})
 		}
 		rm.Routes = append(rm.Routes, route)
