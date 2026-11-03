@@ -981,6 +981,9 @@ func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
 	if plainLog == nil {
 		t.Fatal("the plain server has no error log")
 	}
+	if plainLog.Writer() != &r.s.errLines {
+		t.Fatal("the plain server error log does not write only to the counter")
+	}
 	prevErr, prevLog := os.Stderr, log.Writer()
 	restore := func() {
 		os.Stderr = prevErr
