@@ -144,22 +144,29 @@ func (b *Bundle) Execute(w io.Writer, name string, data Page) error {
 	return t.Execute(w, data)
 }
 
-// Asset is a read-only view of the bytes of an archive entry. It gives no
-// access to the bytes but a write.
+// Asset is a view of the bytes of an archive entry. It has no method that
+// changes or returns the bytes. The only access is WriteTo, which hands the
+// kept bytes to a writer.
 type Asset struct{ data []byte }
 
 // Len returns the number of bytes of the entry.
 func (a Asset) Len() int { return len(a.data) }
 
-// WriteTo writes the bytes of the entry to w. It makes no copy.
+// WriteTo writes the bytes of the entry to w. It makes no copy: it passes the
+// kept slice itself to w.Write. The bytes stay unchanged only if w keeps the
+// io.Writer rule: Write must not change the slice and must not keep it.
 func (a Asset) WriteTo(w io.Writer) (int64, error) {
 	n, err := w.Write(a.data)
 	return int64(n), err
 }
 
 // Asset returns a view of the bytes of an archive entry below "vhosts/" whose
-// name does not end in ".tmpl". A route rule picks assets the same way. It
-// gives false for each other name. A call copies no byte.
+// name does not end in ".tmpl". It checks only that prefix and that suffix. It
+// does not check which vhost the name is below, so it also gives a file of any
+// vhost and the routes.json of each vhost. The route rule accepts only a file
+// below the directory of the route's own vhost. A caller must take asset names
+// from the route map of the vhost. Asset gives false for each other name. A
+// call copies no byte.
 func (b *Bundle) Asset(name string) (Asset, bool) {
 	if !strings.HasPrefix(name, templateDir) || strings.HasSuffix(name, templateSuffix) {
 		return Asset{}, false

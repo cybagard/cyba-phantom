@@ -202,8 +202,8 @@ func TestTU08KeptTemplateIsFromConstructor(t *testing.T) {
 	}
 }
 
-// T-U-08: Execute leaves the kept template unchanged. It is the same pointer,
-// and a second call gives the same output.
+// T-U-08: Execute leaves the kept template unchanged. The kept template is the
+// same pointer after each call, and a second call gives the same output.
 func TestTU08ExecuteKeepsTheTemplate(t *testing.T) {
 	b := loadWith(t, nil, tf(vhostFile, "orig"))
 	kept := b.templates[vhostFile]
@@ -322,9 +322,9 @@ func TestTU08EngineFuncKeys(t *testing.T) {
 }
 
 // T-U-08: the load does not execute a template. The test checks two things.
-// The comment function is not called. And each kept template still clones. This
-// is because html/template refuses Clone after an Execute, also one that fails
-// with nil data.
+// The load does not call the comment function. And each kept template still
+// clones, because html/template refuses Clone after an Execute, also one that
+// fails with nil data.
 func TestTU08LoadDoesNotExecute(t *testing.T) {
 	called := false
 	old := engineFuncs["comment"]
@@ -911,12 +911,62 @@ func TestTS28AssetView(t *testing.T) {
 			t.Errorf("Asset(%q) = len %d, %v; want false", name, a.Len(), ok)
 		}
 	}
-	// The archive rules allow no such name, so the test sets the files by hand.
+	// The load refuses each of these names: "vhostsx/a.png" and "vhosts" fail
+	// with archive_invalid, and "vhosts/a.png" fails with content_invalid (the
+	// route rule). So the test sets the files by hand.
 	odd := &Bundle{archive: &Archive{files: map[string][]byte{"vhostsx/a.png": []byte("x"), "vhosts": []byte("y"), "vhosts/a.png": []byte("z")}}}
 	for name, want := range map[string]bool{"vhostsx/a.png": false, "vhosts": false, "vhosts/a.png": true} {
 		if _, ok := odd.Asset(name); ok != want {
 			t.Errorf("Asset(%q) = %v; want %v", name, ok, want)
 		}
+	}
+}
+
+// recWriter records the slice that Write gets. It writes nothing.
+type recWriter struct{ got []byte }
+
+func (r *recWriter) Write(p []byte) (int, error) { r.got = p; return len(p), nil }
+
+// shortWriter writes one byte and returns err.
+type shortWriter struct{ err error }
+
+func (s shortWriter) Write([]byte) (int, error) { return 1, s.err }
+
+// T-S-28: WriteTo makes no copy. The slice that the writer gets starts at the
+// same address as the archive file and has the same length, and a call to an
+// io.Discard writer allocates nothing.
+func TestTS28AssetWriteToMakesNoCopy(t *testing.T) {
+	const name = hostDir + "a.png"
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(name, "\x89PNG asset bytes")}),
+		tf(trapsName, arr(tj("t", "x"))))...)
+	a, ok := b.Asset(name)
+	raw, _ := b.archive.File(name)
+	if !ok || len(raw) == 0 {
+		t.Fatalf("Asset(%q) = %v, len %d", name, ok, len(raw))
+	}
+	var rec recWriter
+	if _, err := a.WriteTo(&rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.got) != len(raw) || &rec.got[0] != &raw[0] {
+		t.Errorf("the writer got a copy of the archive bytes: len %d, want %d", len(rec.got), len(raw))
+	}
+	if got := testing.AllocsPerRun(100, func() { _, _ = a.WriteTo(io.Discard) }); got != 0 {
+		t.Errorf("WriteTo allocates %v", got)
+	}
+}
+
+// T-S-28: on a short write, WriteTo returns the count and the error of the
+// writer.
+func TestTS28AssetWriteToShortWrite(t *testing.T) {
+	const name = hostDir + "a.png"
+	b := loadRaw(t, nil, nil, append(withRoutes([]ent{tf(vhostFile, "page"), tf(name, "\x89PNG asset bytes")}),
+		tf(trapsName, arr(tj("t", "x"))))...)
+	a, _ := b.Asset(name)
+	boom := errors.New("boom")
+	n, err := a.WriteTo(shortWriter{boom})
+	if n != 1 || !errors.Is(err, boom) {
+		t.Errorf("WriteTo gave (%d, %v); want (1, boom)", n, err)
 	}
 }
 
