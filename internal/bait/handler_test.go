@@ -80,6 +80,10 @@ func TestTU20Host(t *testing.T) {
 		{"kilo.example:8080", "kilo\n"},
 		{"Kilo.example", "kilo\n"},
 		{"example.com:", "<p>index</p>\n"},
+		{"example.com:9", "<p>index</p>\n"},
+		{"example.com:8089", "<p>index</p>\n"},
+		{"ZULU.example", "zulu\n"},
+		{"zuLu.Example:9", "zulu\n"},
 		{"example.com.", ""},
 		{"example.com.:443", ""},
 		{"other.example", ""},
@@ -106,6 +110,25 @@ func TestTU20Host(t *testing.T) {
 		} else if w.Body.String() != c.want {
 			t.Errorf("%s: body %q, want %q", c.line, w.Body.String(), c.want)
 		}
+	}
+}
+
+// TestTU20HostLength checks the fold of a host of 253 bytes and of 254 bytes.
+// A host of 253 bytes is the longest vhost name. A bundle archive cannot hold
+// that name, as the tar name field is too short. So the test calls foldHost.
+func TestTU20HostLength(t *testing.T) {
+	rep := strings.Repeat
+	long := "Z" + rep("a", 62) + "." + rep("B", 63) + "." + rep("c", 63) + "." + rep("D", 61)
+	if len(long) != 253 {
+		t.Fatalf("test host has %d bytes", len(long))
+	}
+	var buf [253]byte
+	got, ok := foldHost(long+":8089", &buf)
+	if want := strings.ToLower(long); !ok || string(got) != want {
+		t.Errorf("253 bytes with a port: ok %v, got %q", ok, got)
+	}
+	if got, ok := foldHost(long+"d", &buf); ok {
+		t.Errorf("254 bytes: ok, got %q", got)
 	}
 }
 

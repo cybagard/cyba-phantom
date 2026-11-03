@@ -39,6 +39,9 @@ var exampleRoutes = []route{
 
 var kiloRoutes = []route{{"/", "kilo.txt", text, "kilo\n"}}
 
+// zuluRoutes are the routes of a vhost whose name has the letter z.
+var zuluRoutes = []route{{"/", "zulu.txt", text, "zulu\n"}}
+
 func mustOK(tb testing.TB, err error) {
 	tb.Helper()
 	if err != nil {
@@ -75,8 +78,9 @@ func bundleWith(tb testing.TB, tag string) *bundle.Bundle {
 		"vhosts/example.com/unrouted.txt": "unrouted\n",
 		"vhosts/kilo.example/routes.json": routesJSON("kilo.example", kiloRoutes),
 		"vhosts/kilo.example/only.txt":    "other vhost\n",
+		"vhosts/zulu.example/routes.json": routesJSON("zulu.example", zuluRoutes),
 	}
-	for host, rs := range map[string][]route{"example.com": exampleRoutes, "kilo.example": kiloRoutes} {
+	for host, rs := range map[string][]route{"example.com": exampleRoutes, "kilo.example": kiloRoutes, "zulu.example": zuluRoutes} {
 		for _, r := range rs {
 			files["vhosts/"+host+"/"+r.file] = r.body
 		}
@@ -114,7 +118,7 @@ func bundleWith(tb testing.TB, tag string) *bundle.Bundle {
 func TestTU20SiteTable(t *testing.T) {
 	b := newBundle(t)
 	s := buildSite(b)
-	if len(s.hosts) != 2 || len(s.hosts["example.com"]) != len(exampleRoutes) || len(s.hosts["kilo.example"]) != 1 {
+	if len(s.hosts) != 3 || len(s.hosts["example.com"]) != len(exampleRoutes) || len(s.hosts["kilo.example"]) != 1 {
 		t.Fatalf("hosts = %d, routes = %d", len(s.hosts), len(s.hosts["example.com"]))
 	}
 	for _, r := range exampleRoutes {
