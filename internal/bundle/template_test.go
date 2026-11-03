@@ -672,9 +672,9 @@ func TestTU08ExecCheckPermitted(t *testing.T) {
 
 // T-U-08: a bundle with 7 good templates and 1 refused template gives
 // template_parse. The set is a map, so the check order is random. With 8 keys,
-// each template is first with chance 1/8. The test makes 110 loads. A check
-// that stops after the first template misses the bad one in all loads. The
-// chance of that is (7/8)^110, below 5e-7.
+// each template is first with chance 1/8. A check that stops after the first
+// template finds the bad one only when it is first. Such a check passes all
+// 110 loads only with chance (1/8)^110.
 func TestTU08ExecCheckEveryTemplate(t *testing.T) {
 	ents := files(7, "plain")
 	ents = append(ents, tf("vhosts/h.example/bad.tmpl", `{{.X}}`))
