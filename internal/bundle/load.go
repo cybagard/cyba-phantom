@@ -18,6 +18,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // The caps of the bundle file and of the signature file, in bytes (SEC-23).
@@ -57,6 +58,9 @@ type Bundle struct {
 	// in an unexported struct field then prints no seed byte. It is nil only
 	// when a test turns the seed step off.
 	seed *seedRef
+	// tokens is the key set of the token seed. It is nil without a seed or
+	// without a trap. It holds no seed byte.
+	tokens *token.KeySet
 }
 
 // Format prints the version and the SHA-256 of the bundle. It prints no seed.
@@ -100,6 +104,10 @@ func (b *Bundle) Traps() []Trap {
 	}
 	return out
 }
+
+// Tokens returns the key set of the bundle. It is nil when the bundle has no
+// seed or no trap. No call gives the seed or the key.
+func (b *Bundle) Tokens() *token.KeySet { return b.tokens }
 
 // Vhosts returns the sorted names of the vhosts that have a route map.
 func (b *Bundle) Vhosts() []string { return slices.Sorted(maps.Keys(b.routes)) }
@@ -227,6 +235,9 @@ func (l *Loader) Healthy() bool {
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: chain
 // check, read, SHA-256, signature, archive, manifest, key ID or rotation,
 // engine, expiry and rollback. Then: trap file, templates, route maps, seed.
+// With a seed and a trap, Load makes the key set of the tokens. It uses the
+// seed, the SHA-256 and the trap ids in file order. A failure gives
+// ErrSeedInvalid. A bundle with no seed or no trap has no key set.
 // A trap file of a bad form gives ErrContentInvalid. A bundle with no trap file
 // has no trap. A route header slot then gives ErrContentInvalid.
 // A host name that is the second name part of a file below vhosts/ is a vhost.
@@ -366,10 +377,22 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 		}
 	}
 	var ref *seedRef
+	var tokens *token.KeySet
 	if seed != nil {
 		ref = &seedRef{seed}
+		// A bundle with no trap has no key set. It has no trap to mint for.
+		if len(traps) > 0 {
+			ids := make([]string, len(traps))
+			for i, t := range traps {
+				ids[i] = t.ID
+			}
+			if tokens, err = token.NewKeySet(*seed, sum, ids, class == ClassReference); err != nil {
+				clear(*seed)
+				return nil, ErrSeedInvalid
+			}
+		}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref}
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref, tokens: tokens}
 	// A candidate that fails a later step keeps no seed. Only an accepted
 	// candidate does.
 	reject := func(err error) (*Bundle, error) {

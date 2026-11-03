@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -355,21 +358,210 @@ func TestTU01_Copy(t *testing.T) {
 	}
 }
 
-// TestTU01_Format checks that a print of a key set shows nothing of it.
-func TestTU01_Format(t *testing.T) {
-	k := newSet(t, testKey, 3)
-	const want = "token.KeySet"
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
-		if got := fmt.Sprintf(verb, k); got != want {
-			t.Errorf("%s: got %q, want %q", verb, got, want)
-		}
+// The known answer for NewKeySet. OpenSSL computed the key, not Go. The seed
+// is the bytes 0x01 to 0x20. The salt is 32 bytes of 0xaa.
+const (
+	katKey   = "f9b515888dac9e08583ee19b3e0aacab"
+	katBlock = "87abc4dfb358b2375d71f189ca5458a0" // AES-128 of the zero block
+)
+
+func katSeed() []byte {
+	s := make([]byte, 32)
+	for i := range s {
+		s[i] = byte(i + 1)
 	}
-	j, err := json.Marshal(k)
+	return s
+}
+
+func sumOf(b byte) [32]byte { return [32]byte(bytes.Repeat([]byte{b}, 32)) }
+
+func newDerived(t testing.TB, seed []byte, sum [32]byte, n int, ref bool) *KeySet {
+	t.Helper()
+	k, err := NewKeySet(seed, sum, traps(n), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(j, []byte("trap-")) || bytes.Contains(j, testKey) {
-		t.Errorf("json holds key set data: %s", j)
+	return k
+}
+
+// TestTU01_NewKeySetVector checks the key against the OpenSSL vector. A
+// changed label, salt, secret, length or hash gives another block.
+func TestTU01_NewKeySetVector(t *testing.T) {
+	k := newDerived(t, katSeed(), sumOf(0xaa), 2, false)
+	var out [Size]byte
+	k.block.Encrypt(out[:], make([]byte, Size))
+	if got := hex.EncodeToString(out[:]); got != katBlock {
+		t.Errorf("AES of the zero block = %s, want %s", got, katBlock)
+	}
+	key, _ := hex.DecodeString(katKey)
+	if want := newSet(t, key, 2); seal(k, [Size]byte{1}) != seal(want, [Size]byte{1}) {
+		t.Error("the key set differs from the set of the vector key")
+	}
+}
+
+// TestTU01_NewKeySetClearsKey keeps the key slice and checks that it is zero
+// after NewKeySet returns. It also checks the refusals.
+func TestTU01_NewKeySetClearsKey(t *testing.T) {
+	orig := deriveKey
+	t.Cleanup(func() { deriveKey = orig })
+	var kept []byte
+	var seen string
+	calls := 0
+	deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
+		calls++
+		key, err := orig(seed, sum)
+		kept, seen = key, hex.EncodeToString(key)
+		return key, err
+	}
+	newDerived(t, katSeed(), sumOf(0xaa), 1, false)
+	if seen != katKey || len(kept) != 16 || !bytes.Equal(kept, make([]byte, 16)) {
+		t.Errorf("key seen %s, slice after return %x", seen, kept)
+	}
+	calls = 0
+	for _, seed := range [][]byte{nil, {}} {
+		if k, err := NewKeySet(seed, sumOf(0xaa), traps(1), false); k != nil || !errors.Is(err, ErrSeed) {
+			t.Errorf("seed %v: %v, %v", seed, k, err)
+		}
+	}
+	if calls != 0 {
+		t.Error("an empty seed reached the derivation")
+	}
+	deriveKey = func([]byte, [32]byte) ([]byte, error) { return nil, errors.New("stub") }
+	if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(1), false); k != nil || !errors.Is(err, ErrKey) {
+		t.Errorf("derivation error: %v, %v", k, err)
+	}
+	deriveKey = func([]byte, [32]byte) ([]byte, error) { return make([]byte, 5), nil }
+	if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(1), false); k != nil || !errors.Is(err, ErrKey) {
+		t.Errorf("short key: %v, %v", k, err)
+	}
+	deriveKey = orig
+	for _, n := range []int{0, 1025} {
+		if k, err := NewKeySet(katSeed(), sumOf(0xaa), traps(n), false); k != nil || !errors.Is(err, ErrTraps) {
+			t.Errorf("%d traps: %v, %v", n, k, err)
+		}
+	}
+}
+
+// TestTU01_NewKeySetSum checks that the salt is part of the key. The counter
+// start is random, so the test checks Verify, not the token bytes.
+func TestTU01_NewKeySetSum(t *testing.T) {
+	a := newDerived(t, katSeed(), sumOf(1), 3, false)
+	same := newDerived(t, katSeed(), sumOf(1), 3, false)
+	other := newDerived(t, katSeed(), sumOf(2), 3, false)
+	ta, _ := a.Mint(1, epoch)
+	ts, _ := same.Mint(2, epoch)
+	to, _ := other.Mint(1, epoch)
+	if got := Verify([]*KeySet{same}, ta); !got.OK || got.Trap != "trap-1" {
+		t.Errorf("same sum, a to same: %+v", got)
+	}
+	if got := Verify([]*KeySet{a}, ts); !got.OK || got.Trap != "trap-2" {
+		t.Errorf("same sum, same to a: %+v", got)
+	}
+	if Verify([]*KeySet{a}, to).OK || Verify([]*KeySet{other}, ta).OK {
+		t.Error("a token verifies under the key set of another sum")
+	}
+}
+
+// TestTU01_Reference checks that Verify gives the flag of the matching key
+// set, not the flag of ring[0].
+func TestTU01_Reference(t *testing.T) {
+	prop := newDerived(t, katSeed(), sumOf(1), 2, false)
+	ref := newDerived(t, katSeed(), sumOf(2), 2, true)
+	tp, _ := prop.Mint(0, epoch)
+	tr, _ := ref.Mint(0, epoch)
+	ring := []*KeySet{prop, ref}
+	if got := Verify(ring, tr); !got.OK || !got.Reference || got.Set != 1 {
+		t.Errorf("reference token: %+v", got)
+	}
+	if got := Verify(ring, tp); !got.OK || got.Reference || got.Set != 0 {
+		t.Errorf("proprietary token: %+v", got)
+	}
+	if got := Verify([]*KeySet{ref, prop}, tp); got.Reference || got.Set != 1 {
+		t.Errorf("proprietary token, reversed ring: %+v", got)
+	}
+}
+
+// markers lists the forms of b that no print may hold. They are the raw bytes
+// and the hex text. They are also each uint32 word, in both byte orders, in
+// decimal and in hex. An AES key schedule prints as such words.
+func markers(b []byte) []string {
+	m := []string{string(b), hex.EncodeToString(b)}
+	for _, o := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		for i := 0; i+4 <= len(b); i += 4 {
+			w := uint64(o.Uint32(b[i:]))
+			m = append(m, strconv.FormatUint(w, 10), strconv.FormatUint(w, 16))
+		}
+	}
+	return m
+}
+
+// TestTS29_Format checks that no print of a key set shows the key, the seed or
+// a trap id. The prints are fmt (direct and in a struct), json and slog.
+func TestTS29_Format(t *testing.T) {
+	ids := traps(3)
+	k, err := NewKeySet(katSeed(), sumOf(0xaa), ids, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := hex.DecodeString(katKey)
+	bad := append(append(markers(key), markers(katSeed())...), ids...)
+	type wrap struct{ ks *KeySet }
+	w := wrap{k}
+	var outs []string
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
+		got := fmt.Sprintf(verb, k)
+		if got != "token.KeySet" {
+			t.Errorf("%s: got %q, want token.KeySet", verb, got)
+		}
+		outs = append(outs, got)
+	}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x"} {
+		outs = append(outs, fmt.Sprintf(verb, w), fmt.Sprintf(verb, &w))
+	}
+	jk, err1 := json.Marshal(k)
+	jw, err2 := json.Marshal(w)
+	if err1 != nil || err2 != nil {
+		t.Fatal(err1, err2)
+	}
+	// "{}" is fixed only if key sets of other seeds and traps give it too.
+	o := newDerived(t, bytes.Repeat([]byte{9}, 32), sumOf(3), 7, true)
+	jo, _ := json.Marshal(o)
+	if string(jk) != string(jo) || string(jw) != string(jo) || string(jo) != "{}" {
+		t.Errorf("json %s, wrapper %s, other key set %s", jk, jw, jo)
+	}
+	var text, js bytes.Buffer
+	slog.New(slog.NewTextHandler(&text, nil)).Info("m", slog.Any("ks", k))
+	slog.New(slog.NewJSONHandler(&js, nil)).Info("m", slog.Any("ks", k))
+	if !strings.HasSuffix(text.String(), " msg=m ks=token.KeySet\n") || !strings.HasSuffix(js.String(), `,"ks":{}}`+"\n") {
+		t.Errorf("slog: %q, %q", text.String(), js.String())
+	}
+	outs = append(outs, string(jk), string(jw), text.String(), js.String())
+	for _, out := range outs {
+		for _, m := range bad {
+			if strings.Contains(out, m) {
+				t.Errorf("print %q holds %q", out, m)
+			}
+		}
+	}
+}
+
+// TestTS29_ErrorsHoldNoSecret checks the errors of the package and of
+// NewKeySet. None holds the key, the seed or a trap id.
+func TestTS29_ErrorsHoldNoSecret(t *testing.T) {
+	key, _ := hex.DecodeString(katKey)
+	bad := append(append(markers(key), markers(katSeed())...), "trap-0")
+	_, e1 := NewKeySet(nil, sumOf(0xaa), traps(1), false)
+	_, e2 := NewKeySet(katSeed(), sumOf(0xaa), nil, false)
+	for _, err := range []error{ErrNoKeySet, ErrIndex, ErrTraps, ErrKey, ErrSeed, e1, e2} {
+		if err == nil {
+			t.Error("a call gave no error")
+			continue
+		}
+		for _, m := range bad {
+			if strings.Contains(err.Error(), m) {
+				t.Errorf("error %v holds %q", err, m)
+			}
+		}
 	}
 }
 
