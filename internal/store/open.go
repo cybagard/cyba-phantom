@@ -91,7 +91,8 @@ var pragmas = []string{
 }
 
 // afterChecks is a test hook. Production code leaves it nil. A test sets it to
-// change the file system between the file checks and the open of SQLite.
+// change the file system between the file checks and the side-file check. The
+// side-file check and the open of SQLite follow the hook.
 var afterChecks func()
 
 // afterVerify is a test hook. Production code leaves it nil. A test sets it to
@@ -200,9 +201,9 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 		return nil, err
 	}
 	if guard != nil {
-		// The guard holds the inode of the made file. open closes it after its
-		// last check before SQLite opens the file. The deferred close is for
-		// the failures before that point.
+		// The guard holds the inode of the made file. open closes it after the
+		// identity check of held, before SQLite opens the file. The deferred
+		// close is for the failures before that point.
 		defer guard.Close()
 	}
 	db, err := open(root, rel, opt, &made, false, guard)
@@ -223,11 +224,11 @@ func Open(root *os.Root, rel string, opt Options) (*sql.DB, error) {
 // name. Then rel must be absent. open makes it and sets kept to the identity
 // of the new file. For any other call, an absent file is an error. guard is
 // nil, or a descriptor that holds the inode of kept. open closes it when its
-// own read-only descriptor of the file is open and its last check is done.
-// This is before SQLite opens the file. A failure after that close removes
-// the made file in open. A failure before it leaves the guard open. That
-// failure can also remove the made file in open. Then the caller finds
-// nothing to remove.
+// own read-only descriptor of the file is open and the identity check of that
+// descriptor is done. This is before SQLite opens the file. A later failure,
+// also of the side-file check, removes the made file in open. A failure before
+// the close leaves the guard open. That failure can also remove the made file
+// in open. Then the caller finds nothing to remove.
 func open(root *os.Root, rel string, opt Options, kept *fs.FileInfo, create bool, guard *os.File) (*sql.DB, error) {
 	base, err := stateBase(root)
 	if err != nil {

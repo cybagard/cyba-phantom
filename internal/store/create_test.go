@@ -116,31 +116,42 @@ func TestTS15KilledStartLeavesNoFileAtRealName(t *testing.T) {
 }
 
 // T-S-15: Open syncs the file under the temporary name, renames it, and syncs
-// the directory. No temporary file stays. The database has auto_vacuum 2.
+// the directory of the file. No temporary file stays. The database has
+// auto_vacuum 2. The test runs for a file in the state directory and for a
+// file in a directory below it.
 func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
-	root, state, _ := newState(t)
-	file := filepath.Join(state, "events.db")
-	var steps []string
-	setHook(t, &syncFile, func(f *os.File) error {
-		kind := "file"
-		if fi, err := f.Stat(); err == nil && fi.IsDir() {
-			kind = "directory"
-		}
-		steps = append(steps, fmt.Sprintf("%s: temporary %t, real %t", kind, !gone(file+tempSuffix), !gone(file)))
-		return f.Sync()
-	})
-	db := mustOpen(t, root, "events.db")
-	defer db.Close()
-	want := []string{"file: temporary true, real false", "directory: temporary false, real true"}
-	var vacuum int
-	err := db.QueryRow("PRAGMA auto_vacuum").Scan(&vacuum)
-	if !reflect.DeepEqual(steps, want) || err != nil || vacuum != 2 {
-		t.Fatalf("sync steps %q, want %q; auto_vacuum %d, %v", steps, want, vacuum, err)
-	}
-	for _, s := range suffixes {
-		if !gone(file + tempSuffix + s) {
-			t.Errorf("events.db%s%s stays", tempSuffix, s)
-		}
+	for _, rel := range []string{"events.db", "data/events.db"} {
+		t.Run(rel, func(t *testing.T) {
+			root, state, _ := newState(t)
+			must(t, os.Mkdir(filepath.Join(state, "data"), 0o700))
+			file := filepath.Join(state, filepath.FromSlash(rel))
+			parent, _ := os.Stat(filepath.Dir(file))
+			var steps []string
+			setHook(t, &syncFile, func(f *os.File) error {
+				kind := "file"
+				if fi, err := f.Stat(); err == nil && fi.IsDir() {
+					kind = "other directory"
+					if os.SameFile(fi, parent) {
+						kind = "directory"
+					}
+				}
+				steps = append(steps, fmt.Sprintf("%s: temporary %t, real %t", kind, !gone(file+tempSuffix), !gone(file)))
+				return f.Sync()
+			})
+			db := mustOpen(t, root, rel)
+			defer db.Close()
+			want := []string{"file: temporary true, real false", "directory: temporary false, real true"}
+			var vacuum int
+			err := db.QueryRow("PRAGMA auto_vacuum").Scan(&vacuum)
+			if !reflect.DeepEqual(steps, want) || err != nil || vacuum != 2 {
+				t.Fatalf("sync steps %q, want %q; auto_vacuum %d, %v", steps, want, vacuum, err)
+			}
+			for _, s := range suffixes {
+				if !gone(file + tempSuffix + s) {
+					t.Errorf("%s%s%s stays", rel, tempSuffix, s)
+				}
+			}
+		})
 	}
 }
 
@@ -170,7 +181,8 @@ func TestTS15LeftoverNextToExistingDatabaseIsRemoved(t *testing.T) {
 }
 
 // T-S-15: a refused open of an existing database keeps its -wal and -shm.
-// A second pool keeps them after the refused pool closes. They stay the same.
+// The first pool is still open and keeps them after the refused pool closes.
+// They stay the same files.
 func TestTS15RefusedOpenOfExistingDatabaseKeepsItsSideFiles(t *testing.T) {
 	root, state, _ := newState(t)
 	file := filepath.Join(state, "events.db")
@@ -199,7 +211,7 @@ var fdCheck func(t *testing.T, paths ...string)
 // Open. A name that ends with "/" is a directory. A content with "->" is a
 // symlink. A content with "=>" is a hard link to the file named in the rest.
 // then runs at the point on ("rename", "sync" of the directory, "checks",
-// "verify", "dsn"). It can also run at the second check of the name onName.
+// "checks2", "verify", "dsn"). It can also run at the second check of the name onName.
 // Open must fail with the rule for errName. A file in kept stays, with its
 // content if it is not empty. A file in gone does not exist. With same, no
 // file changes. With noFds, no descriptor points to the real or the temporary
@@ -238,6 +250,8 @@ func (r refusedStart) run(t *testing.T) {
 		onDirSync(t, call)
 	case "checks":
 		setHook(t, &afterChecks, nth(1, call))
+	case "checks2": // after the guard close, at the real name
+		setHook(t, &afterChecks, nth(2, call))
 	case "verify": // after the first connection, at the real name
 		setHook(t, &afterVerify, nth(2, call))
 	case "dsn": // with a bad connection string, at the real name
@@ -251,7 +265,9 @@ func (r refusedStart) run(t *testing.T) {
 		})
 	}
 	if r.onName != "" {
-		second := nth(2, call) // call 1 is open, call 2 is the reopen
+		// Calls of a directory name are the parent checks of Open and of open.
+		// Calls of a file name are the second open of open and the reopen.
+		second := nth(2, call)
 		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
 			if name == r.onName {
 				second()
@@ -283,7 +299,7 @@ func (r refusedStart) run(t *testing.T) {
 		}
 	}
 	if r.noFds && fdCheck != nil {
-		fdCheck(t, at("events.db"), at(tmpName))
+		fdCheck(t, at(r.rel), at(r.rel+tempSuffix))
 	}
 }
 
@@ -311,7 +327,10 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 				hook(t, os.Symlink("target", at("events.db-journal")))
 			}},
 		{name: "planted side files before a failed connector", errName: "events.db", rule: ruleOpen, on: "dsn",
-			kept: planted, gone: []string{"events.db"}, then: plantAll},
+			kept: planted, gone: []string{"events.db"}, then: plantAll, noFds: true},
+		{name: "wal after the guard close", errName: "events.db-wal", rule: ruleOrphan, on: "checks2",
+			then: plantWal, kept: map[string]string{"events.db-wal": "planted"}, gone: []string{"events.db", tmpName},
+			noFds: true},
 		{name: "planted journal before a failed check", errName: "events.db", rule: ruleMode, on: "verify",
 			kept: map[string]string{"events.db-journal": "planted"}, gone: []string{"events.db"},
 			then: func(t *testing.T, at func(string) string) {
@@ -337,16 +356,20 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 			kept: other, noFds: true,
 			gone: []string{tmpName, tmpName + "-wal", tmpName + "-shm", tmpName + "-journal"},
 			then: func(t *testing.T, at func(string) string) { put(t, at("events.db"), "other file") }},
-		{name: "journal symlink after the rename", errName: "events.db-journal", rule: ruleType, on: "sync",
-			kept: map[string]string{"events.db-journal": ""}, gone: []string{"events.db"}, noFds: true,
-			then: func(t *testing.T, at func(string) string) { hook(t, os.Symlink("target", at("events.db-journal"))) }},
+		{name: "journal symlink after the rename", rel: "data/events.db", errName: "data/events.db-journal",
+			rule: ruleType, on: "sync", plant: [][2]string{{"data/", ""}}, noFds: true,
+			kept: map[string]string{"data/events.db-journal": ""}, gone: []string{"data/events.db"},
+			then: func(t *testing.T, at func(string) string) {
+				hook(t, os.Symlink("target", at("data/events.db-journal")))
+			}},
 	}
 	for _, s := range suffixes[1:] {
 		rows = append(rows, refusedStart{name: "side file " + s + " and leftover", errName: "events.db" + s,
 			rule: ruleOrphan, same: true, plant: [][2]string{{"events.db" + s, "x"}, {tmpName, "x"}}},
 			refusedStart{name: "side file " + s + " after the rename", errName: "events.db" + s, rule: ruleOrphan,
 				on: "sync", kept: map[string]string{"events.db" + s: "planted"}, gone: []string{"events.db", tmpName},
-				then: func(t *testing.T, at func(string) string) { put(t, at("events.db"+s), "planted") }})
+				noFds: true,
+				then:  func(t *testing.T, at func(string) string) { put(t, at("events.db"+s), "planted") }})
 	}
 	for _, r := range rows {
 		t.Run(r.name, r.run)

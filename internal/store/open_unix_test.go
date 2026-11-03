@@ -383,7 +383,7 @@ func TestTS15FailureAfterCreateRemovesMadeFile(t *testing.T) {
 		{"second checks", ruleMode, func(t *testing.T, file string) {
 			setHook(t, &afterVerify, nth(1, chmod640(t, file+tempSuffix)))
 		}},
-		// The call 2 of a hook is the open of the renamed file.
+		// The second call of a hook is the open of the renamed file.
 		{"renamed file, first connection", ruleMode, func(t *testing.T, file string) {
 			setHook(t, &afterChecks, nth(2, chmod640(t, file)))
 		}},
