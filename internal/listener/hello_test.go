@@ -107,10 +107,8 @@ func TestTU21RequestEventPath(t *testing.T) {
 }
 
 // T-U-21: event.RequestPath and location make the same path for each byte
-// after "/". They also do this for the five URLs in this test,
-// requestPathRows and redirectEscapeRows. The two copies have different caps:
-// location also holds the scheme and the host in its 2048 bytes. So the test
-// keeps the copies equal for these rows, not for all paths.
+// after "/". They also do this for the five URLs in this test, for
+// requestPathRows and for redirectEscapeRows.
 func TestTU21RequestPathMatchesLocation(t *testing.T) {
 	us := []*url.URL{{Path: "/%41"}, {Path: "/%zz", RawPath: "/%zz"}, {Path: "/a%", RawPath: "/a%"},
 		{Path: "/%2z", RawPath: "/%2z"}, {Path: "/a%4", RawPath: "/a%4"}}

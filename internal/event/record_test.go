@@ -277,8 +277,8 @@ func TestTU21RequestPath(t *testing.T) {
 }
 
 // T-U-21: after "/", each byte 0x00-0x1F, 0x7F and 0x80-0xFF gives %XX with
-// upper-case hex. RequestPath copies '/', '%' gives %25, and each other byte
-// gives what url.PathEscape gives for that byte alone.
+// upper-case hex. RequestPath copies '/' and writes '%' as %25. Each other
+// byte gives what url.PathEscape gives for that byte alone.
 func TestTU21RequestPathEachByte(t *testing.T) {
 	for c := range 256 {
 		s := "/" + string([]byte{byte(c)})
@@ -377,7 +377,8 @@ func TestTU21ConstructionEscapesControlBytes(t *testing.T) {
 }
 
 // T-U-21: for any Path, the stored path has no control byte, has at most 2048
-// bytes and is valid UTF-8. RecordFromRow accepts the row of the event.
+// bytes and is valid UTF-8. RecordFromRow accepts a row with that path and
+// returns the same path.
 func FuzzTU21Path(f *testing.F) {
 	for _, s := range []string{"/a%2Fb%3Cc", "/a%0Ab", "/a%7F", "/%2541", "/é", "/a\x01b", "\x7f\xff",
 		strings.Repeat("\x01", 2100), strings.Repeat("a", 2046) + "\x01b", strings.Repeat("a", 2047) + "\xff"} {
