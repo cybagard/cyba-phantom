@@ -42,22 +42,18 @@ type startDeps struct {
 	openLog   func(*os.Root, string) (*tlog.Log, error)
 	openStore func(*os.Root, string, store.Options) (*sql.DB, error)
 	migrate   func(*sql.DB, string) error
-	newWriter func(*sql.DB, *event.Queue, *tlog.Log, *event.Counters, bool,
-		*slog.Logger, store.Recovery) *store.Writer
+	newWriter func(*sql.DB, *event.Queue, bool, *slog.Logger,
+		store.Recovery) *store.Writer
 	newCheckpointer func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink,
 		*os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error)
 	runCheckpointer func(context.Context, *tlog.Checkpointer)
 }
 
 var realDeps = startDeps{
-	openLog:   tlog.OpenLog,
-	openStore: store.Open,
-	migrate:   store.Migrate,
-	// newWriter wraps store.NewWriter because its parameter list is long.
-	newWriter: func(db *sql.DB, q *event.Queue, l *tlog.Log, c *event.Counters,
-		bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
-		return store.NewWriter(db, q, l, c, bp, lg, r)
-	},
+	openLog:         tlog.OpenLog,
+	openStore:       store.Open,
+	migrate:         store.Migrate,
+	newWriter:       store.NewWriter,
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 }
@@ -115,9 +111,9 @@ func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 // the drain, and the checkpointer. If the state directory, the log or the
 // store does not open, there is no writer. Then the store part is not healthy.
 // start logs a checkpointer that does not start, and Healthy does not show it
-// (see TlogHealthy). There is no reopen, retry or restart. q and c are the
-// queue and its counters.
-func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *slog.Logger) *storePart {
+// (see TlogHealthy). There is no reopen, retry or restart. The writer takes
+// the counters of q.
+func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePart {
 	s := &storePart{q: q, cancel: func() {}}
 	var err error
 	if s.root, err = os.OpenRoot(p.Root); err != nil {
@@ -129,7 +125,7 @@ func start(p startParams, q *event.Queue, c *event.Counters, d startDeps, lg *sl
 		lg.Error("store does not open", "error", err)
 	}
 	if s.db != nil {
-		s.writer = d.newWriter(s.db, q, s.log, c, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log})
+		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log})
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })

@@ -38,7 +38,7 @@ func realLog(t *testing.T) *tlog.Log {
 func TestTI07StoredEvidenceRowsVerifyAgainstTheRealLog(t *testing.T) {
 	r := newRig(t, 2000)
 	l := realLog(t)
-	r.w.app = l
+	r.w.rec.Log = l
 	want := 0
 	for i := int64(0); i < 1100; i++ {
 		kind := event.KindRequest
@@ -89,7 +89,7 @@ func TestTI07StoredEvidenceRowsVerifyAgainstTheRealLog(t *testing.T) {
 func TestTU18FailedCommitCountsOrphanLeavesAndStops(t *testing.T) {
 	r := newRig(t, 100)
 	l := realLog(t)
-	r.w.app = l
+	r.w.rec.Log = l
 	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit refused") }
 	r.add(event.KindRequest, 1)
 	for i := int64(2); i < 6; i++ {

@@ -32,15 +32,21 @@ type logReader interface {
 
 var _ logReader = (*tlog.Log)(nil)
 
+// evidenceLog is the log of the writer: the write part and the read part.
+type evidenceLog interface {
+	appender
+	logReader
+}
+
 // Recovery holds what the writer needs at start and at a stop. State is the
-// state directory that Open used. Origin is tlog.origin. Log is the log that the
-// appender writes to. It must be the same log as the appender argument of
-// NewWriter. State and Log must not be nil. The start check treats a nil
-// *tlog.Log in Log as no log.
+// state directory that Open used. Origin is tlog.origin. Log is the one log of
+// the writer. The writer appends evidence hashes to it. The start check reads
+// it. State and Log must not be nil. The start check treats a nil *tlog.Log in
+// Log as no log.
 type Recovery struct {
 	State  *os.Root
 	Origin string
-	Log    logReader
+	Log    evidenceLog
 }
 
 // start runs before the first write. A stop marker or a failed check gives an

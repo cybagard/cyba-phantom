@@ -21,8 +21,10 @@ import (
 
 var errBadTile = errors.New("bad tile")
 
-// fakeLog is a log for the start check. It counts the proof calls.
+// fakeLog is a log for the start check. It counts the proof calls. It appends
+// through its testAppender.
 type fakeLog struct {
+	*testAppender
 	size              int64
 	rootErr, proofErr error
 	proves            int
@@ -70,7 +72,7 @@ func (r *rig) logTo() *lines {
 // seed writes n evidence events through the writer of r and the log l.
 func (r *rig) seed(l *tlog.Log, n int) {
 	r.t.Helper()
-	r.w.app, r.w.rec.Log = l, l
+	r.w.rec.Log = l
 	for i := range n {
 		r.add(event.KindCallback, int64(i))
 	}
@@ -80,9 +82,11 @@ func (r *rig) seed(l *tlog.Log, n int) {
 	}
 }
 
-// restart returns a rig with a new queue and a new writer on the same database
-// and state directory, as a restart does.
-func (r *rig) restart(app appender, lg logReader, origin string) *rig {
+// restart returns a rig with a new queue and a new writer on the same
+// database and state directory. This is what a restart does. A nil lg is the
+// fake log of the new rig. A fake log with no testAppender gets the one of the
+// new rig.
+func (r *rig) restart(lg evidenceLog, origin string) *rig {
 	c := event.NewCounters()
 	q, err := event.NewQueue(100, c)
 	if err != nil {
@@ -90,10 +94,14 @@ func (r *rig) restart(app appender, lg logReader, origin string) *rig {
 	}
 	n := &rig{t: r.t, q: q, c: c, db: r.db, app: &testAppender{next: 100}, root: r.root, state: r.state,
 		tick: make(chan time.Time), commits: make(chan int, 64)}
-	if app == nil {
-		app = n.app
+	n.lg = &fakeLog{testAppender: n.app}
+	if f, ok := lg.(*fakeLog); ok && f.testAppender == nil {
+		f.testAppender = n.app
 	}
-	n.w = NewWriter(r.db, q, app, c, false, nil, Recovery{State: r.root, Origin: origin, Log: lg})
+	if lg == nil {
+		lg = n.lg
+	}
+	n.w = NewWriter(r.db, q, false, nil, Recovery{State: r.root, Origin: origin, Log: lg})
 	n.w.tick = n.tick
 	return n
 }
@@ -123,15 +131,15 @@ func eventually(t *testing.T, ok func() bool) {
 func TestTI07StartCheckStopsTheWriter(t *testing.T) {
 	for _, c := range []struct {
 		name, rule, origin, sql string
-		lg                      func() logReader
+		lg                      func() evidenceLog
 		proves                  int
 	}{
 		{"another origin", ruleOrigin, "other", "", nil, 0},
 		{"no origin", ruleNoOrigin, "origin", "DELETE FROM meta WHERE key = 'tlog_origin'", nil, 0},
-		{"database past the log", rulePastLog, "origin", "", func() logReader { return &fakeLog{size: 2} }, 0},
+		{"database past the log", rulePastLog, "origin", "", func() evidenceLog { return &fakeLog{size: 2} }, 0},
 		{"last row does not verify", ruleLeafProof, "origin", "UPDATE event SET hash = zeroblob(32) WHERE leaf_index = 2", nil, 0},
-		{"root error", ruleLogRead, "origin", "", func() logReader { return &fakeLog{size: 3, rootErr: errBadTile} }, 0},
-		{"proof error", ruleLogRead, "origin", "", func() logReader { return &fakeLog{size: 3, proofErr: errBadTile} }, 1},
+		{"root error", ruleLogRead, "origin", "", func() evidenceLog { return &fakeLog{size: 3, rootErr: errBadTile} }, 0},
+		{"proof error", ruleLogRead, "origin", "", func() evidenceLog { return &fakeLog{size: 3, proofErr: errBadTile} }, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l, r := realLog(t), newRig(t, 100)
@@ -139,11 +147,11 @@ func TestTI07StartCheckStopsTheWriter(t *testing.T) {
 			if _, err := r.db.Exec(c.sql); c.sql != "" && err != nil {
 				t.Fatal(err)
 			}
-			var lg logReader = l
+			var lg evidenceLog = l
 			if c.lg != nil {
 				lg = c.lg()
 			}
-			n := r.restart(l, lg, c.origin)
+			n := r.restart(lg, c.origin)
 			n.finish()
 			wantRule(t, n.w.Err(), writerName, c.rule)
 			if f, ok := lg.(*fakeLog); ok && f.proves != c.proves {
@@ -166,7 +174,7 @@ func TestTI07DatabaseReadErrorAtStartStopsTheWriter(t *testing.T) {
 		t.Run(map[bool]string{false: "origin read", true: "evidence row read"}[evidence], func(t *testing.T) {
 			l, r := realLog(t), newRig(t, 100)
 			r.seed(l, 3)
-			n := r.restart(l, l, "origin")
+			n := r.restart(l, "origin")
 			if evidence {
 				// The origin read works. The read of the last evidence row fails.
 				if _, err := r.db.Exec("ALTER TABLE event RENAME COLUMN leaf_index TO leaf_gone"); err != nil {
@@ -200,7 +208,7 @@ func TestTI07NilRecoveryStopsTheWriter(t *testing.T) {
 			r := newRig(t, 100)
 			out := r.logTo()
 			rec := c.rec(r)
-			r.w = NewWriter(r.db, r.q, r.app, r.c, false, slog.New(slog.NewTextHandler(out, nil)), rec)
+			r.w = NewWriter(r.db, r.q, false, slog.New(slog.NewTextHandler(out, nil)), rec)
 			r.w.tick = r.tick
 			r.finish()
 			if r.w.Healthy() || r.app.tries != 0 || r.rows() != 0 {
@@ -222,7 +230,7 @@ func TestTI07NilRecoveryStopsTheWriter(t *testing.T) {
 func TestTI07StartCheckTakesTheRootFromRootAt(t *testing.T) {
 	l, r := realLog(t), newRig(t, 100)
 	r.seed(l, 3)
-	n := r.restart(l, headLiar{l}, "origin")
+	n := r.restart(headLiar{l}, "origin")
 	n.finish()
 	if !n.w.Healthy() {
 		t.Fatalf("the writer stopped: %v", n.w.Err())
@@ -237,7 +245,7 @@ func TestTI07OrphanLeavesAreLoggedOnce(t *testing.T) {
 	if _, err := l.AppendBatch([]tlog.EventHash{{1}, {2}}); err != nil {
 		t.Fatal(err)
 	}
-	n := r.restart(l, l, "origin")
+	n := r.restart(l, "origin")
 	out := n.logTo()
 	n.finish()
 	var leaf int64
@@ -253,7 +261,7 @@ func TestTI07OrphanLeavesAreLoggedOnce(t *testing.T) {
 func TestTI07NoOrphanLeavesWritesNoLogLine(t *testing.T) {
 	l, r := realLog(t), newRig(t, 100)
 	r.seed(l, 3)
-	n := r.restart(l, l, "origin")
+	n := r.restart(l, "origin")
 	out := n.logTo()
 	n.finish()
 	if !n.w.Healthy() || out.count("orphan leaves") != 0 {
@@ -312,7 +320,7 @@ func TestTI07MarkerStopsTheWriterAtStart(t *testing.T) {
 			default:
 				r.app.err = errBadTile
 				r.finish()
-				r = r.restart(nil, r.lg, "origin")
+				r = r.restart(nil, "origin")
 			}
 			if err != nil {
 				t.Fatal(err)

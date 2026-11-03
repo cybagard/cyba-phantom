@@ -90,7 +90,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		return 1
 	}
 	lg := slog.New(slog.NewTextHandler(stderr, nil))
-	s := start(p, q, counters, d, lg)
+	s := start(p, q, d, lg)
 	b := startBundle(p, s, q, lg)
 	var names []string
 	for i := 0; ; i++ {

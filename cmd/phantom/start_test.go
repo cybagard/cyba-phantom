@@ -68,7 +68,7 @@ func launchLog(t *testing.T, p startParams, d startDeps, lg *slog.Logger) (*stor
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := start(p, q, c, d, lg)
+	s := start(p, q, d, lg)
 	t.Cleanup(s.Stop)
 	return s, q
 }
@@ -296,9 +296,9 @@ func TestTU18_OneStart(t *testing.T) {
 	var o opens
 	writers := 0
 	d := o.deps()
-	d.newWriter = func(db *sql.DB, q *event.Queue, l *tlog.Log, c *event.Counters, bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
+	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
 		writers++
-		return store.NewWriter(db, q, l, c, bp, lg, r)
+		return store.NewWriter(db, q, bp, lg, r)
 	}
 	var runs atomic.Int32
 	d.runCheckpointer = func(ctx context.Context, cp *tlog.Checkpointer) { runs.Add(1); cp.Run(ctx) }
@@ -336,7 +336,7 @@ func TestTU18_StopOrder(t *testing.T) {
 	}
 	d := realDeps
 	d.runCheckpointer = func(ctx context.Context, cp *tlog.Checkpointer) { cp.Run(ctx); exited <- q.Closed() }
-	s := start(testParams(t, "events.db"), q, c, d, slog.New(slog.DiscardHandler))
+	s := start(testParams(t, "events.db"), q, d, slog.New(slog.DiscardHandler))
 	if !s.Healthy() {
 		t.Fatal("the part is not healthy")
 	}
@@ -462,7 +462,7 @@ func startBadVkey(t *testing.T, want error, prep func(vpath string) error) {
 	}
 	done := make(chan *storePart, 1)
 	var buf bytes.Buffer
-	go func() { done <- start(p, q, cnt, realDeps, slog.New(slog.NewTextHandler(&buf, nil))) }()
+	go func() { done <- start(p, q, realDeps, slog.New(slog.NewTextHandler(&buf, nil))) }()
 	select {
 	case s := <-done:
 		t.Cleanup(s.Stop)
@@ -740,7 +740,7 @@ func TestTS13_NoKeyOverRows(t *testing.T) {
 			// A FIFO in the spool path must not block start.
 			done := make(chan *storePart, 1)
 			var buf bytes.Buffer
-			go func() { done <- start(p, q, cnt, d, slog.New(slog.NewTextHandler(&buf, nil))) }()
+			go func() { done <- start(p, q, d, slog.New(slog.NewTextHandler(&buf, nil))) }()
 			var s *storePart
 			select {
 			case s = <-done:

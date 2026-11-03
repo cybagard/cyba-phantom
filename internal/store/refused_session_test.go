@@ -126,7 +126,7 @@ func TestTS22SessionIDChangesAndDiffersFromIPHMAC(t *testing.T) {
 		t.Error("the id did not change at a new UTC date")
 	}
 	at = day("2026-03-01T10:00:00Z")
-	w2 := NewWriter(r.db, r.q, r.app, r.c, false, nil, r.w.rec)
+	w2 := NewWriter(r.db, r.q, false, nil, r.w.rec)
 	w2.clock = func() time.Time { return at }
 	if restart := r.refusedIDs(w2, "", ip)[0]; restart == first {
 		t.Error("the id did not change after a restart")
