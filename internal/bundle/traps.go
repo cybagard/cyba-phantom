@@ -9,8 +9,9 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
-// The name and the caps of the trap file, and the cap of one instruction
-// template, in bytes (SEC-29).
+// The name of the trap file and its caps: its bytes, its traps and the bytes
+// of an id. Also the byte cap of one instruction template, and the byte cap of
+// a header name after "X-" (SEC-29, SEC-32).
 const (
 	trapsName        = "traps/traps.json"
 	maxTrapsBytes    = 256 << 10
@@ -117,10 +118,10 @@ func compileTraps(traps []Trap, mk func(string) *template.Template) error {
 
 // trapParts gives the texts around each token in the parse tree of t. It is
 // false for a node that is not text, and for an action that is not one
-// {{.Token}}. A text node holds no "{{", and the string of an action node is
-// its source without the trim markers. The parse drops a comment and keeps no
-// node of it. So it is also false when text holds more "{{" than tokens. A
-// define adds a "{{" in the same way.
+// {{.Token}}. A text node holds no "{{". The string of an action node is a
+// new print of it. Thus {{ .Token }} and {{- .Token -}} give {{.Token}}.
+// The parse drops a comment and keeps no node of it. So it is also false when
+// text holds more "{{" than tokens. A define adds a "{{" in the same way.
 func trapParts(t *template.Template, text string) ([]string, bool) {
 	var parts []string
 	var cur strings.Builder
