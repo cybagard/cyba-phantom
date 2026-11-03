@@ -58,6 +58,7 @@ type Client struct {
 	archive, sig       *http.Client
 	transport          *http.Transport
 	itemDialer         *net.Dialer // always from egress.ItemDialer
+	dialer             *net.Dialer // the dialer of the transport
 	log                *slog.Logger
 	now                func() time.Time
 	cfg                settings
@@ -117,6 +118,7 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 		ResponseHeaderTimeout:  s.headerTimeout,
 		MaxResponseHeaderBytes: maxHeader,
 		DisableCompression:     true,
+		DisableKeepAlives:      true,
 		IdleConnTimeout:        idleTimeout,
 		MaxIdleConns:           1,
 		MaxIdleConnsPerHost:    1,
@@ -128,7 +130,7 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 		archiveURL: u.String(), sigURL: sig.String(),
 		archive:   &http.Client{Transport: tr, CheckRedirect: refuse, Timeout: s.archiveTimeout},
 		sig:       &http.Client{Transport: tr, CheckRedirect: refuse, Timeout: s.sigTimeout},
-		transport: tr, itemDialer: itemDialer, log: log, now: s.now, cfg: s,
+		transport: tr, itemDialer: itemDialer, dialer: dialer, log: log, now: s.now, cfg: s,
 	}, nil
 }
 

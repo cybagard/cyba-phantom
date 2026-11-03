@@ -30,8 +30,8 @@ import (
 )
 
 // The test certificate of httptest is valid for this name. The URL of each test
-// has it. The test seam rewrites the address to dial. Thus an environment
-// proxy would apply to the request if the client used one.
+// has it. The test seam changes only the address of this URL host. A proxy or
+// a redirect target thus gets its own connection, to its own address.
 const host = "example.com"
 
 const (
@@ -99,7 +99,12 @@ func newClientFor(t *testing.T, srv *httptest.Server, s settings, m mode) *rig {
 		s.roots = x509.NewCertPool()
 		s.roots.AddCert(srv.Certificate())
 	}
-	s.dialAddr = func(string) string { return addr }
+	s.dialAddr = func(a string) string {
+		if a == host+":"+port {
+			return addr
+		}
+		return a
+	}
 	buf := &bytes.Buffer{}
 	c, err := newClient("https://"+host+":"+port+"/b/x.cbnd", nil, testLogger(buf), s)
 	if err != nil {
@@ -252,6 +257,12 @@ func TestTS30TransportFields(t *testing.T) {
 	if tr.Proxy != nil || tr.DialContext == nil || tr.DialTLSContext != nil || tr.DialTLS != nil || tr.Dial != nil {
 		t.Error("the proxy or a dialer hook is set wrong")
 	}
+	if c.dialer != c.itemDialer {
+		t.Error("the transport does not use the item dialer")
+	}
+	if !tr.DisableKeepAlives {
+		t.Error("keep-alive is on")
+	}
 	if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 || tr.TLSClientConfig.NextProtos != nil {
 		t.Error("HTTP/2 is not off")
 	}
@@ -319,10 +330,10 @@ func TestTS30RedirectRefused(t *testing.T) {
 			http.Redirect(w, q, target.URL+"/x.cbnd", http.StatusFound)
 		}), small)
 		_, err := f(r.c)
-		r.expect(t, err, ClassRedirect, 302)
 		if hits.Load() != 0 {
-			t.Errorf("%s: the target got %d requests", name, hits.Load())
+			t.Fatalf("%s: the target got %d requests", name, hits.Load())
 		}
+		r.expect(t, err, ClassRedirect, 302)
 	}
 }
 
@@ -511,7 +522,7 @@ func TestTS21ItemDialerPortRule(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The control step runs before a connect: no packet leaves.
-		err = c.itemDialer.ControlContext(context.Background(), "tcp4", tc.dial, nil)
+		err = c.dialer.ControlContext(context.Background(), "tcp4", tc.dial, nil)
 		if tc.refused && !errors.Is(err, egress.ErrRefused) || !tc.refused && err != nil {
 			t.Errorf("%+v: error %v", tc, err)
 		}
@@ -606,25 +617,34 @@ func allocOfFetch(t *testing.T, c *Client) uint64 {
 	return after.TotalAlloc - before.TotalAlloc
 }
 
-// TestTS30AllocationOfOneFetch: the two GETs on a new connection allocate at
-// most 8 MiB + 1 KiB + 1 MiB. The two GETs on the idle connection after it
-// allocate at most 8 MiB + 1 KiB + 64 KiB. Two buffers of cap + 1 bytes are
-// the base.
+// TestTS30AllocationOfOneFetch: one fetch allocates at most 8 MiB + 1 KiB
+// + 1 MiB. Each GET opens its own connection, so a fetch has two TLS
+// handshakes. Two buffers of cap + 1 bytes are the base.
 func TestTS30AllocationOfOneFetch(t *testing.T) {
 	const (
 		base    = maxArchive + maxSignature
 		newConn = base + 1<<20
-		idle    = base + 64<<10
 	)
 	c := allocClients(t)()
-	first := allocOfFetch(t, c) // opens the connection
-	second := allocOfFetch(t, c)
+	first := allocOfFetch(t, c)
 	t.Logf("new connection: %d bytes (limit %d, %d over the base)", first, newConn, int64(first)-base-2)
-	t.Logf("idle connection: %d bytes (limit %d, %d over the base)", second, idle, int64(second)-base-2)
 	if first > newConn {
 		t.Errorf("new connection: %d bytes allocated, limit %d", first, newConn)
 	}
-	if second > idle {
-		t.Errorf("idle connection: %d bytes allocated, limit %d", second, idle)
+}
+
+func TestTS30NoStdLogLine(t *testing.T) {
+	var std bytes.Buffer
+	oldW, oldF := log.Writer(), log.Flags()
+	log.SetOutput(&std)
+	t.Cleanup(func() { log.SetOutput(oldW); log.SetFlags(oldF) })
+	r := newRig(t, rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"+
+		"aaaaa"+"extra text from the server\r\n"), small)
+	if got, err := r.c.Archive(context.Background()); err != nil || string(got) != "aaaaa" {
+		t.Fatalf("%q, %v", got, err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if std.Len() != 0 || r.logs.Len() != 0 {
+		t.Errorf("std log %q, slog %q", &std, r.logs)
 	}
 }
