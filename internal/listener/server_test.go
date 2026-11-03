@@ -959,9 +959,11 @@ func TestTS18ReadPoolSharedByPlainAndTLS(t *testing.T) {
 
 // T-S-17: the error log drops its text. The test writes one line through the
 // error log of the TLS server and of a plain server. The text must not reach
-// the os.Stderr or the standard logger of the time of the write. A writer that
-// kept an older os.Stderr is not checked. The test changes the global os.Stderr
-// and the standard logger, so it must not use t.Parallel.
+// the os.Stderr or the standard logger of the time of the write. The error log
+// of the plain server must write to the counter only.
+// TestTS17FailedHandshakesCountedNotLogged checks this for the TLS server. The
+// test changes the global os.Stderr and the standard logger, so it must not use
+// t.Parallel.
 func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
 	rd, wr, err := os.Pipe()
 	if err != nil {
@@ -980,6 +982,9 @@ func TestTS17ErrorLogWritesNothingToStderr(t *testing.T) {
 	r.s.mu.Unlock()
 	if plainLog == nil {
 		t.Fatal("the plain server has no error log")
+	}
+	if plainLog.Writer() != &r.s.errLines {
+		t.Fatal("the plain server error log does not write only to the counter")
 	}
 	prevErr, prevLog := os.Stderr, log.Writer()
 	restore := func() {

@@ -5,13 +5,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/caddyserver/certmagic"
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
@@ -31,10 +34,62 @@ type gateRig struct {
 	closed <-chan struct{}
 }
 
+// fenceStorage wraps the storage of a gate rig. At cleanup, it waits for the
+// writes in progress, then it refuses all writes. The obtain job of certmagic
+// for noCertName can still write at cleanup. A write that starts after cancel
+// fails in the cert store. Without the wait, a write in progress can create a
+// file while the state directory is removed.
+type fenceStorage struct {
+	certmagic.Storage
+	mu     sync.RWMutex
+	fenced bool
+}
+
+func (f *fenceStorage) write(op func() error) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.fenced {
+		return fs.ErrClosed
+	}
+	return op()
+}
+
+func (f *fenceStorage) Store(ctx context.Context, k string, v []byte) error {
+	return f.write(func() error { return f.Storage.Store(ctx, k, v) })
+}
+
+func (f *fenceStorage) Delete(ctx context.Context, k string) error {
+	return f.write(func() error { return f.Storage.Delete(ctx, k) })
+}
+
+// fence waits for the writes that started. Then it refuses all later writes.
+func (f *fenceStorage) fence(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		f.mu.Lock()
+		f.fenced = true
+		f.mu.Unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("a storage write did not end within 10 s")
+	}
+}
+
 // newGateRig serves a gate rig. pre can change the server before it serves.
 func newGateRig(t *testing.T, tm timeouts, pre func(*Server)) *gateRig {
 	t.Helper()
-	a := newTestACME(t, func(p *ACMEParams) { p.Names = []string{testName, noCertName} })
+	fence := &fenceStorage{}
+	a := newTestACME(t, func(p *ACMEParams) {
+		p.Names = []string{testName, noCertName}
+		fence.Storage, p.Storage = p.Storage, fence
+	})
+	// This cleanup runs after cancel and before the removal of the state
+	// directory.
+	t.Cleanup(func() { a.Stop(); fence.fence(t) })
 	seedCert(t, a, testName)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
