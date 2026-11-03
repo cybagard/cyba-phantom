@@ -57,14 +57,21 @@ stelint-report:
 # The devcontainer has no network, so it sets GOVULNDB to a local copy.
 # gosec reads the GOSEC_AI_* variables and can send code to an AI service.
 # The target removes these variables from the gosec environment.
+# staticcheck also checks the test files. gosec checks production files only.
 # A file:// database must have a modified value in its index/db.json.
 # When that value is missing, the target counts govulncheck as failed.
 GOVULNDB ?= https://vuln.go.dev
+# The info file records when the image fetched the file:// database copy.
+# The target fails when that copy is older than the age limit in days.
+# VULNDB_NOW is a time in seconds since 1970. Empty means the current time.
+VULNDB_INFO ?= /opt/govulndb.info
+VULNDB_MAX_AGE_DAYS ?= 7
+VULNDB_NOW ?=
 
 check:
 	@failed=""; \
 	echo "== staticcheck =="; \
-	staticcheck ./... || failed="$$failed staticcheck"; \
+	staticcheck -tests -checks all ./... || failed="$$failed staticcheck"; \
 	echo "== gosec =="; \
 	env -u GOSEC_AI_PROVIDER -u GOSEC_AI_API_KEY -u GOSEC_AI_BASE_URL gosec -quiet ./... || failed="$$failed gosec"; \
 	echo "== govulncheck (db: $(GOVULNDB)) =="; \
@@ -73,7 +80,24 @@ check:
 		index="$(GOVULNDB:file://%=%)/index/db.json"; \
 		modified=$$(sed -n 's/.*"modified" *: *"\([^"]*\)".*/\1/p' "$$index" 2>/dev/null | tr -cd '0-9A-Za-z:.+-'); \
 		if [ -n "$$modified" ]; then echo "govulncheck: database modified $$modified"; \
-		else echo "govulncheck: error: no modified value in $$index"; vulnfail=1; fi;; \
+		else echo "govulncheck: error: no modified value in $$index"; vulnfail=1; fi; \
+			if [ -r "$(VULNDB_INFO)" ]; then \
+				sed -n -E 's/^((sha256 [0-9A-Fa-f]+)|(fetched [0-9A-Za-z:.+-]+))$$/\1/p' "$(VULNDB_INFO)"; \
+				fetched=$$(sed -n -E 's/^fetched ([0-9A-Za-z:.+-]+)$$/\1/p' "$(VULNDB_INFO)" | head -n 1); \
+				now="$(VULNDB_NOW)"; [ -n "$$now" ] || now=$$(date +%s); \
+				limit="$(VULNDB_MAX_AGE_DAYS)"; ftime=""; \
+				if [ -n "$$fetched" ]; then ftime=$$(date -u -d "$$fetched" +%s 2>/dev/null); fi; \
+				bad=""; \
+				for v in "$$now" "$$limit" "$$ftime"; do \
+					case "$$v" in ""|*[!0-9]*) bad=1;; esac; \
+					if [ $${#v} -gt 13 ]; then bad=1; fi; \
+				done; \
+				if [ -n "$$bad" ]; then \
+					echo "govulncheck: error: cannot compute the image age (fetched: $$fetched); rebuild the image with a new VULNDB_FETCHED value"; vulnfail=1; \
+				elif [ $$((now - ftime)) -gt $$((limit * 86400)) ]; then \
+					echo "govulncheck: error: database copy is older than $$limit days; rebuild the image with a new VULNDB_FETCHED value"; vulnfail=1; \
+				else echo "govulncheck: database copy age $$(((now - ftime) / 86400)) days (limit $$limit)"; fi; \
+			else echo "govulncheck: error: cannot read $(VULNDB_INFO)"; vulnfail=1; fi;; \
 	esac; \
 	govulncheck -db "$(GOVULNDB)" ./... || vulnfail=1; \
 	if [ -n "$$vulnfail" ]; then failed="$$failed govulncheck"; fi; \
