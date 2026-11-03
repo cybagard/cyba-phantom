@@ -54,9 +54,15 @@ func p99(d []time.Duration) time.Duration {
 
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
-func loadEvent(b *testing.B, n int) *event.Event {
+// loadSessions is the count of sessions that loadEvent spreads the events over.
+const loadSessions = 5000
+
+func loadEvent(b *testing.B, n int) *event.Event { return loadEventIn(b, n, loadSessions) }
+
+// loadEventIn is loadEvent with event n in session n % sessions.
+func loadEventIn(b *testing.B, n, sessions int) *event.Event {
 	in := event.Input{
-		Kind: event.KindRequest, Session: fmt.Sprintf("sess-%016x", n%5000), Vhost: "www.example.test",
+		Kind: event.KindRequest, Session: fmt.Sprintf("sess-%016x", n%sessions), Vhost: "www.example.test",
 		Method: "GET", Path: fmt.Sprintf("/wp-content/plugins/example/readme-%07d.txt", n),
 		ClientIP: fmt.Sprintf("198.51.%d.%d", n%250, n/250%250),
 	}
@@ -85,7 +91,23 @@ func BenchmarkWriterLoad(b *testing.B) {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
 	}
 	for range b.N {
-		runLoad(b, false)
+		runLoad(b, false, false)
+	}
+}
+
+// BenchmarkWriterLoadNewSessions is BenchmarkWriterLoad with a new session for
+// each event. This is the worst case for new session rows. It has the same
+// rate, duration, idle time and pass line. It fails when the session rows are
+// not as many as the request rows. Run it only with -bench, in a 1 CPU / 512 MB
+// container:
+//
+//	go test -run '^$' -bench LoadNewSessions -benchtime=1x ./internal/store
+func BenchmarkWriterLoadNewSessions(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
+	for range b.N {
+		runLoad(b, false, true)
 	}
 }
 
@@ -101,7 +123,7 @@ func BenchmarkWriterFlood(b *testing.B) {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
 	}
 	for range b.N {
-		runLoad(b, true)
+		runLoad(b, true, false)
 	}
 }
 
@@ -111,8 +133,8 @@ const (
 )
 
 // runLoad feeds the writer at loadRate, or in bursts above the queue size when
-// flood is true.
-func runLoad(b *testing.B, flood bool) {
+// flood is true. Each event has its own session when newSessions is true.
+func runLoad(b *testing.B, flood, newSessions bool) {
 	dir := b.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		b.Fatal(err)
@@ -150,6 +172,10 @@ func runLoad(b *testing.B, flood bool) {
 	if flood {
 		total = floodBurst * floodTicks
 	}
+	sessions := loadSessions
+	if newSessions {
+		sessions = total
+	}
 	start := time.Now()
 	tick := time.NewTicker(10 * time.Millisecond)
 	for fed := 0; fed < total; {
@@ -159,7 +185,7 @@ func runLoad(b *testing.B, flood bool) {
 			due = fed + floodBurst
 		}
 		for ; fed < due; fed++ {
-			q.Enqueue(loadEvent(b, fed))
+			q.Enqueue(loadEventIn(b, fed, sessions))
 		}
 	}
 	tick.Stop()
@@ -191,6 +217,27 @@ func runLoad(b *testing.B, flood bool) {
 	if err := db.QueryRow("SELECT count(*) FROM ip_counter").Scan(&counterRows); err != nil {
 		b.Fatal(err)
 	}
+	var sessionRows, requestRows int64
+	if err := db.QueryRow("SELECT count(*) FROM session").Scan(&sessionRows); err != nil {
+		b.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM event WHERE kind = 'request'").Scan(&requestRows); err != nil {
+		b.Fatal(err)
+	}
+	dbBytes := pages * pageSize
+	if !flood {
+		// Each 50th event is a callback, with no session row. So 5 000 session
+		// numbers give 4 900 sessions with a request event.
+		want := int64(loadSessions - loadSessions/loadEvery)
+		if newSessions {
+			want = requestRows
+		}
+		if sessionRows != want {
+			b.Errorf("%d session rows, want %d", sessionRows, want)
+		}
+	}
+	b.ReportMetric(float64(sessionRows), "session_rows")
+	b.ReportMetric(float64(dbBytes), "db_bytes")
 	dropped := q.Dropped()
 	if flood && (dropped.Bulk+dropped.Evidence == 0 || counterRows == 0) {
 		b.Errorf("the flood dropped %d events and wrote %d ip_counter rows, want both above 0", dropped.Bulk+dropped.Evidence, counterRows)
