@@ -74,8 +74,8 @@ func wantFixed(t *testing.T, name string, w *httptest.ResponseRecorder) {
 	}
 }
 
-// TestTU20FixedPages checks that the fixed 404 and 405 pages have the status,
-// the body and the exact header map of the listener pages.
+// TestTU20FixedPages compares the fixed 404 and 405 pages with the listener
+// pages. It checks the status, the body and the exact header map.
 func TestTU20FixedPages(t *testing.T) {
 	h, hello := newHandler(t), helloHandler(t)
 	for _, c := range []struct {
