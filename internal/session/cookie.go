@@ -84,8 +84,8 @@ func (k Key) CheckCookie(v string) (string, bool) {
 	return strings.ToLower(sessionEncoding.EncodeToString(b[:idLen])), true
 }
 
-// trimHTAB removes SP and HTAB, and no other byte, at the two ends of s.
-func trimHTAB(s string) string {
+// trimSPHTAB removes SP and HTAB, and no other byte, at the two ends of s.
+func trimSPHTAB(s string) string {
 	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
 		s = s[1:]
 	}
@@ -110,7 +110,7 @@ func CookieFromHeader(h http.Header) (string, bool) {
 			} else {
 				line = ""
 			}
-			part = trimHTAB(part)
+			part = trimSPHTAB(part)
 			name, v, _ := strings.Cut(part, "=")
 			if name != cookieName {
 				continue
