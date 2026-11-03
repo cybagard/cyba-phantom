@@ -558,18 +558,6 @@ func TestTS13_BigDecimalNameIsRejected(t *testing.T) {
 	}
 }
 
-// T-S-13: a failed sync of the spool directory is an error of Add.
-func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
-	e := newSpool(t)
-	msg, err := SignCheckpoint(e.signer, 5, testRoot())
-	must(t, err)
-	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
-	const want = "checkpoint spool checkpoints/5.note: directory cannot be synced"
-	if err := e.Add(5, msg); err == nil || err.Error() != want {
-		t.Fatalf("got %v, want %q", err, want)
-	}
-}
-
 // T-S-13: OpenSpool deletes the temporary files that a crash left, for a note
 // and for a cursor. The spool deletes the file with no new write of that name.
 // A temporary entry that cannot be deleted stays and gets a log line. A name
@@ -600,6 +588,41 @@ func TestTS13_OpenDeletesLeftoverTempFiles(t *testing.T) {
 	}
 	if _, err := os.Lstat(stays); err != nil || !strings.Contains(buf.String(), "9.note.tmp") {
 		t.Fatalf("entry: %v, log %q, want it kept and one log line", err, buf)
+	}
+}
+
+// T-S-13: a failed sync of the spool directory is an error of Add.
+func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
+	e := newSpool(t)
+	msg, err := SignCheckpoint(e.signer, 5, testRoot())
+	must(t, err)
+	setHooks(t, hooks{dir: func(*os.File) error { return errors.New("injected") }})
+	const want = "checkpoint spool checkpoints/5.note: directory cannot be synced"
+	if err := e.Add(5, msg); err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+// T-S-13: Add syncs the temporary file of the note and then the checkpoints
+// directory. It syncs no other file and no other directory.
+func TestTS13_AddSyncsTheNoteFileAndTheSpoolDirectory(t *testing.T) {
+	e := newSpool(t)
+	msg, err := SignCheckpoint(e.signer, 5, testRoot())
+	must(t, err)
+	var files, dirs []string
+	record := func(list *[]string) func(*os.File) error {
+		return func(f *os.File) error {
+			*list = append(*list, filepath.Base(f.Name()))
+			return realSync(f)
+		}
+	}
+	setHooks(t, hooks{file: record(&files), dir: record(&dirs)})
+	must(t, e.Add(5, msg))
+	if want := []string{"5.note.tmp.tmp"}; !slices.Equal(files, want) {
+		t.Errorf("file syncs %q, want %q", files, want)
+	}
+	if want := []string{spoolDir}; !slices.Equal(dirs, want) {
+		t.Errorf("directory syncs %q, want %q", dirs, want)
 	}
 }
 

@@ -458,53 +458,66 @@ func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 	}
 }
 
-// T-S-13: a first start syncs each new file before the link. Then it syncs the
-// keys directory and the state directory.
+// T-S-13: a first start syncs the two key files, the keys directory and the
+// state directory. Then it syncs the signer state and the state directory.
+// The test compares one list of all syncs in call order.
 func TestTS13_FirstStartSyncsEachFileAndDirectory(t *testing.T) {
 	root, _ := newState(t)
-	var files, dirs []string
-	record := func(list *[]string) func(*os.File) error {
+	var syncs []string
+	record := func(kind string) func(*os.File) error {
 		return func(f *os.File) error {
-			*list = append(*list, filepath.Base(f.Name()))
+			syncs = append(syncs, kind+" "+filepath.Base(f.Name()))
 			return realSync(f)
 		}
 	}
-	setHooks(t, hooks{file: record(&files), dir: record(&dirs)})
+	setHooks(t, hooks{file: record("file"), dir: record("dir")})
 	if _, err := loadWithin(t, root, nil, testOrigin, false, 0); err != nil {
 		t.Fatal(err)
 	}
-	wantFiles := []string{"checkpoint.key.tmp", "checkpoint.vkey.tmp", "checkpoint.state.tmp.tmp"}
-	if !slices.Equal(files, wantFiles) {
-		t.Errorf("file syncs %q, want %q", files, wantFiles)
+	want := []string{
+		"file checkpoint.key.tmp", "file checkpoint.vkey.tmp",
+		"dir " + keysDir, "dir .",
+		"file checkpoint.state.tmp.tmp", "dir .",
 	}
-	if want := []string{keysDir, ".", "."}; !slices.Equal(dirs, want) {
-		t.Errorf("directory syncs %q, want %q", dirs, want)
+	if !slices.Equal(syncs, want) {
+		t.Errorf("syncs %q, want %q", syncs, want)
 	}
 }
 
-// T-S-13: a failed sync of a key file or of a directory is an error of the
-// first start. A failed file sync leaves no key file.
+// T-S-13: a failed sync is an error of the first start. Each case fails one
+// call of one kind. The case lists the files that stay in the keys directory.
 func TestTS13_FirstStartSyncFailures(t *testing.T) {
-	fail := func(*os.File) error { return errors.New("injected") }
 	for _, c := range []struct {
-		name string
-		h    hooks
-		want string
+		name     string
+		failFile int // the number of the file sync that fails, 0 for none
+		failDir  int // the number of the directory sync that fails, 0 for none
+		want     string
+		keys     []string
 	}{
-		{"file", hooks{file: fail}, "cannot write the key file"},
-		{"dir", hooks{dir: fail}, "cannot sync the directory"},
+		{"file 1", 1, 0, "cannot write the key file", nil},
+		{"file 2", 2, 0, "cannot write the public key file", []string{keyFile}},
+		{"dir 1", 0, 1, "cannot sync the directory", []string{keyFile, vkeyFile}},
+		{"dir 2", 0, 2, "cannot sync the directory", []string{keyFile, vkeyFile}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			root, dir := newState(t)
-			setHooks(t, c.h)
+			failNth := func(n int) func(*os.File) error {
+				calls := 0
+				return func(f *os.File) error {
+					calls++
+					if calls == n {
+						return errors.New("injected")
+					}
+					return realSync(f)
+				}
+			}
+			setHooks(t, hooks{file: failNth(c.failFile), dir: failNth(c.failDir)})
 			s, err := loadWithin(t, root, nil, testOrigin, false, 0)
 			if err == nil || s != nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got signer %v, error %v; want %q", s, err, c.want)
 			}
-			if c.name == "file" {
-				if names := keysNames(t, dir); len(names) != 0 {
-					t.Errorf("keys directory has %q; want it empty", names)
-				}
+			if names := keysNames(t, dir); !slices.Equal(names, c.keys) {
+				t.Errorf("keys directory has %q; want %q", names, c.keys)
 			}
 		})
 	}

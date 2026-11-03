@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -244,8 +245,8 @@ type hooks struct {
 	rename func(*os.Root, string, string) error // rename of a file
 }
 
-// setHooks is the only test code that sets the durability calls of the store,
-// the key files and the spool. It sets the calls in h and restores the
+// Only setHooks sets the durability calls of the store, the key files, the
+// signer state, and the spool. It sets the calls in h and restores the
 // earlier calls when t ends. The returned function restores them earlier. The
 // calls are package state. Two parallel tests that use them at the same time
 // can race. t.Setenv panics if the test or an ancestor is parallel.
@@ -267,6 +268,23 @@ func setHooks(t testing.TB, h hooks) (restore func()) {
 		renameFile = h.rename
 	}
 	return restore
+}
+
+// T-U-07: without setHooks, the durability calls are the functions of the os
+// package. A call that does nothing cannot pass.
+func TestTU07DurabilityHooksAreTheFunctionsOfTheOsPackage(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		got, want any
+	}{
+		{"syncFile", syncFile, (*os.File).Sync},
+		{"syncDirFile", syncDirFile, (*os.File).Sync},
+		{"renameFile", renameFile, (*os.Root).Rename},
+	} {
+		if reflect.ValueOf(c.got).Pointer() != reflect.ValueOf(c.want).Pointer() {
+			t.Errorf("%s is not the function of the os package", c.name)
+		}
+	}
 }
 
 // A tile or the tree head is durable in this order. First, the store writes the
