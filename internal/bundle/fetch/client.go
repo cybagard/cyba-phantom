@@ -57,6 +57,7 @@ type Client struct {
 	archiveURL, sigURL string
 	archive, sig       *http.Client
 	transport          *http.Transport
+	itemDialer         *net.Dialer // from egress.ItemDialer, also when a test replaces the transport dialer
 	log                *slog.Logger
 	now                func() time.Time
 	cfg                settings
@@ -93,10 +94,11 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 			return nil, errURL
 		}
 	}
-	dialer, err := egress.ItemDialer(private, uint16(port), "tcp", dialTimeout)
+	itemDialer, err := egress.ItemDialer(private, uint16(port), "tcp", dialTimeout)
 	if err != nil {
 		return nil, errors.New("bundle fetch: the port or the private list is not valid")
 	}
+	dialer := itemDialer
 	s.defaults()
 	if s.dialer != nil {
 		dialer = s.dialer
@@ -126,7 +128,7 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 		archiveURL: u.String(), sigURL: sig.String(),
 		archive:   &http.Client{Transport: tr, CheckRedirect: refuse, Timeout: s.archiveTimeout},
 		sig:       &http.Client{Transport: tr, CheckRedirect: refuse, Timeout: s.sigTimeout},
-		transport: tr, log: log, now: s.now, cfg: s,
+		transport: tr, itemDialer: itemDialer, log: log, now: s.now, cfg: s,
 	}, nil
 }
 

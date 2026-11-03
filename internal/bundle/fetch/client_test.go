@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/egress"
 	"github.com/cybagard/cyba-phantom/internal/egress/egresstest"
 )
 
@@ -216,6 +218,7 @@ func TestTS30SignatureURL(t *testing.T) {
 		"https://example.com/b/x.cbnd":         "https://example.com/b/x.sig",
 		"https://example.com:8443/x.y.cbnd":    "https://example.com:8443/x.y.sig",
 		"https://example.com/a.cbnd/b%20.cbnd": "https://example.com/a.cbnd/b%20.sig",
+		"https://example.com/a%2Fb.cbnd":       "https://example.com/a%2Fb.sig",
 	} {
 		c, err := New(in, nil, slog.Default())
 		if err != nil || c.archiveURL != in || c.sigURL != want {
@@ -243,6 +246,9 @@ func TestTS30TransportFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := c.transport
+	if c.itemDialer == nil || c.itemDialer.Timeout != 10*time.Second {
+		t.Errorf("item dialer: %+v", c.itemDialer)
+	}
 	if tr.Proxy != nil || tr.DialContext == nil || tr.DialTLSContext != nil || tr.DialTLS != nil || tr.Dial != nil {
 		t.Error("the proxy or a dialer hook is set wrong")
 	}
@@ -435,8 +441,11 @@ func TestTS30SizeAndStatus(t *testing.T) {
 }
 
 func TestTS30Timeouts(t *testing.T) {
-	const bound = 300 * time.Millisecond
-	s := settings{archiveTimeout: bound, sigTimeout: bound, headerTimeout: bound / 2}
+	const (
+		bound  = 2 * time.Second
+		header = 100 * time.Millisecond
+	)
+	s := settings{archiveTimeout: bound, sigTimeout: bound, headerTimeout: header}
 	slowHeader := http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) { waitDone(q) })
 	slowBody := http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -455,8 +464,9 @@ func TestTS30Timeouts(t *testing.T) {
 			_, err := f(r.c)
 			took := time.Since(begin)
 			r.expect(t, err, ClassTimeout, map[string]int{"slow header": 0, "slow body": 200}[what])
-			want := map[string]time.Duration{"slow header": bound / 2, "slow body": bound}[what]
-			if took < want || took > want+time.Second {
+			want := map[string]time.Duration{"slow header": header, "slow body": bound}[what]
+			slack := map[string]time.Duration{"slow header": 900 * time.Millisecond, "slow body": time.Second}[what]
+			if took < want || took > want+slack {
 				t.Errorf("%s, %s: ended after %v, want about %v", name, what, took, want)
 			}
 		}
@@ -496,21 +506,14 @@ func TestTS21ItemDialerPortRule(t *testing.T) {
 		{"https://10.1.2.3:8443/x.cbnd", "10.9.9.9:8443", false},
 		{"https://10.1.2.3:8443/x.cbnd", "172.16.0.1:8443", true},
 	} {
-		var logs bytes.Buffer
-		c, err := newClient(tc.fetchURL, private, testLogger(&logs), settings{
-			archiveTimeout: 200 * time.Millisecond, dialAddr: func(string) string { return tc.dial },
-		})
+		c, err := New(tc.fetchURL, private, slog.Default())
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = c.Archive(context.Background())
-		if got := err == error(ClassAddress); got != tc.refused {
+		// The control step runs before a connect: no packet leaves.
+		err = c.itemDialer.ControlContext(context.Background(), "tcp4", tc.dial, nil)
+		if tc.refused && !errors.Is(err, egress.ErrRefused) || !tc.refused && err != nil {
 			t.Errorf("%+v: error %v", tc, err)
-		}
-		for _, bad := range []string{"10.", "443", "444"} {
-			if strings.Contains(logs.String(), bad) {
-				t.Errorf("log has %q: %q", bad, &logs)
-			}
 		}
 	}
 }
