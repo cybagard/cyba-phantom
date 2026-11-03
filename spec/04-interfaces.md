@@ -30,7 +30,7 @@ alerts:
     - { type: webhook, url: "https://…", hmac_secret_env: "ALERT_HMAC" }
     - { type: syslog, addr: "tls://logs.example.com:6514" }
     - { type: smtp, host: "smtps://mail.example.com:465", from: "…", to: ["…"] }
-privacy: { store_body_prefix: true, include_ip: false, session_cookie: true }
+privacy: { store_body_prefix: true, include_ip: false, session_cookie: true, js_beacon: true }
 ```
 `phantom --check config.yaml` validates; unknown keys are errors.
 
@@ -93,6 +93,7 @@ The loader also refuses three cases that a plain open reads (ADR-013 amendment o
 | `privacy.store_body_prefix` | `true` | boolean; the prefix size is 4 KB and is not a key (C8) |
 | `privacy.include_ip` | `false` | boolean |
 | `privacy.session_cookie` | `true` | boolean; `false` sets no session cookie and ignores each cookie, so each request gets the keyed session id. `false` is the stricter value (SEC-35, ADR-013, ADR-038) |
+| `privacy.js_beacon` | `true` | boolean; `false` turns the JS beacon off: the beacon paths give the 404 decoy, and no `beacon` event is made. `false` is the stricter value. `--check` prints the value (SEC-38, ADR-013, ADR-039) |
 
 Every URL: no user information, no query (no `?`, also with an empty query), no fragment. A secret such as a token is thus never in a URL in the file (SEC-13). An IP-literal host of a URL or of a `host:port` endpoint must pass the egress address rule (SEC-26, ADR-030): an IPv4 address outside the special-purpose, private, shared, loopback, link-local, multicast and reserved ranges, or an IPv6 address in `2000::/3` outside `2001::/23`, `2001:db8::/32`, `2002::/16` and `3fff::/20`; an IPv4-mapped IPv6 address is checked as its IPv4 address, and a zone is refused. The one exception is the loopback host of a `udp://` or `tcp://` syslog sink. An IP-literal host in the private list of its item also passes, when it is not on the never-list (below). The loader does not resolve a host name; the egress guard checks each resolved address when the sensor connects (SEC-26). The set of `acme.ca`, `bundle.fetch_url`, `tlog.publish[].url`, and sink endpoints is the C4 outbound allow-list. Each entry of the set has the scheme of its value; an smtp sink has `smtp` or `smtps`. The loader gives this set to the egress test (T-S-08). A loopback sink endpoint is in the set, but it is not egress: traffic to it does not leave the host. Thus plain `udp://` and `tcp://` syslog to loopback agrees with the TLS rule of SEC-12; a local relay sends the messages on with TLS. The loader checks only the shape of an smtp value; the alert sinks enforce TLS at run time. No config value comes from request data (SEC-03).
 
