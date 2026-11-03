@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/listener"
 )
 
 // swap is a source that counts the calls of Current. Call n gives list[n], and
@@ -217,12 +219,27 @@ func (f *fallbackFn) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusTeapot)
 }
 
-// TestTU20NoBundle checks that the fallback handler serves with no bundle.
+// TestTU20NoBundle checks that the fallback handler serves with no bundle. The
+// first case uses a fake fallback. The second uses the hello handler.
 func TestTU20NoBundle(t *testing.T) {
 	fb := &fallbackFn{}
 	h := New(&swap{}, fb)
 	if w := serve(t, h, get("/", "example.com")); w.Code != http.StatusTeapot || fb.calls != 1 {
-		t.Fatalf("code %d, fallback calls %d", w.Code, fb.calls)
+		t.Errorf("code %d, fallback calls %d", w.Code, fb.calls)
+	}
+
+	q, err := event.NewQueue(event.MinQueueDepth, event.NewCounters())
+	mustOK(t, err)
+	h = New(&swap{}, listener.NewHelloHandler([]string{"example.com"}, q))
+	w := serve(t, h, get("/", "example.com"))
+	if w.Code != 200 || w.Body.String() != "hello\n" || w.Header().Get("Content-Type") != text ||
+		w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("hello GET: code %d body %q header %v", w.Code, w.Body.String(), w.Header())
+	}
+	r := get("/", "example.com")
+	r.Method = http.MethodPost
+	if w := serve(t, h, r); w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD" {
+		t.Errorf("hello POST: code %d header %v", w.Code, w.Header())
 	}
 }
 
