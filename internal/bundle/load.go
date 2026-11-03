@@ -350,6 +350,9 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	if err := compileTraps(traps, newTemplate); err != nil {
 		return nil, err
 	}
+	if err := checkExec(set, traps); err != nil {
+		return nil, err
+	}
 	// The route step runs also when the template step is nil. The set is then
 	// empty.
 	routes, err := parseRoutes(arch, set, traps)
