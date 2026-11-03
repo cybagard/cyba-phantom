@@ -40,8 +40,10 @@ func parseTemplates(a *Archive) (map[string]*template.Template, error) {
 }
 
 // parseWith is parseTemplates with the constructor mk. It checks the caps of
-// all templates before the first Parse. The error is ErrTemplateParse. That
-// error holds no template text, because a parse error can quote the input.
+// all templates before the first Parse, with the instruction templates of
+// traps/traps.json. A trap file of a bad form gives ErrContentInvalid. Else the
+// error is ErrTemplateParse. That error holds no template text, because a parse
+// error can quote the input. parseWith parses no instruction template.
 func parseWith(a *Archive, mk func(string) *template.Template) (map[string]*template.Template, error) {
 	var names []string
 	var sumBytes, sumActions int
@@ -58,6 +60,19 @@ func parseWith(a *Archive, mk func(string) *template.Template) (map[string]*temp
 			return nil, ErrTemplateParse
 		}
 		names = append(names, name)
+	}
+	// The instruction templates of the traps count in the bundle sums.
+	traps, err := readTraps(a)
+	if err != nil {
+		return nil, err
+	}
+	for _, tr := range traps {
+		n := strings.Count(tr.InstructionTemplate, "{{")
+		sumBytes += len(tr.InstructionTemplate)
+		sumActions += n
+		if len(tr.InstructionTemplate) > maxTrapTemplate || sumBytes > maxBundleBytes || sumActions > maxBundleActions {
+			return nil, ErrTemplateParse
+		}
 	}
 	set := make(map[string]*template.Template, len(names))
 	for _, name := range names {

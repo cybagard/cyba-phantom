@@ -78,8 +78,13 @@ type rawSlot struct {
 // parseRoutes parses the route map of each vhost of the archive. A host name
 // that is the second name part of a file below vhosts/ is a vhost. A file must
 // not be directly below vhosts/. Each vhost needs a valid name and a
-// routes.json file. The error holds no byte of the archive.
-func parseRoutes(a *Archive, set map[string]*template.Template) (map[string]RouteMap, error) {
+// routes.json file. A header slot needs a valid name and the id of a trap. The
+// error holds no byte of the archive.
+func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (map[string]RouteMap, error) {
+	ids := map[string]bool{}
+	for _, t := range traps {
+		ids[t.ID] = true
+	}
 	out := map[string]RouteMap{}
 	for _, name := range a.Names() {
 		if rest, ok := strings.CutPrefix(name, templateDir); ok {
@@ -92,7 +97,7 @@ func parseRoutes(a *Archive, set map[string]*template.Template) (map[string]Rout
 	}
 	for host := range out {
 		b, _ := a.File(templateDir + host + "/" + routeMapName)
-		rm, ok := parseRouteMap(a, set, host, b)
+		rm, ok := parseRouteMap(a, set, ids, host, b)
 		if !ok {
 			return nil, ErrContentInvalid
 		}
@@ -103,7 +108,7 @@ func parseRoutes(a *Archive, set map[string]*template.Template) (map[string]Rout
 
 // parseRouteMap checks the route map b of the vhost host. A missing file is an
 // empty b, which is not an object.
-func parseRouteMap(a *Archive, set map[string]*template.Template, host string, b []byte) (RouteMap, bool) {
+func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string]bool, host string, b []byte) (RouteMap, bool) {
 	var raw rawRouteMap
 	if len(b) > maxRouteMapBytes || json.Unmarshal(b, &raw, parseOpts...) != nil {
 		return RouteMap{}, false
@@ -134,7 +139,7 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, host string, b
 		seen[r.Path.v] = true
 		route := Route{Path: r.Path.v, Template: r.Template.v, Asset: r.Asset.v, Type: r.Type.v}
 		for _, s := range r.Headers.v {
-			if !s.Name.set || !s.Trap.set {
+			if !s.Name.set || !s.Trap.set || !validHeaderName(s.Name.v) || !ids[s.Trap.v] {
 				return RouteMap{}, false
 			}
 			route.Headers = append(route.Headers, HeaderSlot{s.Name.v, s.Trap.v})

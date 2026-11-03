@@ -51,6 +51,8 @@ type Bundle struct {
 	templates map[string]*template.Template
 	// routes holds the route map of each vhost, by host name.
 	routes map[string]RouteMap
+	// traps holds the traps of traps/traps.json. It is nil without that file.
+	traps []Trap
 	// seed is the token seed, behind a pointer to a seedRef. A Bundle value
 	// in an unexported struct field then prints no seed byte. It is nil only
 	// when a test turns the seed step off.
@@ -88,6 +90,15 @@ func (b *Bundle) Routes(host string) (RouteMap, bool) {
 		rm.Routes[i].Headers = slices.Clone(rm.Routes[i].Headers)
 	}
 	return rm, ok
+}
+
+// Traps returns a copy of the traps. A caller cannot change the kept list.
+func (b *Bundle) Traps() []Trap {
+	out := slices.Clone(b.traps)
+	for i := range out {
+		out[i].parts = slices.Clone(out[i].parts)
+	}
+	return out
 }
 
 // Vhosts returns the sorted names of the vhosts that have a route map.
@@ -215,7 +226,9 @@ func (l *Loader) Healthy() bool {
 // Load reads the bundle and the signature file. It checks the bundle and makes
 // it the running bundle (FR-02, SEC-23, SEC-24, SEC-25). The order is: chain
 // check, read, SHA-256, signature, archive, manifest, key ID or rotation,
-// engine, expiry and rollback. Then: templates, route maps, seed.
+// engine, expiry and rollback. Then: trap file, templates, route maps, seed.
+// A trap file of a bad form gives ErrContentInvalid. A bundle with no trap file
+// has no trap. A route header slot then gives ErrContentInvalid.
 // A host name that is the second name part of a file below vhosts/ is a vhost.
 // Each vhost has a routes.json file. A file directly in vhosts/, a bad vhost
 // name or a bad route map gives ErrContentInvalid.
@@ -323,15 +336,23 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	if err != nil {
 		return nil, fixed(err)
 	}
+	// The form check of the trap file runs before the template caps and parses.
+	traps, err := readTraps(arch)
+	if err != nil {
+		return nil, err
+	}
 	var set map[string]*template.Template
 	if l.template != nil {
 		if set, err = l.template(arch); err != nil {
 			return nil, ErrTemplateParse
 		}
 	}
+	if err := compileTraps(traps, newTemplate); err != nil {
+		return nil, err
+	}
 	// The route step runs also when the template step is nil. The set is then
 	// empty.
-	routes, err := parseRoutes(arch, set)
+	routes, err := parseRoutes(arch, set, traps)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +366,7 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	if seed != nil {
 		ref = &seedRef{seed}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, seed: ref}
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref}
 	// A candidate that fails a later step keeps no seed. Only an accepted
 	// candidate does.
 	reject := func(err error) (*Bundle, error) {
