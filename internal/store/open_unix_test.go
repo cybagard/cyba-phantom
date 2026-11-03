@@ -184,7 +184,7 @@ func TestTS15NewFileIsMadeInCheckedParent(t *testing.T) {
 		t.Fatal("the hook of the reopen did not run")
 	}
 	if !inMoved {
-		t.Fatal("the new file is not in the moved directory, or data/events.db exists")
+		t.Fatal("the new file is not in the moved directory, or data/events.db.new exists")
 	}
 	// refuse removes the made file through the checked directory.
 	if _, err := os.Lstat(filepath.Join(data+".moved", tmp)); !errors.Is(err, fs.ErrNotExist) {

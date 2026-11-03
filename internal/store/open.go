@@ -91,8 +91,8 @@ var pragmas = []string{
 }
 
 // afterChecks is a test hook. Production code leaves it nil. A test sets it to
-// change the file system between the file checks and the side-file check. The
-// side-file check and the open of SQLite follow the hook.
+// change the file system between the file checks and the open of SQLite. The
+// side-file check of a made file at the real name comes after the hook.
 var afterChecks func()
 
 // afterVerify is a test hook. Production code leaves it nil. A test sets it to

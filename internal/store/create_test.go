@@ -265,7 +265,7 @@ func (r refusedStart) run(t *testing.T) {
 		})
 	}
 	if r.onName != "" {
-		// Calls of a directory name are the parent checks of Open and of open.
+		// Calls of a directory name are the openDir calls of Open and of open.
 		// Calls of a file name are the second open of open and the reopen.
 		second := nth(2, call)
 		safefiletest.Set(t, safefiletest.Hooks{BeforeCheck: func(name string) {
@@ -331,11 +331,13 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 		{name: "wal after the guard close", errName: "events.db-wal", rule: ruleOrphan, on: "checks2",
 			then: plantWal, kept: map[string]string{"events.db-wal": "planted"}, gone: []string{"events.db", tmpName},
 			noFds: true},
-		{name: "planted journal before a failed check", errName: "events.db", rule: ruleMode, on: "verify",
-			kept: map[string]string{"events.db-journal": "planted"}, gone: []string{"events.db"},
+		{name: "planted journal before a failed check", rel: "data/events.db", errName: "data/events.db",
+			rule: ruleMode, on: "verify", plant: [][2]string{{"data/", ""}},
+			kept: map[string]string{"data/events.db-journal": "planted"},
+			gone: []string{"data/events.db", "data/events.db-wal", "data/events.db-shm"},
 			then: func(t *testing.T, at func(string) string) {
-				put(t, at("events.db-journal"), "planted")
-				hook(t, os.Chmod(at("events.db"), 0o640))
+				put(t, at("data/events.db-journal"), "planted")
+				hook(t, os.Chmod(at("data/events.db"), 0o640))
 			}},
 		{name: "file at the temporary name before open", rel: "data/events.db", errName: "data/events.db",
 			rule: ruleChanged, plant: [][2]string{{"data/", ""}}, onName: "data",
@@ -364,12 +366,13 @@ func TestTS15RefusedStartKeepsOtherFiles(t *testing.T) {
 			}},
 	}
 	for _, s := range suffixes[1:] {
-		rows = append(rows, refusedStart{name: "side file " + s + " and leftover", errName: "events.db" + s,
-			rule: ruleOrphan, same: true, plant: [][2]string{{"events.db" + s, "x"}, {tmpName, "x"}}},
-			refusedStart{name: "side file " + s + " after the rename", errName: "events.db" + s, rule: ruleOrphan,
-				on: "sync", kept: map[string]string{"events.db" + s: "planted"}, gone: []string{"events.db", tmpName},
-				noFds: true,
-				then:  func(t *testing.T, at func(string) string) { put(t, at("events.db"+s), "planted") }})
+		rows = append(rows, refusedStart{name: "side file " + s + " and leftover", rel: "data/events.db",
+			errName: "data/events.db" + s, rule: ruleOrphan, same: true,
+			plant: [][2]string{{"data/", ""}, {"data/events.db" + s, "x"}, {"data/" + tmpName, "x"}}},
+			refusedStart{name: "side file " + s + " after the rename", rel: "data/events.db", errName: "data/events.db" + s,
+				rule: ruleOrphan, on: "sync", plant: [][2]string{{"data/", ""}}, noFds: true,
+				kept: map[string]string{"data/events.db" + s: "planted"}, gone: []string{"data/events.db", "data/" + tmpName},
+				then: func(t *testing.T, at func(string) string) { put(t, at("data/events.db"+s), "planted") }})
 	}
 	for _, r := range rows {
 		t.Run(r.name, r.run)
