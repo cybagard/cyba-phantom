@@ -350,8 +350,8 @@ func TestTU08_HealthFollowsLoaderState(t *testing.T) {
 	}
 }
 
-// tmplBytes is the size of a template of the benchmark. The 64 instruction
-// templates of the trap file add 64 bytes to the byte sum of all templates
+// tmplBytes is the size of a template of the benchmark. The trap file has 64
+// instruction templates. They add 64 bytes to the byte sum of all templates
 // (SEC-29, 512 KiB). Each of 8 templates gives up 16 bytes: 8 x 16 >= 64.
 const tmplBytes = 64<<10 - 16
 

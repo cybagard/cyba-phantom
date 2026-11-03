@@ -140,9 +140,9 @@ func loadRaw(t *testing.T, want error, setup func(*env), ents ...ent) *Bundle {
 }
 
 // T-U-08: a .tmpl file that does not parse gives template_parse. A valid
-// template, any other file, and no template load. A field such as {{.Title}}
-// and a call of a function other than index or comment give template_parse,
-// because the load check refuses them.
+// template, any other file, and no template load. The load check refuses a
+// field such as {{.Title}}. It also refuses a call of any function but index
+// and comment. Both give template_parse.
 func TestTU08TemplateParse(t *testing.T) {
 	assets := strings.Repeat("{{", 50<<10)
 	for _, c := range []struct {
@@ -326,8 +326,8 @@ func TestTU08EngineFuncKeys(t *testing.T) {
 
 // T-U-08: the load does not execute a template. The test checks two things.
 // The comment function is not called. And Template still gives each kept
-// template, because html/template refuses Clone after an Execute, also one
-// that fails with nil data.
+// template. This is because html/template refuses Clone after an Execute, also
+// one that fails with nil data.
 func TestTU08LoadDoesNotExecute(t *testing.T) {
 	called := false
 	old := engineFuncs["comment"]
@@ -673,8 +673,8 @@ func TestTU08ExecCheckPermitted(t *testing.T) {
 // T-U-08: a bundle with 7 good templates and 1 refused template gives
 // template_parse. The set is a map, so the check order is random. With 8 keys,
 // each template is first with chance 1/8. The test makes 110 loads. A check
-// that stops after the first good template misses the bad one in all loads with
-// chance (7/8)^110, below 5e-7.
+// that stops after the first template misses the bad one in all loads. The
+// chance of that is (7/8)^110, below 5e-7.
 func TestTU08ExecCheckEveryTemplate(t *testing.T) {
 	ents := files(7, "plain")
 	ents = append(ents, tf("vhosts/h.example/bad.tmpl", `{{.X}}`))
