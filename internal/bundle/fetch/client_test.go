@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -103,7 +104,11 @@ func newClientFor(t *testing.T, srv *httptest.Server, s settings, m mode) *rig {
 		if a == host+":"+port {
 			return addr
 		}
-		return a
+		if ap, err := netip.ParseAddrPort(a); err == nil && ap.Addr() == netip.MustParseAddr("127.0.0.1") {
+			return a
+		}
+		t.Errorf("unexpected dial %q", a)
+		return "0.0.0.0:0" // the guard refuses it
 	}
 	buf := &bytes.Buffer{}
 	c, err := newClient("https://"+host+":"+port+"/b/x.cbnd", nil, testLogger(buf), s)
@@ -284,13 +289,15 @@ func TestTS30TransportFields(t *testing.T) {
 	}
 }
 
-func TestTS30NoProxy(t *testing.T) {
+// proxyListener is the one proxy of the test binary. http.ProxyFromEnvironment
+// reads the environment once for each process, so each run of the test must
+// see the same address. The listener stays open until the process ends.
+var proxyListener = sync.OnceValues(func() (net.Listener, *atomic.Int32) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	t.Cleanup(func() { ln.Close() })
-	var conns atomic.Int32
+	conns := new(atomic.Int32)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -301,15 +308,21 @@ func TestTS30NoProxy(t *testing.T) {
 			c.Close()
 		}
 	}()
+	return ln, conns
+})
+
+func TestTS30NoProxy(t *testing.T) {
+	ln, conns := proxyListener()
+	before := conns.Load()
 	for _, k := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
 		t.Setenv(k, "http://"+ln.Addr().String())
 	}
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
 	req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/x.cbnd", nil)
-	// Control: the variables apply to a default transport.
-	if u, err := http.ProxyFromEnvironment(req); err != nil || u == nil {
-		t.Fatalf("control: proxy %v, %v", u, err)
+	// Control: the variables apply to a default transport, with this address.
+	if u, err := http.ProxyFromEnvironment(req); err != nil || u == nil || u.Host != ln.Addr().String() {
+		t.Fatalf("control: proxy %v, %v, want host %s", u, err, ln.Addr())
 	}
 	r := newRig(t, body(10, false), small)
 	for name, f := range fetchers {
@@ -317,8 +330,41 @@ func TestTS30NoProxy(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if n := conns.Load(); n != 0 {
+	if n := conns.Load() - before; n != 0 {
 		t.Errorf("%d connections to the proxy", n)
+	}
+}
+
+func TestTS30TransportDialRefusesLoopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var accepts atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			c.Close()
+		}
+	}()
+	c, err := New("https://"+host+"/b/x.cbnd", nil, testLogger(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := c.transport.DialContext(context.Background(), "tcp4", ln.Addr().String())
+	if err == nil {
+		conn.Close()
+	}
+	if !errors.Is(err, egress.ErrRefused) {
+		t.Errorf("error = %v, want egress.ErrRefused", err)
+	}
+	if n := accepts.Load(); n != 0 {
+		t.Errorf("%d connections reached the listener", n)
 	}
 }
 
@@ -634,17 +680,31 @@ func TestTS30AllocationOfOneFetch(t *testing.T) {
 }
 
 func TestTS30NoStdLogLine(t *testing.T) {
-	var std bytes.Buffer
+	written := make(chan string, 1)
 	oldW, oldF := log.Writer(), log.Flags()
-	log.SetOutput(&std)
+	log.SetOutput(signalWriter(func(p []byte) {
+		select {
+		case written <- string(p):
+		default:
+		}
+	}))
 	t.Cleanup(func() { log.SetOutput(oldW); log.SetFlags(oldF) })
 	r := newRig(t, rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"+
 		"aaaaa"+"extra text from the server\r\n"), small)
 	if got, err := r.c.Archive(context.Background()); err != nil || string(got) != "aaaaa" {
 		t.Fatalf("%q, %v", got, err)
 	}
-	time.Sleep(300 * time.Millisecond)
-	if std.Len() != 0 || r.logs.Len() != 0 {
-		t.Errorf("std log %q, slog %q", &std, r.logs)
+	select {
+	case line := <-written:
+		t.Errorf("std log %q", line)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if r.logs.Len() != 0 {
+		t.Errorf("slog %q", r.logs)
 	}
 }
+
+// signalWriter calls f for each write. A function value has no data to race on.
+type signalWriter func([]byte)
+
+func (f signalWriter) Write(p []byte) (int, error) { f(p); return len(p), nil }

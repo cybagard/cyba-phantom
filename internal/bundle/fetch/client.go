@@ -58,7 +58,7 @@ type Client struct {
 	archive, sig       *http.Client
 	transport          *http.Transport
 	itemDialer         *net.Dialer // always from egress.ItemDialer
-	dialer             *net.Dialer // the dialer of the transport
+	dialer             *net.Dialer // the dialer that the transport calls
 	log                *slog.Logger
 	now                func() time.Time
 	cfg                settings
@@ -104,11 +104,11 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 	if s.dialer != nil {
 		dialer = s.dialer
 	}
-	dial := dialer.DialContext
-	if s.dialAddr != nil {
-		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, s.dialAddr(addr))
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if s.dialAddr != nil {
+			addr = s.dialAddr(addr)
 		}
+		return dialer.DialContext(ctx, network, addr)
 	}
 	tr := &http.Transport{
 		Proxy:                  nil,
@@ -119,11 +119,12 @@ func newClient(fetchURL string, private []netip.Prefix, log *slog.Logger, s sett
 		MaxResponseHeaderBytes: maxHeader,
 		DisableCompression:     true,
 		DisableKeepAlives:      true,
-		IdleConnTimeout:        idleTimeout,
-		MaxIdleConns:           1,
-		MaxIdleConnsPerHost:    1,
-		ForceAttemptHTTP2:      false,
-		TLSNextProto:           map[string]func(string, *tls.Conn) http.RoundTripper{},
+		// No effect with keep-alive off; if on, at most one idle connection.
+		IdleConnTimeout:     idleTimeout,
+		MaxIdleConns:        1,
+		MaxIdleConnsPerHost: 1,
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	refuse := func(*http.Request, []*http.Request) error { return errRedirect }
 	return &Client{
