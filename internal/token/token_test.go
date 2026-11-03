@@ -1,10 +1,13 @@
 package token
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -102,7 +105,10 @@ func TestTU01_Unit(t *testing.T) {
 		{"one second before", epoch.Add(-time.Second), 1<<20 - 1},
 		{"600 s before", epoch.Add(-600 * time.Second), 1<<20 - 1},
 		{"601 s before", epoch.Add(-601 * time.Second), 1<<20 - 2},
-		{"zero time", time.Time{}, unitOf(time.Time{})},
+		{"zero time", time.Time{}, 450048},
+		// These two cases do not use epochUnix.
+		{"literal epoch", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 0},
+		{"literal unit 1", time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC), 1},
 	}
 	for _, tc := range tests {
 		if got := unitOf(tc.at); got != tc.want || got > unitMask {
@@ -114,7 +120,7 @@ func TestTU01_Unit(t *testing.T) {
 func TestTU01_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name    string
-		count   int
+		traps   int // number of trap ids in the key set
 		index   int
 		at      time.Time
 		counter uint64 // counter value that the mint uses
@@ -129,7 +135,7 @@ func TestTU01_RoundTrip(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			k := newSet(t, testKey, tc.count)
+			k := newSet(t, testKey, tc.traps)
 			k.counter.Store((tc.counter - 1) & counterMask)
 			tok, err := k.Mint(tc.index, tc.at)
 			if err != nil {
@@ -139,8 +145,8 @@ func TestTU01_RoundTrip(t *testing.T) {
 				t.Fatalf("fields = %d %d %d", i, u, c)
 			}
 			// A second key set from the same key has no shared state.
-			other := newSet(t, testKey, tc.count)
-			want := Result{OK: true, Trap: traps(tc.count)[tc.index], Unit: tc.unit, Set: First}
+			other := newSet(t, testKey, tc.traps)
+			want := Result{OK: true, Trap: traps(tc.traps)[tc.index], Unit: tc.unit, Set: First}
 			if got := Verify([]*KeySet{other}, tok); got != want {
 				t.Fatalf("Verify = %+v, want %+v", got, want)
 			}
@@ -273,22 +279,21 @@ func TestTU01_Ring(t *testing.T) {
 	key := [2][]byte{testKey, otherKey}
 	tests := []struct {
 		name    string
-		count   int  // size of the ring
+		size    int  // size of the ring
 		from    int  // ring position that mints the token, -1 for a stranger
 		wantSet int  // position that Verify reports
 		wantOK  bool // whether Verify accepts
-		calls   int  // Decrypt calls on each key set
 	}{
-		{"ring of 1", 1, 0, First, true, 1},
-		{"first of 2", 2, 0, First, true, 1},
-		{"second of 2", 2, 1, Second, true, 1},
-		{"stranger", 2, -1, 0, false, 1},
-		{"stranger, ring of 1", 1, -1, 0, false, 1},
+		{"ring of 1", 1, 0, First, true},
+		{"first of 2", 2, 0, First, true},
+		{"second of 2", 2, 1, Second, true},
+		{"stranger", 2, -1, 0, false},
+		{"stranger, ring of 1", 1, -1, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ring := make([]*KeySet, tc.count)
-			counters := make([]*countingBlock, tc.count)
+			ring := make([]*KeySet, tc.size)
+			counters := make([]*countingBlock, tc.size)
 			for i := range ring {
 				b, _ := aes.NewCipher(key[i])
 				counters[i] = &countingBlock{Block: b}
@@ -310,11 +315,61 @@ func TestTU01_Ring(t *testing.T) {
 				t.Errorf("Verify = %+v, want %+v", got, want)
 			}
 			for i, c := range counters {
-				if n := int(c.decrypts.Load()); n != tc.calls {
-					t.Errorf("key set %d: %d Decrypt calls, want %d", i, n, tc.calls)
+				if n := c.decrypts.Load(); n != 1 {
+					t.Errorf("key set %d: %d Decrypt calls, want 1", i, n)
 				}
 			}
 		})
+	}
+}
+
+// TestTU01_RingBounds checks that each key set has its own index bound.
+func TestTU01_RingBounds(t *testing.T) {
+	a, b := newSet(t, testKey, 2), newSet(t, otherKey, 8)
+	tok, _ := b.Mint(5, epoch)
+	want := Result{OK: true, Trap: "trap-5", Set: Second}
+	if got := Verify([]*KeySet{a, b}, tok); got != want {
+		t.Errorf("index 5 of B: Verify = %+v, want %+v", got, want)
+	}
+	var plain [Size]byte
+	pack(plain[:], 3, 0, 0)
+	sealed := seal(a, plain)
+	for name, ring := range map[string][]*KeySet{"A, B": {a, b}, "B, A": {b, a}} {
+		if Verify(ring, sealed).OK {
+			t.Errorf("index 3 under A on ring %s is accepted", name)
+		}
+	}
+}
+
+// TestTU01_Copy checks that a key set keeps its own copy of the trap ids.
+func TestTU01_Copy(t *testing.T) {
+	ids := traps(3)
+	k, err := newKeySet(testKey, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := k.Mint(1, epoch)
+	ids[1] = "changed"
+	if got := Verify([]*KeySet{k}, tok); got.Trap != "trap-1" {
+		t.Errorf("Verify = %+v after the caller changed the slice", got)
+	}
+}
+
+// TestTU01_Format checks that a print of a key set shows nothing of it.
+func TestTU01_Format(t *testing.T) {
+	k := newSet(t, testKey, 3)
+	const want = "token.KeySet"
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
+		if got := fmt.Sprintf(verb, k); got != want {
+			t.Errorf("%s: got %q, want %q", verb, got, want)
+		}
+	}
+	j, err := json.Marshal(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(j, []byte("trap-")) || bytes.Contains(j, testKey) {
+		t.Errorf("json holds key set data: %s", j)
 	}
 }
 
@@ -322,6 +377,14 @@ func TestTU01_Refusals(t *testing.T) {
 	good := newSet(t, testKey, 2)
 	if _, err := newKeySet(testKey[:15], traps(1)); !errors.Is(err, ErrKey) {
 		t.Errorf("short key: err = %v", err)
+	}
+	for _, n := range []int{24, 32} { // AES-128 only
+		if _, err := newKeySet(make([]byte, n), traps(1)); !errors.Is(err, ErrKey) {
+			t.Errorf("%d-byte key: err = %v", n, err)
+		}
+	}
+	if _, err := (&KeySet{}).Mint(0, epoch); !errors.Is(err, ErrNoKeySet) {
+		t.Errorf("empty key set: err = %v", err)
 	}
 	for _, n := range []int{0, 1025} {
 		if _, err := newKeySet(testKey, traps(n)); !errors.Is(err, ErrTraps) {

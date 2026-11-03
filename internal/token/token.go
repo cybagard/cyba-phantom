@@ -12,6 +12,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,9 @@ const (
 	unitSeconds = 600
 )
 
-// The position of a key set in the ring that Verify gets.
+// The position of a key set in the ring that Verify gets. A ring can hold
+// any number of key sets. Result.Set is the position of the matching key set.
+// First is the first key set of the ring. Second is the second key set.
 const (
 	First  = 0
 	Second = 1
@@ -75,6 +78,15 @@ type KeySet struct {
 	block   cipher.Block
 	traps   []string
 	counter atomic.Uint64
+}
+
+// redacted is the text that Format writes for every verb.
+const redacted = "token.KeySet"
+
+// Format writes one fixed text for every verb. The text holds no field, no
+// pointer and no counter. A print of a KeySet does not leak the key.
+func (k *KeySet) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte(redacted))
 }
 
 // newKeySet makes a key set from an AES-128 key and the trap ids. The index
@@ -132,7 +144,9 @@ func unpack(b []byte) (index, unit, counter uint64) {
 }
 
 // Mint makes a token for the trap at index, with the time unit of at. Each
-// call uses a new counter value (ADR-036 decision 3). It does not allocate.
+// call uses a new counter value (ADR-036 decision 3). It does not allocate
+// while the buffer pool holds a buffer. A GC or the race detector can make
+// the pool allocate one buffer.
 func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 	var out [Size]byte
 	if k == nil || k.block == nil {
@@ -146,6 +160,8 @@ func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 	pack(buf[:Size], uint64(index), unitOf(at), n)
 	k.block.Encrypt(buf[Size:], buf[:Size])
 	copy(out[:], buf[Size:])
+	// Without this, the pool keeps the plaintext fields and the token bytes.
+	// The buffer holds no key.
 	clear(buf[:])
 	scratch.Put(buf)
 	return out, nil
@@ -157,13 +173,15 @@ type Result struct {
 	OK   bool
 	Trap string // the trap id
 	Unit uint32 // the time unit of the mint
-	Set  int    // the position of the matching key set: First or Second
+	Set  int    // the position of the matching key set in the ring
 }
 
 // Verify checks a token against the key sets of the ring. It decrypts the
 // token under each key set, also after a match. It checks the 56 bits and
 // the index with crypto/subtle, and it selects the result with no early
-// return. A nil key set in the ring does not match. It does not allocate.
+// return. A nil key set in the ring does not match. It does not allocate
+// while the buffer pool holds a buffer. A GC or the race detector can make
+// the pool allocate one buffer. The ring can have any length.
 func Verify(ring []*KeySet, tok [Size]byte) Result {
 	buf := scratch.Get().(*[2 * Size]byte)
 	in, out := buf[:Size], buf[Size:]
@@ -183,6 +201,8 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 		index = subtle.ConstantTimeSelect(ok, int(idx), index)
 		unit = subtle.ConstantTimeSelect(ok, int(un), unit)
 	}
+	// Without this, the pool keeps the plaintext fields and the token bytes.
+	// The buffer holds no key.
 	clear(buf[:])
 	scratch.Put(buf)
 	if matched == 0 {
