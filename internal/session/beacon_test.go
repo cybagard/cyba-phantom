@@ -50,6 +50,20 @@ func TestTU25RoundTrip(t *testing.T) {
 	}
 }
 
+// T-U-25: a ticket made at time zero checks at time zero and in the window.
+func TestTU25EpochZero(t *testing.T) {
+	k := seqKey()
+	v := k.BeaconTicket(knownID, time.UnixMilli(0))
+	if v == "" {
+		t.Fatal("no ticket at time zero")
+	}
+	for _, ms := range []int64{0, 5000} {
+		if !k.CheckBeaconTicket(v, knownID, time.UnixMilli(ms)) {
+			t.Errorf("refused at %d ms", ms)
+		}
+	}
+}
+
 // T-U-25: the tag is the HMAC of the defined input, after 6 bytes of ms.
 func TestTU25MatchesHMAC(t *testing.T) {
 	for n := 0; n < 200; n++ {
