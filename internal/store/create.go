@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
@@ -15,6 +16,15 @@ const tempSuffix = ".new"
 // suffixes are the names of a database file and the files that SQLite makes
 // from it.
 var suffixes = []string{"", "-wal", "-shm", "-journal"}
+
+// leftoverMax is the largest size in bytes of a leftover file that holds no
+// store data. It has one limit for each of suffixes. The store uses pages of
+// 4096 bytes. The database limit is one page, and a table root is on page 2 or
+// higher. The -wal limit is its header, because a frame adds 24 and 4096
+// bytes. A -shm file is an index and holds no row. The create of a new
+// database makes a -journal file. The -journal limit is its size. It has 512
+// bytes of header and one page record of 4 + 4096 + 4 bytes.
+var leftoverMax = [...]int64{4096, 32, math.MaxInt64, 4616}
 
 // syncFile calls fsync on a file and on a directory. A test replaces it to see
 // the order of the steps, or to make a sync fail.
@@ -46,9 +56,11 @@ func renamed(err error, from, to string) error {
 }
 
 // newDatabase checks the files that a killed start left under the temporary
-// name. If one fails fileRule, it refuses and removes nothing. If the database
-// file is absent, it refuses when a -wal, -shm or -journal file is at the real
-// name. Then it removes the leftover files. If the database file is absent, it
+// name. If one fails fileRule, it refuses and removes nothing. It also refuses
+// with ruleData when a file is larger than its limit in leftoverMax. It takes
+// the size from the check and opens no leftover. If the database file is
+// absent, it refuses when a -wal, -shm or -journal file is at the real name.
+// Then it removes the leftover files. If the database file is absent, it
 // makes the database under the temporary name. It does the first write and
 // closes the pool. It syncs the file, renames it to the real name, and syncs
 // dir. All of this is before Open opens the database for use.
@@ -69,8 +81,15 @@ func renamed(err error, from, to string) error {
 // The inode is not held from the close of the first pool to that reopen.
 func newDatabase(root, dir *os.Root, rel, last string, opt Options) (fs.FileInfo, *os.File, error) {
 	tmp, tmpLast := rel+tempSuffix, last+tempSuffix
-	if _, err := checkFiles(dir, tmpLast, tmp); err != nil {
-		return nil, nil, err
+	for i, s := range suffixes {
+		fi, err := safefile.Check(dir, tmpLast+s, fileRule)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return nil, nil, refusal(tmp+s, err, false)
+		case fi.Size() > leftoverMax[i]:
+			return nil, nil, fail(tmp+s, ruleData)
+		}
 	}
 	_, err := dir.Lstat(last)
 	absent := errors.Is(err, fs.ErrNotExist)
