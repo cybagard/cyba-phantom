@@ -65,7 +65,14 @@ var (
 	ErrTraps    = errors.New("token: trap list must hold 1 to 1024 ids")
 	ErrKey      = errors.New("token: key is not valid")
 	ErrSeed     = errors.New("token: seed is empty")
+	// ErrRange is the error of MintRange for a list or an out slice of a bad
+	// length.
+	ErrRange = errors.New("token: range must hold 1 to 68 indexes and match out")
 )
+
+// MaxRange is the largest number of tokens in one MintRange call. It is 64
+// trap ids of a template (SEC-32) and 4 header slots of a route (ADR-038).
+const MaxRange = 68
 
 // keyInfo is the HKDF info of the AES key (ADR-036 decision 4). A zero byte
 // comes after the label. keyBytes is the length of the AES-128 key.
@@ -226,6 +233,46 @@ func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 	return out, nil
 }
 
+// MintRange makes one token for each trap in indexes, with the time unit of
+// at. It reserves all counters with one atomic add, so the ranges of parallel
+// calls do not overlap. Token i is for the trap at indexes[i]. It uses the
+// counter first+i, masked to 42 bits, and writes the token to out[i]. It
+// gives ErrRange for an empty list, for more than MaxRange indexes, and for
+// an out slice of another length. It gives ErrIndex for an index that is not
+// a trap. A refused call moves no counter and writes nothing to out.
+// The caller must not change indexes during the call. The counter can pass
+// 2^42-1 inside a range and wrap to 0. The caller sees this from first and
+// the length. It does not allocate in steady state. After a GC, or under the
+// race detector, the buffer pool can allocate a small, bounded amount of
+// memory.
+func (k *KeySet) MintRange(indexes []int, at time.Time, out [][Size]byte) (first uint64, err error) {
+	if k == nil || k.keySetState == nil || k.block == nil {
+		return 0, ErrNoKeySet
+	}
+	n := uint64(len(indexes))
+	if n == 0 || n > MaxRange || uint64(len(out)) != n {
+		return 0, ErrRange
+	}
+	for _, index := range indexes {
+		if index < 0 || index >= len(k.traps) {
+			return 0, ErrIndex
+		}
+	}
+	first = (k.counter.Add(n) - n + 1) & counterMask
+	unit := unitOf(at)
+	buf := scratch.Get().(*[2 * Size]byte)
+	for i, index := range indexes {
+		pack(buf[:Size], uint64(index), unit, (first+uint64(i))&counterMask)
+		k.block.Encrypt(buf[Size:], buf[:Size])
+		copy(out[i][:], buf[Size:])
+	}
+	// Without this, the pool keeps the plaintext fields and the token bytes.
+	// The buffer holds no key.
+	clear(buf[:])
+	scratch.Put(buf)
+	return first, nil
+}
+
 // Result is the outcome of Verify. When OK is false, the other fields are
 // zero.
 type Result struct {
@@ -233,6 +280,8 @@ type Result struct {
 	Trap string // the trap id
 	Unit uint32 // the time unit of the mint
 	Set  int    // the position of the matching key set in the ring
+	// Counter is the 42-bit counter of the token.
+	Counter uint64
 	// Reference is true when the matching key set is of a reference bundle.
 	Reference bool
 }
@@ -248,13 +297,14 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 	buf := scratch.Get().(*[2 * Size]byte)
 	in, out := buf[:Size], buf[Size:]
 	var matched, set, index, unit, reference int
+	var counter uint64
 	for i, k := range ring {
 		if k == nil || k.keySetState == nil || k.block == nil {
 			continue
 		}
 		copy(in, tok[:])
 		k.block.Decrypt(out, in)
-		idx, un, _ := unpack(out)
+		idx, un, c := unpack(out)
 		zero := subtle.ConstantTimeCompare(out[fieldBytes:], zeroCheck[:])
 		below := subtle.ConstantTimeLessOrEq(int(idx), len(k.traps)-1)
 		ok := zero & below
@@ -263,6 +313,9 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 		index = subtle.ConstantTimeSelect(ok, int(idx), index)
 		unit = subtle.ConstantTimeSelect(ok, int(un), unit)
 		reference = subtle.ConstantTimeSelect(ok, k.ref, reference)
+		// ConstantTimeSelect takes an int, which has 32 bits on some platforms.
+		m := -uint64(ok)
+		counter = counter&^m | c&m
 	}
 	// Without this, the pool keeps the plaintext fields and the token bytes.
 	// The buffer holds no key.
@@ -271,5 +324,5 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 	if matched == 0 {
 		return Result{}
 	}
-	return Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set, Reference: reference == 1}
+	return Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set, Counter: counter, Reference: reference == 1}
 }
