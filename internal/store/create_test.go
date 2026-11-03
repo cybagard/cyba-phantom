@@ -164,8 +164,8 @@ func TestTS15NewDatabaseIsSyncedAndLeavesNoTemporaryFiles(t *testing.T) {
 
 // T-S-15: a write to page 1 of a new database makes a -journal file. Its size
 // is the -journal limit in leftoverMax. The WAL switch of Open removes its
-// journal before a hook can run. So the test uses the settings of Open,
-// without WAL. It reads the journal file while the write is open.
+// journal before the afterVerify hook runs. So the test uses the settings of
+// Open, without WAL. It reads the journal file while the write is open.
 func TestTS15CreateJournalSizeIsTheLeftoverLimit(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "events.db")
 	db, err := sql.Open("sqlite", strings.Replace(dsn(file, true), "&_pragma=journal_mode(WAL)", "", 1))
