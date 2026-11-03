@@ -199,8 +199,8 @@ var fdCheck func(t *testing.T, paths ...string)
 // Open. A name that ends with "/" is a directory. A content with "->" is a
 // symlink. A content with "=>" is a hard link to the file named in the rest.
 // then runs at the point on ("rename", "sync" of the directory, "checks",
-// "verify", "dsn"). It can also run at the second check of the name onName. Open must fail with the
-// rule for errName. A file in kept stays, with its content if it is not empty.
+// "verify", "dsn"). It can also run at the second check of the name onName.
+// Open must fail with the rule for errName. A file in kept stays, with its content if it is not empty.
 // A file in gone does not exist. With same, no file changes. With noFds, no
 // descriptor points to the real or the temporary file.
 type refusedStart struct {
@@ -237,9 +237,9 @@ func (r refusedStart) run(t *testing.T) {
 		onDirSync(t, call)
 	case "checks":
 		setHook(t, &afterChecks, nth(1, call))
-	case "verify": // after the first connection of the open of the real name
+	case "verify": // after the first connection, at the real name
 		setHook(t, &afterVerify, nth(2, call))
-	case "dsn": // before a bad connection string fails the open of the real name
+	case "dsn": // with a bad connection string, at the real name
 		n := 0
 		setHook(t, &editDSN, func(s string) string {
 			if n++; n == 2 {

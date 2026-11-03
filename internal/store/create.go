@@ -59,7 +59,8 @@ func renamed(err error, from, to string) error {
 //
 // A file that is at the real name before the call is never renamed or removed.
 // A file that is not the made file and appears there before the rename is kept.
-// The call fails. A hard link of the made file there goes with it. The Lstat of the real name and the rename are two calls. If someone puts a file
+// The call fails. A hard link of the made file there goes with it. The Lstat
+// of the real name and the rename are two calls. If someone puts a file
 // at the real name in that window, the rename replaces it. Only the sensor user
 // can write in the checked directory. A failure removes the file that this call
 // made, but only when the entry is that file. If someone replaces the entry
