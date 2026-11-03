@@ -127,7 +127,8 @@ docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
 ```
 
 (Or open the folder with the Dev Containers extension, which uses
-`.devcontainer/devcontainer.json`.) `make all` runs build, lint, tests
+`.devcontainer/devcontainer.json`. To fetch a new vulnerability database
+copy there, rebuild the container without the build cache.) `make all` runs build, lint, tests
 (`-race`), the C10 trace check, and the constitution-table mirror.
 `make perf` and `make coverage` are the extra gates; `make dco
 BASE=<sha> HEAD=<sha>` checks the sign-off and the commit identity
