@@ -15,16 +15,20 @@ const tempSuffix = ".new"
 
 // suffixes are the names of a database file and the files that SQLite makes
 // from it.
-var suffixes = []string{"", "-wal", "-shm", "-journal"}
+var suffixes = [...]string{"", "-wal", "-shm", "-journal"}
 
-// leftoverMax is the largest size in bytes of a leftover file that holds no
-// store data. It has one limit for each of suffixes. The store uses pages of
-// 4096 bytes. The database limit is one page, and a table root is on page 2 or
-// higher. The -wal limit is its header, because a frame adds 24 and 4096
-// bytes. A -shm file is an index and holds no row. The create of a new
-// database makes a -journal file. The -journal limit is its size. It has 512
-// bytes of header and one page record of 4 + 4096 + 4 bytes.
-var leftoverMax = [...]int64{4096, 32, math.MaxInt64, 4616}
+// leftoverMax has one limit for each entry of suffixes, in the same order.
+// A limit is the largest size in bytes at which a leftover file cannot hold
+// store data. Open refuses a larger file. The store sets no page size, and the
+// driver default is 4096 bytes.
+//
+// The database limit is one page, because a table root is on page 2 or higher.
+// The -wal limit is the 32-byte WAL header. Each frame adds a 24-byte frame
+// header and one page. A -shm file is the WAL index and holds no row.
+//
+// When Open makes a new database, SQLite writes a -journal of 4616 bytes. The
+// journal has a 512-byte header and one page record of 4 + 4096 + 4 bytes.
+var leftoverMax = [len(suffixes)]int64{4096, 32, math.MaxInt64, 4616}
 
 // syncFile calls fsync on a file and on a directory. A test replaces it to see
 // the order of the steps, or to make a sync fail.
