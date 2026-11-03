@@ -233,6 +233,8 @@ func TestTS31NoAllocations(t *testing.T) {
 		{"1 cookie", oneHeader(), true},
 		{"40 cookies", manyHeader(), true},
 		{"2999 parts with the name", floodHeader(), false},
+		{"no part with the name", hdr("a=b; c=d"), false},
+		{"4 KiB of other cookies", hdr(strings.Repeat("k=v; ", 819) + "k=v"), false},
 	} {
 		if _, ok := CookieFromHeader(c.h); ok != c.ok {
 			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.ok)
