@@ -106,8 +106,11 @@ func TestTU21RequestEventPath(t *testing.T) {
 	}
 }
 
-// T-U-21: event.RequestPath and location make the same path for each byte after
-// "/" and for the rows above. This keeps the two copies of the rule equal.
+// T-U-21: event.RequestPath and location make the same path for each byte
+// after "/". They also do this for the five URLs in this test,
+// requestPathRows and redirectEscapeRows. The two copies have different caps:
+// location also holds the scheme and the host in its 2048 bytes. So the test
+// keeps the copies equal for these rows, not for all paths.
 func TestTU21RequestPathMatchesLocation(t *testing.T) {
 	us := []*url.URL{{Path: "/%41"}, {Path: "/%zz", RawPath: "/%zz"}, {Path: "/a%", RawPath: "/a%"},
 		{Path: "/%2z", RawPath: "/%2z"}, {Path: "/a%4", RawPath: "/a%4"}}
@@ -297,6 +300,7 @@ var redirectEscapeRows = []struct{ target, want string }{
 	{"/a%252Fb", "https://decoy.test/a%252Fb"},
 	{"/%0d%0aSet-Cookie:x", "https://decoy.test/%0D%0ASet-Cookie:x"},
 	{"/é", "https://decoy.test/%C3%A9"},
+	{"/%c3%a9", "https://decoy.test/%C3%A9"},
 	{"http://decoy.test/x%2Fy", "https://decoy.test/x%2Fy"},
 }
 
@@ -412,9 +416,9 @@ func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
 // T-S-17: an "OPTIONS *" request goes to the handler on both sockets. A
 // configured Host gets 405 with Allow. An unknown Host gets 404. Neither gets
 // the 200 with no body of net/http. Over TLS each request gives one request
-// event and no refused event, also with "Connection: close". The stored path is
-// %2A, because the path has no '/'. On the plain socket it gives no Location
-// and no event.
+// event and no refused event, also with "Connection: close". The stored path
+// is %2A: the code escapes '*' and adds no leading '/'. On the plain socket it
+// gives no Location and no event.
 func TestTS17OptionsStarGoesToHandler(t *testing.T) {
 	for _, tc := range []struct {
 		host string

@@ -17,9 +17,9 @@ type recorder struct {
 // record makes the event from r and from code (the status that the handler
 // writes). It never reads the body, a forwarded header, or the protocol fields
 // of r. The fingerprint values stay empty. The path is the value of
-// event.RequestPath: it keeps each escape and holds no control byte. A NewEvent
-// error adds one to errs. A full queue counts its own drop. The call never
-// waits.
+// event.RequestPath: it keeps each escape, with upper-case hex digits, and
+// holds no control byte. A NewEvent error adds one to errs. A full queue
+// counts its own drop. The call never waits.
 func (rc *recorder) record(r *http.Request, code int) {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
