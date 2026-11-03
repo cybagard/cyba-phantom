@@ -50,7 +50,7 @@ const (
 
 // The position of a key set in the ring that Verify gets. A ring can hold
 // any number of key sets. Result.Set is the position of the matching key set.
-// First is the first key set of the ring. Second is the second key set.
+// First and Second name the first two positions.
 const (
 	First  = 0
 	Second = 1
@@ -83,8 +83,10 @@ type KeySet struct {
 // redacted is the text that Format writes for every verb.
 const redacted = "token.KeySet"
 
-// Format writes one fixed text for every verb. The text holds no field, no
-// pointer and no counter. A print of a KeySet does not leak the key.
+// Format writes one fixed text for each verb that fmt gives it. The text
+// holds no field, no pointer and no counter. Only a *KeySet uses Format.
+// fmt can print the fields of a KeySet copy, and of a *KeySet in an unexported
+// field.
 func (k *KeySet) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte(redacted))
 }
@@ -145,8 +147,8 @@ func unpack(b []byte) (index, unit, counter uint64) {
 
 // Mint makes a token for the trap at index, with the time unit of at. Each
 // call uses a new counter value (ADR-036 decision 3). It does not allocate
-// while the buffer pool holds a buffer. A GC or the race detector can make
-// the pool allocate one buffer.
+// in steady state. After a GC, or under the race detector, the buffer pool
+// can allocate a small, bounded amount of memory.
 func (k *KeySet) Mint(index int, at time.Time) ([Size]byte, error) {
 	var out [Size]byte
 	if k == nil || k.block == nil {
@@ -180,8 +182,9 @@ type Result struct {
 // token under each key set, also after a match. It checks the 56 bits and
 // the index with crypto/subtle, and it selects the result with no early
 // return. A nil key set in the ring does not match. It does not allocate
-// while the buffer pool holds a buffer. A GC or the race detector can make
-// the pool allocate one buffer. The ring can have any length.
+// in steady state. After a GC, or under the race detector, the buffer pool
+// can allocate a small, bounded amount of memory. The ring can have any
+// length.
 func Verify(ring []*KeySet, tok [Size]byte) Result {
 	buf := scratch.Get().(*[2 * Size]byte)
 	in, out := buf[:Size], buf[Size:]
