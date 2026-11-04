@@ -100,9 +100,9 @@ type tempFile interface {
 // Close of the temporary file fail. A test also uses it to count Sync calls.
 var wrapTemp func(*os.File) tempFile
 
-// afterTempRemove is nil, except in a test. A test sets it to act between the
-// removal of an old temporary file and the create of the new one. It gets the
-// name of the temporary file.
+// afterTempRemove is nil, except in a test. A test sets it to act after
+// writeTemp removes an old temporary file and before it creates the new one.
+// It gets the name of the temporary file.
 var afterTempRemove func(tmp string)
 
 // writeFile writes data to the file with this name and replaces an old file.

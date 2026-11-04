@@ -298,8 +298,8 @@ func TestTS20WriteFileRenameFails(t *testing.T) {
 	}
 }
 
-// T-S-20: a symlink that appears at the temporary name after the removal of
-// the old temporary file does not make writeTemp follow it. writeTemp gives an
+// T-S-20: a symlink can appear at the temporary name after writeTemp removes
+// the old temporary file. Then writeTemp does not follow it. It gives an
 // error, and the file behind the symlink does not change.
 func TestTS20WriteTempRefusesSymlink(t *testing.T) {
 	dir, r := newDir(t)

@@ -120,11 +120,12 @@ func TestTU08FetchedRejects(t *testing.T) {
 		{"rollback", func(f *fetched) ([]byte, []byte) { return signed(f, mf(ver(1))) }, ErrRollback},
 		{"archive over the cap", func(f *fetched) ([]byte, []byte) { return make([]byte, MaxBundleBytes+1), f.sig }, ErrArchiveInvalid},
 		{"signature over the cap", func(f *fetched) ([]byte, []byte) { return f.arch, make([]byte, MaxSigBytes+1) }, ErrArchiveInvalid},
-		// At the cap, the size is no reason to refuse. The signature check does.
+		// At the cap, the size is no reason to refuse. The signature check
+		// refuses.
 		{"archive at the cap", func(f *fetched) ([]byte, []byte) { return make([]byte, MaxBundleBytes), f.sig }, ErrBadSig},
 		{"signature at the cap", func(f *fetched) ([]byte, []byte) { return f.arch, make([]byte, MaxSigBytes) }, ErrBadSig},
-		// The version state holds the SHA-256 of this expired bundle. Only a start
-		// load accepts it then, so a fetch must refuse it.
+		// The version state holds the SHA-256 of this expired bundle. Only a
+		// start load accepts it then, so a fetch must refuse it.
 		{"expired, state holds its SHA-256", func(f *fetched) ([]byte, []byte) {
 			a, s := signed(f, mf(ver(3), expiredRepl...))
 			dir, err := f.root.OpenRoot("bundle")
