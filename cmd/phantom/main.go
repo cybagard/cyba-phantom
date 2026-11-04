@@ -6,6 +6,7 @@
 // "phantom --check <path>" only validates the file (FR-12). Both modes use the same load function.
 // Both modes read acme.ca_root and the tls.certs files and name a bad key.
 // --check prints each private list entry with its key path.
+// Then it prints the value of privacy.session_cookie with its key path.
 // --check opens no socket, no state directory, no store and no log, and does no DNS lookup (SEC-11).
 package main
 
@@ -54,6 +55,7 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 	}
 	if *check {
 		printPrivateLists(cfg, stdout)
+		printSessionCookie(cfg, stdout)
 		fmt.Fprintln(stdout, "phantom: config is valid")
 		return 0
 	}
@@ -88,6 +90,13 @@ func printPrivateLists(cfg *config.Config, w io.Writer) {
 			fmt.Fprintf(w, "%s[%d]: %s\n", path, i, pfx)
 		}
 	}
+}
+
+// printSessionCookie writes one line with the key path and the effective
+// value of privacy.session_cookie.
+func printSessionCookie(cfg *config.Config, w io.Writer) {
+	v, _ := cfg.Get("privacy.session_cookie")
+	fmt.Fprintf(w, "privacy.session_cookie: %t\n", v.Bool)
 }
 
 // These are the file rules of the config loader. The key file rule also
