@@ -42,6 +42,10 @@ func fileRule(max int64) safefile.Rule {
 // updates when they run at the same time. So two loads never run together.
 var loadMu sync.Mutex
 
+// loadSeq counts the bundles that a loader swapped in, in this process. It is
+// guarded by loadMu, so all loaders share it.
+var loadSeq uint64
+
 // swapGap is the least time from a swap to the next load that is not a start
 // load. seedDelay is the time from a swap until the loader zeroes the replaced
 // seed. A request ends within 20 s, so 30 s is longer than a request that
@@ -73,7 +77,15 @@ type Bundle struct {
 	// tokens is the key set of the token seed. It is nil without a seed or
 	// without a trap. It holds no seed byte.
 	tokens *token.KeySet
+	// seq is the load sequence. The loader sets it at the swap, before any
+	// reader can see the bundle. It is 0 for a bundle never swapped in.
+	seq uint64
 }
+
+// Sequence gives the load sequence of the bundle. A loader gives each bundle
+// that it swaps in a number higher than all earlier numbers in the process.
+// This holds for a load of the same archive and for a second loader.
+func (b *Bundle) Sequence() uint64 { return b.seq }
 
 // Format prints the version and the SHA-256 of the bundle. It prints no seed.
 // The value receiver covers Bundle and *Bundle. fmt does not call Format under
@@ -553,6 +565,9 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 	} else {
 		l.ring.Swap(cand.tokens)
 	}
+	// The stamp is under loadMu, so numbers are unique and rise in swap order.
+	loadSeq++
+	cand.seq = loadSeq
 	// A request can still hold the replaced bundle. A timer zeroes its seed
 	// later, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {

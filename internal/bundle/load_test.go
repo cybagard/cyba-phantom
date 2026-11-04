@@ -559,3 +559,27 @@ func TestTU08LoadsAreSerialized(t *testing.T) {
 		}
 	}
 }
+
+// T-U-20: each swapped-in bundle gets a higher load sequence. Two loads of one
+// archive and a load through a second loader rise. A rejected load leaves the
+// running bundle and its sequence as they were.
+func TestTU20LoadSequenceRises(t *testing.T) {
+	e := running(t)
+	b1 := e.l.Current()
+	b2, err := e.l.Load(false)
+	must(t, err)
+	b3, err := e.loader("bundle/current.cbnd").Load(false)
+	must(t, err)
+	if b1.Sequence() == 0 || b2.Sequence() <= b1.Sequence() || b3.Sequence() <= b2.Sequence() {
+		t.Fatalf("sequences %d, %d, %d do not rise", b1.Sequence(), b2.Sequence(), b3.Sequence())
+	}
+	seq := b3.Sequence()
+	e.install("bundle/current", mf(ver(1)))
+	e.rejects(e.l, false, ErrRollback)
+	if run := e.l.Current(); run != b2 || run.Sequence() != b2.Sequence() {
+		t.Errorf("a rejected load changed the running bundle or its sequence")
+	}
+	if seq != b3.Sequence() {
+		t.Errorf("sequence changed from %d to %d", seq, b3.Sequence())
+	}
+}

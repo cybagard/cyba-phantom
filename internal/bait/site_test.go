@@ -248,26 +248,57 @@ func TestTU20SiteRelease(t *testing.T) {
 	}
 }
 
-// TestTU20SiteLostSwap checks a lost swap. Another bundle becomes cur between
-// the Load and the CompareAndSwap of the first call. The call tries again and
-// ends with its own bundle as cur and the other bundle as retired.
+// TestTU20SiteLostSwap checks a lost swap between two loads with one version.
+// The first bundle has the lower load sequence. The second bundle becomes cur
+// between the Load and the CompareAndSwap of the first call. The call gets its
+// own site and installs nothing. Requests for the running bundle then build no
+// site.
 func TestTU20SiteLostSwap(t *testing.T) {
 	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
-	h := New(&swap{}, &fallbackFn{}, testQueue(t))
+	if b1.Sequence() >= b2.Sequence() {
+		t.Fatal("the second bundle has no higher sequence")
+	}
+	h := New(&swap{list: []*bundle.Bundle{b2}}, &fallbackFn{}, testQueue(t))
 	h.hook = func() {
 		h.hook = nil
 		h.siteOf(b2)
 	}
 	s := h.siteOf(b1)
 	st := h.sites.Load()
-	if st.cur.b != b1 || st.retired[0] != weak.Make(b2) {
-		t.Fatal("the first call did not end with its bundle as cur and the other as retired")
+	if st.cur.b != b2 || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
+		t.Fatal("the first call changed the state")
 	}
 	if e := s.hosts["example.com"]["/"]; e == nil || e.asset.Len() != rootLen("-1") {
 		t.Error("the site is not the site of the first bundle")
 	}
 	if n := h.builds.Load(); n != 2 {
-		t.Errorf("builds = %d, want 2", n)
+		t.Fatalf("builds = %d, want 2", n)
+	}
+	requests(t, h, 10, "-22")
+	if n := h.builds.Load(); n != 2 {
+		t.Errorf("builds after 10 requests = %d, want 2", n)
+	}
+}
+
+// TestTU20SiteOlderVersionLater checks a bundle with an older manifest version
+// that loads after a newer one. This happens when the version state is
+// removed. The older bundle has the higher load sequence. It becomes cur and
+// builds one site.
+func TestTU20SiteOlderVersionLater(t *testing.T) {
+	newer := bundleAt(t, "-1", "2026.11.01-2")
+	older := bundleAt(t, "-22", "2026.11.01-1")
+	h := New(&swap{list: []*bundle.Bundle{older}}, &fallbackFn{}, testQueue(t))
+	h.siteOf(newer)
+	requests(t, h, 1, "-22")
+	if h.sites.Load().cur.b != older {
+		t.Fatal("the later bundle is not cur")
+	}
+	if n := h.builds.Load(); n != 2 {
+		t.Fatalf("builds = %d, want 2", n)
+	}
+	requests(t, h, 10, "-22")
+	if n := h.builds.Load(); n != 2 {
+		t.Errorf("builds after 10 requests = %d, want 2", n)
 	}
 }
 

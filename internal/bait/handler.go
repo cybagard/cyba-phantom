@@ -184,21 +184,13 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 
 // siteOf returns the site of b. The handler keeps a strong pointer to cur only.
 // A bundle in retired gets a site for its own request. The handler does not
-// keep that site. A bundle outside retired becomes cur when its manifest
-// version is not older than the version of cur. This includes a bundle that was
-// never cur and a bundle that has left retired. An older bundle gets a site for
-// its own request, like a bundle in retired. The state does not change. A
-// request in flight keeps its bundle and site in local variables.
-//
-// Known limit: the loader can accept a bundle older than cur, but only after
-// its version state is removed. Then each request for that bundle builds a
-// site. This lasts until a bundle that is not older than cur loads, or the
-// process starts again.
-//
-// Known limit: two loads of the same archive have the same version. A request
-// can read the first load and lose the swap to the second load. It then
-// installs the first load, which was never in the cache. After that, each
-// request for the running bundle builds a site until the next swap.
+// keep that site. A bundle outside retired becomes cur when its load sequence
+// is higher than the sequence of cur. This includes a bundle that was never
+// cur and a bundle that has left retired. A bundle with a lower sequence was
+// loaded earlier than cur. It gets a site for its own request, like a bundle in
+// retired. The state does not change. The sequence does not depend on the
+// manifest version, so a reload of the same archive counts as later. A request
+// in flight keeps its bundle and site in local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
@@ -213,7 +205,7 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 					return buildSite(b, h.token())
 				}
 			}
-			if bundle.CompareVersion(b.Manifest().Version, st.cur.b.Manifest().Version) < 0 {
+			if b.Sequence() <= st.cur.b.Sequence() {
 				h.builds.Add(1)
 				return buildSite(b, h.token())
 			}
