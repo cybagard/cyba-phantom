@@ -15,8 +15,9 @@
 # values. Each replacement adds a line to the file "replaced" in MUTATE_RUN.
 #
 # Gremlins also counts exit status 1 as a kill. Go exits 1 when it cannot load
-# or build the package, and then no test ran. For a "go test" call, this
-# script keeps the output in a new file in MUTATE_RUN. Then it copies the
+# or build the package, and then no test ran. A go vet failure in go test is
+# also a build failure. For a "go test" call, this script keeps the output in
+# a file in MUTATE_RUN. The file name has its process ID. Then it copies the
 # file to stdout. Sometimes go exits 1, and one output line is the FAIL line
 # of a setup or build failure. Then the script exits 2 instead. Gremlins
 # counts status 2 as not viable.

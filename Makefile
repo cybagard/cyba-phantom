@@ -247,8 +247,9 @@ perf-inner:
 # The copy would include the run directory.
 # It copies the module to src in this directory, with all files as they are.
 # The copy is a tar file and its extract. It is about twice the module with
-# untracked files and .git. No size check runs during the copy and the
-# pre-check. The extract and the pre-check files stay. Later checks count them.
+# untracked files and .git. No size check runs during the copy, the build
+# of tools/mutatepkg and the pre-check. The extract and the pre-check files
+# stay. Later checks count them.
 # If a tar command fails, the target prints one line and fails (exit 1).
 # Gremlins starts in the copy. The module root of gremlins is then the copy.
 # Gremlins finds the package of a mutant from the package name of the mutated
@@ -271,10 +272,11 @@ perf-inner:
 # That status is KILLED, LIVED, TIMED OUT or NOT VIABLE. Then no mutant ran
 # on the package that tools/mutatepkg found.
 # Gremlins counts exit status 1 of go test as a kill. This is also so when go
-# could not load or build the package. For a go test call, the wrapper keeps
-# the output in a new file in the run directory. Sometimes go exits 1, and a
-# line of the output is the FAIL line of a setup or build failure. Then the
-# wrapper exits 2 instead of 1. Gremlins counts status 2 as NOT VIABLE.
+# could not load or build the package. A go vet failure in go test is also a
+# build failure. For a go test call, the wrapper keeps the output in a file
+# in the run directory. The file name has its process ID. Sometimes go exits
+# 1, and a line of the output is the FAIL line of a setup or build failure.
+# Then the wrapper exits 2 instead of 1. Gremlins counts status 2 as NOT VIABLE.
 # The target refuses PKG (exit 2) before gremlins starts in some cases. Then
 # it names the packages, because it cannot know the package of a mutant.
 # One case is two or more packages that get the module path. The module root
@@ -283,7 +285,7 @@ perf-inner:
 # module path. gremlins reads the module name from that line. A comment on
 # it breaks the match. It exits 1 if go list fails or no package matches PKG.
 # A PKG that gremlins already maps right has no replacement. An example is
-# internal/config. Its run is the same as before.
+# internal/config. Its mutants test the same package as before.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
 # tests fail, it prints the output and fails (exit 1) before any mutation.
 # It sets TMPDIR and GOTMPDIR to the run directory. It sets GOCACHE and HOME
