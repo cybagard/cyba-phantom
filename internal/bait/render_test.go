@@ -85,12 +85,12 @@ var raceAllocSlack float64
 // JSON encoder, and under the race detector the pool drops items at random.
 // Then its count changes by 2 or 3 between runs.
 //
-// Without the race detector the two counts must be equal. With it, the render
-// takes a buffer from the token pool two times (MintRange and Verify), and the
-// detector can drop a pooled buffer, so each take can allocate one new buffer.
-// A render then allocates at most 2 more than the fewest. The average of 100
-// runs differs by at most raceAllocSlack between the two bundles. The slack is
-// a constant, so a count that grows with the traps still fails.
+// Without the race detector the two counts must be equal. With it, the bound
+// is raceAllocSlack = 2. A render takes a buffer from the token pool two
+// times (MintRange and Verify). The detector can drop a pooled buffer. Then
+// each take allocates one new buffer, so a render allocates at most 2 more
+// than its fewest. The slack is a constant, so a count that grows with the
+// traps still fails.
 func TestTU20RenderAllocs(t *testing.T) {
 	var got [2]float64
 	for i, n := range []int{1, 1024} {
