@@ -14,10 +14,10 @@ const (
 	pageBytes   = 16 << 10
 	pageActions = 64
 	// actionAllocs is the most allocations for each action of a template page.
-	// A page with 1 to 64 actions allocates 16 for each action and 18 more.
+	// A page with 1 to 64 actions allocates 18 for each action and 20 more.
 	// With the race detector, the pools lose items. A page then allocates up
-	// to 17 for each action.
-	actionAllocs = 17
+	// to 19 for each action.
+	actionAllocs = 19
 )
 
 // pageOf makes a page of pageBytes bytes with the trap actions t0 to t(n-1).
@@ -47,7 +47,7 @@ func serveHandler(tb testing.TB, actions int) *Handler {
 
 // serveKinds are the kinds of response of the handler, one for each way that
 // serve ends. limit is the most allocations of serve with the race detector.
-// Measured without it: 15 for an asset and 0 for the fixed pages. It is 34 for
+// Measured without it: 15 for an asset and 0 for the fixed pages. It is 38 for
 // the 404 template and for a page of 1 action.
 var serveKinds = []struct {
 	name, method, target, host string
@@ -55,8 +55,8 @@ var serveKinds = []struct {
 }{
 	{"asset GET", http.MethodGet, "/style.css", "example.com", 16},
 	{"asset HEAD", http.MethodHead, "/style.css", "example.com", 16},
-	{"template page", http.MethodGet, "/t", "example.com", 35},
-	{"vhost 404 template", http.MethodGet, "/nope", "example.com", 35},
+	{"template page", http.MethodGet, "/t", "example.com", 41},
+	{"vhost 404 template", http.MethodGet, "/nope", "example.com", 41},
 	{"fixed 404", http.MethodGet, "/nope", "kilo.example", 0},
 	{"unknown host", http.MethodGet, "/", "other.example", 0},
 	{"405", http.MethodPost, "/", "example.com", 0},
@@ -181,13 +181,13 @@ func BenchmarkSiteBuild(b *testing.B) {
 			var before, after runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&before)
-			s := buildSite(bd, placeholder)
+			s := buildSite(bd)
 			runtime.GC()
 			runtime.ReadMemStats(&after)
 			runtime.KeepAlive(s)
 			b.ReportAllocs()
 			for b.Loop() {
-				buildSite(bd, placeholder)
+				buildSite(bd)
 			}
 			// The first b.Loop call clears the metrics: report after the loop.
 			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "retained-B")

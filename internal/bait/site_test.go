@@ -145,7 +145,7 @@ func archiveLoader(tb testing.TB, tag string, extra map[string]string) *bundle.L
 // A new table comes only with a new bundle.
 func TestTU20SiteTable(t *testing.T) {
 	b := newBundle(t)
-	s := buildSite(b, placeholder)
+	s := buildSite(b)
 	if len(s.hosts) != 3 || len(s.hosts["example.com"]) != len(exampleRoutes) || len(s.hosts["kilo.example"]) != 1 {
 		t.Fatalf("hosts = %d, routes = %d", len(s.hosts), len(s.hosts["example.com"]))
 	}
@@ -155,8 +155,8 @@ func TestTU20SiteTable(t *testing.T) {
 			t.Errorf("route %q: entry %+v", r.path, e)
 		}
 	}
-	if len(s.texts) != 1 || s.texts["a"] != "x" {
-		t.Errorf("texts = %v", s.texts)
+	if len(s.traps) != 1 || s.traps[0].ID != "a" || s.traps[0].Render("T") != "x" {
+		t.Errorf("traps = %v", s.traps)
 	}
 
 	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
@@ -337,7 +337,6 @@ func TestTU20SiteLostSwapNewer(t *testing.T) {
 	}
 	older, newer := withVersion("-1", "2026.11.01-1"), withVersion("-22", "2026.11.01-2")
 	h := New(&swap{list: []*bundle.Bundle{newer}}, &fallbackFn{}, testQueue(t))
-	h.token = func() string { return "tok" }
 	h.hook = func() {
 		h.hook = nil
 		h.siteOf(newer)
@@ -346,8 +345,8 @@ func TestTU20SiteLostSwapNewer(t *testing.T) {
 	if e := s.hosts["example.com"]["/"]; e == nil || e.asset.Len() != rootLen("-1") {
 		t.Error("the site is not the site of the older bundle")
 	}
-	if got := s.texts["a"]; got != "xtok" {
-		t.Errorf("trap text of the older site = %q, want %q", got, "xtok")
+	if len(s.traps) != 1 || s.traps[0].Render("tok") != "xtok" {
+		t.Errorf("traps of the older site = %v", s.traps)
 	}
 	if st := h.sites.Load(); st.cur.b != newer || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
 		t.Error("the older bundle changed the state")

@@ -13,6 +13,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/session"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // testDay is the time of the handler clock in the tests of the events and of
@@ -149,7 +150,7 @@ func TestTU20RequestEventAbort(t *testing.T) {
 		h, q := eventHandler(t, 8)
 		var w http.ResponseWriter = &failWriter{h: http.Header{}}
 		if c.token != nil {
-			h.token = c.token
+			h.text = func([token.Size]byte) string { return c.token() }
 			w = httptest.NewRecorder()
 		}
 		if !aborts(h, w, get(c.path, "example.com")) {
