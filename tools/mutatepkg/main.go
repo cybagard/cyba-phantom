@@ -40,9 +40,9 @@
 //     empty if <replacement> is empty.
 //   - A replacement was planned, the file replaced is not a regular file,
 //     and the gremlins output has a mutant status.
-//   - After the line "Mutation testing completed", the gremlins output does
-//     not have the "Killed, Lived" line once, or not the "Timed out,
-//     Not viable" line once, so the counts are unknown.
+//   - The counts are unknown. After the line "Mutation testing completed",
+//     the "Killed, Lived" line or the "Timed out, Not viable" line is not
+//     in the gremlins output exactly once.
 //   - Killed, Lived and Timed out are 0, and Not viable is not 0.
 //   - A test-output file has the FAIL line of a setup failure.
 //
@@ -210,8 +210,8 @@ func count(re *regexp.Regexp, text, names string) (int, int, error) {
 // of fix. These are the values that the go wrapper reads. Both are empty if
 // fix is empty.
 // It also returns an error if the output lacks a summary line, or has
-// one twice, because the counts are then unknown. Both lines come after the
-// line "Mutation testing completed". The file "out" has the gremlins output.
+// one twice. The counts are then unknown. Both lines come after the line
+// "Mutation testing completed". The file "out" has the gremlins output.
 // The file "replaced" must be a regular file. It has a line for each
 // replacement of the go wrapper. fix is the output of the plan mode.
 //

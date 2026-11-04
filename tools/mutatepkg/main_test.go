@@ -546,7 +546,7 @@ func TestMakefileCallsCheckAfterGremlins(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	// The whole recipe line of the call, from the tab to the line end, sits
+	// The call is a whole recipe line, from the tab to the line end. It sits
 	// after the end of the gremlins run and before the list of mutants.
 	const call = "\n\t" + `"$$d/mutatepkg" -check "$$d" "$$fix" || exit $$?; \` + "\n"
 	const ended = `grep -q 'Mutation testing completed' "$$d/out"`
