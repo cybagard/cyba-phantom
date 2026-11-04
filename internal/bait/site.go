@@ -64,7 +64,7 @@ func (e *entry) mintOf(b *bundle.Bundle, pos map[string]int) {
 // buildSite makes the table of b. It takes the asset names only from the
 // route map of each vhost. The loader refuses a route whose asset is missing.
 // If Asset still gives false, the build makes no entry for that route. The
-// key-set indexes of each route come from b, so only b.Tokens() can use them.
+// key-set indexes of each route come from b. Use them only with b.Tokens().
 func buildSite(b *bundle.Bundle) *site {
 	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, traps: b.Traps()}
 	pos := make(map[string]int, len(s.traps))

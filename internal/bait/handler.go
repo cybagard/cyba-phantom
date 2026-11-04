@@ -70,11 +70,12 @@ type Handler struct {
 	// slotDrops counts the header slots left out of a response because the
 	// value is not valid. It adds one for each slot at each such response.
 	slotDrops atomic.Int64
-	// text gives the text of a token. It is token.Text. Only a test sets it,
-	// before the first request.
+	// text gives the text of a token. The constructor sets it to token.Text.
+	// Only a test changes it, before the first request.
 	text func([token.Size]byte) string
-	// keys gives the key set of a bundle. It is (*bundle.Bundle).Tokens. Only a
-	// test sets it, to get a render with no key set.
+	// keys gives the key set of a bundle. The constructor sets it to
+	// (*bundle.Bundle).Tokens. Only a test changes it, before the first
+	// request.
 	keys func(*bundle.Bundle) *token.KeySet
 	// noKeys counts the renders whose mint failed. The bundle has no key set,
 	// for example. It adds one for each such render.

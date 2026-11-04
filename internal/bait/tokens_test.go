@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,23 @@ func ids(res []token.Result) (out []string) {
 		out = append(out, r.Trap)
 	}
 	return out
+}
+
+// nextCounter mints one token under the key set of b and gives its counter.
+func nextCounter(t *testing.T, b *bundle.Bundle) uint64 {
+	t.Helper()
+	var out [1][token.Size]byte
+	first, err := b.Tokens().MintRange([]int{0}, testDay, out[:])
+	mustOK(t, err)
+	return first
+}
+
+// rcStatus gives the status of a request event, or 0 when it has none.
+func rcStatus(ev *event.Event) int64 {
+	if s := ev.Record().Status; s != nil {
+		return *s
+	}
+	return 0
 }
 
 // TestTI02HandlerTokens fetches each page with token slots twice, from two
@@ -139,8 +157,14 @@ func TestTS31MintOnEvent(t *testing.T) {
 		if c.abort {
 			w = &abortAfterFirst{ResponseRecorder: rec}
 		}
+		before := nextCounter(t, b)
 		if aborted := aborts(h, w, get(c.path, "example.com")); aborted != c.abort {
 			t.Fatalf("%s: aborted %v", c.name, aborted)
+		}
+		// One range for the render: the counter moves by its count, and the
+		// probe mint before and after takes one more.
+		if moved := (nextCounter(t, b) - before) & (event.MintCounterLimit - 1); moved != uint64(c.count)+1 {
+			t.Errorf("%s: the counter moved by %d, want %d", c.name, moved, c.count+1)
 		}
 		evs := q.Drain()
 		if len(evs) != 1 || *reads != 1 {
@@ -250,6 +274,8 @@ func TestTS31SlotValueWithToken(t *testing.T) {
 // TestTS31NoTokenOrCookieText checks that no token text, cookie value or tag is
 // in an event or the standard log. The requests are a new client and a client
 // that returns its cookie. They are also an abort and a render with no key set.
+// A response over the cap through a real server checks the error log of the
+// server too.
 func TestTS31NoTokenOrCookieText(t *testing.T) {
 	logs := &syncBuf{}
 	old := log.Writer()
@@ -285,6 +311,124 @@ func TestTS31NoTokenOrCookieText(t *testing.T) {
 	for _, m := range marks {
 		if strings.Contains(out.String(), m) {
 			t.Errorf("marker %q is in an event or a log line", m)
+		}
+	}
+
+	// A response over the cap through a real server: the abort path. The error
+	// log of the server holds no token text, cookie value or tag.
+	errsBefore := h.execErrs.Load()
+	var mu sync.Mutex
+	var texts []string
+	h.keys = (*bundle.Bundle).Tokens
+	h.text = func(tok [token.Size]byte) string {
+		s := token.Text(tok)
+		mu.Lock()
+		texts = append(texts, s)
+		mu.Unlock()
+		return s + strings.Repeat("x", oneMiB)
+	}
+	srv, srvLog := startServer(t, h)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/t", nil)
+	mustOK(t, err)
+	req.Host = "example.com"
+	req.Header.Set("Cookie", "sid="+cookie)
+	_, err = (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+	srv.Close()
+	mu.Lock()
+	marks = append(texts, cookie, cookie[27:])
+	mu.Unlock()
+	if err == nil || h.execErrs.Load() != errsBefore+1 || len(marks) != 4 {
+		t.Fatalf("over the cap: err %v, %d errors after %d, %d markers", err, h.execErrs.Load(), errsBefore, len(marks))
+	}
+	for _, m := range marks {
+		if strings.Contains(srvLog.String(), m) || strings.Contains(logs.String(), m) {
+			t.Errorf("marker %q is in the server log or the standard log", m)
+		}
+	}
+}
+
+// mixedBundle loads a bundle with the traps ids in this order and the seed
+// byte seed. The route /t has the trap action f and a header slot X-Note for
+// the trap n.
+func mixedBundle(t *testing.T, seed byte, ids ...string) *bundle.Bundle {
+	t.Helper()
+	const dir = "vhosts/example.com/"
+	var traps []map[string]string
+	for _, id := range ids {
+		traps = append(traps, map[string]string{"id": id, "slot": "hidden-p", "surface": "path",
+			"visibility": "human-visible", "instruction_template": "x " + id + " {{.Token}}"})
+	}
+	tj, err := json.Marshal(traps)
+	mustOK(t, err)
+	return bundleFiles(t, "", map[string]string{
+		"secrets/token.seed": strings.Repeat(string([]byte{seed}), 32),
+		"traps/traps.json":   string(tj),
+		dir + "routes.json":  `{"routes":[{"path":"/t","template":"` + dir + `t.tmpl","type":"text/html; charset=utf-8","headers":[{"name":"X-Note","trap":"n"}]}]}`,
+		dir + "t.tmpl":       `<p>{{index .Trap "f"}}</p>`,
+	})
+}
+
+// verifyUnder verifies the token text s under the key set of b.
+func verifyUnder(b *bundle.Bundle, s string) token.Result {
+	tok, ok := token.Parse(s)
+	if !ok {
+		return token.Result{}
+	}
+	return token.Verify([]*token.KeySet{b.Tokens()}, tok)
+}
+
+// TestTS31OneBundleForARequest serves a route with trap actions and a header
+// slot while the source gives one bundle to the request and the other bundle to
+// each later call. The two have another seed and another trap order. The tokens
+// verify under the first bundle only, with the trap of their slot. The set id is
+// that of the first bundle.
+func TestTS31OneBundleForARequest(t *testing.T) {
+	a := mixedBundle(t, 0x09, "f", "n")
+	b := mixedBundle(t, 0x0b, "n", "f")
+	for i, c := range []struct{ cur, other *bundle.Bundle }{{a, b}, {b, a}} {
+		q := queueOf(t, 8)
+		h := New(&swap{list: []*bundle.Bundle{c.cur, c.other}}, &fallbackFn{}, q)
+		w := serve(t, h, get("/t", "example.com"))
+		texts := tokenRE.FindAllString(w.Body.String()+" "+w.Header().Get("X-Note"), -1)
+		if w.Code != 200 || len(texts) != 2 {
+			t.Fatalf("request %d: code %d, tokens %v", i, w.Code, texts)
+		}
+		for j, want := range []string{"f", "n"} {
+			if r := verifyUnder(c.cur, texts[j]); !r.OK || r.Trap != want {
+				t.Errorf("request %d token %d: %+v, want trap %s under the first bundle", i, j, r, want)
+			}
+			if verifyUnder(c.other, texts[j]).OK {
+				t.Errorf("request %d token %d verifies under the other bundle", i, j)
+			}
+		}
+		m, ok := q.Drain()[0].Mint()
+		sum := c.cur.SHA256()
+		if !ok || string(m.SetID[:]) != string(sum[:8]) || m.Count != 2 {
+			t.Errorf("request %d: mint %+v (%v), want the set id of the first bundle", i, m, ok)
+		}
+	}
+}
+
+// TestTS31MintIndexList gives mint a list that a loaded bundle cannot make: 69
+// indexes, and an index that is not a trap. The render serves, counts one in
+// noKeys, gives empty trap texts and keeps no range.
+func TestTS31MintIndexList(t *testing.T) {
+	h, _, _ := realHandler(t, 8)
+	b := h.src.Current()
+	s := buildSite(b)
+	for _, c := range []struct {
+		name string
+		list []int
+	}{
+		{"69 indexes", append([]int{0, 1, 2}, make([]int, token.MaxRange+1-3)...)},
+		{"index that is not a trap", []int{0, 1, len(s.traps)}},
+	} {
+		before := h.noKeys.Load()
+		sess := &reqSession{at: testDay}
+		m := h.mint(b, s, &entry{mint: c.list, acts: 2}, sess)
+		if h.noKeys.Load() != before+1 || sess.mint.Count != 0 || len(m.slots) != 0 || len(m.page.Trap) != 2 ||
+			m.page.Trap[s.traps[0].ID] != "" || m.page.Trap[s.traps[1].ID] != "" {
+			t.Errorf("%s: noKeys %d after %d, mint %+v, trap texts %q", c.name, h.noKeys.Load(), before, sess.mint, m.page.Trap)
 		}
 	}
 }

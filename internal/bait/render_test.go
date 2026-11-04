@@ -250,9 +250,9 @@ func TestTU20RenderNoRequest(t *testing.T) {
 	}
 }
 
-// TestTU20Placeholder checks the token text: printable ASCII, no "--" and no
-// "<". Then the comment function keeps it.
-func TestTU20Placeholder(t *testing.T) {
+// TestTU20PlaceholderKeptByComment checks the token text: printable ASCII, no
+// "--" and no "<". Then the comment function keeps it.
+func TestTU20PlaceholderKeptByComment(t *testing.T) {
 	for _, c := range []byte(placeholder) {
 		if c < 0x20 || c > 0x7e {
 			t.Errorf("byte %#x in the placeholder", c)
@@ -346,6 +346,12 @@ func TestTU20ExecError(t *testing.T) {
 	if resp.StatusCode != 404 || string(body) != notFoundPage || resp.Header.Get("Content-Type") != text ||
 		resp.Header.Get("X-Content-Type-Options") != "nosniff" || h.execErrs.Load() != 1 {
 		t.Errorf("real server: code %d body %q header %v, errors %d", resp.StatusCode, body, resp.Header, h.execErrs.Load())
+	}
+	// The event keeps the range of the mint, for tokens that no client got.
+	if evs := h.q.Drain(); len(evs) != 1 {
+		t.Errorf("%d events, want 1", len(evs))
+	} else if m, ok := evs[0].Mint(); rcStatus(evs[0]) != 404 || !ok || m.Count != 1 {
+		t.Errorf("event: status %d, mint %+v (%v), want 404 and a range of 1", rcStatus(evs[0]), m, ok)
 	}
 	fastest := time.Hour
 	for i := range 5 {

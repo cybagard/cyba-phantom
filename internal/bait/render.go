@@ -34,11 +34,19 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	if n == 0 {
 		return m
 	}
-	m.page.Trap = make(map[string]string, e.acts)
+	if e.acts > 0 {
+		m.page.Trap = make(map[string]string, e.acts)
+	}
 	var out [token.MaxRange][token.Size]byte
 	ks := h.keys(b)
-	first, err := ks.MintRange(e.mint, sess.at, out[:n])
-	if err != nil {
+	// A loaded bundle has at most 64 trap actions and 4 header slots, so n
+	// is never over token.MaxRange here.
+	var first uint64
+	var err error
+	if n <= token.MaxRange {
+		first, err = ks.MintRange(e.mint, sess.at, out[:n])
+	}
+	if n > token.MaxRange || err != nil {
 		h.noKeys.Add(1)
 		for _, i := range e.mint[:e.acts] {
 			m.page.Trap[s.traps[i].ID] = ""
@@ -111,7 +119,7 @@ func (c *capWriter) start() {
 // returns the status that it wrote. The data is the trap text map of the mint
 // of this response. It holds no request value. An error counts one time.
 // Before the first byte, and not over the cap, the response is the fixed 404
-// page. Then the event has no mint range. Else the connection closes. Render
+// page. Then the event keeps the mint range. Else the connection closes. Render
 // then writes the event, with the status of the first byte or none and the
 // mint range, and panics. The panic with ErrAbortHandler also keeps the stack
 // out of the server log. No error text goes anywhere.
@@ -134,7 +142,6 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundl
 		h.record(r, sess, written)
 		panic(http.ErrAbortHandler)
 	}
-	sess.mint = event.MintRange{}
 	reply(w, http.StatusNotFound, notFoundBody)
 	return http.StatusNotFound
 }
