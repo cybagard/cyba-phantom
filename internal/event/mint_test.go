@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"unsafe"
 
 	"github.com/cybagard/cyba-phantom/internal/token"
 )
@@ -88,14 +89,20 @@ func TestTS31MintSize(t *testing.T) {
 	if d := with.Size() - without.Size(); d != 40 {
 		t.Fatalf("Size grows by %d, want 40", d)
 	}
+	if n := unsafe.Sizeof(MintRange{}); n != 32 {
+		t.Fatalf("MintRange takes %d bytes in memory, want 32", n)
+	}
 	if MaxEventBytes != MaxRecordBytes+MaxBodyPrefix+maxIPText+40 {
 		t.Fatalf("MaxEventBytes %d", MaxEventBytes)
 	}
 	big := mintInput(mintRange())
 	big.BodyPrefix = make([]byte, 2*MaxBodyPrefix)
 	e, err := NewEvent(fixedClock(5), big)
-	if err != nil || e.Size() > MaxEventBytes {
-		t.Fatalf("size %d, cap %d (%v)", e.Size(), MaxEventBytes, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Size() > MaxEventBytes {
+		t.Fatalf("size %d, cap %d", e.Size(), MaxEventBytes)
 	}
 }
 

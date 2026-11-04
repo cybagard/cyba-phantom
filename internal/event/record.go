@@ -34,9 +34,10 @@ const (
 	maxEventSize = MaxRecordBytes + MaxBodyPrefix + maxIPText + mintRangeSize
 )
 
-// These constants bound a MintRange. They are copies of the widths and of the
-// range limit of internal/token, which this package must not import. A test
-// compares them with the token values.
+// These constants give the limits of a MintRange. They are copies of values of
+// internal/token, which this package must not import. A test compares
+// MintMaxCount with token.MaxRange. The token package does not export its
+// widths. The same test compares the other two limits with 2^42 and 2^20.
 const (
 	// MintMaxCount is the largest number of tokens in one range.
 	MintMaxCount = 68
@@ -57,8 +58,8 @@ const (
 type MintRange struct {
 	SetID    [8]byte // the first 8 bytes of the bundle SHA-256
 	Unit     uint32  // below MintUnitLimit
+	Count    uint8   // 1 to MintMaxCount; 0 means no range in an Event
 	First    uint64  // below MintCounterLimit
-	Count    uint8   // 1 to MintMaxCount
 	IssuedAt int64   // unix ms
 }
 
@@ -459,8 +460,7 @@ type Input struct {
 type dbOnly struct {
 	ip         string
 	bodyPrefix []byte
-	mint       MintRange
-	hasMint    bool
+	mint       MintRange // present when Count is not 0
 }
 
 // Event is a record with the DB-only values next to it. The record is the
@@ -500,7 +500,7 @@ func (e *Event) BodyPrefix() []byte {
 
 // Mint returns the mint range of the event by value, and false when the event
 // has none.
-func (e *Event) Mint() (MintRange, bool) { return e.db.mint, e.db.hasMint }
+func (e *Event) Mint() (MintRange, bool) { return e.db.mint, e.db.mint.Count != 0 }
 
 // Record returns a deep copy of the record. A change to the copy does not
 // change the event.
@@ -698,7 +698,7 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	}
 	size := len(db.ip) + len(db.bodyPrefix)
 	if in.Mint != nil {
-		db.mint, db.hasMint = *in.Mint, true
+		db.mint = *in.Mint
 		size += mintRangeSize
 	}
 	b, err := r.canonical()
