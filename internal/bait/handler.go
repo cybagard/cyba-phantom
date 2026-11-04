@@ -120,7 +120,7 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 type reqSession struct {
 	ip string // the client address text
 	id string // the session id, or "" when the address is not valid
-	// fresh is true when the response sets a new cookie. This is when the
+	// fresh is true when the response may set a new cookie. This is when the
 	// request has no valid cookie and the cookie is on. key is the day key
 	// that the request used.
 	fresh bool

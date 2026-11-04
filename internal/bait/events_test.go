@@ -617,8 +617,8 @@ type fixedSource struct{ b *bundle.Bundle }
 func (s fixedSource) Current() *bundle.Bundle { return s.b }
 
 // TestTU24CookieOffRace runs concurrent requests on a handler with the cookie
-// off. The race detector finds a write of the switch on the request path. No
-// response has a cookie.
+// off. The race detector can find a write of the switch on the request path.
+// No response has a cookie.
 func TestTU24CookieOffRace(t *testing.T) {
 	on, _ := eventHandler(t, 64)
 	w, _ := sessionEvent(t, "issue", on, get("/t", "example.com"))
