@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/bait"
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/listener"
@@ -131,7 +132,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		HeaderBytes: int(headerBytes.Int),
 		Queue:       q,
 		Counters:    counters,
-	}, listener.NewHelloHandler(decoys, q))
+	}, decoyHandler(cfg, b, s, q, decoys))
 	if err != nil {
 		fmt.Fprintln(stderr, "phantom: decoy listener does not start")
 		httpsLn.Close()
@@ -238,6 +239,24 @@ func serveWith(ctx context.Context, stop context.CancelFunc, cfg *config.Config,
 		return 1
 	}
 	return 0
+}
+
+// decoyHandler returns the handler of the decoy listener. With a loader, it is
+// the bait handler. The hello handler is its fallback. With no loader, no load
+// ran, and the hello handler serves alone. The bait handler shares the day key
+// holder of the writer (SEC-35). With privacy.session_cookie false, the cookie
+// is off. The switch is set here, before any Serve call, because the method
+// takes no lock.
+func decoyHandler(cfg *config.Config, b *bundlePart, s *storePart, q *event.Queue, decoys []string) http.Handler {
+	hello := listener.NewHelloHandler(decoys, q)
+	if b.l == nil {
+		return hello
+	}
+	h := bait.NewWithDayKey(b.l, hello, q, s.DayKey())
+	if v, _ := cfg.Get("privacy.session_cookie"); !v.Bool {
+		h.DisableSessionCookie()
+	}
+	return h
 }
 
 // bindBoth binds listen.https and then listen.http. On an error it writes one fixed line that names the
