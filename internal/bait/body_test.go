@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ var (
 )
 
 // bodyCases are the inputs of the scan. want is the candidate or "".
-var bodyCases = []struct{ name, body, want string }{
+var bodyCases = []bodyCase{
 	{"small", formSmall, tokText},
 	{"dup", formDup, ""},
 	{"deep-2000", formDeep, ""},
@@ -106,12 +107,86 @@ var bodyCases = []struct{ name, body, want string }{
 	{"longer name", `{"tokenx":"` + tokText + `"}`, ""},
 }
 
-// TestTS32BodyScan checks the scan of the flat object.
+// boundCases are the rows for three groups of bounds. The first is the number
+// grammar. The second is the hex digits of a \u escape. The third is a body
+// that ends at each point of the object.
+func boundCases() []bodyCase {
+	var rows []bodyCase
+	add := func(name, body, want string) { rows = append(rows, bodyCase{name, body, want}) }
+	val := func(name, v, want string) { add(name, `{"a":`+v+`,`+member+`}`, want) }
+	for _, n := range []string{"0", "-0", "10", "19", "109", "90", "0.5", "-12.50e+10", "1e5", "1E+5", "1e-5", "1E5"} {
+		val("number "+n, n, tokText)
+	}
+	for _, n := range []string{"1e", "1e+", "1.", "-", "-x", "01", "1.e5", "1e5.5", "", "x"} {
+		val("bad number "+n, n, "")
+	}
+	for _, h := range "09afAF" {
+		val("hex "+string(h), `"\u000`+string(h)+`\u`+string(h)+`000"`, tokText)
+	}
+	for _, h := range "/:`g@G" {
+		val("not hex last "+string(h), `"\u000`+string(h)+`"`, "")
+		val("not hex first "+string(h), `"\u`+string(h)+`000"`, "")
+	}
+	val("escapes", `"\b\f\n\r\t\"\\\/"`, tokText)
+	val("unicode at start", "\"\\u0041é\\u0000\"", tokText)
+	val("space in string", `"x y "`, tokText)
+	val("tab in string", "\"x\ty\"", "")
+	val("unit separator in string", "\"x\x1fy\"", "")
+	for _, p := range []string{`{`, `{"a"`, `{"a" `, `{"a":`, `{"a": `, `{"a":}`, `{a:1}`, `{"a":1`, `{"a":0`,
+		`{"a":-`, `{"a":1.`, `{"a":1e`, `{"a":1e+`, `{"a":19`, `{"a":true`, `{"a":1,`, `{"a":1,"b"`, `{"a":1 `,
+		`{"a":"\`, `{"a":"\u`, `{"a":"\u0`, `{"a":"\u00`, `{"a":"\u004`, `{"a":"A`, `{"a":"A"`, `{"a":"x`} {
+		add("end "+p, p, "")
+	}
+	return rows
+}
+
+type bodyCase struct{ name, body, want string }
+
+var allBodyCases = append(bodyCases, boundCases()...)
+
+// TestTS32BodyScan checks the scan of the flat object. The input has no spare
+// capacity, so a read past its end panics.
 func TestTS32BodyScan(t *testing.T) {
-	for _, c := range bodyCases {
-		v, ok := bodyMember([]byte(c.body), "token")
+	for _, c := range allBodyCases {
+		v, ok := bodyMember(slices.Clip([]byte(c.body)), "token")
 		if (ok && string(v) != c.want) || ok != (c.want != "") {
 			t.Errorf("%s: got %q %v, want %q", c.name, v, ok, c.want)
+		}
+	}
+}
+
+// TestTS32ScanEnds checks the scalar scans at the end of their input.
+func TestTS32ScanEnds(t *testing.T) {
+	for _, lit := range []string{"true", "false", "null"} {
+		b := slices.Clip([]byte(lit))
+		if s, e, isStr, ok := scanScalar(b, 0); !ok || isStr || s != 0 || e != len(b) {
+			t.Errorf("%s: got %d %d %v %v", lit, s, e, isStr, ok)
+		}
+		if _, _, _, ok := scanScalar(b[:len(b)-1], 0); ok {
+			t.Errorf("%s without its last byte is a scalar", lit)
+		}
+	}
+	for _, c := range []struct {
+		in   string
+		i    int
+		want int
+	}{{"1", 1, 1}, {"-", 1, 1}, {"-", 0, 0}, {"1", 0, 1}, {"1.", 0, 0}, {"1e", 0, 0}, {"1e+", 0, 0}, {"0", 0, 1}, {"12", 0, 2}} {
+		if got := scanNumber(slices.Clip([]byte(c.in)), c.i); got != c.want {
+			t.Errorf("scanNumber(%q, %d) = %d, want %d", c.in, c.i, got, c.want)
+		}
+	}
+}
+
+// TestTS32BodyEOFWithData checks a reader that gives the last bytes and io.EOF
+// in one call. A body of 4 097 bytes still gives none.
+func TestTS32BodyEOFWithData(t *testing.T) {
+	for _, c := range []struct{ size, want string }{{"4096", tokText}, {"4097", ""}} {
+		n, _ := strconv.Atoi(c.size)
+		r, rb := postWith("POST", pad(formSmall, n), -1, nil)
+		rb.eofWithData = true
+		got, ok := BodyCandidate(r, "token")
+		if (ok && string(got[:]) != c.want) || ok != (c.want != "") {
+			t.Errorf("%d bytes: got %q %v, want %q", n, got[:], ok, c.want)
 		}
 	}
 }
@@ -119,7 +194,7 @@ func TestTS32BodyScan(t *testing.T) {
 // FuzzBodyMember checks that the scan never panics. A candidate that it gives
 // is in valid UTF-8 input. The seed corpus is the table of the scan.
 func FuzzBodyMember(f *testing.F) {
-	for _, c := range bodyCases {
+	for _, c := range allBodyCases {
 		f.Add([]byte(c.body))
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -135,6 +210,8 @@ type rewind struct {
 	data     []byte
 	off, got int
 	fail     error
+	// eofWithData makes the last Read give io.EOF with its data.
+	eofWithData bool
 }
 
 func (r *rewind) Read(p []byte) (int, error) {
@@ -147,6 +224,9 @@ func (r *rewind) Read(p []byte) (int, error) {
 	n := copy(p, r.data[r.off:])
 	r.off += n
 	r.got += n
+	if r.eofWithData && r.off >= len(r.data) {
+		return n, io.EOF
+	}
 	return n, nil
 }
 
