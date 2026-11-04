@@ -640,7 +640,8 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if in.Session != "" && in.Kind.isSystem() {
 		return nil, errors.New("event: a system kind has no session")
 	}
-	// The caller can change *in.Mint later. NewEvent checks and keeps one copy.
+	// The caller can change *in.Mint while NewEvent runs. NewEvent reads it
+	// once, then checks and keeps that copy.
 	var mint MintRange
 	hasMint := in.Mint != nil
 	if hasMint {
