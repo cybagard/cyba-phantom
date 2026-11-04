@@ -10,9 +10,13 @@ import (
 // T-U-18: sqlite_master equals the embedded DDL; checkpoint has no publish column.
 func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	db := migrated(t)
-	ddl, err := migrationFiles.ReadFile("migrations/0001_schema_v1.sql")
-	if err != nil {
-		t.Fatal(err)
+	var ddl []byte
+	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql"} {
+		b, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ddl = append(ddl, b...)
 	}
 	var got string
 	q := "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid)"
@@ -21,7 +25,7 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	}
 	// SQLite stores each statement without its final semicolon.
 	want := strings.TrimSuffix(strings.Join(strings.Split(strings.TrimSpace(string(ddl)), ";\n"), ";"), ";")
-	if got != want || strings.Count(want, "CREATE ") != 13 {
+	if got != want || strings.Count(want, "CREATE ") != 14 {
 		t.Fatalf("sqlite_master differs from the embedded DDL:\n%q\n%q", got, want)
 	}
 	var n int
@@ -94,7 +98,16 @@ CREATE TABLE checkpoint (
   tree_size INTEGER PRIMARY KEY CHECK (tree_size >= 1),
   root_hash BLOB NOT NULL CHECK (typeof(root_hash) = 'blob' AND length(root_hash) = 32),
   signed_note TEXT NOT NULL, created_at INTEGER NOT NULL
-)`
+)
+CREATE TABLE mint (
+  set_id        BLOB,
+  unit          INTEGER,
+  first         INTEGER,
+  count         INTEGER,
+  session_id    TEXT,
+  issued_at     INTEGER,
+  PRIMARY KEY (set_id, first)
+) WITHOUT ROWID`
 
 // T-U-18: a new database has the fixed text of each table and index. The text
 // of the embedded file is not the only proof.
@@ -109,14 +122,14 @@ func TestTU18SchemaEqualsFixedText(t *testing.T) {
 	}
 }
 
-// T-U-18: the only migration is the first one, and a new database has
-// schema_version 1.
-func TestTU18OnlyFirstMigrationExists(t *testing.T) {
+// T-U-18: the migrations are the first one and the mint table, and a new
+// database has schema_version 2.
+func TestTU18OnlyTwoMigrationsExist(t *testing.T) {
 	files, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil || len(files) != 1 || files[0].Name() != "0001_schema_v1.sql" {
+	if err != nil || len(files) != 2 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" {
 		t.Fatalf("migration files %v: %v", files, err)
 	}
-	if v := metaValue(t, migrated(t), "schema_version"); v != "1" {
+	if v := metaValue(t, migrated(t), "schema_version"); v != "2" {
 		t.Fatalf("schema_version %s", v)
 	}
 }

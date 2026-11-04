@@ -61,6 +61,7 @@ type Writer struct {
 
 	stopErr              atomic.Pointer[error] // the first error; nil while the writer runs
 	writeFailed, orphans atomic.Uint64
+	mintDups             atomic.Uint64 // mint rows that the table already had
 	drops                DropCount
 	markerMade           atomic.Bool // writer.stop exists
 	markerLogged         atomic.Bool // the failed create has a log line
@@ -419,7 +420,10 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
 // one time. After the insert loop, it upserts one session row for each session
 // of the request and refused rows. A known session keeps its first address and
-// JA4. onCommit gets the count of event rows, not of session rows.
+// JA4. The insert loop also stores the mint rows of each request row that has
+// a range, in the same transaction. The duplicate count of the mint rows grows
+// only after a good COMMIT. onCommit gets the count of event rows, not of
+// session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
@@ -443,6 +447,8 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		return false, fail(writerName, ruleDatabase)
 	}
 	defer stmt.Close()
+	mints := mintWriter{tx: tx}
+	defer mints.close()
 
 	var first int64
 	var appendErr error
@@ -492,6 +498,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if err := w.insertRow(ctx, stmt, e, rec, hash, leaf, record); err != nil {
 			return false, err
 		}
+		if err := mints.add(ctx, e, rec); err != nil {
+			return false, err
+		}
 		rows++
 		w.sessions.add(rec, e.IP())
 	}
@@ -518,6 +527,8 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		return false, fail(writerName, ruleDatabase)
 	}
+	// A rolled-back batch counts no duplicate.
+	w.mintDups.Add(mints.dups)
 	if w.timing != nil && len(batch) > 0 {
 		w.timing(time.Since(begin), time.Since(commitAt))
 	}

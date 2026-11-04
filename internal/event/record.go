@@ -31,8 +31,44 @@ const (
 	capFP        = 128
 	capName      = 64
 	maxIPText    = 39
-	maxEventSize = MaxRecordBytes + MaxBodyPrefix + maxIPText
+	maxEventSize = MaxRecordBytes + MaxBodyPrefix + maxIPText + mintRangeSize
 )
+
+// These constants give the limits of a MintRange. They are copies of values of
+// internal/token, which this package must not import. A test compares
+// MintMaxCount with token.MaxRange. The token package does not export its
+// widths. The same test compares the other two limits with 2^42 and 2^20.
+const (
+	// MintMaxCount is the largest number of tokens in one range.
+	MintMaxCount = 68
+	// MintCounterLimit is 2^42, the number of values of the token counter.
+	MintCounterLimit = 1 << 42
+	// MintUnitLimit is 2^20, the number of values of the time unit.
+	MintUnitLimit = 1 << 20
+
+	// mintRangeSize is the fixed size that Size counts for a range. It is the
+	// set id (8 bytes). It is also the unit, the first counter, the count and
+	// issued_at (8 bytes each).
+	mintRangeSize = 8 + 4*8
+)
+
+// MintRange is the counter range of one render. It names the tokens first to
+// first+Count-1 of the time unit Unit. The key set SetID made them. The range
+// holds no token text. It goes to the database only, never to the record.
+type MintRange struct {
+	SetID    [8]byte // the first 8 bytes of the bundle SHA-256
+	Unit     uint32  // below MintUnitLimit
+	Count    uint8   // 1 to MintMaxCount; 0 means no range in an Event
+	First    uint64  // below MintCounterLimit
+	IssuedAt int64   // unix ms
+}
+
+func (m MintRange) check() error {
+	if m.Count == 0 || m.Count > MintMaxCount || m.First >= MintCounterLimit || m.Unit >= MintUnitLimit {
+		return errors.New("event: mint range is out of bounds")
+	}
+	return nil
+}
 
 // Surface is the place of a request where a token was found.
 type Surface string
@@ -399,11 +435,12 @@ func RecordFromRow(row Row) (Record, error) {
 type Clock func() time.Time
 
 // Input holds the values for one event. The values from a request are
-// untrusted. ClientIP and BodyPrefix go to the DB-only part. Forwarded is the
-// value of an X-Forwarded-For or Forwarded header. NewEvent ignores it because
-// the record and the DB part never hold a forwarded address. Reason is for the
-// refused kind only: NewEvent builds the detail from it, and it refuses a
-// detail from the caller for that kind.
+// untrusted. ClientIP, BodyPrefix and Mint go to the DB-only part. Forwarded is
+// the value of an X-Forwarded-For or Forwarded header. NewEvent ignores it. The
+// record and the DB part never hold a forwarded address. Reason is for the
+// refused kind only. NewEvent builds the detail from it, and it refuses a
+// detail from the caller for that kind. Mint is for the request kind only. A
+// nil Mint means no range.
 type Input struct {
 	Kind                         Kind
 	Session, Vhost, Method, Path string
@@ -415,6 +452,7 @@ type Input struct {
 	Reason                       RefusedReason
 	ClientIP, Forwarded          string
 	BodyPrefix                   []byte
+	Mint                         *MintRange
 }
 
 // dbOnly holds the values that only the local database keeps. They are never
@@ -422,6 +460,7 @@ type Input struct {
 type dbOnly struct {
 	ip         string
 	bodyPrefix []byte
+	mint       MintRange // present when Count is not 0
 }
 
 // Event is a record with the DB-only values next to it. The record is the
@@ -438,8 +477,9 @@ type Event struct {
 	size   int
 }
 
-// Size returns the size in bytes of the event: the canonical record, the IP
-// text and the body prefix. It is at most MaxEventBytes.
+// Size returns the size in bytes of the event. It is the canonical record, the
+// IP text and the body prefix. When the event has a mint range, Size also
+// counts the fixed size of the range. It is at most MaxEventBytes.
 func (e *Event) Size() int { return e.size }
 
 // Kind returns the kind of the event.
@@ -457,6 +497,10 @@ func (e *Event) BodyPrefix() []byte {
 	}
 	return append([]byte(nil), e.db.bodyPrefix...)
 }
+
+// Mint returns the mint range of the event by value, and false when the event
+// has none.
+func (e *Event) Mint() (MintRange, bool) { return e.db.mint, e.db.mint.Count != 0 }
 
 // Record returns a deep copy of the record. A change to the copy does not
 // change the event.
@@ -596,6 +640,19 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if in.Session != "" && in.Kind.isSystem() {
 		return nil, errors.New("event: a system kind has no session")
 	}
+	// The caller can change *in.Mint while NewEvent runs. NewEvent reads it
+	// once, then checks and keeps that copy.
+	var mint MintRange
+	hasMint := in.Mint != nil
+	if hasMint {
+		mint = *in.Mint
+		if in.Kind != KindRequest {
+			return nil, errors.New("event: only a request event has a mint range")
+		}
+		if err := mint.check(); err != nil {
+			return nil, err
+		}
+	}
 	if in.Kind == KindRefused {
 		d, err := in.refusedDetail()
 		if err != nil {
@@ -644,9 +701,14 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 		}
 		db.ip = a.String()
 	}
+	size := len(db.ip) + len(db.bodyPrefix)
+	if hasMint {
+		db.mint = mint
+		size += mintRangeSize
+	}
 	b, err := r.canonical()
 	if err != nil {
 		return nil, err
 	}
-	return &Event{record: r, db: db, size: len(b) + len(db.ip) + len(db.bodyPrefix)}, nil
+	return &Event{record: r, db: db, size: size + len(b)}, nil
 }

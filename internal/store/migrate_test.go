@@ -92,7 +92,7 @@ func TestTU18FailedMigrationKeepsOldVersion(t *testing.T) {
 	if content(t, db, file) != empty {
 		t.Fatal("a failed run on a new database left content")
 	}
-	if err := Migrate(db, "o"); err != nil {
+	if err := migrate(db, testSet(nil), "o"); err != nil {
 		t.Fatal(err)
 	}
 	v1 := content(t, db, file)
@@ -398,7 +398,10 @@ func TestTS15DatabaseInMemoryIsClosed(t *testing.T) {
 // T-S-15: the step in memory applies all scripts, also a pending one that
 // changes the event table. A second run with the same scripts has no error.
 func TestTS15PendingChangeOfEventTableIsChecked(t *testing.T) {
-	db := migrated(t)
+	db, _ := opened(t)
+	if err := migrate(db, testSet(nil), "o"); err != nil {
+		t.Fatal(err)
+	}
 	set := testSet(map[string]string{"0002_more.sql": "ALTER TABLE event ADD COLUMN z INTEGER"})
 	for i := 0; i < 2; i++ {
 		if err := migrate(db, set, "o"); err != nil {
