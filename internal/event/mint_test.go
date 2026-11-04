@@ -132,9 +132,7 @@ func TestTS31MintRangeIsChecked(t *testing.T) {
 		m := good
 		if mut == nil {
 			m.First, m.Unit, m.Count = 1<<42-1, 1<<20-1, 1 // the largest values
-			if _, err := NewEvent(fixedClock(5), mintInput(&m)); err != nil {
-				t.Errorf("%s: %v", name, err)
-			}
+			wantKept(t, name, m)
 			continue
 		}
 		mut(&m)
@@ -145,8 +143,20 @@ func TestTS31MintRangeIsChecked(t *testing.T) {
 	m := good
 	m.Count = 1
 	m.First = 0
-	if _, err := NewEvent(fixedClock(5), mintInput(&m)); err != nil {
-		t.Errorf("smallest range: %v", err)
+	wantKept(t, "smallest range", m)
+	wantKept(t, "all zero but the count", MintRange{Count: 1})
+}
+
+// wantKept checks that NewEvent takes the range and that Mint gives it back.
+func wantKept(t *testing.T, name string, m MintRange) {
+	t.Helper()
+	e, err := NewEvent(fixedClock(5), mintInput(&m))
+	if err != nil {
+		t.Errorf("%s: %v", name, err)
+		return
+	}
+	if got, ok := e.Mint(); !ok || got != m {
+		t.Errorf("%s: Mint gives %+v %v, want %+v true", name, got, ok, m)
 	}
 }
 

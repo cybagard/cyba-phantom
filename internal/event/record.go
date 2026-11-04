@@ -640,11 +640,15 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if in.Session != "" && in.Kind.isSystem() {
 		return nil, errors.New("event: a system kind has no session")
 	}
-	if in.Mint != nil {
+	// The caller can change *in.Mint later. NewEvent checks and keeps one copy.
+	var mint MintRange
+	hasMint := in.Mint != nil
+	if hasMint {
+		mint = *in.Mint
 		if in.Kind != KindRequest {
 			return nil, errors.New("event: only a request event has a mint range")
 		}
-		if err := in.Mint.check(); err != nil {
+		if err := mint.check(); err != nil {
 			return nil, err
 		}
 	}
@@ -697,8 +701,8 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 		db.ip = a.String()
 	}
 	size := len(db.ip) + len(db.bodyPrefix)
-	if in.Mint != nil {
-		db.mint = *in.Mint
+	if hasMint {
+		db.mint = mint
 		size += mintRangeSize
 	}
 	b, err := r.canonical()
