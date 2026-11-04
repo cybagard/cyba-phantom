@@ -213,6 +213,7 @@ func TestTU20NotFound(t *testing.T) {
 		r.Method = m
 		w := serve(t, h, r)
 		want := http.Header{"Content-Type": {html}, "X-Content-Type-Options": {"nosniff"}}
+		dropCookie(t, m, w.Header())
 		// The recorder keeps the body of HEAD. A real server drops it.
 		if w.Code != 404 || w.Body.String() != page || !reflect.DeepEqual(w.Header(), want) {
 			t.Errorf("%s: code %d body %q header %v", m, w.Code, w.Body.String(), w.Header())

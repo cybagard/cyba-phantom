@@ -26,6 +26,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/testutil"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
@@ -283,6 +284,31 @@ func TestTU18_Sink(t *testing.T) {
 	}
 }
 
+// TestTU24_WriterSharesDayKey checks the holder of the writer (SEC-35). It is
+// the holder that the store part gives out for the bait handler. Each start
+// makes its own holder.
+func TestTU24_WriterSharesDayKey(t *testing.T) {
+	var got []*session.DayKey
+	d := realDeps
+	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
+		got = append(got, dk)
+		return realDeps.newWriter(db, q, bp, lg, r, dk)
+	}
+	var held []*session.DayKey
+	for range 2 {
+		s, _ := launch(t, testParams(t, "events.db"), d)
+		held = append(held, s.DayKey())
+	}
+	if len(got) != 2 || got[0] == nil || got[0] != held[0] || got[1] != held[1] || held[0] == held[1] {
+		t.Errorf("writer holders %p, store part holders %p", got, held)
+	}
+	// A store that does not open still has a holder for the bait handler.
+	s, _ := launch(t, testParams(t, "keys/events.db"), realDeps)
+	if s.DayKey() == nil {
+		t.Error("no holder when the store did not open")
+	}
+}
+
 // TestTU18_OneStart checks that a writer that stopped at its start check leaves
 // the part not healthy. After that, the checkpointer runs and the drain ticks
 // several times. start opens the log and the store one time each and makes one
@@ -296,9 +322,9 @@ func TestTU18_OneStart(t *testing.T) {
 	var o opens
 	writers := 0
 	d := o.deps()
-	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery) *store.Writer {
+	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
 		writers++
-		return store.NewWriter(db, q, bp, lg, r)
+		return store.NewWriterWithDayKey(db, q, bp, lg, r, dk)
 	}
 	var runs atomic.Int32
 	d.runCheckpointer = func(ctx context.Context, cp *tlog.Checkpointer) { runs.Add(1); cp.Run(ctx) }
