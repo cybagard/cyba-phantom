@@ -82,8 +82,8 @@ type Handler struct {
 	// request and calls dk.At with that time at once. A test sets it.
 	now func() time.Time
 	// cookieOff is true when the session cookie is off (SEC-35). The handler
-	// then sets no cookie and ignores each cookie. DisableSessionCookie sets it
-	// before the first request, so no lock is needed.
+	// then sets no cookie and ignores each cookie. The caller must set it
+	// before the first request. There is no lock.
 	cookieOff bool
 }
 
@@ -120,8 +120,9 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 type reqSession struct {
 	ip string // the client address text
 	id string // the session id, or "" when the address is not valid
-	// fresh is true when the request has no valid cookie. The response then
-	// sets a new cookie. key is the day key that the request used.
+	// fresh is true when the response sets a new cookie. This is when the
+	// request has no valid cookie and the cookie is on. key is the day key
+	// that the request used.
 	fresh bool
 	key   session.Key
 }
