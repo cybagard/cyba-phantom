@@ -114,40 +114,50 @@ const maxTemplateIDs = 64
 // more than one template, and a template with no tree, are refused. The check
 // matches the shape at the first level only. It does not walk into the
 // arguments, so a deep nesting costs no deep walk. The error holds no byte of
-// the archive.
-func checkExec(set map[string]*template.Template, traps []Trap) error {
-	known := make(map[string]bool, len(traps))
-	for _, tr := range traps {
-		known[tr.ID] = true
+// the archive. It also gives, for each template, the key-set index of the trap
+// of each action, in action order. The index of a trap is its position in
+// traps.
+func checkExec(set map[string]*template.Template, traps []Trap) (map[string][]int, error) {
+	known := make(map[string]int, len(traps))
+	for i, tr := range traps {
+		known[tr.ID] = i
 	}
-	for _, t := range set {
-		if !execOK(t, known) {
-			return ErrTemplateParse
+	indexes := make(map[string][]int, len(set))
+	for name, t := range set {
+		idx, ok := execOK(t, known)
+		if !ok {
+			return nil, ErrTemplateParse
 		}
+		indexes[name] = idx
 	}
-	return nil
+	return indexes, nil
 }
 
-// execOK reports whether t passes the check with the known trap ids.
-func execOK(t *template.Template, known map[string]bool) bool {
+// execOK reports whether t passes the check with the known trap ids. known
+// maps each id to its key-set index. execOK also gives the indexes of the
+// actions of t, in action order.
+func execOK(t *template.Template, known map[string]int) ([]int, bool) {
 	if t.Tree == nil || t.Tree.Root == nil || len(t.Templates()) != 1 {
-		return false
+		return nil, false
 	}
 	used := map[string]bool{}
+	idx := []int{}
 	for _, n := range t.Tree.Root.Nodes {
 		switch n := n.(type) {
 		case *parse.TextNode, *parse.CommentNode:
 		case *parse.ActionNode:
 			id, ok := actionID(n)
-			if !ok || !known[id] || used[id] || len(used) >= maxTemplateIDs {
-				return false
+			pos, isKnown := known[id]
+			if !ok || !isKnown || used[id] || len(used) >= maxTemplateIDs {
+				return nil, false
 			}
 			used[id] = true
+			idx = append(idx, pos)
 		default:
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return idx, true
 }
 
 // actionID gives the trap id of an action of one of the two permitted forms.

@@ -868,6 +868,78 @@ func TestTS28ExecuteAllocs(t *testing.T) {
 	}
 }
 
+// indexBundle loads a template with traps c, a, b and d in that order. The
+// actions are in the order b, d, a, in both forms. A second template has no
+// action.
+func indexBundle(t *testing.T) *Bundle {
+	t.Helper()
+	text := `{{index .Trap "b"}}<p>{{comment (index .Trap "d")}}</p>{{index .Trap "a"}}`
+	return loadRaw(t, nil, nil, withRoutes([]ent{tf(vhostFile, text), tf(hostDir+"plain.tmpl", "page"),
+		tf(trapsName, arr(tj("c", "x"), tj("a", "x"), tj("b", "x"), tj("d", "x")))})...)
+}
+
+// T-S-31: the load keeps the key-set indexes of the trap actions, in action
+// order. An unknown name differs from a template with no action. A change of
+// the returned list does not change the kept list.
+func TestTS31TrapIndexes(t *testing.T) {
+	b := indexBundle(t)
+	got, ok := b.TrapIndexes(vhostFile)
+	if !ok || !slices.Equal(got, []int{2, 3, 1}) {
+		t.Fatalf("TrapIndexes gives %v, %v; want [2 3 1], true", got, ok)
+	}
+	got[0] = 99
+	if again, _ := b.TrapIndexes(vhostFile); !slices.Equal(again, []int{2, 3, 1}) {
+		t.Errorf("a change of the result changed the kept list: %v", again)
+	}
+	if none, ok := b.TrapIndexes(hostDir + "plain.tmpl"); !ok || len(none) != 0 {
+		t.Errorf("template with no action gives %v, %v; want empty, true", none, ok)
+	}
+	for _, name := range []string{"", hostDir + "none.tmpl", "manifest.json"} {
+		if none, ok := b.TrapIndexes(name); ok || len(none) != 0 {
+			t.Errorf("TrapIndexes(%q) gives %v, %v; want none, false", name, none, ok)
+		}
+	}
+}
+
+// T-S-31: a template of 64 trap actions has 64 indexes.
+func TestTS31TrapIndexesMax(t *testing.T) {
+	text, ids := manyIDs(maxTemplateIDs)
+	slices.Reverse(ids)
+	got, _ := execLoadIDs(t, nil, text, ids...).TrapIndexes(vhostFile)
+	for i, n := range got {
+		if n != maxTemplateIDs-1-i {
+			t.Fatalf("index %d is %d", i, n)
+		}
+	}
+	if len(got) != maxTemplateIDs {
+		t.Errorf("%d indexes, want %d", len(got), maxTemplateIDs)
+	}
+}
+
+var indexSink []int
+
+// T-S-31: one call allocates at most once, for the copy of the list.
+func TestTS31TrapIndexesAllocs(t *testing.T) {
+	text, ids := manyIDs(maxTemplateIDs)
+	b := execLoadIDs(t, nil, text, ids...)
+	if n := testing.AllocsPerRun(100, func() { indexSink, _ = b.TrapIndexes(vhostFile) }); n > 1 {
+		t.Errorf("TrapIndexes allocates %v times; want at most 1", n)
+	}
+}
+
+// BenchmarkTrapIndexes measures one call for a template of 64 trap actions.
+func BenchmarkTrapIndexes(b *testing.B) {
+	idx := make([]int, maxTemplateIDs)
+	for i := range idx {
+		idx[i] = i
+	}
+	bd := &Bundle{trapIdx: map[string][]int{vhostFile: idx}}
+	b.ReportAllocs()
+	for b.Loop() {
+		indexSink, _ = bd.TrapIndexes(vhostFile)
+	}
+}
+
 // T-S-28: a name that is not a kept template gives ErrNoTemplate and no byte.
 func TestTS28ExecuteUnknownName(t *testing.T) {
 	b := loadWith(t, nil, tf(vhostFile, "page"), tf("vhosts/h.example/a.png", "p"))
