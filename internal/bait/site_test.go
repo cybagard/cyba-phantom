@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,7 +71,11 @@ func routesJSON(host string, rs []route) string {
 func newBundle(tb testing.TB) *bundle.Bundle { return bundleWith(tb, "") }
 
 // bundleWith is newBundle with tag in the root page of example.com.
-func bundleWith(tb testing.TB, tag string) *bundle.Bundle {
+func bundleWith(tb testing.TB, tag string) *bundle.Bundle { return bundleFiles(tb, tag, nil) }
+
+// bundleFiles is bundleWith with the files of extra. A file of extra replaces
+// the file of the same name.
+func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bundle {
 	tb.Helper()
 	files := map[string]string{
 		"manifest.json": fmt.Sprintf(`{"version":"2026.11.01-1","min_engine":"1.0.0","created":%q,"expires":%q,"key_id":"t1"}`,
@@ -91,6 +96,7 @@ func bundleWith(tb testing.TB, tag string) *bundle.Bundle {
 		}
 	}
 	files["vhosts/example.com/index.html"] = "<p>index" + tag + "</p>\n"
+	maps.Copy(files, extra)
 	var buf bytes.Buffer
 	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
 	tw := tar.NewWriter(zw)

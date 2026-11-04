@@ -11,13 +11,14 @@ import (
 )
 
 // entry is one route of a vhost, ready to serve. Only an asset route sets
-// asset, isAsset and the header values.
+// asset, isAsset and clen.
 type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
 	// ctype and clen are Content-Type and Content-Length values. A response
-	// uses them as they are, so a request allocates no header value.
+	// uses them as they are, so a request allocates no header value. A
+	// template route has no clen.
 	ctype, clen []string
 }
 
@@ -48,9 +49,9 @@ func buildSite(b *bundle.Bundle) *site {
 					continue
 				}
 				e.asset, e.isAsset = a, true
-				e.ctype = []string{r.Type}
 				e.clen = []string{strconv.Itoa(a.Len())}
 			}
+			e.ctype = []string{r.Type}
 			paths[r.Path] = e
 		}
 		s.hosts[host] = paths

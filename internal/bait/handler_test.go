@@ -325,12 +325,6 @@ func TestTU20NoBundle(t *testing.T) {
 	}
 }
 
-// TestTU20TemplateRoute checks that a template route gets the fixed 404 page
-// until the render step exists.
-func TestTU20TemplateRoute(t *testing.T) {
-	wantFixed(t, "/t", serve(t, newHandler(t), get("/t", "example.com")))
-}
-
 // countBody counts the reads of a request body.
 type countBody struct{ calls int }
 
@@ -405,3 +399,14 @@ func bench(b *testing.B, target, host string) {
 func BenchmarkAsset(b *testing.B) { bench(b, "/style.css", "example.com") }
 
 func BenchmarkDecoy404(b *testing.B) { bench(b, "/nope", "Example.COM:443") }
+
+func BenchmarkTemplate(b *testing.B) {
+	h := handlerFor(b, pageTmpl)
+	r := get("/t", "example.com")
+	w := &discard{h: http.Header{}}
+	b.ReportAllocs()
+	for b.Loop() {
+		clear(w.h)
+		h.ServeHTTP(w, r)
+	}
+}
