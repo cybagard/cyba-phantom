@@ -37,7 +37,7 @@ type Fetcher struct {
 	jitter   func() float64 // in [0, 1)
 	wait     func(ctx context.Context, d time.Duration) bool
 	try      func(ctx context.Context) bool
-	pairRead func() // when set, a fetch calls it after the second signature read
+	pairRead func() // a fetch calls it after the second signature read
 }
 
 // NewFetcher makes the fetcher of c. A good fetch loads into loader. interval
