@@ -26,6 +26,7 @@ const escOut = `q ` + ent + `34; &amp; &lt; &gt; ` + ent + `39; ` + placeholder
 const outRoutes = `{"routes":[
 {"path":"/t","template":"vhosts/example.com/t.tmpl","type":"text/html; charset=utf-8","headers":[{"name":"X-Note","trap":"n"}]},
 {"path":"/e","template":"vhosts/example.com/e.tmpl","type":"text/html; charset=utf-8","headers":[{"name":"X-Note","trap":"n"}]},
+{"path":"/u","template":"vhosts/example.com/t.tmpl","type":"text/html; charset=utf-8","headers":[{"name":"X-NOTE","trap":"n"}]},
 {"path":"/o","template":"vhosts/example.com/o.tmpl","type":"text/html; charset=utf-8"},
 {"path":"/a","asset":"vhosts/example.com/a.txt","type":"text/plain; charset=utf-8","headers":[{"name":"X-Note","trap":"n"}]},
 {"path":"/robots.txt","template":"vhosts/example.com/robots.tmpl","type":"text/plain; charset=utf-8"},
@@ -154,6 +155,15 @@ func TestTU20SlotValue(t *testing.T) {
 		if n, want := h.slotDrops.Load(), map[bool]int64{true: 0, false: 2}[c.ok]; n != want {
 			t.Errorf("%s: slotDrops %d, want %d", c.name, n, want)
 		}
+	}
+}
+
+// TestTU20SlotName checks the name of a header slot. The load rule permits the
+// name X-NOTE, and the response has the canonical key X-Note.
+func TestTU20SlotName(t *testing.T) {
+	w := serve(t, outHandler(t), get("/u", "example.com"))
+	if _, ok := w.Header()["X-NOTE"]; ok || len(w.Header()["X-Note"]) != 1 {
+		t.Errorf("header %v, want the one key X-Note", w.Header())
 	}
 }
 

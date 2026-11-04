@@ -112,7 +112,8 @@ func TestTU20FixedPages(t *testing.T) {
 	}
 }
 
-// TestTU20NewNil checks that New refuses a nil source and a nil fallback.
+// TestTU20NewNil checks that New refuses a nil source, a nil fallback and a
+// nil queue.
 func TestTU20NewNil(t *testing.T) {
 	fb, q := &fallbackFn{}, testQueue(t)
 	for name, f := range map[string]func(){

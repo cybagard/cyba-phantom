@@ -45,9 +45,11 @@ func slotHeaders(slots []bundle.HeaderSlot, texts map[string]string) (ok []slotH
 	return ok, left
 }
 
-// putSlots adds each slot to hd. A slot whose name is in hd already is left
-// out, with ASCII case ignored. So a slot never replaces or repeats a header
-// that the engine set before. The slots written first count for the next ones.
+// putSlots adds each slot to hd. It skips a slot whose name is in hd already,
+// with case ignored. So a slot never replaces or repeats a header that the
+// engine set before. The slots written first count for the next ones. The
+// check covers only the names in hd. The load rule permits only X- names,
+// so a slot cannot name Content-Length or Allow.
 func putSlots(hd http.Header, slots []slotHeader) {
 	for _, s := range slots {
 		taken := false

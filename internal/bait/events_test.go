@@ -41,18 +41,25 @@ func TestTU20RequestEvents(t *testing.T) {
 	for _, c := range []struct {
 		name, method, host, path string
 		status                   int
+		target                   string // raw request target, if not empty
 	}{
-		{"200 template", "GET", "example.com", "/t", 200},
-		{"200 asset", "GET", "Example.COM:443", "/a", 200},
-		{"404 unknown host", "GET", "other.example", "/t", 404},
-		{"404 no route with 404 template", "GET", "example.com", "/nope", 404},
-		{"404 no route without 404 template", "GET", "kilo.example", "/nope", 404},
-		{"405", "POST", "example.com", "/t", 405},
-		{"HEAD", "HEAD", "example.com", "/t", 200},
-		{"error before the first byte", "GET", "example.com", "/e", 404},
+		{"200 template", "GET", "example.com", "/t", 200, ""},
+		{"200 asset", "GET", "Example.COM:443", "/a", 200, ""},
+		{"404 unknown host", "GET", "other.example", "/t", 404, ""},
+		{"404 no route with 404 template", "GET", "example.com", "/nope", 404, ""},
+		{"404 no route without 404 template", "GET", "kilo.example", "/nope", 404, ""},
+		{"405", "POST", "example.com", "/t", 405, ""},
+		{"HEAD", "HEAD", "example.com", "/t", 200, ""},
+		{"error before the first byte", "GET", "example.com", "/e", 404, ""},
+		// The parser sets RawPath, and the event path escapes the slash.
+		{"escaped slash", "GET", "example.com", "/a%2Fb", 404, "/a%2fb"},
 	} {
 		h, q := eventHandler(t, 8)
 		r := get(c.path, c.host)
+		if c.target != "" {
+			r = raw(t, c.method+" "+c.target+" HTTP/1.1\r\nHost: "+c.host+"\r\n\r\n")
+			r.RemoteAddr = "192.0.2.1:1234"
+		}
 		r.Method = c.method
 		w := serve(t, h, r)
 		rec, ip := oneEvent(t, c.name, q)
@@ -102,8 +109,9 @@ func TestTU20RequestEventText(t *testing.T) {
 	h, q := eventHandler(t, 8)
 	serve(t, h, get("/"+strings.Repeat("\xff", 2048), "example.com"))
 	rec, _ := oneEvent(t, "invalid path", q)
-	if h.eventErrs.Load() != 0 || rec.Path == nil || !utf8.ValidString(*rec.Path) || !strings.HasPrefix(*rec.Path, "/%FF%FF") {
-		t.Errorf("errors %d, path %v", h.eventErrs.Load(), rec.Path)
+	if h.eventErrs.Load() != 0 || rec.Path == nil || !utf8.ValidString(*rec.Path) || !strings.HasPrefix(*rec.Path, "/%FF%FF") ||
+		rec.Status == nil || *rec.Status != 404 || len(rec.Detail) != 0 {
+		t.Errorf("errors %d, record %+v", h.eventErrs.Load(), rec)
 	}
 	const mark = "zqmark"
 	r := get("/t", "example.com")
@@ -115,13 +123,14 @@ func TestTU20RequestEventText(t *testing.T) {
 	rec, ip := oneEvent(t, "markers", q)
 	out, err := json.Marshal(rec)
 	mustOK(t, err)
-	if strings.Contains(string(out), mark) || strings.Contains(ip, mark) || len(rec.Detail) != 0 {
-		t.Errorf("a marker is in the event: %s, ip %q", out, ip)
+	if strings.Contains(string(out), mark) || strings.Contains(ip, mark) || len(rec.Detail) != 0 ||
+		rec.Status == nil || *rec.Status != 200 {
+		t.Errorf("a marker is in the event, or the status is wrong: %s, ip %q", out, ip)
 	}
 }
 
-// TestTU20RequestEventAddr checks the client address. A form that the
-// listener passes on is passed on here. NewEvent refuses a value that is not
+// TestTU20RequestEventAddr checks the client address. The engine passes on
+// each form that the listener passes on. NewEvent refuses a value that is not
 // an address, and the refusal adds one to the counter.
 func TestTU20RequestEventAddr(t *testing.T) {
 	for _, c := range []struct {
@@ -147,8 +156,9 @@ func TestTU20RequestEventAddr(t *testing.T) {
 			}
 			continue
 		}
-		if _, ip := oneEvent(t, c.addr, q); ip != c.ip || h.eventErrs.Load() != 0 {
-			t.Errorf("%q: ip %q, errors %d", c.addr, ip, h.eventErrs.Load())
+		rec, ip := oneEvent(t, c.addr, q)
+		if ip != c.ip || h.eventErrs.Load() != 0 || rec.Status == nil || *rec.Status != 200 || len(rec.Detail) != 0 {
+			t.Errorf("%q: ip %q, errors %d, record %+v", c.addr, ip, h.eventErrs.Load(), rec)
 		}
 	}
 }
@@ -171,7 +181,7 @@ func TestTU20RequestEventQueue(t *testing.T) {
 		}
 	}
 	d := q.Dropped()
-	if d.Bulk+d.Evidence+d.Invalid == 0 || len(q.Drain()) != 1 {
-		t.Errorf("dropped %+v", d)
+	if n := len(q.Drain()); d.Bulk != 5 || d.Evidence != 0 || d.Invalid != 0 || n != 1 {
+		t.Errorf("dropped %+v, %d events queued", d, n)
 	}
 }
