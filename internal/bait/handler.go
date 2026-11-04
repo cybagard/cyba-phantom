@@ -63,9 +63,9 @@ func New(src Source, fallback http.Handler) *Handler {
 
 // siteOf returns the site of b. The handler keeps a strong pointer to cur only.
 // A bundle in retired gets a site for its own request. The handler does not
-// keep that site. Each other bundle becomes cur, also an older bundle that is
-// not in retired. A request in flight keeps its bundle and site in local
-// variables.
+// keep that site. Any other bundle becomes cur. This includes a bundle that
+// was never cur and a bundle older than retired. A request in flight keeps its
+// bundle and site in local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
