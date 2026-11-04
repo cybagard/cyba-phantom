@@ -20,7 +20,7 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 
 all: build lint test trace mirror-diff
 
-# The -s -w flags drop the symbol table and DWARF. Panic traces keep names.
+# -s -w removes the symbol table and DWARF. Panic traces keep function names.
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/phantom ./cmd/phantom
 	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-verify ./cmd/phantom-verify
