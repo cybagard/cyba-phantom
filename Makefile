@@ -278,9 +278,9 @@ perf-inner:
 # mutant status in the gremlins output. That status is KILLED, LIVED,
 # TIMED OUT or NOT VIABLE. Then no mutant ran on the package that
 # tools/mutatepkg found.
-# The third is a missing or repeated summary line. The "Killed, Lived" line
-# and the "Timed out, Not viable" line must each be there once, after the line
-# "Mutation testing completed". Then the counts are unknown.
+# The third is a missing or repeated summary line. The summary lines are
+# "Killed, Lived" and "Timed out, Not viable". Each must be there once, after
+# the line "Mutation testing completed". Then the counts are unknown.
 # The fourth is Killed, Lived and Timed out all 0 and Not viable not 0.
 # The fifth is a test-output file in the run directory with the FAIL line of
 # a setup failure. Then the package could not load. A mutation of code does
