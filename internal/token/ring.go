@@ -74,7 +74,7 @@ func (r *Ring) Swap(next *KeySet) {
 	}
 }
 
-// Len gives the number of key sets that Verify uses now: 0, 1 or 2.
+// Len gives the number of key sets that Verify and Check use now: 0, 1 or 2.
 func (r *Ring) Len() int {
 	n := 0
 	for _, k := range r.active(r.cur.Load(), r.now()) {
@@ -116,9 +116,8 @@ func (r *Ring) Verify(tok [Size]byte) Result {
 }
 
 // verifyAt checks one block against sets at time now, with the buffer of the
-// caller. It always decrypts. When parsed is false, the Result is zero,
-// whatever the block gives. For a match it sets the window class, and
-// it counts a future token.
+// caller. It always decrypts. When parsed is false, the Result is always
+// zero. For a match it sets the window class, and it counts a future token.
 func (r *Ring) verifyAt(buf *[2 * Size]byte, sets []*KeySet, now time.Time, tok [Size]byte, parsed bool) Result {
 	res := verifyIn(buf, sets, tok)
 	if !parsed || !res.OK {
