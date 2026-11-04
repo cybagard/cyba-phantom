@@ -333,8 +333,8 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	batch := make([]*event.Event, 0, maxBatch)
 	for i := range n {
 		set := [8]byte{byte(1 + i*4/n), 0xCD, 3, 4, 5, 6, 7, 8}
-		// The values are wide: a first counter near 3e12 and a unit near
-		// 495 000 need the long forms of the integers. No range wraps.
+		// The values are wide, as real values are. The first counter is near
+		// 3e12 and the unit is near 495 000. No range wraps.
 		m := event.MintRange{SetID: set, Unit: 495_000 + uint32(i/500), First: 3_000_000_000_000 + uint64(i%(n/4))*68, Count: 68, IssuedAt: base + int64(i)*7}
 		batch = append(batch, mintEvent(t, base+int64(i), sessions[i%len(sessions)], m))
 		if len(batch) == maxBatch || i == n-1 {
@@ -386,8 +386,8 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	}
 }
 
-// procStatusBytes returns a field of /proc/self/status in bytes. It is a copy of
-// procStatus in rows_bench_test.go, which takes a *testing.B.
+// procStatusBytes returns a field of /proc/self/status in bytes. It copies
+// procStatus of rows_bench_test.go, which needs a *testing.B.
 func procStatusBytes(t *testing.T, field string) int64 {
 	t.Helper()
 	data, err := os.ReadFile("/proc/self/status")
