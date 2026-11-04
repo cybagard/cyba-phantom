@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -82,8 +82,7 @@ var mintSet = [8]byte{0xAA, 1, 2, 3, 4, 5, 6, 0xBB}
 func TestTS31MigrationAddsMintWithoutRebuild(t *testing.T) {
 	root, _, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
-	first := fstest.MapFS{"0001_schema_v1.sql": testSet(nil)["0001_schema_v1.sql"]}
-	if err := migrate(db, first, "origin"); err != nil {
+	if err := migrate(db, testSet(nil), "origin"); err != nil {
 		t.Fatal(err)
 	}
 	if metaValue(t, db, "schema_version") != "1" {
@@ -334,7 +333,9 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	batch := make([]*event.Event, 0, maxBatch)
 	for i := range n {
 		set := [8]byte{byte(1 + i*4/n), 0xCD, 3, 4, 5, 6, 7, 8}
-		m := event.MintRange{SetID: set, Unit: uint32(i / 500), First: uint64(i%(n/4)) * 68, Count: 68, IssuedAt: base + int64(i)*7}
+		// The values are wide: a first counter near 3e12 and a unit near
+		// 495 000 need the long forms of the integers. No range wraps.
+		m := event.MintRange{SetID: set, Unit: 495_000 + uint32(i/500), First: 3_000_000_000_000 + uint64(i%(n/4))*68, Count: 68, IssuedAt: base + int64(i)*7}
 		batch = append(batch, mintEvent(t, base+int64(i), sessions[i%len(sessions)], m))
 		if len(batch) == maxBatch || i == n-1 {
 			r.writeOK(batch...)
@@ -372,4 +373,72 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	if !strings.Contains(all, "SEARCH mint USING PRIMARY KEY") || strings.Contains(all, "SCAN") || strings.Contains(all, "TEMP B-TREE") {
 		t.Fatalf("plan %q", all)
 	}
+	if n < 1_000_000 {
+		return
+	}
+	// The large form also reads the RSS 30 s after the load, as the load
+	// benchmark does. The pass line is 60 000 000 bytes.
+	time.Sleep(30 * time.Second)
+	rss, hwm := procStatusBytes(t, "VmRSS"), procStatusBytes(t, "VmHWM")
+	t.Logf("RSS 30 s after the load %d bytes, peak %d bytes", rss, hwm)
+	if rss > 60_000_000 {
+		t.Fatalf("RSS %d bytes, want at most 60000000", rss)
+	}
+}
+
+// procStatusBytes returns a field of /proc/self/status in bytes. It is a copy of
+// procStatus in rows_bench_test.go, which takes a *testing.B.
+func procStatusBytes(t *testing.T, field string) int64 {
+	t.Helper()
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, field+":"); ok {
+			kib, err := strconv.ParseInt(strings.Fields(rest)[0], 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return kib * 1024
+		}
+	}
+	t.Fatalf("no %s in /proc/self/status", field)
+	return 0
+}
+
+// failingMint stores one request event with a range after the setup statement
+// has changed the schema. The statement must make the mint insert fail.
+func failingMint(t *testing.T, setup string) {
+	t.Helper()
+	r := newRig(t, 100)
+	if _, err := r.db.Exec(setup); err != nil {
+		t.Fatal(err)
+	}
+	m := event.MintRange{SetID: mintSet, Unit: 1, First: 5, Count: 2, IssuedAt: 9}
+	r.w.flush([]*event.Event{mintEvent(t, 1, "s", m)})
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if r.w.Healthy() || r.rows() != 0 {
+		t.Fatalf("healthy %v, %d event rows, want a stopped writer and 0 rows", r.w.Healthy(), r.rows())
+	}
+	if d := r.w.Stats().Dropped; d != (Drops{Bulk: 1}) {
+		t.Fatalf("drops %+v, want one bulk drop", d)
+	}
+	if setup[:4] != "DROP" {
+		if n := len(mintRows(t, r.db)); n != 0 {
+			t.Fatalf("%d mint rows, want 0", n)
+		}
+	}
+}
+
+// T-S-31: an error of the mint insert stops the writer. The transaction rolls
+// back, so the batch has no event row and no mint row.
+func TestTS31MintInsertErrorStopsTheWriter(t *testing.T) {
+	failingMint(t, "CREATE TRIGGER no_mint BEFORE INSERT ON mint BEGIN SELECT RAISE(ABORT,'x'); END")
+}
+
+// T-S-31: an error at the prepare of the mint insert stops the writer in the
+// same way.
+func TestTS31MintPrepareErrorStopsTheWriter(t *testing.T) {
+	failingMint(t, "DROP TABLE mint")
 }

@@ -420,7 +420,10 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // Then the deferred function counts each leaf of the batch as an orphan leaf,
 // one time. After the insert loop, it upserts one session row for each session
 // of the request and refused rows. A known session keeps its first address and
-// JA4. onCommit gets the count of event rows, not of session rows.
+// JA4. The insert loop also stores the mint rows of each request row that has
+// a range, in the same transaction. The duplicate count of the mint rows grows
+// only after a good COMMIT. onCommit gets the count of event rows, not of
+// session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
