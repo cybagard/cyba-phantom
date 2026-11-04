@@ -1,9 +1,11 @@
 package bait
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -35,13 +37,18 @@ type cbEnv struct {
 	ks *token.KeySet
 }
 
-func newCBEnv(t testing.TB) *cbEnv {
+func newCBEnv(t testing.TB) *cbEnv { return newCBEnvFiles(t, nil) }
+
+// newCBEnvFiles is newCBEnv with the files of extra added to the archive.
+func newCBEnvFiles(t testing.TB, extra map[string]string) *cbEnv {
 	t.Helper()
 	rm := strings.TrimSuffix(routesJSON("example.com", exampleRoutes), "]}") + cbRoutes + "]}"
-	l := archiveLoader(t, "", map[string]string{
+	files := map[string]string{
 		"vhosts/example.com/routes.json": rm,
 		"vhosts/example.com/cb.txt":      cbAssetBody,
-	})
+	}
+	maps.Copy(files, extra)
+	l := archiveLoader(t, "", files)
 	b, err := l.Load(true)
 	mustOK(t, err)
 	q := queueOf(t, 64)
@@ -338,6 +345,83 @@ func TestTS32CallbackNoRing(t *testing.T) {
 	reqs, cbs := take(e.q)
 	if dump(with) != dump(without) || len(reqs) != 1 || len(cbs) != 0 {
 		t.Errorf("no ring: %d request and %d callback events\n%s\n%s", len(reqs), len(cbs), dump(with), dump(without))
+	}
+}
+
+// rootRoutes make "/" of kilo.example a callback route with a segment
+// position. The vhost has two more routes: an exact route with the shape of a
+// token, and a plain route.
+const (
+	exactShape = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rootRoutes = `{"routes":[` +
+		`{"path":"/","asset":"vhosts/kilo.example/kilo.txt","type":"text/plain; charset=utf-8","callback":{"segment":true}},` +
+		`{"path":"/` + exactShape + `","asset":"vhosts/kilo.example/other.txt","type":"text/plain; charset=utf-8"}]}`
+)
+
+// TestTS32CallbackRootSegment checks a segment callback route at the root
+// path. It matches "/" and "/" with one segment. An exact route of the vhost
+// comes first.
+func TestTS32CallbackRootSegment(t *testing.T) {
+	e := newCBEnvFiles(t, map[string]string{
+		"vhosts/kilo.example/routes.json": rootRoutes,
+		"vhosts/kilo.example/other.txt":   "other\n",
+	})
+	for _, tc := range []struct {
+		target, body string
+		code         int
+		token        bool
+	}{
+		{"/" + e.mint(t, time.Now()), "kilo\n", 200, true},
+		{"/", "kilo\n", 200, false},
+		{"/" + exactShape, "other\n", 200, false},
+		{"/a/b", "not found\n", 404, false},
+	} {
+		r := httptest.NewRequest(http.MethodGet, tc.target, nil)
+		r.Host = "kilo.example"
+		w := httptest.NewRecorder()
+		e.h.ServeHTTP(w, r)
+		_, cbs := take(e.q)
+		if w.Code != tc.code || w.Body.String() != tc.body || len(cbs) != btoi(tc.token) {
+			t.Errorf("GET %s: code %d body %q with %d callback events", tc.target, w.Code, w.Body.String(), len(cbs))
+		}
+		if tc.token && (len(cbs) != 1 || *cbs[0].Surface != event.SurfacePath || *cbs[0].Path != "/") {
+			t.Errorf("GET %s: callback records %+v", tc.target, cbs)
+		}
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// TestTS32CallbackLiveDetail checks the detail with a key set that is not of a
+// reference bundle. A good token has no detail member. A stale token has only
+// stale. A future token has stale and future.
+func TestTS32CallbackLiveDetail(t *testing.T) {
+	e := newCBEnv(t)
+	ks, err := token.NewKeySet(bytes.Repeat([]byte{7}, 32), [32]byte{1}, []string{"a"}, false)
+	mustOK(t, err)
+	ring := token.NewRing(time.Now)
+	ring.Swap(ks)
+	e.h.SetRing(ring)
+	e.ks = ks
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want event.Detail
+	}{
+		{"good", time.Now(), nil},
+		{"stale", time.Now().Add(-26 * time.Hour), event.Detail{"stale": event.Bool(true)}},
+		{"future", time.Now().Add(2 * time.Hour), event.Detail{"future": event.Bool(true), "stale": event.Bool(true)}},
+	} {
+		e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, 1, e.mint(t, tc.at)))
+		_, cbs := take(e.q)
+		if len(cbs) != 1 || len(cbs[0].Detail) != len(tc.want) || (len(tc.want) > 0 && !reflect.DeepEqual(cbs[0].Detail, tc.want)) {
+			t.Errorf("%s: records %+v, want detail %v", tc.name, cbs, tc.want)
+		}
 	}
 }
 
