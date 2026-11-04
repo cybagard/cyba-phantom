@@ -314,6 +314,22 @@ func TestTU23StartNoWait(t *testing.T) {
 	g.noWait(2)
 }
 
+// T-U-23: the swap of a start load starts the gap. A load of another source
+// 1 s after it waits 29 s.
+func TestTU23StartLoadStartsGap(t *testing.T) {
+	e := newEnv(t)
+	e.install("bundle/current", mf(ver(2)))
+	g := newBareGapRig(t, e)
+	_, err := g.load(SourceStart)
+	must(t, err)
+	g.clk.advance(time.Second)
+	_, err = g.load(SourceReload)
+	must(t, err)
+	if want := []time.Duration{29 * time.Second}; !slices.Equal(g.sleeps, want) {
+		t.Errorf("waits %v, want %v", g.sleeps, want)
+	}
+}
+
 // T-U-23: a rejection starts no wait. Only a swap sets the time of the last
 // swap, so the load after a rejection starts at once.
 func TestTU23RejectionNoWait(t *testing.T) {
