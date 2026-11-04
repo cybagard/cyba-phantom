@@ -11,8 +11,10 @@ import (
 // finds the mint rows that can hold a counter. A range has at most 68 tokens,
 // so its first counter is in the 68 values up to the counter. The primary key
 // (set_id, unit, first) serves the search. The lookup has no NULL filter. A row
-// with a NULL session marks a duplicate key, and it must still count. LIMIT 2
-// is enough to tell one row from many rows.
+// with a NULL session must still count. A NULL session has two sources: the
+// mark of a duplicate key, and a render event with no session. Each gives
+// "ambiguous". LIMIT 2 is enough to tell one row from many rows. The lookup
+// runs for each linked callback, also when the token row exists.
 const (
 	bumpToken = "UPDATE token SET cb_count = cb_count + 1 WHERE token_id = ?"
 
@@ -27,9 +29,11 @@ LIMIT 2`
 
 // UnlinkedCallbacks returns the number of callbacks that the writer could not
 // link to a mint row. These are the values of phantom_callback_unlinked_total.
-// The reason "none" counts the callbacks with no mint row. The reason
-// "ambiguous" counts the callbacks with two or more mint rows. The counts hold
-// only batches that committed. It is safe to call from any goroutine.
+// The reason "none" counts the callbacks with no mint row. It also counts the
+// callbacks with one row that has a session and no issued_at. The reason
+// "ambiguous" counts the callbacks with two or more mint rows. It also counts
+// the callbacks with one row that has a NULL session. The counts hold only
+// batches that committed. It is safe to call from any goroutine.
 func (w *Writer) UnlinkedCallbacks() (none, ambiguous uint64) {
 	return w.unlinkedNone.Load(), w.unlinkedAmbiguous.Load()
 }
@@ -42,8 +46,8 @@ type tokenCall struct {
 }
 
 // tokenWriter stores the token rows of one transaction. It prepares each
-// statement at its first use. none and ambiguous count the callbacks that have
-// no token row.
+// statement at its first use. none and ambiguous count the callbacks that the
+// writer could not link.
 type tokenWriter struct {
 	tx                   *sql.Tx
 	bump, lookup, insert *sql.Stmt
@@ -81,9 +85,11 @@ func (t *tokenWriter) prepare(ctx context.Context, dst **sql.Stmt, query string)
 	return *dst, nil
 }
 
-// run writes the token rows of the kept callbacks in batch order. A token with
-// a row gets one more callback. A new token row needs exactly one mint row from
-// the lookup. It has the session and issued_at of that row.
+// run writes the token rows of the kept callbacks in batch order. Each callback
+// first runs the lookup, also when its token row exists. When the lookup
+// gives one row with a session and issued_at, a token with a row gets one more
+// callback. A new token row has the session and issued_at of the one mint
+// row. No row, no issued_at, two rows, or a NULL session change no token row.
 func (t *tokenWriter) run(ctx context.Context) error {
 	for _, c := range t.calls {
 		if err := t.one(ctx, c); err != nil {
@@ -94,6 +100,19 @@ func (t *tokenWriter) run(ctx context.Context) error {
 }
 
 func (t *tokenWriter) one(ctx context.Context, c tokenCall) error {
+	link, _ := c.e.Link()
+	session, issuedAt, rows, err := t.mintRow(ctx, link)
+	if err != nil {
+		return err
+	}
+	switch {
+	case rows == 0:
+		t.none++
+		return nil
+	case rows > 1:
+		t.ambiguous++
+		return nil
+	}
 	bump, err := t.prepare(ctx, &t.bump, bumpToken)
 	if err != nil {
 		return err
@@ -107,19 +126,6 @@ func (t *tokenWriter) one(ctx context.Context, c tokenCall) error {
 		return fail(writerName, ruleDatabase)
 	}
 	if n > 0 {
-		return nil
-	}
-	link, _ := c.e.Link()
-	session, issuedAt, rows, err := t.mintRow(ctx, link)
-	if err != nil {
-		return err
-	}
-	switch {
-	case rows == 0:
-		t.none++
-		return nil
-	case rows > 1:
-		t.ambiguous++
 		return nil
 	}
 	ins, err := t.prepare(ctx, &t.insert, insertToken)
@@ -156,9 +162,10 @@ func (t *tokenWriter) mintRow(ctx context.Context, l event.CallbackLink) (sessio
 	if rs.Err() != nil {
 		return "", 0, 0, fail(writerName, ruleDatabase)
 	}
-	// A NULL session marks a duplicate key, so the answer is ambiguous. A row
-	// with a session and no issued_at gives no link. Only a changed database
-	// has such a row.
+	// A NULL session gives ambiguous from each source. The sources are the mark
+	// of a duplicate key and a render event with no session. A row with a
+	// session and no issued_at gives no link. Only a changed database has such
+	// a row.
 	switch {
 	case rows > 1:
 		return "", 0, 2, nil

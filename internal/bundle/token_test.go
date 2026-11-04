@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -313,5 +314,32 @@ func TestTU22_BundleRingNoKeySet(t *testing.T) {
 			t.Fatal("the bundle has a key set")
 		}
 		ringCheck(t, l, "load without key set", t1, want)
+	}
+}
+
+// T-S-31: give the index list of a template to MintRange. Verify maps the
+// tokens to the trap ids of the actions, in action order. The file order of
+// the traps differs from the action order. Both action forms count.
+func TestTS31_IndexesMintRange(t *testing.T) {
+	e := newEnv(t)
+	text := `<p>{{index .Trap "b"}}</p>{{comment (index .Trap "d")}}<i title="{{index .Trap "a"}}">{{comment (index .Trap "c")}}`
+	want := []string{"b", "d", "a", "c"}
+	traps := arr(tj("c", "x"), tj("a", "x"), tj("b", "x"), tj("d", "x"))
+	files := append(withRoutes([]ent{tf(vhostFile, text)}), tf(trapsName, traps), plainEnt(seedA))
+	e.putSeeded(keyTwo(e), ver(2), files...)
+	b, err := e.seedLoader(nil).Load(false)
+	must(t, err)
+	idx, ok := b.TrapIndexes(vhostFile)
+	if !ok || !slices.Equal(idx, []int{2, 3, 1, 0}) {
+		t.Fatalf("TrapIndexes gives %v, %v", idx, ok)
+	}
+	out := make([][token.Size]byte, len(idx))
+	if _, err := b.Tokens().MintRange(idx, testNow, out); err != nil {
+		t.Fatal(err)
+	}
+	for i, tok := range out {
+		if got := token.Verify([]*token.KeySet{b.Tokens()}, tok); !got.OK || got.Trap != want[i] {
+			t.Errorf("token %d: Verify gives %+v, want trap %q", i, got, want[i])
+		}
 	}
 }
