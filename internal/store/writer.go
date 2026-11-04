@@ -66,6 +66,10 @@ type Writer struct {
 	markerMade           atomic.Bool // writer.stop exists
 	markerLogged         atomic.Bool // the failed create has a log line
 
+	// unlinked counts the callbacks with no token row, for each reason. See
+	// UnlinkedCallbacks.
+	unlinkedNone, unlinkedAmbiguous atomic.Uint64
+
 	tick     <-chan time.Time // a test sets it; nil means a ticker of flushEvery
 	onCommit func(rows int)   // a test sets it; nil in production
 	clock    func() time.Time // a test sets it; nil means time.Now
@@ -421,9 +425,11 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // one time. After the insert loop, it upserts one session row for each session
 // of the request and refused rows. A known session keeps its first address and
 // JA4. The insert loop also stores the mint rows of each request row that has
-// a range, in the same transaction. The duplicate count of the mint rows grows
-// only after a good COMMIT. onCommit gets the count of event rows, not of
-// session rows.
+// a range, in the same transaction. After the drop counts, tokenWriter
+// writes the token rows of the callback rows that have a link. The
+// duplicate count of the mint rows grows only after a good COMMIT. The counts
+// of unlinked callbacks do the same. onCommit gets the count of event rows, not
+// of session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
@@ -449,6 +455,8 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	defer stmt.Close()
 	mints := mintWriter{tx: tx}
 	defer mints.close()
+	tokens := tokenWriter{tx: tx}
+	defer tokens.close()
 
 	var first int64
 	var appendErr error
@@ -501,6 +509,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if err := mints.add(ctx, e, rec); err != nil {
 			return false, err
 		}
+		tokens.note(e, rec)
 		rows++
 		w.sessions.add(rec, e.IP())
 	}
@@ -508,6 +517,11 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		return false, err
 	}
 	if err := w.countDrops(ctx, tx, day, key); err != nil {
+		return false, err
+	}
+	// The token rows come after all other rows of the batch, so after its mint
+	// rows.
+	if err := tokens.run(ctx); err != nil {
 		return false, err
 	}
 	var commitAt time.Time
@@ -527,8 +541,10 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		return false, fail(writerName, ruleDatabase)
 	}
-	// A rolled-back batch counts no duplicate.
+	// A rolled-back batch counts no duplicate and no unlinked callback.
 	w.mintDups.Add(mints.dups)
+	w.unlinkedNone.Add(tokens.none)
+	w.unlinkedAmbiguous.Add(tokens.ambiguous)
 	if w.timing != nil && len(batch) > 0 {
 		w.timing(time.Since(begin), time.Since(commitAt))
 	}
