@@ -43,8 +43,8 @@ func fileRule(max int64) safefile.Rule {
 var loadMu sync.Mutex
 
 // swapGap is the least time from a swap to the next load that is not a start
-// load. seedDelay is the time from a swap to the zero of the replaced seed.
-// A request ends within 20 s, so 30 s is longer than a request that holds the
+// load. seedDelay is the time from a swap until the loader zeroes the replaced
+// seed. A request ends within 20 s, so 30 s is longer than a request that holds the
 // replaced bundle (ADR-037).
 const (
 	swapGap   = 30 * time.Second
@@ -526,9 +526,9 @@ func (l *Loader) gapLeft() time.Duration {
 }
 
 // lock takes loadMu for a load of this source. A source other than SourceStart
-// first waits for the swap gap, without loadMu. The gap is checked again after
-// loadMu is taken, as another load can swap while this one waits. The caller
-// unlocks loadMu.
+// first waits for the swap gap, without loadMu. It checks the gap again after
+// it takes loadMu, because another load can swap while this one waits. The
+// caller unlocks loadMu.
 func (l *Loader) lock(src Source) {
 	for {
 		if src != SourceStart {

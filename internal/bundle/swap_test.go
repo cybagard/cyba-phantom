@@ -336,7 +336,7 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 	release := make(chan struct{})
 	arrive.Add(2)
 	// The other load can hold loadMu during a wait, so the waits do not check
-	// it. The check is made below, when both loads wait and none can hold it.
+	// it. The test checks it below, when both loads wait and none can hold it.
 	l.sleep = func(d time.Duration) {
 		target := g.clk.now().Add(d)
 		if calls.Add(1) <= 2 {
