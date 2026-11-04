@@ -238,8 +238,8 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // around the body counts the bytes that the bait handler reads. The handler
 // reads 0 bytes. The callback row checks the code of this commit: the method
 // check comes before the route. T-S-02 and ADR-039 decision 19 permit a POST
-// and a read of at most 4 097 bytes on a callback route with a body position.
-// The beacon post path is not in the code.
+// on a callback route with a body position. The route reads at most 4 097
+// bytes. The beacon post path is not in the code.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex

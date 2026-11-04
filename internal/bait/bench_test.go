@@ -47,8 +47,8 @@ func serveHandler(tb testing.TB, actions int) *Handler {
 
 // serveKinds are the kinds of response of the handler, one for each way that
 // serve ends. limit is the most allocations of serve with the race detector.
-// Measured without it: 15 for an asset, 34 for the 404 template and for a page
-// of 1 action, and 0 for the fixed pages.
+// Measured without it: 15 for an asset and 0 for the fixed pages. It is 34 for
+// the 404 template and for a page of 1 action.
 var serveKinds = []struct {
 	name, method, target, host string
 	limit                      float64
@@ -164,9 +164,9 @@ func callbackFiles(n int) map[string]string {
 	return extra
 }
 
-// BenchmarkSiteBuild measures the build of the site table of a bundle that is
-// as large as the archive limits allow, for two shapes of route. It also
-// reports the bytes that one built site keeps in memory.
+// BenchmarkSiteBuild measures the build of the site table of the largest bundle
+// that loads. It does this for two shapes of route. It also reports the bytes
+// that one built site keeps in memory.
 func BenchmarkSiteBuild(b *testing.B) {
 	shapes := []struct {
 		name  string
@@ -189,7 +189,7 @@ func BenchmarkSiteBuild(b *testing.B) {
 			for b.Loop() {
 				buildSite(bd, placeholder)
 			}
-			// The first call of b.Loop clears the metrics, so report after the loop.
+			// The first b.Loop call clears the metrics: report after the loop.
 			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "retained-B")
 		})
 	}
