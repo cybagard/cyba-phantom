@@ -488,6 +488,58 @@ func TestTU23SeedDelay(t *testing.T) {
 	}
 }
 
+// T-U-23: the loader of NewLoader keeps its own timer and wait. Right after a
+// swap, the replaced seed has its old bytes, so the timer does not run at once.
+func TestTU23DefaultTimer(t *testing.T) {
+	e := newEnv(t)
+	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
+	l.now = func() time.Time { return testNow }
+	key := keyTwo(e)
+	e.putSeeded(key, ver(2), plainEnt(seedA))
+	_, err := l.Load(true)
+	must(t, err)
+	old := l.Current()
+	// The gap has passed, so the next load does not wait.
+	l.swapMu.Lock()
+	l.swapAt = testNow.Add(-swapGap)
+	l.swapMu.Unlock()
+	e.putSeeded(key, ver(3), plainEnt(seedB))
+	_, err = l.LoadFrom(SourceReload)
+	must(t, err)
+	if l.Current() == old || !bytes.Equal(*old.seed.p, seedA) {
+		t.Error("the replaced seed changed at the swap")
+	}
+}
+
+// T-U-23: the loader of NewLoader waits with a real sleep. A wait that does
+// nothing is a loop that reads the clock again and again. The load takes the
+// time that is left of the gap and reads the clock a few times.
+func TestTU23DefaultWait(t *testing.T) {
+	e := newEnv(t)
+	e.install("bundle/current", mf(ver(2)))
+	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
+	l.seed = nil
+	t0, reads := time.Now(), new(atomic.Int64)
+	l.now = func() time.Time {
+		reads.Add(1)
+		return testNow.Add(time.Since(t0))
+	}
+	const left = 200 * time.Millisecond
+	l.swapMu.Lock()
+	l.swapAt = testNow.Add(left - swapGap)
+	l.swapMu.Unlock()
+	reads.Store(0)
+	start := time.Now()
+	_, err := l.LoadFrom(SourceReload)
+	must(t, err)
+	if took := time.Since(start); took < 150*time.Millisecond {
+		t.Errorf("the load took %v; want at least the gap that was left", took)
+	}
+	if n := reads.Load(); n > 20 {
+		t.Errorf("the load read the clock %d times", n)
+	}
+}
+
 const (
 	tp10Env     = "PHANTOM_TP10_CASE"
 	tp10Marker  = "PHANTOM_TP10_CHILD" // only the parent sets it
