@@ -22,8 +22,17 @@ type fetched struct {
 	oldArch, oldSig, arch, sig []byte
 }
 
+// noSeams fails the test when a seam of an earlier test is still set.
+func noSeams(t *testing.T) {
+	t.Helper()
+	if wrapTemp != nil || beforeRename != nil || afterTempRemove != nil {
+		t.Fatal("a test seam is set on entry")
+	}
+}
+
 func newFetched(t *testing.T) *fetched {
 	t.Helper()
+	noSeams(t)
 	e := running(t)
 	f := &fetched{env: e, p: e.observe(e.l)}
 	f.oldArch, f.oldSig = f.bytesOf("bundle/current.cbnd"), f.bytesOf("bundle/current.sig")
@@ -143,13 +152,13 @@ func TestTU08FetchedRejects(t *testing.T) {
 	}
 }
 
-// T-S-20: the directory part and the state-file name of the path are checked
-// before the bytes. A symlink as directory part and a record name give
-// archive_invalid, and nothing is written.
+// T-S-20: LoadFetched checks the directory part and the state-file name of the
+// path before the bytes. A symlink as directory part and a record name, also in
+// upper case, give archive_invalid. LoadFetched writes nothing.
 func TestTS20FetchedPathChecks(t *testing.T) {
 	f := newFetched(t)
 	must(t, os.Symlink(filepath.Join(f.state, "bundle"), filepath.Join(f.state, "link")))
-	for _, path := range []string{"link/current.cbnd", "bundle/rotation-1.cbnd", "bundle/current.sig", "bundle/.cbnd"} {
+	for _, path := range []string{"link/current.cbnd", "bundle/rotation-1.cbnd", "bundle/ROTATION-1.cbnd", "bundle/current.sig", "bundle/.cbnd"} {
 		before := dirListing(t, f.state)
 		l := f.loader(path)
 		if b, err := l.LoadFetched(f.arch, f.sig); b != nil || err != ErrArchiveInvalid {
@@ -233,17 +242,10 @@ func (f *fetched) hasRecord() bool {
 // bundle that only the old key signs gives bad_sig.
 func TestTU23FetchedTransitionCrash(t *testing.T) {
 	stop := func(f *fetched) {
-		beforeRename = func(_, to string) error {
-			if to == "current.sig" {
-				return errInjected
-			}
-			return nil
+		f.crashAfterFirstRename()
+		if f.hasRecord() {
+			f.t.Fatal("a record between the renames")
 		}
-		f.t.Cleanup(func() { beforeRename = nil })
-		if _, err := f.l.LoadFetched(f.arch, f.sig); err != ErrInstallFault || f.hasRecord() {
-			f.t.Fatalf("between the renames: %v, record %v", err, f.hasRecord())
-		}
-		beforeRename = nil
 	}
 	afterRenames := func(f *fetched) {
 		tmp := filepath.Join(f.state, "bundle", recordName(1, "cbnd")+".tmp", "x")
@@ -279,13 +281,7 @@ func TestTU23RollForwardRenameFails(t *testing.T) {
 	f := newFetched(t)
 	f.crashAfterFirstRename()
 	cbnd, sig := f.bytesOf("bundle/current.cbnd"), f.bytesOf("bundle/current.sig")
-	beforeRename = func(_, to string) error {
-		if to == "current.sig" {
-			return errInjected
-		}
-		return nil
-	}
-	t.Cleanup(func() { beforeRename = nil })
+	failRenameTo(t, "current.sig")
 	l := f.loader("bundle/current.cbnd")
 	p := f.observe(l)
 	if b, err := l.Load(true); b != nil || err != ErrInstallFault || l.Current() != nil {
@@ -340,17 +336,23 @@ func TestTU23ReloadNoRollForward(t *testing.T) {
 	}
 }
 
-// crashAfterFirstRename makes the second rename of the install fail. The files
-// are then as after a crash between the two renames.
-func (f *fetched) crashAfterFirstRename() {
-	f.t.Helper()
+// failRenameTo makes each rename to dst fail until the test ends.
+func failRenameTo(t *testing.T, dst string) {
+	t.Helper()
 	beforeRename = func(_, to string) error {
-		if to == "current.sig" {
+		if to == dst {
 			return errInjected
 		}
 		return nil
 	}
-	f.t.Cleanup(func() { beforeRename = nil })
+	t.Cleanup(func() { beforeRename = nil })
+}
+
+// crashAfterFirstRename makes the second rename of the install fail. The files
+// then look like the files after a crash between the two renames.
+func (f *fetched) crashAfterFirstRename() {
+	f.t.Helper()
+	failRenameTo(f.t, "current.sig")
 	if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
 		f.t.Fatalf("got %v, %v", b, err)
 	}
@@ -374,17 +376,10 @@ func TestTU23FetchedWriteFails(t *testing.T) {
 			}
 		}
 	}
-	rename := func(to string) func(f *fetched) {
-		return func(*fetched) {
-			beforeRename = func(_, t string) error {
-				if t == to {
-					return errInjected
-				}
-				return nil
-			}
-		}
+	rename := func(dst string) func(f *fetched) {
+		return func(f *fetched) { failRenameTo(f.t, dst) }
 	}
-	const kept = " state=" + "2026.09.19-2"
+	kept := " state=" + ver(2)
 	cases := []struct {
 		name  string
 		setup func(f *fetched)
@@ -425,8 +420,8 @@ func TestTU23FetchedWriteFails(t *testing.T) {
 }
 
 // T-U-23: after a crash between the two renames, the next start loads the
-// archive with the kept signature temp file. Then it renames that file. It
-// gives one event.
+// archive with the kept signature temporary file. Then it renames that file.
+// It gives one event.
 func TestTU23StartRollsForward(t *testing.T) {
 	f := newFetched(t)
 	f.crashAfterFirstRename()
@@ -446,8 +441,8 @@ func TestTU23StartRollsForward(t *testing.T) {
 }
 
 // T-U-23, T-S-20: a signature temporary file that fails the file rule or the
-// signature is not used. The start load gives the first bad_sig, one event, and
-// no roll-forward. Each install temporary file is gone after the load.
+// signature does not load. The start load gives the first bad_sig, one event,
+// and no roll-forward. It removes each install temporary file.
 func TestTS20RollForwardRefusesTemp(t *testing.T) {
 	plant := func(mut func(f *fetched, p string)) func(f *fetched) {
 		return func(f *fetched) {
