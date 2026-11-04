@@ -88,6 +88,15 @@ func bundleAt(tb testing.TB, tag, version string) *bundle.Bundle {
 // the file of the same name.
 func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bundle {
 	tb.Helper()
+	b, err := archiveLoader(tb, tag, extra).Load(true)
+	mustOK(tb, err)
+	return b
+}
+
+// archiveLoader writes one signed archive, as bundleFiles does, and gives a
+// loader for it. Each Load(true) of the loader loads the same archive.
+func archiveLoader(tb testing.TB, tag string, extra map[string]string) *bundle.Loader {
+	tb.Helper()
 	files := map[string]string{
 		"manifest.json":                   manifestOf("2026.11.01-1"),
 		"secrets/token.seed":              strings.Repeat("\x09", 32),
@@ -128,9 +137,7 @@ func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bun
 	root, err := os.OpenRoot(dir)
 	mustOK(tb, err)
 	tb.Cleanup(func() { root.Close() })
-	b, err := bundle.NewLoader(root, "bundle/current.cbnd", trust, nil).Load(true)
-	mustOK(tb, err)
-	return b
+	return bundle.NewLoader(root, "bundle/current.cbnd", trust, nil)
 }
 
 // TestTU20SiteTable checks the table. It holds each route of each vhost and
@@ -248,13 +255,20 @@ func TestTU20SiteRelease(t *testing.T) {
 	}
 }
 
-// TestTU20SiteLostSwap checks a lost swap between two loads with one version.
-// The first bundle has the lower load sequence. The second bundle becomes cur
-// between the Load and the CompareAndSwap of the first call. The call gets its
-// own site and installs nothing. Requests for the running bundle then build no
-// site.
+// TestTU20SiteLostSwap checks a lost swap between two loads of one archive.
+// The loads have the same version, and the first has the lower load sequence.
+// The second bundle becomes cur between the Load and the CompareAndSwap of the
+// first call. The call gets its own site and installs nothing. Requests for
+// the running bundle then build no site.
 func TestTU20SiteLostSwap(t *testing.T) {
-	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
+	l := archiveLoader(t, "-1", nil)
+	b1, err := l.Load(true)
+	mustOK(t, err)
+	b2, err := l.Load(true)
+	mustOK(t, err)
+	if b1.SHA256() != b2.SHA256() || b1.Manifest().Version != b2.Manifest().Version {
+		t.Fatal("the two loads are not one archive")
+	}
 	if b1.Sequence() >= b2.Sequence() {
 		t.Fatal("the second bundle has no higher sequence")
 	}
@@ -263,18 +277,17 @@ func TestTU20SiteLostSwap(t *testing.T) {
 		h.hook = nil
 		h.siteOf(b2)
 	}
-	s := h.siteOf(b1)
+	if h.siteOf(b1) == nil {
+		t.Fatal("the first call got no site")
+	}
 	st := h.sites.Load()
 	if st.cur.b != b2 || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
 		t.Fatal("the first call changed the state")
 	}
-	if e := s.hosts["example.com"]["/"]; e == nil || e.asset.Len() != rootLen("-1") {
-		t.Error("the site is not the site of the first bundle")
-	}
 	if n := h.builds.Load(); n != 2 {
 		t.Fatalf("builds = %d, want 2", n)
 	}
-	requests(t, h, 10, "-22")
+	requests(t, h, 10, "-1")
 	if n := h.builds.Load(); n != 2 {
 		t.Errorf("builds after 10 requests = %d, want 2", n)
 	}

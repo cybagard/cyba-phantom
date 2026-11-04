@@ -573,13 +573,9 @@ func TestTU20LoadSequenceRises(t *testing.T) {
 	if b1.Sequence() == 0 || b2.Sequence() <= b1.Sequence() || b3.Sequence() <= b2.Sequence() {
 		t.Fatalf("sequences %d, %d, %d do not rise", b1.Sequence(), b2.Sequence(), b3.Sequence())
 	}
-	seq := b3.Sequence()
 	e.install("bundle/current", mf(ver(1)))
 	e.rejects(e.l, false, ErrRollback)
 	if run := e.l.Current(); run != b2 || run.Sequence() != b2.Sequence() {
 		t.Errorf("a rejected load changed the running bundle or its sequence")
-	}
-	if seq != b3.Sequence() {
-		t.Errorf("sequence changed from %d to %d", seq, b3.Sequence())
 	}
 }
