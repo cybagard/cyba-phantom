@@ -50,8 +50,12 @@ func TestTS29_BundleTokens(t *testing.T) {
 			if err != nil || !got.OK || got.Trap != id {
 				t.Errorf("%s, index %d: %v, %+v", key.id, i, err, got)
 			}
-			if got := token.Verify([]*token.KeySet{b.Tokens()}, tok); got.Reference != ref || got.Trap != id {
+			got = token.Verify([]*token.KeySet{b.Tokens()}, tok)
+			if got.Reference != ref || got.Trap != id {
 				t.Errorf("%s, index %d: own set gives %+v", key.id, i, got)
+			}
+			if sum := b.SHA256(); got.SetID != [8]byte(sum[:8]) {
+				t.Errorf("%s, index %d: set id %x, want %x", key.id, i, got.SetID, sum[:8])
 			}
 		}
 		if _, err := b.Tokens().Mint(len(ids), testNow); !errors.Is(err, token.ErrIndex) {

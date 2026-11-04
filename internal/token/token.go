@@ -91,7 +91,8 @@ var deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
 var zeroCheck [Size - fieldBytes]byte
 
 // scratch holds the buffers for one cipher call. A local array that goes to
-// cipher.Block as a slice moves to the heap. The pool avoids that.
+// cipher.Block as a slice moves to the heap. The pool avoids that. A call of
+// Verify or Check uses one buffer.
 var scratch = sync.Pool{New: func() any { return new([2 * Size]byte) }}
 
 // KeySet mints and verifies the tokens of one key. It holds the cipher, a
@@ -108,6 +109,10 @@ type keySetState struct {
 	// ref is 1 for a key set of a reference bundle, else 0. Verify selects on
 	// it with crypto/subtle, so it is an int.
 	ref int
+	// setID is the first 8 bytes of the bundle SHA-256, big-endian. A key set
+	// from newKeySet or newKeySetBlock has a zero set id. Verify selects it
+	// with a mask.
+	setID uint64
 }
 
 // redacted is the text that Format writes for every verb.
@@ -152,6 +157,7 @@ func NewKeySet(seed []byte, sum [32]byte, traps []string, reference bool) (*KeyS
 	if reference {
 		k.ref = 1
 	}
+	k.setID = binary.BigEndian.Uint64(sum[:8])
 	return k, nil
 }
 
@@ -273,8 +279,8 @@ func (k *KeySet) MintRange(indexes []int, at time.Time, out [][Size]byte) (first
 	return first, nil
 }
 
-// Result is the outcome of Verify. When OK is false, the other fields are
-// zero.
+// Result is the outcome of Verify, Ring.Verify and Ring.Check. When OK is
+// false, the other fields are zero.
 type Result struct {
 	OK   bool
 	Trap string // the trap id
@@ -284,8 +290,12 @@ type Result struct {
 	Counter uint64
 	// Reference is true when the matching key set is of a reference bundle.
 	Reference bool
+	// SetID is the first 8 bytes of the bundle SHA-256 of the matching key
+	// set. A key set from newKeySet or newKeySetBlock has a zero set id.
+	SetID [8]byte
 	// Stale and Future give the window class of the token. Only Ring.Verify
-	// sets them. A future token is also stale. They never change OK.
+	// and Ring.Check set them. A future token is also stale. They never change
+	// OK.
 	Stale, Future bool
 }
 
@@ -298,9 +308,19 @@ type Result struct {
 // length.
 func Verify(ring []*KeySet, tok [Size]byte) Result {
 	buf := scratch.Get().(*[2 * Size]byte)
+	res := verifyIn(buf, ring, tok)
+	// Without this, the pool keeps the plaintext fields and the token bytes.
+	// The buffer holds no key.
+	clear(buf[:])
+	scratch.Put(buf)
+	return res
+}
+
+// verifyIn is Verify with the buffer of the caller. The caller clears it.
+func verifyIn(buf *[2 * Size]byte, ring []*KeySet, tok [Size]byte) Result {
 	in, out := buf[:Size], buf[Size:]
 	var matched, set, index, unit, reference int
-	var counter uint64
+	var counter, setID uint64
 	for i, k := range ring {
 		if k == nil || k.keySetState == nil || k.block == nil {
 			continue
@@ -319,13 +339,12 @@ func Verify(ring []*KeySet, tok [Size]byte) Result {
 		// ConstantTimeSelect takes an int, which has 32 bits on some platforms.
 		m := -uint64(ok)
 		counter = counter&^m | c&m
+		setID = setID&^m | k.setID&m
 	}
-	// Without this, the pool keeps the plaintext fields and the token bytes.
-	// The buffer holds no key.
-	clear(buf[:])
-	scratch.Put(buf)
 	if matched == 0 {
 		return Result{}
 	}
-	return Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set, Counter: counter, Reference: reference == 1}
+	res := Result{OK: true, Trap: ring[set].traps[index], Unit: uint32(unit), Set: set, Counter: counter, Reference: reference == 1}
+	binary.BigEndian.PutUint64(res.SetID[:], setID)
+	return res
 }

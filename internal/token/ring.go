@@ -38,15 +38,15 @@ type ringState struct {
 	futures atomic.Uint64
 }
 
-// snapshot is one value of the ring. A Swap makes a new one. A Verify reads it
-// with one atomic load.
+// snapshot is one value of the ring. A Swap makes a new one. A Verify or a
+// Check reads it with one atomic load.
 type snapshot struct {
 	sets  [2]*KeySet // the current key set, then the replaced one
 	until time.Time  // the replaced key set leaves the ring at this time
 }
 
-// NewRing makes an empty ring. now gives the time of Verify and of Swap. A nil
-// now is time.Now.
+// NewRing makes an empty ring. now gives the time of Verify, of Check and of
+// Swap. A nil now is time.Now.
 func NewRing(now func() time.Time) *Ring {
 	if now == nil {
 		now = time.Now
@@ -56,7 +56,8 @@ func NewRing(now func() time.Time) *Ring {
 
 // Swap makes next the current key set. The old current key set becomes the
 // replaced one, for 25 h. One compare-and-swap of a pointer changes the ring.
-// Thus a Verify sees the ring before or after a Swap and nothing between.
+// Thus a Verify or a Check sees the ring before or after a Swap and nothing
+// between.
 func (r *Ring) Swap(next *KeySet) {
 	// Round(0) strips the monotonic reading, so Before compares wall time.
 	until := r.now().Round(0).Add(replacedFor)
@@ -73,7 +74,7 @@ func (r *Ring) Swap(next *KeySet) {
 	}
 }
 
-// Len gives the number of key sets that Verify uses now: 0, 1 or 2.
+// Len gives the number of key sets that Verify and Check use now: 0, 1 or 2.
 func (r *Ring) Len() int {
 	n := 0
 	for _, k := range r.active(r.cur.Load(), r.now()) {
@@ -84,7 +85,7 @@ func (r *Ring) Len() int {
 	return n
 }
 
-// Futures gives the number of future tokens that Verify has found.
+// Futures gives the number of future tokens that Verify and Check have found.
 func (r *Ring) Futures() uint64 { return r.futures.Load() }
 
 // active gives the key sets of s that count at time now.
@@ -107,12 +108,24 @@ func (r *Ring) active(s *snapshot, now time.Time) []*KeySet {
 // for its age. It does not allocate in steady state.
 func (r *Ring) Verify(tok [Size]byte) Result {
 	now := r.now()
-	res := Verify(r.active(r.cur.Load(), now), tok)
-	if res.OK {
-		res.Stale, res.Future = classify(res.Unit, now)
-		if res.Future {
-			r.futures.Add(1)
-		}
+	buf := scratch.Get().(*[2 * Size]byte)
+	res := r.verifyAt(buf, r.active(r.cur.Load(), now), now, tok, true)
+	clear(buf[:])
+	scratch.Put(buf)
+	return res
+}
+
+// verifyAt checks one block against sets at time now, with the buffer of the
+// caller. It always decrypts. When parsed is false, the Result is always
+// zero. For a match it sets the window class, and it counts a future token.
+func (r *Ring) verifyAt(buf *[2 * Size]byte, sets []*KeySet, now time.Time, tok [Size]byte, parsed bool) Result {
+	res := verifyIn(buf, sets, tok)
+	if !parsed || !res.OK {
+		return Result{}
+	}
+	res.Stale, res.Future = classify(res.Unit, now)
+	if res.Future {
+		r.futures.Add(1)
 	}
 	return res
 }
