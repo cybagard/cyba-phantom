@@ -497,8 +497,8 @@ func TestTS32CallbackRootSegment(t *testing.T) {
 		{"*", "not found\n", 404, false},
 	} {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		// An empty path and "*" come from the request line "GET * HTTP/1.1"
-		// and from an absolute-form target with no path.
+		// The request line "GET * HTTP/1.1" gives the path "*". An
+		// absolute-form target with no path gives an empty path.
 		r.URL.Path = tc.target
 		r.Host = "kilo.example"
 		w := httptest.NewRecorder()
