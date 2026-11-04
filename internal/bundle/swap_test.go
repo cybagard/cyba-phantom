@@ -20,13 +20,15 @@ import (
 )
 
 // spinLimit is the number of clock reads that no sound test loader reaches.
+// The count has all reads of the clock, also the reads of the token ring.
 const spinLimit = 1_000_000
 
 // noGap makes the swap gap of the loader pass at once. A test that is not about
 // the gap uses it. That test then does not wait.
 //
-// A lock loop that does not end would hang the test run. So the clock and the
-// wait panic when a loader spins. The run then fails at once.
+// A lock loop that does not end would hang the test run. So the clock panics
+// when a loader spins, and the run fails at once. The wait panics for a gap
+// that has passed.
 //
 // Before a first swap the gap does not read the clock. So the swap time is an
 // old one here, not zero.
