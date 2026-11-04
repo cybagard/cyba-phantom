@@ -324,7 +324,7 @@ func TestTS32LaterCallbackRetriesTheLink(t *testing.T) {
 }
 
 // wantNullSessions checks that the mint table has n rows and that each row has
-// a NULL session. It shows which source made the ambiguous count.
+// a NULL session. It shows that the ambiguous count comes from a NULL session.
 func wantNullSessions(t *testing.T, r *rig, n int) {
 	t.Helper()
 	rows := mintRows(t, r.db)
@@ -349,9 +349,10 @@ func writeShapes(t *testing.T, f func(t *testing.T, write func(r *rig, mint []*e
 	})
 }
 
-// T-S-32: after the token row exists, a duplicate mint key gives ambiguous for
-// each callback of the token. cb_count does not change. A second mint row with
-// another first counter that covers the counter gives the same result.
+// T-S-32: a mint row is added after the token row exists. The row is a
+// duplicate key, or a second row with another first counter. Each later
+// callback of the token (two of them) gives ambiguous. A callback of a token
+// with no row also gives ambiguous. The token row does not change.
 func TestTS32MintRowAfterTokenRowGivesAmbiguous(t *testing.T) {
 	for name, c := range map[string]struct {
 		again *event.Event
@@ -365,9 +366,9 @@ func TestTS32MintRowAfterTokenRowGivesAmbiguous(t *testing.T) {
 				r := newRig(t, 100)
 				r.writeOK(render(t), cbEvent(t, 50, link(5, 105)))
 				wantTokens(t, r, issued(105, 1))
-				write(r, []*event.Event{c.again}, cbEvent(t, 51, link(5, 105)), cbEvent(t, 52, link(5, 106)))
+				write(r, []*event.Event{c.again}, cbEvent(t, 51, link(5, 105)), cbEvent(t, 52, link(5, 106)), cbEvent(t, 53, link(5, 105)))
 				wantTokens(t, r, issued(105, 1))
-				wantUnlinked(t, r, 0, 2)
+				wantUnlinked(t, r, 0, 3)
 				if n := r.w.MintDuplicates(); n != c.dups {
 					t.Errorf("%d duplicates, want %d", n, c.dups)
 				}
@@ -401,7 +402,7 @@ func TestTS32NullSessionSourcesGiveAmbiguous(t *testing.T) {
 }
 
 // T-S-32: after the token row exists, a callback gives none in two cases. The
-// mint row is gone (the 30-day retention), or it has a NULL issued_at. The
+// mint row is gone (the test deletes it), or it has a NULL issued_at. The
 // cb_count does not change.
 func TestTS32TokenRowWithoutUsableMintRowGivesNone(t *testing.T) {
 	for name, q := range map[string]string{
@@ -505,9 +506,9 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 
 // T-S-32: an error of a token statement stops the writer with the database
 // rule. The writer rolls back the batch. Each case reaches its own statement.
-// The cases are: update prepare, update run, lookup prepare, lookup query,
-// lookup scan, lookup rows, insert prepare, insert run. A case can first commit
-// a batch.
+// The cases are: lookup prepare, lookup query, lookup scan, lookup rows,
+// update prepare, update run, insert prepare, insert run. A case can first
+// commit a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
 	// The abs of the smallest int64 is an integer overflow in SQLite.
