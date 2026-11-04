@@ -25,7 +25,13 @@
 //     directory (a parent). It cannot know the package of a mutant. It names
 //     the packages on stderr and exits 2.
 //
-// Exit codes: 0 done, 1 go list failed, 2 usage or a refused PKG.
+// Gremlins reads the module name from the first line of go.mod, with the
+// prefix "module " removed. If that text is not the module path from go
+// list (for example a comment on the first line), mutatepkg names both and
+// exits 2.
+//
+// Exit codes: 0 done, 1 go list failed or no package matches, 2 usage or a
+// refused PKG.
 package main
 
 import (
@@ -99,9 +105,10 @@ func describe(pkgs []pkg) string {
 	return strings.Join(s, ", ")
 }
 
-// list returns the module path and the packages at and below dir, from go
-// list. It skips a package with no Go file that is not a test.
-func list(dir string) (string, []pkg, error) {
+// list returns the module path, the module directory and the packages at and
+// below dir, from go list. It skips a package with no Go file that is not a
+// test.
+func list(dir string) (string, string, []pkg, error) {
 	pattern := strings.TrimSuffix(dir, "/") + "/..."
 	format := "{{.Module.Path}}|{{.Module.Dir}}|{{.ImportPath}}|{{.Dir}}|{{.Name}}|{{len .GoFiles}}|{{len .CgoFiles}}"
 	var stderr bytes.Buffer
@@ -109,14 +116,18 @@ func list(dir string) (string, []pkg, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", nil, fmt.Errorf("go list %s: %v\n%s", pattern, err, stderr.String())
+		return "", "", nil, fmt.Errorf("go list %s: %v\n%s", pattern, err, stderr.String())
 	}
-	var module string
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return "", "", nil, fmt.Errorf("no package matches the pattern %s", pattern)
+	}
+	var module, moduleDir string
 	var pkgs []pkg
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		f := strings.Split(line, "|")
 		if len(f) != 7 {
-			return "", nil, fmt.Errorf("go list %s: unexpected line %q", pattern, line)
+			return "", "", nil, fmt.Errorf("go list %s: unexpected line %q", pattern, line)
 		}
 		files, _ := strconv.Atoi(f[5])
 		cgo, _ := strconv.Atoi(f[6])
@@ -125,15 +136,29 @@ func list(dir string) (string, []pkg, error) {
 		}
 		rel, err := filepath.Rel(f[1], f[3])
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
-		module = f[0]
+		module, moduleDir = f[0], f[1]
 		pkgs = append(pkgs, pkg{Import: f[2], Rel: filepath.ToSlash(rel), Name: f[4]})
 	}
 	if len(pkgs) == 0 {
-		return "", nil, fmt.Errorf("go list %s: no package with Go files", pattern)
+		return "", "", nil, fmt.Errorf("go list %s: no package with Go files", pattern)
 	}
-	return module, pkgs, nil
+	return module, moduleDir, pkgs, nil
+}
+
+// checkGoMod compares the module path with the name that gremlins reads. It
+// takes the first line of go.mod in dir and removes the prefix "module ".
+func checkGoMod(dir, module string) error {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return err
+	}
+	first, _, _ := bytes.Cut(data, []byte("\n"))
+	if name := string(bytes.TrimPrefix(first, []byte("module "))); name != module {
+		return fmt.Errorf("gremlins reads the module name %q from the first line of go.mod, but the module path is %q", name, module)
+	}
+	return nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -141,10 +166,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: mutatepkg <pkg>")
 		return 2
 	}
-	module, pkgs, err := list(args[0])
+	module, moduleDir, pkgs, err := list(args[0])
 	if err != nil {
 		fmt.Fprintln(stderr, "mutate:", err)
 		return 1
+	}
+	if err := checkGoMod(moduleDir, module); err != nil {
+		fmt.Fprintf(stderr, "mutate: PKG %s refused: %v\n", args[0], err)
+		return 2
 	}
 	from, to, err := plan(module, pkgs)
 	if err != nil {

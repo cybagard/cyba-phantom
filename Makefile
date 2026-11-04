@@ -223,7 +223,9 @@ perf-inner:
 # "Mutation testing completed" line. Gremlins exits 0 after a signal,
 # so the completion line shows a full run.
 # MUTATE_CAP is the time limit in seconds for each go command that gremlins
-# starts, builds included. The limit kills the go command and its test
+# starts, builds included. It also applies to the go build and the go list
+# of tools/mutatepkg, because the target installs the go wrapper before that
+# build. The limit kills the go command and its test
 # binary. A stopped mutant shows as LIVED. The limit also applies to the
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
@@ -252,19 +254,33 @@ perf-inner:
 # Gremlins finds the package of a mutant from the package name of the mutated
 # file. It walks up from the directory of the file to the first directory
 # whose path ends with that name. If there is none, it tests the module path.
-# That is the module root package, and its go test fails at once. Gremlins
-# counts that failure as a kill, so every such mutant is a false kill. A
-# package main (for example cmd/phantom) is such a package.
-# After the copy, tools/mutatepkg gives each package below PKG the same walk.
-# If exactly one package gets the module path and it is not the module root
-# package, the go command of the run (tools/mutate-go.sh) replaces the module
-# path with the import path of that package. It does this in the last
-# argument of each go test call. The target prints the two paths.
+# That is the module root package, and its go test fails at once.
+# Gremlins counts that failure as a kill, so every such mutant is a false
+# kill. A package main (for example cmd/phantom) is such a package.
+# After the copy, the target installs the go wrapper (tools/mutate-go.sh).
+# Then tools/mutatepkg gives each package below PKG the same walk.
+# If exactly one package gets the module path, and it is not the module
+# root package, the wrapper replaces the module path with the import path.
+# It does this only for a last argument of a go test call that is the
+# module path. The target prints the two paths.
+# The wrapper adds one line to the file "replaced" in the run directory for
+# each replacement. After gremlins, the target fails (exit 1) if a replacement
+# was set, the file is missing, and gremlins reported a mutant status.
+# That status is KILLED, LIVED, TIMED OUT or NOT VIABLE. Then no mutant ran
+# on the package that tools/mutatepkg found.
+# Gremlins counts exit status 1 of go test as a kill, also when go could not
+# load or build the package. For a go test call, the wrapper keeps the output
+# in a new file in the run directory. It exits 2 instead of 1 if go exits 1
+# and a line of the output is the FAIL line of a setup or build failure.
+# Gremlins counts status 2 as NOT VIABLE.
 # The target refuses PKG (exit 2) before gremlins starts, and names the
 # packages, when it cannot know the package of a mutant. This is the case
 # when two or more packages get the module path (the module root package
-# counts), or when a package gets a parent directory. It exits 1 if go list
-# fails. A PKG that gremlins already maps right (for example internal/config)
+# counts), or when a package gets a parent directory. It also refuses PKG
+# when the first line of go.mod is not "module " and the module path.
+# gremlins reads the module name from that line. A comment on it breaks the
+# match. It exits 1 if go list fails or no package matches PKG.
+# A PKG that gremlins already maps right (for example internal/config)
 # has no replacement, and the run is the same as before.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
 # tests fail, it prints the output and fails (exit 1) before any mutation.
@@ -356,11 +372,11 @@ mutate:
 	echo "mutate: run directory $$d"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
 	mkdir "$$d/src" && tar -cf "$$d/m.tar" . && tar -xf "$$d/m.tar" -C "$$d/src" && rm "$$d/m.tar" || { echo "mutate FAIL: the copy of the module failed (status $$?), no test done" >&2; exit 1; }; \
-	( cd "$$d/src" && go build -o "$$d/mutatepkg" ./tools/mutatepkg ) || { echo "mutate FAIL: cannot build tools/mutatepkg" >&2; exit 1; }; \
+	cp "$$d/src/tools/mutate-go.sh" "$$d/bin/go" && chmod +x "$$d/bin/go" || { echo "mutate FAIL: cannot install the go wrapper" >&2; exit 1; }; \
+	( cd "$$d/src" && go build -buildvcs=false -o "$$d/mutatepkg" ./tools/mutatepkg ) || { echo "mutate FAIL: cannot build tools/mutatepkg" >&2; exit 1; }; \
 	fix=$$( cd "$$d/src" && "$$d/mutatepkg" "$$PKG" ) || exit $$?; \
 	export MUTATE_FROM="$${fix% *}" MUTATE_TO="$${fix#* }"; \
 	[ -z "$$fix" ] || echo "mutate: gremlins maps the package of a mutant to $$MUTATE_FROM, so the go wrapper replaces it with $$MUTATE_TO"; \
-	cp "$$d/src/tools/mutate-go.sh" "$$d/bin/go" && chmod +x "$$d/bin/go" || { echo "mutate FAIL: cannot install the go wrapper" >&2; exit 1; }; \
 	( cd "$$d/src" && exec $(mutate_session) go test "$$PKG" ) >"$$d/pre" 2>&1 & g=$$!; wait $$g; rc=$$?; pkill -KILL -s $$g; g=; \
 	if [ "$$rc" -ne 0 ]; then cat "$$d/pre"; echo "mutate FAIL: go test $$PKG failed in the copy (status $$rc), no mutation done" >&2; exit 1; fi; \
 	[ -z "$$MUTATE_EXCLUDE" ] || printf 'mutate: files excluded by MUTATE_EXCLUDE: %s\n' "$$MUTATE_EXCLUDE"; \
@@ -379,6 +395,7 @@ mutate:
 	if [ -e "$$d/full" ]; then echo "mutate FAIL: files are larger than $$MUTATE_MAX_MIB MiB" >&2; exit 1; fi; \
 	if [ "$$rc" -ne 0 ]; then echo "mutate FAIL: gremlins exited with status $$rc" >&2; exit "$$rc"; fi; \
 	grep -q 'Mutation testing completed' "$$d/out" || { echo "mutate FAIL: gremlins stopped before the end of the run" >&2; exit 1; }; \
+	if [ -n "$$MUTATE_FROM" ] && [ ! -e "$$d/replaced" ] && grep -qE '^ *(KILLED|LIVED|TIMED OUT|NOT VIABLE) ' "$$d/out"; then echo "mutate FAIL: the go wrapper replaced no package ($$MUTATE_FROM with $$MUTATE_TO), so the mutants did not run on the package of PKG" >&2; exit 1; fi; \
 	echo "== not killed =="; \
 	grep -E '^ *(LIVED|TIMED OUT) ' "$$d/out" | sed -e 's/^ */not killed: /'; \
 	sed -n 's/.*\(Not covered: [0-9]*\).*/\1/p' "$$d/out" | head -n 1

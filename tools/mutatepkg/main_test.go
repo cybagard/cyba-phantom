@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,7 +85,9 @@ func TestPlanRefusesPackageThatIsNotKnown(t *testing.T) {
 func writeModule(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	files["go.mod"] = "module " + mod + "\n\ngo 1.21\n"
+	if _, ok := files["go.mod"]; !ok {
+		files["go.mod"] = "module " + mod + "\n\ngo 1.21\n"
+	}
 	for name, body := range files {
 		full := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -110,6 +114,7 @@ func TestRunPackageArgumentOfMutantTest(t *testing.T) {
 		"cmd/app/main_test.go":     "package main\n",
 		"internal/cfg/cfg.go":      "package cfg\n",
 		"internal/cfg/cfg_test.go": "package cfg\n",
+		"cmd/app/e2e/e2e_test.go":  "package main\n",
 	})
 	rc, out, errs := runIn(t, dir, "./cmd/app")
 	if rc != 0 || out != mod+" "+mod+"/cmd/app\n" {
@@ -132,6 +137,42 @@ func TestRunRefusesPackageThatIsNotKnown(t *testing.T) {
 	}
 }
 
+func TestRunPackageWithCgoFile(t *testing.T) {
+	t.Setenv("CGO_ENABLED", "1")
+	dir := writeModule(t, map[string]string{
+		"cmd/app/main.go": "package main\n\nfunc main() {}\n",
+		"cmd/app/c.go":    "package main\n\nimport \"C\"\n",
+	})
+	rc, out, errs := runIn(t, dir, "./cmd/app")
+	if rc != 0 || out != mod+" "+mod+"/cmd/app\n" {
+		t.Errorf("cgo package: rc %d, out %q, err %q", rc, out, errs)
+	}
+}
+
+func TestRunRefusesGoModNameThatGremlinsReadsWrong(t *testing.T) {
+	for _, c := range []struct{ name, gomod string }{
+		{"comment on the first line", "// comment\nmodule " + mod + "\n\ngo 1.21\n"},
+		{"comment after the module path", "module " + mod + " // c\n\ngo 1.21\n"},
+	} {
+		dir := writeModule(t, map[string]string{
+			"go.mod":          c.gomod,
+			"cmd/app/main.go": "package main\n\nfunc main() {}\n",
+		})
+		rc, out, errs := runIn(t, dir, "./cmd/app")
+		if rc != 2 || out != "" || !strings.Contains(errs, "go.mod") || !strings.Contains(errs, strconv.Quote(mod)) {
+			t.Errorf("%s: rc %d, out %q, err %q", c.name, rc, out, errs)
+		}
+	}
+}
+
+func TestRunNoPackageMatchesPattern(t *testing.T) {
+	dir := writeModule(t, map[string]string{"cmd/app/main.go": "package main\n\nfunc main() {}\n"})
+	rc, out, errs := runIn(t, dir, "cmd/app")
+	if rc != 1 || out != "" || !strings.Contains(errs, "no package matches the pattern") {
+		t.Errorf("rc %d, out %q, err %q", rc, out, errs)
+	}
+}
+
 func TestRunErrors(t *testing.T) {
 	dir := writeModule(t, map[string]string{"a/a.go": "package a\n"})
 	if rc, _, _ := runIn(t, dir); rc != 2 {
@@ -145,21 +186,97 @@ func TestRunErrors(t *testing.T) {
 // fakeGo is a go command that prints each argument on its own line.
 const fakeGo = "#!/bin/sh\nfor a; do echo \"arg:$a\"; done\n"
 
-func wrapperRun(t *testing.T, from, to string, args ...string) (string, error) {
+// wrapperCall runs the wrapper with a fake go command (the script goScript)
+// and the extra environment env. It returns the output, the exit status and
+// the MUTATE_RUN directory.
+func wrapperCall(t *testing.T, goScript string, env []string, args ...string) (string, int, string) {
 	t.Helper()
 	if _, err := exec.LookPath("timeout"); err != nil {
 		t.Skip("no timeout command")
 	}
 	dir := t.TempDir()
 	goBin := filepath.Join(dir, "fakego")
-	if err := os.WriteFile(goBin, []byte(fakeGo), 0o755); err != nil {
+	if err := os.WriteFile(goBin, []byte(goScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("sh", append([]string{"../mutate-go.sh"}, args...)...)
-	cmd.Env = append(os.Environ(), "MUTATE_GO="+goBin, "MUTATE_CAP=30", "MUTATE_RUN="+dir,
-		"MUTATE_FROM="+from, "MUTATE_TO="+to)
+	cmd.Env = append(append(os.Environ(), "MUTATE_GO="+goBin, "MUTATE_CAP=30", "MUTATE_RUN="+dir), env...)
 	out, err := cmd.Output()
-	return string(out), err
+	rc := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		rc = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), rc, dir
+}
+
+func wrapperRun(t *testing.T, from, to string, args ...string) (string, error) {
+	t.Helper()
+	out, rc, _ := wrapperCall(t, fakeGo, []string{"MUTATE_FROM=" + from, "MUTATE_TO=" + to}, args...)
+	if rc != 0 {
+		return out, fmt.Errorf("exit status %d", rc)
+	}
+	return out, nil
+}
+
+func TestWrapperWritesReplacedLineForEachReplacement(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"replacement", []string{"test", mod}, "\n"},
+		{"last argument is not the module path", []string{"test", mod, "./x"}, ""},
+		{"other go command", []string{"list", mod}, ""},
+	} {
+		_, rc, dir := wrapperCall(t, fakeGo, []string{"MUTATE_FROM=" + mod, "MUTATE_TO=" + mod + "/cmd/app"}, c.args...)
+		got, err := os.ReadFile(filepath.Join(dir, "replaced"))
+		if rc != 0 || (c.want == "" && err == nil) || (c.want != "" && string(got) != c.want) {
+			t.Errorf("%s: rc %d, replaced %q (%v), want %q", c.name, rc, got, err, c.want)
+		}
+	}
+	_, _, dir := wrapperCall(t, fakeGo, []string{"MUTATE_FROM=", "MUTATE_TO="}, "test", mod)
+	if _, err := os.Stat(filepath.Join(dir, "replaced")); err == nil {
+		t.Error("no replacement set: the file replaced exists")
+	}
+}
+
+func TestWrapperExitsTwoWhenTestCannotLoadOrBuild(t *testing.T) {
+	setup := "#!/bin/sh\nprintf 'no required module provides package x\\nFAIL\\t" + mod + " [setup failed]\\n'\nexit 1\n"
+	build := "#!/bin/sh\nprintf '# " + mod + "\\nx.go:1:1: bad\\nFAIL\\t" + mod + " [build failed]\\n'\nexit 1\n"
+	failing := "#!/bin/sh\nprintf -- '--- FAIL: TestX (0.00s)\\nFAIL\\nFAIL\\t" + mod + "\\t0.01s\\nFAIL\\n'\nexit 1\n"
+	for _, c := range []struct {
+		name   string
+		script string
+		args   []string
+		rc     int
+		want   string
+	}{
+		{"setup failed", setup, []string{"test", mod}, 2, "FAIL\t" + mod + " [setup failed]"},
+		{"build failed", build, []string{"test", mod}, 2, "FAIL\t" + mod + " [build failed]"},
+		{"test failure", failing, []string{"test", mod}, 1, "--- FAIL: TestX"},
+		{"another go command", setup, []string{"build", mod}, 1, "[setup failed]"},
+	} {
+		out, rc, dir := wrapperCall(t, c.script, nil, c.args...)
+		if rc != c.rc || !strings.Contains(out, c.want) {
+			t.Errorf("%s: rc %d, out %q, want rc %d and %q", c.name, rc, out, c.rc, c.want)
+		}
+		if c.args[0] == "test" {
+			files, _ := filepath.Glob(filepath.Join(dir, "test-output.*"))
+			if len(files) != 1 {
+				t.Errorf("%s: output files %v, want one", c.name, files)
+			}
+		}
+	}
+}
+
+func TestWrapperRecordsGoCommandStoppedAtTimeLimit(t *testing.T) {
+	out, rc, dir := wrapperCall(t, "#!/bin/sh\nexec sleep 30\n", []string{"MUTATE_CAP=1"}, "build", mod)
+	got, err := os.ReadFile(filepath.Join(dir, "capped"))
+	if rc != 137 || string(got) != "\n" {
+		t.Errorf("rc %d, out %q, capped %q (%v), want 137 and one line", rc, out, got, err)
+	}
 }
 
 func TestWrapperPackageArgumentOfMutantTest(t *testing.T) {
