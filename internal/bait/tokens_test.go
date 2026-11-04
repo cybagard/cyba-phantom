@@ -161,8 +161,8 @@ func TestTS31MintOnEvent(t *testing.T) {
 		if aborted := aborts(h, w, get(c.path, "example.com")); aborted != c.abort {
 			t.Fatalf("%s: aborted %v", c.name, aborted)
 		}
-		// One range for the render: the counter moves by its count, and the
-		// probe mint before and after takes one more.
+		// One range for the render: the counter moves by its count. The probe
+		// mint before and after takes one more.
 		if moved := (nextCounter(t, b) - before) & (event.MintCounterLimit - 1); moved != uint64(c.count)+1 {
 			t.Errorf("%s: the counter moved by %d, want %d", c.name, moved, c.count+1)
 		}
@@ -378,10 +378,10 @@ func verifyUnder(b *bundle.Bundle, s string) token.Result {
 }
 
 // TestTS31OneBundleForARequest serves a route with trap actions and a header
-// slot while the source gives one bundle to the request and the other bundle to
-// each later call. The two have another seed and another trap order. The tokens
-// verify under the first bundle only, with the trap of their slot. The set id is
-// that of the first bundle.
+// slot. The source gives one bundle to the request and the other bundle to
+// each later call. The two have another seed and another trap order. The
+// tokens verify under the first bundle only, with the trap of their slot. The
+// set id is that of the first bundle.
 func TestTS31OneBundleForARequest(t *testing.T) {
 	a := mixedBundle(t, 0x09, "f", "n")
 	b := mixedBundle(t, 0x0b, "n", "f")
@@ -409,9 +409,9 @@ func TestTS31OneBundleForARequest(t *testing.T) {
 	}
 }
 
-// TestTS31MintIndexList gives mint a list that a loaded bundle cannot make: 69
-// indexes, and an index that is not a trap. The render serves, counts one in
-// noKeys, gives empty trap texts and keeps no range.
+// TestTS31MintIndexList gives mint two lists that a loaded bundle cannot make.
+// One has 69 indexes. One has an index that is not a trap. The render counts
+// one in noKeys, gives empty trap texts and keeps no range.
 func TestTS31MintIndexList(t *testing.T) {
 	h, _, _ := realHandler(t, 8)
 	b := h.src.Current()
