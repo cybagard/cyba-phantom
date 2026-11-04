@@ -20,8 +20,9 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 
 all: build lint test trace mirror-diff
 
+# -s -w removes the symbol table and DWARF. Panic traces keep function names.
 build:
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom ./cmd/phantom
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/phantom ./cmd/phantom
 	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-verify ./cmd/phantom-verify
 
 test:
@@ -187,8 +188,8 @@ perf-inner:
 		fi; \
 		echo "perf: cgroup limits applied (memory.max=$$mem, cpu.max=$$cpu)"; \
 	fi
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-a ./cmd/phantom
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-b ./cmd/phantom
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/phantom-a ./cmd/phantom
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/phantom-b ./cmd/phantom
 	@ha=$$($(HASH) bin/phantom-a 2>/dev/null | cut -d' ' -f1); \
 	hb=$$($(HASH) bin/phantom-b 2>/dev/null | cut -d' ' -f1); \
 	if [ -z "$$ha" ] || [ -z "$$hb" ]; then \
