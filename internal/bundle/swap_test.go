@@ -116,8 +116,8 @@ type gapRig struct {
 }
 
 // gapBound is the real time that a load of a gap test has to return. The fake
-// clock needs no real sleep, so a load that does not return has a loop that
-// does not end. The test then fails and does not hang.
+// clock needs no real sleep. A load that does not return has a loop that does
+// not end. The test then fails and does not hang.
 const gapBound = 5 * time.Second
 
 // newBareGapRig gives a rig for an env whose loader has not swapped yet.
@@ -231,8 +231,8 @@ func TestTU23SwapGap(t *testing.T) {
 	}
 }
 
-// T-U-23: a load of a source other than start, when no swap has happened,
-// starts at once and does not wait.
+// T-U-23: a load of a source other than start starts at once when no swap
+// has happened. It does not wait.
 func TestTU23NoSwapNoWait(t *testing.T) {
 	e := newEnv(t)
 	e.install("bundle/current", mf(ver(2)))
