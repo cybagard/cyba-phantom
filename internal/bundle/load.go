@@ -102,6 +102,14 @@ func (b *Bundle) Routes(host string) (RouteMap, bool) {
 	rm.Routes = slices.Clone(rm.Routes)
 	for i := range rm.Routes {
 		rm.Routes[i].Headers = slices.Clone(rm.Routes[i].Headers)
+		if cb := rm.Routes[i].Callback; cb != nil {
+			c := *cb
+			rm.Routes[i].Callback = &c
+		}
+	}
+	if rm.Beacon != nil {
+		bc := *rm.Beacon
+		rm.Beacon = &bc
 	}
 	return rm, ok
 }

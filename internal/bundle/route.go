@@ -27,21 +27,39 @@ var routeTypes = []string{
 	"image/svg+xml", "image/x-icon",
 }
 
-// Route is one route of a vhost. One of Template and Asset is empty. The other
-// is a full archive name.
+// Route is one route of a vhost. A route with no Callback has one of Template
+// and Asset, and the other is empty. The one that is set is a full archive
+// name. A route with a Callback has no Template and no Headers. It has an Asset
+// and a Type, or no Asset and no Type (a route that answers with no body).
 type Route struct {
 	Path, Template, Asset, Type string
 	Headers                     []HeaderSlot
+	Callback                    *Callback
+}
+
+// Callback holds the positions of a callback route where a visitor can send
+// a callback. A position that is not used is false or empty. At least one is
+// used. Query and Body are parameter names. Header is a header name.
+type Callback struct {
+	Segment             bool
+	Query, Header, Body string
 }
 
 // HeaderSlot is a header slot of a route.
 type HeaderSlot struct{ Name, Trap string }
 
-// RouteMap is the route map of one vhost. NotFound is empty when absent.
+// RouteMap is the route map of one vhost. NotFound is empty when absent. Beacon
+// is nil when absent.
 type RouteMap struct {
 	Routes   []Route
 	NotFound string
+	Beacon   *Beacon
 }
+
+// Beacon holds the two paths of the script beacon of a vhost. The paths differ.
+// No path is the path of a route. No path is below the path of a route that has
+// a Callback with Segment.
+type Beacon struct{ Script, Post string }
 
 // maybe is a JSON member that is missing, or set to a value that is not null.
 type maybe[T any] struct {
@@ -60,14 +78,28 @@ func (m *maybe[T]) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 type rawRouteMap struct {
 	Routes   maybe[[]rawRoute] `json:"routes"`
 	NotFound maybe[string]     `json:"not_found"`
+	Beacon   maybe[rawBeacon]  `json:"beacon"`
+}
+
+type rawBeacon struct {
+	Script maybe[string] `json:"script"`
+	Post   maybe[string] `json:"post"`
 }
 
 type rawRoute struct {
-	Path     maybe[string]    `json:"path"`
-	Template maybe[string]    `json:"template"`
-	Asset    maybe[string]    `json:"asset"`
-	Type     maybe[string]    `json:"type"`
-	Headers  maybe[[]rawSlot] `json:"headers"`
+	Path     maybe[string]      `json:"path"`
+	Template maybe[string]      `json:"template"`
+	Asset    maybe[string]      `json:"asset"`
+	Type     maybe[string]      `json:"type"`
+	Headers  maybe[[]rawSlot]   `json:"headers"`
+	Callback maybe[rawCallback] `json:"callback"`
+}
+
+type rawCallback struct {
+	Segment maybe[bool]   `json:"segment"`
+	Query   maybe[string] `json:"query"`
+	Header  maybe[string] `json:"header"`
+	Body    maybe[string] `json:"body"`
 }
 
 type rawSlot struct {
@@ -130,15 +162,32 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 	}
 	rm := RouteMap{NotFound: raw.NotFound.v}
 	seen := map[string]bool{}
+	var segments []string // paths of the routes with a segment position
 	for _, r := range rs {
-		if !r.Path.set || seen[r.Path.v] || !validPath(r.Path.v) ||
-			r.Template.set == r.Asset.set || !r.Type.set || !slices.Contains(routeTypes, r.Type.v) ||
-			r.Template.set && !isTemplate(r.Template.v) || r.Asset.set && !isAsset(r.Asset.v) ||
+		var ok bool
+		if r.Callback.set {
+			ok = !r.Template.set && !r.Headers.set && r.Asset.set == r.Type.set &&
+				(!r.Asset.set || isAsset(r.Asset.v) && slices.Contains(routeTypes, r.Type.v))
+		} else {
+			ok = r.Template.set != r.Asset.set && r.Type.set && slices.Contains(routeTypes, r.Type.v) &&
+				(!r.Template.set || isTemplate(r.Template.v)) && (!r.Asset.set || isAsset(r.Asset.v))
+		}
+		if !r.Path.set || seen[r.Path.v] || !validPath(r.Path.v) || !ok ||
 			r.Headers.set && (len(r.Headers.v) < 1 || len(r.Headers.v) > maxHeaderSlots) {
 			return RouteMap{}, false
 		}
 		seen[r.Path.v] = true
 		route := Route{Path: r.Path.v, Template: r.Template.v, Asset: r.Asset.v, Type: r.Type.v}
+		if r.Callback.set {
+			cb, ok := callbackOf(r.Callback.v)
+			if !ok {
+				return RouteMap{}, false
+			}
+			route.Callback = &cb
+			if cb.Segment {
+				segments = append(segments, route.Path)
+			}
+		}
 		for _, s := range r.Headers.v {
 			if !s.Name.set || !s.Trap.set || !validHeaderName(s.Name.v) || !ids[s.Trap.v] {
 				return RouteMap{}, false
@@ -151,7 +200,52 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 		}
 		rm.Routes = append(rm.Routes, route)
 	}
+	// This check needs all routes, so the member order does not matter.
+	if raw.Beacon.set {
+		b := raw.Beacon.v
+		if !b.Script.set || !b.Post.set || b.Script.v == b.Post.v {
+			return RouteMap{}, false
+		}
+		for _, p := range []string{b.Script.v, b.Post.v} {
+			if !validPath(p) || seen[p] || slices.ContainsFunc(segments, func(s string) bool { return isBelow(p, s) }) {
+				return RouteMap{}, false
+			}
+		}
+		rm.Beacon = &Beacon{Script: b.Script.v, Post: b.Post.v}
+	}
 	return rm, true
+}
+
+// callbackOf checks the positions of a callback. It needs 1 to 4 positions.
+// When Segment is set, it is true. Query and Body are 1 to 32 bytes of
+// A-Z a-z 0-9 _ -. Header is a valid header slot name.
+func callbackOf(r rawCallback) (Callback, bool) {
+	cb := Callback{Segment: r.Segment.v, Query: r.Query.v, Header: r.Header.v, Body: r.Body.v}
+	n := 0
+	for _, set := range []bool{r.Segment.set, r.Query.set, r.Header.set, r.Body.set} {
+		if set {
+			n++
+		}
+	}
+	ok := n >= 1 && (!r.Segment.set || r.Segment.v) &&
+		(!r.Query.set || validParam(r.Query.v)) && (!r.Body.set || validParam(r.Body.v)) &&
+		(!r.Header.set || validHeaderName(r.Header.v))
+	return cb, ok
+}
+
+// validParam reports whether s is 1 to 32 bytes of A-Z a-z 0-9 _ -.
+func validParam(s string) bool {
+	return len(s) >= 1 && len(s) <= maxHeaderNameLen &&
+		!strings.ContainsFunc(s, func(c rune) bool { return c != '_' && c != '-' && !alnum(c) })
+}
+
+// isBelow reports whether the path p is below the path root, that is, whether
+// p starts with root and "/". Below "/" is each path other than "/".
+func isBelow(p, root string) bool {
+	if root == "/" {
+		return p != "/"
+	}
+	return strings.HasPrefix(p, root+"/")
 }
 
 // validPath reports whether p is a route path. It has 1 to 256 bytes. The
