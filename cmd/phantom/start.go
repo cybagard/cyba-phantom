@@ -101,8 +101,8 @@ type storePart struct {
 }
 
 // DayKey returns the day key holder that the writer uses. The code that
-// serves the bait passes it to bait.NewWithDayKey. Then both compute the same
-// session id (SEC-35).
+// serves the bait must pass it to bait.NewWithDayKey. Then both compute the
+// same session id (SEC-35).
 func (s *storePart) DayKey() *session.DayKey { return s.dk }
 
 // Healthy tells if the store part works: false with no writer, else the health of the writer.
