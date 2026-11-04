@@ -68,7 +68,8 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 	mustOK(t, err)
 	// The server closes the connection at the budget. A later write can fail.
 	for off := 0; off < len(body); off += 16 << 10 {
-		if _, err := fmt.Fprintf(c, "%x\r\n%s\r\n", 16<<10, body[off:off+16<<10]); err != nil {
+		chunk := body[off:min(off+16<<10, len(body))]
+		if _, err := fmt.Fprintf(c, "%x\r\n%s\r\n", len(chunk), chunk); err != nil {
 			break
 		}
 	}
