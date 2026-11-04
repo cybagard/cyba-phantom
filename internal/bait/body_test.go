@@ -390,7 +390,7 @@ func (c *tallyBody) Read(p []byte) (int, error) {
 }
 
 // BenchmarkBodyCandidate reads and scans a body of 4 KiB, and the body with
-// 400 members.
+// 400 members and the token member.
 func BenchmarkBodyCandidate(b *testing.B) {
 	head, tail := `{"pad":"`, `",`+member+`}`
 	pad4k := head + strings.Repeat("x", 4096-len(head)-len(tail)) + tail
