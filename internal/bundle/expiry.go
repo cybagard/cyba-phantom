@@ -27,7 +27,7 @@ func (l *Loader) CheckRunning(now time.Time) bool {
 }
 
 // kickExpiry asks the expiry watch for one check at once. It never blocks. A
-// request that is already waiting covers this one.
+// check that is already asked for covers this one.
 func (l *Loader) kickExpiry() {
 	select {
 	case l.expiryKick <- struct{}{}:

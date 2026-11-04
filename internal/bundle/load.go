@@ -581,7 +581,7 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 	l.swapMu.Lock()
 	l.swapAt = l.now()
 	l.swapMu.Unlock()
-	// The expiry watch checks the new bundle at once. The request never blocks.
+	// The expiry watch checks the new bundle at once. The call never blocks.
 	l.kickExpiry()
 	return cand, nil
 }
