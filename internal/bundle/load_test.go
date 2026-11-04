@@ -560,9 +560,9 @@ func TestTU08LoadsAreSerialized(t *testing.T) {
 	}
 }
 
-// T-U-20: each swapped-in bundle gets a higher load sequence. The sequences of
-// two loads of one archive and of a load through a second loader rise. A
-// rejected load leaves the running bundle and its sequence as they were.
+// T-U-20: each swapped-in bundle gets a higher load sequence. This holds for
+// two loads of one archive and for a load through a second loader. A rejected
+// load leaves the running bundle and its sequence as they were.
 func TestTU20LoadSequenceRises(t *testing.T) {
 	e := running(t)
 	b1 := e.l.Current()

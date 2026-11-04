@@ -294,7 +294,7 @@ func TestTU20SiteLostSwap(t *testing.T) {
 }
 
 // TestTU20SiteOlderVersionLater checks a bundle with an older manifest version
-// that loads after a newer one, as it does after an operator removes the
+// that loads after a newer one. This is the case after an operator removes the
 // version state. The older bundle has the higher load sequence. It becomes cur
 // and builds one site.
 func TestTU20SiteOlderVersionLater(t *testing.T) {
@@ -437,7 +437,7 @@ func TestTU20SiteRaceReloads(t *testing.T) {
 }
 
 // TestTU20SiteSameVersion checks that a later load becomes cur. The later load
-// has the higher sequence, also when its version equals the version of cur.
+// has the higher sequence. Its version can equal the version of cur.
 func TestTU20SiteSameVersion(t *testing.T) {
 	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
 	h := New(&swap{list: []*bundle.Bundle{b2}}, &fallbackFn{}, testQueue(t))
