@@ -198,7 +198,7 @@ func TestTS16SourceGateReasons(t *testing.T) {
 				before := src.Refused()
 				cfg := clientCfg(tc.sni, tc.alpn...)
 				cfg.ClientSessionCache = cache
-				g.handshake(t, cfg)
+				g.refused(t, cfg)
 				waitClosed(t, g.closed)
 				g.events(t, tc.reason)
 				if got := src.Refused() - before; got != 1 {
