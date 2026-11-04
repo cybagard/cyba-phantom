@@ -398,8 +398,8 @@ func (s loaderSrc) Current() *bundle.Bundle { return s.l.Current() }
 
 // TestTU20SiteRaceReloads checks requests that run while one loader reloads one
 // archive. When the loads end, cur is the running bundle and 100 more requests
-// build no site. Under -race, a sequence that the loader sets after the swap
-// is a data race with a request that reads it.
+// build no site. Under -race, the test fails when the loader sets the sequence
+// after the swap.
 func TestTU20SiteRaceReloads(t *testing.T) {
 	l := archiveLoader(t, "-1", nil)
 	_, err := l.Load(true)
