@@ -337,7 +337,7 @@ func (r *rig) warm() {
 }
 
 // T-I-04: a callback event in an idle writer gets its row and its leaf in 50 ms
-// or less. The rig never sends a tick here.
+// or less. After the write of the warm-up event, the rig sends no tick.
 func TestTI04CallbackIsWrittenWithNoTick(t *testing.T) {
 	r := newRig(t, 100)
 	stop := r.start()
