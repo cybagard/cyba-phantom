@@ -317,7 +317,8 @@ func TestTS31WrappedRangeGivesTwoRows(t *testing.T) {
 // T-P-11: N renders with a range of 68 each give N mint rows. Each row takes
 // at most 80 bytes in the b-tree (dbstat). The lookup of a counter searches the
 // primary key.
-// PHANTOM_TP11=1 sets N to 1 000 000.
+// PHANTOM_TP11=1 sets N to 1 000 000. Run this form with 1 CPU, 512 MB of
+// memory, no swap, GOMEMLIMIT=256MiB and no -race.
 func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	n := 20_000
 	if os.Getenv("PHANTOM_TP11") == "1" {
@@ -377,12 +378,12 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 		return
 	}
 	// The large form also reads the RSS 30 s after the load, as the load
-	// benchmark does. The pass line is 60 000 000 bytes.
-	time.Sleep(30 * time.Second)
+	// benchmark does. The pass line is rssLimit.
+	time.Sleep(loadIdle)
 	rss, hwm := procStatusBytes(t, "VmRSS"), procStatusBytes(t, "VmHWM")
 	t.Logf("RSS 30 s after the load %d bytes, peak %d bytes", rss, hwm)
-	if rss > 60_000_000 {
-		t.Fatalf("RSS %d bytes, want at most 60000000", rss)
+	if rss > rssLimit {
+		t.Fatalf("RSS %d bytes, want at most %d", rss, rssLimit)
 	}
 }
 
@@ -408,8 +409,9 @@ func procStatusBytes(t *testing.T, field string) int64 {
 }
 
 // failingMint stores one request event with a range after the setup statement
-// has changed the schema. The statement must make the mint insert fail.
-func failingMint(t *testing.T, setup string) {
+// has changed the schema. The statement must make the mint insert, or its
+// prepare, fail. When tableDropped is true, the setup statement drops the table.
+func failingMint(t *testing.T, setup string, tableDropped bool) {
 	t.Helper()
 	r := newRig(t, 100)
 	if _, err := r.db.Exec(setup); err != nil {
@@ -424,7 +426,7 @@ func failingMint(t *testing.T, setup string) {
 	if d := r.w.Stats().Dropped; d != (Drops{Bulk: 1}) {
 		t.Fatalf("drops %+v, want one bulk drop", d)
 	}
-	if setup[:4] != "DROP" {
+	if !tableDropped {
 		if n := len(mintRows(t, r.db)); n != 0 {
 			t.Fatalf("%d mint rows, want 0", n)
 		}
@@ -434,11 +436,11 @@ func failingMint(t *testing.T, setup string) {
 // T-S-31: an error of the mint insert stops the writer. The transaction rolls
 // back, so the batch has no event row and no mint row.
 func TestTS31MintInsertErrorStopsTheWriter(t *testing.T) {
-	failingMint(t, "CREATE TRIGGER no_mint BEFORE INSERT ON mint BEGIN SELECT RAISE(ABORT,'x'); END")
+	failingMint(t, "CREATE TRIGGER no_mint BEFORE INSERT ON mint BEGIN SELECT RAISE(ABORT,'x'); END", false)
 }
 
 // T-S-31: an error at the prepare of the mint insert stops the writer in the
 // same way.
 func TestTS31MintPrepareErrorStopsTheWriter(t *testing.T) {
-	failingMint(t, "DROP TABLE mint")
+	failingMint(t, "DROP TABLE mint", true)
 }
