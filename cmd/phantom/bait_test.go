@@ -92,9 +92,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	oldNew := newServer
 	t.Cleanup(func() { newServer = oldNew })
 	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		// No Serve call has run yet. A later switch call in the start code
-		// shows in this response. The test can miss a call from another
-		// goroutine.
+		// No Serve call has run yet. If the start code calls the switch
+		// later, this response has a Set-Cookie. The test can miss a call
+		// from another goroutine.
 		req := httptest.NewRequest(http.MethodGet, "/page", nil)
 		req.Host, req.RemoteAddr = decoyName, "127.0.0.1:4000"
 		rec := httptest.NewRecorder()
