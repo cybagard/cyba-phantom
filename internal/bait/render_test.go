@@ -132,7 +132,7 @@ func pick(doc *xhtml.Node, sel string) (got string) {
 // escape, with the letter u and four hex digits.
 const bs = `\`
 
-// slotCases hold one page for each in-page slot. page is the exact output. sel
+// slotCases holds one page for each in-page slot. page is the exact output. sel
 // and dec name the part that the parser must give back, tags the elements.
 var slotCases = []struct{ slot, tmpl, page, sel, dec, tags string }{
 	{"hidden-p", `<p>{{index .Trap "hidden-p"}}</p>`,
@@ -370,15 +370,23 @@ func TestTU20ExecErrorAfterByte(t *testing.T) {
 
 // TestTS28Cap checks the cap through a real server. The page is "<p>", the
 // token and "</p>", so the token sets the size. A page of exactly 1 MiB is
-// complete. A page over the cap stops, also at the first write. The client
-// sees the connection end before a complete response. Each stop adds one
-// error and writes no log line.
+// complete and counts no error. A page over the cap stops and the client sees
+// the connection end before a complete response. The "first" case has the trap
+// action at the start, so its first write is over the cap: no 200 byte goes
+// out. Each stop adds one error and writes no log line.
 func TestTS28Cap(t *testing.T) {
 	for _, c := range []struct {
+		name  string
+		tmpl  string
 		token int
 		ok    bool
-	}{{oneMiB - 7, true}, {oneMiB - 6, false}, {oneMiB + 10, false}} {
-		h := handlerFor(t, `<p>{{index .Trap "a"}}</p>`)
+	}{
+		{"exact", `<p>{{index .Trap "a"}}</p>`, oneMiB - 7, true},
+		{"one over", `<p>{{index .Trap "a"}}</p>`, oneMiB - 6, false},
+		{"far over", `<p>{{index .Trap "a"}}</p>`, oneMiB + 10, false},
+		{"first write over", `{{index .Trap "a"}}</p>`, oneMiB + 10, false},
+	} {
+		h := handlerFor(t, c.tmpl)
 		// The trap text is "say hi " and the token, so the token is shorter.
 		h.token = func() string { return strings.Repeat("x", c.token-len("say hi ")) }
 		srv, logs := startServer(t, h)
@@ -386,13 +394,16 @@ func TestTS28Cap(t *testing.T) {
 		srv.Close()
 		errs := h.execErrs.Load()
 		if len(body) > oneMiB || logs.String() != "" {
-			t.Errorf("token %d: %d body bytes, log %q", c.token, len(body), logs.String())
+			t.Errorf("%s: %d body bytes, log %q", c.name, len(body), logs.String())
 		}
 		if c.ok && (err != nil || resp.StatusCode != 200 || len(body) != oneMiB || errs != 0) {
-			t.Errorf("token %d: err %v, %d body bytes, errors %d, want a complete page", c.token, err, len(body), errs)
+			t.Errorf("%s: err %v, %d body bytes, errors %d, want a complete page", c.name, err, len(body), errs)
 		}
 		if !c.ok && (err == nil || errs != 1) {
-			t.Errorf("token %d: err %v, errors %d, want a broken response and one error", c.token, err, errs)
+			t.Errorf("%s: err %v, errors %d, want a broken response and one error", c.name, err, errs)
+		}
+		if c.name == "first write over" && (resp != nil || len(body) != 0) {
+			t.Errorf("%s: response %v, %d body bytes, want no response", c.name, resp, len(body))
 		}
 	}
 }
