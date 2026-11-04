@@ -56,8 +56,10 @@ type Bundle struct {
 	sum      [32]byte
 	manifest Manifest
 	archive  *Archive
-	class    Class
-	expired  bool
+	// sig holds the bytes of the signature file that verified.
+	sig     []byte
+	class   Class
+	expired bool
 	// templates holds the parsed .tmpl files. No template runs at load.
 	templates map[string]*template.Template
 	// routes holds the route map of each vhost, by host name.
@@ -84,6 +86,10 @@ func (b Bundle) Format(f fmt.State, _ rune) {
 // SHA256 returns the SHA-256 of the archive bytes. It is the identity of the
 // bundle.
 func (b *Bundle) SHA256() [32]byte { return b.sum }
+
+// Signature returns a copy of the bytes of the signature file that verified for
+// this bundle. A start, signal, reload, fetch or roll-forward load sets it.
+func (b *Bundle) Signature() []byte { return slices.Clone(b.sig) }
 
 // Manifest returns a copy of the manifest.
 func (b *Bundle) Manifest() Manifest {
@@ -352,6 +358,9 @@ func (l *Loader) Healthy() bool {
 // A path with the archive name of a record gives ErrArchiveInvalid. The name is
 // "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not count. Load
 // checks this before the chain check and before any read.
+// A start load that gives bad_sig tries once more with <name>.sig.tmp. The
+// file must be there and pass the file rule. The try has each check. The start
+// load then removes each install temporary file. LoadFetched has the install.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	if start {
@@ -363,23 +372,15 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 // load is Load without the lock and without the event. loadMu is held. It sets
 // rd when it has read the bundle file and the signature file.
 func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
-	dir, base, closeDir, err := l.openDir()
+	dir, name, c, closeDir, err := l.prepare(start)
 	if err != nil {
-		return nil, ErrArchiveInvalid
+		return nil, err
 	}
 	defer closeDir()
-	name, ok := strings.CutSuffix(base, ".cbnd")
-	if !ok || name == "" || isRecordName(base) {
-		return nil, ErrArchiveInvalid
+	if start {
+		defer removeInstallTemps(dir, name)
 	}
-	if start || (l.chain == nil && l.chainErr == nil) {
-		_ = l.check(dir)
-	}
-	if l.chainErr != nil {
-		return nil, ErrStateFault
-	}
-	c := *l.chain
-	archive, err := safefile.ReadFile(dir, base, fileRule(MaxBundleBytes))
+	archive, err := safefile.ReadFile(dir, name+".cbnd", fileRule(MaxBundleBytes))
 	var sig []byte
 	if err == nil {
 		sig, err = safefile.ReadFile(dir, name+".sig", fileRule(MaxSigBytes))
@@ -390,6 +391,42 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	if l.afterRead != nil {
 		l.afterRead()
 	}
+	b, err := l.loadBytes(dir, c, archive, sig, start, rd, nil)
+	if start && err == ErrBadSig {
+		return l.rollForward(dir, name, c, archive, rd, err)
+	}
+	return b, err
+}
+
+// prepare runs the checks that come before any read of a bundle file. They are
+// the directory part, the state-file name and the chain check. It gives the
+// open directory, the name of the bundle without ".cbnd", and the chain. The
+// caller calls closeDir. On an error, prepare has closed the directory.
+func (l *Loader) prepare(start bool) (dir *os.Root, name string, c chain, closeDir func(), err error) {
+	dir, base, closeDir, err := l.openDir()
+	if err != nil {
+		return nil, "", chain{}, nil, ErrArchiveInvalid
+	}
+	name, ok := strings.CutSuffix(base, ".cbnd")
+	if !ok || name == "" || isRecordName(base) {
+		closeDir()
+		return nil, "", chain{}, nil, ErrArchiveInvalid
+	}
+	if start || (l.chain == nil && l.chainErr == nil) {
+		_ = l.check(dir)
+	}
+	if l.chainErr != nil {
+		closeDir()
+		return nil, "", chain{}, nil, ErrStateFault
+	}
+	return dir, name, *l.chain, closeDir, nil
+}
+
+// loadBytes runs each check on the archive and signature bytes, and then the
+// record, the version state and the swap. install, when it is not nil, runs
+// before the record of a transition bundle. When it fails, loadBytes gives
+// ErrInstallFault. loadMu is held. It sets rd.
+func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start bool, rd *digest, install func() error) (*Bundle, error) {
 	sum := sha256.Sum256(archive)
 	*rd = digest{sum, true}
 	ids, err := VerifySig(archive, sig, c.trust)
@@ -480,10 +517,17 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 			}
 		}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref, tokens: tokens}
-	// The record and the version state come before Swap. A failed write leaves
-	// the running bundle. A failed check or version-state write removes the
-	// record. Only a failed version-state write restores the trust set.
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, sig: slices.Clone(sig), class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref, tokens: tokens}
+	// The install of a fetched pair comes first. Then the record, the version
+	// state and Swap. A failed write leaves the running bundle. A failed
+	// install leaves the files that the next start can load. A failed check or
+	// version-state write removes the record. Only a failed version-state write
+	// restores the trust set.
+	if install != nil {
+		if err := install(); err != nil {
+			return reject(ErrInstallFault)
+		}
+	}
 	n := len(c.sums) + 1
 	if newRotation {
 		if err := writeRecord(dir, n, archive, sig); err != nil {

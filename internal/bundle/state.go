@@ -109,6 +109,19 @@ var wrapTemp func(*os.File) tempFile
 // name.
 func writeFile(root *os.Root, name string, data []byte) error {
 	tmp := name + ".tmp"
+	if err := writeTemp(root, tmp, data); err != nil {
+		return err
+	}
+	if err := root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return syncDir(root)
+}
+
+// writeTemp makes the temporary file tmp with the data, as writeFile says. It
+// removes the file again when a step after the create fails.
+func writeTemp(root *os.Root, tmp string, data []byte) error {
 	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -127,13 +140,14 @@ func writeFile(root *os.Root, name string, data []byte) error {
 	if cerr := w.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = root.Rename(tmp, name)
-	}
 	if err != nil {
 		_ = root.Remove(tmp)
-		return err
 	}
+	return err
+}
+
+// syncDir calls Sync on the directory of the root.
+func syncDir(root *os.Root) error {
 	d, err := root.Open(".")
 	if err != nil {
 		return err
