@@ -175,8 +175,8 @@ func TestTS32_CheckResults(t *testing.T) {
 	}
 }
 
-// T-S-32: a refused or absent text gives the zero Result and no future count,
-// also if the zero block would verify.
+// T-S-32: a refused or absent text gives the zero Result and no future
+// count. This holds also if the zero block would verify.
 func TestTS32_CheckRefusedNeverMatches(t *testing.T) {
 	b, _ := aes.NewCipher(testKey)
 	k, _ := newKeySetBlock(allMatch{b}, traps(2))
