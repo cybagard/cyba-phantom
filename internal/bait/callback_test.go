@@ -135,8 +135,8 @@ func (f *flushProbe) Flush() {
 // position gives one callback event. It has the surface, the trap, the token
 // id, the route path, the vhost, the method, the status, the client address
 // and the link of the token. The request gives one request event. The handler
-// flushes the response before any event. A route with an asset gives status
-// 200, and a route with none gives 204.
+// flushes the response before any event. A route with an asset gives 200. A
+// route with none gives 204.
 func TestTI04CallbackSurfaces(t *testing.T) {
 	e := newCBEnv(t)
 	for _, rt := range []struct {
@@ -255,7 +255,7 @@ func otherKeySetToken(t testing.TB) string {
 // Set-Cookie. It does this for a route with an asset and a route with none,
 // for GET, HEAD and POST. Both routes have a body position, so POST also goes
 // to the path, query and header positions. The test checks the header values.
-// A HEAD response has the status and the headers of the GET response.
+// A HEAD response has the status and headers of the GET response.
 func TestTS32CallbackFixedResponse(t *testing.T) {
 	e := newCBEnv(t)
 	toks := map[string]string{
@@ -396,8 +396,8 @@ func TestTS32CallbackVhost(t *testing.T) {
 	}
 }
 
-// TestTS32CallbackHeaderName checks that a route with a header name that is
-// not canonical gives a callback event for a token in the canonical header.
+// TestTS32CallbackHeaderName checks a route with a header name that is not
+// canonical. A token in the canonical header gives one callback event.
 func TestTS32CallbackHeaderName(t *testing.T) {
 	e := newCBEnvFiles(t, map[string]string{
 		"vhosts/lima.example/routes.json": `{"routes":[{"path":"/h","callback":{"header":"X-REQUEST-TOKEN"}}]}`,

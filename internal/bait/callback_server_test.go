@@ -63,9 +63,9 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 	go func() { _ = srv.ServePlain(ln, e.h) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	// oneRequest sends a chunked POST of n body bytes, with the last chunk if
-	// last is true. It gives the status line that the server sends, or 0 if
-	// the server sends none, and the request events that the handler records.
+	// oneRequest sends a chunked POST with n body bytes, and the last chunk if
+	// last is true. It gives the status line that the server sends, or 0 if it
+	// sends none. It also gives the request events.
 	oneRequest := func(n int, last bool) (status int, reqs []event.Record) {
 		c, err := net.Dial("tcp", raw.Addr().String())
 		mustOK(t, err)
@@ -74,7 +74,7 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 		_, err = io.WriteString(c, "POST "+cbRoutePath+" HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n")
 		mustOK(t, err)
 		body := strings.Repeat("x", n)
-		// The server closes the connection at the budget. A later write can fail.
+		// The server closes at the budget. Later writes can fail.
 		const chunkSize = 16 << 10
 		for off := 0; off < len(body); off += chunkSize {
 			chunk := body[off:min(off+chunkSize, len(body))]
@@ -111,8 +111,8 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 	wantRequest("small body", reqs)
 
 	// For the large body, net/http drains the unread body before it writes the
-	// response, and the read budget closes the connection first. So the client
-	// gets no status line here. The request event shows the route.
+	// response. The read budget closes the connection first, so the client gets
+	// no status line. The request event shows the route.
 	before := ln.n.Load()
 	_, reqs = oneRequest(300<<10, false)
 	wantRequest("large body", reqs)
