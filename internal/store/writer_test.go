@@ -561,8 +561,8 @@ func TestTU25ManyBeaconsOfOneSessionRunOneUpdate(t *testing.T) {
 }
 
 // T-U-25: the set of beacon sessions starts empty for each batch. The first
-// batch has 500 sessions and the second has 3. The second runs 3 statements, and
-// the set never holds more than 500 sessions.
+// batch has 500 sessions and the second has 3. The second runs 3 statements,
+// and the set never holds more than 500 sessions.
 func TestTU25BeaconSetIsEmptiedForEachBatch(t *testing.T) {
 	r := newRig(t, 1000)
 	execs := 0
@@ -585,10 +585,10 @@ func TestTU25BeaconSetIsEmptiedForEachBatch(t *testing.T) {
 	}
 }
 
-// T-U-25: an error of the beacon update stops the writer. The statement case has
-// a trigger that refuses the update, with a request and a beacon of one session.
-// The prepare case has no session table, with one beacon event. No row exists,
-// no commit happens, and the events of the batch count as drops.
+// T-U-25: an error of the beacon update stops the writer. The statement case
+// has a trigger that refuses the update, with a request and a beacon of one
+// session. The prepare case has no session table, with one beacon event. No
+// row exists, no commit happens, and the events of the batch count as drops.
 func TestTU25BeaconUpdateErrorStopsTheWriter(t *testing.T) {
 	cases := []struct {
 		name  string
