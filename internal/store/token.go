@@ -10,14 +10,15 @@ import (
 // The statements are constants. Every value is a bound parameter. The lookup
 // finds the mint rows that can hold a counter. A range has at most 68 tokens,
 // so its first counter is in the 68 values up to the counter. The primary key
-// (set_id, first) serves the search. LIMIT 2 is enough to tell one row from
-// many rows.
+// (set_id, unit, first) serves the search. The lookup has no NULL filter. A row
+// with a NULL session marks a duplicate key, and it must still count. LIMIT 2
+// is enough to tell one row from many rows.
 const (
 	bumpToken = "UPDATE token SET cb_count = cb_count + 1 WHERE token_id = ?"
 
 	lookupMint = `SELECT session_id, issued_at FROM mint
-WHERE set_id = ? AND first BETWEEN ? - 67 AND ? AND first + count > ? AND unit = ?
-  AND session_id IS NOT NULL AND issued_at IS NOT NULL LIMIT 2`
+WHERE set_id = ? AND unit = ? AND first BETWEEN ? - 67 AND ? AND first + count > ?
+LIMIT 2`
 
 	// insertToken stores the token row of the first callback. A row with the
 	// same token id is not an error. It changes nothing.
@@ -131,32 +132,40 @@ func (t *tokenWriter) one(ctx context.Context, c tokenCall) error {
 	return nil
 }
 
-// mintRow looks up the mint rows of a link. It returns the number of rows (0, 1
-// or 2) and the values of the first row.
+// mintRow looks up the mint rows of a link. It returns 0 for none, 2 for
+// ambiguous, and 1 with the session and issued_at of the one usable row.
 func (t *tokenWriter) mintRow(ctx context.Context, l event.CallbackLink) (session string, issuedAt int64, rows int, err error) {
 	stmt, err := t.prepare(ctx, &t.lookup, lookupMint)
 	if err != nil {
 		return "", 0, 0, err
 	}
 	c := int64(l.Counter)
-	rs, err := stmt.QueryContext(ctx, l.SetID[:], c, c, c, int64(l.Unit))
+	rs, err := stmt.QueryContext(ctx, l.SetID[:], int64(l.Unit), c, c, c)
 	if err != nil {
 		return "", 0, 0, fail(writerName, ruleDatabase)
 	}
 	defer rs.Close()
+	var s sql.NullString
+	var at sql.NullInt64
 	for rs.Next() {
-		var s string
-		var at int64
 		if err := rs.Scan(&s, &at); err != nil {
 			return "", 0, 0, fail(writerName, ruleDatabase)
-		}
-		if rows == 0 {
-			session, issuedAt = s, at
 		}
 		rows++
 	}
 	if rs.Err() != nil {
 		return "", 0, 0, fail(writerName, ruleDatabase)
 	}
-	return session, issuedAt, rows, nil
+	// A NULL session marks a duplicate key, so the answer is ambiguous. A row
+	// with a session and no issued_at gives no link. Only a changed database
+	// has such a row.
+	switch {
+	case rows > 1:
+		return "", 0, 2, nil
+	case rows == 1 && !s.Valid:
+		return "", 0, 2, nil
+	case rows == 1 && !at.Valid:
+		return "", 0, 0, nil
+	}
+	return s.String, at.Int64, rows, nil
 }
