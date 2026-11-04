@@ -325,6 +325,10 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 		n = 1_000_000
 	}
 	r := newRig(t, 100)
+	// The rig hook sends on a channel with room for 64 commits. Nobody reads it
+	// here, so the hook only counts.
+	commits := 0
+	r.w.onCommit = func(int) { commits++ }
 	sessions := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccc", "dddddddddddddddddddddddddd"}
 	const base = 1758300000000
 	batch := make([]*event.Event, 0, maxBatch)
@@ -337,8 +341,11 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 			batch = batch[:0]
 		}
 	}
+	if want := (n + maxBatch - 1) / maxBatch; commits != want || r.rows() != n {
+		t.Fatalf("%d commits (want %d), %d event rows (want %d)", commits, want, r.rows(), n)
+	}
 	var rows, bytes int64
-	if err := r.db.QueryRow("SELECT (SELECT count(*) FROM mint), (SELECT sum(pgsize) FROM dbstat WHERE name = 'mint')").Scan(&rows, &bytes); err != nil {
+	if err := r.db.QueryRow("SELECT (SELECT count(*) FROM mint),(SELECT sum(pgsize) FROM dbstat WHERE name = 'mint')").Scan(&rows, &bytes); err != nil {
 		t.Fatal(err)
 	}
 	per := float64(bytes) / float64(rows)
