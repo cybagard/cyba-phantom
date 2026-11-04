@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -511,4 +512,135 @@ func TestTU24SharedHolder(t *testing.T) {
 			f()
 		}()
 	}
+}
+
+// offHandler returns a handler with the session cookie off. It shares the day
+// key holder and the clock of on. So a cookie of on has a valid tag.
+func offHandler(t *testing.T, on *Handler) *Handler {
+	t.Helper()
+	off := NewWithDayKey(on.src, &fallbackFn{}, queueOf(t, 64), on.dk)
+	off.now = on.now
+	off.DisableSessionCookie()
+	return off
+}
+
+// TestTU24CookieOff checks the off switch (SEC-35). No response has a
+// Set-Cookie header, also with a valid cookie. The event has the keyed id, not
+// the id of the cookie.
+func TestTU24CookieOff(t *testing.T) {
+	on, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "issue", on, get("/t", "example.com"))
+	valid := newCookie(t, "issue", w.Header())
+	cookieID, ok := on.dk.At(on.now()).CheckCookie(valid)
+	if !ok {
+		t.Fatal("the cookie of the on handler is not valid")
+	}
+	off := offHandler(t, on)
+	keyed := keyedID(t, off, "192.0.2.1")
+	if cookieID == keyed {
+		t.Fatal("the cookie id equals the keyed id")
+	}
+	for _, c := range []struct{ name, method, host, path string }{
+		{"template", "GET", "example.com", "/t"},
+		{"template head", "HEAD", "example.com", "/t"},
+		{"asset", "GET", "example.com", "/a"},
+		{"asset head", "HEAD", "example.com", "/a"},
+		{"404 template", "GET", "example.com", "/nope"},
+		{"unknown host", "GET", "other.example", "/t"},
+		{"405", "POST", "example.com", "/t"},
+		{"fixed 404", "GET", "kilo.example", "/nope"},
+		{"error before the first byte", "GET", "example.com", "/e"},
+	} {
+		for _, lines := range [][]string{nil, {"sid=" + valid}} {
+			r := get(c.path, c.host)
+			r.Method = c.method
+			for _, l := range lines {
+				r.Header.Add("Cookie", l)
+			}
+			w, id := sessionEvent(t, c.name, off, r)
+			if got := w.Header().Values("Set-Cookie"); len(got) != 0 || id != keyed {
+				t.Errorf("%s with cookie %v: Set-Cookie %q, id %q, want the keyed id %q",
+					c.name, lines != nil, got, id, keyed)
+			}
+		}
+	}
+}
+
+// TestTU24CookieOffAbort checks the off switch on the path of a response that
+// ends the connection. The event has the keyed id and no cookie is set.
+func TestTU24CookieOffAbort(t *testing.T) {
+	on, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "issue", on, get("/t", "example.com"))
+	valid := newCookie(t, "issue", w.Header())
+	off := offHandler(t, on)
+	keyed := keyedID(t, off, "192.0.2.1")
+	for _, lines := range [][]string{nil, {"sid=" + valid}} {
+		fw := &failWriter{h: http.Header{}}
+		if !aborts(off, fw, withCookie("/t", lines...)) {
+			t.Errorf("cookie %v: no abort", lines != nil)
+		}
+		rec, _ := oneEvent(t, "abort", off.q)
+		if rec.Session == nil || *rec.Session != keyed {
+			t.Errorf("cookie %v: session %v, want %q", lines != nil, rec.Session, keyed)
+		}
+		if got := fw.h.Values("Set-Cookie"); len(got) != 0 {
+			t.Errorf("cookie %v: Set-Cookie %q", lines != nil, got)
+		}
+	}
+}
+
+// TestTU24CookieDefaultOn checks that a handler with no call of the switch
+// sets one cookie for a new client.
+func TestTU24CookieDefaultOn(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "default", h, get("/t", "example.com"))
+	newCookie(t, "default", w.Header())
+}
+
+// TestTU24CookieOffClockRead checks that a request reads the clock one time
+// also with the cookie off.
+func TestTU24CookieOffClockRead(t *testing.T) {
+	on, _ := eventHandler(t, 64)
+	off := offHandler(t, on)
+	reads := 0
+	off.now = func() time.Time { reads++; return testDay }
+	serve(t, off, withCookie("/t", "sid=x"))
+	aborts(off, &failWriter{h: http.Header{}}, get("/t", "example.com"))
+	if reads != 2 {
+		t.Errorf("%d clock reads for 2 requests", reads)
+	}
+}
+
+// fixedSource is a source that gives one bundle. Many goroutines can call it.
+type fixedSource struct{ b *bundle.Bundle }
+
+func (s fixedSource) Current() *bundle.Bundle { return s.b }
+
+// TestTU24CookieOffRace runs concurrent requests on a handler with the cookie
+// off. The race detector checks the switch. No response has a cookie.
+func TestTU24CookieOffRace(t *testing.T) {
+	on, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "issue", on, get("/t", "example.com"))
+	valid := newCookie(t, "issue", w.Header())
+	off := offHandler(t, on)
+	off.src = fixedSource{on.src.Current()}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 20 {
+				r := get("/t", "example.com")
+				if i%2 == 1 {
+					r.Header.Add("Cookie", "sid="+valid)
+				}
+				w := httptest.NewRecorder()
+				off.ServeHTTP(w, r)
+				if got := w.Header().Values("Set-Cookie"); len(got) != 0 {
+					t.Errorf("Set-Cookie %q", got)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
