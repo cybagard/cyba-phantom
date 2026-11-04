@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"crypto/hpke"
+	"errors"
 	"fmt"
 	"html/template"
 	"math/rand/v2"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // spinLimit is the number of clock reads that no sound test loader reaches.
@@ -325,6 +328,51 @@ func TestTU23RejectionNoWait(t *testing.T) {
 	_, err := g.load(SourceReload)
 	must(t, err)
 	g.noWait(2)
+}
+
+// T-U-23: a rejection after the seed step starts no wait. This covers the
+// rejection of the key set step and the rejection of a state fault. Only a swap
+// sets the time of the last swap.
+func TestTU23LateRejectionNoWait(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		want  error
+		fault func(e *env) (undo func())
+	}{
+		{"key set", ErrSeedInvalid, func(e *env) func() {
+			e.l.keySet = func([]byte, [32]byte, []string, bool) (*token.KeySet, error) {
+				return nil, errors.New("stub")
+			}
+			return func() { e.l.keySet = token.NewKeySet }
+		}},
+		{"state fault", ErrStateFault, func(e *env) func() {
+			dir := filepath.Join(e.state, "bundle", stateTempName)
+			must(t, os.MkdirAll(filepath.Join(dir, "x"), 0o700))
+			return func() { must(t, os.RemoveAll(dir)) }
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.l = e.seedLoader(nil)
+			key, g := keyTwo(e), newBareGapRig(t, e)
+			e.putSeeded(key, ver(2), trapEntsWith(plainEnt(seedA), "a")...)
+			for _, src := range []Source{SourceStart, SourceReload} {
+				_, err := g.load(src)
+				must(t, err)
+			}
+			g.reset()
+			g.clk.advance(swapGap + time.Second)
+			e.putSeeded(key, ver(3), trapEntsWith(plainEnt(seedB), "a")...)
+			undo := c.fault(e)
+			if _, err := g.load(SourceReload); err != c.want {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+			undo()
+			_, err := g.load(SourceReload)
+			must(t, err)
+			g.noWait(2)
+		})
+	}
 }
 
 // T-U-23: two loads that wait together do not both start inside the gap. The
