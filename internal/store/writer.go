@@ -444,9 +444,8 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // a range, in the same transaction. After countDrops, tokenWriter writes the
 // token rows of the callback rows that have a link. After the upserts, it sets
 // beacon_seen of each session of the beacon rows (markBeacons). The duplicate
-// count of the
-// mint rows grows only after a good COMMIT. The counts of unlinked callbacks do
-// the same. onCommit gets the count of event rows, not
+// count of the mint rows grows only after a good COMMIT. The counts of
+// unlinked callbacks do the same. onCommit gets the count of event rows, not
 // of session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
