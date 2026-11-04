@@ -581,8 +581,8 @@ func TestTU20LoadSequenceRises(t *testing.T) {
 	}
 }
 
-// T-U-20: the version state is removed. An older bundle then loads. It gets a
-// higher sequence than the bundle that ran before.
+// T-U-20: after the test removes the version state, an older bundle loads. It
+// gets a higher sequence than the bundle that ran before.
 func TestTU20OlderAfterStateRemoved(t *testing.T) {
 	e := running(t)
 	b2 := e.l.Current()
