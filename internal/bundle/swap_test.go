@@ -26,8 +26,13 @@ const spinLimit = 1_000_000
 // the gap uses it. That test then does not wait.
 //
 // A lock loop that does not end would hang the test run. So the clock and the
-// wait panic when a loader spins. The run then fails at once.
+// wait panic when a loader spins. The run then fails at once. The gap does not
+// read the clock before a first swap, so the swap time is an old one, not zero.
 func noGap(l *Loader) {
+	oldSwap := time.Unix(1, 0)
+	l.swapMu.Lock()
+	l.swapAt = oldSwap
+	l.swapMu.Unlock()
 	now, reads := l.now, new(atomic.Int64)
 	l.now = func() time.Time {
 		if reads.Add(1) > spinLimit {
@@ -40,7 +45,7 @@ func noGap(l *Loader) {
 			panic("a load waits for a gap that has passed")
 		}
 		l.swapMu.Lock()
-		l.swapAt = time.Time{}
+		l.swapAt = oldSwap
 		l.swapMu.Unlock()
 	}
 }
@@ -125,20 +130,19 @@ func newBareGapRig(t *testing.T, e *env) *gapRig {
 	t.Helper()
 	g := &gapRig{t: t, e: e, clk: &fakeClock{t: testNow}}
 	l := e.l
-	l.now = g.clk.now
-	l.sleep = func(d time.Duration) {
-		g.checkFree()
-		g.mu.Lock()
-		if g.dead.Load() || len(g.sleeps) >= 1000 {
-			// A load that waits so often has a loop that does not end.
-			// Stop the loop here. The test fails when gapBound has passed.
-			g.mu.Unlock()
-			select {}
+	l.swapMu.Lock()
+	l.swapAt = time.Time{}
+	l.swapMu.Unlock()
+	l.now = func() time.Time {
+		if g.dead.Load() {
+			// A load that did not return has a loop that does not end. It can
+			// hold loadMu here, so a park would block every later test. Panic,
+			// as noGap does, so the run fails at once.
+			panic(g.t.Name() + ": the lock loop does not end")
 		}
-		g.sleeps = append(g.sleeps, d)
-		g.mu.Unlock()
-		g.clk.advance(d)
+		return g.clk.now()
 	}
+	l.sleep = func(d time.Duration) { g.wait(d, true) }
 	l.afterRead = func() {
 		g.mu.Lock()
 		g.starts = append(g.starts, g.clk.now())
@@ -187,7 +191,27 @@ func (g *gapRig) load(src Source) (b *Bundle, err error) {
 	return b, err
 }
 
-// checkFree fails the test if a load waits while it holds loadMu.
+// wait is the wait of the rig. It records d and moves the clock. If free is
+// set, it fails the test when the load holds loadMu. A test with two loads
+// at once sets it only when no other load can hold loadMu.
+func (g *gapRig) wait(d time.Duration, free bool) {
+	if free {
+		g.checkFree()
+	}
+	g.mu.Lock()
+	if g.dead.Load() || len(g.sleeps) >= 1000 {
+		// A load that waits so often has a loop that does not end.
+		// Stop the loop here. The test fails when gapBound has passed.
+		g.mu.Unlock()
+		select {}
+	}
+	g.sleeps = append(g.sleeps, d)
+	g.mu.Unlock()
+	g.clk.advance(d)
+}
+
+// checkFree fails the test if a load waits while it holds loadMu. It is only
+// sound when no other load can hold loadMu: TryLock fails for any holder.
 func (g *gapRig) checkFree() {
 	if !loadMu.TryLock() {
 		if !g.dead.Load() {
@@ -294,21 +318,22 @@ func TestTU23RejectionNoWait(t *testing.T) {
 // second load checks the gap again after it takes loadMu.
 func TestTU23GapCheckedUnderLock(t *testing.T) {
 	g := newGapRig(t, SourceReload)
-	l, plain := g.e.l, g.e.l.sleep
+	l := g.e.l
 	var arrive, done sync.WaitGroup
 	var calls atomic.Int32
 	release := make(chan struct{})
 	arrive.Add(2)
+	// The other load can hold loadMu during a wait, so the waits do not check
+	// it. The check is made below, when both loads wait and none can hold it.
 	l.sleep = func(d time.Duration) {
 		target := g.clk.now().Add(d)
 		if calls.Add(1) <= 2 {
-			g.checkFree()
 			arrive.Done()
 			<-release
 			g.clk.atLeast(target)
 			return
 		}
-		plain(d)
+		g.wait(d, false)
 	}
 	g.clk.advance(time.Second)
 	for range 2 {
@@ -321,6 +346,7 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 		}()
 	}
 	g.within(arrive.Wait)
+	g.checkFree()
 	close(release)
 	g.within(done.Wait)
 	if len(g.starts) != 2 {
