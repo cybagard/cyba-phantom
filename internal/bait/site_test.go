@@ -73,13 +73,23 @@ func newBundle(tb testing.TB) *bundle.Bundle { return bundleWith(tb, "") }
 // bundleWith is newBundle with tag in the root page of example.com.
 func bundleWith(tb testing.TB, tag string) *bundle.Bundle { return bundleFiles(tb, tag, nil) }
 
+// manifestOf is the manifest text of a test bundle with the given version.
+func manifestOf(version string) string {
+	return fmt.Sprintf(`{"version":%q,"min_engine":"1.0.0","created":%q,"expires":%q,"key_id":"t1"}`, version,
+		time.Now().Add(-time.Hour).UTC().Format("2006-01-02T15:04:05Z"), time.Now().Add(24*time.Hour).UTC().Format("2006-01-02T15:04:05Z"))
+}
+
+// bundleAt is bundleWith with the manifest version of version.
+func bundleAt(tb testing.TB, tag, version string) *bundle.Bundle {
+	return bundleFiles(tb, tag, map[string]string{"manifest.json": manifestOf(version)})
+}
+
 // bundleFiles is bundleWith with the files of extra. A file of extra replaces
 // the file of the same name.
 func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bundle {
 	tb.Helper()
 	files := map[string]string{
-		"manifest.json": fmt.Sprintf(`{"version":"2026.11.01-1","min_engine":"1.0.0","created":%q,"expires":%q,"key_id":"t1"}`,
-			time.Now().Add(-time.Hour).UTC().Format("2006-01-02T15:04:05Z"), time.Now().Add(24*time.Hour).UTC().Format("2006-01-02T15:04:05Z")),
+		"manifest.json":                   manifestOf("2026.11.01-1"),
 		"secrets/token.seed":              strings.Repeat("\x09", 32),
 		"score/a":                         "score\n",
 		"fp/a":                            "fp\n",
@@ -258,6 +268,101 @@ func TestTU20SiteLostSwap(t *testing.T) {
 	}
 	if n := h.builds.Load(); n != 2 {
 		t.Errorf("builds = %d, want 2", n)
+	}
+}
+
+// requests serves n requests for the root page of example.com and checks the
+// body of each.
+func requests(t *testing.T, h *Handler, n int, tag string) {
+	t.Helper()
+	for range n {
+		if got, want := serve(t, h, get("/", "example.com")).Body.String(), "<p>index"+tag+"</p>\n"; got != want {
+			t.Fatalf("body %q, want %q", got, want)
+		}
+	}
+}
+
+// TestTU20SiteLostSwapNewer checks a lost swap against a newer bundle. A newer
+// bundle becomes cur between the Load and the CompareAndSwap of a call for an
+// older bundle. The call gets its own site and installs nothing. Requests for
+// the newer bundle then build no site.
+func TestTU20SiteLostSwapNewer(t *testing.T) {
+	const traps = `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x{{.Token}}"}]`
+	withVersion := func(tag, version string) *bundle.Bundle {
+		return bundleFiles(t, tag, map[string]string{"manifest.json": manifestOf(version), "traps/traps.json": traps})
+	}
+	older, newer := withVersion("-1", "2026.11.01-1"), withVersion("-22", "2026.11.01-2")
+	h := New(&swap{list: []*bundle.Bundle{newer}}, &fallbackFn{}, testQueue(t))
+	h.token = func() string { return "tok" }
+	h.hook = func() {
+		h.hook = nil
+		h.siteOf(newer)
+	}
+	s := h.siteOf(older)
+	if e := s.hosts["example.com"]["/"]; e == nil || e.asset.Len() != rootLen("-1") {
+		t.Error("the site is not the site of the older bundle")
+	}
+	if got := s.texts["a"]; got != "xtok" {
+		t.Errorf("trap text of the older site = %q, want %q", got, "xtok")
+	}
+	if st := h.sites.Load(); st.cur.b != newer || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
+		t.Error("the older bundle changed the state")
+	}
+	if n := h.builds.Load(); n != 2 {
+		t.Fatalf("builds = %d, want 2", n)
+	}
+	requests(t, h, 10, "-22")
+	if n := h.builds.Load(); n != 2 {
+		t.Errorf("builds after 10 requests = %d, want 2", n)
+	}
+}
+
+// TestTU20SiteOlderThanRetired checks a bundle that never was in the cache. It
+// is older than cur and the four retired bundles. Its request gets its own
+// site. Requests for the running bundle then build no site.
+func TestTU20SiteOlderThanRetired(t *testing.T) {
+	older := bundleAt(t, "-old", "2026.11.01-1")
+	var bs []*bundle.Bundle
+	for i := range 5 {
+		bs = append(bs, bundleAt(t, fmt.Sprintf("-n%d", i), fmt.Sprintf("2026.11.02-%d", i+1)))
+	}
+	src := &swap{list: []*bundle.Bundle{older, bs[4]}}
+	h := New(src, &fallbackFn{}, testQueue(t))
+	for _, b := range bs {
+		h.siteOf(b)
+	}
+	requests(t, h, 1, "-old")
+	if n := h.builds.Load(); n != 6 {
+		t.Fatalf("builds = %d, want 6", n)
+	}
+	requests(t, h, 10, "-n4")
+	if n := h.builds.Load(); n != 6 {
+		t.Errorf("builds after 10 requests = %d, want 6", n)
+	}
+	if h.sites.Load().cur.b != bs[4] {
+		t.Error("the running bundle is not the newest bundle")
+	}
+	if src.calls != 11 {
+		t.Errorf("source reads = %d, want 1 for each of 11 requests", src.calls)
+	}
+}
+
+// TestTU20SiteSameVersion checks that a bundle with the version of cur becomes
+// cur. A reload of the same archive makes such a bundle.
+func TestTU20SiteSameVersion(t *testing.T) {
+	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
+	h := New(&swap{list: []*bundle.Bundle{b2}}, &fallbackFn{}, testQueue(t))
+	h.siteOf(b1)
+	requests(t, h, 1, "-22")
+	if h.sites.Load().cur.b != b2 {
+		t.Fatal("the bundle with the same version is not cur")
+	}
+	if n := h.builds.Load(); n != 2 {
+		t.Fatalf("builds = %d, want 2", n)
+	}
+	requests(t, h, 10, "-22")
+	if n := h.builds.Load(); n != 2 {
+		t.Errorf("builds after 10 requests = %d, want 2", n)
 	}
 }
 
