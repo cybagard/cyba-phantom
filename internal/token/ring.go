@@ -38,15 +38,15 @@ type ringState struct {
 	futures atomic.Uint64
 }
 
-// snapshot is one value of the ring. A Swap makes a new one. A Verify reads it
-// with one atomic load.
+// snapshot is one value of the ring. A Swap makes a new one. A Verify or a
+// Check reads it with one atomic load.
 type snapshot struct {
 	sets  [2]*KeySet // the current key set, then the replaced one
 	until time.Time  // the replaced key set leaves the ring at this time
 }
 
-// NewRing makes an empty ring. now gives the time of Verify and of Swap. A nil
-// now is time.Now.
+// NewRing makes an empty ring. now gives the time of Verify, of Check and of
+// Swap. A nil now is time.Now.
 func NewRing(now func() time.Time) *Ring {
 	if now == nil {
 		now = time.Now
@@ -56,7 +56,8 @@ func NewRing(now func() time.Time) *Ring {
 
 // Swap makes next the current key set. The old current key set becomes the
 // replaced one, for 25 h. One compare-and-swap of a pointer changes the ring.
-// Thus a Verify sees the ring before or after a Swap and nothing between.
+// Thus a Verify or a Check sees the ring before or after a Swap and nothing
+// between.
 func (r *Ring) Swap(next *KeySet) {
 	// Round(0) strips the monotonic reading, so Before compares wall time.
 	until := r.now().Round(0).Add(replacedFor)
@@ -84,7 +85,7 @@ func (r *Ring) Len() int {
 	return n
 }
 
-// Futures gives the number of future tokens that Verify has found.
+// Futures gives the number of future tokens that Verify and Check have found.
 func (r *Ring) Futures() uint64 { return r.futures.Load() }
 
 // active gives the key sets of s that count at time now.
@@ -115,12 +116,12 @@ func (r *Ring) Verify(tok [Size]byte) Result {
 }
 
 // verifyAt checks one block against sets at time now, with the buffer of the
-// caller. It always decrypts. A block that is not valid gives the zero
-// Result, also if it would match. For a match it sets the window class, and
+// caller. It always decrypts. When parsed is false, the Result is zero,
+// whatever the block gives. For a match it sets the window class, and
 // it counts a future token.
-func (r *Ring) verifyAt(buf *[2 * Size]byte, sets []*KeySet, now time.Time, tok [Size]byte, valid bool) Result {
+func (r *Ring) verifyAt(buf *[2 * Size]byte, sets []*KeySet, now time.Time, tok [Size]byte, parsed bool) Result {
 	res := verifyIn(buf, sets, tok)
-	if !valid || !res.OK {
+	if !parsed || !res.OK {
 		return Result{}
 	}
 	res.Stale, res.Future = classify(res.Unit, now)

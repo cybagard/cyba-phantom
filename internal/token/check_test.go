@@ -10,16 +10,6 @@ import (
 	"time"
 )
 
-// sumKeySet makes a key set from a seed and a bundle SHA-256.
-func sumKeySet(t testing.TB, seed string, sum [32]byte) *KeySet {
-	t.Helper()
-	k, err := NewKeySet([]byte(seed), sum, traps(2), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
-}
-
 // allMatch is a cipher that decrypts every block to a valid future token.
 type allMatch struct{ cipher.Block }
 
@@ -37,7 +27,7 @@ func fixedRing(sets ...*KeySet) *Ring {
 // ring order. A non-match gives a zero set id.
 func TestTS32_SetID(t *testing.T) {
 	sumA, sumB := sha256.Sum256([]byte("a")), sha256.Sum256([]byte("b"))
-	a, b := sumKeySet(t, "seed", sumA), sumKeySet(t, "seed", sumB)
+	a, b := newDerived(t, []byte("seed"), sumA, 2, false), newDerived(t, []byte("seed"), sumB, 2, false)
 	tok, _ := a.Mint(1, unitTime(100))
 	var want, other [8]byte
 	copy(want[:], sumA[:8])
@@ -76,8 +66,8 @@ func TestTS32_SetID(t *testing.T) {
 
 // T-S-32: each Check call does 4 decrypts for each key set, for each input.
 func TestTS32_CheckDecrypts(t *testing.T) {
-	c1 := &countingBlock{Block: must(aes.NewCipher(testKey))}
-	c2 := &countingBlock{Block: must(aes.NewCipher(otherKey))}
+	c1 := &countingBlock{Block: must[cipher.Block](t)(aes.NewCipher(testKey))}
+	c2 := &countingBlock{Block: must[cipher.Block](t)(aes.NewCipher(otherKey))}
 	k1, _ := newKeySetBlock(c1, traps(2))
 	k2, _ := newKeySetBlock(c2, traps(2))
 	good, _ := k1.Mint(1, unitTime(100))
@@ -124,8 +114,8 @@ func (s *swapBlock) Decrypt(dst, src []byte) {
 func TestTS32_CheckOneLoad(t *testing.T) {
 	calls := 0
 	r := NewRing(func() time.Time { calls++; return unitTime(110) })
-	next := &countingBlock{Block: must(aes.NewCipher(otherKey))}
-	sb := &swapBlock{Block: must(aes.NewCipher(testKey))}
+	next := &countingBlock{Block: must[cipher.Block](t)(aes.NewCipher(otherKey))}
+	sb := &swapBlock{Block: must[cipher.Block](t)(aes.NewCipher(testKey))}
 	k1, _ := newKeySetBlock(sb, traps(2))
 	k2, _ := newKeySetBlock(next, traps(2))
 	sb.swap = func() { r.Swap(k2) }
@@ -140,11 +130,15 @@ func TestTS32_CheckOneLoad(t *testing.T) {
 	}
 }
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
+// must gives a function that returns v, or stops the test when err is set.
+func must[T any](t testing.TB) func(v T, err error) T {
+	return func(v T, err error) T {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
 	}
-	return v
 }
 
 // T-S-32: a position gives the Result of Ring.Verify. A bad, absent or

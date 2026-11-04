@@ -162,6 +162,7 @@ func TestTU01_RangeWrap(t *testing.T) {
 func TestTU01_ScratchIsCleared(t *testing.T) {
 	k := newSet(t, testKey, 2)
 	tok, _ := k.Mint(1, epoch)
+	ring := fixedRing(k)
 	calls := []struct {
 		name string
 		call func()
@@ -171,6 +172,8 @@ func TestTU01_ScratchIsCleared(t *testing.T) {
 		}},
 		{"Mint", func() { _, _ = k.Mint(1, epoch) }},
 		{"Verify", func() { Verify([]*KeySet{k}, tok) }},
+		{"Ring.Verify", func() { ring.Verify(tok) }},
+		{"Check", func() { ring.Check([Positions]string{Text(tok)}) }},
 	}
 	for _, c := range calls {
 		for range 100 {

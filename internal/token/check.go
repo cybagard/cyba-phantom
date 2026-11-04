@@ -8,11 +8,11 @@ const Positions = 4
 // loads the ring one time and reads the clock one time for all positions
 // (ADR-039 decision 6). An empty text is an absent position.
 //
-// Each position does one decrypt for each key set of the ring. This holds
-// also for an absent text and for a text that Parse refuses. Such a position
-// verifies the zero block. The work does not show which positions hold a
-// token. A refused or absent position always gives the zero Result, and it
-// does not count in Futures. Check does not allocate in steady state.
+// Each position does one decrypt for each key set of the ring. An absent text
+// and a text that Parse refuses get these decrypts too. They verify the zero
+// block. The time of a match and of an absent text can differ. A refused or
+// absent position always gives the zero Result, and it does not count in
+// Futures. Check does not allocate in steady state.
 func (r *Ring) Check(texts [Positions]string) [Positions]Result {
 	now := r.now()
 	sets := r.active(r.cur.Load(), now)

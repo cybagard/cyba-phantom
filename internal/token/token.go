@@ -91,7 +91,8 @@ var deriveKey = func(seed []byte, sum [32]byte) ([]byte, error) {
 var zeroCheck [Size - fieldBytes]byte
 
 // scratch holds the buffers for one cipher call. A local array that goes to
-// cipher.Block as a slice moves to the heap. The pool avoids that.
+// cipher.Block as a slice moves to the heap. The pool avoids that. A call of
+// Verify or Check uses one buffer.
 var scratch = sync.Pool{New: func() any { return new([2 * Size]byte) }}
 
 // KeySet mints and verifies the tokens of one key. It holds the cipher, a
@@ -109,7 +110,8 @@ type keySetState struct {
 	// it with crypto/subtle, so it is an int.
 	ref int
 	// setID is the first 8 bytes of the bundle SHA-256, big-endian. A key set
-	// from a test cipher has 0. Verify selects it with a mask.
+	// from newKeySet or newKeySetBlock has a zero set id. Verify selects it
+	// with a mask.
 	setID uint64
 }
 
@@ -277,7 +279,7 @@ func (k *KeySet) MintRange(indexes []int, at time.Time, out [][Size]byte) (first
 	return first, nil
 }
 
-// Result is the outcome of Verify. When OK is false, the other fields are
+// Result is the outcome of Verify, Ring.Verify and Ring.Check. When OK is false, the other fields are
 // zero.
 type Result struct {
 	OK   bool
@@ -289,7 +291,7 @@ type Result struct {
 	// Reference is true when the matching key set is of a reference bundle.
 	Reference bool
 	// SetID is the first 8 bytes of the bundle SHA-256 of the matching key
-	// set. A key set that a test made from a key has a zero SetID.
+	// set. A key set from newKeySet or newKeySetBlock has a zero set id.
 	SetID [8]byte
 	// Stale and Future give the window class of the token. Only Ring.Verify
 	// and Ring.Check set them. A future token is also stale. They never change
