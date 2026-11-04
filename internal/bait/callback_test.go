@@ -132,9 +132,10 @@ func (f *flushProbe) Flush() {
 }
 
 // TestTI04CallbackSurfaces checks the handler part of T-I-04. A token at each
-// position gives one callback event. It has the surface, the trap, the token
-// id, the route path, the vhost, the method, the status, the client address
-// and the link of the token. The request gives one request event. The handler
+// position gives one callback event. The test checks the surface, the trap,
+// the token id and the route path. It also checks the vhost, the method, the
+// status, the client address and the link. The request gives one request
+// event. The handler
 // flushes the response before any event. A route with an asset gives 200. A
 // route with none gives 204.
 func TestTI04CallbackSurfaces(t *testing.T) {
@@ -250,12 +251,13 @@ func otherKeySetToken(t testing.TB) string {
 	return token.Text(tok)
 }
 
-// TestTS32CallbackFixedResponse checks that good, stale, future, bad, absent
-// and other-key-set tokens give equal response bytes at each position, with no
-// Set-Cookie. It does this for a route with an asset and a route with none,
-// for GET, HEAD and POST. Both routes have a body position, so POST also goes
-// to the path, query and header positions. The test checks the header values.
-// A HEAD response has the status and headers of the GET response.
+// TestTS32CallbackFixedResponse checks the response for good, stale, future,
+// bad, absent and other-key-set tokens. It must have equal bytes at each
+// position, and no Set-Cookie. The test does this for a route with an asset
+// and a route with none, for GET, HEAD and POST. Both routes have a body
+// position, so POST also goes to the path, query and header positions. The
+// test checks the header values. A HEAD response has the status and headers
+// of the GET response.
 func TestTS32CallbackFixedResponse(t *testing.T) {
 	e := newCBEnv(t)
 	toks := map[string]string{
