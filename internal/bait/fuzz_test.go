@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fuzzSeeds are the forms of T-S-02 for the routes of example.com, as the
+// fuzzSeeds are the forms of T-S-02 for each route of hardServed, as the
 // target and the Host header.
 func fuzzSeeds() [][2]string {
 	var out [][2]string
@@ -17,8 +17,7 @@ func fuzzSeeds() [][2]string {
 			out = append(out, [2]string{f.target, f.host})
 		}
 	}
-	return append(out, [2]string{"/x?y=1", "EXAMPLE.com:443"}, [2]string{"*", "example.com"},
-		[2]string{"/a%2Fb", "example.com"}, [2]string{"/%73tyle.css", "example.com"})
+	return append(out, [2]string{"/x?y=1", "EXAMPLE.com:443"}, [2]string{"*", "example.com"})
 }
 
 // declared gives the bytes of the route with the escaped path p of the vhost

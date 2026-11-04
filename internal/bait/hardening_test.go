@@ -3,6 +3,7 @@ package bait
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/build"
 	"io"
@@ -103,8 +104,9 @@ func forbidden() []string {
 	return out
 }
 
-// exchange writes req on a new connection and reads one response. A request
-// that gets no response, because the server closed, gives status 0.
+// exchange writes req on a new connection and reads one response. Another
+// read error, such as EOF or a reset, is a close and gives status 0. A timeout
+// is not a close: it fails the test.
 func exchange(t *testing.T, addr, req string) (status int, body string) {
 	t.Helper()
 	c, err := net.Dial("tcp", addr)
@@ -114,6 +116,10 @@ func exchange(t *testing.T, addr, req string) (status int, body string) {
 	_, _ = c.Write([]byte(req))
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("no response to %q: %v", strings.SplitN(req, "\r\n", 2)[0], err)
+		}
 		return 0, ""
 	}
 	defer resp.Body.Close()
@@ -238,8 +244,9 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // around the body counts the bytes that the bait handler reads. The handler
 // reads 0 bytes. The callback row checks the code of this commit: the method
 // check comes before the route. T-S-02 and ADR-039 decision 19 permit a POST
-// on a callback route with a body position. The route reads at most 4 097
-// bytes. The beacon post path is not in the code.
+// on a callback route with a body position. Such a route may read at most
+// 4 097 bytes. This test does not check that rule. The beacon post path is not
+// in the code.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex
