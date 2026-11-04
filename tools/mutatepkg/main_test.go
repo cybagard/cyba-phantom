@@ -310,24 +310,39 @@ func TestWrapperPackageArgumentOfMutantTest(t *testing.T) {
 }
 
 const (
-	goodOut = "     KILLED CONDITIONALS_BOUNDARY at x.go:1:2\n" +
-		"Killed: 5, Lived: 1, Not covered: 0\n" +
-		"Timed out: 0, Not viable: 2, Skipped: 0\n" +
-		"Mutation testing completed in 1 second\n"
-	zeroOut = "  NOT VIABLE CONDITIONALS_BOUNDARY at x.go:1:2\n" +
-		"Killed: 0, Lived: 0, Not covered: 0\n" +
-		"Timed out: 0, Not viable: 30, Skipped: 0\n" +
-		"Mutation testing completed in 1 second\n"
+	done     = "Mutation testing completed in 1 second\n"
+	goodSums = "Killed: 437, Lived: 12, Not covered: 53\nTimed out: 2, Not viable: 8, Skipped: 0\n"
+	zeroSums = "Killed: 0, Lived: 0, Not covered: 0\nTimed out: 0, Not viable: 30, Skipped: 0\n"
+	goodOut  = "     KILLED CONDITIONALS_BOUNDARY at x.go:1:2\n" + done + goodSums
+	zeroOut  = "  NOT VIABLE CONDITIONALS_BOUNDARY at x.go:1:2\n" + done + zeroSums
+
 	passOutput  = "ok  \t" + mod + "\t0.01s\n"
 	setupOutput = "no required module provides package x\nFAIL\t" + mod + " [setup failed]\n"
 	buildOutput = "x.go:1:1: bad\nFAIL\t" + mod + " [build failed]\n"
 )
 
 // runDir makes a run directory with the given files and runs the check mode.
+// MUTATE_FROM and MUTATE_TO have the two halves of fix.
 func runDir(t *testing.T, files map[string]string, fix string) (int, string) {
 	t.Helper()
+	from, to, _ := strings.Cut(fix, " ")
+	return runDirEnv(t, files, fix, from, to)
+}
+
+// runDirEnv is runDir with the given MUTATE_FROM and MUTATE_TO. A file name
+// that ends in a slash makes a directory.
+func runDirEnv(t *testing.T, files map[string]string, fix, from, to string) (int, string) {
+	t.Helper()
+	t.Setenv("MUTATE_FROM", from)
+	t.Setenv("MUTATE_TO", to)
 	dir := t.TempDir()
 	for name, body := range files {
+		if strings.HasSuffix(name, "/") {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -343,9 +358,19 @@ func runDir(t *testing.T, files map[string]string, fix string) (int, string) {
 func TestCheckFailsWhenPlannedReplacementDidNotHappen(t *testing.T) {
 	fix := mod + " " + mod + "/cmd/app"
 	rc, errs := runDir(t, map[string]string{"out": goodOut}, fix)
-	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the go wrapper replaced no package ("+mod+" with "+mod+"/cmd/app)") ||
-		strings.Count(errs, "\n") != 1 {
+	const want = "mutate FAIL: the go wrapper replaced no package (" + mod + " with " + mod + "/cmd/app)"
+	if rc != 1 || !strings.HasPrefix(errs, want) || strings.Count(errs, "\n") != 1 {
 		t.Errorf("rc %d, err %q", rc, errs)
+	}
+	// Only NOT VIABLE status lines are a mutant status as well.
+	rc, errs = runDir(t, map[string]string{"out": zeroOut}, fix)
+	if rc != 1 || !strings.HasPrefix(errs, want) || strings.Count(errs, "\n") != 1 {
+		t.Errorf("only not viable: rc %d, err %q", rc, errs)
+	}
+	// A directory named replaced is no file that the wrapper wrote.
+	rc, errs = runDir(t, map[string]string{"out": goodOut, "replaced/": ""}, fix)
+	if rc != 1 || !strings.HasPrefix(errs, want) || strings.Count(errs, "\n") != 1 {
+		t.Errorf("replaced is a directory: rc %d, err %q", rc, errs)
 	}
 	// The file replaced makes the same run pass.
 	rc, errs = runDir(t, map[string]string{"out": goodOut, "replaced": "\n"}, fix)
@@ -353,7 +378,7 @@ func TestCheckFailsWhenPlannedReplacementDidNotHappen(t *testing.T) {
 		t.Errorf("with replaced: rc %d, err %q", rc, errs)
 	}
 	// No mutant status, so the guard has nothing to judge.
-	rc, errs = runDir(t, map[string]string{"out": "Killed: 1, Lived: 0, Not covered: 0\n" +
+	rc, errs = runDir(t, map[string]string{"out": done + "Killed: 1, Lived: 0, Not covered: 0\n" +
 		"Timed out: 0, Not viable: 0, Skipped: 0\n"}, fix)
 	if rc != 0 || errs != "" {
 		t.Errorf("no mutant status: rc %d, err %q", rc, errs)
@@ -383,7 +408,7 @@ func TestCheckFailsWhenNoMutantRanATest(t *testing.T) {
 		{"lived and timed out are equal", "Killed: 0, Lived: 1, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
 		{"killed and timed out are equal", "Killed: 1, Lived: 0, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
 	} {
-		rc, errs := runDir(t, map[string]string{"out": c.counts, "replaced": "\n"}, "")
+		rc, errs := runDir(t, map[string]string{"out": done + c.counts, "replaced": "\n"}, "")
 		if rc != 0 || errs != "" {
 			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
 		}
@@ -396,14 +421,80 @@ func TestCheckFailsWhenSummaryLineIsMissing(t *testing.T) {
 		second = "Timed out: 0, Not viable: 2, Skipped: 0\n"
 	)
 	for _, c := range []struct{ name, out, want string }{
-		{"no Killed line", second, "no line with Killed and Lived"},
-		{"no Timed out line", first, "no line with Timed out and Not viable"},
-		{"no summary", "Mutation testing completed in 1 second\n", "no line with Killed and Lived"},
+		{"no Killed line", done + second, "no line with Killed and Lived"},
+		{"no Timed out line", done + first, "no line with Timed out and Not viable"},
+		{"no summary", done, "no line with Killed and Lived"},
+		{"no completed line", first + second, "no completed line"},
+		{"Killed line twice", done + first + first + second, "2 lines with Killed and Lived"},
+		{"Timed out line twice", done + first + second + second, "2 lines with Timed out and Not viable"},
+		// A whole line before the completed line does not count.
+		{"summary before completed line", first + second + done, "no line with Killed and Lived"},
+		{"Killed line before completed line", first + done + second, "no line with Killed and Lived"},
 	} {
 		rc, errs := runDir(t, map[string]string{"out": c.out, "replaced": "\n"}, "")
 		if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the gremlins output has "+c.want) ||
 			strings.Count(errs, "\n") != 1 {
 			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
+		}
+	}
+}
+
+func TestCheckTakesSummaryFromWholeLinesOnly(t *testing.T) {
+	// A status line with such a file name is no summary line. Only the
+	// NOT VIABLE count tells that no mutant ran.
+	out := done + "     KILLED X at Killed: 3, Lived: 0.go\n" + zeroSums
+	rc, errs := runDir(t, map[string]string{"out": out, "replaced": "\n"}, "")
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: no mutant ran a test") {
+		t.Errorf("file name in a status line: rc %d, err %q", rc, errs)
+	}
+	// The same text before the completed line, as a whole line.
+	out = "Killed: 3, Lived: 0, Not covered: 0\n" + done + zeroSums
+	rc, errs = runDir(t, map[string]string{"out": out, "replaced": "\n"}, "")
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: no mutant ran a test") {
+		t.Errorf("summary before completed line: rc %d, err %q", rc, errs)
+	}
+	// Text after a summary line makes it no summary line.
+	out = done + "Killed: 5, Lived: 1, Not covered: 0 x\n" + "Timed out: 0, Not viable: 2, Skipped: 0\n"
+	rc, errs = runDir(t, map[string]string{"out": out, "replaced": "\n"}, "")
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the gremlins output has no line with Killed and Lived") {
+		t.Errorf("text after the line: rc %d, err %q", rc, errs)
+	}
+}
+
+func TestCheckFailsWhenEnvIsNotTheReplacement(t *testing.T) {
+	fix := mod + " " + mod + "/cmd/app"
+	files := map[string]string{"out": goodOut, "replaced": "\n"}
+	for _, c := range []struct {
+		name, fix, from, to string
+		ok                  bool
+	}{
+		{"both halves", fix, mod, mod + "/cmd/app", true},
+		{"no replacement and no values", "", "", "", true},
+		{"wrong to", fix, mod, mod + "/tools/dco", false},
+		{"wrong from", fix, mod + "/x", mod + "/cmd/app", false},
+		{"empty to", fix, mod, "", false},
+		{"empty from", fix, "", mod + "/cmd/app", false},
+		{"values with an empty fix", "", mod, mod + "/cmd/app", false},
+		{"from with an empty fix", "", mod, "", false},
+		{"to with an empty fix", "", "", mod + "/cmd/app", false},
+	} {
+		rc, errs := runDirEnv(t, files, c.fix, c.from, c.to)
+		if c.ok && (rc != 0 || errs != "") {
+			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
+		}
+		if !c.ok && (rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: MUTATE_FROM or MUTATE_TO differs") ||
+			strings.Count(errs, "\n") != 1) {
+			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
+		}
+	}
+}
+
+func TestCheckRefusesRunDirectoryThatIsNotAbsolute(t *testing.T) {
+	for _, dir := range []string{"", "run", "./run"} {
+		var out, errb bytes.Buffer
+		rc := run([]string{"-check", dir, ""}, &out, &errb)
+		if rc != 2 || !strings.Contains(errb.String(), "usage: mutatepkg <pkg> | mutatepkg -check <run directory> <replacement>") {
+			t.Errorf("dir %q: rc %d, err %q", dir, rc, errb.String())
 		}
 	}
 }
@@ -429,6 +520,8 @@ func TestCheckPassesGoodRun(t *testing.T) {
 		"test-output.100": passOutput,
 		"test-output.200": buildOutput,
 		"test-output.300": "--- FAIL: TestX (0.00s)\nFAIL\nFAIL\t" + mod + "\t0.01s\n",
+		// Text after the bracket makes it no setup failure of the wrapper.
+		"test-output.400": "FAIL\t" + mod + " [setup failed] more\n",
 	}, mod+" "+mod+"/cmd/app")
 	if rc != 0 || errs != "" {
 		t.Errorf("rc %d, err %q", rc, errs)
@@ -436,6 +529,8 @@ func TestCheckPassesGoodRun(t *testing.T) {
 }
 
 func TestCheckErrors(t *testing.T) {
+	t.Setenv("MUTATE_FROM", "")
+	t.Setenv("MUTATE_TO", "")
 	var out, errb bytes.Buffer
 	if rc := run([]string{"-check", t.TempDir(), ""}, &out, &errb); rc != 1 || !strings.HasPrefix(errb.String(), "mutate FAIL:") {
 		t.Errorf("no out file: rc %d, err %q", rc, errb.String())
@@ -451,11 +546,17 @@ func TestMakefileCallsCheckAfterGremlins(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
+	// The whole recipe line of the call, from the tab to the line end, sits
+	// after the end of the gremlins run and before the list of mutants.
+	const call = "\n\t" + `"$$d/mutatepkg" -check "$$d" "$$fix" || exit $$?; \` + "\n"
+	const ended = `grep -q 'Mutation testing completed' "$$d/out"`
+	const list = "\n\t" + `echo "== not killed =="; \` + "\n"
 	gremlins := strings.Index(text, `gremlins unleash`)
-	call := strings.Index(text, `"$$d/mutatepkg" -check "$$d" "$$fix" || exit $$?;`)
-	list := strings.Index(text, `echo "== not killed =="`)
-	if gremlins < 0 || call < gremlins || list < call {
-		t.Errorf("positions: gremlins %d, check %d, list %d", gremlins, call, list)
+	end := strings.Index(text, ended)
+	at := strings.Index(text, call)
+	next := strings.Index(text, list)
+	if strings.Count(text, call) != 1 || gremlins < 0 || end < gremlins || at < end || next < at {
+		t.Errorf("positions: gremlins %d, ended %d, check %d, list %d", gremlins, end, at, next)
 	}
 	// The old guard tested MUTATE_FROM and needed the file replaced to be
 	// missing. It saw neither a broken export nor a package that did not load.

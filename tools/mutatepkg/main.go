@@ -30,17 +30,24 @@
 // prefix "module " removed. If that text is not the module path from go
 // list, mutatepkg names both and exits 2. A comment on the line does this.
 //
-// The -check mode runs after gremlins. <replacement> is the output of the
-// first mode. It reads the files out, replaced and test-output.* in the run
-// directory. It prints one "mutate FAIL:" line and exits 1 in four cases.
-//   - A replacement was planned, the file replaced is missing, and the
-//     gremlins output has a mutant status.
-//   - The gremlins output has no "Killed, Lived" line or no "Timed out,
-//     Not viable" line, so the counts are unknown.
+// The -check mode runs after gremlins. <run directory> is an absolute path.
+// <replacement> is the output of the first mode. It reads the files out,
+// replaced and test-output.* in the run directory. It also reads MUTATE_FROM
+// and MUTATE_TO from its environment. It prints one "mutate FAIL:" line and
+// exits 1 in five cases.
+//   - MUTATE_FROM and MUTATE_TO are not the two halves of <replacement>. The
+//     halves are the text before and after its first space. Both must be
+//     empty if <replacement> is empty.
+//   - A replacement was planned, the file replaced is not a regular file,
+//     and the gremlins output has a mutant status.
+//   - After the line "Mutation testing completed", the gremlins output does
+//     not have the "Killed, Lived" line once, or not the "Timed out,
+//     Not viable" line once, so the counts are unknown.
 //   - Killed, Lived and Timed out are 0, and Not viable is not 0.
 //   - A test-output file has the FAIL line of a setup failure.
 //
-// Exit codes: 0 done, 1 a failed check, 2 usage or a refused PKG. Exit code 1
+// Exit codes: 0 done, 1 a failed check, 2 usage or a refused PKG. Exit code 2
+// also means -check got an empty or a relative run directory. Exit code 1
 // also means go list failed or no package matches PKG.
 package main
 
@@ -173,54 +180,72 @@ func checkGoMod(dir, module string) error {
 }
 
 // Patterns of the gremlins output and of the FAIL line that the go wrapper
-// (mutate-go.sh) turns into exit status 2.
+// (mutate-go.sh) turns into exit status 2. A summary line is a whole line.
 var (
 	statusLine  = regexp.MustCompile(`(?m)^ *(KILLED|LIVED|TIMED OUT|NOT VIABLE) `)
-	killedLived = regexp.MustCompile(`Killed: (\d+), Lived: (\d+)`)
-	timedViable = regexp.MustCompile(`Timed out: (\d+), Not viable: (\d+)`)
+	completed   = regexp.MustCompile(`(?m)^Mutation testing completed`)
+	killedLived = regexp.MustCompile(`(?m)^ *Killed: (\d+), Lived: (\d+), Not covered: \d+$`)
+	timedViable = regexp.MustCompile(`(?m)^ *Timed out: (\d+), Not viable: (\d+), Skipped: \d+$`)
 	setupFailed = regexp.MustCompile(`(?m)^FAIL\t[^ \t]+ \[setup failed\]$`)
 )
 
-// count returns the two numbers of the first match of re in text, or false.
-func count(re *regexp.Regexp, text string) (int, int, bool) {
-	m := re.FindStringSubmatch(text)
-	if m == nil {
-		return 0, 0, false
+// count returns the two numbers of the one match of re in text. It returns
+// an error that names the two counts if there is no match or more than one.
+func count(re *regexp.Regexp, text, names string) (int, int, error) {
+	ms := re.FindAllStringSubmatch(text, -1)
+	switch {
+	case len(ms) == 0:
+		return 0, 0, fmt.Errorf("the gremlins output has no line with %s, so the check cannot count the mutants", names)
+	case len(ms) > 1:
+		return 0, 0, fmt.Errorf("the gremlins output has %d lines with %s, so the check cannot count the mutants", len(ms), names)
 	}
-	a, _ := strconv.Atoi(m[1])
-	b, _ := strconv.Atoi(m[2])
-	return a, b, true
+	a, _ := strconv.Atoi(ms[0][1])
+	b, _ := strconv.Atoi(ms[0][2])
+	return a, b, nil
 }
 
 // checkRun reads the run directory of "make mutate" after gremlins ended. It
 // returns an error that names the cause if no mutant ran a test on PKG.
-// It also returns an error if the output lacks a summary line, because
-// the counts are then unknown. The file "out" has the gremlins output.
-// The file "replaced" has a line for each replacement of the go wrapper.
-// fix is the output of the plan mode.
+// The environment variables MUTATE_FROM and MUTATE_TO must be the two halves
+// of fix. These are the values that the go wrapper reads. Both are empty if
+// fix is empty.
+// It also returns an error if the output lacks a summary line, or has
+// one twice, because the counts are then unknown. Both lines come after the
+// line "Mutation testing completed". The file "out" has the gremlins output.
+// The file "replaced" must be a regular file. It has a line for each
+// replacement of the go wrapper. fix is the output of the plan mode.
 //
 // The go wrapper writes a file test-output.<pid> for each go test call. That
 // includes the pre-check and the coverage run of gremlins. Both passed, or
 // the run would have ended before this check, so they have no setup FAIL line.
 func checkRun(dir, fix string) error {
+	from, to, _ := strings.Cut(fix, " ")
+	envFrom, envTo := os.Getenv("MUTATE_FROM"), os.Getenv("MUTATE_TO")
+	if envFrom != from || envTo != to {
+		return fmt.Errorf("MUTATE_FROM or MUTATE_TO differs from the replacement (%q %q), so the wrapper replaced the wrong package", envFrom, envTo)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "out"))
 	if err != nil {
 		return err
 	}
 	out := string(data)
 	if fix != "" && statusLine.MatchString(out) {
-		if _, err := os.Stat(filepath.Join(dir, "replaced")); err != nil {
-			from, to, _ := strings.Cut(fix, " ")
-			return fmt.Errorf("the go wrapper replaced no package (%s with %s), so the mutants did not run on the package of PKG", from, to)
+		if fi, err := os.Lstat(filepath.Join(dir, "replaced")); err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("the go wrapper replaced no package (%s with %s), so no mutant ran on PKG", from, to)
 		}
 	}
-	killed, lived, ok := count(killedLived, out)
-	if !ok {
-		return fmt.Errorf("the gremlins output has no line with Killed and Lived, so the run cannot be judged")
+	loc := completed.FindStringIndex(out)
+	if loc == nil {
+		return fmt.Errorf("the gremlins output has no completed line, so the check cannot count the mutants")
 	}
-	timed, viable, ok := count(timedViable, out)
-	if !ok {
-		return fmt.Errorf("the gremlins output has no line with Timed out and Not viable, so the run cannot be judged")
+	summary := out[loc[1]:]
+	killed, lived, err := count(killedLived, summary, "Killed and Lived")
+	if err != nil {
+		return err
+	}
+	timed, viable, err := count(timedViable, summary, "Timed out and Not viable")
+	if err != nil {
+		return err
 	}
 	if killed+lived+timed == 0 && viable != 0 {
 		return fmt.Errorf("no mutant ran a test (killed, lived and timed out are 0, not viable is %d)", viable)
@@ -235,14 +260,19 @@ func checkRun(dir, fix string) error {
 			return err
 		}
 		if setupFailed.Match(text) {
-			return fmt.Errorf("the package could not load in a go test call (%s has a setup failed line), so a mutant cannot have run a test", filepath.Base(f))
+			return fmt.Errorf("the package could not load in a go test call (%s), so no mutant ran", filepath.Base(f))
 		}
 	}
 	return nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 3 && args[0] == "-check" {
+	const usage = "usage: mutatepkg <pkg> | mutatepkg -check <run directory> <replacement>"
+	if len(args) > 0 && args[0] == "-check" {
+		if len(args) != 3 || !filepath.IsAbs(args[1]) {
+			fmt.Fprintln(stderr, usage)
+			return 2
+		}
 		if err := checkRun(args[1], args[2]); err != nil {
 			fmt.Fprintln(stderr, "mutate FAIL:", err)
 			return 1
@@ -250,7 +280,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if len(args) != 1 || args[0] == "" {
-		fmt.Fprintln(stderr, "usage: mutatepkg <pkg>")
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 	module, moduleDir, pkgs, err := list(args[0])

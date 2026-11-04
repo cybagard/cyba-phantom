@@ -268,14 +268,21 @@ perf-inner:
 # The wrapper adds one line to the file "replaced" in the run directory for
 # each replacement. After gremlins, the target calls tools/mutatepkg with
 # -check. That mode can fail the target (exit 1) with one "mutate FAIL" line
-# that names the cause. There are four causes.
-# The first is a planned replacement, with the file missing, and a mutant
-# status in the gremlins output. That status is KILLED, LIVED, TIMED OUT or
-# NOT VIABLE. Then no mutant ran on the package that tools/mutatepkg found.
-# The second is a gremlins output with no "Killed, Lived" line or no
-# "Timed out, Not viable" line. Then the counts are unknown.
-# The third is Killed, Lived and Timed out all 0 and Not viable not 0.
-# The fourth is a test-output file in the run directory with the FAIL line of
+# that names the cause. There are five causes.
+# The target exports MUTATE_FROM and MUTATE_TO before gremlins. The -check
+# mode reads the same two variables from its environment, as the wrapper does.
+# The first is a value that is not its half of the planned replacement.
+# From is the text before the first space, and to is the text after it.
+# Both must be empty if no replacement is planned.
+# The second is a planned replacement, with no regular file "replaced", and a
+# mutant status in the gremlins output. That status is KILLED, LIVED,
+# TIMED OUT or NOT VIABLE. Then no mutant ran on the package that
+# tools/mutatepkg found.
+# The third is a gremlins output that does not have the "Killed, Lived" line
+# once, or not the "Timed out, Not viable" line once, after the line
+# "Mutation testing completed". Then the counts are unknown.
+# The fourth is Killed, Lived and Timed out all 0 and Not viable not 0.
+# The fifth is a test-output file in the run directory with the FAIL line of
 # a setup failure. Then the package could not load. A mutation of code does
 # not change the imports. The pre-check and the coverage run of gremlins also
 # write these files. They passed, so they have no such line.
