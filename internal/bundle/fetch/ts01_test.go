@@ -75,10 +75,18 @@ func signedPair(t *testing.T, version string) pair {
 // events go to the queue that it returns.
 func runningLoader(t *testing.T, a pair) (*bundle.Loader, *event.Queue) {
 	t.Helper()
-	dir := t.TempDir()
+	return loaderAt(t, t.TempDir(), &a)
+}
+
+// loaderAt makes a loader on dir. With a start pair, it does the start load.
+// With nil, it has no running bundle.
+func loaderAt(t *testing.T, dir string, a *pair) (*bundle.Loader, *event.Queue) {
+	t.Helper()
 	noErr(t, os.MkdirAll(filepath.Join(dir, "bundle"), 0o700))
-	noErr(t, os.WriteFile(filepath.Join(dir, "bundle/current.cbnd"), a.archive, 0o600))
-	noErr(t, os.WriteFile(filepath.Join(dir, "bundle/current.sig"), a.sig, 0o600))
+	if a != nil {
+		noErr(t, os.WriteFile(filepath.Join(dir, "bundle/current.cbnd"), a.archive, 0o600))
+		noErr(t, os.WriteFile(filepath.Join(dir, "bundle/current.sig"), a.sig, 0o600))
+	}
 	root, err := os.OpenRoot(dir)
 	noErr(t, err)
 	t.Cleanup(func() { root.Close() })
@@ -88,8 +96,10 @@ func runningLoader(t *testing.T, a pair) (*bundle.Loader, *event.Queue) {
 	var shift atomic.Int64
 	l.SetClock(func() time.Time { return time.Now().Add(time.Duration(shift.Load())) },
 		func(d time.Duration) { shift.Add(int64(d)) })
-	if _, err := l.Load(true); err != nil {
-		t.Fatal(err)
+	if a != nil {
+		if _, err := l.Load(true); err != nil {
+			t.Fatal(err)
+		}
 	}
 	q, err := event.NewQueue(8, event.NewCounters())
 	noErr(t, err)
@@ -153,11 +163,32 @@ type fetchRig struct {
 func newFetchRig(t *testing.T, a pair, o *origin) *fetchRig {
 	t.Helper()
 	l, q := runningLoader(t, a)
+	return rigOn(t, l, q, o)
+}
+
+// rigOn is a fetchRig on the loader l and its queue q.
+func rigOn(t *testing.T, l *bundle.Loader, q *event.Queue, o *origin) *fetchRig {
+	t.Helper()
 	s := newSim(t, 0.5)
 	r := newClientFor(t, start(t, o, nil), settings{archiveCap: 1 << 16, sigCap: smallSig, now: s.clk.now}, mode{})
 	f := NewFetcher(r.c, l, time.Hour)
 	s.attach(f)
 	return &fetchRig{f, l, q, l.Current(), o, s}
+}
+
+// checkOrder checks that the paths are signature, archive, signature.
+func checkOrder(t *testing.T, paths []string) {
+	t.Helper()
+	want := []string{".sig", ".cbnd", ".sig"}
+	if len(paths) != len(want) {
+		t.Fatalf("requests %v, want signature, archive, signature", paths)
+	}
+	for i, p := range paths {
+		if !strings.HasSuffix(p, want[i]) {
+			t.Errorf("requests %v, want signature, archive, signature", paths)
+			return
+		}
+	}
 }
 
 // T-S-01: a changed archive from the fetch URL gives bad_sig. The old bundle
@@ -179,9 +210,7 @@ func TestTS01ChangedArchiveFromFetch(t *testing.T) {
 		details[0]["reason"] != "bad_sig" || details[0]["source"] != "fetch" {
 		t.Errorf("events %v, details %v", kinds, details)
 	}
-	if n := len(r.o.requests()); n != 3 {
-		t.Errorf("%d requests, want signature, archive, signature", n)
-	}
+	checkOrder(t, r.o.requests())
 	if r.f.c.Count(ClassRejected) != 1 || !r.f.c.LastGood().IsZero() {
 		t.Errorf("rejected %d, last good %v", r.f.c.Count(ClassRejected), r.f.c.LastGood())
 	}
@@ -207,25 +236,112 @@ func TestTS30UnchangedSignature(t *testing.T) {
 }
 
 // T-S-30: a signature file that changes between the two reads loads nothing.
-// The fetch counts the class changed, and the next wait is a backoff step.
+// The fetch counts the class changed, and the next wait is a backoff step. Then
+// the server gives a stable pair, and the second fetch loads it.
 func TestTS30PairChangesBetweenReads(t *testing.T) {
 	b := signedPair(t, "2026.11.01-2")
 	c := signedPair(t, "2026.11.01-3")
 	r := newFetchRig(t, signedPair(t, "2026.11.01-1"), &origin{archive: b.archive, sigs: func(n int) []byte {
-		return [][]byte{b.sig, c.sig}[n%2]
+		if n == 1 {
+			return c.sig
+		}
+		return b.sig
 	}})
-	r.sim.maxWaits = 2
+	r.sim.maxWaits = 3
+	var tries int
+	var loaded bool
+	var changed uint64
+	r.f.try = func(ctx context.Context) bool {
+		good := r.f.fetch(ctx)
+		if tries++; tries == 1 { // the state after the changed pair
+			loaded, changed = r.l.Current() != r.old, r.f.c.Count(ClassChanged)
+		}
+		return good
+	}
 	r.sim.run()
-	if r.l.Current() != r.old {
-		t.Error("the running bundle changed")
+	if loaded || changed != 1 || r.f.c.Count(ClassRejected) != 0 {
+		t.Errorf("after the first fetch: loaded %v, changed %d, rejected %d", loaded, changed, r.f.c.Count(ClassRejected))
+	}
+	// The wait after the changed pair is the 60 s step. A good fetch gives 1 h.
+	checkWaits(t, r.sim.waits, secs(60, 3600))
+	if tries != 2 {
+		t.Errorf("%d fetches, want 2", tries)
+	}
+	kinds, details := events(t, r.q)
+	if len(kinds) != 1 || kinds[0] != event.KindBundleLoad || details[0]["source"] != "fetch" {
+		t.Errorf("events %v, details %v", kinds, details)
+	}
+	if got := r.l.Current(); got == nil || !bytes.Equal(got.Signature(), b.sig) {
+		t.Errorf("the running bundle is %v", got)
+	}
+}
+
+// T-S-30: no running bundle. The fetch reads the pair and loads it.
+func TestTS30NoRunningBundle(t *testing.T) {
+	b := signedPair(t, "2026.11.01-2")
+	l, q := loaderAt(t, t.TempDir(), nil)
+	if l.Current() != nil {
+		t.Fatal("the loader has a running bundle")
+	}
+	r := rigOn(t, l, q, &origin{archive: b.archive, sigs: func(int) []byte { return b.sig }})
+	if !r.f.fetch(context.Background()) {
+		t.Fatal("the fetch was not good")
+	}
+	checkOrder(t, r.o.requests())
+	kinds, details := events(t, q)
+	if len(kinds) != 1 || kinds[0] != event.KindBundleLoad || details[0]["source"] != "fetch" {
+		t.Errorf("events %v, details %v", kinds, details)
+	}
+	if got := l.Current(); got == nil || !bytes.Equal(got.Signature(), b.sig) {
+		t.Errorf("the running bundle is %v", got)
+	}
+}
+
+// SEC-25: a load that cannot write its files is no rejection. The fetcher
+// counts it as an install fault. The old bundle serves, and there is no event.
+func TestTS30InstallFault(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to a directory with mode 0500")
+	}
+	b := signedPair(t, "2026.11.01-2")
+	dir := t.TempDir()
+	a := signedPair(t, "2026.11.01-1")
+	l, q := loaderAt(t, dir, &a)
+	r := rigOn(t, l, q, &origin{archive: b.archive, sigs: func(int) []byte { return b.sig }})
+	bundleDir := filepath.Join(dir, "bundle")
+	noErr(t, os.Chmod(bundleDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(bundleDir, 0o700) })
+	if r.f.fetch(context.Background()) {
+		t.Error("a fetch that could not write gave a good fetch")
+	}
+	if r.f.InstallFaults() != 1 || r.f.c.Count(ClassRejected) != 0 {
+		t.Errorf("install faults %d, rejected %d", r.f.InstallFaults(), r.f.c.Count(ClassRejected))
+	}
+	if r.l.Current() != r.old || !r.f.c.LastGood().IsZero() {
+		t.Errorf("the running bundle changed, or last good = %v", r.f.c.LastGood())
 	}
 	if kinds, _ := events(t, r.q); len(kinds) != 0 {
 		t.Errorf("events %v", kinds)
 	}
-	if r.f.c.Count(ClassChanged) != 1 || r.f.c.Count(ClassRejected) != 0 {
-		t.Errorf("changed %d, rejected %d", r.f.c.Count(ClassChanged), r.f.c.Count(ClassRejected))
+}
+
+// T-U-23: the context ends after the second signature read. The fetch starts
+// no load, so there is no event and the running bundle stays.
+func TestTS30StopBeforeLoad(t *testing.T) {
+	b := signedPair(t, "2026.11.01-2")
+	r := newFetchRig(t, signedPair(t, "2026.11.01-1"), &origin{archive: b.archive, sigs: func(int) []byte { return b.sig }})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.f.pairRead = cancel
+	if r.f.fetch(ctx) {
+		t.Error("a fetch that the stop ended was good")
 	}
-	checkWaits(t, r.sim.waits, secs(60))
+	if r.l.Current() != r.old {
+		t.Error("a load started after the stop")
+	}
+	if kinds, _ := events(t, r.q); len(kinds) != 0 {
+		t.Errorf("events %v", kinds)
+	}
 }
 
 // T-S-30: a new pair gives one bundle_load with source fetch, and a good fetch.

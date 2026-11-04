@@ -235,6 +235,21 @@ func TestTU23StopWhileWaiting(t *testing.T) {
 	s.f.Run(ctx)
 }
 
+// The wait cancels the context and then gives true, as a timer and a stop can
+// do together. No fetch may start.
+func TestTU23StopWhenWaitAndStopMeet(t *testing.T) {
+	s := newSim(t, 0.5).fake(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if s.f.wait(stopped, 0) { // the fake wait of the rig ends with its context
+		t.Error("the fake wait ignored a done context")
+	}
+	s.f.wait = func(context.Context, time.Duration) bool { cancel(); return true }
+	s.f.try = func(context.Context) bool { t.Error("a fetch started after the stop"); return false }
+	s.f.Run(ctx)
+}
+
 func TestTU23StopDuringFetch(t *testing.T) {
 	s := newSim(t, 0).fake(time.Hour)
 	entered := make(chan struct{})
