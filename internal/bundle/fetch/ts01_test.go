@@ -214,6 +214,9 @@ func TestTS01ChangedArchiveFromFetch(t *testing.T) {
 	if r.f.c.Count(ClassRejected) != 1 || !r.f.c.LastGood().IsZero() {
 		t.Errorf("rejected %d, last good %v", r.f.c.Count(ClassRejected), r.f.c.LastGood())
 	}
+	if r.f.LoadFaults() != 0 {
+		t.Errorf("load faults %d, want 0", r.f.LoadFaults())
+	}
 }
 
 // T-S-30: a signature file equal to the running one ends the fetch after one
@@ -297,9 +300,30 @@ func TestTS30NoRunningBundle(t *testing.T) {
 	}
 }
 
-// SEC-25: a load that cannot write its files is no rejection. The fetcher
-// counts it as an install fault. The old bundle serves, and there is no event.
-func TestTS30InstallFault(t *testing.T) {
+// checkFaultOnly checks that the one fetch ended as a load fault. The fault
+// counter is 1 and no class has a count. The old bundle serves, and there is
+// no event and no last good time.
+func checkFaultOnly(t *testing.T, r *fetchRig) {
+	t.Helper()
+	if r.f.LoadFaults() != 1 {
+		t.Errorf("load faults %d, want 1", r.f.LoadFaults())
+	}
+	for _, c := range classes {
+		if n := r.f.c.Count(c); n != 0 {
+			t.Errorf("class %s has count %d, want 0", c, n)
+		}
+	}
+	if r.l.Current() != r.old || !r.f.c.LastGood().IsZero() {
+		t.Errorf("the running bundle changed, or last good = %v", r.f.c.LastGood())
+	}
+	if kinds, _ := events(t, r.q); len(kinds) != 0 {
+		t.Errorf("events %v", kinds)
+	}
+}
+
+// T-U-23: a load that cannot write its files is no rejection. The fetcher
+// counts it as a load fault. The old bundle serves, and there is no event.
+func TestTU23InstallFault(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can write to a directory with mode 0500")
 	}
@@ -314,22 +338,35 @@ func TestTS30InstallFault(t *testing.T) {
 	if r.f.fetch(context.Background()) {
 		t.Error("a fetch that could not write gave a good fetch")
 	}
-	if r.f.InstallFaults() != 1 || r.f.c.Count(ClassRejected) != 0 {
-		t.Errorf("install faults %d, rejected %d", r.f.InstallFaults(), r.f.c.Count(ClassRejected))
+	checkFaultOnly(t, r)
+}
+
+// T-U-23: a load that cannot write the version state is no rejection. The
+// files of the bundle can be written. A blocked name for the temporary state
+// file makes the state write fail after each check. The fetcher counts a load
+// fault. The old bundle serves, and there is no event.
+func TestTU23StateFault(t *testing.T) {
+	b := signedPair(t, "2026.11.01-2")
+	dir := t.TempDir()
+	a := signedPair(t, "2026.11.01-1")
+	l, q := loaderAt(t, dir, &a)
+	r := rigOn(t, l, q, &origin{archive: b.archive, sigs: func(int) []byte { return b.sig }})
+	block := filepath.Join(dir, "bundle", bundle.StateName+".tmp")
+	noErr(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	if r.f.fetch(context.Background()) {
+		t.Error("a fetch that could not write the state gave a good fetch")
 	}
-	if r.l.Current() != r.old || !r.f.c.LastGood().IsZero() {
-		t.Errorf("the running bundle changed, or last good = %v", r.f.c.LastGood())
-	}
-	if kinds, _ := events(t, r.q); len(kinds) != 0 {
-		t.Errorf("events %v", kinds)
-	}
+	checkFaultOnly(t, r)
 }
 
 // T-U-23: the context ends after the second signature read. The fetch starts
 // no load, so there is no event and the running bundle stays.
-func TestTS30StopBeforeLoad(t *testing.T) {
+func TestTU23StopBeforeLoad(t *testing.T) {
 	b := signedPair(t, "2026.11.01-2")
 	r := newFetchRig(t, signedPair(t, "2026.11.01-1"), &origin{archive: b.archive, sigs: func(int) []byte { return b.sig }})
+	if r.f.pairRead == nil {
+		t.Fatal("NewFetcher left no pair hook")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.f.pairRead = cancel

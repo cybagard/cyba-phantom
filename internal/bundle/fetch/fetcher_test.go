@@ -29,6 +29,7 @@ type sim struct {
 	waits    []time.Duration
 	starts   []time.Time
 	frozen   []bool // Frozen at each start
+	lastGood []bool // LastGood is not zero at each start
 	cancel   context.CancelFunc
 }
 
@@ -54,6 +55,7 @@ func (s *sim) fake(interval time.Duration, results ...bool) *sim {
 		s.results = s.results[1:]
 		s.starts = append(s.starts, s.clk.t)
 		s.frozen = append(s.frozen, s.f.Frozen())
+		s.lastGood = append(s.lastGood, !s.f.c.LastGood().IsZero())
 		if good {
 			s.f.c.Good()
 		}
@@ -198,6 +200,14 @@ func TestTU23Freeze(t *testing.T) {
 			sawClear = sawClear || i > 70 && !s.frozen[i]
 			if i == 70 { // the good fetch
 				ref = at
+			}
+		}
+		if i := len(s.lastGood); i != len(s.starts) {
+			t.Fatalf("%d last good times, %d starts", i, len(s.starts))
+		}
+		for i, z := range s.lastGood {
+			if z != (i > 70) {
+				t.Errorf("interval %v: start %d: last good is set %v", tc.interval, i, z)
 			}
 		}
 		if !sawFrozen || !sawClear {

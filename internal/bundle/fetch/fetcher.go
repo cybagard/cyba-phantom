@@ -3,7 +3,6 @@ package fetch
 import (
 	"bytes"
 	"context"
-	"errors"
 	"math/rand/v2"
 	"net/http"
 	"sync/atomic"
@@ -31,20 +30,22 @@ type Fetcher struct {
 	loader   *bundle.Loader
 	interval time.Duration // bundle.fetch_interval
 	began    atomic.Int64  // the start of Run; 0 before it
-	faults   atomic.Uint64 // the loads that failed to write their files
+	faults   atomic.Uint64 // the loads that ended with a fault, not a rejection
 	// The four fields below are the test seam. New values replace them only in
 	// tests of this package.
-	jitter   func() float64 // in [0, 1)
-	wait     func(ctx context.Context, d time.Duration) bool
-	try      func(ctx context.Context) bool
-	pairRead func() // a fetch calls it after the second signature read
+	jitter func() float64 // in [0, 1)
+	wait   func(ctx context.Context, d time.Duration) bool
+	try    func(ctx context.Context) bool
+	// A fetch calls pairRead when the two signature reads are equal. This is
+	// before the context check and the load. It is never nil.
+	pairRead func()
 }
 
 // NewFetcher makes the fetcher of c. A good fetch loads into loader. interval
 // is bundle.fetch_interval. The waits use timers. Frozen and the start time
 // use the clock of c.
 func NewFetcher(c *Client, loader *bundle.Loader, interval time.Duration) *Fetcher {
-	f := &Fetcher{c: c, loader: loader, interval: interval, jitter: rand.Float64, wait: sleep}
+	f := &Fetcher{c: c, loader: loader, interval: interval, jitter: rand.Float64, wait: sleep, pairRead: func() {}}
 	f.try = f.fetch
 	return f
 }
@@ -115,15 +116,15 @@ func (f *Fetcher) fetch(ctx context.Context) bool {
 		f.c.Record(ClassChanged, http.StatusOK)
 		return false
 	}
-	if f.pairRead != nil {
-		f.pairRead()
-	}
-	if ctx.Err() != nil { // no load starts after the stop
+	f.pairRead()
+	// LoadFetched takes no context. A stop during its swap-gap wait does not
+	// stop that load. Run returns after it.
+	if ctx.Err() != nil {
 		return false
 	}
 	if _, err := f.loader.LoadFetched(archive, first); err != nil {
-		if errors.Is(err, bundle.ErrInstallFault) {
-			// LoadFetched wrote the one log line. This is no rejection.
+		if _, ok := bundle.CodeOf(err); !ok {
+			// The loader wrote one log line and sent no event. This is no rejection.
 			f.faults.Add(1)
 			return false
 		}
@@ -134,9 +135,9 @@ func (f *Fetcher) fetch(ctx context.Context) bool {
 	return true
 }
 
-// InstallFaults gives the number of loads that passed each check and then
-// failed to write their files. It is safe for concurrent use.
-func (f *Fetcher) InstallFaults() uint64 { return f.faults.Load() }
+// LoadFaults gives the number of loads that the loader ended with a fault and
+// no rejection code. It is safe for concurrent use.
+func (f *Fetcher) LoadFaults() uint64 { return f.faults.Load() }
 
 // Frozen tells if there was no good fetch for max(24 h, 4 intervals). Before
 // the first good fetch, the time counts from the start of Run. It is false
