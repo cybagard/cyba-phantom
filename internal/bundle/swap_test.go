@@ -498,6 +498,9 @@ func TestTP10ReloadMemory(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the child reads /proc/self/status")
 	}
+	if ts25Race {
+		t.Skip("the pass line runs in the lines of make test without -race")
+	}
 	for _, c := range tp10Cases {
 		t.Run(c.name, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestTP10Child$", "-test.timeout=120s")
@@ -534,9 +537,6 @@ func TestTP10ReloadMemory(t *testing.T) {
 			if limit != tp10Limit || ok != (c.err == nil) || parsed != tp10Tmpl {
 				t.Errorf("memory limit %d, B accepted %v, %d templates parsed; want %d, %v, %d",
 					limit, ok, parsed, tp10Limit, c.err == nil, tp10Tmpl)
-			}
-			if ts25Race {
-				return
 			}
 			if diff > tp10HWMMax {
 				t.Errorf("VmHWM rose by %d bytes; want at most %d", diff, tp10HWMMax)
