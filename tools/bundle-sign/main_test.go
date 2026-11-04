@@ -916,7 +916,9 @@ func TestTS20PackRefusesArchiveOverTheCap(t *testing.T) {
 
 // T-S-20: pack fails with errPack when it cannot read a directory below dir.
 func TestTS20PackRefusesUnreadableDirectory(t *testing.T) {
-	dir := tempDir(t)
+	// t.TempDir lies outside the package tree, so a killed test leaves no
+	// directory of mode 0 there. The cleanup below runs before its removal.
+	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
 	locked := filepath.Join(src, "traps")
 	if err := os.MkdirAll(locked, 0o755); err != nil {
