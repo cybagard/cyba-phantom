@@ -183,10 +183,9 @@ func TestTS32OverlappingMintRowsAreAmbiguous(t *testing.T) {
 	wantUnlinked(t, r, 0, 1)
 }
 
-// T-S-32: six cases give no token row and one none count. The cases are: no
-// mint row; a mint row with another unit; a mint row with another set; a mint
-// row with a NULL session; a mint row with a NULL issued_at; a mint row of
-// another range.
+// T-S-32: six cases give no token row and one none count. There is no
+// mint row. Or the mint row has another unit, another set, a NULL session or a
+// NULL issued_at. Or it is a mint row of another range.
 func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 	nullSession := mintEvent(t, 1, "", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000})
 	otherSet := event.CallbackLink{SetID: [8]byte{9}, Unit: 5, Counter: 105}
