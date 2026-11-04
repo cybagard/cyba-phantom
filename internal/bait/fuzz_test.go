@@ -17,7 +17,8 @@ func fuzzSeeds() [][2]string {
 			out = append(out, [2]string{f.target, f.host})
 		}
 	}
-	return append(out, [2]string{"/x?y=1", "EXAMPLE.com:443"}, [2]string{"*", "example.com"})
+	return append(out, [2]string{"/x?y=1", "EXAMPLE.com:443"}, [2]string{"*", "example.com"},
+		[2]string{"/a%2Fb", "example.com"}, [2]string{"/%73tyle.css", "example.com"})
 }
 
 // declared gives the bytes of the route with the escaped path p of the vhost

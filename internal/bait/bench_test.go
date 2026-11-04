@@ -18,10 +18,6 @@ const (
 	// With the race detector, the pools lose items. A page then allocates up
 	// to 17 for each action.
 	actionAllocs = 17
-	// fixedAllocs is the most allocations of a request apart from the actions.
-	// Measured: 15 for an asset, 34 for the 404 template and 0 for the other
-	// kinds. With the race detector, they are 16, 35 and 0.
-	fixedAllocs = 35
 )
 
 // pageOf makes a page of pageBytes bytes with the trap actions t0 to t(n-1).
@@ -35,29 +31,35 @@ func pageOf(n int) string {
 }
 
 // serveHandler returns a handler for the hardening bundle with 64 traps. The
-// route /t is the page of pageOf. The 404 template of example.com shows a trap.
-func serveHandler(tb testing.TB) *Handler {
+// route /t is the page of pageOf with the given actions. The 404 template of
+// example.com shows a trap.
+func serveHandler(tb testing.TB, actions int) *Handler {
 	specs := make([]trapSpec, pageActions)
 	for i := range specs {
 		specs[i] = trapSpec{fmt.Sprint("t", i), "hidden-p", "x {{.Token}}"}
 	}
 	b := hardBundle(tb, `<h1>{{index .Trap "t0"}}</h1>`, map[string]string{
 		"traps/traps.json":          trapsJSON(specs),
-		"vhosts/example.com/t.tmpl": pageOf(pageActions),
+		"vhosts/example.com/t.tmpl": pageOf(actions),
 	})
 	return New(fixedSource{b}, &fallbackFn{}, testQueue(tb))
 }
 
 // serveKinds are the kinds of response of the handler, one for each way that
-// serve ends.
-var serveKinds = []struct{ name, method, target, host string }{
-	{"asset GET", http.MethodGet, "/style.css", "example.com"},
-	{"asset HEAD", http.MethodHead, "/style.css", "example.com"},
-	{"template page", http.MethodGet, "/t", "example.com"},
-	{"vhost 404 template", http.MethodGet, "/nope", "example.com"},
-	{"fixed 404", http.MethodGet, "/nope", "kilo.example"},
-	{"unknown host", http.MethodGet, "/", "other.example"},
-	{"405", http.MethodPost, "/", "example.com"},
+// serve ends. limit is the most allocations of serve with the race detector.
+// Measured without it: 15 for an asset, 34 for the 404 template and for a page
+// of 1 action, and 0 for the fixed pages.
+var serveKinds = []struct {
+	name, method, target, host string
+	limit                      float64
+}{
+	{"asset GET", http.MethodGet, "/style.css", "example.com", 16},
+	{"asset HEAD", http.MethodHead, "/style.css", "example.com", 16},
+	{"template page", http.MethodGet, "/t", "example.com", 35},
+	{"vhost 404 template", http.MethodGet, "/nope", "example.com", 35},
+	{"fixed 404", http.MethodGet, "/nope", "kilo.example", 0},
+	{"unknown host", http.MethodGet, "/", "other.example", 0},
+	{"405", http.MethodPost, "/", "example.com", 0},
 }
 
 func kindRequest(method, target, host string) *http.Request {
@@ -69,7 +71,7 @@ func kindRequest(method, target, host string) *http.Request {
 // BenchmarkBaitServe measures a request of each kind through ServeHTTP. This
 // includes the request event.
 func BenchmarkBaitServe(b *testing.B) {
-	h := serveHandler(b)
+	h := serveHandler(b, pageActions)
 	for _, k := range serveKinds {
 		b.Run(k.name, func(b *testing.B) {
 			r, w := kindRequest(k.method, k.target, k.host), &discard{h: http.Header{}}
@@ -83,35 +85,54 @@ func BenchmarkBaitServe(b *testing.B) {
 	}
 }
 
-// TestTS28ServeAllocs checks the allocations of each kind. A template page
-// allocates at most actionAllocs for each action, and each other kind at most
-// fixedAllocs. It calls serve and not ServeHTTP, for the reason of
-// TestTU20RenderAllocs.
-func TestTS28ServeAllocs(t *testing.T) {
-	h := serveHandler(t)
+// allocsOf is the allocations of serve for one request on h.
+func allocsOf(h *Handler, method, target, host string) float64 {
 	b := h.src.Current()
+	r, w := kindRequest(method, target, host), &discard{h: http.Header{}}
+	s := h.sessionOf(r)
+	return testing.AllocsPerRun(100, func() {
+		clear(w.h)
+		h.serve(w, r, b, &s)
+	})
+}
+
+// TestTS28ServeAllocs checks the allocations of each kind against its limit.
+// The limit of the template page is for a page of 1 action. A page of
+// pageActions actions allocates at most actionAllocs more for each action. It
+// calls serve and not ServeHTTP, for the reason of TestTU20RenderAllocs.
+func TestTS28ServeAllocs(t *testing.T) {
+	h, one := serveHandler(t, pageActions), serveHandler(t, 1)
 	for _, k := range serveKinds {
-		r, w := kindRequest(k.method, k.target, k.host), &discard{h: http.Header{}}
-		s := h.sessionOf(r)
-		got := testing.AllocsPerRun(100, func() {
-			clear(w.h)
-			h.serve(w, r, b, &s)
-		})
-		limit := float64(fixedAllocs)
+		hk := h
 		if k.name == "template page" {
-			limit += actionAllocs * pageActions
+			hk = one
 		}
-		t.Logf("%s: %v allocations, limit %v", k.name, got, limit)
-		if got > limit {
-			t.Errorf("%s: %v allocations, limit %v", k.name, got, limit)
+		got := allocsOf(hk, k.method, k.target, k.host)
+		t.Logf("%s: %v allocations, limit %v", k.name, got, k.limit)
+		if got > k.limit {
+			t.Errorf("%s: %v allocations, limit %v", k.name, got, k.limit)
+		}
+		if k.name != "template page" {
+			continue
+		}
+		many, limit := allocsOf(h, k.method, k.target, k.host), got+actionAllocs*(pageActions-1)
+		t.Logf("template page of %d actions: %v allocations, limit %v", pageActions, many, limit)
+		if many > limit {
+			t.Errorf("template page of %d actions: %v allocations, limit %v", pageActions, many, limit)
 		}
 	}
 }
 
-// siteVhosts is the number of vhosts, besides the three of the test archive,
-// with 256 routes each. It is the largest number that loads: 445 gives
-// archive_invalid.
-const siteVhosts = 444
+const (
+	// assetVhosts is the number of vhosts, besides the three of the test
+	// archive, with 256 asset routes each. It is the largest number that
+	// loads: 445 gives archive_invalid.
+	assetVhosts = 444
+	// callbackVhosts is the same for 256 callback routes with no asset. A
+	// route is short, so the size of the archive limits the number. 743 gives
+	// archive_invalid.
+	callbackVhosts = 742
+)
 
 // capFiles makes the files of n more vhosts of 256 routes each. A vhost has one
 // file, which all its routes name.
@@ -129,21 +150,47 @@ func capFiles(n int) map[string]string {
 	return extra
 }
 
-// BenchmarkSiteBuild measures the build of the site table of a bundle at the
-// archive cap. It also reports the bytes that one built site keeps in memory.
-func BenchmarkSiteBuild(b *testing.B) {
-	bd := bundleFiles(b, "", capFiles(siteVhosts))
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	s := buildSite(bd, placeholder)
-	runtime.GC()
-	runtime.ReadMemStats(&after)
-	runtime.KeepAlive(s)
-	b.ReportAllocs()
-	for b.Loop() {
-		buildSite(bd, placeholder)
+// callbackFiles makes the files of n more vhosts of 256 callback routes each.
+// A route has no asset and no type.
+func callbackFiles(n int) map[string]string {
+	extra := map[string]string{}
+	for i := range n {
+		var parts []string
+		for j := range 256 {
+			parts = append(parts, fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j))
+		}
+		extra[fmt.Sprintf("vhosts/a%d.x/routes.json", i)] = `{"routes":[` + strings.Join(parts, ",") + `]}`
 	}
-	// The first call of b.Loop clears the metrics, so report after the loop.
-	b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "retained-B")
+	return extra
+}
+
+// BenchmarkSiteBuild measures the build of the site table of a bundle that is
+// as large as the archive limits allow, for two shapes of route. It also
+// reports the bytes that one built site keeps in memory.
+func BenchmarkSiteBuild(b *testing.B) {
+	shapes := []struct {
+		name  string
+		files func() map[string]string
+	}{
+		{"assets", func() map[string]string { return capFiles(assetVhosts) }},
+		{"callbacks", func() map[string]string { return callbackFiles(callbackVhosts) }},
+	}
+	for _, sh := range shapes {
+		b.Run(sh.name, func(b *testing.B) {
+			bd := bundleFiles(b, "", sh.files())
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			s := buildSite(bd, placeholder)
+			runtime.GC()
+			runtime.ReadMemStats(&after)
+			runtime.KeepAlive(s)
+			b.ReportAllocs()
+			for b.Loop() {
+				buildSite(bd, placeholder)
+			}
+			// The first call of b.Loop clears the metrics, so report after the loop.
+			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "retained-B")
+		})
+	}
 }

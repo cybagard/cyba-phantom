@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
@@ -109,6 +110,7 @@ func exchange(t *testing.T, addr, req string) (status int, body string) {
 	c, err := net.Dial("tcp", addr)
 	mustOK(t, err)
 	defer c.Close()
+	mustOK(t, c.SetDeadline(time.Now().Add(10*time.Second)))
 	_, _ = c.Write([]byte(req))
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
@@ -132,7 +134,7 @@ type form struct {
 // the request. So the handler gives 404 for another host and for such a byte.
 func hardForms(host, p string) []form {
 	bare := strings.TrimPrefix(p, "/")
-	return []form{
+	out := []form{
 		{"dot dot after", p + "/../x", host, 404},
 		{"dot dot before", "/../" + bare, host, 404},
 		{"encoded dot dot", "/%2e%2e" + p, host, 404},
@@ -143,13 +145,22 @@ func hardForms(host, p string) []form {
 		{"action", p + "/{{.T}}", host, 404},
 		{"encoded NUL", p[:1] + "%00" + p[1:], host, 404},
 		{"raw NUL", p[:1] + "\x00" + p[1:], host, 400},
-		{"double slash", "//" + p, host, 404},
+		{"double slash", "/" + p, host, 404},
+		{"triple slash", "//" + p, host, 404},
 		{"absolute form, other host", "http://other.example" + p, host, 404},
 		{"absolute form, byte over 0x7f", "http://exampl\xe9.com" + p, host, 404},
 		{"trailing dot host", p, host + ".", 404},
 		{"host byte over 0x7f", p, host + "\xe9", 400},
 		{"unknown vhost", p, "other.example", 404},
 	}
+	// The handler matches the escaped path, so an encoded byte is no route.
+	if strings.Contains(p[1:], "/") {
+		out = append(out, form{"encoded slash", p[:1] + strings.ReplaceAll(p[1:], "/", "%2F"), host, 404})
+	}
+	if len(p) > 1 {
+		out = append(out, form{"encoded letter", p[:1] + fmt.Sprintf("%%%02X", p[1]) + p[2:], host, 404})
+	}
+	return out
 }
 
 // TestTS02Forms sends each form of hardForms for each route to a real server.
@@ -186,9 +197,11 @@ func TestTS02Forms(t *testing.T) {
 // that are not tests. None is os, io/fs, path/filepath, syscall or net. So the
 // engine has no way to read the disk or to open a connection. net/http and
 // net/netip are other paths. The imports of other packages are not in the list,
-// as net/http imports os.
+// as net/http imports os. The check reads the files of each GOOS and GOARCH.
 func TestTS02DirectImports(t *testing.T) {
-	pkg, err := build.ImportDir(".", 0)
+	ctx := build.Default
+	ctx.UseAllFiles = true
+	pkg, err := ctx.ImportDir(".", 0)
 	mustOK(t, err)
 	if !slices.Contains(pkg.Imports, "net/http") {
 		t.Fatalf("imports %v do not hold net/http", pkg.Imports)
@@ -200,9 +213,13 @@ func TestTS02DirectImports(t *testing.T) {
 	}
 }
 
-// postReq is a POST request with n body bytes, with Content-Length or chunked.
-func postReq(target, host string, n int, chunked bool) string {
-	head := "POST " + target + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n"
+// bodyReq is a request with n body bytes, with Content-Length or chunked. A
+// ctype that is not empty is the Content-Type header.
+func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
+	head := method + " " + target + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n"
+	if ctype != "" {
+		head += "Content-Type: " + ctype + "\r\n"
+	}
 	body := strings.Repeat("a", n)
 	if chunked {
 		return head + "Transfer-Encoding: chunked\r\n\r\n" + fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", n, body)
@@ -211,14 +228,18 @@ func postReq(target, host string, n int, chunked bool) string {
 }
 
 // TestTS02PostBodies sends a POST with 1 000 and with 65 537 body bytes to a
-// real server. The body has Content-Length or is chunked. The targets are the
-// routes of example.com, with the callback route that has a body position. They
-// are also a path with no route and an unknown host. A known host gets the
-// fixed 405 page, and an unknown host gets the fixed 404 page. A close is also
-// right. A wrapper that the server handler puts around the body counts the
-// bytes that the bait handler reads. The handler reads 0 bytes. The method
-// check comes before the route, so the callback route is as the others. The
-// beacon post path is not in the code.
+// real server. The body has Content-Length or is chunked. The POST has no
+// Content-Type, or the type of a form, or the type of a multipart body. The
+// targets are the routes of each vhost of hardHosts, with the callback route
+// that has a body position. They are also a path with no route and an unknown
+// host. A known host gets the fixed 405 page, and an unknown host gets the
+// fixed 404 page. A close is also right. A GET and a HEAD with a body of 65 537
+// bytes get the status of the target. A wrapper that the server handler puts
+// around the body counts the bytes that the bait handler reads. The handler
+// reads 0 bytes. The callback row checks the code of this commit: the method
+// check comes before the route. T-S-02 and ADR-039 decision 19 permit a POST
+// and a read of at most 4 097 bytes on a callback route with a body position.
+// The beacon post path is not in the code.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex
@@ -231,23 +252,40 @@ func TestTS02PostBodies(t *testing.T) {
 		reads = append(reads, rb.got)
 		mu.Unlock()
 	}))
-	targets := []struct{ host, path string }{{"example.com", "/nope"}, {"other.example", "/"}}
-	for _, r := range hardHosts["example.com"] {
-		targets = append(targets, struct{ host, path string }{"example.com", r.path})
+	// code is the status of a GET.
+	type target struct {
+		host, path string
+		code       int
 	}
+	targets := []target{{"example.com", "/nope", 404}, {"other.example", "/", 404}}
+	for host, rs := range hardHosts {
+		for _, r := range rs {
+			targets = append(targets, target{host, r.path, 200})
+		}
+	}
+	addr := srv.Listener.Addr().String()
+	ctypes := []string{"", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"}
 	n := 0
 	for _, c := range targets {
+		want := 405
+		if _, known := hardHosts[c.host]; !known {
+			want = 404
+		}
 		for _, size := range []int{1000, 65537} {
 			for _, chunked := range []bool{false, true} {
-				n++
-				want := 405
-				if c.host != "example.com" {
-					want = 404
+				for _, ctype := range ctypes {
+					n++
+					code, _ := exchange(t, addr, bodyReq("POST", c.path, c.host, ctype, size, chunked))
+					if code != want && code != 0 {
+						t.Errorf("POST %s on %s, %d bytes, chunked %v, type %q: status %d, want %d or a close", c.path, c.host, size, chunked, ctype, code, want)
+					}
 				}
-				code, _ := exchange(t, srv.Listener.Addr().String(), postReq(c.path, c.host, size, chunked))
-				if code != want && code != 0 {
-					t.Errorf("POST %s on %s, %d bytes, chunked %v: status %d, want %d or a close", c.path, c.host, size, chunked, code, want)
-				}
+			}
+		}
+		for _, method := range []string{"GET", "HEAD"} {
+			n++
+			if code, _ := exchange(t, addr, bodyReq(method, c.path, c.host, "", 65537, false)); code != c.code {
+				t.Errorf("%s %s on %s with a body: status %d, want %d", method, c.path, c.host, code, c.code)
 			}
 		}
 	}
