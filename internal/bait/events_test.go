@@ -51,7 +51,8 @@ func TestTU20RequestEvents(t *testing.T) {
 		{"405", "POST", "example.com", "/t", 405, ""},
 		{"HEAD", "HEAD", "example.com", "/t", 200, ""},
 		{"error before the first byte", "GET", "example.com", "/e", 404, ""},
-		// The parser sets RawPath, and the event path escapes the slash.
+		// The parser sets RawPath. The event path keeps its escape, with
+		// upper-case hex digits.
 		{"escaped slash", "GET", "example.com", "/a%2Fb", 404, "/a%2fb"},
 	} {
 		h, q := eventHandler(t, 8)
