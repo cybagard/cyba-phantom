@@ -90,8 +90,8 @@ func QueryCandidate(rawQuery, name string) string {
 	return candidate(val)
 }
 
-// HeaderName gives the canonical form of a header name. It allocates. Call it
-// one time at load, never on a request. It is
+// HeaderName gives the canonical form of a header name. It can allocate. Call
+// it one time at load, never on a request. It is
 // textproto.CanonicalMIMEHeaderKey, called through net/http. The module import
 // list of the egress test has no net/textproto.
 func HeaderName(name string) string {
