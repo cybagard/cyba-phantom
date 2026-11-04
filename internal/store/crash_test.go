@@ -67,20 +67,6 @@ func crashEvents(t *testing.T, q *event.Queue, base int64) {
 	}
 }
 
-// flushWhenTaken waits until the writer has taken all events from the lanes,
-// then sends one tick. Run picks at random between a waiting tick and new
-// events. A tick sent while events are in the lanes can write a part of the
-// batch. Run reads the tick only after it has put each event in its batch.
-func flushWhenTaken(t *testing.T, q *event.Queue, tick chan<- time.Time) {
-	t.Helper()
-	eventually(t, func() bool { return q.Bytes() == (event.Bytes{}) })
-	select {
-	case tick <- time.Now():
-	case <-time.After(waitFor):
-		t.Fatal("the writer did not read the tick")
-	}
-}
-
 // T-I-07: this is the helper process of the crash test. It runs the real writer
 // with the real log. It commits the good batch. It panics in the failed batch
 // at the crash point from the environment. Without the role variable, it skips.
@@ -110,23 +96,25 @@ func TestTI07CrashHelper(t *testing.T) {
 	default:
 		t.Fatalf("unknown crash point %q", point)
 	}
-	committed := make(chan int, 4)
-	w.onCommit = func(n int) { committed <- n }
-	// The tick channel has no buffer, so a completed send proves that Run read
-	// the tick. The real ticker could fire between two enqueues and split a
-	// batch.
-	tick := make(chan time.Time)
-	w.tick = tick
+	// The commit hook holds Run after the good batch until the bad batch is in
+	// the lanes. Then Run takes the bad batch in one pass. It writes the batch
+	// at once, because the batch has evidence events.
+	committed, resume := make(chan int, 4), make(chan struct{})
+	w.onCommit = func(n int) {
+		committed <- n
+		<-resume
+	}
+	// No tick comes: the real ticker could fire between two enqueues.
+	w.tick = make(chan time.Time)
 	crashEvents(t, q, goodBatch)
 	go w.Run(context.Background())
-	flushWhenTaken(t, q, tick)
 	select {
 	case <-committed:
 	case <-time.After(waitFor):
 		t.Fatal("the good batch was not committed")
 	}
 	crashEvents(t, q, badBatch)
-	flushWhenTaken(t, q, tick)
+	close(resume)
 	time.Sleep(waitFor) // the panic in the writer goroutine ends the process
 	t.Fatal("the helper process did not crash")
 }
