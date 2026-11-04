@@ -26,8 +26,10 @@ const spinLimit = 1_000_000
 // the gap uses it. That test then does not wait.
 //
 // A lock loop that does not end would hang the test run. So the clock and the
-// wait panic when a loader spins. The run then fails at once. The gap does not
-// read the clock before a first swap, so the swap time is an old one, not zero.
+// wait panic when a loader spins. The run then fails at once.
+//
+// Before a first swap the gap does not read the clock. So the swap time is an
+// old one here, not zero.
 func noGap(l *Loader) {
 	oldSwap := time.Unix(1, 0)
 	l.swapMu.Lock()
