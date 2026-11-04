@@ -65,15 +65,19 @@ func handlerTraps(tb testing.TB, n int) *Handler {
 }
 
 // TestTU20RenderAllocs checks that the allocations of a template request do
-// not grow with the number of traps of the bundle.
+// not grow with the number of traps of the bundle. It calls serve and not
+// ServeHTTP, so the event is not in the count. NewEvent uses a pool inside the
+// JSON encoder, and under the race detector the pool drops items at random.
+// Then its count changes by 2 or 3 between runs.
 func TestTU20RenderAllocs(t *testing.T) {
 	var got [2]float64
 	for i, n := range []int{1, 1024} {
 		h := handlerTraps(t, n)
+		b := h.src.Current()
 		r, w := get("/t", "example.com"), &discard{h: http.Header{}}
 		got[i] = testing.AllocsPerRun(100, func() {
 			clear(w.h)
-			h.ServeHTTP(w, r)
+			h.serve(w, r, b)
 		})
 	}
 	t.Logf("allocations: 1 trap %v, 1024 traps %v", got[0], got[1])
