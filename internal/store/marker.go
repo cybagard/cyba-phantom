@@ -12,6 +12,14 @@ const markerName = "writer.stop"
 
 const ruleMarkerExists = "stop marker exists"
 
+// closeFile closes the marker file and the state directory. openStateDir
+// opens the state directory for its fsync. Both calls of fsync use syncFile.
+// A test replaces these test hooks to make a step fail.
+var (
+	closeFile    = (*os.File).Close
+	openStateDir = (*os.Root).Open
+)
+
 // checkMarker refuses a start while the marker exists. Lstat does not follow a
 // link, so a symlink, a directory, or any other type is a marker. An error that
 // is not "does not exist" also refuses the start.
@@ -35,8 +43,8 @@ func makeMarker(root *os.Root) error {
 	}
 	f, err := root.OpenFile(markerName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		err = f.Sync()
-		if e := f.Close(); err == nil {
+		err = syncFile(f)
+		if e := closeFile(f); err == nil {
 			err = e
 		}
 	} else if errors.Is(err, fs.ErrExist) {
@@ -45,12 +53,12 @@ func makeMarker(root *os.Root) error {
 	if err != nil {
 		return err
 	}
-	d, err := root.Open(".")
+	d, err := openStateDir(root, ".")
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	return d.Sync()
+	defer closeFile(d)
+	return syncFile(d)
 }
 
 // ensureMarker makes the marker once. If it fails, it logs one line, and the
