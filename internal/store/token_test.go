@@ -240,9 +240,10 @@ func rawMint(t *testing.T, r *rig, session, issuedAt string) {
 	}
 }
 
-// T-S-32: a mint row with a NULL session marks a duplicate key. It gives no
-// token row and one ambiguous count. This holds when its issued_at is NULL.
-// It holds alone, and next to a second row that covers the counter.
+// T-S-32: a mint row with a NULL session gives no token row and one ambiguous
+// count. This holds when its issued_at is NULL. It holds alone, and next to a
+// second row that covers the counter. The mark of a duplicate key and a render
+// event with no session both make such a row.
 func TestTS32NullSessionMintRowIsAmbiguous(t *testing.T) {
 	t.Run("alone", func(t *testing.T) {
 		r := newRig(t, 100)
@@ -322,6 +323,119 @@ func TestTS32LaterCallbackRetriesTheLink(t *testing.T) {
 	wantUnlinked(t, r, 1, 0)
 }
 
+// wantNullSessions checks that the mint table has n rows and that each row has
+// a NULL session. It shows that the ambiguous count comes from a NULL session.
+func wantNullSessions(t *testing.T, r *rig, n int) {
+	t.Helper()
+	rows := mintRows(t, r.db)
+	if len(rows) != n {
+		t.Fatalf("%d mint rows, want %d", len(rows), n)
+	}
+	for _, m := range rows {
+		if m.session != nil {
+			t.Errorf("mint row %+v has a session", m)
+		}
+	}
+}
+
+// writeShapes runs f two times. In the first run, the mint events and the
+// callbacks are in one batch. In the second run, they are in two batches.
+func writeShapes(t *testing.T, f func(t *testing.T, write func(r *rig, mint []*event.Event, cbs ...*event.Event))) {
+	t.Run("one batch", func(t *testing.T) {
+		f(t, func(r *rig, mint []*event.Event, cbs ...*event.Event) { r.writeOK(append(mint, cbs...)...) })
+	})
+	t.Run("two batches", func(t *testing.T) {
+		f(t, func(r *rig, mint []*event.Event, cbs ...*event.Event) { r.writeOK(mint...); r.writeOK(cbs...) })
+	})
+}
+
+// T-S-32: a mint row is added after the token row exists. The row is a
+// duplicate key, or a second row with another first counter. Each later
+// callback of the token (two of them) gives ambiguous. A callback of a token
+// with no row also gives ambiguous. The token row does not change.
+func TestTS32MintRowAfterTokenRowGivesAmbiguous(t *testing.T) {
+	for name, c := range map[string]struct {
+		again *event.Event
+		dups  uint64
+	}{
+		"duplicate key": {mintEvent(t, 2, "again", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 2000}), 1},
+		"second row":    {mintEvent(t, 2, "second", event.MintRange{SetID: mintSet, Unit: 5, First: 105, Count: 10, IssuedAt: 2000}), 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeShapes(t, func(t *testing.T, write func(*rig, []*event.Event, ...*event.Event)) {
+				r := newRig(t, 100)
+				r.writeOK(render(t), cbEvent(t, 50, link(5, 105)))
+				wantTokens(t, r, issued(105, 1))
+				write(r, []*event.Event{c.again}, cbEvent(t, 51, link(5, 105)), cbEvent(t, 52, link(5, 106)), cbEvent(t, 53, link(5, 105)))
+				wantTokens(t, r, issued(105, 1))
+				wantUnlinked(t, r, 0, 3)
+				if n := r.w.MintDuplicates(); n != c.dups {
+					t.Errorf("%d duplicates, want %d", n, c.dups)
+				}
+				if c.dups > 0 {
+					wantNullSessions(t, r, 1)
+				}
+			})
+		})
+	}
+}
+
+// T-S-32: a mint row with a NULL session gives ambiguous and no token row. The
+// two sources are the mark of a duplicate key and a render event with no
+// session. A SELECT shows that the row has a NULL session.
+func TestTS32NullSessionSourcesGiveAmbiguous(t *testing.T) {
+	rng := event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000}
+	for name, mint := range map[string][]*event.Event{
+		"duplicate key":          {mintEvent(t, 1, "issuer", rng), mintEvent(t, 2, "again", rng)},
+		"render with no session": {mintEvent(t, 1, "", rng)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeShapes(t, func(t *testing.T, write func(*rig, []*event.Event, ...*event.Event)) {
+				r := newRig(t, 100)
+				write(r, mint, cbEvent(t, 50, link(5, 105)), cbEvent(t, 51, link(5, 106)))
+				wantNullSessions(t, r, 1)
+				wantTokens(t, r)
+				wantUnlinked(t, r, 0, 2)
+			})
+		})
+	}
+}
+
+// T-S-32: after the token row exists, a callback gives none in two cases. The
+// mint row is gone (the test deletes it), or it has a NULL issued_at. The
+// cb_count does not change.
+func TestTS32TokenRowWithoutUsableMintRowGivesNone(t *testing.T) {
+	for name, q := range map[string]string{
+		"mint row deleted": "DELETE FROM mint",
+		"NULL issued_at":   "UPDATE mint SET issued_at = NULL",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			r.writeOK(render(t), cbEvent(t, 50, link(5, 105)))
+			wantTokens(t, r, issued(105, 1))
+			if _, err := r.db.Exec(q); err != nil {
+				t.Fatal(err)
+			}
+			r.writeOK(cbEvent(t, 51, link(5, 105)))
+			wantTokens(t, r, issued(105, 1))
+			wantUnlinked(t, r, 1, 0)
+		})
+	}
+}
+
+// T-S-32: a callback of a token with a row runs the update and no insert. A
+// trigger that stops each insert shows this.
+func TestTS32RepeatCallbackRunsNoInsert(t *testing.T) {
+	r := newRig(t, 100)
+	r.writeOK(render(t), cbEvent(t, 50, link(5, 105)))
+	if _, err := r.db.Exec("CREATE TRIGGER no_ins BEFORE INSERT ON token BEGIN SELECT RAISE(ABORT,'x'); END"); err != nil {
+		t.Fatal(err)
+	}
+	r.writeOK(cbEvent(t, 60, link(5, 105)))
+	wantTokens(t, r, issued(105, 2))
+	wantUnlinked(t, r, 0, 0)
+}
+
 // T-S-32: the first counter and the last counter of a range link. The counter
 // before the first and the counter after the last do not. A range of 68 links
 // its last counter. A range that wraps links a counter in each of its two rows.
@@ -392,9 +506,9 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 
 // T-S-32: an error of a token statement stops the writer with the database
 // rule. The writer rolls back the batch. Each case reaches its own statement.
-// The cases are: update prepare, update run, lookup prepare, lookup query,
-// lookup scan, lookup rows, insert prepare, insert run. A case can first commit
-// a batch.
+// The cases are: lookup prepare, lookup query, lookup scan, lookup rows,
+// update prepare, update run, insert prepare, insert run. A case can first
+// commit a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
 	// The abs of the smallest int64 is an integer overflow in SQLite.
@@ -412,7 +526,7 @@ func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 		"update run": {[]*event.Event{render(t), cb(50)},
 			"CREATE TRIGGER no_upd BEFORE UPDATE ON token BEGIN SELECT RAISE(ABORT,'x'); END",
 			[]*event.Event{cb(60)}},
-		// The update changes 0 rows, so the lookup prepare runs.
+		// The lookup runs first, so its prepare fails before any update.
 		"lookup prepare": {[]*event.Event{render(t)}, "DROP TABLE mint", []*event.Event{cb(50)}},
 		// The column has no CHECK, so it keeps the text. Scan into int64 fails.
 		"lookup scan": {nil, "INSERT INTO mint " + mintSelect("'x'"), []*event.Event{cb(50)}},
