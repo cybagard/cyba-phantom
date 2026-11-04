@@ -19,6 +19,8 @@ type entry struct {
 	// slots are the header slots with a valid value. left counts the others.
 	slots []slotHeader
 	left  int
+	// cb is set for a callback route (SEC-37). It has no header slots.
+	cb *callbackPos
 	// ctype and clen are Content-Type and Content-Length values. A response
 	// uses them as they are, so a request allocates no header value. A
 	// template route has no clen.
@@ -62,6 +64,15 @@ func buildSite(b *bundle.Bundle, token string) *site {
 				}
 				e.asset, e.isAsset = a, true
 				e.clen = []string{strconv.Itoa(a.Len())}
+			}
+			if r.Callback != nil {
+				// A callback route has no header slots. Its 204 has no type.
+				e.cb = newCallbackPos(r.Callback)
+				if e.isAsset {
+					e.ctype = []string{r.Type}
+				}
+				paths[r.Path] = e
+				continue
 			}
 			e.ctype = []string{r.Type}
 			e.slots, e.left = slotHeaders(r.Headers, s.texts)

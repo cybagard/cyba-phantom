@@ -243,21 +243,23 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // fixed 404 page. A close is also right. A GET and a HEAD with a body of 65 537
 // bytes get the status of the target. A wrapper that the server handler puts
 // around the body counts the bytes that the bait handler reads. The handler
-// reads 0 bytes. The callback row checks the code of this commit: the method
-// check comes before the route. T-S-02 and ADR-039 decision 19 permit a POST
-// on a callback route with a body position. Such a route may read at most
-// 4 097 bytes. This test does not check that rule. The beacon post path is not
-// in the code.
+// reads 0 bytes. A POST to the callback route with a body position gets its
+// fixed response (ADR-039 decision 19). That route reads at most 4 097 bytes.
+// The beacon post path is not in the code.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex
-	var reads []int
+	var reads, cbReads []int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rb := &tallyBody{ReadCloser: r.Body}
 		r.Body = rb
 		h.ServeHTTP(w, r)
 		mu.Lock()
-		reads = append(reads, rb.got)
+		if r.URL.Path == cbRoute.path && r.Method == http.MethodPost {
+			cbReads = append(cbReads, rb.got)
+		} else {
+			reads = append(reads, rb.got)
+		}
 		mu.Unlock()
 	}))
 	// code is the status of a GET.
@@ -278,6 +280,8 @@ func TestTS02PostBodies(t *testing.T) {
 		want := 405
 		if _, known := hardHosts[c.host]; !known {
 			want = 404
+		} else if c.path == cbRoute.path {
+			want = 200 // a POST to a callback route with a body position
 		}
 		for _, size := range []int{1000, 65537} {
 			for _, chunked := range []bool{false, true} {
@@ -298,10 +302,13 @@ func TestTS02PostBodies(t *testing.T) {
 		}
 	}
 	srv.Close()
-	if len(reads) != n {
-		t.Fatalf("the handler ran %d times for %d requests", len(reads), n)
+	if len(reads)+len(cbReads) != n {
+		t.Fatalf("the handler ran %d times for %d requests", len(reads)+len(cbReads), n)
 	}
 	if total := slices.Max(reads); total != 0 {
 		t.Errorf("a request made the handler read %d body bytes, want 0", total)
+	}
+	if total := slices.Max(cbReads); total > bodyMax+1 {
+		t.Errorf("a POST to the callback route read %d body bytes, want at most %d", total, bodyMax+1)
 	}
 }
