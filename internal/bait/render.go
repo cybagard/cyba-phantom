@@ -27,6 +27,7 @@ type capWriter struct {
 	w       http.ResponseWriter
 	h       *Handler
 	e       *entry
+	sess    *reqSession
 	code    int // the status of the page
 	n       int
 	started bool
@@ -47,12 +48,14 @@ func (c *capWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// start writes the slot headers and the status of the page one time. An error
-// page never gets here, so it has no slot header.
+// start writes the slot headers, the cookie of a new session and the status of
+// the page one time. An error page never gets here, so it has neither.
 func (c *capWriter) start() {
 	if !c.started {
 		c.started = true
-		c.h.addSlots(c.w.Header(), c.e)
+		hd := c.w.Header()
+		c.h.addSlots(hd, c.e)
+		c.sess.setCookie(hd)
 		c.w.WriteHeader(c.code)
 	}
 }
@@ -65,11 +68,11 @@ func (c *capWriter) start() {
 // connection closes: render then writes the event, with the status of the
 // first byte or none, and panics. The panic with ErrAbortHandler also keeps the
 // stack out of the server log. No error text goes anywhere.
-func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundle, s *site, e *entry, code int) int {
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundle, s *site, sess *reqSession, e *entry, code int) int {
 	hd := w.Header()
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
-	cw := capWriter{w: w, h: h, e: e, code: code}
+	cw := capWriter{w: w, h: h, e: e, sess: sess, code: code}
 	err := b.Execute(&cw, e.route.Template, bundle.Page{Trap: s.texts})
 	if err == nil {
 		cw.start()
@@ -81,7 +84,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundl
 		if cw.started {
 			written = code
 		}
-		h.record(r, written)
+		h.record(r, sess, written)
 		panic(http.ErrAbortHandler)
 	}
 	reply(w, http.StatusNotFound, notFoundBody)

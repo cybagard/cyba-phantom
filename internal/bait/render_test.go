@@ -75,9 +75,10 @@ func TestTU20RenderAllocs(t *testing.T) {
 		h := handlerTraps(t, n)
 		b := h.src.Current()
 		r, w := get("/t", "example.com"), &discard{h: http.Header{}}
+		s := h.sessionOf(r)
 		got[i] = testing.AllocsPerRun(100, func() {
 			clear(w.h)
-			h.serve(w, r, b)
+			h.serve(w, r, b, &s)
 		})
 	}
 	t.Logf("allocations: 1 trap %v, 1024 traps %v", got[0], got[1])
@@ -184,6 +185,7 @@ func TestTU20RenderSlots(t *testing.T) {
 		for _, host := range hosts {
 			w := serve(t, h, get("/"+c.slot, host))
 			want := http.Header{"Content-Type": {html}, "X-Content-Type-Options": {"nosniff"}}
+			dropCookie(t, c.slot+" on "+host, w.Header())
 			if w.Code != 200 || w.Body.String() != c.page || !reflect.DeepEqual(w.Header(), want) {
 				t.Errorf("%s on %s: code %d body %q header %v, want body %q", c.slot, host, w.Code, w.Body.String(), w.Header(), c.page)
 			}
@@ -297,6 +299,10 @@ func TestTU20RenderHead(t *testing.T) {
 	mustOK(t, err)
 	g.Header.Del("Date")
 	h.Header.Del("Date")
+	// Two new clients get two cookies. The other headers are equal.
+	if gc, hc := dropCookie(t, "GET", g.Header), dropCookie(t, "HEAD", h.Header); gc == hc {
+		t.Errorf("GET and HEAD got the same cookie %q", gc)
+	}
 	if string(gbody) != "<p>say hi "+placeholder+"</p>" || len(hbody) != 0 ||
 		g.StatusCode != 200 || h.StatusCode != g.StatusCode || !reflect.DeepEqual(h.Header, g.Header) || g.Header.Get("Content-Length") == "" {
 		t.Errorf("GET %d %v %q, HEAD %d %v %q", g.StatusCode, g.Header, gbody, h.StatusCode, h.Header, hbody)

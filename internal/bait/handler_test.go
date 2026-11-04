@@ -251,6 +251,7 @@ func TestTU20Assets(t *testing.T) {
 				"X-Content-Type-Options": {"nosniff"},
 				"Content-Length":         {strconv.Itoa(len(rt.body))},
 			}
+			dropCookie(t, m+" "+rt.path, w.Header())
 			if w.Code != 200 || w.Body.String() != body || !reflect.DeepEqual(w.Header(), want) {
 				t.Errorf("%s %s: code %d body %q header %v, want header %v", m, rt.path, w.Code, w.Body.String(), w.Header(), want)
 			}

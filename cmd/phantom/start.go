@@ -18,6 +18,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 	"github.com/cybagard/cyba-phantom/internal/verify"
@@ -43,7 +44,7 @@ type startDeps struct {
 	openStore func(*os.Root, string, store.Options) (*sql.DB, error)
 	migrate   func(*sql.DB, string) error
 	newWriter func(*sql.DB, *event.Queue, bool, *slog.Logger,
-		store.Recovery) *store.Writer
+		store.Recovery, *session.DayKey) *store.Writer
 	newCheckpointer func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink,
 		*os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error)
 	runCheckpointer func(context.Context, *tlog.Checkpointer)
@@ -53,7 +54,7 @@ var realDeps = startDeps{
 	openLog:         tlog.OpenLog,
 	openStore:       store.Open,
 	migrate:         store.Migrate,
-	newWriter:       store.NewWriter,
+	newWriter:       store.NewWriterWithDayKey,
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 }
@@ -86,7 +87,8 @@ func paramsOf(cfg *config.Config) startParams {
 // writer.
 type storePart struct {
 	q      *event.Queue
-	writer *store.Writer // nil when the store did not open
+	dk     *session.DayKey // the holder of the writer and the bait handler
+	writer *store.Writer   // nil when the store did not open
 	drops  store.DropCount
 	root   *os.Root
 	log    *tlog.Log
@@ -97,6 +99,11 @@ type storePart struct {
 	ckpt   sync.WaitGroup
 	wg     sync.WaitGroup // the writer, or the drain
 }
+
+// DayKey returns the day key holder that the writer uses. The code that
+// serves the bait must pass it to bait.NewWithDayKey. Then both compute the
+// same session id (SEC-35).
+func (s *storePart) DayKey() *session.DayKey { return s.dk }
 
 // Healthy tells if the store part works: false with no writer, else the health of the writer.
 func (s *storePart) Healthy() bool { return s.writer != nil && s.writer.Healthy() }
@@ -114,7 +121,7 @@ func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 // (see TlogHealthy). There is no reopen, retry or restart. The writer takes
 // the counters of q.
 func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePart {
-	s := &storePart{q: q, cancel: func() {}}
+	s := &storePart{q: q, dk: session.NewDayKey(), cancel: func() {}}
 	var err error
 	if s.root, err = os.OpenRoot(p.Root); err != nil {
 		lg.Error("state directory does not open", "error", err)
@@ -125,7 +132,7 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 		lg.Error("store does not open", "error", err)
 	}
 	if s.db != nil {
-		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log})
+		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log}, s.dk)
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })

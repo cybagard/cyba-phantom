@@ -6,16 +6,73 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/session"
 )
 
-// eventHandler returns the handler of outHandler with a queue of depth.
+// testDay is the time of the handler clock in the tests of the events and of
+// the session cookie. The tests step it to change the UTC date.
+var testDay = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+
+// eventHandler returns the handler of outHandler with a queue of depth. Its
+// clock stands at testDay, so a test cannot see a change of the UTC date.
 func eventHandler(t *testing.T, depth int) (*Handler, *event.Queue) {
 	t.Helper()
 	q := queueOf(t, depth)
-	return outHandlerQ(t, q), q
+	h := outHandlerQ(t, q)
+	h.now = func() time.Time { return testDay }
+	return h, q
+}
+
+// keyedID returns the keyed session id of ip under the day key of the clock of
+// h. It is the id that a request with no valid cookie has.
+func keyedID(t testing.TB, h *Handler, ip string) string {
+	t.Helper()
+	id := h.dk.At(h.now()).SessionID(ip, "")
+	if id == nil {
+		t.Fatalf("no keyed id for %q", ip)
+	}
+	return *id
+}
+
+// cookieAttrText are the attributes that SEC-35 names, in the order that the
+// handler writes them.
+const cookieAttrText = "; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax"
+
+// newCookie checks that hd has exactly one Set-Cookie header with the name sid
+// and the attributes of SEC-35. It returns the cookie value, or "" after it
+// reported an error.
+func newCookie(t testing.TB, name string, hd http.Header) string {
+	t.Helper()
+	v := hd.Values("Set-Cookie")
+	if len(v) != 1 {
+		t.Errorf("%s: %d Set-Cookie headers, want 1", name, len(v))
+		return ""
+	}
+	val, ok := strings.CutSuffix(v[0], cookieAttrText)
+	if val, ok2 := strings.CutPrefix(val, "sid="); ok && ok2 {
+		c, err := http.ParseSetCookie(v[0])
+		if err != nil || c.Value != val || c.Path != "/" || c.MaxAge != 86400 || c.Domain != "" ||
+			!c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+			t.Errorf("%s: cookie %+v, err %v", name, c, err)
+		}
+		return val
+	}
+	t.Errorf("%s: Set-Cookie %q, want sid=<value>%s", name, v[0], cookieAttrText)
+	return ""
+}
+
+// dropCookie checks the cookie of a new session as newCookie does. Then it
+// removes the cookie. An exact comparison of the other headers can follow.
+func dropCookie(t testing.TB, name string, hd http.Header) string {
+	t.Helper()
+	val := newCookie(t, name, hd)
+	hd.Del("Set-Cookie")
+	return val
 }
 
 // oneEvent takes the only event of q. The IP is the client address text.
@@ -66,7 +123,8 @@ func TestTU20RequestEvents(t *testing.T) {
 		rec, ip := oneEvent(t, c.name, q)
 		if w.Code != c.status || rec.Status == nil || *rec.Status != int64(c.status) ||
 			*rec.Vhost != c.host || *rec.Method != c.method || *rec.Path != c.path || ip != "192.0.2.1" ||
-			len(rec.Detail) != 0 || rec.Session != nil || rec.TrapID != nil || rec.TokenID != nil {
+			len(rec.Detail) != 0 || rec.Session == nil || *rec.Session != keyedID(t, h, "192.0.2.1") ||
+			rec.TrapID != nil || rec.TokenID != nil {
 			t.Errorf("%s: code %d, record %+v, ip %q", c.name, w.Code, rec, ip)
 		}
 	}
@@ -184,5 +242,273 @@ func TestTU20RequestEventQueue(t *testing.T) {
 	d := q.Dropped()
 	if n := len(q.Drain()); d.Bulk != 5 || d.Evidence != 0 || d.Invalid != 0 || n != 1 {
 		t.Errorf("dropped %+v, %d events queued", d, n)
+	}
+}
+
+// sessionEvent serves r and returns the response and the session of the one
+// request event. The session is "" when the event has none.
+func sessionEvent(t *testing.T, name string, h *Handler, r *http.Request) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	w := serve(t, h, r)
+	rec, _ := oneEvent(t, name, h.q)
+	if rec.Session == nil {
+		return w, ""
+	}
+	return w, *rec.Session
+}
+
+// withCookie returns a request for target with the Cookie lines.
+func withCookie(target string, lines ...string) *http.Request {
+	r := get(target, "example.com")
+	for _, l := range lines {
+		r.Header.Add("Cookie", l)
+	}
+	return r
+}
+
+// TestTU24CookieRoundTrip checks the cookie of a new client (SEC-35). The
+// response has one Set-Cookie header. Its value goes back through
+// CookieFromHeader and CheckCookie under the shared key, and its id is not the
+// keyed id. The request that got the cookie has the keyed id in its event. The
+// next request with the cookie has the cookie id and gets no new cookie.
+func TestTU24CookieRoundTrip(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	keyed := keyedID(t, h, "192.0.2.1")
+	w, first := sessionEvent(t, "first", h, get("/t", "example.com"))
+	val := newCookie(t, "first", w.Header())
+	if first != keyed {
+		t.Errorf("first request has id %q, want the keyed id %q", first, keyed)
+	}
+	r := withCookie("/t", "sid="+val)
+	got, ok := session.CookieFromHeader(r.Header)
+	if !ok || got != val {
+		t.Fatalf("CookieFromHeader gave %q, %v for %q", got, ok, val)
+	}
+	id, ok := h.dk.At(h.now()).CheckCookie(val)
+	if !ok || id == keyed {
+		t.Fatalf("CheckCookie gave %q, %v; the keyed id is %q", id, ok, keyed)
+	}
+	for range 2 {
+		w, second := sessionEvent(t, "second", h, withCookie("/t", "sid="+val))
+		if second != id || len(w.Header().Values("Set-Cookie")) != 0 {
+			t.Errorf("returning client: id %q, want %q; headers %v", second, id, w.Header())
+		}
+	}
+	// A handler with the same holder reads the cookie. It has no state.
+	h2 := NewWithDayKey(h.src, &fallbackFn{}, h.q, h.dk)
+	h2.now = h.now
+	if _, other := sessionEvent(t, "other handler", h2, withCookie("/t", "sid="+val)); other != id {
+		t.Errorf("a second handler gave id %q, want %q", other, id)
+	}
+	// The event holds the id and no cookie text.
+	rec := func() string {
+		serve(t, h, withCookie("/t", "sid="+val))
+		out, err := json.Marshal(h.q.Drain()[0].Record())
+		mustOK(t, err)
+		return string(out)
+	}()
+	if strings.Contains(rec, val) || !strings.Contains(rec, id) {
+		t.Errorf("event %s: holds the cookie value, or lacks the id", rec)
+	}
+}
+
+// TestTU24TwoClients checks that two new clients behind one client key get two
+// different cookie ids and the same keyed id.
+func TestTU24TwoClients(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	var vals, ids, keyed [2]string
+	for i, addr := range []string{"192.0.2.1:1111", "192.0.2.1:2222"} {
+		r := get("/t", "example.com")
+		r.RemoteAddr = addr
+		var w *httptest.ResponseRecorder
+		w, keyed[i] = sessionEvent(t, addr, h, r)
+		vals[i] = newCookie(t, addr, w.Header())
+		ids[i], _ = h.dk.At(h.now()).CheckCookie(vals[i])
+	}
+	if vals[0] == vals[1] || ids[0] == "" || ids[0] == ids[1] || keyed[0] != keyed[1] {
+		t.Errorf("cookies %v, ids %v, keyed ids %v", vals, ids, keyed)
+	}
+}
+
+// TestTU24KeyedFallback checks the requests that have the keyed id. The cases
+// are no cookie, a bad tag, two sid cookies, and a malformed value. They are
+// also other names and another UTC date. Each gets a new cookie.
+func TestTU24KeyedFallback(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		step  time.Duration
+		lines func(v string) []string
+	}{
+		{"no cookie", 0, func(string) []string { return nil }},
+		{"bad tag", 0, func(v string) []string { return []string{"sid=" + flip(v)} }},
+		{"two parts", 0, func(v string) []string { return []string{"sid=" + v + "; sid=" + v} }},
+		{"two lines", 0, func(v string) []string { return []string{"sid=" + v, "sid=" + v} }},
+		{"upper case", 0, func(v string) []string { return []string{"sid=" + strings.ToUpper(v)} }},
+		{"41 bytes", 0, func(v string) []string { return []string{"sid=" + v[:41]} }},
+		{"empty value", 0, func(string) []string { return []string{"sid="} }},
+		{"other names", 0, func(v string) []string { return []string{"xsid=" + v + "; SID=" + v + "; sid2=" + v} }},
+		{"another UTC date", 24 * time.Hour, func(v string) []string { return []string{"sid=" + v} }},
+	} {
+		h, _ := eventHandler(t, 64)
+		w, _ := sessionEvent(t, c.name, h, get("/t", "example.com"))
+		old := newCookie(t, c.name, w.Header())
+		if old == "" {
+			t.Fatalf("%s: no cookie to start from", c.name)
+		}
+		day := testDay.Add(c.step)
+		h.now = func() time.Time { return day }
+		w, id := sessionEvent(t, c.name, h, withCookie("/t", c.lines(old)...))
+		fresh := newCookie(t, c.name, w.Header())
+		cid, ok := h.dk.At(day).CheckCookie(fresh)
+		if want := keyedID(t, h, "192.0.2.1"); id != want || !ok || cid == want || fresh == old {
+			t.Errorf("%s: id %q, want the keyed id %q; new cookie id %q, valid %v", c.name, id, want, cid, ok)
+		}
+	}
+}
+
+// flip changes the first character of a cookie value, so the id differs from
+// the id of the tag.
+func flip(v string) string {
+	if v[0] == 'a' {
+		return "b" + v[1:]
+	}
+	return "a" + v[1:]
+}
+
+// TestTU24CookieResponses checks which responses carry the cookie. A template
+// page, the 404 template and an asset do. A fixed page does not: unknown host,
+// 405, the fixed 404 and the fixed 404 after an execution error. A valid
+// cookie gets no header on any response.
+func TestTU24CookieResponses(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "issue", h, get("/t", "example.com"))
+	valid := newCookie(t, "issue", w.Header())
+	for _, c := range []struct {
+		name, method, host, path string
+		code                     int
+		cookie                   bool
+	}{
+		{"template", "GET", "example.com", "/t", 200, true},
+		{"template head", "HEAD", "example.com", "/t", 200, true},
+		{"asset", "GET", "example.com", "/a", 200, true},
+		{"asset head", "HEAD", "example.com", "/a", 200, true},
+		{"404 template", "GET", "example.com", "/nope", 404, true},
+		{"unknown host", "GET", "other.example", "/t", 404, false},
+		{"405", "POST", "example.com", "/t", 405, false},
+		{"fixed 404", "GET", "kilo.example", "/nope", 404, false},
+		{"error before the first byte", "GET", "example.com", "/e", 404, false},
+	} {
+		for _, lines := range [][]string{nil, {"sid=" + valid}} {
+			r := get(c.path, c.host)
+			r.Method = c.method
+			for _, l := range lines {
+				r.Header.Add("Cookie", l)
+			}
+			w, _ := sessionEvent(t, c.name, h, r)
+			if got := len(w.Header().Values("Set-Cookie")); w.Code != c.code || got != map[bool]int{true: 1}[c.cookie && lines == nil] {
+				t.Errorf("%s with cookie %v: code %d, %d Set-Cookie headers", c.name, lines != nil, w.Code, got)
+			}
+			if c.cookie && lines == nil {
+				newCookie(t, c.name, w.Header())
+			}
+		}
+	}
+	// With no bundle, the fallback serves and sets no cookie.
+	fb := &fallbackFn{}
+	none := New(&swap{}, fb, queueOf(t, 8))
+	if w := serve(t, none, get("/t", "example.com")); fb.calls != 1 || len(w.Header().Values("Set-Cookie")) != 0 {
+		t.Errorf("no bundle: %d fallback calls, headers %v", fb.calls, w.Header())
+	}
+}
+
+// TestTU24AbortSession checks the event of a response that ends the connection.
+// It has the session of the normal path. A new client has the keyed id. A
+// returning client has the cookie id.
+func TestTU24AbortSession(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	w, keyed := sessionEvent(t, "issue", h, get("/t", "example.com"))
+	val := newCookie(t, "issue", w.Header())
+	cookieID, _ := h.dk.At(h.now()).CheckCookie(val)
+	for _, c := range []struct {
+		name, want string
+		lines      []string
+	}{
+		{"new client", keyed, nil},
+		{"returning client", cookieID, []string{"sid=" + val}},
+	} {
+		fw := &failWriter{h: http.Header{}}
+		if !aborts(h, fw, withCookie("/t", c.lines...)) {
+			t.Errorf("%s: no abort", c.name)
+		}
+		rec, _ := oneEvent(t, c.name, h.q)
+		if rec.Session == nil || *rec.Session != c.want {
+			t.Errorf("%s: session %v, want %q", c.name, rec.Session, c.want)
+		}
+		if got := len(fw.h.Values("Set-Cookie")); got != map[bool]int{true: 1}[c.lines == nil] {
+			t.Errorf("%s: %d Set-Cookie headers", c.name, got)
+		}
+	}
+}
+
+// TestTU24ClockRead checks that a request reads the clock one time. This holds
+// on the normal path, on the abort path and on a fixed page. The date step of
+// TestTU24KeyedFallback shows that the clock sets the date of the key.
+func TestTU24ClockRead(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	reads := 0
+	h.now = func() time.Time { reads++; return testDay }
+	serve(t, h, get("/t", "example.com"))
+	serve(t, h, get("/nope", "other.example"))
+	aborts(h, &failWriter{h: http.Header{}}, get("/t", "example.com"))
+	if reads != 3 {
+		t.Errorf("%d clock reads for 3 requests", reads)
+	}
+}
+
+// TestTU24SharedHolder checks NewWithDayKey. The handler uses the holder that
+// it gets. So the key of the caller reads its cookies and gives its ids. A nil
+// holder gives the handler a holder of its own. New does the same.
+func TestTU24SharedHolder(t *testing.T) {
+	b := newBundle(t)
+	src := &swap{list: []*bundle.Bundle{b}}
+	dk := session.NewDayKey()
+	h := NewWithDayKey(src, &fallbackFn{}, queueOf(t, 8), dk)
+	h.now = func() time.Time { return testDay }
+	w, id := sessionEvent(t, "shared", h, get("/", "example.com"))
+	val := newCookie(t, "shared", w.Header())
+	key := dk.At(testDay)
+	if _, ok := key.CheckCookie(val); !ok {
+		t.Error("the key of the shared holder does not accept the cookie")
+	}
+	if want := key.SessionID("192.0.2.1", ""); want == nil || *want != id {
+		t.Errorf("event id %q, keyed id of the shared holder %v", id, want)
+	}
+	for name, own := range map[string]*Handler{
+		"nil holder": NewWithDayKey(src, &fallbackFn{}, queueOf(t, 8), nil),
+		"New":        New(src, &fallbackFn{}, queueOf(t, 8)),
+	} {
+		if own.dk == nil || own.dk == dk {
+			t.Errorf("%s: holder %p, shared %p", name, own.dk, dk)
+			continue
+		}
+		own.now = func() time.Time { return testDay }
+		w, _ := sessionEvent(t, name, own, get("/", "example.com"))
+		if _, ok := key.CheckCookie(newCookie(t, name, w.Header())); ok {
+			t.Errorf("%s: the shared key accepts the cookie of a handler with its own holder", name)
+		}
+	}
+	for name, f := range map[string]func(){
+		"nil source":   func() { NewWithDayKey(nil, &fallbackFn{}, queueOf(t, 8), dk) },
+		"nil fallback": func() { NewWithDayKey(src, nil, queueOf(t, 8), dk) },
+		"nil queue":    func() { NewWithDayKey(src, &fallbackFn{}, nil, dk) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: NewWithDayKey did not panic", name)
+				}
+			}()
+			f()
+		}()
 	}
 }

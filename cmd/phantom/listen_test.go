@@ -40,6 +40,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/listener"
+	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
@@ -536,9 +537,9 @@ func TestTS16_WildcardListen(t *testing.T) {
 // depsWithQueue returns the real parts of the store start. When the writer starts, it sets *q to the queue.
 func depsWithQueue(q **event.Queue) startDeps {
 	d := realDeps
-	d.newWriter = func(db *sql.DB, qq *event.Queue, bp bool, lg *slog.Logger, rec store.Recovery) *store.Writer {
+	d.newWriter = func(db *sql.DB, qq *event.Queue, bp bool, lg *slog.Logger, rec store.Recovery, dk *session.DayKey) *store.Writer {
 		*q = qq
-		return realDeps.newWriter(db, qq, bp, lg, rec)
+		return realDeps.newWriter(db, qq, bp, lg, rec, dk)
 	}
 	return d
 }
@@ -1047,9 +1048,9 @@ func openerDB(block string) (string, bool) {
 // depsWithDB wraps the newWriter of d. When the writer starts, it sets *db to the database of the store.
 func depsWithDB(d startDeps, db **sql.DB) startDeps {
 	next := d.newWriter
-	d.newWriter = func(x *sql.DB, qq *event.Queue, bp bool, lg *slog.Logger, rec store.Recovery) *store.Writer {
+	d.newWriter = func(x *sql.DB, qq *event.Queue, bp bool, lg *slog.Logger, rec store.Recovery, dk *session.DayKey) *store.Writer {
 		*db = x
-		return next(x, qq, bp, lg, rec)
+		return next(x, qq, bp, lg, rec, dk)
 	}
 	return d
 }
