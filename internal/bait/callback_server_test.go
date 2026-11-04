@@ -47,10 +47,11 @@ func (c *countConn) Read(p []byte) (int, error) {
 const readBudget = 16384 + 8192 + 1024
 
 // TestTS32CallbackServerBudget serves the handler through the listener. It
-// sends a chunked body of 300 KiB to a route with a body position. The request
-// event must have status 200 and the route path. The connection must read at
-// most the read budget plus one byte, which makes the server close. The test
-// logs the byte count. A small body first shows the 200 status line.
+// sends a chunked body of 300 KiB to a route with a body position, with and
+// without "Connection: close". The request event must have status 200 and the
+// route path. The connection must read at most the read budget plus one byte,
+// which makes the server close. The test logs the byte counts. A small body
+// first shows the 200 status line.
 func TestTS32CallbackServerBudget(t *testing.T) {
 	e := newCBEnv(t)
 	srv, err := listener.New(listener.Config{
@@ -64,14 +65,19 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	// oneRequest sends a chunked POST with n body bytes, and the last chunk if
-	// last is true. It gives the status line that the server sends, or 0 if it
+	// last is true. The request has the header "Connection: close" if closeHdr
+	// is true. It gives the status line that the server sends, or 0 if it
 	// sends none. It also gives the request events.
-	oneRequest := func(n int, last bool) (status int, reqs []event.Record) {
+	oneRequest := func(n int, last, closeHdr bool) (status int, reqs []event.Record) {
 		c, err := net.Dial("tcp", raw.Addr().String())
 		mustOK(t, err)
 		defer c.Close()
 		mustOK(t, c.SetDeadline(time.Now().Add(10*time.Second)))
-		_, err = io.WriteString(c, "POST "+cbRoutePath+" HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n")
+		hdr := ""
+		if closeHdr {
+			hdr = "Connection: close\r\n"
+		}
+		_, err = io.WriteString(c, "POST "+cbRoutePath+" HTTP/1.1\r\nHost: example.com\r\n"+hdr+"Transfer-Encoding: chunked\r\n\r\n")
 		mustOK(t, err)
 		body := strings.Repeat("x", n)
 		// The server closes at the budget. Later writes can fail.
@@ -104,23 +110,40 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 	}
 
 	// A small body that ends in time shows that the request reaches the route.
-	status, reqs := oneRequest(5<<10, true)
+	status, reqs := oneRequest(5<<10, true, true)
 	if status != http.StatusOK {
 		t.Errorf("small body: status line %d, want 200", status)
 	}
 	wantRequest("small body", reqs)
 
-	// For the large body, net/http drains the unread body before it writes the
-	// response. The read budget closes the connection first, so the client gets
-	// no status line. The request event shows the route.
-	before := ln.n.Load()
-	_, reqs = oneRequest(300<<10, false)
-	wantRequest("large body", reqs)
-	got := ln.n.Load() - before
-	t.Logf("connection-level bytes read: %d (budget %d, body %d)", got, readBudget, 300<<10)
 	// The read that passes the budget takes one byte more, then the server
 	// closes the connection.
-	if got > readBudget+1 {
-		t.Errorf("the connection read %d bytes, want at most %d", got, readBudget+1)
+	wantBound := func(what string, got int64) {
+		t.Helper()
+		t.Logf("%s: connection-level bytes read: %d (budget %d, body %d)", what, got, readBudget, 300<<10)
+		if got > readBudget+1 {
+			t.Errorf("%s: the connection read %d bytes, want at most %d", what, got, readBudget+1)
+		}
 	}
+
+	// Keep-alive is the default. net/http drains the unread body before it
+	// writes the response. The read budget closes the connection first, so the
+	// client gets no status line. The request event shows the route.
+	before := ln.n.Load()
+	status, reqs = oneRequest(300<<10, false, false)
+	if status != 0 {
+		t.Errorf("large body, keep-alive: status line %d, want none", status)
+	}
+	wantRequest("large body, keep-alive", reqs)
+	wantBound("large body, keep-alive", ln.n.Load()-before)
+
+	// With "Connection: close", net/http writes the response and drains the
+	// body later. The client gets status 200. The byte bound is the same.
+	before = ln.n.Load()
+	status, reqs = oneRequest(300<<10, false, true)
+	if status != http.StatusOK {
+		t.Errorf("large body, close: status line %d, want 200", status)
+	}
+	wantRequest("large body, close", reqs)
+	wantBound("large body, close", ln.n.Load()-before)
 }

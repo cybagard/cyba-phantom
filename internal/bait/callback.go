@@ -12,7 +12,7 @@ import (
 
 // callbackPos holds the positions of a callback route, ready to serve. header
 // is the canonical header name. vhost is the vhost name of the bundle, for the
-// callback record. The site build makes it, never a request.
+// callback record. The site build makes callbackPos, never a request.
 type callbackPos struct {
 	segment             bool
 	query, header, body string
@@ -27,8 +27,8 @@ func newCallbackPos(c *bundle.Callback, vhost string) *callbackPos {
 	return p
 }
 
-// The positions of a callback route. The order is the order of the texts for
-// Check and of the event rule.
+// These constants name the positions of a callback route. Their order is the
+// order of the texts for Check and of the event rule.
 const (
 	posPath = iota
 	posQuery

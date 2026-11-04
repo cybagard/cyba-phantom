@@ -67,7 +67,7 @@ func buildSite(b *bundle.Bundle, token string) *site {
 				e.clen = []string{strconv.Itoa(a.Len())}
 			}
 			if r.Callback != nil {
-				// Its 204 has no type.
+				// A callback route with no asset has no type.
 				e.cb = newCallbackPos(r.Callback, host)
 				if e.isAsset {
 					e.ctype = []string{r.Type}

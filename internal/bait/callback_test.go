@@ -135,9 +135,8 @@ func (f *flushProbe) Flush() {
 // position gives one callback event. The test checks the surface, the trap,
 // the token id and the route path. It also checks the vhost, the method, the
 // status, the client address and the link. The request gives one request
-// event. The handler
-// flushes the response before any event. A route with an asset gives 200. A
-// route with none gives 204.
+// event. The handler flushes the response before any event. A route with an
+// asset gives 200. A route with none gives 204.
 func TestTI04CallbackSurfaces(t *testing.T) {
 	e := newCBEnv(t)
 	for _, rt := range []struct {
@@ -233,7 +232,7 @@ func dump(w *httptest.ResponseRecorder) string {
 	return fmt.Sprintf("%d %v %q flushed=%v", res.StatusCode, hd, body, w.Flushed)
 }
 
-// head gives the status and the headers without Date of a response.
+// head gives the status of a response and its headers without Date.
 func head(w *httptest.ResponseRecorder) string {
 	hd := w.Result().Header.Clone()
 	hd.Del("Date")
@@ -345,7 +344,7 @@ func TestTS32CallbackDetail(t *testing.T) {
 
 // TestTS32CallbackMarker checks that the token text is in no member of a
 // callback event and in no detail. The handler counts no error. The request
-// event keeps the escaped request path, because ADR-039 decision 10 says so.
+// event keeps the escaped request path, because ADR-039 says so.
 // So the test skips the request event of a path callback. The callback event
 // also does not hold the case of the Host header.
 func TestTS32CallbackMarker(t *testing.T) {
@@ -476,7 +475,7 @@ const (
 
 // TestTS32CallbackRootSegment checks a segment callback route at the root
 // path. It matches "/" and "/" with one segment. An exact route of the vhost
-// comes first. "//", "//x" and "//" with a token get the 404 decoy.
+// comes first. "//", "//x", "//" with a token, "" and "*" get the 404 decoy.
 func TestTS32CallbackRootSegment(t *testing.T) {
 	e := newCBEnvFiles(t, map[string]string{
 		"vhosts/kilo.example/routes.json": rootRoutes,
@@ -494,8 +493,13 @@ func TestTS32CallbackRootSegment(t *testing.T) {
 		{"//", "not found\n", 404, false},
 		{"//x", "not found\n", 404, false},
 		{"//" + e.mint(t, time.Now()), "not found\n", 404, false},
+		{"", "not found\n", 404, false},
+		{"*", "not found\n", 404, false},
 	} {
-		r := httptest.NewRequest(http.MethodGet, tc.target, nil)
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		// An empty path and "*" come from the request line "GET * HTTP/1.1"
+		// and from an absolute-form target with no path.
+		r.URL.Path = tc.target
 		r.Host = "kilo.example"
 		w := httptest.NewRecorder()
 		e.h.ServeHTTP(w, r)
