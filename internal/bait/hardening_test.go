@@ -104,9 +104,10 @@ func forbidden() []string {
 	return out
 }
 
-// exchange writes req on a new connection and reads one response. Another
-// read error, such as EOF or a reset, is a close and gives status 0. A timeout
-// is not a close: it fails the test.
+// exchange writes req on a new connection and reads one response. A timeout
+// on the status line and the headers fails the test: it is not a close. A
+// different read error there, such as EOF or a reset, is a close and gives
+// status 0. The body read does not check for a timeout.
 func exchange(t *testing.T, addr, req string) (status int, body string) {
 	t.Helper()
 	c, err := net.Dial("tcp", addr)
