@@ -81,7 +81,16 @@ type Handler struct {
 	// now gives the time of a request. The handler reads it one time for each
 	// request and calls dk.At with that time at once. A test sets it.
 	now func() time.Time
+	// cookieOff is true when the session cookie is off (SEC-35). The handler
+	// then sets no cookie and ignores each cookie. The caller must set it
+	// before the first request. There is no lock.
+	cookieOff bool
 }
+
+// DisableSessionCookie turns the session cookie off (SEC-35). No response then
+// has a Set-Cookie header, and each request gets the keyed id of its client
+// address. Call it before the first request. It is not safe to call it later.
+func (h *Handler) DisableSessionCookie() { h.cookieOff = true }
 
 // New returns a handler for the bundle of src. With no running bundle, fallback
 // serves the request and writes its own event. Else the handler puts one
@@ -111,25 +120,29 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 type reqSession struct {
 	ip string // the client address text
 	id string // the session id, or "" when the address is not valid
-	// fresh is true when the request has no valid cookie. The response then
-	// sets a new cookie. key is the day key that the request used.
+	// fresh is true when the response may set a new cookie. This is when the
+	// request has no valid cookie and the cookie is on. key is the day key
+	// that the request used.
 	fresh bool
 	key   session.Key
 }
 
 // sessionOf resolves the session of r. A request with one valid cookie has the
 // id of the cookie. Else it has the keyed id of the client address, and the
-// response sets a cookie. The handler keeps no session state in memory.
+// response sets a cookie. With the cookie off, each request has the keyed id
+// and no response sets a cookie. The handler keeps no session state in memory.
 func (h *Handler) sessionOf(r *http.Request) reqSession {
 	k := h.dk.At(h.now())
 	s := reqSession{ip: clientIP(r.RemoteAddr), key: k}
-	if v, ok := session.CookieFromHeader(r.Header); ok {
-		if id, ok := k.CheckCookie(v); ok {
-			s.id = id
-			return s
+	if !h.cookieOff {
+		if v, ok := session.CookieFromHeader(r.Header); ok {
+			if id, ok := k.CheckCookie(v); ok {
+				s.id = id
+				return s
+			}
 		}
 	}
-	s.fresh = true
+	s.fresh = !h.cookieOff
 	if id := k.SessionID(s.ip, ""); id != nil {
 		s.id = *id
 	}
