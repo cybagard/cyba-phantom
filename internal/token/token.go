@@ -279,8 +279,8 @@ func (k *KeySet) MintRange(indexes []int, at time.Time, out [][Size]byte) (first
 	return first, nil
 }
 
-// Result is the outcome of Verify, Ring.Verify and Ring.Check. When OK is false, the other fields are
-// zero.
+// Result is the outcome of Verify, Ring.Verify and Ring.Check. When OK is
+// false, the other fields are zero.
 type Result struct {
 	OK   bool
 	Trap string // the trap id
