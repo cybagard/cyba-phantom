@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"bytes"
-	"crypto/hpke"
 	"errors"
 	"fmt"
 	"html/template"
@@ -27,6 +26,18 @@ import (
 // The count has all reads of the clock, also the reads of the token ring.
 const spinLimit = 1_000_000
 
+// spinGuard gives a clock that panics when a loader spins. It also gives the
+// count of the reads. The panic fails the run at once, and it does not hang.
+func spinGuard(now func() time.Time) (func() time.Time, *atomic.Int64) {
+	reads := new(atomic.Int64)
+	return func() time.Time {
+		if reads.Add(1) > spinLimit {
+			panic("the lock loop does not end")
+		}
+		return now()
+	}, reads
+}
+
 // noGap makes the swap gap of the loader pass at once. A test that is not about
 // the gap uses it. That test then does not wait.
 //
@@ -41,13 +52,7 @@ func noGap(l *Loader) {
 	l.swapMu.Lock()
 	l.swapAt = oldSwap
 	l.swapMu.Unlock()
-	now, reads := l.now, new(atomic.Int64)
-	l.now = func() time.Time {
-		if reads.Add(1) > spinLimit {
-			panic("the lock loop does not end")
-		}
-		return now()
-	}
+	l.now, _ = spinGuard(l.now)
 	l.sleep = func(d time.Duration) {
 		if d <= 0 {
 			panic("a load waits for a gap that has passed")
@@ -441,17 +446,7 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 // 30 s after the swap. Then it is zero. A reader of the old seed during the
 // swap gives no race report. It never reads a changed seed.
 func TestTU23SeedDelay(t *testing.T) {
-	var (
-		e   *env
-		l   *Loader
-		in  hpke.PrivateKey
-		key rkey
-	)
-	// A load that another test left parked can hold loadMu. Bound the setup.
-	within(t, func() { e, l, in, key = seeded(t, keyTwo) }, nil)
-	if e == nil {
-		t.FailNow()
-	}
+	e, l, in, key := seeded(t, keyTwo)
 	old, timers := l.Current(), &fakeTimers{}
 	l.afterFunc = timers.afterFunc
 	var changed atomic.Bool
@@ -489,11 +484,12 @@ func TestTU23SeedDelay(t *testing.T) {
 }
 
 // T-U-23: the loader of NewLoader keeps its own timer and wait. Right after a
-// swap, the replaced seed has its old bytes, so the timer does not run at once.
+// swap, the replaced seed has its old bytes. It keeps them after a short real
+// time, so the timer neither runs at once nor runs early.
 func TestTU23DefaultTimer(t *testing.T) {
 	e := newEnv(t)
 	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
-	l.now = func() time.Time { return testNow }
+	l.now, _ = spinGuard(func() time.Time { return testNow })
 	key := keyTwo(e)
 	e.putSeeded(key, ver(2), plainEnt(seedA))
 	_, err := l.Load(true)
@@ -504,10 +500,11 @@ func TestTU23DefaultTimer(t *testing.T) {
 	l.swapAt = testNow.Add(-swapGap)
 	l.swapMu.Unlock()
 	e.putSeeded(key, ver(3), plainEnt(seedB))
-	_, err = l.LoadFrom(SourceReload)
+	within(t, func() { _, err = l.LoadFrom(SourceReload) }, nil)
 	must(t, err)
+	time.Sleep(200 * time.Millisecond)
 	if l.Current() == old || !bytes.Equal(*old.seed.p, seedA) {
-		t.Error("the replaced seed changed at the swap")
+		t.Error("the replaced seed changed after the swap")
 	}
 }
 
@@ -519,21 +516,20 @@ func TestTU23DefaultWait(t *testing.T) {
 	e.install("bundle/current", mf(ver(2)))
 	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
 	l.seed = nil
-	t0, reads := time.Now(), new(atomic.Int64)
-	l.now = func() time.Time {
-		reads.Add(1)
-		return testNow.Add(time.Since(t0))
-	}
+	t0 := time.Now()
+	var reads *atomic.Int64
+	l.now, reads = spinGuard(func() time.Time { return testNow.Add(time.Since(t0)) })
 	const left = 200 * time.Millisecond
 	l.swapMu.Lock()
 	l.swapAt = testNow.Add(left - swapGap)
 	l.swapMu.Unlock()
 	reads.Store(0)
-	start := time.Now()
-	_, err := l.LoadFrom(SourceReload)
+	var err error
+	within(t, func() { _, err = l.LoadFrom(SourceReload) }, nil)
 	must(t, err)
-	if took := time.Since(start); took < 150*time.Millisecond {
-		t.Errorf("the load took %v; want at least the gap that was left", took)
+	// The test clock starts at t0, so a pause before the load cannot fail this.
+	if took := time.Since(t0); took < left {
+		t.Errorf("the load ended %v after t0; want at least %v", took, left)
 	}
 	if n := reads.Load(); n > 20 {
 		t.Errorf("the load read the clock %d times", n)
