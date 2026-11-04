@@ -142,7 +142,7 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // other writer. Run takes events with TryTake, evidence lane first, into one
 // batch. It writes the batch in one transaction when the batch has 500 events.
 // The take loop can empty both lanes while the batch holds an evidence event.
-// Then Run writes the batch at once, with no tick wait (T-I-04). A batch with
+// Then Run writes the batch at once, with no tick wait (T-U-25). A batch with
 // bulk events only waits for the tick. Run also writes the batch at each tick
 // when the batch is not empty. It holds one batch at a time and starts no
 // goroutine for an event. While the lanes stay non-empty, Run writes at 500
@@ -199,8 +199,8 @@ func (w *Writer) Run(ctx context.Context) error {
 		return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 	}
 	batch := make([]*event.Event, 0, maxBatch)
-	// evidence is true while the batch holds an evidence event. Each write of
-	// the batch ends the mark.
+	// evidence is true while the batch holds an evidence event. The take loop
+	// ends the mark with each write of the batch, so it is false at the select.
 	evidence := false
 	for {
 		select {
@@ -212,7 +212,7 @@ func (w *Writer) Run(ctx context.Context) error {
 			w.flush(batch)
 			return ctx.Err()
 		case <-tick:
-			batch, evidence = w.flush(batch), false
+			batch = w.flush(batch)
 		case rq := <-w.rows:
 			w.serveRow(rq)
 		case <-w.q.Ready():

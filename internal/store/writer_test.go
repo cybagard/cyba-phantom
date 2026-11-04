@@ -210,8 +210,15 @@ func (r *rig) begins() <-chan struct{} {
 
 // waitsForTheTick fails if the writer began a write. Run is one goroutine, so
 // the tick send succeeds only while Run waits in select. Call it after drained.
+// The first check looks at began first, because an early write that has ended
+// leaves Run in select.
 func (r *rig) waitsForTheTick(began <-chan struct{}) {
 	r.t.Helper()
+	select {
+	case <-began:
+		r.t.Fatal("the writer wrote the batch before the tick")
+	default:
+	}
 	select {
 	case <-began:
 		r.t.Fatal("the writer wrote the batch before the tick")
@@ -336,9 +343,9 @@ func (r *rig) warm() {
 	r.commit()
 }
 
-// T-I-04: a callback event in an idle writer gets its row and its leaf in 50 ms
+// T-U-25: a callback event in an idle writer gets its row and its leaf in 50 ms
 // or less. After the write of the warm-up event, the rig sends no tick.
-func TestTI04CallbackIsWrittenWithNoTick(t *testing.T) {
+func TestTU25CallbackIsWrittenWithNoTick(t *testing.T) {
 	r := newRig(t, 100)
 	stop := r.start()
 	r.warm()
@@ -359,8 +366,8 @@ func TestTI04CallbackIsWrittenWithNoTick(t *testing.T) {
 	}
 }
 
-// T-I-04: a batch with bulk events only waits for the tick. One tick writes it.
-func TestTI04BulkOnlyBatchWaitsForTheTick(t *testing.T) {
+// T-U-25: a batch with bulk events only waits for the tick. One tick writes it.
+func TestTU25BulkOnlyBatchWaitsForTheTick(t *testing.T) {
 	r := newRig(t, 100)
 	began := r.begins()
 	stop := r.start()
@@ -379,9 +386,9 @@ func TestTI04BulkOnlyBatchWaitsForTheTick(t *testing.T) {
 	}
 }
 
-// T-I-04: bulk events and one evidence event in the lanes give one write with
+// T-U-25: bulk events and one evidence event in the lanes give one write with
 // no tick. The evidence lane is first, so the evidence row comes first.
-func TestTI04MixedBatchIsWrittenOnceWithTheEvidenceRowFirst(t *testing.T) {
+func TestTU25MixedBatchIsWrittenOnceWithTheEvidenceRowFirst(t *testing.T) {
 	r := newRig(t, 100)
 	for i := int64(0); i < 5; i++ {
 		r.add(event.KindRequest, i)
@@ -398,9 +405,9 @@ func TestTI04MixedBatchIsWrittenOnceWithTheEvidenceRowFirst(t *testing.T) {
 	}
 }
 
-// T-I-04: the evidence mark of a batch ends with its write. After an evidence
+// T-U-25: the evidence mark of a batch ends with its write. After an evidence
 // write, a batch with bulk events only waits for the tick again.
-func TestTI04EvidenceMarkEndsWithTheWrite(t *testing.T) {
+func TestTU25EvidenceMarkEndsWithTheWrite(t *testing.T) {
 	r := newRig(t, 100)
 	began := r.begins()
 	stop := r.start()
@@ -415,6 +422,27 @@ func TestTI04EvidenceMarkEndsWithTheWrite(t *testing.T) {
 	wantCommits(t, r, 3)
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+// T-U-25: the write of 500 events ends the evidence mark. One callback and 509
+// requests are in the lanes before Run starts. Run writes 500 events, and the
+// 10 requests that are left wait for the tick.
+func TestTU25EvidenceMarkEndsAtTheWriteOf500Events(t *testing.T) {
+	r := newRig(t, 1000)
+	began := r.begins()
+	r.add(event.KindCallback, 0)
+	for i := int64(1); i <= 509; i++ {
+		r.add(event.KindRequest, i)
+	}
+	stop := r.start()
+	wantCommits(t, r, maxBatch)
+	<-began
+	r.drained()
+	r.waitsForTheTick(began)
+	wantCommits(t, r, 10)
+	if err := stop(); !errors.Is(err, context.Canceled) || len(r.commits) != 0 {
+		t.Fatalf("err %v, %d more commits", err, len(r.commits))
 	}
 }
 
@@ -514,20 +542,90 @@ func TestTU25BeaconOfUnknownSessionMakesNoSessionRow(t *testing.T) {
 	}
 }
 
-// T-U-25: 500 beacons of one session in one batch run one update statement.
+// T-U-25: 500 beacons of one session in one batch run one update statement. The
+// session row comes from an earlier batch.
 func TestTU25ManyBeaconsOfOneSessionRunOneUpdate(t *testing.T) {
+	r := newRig(t, 1000)
+	r.writeOK(sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 999))
+	execs := 0
+	r.w.beacons.onExec = func() { execs++ }
+	batch := make([]*event.Event, maxBatch)
+	for i := range batch {
+		batch[i] = sessEvent(t, event.KindBeacon, "sess-one", "", "", 1000+int64(i))
+	}
+	r.writeOK(batch...)
+	if execs != 1 || r.rows() != maxBatch+1 {
+		t.Errorf("%d update statements, %d rows, want 1, %d", execs, r.rows(), maxBatch+1)
+	}
+	r.wantSeen("sess-one", 1)
+}
+
+// T-U-25: the set of beacon sessions starts empty for each batch. The first
+// batch has 500 sessions and the second has 3. The second runs 3 statements, and
+// the set never holds more than 500 sessions.
+func TestTU25BeaconSetIsEmptiedForEachBatch(t *testing.T) {
 	r := newRig(t, 1000)
 	execs := 0
 	r.w.beacons.onExec = func() { execs++ }
-	r.enqueue(sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 999))
-	for i := range int64(maxBatch - 1) {
-		r.enqueue(sessEvent(t, event.KindBeacon, "sess-one", "", "", 1000+i))
+	beacons := func(prefix string, n int) []*event.Event {
+		evs := make([]*event.Event, n)
+		for i := range evs {
+			evs[i] = sessEvent(t, event.KindBeacon, fmt.Sprintf("%s-%d", prefix, i), "", "", 1000+int64(i))
+		}
+		return evs
 	}
-	r.runClosed()
-	if execs != 1 || r.rows() != maxBatch {
-		t.Errorf("%d update statements, %d rows, want 1, %d", execs, r.rows(), maxBatch)
+	r.writeOK(beacons("a", maxBatch)...)
+	if execs != maxBatch || len(r.w.beacons.m) > maxBatch {
+		t.Fatalf("batch 1: %d statements, %d sessions in the set", execs, len(r.w.beacons.m))
 	}
-	r.wantSeen("sess-one", 1)
+	execs = 0
+	r.writeOK(beacons("b", 3)...)
+	if execs != 3 || len(r.w.beacons.m) > maxBatch {
+		t.Errorf("batch 2: %d statements, %d sessions in the set, want 3", execs, len(r.w.beacons.m))
+	}
+}
+
+// T-U-25: an error of the beacon update stops the writer. The statement case has
+// a trigger that refuses the update, with a request and a beacon of one session.
+// The prepare case has no session table, with one beacon event. No row exists,
+// no commit happens, and the events of the batch count as drops.
+func TestTU25BeaconUpdateErrorStopsTheWriter(t *testing.T) {
+	cases := []struct {
+		name  string
+		sql   string
+		kinds []event.Kind
+		want  Drops
+	}{
+		{"statement", "CREATE TRIGGER no_beacon BEFORE UPDATE OF beacon_seen ON session BEGIN SELECT RAISE(ABORT, 'x'); END",
+			[]event.Kind{event.KindRequest, event.KindBeacon}, Drops{Bulk: 2}},
+		{"prepare", "DROP TABLE session", []event.Kind{event.KindBeacon}, Drops{Bulk: 1}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			if _, err := r.db.Exec(c.sql); err != nil {
+				t.Fatal(err)
+			}
+			for i, k := range c.kinds {
+				ip := ""
+				if k == event.KindRequest {
+					ip = "192.0.2.1"
+				}
+				r.enqueue(sessEvent(t, k, "s", ip, "", int64(i)))
+			}
+			r.q.Close()
+			if err := r.run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			if s := r.w.Stats(); r.w.Healthy() || s.Dropped != c.want {
+				t.Fatalf("healthy %v, stats %+v, want drops %+v", r.w.Healthy(), s, c.want)
+			}
+			if r.rows() != 0 || len(r.commits) != 0 {
+				t.Errorf("%d event rows, %d commits, want 0 of each", r.rows(), len(r.commits))
+			}
+		})
+	}
 }
 
 // T-U-25: a beacon event with no session runs no statement and gives no error.
