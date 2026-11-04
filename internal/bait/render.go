@@ -52,27 +52,18 @@ func (c *capWriter) start() {
 	}
 }
 
-// trapTexts gives the text of each trap for one page. Each text is the
-// instruction of the trap with token, and the page escapes it later.
-func trapTexts(traps []bundle.Trap, token string) map[string]string {
-	m := make(map[string]string, len(traps))
-	for _, t := range traps {
-		m[t.ID] = t.Render(token)
-	}
-	return m
-}
-
-// render runs the template of e and streams the page. The data holds no
-// request value. An error counts one time. Before the first byte, and not over
-// the cap, the response is the fixed 404 page. Else the connection closes. The
-// panic with ErrAbortHandler also keeps the stack out of the server log. No
-// error text goes anywhere.
+// render runs the template of e and streams the page. The data is the trap
+// text map of the site. The site makes it one time, so it holds no request
+// value and a request allocates no map for it. An error counts one time.
+// Before the first byte, and not over the cap, the response is the fixed 404
+// page. Else the connection closes. The panic with ErrAbortHandler also keeps
+// the stack out of the server log. No error text goes anywhere.
 func (h *Handler) render(w http.ResponseWriter, b *bundle.Bundle, s *site, e *entry) {
 	hd := w.Header()
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
 	cw := capWriter{w: w}
-	err := b.Execute(&cw, e.route.Template, bundle.Page{Trap: trapTexts(s.traps, h.token())})
+	err := b.Execute(&cw, e.route.Template, bundle.Page{Trap: s.texts})
 	if err == nil {
 		cw.start()
 		return

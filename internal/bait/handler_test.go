@@ -400,8 +400,12 @@ func BenchmarkAsset(b *testing.B) { bench(b, "/style.css", "example.com") }
 
 func BenchmarkDecoy404(b *testing.B) { bench(b, "/nope", "Example.COM:443") }
 
-func BenchmarkTemplate(b *testing.B) {
-	h := handlerFor(b, pageTmpl)
+func BenchmarkTemplate(b *testing.B) { benchTemplate(b, 1) }
+
+func BenchmarkTemplateManyTraps(b *testing.B) { benchTemplate(b, 1024) }
+
+func benchTemplate(b *testing.B, traps int) {
+	h := handlerTraps(b, traps)
 	r := get("/t", "example.com")
 	w := &discard{h: http.Header{}}
 	b.ReportAllocs()

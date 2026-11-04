@@ -124,11 +124,11 @@ func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bun
 }
 
 // TestTU20SiteTable checks the table. It holds each route of each vhost and
-// the asset view of each asset route. It holds the result of one Traps call.
+// the asset view of each asset route. It holds the text of each trap.
 // A new table comes only with a new bundle.
 func TestTU20SiteTable(t *testing.T) {
 	b := newBundle(t)
-	s := buildSite(b)
+	s := buildSite(b, placeholder)
 	if len(s.hosts) != 3 || len(s.hosts["example.com"]) != len(exampleRoutes) || len(s.hosts["kilo.example"]) != 1 {
 		t.Fatalf("hosts = %d, routes = %d", len(s.hosts), len(s.hosts["example.com"]))
 	}
@@ -138,8 +138,8 @@ func TestTU20SiteTable(t *testing.T) {
 			t.Errorf("route %q: entry %+v", r.path, e)
 		}
 	}
-	if len(s.traps) != 1 || s.traps[0].ID != "a" {
-		t.Errorf("traps = %v", s.traps)
+	if len(s.texts) != 1 || s.texts["a"] != "x" {
+		t.Errorf("texts = %v", s.texts)
 	}
 
 	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})

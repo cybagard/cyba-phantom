@@ -52,6 +52,36 @@ func handlerFor(tb testing.TB, tmpl string) *Handler {
 	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
 }
 
+// handlerTraps returns a handler for a bundle with n traps t0 to t(n-1). The
+// route /t shows the trap t0.
+func handlerTraps(tb testing.TB, n int) *Handler {
+	specs := make([]trapSpec, n)
+	for i := range specs {
+		specs[i] = trapSpec{fmt.Sprint("t", i), "hidden-p", "x {{.Token}}"}
+	}
+	b := tmplBundle(tb, specs, map[string][]route{
+		"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p>`}}})
+	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+}
+
+// TestTU20RenderAllocs checks that the allocations of a template request do
+// not grow with the number of traps of the bundle.
+func TestTU20RenderAllocs(t *testing.T) {
+	var got [2]float64
+	for i, n := range []int{1, 1024} {
+		h := handlerTraps(t, n)
+		r, w := get("/t", "example.com"), &discard{h: http.Header{}}
+		got[i] = testing.AllocsPerRun(100, func() {
+			clear(w.h)
+			h.ServeHTTP(w, r)
+		})
+	}
+	t.Logf("allocations: 1 trap %v, 1024 traps %v", got[0], got[1])
+	if got[0] != got[1] || got[0] == 0 {
+		t.Errorf("allocations with 1 trap %v, with 1024 traps %v", got[0], got[1])
+	}
+}
+
 const pageTmpl = `<p>{{index .Trap "a"}}</p>`
 
 // The text of a trap has the characters that each context escapes.

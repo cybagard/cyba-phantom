@@ -50,7 +50,8 @@ type Handler struct {
 	// hook runs between the Load and the CompareAndSwap of siteOf. It is nil
 	// in production. A test sets it.
 	hook func()
-	// token gives the token text of a page. It takes no request value.
+	// token gives the token text of a site. A site build calls it one time.
+	// It takes no request value. A test sets it before the first request.
 	token func() string
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64
@@ -81,11 +82,11 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 			for _, r := range st.retired {
 				if r == w {
 					h.builds.Add(1)
-					return buildSite(b)
+					return buildSite(b, h.token())
 				}
 			}
 		}
-		n := &state{cur: &slot{b: b, count: &h.builds}}
+		n := &state{cur: &slot{b: b, count: &h.builds, token: h.token}}
 		if st != nil {
 			n.retired[0] = weak.Make(st.cur.b)
 			copy(n.retired[1:], st.retired[:retiredKept-1])
