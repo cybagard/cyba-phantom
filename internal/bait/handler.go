@@ -50,6 +50,11 @@ type Handler struct {
 	// hook runs between the Load and the CompareAndSwap of siteOf. It is nil
 	// in production. A test sets it.
 	hook func()
+	// token gives the token text of a site. A site build calls it one time.
+	// It takes no request value. A test sets it before the first request.
+	token func() string
+	// execErrs counts the template execution errors.
+	execErrs atomic.Int64
 }
 
 // New returns a handler for the bundle of src. With no running bundle, fallback
@@ -58,7 +63,7 @@ func New(src Source, fallback http.Handler) *Handler {
 	if src == nil || fallback == nil {
 		panic("bait: New needs a source and a fallback handler")
 	}
-	return &Handler{src: src, fallback: fallback}
+	return &Handler{src: src, fallback: fallback, token: placeholderToken}
 }
 
 // siteOf returns the site of b. The handler keeps a strong pointer to cur only.
@@ -77,11 +82,11 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 			for _, r := range st.retired {
 				if r == w {
 					h.builds.Add(1)
-					return buildSite(b)
+					return buildSite(b, h.token())
 				}
 			}
 		}
-		n := &state{cur: &slot{b: b, count: &h.builds}}
+		n := &state{cur: &slot{b: b, count: &h.builds, token: h.token}}
 		if st != nil {
 			n.retired[0] = weak.Make(st.cur.b)
 			copy(n.retired[1:], st.retired[:retiredKept-1])
@@ -109,9 +114,9 @@ func reply(w http.ResponseWriter, code int, body []byte) {
 
 // ServeHTTP reads the running bundle one time. A request then uses only that
 // bundle. The order of the steps is host, method and path. A host with no
-// vhost, a path with no route and a template route get the fixed 404 page.
-// A method other than GET and HEAD gets the fixed 405 page. The handler never
-// reads the body.
+// vhost and a path with no route get the fixed 404 page. A template route
+// renders its template. A method other than GET and HEAD gets the fixed 405
+// page. The handler never reads the body.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b := h.src.Current()
 	if b == nil {
@@ -120,7 +125,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf [maxHost]byte
 	name, ok := foldHost(r.Host, &buf)
-	routes, found := h.siteOf(b).hosts[string(name)]
+	s := h.siteOf(b)
+	routes, found := s.hosts[string(name)]
 	if !ok || !found {
 		reply(w, http.StatusNotFound, notFoundBody)
 		return
@@ -130,8 +136,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e := routes[r.URL.EscapedPath()]
-	if e == nil || !e.isAsset {
+	if e == nil {
 		reply(w, http.StatusNotFound, notFoundBody)
+		return
+	}
+	if !e.isAsset {
+		h.render(w, b, s, e)
 		return
 	}
 	hd := w.Header()

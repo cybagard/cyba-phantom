@@ -11,13 +11,14 @@ import (
 )
 
 // entry is one route of a vhost, ready to serve. Only an asset route sets
-// asset, isAsset and the header values.
+// asset, isAsset and clen.
 type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
 	// ctype and clen are Content-Type and Content-Length values. A response
-	// uses them as they are, so a request allocates no header value.
+	// uses them as they are, so a request allocates no header value. A
+	// template route has no clen.
 	ctype, clen []string
 }
 
@@ -25,15 +26,21 @@ type entry struct {
 type site struct {
 	// hosts maps a vhost name to a map from an escaped route path to a route.
 	hosts map[string]map[string]*entry
-	// traps holds the result of one Traps call.
-	traps []bundle.Trap
+	// texts maps a trap id to its text. The build makes it from one Traps call
+	// and one token. A request only reads it.
+	texts map[string]string
 }
 
-// buildSite makes the table of b. It takes the asset names only from the
+// buildSite makes the table of b. The text of each trap is the instruction of
+// the trap with token. It takes the asset names only from the
 // route map of each vhost. The loader refuses a route whose asset is missing.
 // If Asset still gives false, the build makes no entry for that route.
-func buildSite(b *bundle.Bundle) *site {
-	s := &site{hosts: map[string]map[string]*entry{}, traps: b.Traps()}
+func buildSite(b *bundle.Bundle, token string) *site {
+	traps := b.Traps()
+	s := &site{hosts: map[string]map[string]*entry{}, texts: make(map[string]string, len(traps))}
+	for _, t := range traps {
+		s.texts[t.ID] = t.Render(token)
+	}
 	for _, host := range b.Vhosts() {
 		rm, ok := b.Routes(host)
 		if !ok {
@@ -48,9 +55,9 @@ func buildSite(b *bundle.Bundle) *site {
 					continue
 				}
 				e.asset, e.isAsset = a, true
-				e.ctype = []string{r.Type}
 				e.clen = []string{strconv.Itoa(a.Len())}
 			}
+			e.ctype = []string{r.Type}
 			paths[r.Path] = e
 		}
 		s.hosts[host] = paths
@@ -59,19 +66,20 @@ func buildSite(b *bundle.Bundle) *site {
 }
 
 // slot holds the site of one bundle. once makes the build run one time. count
-// is the build counter of the handler.
+// is the build counter of the handler. token is the token seam of the handler.
 type slot struct {
 	b     *bundle.Bundle
 	once  sync.Once
 	s     *site
 	count *atomic.Int64
+	token func() string
 }
 
 // site returns the table of b and builds it at the first call.
 func (sl *slot) site() *site {
 	sl.once.Do(func() {
 		sl.count.Add(1)
-		sl.s = buildSite(sl.b)
+		sl.s = buildSite(sl.b, sl.token())
 	})
 	return sl.s
 }
