@@ -368,12 +368,13 @@ func TestTU20ExecErrorAfterByte(t *testing.T) {
 	}
 }
 
-// TestTS28Cap checks the cap through a real server. The page is "<p>", the
-// token and "</p>", so the token sets the size. A page of exactly 1 MiB is
-// complete and counts no error. A page over the cap stops. The client sees the
-// connection end before a complete response. The "first write over" case
-// starts with the trap action. So its first write is over the cap, and no 200
-// byte goes out. Each stop adds one error and writes no log line.
+// TestTS28Cap checks the cap through a real server. In the first three cases
+// the page is "<p>", the token and "</p>", so the token sets the size. A page
+// of exactly 1 MiB is complete and counts no error. A page over the cap stops.
+// The client sees the connection end before a complete response. The "first
+// write over" page starts with the trap action, so its first write is over
+// the cap. Then the client gets no status line and no body. Each stop adds
+// one error and writes no log line.
 func TestTS28Cap(t *testing.T) {
 	for _, c := range []struct {
 		name  string
