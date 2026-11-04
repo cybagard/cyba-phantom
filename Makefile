@@ -223,9 +223,9 @@ perf-inner:
 # "Mutation testing completed" line. Gremlins exits 0 after a signal,
 # so the completion line shows a full run.
 # MUTATE_CAP is the time limit in seconds for each go command that gremlins
-# starts, builds included. It also applies to the go build and the go list
-# of tools/mutatepkg, because the target installs the go wrapper before that
-# build. The limit kills the go command and its test
+# starts, builds included. The target installs the go wrapper before the go
+# build of tools/mutatepkg. Thus the limit also applies to that build and to
+# the go list of tools/mutatepkg. The limit kills the go command and its test
 # binary. A stopped mutant shows as LIVED. The limit also applies to the
 # baseline run. Each run starts with an empty build cache, so MUTATE_CAP
 # must be larger than a full build of the package and its tests.
@@ -259,29 +259,31 @@ perf-inner:
 # kill. A package main (for example cmd/phantom) is such a package.
 # After the copy, the target installs the go wrapper (tools/mutate-go.sh).
 # Then tools/mutatepkg gives each package below PKG the same walk.
-# If exactly one package gets the module path, and it is not the module
-# root package, the wrapper replaces the module path with the import path.
+# Sometimes exactly one package gets the module path, and it is not the
+# module root package. Then the wrapper replaces the module path with the
+# import path of that package.
 # It does this only for a last argument of a go test call that is the
 # module path. The target prints the two paths.
 # The wrapper adds one line to the file "replaced" in the run directory for
-# each replacement. After gremlins, the target fails (exit 1) if a replacement
-# was set, the file is missing, and gremlins reported a mutant status.
+# each replacement. After gremlins, the target can fail (exit 1). This occurs
+# when a replacement was set, the file is missing, and gremlins reported a
+# mutant status.
 # That status is KILLED, LIVED, TIMED OUT or NOT VIABLE. Then no mutant ran
 # on the package that tools/mutatepkg found.
-# Gremlins counts exit status 1 of go test as a kill, also when go could not
-# load or build the package. For a go test call, the wrapper keeps the output
-# in a new file in the run directory. It exits 2 instead of 1 if go exits 1
-# and a line of the output is the FAIL line of a setup or build failure.
-# Gremlins counts status 2 as NOT VIABLE.
-# The target refuses PKG (exit 2) before gremlins starts, and names the
-# packages, when it cannot know the package of a mutant. This is the case
-# when two or more packages get the module path (the module root package
-# counts), or when a package gets a parent directory. It also refuses PKG
-# when the first line of go.mod is not "module " and the module path.
-# gremlins reads the module name from that line. A comment on it breaks the
-# match. It exits 1 if go list fails or no package matches PKG.
-# A PKG that gremlins already maps right (for example internal/config)
-# has no replacement, and the run is the same as before.
+# Gremlins counts exit status 1 of go test as a kill. This is also so when go
+# could not load or build the package. For a go test call, the wrapper keeps
+# the output in a new file in the run directory. Sometimes go exits 1, and a
+# line of the output is the FAIL line of a setup or build failure. Then the
+# wrapper exits 2 instead of 1. Gremlins counts status 2 as NOT VIABLE.
+# The target refuses PKG (exit 2) before gremlins starts in some cases. Then
+# it names the packages, because it cannot know the package of a mutant.
+# One case is two or more packages that get the module path. The module root
+# package counts. The other case is a package that gets a parent directory.
+# It also refuses PKG when the first line of go.mod is not "module " and the
+# module path. gremlins reads the module name from that line. A comment on
+# it breaks the match. It exits 1 if go list fails or no package matches PKG.
+# A PKG that gremlins already maps right has no replacement. An example is
+# internal/config. Its run is the same as before.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
 # tests fail, it prints the output and fails (exit 1) before any mutation.
 # It sets TMPDIR and GOTMPDIR to the run directory. It sets GOCACHE and HOME

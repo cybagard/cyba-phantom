@@ -5,9 +5,10 @@
 # seconds. When go stops at the limit, it adds a line to the file "capped" in
 # MUTATE_RUN.
 #
-# Gremlins tests the module root package for a mutant in a package whose name
-# is not the end of its directory path (for example package main). That test
-# run fails at once, and gremlins counts the failure as a kill.
+# Some package names are not the end of their directory path, for example
+# package main. For a mutant in such a package, gremlins tests the module
+# root package. That test run fails at once, and gremlins counts the failure
+# as a kill.
 # For a "go test" call, this script replaces the last argument with MUTATE_TO.
 # It does so only when the last argument is MUTATE_FROM.
 # Both are empty if no replacement is needed. tools/mutatepkg finds the two
@@ -15,9 +16,10 @@
 #
 # Gremlins also counts exit status 1 as a kill. Go exits 1 when it cannot load
 # or build the package, and then no test ran. For a "go test" call, this
-# script keeps the output in a new file in MUTATE_RUN and copies it to stdout.
-# If go exits 1 and one output line is the FAIL line of a setup or build
-# failure, it exits 2 instead. Gremlins counts status 2 as not viable.
+# script keeps the output in a new file in MUTATE_RUN. Then it copies the
+# file to stdout. Sometimes go exits 1, and one output line is the FAIL line
+# of a setup or build failure. Then the script exits 2 instead. Gremlins
+# counts status 2 as not viable.
 n=$#
 i=0
 for a; do
