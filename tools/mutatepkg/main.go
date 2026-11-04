@@ -40,9 +40,9 @@
 //     empty if <replacement> is empty.
 //   - A replacement was planned, the file replaced is not a regular file,
 //     and the gremlins output has a mutant status.
-//   - The counts are unknown. After the line "Mutation testing completed",
-//     the "Killed, Lived" line or the "Timed out, Not viable" line is not
-//     in the gremlins output exactly once.
+//   - The counts are unknown. Two lines give them: "Killed, Lived" and
+//     "Timed out, Not viable". Each must be in the gremlins output once,
+//     after the line "Mutation testing completed".
 //   - Killed, Lived and Timed out are 0, and Not viable is not 0.
 //   - A test-output file has the FAIL line of a setup failure.
 //
