@@ -302,9 +302,10 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 }
 
 // T-S-32: an error of a token statement stops the writer with the database
-// rule. The writer rolls back the batch. Each case reaches its own statement. The cases are: update prepare, update run, lookup prepare, lookup
-// query, lookup scan, lookup rows, insert prepare, insert run. A case can first
-// commit a batch.
+// rule. The writer rolls back the batch. Each case reaches its own statement.
+// The cases are: update prepare, update run, lookup prepare, lookup query,
+// lookup scan, lookup rows, insert prepare, insert run. A case can first commit
+// a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
 	// The abs of the smallest int64 is an integer overflow in SQLite.
