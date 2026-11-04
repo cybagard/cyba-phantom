@@ -256,6 +256,37 @@ func TestTU23FetchedTransitionCrash(t *testing.T) {
 	}
 }
 
+// T-U-23: a roll-forward whose rename of the signature temp file fails gives
+// the first bad_sig. The start load removes the temp files and keeps the pair.
+func TestTU23RollForwardRenameFails(t *testing.T) {
+	f := newFetched(t)
+	f.crashAfterFirstRename()
+	cbnd, sig := f.bytesOf("bundle/current.cbnd"), f.bytesOf("bundle/current.sig")
+	beforeRename = func(_, to string) error {
+		if to == "current.sig" {
+			return errInjected
+		}
+		return nil
+	}
+	t.Cleanup(func() { beforeRename = nil })
+	l := f.loader("bundle/current.cbnd")
+	p := f.observe(l)
+	if b, err := l.Load(true); b != nil || err != ErrBadSig || l.Current() != nil {
+		t.Fatalf("got %v, %v", b, err)
+	}
+	evs, _ := p.take(t)
+	if len(evs) != 1 || evs[0].Record().Kind.String() != "bundle_rejected" ||
+		detail(t, evs[0])["reason"] != "bad_sig" || detail(t, evs[0])["source"] != "start" {
+		t.Errorf("events %v", evs)
+	}
+	if got := f.snap(); got != "cbnd=new-arch sig=old-sig ctmp=none stmp=none state="+ver(2) {
+		t.Errorf("after: %s", got)
+	}
+	if !bytes.Equal(f.bytesOf("bundle/current.cbnd"), cbnd) || !bytes.Equal(f.bytesOf("bundle/current.sig"), sig) {
+		t.Error("the pair changed")
+	}
+}
+
 // T-U-23: only a start load rolls forward. A reload of the same files gives
 // bad_sig and keeps the temporary file.
 func TestTU23ReloadNoRollForward(t *testing.T) {
