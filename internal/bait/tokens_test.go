@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -32,9 +33,8 @@ func tokensOf(t *testing.T, b *bundle.Bundle, w *httptest.ResponseRecorder) ([]s
 	texts = append(texts, tokenRE.FindAllString(strings.Join(w.Header().Values("X-Note"), " "), -1)...)
 	var res []token.Result
 	for _, s := range texts {
-		tok, ok := token.Parse(s)
-		r := token.Verify([]*token.KeySet{b.Tokens()}, tok)
-		if !ok || !r.OK {
+		r := verifyUnder(b, s)
+		if !r.OK {
 			t.Fatalf("token text %q does not verify", s)
 		}
 		res = append(res, r)
@@ -347,7 +347,7 @@ func TestTS31NoTokenOrCookieText(t *testing.T) {
 	}
 }
 
-// mixedBundle loads a bundle with the traps ids in this order and the seed
+// mixedBundle loads a bundle with the trap ids in this order and the seed
 // byte seed. The route /t has the trap action f and a header slot X-Note for
 // the trap n.
 func mixedBundle(t *testing.T, seed byte, ids ...string) *bundle.Bundle {
@@ -410,8 +410,10 @@ func TestTS31OneBundleForARequest(t *testing.T) {
 }
 
 // TestTS31MintIndexList gives mint two lists that a loaded bundle cannot make.
-// One has 69 indexes. One has an index that is not a trap. The render counts
-// one in noKeys, gives empty trap texts and keeps no range.
+// One has 69 indexes. One has an index that is not a trap, in the header-slot
+// part of the list. The render counts one in noKeys, gives empty trap texts
+// and keeps no range. An action index that is not a trap would panic, but a
+// loaded bundle cannot make one.
 func TestTS31MintIndexList(t *testing.T) {
 	h, _, _ := realHandler(t, 8)
 	b := h.src.Current()
@@ -430,5 +432,83 @@ func TestTS31MintIndexList(t *testing.T) {
 			m.page.Trap[s.traps[0].ID] != "" || m.page.Trap[s.traps[1].ID] != "" {
 			t.Errorf("%s: noKeys %d after %d, mint %+v, trap texts %q", c.name, h.noKeys.Load(), before, sess.mint, m.page.Trap)
 		}
+	}
+}
+
+// slotBundle loads a bundle with one trap for each id of ids, in this order.
+// The route /t has the template tmpl and one header slot X-P<i> for the trap
+// headers[i].
+func slotBundle(t *testing.T, ids []string, tmpl string, headers []string) *bundle.Bundle {
+	t.Helper()
+	const dir = "vhosts/example.com/"
+	var traps []map[string]string
+	for _, id := range ids {
+		traps = append(traps, map[string]string{"id": id, "slot": "hidden-p", "surface": "path",
+			"visibility": "human-visible", "instruction_template": "x " + id + " {{.Token}}"})
+	}
+	tj, err := json.Marshal(traps)
+	mustOK(t, err)
+	var slots []string
+	for i, id := range headers {
+		slots = append(slots, fmt.Sprintf(`{"name":"X-P%d","trap":%q}`, i, id))
+	}
+	hj := ""
+	if len(slots) > 0 {
+		hj = `,"headers":[` + strings.Join(slots, ",") + `]`
+	}
+	return bundleFiles(t, "", map[string]string{
+		"secrets/token.seed": strings.Repeat("\x09", 32),
+		"traps/traps.json":   string(tj),
+		dir + "routes.json":  `{"routes":[{"path":"/t","template":"` + dir + `t.tmpl","type":"text/html; charset=utf-8"` + hj + `}]}`,
+		dir + "t.tmpl":       tmpl,
+	})
+}
+
+// TestTS31MintMaxIndexes serves a route with 64 trap actions and 4 header
+// slots, the most that a loaded bundle has. The render mints all 68 tokens.
+// No render counts in noKeys. The range has the count 68 and a unit. Each token
+// verifies to the trap of its slot.
+func TestTS31MintMaxIndexes(t *testing.T) {
+	var ids []string
+	var page strings.Builder
+	for i := range 64 {
+		ids = append(ids, fmt.Sprint("t", i))
+		fmt.Fprintf(&page, `<p>{{index .Trap "t%d"}}</p>`, i)
+	}
+	heads := []string{"h0", "h1", "h2", "h3"}
+	b := slotBundle(t, append(ids, heads...), page.String(), heads)
+	q := queueOf(t, 8)
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, q)
+	h.text = token.Text
+	w := serve(t, h, get("/t", "example.com"))
+	texts := tokenRE.FindAllString(w.Body.String(), -1)
+	if len(texts) != 64 {
+		t.Fatalf("%d tokens in the page, want 64", len(texts))
+	}
+	for i := range heads {
+		texts = append(texts, tokenRE.FindAllString(w.Header().Get(fmt.Sprint("X-P", i)), -1)...)
+	}
+	m, ok := q.Drain()[0].Mint()
+	if w.Code != 200 || len(texts) != 68 || h.noKeys.Load() != 0 || !ok || m.Count != 68 || m.Unit == 0 {
+		t.Fatalf("code %d, %d tokens, noKeys %d, mint %+v (%v)", w.Code, len(texts), h.noKeys.Load(), m, ok)
+	}
+	want := append(ids, heads...)
+	for i, s := range texts {
+		if r := verifyUnder(b, s); !r.OK || r.Trap != want[i] {
+			t.Errorf("token %d: %+v, want trap %s", i, r, want[i])
+		}
+	}
+}
+
+// TestTS31SlotsOnlyNoTrapMap mints for a route with header slots and no trap
+// action. The render gives the slot and no trap map.
+func TestTS31SlotsOnlyNoTrapMap(t *testing.T) {
+	h, _, _ := realHandler(t, 8)
+	b := h.src.Current()
+	s := buildSite(b)
+	sess := &reqSession{at: testDay}
+	m := h.mint(b, s, &entry{mint: []int{0}, acts: 0, names: []string{"X-Note"}}, sess)
+	if m.page.Trap != nil || len(m.slots) != 1 || sess.mint.Count != 1 {
+		t.Errorf("trap map %v, %d slots, mint %+v", m.page.Trap, len(m.slots), sess.mint)
 	}
 }

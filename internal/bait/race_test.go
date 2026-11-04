@@ -2,6 +2,7 @@
 
 package bait
 
-// With the race detector the token buffer pool can drop a buffer. A render
-// takes two buffers (mint and verify), so its count can change by 2.
+// The race detector drops pool items at random. A render takes the token pool
+// two times and prints through the fmt pool. So the check compares means of
+// 100 runs, and the means stay within 2 of each other.
 func init() { raceAllocSlack = 2 }

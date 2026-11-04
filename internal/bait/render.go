@@ -41,12 +41,14 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	ks := h.keys(b)
 	// A loaded bundle has at most 64 trap actions and 4 header slots, so n
 	// is never over token.MaxRange here.
+	failed := n > token.MaxRange
 	var first uint64
-	var err error
-	if n <= token.MaxRange {
+	if !failed {
+		var err error
 		first, err = ks.MintRange(e.mint, sess.at, out[:n])
+		failed = err != nil
 	}
-	if n > token.MaxRange || err != nil {
+	if failed {
 		h.noKeys.Add(1)
 		for _, i := range e.mint[:e.acts] {
 			m.page.Trap[s.traps[i].ID] = ""

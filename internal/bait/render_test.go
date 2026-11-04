@@ -86,11 +86,11 @@ var raceAllocSlack float64
 // Then its count changes by 2 or 3 between runs.
 //
 // Without the race detector the two counts must be equal. With it, the bound
-// is raceAllocSlack = 2. A render takes a buffer from the token pool two
-// times (MintRange and Verify). The detector can drop a pooled buffer. Then
-// each take allocates one new buffer, so a render allocates at most 2 more
-// than its fewest. The slack is a constant, so a count that grows with the
-// traps still fails.
+// is raceAllocSlack = 2. A render takes the token pool two times (MintRange
+// and Verify). The template print uses the fmt pool. The race detector drops
+// pool items at random. So one render can allocate more than 2 extra. The
+// check compares the means of 100 runs, which stay within 2 of each other.
+// The slack is a constant, so a count that grows with the traps still fails.
 func TestTU20RenderAllocs(t *testing.T) {
 	var got [2]float64
 	for i, n := range []int{1, 1024} {
@@ -250,9 +250,9 @@ func TestTU20RenderNoRequest(t *testing.T) {
 	}
 }
 
-// TestTU20PlaceholderKeptByComment checks the token text: printable ASCII, no
-// "--" and no "<". Then the comment function keeps it.
-func TestTU20PlaceholderKeptByComment(t *testing.T) {
+// TestTU20PlaceholderText checks the test constant placeholder: printable
+// ASCII, no "--" and no "<".
+func TestTU20PlaceholderText(t *testing.T) {
 	for _, c := range []byte(placeholder) {
 		if c < 0x20 || c > 0x7e {
 			t.Errorf("byte %#x in the placeholder", c)
