@@ -218,8 +218,9 @@ func TestTU18SinkHealthyWriterFailureGivesNoSpool(t *testing.T) {
 	}
 }
 
-// T-U-18: when a row request stops the writer, the events that the writer took
-// from the lanes and did not write are dropped and counted for their lane.
+// T-U-18: a row request stops the writer. Then the events that the writer took
+// and did not write are dropped. Each drop counts for its lane. The same holds
+// for an event that stays in a lane.
 func TestTU18SinkRowStopCountsTheEventsTheWriterTook(t *testing.T) {
 	r := newSinkRig(t)
 	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("commit failed") }
@@ -227,16 +228,18 @@ func TestTU18SinkRowStopCountsTheEventsTheWriterTook(t *testing.T) {
 	for i := range 3 {
 		r.add(event.KindRequest, int64(i))
 	}
-	r.add(event.KindAlertSent, 9)
 	r.drained()
 	err := r.sink.Add(4, r.note(4, 1))
 	wantRule(t, err, writerName, ruleDatabase)
 	eventually(t, func() bool { return !r.w.Healthy() })
-	// The writer flushes the batch before the discard loop reads a tick, so the
-	// counts are final when fire returns.
+	// The writer writes an evidence event at once. So the batch that the stop
+	// drops has bulk events only. The tick drops an evidence event that is
+	// queued after the stop. It counts for the evidence lane.
+	r.add(event.KindAlertSent, 9)
 	r.fire()
-	if got := r.w.Stats().Dropped; got != (Drops{Bulk: 3, Evidence: 1}) || r.rows() != 0 {
-		t.Errorf("dropped %+v (want bulk 3, evidence 1), event rows %d (want 0)", got, r.rows())
+	eventually(t, func() bool { return r.w.Stats().Dropped == (Drops{Bulk: 3, Evidence: 1}) })
+	if r.rows() != 0 {
+		t.Errorf("event rows %d (want 0)", r.rows())
 	}
 }
 

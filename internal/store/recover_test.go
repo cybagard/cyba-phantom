@@ -388,9 +388,7 @@ func TestTI07MarkerIsTriedAgainAfterAStopDuringRun(t *testing.T) {
 	r.app.mu.Lock()
 	r.app.err = errBadTile
 	r.app.mu.Unlock()
-	r.add(event.KindCallback, 2)
-	r.drained()
-	r.fire()
+	r.add(event.KindCallback, 2) // an evidence batch needs no tick
 	eventually(t, func() bool { return out.count("cannot make the stop marker") == 1 })
 	wantRule(t, r.w.Err(), writerName, ruleAppend)
 	// A tick drops the event after the marker step. The drop shows that the step

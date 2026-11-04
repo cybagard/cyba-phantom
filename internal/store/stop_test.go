@@ -87,9 +87,7 @@ func TestTU18StoppedWriterDropsBothLanes(t *testing.T) {
 
 	// Hold the first AppendBatch call, so that the lanes fill before the stop.
 	r.gate()
-	r.add(event.KindCallback, 0)
-	r.drained()
-	r.fire()
+	r.add(event.KindCallback, 0) // the writer writes it at once, with no tick
 	select {
 	case <-r.app.entered:
 	case <-time.After(waitFor):

@@ -21,7 +21,8 @@ const (
 	overflowHMAC = "overflow"
 
 	// maxBatch and flushEvery are the batch limits (SEC-15, NFR-02): the writer
-	// commits at 500 events or after 250 ms.
+	// commits at 500 events or after 250 ms. A batch with an evidence event
+	// also commits when the lanes are empty.
 	maxBatch   = 500
 	flushEvery = 250 * time.Millisecond
 
@@ -105,6 +106,9 @@ type Writer struct {
 	// sessions holds the sessions of the batch in progress. The writer
 	// empties it at the start of each transaction.
 	sessions sessionBatch
+
+	// beacons holds the sessions of the beacon rows of the batch in progress.
+	beacons beaconSet
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
@@ -137,11 +141,13 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // Run is the one writer goroutine. The caller starts it with go and starts no
 // other writer. Run takes events with TryTake, evidence lane first, into one
 // batch. It writes the batch in one transaction when the batch has 500 events.
-// It also writes the batch at each tick when the batch is not empty. It holds
-// one batch at a time and starts no goroutine for an event. While the lanes
-// stay non-empty, Run writes at 500 events. After each such write it serves a
-// waiting row request and a waiting tick, with no wait. Thus a flood does not
-// hold them.
+// The take loop can empty both lanes while the batch holds an evidence event.
+// Then Run writes the batch at once, with no tick wait (T-I-04). A batch with
+// bulk events only waits for the tick. Run also writes the batch at each tick
+// when the batch is not empty. It holds one batch at a time and starts no
+// goroutine for an event. While the lanes stay non-empty, Run writes at 500
+// events. After each such write it serves a waiting row request and a waiting
+// tick, with no wait. Thus a flood does not hold them.
 //
 // Before the first write, Run does the start check (see start). A stop marker or
 // a failed check stops the writer, and Run goes to the stopped state at once.
@@ -193,6 +199,9 @@ func (w *Writer) Run(ctx context.Context) error {
 		return discardLoop(ctx, w.q, &w.drops, tick, w.ensureMarker)
 	}
 	batch := make([]*event.Event, 0, maxBatch)
+	// evidence is true while the batch holds an evidence event. Each write of
+	// the batch ends the mark.
+	evidence := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,7 +212,7 @@ func (w *Writer) Run(ctx context.Context) error {
 			w.flush(batch)
 			return ctx.Err()
 		case <-tick:
-			batch = w.flush(batch)
+			batch, evidence = w.flush(batch), false
 		case rq := <-w.rows:
 			w.serveRow(rq)
 		case <-w.q.Ready():
@@ -211,14 +220,21 @@ func (w *Writer) Run(ctx context.Context) error {
 			// a flush at 500 events, serve a waiting row request and a waiting
 			// tick, so that a flood does not hold them. Then leave the loop if
 			// ctx has ended or the writer has stopped, so that the select can
-			// take ctx.Done.
+			// take ctx.Done. Only an empty take ends the loop with the lanes
+			// empty. Then a batch with evidence is written at once.
 			for {
 				e, ok := w.q.TryTake()
 				if !ok {
+					if evidence {
+						batch, evidence = w.flush(batch), false
+					}
 					break
 				}
+				if ev, err := e.Kind().IsEvidence(); err == nil && ev {
+					evidence = true
+				}
 				if batch = append(batch, e); len(batch) == maxBatch {
-					batch = w.flush(batch)
+					batch, evidence = w.flush(batch), false
 					batch = w.serveWaiting(tick, batch)
 					if ctx.Err() != nil || !w.Healthy() {
 						break
@@ -426,7 +442,9 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // of the request and refused rows. A known session keeps its first address and
 // JA4. The insert loop also stores the mint rows of each request row that has
 // a range, in the same transaction. After countDrops, tokenWriter writes the
-// token rows of the callback rows that have a link. The duplicate count of the
+// token rows of the callback rows that have a link. After the upserts, it sets
+// beacon_seen of each session of the beacon rows (markBeacons). The duplicate
+// count of the
 // mint rows grows only after a good COMMIT. The counts of unlinked callbacks do
 // the same. onCommit gets the count of event rows, not
 // of session rows.
@@ -476,6 +494,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	}
 	i, rows := 0, 0
 	w.sessions.reset()
+	w.beacons.reset()
 	for j, e := range batch {
 		var hash, leaf, record any // nil is NULL
 		if evidence[j] && appendErr != nil {
@@ -512,8 +531,14 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		tokens.note(e, rec)
 		rows++
 		w.sessions.add(rec, e.IP())
+		w.beacons.add(rec)
 	}
 	if err := w.upsertSessions(ctx, tx, key); err != nil {
+		return false, err
+	}
+	// The beacon updates come after the session upserts, so a session of the
+	// same batch has its row.
+	if err := w.markBeacons(ctx, tx); err != nil {
 		return false, err
 	}
 	if err := w.countDrops(ctx, tx, day, key); err != nil {
@@ -552,6 +577,56 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		w.onCommit(rows)
 	}
 	return true, appendErr
+}
+
+// setBeaconSeen marks a session that has a beacon. It is an update, never an
+// insert: a session with no row changes no row and gives no error.
+const setBeaconSeen = "UPDATE session SET beacon_seen = 1 WHERE id = ? AND beacon_seen = 0"
+
+// beaconSet holds the distinct sessions of the beacon rows of the batch in
+// progress. Only the writer goroutine uses it.
+type beaconSet struct {
+	m map[string]struct{}
+	// onExec runs before each update statement. A test sets it; nil in
+	// production.
+	onExec func()
+}
+
+// reset empties the set and keeps its memory for the next batch.
+func (b *beaconSet) reset() {
+	if b.m == nil {
+		b.m = make(map[string]struct{}, maxBatch)
+	}
+	clear(b.m)
+}
+
+// add notes a stored row. Only a beacon row with a session id adds an entry.
+func (b *beaconSet) add(rec event.Record) {
+	if rec.Kind == event.KindBeacon && rec.Session != nil {
+		b.m[*rec.Session] = struct{}{}
+	}
+}
+
+// markBeacons runs one update for each session of the set, in the transaction
+// tx. It prepares the statement one time. A failure is a database error.
+func (w *Writer) markBeacons(ctx context.Context, tx *sql.Tx) error {
+	if len(w.beacons.m) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, setBeaconSeen)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	defer stmt.Close()
+	for id := range w.beacons.m {
+		if w.beacons.onExec != nil {
+			w.beacons.onExec()
+		}
+		if _, err := stmt.ExecContext(ctx, id); err != nil {
+			return fail(writerName, ruleDatabase)
+		}
+	}
+	return nil
 }
 
 // rowRequest asks the writer goroutine to store one checkpoint row. The reply

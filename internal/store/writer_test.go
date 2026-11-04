@@ -197,6 +197,30 @@ func (r *rig) fire() {
 	}
 }
 
+// begins makes the writer send on the returned channel at each BEGIN. Thus a
+// test can see a write that no tick caused. Set it before the writer starts.
+func (r *rig) begins() <-chan struct{} {
+	began := make(chan struct{}, 8)
+	r.w.beforeBegin = func() error {
+		began <- struct{}{}
+		return nil
+	}
+	return began
+}
+
+// waitsForTheTick fails if the writer began a write. Run is one goroutine, so
+// the tick send succeeds only while Run waits in select. Call it after drained.
+func (r *rig) waitsForTheTick(began <-chan struct{}) {
+	r.t.Helper()
+	select {
+	case <-began:
+		r.t.Fatal("the writer wrote the batch before the tick")
+	case r.tick <- time.Now():
+	case <-time.After(waitFor):
+		r.t.Fatal("Run did not wait for the tick")
+	}
+}
+
 func (r *rig) commit() int {
 	r.t.Helper()
 	select {
@@ -261,34 +285,24 @@ func TestTU18EvidenceLaneIsFirst(t *testing.T) {
 }
 
 // T-U-18: 1 250 events give three transactions (500, 500, 250). The last one
-// waits for the tick. The gated appender makes the check exact: Run is one
-// goroutine, so the tick send succeeds only while Run waits in select. An early
-// write of the last 250 events (one has evidence) would block in AppendBatch.
+// has bulk events only, so it waits for the tick. A hook before BEGIN makes the
+// check exact. Run is one goroutine, so the tick send succeeds only while Run
+// waits in select. An early write of the last 250 events would reach the hook.
 func TestTU18BatchesHaveAtMost500Events(t *testing.T) {
 	r := newRig(t, 2000)
+	began := r.begins()
 	for i := int64(0); i < 1000; i++ {
 		r.add(event.KindRequest, i)
 	}
 	stop := r.start()
 	wantCommits(t, r, 500, 500)
-	r.drained()
-	r.gate()
+	<-began
+	<-began
 	for i := int64(0); i < 250; i++ {
-		kind := event.KindRequest
-		if i == 0 {
-			kind = event.KindAlertSent
-		}
-		r.add(kind, 1000+i)
+		r.add(event.KindRequest, 1000+i)
 	}
 	r.drained()
-	select {
-	case <-r.app.entered:
-		t.Fatal("the last 250 events were written before the tick")
-	case r.tick <- time.Now():
-	case <-time.After(waitFor):
-		t.Fatal("Run did not wait for the tick")
-	}
-	r.ungate()
+	r.waitsForTheTick(began)
 	wantCommits(t, r, 250)
 	if err := stop(); !errors.Is(err, context.Canceled) || r.rows() != 1250 {
 		t.Fatalf("err %v, rows %d", err, r.rows())
@@ -313,6 +327,242 @@ func TestTU18EventsCommitAtTheTick(t *testing.T) {
 	}
 }
 
+// warm makes Run pass its start check, so a later time measure has no start.
+func (r *rig) warm() {
+	r.t.Helper()
+	r.add(event.KindRequest, 0)
+	r.drained()
+	r.fire()
+	r.commit()
+}
+
+// T-I-04: a callback event in an idle writer gets its row and its leaf in 50 ms
+// or less. The rig never sends a tick here.
+func TestTI04CallbackIsWrittenWithNoTick(t *testing.T) {
+	r := newRig(t, 100)
+	stop := r.start()
+	r.warm()
+	begin := time.Now()
+	r.add(event.KindCallback, 1)
+	r.commit()
+	if d := time.Since(begin); d > 50*time.Millisecond {
+		t.Errorf("the callback commit took %v, want at most 50 ms", d)
+	}
+	var hash []byte
+	var leaf int64
+	q := "SELECT hash, leaf_index FROM event WHERE kind = 'callback'"
+	if err := r.db.QueryRow(q).Scan(&hash, &leaf); err != nil || len(hash) != 32 || leaf != 100 {
+		t.Fatalf("hash %x, leaf %d, error %v", hash, leaf, err)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+// T-I-04: a batch with bulk events only waits for the tick. One tick writes it.
+func TestTI04BulkOnlyBatchWaitsForTheTick(t *testing.T) {
+	r := newRig(t, 100)
+	began := r.begins()
+	stop := r.start()
+	for i := int64(0); i < 10; i++ {
+		r.add(event.KindRequest, i)
+	}
+	r.add(event.KindBeacon, 10)
+	if !r.q.Enqueue(refusedEvent(t, "198.51.100.23", "")) {
+		t.Fatal("refused event not queued")
+	}
+	r.drained()
+	r.waitsForTheTick(began)
+	wantCommits(t, r, 12)
+	if err := stop(); !errors.Is(err, context.Canceled) || len(r.commits) != 0 {
+		t.Fatalf("err %v, %d more commits", err, len(r.commits))
+	}
+}
+
+// T-I-04: bulk events and one evidence event in the lanes give one write with
+// no tick. The evidence lane is first, so the evidence row comes first.
+func TestTI04MixedBatchIsWrittenOnceWithTheEvidenceRowFirst(t *testing.T) {
+	r := newRig(t, 100)
+	for i := int64(0); i < 5; i++ {
+		r.add(event.KindRequest, i)
+	}
+	r.add(event.KindCallback, 5)
+	stop := r.start()
+	wantCommits(t, r, 6)
+	var kind string
+	if err := r.db.QueryRow("SELECT kind FROM event ORDER BY id LIMIT 1").Scan(&kind); err != nil || kind != "callback" {
+		t.Fatalf("first row kind %q, error %v", kind, err)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) || len(r.commits) != 0 {
+		t.Fatalf("err %v, %d more commits", err, len(r.commits))
+	}
+}
+
+// T-I-04: the evidence mark of a batch ends with its write. After an evidence
+// write, a batch with bulk events only waits for the tick again.
+func TestTI04EvidenceMarkEndsWithTheWrite(t *testing.T) {
+	r := newRig(t, 100)
+	began := r.begins()
+	stop := r.start()
+	r.add(event.KindCallback, 0)
+	wantCommits(t, r, 1)
+	<-began
+	for i := int64(1); i < 4; i++ {
+		r.add(event.KindRequest, i)
+	}
+	r.drained()
+	r.waitsForTheTick(began)
+	wantCommits(t, r, 3)
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+// beaconSeen returns beacon_seen of the session, and false when it has no row.
+func (r *rig) beaconSeen(id string) (seen int, ok bool) {
+	r.t.Helper()
+	rows, err := r.db.Query("SELECT beacon_seen FROM session WHERE id = ?", id)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return 0, false
+	}
+	if err := rows.Scan(&seen); err != nil {
+		r.t.Fatal(err)
+	}
+	return seen, true
+}
+
+// wantSeen checks beacon_seen of a session that has a row.
+func (r *rig) wantSeen(id string, want int) {
+	r.t.Helper()
+	if seen, ok := r.beaconSeen(id); !ok || seen != want {
+		r.t.Errorf("session %q: beacon_seen %d, row %v, want %d", id, seen, ok, want)
+	}
+}
+
+// enqueue puts events in the lanes. A test then closes the queue and calls run,
+// so that the events are one batch.
+func (r *rig) enqueue(evs ...*event.Event) {
+	r.t.Helper()
+	for _, e := range evs {
+		if !r.q.Enqueue(e) {
+			r.t.Fatal("event not queued")
+		}
+	}
+}
+
+// runClosed closes the queue, runs the writer, and checks a healthy end.
+func (r *rig) runClosed() {
+	r.t.Helper()
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil || !r.w.Healthy() {
+		r.t.Fatalf("run %v, healthy %v", err, r.w.Healthy())
+	}
+}
+
+// T-U-25: a request and a beacon of one session in one batch set beacon_seen.
+// The update runs after the upsert, and only for the session of the beacon. The
+// upsert counts the request once, so the update is not an insert.
+func TestTU25BeaconOfSessionInTheSameBatchSetsBeaconSeen(t *testing.T) {
+	r := newRig(t, 100)
+	execs := 0
+	r.w.beacons.onExec = func() { execs++ }
+	r.enqueue(
+		sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 1000),
+		sessEvent(t, event.KindRequest, "sess-two", "198.51.100.2", "", 1001),
+		sessEvent(t, event.KindBeacon, "sess-one", "", "", 1002),
+	)
+	r.runClosed()
+	r.wantSeen("sess-one", 1)
+	r.wantSeen("sess-two", 0)
+	if s, _ := r.session("sess-one"); s.count != 1 || execs != 1 || r.sessionCount() != 2 {
+		t.Errorf("req_count %d, %d updates, %d sessions, want 1, 1, 2", s.count, execs, r.sessionCount())
+	}
+}
+
+// T-U-25: a session row from an earlier batch gets beacon_seen from a later
+// beacon.
+func TestTU25BeaconOfSessionFromAnEarlierBatchSetsBeaconSeen(t *testing.T) {
+	r := newRig(t, 100)
+	stop := r.start()
+	r.enqueue(sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 1000))
+	r.drained()
+	r.fire()
+	r.commit()
+	r.wantSeen("sess-one", 0)
+	r.enqueue(sessEvent(t, event.KindBeacon, "sess-one", "", "", 1001))
+	r.drained()
+	r.fire()
+	r.commit()
+	r.wantSeen("sess-one", 1)
+	if err := stop(); !errors.Is(err, context.Canceled) || !r.w.Healthy() {
+		t.Fatalf("err %v, healthy %v", err, r.w.Healthy())
+	}
+}
+
+// T-U-25: a beacon of a session with no row stores the beacon row. It makes no
+// session row and gives no error.
+func TestTU25BeaconOfUnknownSessionMakesNoSessionRow(t *testing.T) {
+	r := newRig(t, 100)
+	r.enqueue(sessEvent(t, event.KindBeacon, "sess-none", "", "", 1000))
+	r.runClosed()
+	if _, ok := r.beaconSeen("sess-none"); ok || r.sessionCount() != 0 || r.rows() != 1 {
+		t.Errorf("session row %v, %d sessions, %d event rows, want none, 0, 1", ok, r.sessionCount(), r.rows())
+	}
+}
+
+// T-U-25: 500 beacons of one session in one batch run one update statement.
+func TestTU25ManyBeaconsOfOneSessionRunOneUpdate(t *testing.T) {
+	r := newRig(t, 1000)
+	execs := 0
+	r.w.beacons.onExec = func() { execs++ }
+	r.enqueue(sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 999))
+	for i := range int64(maxBatch - 1) {
+		r.enqueue(sessEvent(t, event.KindBeacon, "sess-one", "", "", 1000+i))
+	}
+	r.runClosed()
+	if execs != 1 || r.rows() != maxBatch {
+		t.Errorf("%d update statements, %d rows, want 1, %d", execs, r.rows(), maxBatch)
+	}
+	r.wantSeen("sess-one", 1)
+}
+
+// T-U-25: a beacon event with no session runs no statement and gives no error.
+func TestTU25BeaconWithNoSessionRunsNoUpdate(t *testing.T) {
+	r := newRig(t, 100)
+	execs := 0
+	r.w.beacons.onExec = func() { execs++ }
+	r.enqueue(sessEvent(t, event.KindBeacon, "", "", "", 1000))
+	r.runClosed()
+	if execs != 0 || r.rows() != 1 || r.sessionCount() != 0 {
+		t.Errorf("%d statements, %d rows, %d sessions, want 0, 1, 0", execs, r.rows(), r.sessionCount())
+	}
+}
+
+// T-U-25: after a failed append the writer commits the bulk rows, so the beacon
+// still sets beacon_seen. Then the writer stops.
+func TestTU25BeaconStillSetsBeaconSeenAfterAFailedAppend(t *testing.T) {
+	r := newRig(t, 100)
+	r.app.err = errors.New("log is stopped")
+	r.enqueue(
+		sessEvent(t, event.KindRequest, "sess-one", "198.51.100.1", "", 1000),
+		sessEvent(t, event.KindBeacon, "sess-one", "", "", 1001),
+		sessEvent(t, event.KindCallback, "sess-one", "", "", 1002),
+	)
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleAppend)
+	r.wantSeen("sess-one", 1)
+	if r.rows() != 2 || r.evidenceRows() != 0 {
+		t.Errorf("%d rows, %d evidence rows, want 2, 0", r.rows(), r.evidenceRows())
+	}
+}
+
 // T-U-18: the goroutine count does not grow with the number of events. The base
 // is the count before Run starts. A batch in flight adds the goroutine of its
 // transaction (database/sql ends it after the commit) and the goroutine of Run.
@@ -321,7 +571,8 @@ func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 	r := newRig(t, 4000)
 	r.gate()
 	base := runtime.NumGoroutine()
-	stop := r.start()
+	// The events are in the lanes before Run starts, so the batches are full.
+	// A batch with evidence is written when the lanes are empty.
 	for i := int64(0); i < 2000; i++ {
 		kind := event.KindRequest
 		if i%5 == 0 {
@@ -329,6 +580,7 @@ func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 		}
 		r.add(kind, i)
 	}
+	stop := r.start()
 	select { // the first batch waits in AppendBatch with its transaction open
 	case <-r.app.entered:
 	case <-time.After(waitFor):
@@ -351,25 +603,27 @@ func TestTU18GoroutineCountDoesNotGrow(t *testing.T) {
 }
 
 // T-U-18: each evidence row has the hash, the leaf index first+i and the record
-// bytes; the appender gets one call for a batch with evidence and none for a
-// batch with bulk events only.
+// bytes. The appender gets one call for a batch with evidence. It gets none for
+// a batch with bulk events only. The test writes each batch with write, so that
+// the batches are exact.
 func TestTU18EvidenceRowsHaveHashLeafAndRecord(t *testing.T) {
 	r := newRig(t, 100)
-	stop := r.start()
 	for _, batch := range [][]event.Kind{
 		{event.KindRequest, event.KindBeacon, event.KindRequest},
 		{event.KindRequest, event.KindCallback, event.KindBeacon, event.KindScoreChange},
 		{event.KindRetention, event.KindAlertSent, event.KindBundleRejected},
 	} {
-		for _, k := range batch {
-			r.add(k, int64(r.rows()))
+		evs := make([]*event.Event, len(batch))
+		for i, k := range batch {
+			e, err := event.NewEvent(nil, event.Input{Kind: k})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs[i] = e
 		}
-		r.drained()
-		r.fire()
-		r.commit()
-	}
-	if err := stop(); !errors.Is(err, context.Canceled) {
-		t.Fatal(err)
+		if err := r.w.write(evs); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if s := r.w.Stats(); s.OrphanLeaves != 0 {
 		t.Fatalf("%d orphan leaves after good batches", s.OrphanLeaves)
@@ -605,26 +859,26 @@ func TestTU18CancelAfterFullFlushLeavesEventsInTheLanes(t *testing.T) {
 	}
 }
 
-// runAfterStart starts the writer. It waits until the writer has passed the
-// start check and committed one event. Then it calls late and calls batch to
-// queue the events. It closes the queue and returns the result of Run. Thus
-// late runs after the start check and before the write of the batch. The
-// function late can change the database, the appender or a hook of the writer.
-// The stop function that start gives also cancels the context of Run.
+// runAfterStart queues the events with batch, closes the queue, and runs the
+// writer. It returns the result of Run. The function late runs on the writer
+// goroutine at the first clock read of a write. That is after the start check
+// and before the write of the batch, with no database connection in use. It can
+// change the database, the appender or a hook of the writer. The events are in
+// the lanes before Run starts, so Run takes the batch in one pass.
 func (r *rig) runAfterStart(late, batch func()) error {
 	r.t.Helper()
-	stop := r.start()
-	r.add(event.KindRequest, 0)
-	r.drained()
-	r.fire()
-	r.commit()
-	if !r.w.Healthy() {
-		r.t.Fatalf("the writer stopped at the start: %v", r.w.Err())
-	}
-	late()
 	batch()
 	r.q.Close()
-	return stop()
+	var once sync.Once
+	clock := r.w.clock
+	r.w.clock = func() time.Time {
+		once.Do(late)
+		if clock != nil {
+			return clock()
+		}
+		return time.Now()
+	}
+	return r.run(context.Background())
 }
 
 // T-U-18: a closed database and a refused row stop the writer and commit nothing
