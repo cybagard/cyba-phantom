@@ -3,6 +3,7 @@
 package bait
 
 import (
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,9 +17,14 @@ type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
-	// slots are the header slots with a valid value. left counts the others.
-	slots []slotHeader
-	left  int
+	// mint holds the key-set indexes of one mint. The first acts are the
+	// trap actions of the template. The header slots named in names follow.
+	// The site build makes it from the bundle of the site.
+	mint  []int
+	acts  int
+	names []string
+	// left counts the header slots with no trap in the bundle.
+	left int
 	// ctype and clen are Content-Type and Content-Length values. A response
 	// uses them as they are, so a request allocates no header value. A
 	// template route has no clen.
@@ -31,21 +37,39 @@ type site struct {
 	hosts map[string]map[string]*entry
 	// notFound maps a vhost name to its 404 template, if the route map has one.
 	notFound map[string]*entry
-	// texts maps a trap id to its text. The build makes it from one Traps call
-	// and one token. A request only reads it.
-	texts map[string]string
+	// traps are the traps of the bundle in file order, so a key-set index is a
+	// position in this list. The build makes it from one Traps call.
+	traps []bundle.Trap
 }
 
-// buildSite makes the table of b. The text of each trap is the instruction of
-// the trap with token. It takes the asset names only from the
+// mintOf gives the entry the key-set indexes of one mint. They are the trap
+// actions of its template, then the header slots whose trap is in the bundle.
+// A slot with no trap adds to left. pos maps a trap id to its index.
+func (e *entry) mintOf(b *bundle.Bundle, pos map[string]int) {
+	if e.route.Template != "" {
+		e.mint, _ = b.TrapIndexes(e.route.Template)
+	}
+	e.acts = len(e.mint)
+	for _, hs := range e.route.Headers {
+		i, ok := pos[hs.Trap]
+		if !ok {
+			e.left++
+			continue
+		}
+		e.mint = append(e.mint, i)
+		e.names = append(e.names, http.CanonicalHeaderKey(hs.Name))
+	}
+}
+
+// buildSite makes the table of b. It takes the asset names only from the
 // route map of each vhost. The loader refuses a route whose asset is missing.
-// If Asset still gives false, the build makes no entry for that route.
-func buildSite(b *bundle.Bundle, token string) *site {
-	traps := b.Traps()
-	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{},
-		texts: make(map[string]string, len(traps))}
-	for _, t := range traps {
-		s.texts[t.ID] = t.Render(token)
+// If Asset still gives false, the build makes no entry for that route. The
+// key-set indexes of each route come from b, so only b.Tokens() can use them.
+func buildSite(b *bundle.Bundle) *site {
+	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, traps: b.Traps()}
+	pos := make(map[string]int, len(s.traps))
+	for i, t := range s.traps {
+		pos[t.ID] = i
 	}
 	for _, host := range b.Vhosts() {
 		rm, ok := b.Routes(host)
@@ -64,11 +88,13 @@ func buildSite(b *bundle.Bundle, token string) *site {
 				e.clen = []string{strconv.Itoa(a.Len())}
 			}
 			e.ctype = []string{r.Type}
-			e.slots, e.left = slotHeaders(r.Headers, s.texts)
+			e.mintOf(b, pos)
 			paths[r.Path] = e
 		}
 		if rm.NotFound != "" {
-			s.notFound[host] = &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
+			nf := &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
+			nf.mintOf(b, pos)
+			s.notFound[host] = nf
 		}
 		s.hosts[host] = paths
 	}
@@ -76,20 +102,19 @@ func buildSite(b *bundle.Bundle, token string) *site {
 }
 
 // slot holds the site of one bundle. once makes the build run one time. count
-// is the build counter of the handler. token is the token seam of the handler.
+// is the build counter of the handler.
 type slot struct {
 	b     *bundle.Bundle
 	once  sync.Once
 	s     *site
 	count *atomic.Int64
-	token func() string
 }
 
 // site returns the table of b and builds it at the first call.
 func (sl *slot) site() *site {
 	sl.once.Do(func() {
 		sl.count.Add(1)
-		sl.s = buildSite(sl.b, sl.token())
+		sl.s = buildSite(sl.b)
 	})
 	return sl.s
 }

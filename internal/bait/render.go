@@ -5,17 +5,64 @@ import (
 	"net/http"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // maxResponse is the most body bytes of one response (SEC-32).
 const maxResponse = 1 << 20
 
-// placeholder is the token text until the engine mints real tokens. It holds
-// only printable ASCII, with no "--" and no "<", so `comment` keeps it.
-const placeholder = "placeholder-token"
+// minted is what one response gets from its mint. It has the trap texts for
+// the template and the header slots with a valid value. It also has the number
+// of slots left out.
+type minted struct {
+	page  bundle.Page
+	slots []slotHeader
+	left  int
+}
 
-// placeholderToken is the token seam. It takes no request value.
-func placeholderToken() string { return placeholder }
+// mint gives the trap texts and the header slots of one response of e. It
+// reserves the tokens of all trap actions and header slots with one MintRange
+// call. The call uses the key set of b and the time of the request. The range
+// goes on sess for the request event. A mint that fails counts one in noKeys.
+// So does a bundle with no key set. Then each trap text is "" and no header
+// slot is set. The response is still served (C3). No token text goes anywhere
+// but into the response.
+func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m minted) {
+	m.left = e.left
+	n := len(e.mint)
+	if n == 0 {
+		return m
+	}
+	m.page.Trap = make(map[string]string, e.acts)
+	var out [token.MaxRange][token.Size]byte
+	ks := h.keys(b)
+	first, err := ks.MintRange(e.mint, sess.at, out[:n])
+	if err != nil {
+		h.noKeys.Add(1)
+		for _, i := range e.mint[:e.acts] {
+			m.page.Trap[s.traps[i].ID] = ""
+		}
+		return m
+	}
+	// Verify of the first token gives the time unit of the mint. The unit
+	// formula stays in internal/token.
+	unit := token.Verify([]*token.KeySet{ks}, out[0]).Unit
+	sum := b.SHA256()
+	sess.mint = event.MintRange{Unit: unit, Count: uint8(n), First: first, IssuedAt: sess.at.UnixMilli()}
+	copy(sess.mint.SetID[:], sum[:])
+	for i, idx := range e.mint {
+		v := s.traps[idx].Render(h.text(out[i]))
+		if i < e.acts {
+			m.page.Trap[s.traps[idx].ID] = v
+		} else if validSlotValue(v) {
+			m.slots = append(m.slots, slotHeader{e.names[i-e.acts], []string{v}})
+		} else {
+			m.left++
+		}
+	}
+	return m
+}
 
 // errOverCap is the error of a write that would pass maxResponse.
 var errOverCap = errors.New("bait: response over the cap")
@@ -26,7 +73,7 @@ var errOverCap = errors.New("bait: response over the cap")
 type capWriter struct {
 	w       http.ResponseWriter
 	h       *Handler
-	e       *entry
+	m       minted
 	sess    *reqSession
 	code    int // the status of the page
 	n       int
@@ -54,26 +101,26 @@ func (c *capWriter) start() {
 	if !c.started {
 		c.started = true
 		hd := c.w.Header()
-		c.h.addSlots(hd, c.e)
+		c.h.addSlots(hd, &c.m)
 		c.sess.setCookie(hd)
 		c.w.WriteHeader(c.code)
 	}
 }
 
 // render runs the template of e and streams the page with the status code. It
-// returns the status that it wrote. The data is the trap text map of the site.
-// The site makes it one time, so it holds no request value and a request
-// allocates no map for it. An error counts one time. Before the first byte,
-// and not over the cap, the response is the fixed 404 page. Else the
-// connection closes: render then writes the event, with the status of the
-// first byte or none, and panics. The panic with ErrAbortHandler also keeps the
-// stack out of the server log. No error text goes anywhere.
+// returns the status that it wrote. The data is the trap text map of the mint
+// of this response. It holds no request value. An error counts one time.
+// Before the first byte, and not over the cap, the response is the fixed 404
+// page. Then the event has no mint range. Else the connection closes. Render
+// then writes the event, with the status of the first byte or none and the
+// mint range, and panics. The panic with ErrAbortHandler also keeps the stack
+// out of the server log. No error text goes anywhere.
 func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundle, s *site, sess *reqSession, e *entry, code int) int {
 	hd := w.Header()
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
-	cw := capWriter{w: w, h: h, e: e, sess: sess, code: code}
-	err := b.Execute(&cw, e.route.Template, bundle.Page{Trap: s.texts})
+	cw := capWriter{w: w, h: h, m: h.mint(b, s, e, sess), sess: sess, code: code}
+	err := b.Execute(&cw, e.route.Template, cw.m.page)
 	if err == nil {
 		cw.start()
 		return code
@@ -87,6 +134,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundl
 		h.record(r, sess, written)
 		panic(http.ErrAbortHandler)
 	}
+	sess.mint = event.MintRange{}
 	reply(w, http.StatusNotFound, notFoundBody)
 	return http.StatusNotFound
 }

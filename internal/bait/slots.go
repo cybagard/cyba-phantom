@@ -3,15 +3,13 @@ package bait
 import (
 	"net/http"
 	"strings"
-
-	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
 
 // maxSlotValue is the most bytes of a header slot value (ADR-035).
 const maxSlotValue = 1024
 
-// slotHeader is a header slot that the site build checked. name is in
-// canonical form. val is the one value. A response shares val.
+// slotHeader is a header slot of one response, with its value checked. name is
+// in canonical form. val is the one value.
 type slotHeader struct {
 	name string
 	val  []string
@@ -29,20 +27,6 @@ func validSlotValue(v string) bool {
 		}
 	}
 	return true
-}
-
-// slotHeaders gives the slots whose value is the text of the trap and is
-// valid. left is the number of slots that it leaves out.
-func slotHeaders(slots []bundle.HeaderSlot, texts map[string]string) (ok []slotHeader, left int) {
-	for _, s := range slots {
-		v := texts[s.Trap]
-		if !validSlotValue(v) {
-			left++
-			continue
-		}
-		ok = append(ok, slotHeader{http.CanonicalHeaderKey(s.Name), []string{v}})
-	}
-	return ok, left
 }
 
 // putSlots adds each slot to hd. It skips a slot whose name is in hd already,
@@ -65,11 +49,11 @@ func putSlots(hd http.Header, slots []slotHeader) {
 	}
 }
 
-// addSlots writes the slot headers of e to hd. It adds the number of slots
-// that the site build left out to slotDrops. Call it after the fixed headers.
-func (h *Handler) addSlots(hd http.Header, e *entry) {
-	putSlots(hd, e.slots)
-	if e.left > 0 {
-		h.slotDrops.Add(int64(e.left))
+// addSlots writes the slot headers of m to hd. It adds the number of slots
+// that m leaves out to slotDrops. Call it after the fixed headers.
+func (h *Handler) addSlots(hd http.Header, m *minted) {
+	putSlots(hd, m.slots)
+	if m.left > 0 {
+		h.slotDrops.Add(int64(m.left))
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/session"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // cookieName is the name of the session cookie (SEC-35). internal/session reads
@@ -64,14 +65,20 @@ type Handler struct {
 	// hook runs between the Load and the CompareAndSwap of siteOf. It is nil
 	// in production. A test sets it.
 	hook func()
-	// token gives the token text of a site. A site build calls it one time.
-	// It takes no request value. A test sets it before the first request.
-	token func() string
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64
 	// slotDrops counts the header slots left out of a response because the
 	// value is not valid. It adds one for each slot at each such response.
 	slotDrops atomic.Int64
+	// text gives the text of a token. It is token.Text. Only a test sets it,
+	// before the first request.
+	text func([token.Size]byte) string
+	// keys gives the key set of a bundle. It is (*bundle.Bundle).Tokens. Only a
+	// test sets it, to get a render with no key set.
+	keys func(*bundle.Bundle) *token.KeySet
+	// noKeys counts the renders whose mint failed. The bundle has no key set,
+	// for example. It adds one for each such render.
+	noKeys atomic.Int64
 	// q takes the request events.
 	q *event.Queue
 	// eventErrs counts the requests for which NewEvent returned an error.
@@ -112,7 +119,7 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 	if dk == nil {
 		dk = session.NewDayKey()
 	}
-	return &Handler{src: src, fallback: fallback, q: q, token: placeholderToken, dk: dk, now: time.Now}
+	return &Handler{src: src, fallback: fallback, q: q, text: token.Text, keys: (*bundle.Bundle).Tokens, dk: dk, now: time.Now}
 }
 
 // reqSession is the session of one request. The handler resolves it one time,
@@ -125,6 +132,11 @@ type reqSession struct {
 	// that the request used.
 	fresh bool
 	key   session.Key
+	// at is the time of the request: the one clock read. The mint uses it
+	// too. mint is the counter range of the response, or the zero value for
+	// a response with no mint.
+	at   time.Time
+	mint event.MintRange
 }
 
 // sessionOf resolves the session of r. A request with one valid cookie has the
@@ -132,8 +144,9 @@ type reqSession struct {
 // response sets a cookie. With the cookie off, each request has the keyed id
 // and no response sets a cookie. The handler keeps no session state in memory.
 func (h *Handler) sessionOf(r *http.Request) reqSession {
-	k := h.dk.At(h.now())
-	s := reqSession{ip: clientIP(r.RemoteAddr), key: k}
+	at := h.now()
+	k := h.dk.At(at)
+	s := reqSession{ip: clientIP(r.RemoteAddr), key: k, at: at}
 	if !h.cookieOff {
 		if v, ok := session.CookieFromHeader(r.Header); ok {
 			if id, ok := k.CheckCookie(v); ok {
@@ -171,9 +184,10 @@ func clientIP(addr string) string {
 }
 
 // record puts one request event on the queue. code is the status that the
-// engine wrote, or 0 when it wrote none. The event has the typed fields and
-// the session id, and no detail. A NewEvent error adds one to eventErrs. A full
-// queue counts its own drop. The call never waits.
+// engine wrote, or 0 when it wrote none. The event has the typed fields, the
+// session id and the mint range of the response. It has no trap id, token id
+// or detail. A NewEvent error adds one to eventErrs. A full queue counts its
+// own drop. The call never waits.
 func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 	in := event.Input{
 		Kind:     event.KindRequest,
@@ -182,6 +196,9 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 		Method:   r.Method,
 		Path:     event.RequestPath(r.URL.RawPath, r.URL.Path),
 		ClientIP: s.ip,
+	}
+	if s.mint.Count != 0 {
+		in.Mint = &s.mint
 	}
 	if code != 0 {
 		st := int64(code)
@@ -215,15 +232,15 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 			for _, r := range st.retired {
 				if r == w {
 					h.builds.Add(1)
-					return buildSite(b, h.token())
+					return buildSite(b)
 				}
 			}
 			if b.Sequence() <= st.cur.b.Sequence() {
 				h.builds.Add(1)
-				return buildSite(b, h.token())
+				return buildSite(b)
 			}
 		}
-		n := &state{cur: &slot{b: b, count: &h.builds, token: h.token}}
+		n := &state{cur: &slot{b: b, count: &h.builds}}
 		if st != nil {
 			n.retired[0] = weak.Make(st.cur.b)
 			copy(n.retired[1:], st.retired[:retiredKept-1])
@@ -300,7 +317,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
 	hd["Content-Length"] = e.clen
-	h.addSlots(hd, e)
+	m := h.mint(b, s, e, sess)
+	h.addSlots(hd, &m)
 	sess.setCookie(hd)
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {

@@ -18,7 +18,18 @@ import (
 	xhtml "golang.org/x/net/html"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
+
+// placeholder is the token text of the tests that pin the text of a page. It
+// holds only printable ASCII, with no "--" and no "<", so `comment` keeps it.
+const placeholder = "placeholder-token"
+
+// fixedText makes h write placeholder for each token, and returns h.
+func fixedText(h *Handler) *Handler {
+	h.text = func([token.Size]byte) string { return placeholder }
+	return h
+}
 
 // trapSpec is a trap of traps/traps.json. The text is the instruction template.
 type trapSpec struct{ id, slot, text string }
@@ -49,7 +60,7 @@ func tmplBundle(tb testing.TB, specs []trapSpec, hosts map[string][]route) *bund
 func handlerFor(tb testing.TB, tmpl string) *Handler {
 	b := tmplBundle(tb, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/t", "t.tmpl", html, tmpl}}})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
+	return fixedText(New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb)))
 }
 
 // handlerTraps returns a handler for a bundle with n traps t0 to t(n-1). The
@@ -176,7 +187,7 @@ func TestTU20RenderSlots(t *testing.T) {
 	}
 	kilo := []route{{"/hidden-p", "hidden-p.tmpl", html, slotCases[0].tmpl}}
 	b := tmplBundle(t, specs, map[string][]route{"example.com": routes, "kilo.example": kilo})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
+	h := fixedText(New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t)))
 	for _, c := range slotCases {
 		hosts := []string{"example.com"}
 		if c.slot == "hidden-p" {
@@ -216,7 +227,7 @@ func TestTU20RenderNoRequest(t *testing.T) {
 	const mark = "zqmark"
 	b := tmplBundle(t, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/" + mark, "p.tmpl", html, pageTmpl}}})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
+	h := fixedText(New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t)))
 	r := get("/"+mark, "example.com")
 	r.URL.RawQuery = "q=" + mark
 	for _, k := range []string{"User-Agent", "Referer", "Cookie", "X-Forwarded-For", "Accept"} {
@@ -236,7 +247,7 @@ func TestTU20Placeholder(t *testing.T) {
 			t.Errorf("byte %#x in the placeholder", c)
 		}
 	}
-	if strings.Contains(placeholder, "--") || strings.Contains(placeholder, "<") || placeholderToken() != placeholder {
+	if strings.Contains(placeholder, "--") || strings.Contains(placeholder, "<") {
 		t.Errorf("placeholder %q", placeholder)
 	}
 }
@@ -399,7 +410,7 @@ func TestTS28Cap(t *testing.T) {
 	} {
 		h := handlerFor(t, c.tmpl)
 		// The trap text is "say hi " and the token, so the token is shorter.
-		h.token = func() string { return strings.Repeat("x", c.token-len("say hi ")) }
+		h.text = func([token.Size]byte) string { return strings.Repeat("x", c.token-len("say hi ")) }
 		srv, logs := startServer(t, h)
 		resp, body, err := fetch(t, srv, http.MethodGet, "/t")
 		srv.Close()

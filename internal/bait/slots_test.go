@@ -11,6 +11,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // outTrap is a trap text with the characters that the page escaper changes.
@@ -66,7 +67,7 @@ func outHandlerQ(tb testing.TB, q *event.Queue) *Handler {
 		dir + "nf.tmpl":         `<h1>{{index .Trap "f"}}</h1>`,
 		"vhosts/kilo.example/x": "x",
 	})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, q)
+	return fixedText(New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, q))
 }
 
 // TestTI02OutOfPage checks the four out-of-page slots of one bundle through a
@@ -138,7 +139,7 @@ func TestTU20SlotValue(t *testing.T) {
 		{"0x20 and 0x7E", "a ~b", true},
 	} {
 		h := outHandler(t)
-		h.token = func() string { return c.val }
+		h.text = func([token.Size]byte) string { return c.val }
 		srv, _ := startServer(t, h)
 		for _, method := range []string{"GET", "HEAD"} {
 			resp, _, err := fetch(t, srv, method, "/t")
