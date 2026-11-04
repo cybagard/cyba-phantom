@@ -49,7 +49,7 @@ func tmplBundle(tb testing.TB, specs []trapSpec, hosts map[string][]route) *bund
 func handlerFor(tb testing.TB, tmpl string) *Handler {
 	b := tmplBundle(tb, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/t", "t.tmpl", html, tmpl}}})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
 }
 
 // handlerTraps returns a handler for a bundle with n traps t0 to t(n-1). The
@@ -61,7 +61,7 @@ func handlerTraps(tb testing.TB, n int) *Handler {
 	}
 	b := tmplBundle(tb, specs, map[string][]route{
 		"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p>`}}})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
 }
 
 // TestTU20RenderAllocs checks that the allocations of a template request do
@@ -171,7 +171,7 @@ func TestTU20RenderSlots(t *testing.T) {
 	}
 	kilo := []route{{"/hidden-p", "hidden-p.tmpl", html, slotCases[0].tmpl}}
 	b := tmplBundle(t, specs, map[string][]route{"example.com": routes, "kilo.example": kilo})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
 	for _, c := range slotCases {
 		hosts := []string{"example.com"}
 		if c.slot == "hidden-p" {
@@ -210,7 +210,7 @@ func TestTU20RenderNoRequest(t *testing.T) {
 	const mark = "zqmark"
 	b := tmplBundle(t, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/" + mark, "p.tmpl", html, pageTmpl}}})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
 	r := get("/"+mark, "example.com")
 	r.URL.RawQuery = "q=" + mark
 	for _, k := range []string{"User-Agent", "Referer", "Cookie", "X-Forwarded-For", "Accept"} {

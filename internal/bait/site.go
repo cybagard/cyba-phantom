@@ -16,6 +16,9 @@ type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
+	// slots are the header slots with a valid value. left counts the others.
+	slots []slotHeader
+	left  int
 	// ctype and clen are Content-Type and Content-Length values. A response
 	// uses them as they are, so a request allocates no header value. A
 	// template route has no clen.
@@ -26,6 +29,8 @@ type entry struct {
 type site struct {
 	// hosts maps a vhost name to a map from an escaped route path to a route.
 	hosts map[string]map[string]*entry
+	// notFound maps a vhost name to its 404 template, if the route map has one.
+	notFound map[string]*entry
 	// texts maps a trap id to its text. The build makes it from one Traps call
 	// and one token. A request only reads it.
 	texts map[string]string
@@ -37,7 +42,8 @@ type site struct {
 // If Asset still gives false, the build makes no entry for that route.
 func buildSite(b *bundle.Bundle, token string) *site {
 	traps := b.Traps()
-	s := &site{hosts: map[string]map[string]*entry{}, texts: make(map[string]string, len(traps))}
+	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{},
+		texts: make(map[string]string, len(traps))}
 	for _, t := range traps {
 		s.texts[t.ID] = t.Render(token)
 	}
@@ -58,7 +64,11 @@ func buildSite(b *bundle.Bundle, token string) *site {
 				e.clen = []string{strconv.Itoa(a.Len())}
 			}
 			e.ctype = []string{r.Type}
+			e.slots, e.left = slotHeaders(r.Headers, s.texts)
 			paths[r.Path] = e
+		}
+		if rm.NotFound != "" {
+			s.notFound[host] = &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
 		}
 		s.hosts[host] = paths
 	}
