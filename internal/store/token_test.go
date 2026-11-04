@@ -198,11 +198,10 @@ func insertRawMint(t *testing.T, r *rig, issuedAt string) {
 	}
 }
 
-// T-S-32: six cases give no token row and one none count. There is no
-// mint row. Or the mint row has another unit, another set, a NULL session or a
-// NULL issued_at. Or it is a mint row of another range.
+// T-S-32: five cases give no token row and one none count. There is no
+// mint row. Or the mint row has another unit, another set or a NULL issued_at.
+// Or it is a mint row of another range.
 func TestTS32NoMintRowGivesNoRow(t *testing.T) {
-	nullSession := mintEvent(t, 1, "", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000})
 	otherSet := event.CallbackLink{SetID: [8]byte{9}, Unit: 5, Counter: 105}
 	for name, c := range map[string]struct {
 		render *event.Event
@@ -212,7 +211,6 @@ func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 		"no mint row":    {nil, "", link(5, 105)},
 		"another unit":   {render(t), "", link(6, 105)},
 		"another set":    {render(t), "", &otherSet},
-		"NULL session":   {nullSession, "", link(5, 105)},
 		"NULL issued_at": {nil, "NULL", link(5, 105)},
 		"another range":  {render(t), "", link(5, 500)},
 	} {
@@ -230,6 +228,83 @@ func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 			wantUnlinked(t, r, 1, 0)
 		})
 	}
+}
+
+// rawMint writes a mint row of mintSet with unit 5, first 100 and count 10.
+// It takes the session and issued_at as SQL values, with no check.
+func rawMint(t *testing.T, r *rig, session, issuedAt string) {
+	t.Helper()
+	q := fmt.Sprintf("INSERT INTO mint SELECT x'%X', 5, 100, 10, %s, %s", mintSet[:], session, issuedAt)
+	if _, err := r.db.Exec(q); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// T-S-32: a mint row with a NULL session marks a duplicate key. It gives no
+// token row and one ambiguous count. This holds when its issued_at is NULL.
+// It holds alone, and next to a second row that covers the counter.
+func TestTS32NullSessionMintRowIsAmbiguous(t *testing.T) {
+	t.Run("alone", func(t *testing.T) {
+		r := newRig(t, 100)
+		r.writeOK(mintEvent(t, 1, "", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000}),
+			cbEvent(t, 50, link(5, 105)))
+		wantTokens(t, r)
+		wantUnlinked(t, r, 0, 1)
+	})
+	t.Run("NULL issued_at", func(t *testing.T) {
+		r := newRig(t, 100)
+		rawMint(t, r, "NULL", "NULL")
+		r.writeOK(cbEvent(t, 50, link(5, 105)))
+		wantTokens(t, r)
+		wantUnlinked(t, r, 0, 1)
+	})
+	t.Run("next to a second row", func(t *testing.T) {
+		r := newRig(t, 100)
+		rawMint(t, r, "NULL", "1000")
+		r.writeOK(mintEvent(t, 2, "second", event.MintRange{SetID: mintSet, Unit: 5, First: 105, Count: 10, IssuedAt: 2000}),
+			cbEvent(t, 50, link(5, 107)))
+		wantTokens(t, r)
+		wantUnlinked(t, r, 0, 1)
+		// A counter that only the second row holds links to the second row.
+		r.writeOK(cbEvent(t, 51, link(5, 112)))
+		wantUnlinked(t, r, 0, 1)
+		row := tokenRow{id: tokenID(112), session: "second", trap: "trap-a", issuedAt: 2000, firstCb: 51, count: 1}
+		wantTokens(t, r, row)
+	})
+}
+
+// T-S-32: two renders in two time units with one first counter keep both mint
+// rows. A callback of each render gives the session of its own render.
+func TestTS32SameFirstCounterInTwoUnitsLinksEachRender(t *testing.T) {
+	r := newRig(t, 100)
+	r.writeOK(
+		mintEvent(t, 1, "five", event.MintRange{SetID: mintSet, Unit: 5, First: 500, Count: 10, IssuedAt: 1000}),
+		mintEvent(t, 2, "six", event.MintRange{SetID: mintSet, Unit: 6, First: 500, Count: 10, IssuedAt: 2000}),
+		cbEvent(t, 50, link(5, 505)),
+		cbEvent(t, 51, link(6, 506)))
+	wantTokens(t, r,
+		tokenRow{id: tokenID(505), session: "five", trap: "trap-a", issuedAt: 1000, firstCb: 50, count: 1},
+		tokenRow{id: tokenID(506), session: "six", trap: "trap-a", issuedAt: 2000, firstCb: 51, count: 1})
+	wantUnlinked(t, r, 0, 0)
+	if n := r.w.MintDuplicates(); n != 0 {
+		t.Errorf("%d duplicates, want 0", n)
+	}
+}
+
+// T-S-32: a duplicate mint key gives ambiguous for its callbacks. A third row
+// that covers the counter does not become the link.
+func TestTS32DuplicateMintKeyThenThirdRowIsAmbiguous(t *testing.T) {
+	r := newRig(t, 100)
+	r.writeOK(
+		mintEvent(t, 1, "first", event.MintRange{SetID: mintSet, Unit: 5, First: 500, Count: 20, IssuedAt: 1000}),
+		mintEvent(t, 2, "again", event.MintRange{SetID: mintSet, Unit: 5, First: 500, Count: 20, IssuedAt: 1001}),
+		cbEvent(t, 50, link(5, 505)))
+	wantTokens(t, r)
+	wantUnlinked(t, r, 0, 1)
+	r.writeOK(mintEvent(t, 3, "third", event.MintRange{SetID: mintSet, Unit: 5, First: 510, Count: 10, IssuedAt: 1002}),
+		cbEvent(t, 51, link(5, 512)))
+	wantTokens(t, r)
+	wantUnlinked(t, r, 0, 2)
 }
 
 // T-S-32: a callback before its mint row exists gives the none count. After the
@@ -282,6 +357,20 @@ func TestTS32RangeEdges(t *testing.T) {
 	if !r.w.Healthy() {
 		t.Fatal("writer not healthy")
 	}
+}
+
+// T-S-32: the lookup reads the 68 first counters up to the counter, no more.
+// A range has at most 68 counters, so a row 68 below the counter cannot cover
+// it. A raw row of 69 counters shows the bound. The sensor never writes such a
+// row. It covers the counter 68 above its first. The lookup does not read it.
+func TestTS32LookupBoundIsSixtySeven(t *testing.T) {
+	r := newRig(t, 100)
+	if _, err := r.db.Exec(fmt.Sprintf("INSERT INTO mint SELECT x'%X', 5, 1000, 69, 'wide', 3000", mintSet[:])); err != nil {
+		t.Fatal(err)
+	}
+	r.writeOK(cbEvent(t, 50, link(5, 1067)), cbEvent(t, 51, link(5, 1068)))
+	wantTokens(t, r, tokenRow{id: tokenID(1067), session: "wide", trap: "trap-a", issuedAt: 3000, firstCb: 50, count: 1})
+	wantUnlinked(t, r, 1, 0)
 }
 
 // T-S-32: a batch that the writer rolls back adds no unlinked count and no
@@ -388,11 +477,15 @@ func TestTS32TokenConflictDoesNotStopTheWriter(t *testing.T) {
 	wantTokens(t, r, tokenRow{id: tokenID(105), session: "other", trap: "trap-x", issuedAt: 1, firstCb: 2, count: 7})
 }
 
+// lookupPlan is the whole plan text of the lookup. It is one search of the
+// primary key. The search uses the key set, the unit and a range of first.
+const lookupPlan = "SEARCH mint USING PRIMARY KEY (set_id=? AND unit=? AND first>? AND first<?)"
+
 // T-S-32: the lookup searches the primary key of mint. It has no scan and no
 // temporary b-tree.
 func TestTS32LookupUsesThePrimaryKey(t *testing.T) {
 	r := newRig(t, 100)
-	rows, err := r.db.Query("EXPLAIN QUERY PLAN "+lookupMint, mintSet[:], 105, 105, 105, 5)
+	rows, err := r.db.Query("EXPLAIN QUERY PLAN "+lookupMint, mintSet[:], 5, 105, 105, 105)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +501,7 @@ func TestTS32LookupUsesThePrimaryKey(t *testing.T) {
 	}
 	all := strings.Join(details, "; ")
 	t.Logf("plan: %s", all)
-	if !strings.Contains(all, "SEARCH mint USING PRIMARY KEY") || strings.Contains(all, "SCAN") || strings.Contains(all, "TEMP B-TREE") {
-		t.Fatalf("plan %q", all)
+	if all != lookupPlan {
+		t.Fatalf("plan %q, want %q", all, lookupPlan)
 	}
 }

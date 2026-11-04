@@ -5,5 +5,5 @@ CREATE TABLE mint (
   count         INTEGER,
   session_id    TEXT,
   issued_at     INTEGER,
-  PRIMARY KEY (set_id, first)
+  PRIMARY KEY (set_id, unit, first)
 ) WITHOUT ROWID;
