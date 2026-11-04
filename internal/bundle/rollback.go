@@ -92,7 +92,8 @@ func (st *state) allows(version string, sum [32]byte, class Class) error {
 // CompareVersion orders two manifest versions as the rollback rule does: the
 // date first, then N as a number. The result is negative when a is older than
 // b, zero when they match, and positive when a is newer. The result is 0 when a
-// or b is not a valid version.
+// or b is not a valid version. This 0 does not mean that the versions are
+// equal, so a caller must not accept a version on this result alone.
 func CompareVersion(a, b string) int {
 	if !validVersion(a) || !validVersion(b) {
 		return 0

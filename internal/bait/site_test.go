@@ -287,8 +287,13 @@ func requests(t *testing.T, h *Handler, n int, tag string) {
 // older bundle. The call gets its own site and installs nothing. Requests for
 // the newer bundle then build no site.
 func TestTU20SiteLostSwapNewer(t *testing.T) {
-	older, newer := bundleAt(t, "-1", "2026.11.01-1"), bundleAt(t, "-22", "2026.11.01-2")
+	const traps = `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x{{.Token}}"}]`
+	withVersion := func(tag, version string) *bundle.Bundle {
+		return bundleFiles(t, tag, map[string]string{"manifest.json": manifestOf(version), "traps/traps.json": traps})
+	}
+	older, newer := withVersion("-1", "2026.11.01-1"), withVersion("-22", "2026.11.01-2")
 	h := New(&swap{list: []*bundle.Bundle{newer}}, &fallbackFn{}, testQueue(t))
+	h.token = func() string { return "tok" }
 	h.hook = func() {
 		h.hook = nil
 		h.siteOf(newer)
@@ -296,6 +301,9 @@ func TestTU20SiteLostSwapNewer(t *testing.T) {
 	s := h.siteOf(older)
 	if e := s.hosts["example.com"]["/"]; e == nil || e.asset.Len() != rootLen("-1") {
 		t.Error("the site is not the site of the older bundle")
+	}
+	if got := s.texts["a"]; got != "xtok" {
+		t.Errorf("trap text of the older site = %q, want %q", got, "xtok")
 	}
 	if st := h.sites.Load(); st.cur.b != newer || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
 		t.Error("the older bundle changed the state")
@@ -316,7 +324,7 @@ func TestTU20SiteOlderThanRetired(t *testing.T) {
 	older := bundleAt(t, "-old", "2026.11.01-1")
 	var bs []*bundle.Bundle
 	for i := range 5 {
-		bs = append(bs, bundleAt(t, "-n"+string(rune('0'+i)), "2026.11.02-"+string(rune('1'+i))))
+		bs = append(bs, bundleAt(t, fmt.Sprintf("-n%d", i), fmt.Sprintf("2026.11.02-%d", i+1)))
 	}
 	src := &swap{list: []*bundle.Bundle{older, bs[4]}}
 	h := New(src, &fallbackFn{}, testQueue(t))

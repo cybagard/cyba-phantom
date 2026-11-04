@@ -194,6 +194,11 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 // its version state is removed. Then each request for that bundle builds a
 // site. This lasts until a bundle that is not older than cur loads, or the
 // process starts again.
+//
+// Known limit: two loads of the same archive have the same version. A request
+// can read the first load and lose the swap to the second load. It then
+// installs the first load, which was never in the cache. After that, each
+// request for the running bundle builds a site until the next swap.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
