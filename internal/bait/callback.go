@@ -11,22 +11,32 @@ import (
 )
 
 // callbackPos holds the positions of a callback route, ready to serve. header
-// is the canonical header name. The site build makes it, never a request.
+// is the canonical header name. vhost is the vhost name of the bundle, for the
+// callback record. The site build makes it, never a request.
 type callbackPos struct {
 	segment             bool
 	query, header, body string
+	vhost               string
 }
 
-func newCallbackPos(c *bundle.Callback) *callbackPos {
-	p := &callbackPos{segment: c.Segment, query: c.Query, body: c.Body}
+func newCallbackPos(c *bundle.Callback, vhost string) *callbackPos {
+	p := &callbackPos{segment: c.Segment, query: c.Query, body: c.Body, vhost: vhost}
 	if c.Header != "" {
 		p.header = HeaderName(c.Header)
 	}
 	return p
 }
 
-// surfaces are the surfaces of the positions. The order is the order of the
-// texts for Check and of the event rule: path, query, header, body.
+// The positions of a callback route. The order is the order of the texts for
+// Check and of the event rule.
+const (
+	posPath = iota
+	posQuery
+	posHeader
+	posBody
+)
+
+// surfaces are the surfaces of the positions, in the order of the positions.
 var surfaces = [token.Positions]event.Surface{
 	event.SurfacePath, event.SurfaceQuery, event.SurfaceHeader, event.SurfaceBody,
 }
@@ -36,22 +46,29 @@ var surfaces = [token.Positions]event.Surface{
 // Call it before the first request. It is not safe to call it later.
 func (h *Handler) SetRing(r *token.Ring) { h.ring = r }
 
-// callbackEntry gives the callback route for the escaped path p. The exact
-// path comes first. Else a route with a segment position matches its path, "/"
-// and one segment. A path that no callback route matches gives nil.
-func callbackEntry(routes map[string]*entry, p string) *entry {
+// routeEntry gives the route for the escaped path p. The exact route of any
+// kind comes first. Else a callback route with a segment position matches its
+// path, "/" and one segment. At the root, only "/" and one segment match, so
+// "//" and "//x" match no route. A path that no route matches gives nil.
+func routeEntry(routes map[string]*entry, p string) *entry {
 	if e := routes[p]; e != nil {
 		return e
 	}
-	i := strings.LastIndexByte(p, '/')
-	if i < 0 {
+	base := "/"
+	switch i := strings.LastIndexByte(p, '/'); {
+	case i < 0, i == 1:
 		return nil
+	case i > 1:
+		base = p[:i]
 	}
-	if e := routes[max(p[:i], "/")]; e != nil && e.cb != nil && e.cb.segment {
+	if e := routes[base]; e != nil && e.cb != nil && e.cb.segment {
 		return e
 	}
 	return nil
 }
+
+// acceptsPost tells if e is a callback route with a body position.
+func (e *entry) acceptsPost() bool { return e != nil && e.cb != nil && e.cb.body != "" }
 
 // callback answers a request for the callback route e. It reads the candidates
 // and the body, writes the fixed response and flushes it. Only then it checks
@@ -61,17 +78,17 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, sess *reqSess
 	var texts [token.Positions]string
 	cb := e.cb
 	if cb.segment {
-		texts[0] = PathCandidate(r.URL.EscapedPath(), e.route.Path)
+		texts[posPath] = PathCandidate(r.URL.EscapedPath(), e.route.Path)
 	}
 	if cb.query != "" {
-		texts[1] = QueryCandidate(r.URL.RawQuery, cb.query)
+		texts[posQuery] = QueryCandidate(r.URL.RawQuery, cb.query)
 	}
 	if cb.header != "" {
-		texts[2] = HeaderCandidate(r.Header, cb.header)
+		texts[posHeader] = HeaderCandidate(r.Header, cb.header)
 	}
 	if cb.body != "" {
 		if c, ok := BodyCandidate(r, cb.body); ok {
-			texts[3] = string(c[:])
+			texts[posBody] = string(c[:])
 		}
 	}
 	code := http.StatusNoContent
@@ -125,7 +142,7 @@ func (h *Handler) callbackEvents(r *http.Request, sess *reqSession, e *entry, co
 			}
 		}
 		ev, err := event.NewEvent(nil, event.Input{
-			Kind: event.KindCallback, Session: sess.id, Vhost: r.Host, Method: r.Method,
+			Kind: event.KindCallback, Session: sess.id, Vhost: e.cb.vhost, Method: r.Method,
 			Path: e.route.Path, Status: &st, TrapID: rs.Trap, TokenID: id,
 			Surface: surfaces[i], Detail: d, ClientIP: sess.ip,
 			Link: &event.CallbackLink{SetID: rs.SetID, Unit: rs.Unit, Counter: rs.Counter},

@@ -289,23 +289,23 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		// Only a callback route with a body position accepts POST (ADR-039).
 		if r.Method == http.MethodPost {
-			if e := callbackEntry(routes, r.URL.EscapedPath()); e != nil && e.cb != nil && e.cb.body != "" {
+			if e := routeEntry(routes, r.URL.EscapedPath()); e.acceptsPost() {
 				return h.callback(w, r, sess, e)
 			}
 		}
 		reply(w, http.StatusMethodNotAllowed, methodBody)
 		return http.StatusMethodNotAllowed
 	}
-	e := callbackEntry(routes, r.URL.EscapedPath())
-	if e != nil && e.cb != nil {
-		return h.callback(w, r, sess, e)
-	}
+	e := routeEntry(routes, r.URL.EscapedPath())
 	if e == nil {
 		if nf := s.notFound[string(name)]; nf != nil {
 			return h.render(w, r, b, s, sess, nf, http.StatusNotFound)
 		}
 		reply(w, http.StatusNotFound, notFoundBody)
 		return http.StatusNotFound
+	}
+	if e.cb != nil {
+		return h.callback(w, r, sess, e)
 	}
 	if !e.isAsset {
 		return h.render(w, r, b, s, sess, e, http.StatusOK)
