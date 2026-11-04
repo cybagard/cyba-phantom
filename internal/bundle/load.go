@@ -188,6 +188,8 @@ func (b *Bundle) Execute(w io.Writer, name string, data Page) error {
 // The second value is false for a name that is not a kept template. A kept
 // template with no trap action gives an empty list and true. A call makes one
 // copy, so a caller cannot change the kept list. It walks no template.
+// Give the list only to the Tokens of the same Bundle. MintRange refuses an
+// empty list, so do not mint for a template with no trap action.
 func (b *Bundle) TrapIndexes(name string) ([]int, bool) {
 	idx, ok := b.trapIdx[name]
 	return slices.Clone(idx), ok

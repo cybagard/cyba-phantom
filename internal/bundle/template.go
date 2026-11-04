@@ -133,10 +133,9 @@ func checkExec(set map[string]*template.Template, traps []Trap) (map[string][]in
 	return indexes, nil
 }
 
-// execOK reports whether t passes the check with the known trap ids. The ids
-// map to the key-set indexes. It gives the indexes of the actions of t in
-// action order. The list is never nil, so a template with no action differs
-// from an unknown template.
+// execOK reports whether t passes the check with the known trap ids. known
+// maps each id to its key-set index. execOK also gives the indexes of the
+// actions of t, in action order.
 func execOK(t *template.Template, known map[string]int) ([]int, bool) {
 	if t.Tree == nil || t.Tree.Root == nil || len(t.Templates()) != 1 {
 		return nil, false
