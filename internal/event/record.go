@@ -70,6 +70,32 @@ func (m MintRange) check() error {
 	return nil
 }
 
+// linkSize is the fixed size that Size counts for a CallbackLink. It is the set
+// id (8 bytes), the unit (4 bytes) and the counter (8 bytes). An event has a
+// range or a link, never both. Thus linkSize must not be more than
+// mintRangeSize. Then MaxEventBytes stays an upper bound of Size. The compile
+// fails if linkSize is more than mintRangeSize.
+const linkSize = 8 + 4 + 8
+
+const _ = uint(mintRangeSize - linkSize)
+
+// CallbackLink names the token of a callback by the key set, the time unit and
+// the counter of the token. The writer uses it to find the mint row of the
+// token. It holds no token text. It goes to the database only, never to the
+// record.
+type CallbackLink struct {
+	SetID   [8]byte // the first 8 bytes of the bundle SHA-256
+	Unit    uint32  // below MintUnitLimit
+	Counter uint64  // below MintCounterLimit
+}
+
+func (l CallbackLink) check() error {
+	if l.Unit >= MintUnitLimit || l.Counter >= MintCounterLimit {
+		return errors.New("event: callback link is out of bounds")
+	}
+	return nil
+}
+
 // Surface is the place of a request where a token was found.
 type Surface string
 
@@ -435,12 +461,13 @@ func RecordFromRow(row Row) (Record, error) {
 type Clock func() time.Time
 
 // Input holds the values for one event. The values from a request are
-// untrusted. ClientIP, BodyPrefix and Mint go to the DB-only part. Forwarded is
-// the value of an X-Forwarded-For or Forwarded header. NewEvent ignores it. The
-// record and the DB part never hold a forwarded address. Reason is for the
-// refused kind only. NewEvent builds the detail from it, and it refuses a
-// detail from the caller for that kind. Mint is for the request kind only. A
-// nil Mint means no range.
+// untrusted. ClientIP, BodyPrefix, Mint and Link go to the DB-only part.
+// Forwarded is the value of an X-Forwarded-For or Forwarded header. NewEvent
+// ignores it. The record and the DB part never hold a forwarded address. Reason
+// is for the refused kind only. NewEvent builds the detail from it, and it
+// refuses a detail from the caller for that kind. Mint is for the request kind
+// only. A nil Mint means no range. Link is for the callback kind only, and only
+// with a TrapID and a TokenID. A nil Link means no link.
 type Input struct {
 	Kind                         Kind
 	Session, Vhost, Method, Path string
@@ -453,6 +480,7 @@ type Input struct {
 	ClientIP, Forwarded          string
 	BodyPrefix                   []byte
 	Mint                         *MintRange
+	Link                         *CallbackLink
 }
 
 // dbOnly holds the values that only the local database keeps. They are never
@@ -461,6 +489,8 @@ type dbOnly struct {
 	ip         string
 	bodyPrefix []byte
 	mint       MintRange // present when Count is not 0
+	link       CallbackLink
+	hasLink    bool // a zero link is a valid value
 }
 
 // Event is a record with the DB-only values next to it. The record is the
@@ -479,7 +509,8 @@ type Event struct {
 
 // Size returns the size in bytes of the event. It is the canonical record, the
 // IP text and the body prefix. When the event has a mint range, Size also
-// counts the fixed size of the range. It is at most MaxEventBytes.
+// counts the fixed size of the range. When it has a link, Size counts the fixed
+// size of the link. It is at most MaxEventBytes.
 func (e *Event) Size() int { return e.size }
 
 // Kind returns the kind of the event.
@@ -501,6 +532,10 @@ func (e *Event) BodyPrefix() []byte {
 // Mint returns the mint range of the event by value, and false when the event
 // has none.
 func (e *Event) Mint() (MintRange, bool) { return e.db.mint, e.db.mint.Count != 0 }
+
+// Link returns the callback link of the event by value, and false when the
+// event has none.
+func (e *Event) Link() (CallbackLink, bool) { return e.db.link, e.db.hasLink }
 
 // Record returns a deep copy of the record. A change to the copy does not
 // change the event.
@@ -653,6 +688,21 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 			return nil, err
 		}
 	}
+	// NewEvent reads *in.Link one time, in the same way.
+	var link CallbackLink
+	hasLink := in.Link != nil
+	if hasLink {
+		link = *in.Link
+		if in.Kind != KindCallback {
+			return nil, errors.New("event: only a callback event has a link")
+		}
+		if in.TrapID == "" || in.TokenID == "" {
+			return nil, errors.New("event: a link needs a trap id and a token id")
+		}
+		if err := link.check(); err != nil {
+			return nil, err
+		}
+	}
 	if in.Kind == KindRefused {
 		d, err := in.refusedDetail()
 		if err != nil {
@@ -705,6 +755,10 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if hasMint {
 		db.mint = mint
 		size += mintRangeSize
+	}
+	if hasLink {
+		db.link, db.hasLink = link, true
+		size += linkSize
 	}
 	b, err := r.canonical()
 	if err != nil {
