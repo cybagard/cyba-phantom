@@ -559,3 +559,38 @@ func TestTU08LoadsAreSerialized(t *testing.T) {
 		}
 	}
 }
+
+// T-U-20: each swapped-in bundle gets a higher load sequence. This holds for
+// two loads of one archive and for a load through a second loader. A rejected
+// load leaves the running bundle and its sequence as they were.
+func TestTU20LoadSequenceRises(t *testing.T) {
+	e := running(t)
+	b1 := e.l.Current()
+	b2, err := e.l.Load(false)
+	must(t, err)
+	b3, err := e.loader("bundle/current.cbnd").Load(false)
+	must(t, err)
+	if b1.Sequence() == 0 || b2.Sequence() <= b1.Sequence() || b3.Sequence() <= b2.Sequence() {
+		t.Fatalf("sequences %d, %d, %d do not rise", b1.Sequence(), b2.Sequence(), b3.Sequence())
+	}
+	s2 := b2.Sequence()
+	e.install("bundle/current", mf(ver(1)))
+	e.rejects(e.l, false, ErrRollback)
+	if run := e.l.Current(); run != b2 || run.Sequence() != s2 {
+		t.Errorf("a rejected load changed the running bundle or its sequence")
+	}
+}
+
+// T-U-20: after the test removes the version state, an older bundle loads. It
+// gets a higher sequence than the bundle that ran before.
+func TestTU20OlderAfterStateRemoved(t *testing.T) {
+	e := running(t)
+	b2 := e.l.Current()
+	must(t, os.Remove(filepath.Join(e.state, "bundle", StateName)))
+	e.install("bundle/current", mf(ver(1)))
+	b1, err := e.l.Load(false)
+	must(t, err)
+	if e.l.Current() != b1 || b1.Sequence() <= b2.Sequence() {
+		t.Fatal("the older bundle is not the running bundle with a higher sequence")
+	}
+}
