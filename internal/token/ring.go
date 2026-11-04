@@ -107,12 +107,25 @@ func (r *Ring) active(s *snapshot, now time.Time) []*KeySet {
 // for its age. It does not allocate in steady state.
 func (r *Ring) Verify(tok [Size]byte) Result {
 	now := r.now()
-	res := Verify(r.active(r.cur.Load(), now), tok)
-	if res.OK {
-		res.Stale, res.Future = classify(res.Unit, now)
-		if res.Future {
-			r.futures.Add(1)
-		}
+	buf := scratch.Get().(*[2 * Size]byte)
+	res := r.verifyAt(buf, r.active(r.cur.Load(), now), now, tok, true)
+	clear(buf[:])
+	scratch.Put(buf)
+	return res
+}
+
+// verifyAt checks one block against sets at time now, with the buffer of the
+// caller. It always decrypts. A block that is not valid gives the zero
+// Result, also if it would match. For a match it sets the window class, and
+// it counts a future token.
+func (r *Ring) verifyAt(buf *[2 * Size]byte, sets []*KeySet, now time.Time, tok [Size]byte, valid bool) Result {
+	res := verifyIn(buf, sets, tok)
+	if !valid || !res.OK {
+		return Result{}
+	}
+	res.Stale, res.Future = classify(res.Unit, now)
+	if res.Future {
+		r.futures.Add(1)
 	}
 	return res
 }
