@@ -590,8 +590,8 @@ func TestTS21GuardFoldsASCIIOnly(t *testing.T) {
 	}
 }
 
-// blockStore is a storage whose Store waits until release closes. It counts the
-// calls that reach it.
+// blockStore is a storage whose Store waits until release closes. Store closes
+// entered once. It counts the calls that reach it.
 type blockStore struct {
 	certmagic.Storage
 	entered, release chan struct{}
@@ -645,13 +645,13 @@ func TestTS16FenceWaitsForAStoreThenRefusesWrites(t *testing.T) {
 	}
 }
 
-// boundTB records the Errorf calls of fence, so a test can check them.
-type boundTB struct {
+// errorfRecorder records the Errorf calls of fence, so a test can check them.
+type errorfRecorder struct {
 	testing.TB
 	msgs []string
 }
 
-func (b *boundTB) Errorf(format string, args ...any) {
+func (b *errorfRecorder) Errorf(format string, args ...any) {
 	b.msgs = append(b.msgs, fmt.Sprintf(format, args...))
 }
 
@@ -663,7 +663,7 @@ func TestTS16FenceReportsAWriteThatDoesNotEnd(t *testing.T) {
 	stored := make(chan error, 1)
 	go func() { stored <- f.Store(context.Background(), "k", nil) }()
 	<-inner.entered
-	rec := &boundTB{TB: t}
+	rec := &errorfRecorder{TB: t}
 	returned := make(chan struct{})
 	go func() { f.fence(rec, 50*time.Millisecond); close(returned) }()
 	select {
@@ -698,33 +698,41 @@ func (g *gatedStore) Store(ctx context.Context, k string, v []byte) error {
 
 // When a test with newTestACME ends, the cleanup stops the cache first. Then it
 // fences the store. A write in progress holds the fence, and the maintenance of
-// the cache must stop in that time. After the cleanup, Store and Delete give
-// fs.ErrClosed, and the write in progress has ended with no error.
+// the cache must stop before the fence begins. A maintenance call after that
+// point fails the test. After the cleanup, Store and Delete give fs.ErrClosed,
+// and the write in progress has ended with no error.
 func TestTS16TestACMEStopsThenFencesAtCleanup(t *testing.T) {
 	var ticks atomic.Int64
 	var fence *fenceStorage
 	gate := &gatedStore{entered: make(chan struct{}), release: make(chan struct{})}
 	bodyEnded, watched := make(chan struct{}), make(chan struct{})
-	var ticked bool // set before watched closes
+	var late atomic.Bool // set by a maintenance call after the fence began
 	stored := make(chan error, 1)
 	ok := t.Run("rig", func(t *testing.T) {
-		// The watcher lets the write end after the cleanup has had time to stop
-		// the cache. Without it, a missing cleanup would leave the write open.
+		// The watcher holds the write open for a time after the body ends. Then
+		// it lets the write end, so a missing cleanup cannot hang the test.
 		go func() {
 			defer close(watched)
 			defer close(gate.release)
 			<-bodyEnded
 			time.Sleep(250 * time.Millisecond)
-			before := ticks.Load()
-			time.Sleep(250 * time.Millisecond)
-			ticked = ticks.Load() != before
 		}()
 		defer close(bodyEnded)
 		a := newTestACME(t, func(p *ACMEParams) {
 			fence = p.Storage.(*fenceStorage)
 			gate.Storage, fence.Storage = fence.Storage, gate
 			p.ocspInterval = 10 * time.Millisecond
-			p.onMaintenance = func() { ticks.Add(1) }
+			p.onMaintenance = func() {
+				ticks.Add(1)
+				if !fence.mu.TryRLock() { // the fence waits for the write
+					late.Store(true)
+					return
+				}
+				if fence.fenced {
+					late.Store(true)
+				}
+				fence.mu.RUnlock()
+			}
 		})
 		seedCert(t, a, "decoy.test")
 		ctx, cancel := context.WithCancel(context.Background())
@@ -743,7 +751,7 @@ func TestTS16TestACMEStopsThenFencesAtCleanup(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the cleanup did not end")
 	}
-	if ticked {
+	if late.Load() {
 		t.Error("the cache still ran its maintenance while the fence waited")
 	}
 	mustNil(t, <-stored)

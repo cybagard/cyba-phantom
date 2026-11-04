@@ -396,8 +396,14 @@ func readHandshakeRecord(t *testing.T, c net.Conn) []byte {
 	if _, err := io.ReadFull(c, body); err != nil {
 		t.Fatalf("read of the record body: %v", err)
 	}
-	if head[0] != 22 || len(body) < 38 || body[0] != 2 {
-		t.Fatalf("record type %d, %d bytes, handshake type %d; want a ServerHello in a handshake record", head[0], len(body), body[0])
+	// Record type 22 is a handshake record. A handshake message has a 4-byte
+	// header and a 2-byte version before the 32-byte random. Type 2 is a
+	// ServerHello.
+	if head[0] != 22 || len(body) < 38 {
+		t.Fatalf("record type %d, %d bytes; want a handshake record with a ServerHello", head[0], len(body))
+	}
+	if body[0] != 2 {
+		t.Fatalf("handshake type %d, want a ServerHello (2)", body[0])
 	}
 	return body[6:38]
 }
@@ -407,8 +413,13 @@ func readHandshakeRecord(t *testing.T, c net.Conn) []byte {
 // name, and for no name. Known limit: the client stops before the name gate
 // runs.
 func TestTS22NoEventAfterHelloRetryRequest(t *testing.T) {
-	for _, name := range []string{testName, otherName, ""} {
-		t.Run("name "+name, func(t *testing.T) {
+	for _, c := range []struct{ label, sni string }{
+		{"configured name", testName},
+		{"unknown name", otherName},
+		{"no name", ""},
+	} {
+		name := c.sni
+		t.Run(c.label, func(t *testing.T) {
 			g := newGateRig(t, defaultTimeouts, nil)
 			c := g.raw(t)
 			exts := []rawExt{extVersions(0x0304), extGroups(29), extSigs(0x0804)}
