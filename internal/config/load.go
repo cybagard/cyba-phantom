@@ -113,6 +113,7 @@ var keys = []key{
 	{path: "alerts.min_band", kind: kindString, def: "agent-likely", check: checkMinBand},
 	{path: "privacy.store_body_prefix", kind: kindBool, def: "true"},
 	{path: "privacy.include_ip", kind: kindBool, def: "false"},
+	{path: "privacy.session_cookie", kind: kindBool, def: "true"},
 }
 
 // Value is one effective config value.

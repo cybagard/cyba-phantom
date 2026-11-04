@@ -1277,6 +1277,7 @@ var scalarBounds = []bound{
 	{key: "alerts.min_band", pass: []string{"agent-likely", "agent-confirmed"}, fail: []string{"human", "crawler", "", "Agent-Likely"}},
 	{key: "privacy.store_body_prefix", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 	{key: "privacy.include_ip", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
+	{key: "privacy.session_cookie", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 }
 
 // TestTS11_ScalarBounds runs the bounds table through Load, one value per PHANTOM_ variable.
@@ -1705,6 +1706,7 @@ func TestTU10_Defaults(t *testing.T) {
 		"alerts.min_band":             {Str: "agent-likely"},
 		"privacy.store_body_prefix":   {Bool: true},
 		"privacy.include_ip":          {},
+		"privacy.session_cookie":      {Bool: true},
 	}
 	for p, want := range rows {
 		want.Source = "default"
@@ -1765,6 +1767,7 @@ func TestTU10_NewSectionsInvalid(t *testing.T) {
 		{"acme:\n  email: sec@example.com\ntlog:\n  origin: \"phantom/<install_id>\"\n", "tlog.origin"},
 		{base + "alerts:\n  min_band: human\n", "alerts.min_band"},
 		{base + "privacy:\n  include_ip: 1\n", "privacy.include_ip"},
+		{base + "privacy:\n  session_cookie: 1\n", "privacy.session_cookie"},
 		{"acme:\n  email: sec@example.com\n", "tlog.origin"}, // The key is required.
 	}
 	for _, r := range rows {

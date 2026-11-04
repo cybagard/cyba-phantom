@@ -161,7 +161,7 @@ func TestTS11_CheckPrintsPrivateLists(t *testing.T) {
 	body := validBody(t)
 	const ca = "  ca: \"https://ca.example.invalid\"\n"
 	const okPub = `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN}`
-	const valid = "phantom: config is valid\n"
+	const valid = "privacy.session_cookie: true\nphantom: config is valid\n"
 	file := strings.Replace(body, ca, ca+"  ca_private: [\"10.0.0.0/8\", \"fd00:0::/8\"]\n", 1)
 	file = strings.Replace(file, okPub, `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN, private: ["192.168.1.0/24", "172.16.0.0/12"]}`+
 		"\n    - {type: https-put, url: \"https://ckpt2.example.invalid/p\", token_env: CKPT_TOKEN, private: [\"10.9.0.0/16\"]}", 1)

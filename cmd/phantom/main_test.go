@@ -144,12 +144,13 @@ func requireNoNet(t *testing.T, label string, d noNet, r noNet) {
 // of both modes (T-S-10). The test checks the types first. It calls a
 // method only on a noNet value.
 func TestTS10_CheckWiring(t *testing.T) {
-	const valid = "phantom: config is valid\n"
+	const valid = "privacy.session_cookie: true\nphantom: config is valid\n"
 	var got config.Net
 	old := loadWith
+	file := writeFile(t, validBody(t))
 	loadWith = func(_ string, _ []string, n config.Net) (*config.Config, error) {
 		got = n
-		return &config.Config{}, nil
+		return old(file, []string{"CKPT_TOKEN=" + strings.Repeat("t", 32)}, config.Net{Dialer: noNet{}, Resolver: noNet{}})
 	}
 	t.Cleanup(func() { loadWith = old })
 	starts := 0
@@ -239,6 +240,34 @@ func TestTS10_CheckFileRules(t *testing.T) {
 	})
 }
 
+// TestTU24_CheckSessionCookie checks that --check prints the effective value
+// of privacy.session_cookie before the valid line. A value that is not a bool
+// gives exit 1 and names the key (T-U-24).
+func TestTU24_CheckSessionCookie(t *testing.T) {
+	const valid = "phantom: config is valid\n"
+	rows := []struct{ name, extra, want string }{
+		{"default", "", "privacy.session_cookie: true\n" + valid},
+		{"true", "privacy:\n  session_cookie: true\n", "privacy.session_cookie: true\n" + valid},
+		{"false", "privacy:\n  session_cookie: false\n", "privacy.session_cookie: false\n" + valid},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			code, so, se, calls := runMode(t, true, validBody(t)+r.extra)
+			if code != 0 || so != r.want || se != "" || calls != 0 {
+				t.Errorf("exit %d, stdout %q, stderr %q, serve calls %d; want 0, %q, nothing, 0", code, so, se, calls, r.want)
+			}
+		})
+	}
+	for _, v := range []string{"on", "yes", "1", `"true"`} {
+		t.Run("refused "+v, func(t *testing.T) {
+			code, so, se, _ := runMode(t, true, validBody(t)+"privacy:\n  session_cookie: "+v+"\n")
+			if code != 1 || so != "" || !strings.Contains(se, "privacy.session_cookie") {
+				t.Errorf("exit %d, stdout %q, stderr %q; want 1, no stdout, and the key path", code, so, se)
+			}
+		})
+	}
+}
+
 // TestTS10_CheckExec runs the binary. A valid file gives exit 0. An invalid
 // file gives a non-zero exit, with the key and the source in stderr (FR-12).
 // The output has no secret marker (T-S-10). An acme.ca value that is not a
@@ -270,7 +299,7 @@ func TestTS10_CheckExec(t *testing.T) {
 	}
 	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
 	code, so, se := runCheck(writeFile(t, validBody(t)))
-	if code != 0 || so != "phantom: config is valid\n" || se != "" {
+	if code != 0 || so != "privacy.session_cookie: true\nphantom: config is valid\n" || se != "" {
 		t.Errorf("valid file: exit %d, stdout %q, stderr %q", code, so, se)
 	}
 	code, _, se = runCheck(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
