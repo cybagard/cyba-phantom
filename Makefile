@@ -266,11 +266,26 @@ perf-inner:
 # It does this only for a last argument of a go test call that is the
 # module path. The target prints the two paths.
 # The wrapper adds one line to the file "replaced" in the run directory for
-# each replacement. After gremlins, the target can fail (exit 1). This occurs
-# when a replacement was set, the file is missing, and gremlins reported a
-# mutant status.
-# That status is KILLED, LIVED, TIMED OUT or NOT VIABLE. Then no mutant ran
-# on the package that tools/mutatepkg found.
+# each replacement. After gremlins, the target calls tools/mutatepkg with
+# -check. That mode can fail the target (exit 1) with one "mutate FAIL" line
+# that names the cause. There are five causes.
+# The target exports MUTATE_FROM and MUTATE_TO before gremlins. The -check
+# mode reads the same two variables from its environment, as the wrapper does.
+# The first is a value that is not its half of the planned replacement.
+# From is the text before the first space, and to is the text after it.
+# Both must be empty if no replacement is planned.
+# The second is a planned replacement, with no regular file "replaced", and a
+# mutant status in the gremlins output. That status is KILLED, LIVED,
+# TIMED OUT or NOT VIABLE. Then no mutant ran on the package that
+# tools/mutatepkg found.
+# The third is a missing or repeated summary line. The summary lines are
+# "Killed, Lived" and "Timed out, Not viable". Each must be there once, after
+# the line "Mutation testing completed". Then the counts are unknown.
+# The fourth is Killed, Lived and Timed out all 0 and Not viable not 0.
+# The fifth is a test-output file in the run directory with the FAIL line of
+# a setup failure. Then the package could not load. A mutation of code does
+# not change the imports. The pre-check and the coverage run of gremlins also
+# write these files. They passed, so they have no such line.
 # Gremlins counts exit status 1 of go test as a kill. This is also so when go
 # could not load or build the package. A go vet failure in go test is also a
 # build failure. For a go test call, the wrapper keeps the output in a file
@@ -399,7 +414,7 @@ mutate:
 	if [ -e "$$d/full" ]; then echo "mutate FAIL: files are larger than $$MUTATE_MAX_MIB MiB" >&2; exit 1; fi; \
 	if [ "$$rc" -ne 0 ]; then echo "mutate FAIL: gremlins exited with status $$rc" >&2; exit "$$rc"; fi; \
 	grep -q 'Mutation testing completed' "$$d/out" || { echo "mutate FAIL: gremlins stopped before the end of the run" >&2; exit 1; }; \
-	if [ -n "$$MUTATE_FROM" ] && [ ! -e "$$d/replaced" ] && grep -qE '^ *(KILLED|LIVED|TIMED OUT|NOT VIABLE) ' "$$d/out"; then echo "mutate FAIL: the go wrapper replaced no package ($$MUTATE_FROM with $$MUTATE_TO), so the mutants did not run on the package of PKG" >&2; exit 1; fi; \
+	"$$d/mutatepkg" -check "$$d" "$$fix" || exit $$?; \
 	echo "== not killed =="; \
 	grep -E '^ *(LIVED|TIMED OUT) ' "$$d/out" | sed -e 's/^ */not killed: /'; \
 	sed -n 's/.*\(Not covered: [0-9]*\).*/\1/p' "$$d/out" | head -n 1

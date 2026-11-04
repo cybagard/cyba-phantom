@@ -6,6 +6,8 @@ import (
 	"crypto/hpke"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -814,4 +816,123 @@ func TestTS20SealRefusals(t *testing.T) {
 		runFail(t, 1, c.err, "seal", pub, c.version, c.id, r.p("out.key"))
 		noFile(t, r.p("out.key"))
 	}
+}
+
+// T-S-20: a call with no argument is a usage error, not a panic.
+func TestTS20NoArgumentIsUsageError(t *testing.T) {
+	runFail(t, 2, errUsage)
+	runFail(t, 2, errUsage, "unknown")
+}
+
+// T-S-20: isNull is true for the null device only.
+func TestTS20IsNullTellsNullDeviceOnly(t *testing.T) {
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	regular, err := os.Create(filepath.Join(tempDir(t), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer regular.Close()
+	closed, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	for _, c := range []struct {
+		name string
+		out  io.Writer
+		want bool
+	}{
+		{"null device", null, true},
+		{"regular file", regular, false},
+		{"closed file", closed, false},
+		{"buffer", &bytes.Buffer{}, false},
+	} {
+		if got := isNull(c.out); got != c.want {
+			t.Errorf("%s: isNull %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// T-S-20: verify refuses a trust file with no final newline, also when each
+// row is a valid key line. A bad row is refused too.
+func TestTS20VerifyRefusesTrustFileForm(t *testing.T) {
+	dir := tempDir(t)
+	p := func(n string) string { return filepath.Join(dir, n) }
+	packBundle(t, dir, p("a.cbnd"))
+	line := runOK(t, "keygen", "k1", p("k1.key"))
+	runOK(t, "sign", "k1", p("k1.key"), p("a.cbnd"), p("a.sig"))
+	for _, c := range []struct{ name, trust string }{
+		{"no final newline", strings.TrimSuffix(line, "\n")},
+		{"bad row after a good row", line + "junk\n"},
+		{"empty file", ""},
+	} {
+		write(t, p("trust"), c.trust, 0o644)
+		if _, errText, code := runCmd("verify", p("trust"), p("a.cbnd"), p("a.sig")); code != 1 || errText != errTrust.Error()+"\n" {
+			t.Errorf("%s: code %d, stderr %q", c.name, code, errText)
+		}
+	}
+	write(t, p("trust"), line, 0o644)
+	if got := runOK(t, "verify", p("trust"), p("a.cbnd"), p("a.sig")); got != "valid: k1\n" {
+		t.Errorf("good trust file: %q", got)
+	}
+}
+
+// T-S-20: pack refuses an archive of more than 8 MiB, also when ReadArchive
+// accepts it. The files hold random bytes, so gzip adds to the size. The
+// tar stream is 8 MiB, the cap of ReadArchive, and the gzip file is larger.
+func TestTS20PackRefusesArchiveOverTheCap(t *testing.T) {
+	dir := tempDir(t)
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(src, "traps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(src, "manifest.json"), "{}", 0o644)
+	rnd := rand.New(rand.NewPCG(1, 2))
+	fill := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(rnd.Uint32())
+		}
+		return string(b)
+	}
+	write(t, filepath.Join(src, "traps", "a"), fill(bundle.MaxEntryBytes), 0o644)
+	write(t, filepath.Join(src, "traps", "b"), fill(bundle.MaxEntryBytes-3072), 0o644)
+	out := filepath.Join(dir, "out.cbnd")
+	runFail(t, 1, errPack, "pack", src, out)
+	noFile(t, out)
+	// Without the second file the same pack passes and stays below the cap.
+	if err := os.Remove(filepath.Join(src, "traps", "b")); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "pack", src, out)
+	if fi, err := os.Stat(out); err != nil || fi.Size() > maxFile {
+		t.Errorf("small pack: %v, %v", fi, err)
+	}
+}
+
+// T-S-20: pack fails with errPack when it cannot read a directory below dir.
+func TestTS20PackRefusesUnreadableDirectory(t *testing.T) {
+	// t.TempDir lies outside the package tree, so a killed test leaves no
+	// directory of mode 0 there. The cleanup below runs before its removal.
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	locked := filepath.Join(src, "traps")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(src, "manifest.json"), "{}", 0o644)
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("the user can read a directory with mode 0")
+	}
+	out := filepath.Join(dir, "out.cbnd")
+	runFail(t, 1, errPack, "pack", src, out)
+	noFile(t, out)
 }
