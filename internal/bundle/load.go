@@ -250,6 +250,9 @@ type Loader struct {
 	// events and log are set by SetEvents. loadMu guards them. Each can be nil.
 	events *event.Queue
 	log    *slog.Logger
+
+	// expiryKick asks the expiry watch for a check. It has a buffer of 1.
+	expiryKick chan struct{}
 }
 
 // NewLoader gives a Loader for the bundle at path below the state root. The
@@ -258,7 +261,7 @@ type Loader struct {
 // install is the install key, which opens the sealed seed of a proprietary
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
-	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, sleep: time.Sleep, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
+	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, sleep: time.Sleep, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet, expiryKick: make(chan struct{}, 1)}
 	l.afterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
 	// The ring reads l.now at each call, so a test can replace the clock.
 	l.ring = token.NewRing(func() time.Time { return l.now() })
@@ -578,6 +581,8 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 	l.swapMu.Lock()
 	l.swapAt = l.now()
 	l.swapMu.Unlock()
+	// The expiry watch checks the new bundle at once. The request never blocks.
+	l.kickExpiry()
 	return cand, nil
 }
 
