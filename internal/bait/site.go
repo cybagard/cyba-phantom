@@ -30,8 +30,8 @@ type site struct {
 }
 
 // buildSite makes the table of b. It takes the asset names only from the
-// route map of each vhost. The build leaves out a route whose asset is
-// missing.
+// route map of each vhost. The loader refuses a route whose asset is missing.
+// If Asset still gives false, the build makes no entry for that route.
 func buildSite(b *bundle.Bundle) *site {
 	s := &site{hosts: map[string]map[string]*entry{}, traps: b.Traps()}
 	for _, host := range b.Vhosts() {

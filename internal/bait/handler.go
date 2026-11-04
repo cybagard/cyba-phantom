@@ -31,9 +31,9 @@ type Source interface {
 // retiredKept is the number of replaced bundles that the handler remembers.
 const retiredKept = 4
 
-// state is the cache of the handler. cur holds the running bundle and its
-// site. retired holds weak pointers to the last replaced bundles, newest first.
-// A weak pointer does not keep a bundle in memory.
+// state is the cache of the handler. cur holds the last installed bundle and
+// its site. retired holds weak pointers to the last replaced bundles, newest
+// first. A weak pointer does not keep a bundle in memory.
 type state struct {
 	cur     *slot
 	retired [retiredKept]weak.Pointer[bundle.Bundle]
@@ -61,9 +61,11 @@ func New(src Source, fallback http.Handler) *Handler {
 	return &Handler{src: src, fallback: fallback}
 }
 
-// siteOf returns the site of b. The handler keeps the running bundle only.
-// A replaced bundle gets a site for its own request. The handler does not keep
-// that site. A request in flight keeps its bundle and site in local variables.
+// siteOf returns the site of b. The handler keeps a strong pointer to cur only.
+// A bundle in retired gets a site for its own request. The handler does not
+// keep that site. Each other bundle becomes cur, also an older bundle that is
+// not in retired. A request in flight keeps its bundle and site in local
+// variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
