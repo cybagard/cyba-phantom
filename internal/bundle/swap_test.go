@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"bytes"
+	"crypto/hpke"
 	"fmt"
 	"html/template"
 	"math/rand/v2"
@@ -333,7 +334,10 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 	l := g.e.l
 	var arrive, done sync.WaitGroup
 	var calls atomic.Int32
-	release := make(chan struct{})
+	release, once := make(chan struct{}), new(sync.Once)
+	// A failed test must also free the parked loads. One can hold loadMu.
+	open := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(open)
 	arrive.Add(2)
 	// The other load can hold loadMu during a wait, so the waits do not check
 	// it. The test checks it below, when both loads wait and none can hold it.
@@ -359,7 +363,7 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 	}
 	g.within(arrive.Wait)
 	g.checkFree()
-	close(release)
+	open()
 	g.within(done.Wait)
 	if len(g.starts) != 2 {
 		t.Fatalf("%d loads started", len(g.starts))
@@ -373,7 +377,17 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 // 30 s after the swap. Then it is zero. A reader of the old seed during the
 // swap gives no race report. It never reads a changed seed.
 func TestTU23SeedDelay(t *testing.T) {
-	e, l, in, key := seeded(t, keyTwo)
+	var (
+		e   *env
+		l   *Loader
+		in  hpke.PrivateKey
+		key rkey
+	)
+	// A load that another test left parked can hold loadMu. Bound the setup.
+	within(t, func() { e, l, in, key = seeded(t, keyTwo) }, nil)
+	if e == nil {
+		t.FailNow()
+	}
 	old, timers := l.Current(), &fakeTimers{}
 	l.afterFunc = timers.afterFunc
 	var changed atomic.Bool
