@@ -183,10 +183,10 @@ func TestTS32OverlappingMintRowsAreAmbiguous(t *testing.T) {
 	wantUnlinked(t, r, 0, 1)
 }
 
-// T-S-32: six cases give no token row and one none count. These are the cases:
-// no mint row, a mint row with another unit, a mint row with another set, a
-// mint row with a NULL session, a mint row with a NULL issued_at, and a mint
-// row of another range.
+// T-S-32: six cases give no token row and one none count. The cases are: no
+// mint row; a mint row with another unit; a mint row with another set; a mint
+// row with a NULL session; a mint row with a NULL issued_at; a mint row of
+// another range.
 func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 	nullSession := mintEvent(t, 1, "", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000})
 	otherSet := event.CallbackLink{SetID: [8]byte{9}, Unit: 5, Counter: 105}
@@ -290,9 +290,9 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 }
 
 // T-S-32: an error of a token statement stops the writer with the database
-// rule, and the batch is rolled back. Each case reaches its own statement: the
-// prepare and the run of the update, the prepare and the scan of the lookup,
-// and the prepare and the run of the insert. A case can first commit a batch.
+// rule, and the batch is rolled back. Each case reaches its own statement. The
+// cases are: update prepare, update run, lookup prepare, lookup scan, insert
+// prepare, insert run. A case can first commit a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
 	for name, c := range map[string]struct {

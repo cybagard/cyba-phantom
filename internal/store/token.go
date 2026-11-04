@@ -60,8 +60,8 @@ func (t *tokenWriter) close() {
 
 // note keeps the row of a callback event that has a link. The writer calls it
 // after the insert of the row. It does not keep a row with no trap id or no
-// token id, because that row cannot give a token row. NewEvent does not make
-// such an event.
+// token id. Such a row cannot give a token row. NewEvent does not make such an
+// event.
 func (t *tokenWriter) note(e *event.Event, rec event.Record) {
 	if _, ok := e.Link(); ok && rec.Kind == event.KindCallback && rec.TrapID != nil && rec.TokenID != nil {
 		t.calls = append(t.calls, tokenCall{e, rec})
