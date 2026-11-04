@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,14 +109,29 @@ func TestTU08FetchedRejects(t *testing.T) {
 		{"min_engine", func(f *fetched) ([]byte, []byte) { return signed(f, mf(ver(3), engineRepl...)) }, ErrMinEngine},
 		{"expired", func(f *fetched) ([]byte, []byte) { return signed(f, mf(ver(3), expiredRepl...)) }, ErrExpired},
 		{"rollback", func(f *fetched) ([]byte, []byte) { return signed(f, mf(ver(1))) }, ErrRollback},
+		{"archive over the cap", func(f *fetched) ([]byte, []byte) { return make([]byte, MaxBundleBytes+1), f.sig }, ErrArchiveInvalid},
+		{"signature over the cap", func(f *fetched) ([]byte, []byte) { return f.arch, make([]byte, MaxSigBytes+1) }, ErrArchiveInvalid},
+		// At the cap, the size is no reason to refuse. The signature check does.
+		{"archive at the cap", func(f *fetched) ([]byte, []byte) { return make([]byte, MaxBundleBytes), f.sig }, ErrBadSig},
+		{"signature at the cap", func(f *fetched) ([]byte, []byte) { return f.arch, make([]byte, MaxSigBytes) }, ErrBadSig},
+		// The version state holds the SHA-256 of this expired bundle. Only a start
+		// load accepts it then, so a fetch must refuse it.
+		{"expired, state holds its SHA-256", func(f *fetched) ([]byte, []byte) {
+			a, s := signed(f, mf(ver(3), expiredRepl...))
+			dir, err := f.root.OpenRoot("bundle")
+			must(f.t, err)
+			defer dir.Close()
+			must(f.t, writeState(dir, state{Version: ver(2), SHA256: sha256.Sum256(a), Class: ClassProprietary}))
+			return a, s
+		}, ErrExpired},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFetched(t)
 			f.write("bundle/current.cbnd", []byte("junk"))
 			f.write("bundle/current.sig", []byte("junk"))
-			before, run := dirListing(t, f.state), f.l.Current()
 			arch, sig := c.mk(f)
+			before, run := dirListing(t, f.state), f.l.Current()
 			if b, err := f.l.LoadFetched(arch, sig); b != nil || err != c.want {
 				t.Fatalf("got %v, %v; want %v", b, err, c.want)
 			}
@@ -256,8 +272,9 @@ func TestTU23FetchedTransitionCrash(t *testing.T) {
 	}
 }
 
-// T-U-23: a roll-forward whose rename of the signature temp file fails gives
-// the first bad_sig. The start load removes the temp files and keeps the pair.
+// T-U-23: a roll-forward whose rename of the signature temporary file fails
+// gives ErrInstallFault, one log line and no event. The start load removes the
+// temporary files and keeps the pair.
 func TestTU23RollForwardRenameFails(t *testing.T) {
 	f := newFetched(t)
 	f.crashAfterFirstRename()
@@ -271,19 +288,40 @@ func TestTU23RollForwardRenameFails(t *testing.T) {
 	t.Cleanup(func() { beforeRename = nil })
 	l := f.loader("bundle/current.cbnd")
 	p := f.observe(l)
-	if b, err := l.Load(true); b != nil || err != ErrBadSig || l.Current() != nil {
+	if b, err := l.Load(true); b != nil || err != ErrInstallFault || l.Current() != nil {
 		t.Fatalf("got %v, %v", b, err)
 	}
-	evs, _ := p.take(t)
-	if len(evs) != 1 || evs[0].Record().Kind.String() != "bundle_rejected" ||
-		detail(t, evs[0])["reason"] != "bad_sig" || detail(t, evs[0])["source"] != "start" {
+	if evs, _ := p.take(t); len(evs) != 0 {
 		t.Errorf("events %v", evs)
+	}
+	if lines := logLines(t, p.buf.String()); len(lines) != 1 || lines[0]["msg"] != "bundle install fault" {
+		t.Errorf("log: %q", p.buf.String())
 	}
 	if got := f.snap(); got != "cbnd=new-arch sig=old-sig ctmp=none stmp=none state="+ver(2) {
 		t.Errorf("after: %s", got)
 	}
 	if !bytes.Equal(f.bytesOf("bundle/current.cbnd"), cbnd) || !bytes.Equal(f.bytesOf("bundle/current.sig"), sig) {
 		t.Error("the pair changed")
+	}
+}
+
+// T-U-23: a roll-forward whose version-state write fails gives ErrStateFault,
+// one log line and no event. The test puts a directory with a file in it at
+// the temporary name of the version state.
+func TestTU23RollForwardStateFault(t *testing.T) {
+	f := newFetched(t)
+	f.crashAfterFirstRename()
+	must(t, os.MkdirAll(filepath.Join(f.state, "bundle", StateName+".tmp", "x"), 0o700))
+	l := f.loader("bundle/current.cbnd")
+	p := f.observe(l)
+	if b, err := l.Load(true); b != nil || err != ErrStateFault || l.Current() != nil {
+		t.Fatalf("got %v, %v", b, err)
+	}
+	if evs, _ := p.take(t); len(evs) != 0 {
+		t.Errorf("events %v", evs)
+	}
+	if lines := logLines(t, p.buf.String()); len(lines) != 1 || lines[0]["msg"] != "bundle state fault" {
+		t.Errorf("log: %q", p.buf.String())
 	}
 }
 

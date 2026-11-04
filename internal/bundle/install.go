@@ -16,8 +16,8 @@ const (
 
 // ErrInstallFault is the error of LoadFetched for a bundle that passed each
 // check. Then the write of its files failed. It is not a rejection code:
-// CodeOf gives false. It gives one log line and no event. The error holds no
-// path and no byte.
+// CodeOf gives false. LoadFetched writes one log line and sends no event for
+// it. The error holds no path and no byte.
 var ErrInstallFault = errors.New("bundle: install fault")
 
 // beforeRename is nil, except in a test. A test sets it to see or to fail a
@@ -78,6 +78,11 @@ func (l *Loader) loadFetched(archive, sig []byte, rd *digest) (*Bundle, error) {
 		return nil, err
 	}
 	defer closeDir()
+	// Load refuses a file over these caps at the next start. So a fetch refuses
+	// bytes over them, before any check and before any write.
+	if len(archive) > MaxBundleBytes || len(sig) > MaxSigBytes {
+		return nil, ErrArchiveInvalid
+	}
 	return l.loadBytes(dir, c, archive, sig, false, rd, func() error { return installPair(dir, name, archive, sig) })
 }
 
@@ -109,13 +114,13 @@ func removeInstallTemps(root *os.Root, name string) {
 	_ = root.Remove(name + sigTemp)
 }
 
-// rollForward is the second try of a start load whose pair gave first, a
-// bad_sig. A crash between the two renames of an install leaves the new
-// archive, the old signature file and <name>.sig.tmp. rollForward loads the
-// archive with that file, with each check. The file must pass the signature
-// file rule.
+// rollForward is the second try of a start load whose pair gave bad_sig. A
+// crash between the two renames of an install leaves the new archive, the old
+// signature file and <name>.sig.tmp. rollForward loads the archive with that
+// file, with each check. The file must pass the signature file rule.
 // On an accept it renames the file to <name>.sig and calls Sync on the
-// directory. In each other case the result is first.
+// directory. For a rejection code, it returns the first error. For a state
+// fault or an install fault, it returns that fault.
 func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte, rd *digest, first error) (*Bundle, error) {
 	sig, err := safefile.ReadFile(dir, name+sigTemp, fileRule(MaxSigBytes))
 	if err != nil {
@@ -129,6 +134,9 @@ func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte,
 	}
 	b, err := l.loadBytes(dir, c, archive, sig, true, rd, promote)
 	if err != nil {
+		if _, ok := CodeOf(err); !ok {
+			return nil, err
+		}
 		return nil, first
 	}
 	return b, nil

@@ -392,7 +392,7 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 		l.afterRead()
 	}
 	b, err := l.loadBytes(dir, c, archive, sig, start, rd, nil)
-	if start && err == ErrBadSig {
+	if start && errors.Is(err, ErrBadSig) {
 		return l.rollForward(dir, name, c, archive, rd, err)
 	}
 	return b, err
