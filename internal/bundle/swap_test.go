@@ -169,10 +169,10 @@ func newGapRig(t *testing.T, src Source) *gapRig {
 	return g
 }
 
-// within runs fn and fails the test, with exit code 1, if fn does not return
-// in gapBound.
-func (g *gapRig) within(fn func()) {
-	g.t.Helper()
+// within runs fn and fails the test if fn does not return in gapBound. Before
+// it fails the test, it calls late if late is not nil.
+func within(t *testing.T, fn func(), late func()) {
+	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -181,8 +181,24 @@ func (g *gapRig) within(fn func()) {
 	select {
 	case <-done:
 	case <-time.After(gapBound):
-		g.dead.Store(true)
-		g.t.Fatalf("no return in %v: the lock loop does not end", gapBound)
+		if late != nil {
+			late()
+		}
+		t.Fatalf("no return in %v: the lock loop does not end", gapBound)
+	}
+}
+
+// within runs fn within gapBound. A late fn sets dead.
+func (g *gapRig) within(fn func()) {
+	g.t.Helper()
+	within(g.t, fn, func() { g.dead.Store(true) })
+}
+
+// noWait checks that no load waited and that n loads started.
+func (g *gapRig) noWait(n int) {
+	g.t.Helper()
+	if len(g.sleeps) != 0 || len(g.starts) != n {
+		g.t.Errorf("waits %v, %d starts; want no wait, %d starts", g.sleeps, len(g.starts), n)
 	}
 }
 
@@ -265,9 +281,7 @@ func TestTU23NoSwapNoWait(t *testing.T) {
 	g := newBareGapRig(t, e)
 	_, err := g.load(SourceReload)
 	must(t, err)
-	if len(g.sleeps) != 0 || len(g.starts) != 1 {
-		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
-	}
+	g.noWait(1)
 }
 
 // T-U-23: a load exactly 30 s after a swap starts at once and does not wait.
@@ -276,9 +290,7 @@ func TestTU23GapEdgeNoWait(t *testing.T) {
 	g.clk.advance(swapGap)
 	_, err := g.load(SourceReload)
 	must(t, err)
-	if len(g.sleeps) != 0 || len(g.starts) != 1 {
-		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
-	}
+	g.noWait(1)
 }
 
 // T-U-23: a start load does not wait.
@@ -293,9 +305,7 @@ func TestTU23StartNoWait(t *testing.T) {
 		g.within(func() { _, err = load() })
 		must(t, err)
 	}
-	if len(g.sleeps) != 0 || len(g.starts) != 2 {
-		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
-	}
+	g.noWait(2)
 }
 
 // T-U-23: a rejection starts no wait. Only a swap sets the time of the last
@@ -311,9 +321,7 @@ func TestTU23RejectionNoWait(t *testing.T) {
 	l.template = parseTemplates
 	_, err := g.load(SourceReload)
 	must(t, err)
-	if len(g.sleeps) != 0 || len(g.starts) != 2 {
-		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
-	}
+	g.noWait(2)
 }
 
 // T-U-23: two loads that wait together do not both start inside the gap. The
@@ -384,7 +392,7 @@ func TestTU23SeedDelay(t *testing.T) {
 	}()
 	e.putSeeded(key, ver(3), e.good(in, key, ver(3), seedB))
 	var err error
-	(&gapRig{t: t}).within(func() { _, err = l.Load(false) })
+	within(t, func() { _, err = l.Load(false) }, nil)
 	close(stop)
 	<-done
 	must(t, err)
