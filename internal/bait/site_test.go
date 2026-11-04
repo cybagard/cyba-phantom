@@ -294,9 +294,9 @@ func TestTU20SiteLostSwap(t *testing.T) {
 }
 
 // TestTU20SiteOlderVersionLater checks a bundle with an older manifest version
-// that loads after a newer one. This happens when the version state is
-// removed. The older bundle has the higher load sequence. It becomes cur and
-// builds one site.
+// that loads after a newer one, as it does after an operator removes the
+// version state. The older bundle has the higher load sequence. It becomes cur
+// and builds one site.
 func TestTU20SiteOlderVersionLater(t *testing.T) {
 	newer := bundleAt(t, "-1", "2026.11.01-2")
 	older := bundleAt(t, "-22", "2026.11.01-1")
@@ -326,10 +326,10 @@ func requests(t *testing.T, h *Handler, n int, tag string) {
 	}
 }
 
-// TestTU20SiteLostSwapNewer checks a lost swap against a newer bundle. A newer
-// bundle becomes cur between the Load and the CompareAndSwap of a call for an
-// older bundle. The call gets its own site and installs nothing. Requests for
-// the newer bundle then build no site.
+// TestTU20SiteLostSwapNewer checks a lost swap against a later load. The later
+// bundle has the higher sequence. It becomes cur between the Load and the
+// CompareAndSwap of a call for the earlier bundle. The call gets its own site
+// and installs nothing. Requests for the later bundle then build no site.
 func TestTU20SiteLostSwapNewer(t *testing.T) {
 	const traps = `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x{{.Token}}"}]`
 	withVersion := func(tag, version string) *bundle.Bundle {
@@ -362,8 +362,8 @@ func TestTU20SiteLostSwapNewer(t *testing.T) {
 }
 
 // TestTU20SiteOlderThanRetired checks a bundle that never was in the cache. It
-// is older than cur and the four retired bundles. Its request gets its own
-// site. Requests for the running bundle then build no site.
+// has a lower sequence than cur and the four retired bundles. Its request gets
+// its own site. Requests for the running bundle then build no site.
 func TestTU20SiteOlderThanRetired(t *testing.T) {
 	older := bundleAt(t, "-old", "2026.11.01-1")
 	var bs []*bundle.Bundle
@@ -391,8 +391,53 @@ func TestTU20SiteOlderThanRetired(t *testing.T) {
 	}
 }
 
-// TestTU20SiteSameVersion checks that a bundle with the version of cur becomes
-// cur. A reload of the same archive makes such a bundle.
+// loaderSrc is a real loader as the source of a handler.
+type loaderSrc struct{ l *bundle.Loader }
+
+func (s loaderSrc) Current() *bundle.Bundle { return s.l.Current() }
+
+// TestTU20SiteRaceReloads checks requests that run while one loader reloads one
+// archive. When the loads end, cur is the running bundle and 100 more requests
+// build no site. Under -race, a sequence that the loader sets after the swap
+// is a data race with a request that reads it.
+func TestTU20SiteRaceReloads(t *testing.T) {
+	l := archiveLoader(t, "-1", nil)
+	_, err := l.Load(true)
+	mustOK(t, err)
+	h := New(loaderSrc{l}, &fallbackFn{}, testQueue(t))
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					h.siteOf(l.Current())
+				}
+			}
+		})
+	}
+	for range 50 {
+		_, err := l.Load(true)
+		mustOK(t, err)
+	}
+	close(done)
+	wg.Wait()
+	run := l.Current()
+	h.siteOf(run)
+	n := h.builds.Load()
+	for range 100 {
+		h.siteOf(l.Current())
+	}
+	if got := h.builds.Load(); got != n || h.sites.Load().cur.b != run {
+		t.Fatalf("builds %d -> %d, or cur is not the running bundle", n, got)
+	}
+}
+
+// TestTU20SiteSameVersion checks that a later load becomes cur. The later load
+// has the higher sequence, also when its version equals the version of cur.
 func TestTU20SiteSameVersion(t *testing.T) {
 	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
 	h := New(&swap{list: []*bundle.Bundle{b2}}, &fallbackFn{}, testQueue(t))

@@ -186,9 +186,9 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 // A bundle in retired gets a site for its own request. The handler does not
 // keep that site. A bundle outside retired becomes cur when its load sequence
 // is higher than the sequence of cur. This includes a bundle that was never
-// cur and a bundle that has left retired. A bundle with a lower sequence was
-// loaded earlier than cur. It gets a site for its own request, like a bundle in
-// retired. The state does not change. The sequence does not depend on the
+// cur and a bundle that has left retired. The loader swapped in a bundle with a
+// lower sequence before cur. It gets a site for its own request, like a bundle
+// in retired. The state does not change. The sequence does not depend on the
 // manifest version, so a reload of the same archive counts as later. A request
 // in flight keeps its bundle and site in local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
