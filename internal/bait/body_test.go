@@ -103,6 +103,11 @@ var bodyCases = []bodyCase{
 	{"25 bytes", `{"token":"` + tokText[:25] + `"}`, ""},
 	{"27 bytes", `{"token":"` + tokText + `a"}`, ""},
 	{"escaped byte", `{"token":"%61` + tokText[3:] + `"}`, ""},
+	{"percent form", `{"token":"%61` + tokText[1:] + `"}`, ""},
+	{"json escape form", "{\"token\":\"\\u0061" + tokText[1:] + "\"}", ""},
+	{"digit number value", `{"token":22222222222222222222222222}`, ""},
+	{"form feed between members", "{" + member + ",\f\"a\":1}", ""},
+	{"form feed before object", "\f" + formSmall, ""},
 	{"name case", `{"Token":"` + tokText + `"}`, ""},
 	{"longer name", `{"tokenx":"` + tokText + `"}`, ""},
 }
@@ -311,12 +316,18 @@ func TestTS32BodyNoAllocs(t *testing.T) {
 		if _, ok := BodyCandidate(r, "token"); ok != f.ok {
 			t.Errorf("%s: ok = %v", name, ok)
 		}
+		want, last := rb.got, 0
 		n := testing.AllocsPerRun(2000, func() {
 			rb.reset()
+			before := rb.got
 			BodyCandidate(r, "token")
+			last = rb.got - before
 		})
 		if n != 0 {
 			t.Errorf("%s: %v allocations", name, n)
+		}
+		if last != want {
+			t.Errorf("%s: last run read %d bytes, first call read %d", name, last, want)
 		}
 	}
 }
@@ -378,18 +389,23 @@ func (c *tallyBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// BenchmarkBodyCandidate reads and scans a body of 4 KiB.
+// BenchmarkBodyCandidate reads and scans a body of 4 KiB, and the body with
+// 400 members, which is the slowest form.
 func BenchmarkBodyCandidate(b *testing.B) {
 	head, tail := `{"pad":"`, `",`+member+`}`
-	body := head + strings.Repeat("x", 4096-len(head)-len(tail)) + tail
-	r, rb := postWith("POST", body, int64(len(body)), nil)
-	if _, ok := BodyCandidate(r, "token"); !ok || len(body) != 4096 {
-		b.Fatalf("body of %d bytes, no candidate", len(body))
-	}
-	b.ReportAllocs()
-	b.SetBytes(int64(len(body)))
-	for b.Loop() {
-		rb.reset()
-		BodyCandidate(r, "token")
+	pad4k := head + strings.Repeat("x", 4096-len(head)-len(tail)) + tail
+	for _, c := range []struct{ name, body string }{{"4 KiB", pad4k}, {"members-400", formMembers}} {
+		b.Run(c.name, func(b *testing.B) {
+			r, rb := postWith("POST", c.body, int64(len(c.body)), nil)
+			if _, ok := BodyCandidate(r, "token"); !ok {
+				b.Fatalf("body of %d bytes, no candidate", len(c.body))
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(c.body)))
+			for b.Loop() {
+				rb.reset()
+				BodyCandidate(r, "token")
+			}
+		})
 	}
 }

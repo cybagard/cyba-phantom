@@ -18,7 +18,7 @@ var nearMiss = map[string]string{
 	"upper":    strings.ToUpper(tokText),
 	"25 bytes": tokText[:25],
 	"27 bytes": tokText + "a",
-	"escaped":  "%61" + tokText[1:24],
+	"escaped":  "%61" + tokText[1:],
 	"digit 0":  tokText[:25] + "0",
 	"empty":    "",
 }

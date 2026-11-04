@@ -90,10 +90,10 @@ func QueryCandidate(rawQuery, name string) string {
 	return candidate(val)
 }
 
-// HeaderName gives the canonical form of a header name. It allocates, so the
-// route build calls it one time at load and never on a request. It is
-// textproto.CanonicalMIMEHeaderKey, called through net/http. The import
-// allow-list of the egress test does not list net/textproto for this package.
+// HeaderName gives the canonical form of a header name. It allocates. Call it
+// one time at load, never on a request. It is
+// textproto.CanonicalMIMEHeaderKey, called through net/http. The module import
+// list of the egress test has no net/textproto.
 func HeaderName(name string) string {
 	return http.CanonicalHeaderKey(name)
 }

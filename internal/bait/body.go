@@ -18,7 +18,7 @@ var bodyPool = sync.Pool{New: func() any { return new([bodyMax + 1]byte) }}
 // JSON body (ADR-039 decision 5). Only a POST has a body candidate. A
 // Content-Length over bodyMax gives no read. Else it reads at most bodyMax+1
 // bytes, also for a chunked body. A body of bodyMax+1 bytes and a read error
-// give none.
+// give none. Call it only for a route with a body position.
 //
 // The candidate is a copy in an array. The pooled buffer goes back to the pool
 // before the call returns. So the caller has no release call, and no later
