@@ -79,7 +79,7 @@ func (l *Loader) loadFetched(archive, sig []byte, rd *digest) (*Bundle, error) {
 	}
 	defer closeDir()
 	// Load refuses a file over these caps at the next start. So a fetch refuses
-	// bytes over them, before any check and before any write.
+	// bytes over them, before the signature check and before any write.
 	if len(archive) > MaxBundleBytes || len(sig) > MaxSigBytes {
 		return nil, ErrArchiveInvalid
 	}
