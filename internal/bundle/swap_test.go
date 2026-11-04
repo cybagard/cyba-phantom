@@ -483,9 +483,9 @@ func TestTU23SeedDelay(t *testing.T) {
 	}
 }
 
-// T-U-23: the loader of NewLoader keeps its own timer and wait. Right after a
-// swap, the replaced seed has its old bytes. It keeps them after a short real
-// time, so the timer neither runs at once nor runs early.
+// T-U-23: the loader of NewLoader keeps its own timer and wait. For 200 ms
+// after a swap, the replaced seed keeps its old bytes. So the timer does not
+// run at once or in the first 200 ms.
 func TestTU23DefaultTimer(t *testing.T) {
 	e := newEnv(t)
 	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
