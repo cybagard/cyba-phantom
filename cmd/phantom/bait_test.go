@@ -92,7 +92,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	oldNew := newServer
 	t.Cleanup(func() { newServer = oldNew })
 	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
-		// No Serve call has run yet. A switch set later shows in this response.
+		// No Serve call has run yet. A later switch call in the start code
+		// shows in this response. The test can miss a call from another
+		// goroutine.
 		req := httptest.NewRequest(http.MethodGet, "/page", nil)
 		req.Host, req.RemoteAddr = decoyName, "127.0.0.1:4000"
 		rec := httptest.NewRecorder()
@@ -256,10 +258,11 @@ func TestTI02_StartServesBait(t *testing.T) {
 // TestTU24_SessionCookieSwitch starts a sensor with privacy.session_cookie
 // false and with true (SEC-35). newServer serves one request to its handler
 // before it returns. With false, that response and each later bait response
-// have no Set-Cookie. So the switch is set before the first Serve call. A valid
-// cookie gets the keyed id of the client address. With true, the first
-// response has one cookie, and the valid cookie keeps its id. A request with
-// no cookie gets a cookie.
+// have no Set-Cookie. So the start code sets the switch before newServer. The
+// test does not always find a call from another goroutine. A valid cookie gets
+// the keyed id of the client address. With true, the first response has one
+// cookie, and the valid cookie keeps its id. A request with no cookie gets a
+// cookie.
 func TestTU24_SessionCookieSwitch(t *testing.T) {
 	for _, c := range []struct {
 		value string
