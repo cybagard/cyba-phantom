@@ -353,7 +353,8 @@ func TestCheckFailsWhenPlannedReplacementDidNotHappen(t *testing.T) {
 		t.Errorf("with replaced: rc %d, err %q", rc, errs)
 	}
 	// No mutant status, so the guard has nothing to judge.
-	rc, errs = runDir(t, map[string]string{"out": "Mutation testing completed in 1 second\n"}, fix)
+	rc, errs = runDir(t, map[string]string{"out": "Killed: 1, Lived: 0, Not covered: 0\n" +
+		"Timed out: 0, Not viable: 0, Skipped: 0\n"}, fix)
 	if rc != 0 || errs != "" {
 		t.Errorf("no mutant status: rc %d, err %q", rc, errs)
 	}
@@ -377,9 +378,31 @@ func TestCheckFailsWhenNoMutantRanATest(t *testing.T) {
 		{"a killed mutant", "Killed: 1, Lived: 0, Not covered: 0\nTimed out: 0, Not viable: 30, Skipped: 0\n"},
 		{"a timed out mutant", "Killed: 0, Lived: 0, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
 		{"no mutant at all", "Killed: 0, Lived: 0, Not covered: 4\nTimed out: 0, Not viable: 0, Skipped: 0\n"},
+		// The sum of the three counts, not a difference of two of them.
+		{"killed and lived are equal", "Killed: 2, Lived: 2, Not covered: 0\nTimed out: 0, Not viable: 30, Skipped: 0\n"},
+		{"lived and timed out are equal", "Killed: 0, Lived: 1, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
+		{"killed and timed out are equal", "Killed: 1, Lived: 0, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
 	} {
 		rc, errs := runDir(t, map[string]string{"out": c.counts, "replaced": "\n"}, "")
 		if rc != 0 || errs != "" {
+			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
+		}
+	}
+}
+
+func TestCheckFailsWhenSummaryLineIsMissing(t *testing.T) {
+	const (
+		first  = "Killed: 5, Lived: 1, Not covered: 0\n"
+		second = "Timed out: 0, Not viable: 2, Skipped: 0\n"
+	)
+	for _, c := range []struct{ name, out, want string }{
+		{"no Killed line", second, "no line with Killed and Lived"},
+		{"no Timed out line", first, "no line with Timed out and Not viable"},
+		{"no summary", "Mutation testing completed in 1 second\n", "no line with Killed and Lived"},
+	} {
+		rc, errs := runDir(t, map[string]string{"out": c.out, "replaced": "\n"}, "")
+		if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the gremlins output has "+c.want) ||
+			strings.Count(errs, "\n") != 1 {
 			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
 		}
 	}

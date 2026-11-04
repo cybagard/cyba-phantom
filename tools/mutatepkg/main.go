@@ -32,9 +32,11 @@
 //
 // The -check mode runs after gremlins. <replacement> is the output of the
 // first mode. It reads the files out, replaced and test-output.* in the run
-// directory. It prints one "mutate FAIL:" line and exits 1 in three cases.
+// directory. It prints one "mutate FAIL:" line and exits 1 in four cases.
 //   - A replacement was planned, the file replaced is missing, and the
 //     gremlins output has a mutant status.
+//   - The gremlins output has no "Killed, Lived" line or no "Timed out,
+//     Not viable" line, so the counts are unknown.
 //   - Killed, Lived and Timed out are 0, and Not viable is not 0.
 //   - A test-output file has the FAIL line of a setup failure.
 //
@@ -192,8 +194,10 @@ func count(re *regexp.Regexp, text string) (int, int, bool) {
 
 // checkRun reads the run directory of "make mutate" after gremlins ended. It
 // returns an error that names the cause if no mutant ran a test on PKG.
-// The file "out" has the gremlins output. The file "replaced" has a line for
-// each replacement of the go wrapper. fix is the output of the plan mode.
+// It also returns an error if the output lacks a summary line, because
+// the counts are then unknown. The file "out" has the gremlins output.
+// The file "replaced" has a line for each replacement of the go wrapper.
+// fix is the output of the plan mode.
 //
 // The go wrapper writes a file test-output.<pid> for each go test call. That
 // includes the pre-check and the coverage run of gremlins. Both passed, or
@@ -210,9 +214,15 @@ func checkRun(dir, fix string) error {
 			return fmt.Errorf("the go wrapper replaced no package (%s with %s), so the mutants did not run on the package of PKG", from, to)
 		}
 	}
-	killed, lived, ok1 := count(killedLived, out)
-	timed, viable, ok2 := count(timedViable, out)
-	if ok1 && ok2 && killed+lived+timed == 0 && viable != 0 {
+	killed, lived, ok := count(killedLived, out)
+	if !ok {
+		return fmt.Errorf("the gremlins output has no line with Killed and Lived, so the run cannot be judged")
+	}
+	timed, viable, ok := count(timedViable, out)
+	if !ok {
+		return fmt.Errorf("the gremlins output has no line with Timed out and Not viable, so the run cannot be judged")
+	}
+	if killed+lived+timed == 0 && viable != 0 {
 		return fmt.Errorf("no mutant ran a test (killed, lived and timed out are 0, not viable is %d)", viable)
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "test-output.*"))
