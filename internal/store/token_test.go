@@ -183,6 +183,21 @@ func TestTS32OverlappingMintRowsAreAmbiguous(t *testing.T) {
 	wantUnlinked(t, r, 0, 1)
 }
 
+// mintSelect gives a SELECT of one mint row of mintSet with the given issued_at
+// SQL value.
+func mintSelect(issuedAt string) string {
+	return fmt.Sprintf("SELECT x'%X', 5, 100, 10, 'issuer', %s", mintSet[:], issuedAt)
+}
+
+// insertRawMint writes a mint row of mintSet with the given issued_at SQL
+// value, with no check of the value.
+func insertRawMint(t *testing.T, r *rig, issuedAt string) {
+	t.Helper()
+	if _, err := r.db.Exec("INSERT INTO mint " + mintSelect(issuedAt)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // T-S-32: six cases give no token row and one none count. There is no
 // mint row. Or the mint row has another unit, another set, a NULL session or a
 // NULL issued_at. Or it is a mint row of another range.
@@ -191,22 +206,20 @@ func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 	otherSet := event.CallbackLink{SetID: [8]byte{9}, Unit: 5, Counter: 105}
 	for name, c := range map[string]struct {
 		render *event.Event
-		sql    string // a mint row with a NULL issued_at
+		rawAt  string // the issued_at SQL value of a raw mint row
 		link   *event.CallbackLink
 	}{
 		"no mint row":    {nil, "", link(5, 105)},
 		"another unit":   {render(t), "", link(6, 105)},
 		"another set":    {render(t), "", &otherSet},
 		"NULL session":   {nullSession, "", link(5, 105)},
-		"NULL issued_at": {nil, "INSERT INTO mint VALUES (x'AA010203040506BB', 5, 100, 10, 'issuer', NULL)", link(5, 105)},
+		"NULL issued_at": {nil, "NULL", link(5, 105)},
 		"another range":  {render(t), "", link(5, 500)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, 100)
-			if c.sql != "" {
-				if _, err := r.db.Exec(c.sql); err != nil {
-					t.Fatal(err)
-				}
+			if c.rawAt != "" {
+				insertRawMint(t, r, c.rawAt)
 			}
 			batch := []*event.Event{cbEvent(t, 50, c.link)}
 			if c.render != nil {
@@ -289,11 +302,17 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 }
 
 // T-S-32: an error of a token statement stops the writer with the database
-// rule, and the batch is rolled back. Each case reaches its own statement. The
-// cases are: update prepare, update run, lookup prepare, lookup scan, insert
-// prepare, insert run. A case can first commit a batch.
+// rule, and the writer rolls back the batch. Each case reaches its own
+// statement. The cases are: update prepare, update run, lookup prepare, lookup
+// query, lookup scan, lookup rows, insert prepare, insert run. A case can first
+// commit a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
+	// The abs of the smallest int64 is an integer overflow in SQLite.
+	const overflow = "abs(-9223372036854775807-1)"
+	view := func(sel string) string {
+		return "DROP TABLE mint; CREATE VIEW mint(set_id, unit, first, count, session_id, issued_at) AS " + sel
+	}
 	for name, c := range map[string]struct {
 		committed []*event.Event // the batch that commits before the setup
 		setup     string
@@ -307,7 +326,13 @@ func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 		// The update changes 0 rows, so the lookup prepare runs.
 		"lookup prepare": {[]*event.Event{render(t)}, "DROP TABLE mint", []*event.Event{cb(50)}},
 		// The column has no CHECK, so it keeps the text. Scan into int64 fails.
-		"lookup scan": {nil, "INSERT INTO mint VALUES (x'AA010203040506BB', 5, 100, 10, 'issuer', 'x')",
+		"lookup scan": {nil, "INSERT INTO mint " + mintSelect("'x'"), []*event.Event{cb(50)}},
+		// The view fails on its first row.
+		"lookup query": {[]*event.Event{render(t)}, view(mintSelect(overflow)),
+			[]*event.Event{cb(50)}},
+		// The first row scans. The view fails on its second row.
+		"lookup rows": {[]*event.Event{render(t)},
+			view(mintSelect("1000") + " UNION ALL " + mintSelect(overflow)),
 			[]*event.Event{cb(50)}},
 		// The update prepare does not use the column. The insert prepare does.
 		"insert prepare": {nil, "ALTER TABLE token DROP COLUMN first_cb_at", []*event.Event{render(t), cb(50)}},
@@ -338,8 +363,13 @@ func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 func TestTS32FailedAppendGivesNoTokenRow(t *testing.T) {
 	r := newRig(t, 100)
 	r.writeOK(render(t))
+	rows := r.rows()
 	r.app.err = errors.New("append failed")
 	r.w.flush([]*event.Event{cbEvent(t, 50, link(5, 105)), cbEvent(t, 51, link(5, 106))})
+	wantRule(t, r.w.Err(), writerName, ruleAppend)
+	if n := r.rows(); n != rows {
+		t.Errorf("%d event rows after a failed append, want %d", n, rows)
+	}
 	if n := len(tokenRows(t, r.db)); n != 0 {
 		t.Errorf("%d token rows after a failed append", n)
 	}
