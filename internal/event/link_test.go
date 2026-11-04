@@ -69,13 +69,22 @@ func TestTS32ZeroLinkIsPresent(t *testing.T) {
 // accepts the largest unit and counter.
 func TestTS32LinkIsChecked(t *testing.T) {
 	for _, k := range []Kind{KindRequest, KindRefused, KindBeacon, KindScoreChange, KindAlertSent, KindBundleLoad, KindBundleRejected, KindRetention} {
-		in := linkInput(linkValue())
+		in := linkInput(nil)
 		in.Kind = k
-		if k == KindRefused {
-			in.Reason = ReasonUnknownName
+		if k.isSystem() {
+			in.Session = ""
 		}
-		if _, err := NewEvent(fixedClock(5), in); err == nil {
-			t.Errorf("kind %v takes a link", k)
+		if k == KindRefused {
+			// A refused record has only a reason and an address.
+			in = Input{Kind: k, Reason: ReasonUnknownName, ClientIP: "192.0.2.1"}
+		}
+		if _, err := NewEvent(fixedClock(5), in); err != nil {
+			t.Errorf("kind %v with no link: %v", k, err)
+			continue
+		}
+		in.Link = linkValue()
+		if _, err := NewEvent(fixedClock(5), in); err == nil || !strings.Contains(err.Error(), "only a callback event has a link") {
+			t.Errorf("kind %v with a link: %v", k, err)
 		}
 	}
 	bad := map[string]func(*CallbackLink){

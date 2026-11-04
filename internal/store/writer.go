@@ -425,10 +425,10 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // one time. After the insert loop, it upserts one session row for each session
 // of the request and refused rows. A known session keeps its first address and
 // JA4. The insert loop also stores the mint rows of each request row that has
-// a range, in the same transaction. After the drop counts, tokenWriter
-// writes the token rows of the callback rows that have a link. The
-// duplicate count of the mint rows grows only after a good COMMIT. The counts
-// of unlinked callbacks do the same. onCommit gets the count of event rows, not
+// a range, in the same transaction. After countDrops, tokenWriter writes the
+// token rows of the callback rows that have a link. The duplicate count of the
+// mint rows grows only after a good COMMIT. The counts of unlinked callbacks do
+// the same. onCommit gets the count of event rows, not
 // of session rows.
 func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false

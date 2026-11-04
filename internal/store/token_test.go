@@ -124,7 +124,7 @@ func TestTS32TwoBatchesGiveTheTokenRow(t *testing.T) {
 	wantUnlinked(t, r, 0, 0)
 }
 
-// T-S-32: a repeat callback adds 1 to cb_count. This holds in the same batch
+// T-S-32: a repeat callback adds 1 to cb_count. This is true in the same batch
 // and in a later batch. The time of the first callback stays.
 func TestTS32RepeatAddsToTheCount(t *testing.T) {
 	l := link(5, 105)
@@ -142,14 +142,28 @@ func TestTS32RepeatAddsToTheCount(t *testing.T) {
 	})
 }
 
-// T-S-32: a callback with no link gives no token row and no count.
+// T-S-32: a callback with no link gives no token row and no count. This is true
+// when the callback has a trap id and a token id.
 func TestTS32CallbackWithoutLinkGivesNoRow(t *testing.T) {
-	r := newRig(t, 100)
-	r.writeOK(render(t), cbEvent(t, 50, nil))
-	wantTokens(t, r)
-	wantUnlinked(t, r, 0, 0)
-	if r.rows() != 2 {
-		t.Errorf("%d event rows, want 2", r.rows())
+	ids, err := event.NewEvent(func() time.Time { return time.UnixMilli(50) },
+		event.Input{Kind: event.KindCallback, Session: "presenter", Path: "/cb", TrapID: "trap-a",
+			TokenID: tokenID(105), Surface: event.SurfacePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cb := range map[string]*event.Event{
+		"no ids":         cbEvent(t, 50, nil),
+		"trap and token": ids,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			r.writeOK(render(t), cb)
+			wantTokens(t, r)
+			wantUnlinked(t, r, 0, 0)
+			if r.rows() != 2 {
+				t.Errorf("%d event rows, want 2", r.rows())
+			}
+		})
 	}
 }
 
@@ -169,23 +183,32 @@ func TestTS32OverlappingMintRowsAreAmbiguous(t *testing.T) {
 	wantUnlinked(t, r, 0, 1)
 }
 
-// T-S-32: four cases give no token row and one none count. The mint row is
-// absent, or has another unit, another set or a NULL session.
+// T-S-32: six cases give no token row and one none count. These are the cases:
+// no mint row, a mint row with another unit, a mint row with another set, a
+// mint row with a NULL session, a mint row with a NULL issued_at, and a mint
+// row of another range.
 func TestTS32NoMintRowGivesNoRow(t *testing.T) {
 	nullSession := mintEvent(t, 1, "", event.MintRange{SetID: mintSet, Unit: 5, First: 100, Count: 10, IssuedAt: 1000})
 	otherSet := event.CallbackLink{SetID: [8]byte{9}, Unit: 5, Counter: 105}
 	for name, c := range map[string]struct {
 		render *event.Event
+		sql    string // a mint row with a NULL issued_at
 		link   *event.CallbackLink
 	}{
-		"no mint row":   {nil, link(5, 105)},
-		"another unit":  {render(t), link(6, 105)},
-		"another set":   {render(t), &otherSet},
-		"NULL session":  {nullSession, link(5, 105)},
-		"another range": {render(t), link(5, 500)},
+		"no mint row":    {nil, "", link(5, 105)},
+		"another unit":   {render(t), "", link(6, 105)},
+		"another set":    {render(t), "", &otherSet},
+		"NULL session":   {nullSession, "", link(5, 105)},
+		"NULL issued_at": {nil, "INSERT INTO mint VALUES (x'AA010203040506BB', 5, 100, 10, 'issuer', NULL)", link(5, 105)},
+		"another range":  {render(t), "", link(5, 500)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, 100)
+			if c.sql != "" {
+				if _, err := r.db.Exec(c.sql); err != nil {
+					t.Fatal(err)
+				}
+			}
 			batch := []*event.Event{cbEvent(t, 50, c.link)}
 			if c.render != nil {
 				batch = append(batch, c.render)
@@ -249,7 +272,8 @@ func TestTS32RangeEdges(t *testing.T) {
 	}
 }
 
-// T-S-32: a batch that is rolled back adds no unlinked count and no token row.
+// T-S-32: a batch that the writer rolls back adds no unlinked count and no
+// token row.
 func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 	r := newRig(t, 100)
 	two := mintEvent(t, 2, "second", event.MintRange{SetID: mintSet, Unit: 5, First: 105, Count: 10, IssuedAt: 2000})
@@ -265,47 +289,62 @@ func TestTS32RolledBackBatchCountsNothing(t *testing.T) {
 	}
 }
 
-// failingToken stores a callback after the setup statement has changed the
-// schema. The batch holds a render, so that the token statements run.
-func failingToken(t *testing.T, setup string) {
-	t.Helper()
-	r := newRig(t, 100)
-	if _, err := r.db.Exec(setup); err != nil {
-		t.Fatal(err)
-	}
-	r.w.flush([]*event.Event{render(t), cbEvent(t, 50, link(5, 105))})
-	wantRule(t, r.w.Err(), writerName, ruleDatabase)
-	if r.w.Healthy() || r.rows() != 0 {
-		t.Fatalf("healthy %v, %d event rows, want a stopped writer and 0 rows", r.w.Healthy(), r.rows())
-	}
-	wantUnlinked(t, r, 0, 0)
-}
-
 // T-S-32: an error of a token statement stops the writer with the database
-// rule, and the batch is rolled back. The cases are the prepare and the run of
-// the update, the lookup and the insert.
+// rule, and the batch is rolled back. Each case reaches its own statement: the
+// prepare and the run of the update, the prepare and the scan of the lookup,
+// and the prepare and the run of the insert. A case can first commit a batch.
 func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
-	for name, setup := range map[string]string{
-		"update prepare": "DROP TABLE token",
-		"update run":     "CREATE TRIGGER no_upd BEFORE UPDATE ON token BEGIN SELECT RAISE(ABORT,'x'); END",
-		"lookup prepare": "DROP TABLE mint",
-		"insert run":     "CREATE TRIGGER no_ins BEFORE INSERT ON token BEGIN SELECT RAISE(ABORT,'x'); END",
+	cb := func(ts int64) *event.Event { return cbEvent(t, ts, link(5, 105)) }
+	for name, c := range map[string]struct {
+		committed []*event.Event // the batch that commits before the setup
+		setup     string
+		batch     []*event.Event // the batch that fails
+	}{
+		"update prepare": {nil, "DROP TABLE token", []*event.Event{render(t), cb(50)}},
+		// The trigger runs only when a row exists to update.
+		"update run": {[]*event.Event{render(t), cb(50)},
+			"CREATE TRIGGER no_upd BEFORE UPDATE ON token BEGIN SELECT RAISE(ABORT,'x'); END",
+			[]*event.Event{cb(60)}},
+		// The update changes 0 rows, so the lookup prepare runs.
+		"lookup prepare": {[]*event.Event{render(t)}, "DROP TABLE mint", []*event.Event{cb(50)}},
+		// The column has no CHECK, so it keeps the text. Scan into int64 fails.
+		"lookup scan": {nil, "INSERT INTO mint VALUES (x'AA010203040506BB', 5, 100, 10, 'issuer', 'x')",
+			[]*event.Event{cb(50)}},
+		// The update prepare does not use the column. The insert prepare does.
+		"insert prepare": {nil, "ALTER TABLE token DROP COLUMN first_cb_at", []*event.Event{render(t), cb(50)}},
+		"insert run": {nil, "CREATE TRIGGER no_ins BEFORE INSERT ON token BEGIN SELECT RAISE(ABORT,'x'); END",
+			[]*event.Event{render(t), cb(50)}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if name == "update run" {
-				// The trigger runs only when a row exists to update.
-				r := newRig(t, 100)
-				r.writeOK(render(t), cbEvent(t, 50, link(5, 105)))
-				if _, err := r.db.Exec(setup); err != nil {
-					t.Fatal(err)
-				}
-				r.w.flush([]*event.Event{cbEvent(t, 60, link(5, 105))})
-				wantRule(t, r.w.Err(), writerName, ruleDatabase)
-				return
+			r := newRig(t, 100)
+			if c.committed != nil {
+				r.writeOK(c.committed...)
 			}
-			failingToken(t, setup)
+			rows := r.rows()
+			if _, err := r.db.Exec(c.setup); err != nil {
+				t.Fatal(err)
+			}
+			r.w.flush(c.batch)
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			if r.w.Healthy() || r.rows() != rows {
+				t.Fatalf("healthy %v, %d event rows, want a stopped writer and %d rows", r.w.Healthy(), r.rows(), rows)
+			}
+			wantUnlinked(t, r, 0, 0)
 		})
 	}
+}
+
+// T-S-32: a batch with a failed AppendBatch gives no token row for its linked
+// callbacks, and no unlinked count. The mint row of an earlier batch exists.
+func TestTS32FailedAppendGivesNoTokenRow(t *testing.T) {
+	r := newRig(t, 100)
+	r.writeOK(render(t))
+	r.app.err = errors.New("append failed")
+	r.w.flush([]*event.Event{cbEvent(t, 50, link(5, 105)), cbEvent(t, 51, link(5, 106))})
+	if n := len(tokenRows(t, r.db)); n != 0 {
+		t.Errorf("%d token rows after a failed append", n)
+	}
+	wantUnlinked(t, r, 0, 0)
 }
 
 // T-S-32: a conflict of the token insert is not an error. The writer is the

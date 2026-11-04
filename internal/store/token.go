@@ -27,8 +27,8 @@ WHERE set_id = ? AND first BETWEEN ? - 67 AND ? AND first + count > ? AND unit =
 // UnlinkedCallbacks returns the number of callbacks that the writer could not
 // link to a mint row. These are the values of phantom_callback_unlinked_total.
 // The reason "none" counts the callbacks with no mint row. The reason
-// "ambiguous" counts the callbacks with two mint rows. The counts hold only
-// batches that committed. It is safe to call from any goroutine.
+// "ambiguous" counts the callbacks with two or more mint rows. The counts hold
+// only batches that committed. It is safe to call from any goroutine.
 func (w *Writer) UnlinkedCallbacks() (none, ambiguous uint64) {
 	return w.unlinkedNone.Load(), w.unlinkedAmbiguous.Load()
 }
@@ -59,8 +59,9 @@ func (t *tokenWriter) close() {
 }
 
 // note keeps the row of a callback event that has a link. The writer calls it
-// after the insert of the row. A row that cannot give a token row is not kept:
-// its trap id or token id is absent. NewEvent does not make such an event.
+// after the insert of the row. It does not keep a row with no trap id or no
+// token id, because that row cannot give a token row. NewEvent does not make
+// such an event.
 func (t *tokenWriter) note(e *event.Event, rec event.Record) {
 	if _, ok := e.Link(); ok && rec.Kind == event.KindCallback && rec.TrapID != nil && rec.TokenID != nil {
 		t.calls = append(t.calls, tokenCall{e, rec})
@@ -80,8 +81,8 @@ func (t *tokenWriter) prepare(ctx context.Context, dst **sql.Stmt, query string)
 }
 
 // run writes the token rows of the kept callbacks in batch order. A token with
-// a row gets one more callback. Else the lookup must give exactly one mint row.
-// The new token row has the session and issued_at of that row.
+// a row gets one more callback. A new token row needs exactly one mint row from
+// the lookup. It has the session and issued_at of that row.
 func (t *tokenWriter) run(ctx context.Context) error {
 	for _, c := range t.calls {
 		if err := t.one(ctx, c); err != nil {

@@ -73,8 +73,11 @@ func (m MintRange) check() error {
 // linkSize is the fixed size that Size counts for a CallbackLink. It is the set
 // id (8 bytes), the unit (4 bytes) and the counter (8 bytes). An event has a
 // range or a link, never both. Thus linkSize must not be more than
-// mintRangeSize. Then MaxEventBytes stays an upper bound of Size.
+// mintRangeSize. Then MaxEventBytes stays an upper bound of Size. The compile
+// fails if linkSize is more than mintRangeSize.
 const linkSize = 8 + 4 + 8
+
+const _ = uint(mintRangeSize - linkSize)
 
 // CallbackLink names the token of a callback by the key set, the time unit and
 // the counter of the token. The writer uses it to find the mint row of the
