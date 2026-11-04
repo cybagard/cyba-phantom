@@ -109,7 +109,11 @@ func (l *Loader) report(src Source, sum digest, b *Bundle, err error) {
 	if err != nil {
 		c, ok := CodeOf(err)
 		if !ok {
-			l.logMembers(slog.LevelError, "bundle state fault", members(src, sum, nil, 0))
+			msg := "bundle state fault"
+			if errors.Is(err, ErrInstallFault) {
+				msg = "bundle install fault"
+			}
+			l.logMembers(slog.LevelError, msg, members(src, sum, nil, 0))
 			return
 		}
 		kind, code, msg, level = event.KindBundleRejected, c, "bundle rejected", slog.LevelWarn

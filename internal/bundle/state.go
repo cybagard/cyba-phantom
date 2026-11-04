@@ -88,7 +88,7 @@ func writeState(root *os.Root, st state) error {
 	return writeFile(root, StateName, fmt.Appendf(nil, "{\"version\":%q,\"sha256\":\"%x\",\"class\":%q}\n", st.Version, st.SHA256, classText[st.Class]))
 }
 
-// tempFile is the part of the temporary file that writeFile uses after it
+// tempFile is the part of the temporary file that writeTemp uses after it
 // creates that file.
 type tempFile interface {
 	Write([]byte) (int, error)
@@ -97,8 +97,13 @@ type tempFile interface {
 }
 
 // wrapTemp is nil, except in a test. A test sets it to make Write, Sync or
-// Close of the temporary file fail.
+// Close of the temporary file fail. A test also uses it to count Sync calls.
 var wrapTemp func(*os.File) tempFile
+
+// afterTempRemove is nil, except in a test. A test sets it to act after
+// writeTemp removes an old temporary file and before it creates the new one.
+// It gets the name of the temporary file.
+var afterTempRemove func(tmp string)
 
 // writeFile writes data to the file with this name and replaces an old file.
 // It makes a temporary file, with the name and ".tmp", and mode 0600 less the
@@ -109,8 +114,24 @@ var wrapTemp func(*os.File) tempFile
 // name.
 func writeFile(root *os.Root, name string, data []byte) error {
 	tmp := name + ".tmp"
+	if err := writeTemp(root, tmp, data); err != nil {
+		return err
+	}
+	if err := root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return syncDir(root)
+}
+
+// writeTemp makes the temporary file tmp with the data, as writeFile says. It
+// removes the file again when a step after the create fails.
+func writeTemp(root *os.Root, tmp string, data []byte) error {
 	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
+	}
+	if afterTempRemove != nil {
+		afterTempRemove(tmp)
 	}
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -127,13 +148,14 @@ func writeFile(root *os.Root, name string, data []byte) error {
 	if cerr := w.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = root.Rename(tmp, name)
-	}
 	if err != nil {
 		_ = root.Remove(tmp)
-		return err
 	}
+	return err
+}
+
+// syncDir calls Sync on the directory of the root.
+func syncDir(root *os.Root) error {
 	d, err := root.Open(".")
 	if err != nil {
 		return err

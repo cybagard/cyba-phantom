@@ -297,3 +297,26 @@ func TestTS20WriteFileRenameFails(t *testing.T) {
 		t.Error("a temporary file is left")
 	}
 }
+
+// T-S-20: a symlink can appear at the temporary name after writeTemp removes
+// the old temporary file. Then writeTemp does not follow it. It gives an
+// error, and the file behind the symlink does not change.
+func TestTS20WriteTempRefusesSymlink(t *testing.T) {
+	dir, r := newDir(t)
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	afterTempRemove = func(tmp string) {
+		if err := os.Symlink("target", filepath.Join(dir, tmp)); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterTempRemove = nil })
+	if err := writeTemp(r.root, "x.tmp", []byte("new")); err == nil {
+		t.Error("the write followed the symlink")
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "keep" {
+		t.Errorf("target %q, %v", got, err)
+	}
+}
