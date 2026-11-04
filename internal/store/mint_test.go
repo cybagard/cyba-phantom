@@ -410,7 +410,7 @@ func procStatusBytes(t *testing.T, field string) int64 {
 
 // failingMint stores one request event with a range after the setup statement
 // has changed the schema. The statement must make the mint insert, or its
-// prepare, fail. When tableDropped is true, the setup statement drops the table.
+// prepare, fail. The flag tableDropped is true when the setup drops the table.
 func failingMint(t *testing.T, setup string, tableDropped bool) {
 	t.Helper()
 	r := newRig(t, 100)
