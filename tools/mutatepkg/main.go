@@ -27,11 +27,10 @@
 //
 // Gremlins reads the module name from the first line of go.mod, with the
 // prefix "module " removed. If that text is not the module path from go
-// list (for example a comment on the first line), mutatepkg names both and
-// exits 2.
+// list, mutatepkg names both and exits 2. A comment on the line does this.
 //
-// Exit codes: 0 done, 1 go list failed or no package matches, 2 usage or a
-// refused PKG.
+// Exit codes: 0 done, 1 go list failed or no package matches PKG, 2 usage or
+// a refused PKG.
 package main
 
 import (
