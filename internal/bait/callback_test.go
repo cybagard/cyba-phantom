@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,33 +133,63 @@ func (f *flushProbe) Flush() {
 
 // TestTI04CallbackSurfaces checks the handler part of T-I-04. A token at each
 // position gives one callback event. It has the surface, the trap, the token
-// id and the route path. The request gives one request event. The handler
-// flushes the response before any event.
+// id, the route path, the vhost, the method, the status, the client address
+// and the link of the token. The request gives one request event. The handler
+// flushes the response before any event. A route with an asset gives status
+// 200, and a route with none gives 204.
 func TestTI04CallbackSurfaces(t *testing.T) {
 	e := newCBEnv(t)
-	for pos, surface := range surfaces {
-		tok := e.mint(t, time.Now())
-		w := &flushProbe{ResponseRecorder: httptest.NewRecorder(), q: e.q}
-		r := cbReq(methodOf(pos), cbRoutePath, pos, tok)
-		e.h.ServeHTTP(w, r)
-		reqs, cbs := take(e.q)
-		if w.atFlush != 0 || !w.Flushed || w.Code != 200 {
-			t.Errorf("%s: %d events at the flush, flushed %v, code %d", surface, w.atFlush, w.Flushed, w.Code)
-		}
-		if len(reqs) != 1 || len(cbs) != 1 {
-			t.Fatalf("%s: %d request and %d callback events, want 1 and 1", surface, len(reqs), len(cbs))
-		}
-		parsed, _ := token.Parse(tok)
-		c := cbs[0]
-		if c.Surface == nil || *c.Surface != surface || c.TrapID == nil || *c.TrapID != "a" ||
-			c.TokenID == nil || *c.TokenID != token.ID(parsed) || c.Path == nil || *c.Path != cbRoutePath {
-			t.Errorf("%s: callback record %+v", surface, c)
-		}
-		if c.Session == nil || reqs[0].Session == nil || *c.Session != *reqs[0].Session {
-			t.Errorf("%s: session of the callback differs from the request", surface)
-		}
-		if want := (event.Detail{"reference_seed": event.Bool(true)}); !reflect.DeepEqual(c.Detail, want) {
-			t.Errorf("%s: detail %v, want %v", surface, c.Detail, want)
+	for _, rt := range []struct {
+		path string
+		code int
+	}{{cbRoutePath, 200}, {"/nc", 204}} {
+		for pos, surface := range surfaces {
+			tok := e.mint(t, time.Now())
+			w := &flushProbe{ResponseRecorder: httptest.NewRecorder(), q: e.q}
+			r := cbReq(methodOf(pos), rt.path, pos, tok)
+			e.h.ServeHTTP(w, r)
+			evs := e.q.Drain()
+			var reqs, cbs []event.Record
+			var cbEv *event.Event
+			for _, ev := range evs {
+				switch rec := ev.Record(); rec.Kind {
+				case event.KindRequest:
+					reqs = append(reqs, rec)
+				case event.KindCallback:
+					cbs, cbEv = append(cbs, rec), ev
+				}
+			}
+			if w.atFlush != 0 || !w.Flushed || w.Code != rt.code {
+				t.Errorf("%s %s: %d events at the flush, flushed %v, code %d", rt.path, surface, w.atFlush, w.Flushed, w.Code)
+			}
+			if len(reqs) != 1 || len(cbs) != 1 {
+				t.Fatalf("%s %s: %d request and %d callback events, want 1 and 1", rt.path, surface, len(reqs), len(cbs))
+			}
+			parsed, _ := token.Parse(tok)
+			c := cbs[0]
+			if c.Surface == nil || *c.Surface != surface || c.TrapID == nil || *c.TrapID != "a" ||
+				c.TokenID == nil || *c.TokenID != token.ID(parsed) || c.Path == nil || *c.Path != rt.path {
+				t.Errorf("%s %s: callback record %+v", rt.path, surface, c)
+			}
+			if c.Vhost == nil || *c.Vhost != "example.com" || c.Method == nil || *c.Method != methodOf(pos) ||
+				c.Status == nil || *c.Status != int64(rt.code) {
+				t.Errorf("%s %s: callback vhost, method or status in %+v", rt.path, surface, c)
+			}
+			if ip := cbEv.IP(); ip != "192.0.2.1" {
+				t.Errorf("%s %s: client address %q", rt.path, surface, ip)
+			}
+			// The link comes from an independent check of the token.
+			res := token.Verify([]*token.KeySet{e.ks}, parsed)
+			want := event.CallbackLink{SetID: res.SetID, Unit: res.Unit, Counter: res.Counter}
+			if link, ok := cbEv.Link(); !ok || link != want {
+				t.Errorf("%s %s: link %+v (%v), want %+v", rt.path, surface, link, ok, want)
+			}
+			if c.Session == nil || reqs[0].Session == nil || *c.Session != *reqs[0].Session {
+				t.Errorf("%s %s: session of the callback differs from the request", rt.path, surface)
+			}
+			if want := (event.Detail{"reference_seed": event.Bool(true)}); !reflect.DeepEqual(c.Detail, want) {
+				t.Errorf("%s %s: detail %v, want %v", rt.path, surface, c.Detail, want)
+			}
 		}
 	}
 }
@@ -201,10 +232,30 @@ func dump(w *httptest.ResponseRecorder) string {
 	return fmt.Sprintf("%d %v %q flushed=%v", res.StatusCode, hd, body, w.Flushed)
 }
 
-// TestTS32CallbackFixedResponse checks that good, stale, future, bad and absent
-// tokens give equal response bytes at each position, with no Set-Cookie. It
-// does this for a route with an asset and a route with none, for GET, HEAD and
-// POST.
+// head gives the status and the headers without Date of a response.
+func head(w *httptest.ResponseRecorder) string {
+	hd := w.Result().Header.Clone()
+	hd.Del("Date")
+	return fmt.Sprintf("%d %v", w.Code, hd)
+}
+
+// otherKeySetToken gives the text of a token that a key set outside of the
+// ring minted.
+func otherKeySetToken(t testing.TB) string {
+	t.Helper()
+	ks, err := token.NewKeySet(bytes.Repeat([]byte{9}, 32), [32]byte{2}, []string{"a"}, false)
+	mustOK(t, err)
+	tok, err := ks.Mint(0, time.Now())
+	mustOK(t, err)
+	return token.Text(tok)
+}
+
+// TestTS32CallbackFixedResponse checks that good, stale, future, bad, absent
+// and other-key-set tokens give equal response bytes at each position, with no
+// Set-Cookie. It does this for a route with an asset and a route with none,
+// for GET, HEAD and POST. Both routes have a body position, so POST also goes
+// to the path, query and header positions. The test checks the header values.
+// A HEAD response has the status and the headers of the GET response.
 func TestTS32CallbackFixedResponse(t *testing.T) {
 	e := newCBEnv(t)
 	toks := map[string]string{
@@ -212,21 +263,21 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 		"stale":  e.mint(t, time.Now().Add(-26*time.Hour)),
 		"future": e.mint(t, time.Now().Add(2*time.Hour)),
 		"bad":    strings.Repeat("a", 26),
+		"other":  otherKeySetToken(t),
 		"none":   "",
 	}
+	const ctype = "text/plain; charset=utf-8"
 	for _, rt := range []struct {
-		path string
-		code int
-		body string
-	}{{cbRoutePath, 200, cbAssetBody}, {"/nc", 204, ""}} {
+		path  string
+		code  int
+		body  string
+		ctype string
+	}{{cbRoutePath, 200, cbAssetBody, ctype}, {"/nc", 204, "", ""}} {
+		// Each method has one response for each position and token kind.
+		dumps, heads := map[string]string{}, map[string]string{}
 		for pos := range surfaces {
-			methods := []string{http.MethodGet, http.MethodHead}
-			if pos == 3 {
-				methods = []string{http.MethodPost}
-			}
-			for _, m := range methods {
-				var first string
-				for _, kind := range []string{"good", "stale", "future", "bad", "none"} {
+			for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+				for _, kind := range []string{"good", "stale", "future", "bad", "other", "none"} {
 					w := httptest.NewRecorder()
 					e.h.ServeHTTP(w, cbReq(m, rt.path, pos, toks[kind]))
 					e.q.Drain()
@@ -235,16 +286,28 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 					if m == http.MethodHead {
 						want = ""
 					}
-					if w.Code != rt.code || w.Body.String() != want || len(w.Result().Header.Values("Set-Cookie")) != 0 {
+					res := w.Result()
+					if w.Code != rt.code || w.Body.String() != want || len(res.Header.Values("Set-Cookie")) != 0 {
 						t.Errorf("%s %s pos %d %s: %s", m, rt.path, pos, kind, got)
 					}
-					if first == "" {
-						first = got
+					wantLen := []string(nil)
+					if rt.code == 200 {
+						wantLen = []string{strconv.Itoa(len(cbAssetBody))}
+					}
+					if !reflect.DeepEqual(res.Header["X-Content-Type-Options"], []string{"nosniff"}) ||
+						res.Header.Get("Content-Type") != rt.ctype || !reflect.DeepEqual(res.Header["Content-Length"], wantLen) {
+						t.Errorf("%s %s pos %d %s: headers %v", m, rt.path, pos, kind, res.Header)
+					}
+					if first, ok := dumps[m]; !ok {
+						dumps[m], heads[m] = got, head(w)
 					} else if got != first {
 						t.Errorf("%s %s pos %d %s: response differs:\n%s\n%s", m, rt.path, pos, kind, got, first)
 					}
 				}
 			}
+		}
+		if heads[http.MethodHead] != heads[http.MethodGet] || heads[http.MethodPost] != heads[http.MethodGet] {
+			t.Errorf("%s: GET, HEAD and POST differ in status or headers:\n%v", rt.path, heads)
 		}
 	}
 }
@@ -268,34 +331,85 @@ func TestTS32CallbackDetail(t *testing.T) {
 			t.Errorf("%s: records %+v, want detail %v", tc.name, cbs, tc.want)
 		}
 	}
-	// A text that is no token of the ring gives no callback event.
-	e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, 1, strings.Repeat("a", 26)))
-	if reqs, cbs := take(e.q); len(reqs) != 1 || len(cbs) != 0 {
-		t.Errorf("bad token: %d request and %d callback events", len(reqs), len(cbs))
+	// A text that is no token of the ring gives no callback event. This holds
+	// for a token that a key set outside of the ring minted.
+	for name, text := range map[string]string{"bad": strings.Repeat("a", 26), "other key set": otherKeySetToken(t)} {
+		e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, 1, text))
+		if reqs, cbs := take(e.q); len(reqs) != 1 || len(cbs) != 0 {
+			t.Errorf("%s token: %d request and %d callback events", name, len(reqs), len(cbs))
+		}
 	}
 }
 
 // TestTS32CallbackMarker checks that the token text is in no member of a
 // callback event and in no detail. The handler counts no error. The request
-// event of a path callback keeps the escaped request path by design.
+// event keeps the escaped request path, because ADR-039 decision 10 says so.
+// So the test skips the request event of a path callback. The callback event
+// also does not hold the case of the Host header.
 func TestTS32CallbackMarker(t *testing.T) {
 	e := newCBEnv(t)
 	for pos, surface := range surfaces {
 		marker := e.mint(t, time.Now())
-		e.h.ServeHTTP(httptest.NewRecorder(), cbReq(methodOf(pos), cbRoutePath, pos, marker))
+		r := cbReq(methodOf(pos), cbRoutePath, pos, marker)
+		r.Host = "eXaMpLe.CoM"
+		e.h.ServeHTTP(httptest.NewRecorder(), r)
 		for _, ev := range e.q.Drain() {
-			if pos == 0 && ev.Kind() == event.KindRequest {
+			if pos == posPath && ev.Kind() == event.KindRequest {
 				continue
 			}
 			b, err := json.Marshal(ev.Record())
 			mustOK(t, err)
-			if strings.Contains(string(b)+fmt.Sprintf("%+v", ev.Record())+ev.IP(), marker) {
+			text := string(b) + fmt.Sprintf("%+v", ev.Record()) + ev.IP()
+			if strings.Contains(text, marker) {
 				t.Errorf("%s: the marker is in the %s event", surface, ev.Kind())
+			}
+			if ev.Kind() == event.KindCallback && strings.Contains(text, "eXaMpLe") {
+				t.Errorf("%s: the Host case is in the callback event", surface)
 			}
 		}
 	}
 	if n := e.h.eventErrs.Load(); n != 0 {
 		t.Errorf("%d event errors", n)
+	}
+}
+
+// TestTS32CallbackVhost checks that the callback record has the vhost name of
+// the bundle, not the Host header of the request. The request event keeps the
+// Host header.
+func TestTS32CallbackVhost(t *testing.T) {
+	e := newCBEnv(t)
+	host := "eXaMpLe.CoM:" + strings.Repeat("9", 300)
+	r := cbReq(http.MethodGet, cbRoutePath, posQuery, e.mint(t, time.Now()))
+	r.Host = host
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, r)
+	reqs, cbs := take(e.q)
+	if w.Code != 200 || len(reqs) != 1 || len(cbs) != 1 {
+		t.Fatalf("code %d with %d request and %d callback events", w.Code, len(reqs), len(cbs))
+	}
+	if cbs[0].Vhost == nil || *cbs[0].Vhost != "example.com" {
+		t.Errorf("callback vhost %v, want example.com", cbs[0].Vhost)
+	}
+	// NewEvent bounds the text of the Host header.
+	if v := reqs[0].Vhost; v == nil || !strings.HasPrefix(*v, "eXaMpLe.CoM:") {
+		t.Errorf("request vhost %v, want the Host header", v)
+	}
+}
+
+// TestTS32CallbackHeaderName checks that a route with a header name that is
+// not canonical gives a callback event for a token in the canonical header.
+func TestTS32CallbackHeaderName(t *testing.T) {
+	e := newCBEnvFiles(t, map[string]string{
+		"vhosts/lima.example/routes.json": `{"routes":[{"path":"/h","callback":{"header":"X-REQUEST-TOKEN"}}]}`,
+	})
+	r := httptest.NewRequest(http.MethodGet, "/h", nil)
+	r.Host = "lima.example"
+	r.Header.Set("X-Request-Token", e.mint(t, time.Now()))
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, r)
+	reqs, cbs := take(e.q)
+	if w.Code != 204 || len(reqs) != 1 || len(cbs) != 1 || *cbs[0].Surface != event.SurfaceHeader {
+		t.Errorf("code %d with %d request and %d callback events %+v", w.Code, len(reqs), len(cbs), cbs)
 	}
 }
 
@@ -349,8 +463,8 @@ func TestTS32CallbackNoRing(t *testing.T) {
 }
 
 // rootRoutes make "/" of kilo.example a callback route with a segment
-// position. The vhost has two more routes: an exact route with the shape of a
-// token, and a plain route.
+// position. The vhost has one more route: an exact route with the shape of a
+// token.
 const (
 	exactShape = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
 	rootRoutes = `{"routes":[` +
@@ -360,7 +474,7 @@ const (
 
 // TestTS32CallbackRootSegment checks a segment callback route at the root
 // path. It matches "/" and "/" with one segment. An exact route of the vhost
-// comes first.
+// comes first. "//", "//x" and "//" with a token get the 404 decoy.
 func TestTS32CallbackRootSegment(t *testing.T) {
 	e := newCBEnvFiles(t, map[string]string{
 		"vhosts/kilo.example/routes.json": rootRoutes,
@@ -375,6 +489,9 @@ func TestTS32CallbackRootSegment(t *testing.T) {
 		{"/", "kilo\n", 200, false},
 		{"/" + exactShape, "other\n", 200, false},
 		{"/a/b", "not found\n", 404, false},
+		{"//", "not found\n", 404, false},
+		{"//x", "not found\n", 404, false},
+		{"//" + e.mint(t, time.Now()), "not found\n", 404, false},
 	} {
 		r := httptest.NewRequest(http.MethodGet, tc.target, nil)
 		r.Host = "kilo.example"
