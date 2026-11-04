@@ -66,6 +66,9 @@ type Bundle struct {
 	expired bool
 	// templates holds the parsed .tmpl files. No template runs at load.
 	templates map[string]*template.Template
+	// trapIdx holds, for each template, the key-set indexes of its trap actions
+	// in action order. The load check makes it once. It is never changed.
+	trapIdx map[string][]int
 	// routes holds the route map of each vhost, by host name.
 	routes map[string]RouteMap
 	// traps holds the traps of traps/traps.json. It is nil without that file.
@@ -177,6 +180,17 @@ func (b *Bundle) Execute(w io.Writer, name string, data Page) error {
 		return ErrNoTemplate
 	}
 	return t.Execute(w, data)
+}
+
+// TrapIndexes returns the key-set indexes of the trap actions of the kept
+// template with this archive name. The list is in action order. The index of a
+// trap is its position in traps/traps.json. A list holds at most 64 indexes.
+// The second value is false for a name that is not a kept template. A kept
+// template with no trap action gives an empty list and true. A call makes one
+// copy, so a caller cannot change the kept list. It walks no template.
+func (b *Bundle) TrapIndexes(name string) ([]int, bool) {
+	idx, ok := b.trapIdx[name]
+	return slices.Clone(idx), ok
 }
 
 // Asset is a view of the bytes of an archive entry. It has no method that
@@ -337,6 +351,8 @@ func (l *Loader) Healthy() bool {
 // seed, the SHA-256 and the trap ids in file order. A failure of the key set
 // step gives ErrSeedInvalid. The key set is nil when the seed step is off (a
 // test seam) or the bundle has no trap.
+// The load keeps, for each template, the key-set indexes of its trap actions
+// in action order (TrapIndexes).
 // A trap file of a bad form gives ErrContentInvalid. A bundle with no trap file
 // has no trap. A route header slot then gives ErrContentInvalid.
 // A host name that is the second name part of a file below vhosts/ is a vhost.
@@ -494,7 +510,8 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 	if err := compileTraps(traps, newTemplate); err != nil {
 		return nil, err
 	}
-	if err := checkExec(set, traps); err != nil {
+	trapIdx, err := checkExec(set, traps)
+	if err != nil {
 		return nil, err
 	}
 	// The route step runs also when the template step is nil. The set is then
@@ -532,7 +549,7 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 			}
 		}
 	}
-	cand := &Bundle{sum: sum, manifest: *m, archive: arch, sig: slices.Clone(sig), class: class, expired: expired, templates: set, routes: routes, traps: traps, seed: ref, tokens: tokens}
+	cand := &Bundle{sum: sum, manifest: *m, archive: arch, sig: slices.Clone(sig), class: class, expired: expired, templates: set, trapIdx: trapIdx, routes: routes, traps: traps, seed: ref, tokens: tokens}
 	// The install of a fetched pair comes first. Then the record, the version
 	// state and Swap. A failed write leaves the running bundle. A failed
 	// install leaves the files that the next start can load. A failed check or
