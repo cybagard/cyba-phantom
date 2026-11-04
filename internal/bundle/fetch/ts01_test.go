@@ -219,6 +219,41 @@ func TestTS01ChangedArchiveFromFetch(t *testing.T) {
 	}
 }
 
+// T-S-30: each rejection code counts the class rejected, not a load fault. A
+// pair with a lower version gives rollback. Bytes that are no archive, with a
+// valid signature, give archive_invalid. The old bundle serves, and the one
+// event has the reason and source fetch.
+func TestTS30OtherRejections(t *testing.T) {
+	junk := []byte("not an archive")
+	junkSig := []byte("t1 " + base64.StdEncoding.EncodeToString(ed25519.Sign(testKey, bundle.SigMessage(junk))) + "\n")
+	older := signedPair(t, "2026.10.01-1")
+	for _, tc := range []struct {
+		reason string
+		p      pair
+	}{
+		{"rollback", older},
+		{"archive_invalid", pair{junk, junkSig}},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			r := newFetchRig(t, signedPair(t, "2026.11.01-1"), &origin{archive: tc.p.archive, sigs: func(int) []byte { return tc.p.sig }})
+			if r.f.fetch(context.Background()) {
+				t.Error("a rejected pair gave a good fetch")
+			}
+			if r.f.c.Count(ClassRejected) != 1 || r.f.LoadFaults() != 0 {
+				t.Errorf("rejected %d, load faults %d, want 1 and 0", r.f.c.Count(ClassRejected), r.f.LoadFaults())
+			}
+			if got := r.l.Current(); got != r.old || got == nil {
+				t.Errorf("the running bundle is %v, want the old bundle", got)
+			}
+			kinds, details := events(t, r.q)
+			if len(kinds) != 1 || kinds[0] != event.KindBundleRejected ||
+				details[0]["reason"] != tc.reason || details[0]["source"] != "fetch" {
+				t.Errorf("events %v, details %v", kinds, details)
+			}
+		})
+	}
+}
+
 // T-S-30: a signature file equal to the running one ends the fetch after one
 // request. There is no archive request, no load and no event.
 func TestTS30UnchangedSignature(t *testing.T) {
@@ -253,22 +288,25 @@ func TestTS30PairChangesBetweenReads(t *testing.T) {
 	r.sim.maxWaits = 3
 	var tries int
 	var loaded bool
-	var changed uint64
+	var changed, faults uint64
 	r.f.try = func(ctx context.Context) bool {
 		good := r.f.fetch(ctx)
 		if tries++; tries == 1 { // the state after the changed pair
-			loaded, changed = r.l.Current() != r.old, r.f.c.Count(ClassChanged)
+			loaded, changed, faults = r.l.Current() != r.old, r.f.c.Count(ClassChanged), r.f.LoadFaults()
 		}
 		return good
 	}
 	r.sim.run()
-	if loaded || changed != 1 || r.f.c.Count(ClassRejected) != 0 {
-		t.Errorf("after the first fetch: loaded %v, changed %d, rejected %d", loaded, changed, r.f.c.Count(ClassRejected))
+	if loaded || changed != 1 || r.f.c.Count(ClassRejected) != 0 || faults != 0 {
+		t.Errorf("after the first fetch: loaded %v, changed %d, rejected %d, load faults %d", loaded, changed, r.f.c.Count(ClassRejected), faults)
 	}
 	// The wait after the changed pair is the 60 s step. A good fetch gives 1 h.
 	checkWaits(t, r.sim.waits, secs(60, 3600))
 	if tries != 2 {
 		t.Errorf("%d fetches, want 2", tries)
+	}
+	if r.f.LoadFaults() != 0 {
+		t.Errorf("load faults %d, want 0", r.f.LoadFaults())
 	}
 	kinds, details := events(t, r.q)
 	if len(kinds) != 1 || kinds[0] != event.KindBundleLoad || details[0]["source"] != "fetch" {
@@ -357,6 +395,10 @@ func TestTU23StateFault(t *testing.T) {
 		t.Error("a fetch that could not write the state gave a good fetch")
 	}
 	checkFaultOnly(t, r)
+	// The install passed. Only the state write failed.
+	if disk, err := os.ReadFile(filepath.Join(dir, "bundle/current.cbnd")); err != nil || !bytes.Equal(disk, b.archive) {
+		t.Errorf("current.cbnd does not hold the fetched archive (read error %v)", err)
+	}
 }
 
 // T-U-23: the context ends after the second signature read. The fetch starts

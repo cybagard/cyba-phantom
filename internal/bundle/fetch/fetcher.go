@@ -124,7 +124,8 @@ func (f *Fetcher) fetch(ctx context.Context) bool {
 	}
 	if _, err := f.loader.LoadFetched(archive, first); err != nil {
 		if _, ok := bundle.CodeOf(err); !ok {
-			// The loader wrote one log line and sent no event. No rejection.
+			// The loader wrote one log line and sent no event. This is not a
+			// rejection.
 			f.faults.Add(1)
 			return false
 		}
