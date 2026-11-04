@@ -308,3 +308,135 @@ func TestWrapperPackageArgumentOfMutantTest(t *testing.T) {
 		}
 	}
 }
+
+const (
+	goodOut = "     KILLED CONDITIONALS_BOUNDARY at x.go:1:2\n" +
+		"Killed: 5, Lived: 1, Not covered: 0\n" +
+		"Timed out: 0, Not viable: 2, Skipped: 0\n" +
+		"Mutation testing completed in 1 second\n"
+	zeroOut = "  NOT VIABLE CONDITIONALS_BOUNDARY at x.go:1:2\n" +
+		"Killed: 0, Lived: 0, Not covered: 0\n" +
+		"Timed out: 0, Not viable: 30, Skipped: 0\n" +
+		"Mutation testing completed in 1 second\n"
+	passOutput  = "ok  \t" + mod + "\t0.01s\n"
+	setupOutput = "no required module provides package x\nFAIL\t" + mod + " [setup failed]\n"
+	buildOutput = "x.go:1:1: bad\nFAIL\t" + mod + " [build failed]\n"
+)
+
+// runDir makes a run directory with the given files and runs the check mode.
+func runDir(t *testing.T, files map[string]string, fix string) (int, string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, errb bytes.Buffer
+	rc := run([]string{"-check", dir, fix}, &out, &errb)
+	if out.Len() != 0 {
+		t.Errorf("stdout %q, want empty", out.String())
+	}
+	return rc, errb.String()
+}
+
+func TestCheckFailsWhenPlannedReplacementDidNotHappen(t *testing.T) {
+	fix := mod + " " + mod + "/cmd/app"
+	rc, errs := runDir(t, map[string]string{"out": goodOut}, fix)
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the go wrapper replaced no package ("+mod+" with "+mod+"/cmd/app)") ||
+		strings.Count(errs, "\n") != 1 {
+		t.Errorf("rc %d, err %q", rc, errs)
+	}
+	// The file replaced makes the same run pass.
+	rc, errs = runDir(t, map[string]string{"out": goodOut, "replaced": "\n"}, fix)
+	if rc != 0 || errs != "" {
+		t.Errorf("with replaced: rc %d, err %q", rc, errs)
+	}
+	// No mutant status, so the guard has nothing to judge.
+	rc, errs = runDir(t, map[string]string{"out": "Mutation testing completed in 1 second\n"}, fix)
+	if rc != 0 || errs != "" {
+		t.Errorf("no mutant status: rc %d, err %q", rc, errs)
+	}
+	// No replacement planned.
+	rc, errs = runDir(t, map[string]string{"out": goodOut}, "")
+	if rc != 0 || errs != "" {
+		t.Errorf("no replacement planned: rc %d, err %q", rc, errs)
+	}
+}
+
+func TestCheckFailsWhenNoMutantRanATest(t *testing.T) {
+	// The file replaced exists and no test-output file does. Only the counts
+	// tell.
+	rc, errs := runDir(t, map[string]string{"out": zeroOut, "replaced": "\n"}, mod+" "+mod+"/cmd/app")
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: no mutant ran a test") || !strings.Contains(errs, "30") ||
+		strings.Count(errs, "\n") != 1 {
+		t.Errorf("rc %d, err %q", rc, errs)
+	}
+	for _, c := range []struct{ name, counts string }{
+		{"a lived mutant", "Killed: 0, Lived: 1, Not covered: 0\nTimed out: 0, Not viable: 30, Skipped: 0\n"},
+		{"a killed mutant", "Killed: 1, Lived: 0, Not covered: 0\nTimed out: 0, Not viable: 30, Skipped: 0\n"},
+		{"a timed out mutant", "Killed: 0, Lived: 0, Not covered: 0\nTimed out: 1, Not viable: 30, Skipped: 0\n"},
+		{"no mutant at all", "Killed: 0, Lived: 0, Not covered: 4\nTimed out: 0, Not viable: 0, Skipped: 0\n"},
+	} {
+		rc, errs := runDir(t, map[string]string{"out": c.counts, "replaced": "\n"}, "")
+		if rc != 0 || errs != "" {
+			t.Errorf("%s: rc %d, err %q", c.name, rc, errs)
+		}
+	}
+}
+
+func TestCheckFailsWhenPackageCannotLoad(t *testing.T) {
+	rc, errs := runDir(t, map[string]string{
+		"out":             goodOut,
+		"replaced":        "\n",
+		"test-output.100": passOutput,
+		"test-output.200": setupOutput,
+	}, mod+" "+mod+"/cmd/app")
+	if rc != 1 || !strings.HasPrefix(errs, "mutate FAIL: the package could not load") || !strings.Contains(errs, "test-output.200") ||
+		strings.Count(errs, "\n") != 1 {
+		t.Errorf("rc %d, err %q", rc, errs)
+	}
+}
+
+func TestCheckPassesGoodRun(t *testing.T) {
+	// A build failure is a not viable mutant and is no cause to fail.
+	rc, errs := runDir(t, map[string]string{
+		"out":             goodOut,
+		"replaced":        "\n",
+		"test-output.100": passOutput,
+		"test-output.200": buildOutput,
+		"test-output.300": "--- FAIL: TestX (0.00s)\nFAIL\nFAIL\t" + mod + "\t0.01s\n",
+	}, mod+" "+mod+"/cmd/app")
+	if rc != 0 || errs != "" {
+		t.Errorf("rc %d, err %q", rc, errs)
+	}
+}
+
+func TestCheckErrors(t *testing.T) {
+	var out, errb bytes.Buffer
+	if rc := run([]string{"-check", t.TempDir(), ""}, &out, &errb); rc != 1 || !strings.HasPrefix(errb.String(), "mutate FAIL:") {
+		t.Errorf("no out file: rc %d, err %q", rc, errb.String())
+	}
+	if rc := run([]string{"-check", t.TempDir()}, &out, &errb); rc != 2 {
+		t.Errorf("missing argument: rc %d, want 2", rc)
+	}
+}
+
+func TestMakefileCallsCheckAfterGremlins(t *testing.T) {
+	data, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	gremlins := strings.Index(text, `gremlins unleash`)
+	call := strings.Index(text, `"$$d/mutatepkg" -check "$$d" "$$fix" || exit $$?;`)
+	list := strings.Index(text, `echo "== not killed =="`)
+	if gremlins < 0 || call < gremlins || list < call {
+		t.Errorf("positions: gremlins %d, check %d, list %d", gremlins, call, list)
+	}
+	// The old guard tested MUTATE_FROM and needed the file replaced to be
+	// missing. It saw neither a broken export nor a package that did not load.
+	if strings.Contains(text, `[ -n "$$MUTATE_FROM" ] && [ ! -e "$$d/replaced" ]`) {
+		t.Error("the Makefile still has the old guard")
+	}
+}

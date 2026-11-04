@@ -4,6 +4,7 @@
 // Usage:
 //
 //	mutatepkg <pkg>
+//	mutatepkg -check <run directory> <replacement>
 //
 // Run it in the module root. <pkg> is the PKG of "make mutate", a directory
 // such as ./cmd/phantom. The packages are the ones below it, itself included.
@@ -29,8 +30,16 @@
 // prefix "module " removed. If that text is not the module path from go
 // list, mutatepkg names both and exits 2. A comment on the line does this.
 //
-// Exit codes: 0 done, 1 go list failed or no package matches PKG, 2 usage or
-// a refused PKG.
+// The -check mode runs after gremlins. <replacement> is the output of the
+// first mode. It reads the files out, replaced and test-output.* in the run
+// directory. It prints one "mutate FAIL:" line and exits 1 in three cases.
+//   - A replacement was planned, the file replaced is missing, and the
+//     gremlins output has a mutant status.
+//   - Killed, Lived and Timed out are 0, and Not viable is not 0.
+//   - A test-output file has the FAIL line of a setup failure.
+//
+// Exit codes: 0 done, 1 a failed check, 2 usage or a refused PKG. Exit code 1
+// also means go list failed or no package matches PKG.
 package main
 
 import (
@@ -41,6 +50,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -160,7 +170,75 @@ func checkGoMod(dir, module string) error {
 	return nil
 }
 
+// Patterns of the gremlins output and of the FAIL line that the go wrapper
+// (mutate-go.sh) turns into exit status 2.
+var (
+	statusLine  = regexp.MustCompile(`(?m)^ *(KILLED|LIVED|TIMED OUT|NOT VIABLE) `)
+	killedLived = regexp.MustCompile(`Killed: (\d+), Lived: (\d+)`)
+	timedViable = regexp.MustCompile(`Timed out: (\d+), Not viable: (\d+)`)
+	setupFailed = regexp.MustCompile(`(?m)^FAIL\t[^ \t]+ \[setup failed\]$`)
+)
+
+// count returns the two numbers of the first match of re in text, or false.
+func count(re *regexp.Regexp, text string) (int, int, bool) {
+	m := re.FindStringSubmatch(text)
+	if m == nil {
+		return 0, 0, false
+	}
+	a, _ := strconv.Atoi(m[1])
+	b, _ := strconv.Atoi(m[2])
+	return a, b, true
+}
+
+// checkRun reads the run directory of "make mutate" after gremlins ended. It
+// returns an error that names the cause if no mutant ran a test on PKG.
+// The file "out" has the gremlins output. The file "replaced" has a line for
+// each replacement of the go wrapper. fix is the output of the plan mode.
+//
+// The go wrapper writes a file test-output.<pid> for each go test call. That
+// includes the pre-check and the coverage run of gremlins. Both passed, or
+// the run would have ended before this check, so they have no setup FAIL line.
+func checkRun(dir, fix string) error {
+	data, err := os.ReadFile(filepath.Join(dir, "out"))
+	if err != nil {
+		return err
+	}
+	out := string(data)
+	if fix != "" && statusLine.MatchString(out) {
+		if _, err := os.Stat(filepath.Join(dir, "replaced")); err != nil {
+			from, to, _ := strings.Cut(fix, " ")
+			return fmt.Errorf("the go wrapper replaced no package (%s with %s), so the mutants did not run on the package of PKG", from, to)
+		}
+	}
+	killed, lived, ok1 := count(killedLived, out)
+	timed, viable, ok2 := count(timedViable, out)
+	if ok1 && ok2 && killed+lived+timed == 0 && viable != 0 {
+		return fmt.Errorf("no mutant ran a test (killed, lived and timed out are 0, not viable is %d)", viable)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "test-output.*"))
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		text, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if setupFailed.Match(text) {
+			return fmt.Errorf("the package could not load in a go test call (%s has a setup failed line), so a mutant cannot have run a test", filepath.Base(f))
+		}
+	}
+	return nil
+}
+
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 3 && args[0] == "-check" {
+		if err := checkRun(args[1], args[2]); err != nil {
+			fmt.Fprintln(stderr, "mutate FAIL:", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) != 1 || args[0] == "" {
 		fmt.Fprintln(stderr, "usage: mutatepkg <pkg>")
 		return 2

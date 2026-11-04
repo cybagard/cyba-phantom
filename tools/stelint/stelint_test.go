@@ -158,6 +158,46 @@ func TestURLOnlyLineIsExempt(t *testing.T) {
 	}
 }
 
+// A long comment on the last line is a hit, also with no final newline.
+func TestLastLineWithoutNewlineIsChecked(t *testing.T) {
+	got := hitLines(comment(81))
+	if len(got) != 1 || got[0] != (hit{1, 81}) {
+		t.Errorf("got %v, want one hit {1 81}", got)
+	}
+	got = hitLines("package a\n\n" + comment(81))
+	if len(got) != 1 || got[0] != (hit{3, 81}) {
+		t.Errorf("got %v, want one hit {3 81}", got)
+	}
+}
+
+// The text of a URL line is the comment text only. Other text on the line
+// or after the URL makes the line a hit.
+func TestURLLineWithOtherTextIsHit(t *testing.T) {
+	url := "https://example.com/" + strings.Repeat("a", 100)
+	for name, src := range map[string]string{
+		"line comment that ends with a block end": "// " + url + " */\n",
+		"space after the scheme":                  "// https:// " + strings.Repeat("a", 100) + "\n",
+	} {
+		if got := hitLines(src); len(got) != 1 {
+			t.Errorf("%s: got %v, want one hit", name, got)
+		}
+	}
+}
+
+// A URL line inside a block comment is exempt. This holds when the comment
+// starts after code or an indent and the URL starts in column 1.
+func TestURLLineInIndentedBlockIsExempt(t *testing.T) {
+	url := "https://example.com/" + strings.Repeat("a", 100)
+	for _, src := range []string{
+		"    /*\n" + url + "\n    */\n",
+		"x := 1; /*\n" + url + "\n*/\n",
+	} {
+		if got := hitLines(src); len(got) != 0 {
+			t.Errorf("%q: got %v, want no hit", src, got)
+		}
+	}
+}
+
 func TestDirectivesAreExempt(t *testing.T) {
 	long := strings.Repeat("x", 100)
 	for _, src := range []string{
@@ -618,6 +658,67 @@ func TestParseDiffRanges(t *testing.T) {
 		if got := targets[0].has(line); got != want {
 			t.Errorf("has(%d) = %v, want %v", line, got, want)
 		}
+	}
+}
+
+// Each bound of the hunk rule is exact. A hunk of the whole file passes. A
+// hunk of one line more fails, also from line 0. A deletion has no lines.
+func TestParseDiffHunkBounds(t *testing.T) {
+	for _, c := range []struct {
+		hunk string
+		ok   bool
+	}{
+		{"@@ -0,0 +1,1048576 @@\n", true},
+		{"@@ -0,0 +0,1048577 @@\n", false},
+		{"@@ -0,0 +1,1048577 @@\n", false},
+		{"@@ -1 +1048577,0 @@\n-x\n", true},
+		{"@@ -1 +2000000,0 @@\n-x\n", true},
+	} {
+		_, err := parseDiff("+++ b/a.go\n" + c.hunk)
+		if (err == nil) != c.ok {
+			t.Errorf("hunk %q: error %v, want ok %v", c.hunk, err, c.ok)
+		}
+	}
+}
+
+func TestParseHunkRefusesBadHeader(t *testing.T) {
+	for _, l := range []string{"@@ ", "@@ -1", "@@ -1 +2", "@@ +1 +2 @@", "@@ -1 -2 @@", "@@ 1 2 @@"} {
+		if _, _, _, ok := parseHunk(l); ok {
+			t.Errorf("parseHunk(%q): ok, want false", l)
+		}
+	}
+	if start, oldLen, newLen, ok := parseHunk("@@ -3,2 +4,5 @@"); !ok || start != 4 || oldLen != 2 || newLen != 5 {
+		t.Errorf("good header: %d %d %d %v", start, oldLen, newLen, ok)
+	}
+}
+
+// A revision that starts with "-" is refused with the fixed text, whichever
+// of the two it is. An empty head is refused too.
+func TestRevisionStartingWithDashIsRefused(t *testing.T) {
+	dir, _ := baseRepo(t)
+	for _, args := range [][]string{{"--", "-bad", "HEAD"}, {"--", "HEAD", "-bad"}, {"HEAD", ""}, {"--", "-all", "-bad"}} {
+		code, _, errOut := runLint(dir, args...)
+		if code != 2 || !strings.Contains(errOut, "a revision must not be empty or start with '-'") {
+			t.Errorf("args %q: code = %d, err = %q", args, code, errOut)
+		}
+	}
+}
+
+// -all lists the regular files only. A symbolic link and a submodule entry
+// with a .go name are skipped.
+func TestListTrackedSkipsLinksAndSubmodules(t *testing.T) {
+	dir := newRepo(t)
+	writeFile(t, dir, "reg.go", "package a\n")
+	writeFile(t, dir, "other.txt", "x\n")
+	if err := os.Symlink("reg.go", filepath.Join(dir, "link.go")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	gitRun(t, dir, "add", "reg.go", "other.txt", "link.go")
+	gitRun(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("a", 40)+",sub.go")
+	gitRun(t, dir, "commit", "-m", "tree")
+	targets, err := listTracked(dir, "HEAD")
+	if err != nil || len(targets) != 1 || targets[0].path != "reg.go" {
+		t.Errorf("targets = %+v, error %v; want only reg.go", targets, err)
 	}
 }
 

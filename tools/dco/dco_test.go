@@ -380,6 +380,44 @@ func TestCheckGoodRecord(t *testing.T) {
 	}
 }
 
+// The last record is a record even when it lacks the NUL and LF that end it.
+func TestCheckKeepsLastRecordWithoutEnd(t *testing.T) {
+	unsigned := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00\x00"
+	var stdout, stderr bytes.Buffer
+	if code := check([]byte(unsigned), "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
+		t.Errorf("check = %d, want 1 with an unsigned line; stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+// The summary line counts the records.
+func TestCheckCountsRecords(t *testing.T) {
+	unsigned := "fedcba9876543210\x00" + me + "\x00" + me + "\x00\x00\x00\n"
+	for _, c := range []struct {
+		name, out, want string
+		code            int
+	}{
+		{"all pass", goodRecord + goodRecord, "dco: all 2 commits in base..HEAD", 0},
+		{"one unsigned", goodRecord + unsigned, "dco FAIL: of 2 commits in base..HEAD, 1 lack", 1},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := check([]byte(c.out), "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
+			t.Errorf("%s: check = %d, stdout %q, stderr %q; want %d and %q", c.name, code, stdout.String(), stderr.String(), c.code, c.want)
+		}
+	}
+}
+
+// A byte of 0x80 or more never matches, not even in two equal strings.
+func TestASCIIEqualFoldRefusesHighByte(t *testing.T) {
+	for _, s := range []string{"\x80", "a\x80", "\x7f\x80", "\xff"} {
+		if asciiEqualFold(s, s) {
+			t.Errorf("asciiEqualFold(%q, %q) = true, want false", s, s)
+		}
+	}
+	if !asciiEqualFold("\x7f", "\x7f") {
+		t.Error(`asciiEqualFold("\x7f", "\x7f") = false, want true`)
+	}
+}
+
 // forgeCommit writes a commit object by hand on top of a signed base. The
 // header line extra goes after the committer line. It uses no --literally, so
 // git checks the object. It returns the repository and the full hash. The
