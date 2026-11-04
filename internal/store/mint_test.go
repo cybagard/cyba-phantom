@@ -40,7 +40,7 @@ type mintRow struct {
 
 func mintRows(t *testing.T, db *sql.DB) (out []mintRow) {
 	t.Helper()
-	rows, err := db.Query("SELECT set_id, unit, first, count, session_id, issued_at FROM mint ORDER BY set_id, first")
+	rows, err := db.Query("SELECT set_id, unit, first, count, session_id, issued_at FROM mint ORDER BY set_id, unit, first")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,41 +241,114 @@ func TestTS31MintRowSessionAndNoRange(t *testing.T) {
 	wantMint(t, mintRows(t, r.db), mintRow{setID: string(mintSet[:]), unit: 1, first: 5, count: 2, issuedAt: 9})
 }
 
-// T-S-31: two events with one key (set_id, first) give no error and no stop.
-// The test runs them in one batch, and in two batches. The first row stays.
-// The writer counts one duplicate.
-func TestTS31DuplicateMintKeyDoesNotStopTheWriter(t *testing.T) {
-	a := event.MintRange{SetID: mintSet, Unit: 1, First: 100, Count: 10, IssuedAt: 11}
-	b := event.MintRange{SetID: mintSet, Unit: 2, First: 100, Count: 20, IssuedAt: 22}
-	other := event.MintRange{SetID: [8]byte{9}, Unit: 1, First: 100, Count: 10, IssuedAt: 33}
-	want := []mintRow{
-		{setID: string(mintSet[:]), unit: 1, first: 100, count: 10, session: ptr("first"), issuedAt: 11},
-		{setID: string([]byte{9, 0, 0, 0, 0, 0, 0, 0}), unit: 1, first: 100, count: 10, session: ptr("o"), issuedAt: 33},
+// T-S-31: two renders with one first counter in two time units keep both rows.
+func TestTS31SameFirstCounterInTwoUnitsKeepsBothRows(t *testing.T) {
+	r := newRig(t, 100)
+	r.writeOK(
+		mintEvent(t, 1, "five", event.MintRange{SetID: mintSet, Unit: 5, First: 500, Count: 10, IssuedAt: 11}),
+		mintEvent(t, 2, "six", event.MintRange{SetID: mintSet, Unit: 6, First: 500, Count: 20, IssuedAt: 22}))
+	s := string(mintSet[:])
+	wantMint(t, mintRows(t, r.db),
+		mintRow{setID: s, unit: 5, first: 500, count: 10, session: ptr("five"), issuedAt: 11},
+		mintRow{setID: s, unit: 6, first: 500, count: 20, session: ptr("six"), issuedAt: 22})
+	if n := r.w.MintDuplicates(); n != 0 {
+		t.Errorf("%d duplicates, want 0", n)
 	}
-	slices.SortFunc(want, func(x, y mintRow) int { return strings.Compare(x.setID, y.setID) })
-	t.Run("one batch", func(t *testing.T) {
-		r := newRig(t, 100)
-		r.writeOK(mintEvent(t, 1, "first", a), mintEvent(t, 2, "second", b), mintEvent(t, 3, "o", other))
+}
+
+// T-S-31: two events with one key (set_id, unit, first) give no error and no
+// stop. The test runs them in one batch, and in two batches. The kept row gets
+// a NULL session and keeps its other values. No other row changes. That holds
+// for a row of the same set and first in another unit. It holds for a row of
+// the same set and unit at another first. The writer counts one duplicate. A
+// later batch commits.
+func TestTS31DuplicateMintKeyDoesNotStopTheWriter(t *testing.T) {
+	s := string(mintSet[:])
+	a := event.MintRange{SetID: mintSet, Unit: 1, First: 100, Count: 10, IssuedAt: 11}
+	b := event.MintRange{SetID: mintSet, Unit: 1, First: 100, Count: 20, IssuedAt: 22}
+	otherUnit := event.MintRange{SetID: mintSet, Unit: 2, First: 100, Count: 10, IssuedAt: 33}
+	otherFirst := event.MintRange{SetID: mintSet, Unit: 1, First: 200, Count: 10, IssuedAt: 44}
+	otherSet := event.MintRange{SetID: [8]byte{9}, Unit: 1, First: 100, Count: 10, IssuedAt: 55}
+	later := event.MintRange{SetID: mintSet, Unit: 1, First: 300, Count: 10, IssuedAt: 66}
+	want := []mintRow{
+		{setID: string([]byte{9, 0, 0, 0, 0, 0, 0, 0}), unit: 1, first: 100, count: 10, session: ptr("o"), issuedAt: 55},
+		{setID: s, unit: 1, first: 100, count: 10, issuedAt: 11},
+		{setID: s, unit: 1, first: 200, count: 10, session: ptr("f"), issuedAt: 44},
+		{setID: s, unit: 1, first: 300, count: 10, session: ptr("l"), issuedAt: 66},
+		{setID: s, unit: 2, first: 100, count: 10, session: ptr("u"), issuedAt: 33},
+	}
+	check := func(t *testing.T, r *rig) {
+		t.Helper()
+		r.writeOK(mintEvent(t, 9, "l", later))
 		wantMint(t, mintRows(t, r.db), want...)
 		if n := r.w.MintDuplicates(); n != 1 {
 			t.Errorf("%d duplicates, want 1", n)
 		}
-		if r.rows() != 3 {
-			t.Errorf("%d event rows, want 3", r.rows())
+		if !r.w.Healthy() || r.rows() != 6 {
+			t.Errorf("healthy %v, %d event rows, want a healthy writer and 6 rows", r.w.Healthy(), r.rows())
 		}
+	}
+	t.Run("one batch", func(t *testing.T) {
+		r := newRig(t, 100)
+		r.writeOK(mintEvent(t, 1, "first", a), mintEvent(t, 2, "second", b), mintEvent(t, 3, "u", otherUnit),
+			mintEvent(t, 4, "f", otherFirst), mintEvent(t, 5, "o", otherSet))
+		check(t, r)
 	})
 	t.Run("two batches", func(t *testing.T) {
 		r := newRig(t, 100)
-		r.writeOK(mintEvent(t, 1, "first", a), mintEvent(t, 3, "o", other))
+		r.writeOK(mintEvent(t, 1, "first", a), mintEvent(t, 3, "u", otherUnit),
+			mintEvent(t, 4, "f", otherFirst), mintEvent(t, 5, "o", otherSet))
 		if n := r.w.MintDuplicates(); n != 0 {
 			t.Errorf("%d duplicates after the first batch, want 0", n)
 		}
 		r.writeOK(mintEvent(t, 2, "second", b))
-		wantMint(t, mintRows(t, r.db), want...)
-		if n := r.w.MintDuplicates(); n != 1 {
-			t.Errorf("%d duplicates, want 1", n)
-		}
+		check(t, r)
 	})
+}
+
+// T-S-31: a duplicate key of a range that wraps marks the row of each part.
+// The mark uses the first counter that the insert used.
+func TestTS31DuplicateWrappedRangeMarksBothParts(t *testing.T) {
+	r := newRig(t, 100)
+	m := event.MintRange{SetID: mintSet, Unit: 6, First: 1<<42 - 3, Count: 5, IssuedAt: 77}
+	r.writeOK(mintEvent(t, 1, "w", m), mintEvent(t, 2, "again", m))
+	s := string(mintSet[:])
+	wantMint(t, mintRows(t, r.db),
+		mintRow{setID: s, unit: 6, first: 0, count: 2, issuedAt: 77},
+		mintRow{setID: s, unit: 6, first: 1<<42 - 3, count: 3, issuedAt: 77})
+	if n := r.w.MintDuplicates(); n != 2 {
+		t.Errorf("%d duplicates, want 2", n)
+	}
+}
+
+// T-S-31: an error of the update that marks a duplicate key stops the writer.
+// An error of the insert does the same. The batch rolls back.
+func TestTS31MintMarkErrorStopsTheWriter(t *testing.T) {
+	m := event.MintRange{SetID: mintSet, Unit: 1, First: 5, Count: 2, IssuedAt: 9}
+	for name, setup := range map[string]string{
+		// The trigger runs when the update changes a row.
+		"run": "CREATE TRIGGER no_mark BEFORE UPDATE ON mint BEGIN SELECT RAISE(ABORT,'x'); END",
+		// SQLite compiles a trigger body with the statement that fires it.
+		// So the prepare of the update fails, and the insert prepare does not.
+		"prepare": "CREATE TRIGGER bad_mark BEFORE UPDATE ON mint BEGIN INSERT INTO missing_table VALUES (1); END",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			r.writeOK(mintEvent(t, 1, "s", m))
+			if _, err := r.db.Exec(setup); err != nil {
+				t.Fatal(err)
+			}
+			r.w.flush([]*event.Event{mintEvent(t, 2, "again", m)})
+			wantRule(t, r.w.Err(), writerName, ruleDatabase)
+			if r.w.Healthy() || r.rows() != 1 {
+				t.Fatalf("healthy %v, %d event rows, want a stopped writer and 1 row", r.w.Healthy(), r.rows())
+			}
+			wantMint(t, mintRows(t, r.db), mintRow{setID: string(mintSet[:]), unit: 1, first: 5, count: 2, session: ptr("s"), issuedAt: 9})
+			if n := r.w.MintDuplicates(); n != 0 {
+				t.Errorf("%d duplicates after a rolled-back batch, want 0", n)
+			}
+		})
+	}
 }
 
 // T-S-31: a batch that is rolled back adds nothing to the duplicate count.
@@ -355,7 +428,7 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	if rows != int64(n) || per > 80 {
 		t.Fatalf("rows %d (want %d), %.1f bytes for each row (want at most 80)", rows, n, per)
 	}
-	plan, err := r.db.Query("EXPLAIN QUERY PLAN SELECT session_id, issued_at FROM mint WHERE set_id = ? AND first <= ? ORDER BY first DESC LIMIT 1", mintSet[:], 1000)
+	plan, err := r.db.Query("EXPLAIN QUERY PLAN "+lookupMint, mintSet[:], 495_000, 1000, 1000, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,8 +444,8 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	}
 	all := strings.Join(details, "; ")
 	t.Logf("plan: %s", all)
-	if !strings.Contains(all, "SEARCH mint USING PRIMARY KEY") || strings.Contains(all, "SCAN") || strings.Contains(all, "TEMP B-TREE") {
-		t.Fatalf("plan %q", all)
+	if all != lookupPlan {
+		t.Fatalf("plan %q, want %q", all, lookupPlan)
 	}
 	if n < 1_000_000 {
 		return

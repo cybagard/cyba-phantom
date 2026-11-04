@@ -106,7 +106,7 @@ CREATE TABLE mint (
   count         INTEGER,
   session_id    TEXT,
   issued_at     INTEGER,
-  PRIMARY KEY (set_id, first)
+  PRIMARY KEY (set_id, unit, first)
 ) WITHOUT ROWID`
 
 // T-U-18: a new database has the fixed text of each table and index. The text
