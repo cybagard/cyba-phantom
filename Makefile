@@ -249,6 +249,23 @@ perf-inner:
 # pre-check. The extract and the pre-check files stay. Later checks count them.
 # If a tar command fails, the target prints one line and fails (exit 1).
 # Gremlins starts in the copy. The module root of gremlins is then the copy.
+# Gremlins finds the package of a mutant from the package name of the mutated
+# file. It walks up from the directory of the file to the first directory
+# whose path ends with that name. If there is none, it tests the module path.
+# That is the module root package, and its go test fails at once. Gremlins
+# counts that failure as a kill, so every such mutant is a false kill. A
+# package main (for example cmd/phantom) is such a package.
+# After the copy, tools/mutatepkg gives each package below PKG the same walk.
+# If exactly one package gets the module path and it is not the module root
+# package, the go command of the run (tools/mutate-go.sh) replaces the module
+# path with the import path of that package. It does this in the last
+# argument of each go test call. The target prints the two paths.
+# The target refuses PKG (exit 2) before gremlins starts, and names the
+# packages, when it cannot know the package of a mutant. This is the case
+# when two or more packages get the module path (the module root package
+# counts), or when a package gets a parent directory. It exits 1 if go list
+# fails. A PKG that gremlins already maps right (for example internal/config)
+# has no replacement, and the run is the same as before.
 # Before gremlins starts, the target runs go test on PKG in the copy. If the
 # tests fail, it prints the output and fails (exit 1) before any mutation.
 # It sets TMPDIR and GOTMPDIR to the run directory. It sets GOCACHE and HOME
@@ -335,12 +352,15 @@ mutate:
 	gopath=$$("$$go" env GOPATH) && gomodcache=$$("$$go" env GOMODCACHE) && goenv=$$("$$go" env GOENV) && goflags=$$("$$go" env GOFLAGS) || { echo "mutate: go env failed" >&2; exit 1; }; \
 	[ -n "$$gopath" ] && [ -n "$$gomodcache" ] || { echo "mutate: go env gives an empty GOPATH or GOMODCACHE" >&2; exit 1; }; \
 	[ -n "$$goenv" ] || goenv=off; \
-	mkdir "$$d/bin"; \
-	printf '#!/bin/sh\ntimeout -s KILL "$$MUTATE_CAP" "$$MUTATE_GO" "$$@"\nr=$$?\ncase $$r in 124|137) echo >>"$$MUTATE_RUN/capped";; esac\nexit $$r\n' >"$$d/bin/go"; \
-	chmod +x "$$d/bin/go"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
+	mkdir "$$d/bin"; mkdir "$$d/home"; unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME; export GOPATH="$$gopath" GOMODCACHE="$$gomodcache" GOENV="$$goenv" GOFLAGS="$${goflags:+$$goflags }-count=1" MUTATE_GO="$$go" MUTATE_RUN="$$d" HOME="$$d/home" TMPDIR="$$d" GOTMPDIR="$$d" GOCACHE="$$d/cache" PATH="$$d/bin:$$PATH"; \
 	echo "mutate: run directory $$d"; \
 	echo "mutate: time limit $$MUTATE_CAP s for each go command; size limit $$MUTATE_MAX_MIB MiB, checked each second"; \
 	mkdir "$$d/src" && tar -cf "$$d/m.tar" . && tar -xf "$$d/m.tar" -C "$$d/src" && rm "$$d/m.tar" || { echo "mutate FAIL: the copy of the module failed (status $$?), no test done" >&2; exit 1; }; \
+	( cd "$$d/src" && go build -o "$$d/mutatepkg" ./tools/mutatepkg ) || { echo "mutate FAIL: cannot build tools/mutatepkg" >&2; exit 1; }; \
+	fix=$$( cd "$$d/src" && "$$d/mutatepkg" "$$PKG" ) || exit $$?; \
+	export MUTATE_FROM="$${fix% *}" MUTATE_TO="$${fix#* }"; \
+	[ -z "$$fix" ] || echo "mutate: gremlins maps the package of a mutant to $$MUTATE_FROM, so the go wrapper replaces it with $$MUTATE_TO"; \
+	cp "$$d/src/tools/mutate-go.sh" "$$d/bin/go" && chmod +x "$$d/bin/go" || { echo "mutate FAIL: cannot install the go wrapper" >&2; exit 1; }; \
 	( cd "$$d/src" && exec $(mutate_session) go test "$$PKG" ) >"$$d/pre" 2>&1 & g=$$!; wait $$g; rc=$$?; pkill -KILL -s $$g; g=; \
 	if [ "$$rc" -ne 0 ]; then cat "$$d/pre"; echo "mutate FAIL: go test $$PKG failed in the copy (status $$rc), no mutation done" >&2; exit 1; fi; \
 	[ -z "$$MUTATE_EXCLUDE" ] || printf 'mutate: files excluded by MUTATE_EXCLUDE: %s\n' "$$MUTATE_EXCLUDE"; \
