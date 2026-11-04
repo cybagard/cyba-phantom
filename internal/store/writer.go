@@ -61,6 +61,7 @@ type Writer struct {
 
 	stopErr              atomic.Pointer[error] // the first error; nil while the writer runs
 	writeFailed, orphans atomic.Uint64
+	mintDups             atomic.Uint64 // mint rows that the table already had
 	drops                DropCount
 	markerMade           atomic.Bool // writer.stop exists
 	markerLogged         atomic.Bool // the failed create has a log line
@@ -443,6 +444,8 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		return false, fail(writerName, ruleDatabase)
 	}
 	defer stmt.Close()
+	mints := mintWriter{tx: tx}
+	defer mints.close()
 
 	var first int64
 	var appendErr error
@@ -492,6 +495,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		if err := w.insertRow(ctx, stmt, e, rec, hash, leaf, record); err != nil {
 			return false, err
 		}
+		if err := mints.add(ctx, e, rec); err != nil {
+			return false, err
+		}
 		rows++
 		w.sessions.add(rec, e.IP())
 	}
@@ -518,6 +524,8 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		return false, fail(writerName, ruleDatabase)
 	}
+	// A rolled-back batch counts no duplicate.
+	w.mintDups.Add(mints.dups)
 	if w.timing != nil && len(batch) > 0 {
 		w.timing(time.Since(begin), time.Since(commitAt))
 	}

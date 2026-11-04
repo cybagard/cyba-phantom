@@ -12,6 +12,10 @@ import (
 const (
 	insertEvent = "INSERT INTO event (ts, session_id, kind, vhost, method, path, status, trap_id, token_id, surface, body_prefix, hash, leaf_index, detail, record) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
+	// insertMint stores one mint row. A row with the same key is not an error.
+	// It changes nothing.
+	insertMint = "INSERT INTO mint (set_id, unit, first, count, session_id, issued_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+
 	upsertCounter = "INSERT INTO ip_counter (day, ip_hmac, requests, dropped) VALUES (?, ?, 0, ?) ON CONFLICT(day, ip_hmac) DO UPDATE SET dropped = dropped + excluded.dropped"
 )
 
@@ -36,6 +40,67 @@ func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, 
 	if _, err := stmt.ExecContext(ctx, r.TS, r.Session, r.Kind.String(), r.Vhost, r.Method, r.Path,
 		r.Status, r.TrapID, r.TokenID, r.Surface, prefix, hash, leaf, detail, record); err != nil {
 		return fail(writerName, ruleDatabase)
+	}
+	return nil
+}
+
+// mintWriter stores the mint rows of one transaction. It prepares the statement
+// at the first range. dups counts the rows that the table already had.
+type mintWriter struct {
+	tx   *sql.Tx
+	stmt *sql.Stmt
+	dups uint64
+}
+
+// MintDuplicates returns the number of mint rows that the writer did not store.
+// The table already had their key (set_id, first). A duplicate is not an error.
+// The count holds only batches that committed. It is safe to call from any
+// goroutine.
+func (w *Writer) MintDuplicates() uint64 { return w.mintDups.Load() }
+
+func (m *mintWriter) close() {
+	if m.stmt != nil {
+		m.stmt.Close()
+	}
+}
+
+// add stores the mint row of a request row that has a range, in the
+// transaction of the event row. The row has the session of the stored row, or
+// NULL. It holds no token text and no token id. A range that passes 2^42 gives
+// two rows: the end of the counter space, and the rest from 0.
+func (m *mintWriter) add(ctx context.Context, e *event.Event, r event.Record) error {
+	rng, ok := e.Mint()
+	if !ok || r.Kind != event.KindRequest {
+		return nil
+	}
+	if m.stmt == nil {
+		stmt, err := m.tx.PrepareContext(ctx, insertMint)
+		if err != nil {
+			return fail(writerName, ruleDatabase)
+		}
+		m.stmt = stmt
+	}
+	first, count := rng.First, uint64(rng.Count)
+	if head := event.MintCounterLimit - first; count > head {
+		if err := m.exec(ctx, rng, r, first, head); err != nil {
+			return err
+		}
+		first, count = 0, count-head
+	}
+	return m.exec(ctx, rng, r, first, count)
+}
+
+func (m *mintWriter) exec(ctx context.Context, rng event.MintRange, r event.Record, first, count uint64) error {
+	res, err := m.stmt.ExecContext(ctx, rng.SetID[:], int64(rng.Unit), int64(first), int64(count), r.Session, rng.IssuedAt)
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fail(writerName, ruleDatabase)
+	}
+	if n == 0 {
+		m.dups++
 	}
 	return nil
 }
