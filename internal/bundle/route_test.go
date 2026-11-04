@@ -205,7 +205,7 @@ func TestTU25CallbackHeaderName(t *testing.T) {
 }
 
 // T-U-25: a callback route has no template and no headers. It has an asset
-// and a type, or none of the two.
+// and a type, or no asset and no type.
 func TestTU25CallbackRouteForm(t *testing.T) {
 	cb := `{"query":"q"}`
 	refuse(t,

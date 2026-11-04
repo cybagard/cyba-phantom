@@ -30,7 +30,7 @@ var routeTypes = []string{
 // Route is one route of a vhost. A route with no Callback has one of Template
 // and Asset, and the other is empty. The one that is set is a full archive
 // name. A route with a Callback has no Template and no Headers. It has an Asset
-// and a Type, or none of the two (a route that answers with no body).
+// and a Type, or no Asset and no Type (a route that answers with no body).
 type Route struct {
 	Path, Template, Asset, Type string
 	Headers                     []HeaderSlot
@@ -217,8 +217,8 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 }
 
 // callbackOf checks the positions of a callback. It needs 1 to 4 positions.
-// Segment must be true. Query and Body are 1 to 32 bytes of A-Z a-z 0-9 _ -.
-// Header is a valid header slot name.
+// When Segment is set, it is true. Query and Body are 1 to 32 bytes of
+// A-Z a-z 0-9 _ -. Header is a valid header slot name.
 func callbackOf(r rawCallback) (Callback, bool) {
 	cb := Callback{Segment: r.Segment.v, Query: r.Query.v, Header: r.Header.v, Body: r.Body.v}
 	n := 0
@@ -239,8 +239,8 @@ func validParam(s string) bool {
 		!strings.ContainsFunc(s, func(c rune) bool { return c != '_' && c != '-' && !alnum(c) })
 }
 
-// isBelow reports whether the path p is below the path root. It starts with
-// root and "/". Below "/" is each path but "/".
+// isBelow reports whether the path p is below the path root, that is, whether
+// p starts with root and "/". Below "/" is each path other than "/".
 func isBelow(p, root string) bool {
 	if root == "/" {
 		return p != "/"
