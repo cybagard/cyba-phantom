@@ -49,7 +49,7 @@ func tmplBundle(tb testing.TB, specs []trapSpec, hosts map[string][]route) *bund
 func handlerFor(tb testing.TB, tmpl string) *Handler {
 	b := tmplBundle(tb, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/t", "t.tmpl", html, tmpl}}})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
 }
 
 // handlerTraps returns a handler for a bundle with n traps t0 to t(n-1). The
@@ -61,19 +61,23 @@ func handlerTraps(tb testing.TB, n int) *Handler {
 	}
 	b := tmplBundle(tb, specs, map[string][]route{
 		"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p>`}}})
-	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
 }
 
 // TestTU20RenderAllocs checks that the allocations of a template request do
-// not grow with the number of traps of the bundle.
+// not grow with the number of traps of the bundle. It calls serve and not
+// ServeHTTP, so the event is not in the count. NewEvent uses a pool inside the
+// JSON encoder, and under the race detector the pool drops items at random.
+// Then its count changes by 2 or 3 between runs.
 func TestTU20RenderAllocs(t *testing.T) {
 	var got [2]float64
 	for i, n := range []int{1, 1024} {
 		h := handlerTraps(t, n)
+		b := h.src.Current()
 		r, w := get("/t", "example.com"), &discard{h: http.Header{}}
 		got[i] = testing.AllocsPerRun(100, func() {
 			clear(w.h)
-			h.ServeHTTP(w, r)
+			h.serve(w, r, b)
 		})
 	}
 	t.Logf("allocations: 1 trap %v, 1024 traps %v", got[0], got[1])
@@ -171,7 +175,7 @@ func TestTU20RenderSlots(t *testing.T) {
 	}
 	kilo := []route{{"/hidden-p", "hidden-p.tmpl", html, slotCases[0].tmpl}}
 	b := tmplBundle(t, specs, map[string][]route{"example.com": routes, "kilo.example": kilo})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
 	for _, c := range slotCases {
 		hosts := []string{"example.com"}
 		if c.slot == "hidden-p" {
@@ -210,7 +214,7 @@ func TestTU20RenderNoRequest(t *testing.T) {
 	const mark = "zqmark"
 	b := tmplBundle(t, []trapSpec{{"a", "hidden-p", "say hi {{.Token}}"}},
 		map[string][]route{"example.com": {{"/" + mark, "p.tmpl", html, pageTmpl}}})
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
 	r := get("/"+mark, "example.com")
 	r.URL.RawQuery = "q=" + mark
 	for _, k := range []string{"User-Agent", "Referer", "Cookie", "X-Forwarded-For", "Accept"} {

@@ -54,7 +54,16 @@ func serve(tb testing.TB, h http.Handler, r *http.Request) *httptest.ResponseRec
 }
 
 func newHandler(tb testing.TB) *Handler {
-	return New(&swap{list: []*bundle.Bundle{newBundle(tb)}}, &fallbackFn{})
+	return New(&swap{list: []*bundle.Bundle{newBundle(tb)}}, &fallbackFn{}, testQueue(tb))
+}
+
+// testQueue returns a queue for the request events of a test handler.
+func testQueue(tb testing.TB) *event.Queue { return queueOf(tb, 8) }
+
+func queueOf(tb testing.TB, depth int) *event.Queue {
+	q, err := event.NewQueue(depth, event.NewCounters())
+	mustOK(tb, err)
+	return q
 }
 
 // helloHandler returns the listener handler for example.com.
@@ -103,12 +112,14 @@ func TestTU20FixedPages(t *testing.T) {
 	}
 }
 
-// TestTU20NewNil checks that New refuses a nil source and a nil fallback.
+// TestTU20NewNil checks that New refuses a nil source, a nil fallback and a
+// nil queue.
 func TestTU20NewNil(t *testing.T) {
-	fb := &fallbackFn{}
+	fb, q := &fallbackFn{}, testQueue(t)
 	for name, f := range map[string]func(){
-		"nil fallback": func() { New(&swap{}, nil) },
-		"nil source":   func() { New(nil, fb) },
+		"nil fallback": func() { New(&swap{}, nil, q) },
+		"nil source":   func() { New(nil, fb, q) },
+		"nil queue":    func() { New(&swap{}, fb, nil) },
 	} {
 		func() {
 			defer func() {
@@ -283,7 +294,7 @@ func TestTS02NeverServed(t *testing.T) {
 func TestTU20OneBundle(t *testing.T) {
 	first, second := bundleWith(t, ""), bundleWith(t, "-second")
 	src := &swap{list: []*bundle.Bundle{first, second}}
-	h := New(src, &fallbackFn{})
+	h := New(src, &fallbackFn{}, testQueue(t))
 	for i, want := range []string{"<p>index</p>\n", "<p>index-second</p>\n"} {
 		w := serve(t, h, get("/", "example.com"))
 		if src.calls != i+1 || w.Body.String() != want {
@@ -307,12 +318,12 @@ func (f *fallbackFn) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 // first case uses a fake fallback. The second uses the hello handler.
 func TestTU20NoBundle(t *testing.T) {
 	fb := &fallbackFn{}
-	h := New(&swap{}, fb)
+	h := New(&swap{}, fb, testQueue(t))
 	if w := serve(t, h, get("/", "example.com")); w.Code != http.StatusTeapot || fb.calls != 1 {
 		t.Errorf("code %d, fallback calls %d", w.Code, fb.calls)
 	}
 
-	h = New(&swap{}, helloHandler(t))
+	h = New(&swap{}, helloHandler(t), testQueue(t))
 	w := serve(t, h, get("/", "example.com"))
 	if w.Code != 200 || w.Body.String() != "hello\n" || w.Header().Get("Content-Type") != text ||
 		w.Header().Get("X-Content-Type-Options") != "nosniff" {
@@ -393,6 +404,7 @@ func bench(b *testing.B, target, host string) {
 	for b.Loop() {
 		clear(w.h)
 		h.ServeHTTP(w, r)
+		h.q.TryTake()
 	}
 }
 
@@ -412,5 +424,6 @@ func benchTemplate(b *testing.B, traps int) {
 	for b.Loop() {
 		clear(w.h)
 		h.ServeHTTP(w, r)
+		h.q.TryTake()
 	}
 }

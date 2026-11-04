@@ -25,6 +25,9 @@ var errOverCap = errors.New("bait: response over the cap")
 // It refuses a write that would take the page over maxResponse.
 type capWriter struct {
 	w       http.ResponseWriter
+	h       *Handler
+	e       *entry
+	code    int // the status of the page
 	n       int
 	started bool
 	over    bool
@@ -44,33 +47,43 @@ func (c *capWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// start writes the 200 status one time.
+// start writes the slot headers and the status of the page one time. An error
+// page never gets here, so it has no slot header.
 func (c *capWriter) start() {
 	if !c.started {
 		c.started = true
-		c.w.WriteHeader(http.StatusOK)
+		c.h.addSlots(c.w.Header(), c.e)
+		c.w.WriteHeader(c.code)
 	}
 }
 
-// render runs the template of e and streams the page. The data is the trap
-// text map of the site. The site makes it one time, so it holds no request
-// value and a request allocates no map for it. An error counts one time.
-// Before the first byte, and not over the cap, the response is the fixed 404
-// page. Else the connection closes. The panic with ErrAbortHandler also keeps
-// the stack out of the server log. No error text goes anywhere.
-func (h *Handler) render(w http.ResponseWriter, b *bundle.Bundle, s *site, e *entry) {
+// render runs the template of e and streams the page with the status code. It
+// returns the status that it wrote. The data is the trap text map of the site.
+// The site makes it one time, so it holds no request value and a request
+// allocates no map for it. An error counts one time. Before the first byte,
+// and not over the cap, the response is the fixed 404 page. Else the
+// connection closes: render then writes the event, with the status of the
+// first byte or none, and panics. The panic with ErrAbortHandler also keeps the
+// stack out of the server log. No error text goes anywhere.
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundle, s *site, e *entry, code int) int {
 	hd := w.Header()
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
-	cw := capWriter{w: w}
+	cw := capWriter{w: w, h: h, e: e, code: code}
 	err := b.Execute(&cw, e.route.Template, bundle.Page{Trap: s.texts})
 	if err == nil {
 		cw.start()
-		return
+		return code
 	}
 	h.execErrs.Add(1)
 	if cw.started || cw.over {
+		written := 0
+		if cw.started {
+			written = code
+		}
+		h.record(r, written)
 		panic(http.ErrAbortHandler)
 	}
 	reply(w, http.StatusNotFound, notFoundBody)
+	return http.StatusNotFound
 }

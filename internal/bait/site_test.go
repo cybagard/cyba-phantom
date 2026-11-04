@@ -142,7 +142,7 @@ func TestTU20SiteTable(t *testing.T) {
 		t.Errorf("texts = %v", s.texts)
 	}
 
-	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{})
+	h := New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(t))
 	for range 5 {
 		if got := serve(t, h, get("/", "example.com")).Code; got != 200 {
 			t.Fatalf("code = %d", got)
@@ -167,7 +167,7 @@ func rootLen(tag string) int { return len("<p>index" + tag + "</p>\n") }
 // alternate build two cached sites and two private sites.
 func TestTU20SiteInterleave(t *testing.T) {
 	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
-	h := New(&swap{}, &fallbackFn{})
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
 	for i, c := range []struct {
 		b    *bundle.Bundle
 		tag  string
@@ -189,7 +189,7 @@ func TestTU20SiteInterleave(t *testing.T) {
 // TestTU20SiteRetired checks that the state remembers the last four replaced
 // bundles, newest first.
 func TestTU20SiteRetired(t *testing.T) {
-	h := New(&swap{}, &fallbackFn{})
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
 	var bs []*bundle.Bundle
 	for range 6 {
 		bs = append(bs, newBundle(t))
@@ -218,7 +218,7 @@ func loadAndRelease(t *testing.T, h *Handler, done chan struct{}) {
 
 // TestTU20SiteRelease checks that the handler does not keep a replaced bundle.
 func TestTU20SiteRelease(t *testing.T) {
-	h := New(&swap{}, &fallbackFn{})
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
 	defer runtime.KeepAlive(h)
 	done := make(chan struct{})
 	loadAndRelease(t, h, done)
@@ -243,7 +243,7 @@ func TestTU20SiteRelease(t *testing.T) {
 // ends with its own bundle as cur and the other bundle as retired.
 func TestTU20SiteLostSwap(t *testing.T) {
 	b1, b2 := bundleWith(t, "-1"), bundleWith(t, "-22")
-	h := New(&swap{}, &fallbackFn{})
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
 	h.hook = func() {
 		h.hook = nil
 		h.siteOf(b2)
@@ -267,7 +267,7 @@ func TestTU20SiteServe(t *testing.T) {
 	b1, b2, b3 := bundleWith(t, "-1"), bundleWith(t, "-2"), bundleWith(t, "-3")
 	list := []*bundle.Bundle{b1, b2, b1, b3, b2}
 	tags := []string{"-1", "-2", "-1", "-3", "-2"}
-	h := New(&swap{list: list}, &fallbackFn{})
+	h := New(&swap{list: list}, &fallbackFn{}, testQueue(t))
 	for i, tag := range tags {
 		w := serve(t, h, get("/", "example.com"))
 		if want := "<p>index" + tag + "</p>\n"; w.Body.String() != want {
@@ -280,7 +280,7 @@ func TestTU20SiteServe(t *testing.T) {
 // build one site, in each of 50 rounds.
 func TestTU20SiteParallel(t *testing.T) {
 	const workers = 32
-	h := New(&swap{}, &fallbackFn{})
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
 	for round := 1; round <= 50; round++ {
 		b := newBundle(t)
 		start := make(chan struct{})
