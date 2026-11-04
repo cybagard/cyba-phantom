@@ -184,9 +184,16 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 
 // siteOf returns the site of b. The handler keeps a strong pointer to cur only.
 // A bundle in retired gets a site for its own request. The handler does not
-// keep that site. Any other bundle becomes cur. This includes a bundle that
-// was never cur and a bundle that has left retired. A request in flight keeps
-// its bundle and site in local variables.
+// keep that site. A bundle outside retired becomes cur when its manifest
+// version is not older than the version of cur. This includes a bundle that was
+// never cur and a bundle that has left retired. An older bundle gets a site for
+// its own request, like a bundle in retired. The state does not change. A
+// request in flight keeps its bundle and site in local variables.
+//
+// Known limit: the loader can accept a bundle older than cur, but only after
+// its version state is removed. Then each request for that bundle builds a
+// site. This lasts until a bundle that is not older than cur loads, or the
+// process starts again.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	for {
 		st := h.sites.Load()
@@ -200,6 +207,10 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 					h.builds.Add(1)
 					return buildSite(b, h.token())
 				}
+			}
+			if bundle.CompareVersion(b.Manifest().Version, st.cur.b.Manifest().Version) < 0 {
+				h.builds.Add(1)
+				return buildSite(b, h.token())
 			}
 		}
 		n := &state{cur: &slot{b: b, count: &h.builds, token: h.token}}

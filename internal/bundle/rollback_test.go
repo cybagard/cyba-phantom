@@ -268,3 +268,29 @@ func TestTS20ExpiredAtStart(t *testing.T) {
 		t.Errorf("first start: %v", err)
 	}
 }
+
+// TestTS20CompareVersion checks the exported compare. The date comes first,
+// then N as a number. A text that is not a valid version gives 0, with no
+// panic.
+func TestTS20CompareVersion(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"2026.11.01-1", "2026.11.01-1", 0},
+		{"2026.11.01-9", "2026.11.01-10", -1},
+		{"2026.11.01-10", "2026.11.01-9", 1},
+		{"2026.10.31-999", "2026.11.01-1", -1},
+		{"2026.11.02-1", "2026.11.01-5", 1},
+		{"", "2026.11.01-1", 0},
+		{"2026.11.01-1", "", 0},
+		{"", "", 0},
+		{"2026.13.01-1", "2026.11.01-1", 0},
+		{"2026.11.01-1", "bad", 0},
+	} {
+		got := CompareVersion(c.a, c.b)
+		if (got > 0) != (c.want > 0) || (got < 0) != (c.want < 0) {
+			t.Errorf("CompareVersion(%q, %q) = %d, want sign %d", c.a, c.b, got, c.want)
+		}
+	}
+}
