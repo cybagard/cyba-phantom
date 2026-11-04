@@ -7,9 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +17,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/listener"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 )
@@ -44,22 +45,21 @@ type baitOpt struct {
 	cookie string // privacy.session_cookie, or "" for the default
 	bundle bool   // put the signed test bundle in the state directory
 	refuse bool   // the store does not open, so no load runs
-	burst  int    // requests for /page, sent before the start line
 }
 
 // baitSensor is a started sensor with its two addresses (with scheme). dk is
-// the day key holder that the writer got. burst holds the burst responses.
+// the day key holder that the writer got. probe is the response to a request
+// that newServer served to its handler, before it returned.
 type baitSensor struct {
 	*running
 	p            startParams
 	https, plain string
 	dk           *session.DayKey
-	burst        []baitResp
+	probe        baitResp
 }
 
 // startBait starts serveWith with a cached certificate for decoyName and the
-// test trust set. The burst requests go out before the start line. They wait in
-// the socket until the first Serve call. So they run at once with the start.
+// test trust set.
 func startBait(t *testing.T, o baitOpt) *baitSensor {
 	t.Helper()
 	httpsLn, plainLn, ca := openListeners(t)
@@ -89,14 +89,19 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	if o.refuse {
 		d.openStore = func(*os.Root, string, store.Options) (*sql.DB, error) { return nil, errors.New("test") }
 	}
-	s.running = launchServe(t, cfg, s.p, d)
-	var wg sync.WaitGroup
-	s.burst = make([]baitResp, o.burst)
-	for i := range s.burst {
-		wg.Go(func() { s.burst[i] = fetch(t, s.https, decoyName, "/page", "") })
+	oldNew := newServer
+	t.Cleanup(func() { newServer = oldNew })
+	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		// No Serve call has run yet. A switch set later shows in this response.
+		req := httptest.NewRequest(http.MethodGet, "/page", nil)
+		req.Host, req.RemoteAddr = decoyName, "127.0.0.1:4000"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		s.probe = baitResp{rec.Code, rec.Body.String(), rec.Result().Header.Values("Set-Cookie")}
+		return oldNew(c, h)
 	}
+	s.running = launchServe(t, cfg, s.p, d)
 	s.waitStarted(t)
-	wg.Wait()
 	return s
 }
 
@@ -249,26 +254,26 @@ func TestTI02_StartServesBait(t *testing.T) {
 }
 
 // TestTU24_SessionCookieSwitch starts a sensor with privacy.session_cookie
-// false and with true (SEC-35). The burst runs at the start. So -race sees a
-// call of the switch after the first Serve call. With false, no bait response
-// has Set-Cookie. A valid cookie gets the keyed id of the client address. With
-// true, the valid cookie keeps its id. A request with no cookie gets a cookie.
+// false and with true (SEC-35). newServer serves one request to its handler
+// before it returns. With false, that response and each later bait response
+// have no Set-Cookie. So the switch is set before the first Serve call. A valid
+// cookie gets the keyed id of the client address. With true, the first
+// response has one cookie, and the valid cookie keeps its id. A request with
+// no cookie gets a cookie.
 func TestTU24_SessionCookieSwitch(t *testing.T) {
 	for _, c := range []struct {
 		value string
 		off   bool
 	}{{"false", true}, {"true", false}} {
 		t.Run(c.value, func(t *testing.T) {
-			s := startBait(t, baitOpt{cookie: c.value, bundle: true, burst: 8})
+			s := startBait(t, baitOpt{cookie: c.value, bundle: true})
 			header, cookieID := s.cookie(t)
 			keyed := s.keyedID(t)
 			valid := fetch(t, s.https, decoyName, "/c-valid", header)
 			none := fetch(t, s.https, decoyName, "/c-none", "")
 			s.stop(t)
-			for i, r := range s.burst {
-				if r.status != 200 || (len(r.cookies) == 0) != c.off {
-					t.Errorf("burst %d: status %d, Set-Cookie %q; want 200 and a cookie only with true", i, r.status, r.cookies)
-				}
+			if r := s.probe; r.status != 200 || (len(r.cookies) == 0) != c.off {
+				t.Errorf("response before Serve: status %d, Set-Cookie %q; want 200 and a cookie only with true", r.status, r.cookies)
 			}
 			if valid.status != 404 || len(valid.cookies) != 0 {
 				t.Errorf("valid cookie: status %d, Set-Cookie %q; want 404 and none", valid.status, valid.cookies)
