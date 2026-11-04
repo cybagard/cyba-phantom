@@ -52,6 +52,7 @@ func plainEnt(b []byte) ent   { return ent{name: seedPlainName, data: b} }
 func (e *env) seedLoader(install hpke.PrivateKey) *Loader {
 	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, install)
 	l.now = func() time.Time { return testNow }
+	noGap(l)
 	return l
 }
 
@@ -158,13 +159,18 @@ func TestTS20SeedOpened(t *testing.T) {
 		if &(*b.seed.p)[0] == &raw[0] {
 			t.Errorf("%s: the seed is a part of the archive bytes", key.id)
 		}
-		// A swap zeroes the old seed and keeps the new one.
-		old := *b.seed.p
+		// A swap keeps the old seed. The timer zeroes it. The new seed stays.
+		old, timers := *b.seed.p, &fakeTimers{}
+		l.afterFunc = timers.afterFunc
 		e.putSeeded(key, ver(3), e.good(in, key, ver(3), seedB))
 		nb, err := l.Load(false)
 		must(t, err)
+		if !bytes.Equal(old, seedA) {
+			t.Errorf("%s: after the swap the old seed is %v", key.id, old)
+		}
+		timers.fire()
 		if !bytes.Equal(old, zeros(seedSize)) || !bytes.Equal(*nb.seed.p, seedB) {
-			t.Errorf("%s: after the swap the old seed %v or the new seed is wrong", key.id, old)
+			t.Errorf("%s: after the timer the old seed %v or the new seed is wrong", key.id, old)
 		}
 	}
 }

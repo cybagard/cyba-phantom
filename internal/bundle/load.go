@@ -42,6 +42,15 @@ func fileRule(max int64) safefile.Rule {
 // updates when they run at the same time. So two loads never run together.
 var loadMu sync.Mutex
 
+// swapGap is the least time from a swap to the next load that is not a start
+// load. seedDelay is the time from a swap until the loader zeroes the replaced
+// seed. A request ends within 20 s, so 30 s is longer than a request that
+// holds the replaced bundle (ADR-037).
+const (
+	swapGap   = 30 * time.Second
+	seedDelay = 30 * time.Second
+)
+
 // Bundle is an accepted bundle. It does not change after the loader makes it.
 type Bundle struct {
 	sum      [32]byte
@@ -192,11 +201,20 @@ type Loader struct {
 	chain    *chain
 	chainErr error
 
+	// swapAt is the time of the last swap, or zero before the first swap.
+	// swapMu guards it, so a load can read it while it waits without loadMu.
+	swapMu sync.Mutex
+	swapAt time.Time
+
 	// now, decompress, template, seed and keySet are steps of the load.
 	// NewLoader sets them, and a test can replace one. now, decompress and
 	// keySet must not be nil. A nil template step keeps no template, and a nil
-	// seed step keeps no seed. afterRead is a hook for tests.
+	// seed step keeps no seed. afterRead is a hook for tests. sleep waits for
+	// the swap gap, and afterFunc runs the delayed zero of a seed. They are
+	// seams for tests and must not be nil.
 	now        func() time.Time
+	sleep      func(time.Duration)
+	afterFunc  func(time.Duration, func())
 	decompress func([]byte) (*Archive, error)
 	afterRead  func()
 	template   func(*Archive) (map[string]*template.Template, error)
@@ -214,7 +232,8 @@ type Loader struct {
 // install is the install key, which opens the sealed seed of a proprietary
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
-	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
+	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, sleep: time.Sleep, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet}
+	l.afterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
 	// The ring reads l.now at each call, so a test can replace the clock.
 	l.ring = token.NewRing(func() time.Time { return l.now() })
 	l.seed = func(a *Archive, c Class, m *Manifest) (*seedBytes, error) { return openSeed(a, c, m, l.install) }
@@ -297,8 +316,11 @@ func (l *Loader) Healthy() bool {
 // The seed is the plain file of a reference bundle. In a proprietary bundle it
 // is the sealed file, opened with the install key. Another form, both, none,
 // or a size other than 32 bytes gives ErrSeedInvalid. The seed stays in memory.
-// After a swap, Load zeroes the seed of the replaced bundle. A candidate that
-// fails a later step keeps no seed.
+// After a swap, a timer zeroes the seed of the replaced bundle 30 s later. A
+// request that holds the replaced bundle then reads no zero seed. A candidate
+// that fails a later step keeps no seed. A load with a source other than
+// SourceStart starts at least 30 s after the last swap. It waits without
+// loadMu. A start load does not wait. A rejection starts no wait.
 // A transition record is the archive and the signature file of an accepted
 // transition bundle. The files are rotation-<n>.cbnd and rotation-<n>.sig in
 // the bundle directory, n from 1 to 8. The chain check starts with the
@@ -479,11 +501,48 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	} else {
 		l.ring.Swap(cand.tokens)
 	}
-	// Zero the seed of the replaced bundle, as far as Go memory allows.
+	// A request can still hold the replaced bundle. A timer zeroes its seed
+	// later, as far as Go memory allows.
 	if old := l.cur.Swap(cand); old != nil && old.seed != nil {
-		clear(*old.seed.p)
+		seed := old.seed.p
+		l.afterFunc(seedDelay, func() { clear(*seed) })
 	}
+	l.swapMu.Lock()
+	l.swapAt = l.now()
+	l.swapMu.Unlock()
 	return cand, nil
+}
+
+// gapLeft gives the time to wait before a load that is not a start load can
+// start. It is zero or less when the gap has passed or no swap has happened.
+func (l *Loader) gapLeft() time.Duration {
+	l.swapMu.Lock()
+	at := l.swapAt
+	l.swapMu.Unlock()
+	if at.IsZero() {
+		return 0
+	}
+	return at.Add(swapGap).Sub(l.now())
+}
+
+// lock takes loadMu for a load of this source. A source other than SourceStart
+// first waits for the swap gap, without loadMu. It checks the gap again after
+// it takes loadMu, because another load can swap while this one waits. The
+// caller unlocks loadMu.
+func (l *Loader) lock(src Source) {
+	for {
+		if src != SourceStart {
+			if d := l.gapLeft(); d > 0 {
+				l.sleep(d)
+				continue
+			}
+		}
+		loadMu.Lock()
+		if src == SourceStart || l.gapLeft() <= 0 {
+			return
+		}
+		loadMu.Unlock()
+	}
 }
 
 // dropRecord removes record n and restores the chain prev in memory.
