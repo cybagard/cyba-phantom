@@ -44,8 +44,8 @@ var loadMu sync.Mutex
 
 // swapGap is the least time from a swap to the next load that is not a start
 // load. seedDelay is the time from a swap until the loader zeroes the replaced
-// seed. A request ends within 20 s, so 30 s is longer than a request that holds the
-// replaced bundle (ADR-037).
+// seed. A request ends within 20 s, so 30 s is longer than a request that
+// holds the replaced bundle (ADR-037).
 const (
 	swapGap   = 30 * time.Second
 	seedDelay = 30 * time.Second
