@@ -14,10 +14,11 @@ const bodyMax = 4096
 // So a read can tell a body of bodyMax bytes from a longer body.
 var bodyPool = sync.Pool{New: func() any { return new([bodyMax + 1]byte) }}
 
-// BodyCandidate gives the candidate in the member name of a JSON body (ADR-039
-// decision 5). Only a POST has a body candidate. A Content-Length over
-// bodyMax gives no read. Else it reads at most bodyMax+1 bytes, also for a
-// chunked body. A body of bodyMax+1 bytes and a read error give none.
+// BodyCandidate gives the string value of the member with the name in a
+// JSON body (ADR-039 decision 5). Only a POST has a body candidate. A
+// Content-Length over bodyMax gives no read. Else it reads at most bodyMax+1
+// bytes, also for a chunked body. A body of bodyMax+1 bytes and a read error
+// give none.
 //
 // The candidate is a copy in an array. The pooled buffer goes back to the pool
 // before the call returns. So the caller has no release call, and no later
