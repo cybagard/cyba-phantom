@@ -75,11 +75,22 @@ func handlerTraps(tb testing.TB, n int) *Handler {
 	return New(&swap{list: []*bundle.Bundle{b}}, &fallbackFn{}, testQueue(tb))
 }
 
+// raceAllocSlack is the allowed difference between two render allocation
+// counts. It is 0 here, and race_test.go sets it with the race detector.
+var raceAllocSlack float64
+
 // TestTU20RenderAllocs checks that the allocations of a template request do
 // not grow with the number of traps of the bundle. It calls serve and not
 // ServeHTTP, so the event is not in the count. NewEvent uses a pool inside the
 // JSON encoder, and under the race detector the pool drops items at random.
 // Then its count changes by 2 or 3 between runs.
+//
+// Without the race detector the two counts must be equal. With it, the render
+// takes a buffer from the token pool two times (MintRange and Verify), and the
+// detector can drop a pooled buffer, so each take can allocate one new buffer.
+// A render then allocates at most 2 more than the fewest. The average of 100
+// runs differs by at most raceAllocSlack between the two bundles. The slack is
+// a constant, so a count that grows with the traps still fails.
 func TestTU20RenderAllocs(t *testing.T) {
 	var got [2]float64
 	for i, n := range []int{1, 1024} {
@@ -93,7 +104,7 @@ func TestTU20RenderAllocs(t *testing.T) {
 		})
 	}
 	t.Logf("allocations: 1 trap %v, 1024 traps %v", got[0], got[1])
-	if got[0] != got[1] || got[0] == 0 {
+	if d := got[1] - got[0]; d > raceAllocSlack || d < -raceAllocSlack || got[0] == 0 {
 		t.Errorf("allocations with 1 trap %v, with 1024 traps %v", got[0], got[1])
 	}
 }
