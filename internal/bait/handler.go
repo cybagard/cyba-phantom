@@ -93,6 +93,9 @@ type Handler struct {
 	// then sets no cookie and ignores each cookie. The caller must set it
 	// before the first request. There is no lock.
 	cookieOff bool
+	// ring verifies the tokens of the callback routes. SetRing sets it before
+	// the first request. With nil, a callback route makes no callback event.
+	ring *token.Ring
 }
 
 // DisableSessionCookie turns the session cookie off (SEC-35). No response then
@@ -286,7 +289,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // order of the steps is host, method and path. A host with no vhost gets the
 // fixed 404 page. A path with no route gets the 404 template of the vhost, or
 // the fixed 404 page. A template route renders its template. A method other
-// than GET and HEAD gets the fixed 405 page. The handler never reads the body.
+// than GET and HEAD gets the fixed 405 page. A POST to a callback route with a
+// body position is the exception. Only that route reads a body.
 // A render that ends the connection writes the event itself and does not
 // return. A template page and an asset response set the cookie of a new
 // session. A fixed page does not.
@@ -300,16 +304,25 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle
 		return http.StatusNotFound
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// Only a callback route with a body position accepts POST (ADR-039).
+		if r.Method == http.MethodPost {
+			if e := routeEntry(routes, r.URL.EscapedPath()); e.acceptsPost() {
+				return h.callback(w, r, sess, e)
+			}
+		}
 		reply(w, http.StatusMethodNotAllowed, methodBody)
 		return http.StatusMethodNotAllowed
 	}
-	e := routes[r.URL.EscapedPath()]
+	e := routeEntry(routes, r.URL.EscapedPath())
 	if e == nil {
 		if nf := s.notFound[string(name)]; nf != nil {
 			return h.render(w, r, b, s, sess, nf, http.StatusNotFound)
 		}
 		reply(w, http.StatusNotFound, notFoundBody)
 		return http.StatusNotFound
+	}
+	if e.cb != nil {
+		return h.callback(w, r, sess, e)
 	}
 	if !e.isAsset {
 		return h.render(w, r, b, s, sess, e, http.StatusOK)
