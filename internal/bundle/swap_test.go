@@ -19,10 +19,26 @@ import (
 	"time"
 )
 
+// spinLimit is the number of clock reads that no sound test loader reaches.
+const spinLimit = 1_000_000
+
 // noGap makes the swap gap of the loader pass at once. A test that is not about
 // the gap uses it. That test then does not wait.
+//
+// A lock loop that does not end would hang the test run. So the clock and the
+// wait panic when a loader spins. The run then fails at once.
 func noGap(l *Loader) {
-	l.sleep = func(time.Duration) {
+	now, reads := l.now, new(atomic.Int64)
+	l.now = func() time.Time {
+		if reads.Add(1) > spinLimit {
+			panic("the lock loop does not end")
+		}
+		return now()
+	}
+	l.sleep = func(d time.Duration) {
+		if d <= 0 {
+			panic("a load waits for a gap that has passed")
+		}
 		l.swapMu.Lock()
 		l.swapAt = time.Time{}
 		l.swapMu.Unlock()
@@ -93,21 +109,32 @@ type gapRig struct {
 	e      *env
 	clk    *fakeClock
 	base   time.Time
+	dead   atomic.Bool // set when a load did not return in time
 	mu     sync.Mutex
 	sleeps []time.Duration
 	starts []time.Time
 }
 
-// newGapRig gives a rig whose loader swapped last at the time base.
-func newGapRig(t *testing.T, src Source) *gapRig {
+// gapBound is the real time that a load of a gap test has to return. The fake
+// clock needs no real sleep, so a load that does not return has a loop that
+// does not end. The test then fails and does not hang.
+const gapBound = 5 * time.Second
+
+// newBareGapRig gives a rig for an env whose loader has not swapped yet.
+func newBareGapRig(t *testing.T, e *env) *gapRig {
 	t.Helper()
-	e := running(t)
 	g := &gapRig{t: t, e: e, clk: &fakeClock{t: testNow}}
 	l := e.l
 	l.now = g.clk.now
 	l.sleep = func(d time.Duration) {
 		g.checkFree()
 		g.mu.Lock()
+		if g.dead.Load() || len(g.sleeps) >= 1000 {
+			// A load that waits so often has a loop that does not end.
+			// Stop the loop here. The test fails when gapBound has passed.
+			g.mu.Unlock()
+			select {}
+		}
 		g.sleeps = append(g.sleeps, d)
 		g.mu.Unlock()
 		g.clk.advance(d)
@@ -117,18 +144,55 @@ func newGapRig(t *testing.T, src Source) *gapRig {
 		g.starts = append(g.starts, g.clk.now())
 		g.mu.Unlock()
 	}
-	// The first load of the env swapped at testNow, so this load waits.
-	_, err := l.LoadFrom(src)
+	return g
+}
+
+// newGapRig gives a rig whose loader swapped last at the time base.
+func newGapRig(t *testing.T, src Source) *gapRig {
+	t.Helper()
+	e := newEnv(t)
+	e.install("bundle/current", mf(ver(2)))
+	g := newBareGapRig(t, e)
+	// A start load swaps at testNow, so the next load waits.
+	_, err := g.load(SourceStart)
+	must(t, err)
+	_, err = g.load(src)
 	must(t, err)
 	g.reset()
 	g.base = g.clk.now()
 	return g
 }
 
+// within runs fn and fails the test, with exit code 1, if fn does not return
+// in gapBound.
+func (g *gapRig) within(fn func()) {
+	g.t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(gapBound):
+		g.dead.Store(true)
+		g.t.Fatalf("no return in %v: the lock loop does not end", gapBound)
+	}
+}
+
+// load runs LoadFrom within gapBound.
+func (g *gapRig) load(src Source) (b *Bundle, err error) {
+	g.t.Helper()
+	g.within(func() { b, err = g.e.l.LoadFrom(src) })
+	return b, err
+}
+
 // checkFree fails the test if a load waits while it holds loadMu.
 func (g *gapRig) checkFree() {
 	if !loadMu.TryLock() {
-		g.t.Error("a load waits for the swap gap while it holds loadMu")
+		if !g.dead.Load() {
+			g.t.Error("a load waits for the swap gap while it holds loadMu")
+		}
 		return
 	}
 	loadMu.Unlock()
@@ -148,7 +212,7 @@ func TestTU23SwapGap(t *testing.T) {
 		t.Run(src.String(), func(t *testing.T) {
 			g := newGapRig(t, src)
 			g.clk.advance(time.Second)
-			_, err := g.e.l.LoadFrom(src)
+			_, err := g.load(src)
 			must(t, err)
 			if want := []time.Duration{29 * time.Second}; !slices.Equal(g.sleeps, want) {
 				t.Errorf("waits %v, want %v", g.sleeps, want)
@@ -158,12 +222,36 @@ func TestTU23SwapGap(t *testing.T) {
 			}
 			g.reset()
 			g.clk.advance(swapGap)
-			_, err = g.e.l.LoadFrom(src)
+			_, err = g.load(src)
 			must(t, err)
 			if len(g.sleeps) != 0 {
 				t.Errorf("a load after the gap waited %v", g.sleeps)
 			}
 		})
+	}
+}
+
+// T-U-23: a load of a source other than start, when no swap has happened,
+// starts at once and does not wait.
+func TestTU23NoSwapNoWait(t *testing.T) {
+	e := newEnv(t)
+	e.install("bundle/current", mf(ver(2)))
+	g := newBareGapRig(t, e)
+	_, err := g.load(SourceReload)
+	must(t, err)
+	if len(g.sleeps) != 0 || len(g.starts) != 1 {
+		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
+	}
+}
+
+// T-U-23: a load exactly 30 s after a swap starts at once and does not wait.
+func TestTU23GapEdgeNoWait(t *testing.T) {
+	g := newGapRig(t, SourceReload)
+	g.clk.advance(swapGap)
+	_, err := g.load(SourceReload)
+	must(t, err)
+	if len(g.sleeps) != 0 || len(g.starts) != 1 {
+		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
 	}
 }
 
@@ -175,7 +263,8 @@ func TestTU23StartNoWait(t *testing.T) {
 		func() (*Bundle, error) { return g.e.l.LoadFrom(SourceStart) },
 		func() (*Bundle, error) { return g.e.l.Load(true) },
 	} {
-		_, err := load()
+		var err error
+		g.within(func() { _, err = load() })
 		must(t, err)
 	}
 	if len(g.sleeps) != 0 || len(g.starts) != 2 {
@@ -190,11 +279,11 @@ func TestTU23RejectionNoWait(t *testing.T) {
 	l := g.e.l
 	g.clk.advance(swapGap + time.Second)
 	l.template = stubParse
-	if _, err := l.LoadFrom(SourceReload); err != ErrTemplateParse {
+	if _, err := g.load(SourceReload); err != ErrTemplateParse {
 		t.Fatalf("got %v", err)
 	}
 	l.template = parseTemplates
-	_, err := l.LoadFrom(SourceReload)
+	_, err := g.load(SourceReload)
 	must(t, err)
 	if len(g.sleeps) != 0 || len(g.starts) != 2 {
 		t.Errorf("waits %v, %d starts", g.sleeps, len(g.starts))
@@ -226,14 +315,14 @@ func TestTU23GapCheckedUnderLock(t *testing.T) {
 		done.Add(1)
 		go func() {
 			defer done.Done()
-			if _, err := l.LoadFrom(SourceReload); err != nil {
+			if _, err := l.LoadFrom(SourceReload); err != nil && !g.dead.Load() {
 				t.Error(err)
 			}
 		}()
 	}
-	arrive.Wait()
+	g.within(arrive.Wait)
 	close(release)
-	done.Wait()
+	g.within(done.Wait)
 	if len(g.starts) != 2 {
 		t.Fatalf("%d loads started", len(g.starts))
 	}
@@ -266,7 +355,8 @@ func TestTU23SeedDelay(t *testing.T) {
 		}
 	}()
 	e.putSeeded(key, ver(3), e.good(in, key, ver(3), seedB))
-	_, err := l.Load(false)
+	var err error
+	(&gapRig{t: t}).within(func() { _, err = l.Load(false) })
 	close(stop)
 	<-done
 	must(t, err)
