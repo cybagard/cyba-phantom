@@ -195,9 +195,9 @@ func count(re *regexp.Regexp, text, names string) (int, int, error) {
 	ms := re.FindAllStringSubmatch(text, -1)
 	switch {
 	case len(ms) == 0:
-		return 0, 0, fmt.Errorf("the gremlins output has no line with %s, so the check cannot count the mutants", names)
+		return 0, 0, fmt.Errorf("gremlins printed no line with %s, so the check cannot count the mutants", names)
 	case len(ms) > 1:
-		return 0, 0, fmt.Errorf("the gremlins output has %d lines with %s, so the check cannot count the mutants", len(ms), names)
+		return 0, 0, fmt.Errorf("gremlins printed %d lines with %s, so the check cannot count the mutants", len(ms), names)
 	}
 	a, _ := strconv.Atoi(ms[0][1])
 	b, _ := strconv.Atoi(ms[0][2])
@@ -222,7 +222,7 @@ func checkRun(dir, fix string) error {
 	from, to, _ := strings.Cut(fix, " ")
 	envFrom, envTo := os.Getenv("MUTATE_FROM"), os.Getenv("MUTATE_TO")
 	if envFrom != from || envTo != to {
-		return fmt.Errorf("MUTATE_FROM or MUTATE_TO differs from the replacement (%q %q), so the wrapper replaced the wrong package", envFrom, envTo)
+		return fmt.Errorf("MUTATE_FROM %q and MUTATE_TO %q are not the plan %q %q, so a mutant can test another package", envFrom, envTo, from, to)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "out"))
 	if err != nil {
