@@ -315,3 +315,52 @@ func TestTU25RoutesCopy(t *testing.T) {
 		t.Errorf("beacon %+v changed", *again.Beacon)
 	}
 }
+
+// capEnts gives the files of a bundle with n callback routes in total, in route
+// maps of maxRoutes routes. With members set, the first route map also has a
+// not_found member and a beacon.
+func capEnts(n int, members bool) []ent {
+	var ents []ent
+	for i := 0; n > 0; i++ {
+		dir := fmt.Sprintf("vhosts/v%d.example/", i)
+		k := min(n, maxRoutes)
+		n -= k
+		rs := make([]string, k)
+		for j := range rs {
+			rs[j] = fmt.Sprintf(`{"path":"/%d","callback":{"query":"q"}}`, j)
+		}
+		text := rt(rs...)
+		if members && i == 0 {
+			text = strings.TrimSuffix(text, "}") + `,"not_found":"` + dir + `n.tmpl","beacon":{"script":"/b.js","post":"/b/p"}}`
+			ents = append(ents, tf(dir+"n.tmpl", "n"))
+		}
+		ents = append(ents, tf(dir+routeMapName, text))
+	}
+	return ents
+}
+
+// T-U-08: a bundle with more than maxBundleRoutes routes in all route maps is
+// refused with content_invalid. The running bundle does not change. A bundle
+// with exactly that number loads. A not_found member and a beacon are not
+// routes.
+func TestTU08RouteCap(t *testing.T) {
+	routes := func(b *Bundle) (n int) {
+		for _, h := range b.Vhosts() {
+			rm, _ := b.Routes(h)
+			n += len(rm.Routes)
+		}
+		return n
+	}
+	for name, members := range map[string]bool{"routes only": false, "with not_found and beacon": true} {
+		t.Run(name, func(t *testing.T) {
+			b := loadRaw(t, nil, nil, capEnts(maxBundleRoutes, members)...)
+			if n := routes(b); n != maxBundleRoutes {
+				t.Errorf("%d routes loaded, want %d", n, maxBundleRoutes)
+			}
+			if rm, _ := b.Routes("v0.example"); members && (rm.NotFound == "" || rm.Beacon == nil) {
+				t.Errorf("not_found %q, beacon %v", rm.NotFound, rm.Beacon)
+			}
+			loadRaw(t, ErrContentInvalid, nil, capEnts(maxBundleRoutes+1, members)...)
+		})
+	}
+}

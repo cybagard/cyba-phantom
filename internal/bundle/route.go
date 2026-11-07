@@ -10,10 +10,13 @@ import (
 )
 
 // The name and the caps of a route map, and the caps of a vhost name (SEC-32).
+// maxRoutes is the cap of one route map. maxBundleRoutes is the cap of all
+// route maps of a bundle together. It is 48 route maps of maxRoutes routes.
 const (
 	routeMapName     = "routes.json"
 	maxRouteMapBytes = 64 << 10
 	maxRoutes        = 256
+	maxBundleRoutes  = 12288
 	maxPathBytes     = 256
 	maxHeaderSlots   = 4
 	maxHostBytes     = 253
@@ -111,8 +114,9 @@ type rawSlot struct {
 // that is the second name part of a file below vhosts/ is a vhost. A file must
 // not be directly below vhosts/. Each vhost needs a valid name and a
 // routes.json file. A header slot needs a valid name and the id of a trap. Two
-// slots of one route do not have the same name, with ASCII case ignored. The
-// error holds no byte of the archive.
+// slots of one route do not have the same name, with ASCII case ignored. All
+// route maps together hold at most maxBundleRoutes routes. A not_found member
+// and a beacon member are not routes. The error holds no byte of the archive.
 func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (map[string]RouteMap, error) {
 	ids := map[string]bool{}
 	for _, t := range traps {
@@ -128,10 +132,12 @@ func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (m
 			out[host] = RouteMap{}
 		}
 	}
+	total := 0
 	for host := range out {
 		b, _ := a.File(templateDir + host + "/" + routeMapName)
 		rm, ok := parseRouteMap(a, set, ids, host, b)
-		if !ok {
+		total += len(rm.Routes)
+		if !ok || total > maxBundleRoutes {
 			return nil, ErrContentInvalid
 		}
 		out[host] = rm

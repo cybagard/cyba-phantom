@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
+
+	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
 
 const (
@@ -124,73 +127,140 @@ func TestTS28ServeAllocs(t *testing.T) {
 }
 
 const (
-	// assetVhosts is the number of vhosts, besides the three of the test
-	// archive, with 256 asset routes each. It is the largest number that
-	// loads: 445 gives archive_invalid.
-	assetVhosts = 444
-	// callbackVhosts is the same for 256 callback routes with no asset. A
-	// route is short, so the size of the archive limits the number. 743 gives
-	// archive_invalid.
-	callbackVhosts = 742
+	// routeCap is the most routes in all route maps of a bundle.
+	routeCap = 12288
+	// baseRoutes is the number of routes of the test archive.
+	baseRoutes = 10
+	// siteHeapLimit is the most heap, in bytes, that one site keeps (T-S-28).
+	// The bundle is at the route cap. Its routes are template routes with four
+	// header slots.
+	siteHeapLimit = 10 << 20
+	// templateVhostRoutes is the routes of one vhost in the template shape.
+	// A route map holds 64 KiB. 192 such routes fill about 62 KB of it.
+	templateVhostRoutes = 192
 )
 
-// capFiles makes the files of n more vhosts of 256 routes each. A vhost has one
-// file, which all its routes name.
-func capFiles(n int) map[string]string {
+// shapeFiles makes the files of vhosts with total routes in all. A vhost has
+// at most per routes. route gives the JSON of route j of a vhost. A vhost also
+// has the file name with the text body, which its routes can name.
+func shapeFiles(total, per int, name, body string, route func(host string, j int) string) map[string]string {
 	extra := map[string]string{}
-	for i := range n {
+	for i := 0; total > 0; i++ {
 		host := fmt.Sprintf("v%d.example", i)
-		var parts []string
-		for j := range 256 {
-			parts = append(parts, fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"}`, j, host))
+		parts := make([]string, min(total, per))
+		total -= len(parts)
+		for j := range parts {
+			parts[j] = route(host, j)
 		}
 		extra["vhosts/"+host+"/routes.json"] = `{"routes":[` + strings.Join(parts, ",") + `]}`
-		extra["vhosts/"+host+"/f"] = "f"
+		extra["vhosts/"+host+"/"+name] = body
 	}
 	return extra
 }
 
-// callbackFiles makes the files of n more vhosts of 256 callback routes each.
-// A route has no asset and no type.
-func callbackFiles(n int) map[string]string {
-	extra := map[string]string{}
-	for i := range n {
-		var parts []string
-		for j := range 256 {
-			parts = append(parts, fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j))
+// capFiles makes the files of asset routes. All routes of a vhost name one
+// file. The test archive and these files hold routeCap routes.
+func capFiles() map[string]string {
+	return shapeFiles(routeCap-baseRoutes, 256, "f", "f", func(host string, j int) string {
+		return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"}`, j, host)
+	})
+}
+
+// callbackFiles makes the files of callback routes. A route has no asset and
+// no type. The test archive and these files hold routeCap routes.
+func callbackFiles() map[string]string {
+	return shapeFiles(routeCap-baseRoutes, 256, "f", "f", func(_ string, j int) string {
+		return fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j)
+	})
+}
+
+// templateFiles makes the files of template routes. A route has four header
+// slots, and each slot name has 34 bytes. All routes of a vhost name one
+// template. The test archive and these files hold routeCap routes.
+func templateFiles() map[string]string {
+	return shapeFiles(routeCap-baseRoutes, templateVhostRoutes, "p.tmpl", "<p>p</p>", func(host string, j int) string {
+		var slots []string
+		for k := range 4 {
+			name := fmt.Sprintf("X-Probe-%d-", k)
+			slots = append(slots, fmt.Sprintf(`{"name":"%s","trap":"a"}`, name+strings.Repeat("a", 34-len(name))))
 		}
-		extra[fmt.Sprintf("vhosts/a%d.x/routes.json", i)] = `{"routes":[` + strings.Join(parts, ",") + `]}`
-	}
-	return extra
+		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8","headers":[%s]}`,
+			j, host, strings.Join(slots, ","))
+	})
 }
 
-// BenchmarkSiteBuild measures the build of the site table of the largest bundle
-// that loads. It does this for two shapes of route. It also reports the bytes
+// retainedOf builds the site of bd and gives the bytes of heap that it keeps
+// after a GC. The bundle stays alive to the end. It holds the archive bytes,
+// and a freed bundle would hide the cost of the site.
+func retainedOf(bd *bundle.Bundle) (uint64, *site) {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	s := buildSite(bd)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(bd)
+	runtime.KeepAlive(s)
+	return after.HeapAlloc - before.HeapAlloc, s
+}
+
+// siteShapes are the route shapes of a bundle at the route cap.
+var siteShapes = []struct {
+	name  string
+	files func() map[string]string
+}{
+	{"assets", capFiles},
+	{"callbacks", callbackFiles},
+	{"templates", templateFiles},
+}
+
+// BenchmarkSiteBuild measures the build of the site table of a bundle at the
+// route cap. It does this for three shapes of route. It also reports the bytes
 // that one built site keeps in memory.
 func BenchmarkSiteBuild(b *testing.B) {
-	shapes := []struct {
-		name  string
-		files func() map[string]string
-	}{
-		{"assets", func() map[string]string { return capFiles(assetVhosts) }},
-		{"callbacks", func() map[string]string { return callbackFiles(callbackVhosts) }},
-	}
-	for _, sh := range shapes {
+	for _, sh := range siteShapes {
 		b.Run(sh.name, func(b *testing.B) {
 			bd := bundleFiles(b, "", sh.files())
-			var before, after runtime.MemStats
-			runtime.GC()
-			runtime.ReadMemStats(&before)
-			s := buildSite(bd)
-			runtime.GC()
-			runtime.ReadMemStats(&after)
-			runtime.KeepAlive(s)
+			retained, _ := retainedOf(bd)
 			b.ReportAllocs()
 			for b.Loop() {
 				buildSite(bd)
 			}
 			// The first b.Loop call clears the metrics: report after the loop.
-			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "retained-B")
+			b.ReportMetric(float64(retained), "retained-B")
 		})
+	}
+}
+
+// routesOf is the number of routes in all route maps of bd.
+func routesOf(bd *bundle.Bundle) (n int) {
+	for _, host := range bd.Vhosts() {
+		rm, _ := bd.Routes(host)
+		n += len(rm.Routes)
+	}
+	return n
+}
+
+// TestTS28SiteTableBound checks the site table of a bundle at the route cap.
+// The routes are template routes with four header slots with 34-byte names.
+// One site keeps at most siteHeapLimit bytes of heap. It keeps at least one
+// entry for each route, so a measure that loses the bundle fails.
+func TestTS28SiteTableBound(t *testing.T) {
+	bd := bundleFiles(t, "", templateFiles())
+	if n := routesOf(bd); n != routeCap {
+		t.Fatalf("bundle has %d routes, want %d", n, routeCap)
+	}
+	hosts := len(bd.Vhosts())
+	got, s := retainedOf(bd)
+	floor := uint64(routeCap) * uint64(unsafe.Sizeof(entry{}))
+	t.Logf("site keeps %d bytes, %.1f bytes for each route; limits %d and %d", got, float64(got)/routeCap, floor, siteHeapLimit)
+	if n := len(s.hosts); n != hosts {
+		t.Errorf("site has %d hosts, bundle has %d", n, hosts)
+	}
+	if got < floor {
+		t.Errorf("site keeps %d bytes, below the floor of %d", got, floor)
+	}
+	if got > siteHeapLimit {
+		t.Errorf("site keeps %d bytes, above the limit of %d", got, siteHeapLimit)
 	}
 }
