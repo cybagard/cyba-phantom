@@ -252,6 +252,28 @@ func band(n int) (lo, hi int) {
 	return int(math.Ceil(mean - zBand*sd)), int(math.Floor(mean + zBand*sd))
 }
 
+func TestTS05_Band(t *testing.T) {
+	tests := []struct{ n, lo, hi int }{
+		{10000, 4872, 5128},
+		{1280000, 638543, 641457},
+	}
+	for _, tc := range tests {
+		if lo, hi := band(tc.n); lo != tc.lo || hi != tc.hi {
+			t.Errorf("band(%d) = %d ... %d, want %d ... %d",
+				tc.n, lo, hi, tc.lo, tc.hi)
+		}
+	}
+}
+
+// agreement counts the bits where tok and id have the same value.
+func agreement(tok, id [Size]byte) int {
+	agree := 0
+	for i := range id {
+		agree += 8 - bits.OnesCount8(tok[i]^id[i])
+	}
+	return agree
+}
+
 func TestTS05_SessionID(t *testing.T) {
 	rng := rand.New(rand.NewChaCha8([32]byte{'s', 'e', 's', 's', 'i', 'o', 'n'}))
 	k := newSet(t, testKey, 1)
@@ -266,10 +288,8 @@ func TestTS05_SessionID(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for i := range id {
-			agree += 8 - bits.OnesCount8(tok[i]^id[i])
-			pairs += 8
-		}
+		agree += agreement(tok, id)
+		pairs += sessionBits
 	}
 	if want := sessionBits * randTokens; pairs != want {
 		t.Fatalf("%d bit pairs, want %d", pairs, want)
@@ -279,8 +299,30 @@ func TestTS05_SessionID(t *testing.T) {
 	if agree < lo || agree > hi {
 		t.Errorf("agreement %d is outside %d ... %d", agree, lo, hi)
 	}
-	// A token equal to its session id agrees in every bit.
-	if pairs >= lo && pairs <= hi {
-		t.Errorf("full agreement %d is inside the band", pairs)
+}
+
+// A token equal to its session id, or its complement, is outside the band.
+func TestTS05_SessionIDControl(t *testing.T) {
+	var tok, inv [Size]byte
+	for i := range tok {
+		tok[i] = byte(i*37 + 11)
+		inv[i] = tok[i] ^ 0xFF
+	}
+	if got := agreement(tok, tok); got != sessionBits {
+		t.Errorf("equal agreement = %d, want %d", got, sessionBits)
+	}
+	if got := agreement(tok, inv); got != 0 {
+		t.Errorf("complement agreement = %d, want 0", got)
+	}
+	same, opposite := 0, 0
+	for range randTokens {
+		same += agreement(tok, tok)
+		opposite += agreement(tok, inv)
+	}
+	lo, hi := band(sessionBits * randTokens)
+	for name, sum := range map[string]int{"equal": same, "complement": opposite} {
+		if sum >= lo && sum <= hi {
+			t.Errorf("%s agreement %d is inside %d ... %d", name, sum, lo, hi)
+		}
 	}
 }
