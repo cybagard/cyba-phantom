@@ -477,6 +477,8 @@ func TestCheckTakesSummaryFromWholeLinesOnly(t *testing.T) {
 	for _, c := range []struct{ name, out string }{
 		{"text before the Killed line", done + "x Killed: 3, Lived: 0, Not covered: 0\n" + zeroSums},
 		{"text after the Timed out line", done + zeroSums + "Timed out: 0, Not viable: 2, Skipped: 0 x\n"},
+		{"text before the Timed out line", done + "Killed: 0, Lived: 0, Not covered: 0\n" +
+			"x Timed out: 3, Not viable: 0, Skipped: 0\n" + "Timed out: 0, Not viable: 30, Skipped: 0\n"},
 		{"text before the completed line", "x Mutation testing completed\n" + goodSums + done + zeroSums},
 	} {
 		rc, errs = runDir(t, map[string]string{"out": c.out, "replaced": "\n"}, "")
