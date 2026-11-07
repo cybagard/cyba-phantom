@@ -11,8 +11,8 @@ import (
 )
 
 // Tests that pin one operator or one bound of the checker. The file name
-// sorts before the other test files, so a loop that never ends fails here
-// first, after the wait in bounded.
+// sorts before the other test files. A loop that never ends thus fails
+// here first, after the wait in bounded.
 
 // bounded fails the test when f takes over 2 s. A loop that counts the wrong
 // way never ends, so this wait is the only thing that stops the test.
