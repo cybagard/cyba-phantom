@@ -4,18 +4,17 @@ import (
 	"math"
 	"math/bits"
 	"math/rand/v2"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 const (
-	randTokens  = 10000 // tokens for each randomness test
-	blockSize   = 128   // block length M of the block frequency test, in bits
-	minP        = 0.01  // a p-value below this fails a NIST test
-	sessionBits = 8 * Size
-	zBand       = 2.5758 // two-sided 99 % point of the normal distribution
-	tiny        = 1e-300
-	eps         = 1e-15
+	randTokens    = 10000 // tokens for each randomness test
+	nistBlockBits = 128   // block length M of the block frequency test, in bits
+	minP          = 0.01  // a p-value below this fails a NIST test
+	sessionBits   = 8 * Size
+	zBand         = 2.5758 // two-sided 99 % point of the normal distribution
 )
 
 // bitsOf gives the bits of b, the most significant bit of each byte first.
@@ -39,6 +38,10 @@ func bitsOfString(s string) []uint8 {
 
 // igamc is the regularized upper incomplete gamma function Q(a, x).
 func igamc(a, x float64) float64 {
+	const (
+		tiny = 1e-300
+		eps  = 1e-15
+	)
 	if x <= 0 {
 		return 1
 	}
@@ -81,8 +84,8 @@ func igamc(a, x float64) float64 {
 	return pre * h
 }
 
-// frequency is the monobit test (NIST SP 800-22 rev1a, section 2.1).
-func frequency(e []uint8) float64 {
+// nistFrequency is the monobit test (NIST SP 800-22 rev1a, section 2.1).
+func nistFrequency(e []uint8) float64 {
 	s := 0.0
 	for _, b := range e {
 		s += float64(2*int(b) - 1)
@@ -91,8 +94,8 @@ func frequency(e []uint8) float64 {
 	return math.Erfc(math.Abs(s) / math.Sqrt(n) / math.Sqrt2)
 }
 
-// blockFrequency is the test of section 2.2 with blocks of m bits.
-func blockFrequency(e []uint8, m int) float64 {
+// nistBlockFrequency is the test of section 2.2 with blocks of m bits.
+func nistBlockFrequency(e []uint8, m int) float64 {
 	nb := len(e) / m
 	chi := 0.0
 	for i := range nb {
@@ -107,18 +110,20 @@ func blockFrequency(e []uint8, m int) float64 {
 	return igamc(float64(nb)/2, chi/2)
 }
 
-// runs is the runs test of section 2.3. It gives 0 when the frequency
-// prerequisite fails.
-func runs(e []uint8) float64 {
+// nistRuns is the runs test of section 2.3. The test is not run when
+// |pi - 1/2| >= 2/sqrt(n). The function then gives 0. The integer form
+// d*d >= 16*n of this rule has no rounding error at the edge.
+func nistRuns(e []uint8) float64 {
 	n := float64(len(e))
 	ones := 0
 	for _, b := range e {
 		ones += int(b)
 	}
-	pi := float64(ones) / n
-	if math.Abs(pi-0.5) >= 2/math.Sqrt(n) {
+	d := 2*ones - len(e)
+	if d*d >= 16*len(e) {
 		return 0
 	}
+	pi := float64(ones) / n
 	v := 1.0
 	for k := 1; k < len(e); k++ {
 		if e[k] != e[k-1] {
@@ -129,8 +134,8 @@ func runs(e []uint8) float64 {
 	return math.Erfc(math.Abs(v-2*n*pq) / (2 * math.Sqrt(2*n) * pq))
 }
 
-// mintBits mints n tokens with counters 0 ... n-1 and gives them in order.
-func mintBits(t *testing.T, n int) (toks [][Size]byte, k *KeySet) {
+// mintTokens mints n tokens with counters 0 ... n-1 and gives them in order.
+func mintTokens(t *testing.T, n int) (toks [][Size]byte, k *KeySet) {
 	t.Helper()
 	k = newSet(t, testKey, 1)
 	k.counter.Store(counterMask) // The first Mint then uses counter 0.
@@ -149,44 +154,57 @@ func TestTS05_Statistics(t *testing.T) {
 		"00001000110100110001001100011001100010100010111000"
 	// 80 ones and 20 zeros in 32 runs: the frequency prerequisite fails.
 	skew := strings.Repeat("111110", 12) + strings.Repeat("1111100", 4)
+	// 70 ones in 100 bits: d*d = 16*n, so the test is not run.
+	edge := strings.Repeat("10", 30) + strings.Repeat("1", 40)
+	// 100 bits with V = 34 runs, fewer than the 50 that n*2pq expects.
+	few := strings.Repeat("000111", 16) + "0011"
 	tests := []struct {
 		name string
 		fn   func([]uint8) float64
 		e    string
 		want float64
 	}{
-		{"frequency short", frequency, "1011010101", 0.527089},
-		{"frequency 100", frequency, e100, 0.109599},
+		{"frequency short", nistFrequency, "1011010101", 0.527089},
+		{"frequency 100", nistFrequency, e100, 0.109599},
 		{"block frequency short", func(e []uint8) float64 {
-			return blockFrequency(e, 3)
+			return nistBlockFrequency(e, 3)
 		}, "0110011010", 0.801252},
 		{"block frequency 100", func(e []uint8) float64 {
-			return blockFrequency(e, 10)
+			return nistBlockFrequency(e, 10)
 		}, e100, 0.706438},
-		{"runs short", runs, "1001101011", 0.147232},
-		{"runs 100", runs, e100, 0.500798},
-		{"runs prerequisite", runs, skew, 0},
+		{"runs short", nistRuns, "1001101011", 0.147232},
+		{"runs 100", nistRuns, e100, 0.500798},
+		{"runs prerequisite", nistRuns, skew, 0},
+		{"runs prerequisite edge", nistRuns, edge, 0},
+		{"runs too few", nistRuns, few, 0.001374},
 	}
 	for _, tc := range tests {
-		if got := tc.fn(bitsOfString(tc.e)); math.Abs(got-tc.want) > 1e-6 {
-			t.Errorf("%s: p = %f, want %f", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.fn(bitsOfString(tc.e)); math.Abs(got-tc.want) > 1e-6 {
+				t.Errorf("p = %f, want %f", got, tc.want)
+			}
+		})
 	}
 }
 
 // Q(1/2, x) = erfc(sqrt(x)) and Q(1, x) = exp(-x). The tail values need the
 // continued fraction: a series loses all digits there.
 func TestTS05_Igamc(t *testing.T) {
-	tests := []struct{ a, x, want float64 }{
-		{0.5, 0.1, math.Erfc(math.Sqrt(0.1))},
-		{0.5, 40, math.Erfc(math.Sqrt(40))},
-		{1, 0.5, math.Exp(-0.5)},
-		{1, 40, math.Exp(-40)},
+	tests := []struct {
+		name       string
+		a, x, want float64
+	}{
+		{"half series", 0.5, 0.1, math.Erfc(math.Sqrt(0.1))},
+		{"half tail", 0.5, 40, math.Erfc(math.Sqrt(40))},
+		{"one series", 1, 0.5, math.Exp(-0.5)},
+		{"one tail", 1, 40, math.Exp(-40)},
 	}
 	for _, tc := range tests {
-		if got := igamc(tc.a, tc.x); math.Abs(got-tc.want) > 1e-9*tc.want {
-			t.Errorf("igamc(%g, %g) = %g, want %g", tc.a, tc.x, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := igamc(tc.a, tc.x); math.Abs(got-tc.want) > 1e-9*tc.want {
+				t.Errorf("igamc(%g, %g) = %g, want %g", tc.a, tc.x, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -198,44 +216,45 @@ func TestTS05_BitOrder(t *testing.T) {
 	}
 }
 
-// pValues runs the three tests on e and checks them against minP.
-func pValues(t *testing.T, e []uint8, wantPass bool) {
+// checkNIST runs the three tests on e. It checks each p-value against minP
+// and against the expected result: frequency, block frequency, runs.
+func checkNIST(t *testing.T, e []uint8, wantPass [3]bool) {
 	t.Helper()
-	if nb := len(e) / blockSize; nb != randTokens {
+	if nb := len(e) / nistBlockBits; nb != randTokens {
 		t.Fatalf("%d blocks, want %d", nb, randTokens)
 	}
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name string
 		p    float64
 	}{
-		{"frequency", frequency(e)},
-		{"block frequency", blockFrequency(e, blockSize)},
-		{"runs", runs(e)},
+		{"frequency", nistFrequency(e)},
+		{"block frequency", nistBlockFrequency(e, nistBlockBits)},
+		{"runs", nistRuns(e)},
 	} {
 		t.Logf("%s: p = %f", tc.name, tc.p)
-		if (tc.p >= minP) != wantPass {
+		if (tc.p >= minP) != wantPass[i] {
 			t.Errorf("%s: p = %f, pass = %v, want %v",
-				tc.name, tc.p, tc.p >= minP, wantPass)
+				tc.name, tc.p, tc.p >= minP, wantPass[i])
 		}
 	}
 }
 
 func TestTS05_NIST(t *testing.T) {
-	toks, k := mintBits(t, randTokens)
-	if _, _, c := open(k, toks[0]); c != 0 {
-		t.Errorf("first counter = %d, want 0", c)
-	}
-	if _, _, c := open(k, toks[randTokens-1]); c != randTokens-1 {
-		t.Errorf("last counter = %d, want %d", c, randTokens-1)
-	}
+	toks, k := mintTokens(t, randTokens)
 	var raw []byte
-	for _, tok := range toks {
+	for i, tok := range toks {
+		index, unit, counter := open(k, tok)
+		if index != 0 || unit != 0 || counter != uint64(i) {
+			t.Fatalf("token %d opens to index %d, unit %d, counter %d",
+				i, index, unit, counter)
+		}
 		raw = append(raw, tok[:]...)
 	}
-	pValues(t, bitsOf(raw), true)
+	checkNIST(t, bitsOf(raw), [3]bool{true, true, true})
 }
 
-// The plaintext blocks have structure. The tests must reject them.
+// The plaintext blocks differ only in the counter field. The tests must
+// reject them.
 func TestTS05_NISTPlaintext(t *testing.T) {
 	var raw []byte
 	var b [Size]byte
@@ -243,11 +262,21 @@ func TestTS05_NISTPlaintext(t *testing.T) {
 		pack(b[:], 0, 0, c)
 		raw = append(raw, b[:]...)
 	}
-	pValues(t, bitsOf(raw), false)
+	checkNIST(t, bitsOf(raw), [3]bool{false, false, false})
 }
 
-// band gives the 99 % band of the sum of n fair coin flips.
-func band(n int) (lo, hi int) {
+// The control has as many ones as zeros in each byte, but a fixed pattern.
+// Frequency and block frequency pass. Runs reaches its formula and fails.
+func TestTS05_NISTBalanced(t *testing.T) {
+	raw := make([]byte, randTokens*Size)
+	for i := range raw {
+		raw[i] = 0x0F
+	}
+	checkNIST(t, bitsOf(raw), [3]bool{true, true, false})
+}
+
+// agreementBand gives the 99 % band of the sum of n fair coin flips.
+func agreementBand(n int) (lo, hi int) {
 	mean, sd := float64(n)/2, math.Sqrt(float64(n))/2
 	return int(math.Ceil(mean - zBand*sd)), int(math.Floor(mean + zBand*sd))
 }
@@ -258,10 +287,12 @@ func TestTS05_Band(t *testing.T) {
 		{1280000, 638543, 641457},
 	}
 	for _, tc := range tests {
-		if lo, hi := band(tc.n); lo != tc.lo || hi != tc.hi {
-			t.Errorf("band(%d) = %d ... %d, want %d ... %d",
-				tc.n, lo, hi, tc.lo, tc.hi)
-		}
+		t.Run(strconv.Itoa(tc.n), func(t *testing.T) {
+			if lo, hi := agreementBand(tc.n); lo != tc.lo || hi != tc.hi {
+				t.Errorf("band = %d ... %d, want %d ... %d",
+					lo, hi, tc.lo, tc.hi)
+			}
+		})
 	}
 }
 
@@ -274,27 +305,21 @@ func agreement(tok, id [Size]byte) int {
 	return agree
 }
 
+// This test fails when session bits are copied or inverted into a token.
+// It cannot show that a token is not derived from a session id. That holds
+// because Mint takes no session id. A keyless hash of the id also passes.
 func TestTS05_SessionID(t *testing.T) {
 	rng := rand.New(rand.NewChaCha8([32]byte{'s', 'e', 's', 's', 'i', 'o', 'n'}))
-	k := newSet(t, testKey, 1)
-	k.counter.Store(counterMask) // A fixed start: the same count in each run.
-	agree, pairs := 0, 0
-	for range randTokens {
+	toks, _ := mintTokens(t, randTokens)
+	agree := 0
+	for _, tok := range toks {
 		var id [Size]byte
 		for i := range id {
 			id[i] = byte(rng.Uint32())
 		}
-		tok, err := k.Mint(0, epoch)
-		if err != nil {
-			t.Fatal(err)
-		}
 		agree += agreement(tok, id)
-		pairs += sessionBits
 	}
-	if want := sessionBits * randTokens; pairs != want {
-		t.Fatalf("%d bit pairs, want %d", pairs, want)
-	}
-	lo, hi := band(pairs)
+	lo, hi := agreementBand(sessionBits * randTokens)
 	t.Logf("agreement %d, band %d ... %d", agree, lo, hi)
 	if agree < lo || agree > hi {
 		t.Errorf("agreement %d is outside %d ... %d", agree, lo, hi)
@@ -319,10 +344,17 @@ func TestTS05_SessionIDControl(t *testing.T) {
 		same += agreement(tok, tok)
 		opposite += agreement(tok, inv)
 	}
-	lo, hi := band(sessionBits * randTokens)
-	for name, sum := range map[string]int{"equal": same, "complement": opposite} {
-		if sum >= lo && sum <= hi {
-			t.Errorf("%s agreement %d is inside %d ... %d", name, sum, lo, hi)
+	lo, hi := agreementBand(sessionBits * randTokens)
+	for _, tc := range []struct {
+		name string
+		sum  int
+	}{
+		{"equal", same},
+		{"complement", opposite},
+	} {
+		if tc.sum >= lo && tc.sum <= hi {
+			t.Errorf("%s agreement %d is inside %d ... %d",
+				tc.name, tc.sum, lo, hi)
 		}
 	}
 }
