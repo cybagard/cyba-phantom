@@ -85,7 +85,8 @@ var (
 // The reload goroutine is in wg, so it ends before the queue closes.
 // After the stop began, the goroutine starts no new load.
 // A load in its wait for the swap gap at the stop runs to its end.
-// So the stop can wait up to 30 s. The load ends before the queue closes.
+// So the stop waits for the rest of the 30 s gap and then for the load.
+// The load ends before the queue closes.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	counters := event.NewCounters()
@@ -218,7 +219,8 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	}
 	serveOne(func() error { return srv.Serve(httpsLn) })
 	serveOne(func() error { return srv.ServePlain(httpLn, listener.NewRedirect(decoys)) })
-	// This starts after the last early return. No early return ends it.
+	// This starts after the last early return of serveWith. Each path that
+	// starts it thus reaches wg.Wait before s.Stop().
 	wg.Go(func() { b.reloadOnSignal(ctx, hup) })
 	startLine := "phantom: started"
 	if !s.Healthy() {

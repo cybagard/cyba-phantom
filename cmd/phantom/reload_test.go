@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hpke"
 	"crypto/tls"
 	"fmt"
@@ -257,6 +258,29 @@ func TestTU23_StopWaitsForLoad(t *testing.T) {
 	}
 }
 
+// TestTU23_NoLoadAfterStop calls reloadOnSignal 1 000 times with an ended ctx
+// and one signal on hup. With no loader, each Reload call writes one line.
+// The select may take the signal or the end, so the check after it must
+// stop each time. No line is written.
+func TestTU23_NoLoadAfterStop(t *testing.T) {
+	var buf bytes.Buffer
+	b := &bundlePart{lg: slog.New(slog.NewTextHandler(&buf, nil))}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	hup := make(chan os.Signal, 1)
+	for range 1000 {
+		select {
+		case <-hup:
+		default:
+		}
+		hup <- syscall.SIGHUP
+		b.reloadOnSignal(ctx, hup)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("%d bytes of log: a load began after the end of ctx", buf.Len())
+	}
+}
+
 // holdWriter blocks the first WriteHeader of a response until wait returns.
 // The handler has read the running bundle by then.
 type holdWriter struct {
@@ -270,10 +294,13 @@ func (w holdWriter) WriteHeader(code int) {
 }
 
 // TestTI12_SighupUnderLoad sends 250 decoy requests to the static name, one
-// each 5 ms (200 each second, 1.2 s). It sends 5 SIGHUPs with new bundles,
-// spread over the run. Each gives one swap and one bundle_load. Before each
-// swap, one request stops inside the handler, after it read the running
-// bundle. It ends after the swap. Each response must have the status and the
+// each 5 ms (at most 200 each second, 1.25 s). A goroutine of its own sends
+// them, so the pace holds during a swap. The run must take 1 s to 3 s. The
+// test sends 5 SIGHUPs with new bundles, spread over the run. Each gives one
+// swap and one bundle_load. The load waits in the swap gap until a request
+// that is not held begins. Before each swap, one request stops inside the
+// handler, after it read the running bundle. It ends after the swap. Each
+// response must have the status and the
 // body of the first one. A running bundle gives the fixed 404 page of the
 // bait handler. The hello page serves with no bundle only. The bundles have
 // no pages, so this is not the run with bait pages.
@@ -290,7 +317,7 @@ func TestTI12_SighupUnderLoad(t *testing.T) {
 			h.ServeHTTP(w, r)
 		}))
 	}
-	g := startReload(t, false, "")
+	g := startReload(t, true, "")
 	tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: staticName, InsecureSkipVerify: true}}
 	t.Cleanup(tr.CloseIdleConnections)
 	cl := &http.Client{Transport: tr, Timeout: netWait}
@@ -323,35 +350,54 @@ func TestTI12_SighupUnderLoad(t *testing.T) {
 			overlapped.Add(1)
 		}
 	}
+	until := func(what string, cond func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(netWait); !cond(); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("no %s", what)
+			}
+		}
+	}
 	var wg sync.WaitGroup
+	var started atomic.Int64 // the requests that are not held and began
+	// swap holds the load in its gap wait. Then it waits for a request that
+	// is not held to begin. Then it lets the load swap.
 	swap := func(i int) {
 		before := g.l.Load().Current()
 		putBundle(t, g.p.Root, g.p.BundlePath, bundleOf(t, fmt.Sprintf("2026.11.01-%d", i+1)), seedKey(goodSeed))
 		wg.Go(func() { check(true) })
 		<-inside
 		g.hup()
-		for deadline := time.Now().Add(netWait); g.l.Load().Current() == before; time.Sleep(time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatalf("no swap for bundle %d", i)
-			}
-		}
+		g.clock.wait(t, int32(i))
+		in := started.Load()
+		until("request inside the swap window", func() bool { return started.Load() > in })
+		g.clock.hold <- struct{}{}
+		until("swap", func() bool { return g.l.Load().Current() != before })
 		gate <- struct{}{}
 	}
-	begin, tick := time.Now(), time.NewTicker(5*time.Millisecond)
-	defer tick.Stop()
-	for n := range total {
-		<-tick.C
-		wg.Go(func() { check(false) })
-		step := total / (swaps + 1)
-		if n > 0 && n%step == 0 && n/step <= swaps {
-			swap(n / step)
+	begin, genDone := time.Now(), make(chan struct{})
+	go func() {
+		defer close(genDone)
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for range total {
+			<-tick.C
+			started.Add(1)
+			wg.Go(func() { check(false) })
 		}
+	}()
+	step := total / (swaps + 1)
+	for i := 1; i <= swaps; i++ {
+		until("request count for the swap", func() bool { return started.Load() >= int64(i*step) })
+		swap(i)
 	}
+	<-genDone
 	wg.Wait()
 	rows := g.stop()
-	if failed.Load() != 0 || sent.Load() < 200 || time.Since(begin) < time.Second || overlapped.Load() != swaps ||
+	took := time.Since(begin)
+	if failed.Load() != 0 || sent.Load() < 200 || took < time.Second || took > 3*time.Second || overlapped.Load() != swaps ||
 		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 {
-		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v; rows %v; want 0 of 200 or more, 5 overlaps, 5 signal loads",
-			failed.Load(), sent.Load(), overlapped.Load(), time.Since(begin), rows)
+		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v; rows %v; want 0 of 200 or more in 1 s to 3 s, 5 overlaps, 5 signal loads",
+			failed.Load(), sent.Load(), overlapped.Load(), took, rows)
 	}
 }

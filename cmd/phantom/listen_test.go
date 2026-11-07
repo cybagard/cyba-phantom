@@ -253,13 +253,9 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 // launchViaServe runs the real serve function with c until the test ends.
 // The serveSetup seam gives it p and realDeps. The waitStop seam holds serve
 // until r.cancel runs, so the test needs no signal.
-func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) *running {
-	return launchViaServeWith(t, cfg, c, p, nil)
-}
-
-// launchViaServeWith is launchViaServe with a function that runs in the
-// serveSetup seam, after serve set its signal handlers. It can be nil.
-func launchViaServeWith(t *testing.T, cfg *config.Config, c content, p startParams, setup func()) *running {
+// The function setup runs in the serveSetup seam, after serve set its
+// signal handlers. It can be nil.
+func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, setup func()) *running {
 	oldLog, oldSetup, oldWait := log.Writer(), serveSetup, waitStop
 	t.Cleanup(func() { log.SetOutput(oldLog); serveSetup, waitStop = oldSetup, oldWait })
 	serveSetup = func(startParams) (startParams, startDeps) {
@@ -1386,7 +1382,7 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		return oldServer(cc, h)
 	}
 	if o.viaServe {
-		m.r = launchViaServeWith(t, cfg, c, p, o.setup)
+		m.r = launchViaServe(t, cfg, c, p, o.setup)
 	} else {
 		m.r = launchContent(t, cfg, c, p, realDeps)
 	}

@@ -52,8 +52,9 @@ func notifyReload() chan os.Signal {
 
 // reloadOnSignal calls Reload with SourceSignal for each signal on hup, one
 // load at a time, until ctx ends. A load that has begun runs to its end.
-// A load in its wait for the swap gap has begun. It can run up to 30 s after
-// ctx ended. After ctx ended, no new load begins.
+// A load in its wait for the swap gap has begun. After ctx ended, it waits
+// for the rest of the 30 s gap and then runs. After ctx ended, no new load
+// begins.
 func (b *bundlePart) reloadOnSignal(ctx context.Context, hup <-chan os.Signal) {
 	for {
 		select {
