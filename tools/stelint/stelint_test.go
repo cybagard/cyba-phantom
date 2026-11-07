@@ -71,16 +71,11 @@ var (
 
 // The scan must end for a short text. A loop that stands still on one rune,
 // or runs past the end, hangs. This test runs first, so it fails before a
-// later test can hang on the same loop.
+// later test can hang on the same loop. This holds when go test runs with
+// -failfast and in file order, with no -shuffle.
 func TestSentenceScanEndsForShortText(t *testing.T) {
 	for _, src := range []string{"// a b.\n", "// é b.\n"} {
-		done := make(chan []sentence, 1)
-		go func() { done <- sentences(src) }()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			t.Fatalf("text %q: no result after 3 s", src)
-		}
+		finishes(t, src)
 	}
 }
 

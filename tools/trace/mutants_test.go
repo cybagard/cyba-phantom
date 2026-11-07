@@ -4,18 +4,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Tests that pin one operator or one bound of the checker. The file name
-// sorts before the other test files. A loop that never ends thus fails
-// here first, after the wait in bounded.
+// These tests pin one operator or one bound of the checker. The file name
+// sorts before the other test files. A loop that never ends fails here
+// first, after the wait in bounded. That holds when go test runs with
+// -failfast and in file order, with no -shuffle.
 
 // bounded fails the test when f takes over 2 s. A loop that counts the wrong
-// way never ends, so this wait is the only thing that stops the test.
+// way never ends. This wait fails the test long before go test -timeout or
+// the gremlins timeout stops it.
 func bounded(t *testing.T, f func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -56,7 +59,7 @@ func TestLoopsEndForShortInput(t *testing.T) {
 			t.Error("no rule x")
 		}
 	})
-	// A "$" and the character after it are skipped once.
+	// The scan skips a "$" and the character after it once.
 	bounded(t, func() {
 		if isAssignment(" $a") {
 			t.Error(`" $a" is no assignment`)
@@ -103,7 +106,11 @@ func TestRunPrintsAtMostTheCapOfFindings(t *testing.T) {
 	}
 	old := os.Stdout
 	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = old })
+	t.Cleanup(func() {
+		os.Stdout = old
+		w.Close()
+		r.Close()
+	})
 	code := run([]string{"tests", "spec", "--milestone", "M-1"})
 	os.Stdout = old
 	w.Close()
@@ -246,7 +253,7 @@ func TestDiffFindingText(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
 	}
-	// Ten lines are named; the rest are counted.
+	// The finding names ten lines and counts the rest.
 	got := diffFinding(strings.Repeat("a\n", 12), strings.Repeat("b\n", 12))
 	if len(got) != 12 || got[0] != head(12) || got[1] != line(1) || got[10] != line(10) ||
 		got[11] != "… 2 more differing line(s)" {
@@ -283,10 +290,19 @@ func TestMatrixFindingText(t *testing.T) {
 	// C10 is a declared requirement: a test that covers it is one finding.
 	dir = newSpec(t)
 	replaceLine(t, dir, "07-test-plan.md", "| T-U-04 | C8 | retention |", "| T-U-04 | C8, C10 | retention |")
-	for _, f := range check(t, dir) {
-		if strings.Contains(f, "does not declare") {
-			t.Errorf("C10 is declared: %q", f)
-		}
+	const c10 = "07-test-plan: test T-U-04 covers C10; no test may cover the trace check"
+	if got := check(t, dir); !slices.Equal(got, []string{c10}) {
+		t.Errorf("C10 covered: findings %q, want only %q", got, c10)
+	}
+}
+
+func TestStampWriteFailsOnAFindingFromTheSpecDir(t *testing.T) {
+	dir := newSpec(t)
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := run([]string{"stamp", dir, "--write"}); got != 1 {
+		t.Errorf("run(stamp --write) with a subdirectory = %d, want 1", got)
 	}
 }
 
