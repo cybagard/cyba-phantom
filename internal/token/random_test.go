@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	randTokens    = 10000 // tokens for each randomness test
-	nistBlockBits = 128   // block length M of the block frequency test, in bits
-	minP          = 0.01  // a p-value below this fails a NIST test
+	randTokens    = 10000 // each randomness test uses this number of tokens
+	nistBlockBits = 128   // the block frequency test uses blocks of M bits
+	minP          = 0.01  // a NIST test fails below this p-value
 	sessionBits   = 8 * Size
-	zBand         = 2.5758 // two-sided 99 % point of the normal distribution
+	zBand         = 2.5758 // z is the two-sided 99 % point of the normal law
 )
 
 // bitsOf gives the bits of b, the most significant bit of each byte first.
@@ -156,7 +156,7 @@ func TestTS05_Statistics(t *testing.T) {
 	skew := strings.Repeat("111110", 12) + strings.Repeat("1111100", 4)
 	// 70 ones in 100 bits: d*d = 16*n, so the test is not run.
 	edge := strings.Repeat("10", 30) + strings.Repeat("1", 40)
-	// 100 bits with V = 34 runs, fewer than the 50 that n*2pq expects.
+	// These 100 bits have V = 34 runs. n*2pq expects 50 runs.
 	few := strings.Repeat("000111", 16) + "0011"
 	tests := []struct {
 		name string
@@ -305,9 +305,11 @@ func agreement(tok, id [Size]byte) int {
 	return agree
 }
 
-// This test fails when session bits are copied or inverted into a token.
-// It cannot show that a token is not derived from a session id. That holds
-// because Mint takes no session id. A keyless hash of the id also passes.
+// This test fails when each token holds a copied session bit, or each holds
+// an inverted one. A mix of copied and inverted bits can pass. A copy into
+// few tokens can pass too. The test cannot show that a token is not derived
+// from a session id. That holds because Mint takes no session id. A keyless
+// hash of the id also passes.
 func TestTS05_SessionID(t *testing.T) {
 	rng := rand.New(rand.NewChaCha8([32]byte{'s', 'e', 's', 's', 'i', 'o', 'n'}))
 	toks, _ := mintTokens(t, randTokens)
