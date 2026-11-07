@@ -238,7 +238,7 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
 	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
-	go func() { r.code = serveWith(ctx, cancel, cfg, c, p, d, r.out, &r.err); close(r.done) }()
+	go func() { r.code = serveWith(ctx, cancel, nil, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -254,9 +254,20 @@ func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d
 // The serveSetup seam gives it p and realDeps. The waitStop seam holds serve
 // until r.cancel runs, so the test needs no signal.
 func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams) *running {
+	return launchViaServeWith(t, cfg, c, p, nil)
+}
+
+// launchViaServeWith is launchViaServe with a function that runs in the
+// serveSetup seam, after serve set its signal handlers. It can be nil.
+func launchViaServeWith(t *testing.T, cfg *config.Config, c content, p startParams, setup func()) *running {
 	oldLog, oldSetup, oldWait := log.Writer(), serveSetup, waitStop
 	t.Cleanup(func() { log.SetOutput(oldLog); serveSetup, waitStop = oldSetup, oldWait })
-	serveSetup = func(startParams) (startParams, startDeps) { return p, realDeps }
+	serveSetup = func(startParams) (startParams, startDeps) {
+		if setup != nil {
+			setup()
+		}
+		return p, realDeps
+	}
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
@@ -906,7 +917,7 @@ func TestTU17_ListenerGetsQueueCounters(t *testing.T) {
 		return nil, errors.New("test error")
 	}
 	var q *event.Queue
-	if code := serveWith(t.Context(), func() {}, cfg, content{}, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
+	if code := serveWith(t.Context(), func() {}, nil, cfg, content{}, tempState(t, cfg), depsWithQueue(&q), io.Discard, io.Discard); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if q == nil || got.Queue != q || got.Counters == nil || !q.Closed() {
@@ -947,7 +958,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 	p, d := tempState(t, cfg), depsWithDB(depsWithQueue(&q), &db)
 	var stdout, stderr strings.Builder
 	before := goroutineBlocks()
-	code := serveWith(t.Context(), func() {}, cfg, content{}, p, d, &stdout, &stderr)
+	code := serveWith(t.Context(), func() {}, nil, cfg, content{}, p, d, &stdout, &stderr)
 	after := goroutineBlocks()
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: decoy listener does not start\n") || stdout.Len() != 0 {
 		t.Errorf("exit %d, stderr %q, stdout %q; want 1, the fixed line and no stdout", code, stderr.String(), stdout.String())
@@ -1296,6 +1307,8 @@ type mixOpt struct {
 	seed    bool          // seed the cache, so the client makes no order
 	// viaServe starts the real serve function, not serveWith.
 	viaServe bool
+	prep     func(*testing.T, startParams) // runs before the start
+	setup    func()                        // runs in the serveSetup seam
 }
 
 // mixed is a running sensor with one static name.
@@ -1358,6 +1371,9 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		caURL, _ := cfg.Get("acme.ca")
 		seedCache(t, p, caURL.Str)
 	}
+	if o.prep != nil {
+		o.prep(t, p)
+	}
 	m := &mixed{cfg: cfg, c: c, p: p, https: https.Addr().String(), plain: plain.Addr().String()}
 	oldWarn, oldServer := warnCerts, newServer
 	t.Cleanup(func() { warnCerts, newServer = oldWarn, oldServer })
@@ -1370,7 +1386,7 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		return oldServer(cc, h)
 	}
 	if o.viaServe {
-		m.r = launchViaServe(t, cfg, c, p)
+		m.r = launchViaServeWith(t, cfg, c, p, o.setup)
 	} else {
 		m.r = launchContent(t, cfg, c, p, realDeps)
 	}
@@ -1617,7 +1633,7 @@ func TestTS27_StartBadEntry(t *testing.T) {
 	// A start that does not fail ends at the timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
-	if code := serveWith(ctx, cancel, cfg, c, tempState(t, cfg), depsWithQueue(&q), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
+	if code := serveWith(ctx, cancel, nil, cfg, c, tempState(t, cfg), depsWithQueue(&q), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "decoy listener does not start") {
 		t.Errorf("exit %d, stderr %q, want exit 1 and the fixed line", code, stderr.String())
 	}
 	if stops.Load() != 1 || closedAtStop || q == nil || !q.Closed() {
