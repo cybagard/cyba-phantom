@@ -921,3 +921,39 @@ func TestTU23ProductionWait(t *testing.T) {
 		t.Error("a closed stop did not end the wait")
 	}
 }
+
+// T-U-23: a load with an open stop returns its bundle, and the next load
+// returns too. A load that gave no bundle would keep loadMu.
+func TestTU23LoadWithOpenStop(t *testing.T) {
+	e := newEnv(t)
+	e.l.SetStop(make(chan struct{}))
+	for _, v := range []int{2, 3} {
+		e.install("bundle/current", mf(ver(v)))
+		var b *Bundle
+		var err error
+		within(t, func() { b, err = e.l.LoadFrom(SourceStart) }, nil)
+		must(t, err)
+		if b == nil || e.l.Current() != b {
+			t.Fatalf("load of version %d gave %v; want the running bundle", v, b)
+		}
+	}
+}
+
+// T-U-23: the gap wait calls the test sleep when it is set. A test sleep that
+// closes the stop gives true. The timer of 1 ns would end the wait at once, so
+// a call to the test sleep shows that the timer did not run.
+func TestTU23GapWaitUsesTestSleep(t *testing.T) {
+	e := newEnv(t)
+	l := e.l
+	stop := make(chan struct{})
+	l.SetStop(stop)
+	var waited time.Duration
+	l.sleep = func(d time.Duration) { waited = d }
+	if l.waitGap(time.Nanosecond) || waited != time.Nanosecond {
+		t.Errorf("open stop: waited %v; want a call of the test sleep and false", waited)
+	}
+	l.sleep = func(time.Duration) { close(stop) }
+	if !l.waitGap(time.Nanosecond) {
+		t.Error("a test sleep that closes the stop did not give true")
+	}
+}

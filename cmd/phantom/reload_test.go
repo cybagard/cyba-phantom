@@ -260,11 +260,18 @@ func TestTU23_SignalLoad(t *testing.T) {
 			putBundle(t, g.p.Root, g.p.BundlePath, bundleOf(t, "2026.11.01-2"), seedKey(c.seed))
 			g.hup()
 			g.clock.wait(t, 1)
-			g.free(1)
-			// The load of the rejection gives no gap, so a second SIGHUP would
-			// not show its end. The log line of the loader shows it.
-			line := `msg="bundle ` + map[string]string{"bundle_load": "loaded", "bundle_rejected": "rejected"}[c.kind] + `" source=signal`
-			until(t, "log line of the signal load", func() bool { return strings.Contains(g.r.err.String(), line) })
+			if c.swap {
+				// The swap sets the gap, so the wait of a second load shows
+				// that the first load ended.
+				g.pass(1)
+			} else {
+				// A rejection sets no gap, and the file of a second load
+				// would change the first load. No wait shows its end. So the
+				// log line of the loader is the only signal. The test polls.
+				g.free(1)
+				line := `msg="bundle rejected" source=signal`
+				until(t, "log line of the signal load", func() bool { return strings.Contains(g.r.err.String(), line) })
+			}
 			rows := g.stop()
 			if after := g.l.Load().Current(); before == nil || (after != before) != c.swap {
 				t.Errorf("swap %v, want %v", after != before, c.swap)
@@ -349,7 +356,8 @@ func (w holdWriter) WriteHeader(code int) {
 // them, so the pace holds during a swap. The run must take 1 s to 3 s. The
 // test sends 5 SIGHUPs with new bundles, spread over the run. Each gives one
 // swap and one bundle_load. The load waits in the swap gap until a request
-// that is not held begins. Before each swap, one request stops inside the
+// that the swap sends is inside the handler. The generator can have ended by
+// then. Before each swap, one request stops inside the
 // handler, after it read the running bundle. It ends after the swap. Each
 // response must have the status and the
 // body of the first one. A running bundle gives the fixed 404 page of the
@@ -380,17 +388,19 @@ func pageBundle(t testing.TB, i int) []byte {
 	return archiveOf(t, fs...)
 }
 
-// getter gives a function that makes a GET for path at the static name. A hold
-// request stops inside the handler. The function returns what it got.
-func (g *reloadRig) getter(path string) func(hold bool) (int, string, error) {
+// getter gives a function that makes a GET for path at the static name, and
+// a function that closes the idle connections of its client. A request of the
+// kind "hold" stops inside the handler. One of the kind "probe" tells the test
+// that it is inside. The first function returns what it got.
+func (g *reloadRig) getter(path string) (get func(kind string) (int, string, error), closeIdle func()) {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: staticName, InsecureSkipVerify: true}}
 	g.t.Cleanup(tr.CloseIdleConnections)
 	cl := &http.Client{Transport: tr, Timeout: netWait}
-	return func(hold bool) (code int, body string, err error) {
+	return func(kind string) (code int, body string, err error) {
 		req, _ := http.NewRequestWithContext(g.t.Context(), http.MethodGet, "https://"+g.https+path, nil)
 		req.Host = staticName
-		if hold {
-			req.Header.Set("X-Hold", "1")
+		if kind != "" {
+			req.Header.Set("X-Kind", kind)
 		}
 		resp, err := cl.Do(req)
 		if err != nil {
@@ -399,19 +409,22 @@ func (g *reloadRig) getter(path string) func(hold bool) (int, string, error) {
 		defer resp.Body.Close()
 		b, err := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b), err
-	}
+	}, tr.CloseIdleConnections
 }
 
 // sighupUnderLoad is the run of the two TestTI12 tests above.
 func sighupUnderLoad(t *testing.T, pages bool) {
 	const total, swaps = 250, 5
-	inside, gate := make(chan struct{}), make(chan struct{})
+	inside, gate, probe := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
 	oldServer := newServer
 	t.Cleanup(func() { newServer = oldServer })
 	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
 		return oldServer(c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("X-Hold") != "" {
+			switch r.Header.Get("X-Kind") {
+			case "hold":
 				w = holdWriter{w, func() { inside <- struct{}{}; <-gate }}
+			case "probe":
+				probe <- struct{}{}
 			}
 			h.ServeHTTP(w, r)
 		}))
@@ -421,8 +434,8 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 		path, first = "/page", pageBundle(t, 0)
 	}
 	g := startReloadWith(t, true, "", first)
-	get := g.getter(path)
-	wantCode, wantBody, err := get(false)
+	get, closeIdle := g.getter(path)
+	wantCode, wantBody, err := get("")
 	if err != nil || (!pages && wantCode != http.StatusNotFound) || (pages && !strings.Contains(wantBody, pageText(0))) {
 		t.Fatalf("first response %d, %q, %v; want the 404 page or the page of bundle 0", wantCode, wantBody, err)
 	}
@@ -430,8 +443,8 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 	// check makes one request. With pages and a want, the body must have the
 	// text of that page. With pages and no want, it must be a page of any
 	// bundle. With no pages, it must equal the first response.
-	check := func(hold bool, want string) {
-		code, body, err := get(hold)
+	check := func(kind, want string) {
+		code, body, err := get(kind)
 		switch {
 		case err != nil, !pages && (code != wantCode || body != wantBody):
 			failed.Add(1)
@@ -441,16 +454,17 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 			failed.Add(1)
 		}
 		sent.Add(1)
-		if hold {
+		if kind == "hold" {
 			overlapped.Add(1)
 		}
 	}
 	var wg sync.WaitGroup
-	var started atomic.Int64 // the requests that are not held and began
-	// swap holds the load in its gap wait. Then it waits for a request that
-	// is not held to begin. Then it lets the load swap. With pages, a request
-	// after the swap gets the page of bundle i. The held request ends after
-	// that and gets the page of bundle i-1.
+	var started atomic.Int64 // the requests of the generator that began
+	// swap holds the load in its gap wait. Then it sends a request of its own
+	// that is not held, and waits until the handler has it. This does not
+	// depend on the generator. Then it lets the load swap. With pages, a
+	// request after the swap gets the page of bundle i. The held request ends
+	// after that and gets the page of bundle i-1.
 	swap := func(i int) {
 		before := g.l.Load().Current()
 		next, held, now := bundleOf(t, fmt.Sprintf("2026.11.01-%d", i+1)), "", ""
@@ -458,16 +472,20 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 			next, held, now = pageBundle(t, i), pageText(i-1), pageText(i)
 		}
 		putBundle(t, g.p.Root, g.p.BundlePath, next, seedKey(goodSeed))
-		wg.Go(func() { check(true, held) })
+		wg.Go(func() { check("hold", held) })
 		<-inside
 		g.hup()
 		g.clock.wait(t, int32(i))
-		in := started.Load()
-		until(t, "request inside the swap window", func() bool { return started.Load() > in })
-		g.clock.hold <- struct{}{}
+		wg.Go(func() { check("probe", "") })
+		select {
+		case <-probe:
+		case <-time.After(netWait):
+			t.Fatal("no request inside the swap window")
+		}
+		g.free(int32(i))
 		until(t, "swap", func() bool { return g.l.Load().Current() != before })
 		if pages {
-			check(false, now)
+			check("", now)
 		}
 		gate <- struct{}{}
 	}
@@ -479,7 +497,7 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 		for range total {
 			<-tick.C
 			started.Add(1)
-			wg.Go(func() { check(false, "") })
+			wg.Go(func() { check("", "") })
 		}
 	}()
 	step := total / (swaps + 1)
@@ -489,12 +507,17 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 	}
 	<-genDone
 	wg.Wait()
-	rows := g.stop()
 	took := time.Since(begin)
+	// A connection that the client dialed and did not use keeps the shutdown
+	// of the server waiting. So the client closes its idle connections.
+	closeIdle()
+	stopAt := time.Now()
+	rows := g.stop()
+	stopTook := time.Since(stopAt)
 	if failed.Load() != 0 || sent.Load() < 200 || took < time.Second || took > 3*time.Second || overlapped.Load() != swaps ||
-		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 {
-		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v; rows %v; want 0 of 200 or more in 1 s to 3 s, 5 overlaps, 5 signal loads",
-			failed.Load(), sent.Load(), overlapped.Load(), took, rows)
+		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 || stopTook > time.Second {
+		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v, stop %v; rows %v; want 0 of 200 or more in 1 s to 3 s, 5 overlaps, 5 signal loads, stop in 1 s or less",
+			failed.Load(), sent.Load(), overlapped.Load(), took, stopTook, rows)
 	}
 }
 
@@ -510,14 +533,20 @@ func TestTI12_NoBundleThenSwap(t *testing.T) {
 	if line := g.r.out.String(); !strings.Contains(line, "bundle not healthy") {
 		t.Errorf("start line %q; want \"bundle not healthy\"", line)
 	}
-	get := g.getter("/page")
-	if code, body, err := get(false); err != nil || code != http.StatusOK || body != "hello\n" {
+	get, _ := g.getter("/page")
+	if code, body, err := get(""); err != nil || code != http.StatusOK || body != "hello\n" {
 		t.Fatalf("before the swap: %d, %q, %v; want the hello page", code, body, err)
 	}
 	putBundle(t, g.p.Root, g.p.BundlePath, pageBundle(t, 1), seedKey(goodSeed))
+	// The second load waits for the swap gap only after the first load
+	// swapped. So its wait shows the swap. The stop ends it.
 	g.hup()
-	until(t, "swap", func() bool { return g.l.Load().Current() != nil })
-	if code, body, err := get(false); err != nil || code != http.StatusOK || !strings.Contains(body, pageText(1)) {
+	g.hup()
+	g.clock.wait(t, 1)
+	if g.l.Load().Current() == nil {
+		t.Fatal("the load did not swap")
+	}
+	if code, body, err := get(""); err != nil || code != http.StatusOK || !strings.Contains(body, pageText(1)) {
 		t.Errorf("after the swap: %d, %q, %v; want the bait page of the bundle", code, body, err)
 	}
 	if rows := g.stop(); count(rows, "bundle_load", "signal") != 1 {
