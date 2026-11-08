@@ -601,10 +601,23 @@ type rejectingKey struct{ note.Verifier }
 
 func (rejectingKey) Verify(msg, sig []byte) bool { return false }
 
+// otherIdentity wraps a verifier and gives another name or another key hash.
+// Verify is the one of the real key, so it accepts the signature.
+type otherIdentity struct {
+	note.Verifier
+	name string
+	hash uint32
+}
+
+func (o otherIdentity) Name() string    { return o.name }
+func (o otherIdentity) KeyHash() uint32 { return o.hash }
+
 // TestTU18_SameKey checks that sameKey accepts the public key of the signer.
 // It also checks that sameKey refuses a verifier with the name and the key
 // hash of the signer. That verifier does not verify the signature of the
-// signer (T-U-18).
+// signer. It refuses a verifier with the name of the signer and another key
+// hash. It refuses a verifier with the key hash of the signer and another
+// name. Both verifiers accept the signature (T-U-18).
 func TestTU18_SameKey(t *testing.T) {
 	skey, vkey, err := note.GenerateKey(rand.Reader, "test/origin")
 	if err != nil {
@@ -623,6 +636,18 @@ func TestTU18_SameKey(t *testing.T) {
 	}
 	if err := sameKey(signer, rejectingKey{v}); err == nil {
 		t.Error("a verifier with the same name and hash that rejects the signature: no error")
+	}
+	const want = "public key file does not match the signer"
+	for _, c := range []struct {
+		name string
+		v    note.Verifier
+	}{
+		{"same name, other hash", otherIdentity{v, signer.Name(), signer.KeyHash() + 1}},
+		{"same hash, other name", otherIdentity{v, signer.Name() + "x", signer.KeyHash()}},
+	} {
+		if err := sameKey(signer, c.v); err == nil || err.Error() != want {
+			t.Errorf("%s: error %v, want %q", c.name, err, want)
+		}
 	}
 }
 

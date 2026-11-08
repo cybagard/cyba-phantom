@@ -98,15 +98,26 @@ type startWait struct {
 	out   *startWriter    // the stdout of who
 	ended <-chan struct{} // closes when who ends
 	info  func() string   // the exit and stderr of who. It runs after ended closed.
+	// stderr gives the stderr of who so far. It can run at any time.
+	stderr func() string
 }
+
+// startLineWait is the time that a test waits for the start line, or for a
+// later point of serve. A start took 4.3 s under disk load, so the time is much
+// longer than that.
+const startLineWait = 30 * time.Second
 
 // until waits until ready closes, or until who ends. ready is the start line, or a later point of serve.
 // When who ends first, the test fails, with one message for an end before the start line and one for
 // an end after it. An end after the start line is not a failure when afterOK is true. Then the test goes on.
+// When startLineWait passes first, the test fails. The message has the stdout
+// and the stderr so far.
 func (w startWait) until(t *testing.T, ready <-chan struct{}, afterOK bool) {
 	t.Helper()
 	select {
 	case <-ready:
+	case <-time.After(startLineWait):
+		t.Fatalf("%s did not reach the point that the test waits for in %v; stdout %q; stderr %q", w.who, startLineWait, w.out.String(), w.stderr())
 	case <-w.ended:
 		switch {
 		case !w.out.hasStarted():
@@ -234,6 +245,7 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
+	fenceCache(t) // before the wait for serve below, so it closes after it
 	ctx, cancel := context.WithCancel(t.Context())
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
@@ -264,6 +276,7 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 		}
 		return p, realDeps
 	}
+	fenceCache(t) // before the wait for serve below, so it closes after it
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
@@ -334,6 +347,8 @@ func (r *running) startWait() startWait {
 		out:   r.out,
 		ended: r.done,
 		info:  func() string { return fmt.Sprintf("exit %d; stderr %q", r.code, r.err.String()) },
+
+		stderr: r.err.String,
 	}
 }
 
@@ -357,6 +372,8 @@ func TestTS16_BindConflict(t *testing.T) {
 			var o opens
 			r := launchServe(t, cfg, p, o.deps())
 			select {
+			case <-time.After(startLineWait):
+				t.Fatalf("serve neither ended nor wrote the start line in %v; stdout %q; stderr %q", startLineWait, r.out.String(), r.err.String())
 			case <-r.done:
 			case <-r.out.started:
 				// serve wrote the start line. Stop it, then read the exit code.
@@ -507,15 +524,7 @@ func TestTS16_WildcardListen(t *testing.T) {
 			if got.Port != httpsPort {
 				t.Errorf("Port given to NewACME = %d, want %d", got.Port, httpsPort)
 			}
-			var wantNames []string
-			for i := 0; ; i++ {
-				v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
-				if v.Str == "" {
-					break
-				}
-				wantNames = append(wantNames, v.Str)
-			}
-			if !slices.Equal(got.Names, wantNames) {
+			if wantNames := []string{decoyName}; !slices.Equal(got.Names, wantNames) {
 				t.Errorf("Names given to NewACME = %q, want %q", got.Names, wantNames)
 			}
 			if want := config.CADirectory(caURL.Str); got.CA != want {
@@ -1101,6 +1110,7 @@ func TestTI03_SigtermStopsServe(t *testing.T) {
 	oldSetup, oldLog := serveSetup, log.Writer()
 	t.Cleanup(func() { serveSetup = oldSetup; log.SetOutput(oldLog) })
 	serveSetup = func(startParams) (startParams, startDeps) { return p, d }
+	fenceCache(t) // before the cleanup of serve below, so it runs after it
 	closed := closedAtReturn(t, &q)
 	waiting, sent := make(chan struct{}), make(chan struct{})
 	// release frees serve from the wrapper of waitStop.
@@ -1327,6 +1337,8 @@ func TestTI03_ColdStartBinary(t *testing.T) {
 		out:   out,
 		ended: exited,
 		info:  func() string { return fmt.Sprintf("%v; stderr %q", waitErr, errb.String()) },
+
+		stderr: errb.String,
 	}.until(t, out.started, true)
 	slow := func() string { return atBegin.startNote(out.at.Sub(begin), "") }
 	coldHandshake(t, https, begin, der, errb, slow).Close()
@@ -1568,6 +1580,39 @@ func TestTS27_StartClientParams(t *testing.T) {
 				t.Errorf("Names %q, want %q", got.Names, want)
 			}
 		})
+	}
+}
+
+// TestTS27_StartClientNames checks that serveWith gives NewACME all the
+// acme.names entries, in order. The list in the test is literal (T-S-27).
+func TestTS27_StartClientNames(t *testing.T) {
+	var got listener.ACMEParams
+	oldNew := newACME
+	t.Cleanup(func() { newACME = oldNew })
+	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap; return nil, errors.New("test error") }
+	startMixed(t, mixOpt{acme: true, name: "k1.host.zz, k2.host.zz, k3.host.zz"})
+	if want := []string{"k1.host.zz", "k2.host.zz", "k3.host.zz"}; !slices.Equal(got.Names, want) {
+		t.Errorf("Names given to NewACME = %q, want %q", got.Names, want)
+	}
+}
+
+// TestTS27_NormalName checks the 0x80 border of normalName. A name with the
+// byte 0x80 or more gives false. A name with the byte 0x7F gives true, in lower
+// case and with one trailing dot removed (T-S-27).
+func TestTS27_NormalName(t *testing.T) {
+	for _, c := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{"a\x80b.host.zz", "", false},
+		{"\x80", "", false},
+		{"a.host.zz\xff", "", false},
+		{"A\x7Fb.Host.ZZ.", "a\x7fb.host.zz", true},
+		{"\x7f", "\x7f", true},
+	} {
+		if got, ok := normalName(c.in); got != c.want || ok != c.ok {
+			t.Errorf("normalName(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }
 
