@@ -258,11 +258,28 @@ func TestTS02CallbackSegmentForms(t *testing.T) {
 	}
 }
 
-// within runs f and fails the test when f does not return in 5 s or when it
-// panics. A loop that does not stop would else last to the timeout of go test.
-// f must put its results in variables that the test reads after within.
-func within(t *testing.T, f func()) {
-	t.Helper()
+// TestMain runs the bounded scan checks before every other test of the
+// package. An older test that calls a scan which does not stop would else hang
+// until the timeout of go test, and the bounded tests would not run. A failed
+// check stops the test binary with status 1.
+func TestMain(m *testing.M) {
+	failed := false
+	for _, check := range []func() error{checkBodyReadLoop, checkBodyScanEscapes, checkQueryAdvances} {
+		if err := check(); err != nil {
+			fmt.Fprintln(os.Stderr, "FAIL:", err)
+			failed = true
+		}
+	}
+	if failed {
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+// withinErr runs f and returns an error when f does not return in 5 s or when
+// it panics. A loop that does not stop would else last to the timeout of go
+// test. f must put its results in variables that the caller reads after withinErr.
+func withinErr(f func()) error {
 	done := make(chan any, 1)
 	go func() {
 		defer func() { done <- recover() }()
@@ -271,11 +288,12 @@ func within(t *testing.T, f func()) {
 	select {
 	case p := <-done:
 		if p != nil {
-			t.Fatalf("panic: %v", p)
+			return fmt.Errorf("panic: %v", p)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("no return in 5 s")
+		return fmt.Errorf("no return in 5 s")
 	}
+	return nil
 }
 
 // stream is a body that counts its Read calls. It gives its data and then
@@ -310,6 +328,12 @@ func (s *stream) Read(p []byte) (int, error) {
 // that fills the buffer, it must not read again with an empty buffer. After
 // io.EOF, it must not read again.
 func TestTS32BodyReadLoopStops(t *testing.T) {
+	if err := checkBodyReadLoop(); err != nil {
+		t.Error(err)
+	}
+}
+
+func checkBodyReadLoop() error {
 	member := `{"tok":"` + strings.Repeat("a", candidateLen) + `"}`
 	for _, tc := range []struct {
 		name string
@@ -322,31 +346,49 @@ func TestTS32BodyReadLoopStops(t *testing.T) {
 		s := &stream{data: []byte(tc.body)}
 		r := &http.Request{Method: http.MethodPost, Body: io.NopCloser(s), ContentLength: -1}
 		var ok bool
-		within(t, func() { _, ok = BodyCandidate(r, "tok") })
+		if err := withinErr(func() { _, ok = BodyCandidate(r, "tok") }); err != nil {
+			return fmt.Errorf("%s: %w", tc.name, err)
+		}
 		if ok != tc.ok || s.calls > 2 || s.empty != 0 || s.afterEOF != 0 {
-			t.Errorf("%s: ok %v, %d reads, %d empty, %d after EOF, want %v, 2 or fewer, 0, 0", tc.name, ok, s.calls, s.empty, s.afterEOF, tc.ok)
+			return fmt.Errorf("%s: ok %v, %d reads, %d empty, %d after EOF, want %v, 2 or fewer, 0, 0", tc.name, ok, s.calls, s.empty, s.afterEOF, tc.ok)
 		}
 	}
+	return nil
 }
 
 // TestTS32BodyScanEscapes checks that the string scan moves past an escape
 // and no further. A member before the token has an escape in its value. The
 // scan must still find the token.
 func TestTS32BodyScanEscapes(t *testing.T) {
+	if err := checkBodyScanEscapes(); err != nil {
+		t.Error(err)
+	}
+}
+
+func checkBodyScanEscapes() error {
 	tok := strings.Repeat("a", candidateLen)
 	for _, v := range []string{`a\nb`, `n\n`, `\\n`, `\"`, `\` + "u0041x"} {
 		var got []byte
 		var found bool
-		within(t, func() { got, found = bodyMember([]byte(`{"x":"`+v+`","tok":"`+tok+`"}`), "tok") })
+		if err := withinErr(func() { got, found = bodyMember([]byte(`{"x":"`+v+`","tok":"`+tok+`"}`), "tok") }); err != nil {
+			return fmt.Errorf("value %q: %w", v, err)
+		}
 		if !found || string(got) != tok {
-			t.Errorf("value %q: found %v, candidate %q", v, found, got)
+			return fmt.Errorf("value %q: found %v, candidate %q", v, found, got)
 		}
 	}
+	return nil
 }
 
 // TestTS32QueryCandidateAdvances checks that the query scan moves to the part
 // after each "&". A scan that goes back reads the same part for ever.
 func TestTS32QueryCandidateAdvances(t *testing.T) {
+	if err := checkQueryAdvances(); err != nil {
+		t.Error(err)
+	}
+}
+
+func checkQueryAdvances() error {
 	tok := strings.Repeat("a", candidateLen)
 	for _, tc := range []struct{ query, want string }{
 		{"x=1&ref=" + tok, tok},
@@ -355,11 +397,14 @@ func TestTS32QueryCandidateAdvances(t *testing.T) {
 		{"ref=" + tok + "&ref=" + tok, ""},
 	} {
 		var got string
-		within(t, func() { got = QueryCandidate(tc.query, "ref") })
+		if err := withinErr(func() { got = QueryCandidate(tc.query, "ref") }); err != nil {
+			return fmt.Errorf("query %q: %w", tc.query, err)
+		}
 		if got != tc.want {
-			t.Errorf("query %q: candidate %q, want %q", tc.query, got, tc.want)
+			return fmt.Errorf("query %q: candidate %q, want %q", tc.query, got, tc.want)
 		}
 	}
+	return nil
 }
 
 // The bounds of one callback request (T-S-32, T-P-12). They come from a
