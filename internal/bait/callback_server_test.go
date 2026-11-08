@@ -126,19 +126,20 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 		}
 	}
 
-	// Keep-alive is the default. net/http drains the unread body before it
-	// writes the response. The read budget closes the connection first, so the
-	// client gets no status line. The request event shows the route.
+	// A request with no "Connection: close" gets the same result, because the
+	// route sends "Connection: close" for itself. net/http writes the response
+	// and does not drain the body first. The client gets status 200. The
+	// request event shows the route.
 	before := ln.n.Load()
 	status, reqs = oneRequest(300<<10, false, false)
-	if status != 0 {
-		t.Errorf("large body, keep-alive: status line %d, want none", status)
+	if status != http.StatusOK {
+		t.Errorf("large body, no close header: status line %d, want 200", status)
 	}
-	wantRequest("large body, keep-alive", reqs)
-	wantBound("large body, keep-alive", ln.n.Load()-before)
+	wantRequest("large body, no close header", reqs)
+	wantBound("large body, no close header", ln.n.Load()-before)
 
-	// With "Connection: close", net/http writes the response and drains the
-	// body later. The client gets status 200. The byte bound is the same.
+	// With "Connection: close" in the request, the result is the same. The byte
+	// bound is the same.
 	before = ln.n.Load()
 	status, reqs = oneRequest(300<<10, false, true)
 	if status != http.StatusOK {

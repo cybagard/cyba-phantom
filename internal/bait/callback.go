@@ -72,9 +72,12 @@ func routeEntry(routes map[string]*entry, p string) *entry {
 func (e *entry) acceptsPost() bool { return e != nil && e.cb != nil && e.cb.body != "" }
 
 // callback answers a request for the callback route e. It reads the candidates
-// and the body, writes the fixed response and flushes it. Only then it checks
-// the tokens and builds the events. The response code reads no token result,
-// so each result gives the same bytes. The route sets no cookie.
+// and the body, writes the fixed response with "Connection: close" and flushes
+// it. Then it closes the connection. Only then it checks the tokens and builds
+// the events. So neither the close nor a next request shows the result. A
+// writer that cannot hijack keeps the check after the flush. The response code
+// reads no token result, so each result gives the same bytes. The route sets
+// no cookie.
 func (h *Handler) callback(w http.ResponseWriter, r *http.Request, sess *reqSession, e *entry) int {
 	var texts [token.Positions]string
 	cb := e.cb
@@ -100,11 +103,13 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, sess *reqSess
 		hd["Content-Type"] = e.ctype
 		hd["Content-Length"] = e.clen
 	}
+	hd["Connection"] = connClose
 	w.WriteHeader(code)
 	if e.isAsset && r.Method != http.MethodHead {
 		_, _ = e.asset.WriteTo(w)
 	}
 	_ = http.NewResponseController(w).Flush()
+	closeConn(w)
 	if h.flushHook != nil {
 		h.flushHook()
 	}
