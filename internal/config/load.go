@@ -114,6 +114,7 @@ var keys = []key{
 	{path: "privacy.store_body_prefix", kind: kindBool, def: "true"},
 	{path: "privacy.include_ip", kind: kindBool, def: "false"},
 	{path: "privacy.session_cookie", kind: kindBool, def: "true"},
+	{path: "privacy.js_beacon", kind: kindBool, def: "true"},
 }
 
 // Value is one effective config value.

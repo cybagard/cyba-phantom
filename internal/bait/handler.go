@@ -107,7 +107,16 @@ type Handler struct {
 	// capped counts the verified tokens that the cap refused. It adds one for
 	// each such token. It is for phantom_callback_capped_total.
 	capped atomic.Uint64
+	// beaconOff is true when the JS beacon is off (SEC-38). The beacon paths
+	// are then paths with no route. A request reads it one time.
+	beaconOff atomic.Bool
 }
+
+// DisableBeacon turns the JS beacon off (SEC-38). A GET or HEAD of a beacon
+// path then gets the 404 decoy, and no beacon event is made. It is safe to call
+// while requests run. A request that has started keeps the value that it read,
+// so one request uses one value.
+func (h *Handler) DisableBeacon() { h.beaconOff.Store(true) }
 
 // DisableSessionCookie turns the session cookie off (SEC-35). No response then
 // has a Set-Cookie header, and each request gets the keyed id of its client
@@ -323,11 +332,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serve answers the request from b and returns the status that it wrote. The
 // order of the steps is host, beacon path, method and path. A host with no
 // vhost gets the fixed 404 page. The two beacon paths of the vhost come next.
-// They are not routes (see serveBeacon). A path with no route gets the 404
-// template of the vhost, or the fixed 404 page. A template route renders its
-// template. A method other than GET and HEAD gets the fixed 405 page. A POST to
-// a callback route with a body position is the exception. A POST to the beacon
-// post path is the other. Only these two read a body.
+// They are not routes (see serveBeacon). With the beacon off, they are paths
+// with no route. A path with no route gets the 404 template of the vhost, or
+// the fixed 404 page. A template route renders its template. A method other
+// than GET and HEAD gets the fixed 405 page. A POST to a callback route with a
+// body position is the exception. A POST to the beacon post path is the other.
+// Only these two read a body.
 // A render that ends the connection writes the event itself and does not
 // return. A template page and an asset response set the cookie of a new
 // session. A fixed page does not.
@@ -340,7 +350,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle
 		reply(w, http.StatusNotFound, notFoundBody)
 		return http.StatusNotFound
 	}
-	if bp := s.beacons[string(name)]; bp != nil {
+	if bp := s.beacons[string(name)]; bp != nil && !h.beaconOff.Load() {
 		if code, ok := h.serveBeacon(w, r, sess, bp); ok {
 			return code
 		}
