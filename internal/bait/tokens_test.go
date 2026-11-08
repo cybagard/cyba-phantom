@@ -352,6 +352,12 @@ func TestTS31NoTokenOrCookieText(t *testing.T) {
 // the trap n.
 func mixedBundle(t *testing.T, seed byte, ids ...string) *bundle.Bundle {
 	t.Helper()
+	return bundleFiles(t, "", mixedFiles(t, seed, ids...))
+}
+
+// mixedFiles gives the files of mixedBundle that replace the test archive.
+func mixedFiles(t *testing.T, seed byte, ids ...string) map[string]string {
+	t.Helper()
 	const dir = "vhosts/example.com/"
 	var traps []map[string]string
 	for _, id := range ids {
@@ -360,12 +366,12 @@ func mixedBundle(t *testing.T, seed byte, ids ...string) *bundle.Bundle {
 	}
 	tj, err := json.Marshal(traps)
 	mustOK(t, err)
-	return bundleFiles(t, "", map[string]string{
+	return map[string]string{
 		"secrets/token.seed": strings.Repeat(string([]byte{seed}), 32),
 		"traps/traps.json":   string(tj),
 		dir + "routes.json":  `{"routes":[{"path":"/t","template":"` + dir + `t.tmpl","type":"text/html; charset=utf-8","headers":[{"name":"X-Note","trap":"n"}]}]}`,
 		dir + "t.tmpl":       `<p>{{index .Trap "f"}}</p>`,
-	})
+	}
 }
 
 // verifyUnder verifies the token text s under the key set of b.
@@ -438,7 +444,7 @@ func TestTS31MintIndexList(t *testing.T) {
 // slotBundle loads a bundle with one trap for each id of ids, in this order.
 // The route /t has the template tmpl and one header slot X-P<i> for the trap
 // headers[i].
-func slotBundle(t *testing.T, ids []string, tmpl string, headers []string) *bundle.Bundle {
+func slotBundle(t testing.TB, ids []string, tmpl string, headers []string) *bundle.Bundle {
 	t.Helper()
 	const dir = "vhosts/example.com/"
 	var traps []map[string]string

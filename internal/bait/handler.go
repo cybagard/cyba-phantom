@@ -65,6 +65,9 @@ type Handler struct {
 	// hook runs between the Load and the CompareAndSwap of siteOf. It is nil
 	// in production. A test sets it.
 	hook func()
+	// mintHook runs in a template render, after the route lookup and before the
+	// mint. It is nil in production. A test sets it.
+	mintHook func()
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64
 	// slotDrops counts the header slots left out of a response because the
