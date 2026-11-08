@@ -3,11 +3,17 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	bundlefetch "github.com/cybagard/cyba-phantom/internal/bundle/fetch"
+	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
@@ -20,6 +26,21 @@ func releaseTrust() bundle.TrustSet { return bundle.TrustSet{} }
 var (
 	bundleTrust = releaseTrust
 	newLoader   = bundle.NewLoader
+	// newFetchClient makes the client of the fetcher. A test replaces it to
+	// see the logger that newFetcher gives.
+	newFetchClient = bundlefetch.New
+	// newFetcher makes the fetcher of the URL. It gives the run function
+	// and the freeze input of the fetcher. For a URL that the client refuses,
+	// it gives an error and no functions.
+	newFetcher = func(url string, private []netip.Prefix, every time.Duration,
+		l *bundle.Loader, lg *slog.Logger) (run func(context.Context), frozen func() bool, err error) {
+		c, err := newFetchClient(url, private, lg)
+		if err != nil {
+			return nil, nil, err
+		}
+		f := bundlefetch.NewFetcher(c, l, every)
+		return f.Run, f.Frozen, nil
+	}
 )
 
 // bundlePart is the bundle part of the process. A nil loader means that no
@@ -27,6 +48,9 @@ var (
 type bundlePart struct {
 	l  *bundle.Loader
 	lg *slog.Logger
+	// watch is the expiry watch. startFetchAndWatch sets it. The pointer is
+	// nil with no watch.
+	watch atomic.Pointer[bundle.ExpiryWatch]
 }
 
 // Reload asks the loader for one load with the source src. It is the one
@@ -99,4 +123,39 @@ func startBundle(p startParams, s *storePart, q *event.Queue, lg *slog.Logger) *
 	l.SetEvents(q, lg)
 	_, _ = l.Load(true) // the loader reports the result; Healthy shows it
 	return &bundlePart{l: l, lg: lg}
+}
+
+// startFetchAndWatch starts the fetcher and the expiry watch in wg, both until
+// ctx ends. It does nothing with no loader. The fetcher starts only with a
+// bundle.fetch_url. When newFetcher gives an error, the function writes one
+// fixed line, and the sensor goes on with no fetcher (C3). The watch gets the
+// freeze input of the fetcher, or nil with no fetcher. The watch has no hook:
+// no alert sink exists yet.
+func (b *bundlePart) startFetchAndWatch(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config) {
+	if b.l == nil {
+		return
+	}
+	var frozen func() bool
+	if u, _ := cfg.Get("bundle.fetch_url"); u.Str != "" {
+		every, _ := cfg.Get("bundle.fetch_interval")
+		run, fz, err := newFetcher(u.Str, cfg.PrivateList("bundle.fetch_private"), every.Dur, b.l, b.lg)
+		if err != nil {
+			b.lg.Error("bundle fetcher does not start")
+		} else {
+			frozen = fz
+			wg.Go(func() { run(ctx) })
+		}
+	}
+	w := bundle.NewExpiryWatch(b.l, frozen, nil, b.lg)
+	b.watch.Store(w)
+	wg.Go(func() { w.Run(ctx) })
+}
+
+// Degraded gives the reasons of the degraded state of the bundle. It is nil
+// when no watch runs. It is safe for concurrent use.
+func (b *bundlePart) Degraded() []string {
+	if w := b.watch.Load(); w != nil {
+		return w.Reasons()
+	}
+	return nil
 }
