@@ -117,7 +117,7 @@ const aesHelperEnv = "PHANTOM_TEST_AES_HELPER"
 // CPU check must give false (SEC-33).
 func TestTS29_RealCheckOffGivesFalse(t *testing.T) {
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
-		t.Skip("the cpu.aes option exists on amd64 and arm64 only")
+		t.Skip("the test runs on amd64 and arm64 only")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
