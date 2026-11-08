@@ -351,15 +351,16 @@ func (w holdWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// TestTI12_SighupUnderLoad sends 250 decoy requests to the static name, one
-// each 5 ms (at most 200 each second, 1.25 s). A goroutine of its own sends
-// them, so the pace holds during a swap. The run must take 1 s to 3 s. The
-// test sends 5 SIGHUPs with new bundles, spread over the run. Each gives one
+// TestTI12_SighupUnderLoad sends decoy requests to the static name, one each
+// 5 ms (at most 200 each second). A goroutine of its own sends them, so the
+// pace holds during a swap. It sends at least 250 and runs until the last
+// swap ended, so the load is continuous in every swap. The test does not
+// bound the run time, as that measures the speed of the machine. The test
+// sends 5 SIGHUPs with new bundles, spread over the run. Each gives one
 // swap and one bundle_load. The load waits in the swap gap until a request
-// that the swap sends is inside the handler. The generator can have ended by
-// then. Before each swap, one request stops inside the
-// handler, after it read the running bundle. It ends after the swap. Each
-// response must have the status and the
+// that the swap sends is inside the handler. Before each swap, one request
+// stops inside the handler, after it read the running bundle. It ends after
+// the swap. Each response must have the status and the
 // body of the first one. A running bundle gives the fixed 404 page of the
 // bait handler. The hello page serves with no bundle only. The bundles have
 // no pages, so this is not the run with bait pages.
@@ -460,6 +461,7 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 	}
 	var wg sync.WaitGroup
 	var started atomic.Int64 // the requests of the generator that began
+	var swapsDone atomic.Bool
 	// swap holds the load in its gap wait. Then it sends a request of its own
 	// that is not held, and waits until the handler has it. This does not
 	// depend on the generator. Then it lets the load swap. With pages, a
@@ -494,8 +496,12 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 		defer close(genDone)
 		tick := time.NewTicker(5 * time.Millisecond)
 		defer tick.Stop()
-		for range total {
-			<-tick.C
+		for n := 0; n < total || !swapsDone.Load(); n++ {
+			select {
+			case <-tick.C:
+			case <-t.Context().Done():
+				return
+			}
 			started.Add(1)
 			wg.Go(func() { check("", "") })
 		}
@@ -505,6 +511,7 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 		until(t, "request count for the swap", func() bool { return started.Load() >= int64(i*step) })
 		swap(i)
 	}
+	swapsDone.Store(true)
 	<-genDone
 	wg.Wait()
 	took := time.Since(begin)
@@ -514,10 +521,11 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 	stopAt := time.Now()
 	rows := g.stop()
 	stopTook := time.Since(stopAt)
-	if failed.Load() != 0 || sent.Load() < 200 || took < time.Second || took > 3*time.Second || overlapped.Load() != swaps ||
-		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 || stopTook > time.Second {
-		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v, stop %v; rows %v; want 0 of 200 or more in 1 s to 3 s, 5 overlaps, 5 signal loads, stop in 1 s or less",
-			failed.Load(), sent.Load(), overlapped.Load(), took, stopTook, rows)
+	minTook := time.Duration(started.Load()-1) * 5 * time.Millisecond
+	if failed.Load() != 0 || sent.Load() < 200 || took < minTook || overlapped.Load() != swaps ||
+		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 || stopTook >= shutdownTime {
+		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v (at least %v), stop %v; rows %v; want 0 of 200 or more, at most 200 each second, 5 overlaps, 5 signal loads, stop before %v",
+			failed.Load(), sent.Load(), overlapped.Load(), took, minTook, stopTook, rows, shutdownTime)
 	}
 }
 
