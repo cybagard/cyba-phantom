@@ -42,6 +42,7 @@ go/scanner
 go/token
 golang.org/x/mod/sumdb/note
 golang.org/x/mod/sumdb/tlog
+golang.org/x/sys/cpu
 html/template
 io
 io/fs
@@ -62,6 +63,7 @@ os/signal
 path
 path/filepath
 regexp
+runtime
 slices
 sort
 strconv

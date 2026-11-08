@@ -56,6 +56,8 @@ var (
 )
 
 // serveWith runs the sensor on the state of p until ctx ends.
+// The start checks the CPU for hardware AES first. With none, it writes one
+// fixed warning line, sets the health flag, and goes on (SEC-33).
 // The start order is: the queue, the two listen sockets, the store part,
 // the bundle part, and the decoy server.
 // The bundle part loads only when the store part has a writer.
@@ -96,6 +98,11 @@ var (
 // error gives one fixed line.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
+	noAES := !hasHardwareAES()
+	noHardwareAES.Store(noAES)
+	if noAES {
+		fmt.Fprintln(stderr, aesWarning)
+	}
 	counters := event.NewCounters()
 	depth, _ := cfg.Get("limits.queue_depth")
 	q, err := event.NewQueue(int(depth.Int), counters)
@@ -239,6 +246,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	}
 	if !b.Healthy() {
 		startLine += " — bundle not healthy"
+	}
+	if noAES {
+		startLine += " — no hardware AES"
 	}
 	if certLine != "" && acme != nil {
 		startLine += " — certificate client start failed"
