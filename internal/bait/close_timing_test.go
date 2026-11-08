@@ -217,7 +217,7 @@ func TestTS32CloseBeforeCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		beacon, good bool
-		route        string // the callback route, or "" for the one with an asset
+		route        string // the callback route, or "" for the asset route
 		noBody       bool   // a beacon post with no body
 	}{
 		{name: "callback, good tokens", good: true},
