@@ -4,6 +4,7 @@ package bait
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -47,18 +48,22 @@ type site struct {
 	traps []bundle.Trap
 	// acts maps a template name to its trap action indexes. The build calls
 	// TrapIndexes one time for each name. Each entry of the template shares
-	// the slice. The slice must not change.
+	// the slice. The slice has no spare capacity and must not change.
 	acts map[string][]int
 }
 
 // mintOf gives the entry the key-set indexes of one mint. They are the trap
 // actions of its template, then the header slots whose trap is in the bundle.
-// A slot with no trap adds to left. pos maps a trap id to its index.
+// The action part is shared by the entries of the template. The slot part is
+// the own part of the entry. A slot with no trap adds to left. pos maps a trap
+// id to its index.
 func (s *site) mintOf(e *entry, b *bundle.Bundle, pos map[string]int) {
 	if name := e.route.Template; name != "" {
 		a, ok := s.acts[name]
 		if !ok {
 			a, _ = b.TrapIndexes(name)
+			// Clip leaves no spare capacity, so an append copies the slice.
+			a = slices.Clip(a)
 			s.acts[name] = a
 		}
 		e.acts = a
@@ -119,6 +124,9 @@ func buildSite(b *bundle.Bundle) *site {
 			}
 			e.ctype = []string{r.Type}
 			s.mintOf(e, b, pos)
+			// The build has copied the slots into slots and names. No request
+			// reads the headers, so the entry does not keep them.
+			e.route.Headers = nil
 			paths[r.Path] = e
 		}
 		if rm.NotFound != "" {

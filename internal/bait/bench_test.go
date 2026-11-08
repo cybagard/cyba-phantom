@@ -137,7 +137,8 @@ const (
 	// baseRoutes is the number of routes of the test archive.
 	baseRoutes = 10
 	// siteHeapLimit is the most heap, in bytes, that one site keeps (T-S-28).
-	// The bundle is at the route cap. It has the largest legal route shapes.
+	// The bundle is at the route cap. The shapes of boundShapes are the largest
+	// ones that a search found. They are not a proof of the maximum.
 	siteHeapLimit = 10 << 20
 	// maxRouteMap is the most routes in one route map.
 	maxRouteMap = 256
@@ -150,6 +151,12 @@ const (
 	// most. 256 vhosts do not load. The archive entries are 20 + 2 * 255. This
 	// is below the 1024 of MaxEntries.
 	mostVhosts = 255
+	// assetSlotsVhosts is the vhost count of the "asset slots" shape.
+	assetSlotsVhosts = 214
+	// templateSlotsVhosts and templateSlotsActions are the vhosts and the trap
+	// actions of the "template slots 29" shape. (16384 - 64) / 423 is 38.
+	templateSlotsVhosts  = 423
+	templateSlotsActions = 38
 )
 
 // shapeSpec describes the vhosts of one bundle shape. The routes of the test
@@ -157,23 +164,23 @@ const (
 type shapeSpec struct {
 	// vhosts is the number of vhosts. They share the routes equally.
 	vhosts int
-	// file and body are a file that every route of a vhost can name. An empty
-	// file adds no file.
-	file, body string
+	// vfiles are the files of a vhost that its routes can name, from the file
+	// name to the body.
+	vfiles map[string]string
 	// route gives the JSON of route j of a vhost.
 	route func(host string, j int) string
 	// members gives the text that follows the routes in a route map, or nil.
 	// It always has a not_found member.
 	members func(host string) string
-	// traps adds traps/traps.json with 64 traps.
-	traps bool
+	// traps is the text of traps/traps.json. An empty text adds no file.
+	traps string
 }
 
 // files makes the files of the vhosts of the shape.
 func (sp shapeSpec) files() map[string]string {
 	files := map[string]string{}
-	if sp.traps {
-		files["traps/traps.json"] = trapSet()
+	if sp.traps != "" {
+		files["traps/traps.json"] = sp.traps
 	}
 	total := routeCap - baseRoutes
 	for i := range sp.vhosts {
@@ -191,8 +198,8 @@ func (sp shapeSpec) files() map[string]string {
 			tail = sp.members(host)
 		}
 		files["vhosts/"+host+"/routes.json"] = `{"routes":[` + strings.Join(parts, ",") + `]` + tail + `}`
-		if sp.file != "" {
-			files["vhosts/"+host+"/"+sp.file] = sp.body
+		for name, body := range sp.vfiles {
+			files["vhosts/"+host+"/"+name] = body
 		}
 	}
 	return files
@@ -222,28 +229,48 @@ func actionsPage(n int) string {
 // templateSpec is a shape of template routes in vhosts. A route has actions
 // trap actions and slots header slots with 34-byte names.
 func templateSpec(actions, slots, vhosts int) shapeSpec {
-	return shapeSpec{vhosts, "p.tmpl", actionsPage(actions), func(host string, j int) string {
-		headers := ""
-		if slots > 0 {
-			var hs []string
-			for k := range slots {
-				hs = append(hs, fmt.Sprintf(`{"name":%q,"trap":"t%d"}`, longName(fmt.Sprintf("X-Probe-%d-", k), 34), k))
-			}
-			headers = `,"headers":[` + strings.Join(hs, ",") + `]`
-		}
-		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8"%s}`, j, host, headers)
-	}, nil, true}
+	return shapeSpec{vhosts, map[string]string{"p.tmpl": actionsPage(actions)}, func(host string, j int) string {
+		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8"%s}`, j, host, slotsJSON("t", slots))
+	}, nil, trapSet()}
 }
 
-// vhostsSpec is the shape of the most vhosts. Each route has 64 actions and
-// four slots. Each vhost also has a not_found of the same template and a
-// beacon.
-func vhostsSpec() shapeSpec {
-	sp := templateSpec(64, 4, mostVhosts)
+// slotsJSON gives the headers member of a route with slots header slots. The
+// names have 34 bytes. The trap of slot k is the id trapPrefix and k.
+func slotsJSON(trapPrefix string, slots int) string {
+	if slots == 0 {
+		return ""
+	}
+	var hs []string
+	for k := range slots {
+		hs = append(hs, fmt.Sprintf(`{"name":%q,"trap":"%s%d"}`, longName(fmt.Sprintf("X-Probe-%d-", k), 34), trapPrefix, k))
+	}
+	return `,"headers":[` + strings.Join(hs, ",") + `]`
+}
+
+// withNotFound adds to each vhost of sp a not_found member that names the
+// template p.tmpl, and a beacon.
+func withNotFound(sp shapeSpec) shapeSpec {
 	sp.members = func(host string) string {
 		return `,"not_found":"vhosts/` + host + `/p.tmpl","beacon":{"script":"/b.js","post":"/b/p"}`
 	}
 	return sp
+}
+
+// assetSlotsSpec is a shape of asset routes with four header slots. Each asset
+// has 100 bytes. The not_found template of a vhost has no action. The bundle
+// has 1020 traps of 15 tokens each, and the four traps h0 to h3 of the slots.
+func assetSlotsSpec() shapeSpec {
+	specs := make([]trapSpec, 0, 1024)
+	for i := range 1020 {
+		specs = append(specs, trapSpec{fmt.Sprint("t", i), "hidden-p", strings.Repeat("{{.Token}}", 15)})
+	}
+	for k := range 4 {
+		specs = append(specs, trapSpec{fmt.Sprint("h", k), "hidden-p", "{{.Token}}"})
+	}
+	files := map[string]string{"f": strings.Repeat("f", 100), "p.tmpl": actionsPage(0)}
+	return withNotFound(shapeSpec{assetSlotsVhosts, files, func(host string, j int) string {
+		return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"%s}`, j, host, slotsJSON("h", 4))
+	}, nil, trapsJSON(specs)})
 }
 
 // callbackSpec is a shape of callback routes with all four positions and an
@@ -251,9 +278,9 @@ func vhostsSpec() shapeSpec {
 func callbackSpec() shapeSpec {
 	cb := fmt.Sprintf(`{"segment":true,"query":%q,"header":%q,"body":%q}`,
 		longName("q", 32), longName("X-Cb-", 34), longName("b", 32))
-	return shapeSpec{vhostsFor(slotMapRoutes), "f", "f", func(host string, j int) string {
+	return shapeSpec{vhostsFor(slotMapRoutes), map[string]string{"f": "f"}, func(host string, j int) string {
 		return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png","callback":%s}`, j, host, cb)
-	}, nil, false}
+	}, nil, ""}
 }
 
 // retainedOf builds the site of bd and gives the bytes of heap that it keeps
@@ -277,15 +304,24 @@ type shape struct {
 	spec shapeSpec
 }
 
-// boundShapes are the largest legal route shapes at the route cap. T-S-28
-// bounds the site table of each one.
+// boundShapes are the largest legal route shapes that a search found at the
+// route cap. The search is not a proof of the maximum. T-S-28 bounds the site
+// table of each one. The first three make a route large with trap actions and
+// header slots. "most vhosts" has the most vhosts with the largest template.
+// The callback shape has the most callback positions. "asset slots" makes the
+// vhost count large: asset routes can have header slots, and 214 vhosts gave
+// the most bytes in a scan of 200 to 334 vhosts. "template slots 29" has 423
+// vhosts of about 29 routes, just over a growth step of a map in Go, with the
+// largest template that still loads.
 func boundShapes() []shape {
 	return []shape{
 		{"64 actions", templateSpec(64, 0, vhostsFor(maxRouteMap))},
 		{"4 slots", templateSpec(0, 4, vhostsFor(slotMapRoutes))},
 		{"64 actions and 4 slots", templateSpec(64, 4, vhostsFor(slotMapRoutes))},
-		{"most vhosts", vhostsSpec()},
+		{"most vhosts", withNotFound(templateSpec(64, 4, mostVhosts))},
 		{"callbacks with 4 positions", callbackSpec()},
+		{"asset slots", assetSlotsSpec()},
+		{"template slots 29", withNotFound(templateSpec(templateSlotsActions, 4, templateSlotsVhosts))},
 	}
 }
 
@@ -293,12 +329,12 @@ func boundShapes() []shape {
 // shapes of boundShapes.
 func benchShapes() []shape {
 	return append([]shape{
-		{"assets", shapeSpec{vhostsFor(maxRouteMap), "f", "f", func(host string, j int) string {
+		{"assets", shapeSpec{vhostsFor(maxRouteMap), map[string]string{"f": "f"}, func(host string, j int) string {
 			return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"}`, j, host)
-		}, nil, false}},
-		{"callbacks", shapeSpec{vhostsFor(maxRouteMap), "", "", func(_ string, j int) string {
+		}, nil, ""}},
+		{"callbacks", shapeSpec{vhostsFor(maxRouteMap), nil, func(_ string, j int) string {
 			return fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j)
-		}, nil, false}},
+		}, nil, ""}},
 	}, boundShapes()...)
 }
 
