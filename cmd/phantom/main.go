@@ -3,6 +3,7 @@
 // The binary reads one config file. "phantom <path>" loads it and binds the two listen sockets.
 // It starts the store, the writer and the checkpointer. It starts the certificate client
 // and the decoy listener. Then it waits for SIGINT or SIGTERM.
+// SIGHUP loads the bundle again.
 // "phantom --check <path>" only validates the file (FR-12). Both modes use the same load function.
 // Both modes read acme.ca_root and the tls.certs files and name a bad key.
 // --check prints each private list entry with its key path.
@@ -63,13 +64,15 @@ func run(args, env []string, stdout, stderr io.Writer) int {
 }
 
 // serve runs the sensor until SIGINT or SIGTERM (see serveWith). A test replaces it.
-// serve sets the signal handler before the start, so it catches a signal
-// during the start.
+// serve sets the signal handlers before the start, so it catches a signal
+// during the start. A SIGHUP asks for a bundle load (see serveWith).
 var serve = func(cfg *config.Config, c content, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	hup := notifyReload()
+	defer signal.Stop(hup)
 	p, d := serveSetup(paramsOf(cfg))
-	return serveWith(ctx, stop, cfg, c, p, d, stdout, stderr)
+	return serveWith(ctx, stop, hup, cfg, c, p, d, stdout, stderr)
 }
 
 // printPrivateLists writes one line for each entry of each private list.
