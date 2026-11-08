@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -739,6 +740,7 @@ type stopRig struct {
 	stop  chan struct{}
 	began chan struct{}
 	q     *event.Queue
+	log   bytes.Buffer // the log of the loader, with no time attribute
 	once  sync.Once
 }
 
@@ -749,7 +751,13 @@ func newStopRig(t *testing.T) *stopRig {
 	s.q, err = event.NewQueue(8, event.NewCounters())
 	must(t, err)
 	l := s.e.l
-	l.SetEvents(s.q, nil)
+	l.SetEvents(s.q, slog.New(slog.NewTextHandler(&s.log, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		}})))
 	l.SetStop(s.stop)
 	l.sleep = func(time.Duration) {
 		s.began <- struct{}{}
@@ -789,8 +797,20 @@ func (s *stopRig) stoppedLoad(err error, run *Bundle) {
 	}
 }
 
+// logLine checks that the loader wrote one log line for the stopped load: the
+// message, the level Info and the attribute source with src only. Call it
+// after the load returned.
+func (s *stopRig) logLine(src string) {
+	s.t.Helper()
+	want := "level=INFO msg=\"bundle load stopped\" source=" + src + "\n"
+	if got := s.log.String(); got != want {
+		s.t.Errorf("log %q, want %q", got, want)
+	}
+}
+
 // T-U-23: a stop during the swap-gap wait of a load ends the wait at once. The
 // load does not start: it gives ErrStopped, reads no file and sends no event.
+// It writes one log line.
 func TestTU23StopEndsGapWait(t *testing.T) {
 	s := newStopRig(t)
 	l, run := s.e.l, s.e.l.Current()
@@ -801,6 +821,7 @@ func TestTU23StopEndsGapWait(t *testing.T) {
 	recv(t, s.began)
 	s.close()
 	s.stoppedLoad(recv(t, done), run)
+	s.logLine("signal")
 	if len(s.starts) != 0 {
 		t.Errorf("%d reads of the bundle file", len(s.starts))
 	}
@@ -818,6 +839,7 @@ func TestTU23StopEndsGapWaitFetched(t *testing.T) {
 	recv(t, s.began)
 	s.close()
 	s.stoppedLoad(recv(t, done), run)
+	s.logLine("fetch")
 	if dirListing(t, dir) != before {
 		t.Error("the bundle directory changed")
 	}
@@ -922,8 +944,8 @@ func TestTU23ProductionWait(t *testing.T) {
 	}
 }
 
-// T-U-23: a load with an open stop returns its bundle, and the next load
-// returns too. A load that gave no bundle would keep loadMu.
+// T-U-23: two start loads in a row both return a bundle. A start load does not
+// read the stop. A load that gave no bundle would keep loadMu.
 func TestTU23LoadWithOpenStop(t *testing.T) {
 	e := newEnv(t)
 	e.l.SetStop(make(chan struct{}))

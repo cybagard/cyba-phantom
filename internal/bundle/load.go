@@ -275,7 +275,9 @@ type Loader struct {
 	// stop is set by SetStop. A nil stop never closes.
 	stop <-chan struct{}
 
-	// events and log are set by SetEvents. loadMu guards them. Each can be nil.
+	// events and log are set by SetEvents under loadMu. A stopped load reads
+	// log without loadMu. So a caller calls SetEvents before the first load
+	// that is not a start load. Each can be nil.
 	events *event.Queue
 	log    *slog.Logger
 
