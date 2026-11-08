@@ -9,9 +9,9 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 )
 
-// mintCases are the token counts of one mint and the probe values of
-// allocations and bytes for the mint. 68 is 64 trap actions and 4 header slots,
-// the most that a loaded template has.
+// mintCases are the token counts of one mint and the reference values of
+// allocations and bytes for the mint. 68 is the 64 trap actions of a template
+// and the 4 header slots of a route.
 var mintCases = []struct{ n, allocs, bytes int }{
 	{1, 4, 480}, {16, 36, 3544}, {64, 132, 14169}, {68, 140, 14745},
 }
@@ -64,17 +64,29 @@ func benchMint(b *testing.B, f mintFixture) {
 }
 
 // TestTS31MintBounds checks the mint step for 1, 16, 64 and 68 tokens. It
-// allocates at most the probe value plus 10 %. testing.AllocsPerRun gives the
-// allocations of one mint. The bytes are the growth of TotalAlloc in
+// allocates at most the reference value plus 10 %. testing.AllocsPerRun gives
+// the allocations of one mint. The bytes are the growth of TotalAlloc in
 // runtime.ReadMemStats over 100 mints, after one warm-up mint, divided by 100.
-// The race detector adds a few allocations, so the limit holds with it too.
+// With -race, N=68 allocated 147 times on the commit of this test. The limit
+// is 154.
 func TestTS31MintBounds(t *testing.T) {
 	const runs = 100
 	var before, after runtime.MemStats
 	for _, c := range mintCases {
 		f := newMintFixture(t, c.n)
-		if got := f.h.mint(f.b, f.s, f.e, &reqSession{at: testDay}); len(got.slots)+len(got.page.Trap) != c.n {
-			t.Fatalf("N=%d: mint gives %d texts", c.n, len(got.slots)+len(got.page.Trap))
+		got := f.h.mint(f.b, f.s, f.e, &reqSession{at: testDay})
+		if len(got.slots)+len(got.page.Trap) != c.n || f.h.noKeys.Load() != 0 {
+			t.Fatalf("N=%d: mint gives %d texts, noKeys %d", c.n, len(got.slots)+len(got.page.Trap), f.h.noKeys.Load())
+		}
+		for id, v := range got.page.Trap {
+			if !tokenRE.MatchString(v) {
+				t.Fatalf("N=%d: trap text of %s has no token", c.n, id)
+			}
+		}
+		for _, sh := range got.slots {
+			if len(sh.val) != 1 || !tokenRE.MatchString(sh.val[0]) {
+				t.Fatalf("N=%d: header slot %s has no token", c.n, sh.name)
+			}
 		}
 		allocs := testing.AllocsPerRun(100, f.run)
 		f.run()

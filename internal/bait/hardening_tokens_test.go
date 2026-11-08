@@ -50,8 +50,9 @@ func swapLoader(t *testing.T) (l *bundle.Loader, put func(seed byte, n int)) {
 // under the key set of the old bundle, which is second in the list. It gives
 // the trap of its slot. The request event goes through a real store writer.
 // The stored mint row is the only one, and its set id is that of the old
-// bundle. The test also checks that the swap comes before the key set of the
-// mint. The test does not wait for the zero of the old seed.
+// bundle. The test also checks the order. The site of the route comes first,
+// then the swap, then the key set of the mint. The key function is the one of
+// the handler, wrapped. The test does not wait for the zero of the old seed.
 func TestTS31SwapDuringRender(t *testing.T) {
 	l, put := swapLoader(t)
 	old := l.Current()
@@ -66,16 +67,18 @@ func TestTS31SwapDuringRender(t *testing.T) {
 		mustOK(t, err)
 		order = append(order, "swap")
 	}
+	keys := h.keys
 	h.keys = func(b *bundle.Bundle) *token.KeySet {
 		order = append(order, "keys")
-		return b.Tokens()
+		return keys(b)
 	}
+	h.hook = func() { order = append(order, "site") }
 	w := serve(t, h, get("/t", "example.com"))
 	if cur == nil || l.Current() != cur || cur == old {
 		t.Fatal("the hook did not swap the running bundle")
 	}
-	if !slices.Equal(order, []string{"swap", "keys"}) {
-		t.Fatalf("order %v, want the swap before the key set of the mint", order)
+	if !slices.Equal(order, []string{"site", "swap", "keys"}) {
+		t.Fatalf("order %v, want the site, the swap, then the key set of the mint", order)
 	}
 	texts := tokenRE.FindAllString(w.Body.String()+" "+w.Header().Get("X-Note"), -1)
 	if w.Code != 200 || len(texts) != 2 {
@@ -227,10 +230,11 @@ func TestTS31RowsForEachRequest(t *testing.T) {
 	}
 }
 
-// cookieCalls gives the position of each call of a method named Cookie,
-// Cookies or CookiesNamed in src. The match is on the syntax tree, so a comment
-// or a string does not match.
-func cookieCalls(path string, src any) ([]gotoken.Position, error) {
+// cookieRefs gives the position of each selector in src that refers to
+// Cookie, Cookies, CookiesNamed or ParseCookie. A call, a method value, a
+// method expression and a field of a literal all have a selector. The match is
+// on the syntax tree, so a comment or a string does not match.
+func cookieRefs(path string, src any) ([]gotoken.Position, error) {
 	fset := gotoken.NewFileSet()
 	f, err := parser.ParseFile(fset, path, src, 0)
 	if err != nil {
@@ -238,38 +242,54 @@ func cookieCalls(path string, src any) ([]gotoken.Position, error) {
 	}
 	var out []gotoken.Position
 	ast.Inspect(f, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && slices.Contains([]string{"Cookie", "Cookies", "CookiesNamed"}, sel.Sel.Name) {
-				out = append(out, fset.Position(sel.Sel.Pos()))
-			}
+		if sel, ok := n.(*ast.SelectorExpr); ok && slices.Contains([]string{"Cookie", "Cookies", "CookiesNamed", "ParseCookie"}, sel.Sel.Name) {
+			out = append(out, fset.Position(sel.Sel.Pos()))
 		}
 		return true
 	})
 	return out, nil
 }
 
-// TestTS31NoRequestCookieCall fails when a file of the package that is not a
-// test calls the Cookie, Cookies or CookiesNamed method. The session cookie
-// comes from session.CookieFromHeader. The check reads the files of each GOOS
-// and GOARCH, as TestTS02DirectImports does.
+// cookieSample has seven references that cookieRefs must report. It also has
+// a comment and a string that it must not report.
+const cookieSample = `package p
+// r.Cookie("sid")
+func f(r *http.Request) {
+	_ = "r.Cookies()"
+	r.Cookie("sid")
+	fmt.Println(r.Cookie("sid"))
+	g := r.Cookie
+	h := (*http.Request).Cookie
+	_ = T{F: r.CookiesNamed}
+	http.ParseCookie("a=b")
+	x.y.Cookies()
+}
+`
+
+// TestTS31NoRequestCookieCall fails when a file of this package or of
+// internal/session, that is not a test, refers to the Cookie, Cookies,
+// CookiesNamed or ParseCookie method or function. The session cookie comes
+// from session.CookieFromHeader. The check reads the files of each GOOS and
+// GOARCH, as TestTS02DirectImports does.
 func TestTS31NoRequestCookieCall(t *testing.T) {
-	const src = "package p\n// r.Cookie(\"sid\")\nfunc f(r *http.Request) { _ = \"r.Cookies()\"; r.Cookie(\"sid\"); r.CookiesNamed(\"a\"); x.y.Cookies() }\n"
-	if got, err := cookieCalls("p.go", src); err != nil || len(got) != 3 {
-		t.Fatalf("the scan finds %v (%v), want 3 calls and none in the comment or the string", got, err)
+	if got, err := cookieRefs("p.go", cookieSample); err != nil || len(got) != 7 {
+		t.Fatalf("the scan finds %v (%v), want 7 references and none in the comment or the string", got, err)
 	}
 	ctx := build.Default
 	ctx.UseAllFiles = true
-	pkg, err := ctx.ImportDir(".", 0)
-	mustOK(t, err)
-	files := slices.Concat(pkg.GoFiles, pkg.CgoFiles, pkg.IgnoredGoFiles)
-	if len(files) == 0 {
-		t.Fatal("the package has no file")
-	}
-	for _, name := range files {
-		calls, err := cookieCalls(filepath.Join(pkg.Dir, name), nil)
+	for _, dir := range []string{".", "../session"} {
+		pkg, err := ctx.ImportDir(dir, 0)
 		mustOK(t, err)
-		for _, p := range calls {
-			t.Errorf("%s: call of a cookie method of the request", p)
+		files := slices.Concat(pkg.GoFiles, pkg.CgoFiles)
+		if len(files) == 0 {
+			t.Fatalf("%s has no file", dir)
+		}
+		for _, name := range files {
+			refs, err := cookieRefs(filepath.Join(pkg.Dir, name), nil)
+			mustOK(t, err)
+			for _, p := range refs {
+				t.Errorf("%s: reference to a cookie function of the request", p)
+			}
 		}
 	}
 }
