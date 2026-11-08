@@ -2,6 +2,7 @@ package bait
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -64,22 +65,30 @@ func benchMint(b *testing.B, f mintFixture) {
 
 // TestTS31MintBounds checks the mint step for 1, 16, 64 and 68 tokens. It
 // allocates at most the probe value plus 10 %. testing.AllocsPerRun gives the
-// allocations of one mint. A run of testing.Benchmark gives the bytes of one
-// mint. The race detector adds a few allocations, so the limit
-// holds with it too.
+// allocations of one mint. The bytes are the growth of TotalAlloc in
+// runtime.ReadMemStats over 100 mints, after one warm-up mint, divided by 100.
+// The race detector adds a few allocations, so the limit holds with it too.
 func TestTS31MintBounds(t *testing.T) {
+	const runs = 100
+	var before, after runtime.MemStats
 	for _, c := range mintCases {
 		f := newMintFixture(t, c.n)
 		if got := f.h.mint(f.b, f.s, f.e, &reqSession{at: testDay}); len(got.slots)+len(got.page.Trap) != c.n {
 			t.Fatalf("N=%d: mint gives %d texts", c.n, len(got.slots)+len(got.page.Trap))
 		}
 		allocs := testing.AllocsPerRun(100, f.run)
-		bytes := testing.Benchmark(func(b *testing.B) { benchMint(b, f) }).AllocedBytesPerOp()
+		f.run()
+		runtime.ReadMemStats(&before)
+		for range runs {
+			f.run()
+		}
+		runtime.ReadMemStats(&after)
+		bytes := (after.TotalAlloc - before.TotalAlloc) / runs
 		t.Logf("N=%d: %v allocations, %d bytes", c.n, allocs, bytes)
 		if limit := c.allocs + c.allocs/10; allocs > float64(limit) {
 			t.Errorf("N=%d: %v allocations, limit %d", c.n, allocs, limit)
 		}
-		if limit := int64(c.bytes + c.bytes/10); bytes > limit {
+		if limit := uint64(c.bytes + c.bytes/10); bytes > limit {
 			t.Errorf("N=%d: %d bytes, limit %d", c.n, bytes, limit)
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
@@ -47,15 +48,16 @@ func swapLoader(t *testing.T) (l *bundle.Loader, put func(seed byte, n int)) {
 // bundle has another seed. The swap comes after the route lookup and before
 // the mint. The request keeps the bundle that it read. Each token verifies
 // under the key set of the old bundle, which is second in the list. It gives
-// the trap of its slot. The mint range has the set id of the old bundle. The
-// test also checks that the swap comes before the key set of the mint. The
-// test does not wait for the zero of the old seed.
+// the trap of its slot. The request event goes through a real store writer.
+// The stored mint row is the only one, and its set id is that of the old
+// bundle. The test also checks that the swap comes before the key set of the
+// mint. The test does not wait for the zero of the old seed.
 func TestTS31SwapDuringRender(t *testing.T) {
 	l, put := swapLoader(t)
 	old := l.Current()
 	put(0x0b, 2)
-	q := queueOf(t, 8)
-	h := New(loaderSrc{l}, &fallbackFn{}, q)
+	rig := newStoreRig(t)
+	h := NewWithDayKey(loaderSrc{l}, &fallbackFn{}, rig.q, rig.dk)
 	var cur *bundle.Bundle
 	var order []string
 	h.mintHook = func() {
@@ -89,10 +91,16 @@ func TestTS31SwapDuringRender(t *testing.T) {
 			t.Errorf("token %d verifies under the new bundle", i)
 		}
 	}
-	m, ok := q.Drain()[0].Mint()
+	rig.drain(t)
+	var setID []byte
+	var count int
 	sum := old.SHA256()
-	if !ok || string(m.SetID[:]) != string(sum[:8]) || m.Count != 2 {
-		t.Errorf("mint %+v (%v), want the set id of the old bundle", m, ok)
+	if n := countOf(t, rig.db, "SELECT count(*) FROM mint"); n != 1 {
+		t.Fatalf("%d mint rows, want 1", n)
+	}
+	mustOK(t, rig.db.QueryRow("SELECT set_id, count FROM mint").Scan(&setID, &count))
+	if string(setID) != string(sum[:8]) || count != 2 {
+		t.Errorf("mint row %x count %d, want the set id %x of the old bundle", setID, count, sum[:8])
 	}
 }
 
@@ -137,13 +145,18 @@ func countOf(t *testing.T, db *sql.DB, query string, args ...any) (n int) {
 	return n
 }
 
-// TestTS31RowsForEachRequest serves requests through the handler into a real
-// writer. Each request gives one event row of kind request. A request with a
-// mint gives one mint row, and a request with none gives no mint row. Three
-// requests of one session give one session row with req_count 3. No mint range
-// comes twice to the writer. The statement count of the writer is not checked:
-// the store has no exported way to read it.
-func TestTS31RowsForEachRequest(t *testing.T) {
+// storeRig is a queue with a real store writer behind it. The handler of a test
+// shares the queue and the day key.
+type storeRig struct {
+	q  *event.Queue
+	w  *store.Writer
+	db *sql.DB
+	dk *session.DayKey
+}
+
+// newStoreRig opens a database and a log in a new state directory.
+func newStoreRig(t *testing.T) storeRig {
+	t.Helper()
 	top, err := filepath.EvalSymlinks(t.TempDir())
 	mustOK(t, err)
 	state := filepath.Join(top, "state")
@@ -158,10 +171,35 @@ func TestTS31RowsForEachRequest(t *testing.T) {
 	lg, err := tlog.OpenLog(root, "tlog")
 	mustOK(t, err)
 	t.Cleanup(func() { lg.Close() })
-
 	q, dk := queueOf(t, 16), session.NewDayKey()
 	w := store.NewWriterWithDayKey(db, q, false, nil, store.Recovery{State: root, Origin: "origin", Log: lg}, dk)
-	h := NewWithDayKey(fixedSource{mixedBundle(t, 0x09, "f", "n")}, &fallbackFn{}, q, dk)
+	return storeRig{q, w, db, dk}
+}
+
+// drain closes the queue and runs the writer until it has stored each event.
+// It fails when the writer stops or sees a mint range twice.
+func (r storeRig) drain(t *testing.T) {
+	t.Helper()
+	r.q.Close()
+	mustOK(t, r.w.Run(context.Background()))
+	if !r.w.Healthy() {
+		t.Fatalf("the writer stopped: %v", r.w.Err())
+	}
+	if d := r.w.MintDuplicates(); d != 0 {
+		t.Errorf("%d mint ranges that the table already had", d)
+	}
+}
+
+// TestTS31RowsForEachRequest serves requests through the handler into a real
+// writer. Each request gives one event row of kind request. A request with a
+// mint gives one mint row, and a request with none gives no mint row. Three
+// requests of one session give one session row with req_count 3. No mint range
+// comes twice to the writer. The statement count of the writer is not checked:
+// the store has no exported way to read it.
+func TestTS31RowsForEachRequest(t *testing.T) {
+	rig := newStoreRig(t)
+	q, db := rig.q, rig.db
+	h := NewWithDayKey(fixedSource{mixedBundle(t, 0x09, "f", "n")}, &fallbackFn{}, q, rig.dk)
 	// Three requests of the first client mint. The second client gets the
 	// fixed 404 page, so its request has no mint.
 	for _, c := range []struct{ ip, target string }{
@@ -171,14 +209,7 @@ func TestTS31RowsForEachRequest(t *testing.T) {
 		r.RemoteAddr = c.ip
 		serve(t, h, r)
 	}
-	q.Close()
-	mustOK(t, w.Run(context.Background()))
-	if !w.Healthy() {
-		t.Fatalf("the writer stopped: %v", w.Err())
-	}
-	if d := w.MintDuplicates(); d != 0 {
-		t.Errorf("%d mint ranges that the table already had", d)
-	}
+	rig.drain(t)
 	for _, c := range []struct {
 		what, query string
 		want        int
