@@ -315,15 +315,15 @@ func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-U-26: a run ends early, with the retention rule, when ctx ends, when a row
-// request stops the writer, or when the queue closes between two chunks. The
-// chunk before it stays whole, and no second chunk commits.
+// T-U-26: a run ends early, with the retention rule, in three cases between two
+// chunks. These are: ctx ends, a row request stops the writer, or the queue
+// closes. The chunk before stays whole, and no second chunk commits.
 func TestTU26RunEndsEarly(t *testing.T) {
 	cases := []struct {
 		name    string
-		trigger func(r *rig, cancel context.CancelFunc) // runs in the first statement
+		trigger func(r *rig, cancel context.CancelFunc) // in the first statement
 		healthy bool
-		waitRun bool  // wait for Run, which then returns wantRun
+		waitRun bool  // wait for Run, which returns wantRun
 		wantRun error // the result of Run
 	}{
 		{"ctx ends", func(_ *rig, cancel context.CancelFunc) { cancel() }, true, true, context.Canceled},
@@ -479,8 +479,8 @@ func TestTU26RunRetentionSendsNoRequestAtOnce(t *testing.T) {
 
 // T-U-26: a caller that has left gets no run. If it leaves before the first
 // chunk, no step runs. If it leaves during the first chunk, no second chunk
-// runs. Between the chunks the writer writes a batch only when it has one: the
-// drop counts wait for a tick, and no tick comes.
+// runs. Between the chunks the writer writes a batch only when it has one.
+// The drop counts wait for a tick, and no tick comes.
 func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 	for _, between := range []bool{false, true} {
 		t.Run(fmt.Sprint("between chunks ", between), func(t *testing.T) {
