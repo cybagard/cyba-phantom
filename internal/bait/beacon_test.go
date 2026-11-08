@@ -84,13 +84,13 @@ func (e *bcEnv) ticket(t testing.TB, addr, cookie string) string {
 // the fixed text with the post path and the ticket of the session. Each request
 // has marker bytes in the query, a header and the cookie. None is in the body.
 // The cookie is not set. HEAD gets the headers and no body. A request with no
-// session id gets an empty ticket. The longest post path gives 309 bytes. A host
-// in capitals with a port gets the same script.
+// session id gets an empty ticket. The longest post path gives 309 bytes. A
+// host in capitals with a port gets the same script.
 func TestTU25BeaconScript(t *testing.T) {
 	long := "/" + strings.Repeat("p", 255)
 	for _, c := range []struct {
 		name, host, post, method, addr string
-		ticketOf                       string // address of the session, "" for none
+		ticketOf                       string // session address, "" for none
 		longest                        bool
 	}{
 		{"plain", "example.com", bcPost, "GET", bcAddr, "192.0.2.1", false},
@@ -132,8 +132,8 @@ func TestTU25BeaconScript(t *testing.T) {
 
 // TestTU25BeaconMethods checks the methods of the two beacon paths. Another
 // method gets the fixed 405 page with its Allow value and reads no body byte.
-// A vhost with no beacon member gives the fixed 404 page for both paths, or its
-// 404 template if it has one.
+// A vhost with no beacon member gives the fixed 404 page for both paths. If it
+// has a 404 template, it gives that page.
 func TestTU25BeaconMethods(t *testing.T) {
 	e := newBC(t, bcPost)
 	all := []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
@@ -332,7 +332,7 @@ func BenchmarkBeaconScript(b *testing.B) { benchBC(b, "GET", bcScript, false) }
 // event and the request event.
 func BenchmarkBeaconPost(b *testing.B) { benchBC(b, "POST", bcPost, true) }
 
-// benchBC measures one request. If withTicket is set, the body is a valid ticket.
+// benchBC measures one request. With withTicket, the body is a valid ticket.
 func benchBC(b *testing.B, method, target string, withTicket bool) {
 	e := newBC(b, bcPost)
 	body := ""
