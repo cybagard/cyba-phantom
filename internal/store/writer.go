@@ -258,7 +258,7 @@ func (w *Writer) Run(ctx context.Context) error {
 					batch, evidence = w.flush(batch), false
 					batch = w.serveWaiting(tick, batch)
 					// A stopped writer, or a ctx that has ended, starts no run.
-					if w.Healthy() && ctx.Err() == nil {
+					if ctx.Err() == nil {
 						select {
 						case rq := <-w.retention:
 							batch = w.serveRetention(ctx, tick, batch, rq)

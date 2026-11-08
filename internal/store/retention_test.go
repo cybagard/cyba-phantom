@@ -373,14 +373,17 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 			for i := range maxBatch {
 				r.add(event.KindRequest, int64(i))
 			}
-			done, cancel := r.launchCancelable(context.Background())
+			done, _ := r.launchCancelable(context.Background())
 			select {
 			case <-hooked:
 			case <-time.After(waitFor):
 				t.Fatal("the batch did not reach its COMMIT")
 			}
-			cancel()
-			r.wait(done)
+			// Run ends after the take loop. A cancel here would end it too early.
+			r.q.Close()
+			if err := r.wait(done); err != nil {
+				t.Fatal(err)
+			}
 			if r.w.Healthy() || calls != 0 || len(*stmts) != 0 || len(r.w.retention) != 1 || len(rq.reply) != 0 || r.events() != 10 {
 				t.Fatalf("healthy %v, %d steps, statements %v, %d waiting, %d replies, %d rows",
 					r.w.Healthy(), calls, *stmts, len(r.w.retention), len(rq.reply), r.events())
