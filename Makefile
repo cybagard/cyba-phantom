@@ -6,6 +6,10 @@
 
 GO := go
 
+# Output folder of the build target. A plain assignment: the environment
+# cannot change it. The test of the release build sets it on the command line.
+BINDIR := bin
+
 # Exact toolchain pin (T-P-07 reproducibility): every go command runs the
 # same Go release everywhere — downloaded with Go's checksum verification
 # when the local toolchain differs from the pinned one.
@@ -21,9 +25,10 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 all: build lint test trace mirror-diff
 
 # -s -w removes the symbol table and DWARF. Panic traces keep function names.
+# GOENV=off stops the go tool from reading the go env file (go env -w).
 build:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/phantom ./cmd/phantom
-	CGO_ENABLED=0 $(GO) build -trimpath -o bin/phantom-verify ./cmd/phantom-verify
+	GOENV=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o $(BINDIR)/phantom ./cmd/phantom
+	GOENV=off CGO_ENABLED=0 $(GO) build -trimpath -o $(BINDIR)/phantom-verify ./cmd/phantom-verify
 
 test:
 	$(GO) test -race ./...
