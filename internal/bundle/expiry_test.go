@@ -56,16 +56,21 @@ func newWatched(e *env, now time.Time, extra func()) *watched {
 			extra()
 		}
 	}
-	x.w = NewExpiryWatch(e.l, x.freeze.Load, hook, slog.New(slog.NewTextHandler(x.buf, nil)))
-	x.w.now = func() time.Time { return *x.now.Load() }
-	x.w.after = func(d time.Duration) <-chan time.Time {
+	x.use(NewExpiryWatch(e.l, x.freeze.Load, hook, slog.New(slog.NewTextHandler(x.buf, nil))))
+	return x
+}
+
+// use sets the watch of x, with the test clock and the test wait.
+func (x *watched) use(w *ExpiryWatch) {
+	x.w = w
+	w.now = func() time.Time { return *x.now.Load() }
+	w.after = func(d time.Duration) <-chan time.Time {
 		select {
 		case x.waits <- d:
 		default:
 		}
 		return x.tick
 	}
-	return x
 }
 
 // setNow sets the clock of the watch.
@@ -326,6 +331,39 @@ func TestTS06WatchSendsNoEvent(t *testing.T) {
 	if p.buf.Len() != 0 {
 		t.Errorf("the loader log has %q", p.buf.String())
 	}
+}
+
+// T-U-23: a hook that calls Reasons sees the new state. It does not wait for a
+// lock that the check holds. The first check waits at most 5 s.
+func TestTU23HookSeesNewState(t *testing.T) {
+	e := running(t)
+	seen := make(chan []string, 4)
+	var x *watched
+	x = newWatched(e, expiryOf(e).Add(time.Hour), func() { seen <- x.w.Reasons() })
+	x.start()
+	select {
+	case got := <-seen:
+		if !slices.Equal(got, []string{ReasonExpired}) {
+			t.Errorf("the hook saw %v; want [expired]", got)
+		}
+	default:
+		t.Fatal("the hook did not run")
+	}
+}
+
+// T-U-23: a watch with no freeze input, no hook and no log works. It reports an
+// expired bundle and the clear after a swap, and it does not panic.
+func TestTU23WatchWithNilInputs(t *testing.T) {
+	e := running(t)
+	x := newWatched(e, expiryOf(e).Add(time.Hour), nil)
+	x.use(NewExpiryWatch(e.l, nil, nil, nil))
+	x.start()
+	x.wantReasons(ReasonExpired)
+	e.install("bundle/current", mf(ver(3), laterExpires...))
+	_, err := e.l.Load(false)
+	must(t, err)
+	x.await()
+	x.wantReasons()
 }
 
 // T-U-23: a hook can call a method that takes the load lock.

@@ -243,6 +243,13 @@ type Loader struct {
 	chain    *chain
 	chainErr error
 
+	// sigKept is the mark: <name>.sig.tmp is a kept file. An install renames it
+	// first and never removes or replaces it. A rename of the file to
+	// <name>.sig clears the mark. So does a load that accepts <name>.cbnd with
+	// <name>.sig, and an install that finds no file. A bad_sig of a
+	// roll-forward also clears it. It is not on disk. loadMu guards it.
+	sigKept bool
+
 	// swapAt is the time of the last swap, or zero before the first swap.
 	// swapMu guards it, so a load can read it while it waits without loadMu.
 	swapMu sync.Mutex
@@ -391,9 +398,19 @@ func (l *Loader) Healthy() bool {
 // A path with the archive name of a record gives ErrArchiveInvalid. The name is
 // "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not count. Load
 // checks this before the chain check and before any read.
-// A start load that gives bad_sig tries once more with <name>.sig.tmp. The
-// file must be there and pass the file rule. The try has each check. The start
-// load then removes each install temporary file. LoadFetched has the install.
+// A start load that gives bad_sig tries once more with <name>.sig.tmp. So does
+// a start load with <name>.cbnd and no <name>.sig. Another archive_invalid
+// gives no try. The file must be there and pass the file rule. The try has each
+// check. The loader sets a mark before it loads with the file. The rename
+// comes after the record and the version state, and before the swap. A
+// failure before the rename, for example an expired bundle, keeps the file
+// and the mark. The rename makes the file <name>.sig and clears the mark.
+// A bad_sig clears the mark. A load that accepts the pair of <name>.cbnd and
+// <name>.sig, with no try, also clears the mark. A start load that stops at
+// the directory part, the state-file name or the chain check removes no
+// temporary file. After another start load, the loader removes
+// <name>.cbnd.tmp. It removes <name>.sig.tmp only if it has no mark.
+// LoadFetched has the install.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	if start {
@@ -403,7 +420,8 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 }
 
 // load is Load without the lock and without the event. loadMu is held. It sets
-// rd when it has read the bundle file and the signature file.
+// rd when it has read the bundle file and a signature file. In a roll-forward,
+// that file can be <name>.sig.tmp.
 func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	dir, name, c, closeDir, err := l.prepare(start)
 	if err != nil {
@@ -411,22 +429,28 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	}
 	defer closeDir()
 	if start {
-		defer removeInstallTemps(dir, name)
+		defer l.removeTemps(dir, name)
 	}
 	archive, err := safefile.ReadFile(dir, name+".cbnd", fileRule(MaxBundleBytes))
-	var sig []byte
-	if err == nil {
-		sig, err = safefile.ReadFile(dir, name+".sig", fileRule(MaxSigBytes))
-	}
 	if err != nil {
+		return nil, ErrArchiveInvalid
+	}
+	sig, err := safefile.ReadFile(dir, name+".sig", fileRule(MaxSigBytes))
+	if err != nil {
+		if start && errors.Is(err, fs.ErrNotExist) {
+			return l.rollForward(dir, name, c, archive, rd, ErrArchiveInvalid)
+		}
 		return nil, ErrArchiveInvalid
 	}
 	if l.afterRead != nil {
 		l.afterRead()
 	}
-	b, err := l.loadBytes(dir, c, archive, sig, start, rd, nil)
+	b, err := l.loadBytes(dir, c, archive, sig, start, rd, nil, nil)
 	if start && errors.Is(err, ErrBadSig) {
 		return l.rollForward(dir, name, c, archive, rd, err)
+	}
+	if err == nil {
+		l.sigKept = false
 	}
 	return b, err
 }
@@ -457,9 +481,10 @@ func (l *Loader) prepare(start bool) (dir *os.Root, name string, c chain, closeD
 
 // loadBytes runs each check on the archive and signature bytes, and then the
 // record, the version state and the swap. install, when it is not nil, runs
-// before the record of a transition bundle. When it fails, loadBytes gives
-// ErrInstallFault. loadMu is held. It sets rd.
-func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start bool, rd *digest, install func() error) (*Bundle, error) {
+// before the record of a transition bundle. after, when it is not nil, runs
+// after the version state and before the swap. When either fails, loadBytes
+// gives ErrInstallFault. loadMu is held. It sets rd.
+func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start bool, rd *digest, install, after func() error) (*Bundle, error) {
 	sum := sha256.Sum256(archive)
 	*rd = digest{sum, true}
 	ids, err := VerifySig(archive, sig, c.trust)
@@ -577,6 +602,13 @@ func (l *Loader) loadBytes(dir *os.Root, c chain, archive, sig []byte, start boo
 			l.dropRecord(dir, n, &c)
 		}
 		return reject(fixed(err))
+	}
+	// A failed rename keeps the version state and the record. The next start
+	// rolls forward, and the rollback rule accepts the bundle.
+	if after != nil {
+		if err := after(); err != nil {
+			return reject(ErrInstallFault)
+		}
 	}
 	// A load of the same bundle keeps its key set and the ring. A swap would
 	// drop the key set of the bundle that the running bundle replaced. For
