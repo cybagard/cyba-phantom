@@ -424,7 +424,7 @@ func TestTS27_CheckContentGood(t *testing.T) {
 			code, so, se, calls := runMode(t, mode == "check", body)
 			wantCalls, wantOut := 1, ""
 			if mode == "check" {
-				wantCalls, wantOut = 0, "privacy.session_cookie: true\nphantom: config is valid\n"
+				wantCalls, wantOut = 0, "privacy.session_cookie: true\nprivacy.js_beacon: true\nphantom: config is valid\n"
 			}
 			if code != 0 || se != "" || calls != wantCalls || so != wantOut {
 				t.Errorf("exit %d, stderr %q, stdout %q, serve calls %d", code, se, so, calls)

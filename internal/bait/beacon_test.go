@@ -232,6 +232,77 @@ func TestTS32BeaconPost(t *testing.T) {
 	}
 }
 
+// newBCOff returns a bcEnv like newBC, with the beacon off. If nf is set,
+// example.com also has a 404 template. The ticket is one that the script gave
+// while the beacon was on.
+func newBCOff(t testing.TB, nf bool) (e *bcEnv, tk string) {
+	t.Helper()
+	rm := strings.TrimSuffix(routesJSON("example.com", exampleRoutes), "}") +
+		`,"beacon":{"script":"` + bcScript + `","post":"` + bcPost + `"}`
+	files := map[string]string{}
+	if nf {
+		rm += `,"not_found":"vhosts/example.com/nf.tmpl"`
+		files["vhosts/example.com/nf.tmpl"] = bcNF
+	}
+	files["vhosts/example.com/routes.json"] = rm + "}"
+	e = &bcEnv{q: queueOf(t, 64), now: testDay}
+	e.h = New(fixedSource{bundleFiles(t, "", files)}, &fallbackFn{}, e.q)
+	e.h.now = func() time.Time { return e.now }
+	tk = e.ticket(t, bcAddr, "")
+	e.h.DisableBeacon()
+	return e, tk
+}
+
+// TestTU25BeaconOff checks the off switch (SEC-38). A request to a beacon path
+// gets what the same method gets on a path with no route. The status, body and
+// headers are the same. GET and HEAD get the 404 template or the fixed 404
+// page. POST gets the fixed 405 page. Set-Cookie is there only where the
+// no-route page has it. The body has no ticket. No request makes a beacon
+// event. Each makes one request event.
+func TestTU25BeaconOff(t *testing.T) {
+	for _, nf := range []bool{false, true} {
+		e, tk := newBCOff(t, nf)
+		cookieOf := func(w *httptest.ResponseRecorder) bool {
+			_, ok := w.Header()["Set-Cookie"]
+			return ok
+		}
+		for _, m := range []string{"GET", "HEAD", "POST"} {
+			body := ""
+			if m == "POST" {
+				body = tk
+			}
+			ref, _ := e.do(m, "/no-route", "example.com", bcAddr, "", body, -2)
+			e.q.Drain()
+			if m == "GET" && (ref.Code != 404 || (ref.Body.String() == bcNF) != nf) {
+				t.Fatalf("nf %t: no-route page has code %d, body %q", nf, ref.Code, ref.Body.String())
+			}
+			if m == "POST" && ref.Code != 405 {
+				t.Fatalf("nf %t: POST to a path with no route has code %d, want 405", nf, ref.Code)
+			}
+			if m == "GET" && cookieOf(ref) != nf {
+				t.Fatalf("nf %t: no-route page has Set-Cookie %t", nf, cookieOf(ref))
+			}
+			for _, p := range []string{bcScript, bcPost} {
+				w, _ := e.do(m, p, "example.com", bcAddr, "", body, -2)
+				evs := e.q.Drain()
+				h, rh := w.Header().Clone(), ref.Header().Clone()
+				h.Del("Set-Cookie")
+				rh.Del("Set-Cookie")
+				if w.Code != ref.Code || w.Body.String() != ref.Body.String() || !reflect.DeepEqual(h, rh) || cookieOf(w) != cookieOf(ref) {
+					t.Errorf("nf %t: %s %s: code %d body %q header %v, want code %d body %q header %v",
+						nf, m, p, w.Code, w.Body.String(), w.Header(), ref.Code, ref.Body.String(), ref.Header())
+				}
+				if strings.Contains(w.Body.String(), tk) || strings.Contains(w.Body.String(), "sendBeacon") {
+					t.Errorf("nf %t: %s %s: body %q has script text", nf, m, p, w.Body.String())
+				}
+				if len(evs) != 1 || evs[0].Kind() != event.KindRequest {
+					t.Errorf("nf %t: %s %s: %d events, want 1 request event", nf, m, p, len(evs))
+				}
+			}
+		}
+	}
+}
+
 // bcReader is a request body for the post path. It gives data, then end. At
 // most step bytes come in a call. If late is set, end comes in a later call.
 // An endless body gives one byte for each call, and 0 bytes for an empty

@@ -144,7 +144,7 @@ func requireNoNet(t *testing.T, label string, d noNet, r noNet) {
 // of both modes (T-S-10). The test checks the types first. It calls a
 // method only on a noNet value.
 func TestTS10_CheckWiring(t *testing.T) {
-	const valid = "privacy.session_cookie: true\nphantom: config is valid\n"
+	const valid = "privacy.session_cookie: true\nprivacy.js_beacon: true\nphantom: config is valid\n"
 	var got config.Net
 	old := loadWith
 	file := writeFile(t, validBody(t))
@@ -246,9 +246,9 @@ func TestTS10_CheckFileRules(t *testing.T) {
 func TestTU24_CheckSessionCookie(t *testing.T) {
 	const valid = "phantom: config is valid\n"
 	rows := []struct{ name, extra, want string }{
-		{"default", "", "privacy.session_cookie: true\n" + valid},
-		{"true", "privacy:\n  session_cookie: true\n", "privacy.session_cookie: true\n" + valid},
-		{"false", "privacy:\n  session_cookie: false\n", "privacy.session_cookie: false\n" + valid},
+		{"default", "", "privacy.session_cookie: true\nprivacy.js_beacon: true\n" + valid},
+		{"true", "privacy:\n  session_cookie: true\n", "privacy.session_cookie: true\nprivacy.js_beacon: true\n" + valid},
+		{"false", "privacy:\n  session_cookie: false\n", "privacy.session_cookie: false\nprivacy.js_beacon: true\n" + valid},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -262,6 +262,34 @@ func TestTU24_CheckSessionCookie(t *testing.T) {
 		t.Run("refused "+v, func(t *testing.T) {
 			code, so, se, _ := runMode(t, true, validBody(t)+"privacy:\n  session_cookie: "+v+"\n")
 			if code != 1 || so != "" || !strings.Contains(se, "privacy.session_cookie") {
+				t.Errorf("exit %d, stdout %q, stderr %q; want 1, no stdout, and the key path", code, so, se)
+			}
+		})
+	}
+}
+
+// TestTU25_CheckJSBeacon checks that --check prints the effective value of
+// privacy.js_beacon after the session cookie line. A value that is not a bool
+// gives exit 1 and names the key (T-U-25).
+func TestTU25_CheckJSBeacon(t *testing.T) {
+	const valid = "phantom: config is valid\n"
+	rows := []struct{ name, extra, want string }{
+		{"default", "", "privacy.session_cookie: true\nprivacy.js_beacon: true\n" + valid},
+		{"true", "privacy:\n  js_beacon: true\n", "privacy.session_cookie: true\nprivacy.js_beacon: true\n" + valid},
+		{"false", "privacy:\n  js_beacon: false\n", "privacy.session_cookie: true\nprivacy.js_beacon: false\n" + valid},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			code, so, se, calls := runMode(t, true, validBody(t)+r.extra)
+			if code != 0 || so != r.want || se != "" || calls != 0 {
+				t.Errorf("exit %d, stdout %q, stderr %q, serve calls %d; want 0, %q, nothing, 0", code, so, se, calls, r.want)
+			}
+		})
+	}
+	for _, v := range []string{"on", "yes", "1", `"true"`} {
+		t.Run("refused "+v, func(t *testing.T) {
+			code, so, se, _ := runMode(t, true, validBody(t)+"privacy:\n  js_beacon: "+v+"\n")
+			if code != 1 || so != "" || !strings.Contains(se, "privacy.js_beacon") {
 				t.Errorf("exit %d, stdout %q, stderr %q; want 1, no stdout, and the key path", code, so, se)
 			}
 		})
@@ -299,7 +327,7 @@ func TestTS10_CheckExec(t *testing.T) {
 	}
 	bad := writeFile(t, "acme:\n  email: sec@example.com\nlisten:\n  nope: 1\n")
 	code, so, se := runCheck(writeFile(t, validBody(t)))
-	if code != 0 || so != "privacy.session_cookie: true\nphantom: config is valid\n" || se != "" {
+	if code != 0 || so != "privacy.session_cookie: true\nprivacy.js_beacon: true\nphantom: config is valid\n" || se != "" {
 		t.Errorf("valid file: exit %d, stdout %q, stderr %q", code, so, se)
 	}
 	code, _, se = runCheck(writeFile(t, validBody(t)), "PHANTOM_ACME_CA=not a url")
