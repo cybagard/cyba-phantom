@@ -69,6 +69,9 @@ type Handler struct {
 	// mintHook runs in a template render, after the route lookup and before the
 	// mint. It is nil in production. A test sets it.
 	mintHook func()
+	// flushHook runs in a callback request, after the flush of the response and
+	// before the check of the tokens. It is nil in production. A test sets it.
+	flushHook func()
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64
 	// slotDrops counts the header slots left out of a response because the
