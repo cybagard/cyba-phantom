@@ -321,7 +321,7 @@ func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 func TestTU26RunEndsEarly(t *testing.T) {
 	cases := []struct {
 		name    string
-		trigger func(r *rig, cancel context.CancelFunc) // in the first statement
+		trigger func(r *rig, cancel context.CancelFunc) // first statement
 		healthy bool
 		waitRun bool  // wait for Run, which returns wantRun
 		wantRun error // the result of Run
