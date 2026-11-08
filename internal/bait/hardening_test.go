@@ -251,10 +251,10 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // the fixed 404 page. A close is also right. A GET and a HEAD with a body of
 // 65 537 bytes get the status of the target. A wrapper that the server handler
 // puts around the body counts the bytes that the bait handler reads. The
-// handler reads 0 bytes. A POST to the callback route with a body position gets its
-// fixed response (ADR-039 decision 19). That route reads at most 4 097 bytes.
-// A POST to the beacon post path gets 204 and reads at most 64 bytes. A POST to
-// the beacon script path gets 405 and reads 0 bytes.
+// handler reads 0 bytes. A POST to the callback route with a body position
+// gets its fixed response (ADR-039 decision 19). That route reads at most
+// 4 097 bytes. A POST to the beacon post path gets 204 and reads at most 64
+// bytes. A POST to the beacon script path gets 405 and reads 0 bytes.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex
