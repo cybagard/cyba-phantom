@@ -259,9 +259,9 @@ func TestTS02CallbackSegmentForms(t *testing.T) {
 }
 
 // TestMain runs the bounded scan checks before every other test of the
-// package. An older test that calls a scan which does not stop would else hang
-// until the timeout of go test, and the bounded tests would not run. A failed
-// check stops the test binary with status 1.
+// package. A scan that does not stop would else hang an older test. Then the
+// bounded tests would not run. A failed check stops the test binary with
+// status 1.
 func TestMain(m *testing.M) {
 	failed := false
 	for _, check := range []func() error{checkBodyReadLoop, checkBodyScanEscapes, checkQueryAdvances} {
@@ -278,7 +278,8 @@ func TestMain(m *testing.M) {
 
 // withinErr runs f and returns an error when f does not return in 5 s or when
 // it panics. A loop that does not stop would else last to the timeout of go
-// test. f must put its results in variables that the caller reads after withinErr.
+// test. f must put its results in variables that the caller reads after the
+// call.
 func withinErr(f func()) error {
 	done := make(chan any, 1)
 	go func() {
