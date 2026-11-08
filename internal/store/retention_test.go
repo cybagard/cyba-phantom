@@ -236,22 +236,24 @@ func TestTU26ChunkEndsAtTheTimeBudget(t *testing.T) {
 }
 
 // T-U-26: an event batch that waits in the lanes commits before the next
-// chunk.
+// chunk. The writer takes at most one batch between two chunks. Thus a flood
+// cannot hold the run. 1 200 events wait. Two chunks write 500 each.
 func TestTU26WaitingBatchCommitsBeforeNextChunk(t *testing.T) {
 	var r *rig
 	var addErr error
 	var order []string // each chunk has one statement: it notes "chunk"
-	r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
-		if order = append(order, "chunk"); i == 0 {
-			addErr = r.tryAdd(event.KindRequest, 1)
+	r = retentionRig(t, 2500, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
+		order = append(order, "chunk")
+		for j := 0; i == 0 && j < 1200 && addErr == nil; j++ {
+			addErr = r.tryAdd(event.KindRequest, int64(j))
 		}
 	}))
-	r.w.onCommit = func(int) { order = append(order, "batch") }
+	r.w.onCommit = func(n int) { order = append(order, fmt.Sprint("batch ", n)) }
 	if err := r.retain(waitFor); err != nil || addErr != nil {
 		t.Fatal(err, addErr)
 	}
-	if len(order) < 3 || strings.Join(order[:3], " ") != "chunk batch chunk" {
-		t.Fatalf("order %v", order)
+	if got, want := strings.Join(order, ", "), "chunk, batch 500, chunk, batch 500, chunk"; got != want {
+		t.Fatalf("order %q, want %q", got, want)
 	}
 }
 
@@ -282,30 +284,17 @@ func TestTU26WaitingRowRequestAndTickAreServedBetweenChunks(t *testing.T) {
 	}
 }
 
-// T-U-26: between two chunks the writer takes at most one batch. Thus a flood
-// cannot hold the run. 1 200 events wait. Two chunks write 500 each.
-func TestTU26TakeBetweenChunksIsOneBatch(t *testing.T) {
-	var r *rig
-	var addErr error
-	r = retentionRig(t, 2500, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
-		for j := 0; i == 0 && j < 1200 && addErr == nil; j++ {
-			addErr = r.tryAdd(event.KindRequest, int64(j))
-		}
-	}))
-	var batches []int
-	r.w.onCommit = func(n int) { batches = append(batches, n) }
-	if err := r.retain(waitFor); err != nil || addErr != nil {
-		t.Fatal(err, addErr)
-	}
-	if !slices.Equal(batches, []int{500, 500}) {
-		t.Fatalf("batches %v, want [500 500]", batches)
-	}
-}
-
 // T-U-26: an error of a chunk statement, of BEGIN and of COMMIT stops the
-// writer as a database error does. The chunk changes no row.
+// writer as a database error does. So does a step count above its limit or
+// below 0. The chunk changes no row.
 func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 	boom := errors.New("refused")
+	bad := func(count func(limit int) int) []retentionStep {
+		return []retentionStep{deleteRange(seedTS, seedTS+10), func(_ context.Context, _ *sql.Tx, limit int) (int, error) {
+			return count(limit), nil
+		}}
+	}
+	all := []retentionStep{deleteRange(seedTS, math.MaxInt64)}
 	cases := []struct {
 		name  string
 		steps []retentionStep
@@ -315,8 +304,10 @@ func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 			deleteRange(seedTS, seedTS+10),
 			func(context.Context, *sql.Tx, int) (int, error) { return 0, boom },
 		}, func(*Writer) {}},
-		{"BEGIN", []retentionStep{deleteRange(seedTS, math.MaxInt64)}, func(w *Writer) { w.beforeBegin = func() error { return boom } }},
-		{"COMMIT", []retentionStep{deleteRange(seedTS, math.MaxInt64)}, func(w *Writer) { w.beforeCommit = func(*sql.Tx) error { return boom } }},
+		{"count above the limit", bad(func(limit int) int { return limit + 1 }), func(*Writer) {}},
+		{"count below 0", bad(func(int) int { return -1 }), func(*Writer) {}},
+		{"BEGIN", all, func(w *Writer) { w.beforeBegin = func() error { return boom } }},
+		{"COMMIT", all, func(w *Writer) { w.beforeCommit = func(*sql.Tx) error { return boom } }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -332,19 +323,61 @@ func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-U-26: a run ends early, with an error, when ctx ends between two chunks.
-// The chunk before it stays whole and the writer stays healthy.
-func TestTU26RunEndsEarlyWhenContextEnds(t *testing.T) {
-	var cancel context.CancelFunc
-	r := retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) { cancel() }))
-	var done <-chan error
-	done, cancel = r.launchCancelable(context.Background())
-	ctx, stop := context.WithTimeout(context.Background(), waitFor)
-	defer stop()
-	wantRule(t, r.w.RunRetention(ctx), writerName, ruleRetention)
-	if err := r.wait(done); !errors.Is(err, context.Canceled) || !r.w.Healthy() || r.events() != 2000 {
-		t.Fatalf("Run %v, healthy %v, %d rows (want 2000)", err, r.w.Healthy(), r.events())
+// T-U-26: a run ends early, with the retention rule, when ctx ends, when a row
+// request stops the writer, or when the queue closes between two chunks. The
+// chunk before it stays whole, and no second chunk commits.
+func TestTU26RunEndsEarly(t *testing.T) {
+	cases := []struct {
+		name    string
+		trigger func(r *rig, cancel context.CancelFunc) // runs in the first statement
+		healthy bool
+		waitRun bool  // wait for Run, which then returns wantRun
+		wantRun error // the result of Run
+	}{
+		{"ctx ends", func(_ *rig, cancel context.CancelFunc) { cancel() }, true, true, context.Canceled},
+		{"row request stops the writer", func(r *rig, _ context.CancelFunc) {
+			r.w.rows <- rowRequest{size: 7, msg: []byte("note"), reply: make(chan error, 1)}
+		}, false, false, nil},
+		{"queue closes", func(r *rig, _ context.CancelFunc) { r.q.Close() }, true, true, nil},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var r *rig
+			var cancel context.CancelFunc
+			r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
+				if i == 0 {
+					c.trigger(r, cancel)
+				}
+			}))
+			r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("refused") }
+			var done <-chan error
+			done, cancel = r.launchCancelable(context.Background())
+			ctx, stop := context.WithTimeout(context.Background(), waitFor)
+			defer stop()
+			wantRule(t, r.w.RunRetention(ctx), writerName, ruleRetention)
+			if c.waitRun {
+				if err := r.wait(done); !errors.Is(err, c.wantRun) {
+					t.Fatalf("Run returned %v, want %v", err, c.wantRun)
+				}
+			}
+			if r.w.Healthy() != c.healthy || r.events() != 2000 {
+				t.Fatalf("healthy %v, %d rows (want %v, 2000)", r.w.Healthy(), r.events(), c.healthy)
+			}
+		})
+	}
+}
+
+// countingRig makes a rig with 10 rows. Its step list holds one step that
+// counts its calls, or no step. It also records the PRAGMA statements.
+func countingRig(t *testing.T, withStep bool) (*rig, *int, *[]string) {
+	t.Helper()
+	calls := 0
+	var steps []retentionStep
+	if withStep {
+		steps = append(steps, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) { calls++ }))
+	}
+	r := retentionRig(t, 10, steps...)
+	return r, &calls, r.recordPragmas()
 }
 
 // T-U-26: a stopped writer starts no run from the take loop. A batch of 500
@@ -353,13 +386,7 @@ func TestTU26RunEndsEarlyWhenContextEnds(t *testing.T) {
 func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 	for _, withStep := range []bool{true, false} {
 		t.Run(fmt.Sprint("with step ", withStep), func(t *testing.T) {
-			calls := 0
-			var steps []retentionStep
-			if withStep {
-				steps = append(steps, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) { calls++ }))
-			}
-			r := retentionRig(t, 10, steps...)
-			stmts := r.recordPragmas()
+			r, calls, stmts := countingRig(t, withStep)
 			rq := retentionRequest{reply: make(chan error, 1)}
 			hooked, first := make(chan struct{}), true
 			r.w.beforeCommit = func(*sql.Tx) error {
@@ -384,9 +411,9 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 			if err := r.wait(done); err != nil {
 				t.Fatal(err)
 			}
-			if r.w.Healthy() || calls != 0 || len(*stmts) != 0 || len(r.w.retention) != 1 || len(rq.reply) != 0 || r.events() != 10 {
+			if r.w.Healthy() || *calls != 0 || len(*stmts) != 0 || len(r.w.retention) != 1 || len(rq.reply) != 0 || r.events() != 10 {
 				t.Fatalf("healthy %v, %d steps, statements %v, %d waiting, %d replies, %d rows",
-					r.w.Healthy(), calls, *stmts, len(r.w.retention), len(rq.reply), r.events())
+					r.w.Healthy(), *calls, *stmts, len(r.w.retention), len(rq.reply), r.events())
 			}
 		})
 	}
@@ -397,20 +424,15 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 func TestTU26RunOnStoppedWriterIsRefused(t *testing.T) {
 	for _, withStep := range []bool{true, false} {
 		t.Run(fmt.Sprint("with step ", withStep), func(t *testing.T) {
-			calls, begins := 0, 0
-			var steps []retentionStep
-			if withStep {
-				steps = append(steps, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) { calls++ }))
-			}
-			r := retentionRig(t, 10, steps...)
-			stmts := r.recordPragmas()
+			r, calls, stmts := countingRig(t, withStep)
+			begins := 0
 			r.w.beforeBegin = func() error { begins++; return nil }
 			r.w.stop(fail(writerName, ruleDatabase))
 			rq := retentionRequest{reply: make(chan error, 1)}
 			r.w.serveRetention(context.Background(), nil, nil, rq)
 			wantRule(t, r.reply(rq), writerName, ruleRetention)
-			if calls != 0 || begins != 0 || len(*stmts) != 0 || r.events() != 10 {
-				t.Fatalf("%d steps, %d BEGIN, statements %v, %d rows", calls, begins, *stmts, r.events())
+			if *calls != 0 || begins != 0 || len(*stmts) != 0 || r.events() != 10 {
+				t.Fatalf("%d steps, %d BEGIN, statements %v, %d rows", *calls, begins, *stmts, r.events())
 			}
 		})
 	}
@@ -443,58 +465,18 @@ func TestTU26RunStartsFromTheTakeLoop(t *testing.T) {
 	}
 }
 
-// T-U-26: a row request that stops the writer between two chunks ends the run.
-// Only the first chunk commits, and the reply has the retention rule.
-func TestTU26RowRequestThatStopsTheWriterEndsTheRun(t *testing.T) {
-	var r *rig
-	r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
-		if i == 0 {
-			r.w.rows <- rowRequest{size: 7, msg: []byte("note"), reply: make(chan error, 1)}
-		}
-	}))
-	commits := 0
-	r.w.beforeCommit = func(*sql.Tx) error { commits++; return nil }
-	r.w.beforeRowCommit = func(*sql.Tx) error { return errors.New("refused") }
-	wantRule(t, r.retain(waitFor), writerName, ruleRetention)
-	if commits != 1 || r.w.Healthy() || r.events() != 2000 {
-		t.Fatalf("%d chunks, healthy %v, %d rows (want 1, false, 2000)", commits, r.w.Healthy(), r.events())
-	}
-}
-
-// T-U-26: a Close of the queue during a run ends the run after the chunk.
-// Then Run does its shutdown and returns nil.
-func TestTU26QueueCloseEndsTheRun(t *testing.T) {
-	var r *rig
-	r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
-		if i == 0 {
-			r.q.Close()
-		}
-	}))
-	done, _ := r.launchCancelable(context.Background())
-	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
-	defer cancel()
-	wantRule(t, r.w.RunRetention(ctx), writerName, ruleRetention)
-	if err := r.wait(done); err != nil || !r.w.Healthy() || r.events() != 2000 {
-		t.Fatalf("Run %v, healthy %v, %d rows (want nil, true, 2000)", err, r.w.Healthy(), r.events())
-	}
-}
-
-// T-U-26: a ctx that has ended sends no request.
-func TestTU26EndedContextSendsNoRequest(t *testing.T) {
+// T-U-26: a ctx that has ended gives ctx.Err(), and a stopped writer gives its
+// error. Both return at once and send no request.
+func TestTU26RunRetentionSendsNoRequestAtOnce(t *testing.T) {
 	r := retentionRig(t, 0)
-	ctx, cancel := context.WithCancel(context.Background())
+	ended, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := r.w.RunRetention(ctx); !errors.Is(err, context.Canceled) || len(r.w.retention) != 0 {
-		t.Fatalf("got %v, %d requests wait", err, len(r.w.retention))
+	if err := r.w.RunRetention(ended); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ended ctx: got %v", err)
 	}
-}
-
-// T-U-26: a stopped writer returns its error at once and takes no request.
-func TestTU26StoppedWriterRefusesARequestAtOnce(t *testing.T) {
-	r := retentionRig(t, 0)
 	r.w.stop(fail(writerName, ruleDatabase))
-	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
-	defer cancel()
+	ctx, stop := context.WithTimeout(context.Background(), waitFor)
+	defer stop()
 	wantRule(t, r.w.RunRetention(ctx), writerName, ruleDatabase)
 	if len(r.w.retention) != 0 {
 		t.Fatalf("%d requests wait", len(r.w.retention))
@@ -523,25 +505,6 @@ func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 			want := map[bool][2]int{false: {0, 3000}, true: {1, 2000}}[between]
 			if got := [2]int{calls, r.events()}; got != want {
 				t.Fatalf("steps and rows %v, want %v", got, want)
-			}
-		})
-	}
-}
-
-// T-U-26: a step that returns a count above its limit, or below 0, is a
-// database error of the chunk. The writer stops.
-func TestTU26StepCountOutsideTheLimitStopsTheWriter(t *testing.T) {
-	for name, count := range map[string]func(limit int) int{
-		"above the limit": func(limit int) int { return limit + 1 },
-		"below 0":         func(int) int { return -1 },
-	} {
-		t.Run(name, func(t *testing.T) {
-			r := retentionRig(t, 10, func(_ context.Context, _ *sql.Tx, limit int) (int, error) {
-				return count(limit), nil
-			})
-			wantRule(t, r.retain(waitFor), writerName, ruleDatabase)
-			if r.w.Healthy() {
-				t.Fatal("the writer is healthy")
 			}
 		})
 	}
