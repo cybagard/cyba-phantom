@@ -797,7 +797,7 @@ func (s *stopRig) stoppedLoad(err error, run *Bundle) {
 	}
 }
 
-// logLine checks that the loader wrote one log line for the stopped load: the
+// logLine checks the log of a stopped load. It must be one line. It has the
 // message, the level Info and the attribute source with src only. Call it
 // after the load returned.
 func (s *stopRig) logLine(src string) {
