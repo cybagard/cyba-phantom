@@ -388,10 +388,10 @@ func pageBundle(t testing.TB, i int) []byte {
 	return archiveOf(t, fs...)
 }
 
-// getter gives a function that makes a GET for path at the static name, and
-// a function that closes the idle connections of its client. A request of the
-// kind "hold" stops inside the handler. One of the kind "probe" tells the test
-// that it is inside. The first function returns what it got.
+// getter gives two functions. The first makes a GET for path at the static
+// name and returns what it got. The second closes the idle connections of the
+// client. A request of the kind "hold" stops inside the handler. One of the
+// kind "probe" tells the test that it is inside.
 func (g *reloadRig) getter(path string) (get func(kind string) (int, string, error), closeIdle func()) {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: staticName, InsecureSkipVerify: true}}
 	g.t.Cleanup(tr.CloseIdleConnections)

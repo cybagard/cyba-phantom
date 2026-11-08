@@ -940,8 +940,8 @@ func TestTU23LoadWithOpenStop(t *testing.T) {
 }
 
 // T-U-23: the gap wait calls the test sleep when it is set. A test sleep that
-// closes the stop gives true. The timer of 1 ns would end the wait at once, so
-// a call to the test sleep shows that the timer did not run.
+// closes the stop gives true. A timer of 1 ns would end at once, so a call of
+// the test sleep shows that the timer did not run.
 func TestTU23GapWaitUsesTestSleep(t *testing.T) {
 	e := newEnv(t)
 	l := e.l
