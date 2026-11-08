@@ -132,8 +132,8 @@ func TestTU25BeaconScript(t *testing.T) {
 
 // TestTU25BeaconMethods checks the methods of the two beacon paths. Another
 // method gets the fixed 405 page with its Allow value and reads no body byte.
-// A vhost with no beacon member gives the fixed 404 page for both paths. If it
-// has a 404 template, it gives that page.
+// A GET of both paths on a vhost with no beacon member gives the fixed 404
+// page. If the vhost has a 404 template, the GET gives that page.
 func TestTU25BeaconMethods(t *testing.T) {
 	e := newBC(t, bcPost)
 	all := []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
