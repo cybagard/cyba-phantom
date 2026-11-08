@@ -258,7 +258,7 @@ func otherKeySetToken(t testing.TB) string {
 // bad, absent, other-key-set and capped tokens. It must have equal bytes at
 // each position, and no Set-Cookie. The clock steps past the token window
 // before each case, so the cap admits a good token each time. A good token
-// that is read gives one callback event. For a capped token, the test admits
+// that is read gives one callback event. For a capped token, the handler admits
 // it once at the same clock. Then it checks the capped counter and the
 // missing callback event. So the case cannot pass as an admitted token. The
 // test does this for a route with an asset and a route with none, for GET,
@@ -292,7 +292,7 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 				for _, kind := range []string{"good", "stale", "future", "bad", "other", "none", "capped"} {
 					clock += 2 * capTokenWindow
 					if kind == "capped" {
-						// The first use is admitted. The case below is capped.
+						// The first use is admitted. Later reads are capped.
 						e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, posQuery, toks[kind]))
 						take(e.q)
 					}

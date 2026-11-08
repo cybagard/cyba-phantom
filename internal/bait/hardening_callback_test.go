@@ -185,7 +185,8 @@ func (c *checkImporter) ImportFrom(path, dir string, mode types.ImportMode) (*ty
 // queryRefs type-checks files. It gives the position of each use of a function
 // in queryParsers. A use is a call, a method value or a method expression. A
 // field with the same name is not a function, so it does not match. Type
-// errors do not stop the scan, but an import error does.
+// errors do not stop the scan, but an import error does. A type error can
+// hide a use, for example one name with two types in files of two GOOS.
 func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]gotoken.Position, error) {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
 	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(error) {}}
@@ -243,7 +244,8 @@ func f(r *http.Request, c conf, db store) {
 // the ParseForm, FormValue, PostFormValue, ParseMultipartForm or
 // MultipartReader method of *net/http.Request. A use is a call, a method value
 // or a method expression, under any variable or import name. The check reads
-// the files of each GOOS and GOARCH.
+// the files of each GOOS and GOARCH. It type-checks them together, so one
+// name with two types in files of two GOOS can hide a use.
 func TestTS32NoQueryParserCall(t *testing.T) {
 	fset := gotoken.NewFileSet()
 	imp := &checkImporter{from: importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)}

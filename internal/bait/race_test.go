@@ -9,5 +9,5 @@ func init() { raceAllocSlack = 2 }
 
 // With the race detector, a callback event allocated 102.5 to 106.0 times in 10
 // runs of TestTS32CallbackRequestAllocs. The test bound for each event is
-// eventAllocs times the 10 % slack, so 105 gives 115.5.
+// eventAllocs plus 10 %, so 105 gives 115.5.
 func init() { eventAllocs = 105 }
