@@ -92,8 +92,8 @@ var (
 // before the queue closes. After the stop began, the fetcher starts no new
 // load. A fetch load that began before the stop runs to its end. This holds
 // also in its wait for the swap gap. So the stop can wait for the rest of
-// the 30 s gap, as for the reload above. A fetcher that does not start gives
-// one fixed line.
+// the 30 s gap and then for the load. A newFetcher
+// error gives one fixed line.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	counters := event.NewCounters()

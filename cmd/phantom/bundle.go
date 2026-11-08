@@ -45,7 +45,8 @@ var (
 type bundlePart struct {
 	l  *bundle.Loader
 	lg *slog.Logger
-	// startFetchAndWatch sets watch. It is nil with no watch.
+	// watch is the expiry watch. startFetchAndWatch sets it. The pointer is
+	// nil with no watch.
 	watch atomic.Pointer[bundle.ExpiryWatch]
 }
 
@@ -123,8 +124,8 @@ func startBundle(p startParams, s *storePart, q *event.Queue, lg *slog.Logger) *
 
 // startFetchAndWatch starts the fetcher and the expiry watch in wg, both until
 // ctx ends. It does nothing with no loader. The fetcher starts only with a
-// bundle.fetch_url. When the fetcher does not start, the function writes one
-// fixed line, and the sensor goes on without it (C3). The watch gets the
+// bundle.fetch_url. When newFetcher gives an error, the function writes one
+// fixed line, and the sensor goes on with no fetcher (C3). The watch gets the
 // freeze input of the fetcher, or nil with no fetcher. The watch has no hook:
 // no alert sink exists yet.
 func (b *bundlePart) startFetchAndWatch(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config) {

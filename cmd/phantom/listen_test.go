@@ -1238,9 +1238,9 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 }
 
 // TestTU23_StopWaitIsBounded sends a request whose handler does not return, so
-// the connection is active at the stop. Serve must wait for the connection,
-// and return after shutdownTime and the handler wait of the listener (1 s).
-// A stop wait with no limit never returns.
+// the connection is active at the stop. Serve must return at least
+// shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. A stop
+// wait with no limit never returns.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
 	inside, release := make(chan struct{}, 1), make(chan struct{})
 	oldServer := newServer
