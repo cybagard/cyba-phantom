@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,6 +25,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/listener"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // noVhost is a decoy name for which the test bundle has no vhost.
@@ -42,16 +48,19 @@ func baitFiles() []tarFile {
 
 // baitOpt sets the start of a sensor for the bait tests.
 type baitOpt struct {
-	cookie string // privacy.session_cookie, or "" for the default
-	bundle bool   // put the signed test bundle in the state directory
-	refuse bool   // the store does not open, so no load runs
+	cookie string    // privacy.session_cookie, or "" for the default
+	bundle bool      // put the signed test bundle in the state directory
+	refuse bool      // the store does not open, so no load runs
+	files  []tarFile // the files of that bundle, or nil for baitFiles
 }
 
 // baitSensor is a started sensor with its two addresses (with scheme). dk is
 // the day key holder that the writer got. probe is the response to a request
-// that newServer served to its handler, before it returned.
+// that newServer served to its handler, before it returned. arch is the archive
+// of the bundle in the state directory.
 type baitSensor struct {
 	*running
+	arch         []byte
 	p            startParams
 	https, plain string
 	dk           *session.DayKey
@@ -76,7 +85,11 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	caURL, _ := cfg.Get("acme.ca")
 	seedCache(t, s.p, caURL.Str)
 	if o.bundle {
-		putBundle(t, s.p.Root, s.p.BundlePath, archiveOf(t, baitFiles()...), seedKey(goodSeed))
+		if o.files == nil {
+			o.files = baitFiles()
+		}
+		s.arch = archiveOf(t, o.files...)
+		putBundle(t, s.p.Root, s.p.BundlePath, s.arch, seedKey(goodSeed))
 	}
 	oldTrust := bundleTrust
 	t.Cleanup(func() { bundleTrust = oldTrust })
@@ -99,7 +112,8 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 		req.Host, req.RemoteAddr = decoyName, "127.0.0.1:4000"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		s.probe = baitResp{rec.Code, rec.Body.String(), rec.Result().Header.Values("Set-Cookie")}
+		hd := rec.Result().Header
+		s.probe = baitResp{rec.Code, rec.Body.String(), hd.Values("Set-Cookie"), hd}
 		return oldNew(c, h)
 	}
 	s.running = launchServe(t, cfg, s.p, d)
@@ -132,11 +146,15 @@ func (s *baitSensor) cookie(t *testing.T) (header, id string) {
 
 // keyedID returns the keyed session id of the loopback client under the key of
 // the writer.
-func (s *baitSensor) keyedID(t *testing.T) string {
+func (s *baitSensor) keyedID(t *testing.T) string { return s.keyedIDOf(t, "127.0.0.1") }
+
+// keyedIDOf returns the keyed session id of the client address ip under the key
+// of the writer.
+func (s *baitSensor) keyedIDOf(t *testing.T, ip string) string {
 	t.Helper()
-	id := s.dk.At(time.Now()).SessionID("127.0.0.1", "")
+	id := s.dk.At(time.Now()).SessionID(ip, "")
 	if id == nil {
-		t.Fatal("no keyed id for the loopback address")
+		t.Fatalf("no keyed id for %s", ip)
 	}
 	return *id
 }
@@ -144,6 +162,17 @@ func (s *baitSensor) keyedID(t *testing.T) string {
 // sessionOf returns the session id of the one stored request row for path. The
 // sensor must be stopped.
 func (s *baitSensor) sessionOf(t *testing.T, path string) string {
+	t.Helper()
+	ids := s.sessionsOf(t, path)
+	if len(ids) != 1 {
+		t.Fatalf("request rows for %s: %q; want one", path, ids)
+	}
+	return ids[0]
+}
+
+// sessionsOf returns the session ids of the stored request rows for path. The
+// sensor must be stopped.
+func (s *baitSensor) sessionsOf(t *testing.T, path string) []string {
 	t.Helper()
 	root, err := os.OpenRoot(s.p.Root)
 	mustOK(t, err)
@@ -160,10 +189,7 @@ func (s *baitSensor) sessionOf(t *testing.T, path string) string {
 		mustOK(t, rows.Scan(&id))
 		ids = append(ids, id)
 	}
-	if len(ids) != 1 {
-		t.Fatalf("request rows for %s: %q; want one", path, ids)
-	}
-	return ids[0]
+	return ids
 }
 
 // baitResp is what a test needs of a response.
@@ -171,6 +197,7 @@ type baitResp struct {
 	status  int
 	body    string
 	cookies []string // the Set-Cookie headers
+	header  http.Header
 }
 
 // fetch makes a GET for path at base with the Host header host. TLS uses the
@@ -178,7 +205,18 @@ type baitResp struct {
 // reports an error with Errorf, so a goroutine can call it.
 func fetch(t *testing.T, base, host, path, cookie string) baitResp {
 	t.Helper()
+	return fetchFrom(t, base, host, path, cookie, nil)
+}
+
+// fetchFrom is fetch with the local address ip for the connection. With a nil
+// ip, the system chooses the address.
+func fetchFrom(t *testing.T, base, host, path, cookie string, ip net.IP) baitResp {
+	t.Helper()
 	tr := &http.Transport{DisableKeepAlives: true, TLSClientConfig: &tls.Config{ServerName: decoyName, InsecureSkipVerify: true}}
+	if ip != nil {
+		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: ip}}
+		tr.DialContext = d.DialContext
+	}
 	defer tr.CloseIdleConnections()
 	cl := &http.Client{Transport: tr, Timeout: netWait, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, base+path, nil)
@@ -193,17 +231,17 @@ func fetch(t *testing.T, base, host, path, cookie string) baitResp {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	return baitResp{resp.StatusCode, string(body), resp.Header.Values("Set-Cookie")}
+	return baitResp{resp.StatusCode, string(body), resp.Header.Values("Set-Cookie"), resp.Header}
 }
 
-// firstP returns the first p element of the page in body.
-func firstP(t *testing.T, body string) *html.Node {
+// elemOf returns the first element name of the page in body.
+func elemOf(t *testing.T, body, name string) *html.Node {
 	t.Helper()
 	doc, err := html.Parse(strings.NewReader(body))
 	mustOK(t, err)
 	var find func(*html.Node) *html.Node
 	find = func(n *html.Node) *html.Node {
-		if n.Type == html.ElementNode && n.Data == "p" {
+		if n.Type == html.ElementNode && n.Data == name {
 			return n
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -213,11 +251,92 @@ func firstP(t *testing.T, body string) *html.Node {
 		}
 		return nil
 	}
-	p := find(doc)
-	if p == nil || p.FirstChild == nil {
-		t.Fatalf("no p element with text in %q", body)
+	n := find(doc)
+	if n == nil {
+		t.Fatalf("no %s element in %q", name, body)
+	}
+	return n
+}
+
+// firstP returns the first p element of the page in body.
+func firstP(t *testing.T, body string) *html.Node {
+	t.Helper()
+	p := elemOf(t, body, "p")
+	if p.FirstChild == nil {
+		t.Fatalf("no text in the p element of %q", body)
 	}
 	return p
+}
+
+// twoFiles are the files of a test bundle with one route and three trap slots.
+// The slots are the text of a hidden p, the content of a meta element, and the
+// header X-Note.
+func twoFiles() []tarFile {
+	dir := "vhosts/" + decoyName + "/"
+	routes := `{"routes":[{"path":"/two","template":"` + dir + `two.tmpl","type":"text/html; charset=utf-8",` +
+		`"headers":[{"name":"X-Note","trap":"h"}]}]}`
+	trap := func(id, slot string) string {
+		return `{"id":"` + id + `","slot":"` + slot + `","surface":"path","visibility":"human-visible","instruction_template":"{{.Token}}"}`
+	}
+	page := `<!doctype html><html><head><meta name="description" content="{{index .Trap "m"}}"></head>` +
+		`<body><p hidden>{{index .Trap "p"}}</p></body></html>`
+	return referenceFiles(
+		tarFile{"traps/traps.json", []byte("[" + trap("p", "hidden-p") + "," + trap("m", "meta-description") + "," + trap("h", "header") + "]")},
+		tarFile{dir + "routes.json", []byte(routes)},
+		tarFile{dir + "two.tmpl", []byte(page)})
+}
+
+// TestTI02_TwoSessionsGetOwnTokens fetches one page from two clients with no
+// cookie, from 127.0.0.1 and from 127.0.0.2 (FR-03). Each trap slot of the
+// page is there and the HTML parses. Each token text verifies to the trap of
+// its slot. No token repeats in or between the responses. The two request rows
+// have the keyed ids of the two client addresses. A host with no 127.0.0.2
+// skips the test.
+func TestTI02_TwoSessionsGetOwnTokens(t *testing.T) {
+	s := startBait(t, baitOpt{bundle: true, files: twoFiles()})
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}, Timeout: netWait}
+	c, err := d.DialContext(t.Context(), "tcp", strings.TrimPrefix(s.https, "https://"))
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Skipf("no client address 127.0.0.2 on this host: %v", err)
+	}
+	mustOK(t, err)
+	c.Close()
+	ids := []string{"p", "m", "h"}
+	ks, err := token.NewKeySet(bytes.Repeat([]byte{9}, 32), sha256.Sum256(s.arch), ids, true)
+	mustOK(t, err)
+	seen := map[string]bool{}
+	ips := []string{"127.0.0.1", "127.0.0.2"}
+	for i, ip := range ips {
+		r := fetchFrom(t, s.https, decoyName, "/two", "", net.ParseIP(ip))
+		if r.status != 200 {
+			t.Fatalf("client %s: status %d; want 200", ip, r.status)
+		}
+		meta := ""
+		for _, a := range elemOf(t, r.body, "meta").Attr {
+			if a.Key == "content" {
+				meta = a.Val
+			}
+		}
+		texts := []string{firstP(t, r.body).FirstChild.Data, meta, r.header.Get("X-Note")}
+		for j, text := range texts {
+			tok, ok := token.Parse(text)
+			if res := token.Verify([]*token.KeySet{ks}, tok); !ok || !res.OK || res.Trap != ids[j] {
+				t.Errorf("client %d, slot %s: text %q gives %+v; want a token of trap %s", i, ids[j], text, res, ids[j])
+			}
+			if seen[text] {
+				t.Errorf("client %d, slot %s: text %q repeats", i, ids[j], text)
+			}
+			seen[text] = true
+		}
+	}
+	s.stop(t)
+	got := s.sessionsOf(t, "/two")
+	want := []string{s.keyedIDOf(t, ips[0]), s.keyedIDOf(t, ips[1])}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) || want[0] == want[1] {
+		t.Errorf("session ids of the two rows %q; want the two keyed ids %q", got, want)
+	}
 }
 
 // TestTI02_StartServesBait checks the decoy listener of a started sensor. A
