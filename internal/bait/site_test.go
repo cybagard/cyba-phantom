@@ -97,6 +97,19 @@ func bundleFiles(tb testing.TB, tag string, extra map[string]string) *bundle.Bun
 // loader for it. Each Load(true) of the loader loads the same archive.
 func archiveLoader(tb testing.TB, tag string, extra map[string]string) *bundle.Loader {
 	tb.Helper()
+	dir := tb.TempDir()
+	trust := writeArchive(tb, dir, tag, extra)
+	root, err := os.OpenRoot(dir)
+	mustOK(tb, err)
+	tb.Cleanup(func() { root.Close() })
+	return bundle.NewLoader(root, "bundle/current.cbnd", trust, nil)
+}
+
+// writeArchive signs the archive of archiveLoader. It writes the archive to
+// bundle/current.cbnd in dir. A second call replaces the first archive. It
+// gives the trust set for the signature.
+func writeArchive(tb testing.TB, dir, tag string, extra map[string]string) bundle.TrustSet {
+	tb.Helper()
 	files := map[string]string{
 		"manifest.json":                   manifestOf("2026.11.01-1"),
 		"secrets/token.seed":              strings.Repeat("\x09", 32),
@@ -129,15 +142,11 @@ func archiveLoader(tb testing.TB, tag string, extra map[string]string) *bundle.L
 
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xA5}, ed25519.SeedSize))
 	trust := bundle.TrustSet{{KeyID: "t1", PublicKey: [32]byte(key.Public().(ed25519.PublicKey)), Class: bundle.ClassReference}}
-	dir := tb.TempDir()
 	sig := "t1 " + base64.StdEncoding.EncodeToString(ed25519.Sign(key, bundle.SigMessage(buf.Bytes()))) + "\n"
 	mustOK(tb, os.MkdirAll(filepath.Join(dir, "bundle"), 0o700))
 	mustOK(tb, os.WriteFile(filepath.Join(dir, "bundle/current.cbnd"), buf.Bytes(), 0o600))
 	mustOK(tb, os.WriteFile(filepath.Join(dir, "bundle/current.sig"), []byte(sig), 0o600))
-	root, err := os.OpenRoot(dir)
-	mustOK(tb, err)
-	tb.Cleanup(func() { root.Close() })
-	return bundle.NewLoader(root, "bundle/current.cbnd", trust, nil)
+	return trust
 }
 
 // TestTU20SiteTable checks the table. It holds each route of each vhost and

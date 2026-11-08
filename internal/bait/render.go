@@ -135,6 +135,9 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundl
 	hd := w.Header()
 	hd["Content-Type"] = e.ctype
 	hd["X-Content-Type-Options"] = nosniff
+	if h.mintHook != nil {
+		h.mintHook()
+	}
 	cw := capWriter{w: w, h: h, m: h.mint(b, s, e, sess), sess: sess, code: code}
 	err := b.Execute(&cw, e.route.Template, cw.m.page)
 	if err == nil {
