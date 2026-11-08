@@ -73,35 +73,37 @@ func TestTS31MintBounds(t *testing.T) {
 	const runs = 100
 	var before, after runtime.MemStats
 	for _, c := range mintCases {
-		f := newMintFixture(t, c.n)
-		got := f.h.mint(f.b, f.s, f.e, &reqSession{at: testDay})
-		if len(got.slots)+len(got.page.Trap) != c.n || f.h.noKeys.Load() != 0 {
-			t.Fatalf("N=%d: mint gives %d texts, noKeys %d", c.n, len(got.slots)+len(got.page.Trap), f.h.noKeys.Load())
-		}
-		for id, v := range got.page.Trap {
-			if !tokenRE.MatchString(v) {
-				t.Fatalf("N=%d: trap text of %s has no token", c.n, id)
+		t.Run(fmt.Sprint("N=", c.n), func(t *testing.T) {
+			f := newMintFixture(t, c.n)
+			got := f.h.mint(f.b, f.s, f.e, &reqSession{at: testDay})
+			if len(got.slots)+len(got.page.Trap) != c.n || f.h.noKeys.Load() != 0 {
+				t.Fatalf("N=%d: mint gives %d texts, noKeys %d", c.n, len(got.slots)+len(got.page.Trap), f.h.noKeys.Load())
 			}
-		}
-		for _, sh := range got.slots {
-			if len(sh.val) != 1 || !tokenRE.MatchString(sh.val[0]) {
-				t.Fatalf("N=%d: header slot %s has no token", c.n, sh.name)
+			for id, v := range got.page.Trap {
+				if !tokenRE.MatchString(v) {
+					t.Fatalf("N=%d: trap text of %s has no token", c.n, id)
+				}
 			}
-		}
-		allocs := testing.AllocsPerRun(100, f.run)
-		f.run()
-		runtime.ReadMemStats(&before)
-		for range runs {
+			for _, sh := range got.slots {
+				if len(sh.val) != 1 || !tokenRE.MatchString(sh.val[0]) {
+					t.Fatalf("N=%d: header slot %s has no token", c.n, sh.name)
+				}
+			}
+			allocs := testing.AllocsPerRun(100, f.run)
 			f.run()
-		}
-		runtime.ReadMemStats(&after)
-		bytes := (after.TotalAlloc - before.TotalAlloc) / runs
-		t.Logf("N=%d: %v allocations, %d bytes", c.n, allocs, bytes)
-		if limit := c.allocs + c.allocs/10; allocs > float64(limit) {
-			t.Errorf("N=%d: %v allocations, limit %d", c.n, allocs, limit)
-		}
-		if limit := uint64(c.bytes + c.bytes/10); bytes > limit {
-			t.Errorf("N=%d: %d bytes, limit %d", c.n, bytes, limit)
-		}
+			runtime.ReadMemStats(&before)
+			for range runs {
+				f.run()
+			}
+			runtime.ReadMemStats(&after)
+			bytes := (after.TotalAlloc - before.TotalAlloc) / runs
+			t.Logf("N=%d: %v allocations, %d bytes", c.n, allocs, bytes)
+			if limit := c.allocs + c.allocs/10; allocs > float64(limit) {
+				t.Errorf("N=%d: %v allocations, limit %d", c.n, allocs, limit)
+			}
+			if limit := uint64(c.bytes + c.bytes/10); bytes > limit {
+				t.Errorf("N=%d: %d bytes, limit %d", c.n, bytes, limit)
+			}
+		})
 	}
 }
