@@ -18,7 +18,10 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/listener"
 )
 
-const fetchSection = "bundle:\n  fetch_url: \"https://bundle.example/b\"\n  fetch_interval: 20m\n  fetch_private: [10.0.0.0/8]\n"
+const fetchSection = "bundle:\n  fetch_url: \"https://bundle.example/b.cbnd\"\n  fetch_interval: 20m\n  fetch_private: [10.0.0.0/8]\n"
+
+// realNewFetcher is the production seam value, kept before a test replaces it.
+var realNewFetcher = newFetcher
 
 // fakeFetch replaces the newFetcher seam until the test ends. It records the
 // values of the call. Its run function waits for the stop and then for linger.
@@ -114,8 +117,38 @@ func TestTU23_FetcherStart(t *testing.T) {
 	want := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.calls != 1 || f.url != "https://bundle.example/b" || f.every != 20*time.Minute || !slices.Equal(f.private, want) || !f.loaded {
+	if f.calls != 1 || f.url != "https://bundle.example/b.cbnd" || f.every != 20*time.Minute || !slices.Equal(f.private, want) || !f.loaded {
 		t.Errorf("%d fetchers with url %q, interval %v, private %v, loaded %v; want 1, the config values, loaded true", f.calls, f.url, f.every, f.private, f.loaded)
+	}
+}
+
+// TestTU23_RealNewFetcher calls the production seam value. A valid URL gives
+// a run function and a freeze input that is false before run. A URL that the
+// client refuses gives an error and no functions.
+func TestTU23_RealNewFetcher(t *testing.T) {
+	_, b, stop := startBoth(t, archiveOf(t, referenceFiles()...))
+	defer stop()
+	private := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	lg := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	run, frozen, err := realNewFetcher("https://bundle.example/b.cbnd", private, 20*time.Minute, b.l, lg)
+	if err != nil || run == nil || frozen == nil {
+		t.Fatalf("valid URL: error %v, run nil %v, frozen nil %v; want no error and both set", err, run == nil, frozen == nil)
+	}
+	if frozen() {
+		t.Error("frozen is true before run")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	done := make(chan struct{})
+	go func() { run(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(netWait):
+		t.Error("run did not return with a canceled context")
+	}
+	run, frozen, err = realNewFetcher("http://bundle.example/b.cbnd", private, 20*time.Minute, b.l, lg)
+	if err == nil || run != nil || frozen != nil {
+		t.Errorf("http URL: error %v, run nil %v, frozen nil %v; want an error and both nil", err, run == nil, frozen == nil)
 	}
 }
 
@@ -203,7 +236,11 @@ func TestTU23_StopOrder(t *testing.T) {
 	// A serve that does not wait for the fetcher closes the queue in this time.
 	f.linger = 200 * time.Millisecond
 	g := startFetchRun(t, fetchSection)
-	<-f.begun
+	select {
+	case <-f.begun:
+	case <-time.After(netWait):
+		t.Fatal("the fetcher did not run")
+	}
 	awaitDone(t, g.r)
 	select {
 	case closed := <-f.ended:
