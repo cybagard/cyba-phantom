@@ -117,8 +117,9 @@ func (f *Fetcher) fetch(ctx context.Context) bool {
 		return false
 	}
 	f.pairRead()
-	// LoadFetched takes no context. A stop during its swap-gap wait does not
-	// stop that load. Run returns after it.
+	// LoadFetched takes no context. The stop of the loader ends its swap-gap
+	// wait, and then it gives ErrStopped. CodeOf gives no code for it, so fetch
+	// counts it in f.faults, one at most, at the stop.
 	if ctx.Err() != nil {
 		return false
 	}

@@ -258,9 +258,11 @@ type Loader struct {
 	// now, decompress, template, seed and keySet are steps of the load.
 	// NewLoader sets them, and a test can replace one. now, decompress and
 	// keySet must not be nil. A nil template step keeps no template, and a nil
-	// seed step keeps no seed. afterRead is a hook for tests. sleep waits for
-	// the swap gap, and afterFunc runs the delayed zero of a seed. They are
-	// seams for tests and must not be nil.
+	// seed step keeps no seed. afterRead is a hook for tests. afterFunc runs
+	// the delayed zero of a seed. It is a seam for tests and must not be nil.
+	// A test can set sleep to wait for the swap gap. A nil sleep waits with a
+	// timer that the stop ends. The stop cannot end a test sleep. A test sleep
+	// that must end at the stop selects on the same channel.
 	now        func() time.Time
 	sleep      func(time.Duration)
 	afterFunc  func(time.Duration, func())
@@ -269,6 +271,9 @@ type Loader struct {
 	template   func(*Archive) (map[string]*template.Template, error)
 	seed       func(*Archive, Class, *Manifest) (*seedBytes, error)
 	keySet     func([]byte, [32]byte, []string, bool) (*token.KeySet, error)
+
+	// stop is set by SetStop. A nil stop never closes.
+	stop <-chan struct{}
 
 	// events and log are set by SetEvents. loadMu guards them. Each can be nil.
 	events *event.Queue
@@ -284,7 +289,7 @@ type Loader struct {
 // install is the install key, which opens the sealed seed of a proprietary
 // bundle. With a nil install key, Load rejects each proprietary bundle.
 func NewLoader(state *os.Root, path string, trust TrustSet, install hpke.PrivateKey) *Loader {
-	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, sleep: time.Sleep, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet, expiryKick: make(chan struct{}, 1)}
+	l := &Loader{state: state, path: path, trust: trust, install: install, now: time.Now, decompress: ReadArchive, template: parseTemplates, keySet: token.NewKeySet, expiryKick: make(chan struct{}, 1)}
 	l.afterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
 	// The ring reads l.now at each call, so a test can replace the clock.
 	l.ring = token.NewRing(func() time.Time { return l.now() })
@@ -653,19 +658,75 @@ func (l *Loader) gapLeft() time.Duration {
 // first waits for the swap gap, without loadMu. It checks the gap again after
 // it takes loadMu, because another load can swap while this one waits. The
 // caller unlocks loadMu.
-func (l *Loader) lock(src Source) {
+//
+// A closed stop of SetStop gives ErrStopped for a source other than
+// SourceStart. This holds before the wait, during the wait, and after the
+// load takes loadMu. Then the load does not start. SourceStart never reads
+// the stop.
+func (l *Loader) lock(src Source) error {
 	for {
 		if src != SourceStart {
+			if l.stopped() {
+				return ErrStopped
+			}
 			if d := l.gapLeft(); d > 0 {
-				l.sleep(d)
+				if l.waitGap(d) {
+					return ErrStopped
+				}
 				continue
 			}
 		}
 		loadMu.Lock()
-		if src == SourceStart || l.gapLeft() <= 0 {
-			return
+		if src == SourceStart {
+			return nil
+		}
+		if l.stopped() {
+			loadMu.Unlock()
+			return ErrStopped
+		}
+		if l.gapLeft() <= 0 {
+			return nil
 		}
 		loadMu.Unlock()
+	}
+}
+
+// ErrStopped is the error of a load that did not start because the stop of the
+// loader was closed. It has fixed text and holds no path.
+var ErrStopped = errors.New("bundle: stopped")
+
+// SetStop sets the stop of all later loads with a source other than
+// SourceStart. A nil channel, the default, never stops. A caller calls it
+// before the first such load, as for SetClock. A later call is not safe. The
+// stop is on the loader, not on each call, so the callers of LoadFrom and
+// LoadFetched need no change.
+func (l *Loader) SetStop(stop <-chan struct{}) { l.stop = stop }
+
+// stopped is true when the stop is closed.
+func (l *Loader) stopped() bool {
+	select {
+	case <-l.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitGap waits d for the swap gap and gives true when the stop closed. A test
+// sleep, when set, does the wait and cannot see the stop. Else a timer and the
+// stop end the wait.
+func (l *Loader) waitGap(d time.Duration) bool {
+	if l.sleep != nil {
+		l.sleep(d)
+		return l.stopped()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-l.stop:
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

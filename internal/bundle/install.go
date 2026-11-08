@@ -70,7 +70,10 @@ func (l *Loader) LoadFetched(archive, sig []byte) (*Bundle, error) {
 	if run := l.cur.Load(); run != nil && run.sum == sha256.Sum256(archive) {
 		return nil, nil
 	}
-	l.lock(SourceFetch)
+	if err := l.lock(SourceFetch); err != nil {
+		l.logStopped(SourceFetch)
+		return nil, err
+	}
 	defer loadMu.Unlock()
 	var sum digest
 	b, err := l.loadFetched(archive, sig, &sum)

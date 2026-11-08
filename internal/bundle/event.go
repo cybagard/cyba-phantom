@@ -90,12 +90,16 @@ func (l *Loader) SetEvents(q *event.Queue, log *slog.Logger) {
 // ErrSource. A source other than SourceStart starts at least 30 s after the
 // last swap. It waits without the load lock. SourceStart does not wait. Only a
 // swap sets the time of the last swap, so a rejection and a state fault start
-// no wait.
+// no wait. A stop of SetStop that closes before the load starts ends it.
+// Then LoadFrom gives ErrStopped, one log line and no event.
 func (l *Loader) LoadFrom(src Source) (*Bundle, error) {
 	if src < SourceStart || src > SourceFetch {
 		return nil, ErrSource
 	}
-	l.lock(src)
+	if err := l.lock(src); err != nil {
+		l.logStopped(src)
+		return nil, err
+	}
 	defer loadMu.Unlock()
 	var sum digest
 	b, err := l.load(src == SourceStart, &sum)
@@ -131,6 +135,12 @@ func (l *Loader) report(src Source, sum digest, b *Bundle, err error) {
 	// a bounded enum, 64 hex digits, or a checked version or key ID.
 	e, _ := event.NewEvent(l.now, event.Input{Kind: kind, Detail: d})
 	l.events.Enqueue(e)
+}
+
+// logStopped writes the log line of a load that the stop ended. It has the
+// source only, and it sends no event.
+func (l *Loader) logStopped(src Source) {
+	l.logMembers(slog.LevelInfo, "bundle load stopped", []member{{"source", src.String()}})
 }
 
 // logMembers writes one log line with the members as attributes.
