@@ -341,3 +341,51 @@ func TestTP12CapLeaves(t *testing.T) {
 		t.Errorf("admitted %d (want %d), callback rows %d, leaves %d", admitted, want, rows, leaves)
 	}
 }
+
+// TestTS32CapPruneKeepsWindow checks that a write removes only the entries
+// outside their window. A token that is admitted late stays capped after two
+// more writes.
+func TestTS32CapPruneKeepsWindow(t *testing.T) {
+	c := newCallbackCap()
+	const late = 1000 * time.Second
+	ka, _ := event.CounterKey(addr(1))
+	kb, _ := event.CounterKey(addr(2))
+	if !c.allow("a", ka, late) || !c.allow("b", kb, late+time.Second) {
+		t.Fatal("a fresh token was capped")
+	}
+	if c.allow("a", ka, late+2*time.Second) {
+		t.Error("a token in its window passed after another write")
+	}
+}
+
+// TestTS32CapPruneBoundary checks the edge of each window. An entry that is
+// exactly one window old leaves the map at the next write. The token map does
+// this after 600 s. The key map does this after 60 s.
+func TestTS32CapPruneBoundary(t *testing.T) {
+	ka, _ := event.CounterKey(addr(1))
+	kb, _ := event.CounterKey(addr(2))
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		sizes  func(c *callbackCap) int
+	}{
+		{"token", wantTokenWindow, func(c *callbackCap) int { n, _ := c.sizes(); return n }},
+		{"key", wantKeyWindow, func(c *callbackCap) int { _, n := c.sizes(); return n }},
+	} {
+		c := newCallbackCap()
+		const start = 100 * time.Second
+		if !c.allow("a", ka, start) || !c.allow("b", kb, start+tc.window-1) {
+			t.Fatalf("%s: a fresh token was capped", tc.name)
+		}
+		if n := tc.sizes(c); n != 2 {
+			t.Errorf("%s: %d entries just before the boundary, want 2", tc.name, n)
+		}
+		c = newCallbackCap()
+		if !c.allow("a", ka, start) || !c.allow("b", kb, start+tc.window) {
+			t.Fatalf("%s: a fresh token was capped", tc.name)
+		}
+		if n := tc.sizes(c); n != 1 {
+			t.Errorf("%s: %d entries at the boundary, want 1", tc.name, n)
+		}
+	}
+}
