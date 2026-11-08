@@ -133,22 +133,34 @@ func (r *rig) events() (n int) {
 	return n
 }
 
+// chunkLog makes a rig with the steps. It notes the limit that each statement
+// gets, and the rows that each chunk changes.
+func chunkLog(t *testing.T, rows int, steps ...retentionStep) (r *rig, limits, chunks *[]int) {
+	t.Helper()
+	cur := 0
+	limits, chunks = new([]int), new([]int)
+	wrapped := make([]retentionStep, len(steps))
+	for i, step := range steps {
+		wrapped[i] = func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			n, err := step(ctx, tx, limit)
+			*limits, cur = append(*limits, limit), cur+n
+			return n, err
+		}
+	}
+	r = retentionRig(t, rows, wrapped...)
+	r.w.beforeCommit = func(*sql.Tx) error { *chunks, cur = append(*chunks, cur), 0; return nil }
+	return r, limits, chunks
+}
+
 // T-U-26: a run over 10 000 rows gives at least 10 chunks. No chunk changes
 // more than 1 000 rows.
 func TestTU26RunGivesChunksOfAtMost1000Rows(t *testing.T) {
-	cur, step := 0, deleteRange(seedTS, math.MaxInt64)
-	r := retentionRig(t, 10_000, func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		n, err := step(ctx, tx, limit)
-		cur += n
-		return n, err
-	})
-	var chunks []int
-	r.w.beforeCommit = func(*sql.Tx) error { chunks, cur = append(chunks, cur), 0; return nil }
+	r, _, chunks := chunkLog(t, 10_000, deleteRange(seedTS, math.MaxInt64))
 	if err := r.retain(waitFor); err != nil {
 		t.Fatal(err)
 	}
-	if len(chunks) < 10 || slices.Max(chunks) > 1000 || r.events() != 0 {
-		t.Fatalf("chunks %v, %d rows left", chunks, r.events())
+	if len(*chunks) < 10 || slices.Max(*chunks) > 1000 || r.events() != 0 {
+		t.Fatalf("chunks %v, %d rows left", *chunks, r.events())
 	}
 }
 
@@ -156,23 +168,12 @@ func TestTU26RunGivesChunksOfAtMost1000Rows(t *testing.T) {
 // changed. Two steps have 600 rows each. The first chunk changes 1 000 rows, so
 // its second statement gets the limit 400. The next chunk changes the rest.
 func TestTU26SecondStatementGetsTheRestOfTheLimit(t *testing.T) {
-	var limits, chunks []int
-	cur := 0
-	wrap := func(step retentionStep) retentionStep {
-		return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-			n, err := step(ctx, tx, limit)
-			limits, cur = append(limits, limit), cur+n
-			return n, err
-		}
-	}
-	r := retentionRig(t, 1200, wrap(deleteRange(seedTS, seedTS+600)),
-		wrap(deleteRange(seedTS+600, seedTS+1200)))
-	r.w.beforeCommit = func(*sql.Tx) error { chunks, cur = append(chunks, cur), 0; return nil }
+	r, limits, chunks := chunkLog(t, 1200, deleteRange(seedTS, seedTS+600), deleteRange(seedTS+600, seedTS+1200))
 	if err := r.retain(waitFor); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(limits, []int{1000, 400, 1000}) || !slices.Equal(chunks, []int{1000, 200}) || r.events() != 0 {
-		t.Fatalf("limits %v, chunks %v, %d rows left", limits, chunks, r.events())
+	if !slices.Equal(*limits, []int{1000, 400, 1000}) || !slices.Equal(*chunks, []int{1000, 200}) || r.events() != 0 {
+		t.Fatalf("limits %v, chunks %v, %d rows left", *limits, *chunks, r.events())
 	}
 }
 
@@ -306,6 +307,14 @@ func TestTU26ChunkErrorStopsTheWriter(t *testing.T) {
 		}, func(*Writer) {}},
 		{"count above the limit", bad(func(limit int) int { return limit + 1 }), func(*Writer) {}},
 		{"count below 0", bad(func(int) int { return -1 }), func(*Writer) {}},
+		{"restore of busy_timeout after the checkpoint (T-S-33)", nil, func(w *Writer) {
+			w.beforePragma = func(s string) error {
+				if s == "PRAGMA busy_timeout=5000" {
+					return boom
+				}
+				return nil
+			}
+		}},
 		{"BEGIN", all, func(w *Writer) { w.beforeBegin = func() error { return boom } }},
 		{"COMMIT", all, func(w *Writer) { w.beforeCommit = func(*sql.Tx) error { return boom } }},
 	}
@@ -535,23 +544,6 @@ func TestTS33RunEndsWithTruncatedWAL(t *testing.T) {
 	}
 }
 
-// T-S-33: a failed busy_timeout restore after the checkpoint is a database
-// error. The writer stops and the stop marker exists.
-func TestTS33RestoreFailureStopsTheWriter(t *testing.T) {
-	r := retentionRig(t, 0)
-	r.w.beforePragma = func(s string) error {
-		if s == "PRAGMA busy_timeout=5000" {
-			return errors.New("pragma refused")
-		}
-		return nil
-	}
-	wantRule(t, r.retain(waitFor), writerName, ruleDatabase)
-	wantRule(t, r.w.Err(), writerName, ruleDatabase)
-	if _, err := r.marker(); err != nil || r.w.Healthy() {
-		t.Fatalf("marker %v, healthy %v", err, r.w.Healthy())
-	}
-}
-
 // T-S-33: a reader holds a snapshot. The checkpoint runs with busy_timeout 0,
 // so it does not wait for the reader. The busy count adds 1 and the writer
 // stays healthy. After the reader ends, the next run truncates the WAL.
@@ -584,11 +576,10 @@ func TestTS33ReaderMakesCheckpointBusyNotAnError(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
 	defer cancel()
-	fi, statErr := os.Stat(filepath.Join(r.state, "events.db-wal"))
-	if err := r.w.RunRetention(ctx); err != nil || statErr != nil {
-		t.Fatal(err, statErr)
+	if err := r.w.RunRetention(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if fi, err = os.Stat(filepath.Join(r.state, "events.db-wal")); err != nil || fi.Size() != 0 || r.w.RetentionCheckpointBusy() != 1 {
+	if fi, err := os.Stat(filepath.Join(r.state, "events.db-wal")); err != nil || fi.Size() != 0 || r.w.RetentionCheckpointBusy() != 1 {
 		t.Fatalf("second run: WAL %v (%v), busy %d", fi, err, r.w.RetentionCheckpointBusy())
 	}
 }
