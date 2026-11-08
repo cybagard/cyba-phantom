@@ -302,6 +302,10 @@ func TestTP12CapBounds(t *testing.T) {
 		}
 		tk, ks := c.sizes()
 		maxTokens, maxKeys = max(maxTokens, tk), max(maxKeys, ks)
+		// Each key holds one time here, so the times equal the keys.
+		if total, most := c.keyEntries(); total != ks || total > boundKeys || most > 1 {
+			t.Fatalf("try %d: %d times in %d keys, %d for one key", i, total, ks, most)
+		}
 	}
 	if maxTokens > boundTokens || maxKeys > boundKeys {
 		t.Errorf("maps reached %d tokens and %d keys, bounds %d and %d", maxTokens, maxKeys, boundTokens, boundKeys)
