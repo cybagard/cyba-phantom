@@ -308,11 +308,13 @@ type shape struct {
 // route cap. The search is not a proof of the maximum. T-S-28 bounds the site
 // table of each one. The first three make a route large with trap actions and
 // header slots. "most vhosts" has the most vhosts with the largest template.
-// The callback shape has the most callback positions. "asset slots" makes the
-// vhost count large: asset routes can have header slots, and 214 vhosts gave
-// the most bytes in a scan of 200 to 334 vhosts. "template slots 29" has 423
-// vhosts of about 29 routes, just over a growth step of a map in Go, with the
-// largest template that still loads.
+// The callback shape has the most callback positions.
+//
+// "asset slots" makes the vhost count large. Asset routes can have header
+// slots. 214 vhosts gave the most bytes in a scan of 200 to 334 vhosts.
+//
+// "template slots 29" has 423 vhosts of about 29 routes. This is just over a
+// growth step of a map in Go. The template is the largest that still loads.
 func boundShapes() []shape {
 	return []shape{
 		{"64 actions", templateSpec(64, 0, vhostsFor(maxRouteMap))},

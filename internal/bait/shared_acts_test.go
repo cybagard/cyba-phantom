@@ -48,7 +48,7 @@ func TestTS31SharedActsReadOnly(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	// The count of requests is odd. So a swap in each mint shows in the content.
+	// The count of requests is odd, so a swap in each mint shows in the list.
 	serve(t, h, get("/r0", "example.com"))
 
 	s := h.siteOf(b)
