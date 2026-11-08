@@ -48,7 +48,8 @@ func TestTS31SharedActsReadOnly(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	// The count of requests is odd, so a swap in each mint shows in the list.
+	// With -race, a write by a mint is a data race. The content check alone
+	// finds a swap of two indexes only in some runs.
 	serve(t, h, get("/r0", "example.com"))
 
 	s := h.siteOf(b)

@@ -15,6 +15,8 @@ import (
 // entry is one route of a vhost, ready to serve. Only an asset route sets
 // asset, isAsset and clen.
 type entry struct {
+	// route is the route of the entry. After the build, route.Headers is nil:
+	// the build copies the slots into slots and names.
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
@@ -54,9 +56,8 @@ type site struct {
 
 // mintOf gives the entry the key-set indexes of one mint. They are the trap
 // actions of its template, then the header slots whose trap is in the bundle.
-// The action part is shared by the entries of the template. The slot part is
-// the own part of the entry. A slot with no trap adds to left. pos maps a trap
-// id to its index.
+// The entries of the template share the action part. The entry owns the slot
+// part. A slot with no trap adds to left. pos maps a trap id to its index.
 func (s *site) mintOf(e *entry, b *bundle.Bundle, pos map[string]int) {
 	if name := e.route.Template; name != "" {
 		a, ok := s.acts[name]

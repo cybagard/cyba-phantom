@@ -137,8 +137,9 @@ const (
 	// baseRoutes is the number of routes of the test archive.
 	baseRoutes = 10
 	// siteHeapLimit is the most heap, in bytes, that one site keeps (T-S-28).
-	// The bundle is at the route cap. The shapes of boundShapes are the largest
-	// ones that a search found. They are not a proof of the maximum.
+	// The bundle is at the route cap. The shapes of boundShapes come from a
+	// search. Of these, "asset slots" keeps the most bytes. The search does not
+	// prove a maximum.
 	siteHeapLimit = 10 << 20
 	// maxRouteMap is the most routes in one route map.
 	maxRouteMap = 256
@@ -304,14 +305,15 @@ type shape struct {
 	spec shapeSpec
 }
 
-// boundShapes are the largest legal route shapes that a search found at the
-// route cap. The search is not a proof of the maximum. T-S-28 bounds the site
-// table of each one. The first three make a route large with trap actions and
-// header slots. "most vhosts" has the most vhosts with the largest template.
-// The callback shape has the most callback positions.
+// boundShapes are route shapes at the route cap that a search found. Of these,
+// "asset slots" keeps the most bytes. The search does not prove a maximum.
+// T-S-28 bounds the site table of each one. The first three make a route
+// large with trap actions and header slots. "most vhosts" has the most vhosts
+// with the largest template. The callback shape has the most callback
+// positions.
 //
-// "asset slots" makes the vhost count large. Asset routes can have header
-// slots. 214 vhosts gave the most bytes in a scan of 200 to 334 vhosts.
+// "asset slots" puts header slots on asset routes. In a scan of 200 to 334
+// vhosts, 214 vhosts gave the most bytes.
 //
 // "template slots 29" has 423 vhosts of about 29 routes. This is just over a
 // growth step of a map in Go. The template is the largest that still loads.
