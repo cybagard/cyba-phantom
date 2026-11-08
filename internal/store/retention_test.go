@@ -372,6 +372,22 @@ func countingRig(t *testing.T, withStep bool) (*rig, *int, *[]string) {
 	return r, &calls, r.recordPragmas()
 }
 
+// queueAtFirstCommit makes the first batch COMMIT put rq in the retention
+// channel. That COMMIT, and each later one, gives err. The returned channel
+// closes when the request is queued.
+func (r *rig) queueAtFirstCommit(rq retentionRequest, err error) <-chan struct{} {
+	queued, first := make(chan struct{}), true
+	r.w.beforeCommit = func(*sql.Tx) error {
+		if first {
+			first = false
+			r.w.retention <- rq
+			close(queued)
+		}
+		return err
+	}
+	return queued
+}
+
 // T-U-26: a stopped writer starts no run from the take loop. A batch of 500
 // events fails at its COMMIT, and a retention request waits at that time. The
 // request stays in its channel. No step, BEGIN or checkpoint statement runs.
@@ -380,15 +396,7 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 		t.Run(fmt.Sprint("with step ", withStep), func(t *testing.T) {
 			r, calls, stmts := countingRig(t, withStep)
 			rq := retentionRequest{reply: make(chan error, 1)}
-			hooked, first := make(chan struct{}), true
-			r.w.beforeCommit = func(*sql.Tx) error {
-				if first {
-					first = false
-					r.w.retention <- rq
-					close(hooked)
-				}
-				return errors.New("refused")
-			}
+			hooked := r.queueAtFirstCommit(rq, errors.New("refused"))
 			for i := range maxBatch {
 				r.add(event.KindRequest, int64(i))
 			}
@@ -440,14 +448,8 @@ func TestTU26RunStartsFromTheTakeLoop(t *testing.T) {
 			lanesBusy = r.q.Bytes() != (event.Bytes{})
 		}
 	}))
-	rq, queued := retentionRequest{reply: make(chan error, 1)}, false
-	r.w.beforeCommit = func(*sql.Tx) error {
-		if !queued {
-			queued = true
-			r.w.retention <- rq
-		}
-		return nil
-	}
+	rq := retentionRequest{reply: make(chan error, 1)}
+	r.queueAtFirstCommit(rq, nil)
 	for i := range 1200 {
 		r.add(event.KindRequest, int64(i))
 	}
