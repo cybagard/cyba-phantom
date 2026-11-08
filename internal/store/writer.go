@@ -159,8 +159,9 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // when the batch is not empty. It holds one batch at a time and starts no
 // goroutine for an event. While the lanes stay non-empty, Run writes at 500
 // events. After each such write it serves three things, with no wait. These
-// are a waiting row request, a waiting retention request and a waiting tick.
-// Thus a flood does not hold them.
+// are a waiting row request, a waiting tick and a waiting retention request,
+// in this order. Thus a flood does not hold them. A stopped writer starts no
+// retention run.
 //
 // A retention request makes Run run the retention steps in chunks (see
 // serveRetention). Between two chunks, Run serves a waiting row request. Then
@@ -236,11 +237,12 @@ func (w *Writer) Run(ctx context.Context) error {
 			batch = w.serveRetention(ctx, tick, batch, rq)
 		case <-w.q.Ready():
 			// Take events until the lanes are empty, then examine Closed. After
-			// a flush at 500 events, serve a waiting row request and a waiting
-			// tick, so that a flood does not hold them. Then leave the loop if
-			// ctx has ended or the writer has stopped, so that the select can
-			// take ctx.Done. Only an empty take ends the loop with the lanes
-			// empty. Then a batch with evidence is written at once.
+			// a flush at 500 events, serve a waiting row request, a waiting tick
+			// and a waiting retention request, in this order, so that a flood does
+			// not hold them. Then leave the loop if ctx has ended or the writer
+			// has stopped, so that the select can take ctx.Done. Only an empty
+			// take ends the loop with the lanes empty. Then a batch with evidence
+			// is written at once.
 			for {
 				e, ok := w.q.TryTake()
 				if !ok {
@@ -255,10 +257,13 @@ func (w *Writer) Run(ctx context.Context) error {
 				if batch = append(batch, e); len(batch) == maxBatch {
 					batch, evidence = w.flush(batch), false
 					batch = w.serveWaiting(tick, batch)
-					select {
-					case rq := <-w.retention:
-						batch = w.serveRetention(ctx, tick, batch, rq)
-					default:
+					// A stopped writer, or a ctx that has ended, starts no run.
+					if w.Healthy() && ctx.Err() == nil {
+						select {
+						case rq := <-w.retention:
+							batch = w.serveRetention(ctx, tick, batch, rq)
+						default:
+						}
 					}
 					if ctx.Err() != nil || !w.Healthy() {
 						break
@@ -284,7 +289,7 @@ func (w *Writer) Run(ctx context.Context) error {
 // of Run. A stopped writer serves nothing: the flush before can have stopped it,
 // and a stopped writer writes no row. It does not serve a retention request:
 // Run does that after it, because the run needs ctx. Between two retention
-// chunks, betweenChunks serves the same things in the order row, batch, tick.
+// chunks, betweenChunks serves a row request, a batch and a tick, in this order.
 func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		return batch

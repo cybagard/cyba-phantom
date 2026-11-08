@@ -83,12 +83,16 @@ var (
 	fixedNames = []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"}
 )
 
+// busyTimeout is the busy_timeout of a pool connection, in milliseconds. A
+// retention checkpoint sets it again after its run.
+const busyTimeout = "5000"
+
 // pragmas are the 03 pragmas, with secure_delete(ON) at the end (SEC-39). Each
 // is in the connection string, so SQLite applies it to each new connection.
 var pragmas = []string{
 	"journal_mode(WAL)", "synchronous(NORMAL)", "cache_size(-8000)",
 	"temp_store(MEMORY)", "mmap_size(0)", "foreign_keys(OFF)",
-	"busy_timeout(5000)", "journal_size_limit(67108864)", "trusted_schema(OFF)",
+	"busy_timeout(" + busyTimeout + ")", "journal_size_limit(67108864)", "trusted_schema(OFF)",
 	"secure_delete(ON)",
 }
 
@@ -603,7 +607,8 @@ func verify(db *sql.DB, rel string) error {
 	if mode != "wal" {
 		return fail(rel, ruleSetting)
 	}
-	// secure_delete must be 1 (SEC-39): a freed page holds no old bytes.
+	// secure_delete must be 1 (SEC-39). After the next checkpoint, a freed page
+	// holds no old bytes.
 	var secure int
 	if err := db.QueryRowContext(ctx, "PRAGMA secure_delete").Scan(&secure); err != nil {
 		return fail(rel, ruleOpen)

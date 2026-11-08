@@ -10,23 +10,26 @@ import (
 
 const (
 	// chunkRows and chunkBudget are the limits of one retention chunk (SEC-39).
-	// A chunk ends at the first of: 1 000 rows, 100 ms, or no row left.
+	// A chunk changes at most 1 000 rows. It ends after the first statement
+	// that reaches 100 ms of statement time, or when no row is left. BEGIN and
+	// COMMIT are not in the statement time.
 	chunkRows   = 1000
 	chunkBudget = 100 * time.Millisecond
 
-	// The checkpoint waits for no reader. A busy result is counted, and the
-	// next run tries again. After it, busy_timeout gets the pool value of the
-	// pragma list in open.go.
+	// The checkpoint waits for no reader. The writer counts a busy result, and
+	// the next run tries again. After it, busy_timeout gets the pool value of
+	// the pragma list in open.go.
 	checkpointSQL = "PRAGMA wal_checkpoint(TRUNCATE)"
 	busyOff       = "PRAGMA busy_timeout=0"
-	busyPool      = "PRAGMA busy_timeout=5000"
+	busyPool      = "PRAGMA busy_timeout=" + busyTimeout
 
 	ruleRetention = "retention run ended early"
 )
 
 // A retentionStep runs one statement in the transaction of a chunk. It changes
 // at most limit rows. It returns the count of rows that it changed. A count
-// below limit means that the step has no row left.
+// below limit means that the step has no row left. A count above limit, or
+// below 0, is a database error of the chunk.
 type retentionStep func(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 
 // retentionSteps are the steps of a run, in order. The list is empty: the steps
@@ -35,17 +38,37 @@ var retentionSteps []retentionStep
 
 // retentionRequest asks the writer goroutine for one retention run. The reply
 // channel has room for one value, so the writer never waits for the caller.
+// The gone channel is the done channel of the context of the caller.
 type retentionRequest struct {
 	reply chan error
+	gone  <-chan struct{}
+}
+
+// left tells if the caller has left. The writer then skips the run.
+func (rq retentionRequest) left() bool {
+	select {
+	case <-rq.gone:
+		return true
+	default:
+		return false
+	}
 }
 
 // RunRetention asks the writer to run the retention steps and waits for the
 // end of the run or of ctx. The reply is nil when the run ended with its
-// checkpoint. It is an error when the run ended early or the writer stopped. A
-// stopped writer takes no request: the call then returns when ctx ends. It is
-// safe to call from any goroutine.
+// checkpoint. It is an error when the run ended early or the writer stopped.
+// The call returns the error of a stopped writer, or ctx.Err() when ctx has
+// ended, at once and sends no request. A call that returns on its ctx can leave
+// a request. The writer drops it. A call can wait until its ctx ends, when the
+// writer stops while the request waits. It is safe to call from any goroutine.
 func (w *Writer) RunRetention(ctx context.Context) error {
-	rq := retentionRequest{reply: make(chan error, 1)}
+	if err := w.Err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rq := retentionRequest{reply: make(chan error, 1), gone: ctx.Done()}
 	select {
 	case w.retention <- rq:
 	case <-ctx.Done():
@@ -67,11 +90,17 @@ func (w *Writer) RetentionCheckpointBusy() uint64 { return w.checkpointBusy.Load
 
 // serveRetention runs one retention run and sends the result to rq. It runs one
 // chunk for each pass. Between two chunks the writer serves what waits (see
-// betweenChunks). Then the run ends early, with an error, in three cases. These
-// are: ctx has ended, the queue is closed, or the writer has stopped. Each
-// chunk is a transaction, so no partial chunk stays. A database error stops the
-// writer. After the last chunk the run ends with the TRUNCATE checkpoint.
+// betweenChunks). A stopped writer, or a caller that has left, gets no chunk
+// and no checkpoint. Then the run ends early, with an error, in four cases.
+// These are: ctx has ended, the caller has left, the queue is closed, or the
+// writer has stopped. Each chunk is a transaction, so no partial chunk stays. A
+// database error stops the writer. After the last chunk the run ends with the
+// TRUNCATE checkpoint.
 func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batch []*event.Event, rq retentionRequest) []*event.Event {
+	if !w.Healthy() || rq.left() {
+		rq.reply <- fail(writerName, ruleRetention)
+		return batch
+	}
 	steps := retentionSteps
 	for cur := 0; cur < len(steps); {
 		if _, err := w.chunk(steps, &cur); err != nil {
@@ -83,7 +112,7 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 			break
 		}
 		batch = w.betweenChunks(tick, batch)
-		if ctx.Err() != nil || w.q.Closed() || !w.Healthy() {
+		if ctx.Err() != nil || rq.left() || w.q.Closed() || !w.Healthy() {
 			rq.reply <- fail(writerName, ruleRetention)
 			return batch
 		}
@@ -99,11 +128,12 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // chunk runs the steps from *cur in one transaction on one pool connection. The
 // transaction does not use the context of Run, as write does not. The statement
 // limit is 1 000 minus the rows that the chunk changed. The chunk ends at the
-// first of three events. These are 1 000 rows, a statement that reaches the
-// budget, and the end of the last step. A step with no row left lets the chunk
-// go on with the next step. The time comes from w.now. It returns the rows
-// that the chunk changed. Any failure is a database error. Then the
-// transaction rolls back.
+// first of three events. These are 1 000 rows, the first statement that
+// reaches the budget, and the end of the last step. BEGIN and COMMIT are not in
+// the budget. A step with no row left lets the chunk go on with the next step.
+// The time comes from w.now. It returns the rows that the chunk changed. Any
+// failure is a database error, also a step count above the limit or below 0.
+// Then the transaction rolls back.
 func (w *Writer) chunk(steps []retentionStep, cur *int) (rows int, err error) {
 	ctx := context.Background()
 	conn, err := w.db.Conn(ctx)
@@ -126,7 +156,7 @@ func (w *Writer) chunk(steps []retentionStep, cur *int) (rows int, err error) {
 	for *cur < len(steps) && rows < chunkRows {
 		limit := chunkRows - rows
 		n, err := steps[*cur](ctx, tx, limit)
-		if err != nil {
+		if err != nil || n < 0 || n > limit {
 			return 0, fail(writerName, ruleDatabase)
 		}
 		rows += n
