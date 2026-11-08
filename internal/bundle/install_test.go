@@ -12,6 +12,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // fetched is a running env (version 2). It holds the old pair and a new signed
@@ -319,6 +320,31 @@ func (f *fetched) startLoads(version string) {
 	}
 }
 
+// T-U-23: a roll-forward whose rename fails leaves the ring. The rename comes
+// before the swap of the key sets.
+func TestTU23RollForwardRenameKeepsRing(t *testing.T) {
+	noSeams(t)
+	e, install := newEnv(t), testInstall(t, 1)
+	key, l := keyOne(e), e.seedLoader(install)
+	e.putSeeded(key, ver(2), trapEntsWith(e.good(install, key, ver(2), seedA), "a")...)
+	b, err := l.Load(false)
+	must(t, err)
+	tok, err := b.Tokens().Mint(0, testNow)
+	must(t, err)
+	oldSig := e.bytesOf("bundle/current.sig")
+	e.putSeeded(key, ver(3), trapEntsWith(e.good(install, key, ver(3), seedB), "a")...)
+	e.write("bundle/current.sig.tmp", e.bytesOf("bundle/current.sig"))
+	e.write("bundle/current.sig", oldSig)
+	failRenameTo(t, "current.sig")
+	if got, err := l.Load(true); got != nil || err != ErrInstallFault {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	ringCheck(t, l, "running bundle", tok, token.First)
+	if l.Ring().Len() != 1 {
+		t.Errorf("ring holds %d key sets", l.Ring().Len())
+	}
+}
+
 // T-U-23: a roll-forward whose later step fails keeps the temporary signature
 // file. The steps are the record write, the chain check, the version-state
 // write, the rename and an expired bundle. The rename comes last, so a fault
@@ -389,6 +415,7 @@ func TestTU23RollForwardLaterStepFails(t *testing.T) {
 // rename of the signature file. The first pair is "old" for snap, and the
 // second pair, of version 4, is "new".
 func secondFetched(t *testing.T) *fetched {
+	t.Helper()
 	f := newFetched(t)
 	f.crashAfterFirstRename()
 	f.oldArch, f.oldSig = f.arch, f.sig
@@ -401,26 +428,42 @@ func secondFetched(t *testing.T) *fetched {
 // later install then renames no old signature temporary file over the pair.
 // The test puts a good pair in place by hand after a failed signature rename.
 // The next install fails at the archive rename. The next start loads the good
-// pair.
+// pair. A reload that rejects the pair keeps the mark.
 func TestTU23ReloadClearsMark(t *testing.T) {
-	f := secondFetched(t)
-	f.write("bundle/current.cbnd", f.arch)
-	f.write("bundle/current.sig", f.sig)
-	if b, err := f.l.Load(false); err != nil || b.Manifest().Version != ver(4) {
-		t.Fatalf("reload: %v, %v", b, err)
-	}
-	third := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
-	failRenameTo(t, "current.cbnd")
-	if b, err := f.l.LoadFetched(third, f.sign(third)); b != nil || err != ErrInstallFault {
-		t.Fatalf("third install: %v, %v", b, err)
-	}
-	if !bytes.Equal(f.bytesOf("bundle/current.sig"), f.sig) {
-		t.Error("the install renamed the old temporary file over the signature file")
-	}
-	beforeRename = nil
-	if b, err := f.loader("bundle/current.cbnd").Load(true); err != nil || b.Manifest().Version != ver(4) {
-		t.Fatalf("next start: %v, %v", b, err)
-	}
+	t.Run("accepted", func(t *testing.T) {
+		f := secondFetched(t)
+		f.write("bundle/current.cbnd", f.arch)
+		f.write("bundle/current.sig", f.sig)
+		if b, err := f.l.Load(false); err != nil || b.Manifest().Version != ver(4) {
+			t.Fatalf("reload: %v, %v", b, err)
+		}
+		third := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
+		failRenameTo(t, "current.cbnd")
+		if b, err := f.l.LoadFetched(third, f.sign(third)); b != nil || err != ErrInstallFault {
+			t.Fatalf("third install: %v, %v", b, err)
+		}
+		if !bytes.Equal(f.bytesOf("bundle/current.sig"), f.sig) {
+			t.Error("the install renamed the old temporary file over the signature file")
+		}
+		beforeRename = nil
+		if b, err := f.loader("bundle/current.cbnd").Load(true); err != nil || b.Manifest().Version != ver(4) {
+			t.Fatalf("next start: %v, %v", b, err)
+		}
+	})
+	// The pair on disk gives bad_sig, so the reload keeps the mark. The next
+	// install renames the kept file first and then fails at the archive rename.
+	t.Run("rejected", func(t *testing.T) {
+		f := secondFetched(t)
+		if b, err := f.l.Load(false); b != nil || err != ErrBadSig {
+			t.Fatalf("reload: %v, %v", b, err)
+		}
+		failRenameTo(t, "current.cbnd")
+		if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
+			t.Fatalf("install: %v, %v", b, err)
+		}
+		f.arch, f.sig, f.oldArch, f.oldSig = f.oldArch, f.oldSig, nil, nil
+		f.startLoads(ver(3))
+	})
 }
 
 // T-U-23: when the kept file is missing, the next install clears the mark and

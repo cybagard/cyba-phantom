@@ -246,8 +246,8 @@ type Loader struct {
 	// sigKept is the mark: <name>.sig.tmp is a kept file. An install renames it
 	// first and never removes or replaces it. A rename of the file to
 	// <name>.sig clears the mark. So does a load that accepts <name>.cbnd with
-	// <name>.sig, and an install that finds no file. It is not on disk. loadMu
-	// guards it.
+	// <name>.sig, and an install that finds no file. A bad_sig of a
+	// roll-forward also clears it. It is not on disk. loadMu guards it.
 	sigKept bool
 
 	// swapAt is the time of the last swap, or zero before the first swap.
@@ -420,7 +420,8 @@ func (l *Loader) Load(start bool) (*Bundle, error) {
 }
 
 // load is Load without the lock and without the event. loadMu is held. It sets
-// rd when it has read the bundle file and the signature file.
+// rd when it has read the bundle file and a signature file. In a roll-forward,
+// that file can be <name>.sig.tmp.
 func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	dir, name, c, closeDir, err := l.prepare(start)
 	if err != nil {
