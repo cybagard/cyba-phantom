@@ -21,14 +21,23 @@ import (
 // seedTS is the ts of the first seeded row. The ts of rig.add is lower.
 const seedTS = 1_000_000
 
-// seedEvents inserts n request rows with ts = base + i*step and a detail text
-// of 300 characters.
-func seedEvents(tb testing.TB, db *sql.DB, n int, base, step int64) {
+// seedEvents inserts n request rows with ts = base + i*step. A wide row has a
+// detail text of 300 characters. Only the benchmark uses it. The seed turns the
+// CHECK constraints off: under the race detector they cost most of the time.
+func seedEvents(tb testing.TB, db *sql.DB, n int, base, step int64, wide bool) {
 	tb.Helper()
+	detail := "NULL"
+	if wide {
+		detail = "hex(randomblob(150))"
+	}
+	if _, err := db.Exec("PRAGMA ignore_check_constraints=ON"); err != nil {
+		tb.Fatal(err)
+	}
+	defer db.Exec("PRAGMA ignore_check_constraints=OFF")
 	for off := 0; off < n; off += 100_000 {
 		last := off + min(100_000, n-off) - 1
 		if _, err := db.Exec(`WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
-			INSERT INTO event (ts, kind, detail) SELECT ? + i*?, 'request', hex(randomblob(150)) FROM c`,
+			INSERT INTO event (ts, kind, detail) SELECT ? + i*?, 'request', `+detail+` FROM c`,
 			off, last, base, step); err != nil {
 			tb.Fatal(err)
 		}
@@ -61,7 +70,7 @@ func onCall(step retentionStep, f func(i int, tx *sql.Tx)) retentionStep {
 func retentionRig(t *testing.T, rows int, steps ...retentionStep) *rig {
 	t.Helper()
 	r := newRig(t, 4000)
-	seedEvents(t, r.db, rows, seedTS, 1)
+	seedEvents(t, r.db, rows, seedTS, 1, false)
 	setHook(t, &retentionSteps, steps)
 	return r
 }
@@ -99,6 +108,63 @@ func TestTU26RunGivesChunksOfAtMost1000Rows(t *testing.T) {
 	}
 	if len(chunks) < 10 || slices.Max(chunks) > 1000 || r.events() != 0 {
 		t.Fatalf("chunks %v, %d rows left", chunks, r.events())
+	}
+}
+
+// T-U-26: the limit of a statement is 1 000 minus the rows that the chunk
+// changed. Two steps have 600 rows each. The first chunk changes 1 000 rows, so
+// its second statement gets the limit 400. The next chunk changes the rest.
+func TestTU26SecondStatementGetsTheRestOfTheLimit(t *testing.T) {
+	var limits, chunks []int
+	cur := 0
+	wrap := func(step retentionStep) retentionStep {
+		return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			n, err := step(ctx, tx, limit)
+			limits, cur = append(limits, limit), cur+n
+			return n, err
+		}
+	}
+	r := retentionRig(t, 1200, wrap(deleteRange(seedTS, seedTS+600)),
+		wrap(deleteRange(seedTS+600, seedTS+1200)))
+	r.w.beforeCommit = func(*sql.Tx) error { chunks, cur = append(chunks, cur), 0; return nil }
+	if err := r.retain(waitFor); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(limits, []int{1000, 400, 1000}) || !slices.Equal(chunks, []int{1000, 200}) || r.events() != 0 {
+		t.Fatalf("limits %v, chunks %v, %d rows left", limits, chunks, r.events())
+	}
+}
+
+// T-U-26: a run with no step runs no chunk, so no BEGIN. It still ends with the
+// checkpoint. The list of production steps is empty in this change.
+func TestTU26EmptyStepListRunsOnlyTheCheckpoint(t *testing.T) {
+	r := retentionRig(t, 0)
+	begins := 0
+	r.w.beforeBegin = func() error { begins++; return nil }
+	var stmts []string
+	r.w.beforePragma = func(s string) error { stmts = append(stmts, s); return nil }
+	if err := r.retain(waitFor); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{busyOff, checkpointSQL, busyPool}; begins != 0 || !slices.Equal(stmts, want) {
+		t.Fatalf("%d BEGIN, statements %v, want %v", begins, stmts, want)
+	}
+}
+
+// T-U-26: between two chunks the writer writes a batch only when it has one.
+// The drop counts wait for the tick: no tick comes, so they stay in memory.
+func TestTU26DropCountsWaitForTheTick(t *testing.T) {
+	var r *rig
+	r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
+		if i == 0 {
+			r.c.DropNoAddr()
+		}
+	}))
+	if err := r.retain(waitFor); err != nil {
+		t.Fatal(err)
+	}
+	if !r.c.Pending() {
+		t.Fatal("a run with no batch and no tick wrote the drop counts")
 	}
 }
 
@@ -263,6 +329,23 @@ func TestTS33RunEndsWithTruncatedWAL(t *testing.T) {
 	}
 }
 
+// T-S-33: a failed busy_timeout restore after the checkpoint is a database
+// error. The writer stops and the stop marker exists.
+func TestTS33RestoreFailureStopsTheWriter(t *testing.T) {
+	r := retentionRig(t, 0)
+	r.w.beforePragma = func(s string) error {
+		if s == busyPool {
+			return errors.New("pragma refused")
+		}
+		return nil
+	}
+	wantRule(t, r.retain(waitFor), writerName, ruleDatabase)
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if _, err := r.marker(); err != nil || r.w.Healthy() {
+		t.Fatalf("marker %v, healthy %v", err, r.w.Healthy())
+	}
+}
+
 // T-S-33: a reader holds a snapshot. The checkpoint runs with busy_timeout 0,
 // so it does not wait for the reader. The busy count adds 1 and the writer
 // stays healthy. After the reader ends, the next run truncates the WAL.
@@ -346,7 +429,7 @@ func BenchmarkRetentionDeleteChunk(b *testing.B) {
 		if err != nil || Migrate(db, "origin") != nil {
 			b.Fatal("setup:", err)
 		}
-		seedEvents(b, db, n, time.Now().UnixMilli()-span, max(1, span/int64(n)))
+		seedEvents(b, db, n, time.Now().UnixMilli()-span, max(1, span/int64(n)), true)
 		db.Close()
 		root.Close()
 		cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkRetentionChunkChild$", "-test.benchtime=1x")
