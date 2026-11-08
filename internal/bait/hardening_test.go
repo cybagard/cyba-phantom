@@ -315,9 +315,9 @@ func TestTS02PostBodies(t *testing.T) {
 			}
 		}
 	}
-	// A callback route and the beacon post path close the connection before the
-	// handler returns, and Close does not wait for such a handler. So wait until
-	// the handler has recorded each request, then read the records under mu.
+	// A callback route and the beacon post path close the connection early.
+	// Close does not wait for such a handler. So wait until the handler has
+	// recorded each request. Then read the records under mu.
 	for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
 		mu.Lock()
 		got := len(reads) + len(cbReads) + len(bpReads)

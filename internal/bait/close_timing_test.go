@@ -217,7 +217,7 @@ func TestTS32CloseBeforeCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		beacon, good bool
-		route        string // the callback route, or "" for the route with an asset
+		route        string // the callback route, or "" for the one with an asset
 		noBody       bool   // a beacon post with no body
 	}{
 		{name: "callback, good tokens", good: true},
@@ -300,7 +300,7 @@ func TestTS32CloseBeforeCheck(t *testing.T) {
 					}
 					open()
 					reqs, rest := waitRequests(t, q, 1)
-					// A request has 4 distinct good tokens, one at each position.
+					// A request has 4 good tokens, one at each position.
 					want := 0
 					if tc.good {
 						want = map[bool]int{false: 4, true: 1}[tc.beacon]

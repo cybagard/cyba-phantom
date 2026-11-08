@@ -12,10 +12,10 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
-// hijackCloser is a handler that writes a 204 with "Connection: close",
-// flushes it, takes the connection from net/http and closes it. The handler of
-// a callback route does this before it checks its tokens. It records each
-// Hijack error, before it closes the connection, for the test to read.
+// hijackCloser is a handler that writes a 204 with "Connection: close" and
+// flushes it. Then it takes the connection from net/http and closes it. The
+// handler of a callback route does this before it checks its tokens. It records
+// each Hijack error, before it closes the connection, for the test to read.
 type hijackCloser struct {
 	mu     sync.Mutex
 	errs   []error
@@ -41,7 +41,7 @@ func (h *hijackCloser) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 }
 
 // waitSlotsFree waits until the server holds no connection slot. The close of a
-// connection ends the socket before it gives the slot back, so a client that
+// connection ends the socket before it gives the slot back. So a client that
 // dials at once can meet a full listener.
 func waitSlotsFree(t *testing.T, r *rig) {
 	t.Helper()
