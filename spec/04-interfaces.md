@@ -10,7 +10,7 @@
 | `GET /session/{id}` | signals, events, proof link |
 | `GET /proof/{event_id}` | JSON inclusion proof + latest checkpoint |
 | `GET /metrics` | Prometheus text (FR-15) |
-| `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise. Each tile-read error stops the tlog: a changed, short or missing tile, and also a mode error or an I/O error. The tlog stays not healthy until the operator opens the log again (SEC-16) |
+| `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise, also while the writer pauses for disk (SEC-40). Each tile-read error stops the tlog: a changed, short or missing tile, and also a mode error or an I/O error. The tlog stays not healthy until the operator opens the log again (SEC-16) |
 | `POST /reload` | bundle reload (also SIGHUP); coalesced, and two swaps are at least 30 s apart (SEC-34) |
 
 ## 3. Config (`/etc/phantom/config.yaml`)
