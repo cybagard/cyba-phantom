@@ -409,6 +409,22 @@ func TestTU23RollForwardLaterStepFails(t *testing.T) {
 			f.startLoads(ver(3))
 		})
 	}
+	// The rename fails after the record write, so the record stays.
+	t.Run("signature rename of a transition bundle", func(t *testing.T) {
+		f := transitionFetched(t)
+		f.crashAfterFirstRename()
+		failRenameTo(t, "current.sig")
+		if b, err := f.loader("bundle/current.cbnd").Load(true); b != nil || err != ErrInstallFault {
+			t.Fatalf("got %v, %v", b, err)
+		}
+		if !f.hasRecord() {
+			t.Error("the failed rename removed the record")
+		}
+		if got := f.snap(); got != kept+ver(3) {
+			t.Errorf("after: %s", got)
+		}
+		f.startLoads(ver(3))
+	})
 }
 
 // secondFetched is a fetched with a mark: the first install failed at the
