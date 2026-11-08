@@ -45,6 +45,8 @@ type site struct {
 	hosts map[string]map[string]*entry
 	// notFound maps a vhost name to its 404 template, if the route map has one.
 	notFound map[string]*entry
+	// beacons maps a vhost name to its beacon paths, if the route map has them.
+	beacons map[string]*beacon
 	// traps are the traps of the bundle in file order, so a key-set index is a
 	// position in this list. The build makes it from one Traps call.
 	traps []bundle.Trap
@@ -93,7 +95,7 @@ func (s *site) mintOf(e *entry, b *bundle.Bundle, pos map[string]int) {
 // If Asset still gives false, the build makes no entry for that route. The
 // key-set indexes of each route come from b. Use them only with b.Tokens().
 func buildSite(b *bundle.Bundle) *site {
-	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, traps: b.Traps(), acts: map[string][]int{}}
+	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, beacons: map[string]*beacon{}, traps: b.Traps(), acts: map[string][]int{}}
 	pos := make(map[string]int, len(s.traps))
 	for i, t := range s.traps {
 		pos[t.ID] = i
@@ -134,6 +136,9 @@ func buildSite(b *bundle.Bundle) *site {
 			nf := &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
 			s.mintOf(nf, b, pos)
 			s.notFound[host] = nf
+		}
+		if rm.Beacon != nil {
+			s.beacons[host] = &beacon{rm.Beacon.Script, rm.Beacon.Post, host}
 		}
 		s.hosts[host] = paths
 	}
