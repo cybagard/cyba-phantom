@@ -1,6 +1,7 @@
 package bait
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -207,6 +208,85 @@ func TestTS32BeaconPost(t *testing.T) {
 		}
 		if reqs != 1 || beacons != btoi(c.want) {
 			t.Errorf("%s: %d request and %d beacon events, want 1 and %d", c.name, reqs, beacons, btoi(c.want))
+		}
+	}
+}
+
+// bcReader is a request body for the post path. It gives data, then end. At
+// most step bytes come in a call. If late is set, end comes in a later call.
+// An endless body gives one byte for each call, and 0 bytes for an empty
+// buffer. After 200 calls it fails, so a loop that does not stop ends.
+type bcReader struct {
+	data           string
+	step           int
+	end            error
+	late, endless  bool
+	calls, gotByte int
+}
+
+func (b *bcReader) Read(p []byte) (int, error) {
+	if b.calls++; b.calls > 200 {
+		return 0, io.ErrClosedPipe
+	}
+	if b.endless {
+		n := min(len(p), 1)
+		b.gotByte += n
+		return n, nil
+	}
+	lim := len(b.data)
+	if b.step > 0 {
+		lim = min(lim, b.step)
+	}
+	n := copy(p, b.data[:lim])
+	b.data = b.data[n:]
+	b.gotByte += n
+	if b.data != "" || b.late && n > 0 {
+		return n, nil
+	}
+	return n, b.end
+}
+
+// TestTS32BeaconBodyEnd checks how the body of a POST ends (SEC-32). The ticket
+// counts only when the read ends with io.EOF at 26 bytes. Another error after
+// the 26 bytes gives no beacon event. A body that never ends is read for 64
+// bytes only. Each POST returns in 5 s and gives 204 and one request event.
+func TestTS32BeaconBodyEnd(t *testing.T) {
+	e := newBC(t, bcPost)
+	tk := e.ticket(t, bcAddr, "")
+	for _, c := range []struct {
+		name  string
+		body  bcReader
+		calls int
+		want  bool
+	}{
+		{"ticket and EOF", bcReader{data: tk, end: io.EOF}, 1, true},
+		{"ticket, EOF in a later call", bcReader{data: tk, end: io.EOF, late: true}, 2, true},
+		{"ticket and another error", bcReader{data: tk, end: io.ErrUnexpectedEOF}, 1, false},
+		{"ticket, another error in a later call", bcReader{data: tk, end: io.ErrUnexpectedEOF, late: true}, 2, false},
+		{"never ends", bcReader{endless: true}, 64, false},
+	} {
+		r := httptest.NewRequest("POST", bcPost, nil)
+		r.Host, r.RemoteAddr, r.ContentLength = "example.com", bcAddr, -1
+		r.Body = io.NopCloser(&c.body)
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { e.h.ServeHTTP(w, r); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the handler did not return in 5 s", c.name)
+		}
+		reqs, beacons := 0, 0
+		for _, ev := range e.q.Drain() {
+			if ev.Record().Kind == event.KindBeacon {
+				beacons++
+			} else {
+				reqs++
+			}
+		}
+		if w.Code != 204 || w.Body.Len() != 0 || c.body.calls != c.calls || c.body.gotByte > 64 || reqs != 1 || beacons != btoi(c.want) {
+			t.Errorf("%s: code %d, %d reads, %d bytes, %d request and %d beacon events, want 204, %d reads, at most 64 bytes, 1 and %d",
+				c.name, w.Code, c.body.calls, c.body.gotByte, reqs, beacons, c.calls, btoi(c.want))
 		}
 	}
 }
