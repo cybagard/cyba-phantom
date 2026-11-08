@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	bundlefetch "github.com/cybagard/cyba-phantom/internal/bundle/fetch"
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/listener"
@@ -154,9 +155,19 @@ func TestTU23_RealNewFetcher(t *testing.T) {
 	defer stop()
 	private := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var got *slog.Logger
+	orig := newFetchClient
+	t.Cleanup(func() { newFetchClient = orig })
+	newFetchClient = func(u string, p []netip.Prefix, l *slog.Logger) (*bundlefetch.Client, error) {
+		got = l
+		return bundlefetch.New(u, p, l)
+	}
 	run, frozen, err := realNewFetcher("https://bundle.example/b.cbnd", private, 20*time.Minute, b.l, lg)
 	if err != nil || run == nil || frozen == nil {
 		t.Fatalf("valid URL: error %v, run nil %v, frozen nil %v; want no error and both set", err, run == nil, frozen == nil)
+	}
+	if got == nil || got != lg {
+		t.Errorf("client logger is %p, want the logger of the caller %p", got, lg)
 	}
 	if frozen() {
 		t.Error("frozen is true before run")

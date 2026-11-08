@@ -26,12 +26,15 @@ func releaseTrust() bundle.TrustSet { return bundle.TrustSet{} }
 var (
 	bundleTrust = releaseTrust
 	newLoader   = bundle.NewLoader
+	// newFetchClient makes the client of the fetcher. A test replaces it to
+	// see the logger that newFetcher gives.
+	newFetchClient = bundlefetch.New
 	// newFetcher makes the fetcher of the URL. It gives the run function
 	// and the freeze input of the fetcher. For a URL that the client refuses,
 	// it gives an error and no functions.
 	newFetcher = func(url string, private []netip.Prefix, every time.Duration,
 		l *bundle.Loader, lg *slog.Logger) (run func(context.Context), frozen func() bool, err error) {
-		c, err := bundlefetch.New(url, private, lg)
+		c, err := newFetchClient(url, private, lg)
 		if err != nil {
 			return nil, nil, err
 		}
