@@ -245,10 +245,11 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // real server. The body has Content-Length or is chunked. The POST has no
 // Content-Type, or the type of a form, or the type of a multipart body. The
 // targets are the routes of each vhost of hardHosts, with the callback route
-// that has a body position. They are also a path with no route and an unknown
-// host. A known host gets the fixed 405 page, and an unknown host gets the
-// fixed 404 page. A close is also right. A GET and a HEAD with a body of 65 537
-// bytes get the status of the target. A wrapper that the server handler puts
+// that has a body position, and the two beacon paths. They are also a path
+// with no route and an unknown host. A known host gets the fixed 405 page. The
+// post path of the beacon gets 204, not the fixed 405 page. An unknown host
+// gets the fixed 404 page. A close is also right. A GET and a HEAD with a body
+// of 65 537 bytes get the status of the target. A wrapper that the server handler puts
 // around the body counts the bytes that the bait handler reads. The handler
 // reads 0 bytes. A POST to the callback route with a body position gets its
 // fixed response (ADR-039 decision 19). That route reads at most 4 097 bytes.
@@ -265,12 +266,10 @@ func TestTS02PostBodies(t *testing.T) {
 		mu.Lock()
 		if r.URL.Path == cbRoute.path && r.Method == http.MethodPost {
 			cbReads = append(cbReads, rb.got)
+		} else if r.URL.Path == hbPost && r.Method == http.MethodPost {
+			bpReads = append(bpReads, rb.got)
 		} else {
-			if r.URL.Path == hbPost && r.Method == http.MethodPost {
-				bpReads = append(bpReads, rb.got)
-			} else {
-				reads = append(reads, rb.got)
-			}
+			reads = append(reads, rb.got)
 		}
 		mu.Unlock()
 	}))

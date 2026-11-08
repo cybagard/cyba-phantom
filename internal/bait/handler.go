@@ -29,9 +29,9 @@ var (
 )
 
 // Header values of the responses. The fixed pages use textType. Only the 405
-// page uses allow, or allowPost on the beacon post path. The fixed pages and
-// the asset responses use nosniff. Do not change an element of these slices.
-// Each response shares them.
+// page uses allow. The fixed pages, the asset responses and the beacon
+// responses use nosniff. allowPost is in beacon.go. Do not change an element of
+// these slices. Each response shares them.
 var (
 	textType = []string{"text/plain; charset=utf-8"}
 	htmlType = []string{"text/html; charset=utf-8"}
@@ -293,13 +293,13 @@ func reply(w http.ResponseWriter, code int, body []byte) {
 	replyAllow(w, code, body, allow)
 }
 
-// replyAllow is reply with the Allow value a for a 405 page.
-func replyAllow(w http.ResponseWriter, code int, body []byte, a []string) {
+// replyAllow is reply with the Allow value allowVal for a 405 page.
+func replyAllow(w http.ResponseWriter, code int, body []byte, allowVal []string) {
 	h := w.Header()
 	h["Content-Type"] = textType
 	h["X-Content-Type-Options"] = nosniff
 	if code == http.StatusMethodNotAllowed {
-		h["Allow"] = a
+		h["Allow"] = allowVal
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write(body)

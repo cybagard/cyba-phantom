@@ -13,10 +13,12 @@ const (
 	scriptHead = `navigator.sendBeacon("`
 	scriptMid  = `","`
 	scriptTail = `")`
-	// ticketLen is the size of a ticket. A route path has at most 256 bytes.
+	// ticketLen is the size of a ticket.
 	ticketLen     = 26
 	beaconBodyMax = 64 // the most body bytes that the post path reads
-	scriptMax     = len(scriptHead) + 256 + len(scriptMid) + ticketLen + len(scriptTail)
+	// scriptMax is the most bytes of a script. The literal 256 is the route
+	// path cap of the bundle loader. A route path has at most 256 bytes.
+	scriptMax = len(scriptHead) + 256 + len(scriptMid) + ticketLen + len(scriptTail)
 )
 
 // Header values of the beacon responses. Do not change an element.
@@ -76,10 +78,10 @@ func beaconScript(w http.ResponseWriter, r *http.Request, sess *reqSession, bp *
 
 // beaconPost reads at most beaconBodyMax body bytes. Then it writes the fixed
 // 204 and flushes it. Only then it checks the ticket and makes the event. The
-// check result changes no response byte. The route sets no cookie.
+// check result changes no response byte. The post path sets no cookie.
 func (h *Handler) beaconPost(w http.ResponseWriter, r *http.Request, sess *reqSession, bp *beacon) int {
 	// A body is a ticket only when the read ends at EOF with exactly ticketLen
-	// bytes. No trim and no decode.
+	// bytes. The code does not trim or decode the body.
 	var buf [beaconBodyMax]byte
 	n := 0
 	var err error
@@ -96,11 +98,11 @@ func (h *Handler) beaconPost(w http.ResponseWriter, r *http.Request, sess *reqSe
 	_ = http.NewResponseController(w).Flush()
 	if isTicket && sess.key.CheckBeaconTicket(string(buf[:n]), sess.id, sess.at) {
 		st := int64(http.StatusNoContent)
-		e, err := event.NewEvent(nil, event.Input{
+		e, evErr := event.NewEvent(nil, event.Input{
 			Kind: event.KindBeacon, Session: sess.id, Vhost: bp.vhost, Method: r.Method,
 			Path: bp.post, Status: &st, ClientIP: sess.ip,
 		})
-		if err != nil {
+		if evErr != nil {
 			h.eventErrs.Add(1)
 		} else {
 			h.q.Enqueue(e)
