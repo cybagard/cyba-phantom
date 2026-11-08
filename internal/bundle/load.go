@@ -244,9 +244,10 @@ type Loader struct {
 	chainErr error
 
 	// sigKept is the mark: <name>.sig.tmp is a kept file. An install renames it
-	// first and never removes or replaces it. A rename of the file to <name>.sig
-	// clears the mark. So does a load that accepts <name>.cbnd with <name>.sig,
-	// and an install that finds no file. It is not on disk. loadMu guards it.
+	// first and never removes or replaces it. A rename of the file to
+	// <name>.sig clears the mark. So does a load that accepts <name>.cbnd with
+	// <name>.sig, and an install that finds no file. It is not on disk. loadMu
+	// guards it.
 	sigKept bool
 
 	// swapAt is the time of the last swap, or zero before the first swap.
