@@ -154,8 +154,15 @@ func writeTemp(root *os.Root, tmp string, data []byte) error {
 	return err
 }
 
+// beforeSyncDir is nil, except in a test. A test sets it to see each call of
+// syncDir.
+var beforeSyncDir func()
+
 // syncDir calls Sync on the directory of the root.
 func syncDir(root *os.Root) error {
+	if beforeSyncDir != nil {
+		beforeSyncDir()
+	}
 	d, err := root.Open(".")
 	if err != nil {
 		return err

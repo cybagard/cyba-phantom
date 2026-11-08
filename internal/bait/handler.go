@@ -29,8 +29,9 @@ var (
 )
 
 // Header values of the responses. The fixed pages use textType. Only the 405
-// page uses allow. The fixed pages and the asset responses use nosniff. Do not
-// change an element of these slices. Each response shares them.
+// page uses allow. The fixed pages, the asset responses and the beacon
+// responses use nosniff. allowPost is in beacon.go. Do not change an element of
+// these slices. Each response shares them.
 var (
 	textType = []string{"text/plain; charset=utf-8"}
 	htmlType = []string{"text/html; charset=utf-8"}
@@ -54,7 +55,7 @@ type state struct {
 	retired [retiredKept]weak.Pointer[bundle.Bundle]
 }
 
-// Handler serves the routes of the running bundle.
+// Handler serves the routes and the beacon paths of the running bundle.
 type Handler struct {
 	src      Source
 	fallback http.Handler
@@ -286,13 +287,19 @@ func (h *Handler) siteOf(b *bundle.Bundle) *site {
 	}
 }
 
-// reply writes a fixed page. A HEAD request gets no body from net/http.
+// reply writes a fixed page. A 405 page has the Allow header of allow. A HEAD
+// request gets no body from net/http.
 func reply(w http.ResponseWriter, code int, body []byte) {
+	replyAllow(w, code, body, allow)
+}
+
+// replyAllow is reply with the Allow value allowVal for a 405 page.
+func replyAllow(w http.ResponseWriter, code int, body []byte, allowVal []string) {
 	h := w.Header()
 	h["Content-Type"] = textType
 	h["X-Content-Type-Options"] = nosniff
 	if code == http.StatusMethodNotAllowed {
-		h["Allow"] = allow
+		h["Allow"] = allowVal
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write(body)
@@ -314,11 +321,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serve answers the request from b and returns the status that it wrote. The
-// order of the steps is host, method and path. A host with no vhost gets the
-// fixed 404 page. A path with no route gets the 404 template of the vhost, or
-// the fixed 404 page. A template route renders its template. A method other
-// than GET and HEAD gets the fixed 405 page. A POST to a callback route with a
-// body position is the exception. Only that route reads a body.
+// order of the steps is host, beacon path, method and path. A host with no
+// vhost gets the fixed 404 page. The two beacon paths of the vhost come next.
+// They are not routes (see serveBeacon). A path with no route gets the 404
+// template of the vhost, or the fixed 404 page. A template route renders its
+// template. A method other than GET and HEAD gets the fixed 405 page. A POST to
+// a callback route with a body position is the exception. A POST to the beacon
+// post path is the other. Only these two read a body.
 // A render that ends the connection writes the event itself and does not
 // return. A template page and an asset response set the cookie of a new
 // session. A fixed page does not.
@@ -330,6 +339,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle
 	if !ok || !found {
 		reply(w, http.StatusNotFound, notFoundBody)
 		return http.StatusNotFound
+	}
+	if bp := s.beacons[string(name)]; bp != nil {
+		if code, ok := h.serveBeacon(w, r, sess, bp); ok {
+			return code
+		}
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		// Only a callback route with a body position accepts POST (ADR-039).
