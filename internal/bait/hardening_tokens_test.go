@@ -266,10 +266,10 @@ func f(r *http.Request) {
 }
 `
 
-// TestTS31NoRequestCookieCall fails when a file of this package or of
-// internal/session, that is not a test, refers to the Cookie, Cookies,
-// CookiesNamed or ParseCookie method or function. The session cookie comes
-// from session.CookieFromHeader. The check reads the files of each GOOS and
+// TestTS31NoRequestCookieCall scans the files of this package and of
+// internal/session that are not tests. It fails when one refers to Cookie,
+// Cookies, CookiesNamed or ParseCookie. The session cookie comes from
+// session.CookieFromHeader. The check reads the files of each GOOS and
 // GOARCH, as TestTS02DirectImports does.
 func TestTS31NoRequestCookieCall(t *testing.T) {
 	if got, err := cookieRefs("p.go", cookieSample); err != nil || len(got) != 7 {
