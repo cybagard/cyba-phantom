@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -189,6 +191,7 @@ func (s *baitSensor) sessionsOf(t *testing.T, path string) []string {
 		mustOK(t, rows.Scan(&id))
 		ids = append(ids, id)
 	}
+	mustOK(t, rows.Err())
 	return ids
 }
 
@@ -197,7 +200,8 @@ type baitResp struct {
 	status  int
 	body    string
 	cookies []string // the Set-Cookie headers
-	header  http.Header
+	// header holds all headers of the response.
+	header http.Header
 }
 
 // fetch makes a GET for path at base with the Host header host. TLS uses the
@@ -234,7 +238,7 @@ func fetchFrom(t *testing.T, base, host, path, cookie string, ip net.IP) baitRes
 	return baitResp{resp.StatusCode, string(body), resp.Header.Values("Set-Cookie"), resp.Header}
 }
 
-// elemOf returns the first element name of the page in body.
+// elemOf returns the first element with the tag name of the page in body.
 func elemOf(t *testing.T, body, name string) *html.Node {
 	t.Helper()
 	doc, err := html.Parse(strings.NewReader(body))
@@ -268,12 +272,12 @@ func firstP(t *testing.T, body string) *html.Node {
 	return p
 }
 
-// twoFiles are the files of a test bundle with one route and three trap slots.
+// slotFiles are the files of a test bundle with one route and three trap slots.
 // The slots are the text of a hidden p, the content of a meta element, and the
 // header X-Note.
-func twoFiles() []tarFile {
+func slotFiles() []tarFile {
 	dir := "vhosts/" + decoyName + "/"
-	routes := `{"routes":[{"path":"/two","template":"` + dir + `two.tmpl","type":"text/html; charset=utf-8",` +
+	routes := `{"routes":[{"path":"/slots","template":"` + dir + `slots.tmpl","type":"text/html; charset=utf-8",` +
 		`"headers":[{"name":"X-Note","trap":"h"}]}]}`
 	trap := func(id, slot string) string {
 		return `{"id":"` + id + `","slot":"` + slot + `","surface":"path","visibility":"human-visible","instruction_template":"{{.Token}}"}`
@@ -283,54 +287,101 @@ func twoFiles() []tarFile {
 	return referenceFiles(
 		tarFile{"traps/traps.json", []byte("[" + trap("p", "hidden-p") + "," + trap("m", "meta-description") + "," + trap("h", "header") + "]")},
 		tarFile{dir + "routes.json", []byte(routes)},
-		tarFile{dir + "two.tmpl", []byte(page)})
+		tarFile{dir + "slots.tmpl", []byte(page)})
+}
+
+// trapIDs returns the trap ids of traps.json in files, in file order.
+func trapIDs(t *testing.T, files []tarFile) []string {
+	var traps []struct{ ID string }
+	for _, f := range files {
+		if f.name == "traps/traps.json" {
+			mustOK(t, json.Unmarshal(f.data, &traps))
+		}
+	}
+	var ids []string
+	for _, tr := range traps {
+		ids = append(ids, tr.ID)
+	}
+	return ids
+}
+
+// checkTags checks the tags of body. Each end tag closes the element that is
+// open last. A void element (meta) has no end tag. None stays open at the end.
+func checkTags(t *testing.T, body string) {
+	t.Helper()
+	var open []string
+	z := html.NewTokenizer(strings.NewReader(body))
+	for tt := z.Next(); tt != html.ErrorToken; tt = z.Next() {
+		tag := z.Token().Data
+		switch {
+		case tt == html.StartTagToken && tag != "meta":
+			open = append(open, tag)
+		case tt == html.EndTagToken:
+			if n := len(open); n == 0 || open[n-1] != tag {
+				t.Fatalf("HTML: end tag %q with open elements %q in %q", tag, open, body)
+			}
+			open = open[:len(open)-1]
+		}
+	}
+	if err := z.Err(); err != io.EOF || len(open) != 0 {
+		t.Fatalf("HTML: error %v, open elements %q at the end of %q", err, open, body)
+	}
 }
 
 // TestTI02_TwoSessionsGetOwnTokens fetches one page from two clients with no
 // cookie, from 127.0.0.1 and from 127.0.0.2 (FR-03). Each trap slot of the
-// page is there and the HTML parses. Each token text verifies to the trap of
+// page is there and the HTML is valid. Each token text verifies to the trap of
 // its slot. No token repeats in or between the responses. The two request rows
-// have the keyed ids of the two client addresses. A host with no 127.0.0.2
-// skips the test.
+// have the keyed ids of the two client addresses. Each trap of the bundle needs
+// a slot check. Only a host that is not Linux and has no 127.0.0.2 skips it.
 func TestTI02_TwoSessionsGetOwnTokens(t *testing.T) {
-	s := startBait(t, baitOpt{bundle: true, files: twoFiles()})
+	s := startBait(t, baitOpt{bundle: true, files: slotFiles()})
 	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}, Timeout: netWait}
 	c, err := d.DialContext(t.Context(), "tcp", strings.TrimPrefix(s.https, "https://"))
-	if errors.Is(err, syscall.EADDRNOTAVAIL) {
-		t.Skipf("no client address 127.0.0.2 on this host: %v", err)
+	if runtime.GOOS != "linux" && errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Skipf("no client address 127.0.0.2 on %s: %v", runtime.GOOS, err)
 	}
 	mustOK(t, err)
 	c.Close()
-	ids := []string{"p", "m", "h"}
+	ids := trapIDs(t, slotFiles())
 	ks, err := token.NewKeySet(bytes.Repeat([]byte{9}, 32), sha256.Sum256(s.arch), ids, true)
 	mustOK(t, err)
 	seen := map[string]bool{}
 	ips := []string{"127.0.0.1", "127.0.0.2"}
 	for i, ip := range ips {
-		r := fetchFrom(t, s.https, decoyName, "/two", "", net.ParseIP(ip))
+		r := fetchFrom(t, s.https, decoyName, "/slots", "", net.ParseIP(ip))
 		if r.status != 200 {
 			t.Fatalf("client %s: status %d; want 200", ip, r.status)
 		}
+		checkTags(t, r.body)
+		m, p := elemOf(t, r.body, "meta"), firstP(t, r.body)
+		if hidden := slices.ContainsFunc(p.Attr, func(a html.Attribute) bool { return a.Key == "hidden" }); !hidden || p.Parent.Data != "body" || m.Parent.Data != "head" {
+			t.Fatalf("client %s: p in %s with hidden %v, meta in %s; want body, true, head", ip, p.Parent.Data, hidden, m.Parent.Data)
+		}
 		meta := ""
-		for _, a := range elemOf(t, r.body, "meta").Attr {
+		for _, a := range m.Attr {
 			if a.Key == "content" {
 				meta = a.Val
 			}
 		}
-		texts := []string{firstP(t, r.body).FirstChild.Data, meta, r.header.Get("X-Note")}
-		for j, text := range texts {
+		texts := map[string]string{"p": p.FirstChild.Data, "m": meta, "h": r.header.Get("X-Note")}
+		for _, id := range ids {
+			text, ok := texts[id]
+			if !ok {
+				t.Fatalf("the test has no slot check for trap %s", id)
+			}
 			tok, ok := token.Parse(text)
-			if res := token.Verify([]*token.KeySet{ks}, tok); !ok || !res.OK || res.Trap != ids[j] {
-				t.Errorf("client %d, slot %s: text %q gives %+v; want a token of trap %s", i, ids[j], text, res, ids[j])
+			if res := token.Verify([]*token.KeySet{ks}, tok); !ok || !res.OK || res.Trap != id {
+				t.Errorf("client %d, slot %s: text %q gives %+v; want a token of trap %s", i, id, text, res, id)
 			}
 			if seen[text] {
-				t.Errorf("client %d, slot %s: text %q repeats", i, ids[j], text)
+				t.Errorf("client %d, slot %s: text %q repeats", i, id, text)
 			}
 			seen[text] = true
 		}
 	}
 	s.stop(t)
-	got := s.sessionsOf(t, "/two")
+	got := s.sessionsOf(t, "/slots")
 	want := []string{s.keyedIDOf(t, ips[0]), s.keyedIDOf(t, ips[1])}
 	slices.Sort(got)
 	slices.Sort(want)
