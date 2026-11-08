@@ -123,9 +123,41 @@ func newRig(t *testing.T, h http.Handler, s settings) *rig {
 	return newClientFor(t, start(t, h, nil), s, mode{})
 }
 
-var fetchers = map[string]func(*Client) ([]byte, error){
-	"archive":   func(c *Client) ([]byte, error) { return c.Archive(context.Background()) },
-	"signature": func(c *Client) ([]byte, error) { return c.Signature(context.Background()) },
+var fetchers = map[string]func(context.Context, *Client) ([]byte, error){
+	"archive":   func(ctx context.Context, c *Client) ([]byte, error) { return c.Archive(ctx) },
+	"signature": func(ctx context.Context, c *Client) ([]byte, error) { return c.Signature(ctx) },
+}
+
+// hangBound is the longest wait for one fetch through within. A fetch through
+// within that does not end in this time fails the test.
+const hangBound = 10 * time.Second
+
+// within runs one fetch of f and fails the test if it does not end in time.
+// When within returns, it cancels the context of the fetch. Then the
+// transport closes a connection that the fetch still reads. Thus the cleanup
+// of the server does not wait for the timeout of the fetch.
+func within(t *testing.T, f func(context.Context, *Client) ([]byte, error), c *Client) ([]byte, error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		got []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := f(ctx, c)
+		done <- result{got, err}
+	}()
+	timer := time.NewTimer(hangBound)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.got, r.err
+	case <-timer.C:
+		t.Fatalf("a fetch did not return in a bounded time (%v)", hangBound)
+		return nil, nil
+	}
 }
 
 // expect checks the error, the counters and the one log line of a failure.
@@ -206,7 +238,7 @@ func TestTS30Success(t *testing.T) {
 		_, _ = io.WriteString(w, "data")
 	}), small)
 	for name, f := range fetchers {
-		if got, err := f(r.c); err != nil || string(got) != "data" {
+		if got, err := within(t, f, r.c); err != nil || string(got) != "data" {
 			t.Errorf("%s: %q, %v", name, got, err)
 		}
 	}
@@ -218,7 +250,7 @@ func TestTS30Success(t *testing.T) {
 	}
 	body := bytes.Repeat([]byte{'x'}, smallArchive) // the cap itself passes
 	r = newRig(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }), small)
-	if got, err := r.c.Archive(context.Background()); err != nil || !bytes.Equal(got, body) {
+	if got, err := within(t, fetchers["archive"], r.c); err != nil || !bytes.Equal(got, body) {
 		t.Errorf("a body of the cap: %d bytes, %v", len(got), err)
 	}
 }
@@ -326,7 +358,7 @@ func TestTS30NoProxy(t *testing.T) {
 	}
 	r := newRig(t, body(10, false), small)
 	for name, f := range fetchers {
-		if _, err := f(r.c); err != nil {
+		if _, err := within(t, f, r.c); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -375,7 +407,7 @@ func TestTS30RedirectRefused(t *testing.T) {
 		r := newRig(t, http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 			http.Redirect(w, q, target.URL+"/x.cbnd", http.StatusFound)
 		}), small)
-		_, err := f(r.c)
+		_, err := within(t, f, r.c)
 		if hits.Load() != 0 {
 			t.Fatalf("%s: the target got %d requests", name, hits.Load())
 		}
@@ -469,7 +501,7 @@ func TestTS30SizeAndStatus(t *testing.T) {
 			"length over the cap":     over,
 		} {
 			r := newRig(t, h, small)
-			_, err := f(r.c)
+			_, err := within(t, f, r.c)
 			r.expect(t, err, ClassSize, 200)
 			if t.Failed() {
 				t.Fatal(name, what)
@@ -477,13 +509,13 @@ func TestTS30SizeAndStatus(t *testing.T) {
 		}
 		// A false length over the body: the body ends early.
 		r := newRig(t, short, small)
-		_, err := f(r.c)
+		_, err := within(t, f, r.c)
 		r.expect(t, err, ClassTransport, 200)
 		// A false length under the body: the client reads the declared bytes
 		// and no more. The bytes stay under the cap. The signature check of
 		// the loader refuses them.
 		r = newRig(t, rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"+strings.Repeat("a", 10*limit)), small)
-		if got, err := f(r.c); err != nil || string(got) != "aaaaa" {
+		if got, err := within(t, f, r.c); err != nil || string(got) != "aaaaa" {
 			t.Errorf("%s: false short length gave %q, %v", name, got, err)
 		}
 		for _, status := range []int{206, 404, 500} {
@@ -491,7 +523,7 @@ func TestTS30SizeAndStatus(t *testing.T) {
 				w.WriteHeader(status)
 				_, _ = w.Write(make([]byte, 10))
 			}), small)
-			_, err := f(r.c)
+			_, err := within(t, f, r.c)
 			r.expect(t, err, ClassStatus, status)
 		}
 	}
@@ -518,7 +550,7 @@ func TestTS30Timeouts(t *testing.T) {
 		for what, h := range map[string]http.Handler{"slow header": slowHeader, "slow body": slowBody} {
 			r := newRig(t, h, s)
 			begin := time.Now()
-			_, err := f(r.c)
+			_, err := f(context.Background(), r.c)
 			took := time.Since(begin)
 			r.expect(t, err, ClassTimeout, map[string]int{"slow header": 0, "slow body": 200}[what])
 			want := map[string]time.Duration{"slow header": header, "slow body": bound}[what]
