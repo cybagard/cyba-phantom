@@ -128,14 +128,14 @@ var fetchers = map[string]func(context.Context, *Client) ([]byte, error){
 	"signature": func(ctx context.Context, c *Client) ([]byte, error) { return c.Signature(ctx) },
 }
 
-// hangBound is the longest wait for one fetch. A normal fetch ends in much less
-// than one second. A fetch that does not end by then is a bug of the read loop.
+// hangBound is the longest wait for one fetch. A fetch that does not end in
+// this time fails the test.
 const hangBound = 10 * time.Second
 
 // within runs one fetch of f and fails the test if it does not end in time.
-// When within returns, it cancels the context of the fetch. A fetch that
-// hangs then ends and closes its connection. The cleanup of the server does
-// not wait for the timeout of the fetch.
+// When within returns, it cancels the context of the fetch. Then the
+// transport closes a connection that the fetch still reads. Thus the cleanup
+// of the server does not wait for the timeout of the fetch.
 func within(t *testing.T, f func(context.Context, *Client) ([]byte, error), c *Client) ([]byte, error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
