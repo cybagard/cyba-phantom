@@ -47,6 +47,9 @@ const (
 //   - a failed start check.
 //   - a fork signal of the checkpoint row.
 //
+// A retention run (RunRetention) is a request to the writer goroutine, as a
+// checkpoint row is. An error of a retention chunk is a database error.
+//
 // Healthy, Err and Stats are safe to call from any goroutine.
 type Writer struct {
 	db         *sql.DB
@@ -78,8 +81,9 @@ type Writer struct {
 	// drop counts and no event does not call it. A test sets it; nil in
 	// production.
 	timing func(batch, commit time.Duration)
-	// beforeCommit runs on the transaction before COMMIT. An error from it is a
-	// failed COMMIT. A test sets it; nil in production.
+	// beforeCommit runs on the transaction before COMMIT, also in a retention
+	// chunk. An error from it is a failed COMMIT. A test sets it; nil in
+	// production.
 	beforeCommit func(tx *sql.Tx) error
 	// beforeAppend runs in the transaction before AppendBatch. A test sets it;
 	// nil in production.
@@ -88,12 +92,13 @@ type Writer struct {
 	// make an error that no real record gives after HashEvidence worked. Nil in
 	// production: the writer then calls event.EvidenceBytes.
 	evidenceBytes func(event.Record) ([]byte, error)
-	// beforePragma runs before each PRAGMA statement of write and of storeRow,
-	// with the text of the statement. An error from it is the error of that
-	// statement. A test sets it; nil in production.
+	// beforePragma runs before each PRAGMA statement of write, of storeRow and
+	// of a retention checkpoint. It gets the text of the statement. An error
+	// from it is the error of that statement. A test sets it. It is nil in
+	// production.
 	beforePragma func(stmt string) error
-	// beforeBegin runs before BEGIN in transact. An error from it is a failed
-	// BEGIN. A test sets it; nil in production.
+	// beforeBegin runs before BEGIN in transact and in a retention chunk. An
+	// error from it is a failed BEGIN. A test sets it; nil in production.
 	beforeBegin func() error
 
 	// beforeRowCommit runs on the transaction of a checkpoint row before COMMIT.
@@ -102,6 +107,12 @@ type Writer struct {
 
 	// rows takes the requests of the checkpoint sink. Only Run reads it.
 	rows chan rowRequest
+
+	// retention takes the retention requests, as rows takes the row requests.
+	// It has room for one request. Only Run reads it.
+	retention chan retentionRequest
+	// checkpointBusy counts the runs whose TRUNCATE checkpoint was busy.
+	checkpointBusy atomic.Uint64
 
 	// sessions holds the sessions of the batch in progress. The writer
 	// empties it at the start of each transaction.
@@ -135,7 +146,8 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 	if dk == nil {
 		dk = session.NewDayKey()
 	}
-	return &Writer{db: db, q: q, rec: rec, counters: q.Counters(), bodyPrefix: bodyPrefix, dk: dk, log: log, rows: make(chan rowRequest, 1)}
+	return &Writer{db: db, q: q, rec: rec, counters: q.Counters(), bodyPrefix: bodyPrefix, dk: dk, log: log,
+		rows: make(chan rowRequest, 1), retention: make(chan retentionRequest, 1)}
 }
 
 // Run is the one writer goroutine. The caller starts it with go and starts no
@@ -146,8 +158,13 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // bulk events only waits for the tick. Run also writes the batch at each tick
 // when the batch is not empty. It holds one batch at a time and starts no
 // goroutine for an event. While the lanes stay non-empty, Run writes at 500
-// events. After each such write it serves a waiting row request and a waiting
-// tick, with no wait. Thus a flood does not hold them.
+// events. After each such write it serves three things, with no wait. These
+// are a waiting row request, a waiting retention request and a waiting tick.
+// Thus a flood does not hold them.
+//
+// A retention request makes Run run the retention steps in chunks (see
+// serveRetention). Between two chunks, Run serves a waiting row request. Then
+// it writes at most one batch from the lanes. Then it serves a waiting tick.
 //
 // Before the first write, Run does the start check (see start). A stop marker or
 // a failed check stops the writer, and Run goes to the stopped state at once.
@@ -215,6 +232,8 @@ func (w *Writer) Run(ctx context.Context) error {
 			batch = w.flush(batch)
 		case rq := <-w.rows:
 			w.serveRow(rq)
+		case rq := <-w.retention:
+			batch = w.serveRetention(ctx, tick, batch, rq)
 		case <-w.q.Ready():
 			// Take events until the lanes are empty, then examine Closed. After
 			// a flush at 500 events, serve a waiting row request and a waiting
@@ -236,6 +255,11 @@ func (w *Writer) Run(ctx context.Context) error {
 				if batch = append(batch, e); len(batch) == maxBatch {
 					batch, evidence = w.flush(batch), false
 					batch = w.serveWaiting(tick, batch)
+					select {
+					case rq := <-w.retention:
+						batch = w.serveRetention(ctx, tick, batch, rq)
+					default:
+					}
 					if ctx.Err() != nil || !w.Healthy() {
 						break
 					}
@@ -258,7 +282,9 @@ func (w *Writer) Run(ctx context.Context) error {
 // serveWaiting serves a row request and a tick that wait now. Each select has a
 // default case, so it never blocks. A tick goes through flush, as in the select
 // of Run. A stopped writer serves nothing: the flush before can have stopped it,
-// and a stopped writer writes no row.
+// and a stopped writer writes no row. It does not serve a retention request:
+// Run does that after it, because the run needs ctx. Between two retention
+// chunks, betweenChunks serves the same things in the order row, batch, tick.
 func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		return batch

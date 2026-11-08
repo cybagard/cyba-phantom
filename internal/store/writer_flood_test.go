@@ -141,7 +141,8 @@ func TestTU18StoppedWriterServesNoWaitingRow(t *testing.T) {
 
 // T-U-18: each event of a batch that ends with an error and no COMMIT counts
 // as a drop. The batch has three bulk and two evidence events.
-// The start event of runAfterStart commits before the error.
+// The function late runs at the first clock read of the write, before the
+// write of the batch.
 func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 	failCommit := func(*sql.Tx) error { return errors.New("commit failed") }
 	cases := []struct {
