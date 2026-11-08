@@ -62,10 +62,10 @@ func benchMint(b *testing.B, f mintFixture) {
 	}
 }
 
-// TestTS31MintBounds checks that the mint step allocates at most the probe
-// value plus 10 % for 1, 16, 64 and 68 tokens. testing.AllocsPerRun gives the
-// allocations of one mint. A benchmark run with testing.Benchmark gives the
-// bytes of one mint. The race detector adds a few allocations, so the limit
+// TestTS31MintBounds checks the mint step for 1, 16, 64 and 68 tokens. It
+// allocates at most the probe value plus 10 %. testing.AllocsPerRun gives the
+// allocations of one mint. A run of testing.Benchmark gives the bytes of one
+// mint. The race detector adds a few allocations, so the limit
 // holds with it too.
 func TestTS31MintBounds(t *testing.T) {
 	for _, c := range mintCases {

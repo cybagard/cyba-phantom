@@ -43,11 +43,11 @@ func swapLoader(t *testing.T) (l *bundle.Loader, put func(seed byte, n int)) {
 	return l, put
 }
 
-// TestTS31SwapDuringRender swaps the running bundle of a real loader to a
-// bundle of another seed after the route lookup and before the mint. The
-// request keeps the bundle that it read. Each token verifies under the key set
-// of the old bundle, which is second in the list, and gives the trap of its
-// slot. The mint range has the set id of the old bundle. The test also checks
+// TestTS31SwapDuringRender swaps the running bundle of a real loader. The new
+// bundle has another seed. The swap comes after the route lookup and before the
+// mint. The request keeps the bundle that it read. Each token verifies under
+// the key set of the old bundle, which is second in the list. It gives the trap
+// of its slot. The mint range has the set id of the old bundle. The test also checks
 // that the swap comes before the key set of the mint. The test does not wait
 // for the zero of the old seed.
 func TestTS31SwapDuringRender(t *testing.T) {

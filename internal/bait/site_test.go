@@ -105,9 +105,9 @@ func archiveLoader(tb testing.TB, tag string, extra map[string]string) *bundle.L
 	return bundle.NewLoader(root, "bundle/current.cbnd", trust, nil)
 }
 
-// writeArchive signs the archive of archiveLoader and writes it to
-// bundle/current.cbnd in dir. A second call replaces the first archive. It gives
-// the trust set for the signature.
+// writeArchive signs the archive of archiveLoader. It writes the archive to
+// bundle/current.cbnd in dir. A second call replaces the first archive. It
+// gives the trust set for the signature.
 func writeArchive(tb testing.TB, dir, tag string, extra map[string]string) bundle.TrustSet {
 	tb.Helper()
 	files := map[string]string{
