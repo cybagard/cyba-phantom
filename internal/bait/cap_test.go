@@ -181,15 +181,22 @@ func TestTS32CapRefusedToken(t *testing.T) {
 		rc.Surface == nil || *rc.Surface != event.SurfaceQuery || c.h.capped.Load() != 1 {
 		t.Errorf("capped: %d events, request %+v, %d capped", n, rc, c.h.capped.Load())
 	}
-	// At each position, the capped response equals the admitted response.
+	// At each position, the first request is admitted and the second is
+	// capped. The two responses are equal.
 	for pos, surface := range surfaces {
 		tk, from := c.fresh(t), addr4(20+pos)
 		var got [2]*httptest.ResponseRecorder
+		before := c.h.capped.Load()
 		for i := range got {
 			r := cbReq(methodOf(pos), cbRoutePath, pos, tk)
 			r.RemoteAddr = from
 			got[i] = serve(t, c.h, r)
-			c.q.Drain()
+			if _, cbs := take(c.q); len(cbs) != 1-i {
+				t.Errorf("%s: request %d made %d callback events, want %d", surface, i, len(cbs), 1-i)
+			}
+		}
+		if n := c.h.capped.Load() - before; n != 1 {
+			t.Errorf("%s: %d capped tokens for the two requests, want 1", surface, n)
 		}
 		if dump(got[0]) != dump(got[1]) || len(got[1].Result().Header.Values("Set-Cookie")) != 0 {
 			t.Errorf("%s: response differs or sets a cookie:\n%s\n%s", surface, dump(got[0]), dump(got[1]))
@@ -227,8 +234,8 @@ func TestTS32CapNoClientKey(t *testing.T) {
 	}
 }
 
-// TestTS32CapKeySliceBound reuses one client key over many windows. The times
-// of the key stay at 10 or fewer, and all key slices hold 120 or fewer.
+// TestTS32CapKeySliceBound reuses one client key over many windows. The
+// entries of the key stay at 10 or fewer. All key slices hold 120 or fewer.
 func TestTS32CapKeySliceBound(t *testing.T) {
 	c := newCallbackCap()
 	key, _ := event.CounterKey(addr(1))
@@ -236,11 +243,11 @@ func TestTS32CapKeySliceBound(t *testing.T) {
 		now := time.Duration(i) * 6 * time.Second
 		c.allow(strconv.Itoa(i), key, now)
 		if total, most := c.keyEntries(); most > wantKeyMax || total > boundKeys {
-			t.Fatalf("try %d: %d times for one key, %d in all, want %d and %d at most", i, most, total, wantKeyMax, boundKeys)
+			t.Fatalf("try %d: %d entries for one key, %d in all, want %d and %d at most", i, most, total, wantKeyMax, boundKeys)
 		}
 	}
 	if total, _ := c.keyEntries(); total != wantKeyMax {
-		t.Errorf("%d times at the end, want %d", total, wantKeyMax)
+		t.Errorf("%d entries at the end, want %d", total, wantKeyMax)
 	}
 }
 
@@ -269,7 +276,8 @@ func TestTS32CapIdleBurst(t *testing.T) {
 // TestTS32CapClockRuns checks the clock of a handler that New makes. The
 // test moves the start back by a time that is not a whole second. The clock
 // must give that time or more. It must give at most that time plus the time
-// since an earlier read.
+// since an earlier read. The clock also advances: after 10 ms of sleep, a
+// second read is at least 10 ms later.
 func TestTS32CapClockRuns(t *testing.T) {
 	const offset = time.Hour + 1234567891*time.Nanosecond
 	old := capStart
@@ -277,8 +285,13 @@ func TestTS32CapClockRuns(t *testing.T) {
 	capStart = func() time.Time { return time.Now().Add(-offset) }
 	before := time.Now()
 	h := New(&swap{}, &fallbackFn{}, testQueue(t))
-	if d, limit := h.mono(), offset+time.Since(before); d < offset || d > limit {
+	d, limit := h.mono(), offset+time.Since(before)
+	if d < offset || d > limit {
 		t.Errorf("the clock gives %v, want %v to %v", d, offset, limit)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if d2 := h.mono(); d2-d < 10*time.Millisecond {
+		t.Errorf("the clock advanced %v in 10 ms of sleep, want 10 ms or more", d2-d)
 	}
 }
 
@@ -302,9 +315,9 @@ func TestTP12CapBounds(t *testing.T) {
 		}
 		tk, ks := c.sizes()
 		maxTokens, maxKeys = max(maxTokens, tk), max(maxKeys, ks)
-		// Each key holds one time here, so the times equal the keys.
+		// Each key holds one entry here, so the entries equal the keys.
 		if total, most := c.keyEntries(); total != ks || total > boundKeys || most > 1 {
-			t.Fatalf("try %d: %d times in %d keys, %d for one key", i, total, ks, most)
+			t.Fatalf("try %d: %d entries in %d keys, %d for one key", i, total, ks, most)
 		}
 	}
 	if maxTokens > boundTokens || maxKeys > boundKeys {
@@ -379,7 +392,9 @@ func settle(t *testing.T, q *event.Queue) {
 
 // TestTP12CapLeaves runs a smaller flood through a real writer and tlog. It
 // has 100 requests each second from 50 client keys for 5 seconds. The tlog
-// leaves equal the admitted callback events. No event is dropped.
+// leaves equal the admitted callback events. No event is dropped. The test
+// also checks the tlog leaves for each second: 60 in second 0, then 1 each
+// second.
 func TestTP12CapLeaves(t *testing.T) {
 	rig := newStoreRig(t)
 	e := newCBEnv(t)

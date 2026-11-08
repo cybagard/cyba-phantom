@@ -97,8 +97,8 @@ func (c *callbackCap) sizes() (tokens, keys int) {
 	return len(c.tokens), len(c.keys)
 }
 
-// keyEntries gives the number of times in all key slices, and the most times
-// that one key holds.
+// keyEntries gives the number of entries in all key slices, and the most
+// entries that one key holds.
 func (c *callbackCap) keyEntries() (total, most int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
