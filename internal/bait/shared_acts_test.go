@@ -48,8 +48,9 @@ func TestTS31SharedActsReadOnly(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	// With -race, a write by a mint is a data race. The content check alone
-	// finds a swap of two indexes only in some runs.
+	// One more request makes the count of mints odd, so a swap in each mint
+	// does not cancel out. With -race, a write by a mint is a data race. The
+	// content check alone finds a swap of two indexes only in some runs.
 	serve(t, h, get("/r0", "example.com"))
 
 	s := h.siteOf(b)
