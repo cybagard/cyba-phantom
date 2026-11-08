@@ -105,10 +105,10 @@ func (f *cacheFence) Stat(ctx context.Context, key string) (info certmagic.KeyIn
 // fenceCache puts a cacheFence over the certificate cache of the client that
 // serve makes, until the test ends. The fence has one cache. When a test makes
 // a second client, the first client also uses the cache of the second client.
-// Its close runs in a cleanup: call
-// fenceCache before the cleanup that waits for serve. Then the close runs after
-// that wait and before the removal of the temporary directory. A test that
-// wraps newACME itself sets its wrapper before the call.
+// Its close runs in a cleanup: call fenceCache before the cleanup that waits
+// for serve. Then the close runs after that wait and before the removal of the
+// temporary directory. A test that wraps newACME itself sets its wrapper before
+// the call.
 func fenceCache(t *testing.T) {
 	t.Helper()
 	f := &cacheFence{}
