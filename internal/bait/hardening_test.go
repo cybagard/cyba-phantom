@@ -26,6 +26,13 @@ var cbRoute = route{"/cb", "cb.txt", text, "callback\n"}
 
 const cbJSON = `{"path":"/cb","asset":"vhosts/example.com/cb.txt","type":"text/plain; charset=utf-8","callback":{"body":"tok"}}`
 
+// hbScript and hbPost are the beacon paths of example.com in the hardening
+// bundle.
+const (
+	hbScript = "/hb.js"
+	hbPost   = "/hb/p"
+)
+
 // nfPage is the page of the 404 template of example.com.
 const nfPage = "<h1>missing</h1>"
 
@@ -57,7 +64,7 @@ func trapsJSON(specs []trapSpec) string {
 func hardBundle(tb testing.TB, nf string, extra map[string]string) *bundle.Bundle {
 	tb.Helper()
 	rm := strings.TrimSuffix(routesJSON("example.com", exampleRoutes), "]}") + "," + cbJSON +
-		`],"not_found":"vhosts/example.com/nf.tmpl"}`
+		`],"not_found":"vhosts/example.com/nf.tmpl","beacon":{"script":"` + hbScript + `","post":"` + hbPost + `"}}`
 	files := map[string]string{
 		"vhosts/example.com/routes.json": rm,
 		"vhosts/example.com/cb.txt":      cbRoute.body,
@@ -238,18 +245,20 @@ func bodyReq(method, target, host, ctype string, n int, chunked bool) string {
 // real server. The body has Content-Length or is chunked. The POST has no
 // Content-Type, or the type of a form, or the type of a multipart body. The
 // targets are the routes of each vhost of hardHosts, with the callback route
-// that has a body position. They are also a path with no route and an unknown
-// host. A known host gets the fixed 405 page, and an unknown host gets the
-// fixed 404 page. A close is also right. A GET and a HEAD with a body of 65 537
-// bytes get the status of the target. A wrapper that the server handler puts
-// around the body counts the bytes that the bait handler reads. The handler
-// reads 0 bytes. A POST to the callback route with a body position gets its
-// fixed response (ADR-039 decision 19). That route reads at most 4 097 bytes.
-// The beacon post path is not in the code.
+// that has a body position. They are also the two beacon paths, a path with no
+// route and an unknown host. A known host gets the fixed 405 page. The post
+// path of the beacon gets 204, not the fixed 405 page. An unknown host gets
+// the fixed 404 page. A close is also right. A GET and a HEAD with a body of
+// 65 537 bytes get the status of the target. A wrapper that the server handler
+// puts around the body counts the bytes that the bait handler reads. The
+// handler reads 0 bytes. A POST to the callback route with a body position
+// gets its fixed response (ADR-039 decision 19). That route reads at most
+// 4 097 bytes. A POST to the beacon post path gets 204 and reads at most 64
+// bytes. A POST to the beacon script path gets 405 and reads 0 bytes.
 func TestTS02PostBodies(t *testing.T) {
 	h := hardHandler(t)
 	var mu sync.Mutex
-	var reads, cbReads []int
+	var reads, cbReads, bpReads []int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rb := &tallyBody{ReadCloser: r.Body}
 		r.Body = rb
@@ -257,6 +266,8 @@ func TestTS02PostBodies(t *testing.T) {
 		mu.Lock()
 		if r.URL.Path == cbRoute.path && r.Method == http.MethodPost {
 			cbReads = append(cbReads, rb.got)
+		} else if r.URL.Path == hbPost && r.Method == http.MethodPost {
+			bpReads = append(bpReads, rb.got)
 		} else {
 			reads = append(reads, rb.got)
 		}
@@ -267,7 +278,8 @@ func TestTS02PostBodies(t *testing.T) {
 		host, path string
 		code       int
 	}
-	targets := []target{{"example.com", "/nope", 404}, {"other.example", "/", 404}}
+	targets := []target{{"example.com", "/nope", 404}, {"other.example", "/", 404},
+		{"example.com", hbScript, 200}, {"example.com", hbPost, 405}}
 	for host, rs := range hardHosts {
 		for _, r := range rs {
 			targets = append(targets, target{host, r.path, 200})
@@ -282,6 +294,8 @@ func TestTS02PostBodies(t *testing.T) {
 			want = 404
 		} else if c.path == cbRoute.path {
 			want = 200 // a POST to a callback route with a body position
+		} else if c.path == hbPost {
+			want = 204 // a POST to the beacon post path
 		}
 		for _, size := range []int{1000, 65537} {
 			for _, chunked := range []bool{false, true} {
@@ -302,8 +316,11 @@ func TestTS02PostBodies(t *testing.T) {
 		}
 	}
 	srv.Close()
-	if len(reads)+len(cbReads) != n {
-		t.Fatalf("the handler ran %d times for %d requests", len(reads)+len(cbReads), n)
+	if len(reads)+len(cbReads)+len(bpReads) != n {
+		t.Fatalf("the handler ran %d times for %d requests", len(reads)+len(cbReads)+len(bpReads), n)
+	}
+	if total := slices.Max(bpReads); total > beaconBodyMax {
+		t.Errorf("a POST to the beacon post path read %d body bytes, want at most %d", total, beaconBodyMax)
 	}
 	if total := slices.Max(reads); total != 0 {
 		t.Errorf("a request made the handler read %d body bytes, want 0", total)
