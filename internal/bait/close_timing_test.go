@@ -2,9 +2,16 @@ package bait
 
 import (
 	"bytes"
+	"cmp"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"slices"
 	"strconv"
@@ -41,11 +48,53 @@ func servePlainLoopback(tb testing.TB, h *Handler, q *event.Queue) string {
 	return ln.Addr().String()
 }
 
+// serveTLSLoopback serves h through listener.Serve on 127.0.0.1 with a
+// self-signed certificate that the test makes. It returns the address and a
+// client config that trusts the certificate.
+func serveTLSLoopback(tb testing.TB, h *Handler, q *event.Queue) (string, *tls.Config) {
+	tb.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	mustOK(tb, err)
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: tlsName},
+		DNSNames:     []string{tlsName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	mustOK(tb, err)
+	leaf, err := x509.ParseCertificate(der)
+	mustOK(tb, err)
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	srv, err := listener.New(listener.Config{
+		TLS:      &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}}},
+		MaxConns: 64, HeaderBytes: 8192, Queue: q, Counters: q.Counters(),
+	}, h)
+	mustOK(tb, err)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	mustOK(tb, err)
+	go func() { _ = srv.Serve(ln) }()
+	tb.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String(), &tls.Config{RootCAs: pool, ServerName: tlsName}
+}
+
+// tlsName is the name in the certificate of serveTLSLoopback.
+const tlsName = "decoy.test"
+
 // callbackRequest is a POST to the callback route with the tokens toks at the
 // positions path, query, header and body. With no tokens it sends a body with
 // no token and no other position.
 func callbackRequest(toks [4]string, closeHdr bool) []byte {
-	target, body, hdr := cbRoutePath, `{"x":1}`, ""
+	return callbackRequestTo(cbRoutePath, toks, closeHdr)
+}
+
+// callbackRequestTo is callbackRequest for the route with the path route.
+func callbackRequestTo(route string, toks [4]string, closeHdr bool) []byte {
+	target, body, hdr := route, `{"x":1}`, ""
 	if toks[0] != "" {
 		target += "/" + toks[0] + "?ref=" + toks[1]
 		hdr = cbHeaderKey + ": " + toks[2] + "\r\n"
@@ -97,9 +146,15 @@ func closeProbe(tb testing.TB, addr string, req []byte) (time.Duration, int) {
 	tb.Helper()
 	c, err := net.DialTimeout("tcp", addr, probeLimit)
 	mustOK(tb, err)
+	return closeProbeOn(tb, c, req)
+}
+
+// closeProbeOn is closeProbe on the open connection c. It closes c.
+func closeProbeOn(tb testing.TB, c net.Conn, req []byte) (time.Duration, int) {
+	tb.Helper()
 	defer c.Close()
 	mustOK(tb, c.SetDeadline(time.Now().Add(probeLimit)))
-	_, err = c.Write(req)
+	_, err := c.Write(req)
 	mustOK(tb, err)
 	var acc []byte
 	buf := make([]byte, 4096)
@@ -155,80 +210,106 @@ func waitRequests(tb testing.TB, q *event.Queue, n int) (reqs, rest []event.Reco
 // the request. A request without that header has a second request in the same
 // write, which gets no response. While the hook blocks, the queue has no event.
 // After the hook returns, a good token gives its event and a bad token gives
-// none.
+// none. More cases are a callback route with no asset and a beacon post with
+// no body. Each case runs on a plain socket and over TLS. Over TLS the client
+// must read the end of the stream while the hook blocks.
 func TestTS32CloseBeforeCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		beacon, good bool
+		route        string // the callback route, or "" for the route with an asset
+		noBody       bool   // a beacon post with no body
 	}{
-		{"callback, good tokens", false, true},
-		{"callback, bad tokens", false, false},
-		{"beacon, good ticket", true, true},
-		{"beacon, bad ticket", true, false},
+		{name: "callback, good tokens", good: true},
+		{name: "callback, bad tokens"},
+		{name: "callback, no asset, good tokens", good: true, route: "/nc"},
+		{name: "callback, no asset, bad tokens", route: "/nc"},
+		{name: "beacon, good ticket", beacon: true, good: true},
+		{name: "beacon, bad ticket", beacon: true},
+		{name: "beacon, no body", beacon: true, noBody: true},
 	} {
-		for _, closeHdr := range []bool{true, false} {
-			name := tc.name + ", request without Connection: close"
-			if closeHdr {
-				name = tc.name + ", request with Connection: close"
-			}
-			t.Run(name, func(t *testing.T) {
-				var h *Handler
-				var q *event.Queue
-				var req []byte
-				var kind event.Kind
-				if tc.beacon {
-					e := newBC(t, bcPost)
-					tk := e.ticket(t, "127.0.0.1:1", "")
-					if !tc.good {
-						b := []byte(tk)
-						b[12] ^= 1
-						tk = string(b)
-					}
-					h, q, req, kind = e.h, e.q, beaconRequest(tk, closeHdr), event.KindBeacon
+		for _, useTLS := range []bool{false, true} {
+			for _, closeHdr := range []bool{true, false} {
+				name := tc.name + ", plain"
+				if useTLS {
+					name = tc.name + ", TLS"
+				}
+				if closeHdr {
+					name += ", request with Connection: close"
 				} else {
-					e := newCBEnv(t)
-					toks := [4]string{}
-					for i := range toks {
-						if toks[i] = strings.Repeat("a", candidateLen); tc.good {
-							toks[i] = e.mint(t, time.Now())
+					name += ", request without Connection: close"
+				}
+				t.Run(name, func(t *testing.T) {
+					var h *Handler
+					var q *event.Queue
+					var req []byte
+					var kind event.Kind
+					if tc.beacon {
+						e := newBC(t, bcPost)
+						tk := e.ticket(t, "127.0.0.1:1", "")
+						if !tc.good {
+							b := []byte(tk)
+							b[12] ^= 1
+							tk = string(b)
 						}
+						if tc.noBody {
+							tk = ""
+						}
+						h, q, req, kind = e.h, e.q, beaconRequest(tk, closeHdr), event.KindBeacon
+					} else {
+						e := newCBEnv(t)
+						toks := [4]string{}
+						for i := range toks {
+							if toks[i] = strings.Repeat("a", candidateLen); tc.good {
+								toks[i] = e.mint(t, time.Now())
+							}
+						}
+						route := cmp.Or(tc.route, cbRoutePath)
+						h, q, req, kind = e.h, e.q, callbackRequestTo(route, toks, closeHdr), event.KindCallback
 					}
-					h, q, req, kind = e.h, e.q, callbackRequest(toks, closeHdr), event.KindCallback
-				}
-				hooked, release := make(chan struct{}, 1), make(chan struct{})
-				h.flushHook = func() {
-					hooked <- struct{}{}
-					<-release
-				}
-				addr := servePlainLoopback(t, h, q)
-				var once sync.Once
-				open := func() { once.Do(func() { close(release) }) }
-				t.Cleanup(open)
+					hooked, release := make(chan struct{}, 1), make(chan struct{})
+					h.flushHook = func() {
+						hooked <- struct{}{}
+						<-release
+					}
+					var once sync.Once
+					open := func() { once.Do(func() { close(release) }) }
+					t.Cleanup(open)
 
-				// The hook blocks until the client has read EOF. A check
-				// before the close leaves the client without EOF.
-				if _, extra := closeProbe(t, addr, req); extra != 0 {
-					t.Errorf("%d bytes after the first response, want 0", extra)
-				}
-				select {
-				case <-hooked:
-				case <-time.After(probeLimit):
-					t.Fatal("the handler did not reach the hook")
-				}
-				if evs := q.Drain(); len(evs) != 0 {
-					t.Errorf("%d events on the queue while the check is blocked, want 0", len(evs))
-				}
-				open()
-				reqs, rest := waitRequests(t, q, 1)
-				// A request has 4 distinct good tokens, one at each position.
-				want := 0
-				if tc.good {
-					want = map[bool]int{false: 4, true: 1}[tc.beacon]
-				}
-				if len(reqs) != 1 || len(rest) != want || slices.ContainsFunc(rest, func(r event.Record) bool { return r.Kind != kind }) {
-					t.Errorf("after the hook: %d request events and %d other events, want 1 and %d of kind %v", len(reqs), len(rest), want, kind)
-				}
-			})
+					// The hook blocks until the client has read EOF. A check
+					// before the close leaves the client without EOF.
+					var extra int
+					if useTLS {
+						addr, cfg := serveTLSLoopback(t, h, q)
+						c, err := tls.DialWithDialer(&net.Dialer{Timeout: probeLimit}, "tcp", addr, cfg)
+						mustOK(t, err)
+						_, extra = closeProbeOn(t, c, req)
+					} else {
+						_, extra = closeProbe(t, servePlainLoopback(t, h, q), req)
+					}
+					if extra != 0 {
+						t.Errorf("%d bytes after the first response, want 0", extra)
+					}
+					select {
+					case <-hooked:
+					case <-time.After(probeLimit):
+						t.Fatal("the handler did not reach the hook")
+					}
+					if evs := q.Drain(); len(evs) != 0 {
+						t.Errorf("%d events on the queue while the check is blocked, want 0", len(evs))
+					}
+					open()
+					reqs, rest := waitRequests(t, q, 1)
+					// A request has 4 distinct good tokens, one at each position.
+					want := 0
+					if tc.good {
+						want = map[bool]int{false: 4, true: 1}[tc.beacon]
+					}
+					if len(reqs) != 1 || len(rest) != want || slices.ContainsFunc(rest, func(r event.Record) bool { return r.Kind != kind }) {
+						t.Errorf("after the hook: %d request events and %d other events, want 1 and %d of kind %v", len(reqs), len(rest), want, kind)
+					}
+				})
+			}
 		}
 	}
 }

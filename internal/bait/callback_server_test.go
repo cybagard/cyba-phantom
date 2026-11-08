@@ -126,10 +126,9 @@ func TestTS32CallbackServerBudget(t *testing.T) {
 		}
 	}
 
-	// A request with no "Connection: close" gets the same result, because the
-	// route sends "Connection: close" for itself. net/http writes the response
-	// and does not drain the body first. The client gets status 200. The
-	// request event shows the route.
+	// A request with no "Connection: close" gets status 200. The route sends
+	// "Connection: close" for itself. net/http does not drain the body before
+	// it writes the response. The request event shows the route.
 	before := ln.n.Load()
 	status, reqs = oneRequest(300<<10, false, false)
 	if status != http.StatusOK {

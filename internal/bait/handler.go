@@ -42,17 +42,16 @@ var (
 	connClose = []string{"close"}
 )
 
-// closeConn takes the connection from net/http and closes it. It returns false
-// for a writer that cannot hijack, for example an HTTP/2 stream or a test
-// recorder. Call it after the flush. A later request on the connection gets no
-// response.
-func closeConn(w http.ResponseWriter) bool {
-	c, _, err := http.NewResponseController(w).Hijack()
-	if err != nil {
-		return false
+// closeConn takes the connection from net/http and closes it. A writer that
+// cannot hijack, for example an HTTP/2 stream or a test recorder, is left as it
+// is. Call it after the flush. A later request on the connection gets no
+// response. The connection caps do not count the handler after the close. So
+// the work after the close must not wait. It has no lock wait other than the
+// admission cap. It has no blocking send and no I/O.
+func closeConn(w http.ResponseWriter) {
+	if c, _, err := http.NewResponseController(w).Hijack(); err == nil {
+		_ = c.Close()
 	}
-	_ = c.Close()
-	return true
 }
 
 // Source gives the running bundle. *bundle.Loader is a Source.
