@@ -399,11 +399,13 @@ func (l *Loader) Healthy() bool {
 // A start load that gives bad_sig tries once more with <name>.sig.tmp. So does
 // a start load with <name>.cbnd and no <name>.sig. Another archive_invalid
 // gives no try. The file must be there and pass the file rule. The try has each
-// check. A file that passed the file rule and the signature stays when a later
-// step fails. The loader then sets a mark for it. A start load that stops at
-// the directory part, the state-file name or the chain check removes no
-// temporary file. After another start load, the loader removes
-// <name>.cbnd.tmp. It removes <name>.sig.tmp only if it has no mark.
+// check. The loader sets a mark before it loads with the file. A failure
+// before the rename, for example an expired bundle, keeps the file and the
+// mark. The rename makes the file <name>.sig and clears the mark. A bad_sig
+// clears the mark. A start load that stops at the directory part, the
+// state-file name or the chain check removes no temporary file. After another
+// start load, the loader removes <name>.cbnd.tmp. It removes <name>.sig.tmp
+// only if it has no mark.
 // LoadFetched has the install.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {

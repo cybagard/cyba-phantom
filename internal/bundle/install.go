@@ -56,8 +56,8 @@ func renameFile(root *os.Root, from, to string) error {
 // removes the record and keeps the files. The next start loads that pair.
 //
 // A failed write gives ErrInstallFault and no event. It leaves the running
-// bundle and the version state. A failure before the first rename removes the
-// two temporary files. A failure at or after the first rename keeps the files.
+// bundle and the version state. A failure before the archive rename removes
+// the two temporary files. A failure at or after that rename keeps the files.
 // A failed rename of the signature file sets the mark of the loader for
 // <name>.sig.tmp. The next fetched bundle then renames that file first, and the
 // roll-forward of the next start can use it. An install never removes or
@@ -92,8 +92,8 @@ func (l *Loader) loadFetched(archive, sig []byte, rd *digest) (*Bundle, error) {
 // installPair writes the two temporary files, and renames the archive and then
 // the signature file. A loader with the mark first renames <name>.sig.tmp to
 // <name>.sig. When that fails, installPair writes nothing. A failure before the
-// first rename removes the temporary files, but not a file with the mark. A
-// failed rename of the signature file sets the mark.
+// archive rename removes the temporary files. A failed rename of the signature
+// file sets the mark.
 func (l *Loader) installPair(root *os.Root, name string, archive, sig []byte) error {
 	if l.sigKept {
 		if err := l.promoteSig(root, name); err != nil {
@@ -142,9 +142,10 @@ func (l *Loader) removeTemps(root *os.Root, name string) {
 // <name>.sig.tmp. rollForward loads the archive with that file, with each
 // check. The file must pass the signature file rule.
 // On an accept it renames the file to <name>.sig and calls Sync on the
-// directory. A file that passed the file rule is kept, with the mark, unless
-// the signature check refuses it. For a rejection code, rollForward returns the
-// first error. For a state fault or an install fault, it returns that fault.
+// directory. rollForward sets the mark before loadBytes. The rename clears it.
+// A failure before the rename keeps the file and the mark. A bad_sig clears
+// the mark. For a rejection code, rollForward returns the first error. For a
+// state fault or an install fault, it returns that fault.
 func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte, rd *digest, first error) (*Bundle, error) {
 	sig, err := safefile.ReadFile(dir, name+sigTemp, fileRule(MaxSigBytes))
 	if err != nil {
