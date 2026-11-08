@@ -57,10 +57,10 @@ func (rq retentionRequest) left() bool {
 // RunRetention asks the writer to run the retention steps and waits for the
 // end of the run or of ctx. The reply is nil when the run ended with its
 // checkpoint. It is an error when the run ended early or the writer stopped.
-// The call returns the error of a stopped writer, or ctx.Err() when ctx has
-// ended, at once and sends no request. A call that returns on its ctx can leave
-// a request. The writer drops it. A call can wait until its ctx ends, when the
-// writer stops while the request waits. It is safe to call from any goroutine.
+// A stopped writer, or a ctx that has ended, gives its error at once and sends
+// no request. A call that returns on its ctx can leave a request. The writer
+// drops it. A call can wait until its ctx ends, when the writer stops while the
+// request waits. It is safe to call from any goroutine.
 func (w *Writer) RunRetention(ctx context.Context) error {
 	if err := w.Err(); err != nil {
 		return err

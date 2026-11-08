@@ -379,7 +379,7 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 			case <-time.After(waitFor):
 				t.Fatal("the batch did not reach its COMMIT")
 			}
-			// Run ends after the take loop. A cancel here would end it too early.
+			// A Close lets Run end after the take loop. A cancel ends it too soon.
 			r.q.Close()
 			if err := r.wait(done); err != nil {
 				t.Fatal(err)
@@ -502,7 +502,8 @@ func TestTU26StoppedWriterRefusesARequestAtOnce(t *testing.T) {
 }
 
 // T-U-26: a caller that has left gets no run. If it leaves before the first
-// chunk, no step runs. If it leaves during the first chunk, no second chunk runs.
+// chunk, no step runs. If it leaves during the first chunk, no second chunk
+// runs.
 func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 	for _, between := range []bool{false, true} {
 		t.Run(fmt.Sprint("between chunks ", between), func(t *testing.T) {
