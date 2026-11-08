@@ -34,10 +34,25 @@ type reloadClock struct {
 	entered chan struct{} // a gap wait began (buffer 1)
 	hold    chan struct{}
 	stop    atomic.Pointer[<-chan struct{}]
+	seen    atomic.Pointer[chan struct{}]
 	once    sync.Once
 }
 
-func (c *reloadClock) now() time.Time { return c.base.Add(time.Duration(c.offset.Load())) }
+func (c *reloadClock) now() time.Time {
+	if p := c.seen.Swap(nil); p != nil {
+		close(*p)
+	}
+	return c.base.Add(time.Duration(c.offset.Load()))
+}
+
+// firstRead gives a channel that the first read of the clock after this call
+// closes. A load reads the clock when it checks the bundle, so the close shows
+// that a load began.
+func (c *reloadClock) firstRead() <-chan struct{} {
+	ch := make(chan struct{})
+	c.seen.Store(&ch)
+	return ch
+}
 
 func (c *reloadClock) sleep(d time.Duration) {
 	c.gaps.Add(1)
@@ -182,10 +197,15 @@ func (g *reloadRig) hup() {
 }
 
 // stop ends serve and returns the bundle events. The stop ends each gap wait
-// that still holds, and its load does not start.
+// that began after startReloadWith set the clock stop, and its load does not
+// start. Serve must return within the wait of the test.
 func (g *reloadRig) stop() []bundleRow {
 	g.r.cancel()
-	<-g.r.done
+	select {
+	case <-g.r.done:
+	case <-time.After(sigtermWait):
+		g.t.Fatal("serve did not return after the stop")
+	}
 	if g.r.code != 0 {
 		g.t.Errorf("exit %d, want 0; stderr %q", g.r.code, g.r.err.String())
 	}
@@ -222,9 +242,11 @@ func TestTU23_SighupDuringStart(t *testing.T) {
 }
 
 // TestTU23_SignalsDuringLoad sends one SIGHUP and holds its load in the gap
-// wait. Then it sends 1 000 more. The signals give one more load (SEC-34).
-// The channel has a buffer of 1. The test ends the gap wait of each of the
-// two loads. A last SIGHUP starts a load that the stop ends in its gap wait.
+// wait. Then it sends 1 000 more (SEC-34). The check of the buffer shows that
+// the channel keeps one signal of them. The test ends the gap wait of each of
+// the two loads that ran. A last SIGHUP starts a load that the stop ends in
+// its gap wait. The stop ends each load that is left, so the rows cannot show
+// an extra load. Only the check of the buffer bounds the loads.
 func TestTU23_SignalsDuringLoad(t *testing.T) {
 	hup := notifyReload()
 	signal.Stop(hup)
@@ -295,9 +317,10 @@ func TestTU23_ReloadWithoutLoader(t *testing.T) {
 }
 
 // TestTU23_StopEndsGapWait holds a load of a SIGHUP in the gap wait. Then it
-// stops serve. The test clock never ends the wait by itself. The stop of the
-// loader ends it, so serve returns within the wait of the test. The load does
-// not start: the rows hold the start load only (FR-14).
+// stops serve. The test clock never ends the wait by itself. The stop ends
+// it, as the clock has the stop of serve by then. So serve returns within the
+// wait of the test. The load does not start: the rows hold the start load
+// only (FR-14).
 func TestTU23_StopEndsGapWait(t *testing.T) {
 	g := startReload(t, true, "")
 	g.hup()
@@ -354,8 +377,8 @@ func (w holdWriter) WriteHeader(code int) {
 // TestTI12_SighupUnderLoad sends decoy requests to the static name, one each
 // 5 ms (at most 200 each second). A goroutine of its own sends them, so the
 // pace holds during a swap. It sends at least 250 and runs until the last
-// swap ended, so the load is continuous in every swap. The test does not
-// bound the run time, as that measures the speed of the machine. The test
+// swap ended, so the load is continuous in every swap. The test has no upper
+// bound on the run time, as that measures the speed of the machine. The test
 // sends 5 SIGHUPs with new bundles, spread over the run. Each gives one
 // swap and one bundle_load. The load waits in the swap gap until a request
 // that the swap sends is inside the handler. Before each swap, one request
@@ -546,9 +569,16 @@ func TestTI12_NoBundleThenSwap(t *testing.T) {
 		t.Fatalf("before the swap: %d, %q, %v; want the hello page", code, body, err)
 	}
 	putBundle(t, g.p.Root, g.p.BundlePath, pageBundle(t, 1), seedKey(goodSeed))
-	// The second load waits for the swap gap only after the first load
-	// swapped. So its wait shows the swap. The stop ends it.
+	// The second signal comes after the first load began, so the channel of
+	// the signals holds it. The second load waits for the swap gap only after
+	// the first load swapped. So its wait shows the swap. The stop ends it.
+	began := g.clock.firstRead()
 	g.hup()
+	select {
+	case <-began:
+	case <-time.After(sigtermWait):
+		t.Fatal("the first load did not begin")
+	}
 	g.hup()
 	g.clock.wait(t, 1)
 	if g.l.Load().Current() == nil {
