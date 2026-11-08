@@ -47,8 +47,9 @@ func swapLoader(t *testing.T) (l *bundle.Loader, put func(seed byte, n int)) {
 // bundle of another seed after the route lookup and before the mint. The
 // request keeps the bundle that it read. Each token verifies under the key set
 // of the old bundle, which is second in the list, and gives the trap of its
-// slot. The mint range has the set id of the old bundle. The test does not
-// wait for the zero of the old seed.
+// slot. The mint range has the set id of the old bundle. The test also checks
+// that the swap comes before the key set of the mint. The test does not wait
+// for the zero of the old seed.
 func TestTS31SwapDuringRender(t *testing.T) {
 	l, put := swapLoader(t)
 	old := l.Current()
@@ -56,14 +57,23 @@ func TestTS31SwapDuringRender(t *testing.T) {
 	q := queueOf(t, 8)
 	h := New(loaderSrc{l}, &fallbackFn{}, q)
 	var cur *bundle.Bundle
+	var order []string
 	h.mintHook = func() {
 		var err error
 		cur, err = l.Load(true)
 		mustOK(t, err)
+		order = append(order, "swap")
+	}
+	h.keys = func(b *bundle.Bundle) *token.KeySet {
+		order = append(order, "keys")
+		return b.Tokens()
 	}
 	w := serve(t, h, get("/t", "example.com"))
 	if cur == nil || l.Current() != cur || cur == old {
 		t.Fatal("the hook did not swap the running bundle")
+	}
+	if !slices.Equal(order, []string{"swap", "keys"}) {
+		t.Fatalf("order %v, want the swap before the key set of the mint", order)
 	}
 	texts := tokenRE.FindAllString(w.Body.String()+" "+w.Header().Get("X-Note"), -1)
 	if w.Code != 200 || len(texts) != 2 {
@@ -130,8 +140,9 @@ func countOf(t *testing.T, db *sql.DB, query string, args ...any) (n int) {
 // TestTS31RowsForEachRequest serves requests through the handler into a real
 // writer. Each request gives one event row of kind request. A request with a
 // mint gives one mint row, and a request with none gives no mint row. Three
-// requests of one session give one session row with req_count 3. The statement
-// count of the writer is not checked: the store has no exported way to read it.
+// requests of one session give one session row with req_count 3. No mint range
+// comes twice to the writer. The statement count of the writer is not checked:
+// the store has no exported way to read it.
 func TestTS31RowsForEachRequest(t *testing.T) {
 	top, err := filepath.EvalSymlinks(t.TempDir())
 	mustOK(t, err)
@@ -164,6 +175,9 @@ func TestTS31RowsForEachRequest(t *testing.T) {
 	mustOK(t, w.Run(context.Background()))
 	if !w.Healthy() {
 		t.Fatalf("the writer stopped: %v", w.Err())
+	}
+	if d := w.MintDuplicates(); d != 0 {
+		t.Errorf("%d mint ranges that the table already had", d)
 	}
 	for _, c := range []struct {
 		what, query string
