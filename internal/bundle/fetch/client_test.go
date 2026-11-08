@@ -128,8 +128,8 @@ var fetchers = map[string]func(context.Context, *Client) ([]byte, error){
 	"signature": func(ctx context.Context, c *Client) ([]byte, error) { return c.Signature(ctx) },
 }
 
-// hangBound is the longest wait for one fetch. A fetch that does not end in
-// this time fails the test.
+// hangBound is the longest wait for one fetch through within. A fetch through
+// within that does not end in this time fails the test.
 const hangBound = 10 * time.Second
 
 // within runs one fetch of f and fails the test if it does not end in time.
