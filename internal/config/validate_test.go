@@ -3536,11 +3536,12 @@ var (
 	fetchURLAccepted = []string{
 		"", "https://bundle.example/b/x.cbnd", "https://bundle.example:8443/x.y.cbnd",
 		"https://bundle.example/a.cbnd/b%20.cbnd", "https://bundle.example/a%2Fb.cbnd",
+		"https://bundle.example/x%2Ecbnd",
 	}
 	fetchURLRefused = []string{
 		"https://bundle.example/b", "https://bundle.example/x.cbn", "https://bundle.example/.cbnd",
 		"https://bundle.example/a/.cbnd", "https://bundle.example/x.cbnd/", "https://bundle.example",
-		"https://bundle.example/%2Ecbnd",
+		"https://bundle.example/%2Ecbnd", "https://bundle.example/%2F.cbnd",
 	}
 )
 

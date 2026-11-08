@@ -52,6 +52,7 @@ func TestTS11_CheckFetchURLPath(t *testing.T) {
 		"https://bundle.example", "https://bundle.example/b", "https://bundle.example/x.cbn",
 		"https://bundle.example/.cbnd", "https://bundle.example/a/.cbnd",
 		"https://bundle.example/x.cbnd/", "https://bundle.example/%2Ecbnd",
+		"https://bundle.example/%2F.cbnd",
 	} {
 		for _, c := range []struct{ file, env string }{
 			{body + "bundle:\n  fetch_url: \"" + u + "\"\n", ""},
