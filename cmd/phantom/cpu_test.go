@@ -32,13 +32,7 @@ func startWithAES(t *testing.T, hw bool) (r *running, flag bool) {
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
 	r = launchServe(t, cfg, tempState(t, cfg), realDeps)
 	// The wait has a bound: a start line without the fixed text must fail.
-	select {
-	case <-r.out.started:
-	case <-r.done:
-		t.Fatalf("serve ended before the start line: exit %d; stderr %q", r.code, r.err.String())
-	case <-time.After(netWait):
-		t.Fatalf("no start line in %v; stdout %q", netWait, r.out.String())
-	}
+	r.waitStarted(t)
 	flag = noHardwareAES.Load()
 	r.cancel()
 	select {
