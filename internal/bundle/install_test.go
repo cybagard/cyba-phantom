@@ -276,8 +276,9 @@ func TestTU23FetchedTransitionCrash(t *testing.T) {
 }
 
 // T-U-23: a roll-forward whose rename of the signature temporary file fails
-// gives ErrInstallFault, one log line and no event. The start load removes the
-// temporary files and keeps the pair.
+// gives ErrInstallFault, one log line and no event. The start load keeps the
+// pair and the signature temporary file. The next start with no fault loads the
+// new bundle.
 func TestTU23RollForwardRenameFails(t *testing.T) {
 	f := newFetched(t)
 	f.crashAfterFirstRename()
@@ -294,11 +295,214 @@ func TestTU23RollForwardRenameFails(t *testing.T) {
 	if lines := logLines(t, p.buf.String()); len(lines) != 1 || lines[0]["msg"] != "bundle install fault" {
 		t.Errorf("log: %q", p.buf.String())
 	}
-	if got := f.snap(); got != "cbnd=new-arch sig=old-sig ctmp=none stmp=none state="+ver(2) {
+	if got := f.snap(); got != "cbnd=new-arch sig=old-sig ctmp=none stmp=new-sig state="+ver(2) {
 		t.Errorf("after: %s", got)
 	}
 	if !bytes.Equal(f.bytesOf("bundle/current.cbnd"), cbnd) || !bytes.Equal(f.bytesOf("bundle/current.sig"), sig) {
 		t.Error("the pair changed")
+	}
+	f.startLoads(ver(3))
+}
+
+// startLoads runs a start load with a new loader and no fault. It expects the
+// bundle with this version, and the new pair on disk.
+func (f *fetched) startLoads(version string) {
+	f.t.Helper()
+	beforeRename = nil
+	b, err := f.loader("bundle/current.cbnd").Load(true)
+	if err != nil || b.Manifest().Version != version {
+		f.t.Fatalf("next start: %v, %v", b, err)
+	}
+	if got := f.snap(); got != "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="+version {
+		f.t.Errorf("after the next start: %s", got)
+	}
+}
+
+// T-U-23: a roll-forward whose later step fails leaves a pair that the next
+// start loads. An expired bundle stops before the rename, so the temporary
+// signature file stays. The record write, the chain check and the version-state
+// write come after the rename. The file is then the signature file. The next
+// start with no fault loads the new bundle.
+func TestTU23RollForwardLaterStepFails(t *testing.T) {
+	const renamed = "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="
+	const kept = "cbnd=new-arch sig=old-sig ctmp=none stmp=new-sig state="
+	blocked := func(name string) func(f *fetched, l *Loader) func() {
+		return func(f *fetched, l *Loader) func() {
+			dir := filepath.Join(f.state, "bundle", name+".tmp")
+			must(f.t, os.MkdirAll(filepath.Join(dir, "x"), 0o700))
+			return func() { must(f.t, os.RemoveAll(dir)) }
+		}
+	}
+	cases := []struct {
+		name       string
+		transition bool
+		fault      func(f *fetched, l *Loader) func()
+		want       error
+		after      string
+	}{
+		{"record write", true, blocked(recordName(1, "cbnd")), ErrStateFault, renamed},
+		{"chain check", true, func(_ *fetched, l *Loader) func() {
+			calls := 0
+			l.decompress = func(b []byte) (*Archive, error) {
+				if calls++; calls > 1 {
+					return nil, ErrArchiveInvalid
+				}
+				return ReadArchive(b)
+			}
+			return func() {}
+		}, ErrStateFault, renamed},
+		{"version-state write", false, blocked(StateName), ErrStateFault, renamed},
+		{"expired bundle", false, func(_ *fetched, l *Loader) func() {
+			l.now = func() time.Time { return testNow.AddDate(2, 0, 0) }
+			return func() {}
+		}, ErrBadSig, kept},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mk := newFetched
+			if c.transition {
+				mk = transitionFetched
+			}
+			f := mk(t)
+			f.crashAfterFirstRename()
+			l := f.loader("bundle/current.cbnd")
+			undo := c.fault(f, l)
+			if b, err := l.Load(true); b != nil || err != c.want {
+				t.Fatalf("got %v, %v; want %v", b, err, c.want)
+			}
+			if got := f.snap(); got != c.after+ver(2) {
+				t.Errorf("after: %s", got)
+			}
+			undo()
+			f.startLoads(ver(3))
+		})
+	}
+}
+
+// T-U-23: after a failed rename of the signature file, the next fetched bundle
+// first renames the kept file. Then it writes its own two files. When that
+// first rename fails, the install writes nothing and the file stays. When the
+// install fails before its archive rename, the next start loads the first
+// bundle.
+func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
+	second := func(t *testing.T) *fetched {
+		f := newFetched(t)
+		f.crashAfterFirstRename()
+		// The first pair is now "old" for snap, and the second pair is "new".
+		f.oldArch, f.oldSig = f.arch, f.sig
+		f.arch = build(ent{name: "manifest.json", data: []byte(mf(ver(4)))})
+		f.sig = f.sign(f.arch)
+		return f
+	}
+	t.Run("renames first", func(t *testing.T) {
+		f := second(t)
+		var seen []string
+		beforeRename = func(from, to string) error {
+			seen = append(seen, from+">"+to+" "+f.snap())
+			return nil
+		}
+		t.Cleanup(func() { beforeRename = nil })
+		_, err := f.l.LoadFetched(f.arch, f.sig)
+		must(t, err)
+		want := []string{
+			"current.sig.tmp>current.sig cbnd=old-arch sig=other ctmp=none stmp=old-sig state=" + ver(2),
+			"current.cbnd.tmp>current.cbnd cbnd=old-arch sig=old-sig ctmp=new-arch stmp=new-sig state=" + ver(2),
+			"current.sig.tmp>current.sig cbnd=new-arch sig=old-sig ctmp=none stmp=new-sig state=" + ver(2),
+		}
+		if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+			t.Errorf("order:\n%s", strings.Join(seen, "\n"))
+		}
+		if got := f.snap(); got != "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="+ver(4) {
+			t.Errorf("after: %s", got)
+		}
+		// The rename cleared the mark. The next install renames no kept file.
+		seen = nil
+		arch := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
+		if _, err := f.l.LoadFetched(arch, f.sign(arch)); err != nil || len(seen) != 2 {
+			t.Errorf("third install: %v, renames %v", err, seen)
+		}
+	})
+	for _, dst := range []string{"current.sig", "current.cbnd"} {
+		t.Run("fails at "+dst, func(t *testing.T) {
+			f := second(t)
+			failRenameTo(t, dst)
+			before := f.files()
+			if b, err := f.l.LoadFetched(f.arch, f.sig); b != nil || err != ErrInstallFault {
+				t.Fatalf("got %v, %v", b, err)
+			}
+			if dst == "current.sig" {
+				if f.files() != before {
+					t.Error("the install wrote a file")
+				}
+				beforeRename = nil
+				if _, err := f.l.LoadFetched(f.arch, f.sig); err != nil {
+					t.Errorf("install after the fault: %v", err)
+				}
+				return
+			}
+			if got := f.snap(); got != "cbnd=old-arch sig=old-sig ctmp=new-arch stmp=new-sig state="+ver(2) {
+				t.Errorf("after: %s", got)
+			}
+			// The pair of the first install is the "new" pair again.
+			f.arch, f.sig, f.oldArch, f.oldSig = f.oldArch, f.oldSig, nil, nil
+			f.startLoads(ver(3))
+		})
+	}
+}
+
+// T-U-23: a start with <name>.cbnd and no <name>.sig rolls forward with
+// <name>.sig.tmp. Another archive_invalid gives no roll-forward, and the start
+// removes the temporary file.
+func TestTU23StartWithoutSignatureFile(t *testing.T) {
+	cases := map[string]func(f *fetched){
+		"no signature file": func(f *fetched) { must(f.t, os.Remove(filepath.Join(f.state, "bundle/current.sig"))) },
+		"signature file refused": func(f *fetched) {
+			must(f.t, os.Chmod(filepath.Join(f.state, "bundle/current.sig"), 0o644))
+		},
+		"no archive": func(f *fetched) { must(f.t, os.Remove(filepath.Join(f.state, "bundle/current.cbnd"))) },
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFetched(t)
+			f.write("bundle/current.cbnd", f.arch)
+			f.write("bundle/current.sig.tmp", f.sig)
+			setup(f)
+			b, err := f.loader("bundle/current.cbnd").Load(true)
+			if name == "no signature file" {
+				if err != nil || b.Manifest().Version != ver(3) {
+					t.Fatalf("got %v, %v", b, err)
+				}
+				return
+			}
+			if b != nil || err != ErrArchiveInvalid || strings.Contains(f.snap(), "stmp=new-sig") {
+				t.Errorf("got %v, %v, %s", b, err, f.snap())
+			}
+		})
+	}
+}
+
+// T-U-23: some start loads stop at the directory part, the state-file name or
+// the chain check. They remove no temporary file.
+func TestTU23StartStopsKeepTemps(t *testing.T) {
+	f := newFetched(t)
+	must(t, os.Symlink(filepath.Join(f.state, "bundle"), filepath.Join(f.state, "link")))
+	arch := f.bytesOf("bundle/current.cbnd")
+	f.record(1, arch, string(f.bytesOf("bundle/current.sig"))+lineOf(newKey(9, "kx"), arch))
+	for _, c := range []struct {
+		path string
+		want error
+	}{{"link/current.cbnd", ErrArchiveInvalid}, {"bundle/rotation-2.cbnd", ErrArchiveInvalid}, {"bundle/current.cbnd", ErrStateFault}} {
+		for _, n := range []string{"current", "rotation-2"} {
+			f.write("bundle/"+n+".cbnd.tmp", []byte("x"))
+			f.write("bundle/"+n+".sig.tmp", []byte("y"))
+		}
+		before := dirListing(t, f.state)
+		if b, err := f.loader(c.path).Load(true); b != nil || err != c.want {
+			t.Errorf("%s: got %v, %v", c.path, b, err)
+		}
+		if dirListing(t, f.state) != before {
+			t.Errorf("%s: a file changed", c.path)
+		}
 	}
 }
 

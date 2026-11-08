@@ -243,6 +243,11 @@ type Loader struct {
 	chain    *chain
 	chainErr error
 
+	// sigKept is the mark: <name>.sig.tmp is a kept file. No install may
+	// remove or replace it. A rename of the file to <name>.sig clears the mark.
+	// It is not on disk. loadMu guards it.
+	sigKept bool
+
 	// swapAt is the time of the last swap, or zero before the first swap.
 	// swapMu guards it, so a load can read it while it waits without loadMu.
 	swapMu sync.Mutex
@@ -391,9 +396,15 @@ func (l *Loader) Healthy() bool {
 // A path with the archive name of a record gives ErrArchiveInvalid. The name is
 // "rotation-<n>.cbnd" with n from 1 to 9. The ASCII case does not count. Load
 // checks this before the chain check and before any read.
-// A start load that gives bad_sig tries once more with <name>.sig.tmp. The
-// file must be there and pass the file rule. The try has each check. The start
-// load then removes each install temporary file. LoadFetched has the install.
+// A start load that gives bad_sig tries once more with <name>.sig.tmp. So does
+// a start load with <name>.cbnd and no <name>.sig. Another archive_invalid
+// gives no try. The file must be there and pass the file rule. The try has each
+// check. A file that passed the file rule and the signature stays when a later
+// step fails. The loader then sets a mark for it. A start load that stops at
+// the directory part, the state-file name or the chain check removes no
+// temporary file. After another start load, the loader removes
+// <name>.cbnd.tmp. It removes <name>.sig.tmp only if it has no mark.
+// LoadFetched has the install.
 // The errors are fixed errors of this package. None holds a path or a byte.
 func (l *Loader) Load(start bool) (*Bundle, error) {
 	if start {
@@ -411,14 +422,17 @@ func (l *Loader) load(start bool, rd *digest) (*Bundle, error) {
 	}
 	defer closeDir()
 	if start {
-		defer removeInstallTemps(dir, name)
+		defer l.removeTemps(dir, name)
 	}
 	archive, err := safefile.ReadFile(dir, name+".cbnd", fileRule(MaxBundleBytes))
-	var sig []byte
-	if err == nil {
-		sig, err = safefile.ReadFile(dir, name+".sig", fileRule(MaxSigBytes))
-	}
 	if err != nil {
+		return nil, ErrArchiveInvalid
+	}
+	sig, err := safefile.ReadFile(dir, name+".sig", fileRule(MaxSigBytes))
+	if err != nil {
+		if start && errors.Is(err, fs.ErrNotExist) {
+			return l.rollForward(dir, name, c, archive, rd, ErrArchiveInvalid)
+		}
 		return nil, ErrArchiveInvalid
 	}
 	if l.afterRead != nil {

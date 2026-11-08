@@ -58,7 +58,10 @@ func renameFile(root *os.Root, from, to string) error {
 // A failed write gives ErrInstallFault and no event. It leaves the running
 // bundle and the version state. A failure before the first rename removes the
 // two temporary files. A failure at or after the first rename keeps the files.
-// The roll-forward of the next start can use them.
+// A failed rename of the signature file sets the mark of the loader for
+// <name>.sig.tmp. The next fetched bundle then renames that file first, and the
+// roll-forward of the next start can use it. An install never removes or
+// replaces a file with the mark.
 func (l *Loader) LoadFetched(archive, sig []byte) (*Bundle, error) {
 	if run := l.cur.Load(); run != nil && run.sum == sha256.Sum256(archive) {
 		return nil, nil
@@ -83,57 +86,76 @@ func (l *Loader) loadFetched(archive, sig []byte, rd *digest) (*Bundle, error) {
 	if len(archive) > MaxBundleBytes || len(sig) > MaxSigBytes {
 		return nil, ErrArchiveInvalid
 	}
-	return l.loadBytes(dir, c, archive, sig, false, rd, func() error { return installPair(dir, name, archive, sig) })
+	return l.loadBytes(dir, c, archive, sig, false, rd, func() error { return l.installPair(dir, name, archive, sig) })
 }
 
 // installPair writes the two temporary files, and renames the archive and then
-// the signature file. A failure before the first rename removes the temporary
-// files.
-func installPair(root *os.Root, name string, archive, sig []byte) error {
+// the signature file. A loader with the mark first renames <name>.sig.tmp to
+// <name>.sig. When that fails, installPair writes nothing. A failure before the
+// first rename removes the temporary files, but not a file with the mark. A
+// failed rename of the signature file sets the mark.
+func (l *Loader) installPair(root *os.Root, name string, archive, sig []byte) error {
+	if l.sigKept {
+		if err := l.promoteSig(root, name); err != nil {
+			return err
+		}
+	}
 	for _, f := range []struct {
 		tmp  string
 		data []byte
 	}{{name + archiveTemp, archive}, {name + sigTemp, sig}} {
 		if err := writeTemp(root, f.tmp, f.data); err != nil {
-			removeInstallTemps(root, name)
+			l.removeTemps(root, name)
 			return err
 		}
 	}
 	if err := renameFile(root, name+archiveTemp, name+".cbnd"); err != nil {
 		return err
 	}
+	return l.promoteSig(root, name)
+}
+
+// promoteSig renames <name>.sig.tmp to <name>.sig and calls Sync on the
+// directory. A failed rename sets the mark, and a rename clears it. loadMu is
+// held.
+func (l *Loader) promoteSig(root *os.Root, name string) error {
 	if err := renameFile(root, name+sigTemp, name+".sig"); err != nil {
+		l.sigKept = true
 		return err
 	}
+	l.sigKept = false
 	return syncDir(root)
 }
 
-// removeInstallTemps removes the temporary files of an install.
-func removeInstallTemps(root *os.Root, name string) {
+// removeTemps removes <name>.cbnd.tmp. It removes <name>.sig.tmp only when the
+// loader has no mark for it. loadMu is held.
+func (l *Loader) removeTemps(root *os.Root, name string) {
 	_ = root.Remove(name + archiveTemp)
-	_ = root.Remove(name + sigTemp)
+	if !l.sigKept {
+		_ = root.Remove(name + sigTemp)
+	}
 }
 
-// rollForward is the second try of a start load whose pair gave bad_sig. A
-// crash between the two renames of an install leaves the new archive, the old
-// signature file and <name>.sig.tmp. rollForward loads the archive with that
-// file, with each check. The file must pass the signature file rule.
+// rollForward is the second try of a start load. It runs when the pair gave
+// bad_sig, or when <name>.sig does not exist. A crash between the two renames
+// of an install leaves the new archive, the old signature file and
+// <name>.sig.tmp. rollForward loads the archive with that file, with each
+// check. The file must pass the signature file rule.
 // On an accept it renames the file to <name>.sig and calls Sync on the
-// directory. For a rejection code, it returns the first error. For a state
-// fault or an install fault, it returns that fault.
+// directory. A file that passed the file rule is kept, with the mark, unless
+// the signature check refuses it. For a rejection code, rollForward returns the
+// first error. For a state fault or an install fault, it returns that fault.
 func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte, rd *digest, first error) (*Bundle, error) {
 	sig, err := safefile.ReadFile(dir, name+sigTemp, fileRule(MaxSigBytes))
 	if err != nil {
 		return nil, first
 	}
-	promote := func() error {
-		if err := renameFile(dir, name+sigTemp, name+".sig"); err != nil {
-			return err
-		}
-		return syncDir(dir)
-	}
-	b, err := l.loadBytes(dir, c, archive, sig, true, rd, promote)
+	l.sigKept = true
+	b, err := l.loadBytes(dir, c, archive, sig, true, rd, func() error { return l.promoteSig(dir, name) })
 	if err != nil {
+		if errors.Is(err, ErrBadSig) {
+			l.sigKept = false
+		}
 		if _, ok := CodeOf(err); !ok {
 			return nil, err
 		}
