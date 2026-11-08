@@ -123,26 +123,30 @@ func newRig(t *testing.T, h http.Handler, s settings) *rig {
 	return newClientFor(t, start(t, h, nil), s, mode{})
 }
 
-var fetchers = map[string]func(*Client) ([]byte, error){
-	"archive":   func(c *Client) ([]byte, error) { return c.Archive(context.Background()) },
-	"signature": func(c *Client) ([]byte, error) { return c.Signature(context.Background()) },
+var fetchers = map[string]func(context.Context, *Client) ([]byte, error){
+	"archive":   func(ctx context.Context, c *Client) ([]byte, error) { return c.Archive(ctx) },
+	"signature": func(ctx context.Context, c *Client) ([]byte, error) { return c.Signature(ctx) },
 }
 
 // hangBound is the longest wait for one fetch. A normal fetch ends in much less
 // than one second. A fetch that does not end by then is a bug of the read loop.
 const hangBound = 10 * time.Second
 
-// within runs one fetch of f and fails the test if it does not end in time. A
-// fetch that hangs stays in its goroutine until the test process ends.
-func within(t *testing.T, f func(*Client) ([]byte, error), c *Client) ([]byte, error) {
+// within runs one fetch of f and fails the test if it does not end in time.
+// When within returns, it cancels the context of the fetch. A fetch that
+// hangs then ends and closes its connection. The cleanup of the server does
+// not wait for the timeout of the fetch.
+func within(t *testing.T, f func(context.Context, *Client) ([]byte, error), c *Client) ([]byte, error) {
 	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	type result struct {
 		got []byte
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
-		got, err := f(c)
+		got, err := f(ctx, c)
 		done <- result{got, err}
 	}()
 	timer := time.NewTimer(hangBound)
@@ -546,7 +550,7 @@ func TestTS30Timeouts(t *testing.T) {
 		for what, h := range map[string]http.Handler{"slow header": slowHeader, "slow body": slowBody} {
 			r := newRig(t, h, s)
 			begin := time.Now()
-			_, err := f(r.c)
+			_, err := f(context.Background(), r.c)
 			took := time.Since(begin)
 			r.expect(t, err, ClassTimeout, map[string]int{"slow header": 0, "slow body": 200}[what])
 			want := map[string]time.Duration{"slow header": header, "slow body": bound}[what]
