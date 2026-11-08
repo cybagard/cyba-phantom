@@ -128,6 +128,34 @@ var fetchers = map[string]func(*Client) ([]byte, error){
 	"signature": func(c *Client) ([]byte, error) { return c.Signature(context.Background()) },
 }
 
+// hangBound is the longest wait for one fetch. A normal fetch ends in much less
+// than one second. A fetch that does not end by then is a bug of the read loop.
+const hangBound = 10 * time.Second
+
+// within runs one fetch of f and fails the test if it does not end in time. A
+// fetch that hangs stays in its goroutine until the test process ends.
+func within(t *testing.T, f func(*Client) ([]byte, error), c *Client) ([]byte, error) {
+	t.Helper()
+	type result struct {
+		got []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := f(c)
+		done <- result{got, err}
+	}()
+	timer := time.NewTimer(hangBound)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.got, r.err
+	case <-timer.C:
+		t.Fatalf("a fetch did not return in a bounded time (%v)", hangBound)
+		return nil, nil
+	}
+}
+
 // expect checks the error, the counters and the one log line of a failure.
 func (r *rig) expect(t *testing.T, err error, class Class, status int) {
 	t.Helper()
@@ -206,7 +234,7 @@ func TestTS30Success(t *testing.T) {
 		_, _ = io.WriteString(w, "data")
 	}), small)
 	for name, f := range fetchers {
-		if got, err := f(r.c); err != nil || string(got) != "data" {
+		if got, err := within(t, f, r.c); err != nil || string(got) != "data" {
 			t.Errorf("%s: %q, %v", name, got, err)
 		}
 	}
@@ -218,7 +246,7 @@ func TestTS30Success(t *testing.T) {
 	}
 	body := bytes.Repeat([]byte{'x'}, smallArchive) // the cap itself passes
 	r = newRig(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }), small)
-	if got, err := r.c.Archive(context.Background()); err != nil || !bytes.Equal(got, body) {
+	if got, err := within(t, fetchers["archive"], r.c); err != nil || !bytes.Equal(got, body) {
 		t.Errorf("a body of the cap: %d bytes, %v", len(got), err)
 	}
 }
@@ -326,7 +354,7 @@ func TestTS30NoProxy(t *testing.T) {
 	}
 	r := newRig(t, body(10, false), small)
 	for name, f := range fetchers {
-		if _, err := f(r.c); err != nil {
+		if _, err := within(t, f, r.c); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -375,7 +403,7 @@ func TestTS30RedirectRefused(t *testing.T) {
 		r := newRig(t, http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 			http.Redirect(w, q, target.URL+"/x.cbnd", http.StatusFound)
 		}), small)
-		_, err := f(r.c)
+		_, err := within(t, f, r.c)
 		if hits.Load() != 0 {
 			t.Fatalf("%s: the target got %d requests", name, hits.Load())
 		}
@@ -469,7 +497,7 @@ func TestTS30SizeAndStatus(t *testing.T) {
 			"length over the cap":     over,
 		} {
 			r := newRig(t, h, small)
-			_, err := f(r.c)
+			_, err := within(t, f, r.c)
 			r.expect(t, err, ClassSize, 200)
 			if t.Failed() {
 				t.Fatal(name, what)
@@ -477,13 +505,13 @@ func TestTS30SizeAndStatus(t *testing.T) {
 		}
 		// A false length over the body: the body ends early.
 		r := newRig(t, short, small)
-		_, err := f(r.c)
+		_, err := within(t, f, r.c)
 		r.expect(t, err, ClassTransport, 200)
 		// A false length under the body: the client reads the declared bytes
 		// and no more. The bytes stay under the cap. The signature check of
 		// the loader refuses them.
 		r = newRig(t, rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"+strings.Repeat("a", 10*limit)), small)
-		if got, err := f(r.c); err != nil || string(got) != "aaaaa" {
+		if got, err := within(t, f, r.c); err != nil || string(got) != "aaaaa" {
 			t.Errorf("%s: false short length gave %q, %v", name, got, err)
 		}
 		for _, status := range []int{206, 404, 500} {
@@ -491,7 +519,7 @@ func TestTS30SizeAndStatus(t *testing.T) {
 				w.WriteHeader(status)
 				_, _ = w.Write(make([]byte, 10))
 			}), small)
-			_, err := f(r.c)
+			_, err := within(t, f, r.c)
 			r.expect(t, err, ClassStatus, status)
 		}
 	}
