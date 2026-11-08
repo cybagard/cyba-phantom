@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -32,7 +35,10 @@ type fakeFetch struct {
 	url     string
 	private []netip.Prefix
 	every   time.Duration
-	loaded  bool // the loader held a running bundle when run began
+	lg      *slog.Logger // the logger argument of the call
+	logOut  io.Writer    // the writer of the std log at the call
+	errLog  io.Writer    // the error log writer of the server that serve made
+	loaded  bool         // the loader held a running bundle when run began
 	q       *event.Queue
 	err     error
 	frozen  func() bool
@@ -43,19 +49,24 @@ type fakeFetch struct {
 
 func newFakeFetch(t *testing.T) *fakeFetch {
 	f := &fakeFetch{begun: make(chan struct{}, 1), ended: make(chan bool, 1)}
-	old, oldServer := newFetcher, newServer
-	t.Cleanup(func() { newFetcher, newServer = old, oldServer })
+	old, oldServer, oldLog := newFetcher, newServer, log.Writer()
+	t.Cleanup(func() { newFetcher, newServer = old, oldServer; log.SetOutput(oldLog) })
 	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		srv, err := oldServer(c, h)
 		f.mu.Lock()
 		f.q = c.Queue
+		if srv != nil {
+			f.errLog = srv.ErrLog()
+		}
 		f.mu.Unlock()
-		return oldServer(c, h)
+		return srv, err
 	}
 	newFetcher = func(url string, private []netip.Prefix, every time.Duration, l *bundle.Loader, lg *slog.Logger) (func(context.Context), func() bool, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls++
 		f.url, f.private, f.every = url, private, every
+		f.lg, f.logOut = lg, log.Writer()
 		if f.err != nil {
 			return nil, nil, f.err
 		}
@@ -104,7 +115,9 @@ func awaitDone(t *testing.T, r *running) {
 }
 
 // TestTU23_FetcherStart checks that serve starts one fetcher after the start
-// load. It gets the URL, the interval and the private list of the config.
+// load. It gets the URL, the interval and the private list of the config. It
+// gets the logger of the bundle part, and it starts after the std log went to
+// the error log writer of the server.
 func TestTU23_FetcherStart(t *testing.T) {
 	f := newFakeFetch(t)
 	g := startFetchRun(t, fetchSection)
@@ -117,6 +130,17 @@ func TestTU23_FetcherStart(t *testing.T) {
 	want := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.lg == nil {
+		t.Error("the fetcher got a nil logger")
+	} else {
+		f.lg.Error("test: fetcher logger")
+		if !strings.Contains(g.r.err.String(), `msg="test: fetcher logger"`) {
+			t.Errorf("the fetcher logger does not write to the log of the process: %q", g.r.err.String())
+		}
+	}
+	if f.errLog == nil || f.logOut != f.errLog {
+		t.Errorf("std log writer %v at the fetcher start, want the error log writer %v of the server", f.logOut, f.errLog)
+	}
 	if f.calls != 1 || f.url != "https://bundle.example/b.cbnd" || f.every != 20*time.Minute || !slices.Equal(f.private, want) || !f.loaded {
 		t.Errorf("%d fetchers with url %q, interval %v, private %v, loaded %v; want 1, the config values, loaded true", f.calls, f.url, f.every, f.private, f.loaded)
 	}
@@ -129,7 +153,7 @@ func TestTU23_RealNewFetcher(t *testing.T) {
 	_, b, stop := startBoth(t, archiveOf(t, referenceFiles()...))
 	defer stop()
 	private := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
-	lg := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	run, frozen, err := realNewFetcher("https://bundle.example/b.cbnd", private, 20*time.Minute, b.l, lg)
 	if err != nil || run == nil || frozen == nil {
 		t.Fatalf("valid URL: error %v, run nil %v, frozen nil %v; want no error and both set", err, run == nil, frozen == nil)
@@ -176,9 +200,9 @@ func fetchCfg(t *testing.T) *config.Config {
 // starts no fetcher and no watch.
 func TestTU23_NoFetcherWithoutLoader(t *testing.T) {
 	f := newFakeFetch(t)
-	b := &bundlePart{lg: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+	b := &bundlePart{lg: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	var wg sync.WaitGroup
-	b.startFetch(t.Context(), &wg, fetchCfg(t))
+	b.startFetchAndWatch(t.Context(), &wg, fetchCfg(t))
 	wg.Wait()
 	if n := f.callCount(); n != 0 || b.watch.Load() != nil || b.Degraded() != nil {
 		t.Errorf("%d fetchers, watch %v, reasons %v; want none", n, b.watch.Load(), b.Degraded())
@@ -189,14 +213,14 @@ func TestTU23_NoFetcherWithoutLoader(t *testing.T) {
 // fixed line with no URL. The watch starts, with no freeze input.
 func TestTU23_FetcherNewError(t *testing.T) {
 	f := newFakeFetch(t)
-	f.err = context.DeadlineExceeded
+	f.err = errors.New("test: no client")
 	_, b, stop := startBoth(t, archiveOf(t, referenceFiles()...))
 	defer stop()
 	var buf bytes.Buffer
 	b.lg = slog.New(slog.NewTextHandler(&buf, nil))
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	b.startFetch(ctx, &wg, fetchCfg(t))
+	b.startFetchAndWatch(ctx, &wg, fetchCfg(t))
 	cancel()
 	wg.Wait()
 	if got := buf.String(); strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, ` level=ERROR msg="bundle fetcher does not start"`+"\n") {
@@ -208,7 +232,8 @@ func TestTU23_FetcherNewError(t *testing.T) {
 }
 
 // TestTU23_WatchDegraded checks that the watch gets the freeze input of the
-// fetcher. Degraded then gives the reason while the watch runs.
+// fetcher. Degraded then gives the reason while the watch runs. The watch gets
+// the logger of the bundle part and writes its line for the change.
 func TestTU23_WatchDegraded(t *testing.T) {
 	f := newFakeFetch(t)
 	f.frozen = func() bool { return true }
@@ -217,14 +242,18 @@ func TestTU23_WatchDegraded(t *testing.T) {
 	if b.Degraded() != nil {
 		t.Errorf("reasons %v before the start, want nil", b.Degraded())
 	}
+	var buf syncBuf // the watch writes from its goroutine
+	b.lg = slog.New(slog.NewTextHandler(&buf, nil))
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	b.startFetch(ctx, &wg, fetchCfg(t))
+	b.startFetchAndWatch(ctx, &wg, fetchCfg(t))
 	defer wg.Wait()
 	defer cancel()
-	for deadline := time.Now().Add(netWait); !slices.Equal(b.Degraded(), []string{bundle.ReasonFreeze}); time.Sleep(time.Millisecond) {
+	// The watch sets the reason before it writes the line.
+	const line = `msg="bundle degraded state changed" reason=freeze on=true`
+	for deadline := time.Now().Add(netWait); !slices.Equal(b.Degraded(), []string{bundle.ReasonFreeze}) || !strings.Contains(buf.String(), line); time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("reasons %v, want [freeze]", b.Degraded())
+			t.Fatalf("reasons %v, log %q; want [freeze] and the line %q", b.Degraded(), buf.String(), line)
 		}
 	}
 }

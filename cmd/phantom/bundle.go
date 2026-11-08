@@ -27,7 +27,8 @@ var (
 	bundleTrust = releaseTrust
 	newLoader   = bundle.NewLoader
 	// newFetcher makes the fetcher of the URL. It gives the run function
-	// and the freeze input of the fetcher.
+	// and the freeze input of the fetcher. For a URL that the client refuses,
+	// it gives an error and no functions.
 	newFetcher = func(url string, private []netip.Prefix, every time.Duration,
 		l *bundle.Loader, lg *slog.Logger) (run func(context.Context), frozen func() bool, err error) {
 		c, err := bundlefetch.New(url, private, lg)
@@ -44,7 +45,7 @@ var (
 type bundlePart struct {
 	l  *bundle.Loader
 	lg *slog.Logger
-	// watch is set by startFetch. It is nil with no watch.
+	// startFetchAndWatch sets watch. It is nil with no watch.
 	watch atomic.Pointer[bundle.ExpiryWatch]
 }
 
@@ -120,12 +121,13 @@ func startBundle(p startParams, s *storePart, q *event.Queue, lg *slog.Logger) *
 	return &bundlePart{l: l, lg: lg}
 }
 
-// startFetch starts the fetcher and the expiry watch in wg, both until ctx
-// ends. It does nothing with no loader. The fetcher starts only with a
-// bundle.fetch_url. A fetcher that does not start writes one fixed line, and
-// the sensor goes on without it (C3). The watch gets the freeze input of the
-// fetcher, or nil with no fetcher. It has no hook: no alert sink exists yet.
-func (b *bundlePart) startFetch(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config) {
+// startFetchAndWatch starts the fetcher and the expiry watch in wg, both until
+// ctx ends. It does nothing with no loader. The fetcher starts only with a
+// bundle.fetch_url. When the fetcher does not start, the function writes one
+// fixed line, and the sensor goes on without it (C3). The watch gets the
+// freeze input of the fetcher, or nil with no fetcher. The watch has no hook:
+// no alert sink exists yet.
+func (b *bundlePart) startFetchAndWatch(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config) {
 	if b.l == nil {
 		return
 	}

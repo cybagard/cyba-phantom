@@ -90,8 +90,10 @@ var (
 // With a bundle.fetch_url and a loader, one fetcher starts after the start
 // load. The expiry watch starts with a loader. Both are in wg, so they end
 // before the queue closes. After the stop began, the fetcher starts no new
-// load. A load in its wait for the swap gap at the stop has begun. It runs
-// to its end. A fetcher that does not start gives one fixed line.
+// load. A fetch load that began before the stop runs to its end, also when
+// it is in its wait for the swap gap. So the stop can wait for the rest of
+// the 30 s gap, as for the reload above. A fetcher that does not start gives
+// one fixed line.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
 	counters := event.NewCounters()
@@ -225,7 +227,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	// The fetcher and the watch start here. This is after the start load.
 	// It is also after the std log went to the counting writer.
 	// No early return follows.
-	b.startFetch(ctx, &wg, cfg)
+	b.startFetchAndWatch(ctx, &wg, cfg)
 	serveOne(func() error { return srv.Serve(httpsLn) })
 	serveOne(func() error { return srv.ServePlain(httpLn, listener.NewRedirect(decoys)) })
 	// This starts after the last early return of serveWith. Each path that
