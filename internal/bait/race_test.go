@@ -7,6 +7,7 @@ package bait
 // 100 runs, and the means stay within 2 of each other.
 func init() { raceAllocSlack = 2 }
 
-// With the race detector, a callback event allocated 104.5 times on the commit
-// of TestTS32CallbackRequestAllocs. So the bound for that mode is 105.
+// With the race detector, a callback event allocated 102.5 to 106.0 times in 10
+// runs of TestTS32CallbackRequestAllocs. The test bound for each event is
+// eventAllocs times the 10 % slack, so 105 gives 115.5.
 func init() { eventAllocs = 105 }

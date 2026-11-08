@@ -1,11 +1,14 @@
 package bait
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/importer"
 	"go/parser"
 	gotoken "go/token"
+	"go/types"
 	"io"
 	"net"
 	"net/http"
@@ -48,10 +51,12 @@ func cbSwapLoader(t *testing.T) (l *bundle.Loader, put func(seed byte, n int)) {
 }
 
 // TestTS32SwapDuringCallback swaps the bundle and the ring after the response
-// is flushed and before the check of the token. The token comes from a render
-// of the old bundle. The callback event must have the key set id of the old
-// bundle. This is the second key set of the ring. The writer must store the
-// token row of the old mint row.
+// is flushed and before the ring load of Check. The hook asserts that the
+// queue holds no callback event yet, so a hook after the events fails. The
+// token comes from a render of the old bundle. The callback event must have
+// the key set id of the old bundle. This is the second key set of the ring.
+// The writer must store the token row of the old mint row. The test does not
+// swap between the ring load and the verify inside Check.
 func TestTS32SwapDuringCallback(t *testing.T) {
 	l, put := cbSwapLoader(t)
 	old := l.Current()
@@ -65,6 +70,13 @@ func TestTS32SwapDuringCallback(t *testing.T) {
 	}
 	var cur *bundle.Bundle
 	h.flushHook = func() {
+		// The token check has not run: the queue has no callback event.
+		for _, ev := range rig.q.Drain() {
+			if ev.Kind() == event.KindCallback {
+				t.Error("the hook ran after the token check: a callback event is on the queue")
+			}
+			rig.q.Enqueue(ev)
+		}
 		put(0x0b, 2)
 		var err error
 		cur, err = l.Load(true)
@@ -143,80 +155,140 @@ func TestTS32SwapRaceCallback(t *testing.T) {
 	wg.Wait()
 }
 
-// queryParsers are the names of the calls that parse a query or a form. A
-// callback route reads its candidates with its own scans (SEC-37).
-var queryParsers = []string{"ParseQuery", "ParseForm", "FormValue", "PostFormValue", "ParseMultipartForm", "MultipartReader"}
+// queryParsers are the full names of the functions that parse a query or a
+// form. A callback route reads its candidates with its own scans (SEC-37).
+var queryParsers = []string{
+	"net/url.ParseQuery", "(*net/url.URL).Query", "(*net/http.Request).ParseForm",
+	"(*net/http.Request).FormValue", "(*net/http.Request).PostFormValue",
+	"(*net/http.Request).ParseMultipartForm", "(*net/http.Request).MultipartReader",
+}
 
-// queryRefs gives the position of each selector in src that names one of
-// queryParsers, or URL.Query. The match is on the syntax tree, so a comment or
-// a string does not match.
-func queryRefs(path string, src any) ([]gotoken.Position, error) {
-	fset := gotoken.NewFileSet()
-	f, err := parser.ParseFile(fset, path, src, 0)
-	if err != nil {
-		return nil, err
+// checkImporter is a source importer that keeps the first import error. A
+// package that does not import would else hide its uses from the scan.
+type checkImporter struct {
+	from types.ImporterFrom
+	err  error
+}
+
+func (c *checkImporter) Import(path string) (*types.Package, error) {
+	return c.ImportFrom(path, "", 0)
+}
+
+func (c *checkImporter) ImportFrom(path, dir string, mode types.ImportMode) (*types.Package, error) {
+	p, err := c.from.ImportFrom(path, dir, mode)
+	if err != nil && c.err == nil {
+		c.err = err
+	}
+	return p, err
+}
+
+// queryRefs type-checks files and gives the position of each use of a function
+// in queryParsers: a call, a method value or a method expression. A field with
+// the same name is not a function, so it does not match. Type errors do not
+// stop the scan, but an import error does.
+func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]gotoken.Position, error) {
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(error) {}}
+	_, _ = conf.Check("p", fset, files, info)
+	if imp.err != nil {
+		return nil, imp.err
 	}
 	var out []gotoken.Position
-	ast.Inspect(f, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok {
-			x, isSel := sel.X.(*ast.SelectorExpr)
-			if slices.Contains(queryParsers, sel.Sel.Name) || isSel && x.Sel.Name == "URL" && sel.Sel.Name == "Query" {
-				out = append(out, fset.Position(sel.Sel.Pos()))
-			}
+	for id, obj := range info.Uses {
+		if fn, ok := obj.(*types.Func); ok && slices.Contains(queryParsers, fn.FullName()) {
+			out = append(out, fset.Position(id.Pos()))
 		}
-		return true
+	}
+	slices.SortFunc(out, func(a, b gotoken.Position) int {
+		return cmp.Or(strings.Compare(a.Filename, b.Filename), a.Offset-b.Offset)
 	})
 	return out, nil
 }
 
-// querySample has seven references that queryRefs must report. It also has a
-// comment, a string, a field and a call of another Query. queryRefs must not
+// querySample has eleven references that queryRefs must report, one on each
+// line that ends with "want". It also has a comment, a string, a field and a
+// method of another type, all named Query or like a parser. queryRefs must not
 // report these.
 const querySample = `package p
+import (
+	"net/http"
+	nu "net/url"
+)
+type conf struct{ Query string }
+type store struct{}
+func (store) Query(string) {}
 // r.ParseForm()
-func f(r *http.Request) {
+func f(r *http.Request, c conf, db store) {
 	_ = "r.FormValue(x)"
-	r.URL.Query()
-	url.ParseQuery("a=b")
-	r.ParseForm()
-	_ = r.FormValue
-	r.PostFormValue("a")
-	r.ParseMultipartForm(1)
-	r.MultipartReader()
+	q := r.URL.Query // want
+	_ = q
+	_ = (*http.Request).FormValue // want
+	nu.ParseQuery("a=b") // want
+	u := r.URL
+	_ = u.Query() // want
+	_ = (*nu.URL).Query // want
+	_ = (*nu.URL).Query(r.URL) // want
+	r.ParseForm() // want
+	_ = r.FormValue // want
+	r.PostFormValue("a") // want
+	r.ParseMultipartForm(1) // want
+	r.MultipartReader() // want
 	_ = c.Query
 	db.Query("x")
 }
 `
 
-// TestTS32NoQueryParserCall scans the files of this package that are not
-// tests. It fails when one refers to URL.Query, ParseQuery, ParseForm,
-// FormValue, PostFormValue, ParseMultipartForm or MultipartReader. The check
-// reads the files of each GOOS and GOARCH.
+// TestTS32NoQueryParserCall type-checks the files of this package that are not
+// tests. It fails when one uses net/url.ParseQuery, (*net/url.URL).Query or
+// the ParseForm, FormValue, PostFormValue, ParseMultipartForm or
+// MultipartReader method of *net/http.Request. A use is a call, a method value
+// or a method expression, under any variable or import name. The check reads
+// the files of each GOOS and GOARCH.
 func TestTS32NoQueryParserCall(t *testing.T) {
-	if got, err := queryRefs("p.go", querySample); err != nil || len(got) != 7 {
-		t.Fatalf("the scan finds %v (%v), want 7 references", got, err)
+	fset := gotoken.NewFileSet()
+	imp := &checkImporter{from: importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)}
+	f, err := parser.ParseFile(fset, "sample.go", querySample, 0)
+	mustOK(t, err)
+	refs, err := queryRefs(fset, imp, []*ast.File{f})
+	mustOK(t, err)
+	var got, want []int
+	for _, p := range refs {
+		got = append(got, p.Line)
+	}
+	for i, line := range strings.Split(querySample, "\n") {
+		if strings.HasSuffix(line, "// want") {
+			want = append(want, i+1)
+		}
+	}
+	if len(want) != 11 || !slices.Equal(got, want) {
+		t.Fatalf("the scan reports the lines %v, want %v", got, want)
 	}
 	ctx := build.Default
 	ctx.UseAllFiles = true
 	pkg, err := ctx.ImportDir(".", 0)
 	mustOK(t, err)
-	files := slices.Concat(pkg.GoFiles, pkg.CgoFiles)
-	if len(files) == 0 {
+	names := slices.Concat(pkg.GoFiles, pkg.CgoFiles)
+	if len(names) == 0 {
 		t.Fatal("the package has no file")
 	}
-	for _, name := range files {
-		refs, err := queryRefs(filepath.Join(pkg.Dir, name), nil)
+	var files []*ast.File
+	for _, name := range names {
+		f, err := parser.ParseFile(fset, filepath.Join(pkg.Dir, name), nil, 0)
 		mustOK(t, err)
-		for _, p := range refs {
-			t.Errorf("%s: call of a query or form parser", p)
-		}
+		files = append(files, f)
+	}
+	refs, err = queryRefs(fset, imp, files)
+	mustOK(t, err)
+	for _, p := range refs {
+		t.Errorf("%s: use of a query or form parser", p)
 	}
 }
 
 // TestTS02CallbackSegmentForms sends the one-segment forms to a callback route
-// with a segment position, on a real server. The forms are raw, because
-// httptest.NewRequest changes them. Each form gets the response of the route
-// path, byte for byte except Date. No byte of the segment is in the response.
+// with a segment position, on a real server. The test writes the request line
+// itself, so no client code can change a form. Each form gets the response of
+// the route path, byte for byte except Date. The response does not contain the
+// text of the segment.
 // No callback event is on the queue. A token in the same place gives the same
 // response and one callback event. So the missing event is not by chance.
 func TestTS02CallbackSegmentForms(t *testing.T) {

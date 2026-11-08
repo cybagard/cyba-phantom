@@ -85,7 +85,8 @@ func BenchmarkCallbackScansAndCheck(b *testing.B) {
 }
 
 // BenchmarkCallbackEventBuild measures the build of one callback event with
-// the token id. The handler does the same for a good token.
+// the token id. It does not measure the parse of the token, the cap or the
+// queue.
 func BenchmarkCallbackEventBuild(b *testing.B) {
 	g := newCallbackRig(b, true)
 	res := g.check()

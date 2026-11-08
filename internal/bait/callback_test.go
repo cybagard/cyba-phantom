@@ -256,15 +256,19 @@ func otherKeySetToken(t testing.TB) string {
 
 // TestTS32CallbackFixedResponse checks the response for good, stale, future,
 // bad, absent, other-key-set and capped tokens. It must have equal bytes at
-// each position, and no Set-Cookie. For a capped token, the test also checks
-// the capped counter and the missing callback event. So the case is not a good
-// token. The test does this for a route with an asset and a route with none,
-// for GET, HEAD and POST. Both routes have a body
-// position, so POST also goes to the path, query and header positions. The
-// test checks the header values. A HEAD response has the status and headers
-// of the GET response.
+// each position, and no Set-Cookie. The clock steps past the token window
+// before each case, so the cap admits a good token each time. A good token
+// that is read gives one callback event. For a capped token, the test admits
+// it once at the same clock, then checks the capped counter and the missing
+// callback event. So the case cannot pass as an admitted token. The test does
+// this for a route with an asset and a route with none, for GET, HEAD and
+// POST. Both routes have a body position, so POST also goes to the path,
+// query and header positions. The test checks the header values. A HEAD
+// response has the status and headers of the GET response.
 func TestTS32CallbackFixedResponse(t *testing.T) {
 	e := newCBEnv(t)
+	var clock time.Duration
+	e.h.mono = func() time.Duration { return clock }
 	toks := map[string]string{
 		"good":   e.mint(t, time.Now()),
 		"stale":  e.mint(t, time.Now().Add(-26*time.Hour)),
@@ -272,11 +276,8 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 		"bad":    strings.Repeat("a", 26),
 		"other":  otherKeySetToken(t),
 		"none":   "",
-		// The cap admits this token one time below. Each later use is capped.
 		"capped": e.mint(t, time.Now()),
 	}
-	e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, posQuery, toks["capped"]))
-	e.q.Drain()
 	const ctype = "text/plain; charset=utf-8"
 	for _, rt := range []struct {
 		path  string
@@ -289,14 +290,24 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 		for pos := range surfaces {
 			for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
 				for _, kind := range []string{"good", "stale", "future", "bad", "other", "none", "capped"} {
+					clock += 2 * capTokenWindow
+					if kind == "capped" {
+						// The first use is admitted. The case below is capped.
+						e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, posQuery, toks[kind]))
+						take(e.q)
+					}
 					w := httptest.NewRecorder()
 					before := e.h.capped.Load()
 					e.h.ServeHTTP(w, cbReq(m, rt.path, pos, toks[kind]))
 					reqs, cbs := take(e.q)
 					// A GET or HEAD reads no body: no token at the body.
-					if read := pos != posBody || m == http.MethodPost; kind == "capped" && read &&
+					read := pos != posBody || m == http.MethodPost
+					if kind == "capped" && read &&
 						(e.h.capped.Load() != before+1 || len(cbs) != 0 || len(reqs) != 1 || reqs[0].TokenID == nil) {
 						t.Errorf("%s %s pos %d: the token was not capped (%d callback events, %d capped)", m, rt.path, pos, len(cbs), e.h.capped.Load()-before)
+					}
+					if kind == "good" && read && (e.h.capped.Load() != before || len(cbs) != 1) {
+						t.Errorf("%s %s pos %d: the good token was not admitted (%d callback events, %d capped)", m, rt.path, pos, len(cbs), e.h.capped.Load()-before)
 					}
 					got := dump(w)
 					want := rt.body
