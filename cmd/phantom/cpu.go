@@ -34,8 +34,12 @@ var hasHardwareAES = func() bool {
 // aesAsm reports whether crypto/aes uses its assembly path on goarch.
 // It follows the selection in go1.27.3 of the standard library.
 // Thus the warning shows when crypto/aes uses the software path.
-// One limit: on ppc64 and ppc64le, GODEBUG=#ppc64aes=off turns the assembly
-// path off. The rule does not read that setting, so it gives no warning.
+// Two limits give no warning where the software path runs. On ppc64 and
+// ppc64le, GODEBUG=ppc64aes=off turns the assembly path off. The build tag
+// purego does the same on each architecture. The rule reads neither.
+// Some GODEBUG cpu options change x/sys/cpu only, not the standard library.
+// They are cpu.aes and cpu.aescbc on s390x, and cpu.sse41 and cpu.ssse3 on
+// amd64 with GOAMD64 v2 or higher. Then the warning shows with hardware AES.
 func aesAsm(goarch string, c cpuBits) bool {
 	switch goarch {
 	case "amd64":

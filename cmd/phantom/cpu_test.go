@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// The other tests of the package compare exact output. Pin the CPU check to
+// hardware AES for them, so that they do not depend on the host CPU.
+func init() {
+	hasHardwareAES = func() bool { return true }
+}
+
 // startWithAES runs the start with an injected CPU check. It stops serve after
 // the start line, and returns the finished run and the flag after the start.
 func startWithAES(t *testing.T, hw bool) (r *running, flag bool) {
@@ -80,6 +86,7 @@ func TestTS29_NoHardwareAESFlagAndSuffix(t *testing.T) {
 // TestTS29_HardwareAESIsQuiet checks that with hardware AES the start writes
 // no warning, does not set the flag, and adds no suffix.
 func TestTS29_HardwareAESIsQuiet(t *testing.T) {
+	noHardwareAES.Store(true) // A stale flag: the start must clear it.
 	r, flag := startWithAES(t, true)
 	if flag {
 		t.Error("the health flag is set with hardware AES")
