@@ -18,7 +18,7 @@ const ts21Flag = "-tags=ts21sentinel"
 // when a binary records a -tags setting. The test has two rows. In the first
 // row, GOENV names the file. In the second row, GOENV is not set and the
 // file is in the default place, below XDG_CONFIG_HOME. The second row runs
-// on linux only, the platform of the release build.
+// on linux only. CI runs the tests on linux.
 // The test cannot see a GOFLAGS variable of the caller. It does not see
 // other go env file settings that leave no -tags setting. It does not see a
 // recipe that sets GOENV to another fixed file. The test puts files only at

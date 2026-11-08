@@ -7,7 +7,8 @@
 GO := go
 
 # Output folder of the build target. An environment variable BINDIR does
-# not change it, unless make runs with -e. The T-S-21 test sets it in the call.
+# not change it, unless make runs with -e.
+# TestTS21ReleaseBuildReadsNoGoEnvFile sets it in the make call.
 BINDIR := bin
 
 # Exact toolchain pin (T-P-07 reproducibility): every go command runs the
