@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestTS11_CheckURLRules(t *testing.T) {
 		host, _, _ := strings.Cut(strings.TrimPrefix(u, "https://"), "/")
 		for _, c := range []struct{ key, file, env string }{
 			{"acme.ca", body, "PHANTOM_ACME_CA=" + u},
-			{"bundle.fetch_url", body, "PHANTOM_BUNDLE_FETCH_URL=" + u},
+			{"bundle.fetch_url", body, "PHANTOM_BUNDLE_FETCH_URL=" + configtest.FetchForm(u)},
 			{"tlog.publish[0].url", strings.Replace(body, "https://ckpt.example.invalid/put", u, 1), ""},
 			{"alerts.sinks[0].url", hook(u), ""},
 		} {
@@ -35,6 +36,38 @@ func TestTS11_CheckURLRules(t *testing.T) {
 			}
 			if strings.Contains(se.String(), host) {
 				t.Errorf("%s %s: stderr shows the URL host: %q", c.key, u, se.String())
+			}
+		}
+	}
+}
+
+// TestTS11_CheckFetchURLPath checks that --check refuses a bundle.fetch_url
+// without a .cbnd name in its path, with exit 1. It does this for the file and
+// for the variable. The error names the key and shows no part of the URL
+// (T-S-11, SEC-34).
+func TestTS11_CheckFetchURLPath(t *testing.T) {
+	body := validBody(t)
+	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+	for _, u := range []string{
+		"https://bundle.example", "https://bundle.example/b", "https://bundle.example/x.cbn",
+		"https://bundle.example/.cbnd", "https://bundle.example/a/.cbnd",
+		"https://bundle.example/x.cbnd/", "https://bundle.example/%2Ecbnd",
+	} {
+		for _, c := range []struct{ file, env string }{
+			{body + "bundle:\n  fetch_url: \"" + u + "\"\n", ""},
+			{body, "PHANTOM_BUNDLE_FETCH_URL=" + u},
+		} {
+			e := env
+			if c.env != "" {
+				e = append(slices.Clone(env), c.env)
+			}
+			var so, se strings.Builder
+			code := run([]string{"--check", writeFile(t, c.file)}, e, &so, &se)
+			if code != 1 || !strings.Contains(se.String(), "config: bundle.fetch_url at ") {
+				t.Errorf("%s: exit %d, stderr %q", u, code, se.String())
+			}
+			if strings.Contains(se.String(), "bundle.example") {
+				t.Errorf("%s: stderr shows the URL: %q", u, se.String())
 			}
 		}
 	}
@@ -63,7 +96,7 @@ func TestTS11_CheckLiteralHostList(t *testing.T) {
 		return body + "alerts:\n  sinks:\n    - " + strings.Join(items, "\n    - ") + "\n"
 	}
 	bundle := func(h, l string) string {
-		out := body + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n"
+		out := body + "bundle:\n  fetch_url: \"https://" + h + "/b.cbnd\"\n"
 		if l != "" {
 			out += "  fetch_private: [" + l + "]\n"
 		}
@@ -165,7 +198,7 @@ func TestTS11_CheckPrintsPrivateLists(t *testing.T) {
 	file := strings.Replace(body, ca, ca+"  ca_private: [\"10.0.0.0/8\", \"fd00:0::/8\"]\n", 1)
 	file = strings.Replace(file, okPub, `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN, private: ["192.168.1.0/24", "172.16.0.0/12"]}`+
 		"\n    - {type: https-put, url: \"https://ckpt2.example.invalid/p\", token_env: CKPT_TOKEN, private: [\"10.9.0.0/16\"]}", 1)
-	file += "bundle:\n  fetch_url: \"https://b.example/b\"\n  fetch_private: [\"192.168.1.0/24\"]\n" +
+	file += "bundle:\n  fetch_url: \"https://b.example/b.cbnd\"\n  fetch_private: [\"192.168.1.0/24\"]\n" +
 		"alerts:\n  sinks:\n    - {type: webhook, url: \"https://hook.example/h\", hmac_secret_env: ALERT_HMAC}\n" +
 		"    - {type: webhook, url: \"https://hook2.example/h\", hmac_secret_env: ALERT_HMAC, private: [\"10.20.0.0/16\"]}\n" +
 		"    - {type: syslog, addr: \"tls://logs.example.invalid:6514\", private: [\"10.30.0.0/16\"]}\n"
@@ -211,7 +244,7 @@ func TestTS11_CheckEgressLiterals(t *testing.T) {
 	files := func(host string) [][3]string {
 		return [][3]string{
 			{"acme.ca", body, "PHANTOM_ACME_CA=https://" + host + "/d"},
-			{"bundle.fetch_url", body, "PHANTOM_BUNDLE_FETCH_URL=https://" + host + "/b"},
+			{"bundle.fetch_url", body, "PHANTOM_BUNDLE_FETCH_URL=https://" + host + "/b.cbnd"},
 			{"tlog.publish[0].url", strings.Replace(body, "https://ckpt.example.invalid/put", "https://"+host+"/p", 1), ""},
 			{"alerts.sinks[0].url", sink(`{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC}`), ""},
 			{"alerts.sinks[0].addr", sink(`{type: syslog, addr: "tls://` + host + `:6514"}`), ""},

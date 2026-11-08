@@ -393,12 +393,22 @@ func checkMinBand(_ *loader, raw string) string {
 }
 
 // checkFetchURL accepts an empty value (the fetch is off) or an https URL.
+// The decoded path of the URL must end in .cbnd. The last path part must
+// have at least one character before .cbnd. This is the rule of fetch.New
+// (SEC-34). The detail has no part of the value.
 func checkFetchURL(_ *loader, raw string) string {
 	if raw == "" {
 		return ""
 	}
-	_, d := parseURL(raw, "https")
-	return d
+	u, d := parseURL(raw, "https")
+	if d != "" {
+		return d
+	}
+	last := u.Path[strings.LastIndexByte(u.Path, '/')+1:]
+	if !strings.HasSuffix(last, ".cbnd") || len(last) == len(".cbnd") {
+		return "the URL path must end in .cbnd, with a name before it"
+	}
+	return ""
 }
 
 // emailRule is the fixed text for a character outside 0x21-0x7E.

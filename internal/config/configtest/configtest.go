@@ -1,7 +1,18 @@
 // Package configtest holds test data that the tests of internal/config and
-// cmd/phantom share. It has data only. Production code must not import this
-// package.
+// cmd/phantom share. It has data and one helper only. Production code must
+// not import this package.
 package configtest
+
+import "strings"
+
+// FetchForm returns u with a path for bundle.fetch_url. The path ends in
+// .cbnd, so that only the host or query rule of u can refuse it.
+func FetchForm(u string) string {
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		return u[:i] + ".cbnd" + u[i:]
+	}
+	return u + "x.cbnd"
+}
 
 // BadURL is one URL that the config refuses. Name is the row name.
 // Detail is text that the refusal detail holds.

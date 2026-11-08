@@ -677,7 +677,7 @@ func TestTS26_CheckPrivateLists(t *testing.T) {
 		return body + "bundle:\n" + url + "  fetch_private: " + list + "\n"
 	}
 	const nine = `[10.0.0.1, 10.0.0.2, 10.0.0.3, 10.0.0.4, 10.0.0.5, 10.0.0.6, 10.0.0.7, 10.0.0.8, 10.0.0.9]`
-	const fetch = "  fetch_url: \"https://bundle.example.invalid/x\"\n"
+	const fetch = "  fetch_url: \"https://bundle.example.invalid/x.cbnd\"\n"
 	sink := func(item string) string { return body + "alerts:\n  sinks:\n    - " + item + "\n" }
 	syslog := func(addr, list string) string {
 		return sink(`{type: syslog, addr: "` + addr + `", private: ` + list + "}")
