@@ -279,8 +279,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 // the bait handler. The hello handler is its fallback. With no loader, no load
 // ran, and the hello handler serves alone. The bait handler shares the day key
 // holder of the writer (SEC-35). With privacy.session_cookie false, the cookie
-// is off. With privacy.js_beacon false, the beacon is off (SEC-38). Each switch
-// is set here, before any Serve call, because the method takes no lock.
+// is off. With privacy.js_beacon false, the beacon is off (SEC-38).
+// decoyHandler sets each switch before any Serve call, so the first request
+// reads the value.
 func decoyHandler(cfg *config.Config, b *bundlePart, s *storePart, q *event.Queue, decoys []string) http.Handler {
 	hello := listener.NewHelloHandler(decoys, q)
 	if b.l == nil {
