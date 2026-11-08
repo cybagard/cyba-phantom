@@ -263,9 +263,10 @@ func TestTS33RunEndsWithTruncatedWAL(t *testing.T) {
 	}
 }
 
-// T-S-33: with a reader that holds a snapshot, the run ends in less than 1 s.
-// The busy count adds 1 and the writer stays healthy. After the reader ends,
-// the next run truncates the WAL.
+// T-S-33: with a reader that holds a snapshot, the checkpoint runs with
+// busy_timeout 0, so it does not wait for the reader. The busy count adds 1
+// and the writer stays healthy. After the reader ends, the next run truncates
+// the WAL.
 func TestTS33ReaderMakesCheckpointBusyNotAnError(t *testing.T) {
 	r := retentionRig(t, 3000, deleteRange(seedTS, math.MaxInt64))
 	rdb := mustOpen(t, r.root, "events.db")
@@ -282,10 +283,14 @@ func TestTS33ReaderMakesCheckpointBusyNotAnError(t *testing.T) {
 	if err := conn.QueryRowContext(context.Background(), "SELECT count(*) FROM event").Scan(&n); err != nil || n != 3000 {
 		t.Fatalf("reader sees %d rows: %v", n, err)
 	}
-	begin := time.Now()
-	err = r.retain(10 * time.Second)
-	if took := time.Since(begin); err != nil || took >= time.Second || r.w.RetentionCheckpointBusy() != 1 || !r.w.Healthy() {
-		t.Fatalf("run: %v after %v, busy %d, healthy %v", err, took, r.w.RetentionCheckpointBusy(), r.w.Healthy())
+	var stmts []string
+	r.w.beforePragma = func(s string) error { stmts = append(stmts, s); return nil }
+	err = r.retain(10 * time.Second) // a bound for a failure, not a check
+	if err != nil || r.w.RetentionCheckpointBusy() != 1 || !r.w.Healthy() {
+		t.Fatalf("run: %v, busy %d, healthy %v", err, r.w.RetentionCheckpointBusy(), r.w.Healthy())
+	}
+	if want := []string{busyOff, checkpointSQL, busyPool}; !slices.Equal(stmts, want) {
+		t.Fatalf("statements %v, want %v", stmts, want)
 	}
 	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
 		t.Fatal(err)
