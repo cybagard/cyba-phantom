@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/bundle/fetch"
 	"github.com/cybagard/cyba-phantom/internal/config/configtest"
 	"github.com/cybagard/cyba-phantom/internal/egress"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
@@ -1225,7 +1227,7 @@ type bound struct {
 
 var (
 	longOrigin = strings.Repeat("a", 128)
-	fetchURL   = "PHANTOM_BUNDLE_FETCH_URL=https://bundle.example/current"
+	fetchURL   = "PHANTOM_BUNDLE_FETCH_URL=https://bundle.example/current.cbnd"
 	// groupWritable is a file in a temp dir with mode 0660. The other bad values of the htpasswd row
 	// are a relative path, an unclean path, and a missing file. All of them go through the PHANTOM_ variable.
 	groupWritable = func() string {
@@ -1252,7 +1254,7 @@ var scalarBounds = []bound{
 	{key: "acme.ca_root", pass: []string{"", certPath}, fail: []string{"root.pem", filepath.Join(testDir, "missing"), groupWritable}, with: []string{"PHANTOM_ACME_CA=https://ca.example/dir"}},
 	{key: "acme.cache_dir", pass: []string{"/var/lib/phantom/certs"}, fail: []string{"/var/lib/other", "var/lib/phantom", "/var/lib/phantom/../x"}},
 	{key: "bundle.path", pass: []string{"/var/lib/phantom/bundle/current.cbnd"}, fail: []string{"/etc/current.cbnd", "bundle.cbnd", "/var/lib/phantom/b/../../x"}},
-	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b"}, fail: []string{"http://bundle.example/b", "https://u:p@bundle.example/b", "https://bundle.example/b#f", "https://169.254.169.254/b", "https://0.0.0.0/b", "ftp://bundle.example/b"}},
+	{key: "bundle.fetch_url", pass: []string{"", "https://bundle.example:8443/b.cbnd"}, fail: []string{"http://bundle.example/b.cbnd", "https://u:p@bundle.example/b.cbnd", "https://bundle.example/b.cbnd#f", "https://169.254.169.254/b.cbnd", "https://0.0.0.0/b.cbnd", "ftp://bundle.example/b.cbnd"}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "0s", "-1h"}, with: []string{fetchURL}},
 	{key: "bundle.fetch_interval", pass: []string{"15m", "168h"}, fail: []string{"14m59s", "168h1s", "1s", "0s", "-1h"}}, // The bounds apply also if the fetch is off.
 	{key: "limits.max_conns", pass: []string{"1", "2000"}, fail: []string{"0", "2001", "-1"}},
@@ -1311,7 +1313,7 @@ func TestTS11_CrossChecks(t *testing.T) {
 		{"events below raw", "store:\n  retention_days:\n    raw: 91\n", "store.retention_days.raw"}, // The raw bound fails first.
 		{"events below raw 2", "store:\n  retention_days:\n    raw: 30\n    events: 29\n", "store.retention_days.events at " + cfg[len(cfg)-64:] + ":8: the value must not be less than"},
 		{"interval, fetch off", "bundle:\n  fetch_interval: 1s\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":6: the duration must be in the range"},
-		{"interval, fetch on", "bundle:\n  fetch_url: https://b.example/x\n  fetch_interval: 14m\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":7: the duration must be in the range"},
+		{"interval, fetch on", "bundle:\n  fetch_url: https://b.example/x.cbnd\n  fetch_interval: 14m\n", "bundle.fetch_interval at " + cfg[len(cfg)-64:] + ":7: the duration must be in the range"},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -1761,7 +1763,7 @@ func TestTU10_Overrides(t *testing.T) {
 // TestTU10_NewSectionsInvalid checks one invalid file value for each new section.
 func TestTU10_NewSectionsInvalid(t *testing.T) {
 	rows := []struct{ file, key string }{
-		{base + "bundle:\n  fetch_url: http://b.example/x\n", "bundle.fetch_url"},
+		{base + "bundle:\n  fetch_url: http://b.example/x.cbnd\n", "bundle.fetch_url"},
 		{base + "limits:\n  body_bytes: 65537\n", "limits.body_bytes"},
 		{base + "store:\n  retention_days:\n    ip: 8\n", "store.retention_days.ip"},
 		{"acme:\n  email: sec@example.com\ntlog:\n  origin: \"phantom/<install_id>\"\n", "tlog.origin"},
@@ -1784,7 +1786,7 @@ func TestTU10_FetchURLAllowList(t *testing.T) {
 	if err != nil || len(c.AllowList()) != 2 { // acme.ca and the publisher of base
 		t.Fatalf("fetch off: %v, %+v", err, c)
 	}
-	c, err = loadProd(t, base, "PHANTOM_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b")
+	c, err = loadProd(t, base, "PHANTOM_BUNDLE_FETCH_URL=https://Bundle.Example:8443/b.cbnd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2165,7 +2167,7 @@ func TestTS11_URLKeys(t *testing.T) {
 		u := bad.URL
 		for _, r := range []struct{ key, file string }{
 			{"acme.ca", "acme:\n  email: sec@example.com\n  ca: \"" + u + "\"\n" + acmeNames + tlogLine},
-			{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"" + u + "\"\n"},
+			{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"" + configtest.FetchForm(u) + "\"\n"},
 			{"tlog.publish[0].url", pub(`{type: https-put, url: "` + u + `", token_env: CKPT_TOKEN}`)},
 			{"alerts.sinks[0].url", snk(`{type: webhook, url: "` + u + `", hmac_secret_env: ALERT_HMAC}`)},
 		} {
@@ -2186,7 +2188,7 @@ func egressKeyFiles(host string) [][2]string {
 	smtpHost := func(h string) string { return `{type: smtp, host: "` + h + `", from: a@b.example, to: [c@d.example]}` }
 	return [][2]string{
 		{"acme.ca", "acme:\n  email: sec@example.com\n  ca: \"https://" + host + "/d\"\n" + acmeNames + tlogLine},
-		{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"https://" + host + "/b\"\n"},
+		{"bundle.fetch_url", base + "bundle:\n  fetch_url: \"https://" + host + "/b.cbnd\"\n"},
 		{"tlog.publish[0].url", pub(`{type: https-put, url: "https://` + host + `/p", token_env: CKPT_TOKEN}`)},
 		{"alerts.sinks[0].url", snk(`{type: webhook, url: "https://` + host + `/h", hmac_secret_env: ALERT_HMAC}`)},
 		{"alerts.sinks[0].addr", snk(sys("tls://" + host + ":6514"))},
@@ -2259,15 +2261,15 @@ func litKinds() []litKind {
 			if own {
 				ca = "  ca_private: [" + l + "]\n"
 			} else {
-				bundle = "bundle:\n  fetch_url: \"https://b.example/x\"\n  fetch_private: [" + l + "]\n"
+				bundle = "bundle:\n  fetch_url: \"https://b.example/x.cbnd\"\n  fetch_private: [" + l + "]\n"
 			}
 			return "acme:\n  email: sec@example.com\n  ca: \"https://" + h + "/d\"\n" + ca + acmeNames + tlogLine + bundle
 		}},
 		{"bundle.fetch_url", "https", "443", func(h, l string, own bool) string {
 			if own {
-				return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n  fetch_private: [" + l + "]\n"
+				return base + "bundle:\n  fetch_url: \"https://" + h + "/b.cbnd\"\n  fetch_private: [" + l + "]\n"
 			}
-			return base + "bundle:\n  fetch_url: \"https://" + h + "/b\"\n" + "alerts:\n  sinks:\n    - " + withList(hookItem, l) + "\n"
+			return base + "bundle:\n  fetch_url: \"https://" + h + "/b.cbnd\"\n" + "alerts:\n  sinks:\n    - " + withList(hookItem, l) + "\n"
 		}},
 		{"tlog.publish[1].url", "https", "443", func(h, l string, own bool) string {
 			lit := `{type: https-put, url: "https://` + h + `/p", token_env: CKPT_TOKEN}`
@@ -2469,7 +2471,7 @@ func TestTS11_SinkUnknownType(t *testing.T) {
 // TestTS08_AllowList checks that AllowList holds the endpoints of acme.ca, bundle.fetch_url, tlog.publish[].url,
 // and the sinks, and that an endpoint that many keys share is in the list one time (C4, T-S-08, T-S-11).
 func TestTS08_AllowList(t *testing.T) {
-	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\n" + acmeNames + "bundle:\n  fetch_url: https://CA.EXAMPLE:14000/b\n" +
+	file := "acme:\n  email: sec@example.com\n  ca: https://ca.example:14000/dir\n" + acmeNames + "bundle:\n  fetch_url: https://CA.EXAMPLE:14000/b.cbnd\n" +
 		"tlog:\n  origin: test/origin\n  publish:\n    - " + pubItem + "\n    - " + `{type: https-put, url: "https://CA.example:14000/ckpt", token_env: CKPT_TOKEN}` + "\n" +
 		"alerts:\n  sinks:\n" +
 		"    - " + `{type: webhook, url: "https://ckpt.example:443/hook", hmac_secret_env: ALERT_HMAC}` + "\n" +
@@ -3257,7 +3259,7 @@ func privateFile(key, kind, list string) string {
 	case "acme.ca_private":
 		return "acme:\n  email: sec@example.com\n  ca: \"https://ca.example/dir\"\n  ca_private: " + list + "\n" + acmeNames + tlogLine
 	case "bundle.fetch_private":
-		return base + "bundle:\n  fetch_url: \"https://bundle.example/x\"\n  fetch_private: " + list + "\n"
+		return base + "bundle:\n  fetch_url: \"https://bundle.example/x.cbnd\"\n  fetch_private: " + list + "\n"
 	case "tlog.publish[0].private":
 		return "acme:\n  email: sec@example.com\n" + acmeNames +
 			"tlog: {origin: test/origin, publish: [{type: https-put, " + publishURL + ", private: " + list + "}]}\n"
@@ -3395,7 +3397,7 @@ func TestTS11_PrivateCross(t *testing.T) {
 	}
 	const (
 		l      = `["10.0.0.1"]`
-		fetch  = "  fetch_url: \"https://bundle.example/x\"\n"
+		fetch  = "  fetch_url: \"https://bundle.example/x.cbnd\"\n"
 		tlsA   = "tls://logs.example:6514"
 		tlsB   = "tls://logs2.example:6514"
 		udpA   = "udp://127.0.0.1:514"
@@ -3525,5 +3527,79 @@ func TestTS26_PrivateListAccessor(t *testing.T) {
 	got[0] = netip.Prefix{}
 	if again := c.PrivateList("tlog.publish[1]"); !slices.Equal(again, pfx("10.9.0.0/16", "fc00::1/128")) {
 		t.Errorf("a change of the result changed the config: %v", again)
+	}
+}
+
+// The path forms of bundle.fetch_url. The accepted forms are those of the
+// fetch client (SEC-34). The empty value turns the fetch off.
+var (
+	fetchURLAccepted = []string{
+		"", "https://bundle.example/b/x.cbnd", "https://bundle.example:8443/x.y.cbnd",
+		"https://bundle.example/a.cbnd/b%20.cbnd", "https://bundle.example/a%2Fb.cbnd",
+		"https://bundle.example/x%2Ecbnd",
+	}
+	fetchURLRefused = []string{
+		"https://bundle.example/b", "https://bundle.example/x.cbn", "https://bundle.example/.cbnd",
+		"https://bundle.example/a/.cbnd", "https://bundle.example/x.cbnd/", "https://bundle.example",
+		"https://bundle.example/%2Ecbnd", "https://bundle.example/%2F.cbnd",
+	}
+)
+
+// fetchURLLoads loads a config with u as bundle.fetch_url, from the file or
+// from PHANTOM_BUNDLE_FETCH_URL. The error is nil if the loader accepts it.
+func fetchURLLoads(t *testing.T, u string, fromEnv bool) error {
+	t.Helper()
+	if fromEnv {
+		_, err := loadProd(t, base, "PHANTOM_BUNDLE_FETCH_URL="+u)
+		return err
+	}
+	_, err := loadProd(t, base+"bundle:\n  fetch_url: \""+u+"\"\n")
+	return err
+}
+
+// TestTS11_FetchURLPathRefused checks that the loader refuses each bad path
+// form of bundle.fetch_url, from the file and from the variable. The error
+// names the key and shows no part of the URL (T-S-11, T-U-10, SEC-34).
+func TestTS11_FetchURLPathRefused(t *testing.T) {
+	for _, u := range fetchURLRefused {
+		for _, fromEnv := range []bool{false, true} {
+			err := fetchURLLoads(t, u, fromEnv)
+			if err == nil || !strings.Contains(err.Error(), "config: bundle.fetch_url at ") {
+				t.Errorf("%s (env %v): got %v", u, fromEnv, err)
+			} else if strings.Contains(err.Error(), "bundle.example") {
+				t.Errorf("%s (env %v): the error shows the URL: %v", u, fromEnv, err)
+			}
+		}
+	}
+}
+
+// TestTS11_FetchURLPathAccepted checks that the loader accepts each good path
+// form of bundle.fetch_url and the empty value (T-S-11, T-U-10, SEC-34).
+func TestTS11_FetchURLPathAccepted(t *testing.T) {
+	for _, u := range fetchURLAccepted {
+		for _, fromEnv := range []bool{false, true} {
+			if err := fetchURLLoads(t, u, fromEnv); err != nil {
+				t.Errorf("%q (env %v): got %v", u, fromEnv, err)
+			}
+		}
+	}
+}
+
+// TestTS11_FetchURLAgreesWithClient checks that the loader and fetch.New agree
+// on the path forms. A value that the loader accepts does not make fetch.New
+// fail. A path form that fetch.New refuses is refused by the loader (SEC-34).
+func TestTS11_FetchURLAgreesWithClient(t *testing.T) {
+	for _, u := range append(slices.Clone(fetchURLAccepted), fetchURLRefused...) {
+		if u == "" {
+			continue // The fetch is off, and no client starts.
+		}
+		loadErr := fetchURLLoads(t, u, false)
+		_, newErr := fetch.New(u, nil, slog.Default())
+		if loadErr == nil && newErr != nil {
+			t.Errorf("%s: the loader accepts it and fetch.New refuses it", u)
+		}
+		if !slices.Contains(fetchURLAccepted, u) && newErr == nil {
+			t.Errorf("%s: fetch.New accepts a refused path form", u)
+		}
 	}
 }
