@@ -2,6 +2,7 @@ package bait
 
 import (
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -108,9 +109,13 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, sess *reqSess
 	return code
 }
 
-// callbackEvents checks the texts and puts one callback event on the queue for
-// each distinct verified token. A token at two positions gives one event, with
-// the surface of its first position. No event, error or count holds a text.
+// callbackEvents checks the texts. It puts one callback event on the queue for
+// each distinct verified token that passes the admission cap (SEC-37). A token
+// at two positions gives one event, with the surface of its first position.
+// A token with no valid client key gets no event. A token that the cap
+// refuses gets no event. It adds one to the counter of capped tokens. The
+// first such token goes to sess for the request event. No event, error or
+// count holds a text.
 func (h *Handler) callbackEvents(r *http.Request, sess *reqSession, e *entry, code int, texts [token.Positions]string) {
 	if h.ring == nil {
 		return
@@ -118,6 +123,8 @@ func (h *Handler) callbackEvents(r *http.Request, sess *reqSession, e *entry, co
 	res := h.ring.Check(texts)
 	var seen [token.Positions]string
 	st := int64(code)
+	var key netip.Addr
+	var haveKey bool
 	for i, rs := range res {
 		if !rs.OK {
 			continue
@@ -128,6 +135,21 @@ func (h *Handler) callbackEvents(r *http.Request, sess *reqSession, e *entry, co
 			continue
 		}
 		seen[i] = id
+		if !haveKey {
+			if a, err := netip.ParseAddr(sess.ip); err == nil {
+				key, haveKey = event.CounterKey(a)
+			}
+			if !haveKey {
+				return
+			}
+		}
+		if !h.admit.allow(id, key, h.mono()) {
+			h.capped.Add(1)
+			if sess.capped.token == "" {
+				sess.capped.trap, sess.capped.token, sess.capped.surface = rs.Trap, id, surfaces[i]
+			}
+			continue
+		}
 		var d event.Detail
 		if rs.Stale || rs.Future || rs.Reference {
 			d = event.Detail{}

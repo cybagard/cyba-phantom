@@ -199,6 +199,9 @@ func TestTI04CallbackSurfaces(t *testing.T) {
 func TestTI04CallbackDistinct(t *testing.T) {
 	e := newCBEnv(t)
 	a, b, c, d := e.mint(t, time.Now()), e.mint(t, time.Now()), e.mint(t, time.Now()), e.mint(t, time.Now())
+	// Each case reuses the tokens, so the clock steps past the token window.
+	var clock time.Duration
+	e.h.mono = func() time.Duration { return clock }
 	for _, tc := range []struct {
 		name string
 		toks [4]string
@@ -210,6 +213,7 @@ func TestTI04CallbackDistinct(t *testing.T) {
 		{"same token four times", [4]string{a, a, a, a}, []event.Surface{"path"}},
 		{"one bad token", [4]string{a, strings.Repeat("a", 26), b, ""}, []event.Surface{"path", "header"}},
 	} {
+		clock += 2 * capTokenWindow
 		w := httptest.NewRecorder()
 		e.h.ServeHTTP(w, cbReqN(http.MethodPost, cbRoutePath, tc.toks))
 		reqs, cbs := take(e.q)
@@ -560,8 +564,13 @@ func BenchmarkCallbackFourPositions(b *testing.B) {
 	r := cbReqN(http.MethodPost, cbRoutePath, toks)
 	body := &rewind{data: []byte(`{"tok":"` + toks[3] + `"}`)}
 	w := &discard{h: http.Header{}}
+	// The clock steps past the token window at each request, so each request
+	// makes its 4 callback events.
+	var clock time.Duration
+	e.h.mono = func() time.Duration { return clock }
 	b.ReportAllocs()
 	for b.Loop() {
+		clock += 2 * capTokenWindow
 		clear(w.h)
 		body.off, r.Body = 0, body
 		e.h.ServeHTTP(w, r)
