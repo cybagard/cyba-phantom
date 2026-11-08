@@ -48,11 +48,15 @@ func TestTS11_CheckURLRules(t *testing.T) {
 func TestTS11_CheckFetchURLPath(t *testing.T) {
 	body := validBody(t)
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "ALERT_HMAC=" + strings.Repeat("h", 32)}
+	const tok = "tok3n9q" // It is in some paths and in no other text.
 	for _, u := range []string{
 		"https://bundle.example", "https://bundle.example/b", "https://bundle.example/x.cbn",
 		"https://bundle.example/.cbnd", "https://bundle.example/a/.cbnd",
 		"https://bundle.example/x.cbnd/", "https://bundle.example/%2Ecbnd",
-		"https://bundle.example/%2F.cbnd",
+		"https://bundle.example/%2F.cbnd", "https://bundle.example/x.CBND", "https://bundle.example/x.cbnd ",
+		"https://bundle.example/" + tok, "https://bundle.example/" + tok + ".cbn",
+		"https://bundle.example/" + tok + "/.cbnd", "https://bundle.example/" + tok + ".CBND",
+		"https://bundle.example/" + tok + ".cbnd ",
 	} {
 		for _, c := range []struct{ file, env string }{
 			{body + "bundle:\n  fetch_url: \"" + u + "\"\n", ""},
@@ -67,7 +71,7 @@ func TestTS11_CheckFetchURLPath(t *testing.T) {
 			if code != 1 || !strings.Contains(se.String(), "config: bundle.fetch_url at ") {
 				t.Errorf("%s: exit %d, stderr %q", u, code, se.String())
 			}
-			if strings.Contains(se.String(), "bundle.example") {
+			if strings.Contains(se.String(), "bundle.example") || strings.Contains(se.String(), tok) {
 				t.Errorf("%s: stderr shows the URL: %q", u, se.String())
 			}
 		}
@@ -195,7 +199,7 @@ func TestTS11_CheckPrintsPrivateLists(t *testing.T) {
 	body := validBody(t)
 	const ca = "  ca: \"https://ca.example.invalid\"\n"
 	const okPub = `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN}`
-	const valid = "privacy.session_cookie: true\nphantom: config is valid\n"
+	const valid = "privacy.session_cookie: true\nprivacy.js_beacon: true\nphantom: config is valid\n"
 	file := strings.Replace(body, ca, ca+"  ca_private: [\"10.0.0.0/8\", \"fd00:0::/8\"]\n", 1)
 	file = strings.Replace(file, okPub, `{type: https-put, url: "https://ckpt.example.invalid/put", token_env: CKPT_TOKEN, private: ["192.168.1.0/24", "172.16.0.0/12"]}`+
 		"\n    - {type: https-put, url: \"https://ckpt2.example.invalid/p\", token_env: CKPT_TOKEN, private: [\"10.9.0.0/16\"]}", 1)

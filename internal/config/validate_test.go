@@ -1280,6 +1280,7 @@ var scalarBounds = []bound{
 	{key: "privacy.store_body_prefix", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 	{key: "privacy.include_ip", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 	{key: "privacy.session_cookie", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
+	{key: "privacy.js_beacon", pass: []string{"true", "false"}, fail: []string{"on", "yes", "1", "True"}},
 }
 
 // TestTS11_ScalarBounds runs the bounds table through Load, one value per PHANTOM_ variable.
@@ -1709,6 +1710,7 @@ func TestTU10_Defaults(t *testing.T) {
 		"privacy.store_body_prefix":   {Bool: true},
 		"privacy.include_ip":          {},
 		"privacy.session_cookie":      {Bool: true},
+		"privacy.js_beacon":           {Bool: true},
 	}
 	for p, want := range rows {
 		want.Source = "default"
@@ -1770,6 +1772,7 @@ func TestTU10_NewSectionsInvalid(t *testing.T) {
 		{base + "alerts:\n  min_band: human\n", "alerts.min_band"},
 		{base + "privacy:\n  include_ip: 1\n", "privacy.include_ip"},
 		{base + "privacy:\n  session_cookie: 1\n", "privacy.session_cookie"},
+		{base + "privacy:\n  js_beacon: 1\n", "privacy.js_beacon"},
 		{"acme:\n  email: sec@example.com\n", "tlog.origin"}, // The key is required.
 	}
 	for _, r := range rows {
@@ -3531,7 +3534,11 @@ func TestTS26_PrivateListAccessor(t *testing.T) {
 }
 
 // The path forms of bundle.fetch_url. The accepted forms are those of the
-// fetch client (SEC-34). The empty value turns the fetch off.
+// fetch client (SEC-34). The empty value turns the fetch off. fetchURLToken
+// is in some refused paths and in no other text, so a test sees a leak of the
+// path.
+const fetchURLToken = "tok3n9q"
+
 var (
 	fetchURLAccepted = []string{
 		"", "https://bundle.example/b/x.cbnd", "https://bundle.example:8443/x.y.cbnd",
@@ -3542,6 +3549,12 @@ var (
 		"https://bundle.example/b", "https://bundle.example/x.cbn", "https://bundle.example/.cbnd",
 		"https://bundle.example/a/.cbnd", "https://bundle.example/x.cbnd/", "https://bundle.example",
 		"https://bundle.example/%2Ecbnd", "https://bundle.example/%2F.cbnd",
+		// The suffix is not .cbnd in lower case, or the path ends in a space.
+		"https://bundle.example/x.CBND", "https://bundle.example/x.cbnd ",
+		// The same forms with a path token.
+		"https://bundle.example/" + fetchURLToken, "https://bundle.example/" + fetchURLToken + ".cbn",
+		"https://bundle.example/" + fetchURLToken + "/.cbnd", "https://bundle.example/" + fetchURLToken + ".CBND",
+		"https://bundle.example/" + fetchURLToken + ".cbnd ",
 	}
 )
 
@@ -3566,7 +3579,7 @@ func TestTS11_FetchURLPathRefused(t *testing.T) {
 			err := fetchURLLoads(t, u, fromEnv)
 			if err == nil || !strings.Contains(err.Error(), "config: bundle.fetch_url at ") {
 				t.Errorf("%s (env %v): got %v", u, fromEnv, err)
-			} else if strings.Contains(err.Error(), "bundle.example") {
+			} else if strings.Contains(err.Error(), "bundle.example") || strings.Contains(err.Error(), fetchURLToken) {
 				t.Errorf("%s (env %v): the error shows the URL: %v", u, fromEnv, err)
 			}
 		}

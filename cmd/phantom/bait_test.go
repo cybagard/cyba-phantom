@@ -51,6 +51,7 @@ func baitFiles() []tarFile {
 // baitOpt sets the start of a sensor for the bait tests.
 type baitOpt struct {
 	cookie string    // privacy.session_cookie, or "" for the default
+	beacon string    // privacy.js_beacon, or "" for the default
 	bundle bool      // put the signed test bundle in the state directory
 	refuse bool      // the store does not open, so no load runs
 	files  []tarFile // the files of that bundle, or nil for baitFiles
@@ -78,6 +79,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 		"PHANTOM_LISTEN_HTTP=" + plainLn.Addr().String(), "PHANTOM_ACME_CA=https://" + ca + "/directory"}
 	if o.cookie != "" {
 		env = append(env, "PHANTOM_PRIVACY_SESSION_COOKIE="+o.cookie)
+	}
+	if o.beacon != "" {
+		env = append(env, "PHANTOM_PRIVACY_JS_BEACON="+o.beacon)
 	}
 	// noVhost is a second decoy name. The bundle has no vhost for it.
 	body := strings.Replace(validBody(t), "names: [decoy.host.zz]", "names: [decoy.host.zz, "+noVhost+"]", 1)
@@ -466,6 +470,47 @@ func TestTU24_SessionCookieSwitch(t *testing.T) {
 			}
 			if got := s.sessionOf(t, "/c-none"); got != keyed {
 				t.Errorf("no cookie row has session %q, want the keyed id %q", got, keyed)
+			}
+		})
+	}
+}
+
+// beaconFiles are the files of baitFiles. The route map has a beacon member.
+func beaconFiles() []tarFile {
+	dir := "vhosts/" + decoyName + "/"
+	routes := `{"routes":[{"path":"/page","template":"` + dir + `page.tmpl","type":"text/html; charset=utf-8"}],` +
+		`"not_found":"` + dir + `gone.tmpl","beacon":{"script":"/bc.js","post":"/bc/p"}}`
+	files := baitFiles()
+	for i := range files {
+		if files[i].name == dir+"routes.json" {
+			files[i].data = []byte(routes)
+		}
+	}
+	return files
+}
+
+// TestTU25_JSBeaconSwitch starts a sensor with privacy.js_beacon false and with
+// true (SEC-38). With false, the script path gets the 404 decoy page and no
+// script text. This is the page of a path with no route. With true, the script
+// path gets the script.
+func TestTU25_JSBeaconSwitch(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		off   bool
+	}{{"false", true}, {"true", false}, {"", false}} {
+		t.Run("value "+c.value, func(t *testing.T) {
+			s := startBait(t, baitOpt{beacon: c.value, bundle: true, files: beaconFiles()})
+			script := fetch(t, s.https, decoyName, "/bc.js", "")
+			gone := fetch(t, s.https, decoyName, "/nothing", "")
+			s.stop(t)
+			if c.off {
+				if script.status != 404 || script.body != gone.body || strings.Contains(script.body, "sendBeacon") {
+					t.Errorf("script path: status %d, body %q; want the 404 decoy %q", script.status, script.body, gone.body)
+				}
+				return
+			}
+			if script.status != 200 || !strings.Contains(script.body, "sendBeacon") {
+				t.Errorf("script path: status %d, body %q; want 200 and the script", script.status, script.body)
 			}
 		})
 	}
