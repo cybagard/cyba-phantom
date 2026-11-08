@@ -198,6 +198,19 @@ func TestTU20HostLength(t *testing.T) {
 	}
 }
 
+// TestTU20HostByteBoundary checks the byte at the edge of the host rule.
+// foldHost refuses a host with the byte 0x80 and folds a host with the byte
+// 0x7F.
+func TestTU20HostByteBoundary(t *testing.T) {
+	var buf [maxHost]byte
+	if got, ok := foldHost("a\x80.example", &buf); ok {
+		t.Errorf("byte 0x80: ok, got %q", got)
+	}
+	if got, ok := foldHost("A\x7f.example", &buf); !ok || string(got) != "a\x7f.example" {
+		t.Errorf("byte 0x7f: ok %v, got %q", ok, got)
+	}
+}
+
 // TestTU20Path checks the path rule. An escape form never reaches a route that
 // a decode or a clean would reach.
 func TestTU20Path(t *testing.T) {

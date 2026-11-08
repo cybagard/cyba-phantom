@@ -427,7 +427,7 @@ func TestTS31MintIndexList(t *testing.T) {
 	} {
 		before := h.noKeys.Load()
 		sess := &reqSession{at: testDay}
-		m := h.mint(b, s, &entry{mint: c.list, acts: 2}, sess)
+		m := h.mint(b, s, &entry{acts: c.list[:2], slots: c.list[2:]}, sess)
 		if h.noKeys.Load() != before+1 || sess.mint.Count != 0 || len(m.slots) != 0 || len(m.page.Trap) != 2 ||
 			m.page.Trap[s.traps[0].ID] != "" || m.page.Trap[s.traps[1].ID] != "" {
 			t.Errorf("%s: noKeys %d after %d, mint %+v, trap texts %q", c.name, h.noKeys.Load(), before, sess.mint, m.page.Trap)
@@ -507,7 +507,7 @@ func TestTS31SlotsOnlyNoTrapMap(t *testing.T) {
 	b := h.src.Current()
 	s := buildSite(b)
 	sess := &reqSession{at: testDay}
-	m := h.mint(b, s, &entry{mint: []int{0}, acts: 0, names: []string{"X-Note"}}, sess)
+	m := h.mint(b, s, &entry{slots: []int{0}, names: []string{"X-Note"}}, sess)
 	if m.page.Trap != nil || len(m.slots) != 1 || sess.mint.Count != 1 {
 		t.Errorf("trap map %v, %d slots, mint %+v", m.page.Trap, len(m.slots), sess.mint)
 	}
