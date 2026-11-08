@@ -5,23 +5,57 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+const ts21Flag = "-tags=ts21sentinel"
+
 // TestTS21ReleaseBuildReadsNoGoEnvFile checks that make build ignores the go
 // env file. The test writes a file that sets GOFLAGS to a sentinel tag. It
 // shows that the go tool reads this file. Then it runs make build and fails
-// when a binary records a -tags setting. The test cannot see a GOFLAGS
-// variable of the caller. It does not see other go env file settings that
-// leave no -tags setting. It builds for the host platform only.
+// when a binary records a -tags setting. The test has two rows. In the first
+// row, GOENV names the file. In the second row, GOENV is not set and the
+// file is in the default place, below XDG_CONFIG_HOME. The second row runs
+// on linux only, because os.UserConfigDir uses XDG_CONFIG_HOME there only.
+// The test cannot see a GOFLAGS variable of the caller. It does not see
+// other go env file settings that leave no -tags setting. It builds for the
+// host platform only.
 func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
-	const flag = "-tags=ts21sentinel"
-	goEnvFile := filepath.Join(t.TempDir(), "env")
-	if err := os.WriteFile(goEnvFile, []byte("GOFLAGS="+flag+"\n"), 0o600); err != nil {
+	t.Run("GOENV names the file", func(t *testing.T) {
+		file := writeGoEnvFile(t, t.TempDir())
+		checkReleaseBuild(t, append(cleanEnv(), "GOENV="+file), file)
+	})
+	t.Run("default file", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("os.UserConfigDir does not use XDG_CONFIG_HOME on " + runtime.GOOS)
+		}
+		xdg := t.TempDir()
+		goDir := filepath.Join(xdg, "go")
+		if err := os.Mkdir(goDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		file := writeGoEnvFile(t, goDir)
+		env := append(cleanEnv(), "XDG_CONFIG_HOME="+xdg)
+		checkReleaseBuild(t, env, file)
+	})
+}
+
+// writeGoEnvFile writes a go env file named env in dir. The file sets GOFLAGS
+// to the sentinel flag. It returns the path of the file.
+func writeGoEnvFile(t *testing.T, dir string) string {
+	t.Helper()
+	file := filepath.Join(dir, "env")
+	if err := os.WriteFile(file, []byte("GOFLAGS="+ts21Flag+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The variables below can hide the file or change the make child.
+	return file
+}
+
+// cleanEnv returns the environment of the test without some variables.
+// These variables can hide the go env file or change the make child.
+func cleanEnv() []string {
 	var env []string
 	for _, e := range os.Environ() {
 		name, _, _ := strings.Cut(e, "=")
@@ -31,17 +65,22 @@ func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
 			env = append(env, e)
 		}
 	}
-	env = append(env, "GOENV="+goEnvFile)
+	return env
+}
 
+// checkReleaseBuild shows that go reads file with env. Then it runs make
+// build with env in a new folder. It checks the build info of both binaries.
+func checkReleaseBuild(t *testing.T, env []string, file string) {
+	t.Helper()
 	goTool, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatalf("the go tool is not on PATH: %v", err)
 	}
-	control := exec.Command(goTool, "env", "GOFLAGS")
+	control := exec.Command(goTool, "env", "GOENV", "GOFLAGS")
 	control.Env = env
 	out, err := control.CombinedOutput()
-	if err != nil || strings.TrimSpace(string(out)) != flag {
-		t.Fatalf("control: go env GOFLAGS = %q, %v; want %q", out, err, flag)
+	if want := file + "\n" + ts21Flag; err != nil || strings.TrimSpace(string(out)) != want {
+		t.Fatalf("control: go env GOENV GOFLAGS = %q, %v; want %q", out, err, want)
 	}
 
 	makeTool, err := exec.LookPath("make")

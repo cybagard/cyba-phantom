@@ -6,8 +6,8 @@
 
 GO := go
 
-# Output folder of the build target. A plain assignment: the environment
-# cannot change it. The test of the release build sets it on the command line.
+# Output folder of the build target. An environment variable BINDIR does
+# not change it, unless make runs with -e. The test sets it in the make call.
 BINDIR := bin
 
 # Exact toolchain pin (T-P-07 reproducibility): every go command runs the
