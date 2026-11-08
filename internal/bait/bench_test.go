@@ -33,16 +33,21 @@ func pageOf(n int) string {
 	return sb.String()
 }
 
-// serveHandler returns a handler for the hardening bundle with 64 traps. The
-// route /t is the page of pageOf with the given actions. The 404 template of
-// example.com shows a trap.
-func serveHandler(tb testing.TB, actions int) *Handler {
+// trapSet gives the traps t0 to t63 of traps/traps.json, one for each action.
+func trapSet() string {
 	specs := make([]trapSpec, pageActions)
 	for i := range specs {
 		specs[i] = trapSpec{fmt.Sprint("t", i), "hidden-p", "x {{.Token}}"}
 	}
+	return trapsJSON(specs)
+}
+
+// serveHandler returns a handler for the hardening bundle with 64 traps. The
+// route /t is the page of pageOf with the given actions. The 404 template of
+// example.com shows a trap.
+func serveHandler(tb testing.TB, actions int) *Handler {
 	b := hardBundle(tb, `<h1>{{index .Trap "t0"}}</h1>`, map[string]string{
-		"traps/traps.json":          trapsJSON(specs),
+		"traps/traps.json":          trapSet(),
 		"vhosts/example.com/t.tmpl": pageOf(actions),
 	})
 	return New(fixedSource{b}, &fallbackFn{}, testQueue(tb))
@@ -132,61 +137,123 @@ const (
 	// baseRoutes is the number of routes of the test archive.
 	baseRoutes = 10
 	// siteHeapLimit is the most heap, in bytes, that one site keeps (T-S-28).
-	// The bundle is at the route cap. Its routes are template routes with four
-	// header slots.
+	// The bundle is at the route cap. It has the largest legal route shapes.
 	siteHeapLimit = 10 << 20
-	// templateVhostRoutes is the routes of one vhost in the template shape.
-	// A route map holds 64 KiB. 192 such routes fill about 62 KB of it.
-	templateVhostRoutes = 192
+	// maxRouteMap is the most routes in one route map.
+	maxRouteMap = 256
+	// slotMapRoutes is the routes of one vhost with four header slots. A route
+	// map holds 64 KiB. 192 such routes fill about 61 KiB of it.
+	slotMapRoutes = 192
+	// mostVhosts is the most vhosts that load when each has a template of 64
+	// trap actions. A bundle holds 16384 actions at most in its templates and
+	// trap texts. The 64 trap texts use 64. So (16384 - 64) / 64 vhosts is the
+	// most. 256 vhosts do not load. The archive entries are 20 + 2 * 255. This
+	// is below the 1024 of MaxEntries.
+	mostVhosts = 255
 )
 
-// shapeFiles makes the files of vhosts with total routes in all. A vhost has
-// at most per routes. route gives the JSON of route j of a vhost. A vhost also
-// has the file name with the text body, which its routes can name.
-func shapeFiles(total, per int, name, body string, route func(host string, j int) string) map[string]string {
-	extra := map[string]string{}
-	for i := 0; total > 0; i++ {
-		host := fmt.Sprintf("v%d.example", i)
-		parts := make([]string, min(total, per))
-		total -= len(parts)
-		for j := range parts {
-			parts[j] = route(host, j)
-		}
-		extra["vhosts/"+host+"/routes.json"] = `{"routes":[` + strings.Join(parts, ",") + `]}`
-		extra["vhosts/"+host+"/"+name] = body
+// shapeSpec describes the vhosts of one bundle shape. The routes of the test
+// archive and the routes of the spec hold routeCap routes in all.
+type shapeSpec struct {
+	// vhosts is the number of vhosts. They share the routes equally.
+	vhosts int
+	// file and body are a file that every route of a vhost can name. An empty
+	// file adds no file.
+	file, body string
+	// route gives the JSON of route j of a vhost.
+	route func(host string, j int) string
+	// members gives the text that follows the routes in a route map, or nil.
+	// It always has a not_found member.
+	members func(host string) string
+	// traps adds traps/traps.json with 64 traps.
+	traps bool
+}
+
+// files makes the files of the vhosts of the shape.
+func (sp shapeSpec) files() map[string]string {
+	files := map[string]string{}
+	if sp.traps {
+		files["traps/traps.json"] = trapSet()
 	}
-	return extra
-}
-
-// capFiles makes the files of asset routes. All routes of a vhost name one
-// file. The test archive and these files hold routeCap routes.
-func capFiles() map[string]string {
-	return shapeFiles(routeCap-baseRoutes, 256, "f", "f", func(host string, j int) string {
-		return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"}`, j, host)
-	})
-}
-
-// callbackFiles makes the files of callback routes. A route has no asset and
-// no type. The test archive and these files hold routeCap routes.
-func callbackFiles() map[string]string {
-	return shapeFiles(routeCap-baseRoutes, 256, "f", "f", func(_ string, j int) string {
-		return fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j)
-	})
-}
-
-// templateFiles makes the files of template routes. A route has four header
-// slots, and each slot name has 34 bytes. All routes of a vhost name one
-// template. The test archive and these files hold routeCap routes.
-func templateFiles() map[string]string {
-	return shapeFiles(routeCap-baseRoutes, templateVhostRoutes, "p.tmpl", "<p>p</p>", func(host string, j int) string {
-		var slots []string
-		for k := range 4 {
-			name := fmt.Sprintf("X-Probe-%d-", k)
-			slots = append(slots, fmt.Sprintf(`{"name":"%s","trap":"a"}`, name+strings.Repeat("a", 34-len(name))))
+	total := routeCap - baseRoutes
+	for i := range sp.vhosts {
+		host := fmt.Sprintf("v%d.example", i)
+		n := total / sp.vhosts
+		if i < total%sp.vhosts {
+			n++
 		}
-		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8","headers":[%s]}`,
-			j, host, strings.Join(slots, ","))
-	})
+		parts := make([]string, n)
+		for j := range parts {
+			parts[j] = sp.route(host, j)
+		}
+		tail := ""
+		if sp.members != nil {
+			tail = sp.members(host)
+		}
+		files["vhosts/"+host+"/routes.json"] = `{"routes":[` + strings.Join(parts, ",") + `]` + tail + `}`
+		if sp.file != "" {
+			files["vhosts/"+host+"/"+sp.file] = sp.body
+		}
+	}
+	return files
+}
+
+// vhostsFor is the number of vhosts with at most per routes each.
+func vhostsFor(per int) int { return (routeCap - baseRoutes + per - 1) / per }
+
+// longName gives a name of n bytes that starts with prefix.
+func longName(prefix string, n int) string {
+	return prefix + strings.Repeat("a", n-len(prefix))
+}
+
+// actionsPage makes a short page with n trap actions, one for each trap t0 to
+// t(n-1). A page with no action has a fixed text.
+func actionsPage(n int) string {
+	if n == 0 {
+		return "<p>p</p>"
+	}
+	var sb strings.Builder
+	for i := range n {
+		fmt.Fprintf(&sb, `<p>{{index .Trap "t%d"}}</p>`, i)
+	}
+	return sb.String()
+}
+
+// templateSpec is a shape of template routes in vhosts. A route has actions
+// trap actions and slots header slots with 34-byte names.
+func templateSpec(actions, slots, vhosts int) shapeSpec {
+	return shapeSpec{vhosts, "p.tmpl", actionsPage(actions), func(host string, j int) string {
+		headers := ""
+		if slots > 0 {
+			var hs []string
+			for k := range slots {
+				hs = append(hs, fmt.Sprintf(`{"name":%q,"trap":"t%d"}`, longName(fmt.Sprintf("X-Probe-%d-", k), 34), k))
+			}
+			headers = `,"headers":[` + strings.Join(hs, ",") + `]`
+		}
+		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8"%s}`, j, host, headers)
+	}, nil, true}
+}
+
+// vhostsSpec is the shape of the most vhosts. Each route has 64 actions and
+// four slots. Each vhost also has a not_found of the same template and a
+// beacon.
+func vhostsSpec() shapeSpec {
+	sp := templateSpec(64, 4, mostVhosts)
+	sp.members = func(host string) string {
+		return `,"not_found":"vhosts/` + host + `/p.tmpl","beacon":{"script":"/b.js","post":"/b/p"}`
+	}
+	return sp
+}
+
+// callbackSpec is a shape of callback routes with all four positions and an
+// asset. The query and body names have 32 bytes, the header name 34.
+func callbackSpec() shapeSpec {
+	cb := fmt.Sprintf(`{"segment":true,"query":%q,"header":%q,"body":%q}`,
+		longName("q", 32), longName("X-Cb-", 34), longName("b", 32))
+	return shapeSpec{vhostsFor(slotMapRoutes), "f", "f", func(host string, j int) string {
+		return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png","callback":%s}`, j, host, cb)
+	}, nil, false}
 }
 
 // retainedOf builds the site of bd and gives the bytes of heap that it keeps
@@ -204,23 +271,47 @@ func retainedOf(bd *bundle.Bundle) (uint64, *site) {
 	return after.HeapAlloc - before.HeapAlloc, s
 }
 
-// siteShapes are the route shapes of a bundle at the route cap.
-var siteShapes = []struct {
-	name  string
-	files func() map[string]string
-}{
-	{"assets", capFiles},
-	{"callbacks", callbackFiles},
-	{"templates", templateFiles},
+// shape is a named route shape of a bundle at the route cap.
+type shape struct {
+	name string
+	spec shapeSpec
+}
+
+// boundShapes are the largest legal route shapes at the route cap. T-S-28
+// bounds the site table of each one.
+func boundShapes() []shape {
+	return []shape{
+		{"64 actions", templateSpec(64, 0, vhostsFor(maxRouteMap))},
+		{"4 slots", templateSpec(0, 4, vhostsFor(slotMapRoutes))},
+		{"64 actions and 4 slots", templateSpec(64, 4, vhostsFor(slotMapRoutes))},
+		{"most vhosts", vhostsSpec()},
+		{"callbacks with 4 positions", callbackSpec()},
+	}
+}
+
+// benchShapes are the shapes of the benchmark: the two old shapes and the
+// shapes of boundShapes.
+func benchShapes() []shape {
+	return append([]shape{
+		{"assets", shapeSpec{vhostsFor(maxRouteMap), "f", "f", func(host string, j int) string {
+			return fmt.Sprintf(`{"path":"/%d","asset":"vhosts/%s/f","type":"image/png"}`, j, host)
+		}, nil, false}},
+		{"callbacks", shapeSpec{vhostsFor(maxRouteMap), "", "", func(_ string, j int) string {
+			return fmt.Sprintf(`{"path":"/%d","callback":{"query":"t"}}`, j)
+		}, nil, false}},
+	}, boundShapes()...)
 }
 
 // BenchmarkSiteBuild measures the build of the site table of a bundle at the
-// route cap. It does this for three shapes of route. It also reports the bytes
-// that one built site keeps in memory.
+// route cap. It does this for each shape of benchShapes. It also reports the
+// bytes that one built site keeps in memory.
 func BenchmarkSiteBuild(b *testing.B) {
-	for _, sh := range siteShapes {
+	for _, sh := range benchShapes() {
 		b.Run(sh.name, func(b *testing.B) {
-			bd := bundleFiles(b, "", sh.files())
+			bd := bundleFiles(b, "", sh.spec.files())
+			if n := routesOf(bd); n != routeCap {
+				b.Fatalf("bundle has %d routes, want %d", n, routeCap)
+			}
 			retained, _ := retainedOf(bd)
 			b.ReportAllocs()
 			for b.Loop() {
@@ -241,26 +332,51 @@ func routesOf(bd *bundle.Bundle) (n int) {
 	return n
 }
 
-// TestTS28SiteTableBound checks the site table of a bundle at the route cap.
-// The routes are template routes with four header slots with 34-byte names.
-// One site keeps at most siteHeapLimit bytes of heap. It keeps at least one
-// entry for each route, so a measure that loses the bundle fails.
+// TestTS28SiteTableBound checks the site table of a bundle at the route cap
+// for each shape of boundShapes. One site keeps at most siteHeapLimit bytes of
+// heap. It has one entry for each route and one for each not_found member. It
+// also keeps at least a byte floor, so a measure that loses the bundle fails.
+// The trap texts are not in this bound.
 func TestTS28SiteTableBound(t *testing.T) {
-	bd := bundleFiles(t, "", templateFiles())
-	if n := routesOf(bd); n != routeCap {
-		t.Fatalf("bundle has %d routes, want %d", n, routeCap)
-	}
-	hosts := len(bd.Vhosts())
-	got, s := retainedOf(bd)
 	floor := uint64(routeCap) * uint64(unsafe.Sizeof(entry{}))
-	t.Logf("site keeps %d bytes, %.1f bytes for each route; limits %d and %d", got, float64(got)/routeCap, floor, siteHeapLimit)
-	if n := len(s.hosts); n != hosts {
-		t.Errorf("site has %d hosts, bundle has %d", n, hosts)
-	}
-	if got < floor {
-		t.Errorf("site keeps %d bytes, below the floor of %d", got, floor)
-	}
-	if got > siteHeapLimit {
-		t.Errorf("site keeps %d bytes, above the limit of %d", got, siteHeapLimit)
+	for _, sh := range boundShapes() {
+		t.Run(sh.name, func(t *testing.T) {
+			bd := bundleFiles(t, "", sh.spec.files())
+			if n := routesOf(bd); n != routeCap {
+				t.Fatalf("bundle has %d routes, want %d", n, routeCap)
+			}
+			hosts := len(bd.Vhosts())
+			got, s := retainedOf(bd)
+			t.Logf("site keeps %d bytes, %.1f bytes for each route; floor %d, limit %d", got, float64(got)/routeCap, floor, siteHeapLimit)
+			if n := len(s.hosts); n != hosts {
+				t.Errorf("site has %d hosts, bundle has %d", n, hosts)
+			}
+			routes, notFound := 0, 0
+			for _, paths := range s.hosts {
+				for _, e := range paths {
+					if e != nil {
+						routes++
+					}
+				}
+			}
+			for _, e := range s.notFound {
+				if e != nil {
+					notFound++
+				}
+			}
+			wantNF := 0
+			if sh.spec.members != nil {
+				wantNF = sh.spec.vhosts
+			}
+			if routes != routeCap || notFound != wantNF {
+				t.Errorf("site has %d route entries and %d not_found entries, want %d and %d", routes, notFound, routeCap, wantNF)
+			}
+			if got < floor {
+				t.Errorf("site keeps %d bytes, below the byte floor of %d", got, floor)
+			}
+			if got > siteHeapLimit {
+				t.Errorf("site keeps %d bytes, above the limit of %d", got, siteHeapLimit)
+			}
+		})
 	}
 }

@@ -30,14 +30,18 @@ type minted struct {
 // but into the response.
 func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m minted) {
 	m.left = e.left
-	n := len(e.mint)
+	acts := len(e.acts)
+	n := acts + len(e.slots)
 	if n == 0 {
 		return m
 	}
-	if e.acts > 0 {
-		m.page.Trap = make(map[string]string, e.acts)
+	if acts > 0 {
+		m.page.Trap = make(map[string]string, acts)
 	}
 	var out [token.MaxRange][token.Size]byte
+	// idx joins the action indexes and the slot indexes in one array on the
+	// stack. e.acts is shared, so the mint reads it and never changes it.
+	var idx [token.MaxRange]int
 	ks := h.keys(b)
 	// A loaded bundle has at most 64 trap actions and 4 header slots, so n
 	// is never over token.MaxRange here.
@@ -45,12 +49,14 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	var first uint64
 	if !failed {
 		var err error
-		first, err = ks.MintRange(e.mint, sess.at, out[:n])
+		copy(idx[:], e.acts)
+		copy(idx[acts:], e.slots)
+		first, err = ks.MintRange(idx[:n], sess.at, out[:n])
 		failed = err != nil
 	}
 	if failed {
 		h.noKeys.Add(1)
-		for _, i := range e.mint[:e.acts] {
+		for _, i := range e.acts {
 			m.page.Trap[s.traps[i].ID] = ""
 		}
 		return m
@@ -61,12 +67,12 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	sum := b.SHA256()
 	sess.mint = event.MintRange{Unit: unit, Count: uint8(n), First: first, IssuedAt: sess.at.UnixMilli()}
 	copy(sess.mint.SetID[:], sum[:])
-	for i, idx := range e.mint {
-		v := s.traps[idx].Render(h.text(out[i]))
-		if i < e.acts {
-			m.page.Trap[s.traps[idx].ID] = v
+	for i, ix := range idx[:n] {
+		v := s.traps[ix].Render(h.text(out[i]))
+		if i < acts {
+			m.page.Trap[s.traps[ix].ID] = v
 		} else if validSlotValue(v) {
-			m.slots = append(m.slots, slotHeader{e.names[i-e.acts], []string{v}})
+			m.slots = append(m.slots, slotHeader{e.names[i-acts], []string{v}})
 		} else {
 			m.left++
 		}

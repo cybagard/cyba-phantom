@@ -198,8 +198,9 @@ func TestTU20HostLength(t *testing.T) {
 	}
 }
 
-// TestTU20HostByteBoundary checks the byte at the edge of the host rule. A host
-// with the byte 0x80 is refused. A host with the byte 0x7F is folded.
+// TestTU20HostByteBoundary checks the byte at the edge of the host rule.
+// foldHost refuses a host with the byte 0x80 and folds a host with the byte
+// 0x7F.
 func TestTU20HostByteBoundary(t *testing.T) {
 	var buf [maxHost]byte
 	if got, ok := foldHost("a\x80.example", &buf); ok {

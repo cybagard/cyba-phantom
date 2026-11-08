@@ -339,10 +339,10 @@ func capEnts(n int, members bool) []ent {
 	return ents
 }
 
-// T-U-08: a bundle with more than maxBundleRoutes routes in all route maps is
-// refused with content_invalid. The running bundle does not change. A bundle
-// with exactly that number loads. A not_found member and a beacon are not
-// routes.
+// T-U-08: the loader refuses a bundle with more than maxBundleRoutes routes in
+// all route maps. The error is content_invalid. The running bundle does not
+// change. A bundle with exactly that number loads. A not_found member and a
+// beacon are not routes.
 func TestTU08RouteCap(t *testing.T) {
 	routes := func(b *Bundle) (n int) {
 		for _, h := range b.Vhosts() {

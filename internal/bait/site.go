@@ -17,11 +17,13 @@ type entry struct {
 	route   bundle.Route
 	asset   bundle.Asset
 	isAsset bool
-	// mint holds the key-set indexes of one mint. The first acts are the
-	// trap actions of the template. The header slots named in names follow.
-	// The site build makes it from the bundle of the site.
-	mint  []int
-	acts  int
+	// acts are the key-set indexes of the trap actions of the template. All
+	// entries of one template share this slice, so no code may change it.
+	acts []int
+	// slots are the key-set indexes of the header slots whose trap is in the
+	// bundle. The entry owns this slice. It has the exact length. names has the
+	// header name of each slot, in the same order.
+	slots []int
 	names []string
 	// left counts the header slots with no trap in the bundle.
 	left int
@@ -43,24 +45,40 @@ type site struct {
 	// traps are the traps of the bundle in file order, so a key-set index is a
 	// position in this list. The build makes it from one Traps call.
 	traps []bundle.Trap
+	// acts maps a template name to its trap action indexes. The build calls
+	// TrapIndexes one time for each name. Each entry of the template shares
+	// the slice. The slice must not change.
+	acts map[string][]int
 }
 
 // mintOf gives the entry the key-set indexes of one mint. They are the trap
 // actions of its template, then the header slots whose trap is in the bundle.
 // A slot with no trap adds to left. pos maps a trap id to its index.
-func (e *entry) mintOf(b *bundle.Bundle, pos map[string]int) {
-	if e.route.Template != "" {
-		e.mint, _ = b.TrapIndexes(e.route.Template)
-	}
-	e.acts = len(e.mint)
-	for _, hs := range e.route.Headers {
-		i, ok := pos[hs.Trap]
+func (s *site) mintOf(e *entry, b *bundle.Bundle, pos map[string]int) {
+	if name := e.route.Template; name != "" {
+		a, ok := s.acts[name]
 		if !ok {
-			e.left++
-			continue
+			a, _ = b.TrapIndexes(name)
+			s.acts[name] = a
 		}
-		e.mint = append(e.mint, i)
-		e.names = append(e.names, http.CanonicalHeaderKey(hs.Name))
+		e.acts = a
+	}
+	n := 0
+	for _, hs := range e.route.Headers {
+		if _, ok := pos[hs.Trap]; ok {
+			n++
+		}
+	}
+	e.left = len(e.route.Headers) - n
+	if n == 0 {
+		return
+	}
+	e.slots, e.names = make([]int, 0, n), make([]string, 0, n)
+	for _, hs := range e.route.Headers {
+		if i, ok := pos[hs.Trap]; ok {
+			e.slots = append(e.slots, i)
+			e.names = append(e.names, http.CanonicalHeaderKey(hs.Name))
+		}
 	}
 }
 
@@ -69,7 +87,7 @@ func (e *entry) mintOf(b *bundle.Bundle, pos map[string]int) {
 // If Asset still gives false, the build makes no entry for that route. The
 // key-set indexes of each route come from b. Use them only with b.Tokens().
 func buildSite(b *bundle.Bundle) *site {
-	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, traps: b.Traps()}
+	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, traps: b.Traps(), acts: map[string][]int{}}
 	pos := make(map[string]int, len(s.traps))
 	for i, t := range s.traps {
 		pos[t.ID] = i
@@ -100,12 +118,12 @@ func buildSite(b *bundle.Bundle) *site {
 				continue
 			}
 			e.ctype = []string{r.Type}
-			e.mintOf(b, pos)
+			s.mintOf(e, b, pos)
 			paths[r.Path] = e
 		}
 		if rm.NotFound != "" {
 			nf := &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
-			nf.mintOf(b, pos)
+			s.mintOf(nf, b, pos)
 			s.notFound[host] = nf
 		}
 		s.hosts[host] = paths
