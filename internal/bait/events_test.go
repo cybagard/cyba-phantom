@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"weak"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -512,6 +513,48 @@ func TestTU24SharedHolder(t *testing.T) {
 			}()
 			f()
 		}()
+	}
+}
+
+// TestTU24CookieSwitchRace calls DisableSessionCookie while 4 goroutines serve
+// requests. Under -race, a plain bool fails here with a data race. After the
+// call, a response sets no cookie.
+func TestTU24CookieSwitchRace(t *testing.T) {
+	h := New(fixedSource{mixedBundle(t, 0x09, "f", "n")}, &fallbackFn{}, queueOf(t, 64))
+	started := make(chan struct{})
+	var once sync.Once
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 200 {
+				serve(t, h, get("/t", "example.com"))
+				h.q.Drain()
+				once.Do(func() { close(started) })
+			}
+		})
+	}
+	<-started
+	h.DisableSessionCookie()
+	wg.Wait()
+	if c := serve(t, h, get("/t", "example.com")).Header().Values("Set-Cookie"); len(c) != 0 {
+		t.Errorf("Set-Cookie %v after DisableSessionCookie", c)
+	}
+}
+
+// TestTU20SiteSameSequence checks two different bundles with the same load
+// sequence (zero, as a bundle that no loader swapped in). The second bundle
+// does not become cur, because its sequence is not higher than that of cur. It
+// gets a site for its own request.
+func TestTU20SiteSameSequence(t *testing.T) {
+	first, second := new(bundle.Bundle), new(bundle.Bundle)
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
+	h.siteOf(first)
+	h.siteOf(second)
+	if st := h.sites.Load(); st.cur.b != first || st.retired[0] != (weak.Pointer[bundle.Bundle]{}) {
+		t.Error("a bundle with a sequence that is not higher became cur")
+	}
+	if n := h.builds.Load(); n != 2 {
+		t.Errorf("builds = %d, want 2", n)
 	}
 }
 

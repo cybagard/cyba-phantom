@@ -93,18 +93,30 @@ type Handler struct {
 	// request and calls dk.At with that time at once. A test sets it.
 	now func() time.Time
 	// cookieOff is true when the session cookie is off (SEC-35). The handler
-	// then sets no cookie and ignores each cookie. The caller must set it
-	// before the first request. There is no lock.
-	cookieOff bool
+	// then sets no cookie and ignores each cookie. A request reads it one time.
+	cookieOff atomic.Bool
 	// ring verifies the tokens of the callback routes. SetRing sets it before
 	// the first request. With nil, a callback route makes no callback event.
 	ring *token.Ring
+	// admit is the admission cap of the callback events. mono gives its clock:
+	// the time since the start, on the monotonic clock. A test replaces mono
+	// while no request runs.
+	admit *callbackCap
+	mono  func() time.Duration
+	// capped counts the verified tokens that the cap refused. It adds one for
+	// each such token. It is for phantom_callback_capped_total.
+	capped atomic.Uint64
 }
 
 // DisableSessionCookie turns the session cookie off (SEC-35). No response then
 // has a Set-Cookie header, and each request gets the keyed id of its client
-// address. Call it before the first request. It is not safe to call it later.
-func (h *Handler) DisableSessionCookie() { h.cookieOff = true }
+// address. It is safe to call while requests run. A request that has started
+// keeps the value that it read, so one request uses one value.
+func (h *Handler) DisableSessionCookie() { h.cookieOff.Store(true) }
+
+// capStart gives the start of the clock of the callback cap. A test replaces
+// it.
+var capStart = time.Now
 
 // New returns a handler for the bundle of src. With no running bundle, fallback
 // serves the request and writes its own event. Else the handler puts one
@@ -126,7 +138,8 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 	if dk == nil {
 		dk = session.NewDayKey()
 	}
-	return &Handler{src: src, fallback: fallback, q: q, text: token.Text, keys: (*bundle.Bundle).Tokens, dk: dk, now: time.Now}
+	return &Handler{src: src, fallback: fallback, q: q, text: token.Text, keys: (*bundle.Bundle).Tokens, dk: dk, now: time.Now,
+		admit: newCallbackCap(), mono: monotonicSince(capStart())}
 }
 
 // reqSession is the session of one request. The handler resolves it one time,
@@ -144,6 +157,13 @@ type reqSession struct {
 	// a response with no mint.
 	at   time.Time
 	mint event.MintRange
+	// firstCapped holds the trap id, token id and surface of the first token
+	// that the callback cap refused. This is in position order. The request
+	// event holds them. firstCapped.token is "" when the cap refused no token.
+	firstCapped struct {
+		trap, token string
+		surface     event.Surface
+	}
 }
 
 // sessionOf resolves the session of r. A request with one valid cookie has the
@@ -154,7 +174,8 @@ func (h *Handler) sessionOf(r *http.Request) reqSession {
 	at := h.now()
 	k := h.dk.At(at)
 	s := reqSession{ip: clientIP(r.RemoteAddr), key: k, at: at}
-	if !h.cookieOff {
+	off := h.cookieOff.Load()
+	if !off {
 		if v, ok := session.CookieFromHeader(r.Header); ok {
 			if id, ok := k.CheckCookie(v); ok {
 				s.id = id
@@ -162,7 +183,7 @@ func (h *Handler) sessionOf(r *http.Request) reqSession {
 			}
 		}
 	}
-	s.fresh = !h.cookieOff
+	s.fresh = !off
 	if id := k.SessionID(s.ip, ""); id != nil {
 		s.id = *id
 	}
@@ -192,9 +213,10 @@ func clientIP(addr string) string {
 
 // record puts one request event on the queue. code is the status that the
 // engine wrote, or 0 when it wrote none. The event has the typed fields, the
-// session id and the mint range of the response. It has no trap id, token id
-// or detail. A NewEvent error adds one to eventErrs. A full queue counts its
-// own drop. The call never waits.
+// session id and the mint range of the response. It has no detail. It has a
+// trap id, a token id and a surface only when the callback cap refused a
+// token. A NewEvent error adds one to eventErrs. A full queue counts
+// its own drop. The call never waits.
 func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 	in := event.Input{
 		Kind:     event.KindRequest,
@@ -210,6 +232,9 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 	if code != 0 {
 		st := int64(code)
 		in.Status = &st
+	}
+	if s.firstCapped.token != "" {
+		in.TrapID, in.TokenID, in.Surface = s.firstCapped.trap, s.firstCapped.token, s.firstCapped.surface
 	}
 	e, err := event.NewEvent(nil, in)
 	if err != nil {
