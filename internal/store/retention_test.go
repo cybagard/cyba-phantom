@@ -379,7 +379,7 @@ func TestTU26StoppedWriterStartsNoRunFromTheTakeLoop(t *testing.T) {
 			case <-time.After(waitFor):
 				t.Fatal("the batch did not reach its COMMIT")
 			}
-			// A Close lets Run end after the take loop. A cancel ends it too soon.
+			// A Close lets Run end after the take loop. A cancel is too soon.
 			r.q.Close()
 			if err := r.wait(done); err != nil {
 				t.Fatal(err)
