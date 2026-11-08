@@ -33,7 +33,9 @@ var hasHardwareAES = func() bool {
 
 // aesAsm reports whether crypto/aes uses its assembly path on goarch.
 // It follows the selection in go1.27.3 of the standard library.
-// Thus the warning shows exactly when crypto/aes uses the software path.
+// Thus the warning shows when crypto/aes uses the software path.
+// One limit: on ppc64 and ppc64le, GODEBUG=#ppc64aes=off turns the assembly
+// path off. The rule does not read that setting, so it gives no warning.
 func aesAsm(goarch string, c cpuBits) bool {
 	switch goarch {
 	case "amd64":
