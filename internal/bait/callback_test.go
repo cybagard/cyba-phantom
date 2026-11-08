@@ -255,9 +255,11 @@ func otherKeySetToken(t testing.TB) string {
 }
 
 // TestTS32CallbackFixedResponse checks the response for good, stale, future,
-// bad, absent and other-key-set tokens. It must have equal bytes at each
-// position, and no Set-Cookie. The test does this for a route with an asset
-// and a route with none, for GET, HEAD and POST. Both routes have a body
+// bad, absent, other-key-set and capped tokens. It must have equal bytes at
+// each position, and no Set-Cookie. For a capped token, the test also checks
+// the capped counter and the missing callback event. So the case is not a good
+// token. The test does this for a route with an asset and a route with none,
+// for GET, HEAD and POST. Both routes have a body
 // position, so POST also goes to the path, query and header positions. The
 // test checks the header values. A HEAD response has the status and headers
 // of the GET response.
@@ -270,7 +272,11 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 		"bad":    strings.Repeat("a", 26),
 		"other":  otherKeySetToken(t),
 		"none":   "",
+		// The cap admits this token one time below. Each later use is capped.
+		"capped": e.mint(t, time.Now()),
 	}
+	e.h.ServeHTTP(httptest.NewRecorder(), cbReq(http.MethodGet, cbRoutePath, posQuery, toks["capped"]))
+	e.q.Drain()
 	const ctype = "text/plain; charset=utf-8"
 	for _, rt := range []struct {
 		path  string
@@ -282,10 +288,16 @@ func TestTS32CallbackFixedResponse(t *testing.T) {
 		dumps, heads := map[string]string{}, map[string]string{}
 		for pos := range surfaces {
 			for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
-				for _, kind := range []string{"good", "stale", "future", "bad", "other", "none"} {
+				for _, kind := range []string{"good", "stale", "future", "bad", "other", "none", "capped"} {
 					w := httptest.NewRecorder()
+					before := e.h.capped.Load()
 					e.h.ServeHTTP(w, cbReq(m, rt.path, pos, toks[kind]))
-					e.q.Drain()
+					reqs, cbs := take(e.q)
+					// A GET or HEAD reads no body: no token at the body.
+					if read := pos != posBody || m == http.MethodPost; kind == "capped" && read &&
+						(e.h.capped.Load() != before+1 || len(cbs) != 0 || len(reqs) != 1 || reqs[0].TokenID == nil) {
+						t.Errorf("%s %s pos %d: the token was not capped (%d callback events, %d capped)", m, rt.path, pos, len(cbs), e.h.capped.Load()-before)
+					}
 					got := dump(w)
 					want := rt.body
 					if m == http.MethodHead {

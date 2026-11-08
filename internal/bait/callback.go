@@ -105,6 +105,9 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, sess *reqSess
 		_, _ = e.asset.WriteTo(w)
 	}
 	_ = http.NewResponseController(w).Flush()
+	if h.flushHook != nil {
+		h.flushHook()
+	}
 	h.callbackEvents(r, sess, e, code, texts)
 	return code
 }
