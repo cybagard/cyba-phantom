@@ -18,9 +18,11 @@ const ts21Flag = "-tags=ts21sentinel"
 // when a binary records a -tags setting. The test has two rows. In the first
 // row, GOENV names the file. In the second row, GOENV is not set and the
 // file is in the default place, below XDG_CONFIG_HOME. The second row runs
-// on linux only, because os.UserConfigDir uses XDG_CONFIG_HOME there only.
+// on linux only, the platform of the release build.
 // The test cannot see a GOFLAGS variable of the caller. It does not see
-// other go env file settings that leave no -tags setting. It builds for the
+// other go env file settings that leave no -tags setting. It does not see a
+// recipe that sets GOENV to another fixed file. The test puts files only at
+// the place that GOENV names and at the default place. It builds for the
 // host platform only.
 func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
 	t.Run("GOENV names the file", func(t *testing.T) {
@@ -29,7 +31,7 @@ func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
 	})
 	t.Run("default file", func(t *testing.T) {
 		if runtime.GOOS != "linux" {
-			t.Skip("os.UserConfigDir does not use XDG_CONFIG_HOME on " + runtime.GOOS)
+			t.Skip("this row runs on linux only, not on " + runtime.GOOS)
 		}
 		xdg := t.TempDir()
 		goDir := filepath.Join(xdg, "go")
@@ -68,8 +70,9 @@ func cleanEnv() []string {
 	return env
 }
 
-// checkReleaseBuild shows that go reads file with env. Then it runs make
-// build with env in a new folder. It checks the build info of both binaries.
+// checkReleaseBuild shows that the go tool reads file when it runs with env.
+// Then it runs make build with env in a new folder. It checks the build info
+// of both binaries.
 func checkReleaseBuild(t *testing.T, env []string, file string) {
 	t.Helper()
 	goTool, err := exec.LookPath("go")
@@ -94,14 +97,15 @@ func checkReleaseBuild(t *testing.T, env []string, file string) {
 		t.Fatalf("make build: %v\n%s", err, out)
 	}
 
+	flagKey, _, _ := strings.Cut(ts21Flag, "=")
 	for _, name := range []string{"phantom", "phantom-verify"} {
 		info, err := buildinfo.ReadFile(filepath.Join(binDir, name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		for _, s := range info.Settings {
-			if s.Key == "-tags" {
-				t.Errorf("%s records -tags=%s: make build read the go env file", name, s.Value)
+			if s.Key == flagKey {
+				t.Errorf("%s records %s=%s: make build read the go env file", name, s.Key, s.Value)
 			}
 		}
 	}
