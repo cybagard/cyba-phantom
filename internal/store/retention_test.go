@@ -192,23 +192,6 @@ func TestTU26EmptyStepListRunsOnlyTheCheckpoint(t *testing.T) {
 	}
 }
 
-// T-U-26: between two chunks the writer writes a batch only when it has one.
-// The drop counts wait for the tick: no tick comes, so they stay in memory.
-func TestTU26DropCountsWaitForTheTick(t *testing.T) {
-	var r *rig
-	r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
-		if i == 0 {
-			r.c.DropNoAddr()
-		}
-	}))
-	if err := r.retain(waitFor); err != nil {
-		t.Fatal(err)
-	}
-	if !r.c.Pending() {
-		t.Fatal("a run with no batch and no tick wrote the drop counts")
-	}
-}
-
 // T-U-26: a chunk ends after the first statement that reaches the 100 ms
 // budget. The statements add 49, 50 and 1 ms to the clock of the writer, in
 // this order. The first two reach 99 ms, which is not enough. The third reaches
@@ -494,13 +477,16 @@ func TestTU26RunRetentionSendsNoRequestAtOnce(t *testing.T) {
 
 // T-U-26: a caller that has left gets no run. If it leaves before the first
 // chunk, no step runs. If it leaves during the first chunk, no second chunk
-// runs.
+// runs. Between the chunks the writer writes a batch only when it has one: the
+// drop counts wait for a tick, and no tick comes.
 func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 	for _, between := range []bool{false, true} {
 		t.Run(fmt.Sprint("between chunks ", between), func(t *testing.T) {
 			gone, calls := make(chan struct{}), 0
-			r := retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) {
+			var r *rig
+			r = retentionRig(t, 3000, onCall(deleteRange(seedTS, math.MaxInt64), func(int, *sql.Tx) {
 				if calls++; between && calls == 1 {
+					r.c.DropNoAddr()
 					close(gone)
 				}
 			}))
@@ -512,8 +498,8 @@ func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 			r.launchCancelable(context.Background())
 			wantRule(t, r.reply(rq), writerName, ruleRetention)
 			want := map[bool][2]int{false: {0, 3000}, true: {1, 2000}}[between]
-			if got := [2]int{calls, r.events()}; got != want {
-				t.Fatalf("steps and rows %v, want %v", got, want)
+			if got := [2]int{calls, r.events()}; got != want || r.c.Pending() != between {
+				t.Fatalf("steps and rows %v, want %v; drop counts pending %v", got, want, r.c.Pending())
 			}
 		})
 	}

@@ -91,11 +91,10 @@ func (w *Writer) RetentionCheckpointBusy() uint64 { return w.checkpointBusy.Load
 // serveRetention runs one retention run and sends the result to rq. It runs one
 // chunk for each pass. Between two chunks the writer serves what waits (see
 // betweenChunks). A stopped writer, or a caller that has left, gets no chunk
-// and no checkpoint. Then the run ends early, with an error, in four cases.
-// These are: ctx has ended, the caller has left, the queue is closed, or the
-// writer has stopped. Each chunk is a transaction, so no partial chunk stays. A
-// database error stops the writer. After the last chunk the run ends with the
-// TRUNCATE checkpoint.
+// and no checkpoint. The run also ends early, with an error, when ctx has
+// ended, the caller has left, the queue is closed, or the writer has stopped.
+// Each chunk is a transaction, so no partial chunk stays. A database error
+// stops the writer. After the last chunk the run ends with the checkpoint.
 func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batch []*event.Event, rq retentionRequest) []*event.Event {
 	if !w.Healthy() || rq.left() {
 		rq.reply <- fail(writerName, ruleRetention)
