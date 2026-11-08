@@ -116,8 +116,8 @@ func awaitDone(t *testing.T, r *running) {
 
 // TestTU23_FetcherStart checks that serve starts one fetcher after the start
 // load. It gets the URL, the interval and the private list of the config. It
-// gets the logger of the bundle part, and it starts after the std log went to
-// the error log writer of the server.
+// gets the logger of the bundle part. It starts after the std log went to the
+// error log writer of the server.
 func TestTU23_FetcherStart(t *testing.T) {
 	f := newFakeFetch(t)
 	g := startFetchRun(t, fetchSection)

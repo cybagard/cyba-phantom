@@ -90,8 +90,8 @@ var (
 // With a bundle.fetch_url and a loader, one fetcher starts after the start
 // load. The expiry watch starts with a loader. Both are in wg, so they end
 // before the queue closes. After the stop began, the fetcher starts no new
-// load. A fetch load that began before the stop runs to its end, also when
-// it is in its wait for the swap gap. So the stop can wait for the rest of
+// load. A fetch load that began before the stop runs to its end. This holds
+// also in its wait for the swap gap. So the stop can wait for the rest of
 // the 30 s gap, as for the reload above. A fetcher that does not start gives
 // one fixed line.
 // stop is the cancel function of ctx.
