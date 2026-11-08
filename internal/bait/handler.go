@@ -114,6 +114,10 @@ type Handler struct {
 // keeps the value that it read, so one request uses one value.
 func (h *Handler) DisableSessionCookie() { h.cookieOff.Store(true) }
 
+// capStart gives the start of the clock of the callback cap. A test replaces
+// it.
+var capStart = time.Now
+
 // New returns a handler for the bundle of src. With no running bundle, fallback
 // serves the request and writes its own event. Else the handler puts one
 // request event on q. It panics when src, fallback or q is nil. The handler
@@ -135,7 +139,7 @@ func NewWithDayKey(src Source, fallback http.Handler, q *event.Queue, dk *sessio
 		dk = session.NewDayKey()
 	}
 	return &Handler{src: src, fallback: fallback, q: q, text: token.Text, keys: (*bundle.Bundle).Tokens, dk: dk, now: time.Now,
-		admit: newCallbackCap(), mono: monotonicSince(time.Now())}
+		admit: newCallbackCap(), mono: monotonicSince(capStart())}
 }
 
 // reqSession is the session of one request. The handler resolves it one time,
@@ -153,10 +157,10 @@ type reqSession struct {
 	// a response with no mint.
 	at   time.Time
 	mint event.MintRange
-	// capped holds the trap id, token id and surface of the first token that
-	// the callback cap refused. This is in position order. The request event
-	// holds them. capped.token is "" when the cap refused no token.
-	capped struct {
+	// firstCapped holds the trap id, token id and surface of the first token
+	// that the callback cap refused. This is in position order. The request
+	// event holds them. firstCapped.token is "" when the cap refused no token.
+	firstCapped struct {
 		trap, token string
 		surface     event.Surface
 	}
@@ -229,8 +233,8 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 		st := int64(code)
 		in.Status = &st
 	}
-	if s.capped.token != "" {
-		in.TrapID, in.TokenID, in.Surface = s.capped.trap, s.capped.token, s.capped.surface
+	if s.firstCapped.token != "" {
+		in.TrapID, in.TokenID, in.Surface = s.firstCapped.trap, s.firstCapped.token, s.firstCapped.surface
 	}
 	e, err := event.NewEvent(nil, in)
 	if err != nil {

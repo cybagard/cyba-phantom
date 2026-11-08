@@ -16,9 +16,9 @@ const (
 	// the number of events that it holds.
 	capKeyWindow = 60 * time.Second
 	capKeyMax    = 10
-	// capInterval is the time for one token of the total bucket to come
+	// capInterval is the time for one slot of the total bucket to come
 	// back. It gives 1 event each second in the long run. capBurst is the
-	// size of the bucket.
+	// number of slots in the bucket.
 	capInterval = time.Second
 	capBurst    = 60
 )
@@ -51,7 +51,7 @@ func monotonicSince(start time.Time) func() time.Duration {
 
 // allow tells if the token id may make an event for the client key at now. It
 // checks the window of the token, the window of the key, then the bucket. Only
-// an event that passes all three takes a bucket token and writes the entries.
+// an event that passes all three takes a bucket slot and writes the entries.
 // When it writes, it removes the entries that are not in their window.
 func (c *callbackCap) allow(id string, key netip.Addr, now time.Duration) bool {
 	c.mu.Lock()
@@ -95,4 +95,16 @@ func (c *callbackCap) sizes() (tokens, keys int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.tokens), len(c.keys)
+}
+
+// keyEntries gives the number of times in all key slices, and the most times
+// that one key holds.
+func (c *callbackCap) keyEntries() (total, most int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, times := range c.keys {
+		total += len(times)
+		most = max(most, len(times))
+	}
+	return total, most
 }

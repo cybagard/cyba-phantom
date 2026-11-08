@@ -171,18 +171,29 @@ func TestTS32CapTotal(t *testing.T) {
 func TestTS32CapRefusedToken(t *testing.T) {
 	c := newCapEnv(t)
 	tok := c.fresh(t)
-	wa, ra, n := c.hit(t, addr4(1), tok)
+	_, ra, n := c.hit(t, addr4(1), tok)
 	if n != 1 || ra.TrapID != nil || ra.TokenID != nil || ra.Surface != nil || c.h.capped.Load() != 0 {
 		t.Fatalf("admitted: %d events, request %+v, %d capped", n, ra, c.h.capped.Load())
 	}
-	wc, rc, n := c.hit(t, addr4(1), tok)
+	_, rc, n := c.hit(t, addr4(1), tok)
 	parsed, _ := token.Parse(tok)
 	if n != 0 || rc.TrapID == nil || *rc.TrapID != "a" || rc.TokenID == nil || *rc.TokenID != token.ID(parsed) ||
 		rc.Surface == nil || *rc.Surface != event.SurfaceQuery || c.h.capped.Load() != 1 {
 		t.Errorf("capped: %d events, request %+v, %d capped", n, rc, c.h.capped.Load())
 	}
-	if dump(wa) != dump(wc) {
-		t.Errorf("response differs:\n%s\n%s", dump(wa), dump(wc))
+	// At each position, the capped response equals the admitted response.
+	for pos, surface := range surfaces {
+		tk, from := c.fresh(t), addr4(20+pos)
+		var got [2]*httptest.ResponseRecorder
+		for i := range got {
+			r := cbReq(methodOf(pos), cbRoutePath, pos, tk)
+			r.RemoteAddr = from
+			got[i] = serve(t, c.h, r)
+			c.q.Drain()
+		}
+		if dump(got[0]) != dump(got[1]) || len(got[1].Result().Header.Values("Set-Cookie")) != 0 {
+			t.Errorf("%s: response differs or sets a cookie:\n%s\n%s", surface, dump(got[0]), dump(got[1]))
+		}
 	}
 	// A fresh path token passes. The query and header tokens are used.
 	// The query token comes first, so it is in the request event.
@@ -201,15 +212,73 @@ func TestTS32CapRefusedToken(t *testing.T) {
 	}
 }
 
-// TestTS32CapNoClientKey checks that a token with no valid client key gets no
-// callback event.
+// TestTS32CapNoClientKey checks a token with no valid client key. It gets no
+// callback event, no capped count and no entry in the maps. The empty address
+// is valid for the request event, so only the cap code can refuse it.
 func TestTS32CapNoClientKey(t *testing.T) {
 	c := newCapEnv(t)
 	r := cbReq(http.MethodGet, cbRoutePath, posQuery, c.fresh(t))
-	r.RemoteAddr = "bogus"
+	r.RemoteAddr = ""
 	serve(t, c.h, r)
-	if _, cbs := take(c.q); len(cbs) != 0 || c.h.capped.Load() != 0 {
-		t.Errorf("%d events and %d capped for a client with no key", len(cbs), c.h.capped.Load())
+	reqs, cbs := take(c.q)
+	tk, ks := c.h.admit.sizes()
+	if len(reqs) != 1 || len(cbs) != 0 || c.h.capped.Load() != 0 || tk != 0 || ks != 0 {
+		t.Errorf("%d request and %d callback events, %d capped, maps %d and %d", len(reqs), len(cbs), c.h.capped.Load(), tk, ks)
+	}
+}
+
+// TestTS32CapKeySliceBound reuses one client key over many windows. The times
+// of the key stay at 10 or fewer, and all key slices hold 120 or fewer.
+func TestTS32CapKeySliceBound(t *testing.T) {
+	c := newCallbackCap()
+	key, _ := event.CounterKey(addr(1))
+	for i := range 2000 {
+		now := time.Duration(i) * 6 * time.Second
+		c.allow(strconv.Itoa(i), key, now)
+		if total, most := c.keyEntries(); most > wantKeyMax || total > boundKeys {
+			t.Fatalf("try %d: %d times for one key, %d in all, want %d and %d at most", i, most, total, wantKeyMax, boundKeys)
+		}
+	}
+	if total, _ := c.keyEntries(); total != wantKeyMax {
+		t.Errorf("%d times at the end, want %d", total, wantKeyMax)
+	}
+}
+
+// TestTS32CapIdleBurst checks the bucket after a long idle time. The test
+// admits some events and then pauses longer than the refill time. Then many
+// distinct tokens and keys at one instant give exactly the burst.
+func TestTS32CapIdleBurst(t *testing.T) {
+	c := newCallbackCap()
+	for i := range 10 {
+		key, _ := event.CounterKey(addr(i))
+		c.allow("early"+strconv.Itoa(i), key, time.Duration(i)*time.Second)
+	}
+	idle := 2000 * time.Second
+	got := 0
+	for i := range 2000 {
+		key, _ := event.CounterKey(addr(100 + i))
+		if c.allow("late"+strconv.Itoa(i), key, idle) {
+			got++
+		}
+	}
+	if got != wantBurst {
+		t.Errorf("%d events at one instant after the idle time, want %d", got, wantBurst)
+	}
+}
+
+// TestTS32CapClockRuns checks the clock of a handler that New makes. The
+// test moves the start back by a time that is not a whole second. The clock
+// must give that time or more. It must give at most that time plus the time
+// since an earlier read.
+func TestTS32CapClockRuns(t *testing.T) {
+	const offset = time.Hour + 1234567891*time.Nanosecond
+	old := capStart
+	t.Cleanup(func() { capStart = old })
+	capStart = func() time.Time { return time.Now().Add(-offset) }
+	before := time.Now()
+	h := New(&swap{}, &fallbackFn{}, testQueue(t))
+	if d, limit := h.mono(), offset+time.Since(before); d < offset || d > limit {
+		t.Errorf("the clock gives %v, want %v to %v", d, offset, limit)
 	}
 }
 
@@ -317,7 +386,9 @@ func TestTP12CapLeaves(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- rig.w.Run(context.Background()) }()
 	const rate, keys, seconds = 100, 50, 5
-	admitted := 0
+	const leafQuery = "SELECT count(*) FROM event WHERE kind = 'callback' AND leaf_index IS NOT NULL"
+	admitted, stored := 0, 0
+	perSecond := make([]int, seconds)
 	for i := range rate * seconds {
 		s := i / rate
 		clock = time.Duration(s)*time.Second + time.Duration(i%rate)*(time.Second/rate)
@@ -327,7 +398,28 @@ func TestTP12CapLeaves(t *testing.T) {
 		serve(t, h, r)
 		admitted += int(1 - (h.capped.Load() - before))
 		settle(t, rig.q)
+		if i%rate != rate-1 {
+			continue
+		}
+		// The end of the second: wait for the leaves of the admitted events.
+		leaves := 0
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			if leaves = countOf(t, rig.db, leafQuery); leaves >= admitted || time.Now().After(end) {
+				break
+			}
+		}
+		perSecond[s], stored = leaves-stored, leaves
 	}
+	for s, n := range perSecond {
+		want := 1
+		if s == 0 {
+			want = wantBurst
+		}
+		if n != want {
+			t.Errorf("second %d: %d leaves, want %d", s, n, want)
+		}
+	}
+	t.Logf("tlog leaves for each second: %v", perSecond)
 	rig.q.Close()
 	if err := <-done; err != nil || !rig.w.Healthy() {
 		t.Fatalf("the writer stopped: %v %v", err, rig.w.Err())
@@ -335,7 +427,7 @@ func TestTP12CapLeaves(t *testing.T) {
 	if d := rig.q.Dropped(); d != (event.Dropped{}) {
 		t.Errorf("dropped events %+v", d)
 	}
-	leaves := countOf(t, rig.db, "SELECT count(*) FROM event WHERE kind = 'callback' AND leaf_index IS NOT NULL")
+	leaves := countOf(t, rig.db, leafQuery)
 	rows := countOf(t, rig.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
 	if want := wantBurst + seconds - 1; admitted != want || leaves != admitted || rows != admitted {
 		t.Errorf("admitted %d (want %d), callback rows %d, leaves %d", admitted, want, rows, leaves)
