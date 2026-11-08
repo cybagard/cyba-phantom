@@ -1237,6 +1237,52 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 	}
 }
 
+// TestTU23_StopWaitIsBounded sends a request whose handler does not return, so
+// the connection is active at the stop. Serve must return after the stop wait
+// of shutdownTime, and not much later. A stop wait with no limit never returns.
+func TestTU23_StopWaitIsBounded(t *testing.T) {
+	inside, release := make(chan struct{}, 1), make(chan struct{})
+	oldServer := newServer
+	t.Cleanup(func() { newServer = oldServer })
+	newServer = func(c listener.Config, h http.Handler) (*listener.Server, error) {
+		return oldServer(c, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			inside <- struct{}{}
+			<-release
+		}))
+	}
+	https, plain, caAddr := openListeners(t)
+	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), caAddr)
+	p := tempState(t, cfg)
+	ca, _ := cfg.Get("acme.ca")
+	seedCache(t, p, ca.Str)
+	r := launchServe(t, cfg, p, realDeps)
+	r.waitStarted(t)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", https.Addr().String(), &tls.Config{ServerName: decoyName, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("handshake: %v; stderr %q", err, r.err.String())
+	}
+	defer conn.Close()
+	defer close(release)
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: " + decoyName + "\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-inside:
+	case <-time.After(netWait):
+		t.Fatal("the handler did not run")
+	}
+	begin := time.Now()
+	r.cancel()
+	select {
+	case <-r.done:
+	case <-time.After(shutdownTime + 3*time.Second):
+		t.Fatalf("serve did not return %v after the stop", shutdownTime+3*time.Second)
+	}
+	if d := time.Since(begin); d < shutdownTime-time.Second {
+		t.Errorf("serve returned %v after the stop, want about %v: it did not wait for the connection", d, shutdownTime)
+	}
+}
+
 // TestTI03_ColdStartBinary builds the binary and starts it with a cached certificate in /var/lib/phantom and a CA
 // that no one answers. A TLS handshake with the cached certificate must work at most 2 s after the process start.
 // SIGTERM must end the process with exit 0 (NFR-05). The test needs root, because /var/lib/phantom is the state directory.
@@ -1301,6 +1347,7 @@ type mixOpt struct {
 	left    time.Duration // time left of the leaf; 0 is 90 days
 	remove  bool          // remove the fixture files after checkContent
 	seed    bool          // seed the cache, so the client makes no order
+	bundle  string        // config lines appended to the file
 	// viaServe starts the real serve function, not serveWith.
 	viaServe bool
 	prep     func(*testing.T, startParams) // runs before the start
@@ -1347,7 +1394,7 @@ func startMixed(t *testing.T, o mixOpt) *mixed {
 		extra += "  ca_private: [" + o.private + "]\n"
 	}
 	const caLine = "  ca: \"https://ca.example.invalid\"\n"
-	body = strings.Replace(body, caLine, caLine+extra, 1)
+	body = strings.Replace(body, caLine, caLine+extra, 1) + o.bundle
 	env := []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_LISTEN_HTTPS=" + https.Addr().String(),
 		"PHANTOM_LISTEN_HTTP=" + plain.Addr().String(), "PHANTOM_ACME_CA=https://" + ca + "/directory"}
 	cfg, err := config.Load(writeFile(t, body), env)
