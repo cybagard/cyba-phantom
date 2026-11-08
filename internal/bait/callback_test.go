@@ -259,8 +259,8 @@ func otherKeySetToken(t testing.TB) string {
 // each position, and no Set-Cookie. The clock steps past the token window
 // before each case, so the cap admits a good token each time. A good token
 // that is read gives one callback event. For a capped token, the test admits
-// it once at the same clock, then checks the capped counter and the missing
-// callback event. So the case cannot pass as an admitted token. The test does
+// it once at the same clock. Then it checks the capped counter and the
+// missing callback event. So the case cannot pass as an admitted token. The test does
 // this for a route with an asset and a route with none, for GET, HEAD and
 // POST. Both routes have a body position, so POST also goes to the path,
 // query and header positions. The test checks the header values. A HEAD

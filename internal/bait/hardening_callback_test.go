@@ -182,10 +182,10 @@ func (c *checkImporter) ImportFrom(path, dir string, mode types.ImportMode) (*ty
 	return p, err
 }
 
-// queryRefs type-checks files and gives the position of each use of a function
-// in queryParsers: a call, a method value or a method expression. A field with
-// the same name is not a function, so it does not match. Type errors do not
-// stop the scan, but an import error does.
+// queryRefs type-checks files. It gives the position of each use of a function
+// in queryParsers. A use is a call, a method value or a method expression. A
+// field with the same name is not a function, so it does not match. Type
+// errors do not stop the scan, but an import error does.
 func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]gotoken.Position, error) {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
 	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(error) {}}
@@ -207,8 +207,8 @@ func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]
 
 // querySample has eleven references that queryRefs must report, one on each
 // line that ends with "want". It also has a comment, a string, a field and a
-// method of another type, all named Query or like a parser. queryRefs must not
-// report these.
+// method of another type. They are named Query or like a parser. queryRefs
+// must not report these.
 const querySample = `package p
 import (
 	"net/http"
