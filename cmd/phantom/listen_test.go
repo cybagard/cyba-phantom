@@ -102,8 +102,9 @@ type startWait struct {
 	stderr func() string
 }
 
-// startLineWait is the time that a test waits for the start line. A start took
-// 4.3 s under disk load, so the time is much longer than that.
+// startLineWait is the time that a test waits for the start line, or for a
+// later point of serve. A start took 4.3 s under disk load, so the time is much
+// longer than that.
 const startLineWait = 30 * time.Second
 
 // until waits until ready closes, or until who ends. ready is the start line, or a later point of serve.
