@@ -38,8 +38,9 @@ var hasHardwareAES = func() bool {
 // ppc64le, GODEBUG=ppc64aes=off turns the assembly path off. The build tag
 // purego does the same on each architecture. The rule reads neither.
 // Some GODEBUG cpu options change x/sys/cpu only, not the standard library.
-// They are cpu.aes and cpu.aescbc on s390x, and cpu.sse41 and cpu.ssse3 on
-// amd64 with GOAMD64 v2 or higher. Then the warning shows with hardware AES.
+// They are cpu.aes, cpu.aescbc and cpu.all on s390x, and cpu.sse41 and
+// cpu.ssse3 on amd64 with GOAMD64 v2 or higher. Then the warning shows with
+// hardware AES.
 func aesAsm(goarch string, c cpuBits) bool {
 	switch goarch {
 	case "amd64":

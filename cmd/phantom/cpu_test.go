@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The other tests of the package compare exact output. Pin the CPU check to
+// realHasHardwareAES is the real CPU check. A package variable is set before
+// init runs, so it holds the function that init replaces.
+var realHasHardwareAES = hasHardwareAES
+
+// Some other tests of the package compare exact output. Set the CPU check to
 // hardware AES for them, so that they do not depend on the host CPU.
 func init() {
 	hasHardwareAES = func() bool { return true }
@@ -97,6 +106,39 @@ func TestTS29_HardwareAESIsQuiet(t *testing.T) {
 	if got := r.out.String(); strings.Contains(got, "AES") || !strings.HasPrefix(got, "phantom: started") {
 		t.Errorf("start line %q, want the start line with no AES suffix", got)
 	}
+}
+
+// aesHelperEnv makes TestTS29_RealCheckHelper run. If it is not set, the
+// helper skips.
+const aesHelperEnv = "PHANTOM_TEST_AES_HELPER"
+
+// TestTS29_RealCheckOffGivesFalse runs the test binary again with
+// GODEBUG=cpu.aes=off. Then x/sys/cpu reports no AES on each host, so the real
+// CPU check must give false (SEC-33).
+func TestTS29_RealCheckOffGivesFalse(t *testing.T) {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skip("the cpu.aes option exists on amd64 and arm64 only")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTS29_RealCheckHelper$")
+	cmd.Env = append(os.Environ(), aesHelperEnv+"=1", "GODEBUG=cpu.aes=off")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
+	}
+	// A skipped helper or a pattern with no test also exits 0.
+	if !strings.Contains(string(out), "real check: false\n") {
+		t.Errorf("child output has no result of false:\n%s", out)
+	}
+}
+
+// TestTS29_RealCheckHelper is the child of TestTS29_RealCheckOffGivesFalse.
+func TestTS29_RealCheckHelper(t *testing.T) {
+	if os.Getenv(aesHelperEnv) == "" {
+		t.Skip("child of TestTS29_RealCheckOffGivesFalse")
+	}
+	fmt.Printf("real check: %v\n", realHasHardwareAES())
 }
 
 // TestTS29_AESRule checks the rule for each architecture and each operand.
