@@ -25,7 +25,7 @@ type fetched struct {
 // noSeams fails the test when a seam of an earlier test is still set.
 func noSeams(t *testing.T) {
 	t.Helper()
-	if wrapTemp != nil || beforeRename != nil || afterTempRemove != nil {
+	if wrapTemp != nil || beforeRename != nil || afterTempRemove != nil || beforeSyncDir != nil {
 		t.Fatal("a test seam is set on entry")
 	}
 }
@@ -352,7 +352,9 @@ func TestTU23RollForwardLaterStepFails(t *testing.T) {
 			return func() {}
 		}, ErrStateFault, renamed},
 		{"version-state write", false, blocked(StateName), ErrStateFault, renamed},
-		{"expired bundle", false, func(_ *fetched, l *Loader) func() {
+		{"expired bundle", false, func(f *fetched, l *Loader) func() {
+			// The start removes this file, also when the mark keeps the other.
+			f.write("bundle/current.cbnd.tmp", []byte("x"))
 			l.now = func() time.Time { return testNow.AddDate(2, 0, 0) }
 			return func() {}
 		}, ErrBadSig, kept},
@@ -401,13 +403,20 @@ func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
 			seen = append(seen, from+">"+to+" "+f.snap())
 			return nil
 		}
-		t.Cleanup(func() { beforeRename = nil })
+		beforeSyncDir = func() { seen = append(seen, "sync "+f.snap()) }
+		t.Cleanup(func() { beforeRename, beforeSyncDir = nil, nil })
 		_, err := f.l.LoadFetched(f.arch, f.sig)
 		must(t, err)
+		// One directory Sync follows the rename of the kept file, before the
+		// install writes its temporary files (ctmp=none). The later Syncs
+		// follow the rename of the signature file and the version state.
 		want := []string{
 			"current.sig.tmp>current.sig cbnd=old-arch sig=other ctmp=none stmp=old-sig state=" + ver(2),
+			"sync cbnd=old-arch sig=old-sig ctmp=none stmp=none state=" + ver(2),
 			"current.cbnd.tmp>current.cbnd cbnd=old-arch sig=old-sig ctmp=new-arch stmp=new-sig state=" + ver(2),
 			"current.sig.tmp>current.sig cbnd=new-arch sig=old-sig ctmp=none stmp=new-sig state=" + ver(2),
+			"sync cbnd=new-arch sig=new-sig ctmp=none stmp=none state=" + ver(2),
+			"sync cbnd=new-arch sig=new-sig ctmp=none stmp=none state=" + ver(4),
 		}
 		if strings.Join(seen, "\n") != strings.Join(want, "\n") {
 			t.Errorf("order:\n%s", strings.Join(seen, "\n"))
@@ -417,6 +426,7 @@ func TestTU23SecondInstallRenamesKeptFile(t *testing.T) {
 		}
 		// The rename cleared the mark. The next install renames no kept file.
 		seen = nil
+		beforeSyncDir = nil
 		arch := build(ent{name: "manifest.json", data: []byte(mf(ver(5)))})
 		if _, err := f.l.LoadFetched(arch, f.sign(arch)); err != nil || len(seen) != 2 {
 			t.Errorf("third install: %v, renames %v", err, seen)
@@ -472,6 +482,9 @@ func TestTU23StartWithoutSignatureFile(t *testing.T) {
 				if err != nil || b.Manifest().Version != ver(3) {
 					t.Fatalf("got %v, %v", b, err)
 				}
+				if got := f.snap(); got != "cbnd=new-arch sig=new-sig ctmp=none stmp=none state="+ver(3) {
+					t.Errorf("after: %s", got)
+				}
 				return
 			}
 			if b != nil || err != ErrArchiveInvalid || strings.Contains(f.snap(), "stmp=new-sig") {
@@ -479,6 +492,20 @@ func TestTU23StartWithoutSignatureFile(t *testing.T) {
 			}
 		})
 	}
+	// A reload does not roll forward, and the file stays.
+	t.Run("reload", func(t *testing.T) {
+		f := newFetched(t)
+		f.write("bundle/current.cbnd", f.arch)
+		f.write("bundle/current.sig.tmp", f.sig)
+		must(t, os.Remove(filepath.Join(f.state, "bundle/current.sig")))
+		b, err := f.loader("bundle/current.cbnd").Load(false)
+		if b != nil || err != ErrArchiveInvalid {
+			t.Fatalf("got %v, %v", b, err)
+		}
+		if got := f.snap(); got != "cbnd=new-arch sig=none ctmp=none stmp=new-sig state="+ver(2) {
+			t.Errorf("after: %s", got)
+		}
+	})
 }
 
 // T-U-23: some start loads stop at the directory part, the state-file name or
@@ -646,8 +673,9 @@ func TestTU23StartRollsForward(t *testing.T) {
 }
 
 // T-U-23, T-S-20: a signature temporary file that fails the file rule or the
-// signature does not load. The start load gives the first bad_sig, one event,
-// and no roll-forward. It removes each install temporary file.
+// signature does not load. This holds for a roll-forward after bad_sig and for
+// one with no <name>.sig. The start load gives the first error and one event.
+// It removes each install temporary file.
 func TestTS20RollForwardRefusesTemp(t *testing.T) {
 	plant := func(mut func(f *fetched, p string)) func(f *fetched) {
 		return func(f *fetched) {
@@ -676,24 +704,39 @@ func TestTS20RollForwardRefusesTemp(t *testing.T) {
 		}),
 		"no temporary file": func(*fetched) {},
 	}
-	for name, setup := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newFetched(t)
-			f.write("bundle/current.cbnd", f.arch)
-			f.write("bundle/current.cbnd.tmp", f.arch)
-			setup(f)
-			l := f.loader("bundle/current.cbnd")
-			p := f.observe(l)
-			if b, err := l.Load(true); b != nil || err != ErrBadSig {
-				t.Fatalf("got %v, %v", b, err)
-			}
-			if got := f.snap(); got != "cbnd=new-arch sig=old-sig ctmp=none stmp=none state="+ver(2) {
-				t.Errorf("after: %s", got)
-			}
-			if evs, _ := p.take(t); len(evs) != 1 || detail(t, evs[0])["reason"] != "bad_sig" {
-				t.Errorf("events %v", evs)
-			}
-		})
+	// The roll-forward has two entries: a bad_sig of the pair, and a missing
+	// <name>.sig. Each refusal gives the code of its entry and loads nothing.
+	entries := []struct {
+		name, reason, sig string
+		err               error
+		prepare           func(f *fetched)
+	}{
+		{"bad_sig", "bad_sig", "old-sig", ErrBadSig, func(*fetched) {}},
+		{"no signature file", "archive_invalid", "none", ErrArchiveInvalid, func(f *fetched) {
+			must(f.t, os.Remove(filepath.Join(f.state, "bundle/current.sig")))
+		}},
+	}
+	for _, e := range entries {
+		for name, setup := range cases {
+			t.Run(e.name+"/"+name, func(t *testing.T) {
+				f := newFetched(t)
+				f.write("bundle/current.cbnd", f.arch)
+				f.write("bundle/current.cbnd.tmp", f.arch)
+				e.prepare(f)
+				setup(f)
+				l := f.loader("bundle/current.cbnd")
+				p := f.observe(l)
+				if b, err := l.Load(true); b != nil || err != e.err {
+					t.Fatalf("got %v, %v", b, err)
+				}
+				if got := f.snap(); got != "cbnd=new-arch sig="+e.sig+" ctmp=none stmp=none state="+ver(2) {
+					t.Errorf("after: %s", got)
+				}
+				if evs, _ := p.take(t); len(evs) != 1 || detail(t, evs[0])["reason"] != e.reason {
+					t.Errorf("events %v", evs)
+				}
+			})
+		}
 	}
 }
 
