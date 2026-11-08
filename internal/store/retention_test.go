@@ -263,10 +263,9 @@ func TestTS33RunEndsWithTruncatedWAL(t *testing.T) {
 	}
 }
 
-// T-S-33: with a reader that holds a snapshot, the checkpoint runs with
-// busy_timeout 0, so it does not wait for the reader. The busy count adds 1
-// and the writer stays healthy. After the reader ends, the next run truncates
-// the WAL.
+// T-S-33: a reader holds a snapshot. The checkpoint runs with busy_timeout 0,
+// so it does not wait for the reader. The busy count adds 1 and the writer
+// stays healthy. After the reader ends, the next run truncates the WAL.
 func TestTS33ReaderMakesCheckpointBusyNotAnError(t *testing.T) {
 	r := retentionRig(t, 3000, deleteRange(seedTS, math.MaxInt64))
 	rdb := mustOpen(t, r.root, "events.db")
