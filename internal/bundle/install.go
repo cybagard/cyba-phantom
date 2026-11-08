@@ -3,6 +3,7 @@ package bundle
 import (
 	"crypto/sha256"
 	"errors"
+	"io/fs"
 	"os"
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
@@ -57,7 +58,8 @@ func renameFile(root *os.Root, from, to string) error {
 //
 // A failed write gives ErrInstallFault and no event. It leaves the running
 // bundle and the version state. A failed rename of a marked file removes and
-// writes no file. A later failure before the archive rename removes the two
+// writes no file. When that file does not exist, the install clears the mark
+// and goes on. A later failure before the archive rename removes the two
 // temporary files. A failure at or after the archive rename keeps the files.
 // A failed rename of the signature file sets the mark of the loader for
 // <name>.sig.tmp. The next fetched bundle then renames that file first, and the
@@ -87,17 +89,21 @@ func (l *Loader) loadFetched(archive, sig []byte, rd *digest) (*Bundle, error) {
 	if len(archive) > MaxBundleBytes || len(sig) > MaxSigBytes {
 		return nil, ErrArchiveInvalid
 	}
-	return l.loadBytes(dir, c, archive, sig, false, rd, func() error { return l.installPair(dir, name, archive, sig) })
+	return l.loadBytes(dir, c, archive, sig, false, rd, func() error { return l.installPair(dir, name, archive, sig) }, nil)
 }
 
 // installPair writes the two temporary files, and renames the archive and then
 // the signature file. A loader with the mark first renames <name>.sig.tmp to
-// <name>.sig. When that fails, installPair removes and writes no file. A later
+// <name>.sig. When that fails, installPair removes and writes no file. When
+// the file does not exist, installPair clears the mark and goes on. A later
 // failure before the archive rename removes the temporary files. A failed
 // rename of the signature file sets the mark.
 func (l *Loader) installPair(root *os.Root, name string, archive, sig []byte) error {
 	if l.sigKept {
-		if err := l.promoteSig(root, name); err != nil {
+		err := l.promoteSig(root, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			l.sigKept = false
+		} else if err != nil {
 			return err
 		}
 	}
@@ -143,8 +149,10 @@ func (l *Loader) removeTemps(root *os.Root, name string) {
 // <name>.sig.tmp. rollForward loads the archive with that file, with each
 // check. The file must pass the signature file rule.
 // On an accept it renames the file to <name>.sig and calls Sync on the
-// directory. rollForward sets the mark before loadBytes. The rename clears it.
-// A failure before the rename keeps the file and the mark. A bad_sig clears
+// directory. The rename comes after the record and the version state, and
+// before the swap. rollForward sets the mark before loadBytes. The rename
+// clears it. A failure before the rename, also of the rename, keeps the file
+// and the mark. The version state and the record then stay. A bad_sig clears
 // the mark. For a rejection code, rollForward returns the first error. For a
 // state fault or an install fault, it returns that fault.
 func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte, rd *digest, first error) (*Bundle, error) {
@@ -153,7 +161,7 @@ func (l *Loader) rollForward(dir *os.Root, name string, c chain, archive []byte,
 		return nil, first
 	}
 	l.sigKept = true
-	b, err := l.loadBytes(dir, c, archive, sig, true, rd, func() error { return l.promoteSig(dir, name) })
+	b, err := l.loadBytes(dir, c, archive, sig, true, rd, nil, func() error { return l.promoteSig(dir, name) })
 	if err != nil {
 		if errors.Is(err, ErrBadSig) {
 			l.sigKept = false
