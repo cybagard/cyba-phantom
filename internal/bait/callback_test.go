@@ -260,10 +260,10 @@ func otherKeySetToken(t testing.TB) string {
 // before each case, so the cap admits a good token each time. A good token
 // that is read gives one callback event. For a capped token, the test admits
 // it once at the same clock. Then it checks the capped counter and the
-// missing callback event. So the case cannot pass as an admitted token. The test does
-// this for a route with an asset and a route with none, for GET, HEAD and
-// POST. Both routes have a body position, so POST also goes to the path,
-// query and header positions. The test checks the header values. A HEAD
+// missing callback event. So the case cannot pass as an admitted token. The
+// test does this for a route with an asset and a route with none, for GET,
+// HEAD and POST. Both routes have a body position, so POST also goes to the
+// path, query and header positions. The test checks the header values. A HEAD
 // response has the status and headers of the GET response.
 func TestTS32CallbackFixedResponse(t *testing.T) {
 	e := newCBEnv(t)
