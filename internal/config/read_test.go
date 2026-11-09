@@ -13,6 +13,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
+	"go.yaml.in/yaml/v3"
 )
 
 // sepRule is the fixed error text for a raw U+0085, U+2028 or U+2029.
@@ -20,6 +21,48 @@ const sepRule = "contains U+0085, U+2028 or U+2029"
 
 // crRule is the fixed error text for a CR without an LF after it.
 const crRule = "contains a CR without an LF after it"
+
+// TestTS10_ReadCRLFBounded checks that the CR scan ends on a file with
+// CRLF line ends. The scan moves past each CRLF. The call has a time bound.
+func TestTS10_ReadCRLFBounded(t *testing.T) {
+	var doc *Doc
+	var err error
+	within(t, func() { doc, err = ReadBytes([]byte("foo: bar\r\nbaz: qux\r\nx: y\r\n")) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Leaves["x"].Value; got != "y" {
+		t.Errorf("x = %q, want y", got)
+	}
+}
+
+// TestTS10_BareTagCursorEdges checks the cost of bareTag at two edges. A
+// second call for the same column does not read again. A column after the
+// end of the line stops at the end of the line.
+func TestTS10_BareTagCursorEdges(t *testing.T) {
+	t.Run("same column", func(t *testing.T) {
+		src := &lineCursor{lines: [][]byte{[]byte("a: !x")}}
+		n := &yaml.Node{Kind: yaml.ScalarNode, Line: 1, Column: 4}
+		for range 2 {
+			if !bareTag(n, src) {
+				t.Fatal("bareTag = false, want true")
+			}
+		}
+		if src.steps != 3 {
+			t.Errorf("steps = %d, want 3", src.steps)
+		}
+	})
+	t.Run("column past the line", func(t *testing.T) {
+		src := &lineCursor{lines: [][]byte{[]byte("ab")}}
+		n := &yaml.Node{Kind: yaml.ScalarNode, Line: 1, Column: 10}
+		if bareTag(n, src) {
+			t.Fatal("bareTag = true, want false")
+		}
+		if src.steps != 2 {
+			t.Errorf("steps = %d, want 2", src.steps)
+		}
+	})
+}
 
 func TestTS10_Read(t *testing.T) {
 	type row struct {

@@ -149,6 +149,61 @@ func TestTU10_ListenDiffer(t *testing.T) {
 	}
 }
 
+// TestTU10_CrossCheckListenFailed checks that crossCheck skips a listen key
+// that failed. The key is in vals with a value that does not parse. Its
+// port equals the port of the other key. No overlap error follows.
+func TestTU10_CrossCheckListenFailed(t *testing.T) {
+	good, bad := Value{Str: ":80"}, Value{Str: "[192.0.2.1]:80"}
+	for _, r := range []struct {
+		name string
+		vals map[string]Value
+	}{
+		{"https failed", map[string]Value{"listen.http": good, "listen.https": bad}},
+		{"http failed", map[string]Value{"listen.http": bad, "listen.https": good}},
+	} {
+		if errs := crossCheck(t.TempDir(), r.vals); len(errs) != 0 {
+			t.Errorf("%s: got %v, want no error", r.name, errs)
+		}
+	}
+}
+
+// TestTU10_SchemasOfFirstList checks that schemasOf finds the first list of
+// the table. That list has no item schemas.
+func TestTU10_SchemasOfFirstList(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("schemasOf(%q) panicked: %v", lists[0].path, r)
+		}
+	}()
+	if got := schemasOf(lists[0].path); got != nil {
+		t.Errorf("schemasOf(%q) = %v, want nil", lists[0].path, got)
+	}
+}
+
+// TestTS11_AllowListBounded checks that AllowList ends for a config with no
+// sink and for a config with a sink. Each call has a time bound.
+func TestTS11_AllowListBounded(t *testing.T) {
+	for _, r := range []struct {
+		name string
+		vals map[string]Value
+		want []Endpoint
+	}{
+		{"no sink", map[string]Value{}, nil},
+		{"one sink", map[string]Value{
+			"alerts.sinks[0].type": {Str: "syslog"},
+			"alerts.sinks[0].addr": {Str: "udp://127.0.0.1:514"},
+		}, []Endpoint{{"udp", "127.0.0.1", "514"}}},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			var got []Endpoint
+			within(t, func() { got = (&Config{values: r.vals}).AllowList() })
+			if !reflect.DeepEqual(got, r.want) {
+				t.Errorf("got %+v, want %+v", got, r.want)
+			}
+		})
+	}
+}
+
 // wantLoad loads base and file. It reports an error unless the load error
 // holds want ("" means no error). It returns the load error.
 func wantLoad(t *testing.T, file, want string) error {

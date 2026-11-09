@@ -384,6 +384,60 @@ func TestTS10_EnvNameForms(t *testing.T) {
 	}
 }
 
+// hangBound is the time that a bounded-wait test gives a call. A call takes
+// microseconds. The bound is large so that a loaded machine does not fail it.
+const hangBound = 10 * time.Second
+
+// within runs f in a goroutine. It stops the test if f does not return in
+// hangBound. A loop that does not end then fails the test and does not hang it.
+func within(t *testing.T, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(hangBound):
+		t.Fatalf("the call did not return in %v", hangBound)
+	}
+}
+
+// TestTS10_EnvFoldFullWidthEdges checks the two edges of the full-width
+// range. U+FF01 and U+FF5E fold to "!" and "~". The next rune on each side
+// stays as it is.
+func TestTS10_EnvFoldFullWidthEdges(t *testing.T) {
+	for _, r := range []struct{ in, want string }{
+		{"！", "!"}, {"～", "~"}, {"＀", "＀"}, {"｟", "｟"},
+	} {
+		if got := envFold(r.in); got != r.want {
+			t.Errorf("envFold(%q) = %q, want %q", r.in, got, r.want)
+		}
+	}
+}
+
+// TestTS10_EscapeBounded checks that esc ends for a cut on the right and for
+// a cut on the left. Each call has a time bound.
+func TestTS10_EscapeBounded(t *testing.T) {
+	for _, r := range []struct {
+		name, in string
+		max      int
+		want     string
+	}{
+		{"right cut", "abcdefgh", 5, "abcde"},
+		{"left cut", "abcdefgh", -5, "...gh"},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			var got string
+			within(t, func() { got = esc(r.in, r.max) })
+			if got != r.want {
+				t.Errorf("esc(%q, %d) = %q, want %q", r.in, r.max, got, r.want)
+			}
+		})
+	}
+}
+
 // TestTS10_WrittenTag checks the YAML tags of a file value through Load.
 // The tag "!" gives an error that names the key. So does a tag other than
 // "!!str" on a quoted or block scalar. The kind tag of the key on a plain
