@@ -515,8 +515,7 @@ func refusedText(s string) string {
 // TestTS32CallbackRefusedTokenRequestEvent sends two callbacks. The first has a
 // token that verifies. The second has a token that does not. Only the first
 // gets a callback event. The two request events must have the same fields.
-// So the benchmark can use the second request as the control for the request
-// row.
+// The benchmark uses the second request as the control for the request row.
 func TestTS32CallbackRefusedTokenRequestEvent(t *testing.T) {
 	e := newCBEnv(t)
 	tok := e.mint(t, time.Now())
@@ -562,15 +561,16 @@ func TestTS32CallbackRefusedTokenRequestEvent(t *testing.T) {
 //     callback. It holds the callback row and the request row of the callback.
 //   - event-B/cbrequest: event bytes that the control pass gains for each
 //     callback. It holds the request row alone.
-//   - callback-B/row: event-B/callback minus event-B/cbrequest. This is the
-//     callback row alone.
+//   - callback-B/row: event-B/callback minus event-B/cbrequest. It is an
+//     estimate of the bytes of the callback row and its index entries.
 //   - token-B/callback: token table bytes that the main pass gains.
 //   - tlog-B/leaf: tlog file bytes that the main pass gains for each leaf.
 //   - callback-rows/callback and token-rows/callback: rows for each callback.
 //
 // One page is 4 096 bytes. A token row takes about 130 bytes. At this count one
-// page changes the token value by 0.8 %. The benchmark runs one pass for any
-// b.N. Run it with -benchtime=1x. It reports 0 for ns/op: no time is measured.
+// page changes token-B/callback by 0.8 %. The benchmark runs one pass for any
+// b.N. Run it with -benchtime=1x. The benchmark measures no time. It sets
+// ns/op to 0, so go test prints no ns/op value.
 func BenchmarkCallbackRows(b *testing.B) {
 	const n = 4000
 	rig := newStoreRig(b)
