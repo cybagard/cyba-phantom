@@ -151,7 +151,9 @@ func TestTU10_ListenDiffer(t *testing.T) {
 
 // TestTU10_CrossCheckListenFailed checks that crossCheck skips a listen key
 // that failed. The key is in vals with a value that does not parse. Its
-// port equals the port of the other key. No overlap error follows.
+// port equals the port of the other key. No overlap error follows. Load
+// removes such a key first. So this test checks the guard in get for a direct
+// call.
 func TestTU10_CrossCheckListenFailed(t *testing.T) {
 	good, bad := Value{Str: ":80"}, Value{Str: "[192.0.2.1]:80"}
 	for _, r := range []struct {
@@ -161,9 +163,11 @@ func TestTU10_CrossCheckListenFailed(t *testing.T) {
 		{"https failed", map[string]Value{"listen.http": good, "listen.https": bad}},
 		{"http failed", map[string]Value{"listen.http": bad, "listen.https": good}},
 	} {
-		if errs := crossCheck(t.TempDir(), r.vals); len(errs) != 0 {
-			t.Errorf("%s: got %v, want no error", r.name, errs)
-		}
+		t.Run(r.name, func(t *testing.T) {
+			if errs := crossCheck(t.TempDir(), r.vals); len(errs) != 0 {
+				t.Errorf("got %v, want no error", errs)
+			}
+		})
 	}
 }
 
@@ -180,9 +184,10 @@ func TestTU10_SchemasOfFirstList(t *testing.T) {
 	}
 }
 
-// TestTS11_AllowListBounded checks that AllowList ends for a config with no
-// sink and for a config with a sink. Each call has a time bound.
-func TestTS11_AllowListBounded(t *testing.T) {
+// TestTS11_AllowListSinks checks the list that AllowList gives for a config
+// with no sink and for a config with a sink. TestMain runs the call with no
+// sink with a time bound before any test.
+func TestTS11_AllowListSinks(t *testing.T) {
 	for _, r := range []struct {
 		name string
 		vals map[string]Value
@@ -195,8 +200,7 @@ func TestTS11_AllowListBounded(t *testing.T) {
 		}, []Endpoint{{"udp", "127.0.0.1", "514"}}},
 	} {
 		t.Run(r.name, func(t *testing.T) {
-			var got []Endpoint
-			within(t, func() { got = (&Config{values: r.vals}).AllowList() })
+			got := (&Config{values: r.vals}).AllowList()
 			if !reflect.DeepEqual(got, r.want) {
 				t.Errorf("got %+v, want %+v", got, r.want)
 			}

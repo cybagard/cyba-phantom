@@ -22,12 +22,11 @@ const sepRule = "contains U+0085, U+2028 or U+2029"
 // crRule is the fixed error text for a CR without an LF after it.
 const crRule = "contains a CR without an LF after it"
 
-// TestTS10_ReadCRLFBounded checks that the CR scan ends on a file with
-// CRLF line ends. The scan moves past each CRLF. The call has a time bound.
-func TestTS10_ReadCRLFBounded(t *testing.T) {
-	var doc *Doc
-	var err error
-	within(t, func() { doc, err = ReadBytes([]byte("foo: bar\r\nbaz: qux\r\nx: y\r\n")) })
+// TestTS10_ReadCRLF checks the values that ReadBytes gives for a file with
+// CRLF line ends. The CR scan moves past each CRLF. TestMain runs this call
+// with a time bound before any test.
+func TestTS10_ReadCRLF(t *testing.T) {
+	doc, err := ReadBytes([]byte(crlfInput))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +51,8 @@ func TestTS10_BareTagCursorEdges(t *testing.T) {
 			t.Errorf("steps = %d, want 3", src.steps)
 		}
 	})
+	// The parser does not give such a column. The bound keeps the cost linear
+	// if a node does.
 	t.Run("column past the line", func(t *testing.T) {
 		src := &lineCursor{lines: [][]byte{[]byte("ab")}}
 		n := &yaml.Node{Kind: yaml.ScalarNode, Line: 1, Column: 10}
@@ -62,6 +63,22 @@ func TestTS10_BareTagCursorEdges(t *testing.T) {
 			t.Errorf("steps = %d, want 2", src.steps)
 		}
 	})
+}
+
+// TestTS10_CutBound checks the 64-byte bound of cut. A string of 65 bytes
+// gives its first 64 bytes. A string of 64 bytes stays whole.
+func TestTS10_CutBound(t *testing.T) {
+	s64 := strings.Repeat("a", 63) + "b"
+	for _, r := range []struct{ name, in, want string }{
+		{"65 bytes", s64 + "c", s64},
+		{"64 bytes", s64, s64},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			if got := cut(r.in); got != r.want {
+				t.Errorf("cut(%d bytes) = %q, want %q", len(r.in), got, r.want)
+			}
+		})
+	}
 }
 
 func TestTS10_Read(t *testing.T) {

@@ -42,8 +42,8 @@ var testDir = func() string {
 // TestMain stops the run when a directory above the package has a group or
 // other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
-// It also stops the run if esc does not end or gives a wrong text. An older
-// test that calls esc has no time bound.
+// It also stops the run if one of these calls does not end: esc, ReadBytes
+// and AllowList. Earlier tests make the same calls with no time bound.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.
 	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "load_test.go"), htpasswdDirRule); err != nil {
@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(testDir)
 		os.Exit(1)
 	}
-	if err := checkEscBounded(); err != nil {
+	if err := checkEnds(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.RemoveAll(testDir)
 		os.Exit(1)
@@ -395,15 +395,6 @@ func TestTS10_EnvNameForms(t *testing.T) {
 // microseconds. The bound is large so that a loaded machine does not fail it.
 const hangBound = 10 * time.Second
 
-// within runs f in a goroutine. It stops the test if f does not return in
-// hangBound. A loop that does not end then fails the test and does not hang it.
-func within(t *testing.T, f func()) {
-	t.Helper()
-	if !returns(f) {
-		t.Fatalf("the call did not return in %v", hangBound)
-	}
-}
-
 // returns runs f in a goroutine. It reports whether f returned in hangBound.
 func returns(f func()) bool {
 	done := make(chan struct{})
@@ -419,7 +410,8 @@ func returns(f func()) bool {
 	}
 }
 
-// escCases are the cuts of esc that the bounded checks run: right and left.
+// escCases are the cuts of esc that the tests and checkEnds run: right and
+// left.
 var escCases = []struct {
 	name, in string
 	max      int
@@ -429,16 +421,26 @@ var escCases = []struct {
 	{"left cut", "abcdefgh", -5, "...gh"},
 }
 
-// checkEscBounded runs escCases with a time bound. TestMain calls it, so a
-// loop in esc that does not end stops the run before any test calls esc.
-func checkEscBounded() error {
-	for _, c := range escCases {
-		var got string
-		if !returns(func() { got = esc(c.in, c.max) }) {
-			return fmt.Errorf("esc(%q, %d) did not return in %v: %s", c.in, c.max, hangBound, c.name)
-		}
-		if got != c.want {
-			return fmt.Errorf("esc(%q, %d) = %q, want %q: %s", c.in, c.max, got, c.want, c.name)
+// crlfInput is a file with CRLF line ends. The CR scan of ReadBytes moves past
+// each CRLF.
+const crlfInput = "foo: bar\r\nbaz: qux\r\nx: y\r\n"
+
+// checkEnds calls esc with a cut on each side, ReadBytes with a CRLF file, and
+// AllowList with no sink. It checks only that each call returns in hangBound.
+// The named tests check the values.
+func checkEnds() error {
+	calls := []struct {
+		name string
+		f    func()
+	}{
+		{"esc, right cut", func() { esc(escCases[0].in, escCases[0].max) }},
+		{"esc, left cut", func() { esc(escCases[1].in, escCases[1].max) }},
+		{"ReadBytes, CRLF file", func() { _, _ = ReadBytes([]byte(crlfInput)) }},
+		{"AllowList, no sink", func() { _ = (&Config{}).AllowList() }},
+	}
+	for _, r := range calls {
+		if !returns(r.f) {
+			return fmt.Errorf("%s did not return in %v", r.name, hangBound)
 		}
 	}
 	return nil
@@ -457,14 +459,12 @@ func TestTS10_EnvFoldFullWidthEdges(t *testing.T) {
 	}
 }
 
-// TestTS10_EscapeBounded checks that esc ends for a cut on the right and for
-// a cut on the left. Each call has a time bound.
-func TestTS10_EscapeBounded(t *testing.T) {
+// TestTS10_EscapeCuts checks the text of esc for a cut on the right and for a
+// cut on the left. TestMain runs this call with a time bound before any test.
+func TestTS10_EscapeCuts(t *testing.T) {
 	for _, r := range escCases {
 		t.Run(r.name, func(t *testing.T) {
-			var got string
-			within(t, func() { got = esc(r.in, r.max) })
-			if got != r.want {
+			if got := esc(r.in, r.max); got != r.want {
 				t.Errorf("esc(%q, %d) = %q, want %q", r.in, r.max, got, r.want)
 			}
 		})
