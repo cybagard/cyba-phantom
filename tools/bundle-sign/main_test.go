@@ -756,11 +756,33 @@ func TestTS20CosignRefusals(t *testing.T) {
 		{"mode 0640", "k3", "m640.key", "one.sig", errKey},
 		{"mode 0604", "k3", "m604.key", "one.sig", errKey},
 		{"two lines", "k3", "k3.key", "both.sig", errSig},
-		{"key ID in the file", "k1", "k1.key", "one.sig", errKeyID},
+		{"key ID in the file", "k1", "k1.key", "one.sig", errDupID},
 		{"bad file", "k3", "k3.key", "bad.sig", errSig},
 		{"no file", "k3", "k3.key", "none.sig", errRead},
 	} {
 		runFail(t, 1, c.err, "cosign", c.id, r.p(c.key), r.p("a.cbnd"), r.p(c.sig), r.p("out.sig"))
+		noFile(t, r.p("out.sig"))
+	}
+}
+
+// T-S-20: cosign makes no output file unless the archive is a bundle archive
+// with a transition manifest. The manifest needs a rotation member. Its key_id
+// is the key_id argument. rotation.from is the key ID of the sig-file line.
+// rotation.key is the public key of the key file.
+func TestTS20CosignChecksArchive(t *testing.T) {
+	r := newRig(t)
+	runOK(t, "keygen", "k1", r.p("k1.key"))
+	newKey := strings.Fields(runOK(t, "keygen", "k2", r.p("k2.key")))[1]
+	otherKey := strings.Fields(runOK(t, "keygen", "k3", r.p("k3.key")))[1]
+	rot := func(from, key string) string { return `,"rotation":{"from":"` + from + `","key":"` + key + `"}` }
+	r.build("norot", "", "k2", testVersion)
+	r.build("keyid", rot("k1", newKey), "k3", testVersion)
+	r.build("from", rot("k3", newKey), "k2", testVersion)
+	r.build("key", rot("k1", otherKey), "k2", testVersion)
+	write(t, r.p("junk.cbnd"), "not an archive", 0o644)
+	runOK(t, "sign", "k1", r.p("k1.key"), r.p("norot.cbnd"), r.p("one.sig"))
+	for _, name := range []string{"norot", "keyid", "from", "key", "junk"} {
+		runFail(t, 1, errTransition, "cosign", "k2", r.p("k2.key"), r.p(name+".cbnd"), r.p("one.sig"), r.p("out.sig"))
 		noFile(t, r.p("out.sig"))
 	}
 }

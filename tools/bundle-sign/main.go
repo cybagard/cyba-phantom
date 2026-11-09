@@ -33,9 +33,14 @@
 //
 // cosign adds the second line of a transition bundle. sig-file must hold
 // one line of the signature form, and key_id must not be the key ID of that
-// line. cosign does not verify that line or read the manifest. cosign makes
-// the new line like sign, with the same key file rules. It writes the old line
-// and the new line to out.sig. Run verify after cosign.
+// line. cosign reads the archive one time. It makes no output file unless the
+// archive is a valid bundle archive. Its manifest must have a rotation member.
+// The manifest key_id must be key_id. rotation.from must be the key ID of that
+// line. rotation.key must be the public key of the key file. cosign makes the
+// new line over the bytes that it checked, with the same key file rules as
+// sign. It writes the old line and the new line to out.sig. cosign does not
+// verify the signature of the old line: it has no public key for it. Run
+// verify after cosign.
 //
 // seal makes the file secrets/token.key for a proprietary bundle. install.pub
 // is the public key file of the sensor: canonical base64 of 32 bytes and a
@@ -97,16 +102,18 @@ var (
   bundle-sign cosign <key_id> <key-file> <archive> <sig-file> <out.sig>
   bundle-sign seal <install.pub> <version> <key_id> <out-file>
   bundle-sign verify <trust-file> <archive> <sig-file>`)
-	errKeyID  = errors.New("bundle-sign: key ID is not valid")
-	errSig    = errors.New("bundle-sign: signature file is not valid")
-	errSeal   = errors.New("bundle-sign: version, key ID or install key is not valid")
-	errKey    = errors.New("bundle-sign: key file is not usable")
-	errRead   = errors.New("bundle-sign: cannot read an input file")
-	errWrite  = errors.New("bundle-sign: cannot write the output file")
-	errTrust  = errors.New("bundle-sign: trust file is not valid")
-	errVerify = errors.New("bundle-sign: bad_sig")
-	errName   = errors.New("bundle-sign: a name does not fit the ustar form")
-	errPack   = errors.New("bundle-sign: directory cannot be packed")
+	errKeyID      = errors.New("bundle-sign: key ID is not valid")
+	errDupID      = errors.New("bundle-sign: key ID is already in the signature file")
+	errSig        = errors.New("bundle-sign: signature file is not valid")
+	errTransition = errors.New("bundle-sign: archive is not the transition bundle of these keys")
+	errSeal       = errors.New("bundle-sign: version, key ID or install key is not valid")
+	errKey        = errors.New("bundle-sign: key file is not usable")
+	errRead       = errors.New("bundle-sign: cannot read an input file")
+	errWrite      = errors.New("bundle-sign: cannot write the output file")
+	errTrust      = errors.New("bundle-sign: trust file is not valid")
+	errVerify     = errors.New("bundle-sign: bad_sig")
+	errName       = errors.New("bundle-sign: a name does not fit the ustar form")
+	errPack       = errors.New("bundle-sign: directory cannot be packed")
 )
 
 var b64 = base64.StdEncoding
@@ -270,35 +277,49 @@ func printLine(out io.Writer, text ...any) error {
 	return nil
 }
 
-// signLine makes one signature line. The key file holds the key ID, one
-// space, the canonical base64 text of a 32-byte seed, and a newline. The key
-// ID in the file must be keyID.
-func signLine(keyID, keyPath, archivePath string) (string, error) {
+// loadKey reads the key file. It holds the key ID, one space, the canonical
+// base64 text of a 32-byte seed, and a newline. The key ID in the file must be
+// keyID.
+func loadKey(keyID, keyPath string) (ed25519.PrivateKey, error) {
 	if err := checkKeyDir(keyPath); err != nil {
-		return "", err
+		return nil, err
 	}
 	b, err := readFile(keyPath, maxSmall, true, errKey)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	text, ok := strings.CutSuffix(string(b), "\n")
 	id, enc, found := strings.Cut(text, " ")
 	seed, err := b64.DecodeString(enc)
 	if !ok || !found || err != nil || len(seed) != ed25519.SeedSize || b64.EncodeToString(seed) != enc {
-		return "", errKey
+		return nil, errKey
 	}
 	if id != keyID {
-		return "", errKeyID
+		return nil, errKeyID
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
 	if _, err := keyLine(keyID, priv.Public().(ed25519.PublicKey)); err != nil {
+		return nil, err
+	}
+	return priv, nil
+}
+
+// sigLine makes one signature line over the archive bytes.
+func sigLine(keyID string, priv ed25519.PrivateKey, archive []byte) string {
+	return keyID + " " + b64.EncodeToString(ed25519.Sign(priv, bundle.SigMessage(archive))) + "\n"
+}
+
+// signLine makes one signature line. It reads the archive one time.
+func signLine(keyID, keyPath, archivePath string) (string, error) {
+	priv, err := loadKey(keyID, keyPath)
+	if err != nil {
 		return "", err
 	}
 	archive, err := readFile(archivePath, maxFile, false, errRead)
 	if err != nil {
 		return "", err
 	}
-	return keyID + " " + b64.EncodeToString(ed25519.Sign(priv, bundle.SigMessage(archive))) + "\n", nil
+	return sigLine(keyID, priv, archive), nil
 }
 
 func sign(a []string, _ io.Writer) error {
@@ -319,13 +340,33 @@ func cosign(a []string, _ io.Writer) error {
 		return errSig
 	}
 	if ids[0] == a[0] {
-		return errKeyID
+		return errDupID
 	}
-	line, err := signLine(a[0], a[1], a[2])
+	priv, err := loadKey(a[0], a[1])
 	if err != nil {
 		return err
 	}
-	return writeNew(a[4], append(prev, line...), 0o644)
+	archive, err := readFile(a[2], maxFile, false, errRead)
+	if err != nil {
+		return err
+	}
+	if !transitionOf(archive, a[0], ids[0], priv.Public().(ed25519.PublicKey)) {
+		return errTransition
+	}
+	return writeNew(a[4], append(prev, sigLine(a[0], priv, archive)...), 0o644)
+}
+
+// transitionOf is true when archive is a bundle archive with a transition
+// manifest. Its key_id is newID. rotation.from is oldID. rotation.key is pub.
+func transitionOf(archive []byte, newID, oldID string, pub ed25519.PublicKey) bool {
+	a, err := bundle.ReadArchive(archive)
+	if err != nil {
+		return false
+	}
+	raw, _ := a.File("manifest.json")
+	m, err := bundle.ParseManifest(raw)
+	return err == nil && m.Rotation != nil && m.KeyID == newID &&
+		m.Rotation.From == oldID && bytes.Equal(m.Rotation.Key[:], pub)
 }
 
 // seal reads the install public key. The text is the canonical base64 of 32
