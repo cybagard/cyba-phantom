@@ -23,6 +23,18 @@ const (
 	cbRowWait = 250 * time.Millisecond
 )
 
+// memoryRoot makes a state directory on a memory filesystem. The test cleanup
+// removes it after the sensor has stopped.
+func memoryRoot(t *testing.T) string {
+	t.Helper()
+	requireTmpfs(t, "/dev/shm")
+	root, err := os.MkdirTemp("/dev/shm", "phantom-state-")
+	mustOK(t, err)
+	t.Cleanup(func() { os.RemoveAll(root) })
+	mustOK(t, os.Chmod(root, 0o700))
+	return root
+}
+
 // callbackFiles are the files of a test bundle with a page and a callback
 // route. The page has four traps, each in its own slot. So it holds four
 // tokens.
@@ -151,9 +163,11 @@ func pollRow(t *testing.T, db *sql.DB, query string, args []any, dest ...any) ti
 // the surface of its position and a leaf. It is in the store within 250 ms of
 // the response, while the sensor runs. Each token has one token row with the
 // session of the render and cb_count 1. The callbacks come with another
-// session cookie, so a token row with the session of the callback fails.
+// session cookie, so a token row with the session of the callback fails. The
+// state is on a memory filesystem. So the 250 ms bound checks the sensor path
+// and not the disk syncs.
 func TestTI04_CallbackRowsEndToEnd(t *testing.T) {
-	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
+	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
 	db := readStore(t, s)
 	render := fetch(t, s.https, decoyName, "/slots", "")
 	if render.status != 200 {
@@ -231,9 +245,10 @@ func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
 // holds the trap and the token id. Its surface is the surface of the
 // position of the repeat. The callbacks come from one client address. The
 // cap for one client key is 10 in 60 s. The test makes 3, so only the cap for
-// each token can refuse.
+// each token can refuse. The state is on a memory filesystem. So the 250 ms
+// bound checks the sensor path and not the disk syncs.
 func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
-	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
+	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
 	db := readStore(t, s)
 	// Each render has new tokens. Each render makes one mint row.
 	first := pageTokens(t, fetch(t, s.https, decoyName, "/slots", ""))

@@ -55,6 +55,7 @@ type baitOpt struct {
 	bundle bool      // put the signed test bundle in the state directory
 	refuse bool      // the store does not open, so no load runs
 	files  []tarFile // the files of that bundle, or nil for baitFiles
+	memory bool      // put the state directory on a memory filesystem
 }
 
 // baitSensor is a started sensor with its two addresses (with scheme). dk is
@@ -88,6 +89,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	cfg, err := config.Load(writeFile(t, body), env)
 	mustOK(t, err)
 	s := &baitSensor{p: tempState(t, cfg), https: "https://" + httpsLn.Addr().String(), plain: "http://" + plainLn.Addr().String()}
+	if o.memory {
+		s.p.Root = memoryRoot(t)
+	}
 	caURL, _ := cfg.Get("acme.ca")
 	seedCache(t, s.p, caURL.Str)
 	if o.bundle {
