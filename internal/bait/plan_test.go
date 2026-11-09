@@ -5,10 +5,12 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/token"
@@ -126,8 +128,55 @@ func plansOf(s *site) map[string]*plan {
 	return out
 }
 
-// planCount is the size of p against the budget, with the record size of 5.
-func planCount(p *plan) int { return len(p.fixed) + 5*len(p.offs) }
+// planCount is the size of p against the budget. It is the capacity of each
+// array in bytes, at least 16 for an array that is not empty. It adds the 80
+// bytes of the plan struct.
+func planCount(p *plan) int {
+	n := 80
+	for _, c := range []int{cap(p.fixed), 4 * cap(p.offs), cap(p.acts)} {
+		if c > 0 {
+			n += max(c, 16)
+		}
+	}
+	return n
+}
+
+var sink any
+
+// TestTS28PlanHeapCount checks that the count is the heap. The heap of one
+// slice made with append equals its capacity in bytes, for some lengths. For
+// a slice under 16 bytes it is 16. The heap of a plan struct equals planHeader.
+func TestTS28PlanHeapCount(t *testing.T) {
+	// heapOf is the least TotalAlloc difference of one call in 50 tries. Other
+	// goroutines can only add to a try.
+	heapOf := func(mk func() any) uint64 {
+		best := ^uint64(0)
+		for range 50 {
+			var a, b runtime.MemStats
+			runtime.ReadMemStats(&a)
+			sink = mk()
+			runtime.ReadMemStats(&b)
+			best = min(best, b.TotalAlloc-a.TotalAlloc)
+		}
+		return best
+	}
+	for _, n := range []int{1, 33, 1000, 40000, 464773} {
+		x := make([]byte, n)
+		var c int
+		got := heapOf(func() any { s := append([]byte(nil), x...); c = cap(s); return &s[0] })
+		if got != uint64(max(c, 16)) || c < n {
+			t.Errorf("%d bytes: heap %d, capacity %d", n, got, c)
+		}
+		y := make([]uint32, n)
+		got = heapOf(func() any { s := append([]uint32(nil), y...); c = 4 * cap(s); return &s[0] })
+		if got != uint64(max(c, 16)) || c < 4*n {
+			t.Errorf("%d words: heap %d, capacity in bytes %d", n, got, c)
+		}
+	}
+	if got := heapOf(func() any { return &plan{} }); got != planHeader || unsafe.Sizeof(plan{}) > planHeader {
+		t.Errorf("plan struct: heap %d, size %d, planHeader %d", got, unsafe.Sizeof(plan{}), planHeader)
+	}
+}
 
 // TestTS28PlanEquality checks that a page with a plan has the bytes of Execute,
 // for both action forms in each context. The trap texts have escaped bytes
@@ -312,8 +361,8 @@ func TestTS28PlanOrder(t *testing.T) {
 			t.Errorf("%s: code %d, noPlan %d, page differs: %v", c.path, w.Code, h.noPlan.Load(), w.Body.String() != want)
 		}
 	}
-	// Four templates with no action, 100 bytes each, and a budget of 200.
-	// The first two plans fill it. No marker run follows.
+	// Four templates with no action and 100 bytes each, and a budget of two
+	// plans. The first two plans fill it. No marker run follows.
 	files := map[string]string{}
 	var routes []string
 	for i := range 4 {
@@ -322,7 +371,8 @@ func TestTS28PlanOrder(t *testing.T) {
 	}
 	files["vhosts/b.example/routes.json"] = `{"routes":[` + strings.Join(routes, ",") + `]}`
 	fb := bundleFiles(t, "", files)
-	pl = newPlanner(fb, fb.Traps(), 200)
+	one100 := planCount(plansOf(makeSite(fb, newPlanner(fb, fb.Traps(), planBudget)))["vhosts/b.example/0.tmpl"])
+	pl = newPlanner(fb, fb.Traps(), 2*one100)
 	got = plansOf(makeSite(fb, pl))
 	if pl.runs != 4 || pl.left != 0 || got["vhosts/b.example/1.tmpl"] == nil || got["vhosts/b.example/2.tmpl"] != nil {
 		t.Errorf("runs = %d, left = %d, plans %v, want 4 runs, left 0, plans for the first two", pl.runs, pl.left, got)
@@ -446,10 +496,16 @@ func TestTS28PlanBudget(t *testing.T) {
 			if kept == 0 || kept == len(all) {
 				t.Errorf("%d of %d templates have a plan, want some but not all", kept, len(all))
 			}
-			// The heap of a plan has its counted bytes, the size classes of
-			// its slices and its header. This is about 1 % more.
-			if d := int64(heap) - int64(base); d > 4<<20+4<<20/50 || d < int64(counted) {
-				t.Errorf("plans keep %d bytes of heap, want from %d to %d", d, counted, 4<<20+4<<20/50)
+			// The count is the heap of the plans, so the heap is at most 4 MiB.
+			// The floor is the fixed bytes: the heap holds at least these.
+			floor := 0
+			for _, p := range all {
+				if p != nil {
+					floor += len(p.fixed)
+				}
+			}
+			if d := int64(heap) - int64(base); d > 4<<20 || d < int64(floor) {
+				t.Errorf("plans keep %d bytes of heap, want from %d to %d", d, floor, 4<<20)
 			}
 		})
 	}

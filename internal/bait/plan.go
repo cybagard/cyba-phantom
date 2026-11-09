@@ -9,12 +9,13 @@ import (
 )
 
 // planBudget is the most bytes that the plans of one site keep (SEC-32). A plan
-// counts as its fixed bytes and cutSize bytes for each cut.
+// counts as the bytes that it allocates, so the budget bounds the heap. See
+// plan.size.
 const planBudget = 4 << 20
 
-// cutSize is the size in bytes of one cut record: an offset (4 bytes) and an
-// action position (1 byte).
-const cutSize = 5
+// planHeader is the heap size of the plan struct. The struct has 72 bytes. The
+// allocator gives it the size class of 80 bytes. A test checks this.
+const planHeader = 80
 
 // maxActs is the most trap actions of a template. The loader refuses more.
 const maxActs = 64
@@ -41,8 +42,24 @@ type plan struct {
 	acts  []uint8
 }
 
-// size is the count of the plan against the budget.
-func (p *plan) size() int { return len(p.fixed) + cutSize*len(p.offs) }
+// size is the count of the plan against the budget. It is the heap that the
+// plan keeps. It has four parts. The first is the capacity of fixed, at 1
+// byte each. The second is the capacity of offs, at 4 bytes each. The third
+// is the capacity of acts, at 1 byte each. The last is planHeader. cut makes
+// each array with append. So its capacity is
+// the size class that the allocator gave it. An array of 1 to 15 bytes can
+// use a block of 16 bytes. So each array counts at least 16 bytes.
+func (p *plan) size() int {
+	return heapBytes(cap(p.fixed)) + heapBytes(4*cap(p.offs)) + heapBytes(cap(p.acts)) + planHeader
+}
+
+// heapBytes is the heap that n bytes of one slice can use.
+func heapBytes(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return max(n, 16)
+}
 
 // markerOf gives the marker of action act in marker run run. It has an edge
 // character, the alphabet, two characters that give act, and a last edge
@@ -106,8 +123,8 @@ func (p *planner) of(name string, acts []int) *plan {
 // A run fails, a marker does not come back exactly, or the two runs differ.
 // It gives nil too if a marker is in the template text or in a trap text.
 // It also gives nil for a plan over the budget that is left. A run writes 36
-// bytes for a cut that counts 5. So a plan near the end of the budget can
-// fail at the cap of its run.
+// bytes for a cut that counts 5 or more. So a plan near the end of the
+// budget can fail at the cap of its run.
 func (p *planner) build(name string, acts []int) *plan {
 	src, _ := p.b.File(name)
 	var runs [2]*plan
@@ -176,11 +193,13 @@ func cut(out []byte, run int, want []uint8) *plan {
 	if !bytes.Equal(pl.acts, want) {
 		return nil
 	}
-	pl.fixed = append(pl.fixed, out...)
-	pl.fixed = bytes.Clone(pl.fixed)
-	pl.offs = append([]uint32(nil), pl.offs...)
-	pl.acts = append([]uint8(nil), pl.acts...)
-	return pl
+	// append rounds the capacity up to the size class, so cap shows the heap.
+	fixed := append(pl.fixed, out...)
+	return &plan{
+		fixed: append([]byte(nil), fixed...),
+		offs:  append([]uint32(nil), pl.offs...),
+		acts:  append([]uint8(nil), pl.acts...),
+	}
 }
 
 // write writes the page of p to w. toks gives the token text of each action.
