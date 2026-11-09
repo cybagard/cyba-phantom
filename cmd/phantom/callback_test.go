@@ -63,17 +63,28 @@ func pageTokens(t *testing.T, r baitResp) [4]string {
 // to position pos. The cookie gives the callback a session of its own.
 func callbackAt(t *testing.T, s *baitSensor, pos int, tok, cookie string) time.Time {
 	t.Helper()
+	var toks [4]string
+	toks[pos] = tok
+	return callbackWith(t, s, toks, cookie)
+}
+
+// callbackWith is callbackAt with a text for each position. An empty text
+// leaves the position absent.
+func callbackWith(t *testing.T, s *baitSensor, toks [4]string, cookie string) time.Time {
+	t.Helper()
 	method, target, body := http.MethodGet, cbRoute, ""
 	hdr := http.Header{"Cookie": {cookie}}
-	switch pos {
-	case 0:
-		target += "/" + tok
-	case 1:
-		target += "?ref=" + tok
-	case 2:
-		hdr.Set(cbHeader, tok)
-	case 3:
-		method, body = http.MethodPost, `{"tok":"`+tok+`"}`
+	if toks[0] != "" {
+		target += "/" + toks[0]
+	}
+	if toks[1] != "" {
+		target += "?ref=" + toks[1]
+	}
+	if toks[2] != "" {
+		hdr.Set(cbHeader, toks[2])
+	}
+	if toks[3] != "" {
+		method, body = http.MethodPost, `{"tok":"`+toks[3]+`"}`
 	}
 	req, err := http.NewRequestWithContext(t.Context(), method, s.https+target, strings.NewReader(body))
 	mustOK(t, err)
@@ -84,7 +95,7 @@ func callbackAt(t *testing.T, s *baitSensor, pos int, tok, cookie string) time.T
 	_, err = io.Copy(io.Discard, resp.Body)
 	mustOK(t, err)
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("position %d: status %d; want 204", pos, resp.StatusCode)
+		t.Fatalf("callback request: status %d; want 204", resp.StatusCode)
 	}
 	return time.Now()
 }
@@ -190,6 +201,79 @@ func TestTI04_CallbackRowsEndToEnd(t *testing.T) {
 	mustOK(t, db.QueryRowContext(t.Context(), "SELECT count(*) FROM token").Scan(&rows))
 	if rows != 4 {
 		t.Errorf("token rows: %d; want 4", rows)
+	}
+	s.stop(t)
+}
+
+// cbCount returns the number of callback rows and the cb_count of the token
+// row for the token id. A missing token row gives -1.
+func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
+	t.Helper()
+	ctx := t.Context()
+	mustOK(t, db.QueryRowContext(ctx, "SELECT count(*) FROM event WHERE kind = 'callback' AND token_id = ?", id).Scan(&rows))
+	err := db.QueryRowContext(ctx, "SELECT cb_count FROM token WHERE token_id = ?", id).Scan(&count)
+	if err == sql.ErrNoRows {
+		return rows, -1
+	}
+	mustOK(t, err)
+	return rows, count
+}
+
+// TestTI04_SameTokenOnceAndRepeatCapped checks two rules of T-I-04 on a
+// started sensor (SEC-37). One token at all four positions of one request
+// gives one callback row and cb_count 1. A repeat of a token that has its row
+// gives no second row and no second count. The request row of the repeat holds
+// the trap, the token id and the surface of the token. The callbacks come from
+// one client address. The cap for one client key is 10 in 60 s. The test makes
+// 3, so only the cap for each token can refuse.
+func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
+	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
+	db := readStore(t, s)
+	// Each render has new tokens. Each render makes one mint row.
+	first := pageTokens(t, fetch(t, s.https, decoyName, "/slots", ""))
+	second := pageTokens(t, fetch(t, s.https, decoyName, "/slots", ""))
+	renderSession := s.keyedID(t)
+	cookie, _ := s.cookie(t)
+	var mints int
+	pollRow(t, db, "SELECT count(*) FROM mint WHERE session_id = ? HAVING count(*) >= 2", []any{renderSession}, &mints)
+	idOf := func(text string) string {
+		tok, ok := token.Parse(text)
+		if !ok {
+			t.Fatalf("text %q is not a token", text)
+		}
+		return token.ID(tok)
+	}
+
+	// One token at the four positions of one request.
+	once := idOf(second[0])
+	got := callbackWith(t, s, [4]string{second[0], second[0], second[0], second[0]}, cookie)
+	var surface string
+	found := pollRow(t, db, "SELECT surface FROM event WHERE kind = 'callback' AND token_id = ?", []any{once}, &surface)
+	if d := found.Sub(got); d > cbRowWait {
+		t.Errorf("four positions: callback row after %v; want at most %v", d, cbRowWait)
+	}
+
+	// A token with one row, sent again at another position.
+	rep := idOf(first[1])
+	got = callbackAt(t, s, 1, first[1], cookie)
+	found = pollRow(t, db, "SELECT surface FROM event WHERE kind = 'callback' AND token_id = ?", []any{rep}, &surface)
+	if d := found.Sub(got); d > cbRowWait {
+		t.Errorf("first callback: row after %v; want at most %v", d, cbRowWait)
+	}
+	callbackAt(t, s, 2, first[1], cookie)
+	// The request row of the repeat is the barrier. The request event of a
+	// capped token has the token fields. Its surface is the one of the
+	// position of the repeat (the header). The request row of the first
+	// callback has no token id.
+	var trap, repSurface string
+	pollRow(t, db, "SELECT trap_id, surface FROM event WHERE kind = 'request' AND token_id = ?", []any{rep}, &trap, &repSurface)
+	if trap != "m" || repSurface != string(event.SurfaceHeader) {
+		t.Errorf("request row of the repeat: trap %q, surface %q; want %q and %q", trap, repSurface, "m", event.SurfaceHeader)
+	}
+	for name, id := range map[string]string{"four positions": once, "repeat": rep} {
+		if rows, count := cbCount(t, db, id); rows != 1 || count != 1 {
+			t.Errorf("%s: %d callback rows and cb_count %d; want 1 and 1", name, rows, count)
+		}
 	}
 	s.stop(t)
 }
