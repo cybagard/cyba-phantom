@@ -213,6 +213,7 @@ type running struct {
 	begin    time.Time
 	cpu      time.Duration // the CPU time of the process at begin
 	pressure pressure      // the io and cpu pressure at begin
+	fences   *fenceSet     // the cache fences of the launch
 }
 
 // cpuTime is the CPU time (user and system) that this process used so far.
@@ -245,11 +246,12 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
-	fenceCache(t) // before the wait for serve below, so it closes after it
+	// Before the wait for serve below, so the fence closes after it.
+	fences := fenceCache(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
-	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
+	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
 	go func() { r.code = serveWith(ctx, cancel, nil, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
@@ -276,12 +278,13 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 		}
 		return p, realDeps
 	}
-	fenceCache(t) // before the wait for serve below, so it closes after it
+	// Before the wait for serve below, so the fence closes after it.
+	fences := fenceCache(t)
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
-	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
@@ -1249,9 +1252,17 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 
 // TestTU23_StopWaitIsBounded sends a request whose handler does not return, so
 // the connection is active at the stop. Serve must return at least
-// shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. A stop
-// wait with no limit never returns.
+// shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. The test
+// checks that total bound from the stop to the return of serve. Serve calls
+// stopACME after the servers stopped. So the test also checks that the time to
+// that call is at least shutdownTime - 1 s. Each failure text gives the phase
+// times that it has and the pressure. A stop wait with no limit does not end
+// while the handler runs, so it fails the bound.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
+	stopped := make(chan time.Time, 1)
+	oldStop := stopACME
+	t.Cleanup(func() { stopACME = oldStop })
+	stopACME = func(a *listener.ACME) { stopped <- time.Now(); oldStop(a) }
 	inside, release := make(chan struct{}, 1), make(chan struct{})
 	oldServer := newServer
 	t.Cleanup(func() { newServer = oldServer })
@@ -1282,15 +1293,32 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 	case <-time.After(netWait):
 		t.Fatal("the handler did not run")
 	}
+	atCancel := readPressure()
 	begin := time.Now()
 	r.cancel()
+	const limit = shutdownTime + 3*time.Second
 	select {
 	case <-r.done:
-	case <-time.After(shutdownTime + 3*time.Second):
-		t.Fatalf("serve did not return %v after the stop", shutdownTime+3*time.Second)
+	case <-time.After(limit):
+		note := fmt.Sprintf("; serve did not call stopACME in %v", limit) + atCancel.note(readPressure())
+		select {
+		case at := <-stopped:
+			note = atCancel.openStopNote(at.Sub(begin), time.Since(at))
+		default:
+		}
+		t.Fatalf("serve did not return %v after the stop%s", limit, note)
 	}
-	if d := time.Since(begin); d < shutdownTime-time.Second {
-		t.Errorf("serve returned %v after the stop, want about %v: it did not wait for the connection", d, shutdownTime)
+	done := time.Now()
+	select {
+	case at := <-stopped:
+		toACME := at.Sub(begin)
+		note := atCancel.stopNote(toACME, done.Sub(at))
+		t.Log(strings.TrimPrefix(note, "; "))
+		if toACME < shutdownTime-time.Second {
+			t.Errorf("serve stopped the servers %v after the stop, want about %v: it did not wait for the connection%s", toACME, shutdownTime, note)
+		}
+	default:
+		t.Errorf("serve did not call stopACME; stop to the return %v%s", done.Sub(begin), atCancel.note(readPressure()))
 	}
 }
 

@@ -541,14 +541,16 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 	// A connection that the client dialed and did not use keeps the shutdown
 	// of the server waiting. So the client closes its idle connections.
 	closeIdle()
+	atStop := readPressure()
 	stopAt := time.Now()
 	rows := g.stop()
 	stopTook := time.Since(stopAt)
 	minTook := time.Duration(started.Load()-1) * 5 * time.Millisecond
 	if failed.Load() != 0 || sent.Load() < 200 || took < minTook || overlapped.Load() != swaps ||
 		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 || stopTook >= shutdownTime {
-		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v (at least %v), stop %v; rows %v; want 0 of 200 or more, at most 200 each second, 5 overlaps, 5 signal loads, stop before %v",
-			failed.Load(), sent.Load(), overlapped.Load(), took, minTook, stopTook, rows, shutdownTime)
+		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v (at least %v), stop %v; rows %v; want 0 of 200 or more, at most 200 each second, 5 overlaps, 5 signal loads, stop before %v%s",
+			failed.Load(), sent.Load(), overlapped.Load(), took, minTook, stopTook, rows, shutdownTime,
+			atStop.note(readPressure())+"; the stop time is from the cancel to the return of serve, with the store close")
 	}
 }
 
