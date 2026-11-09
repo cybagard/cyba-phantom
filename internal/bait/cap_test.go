@@ -512,12 +512,12 @@ func refusedText(s string) string {
 	return "a" + s[1:]
 }
 
-// TestCallbackRefusedTokenRequestEvent sends two callbacks. The first has a
+// TestTS32CallbackRefusedTokenRequestEvent sends two callbacks. The first has a
 // token that verifies. The second has a token that does not. Only the first
 // gets a callback event. The two request events must have the same fields.
 // So the benchmark can use the second request as the control for the request
 // row.
-func TestCallbackRefusedTokenRequestEvent(t *testing.T) {
+func TestTS32CallbackRefusedTokenRequestEvent(t *testing.T) {
 	e := newCBEnv(t)
 	tok := e.mint(t, time.Now())
 	var reqs [2]*event.Event
