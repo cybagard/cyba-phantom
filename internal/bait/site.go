@@ -23,6 +23,9 @@ type entry struct {
 	// acts are the key-set indexes of the trap actions of the template. All
 	// entries of one template share this slice, so no code may change it.
 	acts []int
+	// plan is the render plan of the template, or nil. All entries of one
+	// template share it. Only a site that the handler keeps has plans.
+	plan *plan
 	// slots are the key-set indexes of the header slots whose trap is in the
 	// bundle. The entry owns this slice. It has the exact length. names has the
 	// header name of each slot, in the same order.
@@ -94,7 +97,20 @@ func (s *site) mintOf(e *entry, b *bundle.Bundle, pos map[string]int) {
 // route map of each vhost. The loader refuses a route whose asset is missing.
 // If Asset still gives false, the build makes no entry for that route. The
 // key-set indexes of each route come from b. Use them only with b.Tokens().
-func buildSite(b *bundle.Bundle) *site {
+func buildSite(b *bundle.Bundle) *site { return makeSite(b, nil) }
+
+// buildPlannedSite is buildSite with a render plan for each template that fits
+// in the budget. The handler calls it for the site that it keeps only. The
+// order of the plans is fixed. It is the sorted vhosts. For each vhost, it is
+// the routes in route-map order, then the not_found member. Each template gets
+// one try.
+func buildPlannedSite(b *bundle.Bundle) *site {
+	return makeSite(b, newPlanner(b, b.Traps(), planBudget))
+}
+
+// makeSite is buildSite with the planner pl. With a nil pl, no template gets a
+// plan.
+func makeSite(b *bundle.Bundle, pl *planner) *site {
 	s := &site{hosts: map[string]map[string]*entry{}, notFound: map[string]*entry{}, beacons: map[string]*beacon{}, traps: b.Traps(), acts: map[string][]int{}}
 	pos := make(map[string]int, len(s.traps))
 	for i, t := range s.traps {
@@ -127,6 +143,7 @@ func buildSite(b *bundle.Bundle) *site {
 			}
 			e.ctype = []string{r.Type}
 			s.mintOf(e, b, pos)
+			e.plan = pl.of(r.Template, e.acts)
 			// The build has copied the slots into slots and names. No request
 			// reads the headers, so the entry does not keep them.
 			e.route.Headers = nil
@@ -135,6 +152,7 @@ func buildSite(b *bundle.Bundle) *site {
 		if rm.NotFound != "" {
 			nf := &entry{route: bundle.Route{Template: rm.NotFound}, ctype: htmlType}
 			s.mintOf(nf, b, pos)
+			nf.plan = pl.of(rm.NotFound, nf.acts)
 			s.notFound[host] = nf
 		}
 		if rm.Beacon != nil {
@@ -158,7 +176,7 @@ type slot struct {
 func (sl *slot) site() *site {
 	sl.once.Do(func() {
 		sl.count.Add(1)
-		sl.s = buildSite(sl.b)
+		sl.s = buildPlannedSite(sl.b)
 	})
 	return sl.s
 }
