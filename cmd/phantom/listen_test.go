@@ -1254,9 +1254,9 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 // the connection is active at the stop. Serve must return at least
 // shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. The test
 // checks that total bound from the stop to the return of serve. Serve calls
-// stopACME after the servers stopped, so the test also checks that the time to
-// that call is at least shutdownTime - 1 s. Each failure text gives both phases
-// and the pressure. A stop wait with no limit never returns.
+// stopACME after the servers stopped. So the test also checks that the time to
+// that call is at least shutdownTime - 1 s. Each failure text gives both
+// phases and the pressure. A stop wait with no limit never returns.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
 	stopped := make(chan time.Time, 1)
 	oldStop := stopACME

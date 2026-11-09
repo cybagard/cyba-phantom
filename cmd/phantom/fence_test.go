@@ -123,7 +123,7 @@ type fenceSet struct {
 // over the Storage of that call. Their close runs in a cleanup: call fenceCache
 // before the cleanup that waits for serve. Then the close runs after that wait
 // and before the removal of the temporary directory. A test that wraps newACME
-// itself sets its wrapper before the call. With two launches in one test, the
+// itself sets its wrapper before the call. Take two launches in one test. The
 // fence of the first set over the second client closes after the second
 // temporary directory is removed. The fence of the second set below it closed
 // first.
@@ -393,7 +393,7 @@ func (s *slowStore) Store(context.Context, string, []byte) error {
 // in each of 5000 rounds. A hook runs in each operation after its check and
 // before the call to the cache. Each operation must either get errFenceClosed
 // and make no call, or be counted. When close returns, no call may be in
-// progress, and no call may begin later. The race needs two Ps: with one P,
+// progress, and no call may begin later. The race needs two Ps. With one P,
 // the operations run one after the other and the order is not visible. So the
 // test raises GOMAXPROCS to 2 if it is lower, and restores it at the end.
 func TestTI03_FenceCountsBeforeItCalls(t *testing.T) {

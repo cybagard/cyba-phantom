@@ -88,9 +88,9 @@ func (p pressure) startNote(line time.Duration, extra string) string {
 
 // stopNote gives the two phases of a stop, then the pressure note. The first
 // phase is from the stop to the stopACME call. The second is from that call to
-// the return of serve: the stop of the certificate client, the cache close and
-// the store close. The pressure is the one at the stop. The note reads the
-// pressure now.
+// the return of serve. The second phase holds the stop of the certificate
+// client, the cache close and the store close. The pressure is the one at the
+// stop. The note reads the pressure now.
 func (p pressure) stopNote(toACME, toReturn time.Duration) string {
 	return fmt.Sprintf("; stop to the stopACME call %v, from there to the return %v", toACME, toReturn) + p.note(readPressure())
 }
