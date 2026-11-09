@@ -744,7 +744,9 @@ func TestTS28PlanWork(t *testing.T) {
 		}
 	}
 	t.Logf("%d marker runs, %d bytes of run output, %d plans", pl.runs, pl.runBytes, kept)
-	if kept != 0 || pl.runBytes > planWork || pl.work != 0 || pl.runs < 20 || pl.runs > 60 {
+	// The last run stops at the cap, so the output is the work less one write.
+	// A write is under one run of this shape: 480000 bytes at most.
+	if kept != 0 || pl.runBytes > planWork || pl.runBytes < planWork-480000 || pl.work != 0 || pl.runs < 20 || pl.runs > 60 {
 		t.Errorf("runs %d, run bytes %d (work %d), work left %d, plans %d", pl.runs, pl.runBytes, planWork, pl.work, kept)
 	}
 }
