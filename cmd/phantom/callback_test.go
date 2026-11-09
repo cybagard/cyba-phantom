@@ -227,10 +227,11 @@ func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
 // TestTI04_SameTokenOnceAndRepeatCapped checks two rules of T-I-04 on a
 // started sensor (SEC-37). One token at all four positions of one request
 // gives one callback row and cb_count 1. A repeat of a token that has its row
-// gives no second row and no second count. Its request row holds
-// the trap, the token id and the surface of the position of the repeat. The
-// callbacks come from one client address. The cap for one client key is 10 in
-// 60 s. The test makes 3, so only the cap for each token can refuse.
+// gives no second row and no second count. The request row of the repeat
+// holds the trap and the token id. Its surface is the surface of the
+// position of the repeat. The callbacks come from one client address. The
+// cap for one client key is 10 in 60 s. The test makes 3, so only the cap for
+// each token can refuse.
 func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
 	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
 	db := readStore(t, s)
