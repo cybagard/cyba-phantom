@@ -242,7 +242,8 @@ func TestTS15ConnectionStringIsFixedText(t *testing.T) {
 	const want = "/s/events.db?_defensive=1&_txlock=immediate" +
 		"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-8000)" +
 		"&_pragma=temp_store(MEMORY)&_pragma=mmap_size(0)&_pragma=foreign_keys(OFF)" +
-		"&_pragma=busy_timeout(5000)&_pragma=journal_size_limit(67108864)&_pragma=trusted_schema(OFF)"
+		"&_pragma=busy_timeout(5000)&_pragma=journal_size_limit(67108864)&_pragma=trusted_schema(OFF)" +
+		"&_pragma=secure_delete(ON)"
 	if got := dsn("/s/events.db", false); got != want {
 		t.Fatalf("got %s", got)
 	}
@@ -345,6 +346,7 @@ func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 		"journal_mode": "wal", "synchronous": "1", "cache_size": "-8000", "temp_store": "2",
 		"mmap_size": "0", "foreign_keys": "0", "busy_timeout": "5000",
 		"journal_size_limit": "67108864", "trusted_schema": "0", "auto_vacuum": "2",
+		"secure_delete": "1", // T-S-33
 	}
 	for i := 0; i < 2; i++ {
 		c, err := fresh.Conn(context.Background())
@@ -358,6 +360,21 @@ func TestTS15PragmasReadBackOnNewConnections(t *testing.T) {
 				t.Errorf("connection %d: %s is %q, want %q (%v)", i, name, got, v, err)
 			}
 		}
+	}
+}
+
+// T-S-33: the open refuses a connection string where secure_delete reads
+// back 0 (OFF) or 2 (FAST).
+func TestTS33OpenRefusesSecureDeleteOff(t *testing.T) {
+	for _, mode := range []string{"OFF", "FAST"} {
+		t.Run(mode, func(t *testing.T) {
+			root, _, _ := newState(t)
+			setHook(t, &editDSN, func(s string) string {
+				return strings.Replace(s, "secure_delete(ON)", "secure_delete("+mode+")", 1)
+			})
+			_, err := Open(root, "events.db", Options{})
+			wantRule(t, err, "events.db", ruleSetting)
+		})
 	}
 }
 

@@ -83,12 +83,17 @@ var (
 	fixedNames = []string{"checkpoint.state", "checkpoint.state.tmp", "writer.stop"}
 )
 
-// pragmas are the 03 pragmas. Each is in the connection string, so SQLite
-// applies it to each new connection.
+// busyTimeout is the busy_timeout of a pool connection, in milliseconds. A
+// retention checkpoint sets it again after its run.
+const busyTimeout = "5000"
+
+// pragmas are the 03 pragmas, with secure_delete(ON) at the end (SEC-39). Each
+// is in the connection string, so SQLite applies it to each new connection.
 var pragmas = []string{
 	"journal_mode(WAL)", "synchronous(NORMAL)", "cache_size(-8000)",
 	"temp_store(MEMORY)", "mmap_size(0)", "foreign_keys(OFF)",
-	"busy_timeout(5000)", "journal_size_limit(67108864)", "trusted_schema(OFF)",
+	"busy_timeout(" + busyTimeout + ")", "journal_size_limit(67108864)", "trusted_schema(OFF)",
+	"secure_delete(ON)",
 }
 
 // afterChecks is a test hook. Production code leaves it nil. A test sets it to
@@ -586,9 +591,9 @@ func dsn(path string, created bool) string {
 	return b.String()
 }
 
-// verify reads back the journal mode of the first connection and sets the
-// process settings. The connector checks the location. It returns the *Error of
-// the connector as it is, or a fixed error for rel.
+// verify reads back the journal mode and secure_delete of the first connection
+// and sets the process settings. The connector checks the location. It returns
+// the *Error of the connector as it is, or a fixed error for rel.
 func verify(db *sql.DB, rel string) error {
 	ctx := context.Background()
 	var mode string
@@ -600,6 +605,15 @@ func verify(db *sql.DB, rel string) error {
 		return fail(rel, ruleOpen)
 	}
 	if mode != "wal" {
+		return fail(rel, ruleSetting)
+	}
+	// secure_delete must be 1 (SEC-39). After a TRUNCATE checkpoint that is not
+	// busy, no old bytes stay in the database file or the WAL.
+	var secure int
+	if err := db.QueryRowContext(ctx, "PRAGMA secure_delete").Scan(&secure); err != nil {
+		return fail(rel, ruleOpen)
+	}
+	if secure != 1 {
 		return fail(rel, ruleSetting)
 	}
 	heap.Lock()
