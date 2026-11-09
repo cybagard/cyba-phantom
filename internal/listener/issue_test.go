@@ -437,7 +437,7 @@ func TestTS16RedirectToAnotherPortIsRefused(t *testing.T) {
 }
 
 // requireSnapshot fails the test unless the snapshot of the listening sockets
-// before Start holds the decoy socket, Pebble and the DNS server.
+// holds the decoy socket, Pebble and the DNS server. It is from before Start.
 func requireSnapshot(t *testing.T, before map[string]string, decoy string) {
 	t.Helper()
 	if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), decoy) {
@@ -493,7 +493,8 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 // there. It serves a chain that Pebble issued.
 func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 	// On Linux, with the network "tcp", Go binds the three forms as one
-	// dual-stack [::] socket, as the sensor does with a wildcard listen.
+	// dual-stack [::] socket. The sensor does the same with a wildcard
+	// listen.
 	for _, listen := range []string{"0.0.0.0:0", "[::]:0", ":0"} {
 		t.Run(listen, func(t *testing.T) {
 			f := newIssueFixtureOn(t, listen, "", "wildcard.phantom.test", nil, nil)

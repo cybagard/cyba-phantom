@@ -328,7 +328,7 @@ func startListenerSampler(before map[string]string) *listenerSampler {
 	return s
 }
 
-// stop ends the loop and returns the addresses of the new sockets, the sample
+// stop ends the loop. It returns the addresses of the new sockets, the sample
 // count, the count of failed reads and the last read error. Call it once.
 func (s *listenerSampler) stop() (extra []string, samples int64, failed int, lastErr error) {
 	close(s.quit)
@@ -363,7 +363,7 @@ func watchListeners(t *testing.T, before map[string]string) (finish func()) {
 }
 
 // TestTS16BindCheckFailsOnAFreeAddress is the positive control of the bind
-// check: on an address that nothing holds, a bind works, so the check must
+// check. On an address that nothing holds, a bind works. So the check must
 // give an error.
 func TestTS16BindCheckFailsOnAFreeAddress(t *testing.T) {
 	if err := bindRefusedError(closedAddr(t)); err == nil {
@@ -372,10 +372,10 @@ func TestTS16BindCheckFailsOnAFreeAddress(t *testing.T) {
 }
 
 // TestTS16SamplerReportsAListenerThatOpensAfterItStarts is the positive control
-// of the sampler. The control opens a listener after the sampler starts. It keeps
-// the listener open until the sampler has taken two more samples, so the second
-// one began after the open. Then it stops the sampler, which must report the
-// listener.
+// of the sampler. The control opens a listener after the sampler starts. The
+// listener stays open until the sampler has taken two more samples. The second
+// one began after the open. Then the control stops the sampler. The sampler
+// must report the listener.
 func TestTS16SamplerReportsAListenerThatOpensAfterItStarts(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
