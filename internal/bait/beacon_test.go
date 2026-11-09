@@ -31,11 +31,11 @@ type bcEnv struct {
 	now time.Time
 }
 
-// serveBounded runs the handler and waits 5 s for it. A handler that does not
-// return stops the test run with a panic. A read loop that does not end keeps
-// a CPU busy, and a failed test cannot stop it. The next tests would be slow.
+// serveBounded runs the handler and waits at most 5 s for it. A handler that
+// does not return stops the test run with a panic. A read loop that does not
+// end keeps a CPU busy, and a failed test cannot stop it. The next tests would
+// be slow.
 func serveBounded(tb testing.TB, h http.Handler, w http.ResponseWriter, r *http.Request) {
-	tb.Helper()
 	done := make(chan struct{})
 	go func() { h.ServeHTTP(w, r); close(done) }()
 	select {
@@ -220,7 +220,6 @@ func TestTS32BeaconPost(t *testing.T) {
 		{"newline", tk + "\n", "", "example.com", 0, -2, false},
 		{"64 bytes", pad(64), "", "example.com", 0, -2, false},
 		{"65 bytes, unknown length", pad(65), "", "example.com", 0, -1, false},
-		{"valid, length 64", tk, "", "example.com", 0, 64, true},
 		{"length over 64", pad(65), "", "example.com", 0, 65, false},
 		{"300 KiB, unknown length", pad(300 << 10), "", "example.com", 0, -1, false},
 	} {
@@ -230,8 +229,18 @@ func TestTS32BeaconPost(t *testing.T) {
 		if w.Code != 204 || w.Body.Len() != 0 || !reflect.DeepEqual(w.Header(), hd) {
 			t.Errorf("%s: code %d body %q header %v, want 204, no body, %v", c.name, w.Code, w.Body.String(), w.Header(), hd)
 		}
-		if got > 64 || c.length > 64 && got != 0 {
-			t.Errorf("%s: the handler read %d bytes", c.name, got)
+		// The handler reads the whole body, up to 64 bytes. It reads no byte
+		// if the content length is over 64.
+		size := int64(len(c.body))
+		if c.length != -2 {
+			size = c.length
+		}
+		wantRead := min(len(c.body), 64)
+		if size > 64 {
+			wantRead = 0
+		}
+		if got != wantRead {
+			t.Errorf("%s: the handler read %d bytes, want %d", c.name, got, wantRead)
 		}
 		reqs, beacons := 0, 0
 		for _, ev := range e.q.Drain() {
@@ -373,23 +382,25 @@ func TestTS32BeaconBodyEnd(t *testing.T) {
 		{"ticket, another error in a later call", bcReader{data: tk, end: io.ErrUnexpectedEOF, late: true}, 2, false},
 		{"never ends", bcReader{endless: true}, 64, false},
 	} {
-		r := httptest.NewRequest("POST", bcPost, nil)
-		r.Host, r.RemoteAddr, r.ContentLength = "example.com", bcAddr, -1
-		r.Body = io.NopCloser(&c.body)
-		w := httptest.NewRecorder()
-		serveBounded(t, e.h, w, r)
-		reqs, beacons := 0, 0
-		for _, ev := range e.q.Drain() {
-			if ev.Record().Kind == event.KindBeacon {
-				beacons++
-			} else {
-				reqs++
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", bcPost, nil)
+			r.Host, r.RemoteAddr, r.ContentLength = "example.com", bcAddr, -1
+			r.Body = io.NopCloser(&c.body)
+			w := httptest.NewRecorder()
+			serveBounded(t, e.h, w, r)
+			reqs, beacons := 0, 0
+			for _, ev := range e.q.Drain() {
+				if ev.Record().Kind == event.KindBeacon {
+					beacons++
+				} else {
+					reqs++
+				}
 			}
-		}
-		if w.Code != 204 || w.Body.Len() != 0 || c.body.calls != c.calls || c.body.gotByte > 64 || reqs != 1 || beacons != btoi(c.want) {
-			t.Errorf("%s: code %d, %d reads, %d bytes, %d request and %d beacon events, want 204, %d reads, at most 64 bytes, 1 and %d",
-				c.name, w.Code, c.body.calls, c.body.gotByte, reqs, beacons, c.calls, btoi(c.want))
-		}
+			if w.Code != 204 || w.Body.Len() != 0 || c.body.calls != c.calls || c.body.gotByte > 64 || reqs != 1 || beacons != btoi(c.want) {
+				t.Errorf("%s: code %d, %d reads, %d bytes, %d request and %d beacon events, want 204, %d reads, at most 64 bytes, 1 and %d",
+					c.name, w.Code, c.body.calls, c.body.gotByte, reqs, beacons, c.calls, btoi(c.want))
+			}
+		})
 	}
 }
 
