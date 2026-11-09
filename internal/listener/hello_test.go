@@ -387,6 +387,7 @@ func TestTU19ZonedPeerGivesOneEventWithoutZone(t *testing.T) {
 		{"[fe80::1%eth0]:1234", "fe80::1"},
 		{"[fe80::2%en7]:1234", "fe80::2"},
 		{"[::ffff:192.0.2.1]:1234", "::ffff:192.0.2.1"},
+		{"[::ffff:192.0.2.1%eth0]:1234", "::ffff:192.0.2.1"},
 	} {
 		t.Run(tc.remote, func(t *testing.T) {
 			h, q, _ := newHelloQueue(t, 4)

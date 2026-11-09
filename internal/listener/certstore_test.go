@@ -510,6 +510,49 @@ func TestTS16OpenRemovesLeftoverTemporaryFilesThroughTheRoot(t *testing.T) {
 	unchanged(t, target)
 }
 
+// The walk of Open reads a directory 256 names at a time. It removes the
+// leftover names of each batch. It ends at the end of the directory. A cache
+// directory with no name ends the walk at once. Open runs in a goroutine. A
+// walk that does not end then fails the test and does not hang it.
+func TestTS16OpenRemovesMoreLeftoverFilesThanOneReadAndEndsTheWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{
+		{"no name", 0},
+		{"more names than one read", 700},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cache := filepath.Join(dir, "cache")
+			mustNil(t, os.Mkdir(cache, 0o700))
+			for i := 0; i < tc.n; i++ {
+				mustNil(t, os.WriteFile(filepath.Join(cache, fmt.Sprintf("%s%d", tmpPrefix, i)), nil, 0o600))
+			}
+			state, err := os.OpenRoot(dir)
+			mustNil(t, err)
+			defer state.Close()
+			opened := make(chan error, 1)
+			go func() {
+				s, err := Open(state, "cache")
+				if err == nil {
+					err = s.Close()
+				}
+				opened <- err
+			}()
+			select {
+			case err := <-opened:
+				mustNil(t, err)
+			case <-time.After(30 * time.Second):
+				t.Fatal("Open did not end the walk of the cache directory")
+			}
+			if n := countTmp(t, cache); n != 0 {
+				t.Errorf("%d temporary names stay in the cache directory", n)
+			}
+		})
+	}
+}
+
 // The walk of Open goes into a directory only down to maxParts levels below the
 // cache directory. The directory at level maxParts is the deepest that it enters.
 // It does not enter the next level, so a leftover file there stays.
