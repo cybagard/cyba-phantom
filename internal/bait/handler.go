@@ -47,8 +47,8 @@ var (
 // is. Call it after the flush. A later request on the connection gets no
 // response. The connection caps do not count the handler after the close. So
 // the work after the close must stay short. It takes only two short locks: the
-// admission cap and, when a queue lane is full, the drop counters. It has no
-// blocking send and no I/O.
+// admission cap and, when the queue drops an event, the drop counters. It has
+// no blocking send and no I/O.
 func closeConn(w http.ResponseWriter) {
 	if c, _, err := http.NewResponseController(w).Hijack(); err == nil {
 		_ = c.Close()
