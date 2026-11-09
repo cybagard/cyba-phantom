@@ -221,8 +221,9 @@ func TestTU26ChunkEndsAtTheTimeBudget(t *testing.T) {
 
 // T-U-26: an event batch that waits in the lanes commits before the next
 // chunk. The writer takes at most one batch between two chunks. Thus a flood
-// cannot hold the run. With 1 200 events, each of the first two chunks has a
-// batch of 500 after it. With 1 event and no tick, the batch has 1 event.
+// cannot hold the run. With 1 200 events: After each of the first two chunks,
+// the writer writes a batch of 500. With 1 event and no tick, the batch has 1
+// event.
 func TestTU26WaitingBatchCommitsBeforeNextChunk(t *testing.T) {
 	cases := []struct {
 		events, rows int
@@ -538,9 +539,9 @@ func TestTU26CallerThatLeftGetsNoRun(t *testing.T) {
 
 // T-U-26: the request that RunRetention queues carries the done channel of the
 // caller. The caller leaves before the writer takes the request. Then the
-// writer runs no step.
+// writer runs no step and no checkpoint statement.
 func TestTU26RunRetentionRequestKnowsWhenTheCallerLeft(t *testing.T) {
-	r, calls, _ := countingRig(t, true)
+	r, calls, stmts := countingRig(t, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	res := make(chan error, 1)
@@ -562,8 +563,8 @@ func TestTU26RunRetentionRequestKnowsWhenTheCallerLeft(t *testing.T) {
 	}
 	r.w.serveRetention(context.Background(), nil, nil, rq)
 	wantRule(t, r.reply(rq), writerName, ruleRetention)
-	if *calls != 0 {
-		t.Fatalf("%d steps ran", *calls)
+	if *calls != 0 || len(*stmts) != 0 {
+		t.Fatalf("%d steps ran, statements %v", *calls, *stmts)
 	}
 }
 

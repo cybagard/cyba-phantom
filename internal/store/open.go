@@ -607,8 +607,8 @@ func verify(db *sql.DB, rel string) error {
 	if mode != "wal" {
 		return fail(rel, ruleSetting)
 	}
-	// secure_delete must be 1 (SEC-39). After a checkpoint that is not busy, a
-	// freed page holds no old bytes.
+	// secure_delete must be 1 (SEC-39). After a TRUNCATE checkpoint that is not
+	// busy, no old bytes stay in the database file or the WAL.
 	var secure int
 	if err := db.QueryRowContext(ctx, "PRAGMA secure_delete").Scan(&secure); err != nil {
 		return fail(rel, ruleOpen)
