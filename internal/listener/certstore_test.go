@@ -46,6 +46,49 @@ func mustNil(t testing.TB, err error) {
 	}
 }
 
+// TestMain opens an empty cache directory before all tests.
+// If the walk of Open does not end, each later test that opens a store hangs.
+// The package run then stops only at the time limit of the tool.
+// This check makes the whole run fail in 30 s with one line.
+func TestMain(m *testing.M) {
+	fail := func(msg string) {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(1)
+	}
+	dir, err := os.MkdirTemp("", "listener-start-check")
+	if err != nil {
+		fail("start check: " + err.Error())
+	}
+	if err := os.Mkdir(filepath.Join(dir, "cache"), 0o700); err != nil {
+		fail("start check: " + err.Error())
+	}
+	state, err := os.OpenRoot(dir)
+	if err != nil {
+		fail("start check: " + err.Error())
+	}
+	type result struct {
+		s   *Store
+		err error
+	}
+	opened := make(chan result, 1)
+	go func() {
+		s, err := Open(state, "cache")
+		opened <- result{s, err}
+	}()
+	select {
+	case r := <-opened:
+		if r.err != nil {
+			fail("start check: Open of an empty cache directory failed: " + r.err.Error())
+		}
+		r.s.Close()
+	case <-time.After(30 * time.Second):
+		fail("start check: Open of an empty cache directory did not end")
+	}
+	state.Close()
+	os.RemoveAll(dir)
+	os.Exit(m.Run())
+}
+
 func TestTS16StoreLoadStatDeleteRoundTrip(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
