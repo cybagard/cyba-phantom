@@ -453,16 +453,7 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	if solver != f.addr {
 		t.Fatalf("solver address %s is not the address of the decoy socket %s", solver, f.addr)
 	}
-	decoyHoldsSolver := func(when string) {
-		t.Helper()
-		if l, err := net.Listen("tcp", solver); err == nil {
-			l.Close()
-			t.Fatalf("%s: a second listener bound the solver address %s", when, solver)
-		} else if !strings.Contains(err.Error(), "address already in use") {
-			t.Fatalf("%s: second bind: %v", when, err)
-		}
-	}
-	decoyHoldsSolver("before Start")
+	requireBindRefused(t, solver, "before Start")
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
@@ -470,57 +461,61 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.addr) {
 		t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, f.addr)
 	}
-	// The goroutine writes these. finish reads them after done.
-	var samples, failed int
-	var lastErr error
-	var extra []string
-	quit, done := make(chan struct{}), make(chan struct{})
-	go func() { // no t.Fatal here
-		defer close(done)
-		for stop := false; !stop; {
-			select {
-			case <-quit:
-				stop = true
-			case <-time.After(time.Millisecond):
-			}
-			now, err := listeningSockets()
-			if err != nil {
-				failed, lastErr = failed+1, err
-				continue
-			}
-			samples++
-			for inode, addr := range now {
-				if _, ok := before[inode]; !ok && !slices.Contains(extra, addr) {
-					extra = append(extra, addr)
-				}
-			}
-		}
-	}()
-	var once sync.Once
-	finish := func() {
-		once.Do(func() {
-			close(quit)
-			<-done
-			t.Logf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", samples, failed, lastErr)
-			if samples == 0 {
-				t.Error("no sample of the listening sockets was read, so the check saw nothing")
-			}
-			if len(extra) != 0 {
-				t.Errorf("new listening sockets since before Start: %v", extra)
-			}
-		})
-	}
-	t.Cleanup(finish)
+	finish := watchListeners(t, before)
 	startIssue(t, f)
 	f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
 	finish()
 	// Pebble ran a real TLS-ALPN validation on the decoy socket in the window.
 	f.requireALPN(t)
-	decoyHoldsSolver("after the certificate")
+	requireBindRefused(t, solver, "after the certificate")
 	for inode, addr := range mustListeningSockets(t) {
 		if _, ok := before[inode]; !ok {
 			t.Errorf("new listening socket %s (inode %s) after the certificate", addr, inode)
 		}
+	}
+}
+
+// TestTS16WildcardDecoyAnswersTheChallenge: the decoy socket listens on a
+// wildcard address, and Host is empty, as a wildcard HTTPS listen gives. No
+// certificate is stored, so the issuer runs a real TLS-ALPN-01 validation with
+// Pebble. The solver address is ":<port>", and the decoy socket holds it, so
+// certmagic binds no socket of its own. The test shows this with a refused bind
+// before Start and after the certificate, and with the listening sockets of the
+// process in each sample from before Start until the certificate is served. The
+// decoy socket completes a handshake with acme-tls/1, so the challenge ran
+// there, and it serves a chain that Pebble issued.
+func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the check reads /proc, which only Linux has")
+	}
+	for _, listen := range []string{"0.0.0.0:0", "[::]:0", ":0"} {
+		t.Run(listen, func(t *testing.T) {
+			f := newIssueFixtureOn(t, listen, "", "wildcard.phantom.test", nil, nil)
+			iss := f.a.cfg.Issuers[0].(*certmagic.ACMEIssuer)
+			if !iss.DisableHTTPChallenge {
+				t.Fatal("the issuer has the HTTP challenge on")
+			}
+			_, port, err := net.SplitHostPort(f.listen)
+			mustNil(t, err)
+			// The checks below run also when this one fails, so they show what a wrong
+			// solver address does.
+			if iss.ListenHost != "" || strconv.Itoa(iss.AltTLSALPNPort) != port {
+				t.Errorf("solver host %q, port %d; want host \"\" and port %s", iss.ListenHost, iss.AltTLSALPNPort, port)
+			}
+			solver := ":" + port // the solver address that a wildcard listen must give
+			requireBindRefused(t, solver, "before Start")
+			before := mustListeningSockets(t)
+			if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.listen) {
+				t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, f.listen)
+			}
+			finish := watchListeners(t, before)
+			startIssue(t, f)
+			chain := f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
+			finish()
+			f.requireALPN(t) // Present ran on the decoy socket
+			f.verifyToPebble(t, chain)
+			requireBindRefused(t, solver, "after the certificate")
+		})
 	}
 }
 

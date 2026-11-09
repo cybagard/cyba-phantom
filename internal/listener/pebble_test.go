@@ -140,7 +140,8 @@ type issueFixture struct {
 	rig    *pebbleRig
 	egress *egressRecorder
 	name   string
-	addr   string       // host:port of the decoy socket
+	addr   string       // host:port that a client dials to reach the decoy socket
+	listen string       // the local address of the decoy socket
 	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
 }
 
@@ -149,13 +150,26 @@ type issueFixture struct {
 // GetCertificate of the ACME. It does not call Start.
 func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	return newIssueFixtureOn(t, "127.0.0.1:0", "127.0.0.1", name, front, mod)
+}
+
+// newIssueFixtureOn is newIssueFixture with the listen address of the decoy
+// socket and the Host of the ACMEParams as parameters. When the listen address
+// is a wildcard, f.addr is the loopback address of the same port, because a
+// client cannot dial a wildcard address, and f.listen is the listen address.
+func newIssueFixtureOn(t *testing.T, listen, host, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
+	t.Helper()
+	l, err := net.Listen("tcp", listen)
 	mustNil(t, err)
 	t.Cleanup(func() { l.Close() })
 	port := l.Addr().(*net.TCPAddr).Port
-	f := &issueFixture{name: name, addr: l.Addr().String(), egress: &egressRecorder{}, rig: newPebbleRig(t, port, front)}
+	addr := l.Addr().String()
+	if l.Addr().(*net.TCPAddr).IP.IsUnspecified() {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	}
+	f := &issueFixture{name: name, addr: addr, listen: l.Addr().String(), egress: &egressRecorder{}, rig: newPebbleRig(t, port, front)}
 	f.a = newTestACME(t, func(p *ACMEParams) {
-		p.Names, p.CA, p.Host, p.Port = []string{name}, f.rig.dir, "127.0.0.1", port
+		p.Names, p.CA, p.Host, p.Port = []string{name}, f.rig.dir, host, port
 		p.OnEgress, p.CARoots = f.egress.record, f.rig.trust
 		if mod != nil {
 			mod(p)
@@ -246,6 +260,69 @@ func (f *issueFixture) requireALPN(t *testing.T) {
 	if n := f.alpn.Load(); n < 1 {
 		t.Errorf("the decoy socket completed %d acme-tls/1 handshakes", n)
 	}
+}
+
+// requireBindRefused fails the test unless a new bind of addr fails with
+// "address already in use". The decoy socket holds addr.
+func requireBindRefused(t *testing.T, addr, when string) {
+	t.Helper()
+	if l, err := net.Listen("tcp", addr); err == nil {
+		l.Close()
+		t.Fatalf("%s: a second listener bound the solver address %s", when, addr)
+	} else if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("%s: second bind: %v", when, err)
+	}
+}
+
+// watchListeners samples the listening TCP sockets of the process every
+// millisecond. The sockets in before may listen. The function that it returns
+// stops the sampler, and it fails the test if no sample was read or if a socket
+// that is not in before listened in any sample. It is safe to call it twice, and
+// the test calls it again at cleanup.
+func watchListeners(t *testing.T, before map[string]string) (finish func()) {
+	t.Helper()
+	// The goroutine writes these. finish reads them after done.
+	var samples, failed int
+	var lastErr error
+	var extra []string
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() { // no t.Fatal here
+		defer close(done)
+		for stop := false; !stop; {
+			select {
+			case <-quit:
+				stop = true
+			case <-time.After(time.Millisecond):
+			}
+			now, err := listeningSockets()
+			if err != nil {
+				failed, lastErr = failed+1, err
+				continue
+			}
+			samples++
+			for inode, addr := range now {
+				if _, ok := before[inode]; !ok && !slices.Contains(extra, addr) {
+					extra = append(extra, addr)
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	finish = func() {
+		once.Do(func() {
+			close(quit)
+			<-done
+			t.Logf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", samples, failed, lastErr)
+			if samples == 0 {
+				t.Error("no sample of the listening sockets was read, so the check saw nothing")
+			}
+			if len(extra) != 0 {
+				t.Errorf("new listening sockets since before Start: %v", extra)
+			}
+		})
+	}
+	t.Cleanup(finish)
+	return finish
 }
 
 // mustListeningSockets is listeningSockets that fails the test on an error.
