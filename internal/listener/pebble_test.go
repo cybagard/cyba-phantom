@@ -331,8 +331,8 @@ func (s *listenerSampler) stop() {
 	}
 }
 
-// verdict stops the sampler. It returns an error if no sample was read or if
-// a socket that is not in before listened in a sample.
+// verdict stops the sampler. It returns an error if no sample was read. It
+// also returns an error if a socket that is not in before listened.
 func (s *listenerSampler) verdict() error {
 	s.stop()
 	if s.samples.Load() == 0 {
