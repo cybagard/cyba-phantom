@@ -95,6 +95,12 @@ func (p pressure) stopNote(toACME, toReturn time.Duration) string {
 	return fmt.Sprintf("; stop to the stopACME call %v, from there to the return %v", toACME, toReturn) + p.note(readPressure())
 }
 
+// openStopNote is stopNote for a stop that has not ended. The second phase
+// has no end yet, so it gives the time since the stopACME call instead.
+func (p pressure) openStopNote(toACME, since time.Duration) string {
+	return fmt.Sprintf("; stop to the stopACME call %v, then %v and serve has not returned", toACME, since) + p.note(readPressure())
+}
+
 // wantPressure checks that r has the host io pressure at begin when the host
 // has the file. On a host without the file, it checks nothing.
 func wantPressure(t *testing.T, r *running) {

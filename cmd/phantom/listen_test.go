@@ -1255,8 +1255,9 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 // shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. The test
 // checks that total bound from the stop to the return of serve. Serve calls
 // stopACME after the servers stopped. So the test also checks that the time to
-// that call is at least shutdownTime - 1 s. Each failure text gives both
-// phases and the pressure. A stop wait with no limit never returns.
+// that call is at least shutdownTime - 1 s. Each failure text gives the phase
+// times that it has and the pressure. A stop wait with no limit does not end
+// while the handler runs, so it fails the bound.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
 	stopped := make(chan time.Time, 1)
 	oldStop := stopACME
@@ -1299,10 +1300,10 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 	select {
 	case <-r.done:
 	case <-time.After(limit):
-		note := atCancel.note(readPressure())
+		note := fmt.Sprintf("; serve did not call stopACME in %v", limit) + atCancel.note(readPressure())
 		select {
 		case at := <-stopped:
-			note = atCancel.stopNote(at.Sub(begin), time.Since(at))
+			note = atCancel.openStopNote(at.Sub(begin), time.Since(at))
 		default:
 		}
 		t.Fatalf("serve did not return %v after the stop%s", limit, note)
@@ -1317,7 +1318,7 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 			t.Errorf("serve stopped the servers %v after the stop, want about %v: it did not wait for the connection%s", toACME, shutdownTime, note)
 		}
 	default:
-		t.Error("serve did not call stopACME")
+		t.Errorf("serve did not call stopACME; stop to the return %v%s", done.Sub(begin), atCancel.note(readPressure()))
 	}
 }
 
