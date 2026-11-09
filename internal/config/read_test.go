@@ -66,12 +66,13 @@ func TestTS10_BareTagCursorEdges(t *testing.T) {
 }
 
 // TestTS10_CutBound checks the 64-byte bound of cut. A string of 65 bytes
-// gives its first 64 bytes. A string of 64 bytes stays whole.
+// gives its first 64 bytes. A string of 63 or 64 bytes stays whole.
 func TestTS10_CutBound(t *testing.T) {
 	s64 := strings.Repeat("a", 63) + "b"
 	for _, r := range []struct{ name, in, want string }{
 		{"65 bytes", s64 + "c", s64},
 		{"64 bytes", s64, s64},
+		{"63 bytes", s64[:63], s64[:63]},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			if got := cut(r.in); got != r.want {

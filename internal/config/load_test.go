@@ -43,7 +43,7 @@ var testDir = func() string {
 // other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
 // It also stops the run if one of these calls does not end: esc, ReadBytes
-// and AllowList. Earlier tests make the same calls with no time bound.
+// and AllowList. Other tests make the same calls with no time bound.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.
 	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "load_test.go"), htpasswdDirRule); err != nil {
