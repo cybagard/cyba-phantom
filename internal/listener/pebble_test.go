@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,9 +155,11 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 }
 
 // newIssueFixtureOn is newIssueFixture with the listen address of the decoy
-// socket and the Host of the ACMEParams as parameters. A client cannot dial a
-// wildcard address. So for a wildcard, f.addr is the loopback address of the
-// same port. f.listen is always the listen address.
+// socket and the Host of the ACMEParams as parameters. Go can dial a wildcard
+// address, and the dial then reaches the local system. The fixture dials
+// loopback for a wildcard, so the dial does not depend on that rule. So for a
+// wildcard, f.addr is the loopback address of the same port. f.listen is always
+// the listen address.
 func newIssueFixtureOn(t *testing.T, listen, host, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
 	t.Helper()
 	l, err := net.Listen("tcp", listen)
@@ -262,56 +265,90 @@ func (f *issueFixture) requireALPN(t *testing.T) {
 	}
 }
 
+// bindRefusedError returns nil if a new bind of addr fails with "address
+// already in use". Otherwise it returns an error that tells what happened.
+func bindRefusedError(addr string) error {
+	l, err := net.Listen("tcp", addr)
+	if err == nil {
+		l.Close()
+		return fmt.Errorf("a second listener bound the solver address %s", addr)
+	}
+	if !strings.Contains(err.Error(), "address already in use") {
+		return fmt.Errorf("second bind: %w", err)
+	}
+	return nil
+}
+
 // requireBindRefused fails the test unless a new bind of addr fails with
 // "address already in use". The decoy socket holds addr.
 func requireBindRefused(t *testing.T, addr, when string) {
 	t.Helper()
-	if l, err := net.Listen("tcp", addr); err == nil {
-		l.Close()
-		t.Fatalf("%s: a second listener bound the solver address %s", when, addr)
-	} else if !strings.Contains(err.Error(), "address already in use") {
-		t.Fatalf("%s: second bind: %v", when, err)
+	if err := bindRefusedError(addr); err != nil {
+		t.Fatalf("%s: %v", when, err)
 	}
 }
 
-// watchListeners samples the listening TCP sockets of the process every
-// millisecond. The sockets in before may listen. The function that it returns
-// stops the sampler. Then it fails the test if no sample was read. It also
-// fails the test if a socket that is not in before listened in a sample. A
-// second call does nothing. The test calls it at cleanup too.
-func watchListeners(t *testing.T, before map[string]string) (finish func()) {
-	t.Helper()
-	// The goroutine writes these. finish reads them after done.
-	var samples, failed int
-	var lastErr error
-	var extra []string
-	quit, done := make(chan struct{}), make(chan struct{})
+// listenerSampler reads the listening TCP sockets of the process in a loop.
+type listenerSampler struct {
+	samples atomic.Int64 // the goroutine adds, and the callers read
+	quit    chan struct{}
+	done    chan struct{}
+	// The goroutine writes these. stop reads them after done.
+	failed  int
+	lastErr error
+	extra   []string
+}
+
+// startListenerSampler starts the loop. After each sample it waits 1 ms. The
+// sockets in before may listen. The loop collects the addresses of the other
+// sockets.
+func startListenerSampler(before map[string]string) *listenerSampler {
+	s := &listenerSampler{quit: make(chan struct{}), done: make(chan struct{})}
 	go func() { // no t.Fatal here
-		defer close(done)
+		defer close(s.done)
 		for stop := false; !stop; {
 			select {
-			case <-quit:
+			case <-s.quit:
 				stop = true
 			case <-time.After(time.Millisecond):
 			}
 			now, err := listeningSockets()
 			if err != nil {
-				failed, lastErr = failed+1, err
+				s.failed, s.lastErr = s.failed+1, err
 				continue
 			}
-			samples++
+			s.samples.Add(1)
 			for inode, addr := range now {
-				if _, ok := before[inode]; !ok && !slices.Contains(extra, addr) {
-					extra = append(extra, addr)
+				if _, ok := before[inode]; !ok && !slices.Contains(s.extra, addr) {
+					s.extra = append(s.extra, addr)
 				}
 			}
 		}
 	}()
+	return s
+}
+
+// stop ends the loop and returns the addresses of the new sockets, the sample
+// count, the count of failed reads and the last read error. Call it once.
+func (s *listenerSampler) stop() (extra []string, samples int64, failed int, lastErr error) {
+	close(s.quit)
+	<-s.done
+	return s.extra, s.samples.Load(), s.failed, s.lastErr
+}
+
+// watchListeners samples the listening TCP sockets of the process. The sockets
+// in before may listen. The function that it returns stops the sampler. Then it
+// fails the test if no sample was read. It also fails the test if a socket that
+// is not in before listened in a sample. A second call does nothing. The test
+// calls it at cleanup too.
+func watchListeners(t *testing.T, before map[string]string) (finish func()) {
+	t.Helper()
+	s := startListenerSampler(before)
 	var once sync.Once
 	finish = func() {
+		t.Helper()
 		once.Do(func() {
-			close(quit)
-			<-done
+			extra, samples, failed, lastErr := s.stop()
 			t.Logf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", samples, failed, lastErr)
 			if samples == 0 {
 				t.Error("no sample of the listening sockets was read, so the check saw nothing")
@@ -323,6 +360,40 @@ func watchListeners(t *testing.T, before map[string]string) (finish func()) {
 	}
 	t.Cleanup(finish)
 	return finish
+}
+
+// TestTS16BindCheckFailsOnAFreeAddress is the positive control of the bind
+// check: on an address that nothing holds, a bind works, so the check must
+// give an error.
+func TestTS16BindCheckFailsOnAFreeAddress(t *testing.T) {
+	if err := bindRefusedError(closedAddr(t)); err == nil {
+		t.Fatal("the bind check gave no error on a free address")
+	}
+}
+
+// TestTS16SamplerReportsAListenerThatOpensAfterItStarts is the positive control
+// of the sampler. The control opens a listener after the sampler starts. It keeps
+// the listener open until the sampler has taken two more samples, so the second
+// one began after the open. Then it stops the sampler, which must report the
+// listener.
+func TestTS16SamplerReportsAListenerThatOpensAfterItStarts(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the check reads /proc, which only Linux has")
+	}
+	s := startListenerSampler(mustListeningSockets(t))
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	mustNil(t, err)
+	defer l.Close()
+	for want, deadline := s.samples.Load()+2, time.Now().Add(issueWait); s.samples.Load() < want; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			s.stop()
+			t.Fatal("the sampler took no sample after the listener opened")
+		}
+	}
+	extra, samples, _, _ := s.stop()
+	if !slices.Contains(extra, l.Addr().String()) {
+		t.Fatalf("the sampler reported %v after %d samples; want the listener %s", extra, samples, l.Addr())
+	}
 }
 
 // mustListeningSockets is listeningSockets that fails the test on an error.

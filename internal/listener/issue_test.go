@@ -436,6 +436,15 @@ func TestTS16RedirectToAnotherPortIsRefused(t *testing.T) {
 	}
 }
 
+// requireSnapshot fails the test unless the snapshot of the listening sockets
+// before Start holds the decoy socket, Pebble and the DNS server.
+func requireSnapshot(t *testing.T, before map[string]string, decoy string) {
+	t.Helper()
+	if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), decoy) {
+		t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, decoy)
+	}
+}
+
 // TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge samples the listening
 // TCP sockets of the process from before Start until the certificate is served.
 // Only the sockets that existed before Start may listen. The solver address of
@@ -458,9 +467,7 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
 	before := mustListeningSockets(t)
-	if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.addr) {
-		t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, f.addr)
-	}
+	requireSnapshot(t, before, f.addr)
 	finish := watchListeners(t, before)
 	startIssue(t, f)
 	f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
@@ -485,9 +492,8 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 // decoy socket completes a handshake with acme-tls/1, so the challenge ran
 // there. It serves a chain that Pebble issued.
 func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the check reads /proc, which only Linux has")
-	}
+	// On Linux, with the network "tcp", Go binds the three forms as one
+	// dual-stack [::] socket, as the sensor does with a wildcard listen.
 	for _, listen := range []string{"0.0.0.0:0", "[::]:0", ":0"} {
 		t.Run(listen, func(t *testing.T) {
 			f := newIssueFixtureOn(t, listen, "", "wildcard.phantom.test", nil, nil)
@@ -495,8 +501,14 @@ func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 			if !iss.DisableHTTPChallenge {
 				t.Fatal("the issuer has the HTTP challenge on")
 			}
-			_, port, err := net.SplitHostPort(f.listen)
+			// The decoy socket must be on a wildcard address. Else the
+			// test checks a loopback socket.
+			ap, err := netip.ParseAddrPort(f.listen)
 			mustNil(t, err)
+			if !ap.Addr().IsUnspecified() {
+				t.Fatalf("the decoy socket listens on %s; want a wildcard address", f.listen)
+			}
+			port := strconv.Itoa(int(ap.Port()))
 			// The checks below run also when this one fails. Then they show
 			// what a wrong solver address does.
 			if iss.ListenHost != "" || strconv.Itoa(iss.AltTLSALPNPort) != port {
@@ -505,10 +517,11 @@ func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 			// This is the solver address that a wildcard listen must give.
 			solver := ":" + port
 			requireBindRefused(t, solver, "before Start")
-			before := mustListeningSockets(t)
-			if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.listen) {
-				t.Fatalf("the snapshot before Start is %v; want the decoy %s, Pebble and the DNS server", before, f.listen)
+			if runtime.GOOS != "linux" {
+				t.Skip("the check reads /proc, which only Linux has")
 			}
+			before := mustListeningSockets(t)
+			requireSnapshot(t, before, f.listen)
 			finish := watchListeners(t, before)
 			startIssue(t, f)
 			chain := f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
