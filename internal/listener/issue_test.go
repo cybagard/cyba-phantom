@@ -478,12 +478,12 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 // TestTS16WildcardDecoyAnswersTheChallenge: the decoy socket listens on a
 // wildcard address, and Host is empty, as a wildcard HTTPS listen gives. No
 // certificate is stored, so the issuer runs a real TLS-ALPN-01 validation with
-// Pebble. The solver address is ":<port>", and the decoy socket holds it, so
-// certmagic binds no socket of its own. The test shows this with a refused bind
-// before Start and after the certificate, and with the listening sockets of the
-// process in each sample from before Start until the certificate is served. The
+// Pebble. The solver address is ":<port>". The decoy socket holds it, so
+// certmagic binds no socket of its own. A bind of that address is refused
+// before Start and after the certificate. No sample of the listening sockets
+// shows a new socket, from before Start until the certificate is served. The
 // decoy socket completes a handshake with acme-tls/1, so the challenge ran
-// there, and it serves a chain that Pebble issued.
+// there. It serves a chain that Pebble issued.
 func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
@@ -497,8 +497,8 @@ func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 			}
 			_, port, err := net.SplitHostPort(f.listen)
 			mustNil(t, err)
-			// The checks below run also when this one fails, so they show what a wrong
-			// solver address does.
+			// The checks below run also when this one fails. Then they show
+			// what a wrong solver address does.
 			if iss.ListenHost != "" || strconv.Itoa(iss.AltTLSALPNPort) != port {
 				t.Errorf("solver host %q, port %d; want host \"\" and port %s", iss.ListenHost, iss.AltTLSALPNPort, port)
 			}

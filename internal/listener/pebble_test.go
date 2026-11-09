@@ -154,9 +154,9 @@ func newIssueFixture(t *testing.T, name string, front func(http.Handler) http.Ha
 }
 
 // newIssueFixtureOn is newIssueFixture with the listen address of the decoy
-// socket and the Host of the ACMEParams as parameters. When the listen address
-// is a wildcard, f.addr is the loopback address of the same port, because a
-// client cannot dial a wildcard address, and f.listen is the listen address.
+// socket and the Host of the ACMEParams as parameters. A client cannot dial a
+// wildcard address. So for a wildcard, f.addr is the loopback address of the
+// same port. f.listen is always the listen address.
 func newIssueFixtureOn(t *testing.T, listen, host, name string, front func(http.Handler) http.Handler, mod func(*ACMEParams)) *issueFixture {
 	t.Helper()
 	l, err := net.Listen("tcp", listen)
@@ -276,9 +276,9 @@ func requireBindRefused(t *testing.T, addr, when string) {
 
 // watchListeners samples the listening TCP sockets of the process every
 // millisecond. The sockets in before may listen. The function that it returns
-// stops the sampler, and it fails the test if no sample was read or if a socket
-// that is not in before listened in any sample. It is safe to call it twice, and
-// the test calls it again at cleanup.
+// stops the sampler. Then it fails the test if no sample was read. It also
+// fails the test if a socket that is not in before listened in a sample. A
+// second call does nothing. The test calls it at cleanup too.
 func watchListeners(t *testing.T, before map[string]string) (finish func()) {
 	t.Helper()
 	// The goroutine writes these. finish reads them after done.
