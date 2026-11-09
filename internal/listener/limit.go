@@ -406,9 +406,9 @@ func (c *limitConn) startRequest() { _ = c.reachHandler(true) }
 
 // reachHandler marks that a handler runs in this period, for each request. When
 // active is true, the request has no body. Then the next Write starts the late
-// run. When the connection is closed, it marks nothing and returns false. Then
-// net/http parsed a pipelined request from its buffer. The read budget closed
-// the connection at the idle state before that (SEC-22).
+// run. When the connection is closed, it marks nothing and returns false. For
+// example, the read budget closed it at the idle state. Then net/http parsed
+// a pipelined request from its buffer (SEC-22).
 func (c *limitConn) reachHandler(active bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

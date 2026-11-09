@@ -27,7 +27,8 @@ func (rc *recorder) record(r *http.Request, code int) {
 	if err != nil {
 		ip = r.RemoteAddr // NewEvent refuses a value that is not an address
 	}
-	// NewEvent refuses a zone. Remove it, as the refused emitter does.
+	// NewEvent refuses a zone. Remove it with WithZone(""), as the refused
+	// emitter does. The address is not unmapped.
 	if strings.IndexByte(ip, '%') >= 0 {
 		if a, err := netip.ParseAddr(ip); err == nil {
 			ip = a.WithZone("").String()
