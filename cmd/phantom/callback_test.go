@@ -23,13 +23,14 @@ const (
 	cbRowWait = 250 * time.Millisecond
 )
 
-// memoryRoot makes a state directory on a memory filesystem. The test cleanup
-// removes it after the sensor has stopped.
+// memoryRoot makes a state directory on a memory filesystem (tmpfs). The test
+// cleanup removes it after the sensor stops.
 func memoryRoot(t *testing.T) string {
 	t.Helper()
 	requireTmpfs(t, "/dev/shm")
 	root, err := os.MkdirTemp("/dev/shm", "phantom-state-")
 	mustOK(t, err)
+	requireTmpfs(t, root)
 	t.Cleanup(func() { os.RemoveAll(root) })
 	mustOK(t, os.Chmod(root, 0o700))
 	return root
@@ -168,6 +169,7 @@ func pollRow(t *testing.T, db *sql.DB, query string, args []any, dest ...any) ti
 // and not the disk syncs.
 func TestTI04_CallbackRowsEndToEnd(t *testing.T) {
 	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
+	requireTmpfs(t, s.p.Root)
 	db := readStore(t, s)
 	render := fetch(t, s.https, decoyName, "/slots", "")
 	if render.status != 200 {
@@ -249,6 +251,7 @@ func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
 // bound checks the sensor path and not the disk syncs.
 func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
 	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
+	requireTmpfs(t, s.p.Root)
 	db := readStore(t, s)
 	// Each render has new tokens. Each render makes one mint row.
 	first := pageTokens(t, fetch(t, s.https, decoyName, "/slots", ""))

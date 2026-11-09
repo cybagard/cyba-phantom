@@ -4,9 +4,9 @@ package main
 
 import "testing"
 
-// requireTmpfs skips the test. Only Linux has the memory filesystem that the
-// 250 ms test needs.
+// requireTmpfs skips the test. The check runs only on Linux. On other systems
+// the test skips.
 func requireTmpfs(t *testing.T, _ string) {
 	t.Helper()
-	t.Skip("the 250 ms test needs a tmpfs state directory; only Linux has /dev/shm")
+	t.Skip("the 250 ms test needs a tmpfs state directory; it runs only on Linux")
 }
