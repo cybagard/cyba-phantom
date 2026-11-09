@@ -60,8 +60,9 @@ func (rq retentionRequest) left() bool {
 // A stopped writer, or a ctx that has ended, gives its error at once and sends
 // no request. A call that returns on its ctx can leave a request. The writer
 // drops a request whose caller has left when the writer takes the request.
-// A call also waits until its ctx ends when Run is not running: not started,
-// or returned after Close or a cancel. The request then stays in the buffer.
+// A call also waits until its ctx ends when Run is not running. Run can be
+// not started, or it can return after Close or a cancel. The request then
+// stays in the buffer.
 // The same holds when the writer stops while the request waits. Any goroutine
 // can make the call.
 func (w *Writer) RunRetention(ctx context.Context) error {
