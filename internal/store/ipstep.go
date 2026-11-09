@@ -14,8 +14,9 @@ const clearIPSQL = "UPDATE session SET ip = NULL WHERE rowid IN (SELECT rowid FR
 // newIPStep returns the retention step for the raw address (SEC-39). It clears
 // the address of each session with first_seen before tPriv minus `days` x 24 h.
 // The cutoff is in unix ms. The step reads no clock. tPriv is the time of the
-// run, and the caller gives it. The step covers the session rows of refused
-// events too. The writer puts them in the session table.
+// run, and the caller gives it. The writer puts the session rows of refused
+// events in the session table. Thus the step also clears the address of these
+// rows.
 //
 // The configuration keeps `days` in the range 1 to 7. Outside this range, or
 // with a zero tPriv, the step runs no statement and returns an error. The

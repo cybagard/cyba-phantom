@@ -18,7 +18,7 @@ import (
 
 // ipTPriv is the time of the run in the tests: the tPriv that the caller gives
 // to the step.
-// It has a part of 123 ms, so a cutoff cut to whole seconds fails a test.
+// It has a part of 123 ms, so a cutoff in whole seconds fails a test.
 var ipTPriv = time.UnixMilli(1_800_000_000_123)
 
 // ipCutoff is the cutoff of the step for `days` x 24 h, in unix ms. The tests
