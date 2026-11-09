@@ -119,7 +119,11 @@ func readStore(t *testing.T, s *baitSensor) *sql.DB {
 	mustOK(t, err)
 	t.Cleanup(func() {
 		s.cancel()
-		<-s.done
+		select {
+		case <-s.done:
+		case <-time.After(sigtermWait):
+			t.Errorf("serve did not return after the cancel at the end of the test")
+		}
 		db.Close()
 		root.Close()
 	})
@@ -182,7 +186,9 @@ func TestTI04_CallbackRowsEndToEnd(t *testing.T) {
 		if d := found.Sub(got); d > cbRowWait {
 			t.Errorf("position %d: callback row after %v; want at most %v", pos, d, cbRowWait)
 		}
-		if surface != string(surfaces[pos]) || trap != traps[pos] || session != cbSession || leaf < 0 {
+		// The schema refuses a callback row with no leaf, so the row poll
+		// checks the leaf.
+		if surface != string(surfaces[pos]) || trap != traps[pos] || session != cbSession {
 			t.Errorf("position %d: callback row surface %q, trap %q, session %q, leaf %d; want %q, %q, %q and a leaf",
 				pos, surface, trap, session, leaf, surfaces[pos], traps[pos], cbSession)
 		}
@@ -221,10 +227,10 @@ func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
 // TestTI04_SameTokenOnceAndRepeatCapped checks two rules of T-I-04 on a
 // started sensor (SEC-37). One token at all four positions of one request
 // gives one callback row and cb_count 1. A repeat of a token that has its row
-// gives no second row and no second count. The request row of the repeat holds
-// the trap, the token id and the surface of the token. The callbacks come from
-// one client address. The cap for one client key is 10 in 60 s. The test makes
-// 3, so only the cap for each token can refuse.
+// gives no second row and no second count. Its request row holds
+// the trap, the token id and the surface of the position of the repeat. The
+// callbacks come from one client address. The cap for one client key is 10 in
+// 60 s. The test makes 3, so only the cap for each token can refuse.
 func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
 	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
 	db := readStore(t, s)
@@ -251,6 +257,22 @@ func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
 	if d := found.Sub(got); d > cbRowWait {
 		t.Errorf("four positions: callback row after %v; want at most %v", d, cbRowWait)
 	}
+	// The request row of this request is the barrier. The request makes its
+	// callback events before its request event, in one goroutine. Only this
+	// request has a token in the path segment.
+	var reqRows int
+	pollRow(t, db, "SELECT count(*) FROM event WHERE kind = 'request' AND path LIKE '/api/cb/%' HAVING count(*) > 0", nil, &reqRows)
+	// Without the same-token rule, the cap refuses the positions 2 to 4. The
+	// request row then holds the token fields, as for a capped repeat.
+	var capped int
+	mustOK(t, db.QueryRowContext(t.Context(), "SELECT count(*) FROM event WHERE kind = 'request' AND token_id = ?", once).Scan(&capped))
+	if capped != 0 {
+		t.Errorf("four positions: %d request rows with the token id; want 0", capped)
+	}
+	rows, count := cbCount(t, db, once)
+	if rows != 1 || count != 1 {
+		t.Errorf("four positions: %d callback rows and cb_count %d; want 1 and 1", rows, count)
+	}
 
 	// A token with one row, sent again at another position.
 	rep := idOf(first[1])
@@ -269,10 +291,8 @@ func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
 	if trap != "m" || repSurface != string(event.SurfaceHeader) {
 		t.Errorf("request row of the repeat: trap %q, surface %q; want %q and %q", trap, repSurface, "m", event.SurfaceHeader)
 	}
-	for name, id := range map[string]string{"four positions": once, "repeat": rep} {
-		if rows, count := cbCount(t, db, id); rows != 1 || count != 1 {
-			t.Errorf("%s: %d callback rows and cb_count %d; want 1 and 1", name, rows, count)
-		}
+	if rows, count := cbCount(t, db, rep); rows != 1 || count != 1 {
+		t.Errorf("repeat: %d callback rows and cb_count %d; want 1 and 1", rows, count)
 	}
 	s.stop(t)
 }
