@@ -397,6 +397,15 @@ func TestTS20SealSeed(t *testing.T) {
 	if seed2, _ := open(k, ver(2), "k1", again); bytes.Equal(seed, seed2) {
 		t.Error("two seals hold the same seed")
 	}
+	// A seal for key ID k2 opens with k2 and not with k1.
+	ct2, err := SealSeed(pub, ver(2), "k2")
+	must(t, err)
+	if got, err := open(k, ver(2), "k2", ct2); err != nil || len(got) != seedSize {
+		t.Errorf("open with k2: %d bytes, %v", len(got), err)
+	}
+	if got, err := open(k, ver(2), "k1", ct2); err == nil || got != nil {
+		t.Error("a seal for k2 opens with k1")
+	}
 	for name, f := range map[string]func() ([]byte, error){
 		"version":     func() ([]byte, error) { return open(k, ver(3), "k1", ct) },
 		"key ID":      func() ([]byte, error) { return open(k, ver(2), "k2", ct) },

@@ -482,11 +482,12 @@ func TestTS20RotationChainInMemory(t *testing.T) {
 }
 
 // T-S-20: a bundle directory that does not exist is healthy, as at a first
-// start. Another error at the open of the directory is not healthy.
+// start. Another error at the open of the directory is not healthy. A path
+// with a slash at index 0 has an empty directory part, which does not open.
 func TestTS20HealthyWithoutBundleDirectory(t *testing.T) {
 	e := newEnv(t)
 	must(t, os.Symlink("keys", filepath.Join(e.state, "b1")))
-	for path, want := range map[string]bool{"none/current.cbnd": true, "b1/current.cbnd": false} {
+	for path, want := range map[string]bool{"none/current.cbnd": true, "b1/current.cbnd": false, "/current.cbnd": false} {
 		if got := e.loader(path).Healthy(); got != want {
 			t.Errorf("%s: healthy %v; want %v", path, got, want)
 		}
