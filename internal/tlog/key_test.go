@@ -984,8 +984,8 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 	}
 }
 
-// T-S-13: the load path syncs the public key temporary file. Then it syncs the
-// keys directory, which holds both key files by their final names.
+// T-S-13: the load path syncs the temporary file of the public key. Then it
+// syncs the keys directory, which holds both key files by their final names.
 func TestTS13_VkeyRewriteSyncsTheKeysDirectory(t *testing.T) {
 	root, dir, _ := firstStart(t)
 	must(t, os.Remove(filepath.Join(dir, vkeyName)))

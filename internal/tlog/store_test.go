@@ -242,7 +242,8 @@ var (
 type syncedText struct{ path, text string }
 
 // textAtSync reads the file that a file-sync hook gets. The fsync must come
-// after the write. textAtSync does not check this: check finds an empty text.
+// after the write. textAtSync does not examine the text. The method check
+// reports an empty text and a text that differs from the final file.
 func textAtSync(t *testing.T, f *os.File) syncedText {
 	t.Helper()
 	b, err := os.ReadFile(f.Name())
