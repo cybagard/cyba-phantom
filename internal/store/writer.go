@@ -35,10 +35,11 @@ const (
 
 // Writer is the one writer of the event table. It uses the database pool from
 // Open and Migrate, the queue, and the log. The caller closes them after
-// Run returns. It also adds the drop counts of the queue to ip_counter. A paused
-// writer keeps them in memory until the resume or shutdown. A stopped writer
-// does not write them. The day key comes from one session.DayKey, shared with
-// the request path when the caller gives it to NewWriterWithDayKey.
+// Run returns. It also adds the drop counts of the queue to ip_counter. A
+// paused writer keeps them in memory until the resume or shutdown. A stopped
+// writer does not write them. The day key comes from one session.DayKey,
+// shared with the request path when the caller gives it to
+// NewWriterWithDayKey.
 //
 // The writer stops for one of five causes (see Run):
 //   - an append error.
