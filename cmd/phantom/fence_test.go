@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,9 @@ type cacheFence struct {
 	next   certmagic.Storage
 	closed bool
 	busy   sync.WaitGroup // the operations in progress
+	// afterCheck, when set, runs in each operation that passed its check,
+	// before it calls the cache.
+	afterCheck func()
 }
 
 func newCacheFence(next certmagic.Storage) *cacheFence { return &cacheFence{next: next} }
@@ -44,9 +48,12 @@ func (f *cacheFence) do(fn func(certmagic.Storage) error) error {
 		return errFenceClosed
 	}
 	f.busy.Add(1)
-	next := f.next
+	next, hook := f.next, f.afterCheck
 	f.mu.Unlock()
 	defer f.busy.Done()
+	if hook != nil {
+		hook()
+	}
 	return fn(next)
 }
 
@@ -102,29 +109,46 @@ func (f *cacheFence) Stat(ctx context.Context, key string) (info certmagic.KeyIn
 	return info, err
 }
 
-// fenceCache puts a cacheFence over the certificate cache of the client that
-// serve makes, until the test ends. The fence has one cache. When a test makes
-// a second client, the first client also uses the cache of the second client.
-// Its close runs in a cleanup: call fenceCache before the cleanup that waits
-// for serve. Then the close runs after that wait and before the removal of the
-// temporary directory. A test that wraps newACME itself sets its wrapper before
-// the call.
-func fenceCache(t *testing.T) {
+// fenceSet holds the cacheFence of each client that a test made.
+type fenceSet struct {
+	mu     sync.Mutex
+	fences []*cacheFence
+	// atClose, when set, runs once before the first close of the cleanup.
+	atClose func()
+}
+
+// fenceCache puts a cacheFence over the certificate cache of each client that
+// serve makes, until the test ends. Each newACME call gets a fence of its own,
+// over the Storage of that call. Their close runs in a cleanup: call fenceCache
+// before the cleanup that waits for serve. Then the close runs after that wait
+// and before the removal of the temporary directory. A test that wraps newACME
+// itself sets its wrapper before the call.
+func fenceCache(t *testing.T) *fenceSet {
 	t.Helper()
-	f := &cacheFence{}
+	set := &fenceSet{}
 	old := newACME
 	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) {
-		f.mu.Lock()
-		f.next, ap.Storage = ap.Storage, f
-		f.mu.Unlock()
+		f := newCacheFence(ap.Storage)
+		set.mu.Lock()
+		set.fences = append(set.fences, f)
+		set.mu.Unlock()
+		ap.Storage = f
 		return old(ap)
 	}
 	t.Cleanup(func() { newACME = old })
 	t.Cleanup(func() {
-		if err := f.close(fenceWait); err != nil {
-			t.Error(err)
+		if set.atClose != nil {
+			set.atClose()
+		}
+		set.mu.Lock()
+		defer set.mu.Unlock()
+		for _, f := range set.fences {
+			if err := f.close(fenceWait); err != nil {
+				t.Error(err)
+			}
 		}
 	})
+	return set
 }
 
 // countStore counts the calls that reach it. A Store call tells entered, then
@@ -255,7 +279,8 @@ func TestTI03_FenceRefusesAfterClose(t *testing.T) {
 // TestTI03_LaunchGivesTheClientTheFence checks that launchServe and
 // launchViaServe put the fence over the cache of the client. After the cleanup
 // of the launch ran, a Store call through the Storage of the client fails with
-// errFenceClosed.
+// errFenceClosed. The close must run once, after serve returned and while the
+// state directory still exists.
 func TestTI03_LaunchGivesTheClientTheFence(t *testing.T) {
 	var got certmagic.Storage
 	oldNew := newACME
@@ -263,13 +288,28 @@ func TestTI03_LaunchGivesTheClientTheFence(t *testing.T) {
 	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = ap.Storage; return oldNew(ap) }
 	for _, name := range []string{"launchServe", "launchViaServe"} {
 		got = nil
+		var closes int
+		var serveDone, rootExists bool
 		t.Run(name, func(t *testing.T) {
 			https, plain, ca := openListeners(t)
 			cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+			p := tempState(t, cfg)
+			var r *running
 			if name == "launchServe" {
-				launchServe(t, cfg, tempState(t, cfg), realDeps).waitStarted(t)
+				r = launchServe(t, cfg, p, realDeps)
 			} else {
-				launchViaServe(t, cfg, content{}, tempState(t, cfg), nil).waitStarted(t)
+				r = launchViaServe(t, cfg, content{}, p, nil)
+			}
+			r.waitStarted(t)
+			r.fences.atClose = func() {
+				closes++
+				select {
+				case <-r.done:
+					serveDone = true
+				default:
+				}
+				_, err := os.Stat(p.Root)
+				rootExists = err == nil
 			}
 		})
 		if _, ok := got.(*cacheFence); !ok {
@@ -277,6 +317,114 @@ func TestTI03_LaunchGivesTheClientTheFence(t *testing.T) {
 		}
 		if err := got.Store(t.Context(), "k", []byte("v")); !errors.Is(err, errFenceClosed) {
 			t.Errorf("%s: Store after the cleanup: error %v, want %v", name, err, errFenceClosed)
+		}
+		if closes != 1 || !serveDone || !rootExists {
+			t.Errorf("%s: the close ran %d times, serve had returned %v, state directory existed %v; want once, true, true",
+				name, closes, serveDone, rootExists)
+		}
+	}
+}
+
+// TestTI03_FenceForEachClient makes two clients in one test. Each gets a fence
+// of its own over its own cache. A Store call through the Storage of the first
+// client makes a file in the first cache only.
+func TestTI03_FenceForEachClient(t *testing.T) {
+	var got []certmagic.Storage
+	oldNew := newACME
+	t.Cleanup(func() { newACME = oldNew })
+	newACME = func(ap listener.ACMEParams) (*listener.ACME, error) { got = append(got, ap.Storage); return oldNew(ap) }
+	var dirs [2]string
+	for i := range dirs {
+		https, plain, ca := openListeners(t)
+		cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+		p := tempState(t, cfg)
+		dirs[i] = filepath.Join(p.Root, p.CacheDir)
+		launchServe(t, cfg, p, realDeps).waitStarted(t)
+	}
+	if len(got) != 2 {
+		t.Fatalf("%d clients, want 2", len(got))
+	}
+	a, aok := got[0].(*cacheFence)
+	b, bok := got[1].(*cacheFence)
+	if !aok || !bok || a == b {
+		t.Fatalf("the Storage of the clients are %T and %T, want two different *cacheFence", got[0], got[1])
+	}
+	if err := got[0].Store(t.Context(), "k", []byte("v")); err != nil {
+		t.Fatalf("Store through the first client: %v", err)
+	}
+	for i, want := range []bool{true, false} {
+		if _, err := os.Lstat(filepath.Join(dirs[i], "k")); (err == nil) != want {
+			t.Errorf("file in cache %d: error %v, want present %v", i+1, err, want)
+		}
+	}
+}
+
+// slowStore is a certmagic.Storage that counts its Store calls. A call stays in
+// progress for a moment, and inFlight counts the calls in progress.
+type slowStore struct {
+	countStore
+	inFlight atomic.Int32
+}
+
+func (s *slowStore) Store(context.Context, string, []byte) error {
+	s.calls.Add(1)
+	s.inFlight.Add(1)
+	runtime.Gosched()
+	s.inFlight.Add(-1)
+	return nil
+}
+
+// TestTI03_FenceCountsBeforeItCalls races a close against many Store calls, 200
+// times. A hook runs in each operation after its check and before the call to
+// the cache. Each operation must either get errFenceClosed and make no call, or
+// be counted. When close returns, no call may be in progress, and no call may
+// begin later.
+func TestTI03_FenceCountsBeforeItCalls(t *testing.T) {
+	const rounds, ops = 5000, 16
+	for range rounds {
+		cs := &slowStore{}
+		f := newCacheFence(cs)
+		f.afterCheck = runtime.Gosched
+		var attempts, refused, atClose, inFlight atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range ops {
+			wg.Go(func() {
+				<-start
+				for {
+					attempts.Add(1)
+					err := f.Store(t.Context(), "k", nil)
+					if errors.Is(err, errFenceClosed) {
+						refused.Add(1)
+						return
+					}
+				}
+			})
+		}
+		closed := make(chan error, 1)
+		go func() {
+			<-start
+			for cs.calls.Load() < ops {
+				runtime.Gosched()
+			}
+			err := f.close(fenceWait)
+			atClose.Store(cs.calls.Load())
+			inFlight.Store(cs.inFlight.Load())
+			closed <- err
+		}()
+		close(start)
+		wg.Wait()
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if n := inFlight.Load(); n != 0 {
+			t.Fatalf("close returned with %d calls in progress", n)
+		}
+		if after := cs.calls.Load(); after != atClose.Load() {
+			t.Fatalf("%d calls began after close returned", after-atClose.Load())
+		}
+		if a, c, r := attempts.Load(), cs.calls.Load(), refused.Load(); a != c+r {
+			t.Fatalf("%d operations: %d reached the cache, %d got errFenceClosed", a, c, r)
 		}
 	}
 }

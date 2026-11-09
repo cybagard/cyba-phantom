@@ -213,6 +213,7 @@ type running struct {
 	begin    time.Time
 	cpu      time.Duration // the CPU time of the process at begin
 	pressure pressure      // the io and cpu pressure at begin
+	fences   *fenceSet     // the cache fences of the launch
 }
 
 // cpuTime is the CPU time (user and system) that this process used so far.
@@ -245,11 +246,11 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
-	fenceCache(t) // before the wait for serve below, so it closes after it
+	fences := fenceCache(t) // before the wait for serve below, so it closes after it
 	ctx, cancel := context.WithCancel(t.Context())
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
-	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
+	r := &running{cancel: cancel, done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
 	go func() { r.code = serveWith(ctx, cancel, nil, cfg, c, p, d, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		cancel()
@@ -276,12 +277,12 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 		}
 		return p, realDeps
 	}
-	fenceCache(t) // before the wait for serve below, so it closes after it
+	fences := fenceCache(t) // before the wait for serve below, so it closes after it
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
-	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin}
+	r := &running{cancel: sync.OnceFunc(func() { close(hold) }), done: make(chan struct{}), out: newStartWriter(), begin: time.Now(), cpu: cpuTime(), pressure: atBegin, fences: fences}
 	go func() { r.code = serve(cfg, c, r.out, &r.err); close(r.done) }()
 	t.Cleanup(func() {
 		r.cancel()
