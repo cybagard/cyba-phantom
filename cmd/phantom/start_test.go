@@ -36,11 +36,14 @@ import (
 // The tests start the store part with realDeps. Most are not about the disk
 // guard. The use of the disk of the host must not pause their writer. So the
 // test binary has no guard in realDeps. A test of the guard asks for one with
-// guarded.
+// guarded. A package variable is set before init runs, so realOpenGuard holds
+// the guard of production that init removes.
+var realOpenGuard = realDeps.openGuard
+
 func init() { realDeps.openGuard = nil }
 
 func guarded(d startDeps) startDeps {
-	d.openGuard = store.OpenDiskGuard
+	d.openGuard = realOpenGuard
 	return d
 }
 
@@ -862,13 +865,19 @@ func TestParamsOf(t *testing.T) {
 	}
 }
 
-// T-I-16: start opens the disk guard for the writer. A guard that does not open
-// gives one log line with no path, and the writer runs with no guard.
+// T-I-16: start opens the disk guard and gives it to the writer. The test shows
+// the second step: after the guard is closed, the writer reports failed checks.
+// A guard that does not open gives one log line with no path, and the writer runs
+// with no guard.
 func TestTI16_StartOpensTheGuard(t *testing.T) {
 	s, _ := launch(t, testParams(t, "events.db"), guarded(realDeps))
-	if s.guard == nil || !s.Healthy() || s.writer.Paused() {
-		t.Fatalf("guard %v, healthy %v, paused %v", s.guard, s.Healthy(), s.writer.Paused())
+	if s.guard == nil {
+		t.Fatal("start opened no guard")
 	}
+	if err := s.guard.Close(); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "failed disk check", func() bool { return s.writer.DiskCheckErrors() > 0 })
 	var buf bytes.Buffer
 	d := realDeps
 	d.openGuard = func(*os.Root, string) (*store.DiskGuard, error) { return nil, errors.New("/secret/path") }
@@ -902,14 +911,6 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(p.Root) })
 	s, q := launch(t, p, guarded(realDeps))
-	until := func(what string, cond func() bool) {
-		t.Helper()
-		for end := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
-			if time.Now().After(end) {
-				t.Fatalf("timeout: %s", what)
-			}
-		}
-	}
 	if !s.Healthy() {
 		t.Fatal("not healthy at the start")
 	}
@@ -920,9 +921,9 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 	}
 	t.Cleanup(func() { f.Close() })
 	chunk := make([]byte, 256<<10)
+	var u float64
 	for i := 0; i < 1100; i++ {
-		u, err := s.guard.Use()
-		if err != nil {
+		if u, err = s.guard.Use(); err != nil {
 			t.Fatal(err)
 		}
 		if u >= 0.92 {
@@ -932,14 +933,17 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	until("not healthy", func() bool { return !s.Healthy() })
+	if u < 0.92 {
+		t.Fatalf("the fill reached a use of %v, not 0.92", u)
+	}
+	until(t, "not healthy", func() bool { return !s.Healthy() })
 	// An offer never waits for the writer, so the request path serves.
 	begin := time.Now()
 	put(t, q, event.KindRequest, 3)
 	if d := time.Since(begin); d > time.Second {
 		t.Fatalf("3 offers took %v while the writer paused", d)
 	}
-	until("the drops", func() bool { return s.writer.Stats().Dropped.Bulk == 3 })
+	until(t, "the drops", func() bool { return s.writer.Stats().Dropped.Bulk == 3 })
 	// An open file keeps its blocks, so close it before the remove.
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
@@ -947,5 +951,5 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 	if err := os.Remove(fill); err != nil {
 		t.Fatal(err)
 	}
-	until("healthy again", s.Healthy)
+	until(t, "healthy again", s.Healthy)
 }
