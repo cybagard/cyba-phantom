@@ -328,8 +328,9 @@ func startListenerSampler(before map[string]string) *listenerSampler {
 	return s
 }
 
-// stop ends the loop. It returns the addresses of the new sockets, the sample
-// count, the count of failed reads and the last read error. Call it once.
+// stop ends the loop. It returns the addresses of the new sockets and the
+// sample count. It also returns the failed reads and the last error. Call it
+// once.
 func (s *listenerSampler) stop() (extra []string, samples int64, failed int, lastErr error) {
 	close(s.quit)
 	<-s.done
