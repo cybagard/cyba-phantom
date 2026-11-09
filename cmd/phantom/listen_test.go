@@ -1250,9 +1250,16 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 
 // TestTU23_StopWaitIsBounded sends a request whose handler does not return, so
 // the connection is active at the stop. Serve must return at least
-// shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. A stop
-// wait with no limit never returns.
+// shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. The test
+// takes the end of the stop wait at the stopACME call, which serve makes after
+// the servers stopped. The cache close and the store close come after that
+// call, and they can wait for the disk. So the test bounds the total at
+// sigtermWait only, which a stop wait with no limit never meets.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
+	stopped := make(chan time.Time, 1)
+	oldStop := stopACME
+	t.Cleanup(func() { stopACME = oldStop })
+	stopACME = func(a *listener.ACME) { stopped <- time.Now(); oldStop(a) }
 	inside, release := make(chan struct{}, 1), make(chan struct{})
 	oldServer := newServer
 	t.Cleanup(func() { newServer = oldServer })
@@ -1283,15 +1290,28 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 	case <-time.After(netWait):
 		t.Fatal("the handler did not run")
 	}
+	atCancel := readPressure()
 	begin := time.Now()
 	r.cancel()
 	select {
 	case <-r.done:
-	case <-time.After(shutdownTime + 3*time.Second):
-		t.Fatalf("serve did not return %v after the stop", shutdownTime+3*time.Second)
+	case <-time.After(sigtermWait):
+		t.Fatalf("serve did not return %v after the stop", sigtermWait)
 	}
-	if d := time.Since(begin); d < shutdownTime-time.Second {
-		t.Errorf("serve returned %v after the stop, want about %v: it did not wait for the connection", d, shutdownTime)
+	done := time.Now()
+	select {
+	case at := <-stopped:
+		toACME := at.Sub(begin)
+		note := atCancel.stopNote(toACME, done.Sub(at))
+		t.Log(strings.TrimPrefix(note, "; "))
+		if toACME < shutdownTime-time.Second {
+			t.Errorf("serve stopped the servers %v after the stop, want about %v: it did not wait for the connection%s", toACME, shutdownTime, note)
+		}
+		if toACME > shutdownTime+3*time.Second {
+			t.Errorf("serve stopped the servers %v after the stop, want at most %v%s", toACME, shutdownTime+3*time.Second, note)
+		}
+	default:
+		t.Error("serve did not call stopACME")
 	}
 }
 
