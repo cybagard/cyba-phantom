@@ -481,12 +481,32 @@ func TestTS20RotationChainInMemory(t *testing.T) {
 	e.rejects(l2, false, ErrStateFault)
 }
 
+// T-S-20: rotate refuses a new key ID that is in the trust set. This holds at
+// index 0 and at index 1. The line of the new key verifies in each row.
+func TestTS20RotateRefusesKeyIDInTrustSet(t *testing.T) {
+	k1, k2, fresh := newKey(1, "k1"), newKey(2, "k2"), newKey(9, "k9")
+	c := chain{trust: TrustSet{
+		{KeyID: k1.id, PublicKey: k1.pub},
+		{KeyID: k2.id, PublicKey: k2.pub},
+	}}
+	archive := []byte("archive")
+	for _, id := range []string{"k1", "k2"} {
+		m := &Manifest{KeyID: id, Rotation: &Rotation{From: "k2", Key: fresh.pub}}
+		sig := []byte(lineOf(rkey{id: id, priv: fresh.priv}, archive))
+		if _, _, ok := c.rotate(m, archive, sig, []string{"k2"}); ok {
+			t.Errorf("rotate accepts the new key ID %s of the trust set", id)
+		}
+	}
+}
+
 // T-S-20: a bundle directory that does not exist is healthy, as at a first
-// start. Another error at the open of the directory is not healthy.
+// start. Another error at the open of the directory is not healthy. A path
+// with a slash at index 0 has an empty directory part. The name check of the
+// open refuses the empty name before any open.
 func TestTS20HealthyWithoutBundleDirectory(t *testing.T) {
 	e := newEnv(t)
 	must(t, os.Symlink("keys", filepath.Join(e.state, "b1")))
-	for path, want := range map[string]bool{"none/current.cbnd": true, "b1/current.cbnd": false} {
+	for path, want := range map[string]bool{"none/current.cbnd": true, "b1/current.cbnd": false, "/current.cbnd": false} {
 		if got := e.loader(path).Healthy(); got != want {
 			t.Errorf("%s: healthy %v; want %v", path, got, want)
 		}

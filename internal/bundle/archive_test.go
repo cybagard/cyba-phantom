@@ -105,6 +105,44 @@ func TestTS19CapReaderKeepsAtMostMaxKept(t *testing.T) {
 	}
 }
 
+// T-S-19: capReader passes MaxDecodedBytes+1 bytes in all. Then it gives
+// ErrArchiveInvalid. A read gets at most the bytes that are left up to that
+// count. The loop has a bound, so a reader with no end fails the test.
+func TestTS19CapReaderPassesOneByteOverTheCap(t *testing.T) {
+	cr := &capReader{r: bytes.NewReader(zeros(MaxDecodedBytes + 2<<20))}
+	buf := make([]byte, 1<<20)
+	total, reads := 0, 0
+	var err error
+	for ; err == nil && reads < 16; reads++ {
+		var n int
+		n, err = cr.Read(buf)
+		total += n
+	}
+	if err != ErrArchiveInvalid || total != MaxDecodedBytes+1 {
+		t.Errorf("%d bytes in %d reads, error %v; want %d bytes and ErrArchiveInvalid", total, reads, err, MaxDecodedBytes+1)
+	}
+}
+
+// probeReader sets read when a caller reads it. It has no byte.
+type probeReader struct{ read bool }
+
+func (p *probeReader) Read([]byte) (int, error) { p.read = true; return 0, io.EOF }
+
+// T-S-19: two entries of MaxEntryBytes fill the cap on the sum of the entry
+// sizes. The header of the second entry passes, and readArchive reads its
+// data. The data is not there, so the archive is not valid. The probe shows
+// that the read happened.
+func TestTS19EntrySizesAtBudgetPass(t *testing.T) {
+	anyEntry := func(h *tar.Header) (string, error) { return h.Name, nil }
+	tb := buildTar(ent{name: "traps/a", data: zeros(MaxEntryBytes)})
+	tb = append(tb[:len(tb)-1024], rawHdr("traps/b", tar.TypeReg, MaxEntryBytes)...)
+	probe := &probeReader{}
+	a, err := readArchive(io.MultiReader(bytes.NewReader(tb), probe), anyEntry)
+	if a != nil || err != ErrArchiveInvalid || !probe.read {
+		t.Errorf("archive %v, error %v, data read %v; want ErrArchiveInvalid after a read", a != nil, err, probe.read)
+	}
+}
+
 // T-S-19: a PAX 'x' header with one small record comes before an entry. Next
 // of archive/tar gives ErrArchiveInvalid, on a capReader with keep set.
 // ReadArchive does not need its byte count for this. The reader keeps exactly

@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -527,6 +528,40 @@ func TestTU23MarkedFileMissing(t *testing.T) {
 		}
 		if !f.l.sigKept || f.files() != before {
 			t.Error("the mark or the files changed")
+		}
+	})
+}
+
+// T-U-23: syncDir gives the error of the open of the directory. It also gives
+// the error of the Sync call, and a Close call does not hide it.
+func TestTU23SyncDirErrors(t *testing.T) {
+	t.Run("closed root", func(t *testing.T) {
+		root, err := os.OpenRoot(t.TempDir())
+		must(t, err)
+		must(t, root.Close())
+		if err := syncDir(root); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("got %v; want os.ErrClosed", err)
+		}
+	})
+	t.Run("sync fails", func(t *testing.T) {
+		// A directory of procfs refuses Sync. The test needs such a directory.
+		proc, err := os.OpenRoot("/proc")
+		if err != nil {
+			t.Skip("no /proc:", err)
+		}
+		defer proc.Close()
+		d, err := proc.Open(".")
+		must(t, err)
+		serr := d.Sync()
+		d.Close()
+		if serr == nil {
+			t.Skip("this system syncs /proc")
+		}
+		if errors.Unwrap(serr) == nil {
+			t.Fatalf("Sync error %v wraps no error", serr)
+		}
+		if err := syncDir(proc); !errors.Is(err, errors.Unwrap(serr)) {
+			t.Errorf("got %v; want %v", err, serr)
 		}
 	})
 }

@@ -263,6 +263,10 @@ func (g *gapRig) reset() {
 // swap. The wait is 29 s and holds no loadMu. A load after the gap does not
 // wait.
 func TestTU23SwapGap(t *testing.T) {
+	// SEC-34 gives 30 s for the gap and for the seed delay.
+	if swapGap != 30*time.Second || seedDelay != 30*time.Second {
+		t.Errorf("swap gap %v, seed delay %v; want 30s", swapGap, seedDelay)
+	}
 	for _, src := range []Source{SourceSignal, SourceReload, SourceFetch} {
 		t.Run(src.String(), func(t *testing.T) {
 			g := newGapRig(t, src)

@@ -150,6 +150,9 @@ func TestTS20TrustSet(t *testing.T) {
 	if _, _, ok := ParseKeyLine(line + " "); ok {
 		t.Error("line with a trailing space is accepted")
 	}
+	if _, _, ok := ParseKeyLine("A" + line[1:]); ok {
+		t.Error("line with a key ID that has a capital is accepted")
+	}
 	for _, k := range smallOrderKeys(t) {
 		set := TrustSet{{KeyID: "a1", PublicKey: k, Class: ClassProprietary}}
 		if err := set.Check(nil); err != ErrTrustSet {
@@ -211,6 +214,7 @@ func TestTS20SigKeyIDs(t *testing.T) {
 	}{
 		{"", nil, false}, {a, []string{"a1"}, true}, {b + a, []string{"b2", "a1"}, true},
 		{a + b + a, nil, false}, {a + a, nil, false}, {"junk\n", nil, false},
+		{strings.Replace(a, "a1", "A1", 1), nil, false}, {a + strings.Replace(b, "b2", "B2", 1), nil, false},
 	} {
 		if got, ok := SigKeyIDs([]byte(c.sig)); ok != c.ok || !slices.Equal(got, c.want) {
 			t.Errorf("%q: %q, %v", c.sig, got, ok)
@@ -223,7 +227,7 @@ func TestTS20SigKeyIDs(t *testing.T) {
 func TestTS20CheckSigned(t *testing.T) {
 	privOld, old := testKey(1, "k1")
 	privNew, newKey := testKey(2, "k2")
-	privOther, _ := testKey(3, "k3")
+	privOther, other := testKey(3, "k3")
 	manifest := func(m string) []byte { return build(ent{name: "manifest.json", data: []byte(m)}) }
 	normal := func(id string) []byte { return manifest(mf(ver(2), `"k1"`, q(id))) }
 	pubText := base64.StdEncoding.EncodeToString(newKey.PublicKey[:])
@@ -249,6 +253,12 @@ func TestTS20CheckSigned(t *testing.T) {
 		{"bad archive", []byte("x"), line("k1", privOld, []byte("x")), TrustSet{old}, nil, ErrArchiveInvalid},
 		{"bad manifest", manifest("{}"), line("k1", privOld, manifest("{}")), TrustSet{old}, nil, ErrManifestInvalid},
 		{"other line", transition, line("k3", privOther, transition), TrustSet{old}, nil, ErrBadSig},
+		// A normal bundle with two lines of the set gives both key IDs.
+		{"k1 and k3 lines", normal("k1"), line("k1", privOld, normal("k1")) + line("k3", privOther, normal("k1")), TrustSet{old, other}, []string{"k1", "k3"}, nil},
+		{"old and new lines", normal("k1"), line("k1", privOld, normal("k1")) + line("k2", privNew, normal("k1")), TrustSet{old, newKey}, []string{"k1", "k2"}, nil},
+		// A line over another archive gives ErrBadSig.
+		{"old line over another archive", normal("k1"), line("k1", privOld, normal("k2")) + line("k2", privNew, normal("k1")), TrustSet{old, newKey}, nil, ErrBadSig},
+		{"new line over another archive", normal("k1"), line("k1", privOld, normal("k1")) + line("k2", privNew, normal("k2")), TrustSet{old, newKey}, nil, ErrBadSig},
 	} {
 		got, err := CheckSigned(c.arch, []byte(c.sig), c.trust)
 		if err != c.err || !slices.Equal(got, c.want) {
