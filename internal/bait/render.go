@@ -63,10 +63,9 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 		h.noKeys.Add(1)
 		// A page with empty trap texts has no token for its plan. It renders
 		// with Execute.
-		if m.planned && acts > 0 {
-			m.page.Trap = make(map[string]string, acts)
+		if m.planned {
+			m.unplan(s, e.acts, 0)
 		}
-		m.planned = false
 		for _, i := range e.acts {
 			m.page.Trap[s.traps[i].ID] = ""
 		}
@@ -84,11 +83,7 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 			if m.planned && len(t) > maxTokText {
 				// This is no token, as a token text has 26 bytes. The page
 				// renders with Execute, so its writes stay those of Execute.
-				m.planned = false
-				m.page.Trap = make(map[string]string, acts)
-				for j := range i {
-					m.page.Trap[s.traps[idx[j]].ID] = s.traps[idx[j]].Render(m.toks[j])
-				}
+				m.unplan(s, e.acts, i)
 			}
 			if m.planned {
 				m.toks[i] = t
@@ -105,6 +100,17 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 		}
 	}
 	return m
+}
+
+// unplan turns a plan page into a page for Execute. It makes the trap text map.
+// The first done actions get the text of their tokens in toks.
+func (m *minted) unplan(s *site, acts []int, done int) {
+	m.planned = false
+	m.page.Trap = make(map[string]string, len(acts))
+	for j := range done {
+		t := s.traps[acts[j]]
+		m.page.Trap[t.ID] = t.Render(m.toks[j])
+	}
 }
 
 // errOverCap is the error of a write that would pass maxResponse.
@@ -127,8 +133,8 @@ type capWriter struct {
 	scratch [maxTokText]byte
 }
 
-// writeString is Write for a string. A text that fits in scratch is copied
-// there, else it is converted.
+// writeString is Write for a string. It copies a short text into scratch. It
+// converts a longer text.
 func (c *capWriter) writeString(s string) error {
 	if len(s) > len(c.scratch) {
 		_, err := c.Write([]byte(s))
@@ -167,8 +173,8 @@ func (c *capWriter) start() {
 // render streams the page of e with the status code. A template with a plan
 // writes the fixed bytes and the token texts. Else it runs the template, and a
 // template with no plan counts one in noPlan. It returns the status that it
-// wrote. The data is the trap text map of the mint of this response. It holds
-// no request value. An error counts one time.
+// wrote. For a page with no plan, the data is the trap text map of the mint of
+// this response. It holds no request value. An error counts one time.
 // Before the first byte, and not over the cap, the response is the fixed 404
 // page. Then the event keeps the mint range. Else the connection closes. Render
 // then writes the event, with the status of the first byte or none and the

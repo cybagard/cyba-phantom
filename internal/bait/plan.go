@@ -9,9 +9,21 @@ import (
 )
 
 // planBudget is the most bytes that the plans of one site keep (SEC-32). A plan
-// counts as the bytes that it allocates, so the budget bounds the heap. See
-// plan.size.
+// counts as the allocated size of its arrays and its struct. See plan.size.
+// The heap that the plans keep is near this count.
 const planBudget = 4 << 20
+
+// planSlack is a part of the budget that the plans do not use. The heap of
+// plans is near the count, and a full budget measured 4 KB above it. The build
+// counts plans against planBudget less planSlack. So the heap stays under
+// planBudget.
+const planSlack = 16 << 10
+
+// planWork is the most output bytes of all marker runs of one site build. A run
+// that fails counts too. When the work is used, no more marker run starts.
+// Two runs of a plan write at least its size. So 2 times planBudget cannot fill
+// the budget when one run fails. The factor is 4.
+const planWork = 4 * planBudget
 
 // planHeader is the heap size of the plan struct. The struct has 72 bytes. The
 // allocator gives it the size class of 80 bytes. A test checks this.
@@ -42,18 +54,18 @@ type plan struct {
 	acts  []uint8
 }
 
-// size is the count of the plan against the budget. It is the heap that the
-// plan keeps. It has four parts. The first is the capacity of fixed, at 1
+// size is the count of the plan against the budget. It is the allocated size
+// of the plan. It has four parts. The first is the capacity of fixed, at 1
 // byte each. The second is the capacity of offs, at 4 bytes each. The third
 // is the capacity of acts, at 1 byte each. The last is planHeader. cut makes
-// each array with append. So its capacity is
-// the size class that the allocator gave it. An array of 1 to 15 bytes can
-// use a block of 16 bytes. So each array counts at least 16 bytes.
+// each array with append. So its capacity is the size class that the
+// allocator gave it. An array of 1 to 15 bytes can use a block of 16 bytes.
+// So each array counts at least 16 bytes. The measured heap is near the count.
 func (p *plan) size() int {
 	return heapBytes(cap(p.fixed)) + heapBytes(4*cap(p.offs)) + heapBytes(cap(p.acts)) + planHeader
 }
 
-// heapBytes is the heap that n bytes of one slice can use.
+// heapBytes is the heap that n bytes of one array can use.
 func heapBytes(n int) int {
 	if n == 0 {
 		return 0
@@ -61,11 +73,21 @@ func heapBytes(n int) int {
 	return max(n, 16)
 }
 
-// markerOf gives the marker of action act in marker run run. It has an edge
-// character, the alphabet, two characters that give act, and a last edge
-// character.
+// markerWords are in each marker, after the first edge character. The filters
+// of html/template refuse them. htmlNameFilter refuses an attribute name with
+// src. cssValueFilter refuses a value with expression or mozbinding. So a
+// marker never comes back in these two contexts. A template with an action
+// there gets no plan, for each token. Such a filter looks at the whole value,
+// so a marker run cannot show it.
+const markerWords = "srcexpressionmozbinding"
+
+// markerHead gives the first edge character and the words of a marker.
+func markerHead(run int) string { return string(markerEdges[run][0]) + markerWords }
+
+// markerOf gives the marker of action act in marker run run. It has the head,
+// the alphabet, two characters that give act, and a last edge character.
 func markerOf(act, run int) string {
-	return string(markerEdges[run][0]) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + string(markerEdges[run][1])
+	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + string(markerEdges[run][1])
 }
 
 // errPlanOver is the error of a marker run that passes its cap.
@@ -88,18 +110,21 @@ func (w *runWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// planner builds the plans of one site. left is the budget that is left.
+// planner builds the plans of one site. left is the budget that is left. work
+// is the run output that is left (planWork).
 type planner struct {
 	b     *bundle.Bundle
 	traps []bundle.Trap
 	left  int
+	work  int
 	plans map[string]*plan // a nil plan means the template has none
 	w     runWriter
-	runs  int // marker runs, for a test
+	// runs and runBytes count the marker runs and their output, for a test.
+	runs, runBytes int
 }
 
 func newPlanner(b *bundle.Bundle, traps []bundle.Trap, budget int) *planner {
-	return &planner{b: b, traps: traps, left: budget, plans: map[string]*plan{}}
+	return &planner{b: b, traps: traps, left: budget, work: planWork, plans: map[string]*plan{}}
 }
 
 // of gives the plan of the template name, or nil. It builds the plan at the
@@ -112,7 +137,7 @@ func (p *planner) of(name string, acts []int) *plan {
 		return pl
 	}
 	var pl *plan
-	if p.left > 0 && len(acts) <= maxActs {
+	if p.left > 0 && p.work > 0 && len(acts) <= maxActs {
 		pl = p.build(name, acts)
 	}
 	p.plans[name] = pl
@@ -124,9 +149,12 @@ func (p *planner) of(name string, acts []int) *plan {
 // A marker in the template text or in a trap text also gives nil, with no
 // separate check. A marker of one run has the wrong edge characters in the
 // other run. An extra marker in the output breaks the count in cut.
-// It also gives nil for a plan over the budget that is left. A run writes 36
+// A filter of html/template that looks at the whole value (see markerWords)
+// refuses the marker, so the marker does not come back.
+// It also gives nil for a plan over the budget that is left. A run writes 59
 // bytes for a cut that counts 5 or more. So a plan near the end of the
-// budget can fail at the cap of its run.
+// budget can fail at the cap of its run. The cap of a run is the smaller of
+// the budget left and the work left. A run that fails counts as work.
 func (p *planner) build(name string, acts []int) *plan {
 	var runs [2]*plan
 	for run := range runs {
@@ -141,9 +169,17 @@ func (p *planner) build(name string, acts []int) *plan {
 			}
 		}
 		p.w.buf.Reset()
-		p.w.max = p.left
+		p.w.max = min(p.left, p.work)
+		workCaps := p.work <= p.left
 		p.runs++
-		if p.b.Execute(&p.w, name, page) != nil {
+		err := p.b.Execute(&p.w, name, page)
+		p.runBytes += p.w.buf.Len()
+		p.work -= p.w.buf.Len()
+		if errors.Is(err, errPlanOver) && workCaps {
+			// The work cap stopped the run, so no run can start.
+			p.work = 0
+		}
+		if err != nil {
 			return nil
 		}
 		if runs[run] = cut(p.w.buf.Bytes(), run, want); runs[run] == nil {
@@ -151,8 +187,9 @@ func (p *planner) build(name string, acts []int) *plan {
 		}
 	}
 	a, c := runs[0], runs[1]
-	// cut checks the actions of each run against the same list. So the two
-	// action lists are equal here, and so are the two cut counts.
+	// cut checks each run against a list of actions with equal values. So the
+	// two action lists are equal here, and so are the two cut counts. The
+	// offsets compare is defensive: no escaper moves a byte across a token.
 	if !bytes.Equal(a.fixed, c.fixed) {
 		return nil
 	}
@@ -177,15 +214,15 @@ func cut(out []byte, run int, want []uint8) *plan {
 		if k < 0 {
 			break
 		}
-		end := k + len(alphabet) + 3
-		if k < 1 || end > len(out) || out[k-1] != markerEdges[run][0] || out[end-1] != markerEdges[run][1] {
+		end, lead := k+len(alphabet)+3, len(markerWords)+1
+		if k < lead || end > len(out) || string(out[k-lead:k]) != markerHead(run) || out[end-1] != markerEdges[run][1] {
 			return nil
 		}
 		hi, lo := strings.IndexByte(alphabet, out[end-3]), strings.IndexByte(alphabet, out[end-2])
 		if hi < 0 || lo < 0 || hi<<5|lo >= maxActs {
 			return nil
 		}
-		pl.fixed = append(pl.fixed, out[:k-1]...)
+		pl.fixed = append(pl.fixed, out[:k-lead]...)
 		pl.offs = append(pl.offs, uint32(len(pl.fixed)))
 		pl.acts = append(pl.acts, uint8(hi<<5|lo))
 		out = out[end:]
@@ -193,8 +230,8 @@ func cut(out []byte, run int, want []uint8) *plan {
 	if !bytes.Equal(pl.acts, want) {
 		return nil
 	}
-	// append rounds the capacity up to the size class, so cap shows the heap.
 	fixed := append(pl.fixed, out...)
+	// append rounds each capacity up to the size class, so cap shows the heap.
 	return &plan{
 		fixed: append([]byte(nil), fixed...),
 		offs:  append([]uint32(nil), pl.offs...),

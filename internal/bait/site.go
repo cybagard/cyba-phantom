@@ -105,7 +105,7 @@ func buildSite(b *bundle.Bundle) *site { return makeSite(b, nil) }
 // the routes in route-map order, then the not_found member. Each template gets
 // one try.
 func buildPlannedSite(b *bundle.Bundle) *site {
-	return makeSite(b, newPlanner(b, b.Traps(), planBudget))
+	return makeSite(b, newPlanner(b, b.Traps(), planBudget-planSlack))
 }
 
 // makeSite is buildSite with the planner pl. With a nil pl, no template gets a

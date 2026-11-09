@@ -80,12 +80,20 @@ var planContexts = []struct{ name, text string }{
 	{"srcset", `<img srcset="%s">`},
 	{"srcdoc", `<iframe srcdoc="%s"></iframe>`},
 	{"meta content", `<meta name="description" content="%s">`},
+	{"attr name value", `<p %s=1>`},
+	{"attr name only", `<p %s>`},
+	{"attr name quoted value", `<p %s="v">`},
+	{"css value", `<style>p{color:%s}</style>`},
+	{"css value attr", `<p style="color: %s">`},
 }
 
-// noPlanContexts are the contexts whose two marker runs differ. In a CSS
-// string, the escape of the byte before a token depends on the token.
+// noPlanContexts are the contexts that get no plan. In a CSS string, the escape
+// of the byte before a token depends on the token, so the two runs differ. In
+// an attribute name and in a CSS value, a filter refuses the marker.
 var noPlanContexts = map[string]bool{
 	"style css dq": true, "style attr css sq": true, "style attr unq css dq": true,
+	"attr name value": true, "attr name only": true, "attr name quoted value": true,
+	"css value": true, "css value attr": true,
 }
 
 // execOf runs the template name of b as a render with no plan does. toks has
@@ -198,13 +206,19 @@ func TestTS28PlanEquality(t *testing.T) {
 			t.Run(form+"/"+c.name, func(t *testing.T) {
 				var specs []trapSpec
 				var acts strings.Builder
+				add := func(text string) {
+					id := fmt.Sprint("t", len(specs))
+					specs = append(specs, trapSpec{id, "hidden-p", text})
+					acts.WriteString(act(id))
+				}
 				for _, pre := range affixes {
 					for _, suf := range affixes {
-						id := fmt.Sprint("t", len(specs))
-						specs = append(specs, trapSpec{id, "hidden-p", pre + "{{.Token}}" + suf})
-						acts.WriteString(act(id))
+						add(pre + "{{.Token}}" + suf)
 					}
 				}
+				// A trap with no token and a trap with two tokens.
+				add("plain")
+				add("{{.Token}} {{.Token}}")
 				b := tmplBundle(t, specs, map[string][]route{"example.com": {{"/t", "t.tmpl", html, fmt.Sprintf(c.text, acts.String())}}})
 				h := planHandler(t, b)
 				hasPlan := h.siteOf(b).hosts["example.com"]["/t"].plan != nil
@@ -323,6 +337,9 @@ func TestTS28PlanOrder(t *testing.T) {
 		if p == nil {
 			t.Fatalf("%s has no plan with the full budget", name)
 		}
+		if p.size() != planCount(p) {
+			t.Errorf("%s: size %d, count %d", name, p.size(), planCount(p))
+		}
 		cost[name] = planCount(p)
 	}
 	one, two, nf, mOne := "vhosts/b.example/one.tmpl", "vhosts/b.example/two.tmpl", "vhosts/b.example/nf.tmpl", "vhosts/m.example/one.tmpl"
@@ -406,7 +423,8 @@ func TestTS28PlanRunWriter(t *testing.T) {
 // the index character refuses these. 64 is the first action position over the
 // cap. 256 is the first one that wraps in a byte.
 func TestTS28PlanCut(t *testing.T) {
-	m := func(hi, lo byte) string { return "a" + alphabet + string(hi) + string(lo) + "7" }
+	head := markerHead(0)
+	m := func(hi, lo byte) string { return head + alphabet + string(hi) + string(lo) + "7" }
 	for _, c := range []struct {
 		name, out string
 		want      []uint8
@@ -416,9 +434,11 @@ func TestTS28PlanCut(t *testing.T) {
 		{"marker with text", "x" + markerOf(3, 0) + "y", []uint8{3}, "xy"},
 		{"last position", m('b', '7'), []uint8{63}, ""},
 		{"alphabet at the start", alphabet + "x", nil, "refused"},
-		{"cut at the end", "x" + "a" + alphabet + "a", []uint8{0}, "refused"},
-		{"first edge", "z" + alphabet + "aa7", []uint8{0}, "refused"},
-		{"last edge", "a" + alphabet + "aaz", []uint8{0}, "refused"},
+		{"cut at the end", "x" + head + alphabet + "a", []uint8{0}, "refused"},
+		{"first edge", "z" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
+		{"words", "a" + markerWords[:len(markerWords)-1] + "x" + alphabet + "aa7", []uint8{0}, "refused"},
+		{"head too short", "a" + alphabet + "aa7", []uint8{0}, "refused"},
+		{"last edge", head + alphabet + "aaz", []uint8{0}, "refused"},
 		{"high character", m('!', 'a'), []uint8{224}, "refused"},
 		{"low character", m('a', '!'), []uint8{255}, "refused"},
 		{"position 64", m('c', 'a'), []uint8{64}, "refused"},
@@ -439,31 +459,135 @@ func TestTS28PlanCut(t *testing.T) {
 	}
 }
 
-// writeSizes is a response writer that keeps the size of each write.
+// writeSizes is a response writer that keeps the size and the bytes of each
+// write.
 type writeSizes struct {
 	*discard
 	sizes []int
+	body  strings.Builder
 }
 
 func (w *writeSizes) Write(p []byte) (int, error) {
 	w.sizes = append(w.sizes, len(p))
+	w.body.Write(p)
 	return len(p), nil
+}
+
+// serveSizes serves the route /t of b with the token texts toks. It gives the
+// writer, which has the sizes and the bytes of the writes.
+func serveSizes(h *Handler, b *bundle.Bundle, toks []string) *writeSizes {
+	setTokens(h, toks)
+	w, r := &writeSizes{discard: &discard{h: http.Header{}}}, get("/t", "example.com")
+	s := h.sessionOf(r)
+	h.serve(w, r, b, &s)
+	return w
 }
 
 // TestTS28PlanTokenText checks the token texts at the limit of the scratch
 // array. A text of 32 bytes renders from the plan: the first write is the
 // fixed bytes before the token. A text of 33 bytes renders with Execute: the
-// first write is the text before the action. The bytes are equal.
+// first write is the text before the action. The test compares the bytes with
+// Execute. A second case has two actions and the long text on the second: the
+// first action then needs its trap text for Execute.
 func TestTS28PlanTokenText(t *testing.T) {
-	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}},
+	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}, {"t1", "hidden-p", "y {{.Token}}"}},
 		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p>`}}})
 	for _, c := range []struct{ n, first int }{{31, 5}, {32, 5}, {33, 3}} {
 		h := planHandler(t, b)
-		setTokens(h, []string{strings.Repeat("a", c.n)})
-		w, s := &writeSizes{discard: &discard{h: http.Header{}}}, h.sessionOf(get("/t", "example.com"))
-		h.serve(w, get("/t", "example.com"), b, &s)
-		if len(w.sizes) != 3 || w.sizes[0] != c.first || h.noPlan.Load() != 0 {
-			t.Errorf("text of %d bytes: write sizes %v, noPlan %d, want first %d", c.n, w.sizes, h.noPlan.Load(), c.first)
+		toks := []string{strings.Repeat("a", c.n)}
+		w := serveSizes(h, b, toks)
+		want, err := execOf(b, tmplName, toks)
+		mustOK(t, err)
+		if len(w.sizes) != 3 || w.sizes[0] != c.first || h.noPlan.Load() != 0 || w.body.String() != want {
+			t.Errorf("text of %d bytes: write sizes %v, noPlan %d, want first %d, bytes equal %v", c.n, w.sizes, h.noPlan.Load(), c.first, w.body.String() == want)
+		}
+	}
+	b2 := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}, {"t1", "hidden-p", "y {{.Token}}"}},
+		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p><p>{{index .Trap "t1"}}</p>`}}})
+	for _, n := range []int{32, 33} {
+		toks := []string{"first-token", strings.Repeat("b", n)}
+		w := serveSizes(planHandler(t, b2), b2, toks)
+		want, err := execOf(b2, tmplName, toks)
+		mustOK(t, err)
+		if w.body.String() != want || !strings.Contains(want, "x first-token") {
+			t.Errorf("second text of %d bytes: page %q, want %q", n, w.body.String(), want)
+		}
+	}
+}
+
+// TestTS28PlanNoAction checks a page with a plan and no trap action. It
+// renders from its plan in one write. Execute writes the two text nodes of this
+// template apart, because a template comment splits the text.
+func TestTS28PlanNoAction(t *testing.T) {
+	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}},
+		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `<p>a</p>{{/* c */}}<p>b</p>`}}})
+	h := planHandler(t, b)
+	if h.siteOf(b).hosts["example.com"]["/t"].plan == nil {
+		t.Fatal("the page has no plan")
+	}
+	w := serveSizes(h, b, []string{"unused"})
+	if w.body.String() != "<p>a</p><p>b</p>" || len(w.sizes) != 1 || h.noPlan.Load() != 0 {
+		t.Errorf("page %q, write sizes %v, noPlan %d, want one write", w.body.String(), w.sizes, h.noPlan.Load())
+	}
+	var sb strings.Builder
+	mustOK(t, b.Execute(&sb, tmplName, bundle.Page{}))
+	if sb.String() != w.body.String() {
+		t.Errorf("Execute gives %q", sb.String())
+	}
+}
+
+// TestTS28PlanFilters checks the filters of html/template that look at the
+// whole value. In an attribute name and in a CSS value, the page must have the
+// Execute bytes for tokens that a filter refuses. The template gets no plan,
+// and each page counts one in noPlan.
+func TestTS28PlanFilters(t *testing.T) {
+	pad := func(s string) string { return s + strings.Repeat("b", 26-len(s)) }
+	for _, c := range []struct{ name, tmpl, trap, tok string }{
+		{"on event name", `<p {{index .Trap "t0"}}=1>x</p>`, "o{{.Token}}", pad("nerror")},
+		{"on at the start", `<p {{index .Trap "t0"}}>x</p>`, "{{.Token}}", pad("onx")},
+		{"url in a name", `<p {{index .Trap "t0"}}>x</p>`, "{{.Token}}", pad("xxurl")},
+		{"src in a name", `<p {{index .Trap "t0"}}>x</p>`, "{{.Token}}", pad("xsrc")},
+		{"uri in a name", `<p {{index .Trap "t0"}}="v">x</p>`, "{{.Token}}", pad("xuri")},
+		{"expression after text", `<p style="color: {{index .Trap "t0"}}">x</p>`, "expressio{{.Token}}", pad("n")},
+		{"mozbinding after text", `<style>p{color: {{index .Trap "t0"}}}</style>`, "mozbindin{{.Token}}", pad("g")},
+		{"expression before text", `<style>p{color:{{index .Trap "t0"}}}</style>`, "{{.Token}}xpression", strings.Repeat("b", 25) + "e"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", c.trap}}, map[string][]route{"example.com": {{"/t", "t.tmpl", html, c.tmpl}}})
+			h := planHandler(t, b)
+			if h.siteOf(b).hosts["example.com"]["/t"].plan != nil {
+				t.Fatal("the template has a plan")
+			}
+			want, err := execOf(b, tmplName, []string{c.tok})
+			mustOK(t, err)
+			setTokens(h, []string{c.tok})
+			got := serve(t, h, get("/t", "example.com")).Body.String()
+			if got != want || !strings.Contains(want, "ZgotmplZ") || h.noPlan.Load() != 1 {
+				t.Errorf("page %q, want %q, noPlan %d", got, want, h.noPlan.Load())
+			}
+		})
+	}
+}
+
+// TestTS28PlanMarkers checks the form of a marker. Each marker has the three
+// words that the filters of html/template refuse. The first and last character
+// of a marker in run 1 are hex digits of the token alphabet. Those of a marker
+// in run 2 are letters that are not hex digits.
+func TestTS28PlanMarkers(t *testing.T) {
+	for run := range 2 {
+		for _, act := range []int{0, 1, 31, 32, 63} {
+			m := markerOf(act, run)
+			for _, w := range []string{"src", "expression", "mozbinding", alphabet} {
+				if !strings.Contains(m, w) {
+					t.Errorf("run %d action %d: marker %q has no %q", run, act, m, w)
+				}
+			}
+			first, last := m[0], m[len(m)-1]
+			isHex := func(c byte) bool { return strings.IndexByte(hexSet, c) >= 0 }
+			isOther := func(c byte) bool { return strings.IndexByte(letterSet, c) >= 0 }
+			if run == 0 && !(isHex(first) && isHex(last)) || run == 1 && !(isOther(first) && isOther(last)) {
+				t.Errorf("run %d: edges %q and %q", run, first, last)
+			}
 		}
 	}
 }
@@ -487,8 +611,13 @@ func TestTS28PlanEdges(t *testing.T) {
 	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "{{.Token}}"}},
 		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `{{index .Trap "t0"}}`}}})
 	h := planHandler(t, b)
-	if h.siteOf(b).hosts["example.com"]["/t"].plan == nil {
+	p := h.siteOf(b).hosts["example.com"]["/t"].plan
+	if p == nil {
 		t.Fatal("the page has no plan")
+	}
+	// The plan has no fixed bytes and one cut. Its arrays are under 16 bytes.
+	if len(p.fixed) != 0 || len(p.offs) != 1 || p.size() != planCount(p) || p.size() != 80+16+16 {
+		t.Errorf("plan size %d, count %d, %d fixed bytes, %d cuts", p.size(), planCount(p), len(p.fixed), len(p.offs))
 	}
 	tok := []string{tokOf(rand.New(rand.NewPCG(7, 8)), tokClasses[0])}
 	setTokens(h, tok)
@@ -517,6 +646,85 @@ func TestTS28PlanMintFails(t *testing.T) {
 		if w.Body.String() != c.want || h.noKeys.Load() != wantKeys || h.noPlan.Load() != 0 {
 			t.Errorf("%q: body %q, noKeys %d, noPlan %d", c.tmpl, w.Body.String(), h.noKeys.Load(), h.noPlan.Load())
 		}
+	}
+}
+
+// TestTS28PlanOverBudget checks a plan that passes the cap of its run but has a
+// size over the budget left. The page has 1007 bytes, and the plan counts 1104.
+func TestTS28PlanOverBudget(t *testing.T) {
+	b := bundleFiles(t, "", map[string]string{
+		"vhosts/b.example/routes.json": `{"routes":[{"path":"/1","template":"vhosts/b.example/x.tmpl","type":"text/html; charset=utf-8"}]}`,
+		"vhosts/b.example/x.tmpl":      "<p>" + strings.Repeat("f", 1000) + "</p>",
+	})
+	pl := newPlanner(b, b.Traps(), 1010)
+	if p := pl.of("vhosts/b.example/x.tmpl", nil); p != nil || pl.left != 1010 || pl.w.peak != 1007 {
+		t.Errorf("plan %t, left %d, peak %d, want no plan, 1010 and 1007", p != nil, pl.left, pl.w.peak)
+	}
+	pl = newPlanner(b, b.Traps(), 1110)
+	if p := pl.of("vhosts/b.example/x.tmpl", nil); p == nil || p.size() != 1104 || pl.left != 6 {
+		t.Errorf("plan %t, left %d, want a plan of 1104", p != nil, pl.left)
+	}
+}
+
+// TestTS28PlanOneTry checks that a template gets one try. A template on three
+// routes runs two marker runs, and the three entries share one plan. A template
+// with no plan runs one marker run, and the three entries have none. The
+// bundle has the template of example.com too: two runs.
+func TestTS28PlanOneTry(t *testing.T) {
+	for _, c := range []struct {
+		trap, tmpl string
+		runs       int
+		plan       bool
+	}{{"x {{.Token}}", `<p>{{index .Trap "t0"}}</p>`, 4, true}, {"js:{{.Token}}", `<a href="{{index .Trap "t0"}}">`, 3, false}} {
+		var routes []string
+		for _, p := range []string{"/1", "/2", "/3"} {
+			routes = append(routes, `{"path":"`+p+`","template":"vhosts/b.example/x.tmpl","type":"text/html; charset=utf-8"}`)
+		}
+		b := bundleFiles(t, "", map[string]string{
+			"traps/traps.json":             trapsJSON([]trapSpec{{"t0", "hidden-p", c.trap}}),
+			"vhosts/b.example/routes.json": `{"routes":[` + strings.Join(routes, ",") + `]}`,
+			"vhosts/b.example/x.tmpl":      c.tmpl,
+		})
+		pl := newPlanner(b, b.Traps(), planBudget)
+		paths := makeSite(b, pl).hosts["b.example"]
+		first := paths["/1"].plan
+		if pl.runs != c.runs || (first != nil) != c.plan || paths["/2"].plan != first || paths["/3"].plan != first {
+			t.Errorf("%q: %d runs, want %d; plans %p %p %p", c.trap, pl.runs, c.runs, first, paths["/2"].plan, paths["/3"].plan)
+		}
+	}
+}
+
+// TestTS28PlanWork checks the cap of the work. In this shape the two marker runs
+// of each template differ, because the last trap is in a CSS string. No plan is
+// made, and each template costs two runs. The runs stop at the work cap, and the
+// next templates get no run.
+func TestTS28PlanWork(t *testing.T) {
+	kinds := make([]rune, pageActions)
+	for i := range kinds {
+		kinds[i] = '<'
+		if i < 37 {
+			kinds[i] = 0
+		}
+	}
+	page := mixPage(37, pageActions-1) + `<style>p{content:"{{index .Trap "t63"}}"}</style>`
+	files := map[string]string{"traps/traps.json": rawTraps(kinds)}
+	for i := range mostVhosts {
+		dir := fmt.Sprintf("vhosts/v%d.example/", i)
+		files[dir+"routes.json"] = fmt.Sprintf(`{"routes":[{"path":"/p","template":"%sp.tmpl","type":"text/html; charset=utf-8"}]}`, dir)
+		files[dir+"p.tmpl"] = page
+	}
+	b := bundleFiles(t, "", files)
+	pl := newPlanner(b, b.Traps(), planBudget)
+	s := makeSite(b, pl)
+	kept := 0
+	for name, p := range plansOf(s) {
+		if p != nil && name != tmplName {
+			kept++
+		}
+	}
+	t.Logf("%d marker runs, %d bytes of run output, %d plans", pl.runs, pl.runBytes, kept)
+	if kept != 0 || pl.runBytes > planWork || pl.work != 0 || pl.runs < 20 || pl.runs > 60 {
+		t.Errorf("runs %d, run bytes %d (work %d), work left %d, plans %d", pl.runs, pl.runBytes, planWork, pl.work, kept)
 	}
 }
 
@@ -584,10 +792,31 @@ func mixPage(nul, n int) string {
 	return `<p title=` + a.String() + `>x</p><script>var a="` + b.String() + `";</script>`
 }
 
-// TestTS28PlanBudget checks the plans of one site at the shapes of the largest
-// escape growth and of the most cuts. The plans keep at most 4 MiB of heap, and
-// their count is at most 4 MiB. The budget is nearly full, and the templates
-// past it have no plan.
+// fillShape makes the files of the fill shape: 9 vhosts with a template of the
+// largest escape growth, then 600 templates with one trap action. The size of
+// these falls by about 2 bytes from one to the next, so the budget fills to
+// within a few bytes. The templates of a bundle have 512 KiB at most.
+func fillShape(vhostShape func(int, string, string) map[string]string, kinds []rune) map[string]string {
+	small := `{"id":"s0","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"{{.Token}}"}`
+	files := vhostShape(9, mixPage(37, pageActions), strings.TrimSuffix(rawTraps(kinds), "]")+","+small+"]")
+	var routes [3][]string
+	for j := range 600 {
+		host := fmt.Sprintf("vhosts/w%d.example/", j/200)
+		files[fmt.Sprintf("%sp%d.tmpl", host, j)] = "<p>" + strings.Repeat("f", 1300-13*j/6) + `{{index .Trap "s0"}}</p>`
+		routes[j/200] = append(routes[j/200], fmt.Sprintf(`{"path":"/p%d","template":"%sp%d.tmpl","type":"text/html; charset=utf-8"}`, j, host, j))
+	}
+	for i, rs := range routes {
+		files[fmt.Sprintf("vhosts/w%d.example/routes.json", i)] = `{"routes":[` + strings.Join(rs, ",") + `]}`
+	}
+	return files
+}
+
+// TestTS28PlanBudget checks the plans of one site at three shapes: the largest
+// escape growth, the most cuts and a fill. The count of the plans is at most
+// 4 MiB. The heap of the plans is at most 4 MiB, with no margin. The templates
+// past the budget have no plan. The size of a plan is the count of the test.
+// The measure uses two collections before each read, so the memory of a pool
+// does not count. The heap is near the count, and it can differ by a few KB.
 func TestTS28PlanBudget(t *testing.T) {
 	kinds, dense := make([]rune, pageActions), make([]trapSpec, pageActions)
 	for i := range kinds {
@@ -609,13 +838,15 @@ func TestTS28PlanBudget(t *testing.T) {
 	for _, sh := range []struct {
 		name  string
 		files map[string]string
+		full  int // the budget is full to within this many bytes, or 0
 	}{
-		{"escape growth", vhostShape(mostVhosts, mixPage(37, pageActions), rawTraps(kinds))},
-		{"most cuts", vhostShape(153, actionsPage(pageActions), trapsJSON(dense))},
+		{"escape growth", vhostShape(mostVhosts, mixPage(37, pageActions), rawTraps(kinds)), 480000},
+		{"most cuts", vhostShape(153, actionsPage(pageActions), trapsJSON(dense)), 0},
+		{"fill", fillShape(vhostShape, kinds), 128},
 	} {
 		t.Run(sh.name, func(t *testing.T) {
 			bd := bundleFiles(t, "", sh.files)
-			// The first Execute of a template escapes it. This is no plan.
+			// The first Execute of a template escapes it. This run makes no plan.
 			for name := range plansOf(buildSite(bd)) {
 				_ = bd.Execute(io.Discard, name, bundle.Page{Trap: map[string]string{}})
 			}
@@ -624,21 +855,26 @@ func TestTS28PlanBudget(t *testing.T) {
 			counted, biggest, kept, all := 0, 0, 0, plansOf(s)
 			for _, p := range all {
 				if p != nil {
+					if p.size() != planCount(p) {
+						t.Fatalf("size %d, count %d", p.size(), planCount(p))
+					}
 					counted, biggest, kept = counted+planCount(p), max(biggest, planCount(p)), kept+1
 				}
 			}
 			t.Logf("%d of %d templates have a plan: %d counted bytes, %d bytes of heap, largest plan %d", kept, len(all), counted, int64(heap)-int64(base), biggest)
-			// A run writes 36 bytes for a cut that counts 5. A template near
+			// A run writes 59 bytes for a cut that counts 5. A template near
 			// the end of the budget can fail at the cap of its run. So the
-			// budget is not full to the byte.
-			if counted > 4<<20 || counted <= 4<<20-8*biggest {
-				t.Errorf("counted bytes = %d, want from %d to %d", counted, 4<<20-8*biggest, 4<<20)
+			// budget is not always full.
+			// The build counts against 4 MiB less 16 KiB (planSlack).
+			const counts = 4<<20 - 16<<10
+			if counted > counts || sh.full > 0 && counted < counts-sh.full {
+				t.Errorf("counted bytes = %d, want at most %d and at least %d", counted, counts, counts-sh.full)
 			}
 			if kept == 0 || kept == len(all) {
 				t.Errorf("%d of %d templates have a plan, want some but not all", kept, len(all))
 			}
-			// The count is the heap of the plans, so the heap is at most 4 MiB.
-			// The floor is the fixed bytes: the heap holds at least these.
+			// The count is near the heap of the plans. The limit of the heap is
+			// exactly 4 MiB. The floor is the fixed bytes: the heap holds these.
 			floor := 0
 			for _, p := range all {
 				if p != nil {

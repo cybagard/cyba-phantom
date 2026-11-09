@@ -304,10 +304,13 @@ func retainedOf(bd *bundle.Bundle) (uint64, *site) { return retainedBy(bd, build
 
 // retainedBy is retainedOf for a site that build makes.
 func retainedBy(bd *bundle.Bundle, build func(*bundle.Bundle) *site) (uint64, *site) {
+	// Two collections free the memory of the pools, so it does not count.
 	var before, after runtime.MemStats
+	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	s := build(bd)
+	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(bd)
