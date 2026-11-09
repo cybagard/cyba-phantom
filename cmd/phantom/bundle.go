@@ -75,10 +75,10 @@ func notifyReload() chan os.Signal {
 }
 
 // reloadOnSignal calls Reload with SourceSignal for each signal on hup, one
-// load at a time, until ctx ends. A load that has begun runs to its end.
-// A load in its wait for the swap gap has begun. After ctx ended, it waits
-// for the rest of the 30 s gap and then runs. After ctx ended, no new load
-// begins.
+// load at a time, until ctx ends. A load that has started runs to its end.
+// A load in its wait for the swap gap has not started. When ctx ends, the
+// stop of the loader ends that wait, and the load does not start. After ctx
+// ended, no new load begins.
 func (b *bundlePart) reloadOnSignal(ctx context.Context, hup <-chan os.Signal) {
 	for {
 		select {
@@ -126,15 +126,18 @@ func startBundle(p startParams, s *storePart, q *event.Queue, lg *slog.Logger) *
 }
 
 // startFetchAndWatch starts the fetcher and the expiry watch in wg, both until
-// ctx ends. It does nothing with no loader. The fetcher starts only with a
-// bundle.fetch_url. When newFetcher gives an error, the function writes one
-// fixed line, and the sensor goes on with no fetcher (C3). The watch gets the
-// freeze input of the fetcher, or nil with no fetcher. The watch has no hook:
-// no alert sink exists yet.
+// ctx ends. It does nothing with no loader. With a loader, it first sets the
+// stop of the loader to ctx.Done(). Then a load that is not a start load ends
+// at the stop. The caller calls it before any such load. The fetcher starts
+// only with a bundle.fetch_url. When newFetcher gives an error, the function
+// writes one fixed line, and the sensor goes on with no fetcher (C3). The
+// watch gets the freeze input of the fetcher, or nil with no fetcher. The
+// watch has no hook: no alert sink exists yet.
 func (b *bundlePart) startFetchAndWatch(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config) {
 	if b.l == nil {
 		return
 	}
+	b.l.SetStop(ctx.Done())
 	var frozen func() bool
 	if u, _ := cfg.Get("bundle.fetch_url"); u.Str != "" {
 		every, _ := cfg.Get("bundle.fetch_interval")

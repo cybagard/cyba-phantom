@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
@@ -729,4 +731,251 @@ func TestTP10Child(t *testing.T) {
 	runtime.KeepAlive(runA)
 	runtime.KeepAlive(runB)
 	runtime.KeepAlive(fetched)
+}
+
+// stopRig is a gap rig with a stop and an event queue. Its test sleep tells
+// that the wait began and ends only when the stop closes.
+type stopRig struct {
+	*gapRig
+	stop  chan struct{}
+	began chan struct{}
+	q     *event.Queue
+	log   bytes.Buffer // the log of the loader, with no time attribute
+	once  sync.Once
+}
+
+func newStopRig(t *testing.T) *stopRig {
+	t.Helper()
+	s := &stopRig{gapRig: newGapRig(t, SourceReload), stop: make(chan struct{}), began: make(chan struct{}, 4)}
+	var err error
+	s.q, err = event.NewQueue(8, event.NewCounters())
+	must(t, err)
+	l := s.e.l
+	l.SetEvents(s.q, slog.New(slog.NewTextHandler(&s.log, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		}})))
+	l.SetStop(s.stop)
+	l.sleep = func(time.Duration) {
+		s.began <- struct{}{}
+		<-s.stop
+	}
+	t.Cleanup(s.close)
+	return s
+}
+
+// close closes the stop one time.
+func (s *stopRig) close() { s.once.Do(func() { close(s.stop) }) }
+
+// recv waits for ch within gapBound.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(gapBound):
+		t.Fatalf("no value in %v", gapBound)
+		panic("unreachable")
+	}
+}
+
+// stoppedLoad checks that the load gave ErrStopped, that the same bundle runs,
+// and that no event is in the queue.
+func (s *stopRig) stoppedLoad(err error, run *Bundle) {
+	s.t.Helper()
+	if err != ErrStopped {
+		s.t.Errorf("got %v, want ErrStopped", err)
+	}
+	if s.e.l.Current() != run {
+		s.t.Error("the running bundle changed")
+	}
+	if ev, ok := s.q.TryTake(); ok {
+		s.t.Errorf("an event is in the queue: %v", ev)
+	}
+}
+
+// logLine checks the log of a stopped load. It must be one line. It has the
+// message, the level Info and the attribute source with src only. Call it
+// after the load returned.
+func (s *stopRig) logLine(src string) {
+	s.t.Helper()
+	want := "level=INFO msg=\"bundle load stopped\" source=" + src + "\n"
+	if got := s.log.String(); got != want {
+		s.t.Errorf("log %q, want %q", got, want)
+	}
+}
+
+// T-U-23: a stop during the swap-gap wait of a load ends the wait at once. The
+// load does not start: it gives ErrStopped, reads no file and sends no event.
+// It writes one log line.
+func TestTU23StopEndsGapWait(t *testing.T) {
+	s := newStopRig(t)
+	l, run := s.e.l, s.e.l.Current()
+	// A bundle file of another version would give another Current().
+	s.e.install("bundle/current", mf(ver(3)))
+	done := make(chan error, 1)
+	go func() { _, err := l.LoadFrom(SourceSignal); done <- err }()
+	recv(t, s.began)
+	s.close()
+	s.stoppedLoad(recv(t, done), run)
+	s.logLine("signal")
+	if len(s.starts) != 0 {
+		t.Errorf("%d reads of the bundle file", len(s.starts))
+	}
+}
+
+// T-U-23: the same for a fetched bundle. No file is written.
+func TestTU23StopEndsGapWaitFetched(t *testing.T) {
+	s := newStopRig(t)
+	l, run := s.e.l, s.e.l.Current()
+	arch := build(ent{name: "manifest.json", data: []byte(mf(ver(3)))})
+	dir := filepath.Join(s.e.state, "bundle")
+	before := dirListing(t, dir)
+	done := make(chan error, 1)
+	go func() { _, err := l.LoadFetched(arch, s.e.sign(arch)); done <- err }()
+	recv(t, s.began)
+	s.close()
+	s.stoppedLoad(recv(t, done), run)
+	s.logLine("fetch")
+	if dirListing(t, dir) != before {
+		t.Error("the bundle directory changed")
+	}
+	if len(s.starts) != 0 {
+		t.Errorf("%d reads of the bundle file", len(s.starts))
+	}
+}
+
+// T-U-23: a stop that comes while the load waits for loadMu gives ErrStopped
+// after loadMu is free. The gap has passed, so the load does not wait for it.
+func TestTU23StopWhileWaitingForLoadMu(t *testing.T) {
+	s := newStopRig(t)
+	l := s.e.l
+	s.clk.advance(swapGap)
+	held, release := make(chan struct{}), make(chan struct{})
+	var relOnce sync.Once
+	open := func() { relOnce.Do(func() { close(release) }) }
+	t.Cleanup(open)
+	l.afterRead = func() {
+		held <- struct{}{}
+		<-release
+	}
+	// A signature of other bytes makes the holder load a rejection. A
+	// rejection starts no gap. So only the check of the stop after loadMu
+	// ends the next load.
+	s.e.install("bundle/current", mf(ver(3)))
+	s.e.write("bundle/current.sig", s.e.sign([]byte("other")))
+	holderDone := make(chan error, 1)
+	go func() { _, err := l.LoadFrom(SourceReload); holderDone <- err }()
+	recv(t, held)
+	// The holder waits in afterRead. The next load reads the clock first in
+	// its check of the gap. That is after its stop check and before loadMu.
+	clk, reached := l.now, make(chan struct{}, 1)
+	var armed atomic.Bool
+	l.now = func() time.Time {
+		if armed.CompareAndSwap(false, true) {
+			reached <- struct{}{}
+		}
+		return clk()
+	}
+	done := make(chan error, 1)
+	go func() { _, err := l.LoadFrom(SourceSignal); done <- err }()
+	recv(t, reached)
+	s.close()
+	open()
+	if err := recv(t, holderDone); err == nil || err == ErrStopped {
+		t.Errorf("holder load gave %v; want a rejection", err)
+	}
+	if err := recv(t, done); err != ErrStopped {
+		t.Errorf("got %v, want ErrStopped", err)
+	}
+	if ev, ok := s.q.TryTake(); !ok || ev == nil {
+		t.Fatal("the holder load sent no event")
+	}
+	if ev, ok := s.q.TryTake(); ok {
+		t.Errorf("a second event is in the queue: %v", ev)
+	}
+}
+
+// T-U-23: after the stop, a load that is not a start load gives ErrStopped at
+// once. This holds in the gap and after it. A start load still loads.
+func TestTU23AfterStop(t *testing.T) {
+	s := newStopRig(t)
+	l, run := s.e.l, s.e.l.Current()
+	s.close()
+	l.sleep = func(time.Duration) { t.Error("a load waits after the stop") }
+	for _, passed := range []bool{false, true} {
+		if passed {
+			s.clk.advance(swapGap)
+		}
+		for _, src := range []Source{SourceSignal, SourceReload, SourceFetch} {
+			_, err := s.load(src)
+			s.stoppedLoad(err, run)
+		}
+	}
+	if len(s.starts) != 0 {
+		t.Errorf("%d reads of the bundle file", len(s.starts))
+	}
+	b, err := s.load(SourceStart)
+	must(t, err)
+	if b == nil || len(s.starts) != 1 {
+		t.Errorf("start load gave %v, %d reads", b, len(s.starts))
+	}
+}
+
+// T-U-23: the wait of a loader with no test sleep ends at once when the stop is
+// closed. With an open stop it ends when the timer fires.
+func TestTU23ProductionWait(t *testing.T) {
+	e := newEnv(t)
+	l := NewLoader(e.root, "bundle/current.cbnd", e.trust, nil)
+	stop := make(chan struct{})
+	l.SetStop(stop)
+	var got bool
+	within(t, func() { got = l.waitGap(time.Millisecond) }, nil)
+	if got {
+		t.Error("an open stop ended the wait")
+	}
+	close(stop)
+	within(t, func() { got = l.waitGap(time.Hour) }, nil)
+	if !got {
+		t.Error("a closed stop did not end the wait")
+	}
+}
+
+// T-U-23: two start loads in a row both return a bundle. A start load does not
+// read the stop. A load that gave no bundle would keep loadMu.
+func TestTU23LoadWithOpenStop(t *testing.T) {
+	e := newEnv(t)
+	e.l.SetStop(make(chan struct{}))
+	for _, v := range []int{2, 3} {
+		e.install("bundle/current", mf(ver(v)))
+		var b *Bundle
+		var err error
+		within(t, func() { b, err = e.l.LoadFrom(SourceStart) }, nil)
+		must(t, err)
+		if b == nil || e.l.Current() != b {
+			t.Fatalf("load of version %d gave %v; want the running bundle", v, b)
+		}
+	}
+}
+
+// T-U-23: the gap wait calls the test sleep when it is set. A test sleep that
+// closes the stop gives true. A timer of 1 ns ends at once. So a call of the
+// test sleep shows that no timer ran.
+func TestTU23GapWaitUsesTestSleep(t *testing.T) {
+	e := newEnv(t)
+	l := e.l
+	stop := make(chan struct{})
+	l.SetStop(stop)
+	var waited time.Duration
+	l.sleep = func(d time.Duration) { waited = d }
+	if l.waitGap(time.Nanosecond) || waited != time.Nanosecond {
+		t.Errorf("open stop: waited %v; want a call of the test sleep and false", waited)
+	}
+	l.sleep = func(time.Duration) { close(stop) }
+	if !l.waitGap(time.Nanosecond) {
+		t.Error("a test sleep that closes the stop did not give true")
+	}
 }

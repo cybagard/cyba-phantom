@@ -86,15 +86,14 @@ var (
 // A nil hup gives none.
 // The reload goroutine is in wg, so it ends before the queue closes.
 // After the stop began, the goroutine starts no new load.
-// A load in its wait for the swap gap at the stop runs to its end.
-// So the stop waits for the rest of the 30 s gap and then for the load.
-// The load ends before the queue closes.
+// A load in its wait for the swap gap at the stop ends the wait at once.
+// It does not start, and it sends no event. A load that has started runs to
+// its end. The goroutine ends before the queue closes.
 // With a bundle.fetch_url and a loader, one fetcher starts after the start
 // load. The expiry watch starts with a loader. Both are in wg, so they end
 // before the queue closes. After the stop began, the fetcher starts no new
-// load. A fetch load that began before the stop runs to its end. This holds
-// also in its wait for the swap gap. So the stop can wait for the rest of
-// the 30 s gap and then for the load. A newFetcher
+// load. A fetch load in its wait for the swap gap at the stop does not start.
+// A fetch load that has started runs to its end. A newFetcher
 // error gives one fixed line.
 // stop is the cancel function of ctx.
 func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signal, cfg *config.Config, c content, p startParams, d startDeps, stdout, stderr io.Writer) int {
