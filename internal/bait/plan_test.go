@@ -901,6 +901,40 @@ func TestTS28PlanWorkError(t *testing.T) {
 	}
 }
 
+// TestTS28PlanWorkEqualsLeft checks the run that fails when the work left is
+// equal to the budget left. The two caps are the same, so the work cap stopped
+// the run. The work goes to 0 and the next template gets no run. With more work
+// than budget, the budget cap stopped the run. The work stays and the next
+// template gets its plan. The work stays 501 because the writer refuses the
+// whole 1 007-byte write, so the failed run writes no byte.
+func TestTS28PlanWorkEqualsLeft(t *testing.T) {
+	b := bundleFiles(t, "", map[string]string{
+		"vhosts/b.example/routes.json": `{"routes":[` +
+			`{"path":"/1","template":"vhosts/b.example/big.tmpl","type":"text/html; charset=utf-8"},` +
+			`{"path":"/2","template":"vhosts/b.example/small.tmpl","type":"text/html; charset=utf-8"}]}`,
+		"vhosts/b.example/big.tmpl":   "<p>" + strings.Repeat("f", 1000) + "</p>",
+		"vhosts/b.example/small.tmpl": "<p>f</p>",
+	})
+	for _, c := range []struct {
+		name       string
+		work       int
+		workZero   bool
+		smallBuilt bool
+	}{{"work equals left", 500, true, false}, {"work over left", 501, false, true}} {
+		pl := newPlanner(b, b.Traps(), 500)
+		pl.work = c.work
+		if p := pl.of("vhosts/b.example/big.tmpl", nil); p != nil {
+			t.Fatalf("%s: the big template has a plan", c.name)
+		}
+		if got := pl.work == 0; got != c.workZero {
+			t.Errorf("%s: work left %d, want zero %t", c.name, pl.work, c.workZero)
+		}
+		if got := pl.of("vhosts/b.example/small.tmpl", nil) != nil; got != c.smallBuilt {
+			t.Errorf("%s: the small template has a plan %t, want %t", c.name, got, c.smallBuilt)
+		}
+	}
+}
+
 // TestTS28PlanRunCap checks that a marker run stops at the budget that is left:
 // its output never passes the cap.
 func TestTS28PlanRunCap(t *testing.T) {
