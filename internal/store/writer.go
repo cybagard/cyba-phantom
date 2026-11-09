@@ -242,8 +242,8 @@ func (w *Writer) Run(ctx context.Context) error {
 			// retention request. Thus a flood does not hold them. Then leave
 			// the loop if ctx has ended or the writer has stopped, so that
 			// the select can take ctx.Done. Only an empty take ends the loop
-			// with the lanes empty. Then the writer writes a batch with evidence
-			// at once.
+			// with the lanes empty. Then the writer writes a batch with
+			// evidence at once.
 			for {
 				e, ok := w.q.TryTake()
 				if !ok {
@@ -289,8 +289,9 @@ func (w *Writer) Run(ctx context.Context) error {
 // default case, so it never blocks. A tick goes through flush, as in the select
 // of Run. A stopped writer serves nothing: the flush before can have stopped it,
 // and a stopped writer writes no row. It does not serve a retention request:
-// Run does that after serveWaiting, because the run needs ctx. Between two retention
-// chunks, betweenChunks serves a row request, a batch and a tick, in order.
+// Run does that after serveWaiting, because the run needs ctx. Between two
+// retention chunks, betweenChunks serves a row request, a batch and a tick, in
+// order.
 func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		return batch

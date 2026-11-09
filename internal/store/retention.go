@@ -17,8 +17,8 @@ const (
 	chunkBudget = 100 * time.Millisecond
 
 	// The checkpoint waits for no reader. The writer counts a busy result, and
-	// the next run tries again. After the checkpoint, busy_timeout gets the pool
-	// value of the pragma list in open.go.
+	// the next run tries again. After the checkpoint, busy_timeout gets the
+	// pool value of the pragma list in open.go.
 	checkpointSQL = "PRAGMA wal_checkpoint(TRUNCATE)"
 	busyOff       = "PRAGMA busy_timeout=0"
 	busyPool      = "PRAGMA busy_timeout=" + busyTimeout
@@ -59,11 +59,11 @@ func (rq retentionRequest) left() bool {
 // checkpoint. It is an error when the run ended early or the writer stopped.
 // A stopped writer, or a ctx that has ended, gives its error at once and sends
 // no request. A call that returns on its ctx can leave a request. The writer
-// drops a request whose caller has left when it takes the request. A call also
-// waits until its ctx ends when Run is not running: not started, or returned
-// after Close or a cancel. The request then stays in the buffer. The same holds
-// when the writer stops while the request waits. The call is safe to make from
-// any goroutine.
+// drops a request whose caller has left when the writer takes the request.
+// A call also waits until its ctx ends when Run is not running: not started,
+// or returned after Close or a cancel. The request then stays in the buffer.
+// The same holds when the writer stops while the request waits. Any goroutine
+// can make the call.
 func (w *Writer) RunRetention(ctx context.Context) error {
 	if err := w.Err(); err != nil {
 		return err

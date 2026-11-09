@@ -235,7 +235,7 @@ func TestTU26WaitingBatchCommitsBeforeNextChunk(t *testing.T) {
 		t.Run(fmt.Sprint(c.events, " events"), func(t *testing.T) {
 			var r *rig
 			var addErr error
-			var order []string // each chunk has one statement, which notes "chunk"
+			var order []string // each chunk statement notes "chunk"
 			r = retentionRig(t, c.rows, onCall(deleteRange(seedTS, math.MaxInt64), func(i int, _ *sql.Tx) {
 				order = append(order, "chunk")
 				for j := 0; i == 0 && j < c.events && addErr == nil; j++ {
