@@ -149,8 +149,8 @@ func (p *planner) of(name string, acts []int) *plan {
 // A marker in the template text or in a trap text also gives nil, with no
 // separate check. A marker of one run has the wrong edge characters in the
 // other run. An extra marker in the output breaks the count in cut.
-// A filter of html/template that looks at the whole value (see markerWords)
-// refuses the marker, so the marker does not come back.
+// Some filters of html/template look at the whole value. They refuse the
+// marker, so it does not come back (see markerWords).
 // It also gives nil for a plan over the budget that is left. A run writes 59
 // bytes for a cut that counts 5 or more. So a plan near the end of the
 // budget can fail at the cap of its run. The cap of a run is the smaller of

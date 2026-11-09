@@ -88,7 +88,7 @@ var planContexts = []struct{ name, text string }{
 }
 
 // noPlanContexts are the contexts that get no plan. In a CSS string, the escape
-// of the byte before a token depends on the token, so the two runs differ. In
+// of the byte before a token depends on the token. So the two runs differ. In
 // an attribute name and in a CSS value, a filter refuses the marker.
 var noPlanContexts = map[string]bool{
 	"style css dq": true, "style attr css sq": true, "style attr unq css dq": true,
@@ -487,7 +487,7 @@ func serveSizes(h *Handler, b *bundle.Bundle, toks []string) *writeSizes {
 // array. A text of 32 bytes renders from the plan: the first write is the
 // fixed bytes before the token. A text of 33 bytes renders with Execute: the
 // first write is the text before the action. The test compares the bytes with
-// Execute. A second case has two actions and the long text on the second: the
+// Execute. A second case has two actions and the long text on the second. The
 // first action then needs its trap text for Execute.
 func TestTS28PlanTokenText(t *testing.T) {
 	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}, {"t1", "hidden-p", "y {{.Token}}"}},
@@ -538,8 +538,8 @@ func TestTS28PlanNoAction(t *testing.T) {
 
 // TestTS28PlanFilters checks the filters of html/template that look at the
 // whole value. In an attribute name and in a CSS value, the page must have the
-// Execute bytes for tokens that a filter refuses. The template gets no plan,
-// and each page counts one in noPlan.
+// Execute bytes for tokens that a filter refuses. The template gets no plan.
+// Each page counts one in noPlan.
 func TestTS28PlanFilters(t *testing.T) {
 	pad := func(s string) string { return s + strings.Repeat("b", 26-len(s)) }
 	for _, c := range []struct{ name, tmpl, trap, tok string }{
@@ -694,10 +694,10 @@ func TestTS28PlanOneTry(t *testing.T) {
 	}
 }
 
-// TestTS28PlanWork checks the cap of the work. In this shape the two marker runs
-// of each template differ, because the last trap is in a CSS string. No plan is
-// made, and each template costs two runs. The runs stop at the work cap, and the
-// next templates get no run.
+// TestTS28PlanWork checks the cap of the work. In this shape the two marker
+// runs of each template differ, because the last trap is in a CSS string. No
+// plan is made, and each template costs two runs. The runs stop at the work
+// cap. The next templates get no run.
 func TestTS28PlanWork(t *testing.T) {
 	kinds := make([]rune, pageActions)
 	for i := range kinds {
@@ -792,10 +792,11 @@ func mixPage(nul, n int) string {
 	return `<p title=` + a.String() + `>x</p><script>var a="` + b.String() + `";</script>`
 }
 
-// fillShape makes the files of the fill shape: 9 vhosts with a template of the
-// largest escape growth, then 600 templates with one trap action. The size of
-// these falls by about 2 bytes from one to the next, so the budget fills to
-// within a few bytes. The templates of a bundle have 512 KiB at most.
+// fillShape makes the files of the fill shape. It has 9 vhosts with a template
+// of the largest escape growth. Then it has 600 templates with one trap
+// action. The size of these falls by about 2 bytes from one to the next. So
+// the budget fills to within a few bytes. A bundle has 512 KiB of templates at
+// most.
 func fillShape(vhostShape func(int, string, string) map[string]string, kinds []rune) map[string]string {
 	small := `{"id":"s0","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"{{.Token}}"}`
 	files := vhostShape(9, mixPage(37, pageActions), strings.TrimSuffix(rawTraps(kinds), "]")+","+small+"]")
@@ -846,7 +847,7 @@ func TestTS28PlanBudget(t *testing.T) {
 	} {
 		t.Run(sh.name, func(t *testing.T) {
 			bd := bundleFiles(t, "", sh.files)
-			// The first Execute of a template escapes it. This run makes no plan.
+			// The first Execute of a template escapes it. No plan does this.
 			for name := range plansOf(buildSite(bd)) {
 				_ = bd.Execute(io.Discard, name, bundle.Page{Trap: map[string]string{}})
 			}
@@ -873,8 +874,9 @@ func TestTS28PlanBudget(t *testing.T) {
 			if kept == 0 || kept == len(all) {
 				t.Errorf("%d of %d templates have a plan, want some but not all", kept, len(all))
 			}
-			// The count is near the heap of the plans. The limit of the heap is
-			// exactly 4 MiB. The floor is the fixed bytes: the heap holds these.
+			// The count is near the heap of the plans. The limit of the heap
+			// is exactly 4 MiB. The floor is the fixed bytes. The heap holds
+			// these.
 			floor := 0
 			for _, p := range all {
 				if p != nil {
