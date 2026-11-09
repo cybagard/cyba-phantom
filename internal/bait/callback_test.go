@@ -273,6 +273,27 @@ func TestTI04CallbackDistinct(t *testing.T) {
 	}
 }
 
+// TestTI04CallbackSameTokenNotCapped checks that one valid token at all four
+// positions of a callback route is one token (SEC-37). The route gives one
+// callback event. The token is not a capped token. So the capped counter does
+// not grow. The request event has no trap, token or surface.
+func TestTI04CallbackSameTokenNotCapped(t *testing.T) {
+	e := newCBEnv(t)
+	tok := e.mint(t, time.Now())
+	before := e.h.capped.Load()
+	serve(t, e.h, cbReqN(http.MethodPost, cbRoutePath, [4]string{tok, tok, tok, tok}))
+	reqs, cbs := take(e.q)
+	if len(cbs) != 1 || len(reqs) != 1 {
+		t.Fatalf("%d request and %d callback events, want 1 and 1", len(reqs), len(cbs))
+	}
+	if n := e.h.capped.Load() - before; n != 0 {
+		t.Errorf("the capped counter grew by %d, want 0", n)
+	}
+	if r := reqs[0]; r.TrapID != nil || r.TokenID != nil || r.Surface != nil {
+		t.Errorf("request event %+v has a capped token field, want none", r)
+	}
+}
+
 // dump gives the status, the headers without Date and the body of a response.
 func dump(w *httptest.ResponseRecorder) string {
 	res := w.Result()

@@ -25,9 +25,24 @@ const (
 // bcEnv is a handler for a bundle whose example.com has a beacon member. Its
 // clock is now.
 type bcEnv struct {
+	tb  testing.TB
 	h   *Handler
 	q   *event.Queue
 	now time.Time
+}
+
+// serveBounded runs the handler and waits 5 s for it. A handler that does not
+// return stops the test run with a panic. A read loop that does not end keeps
+// a CPU busy, and a failed test cannot stop it. The next tests would be slow.
+func serveBounded(tb testing.TB, h http.Handler, w http.ResponseWriter, r *http.Request) {
+	tb.Helper()
+	done := make(chan struct{})
+	go func() { h.ServeHTTP(w, r); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		panic(tb.Name() + ": " + r.Method + " " + r.URL.Path + ": the handler did not return in 5 s")
+	}
 }
 
 // newBC returns a bcEnv. The post path of the beacon is post. zulu.example has
@@ -43,7 +58,7 @@ func newBC(t testing.TB, post string) *bcEnv {
 		"vhosts/zulu.example/routes.json": zm,
 		"vhosts/zulu.example/nf.tmpl":     bcNF,
 	})
-	e := &bcEnv{q: queueOf(t, 64), now: testDay}
+	e := &bcEnv{tb: t, q: queueOf(t, 64), now: testDay}
 	e.h = New(fixedSource{b}, &fallbackFn{}, e.q)
 	e.h.now = func() time.Time { return e.now }
 	return e
@@ -64,7 +79,7 @@ func (e *bcEnv) do(method, target, host, addr, cookie string, body string, lengt
 	tb := &tallyBody{ReadCloser: r.Body}
 	r.Body = tb
 	w := httptest.NewRecorder()
-	e.h.ServeHTTP(w, r)
+	serveBounded(e.tb, e.h, w, r)
 	return w, tb.got
 }
 
@@ -205,6 +220,7 @@ func TestTS32BeaconPost(t *testing.T) {
 		{"newline", tk + "\n", "", "example.com", 0, -2, false},
 		{"64 bytes", pad(64), "", "example.com", 0, -2, false},
 		{"65 bytes, unknown length", pad(65), "", "example.com", 0, -1, false},
+		{"valid, length 64", tk, "", "example.com", 0, 64, true},
 		{"length over 64", pad(65), "", "example.com", 0, 65, false},
 		{"300 KiB, unknown length", pad(300 << 10), "", "example.com", 0, -1, false},
 	} {
@@ -246,7 +262,7 @@ func newBCOff(t testing.TB, nf bool) (e *bcEnv, tk string) {
 		files["vhosts/example.com/nf.tmpl"] = bcNF
 	}
 	files["vhosts/example.com/routes.json"] = rm + "}"
-	e = &bcEnv{q: queueOf(t, 64), now: testDay}
+	e = &bcEnv{tb: t, q: queueOf(t, 64), now: testDay}
 	e.h = New(fixedSource{bundleFiles(t, "", files)}, &fallbackFn{}, e.q)
 	e.h.now = func() time.Time { return e.now }
 	tk = e.ticket(t, bcAddr, "")
@@ -361,13 +377,7 @@ func TestTS32BeaconBodyEnd(t *testing.T) {
 		r.Host, r.RemoteAddr, r.ContentLength = "example.com", bcAddr, -1
 		r.Body = io.NopCloser(&c.body)
 		w := httptest.NewRecorder()
-		done := make(chan struct{})
-		go func() { e.h.ServeHTTP(w, r); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: the handler did not return in 5 s", c.name)
-		}
+		serveBounded(t, e.h, w, r)
 		reqs, beacons := 0, 0
 		for _, ev := range e.q.Drain() {
 			if ev.Record().Kind == event.KindBeacon {
@@ -391,7 +401,7 @@ func TestTS32BeaconFlush(t *testing.T) {
 	r := httptest.NewRequest("POST", bcPost, strings.NewReader(tk))
 	r.Host, r.RemoteAddr = "example.com", bcAddr
 	w := &flushProbe{ResponseRecorder: httptest.NewRecorder(), q: e.q}
-	e.h.ServeHTTP(w, r)
+	serveBounded(t, e.h, w, r)
 	if !w.Flushed || w.atFlush != 0 || len(e.q.Drain()) != 2 {
 		t.Errorf("flushed %v, %d events at the flush, want true and 0, and 2 events after", w.Flushed, w.atFlush)
 	}
