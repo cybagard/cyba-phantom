@@ -906,7 +906,7 @@ func TestTS28PlanWorkError(t *testing.T) {
 // the run. The work goes to 0 and the next template gets no run. With more work
 // than budget, the budget cap stopped the run. The work stays and the next
 // template gets its plan. The work stays 501 because the writer refuses the
-// whole 1 003-byte write, so the failed run writes no byte.
+// whole 1 007-byte write, so the failed run writes no byte.
 func TestTS28PlanWorkEqualsLeft(t *testing.T) {
 	b := bundleFiles(t, "", map[string]string{
 		"vhosts/b.example/routes.json": `{"routes":[` +
