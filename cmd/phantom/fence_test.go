@@ -109,11 +109,12 @@ func (f *cacheFence) Stat(ctx context.Context, key string) (info certmagic.KeyIn
 	return info, err
 }
 
-// fenceSet holds the cacheFence of each client that a test made.
+// fenceSet holds a cacheFence for each client that serve made through its
+// wrapper, after the fenceCache call.
 type fenceSet struct {
 	mu     sync.Mutex
 	fences []*cacheFence
-	// atClose, when set, runs once before the first close of the cleanup.
+	// atClose, when set, runs once at the start of the cleanup.
 	atClose func()
 }
 
@@ -122,7 +123,10 @@ type fenceSet struct {
 // over the Storage of that call. Their close runs in a cleanup: call fenceCache
 // before the cleanup that waits for serve. Then the close runs after that wait
 // and before the removal of the temporary directory. A test that wraps newACME
-// itself sets its wrapper before the call.
+// itself sets its wrapper before the call. With two launches in one test, the
+// fence of the first set over the second client closes after the second
+// temporary directory is removed. The fence of the second set below it closed
+// first.
 func fenceCache(t *testing.T) *fenceSet {
 	t.Helper()
 	set := &fenceSet{}
@@ -326,8 +330,8 @@ func TestTI03_LaunchGivesTheClientTheFence(t *testing.T) {
 }
 
 // TestTI03_FenceForEachClient makes two clients in one test. Each gets a fence
-// of its own over its own cache. A Store call through the Storage of the first
-// client makes a file in the first cache only.
+// of its own over its own cache. A Store call through the Storage of each
+// client makes a file in the cache of that client only.
 func TestTI03_FenceForEachClient(t *testing.T) {
 	var got []certmagic.Storage
 	oldNew := newACME
@@ -349,25 +353,36 @@ func TestTI03_FenceForEachClient(t *testing.T) {
 	if !aok || !bok || a == b {
 		t.Fatalf("the Storage of the clients are %T and %T, want two different *cacheFence", got[0], got[1])
 	}
-	if err := got[0].Store(t.Context(), "k", []byte("v")); err != nil {
-		t.Fatalf("Store through the first client: %v", err)
+	for i, key := range []string{"k1", "k2"} {
+		if err := got[i].Store(t.Context(), key, []byte("v")); err != nil {
+			t.Fatalf("Store through client %d: %v", i+1, err)
+		}
 	}
-	for i, want := range []bool{true, false} {
-		if _, err := os.Lstat(filepath.Join(dirs[i], "k")); (err == nil) != want {
-			t.Errorf("file in cache %d: error %v, want present %v", i+1, err, want)
+	for i, key := range []string{"k1", "k2"} {
+		for j := range dirs {
+			want := i == j
+			if _, err := os.Lstat(filepath.Join(dirs[j], key)); (err == nil) != want {
+				t.Errorf("file %q in cache %d: error %v, want present %v", key, j+1, err, want)
+			}
 		}
 	}
 }
 
 // slowStore is a certmagic.Storage that counts its Store calls. A call stays in
-// progress for a moment, and inFlight counts the calls in progress.
+// progress for a moment, and inFlight counts the calls in progress. When the
+// count of calls reaches ops, it closes reached once.
 type slowStore struct {
 	countStore
 	inFlight atomic.Int32
+	ops      int32
+	reached  chan struct{}
+	once     sync.Once
 }
 
 func (s *slowStore) Store(context.Context, string, []byte) error {
-	s.calls.Add(1)
+	if s.calls.Add(1) >= s.ops {
+		s.once.Do(func() { close(s.reached) })
+	}
 	s.inFlight.Add(1)
 	runtime.Gosched()
 	s.inFlight.Add(-1)
@@ -378,11 +393,17 @@ func (s *slowStore) Store(context.Context, string, []byte) error {
 // in each of 5000 rounds. A hook runs in each operation after its check and
 // before the call to the cache. Each operation must either get errFenceClosed
 // and make no call, or be counted. When close returns, no call may be in
-// progress, and no call may begin later.
+// progress, and no call may begin later. The race needs two Ps: with one P,
+// the operations run one after the other and the order is not visible. So the
+// test raises GOMAXPROCS to 2 if it is lower, and restores it at the end.
 func TestTI03_FenceCountsBeforeItCalls(t *testing.T) {
+	if old := runtime.GOMAXPROCS(0); old < 2 {
+		runtime.GOMAXPROCS(2)
+		t.Cleanup(func() { runtime.GOMAXPROCS(old) })
+	}
 	const rounds, ops = 5000, 16
 	for range rounds {
-		cs := &slowStore{}
+		cs := &slowStore{ops: ops, reached: make(chan struct{})}
 		f := newCacheFence(cs)
 		f.afterCheck = runtime.Gosched
 		var attempts, refused, atClose, inFlight atomic.Int32
@@ -404,8 +425,14 @@ func TestTI03_FenceCountsBeforeItCalls(t *testing.T) {
 		closed := make(chan error, 1)
 		go func() {
 			<-start
-			for cs.calls.Load() < ops {
-				runtime.Gosched()
+			select {
+			case <-cs.reached:
+			case <-time.After(netWait):
+				t.Errorf("%d Store calls did not reach the cache in %v", ops, netWait)
+				// The close ends the loops of the operations.
+				f.close(fenceWait)
+				closed <- errors.New("the round ended with no close")
+				return
 			}
 			err := f.close(fenceWait)
 			atClose.Store(cs.calls.Load())
