@@ -555,8 +555,8 @@ func TestCallbackRefusedTokenRequestEvent(t *testing.T) {
 // BenchmarkCallbackRows renders 4 000 pages that each carry a token. Then it
 // serves the 4 000 callbacks of these tokens. It uses a real writer and tlog.
 // A control pass follows. It sends 4 000 callbacks to the same route and
-// position from the same addresses, with a token text that does not verify.
-// Such a callback makes a request event and no callback event. The metrics:
+// position from the same addresses. Their token text does not verify. Such a
+// callback makes a request event and no callback event. The metrics:
 //   - event-B/render: event bytes for each render page (the request row).
 //   - event-B/callback: event bytes that the main pass gains for each
 //     callback. It holds the callback row and the request row of the callback.
