@@ -537,9 +537,9 @@ func TestTS28PlanNoAction(t *testing.T) {
 }
 
 // TestTS28PlanFilters checks the filters of html/template that look at the
-// whole value. In an attribute name and in a CSS value, the page must have the
-// Execute bytes for tokens that a filter refuses. The template gets no plan.
-// Each page counts one in noPlan.
+// whole value. A filter can refuse a token in an attribute name or in a CSS
+// value. The page must then have the Execute bytes. The template gets no
+// plan. Each page counts one in noPlan.
 func TestTS28PlanFilters(t *testing.T) {
 	pad := func(s string) string { return s + strings.Repeat("b", 26-len(s)) }
 	for _, c := range []struct{ name, tmpl, trap, tok string }{
