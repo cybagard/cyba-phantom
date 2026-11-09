@@ -27,9 +27,10 @@ all: build lint test trace mirror-diff
 
 # -s -w removes the symbol table and DWARF. Panic traces keep function names.
 # GOENV=off stops the go tool from reading the go env file (go env -w).
+# GOWORK=off stops the go tool from using a go.work file in a parent folder.
 build:
-	GOENV=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o $(BINDIR)/phantom ./cmd/phantom
-	GOENV=off CGO_ENABLED=0 $(GO) build -trimpath -o $(BINDIR)/phantom-verify ./cmd/phantom-verify
+	GOENV=off GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o $(BINDIR)/phantom ./cmd/phantom
+	GOENV=off GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -o $(BINDIR)/phantom-verify ./cmd/phantom-verify
 
 test:
 	$(GO) test -race ./...

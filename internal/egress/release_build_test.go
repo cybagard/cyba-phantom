@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,98 @@ func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
 	})
 }
 
+// TestTS21ReleaseBuildUsesNoGoWorkFile checks that make build ignores a
+// go.work file in a parent folder. The test makes a folder P. P/m holds
+// symlinks to the files of the module. P/go.work uses P/m and replaces
+// golang.org/x/mod with its module directory. The test shows that the go tool
+// finds P/go.work in P/m. Then it runs make build there and fails when a
+// dependency of a binary has a replace entry.
+// The test does not see a recipe that sets GOWORK to another fixed file. It
+// does not see a replace of a module that the binaries do not import. It
+// builds for the host platform only.
+func TestTS21ReleaseBuildUsesNoGoWorkFile(t *testing.T) {
+	root, err := filepath.Abs(moduleRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := cleanEnv()
+	goVersion := goList(t, root, env, "{{.GoVersion}}")
+	xMod := goList(t, root, env, "{{.Dir}}", "golang.org/x/mod")
+
+	work := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(work); err == nil {
+		work = resolved
+	}
+	mod := filepath.Join(work, "m")
+	if err := os.Mkdir(mod, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"go.mod", "go.sum", "Makefile", "cmd", "internal"} {
+		if err := os.Symlink(filepath.Join(root, name), filepath.Join(mod, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(work, "go.work")
+	text := "go " + goVersion + "\n\nuse ./m\n\nreplace golang.org/x/mod => " + strconv.Quote(xMod) + "\n"
+	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := goEnv(t, mod, env, "GOWORK"); got != file {
+		t.Fatalf("control: go env GOWORK = %q; want %q", got, file)
+	}
+
+	makeTool, err := exec.LookPath("make")
+	if err != nil {
+		t.Fatalf("make is not on PATH: %v", err)
+	}
+	binDir := t.TempDir()
+	build := exec.Command(makeTool, "-C", mod, "build", "BINDIR="+binDir)
+	build.Env = env
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("make build: %v\n%s", err, out)
+	}
+	for _, name := range []string{"phantom", "phantom-verify"} {
+		info, err := buildinfo.ReadFile(filepath.Join(binDir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, dep := range info.Deps {
+			if dep.Replace != nil {
+				t.Errorf("%s: %s is replaced by %s: make build used the go.work file", name, dep.Path, dep.Replace.Path)
+			}
+		}
+	}
+}
+
+// goList runs go list -m with format in dir and returns the trimmed output.
+func goList(t *testing.T, dir string, env []string, format string, args ...string) string {
+	t.Helper()
+	return goOutput(t, dir, env, append([]string{"list", "-m", "-f", format}, args...)...)
+}
+
+// goEnv returns the value of the go variable name when go runs in dir.
+func goEnv(t *testing.T, dir string, env []string, name string) string {
+	t.Helper()
+	return goOutput(t, dir, env, "env", name)
+}
+
+func goOutput(t *testing.T, dir string, env []string, args ...string) string {
+	t.Helper()
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go tool is not on PATH: %v", err)
+	}
+	cmd := exec.Command(goTool, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go %s: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // writeGoEnvFile writes a go env file named env in dir. The file sets GOFLAGS
 // to the sentinel flag. It returns the path of the file.
 func writeGoEnvFile(t *testing.T, dir string) string {
@@ -56,13 +149,14 @@ func writeGoEnvFile(t *testing.T, dir string) string {
 }
 
 // cleanEnv returns the environment of the test without some variables.
-// These variables can hide the go env file or change the make child.
+// These variables can hide the go env file or the go.work file, or change
+// the make child.
 func cleanEnv() []string {
 	var env []string
 	for _, e := range os.Environ() {
 		name, _, _ := strings.Cut(e, "=")
 		switch name {
-		case "GOFLAGS", "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "GOENV":
+		case "GOFLAGS", "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "GOENV", "GOWORK":
 		default:
 			env = append(env, e)
 		}
