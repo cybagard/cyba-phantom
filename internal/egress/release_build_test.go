@@ -51,9 +51,9 @@ func TestTS21ReleaseBuildReadsNoGoEnvFile(t *testing.T) {
 // golang.org/x/mod with its module directory. The test shows that the go tool
 // finds P/go.work in P/m. Then it runs make build there and fails when a
 // dependency of a binary has a replace entry.
-// The test does not see a recipe that sets GOWORK to another fixed file. It
-// does not see a replace of a module that the binaries do not import. It
-// builds for the host platform only.
+// The control step fails when the go env file of the user sets GOWORK=off.
+// The test does not see a replace of a module that the binaries do not
+// import. It builds for the host platform only.
 func TestTS21ReleaseBuildUsesNoGoWorkFile(t *testing.T) {
 	root, err := filepath.Abs(moduleRoot(t))
 	if err != nil {
@@ -121,6 +121,8 @@ func goEnv(t *testing.T, dir string, env []string, name string) string {
 	return goOutput(t, dir, env, "env", name)
 }
 
+// goOutput runs the go tool with args in dir and env. It returns the trimmed
+// standard output, and it fails the test on an error.
 func goOutput(t *testing.T, dir string, env []string, args ...string) string {
 	t.Helper()
 	goTool, err := exec.LookPath("go")
