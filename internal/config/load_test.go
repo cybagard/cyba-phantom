@@ -42,10 +42,17 @@ var testDir = func() string {
 // TestMain stops the run when a directory above the package has a group or
 // other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
+// It also stops the run if esc does not end or gives a wrong text. An older
+// test that calls esc has no time bound.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.
 	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "load_test.go"), htpasswdDirRule); err != nil {
 		fmt.Fprintf(os.Stderr, "the tests need a checkout whose parent directories have no group or other write bit and are owned by root or the current user: %v\n", err)
+		os.RemoveAll(testDir)
+		os.Exit(1)
+	}
+	if err := checkEscBounded(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.RemoveAll(testDir)
 		os.Exit(1)
 	}
@@ -392,6 +399,13 @@ const hangBound = 10 * time.Second
 // hangBound. A loop that does not end then fails the test and does not hang it.
 func within(t *testing.T, f func()) {
 	t.Helper()
+	if !returns(f) {
+		t.Fatalf("the call did not return in %v", hangBound)
+	}
+}
+
+// returns runs f in a goroutine. It reports whether f returned in hangBound.
+func returns(f func()) bool {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -399,9 +413,35 @@ func within(t *testing.T, f func()) {
 	}()
 	select {
 	case <-done:
+		return true
 	case <-time.After(hangBound):
-		t.Fatalf("the call did not return in %v", hangBound)
+		return false
 	}
+}
+
+// escCases are the cuts of esc that the bounded checks run: right and left.
+var escCases = []struct {
+	name, in string
+	max      int
+	want     string
+}{
+	{"right cut", "abcdefgh", 5, "abcde"},
+	{"left cut", "abcdefgh", -5, "...gh"},
+}
+
+// checkEscBounded runs escCases with a time bound. TestMain calls it, so a
+// loop in esc that does not end stops the run before any test calls esc.
+func checkEscBounded() error {
+	for _, c := range escCases {
+		var got string
+		if !returns(func() { got = esc(c.in, c.max) }) {
+			return fmt.Errorf("esc(%q, %d) did not return in %v: %s", c.in, c.max, hangBound, c.name)
+		}
+		if got != c.want {
+			return fmt.Errorf("esc(%q, %d) = %q, want %q: %s", c.in, c.max, got, c.want, c.name)
+		}
+	}
+	return nil
 }
 
 // TestTS10_EnvFoldFullWidthEdges checks the two edges of the full-width
@@ -420,14 +460,7 @@ func TestTS10_EnvFoldFullWidthEdges(t *testing.T) {
 // TestTS10_EscapeBounded checks that esc ends for a cut on the right and for
 // a cut on the left. Each call has a time bound.
 func TestTS10_EscapeBounded(t *testing.T) {
-	for _, r := range []struct {
-		name, in string
-		max      int
-		want     string
-	}{
-		{"right cut", "abcdefgh", 5, "abcde"},
-		{"left cut", "abcdefgh", -5, "...gh"},
-	} {
+	for _, r := range escCases {
 		t.Run(r.name, func(t *testing.T) {
 			var got string
 			within(t, func() { got = esc(r.in, r.max) })
