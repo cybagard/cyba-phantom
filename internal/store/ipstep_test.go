@@ -18,10 +18,11 @@ import (
 
 // ipTPriv is the time of the run in the tests: the tPriv that the caller gives
 // to the step.
-var ipTPriv = time.Unix(1_800_000_000, 0)
+// It has a part of 123 ms, so a cutoff cut to whole seconds fails a test.
+var ipTPriv = time.UnixMilli(1_800_000_000_123)
 
-// ipCutoff is the cutoff of the step for days days, in unix ms. The tests make
-// it again from the definition, not from the code under test.
+// ipCutoff is the cutoff of the step for `days` x 24 h, in unix ms. The tests
+// make it again from the definition, not from the code under test.
 func ipCutoff(days int) int64 { return ipTPriv.UnixMilli() - int64(days)*24*3600*1000 }
 
 // addSessions inserts n session rows with the ids prefix+i for i from from. The
@@ -36,7 +37,7 @@ func addSessions(tb testing.TB, db *sql.DB, prefix string, from, n int, base, st
 	}
 }
 
-// ipRig makes a rig with the IP step for days days. See ipRigFor.
+// ipRig makes a rig with the IP step for `days` x 24 h. See ipRigFor.
 func ipRig(t *testing.T, days int) (r *rig, chunks *[]int) {
 	t.Helper()
 	return ipRigFor(t, newIPStep(ipTPriv, days))
@@ -44,7 +45,7 @@ func ipRig(t *testing.T, days int) (r *rig, chunks *[]int) {
 
 // ipRigFor makes a rig with step. The step gets only its tPriv, not the clock
 // of the writer. The writer clock is fixed, so the chunk budget does not end a
-// chunk. It is one year after tPriv. A step that reads time.Now gets another
+// chunk. The writer clock is one year after tPriv. A step that reads time.Now gets another
 // cutoff, and the tests of the IP step fail. chunks gets the rows that each
 // chunk changed.
 func ipRigFor(t *testing.T, step retentionStep) (r *rig, chunks *[]int) {
@@ -54,6 +55,7 @@ func ipRigFor(t *testing.T, step retentionStep) (r *rig, chunks *[]int) {
 	return r, chunks
 }
 
+// rowsChanged returns the sum of the rows that the chunks changed.
 func rowsChanged(v []int) (s int) {
 	for _, n := range v {
 		s += n
@@ -199,11 +201,12 @@ func TestTU11IPStepRefusesBadParameters(t *testing.T) {
 		tPriv time.Time
 		days  int
 	}{
-		{"0 days", ipTPriv, 0}, {"8 days", ipTPriv, 8}, {"zero tPriv", time.Time{}, 7},
+		{"0 days", ipTPriv, 0}, {"-1 days", ipTPriv, -1}, {"8 days", ipTPriv, 8},
+		{"zero tPriv", time.Time{}, 7},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, chunks := ipRigFor(t, newIPStep(c.tPriv, c.days))
-			addSessions(t, r.db, "old", 0, 1, ipCutoff(7)-2*24*3600*1000, 0, "192.0.2.1")
+			addSessions(t, r.db, "old", 0, 1, ipCutoff(9), 0, "192.0.2.1")
 			addSessions(t, r.db, "young", 0, 1, ipCutoff(7)+1_000_000, 0, "192.0.2.2")
 			wantIPRunStops(t, r)
 			if got := nullIPs(t, r.db); fmt.Sprint(got) != "map[old0:false young0:false]" || rowsChanged(*chunks) != 0 {
@@ -240,6 +243,8 @@ type schemaEntry struct {
 	rows     int64
 }
 
+// schemaEntries returns each entry of sqlite_schema by name, with the row
+// count of each table.
 func schemaEntries(t *testing.T, db *sql.DB) map[string]schemaEntry {
 	t.Helper()
 	rows, err := db.Query("SELECT type, name, sql, rootpage FROM sqlite_schema")
@@ -510,6 +515,9 @@ const mib = 1 << 20 // a MiB is 2^20 bytes
 // VmHWM, the time, and the file and WAL bytes before and after. Run it with
 // -benchtime=1x.
 func BenchmarkIPStepIndexBuild(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
 	n := ipBenchRows(b)
 	keys := []string{"rss", "ms", "db0", "wal0", "db1", "wal1"}
 	m := runIPChild(b, ipBenchState(b, n, true, time.Now()), "build", keys)
@@ -526,6 +534,9 @@ func BenchmarkIPStepIndexBuild(b *testing.B) {
 // prints the rows changed and the WAL bytes at the end. Run it with
 // -benchtime=1x.
 func BenchmarkIPStepChunks(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
 	n, tPriv := ipBenchRows(b), time.Now()
 	state := ipBenchState(b, n, false, tPriv)
 	keys := []string{"rss", "ms", "longest", "rows", "wal", "db0"}
