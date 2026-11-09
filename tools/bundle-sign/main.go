@@ -33,14 +33,16 @@
 //
 // cosign adds the second line of a transition bundle. sig-file must hold
 // one line of the signature form, and key_id must not be the key ID of that
-// line. cosign reads the archive one time. It makes no output file unless the
-// archive is a valid bundle archive. Its manifest must have a rotation member.
-// The manifest key_id must be key_id. rotation.from must be the key ID of that
+// line. cosign reads the archive one time. It makes no output file unless
+// bundle.ReadArchive accepts the archive. That checks the form only. The
+// manifest must pass bundle.ParseManifest and have a rotation member. Its
+// key_id must be the key_id argument. rotation.from must be the key ID of that
 // line. rotation.key must be the public key of the key file. cosign makes the
 // new line over the bytes that it checked, with the same key file rules as
 // sign. It writes the old line and the new line to out.sig. cosign does not
-// verify the signature of the old line: it has no public key for it. Run
-// verify after cosign.
+// verify the signature of the old line: it has no public key for it. It does
+// not check the expiry, min_engine or the seed of the bundle. Run verify
+// after cosign.
 //
 // seal makes the file secrets/token.key for a proprietary bundle. install.pub
 // is the public key file of the sensor: canonical base64 of 32 bytes and a
