@@ -252,10 +252,10 @@ func f(r *http.Request, c conf, db store) {
 // the ParseForm, FormValue, PostFormValue, ParseMultipartForm or
 // MultipartReader method of *net/http.Request. A use is a call, a method value
 // or a method expression, under any variable or import name. The check reads
-// the files of each GOOS and GOARCH. It type-checks them together, so any type
+// the files of each GOOS and GOARCH. It type-checks them together. Any type
 // error fails the test, for example a name with two types in files of two
-// GOOS. See TestTS32QueryScanTypeError. The test does not call t.Parallel: the
-// shared source importer is not safe for concurrent use.
+// GOOS. See TestTS32QueryScanTypeError. The test does not call t.Parallel,
+// because the shared source importer is not safe for concurrent use.
 func TestTS32NoQueryParserCall(t *testing.T) {
 	fset, from := scanImporter()
 	imp := &checkImporter{from: from}

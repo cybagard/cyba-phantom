@@ -512,11 +512,11 @@ func refusedText(s string) string {
 	return "a" + s[1:]
 }
 
-// TestCallbackRefusedTokenRequestEvent compares the request event of a
-// callback with a token that verifies to the request event of a callback with
-// a token that does not. Only the first request gets a callback event. The two
-// request events must have the same fields, so the benchmark can use the
-// second request as the control for the request row.
+// TestCallbackRefusedTokenRequestEvent sends two callbacks. The first has a
+// token that verifies. The second has a token that does not. Only the first
+// gets a callback event. The two request events must have the same fields.
+// So the benchmark can use the second request as the control for the request
+// row.
 func TestCallbackRefusedTokenRequestEvent(t *testing.T) {
 	e := newCBEnv(t)
 	tok := e.mint(t, time.Now())
@@ -553,7 +553,7 @@ func TestCallbackRefusedTokenRequestEvent(t *testing.T) {
 }
 
 // BenchmarkCallbackRows renders 4 000 pages that each carry a token. Then it
-// serves the 4 000 callbacks of these tokens through a real writer and tlog.
+// serves the 4 000 callbacks of these tokens. It uses a real writer and tlog.
 // A control pass follows. It sends 4 000 callbacks to the same route and
 // position from the same addresses, with a token text that does not verify.
 // Such a callback makes a request event and no callback event. The metrics:
