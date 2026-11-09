@@ -246,7 +246,8 @@ func launchServe(t *testing.T, cfg *config.Config, p startParams, d startDeps) *
 func launchContent(t *testing.T, cfg *config.Config, c content, p startParams, d startDeps) *running {
 	oldLog := log.Writer()
 	t.Cleanup(func() { log.SetOutput(oldLog) })
-	fences := fenceCache(t) // before the wait for serve below, so it closes after it
+	// Before the wait for serve below, so the fence closes after it.
+	fences := fenceCache(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	// The read is before begin on purpose, so the window has only serve.
 	atBegin := readPressure()
@@ -277,7 +278,8 @@ func launchViaServe(t *testing.T, cfg *config.Config, c content, p startParams, 
 		}
 		return p, realDeps
 	}
-	fences := fenceCache(t) // before the wait for serve below, so it closes after it
+	// Before the wait for serve below, so the fence closes after it.
+	fences := fenceCache(t)
 	hold := make(chan struct{})
 	waitStop = func(context.Context) { <-hold }
 	// The read is before begin on purpose, so the window has only serve.
