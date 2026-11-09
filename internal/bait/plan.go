@@ -123,7 +123,7 @@ func (p *planner) of(name string, acts []int) *plan {
 // A run fails, a marker does not come back exactly, or the two runs differ.
 // A marker in the template text or in a trap text also gives nil, with no
 // separate check. A marker of one run has the wrong edge characters in the
-// other run, and an extra marker in the output breaks the count in cut.
+// other run. An extra marker in the output breaks the count in cut.
 // It also gives nil for a plan over the budget that is left. A run writes 36
 // bytes for a cut that counts 5 or more. So a plan near the end of the
 // budget can fail at the cap of its run.
@@ -151,8 +151,8 @@ func (p *planner) build(name string, acts []int) *plan {
 		}
 	}
 	a, c := runs[0], runs[1]
-	// cut checks the actions of each run against the same list, so the action
-	// lists and the cut counts of the two runs are equal here.
+	// cut checks the actions of each run against the same list. So the two
+	// action lists are equal here, and so are the two cut counts.
 	if !bytes.Equal(a.fixed, c.fixed) {
 		return nil
 	}

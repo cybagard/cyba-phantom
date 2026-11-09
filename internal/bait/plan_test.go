@@ -384,8 +384,8 @@ func TestTS28PlanOrder(t *testing.T) {
 	}
 }
 
-// TestTS28PlanRunWriter checks the cap of a marker run: a write to exactly the
-// cap is kept, and one more byte is refused.
+// TestTS28PlanRunWriter checks the cap of a marker run. A write to exactly the
+// cap is kept. One more byte is refused.
 func TestTS28PlanRunWriter(t *testing.T) {
 	w := runWriter{max: 10}
 	if n, err := w.Write(make([]byte, 10)); n != 10 || err != nil {
@@ -402,9 +402,9 @@ func TestTS28PlanRunWriter(t *testing.T) {
 
 // TestTS28PlanCut checks cut with output that a template can make. Each
 // marker check has a case where it alone refuses. The want lists with 224 and
-// 255 are the values that a bad index character gives, so only the check of
+// 255 hold the values that a bad index character gives. So only the check of
 // the index character refuses these. 64 is the first action position over the
-// cap, and 256 is the first one that wraps in a byte.
+// cap. 256 is the first one that wraps in a byte.
 func TestTS28PlanCut(t *testing.T) {
 	m := func(hi, lo byte) string { return "a" + alphabet + string(hi) + string(lo) + "7" }
 	for _, c := range []struct {
