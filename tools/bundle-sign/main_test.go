@@ -731,6 +731,47 @@ func TestTS20CosignTransition(t *testing.T) {
 	runFail(t, 1, errVerify, "verify", r.p("trust"), r.p("t.cbnd"), r.p("one.sig"))
 }
 
+// T-S-20: cosign reads the archive one time and signs the bytes that it
+// checked. The test replaces the archive file after the first read. A second
+// read would sign other bytes, and verify would refuse the new line.
+func TestTS20CosignReadsArchiveOnce(t *testing.T) {
+	r := newRig(t)
+	oldLine := runOK(t, "keygen", "k1", r.p("old.key"))
+	newLine := runOK(t, "keygen", "k2", r.p("new.key"))
+	rot := `,"rotation":{"from":"k1","key":"` + strings.Fields(newLine)[1] + `"}`
+	r.build("t", rot, "k2", testVersion)
+	r.build("o", rot, "k2", "2026.10.01-2")
+	first, err := os.ReadFile(r.p("t.cbnd"))
+	other, err2 := os.ReadFile(r.p("o.cbnd"))
+	if err != nil || err2 != nil || bytes.Equal(first, other) {
+		t.Fatal("archives")
+	}
+	runOK(t, "sign", "k1", r.p("old.key"), r.p("t.cbnd"), r.p("one.sig"))
+	reads := 0
+	swap(t, &readInput, func(path string, limit int64, key bool, fail error) ([]byte, error) {
+		b, err := readFile(path, limit, key, fail)
+		if path == r.p("t.cbnd") {
+			reads++
+			if err := os.WriteFile(path, other, 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return b, err
+	})
+	runOK(t, "cosign", "k2", r.p("new.key"), r.p("t.cbnd"), r.p("one.sig"), r.p("two.sig"))
+	if reads != 1 {
+		t.Errorf("archive read %d times; want 1", reads)
+	}
+	readInput = readFile
+	write(t, r.p("trust"), oldLine, 0o644)
+	if err := os.WriteFile(r.p("t.cbnd"), first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runOK(t, "verify", r.p("trust"), r.p("t.cbnd"), r.p("two.sig")); got != "valid: k1 k2\n" {
+		t.Errorf("verify: %q", got)
+	}
+}
+
 // T-S-20: cosign refuses a key file with a group or other bit. It refuses a
 // signature file of two lines or of a wrong form. It refuses a key ID that is
 // in the file. It makes no output file.

@@ -167,6 +167,9 @@ func readFile(path string, limit int64, key bool, fail error) ([]byte, error) {
 	return nil, fail
 }
 
+// readInput reads every input file. Tests replace it to count the reads.
+var readInput = readFile
+
 // Tests replace these write and sync calls to make a failure.
 var (
 	writeTo = (*os.File).Write
@@ -284,7 +287,7 @@ func loadKey(keyID, keyPath string) (ed25519.PrivateKey, error) {
 	if err := checkKeyDir(keyPath); err != nil {
 		return nil, err
 	}
-	b, err := readFile(keyPath, maxSmall, true, errKey)
+	b, err := readInput(keyPath, maxSmall, true, errKey)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +318,7 @@ func signLine(keyID, keyPath, archivePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	archive, err := readFile(archivePath, maxFile, false, errRead)
+	archive, err := readInput(archivePath, maxFile, false, errRead)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +334,7 @@ func sign(a []string, _ io.Writer) error {
 }
 
 func cosign(a []string, _ io.Writer) error {
-	prev, err := readFile(a[3], maxSig, false, errRead)
+	prev, err := readInput(a[3], maxSig, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -346,7 +349,7 @@ func cosign(a []string, _ io.Writer) error {
 	if err != nil {
 		return err
 	}
-	archive, err := readFile(a[2], maxFile, false, errRead)
+	archive, err := readInput(a[2], maxFile, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -373,7 +376,7 @@ func transitionOf(archive []byte, newID, oldID string, pub ed25519.PublicKey) bo
 // bytes and a newline. bundle.SealSeed makes the seed and seals it, so this
 // tool never holds the seed.
 func seal(a []string, _ io.Writer) error {
-	text, err := readFile(a[0], maxSmall, false, errRead)
+	text, err := readInput(a[0], maxSmall, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -390,7 +393,7 @@ func seal(a []string, _ io.Writer) error {
 }
 
 func verify(a []string, out io.Writer) error {
-	text, err := readFile(a[0], maxSmall, false, errRead)
+	text, err := readInput(a[0], maxSmall, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -404,11 +407,11 @@ func verify(a []string, out io.Writer) error {
 	if !ok || trust.Check(nil) != nil {
 		return errTrust
 	}
-	archive, err := readFile(a[1], maxFile, false, errRead)
+	archive, err := readInput(a[1], maxFile, false, errRead)
 	if err != nil {
 		return err
 	}
-	sig, err := readFile(a[2], maxSig, false, errRead)
+	sig, err := readInput(a[2], maxSig, false, errRead)
 	if err != nil {
 		return err
 	}
@@ -438,7 +441,7 @@ func pack(a []string, _ io.Writer) error {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
-		data, err := readFile(p, bundle.MaxEntryBytes, false, errPack)
+		data, err := readInput(p, bundle.MaxEntryBytes, false, errPack)
 		if err != nil {
 			return err
 		}
