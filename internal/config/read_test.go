@@ -13,6 +13,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/safefile"
 	"github.com/cybagard/cyba-phantom/internal/safefile/safefiletest"
+	"go.yaml.in/yaml/v3"
 )
 
 // sepRule is the fixed error text for a raw U+0085, U+2028 or U+2029.
@@ -20,6 +21,66 @@ const sepRule = "contains U+0085, U+2028 or U+2029"
 
 // crRule is the fixed error text for a CR without an LF after it.
 const crRule = "contains a CR without an LF after it"
+
+// TestTS10_ReadCRLF checks the values that ReadBytes gives for a file with
+// CRLF line ends. The CR scan moves past each CRLF. TestMain runs this call
+// with a time bound before any test.
+func TestTS10_ReadCRLF(t *testing.T) {
+	doc, err := ReadBytes([]byte(crlfInput))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Leaves["x"].Value; got != "y" {
+		t.Errorf("x = %q, want y", got)
+	}
+}
+
+// TestTS10_BareTagCursorEdges checks the cost of bareTag at two edges. A
+// second call for the same column does not read again. A column after the
+// end of the line stops at the end of the line.
+func TestTS10_BareTagCursorEdges(t *testing.T) {
+	t.Run("same column", func(t *testing.T) {
+		src := &lineCursor{lines: [][]byte{[]byte("a: !x")}}
+		n := &yaml.Node{Kind: yaml.ScalarNode, Line: 1, Column: 4}
+		for range 2 {
+			if !bareTag(n, src) {
+				t.Fatal("bareTag = false, want true")
+			}
+		}
+		if src.steps != 3 {
+			t.Errorf("steps = %d, want 3", src.steps)
+		}
+	})
+	// The parser does not give such a column. The bound keeps the cost linear
+	// if a node does.
+	t.Run("column past the line", func(t *testing.T) {
+		src := &lineCursor{lines: [][]byte{[]byte("ab")}}
+		n := &yaml.Node{Kind: yaml.ScalarNode, Line: 1, Column: 10}
+		if bareTag(n, src) {
+			t.Fatal("bareTag = true, want false")
+		}
+		if src.steps != 2 {
+			t.Errorf("steps = %d, want 2", src.steps)
+		}
+	})
+}
+
+// TestTS10_CutBound checks the 64-byte bound of cut. A string of 65 bytes
+// gives its first 64 bytes. A string of 63 or 64 bytes stays whole.
+func TestTS10_CutBound(t *testing.T) {
+	s64 := strings.Repeat("a", 63) + "b"
+	for _, r := range []struct{ name, in, want string }{
+		{"65 bytes", s64 + "c", s64},
+		{"64 bytes", s64, s64},
+		{"63 bytes", s64[:63], s64[:63]},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			if got := cut(r.in); got != r.want {
+				t.Errorf("cut(%d bytes) = %q, want %q", len(r.in), got, r.want)
+			}
+		})
+	}
+}
 
 func TestTS10_Read(t *testing.T) {
 	type row struct {

@@ -42,10 +42,17 @@ var testDir = func() string {
 // TestMain stops the run when a directory above the package has a group or
 // other write bit or another owner. The htpasswd directory rule refuses each
 // fixture below such a directory, and many tests would fail with other texts.
+// It also stops the run if one of these calls does not end: esc, ReadBytes
+// and AllowList. Other tests make the same calls with no time bound.
 func TestMain(m *testing.M) {
 	// The file name is for the walk: it checks the package directory and above.
 	if err := safefile.CheckPathParents(filepath.Join(pkgDir, "load_test.go"), htpasswdDirRule); err != nil {
 		fmt.Fprintf(os.Stderr, "the tests need a checkout whose parent directories have no group or other write bit and are owned by root or the current user: %v\n", err)
+		os.RemoveAll(testDir)
+		os.Exit(1)
+	}
+	if err := checkEnds(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.RemoveAll(testDir)
 		os.Exit(1)
 	}
@@ -381,6 +388,86 @@ func TestTS10_EnvNameForms(t *testing.T) {
 		if _, err := loadTest(writeConfig(t, base), []string{name + "=1"}); err != nil {
 			t.Errorf("%q: got %v, want no error", name, err)
 		}
+	}
+}
+
+// hangBound is the time that a bounded-wait test gives a call. A call takes
+// microseconds. The bound is large so that a loaded machine does not fail it.
+const hangBound = 10 * time.Second
+
+// returns runs f in a goroutine. It reports whether f returned in hangBound.
+func returns(f func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(hangBound):
+		return false
+	}
+}
+
+// escCases are the cuts of esc that the tests and checkEnds run: right and
+// left.
+var escCases = []struct {
+	name, in string
+	max      int
+	want     string
+}{
+	{"right cut", "abcdefgh", 5, "abcde"},
+	{"left cut", "abcdefgh", -5, "...gh"},
+}
+
+// crlfInput is a file with CRLF line ends. The CR scan of ReadBytes moves past
+// each CRLF.
+const crlfInput = "foo: bar\r\nbaz: qux\r\nx: y\r\n"
+
+// checkEnds calls esc with a cut on each side, ReadBytes with a CRLF file, and
+// AllowList with no sink. It checks only that each call returns in hangBound.
+// The named tests check the values.
+func checkEnds() error {
+	calls := []struct {
+		name string
+		f    func()
+	}{
+		{"esc, right cut", func() { esc(escCases[0].in, escCases[0].max) }},
+		{"esc, left cut", func() { esc(escCases[1].in, escCases[1].max) }},
+		{"ReadBytes, CRLF file", func() { _, _ = ReadBytes([]byte(crlfInput)) }},
+		{"AllowList, no sink", func() { _ = (&Config{}).AllowList() }},
+	}
+	for _, r := range calls {
+		if !returns(r.f) {
+			return fmt.Errorf("%s did not return in %v", r.name, hangBound)
+		}
+	}
+	return nil
+}
+
+// TestTS10_EnvFoldFullWidthEdges checks the two edges of the full-width
+// range. U+FF01 and U+FF5E fold to "!" and "~". The next rune on each side
+// stays as it is.
+func TestTS10_EnvFoldFullWidthEdges(t *testing.T) {
+	for _, r := range []struct{ in, want string }{
+		{"！", "!"}, {"～", "~"}, {"＀", "＀"}, {"｟", "｟"},
+	} {
+		if got := envFold(r.in); got != r.want {
+			t.Errorf("envFold(%q) = %q, want %q", r.in, got, r.want)
+		}
+	}
+}
+
+// TestTS10_EscapeCuts checks the text of esc for a cut on the right and for a
+// cut on the left. TestMain runs this call with a time bound before any test.
+func TestTS10_EscapeCuts(t *testing.T) {
+	for _, r := range escCases {
+		t.Run(r.name, func(t *testing.T) {
+			if got := esc(r.in, r.max); got != r.want {
+				t.Errorf("esc(%q, %d) = %q, want %q", r.in, r.max, got, r.want)
+			}
+		})
 	}
 }
 
