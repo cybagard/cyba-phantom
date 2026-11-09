@@ -19,6 +19,10 @@ type minted struct {
 	page  bundle.Page
 	slots []slotHeader
 	left  int
+	// planned is true when the page renders from its plan. Then toks has the
+	// token text of each action and page has no trap texts.
+	planned bool
+	toks    [maxActs]string
 }
 
 // mint gives the trap texts and the header slots of one response of e. It
@@ -32,10 +36,11 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	m.left = e.left
 	acts := len(e.acts)
 	n := acts + len(e.slots)
+	m.planned = e.plan != nil
 	if n == 0 {
 		return m
 	}
-	if acts > 0 {
+	if acts > 0 && !m.planned {
 		m.page.Trap = make(map[string]string, acts)
 	}
 	var out [token.MaxRange][token.Size]byte
@@ -56,6 +61,11 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	}
 	if failed {
 		h.noKeys.Add(1)
+		// A page with empty trap texts has no token for its plan. It renders
+		// with Execute.
+		if m.planned {
+			m.unplan(s, e.acts, 0)
+		}
 		for _, i := range e.acts {
 			m.page.Trap[s.traps[i].ID] = ""
 		}
@@ -68,16 +78,39 @@ func (h *Handler) mint(b *bundle.Bundle, s *site, e *entry, sess *reqSession) (m
 	sess.mint = event.MintRange{Unit: unit, Count: uint8(n), First: first, IssuedAt: sess.at.UnixMilli()}
 	copy(sess.mint.SetID[:], sum[:])
 	for i, ix := range idx[:n] {
-		v := s.traps[ix].Render(h.text(out[i]))
+		t := h.text(out[i])
 		if i < acts {
-			m.page.Trap[s.traps[ix].ID] = v
-		} else if validSlotValue(v) {
+			if m.planned && len(t) > maxTokText {
+				// This is no token, as a token text has 26 bytes. The page
+				// renders with Execute, so its writes stay those of Execute.
+				m.unplan(s, e.acts, i)
+			}
+			if m.planned {
+				m.toks[i] = t
+			} else {
+				m.page.Trap[s.traps[ix].ID] = s.traps[ix].Render(t)
+			}
+			continue
+		}
+		v := s.traps[ix].Render(t)
+		if validSlotValue(v) {
 			m.slots = append(m.slots, slotHeader{e.names[i-acts], []string{v}})
 		} else {
 			m.left++
 		}
 	}
 	return m
+}
+
+// unplan turns a plan page into a page for Execute. It makes the trap text map.
+// The first done actions get the text of their tokens in toks.
+func (m *minted) unplan(s *site, acts []int, done int) {
+	m.planned = false
+	m.page.Trap = make(map[string]string, len(acts))
+	for j := range done {
+		t := s.traps[acts[j]]
+		m.page.Trap[t.ID] = t.Render(m.toks[j])
+	}
 }
 
 // errOverCap is the error of a write that would pass maxResponse.
@@ -95,6 +128,20 @@ type capWriter struct {
 	n       int
 	started bool
 	over    bool
+	// scratch holds a short token text for writeString, so a plan page copies
+	// a token with no allocation.
+	scratch [maxTokText]byte
+}
+
+// writeString is Write for a string. It copies a short text into scratch. It
+// converts a longer text.
+func (c *capWriter) writeString(s string) error {
+	if len(s) > len(c.scratch) {
+		_, err := c.Write([]byte(s))
+		return err
+	}
+	_, err := c.Write(c.scratch[:copy(c.scratch[:], s)])
+	return err
 }
 
 func (c *capWriter) Write(p []byte) (int, error) {
@@ -123,9 +170,11 @@ func (c *capWriter) start() {
 	}
 }
 
-// render runs the template of e and streams the page with the status code. It
-// returns the status that it wrote. The data is the trap text map of the mint
-// of this response. It holds no request value. An error counts one time.
+// render streams the page of e with the status code. A template with a plan
+// writes the fixed bytes and the token texts. Else it runs the template, and a
+// template with no plan counts one in noPlan. It returns the status that it
+// wrote. For a page with no plan, the data is the trap text map of the mint of
+// this response. It holds no request value. An error counts one time.
 // Before the first byte, and not over the cap, the response is the fixed 404
 // page. Then the event keeps the mint range. Else the connection closes. Render
 // then writes the event, with the status of the first byte or none and the
@@ -139,7 +188,15 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, b *bundle.Bundl
 		h.mintHook()
 	}
 	cw := capWriter{w: w, h: h, m: h.mint(b, s, e, sess), sess: sess, code: code}
-	err := b.Execute(&cw, e.route.Template, cw.m.page)
+	var err error
+	if cw.m.planned {
+		err = e.plan.write(&cw, &cw.m.toks)
+	} else {
+		if e.plan == nil {
+			h.noPlan.Add(1)
+		}
+		err = b.Execute(&cw, e.route.Template, cw.m.page)
+	}
 	if err == nil {
 		cw.start()
 		return code

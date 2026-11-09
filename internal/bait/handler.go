@@ -92,6 +92,9 @@ type Handler struct {
 	flushHook func()
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64
+	// noPlan counts the template pages that render with Execute because the
+	// template has no plan (SEC-32). It adds one for each such page.
+	noPlan atomic.Int64
 	// slotDrops counts the header slots left out of a response because the
 	// value is not valid. It adds one for each slot at each such response.
 	slotDrops atomic.Int64
@@ -282,7 +285,8 @@ func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 // is higher than the sequence of cur. This includes a bundle that was never
 // cur and a bundle that has left retired. The loader swapped in a bundle with a
 // lower sequence before cur. That bundle gets a site for its own request, like
-// a bundle in retired. The state does not change. The sequence does not depend
+// a bundle in retired. The state does not change. Such a site has no render
+// plan, so its pages render with Execute (SEC-32). The sequence does not depend
 // on the manifest version, so a reload of the same archive counts as later. A
 // request in flight keeps its bundle and site in local variables.
 func (h *Handler) siteOf(b *bundle.Bundle) *site {

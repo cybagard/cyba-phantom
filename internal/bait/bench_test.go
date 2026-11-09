@@ -16,11 +16,9 @@ const (
 	// template route page. It has 16 KiB and 64 trap ids, one action for each.
 	pageBytes   = 16 << 10
 	pageActions = 64
-	// actionAllocs is the most allocations for each action of a template page.
-	// A page with 1 to 64 actions allocates 18 for each action and 20 more.
-	// With the race detector, the pools lose items. A page then allocates up
-	// to 19 for each action.
-	actionAllocs = 19
+	// actionAllocs is the most allocations for each action of a template page
+	// with a plan (ADR-035 decision 14).
+	actionAllocs = 10
 )
 
 // pageOf makes a page of pageBytes bytes with the trap actions t0 to t(n-1).
@@ -45,10 +43,13 @@ func trapSet() string {
 // serveHandler returns a handler for the hardening bundle with 64 traps. The
 // route /t is the page of pageOf with the given actions. The 404 template of
 // example.com shows a trap.
-func serveHandler(tb testing.TB, actions int) *Handler {
+func serveHandler(tb testing.TB, actions int) *Handler { return servePage(tb, pageOf(actions)) }
+
+// servePage is serveHandler for the page text of the route /t.
+func servePage(tb testing.TB, page string) *Handler {
 	b := hardBundle(tb, `<h1>{{index .Trap "t0"}}</h1>`, map[string]string{
 		"traps/traps.json":          trapSet(),
-		"vhosts/example.com/t.tmpl": pageOf(actions),
+		"vhosts/example.com/t.tmpl": page,
 	})
 	return New(fixedSource{b}, &fallbackFn{}, testQueue(tb))
 }
@@ -106,10 +107,22 @@ func allocsOf(h *Handler, method, target, host string) float64 {
 
 // TestTS28ServeAllocs checks the allocations of each kind against its limit.
 // The limit of the template page is for a page of 1 action. A page of
-// pageActions actions allocates at most actionAllocs more for each action. It
-// calls serve and not ServeHTTP, for the reason of TestTU20RenderAllocs.
+// pageActions actions allocates at most actionAllocs more for each action. The
+// pages have a plan. It calls serve and not ServeHTTP, for the reason of
+// TestTU20RenderAllocs. It also logs the allocations of a page with no plan: a
+// marker in its text takes the plan away.
 func TestTS28ServeAllocs(t *testing.T) {
 	h, one := serveHandler(t, pageActions), serveHandler(t, 1)
+	for _, hk := range []*Handler{h, one} {
+		if hk.siteOf(hk.src.Current()).hosts["example.com"]["/t"].plan == nil {
+			t.Fatal("the template page has no plan")
+		}
+	}
+	noPlan := servePage(t, pageOf(pageActions)+markerOf(0, 0))
+	if noPlan.siteOf(noPlan.src.Current()).hosts["example.com"]["/t"].plan != nil {
+		t.Fatal("the page with a marker has a plan")
+	}
+	t.Logf("template page of %d actions with no plan: %v allocations", pageActions, allocsOf(noPlan, http.MethodGet, "/t", "example.com"))
 	for _, k := range serveKinds {
 		hk := h
 		if k.name == "template page" {
@@ -287,11 +300,17 @@ func callbackSpec() shapeSpec {
 // retainedOf builds the site of bd and gives the bytes of heap that it keeps
 // after a GC. The bundle stays alive to the end. It holds the archive bytes,
 // and a freed bundle would hide the cost of the site.
-func retainedOf(bd *bundle.Bundle) (uint64, *site) {
+func retainedOf(bd *bundle.Bundle) (uint64, *site) { return retainedBy(bd, buildSite) }
+
+// retainedBy is retainedOf for a site that build makes.
+func retainedBy(bd *bundle.Bundle, build func(*bundle.Bundle) *site) (uint64, *site) {
+	// Two collections free the memory of the pools, so it does not count.
 	var before, after runtime.MemStats
 	runtime.GC()
+	runtime.GC()
 	runtime.ReadMemStats(&before)
-	s := buildSite(bd)
+	s := build(bd)
+	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(bd)
