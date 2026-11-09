@@ -17,8 +17,8 @@ const (
 	chunkBudget = 100 * time.Millisecond
 
 	// The checkpoint waits for no reader. The writer counts a busy result, and
-	// the next run tries again. After it, busy_timeout gets the pool value of
-	// the pragma list in open.go.
+	// the next run tries again. After the checkpoint, busy_timeout gets the pool
+	// value of the pragma list in open.go.
 	checkpointSQL = "PRAGMA wal_checkpoint(TRUNCATE)"
 	busyOff       = "PRAGMA busy_timeout=0"
 	busyPool      = "PRAGMA busy_timeout=" + busyTimeout
@@ -59,8 +59,11 @@ func (rq retentionRequest) left() bool {
 // checkpoint. It is an error when the run ended early or the writer stopped.
 // A stopped writer, or a ctx that has ended, gives its error at once and sends
 // no request. A call that returns on its ctx can leave a request. The writer
-// drops it. A call can wait until its ctx ends, when the writer stops while the
-// request waits. It is safe to call from any goroutine.
+// drops a request whose caller has left when it takes the request. A call also
+// waits until its ctx ends when Run is not running: not started, or returned
+// after Close or a cancel. The request then stays in the buffer. The same holds
+// when the writer stops while the request waits. The call is safe to make from
+// any goroutine.
 func (w *Writer) RunRetention(ctx context.Context) error {
 	if err := w.Err(); err != nil {
 		return err
@@ -90,13 +93,14 @@ func (w *Writer) RetentionCheckpointBusy() uint64 { return w.checkpointBusy.Load
 
 // serveRetention runs one retention run and sends the result to rq. It runs one
 // chunk for each pass. Between two chunks the writer serves what waits (see
-// betweenChunks). A stopped writer, or a caller that has left, gets no chunk
-// and no checkpoint. The run also ends early, with an error, in four cases.
-// These are: ctx has ended, the caller has left, the queue is closed, or the
-// writer has stopped. Each chunk is a transaction, so no partial chunk stays.
-// A database error stops the writer. The last chunk ends in the checkpoint.
+// betweenChunks). An ended ctx, a stopped writer, or a caller that has left
+// gets no chunk and no checkpoint. The run also ends early, with an error, in
+// four cases. These are: ctx has ended, the caller has left, the queue is
+// closed, or the writer has stopped. Each chunk is a transaction, so no partial
+// chunk stays. A database error stops the writer. The run ends with the
+// checkpoint.
 func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batch []*event.Event, rq retentionRequest) []*event.Event {
-	if !w.Healthy() || rq.left() {
+	if !w.Healthy() || ctx.Err() != nil || rq.left() {
 		rq.reply <- fail(writerName, ruleRetention)
 		return batch
 	}
@@ -127,7 +131,7 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // chunk runs the steps from *cur in one transaction on one pool connection. The
 // transaction does not use the context of Run, as write does not. The statement
 // limit is 1 000 minus the rows that the chunk changed. The chunk ends at the
-// first of three events. These are 1 000 rows, the first statement that
+// first of three conditions. These are 1 000 rows, the first statement that
 // reaches the budget, and the end of the last step. BEGIN and COMMIT are not in
 // the budget. A step with no row left lets the chunk go on with the next step.
 // The time comes from w.now. It returns the rows that the chunk changed. Any
@@ -181,9 +185,9 @@ func (w *Writer) chunk(steps []retentionStep, cur *int) (rows int, err error) {
 
 // betweenChunks serves what waits between two chunks, never blocking. The order
 // is: one row request. Then the events in the lanes, at most one batch of 500.
-// It writes the batch when the batch is not empty. Then one tick. The take has
-// a bound, so a flood cannot stop the run. A stopped writer drops the batch, as
-// flush does.
+// The writer writes the batch when the batch is not empty. Then one tick. The
+// take has a bound, so a flood cannot hold the run. A stopped writer drops the
+// batch, as flush does.
 func (w *Writer) betweenChunks(tick <-chan time.Time, batch []*event.Event) []*event.Event {
 	select {
 	case rq := <-w.rows:
