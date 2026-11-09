@@ -190,9 +190,9 @@ func TestTU11IPStepErrorStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-U-11: a days value below 1 or above 7, or a zero tPriv, gives a step that
-// runs no statement and returns an error. The run stops the writer, and no row
-// changes. A session of 9 days and a young session show the rows.
+// T-U-11: a days value below 1 or above 7 gives a step that runs no statement.
+// A zero tPriv does the same. The step returns an error, so the run stops the
+// writer. No row changes. A session of 9 days and a young session show this.
 func TestTU11IPStepRefusesBadParameters(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -470,8 +470,8 @@ func ipBenchState(b *testing.B, n int, build bool, tPriv time.Time) string {
 }
 
 // runIPChild runs the child benchmark in mode on state. It returns the numbers
-// that the child printed on its line, for example rss=1234 ms=5.6. It fails
-// when a value is not a number, when a key of keys is missing, or when rss is 0.
+// on the line of the child, for example rss=1234 ms=5.6. It fails when a value
+// is not a number. It fails when a key of keys is missing, or when rss is 0.
 func runIPChild(b *testing.B, state, mode string, keys []string, env ...string) map[string]float64 {
 	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkIPStepChild$", "-test.benchtime=1x")
 	cmd.Env = append(append(os.Environ(), ipChildDir+"="+state, ipChildMode+"="+mode), env...)
@@ -522,8 +522,9 @@ func BenchmarkIPStepIndexBuild(b *testing.B) {
 // BenchmarkIPStepChunks measures the IP step of the real runner on a database
 // of schema 3. PHANTOM_IPSTEP_ROWS gives the session rows (default 20 000). The
 // child process runs w.chunk until no row is left. It prints the file bytes
-// before the run, VmHWM, the longest chunk, the total time, the rows changed
-// and the WAL bytes at the end. Run it with -benchtime=1x.
+// before the run and VmHWM. It prints the longest chunk and the total time. It
+// prints the rows changed and the WAL bytes at the end. Run it with
+// -benchtime=1x.
 func BenchmarkIPStepChunks(b *testing.B) {
 	n, tPriv := ipBenchRows(b), time.Now()
 	state := ipBenchState(b, n, false, tPriv)
