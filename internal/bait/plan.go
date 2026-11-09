@@ -21,8 +21,9 @@ const planSlack = 16 << 10
 
 // planWork is the most output bytes of all marker runs of one site build. A run
 // that fails counts too. When the work is used, no more marker run starts.
-// Two runs of a plan write at least its size. So 2 times planBudget cannot fill
-// the budget when one run fails. The factor is 4.
+// The factor is 4. At 2 times, the fill shape got 207 plans (3 990 400 bytes)
+// and the most-cuts shape got 11. At 4 times, they got 455 (4 177 920 bytes)
+// and 22. The escape-growth shape got 9 plans at both.
 const planWork = 4 * planBudget
 
 // planHeader is the heap size of the plan struct. The struct has 72 bytes. The
@@ -39,10 +40,16 @@ const maxTokText = 32
 // alphabet is the token alphabet (internal/token). Each marker holds all of it.
 const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
 
-// The first and last character of a marker in the two marker runs. Run 0 uses
-// hex digits and run 1 uses letters that are not hex digits. The escape of a
-// CSS string depends on this class of the first character of a token.
-var markerEdges = [2][2]byte{{'a', '7'}, {'q', 'z'}}
+// The first two characters and the last character of a marker in the two marker
+// runs. Run 0 uses hex digits and run 1 uses letters that are not hex digits.
+// The class must hold for the first two characters. The URL normalizer keeps a
+// "%" only before two hex digits, so it looks two bytes ahead (url.go:118).
+// The CSS escape looks one byte ahead. No other escaper of go1.27.3 looks
+// further into a value where a plan can exist.
+var (
+	markerStarts = [2]string{"a7", "qz"}
+	markerEnds   = [2]byte{'7', 'z'}
+)
 
 // plan is the output of one template with a marker in place of each token. A
 // request writes the fixed bytes and the token text at each cut, with no
@@ -73,7 +80,7 @@ func heapBytes(n int) int {
 	return max(n, 16)
 }
 
-// markerWords are in each marker, after the first edge character. The filters
+// markerWords are in each marker, after the first two characters. The filters
 // of html/template refuse them. htmlNameFilter refuses an attribute name with
 // src. cssValueFilter refuses a value with expression or mozbinding. So a
 // marker never comes back in these two contexts. A template with an action
@@ -81,13 +88,13 @@ func heapBytes(n int) int {
 // so a marker run cannot show it.
 const markerWords = "srcexpressionmozbinding"
 
-// markerHead gives the first edge character and the words of a marker.
-func markerHead(run int) string { return string(markerEdges[run][0]) + markerWords }
+// markerHead gives the first two characters and the words of a marker.
+func markerHead(run int) string { return markerStarts[run] + markerWords }
 
 // markerOf gives the marker of action act in marker run run. It has the head,
 // the alphabet, two characters that give act, and a last edge character.
 func markerOf(act, run int) string {
-	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + string(markerEdges[run][1])
+	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + string(markerEnds[run])
 }
 
 // errPlanOver is the error of a marker run that passes its cap.
@@ -214,8 +221,8 @@ func cut(out []byte, run int, want []uint8) *plan {
 		if k < 0 {
 			break
 		}
-		end, lead := k+len(alphabet)+3, len(markerWords)+1
-		if k < lead || end > len(out) || string(out[k-lead:k]) != markerHead(run) || out[end-1] != markerEdges[run][1] {
+		end, lead := k+len(alphabet)+3, len(markerStarts[run])+len(markerWords)
+		if k < lead || end > len(out) || string(out[k-lead:k]) != markerHead(run) || out[end-1] != markerEnds[run] {
 			return nil
 		}
 		hi, lo := strings.IndexByte(alphabet, out[end-3]), strings.IndexByte(alphabet, out[end-2])

@@ -96,6 +96,10 @@ var noPlanContexts = map[string]bool{
 	"css value": true, "css value attr": true,
 }
 
+// urlContexts are the contexts of the URL normalizer. With a "%" before the
+// token, the two marker runs differ in these contexts.
+var urlContexts = map[string]bool{"href path dq": true, "href start": true, "srcset": true}
+
 // execOf runs the template name of b as a render with no plan does. toks has
 // one token text for each action.
 func execOf(b *bundle.Bundle, name string, toks []string) (string, error) {
@@ -203,46 +207,56 @@ func TestTS28PlanEquality(t *testing.T) {
 			act = func(id string) string { return `{{comment (index .Trap "` + id + `")}}` }
 		}
 		for _, c := range planContexts {
-			t.Run(form+"/"+c.name, func(t *testing.T) {
-				var specs []trapSpec
-				var acts strings.Builder
-				add := func(text string) {
-					id := fmt.Sprint("t", len(specs))
-					specs = append(specs, trapSpec{id, "hidden-p", text})
-					acts.WriteString(act(id))
-				}
-				for _, pre := range affixes {
-					for _, suf := range affixes {
-						add(pre + "{{.Token}}" + suf)
+			for _, pct := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/percent=%v", form, c.name, pct), func(t *testing.T) {
+					var specs []trapSpec
+					var acts strings.Builder
+					add := func(text string) {
+						id := fmt.Sprint("t", len(specs))
+						specs = append(specs, trapSpec{id, "hidden-p", text})
+						acts.WriteString(act(id))
 					}
-				}
-				// A trap with no token and a trap with two tokens.
-				add("plain")
-				add("{{.Token}} {{.Token}}")
-				b := tmplBundle(t, specs, map[string][]route{"example.com": {{"/t", "t.tmpl", html, fmt.Sprintf(c.text, acts.String())}}})
-				h := planHandler(t, b)
-				hasPlan := h.siteOf(b).hosts["example.com"]["/t"].plan != nil
-				if form == "index" && hasPlan == noPlanContexts[c.name] || form == "comment" && c.name == "html text" && !hasPlan {
-					t.Errorf("plan = %v", hasPlan)
-				}
-				for round := range rounds {
-					toks := make([]string, len(specs))
-					for i := range toks {
-						toks[i] = tokOf(rng, tokClasses[(round+i)%len(tokClasses)])
+					for _, pre := range affixes {
+						for _, suf := range affixes {
+							add(pre + "{{.Token}}" + suf)
+						}
 					}
-					want, err := execOf(b, tmplName, toks)
-					if err != nil {
-						t.Fatal(err)
+					// A "%" before the token. The URL normalizer looks two
+					// bytes ahead. In its contexts the two runs differ.
+					if pct {
+						add("%{{.Token}}")
+						add("%%{{.Token}}")
+						add("%{{.Token}}%")
 					}
-					setTokens(h, toks)
-					if got := serve(t, h, get("/t", "example.com")).Body.String(); got != want {
-						t.Fatalf("round %d: page differs from Execute\n got %q\nwant %q", round, got, want)
+					// A trap with no token and a trap with two tokens.
+					add("plain")
+					add("{{.Token}} {{.Token}}")
+					b := tmplBundle(t, specs, map[string][]route{"example.com": {{"/t", "t.tmpl", html, fmt.Sprintf(c.text, acts.String())}}})
+					h := planHandler(t, b)
+					hasPlan := h.siteOf(b).hosts["example.com"]["/t"].plan != nil
+					noPlan := noPlanContexts[c.name] || pct && urlContexts[c.name]
+					if form == "index" && hasPlan == noPlan || form == "comment" && c.name == "html text" && !hasPlan {
+						t.Errorf("plan = %v", hasPlan)
 					}
-				}
-				if got, want := h.noPlan.Load(), int64(rounds); hasPlan && got != 0 || !hasPlan && got != want {
-					t.Errorf("noPlan = %d with plan %v, want %d without a plan", got, hasPlan, want)
-				}
-			})
+					for round := range rounds {
+						toks := make([]string, len(specs))
+						for i := range toks {
+							toks[i] = tokOf(rng, tokClasses[(round+i)%len(tokClasses)])
+						}
+						want, err := execOf(b, tmplName, toks)
+						if err != nil {
+							t.Fatal(err)
+						}
+						setTokens(h, toks)
+						if got := serve(t, h, get("/t", "example.com")).Body.String(); got != want {
+							t.Fatalf("round %d: page differs from Execute\n got %q\nwant %q", round, got, want)
+						}
+					}
+					if got, want := h.noPlan.Load(), int64(rounds); hasPlan && got != 0 || !hasPlan && got != want {
+						t.Errorf("noPlan = %d with plan %v, want %d without a plan", got, hasPlan, want)
+					}
+				})
+			}
 		}
 	}
 }
@@ -435,9 +449,10 @@ func TestTS28PlanCut(t *testing.T) {
 		{"last position", m('b', '7'), []uint8{63}, ""},
 		{"alphabet at the start", alphabet + "x", nil, "refused"},
 		{"cut at the end", "x" + head + alphabet + "a", []uint8{0}, "refused"},
-		{"first edge", "z" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
-		{"words", "a" + markerWords[:len(markerWords)-1] + "x" + alphabet + "aa7", []uint8{0}, "refused"},
-		{"head too short", "a" + alphabet + "aa7", []uint8{0}, "refused"},
+		{"first character", "z7" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
+		{"second character", "az" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
+		{"words", "a7" + markerWords[:len(markerWords)-1] + "x" + alphabet + "aa7", []uint8{0}, "refused"},
+		{"head too short", "a7" + alphabet + "aa7", []uint8{0}, "refused"},
 		{"last edge", head + alphabet + "aaz", []uint8{0}, "refused"},
 		{"high character", m('!', 'a'), []uint8{224}, "refused"},
 		{"low character", m('a', '!'), []uint8{255}, "refused"},
@@ -590,10 +605,41 @@ func TestTS28PlanSrcset(t *testing.T) {
 	}
 }
 
+// TestTS28PlanPercent checks a "%" before the token in the contexts of the URL
+// normalizer. It keeps a "%" before two hex digits, so it looks two bytes into
+// the token. The two marker runs then differ, the template gets no plan, and
+// the page has the Execute bytes. Each page counts one in noPlan.
+func TestTS28PlanPercent(t *testing.T) {
+	toks := []string{"ab" + strings.Repeat("b", 24), "7c" + strings.Repeat("b", 24), "aq" + strings.Repeat("b", 24), "q" + strings.Repeat("b", 25)}
+	for _, c := range []struct{ name, tmpl string }{
+		{"href path", `<a href="/x/{{index .Trap "t0"}}">x</a>`},
+		{"href start", `<a href="{{index .Trap "t0"}}">x</a>`},
+		{"href unquoted", `<a href=/x/{{index .Trap "t0"}}>x</a>`},
+		{"srcset", `<img srcset="{{index .Trap "t0"}} 1x">`},
+		{"css url", `<p style="background:url(/x/{{index .Trap "t0"}})">x</p>`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "%{{.Token}}"}}, map[string][]route{"example.com": {{"/t", "t.tmpl", html, c.tmpl}}})
+			h := planHandler(t, b)
+			if h.siteOf(b).hosts["example.com"]["/t"].plan != nil {
+				t.Fatal("the template has a plan")
+			}
+			for i, tok := range toks {
+				want, err := execOf(b, tmplName, []string{tok})
+				mustOK(t, err)
+				setTokens(h, []string{tok})
+				if got := serve(t, h, get("/t", "example.com")).Body.String(); got != want || h.noPlan.Load() != int64(i+1) {
+					t.Errorf("token %q: page %q, want %q, noPlan %d", tok, got, want, h.noPlan.Load())
+				}
+			}
+		})
+	}
+}
+
 // TestTS28PlanMarkers checks the form of a marker. Each marker has the three
-// words that the filters of html/template refuse. The first and last character
-// of a marker in run 1 are hex digits of the token alphabet. Those of a marker
-// in run 2 are letters that are not hex digits.
+// words that the filters of html/template refuse. Take the first two characters
+// and the last character of a marker. In run 1 they are hex digits of the token
+// alphabet. In run 2 they are letters that are not hex digits.
 func TestTS28PlanMarkers(t *testing.T) {
 	for run := range 2 {
 		for _, act := range []int{0, 1, 31, 32, 63} {
@@ -603,11 +649,11 @@ func TestTS28PlanMarkers(t *testing.T) {
 					t.Errorf("run %d action %d: marker %q has no %q", run, act, m, w)
 				}
 			}
-			first, last := m[0], m[len(m)-1]
+			first, second, last := m[0], m[1], m[len(m)-1]
 			isHex := func(c byte) bool { return strings.IndexByte(hexSet, c) >= 0 }
 			isOther := func(c byte) bool { return strings.IndexByte(letterSet, c) >= 0 }
-			if run == 0 && !(isHex(first) && isHex(last)) || run == 1 && !(isOther(first) && isOther(last)) {
-				t.Errorf("run %d: edges %q and %q", run, first, last)
+			if run == 0 && !(isHex(first) && isHex(second) && isHex(last)) || run == 1 && !(isOther(first) && isOther(second) && isOther(last)) {
+				t.Errorf("run %d: characters %q, %q and %q", run, first, second, last)
 			}
 		}
 	}
@@ -751,6 +797,31 @@ func TestTS28PlanWork(t *testing.T) {
 	}
 }
 
+// TestTS28PlanWorkError checks a run that fails with an error that is not the
+// cap. The work cap is the smaller cap here. The template with the escape error
+// comes first. The next templates still get their marker runs and plans.
+func TestTS28PlanWorkError(t *testing.T) {
+	files := map[string]string{
+		"traps/traps.json":        trapsJSON([]trapSpec{{"t0", "hidden-p", "x {{.Token}}"}}),
+		"vhosts/b.example/e.tmpl": `<p onclick=f('{{index .Trap "t0"}}')>`,
+	}
+	var routes []string
+	for _, n := range []string{"e", "f", "g"} {
+		if n != "e" {
+			files["vhosts/b.example/"+n+".tmpl"] = `<p>{{index .Trap "t0"}}</p>`
+		}
+		routes = append(routes, `{"path":"/`+n+`","template":"vhosts/b.example/`+n+`.tmpl","type":"text/html; charset=utf-8"}`)
+	}
+	files["vhosts/b.example/routes.json"] = `{"routes":[` + strings.Join(routes, ",") + `]}`
+	b := bundleFiles(t, "", files)
+	pl := newPlanner(b, b.Traps(), planBudget)
+	pl.work = 100000
+	got := plansOf(makeSite(b, pl))
+	if got["vhosts/b.example/e.tmpl"] != nil || got["vhosts/b.example/f.tmpl"] == nil || got["vhosts/b.example/g.tmpl"] == nil || pl.work == 0 {
+		t.Errorf("plans %v, work left %d", got, pl.work)
+	}
+}
+
 // TestTS28PlanRunCap checks that a marker run stops at the budget that is left:
 // its output never passes the cap.
 func TestTS28PlanRunCap(t *testing.T) {
@@ -870,7 +941,8 @@ func TestTS28PlanBudget(t *testing.T) {
 	} {
 		t.Run(sh.name, func(t *testing.T) {
 			bd := bundleFiles(t, "", sh.files)
-			// The first Execute of a template escapes it. No plan does this.
+			// This Execute is not a marker run. It puts the escape memory into
+			// the base.
 			for name := range plansOf(buildSite(bd)) {
 				_ = bd.Execute(io.Discard, name, bundle.Page{Trap: map[string]string{}})
 			}
