@@ -13,10 +13,19 @@ const clearIPSQL = "UPDATE session SET ip = NULL WHERE rowid IN (SELECT rowid FR
 
 // newIPStep returns the retention step for the raw address (SEC-39). It clears
 // the address of each session with first_seen before tPriv minus days days.
-// The cutoff is in unix ms. The step reads no clock: tPriv is the only time.
-// It covers the session rows of refused events too. They are in the same
-// table.
+// The cutoff is in unix ms. The step reads no clock. tPriv is the time of the
+// run, and the caller gives it. The step covers the session rows of refused
+// events too. They are in the same table.
+//
+// The configuration bounds days to 1 through 7. Outside these bounds, or with
+// a zero tPriv, the step runs no statement and returns an error. The runner
+// then stops the writer, as for any other error of a chunk.
 func newIPStep(tPriv time.Time, days int) retentionStep {
+	if days < 1 || days > 7 || tPriv.IsZero() {
+		return func(context.Context, *sql.Tx, int) (int, error) {
+			return 0, fail(writerName, ruleDatabase)
+		}
+	}
 	cutoff := tPriv.Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 		res, err := tx.ExecContext(ctx, clearIPSQL, cutoff, limit)

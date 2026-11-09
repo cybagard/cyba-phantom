@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -15,12 +16,13 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/event"
 )
 
-// ipNow is the T_priv of the tests. The step gets it as a parameter.
-var ipNow = time.Unix(1_800_000_000, 0)
+// ipTPriv is the time of the run in the tests: the tPriv that the caller gives
+// to the step.
+var ipTPriv = time.Unix(1_800_000_000, 0)
 
 // ipCutoff is the cutoff of the step for days days, in unix ms. The tests make
 // it again from the definition, not from the code under test.
-func ipCutoff(days int) int64 { return ipNow.UnixMilli() - int64(days)*24*3600*1000 }
+func ipCutoff(days int) int64 { return ipTPriv.UnixMilli() - int64(days)*24*3600*1000 }
 
 // addSessions inserts n session rows with the ids prefix+i for i from from. The
 // first_seen of row i is base + i*step. An ip of nil is NULL.
@@ -34,18 +36,25 @@ func addSessions(tb testing.TB, db *sql.DB, prefix string, from, n int, base, st
 	}
 }
 
-// ipRig makes a rig with the IP step for days days. The clock of the writer is
-// one year after T_priv, so a step that reads it gets a wrong cutoff. The
-// clock is fixed, so the chunk budget does not end a chunk. chunks gets the
-// rows that each chunk changed.
+// ipRig makes a rig with the IP step for days days. See ipRigFor.
 func ipRig(t *testing.T, days int) (r *rig, chunks *[]int) {
 	t.Helper()
-	r, _, chunks = chunkLog(t, 0, newIPStep(ipNow, days))
-	r.w.clock = func() time.Time { return ipNow.Add(365 * 24 * time.Hour) }
+	return ipRigFor(t, newIPStep(ipTPriv, days))
+}
+
+// ipRigFor makes a rig with step. The step gets only its tPriv, not the clock
+// of the writer. The writer clock is fixed, so the chunk budget does not end a
+// chunk. It is one year after tPriv. A step that reads time.Now gets another
+// cutoff, and the tests of the IP step fail. chunks gets the rows that each
+// chunk changed.
+func ipRigFor(t *testing.T, step retentionStep) (r *rig, chunks *[]int) {
+	t.Helper()
+	r, _, chunks = chunkLog(t, 0, step)
+	r.w.clock = func() time.Time { return ipTPriv.Add(365 * 24 * time.Hour) }
 	return r, chunks
 }
 
-func sum(v []int) (s int) {
+func rowsChanged(v []int) (s int) {
 	for _, n := range v {
 		s += n
 	}
@@ -97,7 +106,9 @@ func TestTU11IPStepClearsOldRowsInChunks(t *testing.T) {
 
 // T-U-11: a row with first_seen one ms before the cutoff loses its ip. A row at
 // the cutoff and a younger row keep it. A row with no ip stays NULL and is not
-// counted. The step uses days and its own T_priv, not the clock of the writer.
+// counted. A row of a returning visitor has an old first_seen and a young
+// last_seen. It loses its ip too. The step uses days and its own tPriv, not the
+// clock of the writer.
 func TestTU11IPStepBoundary(t *testing.T) {
 	for _, days := range []int{1, 7} {
 		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
@@ -113,13 +124,17 @@ func TestTU11IPStepBoundary(t *testing.T) {
 			} {
 				addSessions(t, r.db, s.id, 0, 1, s.ts, 0, s.ip)
 			}
+			q := "INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, band) VALUES ('returning', ?, ?, '192.0.2.5', 'h', 'human')"
+			if _, err := r.db.Exec(q, cut-1, ipTPriv.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
 			if err := r.retain(waitFor); err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]bool{"before0": true, "at0": false, "after0": false, "none0": true, "oldest0": true}
+			want := map[string]bool{"before0": true, "at0": false, "after0": false, "none0": true, "oldest0": true, "returning": true}
 			got := nullIPs(t, r.db)
-			if fmt.Sprint(got) != fmt.Sprint(want) || sum(*chunks) != 2 {
-				t.Fatalf("NULL ip by session %v, want %v; %d rows changed, want 2", got, want, sum(*chunks))
+			if fmt.Sprint(got) != fmt.Sprint(want) || rowsChanged(*chunks) != 3 {
+				t.Fatalf("NULL ip by session %v, want %v; %d rows changed, want 3", got, want, rowsChanged(*chunks))
 			}
 		})
 	}
@@ -147,8 +162,74 @@ func TestTU11IPStepCoversRequestAndRefusedSessions(t *testing.T) {
 	}
 	var left string
 	q := "SELECT group_concat(ip) FROM (SELECT ip FROM session WHERE ip IS NOT NULL ORDER BY ip)"
-	if err := r.db.QueryRow(q).Scan(&left); err != nil || left != "192.0.2.3,192.0.2.4" || sum(*chunks) != 2 {
-		t.Fatalf("addresses left %q (%v), %d rows changed; want the two young ones and 2", left, err, sum(*chunks))
+	if err := r.db.QueryRow(q).Scan(&left); err != nil || left != "192.0.2.3,192.0.2.4" || rowsChanged(*chunks) != 2 {
+		t.Fatalf("addresses left %q (%v), %d rows changed; want the two young ones and 2", left, err, rowsChanged(*chunks))
+	}
+}
+
+// wantIPRunStops checks that a run of the rig ends with an error and that the
+// writer is not healthy.
+func wantIPRunStops(t *testing.T, r *rig) {
+	t.Helper()
+	if err := r.retain(waitFor); err == nil || r.w.Healthy() {
+		t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
+	}
+}
+
+// T-U-11: an error of the statement reaches the runner. The run returns it,
+// the writer stops, and the address stays. A trigger makes the statement fail.
+func TestTU11IPStepErrorStopsTheWriter(t *testing.T) {
+	r, _ := ipRig(t, 7)
+	addSessions(t, r.db, "old", 0, 1, ipCutoff(7)-1_000, 0, "192.0.2.1")
+	if _, err := r.db.Exec("CREATE TRIGGER no_ip BEFORE UPDATE OF ip ON session BEGIN SELECT RAISE(ABORT,'x'); END"); err != nil {
+		t.Fatal(err)
+	}
+	wantIPRunStops(t, r)
+	if got := nullIPs(t, r.db); fmt.Sprint(got) != "map[old0:false]" {
+		t.Fatalf("NULL ip by session %v, want the ip of old0 set", got)
+	}
+}
+
+// T-U-11: a days value below 1 or above 7, or a zero tPriv, gives a step that
+// runs no statement and returns an error. The run stops the writer, and no row
+// changes. A session of 9 days and a young session show the rows.
+func TestTU11IPStepRefusesBadParameters(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		tPriv time.Time
+		days  int
+	}{
+		{"0 days", ipTPriv, 0}, {"8 days", ipTPriv, 8}, {"zero tPriv", time.Time{}, 7},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, chunks := ipRigFor(t, newIPStep(c.tPriv, c.days))
+			addSessions(t, r.db, "old", 0, 1, ipCutoff(7)-2*24*3600*1000, 0, "192.0.2.1")
+			addSessions(t, r.db, "young", 0, 1, ipCutoff(7)+1_000_000, 0, "192.0.2.2")
+			wantIPRunStops(t, r)
+			if got := nullIPs(t, r.db); fmt.Sprint(got) != "map[old0:false young0:false]" || rowsChanged(*chunks) != 0 {
+				t.Fatalf("NULL ip by session %v, %d rows changed; want no change", got, rowsChanged(*chunks))
+			}
+		})
+	}
+}
+
+// T-U-11: the statement uses the limit that the runner gives it. In one
+// transaction, a limit of 7 over 20 old rows changes 7 rows and leaves 13.
+func TestTU11IPStepUsesTheLimitOfTheRunner(t *testing.T) {
+	r := newRig(t, 100)
+	addSessions(t, r.db, "old", 0, 20, ipCutoff(7)-1_000_000, 1, "192.0.2.1")
+	tx, err := r.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	n, err := newIPStep(ipTPriv, 7)(context.Background(), tx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := tx.QueryRow("SELECT count(*) FROM session WHERE ip IS NOT NULL").Scan(&left); err != nil || n != 7 || left != 13 {
+		t.Fatalf("%d rows changed (want 7), %d rows keep an ip (want 13): %v", n, left, err)
 	}
 }
 
@@ -194,7 +275,7 @@ func TestTU11MigrationAddsTwoIndexesWithoutRebuild(t *testing.T) {
 	root, _, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	if err := migrate(db, schema2Set(), "origin"); err != nil || metaValue(t, db, "schema_version") != "2" {
+	if err := migrate(db, schema2Set(t), "origin"); err != nil || metaValue(t, db, "schema_version") != "2" {
 		t.Fatalf("no schema 2 database: %v", err)
 	}
 	for _, s := range []string{
@@ -228,12 +309,12 @@ func TestTU11MigrationAddsTwoIndexesWithoutRebuild(t *testing.T) {
 	}
 }
 
-// plan returns the lines of EXPLAIN QUERY PLAN for q, joined by a line break.
-func plan(t *testing.T, db *sql.DB, q string, args ...any) string {
-	t.Helper()
+// queryPlan returns the lines of EXPLAIN QUERY PLAN for q.
+func queryPlan(tb testing.TB, db *sql.DB, q string, args ...any) []string {
+	tb.Helper()
 	rows, err := db.Query("EXPLAIN QUERY PLAN "+q, args...)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	defer rows.Close()
 	var lines []string
@@ -241,24 +322,30 @@ func plan(t *testing.T, db *sql.DB, q string, args ...any) string {
 		var id, parent, unused int
 		var detail string
 		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 		lines = append(lines, detail)
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
 // T-U-11: the IP step statement uses session_ip_first, and the token delete
-// statement uses token_first_cb. Neither plan scans a table. The token delete
-// is a plan check only: no production code runs it.
+// statement uses token_first_cb. Each test compares the whole plan, so a plan
+// of another shape fails it. The token delete is a plan check only: no
+// production code runs it.
 func TestTU11StatementsUseTheirIndexes(t *testing.T) {
 	db := migrated(t)
 	const tokenDelete = "DELETE FROM token WHERE rowid IN (SELECT rowid FROM token WHERE first_cb_at < ? LIMIT ?)"
-	for _, c := range []struct{ q, index string }{
-		{clearIPSQL, "session_ip_first"}, {tokenDelete, "token_first_cb"},
+	for _, c := range []struct{ q, plan string }{
+		{clearIPSQL, "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\n" +
+			"LIST SUBQUERY 1\n" +
+			"SEARCH session USING INDEX session_ip_first (first_seen<?)"},
+		{tokenDelete, "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\n" +
+			"LIST SUBQUERY 1\n" +
+			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)"},
 	} {
-		if p := plan(t, db, c.q, 1, 1000); !strings.Contains(p, c.index) || strings.Contains(p, "SCAN") {
-			t.Errorf("plan of %q:\n%s", c.q, p)
+		if p := strings.Join(queryPlan(t, db, c.q, 1, 1000), "\n"); p != c.plan {
+			t.Errorf("plan of %q:\n%s\nwant:\n%s", c.q, p, c.plan)
 		}
 	}
 }
@@ -313,7 +400,7 @@ func TestTS33NoAddressResidueAfterTheIPStep(t *testing.T) {
 
 const (
 	// ipChildDir is the state directory of the child. ipChildMode is "build" or
-	// "step". ipChildTPriv is the T_priv of the step, in unix ms.
+	// "step". ipChildTPriv is the tPriv of the step, in unix ms.
 	ipChildDir   = "STORE_IPSTEP_CHILD_DIR"
 	ipChildMode  = "STORE_IPSTEP_CHILD_MODE"
 	ipChildTPriv = "STORE_IPSTEP_CHILD_TPRIV"
@@ -357,7 +444,7 @@ func ipBenchState(b *testing.B, n int, build bool, tPriv time.Time) string {
 	}
 	defer db.Close()
 	if build {
-		err = migrate(db, schema2Set(), "origin")
+		err = migrate(db, schema2Set(b), "origin")
 	} else {
 		err = Migrate(db, "origin")
 	}
@@ -383,8 +470,9 @@ func ipBenchState(b *testing.B, n int, build bool, tPriv time.Time) string {
 }
 
 // runIPChild runs the child benchmark in mode on state. It returns the numbers
-// that the child printed on its line, for example rss=1234 ms=5.6.
-func runIPChild(b *testing.B, state, mode string, env ...string) map[string]float64 {
+// that the child printed on its line, for example rss=1234 ms=5.6. It fails
+// when a value is not a number, when a key of keys is missing, or when rss is 0.
+func runIPChild(b *testing.B, state, mode string, keys []string, env ...string) map[string]float64 {
 	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkIPStepChild$", "-test.benchtime=1x")
 	cmd.Env = append(append(os.Environ(), ipChildDir+"="+state, ipChildMode+"="+mode), env...)
 	out, err := cmd.CombinedOutput()
@@ -393,7 +481,19 @@ func runIPChild(b *testing.B, state, mode string, env ...string) map[string]floa
 			m := map[string]float64{}
 			for _, kv := range strings.Fields(fields) {
 				k, v, _ := strings.Cut(kv, "=")
-				m[k], _ = strconv.ParseFloat(v, 64)
+				f, perr := strconv.ParseFloat(v, 64)
+				if perr != nil {
+					b.Fatalf("child value %q: %v\n%s", kv, perr, out)
+				}
+				m[k] = f
+			}
+			for _, k := range keys {
+				if _, ok := m[k]; !ok {
+					b.Fatalf("child line has no %s\n%s", k, out)
+				}
+			}
+			if m["rss"] == 0 {
+				b.Fatalf("child reports rss 0\n%s", out)
 			}
 			return m
 		}
@@ -402,30 +502,33 @@ func runIPChild(b *testing.B, state, mode string, env ...string) map[string]floa
 	return nil
 }
 
-const mb = 1 << 20 // a MB is 2^20 bytes
+const mib = 1 << 20 // a MiB is 2^20 bytes
 
 // BenchmarkIPStepIndexBuild measures migration 0003 on a database of schema 2.
 // PHANTOM_IPSTEP_ROWS gives the session rows (default 20 000). The database has
-// n/4 token rows too. The child process runs Migrate. It prints VmHWM, the
-// time, and the file and WAL bytes before and after. Run it with -benchtime=1x.
+// a quarter as many token rows. The child process runs Migrate. It prints
+// VmHWM, the time, and the file and WAL bytes before and after. Run it with
+// -benchtime=1x.
 func BenchmarkIPStepIndexBuild(b *testing.B) {
 	n := ipBenchRows(b)
-	m := runIPChild(b, ipBenchState(b, n, true, time.Now()), "build")
-	b.ReportMetric(m["rss"]/mb, "peak-rss-MB")
+	keys := []string{"rss", "ms", "db0", "wal0", "db1", "wal1"}
+	m := runIPChild(b, ipBenchState(b, n, true, time.Now()), "build", keys)
+	b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
 	b.ReportMetric(m["ms"], "build-ms")
-	b.ReportMetric(m["db0"]/mb, "db-MB")
-	b.ReportMetric((m["db1"]+m["wal1"]-m["db0"]-m["wal0"])/mb, "extra-disk-MB")
+	b.ReportMetric(m["db0"]/mib, "db-MiB")
+	b.ReportMetric((m["db1"]+m["wal1"]-m["db0"]-m["wal0"])/mib, "extra-disk-MiB")
 }
 
 // BenchmarkIPStepChunks measures the IP step of the real runner on a database
 // of schema 3. PHANTOM_IPSTEP_ROWS gives the session rows (default 20 000). The
-// child process runs w.chunk until no row is left. It prints VmHWM, the longest
-// chunk, the total time, the rows changed and the WAL bytes at the end. Run it
-// with -benchtime=1x.
+// child process runs w.chunk until no row is left. It prints the file bytes
+// before the run, VmHWM, the longest chunk, the total time, the rows changed
+// and the WAL bytes at the end. Run it with -benchtime=1x.
 func BenchmarkIPStepChunks(b *testing.B) {
 	n, tPriv := ipBenchRows(b), time.Now()
 	state := ipBenchState(b, n, false, tPriv)
-	m := runIPChild(b, state, "step", ipChildTPriv+"="+strconv.FormatInt(tPriv.UnixMilli(), 10))
+	keys := []string{"rss", "ms", "longest", "rows", "wal", "db0"}
+	m := runIPChild(b, state, "step", keys, ipChildTPriv+"="+strconv.FormatInt(tPriv.UnixMilli(), 10))
 	want := 0
 	root, err := os.OpenRoot(state)
 	if err != nil {
@@ -440,11 +543,12 @@ func BenchmarkIPStepChunks(b *testing.B) {
 	if err := db.QueryRow("SELECT count(*) FROM session WHERE ip IS NULL").Scan(&want); err != nil || int(m["rows"]) != want || want == 0 {
 		b.Fatalf("child changed %v rows, the database has %d rows with no ip: %v", m["rows"], want, err)
 	}
-	b.ReportMetric(m["rss"]/mb, "peak-rss-MB")
+	b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
+	b.ReportMetric(m["db0"]/mib, "db-MiB")
 	b.ReportMetric(m["longest"], "chunk-max-ms")
 	b.ReportMetric(m["ms"], "total-ms")
 	b.ReportMetric(m["rows"], "rows-changed")
-	b.ReportMetric(m["wal"]/mb, "wal-MB")
+	b.ReportMetric(m["wal"]/mib, "wal-MiB")
 }
 
 // fileSize returns the size of a file, or 0 when it is not there.
@@ -502,6 +606,6 @@ func BenchmarkIPStepChild(b *testing.B) {
 		took := time.Since(begin)
 		total, longest, rows = total+took, max(longest, took), rows+n
 	}
-	fmt.Printf("ipstep-child rss=%d ms=%.3f longest=%.3f rows=%d wal=%d\n", procStatus(b, "VmHWM"),
-		ms(total), ms(longest), rows, fileSize(wal))
+	fmt.Printf("ipstep-child rss=%d ms=%.3f longest=%.3f rows=%d wal=%d db0=%d\n", procStatus(b, "VmHWM"),
+		ms(total), ms(longest), rows, fileSize(wal), db0)
 }

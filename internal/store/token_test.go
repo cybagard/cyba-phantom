@@ -538,7 +538,8 @@ func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 			view(mintSelect("1000") + " UNION ALL " + mintSelect(overflow)),
 			[]*event.Event{cb(50)}},
 		// The update prepare does not use the column. The insert prepare does.
-		// SQLite keeps an indexed column, so the index goes first.
+		// SQLite refuses to drop an indexed column. Thus the statement drops the
+		// index first.
 		"insert prepare": {nil, "DROP INDEX token_first_cb; ALTER TABLE token DROP COLUMN first_cb_at", []*event.Event{render(t), cb(50)}},
 		"insert run": {nil, "CREATE TRIGGER no_ins BEFORE INSERT ON token BEGIN SELECT RAISE(ABORT,'x'); END",
 			[]*event.Event{render(t), cb(50)}},
@@ -600,21 +601,7 @@ const lookupPlan = "SEARCH mint USING PRIMARY KEY (set_id=? AND unit=? AND first
 // temporary b-tree.
 func TestTS32LookupUsesThePrimaryKey(t *testing.T) {
 	r := newRig(t, 100)
-	rows, err := r.db.Query("EXPLAIN QUERY PLAN "+lookupMint, mintSet[:], 5, 105, 105, 105)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var details []string
-	for rows.Next() {
-		var id, parent, unused int
-		var d string
-		if err := rows.Scan(&id, &parent, &unused, &d); err != nil {
-			t.Fatal(err)
-		}
-		details = append(details, d)
-	}
-	all := strings.Join(details, "; ")
+	all := strings.Join(queryPlan(t, r.db, lookupMint, mintSet[:], 5, 105, 105, 105), "; ")
 	t.Logf("plan: %s", all)
 	if all != lookupPlan {
 		t.Fatalf("plan %q, want %q", all, lookupPlan)

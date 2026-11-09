@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"os"
 	"slices"
 	"strconv"
@@ -102,46 +101,14 @@ func TestTS31MigrationAddsMintWithoutRebuild(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	type entry struct {
-		typ, sql string
-		page     int64
-		rows     int64
-	}
-	schema := func() map[string]entry {
-		t.Helper()
-		out := map[string]entry{}
-		rows, err := db.Query("SELECT type, name, sql, rootpage FROM sqlite_schema")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var typ, name string
-			var text sql.NullString
-			var page int64
-			if err := rows.Scan(&typ, &name, &text, &page); err != nil {
-				t.Fatal(err)
-			}
-			out[name] = entry{typ: typ, sql: text.String, page: page}
-		}
-		for name, e := range out {
-			if e.typ == "table" {
-				if err := db.QueryRow(fmt.Sprintf("SELECT count(*) FROM %q", name)).Scan(&e.rows); err != nil {
-					t.Fatal(err)
-				}
-				out[name] = e
-			}
-		}
-		return out
-	}
-	before := schema()
+	before := schemaEntries(t, db)
 	if before["event"].rows != 2 || before["session"].rows != 1 || before["token"].rows != 1 || before["ip_counter"].rows != 1 || before["checkpoint"].rows != 1 {
 		t.Fatalf("setup rows: %+v", before)
 	}
-	if err := migrate(db, schema2Set(), "origin"); err != nil {
+	if err := migrate(db, schema2Set(t), "origin"); err != nil {
 		t.Fatal(err)
 	}
-	after := schema()
+	after := schemaEntries(t, db)
 	if metaValue(t, db, "schema_version") != "2" {
 		t.Fatalf("schema_version %s", metaValue(t, db, "schema_version"))
 	}
@@ -163,15 +130,19 @@ func TestTS31MigrationAddsMintWithoutRebuild(t *testing.T) {
 	}
 	db = mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	if err := migrate(db, schema2Set(), "origin"); err != nil {
+	if err := migrate(db, schema2Set(t), "origin"); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 }
 
 // schema2Set is the embedded first two migrations: the schema of version 2.
-func schema2Set() fstest.MapFS {
+func schema2Set(tb testing.TB) fstest.MapFS {
+	tb.Helper()
 	set := testSet(nil)
-	second, _ := migrationFiles.ReadFile("migrations/0002_mint.sql")
+	second, err := migrationFiles.ReadFile("migrations/0002_mint.sql")
+	if err != nil {
+		tb.Fatal(err)
+	}
 	set["0002_mint.sql"] = &fstest.MapFile{Data: second}
 	return set
 }
@@ -437,21 +408,7 @@ func TestTP11MintRowsTakeAtMost80Bytes(t *testing.T) {
 	if rows != int64(n) || per > 80 {
 		t.Fatalf("rows %d (want %d), %.1f bytes for each row (want at most 80)", rows, n, per)
 	}
-	plan, err := r.db.Query("EXPLAIN QUERY PLAN "+lookupMint, mintSet[:], 495_000, 1000, 1000, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plan.Close()
-	var details []string
-	for plan.Next() {
-		var id, parent, unused int
-		var d string
-		if err := plan.Scan(&id, &parent, &unused, &d); err != nil {
-			t.Fatal(err)
-		}
-		details = append(details, d)
-	}
-	all := strings.Join(details, "; ")
+	all := strings.Join(queryPlan(t, r.db, lookupMint, mintSet[:], 495_000, 1000, 1000, 1000), "; ")
 	t.Logf("plan: %s", all)
 	if all != lookupPlan {
 		t.Fatalf("plan %q, want %q", all, lookupPlan)
