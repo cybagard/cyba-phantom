@@ -605,19 +605,36 @@ func TestTS13_FailedDirectorySyncOfANoteIsAnError(t *testing.T) {
 
 // T-S-13: Add syncs the temporary file of the note and the checkpoints
 // directory, one time each. It syncs no other file and no other directory.
+// At the file sync, the temporary file holds the whole note: the write is done.
+// At the directory sync, the final name holds the note and no temporary name
+// is left: the rename is done.
 func TestTS13_AddSyncsTheNoteFileAndTheSpoolDirectory(t *testing.T) {
 	e := newSpool(t)
 	msg, err := SignCheckpoint(e.signer, 5, testRoot())
 	must(t, err)
 	var files, dirs []string
-	record := func(list *[]string) func(*os.File) error {
-		return func(f *os.File) error {
-			*list = append(*list, filepath.Base(f.Name()))
+	var atFile []syncedText
+	setHooks(t, hooks{
+		file: func(f *os.File) error {
+			files = append(files, filepath.Base(f.Name()))
+			atFile = append(atFile, textAtSync(t, f))
 			return realSync(f)
-		}
-	}
-	setHooks(t, hooks{file: record(&files), dir: record(&dirs)})
+		},
+		dir: func(f *os.File) error {
+			dirs = append(dirs, filepath.Base(f.Name()))
+			if names := namesAtSync(t, f); !slices.Equal(names, []string{"5.note"}) {
+				t.Errorf("directory sync: names %q, want [5.note]", names)
+			}
+			if b, err := os.ReadFile(filepath.Join(f.Name(), "5.note")); err != nil || !bytes.Equal(b, msg) {
+				t.Errorf("directory sync: final note %q (%v), want the whole note", b, err)
+			}
+			return realSync(f)
+		},
+	})
 	must(t, e.Add(5, msg))
+	for _, s := range atFile {
+		s.check(t)
+	}
 	if want := []string{"5.note.tmp.tmp"}; !slices.Equal(files, want) {
 		t.Errorf("file syncs %q, want %q", files, want)
 	}

@@ -461,18 +461,42 @@ func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 // T-S-13: a first start syncs the two key files, the keys directory and the
 // state directory. Then it syncs the signer state and the state directory.
 // The test compares one list of all syncs in call order.
+// At each file sync, the temporary file holds the whole text.
+// At each directory sync, the files of the step have their final names.
+// No temporary name is left: the link or the rename is done.
 func TestTS13_FirstStartSyncsEachFileAndDirectory(t *testing.T) {
 	root, _ := newState(t)
 	var syncs []string
+	var atFile []syncedText
+	// The final names that the directory must hold at each directory sync.
+	wantNames := [][]string{{keyFile, vkeyFile}, {keysDir}, {stateName, keysDir}}
 	record := func(kind string) func(*os.File) error {
 		return func(f *os.File) error {
 			syncs = append(syncs, kind+" "+filepath.Base(f.Name()))
+			if kind == "file" {
+				atFile = append(atFile, textAtSync(t, f))
+				return realSync(f)
+			}
+			names := namesAtSync(t, f)
+			if len(wantNames) > 0 {
+				want := wantNames[0]
+				wantNames = wantNames[1:]
+				if !slices.Equal(names, want) {
+					t.Errorf("directory sync: names %q, want %q", names, want)
+				}
+			}
 			return realSync(f)
 		}
 	}
 	setHooks(t, hooks{file: record("file"), dir: record("dir")})
 	if _, err := loadWithin(t, root, nil, testOrigin, false, 0); err != nil {
 		t.Fatal(err)
+	}
+	if len(atFile) != 3 {
+		t.Errorf("%d file syncs, want 3", len(atFile))
+	}
+	for _, s := range atFile {
+		s.check(t)
 	}
 	want := []string{
 		"file checkpoint.key.tmp", "file checkpoint.vkey.tmp",

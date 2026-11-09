@@ -238,6 +238,53 @@ var (
 	realRename = (*os.Root).Rename
 )
 
+// syncedText is the path and the text of a temporary file at its fsync.
+type syncedText struct{ path, text string }
+
+// textAtSync reads the file that a file-sync hook gets. The fsync must come
+// after the write, so the text is not empty.
+func textAtSync(t *testing.T, f *os.File) syncedText {
+	t.Helper()
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Errorf("file sync: %v", err)
+	}
+	return syncedText{f.Name(), string(b)}
+}
+
+// check compares the text at the fsync with the final file. The final name is
+// the path without its temporary suffixes. The text must be complete: the same
+// as in the final file, and not empty.
+func (s syncedText) check(t *testing.T) {
+	t.Helper()
+	final := s.path
+	for strings.HasSuffix(final, tmpSuffix) {
+		final = strings.TrimSuffix(final, tmpSuffix)
+	}
+	b, err := os.ReadFile(final)
+	if err != nil || s.text == "" || string(b) != s.text {
+		t.Errorf("%s at its fsync held %q, the final file holds %q (%v); want the same, not empty", filepath.Base(s.path), s.text, b, err)
+	}
+}
+
+// namesAtSync lists the directory that a directory-sync hook gets. No name
+// of a temporary file can be there: the rename and the link are done.
+func namesAtSync(t *testing.T, d *os.File) []string {
+	t.Helper()
+	entries, err := os.ReadDir(d.Name())
+	if err != nil {
+		t.Errorf("directory sync: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), tmpSuffix) {
+			t.Errorf("directory sync of %s: %s is still there", filepath.Base(d.Name()), e.Name())
+		}
+		names = append(names, e.Name())
+	}
+	return names
+}
+
 // hooks holds the calls that setHooks replaces. A nil field keeps the call.
 type hooks struct {
 	file   func(*os.File) error                 // fsync of a file
