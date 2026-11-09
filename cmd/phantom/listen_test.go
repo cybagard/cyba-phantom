@@ -1296,7 +1296,7 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 	select {
 	case <-r.done:
 	case <-time.After(sigtermWait):
-		t.Fatalf("serve did not return %v after the stop", sigtermWait)
+		t.Fatalf("serve did not return %v after the stop%s", sigtermWait, atCancel.note(readPressure()))
 	}
 	done := time.Now()
 	select {
