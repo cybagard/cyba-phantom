@@ -45,9 +45,9 @@ func ipRig(t *testing.T, days int) (r *rig, chunks *[]int) {
 
 // ipRigFor makes a rig with step. The step gets only its tPriv, not the clock
 // of the writer. The writer clock is fixed, so the chunk budget does not end a
-// chunk. The writer clock is one year after tPriv. A step that reads time.Now gets another
-// cutoff, and the tests of the IP step fail. chunks gets the rows that each
-// chunk changed.
+// chunk. The writer clock is one year after tPriv. A step that reads time.Now
+// gets another cutoff, and the tests of the IP step fail. chunks gets the rows
+// that each chunk changed.
 func ipRigFor(t *testing.T, step retentionStep) (r *rig, chunks *[]int) {
 	t.Helper()
 	r, _, chunks = chunkLog(t, 0, step)
