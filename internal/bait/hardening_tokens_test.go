@@ -142,7 +142,7 @@ func TestTS31SwapRace(t *testing.T) {
 }
 
 // countOf gives the integer that a query with one row and one column returns.
-func countOf(t *testing.T, db *sql.DB, query string, args ...any) (n int) {
+func countOf(t testing.TB, db *sql.DB, query string, args ...any) (n int) {
 	t.Helper()
 	mustOK(t, db.QueryRow(query, args...).Scan(&n))
 	return n
@@ -155,10 +155,12 @@ type storeRig struct {
 	w  *store.Writer
 	db *sql.DB
 	dk *session.DayKey
+	// log is the directory of the transparency log.
+	log string
 }
 
 // newStoreRig opens a database and a log in a new state directory.
-func newStoreRig(t *testing.T) storeRig {
+func newStoreRig(t testing.TB) storeRig {
 	t.Helper()
 	top, err := filepath.EvalSymlinks(t.TempDir())
 	mustOK(t, err)
@@ -176,7 +178,7 @@ func newStoreRig(t *testing.T) storeRig {
 	t.Cleanup(func() { lg.Close() })
 	q, dk := queueOf(t, 16), session.NewDayKey()
 	w := store.NewWriterWithDayKey(db, q, false, nil, store.Recovery{State: root, Origin: "origin", Log: lg}, dk)
-	return storeRig{q, w, db, dk}
+	return storeRig{q, w, db, dk, filepath.Join(state, "tlog")}
 }
 
 // drain closes the queue and runs the writer until it has stored each event.

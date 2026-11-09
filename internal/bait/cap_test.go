@@ -2,10 +2,15 @@ package bait
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -380,7 +385,7 @@ func TestTP12CapFlood(t *testing.T) {
 }
 
 // settle waits until the writer has taken each event off the queue.
-func settle(t *testing.T, q *event.Queue) {
+func settle(t testing.TB, q *event.Queue) {
 	t.Helper()
 	for end := time.Now().Add(5 * time.Second); q.Bytes() != (event.Bytes{}); {
 		if time.Now().After(end) {
@@ -451,6 +456,190 @@ func TestTP12CapLeaves(t *testing.T) {
 	if want := wantBurst + seconds - 1; admitted != want || leaves != admitted || rows != admitted {
 		t.Errorf("admitted %d (want %d), callback rows %d, leaves %d", admitted, want, rows, leaves)
 	}
+}
+
+// tableBytes gives the page bytes of each table (dbstat). The bytes of the
+// indexes of a table are in its value.
+func tableBytes(t testing.TB, db *sql.DB) map[string]float64 {
+	t.Helper()
+	rows, err := db.Query("SELECT m.tbl_name, SUM(d.pgsize) FROM dbstat d JOIN sqlite_master m ON m.name = d.name GROUP BY m.tbl_name")
+	mustOK(t, err)
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var name string
+		var n float64
+		mustOK(t, rows.Scan(&name, &n))
+		out[name] = n
+	}
+	mustOK(t, rows.Err())
+	return out
+}
+
+// dirBytes gives the sum of the sizes of the files below dir.
+func dirBytes(t testing.TB, dir string) (n int64) {
+	t.Helper()
+	mustOK(t, filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		n += fi.Size()
+		return nil
+	}))
+	return n
+}
+
+// waitRows waits until the event table has n rows.
+func waitRows(t testing.TB, db *sql.DB, n int) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); countOf(t, db, "SELECT count(*) FROM event") < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the writer did not store the event rows")
+		}
+	}
+}
+
+// refusedText changes the first character of a token text to another character
+// of the token alphabet. The text looks like a token, but it does not verify.
+func refusedText(s string) string {
+	if s[0] == 'a' {
+		return "b" + s[1:]
+	}
+	return "a" + s[1:]
+}
+
+// TestTS32CallbackRefusedTokenRequestEvent sends two callbacks. The first has a
+// token that verifies. The second has a token that does not. Only the first
+// gets a callback event. The two request events must have the same fields.
+// The benchmark uses the second request as the control for the request row.
+func TestTS32CallbackRefusedTokenRequestEvent(t *testing.T) {
+	e := newCBEnv(t)
+	tok := e.mint(t, time.Now())
+	var reqs [2]*event.Event
+	for i, text := range []string{tok, refusedText(tok)} {
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, text)
+		r.RemoteAddr = addr4(1)
+		serve(t, e.h, r)
+		var cbs int
+		for _, ev := range e.q.Drain() {
+			switch ev.Kind() {
+			case event.KindRequest:
+				reqs[i] = ev
+			case event.KindCallback:
+				cbs++
+			}
+		}
+		if cbs != 1-i {
+			t.Errorf("request %d: %d callback events, want %d", i, cbs, 1-i)
+		}
+		if reqs[i] == nil {
+			t.Fatalf("request %d: no request event", i)
+		}
+	}
+	a, b := reqs[0].Record(), reqs[1].Record()
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	t.Logf("admitted token: %s ip %s size %d", ja, reqs[0].IP(), reqs[0].Size())
+	t.Logf("refused token:  %s ip %s size %d", jb, reqs[1].IP(), reqs[1].Size())
+	a.TS, b.TS = 0, 0
+	if !reflect.DeepEqual(a, b) || reqs[0].IP() != reqs[1].IP() || reqs[0].Size() != reqs[1].Size() {
+		t.Errorf("the request events differ: %+v and %+v", a, b)
+	}
+}
+
+// BenchmarkCallbackRows renders 4 000 pages that each carry a token. Then it
+// serves the 4 000 callbacks of these tokens. It uses a real writer and tlog.
+// A control pass follows. It sends 4 000 callbacks to the same route and
+// position from the same addresses. Their token text does not verify. Such a
+// callback makes a request event and no callback event. The metrics:
+//   - event-B/render: event bytes for each render page (the request row).
+//   - event-B/callback: event bytes that the main pass gains for each
+//     callback. It holds the callback row and the request row of the callback.
+//   - event-B/cbrequest: event bytes that the control pass gains for each
+//     callback. It holds the request row alone.
+//   - callback-B/row: event-B/callback minus event-B/cbrequest. It is an
+//     estimate of the bytes of the callback row and its index entries.
+//   - token-B/callback: token table bytes that the main pass gains.
+//   - tlog-B/leaf: tlog file bytes that the main pass gains for each leaf.
+//   - callback-rows/callback and token-rows/callback: rows for each callback.
+//
+// One page is 4 096 bytes. A token row takes about 130 bytes. At this count one
+// page changes token-B/callback by 0.8 %. The benchmark runs one pass for any
+// b.N. Run it with -benchtime=1x. The benchmark measures no time. It sets
+// ns/op to 0, so go test prints no ns/op value.
+func BenchmarkCallbackRows(b *testing.B) {
+	const n = 4000
+	rig := newStoreRig(b)
+	e := newCBEnvFiles(b, map[string]string{
+		"traps/traps.json":          `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x {{.Token}}"}]`,
+		"vhosts/example.com/t.tmpl": `<p>{{index .Trap "a"}}</p>`,
+	})
+	h := NewWithDayKey(e.h.src, &fallbackFn{}, rig.q, rig.dk)
+	h.SetRing(e.h.ring)
+	var clock time.Duration
+	h.mono = func() time.Duration { return clock }
+	done := make(chan error, 1)
+	go func() { done <- rig.w.Run(context.Background()) }()
+	texts := make([]string, n)
+	for i := range n {
+		r := get("/t", "example.com")
+		r.RemoteAddr = addr4(i)
+		texts[i] = tokenRE.FindString(serve(b, h, r).Body.String())
+		settle(b, rig.q)
+	}
+	for end := time.Now().Add(10 * time.Second); countOf(b, rig.db, "SELECT count(*) FROM mint") < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			b.Fatal("the writer did not store the mint rows")
+		}
+	}
+	before, logBefore := tableBytes(b, rig.db), dirBytes(b, rig.log)
+	for i, tok := range texts {
+		// The cap lets one callback through each second after its burst.
+		clock = time.Duration(i) * wantInterval
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, tok)
+		r.RemoteAddr = addr4(i)
+		serve(b, h, r)
+		settle(b, rig.q)
+	}
+	// The rows are the render requests, then a request and a callback row for
+	// each callback.
+	waitRows(b, rig.db, 3*n)
+	mid := tableBytes(b, rig.db)
+	for i, tok := range texts {
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, refusedText(tok))
+		r.RemoteAddr = addr4(i)
+		serve(b, h, r)
+		settle(b, rig.q)
+	}
+	rig.q.Close()
+	if err := <-done; err != nil || !rig.w.Healthy() {
+		b.Fatalf("the writer stopped: %v %v", err, rig.w.Err())
+	}
+	const leafQuery = "SELECT count(*) FROM event WHERE kind = 'callback' AND leaf_index IS NOT NULL"
+	leaves := countOf(b, rig.db, leafQuery)
+	cbs := countOf(b, rig.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+	toks := countOf(b, rig.db, "SELECT count(*) FROM token")
+	if cbs != n || leaves != n || h.capped.Load() != 0 {
+		b.Fatalf("%d callback rows and %d leaves, want %d; %d capped", cbs, leaves, n, h.capped.Load())
+	}
+	after := tableBytes(b, rig.db)
+	if rows := countOf(b, rig.db, "SELECT count(*) FROM event"); rows != 4*n {
+		b.Fatalf("%d event rows, want %d", rows, 4*n)
+	}
+	cbBytes, reqBytes := (mid["event"]-before["event"])/n, (after["event"]-mid["event"])/n
+	b.ReportMetric(0, "ns/op")
+	b.ReportMetric(before["event"]/n, "event-B/render")
+	b.ReportMetric(cbBytes, "event-B/callback")
+	b.ReportMetric(reqBytes, "event-B/cbrequest")
+	b.ReportMetric(cbBytes-reqBytes, "callback-B/row")
+	b.ReportMetric((after["token"]-before["token"])/n, "token-B/callback")
+	b.ReportMetric(float64(dirBytes(b, rig.log)-logBefore)/float64(leaves), "tlog-B/leaf")
+	b.ReportMetric(float64(cbs)/n, "callback-rows/callback")
+	b.ReportMetric(float64(toks)/n, "token-rows/callback")
 }
 
 // TestTS32CapPruneKeepsWindow checks that a write removes only the entries

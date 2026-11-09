@@ -237,11 +237,15 @@ func (s *reqSession) setCookie(hd http.Header) {
 	hd["Set-Cookie"] = []string{cookieName + "=" + s.key.CookieValue(id) + cookieAttrs}
 }
 
-// clientIP gives the address part of addr. For a value that is not an address
-// with a port, it gives addr, which NewEvent then accepts or refuses.
+// clientIP gives the address part of addr, without an IPv6 zone. NewEvent
+// refuses a zone, and the callback cap key already has none. For a value that
+// is not an address, it gives addr, which NewEvent then accepts or refuses.
 func clientIP(addr string) string {
 	if ap, err := netip.ParseAddrPort(addr); err == nil {
-		return ap.Addr().String()
+		return ap.Addr().WithZone("").String()
+	}
+	if a, err := netip.ParseAddr(addr); err == nil && a.Zone() != "" {
+		return a.WithZone("").String()
 	}
 	return addr
 }

@@ -184,15 +184,23 @@ func (c *checkImporter) ImportFrom(path, dir string, mode types.ImportMode) (*ty
 
 // queryRefs type-checks files. It gives the position of each use of a function
 // in queryParsers. A use is a call, a method value or a method expression. A
-// field with the same name is not a function, so it does not match. Type
-// errors do not stop the scan, but an import error does. A type error can
-// hide a use, for example one name with two types in files of two GOOS.
+// field with the same name is not a function, so it does not match. An import
+// error or any type error gives an error and no uses. A type error can hide a
+// use. For example, files of two GOOS can declare one name or method twice.
 func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]gotoken.Position, error) {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(error) {}}
+	var typeErr error
+	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(err error) {
+		if typeErr == nil {
+			typeErr = err
+		}
+	}}
 	_, _ = conf.Check("p", fset, files, info)
 	if imp.err != nil {
 		return nil, imp.err
+	}
+	if typeErr != nil {
+		return nil, typeErr
 	}
 	var out []gotoken.Position
 	for id, obj := range info.Uses {
@@ -244,11 +252,13 @@ func f(r *http.Request, c conf, db store) {
 // the ParseForm, FormValue, PostFormValue, ParseMultipartForm or
 // MultipartReader method of *net/http.Request. A use is a call, a method value
 // or a method expression, under any variable or import name. The check reads
-// the files of each GOOS and GOARCH. It type-checks them together, so one
-// name with two types in files of two GOOS can hide a use.
+// the files of each GOOS and GOARCH. It type-checks them together. Any type
+// error fails the test, for example a name with two types in files of two
+// GOOS. See TestTS32QueryScanTypeError. The test does not call t.Parallel,
+// because the shared source importer is not safe for concurrent use.
 func TestTS32NoQueryParserCall(t *testing.T) {
-	fset := gotoken.NewFileSet()
-	imp := &checkImporter{from: importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)}
+	fset, from := scanImporter()
+	imp := &checkImporter{from: from}
 	f, err := parser.ParseFile(fset, "sample.go", querySample, 0)
 	mustOK(t, err)
 	refs, err := queryRefs(fset, imp, []*ast.File{f})
@@ -283,6 +293,50 @@ func TestTS32NoQueryParserCall(t *testing.T) {
 	mustOK(t, err)
 	for _, p := range refs {
 		t.Errorf("%s: use of a query or form parser", p)
+	}
+}
+
+// scanImporter gives one file set and one source importer to the two scan
+// tests. A source import of net/http takes several seconds. The importer is
+// not safe for concurrent use, so the scan tests do not call t.Parallel.
+var scanImporter = sync.OnceValues(func() (*gotoken.FileSet, types.ImporterFrom) {
+	fset := gotoken.NewFileSet()
+	return fset, importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)
+})
+
+// TestTS32QueryScanTypeError gives queryRefs two files of two GOOS. The files
+// have a type error, and a parser call follows the error. The scan must report
+// an error. It must not drop the type error. The first case declares one name
+// with two types. The second case declares one method twice. The test does not
+// call t.Parallel: the shared source importer is not safe for concurrent use.
+func TestTS32QueryScanTypeError(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		srcs [2]string
+	}{
+		{"two types", [2]string{
+			"package p\ntype conn int\n",
+			"package p\nimport \"net/http\"\ntype conn struct{ r *http.Request }\nfunc g(c conn) { c.r.ParseForm() }\n",
+		}},
+		{"two methods", [2]string{
+			"package p\ntype conn struct{}\nfunc (conn) req() int { return 0 }\n",
+			"package p\nimport \"net/http\"\nfunc (conn) req() *http.Request { return nil }\nfunc g(c conn) { c.req().ParseForm() }\n",
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fset, from := scanImporter()
+			imp := &checkImporter{from: from}
+			var files []*ast.File
+			for i, name := range []string{"zz_c_linux.go", "zz_d_darwin.go"} {
+				f, err := parser.ParseFile(fset, name, c.srcs[i], 0)
+				mustOK(t, err)
+				files = append(files, f)
+			}
+			refs, err := queryRefs(fset, imp, files)
+			if err == nil {
+				t.Errorf("the scan gives the uses %v and no error, want an error", refs)
+			}
+		})
 	}
 }
 
