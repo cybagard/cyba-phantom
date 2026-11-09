@@ -461,18 +461,44 @@ func TestTS13_FirstStartStateWriteFails(t *testing.T) {
 // T-S-13: a first start syncs the two key files, the keys directory and the
 // state directory. Then it syncs the signer state and the state directory.
 // The test compares one list of all syncs in call order.
+// At each file sync, the temporary file holds the whole text.
+// At each directory sync, the files of the step have their final names.
+// No temporary name is left: the link or the rename is done.
 func TestTS13_FirstStartSyncsEachFileAndDirectory(t *testing.T) {
 	root, _ := newState(t)
 	var syncs []string
+	var atFile []syncedText
+	dirSyncs := 0
+	// The final names that the directory must hold at each directory sync.
+	wantNames := [][]string{{keyFile, vkeyFile}, {keysDir}, {stateName, keysDir}}
 	record := func(kind string) func(*os.File) error {
 		return func(f *os.File) error {
 			syncs = append(syncs, kind+" "+filepath.Base(f.Name()))
+			if kind == "file" {
+				atFile = append(atFile, textAtSync(t, f))
+				return realSync(f)
+			}
+			names := namesAtSync(t, f)
+			dirSyncs++
+			if len(wantNames) > 0 {
+				want := wantNames[0]
+				wantNames = wantNames[1:]
+				if !slices.Equal(names, want) {
+					t.Errorf("directory sync %d (%s): names %q, want %q", dirSyncs, filepath.Base(f.Name()), names, want)
+				}
+			}
 			return realSync(f)
 		}
 	}
 	setHooks(t, hooks{file: record("file"), dir: record("dir")})
 	if _, err := loadWithin(t, root, nil, testOrigin, false, 0); err != nil {
 		t.Fatal(err)
+	}
+	if len(atFile) != 3 {
+		t.Errorf("%d file syncs, want 3", len(atFile))
+	}
+	for _, s := range atFile {
+		s.check(t)
 	}
 	want := []string{
 		"file checkpoint.key.tmp", "file checkpoint.vkey.tmp",
@@ -955,6 +981,47 @@ func TestTS13_MissingVkeyIsWrittenOnLoad(t *testing.T) {
 	}
 	if fi, err := os.Stat(vpath); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("public key file mode, error %v; want 0600", err)
+	}
+}
+
+// T-S-13: the load path syncs the temporary file of the public key. Then it
+// syncs the keys directory, which holds both key files by their final names.
+func TestTS13_VkeyRewriteSyncsTheKeysDirectory(t *testing.T) {
+	root, dir, _ := firstStart(t)
+	must(t, os.Remove(filepath.Join(dir, vkeyName)))
+	keysInfo, err := os.Stat(filepath.Join(dir, keysDir))
+	must(t, err)
+	var atFile []syncedText
+	var dirs []string
+	var names [][]string
+	setHooks(t, hooks{
+		file: func(f *os.File) error {
+			atFile = append(atFile, textAtSync(t, f))
+			return realSync(f)
+		},
+		dir: func(f *os.File) error {
+			fi, err := f.Stat()
+			must(t, err)
+			kind := "other"
+			if os.SameFile(fi, keysInfo) {
+				kind = keysDir
+			}
+			dirs = append(dirs, kind)
+			names = append(names, namesAtSync(t, f))
+			return realSync(f)
+		},
+	})
+	_, err = LoadOrCreateSigner(root, nil, testOrigin, true, 1)
+	must(t, err)
+	if len(atFile) != 1 || filepath.Base(atFile[0].path) != vkeyFile+".tmp" {
+		t.Fatalf("file syncs %+v, want one of the public key temporary file", atFile)
+	}
+	atFile[0].check(t)
+	if !slices.Equal(dirs, []string{keysDir}) {
+		t.Fatalf("directory syncs of %q, want one of %q", dirs, keysDir)
+	}
+	if want := []string{keyFile, vkeyFile}; !slices.Equal(names[0], want) {
+		t.Errorf("names at the directory sync %q, want %q", names[0], want)
 	}
 }
 
