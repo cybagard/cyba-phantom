@@ -110,8 +110,7 @@ func plainClient() *http.Client {
 }
 
 // readStore opens the store of the running sensor for reads. The pool stays
-// open until the sensor has stopped. A close of it drops the locks of the
-// process on the database file.
+// open until the sensor has stopped.
 func readStore(t *testing.T, s *baitSensor) *sql.DB {
 	t.Helper()
 	root, err := os.OpenRoot(s.p.Root)
