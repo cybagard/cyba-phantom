@@ -563,7 +563,20 @@ func TestTI01RenewDueKeepsACertificateThatNeedsNoRenewal(t *testing.T) {
 	ctx := context.Background()
 	old, err := a.cfg.CacheManagedCertificate(ctx, testName)
 	mustNil(t, err)
-	a.renewDue(ctx, testName, old)
+	// A renewal that does not see the certificate tries again until its context
+	// ends. The goroutine and the wait make that a failure and not a hang.
+	renewCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	renewed := make(chan struct{})
+	go func() {
+		defer close(renewed)
+		a.renewDue(renewCtx, testName, old)
+	}()
+	select {
+	case <-renewed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the renewal of a certificate that needs none did not end")
+	}
 	if got := a.cache.AllMatchingCertificates(testName); len(got) != 1 || got[0].Hash() != old.Hash() {
 		t.Errorf("%d certificates in the cache, want the old one", len(got))
 	}

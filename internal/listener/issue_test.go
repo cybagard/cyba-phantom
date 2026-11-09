@@ -39,6 +39,11 @@ import (
 
 const issueLimit = 120 * time.Second // the most time that the listener can take to obtain a certificate
 
+// issueWait is the wait of a test that needs a certificate, but does not check
+// the time limit. A normal issuance takes about 1 s. A test fails after this
+// wait.
+const issueWait = 30 * time.Second
+
 // startIssue calls Start with the context of the test.
 func startIssue(t *testing.T, f *issueFixture) time.Time {
 	t.Helper()
@@ -183,12 +188,12 @@ func TestTS16NoStorageReadForAcmeTLSDuringARealIssuance(t *testing.T) {
 	key := tokenKeyOf(f.a, f.name)
 	startIssue(t, f)
 
-	timer := time.NewTimer(issueLimit)
+	timer := time.NewTimer(issueWait)
 	defer timer.Stop()
 	select {
 	case <-hold.held:
 	case <-timer.C:
-		t.Fatalf("the issuance did not store a certificate within %v", issueLimit)
+		t.Fatalf("the issuance did not store a certificate within %v", issueWait)
 	}
 	if _, active := certmagic.GetACMEChallenge(f.name); active {
 		t.Fatal("the challenge is still active at the hold")
@@ -242,7 +247,7 @@ func TestTS16NoStorageReadForAcmeTLSDuringARealIssuance(t *testing.T) {
 	f.onlyPebble(t, "during the handshakes")
 
 	open()
-	chain := f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })
+	chain := f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
 	f.verifyToPebble(t, chain)
 	f.onlyPebble(t, "after the issuance")
 	_, keys := hold.calls()
@@ -265,7 +270,7 @@ func TestTI01RenewsACachedCertificateWithTwentyNineDaysLeft(t *testing.T) {
 	startIssue(t, f)
 	f.requireServes(t, seeded, "after Start")
 	begin := time.Now()
-	chain := f.waitChain(t, issueLimit, func(leaf *x509.Certificate) bool { return !leaf.Equal(seeded) })
+	chain := f.waitChain(t, issueWait, func(leaf *x509.Certificate) bool { return !leaf.Equal(seeded) })
 	t.Logf("replacement served %v after the first handshake", time.Since(begin))
 	if leaf := chain[0]; leaf.SerialNumber.Cmp(seeded.SerialNumber) == 0 || !leaf.NotAfter.After(seeded.NotAfter) {
 		t.Errorf("replacement has serial %v and ends %v; the cached one ends %v", leaf.SerialNumber, leaf.NotAfter, seeded.NotAfter)
@@ -313,11 +318,11 @@ func shortRenewalInfoPoll(next http.Handler) http.Handler {
 func TestTI01RenewsAPebbleCertificateThroughARIWithoutReplaces(t *testing.T) {
 	f := newIssueFixture(t, "ari.phantom.test", shortRenewalInfoPoll, func(p *ACMEParams) { p.maintenanceInterval = time.Second })
 	startIssue(t, f)
-	first := f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })[0]
+	first := f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })[0]
 	now := time.Now().UTC()
 	window := fmt.Sprintf(`{"suggestedWindow":{"start":%q,"end":%q}}`, now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
 	mustNil(t, f.rig.db.SetARIResponse(first.SerialNumber, window))
-	chain := f.waitChain(t, issueLimit, func(leaf *x509.Certificate) bool { return !leaf.Equal(first) })
+	chain := f.waitChain(t, issueWait, func(leaf *x509.Certificate) bool { return !leaf.Equal(first) })
 	f.verifyToPebble(t, chain)
 	// Pebble stores the order by serial after it issues the certificate.
 	var order *core.Order
@@ -325,7 +330,7 @@ func TestTI01RenewsAPebbleCertificateThroughARIWithoutReplaces(t *testing.T) {
 		var err error
 		order, err = f.rig.db.GetOrderByIssuedSerial(hex.EncodeToString(chain[0].SerialNumber.Bytes()))
 		return err == nil
-	}, issueLimit)
+	}, issueWait)
 	order.RLock()
 	defer order.RUnlock()
 	if order.Replaces != "" {
@@ -507,7 +512,7 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	}
 	t.Cleanup(finish)
 	startIssue(t, f)
-	f.waitChain(t, issueLimit, func(*x509.Certificate) bool { return true })
+	f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
 	finish()
 	// Pebble ran a real TLS-ALPN validation on the decoy socket in the window.
 	f.requireALPN(t)
