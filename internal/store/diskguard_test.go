@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,8 +37,9 @@ func TestTI16_FsUse(t *testing.T) {
 		{"blocks are higher", 1000, 50, 50, 1000, 500, 0.95},
 		{"no inode count", 1000, 900, 900, 0, 0, 0.1},
 		{"empty", 0, 0, 0, 0, 0, 0},
+		{"used blocks equal the available blocks", 1000, 500, 500, 0, 0, 0.5},
 	} {
-		if got := fsUse(c.blocks, c.bfree, c.bavail, c.files, c.ffree); math.Abs(got-c.want) > 1e-9 {
+		if got := fsUse(c.blocks, c.bfree, c.bavail, c.files, c.ffree); !(math.Abs(got-c.want) <= 1e-9) {
 			t.Errorf("%s: use %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -80,6 +82,58 @@ func TestTI16_GuardTakesTheHigherDirectory(t *testing.T) {
 	}
 	if _, err := OpenDiskGuard(root, "missing"); err == nil {
 		t.Fatal("a guard opened with no directory")
+	}
+}
+
+// T-I-16: the real measure of a directory is the use that Statfs gives for it,
+// and it is not zero. A measure that ignores the Fstatfs result would give 0.
+func TestTI16_RealUseMatchesStatfs(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.Mkdir("tlog", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g, err := OpenDiskGuard(root, "tlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	want := fsUse(uint64(st.Blocks), uint64(st.Bfree), uint64(st.Bavail), uint64(st.Files), uint64(st.Ffree))
+	got, err := g.Use()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(got > 0) || !(math.Abs(got-want) <= 0.01) {
+		t.Fatalf("use %v, Statfs gives %v", got, want)
+	}
+}
+
+// T-I-16: a paused writer writes the drop counts of the queue to ip_counter at
+// shutdown. It writes no event row and makes no append, and it stays paused.
+func TestTI16_PausedShutdownWritesTheDropCounts(t *testing.T) {
+	r := newRig(t, 10)
+	r.w.disk = func() (float64, error) { return 0.95, nil }
+	addr := netip.MustParseAddr("192.0.2.7")
+	r.c.Drop(addr)
+	r.c.Drop(addr)
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := r.ipCounters()
+	if len(got) != 1 || !strings.HasSuffix(got[0], " 2") || r.c.Pending() {
+		t.Fatalf("ip_counter %q, pending %v", got, r.c.Pending())
+	}
+	if r.rows() != 0 || r.app.tries != 0 || !r.w.Paused() || !r.w.Healthy() {
+		t.Fatalf("%d rows, %d appends, paused %v, healthy %v", r.rows(), r.app.tries, r.w.Paused(), r.w.Healthy())
 	}
 }
 

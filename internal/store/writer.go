@@ -35,8 +35,9 @@ const (
 
 // Writer is the one writer of the event table. It uses the database pool from
 // Open and Migrate, the queue, and the log. The caller closes them after
-// Run returns. It also adds the drop counts of the queue to ip_counter. The
-// day key comes from one session.DayKey, shared with the request path when
+// Run returns. It also adds the drop counts of the queue to ip_counter. A paused
+// writer keeps them in memory until the resume or shutdown. A stopped writer
+// does not write them. The day key comes from one session.DayKey, shared with the request path when
 // the caller gives it to NewWriterWithDayKey.
 //
 // The writer stops for one of five causes (see Run):
@@ -53,7 +54,7 @@ const (
 // With a disk guard (SetDiskGuard) the writer can also pause. A pause is not a
 // stop (see Paused).
 //
-// Healthy, Err, Paused and Stats are safe to call from any goroutine.
+// Healthy, Err, Paused, DiskCheckErrors and Stats are safe to call from any goroutine.
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
@@ -117,8 +118,8 @@ type Writer struct {
 	// checkpointBusy counts the runs whose TRUNCATE checkpoint was busy.
 	checkpointBusy atomic.Uint64
 
-	// disk gives the disk use of the guard, from 0 to 1 (see SetDiskGuard). A
-	// test sets it; nil means no guard.
+	// disk gives the disk use of the guard, from 0 to 1. SetDiskGuard sets it, and
+	// a test can set another; nil means no guard.
 	disk          func() (float64, error)
 	paused        atomic.Bool   // the pause of the disk guard; not a stop
 	diskErrors    atomic.Uint64 // the failed measures
@@ -214,7 +215,9 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // after a cancel, as it does when it has not stopped.
 //
 // At each tick, also when the batch is empty, the writer checks the drop counts
-// of the queue. If there are any, it adds them to ip_counter (see write).
+// of the queue. If there are any, it adds them to ip_counter (see write). While
+// the writer is paused, the counts stay in memory. They go to ip_counter at the
+// resume or at shutdown, under the day of that write.
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick
 	if tick == nil {
@@ -321,9 +324,11 @@ func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*ev
 
 // shutdown writes the last batch and the events that Drain returns. If the
 // writer has stopped, flush drops the events that are left, and counts them.
-// It ends with one flush of an empty batch, so that the drop counts that are
-// still in memory go to ip_counter. Thus a healthy writer keeps no count in
-// memory after shutdown.
+// If it has paused, flush drops them in the same way. It ends with one write of
+// an empty batch, so that the drop counts that are still in memory go to
+// ip_counter. This write is also made while paused: it has no event row and
+// calls no appender. Thus a writer that has not stopped keeps no count in
+// memory after shutdown. A stopped writer writes nothing.
 func (w *Writer) shutdown(batch []*event.Event) {
 	w.flush(batch)
 	for rest := w.q.Drain(); len(rest) > 0; {
@@ -331,7 +336,11 @@ func (w *Writer) shutdown(batch []*event.Event) {
 		w.flush(rest[:n])
 		rest = rest[n:]
 	}
-	w.flush(nil)
+	if w.Healthy() {
+		if err := w.write(nil); err != nil {
+			w.stop(err)
+		}
+	}
 }
 
 // flush writes the batch and returns it empty. It clears the pointers, so the

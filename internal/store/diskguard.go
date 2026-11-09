@@ -64,7 +64,7 @@ func (g *DiskGuard) Use() (float64, error) {
 }
 
 // fdUse reads the use of the file system of f. It uses only fields that Linux
-// and the other Unix systems have.
+// and macOS have.
 func fdUse(f *os.File) (use float64, err error) {
 	c, err := f.SyscallConn()
 	if err != nil {
