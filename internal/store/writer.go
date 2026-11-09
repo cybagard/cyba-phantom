@@ -50,7 +50,10 @@ const (
 // A retention run (RunRetention) is a request to the writer goroutine, as a
 // checkpoint row is. An error of a retention chunk is a database error.
 //
-// Healthy, Err and Stats are safe to call from any goroutine.
+// With a disk guard (SetDiskGuard) the writer can also pause. A pause is not a
+// stop (see Paused).
+//
+// Healthy, Err, Paused and Stats are safe to call from any goroutine.
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
@@ -113,6 +116,13 @@ type Writer struct {
 	retention chan retentionRequest
 	// checkpointBusy counts the runs whose TRUNCATE checkpoint was busy.
 	checkpointBusy atomic.Uint64
+
+	// disk gives the disk use of the guard, from 0 to 1 (see SetDiskGuard). A
+	// test sets it; nil means no guard.
+	disk          func() (float64, error)
+	paused        atomic.Bool   // the pause of the disk guard; not a stop
+	diskErrors    atomic.Uint64 // the failed measures
+	diskErrLogged atomic.Bool   // the first failed measure has a log line
 
 	// sessions holds the sessions of the batch in progress. The writer
 	// empties it at the start of each transaction.
@@ -327,15 +337,22 @@ func (w *Writer) shutdown(batch []*event.Event) {
 // flush writes the batch and returns it empty. It clears the pointers, so the
 // events of the written batch can be freed. An error stops the writer. A stopped
 // writer writes nothing: flush drops the events and counts the drops. The lane
-// of each of these drops is the lane of e.Kind(). A batch that ends with an
-// error and no COMMIT is lost. write counts each of its events as a drop. The
-// lane of that drop is the lane of the kind of the record copy. flush does not
-// count a batch whose COMMIT succeeded.
+// of each of these drops is the lane of e.Kind(). A paused writer (see
+// SetDiskGuard) does the same, and also drops the events that are in the lanes.
+// It makes no stop. A batch that ends with an error and no COMMIT is lost.
+// write counts each of its events as a drop. The lane of that drop is the lane
+// of the kind of the record copy. flush does not count a batch whose COMMIT
+// succeeded.
 func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		for _, e := range batch {
 			w.drops.add(e.Kind())
 		}
+	} else if w.diskPaused() {
+		for _, e := range batch {
+			w.drops.add(e.Kind())
+		}
+		discardAll(w.q, &w.drops)
 	} else if err := w.write(batch); err != nil {
 		w.stop(err)
 	}

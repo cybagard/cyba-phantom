@@ -33,6 +33,17 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/verify"
 )
 
+// The tests start the store part with realDeps. Most are not about the disk
+// guard. The use of the disk of the host must not pause their writer. So the
+// test binary has no guard in realDeps. A test of the guard asks for one with
+// guarded.
+func init() { realDeps.openGuard = nil }
+
+func guarded(d startDeps) startDeps {
+	d.openGuard = store.OpenDiskGuard
+	return d
+}
+
 // opens counts the calls that open the log and the store, and the runs of the
 // migration. Its deps method gives the real parts to start.
 type opens struct{ log, store, migrate int }
@@ -849,4 +860,92 @@ func TestParamsOf(t *testing.T) {
 	if got := paramsOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("params %+v, want %+v", got, want)
 	}
+}
+
+// T-I-16: start opens the disk guard for the writer. A guard that does not open
+// gives one log line with no path, and the writer runs with no guard.
+func TestTI16_StartOpensTheGuard(t *testing.T) {
+	s, _ := launch(t, testParams(t, "events.db"), guarded(realDeps))
+	if s.guard == nil || !s.Healthy() || s.writer.Paused() {
+		t.Fatalf("guard %v, healthy %v, paused %v", s.guard, s.Healthy(), s.writer.Paused())
+	}
+	var buf bytes.Buffer
+	d := realDeps
+	d.openGuard = func(*os.Root, string) (*store.DiskGuard, error) { return nil, errors.New("/secret/path") }
+	s, _ = launchLog(t, testParams(t, "events.db"), d, slog.New(slog.NewTextHandler(&buf, nil)))
+	if s.guard != nil || !s.Healthy() || !strings.Contains(buf.String(), "disk guard does not open") || strings.Contains(buf.String(), "secret") {
+		t.Fatalf("guard %v, healthy %v, log %q", s.guard, s.Healthy(), buf.String())
+	}
+}
+
+// T-I-16 through the started store part, on a real small file system. At 92 %
+// use the store part is not healthy. The offers to the queue return. After the
+// fill file is gone, the store part is healthy again. Set PHANTOM_DISKFULL to
+// a directory on a tmpfs of at most 256 MiB. Else the test skips. The test of
+// the writer in internal/store shows the rows, the drops and the stop marker.
+func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
+	dir := os.Getenv("PHANTOM_DISKFULL")
+	if dir == "" {
+		t.Skip("PHANTOM_DISKFULL is not set: it names a directory on a small tmpfs")
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
+		t.Skipf("PHANTOM_DISKFULL is on a file system of %d MiB: the limit is 256 MiB", size>>20)
+	}
+	p := testParams(t, "events.db")
+	p.Root = filepath.Join(dir, "phantom-diskfull-"+filepath.Base(p.Root))
+	if err := os.Mkdir(p.Root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(p.Root) })
+	s, q := launch(t, p, guarded(realDeps))
+	until := func(what string, cond func() bool) {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("timeout: %s", what)
+			}
+		}
+	}
+	if !s.Healthy() {
+		t.Fatal("not healthy at the start")
+	}
+	fill := filepath.Join(p.Root, "fill")
+	f, err := os.Create(fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	chunk := make([]byte, 256<<10)
+	for i := 0; i < 1100; i++ {
+		u, err := s.guard.Use()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u >= 0.92 {
+			break
+		}
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	until("not healthy", func() bool { return !s.Healthy() })
+	// An offer never waits for the writer, so the request path serves.
+	begin := time.Now()
+	put(t, q, event.KindRequest, 3)
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("3 offers took %v while the writer paused", d)
+	}
+	until("the drops", func() bool { return s.writer.Stats().Dropped.Bulk == 3 })
+	// An open file keeps its blocks, so close it before the remove.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fill); err != nil {
+		t.Fatal(err)
+	}
+	until("healthy again", s.Healthy)
 }
