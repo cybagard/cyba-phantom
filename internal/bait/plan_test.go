@@ -5,6 +5,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"slices"
 	"strings"
@@ -244,7 +245,11 @@ func TestTS28PlanFallback(t *testing.T) {
 		{"comment refusal", `<p>{{comment (index .Trap "t0")}}</p>`, "a<{{.Token}}", false},
 		{"escape error", `<p onclick=f('{{index .Trap "t0"}}')>`, "x {{.Token}}", true},
 		{"marker in the template", `<p>` + markerOf(0, 0) + `{{index .Trap "t0"}}</p>`, "x {{.Token}}", false},
+		{"marker of run 2 in the template", `<p>` + markerOf(0, 1) + `{{index .Trap "t0"}}</p>`, "x {{.Token}}", false},
 		{"marker in a trap text", `<p>{{index .Trap "t0"}}</p>`, markerOf(0, 1) + "{{.Token}}", false},
+		{"marker of run 1 in a trap text", `<p>{{index .Trap "t0"}}</p>`, markerOf(0, 0) + "{{.Token}}", false},
+		{"marker of another action in a trap text", `<p>{{index .Trap "t0"}}</p>`, markerOf(5, 0) + "{{.Token}}", false},
+		{"alphabet at the start, no action", alphabet + "!", "x {{.Token}}", false},
 		{"two runs differ", `<style>p{content:"{{index .Trap "t0"}}"}</style>`, "<{{.Token}}", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -376,6 +381,142 @@ func TestTS28PlanOrder(t *testing.T) {
 	got = plansOf(makeSite(fb, pl))
 	if pl.runs != 4 || pl.left != 0 || got["vhosts/b.example/1.tmpl"] == nil || got["vhosts/b.example/2.tmpl"] != nil {
 		t.Errorf("runs = %d, left = %d, plans %v, want 4 runs, left 0, plans for the first two", pl.runs, pl.left, got)
+	}
+}
+
+// TestTS28PlanRunWriter checks the cap of a marker run: a write to exactly the
+// cap is kept, and one more byte is refused.
+func TestTS28PlanRunWriter(t *testing.T) {
+	w := runWriter{max: 10}
+	if n, err := w.Write(make([]byte, 10)); n != 10 || err != nil {
+		t.Errorf("write of the cap: %d, %v", n, err)
+	}
+	if n, err := w.Write([]byte{1}); n != 0 || err != errPlanOver || w.buf.Len() != 10 {
+		t.Errorf("write over the cap: %d, %v, %d bytes kept", n, err, w.buf.Len())
+	}
+	v := runWriter{max: 10}
+	if _, err := v.Write(make([]byte, 11)); err != errPlanOver || v.buf.Len() != 0 {
+		t.Errorf("write of cap + 1: %v, %d bytes kept", err, v.buf.Len())
+	}
+}
+
+// TestTS28PlanCut checks cut with output that a template can make. Each
+// marker check has a case where it alone refuses. The want lists with 224 and
+// 255 are the values that a bad index character gives, so only the check of
+// the index character refuses these. 64 is the first action position over the
+// cap, and 256 is the first one that wraps in a byte.
+func TestTS28PlanCut(t *testing.T) {
+	m := func(hi, lo byte) string { return "a" + alphabet + string(hi) + string(lo) + "7" }
+	for _, c := range []struct {
+		name, out string
+		want      []uint8
+		fixed     string // the fixed bytes if the output is accepted
+	}{
+		{"marker alone", markerOf(0, 0), []uint8{0}, ""},
+		{"marker with text", "x" + markerOf(3, 0) + "y", []uint8{3}, "xy"},
+		{"last position", m('b', '7'), []uint8{63}, ""},
+		{"alphabet at the start", alphabet + "x", nil, "refused"},
+		{"cut at the end", "x" + "a" + alphabet + "a", []uint8{0}, "refused"},
+		{"first edge", "z" + alphabet + "aa7", []uint8{0}, "refused"},
+		{"last edge", "a" + alphabet + "aaz", []uint8{0}, "refused"},
+		{"high character", m('!', 'a'), []uint8{224}, "refused"},
+		{"low character", m('a', '!'), []uint8{255}, "refused"},
+		{"position 64", m('c', 'a'), []uint8{64}, "refused"},
+		{"position 256", m('i', 'a'), []uint8{0}, "refused"},
+		{"other action", markerOf(1, 0), []uint8{0}, "refused"},
+		{"marker of run 2", markerOf(0, 1), []uint8{0}, "refused"},
+	} {
+		got := cut([]byte(c.out), 0, c.want)
+		if c.fixed == "refused" {
+			if got != nil {
+				t.Errorf("%s: output accepted", c.name)
+			}
+			continue
+		}
+		if got == nil || string(got.fixed) != c.fixed || !slices.Equal(got.acts, c.want) {
+			t.Errorf("%s: output refused or wrong plan %+v", c.name, got)
+		}
+	}
+}
+
+// writeSizes is a response writer that keeps the size of each write.
+type writeSizes struct {
+	*discard
+	sizes []int
+}
+
+func (w *writeSizes) Write(p []byte) (int, error) {
+	w.sizes = append(w.sizes, len(p))
+	return len(p), nil
+}
+
+// TestTS28PlanTokenText checks the token texts at the limit of the scratch
+// array. A text of 32 bytes renders from the plan: the first write is the
+// fixed bytes before the token. A text of 33 bytes renders with Execute: the
+// first write is the text before the action. The bytes are equal.
+func TestTS28PlanTokenText(t *testing.T) {
+	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}},
+		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `<p>{{index .Trap "t0"}}</p>`}}})
+	for _, c := range []struct{ n, first int }{{31, 5}, {32, 5}, {33, 3}} {
+		h := planHandler(t, b)
+		setTokens(h, []string{strings.Repeat("a", c.n)})
+		w, s := &writeSizes{discard: &discard{h: http.Header{}}}, h.sessionOf(get("/t", "example.com"))
+		h.serve(w, get("/t", "example.com"), b, &s)
+		if len(w.sizes) != 3 || w.sizes[0] != c.first || h.noPlan.Load() != 0 {
+			t.Errorf("text of %d bytes: write sizes %v, noPlan %d, want first %d", c.n, w.sizes, h.noPlan.Load(), c.first)
+		}
+	}
+}
+
+// TestTS28PlanWriteString checks writeString for texts around the size of the
+// scratch array: the bytes written are the text.
+func TestTS28PlanWriteString(t *testing.T) {
+	b := newBundle(t)
+	for _, n := range []int{0, 1, 31, 32, 33, 100} {
+		rec, text := httptest.NewRecorder(), strings.Repeat("k", n)
+		cw := capWriter{w: rec, h: planHandler(t, b), sess: &reqSession{}, code: 200}
+		if err := cw.writeString(text); err != nil || rec.Body.String() != text {
+			t.Errorf("%d bytes: error %v, wrote %d bytes", n, err, rec.Body.Len())
+		}
+	}
+}
+
+// TestTS28PlanEdges checks a page that starts and ends with a token. Its plan
+// exists and the page is equal to Execute.
+func TestTS28PlanEdges(t *testing.T) {
+	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "{{.Token}}"}},
+		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `{{index .Trap "t0"}}`}}})
+	h := planHandler(t, b)
+	if h.siteOf(b).hosts["example.com"]["/t"].plan == nil {
+		t.Fatal("the page has no plan")
+	}
+	tok := []string{tokOf(rand.New(rand.NewPCG(7, 8)), tokClasses[0])}
+	setTokens(h, tok)
+	if got := serve(t, h, get("/t", "example.com")).Body.String(); got != tok[0] || h.noPlan.Load() != 0 {
+		t.Errorf("page %q, noPlan %d, want %q", got, h.noPlan.Load(), tok[0])
+	}
+}
+
+// TestTS28PlanMintFails checks a page with a plan when the mint fails. The
+// page renders with Execute and empty trap texts. The plan is not used and
+// nothing counts in noPlan. A page with no action does the same with no map.
+func TestTS28PlanMintFails(t *testing.T) {
+	for _, c := range []struct{ tmpl, want string }{{`<p>{{index .Trap "t0"}}</p>`, "<p></p>"}, {"<p>fixed</p>", "<p>fixed</p>"}} {
+		b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "x {{.Token}}"}},
+			map[string][]route{"example.com": {{"/t", "t.tmpl", html, c.tmpl}}})
+		h := planHandler(t, b)
+		if h.siteOf(b).hosts["example.com"]["/t"].plan == nil {
+			t.Fatal("the page has no plan")
+		}
+		h.keys = func(*bundle.Bundle) *token.KeySet { return nil }
+		w := serve(t, h, get("/t", "example.com"))
+		wantKeys := int64(1)
+		if c.tmpl == "<p>fixed</p>" {
+			wantKeys = 0
+		}
+		if w.Body.String() != c.want || h.noKeys.Load() != wantKeys || h.noPlan.Load() != 0 {
+			t.Errorf("%q: body %q, noKeys %d, noPlan %d", c.tmpl, w.Body.String(), h.noKeys.Load(), h.noPlan.Load())
+		}
 	}
 }
 

@@ -121,12 +121,13 @@ func (p *planner) of(name string, acts []int) *plan {
 
 // build makes the plan with two marker runs. It gives nil in these cases.
 // A run fails, a marker does not come back exactly, or the two runs differ.
-// It gives nil too if a marker is in the template text or in a trap text.
+// A marker in the template text or in a trap text also gives nil, with no
+// separate check. A marker of one run has the wrong edge characters in the
+// other run, and an extra marker in the output breaks the count in cut.
 // It also gives nil for a plan over the budget that is left. A run writes 36
 // bytes for a cut that counts 5 or more. So a plan near the end of the
 // budget can fail at the cap of its run.
 func (p *planner) build(name string, acts []int) *plan {
-	src, _ := p.b.File(name)
 	var runs [2]*plan
 	for run := range runs {
 		page := bundle.Page{Trap: make(map[string]string, len(acts))}
@@ -134,9 +135,6 @@ func (p *planner) build(name string, acts []int) *plan {
 		for i, ix := range acts {
 			m := markerOf(i, run)
 			t := p.traps[ix]
-			if bytes.Contains(src, []byte(m)) || strings.Contains(t.InstructionTemplate, m) {
-				return nil
-			}
 			page.Trap[t.ID] = t.Render(m)
 			for range strings.Count(page.Trap[t.ID], m) {
 				want = append(want, uint8(i))
@@ -153,7 +151,9 @@ func (p *planner) build(name string, acts []int) *plan {
 		}
 	}
 	a, c := runs[0], runs[1]
-	if !bytes.Equal(a.fixed, c.fixed) || !bytes.Equal(a.acts, c.acts) || len(a.offs) != len(c.offs) {
+	// cut checks the actions of each run against the same list, so the action
+	// lists and the cut counts of the two runs are equal here.
+	if !bytes.Equal(a.fixed, c.fixed) {
 		return nil
 	}
 	for i := range a.offs {
