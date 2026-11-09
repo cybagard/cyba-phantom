@@ -75,10 +75,13 @@ func onCall(step retentionStep, f func(i int, tx *sql.Tx)) retentionStep {
 	}
 }
 
-// retentionRig makes a rig with rows seeded rows and the given steps.
+// retentionRig makes a rig with rows seeded rows and the given steps. The clock
+// of the writer is fixed, so a slow runner cannot end a chunk at the time
+// budget. A test of the budget sets its own clock after the rig.
 func retentionRig(t *testing.T, rows int, steps ...retentionStep) *rig {
 	t.Helper()
 	r := newRig(t, 4000)
+	r.w.clock = func() time.Time { return time.Unix(0, 0) }
 	seedEvents(t, r.db, rows, seedTS, 1, false)
 	setHook(t, &retentionSteps, steps)
 	return r
