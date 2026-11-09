@@ -316,13 +316,19 @@ func helloConn(hello *tls.ClientHelloInfo) *limitConn {
 // markRequest wraps h. It counts h as a running handler of s. The count goes
 // down in a defer, because net/http recovers a panic of h outside this wrapper.
 // Before h runs, it marks the request on its limitConn. A request without a
-// body is also active. A request with a body never starts a late run.
+// body is also active. A request with a body never starts a late run. On a
+// closed connection, h does not run. The read budget can close a connection
+// while net/http still holds a pipelined request in its buffer (SEC-22). The
+// wrapper returns and writes nothing. The socket is closed, so net/http sends
+// no reply. A panic with http.ErrAbortHandler would add an unwind for no gain.
 func (s *Server) markRequest(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.handlers.enter()
 		defer s.handlers.leave()
 		if lc, ok := r.Context().Value(limitConnKey{}).(*limitConn); ok {
-			lc.reachHandler(r.Body == http.NoBody)
+			if !lc.reachHandler(r.Body == http.NoBody) {
+				return
+			}
 		}
 		h.ServeHTTP(w, r)
 	})
