@@ -40,15 +40,15 @@ const maxTokText = 32
 // alphabet is the token alphabet (internal/token). Each marker holds all of it.
 const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
 
-// The first two characters and the last character of a marker in the two marker
-// runs. Run 0 uses hex digits and run 1 uses letters that are not hex digits.
-// The class must hold for the first two characters. The URL normalizer keeps a
-// "%" only before two hex digits, so it looks two bytes ahead (url.go:118).
-// The CSS escape looks one byte ahead. No other escaper of go1.27.3 looks
-// further into a value where a plan can exist.
+// The first two and the last two characters of a marker in the two marker runs.
+// Run 0 uses hex digits and run 1 uses letters that are not hex digits. The
+// class must hold for two characters at each end. An escaper can look at the
+// neighbour bytes of a token. The URL normalizer keeps a "%" only before two
+// hex digits (url.go:118). The CSS escape looks one byte ahead. No other
+// escaper of go1.27.3 looks further into a value where a plan can exist.
 var (
 	markerStarts = [2]string{"a7", "qz"}
-	markerEnds   = [2]byte{'7', 'z'}
+	markerEnds   = [2]string{"7a", "zq"}
 )
 
 // plan is the output of one template with a marker in place of each token. A
@@ -94,7 +94,7 @@ func markerHead(run int) string { return markerStarts[run] + markerWords }
 // markerOf gives the marker of action act in marker run run. It has the head,
 // the alphabet, two characters that give act, and a last edge character.
 func markerOf(act, run int) string {
-	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + string(markerEnds[run])
+	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + markerEnds[run]
 }
 
 // errPlanOver is the error of a marker run that passes its cap.
@@ -221,11 +221,11 @@ func cut(out []byte, run int, want []uint8) *plan {
 		if k < 0 {
 			break
 		}
-		end, lead := k+len(alphabet)+3, len(markerStarts[run])+len(markerWords)
-		if k < lead || end > len(out) || string(out[k-lead:k]) != markerHead(run) || out[end-1] != markerEnds[run] {
+		end, lead := k+len(alphabet)+2+len(markerEnds[run]), len(markerStarts[run])+len(markerWords)
+		if k < lead || end > len(out) || string(out[k-lead:k]) != markerHead(run) || string(out[end-len(markerEnds[run]):end]) != markerEnds[run] {
 			return nil
 		}
-		hi, lo := strings.IndexByte(alphabet, out[end-3]), strings.IndexByte(alphabet, out[end-2])
+		hi, lo := strings.IndexByte(alphabet, out[k+len(alphabet)]), strings.IndexByte(alphabet, out[k+len(alphabet)+1])
 		if hi < 0 || lo < 0 || hi<<5|lo >= maxActs {
 			return nil
 		}

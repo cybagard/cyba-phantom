@@ -438,7 +438,7 @@ func TestTS28PlanRunWriter(t *testing.T) {
 // cap. 256 is the first one that wraps in a byte.
 func TestTS28PlanCut(t *testing.T) {
 	head := markerHead(0)
-	m := func(hi, lo byte) string { return head + alphabet + string(hi) + string(lo) + "7" }
+	m := func(hi, lo byte) string { return head + alphabet + string(hi) + string(lo) + "7a" }
 	for _, c := range []struct {
 		name, out string
 		want      []uint8
@@ -449,11 +449,12 @@ func TestTS28PlanCut(t *testing.T) {
 		{"last position", m('b', '7'), []uint8{63}, ""},
 		{"alphabet at the start", alphabet + "x", nil, "refused"},
 		{"cut at the end", "x" + head + alphabet + "a", []uint8{0}, "refused"},
-		{"first character", "z7" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
-		{"second character", "az" + markerWords + alphabet + "aa7", []uint8{0}, "refused"},
-		{"words", "a7" + markerWords[:len(markerWords)-1] + "x" + alphabet + "aa7", []uint8{0}, "refused"},
-		{"head too short", "a7" + alphabet + "aa7", []uint8{0}, "refused"},
-		{"last edge", head + alphabet + "aaz", []uint8{0}, "refused"},
+		{"first character", "z7" + markerWords + alphabet + "aa7a", []uint8{0}, "refused"},
+		{"second character", "az" + markerWords + alphabet + "aa7a", []uint8{0}, "refused"},
+		{"words", "a7" + markerWords[:len(markerWords)-1] + "x" + alphabet + "aa7a", []uint8{0}, "refused"},
+		{"head too short", "a7" + alphabet + "aa7a", []uint8{0}, "refused"},
+		{"third from last character", head + alphabet + "aaza", []uint8{0}, "refused"},
+		{"last character", head + alphabet + "aa7z", []uint8{0}, "refused"},
 		{"high character", m('!', 'a'), []uint8{224}, "refused"},
 		{"low character", m('a', '!'), []uint8{255}, "refused"},
 		{"position 64", m('c', 'a'), []uint8{64}, "refused"},
@@ -637,8 +638,8 @@ func TestTS28PlanPercent(t *testing.T) {
 }
 
 // TestTS28PlanMarkers checks the form of a marker. Each marker has the three
-// words that the filters of html/template refuse. Take the first two characters
-// and the last character of a marker. In run 1 they are hex digits of the token
+// words that the filters of html/template refuse. Take the first two and the
+// last two characters of a marker. In run 1 they are hex digits of the token
 // alphabet. In run 2 they are letters that are not hex digits.
 func TestTS28PlanMarkers(t *testing.T) {
 	for run := range 2 {
@@ -649,13 +650,91 @@ func TestTS28PlanMarkers(t *testing.T) {
 					t.Errorf("run %d action %d: marker %q has no %q", run, act, m, w)
 				}
 			}
-			first, second, last := m[0], m[1], m[len(m)-1]
-			isHex := func(c byte) bool { return strings.IndexByte(hexSet, c) >= 0 }
-			isOther := func(c byte) bool { return strings.IndexByte(letterSet, c) >= 0 }
-			if run == 0 && !(isHex(first) && isHex(second) && isHex(last)) || run == 1 && !(isOther(first) && isOther(second) && isOther(last)) {
-				t.Errorf("run %d: characters %q, %q and %q", run, first, second, last)
+			set := hexSet
+			if run == 1 {
+				set = letterSet
+			}
+			for _, c := range []byte{m[0], m[1], m[len(m)-2], m[len(m)-1]} {
+				if strings.IndexByte(set, c) < 0 {
+					t.Errorf("run %d: marker %q has %q outside %q", run, m, c, set)
+				}
 			}
 		}
+	}
+}
+
+// neighbourToks are tokens with the first two and the last two characters hex,
+// not hex, and mixed. They are 26 characters of the token alphabet.
+func neighbourToks() []string {
+	var out []string
+	for _, e := range [][2]string{{"a7", "7a"}, {"qz", "zq"}, {"a7", "zq"}, {"qz", "7a"}, {"aq", "q7"}, {"7c", "c2"}, {"qa", "7z"}} {
+		out = append(out, e[0]+"ghijklmnopqrstuvwxyz23"+e[1])
+	}
+	return out
+}
+
+// TestTS28PlanNeighbours checks the escapers that look at the bytes next to a
+// token. Each row is one escaper. A row has no plan when a marker run differs
+// or does not come back. Else it has a plan. In both cases the page has the
+// Execute bytes. A page with no plan counts one in noPlan.
+func TestTS28PlanNeighbours(t *testing.T) {
+	index := `{{index .Trap "t0"}}`
+	comment := `{{comment (index .Trap "t0")}}`
+	toks := neighbourToks()
+	for _, c := range []struct {
+		row, name, tmpl, trap string
+		plan                  bool
+	}{
+		// 1. The URL normalizer keeps a "%" before two hex bytes (url.go:118).
+		{"url", "href path %", `<a href="/x/` + index + `">`, "%{{.Token}}", false},
+		{"url", "href start %", `<a href="` + index + `">`, "%{{.Token}}", false},
+		{"url", "href unquoted %", `<a href=/x/` + index + `>`, "%{{.Token}}", false},
+		{"url", "srcset %", `<img srcset="` + index + ` 1x">`, "%{{.Token}}", false},
+		{"url", "css url %", `<p style="background:url(/x/` + index + `)">`, "%{{.Token}}", false},
+		{"url", "href path %a", `<a href="/x/` + index + `">`, "%a{{.Token}}", false},
+		{"url", "href start %a", `<a href="` + index + `">`, "%a{{.Token}}", false},
+		{"url", "href unquoted %a", `<a href=/x/` + index + `>`, "%a{{.Token}}", false},
+		{"url", "srcset %a", `<img srcset="` + index + ` 1x">`, "%a{{.Token}}", false},
+		{"url", "css url %a", `<p style="background:url(/x/` + index + `)">`, "%a{{.Token}}", false},
+		// 2. The CSS escape writes a space after a hex escape (css.go:178).
+		{"css escape", "style element", `<style>p{content:"` + index + `"}</style>`, "<{{.Token}}", false},
+		{"css escape", "style attribute", `<p style="content:'` + index + `'">`, "<{{.Token}}", false},
+		// 3. The JS value escaper pads a non-string value (js.go:219).
+		{"js value", "token", `<script>var a=` + index + `;</script>`, "{{.Token}}", true},
+		{"js value", "text around", `<script>var a=` + index + `;</script>`, "x{{.Token}}y", true},
+		// 4. stripTags removes the marker from template.HTML in an attribute.
+		{"strip tags", "quoted", `<p title="` + comment + `">`, "{{.Token}}", false},
+		{"strip tags", "unquoted", `<p title=` + comment + `>`, "{{.Token}}", false},
+		// 5. decodeCSS and the "--" look-back are in the CSS value filter.
+		{"css value", "dash", `<p style="color: ` + index + `">`, "-{{.Token}}", false},
+		{"css value", "escape", `<p style="color: ` + index + `">`, `\3{{.Token}}`, false},
+		// 6. A rune before or after the token does not change the token bytes.
+		{"utf-8", "html text", `<p>` + index + `</p>`, "é{{.Token}}é", true},
+		{"utf-8", "html text space", `<p>` + index + `</p>`, " {{.Token}}", true},
+		{"utf-8", "js string", `<script>var a="` + index + `";</script>`, "é{{.Token}}é", true},
+		{"utf-8", "js string space", `<script>var a="` + index + `";</script>`, " {{.Token}}", true},
+		{"utf-8", "url path", `<a href="/x/` + index + `">`, "é{{.Token}}é", true},
+		{"utf-8", "url path space", `<a href="/x/` + index + `">`, " {{.Token}}", true},
+	} {
+		t.Run(c.row+"/"+c.name, func(t *testing.T) {
+			b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", c.trap}}, map[string][]route{"example.com": {{"/t", "t.tmpl", html, c.tmpl}}})
+			h := planHandler(t, b)
+			if has := h.siteOf(b).hosts["example.com"]["/t"].plan != nil; has != c.plan {
+				t.Fatalf("plan = %v, want %v", has, c.plan)
+			}
+			for i, tok := range toks {
+				want, err := execOf(b, tmplName, []string{tok})
+				mustOK(t, err)
+				setTokens(h, []string{tok})
+				counted := int64(0)
+				if !c.plan {
+					counted = int64(i + 1)
+				}
+				if got := serve(t, h, get("/t", "example.com")).Body.String(); got != want || h.noPlan.Load() != counted {
+					t.Errorf("token %q: page %q, want %q, noPlan %d", tok, got, want, h.noPlan.Load())
+				}
+			}
+		})
 	}
 }
 
