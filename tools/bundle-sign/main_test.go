@@ -304,6 +304,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 	secrets := []string{string(seed), b64.EncodeToString(seed), b64.EncodeToString(ed25519.NewKeyFromSeed(seed))}
 	write(t, p("a.cbnd"), "archive", 0o644)
 	write(t, p("one.sig"), "k1 "+strings.Repeat("A", 86)+"==\n", 0o644)
+	write(t, p("zero.sig"), "k0 "+strings.Repeat("A", 86)+"==\n", 0o644)
 	for i, mode := range []os.FileMode{0o600, 0o640} {
 		write(t, p("m.key"), "k1 "+b64.EncodeToString(seed)+"\n", mode)
 		o := func(n string) string { return p(string(rune('a'+i)) + n) }
@@ -313,6 +314,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 			{"keygen", "k1", p("m.key")},
 			{"verify", p("m.key"), p("a.cbnd"), p("one.sig")},
 			{"pack", p("m.key"), o("p.cbnd")},
+			{"cosign", "k1", p("m.key"), p("a.cbnd"), p("zero.sig"), o("c.sig")},
 		} {
 			out, errText, _ := runCmd(args...)
 			all += out + errText
@@ -806,6 +808,18 @@ func TestTS20CosignRefusals(t *testing.T) {
 	}
 }
 
+// T-S-20: the error texts of cosign are fixed.
+func TestTS20CosignErrorTexts(t *testing.T) {
+	for err, want := range map[error]string{
+		errDupID:      "bundle-sign: key ID is already in the signature file",
+		errTransition: "bundle-sign: archive is not the transition bundle of these keys",
+	} {
+		if err.Error() != want {
+			t.Errorf("error text %q; want %q", err.Error(), want)
+		}
+	}
+}
+
 // T-S-20: cosign makes no output file unless the archive is a bundle archive
 // with a transition manifest. The manifest needs a rotation member. Its key_id
 // is the key_id argument. rotation.from is the key ID of the sig-file line.
@@ -820,9 +834,11 @@ func TestTS20CosignChecksArchive(t *testing.T) {
 	r.build("keyid", rot("k1", newKey), "k3", testVersion)
 	r.build("from", rot("k3", newKey), "k2", testVersion)
 	r.build("key", rot("k1", otherKey), "k2", testVersion)
+	// ReadArchive accepts this archive, and ParseManifest refuses the member.
+	r.build("badmanifest", `,"extra":1`+rot("k1", newKey), "k2", testVersion)
 	write(t, r.p("junk.cbnd"), "not an archive", 0o644)
 	runOK(t, "sign", "k1", r.p("k1.key"), r.p("norot.cbnd"), r.p("one.sig"))
-	for _, name := range []string{"norot", "keyid", "from", "key", "junk"} {
+	for _, name := range []string{"norot", "keyid", "from", "key", "badmanifest", "junk"} {
 		runFail(t, 1, errTransition, "cosign", "k2", r.p("k2.key"), r.p(name+".cbnd"), r.p("one.sig"), r.p("out.sig"))
 		noFile(t, r.p("out.sig"))
 	}
