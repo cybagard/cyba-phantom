@@ -1253,10 +1253,10 @@ func TestTI03_StopWaitsForOpenConnection(t *testing.T) {
 // TestTU23_StopWaitIsBounded sends a request whose handler does not return, so
 // the connection is active at the stop. Serve must return at least
 // shutdownTime - 1 s and at most shutdownTime + 3 s after the stop. The test
-// takes the end of the stop wait at the stopACME call, which serve makes after
-// the servers stopped. The cache close and the store close come after that
-// call, and they can wait for the disk. So the test bounds the total at
-// sigtermWait only, which a stop wait with no limit never meets.
+// checks that total bound from the stop to the return of serve. Serve calls
+// stopACME after the servers stopped, so the test also checks that the time to
+// that call is at least shutdownTime - 1 s. Each failure text gives both phases
+// and the pressure. A stop wait with no limit never returns.
 func TestTU23_StopWaitIsBounded(t *testing.T) {
 	stopped := make(chan time.Time, 1)
 	oldStop := stopACME
@@ -1295,10 +1295,17 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 	atCancel := readPressure()
 	begin := time.Now()
 	r.cancel()
+	const limit = shutdownTime + 3*time.Second
 	select {
 	case <-r.done:
-	case <-time.After(sigtermWait):
-		t.Fatalf("serve did not return %v after the stop%s", sigtermWait, atCancel.note(readPressure()))
+	case <-time.After(limit):
+		note := atCancel.note(readPressure())
+		select {
+		case at := <-stopped:
+			note = atCancel.stopNote(at.Sub(begin), time.Since(at))
+		default:
+		}
+		t.Fatalf("serve did not return %v after the stop%s", limit, note)
 	}
 	done := time.Now()
 	select {
@@ -1308,9 +1315,6 @@ func TestTU23_StopWaitIsBounded(t *testing.T) {
 		t.Log(strings.TrimPrefix(note, "; "))
 		if toACME < shutdownTime-time.Second {
 			t.Errorf("serve stopped the servers %v after the stop, want about %v: it did not wait for the connection%s", toACME, shutdownTime, note)
-		}
-		if toACME > shutdownTime+3*time.Second {
-			t.Errorf("serve stopped the servers %v after the stop, want at most %v%s", toACME, shutdownTime+3*time.Second, note)
 		}
 	default:
 		t.Error("serve did not call stopACME")

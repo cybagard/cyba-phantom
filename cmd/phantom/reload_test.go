@@ -550,7 +550,7 @@ func sighupUnderLoad(t *testing.T, pages bool) {
 		count(rows, "bundle_load", "signal") != swaps || len(rows) != swaps+1 || stopTook >= shutdownTime {
 		t.Errorf("%d of %d requests failed, %d overlapped a swap, %v (at least %v), stop %v; rows %v; want 0 of 200 or more, at most 200 each second, 5 overlaps, 5 signal loads, stop before %v%s",
 			failed.Load(), sent.Load(), overlapped.Load(), took, minTook, stopTook, rows, shutdownTime,
-			atStop.note(readPressure())+"; the stop time is from the cancel to the return of serve, with the cache and store close")
+			atStop.note(readPressure())+"; the stop time is from the cancel to the return of serve, with the store close")
 	}
 }
 
