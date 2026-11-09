@@ -374,11 +374,11 @@ func (s *slowStore) Store(context.Context, string, []byte) error {
 	return nil
 }
 
-// TestTI03_FenceCountsBeforeItCalls races a close against many Store calls, 200
-// times. A hook runs in each operation after its check and before the call to
-// the cache. Each operation must either get errFenceClosed and make no call, or
-// be counted. When close returns, no call may be in progress, and no call may
-// begin later.
+// TestTI03_FenceCountsBeforeItCalls races a close against many Store calls,
+// in each of 5000 rounds. A hook runs in each operation after its check and
+// before the call to the cache. Each operation must either get errFenceClosed
+// and make no call, or be counted. When close returns, no call may be in
+// progress, and no call may begin later.
 func TestTI03_FenceCountsBeforeItCalls(t *testing.T) {
 	const rounds, ops = 5000, 16
 	for range rounds {
