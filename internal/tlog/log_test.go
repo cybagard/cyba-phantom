@@ -1352,8 +1352,8 @@ func TestTU07OpenLogMakesLoadedHeadDurable(t *testing.T) {
 
 // T-U-07: a batch copies a level buffer one time, not for each hash. A batch
 // of 250 leaves fills most of one level-0 tile. A copy for each hash makes the
-// batch allocate more than 1.3 MB. The right code allocates less than 270 KB,
-// also with the race detector. The limit is 500 KB.
+// batch allocate more than 1250 KiB. The correct code allocates less than
+// 300 KiB, also with the race detector. The limit is 500 KiB (512000 bytes).
 func TestTU07BatchCopiesALevelBufferOneTime(t *testing.T) {
 	withoutSync(t)
 	state, _ := newLogState(t)
