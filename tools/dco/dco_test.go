@@ -445,7 +445,8 @@ func forgeCommit(t *testing.T, extra, msg string) (dir, hash string) {
 
 // Git converts the message to UTF-8 from the encoding header. The bytes of
 // an address can then come out as other characters, so dco cannot see the
-// address. A commit with any encoding header fails.
+// address. A commit with a non-empty encoding header fails. An empty value
+// gives an empty %e, and that commit passes.
 func TestEncodingHeaderFails(t *testing.T) {
 	const hint = "hint: commits must not set an encoding header\n"
 	t.Run("ISO-2022-JP hides an address", func(t *testing.T) {

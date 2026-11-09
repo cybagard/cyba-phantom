@@ -304,6 +304,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 	secrets := []string{string(seed), b64.EncodeToString(seed), b64.EncodeToString(ed25519.NewKeyFromSeed(seed))}
 	write(t, p("a.cbnd"), "archive", 0o644)
 	write(t, p("one.sig"), "k1 "+strings.Repeat("A", 86)+"==\n", 0o644)
+	write(t, p("zero.sig"), "k0 "+strings.Repeat("A", 86)+"==\n", 0o644)
 	for i, mode := range []os.FileMode{0o600, 0o640} {
 		write(t, p("m.key"), "k1 "+b64.EncodeToString(seed)+"\n", mode)
 		o := func(n string) string { return p(string(rune('a'+i)) + n) }
@@ -313,6 +314,7 @@ func TestTS20KeyMarkerNeverAppears(t *testing.T) {
 			{"keygen", "k1", p("m.key")},
 			{"verify", p("m.key"), p("a.cbnd"), p("one.sig")},
 			{"pack", p("m.key"), o("p.cbnd")},
+			{"cosign", "k1", p("m.key"), p("a.cbnd"), p("zero.sig"), o("c.sig")},
 		} {
 			out, errText, _ := runCmd(args...)
 			all += out + errText
@@ -731,6 +733,47 @@ func TestTS20CosignTransition(t *testing.T) {
 	runFail(t, 1, errVerify, "verify", r.p("trust"), r.p("t.cbnd"), r.p("one.sig"))
 }
 
+// T-S-20: cosign reads the archive one time and signs the bytes that it
+// checked. The test replaces the archive file after the first read. A second
+// read would sign other bytes, and verify would refuse the new line.
+func TestTS20CosignReadsArchiveOnce(t *testing.T) {
+	r := newRig(t)
+	oldLine := runOK(t, "keygen", "k1", r.p("old.key"))
+	newLine := runOK(t, "keygen", "k2", r.p("new.key"))
+	rot := `,"rotation":{"from":"k1","key":"` + strings.Fields(newLine)[1] + `"}`
+	r.build("t", rot, "k2", testVersion)
+	r.build("o", rot, "k2", "2026.10.01-2")
+	first, err := os.ReadFile(r.p("t.cbnd"))
+	other, err2 := os.ReadFile(r.p("o.cbnd"))
+	if err != nil || err2 != nil || bytes.Equal(first, other) {
+		t.Fatal("archives")
+	}
+	runOK(t, "sign", "k1", r.p("old.key"), r.p("t.cbnd"), r.p("one.sig"))
+	reads := 0
+	swap(t, &readInput, func(path string, limit int64, key bool, fail error) ([]byte, error) {
+		b, err := readFile(path, limit, key, fail)
+		if path == r.p("t.cbnd") {
+			reads++
+			if err := os.WriteFile(path, other, 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return b, err
+	})
+	runOK(t, "cosign", "k2", r.p("new.key"), r.p("t.cbnd"), r.p("one.sig"), r.p("two.sig"))
+	if reads != 1 {
+		t.Errorf("archive read %d times; want 1", reads)
+	}
+	readInput = readFile
+	write(t, r.p("trust"), oldLine, 0o644)
+	if err := os.WriteFile(r.p("t.cbnd"), first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runOK(t, "verify", r.p("trust"), r.p("t.cbnd"), r.p("two.sig")); got != "valid: k1 k2\n" {
+		t.Errorf("verify: %q", got)
+	}
+}
+
 // T-S-20: cosign refuses a key file with a group or other bit. It refuses a
 // signature file of two lines or of a wrong form. It refuses a key ID that is
 // in the file. It makes no output file.
@@ -756,11 +799,47 @@ func TestTS20CosignRefusals(t *testing.T) {
 		{"mode 0640", "k3", "m640.key", "one.sig", errKey},
 		{"mode 0604", "k3", "m604.key", "one.sig", errKey},
 		{"two lines", "k3", "k3.key", "both.sig", errSig},
-		{"key ID in the file", "k1", "k1.key", "one.sig", errKeyID},
+		{"key ID in the file", "k1", "k1.key", "one.sig", errDupID},
 		{"bad file", "k3", "k3.key", "bad.sig", errSig},
 		{"no file", "k3", "k3.key", "none.sig", errRead},
 	} {
 		runFail(t, 1, c.err, "cosign", c.id, r.p(c.key), r.p("a.cbnd"), r.p(c.sig), r.p("out.sig"))
+		noFile(t, r.p("out.sig"))
+	}
+}
+
+// T-S-20: the error texts of cosign are fixed.
+func TestTS20CosignErrorTexts(t *testing.T) {
+	for err, want := range map[error]string{
+		errDupID:      "bundle-sign: key ID is already in the signature file",
+		errTransition: "bundle-sign: archive is not the transition bundle of these keys",
+	} {
+		if err.Error() != want {
+			t.Errorf("error text %q; want %q", err.Error(), want)
+		}
+	}
+}
+
+// T-S-20: cosign makes no output file unless the archive is a bundle archive
+// with a transition manifest. The manifest needs a rotation member. Its key_id
+// is the key_id argument. rotation.from is the key ID of the sig-file line.
+// rotation.key is the public key of the key file.
+func TestTS20CosignChecksArchive(t *testing.T) {
+	r := newRig(t)
+	runOK(t, "keygen", "k1", r.p("k1.key"))
+	newKey := strings.Fields(runOK(t, "keygen", "k2", r.p("k2.key")))[1]
+	otherKey := strings.Fields(runOK(t, "keygen", "k3", r.p("k3.key")))[1]
+	rot := func(from, key string) string { return `,"rotation":{"from":"` + from + `","key":"` + key + `"}` }
+	r.build("norot", "", "k2", testVersion)
+	r.build("keyid", rot("k1", newKey), "k3", testVersion)
+	r.build("from", rot("k3", newKey), "k2", testVersion)
+	r.build("key", rot("k1", otherKey), "k2", testVersion)
+	// ReadArchive accepts this archive, and ParseManifest refuses the member.
+	r.build("badmanifest", `,"extra":1`+rot("k1", newKey), "k2", testVersion)
+	write(t, r.p("junk.cbnd"), "not an archive", 0o644)
+	runOK(t, "sign", "k1", r.p("k1.key"), r.p("norot.cbnd"), r.p("one.sig"))
+	for _, name := range []string{"norot", "keyid", "from", "key", "badmanifest", "junk"} {
+		runFail(t, 1, errTransition, "cosign", "k2", r.p("k2.key"), r.p(name+".cbnd"), r.p("one.sig"), r.p("out.sig"))
 		noFile(t, r.p("out.sig"))
 	}
 }
