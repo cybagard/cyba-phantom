@@ -462,19 +462,27 @@ func TestTS16NoListenerBesideTheDecoySocketAfterTheChallenge(t *testing.T) {
 	if solver != f.addr {
 		t.Fatalf("solver address %s is not the address of the decoy socket %s", solver, f.addr)
 	}
-	requireBindRefused(t, solver, "before Start")
+	if err := bindRefusedError(solver); err != nil {
+		t.Fatalf("before Start: %v", err)
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
 	before := mustListeningSockets(t)
 	requireSnapshot(t, before, f.addr)
-	finish := watchListeners(t, before)
+	s := startListenerSampler(before)
+	t.Cleanup(s.stop)
 	startIssue(t, f)
 	f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
-	finish()
+	if err := s.verdict(); err != nil {
+		t.Error(err)
+	}
+	t.Log(s.summary())
 	// Pebble ran a real TLS-ALPN validation on the decoy socket in the window.
 	f.requireALPN(t)
-	requireBindRefused(t, solver, "after the certificate")
+	if err := bindRefusedError(solver); err != nil {
+		t.Fatalf("after the certificate: %v", err)
+	}
 	for inode, addr := range mustListeningSockets(t) {
 		if _, ok := before[inode]; !ok {
 			t.Errorf("new listening socket %s (inode %s) after the certificate", addr, inode)
@@ -517,19 +525,27 @@ func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 			}
 			// This is the solver address that a wildcard listen must give.
 			solver := ":" + port
-			requireBindRefused(t, solver, "before Start")
+			if err := bindRefusedError(solver); err != nil {
+				t.Fatalf("before Start: %v", err)
+			}
 			if runtime.GOOS != "linux" {
 				t.Skip("the check reads /proc, which only Linux has")
 			}
 			before := mustListeningSockets(t)
 			requireSnapshot(t, before, f.listen)
-			finish := watchListeners(t, before)
+			s := startListenerSampler(before)
+			t.Cleanup(s.stop)
 			startIssue(t, f)
 			chain := f.waitChain(t, issueWait, func(*x509.Certificate) bool { return true })
-			finish()
+			if err := s.verdict(); err != nil {
+				t.Error(err)
+			}
+			t.Log(s.summary())
 			f.requireALPN(t) // Present ran on the decoy socket
 			f.verifyToPebble(t, chain)
-			requireBindRefused(t, solver, "after the certificate")
+			if err := bindRefusedError(solver); err != nil {
+				t.Fatalf("after the certificate: %v", err)
+			}
 		})
 	}
 }

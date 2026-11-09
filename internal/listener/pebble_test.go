@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -279,21 +280,13 @@ func bindRefusedError(addr string) error {
 	return nil
 }
 
-// requireBindRefused fails the test unless a new bind of addr fails with
-// "address already in use". The decoy socket holds addr.
-func requireBindRefused(t *testing.T, addr, when string) {
-	t.Helper()
-	if err := bindRefusedError(addr); err != nil {
-		t.Fatalf("%s: %v", when, err)
-	}
-}
-
 // listenerSampler reads the listening TCP sockets of the process in a loop.
 type listenerSampler struct {
 	samples atomic.Int64 // the goroutine adds, and the callers read
 	quit    chan struct{}
 	done    chan struct{}
-	// The goroutine writes these. stop reads them after done.
+	stopped bool // the test goroutine reads and writes this
+	// The goroutine writes these. The callers read them after stop.
 	failed  int
 	lastErr error
 	extra   []string
@@ -328,39 +321,33 @@ func startListenerSampler(before map[string]string) *listenerSampler {
 	return s
 }
 
-// stop ends the loop. It returns the addresses of the new sockets and the
-// sample count. It also returns the failed reads and the last error. Call it
-// once.
-func (s *listenerSampler) stop() (extra []string, samples int64, failed int, lastErr error) {
-	close(s.quit)
-	<-s.done
-	return s.extra, s.samples.Load(), s.failed, s.lastErr
+// stop ends the loop and waits for it. A second call does nothing, so a test
+// can call it at cleanup too.
+func (s *listenerSampler) stop() {
+	if !s.stopped {
+		s.stopped = true
+		close(s.quit)
+		<-s.done
+	}
 }
 
-// watchListeners samples the listening TCP sockets of the process. The sockets
-// in before may listen. The function that it returns stops the sampler. Then it
-// fails the test if no sample was read. It also fails the test if a socket that
-// is not in before listened in a sample. A second call does nothing. The test
-// calls it at cleanup too.
-func watchListeners(t *testing.T, before map[string]string) (finish func()) {
-	t.Helper()
-	s := startListenerSampler(before)
-	var once sync.Once
-	finish = func() {
-		t.Helper()
-		once.Do(func() {
-			extra, samples, failed, lastErr := s.stop()
-			t.Logf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", samples, failed, lastErr)
-			if samples == 0 {
-				t.Error("no sample of the listening sockets was read, so the check saw nothing")
-			}
-			if len(extra) != 0 {
-				t.Errorf("new listening sockets since before Start: %v", extra)
-			}
-		})
+// verdict stops the sampler. It returns an error if no sample was read or if
+// a socket that is not in before listened in a sample.
+func (s *listenerSampler) verdict() error {
+	s.stop()
+	if s.samples.Load() == 0 {
+		return errors.New("no sample of the listening sockets was read, so the check saw nothing")
 	}
-	t.Cleanup(finish)
-	return finish
+	if len(s.extra) != 0 {
+		return fmt.Errorf("new listening sockets since before Start: %v", s.extra)
+	}
+	return nil
+}
+
+// summary stops the sampler and tells what it read.
+func (s *listenerSampler) summary() string {
+	s.stop()
+	return fmt.Sprintf("%d samples of the listening sockets, %d failed reads of /proc (last error: %v)", s.samples.Load(), s.failed, s.lastErr)
 }
 
 // TestTS16BindCheckFailsOnAFreeAddress is the positive control of the bind
@@ -372,28 +359,52 @@ func TestTS16BindCheckFailsOnAFreeAddress(t *testing.T) {
 	}
 }
 
+// TestTS16BindCheckFailsOnAnotherBindError is the second control of the bind
+// check. 192.0.2.1 is a documentation address (RFC 5737) that the host does
+// not hold. The bind fails, but not with "address already in use". So the
+// check must give an error.
+func TestTS16BindCheckFailsOnAnotherBindError(t *testing.T) {
+	err := bindRefusedError("192.0.2.1:0")
+	if err == nil {
+		t.Fatal("the bind check gave no error on a bind that failed for another reason")
+	}
+	t.Logf("the bind check gave: %v", err)
+}
+
 // TestTS16SamplerReportsAListenerThatOpensAfterItStarts is the positive control
 // of the sampler. The control opens a listener after the sampler starts. The
 // listener stays open until the sampler has taken two more samples. The second
-// one began after the open. Then the control stops the sampler. The sampler
-// must report the listener.
+// one began after the open. Then the control closes the listener and stops the
+// sampler. So the sampler must have seen the listener while it was open. The
+// verdict must be an error that names the listener.
 func TestTS16SamplerReportsAListenerThatOpensAfterItStarts(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the check reads /proc, which only Linux has")
 	}
 	s := startListenerSampler(mustListeningSockets(t))
+	t.Cleanup(s.stop)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	mustNil(t, err)
 	defer l.Close()
 	for want, deadline := s.samples.Load()+2, time.Now().Add(issueWait); s.samples.Load() < want; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			s.stop()
 			t.Fatal("the sampler took no sample after the listener opened")
 		}
 	}
-	extra, samples, _, _ := s.stop()
-	if !slices.Contains(extra, l.Addr().String()) {
-		t.Fatalf("the sampler reported %v after %d samples; want the listener %s", extra, samples, l.Addr())
+	mustNil(t, l.Close())
+	err = s.verdict()
+	if err == nil || !strings.Contains(err.Error(), l.Addr().String()) {
+		t.Fatalf("the verdict is %v after %d samples; want an error that names the listener %s", err, s.samples.Load(), l.Addr())
+	}
+}
+
+// TestTS16SamplerVerdictFailsWithoutASample is the control of the sample
+// count. A sampler that read no sample must give an error.
+func TestTS16SamplerVerdictFailsWithoutASample(t *testing.T) {
+	s := &listenerSampler{quit: make(chan struct{}), done: make(chan struct{})}
+	close(s.done)
+	if err := s.verdict(); err == nil {
+		t.Fatal("the verdict of a sampler without a sample is no error")
 	}
 }
 
