@@ -2,10 +2,13 @@ package bait
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -380,7 +383,7 @@ func TestTP12CapFlood(t *testing.T) {
 }
 
 // settle waits until the writer has taken each event off the queue.
-func settle(t *testing.T, q *event.Queue) {
+func settle(t testing.TB, q *event.Queue) {
 	t.Helper()
 	for end := time.Now().Add(5 * time.Second); q.Bytes() != (event.Bytes{}); {
 		if time.Now().After(end) {
@@ -451,6 +454,101 @@ func TestTP12CapLeaves(t *testing.T) {
 	if want := wantBurst + seconds - 1; admitted != want || leaves != admitted || rows != admitted {
 		t.Errorf("admitted %d (want %d), callback rows %d, leaves %d", admitted, want, rows, leaves)
 	}
+}
+
+// tableBytes gives the page bytes of each table (dbstat). The bytes of the
+// indexes of a table are in its value.
+func tableBytes(t testing.TB, db *sql.DB) map[string]float64 {
+	t.Helper()
+	rows, err := db.Query("SELECT m.tbl_name, SUM(d.pgsize) FROM dbstat d JOIN sqlite_master m ON m.name = d.name GROUP BY m.tbl_name")
+	mustOK(t, err)
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var name string
+		var n float64
+		mustOK(t, rows.Scan(&name, &n))
+		out[name] = n
+	}
+	mustOK(t, rows.Err())
+	return out
+}
+
+// dirBytes gives the sum of the sizes of the files below dir.
+func dirBytes(t testing.TB, dir string) (n int64) {
+	t.Helper()
+	mustOK(t, filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		fi, err := d.Info()
+		n += fi.Size()
+		return err
+	}))
+	return n
+}
+
+// BenchmarkCallbackRows renders 4 000 pages that each carry a token. Then it
+// serves the 4 000 callbacks of these tokens through a real writer and tlog.
+// For each callback it reports the bytes that the event table and the token
+// table gain (dbstat). It reports the bytes that the tlog files gain for each
+// leaf, and the callback rows and token rows. The event gain includes the
+// request row of the callback. The event bytes for each render are the request
+// row of a render page. One page is 4 096 bytes. A token row takes about 130
+// bytes. At this count one page changes the token value by 0.8 %. The
+// benchmark does its work one time and ignores b.N.
+func BenchmarkCallbackRows(b *testing.B) {
+	const n = 4000
+	rig := newStoreRig(b)
+	e := newCBEnvFiles(b, map[string]string{
+		"traps/traps.json":          `[{"id":"a","slot":"hidden-p","surface":"path","visibility":"human-visible","instruction_template":"x {{.Token}}"}]`,
+		"vhosts/example.com/t.tmpl": `<p>{{index .Trap "a"}}</p>`,
+	})
+	h := NewWithDayKey(e.h.src, &fallbackFn{}, rig.q, rig.dk)
+	h.SetRing(e.h.ring)
+	var clock time.Duration
+	h.mono = func() time.Duration { return clock }
+	done := make(chan error, 1)
+	go func() { done <- rig.w.Run(context.Background()) }()
+	texts := make([]string, n)
+	for i := range n {
+		r := get("/t", "example.com")
+		r.RemoteAddr = addr4(i)
+		texts[i] = tokenRE.FindString(serve(b, h, r).Body.String())
+		settle(b, rig.q)
+	}
+	for end := time.Now().Add(10 * time.Second); countOf(b, rig.db, "SELECT count(*) FROM mint") < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			b.Fatal("the writer did not store the mint rows")
+		}
+	}
+	before, logBefore := tableBytes(b, rig.db), dirBytes(b, rig.log)
+	for i, tok := range texts {
+		// The cap lets one callback through each second after its burst.
+		clock = time.Duration(i) * wantInterval
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, tok)
+		r.RemoteAddr = addr4(i)
+		serve(b, h, r)
+		settle(b, rig.q)
+	}
+	rig.q.Close()
+	if err := <-done; err != nil || !rig.w.Healthy() {
+		b.Fatalf("the writer stopped: %v %v", err, rig.w.Err())
+	}
+	const leafQuery = "SELECT count(*) FROM event WHERE kind = 'callback' AND leaf_index IS NOT NULL"
+	leaves := countOf(b, rig.db, leafQuery)
+	cbs := countOf(b, rig.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+	toks := countOf(b, rig.db, "SELECT count(*) FROM token")
+	if cbs != n || leaves != n || h.capped.Load() != 0 {
+		b.Fatalf("%d callback rows and %d leaves, want %d; %d capped", cbs, leaves, n, h.capped.Load())
+	}
+	after := tableBytes(b, rig.db)
+	b.ReportMetric(before["event"]/n, "event-B/render")
+	b.ReportMetric((after["event"]-before["event"])/n, "event-B/callback")
+	b.ReportMetric((after["token"]-before["token"])/n, "token-B/callback")
+	b.ReportMetric(float64(dirBytes(b, rig.log)-logBefore)/float64(leaves), "tlog-B/leaf")
+	b.ReportMetric(float64(cbs)/n, "callback-rows/callback")
+	b.ReportMetric(float64(toks)/n, "token-rows/callback")
 }
 
 // TestTS32CapPruneKeepsWindow checks that a write removes only the entries

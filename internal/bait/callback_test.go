@@ -8,7 +8,9 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -190,6 +192,50 @@ func TestTI04CallbackSurfaces(t *testing.T) {
 			if want := (event.Detail{"reference_seed": event.Bool(true)}); !reflect.DeepEqual(c.Detail, want) {
 				t.Errorf("%s %s: detail %v, want %v", rt.path, surface, c.Detail, want)
 			}
+		}
+	}
+}
+
+// zonedKinds drains q. The events must have the kinds in want, in any order.
+// Each event must have the client address fe80::1.
+func zonedKinds(t *testing.T, q *event.Queue, want ...event.Kind) {
+	t.Helper()
+	var got []event.Kind
+	for _, ev := range q.Drain() {
+		got = append(got, ev.Kind())
+		if ev.IP() != "fe80::1" {
+			t.Errorf("%s event: client address %q", ev.Kind(), ev.IP())
+		}
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("event kinds %v, want %v", got, want)
+	}
+}
+
+// TestTS32ZonedClient sends a callback and a beacon post from a link-local
+// address with a zone. The request, callback and beacon events keep the address
+// without its zone. The writer drops no event.
+func TestTS32ZonedClient(t *testing.T) {
+	const from = "[fe80::1%eth0]:4000"
+	if a, err := netip.ParseAddrPort(from); err != nil || a.Addr().Zone() == "" {
+		t.Fatalf("the test address %q has no zone: %v", from, err)
+	}
+	e := newCBEnv(t)
+	r := cbReq(http.MethodGet, cbRoutePath, posQuery, e.mint(t, time.Now()))
+	r.RemoteAddr = from
+	serve(t, e.h, r)
+	zonedKinds(t, e.q, event.KindRequest, event.KindCallback)
+	b := newBC(t, bcPost)
+	tk := b.ticket(t, from, "")
+	if w, _ := b.do("POST", bcPost, "example.com", from, "", tk, -2); w.Code != 204 {
+		t.Errorf("beacon post: code %d", w.Code)
+	}
+	zonedKinds(t, b.q, event.KindRequest, event.KindBeacon)
+	for _, h := range []*Handler{e.h, b.h} {
+		if n := h.eventErrs.Load(); n != 0 {
+			t.Errorf("%d event errors", n)
 		}
 	}
 }

@@ -203,6 +203,8 @@ func TestTU20RequestEventAddr(t *testing.T) {
 		{"[2001:db8::1]:443", "2001:db8::1", false},
 		{"192.0.2.7", "192.0.2.7", false},
 		{"::1", "::1", false},
+		{"[fe80::1%eth0]:80", "fe80::1", false},
+		{"fe80::1%eth0", "fe80::1", false},
 		{"not-an-address", "", true},
 		{"example.com:80", "", true},
 	} {
@@ -222,6 +224,28 @@ func TestTU20RequestEventAddr(t *testing.T) {
 		if ip != c.ip || h.eventErrs.Load() != 0 || rec.Status == nil || *rec.Status != 200 || len(rec.Detail) != 0 {
 			t.Errorf("%q: ip %q, errors %d, record %+v", c.addr, ip, h.eventErrs.Load(), rec)
 		}
+	}
+}
+
+// TestTU20RequestEventZoneSession checks the session id of a zoned address,
+// with the cookie off. It is the keyed id of the address without its zone. It
+// is the id of a request from the plain address.
+func TestTU20RequestEventZoneSession(t *testing.T) {
+	h, q := eventHandler(t, 8)
+	h.cookieOff.Store(true)
+	var ids [2]string
+	for i, from := range []string{"[fe80::1%eth0]:80", "[fe80::1]:80"} {
+		r := get("/t", "example.com")
+		r.RemoteAddr = from
+		serve(t, h, r)
+		rec, ip := oneEvent(t, from, q)
+		if rec.Session == nil || ip != "fe80::1" {
+			t.Fatalf("%q: session %v, ip %q", from, rec.Session, ip)
+		}
+		ids[i] = *rec.Session
+	}
+	if want := keyedID(t, h, "fe80::1"); ids[0] != want || ids[1] != want {
+		t.Errorf("session ids %q, want %q for both", ids, want)
 	}
 }
 
