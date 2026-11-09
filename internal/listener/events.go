@@ -3,6 +3,8 @@ package listener
 import (
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync/atomic"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -24,6 +26,12 @@ func (rc *recorder) record(r *http.Request, code int) {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		ip = r.RemoteAddr // NewEvent refuses a value that is not an address
+	}
+	// NewEvent refuses a zone. Remove it, as the refused emitter does.
+	if strings.IndexByte(ip, '%') >= 0 {
+		if a, err := netip.ParseAddr(ip); err == nil {
+			ip = a.WithZone("").String()
+		}
 	}
 	st := int64(code)
 	e, err := event.NewEvent(nil, event.Input{

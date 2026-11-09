@@ -379,6 +379,29 @@ func TestTU19NewEventErrorCountsAndServes(t *testing.T) {
 	}
 }
 
+// T-U-19: a peer address with an IPv6 zone gives one request event. The stored
+// client address has no zone. The error counter does not change. An
+// IPv4-mapped address keeps its form.
+func TestTU19ZonedPeerGivesOneEventWithoutZone(t *testing.T) {
+	for _, tc := range []struct{ remote, want string }{
+		{"[fe80::1%eth0]:1234", "fe80::1"},
+		{"[fe80::2%en7]:1234", "fe80::2"},
+		{"[::ffff:192.0.2.1]:1234", "::ffff:192.0.2.1"},
+	} {
+		t.Run(tc.remote, func(t *testing.T) {
+			h, q, _ := newHelloQueue(t, 4)
+			resp, _ := serveRaw(t, h, &http.Request{Method: "GET", Host: "decoy.test", RemoteAddr: tc.remote})
+			evs := q.Drain()
+			if resp.StatusCode != 200 || h.EventErrors() != 0 || len(evs) != 1 {
+				t.Fatalf("status %d, errors %d, events %d", resp.StatusCode, h.EventErrors(), len(evs))
+			}
+			if got := evs[0].IP(); got != tc.want {
+				t.Errorf("stored IP %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // T-S-17: a PRI * HTTP/2.0 request over TLS gets the fixed 404 page and one
 // request event.
 func TestTS17PriOverTLSGivesNotFoundAndOneEvent(t *testing.T) {
