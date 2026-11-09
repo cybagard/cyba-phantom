@@ -140,7 +140,7 @@ type issueFixture struct {
 	rig    *pebbleRig
 	egress *egressRecorder
 	name   string
-	addr   string       // host:port that a client dials to reach the decoy socket
+	addr   string       // host:port that a client dials for the decoy socket
 	listen string       // the local address of the decoy socket
 	alpn   atomic.Int64 // the handshakes of the decoy socket that negotiated acme-tls/1
 }

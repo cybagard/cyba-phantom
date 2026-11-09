@@ -502,7 +502,8 @@ func TestTS16WildcardDecoyAnswersTheChallenge(t *testing.T) {
 			if iss.ListenHost != "" || strconv.Itoa(iss.AltTLSALPNPort) != port {
 				t.Errorf("solver host %q, port %d; want host \"\" and port %s", iss.ListenHost, iss.AltTLSALPNPort, port)
 			}
-			solver := ":" + port // the solver address that a wildcard listen must give
+			// This is the solver address that a wildcard listen must give.
+			solver := ":" + port
 			requireBindRefused(t, solver, "before Start")
 			before := mustListeningSockets(t)
 			if len(before) < 3 || !slices.Contains(slices.Collect(maps.Values(before)), f.listen) {
