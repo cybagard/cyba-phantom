@@ -550,6 +550,9 @@ func TestTS28PlanFilters(t *testing.T) {
 		{"uri in a name", `<p {{index .Trap "t0"}}="v">x</p>`, "{{.Token}}", pad("xuri")},
 		{"expression after text", `<p style="color: {{index .Trap "t0"}}">x</p>`, "expressio{{.Token}}", pad("n")},
 		{"mozbinding after text", `<style>p{color: {{index .Trap "t0"}}}</style>`, "mozbindin{{.Token}}", pad("g")},
+		{"url scheme is the token", `<a href="{{index .Trap "t0"}}">x</a>`, "{{.Token}}:x", pad("abc")},
+		{"url scheme has text before the token", `<a href="{{index .Trap "t0"}}">x</a>`, "x{{.Token}}:y", pad("abc")},
+		{"srcset url scheme is the token", `<img srcset="{{index .Trap "t0"}}">`, "{{.Token}}:x 1x", pad("abc")},
 		{"expression before text", `<style>p{color:{{index .Trap "t0"}}}</style>`, "{{.Token}}xpression", strings.Repeat("b", 25) + "e"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -566,6 +569,24 @@ func TestTS28PlanFilters(t *testing.T) {
 				t.Errorf("page %q, want %q, noPlan %d", got, want, h.noPlan.Load())
 			}
 		})
+	}
+}
+
+// TestTS28PlanSrcset checks a srcset value with a token after a path. The
+// filter passes it, so the template has a plan and the bytes equal Execute.
+func TestTS28PlanSrcset(t *testing.T) {
+	b := tmplBundle(t, []trapSpec{{"t0", "hidden-p", "/a.png {{.Token}}"}},
+		map[string][]route{"example.com": {{"/t", "t.tmpl", html, `<img srcset="{{index .Trap "t0"}}">`}}})
+	h := planHandler(t, b)
+	if h.siteOf(b).hosts["example.com"]["/t"].plan == nil {
+		t.Fatal("the template has no plan")
+	}
+	tok := []string{strings.Repeat("b", 26)}
+	want, err := execOf(b, tmplName, tok)
+	mustOK(t, err)
+	setTokens(h, tok)
+	if got := serve(t, h, get("/t", "example.com")).Body.String(); got != want || strings.Contains(want, "ZgotmplZ") || h.noPlan.Load() != 0 {
+		t.Errorf("page %q, want %q, noPlan %d", got, want, h.noPlan.Load())
 	}
 }
 
