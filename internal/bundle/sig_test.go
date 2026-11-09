@@ -256,6 +256,7 @@ func TestTS20CheckSigned(t *testing.T) {
 		// A normal bundle with two lines of the set gives both key IDs.
 		{"k1 and k3 lines", normal("k1"), line("k1", privOld, normal("k1")) + line("k3", privOther, normal("k1")), TrustSet{old, other}, []string{"k1", "k3"}, nil},
 		{"old and new lines", normal("k1"), line("k1", privOld, normal("k1")) + line("k2", privNew, normal("k1")), TrustSet{old, newKey}, []string{"k1", "k2"}, nil},
+		// A line over another archive gives ErrBadSig.
 		{"old line over another archive", normal("k1"), line("k1", privOld, normal("k2")) + line("k2", privNew, normal("k1")), TrustSet{old, newKey}, nil, ErrBadSig},
 		{"new line over another archive", normal("k1"), line("k1", privOld, normal("k1")) + line("k2", privNew, normal("k2")), TrustSet{old, newKey}, nil, ErrBadSig},
 	} {

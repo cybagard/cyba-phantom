@@ -557,6 +557,9 @@ func TestTU23SyncDirErrors(t *testing.T) {
 		if serr == nil {
 			t.Skip("this system syncs /proc")
 		}
+		if errors.Unwrap(serr) == nil {
+			t.Fatalf("Sync error %v wraps no error", serr)
+		}
 		if err := syncDir(proc); !errors.Is(err, errors.Unwrap(serr)) {
 			t.Errorf("got %v; want %v", err, serr)
 		}

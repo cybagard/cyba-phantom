@@ -128,10 +128,10 @@ type probeReader struct{ read bool }
 
 func (p *probeReader) Read([]byte) (int, error) { p.read = true; return 0, io.EOF }
 
-// T-S-19: two entries of MaxEntryBytes fill the budget of the entry sizes. The
-// header of the second entry passes, and ReadArchive reads its data. The data
-// is not there, so the archive is not valid. The probe shows that the read
-// happened.
+// T-S-19: two entries of MaxEntryBytes fill the cap on the sum of the entry
+// sizes. The header of the second entry passes, and readArchive reads its
+// data. The data is not there, so the archive is not valid. The probe shows
+// that the read happened.
 func TestTS19EntrySizesAtBudgetPass(t *testing.T) {
 	anyEntry := func(h *tar.Header) (string, error) { return h.Name, nil }
 	tb := buildTar(ent{name: "traps/a", data: zeros(MaxEntryBytes)})
