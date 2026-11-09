@@ -639,8 +639,8 @@ func TestTS28PlanPercent(t *testing.T) {
 
 // TestTS28PlanMarkers checks the form of a marker. Each marker has the three
 // words that the filters of html/template refuse. Take the first two and the
-// last two characters of a marker. In run 1 they are hex digits of the token
-// alphabet. In run 2 they are letters that are not hex digits.
+// last two characters of a marker. In the first run they are hex digits of the
+// token alphabet. In the second run they are letters that are not hex digits.
 func TestTS28PlanMarkers(t *testing.T) {
 	for run := range 2 {
 		for _, act := range []int{0, 1, 31, 32, 63} {
@@ -1037,7 +1037,7 @@ func TestTS28PlanBudget(t *testing.T) {
 				}
 			}
 			t.Logf("%d of %d templates have a plan: %d counted bytes, %d bytes of heap, largest plan %d", kept, len(all), counted, int64(heap)-int64(base), biggest)
-			// A run writes 59 bytes for a cut that counts 5. A template near
+			// A run writes 61 bytes for a cut that counts 5. A template near
 			// the end of the budget can fail at the cap of its run. So the
 			// budget is not always full.
 			// The build counts against 4 MiB less 16 KiB (planSlack).

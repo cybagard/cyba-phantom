@@ -21,7 +21,7 @@ const planSlack = 16 << 10
 
 // planWork is the most output bytes of all marker runs of one site build. A run
 // that fails counts too. When the work is used, no more marker run starts.
-// The factor is 4. At 2 times, the fill shape got 207 plans (3 990 400 bytes)
+// The factor is 4. At 2 times, the fill shape got 206 plans (3 989 392 bytes)
 // and the most-cuts shape got 11. At 4 times, they got 455 (4 177 920 bytes)
 // and 22. The escape-growth shape got 9 plans at both.
 const planWork = 4 * planBudget
@@ -40,8 +40,9 @@ const maxTokText = 32
 // alphabet is the token alphabet (internal/token). Each marker holds all of it.
 const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
 
-// The first two and the last two characters of a marker in the two marker runs.
-// Run 0 uses hex digits and run 1 uses letters that are not hex digits. The
+// markerStarts and markerEnds give the first two and the last two characters
+// of a marker in each run. The first run (index 0) uses hex digits. The second
+// run (index 1) uses letters that are not hex digits. The
 // class must hold for two characters at each end. An escaper can look at the
 // neighbour bytes of a token. The URL normalizer keeps a "%" only before two
 // hex digits (url.go:118). The CSS escape looks one byte ahead. No other
@@ -92,7 +93,8 @@ const markerWords = "srcexpressionmozbinding"
 func markerHead(run int) string { return markerStarts[run] + markerWords }
 
 // markerOf gives the marker of action act in marker run run. It has the head,
-// the alphabet, two characters that give act, and a last edge character.
+// the alphabet, two characters that give act, and the two end characters of
+// the run.
 func markerOf(act, run int) string {
 	return markerHead(run) + alphabet + string(alphabet[act>>5&31]) + string(alphabet[act&31]) + markerEnds[run]
 }
@@ -158,7 +160,7 @@ func (p *planner) of(name string, acts []int) *plan {
 // other run. An extra marker in the output breaks the count in cut.
 // Some filters of html/template look at the whole value. They refuse the
 // marker, so it does not come back (see markerWords).
-// It also gives nil for a plan over the budget that is left. A run writes 59
+// It also gives nil for a plan over the budget that is left. A run writes 61
 // bytes for a cut that counts 5 or more. So a plan near the end of the
 // budget can fail at the cap of its run. The cap of a run is the smaller of
 // the budget left and the work left. A run that fails counts as work.
