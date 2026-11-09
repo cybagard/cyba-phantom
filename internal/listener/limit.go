@@ -402,16 +402,22 @@ func (c *limitConn) Write(p []byte) (int, error) {
 
 // startRequest marks a request without a body as active. A test calls it. The
 // handler wrapper calls reachHandler.
-func (c *limitConn) startRequest() { c.reachHandler(true) }
+func (c *limitConn) startRequest() { _ = c.reachHandler(true) }
 
 // reachHandler marks that a handler runs in this period, for each request. When
 // active is true, the request has no body. Then the next Write starts the late
-// run.
-func (c *limitConn) reachHandler(active bool) {
+// run. When the connection is closed, it marks nothing and returns false. Then
+// net/http parsed a pipelined request from its buffer. The read budget closed
+// the connection at the idle state before that (SEC-22).
+func (c *limitConn) reachHandler(active bool) bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
 	c.handled = true
 	c.active = c.active || active
-	c.mu.Unlock()
+	return true
 }
 
 // markACME marks the connection as an acme-tls/1 connection.
