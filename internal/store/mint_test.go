@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -137,7 +138,7 @@ func TestTS31MigrationAddsMintWithoutRebuild(t *testing.T) {
 	if before["event"].rows != 2 || before["session"].rows != 1 || before["token"].rows != 1 || before["ip_counter"].rows != 1 || before["checkpoint"].rows != 1 {
 		t.Fatalf("setup rows: %+v", before)
 	}
-	if err := Migrate(db, "origin"); err != nil {
+	if err := migrate(db, schema2Set(), "origin"); err != nil {
 		t.Fatal(err)
 	}
 	after := schema()
@@ -162,9 +163,17 @@ func TestTS31MigrationAddsMintWithoutRebuild(t *testing.T) {
 	}
 	db = mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
-	if err := Migrate(db, "origin"); err != nil {
+	if err := migrate(db, schema2Set(), "origin"); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
+}
+
+// schema2Set is the embedded first two migrations: the schema of version 2.
+func schema2Set() fstest.MapFS {
+	set := testSet(nil)
+	second, _ := migrationFiles.ReadFile("migrations/0002_mint.sql")
+	set["0002_mint.sql"] = &fstest.MapFile{Data: second}
+	return set
 }
 
 // T-S-31: the file of the migration holds the table and nothing else.

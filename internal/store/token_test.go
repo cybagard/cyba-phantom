@@ -538,7 +538,8 @@ func TestTS32TokenStatementErrorStopsTheWriter(t *testing.T) {
 			view(mintSelect("1000") + " UNION ALL " + mintSelect(overflow)),
 			[]*event.Event{cb(50)}},
 		// The update prepare does not use the column. The insert prepare does.
-		"insert prepare": {nil, "ALTER TABLE token DROP COLUMN first_cb_at", []*event.Event{render(t), cb(50)}},
+		// SQLite keeps an indexed column, so the index goes first.
+		"insert prepare": {nil, "DROP INDEX token_first_cb; ALTER TABLE token DROP COLUMN first_cb_at", []*event.Event{render(t), cb(50)}},
 		"insert run": {nil, "CREATE TRIGGER no_ins BEFORE INSERT ON token BEGIN SELECT RAISE(ABORT,'x'); END",
 			[]*event.Event{render(t), cb(50)}},
 	} {

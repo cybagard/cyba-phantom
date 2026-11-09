@@ -11,7 +11,7 @@ import (
 func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	db := migrated(t)
 	var ddl []byte
-	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql"} {
+	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql", "0003_retention.sql"} {
 		b, err := migrationFiles.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -25,7 +25,7 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	}
 	// SQLite stores each statement without its final semicolon.
 	want := strings.TrimSuffix(strings.Join(strings.Split(strings.TrimSpace(string(ddl)), ";\n"), ";"), ";")
-	if got != want || strings.Count(want, "CREATE ") != 14 {
+	if got != want || strings.Count(want, "CREATE ") != 16 {
 		t.Fatalf("sqlite_master differs from the embedded DDL:\n%q\n%q", got, want)
 	}
 	var n int
@@ -107,7 +107,9 @@ CREATE TABLE mint (
   session_id    TEXT,
   issued_at     INTEGER,
   PRIMARY KEY (set_id, unit, first)
-) WITHOUT ROWID`
+) WITHOUT ROWID
+CREATE INDEX session_ip_first ON session(first_seen) WHERE ip IS NOT NULL
+CREATE INDEX token_first_cb ON token(first_cb_at)`
 
 // T-U-18: a new database has the fixed text of each table and index. The text
 // of the embedded file is not the only proof.
@@ -122,14 +124,14 @@ func TestTU18SchemaEqualsFixedText(t *testing.T) {
 	}
 }
 
-// T-U-18: the migrations are the first one and the mint table, and a new
-// database has schema_version 2.
-func TestTU18OnlyTwoMigrationsExist(t *testing.T) {
+// T-U-18: the migrations are the first one, the mint table and the retention
+// indexes. A new database has schema_version 3.
+func TestTU18OnlyThreeMigrationsExist(t *testing.T) {
 	files, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil || len(files) != 2 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" {
+	if err != nil || len(files) != 3 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" || files[2].Name() != "0003_retention.sql" {
 		t.Fatalf("migration files %v: %v", files, err)
 	}
-	if v := metaValue(t, migrated(t), "schema_version"); v != "2" {
+	if v := metaValue(t, migrated(t), "schema_version"); v != "3" {
 		t.Fatalf("schema_version %s", v)
 	}
 }
