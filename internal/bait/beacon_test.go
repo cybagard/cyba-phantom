@@ -173,7 +173,8 @@ func TestTU25BeaconMethods(t *testing.T) {
 // TestTS32BeaconPost checks the POST of a ticket (SEC-38, SEC-32). Only the
 // exact ticket of the session, at an age of 0 to 5 000 ms, gives one beacon
 // event. Each case gives one request event. Each case gives the same 204, the
-// same headers and no body. A host in capitals with a port gives the same.
+// same headers (with "Connection: close") and no body. A host in capitals with
+// a port gives the same.
 func TestTS32BeaconPost(t *testing.T) {
 	e := newBC(t, bcPost)
 	tk := e.ticket(t, bcAddr, "")
@@ -209,7 +210,7 @@ func TestTS32BeaconPost(t *testing.T) {
 	} {
 		e.now = testDay.Add(c.at)
 		w, got := e.do("POST", bcPost, c.host, bcAddr, c.cookie, c.body, c.length)
-		hd := http.Header{"X-Content-Type-Options": {"nosniff"}}
+		hd := http.Header{"X-Content-Type-Options": {"nosniff"}, "Connection": {"close"}}
 		if w.Code != 204 || w.Body.Len() != 0 || !reflect.DeepEqual(w.Header(), hd) {
 			t.Errorf("%s: code %d body %q header %v, want 204, no body, %v", c.name, w.Code, w.Body.String(), w.Header(), hd)
 		}

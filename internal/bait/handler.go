@@ -37,7 +37,23 @@ var (
 	htmlType = []string{"text/html; charset=utf-8"}
 	nosniff  = []string{"nosniff"}
 	allow    = []string{"GET, HEAD"}
+	// connClose is the Connection header value of a callback route and of the
+	// beacon post path.
+	connClose = []string{"close"}
 )
+
+// closeConn takes the connection from net/http and closes it. A writer that
+// cannot hijack, for example an HTTP/2 stream or a test recorder, is left as it
+// is. Call it after the flush. A later request on the connection gets no
+// response. The connection caps do not count the handler after the close. So
+// the work after the close must stay short. It takes only two short locks: the
+// admission cap and, when the queue drops an event, the drop counters. It has
+// no blocking send and no I/O.
+func closeConn(w http.ResponseWriter) {
+	if c, _, err := http.NewResponseController(w).Hijack(); err == nil {
+		_ = c.Close()
+	}
+}
 
 // Source gives the running bundle. *bundle.Loader is a Source.
 type Source interface {
@@ -69,8 +85,10 @@ type Handler struct {
 	// mintHook runs in a template render, after the route lookup and before the
 	// mint. It is nil in production. A test sets it.
 	mintHook func()
-	// flushHook runs in a callback request, after the flush of the response and
-	// before the check of the tokens. It is nil in production. A test sets it.
+	// flushHook runs in a callback request and in a beacon post. It runs after
+	// the flush and the close of the connection. It runs before the check of
+	// the tokens or the ticket. A writer that cannot hijack runs it after the
+	// flush. It is nil in production. A test sets it.
 	flushHook func()
 	// execErrs counts the template execution errors.
 	execErrs atomic.Int64

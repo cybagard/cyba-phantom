@@ -77,8 +77,10 @@ func beaconScript(w http.ResponseWriter, r *http.Request, sess *reqSession, bp *
 }
 
 // beaconPost reads at most beaconBodyMax body bytes. Then it writes the fixed
-// 204 and flushes it. Only then it checks the ticket and makes the event. The
-// check result changes no response byte. The post path sets no cookie.
+// 204 with "Connection: close" and flushes it. Then it closes the connection.
+// Only then it checks the ticket and makes the event. A writer that cannot
+// hijack keeps the check after the flush. The check result changes no response
+// byte and no time on the connection. The post path sets no cookie.
 func (h *Handler) beaconPost(w http.ResponseWriter, r *http.Request, sess *reqSession, bp *beacon) int {
 	// A body is a ticket only when the read ends at EOF with exactly ticketLen
 	// bytes. The code does not trim or decode the body.
@@ -94,8 +96,13 @@ func (h *Handler) beaconPost(w http.ResponseWriter, r *http.Request, sess *reqSe
 	}
 	isTicket := n == ticketLen && err == io.EOF
 	w.Header()["X-Content-Type-Options"] = nosniff
+	w.Header()["Connection"] = connClose
 	w.WriteHeader(http.StatusNoContent)
 	_ = http.NewResponseController(w).Flush()
+	closeConn(w)
+	if h.flushHook != nil {
+		h.flushHook()
+	}
 	if isTicket && sess.key.CheckBeaconTicket(string(buf[:n]), sess.id, sess.at) {
 		st := int64(http.StatusNoContent)
 		e, evErr := event.NewEvent(nil, event.Input{

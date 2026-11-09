@@ -315,7 +315,23 @@ func TestTS02PostBodies(t *testing.T) {
 			}
 		}
 	}
+	// A callback route and the beacon post path close the connection early.
+	// Close does not wait for such a handler. So wait until the handler has
+	// recorded each request. Then read the records under mu.
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		mu.Lock()
+		got := len(reads) + len(cbReads) + len(bpReads)
+		mu.Unlock()
+		if got >= n {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the handler ran %d times for %d requests", got, n)
+		}
+	}
 	srv.Close()
+	mu.Lock()
+	defer mu.Unlock()
 	if len(reads)+len(cbReads)+len(bpReads) != n {
 		t.Fatalf("the handler ran %d times for %d requests", len(reads)+len(cbReads)+len(bpReads), n)
 	}

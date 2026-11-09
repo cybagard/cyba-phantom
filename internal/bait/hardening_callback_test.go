@@ -313,21 +313,24 @@ func TestTS02CallbackSegmentForms(t *testing.T) {
 	if !strings.HasPrefix(plain, "HTTP/1.1 200 ") || !strings.HasSuffix(plain, "\r\n\r\n"+cbAssetBody) {
 		t.Fatalf("the route gives %q", plain)
 	}
-	take(e.q)
-	for _, seg := range []string{"/", "/..", "/%2e%2e", "/%2E%2E", "/{{.T}}"} {
+	// The route checks after it closes the connection, so the events come
+	// after the client sees EOF. The request event comes last.
+	waitRequests(t, e.q, 1)
+	forms := []string{"/", "/..", "/%2e%2e", "/%2E%2E", "/{{.T}}"}
+	for _, seg := range forms {
 		got := fetch(cbRoutePath + seg)
 		if got != plain || len(seg) > 1 && strings.Contains(got, seg[1:]) {
 			t.Errorf("%s: response %q, want %q", seg, got, plain)
 		}
 	}
-	if _, cbs := take(e.q); len(cbs) != 0 {
+	if _, cbs := waitRequests(t, e.q, len(forms)); len(cbs) != 0 {
 		t.Errorf("%d callback events for the forms, want 0", len(cbs))
 	}
 	text := e.mint(t, time.Now())
 	if got := fetch(cbRoutePath + "/" + text); got != plain {
 		t.Errorf("token segment: response %q, want %q", got, plain)
 	}
-	if _, cbs := take(e.q); len(cbs) != 1 || *cbs[0].Surface != event.SurfacePath {
+	if _, cbs := waitRequests(t, e.q, 1); len(cbs) != 1 || *cbs[0].Surface != event.SurfacePath {
 		t.Errorf("token segment: callback events %+v, want 1 at the path", cbs)
 	}
 }
