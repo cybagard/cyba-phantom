@@ -216,7 +216,7 @@ func zonedKinds(t *testing.T, q *event.Queue, want ...event.Kind) {
 
 // TestTS32ZonedClient sends a callback and a beacon post from a link-local
 // address with a zone. The request, callback and beacon events keep the address
-// without its zone. The writer drops no event.
+// without its zone. The handler refuses no event: eventErrs stays 0.
 func TestTS32ZonedClient(t *testing.T) {
 	const from = "[fe80::1%eth0]:4000"
 	if a, err := netip.ParseAddrPort(from); err != nil || a.Addr().Zone() == "" {

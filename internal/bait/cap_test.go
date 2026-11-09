@@ -3,12 +3,14 @@ package bait
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -482,21 +484,93 @@ func dirBytes(t testing.TB, dir string) (n int64) {
 			return err
 		}
 		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
 		n += fi.Size()
-		return err
+		return nil
 	}))
 	return n
 }
 
+// waitRows waits until the event table has n rows.
+func waitRows(t testing.TB, db *sql.DB, n int) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); countOf(t, db, "SELECT count(*) FROM event") < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the writer did not store the event rows")
+		}
+	}
+}
+
+// refusedText changes the first character of a token text to another character
+// of the token alphabet. The text looks like a token, but it does not verify.
+func refusedText(s string) string {
+	if s[0] == 'a' {
+		return "b" + s[1:]
+	}
+	return "a" + s[1:]
+}
+
+// TestCallbackRefusedTokenRequestEvent compares the request event of a
+// callback with a token that verifies to the request event of a callback with
+// a token that does not. Only the first request gets a callback event. The two
+// request events must have the same fields, so the benchmark can use the
+// second request as the control for the request row.
+func TestCallbackRefusedTokenRequestEvent(t *testing.T) {
+	e := newCBEnv(t)
+	tok := e.mint(t, time.Now())
+	var reqs [2]*event.Event
+	for i, text := range []string{tok, refusedText(tok)} {
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, text)
+		r.RemoteAddr = addr4(1)
+		serve(t, e.h, r)
+		var cbs int
+		for _, ev := range e.q.Drain() {
+			switch ev.Kind() {
+			case event.KindRequest:
+				reqs[i] = ev
+			case event.KindCallback:
+				cbs++
+			}
+		}
+		if cbs != 1-i {
+			t.Errorf("request %d: %d callback events, want %d", i, cbs, 1-i)
+		}
+		if reqs[i] == nil {
+			t.Fatalf("request %d: no request event", i)
+		}
+	}
+	a, b := reqs[0].Record(), reqs[1].Record()
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	t.Logf("admitted token: %s ip %s size %d", ja, reqs[0].IP(), reqs[0].Size())
+	t.Logf("refused token:  %s ip %s size %d", jb, reqs[1].IP(), reqs[1].Size())
+	a.TS, b.TS = 0, 0
+	if !reflect.DeepEqual(a, b) || reqs[0].IP() != reqs[1].IP() || reqs[0].Size() != reqs[1].Size() {
+		t.Errorf("the request events differ: %+v and %+v", a, b)
+	}
+}
+
 // BenchmarkCallbackRows renders 4 000 pages that each carry a token. Then it
 // serves the 4 000 callbacks of these tokens through a real writer and tlog.
-// For each callback it reports the bytes that the event table and the token
-// table gain (dbstat). It reports the bytes that the tlog files gain for each
-// leaf, and the callback rows and token rows. The event gain includes the
-// request row of the callback. The event bytes for each render are the request
-// row of a render page. One page is 4 096 bytes. A token row takes about 130
-// bytes. At this count one page changes the token value by 0.8 %. The
-// benchmark does its work one time and ignores b.N.
+// A control pass follows. It sends 4 000 callbacks to the same route and
+// position from the same addresses, with a token text that does not verify.
+// Such a callback makes a request event and no callback event. The metrics:
+//   - event-B/render: event bytes for each render page (the request row).
+//   - event-B/callback: event bytes that the main pass gains for each
+//     callback. It holds the callback row and the request row of the callback.
+//   - event-B/cbrequest: event bytes that the control pass gains for each
+//     callback. It holds the request row alone.
+//   - callback-B/row: event-B/callback minus event-B/cbrequest. This is the
+//     callback row alone.
+//   - token-B/callback: token table bytes that the main pass gains.
+//   - tlog-B/leaf: tlog file bytes that the main pass gains for each leaf.
+//   - callback-rows/callback and token-rows/callback: rows for each callback.
+//
+// One page is 4 096 bytes. A token row takes about 130 bytes. At this count one
+// page changes the token value by 0.8 %. The benchmark runs one pass for any
+// b.N. Run it with -benchtime=1x. It reports 0 for ns/op: no time is measured.
 func BenchmarkCallbackRows(b *testing.B) {
 	const n = 4000
 	rig := newStoreRig(b)
@@ -531,6 +605,16 @@ func BenchmarkCallbackRows(b *testing.B) {
 		serve(b, h, r)
 		settle(b, rig.q)
 	}
+	// The rows are the render requests, then a request and a callback row for
+	// each callback.
+	waitRows(b, rig.db, 3*n)
+	mid := tableBytes(b, rig.db)
+	for i, tok := range texts {
+		r := cbReq(http.MethodGet, cbRoutePath, posQuery, refusedText(tok))
+		r.RemoteAddr = addr4(i)
+		serve(b, h, r)
+		settle(b, rig.q)
+	}
 	rig.q.Close()
 	if err := <-done; err != nil || !rig.w.Healthy() {
 		b.Fatalf("the writer stopped: %v %v", err, rig.w.Err())
@@ -543,8 +627,15 @@ func BenchmarkCallbackRows(b *testing.B) {
 		b.Fatalf("%d callback rows and %d leaves, want %d; %d capped", cbs, leaves, n, h.capped.Load())
 	}
 	after := tableBytes(b, rig.db)
+	if rows := countOf(b, rig.db, "SELECT count(*) FROM event"); rows != 4*n {
+		b.Fatalf("%d event rows, want %d", rows, 4*n)
+	}
+	cbBytes, reqBytes := (mid["event"]-before["event"])/n, (after["event"]-mid["event"])/n
+	b.ReportMetric(0, "ns/op")
 	b.ReportMetric(before["event"]/n, "event-B/render")
-	b.ReportMetric((after["event"]-before["event"])/n, "event-B/callback")
+	b.ReportMetric(cbBytes, "event-B/callback")
+	b.ReportMetric(reqBytes, "event-B/cbrequest")
+	b.ReportMetric(cbBytes-reqBytes, "callback-B/row")
 	b.ReportMetric((after["token"]-before["token"])/n, "token-B/callback")
 	b.ReportMetric(float64(dirBytes(b, rig.log)-logBefore)/float64(leaves), "tlog-B/leaf")
 	b.ReportMetric(float64(cbs)/n, "callback-rows/callback")

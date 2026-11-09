@@ -184,24 +184,23 @@ func (c *checkImporter) ImportFrom(path, dir string, mode types.ImportMode) (*ty
 
 // queryRefs type-checks files. It gives the position of each use of a function
 // in queryParsers. A use is a call, a method value or a method expression. A
-// field with the same name is not a function, so it does not match. Type
-// errors do not stop the scan, but an import error and a redeclared name do.
-// One name with two types in files of two GOOS is a redeclared name. The type
-// error that it causes can hide a use.
+// field with the same name is not a function, so it does not match. An import
+// error or any type error gives an error and no uses. A type error can hide a
+// use. For example, files of two GOOS can declare one name or method twice.
 func queryRefs(fset *gotoken.FileSet, imp *checkImporter, files []*ast.File) ([]gotoken.Position, error) {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	var redeclared error
+	var typeErr error
 	conf := types.Config{Importer: imp, FakeImportC: true, Error: func(err error) {
-		if redeclared == nil && strings.Contains(err.Error(), "redeclared") {
-			redeclared = err
+		if typeErr == nil {
+			typeErr = err
 		}
 	}}
 	_, _ = conf.Check("p", fset, files, info)
 	if imp.err != nil {
 		return nil, imp.err
 	}
-	if redeclared != nil {
-		return nil, redeclared
+	if typeErr != nil {
+		return nil, typeErr
 	}
 	var out []gotoken.Position
 	for id, obj := range info.Uses {
@@ -253,12 +252,13 @@ func f(r *http.Request, c conf, db store) {
 // the ParseForm, FormValue, PostFormValue, ParseMultipartForm or
 // MultipartReader method of *net/http.Request. A use is a call, a method value
 // or a method expression, under any variable or import name. The check reads
-// the files of each GOOS and GOARCH. It type-checks them together, so a name
-// with two types in files of two GOOS fails the test. See
-// TestTS32QueryScanRedeclared.
+// the files of each GOOS and GOARCH. It type-checks them together, so any type
+// error fails the test, for example a name with two types in files of two
+// GOOS. See TestTS32QueryScanTypeError. The test does not call t.Parallel: the
+// shared source importer is not safe for concurrent use.
 func TestTS32NoQueryParserCall(t *testing.T) {
-	fset := gotoken.NewFileSet()
-	imp := &checkImporter{from: importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)}
+	fset, from := scanImporter()
+	imp := &checkImporter{from: from}
 	f, err := parser.ParseFile(fset, "sample.go", querySample, 0)
 	mustOK(t, err)
 	refs, err := queryRefs(fset, imp, []*ast.File{f})
@@ -296,24 +296,47 @@ func TestTS32NoQueryParserCall(t *testing.T) {
 	}
 }
 
-// TestTS32QueryScanRedeclared gives queryRefs two files of two GOOS. They
-// declare one name with two types, and a parser call follows the name. The
-// scan must report an error. It must not drop the type error.
-func TestTS32QueryScanRedeclared(t *testing.T) {
+// scanImporter gives one file set and one source importer to the two scan
+// tests. A source import of net/http takes several seconds. The importer is
+// not safe for concurrent use, so the scan tests do not call t.Parallel.
+var scanImporter = sync.OnceValues(func() (*gotoken.FileSet, types.ImporterFrom) {
 	fset := gotoken.NewFileSet()
-	imp := &checkImporter{from: importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)}
-	var files []*ast.File
-	for _, c := range []struct{ name, src string }{
-		{"zz_c_linux.go", "package p\ntype conn int\n"},
-		{"zz_d_darwin.go", "package p\nimport \"net/http\"\ntype conn struct{ r *http.Request }\nfunc g(c conn) { c.r.ParseForm() }\n"},
+	return fset, importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)
+})
+
+// TestTS32QueryScanTypeError gives queryRefs two files of two GOOS. The files
+// have a type error, and a parser call follows the error. The scan must report
+// an error. It must not drop the type error. The first case declares one name
+// with two types. The second case declares one method twice. The test does not
+// call t.Parallel: the shared source importer is not safe for concurrent use.
+func TestTS32QueryScanTypeError(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		srcs [2]string
+	}{
+		{"two types", [2]string{
+			"package p\ntype conn int\n",
+			"package p\nimport \"net/http\"\ntype conn struct{ r *http.Request }\nfunc g(c conn) { c.r.ParseForm() }\n",
+		}},
+		{"two methods", [2]string{
+			"package p\ntype conn struct{}\nfunc (conn) req() int { return 0 }\n",
+			"package p\nimport \"net/http\"\nfunc (conn) req() *http.Request { return nil }\nfunc g(c conn) { c.req().ParseForm() }\n",
+		}},
 	} {
-		f, err := parser.ParseFile(fset, c.name, c.src, 0)
-		mustOK(t, err)
-		files = append(files, f)
-	}
-	refs, err := queryRefs(fset, imp, files)
-	if err == nil || !strings.Contains(err.Error(), "redeclared") {
-		t.Errorf("the scan gives the uses %v and the error %v, want a redeclared error", refs, err)
+		t.Run(c.name, func(t *testing.T) {
+			fset, from := scanImporter()
+			imp := &checkImporter{from: from}
+			var files []*ast.File
+			for i, name := range []string{"zz_c_linux.go", "zz_d_darwin.go"} {
+				f, err := parser.ParseFile(fset, name, c.srcs[i], 0)
+				mustOK(t, err)
+				files = append(files, f)
+			}
+			refs, err := queryRefs(fset, imp, files)
+			if err == nil {
+				t.Errorf("the scan gives the uses %v and no error, want an error", refs)
+			}
+		})
 	}
 }
 

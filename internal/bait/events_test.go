@@ -205,6 +205,7 @@ func TestTU20RequestEventAddr(t *testing.T) {
 		{"::1", "::1", false},
 		{"[fe80::1%eth0]:80", "fe80::1", false},
 		{"fe80::1%eth0", "fe80::1", false},
+		{"[::ffff:192.0.2.1]:80", "::ffff:192.0.2.1", false},
 		{"not-an-address", "", true},
 		{"example.com:80", "", true},
 	} {
