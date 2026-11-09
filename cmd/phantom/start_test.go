@@ -867,8 +867,8 @@ func TestParamsOf(t *testing.T) {
 
 // T-I-16: start opens the disk guard and gives it to the writer. The test shows
 // the second step: after the guard is closed, the writer reports failed checks.
-// A guard that does not open gives one log line with no path, and the writer runs
-// with no guard.
+// A guard that does not open gives one log line with no path. The writer then
+// runs with no guard.
 func TestTI16_StartOpensTheGuard(t *testing.T) {
 	s, _ := launch(t, testParams(t, "events.db"), guarded(realDeps))
 	if s.guard == nil {
