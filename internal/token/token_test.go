@@ -123,6 +123,12 @@ func TestTU01_Unit(t *testing.T) {
 	}
 }
 
+func TestTU01_Epoch(t *testing.T) {
+	if got := Epoch(); !got.Equal(epoch) || Unit(got) != 0 {
+		t.Errorf("Epoch = %v, unit %d", got, Unit(got))
+	}
+}
+
 func TestTU01_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name    string

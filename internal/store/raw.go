@@ -27,12 +27,17 @@ const (
 	// event_kind_ts.
 	deleteRawSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind IN ('refused', 'beacon') AND ts < ? LIMIT ?)"
 
-	// mintNextSQL finds the next set_id after a position. mintDeleteSQL deletes
-	// the rows of one set_id in a range of units, in the order of the primary
-	// key. Both use the primary key.
+	// The mint statements use the primary key. mintNextSQL finds the next
+	// set_id after a position. mintUnitSQL finds the oldest unit of a set_id
+	// in a range. mintCountSQL counts the rows of a unit, at most a bound.
+	// mintDropSQL deletes all rows of a unit. mintDeleteSQL deletes the first
+	// rows of a unit, in the order of the primary key.
 	mintNextSQL   = "SELECT set_id FROM mint WHERE set_id > ? ORDER BY set_id LIMIT 1"
+	mintUnitSQL   = "SELECT unit FROM mint WHERE set_id = ? AND unit BETWEEN ? AND ? ORDER BY unit LIMIT 1"
+	mintCountSQL  = "SELECT count(*) FROM (SELECT 1 FROM mint WHERE set_id = ? AND unit = ? LIMIT ?)"
+	mintDropSQL   = "DELETE FROM mint WHERE set_id = ? AND unit = ?"
 	mintDeleteSQL = "DELETE FROM mint WHERE (set_id, unit, first) IN " +
-		"(SELECT set_id, unit, first FROM mint WHERE set_id = ? AND unit BETWEEN ? AND ? ORDER BY unit, first LIMIT ?)"
+		"(SELECT set_id, unit, first FROM mint WHERE set_id = ? AND unit = ? ORDER BY first LIMIT ?)"
 )
 
 // newFieldClearStep returns the step that sets body_prefix, detail and record
@@ -47,7 +52,8 @@ const (
 // share is not read two times. The step writes the mark, with the cutoff, in
 // the transaction of its last chunk. A run that ends early writes no mark. The
 // next run starts at the old mark. A row that is written later with a ts
-// before the mark keeps its fields.
+// before the mark keeps its fields. A row that is written during a run, behind
+// the position of the step, also keeps its fields.
 //
 // A call returns `limit` when it changed that many rows, and the rows plus 1
 // for the mark otherwise. With days outside 1 to 30, or a zero tPriv, the step
@@ -65,9 +71,11 @@ func newFieldClearStep(tPriv time.Time, days int) retentionStep {
 		}
 		if !begun {
 			begun = true
-			if v, ok, err := metaGet(ctx, tx, rawDoneKey); err != nil {
-				return 0, err
-			} else if mark, err := strconv.ParseInt(v, 10, 64); ok && err == nil {
+			text, found, merr := metaGet(ctx, tx, rawDoneKey)
+			if merr != nil {
+				return 0, merr
+			}
+			if mark, perr := strconv.ParseInt(text, 10, 64); found && perr == nil {
 				if cutoff <= mark {
 					done = true
 					return 0, nil
@@ -82,10 +90,11 @@ func newFieldClearStep(tPriv time.Time, days int) retentionStep {
 		n, last := 0, pos
 		err = eachRow(rows, func() error {
 			var p rollupPos
-			if err := rows.Scan(&p.ts, &p.id); err != nil {
-				return err
+			if serr := rows.Scan(&p.ts, &p.id); serr != nil {
+				return serr
 			}
-			if n++; p.ts > last.ts || p.ts == last.ts && p.id > last.id {
+			n++
+			if p.ts > last.ts || p.ts == last.ts && p.id > last.id {
 				last = p
 			}
 			return nil
@@ -134,27 +143,43 @@ func mintRanges(cu uint32) [][2]int64 {
 	return [][2]int64{{lo, mask}, {0, hi}}
 }
 
+// mintNone is the mint step of a cutoff before the token epoch. It deletes no
+// row.
+func mintNone(context.Context, *sql.Tx, int) (int, error) { return 0, nil }
+
 // newMintStep returns the step that deletes the mint rows of the units before
 // the cutoff unit (SEC-39, ADR-038). The cutoff unit is the unit of tDel minus
-// `days` x 24 h. The step works for each set_id in turn. It keeps the position
-// of the set_id in memory. For each set_id it deletes the rows of the unit
-// ranges of mintRanges, oldest unit first. It uses the primary key (set_id,
-// unit, first). A cutoff on the unit, not on issued_at, deletes the rows of
-// one unit together. Thus two rows that cover one counter go together, or stay
-// together.
+// `days` x 24 h. A cutoff before the token epoch gives a step that deletes no
+// row. Units are modulo 2^20, so such a cutoff reads as a cutoff ahead.
 //
-// Known limit: a unit of one set_id can have more rows than one chunk. Its
-// rows can then go in two chunks of one run. Between the two commits, a
-// callback can find one of the two rows and link to its session. The step does
-// not prevent this.
+// The step works for each set_id in turn. It keeps the position of the set_id
+// in memory. For each set_id and each range of mintRanges, oldest unit first,
+// it finds the next unit. It counts the rows of the unit, at most one more
+// than the rows that the call can still delete. A unit that fits is deleted
+// whole, in one statement. A unit that does not fit is not deleted. The call
+// then returns `limit`. The next chunk starts the step again with a full
+// limit. A call with a full limit deletes the first rows of a unit that does
+// not fit. It uses the order of the primary key. All statements use the
+// primary key (set_id, unit, first).
 //
-// A call returns `limit` when it deleted that many rows, and their count
-// otherwise. With days outside 1 to 30, or a zero tDel, the step runs no
-// statement and returns an error.
+// The rows of one unit go in one statement. Thus two rows that cover one
+// counter go together, or stay together. The exception is a unit with more
+// rows than one chunk (1 000). Its rows go in two or more chunks. Between two
+// commits, a callback can find one of the rows. This is the known limit.
+//
+// One call can read each set_id that has no row to delete. The bound is the
+// count of set_ids, one for each bundle (event.MintRange).
+//
+// A call returns `limit` when it can have rows left, and the rows that it
+// deleted otherwise. With days outside 1 to 30, or a zero tDel, the step runs
+// no statement and returns an error.
 func newMintStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
 		return rollupRefused
+	}
+	if time.UnixMilli(cutoff).Before(token.Epoch()) {
+		return mintNone
 	}
 	ranges := mintRanges(token.Unit(time.UnixMilli(cutoff)))
 	// A text is below each blob, so it is before the first set_id.
@@ -163,21 +188,41 @@ func newMintStep(tDel time.Time, days int) retentionStep {
 		left := limit
 		for {
 			var next []byte
-			if found, err := scanOne(tx.QueryRowContext(ctx, mintNextSQL, set), &next); err != nil || !found {
+			found, err := scanOne(tx.QueryRowContext(ctx, mintNextSQL, set), &next)
+			if err != nil || !found {
 				return limit - left, err
 			}
 			for _, r := range ranges {
-				if left == 0 {
-					break
+				for {
+					var unit int64
+					found, err := scanOne(tx.QueryRowContext(ctx, mintUnitSQL, next, r[0], r[1]), &unit)
+					if err != nil || !found {
+						if err != nil {
+							return 0, err
+						}
+						break
+					}
+					var rows int
+					if err := tx.QueryRowContext(ctx, mintCountSQL, next, unit, left+1).Scan(&rows); err != nil {
+						return 0, err
+					}
+					if rows <= left {
+						if _, err := execN(ctx, tx, mintDropSQL, next, unit); err != nil {
+							return 0, err
+						}
+						if left -= rows; left == 0 {
+							return limit, nil
+						}
+						continue
+					}
+					if left < chunkRows {
+						return limit, nil
+					}
+					if _, err := execN(ctx, tx, mintDeleteSQL, next, unit, left); err != nil {
+						return 0, err
+					}
+					return limit, nil
 				}
-				n, err := execN(ctx, tx, mintDeleteSQL, next, r[0], r[1], left)
-				if err != nil {
-					return 0, err
-				}
-				left -= n
-			}
-			if left == 0 {
-				return limit, nil // this set_id can have rows left
 			}
 			set = next
 		}

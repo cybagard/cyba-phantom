@@ -135,7 +135,7 @@ func TestTU11FieldClearCutoffNotAfterTheMarkChangesNothing(t *testing.T) {
 // a run reads only the rows of its window.
 func TestTU11FieldClearUsesEventTSWithBothBounds(t *testing.T) {
 	plan := strings.Join(queryPlan(t, migrated(t), clearRawSQL, 1, 2, 1, 0, 1000), "\n")
-	if !strings.Contains(plan, "event_ts (ts>? AND ts<?)") || strings.Contains(plan, "SCAN event") {
+	if !strings.Contains(plan, "event_ts (ts>? AND ts<?)") || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "TEMP B-TREE") {
 		t.Fatalf("plan:\n%s", plan)
 	}
 }
@@ -329,7 +329,8 @@ func TestTS34MintStatementsUsePrimaryKey(t *testing.T) {
 	for _, c := range []struct {
 		q    string
 		args []any
-	}{{mintNextSQL, []any{""}}, {mintDeleteSQL, []any{[]byte{1}, 0, 5, 1000}}} {
+	}{{mintNextSQL, []any{""}}, {mintUnitSQL, []any{[]byte{1}, 0, 5}}, {mintCountSQL, []any{[]byte{1}, 5, 1000}},
+		{mintDropSQL, []any{[]byte{1}, 5}}, {mintDeleteSQL, []any{[]byte{1}, 5, 1000}}} {
 		if plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n"); !strings.Contains(plan, "PRIMARY KEY") || strings.Contains(plan, "SCAN mint") {
 			t.Errorf("plan of %q:\n%s", c.q, plan)
 		}
@@ -351,6 +352,10 @@ func TestTU11RunStepsRunsTheRawSteps(t *testing.T) {
 	}
 	addMintRow(t, r.db, 1, oldUnit, 1, 0)
 	addMintRow(t, r.db, 1, youngUnit, 2, 0)
+	// The trigger notes each row that an UPDATE changes. The delete runs before
+	// the clear, so the clear never writes the two old rows.
+	mustExec(t, r.db, "CREATE TABLE touched (id INTEGER)")
+	mustExec(t, r.db, "CREATE TRIGGER note AFTER UPDATE ON event BEGIN INSERT INTO touched VALUES (old.id); END")
 	r.launchCancelable(context.Background())
 	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
 	defer cancel()
@@ -363,5 +368,117 @@ func TestTU11RunStepsRunsTheRawSteps(t *testing.T) {
 	}
 	if got, want := mintLeft(t, r.db), fmt.Sprintf("01/%d/2", youngUnit); got != want {
 		t.Fatalf("mint rows left %q, want %q", got, want)
+	}
+	if n := count(t, r.db, "SELECT count(*) FROM touched"); n != 2 {
+		t.Fatalf("the clear wrote %d rows, want the 2 young rows", n)
+	}
+}
+
+// addMintRows inserts n rows of the unit with first = 0 to n-1.
+func addMintRows(t *testing.T, db *sql.DB, set byte, unit int64, n int) {
+	t.Helper()
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < ?)
+		INSERT INTO mint SELECT ?, ?, i, 1, 's', 0 FROM c`, n-1, []byte{set}, unit)
+}
+
+// mintStepAfter returns the mint step with a cutoff unit after all test units.
+func mintStepAfter() retentionStep {
+	return newMintStep(unitTime(100).Add(30*24*time.Hour), 30)
+}
+
+// T-S-34: a unit that does not fit in the rest of a chunk is not split. Unit 5
+// has 999 rows and unit 6 has 2 rows that cover one counter. The first call
+// deletes unit 5, and it keeps both rows of unit 6. The next call deletes both.
+func TestTS34MintUnitIsNotSplitByAChunk(t *testing.T) {
+	db := migrated(t)
+	addMintRows(t, db, 1, 5, 999)
+	addMintRow(t, db, 1, 6, 500, 0)
+	addMintRow(t, db, 1, 6, 505, 0)
+	step := mintStepAfter()
+	if n := callWithin(t, db, step, 1000); n != 1000 || mintLeft(t, db) != "01/6/500 01/6/505" {
+		t.Fatalf("first call returned %d, %d rows left", n, count(t, db, "SELECT count(*) FROM mint"))
+	}
+	if n := callWithin(t, db, step, 1000); n != 2 || mintLeft(t, db) != "" {
+		t.Fatalf("second call returned %d, rows left %q", n, mintLeft(t, db))
+	}
+}
+
+// T-S-34: with a limit below a full chunk, a unit that does not fit stays. The
+// call deletes no row and returns its limit.
+func TestTS34MintUnitThatDoesNotFitStaysInASmallChunk(t *testing.T) {
+	db := migrated(t)
+	addMintRows(t, db, 1, 5, 999)
+	if n := callWithin(t, db, mintStepAfter(), 998); n != 998 || count(t, db, "SELECT count(*) FROM mint") != 999 {
+		t.Fatalf("returned %d, %d rows left; want 998 and 999", n, count(t, db, "SELECT count(*) FROM mint"))
+	}
+}
+
+// T-S-34: a unit with more rows than one chunk is the only unit that splits. A
+// full chunk deletes 1 000 rows in the order of the primary key, then 1 row.
+func TestTS34MintUnitOfMoreThanAChunkSplits(t *testing.T) {
+	db := migrated(t)
+	addMintRows(t, db, 1, 5, 1001)
+	step := mintStepAfter()
+	if n := callWithin(t, db, step, 1000); n != 1000 || count(t, db, "SELECT count(*) FROM mint") != 1 ||
+		mintLeft(t, db) != "01/5/1000" {
+		t.Fatalf("first call returned %d, %d rows left", n, count(t, db, "SELECT count(*) FROM mint"))
+	}
+	if n := callWithin(t, db, step, 1000); n != 1 || mintLeft(t, db) != "" {
+		t.Fatalf("second call returned %d, rows left %q", n, mintLeft(t, db))
+	}
+}
+
+// T-S-34: the oldest unit goes first. With a limit of 1, unit 5 goes and unit 6
+// stays.
+func TestTS34MintOldestUnitGoesFirst(t *testing.T) {
+	db := migrated(t)
+	addMintRow(t, db, 1, 6, 6, 0)
+	addMintRow(t, db, 1, 5, 5, 0)
+	if n := callWithin(t, db, mintStepAfter(), 1); n != 1 || mintLeft(t, db) != "01/6/6" {
+		t.Fatalf("returned %d, rows left %q", n, mintLeft(t, db))
+	}
+}
+
+// T-S-34: a cutoff before the token epoch deletes nothing. The unit is modulo
+// 2^20, so such a cutoff reads as a cutoff ahead. With the real time, the old
+// row goes and the young rows stay.
+func TestTS34MintCutoffBeforeTheEpochDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		tDel time.Time
+		left int
+	}{
+		{"2015", time.Date(2015, 2, 10, 0, 0, 0, 0, time.UTC), 3},
+		{"1970", time.Unix(0, 0), 3},
+		{"now", now, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			for i, age := range []time.Duration{24 * time.Hour, 2 * time.Hour, 31 * 24 * time.Hour} {
+				addMintRow(t, db, 1, int64(token.Unit(now.Add(-age))), int64(i), 0)
+			}
+			callWithin(t, db, newMintStep(c.tDel, 30), chunkRows)
+			if n := count(t, db, "SELECT count(*) FROM mint"); n != c.left {
+				t.Fatalf("%d rows left, want %d", n, c.left)
+			}
+		})
+	}
+}
+
+// T-U-11: ids that are not in ts order. Each row has a higher id and a lower
+// ts than the row before. The first call clears the 1 000 rows with the lowest
+// ts. The second call clears the rest.
+func TestTU11FieldClearTakesRowsInTSOrder(t *testing.T) {
+	db := migrated(t)
+	addFull(t, db, "request", 1500, 2000, -1)
+	step := newFieldClearStep(rollTDel, 30)
+	if n := callWithin(t, db, step, 1000); n != 1000 ||
+		count(t, db, "SELECT count(*) FROM event WHERE "+rawCleared+" AND ts <= 1500") != 1000 ||
+		count(t, db, "SELECT count(*) FROM event WHERE "+rawCleared) != 1000 {
+		t.Fatalf("first call returned %d, %d rows cleared", n, count(t, db, "SELECT count(*) FROM event WHERE "+rawCleared))
+	}
+	if n := callWithin(t, db, step, 1000); n != 501 || count(t, db, "SELECT count(*) FROM event WHERE "+rawFull) != 0 {
+		t.Fatalf("second call returned %d, %d rows keep a value", n, count(t, db, "SELECT count(*) FROM event WHERE "+rawFull))
 	}
 }
