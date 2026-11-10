@@ -285,7 +285,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	case <-closed:
 	case <-timer.C:
 		// The close goes on in its goroutine. The exit cuts it (ADR-041).
-		fmt.Fprintln(stderr, "phantom: close did not end in 1.5s")
+		fmt.Fprintf(stderr, "phantom: close did not end in %v\n", closeTime)
 		return 1
 	}
 	if failed.Load() {

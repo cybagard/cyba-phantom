@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
-	"github.com/cybagard/cyba-phantom/internal/listener"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
@@ -20,33 +20,40 @@ import (
 
 const closeLine = "phantom: close did not end in 1.5s\n"
 
-// boundTime is the close bound of ADR-041. The tests do not use closeTime, so
-// a change of that constant fails them.
+// boundTime is the close bound of ADR-041. The tests keep their own value.
+// TestTU18_CloseTimeIsBound checks that closeTime is equal to it.
 const boundTime = 1500 * time.Millisecond
 
 // closeMargin is the scheduling margin that a test allows on top of boundTime.
-const closeMargin = time.Second
+const closeMargin = 100 * time.Millisecond
 
 // closeRun is a serve call with a seam in startDeps for its close.
 type closeRun struct {
-	r      *running
-	p      startParams
-	atWait chan time.Time // the time of the first close step
-	before chan string    // the stderr at the first close step
+	r *running
+	p startParams
+
+	mu           sync.Mutex
+	lastServed   time.Time // the time of the last serve call to return
+	stderrServed string    // the stderr when that serve call returned
 }
 
 // launchClose runs serve with the real parts, except that the checkpointer
 // runs the function run. run gets the context and the checkpointer.
-// The first close step is the stopACME call. So the test sees where it begins.
+// The served seam runs when a serve call returns, before serve waits for
+// both calls. The test uses the time of the last call as the start of the
+// close wait.
 func launchClose(t *testing.T, run func(context.Context, *tlog.Checkpointer, *event.Queue)) *closeRun {
 	t.Helper()
-	oldStop := stopACME
-	t.Cleanup(func() { stopACME = oldStop })
-	c := &closeRun{atWait: make(chan time.Time, 1), before: make(chan string, 1)}
-	stopACME = func(a *listener.ACME) {
-		c.before <- c.r.err.String()
-		c.atWait <- time.Now()
-		oldStop(a)
+	oldServed := served
+	t.Cleanup(func() { served = oldServed })
+	c := &closeRun{}
+	served = func() {
+		now := time.Now()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if now.After(c.lastServed) {
+			c.lastServed, c.stderrServed = now, c.r.err.String()
+		}
 	}
 	https, plain, caAddr := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), caAddr)
@@ -65,25 +72,62 @@ func launchClose(t *testing.T, run func(context.Context, *tlog.Checkpointer, *ev
 	return c
 }
 
+// storeStopName is the name of the function that the blocked close goroutine
+// runs. It comes from the method, so a rename of the method breaks the build.
+var storeStopName = runtime.FuncForPC(reflect.ValueOf((*storePart).Stop).Pointer()).Name()
+
+// closeInStop tells if a goroutine is in storePart.Stop. It reads the stack
+// dump of all goroutines, and doubles the buffer until the dump fits.
+func closeInStop() bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Contains(string(buf[:n]), storeStopName)
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
 // waitCloseEnd waits until no goroutine is in storePart.Stop. A close that was
 // blocked has then ended, and no file of the state directory is open.
 func waitCloseEnd(t *testing.T) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
 	for end := time.Now().Add(netWait); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		if !strings.Contains(string(buf[:runtime.Stack(buf, true)]), "(*storePart).Stop") {
+		if !closeInStop() {
 			return
 		}
 	}
 	t.Error("the close goroutine did not end after the release")
 }
 
+// waitServeEnd waits until serve returns. It fails the test after the time
+// that the stop and the close bound allow, plus closeMargin.
+func (c *closeRun) waitServeEnd(t *testing.T) {
+	t.Helper()
+	limit := shutdownTime + boundTime + closeMargin
+	select {
+	case <-c.r.done:
+	case <-time.After(limit):
+		t.Fatalf("serve did not return in %v after the stop", limit)
+	}
+}
+
+// TestTU18_CloseTimeIsBound checks that closeTime is equal to the bound of the
+// tests. A change of the constant fails this test.
+func TestTU18_CloseTimeIsBound(t *testing.T) {
+	if closeTime != boundTime {
+		t.Errorf("closeTime is %v, want %v", closeTime, boundTime)
+	}
+}
+
 // TestTU18_CloseBound blocks the checkpointer, so the store close does not end
 // at the cancel. Serve must return after boundTime, with exit 1 and one fixed
-// line. The wait is measured from the first close step, which is the end of the
-// serve calls. The upper limit is boundTime plus closeMargin. The test does not
-// use a longer timeout to pass. At the end, the test releases the checkpointer
-// and waits for the close goroutine, so no file stays open.
+// line. The wait runs from the return of the last serve call, which is before
+// the timer of serve starts. The upper limit is boundTime plus closeMargin.
+// The test does not use a longer timeout to pass. Before the end, the test
+// checks that the close goroutine is still in storePart.Stop. Then it releases
+// the checkpointer and waits for that goroutine, so no file stays open.
 func TestTU18_CloseBound(t *testing.T) {
 	release, entered := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -93,35 +137,35 @@ func TestTU18_CloseBound(t *testing.T) {
 		<-ctx.Done()
 		<-release
 	})
-	t.Cleanup(func() { free(); waitCloseEnd(t) })
+	t.Cleanup(func() {
+		if !closeInStop() {
+			t.Errorf("no goroutine is in %s before the release", storeStopName)
+		}
+		free()
+		waitCloseEnd(t)
+	})
 	select {
 	case <-entered:
 	case <-time.After(netWait):
 		t.Fatal("the checkpointer did not start")
 	}
 	c.r.cancel()
-	select {
-	case <-c.r.done:
-	case <-time.After(shutdownTime + boundTime + closeMargin):
-		t.Fatalf("serve did not return in %v after the stop", shutdownTime+boundTime+closeMargin)
-	}
+	c.waitServeEnd(t)
 	end := time.Now()
-	var begin time.Time
-	var before string
-	select {
-	case begin = <-c.atWait:
-		before = <-c.before
-	default:
+	c.mu.Lock()
+	begin, stderrBefore := c.lastServed, c.stderrServed
+	c.mu.Unlock()
+	if begin.IsZero() {
 		t.Fatal("serve did not reach the close")
 	}
 	if d := end.Sub(begin); d < boundTime || d > boundTime+closeMargin {
-		t.Errorf("serve returned %v after the close began, want from %v to %v", d, boundTime, boundTime+closeMargin)
+		t.Errorf("serve returned %v after the last serve call, want from %v to %v", d, boundTime, boundTime+closeMargin)
 	}
 	if c.r.code != 1 {
 		t.Errorf("exit %d, want 1", c.r.code)
 	}
-	if got := strings.TrimPrefix(c.r.err.String(), before); got != closeLine {
-		t.Errorf("stderr after the close began %q, want %q", got, closeLine)
+	if got := strings.TrimPrefix(c.r.err.String(), stderrBefore); got != closeLine {
+		t.Errorf("stderr after the serve calls %q, want %q", got, closeLine)
 	}
 }
 
@@ -133,11 +177,7 @@ func TestTU18_CloseWithinBound(t *testing.T) {
 		time.Sleep(boundTime / 3)
 	})
 	c.r.cancel()
-	select {
-	case <-c.r.done:
-	case <-time.After(shutdownTime + boundTime + closeMargin):
-		t.Fatal("serve did not return after the stop")
-	}
+	c.waitServeEnd(t)
 	if c.r.code != 0 {
 		t.Errorf("exit %d, want 0; stderr %q", c.r.code, c.r.err.String())
 	}
@@ -147,8 +187,9 @@ func TestTU18_CloseWithinBound(t *testing.T) {
 }
 
 // TestTU18_StopWritesCounts adds drop counts to the overflow counter at the
-// cancel of the checkpointer, inside the store close. A normal stop gives exit
-// 0, and the writer writes the ip_counter row of those counts.
+// cancel of the checkpointer, inside the store close. The test checks the
+// outcome only: a normal stop gives exit 0, and the database has the
+// ip_counter row with those drops.
 func TestTU18_StopWritesCounts(t *testing.T) {
 	const drops = 3
 	c := launchClose(t, func(ctx context.Context, cp *tlog.Checkpointer, q *event.Queue) {
@@ -158,11 +199,7 @@ func TestTU18_StopWritesCounts(t *testing.T) {
 		}
 	})
 	c.r.cancel()
-	select {
-	case <-c.r.done:
-	case <-time.After(shutdownTime + boundTime + closeMargin):
-		t.Fatal("serve did not return after the stop")
-	}
+	c.waitServeEnd(t)
 	if c.r.code != 0 {
 		t.Fatalf("exit %d, want 0; stderr %q", c.r.code, c.r.err.String())
 	}
