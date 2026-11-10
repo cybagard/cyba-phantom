@@ -198,6 +198,14 @@ func unitOf(t time.Time) uint64 {
 	return uint64(u) & unitMask
 }
 
+// Unit gives the time unit of t (ADR-036 decision 2). It is the unit that Mint
+// writes into a token and that the store keeps in a mint row. It is below 2^20.
+func Unit(t time.Time) uint32 { return uint32(unitOf(t)) }
+
+// Epoch is the start of unit 0 (ADR-036 decision 2). A time shortly before it
+// has a unit near the top of the range.
+func Epoch() time.Time { return time.Unix(epochUnix, 0).UTC() }
+
 // pack writes the plaintext block to b. The fields must be in range.
 func pack(b []byte, index, unit, counter uint64) {
 	hi := index<<indexShift | unit<<unitShift | counter>>counterLowBits

@@ -117,6 +117,15 @@ func TestTU01_Unit(t *testing.T) {
 		if got := unitOf(tc.at); got != tc.want || got > unitMask {
 			t.Errorf("%s: unit = %d, want %d", tc.name, got, tc.want)
 		}
+		if got := Unit(tc.at); uint64(got) != tc.want {
+			t.Errorf("%s: Unit = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTU01_Epoch(t *testing.T) {
+	if got := Epoch(); !got.Equal(epoch) || Unit(got) != 0 {
+		t.Errorf("Epoch = %v, unit %d", got, Unit(got))
 	}
 }
 
