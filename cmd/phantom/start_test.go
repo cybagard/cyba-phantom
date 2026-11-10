@@ -953,3 +953,96 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 	}
 	until(t, "healthy again", s.Healthy)
 }
+
+// T-I-16 through a started sensor, with a real decoy request. The state
+// directory is on a small tmpfs and the writer has the real disk guard. At 92 %
+// use the writer pauses. A request for /page still gets status 200 and the
+// page of the bait handler. Its event is dropped and counted, the event table
+// gets no row for it, and there is no stop marker. After the fill file is gone,
+// the writer resumes and the next request has a row. Set PHANTOM_DISKFULL to
+// run it. The state directory is on /dev/shm, and the test skips when that file
+// system is larger than 256 MiB.
+func TestTI16_DecoyServesWhilePaused(t *testing.T) {
+	if os.Getenv("PHANTOM_DISKFULL") == "" {
+		t.Skip("PHANTOM_DISKFULL is not set: the test fills a small tmpfs")
+	}
+	old := realDeps
+	t.Cleanup(func() { realDeps = old })
+	var kept atomic.Pointer[store.Writer]
+	realDeps.openGuard = realOpenGuard
+	realDeps.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
+		w := old.newWriter(db, q, bp, lg, r, dk)
+		kept.Store(w)
+		return w
+	}
+	s := startBait(t, baitOpt{bundle: true, memory: true})
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(s.p.Root, &st); err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
+		t.Skipf("the state directory is on a file system of %d MiB: the limit is 256 MiB", size>>20)
+	}
+	w := kept.Load()
+	if w == nil {
+		t.Fatal("start made no writer")
+	}
+	rows := func() int {
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(s.p.Root, s.p.StorePath)+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM event WHERE kind = 'request' AND vhost = ? AND path = '/page'", decoyName).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	fill := filepath.Join(s.p.Root, "fill")
+	f, err := os.Create(fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	chunk := make([]byte, 256<<10)
+	var use float64
+	for i := 0; i < 1100 && use < 0.92; i++ {
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Statfs(s.p.Root, &st); err != nil {
+			t.Fatal(err)
+		}
+		use = 1 - float64(st.Bavail)/float64(st.Blocks)
+	}
+	if use < 0.92 {
+		t.Fatalf("the fill reached a use of %v, not 0.92", use)
+	}
+	until(t, "paused writer", w.Paused)
+	dropped, before := w.Stats().Dropped.Bulk, rows()
+	page := fetch(t, s.https, decoyName, "/page", "")
+	if page.status != 200 || !strings.Contains(page.body, "<h1>page</h1>") || !strings.Contains(page.body, "bait note") {
+		t.Errorf("/page while paused: status %d, body %q; want 200 and the bait page", page.status, page.body)
+	}
+	until(t, "the drop of the request", func() bool { return w.Stats().Dropped.Bulk == dropped+1 })
+	if got := rows(); got != before {
+		t.Errorf("/page rows while paused: %d, want %d", got, before)
+	}
+	if _, err := os.Lstat(filepath.Join(s.p.Root, "writer.stop")); !errors.Is(err, fs.ErrNotExist) || !w.Healthy() {
+		t.Errorf("stop marker: %v, healthy %v; want none and true", err, w.Healthy())
+	}
+	// An open file keeps its blocks, so close it before the remove.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fill); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "resumed writer", func() bool { return !w.Paused() })
+	if r := fetch(t, s.https, decoyName, "/page", ""); r.status != 200 {
+		t.Errorf("/page after the resume: status %d, want 200", r.status)
+	}
+	until(t, "the row of the request", func() bool { return rows() == before+1 })
+	s.stop(t)
+}
