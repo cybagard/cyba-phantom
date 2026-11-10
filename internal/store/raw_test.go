@@ -190,6 +190,35 @@ func TestTU11RawStepsRefuseBadParameters(t *testing.T) {
 	}
 }
 
+// callWithin is call with a bound of 5 s. A step that loops for ever fails the
+// test, as its statements return the error of the ended context.
+func callWithin(t *testing.T, db *sql.DB, step retentionStep, limit int) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := db.Begin()
+	check(t, err)
+	n, err := step(ctx, tx, limit)
+	check(t, err)
+	check(t, tx.Commit())
+	return n
+}
+
+// T-U-11: a mark that does not parse counts as no mark. The window starts at
+// the oldest row, and the step writes the cutoff as the mark.
+func TestTU11FieldClearUnparsableMarkTakesAllRows(t *testing.T) {
+	r, _ := rollRig(t, newFieldClearStep(rollTDel, 30))
+	mustExec(t, r.db, metaSetSQL, rawDoneKey, "x")
+	addFull(t, r.db, "callback", 1, -5, 0) // before a mark that parses as 0
+	runOK(t, r)
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+		t.Fatalf("%d rows keep a value", n)
+	}
+	if got, want := metaValue(t, r.db, rawDoneKey), strconv.FormatInt(rollCutoff(30), 10); got != want {
+		t.Fatalf("mark %s, want %s", got, want)
+	}
+}
+
 // unitTime returns a time in the middle of the time unit u.
 func unitTime(u int) time.Time {
 	return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(u)*10*time.Minute + 5*time.Minute)
@@ -233,7 +262,7 @@ func TestTS34MintSplitUnitGoesTogether(t *testing.T) {
 			}
 			addMintRow(t, db, 1, u, 500, a.UnixMilli())
 			addMintRow(t, db, 1, u, 505, b.UnixMilli())
-			call(t, db, newMintStep(cutTime.Add(30*24*time.Hour), 30), chunkRows)
+			callWithin(t, db, newMintStep(cutTime.Add(30*24*time.Hour), 30), chunkRows)
 			if got := mintLeft(t, db); got != c.want {
 				t.Fatalf("rows left %q, want %q", got, c.want)
 			}
@@ -260,7 +289,7 @@ func TestTS34MintUnitsAtTheWrap(t *testing.T) {
 		for _, u := range c.units {
 			addMintRow(t, db, 1, u, u, 0)
 		}
-		call(t, db, newMintStep(unitTime(c.cut).Add(30*24*time.Hour), 30), chunkRows)
+		callWithin(t, db, newMintStep(unitTime(c.cut).Add(30*24*time.Hour), 30), chunkRows)
 		got := rawText(t, db, "SELECT coalesce(group_concat(unit, ' '), '') FROM (SELECT unit FROM mint ORDER BY unit)")
 		if got != c.want {
 			t.Errorf("cutoff unit %d: units left %q, want %q", c.cut, got, c.want)
@@ -286,7 +315,7 @@ func TestTS34MintPositionCrossesSetsAndChunks(t *testing.T) {
 	}
 	step, total := newMintStep(unitTime(3).Add(30*24*time.Hour), 30), 0
 	for n := 4; n == 4; {
-		n = call(t, db, step, 4)
+		n = callWithin(t, db, step, 4)
 		total += n
 	}
 	if want := "01/3/3 01/4/4 02/3/3 02/4/4 03/3/3 03/4/4 04/3/3 04/4/4"; mintLeft(t, db) != want || total != 15 {
