@@ -188,8 +188,8 @@ func TestTU18_CloseWithinBound(t *testing.T) {
 
 // TestTU18_StopWritesCounts adds drop counts to the overflow counter at the
 // cancel of the checkpointer, inside the store close. The test checks the
-// outcome only: a normal stop gives exit 0, and the database has the
-// ip_counter row with those drops.
+// outcome only. A normal stop gives exit 0. The database has the ip_counter
+// row with those drops.
 func TestTU18_StopWritesCounts(t *testing.T) {
 	const drops = 3
 	c := launchClose(t, func(ctx context.Context, cp *tlog.Checkpointer, q *event.Queue) {
