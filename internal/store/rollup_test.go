@@ -337,35 +337,137 @@ func TestTU11RollupDayStepWaitsForTheRollup(t *testing.T) {
 	}
 }
 
-// T-U-11: each step uses the limit that the runner gives it. In one
-// transaction, a limit of 7 over 20 old rows changes 7 rows. A limit of 5 over
-// 12 callbacks of a done day gives 5, 5 and 3 rows. The third call counts 2
-// callbacks and deletes 1 seen row. Then it sets the mark.
-func TestTU11RollupStepsUseTheLimitOfTheRunner(t *testing.T) {
-	r := newRig(t, 100)
-	ctx := context.Background()
-	addEvents(t, r.db, "request", 20, utc("2027-01-09T01:00:00Z"), 1, "s1", "a")
-	addEvents(t, r.db, "callback", 12, utc("2027-01-09T02:00:00Z"), 1, "s1", "a")
-	tx, err := r.db.Begin()
-	if err != nil {
-		t.Fatal(err)
+// call runs a step once in its own transaction with the limit. It commits.
+func call(t *testing.T, db *sql.DB, step retentionStep, limit int) int {
+	t.Helper()
+	tx, err := db.Begin()
+	check(t, err)
+	n, err := step(context.Background(), tx, limit)
+	check(t, err)
+	check(t, tx.Commit())
+	return n
+}
+
+// rollDay is the day step of the tests with the time rollTDel and 30 days.
+var rollDay = newRollupDayStep(rollTDel, 30)
+
+// T-U-11: the roll-up step uses the limit that the runner gives it. A limit of
+// 7 over 20 old rows changes 7 rows. A limit of 30 changes the other 13.
+func TestTU11RollupStepUsesTheLimitOfTheRunner(t *testing.T) {
+	db := migrated(t)
+	addEvents(t, db, "request", 20, utc("2027-01-09T01:00:00Z"), 1, "s1", "a")
+	step := newRollupStep(rollTDel, 30)
+	if a, b := call(t, db, step, 7), call(t, db, step, 30); a != 7 || b != 13 {
+		t.Fatalf("rows by call %d and %d; want 7 and 13", a, b)
 	}
-	defer tx.Rollback()
-	var got []int
-	for _, c := range []struct {
-		step  retentionStep
-		limit int
-	}{{newRollupStep(rollTDel, 30), 7}, {newRollupStep(rollTDel, 30), 30}, {newRollupDayStep(rollTDel, 30), 5},
-		{newRollupDayStep(rollTDel, 30), 5}, {newRollupDayStep(rollTDel, 30), 5}} {
-		n, err := c.step(ctx, tx, c.limit)
-		if err != nil {
-			t.Fatal(err)
+}
+
+// addSeen adds n seen rows of a day. dayState returns the meta rows of the day
+// step, the seen rows left and the callbacks counted.
+func addSeen(t *testing.T, db *sql.DB, day string, n int) {
+	t.Helper()
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < ?)
+		INSERT INTO rollup_seen SELECT ?, 'a', 'human', '', 's' || i FROM c`, n, day)
+}
+
+func dayState(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var out string
+	check(t, db.QueryRow(`SELECT coalesce((SELECT group_concat(key || '=' || value) FROM
+		(SELECT * FROM meta WHERE key LIKE 'retention_rollup%' ORDER BY key)), '') ||
+		' seen=' || (SELECT count(*) FROM rollup_seen) || ' cb=' || (SELECT coalesce(sum(callbacks), 0) FROM aggregate_day)`).Scan(&out))
+	return out
+}
+
+// T-U-11: the seen-row delete shares the budget of a call. A done day with 5
+// seen rows and no callback takes 3 calls of 2. A call that counts no
+// callback saves no position. A call that uses its whole budget sets no mark.
+// Then a day has 3 callbacks and 4 seen rows. A call of 5 counts the 3 and
+// deletes 2, no more. The next call deletes the rest and sets the mark.
+func TestTU11RollupDayStepSeenRowsUseTheBudget(t *testing.T) {
+	db := migrated(t)
+	addSeen(t, db, "2027-01-08", 5)
+	for _, want := range []string{" seen=3 cb=0", " seen=1 cb=0", "retention_rollup_done=2027-01-08 seen=0 cb=0"} {
+		call(t, db, rollDay, 2)
+		if got := dayState(t, db); got != want {
+			t.Fatalf("state %q; want %q", got, want)
 		}
-		got = append(got, n)
 	}
-	var mark string
-	if err := tx.QueryRow("SELECT value FROM meta WHERE key = ?", rollupDoneKey).Scan(&mark); err != nil || fmt.Sprint(got) != "[7 13 5 5 3]" || mark != "2027-01-09" {
-		t.Fatalf("rows by call %v, mark %q (%v); want [7 13 5 5 3] and 2027-01-09", got, mark, err)
+	addSeen(t, db, "2027-01-09", 4)
+	ts := utc("2027-01-09T01:00:00Z")
+	addEvents(t, db, "callback", 3, ts, 1000, nil, nil)
+	for _, c := range []struct {
+		n     int
+		state string
+	}{{5, "retention_rollup_done=2027-01-08,retention_rollup_pos=" + fmt.Sprint(ts+2000) + ":3 seen=2 cb=3"},
+		{2, "retention_rollup_done=2027-01-09 seen=0 cb=3"}} {
+		if n, got := call(t, db, rollDay, 5), dayState(t, db); n != c.n || got != c.state {
+			t.Fatalf("call gave %d, state %q; want %d, %q", n, got, c.n, c.state)
+		}
+	}
+}
+
+// T-U-11: a callback at the first or the last ms of a UTC day counts one time,
+// under its own day. Calls of 2 callbacks cross the midnights and a saved
+// position.
+func TestTU11RollupDayStepCountsDayEdges(t *testing.T) {
+	db := migrated(t)
+	addEvents(t, db, "callback", 2, utc("2027-01-09T00:00:00Z")-1, 1, nil, nil)
+	addEvents(t, db, "callback", 2, utc("2027-01-10T00:00:00Z")-1, 1, nil, nil)
+	for i := 0; i < 9 && call(t, db, rollDay, 2) > 0; i++ {
+	}
+	want := "2027-01-08||human||0|0|1 ; 2027-01-09||human||0|0|2 ; 2027-01-10||human||0|0|1"
+	if got := aggregates(t, db); got != want {
+		t.Fatalf("aggregates %q; want %q", got, want)
+	}
+}
+
+// T-U-11: a day is done when its end is the cutoff. One ms later it is not.
+func TestTU11RollupDayStepDoneAtTheCutoff(t *testing.T) {
+	for _, c := range []struct {
+		shift time.Duration
+		want  int
+	}{{0, 1}, {-time.Millisecond, 0}} {
+		db := migrated(t)
+		addEvents(t, db, "callback", 1, utc("2027-01-09T12:00:00Z"), 0, nil, nil)
+		call(t, db, newRollupDayStep(time.Date(2027, 1, 11, 0, 0, 0, 0, time.UTC).Add(c.shift), 1), 10)
+		if got := count(t, db, "SELECT coalesce(sum(callbacks), 0) FROM aggregate_day"); got != c.want {
+			t.Fatalf("shift %v: %d callbacks counted; want %d", c.shift, got, c.want)
+		}
+	}
+}
+
+// T-U-11: a seen day older than the first callback day after the mark is done
+// first. A call of 2 deletes its 2 seen rows and counts no callback. A call with
+// limit 0 reads nothing, also with a bad mark.
+func TestTU11RollupDayStepTakesTheOlderDayFirst(t *testing.T) {
+	db := migrated(t)
+	addSeen(t, db, "2027-01-05", 2)
+	addEvents(t, db, "callback", 1, utc("2027-01-07T12:00:00Z"), 0, nil, nil)
+	call(t, db, rollDay, 2)
+	if got := dayState(t, db); got != " seen=0 cb=0" {
+		t.Fatalf("after the first call: %q", got)
+	}
+	call(t, db, rollDay, 9)
+	if got := dayState(t, db); got != "retention_rollup_done=2027-01-07 seen=0 cb=1" {
+		t.Fatalf("after the second call: %q", got)
+	}
+	mustExec(t, db, metaSetSQL, rollupDoneKey, "bad")
+	if n := call(t, db, rollDay, 0); n != 0 {
+		t.Fatalf("a call with limit 0 gave %d", n)
+	}
+}
+
+// T-U-11: a row that cannot be read stops the roll-up step with an error. Here
+// the ts is a real number, so the scan fails. The rows are closed.
+func TestTU11RollupStepReportsAScanError(t *testing.T) {
+	db := migrated(t)
+	mustExec(t, db, "INSERT INTO event (ts, kind) VALUES (1.5, 'request')")
+	tx, err := db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	if _, err := newRollupStep(rollTDel, 30)(context.Background(), tx, 10); err == nil {
+		t.Fatal("no error for a row that cannot be read")
 	}
 }
 

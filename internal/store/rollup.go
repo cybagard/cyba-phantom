@@ -39,7 +39,7 @@ const (
 	// first day with data.
 	rollupLeftSQL     = "SELECT 1 FROM event WHERE kind = 'request' AND ts < ? LIMIT 1"
 	rollupCallbackSQL = "WITH pick AS (SELECT id, ts, vhost, session_id FROM event WHERE kind = 'callback' AND ts >= ? AND ts < ? " +
-		"AND (ts > ? OR id > ?) ORDER BY ts, id LIMIT ?) " +
+		"AND (ts, id) > (?, ?) ORDER BY ts, id LIMIT ?) " +
 		"SELECT p.id, p.ts, coalesce(p.vhost, ''), coalesce(s.band, 'human'), coalesce(s.family, '') FROM pick p LEFT JOIN session s ON s.id = p.session_id"
 	rollupFirstCallbackSQL = "SELECT ts FROM event WHERE kind = 'callback' AND ts >= ? ORDER BY ts LIMIT 1"
 	rollupFirstSeenSQL     = "SELECT day FROM rollup_seen WHERE day > ? ORDER BY day LIMIT 1"
@@ -341,9 +341,7 @@ func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, budget int) (us
 		k := rollupKey{day: day}
 		err := rows.Scan(&id, &ts, &k.vhost, &k.band, &k.family)
 		counts.of(k).callbacks++
-		if ts > lastTS || ts == lastTS && id > lastID {
-			lastTS, lastID = ts, id
-		}
+		lastTS, lastID = ts, id
 		used++
 		return err
 	})
