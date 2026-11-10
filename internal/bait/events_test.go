@@ -2,6 +2,7 @@ package bait
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,8 +125,13 @@ func TestTU20RequestEvents(t *testing.T) {
 		r.Method = c.method
 		w := serve(t, h, r)
 		rec, ip := oneEvent(t, c.name, q)
+		// The event holds the matched vhost name, not the Host (SEC-41).
+		wantVhost := strings.ToLower(strings.TrimSuffix(c.host, ":443"))
+		if c.host == "other.example" {
+			wantVhost = ""
+		}
 		if w.Code != c.status || rec.Status == nil || *rec.Status != int64(c.status) ||
-			*rec.Vhost != c.host || *rec.Method != c.method || *rec.Path != c.path || ip != "192.0.2.1" ||
+			(wantVhost == "") != (rec.Vhost == nil) || rec.Vhost != nil && *rec.Vhost != wantVhost || *rec.Method != c.method || *rec.Path != c.path || ip != "192.0.2.1" ||
 			len(rec.Detail) != 0 || rec.Session == nil || *rec.Session != keyedID(t, h, "192.0.2.1") ||
 			rec.TrapID != nil || rec.TokenID != nil {
 			t.Errorf("%s: code %d, record %+v, ip %q", c.name, w.Code, rec, ip)
@@ -161,6 +167,87 @@ func TestTU20RequestEventAbort(t *testing.T) {
 		if len(rec.Detail) != 0 || (c.status == 0) != (rec.Status == nil) || rec.Status != nil && *rec.Status != c.status {
 			t.Errorf("%s: record %+v", c.name, rec)
 		}
+	}
+}
+
+// hostShapes are the Host values of T-S-35 for the vhosts example.com and
+// kilo.example. want is the stored vhost, or "" for no vhost.
+var hostShapes = []struct{ name, host, want string }{
+	{"exact", "example.com", "example.com"},
+	{"upper case", "EXAMPLE.COM", "example.com"},
+	{"port", "example.com:8443", "example.com"},
+	{"upper case and port", "EXAMPLE.COM:443", "example.com"},
+	{"colon with no digits", "example.com:", "example.com"},
+	{"port that is not digits", "example.com:abc", ""},
+	{"trailing dot", "example.com.", ""},
+	{"punycode", "xn--bcher-kva.example", ""},
+	{"raw UTF-8", "bücher.example", ""},
+	{"Kelvin sign", "Kilo.example", ""},
+	{"upper case with port", "KILO.example:443", "kilo.example"},
+	{"IPv4", "192.0.2.1", ""},
+	{"IPv4 with port", "192.0.2.1:443", ""},
+	{"IPv6", "[2001:db8::1]", ""},
+	{"IPv6 with port", "[2001:db8::1]:443", ""},
+	{"IPv6 zone", "[fe80::1%25eth0]", ""},
+	{"empty", "", ""},
+	{"253 bytes", strings.Repeat("a", 253), ""},
+	{"257 bytes", strings.Repeat("a", 257), ""},
+	{"NUL escape", "x%00y.example", ""},
+}
+
+func vhostOf(rec event.Record) string {
+	if rec.Vhost == nil {
+		return ""
+	}
+	return *rec.Vhost
+}
+
+// TestTS35BaitStoresMatchedName checks that each Host shape gives the name of
+// a bundle vhost or no vhost in the request event (SEC-41).
+func TestTS35BaitStoresMatchedName(t *testing.T) {
+	for _, c := range hostShapes {
+		h, q := eventHandler(t, 8)
+		serve(t, h, get("/t", c.host))
+		rec, _ := oneEvent(t, c.name, q)
+		if got := vhostOf(rec); got != c.want {
+			t.Errorf("%s: stored vhost %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestTS35BaitAbortStoresMatchedName checks that a render that ends the
+// connection stores the matched name, and not the Host.
+func TestTS35BaitAbortStoresMatchedName(t *testing.T) {
+	h, q := eventHandler(t, 8)
+	if !aborts(h, &failWriter{h: http.Header{}}, get("/t", "EXAMPLE.COM:443")) {
+		t.Fatal("no abort")
+	}
+	rec, _ := oneEvent(t, "abort", q)
+	if got := vhostOf(rec); got != "example.com" {
+		t.Errorf("stored vhost %q, want example.com", got)
+	}
+}
+
+// TestTS35BaitBoundsStoredValues checks that 10 000 distinct Hosts give at most
+// one stored value for each vhost and one for no vhost.
+func TestTS35BaitBoundsStoredValues(t *testing.T) {
+	const vhosts = 2 // example.com and kilo.example
+	h, q := eventHandler(t, 1000)
+	seen := map[string]bool{}
+	for i := 0; i < 10000; i++ {
+		host := fmt.Sprintf("h%d.example", i)
+		if i%2 == 0 {
+			host = fmt.Sprintf("ExAmPlE.cOm:%d", i)
+		}
+		serve(t, h, get("/nope", host))
+		if i%1000 == 999 {
+			for _, e := range q.Drain() {
+				seen[vhostOf(e.Record())] = true
+			}
+		}
+	}
+	if len(seen) > vhosts+1 || !seen["example.com"] || !seen[""] {
+		t.Errorf("%d distinct stored values, want at most %d, with example.com and none", len(seen), vhosts+1)
 	}
 }
 

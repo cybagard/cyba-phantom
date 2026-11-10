@@ -469,8 +469,8 @@ func TestTS32CallbackMarker(t *testing.T) {
 }
 
 // TestTS32CallbackVhost checks that the callback record has the vhost name of
-// the bundle, not the Host header of the request. The request event keeps the
-// Host header.
+// the bundle, not the Host header of the request. The request event has the
+// same name.
 func TestTS32CallbackVhost(t *testing.T) {
 	e := newCBEnv(t)
 	host := "eXaMpLe.CoM:" + strings.Repeat("9", 300)
@@ -485,9 +485,8 @@ func TestTS32CallbackVhost(t *testing.T) {
 	if cbs[0].Vhost == nil || *cbs[0].Vhost != "example.com" {
 		t.Errorf("callback vhost %v, want example.com", cbs[0].Vhost)
 	}
-	// NewEvent bounds the text of the Host header.
-	if v := reqs[0].Vhost; v == nil || !strings.HasPrefix(*v, "eXaMpLe.CoM:") {
-		t.Errorf("request vhost %v, want the Host header", v)
+	if v := reqs[0].Vhost; v == nil || *v != "example.com" {
+		t.Errorf("request vhost %v, want example.com", v)
 	}
 }
 
