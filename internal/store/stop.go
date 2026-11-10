@@ -50,8 +50,9 @@ type Stats struct {
 	// AppendBatch call. It is for phantom_tlog_orphan_leaves_total.
 	OrphanLeaves uint64
 	// Dropped counts the dropped events for each lane. These are the events
-	// that the stopped writer took out of the lanes. They also include each
-	// event of a batch that ends with an error and no COMMIT. It is for
+	// that the stopped writer took out of the lanes. They include the events
+	// that a paused writer drops. They also include each event of a batch that
+	// ends with an error and no COMMIT. It is for
 	// phantom_store_dropped_events_total.
 	Dropped Drops
 }

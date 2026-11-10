@@ -35,9 +35,11 @@ const (
 
 // Writer is the one writer of the event table. It uses the database pool from
 // Open and Migrate, the queue, and the log. The caller closes them after
-// Run returns. It also adds the drop counts of the queue to ip_counter. The
-// day key comes from one session.DayKey, shared with the request path when
-// the caller gives it to NewWriterWithDayKey.
+// Run returns. It also adds the drop counts of the queue to ip_counter. A
+// paused writer keeps them in memory until the resume or shutdown. A stopped
+// writer does not write them. The day key comes from one session.DayKey,
+// shared with the request path when the caller gives it to
+// NewWriterWithDayKey.
 //
 // The writer stops for one of five causes (see Run):
 //   - an append error.
@@ -50,7 +52,11 @@ const (
 // A retention run (RunRetention) is a request to the writer goroutine, as a
 // checkpoint row is. An error of a retention chunk is a database error.
 //
-// Healthy, Err and Stats are safe to call from any goroutine.
+// With a disk guard (SetDiskGuard) the writer can also pause. A pause is not a
+// stop (see Paused).
+//
+// Healthy, Err, Paused, DiskCheckErrors and Stats are safe to call from any
+// goroutine.
 type Writer struct {
 	db         *sql.DB
 	q          *event.Queue
@@ -113,6 +119,13 @@ type Writer struct {
 	retention chan retentionRequest
 	// checkpointBusy counts the runs whose TRUNCATE checkpoint was busy.
 	checkpointBusy atomic.Uint64
+
+	// disk gives the disk use of the guard, from 0 to 1. SetDiskGuard sets it.
+	// A test can set another; nil means no guard.
+	disk          func() (float64, error)
+	paused        atomic.Bool   // the pause of the disk guard; not a stop
+	diskErrors    atomic.Uint64 // the failed measures
+	diskErrLogged atomic.Bool   // the first failed measure has a log line
 
 	// sessions holds the sessions of the batch in progress. The writer
 	// empties it at the start of each transaction.
@@ -204,7 +217,9 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // after a cancel, as it does when it has not stopped.
 //
 // At each tick, also when the batch is empty, the writer checks the drop counts
-// of the queue. If there are any, it adds them to ip_counter (see write).
+// of the queue. If there are any, it adds them to ip_counter (see write). While
+// the writer is paused, the counts stay in memory. They go to ip_counter at the
+// resume or at shutdown, under the day of that write.
 func (w *Writer) Run(ctx context.Context) error {
 	tick := w.tick
 	if tick == nil {
@@ -311,9 +326,11 @@ func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*ev
 
 // shutdown writes the last batch and the events that Drain returns. If the
 // writer has stopped, flush drops the events that are left, and counts them.
-// It ends with one flush of an empty batch, so that the drop counts that are
-// still in memory go to ip_counter. Thus a healthy writer keeps no count in
-// memory after shutdown.
+// If it has paused, flush drops them in the same way. It ends with one write of
+// an empty batch. This write sends the drop counts that are still in memory to
+// ip_counter. It is also made while paused: it has no event row and calls no
+// appender. Thus a writer that has not stopped keeps no count in memory after
+// shutdown. A stopped writer writes nothing.
 func (w *Writer) shutdown(batch []*event.Event) {
 	w.flush(batch)
 	for rest := w.q.Drain(); len(rest) > 0; {
@@ -321,21 +338,32 @@ func (w *Writer) shutdown(batch []*event.Event) {
 		w.flush(rest[:n])
 		rest = rest[n:]
 	}
-	w.flush(nil)
+	if w.Healthy() {
+		if err := w.write(nil); err != nil {
+			w.stop(err)
+		}
+	}
 }
 
 // flush writes the batch and returns it empty. It clears the pointers, so the
 // events of the written batch can be freed. An error stops the writer. A stopped
 // writer writes nothing: flush drops the events and counts the drops. The lane
-// of each of these drops is the lane of e.Kind(). A batch that ends with an
-// error and no COMMIT is lost. write counts each of its events as a drop. The
-// lane of that drop is the lane of the kind of the record copy. flush does not
-// count a batch whose COMMIT succeeded.
+// of each of these drops is the lane of e.Kind(). A paused writer (see
+// SetDiskGuard) does the same, and also drops the events that are in the lanes.
+// It makes no stop. A batch that ends with an error and no COMMIT is lost.
+// write counts each of its events as a drop. The lane of that drop is the lane
+// of the kind of the record copy. flush does not count a batch whose COMMIT
+// succeeded.
 func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	if !w.Healthy() {
 		for _, e := range batch {
 			w.drops.add(e.Kind())
 		}
+	} else if w.diskPaused() {
+		for _, e := range batch {
+			w.drops.add(e.Kind())
+		}
+		discardAll(w.q, &w.drops)
 	} else if err := w.write(batch); err != nil {
 		w.stop(err)
 	}
