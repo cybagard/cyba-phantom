@@ -176,12 +176,17 @@ func (s *Schedule) runOnce(stop context.Context) {
 
 // runSteps returns the steps of one run in order. The roll-up step and the day
 // step come first: they read the session and event rows that later deletes
-// remove. The mark step is last, so a run that ends early writes no mark.
+// remove. The delete of the refused and beacon rows comes before the field
+// clear. Thus the clear does not write rows that the delete removes. The mark
+// step is last, so a run that ends early writes no mark.
 func runSteps(wall, tDel, tPriv time.Time, ip, raw int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
+		newRawDeleteStep(tDel, raw),
+		newFieldClearStep(tPriv, raw),
+		newMintStep(tDel, raw),
 		markStep(wall),
 	}
 }
