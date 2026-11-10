@@ -389,10 +389,10 @@ func seedMixed(t *testing.T, db *sql.DB) {
 	addSeen(t, db, "2027-01-05", 6)
 }
 
-// T-U-11: the count that a step returns is at least the rows that the call
-// changed, and at most the limit. The data have distinct sessions and hosts,
-// callbacks over two done days, and seen rows. The roll-up step runs with the
-// limits 1000 and 7. The day step runs with 1000, 7 and 2.
+// T-U-11: a step returns a count that is at least the rows that the call
+// changed. The count is at most the limit. The data have distinct sessions
+// and hosts, callbacks over two done days, and seen rows. The roll-up step
+// runs with the limits 1000 and 7. The day step runs with 1000, 7 and 2.
 func TestTU11RollupCountIsAnUpperBoundOfTheChangedRows(t *testing.T) {
 	for _, c := range []struct {
 		limit int
@@ -449,8 +449,8 @@ func dayState(t *testing.T, db *sql.DB) string {
 
 // T-U-11: removing seen rows uses the row limit of a call, at a cost of 1 for
 // each row. A done day has 5 seen rows and no callback. Two calls of 2 remove
-// 4 of them. A call of 3 removes the last one, has room for the end of the day
-// (cost 2) and sets the mark. A call that counts no callback saves no
+// 4 of them. A call of 3 removes the last one. It has room for the end of the
+// day (cost 2) and sets the mark. A call that counts no callback saves no
 // position. Then a day has 3 callbacks and 4 seen rows. A call of 5 counts 2
 // callbacks. The next call counts the third and removes 3 seen rows. The last
 // call removes 1 seen row and sets the mark.
@@ -557,8 +557,8 @@ func TestTU11RollupStepReportsAScanError(t *testing.T) {
 }
 
 // T-U-11: a read error after the first row of a callback query stops the day
-// step with an error, and the day is not done. A view replaces the session
-// table. It fails for one session, so the second row of the query fails.
+// step. The step returns an error, and the day is not done. A view replaces the
+// session table. It fails for one session, so the second row of the query fails.
 func TestTU11RollupDayStepReportsAReadError(t *testing.T) {
 	db := migrated(t)
 	mustExec(t, db, "ALTER TABLE session RENAME TO session_table")

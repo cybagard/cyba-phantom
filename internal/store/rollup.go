@@ -36,9 +36,9 @@ const (
 
 	// The day step uses these. rollupLeftSQL finds a request row that the
 	// roll-up step has not done. rollupCallbackSQL gives the callbacks
-	// before a time and after a position, at most the limit, in the order
-	// of the position. The row value seeks in event_kind_ts. The next two
-	// find the first day with data.
+	// before a time and after a position. It gives at most the limit, in
+	// the order of the position. The row value seeks in event_kind_ts. The
+	// next two find the first day with data.
 	rollupLeftSQL     = "SELECT 1 FROM event WHERE kind = 'request' AND ts < ? LIMIT 1"
 	rollupCallbackSQL = "WITH pick AS (SELECT id, ts, vhost, session_id FROM event WHERE kind = 'callback' AND ts < ? " +
 		"AND (ts, id) > (?, ?) ORDER BY ts, id LIMIT ?) " +
@@ -78,8 +78,8 @@ func rollupRefused(context.Context, *sql.Tx, int) (int, error) {
 // These costs bound the rows that a piece of work changes. A step returns the
 // sum of them, so the count is at least the rows changed (see retentionStep).
 const (
-	// rollupRowCost is for a request row: the step deletes the event, adds a
-	// seen row, and does its share of the aggregate_day upserts.
+	// rollupRowCost is for a request row. The step deletes the event and
+	// adds a seen row. It also does its share of the upserts.
 	rollupRowCost = 3
 	// rollupReadCost is for a callback: the read and its share of the upserts
 	// and of the position write.
@@ -116,9 +116,9 @@ func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupD
 // The pairs of a key and a session stay in rollup_seen. A session can have
 // rows in two chunks or two runs of one day. The pair stops a second count.
 // The day step removes the pairs of a day when the day is done. A row of a
-// day at or before the mark rollupDoneKey (a wall clock step back) still
-// rolls up and counts as a request. It adds no pair and no session, as no
-// step would remove the pair.
+// day at or before the mark rollupDoneKey still rolls up (a wall clock step
+// back). It counts as a request. It adds no pair and no session, as no step
+// would remove the pair.
 //
 // With days outside 1 to 30, or a zero tDel, the step runs no statement and
 // returns an error. The runner then stops the writer.
@@ -241,8 +241,8 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 // done days in order, from the day after the meta mark rollupDoneKey. For
 // each day it adds the callback events to aggregate_day. It uses the key
 // rules of the roll-up step. Then it deletes the rollup_seen rows of the
-// day and of older days (rows of an older binary or a broken run). At the
-// end of a day it sets the mark.
+// day and of older days. Older days have rows of an older binary or a broken
+// run. At the end of a day it sets the mark.
 //
 // Each call has a row limit. A callback costs 2, a seen row costs 1, and the
 // end of a day costs 2. Thus the cost is at least the rows that the call
@@ -317,9 +317,9 @@ func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (start int64, 
 	return start, start+rollupDayMs <= cutoff, nil
 }
 
-// rollupFirstDay returns the start of the first day after the mark with a
-// callback event or a seen row, in unix ms. ok is false when there is none. It
-// uses two index seeks.
+// rollupFirstDay returns the start of the first day after the mark that has a
+// callback or a seen row. The start is in unix ms. ok is false when there is
+// none. It uses two index seeks.
 func rollupFirstDay(ctx context.Context, tx *sql.Tx) (start int64, ok bool, err error) {
 	mark, hasMark, err := metaGet(ctx, tx, rollupDoneKey)
 	if err != nil {
