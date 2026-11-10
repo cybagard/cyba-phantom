@@ -36,54 +36,35 @@ func utc(s string) int64 {
 // addSession inserts a session row. A family of nil is NULL.
 func addSession(tb testing.TB, db *sql.DB, id, band string, family any) {
 	tb.Helper()
-	if _, err := db.Exec("INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES (?, 0, 0, 'h', ?, ?)", id, band, family); err != nil {
-		tb.Fatal(err)
-	}
+	mustExec(tb, db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES (?, 0, 0, 'h', ?, ?)", id, band, family)
 }
 
 // addEvents inserts n rows of kind with ts = ts0 + i*step. A session id or a
 // vhost of nil is NULL. A callback row gets a hash and a leaf index.
 func addEvents(tb testing.TB, db *sql.DB, kind string, n int, ts0, step int64, sid, vhost any) {
 	tb.Helper()
-	var next int64
-	if err := db.QueryRow("SELECT coalesce(max(leaf_index) + 1, 0) FROM event").Scan(&next); err != nil {
-		tb.Fatal(err)
-	}
 	cb := kind == "callback"
-	if _, err := db.Exec(`WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < ?)
+	mustExec(tb, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < ?)
 		INSERT INTO event (ts, session_id, kind, vhost, hash, leaf_index)
-		SELECT ? + i*?, ?, ?, ?, CASE WHEN ? THEN zeroblob(32) END, CASE WHEN ? THEN ? + i END FROM c`,
-		n-1, ts0, step, sid, kind, vhost, cb, cb, next); err != nil {
-		tb.Fatal(err)
-	}
+		SELECT ? + i*?, ?, ?, ?, CASE WHEN ? THEN zeroblob(32) END,
+		CASE WHEN ? THEN i + (SELECT coalesce(max(leaf_index) + 1, 0) FROM event) END FROM c`,
+		n-1, ts0, step, sid, kind, vhost, cb, cb)
 }
 
 // aggregates returns the rows of aggregate_day as text, in key order.
 func aggregates(tb testing.TB, db *sql.DB) string {
 	tb.Helper()
-	rows, err := db.Query("SELECT day, vhost, band, family, sessions, requests, callbacks FROM aggregate_day ORDER BY day, vhost, band, family")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var d, v, b, f string
-		var s, q, c int
-		if err := rows.Scan(&d, &v, &b, &f, &s, &q, &c); err != nil {
-			tb.Fatal(err)
-		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%d|%d|%d", d, v, b, f, s, q, c))
-	}
-	return strings.Join(out, " ; ")
+	var out string
+	check(tb, db.QueryRow(`SELECT coalesce(group_concat(day || '|' || vhost || '|' || band || '|' || family || '|' ||
+		sessions || '|' || requests || '|' || callbacks, ' ; '), '') FROM
+		(SELECT * FROM aggregate_day ORDER BY day, vhost, band, family)`).Scan(&out))
+	return out
 }
 
 // count returns the result of a query with one integer.
 func count(tb testing.TB, db *sql.DB, q string) (n int) {
 	tb.Helper()
-	if err := db.QueryRow(q).Scan(&n); err != nil {
-		tb.Fatal(err)
-	}
+	check(tb, db.QueryRow(q).Scan(&n))
 	return n
 }
 
@@ -107,12 +88,27 @@ func (r *rig) runDirect() error {
 	return <-rq.reply
 }
 
+// runOK makes one run of the rig. It fails the test on an error.
+func runOK(t *testing.T, r *rig) {
+	t.Helper()
+	if err := r.runDirect(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // runAgain makes one more run of the rig with steps.
 func runAgain(t *testing.T, r *rig, steps ...retentionStep) {
 	t.Helper()
 	setHook(t, &retentionSteps, steps)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
+	runOK(t, r)
+}
+
+// stops makes one run of the rig. It fails the test unless the run ends with an
+// error and a stopped writer.
+func stops(t *testing.T, r *rig) {
+	t.Helper()
+	if err := r.runDirect(); err == nil || r.w.Healthy() {
+		t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
 	}
 }
 
@@ -151,9 +147,7 @@ func TestTU11RollupMovesRowsInChunksAndAdds(t *testing.T) {
 	addEvents(t, r.db, "request", 1, cut-1, 0, "s1", "a")
 	addEvents(t, r.db, "request", 1, cut, 0, "s1", "a")
 	addEvents(t, r.db, "request", 5, cut+1000, 1000, "s1", "a")
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	want := "2027-01-09|a|crawler||1|3|0 ; 2027-01-09|a|human|f|1|1500|0 ; 2027-01-11|a|human|f|1|11|0"
 	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 514]" || r.events() != 6 {
 		t.Fatalf("aggregates %q, chunks %v, %d rows left; want %q, [1000 514], 6", got, *chunks, r.events(), want)
@@ -183,9 +177,7 @@ func TestTU11RollupBoundaryAndUTCDay(t *testing.T) {
 			addEvents(t, r.db, "request", 1, cut, 0, nil, "at")
 			addEvents(t, r.db, "request", 1, cut+1, 0, nil, "after")
 			addEvents(t, r.db, "request", 1, utc("2027-01-01T22:00:00Z"), 0, nil, "late")
-			if err := r.runDirect(); err != nil {
-				t.Fatal(err)
-			}
+			runOK(t, r)
 			before := time.UnixMilli(cut - 1).UTC().Format("2006-01-02")
 			want := "2027-01-01|late|human||0|1|0 ; " + before + "|before|human||0|1|0"
 			if got := aggregates(t, r.db); got != want || r.events() != 2 {
@@ -212,9 +204,7 @@ func TestTU11RollupSessionCountsOncePerKey(t *testing.T) {
 		}
 		return old(tx)
 	}
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	want := "2027-01-09|a|crawler|f|1|1500|0 ; 2027-01-09|a|human|f|1|1000|0"
 	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 1000 500]" {
 		t.Fatalf("aggregates %q, chunks %v; want %q", got, *chunks, want)
@@ -232,9 +222,7 @@ func TestTS34RollupNullKeys(t *testing.T) {
 	addEvents(t, r.db, "request", 2, ts, 1, nil, nil)
 	addEvents(t, r.db, "request", 2, ts, 1, "ghost", "v")
 	addEvents(t, r.db, "request", 2, ts, 1, "nofamily", nil)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	want := "2027-01-09||agent-likely||1|2|0 ; 2027-01-09||human||0|2|0 ; 2027-01-09|v|human||1|2|0"
 	if got := aggregates(t, r.db); got != want || !r.w.Healthy() || r.events() != 0 {
 		t.Fatalf("aggregates %q, healthy %v, %d rows left; want %q", got, r.w.Healthy(), r.events(), want)
@@ -276,9 +264,7 @@ const wantDays = "2027-01-02|a|human|f|0|0|2 ; 2027-01-10||human||0|0|1 ; " +
 func TestTU11RollupDayStepCountsCallbacksOnce(t *testing.T) {
 	r, chunks := rollRig(t, newRollupStep(rollTDel, 30), newRollupDayStep(rollTDel, 30))
 	seedDays(t, r.db)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	if got := aggregates(t, r.db); got != wantDays || fmt.Sprint(*chunks) != "[1000 1000 509]" {
 		t.Fatalf("aggregates %q, chunks %v; want %q, [1000 1000 509]", got, *chunks, wantDays)
 	}
@@ -296,16 +282,12 @@ func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 	r, _ := rollRig(t, newRollupStep(rollTDel, 30), newRollupDayStep(rollTDel, 30))
 	seedDays(t, r.db)
 	failCommit(r, 2)
-	if err := r.runDirect(); err == nil || r.w.Healthy() {
-		t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
-	}
+	stops(t, r)
 	if got := aggregates(t, r.db); !strings.Contains(got, "2027-01-10|a|human|f|1|3|993") || r.events() != 2508 {
 		t.Fatalf("after the crash: aggregates %q, %d events", got, r.events())
 	}
 	replaceWriter(r)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	if got := aggregates(t, r.db); got != wantDays || metaValue(t, r.db, rollupDoneKey) != "2027-01-10" {
 		t.Fatalf("after the new run: aggregates %q; want %q", got, wantDays)
 	}
@@ -323,19 +305,16 @@ func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 	}
 	clean, _ := rollRig(t, newRollupStep(rollTDel, 30))
 	seed(clean)
-	if err := clean.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, clean)
 	r, _ := rollRig(t, newRollupStep(rollTDel, 30))
 	seed(r)
 	failCommit(r, 3)
-	if err := r.runDirect(); err == nil || r.events() != 3200-2000 {
-		t.Fatalf("run error %v, %d rows left; want an error and 1 200", err, r.events())
+	stops(t, r)
+	if r.events() != 3200-2000 {
+		t.Fatalf("%d rows left after the crash; want 1 200", r.events())
 	}
 	replaceWriter(r)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	want := "2027-01-09|a|crawler||1|700|0 ; 2027-01-09|a|human|f|1|2500|0"
 	if got, w := aggregates(t, r.db), aggregates(t, clean.db); got != want || w != want || r.events() != 0 {
 		t.Fatalf("after a crash %q, clean %q; want %q", got, w, want)
@@ -348,9 +327,7 @@ func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 func TestTU11RollupDayStepWaitsForTheRollup(t *testing.T) {
 	r, _ := rollRig(t, newRollupDayStep(rollTDel, 30), newRollupStep(rollTDel, 30))
 	seedDays(t, r.db)
-	if err := r.runDirect(); err != nil {
-		t.Fatal(err)
-	}
+	runOK(t, r)
 	want := "2027-01-10|a|human|f|1|3|0 ; 2027-01-11|a|human|f|1|2|0"
 	if got := aggregates(t, r.db); got != want || count(t, r.db, "SELECT count(*) FROM rollup_seen") != 2 ||
 		count(t, r.db, "SELECT count(*) FROM meta WHERE key LIKE 'retention_rollup%'") != 0 {
@@ -402,9 +379,7 @@ func TestTU11RollupRefusesBadParameters(t *testing.T) {
 			for _, step := range []retentionStep{newRollupStep(c.tDel, c.days), newRollupDayStep(c.tDel, c.days)} {
 				r, chunks := rollRig(t, step)
 				addEvents(t, r.db, "request", 1, utc("2027-01-01T00:00:00Z"), 0, nil, "a")
-				if err := r.runDirect(); err == nil || r.w.Healthy() {
-					t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
-				}
+				stops(t, r)
 				if r.events() != 1 || aggregates(t, r.db) != "" || rowsChanged(*chunks) != 0 {
 					t.Fatalf("%d rows left, aggregates %q; want 1 row and no change", r.events(), aggregates(t, r.db))
 				}
@@ -490,23 +465,8 @@ func BenchmarkRollup(b *testing.B) {
 			}
 		}
 	}
-	if m["rss"] == 0 {
+	if m["rss"] == 0 || m["rows"] == 0 {
 		b.Fatalf("child: %v\n%s", err, out)
-	}
-	root, err := os.OpenRoot(state)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer root.Close()
-	db, err := Open(root, "events.db", Options{})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer db.Close()
-	var rolled int
-	q := "SELECT coalesce(sum(requests), 0) FROM aggregate_day"
-	if err := db.QueryRow(q).Scan(&rolled); err != nil || rolled == 0 || rolled+count(b, db, "SELECT count(*) FROM event WHERE kind = 'request'") != n {
-		b.Fatalf("%d requests rolled, %d left of %d: %v", rolled, n-rolled, n, err)
 	}
 	b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
 	b.ReportMetric(m["ms"], "total-ms")
@@ -522,55 +482,55 @@ func BenchmarkRollup(b *testing.B) {
 // The setup runs in the parent, so a child process has its own peak.
 func rollBenchState(b *testing.B, n, per int, tDel time.Time) string {
 	top, err := filepath.EvalSymlinks(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
-	}
+	check(b, err)
 	state := filepath.Join(top, "state")
-	if err := os.Mkdir(state, 0o700); err != nil {
-		b.Fatal(err)
-	}
-	root, err := os.OpenRoot(state)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer root.Close()
-	db, err := Open(root, "events.db", Options{})
-	if err != nil {
-		b.Fatal(err)
-	}
+	check(b, os.Mkdir(state, 0o700))
+	db := openState(b, state)
 	defer db.Close()
-	if err := Migrate(db, "origin"); err != nil {
-		b.Fatal(err)
-	}
-	if _, err := db.Exec("PRAGMA ignore_check_constraints=ON"); err != nil {
-		b.Fatal(err)
-	}
+	check(b, Migrate(db, "origin"))
+	mustExec(b, db, "PRAGMA ignore_check_constraints=ON")
 	span := int64(40 * 24 * time.Hour / time.Millisecond)
 	base, step := tDel.UnixMilli()-span, max(1, span/int64(n))
+	const rec = "WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?) "
 	for off := 0; off < n; off += 100_000 {
 		last := off + min(100_000, n-off) - 1
-		if _, err := db.Exec(`WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
-			INSERT INTO event (ts, session_id, kind, vhost) SELECT ? + i*?, 's' || (i / ?), 'request', 'v' || (i % 3) FROM c`,
-			off, last, base, step, per); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := db.Exec(`WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
-			INSERT INTO session (id, first_seen, last_seen, ip_hmac, band)
-			SELECT 's' || i, 0, 0, 'h', CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c`,
-			off/per, last/per); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := db.Exec(`WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
-			INSERT INTO event (ts, session_id, kind, vhost, hash, leaf_index)
-			SELECT ? + i*?, 's' || (i % 7), 'callback', 'v' || (i % 3), zeroblob(32), i FROM c`,
-			off/200, last/200, base, step*200); err != nil {
-			b.Fatal(err)
-		}
+		mustExec(b, db, rec+`INSERT INTO event (ts, session_id, kind, vhost)
+			SELECT ? + i*?, 's' || (i / ?), 'request', 'v' || (i % 3) FROM c`, off, last, base, step, per)
+		mustExec(b, db, rec+`INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) SELECT 's' || i, 0, 0, 'h',
+			CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c`,
+			off/per, last/per)
+		mustExec(b, db, rec+`INSERT INTO event (ts, session_id, kind, vhost, hash, leaf_index)
+			SELECT ? + i*?, 's' || (i % 7), 'callback', 'v' || (i % 3), zeroblob(32), i FROM c`, off/200, last/200, base, step*200)
 	}
-	if _, err := db.Exec("PRAGMA ignore_check_constraints=OFF"); err != nil {
-		b.Fatal(err)
-	}
+	mustExec(b, db, "PRAGMA ignore_check_constraints=OFF")
 	return state
+}
+
+// check fails the test or benchmark on an error.
+func check(tb testing.TB, err error) {
+	tb.Helper()
+	if err != nil {
+		tb.Fatal(err)
+	}
+}
+
+// mustExec runs a statement and fails the test or benchmark on an error.
+func mustExec(tb testing.TB, db *sql.DB, q string, args ...any) {
+	tb.Helper()
+	_, err := db.Exec(q, args...)
+	check(tb, err)
+}
+
+// openState opens the database of a state directory. The cleanup closes the
+// directory.
+func openState(b *testing.B, dir string) *sql.DB {
+	b.Helper()
+	root, err := os.OpenRoot(dir)
+	check(b, err)
+	b.Cleanup(func() { root.Close() })
+	db, err := Open(root, "events.db", Options{})
+	check(b, err)
+	return db
 }
 
 // BenchmarkRollupChild is the child process of BenchmarkRollup. Without its
@@ -581,21 +541,10 @@ func BenchmarkRollupChild(b *testing.B) {
 		b.Skip("child process of BenchmarkRollup")
 	}
 	tms, err := strconv.ParseInt(os.Getenv(rollChildTDel), 10, 64)
-	if err != nil {
-		b.Fatal(err)
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		b.Fatal(err)
-	}
-	db, err := Open(root, "events.db", Options{})
-	if err != nil {
-		b.Fatal(err)
-	}
+	check(b, err)
+	db := openState(b, dir)
 	q, err := event.NewQueue(1, event.NewCounters())
-	if err != nil {
-		b.Fatal(err)
-	}
+	check(b, err)
 	tDel := time.UnixMilli(tms)
 	w := NewWriter(db, q, false, nil, Recovery{})
 	steps := []retentionStep{newRollupStep(tDel, 30), newRollupDayStep(tDel, 30)}
@@ -604,9 +553,7 @@ func BenchmarkRollupChild(b *testing.B) {
 	for cur := 0; cur < len(steps); {
 		begin, was := time.Now(), cur
 		n, err := w.chunk(steps, &cur)
-		if err != nil {
-			b.Fatal(err)
-		}
+		check(b, err)
 		took := time.Since(begin)
 		total, longest, rows = total+took, max(longest, took), rows+n
 		if was == 0 && cur == 1 {

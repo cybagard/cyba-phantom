@@ -107,44 +107,29 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 			return 0, err
 		}
 		var batch []picked
-		for rows.Next() {
+		err = eachRow(rows, func() error {
 			var p picked
 			var ts int64
-			if err = rows.Scan(&p.id, &ts, &p.key.vhost, &p.sid, &p.key.band, &p.key.family); err != nil {
-				break
-			}
+			err := rows.Scan(&p.id, &ts, &p.key.vhost, &p.sid, &p.key.band, &p.key.family)
 			p.key.day = rollupDay(ts)
 			batch = append(batch, p)
-		}
-		if err == nil {
-			err = rows.Err()
-		}
-		if cerr := rows.Close(); err == nil {
-			err = cerr
-		}
+			return err
+		})
 		if err != nil {
 			return 0, err
 		}
-		counts := map[rollupKey]*rollupCount{}
+		counts := rollupCounts{}
 		for _, p := range batch {
-			c := counts[p.key]
-			if c == nil {
-				c = &rollupCount{}
-				counts[p.key] = c
-			}
+			c := counts.of(p.key)
 			c.requests++
 			if p.sid.Valid {
-				res, err := tx.ExecContext(ctx, rollupSeenSQL, p.key.day, p.key.vhost, p.key.band, p.key.family, p.sid.String)
+				n, err := execN(ctx, tx, rollupSeenSQL, p.key.day, p.key.vhost, p.key.band, p.key.family, p.sid.String)
 				if err != nil {
 					return 0, err
 				}
-				n, err := res.RowsAffected()
-				if err != nil {
-					return 0, err
-				}
-				c.sessions += int(n)
+				c.sessions += n
 			}
-			if _, err := tx.ExecContext(ctx, rollupDropSQL, p.id); err != nil {
+			if _, err := execN(ctx, tx, rollupDropSQL, p.id); err != nil {
 				return 0, err
 			}
 		}
@@ -155,8 +140,34 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 	}
 }
 
+// rollupCounts holds what one call adds to each key.
+type rollupCounts map[rollupKey]*rollupCount
+
+// of returns the count of a key. It makes the count when it is new.
+func (m rollupCounts) of(k rollupKey) *rollupCount {
+	if m[k] == nil {
+		m[k] = &rollupCount{}
+	}
+	return m[k]
+}
+
+// eachRow calls f for each row, then closes rows. It returns the first error.
+func eachRow(rows *sql.Rows, f func() error) (err error) {
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	for rows.Next() {
+		if err = f(); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // rollupAdd adds the counts to the rows of aggregate_day.
-func rollupAdd(ctx context.Context, tx *sql.Tx, counts map[rollupKey]*rollupCount) error {
+func rollupAdd(ctx context.Context, tx *sql.Tx, counts rollupCounts) error {
 	for k, c := range counts {
 		if _, err := tx.ExecContext(ctx, rollupAddSQL, k.day, k.vhost, k.band, k.family, c.sessions, c.requests, c.callbacks); err != nil {
 			return err
@@ -320,60 +331,51 @@ func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, budget int) (us
 	if err != nil {
 		return 0, false, err
 	}
-	counts := map[rollupKey]*rollupCount{}
+	counts := rollupCounts{}
 	var lastTS, lastID int64
-	for rows.Next() {
+	err = eachRow(rows, func() error {
 		var id, ts int64
 		k := rollupKey{day: day}
-		if err = rows.Scan(&id, &ts, &k.vhost, &k.band, &k.family); err != nil {
-			break
-		}
-		if c := counts[k]; c != nil {
-			c.callbacks++
-		} else {
-			counts[k] = &rollupCount{callbacks: 1}
-		}
+		err := rows.Scan(&id, &ts, &k.vhost, &k.band, &k.family)
+		counts.of(k).callbacks++
 		if ts > lastTS || ts == lastTS && id > lastID {
 			lastTS, lastID = ts, id
 		}
 		used++
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	if cerr := rows.Close(); err == nil {
-		err = cerr
-	}
+		return err
+	})
 	if err != nil {
 		return 0, false, err
 	}
-	if err := rollupAdd(ctx, tx, counts); err != nil {
+	if err = rollupAdd(ctx, tx, counts); err != nil {
 		return 0, false, err
 	}
 	if used > 0 {
 		pos := strconv.FormatInt(lastTS, 10) + ":" + strconv.FormatInt(lastID, 10)
-		if _, err := tx.ExecContext(ctx, metaSetSQL, rollupPosKey, pos); err != nil {
+		if _, err = execN(ctx, tx, metaSetSQL, rollupPosKey, pos); err != nil {
 			return 0, false, err
 		}
 	}
 	if used == budget {
 		return used, false, nil
 	}
-	res, err := tx.ExecContext(ctx, rollupDropSeenSQL, day, budget-used)
-	if err != nil {
+	n, err := execN(ctx, tx, rollupDropSeenSQL, day, budget-used)
+	if used += n; err != nil || used == budget {
+		return used, false, err
+	}
+	if _, err = execN(ctx, tx, metaSetSQL, rollupDoneKey, day); err != nil {
 		return 0, false, err
+	}
+	_, err = execN(ctx, tx, metaDelSQL, rollupPosKey)
+	return used, true, err
+}
+
+// execN runs a statement and returns the rows that it changed.
+func execN(ctx context.Context, tx *sql.Tx, q string, args ...any) (int, error) {
+	res, err := tx.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, err
 	}
 	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, false, err
-	}
-	used += int(n)
-	if used == budget {
-		return used, false, nil
-	}
-	if _, err := tx.ExecContext(ctx, metaSetSQL, rollupDoneKey, day); err != nil {
-		return 0, false, err
-	}
-	_, err = tx.ExecContext(ctx, metaDelSQL, rollupPosKey)
-	return used, true, err
+	return int(n), err
 }
