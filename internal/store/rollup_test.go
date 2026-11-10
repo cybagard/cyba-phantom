@@ -507,6 +507,19 @@ func TestTU11RollupDayStepDoneAtTheCutoff(t *testing.T) {
 	}
 }
 
+// T-U-11: a callback in UTC year 10000 (a wall clock far ahead) is not in a
+// done day. The step parses no text for it. The run ends healthy, the older day
+// is done, and the far day is not.
+func TestTU11RollupDayStepKeepsAFarDay(t *testing.T) {
+	r, _ := rollRig(t, newRollupStep(rollTDel, 30), rollDay)
+	addEvents(t, r.db, "callback", 1, utc("2027-01-09T12:00:00Z"), 0, nil, "a")
+	addEvents(t, r.db, "callback", 1, time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(), 0, nil, "a")
+	runOK(t, r)
+	if got := aggregates(t, r.db); got != "2027-01-09|a|human||0|0|1" || metaValue(t, r.db, rollupDoneKey) != "2027-01-09" || !r.w.Healthy() {
+		t.Fatalf("aggregates %q, mark %q, healthy %v", got, metaValue(t, r.db, rollupDoneKey), r.w.Healthy())
+	}
+}
+
 // T-U-11: a seen day older than the first callback day after the mark is done
 // first. A call of 2 deletes its 2 seen rows and counts no callback. A call
 // with limit 0 reads nothing, also with a bad mark.
@@ -574,7 +587,7 @@ func TestTU11RollupStatementsUseIndexes(t *testing.T) {
 	}{
 		{rollupPickSQL, []any{1, 1000}, "event_kind_ts"},
 		{rollupLeftSQL, []any{1}, "event_kind_ts"},
-		{rollupCallbackSQL, []any{1, 2, 1, 0, 1000}, "event_kind_ts"},
+		{rollupCallbackSQL, []any{2, 1, 0, 1000}, "event_kind_ts (kind=? AND ts>? AND ts<?)"},
 		{rollupFirstCallbackSQL, []any{1}, "event_kind_ts"},
 		{rollupFirstSeenSQL, []any{""}, "PRIMARY KEY"},
 		{rollupDropSeenSQL, []any{"d", 1000}, "PRIMARY KEY"},

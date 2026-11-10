@@ -34,13 +34,15 @@ const (
 		"requests = requests + excluded.requests, callbacks = callbacks + excluded.callbacks"
 
 	// The day step uses these. rollupLeftSQL finds a request row that the
-	// roll-up step has not done. rollupCallbackSQL gives the callbacks of
-	// one day after a position, at most the limit. The next two find the
-	// first day with data.
+	// roll-up step has not done. rollupCallbackSQL gives the callbacks
+	// before a time and after a position, at most the limit, in the order
+	// of the position. The row value seeks in event_kind_ts. The next two
+	// find the first day with data.
 	rollupLeftSQL     = "SELECT 1 FROM event WHERE kind = 'request' AND ts < ? LIMIT 1"
-	rollupCallbackSQL = "WITH pick AS (SELECT id, ts, vhost, session_id FROM event WHERE kind = 'callback' AND ts >= ? AND ts < ? " +
+	rollupCallbackSQL = "WITH pick AS (SELECT id, ts, vhost, session_id FROM event WHERE kind = 'callback' AND ts < ? " +
 		"AND (ts, id) > (?, ?) ORDER BY ts, id LIMIT ?) " +
-		"SELECT p.id, p.ts, coalesce(p.vhost, ''), coalesce(s.band, 'human'), coalesce(s.family, '') FROM pick p LEFT JOIN session s ON s.id = p.session_id"
+		"SELECT p.id, p.ts, coalesce(p.vhost, ''), coalesce(s.band, 'human'), coalesce(s.family, '') FROM pick p " +
+		"LEFT JOIN session s ON s.id = p.session_id ORDER BY p.ts, p.id"
 	rollupFirstCallbackSQL = "SELECT ts FROM event WHERE kind = 'callback' AND ts >= ? ORDER BY ts LIMIT 1"
 	rollupFirstSeenSQL     = "SELECT day FROM rollup_seen WHERE day > ? ORDER BY day LIMIT 1"
 	rollupDropSeenSQL      = "DELETE FROM rollup_seen WHERE (day, vhost, band, family, session_id) IN " +
@@ -84,6 +86,12 @@ const (
 	// rollupEndCost is for the two meta writes that end a day.
 	rollupEndCost = 2
 )
+
+// rollupDayMs is the length of a UTC day in unix ms.
+const rollupDayMs = int64(24 * time.Hour / time.Millisecond)
+
+// rollupDayStart returns the start of the UTC day of a time, in unix ms.
+func rollupDayStart(ts int64) int64 { return ts - (ts%rollupDayMs+rollupDayMs)%rollupDayMs }
 
 // rollupDay returns the UTC date of a time in unix ms.
 func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupDayFmt) }
@@ -246,14 +254,14 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 		left := limit
 		for left > 0 {
-			day, ok, err := rollupNextDay(ctx, tx, cutoff)
+			start, ok, err := rollupNextDay(ctx, tx, cutoff)
 			if err != nil {
 				return 0, err
 			}
 			if !ok {
 				break
 			}
-			used, err := rollupCountDay(ctx, tx, day, left)
+			used, err := rollupCountDay(ctx, tx, start, left)
 			if err != nil {
 				return 0, err
 			}
@@ -263,114 +271,117 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 	}
 }
 
-// rollupNextDay returns the next day to work on. This is the day in progress,
-// or the first day with a callback or a seen row after the mark. ok is false
-// in three cases. There is no such day. Or a request row before the cutoff
-// is left. Or the day is not over at the cutoff.
-func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (day string, ok bool, err error) {
+// rollupNextDay returns the start of the next day to work on, in unix ms. This
+// is the day in progress, or the first day with a callback or a seen row after
+// the mark. ok is false in three cases. There is no such day. Or a request row
+// before the cutoff is left. Or the day is not over at the cutoff. The step
+// parses no day text of a day that is not done.
+func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (start int64, ok bool, err error) {
 	var one int
 	if left, err := scanOne(tx.QueryRowContext(ctx, rollupLeftSQL, cutoff), &one); left || err != nil {
-		return "", false, err
+		return 0, false, err
 	}
-	pos, inProgress, err := metaGet(ctx, tx, rollupPosKey)
+	v, inProgress, err := metaGet(ctx, tx, rollupPosKey)
 	if err != nil {
-		return "", false, err
+		return 0, false, err
 	}
 	if inProgress {
-		ts, _, err := rollupPos(pos)
+		pos, err := parseRollupPos(v)
 		if err != nil {
-			return "", false, err
+			return 0, false, err
 		}
-		day = rollupDay(ts)
-	} else if day, err = rollupFirstDay(ctx, tx); err != nil || day == "" {
-		return "", false, err
+		start = rollupDayStart(pos.ts)
+	} else if start, ok, err = rollupFirstDay(ctx, tx); err != nil || !ok {
+		return 0, false, err
 	}
-	t, err := time.Parse(rollupDayFmt, day)
-	if err != nil {
-		return "", false, err
-	}
-	return day, t.AddDate(0, 0, 1).UnixMilli() <= cutoff, nil
+	return start, start+rollupDayMs <= cutoff, nil
 }
 
-// rollupFirstDay returns the first day after the mark with a callback event or
-// a seen row. It returns "" when there is none. It uses two index seeks.
-func rollupFirstDay(ctx context.Context, tx *sql.Tx) (string, error) {
+// rollupFirstDay returns the start of the first day after the mark with a
+// callback event or a seen row, in unix ms. ok is false when there is none. It
+// uses two index seeks.
+func rollupFirstDay(ctx context.Context, tx *sql.Tx) (start int64, ok bool, err error) {
 	mark, hasMark, err := metaGet(ctx, tx, rollupDoneKey)
 	if err != nil {
-		return "", err
+		return 0, false, err
 	}
 	from := int64(0)
 	if hasMark {
 		t, err := time.Parse(rollupDayFmt, mark)
 		if err != nil {
-			return "", err
+			return 0, false, err
 		}
-		from = t.AddDate(0, 0, 1).UnixMilli()
+		from = t.UnixMilli() + rollupDayMs
 	}
-	day := ""
 	var ts int64
-	if ok, err := scanOne(tx.QueryRowContext(ctx, rollupFirstCallbackSQL, from), &ts); err != nil {
-		return "", err
-	} else if ok {
-		day = rollupDay(ts)
+	if found, err := scanOne(tx.QueryRowContext(ctx, rollupFirstCallbackSQL, from), &ts); err != nil {
+		return 0, false, err
+	} else if found {
+		start, ok = rollupDayStart(ts), true
 	}
 	var seen string
-	if ok, err := scanOne(tx.QueryRowContext(ctx, rollupFirstSeenSQL, mark), &seen); err != nil {
-		return "", err
-	} else if ok && (day == "" || seen < day) {
-		day = seen
+	if found, err := scanOne(tx.QueryRowContext(ctx, rollupFirstSeenSQL, mark), &seen); err != nil || !found {
+		return start, ok, err
 	}
-	return day, nil
+	t, err := time.Parse(rollupDayFmt, seen)
+	if err != nil {
+		return 0, false, err
+	}
+	if s := t.UnixMilli(); !ok || s < start {
+		start, ok = s, true
+	}
+	return start, ok, nil
 }
 
-// rollupPos reads the value of rollupPosKey: the ts and the id, as ts:id.
-func rollupPos(v string) (ts, id int64, err error) {
+// rollupPos is the position in a day: the ts and the id of the last callback
+// counted. The meta key rollupPosKey holds it as ts:id.
+type rollupPos struct{ ts, id int64 }
+
+func (p rollupPos) String() string {
+	return strconv.FormatInt(p.ts, 10) + ":" + strconv.FormatInt(p.id, 10)
+}
+
+// parseRollupPos reads the text of a position.
+func parseRollupPos(v string) (p rollupPos, err error) {
 	a, b, _ := strings.Cut(v, ":")
-	if ts, err = strconv.ParseInt(a, 10, 64); err != nil {
-		return 0, 0, err
+	if p.ts, err = strconv.ParseInt(a, 10, 64); err != nil {
+		return rollupPos{}, err
 	}
-	id, err = strconv.ParseInt(b, 10, 64)
-	return ts, id, err
+	p.id, err = strconv.ParseInt(b, 10, 64)
+	return p, err
 }
 
-// rollupCountDay does work for the day at a cost of at most `limit`. First it
+// rollupCountDay does work for the day that starts at `start`, at a cost of at
+// most `limit`. First it
 // counts the callbacks after the saved position. When they are all counted, it
 // removes the seen rows of the day. When it removes the last of them, it sets
 // the mark and removes the position. It returns the cost. The cost is less
 // than `limit` only when the day is done.
-func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, limit int) (cost int, err error) {
-	start, err := time.Parse(rollupDayFmt, day)
-	if err != nil {
-		return 0, err
-	}
-	from, afterID := start.UnixMilli(), int64(0)
-	afterTS := from - 1
-	if pos, ok, err := metaGet(ctx, tx, rollupPosKey); err != nil {
+func rollupCountDay(ctx context.Context, tx *sql.Tx, start int64, limit int) (cost int, err error) {
+	day := rollupDay(start)
+	after := rollupPos{ts: start, id: -1}
+	if v, ok, err := metaGet(ctx, tx, rollupPosKey); err != nil {
 		return 0, err
 	} else if ok {
-		if afterTS, afterID, err = rollupPos(pos); err != nil {
+		if after, err = parseRollupPos(v); err != nil {
 			return 0, err
 		}
-		from = afterTS
 	}
-	end := start.AddDate(0, 0, 1).UnixMilli()
 	most := limit / rollupReadCost
 	if most == 0 {
 		return limit, nil
 	}
-	rows, err := tx.QueryContext(ctx, rollupCallbackSQL, from, end, afterTS, afterID, most)
+	rows, err := tx.QueryContext(ctx, rollupCallbackSQL, start+rollupDayMs, after.ts, after.id, most)
 	if err != nil {
 		return 0, err
 	}
 	counts := rollupCounts{}
-	var lastTS, lastID int64
+	var last rollupPos
 	read := 0
 	err = eachRow(rows, func() error {
-		var id, ts int64
 		k := rollupKey{day: day}
-		err := rows.Scan(&id, &ts, &k.vhost, &k.band, &k.family)
+		err := rows.Scan(&last.id, &last.ts, &k.vhost, &k.band, &k.family)
 		counts.of(k).callbacks++
-		lastTS, lastID = ts, id
 		read++
 		return err
 	})
@@ -381,8 +392,7 @@ func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, limit int) (cos
 		return 0, err
 	}
 	if read > 0 {
-		pos := strconv.FormatInt(lastTS, 10) + ":" + strconv.FormatInt(lastID, 10)
-		if _, err = execN(ctx, tx, metaSetSQL, rollupPosKey, pos); err != nil {
+		if _, err = execN(ctx, tx, metaSetSQL, rollupPosKey, last.String()); err != nil {
 			return 0, err
 		}
 	}
