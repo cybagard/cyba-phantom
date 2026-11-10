@@ -202,8 +202,8 @@ func unitOf(t time.Time) uint64 {
 // writes into a token and that the store keeps in a mint row. It is below 2^20.
 func Unit(t time.Time) uint32 { return uint32(unitOf(t)) }
 
-// Epoch is the start of unit 0 (ADR-036 decision 2). A time before it has a
-// unit near the top of the range.
+// Epoch is the start of unit 0 (ADR-036 decision 2). A time shortly before it
+// has a unit near the top of the range.
 func Epoch() time.Time { return time.Unix(epochUnix, 0).UTC() }
 
 // pack writes the plaintext block to b. The fields must be in range.

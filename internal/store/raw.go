@@ -150,7 +150,8 @@ func mintNone(context.Context, *sql.Tx, int) (int, error) { return 0, nil }
 // newMintStep returns the step that deletes the mint rows of the units before
 // the cutoff unit (SEC-39, ADR-038). The cutoff unit is the unit of tDel minus
 // `days` x 24 h. A cutoff before the token epoch gives a step that deletes no
-// row. Units are modulo 2^20, so such a cutoff reads as a cutoff ahead.
+// row. Units are modulo 2^20, so such a cutoff can read as a cutoff ahead of
+// the rows. Then young rows go.
 //
 // The step works for each set_id in turn. It keeps the position of the set_id
 // in memory. For each set_id and each range of mintRanges, oldest unit first,

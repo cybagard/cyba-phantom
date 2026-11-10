@@ -440,8 +440,8 @@ func TestTS34MintOldestUnitGoesFirst(t *testing.T) {
 }
 
 // T-S-34: a cutoff before the token epoch deletes nothing. The unit is modulo
-// 2^20, so such a cutoff reads as a cutoff ahead. With the real time, the old
-// row goes and the young rows stay.
+// 2^20, so such a cutoff can read as a cutoff ahead. With the real time, the
+// old row goes and the young rows stay.
 func TestTS34MintCutoffBeforeTheEpochDeletesNothing(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
