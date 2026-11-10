@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -32,6 +33,24 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 	"github.com/cybagard/cyba-phantom/internal/verify"
 )
+
+// shmTmpfsMagic is the filesystem type number of tmpfs in statfs(2). The file
+// of requireTmpfs has the same number, but only for Linux.
+const shmTmpfsMagic = 0x01021994
+
+// The tests start the store part with realDeps. Most are not about the disk
+// guard. The use of the disk of the host must not pause their writer. So the
+// test binary has no guard in realDeps. A test of the guard asks for one with
+// guarded. A package variable is set before init runs, so realOpenGuard holds
+// the guard of production that init removes.
+var realOpenGuard = realDeps.openGuard
+
+func init() { realDeps.openGuard = nil }
+
+func guarded(d startDeps) startDeps {
+	d.openGuard = realOpenGuard
+	return d
+}
 
 // opens counts the calls that open the log and the store, and the runs of the
 // migration. Its deps method gives the real parts to start.
@@ -849,4 +868,215 @@ func TestParamsOf(t *testing.T) {
 	if got := paramsOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("params %+v, want %+v", got, want)
 	}
+}
+
+// T-I-16: start opens the disk guard and gives it to the writer. The test shows
+// the second step: after the guard is closed, the writer reports failed checks.
+// A guard that does not open gives one log line with no path. The writer then
+// runs with no guard.
+func TestTI16_StartOpensTheGuard(t *testing.T) {
+	s, _ := launch(t, testParams(t, "events.db"), guarded(realDeps))
+	if s.guard == nil {
+		t.Fatal("start opened no guard")
+	}
+	if err := s.guard.Close(); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "failed disk check", func() bool { return s.writer.DiskCheckErrors() > 0 })
+	var buf bytes.Buffer
+	d := realDeps
+	d.openGuard = func(*os.Root, string) (*store.DiskGuard, error) { return nil, errors.New("/secret/path") }
+	s, _ = launchLog(t, testParams(t, "events.db"), d, slog.New(slog.NewTextHandler(&buf, nil)))
+	if s.guard != nil || !s.Healthy() || !strings.Contains(buf.String(), "disk guard does not open") || strings.Contains(buf.String(), "secret") {
+		t.Fatalf("guard %v, healthy %v, log %q", s.guard, s.Healthy(), buf.String())
+	}
+}
+
+// T-I-16 through the started store part, on a real small file system. At 92 %
+// use the store part is not healthy. The offers to the queue return. After the
+// fill file is gone, the store part is healthy again. Set PHANTOM_DISKFULL to
+// a directory on a tmpfs of at most 256 MiB. Else the test skips. The test of
+// the writer in internal/store shows the rows, the drops and the stop marker.
+func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
+	dir := os.Getenv("PHANTOM_DISKFULL")
+	if dir == "" {
+		t.Skip("PHANTOM_DISKFULL is not set: it names a directory on a small tmpfs")
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
+		t.Skipf("PHANTOM_DISKFULL is on a file system of %d MiB: the limit is 256 MiB", size>>20)
+	}
+	p := testParams(t, "events.db")
+	p.Root = filepath.Join(dir, "phantom-diskfull-"+filepath.Base(p.Root))
+	if err := os.Mkdir(p.Root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(p.Root) })
+	s, q := launch(t, p, guarded(realDeps))
+	if !s.Healthy() {
+		t.Fatal("not healthy at the start")
+	}
+	fill := filepath.Join(p.Root, "fill")
+	f, err := os.Create(fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	chunk := make([]byte, 256<<10)
+	var u float64
+	for i := 0; i < 1100; i++ {
+		if u, err = s.guard.Use(); err != nil {
+			t.Fatal(err)
+		}
+		if u >= 0.92 {
+			break
+		}
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if u < 0.92 {
+		t.Fatalf("the fill reached a use of %v, not 0.92", u)
+	}
+	until(t, "not healthy", func() bool { return !s.Healthy() })
+	// An offer never waits for the writer, so the request path serves.
+	begin := time.Now()
+	put(t, q, event.KindRequest, 3)
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("3 offers took %v while the writer paused", d)
+	}
+	until(t, "the drops", func() bool { return s.writer.Stats().Dropped.Bulk == 3 })
+	// An open file keeps its blocks, so close it before the remove.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fill); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "healthy again", s.Healthy)
+}
+
+// T-I-16 through a started sensor, with a real decoy request. The state
+// directory is on a small tmpfs and the writer has the real disk guard. At 92 %
+// use the writer pauses. A request for /page still gets status 200 and the
+// page of the bait handler. Its event is dropped and counted, the event table
+// gets no row for it, and there is no stop marker. After the fill file is gone,
+// the writer resumes and the next request has a row. Set PHANTOM_DISKFULL to
+// run it. The test fills /dev/shm, where startBait puts the state directory,
+// whatever PHANTOM_DISKFULL names. It skips when /dev/shm is not a tmpfs or is
+// larger than 256 MiB.
+func TestTI16_DecoyServesWhilePaused(t *testing.T) {
+	if os.Getenv("PHANTOM_DISKFULL") == "" {
+		t.Skip("PHANTOM_DISKFULL is not set: the test fills a small tmpfs")
+	}
+	old := realDeps
+	t.Cleanup(func() { realDeps = old })
+	var kept atomic.Pointer[store.Writer]
+	realDeps.openGuard = realOpenGuard
+	realDeps.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
+		w := old.newWriter(db, q, bp, lg, r, dk)
+		kept.Store(w)
+		return w
+	}
+	// startBait puts the state directory on /dev/shm. Fill only a small tmpfs.
+	var st syscall.Statfs_t
+	if runtime.GOOS != "linux" {
+		t.Skip("the test fills /dev/shm, a tmpfs of Linux")
+	}
+	if err := syscall.Statfs("/dev/shm", &st); err != nil {
+		t.Skipf("cannot read /dev/shm: %v", err)
+	}
+	if int64(st.Type) != shmTmpfsMagic {
+		t.Skip("/dev/shm is not a tmpfs")
+	}
+	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
+		t.Skipf("/dev/shm is a file system of %d MiB: the limit is 256 MiB", size>>20)
+	}
+	s := startBait(t, baitOpt{bundle: true, memory: true})
+	w := kept.Load()
+	if w == nil {
+		t.Fatal("start made no writer")
+	}
+	rows := func() int {
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(s.p.Root, s.p.StorePath)+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM event WHERE kind = 'request' AND vhost = ? AND path = '/page'", decoyName).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// The probe request of the start has its row. So no event of the start
+	// waits in the queue or in a batch. Its drop cannot count as the drop of
+	// the request below.
+	until(t, "the row of the start probe", func() bool { return rows() == 1 })
+	fill := filepath.Join(s.p.Root, "fill")
+	f, err := os.Create(fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	chunk := make([]byte, 256<<10)
+	var use float64
+	for i := 0; i < 1100 && use < 0.92; i++ {
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Statfs(s.p.Root, &st); err != nil {
+			t.Fatal(err)
+		}
+		use = 1 - float64(st.Bavail)/float64(st.Blocks)
+	}
+	if use < 0.92 {
+		t.Fatalf("the fill reached a use of %v, not 0.92", use)
+	}
+	until(t, "paused writer", w.Paused)
+	// The flush that sets the pause counts the drops of its batch after it sets
+	// the pause.
+	// Read the baseline when the count has not changed for more than 2 ticks
+	// of the writer (250 ms each).
+	const settle = 3 * 250 * time.Millisecond
+	dropped, since := w.Stats().Dropped.Bulk, time.Now()
+	for time.Since(since) <= settle {
+		if now := w.Stats().Dropped.Bulk; now != dropped {
+			dropped, since = now, time.Now()
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := rows()
+	page := fetch(t, s.https, decoyName, "/page", "")
+	if page.status != 200 || !strings.Contains(page.body, "<h1>page</h1>") || !strings.Contains(page.body, "bait note") {
+		t.Errorf("/page while paused: status %d, body %q; want 200 and the bait page", page.status, page.body)
+	}
+	until(t, "the drop of the request", func() bool { return w.Stats().Dropped.Bulk == dropped+1 })
+	// No other event counts later, and the writer wrote no row.
+	time.Sleep(settle)
+	if got := w.Stats().Dropped.Bulk; got != dropped+1 {
+		t.Errorf("bulk drops after the request: %d, want %d", got, dropped+1)
+	}
+	if got := rows(); got != before {
+		t.Errorf("/page rows while paused: %d, want %d", got, before)
+	}
+	if _, err := os.Lstat(filepath.Join(s.p.Root, "writer.stop")); !errors.Is(err, fs.ErrNotExist) || !w.Healthy() {
+		t.Errorf("stop marker: %v, healthy %v; want none and true", err, w.Healthy())
+	}
+	// An open file keeps its blocks, so close it before the remove.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fill); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "resumed writer", func() bool { return !w.Paused() })
+	if r := fetch(t, s.https, decoyName, "/page", ""); r.status != 200 {
+		t.Errorf("/page after the resume: status %d, want 200", r.status)
+	}
+	until(t, "the row of the request", func() bool { return rows() == before+1 })
+	s.stop(t)
 }

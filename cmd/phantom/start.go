@@ -48,6 +48,10 @@ type startDeps struct {
 	newCheckpointer func(*tlog.Log, note.Signer, note.Verifier, tlog.NoteSink,
 		*os.Root, string, time.Duration, *slog.Logger) (*tlog.Checkpointer, error)
 	runCheckpointer func(context.Context, *tlog.Checkpointer)
+	// openGuard opens the disk guard of the writer (SEC-40). Nil means no
+	// guard. A test that is not about the pause sets nil. Then a full host
+	// disk does not pause its writer.
+	openGuard func(*os.Root, string) (*store.DiskGuard, error)
 }
 
 var realDeps = startDeps{
@@ -57,6 +61,7 @@ var realDeps = startDeps{
 	newWriter:       store.NewWriterWithDayKey,
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
+	openGuard:       store.OpenDiskGuard,
 }
 
 // paramsOf reads the values of the store start from the loaded config.
@@ -93,6 +98,7 @@ type storePart struct {
 	root   *os.Root
 	log    *tlog.Log
 	db     *sql.DB
+	guard  *store.DiskGuard // nil when there is no disk guard
 	sink   *store.Sink
 	cp     *tlog.Checkpointer // nil when the checkpointer did not start
 	cancel context.CancelFunc // stops the checkpointer
@@ -106,7 +112,10 @@ type storePart struct {
 func (s *storePart) DayKey() *session.DayKey { return s.dk }
 
 // Healthy tells if the store part works: false with no writer, else the health of the writer.
-func (s *storePart) Healthy() bool { return s.writer != nil && s.writer.Healthy() }
+// It is also false while the writer pauses for a full disk (SEC-40).
+func (s *storePart) Healthy() bool {
+	return s.writer != nil && s.writer.Healthy() && !s.writer.Paused()
+}
 
 // TlogHealthy tells if the checkpointer started and is healthy. Healthy does not show the checkpointer.
 func (s *storePart) TlogHealthy() bool { return s.cp != nil && s.cp.Healthy() }
@@ -133,6 +142,13 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 	}
 	if s.db != nil {
 		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log}, s.dk)
+		if d.openGuard != nil {
+			if s.guard, err = d.openGuard(s.root, p.TlogDir); err != nil {
+				lg.Error("disk guard does not open")
+				s.guard = nil
+			}
+			s.writer.SetDiskGuard(s.guard)
+		}
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
@@ -283,6 +299,9 @@ func (s *storePart) Stop() {
 	s.ckpt.Wait()
 	s.q.Close()
 	s.wg.Wait()
+	if s.guard != nil {
+		s.guard.Close()
+	}
 	if s.db != nil {
 		s.db.Close()
 	}
