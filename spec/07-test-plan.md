@@ -68,7 +68,7 @@ Five layers, each gating the next. Everything runs in CI except soak, which runs
 | T-I-13 | FR-11 | Retention job with clock advanced 91 days; DB size (database file + WAL bytes) ≤ cap; aggregates intact |
 | T-I-14 | FR-16, SEC-18 | `phantom-verify` accepts event + checkpoint from T-I-06; rejects modified event |
 | T-I-15 | FR-15, NFR-08 | `/metrics` exposes `phantom_dropped_events_total`, `phantom_queue_depth`, `phantom_band_sessions{band=}`, `phantom_tlog_write_failed_total` |
-| T-I-16 | SEC-40, NFR-04 | Disk pause (ADR-040). Fill a small file system to 92 %: no new row and no append, and drops counted for each lane. The decoy serves, the store reports not healthy, and no stop marker exists. Free the space: below 85 %, rows are written again. The measure reads blocks and inodes through open descriptors |
+| T-I-16 | SEC-40, NFR-04 | Disk pause (ADR-040). Fill a small file system to 92 %: no new event row and no append, and drops counted for each lane. A shutdown during the pause writes the drop counts in one counts-only transaction. The decoy serves, the store reports not healthy, and no stop marker exists. Free the space: below 85 %, rows are written again. The measure reads blocks and inodes through open descriptors |
 
 ### Performance (cgroup: 1 CPU, 512 MB)
 | ID | Covers | Load | Pass |
