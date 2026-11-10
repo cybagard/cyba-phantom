@@ -255,8 +255,9 @@ func seedDays(t *testing.T, db *sql.DB) {
 	addEvents(t, db, "callback", 4, utc("2027-01-11T01:00:00Z"), 1000, "s1", "a")
 }
 
-// wantDays is the result of the day step tests after a full run. The callbacks
-// of the two done days are counted. The other day has no callback count.
+// wantDays is the result of the day step tests after a full run. The day step
+// counts the callbacks of the two done days. The other day has no callback
+// count.
 const wantDays = "2027-01-02|a|human|f|0|0|2 ; 2027-01-10||human||0|0|1 ; " +
 	"2027-01-10|a|human|f|1|3|2500 ; 2027-01-11|a|human|f|1|2|0"
 
@@ -297,7 +298,7 @@ func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 
 // T-U-11: a crash between two roll-up chunks gives the counts of a clean run.
 // Two sessions have rows in many chunks. The failed chunk rolls back with its
-// pairs and its deletes.
+// pairs and its removed rows.
 func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 	seed := func(r *rig) {
 		addSession(t, r.db, "s1", "human", "f")
@@ -324,8 +325,8 @@ func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 }
 
 // T-U-11: a day step that runs before the roll-up step does nothing. A request
-// row before the cutoff is left, so no day is done. No callback is counted, and
-// no seen row or mark changes.
+// row before the cutoff stays, so no day is done. The step counts no callback,
+// and no seen row or mark changes.
 func TestTU11RollupDayStepWaitsForTheRollup(t *testing.T) {
 	r, _ := rollRig(t, newRollupDayStep(rollTDel, 30), newRollupStep(rollTDel, 30))
 	seedDays(t, r.db)
@@ -521,7 +522,7 @@ func TestTU11RollupDayStepKeepsAFarDay(t *testing.T) {
 }
 
 // T-U-11: a seen day older than the first callback day after the mark is done
-// first. A call of 2 deletes its 2 seen rows and counts no callback. A call
+// first. A call of 2 removes its 2 seen rows and counts no callback. A call
 // with limit 0 reads nothing, also with a bad mark.
 func TestTU11RollupDayStepTakesTheOlderDayFirst(t *testing.T) {
 	db := migrated(t)
@@ -541,8 +542,9 @@ func TestTU11RollupDayStepTakesTheOlderDayFirst(t *testing.T) {
 	}
 }
 
-// T-U-11: a row that cannot be read stops the roll-up step with an error. Here
-// the ts is a real number, so the scan fails. The rows are closed.
+// T-U-11: a row that the step cannot read stops the roll-up step with an
+// error. Here the ts is a real number, so the scan fails. The step closes the
+// rows.
 func TestTU11RollupStepReportsAScanError(t *testing.T) {
 	db := migrated(t)
 	mustExec(t, db, "INSERT INTO event (ts, kind) VALUES (1.5, 'request')")
@@ -778,15 +780,23 @@ func rollBenchState(b *testing.B, n, per int, tDel time.Time) string {
 	for off := 0; off < n; off += 100_000 {
 		last := off + min(100_000, n-off) - 1
 		mustExec(b, db, rec+`INSERT INTO event (ts, session_id, kind, vhost)
-			SELECT ? + i*?, 's' || (i / ?), 'request', 'v' || (i % 3) FROM c`, off, last, base, step, per)
-		mustExec(b, db, rec+`INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) SELECT 's' || i, 0, 0, 'h',
+			SELECT ? + i*?, `+rollSID(fmt.Sprint("i / ", per))+`, 'request', 'v' || (i % 3) FROM c`, off, last, base, step)
+		mustExec(b, db, rec+`INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) SELECT `+rollSID("i")+`, 0, 0, 'h',
 			CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c`,
 			off/per, last/per)
 		mustExec(b, db, rec+`INSERT INTO event (ts, session_id, kind, vhost, hash, leaf_index)
-			SELECT ? + i*?, 's' || (i % 7), 'callback', 'v' || (i % 3), zeroblob(32), i FROM c`, off/200, last/200, base, step*200)
+			SELECT ? + i*?, `+rollSID("i % 7")+`, 'callback', 'v' || (i % 3), zeroblob(32), i FROM c`, off/200, last/200, base, step*200)
 	}
 	mustExec(b, db, "PRAGMA ignore_check_constraints=OFF")
 	return state
+}
+
+// rollSID returns the SQL text of a session id for the session number j. The
+// id is like a real one: 26 characters, scattered, and unique for each j below
+// 2^32. The first half is a product of j with an odd number, so it differs
+// for each j.
+func rollSID(j string) string {
+	return fmt.Sprintf("printf('%%013x%%013x', (%[1]s) * 2654435761 %% 4294967296 * 1000003, (%[1]s) * 2246822519 %% 4294967296 * 1000033)", j)
 }
 
 // check fails the test or benchmark on an error.

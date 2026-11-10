@@ -276,7 +276,7 @@ func schemaEntries(t *testing.T, db *sql.DB) map[string]schemaEntry {
 // T-U-11: a database of schema 2 with a row in each table gets schema 4. Each
 // old entry keeps its SQL text and its root page, so no table is rebuilt. The
 // row counts stay. The only new entries are the two indexes and rollup_seen.
-func TestTU11MigrationAddsTwoIndexesWithoutRebuild(t *testing.T) {
+func TestTU11MigrationAddsTwoIndexesAndTheSeenTableWithoutRebuild(t *testing.T) {
 	root, _, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })

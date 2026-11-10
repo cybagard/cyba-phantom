@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	// rollupDoneKey is the meta key of the last day that is done. The
-	// callbacks of that day are counted. Its rollup_seen rows are gone.
+	// rollupDoneKey is the meta key of the last day that is done. The day
+	// step counts the callbacks of that day and removes its rollup_seen rows.
 	// rollupPosKey is the meta key of the last callback counted in the day
 	// in progress. It holds the ts and the id, as ts:id. The day step
 	// removes it when the day is done.
@@ -78,8 +78,8 @@ func rollupRefused(context.Context, *sql.Tx, int) (int, error) {
 // These costs bound the rows that a piece of work changes. A step returns the
 // sum of them, so the count is at least the rows changed (see retentionStep).
 const (
-	// rollupRowCost is for a request row: its event delete, its seen row and
-	// its share of the aggregate_day upserts.
+	// rollupRowCost is for a request row: the step deletes the event, adds a
+	// seen row, and does its share of the aggregate_day upserts.
 	rollupRowCost = 3
 	// rollupReadCost is for a callback: the read and its share of the upserts
 	// and of the position write.
