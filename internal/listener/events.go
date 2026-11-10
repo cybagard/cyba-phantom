@@ -18,10 +18,9 @@ type recorder struct {
 
 // record makes the event from r and from code (the status that the handler
 // writes). vhost is the configured name that the Host matched, or "" when it
-// matched none. The event has no vhost for "". It never holds the Host
-// (SEC-41).
-// record never reads the body, a forwarded header, or the protocol fields
-// of r. The fingerprint values stay empty. The path is the value of
+// matched none. The event has no vhost for "". record never stores the Host
+// (SEC-41). record never reads the body, a forwarded header, or the protocol
+// fields of r. The fingerprint values stay empty. The path is the value of
 // event.RequestPath: it keeps each escape, with upper-case hex digits, and
 // holds no control byte. A NewEvent error adds one to errs. A full queue
 // counts its own drop. The call never waits.

@@ -627,6 +627,7 @@ var hostShapes = []struct{ name, host, want string }{
 	{"253 bytes", strings.Repeat("a", 253), ""},
 	{"257 bytes", strings.Repeat("a", 257), ""},
 	{"NUL escape", "x%00y.example", ""},
+	{"sub-delimiters", "decoy.test!$&'()*+,;=", ""},
 }
 
 func vhostOf(rec event.Record) string {
@@ -660,6 +661,34 @@ func TestTS35HelloStoresMatchedName(t *testing.T) {
 		rd, _ := serveRaw(t, NewRedirect(list), &http.Request{Method: "GET", Host: tc.host})
 		if resp.StatusCode != code || rd.StatusCode != rcode {
 			t.Errorf("%s: status %d and redirect %d, want %d and %d", tc.name, resp.StatusCode, rd.StatusCode, code, rcode)
+		}
+	}
+}
+
+// T-S-35: a method other than GET and HEAD gets 405 for a configured name and
+// 404 for another Host. The event holds the matched name, or none.
+func TestTS35HelloStoresMatchedNameMethods(t *testing.T) {
+	list := []string{"decoy.test", "kilo.example"}
+	for _, tc := range []struct {
+		method, host string
+		status       int
+		want         string
+	}{
+		{"POST", "DECOY.test:443", 405, "decoy.test"},
+		{"DELETE", "decoy.test:abc", 404, ""},
+		{"PUT", "KILO.example", 405, "kilo.example"},
+	} {
+		q, err := event.NewQueue(4, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, _ := serveRaw(t, NewHelloHandler(list, q), &http.Request{Method: tc.method, Host: tc.host})
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("%s %s: %d events", tc.method, tc.host, len(evs))
+		}
+		if got := vhostOf(evs[0].Record()); resp.StatusCode != tc.status || got != tc.want {
+			t.Errorf("%s %s: status %d, stored vhost %q, want %d and %q", tc.method, tc.host, resp.StatusCode, got, tc.status, tc.want)
 		}
 	}
 }
