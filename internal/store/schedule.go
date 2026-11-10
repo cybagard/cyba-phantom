@@ -14,7 +14,7 @@ const (
 	runHour, runMinute = 3, 15
 
 	// runLimit is the time that one run can take, with its checkpoint. When
-	// this time ends, the run ends early. The next run continues from the marks.
+	// this time ends, the run ends early. The next run continues from marks.
 	runLimit = 6 * time.Hour
 
 	// runGap is the monotonic time between two runs that checks start. Days are
