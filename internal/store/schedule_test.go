@@ -242,8 +242,8 @@ func TestTU27WallStepBackRunsOnEachLaterDay(t *testing.T) {
 }
 
 // T-U-27: a step of +2 d, then a step of -2 d in the same process, after more
-// than 2 d of uptime. The step forward gives no run 9 h after a run. The checks
-// after the step back give one run for each later day.
+// than 2 d of uptime. The step forward gives no run 9 h after a run. After the
+// step back, each later day gives one run.
 func TestTU27StepsForwardAndBackInTheProcess(t *testing.T) {
 	s, f, runs := stepRig(t, day10, time.Hour)
 	minutes(s, f, 24*60)
@@ -257,9 +257,9 @@ func TestTU27StepsForwardAndBackInTheProcess(t *testing.T) {
 	wantRuns(t, runs, "02-11 03:15", "02-14 03:15", "02-13 03:15", "02-14 03:15")
 }
 
-// T-U-27: a later day starts a run only when 20 h of monotonic time passed
-// since the last run. A step of +2 d, 1 h after a run, gives no run. The next
-// retention day, 20 h later, gives one run.
+// T-U-27: a later day starts a run after 20 h of monotonic time since the last
+// run. A step of +2 d, 1 h after a run, gives no run. The next retention day,
+// 23 h later, gives one run.
 func TestTU27GapHoldsBackTheRunAfterAStepForward(t *testing.T) {
 	s, f, runs := stepRig(t, time.Date(2027, 2, 10, 3, 14, 0, 0, time.UTC), time.Hour)
 	minutes(s, f, 1)
