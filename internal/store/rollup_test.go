@@ -132,10 +132,10 @@ func replaceWriter(r *rig) {
 	r.w.tick, r.w.clock = r.tick, old.clock
 }
 
-// T-U-11: a run takes the old request rows in chunks of 1 000 and deletes them.
-// The key rows add. The session with rows in both runs counts one time, as the
-// cutoff splits its day. A row at the cutoff stays. A run again changes no
-// count.
+// T-U-11: a run takes the old request rows in chunks of 333 rows (a count of
+// 1 000) and deletes them. The key rows add. The session with rows in both runs
+// counts one time, as the cutoff splits its day. A row at the cutoff stays. A
+// run again changes no count.
 func TestTU11RollupMovesRowsInChunksAndAdds(t *testing.T) {
 	r, chunks := rollRig(t, newRollupStep(rollTDel, 30))
 	cut := rollCutoff(30)
@@ -235,6 +235,10 @@ func TestTS34RollupNullKeys(t *testing.T) {
 	want = "2027-01-09||agent-likely||1|5|0 ; 2027-01-09||human||0|5|0 ; 2027-01-09|v|human||1|5|0"
 	if got := aggregates(t, r.db); got != want || !r.w.Healthy() || r.events() != 0 {
 		t.Fatalf("second run: aggregates %q, healthy %v, %d rows left; want %q", got, r.w.Healthy(), r.events(), want)
+	}
+	runAgain(t, r, newRollupStep(rollTDel, 30))
+	if got := aggregates(t, r.db); got != want || !r.w.Healthy() {
+		t.Fatalf("third run with no new row: aggregates %q, healthy %v; want %q", got, r.w.Healthy(), want)
 	}
 }
 
@@ -448,19 +452,23 @@ func dayState(t *testing.T, db *sql.DB) string {
 }
 
 // T-U-11: removing seen rows uses the row limit of a call, at a cost of 1 for
-// each row. A done day has 5 seen rows and no callback. Two calls of 2 remove
-// 4 of them. A call of 3 removes the last one. It has room for the end of the
-// day (cost 2) and sets the mark. A call that counts no callback saves no
-// position. Then a day has 3 callbacks and 4 seen rows. A call of 5 counts 2
+// each row. A done day has 5 seen rows and no callback. The first call saves
+// the position (cost 1) and removes 1 row. The next calls of 2 and 3 remove 2
+// rows each. The last call has room for the end of the day (cost 2) and sets
+// the mark. Then a day has 3 callbacks and 4 seen rows. A call of 5 counts 2
 // callbacks. The next call counts the third and removes 3 seen rows. The last
 // call removes 1 seen row and sets the mark.
 func TestTU11RollupDayStepSeenRowsUseTheRowLimit(t *testing.T) {
 	db := migrated(t)
 	addSeen(t, db, "2027-01-08", 5)
-	for i, want := range []string{" seen=3 cb=0", " seen=1 cb=0", "retention_rollup_done=2027-01-08 seen=0 cb=0"} {
-		call(t, db, rollDay, min(2+i/2, 3))
-		if got := dayState(t, db); got != want {
-			t.Fatalf("state %q; want %q", got, want)
+	pos := "retention_rollup_pos=" + fmt.Sprint(utc("2027-01-08T00:00:00Z")) + ":-1"
+	for _, c := range []struct {
+		limit int
+		want  string
+	}{{2, pos + " seen=4 cb=0"}, {2, pos + " seen=2 cb=0"}, {3, pos + " seen=0 cb=0"}, {3, "retention_rollup_done=2027-01-08 seen=0 cb=0"}} {
+		call(t, db, rollDay, c.limit)
+		if got := dayState(t, db); got != c.want {
+			t.Fatalf("state %q; want %q", got, c.want)
 		}
 	}
 	addSeen(t, db, "2027-01-09", 4)
@@ -480,14 +488,16 @@ func TestTU11RollupDayStepSeenRowsUseTheRowLimit(t *testing.T) {
 
 // T-U-11: a callback at the first or the last ms of a UTC day counts one time.
 // It counts under its own day. Calls of 2 callbacks cross the midnights and a
-// saved position.
+// saved position. The first row of the database (id 1) is at the first ms of a
+// day.
 func TestTU11RollupDayStepCountsDayEdges(t *testing.T) {
 	db := migrated(t)
+	addEvents(t, db, "callback", 1, utc("2027-01-08T00:00:00Z"), 0, nil, nil)
 	addEvents(t, db, "callback", 2, utc("2027-01-09T00:00:00Z")-1, 1, nil, nil)
 	addEvents(t, db, "callback", 2, utc("2027-01-10T00:00:00Z")-1, 1, nil, nil)
 	for i := 0; i < 20 && call(t, db, rollDay, 2) > 0; i++ {
 	}
-	want := "2027-01-08||human||0|0|1 ; 2027-01-09||human||0|0|2 ; 2027-01-10||human||0|0|1"
+	want := "2027-01-08||human||0|0|2 ; 2027-01-09||human||0|0|2 ; 2027-01-10||human||0|0|1"
 	if got := aggregates(t, db); got != want {
 		t.Fatalf("aggregates %q; want %q", got, want)
 	}
@@ -521,15 +531,94 @@ func TestTU11RollupDayStepKeepsAFarDay(t *testing.T) {
 	}
 }
 
+// T-U-11: a day in UTC year 10000 is never done. This holds when its end is
+// before the cutoff, as with a wall clock far ahead. It makes no seen row, and
+// the step counts no callback of it. The request row of the day rolls up. The
+// run ends healthy, and a second run changes nothing.
+func TestTU11RollupDayStepKeepsAFarDayBeforeTheCutoff(t *testing.T) {
+	tDel := time.Date(10000, 3, 1, 12, 0, 0, 0, time.UTC)
+	r, _ := rollRig(t, newRollupStep(tDel, 30), newRollupDayStep(tDel, 30))
+	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	addEvents(t, r.db, "callback", 1, utc("2027-01-09T12:00:00Z"), 0, nil, "a")
+	addEvents(t, r.db, "callback", 1, far, 0, nil, "a")
+	addEvents(t, r.db, "request", 1, far, 0, "s1", "a")
+	want := "10000-01-01|a|human||0|1|0 ; 2027-01-09|a|human||0|0|1"
+	for run := 1; run <= 2; run++ {
+		if run == 2 {
+			runAgain(t, r, newRollupStep(tDel, 30), newRollupDayStep(tDel, 30))
+		} else {
+			runOK(t, r)
+		}
+		if got := aggregates(t, r.db); got != want || dayState(t, r.db) != "retention_rollup_done=2027-01-09 seen=0 cb=1" || !r.w.Healthy() {
+			t.Fatalf("run %d: aggregates %q, state %q, healthy %v; want %q", run, got, dayState(t, r.db), r.w.Healthy(), want)
+		}
+	}
+}
+
+// T-U-11: callbacks at one ms count one time each, also when the calls split
+// the group. A limit of 4 reads 2 callbacks for each call, so the 5 callbacks
+// at one ms need 3 calls. The saved position holds the ts and the id.
+func TestTU11RollupDayStepSplitsCallbacksOfOneMs(t *testing.T) {
+	db := migrated(t)
+	addEvents(t, db, "callback", 5, utc("2027-01-09T12:00:00Z"), 0, nil, "a")
+	for i := 0; i < 20 && call(t, db, rollDay, 4) > 0; i++ {
+	}
+	if got := aggregates(t, db); got != "2027-01-09|a|human||0|0|5" {
+		t.Fatalf("aggregates %q; want 5 callbacks", got)
+	}
+}
+
+// T-U-11: a stale seen row at the mark day does not make the step count that
+// done day again. The step removes the row when it does a later day.
+func TestTU11RollupDayStepDropsAStaleSeenRowAtTheMark(t *testing.T) {
+	db := migrated(t)
+	ts := utc("2027-01-09T12:00:00Z")
+	mustExec(t, db, "INSERT INTO aggregate_day VALUES ('2027-01-09', 'a', 'human', '', 0, 0, 1)")
+	mustExec(t, db, metaSetSQL, rollupDoneKey, "2027-01-09")
+	addEvents(t, db, "callback", 1, ts, 0, nil, "a")
+	addEvents(t, db, "callback", 1, ts+86_400_000, 0, nil, "a")
+	addSeen(t, db, "2027-01-09", 1)
+	call(t, db, rollDay, 100)
+	if got := aggregates(t, db); got != "2027-01-09|a|human||0|0|1 ; 2027-01-10|a|human||0|0|1" ||
+		dayState(t, db) != "retention_rollup_done=2027-01-10 seen=0 cb=2" {
+		t.Fatalf("aggregates %q, state %q", got, dayState(t, db))
+	}
+}
+
+// T-U-11: a late request row adds no session when the day step has begun to
+// remove the seen rows of its day. Five sessions roll up. A call of 3 removes
+// some of the 5 seen rows. A late row of one old and one new session then rolls
+// up.
+func TestTU11RollupLateRowOfAClosingDayAddsNoSession(t *testing.T) {
+	db := migrated(t)
+	ts := utc("2027-01-08T01:00:00Z")
+	for i := 0; i < 5; i++ {
+		addEvents(t, db, "request", 1, ts+int64(i)*1000, 0, fmt.Sprint("s", i), "a")
+	}
+	call(t, db, newRollupStep(rollTDel, 30), 1000)
+	call(t, db, rollDay, 3)
+	if seen := count(t, db, "SELECT count(*) FROM rollup_seen"); seen == 0 || seen == 5 {
+		t.Fatalf("%d seen rows after the first call; want some, not all", seen)
+	}
+	addEvents(t, db, "request", 1, ts+10_000, 0, "s0", "a")
+	addEvents(t, db, "request", 1, ts+11_000, 0, "s9", "a")
+	call(t, db, newRollupStep(rollTDel, 30), 1000)
+	for i := 0; i < 5 && call(t, db, rollDay, 1000) > 0; i++ {
+	}
+	if got := aggregates(t, db); got != "2027-01-08|a|human||5|7|0" || count(t, db, "SELECT count(*) FROM rollup_seen") != 0 {
+		t.Fatalf("aggregates %q; want 5 sessions and 7 requests, and no seen row", got)
+	}
+}
+
 // T-U-11: a seen day older than the first callback day after the mark is done
-// first. A call of 2 removes its 2 seen rows and counts no callback. A call
-// with limit 0 reads nothing, also with a bad mark.
+// first. A call of 3 saves the position, removes its 2 seen rows and counts no
+// callback. A call with limit 0 reads nothing, also with a bad mark.
 func TestTU11RollupDayStepTakesTheOlderDayFirst(t *testing.T) {
 	db := migrated(t)
 	addSeen(t, db, "2027-01-05", 2)
 	addEvents(t, db, "callback", 1, utc("2027-01-07T12:00:00Z"), 0, nil, nil)
-	call(t, db, rollDay, 2)
-	if got := dayState(t, db); got != " seen=0 cb=0" {
+	call(t, db, rollDay, 3)
+	if got := dayState(t, db); got != "retention_rollup_pos="+fmt.Sprint(utc("2027-01-05T00:00:00Z"))+":-1 seen=0 cb=0" {
 		t.Fatalf("after the first call: %q", got)
 	}
 	call(t, db, rollDay, 9)

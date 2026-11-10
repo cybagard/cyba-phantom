@@ -97,6 +97,28 @@ func rollupDayStart(ts int64) int64 { return ts - (ts%rollupDayMs+rollupDayMs)%r
 // rollupDay returns the UTC date of a time in unix ms.
 func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupDayFmt) }
 
+// rollupFarMs is the start of UTC year 10000 in unix ms. The date text of a
+// later day has 5 digits for the year. The day step never does such a day.
+var rollupFarMs = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+
+// rollupFloor returns the last date text that the roll-up step treats as done.
+// It is the mark, or the date of the saved position when that is later.
+func rollupFloor(ctx context.Context, tx *sql.Tx) (string, error) {
+	floor, _, err := metaGet(ctx, tx, rollupDoneKey)
+	if err != nil {
+		return "", err
+	}
+	v, ok, err := metaGet(ctx, tx, rollupPosKey)
+	if err != nil || !ok {
+		return floor, err
+	}
+	pos, err := parseRollupPos(v)
+	if err != nil {
+		return "", err
+	}
+	return max(floor, rollupDay(pos.ts)), nil
+}
+
 // newRollupStep returns the roll-up step for the request rows (SEC-39). It
 // takes the rows with ts before tDel minus `days` x 24 h. The step reads no
 // clock. Each request row costs 3 changed rows. Thus each call takes at most
@@ -118,7 +140,10 @@ func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupD
 // The day step removes the pairs of a day when the day is done. A row of a
 // day at or before the mark rollupDoneKey still rolls up (a wall clock step
 // back). It counts as a request. It adds no pair and no session, as no step
-// would remove the pair.
+// would remove the pair. The same holds for a day at or before the day of the
+// saved position rollupPosKey. The day step has begun to remove its pairs.
+// A row after year 9999 rolls up with no pair and no session. Its day is
+// never done.
 //
 // With days outside 1 to 30, or a zero tDel, the step runs no statement and
 // returns an error. The runner then stops the writer.
@@ -132,12 +157,13 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 			id  int64
 			key rollupKey
 			sid sql.NullString
+			far bool
 		}
 		most := limit / rollupRowCost
 		if most == 0 {
 			return limit, nil
 		}
-		mark, _, err := metaGet(ctx, tx, rollupDoneKey)
+		floor, err := rollupFloor(ctx, tx)
 		if err != nil {
 			return 0, err
 		}
@@ -150,7 +176,7 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 			var p picked
 			var ts int64
 			err := rows.Scan(&p.id, &ts, &p.key.vhost, &p.sid, &p.key.band, &p.key.family)
-			p.key.day = rollupDay(ts)
+			p.key.day, p.far = rollupDay(ts), ts >= rollupFarMs
 			batch = append(batch, p)
 			return err
 		})
@@ -161,7 +187,7 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 		for _, p := range batch {
 			c := counts.of(p.key)
 			c.requests++
-			if p.sid.Valid && p.key.day > mark {
+			if p.sid.Valid && p.key.day > floor && !p.far {
 				n, err := execN(ctx, tx, rollupSeenSQL, p.key.day, p.key.vhost, p.key.band, p.key.family, p.sid.String)
 				if err != nil {
 					return 0, err
@@ -248,7 +274,7 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 // end of a day costs 2. Thus the cost is at least the rows that the call
 // changes. A day with many callbacks takes several calls. The step saves the
 // position in the day in the meta key rollupPosKey, in the transaction of the
-// counts. Thus no callback counts two times, and none is missed. The step
+// counts. Thus no callback counts two times, and the step misses none. The step
 // does not visit a day with no callback and no seen row. It looks for the next
 // day with data.
 //
@@ -271,7 +297,7 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 				break
 			}
 			if start <= last {
-				// No input can cause this: an invariant is broken.
+				// No input can cause this: the code broke an invariant.
 				return 0, fail(writerName, ruleDatabase)
 			}
 			used, err := rollupCountDay(ctx, tx, start, left)
@@ -294,8 +320,9 @@ var rollupPickDay = rollupNextDay
 // rollupNextDay returns the start of the next day to work on, in unix ms. This
 // is the day in progress, or the first day with a callback or a seen row after
 // the mark. ok is false in three cases. There is no such day. Or a request row
-// before the cutoff is left. Or the day is not over at the cutoff. The step
-// parses no day text of a day that is not done.
+// before the cutoff is left. Or the day is not over at the cutoff. A day after
+// year 9999 is never over. The step parses no day text of a day that is not
+// done.
 func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (start int64, ok bool, err error) {
 	var one int
 	if left, err := scanOne(tx.QueryRowContext(ctx, rollupLeftSQL, cutoff), &one); left || err != nil {
@@ -314,7 +341,7 @@ func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (start int64, 
 	} else if start, ok, err = rollupFirstDay(ctx, tx); err != nil || !ok {
 		return 0, false, err
 	}
-	return start, start+rollupDayMs <= cutoff, nil
+	return start, start+rollupDayMs <= cutoff && start < rollupFarMs, nil
 }
 
 // rollupFirstDay returns the start of the first day after the mark that has a
@@ -372,17 +399,19 @@ func parseRollupPos(v string) (p rollupPos, err error) {
 }
 
 // rollupCountDay does work for the day that starts at `start`, at a cost of at
-// most `limit`. First it
-// counts the callbacks after the saved position. When they are all counted, it
-// removes the seen rows of the day. When it removes the last of them, it sets
-// the mark and removes the position. It returns the cost. The cost is less
-// than `limit` only when the day is done.
+// most `limit`. First it counts the callbacks after the saved position. When
+// they are all counted, it saves the position if none is saved. This tells the
+// roll-up step that the day is closing. Then it removes the seen rows of the
+// day. When it removes the last of them, it sets the mark and removes the
+// position. It returns the cost. The cost is less than `limit` only when the
+// day is done.
 func rollupCountDay(ctx context.Context, tx *sql.Tx, start int64, limit int) (cost int, err error) {
 	day := rollupDay(start)
-	after := rollupPos{ts: start, id: -1}
+	after, saved := rollupPos{ts: start, id: -1}, false
 	if v, ok, err := metaGet(ctx, tx, rollupPosKey); err != nil {
 		return 0, err
 	} else if ok {
+		saved = true
 		if after, err = parseRollupPos(v); err != nil {
 			return 0, err
 		}
@@ -420,6 +449,12 @@ func rollupCountDay(ctx context.Context, tx *sql.Tx, start int64, limit int) (co
 		return limit, nil
 	}
 	cost = read * rollupReadCost
+	if read == 0 && !saved {
+		if _, err = execN(ctx, tx, metaSetSQL, rollupPosKey, after.String()); err != nil {
+			return 0, err
+		}
+		cost++
+	}
 	n, err := execN(ctx, tx, rollupDropSeenSQL, day, limit-cost)
 	if err != nil {
 		return 0, err
