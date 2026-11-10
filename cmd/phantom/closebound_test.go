@@ -38,16 +38,18 @@ type closeRun struct {
 }
 
 // launchClose runs serve with the real parts, except that the checkpointer
-// runs the function run. run gets the context and the checkpointer.
-// The served seam runs when a serve call returns, before serve waits for
-// both calls. The test uses the time of the last call as the start of the
-// close wait.
-func launchClose(t *testing.T, run func(context.Context, *tlog.Checkpointer, *event.Queue)) *closeRun {
+// runs the function run. run gets the context, the checkpointer and the queue.
+// The served seam runs when a serve call returns, before wg.Wait in serve
+// returns. It first sleeps for slow, so the first phase of the stop takes
+// at least that time. The test uses the time of the last call as the start
+// of the close wait.
+func launchClose(t *testing.T, slow time.Duration, run func(context.Context, *tlog.Checkpointer, *event.Queue)) *closeRun {
 	t.Helper()
 	oldServed := served
 	t.Cleanup(func() { served = oldServed })
 	c := &closeRun{}
 	served = func() {
+		time.Sleep(slow)
 		now := time.Now()
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -78,6 +80,8 @@ var storeStopName = runtime.FuncForPC(reflect.ValueOf((*storePart).Stop).Pointer
 
 // closeInStop tells if a goroutine is in storePart.Stop. It reads the stack
 // dump of all goroutines, and doubles the buffer until the dump fits.
+// It scans all goroutines of the test binary, so it is correct only while
+// no test of the package runs in parallel.
 func closeInStop() bool {
 	buf := make([]byte, 1<<16)
 	for {
@@ -125,14 +129,13 @@ func TestTU18_CloseTimeIsBound(t *testing.T) {
 // at the cancel. Serve must return after boundTime, with exit 1 and one fixed
 // line. The wait runs from the return of the last serve call, which is before
 // the timer of serve starts. The upper limit is boundTime plus closeMargin.
-// The test does not use a longer timeout to pass. Before the end, the test
-// checks that the close goroutine is still in storePart.Stop. Then it releases
-// the checkpointer and waits for that goroutine, so no file stays open.
+// The d check, not the guard of waitServeEnd, proves the bound. Before the
+// end, the test checks that the close goroutine is still in storePart.Stop.
+// Then it releases the checkpointer and waits for that goroutine, so no file
+// stays open.
 func TestTU18_CloseBound(t *testing.T) {
 	release, entered := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	free := func() { once.Do(func() { close(release) }) }
-	c := launchClose(t, func(ctx context.Context, _ *tlog.Checkpointer, _ *event.Queue) {
+	c := launchClose(t, 0, func(ctx context.Context, _ *tlog.Checkpointer, _ *event.Queue) {
 		close(entered)
 		<-ctx.Done()
 		<-release
@@ -141,7 +144,7 @@ func TestTU18_CloseBound(t *testing.T) {
 		if !closeInStop() {
 			t.Errorf("no goroutine is in %s before the release", storeStopName)
 		}
-		free()
+		close(release)
 		waitCloseEnd(t)
 	})
 	select {
@@ -169,10 +172,12 @@ func TestTU18_CloseBound(t *testing.T) {
 	}
 }
 
-// TestTU18_CloseWithinBound slows the close by boundTime/3 and then lets it
-// end. Serve must wait for it, write no close line, and give exit 0.
+// TestTU18_CloseWithinBound slows the first phase of the stop by boundTime and
+// the close by boundTime/3. Serve must wait for the close, write nothing after
+// the last serve call, and give exit 0. The slow first phase fails a timer
+// that starts before srv.Shutdown.
 func TestTU18_CloseWithinBound(t *testing.T) {
-	c := launchClose(t, func(ctx context.Context, cp *tlog.Checkpointer, _ *event.Queue) {
+	c := launchClose(t, boundTime, func(ctx context.Context, cp *tlog.Checkpointer, _ *event.Queue) {
 		cp.Run(ctx)
 		time.Sleep(boundTime / 3)
 	})
@@ -181,8 +186,11 @@ func TestTU18_CloseWithinBound(t *testing.T) {
 	if c.r.code != 0 {
 		t.Errorf("exit %d, want 0; stderr %q", c.r.code, c.r.err.String())
 	}
-	if strings.Contains(c.r.err.String(), "close did not end") {
-		t.Errorf("stderr %q has the close line", c.r.err.String())
+	c.mu.Lock()
+	stderrBefore := c.stderrServed
+	c.mu.Unlock()
+	if got := strings.TrimPrefix(c.r.err.String(), stderrBefore); got != "" {
+		t.Errorf("stderr after the serve calls %q, want none", got)
 	}
 }
 
@@ -192,7 +200,7 @@ func TestTU18_CloseWithinBound(t *testing.T) {
 // row with those drops.
 func TestTU18_StopWritesCounts(t *testing.T) {
 	const drops = 3
-	c := launchClose(t, func(ctx context.Context, cp *tlog.Checkpointer, q *event.Queue) {
+	c := launchClose(t, 0, func(ctx context.Context, cp *tlog.Checkpointer, q *event.Queue) {
 		cp.Run(ctx)
 		for range drops {
 			q.Counters().DropNoAddr()
