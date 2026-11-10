@@ -26,7 +26,7 @@ const (
 	ruleRetention = "retention run ended early"
 )
 
-// A retentionStep runs one statement in the transaction of a chunk. It changes
+// A retentionStep runs its statements in the transaction of a chunk. It changes
 // at most limit rows. It returns a count that is an upper bound of the rows
 // that it changed, and at most limit. A count below limit means that the step
 // has no row left. A count above limit, or below 0, is a database error of the
