@@ -35,6 +35,7 @@ type startParams struct {
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
+	IPDays, RawDays                  int // store.retention_days.ip and .raw
 }
 
 // startDeps holds the parts that a test replaces. A test counts the calls that
@@ -52,6 +53,9 @@ type startDeps struct {
 	// guard. A test that is not about the pause sets nil. Then a full host
 	// disk does not pause its writer.
 	openGuard func(*os.Root, string) (*store.DiskGuard, error)
+	// schedule runs the nightly retention schedule until its context ends
+	// (SEC-40). Nil means no schedule.
+	schedule func(ctx context.Context, w *store.Writer, ipDays, rawDays int, lg *slog.Logger)
 }
 
 var realDeps = startDeps{
@@ -62,6 +66,9 @@ var realDeps = startDeps{
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
+	schedule: func(ctx context.Context, w *store.Writer, ipDays, rawDays int, lg *slog.Logger) {
+		store.NewSchedule(w, ipDays, rawDays, lg).Run(ctx)
+	},
 }
 
 // paramsOf reads the values of the store start from the loaded config.
@@ -79,7 +86,10 @@ func paramsOf(cfg *config.Config) startParams {
 	str := func(k string) string { v, _ := cfg.Get(k); return v.Str }
 	iv, _ := cfg.Get("tlog.checkpoint_interval")
 	bp, _ := cfg.Get("privacy.store_body_prefix")
+	ipd, _ := cfg.Get("store.retention_days.ip")
+	rawd, _ := cfg.Get("store.retention_days.raw")
 	return startParams{
+		IPDays: int(ipd.Int), RawDays: int(rawd.Int),
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),
 		CacheDir: rel(str("acme.cache_dir")), BundlePath: rel(str("bundle.path")),
 		Reserved: []string{rel(str("tlog.dir")), rel(str("acme.cache_dir")), rel(filepath.Dir(str("bundle.path")))},
@@ -104,6 +114,9 @@ type storePart struct {
 	cancel context.CancelFunc // stops the checkpointer
 	ckpt   sync.WaitGroup
 	wg     sync.WaitGroup // the writer, or the drain
+
+	stopSched context.CancelFunc // stops the retention schedule
+	sched     sync.WaitGroup
 }
 
 // DayKey returns the day key holder that the writer uses. The code that
@@ -130,7 +143,7 @@ func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 // (see TlogHealthy). There is no reopen, retry or restart. The writer takes
 // the counters of q.
 func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePart {
-	s := &storePart{q: q, dk: session.NewDayKey(), cancel: func() {}}
+	s := &storePart{q: q, dk: session.NewDayKey(), cancel: func() {}, stopSched: func() {}}
 	var err error
 	if s.root, err = os.OpenRoot(p.Root); err != nil {
 		lg.Error("state directory does not open", "error", err)
@@ -150,6 +163,11 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 			s.writer.SetDiskGuard(s.guard)
 		}
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
+		if d.schedule != nil {
+			var ctx context.Context
+			ctx, s.stopSched = context.WithCancel(context.Background())
+			s.sched.Go(func() { d.schedule(ctx, s.writer, p.IPDays, p.RawDays, lg) })
+		}
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
 	}
@@ -292,9 +310,13 @@ func (s *storePart) startCheckpointer(p startParams, d startDeps, lg *slog.Logge
 	return nil
 }
 
-// Stop ends the store part. It stops the checkpointer first: after the writer returns, a sink call would wait
-// for a reply that does not come. Then it closes the queue, waits for the writer or the drain, and closes the files.
+// Stop ends the store part. It stops the retention schedule first, as a run
+// waits for the writer. Then it stops the checkpointer. After the writer
+// returns, a sink call would wait for a reply that does not come. Then it
+// closes the queue, waits for the writer or the drain, and closes the files.
 func (s *storePart) Stop() {
+	s.stopSched()
+	s.sched.Wait()
 	s.cancel()
 	s.ckpt.Wait()
 	s.q.Close()
