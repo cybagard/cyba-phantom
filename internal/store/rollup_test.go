@@ -133,7 +133,7 @@ func replaceWriter(r *rig) {
 }
 
 // T-U-11: a run takes the old request rows in chunks of 333 rows (a count of
-// 1 000) and deletes them. The key rows add. The session with rows in both runs
+// 1 000). It deletes them. The key rows add. The session with rows in both runs
 // counts one time, as the cutoff splits its day. A row at the cutoff stays. A
 // run again changes no count.
 func TestTU11RollupMovesRowsInChunksAndAdds(t *testing.T) {
@@ -585,8 +585,8 @@ func TestTU11RollupDayStepDropsAStaleSeenRowAtTheMark(t *testing.T) {
 	}
 }
 
-// T-U-11: a late request row adds no session when the day step has begun to
-// remove the seen rows of its day. Five sessions roll up. A call of 3 removes
+// T-U-11: a late request row adds no session after the day step has begun to
+// remove its seen rows. Five sessions roll up. A call of 3 removes
 // some of the 5 seen rows. A late row of one old and one new session then rolls
 // up.
 func TestTU11RollupLateRowOfAClosingDayAddsNoSession(t *testing.T) {
