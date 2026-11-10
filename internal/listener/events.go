@@ -17,12 +17,15 @@ type recorder struct {
 }
 
 // record makes the event from r and from code (the status that the handler
-// writes). It never reads the body, a forwarded header, or the protocol fields
+// writes). vhost is the configured name that the Host matched, or "" when it
+// matched none. The event has no vhost for "". It never holds the Host
+// (SEC-41).
+// record never reads the body, a forwarded header, or the protocol fields
 // of r. The fingerprint values stay empty. The path is the value of
 // event.RequestPath: it keeps each escape, with upper-case hex digits, and
 // holds no control byte. A NewEvent error adds one to errs. A full queue
 // counts its own drop. The call never waits.
-func (rc *recorder) record(r *http.Request, code int) {
+func (rc *recorder) record(r *http.Request, vhost string, code int) {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		ip = r.RemoteAddr // NewEvent refuses a value that is not an address
@@ -37,7 +40,7 @@ func (rc *recorder) record(r *http.Request, code int) {
 	st := int64(code)
 	e, err := event.NewEvent(nil, event.Input{
 		Kind:     event.KindRequest,
-		Vhost:    r.Host,
+		Vhost:    vhost,
 		Method:   r.Method,
 		Path:     event.RequestPath(r.URL.RawPath, r.URL.Path),
 		Status:   &st,
