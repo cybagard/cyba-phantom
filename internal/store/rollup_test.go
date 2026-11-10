@@ -240,8 +240,9 @@ func TestTS34RollupNullKeys(t *testing.T) {
 
 // seedDays makes the rows of the day step tests. The day 2027-01-10 is done.
 // It has 3 request rows. The day 2027-01-11 is not done. It has 2 request
-// rows before the cutoff and 1 after it. The callbacks are 2 on 2027-01-02,
-// 2 501 on 2027-01-10 (one has no vhost and no session) and 4 on 2027-01-11.
+// rows before the cutoff and 1 after it. The callbacks are 2 on 2027-01-02.
+// They are 2 501 on 2027-01-10 (one has no vhost and no session). They are 4
+// on 2027-01-11.
 func seedDays(t *testing.T, db *sql.DB) {
 	t.Helper()
 	addSession(t, db, "s1", "human", "f")
@@ -436,9 +437,10 @@ const (
 //	  ./internal/store
 //
 // PHANTOM_ROLLUP_ROWS gives the request rows (default 20 000). The rows cover
-// 40 days that end at tDel. The shape is "a" (1 session for each 5 requests,
-// default) or "b" (1 session for each request, the most pairs). A callback
-// event follows each 200 requests. The steps use 30 days.
+// 40 days that end at tDel. The shape is "a" or "b". Shape "a" (default) has 1
+// session for each 5 requests. Shape "b" has 1 session for each request, the
+// most pairs. A callback event follows each 200 requests. The steps use 30
+// days.
 func BenchmarkRollup(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")

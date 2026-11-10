@@ -90,8 +90,8 @@ func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupD
 // rows in two chunks or two runs of one day. The pair stops a second count.
 // The day step removes the pairs of a day when the day is done.
 //
-// Outside the days range 1 to 30, or with a zero tDel, the step runs no
-// statement and returns an error. The runner then stops the writer.
+// With days outside 1 to 30, or a zero tDel, the step runs no statement and
+// returns an error. The runner then stops the writer.
 func newRollupStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
@@ -208,9 +208,9 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 // callback counts two times, and none is missed. The step does not visit a
 // day with no callback and no seen row. It looks for the next day with data.
 //
-// The step returns less than `limit` only when no done day is left. Outside
-// the days range 1 to 30, or with a zero tDel, the step runs no statement and
-// returns an error.
+// The step returns less than `limit` only when no done day is left. With
+// days outside 1 to 30, or a zero tDel, it runs no statement and returns an
+// error.
 func newRollupDayStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
