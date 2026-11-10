@@ -34,11 +34,11 @@ func newNames(list []string) names {
 const maxHost = 253
 
 // match folds host as the bait engine does and looks it up. It returns the
-// configured name. A byte of 0x80 or more, a host over maxHost bytes after the
-// port is removed and a name that is not configured give false. The fold
-// removes a final ":" with digits, or with none. It changes only A-Z to a-z and
-// keeps a trailing dot. The fold must stay the same as foldHost of
-// internal/bait.
+// configured name. A byte of 0x80 or more gives false. A name that is not
+// configured gives false. A host over maxHost bytes after the port is removed
+// gives false. The fold removes a final ":" with digits, or with none. It
+// changes only A-Z to a-z and keeps a trailing dot. The fold must stay the
+// same as foldHost of internal/bait.
 func (n names) match(host string) (string, bool) {
 	for i := 0; i < len(host); i++ {
 		if host[i] >= 0x80 {
