@@ -33,8 +33,9 @@ const (
 // chunk.
 type retentionStep func(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 
-// retentionSteps are the steps of a run, in order. The list is empty: the steps
-// come in later changes. A test sets its own list and restores this one.
+// retentionSteps are the steps of a run that RunRetention starts, in order. The
+// list is empty. The schedule does not use it: it sends the list that it builds
+// for each run. A test sets its own list and restores this one.
 var retentionSteps []retentionStep
 
 // retentionRequest asks the writer goroutine for one retention run. The reply
@@ -43,6 +44,7 @@ var retentionSteps []retentionStep
 type retentionRequest struct {
 	reply chan error
 	gone  <-chan struct{}
+	steps []retentionStep // nil means the package list retentionSteps
 }
 
 // left tells if the caller has left. The writer then skips the run.
@@ -67,13 +69,20 @@ func (rq retentionRequest) left() bool {
 // holds when the writer stops while the request waits. Any goroutine can make
 // the call.
 func (w *Writer) RunRetention(ctx context.Context) error {
+	return w.runSteps(ctx, nil)
+}
+
+// runSteps is RunRetention with its own step list. The schedule builds a list
+// for each run, because the cutoffs come from the time of the run. A nil list
+// means the package list retentionSteps.
+func (w *Writer) runSteps(ctx context.Context, steps []retentionStep) error {
 	if err := w.Err(); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rq := retentionRequest{reply: make(chan error, 1), gone: ctx.Done()}
+	rq := retentionRequest{reply: make(chan error, 1), gone: ctx.Done(), steps: steps}
 	select {
 	case w.retention <- rq:
 	case <-ctx.Done():
@@ -106,7 +115,10 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 		rq.reply <- fail(writerName, ruleRetention)
 		return batch
 	}
-	steps := retentionSteps
+	steps := rq.steps
+	if steps == nil {
+		steps = retentionSteps
+	}
 	for cur := 0; cur < len(steps); {
 		if _, err := w.chunk(steps, &cur); err != nil {
 			w.stop(err)
