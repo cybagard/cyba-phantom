@@ -20,8 +20,8 @@ import (
 // 2027-01-11 12:00:00.123 UTC, in the middle of a UTC day.
 var rollTDel = time.Date(2027, 2, 10, 12, 0, 0, 123_000_000, time.UTC)
 
-// rollCutoff is the cutoff of the steps for `days` x 24 h, in unix ms. The tests
-// make it again from the definition, not from the code under test.
+// rollCutoff is the cutoff of the steps for `days` x 24 h, in unix ms. The
+// tests make it again from the definition, not from the code under test.
 func rollCutoff(days int) int64 { return rollTDel.UnixMilli() - int64(days)*24*3600*1000 }
 
 // utc returns the unix ms of an RFC 3339 time.
@@ -187,10 +187,10 @@ func TestTU11RollupBoundaryAndUTCDay(t *testing.T) {
 	}
 }
 
-// T-U-11: "exact for each key" means that a session counts one time for each key
-// (day, vhost, band, family) in which it has a row. One session has 2 500 rows
-// in 3 chunks. Its band changes after the first chunk. It counts one time under
-// each band, and the pairs keep it from counting for each chunk.
+// T-U-11: "exact for each key" means this. A session counts one time for each
+// key (day, vhost, band, family) in which it has a row. One session has 2 500
+// rows in 3 chunks. Its band changes after the first chunk. It counts one time
+// under each band. The pairs stop a count for each chunk.
 func TestTU11RollupSessionCountsOncePerKey(t *testing.T) {
 	r, chunks := rollRig(t, newRollupStep(rollTDel, 30))
 	addSession(t, r.db, "s1", "human", "f")
@@ -211,10 +211,11 @@ func TestTU11RollupSessionCountsOncePerKey(t *testing.T) {
 	}
 }
 
-// T-S-34: a request row with no vhost, with no session row, or with a session
-// that has no family rolls up to ” , 'human' and ”. The writer stays healthy.
-// A second run with more rows of the same keys gives the same rows with higher
-// counts, and one row for each key. A session with no row counts one time.
+// T-S-34: a request row can have no vhost, no session row, or a session with
+// no family. It rolls up to an empty vhost, the band human and an empty
+// family. The writer stays healthy. A second run with more rows of the same
+// keys gives one row for each key, with higher counts. A session with no
+// row counts one time.
 func TestTS34RollupNullKeys(t *testing.T) {
 	r, _ := rollRig(t, newRollupStep(rollTDel, 30))
 	ts := utc("2027-01-09T01:00:00Z")
@@ -237,10 +238,10 @@ func TestTS34RollupNullKeys(t *testing.T) {
 	}
 }
 
-// seedDays makes the rows of the day step tests. The request rows are 3 in
-// 2027-01-10, which is done, and 2 in 2027-01-11 before the cutoff, which is
-// not done, and 1 after the cutoff. The callbacks are 2 on 2027-01-02, 2 501 on
-// 2027-01-10 (one has no vhost and no session) and 4 on 2027-01-11.
+// seedDays makes the rows of the day step tests. The day 2027-01-10 is done.
+// It has 3 request rows. The day 2027-01-11 is not done. It has 2 request
+// rows before the cutoff and 1 after it. The callbacks are 2 on 2027-01-02,
+// 2 501 on 2027-01-10 (one has no vhost and no session) and 4 on 2027-01-11.
 func seedDays(t *testing.T, db *sql.DB) {
 	t.Helper()
 	addSession(t, db, "s1", "human", "f")
@@ -253,8 +254,8 @@ func seedDays(t *testing.T, db *sql.DB) {
 	addEvents(t, db, "callback", 4, utc("2027-01-11T01:00:00Z"), 1000, "s1", "a")
 }
 
-// wantDays is the result of the day step tests after a full run: the callbacks
-// of the two done days are counted, the other day has no callback count.
+// wantDays is the result of the day step tests after a full run. The callbacks
+// of the two done days are counted. The other day has no callback count.
 const wantDays = "2027-01-02|a|human|f|0|0|2 ; 2027-01-10||human||0|0|1 ; " +
 	"2027-01-10|a|human|f|1|3|2500 ; 2027-01-11|a|human|f|1|2|0"
 
@@ -274,10 +275,10 @@ func TestTU11RollupDayStepCountsCallbacksOnce(t *testing.T) {
 	}
 }
 
-// T-U-11: a failed chunk in the middle of a day rolls back, with its position.
-// A new writer on the same database counts each callback one time and gives
-// the result of a clean run. The first chunk holds 995 of the 2 501 callbacks of
-// the day. The second chunk fails.
+// T-U-11: a failed chunk in the middle of a day rolls back, with its
+// position. A new writer on the same database counts each callback one time.
+// It gives the result of a clean run. The first chunk holds 993 of the 2 501
+// callbacks of the day. The second chunk fails.
 func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 	r, _ := rollRig(t, newRollupStep(rollTDel, 30), newRollupDayStep(rollTDel, 30))
 	seedDays(t, r.db)
@@ -293,8 +294,8 @@ func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 	}
 }
 
-// T-U-11: a crash between two roll-up chunks gives the counts of a clean run:
-// two sessions have rows in each of 4 chunks. The failed chunk rolls back with
+// T-U-11: a crash between two roll-up chunks gives the counts of a clean run.
+// Two sessions have rows in each of 4 chunks. The failed chunk rolls back with
 // its pairs and its deletes.
 func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 	seed := func(r *rig) {
@@ -337,7 +338,7 @@ func TestTU11RollupDayStepWaitsForTheRollup(t *testing.T) {
 
 // T-U-11: each step uses the limit that the runner gives it. In one
 // transaction, a limit of 7 over 20 old rows changes 7 rows. A limit of 5 over
-// 12 callbacks of a done day gives 5, 5 and 3 rows: the third call counts 2
+// 12 callbacks of a done day gives 5, 5 and 3 rows. The third call counts 2
 // callbacks and deletes 1 seen row. Then it sets the mark.
 func TestTU11RollupStepsUseTheLimitOfTheRunner(t *testing.T) {
 	r := newRig(t, 100)
@@ -389,8 +390,8 @@ func TestTU11RollupRefusesBadParameters(t *testing.T) {
 }
 
 // T-U-11: each statement of the steps uses an index. No plan scans event,
-// session, aggregate_day or rollup_seen. The pick of the roll-up and the pick
-// of the callbacks use event_kind_ts, so a call reads at most its limit.
+// session, aggregate_day or rollup_seen. The two picks use event_kind_ts.
+// Thus a call reads at most its limit.
 func TestTU11RollupStatementsUseIndexes(t *testing.T) {
 	db := migrated(t)
 	for _, c := range []struct {
@@ -417,23 +418,25 @@ func TestTU11RollupStatementsUseIndexes(t *testing.T) {
 }
 
 const (
-	// rollChildDir is the state directory of the child. rollChildTDel is the tDel
-	// of the steps, in unix ms.
+	// rollChildDir is the state directory of the child. rollChildTDel is
+	// the tDel of the steps, in unix ms.
 	rollChildDir  = "STORE_ROLLUP_CHILD_DIR"
 	rollChildTDel = "STORE_ROLLUP_CHILD_TDEL"
 )
 
 // BenchmarkRollup measures the roll-up and day steps through the runner, as
-// the ADR-032 table needs. The child process runs w.chunk until no row is left.
-// It prints VmHWM, the total time, the longest chunk, the rows changed, the WAL
-// bytes and the database bytes after, and the size of rollup_seen at its
-// largest, which is when the roll-up step is done. Run it with -benchtime=1x:
+// the ADR-032 table needs. The child process runs w.chunk until no row is
+// left. It prints VmHWM, the total time and the longest chunk. It prints the
+// rows changed, and the WAL and database bytes after. It prints the size of
+// rollup_seen at its largest. This is when the roll-up step is done. Run it
+// with -benchtime=1x:
 //
 //	PHANTOM_ROLLUP_ROWS=4000000 PHANTOM_ROLLUP_SHAPE=a \
-//	  go test -run '^$' -bench '^BenchmarkRollup$' -benchtime=1x ./internal/store
+//	  go test -run '^$' -bench '^BenchmarkRollup$' -benchtime=1x \
+//	  ./internal/store
 //
-// PHANTOM_ROLLUP_ROWS gives the request rows (default 20 000). The rows cover 40
-// days that end at tDel. The shape is "a" (1 session for each 5 requests,
+// PHANTOM_ROLLUP_ROWS gives the request rows (default 20 000). The rows cover
+// 40 days that end at tDel. The shape is "a" (1 session for each 5 requests,
 // default) or "b" (1 session for each request, the most pairs). A callback
 // event follows each 200 requests. The steps use 30 days.
 func BenchmarkRollup(b *testing.B) {

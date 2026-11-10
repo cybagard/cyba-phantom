@@ -10,17 +10,18 @@ import (
 )
 
 const (
-	// rollupDoneKey is the meta key of the last day that is done: its callbacks
-	// are counted and its rollup_seen rows are gone. rollupPosKey is the meta key
-	// of the last callback counted in the day that is in progress. It holds the
-	// ts and the id, as ts:id. The day step removes it when the day is done.
+	// rollupDoneKey is the meta key of the last day that is done. The
+	// callbacks of that day are counted. Its rollup_seen rows are gone.
+	// rollupPosKey is the meta key of the last callback counted in the day
+	// in progress. It holds the ts and the id, as ts:id. The day step
+	// removes it when the day is done.
 	rollupDoneKey = "retention_rollup_done"
 	rollupPosKey  = "retention_rollup_pos"
 	rollupDayFmt  = "2006-01-02"
 
-	// rollupPickSQL gives the oldest request rows before the cutoff, in the order
-	// of event_kind_ts. Each key part is never NULL: a missing vhost or family is
-	// '' and a missing session row has the band 'human'.
+	// rollupPickSQL gives the oldest request rows before the cutoff, in the
+	// order of event_kind_ts. No key part is NULL. A missing vhost or family
+	// is ''. A missing session row gives the band 'human'.
 	rollupPickSQL = "SELECT e.id, e.ts, coalesce(e.vhost, ''), e.session_id, coalesce(s.band, 'human'), coalesce(s.family, '') " +
 		"FROM event e LEFT JOIN session s ON s.id = e.session_id " +
 		"WHERE e.id IN (SELECT id FROM event WHERE kind = 'request' AND ts < ? ORDER BY ts LIMIT ?)"
@@ -33,9 +34,9 @@ const (
 		"requests = requests + excluded.requests, callbacks = callbacks + excluded.callbacks"
 
 	// The day step uses these. rollupLeftSQL finds a request row that the
-	// roll-up step has not done. rollupCallbackSQL gives the callbacks of one day
-	// after a position, at most the limit. The next two find the first day with
-	// data.
+	// roll-up step has not done. rollupCallbackSQL gives the callbacks of
+	// one day after a position, at most the limit. The next two find the
+	// first day with data.
 	rollupLeftSQL     = "SELECT 1 FROM event WHERE kind = 'request' AND ts < ? LIMIT 1"
 	rollupCallbackSQL = "WITH pick AS (SELECT id, ts, vhost, session_id FROM event WHERE kind = 'callback' AND ts >= ? AND ts < ? " +
 		"AND (ts > ? OR id > ?) ORDER BY ts, id LIMIT ?) " +
@@ -76,17 +77,17 @@ func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupD
 
 // newRollupStep returns the roll-up step for the request rows (SEC-39). It
 // takes the rows with ts before tDel minus `days` x 24 h. The step reads no
-// clock. Each call takes at most `limit` rows, oldest first. It adds the rows
-// and the new sessions of each key to aggregate_day. Then it deletes the rows.
-// All this is in the transaction of the caller, so a failed chunk keeps the
-// rows and changes no count.
+// clock. Each call takes at most `limit` rows, oldest first. It adds the
+// rows and the new sessions of each key to aggregate_day. Then it deletes
+// the rows. All this is in the transaction of the caller. A failed chunk
+// keeps the rows and changes no count.
 //
-// "Exact for each key" means this: a session counts one time for each key
+// "Exact for each key" means this. A session counts one time for each key
 // (day, vhost, band, family) in which it has a row. A session whose band
 // changes between two chunks counts one time under each band.
 //
 // The pairs of a key and a session stay in rollup_seen. A session can have
-// rows in two chunks or two runs of one day, and the pair stops a second count.
+// rows in two chunks or two runs of one day. The pair stops a second count.
 // The day step removes the pairs of a day when the day is done.
 //
 // Outside the days range 1 to 30, or with a zero tDel, the step runs no
@@ -194,19 +195,21 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 }
 
 // newRollupDayStep returns the day step. It runs after the roll-up step in a
-// step list (SEC-39). A day is done when its end is not after the cutoff, and
-// no request row with ts before the cutoff is left. The step takes the done
-// days in order, from the day after the meta mark rollupDoneKey. For each day it
-// adds the callback events to aggregate_day, with the key rules of the roll-up
-// step. Then it deletes the rollup_seen rows of the day. At the end of a day it
-// sets the mark. Each call reads or changes at most `limit` rows. A day with
-// many callbacks takes several calls. The position in the day is in the meta
-// key rollupPosKey, and it is saved in the transaction of the counts. Thus no
-// callback counts two times, and none is missed. A day with no callback and no
-// seen row is not visited: the step looks for the next day with data.
+// step list (SEC-39). A day is done when its end is not after the cutoff.
+// Also, no request row with ts before the cutoff is left. The step takes the
+// done days in order, from the day after the meta mark rollupDoneKey. For
+// each day it adds the callback events to aggregate_day. It uses the key
+// rules of the roll-up step. Then it deletes the rollup_seen rows of the
+// day. At the end of a day it sets the mark.
 //
-// The step returns less than `limit` only when no done day is left. Outside the
-// days range 1 to 30, or with a zero tDel, the step runs no statement and
+// Each call reads or changes at most `limit` rows. A day with many
+// callbacks takes several calls. The position in the day is in the meta key
+// rollupPosKey. It is saved in the transaction of the counts. Thus no
+// callback counts two times, and none is missed. The step does not visit a
+// day with no callback and no seen row. It looks for the next day with data.
+//
+// The step returns less than `limit` only when no done day is left. Outside
+// the days range 1 to 30, or with a zero tDel, the step runs no statement and
 // returns an error.
 func newRollupDayStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
@@ -236,10 +239,10 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 	}
 }
 
-// rollupNextDay returns the next day to work on: the day in progress, or the
-// first day with a callback or a seen row after the mark. ok is false when
-// there is no such day, when a request row before the cutoff is left, or when
-// the day is not over at the cutoff.
+// rollupNextDay returns the next day to work on. This is the day in progress,
+// or the first day with a callback or a seen row after the mark. ok is false
+// in three cases. There is no such day. Or a request row before the cutoff
+// is left. Or the day is not over at the cutoff.
 func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (day string, ok bool, err error) {
 	var one int
 	if left, err := scanOne(tx.QueryRowContext(ctx, rollupLeftSQL, cutoff), &one); left || err != nil {
