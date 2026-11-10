@@ -160,7 +160,7 @@ func (s *Schedule) check(ctx context.Context) {
 
 // runOnce makes one run with a step list for the clock readings of the run. A
 // run can end with an error that is not the stop of the schedule. Then it adds
-// 1 to the early-end count. The first one writes one log line.
+// 1 to the early-end count. The first early end writes one log line.
 func (s *Schedule) runOnce(stop context.Context) {
 	wall, tDel, tPriv := s.clock.reading()
 	ctx, cancel := context.WithTimeout(stop, s.limit)

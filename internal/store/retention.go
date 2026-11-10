@@ -34,7 +34,7 @@ const (
 type retentionStep func(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 
 // retentionSteps are the steps of a run that RunRetention starts, in order. The
-// list is empty. The schedule does not use it: it sends the list that it builds
+// list is empty. The schedule does not use this list. It sends its own list
 // for each run. A test sets its own list and restores this one.
 var retentionSteps []retentionStep
 

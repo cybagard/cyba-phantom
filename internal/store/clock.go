@@ -11,10 +11,11 @@ import (
 const clockLimit = time.Hour
 
 // clockGuard bounds the cutoffs of a retention run with a monotonic anchor
-// (SEC-40). The anchor is one reading of time.Now at the start. T_mono is the
+// (SEC-40). The anchor is one call of time.Now at the start. T_mono is the
 // wall time of the anchor plus the monotonic time since the anchor. A step of
 // the wall clock does not move T_mono. On Linux a host suspend does not count
-// in the monotonic clock. The difference is then a count, not a stop.
+// in the monotonic clock. Then the difference is counted. It does not stop
+// the run.
 //
 // A wall clock that is wrong at the start moves the anchor too. The guard does
 // not see this error.
@@ -45,8 +46,8 @@ func newClockGuard(lg *slog.Logger) *clockGuard {
 // reading returns the times of one run. Deletes use tDel, the earlier time, so
 // no row goes before its age. The address step uses tPriv, the later time, so
 // no address stays longer than its age. A difference of more than 1 h adds 1 to
-// the count of the run. The first one writes one log line, with the difference
-// in whole seconds as the only value.
+// the count of the run. The first difference writes one log line. Its only
+// value is the difference in whole seconds.
 func (c *clockGuard) reading() (wall, tDel, tPriv time.Time) {
 	wall = c.wall()
 	mono := c.anchor.Add(c.mono())
