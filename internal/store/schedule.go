@@ -13,8 +13,8 @@ const (
 	// The run is at 03:15 local time (SEC-40).
 	runHour, runMinute = 3, 15
 
-	// runLimit is the time that one run can take, with its checkpoint. When this
-	// time ends, the run ends early. The next run continues from the marks.
+	// runLimit is the time that one run can take, with its checkpoint. When
+	// this time ends, the run ends early. The next run continues from the marks.
 	runLimit = 6 * time.Hour
 
 	// runGap is the monotonic time between two runs that checks start. Days are
@@ -139,10 +139,9 @@ func (s *Schedule) begin(ctx context.Context) {
 // last run day. A local time that goes back in a DST repeat gives an earlier
 // day, and that day has run. The wall clock can step to an earlier time. Then
 // the last run day becomes the day of the new wall time, and no run starts.
-// Each later day then starts a run. A later day starts a run only after 20 h of
-// monotonic time since the last run that a check started. The run at the start
-// does not count. Thus a wall clock that steps back and forth around 03:15
-// starts no extra run.
+// Each later day then starts a run. A run needs 20 h of monotonic time since
+// the last run that a check started. The run at the start does not count. Thus
+// a wall clock that steps back and forth around 03:15 starts no extra run.
 func (s *Schedule) check(ctx context.Context) {
 	wall := s.clock.wall()
 	day, back := retentionDay(wall, s.loc), wall.Before(s.lastWall)

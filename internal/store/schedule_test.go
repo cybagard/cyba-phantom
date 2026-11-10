@@ -241,7 +241,7 @@ func TestTU27WallStepBackRunsOnEachLaterDay(t *testing.T) {
 	wantRuns(t, runs, "02-09 03:15", "02-10 03:15", "02-11 03:15")
 }
 
-// T-U-27: a step of +2 d, then a step of -2 d in the same process, after more
+// T-U-27: a step of +2 d and then a step of -2 d in one process, after more
 // than 2 d of uptime. The step forward gives no run 9 h after a run. After the
 // step back, each later day gives one run.
 func TestTU27StepsForwardAndBackInTheProcess(t *testing.T) {
@@ -271,8 +271,8 @@ func TestTU27GapHoldsBackTheRunAfterAStepForward(t *testing.T) {
 	wantRuns(t, runs, "02-10 03:15", "02-13 03:15")
 }
 
-// T-U-27: a run at the start, at 04:00 or at 10:00, does not hold back the run
-// of 03:15 on the next day.
+// T-U-27: a run at the start, at 04:00 or 10:00, does not hold back the run of
+// 03:15 on the next day.
 func TestTU27StartRunDoesNotHoldBackTheNextDay(t *testing.T) {
 	for _, h := range []int{4, 10} {
 		s, f, runs := stepRig(t, time.Date(2027, 2, 10, h, 0, 0, 0, time.UTC), 0)
