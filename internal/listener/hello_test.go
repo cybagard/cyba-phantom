@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -600,5 +601,178 @@ func TestTS17LocationWorkIsBounded(t *testing.T) {
 		if loc := location("decoy.test", u); len(loc) > maxLocation {
 			t.Fatalf("%s: length %d", tc.name, len(loc))
 		}
+	}
+}
+
+// hostShapes are the Host values of T-S-35 for the names decoy.test and
+// kilo.example. want is the stored vhost, or "" for no vhost.
+var hostShapes = []struct{ name, host, want string }{
+	{"exact", "decoy.test", "decoy.test"},
+	{"upper case", "DECOY.TEST", "decoy.test"},
+	{"port", "decoy.test:8443", "decoy.test"},
+	{"upper case and port", "DECOY.test:443", "decoy.test"},
+	{"colon with no digits", "decoy.test:", "decoy.test"},
+	{"port that is not digits", "decoy.test:abc", ""},
+	{"trailing dot", "decoy.test.", ""},
+	{"punycode", "xn--bcher-kva.example", ""},
+	{"raw UTF-8", "bücher.example", ""},
+	{"Kelvin sign", "Kilo.example", ""},
+	{"upper case with port", "KILO.example:443", "kilo.example"},
+	{"IPv4", "192.0.2.1", ""},
+	{"IPv4 with port", "192.0.2.1:443", ""},
+	{"IPv6", "[2001:db8::1]", ""},
+	{"IPv6 with port", "[2001:db8::1]:443", ""},
+	{"IPv6 zone", "[fe80::1%25eth0]", ""},
+	{"empty", "", ""},
+	{"253 bytes", strings.Repeat("a", 253), ""},
+	{"257 bytes", strings.Repeat("a", 257), ""},
+	{"NUL escape", "x%00y.example", ""},
+	{"sub-delimiters", "decoy.test!$&'()*+,;=", ""},
+}
+
+func vhostOf(rec event.Record) string {
+	if rec.Vhost == nil {
+		return ""
+	}
+	return *rec.Vhost
+}
+
+// T-S-35: each Host shape gives a configured name or no vhost in the event.
+// The Kelvin sign is no match. The redirect handler uses the same match.
+func TestTS35HelloStoresMatchedName(t *testing.T) {
+	list := []string{"decoy.test", "kilo.example"}
+	for _, tc := range hostShapes {
+		q, err := event.NewQueue(4, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, _ := serveRaw(t, NewHelloHandler(list, q), &http.Request{Method: "GET", Host: tc.host})
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("%s: %d events", tc.name, len(evs))
+		}
+		if got := vhostOf(evs[0].Record()); got != tc.want {
+			t.Errorf("%s: stored vhost %q, want %q", tc.name, got, tc.want)
+		}
+		code, rcode := 404, 404
+		if tc.want != "" {
+			code, rcode = 200, 308
+		}
+		rd, _ := serveRaw(t, NewRedirect(list), &http.Request{Method: "GET", Host: tc.host})
+		if resp.StatusCode != code || rd.StatusCode != rcode {
+			t.Errorf("%s: status %d and redirect %d, want %d and %d", tc.name, resp.StatusCode, rd.StatusCode, code, rcode)
+		}
+	}
+}
+
+// T-S-35: a method other than GET and HEAD gets 405 for a configured name and
+// 404 for another Host. The event holds the matched name, or none.
+func TestTS35HelloStoresMatchedNameMethods(t *testing.T) {
+	list := []string{"decoy.test", "kilo.example"}
+	for _, tc := range []struct {
+		method, host string
+		status       int
+		want         string
+	}{
+		{"POST", "DECOY.test:443", 405, "decoy.test"},
+		{"DELETE", "decoy.test:abc", 404, ""},
+		{"PUT", "KILO.example", 405, "kilo.example"},
+	} {
+		q, err := event.NewQueue(4, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, _ := serveRaw(t, NewHelloHandler(list, q), &http.Request{Method: tc.method, Host: tc.host})
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("%s %s: %d events", tc.method, tc.host, len(evs))
+		}
+		if got := vhostOf(evs[0].Record()); resp.StatusCode != tc.status || got != tc.want {
+			t.Errorf("%s %s: status %d, stored vhost %q, want %d and %q", tc.method, tc.host, resp.StatusCode, got, tc.status, tc.want)
+		}
+	}
+}
+
+// T-S-35: the fold keeps its edges. The digits 0 and 9 end a port, and A and Z
+// fold. The bytes '@' and '[' do not fold. A host of 253 bytes matches, with or
+// without a port. A host of 254 bytes does not match, also when its first 253
+// bytes are a configured name.
+func TestTS35HelloFoldBoundaries(t *testing.T) {
+	label := strings.Repeat("a", 63)
+	long := label + "." + label + "." + label + "." + label[:61]
+	if len(long) != 253 {
+		t.Fatalf("name length %d, want 253", len(long))
+	}
+	list := []string{"decoy.test", "az.test", long}
+	for _, tc := range []struct{ host, want string }{
+		{"decoy.test:9", "decoy.test"},
+		{"decoy.test:0", "decoy.test"},
+		{"decoy.test:9x", ""},
+		{"AZ.TEST", "az.test"},
+		{"@z.test", ""},
+		{"[z.test", ""},
+		{long, long},
+		{long + ":443", long},
+		{long + "a", ""},
+		{strings.ToUpper(long) + "x", ""},
+	} {
+		q, err := event.NewQueue(4, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, _ := serveRaw(t, NewHelloHandler(list, q), &http.Request{Method: "GET", Host: tc.host})
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("host of %d bytes: %d events", len(tc.host), len(evs))
+		}
+		code := 404
+		if tc.want != "" {
+			code = 200
+		}
+		if got := vhostOf(evs[0].Record()); got != tc.want || resp.StatusCode != code {
+			t.Errorf("host %.20q (%d bytes): status %d, vhost %.20q, want %d and %.20q",
+				tc.host, len(tc.host), resp.StatusCode, got, code, tc.want)
+		}
+	}
+}
+
+// T-S-35: 10 000 distinct Hosts give at most one stored value for each name
+// and one for no vhost.
+func TestTS35HelloBoundsStoredValues(t *testing.T) {
+	h, q, _ := newHelloQueue(t, 1000)
+	seen := map[string]bool{}
+	for i := 0; i < 10000; i++ {
+		host := fmt.Sprintf("h%d.test", i)
+		if i%2 == 0 {
+			host = fmt.Sprintf("DeCoY.TeSt:%d", i)
+		}
+		serveRaw(t, h, &http.Request{Method: "GET", Host: host})
+		if i%1000 == 999 {
+			for _, e := range q.Drain() {
+				seen[vhostOf(e.Record())] = true
+			}
+		}
+	}
+	if len(seen) > len(helloNames)+1 || !seen["decoy.test"] || !seen[""] {
+		t.Errorf("%d distinct stored values, want at most %d, with decoy.test and none", len(seen), len(helloNames)+1)
+	}
+}
+
+// T-S-35: one request over TLS stores the configured name, not the Host.
+func TestTS35HelloTLSStoresName(t *testing.T) {
+	h, q, _ := newHelloQueue(t, 4)
+	rg := newRig(t, 8, testHeaderBytes, defaultTimeouts, h)
+	rg.serve(t)
+	c, err := tls.Dial("tcp", rg.addr, rg.clientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := roundTrip(c, "GET / HTTP/1.1\r\nHost: DECOY.test:443\r\n\r\n"); got != 200 {
+		t.Fatalf("status %d", got)
+	}
+	evs := q.Drain()
+	if len(evs) != 1 || vhostOf(evs[0].Record()) != "decoy.test" {
+		t.Fatalf("events %d, want one with vhost decoy.test", len(evs))
 	}
 }

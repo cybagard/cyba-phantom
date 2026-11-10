@@ -41,6 +41,10 @@ func normalName(name string) (string, bool) {
 // shutdownTime is the time that the servers get to end their open connections at the stop.
 const shutdownTime = 5 * time.Second
 
+// closeTime is the time that serve waits for the close steps.
+// The wait starts after the servers stopped.
+const closeTime = 1500 * time.Millisecond
+
 // The seams of serveWith. A test replaces them to see the order of the start and the stop.
 var (
 	newServer = listener.New
@@ -75,6 +79,9 @@ var (
 // A bind error ends the start before the store part opens a file.
 // The stop is the reverse. Both serve calls return. Then the client stops, the cache closes,
 // and the store part closes the queue. Thus no handler adds an event to a closed queue.
+// These close steps run in one goroutine. Serve waits for it at most
+// closeTime. When it does not end, serve writes one fixed line and gives
+// exit 1. The process exit then cuts the close, as a crash does (ADR-041).
 // A failure of the state directory, the cache or the client does not end the process.
 // The decoys serve, the sensor writes one fixed line, and the start line says that it is not healthy.
 // A queue error, a bind error, or a decoy server that does not start
@@ -261,13 +268,26 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	srv.Shutdown(sctx)
 	cancel()
 	wg.Wait()
-	if acme != nil {
-		stopACME(acme)
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		if acme != nil {
+			stopACME(acme)
+		}
+		if cache != nil {
+			cache.Close()
+		}
+		s.Stop()
+	}()
+	timer := time.NewTimer(closeTime)
+	defer timer.Stop()
+	select {
+	case <-closed:
+	case <-timer.C:
+		// The close goes on in its goroutine. The exit cuts it (ADR-041).
+		fmt.Fprintf(stderr, "phantom: close did not end in %v\n", closeTime)
+		return 1
 	}
-	if cache != nil {
-		cache.Close()
-	}
-	s.Stop()
 	if failed.Load() {
 		return 1
 	}

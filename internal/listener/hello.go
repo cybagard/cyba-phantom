@@ -1,7 +1,6 @@
 package listener
 
 import (
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,13 +30,39 @@ func newNames(list []string) names {
 	return n
 }
 
-// match removes a port from host, changes it to lower case and looks it up. It
-// returns the configured name. An unknown form gives false.
+// maxHost is the size in bytes of the longest host name.
+const maxHost = 253
+
+// match folds host as the bait engine does and looks it up. It returns the
+// configured name. A byte of 0x80 or more gives false. A name that is not
+// configured gives false. A host over maxHost bytes after the port is removed
+// gives false. The fold removes a final ":" with digits, or with none. It
+// changes only A-Z to a-z and keeps a trailing dot. The fold must stay the
+// same as foldHost of internal/bait.
 func (n names) match(host string) (string, bool) {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return "", false
+		}
 	}
-	s, ok := n[strings.ToLower(host)]
+	i := len(host)
+	for i > 0 && host[i-1] >= '0' && host[i-1] <= '9' {
+		i--
+	}
+	if i > 0 && host[i-1] == ':' {
+		host = host[:i-1]
+	}
+	if len(host) > maxHost {
+		return "", false
+	}
+	var buf [maxHost]byte
+	b := buf[:copy(buf[:], host)]
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	s, ok := n[string(b)]
 	return s, ok
 }
 
@@ -92,8 +117,8 @@ func (h *HelloHandler) EventErrors() uint64 { return h.rec.errs.Load() }
 // configured name with GET or HEAD, 405 for another method, else 404. It
 // records one request event with the status code that it writes.
 func (h *HelloHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_, code, body := h.names.decide(r)
-	h.rec.record(r, code)
+	name, code, body := h.names.decide(r)
+	h.rec.record(r, name, code)
 	reply(w, code, body)
 }
 

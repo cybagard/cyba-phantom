@@ -192,6 +192,10 @@ type reqSession struct {
 	// a response with no mint.
 	at   time.Time
 	mint event.MintRange
+	// host holds the folded Host. hostLen is the size of the vhost name that
+	// it matched, or 0 when no vhost matched. serve sets both.
+	host    [maxHost]byte
+	hostLen int
 	// firstCapped holds the trap id, token id and surface of the first token
 	// that the callback cap refused. This is in position order. The request
 	// event holds them. firstCapped.token is "" when the cap refused no token.
@@ -254,13 +258,15 @@ func clientIP(addr string) string {
 // engine wrote, or 0 when it wrote none. The event has the typed fields, the
 // session id and the mint range of the response. It has no detail. It has a
 // trap id, a token id and a surface only when the callback cap refused a
-// token. A NewEvent error adds one to eventErrs. A full queue counts
-// its own drop. The call never waits.
+// token. The vhost is the name of the bundle vhost that the Host matched, in
+// lower case. With no match it has no vhost. It never holds the Host (SEC-41).
+// A NewEvent error adds one to eventErrs. A full queue counts its own drop.
+// The call never waits.
 func (h *Handler) record(r *http.Request, s *reqSession, code int) {
 	in := event.Input{
 		Kind:     event.KindRequest,
 		Session:  s.id,
-		Vhost:    r.Host,
+		Vhost:    string(s.host[:s.hostLen]),
 		Method:   r.Method,
 		Path:     event.RequestPath(r.URL.RawPath, r.URL.Path),
 		ClientIP: s.ip,
@@ -372,14 +378,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // return. A template page and an asset response set the cookie of a new
 // session. A fixed page does not.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, b *bundle.Bundle, sess *reqSession) int {
-	var buf [maxHost]byte
-	name, ok := foldHost(r.Host, &buf)
+	name, ok := foldHost(r.Host, &sess.host)
 	s := h.siteOf(b)
 	routes, found := s.hosts[string(name)]
 	if !ok || !found {
 		reply(w, http.StatusNotFound, notFoundBody)
 		return http.StatusNotFound
 	}
+	sess.hostLen = len(name)
 	if bp := s.beacons[string(name)]; bp != nil && !h.beaconOff.Load() {
 		if code, ok := h.serveBeacon(w, r, sess, bp); ok {
 			return code
