@@ -80,8 +80,8 @@ var storeStopName = runtime.FuncForPC(reflect.ValueOf((*storePart).Stop).Pointer
 
 // closeInStop tells if a goroutine is in storePart.Stop. It reads the stack
 // dump of all goroutines, and doubles the buffer until the dump fits.
-// It scans all goroutines of the test binary, so it is correct only while
-// no test of the package runs in parallel.
+// It scans all goroutines of the test binary. It is correct only while no
+// test of the package runs in parallel.
 func closeInStop() bool {
 	buf := make([]byte, 1<<16)
 	for {
