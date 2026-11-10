@@ -664,6 +664,49 @@ func TestTS35HelloStoresMatchedName(t *testing.T) {
 	}
 }
 
+// T-S-35: the fold keeps its edges. The digits 0 and 9 end a port, and A and Z
+// fold. The bytes '@' and '[' do not fold. A host of 253 bytes matches, with or
+// without a port. A host of 254 bytes does not match, also when its first 253
+// bytes are a configured name.
+func TestTS35HelloFoldBoundaries(t *testing.T) {
+	label := strings.Repeat("a", 63)
+	long := label + "." + label + "." + label + "." + label[:61]
+	if len(long) != 253 {
+		t.Fatalf("name length %d, want 253", len(long))
+	}
+	list := []string{"decoy.test", "az.test", long}
+	for _, tc := range []struct{ host, want string }{
+		{"decoy.test:9", "decoy.test"},
+		{"decoy.test:0", "decoy.test"},
+		{"decoy.test:9x", ""},
+		{"AZ.TEST", "az.test"},
+		{"@z.test", ""},
+		{"[z.test", ""},
+		{long, long},
+		{long + ":443", long},
+		{long + "a", ""},
+		{strings.ToUpper(long) + "x", ""},
+	} {
+		q, err := event.NewQueue(4, event.NewCounters())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, _ := serveRaw(t, NewHelloHandler(list, q), &http.Request{Method: "GET", Host: tc.host})
+		evs := q.Drain()
+		if len(evs) != 1 {
+			t.Fatalf("host of %d bytes: %d events", len(tc.host), len(evs))
+		}
+		code := 404
+		if tc.want != "" {
+			code = 200
+		}
+		if got := vhostOf(evs[0].Record()); got != tc.want || resp.StatusCode != code {
+			t.Errorf("host %.20q (%d bytes): status %d, vhost %.20q, want %d and %.20q",
+				tc.host, len(tc.host), resp.StatusCode, got, code, tc.want)
+		}
+	}
+}
+
 // T-S-35: 10 000 distinct Hosts give at most one stored value for each name
 // and one for no vhost.
 func TestTS35HelloBoundsStoredValues(t *testing.T) {
