@@ -103,18 +103,19 @@ func TestTU20RequestEvents(t *testing.T) {
 		name, method, host, path string
 		status                   int
 		target                   string // raw request target, if not empty
+		wantVhost                string // the stored vhost, "" for none
 	}{
-		{"200 template", "GET", "example.com", "/t", 200, ""},
-		{"200 asset", "GET", "Example.COM:443", "/a", 200, ""},
-		{"404 unknown host", "GET", "other.example", "/t", 404, ""},
-		{"404 no route with 404 template", "GET", "example.com", "/nope", 404, ""},
-		{"404 no route without 404 template", "GET", "kilo.example", "/nope", 404, ""},
-		{"405", "POST", "example.com", "/t", 405, ""},
-		{"HEAD", "HEAD", "example.com", "/t", 200, ""},
-		{"error before the first byte", "GET", "example.com", "/e", 404, ""},
+		{"200 template", "GET", "example.com", "/t", 200, "", "example.com"},
+		{"200 asset", "GET", "Example.COM:443", "/a", 200, "", "example.com"},
+		{"404 unknown host", "GET", "other.example", "/t", 404, "", ""},
+		{"404 no route with 404 template", "GET", "example.com", "/nope", 404, "", "example.com"},
+		{"404 no route without 404 template", "GET", "kilo.example", "/nope", 404, "", "kilo.example"},
+		{"405", "POST", "example.com", "/t", 405, "", "example.com"},
+		{"HEAD", "HEAD", "example.com", "/t", 200, "", "example.com"},
+		{"error before the first byte", "GET", "example.com", "/e", 404, "", "example.com"},
 		// The parser sets RawPath. The event path keeps its escape, with
 		// upper-case hex digits.
-		{"escaped slash", "GET", "example.com", "/a%2Fb", 404, "/a%2fb"},
+		{"escaped slash", "GET", "example.com", "/a%2Fb", 404, "/a%2fb", "example.com"},
 	} {
 		h, q := eventHandler(t, 8)
 		r := get(c.path, c.host)
@@ -126,12 +127,8 @@ func TestTU20RequestEvents(t *testing.T) {
 		w := serve(t, h, r)
 		rec, ip := oneEvent(t, c.name, q)
 		// The event holds the matched vhost name, not the Host (SEC-41).
-		wantVhost := strings.ToLower(strings.TrimSuffix(c.host, ":443"))
-		if c.host == "other.example" {
-			wantVhost = ""
-		}
 		if w.Code != c.status || rec.Status == nil || *rec.Status != int64(c.status) ||
-			(wantVhost == "") != (rec.Vhost == nil) || rec.Vhost != nil && *rec.Vhost != wantVhost || *rec.Method != c.method || *rec.Path != c.path || ip != "192.0.2.1" ||
+			((c.wantVhost == "") != (rec.Vhost == nil) || (rec.Vhost != nil && *rec.Vhost != c.wantVhost)) || *rec.Method != c.method || *rec.Path != c.path || ip != "192.0.2.1" ||
 			len(rec.Detail) != 0 || rec.Session == nil || *rec.Session != keyedID(t, h, "192.0.2.1") ||
 			rec.TrapID != nil || rec.TokenID != nil {
 			t.Errorf("%s: code %d, record %+v, ip %q", c.name, w.Code, rec, ip)
@@ -193,6 +190,7 @@ var hostShapes = []struct{ name, host, want string }{
 	{"253 bytes", strings.Repeat("a", 253), ""},
 	{"257 bytes", strings.Repeat("a", 257), ""},
 	{"NUL escape", "x%00y.example", ""},
+	{"sub-delimiters", "example.com!$&'()*+,;=", ""},
 }
 
 func vhostOf(rec event.Record) string {
@@ -228,11 +226,39 @@ func TestTS35BaitAbortStoresMatchedName(t *testing.T) {
 	}
 }
 
+// TestTS35BaitBeaconStoresMatchedName checks the beacon script and the beacon
+// post. The request event of each has the matched name, and not the Host.
+func TestTS35BaitBeaconStoresMatchedName(t *testing.T) {
+	e := newBC(t, bcPost)
+	tk := e.ticket(t, bcAddr, "")
+	for _, c := range []struct{ name, method, path, host, body string }{
+		{"script", "GET", bcScript, "EXAMPLE.COM:443", ""},
+		{"post", "POST", bcPost, "eXample.com:", tk},
+	} {
+		w, _ := e.do(c.method, c.path, c.host, bcAddr, "", c.body, -2)
+		reqs := 0
+		for _, ev := range e.q.Drain() {
+			if rec := ev.Record(); ev.Kind() == event.KindRequest {
+				reqs++
+				if got := vhostOf(rec); got != "example.com" {
+					t.Errorf("%s: stored vhost %q, want example.com", c.name, got)
+				}
+			}
+		}
+		if reqs != 1 {
+			t.Errorf("%s: code %d, %d request events, want 1", c.name, w.Code, reqs)
+		}
+	}
+}
+
 // TestTS35BaitBoundsStoredValues sends 10 000 distinct Hosts. The events hold
 // at most one value for each vhost and one for no vhost.
 func TestTS35BaitBoundsStoredValues(t *testing.T) {
-	const vhosts = 2 // example.com and kilo.example
 	h, q := eventHandler(t, 1000)
+	vhosts := len(h.siteOf(h.src.Current()).hosts)
+	if vhosts != 3 { // example.com, kilo.example and zulu.example
+		t.Fatalf("the bundle has %d vhosts, want 3", vhosts)
+	}
 	seen := map[string]bool{}
 	for i := 0; i < 10000; i++ {
 		host := fmt.Sprintf("h%d.example", i)
