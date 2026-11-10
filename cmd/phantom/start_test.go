@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -32,6 +33,10 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 	"github.com/cybagard/cyba-phantom/internal/verify"
 )
+
+// shmTmpfsMagic is the filesystem type number of tmpfs in statfs(2). The file
+// of requireTmpfs has the same number, but only for Linux.
+const shmTmpfsMagic = 0x01021994
 
 // The tests start the store part with realDeps. Most are not about the disk
 // guard. The use of the disk of the host must not pause their writer. So the
@@ -960,8 +965,9 @@ func TestTI16_StorePartNotHealthyOnAFullFileSystem(t *testing.T) {
 // page of the bait handler. Its event is dropped and counted, the event table
 // gets no row for it, and there is no stop marker. After the fill file is gone,
 // the writer resumes and the next request has a row. Set PHANTOM_DISKFULL to
-// run it. The state directory is on /dev/shm, and the test skips when that file
-// system is larger than 256 MiB.
+// run it. The test fills /dev/shm, where startBait puts the state directory,
+// whatever PHANTOM_DISKFULL names. It skips when /dev/shm is not a tmpfs or is
+// larger than 256 MiB.
 func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 	if os.Getenv("PHANTOM_DISKFULL") == "" {
 		t.Skip("PHANTOM_DISKFULL is not set: the test fills a small tmpfs")
@@ -975,14 +981,21 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		kept.Store(w)
 		return w
 	}
-	s := startBait(t, baitOpt{bundle: true, memory: true})
+	// startBait puts the state directory on /dev/shm. Fill only a small tmpfs.
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(s.p.Root, &st); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "linux" {
+		t.Skip("the test fills /dev/shm, a tmpfs of Linux")
+	}
+	if err := syscall.Statfs("/dev/shm", &st); err != nil {
+		t.Skipf("cannot read /dev/shm: %v", err)
+	}
+	if int64(st.Type) != shmTmpfsMagic {
+		t.Skip("/dev/shm is not a tmpfs")
 	}
 	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
-		t.Skipf("the state directory is on a file system of %d MiB: the limit is 256 MiB", size>>20)
+		t.Skipf("/dev/shm is a file system of %d MiB: the limit is 256 MiB", size>>20)
 	}
+	s := startBait(t, baitOpt{bundle: true, memory: true})
 	w := kept.Load()
 	if w == nil {
 		t.Fatal("start made no writer")
@@ -999,6 +1012,10 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		}
 		return n
 	}
+	// The probe request of the start has its row. So no event of the start waits
+	// in the queue or in a batch, and its drop cannot count as the drop of the
+	// request below.
+	until(t, "the row of the start probe", func() bool { return rows() == 1 })
 	fill := filepath.Join(s.p.Root, "fill")
 	f, err := os.Create(fill)
 	if err != nil {
@@ -1020,12 +1037,28 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		t.Fatalf("the fill reached a use of %v, not 0.92", use)
 	}
 	until(t, "paused writer", w.Paused)
-	dropped, before := w.Stats().Dropped.Bulk, rows()
+	// The flush that sets the pause counts the drops of its batch after it. Read
+	// the baseline when the count has not changed for more than 2 ticks of the
+	// writer (250 ms each).
+	const settle = 3 * 250 * time.Millisecond
+	dropped, since := w.Stats().Dropped.Bulk, time.Now()
+	for time.Since(since) <= settle {
+		if now := w.Stats().Dropped.Bulk; now != dropped {
+			dropped, since = now, time.Now()
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := rows()
 	page := fetch(t, s.https, decoyName, "/page", "")
 	if page.status != 200 || !strings.Contains(page.body, "<h1>page</h1>") || !strings.Contains(page.body, "bait note") {
 		t.Errorf("/page while paused: status %d, body %q; want 200 and the bait page", page.status, page.body)
 	}
 	until(t, "the drop of the request", func() bool { return w.Stats().Dropped.Bulk == dropped+1 })
+	// No other event counts later, and the writer wrote no row.
+	time.Sleep(settle)
+	if got := w.Stats().Dropped.Bulk; got != dropped+1 {
+		t.Errorf("bulk drops after the request: %d, want %d", got, dropped+1)
+	}
 	if got := rows(); got != before {
 		t.Errorf("/page rows while paused: %d, want %d", got, before)
 	}
