@@ -79,9 +79,8 @@ func launchClose(t *testing.T, slow time.Duration, run func(context.Context, *tl
 var storeStopName = runtime.FuncForPC(reflect.ValueOf((*storePart).Stop).Pointer()).Name()
 
 // closeInStop tells if a goroutine is in storePart.Stop. It reads the stack
-// dump of all goroutines, and doubles the buffer until the dump fits.
-// It scans all goroutines of the test binary. It is correct only while no
-// test of the package runs in parallel.
+// dump of all goroutines of the test binary, and doubles the buffer until the
+// dump fits. It is correct only while no test of the package runs in parallel.
 func closeInStop() bool {
 	buf := make([]byte, 1<<16)
 	for {
@@ -129,10 +128,10 @@ func TestTU18_CloseTimeIsBound(t *testing.T) {
 // at the cancel. Serve must return after boundTime, with exit 1 and one fixed
 // line. The wait runs from the return of the last serve call, which is before
 // the timer of serve starts. The upper limit is boundTime plus closeMargin.
-// The d check, not the guard of waitServeEnd, proves the bound. Before the
-// end, the test checks that the close goroutine is still in storePart.Stop.
-// Then it releases the checkpointer and waits for that goroutine, so no file
-// stays open.
+// The check of the time from the last serve call to the return proves the
+// bound. Before the end, the test checks that the close goroutine is still in
+// storePart.Stop. Then it releases the checkpointer and waits for that
+// goroutine, so no file stays open.
 func TestTU18_CloseBound(t *testing.T) {
 	release, entered := make(chan struct{}), make(chan struct{})
 	c := launchClose(t, 0, func(ctx context.Context, _ *tlog.Checkpointer, _ *event.Queue) {
@@ -174,8 +173,8 @@ func TestTU18_CloseBound(t *testing.T) {
 
 // TestTU18_CloseWithinBound slows the first phase of the stop by boundTime and
 // the close by boundTime/3. Serve must wait for the close, write nothing after
-// the last serve call, and give exit 0. The slow first phase fails a timer
-// that starts before srv.Shutdown.
+// the last serve call, and give exit 0. If the timer starts before
+// srv.Shutdown, the slow first phase makes this test fail.
 func TestTU18_CloseWithinBound(t *testing.T) {
 	c := launchClose(t, boundTime, func(ctx context.Context, cp *tlog.Checkpointer, _ *event.Queue) {
 		cp.Run(ctx)
