@@ -1037,7 +1037,8 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		t.Fatalf("the fill reached a use of %v, not 0.92", use)
 	}
 	until(t, "paused writer", w.Paused)
-	// The flush that sets the pause counts the drops of its batch after it.
+	// The flush that sets the pause counts the drops of its batch after it sets
+	// the pause.
 	// Read the baseline when the count has not changed for more than 2 ticks
 	// of the writer (250 ms each).
 	const settle = 3 * 250 * time.Millisecond
