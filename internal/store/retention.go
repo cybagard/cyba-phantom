@@ -27,9 +27,10 @@ const (
 )
 
 // A retentionStep runs one statement in the transaction of a chunk. It changes
-// at most limit rows. It returns the count of rows that it changed. A count
-// below limit means that the step has no row left. A count above limit, or
-// below 0, is a database error of the chunk.
+// at most limit rows. It returns a count that is an upper bound of the rows
+// that it changed, and at most limit. A count below limit means that the step
+// has no row left. A count above limit, or below 0, is a database error of the
+// chunk.
 type retentionStep func(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 
 // retentionSteps are the steps of a run, in order. The list is empty: the steps

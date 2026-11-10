@@ -72,15 +72,33 @@ func rollupRefused(context.Context, *sql.Tx, int) (int, error) {
 	return 0, fail(writerName, ruleDatabase)
 }
 
+// These costs bound the rows that a piece of work changes. A step returns the
+// sum of them, so the count is at least the rows changed (see retentionStep).
+const (
+	// rollupRowCost is for a request row: its event delete, its seen row and
+	// its share of the aggregate_day upserts.
+	rollupRowCost = 3
+	// rollupReadCost is for a callback: the read and its share of the upserts
+	// and of the position write.
+	rollupReadCost = 2
+	// rollupEndCost is for the two meta writes that end a day.
+	rollupEndCost = 2
+)
+
 // rollupDay returns the UTC date of a time in unix ms.
 func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupDayFmt) }
 
 // newRollupStep returns the roll-up step for the request rows (SEC-39). It
 // takes the rows with ts before tDel minus `days` x 24 h. The step reads no
-// clock. Each call takes at most `limit` rows, oldest first. It adds the
-// rows and the new sessions of each key to aggregate_day. Then it deletes
-// the rows. All this is in the transaction of the caller. A failed chunk
-// keeps the rows and changes no count.
+// clock. Each request row costs 3 changed rows. Thus each call takes at most
+// `limit`/3 rows, oldest first. It adds the rows and the new sessions of each
+// key to aggregate_day. Then it deletes the rows. All this is in the
+// transaction of the caller. A failed chunk keeps the rows and changes no
+// count.
+//
+// The call returns `limit` when it took the most rows, and 3 times the rows
+// otherwise. With `limit` below 3, it runs no statement and returns `limit`.
+// The next chunk gives the step a full limit.
 //
 // "Exact for each key" means this. A session counts one time for each key
 // (day, vhost, band, family) in which it has a row. A session whose band
@@ -103,7 +121,11 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 			key rollupKey
 			sid sql.NullString
 		}
-		rows, err := tx.QueryContext(ctx, rollupPickSQL, cutoff, limit)
+		most := limit / rollupRowCost
+		if most == 0 {
+			return limit, nil
+		}
+		rows, err := tx.QueryContext(ctx, rollupPickSQL, cutoff, most)
 		if err != nil {
 			return 0, err
 		}
@@ -137,7 +159,10 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 		if err := rollupAdd(ctx, tx, counts); err != nil {
 			return 0, err
 		}
-		return len(batch), nil
+		if len(batch) == most {
+			return limit, nil
+		}
+		return rollupRowCost * len(batch), nil
 	}
 }
 
@@ -202,11 +227,13 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 // rules of the roll-up step. Then it deletes the rollup_seen rows of the
 // day. At the end of a day it sets the mark.
 //
-// Each call reads or changes at most `limit` rows. A day with many
-// callbacks takes several calls. The position in the day is in the meta key
-// rollupPosKey. It is saved in the transaction of the counts. Thus no
-// callback counts two times, and none is missed. The step does not visit a
-// day with no callback and no seen row. It looks for the next day with data.
+// Each call has a row limit. A callback costs 2, a seen row costs 1, and the
+// end of a day costs 2. Thus the cost is at least the rows that the call
+// changes. A day with many callbacks takes several calls. The step saves the
+// position in the day in the meta key rollupPosKey, in the transaction of the
+// counts. Thus no callback counts two times, and none is missed. The step
+// does not visit a day with no callback and no seen row. It looks for the next
+// day with data.
 //
 // The step returns less than `limit` only when no done day is left. With
 // days outside 1 to 30, or a zero tDel, it runs no statement and returns an
@@ -217,8 +244,8 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		budget := limit
-		for budget > 0 {
+		left := limit
+		for left > 0 {
 			day, ok, err := rollupNextDay(ctx, tx, cutoff)
 			if err != nil {
 				return 0, err
@@ -226,16 +253,13 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 			if !ok {
 				break
 			}
-			used, finished, err := rollupCountDay(ctx, tx, day, budget)
+			used, err := rollupCountDay(ctx, tx, day, left)
 			if err != nil {
 				return 0, err
 			}
-			budget -= used
-			if !finished {
-				break
-			}
+			left -= used
 		}
-		return limit - budget, nil
+		return limit - left, nil
 	}
 }
 
@@ -309,66 +333,75 @@ func rollupPos(v string) (ts, id int64, err error) {
 	return ts, id, err
 }
 
-// rollupCountDay does at most budget rows of work for the day. First it counts
-// the callbacks after the saved position. When they are all counted, it deletes
-// the seen rows of the day. When it deletes the last of them, it sets the mark
-// and removes the position. It returns the rows that it read or deleted.
-// finished is false only when it used the whole budget.
-func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, budget int) (used int, finished bool, err error) {
+// rollupCountDay does work for the day at a cost of at most `limit`. First it
+// counts the callbacks after the saved position. When they are all counted, it
+// removes the seen rows of the day. When it removes the last of them, it sets
+// the mark and removes the position. It returns the cost. The cost is less
+// than `limit` only when the day is done.
+func rollupCountDay(ctx context.Context, tx *sql.Tx, day string, limit int) (cost int, err error) {
 	start, err := time.Parse(rollupDayFmt, day)
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	from, afterID := start.UnixMilli(), int64(0)
 	afterTS := from - 1
 	if pos, ok, err := metaGet(ctx, tx, rollupPosKey); err != nil {
-		return 0, false, err
+		return 0, err
 	} else if ok {
 		if afterTS, afterID, err = rollupPos(pos); err != nil {
-			return 0, false, err
+			return 0, err
 		}
 		from = afterTS
 	}
 	end := start.AddDate(0, 0, 1).UnixMilli()
-	rows, err := tx.QueryContext(ctx, rollupCallbackSQL, from, end, afterTS, afterID, budget)
+	most := limit / rollupReadCost
+	if most == 0 {
+		return limit, nil
+	}
+	rows, err := tx.QueryContext(ctx, rollupCallbackSQL, from, end, afterTS, afterID, most)
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	counts := rollupCounts{}
 	var lastTS, lastID int64
+	read := 0
 	err = eachRow(rows, func() error {
 		var id, ts int64
 		k := rollupKey{day: day}
 		err := rows.Scan(&id, &ts, &k.vhost, &k.band, &k.family)
 		counts.of(k).callbacks++
 		lastTS, lastID = ts, id
-		used++
+		read++
 		return err
 	})
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	if err = rollupAdd(ctx, tx, counts); err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	if used > 0 {
+	if read > 0 {
 		pos := strconv.FormatInt(lastTS, 10) + ":" + strconv.FormatInt(lastID, 10)
 		if _, err = execN(ctx, tx, metaSetSQL, rollupPosKey, pos); err != nil {
-			return 0, false, err
+			return 0, err
 		}
 	}
-	if used == budget {
-		return used, false, nil
+	if read == most {
+		return limit, nil
 	}
-	n, err := execN(ctx, tx, rollupDropSeenSQL, day, budget-used)
-	if used += n; err != nil || used == budget {
-		return used, false, err
+	cost = read * rollupReadCost
+	n, err := execN(ctx, tx, rollupDropSeenSQL, day, limit-cost)
+	if err != nil {
+		return 0, err
+	}
+	if cost += n; cost+rollupEndCost > limit {
+		return limit, nil
 	}
 	if _, err = execN(ctx, tx, metaSetSQL, rollupDoneKey, day); err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	_, err = execN(ctx, tx, metaDelSQL, rollupPosKey)
-	return used, true, err
+	return cost + rollupEndCost, err
 }
 
 // execN runs a statement and returns the rows that it changed.

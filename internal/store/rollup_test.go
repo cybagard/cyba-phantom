@@ -149,8 +149,8 @@ func TestTU11RollupMovesRowsInChunksAndAdds(t *testing.T) {
 	addEvents(t, r.db, "request", 5, cut+1000, 1000, "s1", "a")
 	runOK(t, r)
 	want := "2027-01-09|a|crawler||1|3|0 ; 2027-01-09|a|human|f|1|1500|0 ; 2027-01-11|a|human|f|1|11|0"
-	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 514]" || r.events() != 6 {
-		t.Fatalf("aggregates %q, chunks %v, %d rows left; want %q, [1000 514], 6", got, *chunks, r.events(), want)
+	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 1000 1000 1000 546]" || r.events() != 6 {
+		t.Fatalf("aggregates %q, chunks %v, %d rows left; want %q, [1000 1000 1000 1000 546], 6", got, *chunks, r.events(), want)
 	}
 	runAgain(t, r, newRollupStep(rollTDel.Add(12*time.Hour), 30))
 	want = "2027-01-09|a|crawler||1|3|0 ; 2027-01-09|a|human|f|1|1500|0 ; 2027-01-11|a|human|f|1|17|0"
@@ -189,8 +189,8 @@ func TestTU11RollupBoundaryAndUTCDay(t *testing.T) {
 
 // T-U-11: "exact for each key" means this. A session counts one time for each
 // key (day, vhost, band, family) in which it has a row. One session has 2 500
-// rows in 3 chunks. Its band changes after the first chunk. It counts one time
-// under each band. The pairs stop a count for each chunk.
+// rows in 8 chunks. Its band changes after the first chunk of 333 rows. It
+// counts one time under each band. The pairs stop a count for each chunk.
 func TestTU11RollupSessionCountsOncePerKey(t *testing.T) {
 	r, chunks := rollRig(t, newRollupStep(rollTDel, 30))
 	addSession(t, r.db, "s1", "human", "f")
@@ -205,8 +205,8 @@ func TestTU11RollupSessionCountsOncePerKey(t *testing.T) {
 		return old(tx)
 	}
 	runOK(t, r)
-	want := "2027-01-09|a|crawler|f|1|1500|0 ; 2027-01-09|a|human|f|1|1000|0"
-	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 1000 500]" {
+	want := "2027-01-09|a|crawler|f|1|2167|0 ; 2027-01-09|a|human|f|1|333|0"
+	if got := aggregates(t, r.db); got != want || fmt.Sprint(*chunks) != "[1000 1000 1000 1000 1000 1000 1000 507]" {
 		t.Fatalf("aggregates %q, chunks %v; want %q", got, *chunks, want)
 	}
 }
@@ -267,8 +267,8 @@ func TestTU11RollupDayStepCountsCallbacksOnce(t *testing.T) {
 	r, chunks := rollRig(t, newRollupStep(rollTDel, 30), newRollupDayStep(rollTDel, 30))
 	seedDays(t, r.db)
 	runOK(t, r)
-	if got := aggregates(t, r.db); got != wantDays || fmt.Sprint(*chunks) != "[1000 1000 509]" {
-		t.Fatalf("aggregates %q, chunks %v; want %q, [1000 1000 509]", got, *chunks, wantDays)
+	if got := aggregates(t, r.db); got != wantDays || fmt.Sprint(*chunks) != "[1000 1000 1000 1000 1000 27]" {
+		t.Fatalf("aggregates %q, chunks %v; want %q, [1000 1000 1000 1000 1000 27]", got, *chunks, wantDays)
 	}
 	if m := metaValue(t, r.db, rollupDoneKey); m != "2027-01-10" || count(t, r.db, "SELECT count(*) FROM meta WHERE key = '"+rollupPosKey+"'") != 0 ||
 		count(t, r.db, "SELECT count(*) FROM rollup_seen") != 1 || r.events() != 2508 {
@@ -278,14 +278,14 @@ func TestTU11RollupDayStepCountsCallbacksOnce(t *testing.T) {
 
 // T-U-11: a failed chunk in the middle of a day rolls back, with its
 // position. A new writer on the same database counts each callback one time.
-// It gives the result of a clean run. The first chunk holds 993 of the 2 501
+// It gives the result of a clean run. The first chunk holds 489 of the 2 501
 // callbacks of the day. The second chunk fails.
 func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 	r, _ := rollRig(t, newRollupStep(rollTDel, 30), newRollupDayStep(rollTDel, 30))
 	seedDays(t, r.db)
 	failCommit(r, 2)
 	stops(t, r)
-	if got := aggregates(t, r.db); !strings.Contains(got, "2027-01-10|a|human|f|1|3|993") || r.events() != 2508 {
+	if got := aggregates(t, r.db); !strings.Contains(got, "2027-01-10|a|human|f|1|3|489") || r.events() != 2508 {
 		t.Fatalf("after the crash: aggregates %q, %d events", got, r.events())
 	}
 	replaceWriter(r)
@@ -296,8 +296,8 @@ func TestTU11RollupDayStepCrashBetweenChunks(t *testing.T) {
 }
 
 // T-U-11: a crash between two roll-up chunks gives the counts of a clean run.
-// Two sessions have rows in each of 4 chunks. The failed chunk rolls back with
-// its pairs and its deletes.
+// Two sessions have rows in many chunks. The failed chunk rolls back with its
+// pairs and its deletes.
 func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 	seed := func(r *rig) {
 		addSession(t, r.db, "s1", "human", "f")
@@ -312,8 +312,8 @@ func TestTU11RollupCrashBetweenChunks(t *testing.T) {
 	seed(r)
 	failCommit(r, 3)
 	stops(t, r)
-	if r.events() != 3200-2000 {
-		t.Fatalf("%d rows left after the crash; want 1 200", r.events())
+	if r.events() != 3200-666 {
+		t.Fatalf("%d rows left after the crash; want 2 534", r.events())
 	}
 	replaceWriter(r)
 	runOK(t, r)
@@ -351,14 +351,81 @@ func call(t *testing.T, db *sql.DB, step retentionStep, limit int) int {
 // rollDay is the day step of the tests with the time rollTDel and 30 days.
 var rollDay = newRollupDayStep(rollTDel, 30)
 
-// T-U-11: the roll-up step uses the limit that the runner gives it. A limit of
-// 7 over 20 old rows changes 7 rows. A limit of 30 changes the other 13.
+// T-U-11: the roll-up step uses the limit that the runner gives it. A request
+// row costs 3. A limit of 7 takes 2 of 20 old rows and returns the limit. A
+// limit of 2 takes no row and returns the limit. A limit of 30 takes 10 rows
+// and returns the limit. The last 8 rows cost 24.
 func TestTU11RollupStepUsesTheLimitOfTheRunner(t *testing.T) {
 	db := migrated(t)
 	addEvents(t, db, "request", 20, utc("2027-01-09T01:00:00Z"), 1, "s1", "a")
 	step := newRollupStep(rollTDel, 30)
-	if a, b := call(t, db, step, 7), call(t, db, step, 30); a != 7 || b != 13 {
-		t.Fatalf("rows by call %d and %d; want 7 and 13", a, b)
+	for _, c := range []struct{ limit, want, left int }{{7, 7, 18}, {2, 2, 18}, {30, 30, 8}, {30, 24, 0}} {
+		if n, left := call(t, db, step, c.limit), count(t, db, "SELECT count(*) FROM event"); n != c.want || left != c.left {
+			t.Fatalf("limit %d: returned %d, %d rows left; want %d, %d", c.limit, n, left, c.want, c.left)
+		}
+	}
+}
+
+// totalChanges returns the rows that the connection of tx changed so far.
+func totalChanges(t *testing.T, tx *sql.Tx) (n int) {
+	t.Helper()
+	check(t, tx.QueryRow("SELECT total_changes()").Scan(&n))
+	return n
+}
+
+// seedMixed makes rows for both steps. Fifty request rows of distinct
+// sessions and hosts are on two done days. Callbacks of distinct hosts are on
+// two done days. Six seen rows are on an older day.
+func seedMixed(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, ts := range []int64{utc("2027-01-08T01:00:00Z"), utc("2027-01-09T01:00:00Z")} {
+		mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 24)
+			INSERT INTO event (ts, session_id, kind, vhost) SELECT ? + i, 's' || i, 'request', 'h' || i FROM c`, ts)
+		mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 24)
+			INSERT INTO event (ts, session_id, kind, vhost, hash, leaf_index) SELECT ? + i, 's' || i, 'callback', 'c' || i, zeroblob(32), i
+			+ (SELECT coalesce(max(leaf_index) + 1, 0) FROM event) FROM c`, ts+3_600_000)
+	}
+	addSeen(t, db, "2027-01-05", 6)
+}
+
+// T-U-11: the count that a step returns is at least the rows that the call
+// changed, and at most the limit. The data have distinct sessions and hosts,
+// callbacks over two done days, and seen rows. The roll-up step runs with the
+// limits 1000 and 7. The day step runs with 1000, 7 and 2.
+func TestTU11RollupCountIsAnUpperBoundOfTheChangedRows(t *testing.T) {
+	for _, c := range []struct {
+		limit int
+		both  bool
+	}{{1000, true}, {7, true}, {2, false}} {
+		t.Run(fmt.Sprint("limit ", c.limit), func(t *testing.T) {
+			db := migrated(t)
+			seedMixed(t, db)
+			steps := []retentionStep{newRollupStep(rollTDel, 30), rollDay}
+			if !c.both {
+				steps = steps[1:]
+				call(t, db, newRollupStep(rollTDel, 30), 1000)
+			}
+			for _, step := range steps {
+				for calls, n := 0, 0; calls == 0 || n == c.limit; calls++ {
+					tx, err := db.Begin()
+					check(t, err)
+					before := totalChanges(t, tx)
+					n, err = step(context.Background(), tx, c.limit)
+					check(t, err)
+					if changed := totalChanges(t, tx) - before; changed > n || n > c.limit {
+						t.Fatalf("limit %d: call returned %d and changed %d rows", c.limit, n, changed)
+					}
+					check(t, tx.Commit())
+					if calls > 500 {
+						t.Fatal("the step does not end")
+					}
+				}
+			}
+			if got := count(t, db, "SELECT count(*) FROM event WHERE kind = 'request'") + count(t, db, "SELECT count(*) FROM rollup_seen"); got != 0 ||
+				metaValue(t, db, rollupDoneKey) != "2027-01-09" {
+				t.Fatalf("%d request and seen rows left, mark %q", got, metaValue(t, db, rollupDoneKey))
+			}
+		})
 	}
 }
 
@@ -379,16 +446,18 @@ func dayState(t *testing.T, db *sql.DB) string {
 	return out
 }
 
-// T-U-11: the seen-row delete shares the budget of a call. A done day with 5
-// seen rows and no callback takes 3 calls of 2. A call that counts no
-// callback saves no position. A call that uses its whole budget sets no mark.
-// Then a day has 3 callbacks and 4 seen rows. A call of 5 counts the 3 and
-// deletes 2, no more. The next call deletes the rest and sets the mark.
-func TestTU11RollupDayStepSeenRowsUseTheBudget(t *testing.T) {
+// T-U-11: removing seen rows uses the row limit of a call, at a cost of 1 for
+// each row. A done day has 5 seen rows and no callback. Two calls of 2 remove
+// 4 of them. A call of 3 removes the last one, has room for the end of the day
+// (cost 2) and sets the mark. A call that counts no callback saves no
+// position. Then a day has 3 callbacks and 4 seen rows. A call of 5 counts 2
+// callbacks. The next call counts the third and removes 3 seen rows. The last
+// call removes 1 seen row and sets the mark.
+func TestTU11RollupDayStepSeenRowsUseTheRowLimit(t *testing.T) {
 	db := migrated(t)
 	addSeen(t, db, "2027-01-08", 5)
-	for _, want := range []string{" seen=3 cb=0", " seen=1 cb=0", "retention_rollup_done=2027-01-08 seen=0 cb=0"} {
-		call(t, db, rollDay, 2)
+	for i, want := range []string{" seen=3 cb=0", " seen=1 cb=0", "retention_rollup_done=2027-01-08 seen=0 cb=0"} {
+		call(t, db, rollDay, min(2+i/2, 3))
 		if got := dayState(t, db); got != want {
 			t.Fatalf("state %q; want %q", got, want)
 		}
@@ -399,8 +468,9 @@ func TestTU11RollupDayStepSeenRowsUseTheBudget(t *testing.T) {
 	for _, c := range []struct {
 		n     int
 		state string
-	}{{5, "retention_rollup_done=2027-01-08,retention_rollup_pos=" + fmt.Sprint(ts+2000) + ":3 seen=2 cb=3"},
-		{2, "retention_rollup_done=2027-01-09 seen=0 cb=3"}} {
+	}{{5, "retention_rollup_done=2027-01-08,retention_rollup_pos=" + fmt.Sprint(ts+1000) + ":2 seen=4 cb=2"},
+		{5, "retention_rollup_done=2027-01-08,retention_rollup_pos=" + fmt.Sprint(ts+2000) + ":3 seen=1 cb=3"},
+		{3, "retention_rollup_done=2027-01-09 seen=0 cb=3"}} {
 		if n, got := call(t, db, rollDay, 5), dayState(t, db); n != c.n || got != c.state {
 			t.Fatalf("call gave %d, state %q; want %d, %q", n, got, c.n, c.state)
 		}
@@ -414,7 +484,7 @@ func TestTU11RollupDayStepCountsDayEdges(t *testing.T) {
 	db := migrated(t)
 	addEvents(t, db, "callback", 2, utc("2027-01-09T00:00:00Z")-1, 1, nil, nil)
 	addEvents(t, db, "callback", 2, utc("2027-01-10T00:00:00Z")-1, 1, nil, nil)
-	for i := 0; i < 9 && call(t, db, rollDay, 2) > 0; i++ {
+	for i := 0; i < 20 && call(t, db, rollDay, 2) > 0; i++ {
 	}
 	want := "2027-01-08||human||0|0|1 ; 2027-01-09||human||0|0|2 ; 2027-01-10||human||0|0|1"
 	if got := aggregates(t, db); got != want {
