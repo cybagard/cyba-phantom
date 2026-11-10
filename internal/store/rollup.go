@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ const (
 	rollupFirstCallbackSQL = "SELECT ts FROM event WHERE kind = 'callback' AND ts >= ? ORDER BY ts LIMIT 1"
 	rollupFirstSeenSQL     = "SELECT day FROM rollup_seen WHERE day > ? ORDER BY day LIMIT 1"
 	rollupDropSeenSQL      = "DELETE FROM rollup_seen WHERE (day, vhost, band, family, session_id) IN " +
-		"(SELECT day, vhost, band, family, session_id FROM rollup_seen WHERE day = ? LIMIT ?)"
+		"(SELECT day, vhost, band, family, session_id FROM rollup_seen WHERE day <= ? LIMIT ?)"
 	metaGetSQL = "SELECT value FROM meta WHERE key = ?"
 	metaSetSQL = "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"
 	metaDelSQL = "DELETE FROM meta WHERE key = ?"
@@ -114,7 +115,10 @@ func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupD
 //
 // The pairs of a key and a session stay in rollup_seen. A session can have
 // rows in two chunks or two runs of one day. The pair stops a second count.
-// The day step removes the pairs of a day when the day is done.
+// The day step removes the pairs of a day when the day is done. A row of a
+// day at or before the mark rollupDoneKey (a wall clock step back) still
+// rolls up and counts as a request. It adds no pair and no session, as no
+// step would remove the pair.
 //
 // With days outside 1 to 30, or a zero tDel, the step runs no statement and
 // returns an error. The runner then stops the writer.
@@ -132,6 +136,10 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 		most := limit / rollupRowCost
 		if most == 0 {
 			return limit, nil
+		}
+		mark, _, err := metaGet(ctx, tx, rollupDoneKey)
+		if err != nil {
+			return 0, err
 		}
 		rows, err := tx.QueryContext(ctx, rollupPickSQL, cutoff, most)
 		if err != nil {
@@ -153,7 +161,7 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 		for _, p := range batch {
 			c := counts.of(p.key)
 			c.requests++
-			if p.sid.Valid {
+			if p.sid.Valid && p.key.day > mark {
 				n, err := execN(ctx, tx, rollupSeenSQL, p.key.day, p.key.vhost, p.key.band, p.key.family, p.sid.String)
 				if err != nil {
 					return 0, err
@@ -233,7 +241,8 @@ func scanOne(row *sql.Row, dst ...any) (ok bool, err error) {
 // done days in order, from the day after the meta mark rollupDoneKey. For
 // each day it adds the callback events to aggregate_day. It uses the key
 // rules of the roll-up step. Then it deletes the rollup_seen rows of the
-// day. At the end of a day it sets the mark.
+// day and of older days (rows of an older binary or a broken run). At the
+// end of a day it sets the mark.
 //
 // Each call has a row limit. A callback costs 2, a seen row costs 1, and the
 // end of a day costs 2. Thus the cost is at least the rows that the call
@@ -252,24 +261,35 @@ func newRollupDayStep(tDel time.Time, days int) retentionStep {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		left := limit
+		left, last := limit, int64(math.MinInt64)
 		for left > 0 {
-			start, ok, err := rollupNextDay(ctx, tx, cutoff)
+			start, ok, err := rollupPickDay(ctx, tx, cutoff)
 			if err != nil {
 				return 0, err
 			}
 			if !ok {
 				break
 			}
+			if start <= last {
+				// No input can cause this: an invariant is broken.
+				return 0, fail(writerName, ruleDatabase)
+			}
 			used, err := rollupCountDay(ctx, tx, start, left)
 			if err != nil {
 				return 0, err
+			}
+			if used < left {
+				last = start
 			}
 			left -= used
 		}
 		return limit - left, nil
 	}
 }
+
+// rollupPickDay is rollupNextDay. A test replaces it to break the invariant
+// that a done day is not picked again.
+var rollupPickDay = rollupNextDay
 
 // rollupNextDay returns the start of the next day to work on, in unix ms. This
 // is the day in progress, or the first day with a callback or a seen row after

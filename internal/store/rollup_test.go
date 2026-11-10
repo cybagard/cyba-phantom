@@ -554,6 +554,99 @@ func TestTU11RollupStepReportsAScanError(t *testing.T) {
 	}
 }
 
+// T-U-11: a read error after the first row of a callback query stops the day
+// step with an error, and the day is not done. A view replaces the session
+// table. It fails for one session, so the second row of the query fails.
+func TestTU11RollupDayStepReportsAReadError(t *testing.T) {
+	db := migrated(t)
+	mustExec(t, db, "ALTER TABLE session RENAME TO session_table")
+	mustExec(t, db, `CREATE VIEW session AS SELECT id, family, CASE WHEN id = 'bad' THEN abs(-9223372036854775807 - 1) ELSE band END AS band
+		FROM session_table`)
+	mustExec(t, db, "INSERT INTO session_table (id, first_seen, last_seen, ip_hmac, band) VALUES ('ok', 0, 0, 'h', 'human'), ('bad', 0, 0, 'h', 'human')")
+	ts := utc("2027-01-09T01:00:00Z")
+	addEvents(t, db, "callback", 1, ts, 0, "ok", "a")
+	addEvents(t, db, "callback", 1, ts+1000, 0, "bad", "a")
+	tx, err := db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	if _, err := rollDay(context.Background(), tx, 1000); err == nil {
+		t.Fatal("no error for a failed read")
+	}
+	var marks int
+	check(t, tx.QueryRow("SELECT count(*) FROM meta WHERE key = ?", rollupDoneKey).Scan(&marks))
+	if marks != 0 {
+		t.Fatal("the day is done after a failed read")
+	}
+}
+
+// T-U-11: a request row at the cutoff does not hold the day step. The day
+// before it is done.
+func TestTU11RollupDayStepIgnoresARequestRowAtTheCutoff(t *testing.T) {
+	db := migrated(t)
+	addEvents(t, db, "request", 1, rollCutoff(30), 0, nil, "a")
+	addEvents(t, db, "callback", 1, utc("2027-01-10T12:00:00Z"), 0, nil, "a")
+	call(t, db, rollDay, 10)
+	if got := dayState(t, db); got != "retention_rollup_done=2027-01-10 seen=0 cb=1" {
+		t.Fatalf("state %q", got)
+	}
+}
+
+// T-U-11: the roll-up step takes the oldest rows first. The newer rows have
+// the lower ids. A call that takes 2 rows rolls up the 2 rows of the older day.
+func TestTU11RollupTakesTheOldestRowsFirst(t *testing.T) {
+	db := migrated(t)
+	addEvents(t, db, "request", 3, utc("2027-01-10T01:00:00Z"), 1000, nil, "a")
+	addEvents(t, db, "request", 2, utc("2027-01-09T01:00:00Z"), 1000, nil, "a")
+	call(t, db, newRollupStep(rollTDel, 30), 2*rollupRowCost)
+	if got := aggregates(t, db); got != "2027-01-09|a|human||0|2|0" || count(t, db, "SELECT count(*) FROM event") != 3 {
+		t.Fatalf("aggregates %q", got)
+	}
+}
+
+// T-U-11: a day step that picks a done day again stops with an error. This
+// breaks an invariant, and no input can cause it. A test replaces the pick. The
+// context ends the loop of a step that has no guard, so the test fails in 5 s.
+func TestTU11RollupDayStepStopsWhenADayIsPickedAgain(t *testing.T) {
+	db := migrated(t)
+	setHook(t, &rollupPickDay, func(context.Context, *sql.Tx, int64) (int64, bool, error) {
+		return utc("2027-01-05T00:00:00Z"), true, nil
+	})
+	tx, err := db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := rollDay(ctx, tx, 1000); err == nil || ctx.Err() != nil {
+		t.Fatalf("error %v, context error %v; want a guard error before the timeout", err, ctx.Err())
+	}
+}
+
+// T-U-11: a request row of a day at or before the mark rolls up. It counts as a
+// request, and adds no session and no seen row. The late rows are from the same
+// session and from a new session. A stale seen row of an older day goes away
+// when the day step does a later day.
+func TestTU11RollupLateRowOfADoneDayAddsNoSession(t *testing.T) {
+	r, _ := rollRig(t, newRollupStep(rollTDel, 30), rollDay)
+	addSession(t, r.db, "s1", "human", "f")
+	addSession(t, r.db, "s2", "human", "f")
+	ts := utc("2027-01-09T01:00:00Z")
+	addEvents(t, r.db, "request", 1, ts, 0, "s1", "a")
+	addEvents(t, r.db, "callback", 1, ts, 0, "s1", "a")
+	runOK(t, r)
+	if got := aggregates(t, r.db); got != "2027-01-09|a|human|f|1|1|1" || metaValue(t, r.db, rollupDoneKey) != "2027-01-09" {
+		t.Fatalf("after the first run: %q", got)
+	}
+	addEvents(t, r.db, "request", 1, ts+1000, 0, "s1", "a")
+	addEvents(t, r.db, "request", 1, ts+2000, 0, "s2", "a")
+	addEvents(t, r.db, "callback", 1, ts+86_400_000, 0, "s1", "a")
+	addSeen(t, r.db, "2027-01-05", 2)
+	runAgain(t, r, newRollupStep(rollTDel, 30), rollDay)
+	want := "2027-01-09|a|human|f|1|3|1 ; 2027-01-10|a|human|f|0|0|1"
+	if got := aggregates(t, r.db); got != want || count(t, r.db, "SELECT count(*) FROM rollup_seen") != 0 {
+		t.Fatalf("after the late rows: %q, %d seen rows; want %q, 0", got, count(t, r.db, "SELECT count(*) FROM rollup_seen"), want)
+	}
+}
+
 // T-U-11: a days value below 1 or above 30, or a zero tDel, gives a step that
 // runs no statement. The run stops the writer, and no row changes.
 func TestTU11RollupRefusesBadParameters(t *testing.T) {
