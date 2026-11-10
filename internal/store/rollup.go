@@ -15,8 +15,8 @@ const (
 	// step counts the callbacks of that day and removes its rollup_seen rows.
 	// rollupPosKey is the meta key of the position in the day in progress.
 	// It holds the ts and the id of the last callback counted, as ts:id. It
-	// holds start:-1 when the day step saves it before the seen rows go. The
-	// day step removes it when the day is done.
+	// holds start:-1 when the day has no callback. The day step removes it
+	// when the day is done.
 	rollupDoneKey = "retention_rollup_done"
 	rollupPosKey  = "retention_rollup_pos"
 	rollupDayFmt  = "2006-01-02"
@@ -404,11 +404,11 @@ func parseRollupPos(v string) (p rollupPos, err error) {
 
 // rollupCountDay does work for the day that starts at `start`, at a cost of at
 // most `limit`. First it counts the callbacks after the saved position. When
-// it has counted them all, it saves the position if none is saved. The saved
-// position tells the roll-up step that the day is closing. Then it removes the
-// seen rows of the day. When it removes the last of them, it sets the mark and
-// removes the position. It returns the cost. The cost is less than `limit`
-// only when the day is done.
+// it has counted them all, it saves the position if it has saved no position.
+// The saved position tells the roll-up step that the day is closing. Then it
+// removes the seen rows of the day. When it removes the last of them, it sets
+// the mark and removes the position. It returns the cost. The cost is less
+// than `limit` only when the day is done.
 func rollupCountDay(ctx context.Context, tx *sql.Tx, start int64, limit int) (cost int, err error) {
 	day := rollupDay(start)
 	after, saved := rollupPos{ts: start, id: -1}, false
