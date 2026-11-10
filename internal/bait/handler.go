@@ -192,8 +192,8 @@ type reqSession struct {
 	// a response with no mint.
 	at   time.Time
 	mint event.MintRange
-	// host holds the folded Host, and hostLen is the size of the vhost name that
-	// it matched. hostLen is 0 when no vhost matched. serve sets both.
+	// host holds the folded Host. hostLen is the size of the vhost name that
+	// it matched, or 0 when no vhost matched. serve sets both.
 	host    [maxHost]byte
 	hostLen int
 	// firstCapped holds the trap id, token id and surface of the first token

@@ -202,8 +202,8 @@ func vhostOf(rec event.Record) string {
 	return *rec.Vhost
 }
 
-// TestTS35BaitStoresMatchedName checks that each Host shape gives the name of
-// a bundle vhost or no vhost in the request event (SEC-41).
+// TestTS35BaitStoresMatchedName checks each Host shape. The request event has
+// the name of a bundle vhost, or no vhost (SEC-41).
 func TestTS35BaitStoresMatchedName(t *testing.T) {
 	for _, c := range hostShapes {
 		h, q := eventHandler(t, 8)
@@ -228,8 +228,8 @@ func TestTS35BaitAbortStoresMatchedName(t *testing.T) {
 	}
 }
 
-// TestTS35BaitBoundsStoredValues checks that 10 000 distinct Hosts give at most
-// one stored value for each vhost and one for no vhost.
+// TestTS35BaitBoundsStoredValues sends 10 000 distinct Hosts. The events hold
+// at most one value for each vhost and one for no vhost.
 func TestTS35BaitBoundsStoredValues(t *testing.T) {
 	const vhosts = 2 // example.com and kilo.example
 	h, q := eventHandler(t, 1000)
