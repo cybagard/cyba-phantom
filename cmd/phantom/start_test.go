@@ -1012,9 +1012,9 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		}
 		return n
 	}
-	// The probe request of the start has its row. So no event of the start waits
-	// in the queue or in a batch, and its drop cannot count as the drop of the
-	// request below.
+	// The probe request of the start has its row. So no event of the start
+	// waits in the queue or in a batch. Its drop cannot count as the drop of
+	// the request below.
 	until(t, "the row of the start probe", func() bool { return rows() == 1 })
 	fill := filepath.Join(s.p.Root, "fill")
 	f, err := os.Create(fill)
@@ -1037,9 +1037,9 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 		t.Fatalf("the fill reached a use of %v, not 0.92", use)
 	}
 	until(t, "paused writer", w.Paused)
-	// The flush that sets the pause counts the drops of its batch after it. Read
-	// the baseline when the count has not changed for more than 2 ticks of the
-	// writer (250 ms each).
+	// The flush that sets the pause counts the drops of its batch after it.
+	// Read the baseline when the count has not changed for more than 2 ticks
+	// of the writer (250 ms each).
 	const settle = 3 * 250 * time.Millisecond
 	dropped, since := w.Stats().Dropped.Bulk, time.Now()
 	for time.Since(since) <= settle {
