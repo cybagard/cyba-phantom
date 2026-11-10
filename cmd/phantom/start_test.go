@@ -398,17 +398,25 @@ func TestTU18_StopOrder(t *testing.T) {
 
 // TestTU27_StartRunsTheSchedule checks that start runs the schedule with the
 // days of the params when a writer runs. With no mark, the run at the start
-// writes the mark (T-U-27). The test waits for the mark with a bound.
+// writes the mark (T-U-27). The wrapped schedule signals when the start check
+// ends. The test then reads the mark one time, with a bounded wait.
 func TestTU27_StartRunsTheSchedule(t *testing.T) {
-	s, _ := launch(t, testParams(t, "events.db"), realDeps)
-	for end := time.Now().Add(netWait); ; time.Sleep(10 * time.Millisecond) {
-		var v string
-		if s.db.QueryRow("SELECT value FROM meta WHERE key = 'retention_last'").Scan(&v) == nil {
-			return
-		}
-		if time.Now().After(end) {
-			t.Fatal("the schedule wrote no mark")
-		}
+	began := make(chan struct{})
+	d := realDeps
+	d.schedule = func(ctx context.Context, w *store.Writer, ip, raw int, lg *slog.Logger) {
+		sc := store.NewSchedule(w, ip, raw, lg)
+		go func() { <-sc.Began(); close(began) }()
+		sc.Run(ctx)
+	}
+	s, _ := launch(t, testParams(t, "events.db"), d)
+	select {
+	case <-began:
+	case <-time.After(netWait):
+		t.Fatal("the schedule did not end its start check")
+	}
+	var v string
+	if err := s.db.QueryRow("SELECT value FROM meta WHERE key = 'retention_last'").Scan(&v); err != nil {
+		t.Fatalf("the schedule wrote no mark: %v", err)
 	}
 }
 
@@ -420,11 +428,13 @@ func TestTU27_NoScheduleWithoutWriter(t *testing.T) {
 	launch(t, testParams(t, "keys/events.db"), d)
 }
 
-// TestTU27_StopEndsTheSchedule checks that Stop cancels a schedule that waits
-// in a run. Stop waits for it before it closes the queue. The stop ends within
-// the close bound (T-U-27).
+// TestTU27_StopEndsTheSchedule checks that Stop cancels the schedule and waits
+// for it before it closes the queue. The fake schedule ends after its context
+// ends, when the test lets it go. Until then, Stop must not return. After the
+// release, the stop ends within the close bound (T-U-27).
 func TestTU27_StopEndsTheSchedule(t *testing.T) {
-	started, ended := make(chan struct{}), make(chan bool, 1)
+	started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	ended := make(chan bool, 1)
 	q, err := event.NewQueue(8, event.NewCounters())
 	if err != nil {
 		t.Fatal(err)
@@ -436,19 +446,42 @@ func TestTU27_StopEndsTheSchedule(t *testing.T) {
 		}
 		close(started)
 		<-ctx.Done()
+		close(cancelled)
+		<-release
 		ended <- q.Closed()
 	}
 	s := start(testParams(t, "events.db"), q, d, slog.New(slog.DiscardHandler))
-	<-started
+	recv := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(netWait):
+			close(release)
+			t.Fatal(what)
+		}
+	}
+	recv(started, "the schedule did not start")
 	stopped := make(chan struct{})
 	go func() { s.Stop(); close(stopped) }()
+	recv(cancelled, "Stop did not cancel the schedule")
+	select {
+	case <-stopped:
+		t.Error("Stop ended before the schedule ended")
+	case <-time.After(closeMargin):
+	}
+	close(release)
 	select {
 	case <-stopped:
 	case <-time.After(boundTime + closeMargin):
 		t.Fatal("Stop did not end in the close bound")
 	}
-	if closed := <-ended; closed {
-		t.Error("the queue closed before the schedule ended")
+	select {
+	case closed := <-ended:
+		if closed {
+			t.Error("the queue closed before the schedule ended")
+		}
+	case <-time.After(netWait):
+		t.Fatal("the schedule did not report")
 	}
 }
 

@@ -43,10 +43,10 @@ func newClockGuard(lg *slog.Logger) *clockGuard {
 }
 
 // reading returns the times of one run. Deletes use tDel, the earlier time, so
-// no row goes before its age. The address and field steps use tPriv, the later
-// time, so no address stays longer than its age. A difference of more than 1 h
-// adds 1 to the count of the run. The first one writes one log line, with the
-// difference in whole seconds as the only value.
+// no row goes before its age. The address step uses tPriv, the later time, so
+// no address stays longer than its age. A difference of more than 1 h adds 1 to
+// the count of the run. The first one writes one log line, with the difference
+// in whole seconds as the only value.
 func (c *clockGuard) reading() (wall, tDel, tPriv time.Time) {
 	wall = c.wall()
 	mono := c.anchor.Add(c.mono())
