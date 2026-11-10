@@ -557,8 +557,9 @@ func TestTU11RollupStepReportsAScanError(t *testing.T) {
 }
 
 // T-U-11: a read error after the first row of a callback query stops the day
-// step. The step returns an error, and the day is not done. A view replaces the
-// session table. It fails for one session, so the second row of the query fails.
+// step. The step returns an error, and the day is not done. A view replaces
+// the session table. It fails for one session, so the second row of the query
+// fails.
 func TestTU11RollupDayStepReportsAReadError(t *testing.T) {
 	db := migrated(t)
 	mustExec(t, db, "ALTER TABLE session RENAME TO session_table")
