@@ -11,7 +11,7 @@ import (
 func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	db := migrated(t)
 	var ddl []byte
-	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql", "0003_retention.sql"} {
+	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql", "0003_retention.sql", "0004_rollup.sql"} {
 		b, err := migrationFiles.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -25,7 +25,7 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	}
 	// SQLite stores each statement without its final semicolon.
 	want := strings.TrimSuffix(strings.Join(strings.Split(strings.TrimSpace(string(ddl)), ";\n"), ";"), ";")
-	if got != want || strings.Count(want, "CREATE ") != 16 {
+	if got != want || strings.Count(want, "CREATE ") != 17 {
 		t.Fatalf("sqlite_master differs from the embedded DDL:\n%q\n%q", got, want)
 	}
 	var n int
@@ -109,7 +109,12 @@ CREATE TABLE mint (
   PRIMARY KEY (set_id, unit, first)
 ) WITHOUT ROWID
 CREATE INDEX session_ip_first ON session(first_seen) WHERE ip IS NOT NULL
-CREATE INDEX token_first_cb ON token(first_cb_at)`
+CREATE INDEX token_first_cb ON token(first_cb_at)
+CREATE TABLE rollup_seen (
+  day TEXT NOT NULL, vhost TEXT NOT NULL, band TEXT NOT NULL, family TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  PRIMARY KEY (day, vhost, band, family, session_id)
+) WITHOUT ROWID`
 
 // T-U-18: a new database has the fixed text of each table and index. The text
 // of the embedded file is not the only proof.
@@ -124,14 +129,15 @@ func TestTU18SchemaEqualsFixedText(t *testing.T) {
 	}
 }
 
-// T-U-18: the migrations are the first one, the mint table and the retention
-// indexes. A new database has schema_version 3.
-func TestTU18OnlyThreeMigrationsExist(t *testing.T) {
+// T-U-18: the migrations are the first one, the mint table, the retention
+// indexes and the roll-up table. A new database has schema_version 4.
+func TestTU18OnlyFourMigrationsExist(t *testing.T) {
 	files, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil || len(files) != 3 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" || files[2].Name() != "0003_retention.sql" {
+	if err != nil || len(files) != 4 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" ||
+		files[2].Name() != "0003_retention.sql" || files[3].Name() != "0004_rollup.sql" {
 		t.Fatalf("migration files %v: %v", files, err)
 	}
-	if v := metaValue(t, migrated(t), "schema_version"); v != "3" {
+	if v := metaValue(t, migrated(t), "schema_version"); v != "4" {
 		t.Fatalf("schema_version %s", v)
 	}
 }
