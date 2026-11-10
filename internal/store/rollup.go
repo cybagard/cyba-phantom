@@ -13,9 +13,10 @@ import (
 const (
 	// rollupDoneKey is the meta key of the last day that is done. The day
 	// step counts the callbacks of that day and removes its rollup_seen rows.
-	// rollupPosKey is the meta key of the last callback counted in the day
-	// in progress. It holds the ts and the id, as ts:id. The day step
-	// removes it when the day is done.
+	// rollupPosKey is the meta key of the position in the day in progress.
+	// It holds the ts and the id of the last callback counted, as ts:id. It
+	// holds start:-1 when the day step saves it before the seen rows go. The
+	// day step removes it when the day is done.
 	rollupDoneKey = "retention_rollup_done"
 	rollupPosKey  = "retention_rollup_pos"
 	rollupDayFmt  = "2006-01-02"
@@ -98,11 +99,12 @@ func rollupDayStart(ts int64) int64 { return ts - (ts%rollupDayMs+rollupDayMs)%r
 func rollupDay(ts int64) string { return time.UnixMilli(ts).UTC().Format(rollupDayFmt) }
 
 // rollupFarMs is the start of UTC year 10000 in unix ms. The date text of a
-// later day has 5 digits for the year. The day step never does such a day.
+// later day has 5 digits for the year. The day step never finishes such a day.
 var rollupFarMs = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
 
-// rollupFloor returns the last date text that the roll-up step treats as done.
-// It is the mark, or the date of the saved position when that is later.
+// rollupFloor returns the last date text that gets no new seen pair in the
+// roll-up step. It is the mark, or the date of the saved position when that is
+// later.
 func rollupFloor(ctx context.Context, tx *sql.Tx) (string, error) {
 	floor, _, err := metaGet(ctx, tx, rollupDoneKey)
 	if err != nil {
@@ -138,10 +140,12 @@ func rollupFloor(ctx context.Context, tx *sql.Tx) (string, error) {
 // The pairs of a key and a session stay in rollup_seen. A session can have
 // rows in two chunks or two runs of one day. The pair stops a second count.
 // The day step removes the pairs of a day when the day is done. A row of a
-// day at or before the mark rollupDoneKey still rolls up (a wall clock step
-// back). It counts as a request. It adds no pair and no session, as no step
-// would remove the pair. The same holds for a day at or before the day of the
-// saved position rollupPosKey. The day step has begun to remove its pairs.
+// day at or before the mark rollupDoneKey still rolls up, after a wall clock
+// moves back. It counts as a request. It adds no pair and no session, as no
+// step would remove the pair. The same holds for a day at or before the day
+// of the saved position rollupPosKey. The day step has begun to count the
+// callbacks of that day, or to remove its pairs. Thus a late row of a new
+// session in that day adds no session.
 // A row after year 9999 rolls up with no pair and no session. Its day is
 // never done.
 //
@@ -400,11 +404,11 @@ func parseRollupPos(v string) (p rollupPos, err error) {
 
 // rollupCountDay does work for the day that starts at `start`, at a cost of at
 // most `limit`. First it counts the callbacks after the saved position. When
-// they are all counted, it saves the position if none is saved. This tells the
-// roll-up step that the day is closing. Then it removes the seen rows of the
-// day. When it removes the last of them, it sets the mark and removes the
-// position. It returns the cost. The cost is less than `limit` only when the
-// day is done.
+// it has counted them all, it saves the position if none is saved. The saved
+// position tells the roll-up step that the day is closing. Then it removes the
+// seen rows of the day. When it removes the last of them, it sets the mark and
+// removes the position. It returns the cost. The cost is less than `limit`
+// only when the day is done.
 func rollupCountDay(ctx context.Context, tx *sql.Tx, start int64, limit int) (cost int, err error) {
 	day := rollupDay(start)
 	after, saved := rollupPos{ts: start, id: -1}, false
