@@ -407,9 +407,9 @@ func TestTU11RollupDayStepSeenRowsUseTheBudget(t *testing.T) {
 	}
 }
 
-// T-U-11: a callback at the first or the last ms of a UTC day counts one time,
-// under its own day. Calls of 2 callbacks cross the midnights and a saved
-// position.
+// T-U-11: a callback at the first or the last ms of a UTC day counts one time.
+// It counts under its own day. Calls of 2 callbacks cross the midnights and a
+// saved position.
 func TestTU11RollupDayStepCountsDayEdges(t *testing.T) {
 	db := migrated(t)
 	addEvents(t, db, "callback", 2, utc("2027-01-09T00:00:00Z")-1, 1, nil, nil)
@@ -438,8 +438,8 @@ func TestTU11RollupDayStepDoneAtTheCutoff(t *testing.T) {
 }
 
 // T-U-11: a seen day older than the first callback day after the mark is done
-// first. A call of 2 deletes its 2 seen rows and counts no callback. A call with
-// limit 0 reads nothing, also with a bad mark.
+// first. A call of 2 deletes its 2 seen rows and counts no callback. A call
+// with limit 0 reads nothing, also with a bad mark.
 func TestTU11RollupDayStepTakesTheOlderDayFirst(t *testing.T) {
 	db := migrated(t)
 	addSeen(t, db, "2027-01-05", 2)
