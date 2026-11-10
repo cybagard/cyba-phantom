@@ -185,6 +185,7 @@ func runSteps(wall, tDel, tPriv time.Time, ip, raw int) []retentionStep {
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
 		newRawDeleteStep(tDel, raw),
+		newCounterDeleteStep(tDel, raw),
 		newFieldClearStep(tPriv, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),
