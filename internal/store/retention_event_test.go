@@ -217,3 +217,39 @@ func TestTU11RolledBackChunkIsNotCounted(t *testing.T) {
 		t.Fatalf("run record %+v after a rolled back chunk", run)
 	}
 }
+
+// T-U-11: a run of the schedule through the running writer makes the event.
+// The run function is the real Writer.runSteps. It takes the run record from
+// the context.
+func TestTU11RetentionEventThroughRunningWriter(t *testing.T) {
+	r := newRig(t, 8)
+	r.launchCancelable(context.Background())
+	// The writer reads the tick only after its start check. The seed has
+	// callback rows with no leaf in the log, so it comes after that check.
+	r.fire()
+	seedRetention(t, r.db)
+	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
+	defer cancel()
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	s.runOnce(ctx)
+	if n := retentionRows(t, r); n != 1 {
+		t.Fatalf("%d retention rows, want 1", n)
+	}
+	var detail string
+	check(t, r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
+	got, err := event.ParseDetail(detail)
+	check(t, err)
+	want := event.Detail{
+		"ip": event.Int(3), "fields": event.Int(5), "rolled": event.Int(400), "deleted": event.Int(30),
+		"evicted": event.Int(0), "vacuumed": event.Int(0),
+		"cutoff_ip": event.Int(rollTDel.UnixMilli() - 7*24*3600*1000), "cutoff_raw": event.Int(rollCutoff(30)),
+	}
+	if len(got) != len(want) {
+		t.Errorf("detail %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("member %s = %v, want %v", k, got[k], v)
+		}
+	}
+}
