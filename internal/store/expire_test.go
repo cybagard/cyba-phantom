@@ -396,8 +396,8 @@ func TestTU11RunStepsDeletesTheRowsOlderThanTheEventsDays(t *testing.T) {
 	}
 }
 
-// T-U-11: a request row of more than 45 d that no run rolled up is counted
-// in aggregate_day. The event delete removes it after that.
+// T-U-11: the roll-up counts a request row of more than 45 d that no run
+// rolled up. The event delete removes it after that.
 func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 	r := newRig(t, 100)
 	addEvents(t, r.db, "request", 1, rollCutoff(45)-rawDay, 0, "s", "v")
@@ -412,10 +412,10 @@ func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 // T-U-11: events = raw, with 30 and with 1 days. The event step keeps the
 // callbacks of the UTC day of the raw cutoff until the day step counts them.
 // The cutoff is 2027-01-11 12:00. The callbacks of 05:00 on that day stay after
-// run 1. After run 2, 24 h later, the day is done. Then they are counted in
-// aggregate_day, and deleted. Run 1 counts and deletes the callbacks of the day
-// before. It also deletes an evidence row older than the start of the cutoff
-// day.
+// run 1. At run 2, 24 h later, the day is done. Run 2 counts them in
+// aggregate_day and deletes them. Run 1 counts and deletes the callbacks of
+// the day before. It also deletes an evidence row older than the start of the
+// cutoff day.
 func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
 	for _, days := range []int{30, 1} {
 		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
