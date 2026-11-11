@@ -507,8 +507,8 @@ const oneDay = 24 * time.Hour
 
 // T-U-27 (feeds T-C-06): the wall clock is 2 d ahead. A request row of 29 d by
 // the monotonic time stays. A row of 31 d goes. The events days are 90. An
-// evidence row, a token and a session of 89 d stay: they are younger than the
-// events cutoff by tDel, and older than it by tPriv.
+// evidence row, a token and a session of 89 d stay. They are younger than the
+// events cutoff by tDel. They are older than it by tPriv.
 func TestTU27WallPlusTwoDaysDeletesNothingEarly(t *testing.T) {
 	r, s, _ := prodRig(t, 48*time.Hour, nil)
 	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 29*oneDay), 0, nil, nil)
@@ -606,8 +606,8 @@ func TestTU27EarlyEndWritesNoMark(t *testing.T) {
 
 // T-U-27: the roll-up step runs before the day step. The day step counts the
 // callbacks of a day only when no request row of the day is left. The session
-// has last_seen 0, so the run deletes it. The test thus also guards the place
-// of the session step: it comes after the day step, which reads the session.
+// has last_seen 0, so the run deletes it. So the test also guards the place of
+// the session step: it comes after the day step, which reads the session.
 func TestTU27RollupStepRunsBeforeTheDayStep(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	addSession(t, r.db, "s1", "human", "f")

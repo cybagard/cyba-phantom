@@ -442,10 +442,10 @@ func TestTU27_StartPassesTheEventsDays(t *testing.T) {
 	}
 }
 
-// TestTU27_RealScheduleUsesTheEventsDays checks the schedule of realDeps. Its
-// run at the start deletes a token of 60 d and keeps a token of 40 d, with the
-// days 7, 30 and 45. A schedule that takes the raw days (30) or a constant 90 as
-// the events days deletes the second token or not the first (T-U-27).
+// TestTU27_RealScheduleUsesTheEventsDays checks the schedule of realDeps. With
+// the days 7, 30 and 45, its run at the start deletes a token of 60 d. It keeps
+// a token of 40 d. A schedule with the raw days (30) as the events days deletes
+// both tokens. A schedule with a constant 90 keeps both (T-U-27).
 func TestTU27_RealScheduleUsesTheEventsDays(t *testing.T) {
 	d := realDeps
 	d.schedule = nil

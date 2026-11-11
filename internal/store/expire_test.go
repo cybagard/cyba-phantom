@@ -409,13 +409,12 @@ func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 	}
 }
 
-// T-U-11: with events = raw = 30, the event step does not delete the callbacks
-// of the UTC day of the raw cutoff before the day step counts them. The cutoff
-// is 2027-01-11 12:00. The callbacks of 05:00 on that day, before the cutoff,
-// stay after run 1. After run 2, 24 h later, the day is done: they are counted
-// in aggregate_day, and then deleted. The callbacks of the day before are
-// counted and deleted by run 1. An evidence row older than the start of the
-// cutoff day is deleted by run 1.
+// T-U-11: with events = raw = 30, the event step keeps the callbacks of the UTC
+// day of the raw cutoff until the day step counts them. The cutoff is
+// 2027-01-11 12:00. The callbacks of 05:00 on that day stay after run 1. After
+// run 2, 24 h later, the day is done. Then they are counted in aggregate_day,
+// and deleted. Run 1 counts and deletes the callbacks of the day before. It
+// also deletes an evidence row older than the start of the cutoff day.
 func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
 	r, _ := rollRig(t, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 30)...)
 	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES ('s1', 0, ?, 'h', 'human', 'f')",
@@ -437,7 +436,7 @@ func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
 // T-U-11: an events days value of 0 or 91 gives the step for bad parameters.
 // The run ends with an error and the writer stops. A token, a session and an
 // evidence row of 100 d stay. No step before the three deletes has a row to
-// change, so the result does not depend on the chunk size or the time.
+// change. So the result does not depend on the chunk size or the time.
 func TestTU11RunStepsRefusesBadEventsDays(t *testing.T) {
 	for _, days := range []int{0, 91} {
 		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
