@@ -78,7 +78,7 @@ func TestTU06_AbsentFields(t *testing.T) {
 			}
 			in.Session = ""
 			if k == KindRetention {
-				in.Vhost, in.Path = "", "" // a retention event has no such field
+				in.Vhost, in.Path = "", "" // retention has no such field
 			}
 			e = mustEvent(t, in)
 		} else if err != nil {
@@ -444,7 +444,7 @@ func TestTS12_IPMarkers(t *testing.T) {
 	all := strings.Join(forms, ", ")
 	for _, k := range allKinds {
 		if k == KindRetention {
-			continue // it refuses an address, a forwarded value and a body prefix
+			continue // it refuses these inputs: see its refusal test
 		}
 		inputs := []Input{{Forwarded: all, BodyPrefix: []byte(all)}}
 		for _, a := range addrs {

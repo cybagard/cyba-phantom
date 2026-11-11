@@ -61,8 +61,8 @@ func (in Input) checkRetention() error {
 }
 
 // checkRetentionDetail refuses a member that is not one of the eight, and every
-// value that is not an integer. The canonical encoder in NewEvent refuses an integer outside
-// +-(2^53-1).
+// value that is not an integer. The canonical encoder in NewEvent refuses an
+// integer outside +-(2^53-1).
 func checkRetentionDetail(d Detail) error {
 	for k, v := range d {
 		if !retentionMembers[k] || v.tag != 'i' {

@@ -299,7 +299,8 @@ func TestTU11StoppedWriterMakesNoRetentionEvent(t *testing.T) {
 	s.run = func(ctx context.Context, steps []retentionStep) error {
 		steps[0] = onCall(steps[0], func(i int, _ *sql.Tx) {
 			if i == 1 {
-				r.w.stop(fail(writerName, ruleDatabase)) // after this chunk commits
+				// The chunk commits after this call.
+				r.w.stop(fail(writerName, ruleDatabase))
 			}
 		})
 		return serveWithRun(r)(ctx, steps)
