@@ -178,12 +178,14 @@ func (s *Schedule) runOnce(stop context.Context) {
 // eventTime returns the time that the event step takes in place of tDel. The
 // day step counts the callbacks of a UTC day only when the day is done. With
 // events equal to raw, the event cutoff is the raw cutoff. Then the event step
-// could delete the callbacks of that UTC day before the day step counts them.
-// So the event cutoff is not later than the start of that UTC day. With events
-// above raw, the cap has no effect. A request row before the raw cutoff that
-// the writer stores during the run stops the day step. This occurs only when
-// the wall clock steps back by raw days or more. Then the event step can
-// delete callbacks that the day step did not count. With bad raw days or a
+// can delete the callbacks of that UTC day before the cutoff. The day step has
+// not counted them yet. So the event cutoff is not later than the start of
+// that UTC day. With events above raw, the cap has no effect. The writer can
+// store a request row before the raw cutoff during the run. This occurs only
+// when the wall clock steps back by raw days or more. Such a row that comes
+// before the day step ends stops the day step. Then the event step can delete
+// callbacks that the day step did not count. The event step can delete such a
+// row that comes after the day step, with no roll-up. With bad raw days or a
 // zero tDel, the time is tDel. The event step itself refuses bad events days,
 // for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
