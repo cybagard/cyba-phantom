@@ -506,14 +506,23 @@ func msAgo(t time.Time, back time.Duration) int64 { return t.Add(-back).UnixMill
 const oneDay = 24 * time.Hour
 
 // T-U-27 (feeds T-C-06): the wall clock is 2 d ahead. A request row of 29 d by
-// the monotonic time stays. A row of 31 d goes.
+// the monotonic time stays. A row of 31 d goes. The events days are 90. An
+// evidence row, a token and a session of 89 d stay: they are younger than the
+// events cutoff by tDel, and older than it by tPriv.
 func TestTU27WallPlusTwoDaysDeletesNothingEarly(t *testing.T) {
 	r, s, _ := prodRig(t, 48*time.Hour, nil)
 	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 29*oneDay), 0, nil, nil)
 	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 31*oneDay), 0, nil, nil)
+	young := msAgo(rollTDel, 89*oneDay)
+	addEventAt(t, r.db, "score_change", young)
+	expireCaseNamed("token").add(t, r.db, young)
+	expireCaseNamed("session").add(t, r.db, young)
 	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE ts = "+strconv.FormatInt(msAgo(rollTDel, 29*oneDay), 10)); n != 1 || r.events() != 1 {
-		t.Fatalf("%d rows of 29 d, %d rows in all; want 1 and 1", n, r.events())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE ts = "+strconv.FormatInt(msAgo(rollTDel, 29*oneDay), 10)); n != 1 || r.events() != 2 {
+		t.Fatalf("%d rows of 29 d, %d rows in all; want 1 and 2", n, r.events())
+	}
+	if tok, ses := count(t, r.db, "SELECT count(*) FROM token"), count(t, r.db, "SELECT count(*) FROM session"); tok != 1 || ses != 4 {
+		t.Fatalf("%d tokens, %d sessions left; want 1 and 4", tok, ses)
 	}
 }
 
@@ -596,7 +605,9 @@ func TestTU27EarlyEndWritesNoMark(t *testing.T) {
 }
 
 // T-U-27: the roll-up step runs before the day step. The day step counts the
-// callbacks of a day only when no request row of the day is left.
+// callbacks of a day only when no request row of the day is left. The session
+// has last_seen 0, so the run deletes it. The test thus also guards the place
+// of the session step: it comes after the day step, which reads the session.
 func TestTU27RollupStepRunsBeforeTheDayStep(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	addSession(t, r.db, "s1", "human", "f")

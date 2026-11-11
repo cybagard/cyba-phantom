@@ -442,6 +442,36 @@ func TestTU27_StartPassesTheEventsDays(t *testing.T) {
 	}
 }
 
+// TestTU27_RealScheduleUsesTheEventsDays checks the schedule of realDeps. Its
+// run at the start deletes a token of 60 d and keeps a token of 40 d, with the
+// days 7, 30 and 45. A schedule that takes the raw days (30) or a constant 90 as
+// the events days deletes the second token or not the first (T-U-27).
+func TestTU27_RealScheduleUsesTheEventsDays(t *testing.T) {
+	d := realDeps
+	d.schedule = nil
+	s, _ := launch(t, testParams(t, "events.db"), d)
+	now := time.Now()
+	for _, age := range []int{60, 40} {
+		at := now.Add(-time.Duration(age) * 24 * time.Hour).UnixMilli()
+		if _, err := s.db.Exec("INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES ('t' || ?, 's', 't', ?, ?)",
+			age, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); realDeps.schedule(ctx, s.writer, 7, 30, 45, slog.New(slog.DiscardHandler)) }()
+	t.Cleanup(func() { cancel(); <-done })
+	until(t, "mark of the run", func() bool {
+		var n int
+		return s.db.QueryRow("SELECT count(*) FROM meta WHERE key = 'retention_last'").Scan(&n) == nil && n == 1
+	})
+	var ids string
+	if err := s.db.QueryRow("SELECT coalesce(group_concat(token_id), '') FROM token").Scan(&ids); err != nil || ids != "t40" {
+		t.Fatalf("tokens left %q, error %v; want t40", ids, err)
+	}
+}
+
 // TestTU27_NoScheduleWithoutWriter checks that a store that does not open has
 // no schedule (T-U-27).
 func TestTU27_NoScheduleWithoutWriter(t *testing.T) {

@@ -26,6 +26,16 @@ type expireCase struct {
 
 var expireBands = []string{"human", "crawler", "agent-likely", "agent-confirmed"}
 
+// expireCaseNamed returns the case with the name.
+func expireCaseNamed(name string) expireCase {
+	for _, c := range expireCases {
+		if c.name == name {
+			return c
+		}
+	}
+	panic("no expire case " + name)
+}
+
 // addEventAt inserts one event row. A callback and a score_change row get a
 // hash and a leaf index, as the schema needs.
 func addEventAt(tb testing.TB, db *sql.DB, kind string, at int64) {
@@ -319,10 +329,7 @@ func TestTU11CounterDeleteRunsInChunks(t *testing.T) {
 func TestTU11RunStepsDeletesOldIPCounterRows(t *testing.T) {
 	r := newRig(t, 4000)
 	addCounterDays(t, r.db, "2027-01-10", "2027-01-11", "2027-01-12")
-	r.launchCancelable(context.Background())
-	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
-	defer cancel()
-	if err := r.w.runSteps(ctx, runSteps(rollTDel, rollTDel, rollTDel.Add(48*time.Hour), 7, 30, 90)); err != nil {
+	if err := runWith(t, r, runSteps(rollTDel, rollTDel, rollTDel.Add(48*time.Hour), 7, 30, 90)); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := counterDays(t, r.db), "2027-01-11 2027-01-12"; got != want {
@@ -362,7 +369,8 @@ func TestTU11RunStepsDeletesTheRowsOlderThanTheEventsDays(t *testing.T) {
 	tDel, cut := rollTDel, rollCutoff(45)
 	r := evidenceRig(t, []string{"callback", "score_change", "alert_sent", "callback"},
 		[]int64{cut - rawDay, cut - 1, cut - 40*rawDay, cut + rawDay})
-	for _, c := range expireCases[1:] {
+	for _, name := range []string{"token", "session"} {
+		c := expireCaseNamed(name)
 		c.add(t, r.db, cut-rawDay)
 		c.add(t, r.db, cut+rawDay)
 	}
@@ -378,8 +386,9 @@ func TestTU11RunStepsDeletesTheRowsOlderThanTheEventsDays(t *testing.T) {
 		{"token", "SELECT count(*) FROM token WHERE first_cb_at = " + fmt.Sprint(cut+rawDay)},
 		{"session", "SELECT count(*) FROM session WHERE last_seen = " + fmt.Sprint(cut+rawDay)},
 	} {
-		if n, all := count(t, r.db, c.q), count(t, r.db, "SELECT count(*) FROM "+c.name); n != all || n != map[string]int{"event": 1, "token": 1, "session": 4}[c.name] {
-			t.Errorf("%s: %d young rows, %d rows in all", c.name, n, all)
+		want := map[string]int{"event": 1, "token": 1, "session": 4}[c.name]
+		if n, all := count(t, r.db, c.q), count(t, r.db, "SELECT count(*) FROM "+c.name); n != all || n != want {
+			t.Errorf("%s: %d young rows, %d rows in all; want %d of each", c.name, n, all, want)
 		}
 	}
 	if n := count(t, r.db, "SELECT count(*) FROM touched"); n != 1 {
@@ -400,18 +409,43 @@ func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 	}
 }
 
+// T-U-11: with events = raw = 30, the event step does not delete the callbacks
+// of the UTC day of the raw cutoff before the day step counts them. The cutoff
+// is 2027-01-11 12:00. The callbacks of 05:00 on that day, before the cutoff,
+// stay after run 1. After run 2, 24 h later, the day is done: they are counted
+// in aggregate_day, and then deleted. The callbacks of the day before are
+// counted and deleted by run 1. An evidence row older than the start of the
+// cutoff day is deleted by run 1.
+func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
+	r, _ := rollRig(t, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 30)...)
+	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES ('s1', 0, ?, 'h', 'human', 'f')",
+		rollTDel.UnixMilli())
+	addEvents(t, r.db, "callback", 2, utc("2027-01-11T05:00:00Z"), 1000, "s1", "a")
+	addEvents(t, r.db, "callback", 3, utc("2027-01-10T05:00:00Z"), 1000, "s1", "a")
+	addEventAt(t, r.db, "score_change", utc("2027-01-09T05:00:00Z"))
+	runOK(t, r)
+	if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3"; got != want || r.events() != 2 {
+		t.Fatalf("after run 1: aggregates %q, %d events; want %q and 2", got, r.events(), want)
+	}
+	next := rollTDel.Add(oneDay)
+	runAgain(t, r, runSteps(next, next, next, 7, 30, 30)...)
+	if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3 ; 2027-01-11|a|human|f|0|0|2"; got != want || r.events() != 0 {
+		t.Fatalf("after run 2: aggregates %q, %d events; want %q and 0", got, r.events(), want)
+	}
+}
+
 // T-U-11: an events days value of 0 or 91 gives the step for bad parameters.
-// The run ends with an error and the writer stops. The chunk with the step
-// rolls back. So no row goes. A token and a session of 100 d stay. The beacon
-// row that the raw delete would take in the same chunk stays too.
+// The run ends with an error and the writer stops. A token, a session and an
+// evidence row of 100 d stay. No step before the three deletes has a row to
+// change, so the result does not depend on the chunk size or the time.
 func TestTU11RunStepsRefusesBadEventsDays(t *testing.T) {
 	for _, days := range []int{0, 91} {
 		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
 			r := newRig(t, 100)
 			at := rollCutoff(90) - 10*rawDay
-			expireCases[1].add(t, r.db, at)
-			expireCases[2].add(t, r.db, at)
-			addFull(t, r.db, "beacon", 1, at, 0)
+			expireCaseNamed("token").add(t, r.db, at)
+			expireCaseNamed("session").add(t, r.db, at)
+			addEventAt(t, r.db, "score_change", at)
 			if err := runWith(t, r, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, days)); err == nil || r.w.Healthy() {
 				t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
 			}
