@@ -74,6 +74,10 @@ func TestTS32LinkIsChecked(t *testing.T) {
 		if k.isSystem() {
 			in.Session = ""
 		}
+		if k == KindRetention {
+			// A retention event has only a kind and a detail.
+			in = Input{Kind: k}
+		}
 		if k == KindRefused {
 			// A refused record has only a reason and an address.
 			in = Input{Kind: k, Reason: ReasonUnknownName, ClientIP: "192.0.2.1"}

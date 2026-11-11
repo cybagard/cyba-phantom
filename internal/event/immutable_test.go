@@ -221,6 +221,9 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 	}
 	for _, k := range allKinds {
 		for _, v := range variants {
+			if v.name == "full" && k == event.KindRetention {
+				continue // a retention event has only a kind and a detail
+			}
 			for _, tp := range tampers {
 				t.Run(k.String()+"/"+v.name+"/"+tp.name, func(t *testing.T) {
 					e := mustEvent(t, at(1758300000123), v.in(k))

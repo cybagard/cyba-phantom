@@ -18,10 +18,13 @@ const (
 	rawDoneKey = "retention_raw_done"
 
 	// clearRawSQL clears the fields of the next rows after a position. It
-	// picks them in the order of event_ts: ts, then the rowid. It returns the
-	// ts and the id of each row that it changed.
+	// picks them in the order of event_ts: ts, then the rowid. It skips a row
+	// whose three fields are already NULL. Thus it changes, and returns, only
+	// rows that hold a value. It returns the ts and the id of each such row.
 	clearRawSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
-		"(SELECT id FROM event WHERE ts >= ? AND ts < ? AND (ts, id) > (?, ?) ORDER BY ts, id LIMIT ?) RETURNING ts, id"
+		"(SELECT id FROM event WHERE ts >= ? AND ts < ? AND (ts, id) > (?, ?) " +
+		"AND (body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL) " +
+		"ORDER BY ts, id LIMIT ?) RETURNING ts, id"
 
 	// deleteRawSQL deletes old rows of the kinds that have no roll-up. It uses
 	// event_kind_ts.
@@ -103,6 +106,7 @@ func newFieldClearStep(tPriv time.Time, days int) retentionStep {
 			return 0, err
 		}
 		pos = last
+		tallyRows(ctx, memFields, n)
 		if n == limit {
 			return limit, nil
 		}
@@ -125,7 +129,7 @@ func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execN(ctx, tx, deleteRawSQL, cutoff, limit)
+		return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
 	}
 }
 
@@ -208,7 +212,7 @@ func newMintStep(tDel time.Time, days int) retentionStep {
 						return 0, err
 					}
 					if rows <= left {
-						if _, err := execN(ctx, tx, mintDropSQL, next, unit); err != nil {
+						if _, err := execCount(ctx, tx, memDeleted, mintDropSQL, next, unit); err != nil {
 							return 0, err
 						}
 						if left -= rows; left == 0 {
@@ -219,7 +223,7 @@ func newMintStep(tDel time.Time, days int) retentionStep {
 					if left < chunkRows {
 						return limit, nil
 					}
-					if _, err := execN(ctx, tx, mintDeleteSQL, next, unit, left); err != nil {
+					if _, err := execCount(ctx, tx, memDeleted, mintDeleteSQL, next, unit, left); err != nil {
 						return 0, err
 					}
 					return limit, nil

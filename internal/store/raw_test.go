@@ -76,6 +76,71 @@ func TestTU11FieldClearWindowAndMark(t *testing.T) {
 	}
 }
 
+// T-U-11: the filter of the clear statement has three terms. A row with only
+// one of the three fields is cleared and counted. A row with none is skipped,
+// so the count is 3 and not 4.
+func TestTU11FieldClearFilterHasThreeTerms(t *testing.T) {
+	r, _ := rollRig(t, newFieldClearStep(rollTDel, 30))
+	mustExec(t, r.db, "INSERT INTO event (ts, kind, body_prefix) VALUES (10, 'request', x'62')")
+	mustExec(t, r.db, "INSERT INTO event (ts, kind, detail) VALUES (11, 'request', '{}')")
+	mustExec(t, r.db, "INSERT INTO event (ts, kind, record, hash, leaf_index) VALUES (12, 'callback', x'7b7d', zeroblob(32), 1)")
+	mustExec(t, r.db, "INSERT INTO event (ts, kind) VALUES (13, 'request')")
+	var tl tally
+	ctx := context.WithValue(context.Background(), tallyKey{}, &tl)
+	tx, err := r.db.Begin()
+	check(t, err)
+	if _, err := newFieldClearStep(rollTDel, 30)(ctx, tx, chunkRows); err != nil {
+		t.Fatal(err)
+	}
+	check(t, tx.Commit())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 || tl[memFields] != 3 {
+		t.Fatalf("%d rows keep a value, %d rows counted; want 0 and 3", n, tl[memFields])
+	}
+}
+
+// T-U-11: a row that gets a value again behind the position of the step keeps
+// it. The step clears only the rows after its position. The test runs three
+// shapes of ts: rising, falling and one ts for all rows.
+func TestTU11FieldClearKeepsAValueWrittenBehindThePosition(t *testing.T) {
+	for name, ts := range map[string]func(i int64) int64{
+		"rising":  func(i int64) int64 { return 100 + i },
+		"falling": func(i int64) int64 { return 100 - i },
+		"one ts":  func(int64) int64 { return 100 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _ := rollRig(t, newFieldClearStep(rollTDel, 30))
+			for i := range int64(6) {
+				addFull(t, r.db, "request", 1, ts(i), 0)
+			}
+			step := newFieldClearStep(rollTDel, 30)
+			if n := callWithin(t, r.db, step, 4); n != 4 {
+				t.Fatalf("first call returned %d, want 4", n)
+			}
+			// The first and the last row of the four that the call cleared.
+			rows, err := r.db.Query("SELECT id FROM event WHERE " + rawCleared + " ORDER BY ts, id")
+			check(t, err)
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				check(t, rows.Scan(&id))
+				ids = append(ids, id)
+			}
+			check(t, rows.Err())
+			check(t, rows.Close())
+			if len(ids) != 4 {
+				t.Fatalf("%d rows cleared, want 4", len(ids))
+			}
+			mustExec(t, r.db, "UPDATE event SET body_prefix = x'62' WHERE id IN (?, ?)", ids[0], ids[3])
+			if n := callWithin(t, r.db, step, chunkRows); n != 3 {
+				t.Fatalf("second call returned %d, want 3 (two rows and the mark)", n)
+			}
+			if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 2 {
+				t.Fatalf("%d rows keep a value, want the 2 rows that got a value again", n)
+			}
+		})
+	}
+}
+
 // T-U-11: with no mark, the first run takes the oldest row. More rows with one
 // ts than one chunk are all cleared. The chunks read each row one time. They
 // change 1 000, 1 000 and 502 rows, and the mark costs 1.

@@ -34,6 +34,7 @@ func newIPStep(tPriv time.Time, days int) retentionStep {
 			return 0, err
 		}
 		n, err := res.RowsAffected()
+		tallyRows(ctx, memIP, int(n))
 		return int(n), err
 	}
 }

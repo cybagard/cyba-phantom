@@ -38,6 +38,61 @@ type retentionStep func(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 // for each run. A test sets its own list and restores this one.
 var retentionSteps []retentionStep
 
+// A member is one count of the retention event. A step adds the rows that its
+// statements changed to a member, never the cost that it returns.
+type member uint8
+
+const (
+	memIP member = iota
+	memFields
+	memRolled
+	memDeleted
+	numMembers // the number of members, not a member
+)
+
+// tally holds the rows that the steps of one chunk changed.
+type tally [numMembers]int64
+
+type tallyKey struct{}
+
+// tallyRows adds n rows to a member of the tally of the chunk. A chunk with no
+// run record has no tally, and the call does nothing.
+func tallyRows(ctx context.Context, m member, n int) {
+	if t, ok := ctx.Value(tallyKey{}).(*tally); ok {
+		t[m] += int64(n)
+	}
+}
+
+// execCount is execN, and it counts the rows that the statement changed.
+func execCount(ctx context.Context, tx *sql.Tx, m member, q string, args ...any) (int, error) {
+	n, err := execN(ctx, tx, q, args...)
+	tallyRows(ctx, m, n)
+	return n, err
+}
+
+// retentionRun is the record of one schedule run: the counts of the chunks that
+// committed, and the two cutoffs. The schedule goroutine sets the cutoffs
+// before it sends the request. After that, only the writer goroutine uses it.
+type retentionRun struct {
+	counts event.RetentionCounts
+}
+
+type runKey struct{}
+
+// withRun gives ctx a run record. runSteps reads it from the context, so the
+// signature of the run function of the schedule does not change.
+func withRun(ctx context.Context, run *retentionRun) context.Context {
+	return context.WithValue(ctx, runKey{}, run)
+}
+
+// add puts the rows of a committed chunk in the run total.
+func (r *retentionRun) add(t *tally) {
+	r.counts.IP += t[memIP]
+	r.counts.Fields += t[memFields]
+	r.counts.Rolled += t[memRolled]
+	r.counts.Deleted += t[memDeleted]
+}
+
 // retentionRequest asks the writer goroutine for one retention run. The reply
 // channel has room for one value, so the writer never waits for the caller.
 // The gone channel is the done channel of the context of the caller.
@@ -45,6 +100,7 @@ type retentionRequest struct {
 	reply chan error
 	gone  <-chan struct{}
 	steps []retentionStep // nil means the package list retentionSteps
+	run   *retentionRun   // nil means that the run makes no event
 }
 
 // left tells if the caller has left. The writer then skips the run.
@@ -82,7 +138,8 @@ func (w *Writer) runSteps(ctx context.Context, steps []retentionStep) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rq := retentionRequest{reply: make(chan error, 1), gone: ctx.Done(), steps: steps}
+	run, _ := ctx.Value(runKey{}).(*retentionRun)
+	rq := retentionRequest{reply: make(chan error, 1), gone: ctx.Done(), steps: steps, run: run}
 	select {
 	case w.retention <- rq:
 	case <-ctx.Done():
@@ -120,7 +177,7 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 		steps = retentionSteps
 	}
 	for cur := 0; cur < len(steps); {
-		if _, err := w.chunk(steps, &cur); err != nil {
+		if _, err := w.chunkRun(steps, &cur, rq.run); err != nil {
 			w.stop(err)
 			rq.reply <- err
 			return batch
@@ -130,16 +187,41 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 		}
 		batch = w.betweenChunks(tick, batch)
 		if ctx.Err() != nil || rq.left() || w.q.Closed() || !w.Healthy() {
-			rq.reply <- fail(writerName, ruleRetention)
+			rq.reply <- w.endRun(rq.run, fail(writerName, ruleRetention))
 			return batch
 		}
 	}
 	err := w.checkpoint()
 	if err != nil {
 		w.stop(err)
+	} else {
+		err = w.endRun(rq.run, nil)
 	}
 	rq.reply <- err
 	return batch
+}
+
+// endRun writes the retention event of a run that has a run record. The caller
+// calls it after a chunk has committed. The event goes to flush as a batch of
+// its own. It does not use the queue, so a full evidence lane cannot drop it. A
+// paused writer drops it with a count, as flush does. A stopped writer makes no
+// event and counts no drop. endRun returns err. If the write stops the writer,
+// it returns the error of the stop.
+func (w *Writer) endRun(run *retentionRun, err error) error {
+	if run == nil || !w.Healthy() {
+		return err
+	}
+	e, eerr := event.NewRetentionEvent(w.now, run.counts)
+	if eerr != nil {
+		eerr = fail(writerName, ruleRecord)
+		w.stop(eerr)
+		return eerr
+	}
+	w.flush([]*event.Event{e})
+	if !w.Healthy() {
+		return w.Err()
+	}
+	return err
 }
 
 // chunk runs the steps from *cur in one transaction on one pool connection. The
@@ -152,7 +234,15 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // failure is a database error, also a step count above the limit or below 0.
 // Then the transaction rolls back.
 func (w *Writer) chunk(steps []retentionStep, cur *int) (rows int, err error) {
-	ctx := context.Background()
+	return w.chunkRun(steps, cur, nil)
+}
+
+// chunkRun is chunk for a run with a run record. The steps count the rows that
+// they change in a tally of the chunk. The tally goes into the run total after
+// the COMMIT, so a chunk that rolls back adds nothing.
+func (w *Writer) chunkRun(steps []retentionStep, cur *int, run *retentionRun) (rows int, err error) {
+	var t tally
+	ctx := context.WithValue(context.Background(), tallyKey{}, &t)
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		return 0, fail(writerName, ruleDatabase)
@@ -193,6 +283,9 @@ func (w *Writer) chunk(steps []retentionStep, cur *int) (rows int, err error) {
 	}
 	if err != nil {
 		return 0, fail(writerName, ruleDatabase)
+	}
+	if run != nil {
+		run.add(&t)
 	}
 	return rows, nil
 }
