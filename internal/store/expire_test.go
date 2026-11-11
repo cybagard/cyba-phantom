@@ -115,8 +115,8 @@ func expireChunks(n, cost int) (chunks []int) {
 }
 
 // T-U-11: 2 500 old rows go in chunks of at most 1 000 / cost rows. The young
-// rows stay. With cost 1, the chunks are 1 000, 1 000 and 500. With cost 4, they
-// are 10 chunks of 250 rows and one empty chunk.
+// rows stay. With cost 1, the chunks are 1 000, 1 000 and 500. With cost 4,
+// they are 10 chunks of 250 rows and one empty chunk.
 func TestTU11ExpireStepsRunInChunks(t *testing.T) {
 	cut := rollCutoff(90)
 	for _, c := range expireCases {
@@ -133,9 +133,9 @@ func TestTU11ExpireStepsRunInChunks(t *testing.T) {
 	}
 }
 
-// T-U-11: a step with a cost deletes at most limit / cost rows and returns cost
-// x the rows it deleted. When it took the most rows, it returns the limit. With
-// a limit below the cost, it runs no statement and returns the limit. The
+// T-U-11: a step with a cost deletes at most limit / cost rows. It returns cost
+// x the rows it deleted. When it took the most rows, it returns the limit.
+// With a limit below the cost, it runs no statement and returns the limit. The
 // transaction here is over, so any statement would fail.
 func TestTU11ExpireStepCostsEachRow(t *testing.T) {
 	db := migrated(t)
@@ -161,9 +161,9 @@ func TestTU11ExpireStepCostsEachRow(t *testing.T) {
 	}
 }
 
-// T-U-11: the session step costs 4 for each row. A limit of 1 000 deletes 250 of
-// 400 old rows and returns the limit. The cost comes from the chunk time of a
-// session row with its fingerprints, as measured at 4 million rows.
+// T-U-11: the session step costs 4 for each row. A limit of 1 000 deletes 250
+// of 400 old rows and returns the limit. The cost comes from the chunk time of
+// a session row, as measured at 4 million rows.
 func TestTU11SessionStepCostsFourPerRow(t *testing.T) {
 	db := migrated(t)
 	addSessions(t, db, "s", 0, 400, rollCutoff(90)-rawDay, 0, nil)
@@ -172,9 +172,9 @@ func TestTU11SessionStepCostsFourPerRow(t *testing.T) {
 	}
 }
 
-// T-U-11: each new step keeps the limit that the runner gives it, which is 1 000
+// T-U-11: each new step keeps the limit that the runner gives it. That is 1 000
 // minus the rows of the steps before it. With a limit of 7 and 20 old rows, a
-// step of cost 1 deletes 7 rows and the session step deletes 1. A step that used
+// step of cost 1 deletes 7 rows. The session step deletes 1. A step that used
 // the full chunk size would delete more.
 func TestTU11ExpireStepsKeepTheLeftoverLimit(t *testing.T) {
 	cut := rollCutoff(90)
