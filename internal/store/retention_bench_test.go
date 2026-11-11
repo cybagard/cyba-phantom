@@ -147,3 +147,90 @@ func BenchmarkRawChild(b *testing.B) {
 	fmt.Printf("raw-child rss=%d ms=%.3f longest=%.3f rows=%d wal=%d db=%d\n", procStatus(b, "VmHWM"),
 		ms(total), ms(longest), rows, fileSize(filepath.Join(dir, "events.db-wal")), fileSize(filepath.Join(dir, "events.db")))
 }
+
+const vacuumChildDir = "STORE_VACUUM_CHILD_DIR"
+
+// BenchmarkVacuum measures PRAGMA incremental_vacuum(1000) through the cap
+// shrink step. The parent makes a database of request rows with a body. It
+// deletes all of them, so their pages stay on the freelist. The child process
+// runs w.chunkRun until no free page is left. It prints VmHWM, the total time
+// and the longest chunk. It prints the pages freed, and the WAL and database
+// bytes after. Run it with -benchtime=1x:
+//
+//	PHANTOM_VACUUM_ROWS=4000000 go test -run '^$' -bench '^BenchmarkVacuum$' \
+//	  -benchtime=1x ./internal/store
+//
+// PHANTOM_VACUUM_ROWS gives the rows (default 20 000).
+func BenchmarkVacuum(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
+	n := 20_000
+	if s := os.Getenv("PHANTOM_VACUUM_ROWS"); s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil || v < chunkRows {
+			b.Fatalf("PHANTOM_VACUUM_ROWS %q: want a number of at least %d", s, chunkRows)
+		}
+		n = v
+	}
+	top, err := filepath.EvalSymlinks(b.TempDir())
+	check(b, err)
+	state := filepath.Join(top, "state")
+	check(b, os.Mkdir(state, 0o700))
+	db := openState(b, state)
+	check(b, Migrate(db, "origin"))
+	const rec = "WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?) "
+	for off := 0; off < n; off += 100_000 {
+		mustExec(b, db, rec+"INSERT INTO event (ts, kind, session_id, vhost, path, body_prefix) SELECT i, 'request', "+rollSID("i")+
+			", 'www.example.com', '/a/' || hex(randomblob(12)), zeroblob(256) FROM c", off, off+min(100_000, n-off)-1)
+	}
+	mustExec(b, db, "DELETE FROM event")
+	mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
+	check(b, db.Close())
+	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkVacuumChild$", "-test.benchtime=1x")
+	cmd.Env = append(os.Environ(), vacuumChildDir+"="+state)
+	out, err := cmd.CombinedOutput()
+	m := map[string]float64{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if fields, ok := strings.CutPrefix(line, "vacuum-child "); ok && err == nil {
+			for _, kv := range strings.Fields(fields) {
+				k, v, _ := strings.Cut(kv, "=")
+				m[k], _ = strconv.ParseFloat(v, 64)
+			}
+		}
+	}
+	if m["rss"] == 0 || m["pages"] == 0 {
+		b.Fatalf("child: %v\n%s", err, out)
+	}
+	b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
+	b.ReportMetric(m["ms"], "total-ms")
+	b.ReportMetric(m["longest"], "chunk-max-ms")
+	b.ReportMetric(m["pages"], "pages-freed")
+	b.ReportMetric(m["wal"]/mib, "wal-MiB")
+	b.ReportMetric(m["db"]/mib, "db-MiB")
+}
+
+// BenchmarkVacuumChild is the child process of BenchmarkVacuum. Without its
+// environment variable, it skips.
+func BenchmarkVacuumChild(b *testing.B) {
+	dir := os.Getenv(vacuumChildDir)
+	if dir == "" {
+		b.Skip("child process of BenchmarkVacuum")
+	}
+	db := openState(b, dir)
+	q, err := event.NewQueue(1, event.NewCounters())
+	check(b, err)
+	w := NewWriter(db, q, false, nil, Recovery{})
+	c := &capRun{over: true} // a target of 0: free all pages
+	steps, run := []retentionStep{c.shrink}, &retentionRun{}
+	var total, longest time.Duration
+	for cur := 0; cur < len(steps); {
+		begin := time.Now()
+		_, err := w.chunkRun(steps, &cur, run)
+		check(b, err)
+		took := time.Since(begin)
+		total, longest = total+took, max(longest, took)
+	}
+	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f pages=%d wal=%d db=%d\n", procStatus(b, "VmHWM"),
+		ms(total), ms(longest), run.counts.Vacuumed, fileSize(filepath.Join(dir, "events.db-wal")), fileSize(filepath.Join(dir, "events.db")))
+}

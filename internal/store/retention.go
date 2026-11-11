@@ -47,6 +47,8 @@ const (
 	memFields
 	memRolled
 	memDeleted
+	memEvicted
+	memVacuumed
 	numMembers // the number of members, not a member
 )
 
@@ -75,6 +77,16 @@ func execCount(ctx context.Context, tx *sql.Tx, m member, q string, args ...any)
 // before it sends the request. After that, only the writer goroutine uses it.
 type retentionRun struct {
 	counts event.RetentionCounts
+
+	// capAt is 1 plus the index of the first cap step. 0 means no cap step.
+	// Before that step, the run ends its chunk and settles the WAL, once.
+	capAt   int
+	settled bool
+}
+
+// settleDue tells if the run must settle the WAL before the step at index i.
+func (r *retentionRun) settleDue(i int) bool {
+	return r != nil && r.capAt == i+1 && !r.settled
 }
 
 type runKey struct{}
@@ -91,6 +103,8 @@ func (r *retentionRun) add(t *tally) {
 	r.counts.Fields += t[memFields]
 	r.counts.Rolled += t[memRolled]
 	r.counts.Deleted += t[memDeleted]
+	r.counts.Evicted += t[memEvicted]
+	r.counts.Vacuumed += t[memVacuumed]
 }
 
 // retentionRequest asks the writer goroutine for one retention run. The reply
@@ -177,6 +191,14 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 		steps = retentionSteps
 	}
 	for cur := 0; cur < len(steps); {
+		if rq.run.settleDue(cur) {
+			rq.run.settled = true
+			if err := w.truncateWAL(false); err != nil {
+				w.stop(err)
+				rq.reply <- err
+				return batch
+			}
+		}
 		if _, err := w.chunkRun(steps, &cur, rq.run); err != nil {
 			w.stop(err)
 			rq.reply <- err
@@ -260,7 +282,7 @@ func (w *Writer) chunkRun(steps []retentionStep, cur *int, run *retentionRun) (r
 	}
 	defer tx.Rollback() // no effect after COMMIT
 	start := w.now()
-	for *cur < len(steps) && rows < chunkRows {
+	for *cur < len(steps) && rows < chunkRows && !run.settleDue(*cur) {
 		limit := chunkRows - rows
 		n, err := steps[*cur](ctx, tx, limit)
 		if err != nil || n < 0 || n > limit {
@@ -323,7 +345,12 @@ func (w *Writer) betweenChunks(tick <-chan time.Time, batch []*event.Event) []*e
 // busy_timeout 0. Then it sets busy_timeout to the pool value again. A busy
 // result adds 1 to the busy count and is not an error. A failed pragma or
 // checkpoint statement is a database error.
-func (w *Writer) checkpoint() (err error) {
+func (w *Writer) checkpoint() (err error) { return w.truncateWAL(true) }
+
+// truncateWAL is checkpoint. The settle before the cap step calls it with count
+// false. Its busy result is not in the busy count. That count has one value for
+// each run.
+func (w *Writer) truncateWAL(count bool) (err error) {
 	ctx := context.Background()
 	conn, err := w.db.Conn(ctx)
 	if err != nil {
@@ -347,7 +374,7 @@ func (w *Writer) checkpoint() (err error) {
 	if err := conn.QueryRowContext(ctx, checkpointSQL).Scan(&busy, &logFrames, &moved); err != nil {
 		return fail(writerName, ruleDatabase)
 	}
-	if busy == 1 {
+	if busy == 1 && count {
 		w.checkpointBusy.Add(1)
 	}
 	return nil

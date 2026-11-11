@@ -13,7 +13,8 @@ import "errors"
 //     rows that the delete statements removed. rollup_seen and meta rows are
 //     not in it.
 //   - Evicted and Vacuumed: rows that the database cap removed, and the pages
-//     that it freed. They are 0 while no cap step exists.
+//     that its vacuum freed. A request row that the cap rolls up is in Evicted,
+//     not in Rolled. Both are 0 when the run has no cap.
 //   - CutoffIP and CutoffRaw: the cutoff of the address step and the raw
 //     cutoff of the run, in unix ms.
 type RetentionCounts struct {

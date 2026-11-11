@@ -54,7 +54,12 @@ type Schedule struct {
 	ranAt     time.Duration // the monotonic time of the last run of a check
 	earlyEnds atomic.Uint64
 	earlyLog  atomic.Bool
+	maxBytes  int64 // store.max_bytes; 0 means no cap step
 }
+
+// SetMaxBytes sets the database cap (store.max_bytes) for the next runs. A cap
+// of 0 gives no cap step. Call it before Run starts.
+func (s *Schedule) SetMaxBytes(n int64) { s.maxBytes = n }
 
 // NewSchedule makes the schedule of w. The days are the values of
 // store.retention_days.ip, store.retention_days.raw and
@@ -169,7 +174,8 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run := &retentionRun{}
 	run.counts.CutoffIP, _ = retentionCutoff(tPriv, s.ip, 7)
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
-	err := s.run(withRun(ctx, run), runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events))
+	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, tDel)
+	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
 		if s.earlyLog.CompareAndSwap(false, true) {
