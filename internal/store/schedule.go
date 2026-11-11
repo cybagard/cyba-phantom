@@ -180,11 +180,11 @@ func (s *Schedule) runOnce(stop context.Context) {
 // events equal to raw, the event cutoff is the raw cutoff. Then the callbacks
 // of its UTC day, before the cutoff, would go before the day step counts them.
 // So the event cutoff is not later than the start of that UTC day. With events
-// above raw, the cap has no effect. With bad parameters, the time is tDel, and
-// the step for bad parameters follows.
+// above raw, the cap has no effect. With bad raw days or a zero tDel, the time
+// is tDel. The event step itself refuses bad events days, for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
 	cut, ok := rollupCutoff(tDel, raw)
-	if !ok || events < 1 || events > expireMaxDays {
+	if !ok {
 		return tDel
 	}
 	capped := time.UnixMilli(rollupDayStart(cut) + int64(events)*rollupDayMs)

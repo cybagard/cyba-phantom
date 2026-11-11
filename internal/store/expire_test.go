@@ -409,27 +409,48 @@ func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 	}
 }
 
-// T-U-11: events = raw = 30. The event step keeps the callbacks of the UTC day
-// of the raw cutoff until the day step counts them. The cutoff is
-// 2027-01-11 12:00. The callbacks of 05:00 on that day stay after run 1. After
-// run 2, 24 h later, the day is done. Then they are counted in aggregate_day,
-// and deleted. Run 1 counts and deletes the callbacks of the day before. It
-// also deletes an evidence row older than the start of the cutoff day.
+// T-U-11: events = raw, with 30 and with 1 days. The event step keeps the
+// callbacks of the UTC day of the raw cutoff until the day step counts them.
+// The cutoff is 2027-01-11 12:00. The callbacks of 05:00 on that day stay after
+// run 1. After run 2, 24 h later, the day is done. Then they are counted in
+// aggregate_day, and deleted. Run 1 counts and deletes the callbacks of the day
+// before. It also deletes an evidence row older than the start of the cutoff
+// day.
 func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
-	r, _ := rollRig(t, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 30)...)
-	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES ('s1', 0, ?, 'h', 'human', 'f')",
-		rollTDel.UnixMilli())
-	addEvents(t, r.db, "callback", 2, utc("2027-01-11T05:00:00Z"), 1000, "s1", "a")
-	addEvents(t, r.db, "callback", 3, utc("2027-01-10T05:00:00Z"), 1000, "s1", "a")
-	addEventAt(t, r.db, "score_change", utc("2027-01-09T05:00:00Z"))
-	runOK(t, r)
-	if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3"; got != want || r.events() != 2 {
-		t.Fatalf("after run 1: aggregates %q, %d events; want %q and 2", got, r.events(), want)
+	for _, days := range []int{30, 1} {
+		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
+			tDel := rollTDel.Add(-time.Duration(30-days) * oneDay)
+			r, _ := rollRig(t, runSteps(tDel, tDel, tDel, 7, days, days)...)
+			mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES ('s1', 0, ?, 'h', 'human', 'f')",
+				tDel.UnixMilli())
+			addEvents(t, r.db, "callback", 2, utc("2027-01-11T05:00:00Z"), 1000, "s1", "a")
+			addEvents(t, r.db, "callback", 3, utc("2027-01-10T05:00:00Z"), 1000, "s1", "a")
+			addEventAt(t, r.db, "score_change", utc("2027-01-09T05:00:00Z"))
+			runOK(t, r)
+			if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3"; got != want || r.events() != 2 {
+				t.Fatalf("after run 1: aggregates %q, %d events; want %q and 2", got, r.events(), want)
+			}
+			next := tDel.Add(oneDay)
+			runAgain(t, r, runSteps(next, next, next, 7, days, days)...)
+			if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3 ; 2027-01-11|a|human|f|0|0|2"; got != want || r.events() != 0 {
+				t.Fatalf("after run 2: aggregates %q, %d events; want %q and 0", got, r.events(), want)
+			}
+		})
 	}
-	next := rollTDel.Add(oneDay)
-	runAgain(t, r, runSteps(next, next, next, 7, 30, 30)...)
-	if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3 ; 2027-01-11|a|human|f|0|0|2"; got != want || r.events() != 0 {
-		t.Fatalf("after run 2: aggregates %q, %d events; want %q and 0", got, r.events(), want)
+}
+
+// T-U-11: with raw days of 0 or 31, or a zero tDel, the event time is tDel.
+func TestTU11EventTimeIsTDelForBadRawDays(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tDel time.Time
+		raw  int
+	}{{"raw 0", rollTDel, 0}, {"raw 31", rollTDel, 31}, {"zero tDel", time.Time{}, 30}} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := eventTime(c.tDel, c.raw, 45); !got.Equal(c.tDel) {
+				t.Fatalf("event time %v, want %v", got, c.tDel)
+			}
+		})
 	}
 }
 
