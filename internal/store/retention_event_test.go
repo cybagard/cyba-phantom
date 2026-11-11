@@ -224,8 +224,8 @@ func TestTU11RetentionEventAfterEarlyEnd(t *testing.T) {
 }
 
 // T-U-11: two schedule runs. Run 1 ends early inside the field clear. Run 2
-// ends normally. The event of one run only has each row that the clear changes.
-// Each run has its own record.
+// ends normally on the same schedule. The event of one run only has each row
+// that the clear changes. Each run has its own record.
 func TestTU11RetentionEventsOfTwoRunsCountEachRowOnce(t *testing.T) {
 	r := newRig(t, 8)
 	// The event of run 1 must not be older than the event cutoff of run 2.
@@ -246,9 +246,9 @@ func TestTU11RetentionEventsOfTwoRunsCountEachRowOnce(t *testing.T) {
 		return serveWithRun(r)(ctx, steps)
 	}
 	s.runOnce(ctx)
-	if err := scheduleRun(t, r, context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	// Run 2 uses the same schedule as run 1.
+	s.run = serveWithRun(r)
+	s.runOnce(context.Background())
 	rows, err := r.db.Query(`SELECT json_extract(detail, '$.fields'),
 		json_extract(detail, '$.ip') + json_extract(detail, '$.rolled') + json_extract(detail, '$.deleted')
 		FROM event WHERE kind = 'retention' ORDER BY id`)
