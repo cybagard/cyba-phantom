@@ -337,16 +337,15 @@ func queryPlan(tb testing.TB, db *sql.DB, q string, args ...any) []string {
 
 // T-U-11: the IP step statement uses session_ip_first, and the token delete
 // statement uses token_first_cb. Each test compares the whole plan, so a plan
-// of another shape fails it. The token delete is a plan check only: no
-// production code runs it.
+// of another shape fails it. The token delete is the statement of the token
+// expire step.
 func TestTU11StatementsUseTheirIndexes(t *testing.T) {
 	db := migrated(t)
-	const tokenDelete = "DELETE FROM token WHERE rowid IN (SELECT rowid FROM token WHERE first_cb_at < ? LIMIT ?)"
 	for _, c := range []struct{ q, plan string }{
 		{clearIPSQL, "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
 			"SEARCH session USING INDEX session_ip_first (first_seen<?)"},
-		{tokenDelete, "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\n" +
+		{deleteTokenSQL, "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
 			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)"},
 	} {

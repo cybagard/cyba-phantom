@@ -15,8 +15,8 @@ import (
 
 const (
 	// rawChildDir is the state directory of the child. rawChildStep is its
-	// step: "clear", "delete" or "mint". rawChildTime is the time of the step,
-	// in unix ms.
+	// step: "clear", "delete", "mint", "session", "token" or "event".
+	// rawChildTime is the time of the step, in unix ms.
 	rawChildDir  = "STORE_RAW_CHILD_DIR"
 	rawChildStep = "STORE_RAW_CHILD_STEP"
 	rawChildTime = "STORE_RAW_CHILD_TIME"
@@ -34,7 +34,10 @@ const (
 // PHANTOM_RAW_ROWS gives the rows of the table (default 20 000). The rows cover
 // 40 days that end at the time of the step. The steps use 30 days. The clear
 // has request rows with a body of 256 bytes and a detail. The delete has
-// refused and beacon rows. The mint rows are in 3 sets.
+// refused and beacon rows. The mint rows are in 3 sets. The session, token and
+// event deletes use 30 days, as the others. Their rows have a last_seen, a
+// first_cb_at or a ts in the 40 days. The session rows have the 4 bands. For
+// the session step, rows-changed counts 4 for each deleted row: its cost.
 func BenchmarkRaw(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
@@ -47,7 +50,7 @@ func BenchmarkRaw(b *testing.B) {
 		}
 		n = v
 	}
-	for _, step := range []string{"clear", "delete", "mint"} {
+	for _, step := range []string{"clear", "delete", "mint", "session", "token", "event"} {
 		b.Run(step, func(b *testing.B) {
 			at := time.Now()
 			state := rawBenchState(b, step, n, at)
@@ -97,6 +100,16 @@ func rawBenchState(b *testing.B, step string, n int, at time.Time) string {
 			mustExec(b, db, rec+"INSERT INTO event (ts, kind, body_prefix, detail) SELECT ? + i*?, 'request', zeroblob(256), '{}' FROM c", off, last, base, inc)
 		case "delete":
 			mustExec(b, db, rec+"INSERT INTO event (ts, kind) SELECT ? + i*?, CASE i % 2 WHEN 0 THEN 'refused' ELSE 'beacon' END FROM c", off, last, base, inc)
+		case "event":
+			mustExec(b, db, rec+"INSERT INTO event (ts, kind, session_id, vhost, path) SELECT ? + i*?, 'request', "+rollSID("i+1")+", 'www.example.com', '/a/' || hex(randomblob(12)) FROM c",
+				off, last, base, inc)
+		case "session":
+			mustExec(b, db, rec+"INSERT INTO session (id, first_seen, last_seen, ip_hmac, ja4, h2_fp, ua, hdr_order_hash, family, band) SELECT "+rollSID("i")+", ? + i*?, ? + i*?, "+
+				"hex(randomblob(32)), hex(randomblob(18)), hex(randomblob(20)), hex(randomblob(60)), hex(randomblob(8)), 'fam', "+
+				"CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c", off, last, base, inc, base, inc)
+		case "token":
+			mustExec(b, db, rec+"INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) SELECT "+rollSID("i")+", "+rollSID("i+1")+", 't', ?, ? + i*? FROM c",
+				off, last, base, base, inc)
 		default:
 			mustExec(b, db, rec+`INSERT INTO mint SELECT substr(x'000102', 1 + i % 3, 1), ((? + i*?) / 1000 - ?) / 600 % ?, i, 10, 's', ? + i*? FROM c`,
 				off, last, base, inc, epoch, event.MintUnitLimit, base, inc)
@@ -118,7 +131,8 @@ func BenchmarkRawChild(b *testing.B) {
 	q, err := event.NewQueue(1, event.NewCounters())
 	check(b, err)
 	at := time.UnixMilli(tms)
-	steps := map[string]retentionStep{"clear": newFieldClearStep(at, 30), "delete": newRawDeleteStep(at, 30), "mint": newMintStep(at, 30)}
+	steps := map[string]retentionStep{"clear": newFieldClearStep(at, 30), "delete": newRawDeleteStep(at, 30), "mint": newMintStep(at, 30),
+		"session": newSessionExpireStep(at, 30), "token": newTokenExpireStep(at, 30), "event": newEventExpireStep(at, 30)}
 	run := []retentionStep{steps[os.Getenv(rawChildStep)]}
 	w := NewWriter(db, q, false, nil, Recovery{})
 	var total, longest time.Duration
