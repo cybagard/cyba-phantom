@@ -134,7 +134,32 @@ func TestTU11ExpireStatementsUseTheirIndexes(t *testing.T) {
 	}
 }
 
-// T-U-11, T-S-34: a days value outside the range of the step gives a step that
+// T-U-11: the days 1 and 90 are in the range of each step. With 1 day, a row of
+// 2 d goes and a row of 12 h stays. With 90 days, a row of 91 d goes and a row
+// of 89.5 d stays.
+func TestTU11ExpireStepsAcceptTheEdgesOfTheRange(t *testing.T) {
+	for _, c := range expireCases {
+		for _, days := range []int{1, 90} {
+			t.Run(fmt.Sprint(c.name, " ", days, " days"), func(t *testing.T) {
+				cut := rollCutoff(days)
+				r, chunks := rollRig(t, c.mk(rollTDel, days))
+				if c.setup != nil {
+					c.setup(t, r.db)
+				}
+				c.add(t, r.db, cut-rawDay)
+				c.add(t, r.db, cut+rawDay/2)
+				runOK(t, r)
+				q := fmt.Sprintf("SELECT count(*) FROM %s WHERE %s < %d", c.table, c.key, cut)
+				if old, all := count(t, r.db, q), count(t, r.db, "SELECT count(*) FROM "+c.table); old != 0 || all != c.per+c.extra ||
+					fmt.Sprint(*chunks) != fmt.Sprint([]int{c.per}) {
+					t.Fatalf("%d old rows, %d rows in all, chunks %v; want 0, %d and [%d]", old, all, *chunks, c.per+c.extra, c.per)
+				}
+			})
+		}
+	}
+}
+
+// T-U-11: a days value outside the range of the step gives a step that
 // runs no statement. A zero time does the same. The run stops the writer, and
 // no row changes. The events days go from 1 to 90. The raw days go from 1 to
 // 30.
