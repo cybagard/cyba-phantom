@@ -52,7 +52,7 @@ func (f *fakeClock) local(l *time.Location) string { return f.wall().In(l).Forma
 // is the one of the caller.
 func fakeSchedule(t *testing.T, r *rig, loc *time.Location, start time.Time, lg *slog.Logger) (*Schedule, *fakeClock) {
 	t.Helper()
-	s := NewSchedule(r.w, 7, 30, lg)
+	s := NewSchedule(r.w, 7, 30, 90, lg)
 	f := &fakeClock{anchor: start, now: start}
 	s.loc, s.clock.anchor, s.clock.wall, s.clock.mono = loc, start, f.wall, f.mono
 	return s, f
@@ -369,7 +369,7 @@ func sendTick(t *testing.T, tick chan<- time.Time) {
 // the request waits for a reply. The stop is not an early end.
 func TestTU27StopEndsAScheduleThatWaitsInARun(t *testing.T) {
 	r := newRig(t, 8)
-	s := NewSchedule(r.w, 7, 30, nil)
+	s := NewSchedule(r.w, 7, 30, 90, nil)
 	entered := make(chan struct{})
 	inner := s.run
 	s.run = func(ctx context.Context, steps []retentionStep) error { close(entered); return inner(ctx, steps) }
@@ -389,6 +389,32 @@ func TestTU27StopEndsAScheduleThatWaitsInARun(t *testing.T) {
 	}
 	if s.EarlyEnds() != 0 {
 		t.Errorf("%d early ends after the stop, want 0", s.EarlyEnds())
+	}
+}
+
+// T-U-11: the run of the schedule deletes by the events days it got. It does
+// not use the ip, raw or 90-day values. With 45 days, a token of 46 d is gone
+// and a token of 44 d stays. With no mark, the run at the start runs at once.
+func TestTU11ScheduleRunsWithTheEventsDays(t *testing.T) {
+	r := newRig(t, 100)
+	r.launchCancelable(context.Background())
+	for _, d := range []int{44, 46} {
+		mustExec(t, r.db, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES (?, 's', 't', 1, ?)",
+			d, time.Now().Add(-time.Duration(d)*24*time.Hour).UnixMilli())
+	}
+	s := NewSchedule(r.w, 7, 30, 45, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	select {
+	case <-s.Began():
+	case <-time.After(waitFor):
+		t.Fatal("the schedule did not end its start check")
+	}
+	cancel()
+	<-done
+	if got := rawText(t, r.db, "SELECT coalesce(group_concat(token_id), '') FROM token"); got != "44" {
+		t.Fatalf("tokens left %q, want 44", got)
 	}
 }
 

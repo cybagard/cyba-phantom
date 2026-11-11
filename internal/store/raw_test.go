@@ -359,7 +359,7 @@ func TestTU11RunStepsRunsTheRawSteps(t *testing.T) {
 	r.launchCancelable(context.Background())
 	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
 	defer cancel()
-	if err := r.w.runSteps(ctx, runSteps(tDel, tDel, tPriv, 7, 30)); err != nil {
+	if err := r.w.runSteps(ctx, runSteps(tDel, tDel, tPriv, 7, 30, 90)); err != nil {
 		t.Fatal(err)
 	}
 	q := "SELECT group_concat(kind || ':' || (ts - " + strconv.FormatInt(cut, 10) + ") || ':' || (" + rawCleared + "), ' ') FROM (SELECT * FROM event ORDER BY kind)"

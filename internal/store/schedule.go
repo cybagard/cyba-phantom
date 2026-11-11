@@ -41,6 +41,7 @@ type Schedule struct {
 	clock     *clockGuard
 	loc       *time.Location
 	ip, raw   int // the days of the address step and of the raw rows
+	events    int // the days of the event, token and session rows
 	lg        *slog.Logger
 	tick      <-chan time.Time // nil means a ticker of one minute
 	run       func(ctx context.Context, steps []retentionStep) error
@@ -56,14 +57,14 @@ type Schedule struct {
 }
 
 // NewSchedule makes the schedule of w. The days are the values of
-// store.retention_days.ip and store.retention_days.raw. The location is the
-// local time zone.
-func NewSchedule(w *Writer, ipDays, rawDays int, lg *slog.Logger) *Schedule {
+// store.retention_days.ip, store.retention_days.raw and
+// store.retention_days.events. The location is the local time zone.
+func NewSchedule(w *Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) *Schedule {
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
 	return &Schedule{w: w, clock: newClockGuard(lg), loc: time.Local, ip: ipDays, raw: rawDays,
-		lg: lg, run: w.runSteps, limit: runLimit, gap: runGap,
+		events: eventsDays, lg: lg, run: w.runSteps, limit: runLimit, gap: runGap,
 		began: make(chan struct{})}
 }
 
@@ -165,7 +166,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	wall, tDel, tPriv := s.clock.reading()
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
-	err := s.run(ctx, runSteps(wall, tDel, tPriv, s.ip, s.raw))
+	err := s.run(ctx, runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events))
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
 		if s.earlyLog.CompareAndSwap(false, true) {
@@ -177,15 +178,23 @@ func (s *Schedule) runOnce(stop context.Context) {
 // runSteps returns the steps of one run in order. The roll-up step and the day
 // step come first: they read the session and event rows that later deletes
 // remove. The delete of the refused and beacon rows comes before the field
-// clear. Thus the clear does not write rows that the delete removes. The mark
-// step is last, so a run that ends early writes no mark.
-func runSteps(wall, tDel, tPriv time.Time, ip, raw int) []retentionStep {
+// clear. Thus the clear does not write rows that the delete removes. The three
+// 90-day deletes come after the roll-up steps. A request row older than the
+// events cutoff then rolls up before the event delete removes it. The events
+// days are not below the raw days. They come before the field clear, for the
+// same reason as the raw delete. The clear does not write rows that the event
+// delete removes. The mark step is last, so a run that ends early writes no
+// mark.
+func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
 		newRawDeleteStep(tDel, raw),
 		newCounterDeleteStep(tDel, raw),
+		newEventExpireStep(tDel, events),
+		newTokenExpireStep(tDel, events),
+		newSessionExpireStep(tDel, events),
 		newFieldClearStep(tPriv, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),

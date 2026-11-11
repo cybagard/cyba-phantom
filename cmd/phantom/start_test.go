@@ -73,7 +73,7 @@ func testParams(t *testing.T, storePath string) startParams {
 	if err := os.Chmod(root, 0o700); err != nil { // The log refuses a state directory with group or other bits.
 		t.Fatal(err)
 	}
-	return startParams{Root: root, StorePath: storePath, TlogDir: "tlog", Origin: "test/origin", Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30}
+	return startParams{Root: root, StorePath: storePath, TlogDir: "tlog", Origin: "test/origin", Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90}
 }
 
 func launch(t *testing.T, p startParams, d startDeps) (*storePart, *event.Queue) {
@@ -403,8 +403,8 @@ func TestTU18_StopOrder(t *testing.T) {
 func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	began := make(chan struct{})
 	d := realDeps
-	d.schedule = func(ctx context.Context, w *store.Writer, ip, raw int, lg *slog.Logger) {
-		sc := store.NewSchedule(w, ip, raw, lg)
+	d.schedule = func(ctx context.Context, w *store.Writer, ip, raw, events int, lg *slog.Logger) {
+		sc := store.NewSchedule(w, ip, raw, events, lg)
 		go func() { <-sc.Began(); close(began) }()
 		sc.Run(ctx)
 	}
@@ -420,11 +420,33 @@ func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	}
 }
 
+// TestTU27_StartPassesTheEventsDays checks that start gives the schedule the
+// events days of the params. The value is not the default, so a start that
+// passes the raw days or a constant fails (T-U-27).
+func TestTU27_StartPassesTheEventsDays(t *testing.T) {
+	got := make(chan [3]int, 1)
+	d := realDeps
+	d.schedule = func(_ context.Context, _ *store.Writer, ip, raw, events int, _ *slog.Logger) {
+		got <- [3]int{ip, raw, events}
+	}
+	p := testParams(t, "events.db")
+	p.EventsDays = 45
+	launch(t, p, d)
+	select {
+	case v := <-got:
+		if v != [3]int{7, 30, 45} {
+			t.Errorf("days %v, want [7 30 45]", v)
+		}
+	case <-time.After(netWait):
+		t.Fatal("the schedule did not start")
+	}
+}
+
 // TestTU27_NoScheduleWithoutWriter checks that a store that does not open has
 // no schedule (T-U-27).
 func TestTU27_NoScheduleWithoutWriter(t *testing.T) {
 	d := realDeps
-	d.schedule = func(context.Context, *store.Writer, int, int, *slog.Logger) { t.Error("schedule started") }
+	d.schedule = func(context.Context, *store.Writer, int, int, int, *slog.Logger) { t.Error("schedule started") }
 	launch(t, testParams(t, "keys/events.db"), d)
 }
 
@@ -440,9 +462,9 @@ func TestTU27_StopEndsTheSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := realDeps
-	d.schedule = func(ctx context.Context, _ *store.Writer, ip, raw int, _ *slog.Logger) {
-		if ip != 7 || raw != 30 {
-			t.Errorf("days %d and %d, want 7 and 30", ip, raw)
+	d.schedule = func(ctx context.Context, _ *store.Writer, ip, raw, events int, _ *slog.Logger) {
+		if ip != 7 || raw != 30 || events != 90 {
+			t.Errorf("days %d, %d and %d, want 7, 30 and 90", ip, raw, events)
 		}
 		close(started)
 		<-ctx.Done()
@@ -953,9 +975,18 @@ func TestParamsOf(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := startParams{Root: "/var/lib/phantom", StorePath: "events.db", TlogDir: "tlog", Origin: "test/origin", CacheDir: "certs", BundlePath: "bundle/current.cbnd",
-		Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30}
+		Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90}
 	if got := paramsOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("params %+v, want %+v", got, want)
+	}
+	// A non-default value shows that paramsOf reads the events key, not a
+	// constant and not the raw days.
+	cfg, err = config.Load(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_STORE_RETENTION_DAYS_EVENTS=45"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paramsOf(cfg); got.EventsDays != 45 || got.RawDays != 30 {
+		t.Errorf("events days %d and raw days %d, want 45 and 30", got.EventsDays, got.RawDays)
 	}
 }
 
