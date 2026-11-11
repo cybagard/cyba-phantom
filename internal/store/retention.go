@@ -47,11 +47,11 @@ const (
 	memFields
 	memRolled
 	memDeleted
-	memCount
+	numMembers // the number of members, not a member
 )
 
 // tally holds the rows that the steps of one chunk changed.
-type tally [memCount]int64
+type tally [numMembers]int64
 
 type tallyKey struct{}
 
@@ -71,10 +71,10 @@ func execCount(ctx context.Context, tx *sql.Tx, m member, q string, args ...any)
 }
 
 // retentionRun is the record of one schedule run: the counts of the chunks that
-// committed, and the two cutoffs. The writer goroutine alone uses it.
+// committed, and the two cutoffs. The schedule goroutine sets the cutoffs
+// before it sends the request. After that, only the writer goroutine uses it.
 type retentionRun struct {
-	counts    event.RetentionCounts
-	committed bool // a chunk has committed
+	counts event.RetentionCounts
 }
 
 type runKey struct{}
@@ -87,7 +87,6 @@ func withRun(ctx context.Context, run *retentionRun) context.Context {
 
 // add puts the rows of a committed chunk in the run total.
 func (r *retentionRun) add(t *tally) {
-	r.committed = true
 	r.counts.IP += t[memIP]
 	r.counts.Fields += t[memFields]
 	r.counts.Rolled += t[memRolled]
@@ -202,13 +201,14 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 	return batch
 }
 
-// endRun writes the retention event of a run that has a run record and one
-// committed chunk or more. The event goes to flush as a batch of its own. It
-// does not use the queue, so a full evidence lane cannot drop it. A paused or
-// stopped writer drops it with a count, as flush does. It returns err. If the
-// write stops the writer, it returns the error of the stop.
+// endRun writes the retention event of a run that has a run record. The caller
+// calls it after a chunk has committed. The event goes to flush as a batch of
+// its own. It does not use the queue, so a full evidence lane cannot drop it. A
+// paused writer drops it with a count, as flush does. A stopped writer makes no
+// event and counts no drop. endRun returns err. If the write stops the writer,
+// it returns the error of the stop.
 func (w *Writer) endRun(run *retentionRun, err error) error {
-	if run == nil || !run.committed || !w.Healthy() {
+	if run == nil || !w.Healthy() {
 		return err
 	}
 	e, eerr := event.NewRetentionEvent(w.now, run.counts)

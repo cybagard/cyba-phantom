@@ -46,8 +46,22 @@ func NewRetentionEvent(now Clock, c RetentionCounts) (*Event, error) {
 
 var errRetentionDetail = errors.New("event: the detail of a retention event has only the eight integer members")
 
-// checkRetentionDetail refuses a member that is not one of the eight, and a
-// text value. The canonical encoder in NewEvent refuses an integer outside
+var errRetentionInput = errors.New("event: a retention event has only a kind and a detail")
+
+// checkRetention refuses each input of a retention event except the kind and
+// the detail. Then it checks the detail.
+func (in Input) checkRetention() error {
+	if in.Session != "" || in.Vhost != "" || in.Method != "" || in.Path != "" ||
+		in.TrapID != "" || in.TokenID != "" || in.Status != nil || in.Surface != "" ||
+		in.JA4 != "" || in.H2 != "" || in.Hdr != "" || in.ClientIP != "" ||
+		in.Forwarded != "" || len(in.BodyPrefix) > 0 || in.Mint != nil || in.Link != nil {
+		return errRetentionInput
+	}
+	return checkRetentionDetail(in.Detail)
+}
+
+// checkRetentionDetail refuses a member that is not one of the eight, and every
+// value that is not an integer. The canonical encoder in NewEvent refuses an integer outside
 // +-(2^53-1).
 func checkRetentionDetail(d Detail) error {
 	for k, v := range d {

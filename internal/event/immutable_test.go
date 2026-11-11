@@ -43,18 +43,7 @@ func fullInput(k event.Kind) event.Input {
 	if hasSession(k) {
 		in.Session = "sess-1"
 	}
-	if k == event.KindRetention {
-		in.Detail = event.Detail{"ip": event.Int(7), "fields": event.Int(1)}
-	}
 	return in
-}
-
-// detailKey is the member of fullInput that has the value 7.
-func detailKey(k event.Kind) string {
-	if k == event.KindRetention {
-		return "ip"
-	}
-	return "count"
 }
 
 // bigInput sets every field to the longest value that the caps allow. The path
@@ -232,6 +221,9 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 	}
 	for _, k := range allKinds {
 		for _, v := range variants {
+			if v.name == "full" && k == event.KindRetention {
+				continue // a retention event has only a kind and a detail
+			}
 			for _, tp := range tampers {
 				t.Run(k.String()+"/"+v.name+"/"+tp.name, func(t *testing.T) {
 					e := mustEvent(t, at(1758300000123), v.in(k))
@@ -239,7 +231,7 @@ func TestTS12_AccessorsShareNoMemory(t *testing.T) {
 					if v.name == "full" {
 						rec := e.Record()
 						if rec.Path == nil || *rec.Path != "/p?x=1" || rec.FP == nil || *rec.FP.JA4 != "ja4-value" ||
-							rec.Detail[detailKey(k)] != event.Int(7) || e.IP() != "2001:db8::7" || string(e.BodyPrefix()) != "body prefix bytes" {
+							rec.Detail["count"] != event.Int(7) || e.IP() != "2001:db8::7" || string(e.BodyPrefix()) != "body prefix bytes" {
 							t.Fatalf("the event lacks a value of its input: %+v", rec)
 						}
 					} else if e.BodyPrefix() != nil || e.IP() != "" {

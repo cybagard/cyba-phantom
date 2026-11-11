@@ -48,7 +48,8 @@ func rowEvent(t *testing.T, k event.Kind, full bool, ts int64) *event.Event {
 			in.Session = "sess-1"
 		}
 		if k == event.KindRetention {
-			in.Detail = event.Detail{"ip": event.Int(7), "fields": event.Int(3)}
+			// A retention event has only a kind and a detail.
+			in = event.Input{Kind: k, Detail: event.Detail{"ip": event.Int(7), "fields": event.Int(3)}}
 		}
 	}
 	e, err := event.NewEvent(func() time.Time { return time.UnixMilli(ts) }, in)

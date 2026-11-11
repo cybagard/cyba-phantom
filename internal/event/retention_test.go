@@ -55,3 +55,35 @@ func TestTU11_RetentionRefusals(t *testing.T) {
 		t.Errorf("another kind has the check: %v", err)
 	}
 }
+
+// T-U-11: NewEvent refuses each input of a retention event that is not the kind
+// or the detail. A bool member is also refused.
+func TestTU11_RetentionRefusesOtherInputs(t *testing.T) {
+	st := int64(200)
+	for name, mod := range map[string]func(*Input){
+		"session":     func(in *Input) { in.Session = "s" },
+		"vhost":       func(in *Input) { in.Vhost = "v" },
+		"method":      func(in *Input) { in.Method = "GET" },
+		"path":        func(in *Input) { in.Path = "/" },
+		"trap id":     func(in *Input) { in.TrapID = "t" },
+		"token id":    func(in *Input) { in.TokenID = "k" },
+		"status":      func(in *Input) { in.Status = &st },
+		"surface":     func(in *Input) { in.Surface = SurfaceBody },
+		"ja4":         func(in *Input) { in.JA4 = "j" },
+		"h2":          func(in *Input) { in.H2 = "h" },
+		"hdr":         func(in *Input) { in.Hdr = "h" },
+		"client ip":   func(in *Input) { in.ClientIP = "192.0.2.1" },
+		"forwarded":   func(in *Input) { in.Forwarded = "192.0.2.1" },
+		"body prefix": func(in *Input) { in.BodyPrefix = []byte("b") },
+		"mint":        func(in *Input) { in.Mint = &MintRange{} },
+		"link":        func(in *Input) { in.Link = &CallbackLink{} },
+		"reason":      func(in *Input) { in.Reason = ReasonBadHello },
+		"bool member": func(in *Input) { in.Detail = Detail{"ip": Bool(true)} },
+	} {
+		in := Input{Kind: KindRetention, Detail: Detail{"ip": Int(1)}}
+		mod(&in)
+		if _, err := NewEvent(nil, in); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+}

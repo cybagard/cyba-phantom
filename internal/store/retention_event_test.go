@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func seedRetention(t *testing.T, db *sql.DB) {
 	for _, first := range []int64{1, 11, 21} {
 		addMintRow(t, db, 1, 1, first, 1) // deleted: 3
 	}
-	// The three old session rows are deleted too: 3 more.
+	// The session delete removes the three old session rows: 3 more.
 }
 
 // T-U-11: a run of the schedule makes one retention event. It has a leaf
@@ -113,11 +114,16 @@ func TestTU11RetentionEventCountsRows(t *testing.T) {
 	if sum := sha256.Sum256(rec); !leaf.Valid || sid.Valid || string(hash) != string(sum[:]) {
 		t.Fatalf("leaf %v, session %v, hash is the sha256 of the record: %v", leaf, sid, string(hash) == string(sum[:]))
 	}
-	got, err := event.ParseDetail(detail)
+	sameDetail(t, detail, seededDetail())
+}
+
+// sameDetail fails the test if the detail text has other members than want.
+func sameDetail(t *testing.T, text string, want event.Detail) {
+	t.Helper()
+	got, err := event.ParseDetail(text)
 	check(t, err)
-	want := seededDetail()
 	if len(got) != len(want) {
-		t.Fatalf("detail %v, want %v", got, want)
+		t.Errorf("detail %v, want %v", got, want)
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -222,7 +228,7 @@ func TestTU11RolledBackChunkIsNotCounted(t *testing.T) {
 	if _, err := r.w.chunkRun([]retentionStep{newRollupStep(rollTDel, 30)}, &cur, run); err == nil {
 		t.Fatal("the chunk committed")
 	}
-	if run.committed || run.counts != (event.RetentionCounts{}) {
+	if run.counts != (event.RetentionCounts{}) {
 		t.Fatalf("run record %+v after a rolled back chunk", run)
 	}
 }
@@ -247,15 +253,62 @@ func TestTU11RetentionEventThroughRunningWriter(t *testing.T) {
 	}
 	var detail string
 	check(t, r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
-	got, err := event.ParseDetail(detail)
-	check(t, err)
-	want := seededDetail()
-	if len(got) != len(want) {
-		t.Errorf("detail %v, want %v", got, want)
+	sameDetail(t, detail, seededDetail())
+}
+
+// T-U-11: the address cutoff uses tPriv and the raw cutoff uses tDel. The wall
+// clock is 30 min behind the monotonic clock, so tDel is before tPriv.
+func TestTU11RetentionEventCutoffsUseTheirTimes(t *testing.T) {
+	r := newRig(t, 8)
+	addEvents(t, r.db, "request", 3, rollCutoff(30)-2*3600*1000, 1, nil, nil)
+	s, f := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	f.jump(-30 * time.Minute)
+	s.run = serveWithRun(r)
+	s.runOnce(context.Background())
+	var detail string
+	check(t, r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
+	sameDetail(t, detail, event.Detail{
+		"ip": event.Int(0), "fields": event.Int(0), "rolled": event.Int(3), "deleted": event.Int(0),
+		"evicted": event.Int(0), "vacuumed": event.Int(0),
+		"cutoff_ip":  event.Int(rollTDel.UnixMilli() - 7*24*3600*1000),
+		"cutoff_raw": event.Int(rollCutoff(30) - 30*60*1000),
+	})
+}
+
+// T-U-11: when the write of the event stops the writer, the run replies with
+// the error of the stop. The row is not stored.
+func TestTU11RetentionEventWriteStopsTheWriter(t *testing.T) {
+	r := newRig(t, 8)
+	r.app.err = errors.New("append failed")
+	addEvents(t, r.db, "request", 3, rollCutoff(30)-1000, 1, nil, nil)
+	err := scheduleRun(t, r, context.Background())
+	if err == nil || r.w.Healthy() || err != r.w.Err() {
+		t.Fatalf("reply %v, writer error %v, healthy %v", err, r.w.Err(), r.w.Healthy())
 	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("member %s = %v, want %v", k, got[k], v)
-		}
+	if n := retentionRows(t, r); n != 0 {
+		t.Fatalf("%d retention rows after a failed append", n)
+	}
+}
+
+// T-U-11: a writer that stops after a committed chunk makes no event and counts
+// no drop. The run ends early.
+func TestTU11StoppedWriterMakesNoRetentionEvent(t *testing.T) {
+	r := newRig(t, 8)
+	addEvents(t, r.db, "request", 1500, rollCutoff(30)-2000, 1, nil, nil)
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		steps[0] = onCall(steps[0], func(i int, _ *sql.Tx) {
+			if i == 1 {
+				r.w.stop(fail(writerName, ruleDatabase)) // after this chunk commits
+			}
+		})
+		return serveWithRun(r)(ctx, steps)
+	}
+	s.runOnce(context.Background())
+	if r.events() == 1500 {
+		t.Fatal("no chunk committed")
+	}
+	if n := retentionRows(t, r); n != 0 || r.w.Stats().Dropped != (Drops{}) {
+		t.Fatalf("%d retention rows, drops %v", n, r.w.Stats().Dropped)
 	}
 }

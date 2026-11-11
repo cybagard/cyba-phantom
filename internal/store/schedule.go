@@ -167,7 +167,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
 	run := &retentionRun{}
-	run.counts.CutoffIP = tPriv.Add(-time.Duration(s.ip) * 24 * time.Hour).UnixMilli()
+	run.counts.CutoffIP, _ = retentionCutoff(tPriv, s.ip, 7)
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	err := s.run(withRun(ctx, run), runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events))
 	if err != nil && stop.Err() == nil {

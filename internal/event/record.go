@@ -719,7 +719,7 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 		return nil, errDetailMembers
 	}
 	if in.Kind == KindRetention {
-		if err := checkRetentionDetail(in.Detail); err != nil {
+		if err := in.checkRetention(); err != nil {
 			return nil, err
 		}
 	}
