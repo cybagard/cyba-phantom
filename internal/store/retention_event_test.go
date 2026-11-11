@@ -42,20 +42,32 @@ func retentionRows(t *testing.T, r *rig) int {
 	return count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'retention'")
 }
 
-// seedRetention seeds a known number of rows for each member. These are 3
-// addresses, 5 field rows, 400 request rows, and 30 rows for the deletes. The
-// request rows cost 1 200, so the run has two chunks.
+// seededDetail is the detail that a run over seedRetention gives. The members
+// ip, fields and deleted have more than 1 000 rows. So each has rows in two
+// chunks or more. The request rows cost 1 200, so rolled is in two chunks too.
+func seededDetail() event.Detail {
+	return event.Detail{
+		"ip": event.Int(1200), "fields": event.Int(1200), "rolled": event.Int(400), "deleted": event.Int(1224),
+		"evicted": event.Int(0), "vacuumed": event.Int(0),
+		"cutoff_ip": event.Int(rollTDel.UnixMilli() - 7*24*3600*1000), "cutoff_raw": event.Int(rollCutoff(30)),
+	}
+}
+
+// seedRetention seeds a known number of rows for each member. These are 1 200
+// addresses, 1 200 field rows, 400 request rows, and 1 224 rows to delete.
 func seedRetention(t *testing.T, db *sql.DB) {
 	t.Helper()
 	day := int64(24 * time.Hour / time.Millisecond)
 	now := rollTDel.UnixMilli()
+	// ip: 1200
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 1199)
+		INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, band)
+		SELECT 'ip' || i, ?, ?, '192.0.2.1', 'h', 'human' FROM c`, now-8*day, now-8*day)
 	for i := range 3 {
-		mustExec(t, db, "INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, band) VALUES (?, ?, ?, '192.0.2.1', 'h', 'human')",
-			fmt.Sprint("ip", i), now-8*day, now-8*day)
 		mustExec(t, db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) VALUES (?, ?, ?, 'h', 'human')",
 			fmt.Sprint("old", i), now-100*day, now-100*day)
 	}
-	addFull(t, db, "callback", 5, now-50*day, 1)              // fields: 5
+	addFull(t, db, "callback", 1200, now-50*day, 1)           // fields: 1200
 	addEvents(t, db, "request", 400, now-40*day, 1, nil, nil) // rolled: 400
 	addFull(t, db, "refused", 5, now-35*day, 1)               // deleted: 5
 	addFull(t, db, "beacon", 4, now-35*day, 1)                // deleted: 4
@@ -64,9 +76,9 @@ func seedRetention(t *testing.T, db *sql.DB) {
 		mustExec(t, db, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES (?, 's', 't', 1, ?)",
 			fmt.Sprint("t", i), now-100*day) // deleted: 2
 	}
-	for i := range 6 {
-		mustExec(t, db, "INSERT INTO ip_counter (day, ip_hmac, requests, dropped) VALUES ('2000-01-01', ?, 1, 0)", fmt.Sprint("h", i))
-	}
+	// deleted: 1200
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 1199)
+		INSERT INTO ip_counter (day, ip_hmac, requests, dropped) SELECT '2000-01-01', 'h' || i, 1, 0 FROM c`)
 	for _, first := range []int64{1, 11, 21} {
 		addMintRow(t, db, 1, 1, first, 1) // deleted: 3
 	}
@@ -80,6 +92,7 @@ func seedRetention(t *testing.T, db *sql.DB) {
 func TestTU11RetentionEventCountsRows(t *testing.T) {
 	r := newRig(t, 8)
 	seedRetention(t, r.db)
+	r.app.next = 10_000 // above the leaf indexes of the seed
 	var chunks int
 	r.w.beforeCommit = func(*sql.Tx) error { chunks++; return nil }
 	if err := scheduleRun(t, r, context.Background()); err != nil {
@@ -102,11 +115,7 @@ func TestTU11RetentionEventCountsRows(t *testing.T) {
 	}
 	got, err := event.ParseDetail(detail)
 	check(t, err)
-	want := event.Detail{
-		"ip": event.Int(3), "fields": event.Int(5), "rolled": event.Int(400), "deleted": event.Int(30),
-		"evicted": event.Int(0), "vacuumed": event.Int(0),
-		"cutoff_ip": event.Int(rollTDel.UnixMilli() - 7*24*3600*1000), "cutoff_raw": event.Int(rollCutoff(30)),
-	}
+	want := seededDetail()
 	if len(got) != len(want) {
 		t.Fatalf("detail %v, want %v", got, want)
 	}
@@ -213,7 +222,7 @@ func TestTU11RolledBackChunkIsNotCounted(t *testing.T) {
 	if _, err := r.w.chunkRun([]retentionStep{newRollupStep(rollTDel, 30)}, &cur, run); err == nil {
 		t.Fatal("the chunk committed")
 	}
-	if run.chunks != 0 || run.counts != (event.RetentionCounts{}) {
+	if run.committed || run.counts != (event.RetentionCounts{}) {
 		t.Fatalf("run record %+v after a rolled back chunk", run)
 	}
 }
@@ -227,6 +236,7 @@ func TestTU11RetentionEventThroughRunningWriter(t *testing.T) {
 	// The writer reads the tick only after its start check. The seed has
 	// callback rows with no leaf in the log, so it comes after that check.
 	r.fire()
+	r.app.next = 10_000 // above the leaf indexes of the seed
 	seedRetention(t, r.db)
 	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
 	defer cancel()
@@ -239,11 +249,7 @@ func TestTU11RetentionEventThroughRunningWriter(t *testing.T) {
 	check(t, r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
 	got, err := event.ParseDetail(detail)
 	check(t, err)
-	want := event.Detail{
-		"ip": event.Int(3), "fields": event.Int(5), "rolled": event.Int(400), "deleted": event.Int(30),
-		"evicted": event.Int(0), "vacuumed": event.Int(0),
-		"cutoff_ip": event.Int(rollTDel.UnixMilli() - 7*24*3600*1000), "cutoff_raw": event.Int(rollCutoff(30)),
-	}
+	want := seededDetail()
 	if len(got) != len(want) {
 		t.Errorf("detail %v, want %v", got, want)
 	}

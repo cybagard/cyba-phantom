@@ -1,9 +1,6 @@
 package event
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // RetentionCounts is the detail of a retention event: what one retention run
 // did. Each member is an integer. A count is the number of rows that the
@@ -49,15 +46,13 @@ func NewRetentionEvent(now Clock, c RetentionCounts) (*Event, error) {
 
 var errRetentionDetail = errors.New("event: the detail of a retention event has only the eight integer members")
 
-// checkRetentionDetail refuses three things. These are a member that is not one
-// of the eight, a text value, and an integer outside +-(2^53-1).
+// checkRetentionDetail refuses a member that is not one of the eight, and a
+// text value. The canonical encoder in NewEvent refuses an integer outside
+// +-(2^53-1).
 func checkRetentionDetail(d Detail) error {
 	for k, v := range d {
 		if !retentionMembers[k] || v.tag != 'i' {
 			return errRetentionDetail
-		}
-		if v.i > maxInt || v.i < -maxInt {
-			return fmt.Errorf("event: retention member %s is outside the integer range", k)
 		}
 	}
 	return nil

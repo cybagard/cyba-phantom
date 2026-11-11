@@ -73,8 +73,8 @@ func execCount(ctx context.Context, tx *sql.Tx, m member, q string, args ...any)
 // retentionRun is the record of one schedule run: the counts of the chunks that
 // committed, and the two cutoffs. The writer goroutine alone uses it.
 type retentionRun struct {
-	counts event.RetentionCounts
-	chunks int
+	counts    event.RetentionCounts
+	committed bool // a chunk has committed
 }
 
 type runKey struct{}
@@ -87,7 +87,7 @@ func withRun(ctx context.Context, run *retentionRun) context.Context {
 
 // add puts the rows of a committed chunk in the run total.
 func (r *retentionRun) add(t *tally) {
-	r.chunks++
+	r.committed = true
 	r.counts.IP += t[memIP]
 	r.counts.Fields += t[memFields]
 	r.counts.Rolled += t[memRolled]
@@ -208,7 +208,7 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // stopped writer drops it with a count, as flush does. It returns err. If the
 // write stops the writer, it returns the error of the stop.
 func (w *Writer) endRun(run *retentionRun, err error) error {
-	if run == nil || run.chunks == 0 || !w.Healthy() {
+	if run == nil || !run.committed || !w.Healthy() {
 		return err
 	}
 	e, eerr := event.NewRetentionEvent(w.now, run.counts)
