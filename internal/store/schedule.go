@@ -41,6 +41,7 @@ type Schedule struct {
 	clock     *clockGuard
 	loc       *time.Location
 	ip, raw   int // the days of the address step and of the raw rows
+	events    int // the days of the event, token and session rows
 	lg        *slog.Logger
 	tick      <-chan time.Time // nil means a ticker of one minute
 	run       func(ctx context.Context, steps []retentionStep) error
@@ -56,14 +57,14 @@ type Schedule struct {
 }
 
 // NewSchedule makes the schedule of w. The days are the values of
-// store.retention_days.ip and store.retention_days.raw. The location is the
-// local time zone.
-func NewSchedule(w *Writer, ipDays, rawDays int, lg *slog.Logger) *Schedule {
+// store.retention_days.ip, store.retention_days.raw and
+// store.retention_days.events. The location is the local time zone.
+func NewSchedule(w *Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) *Schedule {
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
 	return &Schedule{w: w, clock: newClockGuard(lg), loc: time.Local, ip: ipDays, raw: rawDays,
-		lg: lg, run: w.runSteps, limit: runLimit, gap: runGap,
+		events: eventsDays, lg: lg, run: w.runSteps, limit: runLimit, gap: runGap,
 		began: make(chan struct{})}
 }
 
@@ -165,7 +166,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	wall, tDel, tPriv := s.clock.reading()
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
-	err := s.run(ctx, runSteps(wall, tDel, tPriv, s.ip, s.raw))
+	err := s.run(ctx, runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events))
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
 		if s.earlyLog.CompareAndSwap(false, true) {
@@ -174,18 +175,53 @@ func (s *Schedule) runOnce(stop context.Context) {
 	}
 }
 
+// eventTime returns the time that the event step takes in place of tDel. The
+// day step counts the callbacks of a UTC day only when the day is done. With
+// events equal to raw, the event cutoff is the raw cutoff. Then the event step
+// can delete the callbacks of that UTC day before the cutoff. The day step has
+// not counted them yet. So the event cutoff is not later than the start of
+// that UTC day. With events above raw, the cap has no effect. The writer can
+// store a request row before the raw cutoff during the run. This occurs only
+// when the wall clock steps back by raw days or more. Such a row that comes
+// after the roll-up step and before the day step ends stops the day step. Then
+// the event step can delete callbacks that the day step did not count. The
+// event step can delete such a row that comes after the day step, with no
+// roll-up. With bad raw days or a zero tDel, the time is tDel. The event step
+// itself refuses bad events days, for any time.
+func eventTime(tDel time.Time, raw, events int) time.Time {
+	cut, ok := rollupCutoff(tDel, raw)
+	if !ok {
+		return tDel
+	}
+	capped := time.UnixMilli(rollupDayStart(cut) + int64(events)*rollupDayMs)
+	if capped.Before(tDel) {
+		return capped
+	}
+	return tDel
+}
+
 // runSteps returns the steps of one run in order. The roll-up step and the day
 // step come first: they read the session and event rows that later deletes
 // remove. The delete of the refused and beacon rows comes before the field
-// clear. Thus the clear does not write rows that the delete removes. The mark
-// step is last, so a run that ends early writes no mark.
-func runSteps(wall, tDel, tPriv time.Time, ip, raw int) []retentionStep {
+// clear. Thus the clear does not write rows that the delete removes. The event,
+// token and session deletes, which use retention_days.events, come after the
+// roll-up steps. A request row that the run finds at its start rolls up
+// before the event delete removes it. The configuration keeps the events days
+// not below the raw days (internal/config/validate.go). The event step has a
+// capped cutoff: see eventTime. These three deletes come before the field
+// clear, for the same reason as the raw delete. The clear does not write rows
+// that the event delete removes. The mark step is last, so a run that ends
+// early writes no mark.
+func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
 		newIPStep(tPriv, ip),
 		newRawDeleteStep(tDel, raw),
 		newCounterDeleteStep(tDel, raw),
+		newEventExpireStep(eventTime(tDel, raw, events), events),
+		newTokenExpireStep(tDel, events),
+		newSessionExpireStep(tDel, events),
 		newFieldClearStep(tPriv, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),

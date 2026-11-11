@@ -35,7 +35,7 @@ type startParams struct {
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
-	IPDays, RawDays                  int // store.retention_days.ip and .raw
+	IPDays, RawDays, EventsDays      int // store.retention_days.{ip,raw,events}
 }
 
 // startDeps holds the parts that a test replaces. A test counts the calls that
@@ -55,7 +55,7 @@ type startDeps struct {
 	openGuard func(*os.Root, string) (*store.DiskGuard, error)
 	// schedule runs the nightly retention schedule until its context ends
 	// (SEC-40). Nil means no schedule.
-	schedule func(ctx context.Context, w *store.Writer, ipDays, rawDays int, lg *slog.Logger)
+	schedule func(ctx context.Context, w *store.Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger)
 }
 
 var realDeps = startDeps{
@@ -66,8 +66,8 @@ var realDeps = startDeps{
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
-	schedule: func(ctx context.Context, w *store.Writer, ipDays, rawDays int, lg *slog.Logger) {
-		store.NewSchedule(w, ipDays, rawDays, lg).Run(ctx)
+	schedule: func(ctx context.Context, w *store.Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) {
+		store.NewSchedule(w, ipDays, rawDays, eventsDays, lg).Run(ctx)
 	},
 }
 
@@ -88,8 +88,9 @@ func paramsOf(cfg *config.Config) startParams {
 	bp, _ := cfg.Get("privacy.store_body_prefix")
 	ipd, _ := cfg.Get("store.retention_days.ip")
 	rawd, _ := cfg.Get("store.retention_days.raw")
+	evd, _ := cfg.Get("store.retention_days.events")
 	return startParams{
-		IPDays: int(ipd.Int), RawDays: int(rawd.Int),
+		IPDays: int(ipd.Int), RawDays: int(rawd.Int), EventsDays: int(evd.Int),
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),
 		CacheDir: rel(str("acme.cache_dir")), BundlePath: rel(str("bundle.path")),
 		Reserved: []string{rel(str("tlog.dir")), rel(str("acme.cache_dir")), rel(filepath.Dir(str("bundle.path")))},
@@ -166,7 +167,7 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 		if d.schedule != nil {
 			var ctx context.Context
 			ctx, s.stopSched = context.WithCancel(context.Background())
-			s.sched.Go(func() { d.schedule(ctx, s.writer, p.IPDays, p.RawDays, lg) })
+			s.sched.Go(func() { d.schedule(ctx, s.writer, p.IPDays, p.RawDays, p.EventsDays, lg) })
 		}
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })

@@ -52,7 +52,7 @@ func (f *fakeClock) local(l *time.Location) string { return f.wall().In(l).Forma
 // is the one of the caller.
 func fakeSchedule(t *testing.T, r *rig, loc *time.Location, start time.Time, lg *slog.Logger) (*Schedule, *fakeClock) {
 	t.Helper()
-	s := NewSchedule(r.w, 7, 30, lg)
+	s := NewSchedule(r.w, 7, 30, 90, lg)
 	f := &fakeClock{anchor: start, now: start}
 	s.loc, s.clock.anchor, s.clock.wall, s.clock.mono = loc, start, f.wall, f.mono
 	return s, f
@@ -369,7 +369,7 @@ func sendTick(t *testing.T, tick chan<- time.Time) {
 // the request waits for a reply. The stop is not an early end.
 func TestTU27StopEndsAScheduleThatWaitsInARun(t *testing.T) {
 	r := newRig(t, 8)
-	s := NewSchedule(r.w, 7, 30, nil)
+	s := NewSchedule(r.w, 7, 30, 90, nil)
 	entered := make(chan struct{})
 	inner := s.run
 	s.run = func(ctx context.Context, steps []retentionStep) error { close(entered); return inner(ctx, steps) }
@@ -389,6 +389,32 @@ func TestTU27StopEndsAScheduleThatWaitsInARun(t *testing.T) {
 	}
 	if s.EarlyEnds() != 0 {
 		t.Errorf("%d early ends after the stop, want 0", s.EarlyEnds())
+	}
+}
+
+// T-U-11: the run of the schedule deletes by the events days it got. It does
+// not use the ip, raw or 90-day values. With 45 days, a token of 46 d is gone
+// and a token of 44 d stays. With no mark, the run at the start runs at once.
+func TestTU11ScheduleRunsWithTheEventsDays(t *testing.T) {
+	r := newRig(t, 100)
+	r.launchCancelable(context.Background())
+	for _, d := range []int{44, 46} {
+		mustExec(t, r.db, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES (?, 's', 't', 1, ?)",
+			d, time.Now().Add(-time.Duration(d)*24*time.Hour).UnixMilli())
+	}
+	s := NewSchedule(r.w, 7, 30, 45, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	select {
+	case <-s.Began():
+	case <-time.After(waitFor):
+		t.Fatal("the schedule did not end its start check")
+	}
+	cancel()
+	<-done
+	if got := rawText(t, r.db, "SELECT coalesce(group_concat(token_id), '') FROM token"); got != "44" {
+		t.Fatalf("tokens left %q, want 44", got)
 	}
 }
 
@@ -480,14 +506,23 @@ func msAgo(t time.Time, back time.Duration) int64 { return t.Add(-back).UnixMill
 const oneDay = 24 * time.Hour
 
 // T-U-27 (feeds T-C-06): the wall clock is 2 d ahead. A request row of 29 d by
-// the monotonic time stays. A row of 31 d goes.
+// the monotonic time stays. A row of 31 d goes. The events days are 90. An
+// evidence row, a token and a session of 89 d stay. They are younger than the
+// events cutoff by tDel. They are older than it by tPriv.
 func TestTU27WallPlusTwoDaysDeletesNothingEarly(t *testing.T) {
 	r, s, _ := prodRig(t, 48*time.Hour, nil)
 	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 29*oneDay), 0, nil, nil)
 	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 31*oneDay), 0, nil, nil)
+	young := msAgo(rollTDel, 89*oneDay)
+	addEventAt(t, r.db, "score_change", young)
+	expireCaseNamed("token").add(t, r.db, young)
+	expireCaseNamed("session").add(t, r.db, young)
 	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE ts = "+strconv.FormatInt(msAgo(rollTDel, 29*oneDay), 10)); n != 1 || r.events() != 1 {
-		t.Fatalf("%d rows of 29 d, %d rows in all; want 1 and 1", n, r.events())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE ts = "+strconv.FormatInt(msAgo(rollTDel, 29*oneDay), 10)); n != 1 || r.events() != 2 {
+		t.Fatalf("%d rows of 29 d, %d rows in all; want 1 and 2", n, r.events())
+	}
+	if tok, ses := count(t, r.db, "SELECT count(*) FROM token"), count(t, r.db, "SELECT count(*) FROM session"); tok != 1 || ses != 4 {
+		t.Fatalf("%d tokens, %d sessions left; want 1 and 4", tok, ses)
 	}
 }
 
@@ -570,7 +605,9 @@ func TestTU27EarlyEndWritesNoMark(t *testing.T) {
 }
 
 // T-U-27: the roll-up step runs before the day step. The day step counts the
-// callbacks of a day only when no request row of the day is left.
+// callbacks of a day only when no request row of the day is left. The session
+// has last_seen 0, so the run deletes it. So the test also guards the place of
+// the session step. It comes after the day step, which reads the session.
 func TestTU27RollupStepRunsBeforeTheDayStep(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	addSession(t, r.db, "s1", "human", "f")

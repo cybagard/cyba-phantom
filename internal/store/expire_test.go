@@ -26,6 +26,16 @@ type expireCase struct {
 
 var expireBands = []string{"human", "crawler", "agent-likely", "agent-confirmed"}
 
+// expireCaseNamed returns the case with the name.
+func expireCaseNamed(name string) expireCase {
+	for _, c := range expireCases {
+		if c.name == name {
+			return c
+		}
+	}
+	panic("no expire case " + name)
+}
+
 // addEventAt inserts one event row. A callback and a score_change row get a
 // hash and a leaf index, as the schema needs.
 func addEventAt(tb testing.TB, db *sql.DB, kind string, at int64) {
@@ -319,13 +329,171 @@ func TestTU11CounterDeleteRunsInChunks(t *testing.T) {
 func TestTU11RunStepsDeletesOldIPCounterRows(t *testing.T) {
 	r := newRig(t, 4000)
 	addCounterDays(t, r.db, "2027-01-10", "2027-01-11", "2027-01-12")
-	r.launchCancelable(context.Background())
-	ctx, cancel := context.WithTimeout(context.Background(), waitFor)
-	defer cancel()
-	if err := r.w.runSteps(ctx, runSteps(rollTDel, rollTDel, rollTDel.Add(48*time.Hour), 7, 30)); err != nil {
+	if err := runWith(t, r, runSteps(rollTDel, rollTDel, rollTDel.Add(48*time.Hour), 7, 30, 90)); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := counterDays(t, r.db), "2027-01-11 2027-01-12"; got != want {
 		t.Fatalf("days left %q, want %q", got, want)
+	}
+}
+
+// runWith runs steps through the writer of r, which Run serves. The writer
+// has ended when it returns.
+func runWith(t *testing.T, r *rig, steps []retentionStep) error {
+	t.Helper()
+	_, cancel := r.launchCancelable(context.Background())
+	ctx, cancelRun := context.WithTimeout(context.Background(), waitFor)
+	defer cancelRun()
+	err := r.w.runSteps(ctx, steps)
+	r.stopRun(cancel)
+	return err
+}
+
+// evidenceRig seeds one evidence row for each kind and ts, each with a leaf in
+// a real log. It returns a rig that restarts on the same database and log.
+func evidenceRig(t *testing.T, kinds []string, ts []int64) *rig {
+	t.Helper()
+	l, r := realLog(t), newRig(t, 100)
+	r.seed(l, len(ts))
+	for i, k := range kinds {
+		mustExec(t, r.db, "UPDATE event SET kind = ?, ts = ? WHERE leaf_index = ?", k, ts[i], i)
+	}
+	return r.restart(l, "origin")
+}
+
+// T-U-11: the run deletes the event, token and session rows of more than 45 d.
+// It keeps the rows of 44 d. The events days are not 90 and not the raw days.
+// The steps get tDel. tPriv is 2 d later, so the rows of 44 d are older than
+// 45 d by tPriv. They stay only when each step uses tDel.
+func TestTU11RunStepsDeletesTheRowsOlderThanTheEventsDays(t *testing.T) {
+	tDel, cut := rollTDel, rollCutoff(45)
+	r := evidenceRig(t, []string{"callback", "score_change", "alert_sent", "callback"},
+		[]int64{cut - rawDay, cut - 1, cut - 40*rawDay, cut + rawDay})
+	for _, name := range []string{"token", "session"} {
+		c := expireCaseNamed(name)
+		c.add(t, r.db, cut-rawDay)
+		c.add(t, r.db, cut+rawDay)
+	}
+	// The event delete runs before the field clear. So the clear writes only
+	// the row that stays.
+	mustExec(t, r.db, "CREATE TABLE touched (id INTEGER)")
+	mustExec(t, r.db, "CREATE TRIGGER note AFTER UPDATE ON event BEGIN INSERT INTO touched VALUES (old.id); END")
+	if err := runWith(t, r, runSteps(tDel, tDel, tDel.Add(48*time.Hour), 7, 30, 45)); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, q string }{
+		{"event", "SELECT count(*) FROM event WHERE ts = " + fmt.Sprint(cut+rawDay)},
+		{"token", "SELECT count(*) FROM token WHERE first_cb_at = " + fmt.Sprint(cut+rawDay)},
+		{"session", "SELECT count(*) FROM session WHERE last_seen = " + fmt.Sprint(cut+rawDay)},
+	} {
+		want := map[string]int{"event": 1, "token": 1, "session": 4}[c.name]
+		if n, all := count(t, r.db, c.q), count(t, r.db, "SELECT count(*) FROM "+c.name); n != all || n != want {
+			t.Errorf("%s: %d young rows, %d rows in all; want %d of each", c.name, n, all, want)
+		}
+	}
+	if n := count(t, r.db, "SELECT count(*) FROM touched"); n != 1 {
+		t.Errorf("the clear wrote %d rows, want the 1 young row", n)
+	}
+}
+
+// T-U-11: the roll-up counts a request row of more than 45 d that no run
+// rolled up. The event delete removes it after that.
+func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
+	r := newRig(t, 100)
+	addEvents(t, r.db, "request", 1, rollCutoff(45)-rawDay, 0, "s", "v")
+	if err := runWith(t, r, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 45)); err != nil {
+		t.Fatal(err)
+	}
+	if n, sum := count(t, r.db, "SELECT count(*) FROM event"), count(t, r.db, "SELECT coalesce(sum(requests), 0) FROM aggregate_day"); n != 0 || sum != 1 {
+		t.Fatalf("%d event rows left, %d requests counted; want 0 and 1", n, sum)
+	}
+}
+
+// T-U-11: events = raw, with 30 and with 1 days. The event step keeps the
+// callbacks of the UTC day of the raw cutoff until the day step counts them.
+// The cutoff is 2027-01-11 12:00. The callbacks of 05:00 on that day stay after
+// run 1. At run 2, 24 h later, the day is done. Run 2 counts them in
+// aggregate_day and deletes them. Run 1 counts and deletes the callbacks of
+// the day before. It also deletes an evidence row older than the start of the
+// cutoff day.
+func TestTU11RunStepsKeepsTheCallbacksOfTheCutoffDayUntilCounted(t *testing.T) {
+	for _, days := range []int{30, 1} {
+		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
+			tDel := rollTDel.Add(-time.Duration(30-days) * oneDay)
+			r, _ := rollRig(t, runSteps(tDel, tDel, tDel, 7, days, days)...)
+			mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band, family) VALUES ('s1', 0, ?, 'h', 'human', 'f')",
+				tDel.UnixMilli())
+			addEvents(t, r.db, "callback", 2, utc("2027-01-11T05:00:00Z"), 1000, "s1", "a")
+			addEvents(t, r.db, "callback", 3, utc("2027-01-10T05:00:00Z"), 1000, "s1", "a")
+			addEventAt(t, r.db, "score_change", utc("2027-01-09T05:00:00Z"))
+			runOK(t, r)
+			if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3"; got != want || r.events() != 2 {
+				t.Fatalf("after run 1: aggregates %q, %d events; want %q and 2", got, r.events(), want)
+			}
+			next := tDel.Add(oneDay)
+			runAgain(t, r, runSteps(next, next, next, 7, days, days)...)
+			if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|0|0|3 ; 2027-01-11|a|human|f|0|0|2"; got != want || r.events() != 0 {
+				t.Fatalf("after run 2: aggregates %q, %d events; want %q and 0", got, r.events(), want)
+			}
+		})
+	}
+}
+
+// T-U-11: with raw days of 0 or 31, or a zero tDel, the event time is tDel.
+func TestTU11EventTimeIsTDelForBadRawDays(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tDel time.Time
+		raw  int
+	}{{"raw 0", rollTDel, 0}, {"raw 31", rollTDel, 31}, {"zero tDel", time.Time{}, 30}} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := eventTime(c.tDel, c.raw, 45); !got.Equal(c.tDel) {
+				t.Fatalf("event time %v, want %v", got, c.tDel)
+			}
+		})
+	}
+}
+
+// T-U-11: an events days value of 0 or 91 gives the step for bad parameters.
+// The run ends with an error and the writer stops. A token, a session and an
+// evidence row of 100 d stay. No step before the three deletes has a row to
+// change. So the result does not depend on the chunk size or the time.
+func TestTU11RunStepsRefusesBadEventsDays(t *testing.T) {
+	for _, days := range []int{0, 91} {
+		t.Run(fmt.Sprint(days, " days"), func(t *testing.T) {
+			r := newRig(t, 100)
+			at := rollCutoff(90) - 10*rawDay
+			expireCaseNamed("token").add(t, r.db, at)
+			expireCaseNamed("session").add(t, r.db, at)
+			addEventAt(t, r.db, "score_change", at)
+			if err := runWith(t, r, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, days)); err == nil || r.w.Healthy() {
+				t.Fatalf("run error %v, healthy %v; want an error and a stopped writer", err, r.w.Healthy())
+			}
+			if tok, ses, ev := count(t, r.db, "SELECT count(*) FROM token"), count(t, r.db, "SELECT count(*) FROM session"),
+				count(t, r.db, "SELECT count(*) FROM event"); tok != 1 || ses != 4 || ev != 1 {
+				t.Fatalf("%d tokens, %d sessions, %d events left; want 1, 4 and 1", tok, ses, ev)
+			}
+		})
+	}
+}
+
+// T-I-07: leaves of evidence rows that the event delete removed count as
+// orphan leaves. After a run that deleted the newest evidence rows, a restart
+// on the same database is healthy. It logs the count of the leaves above the
+// newest row that is left.
+func TestTI07RestartAfterTheEventDeleteLogsOrphanLeaves(t *testing.T) {
+	cut := rollCutoff(45)
+	n := evidenceRig(t, []string{"callback", "callback", "callback"}, []int64{cut + rawDay, cut - rawDay, cut - 2*rawDay})
+	if err := runWith(t, n, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 45)); err != nil {
+		t.Fatal(err)
+	}
+	if left := count(t, n.db, "SELECT count(*) FROM event"); left != 1 {
+		t.Fatalf("%d evidence rows left, want 1", left)
+	}
+	m := n.restart(n.w.rec.Log, "origin")
+	out := m.logTo()
+	m.finish()
+	if !m.w.Healthy() || out.count("orphan leaves") != 1 || out.count("count=2") != 1 {
+		t.Fatalf("healthy %v, log:\n%s", m.w.Healthy(), out.b.String())
 	}
 }
