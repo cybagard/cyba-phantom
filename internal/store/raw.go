@@ -103,6 +103,7 @@ func newFieldClearStep(tPriv time.Time, days int) retentionStep {
 			return 0, err
 		}
 		pos = last
+		tallyRows(ctx, memFields, n)
 		if n == limit {
 			return limit, nil
 		}
@@ -125,7 +126,7 @@ func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execN(ctx, tx, deleteRawSQL, cutoff, limit)
+		return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
 	}
 }
 
@@ -208,7 +209,7 @@ func newMintStep(tDel time.Time, days int) retentionStep {
 						return 0, err
 					}
 					if rows <= left {
-						if _, err := execN(ctx, tx, mintDropSQL, next, unit); err != nil {
+						if _, err := execCount(ctx, tx, memDeleted, mintDropSQL, next, unit); err != nil {
 							return 0, err
 						}
 						if left -= rows; left == 0 {
@@ -219,7 +220,7 @@ func newMintStep(tDel time.Time, days int) retentionStep {
 					if left < chunkRows {
 						return limit, nil
 					}
-					if _, err := execN(ctx, tx, mintDeleteSQL, next, unit, left); err != nil {
+					if _, err := execCount(ctx, tx, memDeleted, mintDeleteSQL, next, unit, left); err != nil {
 						return 0, err
 					}
 					return limit, nil

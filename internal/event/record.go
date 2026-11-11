@@ -718,6 +718,11 @@ func NewEvent(now Clock, in Input) (*Event, error) {
 	if len(in.Detail) > maxDetailMembers {
 		return nil, errDetailMembers
 	}
+	if in.Kind == KindRetention {
+		if err := checkRetentionDetail(in.Detail); err != nil {
+			return nil, err
+		}
+	}
 	var detail Detail
 	if in.Detail != nil {
 		detail = make(Detail, len(in.Detail))

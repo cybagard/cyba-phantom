@@ -47,6 +47,9 @@ func rowEvent(t *testing.T, k event.Kind, full bool, ts int64) *event.Event {
 		if !isSystem(k) {
 			in.Session = "sess-1"
 		}
+		if k == event.KindRetention {
+			in.Detail = event.Detail{"ip": event.Int(7), "fields": event.Int(3)}
+		}
 	}
 	e, err := event.NewEvent(func() time.Time { return time.UnixMilli(ts) }, in)
 	if err != nil {

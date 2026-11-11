@@ -204,7 +204,7 @@ func newRollupStep(tDel time.Time, days int) retentionStep {
 				}
 				c.sessions += n
 			}
-			if _, err := execN(ctx, tx, rollupDropSQL, p.id); err != nil {
+			if _, err := execCount(ctx, tx, memRolled, rollupDropSQL, p.id); err != nil {
 				return 0, err
 			}
 		}

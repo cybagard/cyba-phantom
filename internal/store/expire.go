@@ -44,7 +44,7 @@ func newExpireStep(q string, cost int, tDel time.Time, days int) retentionStep {
 		if most == 0 {
 			return limit, nil
 		}
-		n, err := execN(ctx, tx, q, cutoff, most)
+		n, err := execCount(ctx, tx, memDeleted, q, cutoff, most)
 		if err != nil {
 			return 0, err
 		}
@@ -87,6 +87,6 @@ func newCounterDeleteStep(tDel time.Time, days int) retentionStep {
 	}
 	date := time.UnixMilli(cutoff).UTC().Format(dayLayout)
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execN(ctx, tx, deleteCounterSQL, date, limit)
+		return execCount(ctx, tx, memDeleted, deleteCounterSQL, date, limit)
 	}
 }
