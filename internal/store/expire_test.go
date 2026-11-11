@@ -409,8 +409,8 @@ func TestTU11RunStepsRollsUpBeforeTheEventDelete(t *testing.T) {
 	}
 }
 
-// T-U-11: with events = raw = 30, the event step keeps the callbacks of the UTC
-// day of the raw cutoff until the day step counts them. The cutoff is
+// T-U-11: events = raw = 30. The event step keeps the callbacks of the UTC day
+// of the raw cutoff until the day step counts them. The cutoff is
 // 2027-01-11 12:00. The callbacks of 05:00 on that day stay after run 1. After
 // run 2, 24 h later, the day is done. Then they are counted in aggregate_day,
 // and deleted. Run 1 counts and deletes the callbacks of the day before. It

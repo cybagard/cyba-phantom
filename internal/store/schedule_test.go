@@ -607,7 +607,7 @@ func TestTU27EarlyEndWritesNoMark(t *testing.T) {
 // T-U-27: the roll-up step runs before the day step. The day step counts the
 // callbacks of a day only when no request row of the day is left. The session
 // has last_seen 0, so the run deletes it. So the test also guards the place of
-// the session step: it comes after the day step, which reads the session.
+// the session step. It comes after the day step, which reads the session.
 func TestTU27RollupStepRunsBeforeTheDayStep(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	addSession(t, r.db, "s1", "human", "f")
