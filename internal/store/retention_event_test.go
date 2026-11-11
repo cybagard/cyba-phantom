@@ -48,14 +48,14 @@ func retentionRows(t *testing.T, r *rig) int {
 // chunks or more. The request rows cost 1 200, so rolled is in two chunks too.
 func seededDetail() event.Detail {
 	return event.Detail{
-		"ip": event.Int(1200), "fields": event.Int(1200), "rolled": event.Int(400), "deleted": event.Int(1224),
+		"ip": event.Int(1200), "fields": event.Int(1200), "rolled": event.Int(400), "deleted": event.Int(3724),
 		"evicted": event.Int(0), "vacuumed": event.Int(0),
 		"cutoff_ip": event.Int(rollTDel.UnixMilli() - 7*24*3600*1000), "cutoff_raw": event.Int(rollCutoff(30)),
 	}
 }
 
 // seedRetention seeds a known number of rows for each member. These are 1 200
-// addresses, 1 200 field rows, 400 request rows, and 1 224 rows to delete.
+// addresses, 1 200 field rows, 400 request rows, and 3 724 rows to delete.
 func seedRetention(t *testing.T, db *sql.DB) {
 	t.Helper()
 	day := int64(24 * time.Hour / time.Millisecond)
@@ -83,6 +83,10 @@ func seedRetention(t *testing.T, db *sql.DB) {
 	for _, first := range []int64{1, 11, 21} {
 		addMintRow(t, db, 1, 1, first, 1) // deleted: 3
 	}
+	// One unit with 2 500 rows. The step deletes it in parts of one chunk.
+	// deleted: 2500
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 2500)
+		INSERT INTO mint SELECT x'02', 2, i, 1, 's', 1 FROM c`)
 	// The session delete removes the three old session rows: 3 more.
 }
 
@@ -216,6 +220,52 @@ func TestTU11RetentionEventAfterEarlyEnd(t *testing.T) {
 	left := int64(count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"))
 	if got["rolled"] != event.Int(1500-left) || left == 0 || left == 1500 {
 		t.Fatalf("rolled %v with %d request rows left of 1500", got["rolled"], left)
+	}
+}
+
+// T-U-11: two schedule runs. Run 1 ends early inside the field clear. Run 2
+// ends normally. Each row that the clear changes is in the event of one run
+// only, and each run has its own record.
+func TestTU11RetentionEventsOfTwoRunsCountEachRowOnce(t *testing.T) {
+	r := newRig(t, 8)
+	// The event of run 1 must not be older than the event cutoff of run 2.
+	r.w.clock = func() time.Time { return rollTDel }
+	now := rollTDel.UnixMilli()
+	addFull(t, r.db, "callback", 2500, now-50*24*3600*1000, 1)
+	r.app.next = 10_000 // above the leaf indexes of the seed
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		const fieldClear = 8 // the index in the list of runSteps
+		steps[fieldClear] = onCall(steps[fieldClear], func(i int, _ *sql.Tx) {
+			if i == 0 {
+				cancel() // the chunk of this call commits, and the run then ends
+			}
+		})
+		return serveWithRun(r)(ctx, steps)
+	}
+	s.runOnce(ctx)
+	if err := scheduleRun(t, r, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := r.db.Query(`SELECT json_extract(detail, '$.fields'),
+		json_extract(detail, '$.ip') + json_extract(detail, '$.rolled') + json_extract(detail, '$.deleted')
+		FROM event WHERE kind = 'retention' ORDER BY id`)
+	check(t, err)
+	var fields []int64
+	for rows.Next() {
+		var n, others int64
+		check(t, rows.Scan(&n, &others))
+		if others != 0 {
+			t.Errorf("run %d: ip, rolled and deleted add to %d, want 0", len(fields)+1, others)
+		}
+		fields = append(fields, n)
+	}
+	check(t, rows.Err())
+	check(t, rows.Close())
+	if len(fields) != 2 || fields[0] <= 0 || fields[1] <= 0 || fields[0]+fields[1] != 2500 {
+		t.Fatalf("fields of the two runs: %v, want two counts above 0 with the sum 2500", fields)
 	}
 }
 

@@ -452,9 +452,6 @@ func TestTS12_IPMarkers(t *testing.T) {
 		}
 		for _, in := range inputs {
 			in.Kind, in.Vhost, in.Detail = k, "decoy.example", Detail{"n": Int(1)}
-			if k == KindRetention {
-				in.Detail = Detail{"ip": Int(1)}
-			}
 			e, err := NewEvent(fixedClock(1758300000123), in)
 			if err != nil {
 				t.Fatal(err)

@@ -18,10 +18,13 @@ const (
 	rawDoneKey = "retention_raw_done"
 
 	// clearRawSQL clears the fields of the next rows after a position. It
-	// picks them in the order of event_ts: ts, then the rowid. It returns the
-	// ts and the id of each row that it changed.
+	// picks them in the order of event_ts: ts, then the rowid. It skips a row
+	// whose three fields are already NULL. Thus it changes, and returns, only
+	// rows that hold a value. It returns the ts and the id of each such row.
 	clearRawSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
-		"(SELECT id FROM event WHERE ts >= ? AND ts < ? AND (ts, id) > (?, ?) ORDER BY ts, id LIMIT ?) RETURNING ts, id"
+		"(SELECT id FROM event WHERE ts >= ? AND ts < ? AND (ts, id) > (?, ?) " +
+		"AND (body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL) " +
+		"ORDER BY ts, id LIMIT ?) RETURNING ts, id"
 
 	// deleteRawSQL deletes old rows of the kinds that have no roll-up. It uses
 	// event_kind_ts.
