@@ -183,11 +183,11 @@ func (s *Schedule) runOnce(stop context.Context) {
 // that UTC day. With events above raw, the cap has no effect. The writer can
 // store a request row before the raw cutoff during the run. This occurs only
 // when the wall clock steps back by raw days or more. Such a row that comes
-// before the day step ends stops the day step. Then the event step can delete
-// callbacks that the day step did not count. The event step can delete such a
-// row that comes after the day step, with no roll-up. With bad raw days or a
-// zero tDel, the time is tDel. The event step itself refuses bad events days,
-// for any time.
+// after the roll-up step and before the day step ends stops the day step. Then
+// the event step can delete callbacks that the day step did not count. The
+// event step can delete such a row that comes after the day step, with no
+// roll-up. With bad raw days or a zero tDel, the time is tDel. The event step
+// itself refuses bad events days, for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
 	cut, ok := rollupCutoff(tDel, raw)
 	if !ok {
