@@ -36,7 +36,8 @@ const (
 // has request rows with a body of 256 bytes and a detail. The delete has
 // refused and beacon rows. The mint rows are in 3 sets. The session, token and
 // event deletes use 30 days, as the others. Their rows have a last_seen, a
-// first_cb_at or a ts in the 40 days. The session rows have the 4 bands.
+// first_cb_at or a ts in the 40 days. The session rows have the 4 bands. For
+// the session step, rows-changed counts 4 for each deleted row: its cost.
 func BenchmarkRaw(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")

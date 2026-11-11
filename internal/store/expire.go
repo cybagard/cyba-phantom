@@ -24,9 +24,8 @@ const (
 const expireMaxDays = 90
 
 // This is the cost of one deleted session row. A row has a random ip_hmac and
-// four fingerprint columns. Each delete touches a random page of the ip_hmac
-// index. A chunk of 1 000 such rows took 195 ms at 4 million rows, over the
-// 100 ms of SEC-39. Thus a chunk takes at most limit / cost rows.
+// four fingerprint columns. At 4 million such rows, a chunk of 1 000 rows took
+// more than the 100 ms of SEC-39. Thus a chunk takes at most limit / cost rows.
 const sessionExpireCost = 4
 
 // newExpireStep returns the step that runs the delete statement q with the
