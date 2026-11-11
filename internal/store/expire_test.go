@@ -11,11 +11,13 @@ import (
 
 // expireCase describes one 90-day step for the tests. add inserts per rows.
 // Each row has the key `at`, and a young value in each other time column. bulk
-// inserts n rows with the key `at`.
+// inserts n rows with the key `at`. cost is the cost of a deleted row, as the
+// measurement gave it.
 type expireCase struct {
 	name, table, key, plan string
 	stmt                   string
 	mk                     func(time.Time, int) retentionStep
+	cost                   int
 	per, extra             int // rows of one add; rows of setup that stay
 	setup                  func(tb testing.TB, db *sql.DB)
 	add                    func(tb testing.TB, db *sql.DB, at int64)
@@ -35,7 +37,7 @@ func addEventAt(tb testing.TB, db *sql.DB, kind string, at int64) {
 
 var expireCases = []expireCase{
 	{
-		name: "event", table: "event", key: "ts", mk: newEventExpireStep, stmt: deleteEventSQL, per: 3,
+		name: "event", table: "event", key: "ts", mk: newEventExpireStep, stmt: deleteEventSQL, cost: 1, per: 3,
 		plan: "SEARCH event USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSEARCH event USING COVERING INDEX event_ts (ts<?)",
 		add: func(tb testing.TB, db *sql.DB, at int64) {
 			for _, k := range []string{"request", "callback", "score_change"} {
@@ -47,7 +49,7 @@ var expireCases = []expireCase{
 	{
 		// The key is first_cb_at. issued_at is young for each row. A token
 		// with no callback has a NULL key and an old issued_at. It stays.
-		name: "token", table: "token", key: "first_cb_at", mk: newTokenExpireStep, stmt: deleteTokenSQL, per: 1, extra: 1,
+		name: "token", table: "token", key: "first_cb_at", mk: newTokenExpireStep, stmt: deleteTokenSQL, cost: 1, per: 1, extra: 1,
 		plan: "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)",
 		setup: func(tb testing.TB, db *sql.DB) {
 			mustExec(tb, db, "INSERT INTO token (token_id, session_id, trap_id, issued_at) VALUES ('none', 's', 't', 1)")
@@ -65,7 +67,7 @@ var expireCases = []expireCase{
 	{
 		// The key is last_seen. first_seen is young for each row. Each band
 		// has a row.
-		name: "session", table: "session", key: "last_seen", mk: newSessionExpireStep, stmt: deleteSessionSQL, per: len(expireBands),
+		name: "session", table: "session", key: "last_seen", mk: newSessionExpireStep, stmt: deleteSessionSQL, cost: 4, per: len(expireBands),
 		plan: "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSEARCH session USING COVERING INDEX session_band_last (band=? AND last_seen<?)",
 		add: func(tb testing.TB, db *sql.DB, at int64) {
 			for _, b := range expireBands {
@@ -94,15 +96,27 @@ func TestTU11ExpireStepsDeleteByTheirKey(t *testing.T) {
 			runOK(t, r)
 			q := fmt.Sprintf("SELECT count(*) FROM %s WHERE %s < %d", c.table, c.key, cut)
 			if old, all := count(t, r.db, q), count(t, r.db, "SELECT count(*) FROM "+c.table); old != 0 || all != 2*c.per+c.extra ||
-				fmt.Sprint(*chunks) != fmt.Sprint([]int{2 * c.per}) {
-				t.Fatalf("%d old rows, %d rows in all, chunks %v; want 0, %d and [%d]", old, all, *chunks, 2*c.per+c.extra, 2*c.per)
+				fmt.Sprint(*chunks) != fmt.Sprint([]int{c.cost * 2 * c.per}) {
+				t.Fatalf("%d old rows, %d rows in all, chunks %v; want 0, %d and [%d]", old, all, *chunks, 2*c.per+c.extra, c.cost*2*c.per)
 			}
 		})
 	}
 }
 
-// T-U-11: 2 500 old rows go in chunks of 1 000, 1 000 and 500. The young rows
-// stay.
+// expireChunks returns the chunks that the steps of cost `cost` make for n old
+// rows. A chunk takes at most 1 000 / cost rows. A chunk with that many rows
+// counts 1 000, and the last chunk counts cost x the rows left.
+func expireChunks(n, cost int) (chunks []int) {
+	most := chunkRows / cost
+	for ; n >= most; n -= most {
+		chunks = append(chunks, chunkRows)
+	}
+	return append(chunks, cost*n)
+}
+
+// T-U-11: 2 500 old rows go in chunks of at most 1 000 / cost rows. The young
+// rows stay. With cost 1, the chunks are 1 000, 1 000 and 500. With cost 4, they
+// are 10 chunks of 250 rows and one empty chunk.
 func TestTU11ExpireStepsRunInChunks(t *testing.T) {
 	cut := rollCutoff(90)
 	for _, c := range expireCases {
@@ -111,11 +125,76 @@ func TestTU11ExpireStepsRunInChunks(t *testing.T) {
 			c.bulk(t, r.db, 2500, cut-rawDay)
 			c.add(t, r.db, cut+rawDay)
 			runOK(t, r)
-			if n := count(t, r.db, "SELECT count(*) FROM "+c.table); n != c.per || fmt.Sprint(*chunks) != "[1000 1000 500]" {
-				t.Fatalf("%d rows left, chunks %v; want %d and [1000 1000 500]", n, *chunks, c.per)
+			want := fmt.Sprint(expireChunks(2500, c.cost))
+			if n := count(t, r.db, "SELECT count(*) FROM "+c.table); n != c.per || fmt.Sprint(*chunks) != want {
+				t.Fatalf("%d rows left, chunks %v; want %d and %s", n, *chunks, c.per, want)
 			}
 		})
 	}
+}
+
+// T-U-11: a step with a cost deletes at most limit / cost rows and returns cost
+// x the rows it deleted. When it took the most rows, it returns the limit. With
+// a limit below the cost, it runs no statement and returns the limit. The
+// transaction here is over, so any statement would fail.
+func TestTU11ExpireStepCostsEachRow(t *testing.T) {
+	db := migrated(t)
+	cut := rollCutoff(90)
+	step := newExpireStep(deleteEventSQL, 3, rollTDel, 90)
+	addEvents(t, db, "request", 5, cut-rawDay, 0, nil, nil)
+	addEvents(t, db, "request", 1, cut+rawDay, 0, nil, nil)
+	for _, c := range []struct{ limit, want, left int }{
+		{2, 2, 6},   // below the cost: no row
+		{10, 10, 3}, // 3 rows, the most: the limit
+		{10, 6, 1},  // 2 rows: cost 3 each
+		{10, 0, 1},  // no old row
+	} {
+		if n, left := call(t, db, step, c.limit), count(t, db, "SELECT count(*) FROM event"); n != c.want || left != c.left {
+			t.Fatalf("limit %d: returned %d, %d rows left; want %d and %d", c.limit, n, left, c.want, c.left)
+		}
+	}
+	tx, err := db.Begin()
+	check(t, err)
+	check(t, tx.Rollback())
+	if n, err := step(context.Background(), tx, 2); n != 2 || err != nil {
+		t.Fatalf("limit 2 on a closed transaction: %d, %v; want 2 and no error", n, err)
+	}
+}
+
+// T-U-11: the session step costs 4 for each row. A limit of 1 000 deletes 250 of
+// 400 old rows and returns the limit. The cost comes from the chunk time of a
+// session row with its fingerprints, as measured at 4 million rows.
+func TestTU11SessionStepCostsFourPerRow(t *testing.T) {
+	db := migrated(t)
+	addSessions(t, db, "s", 0, 400, rollCutoff(90)-rawDay, 0, nil)
+	if n, left := call(t, db, newSessionExpireStep(rollTDel, 90), 1000), count(t, db, "SELECT count(*) FROM session"); n != 1000 || left != 150 {
+		t.Fatalf("returned %d, %d rows left; want 1000 and 150", n, left)
+	}
+}
+
+// T-U-11: each new step keeps the limit that the runner gives it, which is 1 000
+// minus the rows of the steps before it. With a limit of 7 and 20 old rows, a
+// step of cost 1 deletes 7 rows and the session step deletes 1. A step that used
+// the full chunk size would delete more.
+func TestTU11ExpireStepsKeepTheLeftoverLimit(t *testing.T) {
+	cut := rollCutoff(90)
+	for _, c := range expireCases {
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			c.bulk(t, db, 20, cut-rawDay)
+			if n, left := call(t, db, c.mk(rollTDel, 90), 7), count(t, db, "SELECT count(*) FROM "+c.table); n != 7 || left != 20-7/c.cost {
+				t.Fatalf("returned %d, %d rows left; want 7 and %d", n, left, 20-7/c.cost)
+			}
+		})
+	}
+	t.Run("ip_counter", func(t *testing.T) {
+		db := migrated(t)
+		mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 19)
+			INSERT INTO ip_counter (day, ip_hmac, requests, dropped) SELECT '2000-01-01', 'h' || i, 1, 0 FROM c`)
+		if n, left := call(t, db, newCounterDeleteStep(rollTDel, 30), 7), count(t, db, "SELECT count(*) FROM ip_counter"); n != 7 || left != 13 {
+			t.Fatalf("returned %d, %d rows left; want 7 and 13", n, left)
+		}
+	})
 }
 
 // T-U-11: each statement uses its index, and no plan has a SCAN. The plan is
@@ -151,8 +230,8 @@ func TestTU11ExpireStepsAcceptTheEdgesOfTheRange(t *testing.T) {
 				runOK(t, r)
 				q := fmt.Sprintf("SELECT count(*) FROM %s WHERE %s < %d", c.table, c.key, cut)
 				if old, all := count(t, r.db, q), count(t, r.db, "SELECT count(*) FROM "+c.table); old != 0 || all != c.per+c.extra ||
-					fmt.Sprint(*chunks) != fmt.Sprint([]int{c.per}) {
-					t.Fatalf("%d old rows, %d rows in all, chunks %v; want 0, %d and [%d]", old, all, *chunks, c.per+c.extra, c.per)
+					fmt.Sprint(*chunks) != fmt.Sprint([]int{c.cost * c.per}) {
+					t.Fatalf("%d old rows, %d rows in all, chunks %v; want 0, %d and [%d]", old, all, *chunks, c.per+c.extra, c.cost*c.per)
 				}
 			})
 		}
@@ -210,9 +289,8 @@ func counterDays(tb testing.TB, db *sql.DB) string {
 // stay. The cutoff date is a UTC date. The test sets tDel and the local zone
 // 13 h east of UTC. In that zone, the cutoff has the date 2026-03-02.
 func TestTU11CounterDeleteKeepsTheDateOfTheCutoff(t *testing.T) {
-	zone, was := time.FixedZone("east", 13*3600), time.Local
-	time.Local = zone
-	t.Cleanup(func() { time.Local = was })
+	zone := time.FixedZone("east", 13*3600)
+	setHook(t, &time.Local, zone)
 	tDel := time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC).In(zone)
 	r, chunks := rollRig(t, newCounterDeleteStep(tDel, 30))
 	addCounterDays(t, r.db, "2026-02-27", "2026-02-28", "2026-03-01", "2026-03-02", "2026-03-31")

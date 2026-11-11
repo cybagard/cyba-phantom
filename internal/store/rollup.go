@@ -60,14 +60,20 @@ type rollupKey struct{ day, vhost, band, family string }
 // rollupCount is what one call adds to the row of a key.
 type rollupCount struct{ sessions, requests, callbacks int }
 
-// rollupCutoff returns the cutoff in unix ms: tDel minus days x 24 h. The
-// configuration keeps days in the range 1 to 30. Outside this range, or with a
-// zero tDel, ok is false.
-func rollupCutoff(tDel time.Time, days int) (cutoff int64, ok bool) {
-	if days < 1 || days > 30 || tDel.IsZero() {
+// retentionCutoff returns the cutoff in unix ms: tDel minus days x 24 h. Days
+// must be in the range 1 to maxDays. Outside this range, or with a zero tDel,
+// ok is false.
+func retentionCutoff(tDel time.Time, days, maxDays int) (cutoff int64, ok bool) {
+	if days < 1 || days > maxDays || tDel.IsZero() {
 		return 0, false
 	}
 	return tDel.Add(-time.Duration(days) * 24 * time.Hour).UnixMilli(), true
+}
+
+// rollupCutoff is retentionCutoff for the raw days. The configuration keeps
+// them in the range 1 to 30.
+func rollupCutoff(tDel time.Time, days int) (cutoff int64, ok bool) {
+	return retentionCutoff(tDel, days, 30)
 }
 
 // rollupRefused is the step for bad parameters. It runs no statement. The error

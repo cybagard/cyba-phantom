@@ -20,47 +20,59 @@ const (
 	deleteCounterSQL = "DELETE FROM ip_counter WHERE rowid IN (SELECT rowid FROM ip_counter WHERE day < ? LIMIT ?)"
 )
 
-// expireCutoff returns the cutoff in unix ms: tDel minus days x 24 h. The
-// configuration keeps the days of the events in the range 1 to 90. Outside this
-// range, or with a zero tDel, ok is false.
-func expireCutoff(tDel time.Time, days int) (cutoff int64, ok bool) {
-	if days < 1 || days > 90 || tDel.IsZero() {
-		return 0, false
-	}
-	return tDel.Add(-time.Duration(days) * 24 * time.Hour).UnixMilli(), true
-}
+// The configuration keeps the days of the events in the range 1 to 90.
+const expireMaxDays = 90
+
+// This is the cost of one deleted session row. A row has a random ip_hmac and
+// four fingerprint columns. Each delete touches a random page of the ip_hmac
+// index. A chunk of 1 000 such rows took 195 ms at 4 million rows, over the
+// 100 ms of SEC-39. Thus a chunk takes at most limit / cost rows.
+const sessionExpireCost = 4
 
 // newExpireStep returns the step that runs the delete statement q with the
-// cutoff of expireCutoff. Each call deletes at most `limit` rows and returns
-// their count. With bad parameters, the step runs no statement and returns an
-// error.
-func newExpireStep(q string, tDel time.Time, days int) retentionStep {
-	cutoff, ok := expireCutoff(tDel, days)
+// cutoff for days. A row costs `cost` of the limit, as in the roll-up step.
+// Each call deletes at most limit / cost rows. It returns `limit` when it took
+// the most rows, and cost x rows otherwise. With a limit below the cost, it
+// runs no statement and returns `limit`. With bad parameters, the step runs no
+// statement and returns an error.
+func newExpireStep(q string, cost int, tDel time.Time, days int) retentionStep {
+	cutoff, ok := retentionCutoff(tDel, days, expireMaxDays)
 	if !ok {
 		return rollupRefused
 	}
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return execN(ctx, tx, q, cutoff, limit)
+		most := limit / cost
+		if most == 0 {
+			return limit, nil
+		}
+		n, err := execN(ctx, tx, q, cutoff, most)
+		if err != nil {
+			return 0, err
+		}
+		if n == most {
+			return limit, nil
+		}
+		return cost * n, nil
 	}
 }
 
 // newEventExpireStep deletes the event rows of each kind with ts before the
 // cutoff (SEC-39). days is store.retention_days.events.
 func newEventExpireStep(tDel time.Time, days int) retentionStep {
-	return newExpireStep(deleteEventSQL, tDel, days)
+	return newExpireStep(deleteEventSQL, 1, tDel, days)
 }
 
 // newTokenExpireStep deletes the token rows with first_cb_at before the cutoff
 // (SEC-39). days is store.retention_days.events.
 func newTokenExpireStep(tDel time.Time, days int) retentionStep {
-	return newExpireStep(deleteTokenSQL, tDel, days)
+	return newExpireStep(deleteTokenSQL, 1, tDel, days)
 }
 
 // newSessionExpireStep deletes the session rows with last_seen before the
 // cutoff (SEC-39). The event rows of a session stay: they go by their own ts.
 // days is store.retention_days.events.
 func newSessionExpireStep(tDel time.Time, days int) retentionStep {
-	return newExpireStep(deleteSessionSQL, tDel, days)
+	return newExpireStep(deleteSessionSQL, sessionExpireCost, tDel, days)
 }
 
 // newCounterDeleteStep returns the step that deletes the ip_counter rows with

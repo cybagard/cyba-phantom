@@ -100,12 +100,14 @@ func rawBenchState(b *testing.B, step string, n int, at time.Time) string {
 		case "delete":
 			mustExec(b, db, rec+"INSERT INTO event (ts, kind) SELECT ? + i*?, CASE i % 2 WHEN 0 THEN 'refused' ELSE 'beacon' END FROM c", off, last, base, inc)
 		case "event":
-			mustExec(b, db, rec+"INSERT INTO event (ts, kind) SELECT ? + i*?, 'request' FROM c", off, last, base, inc)
+			mustExec(b, db, rec+"INSERT INTO event (ts, kind, session_id, vhost, path) SELECT ? + i*?, 'request', "+rollSID("i+1")+", 'www.example.com', '/a/' || hex(randomblob(12)) FROM c",
+				off, last, base, inc)
 		case "session":
-			mustExec(b, db, rec+"INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) SELECT "+rollSID("i")+", ? + i*?, ? + i*?, 'h', "+
+			mustExec(b, db, rec+"INSERT INTO session (id, first_seen, last_seen, ip_hmac, ja4, h2_fp, ua, hdr_order_hash, family, band) SELECT "+rollSID("i")+", ? + i*?, ? + i*?, "+
+				"hex(randomblob(32)), hex(randomblob(18)), hex(randomblob(20)), hex(randomblob(60)), hex(randomblob(8)), 'fam', "+
 				"CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c", off, last, base, inc, base, inc)
 		case "token":
-			mustExec(b, db, rec+"INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) SELECT "+rollSID("i")+", 's', 't', ?, ? + i*? FROM c",
+			mustExec(b, db, rec+"INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) SELECT "+rollSID("i")+", "+rollSID("i+1")+", 't', ?, ? + i*? FROM c",
 				off, last, base, base, inc)
 		default:
 			mustExec(b, db, rec+`INSERT INTO mint SELECT substr(x'000102', 1 + i % 3, 1), ((? + i*?) / 1000 - ?) / 600 % ?, i, 10, 's', ? + i*? FROM c`,
