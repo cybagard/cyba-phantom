@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,6 +23,8 @@ func capLabels(t *testing.T, db *sql.DB) []string {
 	rows, err := db.Query(`SELECT l FROM (
 		SELECT kind || '@' || strftime('%d', ts/1000, 'unixepoch') AS l FROM event UNION ALL
 		SELECT 'session@' || strftime('%d', last_seen/1000, 'unixepoch') FROM session UNION ALL
+		SELECT 'counter@' || substr(day, 9, 2) FROM ip_counter UNION ALL
+		SELECT 'token@' || strftime('%d', first_cb_at/1000, 'unixepoch') FROM token WHERE first_cb_at IS NOT NULL UNION ALL
 		SELECT 'mint@' || strftime('%d', issued_at/1000, 'unixepoch') FROM mint) ORDER BY l`)
 	check(t, err)
 	defer rows.Close()
@@ -47,28 +50,37 @@ func removed(before, after []string) string {
 	return strings.Join(gone, " ")
 }
 
-// addMint inserts one mint row of the unit of the time at, with the counter
-// first.
-func addMint(t *testing.T, db *sql.DB, at, first int64) {
+// addMint inserts one mint row. The set is hex text. The unit is the unit of
+// the time at. The counter is first.
+func addMint(t *testing.T, db *sql.DB, set string, at, first int64) {
 	t.Helper()
-	mustExec(t, db, "INSERT INTO mint (set_id, unit, first, count, session_id, issued_at) VALUES (x'01', ?, ?, 1, 's', ?)",
-		token.Unit(time.UnixMilli(at)), first, at)
+	mustExec(t, db, "INSERT INTO mint (set_id, unit, first, count, session_id, issued_at) VALUES (unhex(?), ?, ?, 1, 's', ?)",
+		set, token.Unit(time.UnixMilli(at)), first, at)
+}
+
+// addHashed inserts n evidence rows of a kind with a hash and the leaf indexes
+// from leaf0.
+func addHashed(t *testing.T, db *sql.DB, kind string, n int, ts int64, leaf0 int) {
+	t.Helper()
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < ?)
+		INSERT INTO event (ts, kind, hash, leaf_index) SELECT ?, ?, zeroblob(32), ? + i FROM c`, n-1, ts, kind, leaf0)
 }
 
 // forcedCap makes the cap state of a test that has begun and is over the cap.
 // The measure never reaches the target, so the steps evict all they can.
-func forcedCap(r *rig) *capRun {
-	c := newCapRun(r.w, 1000, rollTDel)
+func forcedCap(r *rig, now time.Time) *capRun {
+	c := newCapRun(r.w, 1000, "events.db", now)
 	c.begun, c.over = true, true
 	c.measure = func(context.Context, *sql.Tx) (int64, error) { return 1 << 40, nil }
 	return c
 }
 
 // T-U-11: the cap evicts in tiers, and in each tier the oldest UTC day first.
-// Tier 1 has request, refused and beacon rows. On one day, a request row goes
-// before a refused row. Tier 2 has mint and session rows. Tier 3 has evidence
-// rows. Tier 1 can be empty, and then a request row can come. That row goes
-// before the session and mint rows that are left. Each call takes one source.
+// Tier 1 has request, refused, beacon and ip_counter rows. On one day, the
+// first source goes first. Tier 2 has mint, session and token rows. A session
+// of the band agent-confirmed is in it. Tier 3 has evidence rows. Tier 1 can be
+// empty, and then a request row can come. That row goes before the rows of tier
+// 2. Each call takes one source.
 func TestTU11CapEvictsInTiersOldestDayFirst(t *testing.T) {
 	r := newRig(t, 100)
 	for _, d := range []int{3, 1, 2} {
@@ -76,17 +88,18 @@ func TestTU11CapEvictsInTiersOldestDayFirst(t *testing.T) {
 	}
 	addEvents(t, r.db, "refused", 1, capDay(2), 0, nil, nil)
 	addEvents(t, r.db, "beacon", 1, capDay(4), 0, nil, nil)
-	addEventAt(t, r.db, "score_change", capDay(5))
-	addEventAt(t, r.db, "callback", capDay(1))
-	for _, d := range []int{3, 1} {
-		mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) VALUES (?, 0, ?, 'h', 'human')", d, capDay(d))
-	}
-	addMint(t, r.db, capDay(2), 0)
-	c := forcedCap(r)
-	want := []string{"request@01", "request@02", "refused@02", "request@03", "beacon@04", "request@06",
-		"session@01", "mint@02", "session@03", "callback@01", "score_change@05", ""}
+	mustExec(t, r.db, "INSERT INTO ip_counter (day, ip_hmac, requests, dropped) VALUES ('2027-01-02', 'h', 1, 0)")
+	addHashed(t, r.db, "score_change", 1, capDay(5), 0)
+	addHashed(t, r.db, "callback", 1, capDay(1), 1)
+	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) VALUES ('1', 0, ?, 'h', 'human')", capDay(1))
+	mustExec(t, r.db, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, band) VALUES ('3', 0, ?, 'h', 'agent-confirmed')", capDay(3))
+	mustExec(t, r.db, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) VALUES ('t', 's', 't', 1, ?)", capDay(2))
+	addMint(t, r.db, "01", capDay(2), 0)
+	c := forcedCap(r, rollTDel)
+	want := []string{"request@01", "request@02", "refused@02", "counter@02", "request@03", "beacon@04", "request@06",
+		"session@01", "mint@02", "token@02", "session@03", "callback@01", "score_change@05", ""}
 	for i, w := range want {
-		if i == 5 {
+		if i == 6 {
 			// A request row, stored between two chunks.
 			addEvents(t, r.db, "request", 1, capDay(6), 0, nil, nil)
 		}
@@ -111,7 +124,7 @@ func TestTU11CapFloodEvictsNoEvidenceWhileBulkRowsRemain(t *testing.T) {
 	r := newRig(t, 100)
 	addEvents(t, r.db, "callback", 5, capDay(1), 1000, nil, nil)
 	addEvents(t, r.db, "request", 3000, capDay(2), 1000, nil, "v")
-	c := forcedCap(r)
+	c := forcedCap(r, rollTDel)
 	c.target = 5
 	c.measure = func(ctx context.Context, tx *sql.Tx) (n int64, err error) {
 		return n, tx.QueryRowContext(ctx, "SELECT count(*) FROM event").Scan(&n)
@@ -137,13 +150,99 @@ func TestTU11CapKeepsMintUnitsWhole(t *testing.T) {
 	r := newRig(t, 100)
 	for u := range 3 {
 		for f := range 3 {
-			addMint(t, r.db, capDay(1)+int64(u)*600_000, int64(f))
+			addMint(t, r.db, "01", capDay(1)+int64(u)*600_000, int64(f))
 		}
 	}
-	call(t, r.db, forcedCap(r).evict, 4)
+	call(t, r.db, forcedCap(r, rollTDel).evict, 4)
 	if rows, odd := count(t, r.db, "SELECT count(*) FROM mint"), count(t, r.db,
 		"SELECT count(*) FROM (SELECT unit FROM mint GROUP BY unit HAVING count(*) != 3)"); rows != 6 || odd != 0 {
 		t.Fatalf("%d mint rows, %d split units; want 6 and 0", rows, odd)
+	}
+}
+
+// T-U-11: tier 2 sees each mint row. Tier 3 starts only after the last one.
+// There are three cases. The rows are of the unit of the run. Or they are of
+// later units: the wall clock stepped back. Or the run time is before the token
+// epoch. A callback stays while a mint row is left.
+func TestTU11CapSeesEveryMintRow(t *testing.T) {
+	epoch := token.Epoch()
+	for _, c := range []struct {
+		name string
+		now  time.Time
+		rows []time.Time
+	}{
+		{"current unit", rollTDel, []time.Time{rollTDel}},
+		{"later unit", rollTDel, []time.Time{rollTDel.Add(24 * time.Hour), rollTDel.Add(48 * time.Hour)}},
+		{"run before the epoch", epoch.Add(-time.Hour), []time.Time{epoch.Add(-3 * time.Hour), epoch.Add(-time.Hour), epoch.Add(2 * time.Hour)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			addHashed(t, r.db, "callback", 1, capDay(1), 0)
+			for i, at := range c.rows {
+				addMint(t, r.db, "01", at.UnixMilli(), int64(i))
+			}
+			e := forcedCap(r, c.now)
+			for range 10 {
+				n := call(t, r.db, e.evict, chunkRows)
+				mints := count(t, r.db, "SELECT count(*) FROM mint")
+				if cb := count(t, r.db, "SELECT count(*) FROM event"); cb == 0 && mints > 0 {
+					t.Fatalf("the callback went with %d mint rows left", mints)
+				} else if n == 0 {
+					if mints != 0 || cb != 0 {
+						t.Fatalf("%d mint rows and %d events left at the end", mints, cb)
+					}
+					return
+				}
+			}
+			t.Fatal("the cap did not end")
+		})
+	}
+	t.Run("two sets", func(t *testing.T) {
+		r := newRig(t, 100)
+		addMint(t, r.db, "01", capDay(3), 0)
+		addMint(t, r.db, "02", capDay(1), 0)
+		addHashed(t, r.db, "callback", 1, capDay(1), 0)
+		e := forcedCap(r, rollTDel)
+		for i, w := range []string{"mint@01", "mint@03", "callback@01", ""} {
+			before := capLabels(t, r.db)
+			call(t, r.db, e.evict, chunkRows)
+			if got := removed(before, capLabels(t, r.db)); got != w {
+				t.Fatalf("call %d removed %q, want %q", i, got, w)
+			}
+		}
+	})
+}
+
+// T-U-11: a source that has a row and removes none is not asked again. The step
+// ends, and it does not spin. The stub stops the test if it is asked again.
+func TestTU11CapStopsASourceThatRemovesNoRow(t *testing.T) {
+	r := newRig(t, 100)
+	calls := 0
+	stub := &capSource{
+		oldest: func(context.Context, *sql.Tx) (int64, bool, error) { return capDay(1), true, nil },
+		evict: func(context.Context, *sql.Tx, int64, int) (int, error) {
+			if calls++; calls > 3 {
+				panic("the cap asks a source again that removed no row")
+			}
+			return 0, nil
+		},
+	}
+	c := forcedCap(r, rollTDel)
+	c.tiers = [][]*capSource{{stub}}
+	if n := call(t, r.db, c.evict, chunkRows); n != 0 || calls != 1 {
+		t.Fatalf("returned %d after %d calls of the source, want 0 and 1", n, calls)
+	}
+}
+
+// T-U-11: the tier-3 delete removes at most the limit in one call. 600 callback
+// rows and 600 score_change rows are of one day. A limit of 1 000 leaves 200.
+func TestTU11CapEvidenceDeleteKeepsTheLimit(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 600, capDay(1), 0)
+	addHashed(t, r.db, "score_change", 600, capDay(1), 1000)
+	call(t, r.db, forcedCap(r, rollTDel).evict, chunkRows)
+	if n := count(t, r.db, "SELECT count(*) FROM event"); n != 200 {
+		t.Fatalf("%d evidence rows left, want 200", n)
 	}
 }
 
@@ -163,12 +262,13 @@ func truncated(t *testing.T, r *rig) int64 {
 	return fileSize(filepath.Join(r.state, "events.db"))
 }
 
-// capRunOf runs the cap steps and a mark step through the writer, with a run
-// record. It returns the record.
-func capRunOf(t *testing.T, r *rig, max int64) *retentionRun {
+// capRunOf runs the steps through the writer, with a run record. The steps are
+// the cap steps and a mark step, or the steps that first come from the caller.
+// It returns the record.
+func capRunOf(t *testing.T, r *rig, capBytes int64, first ...retentionStep) *retentionRun {
 	t.Helper()
 	run := &retentionRun{}
-	steps := withCap([]retentionStep{markStep(rollTDel)}, run, r.w, max, rollTDel)
+	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel)
 	ctx, cancel := context.WithTimeout(withRun(context.Background(), run), waitFor)
 	defer cancel()
 	check(t, serveWithRun(r)(ctx, steps))
@@ -215,6 +315,26 @@ func TestTU11CapSettlesTheWALBeforeItMeasures(t *testing.T) {
 	}
 }
 
+// T-U-11: as in a real run, a step before the cap step writes the WAL. It does
+// this in the chunks of the run. Its last call is in the chunk of the cap
+// step. The cap step must still measure after the checkpoint. So no row goes.
+func TestTU11CapSettlesAfterTheStepsOfItsChunk(t *testing.T) {
+	r := newRig(t, 100)
+	size := capFixture(t, r)
+	calls := 0
+	churnStep := func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+		if calls++; calls > 300 {
+			return 0, nil
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE event SET vhost = ? WHERE id = ?", fmt.Sprint("v", calls), calls)
+		return limit, err
+	}
+	run := capRunOf(t, r, size+size/20, churnStep)
+	if left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); run.counts.Evicted != 0 || left != 3000 {
+		t.Fatalf("evicted %d rows, %d left; want 0 and 3000", run.counts.Evicted, left)
+	}
+}
+
 // T-U-11: the size has the WAL bytes. A reader keeps a snapshot, so the
 // checkpoint cannot empty the WAL. The file is below the cap and the file with
 // the WAL is above it. The run evicts, and a busy checkpoint is not an error.
@@ -236,21 +356,110 @@ func TestTU11CapCountsTheWALInTheSize(t *testing.T) {
 	}
 }
 
-// T-U-11: the cap evicts to 90 % of the cap and the vacuum shrinks the file to
-// that line. A request row that the cap removes is in aggregate_day and in
-// evicted, not in rolled. The vacuum pages are in vacuumed.
+// T-U-11: the cap evicts to 90 % of the cap and the shrink step makes the file
+// that small. A request row that the cap removes is in aggregate_day and in
+// evicted, not in rolled. The freed pages are in vacuumed.
 func TestTU11CapEvictsToNinetyPercentAndCounts(t *testing.T) {
 	r := newRig(t, 100)
-	max := capFixture(t, r) * 6 / 10
-	run := capRunOf(t, r, max)
+	capBytes := capFixture(t, r) * 6 / 10
+	run := capRunOf(t, r, capBytes)
 	left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'")
 	sum := count(t, r.db, "SELECT sum(requests) FROM aggregate_day")
 	got, c := truncated(t, r), run.counts
 	if c.Evicted == 0 || c.Evicted != int64(3000-left) || int64(sum) != c.Evicted || c.Rolled != 0 || c.Vacuumed == 0 {
 		t.Fatalf("evicted %d, rolled %d, vacuumed %d, %d counted, %d left; want evicted = counted = %d removed", c.Evicted, c.Rolled, c.Vacuumed, sum, left, 3000-left)
 	}
-	if got > max*9/10 || newCapRun(r.w, 1000, rollTDel).target != 900 {
-		t.Fatalf("file %d bytes, want at most 90 %% of the cap %d; the target is 900 for a cap of 1000", got, max)
+	if got > capBytes*9/10 || newCapRun(r.w, 1000, "events.db", rollTDel).target != 900 {
+		t.Fatalf("file %d bytes, want at most 90 %% of the cap %d; the target is 900 for a cap of 1000", got, capBytes)
+	}
+}
+
+// freedFixture makes a rig with free pages: 1 500 of 3 000 rows are deleted.
+func freedFixture(t *testing.T) *rig {
+	t.Helper()
+	r := newRig(t, 100)
+	capFixture(t, r)
+	mustExec(t, r.db, "DELETE FROM event WHERE id <= 1500")
+	return r
+}
+
+// dbPages returns the page count, the free page count and the page size.
+func dbPages(t *testing.T, db *sql.DB) (count, free, size int64) {
+	t.Helper()
+	tx, err := db.Begin()
+	check(t, err)
+	count, free, size, err = pages(context.Background(), tx)
+	check(t, err)
+	check(t, tx.Rollback())
+	return count, free, size
+}
+
+// T-U-11: the shrink step stops when the file is at most 90 % of the cap, with
+// free pages left. The first statement frees 16 pages, and vacuumed has that
+// exact number. The target is 8 pages below the file, so one statement is
+// enough. The second call frees nothing.
+func TestTU11CapShrinkStopsAtTheTargetWithFreePagesLeft(t *testing.T) {
+	r := freedFixture(t)
+	count0, free0, size := dbPages(t, r.db)
+	c := &capRun{w: r.w, over: true, target: (count0 - 8) * size}
+	run, cur := &retentionRun{}, 0
+	steps := []retentionStep{c.shrink}
+	for range 2 {
+		_, err := r.w.chunkRun(steps, &cur, run)
+		check(t, err)
+	}
+	if count1, free1, _ := dbPages(t, r.db); run.counts.Vacuumed != 16 || free1 != free0-16 || count1 != count0-16 || cur != 1 {
+		t.Fatalf("vacuumed %d, free %d of %d, pages %d of %d, step %d; want 16, %d, %d and 1", run.counts.Vacuumed, free1, free0, count1, count0, cur, free0-16, count0-16)
+	}
+}
+
+// T-U-11: the shrink step makes each statement from the time of the last one.
+// The first statement has 16 pages. A statement of 500 ms gives 1 page next. A
+// statement of 1 ms gives 800. A statement at the budget keeps 16. The pages
+// stay from 1 to 1 000.
+func TestTU11CapShrinkSizesItsStatementFromTheTime(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		took time.Duration
+		want int
+	}{{"slow", 500 * time.Millisecond, 1}, {"fast", time.Millisecond, 800}, {"at the budget", shrinkBudget, 16}} {
+		t.Run(c.name, func(t *testing.T) {
+			r := freedFixture(t)
+			at := rollTDel
+			r.w.clock = func() time.Time { at = at.Add(c.took); return at }
+			s := &capRun{w: r.w, over: true}
+			call(t, r.db, s.shrink, chunkRows)
+			if s.pages != c.want || s.minPages != 16 || s.maxPages != 16 {
+				t.Fatalf("next %d pages, first %d to %d; want %d and 16", s.pages, s.minPages, s.maxPages, c.want)
+			}
+		})
+	}
+	for _, c := range []struct {
+		n    int
+		took time.Duration
+		want int
+	}{{1000, time.Nanosecond, 1000}, {1, time.Hour, 1}, {1000, time.Millisecond, 1000}, {16, 0, 1000}, {500, 100 * time.Millisecond, 250}} {
+		if got := nextShrink(c.n, c.took); got != c.want {
+			t.Errorf("nextShrink(%d, %v) = %d, want %d", c.n, c.took, got, c.want)
+		}
+	}
+}
+
+// T-U-11: a database where incremental_vacuum frees no page makes the shrink
+// step end. It does not loop.
+func TestTU11CapShrinkEndsWhenNoPageIsFreed(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "plain.db"))
+	check(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, "CREATE TABLE t (a BLOB)")
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 299) INSERT INTO t SELECT zeroblob(3000) FROM c`)
+	mustExec(t, db, "DELETE FROM t")
+	if _, free, _ := dbPages(t, db); free == 0 {
+		t.Fatal("the database has no free page")
+	}
+	if n := call(t, db, (&capRun{w: &Writer{}, over: true}).shrink, chunkRows); n != 0 {
+		t.Fatalf("returned %d, want 0", n)
 	}
 }
 
@@ -259,12 +468,12 @@ func TestTU11CapEvictsToNinetyPercentAndCounts(t *testing.T) {
 // after the last row has gone.
 func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	steps := []retentionStep{markStep(rollTDel)}
-	if got := withCap(steps, nil, nil, 0, rollTDel); len(got) != 1 {
+	if got := withCap(steps, nil, nil, 0, "", rollTDel); len(got) != 1 {
 		t.Fatalf("a cap of 0 gave %d steps, want 1", len(got))
 	}
-	for _, max := range []int64{0, 1} {
+	for _, capBytes := range []int64{0, 1} {
 		r, s, _ := prodRig(t, 0, nil)
-		s.SetMaxBytes(max)
+		s.SetMaxBytes(capBytes, "events.db")
 		addEvents(t, r.db, "request", 3, rollTDel.UnixMilli()-3600_000, 1, nil, nil)
 		atMark := -1
 		s.run = func(ctx context.Context, steps []retentionStep) error {
@@ -282,8 +491,8 @@ func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 		}
 		s.runOnce(context.Background())
 		left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'")
-		if want := map[int64]int{0: 3, 1: 0}[max]; atMark != want || left != want {
-			t.Fatalf("cap %d: %d rows when the mark came, %d at the end; want %d", max, atMark, left, want)
+		if want := map[int64]int{0: 3, 1: 0}[capBytes]; atMark != want || left != want {
+			t.Fatalf("cap %d: %d rows when the mark came, %d at the end; want %d", capBytes, atMark, left, want)
 		}
 	}
 }
@@ -302,6 +511,36 @@ func capDataset(t *testing.T, r *rig) {
 		SELECT ?1 - k*86400000 - 500, 'callback', 's' || k, '{}', randomblob(8), zeroblob(32), k FROM d`, rollTDel.UnixMilli())
 }
 
+// livePages returns the bytes of the pages in use.
+func livePages(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	count, free, size := dbPages(t, db)
+	return (count - free) * size
+}
+
+// T-U-11: the cap steps come after the 30-day and the 90-day steps. A run with
+// no cap leaves some pages in use. A cap 20 % above that needs no eviction
+// after those steps, so no young row goes. Before them, the pages in use would
+// be far above the line, and the cap would evict.
+func TestTU11CapRunsAfterTheOtherSteps(t *testing.T) {
+	base, bs, _ := prodRig(t, 0, nil)
+	bs.run = serveWithRun(base)
+	capDataset(t, base)
+	bs.runOnce(context.Background())
+	r, s, _ := prodRig(t, 0, nil)
+	capDataset(t, r)
+	s.SetMaxBytes(livePages(t, base.db)*12/10, "events.db")
+	var run *retentionRun
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		run, _ = ctx.Value(runKey{}).(*retentionRun)
+		return serveWithRun(r)(ctx, steps)
+	}
+	s.runOnce(context.Background())
+	if left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); run.counts.Evicted != 0 || left != 3000 {
+		t.Fatalf("evicted %d rows, %d request rows left; want 0 and 3000", run.counts.Evicted, left)
+	}
+}
+
 // T-U-11: the whole run over 100 days of data, with the cap. The address is
 // NULL after 7 d. The callback detail is NULL after 30 d. The request rows of
 // 30 d and older are in aggregate_day. The cap removes the request rows of the
@@ -317,12 +556,7 @@ func TestTU11CapRunOverAHundredDays(t *testing.T) {
 		t.Fatalf("%d request rows after a run with no cap, want 3000", n)
 	}
 	// The first run left free pages, so the cap is 95 % of the pages in use.
-	tx, err := r.db.Begin()
-	check(t, err)
-	pc, free, ps, err := pages(context.Background(), tx)
-	check(t, err)
-	check(t, tx.Rollback())
-	s.SetMaxBytes((pc - free) * ps * 95 / 100)
+	s.SetMaxBytes(livePages(t, r.db)*95/100, "events.db")
 	s.runOnce(context.Background())
 	days := rawText(t, r.db, fmt.Sprintf(`SELECT group_concat(k || ':' || n) FROM (SELECT (%d - ts) / 86400000 AS k, count(*) AS n
 		FROM event WHERE kind = 'request' GROUP BY k ORDER BY k)`, rollTDel.UnixMilli()))
@@ -347,26 +581,93 @@ func TestTU11CapRunOverAHundredDays(t *testing.T) {
 	}
 }
 
-// T-I-13 (store level): the clock is 91 d ahead of the data and the cap is
-// small. After the run, the file and the WAL on disk have at most the cap in
-// bytes. The roll-up counts each request row.
-func TestTI13RunWithAClockOf91DaysEndsUnderTheCap(t *testing.T) {
+// ti13Run makes the run of T-I-13 with a cap of capBytes. The clock is 91 d
+// ahead of the data. It returns the rig and the sums of aggregate_day.
+func ti13Run(t *testing.T, capBytes int64) (*rig, string) {
+	t.Helper()
 	r := newRig(t, 100)
 	capDataset(t, r)
-	start := rollTDel.Add(91 * 24 * time.Hour)
-	s, _ := fakeSchedule(t, r, time.UTC, start, nil)
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(91*24*time.Hour), nil)
 	s.run = serveWithRun(r)
-	const max = 512 << 10
-	s.SetMaxBytes(max)
+	s.SetMaxBytes(capBytes, "events.db")
 	s.runOnce(context.Background())
+	return r, rawText(t, r.db, "SELECT sum(sessions) || '|' || sum(requests) || '|' || sum(callbacks) FROM aggregate_day")
+}
+
+// T-I-13 (store level): the clock is 91 d ahead of the data and the cap is
+// small. After the run, the file and the WAL on disk have at most the cap in
+// bytes. The sessions, requests and callbacks of aggregate_day are the same as
+// in a run with no cap.
+func TestTI13RunWithAClockOf91DaysEndsUnderTheCap(t *testing.T) {
+	const capBytes = 512 << 10
+	_, base := ti13Run(t, 0)
+	r, got := ti13Run(t, capBytes)
 	file, wal := fileSize(filepath.Join(r.state, "events.db")), fileSize(filepath.Join(r.state, "events.db-wal"))
-	if sum := count(t, r.db, "SELECT sum(requests) FROM aggregate_day"); file+wal > max || sum != 10000 {
-		t.Fatalf("file %d + WAL %d bytes, cap %d, %d requests counted; want the bytes within the cap and 10000", file, wal, max, sum)
+	if file+wal > capBytes || got != base || !strings.HasPrefix(base, "100|10000|") || strings.HasSuffix(base, "|0") {
+		t.Fatalf("file %d + WAL %d bytes, cap %d, sums %q, %q with no cap; want the bytes within the cap and the same sums, with 100 sessions, 10000 requests and callbacks", file, wal, capBytes, got, base)
 	}
 }
 
-// T-U-11: the statements of the cap use an index. No plan has a SCAN of event,
-// session or mint.
+// T-U-11: the counts of a run with the cap are exact over 2 chunks and 2 runs.
+// Run 1 ends early after its first eviction chunk. Run 2 ends at its end. The
+// evicted rows of the 2 events add up to the rows that went. They also add up
+// to the roll-up. Only run 2 frees pages.
+func TestTU11CapCountsOverTwoChunksAndTwoRuns(t *testing.T) {
+	r := newRig(t, 8)
+	r.w.clock = func() time.Time { return rollTDel }
+	size := capFixture(t, r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	s.SetMaxBytes(size*6/10, "events.db")
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		evict := len(steps) - 3
+		steps[evict] = onCall(steps[evict], func(i int, _ *sql.Tx) {
+			if i == 0 {
+				cancel() // this chunk commits, and the run then ends
+			}
+		})
+		return serveWithRun(r)(ctx, steps)
+	}
+	s.runOnce(ctx)
+	s.run = serveWithRun(r)
+	s.runOnce(context.Background())
+	rows, err := r.db.Query(`SELECT json_extract(detail, '$.evicted'), json_extract(detail, '$.vacuumed'),
+		json_extract(detail, '$.rolled') FROM event WHERE kind = 'retention' ORDER BY id`)
+	check(t, err)
+	var ev, va []int64
+	for rows.Next() {
+		var e, v, rolled int64
+		check(t, rows.Scan(&e, &v, &rolled))
+		if rolled != 0 {
+			t.Errorf("run %d: rolled %d, want 0", len(ev)+1, rolled)
+		}
+		ev, va = append(ev, e), append(va, v)
+	}
+	check(t, rows.Err())
+	check(t, rows.Close())
+	left := int64(count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"))
+	if len(ev) != 2 || ev[0] <= 0 || ev[1] <= 0 || ev[0]+ev[1] != 3000-left || va[0] != 0 || va[1] <= 0 ||
+		int64(count(t, r.db, "SELECT sum(requests) FROM aggregate_day")) != 3000-left {
+		t.Fatalf("evicted %v, vacuumed %v, %d request rows left; want 2 runs that add up to %d", ev, va, left, 3000-left)
+	}
+}
+
+// T-U-11: the size of the files comes from the name that Open checked, through
+// the root. A rename of the state directory after open does not stop a run with
+// a cap.
+func TestTU11CapDoesNotNeedThePathOfTheStateDirectory(t *testing.T) {
+	r := newRig(t, 100)
+	capFixture(t, r)
+	check(t, os.Rename(r.state, r.state+"-moved"))
+	run := capRunOf(t, r, 1)
+	if !r.w.Healthy() || run.counts.Evicted == 0 {
+		t.Fatalf("healthy %v, evicted %d; want a healthy writer and rows evicted", r.w.Healthy(), run.counts.Evicted)
+	}
+}
+
+// T-U-11: the statements of the cap use an index. No plan scans event, session,
+// token, ip_counter or mint.
 func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 	db := migrated(t)
 	for _, c := range []struct {
@@ -376,13 +677,26 @@ func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 	}{
 		{oldestEventSQL, []any{"callback"}, "event_kind_ts (kind=?)"},
 		{oldestSessionSQL, []any{"human"}, "session_band_last (band=?)"},
+		{oldestCounterSQL, nil, "sqlite_autoindex_ip_counter_1"},
+		{oldestTokenSQL, nil, "token_first_cb"},
 		{evictEvidenceSQL, []any{"callback", 1, 1000}, "event_kind_ts (kind=? AND ts<?)"},
 		{deleteRawSQL, []any{1, 1000}, "event_kind_ts"},
+		{deleteCounterSQL, []any{"2027-01-02", 1000}, "sqlite_autoindex_ip_counter_1"},
+		{deleteTokenSQL, []any{1, 1000}, "token_first_cb"},
 		{mintNextSQL, []any{""}, "PRIMARY KEY"},
 		{mintUnitSQL, []any{"", 1, 2}, "PRIMARY KEY"},
+		{mintCountSQL, []any{"", 1, 2}, "PRIMARY KEY"},
+		{mintDropSQL, []any{"", 1}, "PRIMARY KEY"},
+		{mintDeleteSQL, []any{"", 1, 1000}, "PRIMARY KEY"},
 	} {
-		if plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n"); strings.Contains(plan, "SCAN") || !strings.Contains(plan, c.use) {
-			t.Errorf("plan of %q:\n%s\nwant no SCAN and %q", c.q, plan, c.use)
+		plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n")
+		for _, table := range []string{"event", "session", "token", "ip_counter", "mint"} {
+			if strings.Contains(plan, "SCAN "+table) {
+				t.Errorf("plan of %q has a SCAN of %s:\n%s", c.q, table, plan)
+			}
+		}
+		if !strings.Contains(plan, c.use) {
+			t.Errorf("plan of %q:\n%s\nwant %q", c.q, plan, c.use)
 		}
 	}
 }

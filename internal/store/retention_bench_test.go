@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,19 +149,59 @@ func BenchmarkRawChild(b *testing.B) {
 		ms(total), ms(longest), rows, fileSize(filepath.Join(dir, "events.db-wal")), fileSize(filepath.Join(dir, "events.db")))
 }
 
-const vacuumChildDir = "STORE_VACUUM_CHILD_DIR"
+const (
+	vacuumChildDir = "STORE_VACUUM_CHILD_DIR"
+	vacuumFixedN   = "PHANTOM_VACUUM_N"
+)
 
-// BenchmarkVacuum measures PRAGMA incremental_vacuum(1000) through the cap
-// shrink step. The parent makes a database of request rows with a body. It
-// deletes all of them, so their pages stay on the freelist. The child process
-// runs w.chunkRun until no free page is left. It prints VmHWM, the total time
-// and the longest chunk. It prints the pages freed, and the WAL and database
-// bytes after. Run it with -benchtime=1x:
+// vacuumDelete deletes all rows of event, n rows with the ids 1 to n. In file
+// order, it is one statement. Scattered, it deletes blocks of 100 ids in a
+// permuted order, 1 000 blocks for each transaction. Then the freelist is not
+// in file order.
+func vacuumDelete(b *testing.B, db *sql.DB, n int, scattered bool) {
+	if !scattered {
+		mustExec(b, db, "DELETE FROM event")
+		return
+	}
+	const block = 100
+	blocks := (n + block - 1) / block
+	step := 7919
+	if blocks%step == 0 {
+		step = 7907
+	}
+	tx, err := db.Begin()
+	check(b, err)
+	for i := range blocks {
+		lo := i*step%blocks*block + 1
+		_, err := tx.Exec("DELETE FROM event WHERE id BETWEEN ? AND ?", lo, lo+block-1)
+		check(b, err)
+		if i%1000 == 999 {
+			check(b, tx.Commit())
+			tx, err = db.Begin()
+			check(b, err)
+		}
+	}
+	check(b, tx.Commit())
+}
+
+// BenchmarkVacuum measures PRAGMA incremental_vacuum through the cap shrink
+// step. The parent makes a database of request rows. A body of 3 000 bytes
+// gives a row about one page. The parent deletes all rows, so their pages stay
+// on the freelist. The child process runs the shrink step until no free
+// page is left. It prints VmHWM, the total time and the longest chunk. It
+// prints the smallest and the largest pages of a statement. It prints the time
+// of the first 3 chunks and the pages freed. It prints the largest WAL during
+// the run. It prints the database bytes before the delete and after the end
+// TRUNCATE checkpoint. Run it with -benchtime=1x:
 //
-//	PHANTOM_VACUUM_ROWS=4000000 go test -run '^$' -bench '^BenchmarkVacuum$' \
-//	  -benchtime=1x ./internal/store
+//	PHANTOM_VACUUM_ROWS=4000000 PHANTOM_VACUUM_ORDER=scattered \
+//	  go test -run '^$' -bench '^BenchmarkVacuum$' -benchtime=1x \
+//	  ./internal/store
 //
-// PHANTOM_VACUUM_ROWS gives the rows (default 20 000).
+// PHANTOM_VACUUM_ROWS gives the rows (default 20 000). PHANTOM_VACUUM_ORDER is
+// file (default) or scattered: the order of the delete. PHANTOM_VACUUM_N gives
+// a fixed number of pages for each statement. Then the child runs statements
+// with that number, and it prints the longest statement and the first 3.
 func BenchmarkVacuum(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
@@ -182,9 +223,11 @@ func BenchmarkVacuum(b *testing.B) {
 	const rec = "WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?) "
 	for off := 0; off < n; off += 100_000 {
 		mustExec(b, db, rec+"INSERT INTO event (ts, kind, session_id, vhost, path, body_prefix) SELECT i, 'request', "+rollSID("i")+
-			", 'www.example.com', '/a/' || hex(randomblob(12)), zeroblob(256) FROM c", off, off+min(100_000, n-off)-1)
+			", 'www.example.com', '/a/' || hex(randomblob(12)), zeroblob(3000) FROM c", off+1, off+min(100_000, n-off))
 	}
-	mustExec(b, db, "DELETE FROM event")
+	mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
+	before := fileSize(filepath.Join(state, "events.db"))
+	vacuumDelete(b, db, n, os.Getenv("PHANTOM_VACUUM_ORDER") == "scattered")
 	mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
 	check(b, db.Close())
 	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkVacuumChild$", "-test.benchtime=1x")
@@ -206,8 +249,14 @@ func BenchmarkVacuum(b *testing.B) {
 	b.ReportMetric(m["ms"], "total-ms")
 	b.ReportMetric(m["longest"], "chunk-max-ms")
 	b.ReportMetric(m["pages"], "pages-freed")
-	b.ReportMetric(m["wal"]/mib, "wal-MiB")
-	b.ReportMetric(m["db"]/mib, "db-MiB")
+	b.ReportMetric(m["first1"], "first-ms")
+	b.ReportMetric(m["first2"], "second-ms")
+	b.ReportMetric(m["first3"], "third-ms")
+	b.ReportMetric(m["nmin"], "pages-min")
+	b.ReportMetric(m["nmax"], "pages-max")
+	b.ReportMetric(m["walmax"]/mib, "wal-max-MiB")
+	b.ReportMetric(float64(before)/mib, "db-before-MiB")
+	b.ReportMetric(m["db"]/mib, "db-after-MiB")
 }
 
 // BenchmarkVacuumChild is the child process of BenchmarkVacuum. Without its
@@ -221,16 +270,49 @@ func BenchmarkVacuumChild(b *testing.B) {
 	q, err := event.NewQueue(1, event.NewCounters())
 	check(b, err)
 	w := NewWriter(db, q, false, nil, Recovery{})
-	c := &capRun{over: true} // a target of 0: free all pages
-	steps, run := []retentionStep{c.shrink}, &retentionRun{}
-	var total, longest time.Duration
-	for cur := 0; cur < len(steps); {
-		begin := time.Now()
-		_, err := w.chunkRun(steps, &cur, run)
-		check(b, err)
-		took := time.Since(begin)
+	fixed, _ := strconv.Atoi(os.Getenv(vacuumFixedN))
+	wal := filepath.Join(dir, "events.db-wal")
+	var total, longest, walMax time.Duration
+	var first []float64
+	note := func(took time.Duration) {
 		total, longest = total+took, max(longest, took)
+		walMax = max(walMax, time.Duration(fileSize(wal)))
+		if len(first) < 3 {
+			first = append(first, ms(took))
+		}
 	}
-	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f pages=%d wal=%d db=%d\n", procStatus(b, "VmHWM"),
-		ms(total), ms(longest), run.counts.Vacuumed, fileSize(filepath.Join(dir, "events.db-wal")), fileSize(filepath.Join(dir, "events.db")))
+	freed, nmin, nmax := int64(0), fixed, fixed
+	if fixed > 0 {
+		var free0, free int64
+		check(b, db.QueryRow("PRAGMA freelist_count").Scan(&free0))
+		for free = free0; free > 0; {
+			begin := time.Now()
+			mustExec(b, db, "PRAGMA incremental_vacuum("+strconv.Itoa(fixed)+")")
+			note(time.Since(begin))
+			var after int64
+			check(b, db.QueryRow("PRAGMA freelist_count").Scan(&after))
+			if after >= free {
+				break
+			}
+			free = after
+		}
+		freed = free0 - free
+	} else {
+		c := &capRun{w: w, over: true} // a target of 0: free all pages
+		steps, run := []retentionStep{c.shrink}, &retentionRun{}
+		for cur := 0; cur < len(steps); {
+			begin := time.Now()
+			_, err := w.chunkRun(steps, &cur, run)
+			check(b, err)
+			note(time.Since(begin))
+		}
+		freed, nmin, nmax = run.counts.Vacuumed, c.minPages, c.maxPages
+	}
+	mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
+	for len(first) < 3 {
+		first = append(first, 0)
+	}
+	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f first1=%.3f first2=%.3f first3=%.3f nmin=%d nmax=%d pages=%d walmax=%d db=%d\n",
+		procStatus(b, "VmHWM"), ms(total), ms(longest), first[0], first[1], first[2], nmin, nmax, freed, int64(walMax),
+		fileSize(filepath.Join(dir, "events.db")))
 }
