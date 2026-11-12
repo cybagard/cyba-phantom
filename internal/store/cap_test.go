@@ -414,34 +414,59 @@ func TestTU11CapShrinkStopsAtTheTargetWithFreePagesLeft(t *testing.T) {
 }
 
 // T-U-11: the shrink step makes each statement from the time of the last one.
-// The first statement has 16 pages. A statement of 500 ms gives 1 page next. A
-// statement of 1 ms gives 800. A statement at the budget keeps 16. The pages
-// stay from 1 to 1 000.
+// After a fast statement, the pages grow at most twice. This holds for a time
+// of 0 too. After a statement over 50 ms, they are half, at least 1. They stay
+// from 1 to 1 000. A statement at the budget is fast.
 func TestTU11CapShrinkSizesItsStatementFromTheTime(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		took time.Duration
-		want int
-	}{{"slow", 500 * time.Millisecond, 1}, {"fast", time.Millisecond, 800}, {"at the budget", shrinkBudget, 16}} {
-		t.Run(c.name, func(t *testing.T) {
-			r := freedFixture(t)
-			at := rollTDel
-			r.w.clock = func() time.Time { at = at.Add(c.took); return at }
-			s := &capRun{w: r.w, over: true}
-			call(t, r.db, s.shrink, chunkRows)
-			if s.pages != c.want || s.minPages != 16 || s.maxPages != 16 {
-				t.Fatalf("next %d pages, first %d to %d; want %d and 16", s.pages, s.minPages, s.maxPages, c.want)
+	for _, n := range []int{1, 16, 500, 999, 1000} {
+		for _, took := range []time.Duration{0, -time.Second, time.Microsecond, time.Millisecond, shrinkBudget} {
+			if got := nextShrink(n, took); got < 1 || got > min(2*n, shrinkMax) {
+				t.Errorf("nextShrink(%d, %v) = %d, want 1 to %d", n, took, got, min(2*n, shrinkMax))
 			}
-		})
+		}
+		for _, took := range []time.Duration{shrinkBudget + time.Nanosecond, 51 * time.Millisecond, 2 * time.Second} {
+			if got := nextShrink(n, took); got != max(n/2, 1) {
+				t.Errorf("nextShrink(%d, %v) = %d, want %d", n, took, got, max(n/2, 1))
+			}
+		}
 	}
 	for _, c := range []struct {
 		n    int
 		took time.Duration
 		want int
-	}{{1000, time.Nanosecond, 1000}, {1, time.Hour, 1}, {1000, time.Millisecond, 1000}, {16, 0, 1000}, {500, 100 * time.Millisecond, 250}} {
+	}{{16, time.Millisecond, 32}, {16, shrinkBudget, 16}, {500, 40 * time.Millisecond, 625}, {40, 25 * time.Millisecond, 80}} {
 		if got := nextShrink(c.n, c.took); got != c.want {
 			t.Errorf("nextShrink(%d, %v) = %d, want %d", c.n, c.took, got, c.want)
 		}
+	}
+}
+
+// T-U-11: the step has a fake clock. Three fast statements and one slow one
+// use 16, 32, 64 and 128 pages. The next one has 64.
+func TestTU11CapShrinkGrowsByTwiceAndHalvesAfterASlowOne(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "plain.db"))
+	check(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, "PRAGMA auto_vacuum = INCREMENTAL")
+	mustExec(t, db, "CREATE TABLE t (a BLOB)")
+	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 599) INSERT INTO t SELECT zeroblob(3000) FROM c`)
+	mustExec(t, db, "DELETE FROM t")
+	took, calls, at := []time.Duration{0, time.Microsecond, time.Millisecond, 80 * time.Millisecond}, 0, rollTDel
+	w := &Writer{clock: func() time.Time {
+		if calls++; calls%2 == 0 {
+			at = at.Add(took[calls/2-1])
+		}
+		return at
+	}}
+	s := &capRun{w: w, over: true}
+	var used []int
+	for range took {
+		used = append(used, max(s.pages, shrinkFirst))
+		call(t, db, s.shrink, chunkRows)
+	}
+	if fmt.Sprint(used) != "[16 32 64 128]" || s.pages != 64 {
+		t.Fatalf("statements of %v pages, then %d; want [16 32 64 128] and 64", used, s.pages)
 	}
 }
 

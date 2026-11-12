@@ -20,8 +20,9 @@ const (
 	mintUnitMs = 600_000
 
 	// The shrink step frees pages with one statement for each chunk. The first
-	// statement frees shrinkFirst pages. Each next statement frees as many
-	// pages as the time of the last one allows for shrinkBudget (ADR-040).
+	// statement frees shrinkFirst pages. After a fast statement, the next one
+	// has at most twice the pages. After one over shrinkBudget, it has half
+	// (ADR-040). A statement can still stall on the file write.
 	shrinkFirst  = 16
 	shrinkMax    = 1000
 	shrinkBudget = 50 * time.Millisecond
@@ -429,13 +430,18 @@ func (c *capRun) work(ctx context.Context, tx *sql.Tx, tier []*capSource, limit 
 }
 
 // nextShrink returns the pages of the next shrink statement. n pages took
-// `took`. The result is n scaled so that a statement takes shrinkBudget. It is
-// in the range 1 to shrinkMax.
+// `took`. After a statement of at most shrinkBudget, the result is n scaled to
+// that budget, but at most 2n. A time of 0 or less counts as fast. After a
+// longer statement, the result is n/2. It is in the range 1 to shrinkMax. A
+// statement can still stall on the file write (ADR-040).
 func nextShrink(n int, took time.Duration) int {
-	if took <= 0 {
-		return shrinkMax
+	if took > shrinkBudget {
+		return max(n/2, 1)
 	}
-	next := int64(float64(n) * float64(shrinkBudget) / float64(took))
+	next := int64(2 * n)
+	if took > 0 {
+		next = min(next, int64(float64(n)*float64(shrinkBudget)/float64(took)))
+	}
 	return int(min(max(next, 1), shrinkMax))
 }
 
