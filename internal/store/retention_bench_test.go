@@ -192,7 +192,9 @@ func vacuumDelete(b *testing.B, db *sql.DB, n int, scattered bool) {
 // prints the smallest and the largest pages of a statement. It prints the time
 // of the first 3 chunks and the pages freed. It prints the largest WAL during
 // the run. It prints the database bytes before the delete and after the end
-// TRUNCATE checkpoint. Run it with -benchtime=1x:
+// TRUNCATE checkpoint. It prints over100 and over250. These are the chunks over
+// 100 ms and over 250 ms. With a fixed N, they are statements. Run it with
+// -benchtime=1x:
 //
 //	PHANTOM_VACUUM_ROWS=4000000 PHANTOM_VACUUM_ORDER=scattered \
 //	  go test -run '^$' -bench '^BenchmarkVacuum$' -benchtime=1x \
@@ -274,7 +276,8 @@ func BenchmarkVacuumChild(b *testing.B) {
 	w := NewWriter(db, q, false, nil, Recovery{})
 	fixed, _ := strconv.Atoi(os.Getenv(vacuumFixedN))
 	wal := filepath.Join(dir, "events.db-wal")
-	var total, longest, walMax time.Duration
+	var total, longest time.Duration
+	var walMax int64
 	var first []float64
 	var over100, over250 int
 	note := func(took time.Duration) {
@@ -285,7 +288,7 @@ func BenchmarkVacuumChild(b *testing.B) {
 		if took > 250*time.Millisecond {
 			over250++
 		}
-		walMax = max(walMax, time.Duration(fileSize(wal)))
+		walMax = max(walMax, fileSize(wal))
 		if len(first) < 3 {
 			first = append(first, ms(took))
 		}
@@ -322,6 +325,6 @@ func BenchmarkVacuumChild(b *testing.B) {
 		first = append(first, 0)
 	}
 	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f first1=%.3f first2=%.3f first3=%.3f nmin=%d nmax=%d pages=%d walmax=%d over100=%d over250=%d db=%d\n",
-		procStatus(b, "VmHWM"), ms(total), ms(longest), first[0], first[1], first[2], nmin, nmax, freed, int64(walMax),
+		procStatus(b, "VmHWM"), ms(total), ms(longest), first[0], first[1], first[2], nmin, nmax, freed, walMax,
 		over100, over250, fileSize(filepath.Join(dir, "events.db")))
 }

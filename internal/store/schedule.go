@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"strconv"
 	"sync/atomic"
@@ -55,13 +57,42 @@ type Schedule struct {
 	earlyEnds atomic.Uint64
 	earlyLog  atomic.Bool
 	maxBytes  int64  // store.max_bytes; 0 means no cap step
-	dbRel     string // the name that Open checked, relative to the root
+	dbRel     string // the name that SetMaxBytes checked, relative to the root
+	capLog    atomic.Bool
 }
 
-// SetMaxBytes sets the database cap (store.max_bytes) for the next runs. rel is
-// the name that the caller gave to Open. A cap of 0 gives no cap step. Call it
-// before Run starts.
-func (s *Schedule) SetMaxBytes(n int64, rel string) { s.maxBytes, s.dbRel = n, rel }
+// errCapName is the refusal of SetMaxBytes for a bad database name.
+var errCapName = errors.New("store: the cap needs the name of the database file in the state directory")
+
+// SetMaxBytes sets the database cap (store.max_bytes) for the next runs. A cap
+// of 0 or less gives no cap step, and rel can be any text. Else rel must be the
+// name of the database file in the state root. It is the name that the caller
+// gave to Open. The call checks that rel is a valid relative name. It checks
+// that an Lstat through the root gives a regular file. If not, it returns an
+// error and sets nothing. Call it before Run starts.
+func (s *Schedule) SetMaxBytes(n int64, rel string) error {
+	if n <= 0 {
+		s.maxBytes, s.dbRel = 0, ""
+		return nil
+	}
+	if !fs.ValidPath(rel) || rel == "." || s.w.rec.State == nil {
+		return errCapName
+	}
+	if fi, err := s.w.rec.State.Lstat(rel); err != nil || !fi.Mode().IsRegular() {
+		return errCapName
+	}
+	s.maxBytes, s.dbRel = n, rel
+	return nil
+}
+
+// capFault is called when the database file is missing at the trigger of a
+// run. The run then evicts nothing. It writes one fixed log line for each
+// schedule, with no path and no row value.
+func (s *Schedule) capFault() {
+	if s.capLog.CompareAndSwap(false, true) {
+		s.lg.Error("retention cap not applied: database file not found")
+	}
+}
 
 // NewSchedule makes the schedule of w. The days are the values of
 // store.retention_days.ip, store.retention_days.raw and
@@ -176,7 +207,9 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run := &retentionRun{}
 	run.counts.CutoffIP, _ = retentionCutoff(tPriv, s.ip, 7)
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
-	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel)
+	// The mint order takes tDel, as the deletes do. A step forward of the wall
+	// clock must not make mint units look old.
+	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capFault)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)

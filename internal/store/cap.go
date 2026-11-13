@@ -20,10 +20,10 @@ const (
 	mintUnitMs = 600_000
 
 	// The shrink step frees pages with one statement for each chunk. The first
-	// statement frees shrinkFirst pages. After a fast statement, the next one
-	// has at most twice the pages, and at most shrinkMax. After one over
-	// shrinkBudget, it has half (ADR-040). A statement can still stall on the
-	// file write. The pages of a statement are from 1 to 16.
+	// statement frees at most shrinkFirst pages. After a fast statement, the
+	// next one has at most twice the pages, and at most shrinkMax. After one
+	// over shrinkBudget, it has half (ADR-040). A statement can still stall on
+	// the file write. The pages of a statement are from 1 to 16.
 	shrinkFirst  = 16
 	shrinkMax    = 16
 	shrinkBudget = 50 * time.Millisecond
@@ -59,26 +59,29 @@ type capSource struct {
 // in the loop measure.
 type capRun struct {
 	w      *Writer
-	rel    string // the name of the database file, relative to the state root
+	rel    string // the database name that SetMaxBytes checked
 	limit  int64  // the cap, in bytes
 	target int64
 	tiers  [][]*capSource
-	skip   map[*capSource]bool // sources that removed no row
 
 	begun, over, done bool
 
+	// fault is called when the database file is missing at the trigger. It can
+	// be nil.
+	fault func()
+
 	// The pages of the next shrink statement, and the least and the most
 	// that the run used.
-	pages, minPages, maxPages int
+	stmtPages, minPages, maxPages int
 
 	// measure replaces the live pages. A test sets it; nil in production.
 	measure func(ctx context.Context, tx *sql.Tx) (int64, error)
 }
 
 // newCapRun makes the cap state for a cap of limit bytes. rel is the name that
-// the store opened, relative to the state root. now is the time of the run.
+// SetMaxBytes checked, relative to the state root. now is the time of the run.
 func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
-	c := &capRun{w: w, rel: rel, limit: limit, target: limit / 100 * capPercent, skip: map[*capSource]bool{}}
+	c := &capRun{w: w, rel: rel, limit: limit, target: limit / 100 * capPercent}
 	order := newMintOrder(now)
 	request := &capSource{
 		oldest: func(ctx context.Context, tx *sql.Tx) (int64, bool, error) {
@@ -143,12 +146,14 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 
 // withCap puts the cap steps before the last step of a run. That step is the
 // mark step, which stays last. A cap of 0 or less adds no step. The run record
-// tells the runner where the cap steps start.
-func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time) []retentionStep {
+// tells the runner where the cap steps start. fault is called when the
+// database file is missing at the trigger. It can be nil.
+func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, fault func()) []retentionStep {
 	if capBytes <= 0 || len(steps) == 0 {
 		return steps
 	}
 	c, last := newCapRun(w, capBytes, rel, now), len(steps)-1
+	c.fault = fault
 	if run != nil {
 		run.capAt = last + 1
 	}
@@ -333,14 +338,21 @@ func pages(ctx context.Context, tx *sql.Tx) (count, free, size int64, err error)
 	return count, free, size, nil
 }
 
+// errNoDatabase tells that the database file of the cap is not in the state
+// directory.
+var errNoDatabase = errors.New("store: the database file of the cap is missing")
+
 // diskBytes returns the bytes of the database file and its WAL on disk. It
-// reads them with Lstat through the state root, on the name that the store
-// checked at open. It opens no file and resolves no path. A missing WAL has 0
-// bytes.
+// reads them with Lstat through the state root, on the name that SetMaxBytes
+// checked. It opens no file and resolves no path. A missing WAL has 0 bytes. A
+// missing database file is the error errNoDatabase.
 func (c *capRun) diskBytes() (n int64, err error) {
-	for _, name := range []string{c.rel, c.rel + "-wal"} {
+	for i, name := range []string{c.rel, c.rel + "-wal"} {
 		fi, err := c.w.rec.State.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
+			if i == 0 {
+				return 0, errNoDatabase
+			}
 			continue
 		}
 		if err != nil {
@@ -369,6 +381,13 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 	if !c.begun {
 		c.begun = true
 		n, err := c.diskBytes()
+		if errors.Is(err, errNoDatabase) {
+			if c.fault != nil {
+				c.fault()
+			}
+			c.done = true
+			return 0, nil
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -386,9 +405,14 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 		return 0, nil
 	}
 	for _, tier := range c.tiers {
-		if moved, err := c.work(ctx, tx, tier, limit); err != nil {
+		moved, stuck, err := c.work(ctx, tx, tier, limit)
+		if err != nil {
 			return 0, err
-		} else if moved {
+		}
+		if stuck {
+			break
+		}
+		if moved {
 			return limit, nil
 		}
 	}
@@ -397,37 +421,26 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 }
 
 // work evicts rows of the source of the tier with the oldest UTC day. A tie
-// goes to the first source. It returns false when the tier has no row left. A
-// source that has a row but removes none is not asked again in this run. Thus
-// the step cannot spin.
-func (c *capRun) work(ctx context.Context, tx *sql.Tx, tier []*capSource, limit int) (bool, error) {
-	for {
-		var pick *capSource
-		var day int64
-		for _, s := range tier {
-			if c.skip[s] {
-				continue
-			}
-			ts, ok, err := s.oldest(ctx, tx)
-			if err != nil {
-				return false, err
-			}
-			if d := rollupDayStart(ts); ok && (pick == nil || d < day) {
-				pick, day = s, d
-			}
-		}
-		if pick == nil {
-			return false, nil
-		}
-		n, err := pick.evict(ctx, tx, day+rollupDayMs, limit)
+// goes to the first source. It returns moved false when the tier has no row
+// left. It returns stuck true when that source has a row but removes none. The
+// eviction then ends: no later tier runs, and the step cannot spin.
+func (c *capRun) work(ctx context.Context, tx *sql.Tx, tier []*capSource, limit int) (moved, stuck bool, err error) {
+	var pick *capSource
+	var day int64
+	for _, s := range tier {
+		ts, ok, err := s.oldest(ctx, tx)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
-		if n > 0 {
-			return true, nil
+		if d := rollupDayStart(ts); ok && (pick == nil || d < day) {
+			pick, day = s, d
 		}
-		c.skip[pick] = true
 	}
+	if pick == nil {
+		return false, false, nil
+	}
+	n, err := pick.evict(ctx, tx, day+rollupDayMs, limit)
+	return n > 0, n == 0 && err == nil, err
 }
 
 // nextShrink returns the pages of the next shrink statement. n pages took
@@ -458,18 +471,18 @@ func (c *capRun) shrink(ctx context.Context, tx *sql.Tx, limit int) (int, error)
 	if err != nil || free == 0 || count*size <= c.target {
 		return 0, err
 	}
-	if c.pages == 0 {
-		c.pages = shrinkFirst
+	if c.stmtPages == 0 {
+		c.stmtPages = shrinkFirst
 	}
-	if c.minPages == 0 || c.pages < c.minPages {
-		c.minPages = c.pages
+	if c.minPages == 0 || c.stmtPages < c.minPages {
+		c.minPages = c.stmtPages
 	}
-	c.maxPages = max(c.maxPages, c.pages)
+	c.maxPages = max(c.maxPages, c.stmtPages)
 	start := c.w.now()
-	if _, err := tx.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(c.pages)+")"); err != nil {
+	if _, err := tx.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(c.stmtPages)+")"); err != nil {
 		return 0, err
 	}
-	c.pages = nextShrink(c.pages, c.w.now().Sub(start))
+	c.stmtPages = nextShrink(c.stmtPages, c.w.now().Sub(start))
 	_, after, _, err := pages(ctx, tx)
 	if err != nil || after >= free {
 		return 0, err // no page freed: stop, not loop
