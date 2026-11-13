@@ -249,6 +249,8 @@ func BenchmarkVacuum(b *testing.B) {
 	b.ReportMetric(m["ms"], "total-ms")
 	b.ReportMetric(m["longest"], "chunk-max-ms")
 	b.ReportMetric(m["pages"], "pages-freed")
+	b.ReportMetric(m["over100"], "chunks-over-100ms")
+	b.ReportMetric(m["over250"], "chunks-over-250ms")
 	b.ReportMetric(m["first1"], "first-ms")
 	b.ReportMetric(m["first2"], "second-ms")
 	b.ReportMetric(m["first3"], "third-ms")
@@ -274,8 +276,15 @@ func BenchmarkVacuumChild(b *testing.B) {
 	wal := filepath.Join(dir, "events.db-wal")
 	var total, longest, walMax time.Duration
 	var first []float64
+	var over100, over250 int
 	note := func(took time.Duration) {
 		total, longest = total+took, max(longest, took)
+		if took > 100*time.Millisecond {
+			over100++
+		}
+		if took > 250*time.Millisecond {
+			over250++
+		}
 		walMax = max(walMax, time.Duration(fileSize(wal)))
 		if len(first) < 3 {
 			first = append(first, ms(took))
@@ -312,7 +321,7 @@ func BenchmarkVacuumChild(b *testing.B) {
 	for len(first) < 3 {
 		first = append(first, 0)
 	}
-	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f first1=%.3f first2=%.3f first3=%.3f nmin=%d nmax=%d pages=%d walmax=%d db=%d\n",
+	fmt.Printf("vacuum-child rss=%d ms=%.3f longest=%.3f first1=%.3f first2=%.3f first3=%.3f nmin=%d nmax=%d pages=%d walmax=%d over100=%d over250=%d db=%d\n",
 		procStatus(b, "VmHWM"), ms(total), ms(longest), first[0], first[1], first[2], nmin, nmax, freed, int64(walMax),
-		fileSize(filepath.Join(dir, "events.db")))
+		over100, over250, fileSize(filepath.Join(dir, "events.db")))
 }
