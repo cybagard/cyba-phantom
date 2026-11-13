@@ -5,7 +5,9 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -536,7 +538,7 @@ func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	for _, capBytes := range []int64{0, 1} {
 		r, s, _ := prodRig(t, 0, nil)
 		s.limit = capRunLimit
-		s.SetMaxBytes(capBytes, "events.db")
+		check(t, s.SetMaxBytes(capBytes, "events.db"))
 		addEvents(t, r.db, "request", 3, rollTDel.UnixMilli()-3600_000, 1, nil, nil)
 		atMark := -1
 		s.run = func(ctx context.Context, steps []retentionStep) error {
@@ -594,7 +596,7 @@ func TestTU11CapRunsAfterTheOtherSteps(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	s.limit = capRunLimit
 	capDataset(t, r)
-	s.SetMaxBytes(livePages(t, base.db)*12/10, "events.db")
+	check(t, s.SetMaxBytes(livePages(t, base.db)*12/10, "events.db"))
 	var run *retentionRun
 	s.run = func(ctx context.Context, steps []retentionStep) error {
 		run, _ = ctx.Value(runKey{}).(*retentionRun)
@@ -622,7 +624,7 @@ func TestTU11CapRunOverAHundredDays(t *testing.T) {
 		t.Fatalf("%d request rows after a run with no cap, want 3000", n)
 	}
 	// The first run left free pages, so the cap is 95 % of the pages in use.
-	s.SetMaxBytes(livePages(t, r.db)*95/100, "events.db")
+	check(t, s.SetMaxBytes(livePages(t, r.db)*95/100, "events.db"))
 	s.runOnce(context.Background())
 	days := rawText(t, r.db, fmt.Sprintf(`SELECT group_concat(k || ':' || n) FROM (SELECT (%d - ts) / 86400000 AS k, count(*) AS n
 		FROM event WHERE kind = 'request' GROUP BY k ORDER BY k)`, rollTDel.UnixMilli()))
@@ -656,7 +658,7 @@ func ti13Run(t *testing.T, capBytes int64) (*rig, string) {
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(91*24*time.Hour), nil)
 	s.limit = capRunLimit
 	s.run = serveWithRun(r)
-	s.SetMaxBytes(capBytes, "events.db")
+	check(t, s.SetMaxBytes(capBytes, "events.db"))
 	s.runOnce(context.Background())
 	return r, rawText(t, r.db, "SELECT sum(sessions) || '|' || sum(requests) || '|' || sum(callbacks) FROM aggregate_day")
 }
@@ -687,7 +689,7 @@ func TestTU11CapCountsOverTwoChunksAndTwoRuns(t *testing.T) {
 	defer cancel()
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
 	s.limit = capRunLimit
-	s.SetMaxBytes(size*6/10, "events.db")
+	check(t, s.SetMaxBytes(size*6/10, "events.db"))
 	s.run = func(ctx context.Context, steps []retentionStep) error {
 		evict := len(steps) - 3
 		steps[evict] = onCall(steps[evict], func(i int, _ *sql.Tx) {
@@ -914,18 +916,21 @@ func TestTU11CapKeepsEvidenceUntilEveryOtherRowIsGone(t *testing.T) {
 	}
 }
 
-// capRunLimit is the time that a run of a cap test can take. A hang then fails
-// the test, and the test does not wait for the package timeout.
+// capRunLimit is the time that a run of a cap test can take. The run ends
+// between two chunks when this time has passed. A hang inside a step is not
+// ended by it: the chunk has its own context.
 const capRunLimit = 30 * time.Second
 
-// newRigAt is newRig with the database at the name rel. The directory part of
-// rel is made in the state directory.
+// newRigAt is newRig with the database at the name rel. It makes one directory
+// level: the directory part of rel, when rel has one.
 func newRigAt(t *testing.T, rel string) *rig {
 	t.Helper()
 	q, err := event.NewQueue(100, event.NewCounters())
 	check(t, err)
 	root, state, _ := newState(t)
-	check(t, os.Mkdir(filepath.Join(state, filepath.Dir(rel)), 0o700))
+	if dir := filepath.Dir(rel); dir != "." {
+		check(t, os.Mkdir(filepath.Join(state, dir), 0o700))
+	}
 	db := mustOpen(t, root, rel)
 	t.Cleanup(func() { db.Close() })
 	check(t, Migrate(db, "origin"))
@@ -966,6 +971,13 @@ func TestTU11CapSetMaxBytesChecksTheName(t *testing.T) {
 	if err := bare.SetMaxBytes(5, "events.db"); err == nil || bare.maxBytes != 0 {
 		t.Errorf("a writer with no state directory: error %v, cap %d; want an error and cap 0", err, bare.maxBytes)
 	}
+	// A failed query is an error too. The name is the right one.
+	closed := newRig(t, 100)
+	cs, _ := fakeSchedule(t, closed, time.UTC, rollTDel, nil)
+	check(t, closed.db.Close())
+	if err := cs.SetMaxBytes(5, "events.db"); err == nil || cs.maxBytes != 0 {
+		t.Errorf("a closed database: error %v, cap %d; want an error and cap 0", err, cs.maxBytes)
+	}
 }
 
 // faultRun checks a database name at SetMaxBytes, tampers with the state
@@ -988,10 +1000,47 @@ func faultRun(t *testing.T, r *rig, rel string, tamper func()) {
 	}
 }
 
-// T-U-11: the trigger has a cap fault in three cases. The database file can be
+// T-U-11: the trigger has a cap fault in four cases. The database file can be
 // missing, as after a rename. A directory can be at the name. A directory part
-// of the name can be a file (ENOTDIR).
+// of the name can be a file (ENOTDIR). A directory can be at the WAL name. A
+// missing WAL is no fault: the run evicts and writes no log line.
 func TestTU11CapNotAppliedWhenTheNameIsNotTheDatabaseFile(t *testing.T) {
+	t.Run("directory at the WAL name", func(t *testing.T) {
+		r := newRig(t, 100)
+		faultRun(t, r, "events.db", func() {
+			wal := filepath.Join(r.state, "events.db-wal")
+			check(t, os.Rename(wal, filepath.Join(r.state, "gone-wal")))
+			check(t, os.Mkdir(wal, 0o700))
+		})
+	})
+	t.Run("WAL name with an Lstat error", func(t *testing.T) {
+		// The database name has 252 characters, so the WAL name has 256. The
+		// Lstat of the WAL gives an error that is not a missing file.
+		r := newRig(t, 100)
+		name := strings.Repeat("a", 252)
+		check(t, os.WriteFile(filepath.Join(r.state, name), []byte("x"), 0o600))
+		if _, err := r.root.Lstat(name + "-wal"); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Skipf("the file system gives %v for a name of 256 characters", err)
+		}
+		if n, ok := (&capRun{w: r.w, rel: name}).diskBytes(); ok {
+			t.Fatalf("diskBytes gave %d bytes and ok, want the cap fault", n)
+		}
+	})
+	t.Run("missing WAL", func(t *testing.T) {
+		r := newRig(t, 100)
+		size := capFixture(t, r)
+		var out bytes.Buffer
+		s, _ := fakeSchedule(t, r, time.UTC, rollTDel, slog.New(slog.NewTextHandler(&out, nil)))
+		s.limit = capRunLimit
+		check(t, s.SetMaxBytes(size/2, "events.db"))
+		check(t, os.Remove(filepath.Join(r.state, "events.db-wal")))
+		s.run = serveWithRun(r)
+		s.runOnce(context.Background())
+		left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'")
+		if left >= 3000 || !r.w.Healthy() || out.Len() != 0 {
+			t.Fatalf("%d request rows left, healthy %v, log %q; want rows evicted, healthy and no log", left, r.w.Healthy(), out.String())
+		}
+	})
 	t.Run("missing", func(t *testing.T) {
 		r := newRig(t, 100)
 		faultRun(t, r, "events.db", func() {
