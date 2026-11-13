@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -64,12 +65,16 @@ type Schedule struct {
 // errCapName is the refusal of SetMaxBytes for a bad database name.
 var errCapName = errors.New("store: the cap needs the name of the database file in the state directory")
 
+// mainFileSQL gives the file of the main database of a connection.
+const mainFileSQL = "SELECT file FROM pragma_database_list WHERE name = 'main'"
+
 // SetMaxBytes sets the database cap (store.max_bytes) for the next runs. A cap
 // of 0 or less gives no cap step, and rel can be any text. Else rel must be the
-// name of the database file in the state root. It is the name that the caller
-// gave to Open. The call checks that rel is a valid relative name. It checks
-// that an Lstat through the root gives a regular file. If not, it returns an
-// error and sets nothing. Call it before Run starts.
+// name of the open database, relative to the state root. It is the name that
+// the caller gave to Open. The call checks that rel is a valid relative name.
+// It checks that an Lstat through the root gives a regular file. It also checks
+// that the path of rel is the main file in the database list of SQLite. If not,
+// it returns an error and sets nothing. Call it before Run starts.
 func (s *Schedule) SetMaxBytes(n int64, rel string) error {
 	if n <= 0 {
 		s.maxBytes, s.dbRel = 0, ""
@@ -78,19 +83,35 @@ func (s *Schedule) SetMaxBytes(n int64, rel string) error {
 	if !fs.ValidPath(rel) || rel == "." || s.w.rec.State == nil {
 		return errCapName
 	}
-	if fi, err := s.w.rec.State.Lstat(rel); err != nil || !fi.Mode().IsRegular() {
+	if fi, err := s.w.rec.State.Lstat(rel); err != nil || !fi.Mode().IsRegular() || !s.isOpenDatabase(rel) {
 		return errCapName
 	}
 	s.maxBytes, s.dbRel = n, rel
 	return nil
 }
 
-// capFault is called when the database file is missing at the trigger of a
-// run. The run then evicts nothing. It writes one fixed log line for each
-// schedule, with no path and no row value.
+// isOpenDatabase tells if the path of rel in the state directory is the main
+// file of the writer's database. Open builds that path in the same way.
+func (s *Schedule) isOpenDatabase(rel string) bool {
+	base, err := stateBase(s.w.rec.State)
+	if err != nil || s.w.db == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readLimit)
+	defer cancel()
+	var file string
+	if err := s.w.db.QueryRowContext(ctx, mainFileSQL).Scan(&file); err != nil {
+		return false
+	}
+	return file == filepath.Join(base, filepath.FromSlash(rel))
+}
+
+// capFault is called when the files of the cap cannot be measured at the
+// trigger of a run. The run then evicts nothing. It writes one fixed log line
+// for each schedule, with no path and no row value.
 func (s *Schedule) capFault() {
 	if s.capLog.CompareAndSwap(false, true) {
-		s.lg.Error("retention cap not applied: database file not found")
+		s.lg.Error("retention cap not applied: database file not measured")
 	}
 }
 

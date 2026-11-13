@@ -55,8 +55,8 @@ type capSource struct {
 // The loop measure is the live pages: pages in use, with no free page. A delete
 // moves pages to the freelist, and the file does not shrink until the shrink
 // step frees them.
-// The WAL grows during the run and the last checkpoint empties it, so it is not
-// in the loop measure.
+// The WAL grows during the run. The last checkpoint empties it when no reader
+// holds it. So the WAL is not in the loop measure.
 type capRun struct {
 	w      *Writer
 	rel    string // the database name that SetMaxBytes checked
@@ -66,8 +66,8 @@ type capRun struct {
 
 	begun, over, done bool
 
-	// fault is called when the database file is missing at the trigger. It can
-	// be nil.
+	// fault is called when the files of the cap cannot be measured at the
+	// trigger. It can be nil.
 	fault func()
 
 	// The pages of the next shrink statement, and the least and the most
@@ -146,8 +146,8 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 
 // withCap puts the cap steps before the last step of a run. That step is the
 // mark step, which stays last. A cap of 0 or less adds no step. The run record
-// tells the runner where the cap steps start. fault is called when the
-// database file is missing at the trigger. It can be nil.
+// tells the runner where the cap steps start. fault is called when the files
+// of the cap cannot be measured at the trigger. It can be nil.
 func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, fault func()) []retentionStep {
 	if capBytes <= 0 || len(steps) == 0 {
 		return steps
@@ -338,29 +338,23 @@ func pages(ctx context.Context, tx *sql.Tx) (count, free, size int64, err error)
 	return count, free, size, nil
 }
 
-// errNoDatabase tells that the database file of the cap is not in the state
-// directory.
-var errNoDatabase = errors.New("store: the database file of the cap is missing")
-
 // diskBytes returns the bytes of the database file and its WAL on disk. It
 // reads them with Lstat through the state root, on the name that SetMaxBytes
-// checked. It opens no file and resolves no path. A missing WAL has 0 bytes. A
-// missing database file is the error errNoDatabase.
-func (c *capRun) diskBytes() (n int64, err error) {
+// checked. It opens no file. With a bare name, it resolves no path. A missing
+// WAL has 0 bytes. Any other Lstat error gives ok false. So does a result that
+// is not a regular file. This is the cap fault.
+func (c *capRun) diskBytes() (n int64, ok bool) {
 	for i, name := range []string{c.rel, c.rel + "-wal"} {
 		fi, err := c.w.rec.State.Lstat(name)
-		if errors.Is(err, fs.ErrNotExist) {
-			if i == 0 {
-				return 0, errNoDatabase
-			}
+		if i == 1 && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err != nil {
-			return 0, err
+		if err != nil || !fi.Mode().IsRegular() {
+			return 0, false
 		}
 		n += fi.Size()
 	}
-	return n, nil
+	return n, true
 }
 
 // live returns the bytes of the pages in use.
@@ -380,16 +374,13 @@ func (c *capRun) live(ctx context.Context, tx *sql.Tx) (int64, error) {
 func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 	if !c.begun {
 		c.begun = true
-		n, err := c.diskBytes()
-		if errors.Is(err, errNoDatabase) {
+		n, ok := c.diskBytes()
+		if !ok {
 			if c.fault != nil {
 				c.fault()
 			}
 			c.done = true
 			return 0, nil
-		}
-		if err != nil {
-			return 0, err
 		}
 		c.over = n > c.limit
 	}

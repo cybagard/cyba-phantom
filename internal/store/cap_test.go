@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
@@ -234,7 +235,7 @@ func callIn(t *testing.T, db *sql.DB, step retentionStep, limit int) int {
 // T-U-11: a source that has a row and removes none ends the eviction. No later
 // tier runs, and the step does not spin. The stub in tier 1 stops the test with
 // a panic at its 2nd call. The callback of tier 3 stays. A request row with the
-// ts 9223372036854775000 does the same: the end of its day is not a number.
+// ts 9223372036854775000 does the same: the end of its day overflows int64.
 func TestTU11CapStopsWhenASourceRemovesNoRow(t *testing.T) {
 	r := newRig(t, 100)
 	addHashed(t, r.db, "callback", 1, capDay(1), 0)
@@ -534,6 +535,7 @@ func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	}
 	for _, capBytes := range []int64{0, 1} {
 		r, s, _ := prodRig(t, 0, nil)
+		s.limit = capRunLimit
 		s.SetMaxBytes(capBytes, "events.db")
 		addEvents(t, r.db, "request", 3, rollTDel.UnixMilli()-3600_000, 1, nil, nil)
 		atMark := -1
@@ -585,10 +587,12 @@ func livePages(t *testing.T, db *sql.DB) int64 {
 // be far above the line, and the cap would evict.
 func TestTU11CapRunsAfterTheOtherSteps(t *testing.T) {
 	base, bs, _ := prodRig(t, 0, nil)
+	bs.limit = capRunLimit
 	bs.run = serveWithRun(base)
 	capDataset(t, base)
 	bs.runOnce(context.Background())
 	r, s, _ := prodRig(t, 0, nil)
+	s.limit = capRunLimit
 	capDataset(t, r)
 	s.SetMaxBytes(livePages(t, base.db)*12/10, "events.db")
 	var run *retentionRun
@@ -609,6 +613,7 @@ func TestTU11CapRunsAfterTheOtherSteps(t *testing.T) {
 // with no cap removes none of them.
 func TestTU11CapRunOverAHundredDays(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
+	s.limit = capRunLimit
 	s.run = serveWithRun(r)
 	capDataset(t, r)
 	s.runOnce(context.Background())
@@ -649,6 +654,7 @@ func ti13Run(t *testing.T, capBytes int64) (*rig, string) {
 	r := newRig(t, 100)
 	capDataset(t, r)
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(91*24*time.Hour), nil)
+	s.limit = capRunLimit
 	s.run = serveWithRun(r)
 	s.SetMaxBytes(capBytes, "events.db")
 	s.runOnce(context.Background())
@@ -680,6 +686,7 @@ func TestTU11CapCountsOverTwoChunksAndTwoRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+	s.limit = capRunLimit
 	s.SetMaxBytes(size*6/10, "events.db")
 	s.run = func(ctx context.Context, steps []retentionStep) error {
 		evict := len(steps) - 3
@@ -907,44 +914,104 @@ func TestTU11CapKeepsEvidenceUntilEveryOtherRowIsGone(t *testing.T) {
 	}
 }
 
+// capRunLimit is the time that a run of a cap test can take. A hang then fails
+// the test, and the test does not wait for the package timeout.
+const capRunLimit = 30 * time.Second
+
+// newRigAt is newRig with the database at the name rel. The directory part of
+// rel is made in the state directory.
+func newRigAt(t *testing.T, rel string) *rig {
+	t.Helper()
+	q, err := event.NewQueue(100, event.NewCounters())
+	check(t, err)
+	root, state, _ := newState(t)
+	check(t, os.Mkdir(filepath.Join(state, filepath.Dir(rel)), 0o700))
+	db := mustOpen(t, root, rel)
+	t.Cleanup(func() { db.Close() })
+	check(t, Migrate(db, "origin"))
+	app := &testAppender{next: 100}
+	r := &rig{t: t, q: q, db: db, app: app, root: root, state: state, lg: &fakeLog{testAppender: app}, tick: make(chan time.Time)}
+	r.w = NewWriter(db, q, false, nil, Recovery{State: root, Origin: "origin", Log: r.lg})
+	r.w.tick = r.tick
+	return r
+}
+
 // T-U-11: SetMaxBytes refuses a bad relative name, a name with no file, a
-// directory, and a link. It takes the name of the database file. With a cap of
-// 0, it takes any name and adds no step.
+// directory and a link. It also refuses a regular file that is not the open
+// database. These are the WAL, the shm file, another file, and a file in a
+// subdirectory. It takes the name of the open database. With a cap of 0, it
+// takes any name. It then sets cap 0 and an empty name, and adds no step.
 func TestTU11CapSetMaxBytesChecksTheName(t *testing.T) {
 	r := newRig(t, 100)
+	capFixture(t, r)
 	check(t, os.Mkdir(filepath.Join(r.state, "dir"), 0o700))
+	check(t, os.Mkdir(filepath.Join(r.state, "sub"), 0o700))
 	check(t, os.Symlink("events.db", filepath.Join(r.state, "link.db")))
+	check(t, os.WriteFile(filepath.Join(r.state, "other.db"), []byte("x"), 0o600))
+	check(t, os.WriteFile(filepath.Join(r.state, "sub", "x.db"), []byte("x"), 0o600))
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, nil)
-	for _, rel := range []string{"", ".", "../x", "/abs", "wrong.db", "dir", "link.db"} {
+	for _, rel := range []string{"", ".", "../x", "/abs", "wrong.db", "dir", "link.db", "events.db-wal", "events.db-shm",
+		"other.db", "sub/x.db", "./events.db", "a//events.db"} {
 		if err := s.SetMaxBytes(5, rel); err == nil || s.maxBytes != 0 {
 			t.Errorf("name %q: error %v, cap %d; want an error and cap 0", rel, err, s.maxBytes)
 		}
 	}
-	if err := s.SetMaxBytes(0, "../x"); err != nil || s.maxBytes != 0 {
-		t.Errorf("cap 0 with a bad name: error %v, cap %d; want none and 0", err, s.maxBytes)
-	}
 	if err := s.SetMaxBytes(5, "events.db"); err != nil || s.maxBytes != 5 || s.dbRel != "events.db" {
 		t.Errorf("the database name: error %v, cap %d; want none and 5", err, s.maxBytes)
 	}
+	if err := s.SetMaxBytes(0, "../x"); err != nil || s.maxBytes != 0 || s.dbRel != "" {
+		t.Errorf("cap 0 with a bad name: error %v, cap %d, name %q; want none, 0 and an empty name", err, s.maxBytes, s.dbRel)
+	}
+	bare := NewSchedule(NewWriter(r.db, r.q, false, nil, Recovery{}), 7, 30, 90, nil)
+	if err := bare.SetMaxBytes(5, "events.db"); err == nil || bare.maxBytes != 0 {
+		t.Errorf("a writer with no state directory: error %v, cap %d; want an error and cap 0", err, bare.maxBytes)
+	}
 }
 
-// T-U-11: the database file is missing at the trigger, as after a rename in the
-// state directory. The run evicts nothing and the writer stays healthy. The
-// schedule writes one fixed log line for 2 runs, with no path in it.
-func TestTU11CapNotAppliedWhenTheDatabaseFileIsMissing(t *testing.T) {
-	r := newRig(t, 100)
-	capFixture(t, r)
+// faultRun checks a database name at SetMaxBytes, tampers with the state
+// directory, and makes 2 runs. Each run evicts nothing and the writer stays
+// healthy. The schedule writes one fixed log line with no path in it.
+func faultRun(t *testing.T, r *rig, rel string, tamper func()) {
+	t.Helper()
+	addEvents(t, r.db, "request", 3, rollTDel.UnixMilli()-3600_000, 1, nil, nil)
 	var out bytes.Buffer
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, slog.New(slog.NewTextHandler(&out, nil)))
-	check(t, s.SetMaxBytes(1, "events.db"))
-	check(t, os.Rename(filepath.Join(r.state, "events.db"), filepath.Join(r.state, "gone.db")))
+	s.limit = capRunLimit
+	check(t, s.SetMaxBytes(1, rel))
+	tamper()
 	s.run = serveWithRun(r)
 	s.runOnce(context.Background())
 	s.runOnce(context.Background())
 	left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'")
-	if log := out.String(); left != 3000 || !r.w.Healthy() || strings.Count(log, "database file not found") != 1 || strings.Contains(log, "events") {
-		t.Fatalf("%d request rows left, healthy %v, log %q; want 3000, healthy and one fixed line", left, r.w.Healthy(), log)
+	if log := out.String(); left != 3 || !r.w.Healthy() || strings.Count(log, "database file not measured") != 1 || strings.Contains(log, "events") {
+		t.Fatalf("%d request rows left, healthy %v, log %q; want 3, healthy and one fixed line", left, r.w.Healthy(), log)
 	}
+}
+
+// T-U-11: the trigger has a cap fault in three cases. The database file can be
+// missing, as after a rename. A directory can be at the name. A directory part
+// of the name can be a file (ENOTDIR).
+func TestTU11CapNotAppliedWhenTheNameIsNotTheDatabaseFile(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		r := newRig(t, 100)
+		faultRun(t, r, "events.db", func() {
+			check(t, os.Rename(filepath.Join(r.state, "events.db"), filepath.Join(r.state, "gone.db")))
+		})
+	})
+	t.Run("directory at the name", func(t *testing.T) {
+		r := newRig(t, 100)
+		faultRun(t, r, "events.db", func() {
+			check(t, os.Rename(filepath.Join(r.state, "events.db"), filepath.Join(r.state, "gone.db")))
+			check(t, os.Mkdir(filepath.Join(r.state, "events.db"), 0o700))
+		})
+	})
+	t.Run("a file in place of the directory part", func(t *testing.T) {
+		r := newRigAt(t, "sub/events.db")
+		faultRun(t, r, "sub/events.db", func() {
+			check(t, os.Rename(filepath.Join(r.state, "sub"), filepath.Join(r.state, "sub.moved")))
+			check(t, os.WriteFile(filepath.Join(r.state, "sub"), []byte("x"), 0o600))
+		})
+	})
 }
 
 // T-U-11: the statements of the cap use an index. No plan scans event, session,
