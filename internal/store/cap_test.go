@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
@@ -413,15 +414,15 @@ func TestTU11CapShrinkStopsAtTheTargetWithFreePagesLeft(t *testing.T) {
 	}
 }
 
-// T-U-11: the shrink step makes each statement from the time of the last one.
-// After a fast statement, the pages grow at most twice. This holds for a time
-// of 0 too. After a statement over 50 ms, they are half, at least 1. They stay
-// from 1 to 1 000. A statement at the budget is fast.
+// T-U-11: the pages of a shrink statement are from 1 to 16. After a fast
+// statement, they grow at most twice, also for a time of 0. From 16 they stay
+// 16. After a statement over 50 ms, they are half, at least 1. A statement at
+// the budget is fast.
 func TestTU11CapShrinkSizesItsStatementFromTheTime(t *testing.T) {
-	for _, n := range []int{1, 16, 500, 999, 1000} {
+	for _, n := range []int{1, 2, 8, 15, 16} {
 		for _, took := range []time.Duration{0, -time.Second, time.Microsecond, time.Millisecond, shrinkBudget} {
-			if got := nextShrink(n, took); got < 1 || got > min(2*n, shrinkMax) {
-				t.Errorf("nextShrink(%d, %v) = %d, want 1 to %d", n, took, got, min(2*n, shrinkMax))
+			if got := nextShrink(n, took); got < 1 || got > min(2*n, 16) {
+				t.Errorf("nextShrink(%d, %v) = %d, want 1 to %d", n, took, got, min(2*n, 16))
 			}
 		}
 		for _, took := range []time.Duration{shrinkBudget + time.Nanosecond, 51 * time.Millisecond, 2 * time.Second} {
@@ -434,16 +435,17 @@ func TestTU11CapShrinkSizesItsStatementFromTheTime(t *testing.T) {
 		n    int
 		took time.Duration
 		want int
-	}{{16, time.Millisecond, 32}, {16, shrinkBudget, 16}, {500, 40 * time.Millisecond, 625}, {40, 25 * time.Millisecond, 80}} {
+	}{{1, 0, 2}, {2, time.Microsecond, 4}, {4, 0, 8}, {8, 0, 16}, {16, 0, 16}, {16, shrinkBudget, 16}, {10, 40 * time.Millisecond, 12}} {
 		if got := nextShrink(c.n, c.took); got != c.want {
 			t.Errorf("nextShrink(%d, %v) = %d, want %d", c.n, c.took, got, c.want)
 		}
 	}
 }
 
-// T-U-11: the step has a fake clock. Three fast statements and one slow one
-// use 16, 32, 64 and 128 pages. The next one has 64.
-func TestTU11CapShrinkGrowsByTwiceAndHalvesAfterASlowOne(t *testing.T) {
+// T-U-11: the step has a fake clock. One fast and five slow statements use 16,
+// 16, 8, 4, 2 and 1 pages. The next one has 1. Then five fast ones use 1, 2, 4,
+// 8 and 16 pages. The next one has 16.
+func TestTU11CapShrinkHalvesAfterASlowOneAndGrowsBack(t *testing.T) {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "plain.db"))
 	check(t, err)
 	defer db.Close()
@@ -452,7 +454,8 @@ func TestTU11CapShrinkGrowsByTwiceAndHalvesAfterASlowOne(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (a BLOB)")
 	mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 599) INSERT INTO t SELECT zeroblob(3000) FROM c`)
 	mustExec(t, db, "DELETE FROM t")
-	took, calls, at := []time.Duration{0, time.Microsecond, time.Millisecond, 80 * time.Millisecond}, 0, rollTDel
+	slow, fast := 80*time.Millisecond, time.Millisecond
+	took, calls, at := []time.Duration{fast, slow, slow, slow, slow, slow, fast, fast, fast, fast, fast}, 0, rollTDel
 	w := &Writer{clock: func() time.Time {
 		if calls++; calls%2 == 0 {
 			at = at.Add(took[calls/2-1])
@@ -462,11 +465,11 @@ func TestTU11CapShrinkGrowsByTwiceAndHalvesAfterASlowOne(t *testing.T) {
 	s := &capRun{w: w, over: true}
 	var used []int
 	for range took {
-		used = append(used, max(s.pages, shrinkFirst))
+		used = append(used, cmp.Or(s.pages, shrinkFirst))
 		call(t, db, s.shrink, chunkRows)
 	}
-	if fmt.Sprint(used) != "[16 32 64 128]" || s.pages != 64 {
-		t.Fatalf("statements of %v pages, then %d; want [16 32 64 128] and 64", used, s.pages)
+	if fmt.Sprint(used) != "[16 16 8 4 2 1 1 2 4 8 16]" || s.pages != 16 {
+		t.Fatalf("statements of %v pages, then %d; want [16 16 8 4 2 1 1 2 4 8 16] and 16", used, s.pages)
 	}
 }
 
@@ -688,6 +691,148 @@ func TestTU11CapDoesNotNeedThePathOfTheStateDirectory(t *testing.T) {
 	run := capRunOf(t, r, 1)
 	if !r.w.Healthy() || run.counts.Evicted == 0 {
 		t.Fatalf("healthy %v, evicted %d; want a healthy writer and rows evicted", r.w.Healthy(), run.counts.Evicted)
+	}
+}
+
+// T-U-11: the start of the unit of the run is the start of its 10-minute unit.
+// This holds on a boundary, and before the token epoch with a remainder. The
+// unit before and the unit after start 10 minutes earlier and later.
+func TestTU11CapMintOrderStartsAtTheUnitOfTheRun(t *testing.T) {
+	epoch := token.Epoch()
+	const mask = 1<<20 - 1
+	for _, c := range []struct {
+		name       string
+		now, start time.Time
+	}{
+		{"after the epoch", epoch.Add(time.Hour + 5*time.Second + 123*time.Millisecond), epoch.Add(time.Hour)},
+		{"on a boundary", epoch.Add(time.Hour), epoch.Add(time.Hour)},
+		{"1 ms before a boundary", epoch.Add(time.Hour - time.Millisecond), epoch.Add(50 * time.Minute)},
+		{"before the epoch with a remainder", epoch.Add(-time.Hour - 7*time.Second), epoch.Add(-70 * time.Minute)},
+		{"before the epoch on a boundary", epoch.Add(-time.Hour), epoch.Add(-time.Hour)},
+	} {
+		o, u := newMintOrder(c.now), int64(token.Unit(c.now))
+		got := [3]int64{o.at((u - 1) & mask), o.at(u), o.at((u + 1) & mask)}
+		if want := [3]int64{c.start.Add(-10 * time.Minute).UnixMilli(), c.start.UnixMilli(), c.start.Add(10 * time.Minute).UnixMilli()}; got != want {
+			t.Errorf("%s: starts %v, want %v", c.name, got, want)
+		}
+	}
+}
+
+// T-U-11: the unit ranges are one range when the first unit is 0. With the
+// wrap, they are two. The start of a unit is exact. This holds for the first
+// rank, for the unit of the run, and for the top rank.
+func TestTU11CapMintOrderRangesAndStarts(t *testing.T) {
+	const top, half, start = 1<<20 - 1, 1 << 19, int64(1) << 40
+	for _, c := range []struct {
+		lo   int64
+		want string
+	}{{0, "[[0 1048575]]"}, {5, "[[5 1048575] [0 4]]"}} {
+		o := mintOrder{lo: c.lo, start: start}
+		if got := fmt.Sprint(o.ranges()); got != c.want {
+			t.Errorf("lo %d: ranges %s, want %s", c.lo, got, c.want)
+		}
+		got := [3]int64{o.at(c.lo), o.at((c.lo + half - 1) & top), o.at((c.lo - 1) & top)}
+		if want := [3]int64{start - (half-1)*mintUnitMs, start, start + half*mintUnitMs}; got != want {
+			t.Errorf("lo %d: starts %v, want %v", c.lo, got, want)
+		}
+	}
+}
+
+// evictMint runs the evict of a mint order in one call.
+func evictMint(t *testing.T, r *rig, o mintOrder, end int64, limit int) int {
+	t.Helper()
+	return call(t, r.db, func(ctx context.Context, tx *sql.Tx, _ int) (int, error) {
+		return o.evict(ctx, tx, end, limit)
+	}, chunkRows)
+}
+
+// addUnits inserts rows of set 01, n[i] rows in unit u[i].
+func addUnits(t *testing.T, db *sql.DB, units, rows []int) {
+	t.Helper()
+	for i, u := range units {
+		for f := range rows[i] {
+			mustExec(t, db, "INSERT INTO mint (set_id, unit, first, count, session_id, issued_at) VALUES (x'01', ?, ?, 1, 's', 0)", u, f)
+		}
+	}
+}
+
+// T-U-11: the oldest mint unit is found on both sides of the wrap, and it goes
+// first. With the first unit 0, the order has one range. Else it has two. The
+// unit with the lower rank is oldest, also when it has the higher number.
+func TestTU11CapMintOrderFindsTheOldestUnitAcrossTheWrap(t *testing.T) {
+	for _, c := range []struct {
+		lo            int64
+		oldest, later int
+	}{{0, 3, 1<<20 - 2}, {582681, 582684, 582679}} {
+		r := newRig(t, 100)
+		o := mintOrder{lo: c.lo, start: rollTDel.UnixMilli()}
+		addUnits(t, r.db, []int{c.later, c.oldest}, []int{1, 1})
+		tx, err := r.db.Begin()
+		check(t, err)
+		got, ok, err := o.oldest(context.Background(), tx)
+		check(t, err)
+		check(t, tx.Rollback())
+		if want := o.at(int64(c.oldest)); !ok || got != want {
+			t.Fatalf("lo %d: oldest %d %v, want %d", c.lo, got, ok, want)
+		}
+		if n, left := evictMint(t, r, o, o.at(int64(c.oldest))+mintUnitMs, chunkRows), count(t, r.db, "SELECT unit FROM mint"); n != 1 || left != c.later {
+			t.Fatalf("lo %d: removed %d rows, unit %d left; want 1 and %d", c.lo, n, left, c.later)
+		}
+	}
+}
+
+// T-U-11: the evict of a mint order. A unit that starts at the end stays. A
+// unit that starts 1 ms before goes. A unit with exactly the rows that are left
+// goes whole. A unit with one more row stays, and the call returns the rows
+// that it deleted. The call stops after the last row that fits.
+func TestTU11CapMintEvictKeepsTheBoundaries(t *testing.T) {
+	o := mintOrder{lo: 0, start: rollTDel.UnixMilli()}
+	at := func(u int) int64 { return o.at(int64(u)) }
+	for _, c := range []struct {
+		name            string
+		units, rows     []int
+		end             int64
+		limit           int
+		wantN, wantLeft int
+	}{
+		{"unit at the end", []int{1000}, []int{2}, at(1000), 100, 0, 2},
+		{"unit 1 ms before the end", []int{1000}, []int{2}, at(1000) + 1, 100, 2, 0},
+		{"rows that fit", []int{1000, 1001}, []int{2, 2}, at(1002), 4, 4, 0},
+		{"one row too many", []int{1000, 1001}, []int{2, 3}, at(1002), 4, 2, 3},
+		{"stop after the last that fits", []int{1000, 1001, 1002}, []int{2, 2, 1}, at(1003), 4, 4, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t, 100)
+			addUnits(t, r.db, c.units, c.rows)
+			if n, left := evictMint(t, r, o, c.end, c.limit), count(t, r.db, "SELECT count(*) FROM mint"); n != c.wantN || left != c.wantLeft {
+				t.Fatalf("removed %d, %d rows left; want %d and %d", n, left, c.wantN, c.wantLeft)
+			}
+		})
+	}
+}
+
+// T-U-11: the shrink step runs no statement when the database has no free page.
+// It runs none when the file is at the target. One byte below, it runs.
+func TestTU11CapShrinkStopsWithNoFreePageOrAtTheTarget(t *testing.T) {
+	r := newRig(t, 100)
+	if _, free, _ := dbPages(t, r.db); free != 0 {
+		t.Fatalf("%d free pages in a new database, want 0", free)
+	}
+	s := &capRun{w: r.w, over: true}
+	if n := call(t, r.db, s.shrink, chunkRows); n != 0 || s.pages != 0 {
+		t.Fatalf("no free page: returned %d, %d pages; want 0 and 0", n, s.pages)
+	}
+	f := freedFixture(t)
+	pc, _, size := dbPages(t, f.db)
+	for _, c := range []struct {
+		target int64
+		ran    bool
+	}{{pc * size, false}, {pc*size - 1, true}} {
+		s := &capRun{w: f.w, over: true, target: c.target}
+		call(t, f.db, s.shrink, chunkRows)
+		if (s.pages != 0) != c.ran {
+			t.Errorf("target %d: statement run %v, want %v", c.target, s.pages != 0, c.ran)
+		}
 	}
 }
 

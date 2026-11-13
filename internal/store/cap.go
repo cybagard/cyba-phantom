@@ -21,10 +21,11 @@ const (
 
 	// The shrink step frees pages with one statement for each chunk. The first
 	// statement frees shrinkFirst pages. After a fast statement, the next one
-	// has at most twice the pages. After one over shrinkBudget, it has half
-	// (ADR-040). A statement can still stall on the file write.
+	// has at most twice the pages, and at most shrinkMax. After one over
+	// shrinkBudget, it has half (ADR-040). A statement can still stall on the
+	// file write. The pages of a statement are from 1 to 16.
 	shrinkFirst  = 16
-	shrinkMax    = 1000
+	shrinkMax    = 16
 	shrinkBudget = 50 * time.Millisecond
 
 	// Each seek reads the oldest row of one kind, band or table through an
@@ -432,8 +433,8 @@ func (c *capRun) work(ctx context.Context, tx *sql.Tx, tier []*capSource, limit 
 // nextShrink returns the pages of the next shrink statement. n pages took
 // `took`. After a statement of at most shrinkBudget, the result is n scaled to
 // that budget, but at most 2n. A time of 0 or less counts as fast. After a
-// longer statement, the result is n/2. It is in the range 1 to shrinkMax. A
-// statement can still stall on the file write (ADR-040).
+// longer statement, the result is n/2. It is in the range 1 to 16. A statement
+// can still stall on the file write (ADR-040).
 func nextShrink(n int, took time.Duration) int {
 	if took > shrinkBudget {
 		return max(n/2, 1)
@@ -448,7 +449,7 @@ func nextShrink(n int, took time.Duration) int {
 // shrink frees pages with one statement for each chunk, after the eviction. It
 // stops when the file is at most 90 % of the cap or no free page is left. It
 // does nothing when the disk bytes were not above the cap. It counts the freed
-// pages. The pages of a statement come from the time of the last one.
+// pages. The pages of a statement come from the last one: see nextShrink.
 func (c *capRun) shrink(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 	if !c.over {
 		return 0, nil
