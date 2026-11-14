@@ -1328,8 +1328,9 @@ func addAggregates(t *testing.T, db *sql.DB, n int) {
 }
 
 // T-U-28, SEC-41: the kept bytes are those of each table and index other than
-// event. They include the schema table. A large event table is not in them. The expected value is the sum of all objects of dbstat, less the
-// sum of the event objects.
+// event. They include the schema table. A large event table is not in them.
+// The expected value is the sum of all objects of dbstat, less the sum of the
+// event objects.
 func TestTU28KeptBytesLeaveOutTheEventTable(t *testing.T) {
 	r := newRig(t, 100)
 	addHashed(t, r.db, "callback", 50_000, capDay(1), 0)

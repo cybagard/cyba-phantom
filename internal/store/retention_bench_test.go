@@ -157,9 +157,9 @@ const keptChildDir = "STORE_KEPT_CHILD_DIR"
 // parent makes aggregate_day at each size, and 1 000 evidence rows. The child
 // process opens the database. It runs one cap chunk through capRun.evict, from
 // BEGIN to COMMIT. The deadline is the production one. Tiers 1 and 2 are
-// empty. It prints the time of that chunk and whether it counted slow. Then it reads
-// keptSQL with no deadline. It prints VmHWM and the time of that read. Run it
-// with -benchtime=1x:
+// empty. It prints the time of that chunk and whether it counted slow. Then it
+// reads keptSQL with no deadline. It prints VmHWM and the time of that read.
+// Run it with -benchtime=1x:
 //
 //	PHANTOM_KEPT_ROWS=1000,10000,100000 go test -run '^$' \
 //	  -bench '^BenchmarkKept$' -benchtime=1x ./internal/store
