@@ -1355,27 +1355,22 @@ func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
 }
 
 // T-U-28: a read of the kept bytes that passes its deadline counts slow, not
-// kept. The test uses the real statement and a table that takes more than the
-// deadline. The read ends no earlier than the deadline, so it began. Tier 3
-// does not run. The call returns 0 with no error. The transaction still works.
+// kept. The test uses the real statement. The deadline of 1 ns has passed
+// before the read starts, so the result does not depend on the speed of the
+// machine. Tier 3 does not run. The call returns 0 with no error. The
+// transaction still works.
 func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 	r := newRig(t, 100)
-	addAggregates(t, r.db, 40_000)
+	addAggregates(t, r.db, 100)
 	addHashed(t, r.db, "callback", 3, capDay(1), 0)
 	c := forcedCap(r, rollTDel)
-	c.keptBytes, c.keptLimit = nil, time.Millisecond
+	c.keptBytes, c.keptLimit = nil, time.Nanosecond
 	reasons := recordUnmet(c)
 	tx, err := r.db.Begin()
 	check(t, err)
 	defer tx.Rollback()
-	begin := time.Now()
-	reason, err := c.keptOver(context.Background(), tx)
-	took := time.Since(begin)
-	var bytes int64
-	begin = time.Now()
-	check(t, tx.QueryRow(keptSQL).Scan(&bytes))
-	if full := time.Since(begin); reason != reasonSlow || err != nil || took < c.keptLimit || full < c.keptLimit {
-		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow and no error after the deadline, with a read that takes longer", reason, err, took, full)
+	if reason, err := c.keptOver(context.Background(), tx); reason != reasonSlow || err != nil {
+		t.Fatalf("reason %q, error %v; want slow and no error", reason, err)
 	}
 	n, err := c.evict(context.Background(), tx, chunkRows)
 	if n != 0 || err != nil || len(*reasons) != 1 || (*reasons)[0] != reasonSlow || !c.done {
@@ -1390,17 +1385,57 @@ func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 	}
 }
 
+// minKeptRead is the least time of the full read that makes the ratio of
+// TestTU28KeptReadStopsInsideALargeTable meaningful.
+const minKeptRead = 8 * time.Millisecond
+
+// T-U-28: the deadline stops the read inside one large table. The table is
+// rollup_seen, which is one btree, and it is in the line. F is the least time
+// of the full read of the real statement. A read with a deadline of F/4 must
+// count slow and end in less than 3/4 of F. A statement with the aggregate
+// column checks for an interrupt only between two objects, so it fails this
+// test. The test is relative, so it does not depend on the speed of the
+// machine. A machine that is too fast for the table makes it fail, not skip.
+func TestTU28KeptReadStopsInsideALargeTable(t *testing.T) {
+	r := newRig(t, 100)
+	for off := 0; off < 250_000; off += 50_000 {
+		mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+			INSERT INTO rollup_seen (day, vhost, band, family, session_id)
+			SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`, off, off+49_999)
+	}
+	tx, err := r.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	var n int64
+	full := time.Hour
+	for range 3 {
+		begin := time.Now()
+		check(t, tx.QueryRow(keptSQL).Scan(&n))
+		full = min(full, time.Since(begin))
+	}
+	if full < minKeptRead {
+		t.Fatalf("the full read took %v, less than %v: the table is too small for this machine", full, minKeptRead)
+	}
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = nil, full/4
+	begin := time.Now()
+	reason, err := c.keptOver(context.Background(), tx)
+	if took := time.Since(begin); reason != reasonSlow || err != nil || took >= full*3/4 {
+		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow, no error, and less than 3/4 of the full time", reason, err, took, full)
+	}
+}
+
 // T-U-28: through a run of the schedule, a slow read counts slow and not kept.
 // No evidence row goes and the writer stays healthy. The fixed line is in the
 // log for each run. The chunk commits, so the mark step of the run writes its
 // meta key. A second run works. After both, the writer writes an event.
 func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 	r := newRig(t, 100)
-	addAggregates(t, r.db, 40_000)
+	addAggregates(t, r.db, 3000)
 	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
 	var out bytes.Buffer
 	s := keptSchedule(t, r, truncated(t, r)-1, &out)
-	s.keptLimit = time.Millisecond
+	s.keptLimit = time.Nanosecond
 	for run := 1; run <= 2; run++ {
 		mustExec(t, r.db, "DELETE FROM meta WHERE key = 'retention_last'")
 		s.runOnce(context.Background())

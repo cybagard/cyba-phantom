@@ -39,10 +39,13 @@ const (
 	// evictSeenSQL deletes the seen rows of one day, at most the limit. keptSQL
 	// gives the bytes of each table and index other than event and its indexes,
 	// and of the schema table. The names stay an equality list, so that dbstat
-	// does not walk the event pages.
+	// does not walk the event pages. The statement has no aggregate column, so
+	// dbstat gives one row for each page. With the aggregate column, SQLite
+	// checks for an interrupt only between two objects. A large table or index
+	// would then have no bound in time.
 	evictSeenSQL = "DELETE FROM rollup_seen WHERE (day, vhost, band, family, session_id) IN " +
 		"(SELECT day, vhost, band, family, session_id FROM rollup_seen WHERE day = ? LIMIT ?)"
-	keptSQL = "SELECT coalesce(sum(pgsize), 0) FROM dbstat WHERE aggregate = TRUE AND name IN " +
+	keptSQL = "SELECT coalesce(sum(pgsize), 0) FROM dbstat WHERE name IN " +
 		"(SELECT name FROM sqlite_schema WHERE tbl_name <> 'event' UNION ALL SELECT 'sqlite_schema')"
 
 	// keptReadLimit is the time that the read of keptSQL can take. A read that
@@ -498,9 +501,10 @@ func (c *capRun) note(reason string) {
 // text. The reason kept means that the tables and indexes other than event hold
 // 90 % of the cap (SEC-41). No tier removes them. The reason slow means that
 // the read did not end in keptLimit. The run reads dbstat one time, when tier 3
-// is the next tier to run. A read that passes its deadline is no
-// error, and the chunk commits. An error of the chunk context is returned. So
-// is any other error.
+// is the next tier to run. The statement reads one dbstat row for each page, so
+// the deadline stops the read inside a large table. A read that passes its
+// deadline is no error, and the chunk commits. An error of the chunk context
+// is returned. So is any other error.
 func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
 	if c.keptKnown {
 		return c.kept, nil
