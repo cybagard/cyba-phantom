@@ -1126,7 +1126,7 @@ func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 		{mintDeleteSQL, []any{"", 1, 1000}, "PRIMARY KEY"},
 		{evictSeenSQL, []any{"2027-01-01", 1000}, "PRIMARY KEY"},
 		{rollupLeftSQL, []any{1}, "event_kind_ts"},
-		{keptSQL, nil, "dbstat"},
+		{keptSQL, nil, "dbstat VIRTUAL TABLE INDEX 0x2"},
 	} {
 		plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n")
 		for _, table := range []string{"event", "session", "token", "ip_counter", "mint", "rollup_seen"} {
@@ -1355,10 +1355,11 @@ func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
 }
 
 // T-U-28: a read of the kept bytes that passes its deadline counts slow, not
-// kept. The test uses the real statement. The deadline of 1 ns has passed
-// before the read starts. So the result does not depend on the speed of the
-// machine. Tier 3 does not run. The call returns 0 with no error. The
-// transaction still works.
+// kept. The deadline of 1 ns has passed before the query. The database/sql
+// package returns the error before the driver runs, so the test does not
+// reach the interrupt of the driver. It does not depend on the speed of the
+// machine. It tests the count. Tier 3 does not run. The call returns 0 with no
+// error. The transaction still works.
 func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 	r := newRig(t, 100)
 	addAggregates(t, r.db, 100)
@@ -1395,27 +1396,14 @@ const minKeptRead = 8 * time.Millisecond
 // count slow and end in less than 3/4 of F. A statement with the aggregate
 // column checks for an interrupt only between two objects, so it fails this
 // test. The test is relative, so it does not depend on the speed of the
-// machine. A machine that is too fast for the table makes it fail, not skip.
+// machine. The table grows in steps until the full read is long enough. A
+// machine that is too fast for the largest table makes it fail, not skip.
 func TestTU28KeptReadStopsInsideALargeTable(t *testing.T) {
 	r := newRig(t, 100)
-	for off := 0; off < 250_000; off += 50_000 {
-		mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
-			INSERT INTO rollup_seen (day, vhost, band, family, session_id)
-			SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`, off, off+49_999)
-	}
+	full := fillSeenForRead(t, r.db)
 	tx, err := r.db.Begin()
 	check(t, err)
 	defer tx.Rollback()
-	var n int64
-	full := time.Hour
-	for range 3 {
-		begin := time.Now()
-		check(t, tx.QueryRow(keptSQL).Scan(&n))
-		full = min(full, time.Since(begin))
-	}
-	if full < minKeptRead {
-		t.Fatalf("the full read took %v, less than %v: the table is too small for this machine", full, minKeptRead)
-	}
 	c := forcedCap(r, rollTDel)
 	c.keptBytes, c.keptLimit = nil, full/4
 	begin := time.Now()
@@ -1423,12 +1411,55 @@ func TestTU28KeptReadStopsInsideALargeTable(t *testing.T) {
 	if took := time.Since(begin); reason != reasonSlow || err != nil || took >= full*3/4 {
 		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow, no error, and less than 3/4 of the full time", reason, err, took, full)
 	}
+	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES ('probe', '1')"); err != nil {
+		t.Fatalf("the transaction does not work after the interrupt: %v", err)
+	}
+	check(t, tx.Commit())
+	if n := count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'probe'"); n != 1 {
+		t.Fatalf("%d probe rows after the commit, want 1", n)
+	}
+}
+
+// keptFillRows is the rows that one step adds to rollup_seen. keptFillSteps is
+// the most steps that fillSeenForRead makes.
+const (
+	keptFillRows  = 250_000
+	keptFillSteps = 6
+)
+
+// fillSeenForRead adds rows to rollup_seen, keptFillRows at a time, until the
+// least of 3 full reads of the real statement is at least minKeptRead. It
+// returns that time. At the last step it fails with a message that names it.
+func fillSeenForRead(t *testing.T, db *sql.DB) time.Duration {
+	t.Helper()
+	var n int64
+	full := time.Duration(0)
+	for step := range keptFillSteps {
+		for off := step * keptFillRows; off < (step+1)*keptFillRows; off += 50_000 {
+			mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+				INSERT INTO rollup_seen (day, vhost, band, family, session_id)
+				SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`, off, off+49_999)
+		}
+		full = time.Hour
+		for range 3 {
+			begin := time.Now()
+			check(t, db.QueryRow(keptSQL).Scan(&n))
+			full = min(full, time.Since(begin))
+		}
+		if full >= minKeptRead {
+			return full
+		}
+	}
+	t.Fatalf("the full read took %v, less than %v, with %d rows: the table is too small for this machine", full, minKeptRead, keptFillSteps*keptFillRows)
+	return 0
 }
 
 // T-U-28: through a run of the schedule, a slow read counts slow and not kept.
 // No evidence row goes and the writer stays healthy. The fixed line is in the
 // log for each run. The chunk commits, so the mark step of the run writes its
-// meta key. A second run works. After both, the writer writes an event.
+// meta key. A second run works. After both, the writer writes an event. The
+// deadline of 1 ns has passed before the query, so the driver does not run. The
+// next test has a real interrupt.
 func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 	r := newRig(t, 100)
 	addAggregates(t, r.db, 3000)
@@ -1436,6 +1467,34 @@ func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 	var out bytes.Buffer
 	s := keptSchedule(t, r, truncated(t, r)-1, &out)
 	s.keptLimit = time.Nanosecond
+	checkSlowRuns(t, r, s, &out)
+}
+
+// T-U-28: the operator condition with a real interrupt. The table is a large
+// rollup_seen, as in TestTU28KeptReadStopsInsideALargeTable. The deadline is a
+// quarter of the full read, so the driver interrupts the read. The two runs
+// meet every condition of the test above. The runs take at least the deadline
+// each, so the read began.
+func TestTU28SlowKeptReadWithARealInterruptLeavesThePoolWorking(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
+	full := fillSeenForRead(t, r.db)
+	var out bytes.Buffer
+	s := keptSchedule(t, r, truncated(t, r)-1, &out)
+	s.keptLimit = full / 4
+	begin := time.Now()
+	checkSlowRuns(t, r, s, &out)
+	if took := time.Since(begin); took < 2*s.keptLimit {
+		t.Fatalf("2 runs took %v, less than 2 deadlines of %v: the read did not begin", took, s.keptLimit)
+	}
+}
+
+// checkSlowRuns makes 2 runs of the schedule. Each must count slow and not
+// kept, and delete no evidence row. The writer stays healthy, the log has the
+// fixed line for each run, and the mark step writes its key. After the runs,
+// the writer writes an event.
+func checkSlowRuns(t *testing.T, r *rig, s *Schedule, out *bytes.Buffer) {
+	t.Helper()
 	for run := 1; run <= 2; run++ {
 		mustExec(t, r.db, "DELETE FROM meta WHERE key = 'retention_last'")
 		s.runOnce(context.Background())
@@ -1456,6 +1515,74 @@ func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 	}
 	if n := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); n != 1 || !r.w.Healthy() {
 		t.Fatalf("%d request rows after the runs, error %v; want the new event written", n, r.w.Err())
+	}
+}
+
+// lateRead makes a cap state at tier 3 with 3 evidence rows. The kept bytes are
+// at the target, so a read gives the reason kept. reads counts the reads. now is
+// the fake clock of the writer. It returns the steps of a chunk: a step that
+// moves the clock by prior, and the cap step.
+func lateRead(t *testing.T, prior, keptLimit time.Duration) (r *rig, c *capRun, steps []retentionStep, reads *int, reasons *[]string) {
+	t.Helper()
+	r = newRig(t, 100)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	now := time.Unix(0, 0)
+	r.w.clock = func() time.Time { return now }
+	c = forcedCap(r, rollTDel)
+	c.keptLimit = keptLimit
+	reasons, reads = recordUnmet(c), new(int)
+	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *reads++; return c.target, nil }
+	earlier := func(context.Context, *sql.Tx, int) (int, error) { now = now.Add(prior); return 0, nil }
+	return r, c, []retentionStep{earlier, c.evict}, reads, reasons
+}
+
+// T-U-28: the read of the kept bytes starts only when the chunk has keptLimit of
+// its budget left. An earlier step of 60 ms leaves 40 ms. The cap step then does
+// not read, and the chunk ends. The next chunk reads one time and gives the
+// reason. No evidence row goes.
+func TestTU28KeptReadWaitsForANewChunkWhenTheBudgetIsShort(t *testing.T) {
+	r, _, steps, reads, reasons := lateRead(t, 60*time.Millisecond, keptReadLimit)
+	cur := 0
+	rows, err := r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != chunkRows || cur != 1 || *reads != 0 || len(*reasons) != 0 {
+		t.Fatalf("first chunk: %d rows, step %d, %d reads, counted %q; want the chunk to end at the cap step with no read", rows, cur, *reads, *reasons)
+	}
+	rows, err = r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != 0 || cur != 2 || *reads != 1 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("second chunk: %d rows, step %d, %d reads, counted %q; want one read and kept", rows, cur, *reads, *reasons)
+	}
+	if cb := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"); cb != 3 {
+		t.Fatalf("%d callbacks left, want 3", cb)
+	}
+}
+
+// T-U-28: an earlier step of 10 ms leaves 90 ms. The read is in the same chunk.
+func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
+	r, _, steps, reads, reasons := lateRead(t, 10*time.Millisecond, keptReadLimit)
+	cur := 0
+	rows, err := r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != 0 || cur != 2 || *reads != 1 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("chunk: %d rows, step %d, %d reads, counted %q; want one read and kept in this chunk", rows, cur, *reads, *reasons)
+	}
+}
+
+// T-U-28: a limit above the chunk budget waits one time. The next chunk reads,
+// so the run ends and does not loop.
+func TestTU28KeptReadWaitsOneTimeForALimitAboveTheBudget(t *testing.T) {
+	r, _, steps, reads, reasons := lateRead(t, 0, 2*chunkBudget)
+	cur := 0
+	for chunk, want := range []int{0, 1} {
+		rows, err := r.w.chunkRun(steps, &cur, nil)
+		check(t, err)
+		if (rows == chunkRows) != (want == 0) || *reads != want {
+			t.Fatalf("chunk %d: %d rows, %d reads; want %d reads after it", chunk+1, rows, *reads, want)
+		}
+	}
+	if cur != 2 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("step %d, counted %q; want the run done with one kept", cur, *reasons)
 	}
 }
 

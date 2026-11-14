@@ -107,6 +107,7 @@ type capRun struct {
 	seenDay   string
 	keptKnown bool
 	kept      string
+	deferred  bool // the read waited one time for a new chunk
 
 	// keptLimit is the time that the read of the kept bytes can take. A test
 	// sets it. keptBytes replaces the dbstat read. A test sets it; nil in
@@ -429,7 +430,10 @@ func (c *capRun) live(ctx context.Context, tx *sql.Tx) (int64, error) {
 // above the cap. If so, each call evicts rows of one source and one UTC day.
 // This goes on until the live bytes are at most 90 % of the cap. A call starts
 // at tier 1. Thus a row stored between two chunks goes before any row of a
-// later tier. A call returns the limit while it can have work left.
+// later tier. A call returns the limit while it can have work left. Before the
+// read of the kept bytes, it checks the chunk time. With less than keptLimit of
+// the chunk budget left, it returns the limit and the read waits for the next
+// chunk. This happens one time at most in a run.
 func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 	if !c.begun {
 		c.begun = true
@@ -466,6 +470,11 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 	}
 	for i, tier := range c.tiers {
 		if i == len(c.tiers)-1 {
+			if c.lateStart(ctx) {
+				// The read would pass the chunk budget. A new chunk reads it.
+				c.deferred = true
+				return limit, nil
+			}
 			if reason, err := c.keptOver(ctx, tx); err != nil {
 				return 0, err
 			} else if reason != "" {
@@ -490,6 +499,19 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 	return 0, nil
 }
 
+// lateStart tells if the read of the kept bytes must wait for the next chunk.
+// It is so when the read is not known, the run has not deferred it, and the
+// time that the chunk used plus keptLimit is above chunkBudget. A run defers
+// one time at most, so a keptLimit above the budget cannot loop. A context with
+// no chunk start means that no earlier work is in the chunk.
+func (c *capRun) lateStart(ctx context.Context) bool {
+	start, ok := ctx.Value(chunkStartKey{}).(time.Time)
+	if !ok || c.keptKnown || c.deferred {
+		return false
+	}
+	return c.w.now().Sub(start)+c.keptLimit > chunkBudget
+}
+
 // note counts a cap that the run does not meet.
 func (c *capRun) note(reason string) {
 	if c.unmet != nil {
@@ -501,7 +523,8 @@ func (c *capRun) note(reason string) {
 // text. The reason kept means that the tables and indexes other than event hold
 // 90 % of the cap (SEC-41). No tier removes them. The reason slow means that
 // the read did not end in keptLimit. The run reads dbstat one time, when tier 3
-// is the next tier to run. The statement reads one dbstat row for each page, so
+// is the next tier to run, and the chunk has keptLimit of its budget left (see
+// lateStart). The statement reads one dbstat row for each page, so
 // the deadline stops the read inside a large table. A read that passes its
 // deadline is no error, and the chunk commits. An error of the chunk context
 // is returned. So is any other error.
