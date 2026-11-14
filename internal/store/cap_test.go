@@ -1356,7 +1356,7 @@ func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
 
 // T-U-28: a read of the kept bytes that passes its deadline counts slow, not
 // kept. The test uses the real statement. The deadline of 1 ns has passed
-// before the read starts, so the result does not depend on the speed of the
+// before the read starts. So the result does not depend on the speed of the
 // machine. Tier 3 does not run. The call returns 0 with no error. The
 // transaction still works.
 func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
