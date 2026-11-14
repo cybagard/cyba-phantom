@@ -52,6 +52,11 @@ const (
 	// takes longer stops, and the run does not run tier 3.
 	keptReadLimit = 50 * time.Millisecond
 
+	// keptStopMargin is the time that a read can need to stop after its
+	// deadline. A read starts only with keptReadLimit plus this margin left in
+	// the chunk budget.
+	keptStopMargin = 10 * time.Millisecond
+
 	// The reasons of a cap that a run does not meet.
 	reasonKept, reasonSlow, reasonStuck, reasonFault = "kept", "slow", "stuck", "fault"
 )
@@ -114,6 +119,10 @@ type capRun struct {
 	// production.
 	keptLimit time.Duration
 	keptBytes func(ctx context.Context, tx *sql.Tx) (int64, error)
+
+	// keptTook gets the time of the real read, from the start of its deadline.
+	// A test sets it; nil in production.
+	keptTook func(time.Duration)
 
 	// The pages of the next shrink statement, and the least and the most
 	// that the run used.
@@ -203,16 +212,16 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 // withCap puts the cap steps before the last step of a run. That step is the
 // mark step, which stays last. A cap of 0 or less adds no step. The run record
 // tells the runner where the cap steps start. unmet is called with the reason,
-// one time at most, when the run does not meet the cap. It can be nil. A
-// keptLimit above 0 replaces keptReadLimit: a test sets it.
-func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, unmet func(string), keptLimit time.Duration) []retentionStep {
+// one time at most, when the run does not meet the cap. It can be nil. tune
+// changes the cap state: a test sets it. It can be nil.
+func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, unmet func(string), tune func(*capRun)) []retentionStep {
 	if capBytes <= 0 || len(steps) == 0 {
 		return steps
 	}
 	c, last := newCapRun(w, capBytes, rel, now), len(steps)-1
 	c.unmet = unmet
-	if keptLimit > 0 {
-		c.keptLimit = keptLimit
+	if tune != nil {
+		tune(c)
 	}
 	if run != nil {
 		run.capAt = last + 1
@@ -431,9 +440,10 @@ func (c *capRun) live(ctx context.Context, tx *sql.Tx) (int64, error) {
 // This goes on until the live bytes are at most 90 % of the cap. A call starts
 // at tier 1. Thus a row stored between two chunks goes before any row of a
 // later tier. A call returns the limit while it can have work left. Before the
-// read of the kept bytes, it checks the chunk time. If less than keptLimit of
-// the chunk budget is left, it returns the limit. Then the read waits for the
-// next chunk. This happens one time at most in a run.
+// read of the kept bytes, it checks the chunk time. Less than keptLimit plus
+// keptStopMargin of the chunk budget can be left. Then it returns the limit,
+// and the read waits for the next chunk. This happens one time at most in a
+// run.
 func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 	if !c.begun {
 		c.begun = true
@@ -501,15 +511,16 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 
 // lateStart tells if the read of the kept bytes must wait for the next chunk.
 // It is so when the read is not known and the run has not deferred it. The
-// time that the chunk used, plus keptLimit, must be above chunkBudget. A run
-// defers one time at most, so a keptLimit above the budget cannot loop. A
-// context with no chunk start means that no earlier work is in the chunk.
+// time that the chunk used, plus keptLimit and keptStopMargin, must be above
+// chunkBudget. A run defers one time at most, so a keptLimit above the budget
+// cannot loop. A context with no chunk start means that no earlier work is in
+// the chunk.
 func (c *capRun) lateStart(ctx context.Context) bool {
 	start, ok := ctx.Value(chunkStartKey{}).(time.Time)
 	if !ok || c.keptKnown || c.deferred {
 		return false
 	}
-	return c.w.now().Sub(start)+c.keptLimit > chunkBudget
+	return c.w.now().Sub(start)+c.keptLimit+keptStopMargin > chunkBudget
 }
 
 // note counts a cap that the run does not meet.
@@ -523,8 +534,8 @@ func (c *capRun) note(reason string) {
 // text. The reason kept means that the tables and indexes other than event hold
 // 90 % of the cap (SEC-41). No tier removes them. The reason slow means that
 // the read did not end in keptLimit. The run reads dbstat one time. It reads
-// when tier 3 is the next tier to run. The chunk must have keptLimit of its
-// budget left (see lateStart). The statement reads one dbstat row for each
+// when tier 3 is the next tier to run. The chunk must have keptLimit plus
+// keptStopMargin of its budget left (see lateStart). The statement reads one dbstat row for each
 // page, so the deadline stops the read inside a large table. A read that
 // passes its deadline is no error, and the chunk commits. An error of the
 // chunk context is returned. So is any other error.
@@ -532,6 +543,7 @@ func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
 	if c.keptKnown {
 		return c.kept, nil
 	}
+	begin := time.Now()
 	rctx, cancel := context.WithTimeout(ctx, c.keptLimit)
 	defer cancel()
 	var n int64
@@ -540,6 +552,9 @@ func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
 		n, err = c.keptBytes(rctx, tx)
 	} else {
 		err = tx.QueryRowContext(rctx, keptSQL).Scan(&n)
+		if c.keptTook != nil {
+			c.keptTook(time.Since(begin))
+		}
 	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:

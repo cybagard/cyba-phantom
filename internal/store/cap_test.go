@@ -335,7 +335,7 @@ func truncated(t *testing.T, r *rig) int64 {
 func capRunOf(t *testing.T, r *rig, capBytes int64, first ...retentionStep) *retentionRun {
 	t.Helper()
 	run := &retentionRun{}
-	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil, 0)
+	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil, nil)
 	ctx, cancel := context.WithTimeout(withRun(context.Background(), run), waitFor)
 	defer cancel()
 	check(t, serveWithRun(r)(ctx, steps))
@@ -567,7 +567,7 @@ func TestTU11CapShrinkEndsWhenNoPageIsFreed(t *testing.T) {
 // after the last row has gone.
 func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	steps := []retentionStep{markStep(rollTDel)}
-	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil, 0); len(got) != 1 {
+	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil, nil); len(got) != 1 {
 		t.Fatalf("a cap of 0 gave %d steps, want 1", len(got))
 	}
 	for _, capBytes := range []int64{0, 1} {
@@ -1390,6 +1390,10 @@ func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 // TestTU28KeptReadStopsInsideALargeTable meaningful.
 const minKeptRead = 8 * time.Millisecond
 
+// minKeptLimit is the least deadline of the real-interrupt tests, a quarter of
+// minKeptRead. A shorter deadline is too close to the time of a skipped read.
+const minKeptLimit = minKeptRead / 4
+
 // T-U-28: the deadline stops the read inside one large table. The table is
 // rollup_seen, which is one btree, and it is in the line. F is the least time
 // of the full read of the real statement. A read with a deadline of F/4 must
@@ -1406,10 +1410,15 @@ func TestTU28KeptReadStopsInsideALargeTable(t *testing.T) {
 	defer tx.Rollback()
 	c := forcedCap(r, rollTDel)
 	c.keptBytes, c.keptLimit = nil, full/4
+	var read time.Duration
+	c.keptTook = func(d time.Duration) { read = d }
 	begin := time.Now()
 	reason, err := c.keptOver(context.Background(), tx)
 	if took := time.Since(begin); reason != reasonSlow || err != nil || took >= full*3/4 {
 		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow, no error, and less than 3/4 of the full time", reason, err, took, full)
+	}
+	if c.keptLimit < minKeptLimit || read < c.keptLimit {
+		t.Fatalf("the deadline is %v and the read took %v; want a deadline of at least %v and a read of at least the deadline", c.keptLimit, read, minKeptLimit)
 	}
 	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES ('probe', '1')"); err != nil {
 		t.Fatalf("the transaction does not work after the interrupt: %v", err)
@@ -1467,26 +1476,30 @@ func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
 	var out bytes.Buffer
 	s := keptSchedule(t, r, truncated(t, r)-1, &out)
-	s.keptLimit = time.Nanosecond
+	s.tune = func(c *capRun) { c.keptLimit = time.Nanosecond }
 	checkSlowRuns(t, r, s, &out)
 }
 
 // T-U-28: the operator condition with a real interrupt. The table is a large
 // rollup_seen, as in TestTU28KeptReadStopsInsideALargeTable. The deadline is a
 // quarter of the full read, so the driver interrupts the read. The two runs
-// meet every condition of the test above. The runs take at least the deadline
-// each, so the read began.
+// meet every condition of the test above. A hook records the time of each
+// real read. Each read takes at least the deadline. A read that is skipped, or
+// that has a deadline that passed before it, returns at once and fails this.
 func TestTU28SlowKeptReadWithARealInterruptLeavesThePoolWorking(t *testing.T) {
 	r := newRig(t, 100)
 	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
 	full := fillSeenForRead(t, r.db)
 	var out bytes.Buffer
 	s := keptSchedule(t, r, truncated(t, r)-1, &out)
-	s.keptLimit = full / 4
-	begin := time.Now()
+	var reads []time.Duration
+	s.tune = func(c *capRun) {
+		c.keptLimit = full / 4
+		c.keptTook = func(d time.Duration) { reads = append(reads, d) }
+	}
 	checkSlowRuns(t, r, s, &out)
-	if took := time.Since(begin); took < 2*s.keptLimit {
-		t.Fatalf("2 runs took %v, less than 2 deadlines of %v: the read did not begin", took, s.keptLimit)
+	if limit := full / 4; limit < minKeptLimit || len(reads) != 2 || reads[0] < limit || reads[1] < limit {
+		t.Fatalf("the deadline is %v (at least %v needed) and the reads took %v; want 2 reads of at least the deadline", limit, minKeptLimit, reads)
 	}
 }
 
@@ -1519,30 +1532,42 @@ func checkSlowRuns(t *testing.T, r *rig, s *Schedule, out *bytes.Buffer) {
 	}
 }
 
+// lateFix is the fixture of the late-start tests. steps are the steps of a
+// chunk: a step that moves the fake clock of the writer by *prior, and the cap
+// step. reads counts the reads of the kept bytes.
+type lateFix struct {
+	r       *rig
+	c       *capRun
+	steps   []retentionStep
+	reads   *int
+	reasons *[]string
+	prior   *time.Duration
+}
+
 // lateRead makes a cap state at tier 3 with 3 evidence rows. The kept bytes
-// are at the target, so a read gives the reason kept. reads counts the reads.
-// The writer has a fake clock. It returns the steps of a chunk: a step that
-// moves the clock by prior, and the cap step.
-func lateRead(t *testing.T, prior, keptLimit time.Duration) (r *rig, c *capRun, steps []retentionStep, reads *int, reasons *[]string) {
+// are at the target, so a read gives the reason kept.
+func lateRead(t *testing.T, prior, keptLimit time.Duration) lateFix {
 	t.Helper()
-	r = newRig(t, 100)
+	r := newRig(t, 100)
 	addHashed(t, r.db, "callback", 3, capDay(1), 0)
 	now := time.Unix(0, 0)
 	r.w.clock = func() time.Time { return now }
-	c = forcedCap(r, rollTDel)
+	c := forcedCap(r, rollTDel)
 	c.keptLimit = keptLimit
-	reasons, reads = recordUnmet(c), new(int)
-	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *reads++; return c.target, nil }
-	earlier := func(context.Context, *sql.Tx, int) (int, error) { now = now.Add(prior); return 0, nil }
-	return r, c, []retentionStep{earlier, c.evict}, reads, reasons
+	f := lateFix{r: r, c: c, reasons: recordUnmet(c), reads: new(int), prior: &prior}
+	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *f.reads++; return c.target, nil }
+	earlier := func(context.Context, *sql.Tx, int) (int, error) { now = now.Add(*f.prior); return 0, nil }
+	f.steps = []retentionStep{earlier, c.evict}
+	return f
 }
 
 // T-U-28: the read of the kept bytes starts only when the chunk has keptLimit
-// of its budget left. An earlier step of 60 ms leaves 40 ms. The cap step then
-// does not read, and the chunk ends. The next chunk reads one time and gives
-// the reason. No evidence row goes.
+// plus keptStopMargin of its budget left. An earlier step of 60 ms leaves 40
+// ms. The cap step then does not read, and the chunk ends. The next chunk
+// reads one time and gives the reason. No evidence row goes.
 func TestTU28KeptReadWaitsForANewChunkWhenTheBudgetIsShort(t *testing.T) {
-	r, _, steps, reads, reasons := lateRead(t, 60*time.Millisecond, keptReadLimit)
+	f := lateRead(t, 60*time.Millisecond, keptReadLimit)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
 	cur := 0
 	rows, err := r.w.chunkRun(steps, &cur, nil)
 	check(t, err)
@@ -1561,7 +1586,8 @@ func TestTU28KeptReadWaitsForANewChunkWhenTheBudgetIsShort(t *testing.T) {
 
 // T-U-28: an earlier step of 10 ms leaves 90 ms. The read is in the same chunk.
 func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
-	r, _, steps, reads, reasons := lateRead(t, 10*time.Millisecond, keptReadLimit)
+	f := lateRead(t, 10*time.Millisecond, keptReadLimit)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
 	cur := 0
 	rows, err := r.w.chunkRun(steps, &cur, nil)
 	check(t, err)
@@ -1570,10 +1596,51 @@ func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
 	}
 }
 
+// T-U-28: the margin pins the boundary. An earlier step of 40 ms, the read
+// limit of 50 ms and the margin of 10 ms make 100 ms, which is not above the
+// budget. The read is in the same chunk. With 41 ms, the read waits.
+func TestTU28KeptReadBoundaryOfTheStopMargin(t *testing.T) {
+	for _, c := range []struct {
+		prior time.Duration
+		reads int
+	}{{40 * time.Millisecond, 1}, {41 * time.Millisecond, 0}} {
+		f := lateRead(t, c.prior, keptReadLimit)
+		cur := 0
+		_, err := f.r.w.chunkRun(f.steps, &cur, nil)
+		check(t, err)
+		if *f.reads != c.reads {
+			t.Fatalf("an earlier step of %v: %d reads in the first chunk, want %d", c.prior, *f.reads, c.reads)
+		}
+	}
+}
+
+// T-U-28: once the read is known, a later chunk with an earlier step does not
+// wait. Chunk 1 reads, finds the size below the line, and evicts day 1. Chunk 2
+// has an earlier step of 60 ms. It evicts day 2 and reads nothing.
+func TestTU28KnownReadIsNotDeferredByALaterChunk(t *testing.T) {
+	f := lateRead(t, 0, keptReadLimit)
+	addHashed(t, f.r.db, "callback", 3, capDay(2), 3)
+	f.c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *f.reads++; return 0, nil }
+	callbacks := func() int { return count(t, f.r.db, "SELECT count(*) FROM event WHERE kind = 'callback'") }
+	cur := 0
+	_, err := f.r.w.chunkRun(f.steps, &cur, nil)
+	check(t, err)
+	if *f.reads != 1 || callbacks() != 3 {
+		t.Fatalf("chunk 1: %d reads, %d callbacks; want 1 and 3", *f.reads, callbacks())
+	}
+	*f.prior, cur = 60*time.Millisecond, 0
+	_, err = f.r.w.chunkRun(f.steps, &cur, nil)
+	check(t, err)
+	if *f.reads != 1 || callbacks() != 0 {
+		t.Fatalf("chunk 2: %d reads, %d callbacks; want 1 and 0", *f.reads, callbacks())
+	}
+}
+
 // T-U-28: a limit above the chunk budget waits one time. The next chunk reads,
 // so the run ends and does not loop.
 func TestTU28KeptReadWaitsOneTimeForALimitAboveTheBudget(t *testing.T) {
-	r, _, steps, reads, reasons := lateRead(t, 0, 2*chunkBudget)
+	f := lateRead(t, 0, 2*chunkBudget)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
 	cur := 0
 	for chunk, want := range []int{0, 1} {
 		rows, err := r.w.chunkRun(steps, &cur, nil)

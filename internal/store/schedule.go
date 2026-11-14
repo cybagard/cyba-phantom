@@ -62,8 +62,8 @@ type Schedule struct {
 	capLog    atomic.Bool
 	// The runs that did not meet the cap, for each reason.
 	capKept, capSlow, capStuck, capFaults atomic.Uint64
-	// keptLimit is set by a test. 0 means keptReadLimit.
-	keptLimit time.Duration
+	// tune changes the cap state of each run. A test sets it; nil in production.
+	tune func(*capRun)
 }
 
 // errCapName is the refusal of SetMaxBytes for a bad database name.
@@ -254,7 +254,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	// The mint order takes tDel, as the deletes do. A step forward of the wall
 	// clock must not make mint units look old.
-	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.keptLimit)
+	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
