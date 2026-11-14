@@ -61,7 +61,8 @@ type Schedule struct {
 	dbRel     string // the name that SetMaxBytes checked, relative to the root
 	capLog    atomic.Bool
 	// The runs that did not meet the cap, for each reason.
-	capKept, capStuck, capFaults atomic.Uint64
+	capKept, capSlow, capStuck, capFaults atomic.Uint64
+	keptLimit                             time.Duration // a test sets it; 0 means keptReadLimit
 }
 
 // errCapName is the refusal of SetMaxBytes for a bad database name.
@@ -111,13 +112,16 @@ func (s *Schedule) isOpenDatabase(rel string) bool {
 // capUnmet counts a run that does not meet the cap, with the reason. A fault
 // is that the files of the cap cannot be measured at the trigger. The run then
 // evicts nothing. The schedule writes one fixed log line for it, one time only.
-// A kept skip of tier 3 writes one fixed line in each run. No line has a path
-// or a row value.
+// A kept skip or a slow read of the kept bytes writes one fixed line in each
+// run. No line has a path or a row value.
 func (s *Schedule) capUnmet(reason string) {
 	switch reason {
 	case reasonKept:
 		s.capKept.Add(1)
 		s.lg.Error("retention cap not met: kept rows over the cap")
+	case reasonSlow:
+		s.capSlow.Add(1)
+		s.lg.Error("retention cap not met: kept read too slow")
 	case reasonStuck:
 		s.capStuck.Add(1)
 	case reasonFault:
@@ -131,7 +135,7 @@ func (s *Schedule) capUnmet(reason string) {
 // CapUnmet returns the counts of the runs that did not meet the cap, for each
 // reason. It is safe to call from any goroutine.
 func (s *Schedule) CapUnmet() CapUnmet {
-	return CapUnmet{Kept: s.capKept.Load(), Stuck: s.capStuck.Load(), Fault: s.capFaults.Load()}
+	return CapUnmet{Kept: s.capKept.Load(), Slow: s.capSlow.Load(), Stuck: s.capStuck.Load(), Fault: s.capFaults.Load()}
 }
 
 // NewSchedule makes the schedule of w. The days are the values of
@@ -249,7 +253,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	// The mint order takes tDel, as the deletes do. A step forward of the wall
 	// clock must not make mint units look old.
-	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet)
+	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.keptLimit)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)

@@ -153,16 +153,19 @@ func BenchmarkRawChild(b *testing.B) {
 const keptChildDir = "STORE_KEPT_CHILD_DIR"
 
 // BenchmarkKept measures the dbstat read of the cap step (SEC-41). It reads
-// the bytes of aggregate_day and checkpoint with their indexes. It has 3 sizes
-// of aggregate_day. The parent makes the table. The child process opens the
-// database and reads keptSQL in one transaction. It prints VmHWM and the time.
-// Run it with -benchtime=1x:
+// the bytes of each table and index other than event and its indexes. The
+// parent makes aggregate_day at each size, and 1 000 evidence rows. The child
+// process opens the database. It runs one cap chunk through capRun.evict with
+// the production deadline, from BEGIN to COMMIT, with tiers 1 and 2 empty. It
+// prints the time of that chunk and whether it counted slow. Then it reads
+// keptSQL with no deadline. It prints VmHWM and the time of that read. Run it
+// with -benchtime=1x:
 //
 //	PHANTOM_KEPT_ROWS=1000,10000,100000 go test -run '^$' \
 //	  -bench '^BenchmarkKept$' -benchtime=1x ./internal/store
 //
-// PHANTOM_KEPT_ROWS gives the 3 sizes (default 1000,10000,100000). Each row has
-// a vhost text of 64 bytes.
+// PHANTOM_KEPT_ROWS takes a list of sizes (default 1000,10000,100000). The
+// vhost of each row is 64 hex characters and the row number.
 func BenchmarkKept(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
@@ -191,6 +194,9 @@ func BenchmarkKept(b *testing.B) {
 					INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
 					SELECT '2027-01-01', hex(randomblob(32)) || i, 'human', '', 1, 1, 0 FROM c`, off, off+min(100_000, n-off)-1)
 			}
+			// The chunk of the child has evidence rows to evict, if tier 3 runs.
+			mustExec(b, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 999)
+				INSERT INTO event (ts, kind, hash, leaf_index) SELECT i, 'callback', zeroblob(32), i FROM c`)
 			mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
 			check(b, db.Close())
 			cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkKeptChild$", "-test.benchtime=1x")
@@ -211,6 +217,8 @@ func BenchmarkKept(b *testing.B) {
 			b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
 			b.ReportMetric(m["ms"], "read-ms")
 			b.ReportMetric(m["bytes"]/mib, "kept-MiB")
+			b.ReportMetric(m["chunk"], "chunk-ms")
+			b.ReportMetric(m["slow"], "slow-runs")
 		})
 	}
 }
@@ -223,15 +231,36 @@ func BenchmarkKeptChild(b *testing.B) {
 		b.Skip("child process of BenchmarkKept")
 	}
 	db := openState(b, dir)
-	tx, err := db.Begin()
+	q, err := event.NewQueue(1, event.NewCounters())
+	check(b, err)
+	ctx := context.Background()
+	// One cap chunk, from BEGIN to COMMIT, with the production deadline. The
+	// cap is small, so the run gets to tier 3 and reads the kept bytes.
+	c := newCapRun(NewWriter(db, q, false, nil, Recovery{}), 1000, "events.db", time.Now())
+	c.begun, c.over = true, true
+	slow := 0
+	c.unmet = func(reason string) {
+		if reason == reasonSlow {
+			slow = 1
+		}
+	}
+	begin := time.Now()
+	tx, err := db.BeginTx(ctx, nil)
+	check(b, err)
+	_, err = c.evict(ctx, tx, chunkRows)
+	check(b, err)
+	check(b, tx.Commit())
+	chunk := time.Since(begin)
+	// The read with no deadline.
+	tx, err = db.BeginTx(ctx, nil)
 	check(b, err)
 	var bytes int64
-	begin := time.Now()
-	err = tx.QueryRowContext(context.Background(), keptSQL).Scan(&bytes)
+	begin = time.Now()
+	err = tx.QueryRowContext(ctx, keptSQL).Scan(&bytes)
 	took := time.Since(begin)
 	check(b, err)
 	check(b, tx.Rollback())
-	fmt.Printf("kept-child rss=%d ms=%.3f bytes=%d\n", procStatus(b, "VmHWM"), ms(took), bytes)
+	fmt.Printf("kept-child rss=%d ms=%.3f bytes=%d chunk=%.3f slow=%d\n", procStatus(b, "VmHWM"), ms(took), bytes, ms(chunk), slow)
 }
 
 const (

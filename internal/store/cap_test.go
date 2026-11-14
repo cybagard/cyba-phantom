@@ -335,7 +335,7 @@ func truncated(t *testing.T, r *rig) int64 {
 func capRunOf(t *testing.T, r *rig, capBytes int64, first ...retentionStep) *retentionRun {
 	t.Helper()
 	run := &retentionRun{}
-	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil)
+	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil, 0)
 	ctx, cancel := context.WithTimeout(withRun(context.Background(), run), waitFor)
 	defer cancel()
 	check(t, serveWithRun(r)(ctx, steps))
@@ -567,7 +567,7 @@ func TestTU11CapShrinkEndsWhenNoPageIsFreed(t *testing.T) {
 // after the last row has gone.
 func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	steps := []retentionStep{markStep(rollTDel)}
-	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil); len(got) != 1 {
+	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil, 0); len(got) != 1 {
 		t.Fatalf("a cap of 0 gave %d steps, want 1", len(got))
 	}
 	for _, capBytes := range []int64{0, 1} {
@@ -1151,23 +1151,25 @@ func keptSchedule(t *testing.T, r *rig, capBytes int64, out *bytes.Buffer) *Sche
 	return s
 }
 
-// T-U-28, SEC-41: with aggregate_day or checkpoint over 90 % of a small cap, a
-// run deletes no evidence row. It counts one kept, and the writer stays
-// healthy. The log has the fixed line for each run. A second run counts 1
-// more. No run
+// T-U-28, SEC-41: the tables other than event hold over 90 % of a small cap.
+// The test fills aggregate_day, checkpoint and rollup_seen, each alone. A run
+// deletes no evidence row. It counts one kept, and the writer stays healthy.
+// The log has the fixed line for each run. A second run counts 1 more. No run
 // counts a stuck.
 func TestTU28KeptRowsOverTheLineKeepTheEvidence(t *testing.T) {
-	for _, table := range []string{"aggregate_day", "checkpoint"} {
+	fill := map[string]string{
+		"aggregate_day": `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 2999)
+			INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
+			SELECT '2026-12-01', hex(randomblob(60)) || i, 'human', '', 1, 1, 0 FROM c`,
+		"checkpoint": `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 3000)
+			INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) SELECT i, zeroblob(32), hex(randomblob(250)), i FROM c`,
+		"rollup_seen": `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 3999)
+			INSERT INTO rollup_seen (day, vhost, band, family, session_id) SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`,
+	}
+	for table, q := range fill {
 		t.Run(table, func(t *testing.T) {
 			r := newRig(t, 100)
-			if table == "aggregate_day" {
-				mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 2999)
-					INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
-					SELECT '2026-12-01', hex(randomblob(60)) || i, 'human', '', 1, 1, 0 FROM c`)
-			} else {
-				mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 3000)
-					INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) SELECT i, zeroblob(32), hex(randomblob(250)), i FROM c`)
-			}
+			mustExec(t, r.db, q)
 			addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
 			var out bytes.Buffer
 			s := keptSchedule(t, r, truncated(t, r)-1, &out)
@@ -1290,6 +1292,9 @@ func TestTU28SeenRowsOfAnEvictedDayGoInChunks(t *testing.T) {
 		t.Fatalf("last call: returned %d, %d gone; day 1 %d, day 2 %d, older day %d seen rows; want 0, 0, 0, 3 and 2",
 			n, gone, left("2027-01-01"), left("2027-01-02"), left("2026-12-31"))
 	}
+	if c.seenDay != "" {
+		t.Fatalf("the day %q is still pending after its last seen row went", c.seenDay)
+	}
 	if len(measured) != 2 || measured[0] != 15 || measured[1] != 5 {
 		t.Fatalf("the measure saw %v seen rows, want 15 before the delete and 5 after", measured)
 	}
@@ -1309,5 +1314,225 @@ func TestTU28SeenRowsStayWhileTheDayHasARequestRow(t *testing.T) {
 		if got := count(t, r.db, "SELECT count(*) FROM rollup_seen"); got != want {
 			t.Fatalf("after call %d: %d seen rows, want %d", i+1, got, want)
 		}
+	}
+}
+
+// addAggregates inserts n rows into aggregate_day, one vhost for each row.
+func addAggregates(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	for off := 0; off < n; off += 50_000 {
+		mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+			INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
+			SELECT '2026-12-01', hex(randomblob(32)) || i, 'human', '', 1, 1, 0 FROM c`, off, off+min(50_000, n-off)-1)
+	}
+}
+
+// T-U-28, SEC-41: the kept bytes are those of each table and index other than
+// event and its indexes, and of the schema table. A large event table is not in
+// them. The expected value is the sum of all objects of dbstat less the sum of
+// the event objects.
+func TestTU28KeptBytesLeaveOutTheEventTable(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 50_000, capDay(1), 0)
+	addAggregates(t, r.db, 100)
+	addSeen(t, r.db, "2027-01-01", 100)
+	var kept, all, ev int64
+	check(t, r.db.QueryRow(keptSQL).Scan(&kept))
+	check(t, r.db.QueryRow("SELECT sum(pgsize) FROM dbstat WHERE aggregate = TRUE").Scan(&all))
+	check(t, r.db.QueryRow(`SELECT sum(pgsize) FROM dbstat WHERE aggregate = TRUE AND
+		name IN (SELECT name FROM sqlite_schema WHERE tbl_name = 'event')`).Scan(&ev))
+	if kept != all-ev || ev < 50*kept {
+		t.Fatalf("kept %d bytes, all %d, event %d; want kept = all - event, and a large event table", kept, all, ev)
+	}
+}
+
+// T-U-28: the production cap state has a read limit of 50 ms.
+func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
+	c := newCapRun(newRig(t, 100).w, 1000, "events.db", rollTDel)
+	if keptReadLimit != 50*time.Millisecond || c.keptLimit != keptReadLimit {
+		t.Fatalf("the limit is %v and the cap state has %v, want 50ms", keptReadLimit, c.keptLimit)
+	}
+}
+
+// T-U-28: a read of the kept bytes that passes its deadline counts slow, not
+// kept. The test uses the real statement and a table that takes more than the
+// deadline. The read ends no earlier than the deadline, so it began. Tier 3 does
+// not run, the call returns 0 with no error, and the transaction still works.
+func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
+	r := newRig(t, 100)
+	addAggregates(t, r.db, 40_000)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = nil, time.Millisecond
+	reasons := recordUnmet(c)
+	tx, err := r.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	begin := time.Now()
+	reason, err := c.keptOver(context.Background(), tx)
+	took := time.Since(begin)
+	var bytes int64
+	begin = time.Now()
+	check(t, tx.QueryRow(keptSQL).Scan(&bytes))
+	if full := time.Since(begin); reason != reasonSlow || err != nil || took < c.keptLimit || full < c.keptLimit {
+		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow and no error after the deadline, with a read that takes longer", reason, err, took, full)
+	}
+	n, err := c.evict(context.Background(), tx, chunkRows)
+	if n != 0 || err != nil || len(*reasons) != 1 || (*reasons)[0] != reasonSlow || !c.done {
+		t.Fatalf("evict returned %d and %v, counted %q, done %v; want 0, no error, one slow and done", n, err, *reasons, c.done)
+	}
+	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES ('probe', '1')"); err != nil {
+		t.Fatalf("the transaction does not work after the deadline: %v", err)
+	}
+	check(t, tx.Commit())
+	if cb := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"); cb != 3 {
+		t.Fatalf("%d callbacks left, want 3", cb)
+	}
+}
+
+// T-U-28: through a run of the schedule, a slow read counts slow and not kept.
+// No evidence row goes and the writer stays healthy. The fixed line is in the
+// log for each run. The chunk commits, so the mark step of the run writes its
+// meta key. A second run works. After both, the writer writes an event.
+func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
+	r := newRig(t, 100)
+	addAggregates(t, r.db, 40_000)
+	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
+	var out bytes.Buffer
+	s := keptSchedule(t, r, truncated(t, r)-1, &out)
+	s.keptLimit = time.Millisecond
+	for run := 1; run <= 2; run++ {
+		mustExec(t, r.db, "DELETE FROM meta WHERE key = 'retention_last'")
+		s.runOnce(context.Background())
+		left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+		mark := count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'retention_last'")
+		if got := s.CapUnmet(); left != 20 || mark != 1 || got != (CapUnmet{Slow: uint64(run)}) || !r.w.Healthy() ||
+			strings.Count(out.String(), "msg=\"retention cap not met: kept read too slow\"\n") != run {
+			t.Fatalf("run %d: %d callbacks, %d marks, counts %+v, healthy %v, log %q; want 20, 1, %d slow only, healthy and %d lines",
+				run, left, mark, got, r.w.Healthy(), out.String(), run, run)
+		}
+	}
+	// The fake log has no leaf for the callbacks, so the start check would refuse them.
+	mustExec(t, r.db, "DELETE FROM event")
+	r.add(event.KindRequest, rollTDel.UnixMilli())
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("the writer failed after the runs: %v", err)
+	}
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); n != 1 || !r.w.Healthy() {
+		t.Fatalf("%d request rows after the runs, error %v; want the new event written", n, r.w.Err())
+	}
+}
+
+// T-U-28: an error of the chunk context is not a slow read. A deadline of the
+// chunk and a cancel of the chunk are returned, and nothing is counted. A read
+// that ends at its own deadline is slow, and the next call reads nothing.
+func TestTU28ReadErrorsOfTheChunkAreNotSlow(t *testing.T) {
+	wait := func(ctx context.Context, _ *sql.Tx) (int64, error) { <-ctx.Done(); return 0, ctx.Err() }
+	for name, mk := range map[string]func() (context.Context, context.CancelFunc){
+		"deadline": func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Millisecond)
+		},
+		"cancel": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(20*time.Millisecond, cancel)
+			return ctx, cancel
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			c := forcedCap(r, rollTDel)
+			c.keptBytes, c.keptLimit = wait, time.Hour
+			reasons := recordUnmet(c)
+			ctx, cancel := mk()
+			defer cancel()
+			tx, err := r.db.Begin()
+			check(t, err)
+			defer tx.Rollback()
+			reason, err := c.keptOver(ctx, tx)
+			if err == nil || reason != "" || len(*reasons) != 0 {
+				t.Fatalf("reason %q, error %v, counted %q; want the error and no count", reason, err, *reasons)
+			}
+		})
+	}
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = wait, time.Millisecond
+	reasons := recordUnmet(c)
+	callIn(t, r.db, c.evict, chunkRows)
+	callIn(t, r.db, c.evict, chunkRows)
+	if left := count(t, r.db, "SELECT count(*) FROM event"); left != 3 || len(*reasons) != 1 || (*reasons)[0] != reasonSlow {
+		t.Fatalf("%d rows left, counted %q; want 3 and one slow", left, *reasons)
+	}
+}
+
+// T-U-28: an error of the roll-up inside the request source is returned, and
+// the chunk can roll back. A trigger on aggregate_day stops the insert. The
+// source must not report rows that it removed, and it must not set a seen day.
+func TestTU28RollUpErrorOfTheRequestSourceIsReturned(t *testing.T) {
+	r := newRig(t, 100)
+	mustExec(t, r.db, "CREATE TRIGGER stop_agg BEFORE INSERT ON aggregate_day BEGIN SELECT RAISE(ABORT, 'stopped'); END")
+	addEvents(t, r.db, "request", 5, capDay(1), 0, nil, nil)
+	c := forcedCap(r, rollTDel)
+	tx, err := r.db.Begin()
+	check(t, err)
+	n, err := c.evict(context.Background(), tx, chunkRows)
+	check(t, tx.Rollback())
+	if err == nil || n != 0 || c.seenDay != "" {
+		t.Fatalf("evict returned %d and %v, seen day %q; want 0, an error and no day", n, err, c.seenDay)
+	}
+	if left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); left != 5 {
+		t.Fatalf("%d request rows left, want 5", left)
+	}
+}
+
+// liveOf returns the live bytes of the cap state, from its own measure.
+func liveOf(t *testing.T, c *capRun) int64 {
+	t.Helper()
+	tx, err := c.w.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	v, err := c.live(context.Background(), tx)
+	check(t, err)
+	return v
+}
+
+// T-U-28: the live size counts the seen rows before the delete. The test uses
+// no measure hook, so the page counts are read. 5 000 seen rows of a young day
+// make the live size larger than that of a database with none. It falls after
+// the seen delete, and it stays down after the shrink step.
+func TestTU28LiveSizeCountsTheSeenRowsUntilTheyGo(t *testing.T) {
+	empty := forcedCap(newRig(t, 100), rollTDel)
+	empty.measure = nil
+	base := liveOf(t, empty)
+	r := newRig(t, 100)
+	addEvents(t, r.db, "request", 1, capDay(1), 0, nil, nil)
+	mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 4999)
+		INSERT INTO rollup_seen (day, vhost, band, family, session_id) SELECT '2027-01-01', 'v', 'human', '', hex(randomblob(24)) || i FROM c`)
+	c := forcedCap(r, rollTDel)
+	c.measure = nil
+	_, _, size := dbPages(t, r.db)
+	before := liveOf(t, c)
+	if before < base+40*size {
+		t.Fatalf("live %d bytes with the seen rows, %d without; want at least 40 pages more", before, base)
+	}
+	for range 100 {
+		if callIn(t, r.db, c.evict, chunkRows) == 0 {
+			break
+		}
+	}
+	if left := count(t, r.db, "SELECT count(*) FROM rollup_seen"); left != 0 {
+		t.Fatalf("%d seen rows left, want 0", left)
+	}
+	afterDelete := liveOf(t, c)
+	for range 1000 {
+		if callIn(t, r.db, c.shrink, chunkRows) == 0 {
+			break
+		}
+	}
+	if afterShrink := liveOf(t, c); afterDelete > before-40*size || afterShrink > afterDelete || afterShrink > base+8*size {
+		t.Fatalf("live %d before, %d after the delete, %d after the shrink, %d for an empty database; want a fall of 40 pages and a return near the empty size",
+			before, afterDelete, afterShrink, base)
 	}
 }
