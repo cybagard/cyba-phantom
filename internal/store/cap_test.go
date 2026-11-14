@@ -1428,8 +1428,8 @@ const (
 )
 
 // fillSeenForRead adds rows to rollup_seen, keptFillRows at a time. It stops
-// when the least of 3 full reads of the real statement is at least minKeptRead,
-// and returns that time. At the last step it fails with a message that names
+// when the least of 3 full reads of the real statement is at least minKeptRead.
+// It returns that time. At the last step it fails with a message that names
 // the time.
 func fillSeenForRead(t *testing.T, db *sql.DB) time.Duration {
 	t.Helper()
