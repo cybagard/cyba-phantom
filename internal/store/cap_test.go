@@ -1356,10 +1356,10 @@ func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
 
 // T-U-28: a read of the kept bytes that passes its deadline counts slow, not
 // kept. The deadline of 1 ns has passed before the query. The database/sql
-// package returns the error before the driver runs, so the test does not
+// package returns the error before the driver runs. So the test does not
 // reach the interrupt of the driver. It does not depend on the speed of the
-// machine. It tests the count. Tier 3 does not run. The call returns 0 with no
-// error. The transaction still works.
+// machine. It tests the count. Tier 3 does not run. The call returns 0 with
+// no error. The transaction still works.
 func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 	r := newRig(t, 100)
 	addAggregates(t, r.db, 100)
@@ -1427,9 +1427,10 @@ const (
 	keptFillSteps = 6
 )
 
-// fillSeenForRead adds rows to rollup_seen, keptFillRows at a time, until the
-// least of 3 full reads of the real statement is at least minKeptRead. It
-// returns that time. At the last step it fails with a message that names it.
+// fillSeenForRead adds rows to rollup_seen, keptFillRows at a time. It stops
+// when the least of 3 full reads of the real statement is at least minKeptRead,
+// and returns that time. At the last step it fails with a message that names
+// the time.
 func fillSeenForRead(t *testing.T, db *sql.DB) time.Duration {
 	t.Helper()
 	var n int64
@@ -1518,9 +1519,9 @@ func checkSlowRuns(t *testing.T, r *rig, s *Schedule, out *bytes.Buffer) {
 	}
 }
 
-// lateRead makes a cap state at tier 3 with 3 evidence rows. The kept bytes are
-// at the target, so a read gives the reason kept. reads counts the reads. now is
-// the fake clock of the writer. It returns the steps of a chunk: a step that
+// lateRead makes a cap state at tier 3 with 3 evidence rows. The kept bytes
+// are at the target, so a read gives the reason kept. reads counts the reads.
+// The writer has a fake clock. It returns the steps of a chunk: a step that
 // moves the clock by prior, and the cap step.
 func lateRead(t *testing.T, prior, keptLimit time.Duration) (r *rig, c *capRun, steps []retentionStep, reads *int, reasons *[]string) {
 	t.Helper()
@@ -1536,10 +1537,10 @@ func lateRead(t *testing.T, prior, keptLimit time.Duration) (r *rig, c *capRun, 
 	return r, c, []retentionStep{earlier, c.evict}, reads, reasons
 }
 
-// T-U-28: the read of the kept bytes starts only when the chunk has keptLimit of
-// its budget left. An earlier step of 60 ms leaves 40 ms. The cap step then does
-// not read, and the chunk ends. The next chunk reads one time and gives the
-// reason. No evidence row goes.
+// T-U-28: the read of the kept bytes starts only when the chunk has keptLimit
+// of its budget left. An earlier step of 60 ms leaves 40 ms. The cap step then
+// does not read, and the chunk ends. The next chunk reads one time and gives
+// the reason. No evidence row goes.
 func TestTU28KeptReadWaitsForANewChunkWhenTheBudgetIsShort(t *testing.T) {
 	r, _, steps, reads, reasons := lateRead(t, 60*time.Millisecond, keptReadLimit)
 	cur := 0
