@@ -1596,9 +1596,9 @@ func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
 	}
 }
 
-// T-U-28: the margin pins the boundary. An earlier step of 40 ms, the read
-// limit of 50 ms and the margin of 10 ms make 100 ms. This is not above the
-// budget, so the read is in the same chunk. With 41 ms, the read waits.
+// T-U-28: the margin pins the boundary. Take an earlier step of 40 ms, the
+// limit of 50 ms and the margin of 10 ms. They make 100 ms. This is not above
+// the budget, so the read is in the same chunk. With 41 ms, the read waits.
 func TestTU28KeptReadBoundaryOfTheStopMargin(t *testing.T) {
 	for _, c := range []struct {
 		prior time.Duration
