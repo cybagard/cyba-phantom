@@ -1532,9 +1532,9 @@ func checkSlowRuns(t *testing.T, r *rig, s *Schedule, out *bytes.Buffer) {
 	}
 }
 
-// lateFix is the fixture of the late-start tests. steps are the steps of a
-// chunk: a step that moves the fake clock of the writer by *prior, and the cap
-// step. reads counts the reads of the kept bytes.
+// lateFix is the fixture of the late-start tests. The steps make a chunk. One
+// step moves the fake clock of the writer by *prior. The other is the cap step.
+// The field reads counts the reads of the kept bytes.
 type lateFix struct {
 	r       *rig
 	c       *capRun
@@ -1597,8 +1597,8 @@ func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
 }
 
 // T-U-28: the margin pins the boundary. An earlier step of 40 ms, the read
-// limit of 50 ms and the margin of 10 ms make 100 ms, which is not above the
-// budget. The read is in the same chunk. With 41 ms, the read waits.
+// limit of 50 ms and the margin of 10 ms make 100 ms. This is not above the
+// budget, so the read is in the same chunk. With 41 ms, the read waits.
 func TestTU28KeptReadBoundaryOfTheStopMargin(t *testing.T) {
 	for _, c := range []struct {
 		prior time.Duration

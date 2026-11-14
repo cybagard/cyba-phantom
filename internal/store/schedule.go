@@ -62,7 +62,8 @@ type Schedule struct {
 	capLog    atomic.Bool
 	// The runs that did not meet the cap, for each reason.
 	capKept, capSlow, capStuck, capFaults atomic.Uint64
-	// tune changes the cap state of each run. A test sets it; nil in production.
+	// tune changes the cap state of each run. A test sets it. It is nil in
+	// production.
 	tune func(*capRun)
 }
 

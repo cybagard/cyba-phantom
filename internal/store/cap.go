@@ -535,10 +535,10 @@ func (c *capRun) note(reason string) {
 // 90 % of the cap (SEC-41). No tier removes them. The reason slow means that
 // the read did not end in keptLimit. The run reads dbstat one time. It reads
 // when tier 3 is the next tier to run. The chunk must have keptLimit plus
-// keptStopMargin of its budget left (see lateStart). The statement reads one dbstat row for each
-// page, so the deadline stops the read inside a large table. A read that
-// passes its deadline is no error, and the chunk commits. An error of the
-// chunk context is returned. So is any other error.
+// keptStopMargin of its budget left (see lateStart). The statement reads one
+// dbstat row for each page, so the deadline stops the read inside a large
+// table. A read that passes its deadline is no error, and the chunk commits.
+// An error of the chunk context is returned. So is any other error.
 func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
 	if c.keptKnown {
 		return c.kept, nil
