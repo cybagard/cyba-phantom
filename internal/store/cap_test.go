@@ -1000,10 +1000,11 @@ func faultRun(t *testing.T, r *rig, rel string, tamper func()) {
 	}
 }
 
-// T-U-11: the trigger has a cap fault in four cases. The database file can be
+// T-U-11: the trigger has a cap fault in five cases. The database file can be
 // missing, as after a rename. A directory can be at the name. A directory part
-// of the name can be a file (ENOTDIR). A directory can be at the WAL name. A
-// missing WAL is no fault: the run evicts and writes no log line.
+// of the name can be a file (ENOTDIR). A directory can be at the WAL name. The
+// WAL name can give an Lstat error that is not a missing file. A missing WAL
+// is no fault: the run evicts and writes no log line.
 func TestTU11CapNotAppliedWhenTheNameIsNotTheDatabaseFile(t *testing.T) {
 	t.Run("directory at the WAL name", func(t *testing.T) {
 		r := newRig(t, 100)
