@@ -155,8 +155,8 @@ const keptChildDir = "STORE_KEPT_CHILD_DIR"
 // BenchmarkKept measures the dbstat read of the cap step (SEC-41). It reads
 // the bytes of each table and index other than event and its indexes. The
 // parent makes aggregate_day at each size, and 1 000 evidence rows. The child
-// process opens the database. It runs one cap chunk through capRun.evict with
-// the production deadline, from BEGIN to COMMIT, with tiers 1 and 2 empty. It
+// process opens the database. It runs one cap chunk through capRun.evict, from
+// BEGIN to COMMIT, with the production deadline and tiers 1 and 2 empty. It
 // prints the time of that chunk and whether it counted slow. Then it reads
 // keptSQL with no deadline. It prints VmHWM and the time of that read. Run it
 // with -benchtime=1x:
@@ -194,7 +194,7 @@ func BenchmarkKept(b *testing.B) {
 					INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
 					SELECT '2027-01-01', hex(randomblob(32)) || i, 'human', '', 1, 1, 0 FROM c`, off, off+min(100_000, n-off)-1)
 			}
-			// The chunk of the child has evidence rows to evict, if tier 3 runs.
+			// The chunk of the child can evict these, if tier 3 runs.
 			mustExec(b, db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 999)
 				INSERT INTO event (ts, kind, hash, leaf_index) SELECT i, 'callback', zeroblob(32), i FROM c`)
 			mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")

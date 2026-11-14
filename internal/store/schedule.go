@@ -62,7 +62,8 @@ type Schedule struct {
 	capLog    atomic.Bool
 	// The runs that did not meet the cap, for each reason.
 	capKept, capSlow, capStuck, capFaults atomic.Uint64
-	keptLimit                             time.Duration // a test sets it; 0 means keptReadLimit
+	// keptLimit is set by a test. 0 means keptReadLimit.
+	keptLimit time.Duration
 }
 
 // errCapName is the refusal of SetMaxBytes for a bad database name.

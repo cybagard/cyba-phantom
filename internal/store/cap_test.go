@@ -1328,9 +1328,9 @@ func addAggregates(t *testing.T, db *sql.DB, n int) {
 }
 
 // T-U-28, SEC-41: the kept bytes are those of each table and index other than
-// event and its indexes, and of the schema table. A large event table is not in
-// them. The expected value is the sum of all objects of dbstat less the sum of
-// the event objects.
+// event and its indexes, and of the schema table. A large event table is not
+// in them. The expected value is the sum of all objects of dbstat, less the
+// sum of the event objects.
 func TestTU28KeptBytesLeaveOutTheEventTable(t *testing.T) {
 	r := newRig(t, 100)
 	addHashed(t, r.db, "callback", 50_000, capDay(1), 0)
@@ -1356,8 +1356,8 @@ func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
 
 // T-U-28: a read of the kept bytes that passes its deadline counts slow, not
 // kept. The test uses the real statement and a table that takes more than the
-// deadline. The read ends no earlier than the deadline, so it began. Tier 3 does
-// not run, the call returns 0 with no error, and the transaction still works.
+// deadline. The read ends no earlier than the deadline, so it began. Tier 3
+// does not run. The call returns 0 with no error. The transaction still works.
 func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
 	r := newRig(t, 100)
 	addAggregates(t, r.db, 40_000)
@@ -1412,7 +1412,7 @@ func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
 				run, left, mark, got, r.w.Healthy(), out.String(), run, run)
 		}
 	}
-	// The fake log has no leaf for the callbacks, so the start check would refuse them.
+	// The fake log has no leaf for the callbacks. The start check refuses them.
 	mustExec(t, r.db, "DELETE FROM event")
 	r.add(event.KindRequest, rollTDel.UnixMilli())
 	r.q.Close()

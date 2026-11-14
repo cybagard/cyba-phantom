@@ -494,12 +494,13 @@ func (c *capRun) note(reason string) {
 	}
 }
 
-// keptOver tells if tier 3 must not run. It returns the reason: kept when the
-// tables and indexes other than event hold 90 % of the cap or more (SEC-41),
-// slow when the read does not end in keptLimit, and "" otherwise. No tier
-// removes these tables. The run reads dbstat one time, when tier 3 is the next
-// tier to run. A read that passes its deadline is no error: the chunk commits.
-// An error of the chunk context, or any other error, is returned.
+// keptOver tells if tier 3 must not run. It returns the reason, or "". The
+// reason kept means that the tables and indexes other than event hold 90 % of
+// the cap or more (SEC-41). No tier removes them. The reason slow means that
+// the read did not end in keptLimit. The run reads dbstat one time, when tier 3
+// is the next tier to run. A read that passes its deadline is no error, and the
+// chunk commits. An error of the chunk context is returned. So is any other
+// error.
 func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
 	if c.keptKnown {
 		return c.kept, nil
