@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -147,6 +148,90 @@ func BenchmarkRawChild(b *testing.B) {
 	}
 	fmt.Printf("raw-child rss=%d ms=%.3f longest=%.3f rows=%d wal=%d db=%d\n", procStatus(b, "VmHWM"),
 		ms(total), ms(longest), rows, fileSize(filepath.Join(dir, "events.db-wal")), fileSize(filepath.Join(dir, "events.db")))
+}
+
+const keptChildDir = "STORE_KEPT_CHILD_DIR"
+
+// BenchmarkKept measures the dbstat read of the cap step (SEC-41). It reads
+// the bytes of aggregate_day and checkpoint with their indexes. It has 3 sizes
+// of aggregate_day. The parent makes the table. The child process opens the
+// database and reads keptSQL in one transaction. It prints VmHWM and the time.
+// Run it with -benchtime=1x:
+//
+//	PHANTOM_KEPT_ROWS=1000,10000,100000 go test -run '^$' \
+//	  -bench '^BenchmarkKept$' -benchtime=1x ./internal/store
+//
+// PHANTOM_KEPT_ROWS gives the 3 sizes (default 1000,10000,100000). Each row has
+// a vhost text of 64 bytes.
+func BenchmarkKept(b *testing.B) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
+	}
+	sizes := []int{1000, 10_000, 100_000}
+	if s := os.Getenv("PHANTOM_KEPT_ROWS"); s != "" {
+		sizes = sizes[:0]
+		for _, f := range strings.Split(s, ",") {
+			v, err := strconv.Atoi(f)
+			if err != nil || v < 1 {
+				b.Fatalf("PHANTOM_KEPT_ROWS %q: want numbers of rows, with commas", s)
+			}
+			sizes = append(sizes, v)
+		}
+	}
+	for _, n := range sizes {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			top, err := filepath.EvalSymlinks(b.TempDir())
+			check(b, err)
+			state := filepath.Join(top, "state")
+			check(b, os.Mkdir(state, 0o700))
+			db := openState(b, state)
+			check(b, Migrate(db, "origin"))
+			for off := 0; off < n; off += 100_000 {
+				mustExec(b, db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+					INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
+					SELECT '2027-01-01', hex(randomblob(32)) || i, 'human', '', 1, 1, 0 FROM c`, off, off+min(100_000, n-off)-1)
+			}
+			mustExec(b, db, "PRAGMA wal_checkpoint(TRUNCATE)")
+			check(b, db.Close())
+			cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkKeptChild$", "-test.benchtime=1x")
+			cmd.Env = append(os.Environ(), keptChildDir+"="+state)
+			out, err := cmd.CombinedOutput()
+			m := map[string]float64{}
+			for _, line := range strings.Split(string(out), "\n") {
+				if fields, ok := strings.CutPrefix(line, "kept-child "); ok && err == nil {
+					for _, kv := range strings.Fields(fields) {
+						k, v, _ := strings.Cut(kv, "=")
+						m[k], _ = strconv.ParseFloat(v, 64)
+					}
+				}
+			}
+			if m["rss"] == 0 || m["bytes"] == 0 {
+				b.Fatalf("child: %v\n%s", err, out)
+			}
+			b.ReportMetric(m["rss"]/mib, "peak-rss-MiB")
+			b.ReportMetric(m["ms"], "read-ms")
+			b.ReportMetric(m["bytes"]/mib, "kept-MiB")
+		})
+	}
+}
+
+// BenchmarkKeptChild is the child process of BenchmarkKept. Without its
+// environment variable, it skips.
+func BenchmarkKeptChild(b *testing.B) {
+	dir := os.Getenv(keptChildDir)
+	if dir == "" {
+		b.Skip("child process of BenchmarkKept")
+	}
+	db := openState(b, dir)
+	tx, err := db.Begin()
+	check(b, err)
+	var bytes int64
+	begin := time.Now()
+	err = tx.QueryRowContext(context.Background(), keptSQL).Scan(&bytes)
+	took := time.Since(begin)
+	check(b, err)
+	check(b, tx.Rollback())
+	fmt.Printf("kept-child rss=%d ms=%.3f bytes=%d\n", procStatus(b, "VmHWM"), ms(took), bytes)
 }
 
 const (

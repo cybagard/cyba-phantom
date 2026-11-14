@@ -35,7 +35,28 @@ const (
 	oldestCounterSQL = "SELECT min(day) FROM ip_counter"
 	oldestTokenSQL   = "SELECT first_cb_at FROM token WHERE first_cb_at IS NOT NULL ORDER BY first_cb_at LIMIT 1"
 	evictEvidenceSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind = ? AND ts < ? LIMIT ?)"
+
+	// evictSeenSQL deletes the seen rows of one day, at most the limit. keptSQL
+	// gives the bytes of the tables that no tier removes, with their indexes.
+	evictSeenSQL = "DELETE FROM rollup_seen WHERE (day, vhost, band, family, session_id) IN " +
+		"(SELECT day, vhost, band, family, session_id FROM rollup_seen WHERE day = ? LIMIT ?)"
+	keptSQL = "SELECT coalesce(sum(pgsize), 0) FROM dbstat WHERE aggregate = TRUE AND name IN " +
+		"(SELECT name FROM sqlite_schema WHERE tbl_name IN ('aggregate_day', 'checkpoint'))"
+
+	// The reasons of a cap that a run does not meet.
+	reasonKept, reasonStuck, reasonFault = "kept", "stuck", "fault"
 )
+
+// CapUnmet counts the runs that did not meet the cap, for each reason. These
+// are the values of the reason label of phantom_retention_cap_unmet_total.
+//   - Kept: the tables that no tier removes hold 90 % of the cap or more.
+//     Tier 3 did not run (SEC-41).
+//   - Stuck: the live pages stay above 90 % of the cap. No tier can remove a
+//     row.
+//   - Fault: the files of the cap could not be measured.
+type CapUnmet struct {
+	Kept, Stuck, Fault uint64
+}
 
 // evidenceKinds are the event kinds that have a hash. Tier 3 evicts them.
 var evidenceKinds = []string{"callback", "score_change", "alert_sent", "bundle_load", "bundle_rejected", "retention"}
@@ -66,9 +87,20 @@ type capRun struct {
 
 	begun, over, done bool
 
-	// fault is called when the files of the cap cannot be measured at the
-	// trigger. It can be nil.
-	fault func()
+	// unmet is called with a reason when the run does not meet the cap. It is
+	// called one time at most in a run. It can be nil.
+	unmet   func(reason string)
+	counted bool
+
+	// seenDay is the UTC date of a day whose last request row tier 1 evicted.
+	// Its seen rows go in the next calls. keptKnown and kept hold the one read
+	// of the kept bytes in a run.
+	seenDay   string
+	keptKnown bool
+	kept      bool
+
+	// keptBytes replaces the dbstat read. A test sets it; nil in production.
+	keptBytes func(ctx context.Context, tx *sql.Tx) (int64, error)
 
 	// The pages of the next shrink statement, and the least and the most
 	// that the run used.
@@ -88,7 +120,18 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 			return oldestOf(ctx, tx, oldestEventSQL, "request")
 		},
 		evict: func(ctx context.Context, tx *sql.Tx, end int64, limit int) (int, error) {
-			return viaTally(ctx, tx, newRollupStep(dayCut(end), 1), limit)
+			n, err := viaTally(ctx, tx, newRollupStep(dayCut(end), 1), limit)
+			if err != nil || n == 0 {
+				return n, err
+			}
+			// With no request row left in the day, its seen rows go next.
+			var left int
+			if err := tx.QueryRowContext(ctx, rollupLeftSQL, end).Scan(&left); errors.Is(err, sql.ErrNoRows) {
+				c.seenDay = rollupDay(end - 1)
+			} else if err != nil {
+				return 0, err
+			}
+			return n, nil
 		},
 	}
 	refused := &capSource{
@@ -146,14 +189,14 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 
 // withCap puts the cap steps before the last step of a run. That step is the
 // mark step, which stays last. A cap of 0 or less adds no step. The run record
-// tells the runner where the cap steps start. fault is called when the files
-// of the cap cannot be measured at the trigger. It can be nil.
-func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, fault func()) []retentionStep {
+// tells the runner where the cap steps start. unmet is called with the reason,
+// one time at most, when the run does not meet the cap. It can be nil.
+func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, unmet func(string)) []retentionStep {
 	if capBytes <= 0 || len(steps) == 0 {
 		return steps
 	}
 	c, last := newCapRun(w, capBytes, rel, now), len(steps)-1
-	c.fault = fault
+	c.unmet = unmet
 	if run != nil {
 		run.capAt = last + 1
 	}
@@ -376,9 +419,7 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 		c.begun = true
 		n, ok := c.diskBytes()
 		if !ok {
-			if c.fault != nil {
-				c.fault()
-			}
+			c.note(reasonFault)
 			c.done = true
 			return 0, nil
 		}
@@ -386,6 +427,18 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 	}
 	if !c.over || c.done {
 		return 0, nil
+	}
+	if c.seenDay != "" {
+		// The seen rows of an evicted day go before the live check. Thus a run
+		// that meets the target leaves none. They are not in the evicted count.
+		n, err := execN(ctx, tx, evictSeenSQL, c.seenDay, limit)
+		if err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			return limit, nil
+		}
+		c.seenDay = ""
 	}
 	live, err := c.live(ctx, tx)
 	if err != nil {
@@ -395,7 +448,16 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 		c.done = true
 		return 0, nil
 	}
-	for _, tier := range c.tiers {
+	for i, tier := range c.tiers {
+		if i == len(c.tiers)-1 {
+			if kept, err := c.keptOver(ctx, tx); err != nil {
+				return 0, err
+			} else if kept {
+				c.note(reasonKept)
+				c.done = true
+				return 0, nil
+			}
+		}
 		moved, stuck, err := c.work(ctx, tx, tier, limit)
 		if err != nil {
 			return 0, err
@@ -407,8 +469,38 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 			return limit, nil
 		}
 	}
+	c.note(reasonStuck)
 	c.done = true
 	return 0, nil
+}
+
+// note counts a cap that the run does not meet. A run counts one reason.
+func (c *capRun) note(reason string) {
+	if c.unmet != nil && !c.counted {
+		c.unmet(reason)
+	}
+	c.counted = true
+}
+
+// keptOver tells if aggregate_day and checkpoint, with their indexes, hold 90 %
+// of the cap or more. No tier removes these tables. The run reads dbstat one
+// time, when tier 3 is the next tier to run (SEC-41).
+func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (bool, error) {
+	if c.keptKnown {
+		return c.kept, nil
+	}
+	var n int64
+	var err error
+	if c.keptBytes != nil {
+		n, err = c.keptBytes(ctx, tx)
+	} else {
+		err = tx.QueryRowContext(ctx, keptSQL).Scan(&n)
+	}
+	if err != nil {
+		return false, err
+	}
+	c.keptKnown, c.kept = true, n >= c.target
+	return c.kept, nil
 }
 
 // work evicts rows of the source of the tier with the oldest UTC day. A tie

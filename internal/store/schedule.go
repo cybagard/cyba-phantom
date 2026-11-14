@@ -60,6 +60,8 @@ type Schedule struct {
 	maxBytes  int64  // store.max_bytes; 0 means no cap step
 	dbRel     string // the name that SetMaxBytes checked, relative to the root
 	capLog    atomic.Bool
+	// The runs that did not meet the cap, for each reason.
+	capKept, capStuck, capFaults atomic.Uint64
 }
 
 // errCapName is the refusal of SetMaxBytes for a bad database name.
@@ -106,13 +108,30 @@ func (s *Schedule) isOpenDatabase(rel string) bool {
 	return file == filepath.Join(base, filepath.FromSlash(rel))
 }
 
-// capFault is called when the files of the cap cannot be measured at the
-// trigger of a run. The run then evicts nothing. It writes one fixed log line
-// for each schedule, with no path and no row value.
-func (s *Schedule) capFault() {
-	if s.capLog.CompareAndSwap(false, true) {
-		s.lg.Error("retention cap not applied: database file not measured")
+// capUnmet counts a run that does not meet the cap, with the reason. A fault
+// is that the files of the cap cannot be measured at the trigger. The run then
+// evicts nothing. The schedule writes one fixed log line for it, one time only.
+// A kept skip of tier 3 writes one fixed line in each run. No line has a path
+// or a row value.
+func (s *Schedule) capUnmet(reason string) {
+	switch reason {
+	case reasonKept:
+		s.capKept.Add(1)
+		s.lg.Error("retention cap not met: kept rows over the cap")
+	case reasonStuck:
+		s.capStuck.Add(1)
+	case reasonFault:
+		s.capFaults.Add(1)
+		if s.capLog.CompareAndSwap(false, true) {
+			s.lg.Error("retention cap not applied: database file not measured")
+		}
 	}
+}
+
+// CapUnmet returns the counts of the runs that did not meet the cap, for each
+// reason. It is safe to call from any goroutine.
+func (s *Schedule) CapUnmet() CapUnmet {
+	return CapUnmet{Kept: s.capKept.Load(), Stuck: s.capStuck.Load(), Fault: s.capFaults.Load()}
 }
 
 // NewSchedule makes the schedule of w. The days are the values of
@@ -230,7 +249,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	// The mint order takes tDel, as the deletes do. A step forward of the wall
 	// clock must not make mint units look old.
-	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capFault)
+	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
