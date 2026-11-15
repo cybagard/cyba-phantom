@@ -89,9 +89,9 @@ var (
 // chunks of the step returned. A step can count a row more than one time.
 // The cap and shrink steps count their own units. A rule fails for a step
 // with 0. The cap is a tenth of the database size at the start. So the cap
-// step evicts and the shrink step frees pages. The rule on the longest chunk uses the
-// writer hold, as the writer serves no event during it. A chunk that runs
-// several steps counts for the last of them. So a step with 0 chunks ran
+// step evicts and the shrink step frees pages. The rule on the longest chunk
+// uses the writer hold, as the writer serves no event during it. A chunk that
+// runs several steps counts for the last of them. So a step with 0 chunks ran
 // inside the chunk of a later step. The database is below TMPDIR.
 func BenchmarkRetention(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
