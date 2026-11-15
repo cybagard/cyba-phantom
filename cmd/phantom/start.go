@@ -35,8 +35,9 @@ type startParams struct {
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
-	IPDays, RawDays, EventsDays      int   // store.retention_days.{ip,raw,events}
-	MaxBytes                         int64 // store.max_bytes
+	// The days are store.retention_days.{ip,raw,events}.
+	IPDays, RawDays, EventsDays int
+	MaxBytes                    int64 // store.max_bytes
 }
 
 // startDeps holds the parts that a test replaces. A test counts the calls that

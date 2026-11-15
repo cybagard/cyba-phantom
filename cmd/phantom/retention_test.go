@@ -313,8 +313,8 @@ func TestTS35_HostValuesThroughTheStartedSensor(t *testing.T) {
 			var day string
 			var vhost sql.NullString
 			mustOK(t, rows.Scan(&day, &vhost))
-			// The roll-up stores "" for no vhost. NULL has its own key, which no
-			// vhost text can be.
+			// The roll-up stores "" for no vhost. NULL has its own key. No
+			// vhost text can be that key.
 			key := vhost.String
 			switch {
 			case !vhost.Valid:
