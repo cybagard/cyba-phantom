@@ -35,7 +35,43 @@ const (
 	oldestCounterSQL = "SELECT min(day) FROM ip_counter"
 	oldestTokenSQL   = "SELECT first_cb_at FROM token WHERE first_cb_at IS NOT NULL ORDER BY first_cb_at LIMIT 1"
 	evictEvidenceSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind = ? AND ts < ? LIMIT ?)"
+
+	// evictSeenSQL deletes the seen rows of one day, at most the limit. keptSQL
+	// gives the bytes of each table and index other than event and its indexes,
+	// and of the schema table. The names stay an equality list, so that dbstat
+	// does not walk the event pages. The statement has no aggregate column, so
+	// dbstat gives one row for each page. With the aggregate column, SQLite
+	// checks for an interrupt only between two objects. A large table or index
+	// would then have no bound in time.
+	evictSeenSQL = "DELETE FROM rollup_seen WHERE (day, vhost, band, family, session_id) IN " +
+		"(SELECT day, vhost, band, family, session_id FROM rollup_seen WHERE day = ? LIMIT ?)"
+	keptSQL = "SELECT coalesce(sum(pgsize), 0) FROM dbstat WHERE name IN " +
+		"(SELECT name FROM sqlite_schema WHERE tbl_name <> 'event' UNION ALL SELECT 'sqlite_schema')"
+
+	// keptReadLimit is the time that the read of keptSQL can take. A read that
+	// takes longer stops, and the run does not run tier 3.
+	keptReadLimit = 50 * time.Millisecond
+
+	// keptStopMargin is the time that a read can need to stop after its
+	// deadline. A read starts only with keptReadLimit plus this margin left in
+	// the chunk budget.
+	keptStopMargin = 10 * time.Millisecond
+
+	// The reasons of a cap that a run does not meet.
+	reasonKept, reasonSlow, reasonStuck, reasonFault = "kept", "slow", "stuck", "fault"
 )
+
+// CapUnmet counts the runs that did not meet the cap, for each reason. These
+// are the values of the reason label of phantom_retention_cap_unmet_total.
+//   - Kept: the tables and indexes other than event hold 90 % of the cap or
+//     more. Tier 3 did not run (SEC-41).
+//   - Slow: the read of these bytes did not end in time. Tier 3 did not run.
+//   - Stuck: the live pages stay above 90 % of the cap. No tier can remove a
+//     row.
+//   - Fault: the files of the cap could not be measured.
+type CapUnmet struct {
+	Kept, Slow, Stuck, Fault uint64
+}
 
 // evidenceKinds are the event kinds that have a hash. Tier 3 evicts them.
 var evidenceKinds = []string{"callback", "score_change", "alert_sent", "bundle_load", "bundle_rejected", "retention"}
@@ -66,9 +102,27 @@ type capRun struct {
 
 	begun, over, done bool
 
-	// fault is called when the files of the cap cannot be measured at the
-	// trigger. It can be nil.
-	fault func()
+	// unmet is called with a reason when the run does not meet the cap. Each
+	// reason ends the run, so it is called one time at most. It can be nil.
+	unmet func(reason string)
+
+	// seenDay is the UTC date of a day whose last request row tier 1 evicted.
+	// Its seen rows go in the next calls. keptKnown and kept hold the one read
+	// of the kept bytes in a run. kept is the reason or "".
+	seenDay   string
+	keptKnown bool
+	kept      string
+	deferred  bool // the read waited one time for a new chunk
+
+	// keptLimit is the time that the read of the kept bytes can take. A test
+	// sets it. keptBytes replaces the dbstat read. A test sets it; nil in
+	// production.
+	keptLimit time.Duration
+	keptBytes func(ctx context.Context, tx *sql.Tx) (int64, error)
+
+	// keptTook gets the time of the real read, from the start of its deadline.
+	// A test sets it; nil in production.
+	keptTook func(time.Duration)
 
 	// The pages of the next shrink statement, and the least and the most
 	// that the run used.
@@ -81,14 +135,25 @@ type capRun struct {
 // newCapRun makes the cap state for a cap of limit bytes. rel is the name that
 // SetMaxBytes checked, relative to the state root. now is the time of the run.
 func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
-	c := &capRun{w: w, rel: rel, limit: limit, target: limit / 100 * capPercent}
+	c := &capRun{w: w, rel: rel, limit: limit, target: limit / 100 * capPercent, keptLimit: keptReadLimit}
 	order := newMintOrder(now)
 	request := &capSource{
 		oldest: func(ctx context.Context, tx *sql.Tx) (int64, bool, error) {
 			return oldestOf(ctx, tx, oldestEventSQL, "request")
 		},
 		evict: func(ctx context.Context, tx *sql.Tx, end int64, limit int) (int, error) {
-			return viaTally(ctx, tx, newRollupStep(dayCut(end), 1), limit)
+			n, err := viaTally(ctx, tx, newRollupStep(dayCut(end), 1), limit)
+			if err != nil || n == 0 {
+				return n, err
+			}
+			// With no request row left in the day, its seen rows go next.
+			var left int
+			if err := tx.QueryRowContext(ctx, rollupLeftSQL, end).Scan(&left); errors.Is(err, sql.ErrNoRows) {
+				c.seenDay = rollupDay(end - 1)
+			} else if err != nil {
+				return 0, err
+			}
+			return n, nil
 		},
 	}
 	refused := &capSource{
@@ -146,14 +211,18 @@ func newCapRun(w *Writer, limit int64, rel string, now time.Time) *capRun {
 
 // withCap puts the cap steps before the last step of a run. That step is the
 // mark step, which stays last. A cap of 0 or less adds no step. The run record
-// tells the runner where the cap steps start. fault is called when the files
-// of the cap cannot be measured at the trigger. It can be nil.
-func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, fault func()) []retentionStep {
+// tells the runner where the cap steps start. unmet is called with the reason,
+// one time at most, when the run does not meet the cap. It can be nil. tune
+// changes the cap state: a test sets it. It can be nil.
+func withCap(steps []retentionStep, run *retentionRun, w *Writer, capBytes int64, rel string, now time.Time, unmet func(string), tune func(*capRun)) []retentionStep {
 	if capBytes <= 0 || len(steps) == 0 {
 		return steps
 	}
 	c, last := newCapRun(w, capBytes, rel, now), len(steps)-1
-	c.fault = fault
+	c.unmet = unmet
+	if tune != nil {
+		tune(c)
+	}
 	if run != nil {
 		run.capAt = last + 1
 	}
@@ -370,15 +439,17 @@ func (c *capRun) live(ctx context.Context, tx *sql.Tx) (int64, error) {
 // above the cap. If so, each call evicts rows of one source and one UTC day.
 // This goes on until the live bytes are at most 90 % of the cap. A call starts
 // at tier 1. Thus a row stored between two chunks goes before any row of a
-// later tier. A call returns the limit while it can have work left.
+// later tier. A call returns the limit while it can have work left. Before the
+// read of the kept bytes, it checks the chunk time. Less than keptLimit plus
+// keptStopMargin of the chunk budget can be left. Then it returns the limit,
+// and the read waits for the next chunk. This happens one time at most in a
+// run.
 func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 	if !c.begun {
 		c.begun = true
 		n, ok := c.diskBytes()
 		if !ok {
-			if c.fault != nil {
-				c.fault()
-			}
+			c.note(reasonFault)
 			c.done = true
 			return 0, nil
 		}
@@ -386,6 +457,18 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 	}
 	if !c.over || c.done {
 		return 0, nil
+	}
+	if c.seenDay != "" {
+		// The seen rows of an evicted day go before the live check. Thus a run
+		// that meets the target leaves none. They are not in the evicted count.
+		n, err := execN(ctx, tx, evictSeenSQL, c.seenDay, limit)
+		if err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			return limit, nil
+		}
+		c.seenDay = ""
 	}
 	live, err := c.live(ctx, tx)
 	if err != nil {
@@ -395,7 +478,21 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 		c.done = true
 		return 0, nil
 	}
-	for _, tier := range c.tiers {
+	for i, tier := range c.tiers {
+		if i == len(c.tiers)-1 {
+			if c.lateStart(ctx) {
+				// The read would pass the chunk budget. A new chunk reads it.
+				c.deferred = true
+				return limit, nil
+			}
+			if reason, err := c.keptOver(ctx, tx); err != nil {
+				return 0, err
+			} else if reason != "" {
+				c.note(reason)
+				c.done = true
+				return 0, nil
+			}
+		}
 		moved, stuck, err := c.work(ctx, tx, tier, limit)
 		if err != nil {
 			return 0, err
@@ -407,8 +504,69 @@ func (c *capRun) evict(ctx context.Context, tx *sql.Tx, limit int) (int, error) 
 			return limit, nil
 		}
 	}
+	c.note(reasonStuck)
 	c.done = true
 	return 0, nil
+}
+
+// lateStart tells if the read of the kept bytes must wait for the next chunk.
+// It is so when the read is not known and the run has not deferred it. The
+// time that the chunk used, plus keptLimit and keptStopMargin, must be above
+// chunkBudget. A run defers one time at most, so a keptLimit above the budget
+// cannot loop. A context with no chunk start means that no earlier work is in
+// the chunk.
+func (c *capRun) lateStart(ctx context.Context) bool {
+	start, ok := ctx.Value(chunkStartKey{}).(time.Time)
+	if !ok || c.keptKnown || c.deferred {
+		return false
+	}
+	return c.w.now().Sub(start)+c.keptLimit+keptStopMargin > chunkBudget
+}
+
+// note counts a cap that the run does not meet.
+func (c *capRun) note(reason string) {
+	if c.unmet != nil {
+		c.unmet(reason)
+	}
+}
+
+// keptOver tells if tier 3 must not run. It returns the reason, or an empty
+// text. The reason kept means that the tables and indexes other than event hold
+// 90 % of the cap (SEC-41). No tier removes them. The reason slow means that
+// the read did not end in keptLimit. The run reads dbstat one time. It reads
+// when tier 3 is the next tier to run. The chunk must have keptLimit plus
+// keptStopMargin of its budget left (see lateStart). The statement reads one
+// dbstat row for each page, so the deadline stops the read inside a large
+// table. A read that passes its deadline is no error, and the chunk commits.
+// An error of the chunk context is returned. So is any other error.
+func (c *capRun) keptOver(ctx context.Context, tx *sql.Tx) (string, error) {
+	if c.keptKnown {
+		return c.kept, nil
+	}
+	begin := time.Now()
+	rctx, cancel := context.WithTimeout(ctx, c.keptLimit)
+	defer cancel()
+	var n int64
+	var err error
+	if c.keptBytes != nil {
+		n, err = c.keptBytes(rctx, tx)
+	} else {
+		err = tx.QueryRowContext(rctx, keptSQL).Scan(&n)
+		if c.keptTook != nil {
+			c.keptTook(time.Since(begin))
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+		c.keptKnown, c.kept = true, reasonSlow
+	case err != nil:
+		return "", err
+	case n >= c.target:
+		c.keptKnown, c.kept = true, reasonKept
+	default:
+		c.keptKnown = true
+	}
+	return c.kept, nil
 }
 
 // work evicts rows of the source of the tier with the oldest UTC day. A tie

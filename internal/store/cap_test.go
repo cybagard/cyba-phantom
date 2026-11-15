@@ -78,6 +78,8 @@ func forcedCap(r *rig, now time.Time) *capRun {
 	c := newCapRun(r.w, 1000, "events.db", now)
 	c.begun, c.over = true, true
 	c.measure = func(context.Context, *sql.Tx) (int64, error) { return 1 << 40, nil }
+	// The kept tables are small, so tier 3 runs. A kept test sets its own.
+	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { return 0, nil }
 	return c
 }
 
@@ -252,18 +254,51 @@ func TestTU11CapStopsWhenASourceRemovesNoRow(t *testing.T) {
 		},
 	}
 	c := forcedCap(r, rollTDel)
+	reasons := recordUnmet(c)
 	c.tiers = [][]*capSource{{stub}, c.tiers[2]}
 	if n := callIn(t, r.db, c.evict, chunkRows); n != 0 || calls != 1 || count(t, r.db, "SELECT count(*) FROM event") != 1 {
 		t.Fatalf("returned %d after %d calls of the source, want 0 and 1, and the callback stays", n, calls)
+	}
+	if got := strings.Join(*reasons, ","); got != "stuck" {
+		t.Fatalf("counted %q, want one stuck", got)
 	}
 	r = newRig(t, 100)
 	addEvents(t, r.db, "request", 1, 9223372036854775000, 0, nil, nil)
 	addHashed(t, r.db, "callback", 1, capDay(1), 0)
 	c = forcedCap(r, rollTDel)
+	reasons = recordUnmet(c)
 	callIn(t, r.db, c.evict, chunkRows)
 	if cb := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"); cb != 1 {
 		t.Fatalf("%d callbacks left after a request row that cannot go, want 1", cb)
 	}
+	if got := strings.Join(*reasons, ","); got != "stuck" {
+		t.Fatalf("counted %q after a request row that cannot go, want one stuck", got)
+	}
+	// No tier has a row: the eviction ends above the target, and it counts too.
+	c = forcedCap(newRig(t, 100), rollTDel)
+	reasons = recordUnmet(c)
+	callIn(t, c.w.db, c.evict, chunkRows)
+	callIn(t, c.w.db, c.evict, chunkRows)
+	if got := strings.Join(*reasons, ","); got != "stuck" {
+		t.Fatalf("counted %q with no row in any tier, want one stuck for the run", got)
+	}
+	// A run that reaches the target counts nothing.
+	r = newRig(t, 100)
+	addHashed(t, r.db, "callback", 1, capDay(1), 0)
+	c = forcedCap(r, rollTDel)
+	reasons = recordUnmet(c)
+	c.measure = func(context.Context, *sql.Tx) (int64, error) { return c.target, nil }
+	callIn(t, r.db, c.evict, chunkRows)
+	if len(*reasons) != 0 {
+		t.Fatalf("counted %q for a run at the target, want nothing", *reasons)
+	}
+}
+
+// recordUnmet makes c keep the reasons that it counts.
+func recordUnmet(c *capRun) *[]string {
+	var got []string
+	c.unmet = func(reason string) { got = append(got, reason) }
+	return &got
 }
 
 // T-U-11: the tier-3 delete removes at most the limit in one call. 600 callback
@@ -300,7 +335,7 @@ func truncated(t *testing.T, r *rig) int64 {
 func capRunOf(t *testing.T, r *rig, capBytes int64, first ...retentionStep) *retentionRun {
 	t.Helper()
 	run := &retentionRun{}
-	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil)
+	steps := withCap(append(first, markStep(rollTDel)), run, r.w, capBytes, "events.db", rollTDel, nil, nil)
 	ctx, cancel := context.WithTimeout(withRun(context.Background(), run), waitFor)
 	defer cancel()
 	check(t, serveWithRun(r)(ctx, steps))
@@ -532,7 +567,7 @@ func TestTU11CapShrinkEndsWhenNoPageIsFreed(t *testing.T) {
 // after the last row has gone.
 func TestTU11CapStepsRunBeforeTheMarkStep(t *testing.T) {
 	steps := []retentionStep{markStep(rollTDel)}
-	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil); len(got) != 1 {
+	if got := withCap(steps, nil, nil, 0, "", rollTDel, nil, nil); len(got) != 1 {
 		t.Fatalf("a cap of 0 gave %d steps, want 1", len(got))
 	}
 	for _, capBytes := range []int64{0, 1} {
@@ -998,6 +1033,9 @@ func faultRun(t *testing.T, r *rig, rel string, tamper func()) {
 	if log := out.String(); left != 3 || !r.w.Healthy() || strings.Count(log, "database file not measured") != 1 || strings.Contains(log, "events") {
 		t.Fatalf("%d request rows left, healthy %v, log %q; want 3, healthy and one fixed line", left, r.w.Healthy(), log)
 	}
+	if got := s.CapUnmet(); got != (CapUnmet{Fault: 2}) {
+		t.Fatalf("counts %+v after 2 runs with a fault, want 2 faults and nothing else", got)
+	}
 }
 
 // T-U-11: the trigger has a cap fault in five cases. The database file can be
@@ -1086,9 +1124,12 @@ func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 		{mintCountSQL, []any{"", 1, 2}, "PRIMARY KEY"},
 		{mintDropSQL, []any{"", 1}, "PRIMARY KEY"},
 		{mintDeleteSQL, []any{"", 1, 1000}, "PRIMARY KEY"},
+		{evictSeenSQL, []any{"2027-01-01", 1000}, "PRIMARY KEY"},
+		{rollupLeftSQL, []any{1}, "event_kind_ts"},
+		{keptSQL, nil, "dbstat VIRTUAL TABLE INDEX 0x2"},
 	} {
 		plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n")
-		for _, table := range []string{"event", "session", "token", "ip_counter", "mint"} {
+		for _, table := range []string{"event", "session", "token", "ip_counter", "mint", "rollup_seen"} {
 			if strings.Contains(plan, "SCAN "+table) {
 				t.Errorf("plan of %q has a SCAN of %s:\n%s", c.q, table, plan)
 			}
@@ -1096,5 +1137,632 @@ func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 		if !strings.Contains(plan, c.use) {
 			t.Errorf("plan of %q:\n%s\nwant %q", c.q, plan, c.use)
 		}
+	}
+}
+
+// keptSchedule makes a schedule with a cap for runs through the writer. The
+// buffer out gets the log.
+func keptSchedule(t *testing.T, r *rig, capBytes int64, out *bytes.Buffer) *Schedule {
+	t.Helper()
+	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, slog.New(slog.NewTextHandler(out, nil)))
+	s.limit = capRunLimit
+	check(t, s.SetMaxBytes(capBytes, "events.db"))
+	s.run = serveWithRun(r)
+	return s
+}
+
+// T-U-28, SEC-41: the tables other than event hold over 90 % of a small cap.
+// The test fills aggregate_day, checkpoint and rollup_seen, each alone. A run
+// deletes no evidence row. It counts one kept, and the writer stays healthy.
+// The log has the fixed line for each run. A second run counts 1 more. No run
+// counts a stuck.
+func TestTU28KeptRowsOverTheLineKeepTheEvidence(t *testing.T) {
+	fill := map[string]string{
+		"aggregate_day": `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 2999)
+			INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
+			SELECT '2026-12-01', hex(randomblob(60)) || i, 'human', '', 1, 1, 0 FROM c`,
+		"checkpoint": `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 3000)
+			INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) SELECT i, zeroblob(32), hex(randomblob(250)), i FROM c`,
+		"rollup_seen": `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 3999)
+			INSERT INTO rollup_seen (day, vhost, band, family, session_id) SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`,
+	}
+	for table, q := range fill {
+		t.Run(table, func(t *testing.T) {
+			r := newRig(t, 100)
+			mustExec(t, r.db, q)
+			addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
+			var out bytes.Buffer
+			s := keptSchedule(t, r, truncated(t, r)-1, &out)
+			for run := 1; run <= 2; run++ {
+				s.runOnce(context.Background())
+				left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+				if got := s.CapUnmet(); left != 20 || got != (CapUnmet{Kept: uint64(run)}) || !r.w.Healthy() ||
+					strings.Count(out.String(), "msg=\"retention cap not met: kept rows over the cap\"\n") != run {
+					t.Fatalf("run %d: %d callbacks left, counts %+v, healthy %v, log %q; want 20, %d kept only, healthy and %d lines",
+						run, left, got, r.w.Healthy(), out.String(), run, run)
+				}
+			}
+		})
+	}
+}
+
+// T-U-28: below the line, tier 3 runs as before. The evidence rows go, the run
+// reaches the target, and no reason is counted.
+func TestTU28BelowTheLineTierThreeRuns(t *testing.T) {
+	r := newRig(t, 100)
+	mustExec(t, r.db, "INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks) VALUES ('2026-12-01', 'v', 'human', '', 1, 1, 0)")
+	addHashed(t, r.db, "callback", 20000, rollTDel.UnixMilli()-3600_000, 0)
+	var out bytes.Buffer
+	s := keptSchedule(t, r, truncated(t, r)*6/10, &out)
+	s.runOnce(context.Background())
+	left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+	if got := s.CapUnmet(); left >= 20000 || got != (CapUnmet{}) || out.Len() != 0 {
+		t.Fatalf("%d callbacks left, counts %+v, log %q; want rows evicted, no count and no log", left, got, out.String())
+	}
+}
+
+// T-U-28: the kept line is at 90 % of the cap or more, not above it. The kept
+// bytes of the test are 900 and 901 for a cap of 1 000, and 899. The run reads
+// them one time, however many chunks it has.
+func TestTU28KeptLineIsAtNinetyPercent(t *testing.T) {
+	for _, c := range []struct {
+		bytes int64
+		kept  bool
+	}{{900, true}, {901, true}, {899, false}} {
+		r := newRig(t, 100)
+		addHashed(t, r.db, "callback", 3, capDay(1), 0)
+		cr := forcedCap(r, rollTDel)
+		reasons, reads := recordUnmet(cr), 0
+		cr.keptBytes = func(context.Context, *sql.Tx) (int64, error) { reads++; return c.bytes, nil }
+		for range 5 {
+			callIn(t, r.db, cr.evict, 1)
+		}
+		left := count(t, r.db, "SELECT count(*) FROM event")
+		if reads != 1 || (left == 3) != c.kept || (len(*reasons) == 1 && (*reasons)[0] == "kept") != c.kept {
+			t.Fatalf("kept bytes %d: %d reads, %d rows left, counted %q; want 1 read, kept %v", c.bytes, reads, left, *reasons, c.kept)
+		}
+	}
+}
+
+// T-U-28: a failing read of the kept bytes is an error of the step. The other
+// statements of the cap do the same. It counts nothing.
+func TestTU28KeptReadErrorIsReturned(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 1, capDay(1), 0)
+	c := forcedCap(r, rollTDel)
+	reasons := recordUnmet(c)
+	boom := errors.New("read failed")
+	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { return 0, boom }
+	tx, err := r.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	if _, err := c.evict(context.Background(), tx, chunkRows); !errors.Is(err, boom) || len(*reasons) != 0 {
+		t.Fatalf("error %v, counted %q; want the read error and no count", err, *reasons)
+	}
+}
+
+// T-U-28: tier 1 evicts the last request row of a UTC day. Then the seen rows
+// of that day go, at most one limit in a call. The measure sees the seen rows
+// before the delete. The run meets the target on the chunk that evicts the
+// row, and the seen rows still go. The seen rows of a day with a request row
+// stay. So do those of an older day. The seen rows are not in the evicted
+// count.
+func TestTU28SeenRowsOfAnEvictedDayGoInChunks(t *testing.T) {
+	r := newRig(t, 100)
+	addEvents(t, r.db, "request", 1, capDay(1), 0, nil, nil)
+	addEvents(t, r.db, "request", 1, capDay(2), 0, nil, nil)
+	addSeen(t, r.db, "2027-01-01", 10)
+	addSeen(t, r.db, "2027-01-02", 3)
+	addSeen(t, r.db, "2026-12-31", 2)
+	const limit = 4
+	c := forcedCap(r, rollTDel)
+	var measured []int
+	c.measure = func(ctx context.Context, tx *sql.Tx) (int64, error) {
+		var n int
+		err := tx.QueryRowContext(ctx, "SELECT count(*) FROM rollup_seen").Scan(&n)
+		if measured = append(measured, n); len(measured) > 1 {
+			return 0, err
+		}
+		return 1 << 40, err
+	}
+	var tal tally
+	ctx := context.WithValue(context.Background(), tallyKey{}, &tal)
+	left := func(day string) int {
+		return count(t, r.db, "SELECT count(*) FROM rollup_seen WHERE day = '"+day+"'")
+	}
+	tx := func() *sql.Tx { x, err := r.db.BeginTx(ctx, nil); check(t, err); return x }
+	step := func() (n, before int) {
+		before = left("2027-01-01")
+		x := tx()
+		n, err := c.evict(ctx, x, limit)
+		check(t, err)
+		check(t, x.Commit())
+		return n, before - left("2027-01-01")
+	}
+	// The first call evicts the request row of day 1: day 2 still has one.
+	if n, gone := step(); n != limit || gone != 0 || c.seenDay != "2027-01-01" {
+		t.Fatalf("first call: returned %d, %d seen rows gone, day %q; want the limit, 0 and 2027-01-01", n, gone, c.seenDay)
+	}
+	for i, want := range []int{4, 4, 2} {
+		if n, gone := step(); n != limit || gone != want {
+			t.Fatalf("seen call %d: returned %d, %d rows gone; want the limit and %d", i, n, gone, want)
+		}
+	}
+	if n, gone := step(); n != 0 || gone != 0 || left("2027-01-01") != 0 || left("2027-01-02") != 3 || left("2026-12-31") != 2 {
+		t.Fatalf("last call: returned %d, %d gone; day 1 %d, day 2 %d, older day %d seen rows; want 0, 0, 0, 3 and 2",
+			n, gone, left("2027-01-01"), left("2027-01-02"), left("2026-12-31"))
+	}
+	if c.seenDay != "" {
+		t.Fatalf("the day %q is still pending after its last seen row went", c.seenDay)
+	}
+	if len(measured) != 2 || measured[0] != 15 || measured[1] != 5 {
+		t.Fatalf("the measure saw %v seen rows, want 15 before the delete and 5 after", measured)
+	}
+	if left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); left != 1 || tal[memEvicted] != 1 {
+		t.Fatalf("%d request rows left, evicted %d; want 1 and 1, with no seen row in the count", left, tal[memEvicted])
+	}
+}
+
+// T-U-28: a day that keeps a request row after a chunk keeps its seen rows.
+func TestTU28SeenRowsStayWhileTheDayHasARequestRow(t *testing.T) {
+	r := newRig(t, 100)
+	addEvents(t, r.db, "request", 2, capDay(1), 1, nil, nil)
+	addSeen(t, r.db, "2027-01-01", 5)
+	c := forcedCap(r, rollTDel)
+	for i, want := range []int{5, 5, 2, 0} {
+		callIn(t, r.db, c.evict, 3)
+		if got := count(t, r.db, "SELECT count(*) FROM rollup_seen"); got != want {
+			t.Fatalf("after call %d: %d seen rows, want %d", i+1, got, want)
+		}
+	}
+}
+
+// addAggregates inserts n rows into aggregate_day, one vhost for each row.
+func addAggregates(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	for off := 0; off < n; off += 50_000 {
+		mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+			INSERT INTO aggregate_day (day, vhost, band, family, sessions, requests, callbacks)
+			SELECT '2026-12-01', hex(randomblob(32)) || i, 'human', '', 1, 1, 0 FROM c`, off, off+min(50_000, n-off)-1)
+	}
+}
+
+// T-U-28, SEC-41: the kept bytes are those of each table and index other than
+// event. They include the schema table. A large event table is not in them.
+// The expected value is the sum of all objects of dbstat, less the sum of the
+// event objects.
+func TestTU28KeptBytesLeaveOutTheEventTable(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 50_000, capDay(1), 0)
+	addAggregates(t, r.db, 100)
+	addSeen(t, r.db, "2027-01-01", 100)
+	var kept, all, ev int64
+	check(t, r.db.QueryRow(keptSQL).Scan(&kept))
+	check(t, r.db.QueryRow("SELECT sum(pgsize) FROM dbstat WHERE aggregate = TRUE").Scan(&all))
+	check(t, r.db.QueryRow(`SELECT sum(pgsize) FROM dbstat WHERE aggregate = TRUE AND
+		name IN (SELECT name FROM sqlite_schema WHERE tbl_name = 'event')`).Scan(&ev))
+	if kept != all-ev || ev < 50*kept {
+		t.Fatalf("kept %d bytes, all %d, event %d; want kept = all - event, and a large event table", kept, all, ev)
+	}
+}
+
+// T-U-28: the production cap state has a read limit of 50 ms.
+func TestTU28KeptReadLimitIs50Milliseconds(t *testing.T) {
+	c := newCapRun(newRig(t, 100).w, 1000, "events.db", rollTDel)
+	if keptReadLimit != 50*time.Millisecond || c.keptLimit != keptReadLimit {
+		t.Fatalf("the limit is %v and the cap state has %v, want 50ms", keptReadLimit, c.keptLimit)
+	}
+}
+
+// T-U-28: a read of the kept bytes that passes its deadline counts slow, not
+// kept. The deadline of 1 ns has passed before the query. The database/sql
+// package returns the error before the driver runs. So the test does not
+// reach the interrupt of the driver. It does not depend on the speed of the
+// machine. It tests the count. Tier 3 does not run. The call returns 0 with
+// no error. The transaction still works.
+func TestTU28SlowKeptReadStopsAtItsDeadline(t *testing.T) {
+	r := newRig(t, 100)
+	addAggregates(t, r.db, 100)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = nil, time.Nanosecond
+	reasons := recordUnmet(c)
+	tx, err := r.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	if reason, err := c.keptOver(context.Background(), tx); reason != reasonSlow || err != nil {
+		t.Fatalf("reason %q, error %v; want slow and no error", reason, err)
+	}
+	n, err := c.evict(context.Background(), tx, chunkRows)
+	if n != 0 || err != nil || len(*reasons) != 1 || (*reasons)[0] != reasonSlow || !c.done {
+		t.Fatalf("evict returned %d and %v, counted %q, done %v; want 0, no error, one slow and done", n, err, *reasons, c.done)
+	}
+	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES ('probe', '1')"); err != nil {
+		t.Fatalf("the transaction does not work after the deadline: %v", err)
+	}
+	check(t, tx.Commit())
+	if cb := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"); cb != 3 {
+		t.Fatalf("%d callbacks left, want 3", cb)
+	}
+}
+
+// minKeptRead is the least time of the full read that makes the ratio of
+// TestTU28KeptReadStopsInsideALargeTable meaningful.
+const minKeptRead = 8 * time.Millisecond
+
+// minKeptLimit is the least deadline of the real-interrupt tests, a quarter of
+// minKeptRead. A shorter deadline is too close to the time of a skipped read.
+const minKeptLimit = minKeptRead / 4
+
+// T-U-28: the deadline stops the read inside one large table. The table is
+// rollup_seen, which is one btree, and it is in the line. F is the least time
+// of the full read of the real statement. A read with a deadline of F/4 must
+// count slow and end in less than 3/4 of F. A statement with the aggregate
+// column checks for an interrupt only between two objects, so it fails this
+// test. The test is relative, so it does not depend on the speed of the
+// machine. The table grows in steps until the full read is long enough. A
+// machine that is too fast for the largest table makes it fail, not skip.
+func TestTU28KeptReadStopsInsideALargeTable(t *testing.T) {
+	r := newRig(t, 100)
+	full := fillSeenForRead(t, r.db)
+	tx, err := r.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = nil, full/4
+	var read time.Duration
+	c.keptTook = func(d time.Duration) { read = d }
+	begin := time.Now()
+	reason, err := c.keptOver(context.Background(), tx)
+	if took := time.Since(begin); reason != reasonSlow || err != nil || took >= full*3/4 {
+		t.Fatalf("reason %q, error %v after %v; the full read took %v; want slow, no error, and less than 3/4 of the full time", reason, err, took, full)
+	}
+	if c.keptLimit < minKeptLimit || read < c.keptLimit {
+		t.Fatalf("the deadline is %v and the read took %v; want a deadline of at least %v and a read of at least the deadline", c.keptLimit, read, minKeptLimit)
+	}
+	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES ('probe', '1')"); err != nil {
+		t.Fatalf("the transaction does not work after the interrupt: %v", err)
+	}
+	check(t, tx.Commit())
+	if n := count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'probe'"); n != 1 {
+		t.Fatalf("%d probe rows after the commit, want 1", n)
+	}
+}
+
+// keptFillRows is the rows that one step adds to rollup_seen. keptFillSteps is
+// the most steps that fillSeenForRead makes.
+const (
+	keptFillRows  = 250_000
+	keptFillSteps = 6
+)
+
+// fillSeenForRead adds rows to rollup_seen, keptFillRows at a time. It stops
+// when the least of 3 full reads of the real statement is at least minKeptRead.
+// It returns that time. At the last step it fails with a message that names
+// the time.
+func fillSeenForRead(t *testing.T, db *sql.DB) time.Duration {
+	t.Helper()
+	var n int64
+	full := time.Duration(0)
+	for step := range keptFillSteps {
+		for off := step * keptFillRows; off < (step+1)*keptFillRows; off += 50_000 {
+			mustExec(t, db, `WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c WHERE i < ?)
+				INSERT INTO rollup_seen (day, vhost, band, family, session_id)
+				SELECT '2027-02-09', 'v', 'human', '', hex(randomblob(40)) || i FROM c`, off, off+49_999)
+		}
+		full = time.Hour
+		for range 3 {
+			begin := time.Now()
+			check(t, db.QueryRow(keptSQL).Scan(&n))
+			full = min(full, time.Since(begin))
+		}
+		if full >= minKeptRead {
+			return full
+		}
+	}
+	t.Fatalf("the full read took %v, less than %v, with %d rows: the table is too small for this machine", full, minKeptRead, keptFillSteps*keptFillRows)
+	return 0
+}
+
+// T-U-28: through a run of the schedule, a slow read counts slow and not kept.
+// No evidence row goes and the writer stays healthy. The fixed line is in the
+// log for each run. The chunk commits, so the mark step of the run writes its
+// meta key. A second run works. After both, the writer writes an event. The
+// deadline of 1 ns has passed before the query, so the driver does not run. The
+// next test has a real interrupt.
+func TestTU28SlowKeptReadLeavesThePoolWorking(t *testing.T) {
+	r := newRig(t, 100)
+	addAggregates(t, r.db, 3000)
+	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
+	var out bytes.Buffer
+	s := keptSchedule(t, r, truncated(t, r)-1, &out)
+	s.tune = func(c *capRun) { c.keptLimit = time.Nanosecond }
+	checkSlowRuns(t, r, s, &out)
+}
+
+// T-U-28: the operator condition with a real interrupt. The table is a large
+// rollup_seen, as in TestTU28KeptReadStopsInsideALargeTable. The deadline is a
+// quarter of the full read, so the driver interrupts the read. The two runs
+// meet every condition of the test above. A hook records the time of each
+// real read. Each read takes at least the deadline. A read that is skipped, or
+// that has a deadline that passed before it, returns at once and fails this.
+func TestTU28SlowKeptReadWithARealInterruptLeavesThePoolWorking(t *testing.T) {
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 20, rollTDel.UnixMilli()-3600_000, 0)
+	full := fillSeenForRead(t, r.db)
+	var out bytes.Buffer
+	s := keptSchedule(t, r, truncated(t, r)-1, &out)
+	var reads []time.Duration
+	s.tune = func(c *capRun) {
+		c.keptLimit = full / 4
+		c.keptTook = func(d time.Duration) { reads = append(reads, d) }
+	}
+	checkSlowRuns(t, r, s, &out)
+	if limit := full / 4; limit < minKeptLimit || len(reads) != 2 || reads[0] < limit || reads[1] < limit {
+		t.Fatalf("the deadline is %v (at least %v needed) and the reads took %v; want 2 reads of at least the deadline", limit, minKeptLimit, reads)
+	}
+}
+
+// checkSlowRuns makes 2 runs of the schedule. Each must count slow and not
+// kept, and delete no evidence row. The writer stays healthy, the log has the
+// fixed line for each run, and the mark step writes its key. After the runs,
+// the writer writes an event.
+func checkSlowRuns(t *testing.T, r *rig, s *Schedule, out *bytes.Buffer) {
+	t.Helper()
+	for run := 1; run <= 2; run++ {
+		mustExec(t, r.db, "DELETE FROM meta WHERE key = 'retention_last'")
+		s.runOnce(context.Background())
+		left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'")
+		mark := count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'retention_last'")
+		if got := s.CapUnmet(); left != 20 || mark != 1 || got != (CapUnmet{Slow: uint64(run)}) || !r.w.Healthy() ||
+			strings.Count(out.String(), "msg=\"retention cap not met: kept read too slow\"\n") != run {
+			t.Fatalf("run %d: %d callbacks, %d marks, counts %+v, healthy %v, log %q; want 20, 1, %d slow only, healthy and %d lines",
+				run, left, mark, got, r.w.Healthy(), out.String(), run, run)
+		}
+	}
+	// The fake log has no leaf for the callbacks. The start check refuses them.
+	mustExec(t, r.db, "DELETE FROM event")
+	r.add(event.KindRequest, rollTDel.UnixMilli())
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("the writer failed after the runs: %v", err)
+	}
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); n != 1 || !r.w.Healthy() {
+		t.Fatalf("%d request rows after the runs, error %v; want the new event written", n, r.w.Err())
+	}
+}
+
+// lateFix is the fixture of the late-start tests. The steps make a chunk. One
+// step moves the fake clock of the writer by *prior. The other is the cap step.
+// The field reads counts the reads of the kept bytes.
+type lateFix struct {
+	r       *rig
+	c       *capRun
+	steps   []retentionStep
+	reads   *int
+	reasons *[]string
+	prior   *time.Duration
+}
+
+// lateRead makes a cap state at tier 3 with 3 evidence rows. The kept bytes
+// are at the target, so a read gives the reason kept.
+func lateRead(t *testing.T, prior, keptLimit time.Duration) lateFix {
+	t.Helper()
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	now := time.Unix(0, 0)
+	r.w.clock = func() time.Time { return now }
+	c := forcedCap(r, rollTDel)
+	c.keptLimit = keptLimit
+	f := lateFix{r: r, c: c, reasons: recordUnmet(c), reads: new(int), prior: &prior}
+	c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *f.reads++; return c.target, nil }
+	earlier := func(context.Context, *sql.Tx, int) (int, error) { now = now.Add(*f.prior); return 0, nil }
+	f.steps = []retentionStep{earlier, c.evict}
+	return f
+}
+
+// T-U-28: the read of the kept bytes starts only when the chunk has keptLimit
+// plus keptStopMargin of its budget left. An earlier step of 60 ms leaves 40
+// ms. The cap step then does not read, and the chunk ends. The next chunk
+// reads one time and gives the reason. No evidence row goes.
+func TestTU28KeptReadWaitsForANewChunkWhenTheBudgetIsShort(t *testing.T) {
+	f := lateRead(t, 60*time.Millisecond, keptReadLimit)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
+	cur := 0
+	rows, err := r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != chunkRows || cur != 1 || *reads != 0 || len(*reasons) != 0 {
+		t.Fatalf("first chunk: %d rows, step %d, %d reads, counted %q; want the chunk to end at the cap step with no read", rows, cur, *reads, *reasons)
+	}
+	rows, err = r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != 0 || cur != 2 || *reads != 1 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("second chunk: %d rows, step %d, %d reads, counted %q; want one read and kept", rows, cur, *reads, *reasons)
+	}
+	if cb := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"); cb != 3 {
+		t.Fatalf("%d callbacks left, want 3", cb)
+	}
+}
+
+// T-U-28: an earlier step of 10 ms leaves 90 ms. The read is in the same chunk.
+func TestTU28KeptReadStaysInTheChunkWhenTheBudgetIsLongEnough(t *testing.T) {
+	f := lateRead(t, 10*time.Millisecond, keptReadLimit)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
+	cur := 0
+	rows, err := r.w.chunkRun(steps, &cur, nil)
+	check(t, err)
+	if rows != 0 || cur != 2 || *reads != 1 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("chunk: %d rows, step %d, %d reads, counted %q; want one read and kept in this chunk", rows, cur, *reads, *reasons)
+	}
+}
+
+// T-U-28: the margin pins the boundary. Take an earlier step of 40 ms, the
+// limit of 50 ms and the margin of 10 ms. They make 100 ms. This is not above
+// the budget, so the read is in the same chunk. With 41 ms, the read waits.
+func TestTU28KeptReadBoundaryOfTheStopMargin(t *testing.T) {
+	for _, c := range []struct {
+		prior time.Duration
+		reads int
+	}{{40 * time.Millisecond, 1}, {41 * time.Millisecond, 0}} {
+		f := lateRead(t, c.prior, keptReadLimit)
+		cur := 0
+		_, err := f.r.w.chunkRun(f.steps, &cur, nil)
+		check(t, err)
+		if *f.reads != c.reads {
+			t.Fatalf("an earlier step of %v: %d reads in the first chunk, want %d", c.prior, *f.reads, c.reads)
+		}
+	}
+}
+
+// T-U-28: once the read is known, a later chunk with an earlier step does not
+// wait. Chunk 1 reads, finds the size below the line, and evicts day 1. Chunk 2
+// has an earlier step of 60 ms. It evicts day 2 and reads nothing.
+func TestTU28KnownReadIsNotDeferredByALaterChunk(t *testing.T) {
+	f := lateRead(t, 0, keptReadLimit)
+	addHashed(t, f.r.db, "callback", 3, capDay(2), 3)
+	f.c.keptBytes = func(context.Context, *sql.Tx) (int64, error) { *f.reads++; return 0, nil }
+	callbacks := func() int { return count(t, f.r.db, "SELECT count(*) FROM event WHERE kind = 'callback'") }
+	cur := 0
+	_, err := f.r.w.chunkRun(f.steps, &cur, nil)
+	check(t, err)
+	if *f.reads != 1 || callbacks() != 3 {
+		t.Fatalf("chunk 1: %d reads, %d callbacks; want 1 and 3", *f.reads, callbacks())
+	}
+	*f.prior, cur = 60*time.Millisecond, 0
+	_, err = f.r.w.chunkRun(f.steps, &cur, nil)
+	check(t, err)
+	if *f.reads != 1 || callbacks() != 0 {
+		t.Fatalf("chunk 2: %d reads, %d callbacks; want 1 and 0", *f.reads, callbacks())
+	}
+}
+
+// T-U-28: a limit above the chunk budget waits one time. The next chunk reads,
+// so the run ends and does not loop.
+func TestTU28KeptReadWaitsOneTimeForALimitAboveTheBudget(t *testing.T) {
+	f := lateRead(t, 0, 2*chunkBudget)
+	r, steps, reads, reasons := f.r, f.steps, f.reads, f.reasons
+	cur := 0
+	for chunk, want := range []int{0, 1} {
+		rows, err := r.w.chunkRun(steps, &cur, nil)
+		check(t, err)
+		if (rows == chunkRows) != (want == 0) || *reads != want {
+			t.Fatalf("chunk %d: %d rows, %d reads; want %d reads after it", chunk+1, rows, *reads, want)
+		}
+	}
+	if cur != 2 || len(*reasons) != 1 || (*reasons)[0] != reasonKept {
+		t.Fatalf("step %d, counted %q; want the run done with one kept", cur, *reasons)
+	}
+}
+
+// T-U-28: an error of the chunk context is not a slow read. A deadline of the
+// chunk and a cancel of the chunk are returned, and nothing is counted. A read
+// that ends at its own deadline is slow, and the next call reads nothing.
+func TestTU28ReadErrorsOfTheChunkAreNotSlow(t *testing.T) {
+	wait := func(ctx context.Context, _ *sql.Tx) (int64, error) { <-ctx.Done(); return 0, ctx.Err() }
+	for name, mk := range map[string]func() (context.Context, context.CancelFunc){
+		"deadline": func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Millisecond)
+		},
+		"cancel": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(20*time.Millisecond, cancel)
+			return ctx, cancel
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 100)
+			c := forcedCap(r, rollTDel)
+			c.keptBytes, c.keptLimit = wait, time.Hour
+			reasons := recordUnmet(c)
+			ctx, cancel := mk()
+			defer cancel()
+			tx, err := r.db.Begin()
+			check(t, err)
+			defer tx.Rollback()
+			reason, err := c.keptOver(ctx, tx)
+			if err == nil || reason != "" || len(*reasons) != 0 {
+				t.Fatalf("reason %q, error %v, counted %q; want the error and no count", reason, err, *reasons)
+			}
+		})
+	}
+	r := newRig(t, 100)
+	addHashed(t, r.db, "callback", 3, capDay(1), 0)
+	c := forcedCap(r, rollTDel)
+	c.keptBytes, c.keptLimit = wait, time.Millisecond
+	reasons := recordUnmet(c)
+	callIn(t, r.db, c.evict, chunkRows)
+	callIn(t, r.db, c.evict, chunkRows)
+	if left := count(t, r.db, "SELECT count(*) FROM event"); left != 3 || len(*reasons) != 1 || (*reasons)[0] != reasonSlow {
+		t.Fatalf("%d rows left, counted %q; want 3 and one slow", left, *reasons)
+	}
+}
+
+// T-U-28: an error of the roll-up inside the request source is returned, and
+// the chunk can roll back. A trigger on aggregate_day stops the insert. The
+// source must not report rows that it removed, and it must not set a seen day.
+func TestTU28RollUpErrorOfTheRequestSourceIsReturned(t *testing.T) {
+	r := newRig(t, 100)
+	mustExec(t, r.db, "CREATE TRIGGER stop_agg BEFORE INSERT ON aggregate_day BEGIN SELECT RAISE(ABORT, 'stopped'); END")
+	addEvents(t, r.db, "request", 5, capDay(1), 0, nil, nil)
+	c := forcedCap(r, rollTDel)
+	tx, err := r.db.Begin()
+	check(t, err)
+	n, err := c.evict(context.Background(), tx, chunkRows)
+	check(t, tx.Rollback())
+	if err == nil || n != 0 || c.seenDay != "" {
+		t.Fatalf("evict returned %d and %v, seen day %q; want 0, an error and no day", n, err, c.seenDay)
+	}
+	if left := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); left != 5 {
+		t.Fatalf("%d request rows left, want 5", left)
+	}
+}
+
+// liveOf returns the live bytes of the cap state, from its own measure.
+func liveOf(t *testing.T, c *capRun) int64 {
+	t.Helper()
+	tx, err := c.w.db.Begin()
+	check(t, err)
+	defer tx.Rollback()
+	v, err := c.live(context.Background(), tx)
+	check(t, err)
+	return v
+}
+
+// T-U-28: the live size counts the seen rows before the delete. The test uses
+// no measure hook, so the page counts are read. 5 000 seen rows of a young day
+// make the live size larger than that of a database with none. It falls after
+// the seen delete, and it stays down after the shrink step.
+func TestTU28LiveSizeCountsTheSeenRowsUntilTheyGo(t *testing.T) {
+	empty := forcedCap(newRig(t, 100), rollTDel)
+	empty.measure = nil
+	base := liveOf(t, empty)
+	r := newRig(t, 100)
+	addEvents(t, r.db, "request", 1, capDay(1), 0, nil, nil)
+	mustExec(t, r.db, `WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < 4999)
+		INSERT INTO rollup_seen (day, vhost, band, family, session_id) SELECT '2027-01-01', 'v', 'human', '', hex(randomblob(24)) || i FROM c`)
+	c := forcedCap(r, rollTDel)
+	c.measure = nil
+	_, _, size := dbPages(t, r.db)
+	before := liveOf(t, c)
+	if before < base+40*size {
+		t.Fatalf("live %d bytes with the seen rows, %d without; want at least 40 pages more", before, base)
+	}
+	for range 100 {
+		if callIn(t, r.db, c.evict, chunkRows) == 0 {
+			break
+		}
+	}
+	if left := count(t, r.db, "SELECT count(*) FROM rollup_seen"); left != 0 {
+		t.Fatalf("%d seen rows left, want 0", left)
+	}
+	afterDelete := liveOf(t, c)
+	for range 1000 {
+		if callIn(t, r.db, c.shrink, chunkRows) == 0 {
+			break
+		}
+	}
+	if afterShrink := liveOf(t, c); afterDelete > before-40*size || afterShrink > afterDelete || afterShrink > base+8*size {
+		t.Fatalf("live %d before, %d after the delete, %d after the shrink, %d for an empty database; want a fall of 40 pages and a return near the empty size",
+			before, afterDelete, afterShrink, base)
 	}
 }

@@ -57,6 +57,11 @@ type tally [numMembers]int64
 
 type tallyKey struct{}
 
+// chunkStartKey is the key of the start time of the chunk, a time.Time. A step
+// reads it to know how much of the chunk budget the earlier steps used. A
+// context with no start means that no earlier work is in the chunk.
+type chunkStartKey struct{}
+
 // tallyRows adds n rows to a member of the tally of the chunk. A chunk with no
 // run record has no tally, and the call does nothing.
 func tallyRows(ctx context.Context, m member, n int) {
@@ -282,6 +287,7 @@ func (w *Writer) chunkRun(steps []retentionStep, cur *int, run *retentionRun) (r
 	}
 	defer tx.Rollback() // no effect after COMMIT
 	start := w.now()
+	ctx = context.WithValue(ctx, chunkStartKey{}, start)
 	for *cur < len(steps) && rows < chunkRows && !run.settleDue(*cur) {
 		limit := chunkRows - rows
 		n, err := steps[*cur](ctx, tx, limit)
