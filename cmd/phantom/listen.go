@@ -122,6 +122,13 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	}
 	lg := slog.New(slog.NewTextHandler(stderr, nil))
 	s := start(p, q, d, lg)
+	if s.capErr != nil {
+		fmt.Fprintln(stderr, "phantom: retention cap does not start")
+		httpsLn.Close()
+		httpLn.Close()
+		s.Stop()
+		return 1
+	}
 	b := startBundle(p, s, q, lg)
 	var names []string
 	for i := 0; ; i++ {

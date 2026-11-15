@@ -403,10 +403,10 @@ func TestTU18_StopOrder(t *testing.T) {
 func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	began := make(chan struct{})
 	d := realDeps
-	d.schedule = func(ctx context.Context, w *store.Writer, ip, raw, events int, lg *slog.Logger) {
-		sc := store.NewSchedule(w, ip, raw, events, lg)
+	d.schedule = func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
+		sc := store.NewSchedule(w, p.IPDays, p.RawDays, p.EventsDays, lg)
 		go func() { <-sc.Began(); close(began) }()
-		sc.Run(ctx)
+		return sc.Run, nil
 	}
 	s, _ := launch(t, testParams(t, "events.db"), d)
 	select {
@@ -421,21 +421,27 @@ func TestTU27_StartRunsTheSchedule(t *testing.T) {
 }
 
 // TestTU27_StartPassesTheEventsDays checks that start gives the schedule the
-// events days of the params. The value is not the default, so a start that
-// passes the raw days or a constant fails (T-U-27).
+// events days, the cap and the store path of the params. The values are not the
+// defaults, so a start that passes the raw days or a constant fails (T-U-27).
 func TestTU27_StartPassesTheEventsDays(t *testing.T) {
-	got := make(chan [3]int, 1)
+	type got struct {
+		days  [3]int
+		max   int64
+		store string
+	}
+	ch := make(chan got, 1)
 	d := realDeps
-	d.schedule = func(_ context.Context, _ *store.Writer, ip, raw, events int, _ *slog.Logger) {
-		got <- [3]int{ip, raw, events}
+	d.schedule = func(_ *store.Writer, p startParams, _ *slog.Logger) (func(context.Context), error) {
+		ch <- got{[3]int{p.IPDays, p.RawDays, p.EventsDays}, p.MaxBytes, p.StorePath}
+		return func(context.Context) {}, nil
 	}
 	p := testParams(t, "events.db")
-	p.EventsDays = 45
+	p.EventsDays, p.MaxBytes = 45, 123456789
 	launch(t, p, d)
 	select {
-	case v := <-got:
-		if v != [3]int{7, 30, 45} {
-			t.Errorf("days %v, want [7 30 45]", v)
+	case v := <-ch:
+		if v != (got{[3]int{7, 30, 45}, 123456789, "events.db"}) {
+			t.Errorf("schedule got %+v, want days [7 30 45], cap 123456789, store events.db", v)
 		}
 	case <-time.After(netWait):
 		t.Fatal("the schedule did not start")
@@ -460,7 +466,13 @@ func TestTU27_RealScheduleUsesTheEventsDays(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); realDeps.schedule(ctx, s.writer, 7, 30, 45, slog.New(slog.DiscardHandler)) }()
+	p := testParams(t, "events.db")
+	p.EventsDays = 45
+	run, err := realDeps.schedule(s.writer, p, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { defer close(done); run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 	until(t, "mark of the run", func() bool {
 		var n int
@@ -476,7 +488,10 @@ func TestTU27_RealScheduleUsesTheEventsDays(t *testing.T) {
 // no schedule (T-U-27).
 func TestTU27_NoScheduleWithoutWriter(t *testing.T) {
 	d := realDeps
-	d.schedule = func(context.Context, *store.Writer, int, int, int, *slog.Logger) { t.Error("schedule started") }
+	d.schedule = func(*store.Writer, startParams, *slog.Logger) (func(context.Context), error) {
+		t.Error("schedule started")
+		return nil, nil
+	}
 	launch(t, testParams(t, "keys/events.db"), d)
 }
 
@@ -492,15 +507,17 @@ func TestTU27_StopEndsTheSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := realDeps
-	d.schedule = func(ctx context.Context, _ *store.Writer, ip, raw, events int, _ *slog.Logger) {
-		if ip != 7 || raw != 30 || events != 90 {
-			t.Errorf("days %d, %d and %d, want 7, 30 and 90", ip, raw, events)
+	d.schedule = func(_ *store.Writer, p startParams, _ *slog.Logger) (func(context.Context), error) {
+		if p.IPDays != 7 || p.RawDays != 30 || p.EventsDays != 90 {
+			t.Errorf("days %d, %d and %d, want 7, 30 and 90", p.IPDays, p.RawDays, p.EventsDays)
 		}
-		close(started)
-		<-ctx.Done()
-		close(cancelled)
-		<-release
-		ended <- q.Closed()
+		return func(ctx context.Context) {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			ended <- q.Closed()
+		}, nil
 	}
 	s := start(testParams(t, "events.db"), q, d, slog.New(slog.DiscardHandler))
 	recv := func(ch <-chan struct{}, what string) {
@@ -1005,7 +1022,7 @@ func TestParamsOf(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := startParams{Root: "/var/lib/phantom", StorePath: "events.db", TlogDir: "tlog", Origin: "test/origin", CacheDir: "certs", BundlePath: "bundle/current.cbnd",
-		Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90}
+		Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90, MaxBytes: 10737418240}
 	if got := paramsOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("params %+v, want %+v", got, want)
 	}
@@ -1017,6 +1034,14 @@ func TestParamsOf(t *testing.T) {
 	}
 	if got := paramsOf(cfg); got.EventsDays != 45 || got.RawDays != 30 {
 		t.Errorf("events days %d and raw days %d, want 45 and 30", got.EventsDays, got.RawDays)
+	}
+	// A non-default cap shows that paramsOf reads store.max_bytes.
+	cfg, err = config.Load(writeFile(t, validBody(t)), []string{"CKPT_TOKEN=" + strings.Repeat("t", 32), "PHANTOM_STORE_MAX_BYTES=300000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paramsOf(cfg); got.MaxBytes != 300000000 {
+		t.Errorf("max bytes %d, want 300000000", got.MaxBytes)
 	}
 }
 
