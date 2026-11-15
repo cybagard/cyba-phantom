@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,13 +66,32 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 	p.MaxBytes = 1 << 30
 	d := realDeps
 	// The database opens as other.db, and the schedule gets events.db.
-	d.openStore = func(r *os.Root, _ string, o store.Options) (*sql.DB, error) { return store.Open(r, "other.db", o) }
+	var opened atomic.Pointer[sql.DB]
+	d.openStore = func(r *os.Root, _ string, o store.Options) (*sql.DB, error) {
+		db, err := store.Open(r, "other.db", o)
+		opened.Store(db)
+		return db, err
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), netWait)
 	defer cancel()
 	var stderr strings.Builder
 	code := serveWith(ctx, cancel, nil, cfg, content{}, p, d, io.Discard, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: retention cap does not start\n") {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the cap line", code, stderr.String())
+	}
+	// The refusal must free the ports and the store, as a stop does.
+	for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
+		// A listener that is still open waits for a client. The deadline ends
+		// the wait. It gives a timeout error, not a closed one.
+		ln.Listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+		if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("%s listener after the refusal: Accept gave %v, want a closed listener", name, err)
+		}
+	}
+	if db := opened.Load(); db == nil {
+		t.Error("the store did not open")
+	} else if err := db.Ping(); err == nil {
+		t.Error("the store is open after the refusal")
 	}
 	withState(t, p, "other.db", func(db *sql.DB) {
 		if n := countOf(t, db, "SELECT count(*) FROM meta WHERE key = 'retention_last'"); n != 0 {
@@ -245,8 +265,9 @@ func sendHosts(t *testing.T, addr string, hosts []string) map[string]int {
 // deletes the mark. It starts the sensor again on the same state directory.
 // The run at the start rolls the rows up. For each day of aggregate_day, the
 // distinct vhost values are at most the configured names plus one (T-S-35).
-// Each is a configured name or NULL. The test config has two names, decoyName
-// and noVhost. The bundle has a vhost for decoyName only. So the bound is 3.
+// Each is a configured name or the empty name, as the roll-up stores it. The
+// test config has two names, decoyName and noVhost. The bundle has a vhost for
+// decoyName only. So the bound is 3.
 func TestTS35_HostValuesThroughTheStartedSensor(t *testing.T) {
 	names := []string{decoyName, noVhost}
 	hosts := hostileHosts(10_000)
@@ -292,13 +313,19 @@ func TestTS35_HostValuesThroughTheStartedSensor(t *testing.T) {
 			var day string
 			var vhost sql.NullString
 			mustOK(t, rows.Scan(&day, &vhost))
-			if vhost.Valid && vhost.String != "" && !slices.Contains(names, vhost.String) {
-				t.Errorf("day %s has the vhost %q, which is not a configured name", day, vhost.String)
+			// The roll-up stores "" for no vhost. NULL has its own key, which no
+			// vhost text can be.
+			key := vhost.String
+			switch {
+			case !vhost.Valid:
+				key = "\x00null"
+			case key != "" && !slices.Contains(names, key):
+				t.Errorf("day %s has the vhost %q, which is not a configured name", day, key)
 			}
 			if perDay[day] == nil {
 				perDay[day] = map[string]bool{}
 			}
-			perDay[day][vhost.String] = true
+			perDay[day][key] = true
 		}
 		mustOK(t, rows.Err())
 		if len(perDay) == 0 {

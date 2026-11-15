@@ -35,7 +35,7 @@ type startParams struct {
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
-	IPDays, RawDays, EventsDays      int   // retention_days.{ip,raw,events}
+	IPDays, RawDays, EventsDays      int   // store.retention_days.{ip,raw,events}
 	MaxBytes                         int64 // store.max_bytes
 }
 
@@ -179,7 +179,7 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 			// cap gives no run, not even the run at the start. So the sensor
 			// never runs with the cap off. serve stops on capErr.
 			if run, err := d.schedule(s.writer, p, lg); err != nil {
-				lg.Error("retention cap refused")
+				lg.Error("retention cap refused", "error", err)
 				s.capErr = err
 			} else {
 				var ctx context.Context

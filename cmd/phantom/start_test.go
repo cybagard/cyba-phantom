@@ -420,10 +420,11 @@ func TestTU27_StartRunsTheSchedule(t *testing.T) {
 	}
 }
 
-// TestTU27_StartPassesTheEventsDays checks that start gives the schedule the
-// events days, the cap and the store path of the params. The values are not the
-// defaults, so a start that passes the raw days or a constant fails (T-U-27).
-func TestTU27_StartPassesTheEventsDays(t *testing.T) {
+// TestTU27_StartPassesTheScheduleValues checks that start gives the schedule
+// the events days, the cap and the store path of the params. The values are not
+// the defaults, so a start that passes the raw days or a constant fails
+// (T-U-27).
+func TestTU27_StartPassesTheScheduleValues(t *testing.T) {
 	type got struct {
 		days  [3]int
 		max   int64
