@@ -1,14 +1,18 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/metrics"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -45,14 +49,25 @@ var (
 // The writer gets 500 events a second (T-P-13, SEC-39, SEC-41). It is not
 // part of make all. The parent makes the database. The child process runs
 // the schedule, so it has its own peak. The child prints two times for each
-// step and each group. The chunk body goes from the start of the chunk to
-// its COMMIT. The writer hold goes from one chunk start to the next. It has
-// the COMMIT and the batches between the chunks. The child prints the count
-// of each over 100 ms and over 250 ms. It prints the queue bytes in the
-// longest chunk and the largest queue bytes of the run. It prints the peak
-// RSS (VmHWM) and the dropped events. It prints the extra disk against the
-// 90 % line of the file system. It ends with one PASS or FAIL line for each
-// rule. Run it with -benchtime=1x:
+// step and each group, for chunk transactions only. A batch transaction of
+// events is not a chunk: the step wrapper tells them apart. The chunk body
+// goes from the start of the chunk to its COMMIT. The writer hold goes from
+// one chunk start to the next. It has four fields. The body is the chunk
+// body. The commit goes from the chunk's COMMIT call to the next BEGIN of any
+// transaction, so it is the COMMIT and the small steps before that BEGIN (the
+// WAL settle, the close of the connection). The batch is the sum of the batch
+// transactions in the hold, each from its BEGIN to the next BEGIN. The rest
+// is the hold less the three. The child prints the count of each over 100 ms
+// and over 250 ms. For each hold over 100 ms it prints one ret-long line with
+// the fields, the COMMIT time of the batches, the WAL bytes, checkpoint
+// sequence and nBackfill at the chunk's COMMIT call and at the next BEGIN,
+// and the change of the GC cycles and of the CPU throttling over the hold (-1
+// when /sys/fs/cgroup/cpu.stat is missing). The ret-batch line counts the
+// batch transactions. The child prints the queue bytes in the longest chunk
+// and the largest queue bytes of the run. It prints the peak RSS (VmHWM) and
+// the dropped events. It prints the extra disk against the 90 % line of the
+// file system. It ends with one PASS or FAIL line for each rule. Run it with
+// -benchtime=1x:
 //
 //	PHANTOM_RETENTION_ROWS=30000000 go test -run '^$' \
 //	  -bench '^BenchmarkRetention$' -benchtime=1x ./internal/store
@@ -222,8 +237,9 @@ func BenchmarkRetentionChild(b *testing.B) {
 	check(b, s.SetMaxBytes(capBytes, "events.db"))
 
 	var st loadStats
-	var cur atomic.Int32
 	startDisk := childDisk(dir)
+	tr := newHoldTrace(&st, q, dir)
+	defer tr.close()
 	inner := s.run
 	s.run = func(ctx context.Context, steps []retentionStep) error {
 		if len(steps) != len(loadSteps) {
@@ -232,7 +248,7 @@ func BenchmarkRetentionChild(b *testing.B) {
 		wrapped := make([]retentionStep, len(steps))
 		for i, step := range steps {
 			wrapped[i] = func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-				cur.Store(int32(i))
+				tr.step, tr.chunk = i, true // only a chunk runs a step
 				n, err := step(ctx, tx, limit)
 				st.rows[i] += n
 				return n, err
@@ -240,25 +256,8 @@ func BenchmarkRetentionChild(b *testing.B) {
 		}
 		return inner(ctx, wrapped)
 	}
-	var begin, prevBegin time.Time
-	prevStep := 0
-	w.beforeBegin = func() error {
-		begin = time.Now()
-		if !prevBegin.IsZero() {
-			st.addHold(prevStep, begin.Sub(prevBegin))
-		}
-		prevBegin = begin
-		raise(&st.maxDisk, childDisk(dir))
-		return nil
-	}
-	w.beforeCommit = func(*sql.Tx) error {
-		step, took, fill := int(cur.Load()), time.Since(begin), q.Bytes()
-		st.addBody(step, took, fill)
-		prevStep = step
-		raise(&st.maxFill, fill.Bulk+fill.Evidence)
-		raise(&st.maxDisk, childDisk(dir))
-		return nil
-	}
+	w.beforeBegin, w.beforeCommit = tr.beforeBegin, tr.beforeCommit
+	w.timing = tr.timing
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
@@ -290,10 +289,8 @@ func BenchmarkRetentionChild(b *testing.B) {
 
 	runStart := time.Now()
 	s.runOnce(context.Background())
-	if !prevBegin.IsZero() {
-		// The last hold has the checkpoint and the event.
-		st.addHold(prevStep, time.Since(prevBegin))
-	}
+	// The last hold has the checkpoint and the event.
+	tr.finish()
 	total := time.Since(runStart)
 	raise(&st.maxDisk, childDisk(dir))
 	close(stopLoad)
@@ -337,6 +334,7 @@ func BenchmarkRetentionChild(b *testing.B) {
 	}
 	fmt.Printf("ret-run chunks=%d body>100ms=%d body>250ms=%d hold>100ms=%d hold>250ms=%d total=%.1fs offered=%d (%d a second) cap=%d MiB\n",
 		chunks, o100b, o250b, o100h, o250h, total.Seconds(), offered, startedOfferRate, capBytes/mib)
+	fmt.Printf("ret-batch transactions=%d longest=%.1fms longest-commit=%.1fms\n", tr.batches, ms(tr.longBatch), ms(tr.longBatchCommit))
 	fmt.Printf("ret-queue largest=%d bytes (both lanes)\n", st.maxFill.Load())
 	fmt.Printf("ret-disk start=%.1fMiB largest=%.1fMiB extra=%.1fMiB line90=%.1fMiB\n", float64(startDisk)/mib, float64(st.maxDisk.Load())/mib, float64(extra)/mib, float64(line)/mib)
 	fmt.Printf("ret-dropped queue(bulk=%d evidence=%d invalid=%d) writer(bulk=%d evidence=%d)\n",
@@ -389,4 +387,198 @@ func (s *loadStats) addHold(step int, took time.Duration) {
 	if took > 250*time.Millisecond {
 		s.over250h[step]++
 	}
+}
+
+// walMark is the state of the WAL at one point: its bytes, the checkpoint
+// sequence number of its header (bytes 12-15, big-endian) and nBackfill of the
+// -shm file (offset 96, native byte order).
+type walMark struct {
+	bytes         int64
+	seq, backfill uint32
+}
+
+func readWAL(dir string) (m walMark) {
+	var b [16]byte
+	wal := filepath.Join(dir, "events.db-wal")
+	m.bytes = fileSize(wal)
+	if f, err := os.Open(wal); err == nil {
+		if n, _ := f.ReadAt(b[:], 0); n == len(b) {
+			m.seq = binary.BigEndian.Uint32(b[12:])
+		}
+		f.Close()
+	}
+	if f, err := os.Open(filepath.Join(dir, "events.db-shm")); err == nil {
+		if n, _ := f.ReadAt(b[:4], 96); n == 4 {
+			m.backfill = binary.NativeEndian.Uint32(b[:4])
+		}
+		f.Close()
+	}
+	return m
+}
+
+// loadMark is the GC cycle count and the CPU throttling counters (-1: no
+// cpu.stat) at one point.
+type loadMark struct {
+	gc                     uint64
+	throttled, throttledUS int64
+}
+
+var statKeys = [2][]byte{[]byte("nr_throttled "), []byte("throttled_usec ")}
+
+// holdTrace splits the writer hold of each chunk. All hooks run on the writer
+// goroutine. finish ends the trace, and the mutex orders it with the hooks.
+type holdTrace struct {
+	mu   sync.Mutex
+	done bool
+	st   *loadStats
+	q    *event.Queue
+	dir  string
+	cpu  *os.File // cpu.stat of the cgroup; nil when missing
+	buf  [512]byte
+	gcs  []metrics.Sample
+
+	step  int  // set by the step wrapper
+	chunk bool // the open transaction ran a step, so it is a chunk
+	begin time.Time
+	at    loadMark // marks at the BEGIN of the open transaction
+
+	open            bool // a chunk hold is open
+	start           time.Time
+	startMark       loadMark
+	hstep           int
+	body, commit    time.Duration
+	batch, batchCom time.Duration
+	commitAt        time.Time
+	commitDue       bool // the commit field waits for the next BEGIN
+	commitWAL, next walMark
+	batchAt         time.Time
+	batchOpen       bool
+
+	batches                    int
+	longBatch, longBatchCommit time.Duration
+}
+
+func newHoldTrace(st *loadStats, q *event.Queue, dir string) *holdTrace {
+	f, _ := os.Open("/sys/fs/cgroup/cpu.stat")
+	return &holdTrace{st: st, q: q, dir: dir, cpu: f, gcs: []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}}
+}
+
+func (t *holdTrace) close() {
+	if t.cpu != nil {
+		t.cpu.Close()
+	}
+}
+
+func (t *holdTrace) mark() loadMark {
+	metrics.Read(t.gcs)
+	m := loadMark{gc: t.gcs[0].Value.Uint64(), throttled: -1, throttledUS: -1}
+	if t.cpu != nil {
+		n, _ := t.cpu.ReadAt(t.buf[:], 0)
+		for rest := t.buf[:n]; len(rest) > 0; {
+			var line []byte
+			line, rest, _ = bytes.Cut(rest, []byte("\n"))
+			for i, p := range [2]*int64{&m.throttled, &m.throttledUS} {
+				if v, ok := bytes.CutPrefix(line, statKeys[i]); ok {
+					*p, _ = strconv.ParseInt(string(v), 10, 64)
+				}
+			}
+		}
+	}
+	return m
+}
+
+// endBatch ends the open batch transaction at now.
+func (t *holdTrace) endBatch(now time.Time) {
+	if t.batchOpen {
+		d := now.Sub(t.batchAt)
+		t.batch, t.batchOpen = t.batch+d, false
+		t.longBatch = max(t.longBatch, d)
+	}
+}
+
+func (t *holdTrace) beforeBegin() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done {
+		return nil
+	}
+	now := time.Now()
+	if t.commitDue {
+		t.commit, t.commitDue, t.next = now.Sub(t.commitAt), false, readWAL(t.dir)
+	}
+	t.endBatch(now)
+	t.begin, t.chunk, t.at = now, false, t.mark()
+	raise(&t.st.maxDisk, childDisk(t.dir))
+	return nil
+}
+
+// beforeCommit tells a chunk from a batch by the flag of the step wrapper.
+func (t *holdTrace) beforeCommit(*sql.Tx) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done {
+		return nil
+	}
+	now, fill := time.Now(), t.q.Bytes()
+	raise(&t.st.maxFill, fill.Bulk+fill.Evidence)
+	raise(&t.st.maxDisk, childDisk(t.dir))
+	if !t.chunk {
+		t.batches, t.batchAt, t.batchOpen = t.batches+1, t.begin, true
+		return nil
+	}
+	body := now.Sub(t.begin)
+	t.st.addBody(t.step, body, fill)
+	if t.open {
+		t.closeHold(t.begin, t.at)
+	}
+	t.open, t.start, t.startMark, t.hstep, t.body = true, t.begin, t.at, t.step, body
+	t.commit, t.batch, t.batchCom, t.commitAt, t.commitDue = 0, 0, 0, now, true
+	t.commitWAL = readWAL(t.dir)
+	return nil
+}
+
+// timing gets the COMMIT time of each batch transaction that has an event.
+func (t *holdTrace) timing(_, commit time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.done {
+		t.batchCom += commit
+		t.longBatchCommit = max(t.longBatchCommit, commit)
+	}
+}
+
+// finish ends the open hold after the run.
+func (t *holdTrace) finish() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	if t.commitDue {
+		t.commit, t.next = now.Sub(t.commitAt), readWAL(t.dir)
+	}
+	t.endBatch(now)
+	if t.open {
+		t.closeHold(now, t.mark())
+	}
+	t.done = true
+}
+
+// closeHold ends the hold at end, with the marks of that point. A hold over
+// 100 ms gets a ret-long line.
+func (t *holdTrace) closeHold(end time.Time, em loadMark) {
+	hold := end.Sub(t.start)
+	t.st.addHold(t.hstep, hold)
+	if hold <= 100*time.Millisecond {
+		return
+	}
+	delta := func(a, b int64) int64 {
+		if a < 0 || b < 0 {
+			return -1
+		}
+		return b - a
+	}
+	fmt.Printf("ret-long step=%s body=%.1fms commit=%.1fms batch=%.1fms batch-commit=%.1fms rest=%.1fms hold=%.1fms "+
+		"wal-bytes=%d>%d wal-seq=%d>%d backfill=%d>%d gc-cycles=%d throttled=%d throttled-usec=%d\n",
+		loadSteps[t.hstep], ms(t.body), ms(t.commit), ms(t.batch), ms(t.batchCom), ms(hold-t.body-t.commit-t.batch), ms(hold),
+		t.commitWAL.bytes, t.next.bytes, t.commitWAL.seq, t.next.seq, t.commitWAL.backfill, t.next.backfill,
+		em.gc-t.startMark.gc, delta(t.startMark.throttled, em.throttled), delta(t.startMark.throttledUS, em.throttledUS))
 }
