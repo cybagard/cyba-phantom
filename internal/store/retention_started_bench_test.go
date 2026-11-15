@@ -41,8 +41,8 @@ var (
 	loadSteps = []string{"rollup", "rollup-day", "ip-7d", "raw-delete",
 		"counter-delete", "event-expire", "token-expire", "session-expire",
 		"field-clear", "mint", "cap", "shrink", "mark"}
-	loadGroups = []string{"30d", "30d", "7d-ip", "30d", "30d", "90d", "90d",
-		"90d", "7d-ip", "30d", "cap", "shrink", "mark"}
+	loadGroups = []string{"30d", "30d", "7d", "30d", "30d", "90d", "90d",
+		"90d", "30d", "30d", "cap", "shrink", "mark"}
 )
 
 // BenchmarkRetention measures one retention run of the schedule with a cap.
@@ -53,11 +53,11 @@ var (
 // events is not a chunk: the step wrapper tells them apart. The chunk body
 // goes from the start of the chunk to its COMMIT. The writer hold goes from
 // one chunk start to the next. It has four fields. The body is the chunk
-// body. The commit goes from the chunk's COMMIT call to the next BEGIN of
-// any transaction. So it is the COMMIT and the small steps before that
-// BEGIN. These are the WAL settle and the close of the connection. The batch
-// is the sum of the batch transactions in the hold. Each goes from its BEGIN
-// to the next BEGIN. The rest is the hold less the three. The child prints
+// body. The commit goes from the COMMIT call of the chunk to the next BEGIN
+// of any transaction. It holds the COMMIT, the WAL settle and the work of the
+// writer before that BEGIN. The batch is the sum of the batch transactions
+// in the hold. Each goes from its BEGIN to the next BEGIN. The rest is the
+// hold minus the three. The child prints
 // the count of each over 100 ms and over 250 ms. For each hold over 100 ms
 // it prints one ret-long line. It has the fields and the COMMIT time of the
 // batches. It has the WAL bytes, checkpoint sequence and nBackfill at the
@@ -74,8 +74,9 @@ var (
 //	  -bench '^BenchmarkRetention$' -benchtime=1x ./internal/store
 //
 // PHANTOM_RETENTION_ROWS gives the rows of the event table (default 20 000).
-// The rows cover 120 days that end now. 1 row in 20 is a refused row and 1 in
-// 20 a beacon row. 1 in 50 is a callback row with a detail and a body prefix.
+// The rows cover 120 days that end now. 1 row in 20 is a refused row. 1 row
+// in 20 is a beacon row. 1 in 50 is a callback row with a detail and a body
+// prefix.
 // The rest, 88 %, are request rows. For 30 M request rows, set the variable
 // to 34 100 000. There is a session row, with an address, for each 8 rows.
 // There is a token, a mint and an ip_counter row for each 16. So each step
@@ -85,8 +86,8 @@ var (
 // older than 30 d. The event expire takes the callback rows older than
 // 90 d. The field clear takes the callback rows between 30 d and 90 d. The
 // child prints rows= for each step. It is the sum of the values that the
-// chunks of the step returned. A step can weigh a row, and the cap and
-// shrink steps count their own units. A rule fails for a step with 0. The
+// chunks of the step returned. A step can count a row more than one time.
+// The cap and shrink steps count their own units. A rule fails for a step with 0. The
 // cap is a tenth of the database size at the start. So the cap step evicts
 // and the shrink step frees pages. The rule on the longest chunk uses the
 // writer hold, as the writer serves no event during it. A chunk that runs
@@ -399,21 +400,20 @@ type walMark struct {
 	seq, backfill uint32
 }
 
-func readWAL(dir string) (m walMark) {
+// readWAL reads the WAL mark through the files that newHoldTrace opened. A
+// close of a second descriptor would drop the locks of SQLite on that file.
+func (t *holdTrace) readWAL() (m walMark) {
 	var b [16]byte
-	wal := filepath.Join(dir, "events.db-wal")
-	m.bytes = fileSize(wal)
-	if f, err := os.Open(wal); err == nil {
-		if n, _ := f.ReadAt(b[:], 0); n == len(b) {
+	m.bytes = fileSize(filepath.Join(t.dir, "events.db-wal"))
+	if t.wal != nil {
+		if n, _ := t.wal.ReadAt(b[:], 0); n == len(b) {
 			m.seq = binary.BigEndian.Uint32(b[12:])
 		}
-		f.Close()
 	}
-	if f, err := os.Open(filepath.Join(dir, "events.db-shm")); err == nil {
-		if n, _ := f.ReadAt(b[:4], 96); n == 4 {
+	if t.shm != nil {
+		if n, _ := t.shm.ReadAt(b[:4], 96); n == 4 {
 			m.backfill = binary.NativeEndian.Uint32(b[:4])
 		}
-		f.Close()
 	}
 	return m
 }
@@ -436,6 +436,8 @@ type holdTrace struct {
 	q    *event.Queue
 	dir  string
 	cpu  *os.File // cpu.stat of the cgroup; nil when missing
+	wal  *os.File // the WAL file; nil when missing
+	shm  *os.File // the shared-memory file of the WAL; nil when missing
 	buf  [512]byte
 	gcs  []metrics.Sample
 
@@ -462,12 +464,18 @@ type holdTrace struct {
 
 func newHoldTrace(st *loadStats, q *event.Queue, dir string) *holdTrace {
 	f, _ := os.Open("/sys/fs/cgroup/cpu.stat")
-	return &holdTrace{st: st, q: q, dir: dir, cpu: f, gcs: []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}}
+	t := &holdTrace{st: st, q: q, dir: dir, cpu: f, gcs: []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}}
+	// The database is open, so both files exist.
+	t.wal, _ = os.Open(filepath.Join(dir, "events.db-wal"))
+	t.shm, _ = os.Open(filepath.Join(dir, "events.db-shm"))
+	return t
 }
 
 func (t *holdTrace) close() {
-	if t.cpu != nil {
-		t.cpu.Close()
+	for _, f := range []*os.File{t.cpu, t.wal, t.shm} {
+		if f != nil {
+			f.Close()
+		}
 	}
 }
 
@@ -506,7 +514,7 @@ func (t *holdTrace) beforeBegin() error {
 	}
 	now := time.Now()
 	if t.commitDue {
-		t.commit, t.commitDue, t.next = now.Sub(t.commitAt), false, readWAL(t.dir)
+		t.commit, t.commitDue, t.next = now.Sub(t.commitAt), false, t.readWAL()
 	}
 	t.endBatch(now)
 	t.begin, t.chunk, t.at = now, false, t.mark()
@@ -535,7 +543,7 @@ func (t *holdTrace) beforeCommit(*sql.Tx) error {
 	}
 	t.open, t.start, t.startMark, t.hstep, t.body = true, t.begin, t.at, t.step, body
 	t.commit, t.batch, t.batchCom, t.commitAt, t.commitDue = 0, 0, 0, now, true
-	t.commitWAL = readWAL(t.dir)
+	t.commitWAL = t.readWAL()
 	return nil
 }
 
@@ -555,7 +563,7 @@ func (t *holdTrace) finish() {
 	defer t.mu.Unlock()
 	now := time.Now()
 	if t.commitDue {
-		t.commit, t.next = now.Sub(t.commitAt), readWAL(t.dir)
+		t.commit, t.next = now.Sub(t.commitAt), t.readWAL()
 	}
 	t.endBatch(now)
 	if t.open {
