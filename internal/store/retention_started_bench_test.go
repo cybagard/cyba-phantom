@@ -58,11 +58,22 @@ var (
 //	  -bench '^BenchmarkRetention$' -benchtime=1x ./internal/store
 //
 // PHANTOM_RETENTION_ROWS gives the rows of the event table (default 20 000).
-// The rows cover 120 days that end now. 1 row in 20 is a refused or beacon
-// row. There is a session row for each 8 rows. There is a token and a mint
-// row for each 16. Each step of the run finds rows. The cap is a tenth of the
-// database size at the start. So the cap step evicts and the shrink step
-// frees pages. The rule on the longest chunk uses the writer hold, as the
+// The rows cover 120 days that end now. 1 row in 20 is a refused row and 1 in
+// 20 a beacon row. 1 in 50 is a callback row with a detail and a body prefix.
+// The rest, 88 %, are request rows: 30 M request rows need 34 100 000. There
+// is a session row for each 8 rows, with an address. There is a token and a
+// mint row for each 16, and an ip_counter row for each 16 (one day, one
+// address). So each step of the run finds rows: the roll-up and the raw
+// delete the request, refused and beacon rows older than 30 d, the address
+// step the sessions older than 7 d, the counter delete the ip_counter rows
+// older than 30 d, the event expire the callback rows older than 90 d, and the
+// field clear the callback rows between 30 d and 90 d. The child prints rows=
+// for each step: the sum of the values that its chunks returned. That is a
+// count of rows, but a step can weigh a row (the roll-up, the session expire)
+// and the cap and shrink steps count their own units. A rule fails for a step
+// with 0. The mint step needs mint rows older than 30 d, so it has some too. The cap
+// is a tenth of the database size at the start. So the cap step evicts and the
+// shrink step frees pages. The rule on the longest chunk uses the writer hold, as the
 // writer serves no event during it. A chunk that runs several steps counts
 // for the last of them. So a step with 0 chunks ran inside the chunk of a
 // later step. The database is below TMPDIR.
@@ -129,20 +140,36 @@ func retentionState(b *testing.B, n int) string {
 			mustExec(b, db, rec+insert, append(args, extra(inc)...)...)
 		}
 	}
-	fill(n, "INSERT INTO event (ts, kind, session_id, vhost, path, body_prefix, detail) SELECT ? + i*?, "+
-		"CASE WHEN i % 20 = 0 THEN 'refused' WHEN i % 20 = 10 THEN 'beacon' ELSE 'request' END, "+
+	fill(n, "INSERT INTO event (ts, kind, session_id, vhost, path, body_prefix, detail, hash, leaf_index) SELECT ? + i*?, "+
+		"CASE WHEN i % 20 = 0 THEN 'refused' WHEN i % 20 = 10 THEN 'beacon' WHEN i % 50 = 7 THEN 'callback' ELSE 'request' END, "+
 		"CASE WHEN i % 10 = 0 THEN NULL ELSE "+rollSID("i/8")+" END, 'www.example.com', '/a/' || hex(randomblob(12)), "+
-		"CASE WHEN i % 10 = 0 THEN NULL ELSE zeroblob(100) END, CASE WHEN i % 10 = 0 THEN NULL ELSE '{}' END FROM c",
+		"CASE WHEN i % 10 = 0 THEN NULL ELSE zeroblob(100) END, CASE WHEN i % 10 = 0 THEN NULL ELSE '{}' END, "+
+		// A callback row has a zero hash and the leaf index i/50. The log gets
+		// one zero leaf for each, so the start check of the writer finds the
+		// largest leaf index in the log.
+		"CASE WHEN i % 50 = 7 THEN zeroblob(32) END, CASE WHEN i % 50 = 7 THEN i / 50 END FROM c",
 		func(inc int64) []any { return []any{base, inc} })
-	fill(n/8+1, "INSERT INTO session (id, first_seen, last_seen, ip_hmac, ja4, h2_fp, ua, hdr_order_hash, family, band) SELECT "+rollSID("i")+
-		", ? + i*?, ? + i*?, hex(randomblob(32)), hex(randomblob(18)), hex(randomblob(20)), hex(randomblob(60)), hex(randomblob(8)), 'fam', "+
+	fill(n/8+1, "INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, ja4, h2_fp, ua, hdr_order_hash, family, band) SELECT "+rollSID("i")+
+		", ? + i*?, ? + i*?, printf('10.%d.%d.%d', i/65536 % 256, i/256 % 256, i % 256), hex(randomblob(32)), hex(randomblob(18)), hex(randomblob(20)), hex(randomblob(60)), hex(randomblob(8)), 'fam', "+
 		"CASE i % 4 WHEN 0 THEN 'human' WHEN 1 THEN 'crawler' WHEN 2 THEN 'agent-likely' ELSE 'agent-confirmed' END FROM c",
 		func(inc int64) []any { return []any{base, inc, base, inc} })
 	fill(n/16+1, "INSERT INTO token (token_id, session_id, trap_id, issued_at, first_cb_at) SELECT "+rollSID("i")+", "+rollSID("i+1")+", 't', ?, ? + i*? FROM c",
 		func(inc int64) []any { return []any{base, base, inc} })
 	fill(n/16+1, `INSERT INTO mint SELECT substr(x'000102', 1 + i % 3, 1), ((? + i*?) / 1000 - ?) / 600 % ?, i, 10, 's', ? + i*? FROM c`,
 		func(inc int64) []any { return []any{base, inc, epoch, event.MintUnitLimit, base, inc} })
+	fill(n/16+1, "INSERT INTO ip_counter SELECT strftime('%Y-%m-%d', (? + i*?) / 1000, 'unixepoch'), hex(randomblob(16)), 1, 0 FROM c",
+		func(inc int64) []any { return []any{base, inc} })
 	mustExec(b, db, checkpointSQL)
+	root, err := os.OpenRoot(state)
+	check(b, err)
+	defer root.Close()
+	lg, err := tlog.OpenLog(root, "tlog")
+	check(b, err)
+	defer lg.Close()
+	for left := (n + 42) / 50; left > 0; left -= 4096 {
+		_, err := lg.AppendBatch(make([]tlog.EventHash, min(left, 4096)))
+		check(b, err)
+	}
 	return state
 }
 
@@ -155,6 +182,7 @@ type loadStats struct {
 	over100b, over250b [13]int
 	over100h, over250h [13]int
 	chunks             [13]int
+	rows               [13]int      // the rows that the step returned, all chunks
 	maxFill            atomic.Int64 // the most queue bytes, both lanes
 	maxDisk            atomic.Int64 // the most database and WAL bytes
 }
@@ -206,7 +234,9 @@ func BenchmarkRetentionChild(b *testing.B) {
 		for i, step := range steps {
 			wrapped[i] = func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 				cur.Store(int32(i))
-				return step(ctx, tx, limit)
+				n, err := step(ctx, tx, limit)
+				st.rows[i] += n
+				return n, err
 			}
 		}
 		return inner(ctx, wrapped)
@@ -287,8 +317,8 @@ func BenchmarkRetentionChild(b *testing.B) {
 	groups := map[string]*[2]time.Duration{}
 	var order []string
 	for i, name := range loadSteps {
-		fmt.Printf("ret-step %-15s chunks=%d body-max=%.1fms body>100ms=%d body>250ms=%d hold-max=%.1fms hold>100ms=%d hold>250ms=%d queue-at-longest-body=%d+%d bytes\n",
-			name, st.chunks[i], ms(st.body[i]), st.over100b[i], st.over250b[i], ms(st.hold[i]), st.over100h[i], st.over250h[i],
+		fmt.Printf("ret-step %-15s chunks=%d rows=%d body-max=%.1fms body>100ms=%d body>250ms=%d hold-max=%.1fms hold>100ms=%d hold>250ms=%d queue-at-longest-body=%d+%d bytes\n",
+			name, st.chunks[i], st.rows[i], ms(st.body[i]), st.over100b[i], st.over250b[i], ms(st.hold[i]), st.over100h[i], st.over250h[i],
 			st.bodyFill[i].Bulk, st.bodyFill[i].Evidence)
 		g := groups[loadGroups[i]]
 		if g == nil {
@@ -323,6 +353,17 @@ func BenchmarkRetentionChild(b *testing.B) {
 	verdict(fmt.Sprintf("extra disk %.1f MiB below the 90 %% line %.1f MiB", float64(extra)/mib, float64(line)/mib), extra < line)
 	verdict(fmt.Sprintf("longest writer hold %.1f ms <= 250 ms", ms(hold)), hold <= 250*time.Millisecond)
 	verdict(fmt.Sprintf("dropped events %d == 0", droppedTotal), droppedTotal == 0)
+	var idle []string
+	for i, name := range loadSteps {
+		if st.rows[i] == 0 {
+			idle = append(idle, name)
+		}
+	}
+	rule := "every step changed rows"
+	if len(idle) > 0 {
+		rule += ", 0 rows in " + strings.Join(idle, ", ")
+	}
+	verdict(rule, len(idle) == 0)
 	fmt.Printf("ret-summary rss=%d extra=%d hold=%.3f body=%.3f dropped=%d\n", rss, extra, ms(hold), ms(body), droppedTotal)
 }
 
