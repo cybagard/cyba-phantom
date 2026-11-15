@@ -60,23 +60,22 @@ var (
 // PHANTOM_RETENTION_ROWS gives the rows of the event table (default 20 000).
 // The rows cover 120 days that end now. 1 row in 20 is a refused row and 1 in
 // 20 a beacon row. 1 in 50 is a callback row with a detail and a body prefix.
-// The rest, 88 %, are request rows: 30 M request rows need 34 100 000. There
-// is a session row for each 8 rows, with an address. There is a token and a
-// mint row for each 16, and an ip_counter row for each 16 (one day, one
-// address). So each step of the run finds rows: the roll-up and the raw
-// delete the request, refused and beacon rows older than 30 d, the address
-// step the sessions older than 7 d, the counter delete the ip_counter rows
-// older than 30 d, the event expire the callback rows older than 90 d, and the
-// field clear the callback rows between 30 d and 90 d. The child prints rows=
-// for each step: the sum of the values that its chunks returned. That is a
-// count of rows, but a step can weigh a row (the roll-up, the session expire)
-// and the cap and shrink steps count their own units. A rule fails for a step
-// with 0. The mint step needs mint rows older than 30 d, so it has some too. The cap
-// is a tenth of the database size at the start. So the cap step evicts and the
-// shrink step frees pages. The rule on the longest chunk uses the writer hold, as the
-// writer serves no event during it. A chunk that runs several steps counts
-// for the last of them. So a step with 0 chunks ran inside the chunk of a
-// later step. The database is below TMPDIR.
+// The rest, 88 %, are request rows. For 30 M request rows, set the variable
+// to 34 100 000. There is a session row, with an address, for each 8 rows.
+// There is a token, a mint and an ip_counter row for each 16. So each step
+// of the run finds rows. The roll-up and the raw delete take the request,
+// refused and beacon rows older than 30 d. The address step takes the
+// sessions older than 7 d. The counter delete takes the ip_counter rows
+// older than 30 d. The event expire takes the callback rows older than
+// 90 d. The field clear takes the callback rows between 30 d and 90 d. The
+// child prints rows= for each step. It is the sum of the values that the
+// chunks of the step returned. A step can weigh a row, and the cap and
+// shrink steps count their own units. A rule fails for a step with 0. The
+// cap is a tenth of the database size at the start. So the cap step evicts
+// and the shrink step frees pages. The rule on the longest chunk uses the
+// writer hold, as the writer serves no event during it. A chunk that runs
+// several steps counts for the last of them. So a step with 0 chunks ran
+// inside the chunk of a later step. The database is below TMPDIR.
 func BenchmarkRetention(b *testing.B) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		b.Skip("no /proc/self/status: the benchmark reads RSS from it")
@@ -144,9 +143,9 @@ func retentionState(b *testing.B, n int) string {
 		"CASE WHEN i % 20 = 0 THEN 'refused' WHEN i % 20 = 10 THEN 'beacon' WHEN i % 50 = 7 THEN 'callback' ELSE 'request' END, "+
 		"CASE WHEN i % 10 = 0 THEN NULL ELSE "+rollSID("i/8")+" END, 'www.example.com', '/a/' || hex(randomblob(12)), "+
 		"CASE WHEN i % 10 = 0 THEN NULL ELSE zeroblob(100) END, CASE WHEN i % 10 = 0 THEN NULL ELSE '{}' END, "+
-		// A callback row has a zero hash and the leaf index i/50. The log gets
-		// one zero leaf for each, so the start check of the writer finds the
-		// largest leaf index in the log.
+		// A callback row has a zero hash and the leaf index i/50. The log
+		// gets one zero leaf for each. So the start check of the writer
+		// finds the largest leaf index in the log.
 		"CASE WHEN i % 50 = 7 THEN zeroblob(32) END, CASE WHEN i % 50 = 7 THEN i / 50 END FROM c",
 		func(inc int64) []any { return []any{base, inc} })
 	fill(n/8+1, "INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, ja4, h2_fp, ua, hdr_order_hash, family, band) SELECT "+rollSID("i")+
@@ -182,7 +181,7 @@ type loadStats struct {
 	over100b, over250b [13]int
 	over100h, over250h [13]int
 	chunks             [13]int
-	rows               [13]int      // the rows that the step returned, all chunks
+	rows               [13]int      // the sum of the step returns
 	maxFill            atomic.Int64 // the most queue bytes, both lanes
 	maxDisk            atomic.Int64 // the most database and WAL bytes
 }
