@@ -53,17 +53,18 @@ var (
 // events is not a chunk: the step wrapper tells them apart. The chunk body
 // goes from the start of the chunk to its COMMIT. The writer hold goes from
 // one chunk start to the next. It has four fields. The body is the chunk
-// body. The commit goes from the chunk's COMMIT call to the next BEGIN of any
-// transaction. So it is the COMMIT and the small steps before that BEGIN,
-// such as the WAL settle and the close of the connection. The batch is the
-// sum of the batch transactions in the hold. Each goes from its BEGIN to the
-// next BEGIN. The rest is the hold less the three. The child prints the count
-// of each over 100 ms and over 250 ms. For each hold over 100 ms it prints
-// one ret-long line. It has the fields and the COMMIT time of the batches.
-// It has the WAL bytes, checkpoint sequence and nBackfill at the chunk's
-// COMMIT call and at the next BEGIN. It has the change of the GC cycles and
-// of the CPU throttling over the hold (-1 when /sys/fs/cgroup/cpu.stat is
-// missing). The ret-batch line counts the batch transactions. The child prints the queue bytes in the longest chunk
+// body. The commit goes from the chunk's COMMIT call to the next BEGIN of
+// any transaction. So it is the COMMIT and the small steps before that
+// BEGIN, such as the WAL settle and the close of the connection. The batch
+// is the sum of the batch transactions in the hold. Each goes from its BEGIN
+// to the next BEGIN. The rest is the hold less the three. The child prints
+// the count of each over 100 ms and over 250 ms. For each hold over 100 ms
+// it prints one ret-long line. It has the fields and the COMMIT time of the
+// batches. It has the WAL bytes, checkpoint sequence and nBackfill at the
+// chunk's COMMIT call and at the next BEGIN. It has the change of the GC
+// cycles. It has the change of the CPU throttling (-1 when
+// /sys/fs/cgroup/cpu.stat is missing). The ret-batch line counts the batch
+// transactions. The child prints the queue bytes in the longest chunk
 // and the largest queue bytes of the run. It prints the peak RSS (VmHWM) and
 // the dropped events. It prints the extra disk against the 90 % line of the
 // file system. It ends with one PASS or FAIL line for each rule. Run it with
