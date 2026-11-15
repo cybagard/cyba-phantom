@@ -55,7 +55,7 @@ var (
 // one chunk start to the next. It has four fields. The body is the chunk
 // body. The commit goes from the chunk's COMMIT call to the next BEGIN of
 // any transaction. So it is the COMMIT and the small steps before that
-// BEGIN, such as the WAL settle and the close of the connection. The batch
+// BEGIN. These are the WAL settle and the close of the connection. The batch
 // is the sum of the batch transactions in the hold. Each goes from its BEGIN
 // to the next BEGIN. The rest is the hold less the three. The child prints
 // the count of each over 100 ms and over 250 ms. For each hold over 100 ms
