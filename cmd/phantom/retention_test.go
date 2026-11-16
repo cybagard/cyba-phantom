@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +81,13 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 	if code != 1 || !strings.Contains(stderr.String(), "phantom: retention cap does not start\n") {
 		t.Errorf("exit %d, stderr %q; want exit 1 and the cap line", code, stderr.String())
 	}
+	// The state directory is empty at the start. A refused cap gives no
+	// checkpointer, so the start makes no signing key.
+	for _, name := range []string{"keys/checkpoint.key", tlog.VKeyName} {
+		if _, err := os.Lstat(filepath.Join(p.Root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after the refusal: Lstat gave %v, want a missing file", name, err)
+		}
+	}
 	// The refusal must free the ports and the store, as a stop does.
 	for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
 		// A listener that is still open waits for a client. The deadline ends
@@ -98,6 +107,23 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 			t.Errorf("%d retention marks: the schedule ran after the refusal", n)
 		}
 	})
+}
+
+// TestTU27_ScheduleRefusesNoCap checks that the schedule of the start refuses
+// a cap of 0 or less. SetMaxBytes reads such a cap as no cap. The start must
+// not run with the cap off. The schedule gives an error and no run function
+// (T-U-27, SEC-41).
+func TestTU27_ScheduleRefusesNoCap(t *testing.T) {
+	for _, maxBytes := range []int64{0, -1} {
+		t.Run(strconv.FormatInt(maxBytes, 10), func(t *testing.T) {
+			// The refusal comes before the schedule reads the writer.
+			p := startParams{MaxBytes: maxBytes, StorePath: "events.db"}
+			run, err := realDeps.schedule(nil, p, slog.New(slog.DiscardHandler))
+			if err == nil || run != nil {
+				t.Errorf("schedule with cap %d gave error %v and run %v, want an error and no run", maxBytes, err, run != nil)
+			}
+		})
+	}
 }
 
 // TestTI13_StartedSensorKeepsTheCap runs one retention run in the started

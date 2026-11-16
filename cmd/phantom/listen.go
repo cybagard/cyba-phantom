@@ -26,6 +26,16 @@ import (
 
 var errNoClient = errors.New("no certificate client")
 
+// solverHost gives the host of the ACME solver for the bound address of the
+// decoy listener. An unspecified address gives the empty host. Else the host
+// is the IP text, with "%" and the zone when the address has a zone.
+func solverHost(addr *net.TCPAddr) string {
+	if addr.IP.IsUnspecified() {
+		return ""
+	}
+	return (&net.IPAddr{IP: addr.IP, Zone: addr.Zone}).String()
+}
+
 // normalName returns a server name in lower case with one trailing dot
 // removed. It returns false for a name with a byte of 0x80 or more.
 // The certificate source applies the same rule: it refuses such a name.
@@ -192,13 +202,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		ca, _ := cfg.Get("acme.ca")
 		email, _ := cfg.Get("acme.email")
 		addr := httpsLn.Addr().(*net.TCPAddr)
-		host := ""
-		if !addr.IP.IsUnspecified() {
-			host = addr.IP.String()
-		}
 		if acme, err = newACME(listener.ACMEParams{
 			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
-			Host: host, Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
+			Host: solverHost(addr), Port: addr.Port, Logger: slog.New(slog.NewTextHandler(stderr, nil)),
 			CARoots: c.roots, CAPrivate: cfg.PrivateList("acme.ca_private"),
 		}); err != nil {
 			acme = nil

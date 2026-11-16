@@ -71,6 +71,10 @@ var realDeps = startDeps{
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
 	schedule: func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
+		// SetMaxBytes reads a cap of 0 or less as no cap. Here it is a refusal.
+		if p.MaxBytes <= 0 {
+			return nil, errors.New("store.max_bytes must be more than 0")
+		}
 		sc := store.NewSchedule(w, p.IPDays, p.RawDays, p.EventsDays, lg)
 		// The name is the one that start gave to Open.
 		if err := sc.SetMaxBytes(p.MaxBytes, p.StorePath); err != nil {
@@ -191,7 +195,8 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
 	}
-	if s.log != nil {
+	// A refused cap stops the start. So the first start makes no key.
+	if s.log != nil && s.capErr == nil {
 		if err := s.startCheckpointer(p, d, lg); err != nil {
 			lg.Error("checkpointer does not start", "error", err)
 		}

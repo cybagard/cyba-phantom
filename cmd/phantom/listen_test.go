@@ -472,6 +472,31 @@ func listenSockets(t *testing.T) map[string]int {
 	return socks
 }
 
+// TestTS16_SolverHost checks the host of the ACME solver for each form of the
+// bound address. A zone stays in the host. A real bind with a zone needs a
+// link-local address, so the test builds the addresses (T-S-16).
+func TestTS16_SolverHost(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		addr *net.TCPAddr
+		want string
+	}{
+		{"0.0.0.0", &net.TCPAddr{IP: net.ParseIP("0.0.0.0")}, ""},
+		{"::", &net.TCPAddr{IP: net.ParseIP("::")}, ""},
+		{"127.0.0.1", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}, "127.0.0.1"},
+		{"::1", &net.TCPAddr{IP: net.ParseIP("::1")}, "::1"},
+		{"::ffff:127.0.0.1", &net.TCPAddr{IP: net.ParseIP("::ffff:127.0.0.1")}, "127.0.0.1"},
+		{"::ffff:0.0.0.0", &net.TCPAddr{IP: net.ParseIP("::ffff:0.0.0.0")}, ""},
+		{"fe80::1%eth0", &net.TCPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"}, "fe80::1%eth0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := solverHost(c.addr); got != c.want {
+				t.Errorf("solverHost(%v) = %q, want %q", c.addr, got, c.want)
+			}
+		})
+	}
+}
+
 // TestTS16_WildcardListen starts serve with listen.https on 0.0.0.0,
 // on [::], on 127.0.0.1, and on the empty host. After the start line,
 // the process has exactly two new LISTEN sockets: the two decoy sockets.
@@ -490,6 +515,8 @@ func TestTS16_WildcardListen(t *testing.T) {
 		{"[::]", "[::]", ""},
 		{"127.0.0.1", "127.0.0.1", "127.0.0.1"},
 		{"no host", "", ""},
+		{"[::ffff:127.0.0.1]", "[::ffff:127.0.0.1]", "127.0.0.1"},
+		{"[::ffff:0.0.0.0]", "[::ffff:0.0.0.0]", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// The test uses only the CA address. Serve binds the others
@@ -1700,6 +1727,11 @@ func TestTS27_StartMixed(t *testing.T) {
 	if _, err := m.get(&tls.ClientHelloInfo{ServerName: staticName}); err != nil || m.source.Refused() != 0 {
 		t.Errorf("GetCertificate for the static name: error %v, refusals %d", err, m.source.Refused())
 	}
+	// AllocsPerRun counts the allocations of the whole process. The goroutines
+	// of the started sensor allocate too. So stop the sensor before the count.
+	// GetCertificate for a static name reads only the source.
+	m.r.cancel()
+	<-m.r.done
 	if allocs := testing.AllocsPerRun(100, func() { m.get(&tls.ClientHelloInfo{ServerName: staticName}) }); allocs > 1 {
 		t.Errorf("GetCertificate for a static name makes %v allocations, want at most 1", allocs)
 	} else {
