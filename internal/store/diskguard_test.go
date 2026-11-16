@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"math"
@@ -134,6 +135,27 @@ func TestTI16_PausedShutdownWritesTheDropCounts(t *testing.T) {
 	}
 	if r.rows() != 0 || r.app.tries != 0 || !r.w.Paused() || !r.w.Healthy() {
 		t.Fatalf("%d rows, %d appends, paused %v, healthy %v", r.rows(), r.app.tries, r.w.Paused(), r.w.Healthy())
+	}
+}
+
+// T-I-16: at shutdown of a paused writer, the counts-only write can fail. Then
+// the writer stops with the database error and makes the stop marker. No event
+// row, no append and no ip_counter row exists.
+func TestTI16_PausedShutdownCountsWriteFailureStopsTheWriter(t *testing.T) {
+	r := newRig(t, 10)
+	r.w.disk = func() (float64, error) { return 0.95, nil }
+	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("commit refused") }
+	r.c.Drop(netip.MustParseAddr("192.0.2.7"))
+	r.q.Close()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleDatabase)
+	if _, err := r.marker(); err != nil {
+		t.Fatalf("no stop marker: %v", err)
+	}
+	if r.w.Healthy() || !r.w.Paused() || r.rows() != 0 || r.app.tries != 0 || len(r.ipCounters()) != 0 {
+		t.Fatalf("healthy %v, paused %v, %d rows, %d appends, ip_counter %q", r.w.Healthy(), r.w.Paused(), r.rows(), r.app.tries, r.ipCounters())
 	}
 }
 

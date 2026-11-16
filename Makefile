@@ -21,7 +21,7 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage perf perf-inner fixtures mutate clean
+.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage fill perf perf-inner fixtures mutate clean
 
 all: build lint test trace mirror-diff
 
@@ -153,6 +153,24 @@ dco:
 coverage:
 	bash tools/coverage.sh
 	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^(TestTS25|TestTP10)' ./internal/bundle
+
+# T-I-16: the fill tests need a small tmpfs. PHANTOM_DISKFULL names a directory
+# on it, and /dev/shm must be a small tmpfs too. The fill job of CI sets both
+# up. Without them each test skips. The target fails when go test fails, a test
+# skips or a named test lacks a PASS line.
+space := $(subst ,, )
+FILL_TESTS := TestTI16_FullSmallFileSystemPausesTheWriter TestTI16_StorePartNotHealthyOnAFullFileSystem TestTI16_DecoyServesWhilePaused
+FILL_RUN := ^($(subst $(space),|,$(FILL_TESTS)))$$
+fill:
+	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	$(GO) test -race -timeout 5m -p 1 -count=1 -v -run '$(FILL_RUN)' ./internal/store ./cmd/phantom >"$$log" 2>&1; rc=$$?; \
+	cat "$$log"; \
+	[ "$$rc" -eq 0 ] || { echo "fill FAIL: go test exited with status $$rc"; exit 1; }; \
+	! grep -q -- '--- SKIP' "$$log" || { echo "fill FAIL: a test skipped"; exit 1; }; \
+	for t in $(FILL_TESTS); do \
+		grep -q -- "--- PASS: $$t " "$$log" || { echo "fill FAIL: $$t did not pass"; exit 1; }; \
+	done; \
+	echo "fill: the fill tests passed and none skipped"
 
 # T-U-06: write the sha256 values of the hand-written canonical text into
 # internal/event/testdata. T-U-12: write the signed note into the golden

@@ -34,12 +34,13 @@
 #   - lint: gofmt, go vet, comment line length and comment sentence length;
 #   - dco: sign-off and commit identity, on PRs only;
 #   - test: go test -race and the coverage gate;
+#   - fill: the T-I-16 fill tests on a small tmpfs; a skip fails the job;
 #   - oracle: the tar reader oracle, in the pinned golang container;
 #   - trace: the C10 matrix and the sync stamp;
 #   - trace-tests: a Go test or a marker for each test ID of the milestone;
 #   - mirror-diff: the constitution table;
 #   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
-# The test, oracle and build jobs share one checkout step through a YAML
+# The test, fill, oracle and build jobs share one checkout step through a YAML
 # anchor.
 # The dco, trace, trace-tests and mirror-diff jobs share their base-checkout
 # and gate-source steps through YAML anchors. The lint job has its own
@@ -175,6 +176,28 @@ jobs:
 
       - name: go test -race + coverage gate
         run: make coverage
+
+  fill:
+    # T-I-16: the fill tests fill a small tmpfs to 92 %. They skip without
+    # one, so make fill fails when a named test skips or does not pass. The
+    # first step makes a 64 MiB tmpfs for PHANTOM_DISKFULL. It also shrinks
+    # /dev/shm, where the decoy test puts its state directory. The runner
+    # is a throw-away machine.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PHANTOM_DISKFULL: /mnt/diskfull
+    steps:
+      - *checkout
+
+      - name: Small tmpfs for the fill tests
+        run: |
+          sudo mkdir -p "$PHANTOM_DISKFULL"
+          sudo mount -t tmpfs -o size=64m,uid=$(id -u),gid=$(id -g),mode=0700 tmpfs "$PHANTOM_DISKFULL"
+          sudo mount -o remount,size=64m /dev/shm
+
+      - name: Fill tests (no skip allowed)
+        run: make fill
 
   oracle:
     # The reader oracle of internal/bundle compares Go archive/tar with
