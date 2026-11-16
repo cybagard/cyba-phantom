@@ -1141,11 +1141,14 @@ func TestTU11CapStatementsUseTheirIndexes(t *testing.T) {
 }
 
 // keptSchedule makes a schedule with a cap for runs through the writer. The
-// buffer out gets the log.
+// buffer out gets the log. The read of the kept bytes gets a limit of one
+// minute, so a slow runner does not count slow. A test that tests the limit
+// sets tune again.
 func keptSchedule(t *testing.T, r *rig, capBytes int64, out *bytes.Buffer) *Schedule {
 	t.Helper()
 	s, _ := fakeSchedule(t, r, time.UTC, rollTDel, slog.New(slog.NewTextHandler(out, nil)))
 	s.limit = capRunLimit
+	s.tune = func(c *capRun) { c.keptLimit = time.Minute }
 	check(t, s.SetMaxBytes(capBytes, "events.db"))
 	s.run = serveWithRun(r)
 	return s
