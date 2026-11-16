@@ -314,6 +314,7 @@ func cases() []row {
 			rs("scheme", "data-url", "percent-escape")},
 		{`<a href="data:text/css;base64,QUJD REVG R0hJ">`, rs("scheme", "data-url")},
 		{`<a href="mailto:x@evil.example">`, rs("scheme")},
+		{`<p>data:x</p>`, rs("data-url")},
 		{`<a href="tel:1">`, rs("scheme")}, {`<a href="sms:1">`, rs("scheme")},
 		{`<p>see (see: x)</p>`, rs("scheme")},
 		{`<p>caf&#` + `37;41</p>`, rs("percent-escape")},
@@ -381,6 +382,7 @@ func extraRows() []row {
 		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker), at(pagePath, "marker")},
 		{"marker in an attribute", put(pagePath, `<p title="`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"manifest as a directory", func(m fstest.MapFS) {
 			delete(m, "manifest.json")
