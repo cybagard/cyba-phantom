@@ -73,9 +73,9 @@ func newGatedExpireStep(q string, cost int, tDel time.Time, days int,
 // newEventExpireStep deletes the event rows of each kind with ts before the
 // cutoff (SEC-39). days is store.retention_days.events. Each chunk caps the
 // cutoff at the start of the day that the day step works on next (see
-// rollupWorkDay). Thus it removes no row of a UTC day that the day step has
-// not finished. The day step can stop early with a request row left. With no
-// such day, the cutoff does not change.
+// rollupWorkDay). Thus it removes no row of that day or of a later day. The
+// day step can stop early with a request row left. With no such day, the
+// cutoff does not change.
 func newEventExpireStep(tDel time.Time, days int) retentionStep {
 	return newGatedExpireStep(deleteEventSQL, 1, tDel, days, eventGate)
 }

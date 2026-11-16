@@ -1012,8 +1012,9 @@ func TestTU27LateRequestRowKeepsTheCallbacksOfADayNotDone(t *testing.T) {
 }
 
 // T-U-27: a database has no callback row and no seen row. It has no done mark
-// and no day for the day step. The event delete still removes its old rows of
-// each kind. This includes the refused and beacon rows.
+// and no day for the day step. The event delete still removes its old
+// score_change row. The raw delete removes the old refused and beacon rows
+// before the event step runs.
 func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
 	r, s, _ := prodRig(t, 0, nil)
 	old := msAgo(rollTDel, 100*oneDay)
