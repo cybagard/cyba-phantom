@@ -328,7 +328,7 @@ func startBoth(tb testing.TB, arch []byte) (dir string, bp *bundlePart, stop fun
 	mustOK(tb, os.Chmod(dir, 0o700))
 	putBundle(tb, dir, bundleFile, arch, seedKey(goodSeed))
 	p := startParams{Root: dir, StorePath: "events.db", TlogDir: "tlog", Origin: "bench/origin", CacheDir: "certs",
-		BundlePath: bundleFile, Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour}
+		BundlePath: bundleFile, Reserved: []string{"tlog", "certs", "bundle"}, Interval: time.Hour, MaxBytes: 1 << 30}
 	c := event.NewCounters()
 	q, err := event.NewQueue(16, c)
 	mustOK(tb, err)

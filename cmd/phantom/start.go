@@ -71,7 +71,7 @@ var realDeps = startDeps{
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
 	schedule: func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
-		// SetMaxBytes reads a cap of 0 or less as no cap. Here it is a refusal.
+		// SetMaxBytes reads a cap of 0 or less as no cap. The start refuses it.
 		if p.MaxBytes <= 0 {
 			return nil, errors.New("store.max_bytes must be more than 0")
 		}
@@ -156,8 +156,8 @@ func (s *storePart) Drops() store.Drops { return s.drops.Load() }
 // the drain, and the checkpointer. If the state directory, the log or the
 // store does not open, there is no writer. Then the store part is not healthy.
 // start logs a checkpointer that does not start, and Healthy does not show it
-// (see TlogHealthy). There is no reopen, retry or restart. The writer takes
-// the counters of q.
+// (see TlogHealthy). After a refused cap, start skips the checkpointer. There
+// is no reopen, retry or restart. The writer takes the counters of q.
 func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePart {
 	s := &storePart{q: q, dk: session.NewDayKey(), cancel: func() {}, stopSched: func() {}}
 	var err error
@@ -195,7 +195,8 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
 	}
-	// A refused cap stops the start. So the first start makes no key.
+	// After a refused cap, start does not start the checkpointer. So it
+	// makes no key and signs nothing.
 	if s.log != nil && s.capErr == nil {
 		if err := s.startCheckpointer(p, d, lg); err != nil {
 			lg.Error("checkpointer does not start", "error", err)

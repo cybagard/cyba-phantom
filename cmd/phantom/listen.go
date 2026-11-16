@@ -27,8 +27,8 @@ import (
 var errNoClient = errors.New("no certificate client")
 
 // solverHost gives the host of the ACME solver for the bound address of the
-// decoy listener. An unspecified address gives the empty host. Else the host
-// is the IP text, with "%" and the zone when the address has a zone.
+// decoy listener. An unspecified address gives the empty host. An address
+// that is specified gives the IP text, with "%" and the zone if it has one.
 func solverHost(addr *net.TCPAddr) string {
 	if addr.IP.IsUnspecified() {
 		return ""
