@@ -269,8 +269,9 @@ func (s *Schedule) check(ctx context.Context) {
 // adds 1 to the mark-ahead count. The first one writes one fixed log line with
 // no time value. A run can end with no error. Then the mark in memory becomes
 // the later of the mark and the wall time of the run. A run with an error does
-// not change it. Before a read of the mark has succeeded, the run reads it
-// again. It keeps the later of the two marks.
+// not change it. After an error, the next run reads the stored mark again.
+// Before a read of the mark has succeeded, the run reads it again. It keeps the
+// later of the two marks.
 func (s *Schedule) runOnce(stop context.Context) {
 	if !s.markRead {
 		if m, ok := s.readMark(stop); ok {
@@ -298,6 +299,9 @@ func (s *Schedule) runOnce(stop context.Context) {
 	err := s.run(withRun(ctx, run), steps)
 	if err == nil && wall.After(s.mark) {
 		s.mark = wall
+	}
+	if err != nil {
+		s.markRead = false
 	}
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)

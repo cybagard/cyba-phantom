@@ -588,8 +588,10 @@ func TestTU27MarkAheadClearsAddressesAndDeletesNothingEarly(t *testing.T) {
 // T-U-27: a run that ends early does not change the mark in memory. The next
 // run uses the old mark. The start sets the mark to 2 d after the wall time. A
 // run with the wall clock 4 d ahead fails. Then the wall clock is right again.
-// An address of 5 d and 1 h is NULL by the old mark. An address of 4 d stays:
-// the mark is not 4 d ahead, and it is not reset.
+// The read of the mark in the next run fails, so only the mark in memory
+// counts. An address of 5 d and 1 h is NULL, so the mark is not reset. An
+// address of 4 d stays, so the mark did not take the wall time of the failed
+// run.
 func TestTU27EarlyEndKeepsTheMarkInMemory(t *testing.T) {
 	r, s, f := prodRig(t, 0, nil)
 	setMark(t, r.db, rollTDel.Add(48*time.Hour))
@@ -599,12 +601,48 @@ func TestTU27EarlyEndKeepsTheMarkInMemory(t *testing.T) {
 	f.jump(96 * time.Hour)
 	s.runOnce(context.Background())
 	f.jump(-96 * time.Hour)
-	s.run = ok
 	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
 	addSessions(t, r.db, "new", 0, 1, msAgo(rollTDel, 4*oneDay), 0, "203.0.113.8")
+	s.readTime = 50 * time.Millisecond
+	conn, err := r.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		conn.Close() // the writer connection is free for the run
+		return ok(ctx, steps)
+	}
 	s.runOnce(context.Background())
-	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] || s.EarlyEnds() != 1 {
-		t.Fatalf("null addresses %v, %d early ends; want old0 only and 1", got, s.EarlyEnds())
+	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] || s.markRead || s.EarlyEnds() != 1 {
+		t.Fatalf("null addresses %v, read of the mark %v, %d early ends; want old0 only, a failed read and 1", got, s.markRead, s.EarlyEnds())
+	}
+}
+
+// T-U-27: a run can store its mark and still end with an error. This occurs
+// when the run limit ends while the run waits for the reply. The next run
+// reads the stored mark again. The first run has the wall clock 2 d ahead.
+// Then the wall clock is right again. The stored mark is the wall time of that
+// run. An address of 5 d and 1 h is NULL by the mark. The run counts a mark
+// ahead.
+func TestTU27LostReplyAfterTheMarkIsStoredReadsTheMarkAgain(t *testing.T) {
+	r, s, f := prodRig(t, 0, nil)
+	s.begin(context.Background())
+	ok := s.run
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		if err := ok(ctx, steps); err != nil {
+			return err
+		}
+		return context.DeadlineExceeded
+	}
+	f.jump(48 * time.Hour)
+	ahead := strconv.FormatInt(f.wall().UnixMilli(), 10)
+	s.runOnce(context.Background())
+	f.jump(-48 * time.Hour)
+	s.run = ok
+	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
+	s.runOnce(context.Background())
+	if got, mark := nullIPs(t, r.db), metaValue(t, r.db, retentionLastKey); !got["old0"] || mark != ahead || s.MarkAhead() != 1 || s.EarlyEnds() != 1 {
+		t.Fatalf("null addresses %v, mark %s, %d marks ahead, %d early ends; want old0, %s, 1 and 1", got, mark, s.MarkAhead(), s.EarlyEnds(), ahead)
 	}
 }
 
@@ -636,6 +674,7 @@ func TestTU27FailedStartReadIsMadeAgain(t *testing.T) {
 	if got := nullIPs(t, r.db); s.markRead || got["old0"] || got["near0"] {
 		t.Fatalf("read of the mark %v, null addresses %v; want a failed read and none", s.markRead, got)
 	}
+	s.readTime = readLimit
 	s.runOnce(context.Background())
 	if got := nullIPs(t, r.db); !s.markRead || !got["old0"] || got["near0"] {
 		t.Fatalf("read of the mark %v, null addresses %v; want a read and old0 only", s.markRead, got)
