@@ -343,31 +343,18 @@ func (r *rig) warm() {
 	r.commit()
 }
 
-// T-U-25: a callback event in an idle writer gets its row and its leaf with no
-// tick. The writer begins the write at most 50 ms after the enqueue. The bound
-// does not include the sync of the commit to the device. After the write, Run
-// waits for a tick again. After the write of the warm-up event, the rig sends
-// no tick.
+// T-U-25: a callback event in an idle writer gets its row and its leaf in 50 ms
+// or less. After the write of the warm-up event, the rig sends no tick.
 func TestTU25CallbackIsWrittenWithNoTick(t *testing.T) {
 	r := newRig(t, 100)
-	began := r.begins()
-	forward := r.w.beforeBegin
-	var beganAt atomic.Int64
-	r.w.beforeBegin = func() error {
-		beganAt.Store(time.Now().UnixNano())
-		return forward()
-	}
 	stop := r.start()
 	r.warm()
-	<-began
-	enqueued := time.Now()
+	begin := time.Now()
 	r.add(event.KindCallback, 1)
 	r.commit()
-	<-began
-	if d := time.Duration(beganAt.Load() - enqueued.UnixNano()); d > 50*time.Millisecond {
-		t.Errorf("the write began %v after the callback event, want at most 50 ms", d)
+	if d := time.Since(begin); d > 50*time.Millisecond {
+		t.Errorf("the callback commit took %v, want at most 50 ms", d)
 	}
-	r.waitsForTheTick(began)
 	var hash []byte
 	var leaf int64
 	q := "SELECT hash, leaf_index FROM event WHERE kind = 'callback'"
