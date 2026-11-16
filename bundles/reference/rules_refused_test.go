@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -288,7 +289,8 @@ func cases() []row {
 		rules []string
 	}{
 		// A template comment joins the pieces of a form in the rendered page.
-		{`<scr{{/* x */}}ipt>`, rs("template-action", "script(<script)(rendered)", "script(<script)(rendered, empty)")},
+		{`<scr{{/* x */}}ipt>`, rs("template-action", "element(scr{{)", "script(<script)(rendered)",
+			"script(<script)(rendered, empty)")},
 		{`<img onl{{/**/}}oad=x>`, rs("template-action", "on-attr(rendered)", "on-attr(rendered, empty)")},
 		{`<a href="ht{{/**/}}tps://evil.example/x">`, rs("template-action", "absolute-url",
 			"absolute-url(rendered)", "scheme(rendered)", "third-party(rendered)",
@@ -420,6 +422,7 @@ func cases() []row {
 		if o, ok := pageOnly[f.text]; ok {
 			pageRules = o
 		}
+		pageRules = append(slices.Clone(pageRules), elementRules(f.text)...)
 		rows = append(rows,
 			row{"page " + f.text, pageWith(f.text), at(pagePath, pageRules...)},
 			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
@@ -430,6 +433,23 @@ func cases() []row {
 	rows = append(rows, formRows()...)
 	rows = append(rows, positionRows()...)
 	return rows
+}
+
+// tagNames finds the name of each tag in the literal text of a row. It is a
+// plain pattern, not the scan of the rules.
+var tagNames = regexp.MustCompile(`(?i)</?([a-z][^\s/>]*)`)
+
+// elementRules gives the "element(<name>)" finding for each tag name of text
+// that is not in the list of elements.
+func elementRules(text string) []string {
+	var out []string
+	for _, m := range tagNames.FindAllStringSubmatch(text, -1) {
+		n := strings.ToLower(m[1])
+		if f := "element(" + n + ")"; !slices.Contains(elements, n) && !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // longHost gives a valid vhost name of 201 bytes plus n.
@@ -482,7 +502,8 @@ func extraRows() []row {
 		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker), at(pagePath, "marker", "render")},
+		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker),
+			at(pagePath, "marker", "render", "element("+marker+")")},
 		{"marker in an attribute", put(pagePath, `<p title="`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"manifest as a directory", func(m fstest.MapFS) {
 			delete(m, "manifest.json")
@@ -531,7 +552,8 @@ func extraRows() []row {
 		// Marker in the text that stays. The first row shows a quoted ">".
 		{"marker in a quoted attribute with a closing bracket",
 			put(pagePath, `<p title="a>`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		hidden("style"), hidden("template"), hidden("title"), hidden("textarea"), hidden("noscript"),
+		hidden("style"), hidden("template", "element(template)"), hidden("title"),
+		hidden("textarea", "element(textarea)"), hidden("noscript"),
 		hidden("script", "script(<script)", "script(<script)(rendered)", "script(<script)(rendered, empty)"),
 		// Deny on all separators.
 		junk("api..key", "api..key", "instr-deny(api key)", "instr-deny(apikey)"),
@@ -558,7 +580,7 @@ func extraRows() []row {
 		both2("animation target set by a trap text", "tel: x "+marker+" {{.Token}}",
 			`<p>`+marker+`</p><svg><animate attributeName="href" values="/a;{{index .Trap "t1"}}"/></svg>`,
 			slices.Concat(at(trapsFile, "trap-form"), at(pagePath, "anim-target", "anim-target(rendered)",
-				"anim-target(rendered, empty)", "action-position"))...),
+				"anim-target(rendered, empty)", "action-position", "element(svg)", "element(animate)"))...),
 		// Rendered base64: the end of the template text and the trap text join.
 		both2("rendered base64 run", "aGVsbG8gd29ybGQgZm9 "+marker+" {{.Token}}",
 			`<p>`+marker+` aGVsbG8gd29ybGQgZm9{{index .Trap "t1"}}</p>`,
@@ -689,9 +711,15 @@ func positionRows() []row {
 	)
 	notFound := z + "404.tmpl"
 	ldTags := withRendered(rs("script(<script)"))
-	return []row{
+	rows := []row{
 		// Positions that pass.
 		posRow("text in noscript", `<noscript>ACT</noscript>`),
+		posRow("text in title", `<title>ACT</title>`),
+		// html/template writes "<" in the title text as "&lt;", so the style
+		// element is text and the action is title text.
+		posRow("title with a look-alike end tag", `<title></titlex><style>p{background:url('ACT')}</style></title>`),
+		posRow("element names in capitals", `<DIV><P>ACT</P></DIV>`),
+		posRow("escaped less-than in an attribute value", `<p title="a &lt; b">ACT</p>`),
 		posRow("comment action", `CMT`),
 		posRow("alt", `<img alt="ACT">`),
 		posRow("title", `<p title="ACT">x</p>`),
@@ -723,11 +751,11 @@ func positionRows() []row {
 		linkRow("href with quotes around the action", `<a rel="nofollow" href="''ACT">x</a>`, bad),
 		fileRow("action in a Disallow line with more words", textType, "robots.tmpl",
 			"# "+marker+"\nDisallow: ACT and more words\n", bad),
-		posRow("action in link href", `<link rel="stylesheet" href="ACT">`, bad),
+		posRow("action in link href", `<link rel="stylesheet" href="ACT">`, bad, "element(link)"),
 		posRow("action in the href of a link with no nofollow", `<a href="ACT">x</a>`, bad),
-		posRow("action in a form action", `<form action="ACT"></form>`, bad),
-		posRow("action in formaction", `<button formaction="ACT">x</button>`, bad),
-		posRow("action in poster", `<video poster="ACT"></video>`, bad),
+		posRow("action in a form action", `<form action="ACT"></form>`, bad, "element(form)"),
+		posRow("action in formaction", `<button formaction="ACT">x</button>`, bad, "element(button)"),
+		posRow("action in poster", `<video poster="ACT"></video>`, bad, "element(video)"),
 		posRow("action in a data attribute", `<p data-x="ACT">x</p>`, bad),
 		posRow("action in the content of another meta", `<meta name="keywords" content="ACT">`, bad),
 		posRow("action in an HTML comment", `<!-- ACT -->`, bad),
@@ -743,6 +771,20 @@ func positionRows() []row {
 		{"action in an SVG asset", put(svgPath, actor.Replace(`<svg><text>ACT</text></svg>`)), at(svgPath, bad)},
 		{"template that no route names", put(z+"extra.tmpl", actor.Replace(`<p>`+marker+` ACT</p>`)), at(z+"extra.tmpl", bad)},
 		{"404 template that no route names", put(notFound, actor.Replace(`<p>`+marker+` ACT</p>`)), at(notFound, bad)},
+
+		// Elements and attribute values that the scan does not model.
+		posRow("element that is not in the list", `<foo>x</foo>`, "element(foo)"),
+		posRow("end tag that is not in the list", `</foo>`, "element(foo)"),
+		posRow("less-than in an attribute value", `<p title="<x">ACT</p>`, "attr-lt", "attr-lt(rendered)"),
+		posRow("end tag of title in an attribute value in title",
+			`<title><b title="</title><style>p{background:url('ACT')}</style>">x</b></title>`,
+			bad, "attr-lt", "element(b)"),
+		posRow("end tag of noscript in an attribute value in noscript",
+			`<noscript><b title="</noscript><style>p{background:url('ACT')}</style>">x</b></noscript>`,
+			"attr-lt", "attr-lt(rendered)", "element(b)"),
+		// html/template removes the comment, so the output has no end tag.
+		posRow("end tag of noscript in a comment in noscript",
+			`<noscript><!--</noscript><style>p{background:url('ACT')}</style>--></noscript>`, bad),
 
 		// Trap forms in a position of the other class.
 		linkRow("form L1 in element text", `<p>ACT</p>`, "trap-class"),
@@ -768,11 +810,26 @@ func positionRows() []row {
 		posRow("@context in the block", ld(`{"@context":"x","description":ACT}`), "json-ld"),
 		posRow("array in the block", ld(`[{"description":ACT}]`), "json-ld(rendered)"),
 		posRow("two objects in the block", ld(`{"a":ACT}{"b":ACT}`), "json-ld(rendered)"),
+		posRow("comment in the block", ld(`{"a":1, /*':ACT}*/ "b":2}`), "json-ld"),
 		posRow("cut object in the block", ld(`{"a":ACT`), "json-ld", "json-ld(rendered)"),
 		posRow("empty block", ld(``), "json-ld(rendered)"),
 		posRow("null in the block", ld(`null`), "json-ld(rendered)"),
 		{"json-ld block in an asset", put(svgPath, ld(`{"a":1}`)), at(svgPath, "script(<script)")},
 	}
+	// A browser reads the content of each of these as raw text or RCDATA,
+	// up to its own end tag. A value can hold that end tag and a style
+	// element. A scan that reads the content as markup misses it. Each name
+	// is refused. html/template escapes the content of textarea, so only
+	// that row has no "attr-lt(rendered)".
+	for _, el := range []string{"xmp", "noembed", "noframes", "plaintext", "textarea"} {
+		rules := rs("element("+el+")", "attr-lt")
+		if el != "textarea" {
+			rules = append(rules, "attr-lt(rendered)")
+		}
+		rows = append(rows, posRow("refused element "+el,
+			"<"+el+`><p title="</`+el+`><style>a{background:url('ACT')}</style>">x</p></`+el+">", rules...))
+	}
+	return rows
 }
 
 // failFS is a tree that cannot list a directory.

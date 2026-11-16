@@ -67,6 +67,13 @@ var (
 	// A tag. A quoted value may hold ">". An open "<" runs to the end of the
 	// text, and a quote with no end is a plain character.
 	markup = regexp.MustCompile(`(?s)<(?:"[^"]*"|'[^']*'|[^>])*(?:>|$)`)
+	// The element names that a text/html template can use. A new name is a
+	// code change in a reviewed PR. The list holds no element whose content
+	// a browser reads as raw text or RCDATA, other than style, script, title
+	// and noscript.
+	elements = []string{"html", "head", "body", "title", "meta", "style", "script", "noscript",
+		"p", "a", "img", "div", "span", "h1", "h2", "h3", "ul", "ol", "li", "em", "strong", "br",
+		"section", "header", "footer", "main", "nav", "article"}
 	// An element whose text a browser does not show as page text.
 	hiddenElements = hiddenOf("style", "script", "template", "title", "textarea", "noscript")
 	// The deny check reads a text with each run of other characters as one
@@ -184,7 +191,7 @@ func validPath(p string) bool {
 }
 
 // validParam is a copy of validParam in internal/bundle/route.go (lines
-// 244-247): 1 to 32 bytes of A-Z a-z 0-9 _ -.
+// 244-246): 1 to 32 bytes of A-Z a-z 0-9 _ -.
 func validParam(s string) bool {
 	return len(s) >= 1 && len(s) <= maxHeaderNameLen &&
 		!strings.ContainsFunc(s, func(c rune) bool { return c != '_' && c != '-' && !alnum(c) })
@@ -331,7 +338,7 @@ func checkTree(fsys fs.FS) []string {
 		}
 	}
 	for _, name := range templates {
-		r.render(name, string(files[name]), texts)
+		r.render(name, string(files[name]), texts, slices.Contains(owner[name].types[name], "text/html"))
 	}
 	return r.out
 }
@@ -503,8 +510,9 @@ func schemeFound(low string) bool {
 // texts of the tree, and with no trap text. In the second run, each index
 // action gives "" and each comment action gives an empty HTML comment. It
 // runs the markup rules and the base64 rule on each output. A template that
-// does not parse or run is a finding.
-func (r *result) render(name, text string, traps map[string]string) {
+// does not parse or run is a finding. For a text/html template (isHTML), the
+// output with the trap texts also has no "<" in an attribute value.
+func (r *result) render(name, text string, traps map[string]string, isHTML bool) {
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
 	if err != nil {
@@ -524,6 +532,9 @@ func (r *result) render(name, text string, traps map[string]string) {
 		r.markupRules(name, out, renderForm(out), run.sfx, false, true)
 		if run.sfx == "(rendered)" {
 			r.ldObject(name, out)
+			if isHTML && attrLt(out) {
+				r.add("attr-lt(rendered)", name)
+			}
 		}
 		// The token is not part of a base64 run. It is made at run time.
 		if base64Run.MatchString(strings.ReplaceAll(out, fixedToken, "-")) {
@@ -577,7 +588,7 @@ func doctypes(s string) []string {
 // template checks the marker and the actions of a template. The marker must
 // be in the text that stays when HTML comments, the hidden elements and tags
 // are removed. Each "{{" must start one of the two exact forms, and no "/"
-// comes before it. A json-ld block has no "@context".
+// comes before it. A json-ld block has no "@context" and no "/*".
 func (r *result) template(name, text, n string) {
 	visible := htmlComment.ReplaceAllString(text, "")
 	for _, re := range hiddenElements {
@@ -603,7 +614,8 @@ func (r *result) template(name, text, n string) {
 		if k := rawTextEnd(body, "script"); k >= 0 {
 			body = body[:k]
 		}
-		if strings.Contains(strings.ToLower(body), "@context") {
+		// The engine removes a JS comment, so an action in it is not rendered.
+		if strings.Contains(strings.ToLower(body), "@context") || strings.Contains(body, "/*") {
 			r.add("json-ld", name)
 		}
 	}
@@ -641,7 +653,16 @@ func (r *result) positions(name, text string, v *vhost) {
 		types = []string{""}
 	}
 	for _, typ := range types {
-		for _, p := range placesOf(text, typ) {
+		places, names := placesOf(text, typ)
+		for _, n := range names {
+			if !slices.Contains(elements, n) {
+				r.add("element("+n+")", name)
+			}
+		}
+		if typ == "text/html" && attrLt(text) {
+			r.add("attr-lt", name)
+		}
+		for _, p := range places {
 			switch {
 			case p.class != "":
 				v.uses = append(v.uses, use{p.id, p.class, name})
@@ -656,10 +677,11 @@ func (r *result) positions(name, text string, v *vhost) {
 
 // placesOf gives the place of each trap action of a template. The template
 // has the content type typ. The places are in the order of the text. Each
-// action becomes a NUL byte first. Its quotes then do not change the scan.
-func placesOf(text, typ string) []place {
+// action becomes a NUL byte first. Its quotes then do not change the scan. For
+// text/html it also gives the name of each start tag and end tag.
+func placesOf(text, typ string) (out []place, names []string) {
 	if strings.ContainsRune(text, 0) { // The byte rule refuses it.
-		return nil
+		return nil, nil
 	}
 	var ids []string // A comment action has the prefix "!".
 	s := actionRe.ReplaceAllStringFunc(text, func(m string) string {
@@ -670,7 +692,6 @@ func placesOf(text, typ string) []place {
 		}
 		return "\x00"
 	})
-	var out []place
 	// emit takes the next action. The comment action is only for element text.
 	emit := func(class string, elementText bool, rule string) {
 		id := ids[len(out)]
@@ -684,7 +705,7 @@ func placesOf(text, typ string) []place {
 	}
 	switch typ {
 	case "text/html":
-		htmlPlaces(s, emit)
+		names = htmlPlaces(s, emit)
 	case "text/plain":
 		for k := range len(s) {
 			if s[k] == 0 {
@@ -716,7 +737,23 @@ func placesOf(text, typ string) []place {
 			}
 		}
 	}
-	return out
+	return out, names
+}
+
+// attrLt reports an attribute value, quoted or not, that holds "<". The scan
+// is on each tag that the pattern markup finds, also in the content of an
+// element that a browser reads as RCDATA or raw text. The engine never writes
+// "<" in a value. A "<" there can hide an end tag from a scan that reads the
+// value as one string.
+func attrLt(s string) bool {
+	for _, tag := range markup.FindAllString(s, -1) {
+		for _, m := range attrRe.FindAllStringSubmatch(tag, -1) {
+			if strings.Contains(m[2], "<") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // openQuote gives the index of the quote that opens the JSON string. That
@@ -741,8 +778,10 @@ func openQuote(s string) int {
 // byte stands in element text, in a start tag, or in a comment or raw text
 // element. These positions are listed. Element text. The values of alt, title
 // and aria-label. The "content" of a description meta. The "href" of a
-// nofollow link. A bare member value of the json-ld block.
-func htmlPlaces(s string, emit func(class string, elementText bool, rule string)) {
+// nofollow link. A bare member value of the json-ld block. It also gives the
+// name of each start tag and end tag, in lower case.
+func htmlPlaces(s string, emit func(class string, elementText bool, rule string)) (names []string) {
+	isLetter := func(i int) bool { return i < len(s) && 'a' <= s[i]|0x20 && s[i]|0x20 <= 'z' }
 	rest := func(from, to int, f func(k int)) {
 		for k := from; k < to; k++ {
 			if s[k] == 0 {
@@ -760,6 +799,8 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			}
 			rest(i, j, func(k int) {
 				switch {
+				case end == "title": // RCDATA: the text is element text.
+					emit("F", true, "")
 				case !ld:
 					emit("", false, "")
 				case !bareMember(s[i:j], k-i):
@@ -776,18 +817,21 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			}
 			rest(i, j, func(int) { emit("", false, "") })
 			i = min(j+3, len(s))
-		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?"):
-			// A browser reads "<!" that is not "<!--", and "<?", as a comment
-			// that ends at the next ">".
+		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?") ||
+			strings.HasPrefix(s[i:], "</") && !isLetter(i+2):
+			// A browser reads "<!" that is not "<!--", "<?", and "</" with no
+			// letter after it, as a comment that ends at the next ">".
 			j := len(s)
 			if k := strings.IndexByte(s[i:], '>'); k >= 0 {
 				j = i + k
 			}
 			rest(i, j, func(int) { emit("", false, "") })
 			i = min(j+1, len(s))
-		case s[i] == '<' && i+1 < len(s) && (s[i+1] == '/' || 'a' <= s[i+1]|0x20 && s[i+1]|0x20 <= 'z'):
+		case s[i] == '<' && (isLetter(i+1) || strings.HasPrefix(s[i:], "</")):
 			j := i + markup.FindStringIndex(s[i:])[1]
-			end, ld = tagPlaces(s[i:j], emit)
+			var name string
+			name, end, ld = tagPlaces(s[i:j], emit)
+			names = append(names, name)
 			i = j
 		default:
 			if s[i] == 0 {
@@ -796,6 +840,7 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			i++
 		}
 	}
+	return names
 }
 
 // jsonSpace is the white space of JSON.
@@ -834,17 +879,23 @@ func bareMember(block string, k int) bool {
 		after != "" && (after[0] == ',' || after[0] == '}')
 }
 
+// tagName gives the name of a tag in lower case. s is the tag with no "<" or
+// "</". The name ends at white space, "/" or ">", or at the end of s.
+func tagName(s string) string {
+	return strings.ToLower(s[:strings.IndexAny(s+">", " \t\n/>")])
+}
+
 // tagPlaces calls emit for each NUL byte of a tag. It gives the name of the
-// raw text element that a start tag opens. It also says if that element is the
-// json-ld block.
-func tagPlaces(tag string, emit func(class string, elementText bool, rule string)) (end string, ld bool) {
+// tag. It also gives the name of the raw text or RCDATA element that a start
+// tag opens, and says if that element is the json-ld block.
+func tagPlaces(tag string, emit func(class string, elementText bool, rule string)) (name, end string, ld bool) {
 	if strings.HasPrefix(tag, "</") {
 		for range strings.Count(tag, "\x00") {
 			emit("", false, "")
 		}
-		return "", false
+		return tagName(tag[2:]), "", false
 	}
-	name := strings.ToLower(strings.FieldsFunc(tag[1:], func(c rune) bool { return c == ' ' || c == '>' || c == '/' || c == '\t' || c == '\n' })[0])
+	name = tagName(tag[1:])
 	attrs := attrRe.FindAllStringSubmatchIndex(tag, -1)
 	val := func(a []int) string { // One pair of matching outer quotes goes.
 		v := tag[a[4]:a[5]]
@@ -883,11 +934,18 @@ func tagPlaces(tag string, emit func(class string, elementText bool, rule string
 	}
 	switch {
 	case name == "style":
-		return "style", false
+		return name, "style", false
 	case name == "script":
-		return "script", tag == ldTag
+		return name, "script", tag == ldTag
+	case name == "title": // RCDATA: the content ends at the first end tag of title.
+		return name, "title", false
+	case name == "noscript":
+		// A browser with scripting on reads the content as raw text up to
+		// "</noscript". Here it is markup, as html/template reads it. An end
+		// tag cannot hide in an attribute value: a value has no "<" (attr-lt).
+		// It cannot hide in a comment: html/template removes comments.
 	}
-	return "", false
+	return name, "", false
 }
 
 // normalForm decodes the character references of s. It then deletes each
