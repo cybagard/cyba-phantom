@@ -819,8 +819,8 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			i = min(j+3, len(s))
 		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?") ||
 			strings.HasPrefix(s[i:], "</") && !isLetter(i+2):
-			// A browser reads these as a comment that ends at the next ">". They
-			// are "<!" with no "--", "<?", and "</" with no letter.
+			// A browser reads these as a comment that ends at the next ">".
+			// They are "<!" with no "--", "<?", and "</" with no letter.
 			j := len(s)
 			if k := strings.IndexByte(s[i:], '>'); k >= 0 {
 				j = i + k
