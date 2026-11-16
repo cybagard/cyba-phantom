@@ -68,8 +68,8 @@ var (
 	// text, and a quote with no end is a plain character.
 	markup = regexp.MustCompile(`(?s)<(?:"[^"]*"|'[^']*'|[^>])*(?:>|$)`)
 	// The element names that a text/html template can use. A new name is a
-	// code change in a reviewed PR. The list holds no element whose content
-	// a browser reads as raw text or RCDATA, other than style, script, title
+	// code change in a reviewed PR. The list holds no element that a browser
+	// reads as raw text or RCDATA. The exceptions are style, script, title
 	// and noscript.
 	elements = []string{"html", "head", "body", "title", "meta", "style", "script", "noscript",
 		"p", "a", "img", "div", "span", "h1", "h2", "h3", "ul", "ol", "li", "em", "strong", "br",
@@ -740,8 +740,8 @@ func placesOf(text, typ string) (out []place, names []string) {
 	return out, names
 }
 
-// attrLt reports an attribute value, quoted or not, that holds "<". The scan
-// is on each tag that the pattern markup finds, also in the content of an
+// attrLt reports an attribute value, quoted or not, that holds "<". It scans
+// each tag that the pattern markup finds. That includes the content of an
 // element that a browser reads as RCDATA or raw text. The engine never writes
 // "<" in a value. A "<" there can hide an end tag from a scan that reads the
 // value as one string.
@@ -819,8 +819,8 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			i = min(j+3, len(s))
 		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?") ||
 			strings.HasPrefix(s[i:], "</") && !isLetter(i+2):
-			// A browser reads "<!" that is not "<!--", "<?", and "</" with no
-			// letter after it, as a comment that ends at the next ">".
+			// A browser reads these as a comment that ends at the next ">". They
+			// are "<!" with no "--", "<?", and "</" with no letter.
 			j := len(s)
 			if k := strings.IndexByte(s[i:], '>'); k >= 0 {
 				j = i + k
@@ -887,7 +887,7 @@ func tagName(s string) string {
 
 // tagPlaces calls emit for each NUL byte of a tag. It gives the name of the
 // tag. It also gives the name of the raw text or RCDATA element that a start
-// tag opens, and says if that element is the json-ld block.
+// tag opens. It says if that element is the json-ld block.
 func tagPlaces(tag string, emit func(class string, elementText bool, rule string)) (name, end string, ld bool) {
 	if strings.HasPrefix(tag, "</") {
 		for range strings.Count(tag, "\x00") {
@@ -937,7 +937,7 @@ func tagPlaces(tag string, emit func(class string, elementText bool, rule string
 		return name, "style", false
 	case name == "script":
 		return name, "script", tag == ldTag
-	case name == "title": // RCDATA: the content ends at the first end tag of title.
+	case name == "title": // RCDATA: the content ends at the end tag.
 		return name, "title", false
 	case name == "noscript":
 		// A browser with scripting on reads the content as raw text up to

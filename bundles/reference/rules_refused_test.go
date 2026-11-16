@@ -715,8 +715,8 @@ func positionRows() []row {
 		// Positions that pass.
 		posRow("text in noscript", `<noscript>ACT</noscript>`),
 		posRow("text in title", `<title>ACT</title>`),
-		// html/template writes "<" in the title text as "&lt;", so the style
-		// element is text and the action is title text.
+		// html/template writes "<" as "&lt;" in title text. So the style
+		// element is text, and the action is title text.
 		posRow("title with a look-alike end tag", `<title></titlex><style>p{background:url('ACT')}</style></title>`),
 		posRow("element names in capitals", `<DIV><P>ACT</P></DIV>`),
 		posRow("escaped less-than in an attribute value", `<p title="a &lt; b">ACT</p>`),
