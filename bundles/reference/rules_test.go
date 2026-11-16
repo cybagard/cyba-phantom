@@ -408,9 +408,10 @@ func schemeFound(low string) bool {
 }
 
 // render runs a template as the engine does. It runs two times: with the trap
-// texts of the tree, and with no trap text (each action gives ""). It runs the
-// markup rules and the base64 rule on each output. A template that does not
-// parse or run is a finding.
+// texts of the tree, and with no trap text. In the second run, each index
+// action gives "" and each comment action gives an empty HTML comment. It
+// runs the markup rules and the base64 rule on each output. A template that
+// does not parse or run is a finding.
 func (r *result) render(name, text string, traps map[string]string) {
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
