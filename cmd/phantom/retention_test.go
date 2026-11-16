@@ -206,13 +206,14 @@ func TestTI13_StartedSensorKeepsTheCap(t *testing.T) {
 	}
 }
 
-// untilRun waits until cond is true, the end of the retention run. The run
-// writes its mark or event at its end. It fails the test if the run takes
-// longer than the bound. The bound is not netWait. netWait is for one network
+// untilRun waits until cond is true. The run writes its mark in its last
+// step and its retention event at its end. It fails the test if cond is not
+// true within the bound. The bound is not netWait. netWait is for one network
 // step. The run rolls up thousands of rows and runs every step. With -race and
 // coverage on a slow runner it takes more than netWait. So the bound comes from
-// the test: its deadline, less a margin for the stop and the checks. With no
-// deadline, it is 2 minutes. The test logs the time since start.
+// the test: its deadline, minus a margin for the stop and the checks. With no
+// deadline, it is 2 minutes. The logged time starts before the start of the
+// sensor, so it holds the start and the run.
 func untilRun(t *testing.T, what string, start time.Time, cond func() bool) {
 	t.Helper()
 	bound := 2 * time.Minute
