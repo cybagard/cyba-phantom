@@ -57,6 +57,9 @@ type Schedule struct {
 	ranAt     time.Duration // the monotonic time of the last run of a check
 	earlyEnds atomic.Uint64
 	earlyLog  atomic.Bool
+	mark      time.Time // the mark of the last run, in memory
+	markAhead atomic.Uint64
+	markLog   atomic.Bool
 	maxBytes  int64  // store.max_bytes; 0 means no cap step
 	dbRel     string // the name that SetMaxBytes checked, relative to the root
 	capLog    atomic.Bool
@@ -156,6 +159,10 @@ func NewSchedule(w *Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) *S
 // differed by more than 1 h. It is safe to call from any goroutine.
 func (s *Schedule) ClockDiffs() uint64 { return s.clock.Diffs() }
 
+// MarkAhead returns the number of runs with a mark more than 1 h after the wall
+// time of the run. It is safe to call from any goroutine.
+func (s *Schedule) MarkAhead() uint64 { return s.markAhead.Load() }
+
 // EarlyEnds returns the number of runs that ended early, with an error that is
 // not the stop of the schedule. It is safe to call from any goroutine.
 func (s *Schedule) EarlyEnds() uint64 { return s.earlyEnds.Load() }
@@ -203,6 +210,8 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // than 25 h old, it runs at once. A mark that cannot be read or is not a number
 // is 0, so it is old. A mark after the wall time is old too: the wall clock
 // was ahead at the last run. The run keeps the mark, and it does not move back.
+// The value that it read stays in memory as the mark of the last run. This is
+// true also when the value is after the wall time. See runOnce.
 func (s *Schedule) begin(ctx context.Context) {
 	wall := s.clock.wall()
 	s.lastWall = wall
@@ -212,6 +221,7 @@ func (s *Schedule) begin(ctx context.Context) {
 	_ = s.w.db.QueryRowContext(rctx, metaGetSQL, retentionLastKey).Scan(&v)
 	ms, _ := strconv.ParseInt(v, 10, 64)
 	mark := time.UnixMilli(ms)
+	s.mark = mark
 	if wall.Sub(mark) > catchUp || mark.After(wall) {
 		s.runOnce(ctx)
 		s.lastDay = retentionDay(wall, s.loc)
@@ -245,9 +255,20 @@ func (s *Schedule) check(ctx context.Context) {
 
 // runOnce makes one run with a step list for the clock readings of the run. A
 // run can end with an error that is not the stop of the schedule. Then it adds
-// 1 to the early-end count. The first early end writes one log line.
+// 1 to the early-end count. The first early end writes one log line. The mark
+// in memory bounds tPriv from below. A mark more than 1 h after the wall time
+// adds 1 to the mark-ahead count. The first one writes one fixed log line with
+// no time value. A run can end with no error. Then the mark in memory becomes
+// the later of the mark and the wall time of the run. A run with an error does
+// not change it.
 func (s *Schedule) runOnce(stop context.Context) {
-	wall, tDel, tPriv := s.clock.reading()
+	wall, tDel, tPriv := s.clock.reading(s.mark)
+	if s.mark.Sub(wall) > clockLimit {
+		s.markAhead.Add(1)
+		if s.markLog.CompareAndSwap(false, true) {
+			s.lg.Warn("retention mark is ahead of the wall clock")
+		}
+	}
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
 	run := &retentionRun{}
@@ -257,6 +278,9 @@ func (s *Schedule) runOnce(stop context.Context) {
 	// clock must not make mint units look old.
 	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
+	if err == nil && wall.After(s.mark) {
+		s.mark = wall
+	}
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
 		if s.earlyLog.CompareAndSwap(false, true) {
