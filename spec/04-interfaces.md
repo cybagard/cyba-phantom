@@ -123,12 +123,14 @@ Rules (SEC-16, SEC-17, ADR-020):
 ```json
 { "v":1, "sensor":"<install_id>", "session":"…", "band":"agent-confirmed", "score":92, "family":"…",
   "signals":{"ja4":"…","h2":"…","hdr":"…","beacon":false,"cadence_ms_p50":140},
-  "trap":{"id":"t-…","surface":"path","instruction_class":"…"},
+  "trap":{"id":"t-…","surface":"path","instruction_class":"…","reference_seed":true,"note":"reference seed: no C6 strength"},
   "evidence":{"event_id":123,"hash":"…","leaf_index":98765,"tree_size":98800,"proof":["…"],"checkpoint_pending":true},
   "ip_hmac":"…", "ip": "<only if within 7d and privacy.include_ip=true>", "ts":"…" }
 ```
 Headers: `X-Phantom-Signature: sha256=<hmac>`, `X-Phantom-Sensor`.
-Syslog: RFC 5424, structured-data `[phantom@0 session="…" band="…" trap="…" leaf="…"]`.
+`trap.reference_seed` and `trap.note` are only in the alert of a callback with a token of a reference bundle. Then `reference_seed` is `true`, and `note` is the fixed text "reference seed: no C6 strength". In other alerts, both members are absent (ADR-036, ADR-042).
+Syslog: RFC 5424, structured-data `[phantom@0 session="…" band="…" trap="…" leaf="…" reference_seed="true"]`. The parameter `reference_seed` follows the rule of `trap.reference_seed`.
+SMTP: the mail of such an alert has the line `reference seed: no C6 strength`.
 
 ## 7. Verifier (`phantom-verify`)
 
