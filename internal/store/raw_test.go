@@ -196,11 +196,11 @@ func TestTU11FieldClearCutoffNotAfterTheMarkChangesNothing(t *testing.T) {
 	}
 }
 
-// T-U-11: the statement of the step uses event_ts with both bounds of ts. Thus
-// a run reads only the rows of its window.
-func TestTU11FieldClearUsesEventTSWithBothBounds(t *testing.T) {
+// T-U-11: the statement of the step uses event_raw_ts with both bounds of ts.
+// Thus a run reads only the rows of its window that have a field.
+func TestTU11FieldClearUsesRawIndexWithBothBounds(t *testing.T) {
 	plan := strings.Join(queryPlan(t, migrated(t), clearRawSQL, 1, 2, 1, 0, 1000), "\n")
-	if !strings.Contains(plan, "event_ts (ts>? AND ts<?)") || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "TEMP B-TREE") {
+	if !strings.Contains(plan, "event_raw_ts (ts>? AND ts<?)") || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "TEMP B-TREE") {
 		t.Fatalf("plan:\n%s", plan)
 	}
 }

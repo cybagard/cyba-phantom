@@ -273,10 +273,10 @@ func schemaEntries(t *testing.T, db *sql.DB) map[string]schemaEntry {
 	return out
 }
 
-// T-U-11: a database of schema 2 with a row in each table gets schema 4. Each
+// T-U-11: a database of schema 2 with a row in each table gets schema 5. Each
 // old entry keeps its SQL text and its root page, so no table is rebuilt. The
-// row counts stay. The only new entries are the two indexes and rollup_seen.
-func TestTU11MigrationAddsTwoIndexesAndTheSeenTableWithoutRebuild(t *testing.T) {
+// row counts stay. The only new entries are three indexes and rollup_seen.
+func TestTU11MigrationAddsThreeIndexesAndTheSeenTableWithoutRebuild(t *testing.T) {
 	root, _, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
 	t.Cleanup(func() { db.Close() })
@@ -301,7 +301,7 @@ func TestTU11MigrationAddsTwoIndexesAndTheSeenTableWithoutRebuild(t *testing.T) 
 		t.Fatal(err)
 	}
 	after := schemaEntries(t, db)
-	if v := metaValue(t, db, "schema_version"); v != "4" {
+	if v := metaValue(t, db, "schema_version"); v != "5" {
 		t.Fatalf("schema_version %s", v)
 	}
 	for name, was := range before {
@@ -309,8 +309,8 @@ func TestTU11MigrationAddsTwoIndexesAndTheSeenTableWithoutRebuild(t *testing.T) 
 			t.Errorf("%s changed: %+v, was %+v", name, after[name], was)
 		}
 	}
-	if len(after) != len(before)+3 || after["session_ip_first"].typ != "index" || after["token_first_cb"].typ != "index" ||
-		after["rollup_seen"].typ != "table" {
+	if len(after) != len(before)+4 || after["session_ip_first"].typ != "index" || after["token_first_cb"].typ != "index" ||
+		after["event_raw_ts"].typ != "index" || after["rollup_seen"].typ != "table" {
 		t.Errorf("new entries: %+v", after)
 	}
 }
@@ -478,11 +478,17 @@ func ipBenchState(b *testing.B, n int, build bool, tPriv time.Time) string {
 // on the line of the child, for example rss=1234 ms=5.6. It fails when a value
 // is not a number. It fails when a key of keys is missing, or when rss is 0.
 func runIPChild(b *testing.B, state, mode string, keys []string, env ...string) map[string]float64 {
-	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkIPStepChild$", "-test.benchtime=1x")
-	cmd.Env = append(append(os.Environ(), ipChildDir+"="+state, ipChildMode+"="+mode), env...)
+	return runChild(b, "BenchmarkIPStepChild", "ipstep-child ", keys, append(env, ipChildDir+"="+state, ipChildMode+"="+mode)...)
+}
+
+// runChild runs the child benchmark bench with env. It reads the line of the
+// child that starts with prefix, as runIPChild does.
+func runChild(b *testing.B, bench, prefix string, keys []string, env ...string) map[string]float64 {
+	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.bench=^"+bench+"$", "-test.benchtime=1x")
+	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	for _, line := range strings.Split(string(out), "\n") {
-		if fields, ok := strings.CutPrefix(line, "ipstep-child "); ok && err == nil {
+		if fields, ok := strings.CutPrefix(line, prefix); ok && err == nil {
 			m := map[string]float64{}
 			for _, kv := range strings.Fields(fields) {
 				k, v, _ := strings.Cut(kv, "=")

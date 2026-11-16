@@ -71,6 +71,17 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	case have == len(scripts):
 		return checkEvent(ctx, tx, scripts)
 	}
+	// A later script can fail on a missing event table before the final check.
+	// A pending script can change the text, so this check reads only the name.
+	if have > 0 {
+		var got string
+		switch err := tx.QueryRowContext(ctx, eventSQL).Scan(&got); {
+		case err == sql.ErrNoRows:
+			return fail(schemaName, ruleEvent)
+		case err != nil:
+			return fail(schemaName, ruleMigrate)
+		}
+	}
 	for _, s := range scripts[have:] {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
 			return fail(schemaName, ruleMigrate)
