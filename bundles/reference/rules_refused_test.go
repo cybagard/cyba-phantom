@@ -352,8 +352,8 @@ func routesOf(path string) string {
 	return `{"routes":[{"path":"` + path + `","callback":{"segment":true}}]}`
 }
 
-// extraRows are the rows for the rules of template actions, host-like paths,
-// the marker outside markup, and the tree entries of the wrong type.
+// extraRows are more rows. They cover template actions, host-like paths, the
+// marker outside markup and tree entries of the wrong type.
 func extraRows() []row {
 	z := "vhosts/" + host + "/"
 	hostPath := func(p string) row {
