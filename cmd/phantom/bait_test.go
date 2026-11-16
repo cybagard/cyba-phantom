@@ -56,6 +56,15 @@ type baitOpt struct {
 	refuse bool      // the store does not open, so no load runs
 	files  []tarFile // the files of that bundle, or nil for baitFiles
 	memory bool      // put the state directory on a memory filesystem
+	// root is the state directory of an earlier start, to start on its data.
+	root string
+	// maxBytes is store.max_bytes in the start values. 0 keeps the config.
+	maxBytes int64
+	// seed runs before the start, on the start values with the state
+	// directory.
+	seed func(t *testing.T, p startParams)
+	// store gets the database that the start opened.
+	store func(*sql.DB)
 }
 
 // baitSensor is a started sensor with its two addresses (with scheme). dk is
@@ -92,6 +101,15 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	if o.memory {
 		s.p.Root = memoryRoot(t)
 	}
+	if o.root != "" {
+		s.p.Root = o.root
+	}
+	if o.maxBytes != 0 {
+		s.p.MaxBytes = o.maxBytes
+	}
+	if o.seed != nil {
+		o.seed(t, s.p)
+	}
 	caURL, _ := cfg.Get("acme.ca")
 	seedCache(t, s.p, caURL.Str)
 	if o.bundle {
@@ -108,6 +126,15 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
 		s.dk = dk // read by the test after the start line
 		return realDeps.newWriter(db, q, bp, lg, r, dk)
+	}
+	if o.store != nil {
+		d.openStore = func(r *os.Root, rel string, opt store.Options) (*sql.DB, error) {
+			db, err := realDeps.openStore(r, rel, opt)
+			if err == nil {
+				o.store(db)
+			}
+			return db, err
+		}
 	}
 	if o.refuse {
 		d.openStore = func(*os.Root, string, store.Options) (*sql.DB, error) { return nil, errors.New("test") }

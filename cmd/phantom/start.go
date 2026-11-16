@@ -35,7 +35,9 @@ type startParams struct {
 	Reserved                         []string
 	Interval                         time.Duration
 	BodyPrefix                       bool
-	IPDays, RawDays, EventsDays      int // store.retention_days.{ip,raw,events}
+	// The days are store.retention_days.{ip,raw,events}.
+	IPDays, RawDays, EventsDays int
+	MaxBytes                    int64 // store.max_bytes
 }
 
 // startDeps holds the parts that a test replaces. A test counts the calls that
@@ -53,9 +55,11 @@ type startDeps struct {
 	// guard. A test that is not about the pause sets nil. Then a full host
 	// disk does not pause its writer.
 	openGuard func(*os.Root, string) (*store.DiskGuard, error)
-	// schedule runs the nightly retention schedule until its context ends
-	// (SEC-40). Nil means no schedule.
-	schedule func(ctx context.Context, w *store.Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger)
+	// schedule makes the nightly retention schedule (SEC-40). It returns the
+	// run function, which runs until its context ends. The schedule gets the
+	// days and the cap of p (store.max_bytes). An error means that the
+	// schedule refused the cap. Then no run may start. Nil means no schedule.
+	schedule func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error)
 }
 
 var realDeps = startDeps{
@@ -66,8 +70,13 @@ var realDeps = startDeps{
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
-	schedule: func(ctx context.Context, w *store.Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) {
-		store.NewSchedule(w, ipDays, rawDays, eventsDays, lg).Run(ctx)
+	schedule: func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
+		sc := store.NewSchedule(w, p.IPDays, p.RawDays, p.EventsDays, lg)
+		// The name is the one that start gave to Open.
+		if err := sc.SetMaxBytes(p.MaxBytes, p.StorePath); err != nil {
+			return nil, err
+		}
+		return sc.Run, nil
 	},
 }
 
@@ -89,8 +98,9 @@ func paramsOf(cfg *config.Config) startParams {
 	ipd, _ := cfg.Get("store.retention_days.ip")
 	rawd, _ := cfg.Get("store.retention_days.raw")
 	evd, _ := cfg.Get("store.retention_days.events")
+	maxb, _ := cfg.Get("store.max_bytes")
 	return startParams{
-		IPDays: int(ipd.Int), RawDays: int(rawd.Int), EventsDays: int(evd.Int),
+		IPDays: int(ipd.Int), RawDays: int(rawd.Int), EventsDays: int(evd.Int), MaxBytes: maxb.Int,
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),
 		CacheDir: rel(str("acme.cache_dir")), BundlePath: rel(str("bundle.path")),
 		Reserved: []string{rel(str("tlog.dir")), rel(str("acme.cache_dir")), rel(filepath.Dir(str("bundle.path")))},
@@ -118,6 +128,7 @@ type storePart struct {
 
 	stopSched context.CancelFunc // stops the retention schedule
 	sched     sync.WaitGroup
+	capErr    error // the schedule refused the cap, so it did not start
 }
 
 // DayKey returns the day key holder that the writer uses. The code that
@@ -165,9 +176,17 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 		}
 		s.wg.Go(func() { s.writer.Run(context.Background()) })
 		if d.schedule != nil {
-			var ctx context.Context
-			ctx, s.stopSched = context.WithCancel(context.Background())
-			s.sched.Go(func() { d.schedule(ctx, s.writer, p.IPDays, p.RawDays, p.EventsDays, lg) })
+			// The refusal is known here, before the goroutine starts. A refused
+			// cap gives no run, not even the run at the start. So the sensor
+			// never runs with the cap off. serve stops on capErr.
+			if run, err := d.schedule(s.writer, p, lg); err != nil {
+				lg.Error("retention cap refused", "error", err)
+				s.capErr = err
+			} else {
+				var ctx context.Context
+				ctx, s.stopSched = context.WithCancel(context.Background())
+				s.sched.Go(func() { run(ctx) })
+			}
 		}
 	} else {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
