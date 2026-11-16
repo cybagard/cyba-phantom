@@ -91,6 +91,8 @@ func TestTU08HeaderSlotNamesRefused(t *testing.T) {
 		"x-frame-options", "x-sendfile",
 		"X-Accel-Redirect", "x-accel-buffering", "X-ACCEL-Buffering", "X-accel-x", "X-Accel-",
 		"X-Forwarded-For", "X-FORWARDED-HOST", "X-forwarded-proto", "x-forwarded-for", "X-Forwarded-",
+		"X-Sendfile2", "X-Sendfile-Type", "X-LIGHTTPD-send-file", "X-Lighttpd-Send-File",
+		"X-Reproxy-URL", "x-reproxy-expected-size", "X-Lighttpd-", "X-Reproxy-",
 	} {
 		refuse(t, doc(pa, ti, ty, slotsOf(n)))
 	}
@@ -99,8 +101,9 @@ func TestTU08HeaderSlotNamesRefused(t *testing.T) {
 // T-U-08: names that are near a reserved name load.
 func TestTU08HeaderSlotNamesNearReserved(t *testing.T) {
 	for _, n := range []string{
-		"X-Accel", "X-Accelerate", "X-Forwarded", "X-ForwardedFor", "X-Sendfile-Type", "X-Frame-Options2",
+		"X-Accel", "X-Accelerate", "X-Forwarded", "X-ForwardedFor", "X-Frame-Options2",
 		"X-Content-Type-Option", "X-Content-Type-Options2", "X-XSS-Protection2", "X-Sendfil", "X-Acce-l",
+		"X-Lighttpd", "X-Reproxy", "X-Lighttpdx", "X-Reproxyx", "X-Real-IP", "X-Original-URL", "X-Rewrite-URL",
 	} {
 		t.Run(n, func(t *testing.T) { loadRaw(t, nil, nil, site(doc(pa, ti, ty, slotsOf(n)))...) })
 	}
@@ -196,10 +199,11 @@ func TestTU25CallbackParamForm(t *testing.T) {
 
 // T-U-25: the header position has the rules of a header slot name.
 func TestTU25CallbackHeaderName(t *testing.T) {
-	for _, n := range []string{"X-A", "X-Accel", "X-Forwarded", "X-" + strings.Repeat("a", 32)} {
+	for _, n := range []string{"X-A", "X-Accel", "X-Forwarded", "X-Lighttpd", "X-Reproxy", "X-" + strings.Repeat("a", 32)} {
 		loads(t, cbDoc(`{"header":"`+n+`"}`))
 	}
-	for _, n := range []string{"X-", "A", "Y-A", "X-Frame-Options", "x-frame-options", "X-Accel-A", "X-Forwarded-For", "X-a b", "X-" + strings.Repeat("a", 33)} {
+	for _, n := range []string{"X-", "A", "Y-A", "X-Frame-Options", "x-frame-options", "X-Accel-A", "X-Forwarded-For", "X-a b", "X-" + strings.Repeat("a", 33),
+		"X-Sendfile", "X-Sendfile2", "x-lighttpd-a", "X-Lighttpd-", "X-Reproxy-URL", "x-reproxy-", "X-SENDFILE2", "X-LIGHTTPD-a", "X-reproxy-url"} {
 		refuse(t, cbDoc(`{"header":"`+n+`"}`))
 	}
 }
