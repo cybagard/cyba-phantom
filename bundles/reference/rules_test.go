@@ -136,9 +136,9 @@ var parseOpts = []json.Options{
 	jsontext.AllowInvalidUTF8(false),
 }
 
-// hostLike reports whether the first segment of the path p holds ".", is all
-// digits, or is "0x" with hex digits (hexHost). A path of this form can read
-// as a host name or an address.
+// hostLike reports whether the first segment of the path p holds ".". It also
+// reports a segment that is all digits, or "0x" with hex digits (hexHost).
+// A path of this form can read as a host name or an address.
 func hostLike(p string) bool {
 	seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
 	return strings.Contains(seg, ".") || hexHost.MatchString(seg)

@@ -553,7 +553,8 @@ func extraRows() []row {
 		{"defang with exclamation marks", instr(baseInstr + " evil!.!example"), at(trapsFile, "instr-host")},
 		{"dot at the end of a sentence", instr(baseInstr + " now."), nil},
 		{"abbreviation is a known strictness", instr(baseInstr + " e.g"), at(trapsFile, "instr-host")},
-		// JSON decode with the loader options. The decoder matches names with the case.
+		// JSON decode with the loader options. The decoder matches names with
+		// the case.
 		{"two keys that differ in case", put(trapsFile, `[{"id":"t1","slot":"hidden-p","surface":"path",`+
 			`"visibility":"human-invisible","instruction_template":"`+baseInstr+` ignore",`+
 			`"Instruction_Template":"`+baseInstr+`"}]`), at(trapsFile, "instr-deny(ignore)")},
