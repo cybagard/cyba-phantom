@@ -52,6 +52,8 @@ type Schedule struct {
 	lastWall  time.Time     // the wall time of the last check
 	limit     time.Duration // the time that one run can take
 	gap       time.Duration // the monotonic time between two runs of new days
+	readTime  time.Duration // the time that a read of the mark can take
+	markRead  bool          // a read of the mark has succeeded
 	began     chan struct{} // closed when the start check ends
 	ran       bool          // a check made a run
 	ranAt     time.Duration // the monotonic time of the last run of a check
@@ -152,7 +154,7 @@ func NewSchedule(w *Writer, ipDays, rawDays, eventsDays int, lg *slog.Logger) *S
 	}
 	return &Schedule{w: w, clock: newClockGuard(lg), loc: time.Local, ip: ipDays, raw: rawDays,
 		events: eventsDays, lg: lg, run: w.runSteps, limit: runLimit, gap: runGap,
-		began: make(chan struct{})}
+		readTime: readLimit, began: make(chan struct{})}
 }
 
 // ClockDiffs returns the number of runs whose wall clock and monotonic clock
@@ -211,23 +213,30 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // is 0, so it is old. A mark after the wall time is old too: the wall clock
 // was ahead at the last run. The run keeps the mark, and it does not move back.
 // The value that it read stays in memory as the mark of the last run. This is
-// true also when the value is after the wall time. See runOnce.
+// true also when the value is after the wall time. If the read fails, runOnce
+// reads the mark again. See runOnce.
 func (s *Schedule) begin(ctx context.Context) {
 	wall := s.clock.wall()
 	s.lastWall = wall
-	rctx, cancel := context.WithTimeout(ctx, readLimit)
-	defer cancel()
-	var v string
-	_ = s.w.db.QueryRowContext(rctx, metaGetSQL, retentionLastKey).Scan(&v)
-	ms, _ := strconv.ParseInt(v, 10, 64)
-	mark := time.UnixMilli(ms)
-	s.mark = mark
+	mark, ok := s.readMark(ctx)
+	s.mark, s.markRead = mark, ok
 	if wall.Sub(mark) > catchUp || mark.After(wall) {
 		s.runOnce(ctx)
 		s.lastDay = retentionDay(wall, s.loc)
 		return
 	}
 	s.lastDay = retentionDay(mark, s.loc)
+}
+
+// readMark reads the stored mark of the last run. No mark, or text that is not
+// a number, gives the time 0. The flag is false only when the read fails.
+func (s *Schedule) readMark(ctx context.Context) (time.Time, bool) {
+	rctx, cancel := context.WithTimeout(ctx, s.readTime)
+	defer cancel()
+	var v string
+	err := s.w.db.QueryRowContext(rctx, metaGetSQL, retentionLastKey).Scan(&v)
+	ms, _ := strconv.ParseInt(v, 10, 64)
+	return time.UnixMilli(ms), err == nil || errors.Is(err, sql.ErrNoRows)
 }
 
 // check starts a run when the retention day of the wall time is later than the
@@ -260,8 +269,17 @@ func (s *Schedule) check(ctx context.Context) {
 // adds 1 to the mark-ahead count. The first one writes one fixed log line with
 // no time value. A run can end with no error. Then the mark in memory becomes
 // the later of the mark and the wall time of the run. A run with an error does
-// not change it.
+// not change it. Before a read of the mark has succeeded, the run reads it
+// again. It keeps the later of the two marks.
 func (s *Schedule) runOnce(stop context.Context) {
+	if !s.markRead {
+		if m, ok := s.readMark(stop); ok {
+			s.markRead = true
+			if m.After(s.mark) {
+				s.mark = m
+			}
+		}
+	}
 	wall, tDel, tPriv := s.clock.reading(s.mark)
 	if s.mark.Sub(wall) > clockLimit {
 		s.markAhead.Add(1)

@@ -585,21 +585,60 @@ func TestTU27MarkAheadClearsAddressesAndDeletesNothingEarly(t *testing.T) {
 	}
 }
 
-// T-U-27: a run that ends early does not change the mark in memory. The wall
-// clock is 2 d ahead in the first run, which fails. Then it is right again.
-// The next run has the address cutoff of the monotonic time, not of the wall
-// time of the first run.
+// T-U-27: a run that ends early does not change the mark in memory. The next
+// run uses the old mark. The start sets the mark to 2 d after the wall time. A
+// run with the wall clock 4 d ahead fails. Then the wall clock is right again.
+// An address of 5 d and 1 h is NULL by the old mark. An address of 4 d stays:
+// the mark is not 4 d ahead, and it is not reset.
 func TestTU27EarlyEndKeepsTheMarkInMemory(t *testing.T) {
-	r, s, f := prodRig(t, 48*time.Hour, nil)
+	r, s, f := prodRig(t, 0, nil)
+	setMark(t, r.db, rollTDel.Add(48*time.Hour))
+	s.begin(context.Background())
 	ok := s.run
 	s.run = func(context.Context, []retentionStep) error { return errors.New("early end") }
+	f.jump(96 * time.Hour)
 	s.runOnce(context.Background())
-	f.jump(-48 * time.Hour)
+	f.jump(-96 * time.Hour)
 	s.run = ok
-	addSessions(t, r.db, "x", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
+	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
+	addSessions(t, r.db, "new", 0, 1, msAgo(rollTDel, 4*oneDay), 0, "203.0.113.8")
 	s.runOnce(context.Background())
-	if got := nullIPs(t, r.db); got["x0"] || s.EarlyEnds() != 1 || s.MarkAhead() != 0 {
-		t.Fatalf("null addresses %v, %d early ends, %d marks ahead; want none, 1 and 0", got, s.EarlyEnds(), s.MarkAhead())
+	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] || s.EarlyEnds() != 1 {
+		t.Fatalf("null addresses %v, %d early ends; want old0 only and 1", got, s.EarlyEnds())
+	}
+}
+
+// T-U-27: a read of the mark that fails at the start is made again in a run.
+// The restart has the wall clock 2 d behind. The mark is 1 h before the true
+// time. A session of 7 d and 2 h has an address. A session of 7 d and 30 min
+// has one. The read at the start fails, and so does the read in the start run.
+// That run leaves both addresses, as it has no mark. The next run reads the
+// mark. The address of 7 d and 2 h is NULL. The other stays: it is 6 d, 23 h
+// and 30 min old by the mark.
+func TestTU27FailedStartReadIsMadeAgain(t *testing.T) {
+	r := newRig(t, 8)
+	trueNow := rollTDel
+	setMark(t, r.db, trueNow.Add(-time.Hour))
+	addSessions(t, r.db, "old", 0, 1, msAgo(trueNow, 7*oneDay+2*time.Hour), 0, "203.0.113.7")
+	addSessions(t, r.db, "near", 0, 1, msAgo(trueNow, 7*oneDay+30*time.Minute), 0, "203.0.113.8")
+	s, _ := fakeSchedule(t, r, time.UTC, trueNow.Add(-48*time.Hour), nil)
+	s.readTime = 50 * time.Millisecond
+	conn, err := r.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := direct(r)
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		conn.Close() // the writer connection is free for the run
+		return run(ctx, steps)
+	}
+	s.begin(context.Background())
+	if got := nullIPs(t, r.db); s.markRead || got["old0"] || got["near0"] {
+		t.Fatalf("read of the mark %v, null addresses %v; want a failed read and none", s.markRead, got)
+	}
+	s.runOnce(context.Background())
+	if got := nullIPs(t, r.db); !s.markRead || !got["old0"] || got["near0"] {
+		t.Fatalf("read of the mark %v, null addresses %v; want a read and old0 only", s.markRead, got)
 	}
 }
 
@@ -653,12 +692,14 @@ func TestTU27MarkNeverMovesBackAndDifferencesCount(t *testing.T) {
 }
 
 // T-U-27: the mark is the wall time of the run, not the later of the two
-// times. The wall clock is 2 d behind, so the mono time is later.
+// times. The wall clock is 2 d behind, so the mono time is later. The mark in
+// memory is the wall time too: a second run has no mark ahead.
 func TestTU27MarkIsTheWallTimeOfTheRun(t *testing.T) {
 	r, s, f := prodRig(t, -48*time.Hour, nil)
 	s.runOnce(context.Background())
-	if got, want := metaValue(t, r.db, retentionLastKey), strconv.FormatInt(f.wall().UnixMilli(), 10); got != want {
-		t.Fatalf("mark %s, want %s", got, want)
+	s.runOnce(context.Background())
+	if got, want := metaValue(t, r.db, retentionLastKey), strconv.FormatInt(f.wall().UnixMilli(), 10); got != want || s.MarkAhead() != 0 {
+		t.Fatalf("mark %s, %d marks ahead; want %s and 0", got, s.MarkAhead(), want)
 	}
 }
 
