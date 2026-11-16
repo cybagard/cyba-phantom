@@ -598,7 +598,7 @@ func TestTS12_DetailMarshaledSizeBound(t *testing.T) {
 // has the marshaled text {"a":"..."}. Its size is 8 + 2 * quotes + others.
 // Each size from 2048 to 2208 passes check. At 2048 the encoder gets the
 // text. A size past 2048 is an error, and the encoder gets no input. So a
-// looser bound lets a size from 2049 to 2207 through to the encoder.
+// looser bound lets at least the size 2049 through to the encoder.
 func TestTS12_DetailMarshaledSizeExactBound(t *testing.T) {
 	seen := watchEncoder(t)
 	for size := MaxDetailBytes; size <= MaxDetailBytes+160; size++ {
