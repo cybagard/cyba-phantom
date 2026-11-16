@@ -93,6 +93,7 @@ func TestTU08HeaderSlotNamesRefused(t *testing.T) {
 		"X-Forwarded-For", "X-FORWARDED-HOST", "X-forwarded-proto", "x-forwarded-for", "X-Forwarded-",
 		"X-Sendfile2", "X-Sendfile-Type", "X-LIGHTTPD-send-file", "X-Lighttpd-Send-File",
 		"X-Reproxy-URL", "x-reproxy-expected-size", "X-Lighttpd-", "X-Reproxy-",
+		"X-REPROXY-URL", "X-reproxy-expected-size", "X-sendfile2",
 	} {
 		refuse(t, doc(pa, ti, ty, slotsOf(n)))
 	}
