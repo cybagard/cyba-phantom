@@ -84,8 +84,8 @@ var (
 	// An unterminated HTML comment runs to the end of the text.
 	htmlComment = regexp.MustCompile(`(?s)<!--.*?(?:-->|$)`)
 
-	// A trap text has no "[" or "]", and no ":" at the end or before a
-	// character that is not a space.
+	// A trap text has no "[" or "]". It has no ":" at the end. It has no
+	// ":" before a character that is not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
 	// These words are checked on the text with all spaces removed.
 	denyCompact = []string{"apikey", "systemprompt", "privatekey"}

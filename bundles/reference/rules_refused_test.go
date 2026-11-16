@@ -65,7 +65,7 @@ func both(es ...edit) edit {
 func rs(rules ...string) []string { return rules }
 
 // withRendered adds the "(rendered)" form of each rule that also runs on a
-// rendered page. A template shows its own text in the output, so a markup
+// rendered page. A template shows its own text in the output. So a markup
 // rule that fires on the text also fires on the output.
 func withRendered(rules []string) []string {
 	out := slices.Clone(rules)
