@@ -3,11 +3,14 @@
 package reference
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
+	"html/template"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -47,14 +50,26 @@ var (
 		`xmlns:xlink="http://www.w3.org/1999/xlink"`, "")
 	// A value that starts with a scheme, after "=", a quote or "(".
 	scheme = regexp.MustCompile(`(?i)(?:=|["'(])\s*[a-z][a-z0-9+.-]*:`)
+	// An attribute value, quoted or not. A scheme with a non-space after
+	// its ":" is refused inside a value, also after ";", "," or white space.
+	attrValue     = regexp.MustCompile(`(?is)=\s*("[^"]*"|'[^']*'|[^\s>"']+)`)
+	schemeInValue = regexp.MustCompile(`(?i)(?:^|[;,\s"'])[a-z][a-z0-9+.-]*:\S`)
+	httpEquiv     = regexp.MustCompile(`(?i)[\s"'/]http-equiv\s*=`)
+	hexHost       = regexp.MustCompile(`(?i)^(0x[0-9a-f]*|[0-9]+)$`)
+	// A trap text has only these characters, and the one token.
+	notTrapChar = regexp.MustCompile(`[^A-Za-z0-9 .,;:!?'()/_-]`)
+	dotEnv      = regexp.MustCompile(`\.\s*env\b`)
 	// A tag of the list, also after a namespace prefix such as "s:".
 	tagRe     = regexp.MustCompile(`(?i)<(?:[a-z0-9._-]+:)?(script|iframe|object|embed|foreignobject)`)
 	styleAttr = regexp.MustCompile(`(?i)[\s"'/]style\s*=`)
-	// Markup of any kind. An open "<" runs to the end of the text.
-	markup = regexp.MustCompile(`(?s)<[^>]*(?:>|$)`)
+	// A tag. A quoted value may hold ">". An open "<" runs to the end of the
+	// text, and a quote with no end is a plain character.
+	markup = regexp.MustCompile(`(?s)<(?:"[^"]*"|'[^']*'|[^>])*(?:>|$)`)
+	// An element whose text a browser does not show as page text.
+	hiddenElements = hiddenOf("style", "script", "template", "title", "textarea", "noscript")
 	// The deny check reads a text with each run of other characters as one
-	// space. "." stays, for ".env".
-	notAlnum  = regexp.MustCompile(`[^a-z0-9.]+`)
+	// space.
+	notAlnum  = regexp.MustCompile(`[^a-z0-9]+`)
 	rmDash    = regexp.MustCompile(`(^|[^a-z0-9])rm[^a-z0-9]*-`)
 	denyStart = map[string]*regexp.Regexp{
 		"e mail":    regexp.MustCompile(`\be mail`),
@@ -69,9 +84,9 @@ var (
 	// An unterminated HTML comment runs to the end of the text.
 	htmlComment = regexp.MustCompile(`(?s)<!--.*?(?:-->|$)`)
 
-	// A trap text has no "[" or "]", and no ":" before a character that is
-	// not a space.
-	hostForm = regexp.MustCompile(`[\[\]]|:[^ ]`)
+	// A trap text has no "[" or "]", and no ":" at the end or before a
+	// character that is not a space.
+	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
 	// These words are checked on the text with all spaces removed.
 	denyCompact = []string{"apikey", "systemprompt", "privatekey"}
 
@@ -82,7 +97,7 @@ var (
 	// apart.
 	denyWords = []string{
 		"ignore", "previous", "system prompt", "password", "credential",
-		"secret", "api key", "private key", "ssh", ".env", "cookie", "history",
+		"secret", "api key", "private key", "ssh", "cookie", "history",
 		"conversation", "email", "curl", "wget", "sudo", "base64",
 		"execute", "shell", "download", "install",
 	}
@@ -111,7 +126,7 @@ type vhost struct {
 // all digits. A path of this form can read as a host name or an address.
 func hostLike(p string) bool {
 	seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
-	return strings.Contains(seg, ".") || (seg != "" && strings.Trim(seg, "0123456789") == "")
+	return strings.Contains(seg, ".") || hexHost.MatchString(seg)
 }
 
 func (v *vhost) readRoutes(r *result, name string, b []byte) {
@@ -175,6 +190,7 @@ func checkTree(fsys fs.FS) []string {
 	r.shape(names, dirs, files)
 	hosts := r.vhostNames(names, dirs)
 	users := map[string][]*vhost{}
+	var templates []string
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		b := files[name]
 		if name != seedName { // Each file but the seed is a text file.
@@ -193,13 +209,19 @@ func checkTree(fsys fs.FS) []string {
 			continue
 		}
 		r.page(name, b, v)
+		if strings.HasSuffix(name, ".tmpl") {
+			templates = append(templates, name)
+		}
 	}
 	for _, v := range hosts {
 		for id := range v.traps {
 			users[id] = append(users[id], v)
 		}
 	}
-	r.traps(files[trapsFile], users)
+	texts := r.traps(files[trapsFile], users)
+	for _, name := range templates {
+		r.render(name, string(files[name]), texts)
+	}
 	return r.out
 }
 
@@ -269,53 +291,127 @@ func (r *result) text(name string, b []byte) {
 	}
 }
 
+// hiddenOf makes one pattern for each element in names. The pattern matches
+// the start tag, the content and the end tag. An open element runs to the end.
+func hiddenOf(names ...string) []*regexp.Regexp {
+	var out []*regexp.Regexp
+	for _, n := range names {
+		out = append(out, regexp.MustCompile(`(?is)<`+n+`\b(?:"[^"]*"|'[^']*'|[^>])*>.*?(?:</`+n+`\s*>|$)`))
+	}
+	return out
+}
+
 // page checks a file below a vhost with the script and URL rules. For a
-// template it also checks the marker and the action forms. The tag, style
-// and on-attribute rules run on the raw text and on the normal form.
+// template it also checks the marker and the action forms. The rules run on
+// the raw text and on the normal form.
 func (r *result) page(name string, b []byte, v *vhost) {
 	raw := string(b)
 	n := normalForm(raw)
 	if strings.HasSuffix(name, ".tmpl") {
 		r.template(name, raw, n, v)
 	}
+	r.markupRules(name, raw, n, "", true)
+}
+
+// markupRules runs the script, style, URL and scheme rules on a text and on
+// its normal form n. Each finding has the suffix sfx. With static, it also
+// checks the DOCTYPE, http-equiv and percent escapes. They are not checked
+// on a rendered page.
+func (r *result) markupRules(name, raw, n, sfx string, static bool) {
 	for _, s := range []string{raw, n} {
 		low := strings.ToLower(s)
 		for _, m := range tagRe.FindAllStringSubmatch(s, -1) {
-			r.add("script(<"+strings.ToLower(m[1])+")", name)
+			r.add("script(<"+strings.ToLower(m[1])+")"+sfx, name)
 		}
 		if strings.Contains(low, "javascript:") {
-			r.add("script(javascript:)", name)
+			r.add("script(javascript:)"+sfx, name)
 		}
 		if onAttr.MatchString(s) || animOn.MatchString(s) {
-			r.add("on-attr", name)
+			r.add("on-attr"+sfx, name)
 		}
 		if styleAttr.MatchString(s) {
-			r.add("style-attr", name)
+			r.add("style-attr"+sfx, name)
 		}
-		if len(doctypes(low)) > 0 {
+		if static && len(doctypes(low)) > 0 {
 			r.add("doctype", name)
 		}
-		if hexEscape.MatchString(s) {
+		if static && httpEquiv.MatchString(s) {
+			r.add("http-equiv", name)
+		}
+		if static && hexEscape.MatchString(s) {
 			r.add("percent-escape", name)
 		}
 	}
 	if external.MatchString(n) {
-		r.add("third-party", name)
+		r.add("third-party"+sfx, name)
 	}
 	n = svgNames.Replace(n)
 	low := strings.ToLower(n)
 	if absoluteURL.MatchString(low) {
-		r.add("absolute-url", name)
+		r.add("absolute-url"+sfx, name)
 	}
-	if scheme.MatchString(low) {
-		r.add("scheme", name)
+	if schemeFound(low) {
+		r.add("scheme"+sfx, name)
 	}
 	if strings.Contains(low, "data:") {
-		r.add("data-url", name)
+		r.add("data-url"+sfx, name)
 	}
 	if strings.Contains(raw, `\`) || strings.Contains(n, `\`) {
-		r.add("backslash", name)
+		r.add("backslash"+sfx, name)
 	}
+}
+
+// schemeFound reports a value that starts with a scheme. It also reports a
+// scheme after ";", "," or white space inside an attribute value.
+func schemeFound(low string) bool {
+	if scheme.MatchString(low) {
+		return true
+	}
+	for _, m := range attrValue.FindAllStringSubmatch(low, -1) {
+		if schemeInValue.MatchString(m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// render runs a template as the engine does, with the trap texts of the
+// tree. It runs the markup rules on the output. A template that does not
+// parse or run is a finding.
+func (r *result) render(name, text string, traps map[string]string) {
+	t, err := template.New(name).Option("missingkey=error").
+		Funcs(template.FuncMap{"comment": comment}).Parse(text)
+	var buf bytes.Buffer
+	if err == nil {
+		err = t.Execute(&buf, bundle.Page{Trap: traps})
+	}
+	if err != nil {
+		r.add("render", name)
+		return
+	}
+	out := buf.String()
+	r.markupRules(name, out, renderForm(out), "(rendered)", false)
+}
+
+// comment is a copy of the function comment of internal/bundle/template.go.
+// It is not exported there. The engine adds it to each template.
+func comment(s string) template.HTML {
+	if strings.Contains(s, "--") || strings.Contains(s, "<") || strings.HasPrefix(s, ">") || strings.HasPrefix(s, "->") ||
+		strings.ContainsFunc(s, func(c rune) bool { return c < 0x20 && c != '\t' && c != '\n' || 0x7f <= c && c <= 0x9f }) {
+		return ""
+	}
+	return template.HTML("<!-- " + s + " -->")
+}
+
+// renderForm decodes the character references of a rendered page. It then
+// decodes percent escapes, and keeps the text when that fails. It deletes
+// each rune below 0x20 and the rune 0x7F.
+func renderForm(s string) string {
+	s = html.UnescapeString(s)
+	if u, err := url.PathUnescape(s); err == nil {
+		s = u
+	}
+	return dropControls(s)
 }
 
 // doctypes lists the bad declarations in the lower-case text s. An entity or
@@ -340,10 +436,15 @@ func doctypes(s string) []string {
 }
 
 // template checks the marker and the actions of a template. The marker must
-// be outside markup. Each "{{" must start one of the two exact forms, and no
-// "/" comes before it. The traps of the vhost come from these forms only.
+// be in the text that stays when HTML comments, the hidden elements and tags
+// are removed. Each "{{" must start one of the two exact forms, and no "/"
+// comes before it. The traps of the vhost come from these forms only.
 func (r *result) template(name, text, n string, v *vhost) {
-	visible := markup.ReplaceAllString(htmlComment.ReplaceAllString(text, ""), "")
+	visible := htmlComment.ReplaceAllString(text, "")
+	for _, re := range hiddenElements {
+		visible = re.ReplaceAllString(visible, "")
+	}
+	visible = markup.ReplaceAllString(visible, "")
 	if !strings.Contains(visible, marker) {
 		r.add("marker", name)
 	}
@@ -370,19 +471,26 @@ func (r *result) template(name, text, n string, v *vhost) {
 
 // normalForm decodes the character references of s. It then deletes each
 // rune below 0x20 and the rune 0x7F.
-func normalForm(s string) string {
+func normalForm(s string) string { return dropControls(html.UnescapeString(s)) }
+
+func dropControls(s string) string {
 	return strings.Map(func(c rune) rune {
 		if c < 0x20 || c == 0x7f {
 			return -1
 		}
 		return c
-	}, html.UnescapeString(s))
+	}, s)
 }
 
-// traps checks the instruction template of each trap in traps/traps.json.
-func (r *result) traps(b []byte, users map[string][]*vhost) {
+// fixedToken is the token that a rendered page holds. It has 26 characters
+// of a-z and 2-7.
+const fixedToken = "abcdefghijklmnopqrstuvwxyz"
+
+// traps checks the instruction template of each trap in traps/traps.json. It
+// gives the text of each trap with the fixed token, by trap id.
+func (r *result) traps(b []byte, users map[string][]*vhost) map[string]string {
 	if b == nil {
-		return
+		return nil
 	}
 	var ts []struct {
 		ID   string `json:"id"`
@@ -390,11 +498,14 @@ func (r *result) traps(b []byte, users map[string][]*vhost) {
 	}
 	if json.Unmarshal(b, &ts) != nil {
 		r.add("traps-json", trapsFile)
-		return
+		return nil
 	}
+	texts := map[string]string{}
 	for _, t := range ts {
 		r.instruction(t.Text, users[t.ID])
+		texts[t.ID] = strings.ReplaceAll(t.Text, tokenAction, fixedToken)
 	}
+	return texts
 }
 
 func (r *result) instruction(text string, users []*vhost) {
@@ -408,6 +519,7 @@ func (r *result) instruction(text string, users []*vhost) {
 	add("instr-bytes", strings.ContainsFunc(text, func(c rune) bool { return c < 0x20 || c > 0x7e }))
 	add("instr-token", strings.Count(text, tokenAction) != 1 || strings.Count(text, "{{") != 1)
 	add("instr-host-form", hostForm.MatchString(text))
+	add("instr-chars", notTrapChar.MatchString(strings.ReplaceAll(text, tokenAction, "")))
 	add("marker", !strings.Contains(text, marker))
 	add("base64", base64Run.MatchString(text))
 	add("entity", strings.Contains(text, "&#") || hexEscape.MatchString(text))
@@ -425,6 +537,7 @@ func (r *result) instruction(text string, users []*vhost) {
 	for w, re := range denyStart {
 		add("instr-deny("+w+")", re.MatchString(s))
 	}
+	add("instr-deny(.env)", dotEnv.MatchString(low))
 	add("instr-deny(rm -)", rmDash.MatchString(low))
 	add("instr-deny(instruction+override)",
 		strings.Contains(s, "instruction") && strings.Contains(compact, "override"))

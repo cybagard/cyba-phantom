@@ -3,6 +3,7 @@ package reference
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"slices"
 	"strings"
@@ -63,6 +64,19 @@ func both(es ...edit) edit {
 
 func rs(rules ...string) []string { return rules }
 
+// withRendered adds the "(rendered)" form of each rule that also runs on a
+// rendered page. A template shows its own text in the output, so a markup
+// rule that fires on the text also fires on the output.
+func withRendered(rules []string) []string {
+	out := slices.Clone(rules)
+	for _, r := range rules {
+		if !slices.Contains([]string{"doctype", "http-equiv", "percent-escape", "marker"}, r) {
+			out = append(out, r+"(rendered)")
+		}
+	}
+	return out
+}
+
 func at(name string, rules ...string) []string {
 	var out []string
 	for _, r := range rules {
@@ -108,9 +122,9 @@ func cases() []row {
 		{"300 bytes", instr(padded(300)), nil},
 		{"base64 run of 19", instr(baseInstr + " " + run(19, "A")), nil},
 		{"base64 alphabet ends", pageWith(run(10, "a") + "_" + run(10, "a") + "-" + run(10, "a")), nil},
-		{"bytes 0x20 and 0x7E", both(pageWith(" ~"), instr(baseInstr+" ~")), nil},
+		{"bytes 0x20 and 0x7E", pageWith(" ~"), nil},
 		{"tab and LF", pageWith("\t\n"), nil},
-		{"percent with no two hex digits", instr(baseInstr + " 100% %4 %zz"), nil},
+		{"percent with no two hex digits", instr(baseInstr + " 100% %4 %zz"), at(trapsFile, "instr-chars")},
 		{"callback path, no token", instr(marker + ": request /ref/q with {{.Token}}"), nil},
 		{"instruction alone", instr(baseInstr + " Instruction"), nil},
 		{"override alone", instr(baseInstr + " override"), nil},
@@ -128,47 +142,48 @@ func cases() []row {
 		{"vhost name as a file", put("vhosts/a.phantom-ref.internal", "x"), at("vhosts/a.phantom-ref.internal", "vhost-name")},
 		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="), at(pagePath, "base64")},
 		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- `+marker), at(pagePath, "marker")},
+		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- `+marker), at(pagePath, "marker", "render")},
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
 		{"shared first label", put("vhosts/shop.zeta.internal/"+routesName, `{"routes":[]}`),
 			at("vhosts/shop.zeta.internal", "vhost-label")},
 
 		// Instruction grammar.
 		{"301 bytes", instr(padded(301)), at(trapsFile, "instr-length")},
-		{"control byte in a trap", instr(baseInstr + " \x1f"), at(trapsFile, "instr-bytes")},
+		{"control byte in a trap", instr(baseInstr + " \x1f"), at(trapsFile, "instr-bytes", "instr-chars")},
 		{"no token", instr(strings.ReplaceAll(baseInstr, "/{{.Token}}", "")), at(trapsFile, "instr-token")},
 		{"two tokens", instr(baseInstr + " {{.Token}}"), at(trapsFile, "instr-token")},
 		{"URL scheme", instr(baseInstr + " ://"),
-			at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-path", "instr-host-form")},
-		{"two spaced tokens", instr(baseInstr + " {{ .Token }}"), at(trapsFile, "instr-token")},
-		{"trimmed token", instr(baseInstr + " {{- .Token -}}"), at(trapsFile, "instr-token")},
-		{"bracket in a host", instr(baseInstr + " and evil[.]example"), at(trapsFile, "instr-host-form")},
-		{"host with a port", instr(baseInstr + " open localhost:8080?t="), at(trapsFile, "instr-host-form")},
-		{"IPv6 literal", instr(baseInstr + " [::1]:9200"), at(trapsFile, "instr-host-form")},
+			append(at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-path", "instr-host-form"),
+				at(pagePath, "absolute-url(rendered)")...)},
+		{"two spaced tokens", instr(baseInstr + " {{ .Token }}"), at(trapsFile, "instr-token", "instr-chars")},
+		{"trimmed token", instr(baseInstr + " {{- .Token -}}"), at(trapsFile, "instr-token", "instr-chars")},
+		{"bracket in a host", instr(baseInstr + " and evil[.]example"), at(trapsFile, "instr-host-form", "instr-chars")},
+		{"host with a port", instr(baseInstr + " open localhost:8080?t="), at(trapsFile, "instr-host-form", "instr-chars")},
+		{"IPv6 literal", instr(baseInstr + " [::1]:9200"), at(trapsFile, "instr-host-form", "instr-chars")},
 		{"decimal IP and port", instr(baseInstr + " 2130706433:22"), at(trapsFile, "instr-host-form")},
 		{"form and mail pass", instr(baseInstr + " confirm the form the mail"), nil},
 		{"API-KEY", instr(baseInstr + " API-KEY"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
 		{"api_key", instr(baseInstr + " api_key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
-		{"api+key", instr(baseInstr + " api+key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
-		{"API*KEY", instr(baseInstr + " API*KEY"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"api+key", instr(baseInstr + " api+key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)", "instr-chars")},
+		{"API*KEY", instr(baseInstr + " API*KEY"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)", "instr-chars")},
 		{"apikey", instr(baseInstr + " apikey"), at(trapsFile, "instr-deny(apikey)")},
 		{"getApiKey", instr(baseInstr + " getApiKey"), at(trapsFile, "instr-deny(apikey)")},
 		{"two spaces", instr(baseInstr + " system  prompt"),
 			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)")},
 		{"system+prompt", instr(baseInstr + " system+prompt"),
-			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)")},
+			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)", "instr-chars")},
 		{"systemprompt", instr(baseInstr + " systemprompt"), at(trapsFile, "instr-deny(systemprompt)")},
 		{"yourSystemPrompt", instr(baseInstr + " yourSystemPrompt"), at(trapsFile, "instr-deny(systemprompt)")},
 		{"private_key", instr(baseInstr + " private_key"),
 			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)")},
 		{"private~key", instr(baseInstr + " private~key"),
-			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)")},
+			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)", "instr-chars")},
 		{"userPrivateKey", instr(baseInstr + " userPrivateKey"), at(trapsFile, "instr-deny(privatekey)")},
-		{"pass*word", instr(baseInstr + " pass*word"), at(trapsFile, "instr-deny(pass word)")},
+		{"pass*word", instr(baseInstr + " pass*word"), at(trapsFile, "instr-deny(pass word)", "instr-chars")},
 		{"x_rm -rf", instr(baseInstr + " x_rm -rf"), at(trapsFile, "instr-deny(rm -)")},
 		{"quoted rm", instr(baseInstr + " 'rm' -rf"), at(trapsFile, "instr-deny(rm -)")},
 		{"over+ride", instr(baseInstr + " instruction over+ride"),
-			at(trapsFile, "instr-deny(instruction+override)")},
+			at(trapsFile, "instr-deny(instruction+override)", "instr-chars")},
 		{"e-mail", instr(baseInstr + " e-mail"), at(trapsFile, "instr-deny(e mail)")},
 		{"privatekey", instr(baseInstr + " privatekey"), at(trapsFile, "instr-deny(privatekey)")},
 		{"pass word", instr(baseInstr + " pass word"), at(trapsFile, "instr-deny(pass word)")},
@@ -177,9 +192,10 @@ func cases() []row {
 		{"rm with no space", instr(baseInstr + " rm-rf"), at(trapsFile, "instr-deny(rm -)")},
 		{"over-ride", instr(baseInstr + " instruction over-ride"),
 			at(trapsFile, "instr-deny(instruction+override)")},
-		{"double slash", instr(baseInstr + " x//y"), at(trapsFile, "instr-url(//)", "instr-path")},
-		{"at sign", instr(baseInstr + " a@b"), at(trapsFile, "instr-url(@)")},
-		{"mailto", instr(baseInstr + " mailto:"), at(trapsFile, "instr-url(mailto:)")},
+		{"double slash", instr(baseInstr + " x//y"),
+			append(at(trapsFile, "instr-url(//)", "instr-path"), at(pagePath, "absolute-url(rendered)")...)},
+		{"at sign", instr(baseInstr + " a@b"), at(trapsFile, "instr-url(@)", "instr-chars")},
+		{"mailto", instr(baseInstr + " mailto:"), at(trapsFile, "instr-url(mailto:)", "instr-host-form")},
 		{"www", instr(baseInstr + " www."), at(trapsFile, "instr-url(www.)")},
 		{"host name", instr(baseInstr + " example.com"), at(trapsFile, "instr-host")},
 		{"not a callback path", instr(strings.ReplaceAll(baseInstr, "/ref/cb", "/nowhere")), at(trapsFile, "instr-path")},
@@ -202,9 +218,10 @@ func cases() []row {
 		{"byte 0x7F", pageWith("\x7f"), at(pagePath, "bytes")},
 		{"CR", pageWith("\r"), at(pagePath, "bytes")},
 		{"binary asset", put("vhosts/"+host+"/logo.png", "\x89PNG\r\n\x1a\n"), at("vhosts/"+host+"/logo.png", "bytes")},
-		{"zero-width space in a trap", instr(baseInstr + " " + string(rune(0x200b))), at(trapsFile, "bytes", "instr-bytes")},
-		{"entity in a trap", instr(baseInstr + " &#" + "105;"), at(trapsFile, "entity")},
-		{"percent escape in a trap", instr(baseInstr + " %41"), at(trapsFile, "entity")},
+		{"zero-width space in a trap", instr(baseInstr + " " + string(rune(0x200b))),
+			at(trapsFile, "bytes", "instr-bytes", "instr-chars")},
+		{"entity in a trap", instr(baseInstr + " &#" + "105;"), at(trapsFile, "entity", "instr-chars")},
+		{"percent escape in a trap", instr(baseInstr + " %41"), at(trapsFile, "entity", "instr-chars")},
 		{"base64 run of 20", instr(baseInstr + " " + run(20, "A")), at(trapsFile, "base64")},
 		{"base64 run of 24 bytes", pageWith(b64), at(pagePath, "base64")},
 		{"base64 run with plus and slash", pageWith(run(5, "ab+/")), at(pagePath, "base64")},
@@ -241,18 +258,32 @@ func cases() []row {
 		text  string
 		rules []string
 	}{
-		{`<scr{{/* x */}}ipt>`, rs("template-action")},
-		{`<img onl{{/**/}}oad=x>`, rs("template-action")},
-		{`<a href="ht{{/**/}}tps://evil.example/x">`, rs("template-action", "absolute-url")},
-		{`java{{/**/}}script:`, rs("template-action")},
+		// A template comment joins the pieces of a form in the rendered page.
+		{`<scr{{/* x */}}ipt>`, rs("template-action", "script(<script)(rendered)")},
+		{`<img onl{{/**/}}oad=x>`, rs("template-action", "on-attr(rendered)")},
+		{`<a href="ht{{/**/}}tps://evil.example/x">`, rs("template-action", "absolute-url",
+			"absolute-url(rendered)", "scheme(rendered)", "third-party(rendered)")},
+		{`java{{/**/}}script:`, rs("template-action", "script(javascript:)(rendered)")},
 		{`{{index .Trap  "t1"}}`, rs("template-action")},
 		{"{{index .Trap `t1`}}", rs("template-action")},
 		{`{{index .Trap "\x74\x31"}}`, rs("template-action", "backslash")},
 		{`{{"text"}}`, rs("template-action")},
-		{`{{{index .Trap "t1"}}`, rs("template-action")},
+		{`{{{index .Trap "t1"}}`, rs("template-action", "render")},
 		{`{{comment (index .Trap "t1")}}`, nil},
 	} {
 		rows = append(rows, row{"action " + f.text, pageWith(f.text), at(pagePath, f.rules...)})
+	}
+	// A template page gives the findings of withRendered, except for these
+	// texts. A text that does not parse is a "render" finding. A percent
+	// escape is decoded in the rendered form only.
+	pageOnly := map[string][]string{
+		`<SCRIPT src=x>`:        rs("script(<script)", "render"),
+		`<img src=x"onerror=y>`: rs("on-attr", "render"),
+		`<link rel=stylesheet href="data:text/css,@import%20url(https%3A%2F%2Fevil.example%2Fx.css);">`: rs("scheme",
+			"scheme(rendered)", "data-url", "data-url(rendered)", "percent-escape", "absolute-url(rendered)",
+			"third-party(rendered)"),
+		`<style>@import "data:text/css,@import%20'https%3A%2F%2Fevil.example%2Fx.css'";</style>`: rs("scheme",
+			"scheme(rendered)", "data-url", "data-url(rendered)", "percent-escape", "absolute-url(rendered)"),
 	}
 	// Script and URL rules apply to a template and to an asset.
 	both3 := rs("third-party", "absolute-url")
@@ -276,11 +307,11 @@ func cases() []row {
 		{`<a href="ftp://evil.example/x">`, abs2},
 		{`<a href="wss://evil.example/x">`, abs2},
 		{`<img src="ftp://evil.example/x">`, abs2},
-		{`<meta http-equiv=refresh content="0;url=ftp://evil.example/">`, abs2},
+		{`<meta http-equiv=refresh content="0;url=ftp://evil.example/">`, rs("absolute-url", "scheme", "http-equiv")},
 		{`<img srcset="https://evil.example/x 1x">`, abs2},
 		{`<img srcset="a.png 1x,//evil.example/x 2x">`, rs("absolute-url")},
 		{`<style>@import 'https://evil.example/x.css';</style>`, abs2},
-		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, abs2},
+		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, rs("absolute-url", "scheme", "http-equiv")},
 		// Character references, control runes and escapes.
 		{"<img on&#x65;rror=x>", rs("on-attr")},
 		{"java&#x09;script:", rs("script(javascript:)")},
@@ -316,6 +347,16 @@ func cases() []row {
 		{`<a href="mailto:x@evil.example">`, rs("scheme")},
 		{`<p>data:x</p>`, rs("data-url")},
 		{`<a href="tel:1">`, rs("scheme")}, {`<a href="sms:1">`, rs("scheme")},
+		// A scheme after ";", "," or white space inside a value.
+		{`<meta http-equiv=refresh content="0;mailto:x@evil.example">`, rs("http-equiv", "scheme")},
+		{`<meta content="0;mailto:x@evil.example">`, rs("scheme")},
+		{`<meta content="0,tel:1">`, rs("scheme")},
+		{`<meta content="0 sms:1">`, rs("scheme")},
+		{`<meta content="0;ms-settings:x">`, rs("scheme")},
+		{`<svg><animate attributeName="href" values="/a;mailto:x@evil.example"/></svg>`, rs("scheme")},
+		{`<a href=" mailto:x">`, rs("scheme")},
+		{`<a href=x;tel:1>`, rs("scheme")},
+		{`<p/style="x">`, rs("style-attr")},
 		{`<p>see (see: x)</p>`, rs("scheme")},
 		{`<p>caf&#` + `37;41</p>`, rs("percent-escape")},
 		// Style attribute, prefixed tags and DOCTYPE.
@@ -326,14 +367,18 @@ func cases() []row {
 		{`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY c ":">]><svg xmlns="http://www.w3.org/2000/svg">` +
 			`<a href="https&c;//evil.example/x.png">x</a></svg>`, rs("doctype", "absolute-url")},
 		{`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY j "javas">]><svg><a href="&j;cript:x()">x</a></svg>`,
-			rs("doctype")},
+			rs("doctype", "scheme")},
 		{`<!ATTLIST a b CDATA "c">`, rs("doctype")},
 		{`<!DOCTYPE svg>`, rs("doctype")},
 		// A line feed or a tab before an event attribute.
 		{"<img src=x\nonerror=y>", rs("on-attr")}, {"<img src=x\tonerror=y>", rs("on-attr")},
 	} {
+		pageRules := withRendered(f.rules)
+		if o, ok := pageOnly[f.text]; ok {
+			pageRules = o
+		}
 		rows = append(rows,
-			row{"page " + f.text, pageWith(f.text), at(pagePath, f.rules...)},
+			row{"page " + f.text, pageWith(f.text), at(pagePath, pageRules...)},
 			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
 	}
 	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
@@ -356,6 +401,15 @@ func routesOf(path string) string {
 // marker outside markup and tree entries of the wrong type.
 func extraRows() []row {
 	z := "vhosts/" + host + "/"
+	// A trap text and a template that give a bad page only together. The
+	// trap text has its own findings. The page findings have "(rendered)".
+	both2 := func(name, trap, tmpl string, want ...string) row {
+		return row{name, both(instr(trap), put(pagePath, tmpl)), want}
+	}
+	hidden := func(el string, extra ...string) row {
+		return row{"marker inside " + el, put(pagePath, "<"+el+">"+marker+"</"+el+`><p>{{index .Trap "t1"}}</p>`),
+			at(pagePath, append([]string{"marker"}, extra...)...)}
+	}
 	hostPath := func(p string) row {
 		return row{"host-like path " + p, both(put(routes, routesOf(p)), instr(marker+": request "+p+"/{{.Token}} now")),
 			append(at(routes, "path-host-form"), at(trapsFile, "path-host-form")...)}
@@ -382,7 +436,7 @@ func extraRows() []row {
 		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker), at(pagePath, "marker")},
+		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker), at(pagePath, "marker", "render")},
 		{"marker in an attribute", put(pagePath, `<p title="`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"manifest as a directory", func(m fstest.MapFS) {
 			delete(m, "manifest.json")
@@ -393,7 +447,72 @@ func extraRows() []row {
 			delete(m, routes)
 			m["vhosts"] = &fstest.MapFile{Data: []byte("x")}
 		}, append(at("vhosts", "tree-top"), at(trapsFile, "instr-path")...)},
-		{"token name that is not the token", instr(marker + ": request /ref/cb {{.Tok}}"), at(trapsFile, "instr-token")},
+		// Rendered page. The trap text and the template are fine alone.
+		// Row (a) shows "absolute-url(rendered)" and "scheme(rendered)": the
+		// token and the text after the action join "https:" and a host.
+		both2("rendered: srcset joins a trap that ends in a scheme",
+			marker+": request /ref/cb/{{.Token}} to confirm, https:",
+			`<p>`+marker+`</p><img alt="x" srcset="{{index .Trap "t1"}}evil.example/x.png 2x">`,
+			append(at(trapsFile, "instr-host-form"), at(pagePath, "absolute-url(rendered)", "scheme(rendered)")...)...),
+		// Row (b) shows "script(javascript:)(rendered)" and "scheme(rendered)"
+		// from a trap text that is not a path.
+		both2("rendered: href joins a prefix and a trap text", "script: void '"+marker+"' {{.Token}}",
+			`<p>`+marker+`</p><a href="java{{index .Trap "t1"}}">x</a>`,
+			at(pagePath, "script(javascript:)(rendered)", "scheme(rendered)")...),
+		both2("rendered: text joins a trap that ends in a scheme",
+			marker+": request /ref/cb/{{.Token}} to confirm https:",
+			`<p>`+marker+` {{index .Trap "t1"}}evil.example/collect</p>`,
+			append(at(trapsFile, "instr-host-form"), at(pagePath, "absolute-url(rendered)")...)...),
+		// Row (d): only the rendered rule fires. The trap text ends in "java".
+		both2("rendered: only the rendered rule fires", marker+": request /ref/cb/{{.Token}} to confirm java",
+			`<p>`+marker+`</p>{{index .Trap "t1"}}script:x`, at(pagePath, "script(javascript:)(rendered)")...),
+		// Trap text alphabet.
+		{"character references for a URL", instr(baseInstr + " &sol;&sol;evil&period;example&sol;x"),
+			at(trapsFile, "instr-chars")},
+		{"escape for a slash", instr(baseInstr + " \\u002f\\u002fevil"),
+			append(at(trapsFile, "instr-chars"), at(pagePath, "backslash(rendered)")...)},
+		{"equal sign in a trap", instr(baseInstr + " x=y"), at(trapsFile, "instr-chars")},
+		{"hash sign in a trap", instr(baseInstr + " #x"), at(trapsFile, "instr-chars")},
+		{"angle bracket in a trap", instr(baseInstr + " a<b"), at(trapsFile, "instr-chars")},
+		{"trap text that ends in a scheme", instr(baseInstr + " https:"),
+			append(at(trapsFile, "instr-host-form"), at(pagePath, "absolute-url(rendered)")...)},
+		{"all allowed characters", instr(baseInstr + " Ab9 .,;: !?'()_-"), nil},
+		// Pass rows for the scheme rule.
+		{"colon in text", pageWith("<p>Note: x</p>"), nil},
+		{"two class names", pageWith(`<p class="a b">x</p>`), nil},
+		// Marker in the text that stays. The first row shows a quoted ">".
+		{"marker in a quoted attribute with a closing bracket",
+			put(pagePath, `<p title="a>`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		hidden("style"), hidden("template"), hidden("title"), hidden("textarea"), hidden("noscript"),
+		hidden("script", "script(<script)", "script(<script)(rendered)"),
+		// Deny on all separators.
+		{"api..key", instr(baseInstr + " api..key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"system..prompt", instr(baseInstr + " system..prompt"),
+			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)")},
+		{"private..key", instr(baseInstr + " private..key"),
+			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)")},
+		{"pass..word", instr(baseInstr + " pass..word"), at(trapsFile, "instr-deny(pass word)")},
+		{"e..mail", instr(baseInstr + " e..mail"), at(trapsFile, "instr-deny(e mail)")},
+		{"over..ride", instr(baseInstr + " instruction over..ride"), at(trapsFile, "instr-deny(instruction+override)")},
+		{"api. key", instr(baseInstr + " the api. key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"dot env with a space", instr(baseInstr + " the . env file"), at(trapsFile, "instr-deny(.env)")},
+		// A first path segment in hex.
+		{"hex first segment", both(put(routes, routesOf("/0x7f000001")),
+			instr(marker+": request /0x7f000001/{{.Token}} now")),
+			append(at(routes, "path-host-form"), at(trapsFile, "path-host-form")...)},
+		{"token name that is not the token", instr(marker + ": request /ref/cb {{.Tok}}"), at(trapsFile, "instr-token", "instr-chars")},
+	}
+}
+
+// failFS is a tree that cannot list a directory.
+type failFS struct{ fstest.MapFS }
+
+func (failFS) ReadDir(string) ([]fs.DirEntry, error) { return nil, errors.New("no list") }
+
+func TestTS36WalkErrorIsAFinding(t *testing.T) {
+	got := checkTree(failFS{fstest.MapFS{"manifest.json": {}}})
+	if len(got) != 1 || !strings.HasPrefix(got[0], "walk ") {
+		t.Errorf("findings %q, want one walk finding", got)
 	}
 }
 
