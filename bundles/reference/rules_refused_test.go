@@ -189,8 +189,8 @@ func cases() []row {
 		rows = append(rows, row{"deny " + w, instr(baseInstr + " " + strings.ToUpper(w)), at(trapsFile, "instr-deny("+w+")")})
 	}
 	// Script and URL rules apply to a template and to an asset.
-	// The URL forms are read as a browser reads them: with a character
-	// reference, a tab, a LF or a backslash in the URL.
+	// A browser reads some forms as a URL. They have a character reference,
+	// a tab, a LF or a backslash.
 	both3 := []string{"third-party", "absolute-url"}
 	for _, f := range []struct {
 		text  string
