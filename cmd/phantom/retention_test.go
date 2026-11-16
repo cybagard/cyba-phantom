@@ -61,7 +61,7 @@ func countOf(t *testing.T, db *sql.DB, q string, args ...any) (n int) {
 // cap. In the second, the cap is 0, and the real store is open. serve must end
 // with exit 1 and one fixed line. The schedule must not run, not even the run
 // at the start, which would write the mark. A refusal that is only logged
-// leaves the sensor running with the cap off (T-U-27, SEC-41).
+// leaves the sensor running with the cap off (T-U-27, SEC-40).
 func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -102,7 +102,7 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 			// The refusal must free the ports and the store, as a stop does.
 			for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
 				// A listener that is still open waits for a client. The
-				// deadline ends the wait. It gives a timeout, not a closed one.
+				// deadline ends the wait with a timeout error, not ErrClosed.
 				ln.Listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
 					t.Errorf("%s listener after the refusal: Accept gave %v, want a closed listener", name, err)
