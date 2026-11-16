@@ -101,8 +101,8 @@ func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
 			}
 			// The refusal must free the ports and the store, as a stop does.
 			for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
-				// A listener that is still open waits for a client. The deadline
-				// ends the wait. It gives a timeout error, not a closed one.
+				// A listener that is still open waits for a client. The
+				// deadline ends the wait. It gives a timeout, not a closed one.
 				ln.Listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
 				if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
 					t.Errorf("%s listener after the refusal: Accept gave %v, want a closed listener", name, err)
