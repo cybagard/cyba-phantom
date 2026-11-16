@@ -348,7 +348,7 @@ const (
 	ty       = `"type":"text/html; charset=utf-8"`
 	ti       = `"template":"` + hostDir + `index.tmpl"`
 	png      = `"asset":"` + hostDir + `a.png"`
-	slotJSON = `{"name":"X-A","trap":"t"}`
+	slotJSON = `{"name":"X-Note","trap":"t"}`
 )
 
 // rt gives a route map with these routes, in JSON.
@@ -426,10 +426,10 @@ func TestTU08RouteMapRefused(t *testing.T) {
 		more(`,"routes":[`+route+`]`), more(`,"x":1`), `{"Routes":[`+route+`]}`, doc(`"Path":"/a"`, ti, ty),
 		ok+"x", ok+ok, `{}`, `{"routes":[]}`, manyRoutes(257), more(`,"not_found":null`))
 	refuse(t, `{"routes":null}`, doc(pa, ti, ty, `"headers":null`), doc(pa, `"template":null`, png, ty),
-		doc(pa, ti, ty, `"headers":[{"name":null,"trap":"t"}]`), doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":null}]`),
+		doc(pa, ti, ty, `"headers":[{"name":null,"trap":"t"}]`), doc(pa, ti, ty, `"headers":[{"name":"X-Note","trap":null}]`),
 		doc(`"path":null`, ti, ty))
 	refuse(t, doc(pa, `"path":"/b"`, ti, ty), doc(pa, ti, ty, `"x":1`), doc(pa, ti, `"Type":"text/html; charset=utf-8"`),
-		doc(pa, ti, ty, `"headers":[{"name":"X-A","name":"X-B","trap":"t"}]`), rt("null"),
+		doc(pa, ti, ty, `"headers":[{"name":"X-Note","name":"X-Runtime","trap":"t"}]`), rt("null"),
 		doc(pa, ti, ty, `"headers":[null]`))
 	for _, p := range []string{"", "a", "/a b", "/:", "/a%41", "/a?x", "//x", "/a/", "/a//b", "/./a", "/a/..", "/" + strings.Repeat("a", 256)} {
 		refuse(t, doc(`"path":"`+p+`"`, ti, ty))
@@ -443,9 +443,9 @@ func TestTU08RouteMapRefused(t *testing.T) {
 		refuse(t, doc(pa, target, ty))
 	}
 	refuse(t, doc(pa, ty), doc(pa, ti), doc(pa, ti, `"type":"text/xml"`), doc(pa, ti, `"type":"Application/JSON"`), doc(ti, ty))
-	for _, slots := range []string{"", strings.Join([]string{slotJSON, `{"name":"X-B","trap":"t"}`, `{"name":"X-C","trap":"t"}`,
-		`{"name":"X-D","trap":"t"}`, `{"name":"X-E","trap":"t"}`}, ","), `{"name":"X-A","trap":"t","x":1}`,
-		`{"trap":"t"}`, `{"name":"X-A"}`, `{"name":1,"trap":"t"}`} {
+	for _, slots := range []string{"", strings.Join([]string{slotJSON, `{"name":"X-Powered-By","trap":"t"}`, `{"name":"X-Generator","trap":"t"}`,
+		`{"name":"X-Request-Id","trap":"t"}`, `{"name":"X-Runtime","trap":"t"}`}, ","), `{"name":"X-Note","trap":"t","x":1}`,
+		`{"trap":"t"}`, `{"name":"X-Note"}`, `{"name":1,"trap":"t"}`} {
 		refuse(t, doc(pa, ti, ty, `"headers":[`+slots+`]`))
 	}
 	for _, nf := range []string{hostDir + "a.png", otherDir + "o.tmpl", hostDir + "none.tmpl"} {
@@ -503,7 +503,7 @@ func TestTU08RouteForms(t *testing.T) {
 // T-U-08: the size and count limits hold exactly.
 func TestTU08RouteLimits(t *testing.T) {
 	slots := func(n int) string {
-		return doc(pa, ti, ty, slotsOf([]string{"X-A", "X-B", "X-C", "X-D"}[:n]...))
+		return doc(pa, ti, ty, slotsOf([]string{"X-Note", "X-Powered-By", "X-Generator", "X-Request-Id"}[:n]...))
 	}
 	for _, text := range []string{spaced(doc(pa, ti, ty), 65536), manyRoutes(256), slots(1), slots(4),
 		doc(`"path":"/`+strings.Repeat("a", 255)+`"`, ti, ty), doc(`"path":"/"`, ti, ty)} {
@@ -544,10 +544,11 @@ func TestTU08RouteMapAccepted(t *testing.T) {
 		rs = append(rs, fmt.Sprintf(`{"path":%q,"type":%q,%q:%q}`, r.Path, typ, kind, name))
 		want.Routes = append(want.Routes, r)
 	}
-	four := []HeaderSlot{{"X-A", "t1"}, {"X-B", "t2"}, {"X-C", "t3"}, {"X-D", "t4"}}
-	rs = append(rs, `{"path":"/","asset":"`+hostDir+`UP.TMPL","type":"image/png","headers":[{"name":"X-A","trap":"t1"}]}`,
+	four := []HeaderSlot{{"X-Note", "t1"}, {"X-Powered-By", "t2"}, {"X-Generator", "t3"}, {"X-Request-Id", "t4"}}
+	rs = append(rs, `{"path":"/","asset":"`+hostDir+`UP.TMPL","type":"image/png","headers":[{"name":"X-Note","trap":"t1"}]}`,
 		`{"path":"/.well-known/x","asset":"`+hostDir+`a.png","type":"image/png","headers":[`+
-			`{"name":"X-A","trap":"t1"},{"name":"X-B","trap":"t2"},{"name":"X-C","trap":"t3"},{"name":"X-D","trap":"t4"}]}`)
+			`{"name":"X-Note","trap":"t1"},{"name":"X-Powered-By","trap":"t2"},`+
+			`{"name":"X-Generator","trap":"t3"},{"name":"X-Request-Id","trap":"t4"}]}`)
 	want.Routes = append(want.Routes,
 		Route{Path: "/", Asset: hostDir + "UP.TMPL", Type: "image/png", Headers: four[:1]},
 		Route{Path: "/.well-known/x", Asset: hostDir + "a.png", Type: "image/png", Headers: four})

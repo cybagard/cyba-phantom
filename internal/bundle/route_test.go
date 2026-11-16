@@ -3,6 +3,7 @@ package bundle
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,30 +100,72 @@ func TestTU08HeaderSlotNamesRefused(t *testing.T) {
 	}
 }
 
-// T-U-08: names that are near a reserved name load.
-func TestTU08HeaderSlotNamesNearReserved(t *testing.T) {
+// T-U-08: a name that is off the list gives content_invalid. This holds for a
+// name near a listed or reserved name. It holds for a Cyrillic letter. It holds
+// for the long s, which folds to s in Unicode.
+func TestTU08HeaderSlotNamesOffList(t *testing.T) {
 	for _, n := range []string{
+		"X-A", "X-Notes", "X-Note-", "X-Content-Type-Options", "X-Sendfile", "X-Accel-Redirect",
+		"X-LiteSpeed-Location", "X-Proxy-Redirect",
+		"X-NoteX", "XNote", "X_Note", "X-Not", "X-Request-ID2", "-X-Note", "Note", " X-Note", "X-Note ",
+		"X-N\u043ete", "X-Not\u0435", "X-Reque\u017ft-Id", "X-Serve\u017f-By",
 		"X-Accel", "X-Accelerate", "X-Forwarded", "X-ForwardedFor", "X-Frame-Options2",
 		"X-Content-Type-Option", "X-Content-Type-Options2", "X-XSS-Protection2", "X-Sendfil", "X-Acce-l",
 		"X-Lighttpd", "X-Reproxy", "X-Lighttpdx", "X-Reproxyx", "X-Real-IP", "X-Original-URL", "X-Rewrite-URL",
 	} {
-		t.Run(n, func(t *testing.T) { loadRaw(t, nil, nil, site(doc(pa, ti, ty, slotsOf(n)))...) })
+		refuse(t, doc(pa, ti, ty, slotsOf(n)))
 	}
+}
+
+// listed are the 6 names of the list, spelled out so that a change of
+// slotNames shows in the tests.
+var listed = []string{"X-Note", "X-Powered-By", "X-Generator", "X-Request-Id", "X-Runtime", "X-Served-By"}
+
+// T-U-08: each of the 6 listed names loads, in each ASCII case that the test
+// tries. A slot keeps the name as the bundle spells it.
+func TestTU08HeaderSlotNamesListed(t *testing.T) {
+	if !slices.Equal(slotNames, listed) {
+		t.Fatalf("slotNames %q, want %q", slotNames, listed)
+	}
+	for _, n := range listed {
+		for _, v := range []string{n, strings.ToLower(n), strings.ToUpper(n), strings.ToUpper(n[:3]) + strings.ToLower(n[3:])} {
+			t.Run(v, func(t *testing.T) {
+				b := loadRaw(t, nil, nil, site(doc(pa, ti, ty, slotsOf(v)))...)
+				rm, _ := b.Routes("h.example")
+				if got := rm.Routes[0].Headers; len(got) != 1 || got[0] != (HeaderSlot{v, "t"}) {
+					t.Errorf("headers %+v, want one slot %q", got, v)
+				}
+			})
+		}
+	}
+}
+
+// T-U-08: a route has 1 to 4 header slots. 5 slots with 5 listed names give
+// content_invalid. 4 slots with 4 listed names load.
+func TestTU08HeaderSlotCount(t *testing.T) {
+	refuse(t, doc(pa, ti, ty, slotsOf(listed[:5]...)), doc(pa, ti, ty, slotsOf(listed...)),
+		doc(pa, ti, ty, `"headers":[]`))
+	for n := 1; n <= 4; n++ {
+		loadRaw(t, nil, nil, site(doc(pa, ti, ty, slotsOf(listed[:n]...)))...)
+	}
+	loadRaw(t, nil, nil, site(doc(pa, ti, ty, slotsOf(listed[2:]...)))...)
 }
 
 // T-U-08: two header slots of one route with names that are equal in ASCII case
 // give content_invalid. The same name in two routes loads.
 func TestTU08HeaderSlotDuplicates(t *testing.T) {
 	for _, names := range [][]string{
-		{"X-A", "X-a"}, {"X-A", "x-a"}, {"X-A", "X-A"}, {"X-a-b", "X-A-B"}, {"X-A", "X-B", "X-C", "X-a"},
-		{"X-A", "X-B", "X-b"}, {"X-A", "X-B", "X-C", "X-D", "X-A"},
+		{"X-Note", "X-NOTE"}, {"X-Note", "x-note"}, {"X-Note", "X-Note"}, {"X-Powered-By", "x-POWERED-by"},
+		{"X-Note", "X-Runtime", "X-Generator", "x-note"}, {"X-Note", "X-Runtime", "x-runtime"},
+		{"X-Note", "X-Runtime", "X-Generator", "X-Served-By", "X-Note"},
 	} {
 		refuse(t, doc(pa, ti, ty, slotsOf(names...)))
 	}
-	other := fmt.Sprintf(`{"path":"/b",%s,%s,%s}`, ti, ty, slotsOf("X-A"))
+	other := fmt.Sprintf(`{"path":"/b",%s,%s,%s}`, ti, ty, slotsOf("X-Note"))
 	for _, text := range []string{
-		doc(pa, ti, ty, slotsOf("X-A", "X-B")), doc(pa, ti, ty, slotsOf("X-A", "X-B", "X-C", "X-D")),
-		rt(`{`+pa+`,`+ti+`,`+ty+`,`+slotsOf("X-A")+`}`, other),
+		doc(pa, ti, ty, slotsOf("X-Note", "X-Runtime")),
+		doc(pa, ti, ty, slotsOf("X-Note", "X-Runtime", "X-Generator", "X-Served-By")),
+		rt(`{`+pa+`,`+ti+`,`+ty+`,`+slotsOf("X-Note")+`}`, other),
 	} {
 		loadRaw(t, nil, nil, site(text)...)
 	}
@@ -198,13 +241,19 @@ func TestTU25CallbackParamForm(t *testing.T) {
 	}
 }
 
-// T-U-25: the header position has the rules of a header slot name.
+// T-U-25: the header position keeps the old name rule. A name off the list of
+// header slot names loads. The refused names and starts stay refused, in each
+// ASCII case.
 func TestTU25CallbackHeaderName(t *testing.T) {
-	for _, n := range []string{"X-A", "X-Accel", "X-Forwarded", "X-Lighttpd", "X-Reproxy", "X-" + strings.Repeat("a", 32)} {
+	for _, n := range []string{"X-A", "X-Request-Token", "X-REQUEST-TOKEN", "X-Accel", "X-Forwarded", "X-Lighttpd", "X-Reproxy",
+		"X-" + strings.Repeat("a", 32), "X-Note"} {
 		loads(t, cbDoc(`{"header":"`+n+`"}`))
 	}
 	for _, n := range []string{"X-", "A", "Y-A", "X-Frame-Options", "x-frame-options", "X-Accel-A", "X-Forwarded-For", "X-a b", "X-" + strings.Repeat("a", 33),
-		"X-Sendfile", "X-Sendfile2", "x-lighttpd-a", "X-Lighttpd-", "X-Reproxy-URL", "x-reproxy-", "X-SENDFILE2", "X-LIGHTTPD-a", "X-reproxy-url"} {
+		"X-Content-Type-Options", "x-content-type-options", "X-CONTENT-TYPE-OPTIONS", "X-XSS-Protection", "X-xss-protection",
+		"X-Sendfile", "X-Sendfile2", "x-lighttpd-a", "X-Lighttpd-", "X-Reproxy-URL", "x-reproxy-", "X-SENDFILE2", "X-LIGHTTPD-a", "X-reproxy-url",
+		"X-Accel-Redirect", "x-accel-redirect", "X-ACCEL-REDIRECT", "x-forwarded-for", "X-FORWARDED-FOR", "X-Forwarded-Host",
+		"x-sendfile", "X-SENDFILE", "X-Sendfile-Type", "X-REPROXY-URL", "X-Lighttpd-Send-File", "x-lighttpd-send-file"} {
 		refuse(t, cbDoc(`{"header":"`+n+`"}`))
 	}
 }
@@ -214,7 +263,7 @@ func TestTU25CallbackHeaderName(t *testing.T) {
 func TestTU25CallbackRouteForm(t *testing.T) {
 	cb := `{"query":"q"}`
 	refuse(t,
-		cbDoc(cb, ti, ty), cbDoc(cb, ti), cbDoc(cb, png, ty, slotsOf("X-A")), cbDoc(cb, slotsOf("X-A")),
+		cbDoc(cb, ti, ty), cbDoc(cb, ti), cbDoc(cb, png, ty, slotsOf("X-Note")), cbDoc(cb, slotsOf("X-Note")),
 		cbDoc(cb, ty), cbDoc(cb, png), cbDoc(cb, `"asset":"`+hostDir+`none.png"`, ty),
 		cbDoc(cb, png, `"type":"text/x"`), cbDoc(cb, `"asset":"`+hostDir+`index.tmpl"`, ty),
 		cbDoc(cb, `"type":"image/png"`), cbDoc(cb, `"template":null`),
