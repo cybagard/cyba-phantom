@@ -85,9 +85,9 @@ func (r *result) add(rule, name string) {
 }
 
 // vhost is what a trap check needs of one vhost directory. A trap is global
-// to the bundle. A vhost uses it in a header slot of its route map, or with
-// an exact action form in a template. "The same vhost" of a trap is each
-// vhost that uses it. A trap that no vhost uses has no valid path.
+// to the bundle. A vhost uses it in a header slot of its route map. It can
+// also use it with an exact action form in a template. "The same vhost" of a
+// trap is each vhost that uses it. A trap that no vhost uses has no path.
 type vhost struct {
 	callbacks, segments []string
 	traps               map[string]bool
@@ -241,9 +241,9 @@ func (r *result) text(name string, b []byte) {
 	}
 }
 
-// page checks a file below a vhost: the script and URL rules, and for a
-// template the marker and the action forms. The tag and on-attribute rules
-// run on the raw text and on the normal form.
+// page checks a file below a vhost with the script and URL rules. For a
+// template it also checks the marker and the action forms. The tag and
+// on-attribute rules run on the raw text and on the normal form.
 func (r *result) page(name string, b []byte, v *vhost) {
 	raw := string(b)
 	n := normalForm(raw)
