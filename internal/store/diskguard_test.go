@@ -154,8 +154,8 @@ func TestTI16_PausedShutdownCountsWriteFailureStopsTheWriter(t *testing.T) {
 	if _, err := r.marker(); err != nil {
 		t.Fatalf("no stop marker: %v", err)
 	}
-	if r.w.Healthy() || r.rows() != 0 || r.app.tries != 0 || len(r.ipCounters()) != 0 {
-		t.Fatalf("healthy %v, %d rows, %d appends, ip_counter %q", r.w.Healthy(), r.rows(), r.app.tries, r.ipCounters())
+	if r.w.Healthy() || !r.w.Paused() || r.rows() != 0 || r.app.tries != 0 || len(r.ipCounters()) != 0 {
+		t.Fatalf("healthy %v, paused %v, %d rows, %d appends, ip_counter %q", r.w.Healthy(), r.w.Paused(), r.rows(), r.app.tries, r.ipCounters())
 	}
 }
 
