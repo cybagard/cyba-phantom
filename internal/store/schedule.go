@@ -383,7 +383,8 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // capped cutoff: see eventTime. It also caps the cutoff in each chunk at the
 // day that the day step works on next. These three deletes come before the
 // field clear, for the same reason as the raw delete. The clear does not write
-// rows that the event delete removes. The mark step is last, so a run that
+// rows that the event delete removes. The clear ends its window at the tPriv
+// cutoff and writes its mark from tDel. The mark step is last, so a run that
 // ends early writes no mark.
 func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
@@ -395,7 +396,7 @@ func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep 
 		newEventExpireStep(eventTime(tDel, raw, events), events),
 		newTokenExpireStep(tDel, events),
 		newSessionExpireStep(tDel, events),
-		newFieldClearStep(tPriv, raw),
+		newFieldClearStep(tPriv, tDel, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),
 	}

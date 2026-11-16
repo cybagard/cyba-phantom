@@ -1027,3 +1027,39 @@ func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
 		t.Fatalf("%d events left, want 1 with no done mark", r.events())
 	}
 }
+
+// T-U-27: one run has the wall clock 40 d ahead, and the later runs have the
+// right clock. The visitor writes a callback row 1 d after the first run. The
+// row has no field after the next run, at each age from 31 d. The field clear
+// does not keep a mark that is ahead of the true time.
+func TestTU27FieldClearAfterOneRunWithTheWallClockAhead(t *testing.T) {
+	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
+		t.Run(age.String(), func(t *testing.T) {
+			r, s, f := prodRig(t, 40*oneDay, nil)
+			s.runOnce(context.Background())
+			f.jump(-40 * oneDay)
+			f.advance(oneDay)
+			addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+			f.advance(age)
+			s.runOnce(context.Background())
+			if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+				t.Fatalf("%d rows keep a field at the age %v", n, age)
+			}
+		})
+	}
+}
+
+// T-U-27: the wall clock is 40 d behind for two runs. A callback row that the
+// visitor writes between them has a ts of about 40 d before the true time. It
+// has no field after the second run.
+func TestTU27FieldClearAfterRunsWithTheWallClockBehind(t *testing.T) {
+	r, s, f := prodRig(t, -40*oneDay, nil)
+	s.runOnce(context.Background())
+	f.advance(time.Hour)
+	addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+	f.advance(time.Hour)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+		t.Fatalf("%d rows keep a field after the second run", n)
+	}
+}
