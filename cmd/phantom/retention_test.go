@@ -139,6 +139,7 @@ func TestTI13_StartedSensorKeepsTheCap(t *testing.T) {
 		})
 	}
 	var live atomic.Pointer[sql.DB]
+	began := time.Now()
 	s := startBait(t, baitOpt{bundle: true, maxBytes: capBytes, seed: seed, store: live.Store})
 	size := func() int64 {
 		var n int64
@@ -149,7 +150,7 @@ func TestTI13_StartedSensorKeepsTheCap(t *testing.T) {
 		}
 		return n
 	}
-	until(t, "retention event", func() bool {
+	untilRun(t, "retention event", began, func() bool {
 		db := live.Load()
 		return db != nil && countOf(t, db, "SELECT count(*) FROM event WHERE kind = 'retention'") == 1
 	})
@@ -203,6 +204,27 @@ func TestTI13_StartedSensorKeepsTheCap(t *testing.T) {
 	if n := size(); n > capBytes {
 		t.Errorf("size %d after the stop, cap %d", n, capBytes)
 	}
+}
+
+// untilRun waits until cond is true, the end of the retention run. The run
+// writes its mark or event at its end. It fails the test if the run takes
+// longer than the bound. The bound is not netWait. netWait is for one network
+// step. The run rolls up thousands of rows and runs every step. With -race and
+// coverage on a slow runner it takes more than netWait. So the bound comes from
+// the test: its deadline, less a margin for the stop and the checks. With no
+// deadline, it is 2 minutes. The test logs the time since start.
+func untilRun(t *testing.T, what string, start time.Time, cond func() bool) {
+	t.Helper()
+	bound := 2 * time.Minute
+	if d, ok := t.Deadline(); ok {
+		bound = time.Until(d) - 30*time.Second
+	}
+	for limit := time.Now().Add(bound); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(limit) {
+			t.Fatalf("no %s after %v", what, bound)
+		}
+	}
+	t.Logf("the run took %v (%s)", time.Since(start).Round(time.Millisecond), what)
 }
 
 // hostileHosts returns n distinct Host values. First come the forms of T-S-35.
@@ -291,8 +313,9 @@ func TestTS35_HostValuesThroughTheStartedSensor(t *testing.T) {
 		mustExec(t, db, "DELETE FROM meta WHERE key = 'retention_last'")
 	})
 	var live atomic.Pointer[sql.DB]
+	began := time.Now()
 	s2 := startBait(t, baitOpt{root: s.p.Root, store: live.Store})
-	until(t, "mark of the run", func() bool {
+	untilRun(t, "mark of the run", began, func() bool {
 		db := live.Load()
 		return db != nil && countOf(t, db, "SELECT count(*) FROM meta WHERE key = 'retention_last'") == 1
 	})
