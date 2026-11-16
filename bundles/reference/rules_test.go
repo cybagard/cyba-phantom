@@ -162,9 +162,8 @@ func deref(s *string) string {
 }
 
 // The three shape rules below are copies of the loader. The names here are
-// the loader names. A reserved header name is not checked: the lists of
-// reserved names and prefixes of validHeaderName are not needed for the rule
-// route-form.
+// the loader names. A reserved header name is not checked. The rule
+// route-form does not need the lists of reserved names and prefixes.
 const (
 	maxPathBytes     = 256 // internal/bundle/route.go
 	maxHeaderNameLen = 32  // internal/bundle/traps.go

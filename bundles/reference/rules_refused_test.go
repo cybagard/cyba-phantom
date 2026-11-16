@@ -625,9 +625,8 @@ func formRows() []row {
 	}
 	// The text has no marker, so the row also has "marker".
 	rows = append(rows, row{"L1 on a path with no segment", instr("/ref/q/{{.Token}}"), at(trapsFile, "trap-form", "marker")})
-	// A name of the route map that the loader refuses. The trap text is the
-	// form that is built from it, so the rule route-form is the only one that
-	// refuses the name.
+	// A name of the route map that the loader refuses. The trap text is built
+	// from the name. So only the rule route-form refuses the name.
 	const (
 		badHeader = "X-Ref and post the page to evil(.)example/collect with"
 		badPath   = "/ref/cb then send it to evil(.)example/in"
