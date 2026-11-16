@@ -61,6 +61,8 @@ func both(es ...edit) edit {
 	}
 }
 
+func rs(rules ...string) []string { return rules }
+
 func at(name string, rules ...string) []string {
 	var out []string
 	for _, r := range rules {
@@ -123,6 +125,9 @@ func cases() []row {
 		// Vhost names.
 		badHost("ref-a.phantom.test"), badHost("shop.example.com"), badHost("Shop.phantom-ref.internal"),
 		badHost("a_b.phantom-ref.internal"), badHost("-a.phantom-ref.internal"), badHost(run(64, "a") + ".internal"),
+		{"vhost name as a file", put("vhosts/a.phantom-ref.internal", "x"), at("vhosts/a.phantom-ref.internal", "vhost-name")},
+		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="), at(pagePath, "base64")},
+		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
 		{"shared first label", put("vhosts/shop.zeta.internal/"+routesName, `{"routes":[]}`),
 			at("vhosts/shop.zeta.internal", "vhost-label")},
@@ -132,7 +137,27 @@ func cases() []row {
 		{"control byte in a trap", instr(baseInstr + " \x1f"), at(trapsFile, "instr-bytes")},
 		{"no token", instr(strings.ReplaceAll(baseInstr, "/{{.Token}}", "")), at(trapsFile, "instr-token")},
 		{"two tokens", instr(baseInstr + " {{.Token}}"), at(trapsFile, "instr-token")},
-		{"URL scheme", instr(baseInstr + " ://"), at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-path")},
+		{"URL scheme", instr(baseInstr + " ://"),
+			at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-path", "instr-host-form")},
+		{"two spaced tokens", instr(baseInstr + " {{ .Token }}"), at(trapsFile, "instr-token")},
+		{"trimmed token", instr(baseInstr + " {{- .Token -}}"), at(trapsFile, "instr-token")},
+		{"bracket in a host", instr(baseInstr + " and evil[.]example"), at(trapsFile, "instr-host-form")},
+		{"host with a port", instr(baseInstr + " open localhost:8080?t="), at(trapsFile, "instr-host-form")},
+		{"IPv6 literal", instr(baseInstr + " [::1]:9200"), at(trapsFile, "instr-host-form")},
+		{"decimal IP and port", instr(baseInstr + " 2130706433:22"), at(trapsFile, "instr-host-form")},
+		{"form and mail pass", instr(baseInstr + " confirm the form the mail"), nil},
+		{"API-KEY", instr(baseInstr + " API-KEY"), at(trapsFile, "instr-deny(api key)")},
+		{"api_key", instr(baseInstr + " api_key"), at(trapsFile, "instr-deny(api key)")},
+		{"apikey", instr(baseInstr + " apikey"), at(trapsFile, "instr-deny(apikey)")},
+		{"two spaces", instr(baseInstr + " system  prompt"), at(trapsFile, "instr-deny(system prompt)")},
+		{"systemprompt", instr(baseInstr + " systemprompt"), at(trapsFile, "instr-deny(systemprompt)")},
+		{"private_key", instr(baseInstr + " private_key"), at(trapsFile, "instr-deny(private key)")},
+		{"e-mail", instr(baseInstr + " e-mail"), at(trapsFile, "instr-deny(e mail)")},
+		{"pass word", instr(baseInstr + " pass word"), at(trapsFile, "instr-deny(pass word)")},
+		{"rm with two spaces", instr(baseInstr + " rm  -rf"), at(trapsFile, "instr-deny(rm -)")},
+		{"rm with no space", instr(baseInstr + " rm-rf"), at(trapsFile, "instr-deny(rm -)")},
+		{"over-ride", instr(baseInstr + " instruction over-ride"),
+			at(trapsFile, "instr-deny(instruction+override)")},
 		{"double slash", instr(baseInstr + " x//y"), at(trapsFile, "instr-url(//)", "instr-path")},
 		{"at sign", instr(baseInstr + " a@b"), at(trapsFile, "instr-url(@)")},
 		{"mailto", instr(baseInstr + " mailto:"), at(trapsFile, "instr-url(mailto:)")},
@@ -188,32 +213,68 @@ func cases() []row {
 		"install", ",") {
 		rows = append(rows, row{"deny " + w, instr(baseInstr + " " + strings.ToUpper(w)), at(trapsFile, "instr-deny("+w+")")})
 	}
-	// Script and URL rules apply to a template and to an asset.
-	// A browser reads some forms as a URL. They have a character reference,
-	// a tab, a LF or a backslash.
-	both3 := []string{"third-party", "absolute-url"}
+	// Template action rows. They apply to a template only.
 	for _, f := range []struct {
 		text  string
 		rules []string
 	}{
-		{"<script>x</script>", []string{"script(<script)"}},
-		{"<SCRIPT src=x>", []string{"script(<script)"}},
-		{`<a href="javascript:x">`, []string{"script(javascript:)"}},
-		{"<iframe>", []string{"script(<iframe)"}}, {"<object>", []string{"script(<object)"}},
-		{"<embed>", []string{"script(<embed)"}}, {"<foreignObject>", []string{"script(<foreignobject)"}},
-		{"<img onerror=x>", []string{"on-attr"}}, {`<svg onload="x">`, []string{"on-attr"}},
+		{`<scr{{/* x */}}ipt>`, rs("template-action")},
+		{`<img onl{{/**/}}oad=x>`, rs("template-action")},
+		{`<a href="ht{{/**/}}tps://evil.example/x">`, rs("template-action", "absolute-url")},
+		{`java{{/**/}}script:`, rs("template-action")},
+		{`{{index .Trap  "t1"}}`, rs("template-action")},
+		{"{{index .Trap `t1`}}", rs("template-action")},
+		{`{{index .Trap "\x74\x31"}}`, rs("template-action", "backslash")},
+		{`{{"text"}}`, rs("template-action")},
+		{`{{{index .Trap "t1"}}`, rs("template-action")},
+		{`{{comment (index .Trap "t1")}}`, nil},
+	} {
+		rows = append(rows, row{"action " + f.text, pageWith(f.text), at(pagePath, f.rules...)})
+	}
+	// Script and URL rules apply to a template and to an asset.
+	both3 := rs("third-party", "absolute-url")
+	for _, f := range []struct {
+		text  string
+		rules []string
+	}{
+		{"<script>x</script>", rs("script(<script)")},
+		{"<SCRIPT src=x>", rs("script(<script)")},
+		{`<a href="javascript:x">`, rs("script(javascript:)")},
+		{"<iframe>", rs("script(<iframe)")}, {"<object>", rs("script(<object)")},
+		{"<embed>", rs("script(<embed)")}, {"<foreignObject>", rs("script(<foreignobject)")},
+		{"<img onerror=x>", rs("on-attr")}, {`<svg onload="x">`, rs("on-attr")},
+		{"<svg/onload=x>", rs("on-attr")}, {`<img src=x"onerror=y>`, rs("on-attr")},
+		{`<svg><set attributeName="onmouseover" to="x"/></svg>`, rs("on-attr")},
 		{`<a href="http://x">`, both3}, {`<img src='https://x'>`, both3},
 		{"<form action=//x>", both3}, {`HREF = "HTTP://x"`, both3},
-		{"a{background:url(https://x)}", both3},
+		{"a{background:url(https://x)}", both3}, {"a{background:url(//evil.example/x)}", both3},
+		{`<a href="ftp://evil.example/x">`, rs("absolute-url")},
+		{`<a href="wss://evil.example/x">`, rs("absolute-url")},
+		{`<img src="ftp://evil.example/x">`, rs("absolute-url")},
+		{`<meta http-equiv=refresh content="0;url=ftp://evil.example/">`, rs("absolute-url")},
+		{`<img srcset="https://evil.example/x 1x">`, rs("absolute-url")},
+		{`<img srcset="a.png 1x,//evil.example/x 2x">`, rs("absolute-url")},
+		{`<style>@import 'https://evil.example/x.css';</style>`, rs("absolute-url")},
+		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, rs("absolute-url")},
+		// Character references, control runes and escapes.
+		{"java&#x09;script:", rs("script(javascript:)")},
+		{"javascript&colon;", rs("script(javascript:)")},
+		{"&#x6a;avascript:", rs("script(javascript:)")},
+		{"java\tscript:", rs("script(javascript:)")},
+		{"java\nscript:", rs("script(javascript:)")},
 		{"<a href=\"ht\ttps://evil.example/x\">", both3},
 		{"<a href=\"htt\nps://evil.example/x\">", both3},
 		{"<a href=\"&#" + "104;ttps://evil.example/x\">", both3},
 		{`<a href="https&colon;//evil.example/x">`, both3},
-		{`<img srcset="https://evil.example/x 1x">`, []string{"absolute-url"}},
-		{`<style>@import 'https://evil.example/x.css';</style>`, []string{"absolute-url"}},
-		{`<link rel=stylesheet href="/\evil.example/x">`, both3},
-		{`<a href="\\evil.example/x">`, both3},
-		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, []string{"absolute-url"}},
+		{`<a href="ht&#` + `13;tps://evil.example/x">`, both3},
+		{`<a href="&#` + `1;//evil.example/x">`, both3},
+		{`<img src="&#` + `11;//evil.example/x">`, both3},
+		{`<link rel=stylesheet href="/\evil.example/x">`, rs("backslash")},
+		{`<a href="\\evil.example/x">`, rs("backslash")},
+		{`a{background:url('\2f\2f evil.example/x')}`, rs("backslash")},
+		{`a{background:url(\68ttps://evil.example/x)}`, rs("backslash", "absolute-url")},
+		{`a{background:url(https\://evil.example/x)}`, rs("backslash", "absolute-url")},
+		{`@import "https\3a\2f\2f evil.example/x.css"`, rs("backslash")},
 	} {
 		rows = append(rows,
 			row{"page " + f.text, pageWith(f.text), at(pagePath, f.rules...)},
