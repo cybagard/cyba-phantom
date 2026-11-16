@@ -154,6 +154,51 @@ func hostLike(p string) bool {
 	return strings.Contains(seg, ".") || hexHost.MatchString(seg)
 }
 
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// The three shape rules below are copies of the loader. The names here are
+// the loader names. A reserved header name is not checked: the lists of
+// reserved names and prefixes of validHeaderName are not needed for the rule
+// route-form.
+const (
+	maxPathBytes     = 256 // internal/bundle/route.go
+	maxHeaderNameLen = 32  // internal/bundle/traps.go
+)
+
+func alnum(c rune) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' }
+
+// validPath is a copy of validPath in internal/bundle/route.go (lines 262-271).
+func validPath(p string) bool {
+	if len(p) < 1 || len(p) > maxPathBytes || p[0] != '/' ||
+		strings.ContainsFunc(p, func(c rune) bool { return !strings.ContainsRune("/._-", c) && !alnum(c) }) {
+		return false
+	}
+	if p == "/" {
+		return true
+	}
+	return !slices.ContainsFunc(strings.Split(p[1:], "/"), func(s string) bool { return s == "" || s == "." || s == ".." })
+}
+
+// validParam is a copy of validParam in internal/bundle/route.go (lines
+// 244-247): 1 to 32 bytes of A-Z a-z 0-9 _ -.
+func validParam(s string) bool {
+	return len(s) >= 1 && len(s) <= maxHeaderNameLen &&
+		!strings.ContainsFunc(s, func(c rune) bool { return c != '_' && c != '-' && !alnum(c) })
+}
+
+// validHeaderName is a copy of the "X-" prefix, length and byte rules of
+// validHeaderName in internal/bundle/traps.go (lines 119-129).
+func validHeaderName(s string) bool {
+	rest, ok := strings.CutPrefix(s, "X-")
+	return ok && len(rest) >= 1 && len(rest) <= maxHeaderNameLen &&
+		!strings.ContainsFunc(rest, func(c rune) bool { return c != '-' && !alnum(c) })
+}
+
 // readRoutes reads a route map. The rule path-host-form runs only on the
 // paths that an agent is told to request: callback paths and beacon paths.
 // A page path such as "/robots.txt" is not one of them.
@@ -164,10 +209,10 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 			Template string `json:"template"`
 			Type     string `json:"type"`
 			Callback *struct {
-				Segment bool   `json:"segment"`
-				Query   string `json:"query"`
-				Header  string `json:"header"`
-				Body    string `json:"body"`
+				Segment bool    `json:"segment"`
+				Query   *string `json:"query"`
+				Header  *string `json:"header"`
+				Body    *string `json:"body"`
 			} `json:"callback"`
 			Headers []struct {
 				Trap string `json:"trap"`
@@ -194,7 +239,13 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 			r.add("path-host-form", name)
 		}
 		if c := rt.Callback; c != nil {
-			v.callbacks[rt.Path] = callback{c.Segment, c.Query, c.Header, c.Body}
+			// A name that is set and not valid is refused, as the loader does.
+			q, h, b := deref(c.Query), deref(c.Header), deref(c.Body)
+			if !validPath(rt.Path) || c.Query != nil && !validParam(q) ||
+				c.Header != nil && !validHeaderName(h) || c.Body != nil && !validParam(b) {
+				r.add("route-form", name)
+			}
+			v.callbacks[rt.Path] = callback{c.Segment, q, h, b}
 		}
 		if rt.Template != "" {
 			typ, _, _ := strings.Cut(rt.Type, ";")
@@ -550,7 +601,9 @@ func (r *result) template(name, text, n string) {
 		r.add("template-action", name)
 	}
 	if _, body, ok := strings.Cut(text, ldTag); ok {
-		body, _, _ = strings.Cut(body, "</script>")
+		if k := rawTextEnd(body, "script"); k >= 0 {
+			body = body[:k]
+		}
 		if strings.Contains(strings.ToLower(body), "@context") {
 			r.add("json-ld", name)
 		}
@@ -564,7 +617,9 @@ func (r *result) ldObject(name, out string) {
 	if !ok {
 		return
 	}
-	body, _, _ = strings.Cut(body, "</script>")
+	if k := rawTextEnd(body, "script"); k >= 0 {
+		body = body[:k]
+	}
 	var o map[string]jsontext.Value
 	if json.Unmarshal([]byte(body), &o, parseOpts...) != nil || o == nil {
 		r.add("json-ld(rendered)", name)
@@ -634,8 +689,9 @@ func placesOf(text, typ string) []place {
 	case "text/plain":
 		for k := range len(s) {
 			if s[k] == 0 {
+				// The line is "Disallow: " and the action, and nothing more.
 				class := ""
-				if s[strings.LastIndex(s[:k], "\n")+1:k] == "Disallow: " {
+				if s[strings.LastIndex(s[:k], "\n")+1:k] == "Disallow: " && (k+1 == len(s) || s[k+1] == '\n') {
 					class = "L"
 				}
 				emit(class, false, "")
@@ -695,19 +751,19 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			}
 		}
 	}
-	end, ld := "", false // The end tag of a raw text element.
+	end, ld := "", false // The name of the raw text element that is open.
 	for i := 0; i < len(s); {
 		switch {
 		case end != "":
 			j := len(s)
-			if k := strings.Index(strings.ToLower(s[i:]), end); k >= 0 {
+			if k := rawTextEnd(s[i:], end); k >= 0 {
 				j = i + k
 			}
 			rest(i, j, func(k int) {
 				switch {
 				case !ld:
 					emit("", false, "")
-				case openQuote(s[i:k]) >= 0:
+				case !bareMember(s[i:j], k-i):
 					emit("", false, "json-ld")
 				default:
 					emit("F", false, "")
@@ -721,6 +777,15 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 			}
 			rest(i, j, func(int) { emit("", false, "") })
 			i = min(j+3, len(s))
+		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?"):
+			// A browser reads "<!" that is not "<!--", and "<?", as a comment
+			// that ends at the next ">".
+			j := len(s)
+			if k := strings.IndexByte(s[i:], '>'); k >= 0 {
+				j = i + k
+			}
+			rest(i, j, func(int) { emit("", false, "") })
+			i = min(j+1, len(s))
 		case s[i] == '<' && i+1 < len(s) && (s[i+1] == '/' || 'a' <= s[i+1]|0x20 && s[i+1]|0x20 <= 'z'):
 			j := i + markup.FindStringIndex(s[i:])[1]
 			end, ld = tagPlaces(s[i:j], emit)
@@ -734,7 +799,43 @@ func htmlPlaces(s string, emit func(class string, elementText bool, rule string)
 	}
 }
 
-// tagPlaces calls emit for each NUL byte of a tag. It gives the end tag of the
+// jsonSpace is the white space of JSON.
+const jsonSpace = " \t\n\r"
+
+// rawTextEnd gives the index of the end tag of the raw text element name in s,
+// or -1. The end tag is "</", the name with ASCII case ignored, and one byte
+// of " \t\n\f/>". This is html/template indexTagEnd (transition.go). A name at
+// the end of s, with no byte after it, is not an end tag. CR is not in the set.
+func rawTextEnd(s, name string) int {
+	low := []byte(s)
+	for i, c := range low {
+		if 'A' <= c && c <= 'Z' {
+			low[i] = c | 0x20
+		}
+	}
+	for from := 0; ; {
+		k := bytes.Index(low[from:], []byte("</"+name))
+		if k < 0 {
+			return -1
+		}
+		k += from
+		if e := k + 2 + len(name); e < len(s) && strings.IndexByte(" \t\n\f/>", s[e]) >= 0 {
+			return k
+		}
+		from = k + 1
+	}
+}
+
+// bareMember reports whether the NUL byte at k of the json-ld block is a bare
+// member value. It is not in a string. The byte before it, with spaces
+// skipped, is ":". The byte after it, with spaces skipped, is "," or "}".
+func bareMember(block string, k int) bool {
+	after := strings.TrimLeft(block[k+1:], jsonSpace)
+	return openQuote(block[:k]) < 0 && strings.HasSuffix(strings.TrimRight(block[:k], jsonSpace), ":") &&
+		after != "" && (after[0] == ',' || after[0] == '}')
+}
+
+// tagPlaces calls emit for each NUL byte of a tag. It gives the name of the
 // raw text element that a start tag opens. It also says if that element is the
 // json-ld block.
 func tagPlaces(tag string, emit func(class string, elementText bool, rule string)) (end string, ld bool) {
@@ -746,7 +847,13 @@ func tagPlaces(tag string, emit func(class string, elementText bool, rule string
 	}
 	name := strings.ToLower(strings.FieldsFunc(tag[1:], func(c rune) bool { return c == ' ' || c == '>' || c == '/' || c == '\t' || c == '\n' })[0])
 	attrs := attrRe.FindAllStringSubmatchIndex(tag, -1)
-	val := func(a []int) string { return strings.Trim(tag[a[4]:a[5]], `"'`) }
+	val := func(a []int) string { // One pair of matching outer quotes goes.
+		v := tag[a[4]:a[5]]
+		if n := len(v); n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n-1] == v[0] {
+			return v[1 : n-1]
+		}
+		return v
+	}
 	get := func(want string) string {
 		for _, a := range attrs {
 			if strings.EqualFold(tag[a[2]:a[3]], want) {
@@ -777,9 +884,9 @@ func tagPlaces(tag string, emit func(class string, elementText bool, rule string
 	}
 	switch {
 	case name == "style":
-		return "</style", false
+		return "style", false
 	case name == "script":
-		return "</script", tag == ldTag
+		return "script", tag == ldTag
 	}
 	return "", false
 }
