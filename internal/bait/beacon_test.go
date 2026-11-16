@@ -64,9 +64,9 @@ func newBC(t testing.TB, post string) *bcEnv {
 	return e
 }
 
-// do serves a request. A non-empty cookie is the sid cookie. The body counter
-// tells how many bytes the handler read. A length of -2 keeps the length of the
-// body, and -1 is a body of unknown length.
+// do serves a request. A non-empty cookie is the value of the session cookie.
+// The body counter tells how many bytes the handler read. A length of -2 keeps
+// the length of the body, and -1 is a body of unknown length.
 func (e *bcEnv) do(method, target, host, addr, cookie string, body string, length int64) (*httptest.ResponseRecorder, int) {
 	r := httptest.NewRequest(method, target, strings.NewReader(body))
 	r.Host, r.RemoteAddr = host, addr
@@ -74,7 +74,7 @@ func (e *bcEnv) do(method, target, host, addr, cookie string, body string, lengt
 		r.ContentLength = length
 	}
 	if cookie != "" {
-		r.Header.Set("Cookie", "sid="+cookie)
+		r.Header.Set("Cookie", "__Host-sid="+cookie)
 	}
 	tb := &tallyBody{ReadCloser: r.Body}
 	r.Body = tb
@@ -118,7 +118,7 @@ func TestTU25BeaconScript(t *testing.T) {
 		r := httptest.NewRequest(c.method, bcScript+"?q=MARKER", nil)
 		r.Host, r.RemoteAddr = c.host, c.addr
 		r.Header.Set("X-Marker", "MARKER")
-		r.Header.Set("Cookie", "sid=MARKER")
+		r.Header.Set("Cookie", "__Host-sid=MARKER")
 		w := serve(t, e.h, r)
 		want := `navigator.sendBeacon("` + c.post + `","`
 		if c.ticketOf != "" {

@@ -16,7 +16,7 @@ import (
 
 // cookieName is the name of the session cookie (SEC-35). internal/session reads
 // the same name.
-const cookieName = "sid"
+const cookieName = "__Host-sid"
 
 // cookieAttrs are the attributes of the session cookie (SEC-35). There is no
 // Domain attribute, so the cookie is host-only.
