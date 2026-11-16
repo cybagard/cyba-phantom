@@ -47,9 +47,9 @@ func keyedID(t testing.TB, h *Handler, ip string) string {
 // handler writes them.
 const cookieAttrText = "; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax"
 
-// newCookie checks that hd has exactly one Set-Cookie header with the name sid
-// and the attributes of SEC-35. It returns the cookie value, or "" after it
-// reported an error.
+// newCookie checks that hd has exactly one Set-Cookie header with the name
+// __Host-sid and the attributes of SEC-35. It returns the cookie value, or ""
+// after it reported an error.
 func newCookie(t testing.TB, name string, hd http.Header) string {
 	t.Helper()
 	v := hd.Values("Set-Cookie")
@@ -58,7 +58,7 @@ func newCookie(t testing.TB, name string, hd http.Header) string {
 		return ""
 	}
 	val, ok := strings.CutSuffix(v[0], cookieAttrText)
-	if val, ok2 := strings.CutPrefix(val, "sid="); ok && ok2 {
+	if val, ok2 := strings.CutPrefix(val, "__Host-sid="); ok && ok2 {
 		c, err := http.ParseSetCookie(v[0])
 		if err != nil || c.Value != val || c.Path != "/" || c.MaxAge != 86400 || c.Domain != "" ||
 			!c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
@@ -66,7 +66,7 @@ func newCookie(t testing.TB, name string, hd http.Header) string {
 		}
 		return val
 	}
-	t.Errorf("%s: Set-Cookie %q, want sid=<value>%s", name, v[0], cookieAttrText)
+	t.Errorf("%s: Set-Cookie %q, want __Host-sid=<value>%s", name, v[0], cookieAttrText)
 	return ""
 }
 
@@ -420,7 +420,7 @@ func TestTU24CookieRoundTrip(t *testing.T) {
 	if first != keyed {
 		t.Errorf("first request has id %q, want the keyed id %q", first, keyed)
 	}
-	r := withCookie("/t", "sid="+val)
+	r := withCookie("/t", "__Host-sid="+val)
 	got, ok := session.CookieFromHeader(r.Header)
 	if !ok || got != val {
 		t.Fatalf("CookieFromHeader gave %q, %v for %q", got, ok, val)
@@ -430,7 +430,7 @@ func TestTU24CookieRoundTrip(t *testing.T) {
 		t.Fatalf("CheckCookie gave %q, %v; the keyed id is %q", id, ok, keyed)
 	}
 	for range 2 {
-		w, second := sessionEvent(t, "second", h, withCookie("/t", "sid="+val))
+		w, second := sessionEvent(t, "second", h, withCookie("/t", "__Host-sid="+val))
 		if second != id || len(w.Header().Values("Set-Cookie")) != 0 {
 			t.Errorf("returning client: id %q, want %q; headers %v", second, id, w.Header())
 		}
@@ -438,12 +438,12 @@ func TestTU24CookieRoundTrip(t *testing.T) {
 	// A handler with the same holder reads the cookie. It has no state.
 	h2 := NewWithDayKey(h.src, &fallbackFn{}, h.q, h.dk)
 	h2.now = h.now
-	if _, other := sessionEvent(t, "other handler", h2, withCookie("/t", "sid="+val)); other != id {
+	if _, other := sessionEvent(t, "other handler", h2, withCookie("/t", "__Host-sid="+val)); other != id {
 		t.Errorf("a second handler gave id %q, want %q", other, id)
 	}
 	// The event holds the id and no cookie text.
 	rec := func() string {
-		serve(t, h, withCookie("/t", "sid="+val))
+		serve(t, h, withCookie("/t", "__Host-sid="+val))
 		out, err := json.Marshal(h.q.Drain()[0].Record())
 		mustOK(t, err)
 		return string(out)
@@ -472,8 +472,9 @@ func TestTU24TwoClients(t *testing.T) {
 }
 
 // TestTU24KeyedFallback checks the requests that have the keyed id. The cases
-// are no cookie, a bad tag, two sid cookies, and a malformed value. They are
-// also other names and another UTC date. Each gets a new cookie.
+// are no cookie, a bad tag, two session cookies, and a malformed value. They
+// are also other names and another UTC date. A valid value under the name sid,
+// or under __host-sid, is one of the other names. Each gets a new cookie.
 func TestTU24KeyedFallback(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -481,14 +482,18 @@ func TestTU24KeyedFallback(t *testing.T) {
 		lines func(v string) []string
 	}{
 		{"no cookie", 0, func(string) []string { return nil }},
-		{"bad tag", 0, func(v string) []string { return []string{"sid=" + flip(v)} }},
-		{"two parts", 0, func(v string) []string { return []string{"sid=" + v + "; sid=" + v} }},
-		{"two lines", 0, func(v string) []string { return []string{"sid=" + v, "sid=" + v} }},
-		{"upper case", 0, func(v string) []string { return []string{"sid=" + strings.ToUpper(v)} }},
-		{"41 bytes", 0, func(v string) []string { return []string{"sid=" + v[:41]} }},
-		{"empty value", 0, func(string) []string { return []string{"sid="} }},
-		{"other names", 0, func(v string) []string { return []string{"xsid=" + v + "; SID=" + v + "; sid2=" + v} }},
-		{"another UTC date", 24 * time.Hour, func(v string) []string { return []string{"sid=" + v} }},
+		{"bad tag", 0, func(v string) []string { return []string{"__Host-sid=" + flip(v)} }},
+		{"two parts", 0, func(v string) []string { return []string{"__Host-sid=" + v + "; __Host-sid=" + v} }},
+		{"two lines", 0, func(v string) []string { return []string{"__Host-sid=" + v, "__Host-sid=" + v} }},
+		{"upper case", 0, func(v string) []string { return []string{"__Host-sid=" + strings.ToUpper(v)} }},
+		{"41 bytes", 0, func(v string) []string { return []string{"__Host-sid=" + v[:41]} }},
+		{"empty value", 0, func(string) []string { return []string{"__Host-sid="} }},
+		{"other names", 0, func(v string) []string {
+			return []string{"x__Host-sid=" + v + "; __HOST-SID=" + v + "; __Host-sid2=" + v}
+		}},
+		{"name without prefix", 0, func(v string) []string { return []string{"sid=" + v} }},
+		{"name in other case", 0, func(v string) []string { return []string{"__host-sid=" + v} }},
+		{"another UTC date", 24 * time.Hour, func(v string) []string { return []string{"__Host-sid=" + v} }},
 	} {
 		h, _ := eventHandler(t, 64)
 		w, _ := sessionEvent(t, c.name, h, get("/t", "example.com"))
@@ -504,6 +509,23 @@ func TestTU24KeyedFallback(t *testing.T) {
 		if want := keyedID(t, h, "192.0.2.1"); id != want || !ok || cid == want || fresh == old {
 			t.Errorf("%s: id %q, want the keyed id %q; new cookie id %q, valid %v", c.name, id, want, cid, ok)
 		}
+	}
+}
+
+// TestTU24CookieNameBoth checks a request with a valid value under sid and
+// under __Host-sid. Only one part has the name. The request has the cookie id
+// of the __Host-sid value and gets no new cookie.
+func TestTU24CookieNameBoth(t *testing.T) {
+	h, _ := eventHandler(t, 64)
+	w, _ := sessionEvent(t, "issue", h, get("/t", "example.com"))
+	val := newCookie(t, "issue", w.Header())
+	want, ok := h.dk.At(h.now()).CheckCookie(val)
+	if !ok {
+		t.Fatalf("no cookie id for %q", val)
+	}
+	w, id := sessionEvent(t, "both", h, withCookie("/t", "sid="+val+"; __Host-sid="+val))
+	if id != want || len(w.Header().Values("Set-Cookie")) != 0 {
+		t.Errorf("both names: id %q, want %q; headers %v", id, want, w.Header())
 	}
 }
 
@@ -539,7 +561,7 @@ func TestTU24CookieResponses(t *testing.T) {
 		{"fixed 404", "GET", "kilo.example", "/nope", 404, false},
 		{"error before the first byte", "GET", "example.com", "/e", 404, false},
 	} {
-		for _, lines := range [][]string{nil, {"sid=" + valid}} {
+		for _, lines := range [][]string{nil, {"__Host-sid=" + valid}} {
 			r := get(c.path, c.host)
 			r.Method = c.method
 			for _, l := range lines {
@@ -575,7 +597,7 @@ func TestTU24AbortSession(t *testing.T) {
 		lines      []string
 	}{
 		{"new client", keyed, nil},
-		{"returning client", cookieID, []string{"sid=" + val}},
+		{"returning client", cookieID, []string{"__Host-sid=" + val}},
 	} {
 		fw := &failWriter{h: http.Header{}}
 		if !aborts(h, fw, withCookie("/t", c.lines...)) {
@@ -733,7 +755,7 @@ func TestTU24CookieOff(t *testing.T) {
 		{"fixed 404", "GET", "kilo.example", "/nope"},
 		{"error before the first byte", "GET", "example.com", "/e"},
 	} {
-		for _, lines := range [][]string{nil, {"sid=" + valid}} {
+		for _, lines := range [][]string{nil, {"__Host-sid=" + valid}} {
 			r := get(c.path, c.host)
 			r.Method = c.method
 			for _, l := range lines {
@@ -756,7 +778,7 @@ func TestTU24CookieOffAbort(t *testing.T) {
 	valid := newCookie(t, "issue", w.Header())
 	off := offHandler(t, on)
 	keyed := keyedID(t, off, "192.0.2.1")
-	for _, lines := range [][]string{nil, {"sid=" + valid}} {
+	for _, lines := range [][]string{nil, {"__Host-sid=" + valid}} {
 		fw := &failWriter{h: http.Header{}}
 		if !aborts(off, fw, withCookie("/t", lines...)) {
 			t.Errorf("cookie %v: no abort", lines != nil)
@@ -786,7 +808,7 @@ func TestTU24CookieOffClockRead(t *testing.T) {
 	off := offHandler(t, on)
 	reads := 0
 	off.now = func() time.Time { reads++; return testDay }
-	serve(t, off, withCookie("/t", "sid=x"))
+	serve(t, off, withCookie("/t", "__Host-sid=x"))
 	aborts(off, &failWriter{h: http.Header{}}, get("/t", "example.com"))
 	if reads != 2 {
 		t.Errorf("%d clock reads for 2 requests", reads)
@@ -815,7 +837,7 @@ func TestTU24CookieOffRace(t *testing.T) {
 			for i := range 20 {
 				r := get("/t", "example.com")
 				if i%2 == 1 {
-					r.Header.Add("Cookie", "sid="+valid)
+					r.Header.Add("Cookie", "__Host-sid="+valid)
 				}
 				w := httptest.NewRecorder()
 				off.ServeHTTP(w, r)

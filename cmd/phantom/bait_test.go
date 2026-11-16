@@ -178,7 +178,7 @@ func (s *baitSensor) cookie(t *testing.T) (header, id string) {
 	if !ok {
 		t.Fatal("the key of the writer does not accept its own cookie")
 	}
-	return "sid=" + v, id
+	return "__Host-sid=" + v, id
 }
 
 // keyedID returns the keyed session id of the loopback client under the key of
@@ -486,7 +486,7 @@ func TestTU24_SessionCookieSwitch(t *testing.T) {
 			if valid.status != 404 || len(valid.cookies) != 0 {
 				t.Errorf("valid cookie: status %d, Set-Cookie %q; want 404 and none", valid.status, valid.cookies)
 			}
-			if (len(none.cookies) == 0) != c.off || (!c.off && !strings.HasPrefix(none.cookies[0], "sid=")) {
+			if (len(none.cookies) == 0) != c.off || (!c.off && !strings.HasPrefix(none.cookies[0], "__Host-sid=")) {
 				t.Errorf("no cookie: Set-Cookie %q; want one only with true", none.cookies)
 			}
 			want := cookieID
@@ -556,7 +556,7 @@ func TestTU24_BaitSharesWriterDayKey(t *testing.T) {
 	header, cookieID := s.cookie(t)
 	keyed := s.keyedID(t)
 	fetch(t, s.https, decoyName, "/k-valid", header)
-	fetch(t, s.https, decoyName, "/k-bad", "sid=bad")
+	fetch(t, s.https, decoyName, "/k-bad", "__Host-sid=bad")
 	s.stop(t)
 	if got := s.sessionOf(t, "/k-valid"); got != cookieID {
 		t.Errorf("valid cookie row has session %q, want the cookie id %q", got, cookieID)

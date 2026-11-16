@@ -18,7 +18,8 @@ const clockLimit = time.Hour
 // does not stop the run.
 //
 // A wall clock that is wrong at the start moves the anchor too. The guard does
-// not see this error.
+// not see this error. The mark of the last run bounds it for the address step
+// and the field clear. Reading takes the mark as a lower bound of tPriv.
 type clockGuard struct {
 	anchor time.Time // the wall time of the anchor, with no monotonic part
 	wall   func() time.Time
@@ -44,11 +45,13 @@ func newClockGuard(lg *slog.Logger) *clockGuard {
 }
 
 // reading returns the times of one run. Deletes use tDel, the earlier time, so
-// no row goes before its age. The address step uses tPriv, the later time, so
-// no address stays longer than its age. A difference of more than 1 h adds 1 to
-// the count of the run. The first difference writes one log line. The log
-// line has one value: the difference in whole seconds.
-func (c *clockGuard) reading() (wall, tDel, tPriv time.Time) {
+// no row goes before its age. The address step uses tPriv. This is the latest
+// of the wall time, T_mono and the mark of the last run. So tPriv is not before
+// the mark that the caller gives. Take the wall time and T_mono. If they differ
+// by more than 1 h, the run adds 1 to the count. The mark does not change this
+// count. The first difference writes one log line. The log line has one value:
+// the difference in whole seconds.
+func (c *clockGuard) reading(mark time.Time) (wall, tDel, tPriv time.Time) {
 	wall = c.wall()
 	mono := c.anchor.Add(c.mono())
 	tDel, tPriv = wall, mono
@@ -60,6 +63,9 @@ func (c *clockGuard) reading() (wall, tDel, tPriv time.Time) {
 		if c.logged.CompareAndSwap(false, true) {
 			c.lg.Warn("wall clock differs from monotonic clock", "seconds", int64(diff/time.Second))
 		}
+	}
+	if mark.After(tPriv) {
+		tPriv = mark
 	}
 	return wall, tDel, tPriv
 }
