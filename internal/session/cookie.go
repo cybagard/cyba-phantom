@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	// cookieName is the fixed generic name of the session cookie.
-	cookieName = "sid"
+	// cookieName is the fixed name of the session cookie. The __Host- prefix
+	// makes a browser accept the cookie only with Secure, Path=/ and no Domain.
+	// The name is case-sensitive.
+	cookieName = "__Host-sid"
 	// cookiePrefix makes the tag differ from the other HMAC uses of the key.
 	cookiePrefix = "phantom-cookie-v1"
 	idLen        = 16

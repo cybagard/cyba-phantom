@@ -68,7 +68,7 @@ func TestTU24AlphabetCharacters(t *testing.T) {
 		if !ok || got != want {
 			t.Fatalf("CheckCookie(%q) = %q, %v, want %q", v, got, ok, want)
 		}
-		p, ok := CookieFromHeader(hdr("sid=" + v))
+		p, ok := CookieFromHeader(hdr("__Host-sid=" + v))
 		if !ok || p != v {
 			t.Fatalf("CookieFromHeader(%q) = %q, %v", v, p, ok)
 		}
@@ -141,13 +141,39 @@ func TestTU24Refused(t *testing.T) {
 		if name == "another key" {
 			continue
 		}
-		if _, ok := CookieFromHeader(hdr("sid=" + c)); ok {
+		if _, ok := CookieFromHeader(hdr("__Host-sid=" + c)); ok {
 			t.Errorf("%s: parse accepted", name)
 		}
 	}
 	// The value of the other key is well formed, so the parse takes it.
-	if _, ok := CookieFromHeader(hdr("sid=" + cases["another key"])); !ok {
+	if _, ok := CookieFromHeader(hdr("__Host-sid=" + cases["another key"])); !ok {
 		t.Error("parse refused a well formed value")
+	}
+}
+
+// T-U-24: the parse takes a valid value under the name __Host-sid and under no
+// other name. A valid value under sid, or under __host-sid, gives no cookie. A
+// request with both sid and __Host-sid takes the __Host-sid value.
+func TestTU24CookieName(t *testing.T) {
+	k := seqKey()
+	v := k.CookieValue(testID())
+	for _, c := range []struct {
+		name, line string
+		ok         bool
+	}{
+		{"__Host-sid", "__Host-sid=" + v, true},
+		{"sid", "sid=" + v, false},
+		{"__host-sid", "__host-sid=" + v, false},
+		{"__HOST-SID", "__HOST-SID=" + v, false},
+		{"sid and __Host-sid", "sid=" + v + "; __Host-sid=" + v, true},
+	} {
+		got, ok := CookieFromHeader(hdr(c.line))
+		if ok != c.ok || (ok && got != v) {
+			t.Errorf("%s: got %q, %v, want ok %v", c.name, got, ok, c.ok)
+		}
+	}
+	if cookieName != "__Host-sid" {
+		t.Errorf("cookie name %q", cookieName)
 	}
 }
 
@@ -165,38 +191,43 @@ func TestTU24ZeroKey(t *testing.T) {
 // T-S-31: exactly one part with the name gives the value.
 func TestTS31Parse(t *testing.T) {
 	v := knownValue
-	bad := "sid=x"
+	const n = "__Host-sid"
+	bad := n + "=x"
 	cases := []struct {
 		name  string
 		lines []string
 		ok    bool
 	}{
-		{"one", []string{"sid=" + v}, true},
-		{"others around", []string{"a=b; sid=" + v + "; c=d"}, true},
-		{"other lines", []string{"a=b", "sid=" + v, "c=d"}, true},
-		{"space and tab", []string{" \t sid=" + v + " \t ;a=b"}, true},
-		{"tab only", []string{"a=b;\tsid=" + v + "\t"}, true},
+		{"one", []string{n + "=" + v}, true},
+		{"others around", []string{"a=b; " + n + "=" + v + "; c=d"}, true},
+		{"other lines", []string{"a=b", n + "=" + v, "c=d"}, true},
+		{"space and tab", []string{" \t " + n + "=" + v + " \t ;a=b"}, true},
+		{"tab only", []string{"a=b;\t" + n + "=" + v + "\t"}, true},
 		{"no header", nil, false},
 		{"no part with the name", []string{"a=b; c=d"}, false},
 		{"empty line", []string{""}, false},
-		{"upper name", []string{"SID=" + v}, false},
-		{"space before equals", []string{"sid =" + v}, false},
-		{"name prefix", []string{"sid2=" + v, "xsid=" + v}, false},
-		{"no equals", []string{"sid"}, false},
-		{"empty value", []string{"sid="}, false},
-		{"bare name next to a valid part", []string{"sid; sid=" + v}, false},
-		{"empty value next to a valid part", []string{"sid=; sid=" + v}, false},
-		{"valid part next to a bare name", []string{"sid=" + v + "; sid"}, false},
-		{"valid part next to an empty value", []string{"sid=" + v + "; sid="}, false},
-		{"quoted", []string{`sid="` + v + `"`}, false},
-		{"two in a line", []string{"sid=" + v + "; sid=" + v}, false},
-		{"valid then bad", []string{"sid=" + v + "; " + bad}, false},
-		{"bad then valid", []string{bad + "; sid=" + v}, false},
-		{"two lines", []string{"sid=" + v, "sid=" + v}, false},
-		{"two lines, one bad", []string{"sid=" + v, bad}, false},
-		{"CR at the end", []string{"sid=" + v + "\r"}, false},
-		{"value with a second equals", []string{"sid=" + v + "="}, false},
-		{"empty parts", []string{";;sid=" + v + ";;"}, true},
+		{"upper name", []string{"__HOST-SID=" + v}, false},
+		{"name without prefix", []string{"sid=" + v}, false},
+		{"name in other case", []string{"__host-sid=" + v}, false},
+		{"name without prefix next to the name", []string{"sid=" + v + "; " + n + "=" + v}, true},
+		{"name in other case next to the name", []string{"__host-sid=" + v, n + "=" + v}, true},
+		{"space before equals", []string{n + " =" + v}, false},
+		{"name prefix", []string{n + "2=" + v, "x" + n + "=" + v}, false},
+		{"no equals", []string{n}, false},
+		{"empty value", []string{n + "="}, false},
+		{"bare name next to a valid part", []string{n + "; " + n + "=" + v}, false},
+		{"empty value next to a valid part", []string{n + "=; " + n + "=" + v}, false},
+		{"valid part next to a bare name", []string{n + "=" + v + "; " + n}, false},
+		{"valid part next to an empty value", []string{n + "=" + v + "; " + n + "="}, false},
+		{"quoted", []string{n + `="` + v + `"`}, false},
+		{"two in a line", []string{n + "=" + v + "; " + n + "=" + v}, false},
+		{"valid then bad", []string{n + "=" + v + "; " + bad}, false},
+		{"bad then valid", []string{bad + "; " + n + "=" + v}, false},
+		{"two lines", []string{n + "=" + v, n + "=" + v}, false},
+		{"two lines, one bad", []string{n + "=" + v, bad}, false},
+		{"CR at the end", []string{n + "=" + v + "\r"}, false},
+		{"value with a second equals", []string{n + "=" + v + "="}, false},
+		{"empty parts", []string{";;" + n + "=" + v + ";;"}, true},
 	}
 	for _, c := range cases {
 		got, ok := CookieFromHeader(hdr(c.lines...))
@@ -206,7 +237,7 @@ func TestTS31Parse(t *testing.T) {
 	}
 }
 
-func oneHeader() http.Header { return hdr("sid=" + knownValue) }
+func oneHeader() http.Header { return hdr("__Host-sid=" + knownValue) }
 
 func manyHeader() http.Header {
 	var b strings.Builder
@@ -215,12 +246,12 @@ func manyHeader() http.Header {
 		b.WriteString(string(rune('a' + i%26)))
 		b.WriteString("=v; ")
 	}
-	b.WriteString("sid=" + knownValue)
+	b.WriteString("__Host-sid=" + knownValue)
 	return hdr(b.String())
 }
 
 func floodHeader() http.Header {
-	return hdr(strings.Repeat("sid=x; ", 2998) + "sid=x")
+	return hdr(strings.Repeat("__Host-sid=x; ", 2998) + "__Host-sid=x")
 }
 
 // T-S-31: the parse allocates nothing.
@@ -274,7 +305,7 @@ func BenchmarkRequestCookie(b *testing.B) {
 		b.Run(c.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				r.Cookie("sid")
+				r.Cookie(cookieName)
 			}
 		})
 	}
