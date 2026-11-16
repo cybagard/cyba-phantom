@@ -248,7 +248,8 @@ func templateSpec(actions, slots, vhosts int) shapeSpec {
 	}, nil, trapSet()}
 }
 
-// slotNames are four names that a header slot can have.
+// slotNames are 4 of the 6 names that a header slot can have. The bundle
+// loader has the full list.
 var slotNames = []string{"X-Request-Id", "X-Powered-By", "X-Generator", "X-Served-By"}
 
 // slotsJSON gives the headers member of a route with slots header slots, at

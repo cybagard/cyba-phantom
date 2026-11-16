@@ -82,8 +82,8 @@ func TestTU08StepOrder(t *testing.T) {
 	loadRaw(t, ErrContentInvalid, seeded, tf(vhostFile, "ok"), badRoutes)
 }
 
-// T-U-08: a header slot name that is a reserved name, in any ASCII case, gives
-// content_invalid. A name that starts with a reserved start does too.
+// T-U-08: these names are not on the list of slot names. Each one, in any
+// ASCII case, gives content_invalid.
 func TestTU08HeaderSlotNamesRefused(t *testing.T) {
 	for _, n := range []string{
 		"X-Content-Type-Options", "X-Frame-Options", "X-XSS-Protection", "X-Sendfile",
@@ -117,7 +117,7 @@ func TestTU08HeaderSlotNamesOffList(t *testing.T) {
 	}
 }
 
-// listed are the 6 names of the list, spelled out so that a change of
+// listed are the 6 names of the list, written in full. Thus a change of
 // slotNames shows in the tests.
 var listed = []string{"X-Note", "X-Powered-By", "X-Generator", "X-Request-Id", "X-Runtime", "X-Served-By"}
 
@@ -253,7 +253,9 @@ func TestTU25CallbackHeaderName(t *testing.T) {
 		"X-Content-Type-Options", "x-content-type-options", "X-CONTENT-TYPE-OPTIONS", "X-XSS-Protection", "X-xss-protection",
 		"X-Sendfile", "X-Sendfile2", "x-lighttpd-a", "X-Lighttpd-", "X-Reproxy-URL", "x-reproxy-", "X-SENDFILE2", "X-LIGHTTPD-a", "X-reproxy-url",
 		"X-Accel-Redirect", "x-accel-redirect", "X-ACCEL-REDIRECT", "x-forwarded-for", "X-FORWARDED-FOR", "X-Forwarded-Host",
-		"x-sendfile", "X-SENDFILE", "X-Sendfile-Type", "X-REPROXY-URL", "X-Lighttpd-Send-File", "x-lighttpd-send-file"} {
+		"x-sendfile", "X-SENDFILE", "X-Sendfile-Type", "X-REPROXY-URL", "X-Lighttpd-Send-File", "x-lighttpd-send-file",
+		"X-FRAME-OPTIONS", "x-xss-protection", "X-XSS-PROTECTION", "X-LIGHTTPD-SEND-FILE", "x-accel-buffering",
+		"X_A", "X-a_b", "X-é", "x-A", "X-a.b"} {
 		refuse(t, cbDoc(`{"header":"`+n+`"}`))
 	}
 }
