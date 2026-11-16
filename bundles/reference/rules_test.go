@@ -5,6 +5,7 @@ package reference
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io/fs"
 	"maps"
 	"os"
@@ -38,6 +39,9 @@ var (
 	onAttr    = regexp.MustCompile(`(?i)[\s"'/]on[a-z]+\s*=`)
 	external  = regexp.MustCompile(`(?i)(?:\b(?:src|href|action)\s*=\s*["']?` +
 		`|\burl\(\s*["']?)\s*(?:https?:|//)`)
+
+	// The tree has no reason to hold an absolute URL in any position.
+	absoluteURL = regexp.MustCompile(`https?:|(?:^|[\s="'(,])//`)
 
 	topDirs  = []string{"vhosts", "traps", "secrets"}
 	urlForms = []string{"://", "//", "@", "mailto:", "www."}
@@ -239,9 +243,21 @@ func (r *result) page(name string, b []byte, v *vhost) {
 	if onAttr.Match(b) {
 		r.add("on-attr", name)
 	}
-	if external.Match(b) {
+	n := normalForm(string(b))
+	if external.MatchString(n) {
 		r.add("third-party", name)
 	}
+	if absoluteURL.MatchString(strings.ToLower(n)) {
+		r.add("absolute-url", name)
+	}
+}
+
+// normalForm is the text as a browser reads a URL in it. A character
+// reference is decoded, tab and LF are deleted, and "\" is read as "/".
+func normalForm(s string) string {
+	s = html.UnescapeString(s)
+	s = strings.NewReplacer("\t", "", "\n", "").Replace(s)
+	return strings.ReplaceAll(s, `\`, "/")
 }
 
 // traps checks the instruction template of each trap in traps/traps.json.

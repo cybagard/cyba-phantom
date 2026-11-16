@@ -115,6 +115,8 @@ func cases() []row {
 		{"same path on both vhosts", docs(`{"routes":[{"path":"/ref/cb","callback":{"segment":true}}]}`), nil},
 		{"trap used by a header slot", both(nothing, put(routes, `{"routes":[{"path":"/","template":"x","type":"t",`+
 			`"headers":[{"name":"X-Note","trap":"t1"}]},{"path":"/ref/cb","callback":{"segment":true}}]}`)), nil},
+		{"relative URLs", both(pageWith(`<a href="/ref/cb">x</a>`),
+			put(svgPath, `a{background:url(/a.css)}`)), nil},
 		{"markup with no script", both(pageWith(`<a href="/ref/cb"><img src="logo.svg" alt="x"></a>`),
 			put(svgPath, `<svg><title>ok</title></svg>`)), nil},
 
@@ -187,19 +189,35 @@ func cases() []row {
 		rows = append(rows, row{"deny " + w, instr(baseInstr + " " + strings.ToUpper(w)), at(trapsFile, "instr-deny("+w+")")})
 	}
 	// Script and URL rules apply to a template and to an asset.
-	for _, f := range []struct{ text, rule string }{
-		{"<script>x</script>", "script(<script)"}, {"<SCRIPT src=x>", "script(<script)"},
-		{`<a href="javascript:x">`, "script(javascript:)"}, {"<iframe>", "script(<iframe)"},
-		{"<object>", "script(<object)"}, {"<embed>", "script(<embed)"},
-		{"<foreignObject>", "script(<foreignobject)"},
-		{"<img onerror=x>", "on-attr"}, {`<svg onload="x">`, "on-attr"},
-		{`<a href="http://x">`, "third-party"}, {`<img src='https://x'>`, "third-party"},
-		{"<form action=//x>", "third-party"}, {`HREF = "HTTP://x"`, "third-party"},
-		{"a{background:url(https://x)}", "third-party"},
+	// The URL forms are read as a browser reads them: with a character
+	// reference, a tab, a LF or a backslash in the URL.
+	both3 := []string{"third-party", "absolute-url"}
+	for _, f := range []struct {
+		text  string
+		rules []string
+	}{
+		{"<script>x</script>", []string{"script(<script)"}},
+		{"<SCRIPT src=x>", []string{"script(<script)"}},
+		{`<a href="javascript:x">`, []string{"script(javascript:)"}},
+		{"<iframe>", []string{"script(<iframe)"}}, {"<object>", []string{"script(<object)"}},
+		{"<embed>", []string{"script(<embed)"}}, {"<foreignObject>", []string{"script(<foreignobject)"}},
+		{"<img onerror=x>", []string{"on-attr"}}, {`<svg onload="x">`, []string{"on-attr"}},
+		{`<a href="http://x">`, both3}, {`<img src='https://x'>`, both3},
+		{"<form action=//x>", both3}, {`HREF = "HTTP://x"`, both3},
+		{"a{background:url(https://x)}", both3},
+		{"<a href=\"ht\ttps://evil.example/x\">", both3},
+		{"<a href=\"htt\nps://evil.example/x\">", both3},
+		{"<a href=\"&#" + "104;ttps://evil.example/x\">", both3},
+		{`<a href="https&colon;//evil.example/x">`, both3},
+		{`<img srcset="https://evil.example/x 1x">`, []string{"absolute-url"}},
+		{`<style>@import 'https://evil.example/x.css';</style>`, []string{"absolute-url"}},
+		{`<link rel=stylesheet href="/\evil.example/x">`, both3},
+		{`<a href="\\evil.example/x">`, both3},
+		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, []string{"absolute-url"}},
 	} {
 		rows = append(rows,
-			row{"page " + f.text, pageWith(f.text), at(pagePath, f.rule)},
-			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rule)})
+			row{"page " + f.text, pageWith(f.text), at(pagePath, f.rules...)},
+			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
 	}
 	return rows
 }
