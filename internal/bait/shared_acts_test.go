@@ -27,7 +27,7 @@ func TestTS31SharedActsReadOnly(t *testing.T) {
 	var parts []string
 	for i := range routes {
 		parts = append(parts, fmt.Sprintf(`{"path":"/r%d","template":"%sp.tmpl","type":"text/html; charset=utf-8",`+
-			`"headers":[{"name":"X-Slot-%d","trap":"h0"}]}`, i, dir, i))
+			`"headers":[{"name":"%s","trap":"h0"}]}`, i, dir, slotNames[i]))
 	}
 	b := bundleFiles(t, "", map[string]string{
 		"traps/traps.json":  trapsJSON(specs),

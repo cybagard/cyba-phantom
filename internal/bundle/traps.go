@@ -89,20 +89,33 @@ func validTrapID(s string) bool {
 		!strings.ContainsFunc(s, func(c rune) bool { return c != '-' && (c < '0' || c > '9') && (c < 'a' || c > 'z') })
 }
 
-// reservedHeaders are names that a header slot must not have. The match
-// ignores ASCII case.
+// slotNames are the only names that a header slot can have. The match ignores
+// ASCII case.
+var slotNames = []string{"X-Note", "X-Powered-By", "X-Generator", "X-Request-Id", "X-Runtime", "X-Served-By"}
+
+// validSlotName reports whether s is one of slotNames. The match ignores ASCII
+// case. The length check comes first, so no non-ASCII letter can match.
+func validSlotName(s string) bool {
+	return slices.ContainsFunc(slotNames, func(n string) bool {
+		return len(s) == len(n) && strings.EqualFold(s, n)
+	})
+}
+
+// reservedHeaders are names that the callback header position must not have.
+// The match ignores ASCII case.
 var reservedHeaders = []string{"X-Content-Type-Options", "X-Frame-Options", "X-XSS-Protection"}
 
-// reservedHeaderPrefixes are the starts of names that a header slot must not
-// have. The start X-Sendfile has no trailing "-", so it also covers
-// X-Sendfile2. The match ignores ASCII case.
+// reservedHeaderPrefixes are the starts of names that the callback header
+// position must not have. The start X-Sendfile has no trailing "-", so it also
+// covers X-Sendfile2. The match ignores ASCII case.
 var reservedHeaderPrefixes = []string{"X-Accel-", "X-Forwarded-", "X-Sendfile", "X-Lighttpd-", "X-Reproxy-"}
 
 // validHeaderName reports whether s is "X-" and 1 to 32 bytes of A-Z a-z 0-9 -.
-// It is false for a name that equals X-Content-Type-Options, X-Frame-Options
-// or X-XSS-Protection. It is false for a name that starts with X-Accel-,
-// X-Forwarded-, X-Sendfile, X-Lighttpd- or X-Reproxy-. These matches ignore
-// ASCII case. The character check comes first, so the fold only sees ASCII.
+// The callback header position uses it. It is false for a name that equals
+// X-Content-Type-Options, X-Frame-Options or X-XSS-Protection. It is false for
+// a name that starts with X-Accel-, X-Forwarded-, X-Sendfile, X-Lighttpd- or
+// X-Reproxy-. These matches ignore ASCII case. The character check comes
+// first, so the fold only sees ASCII.
 func validHeaderName(s string) bool {
 	rest, ok := strings.CutPrefix(s, "X-")
 	if !ok || len(rest) < 1 || len(rest) > maxHeaderNameLen ||

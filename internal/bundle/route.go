@@ -113,10 +113,11 @@ type rawSlot struct {
 // parseRoutes parses the route map of each vhost of the archive. A host name
 // that is the second name part of a file below vhosts/ is a vhost. A file must
 // not be directly below vhosts/. Each vhost needs a valid name and a
-// routes.json file. A header slot needs a valid name and the id of a trap. Two
-// slots of one route do not have the same name, with ASCII case ignored. All
-// route maps together hold at most maxBundleRoutes routes. A not_found member
-// and a beacon member are not routes. The error holds no byte of the archive.
+// routes.json file. A header slot needs a name from slotNames and the id of a
+// trap. Two slots of one route do not have the same name, with ASCII case
+// ignored. All route maps together hold at most maxBundleRoutes routes. A
+// not_found member and a beacon member are not routes. The error holds no byte
+// of the archive.
 func parseRoutes(a *Archive, set map[string]*template.Template, traps []Trap) (map[string]RouteMap, error) {
 	ids := map[string]bool{}
 	for _, t := range traps {
@@ -195,7 +196,7 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 			}
 		}
 		for _, s := range r.Headers.v {
-			if !s.Name.set || !s.Trap.set || !validHeaderName(s.Name.v) || !ids[s.Trap.v] {
+			if !s.Name.set || !s.Trap.set || !validSlotName(s.Name.v) || !ids[s.Trap.v] {
 				return RouteMap{}, false
 			}
 			// Slot names of one route must differ by more than ASCII case.
@@ -224,7 +225,7 @@ func parseRouteMap(a *Archive, set map[string]*template.Template, ids map[string
 
 // callbackOf checks the positions of a callback. It needs 1 to 4 positions.
 // When Segment is set, it is true. Query and Body are 1 to 32 bytes of
-// A-Z a-z 0-9 _ -. Header is a valid header slot name.
+// A-Z a-z 0-9 _ -. Header passes validHeaderName. It need not be in slotNames.
 func callbackOf(r rawCallback) (Callback, bool) {
 	cb := Callback{Segment: r.Segment.v, Query: r.Query.v, Header: r.Header.v, Body: r.Body.v}
 	n := 0

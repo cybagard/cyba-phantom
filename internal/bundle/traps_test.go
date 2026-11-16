@@ -171,7 +171,7 @@ func TestTU08TrapsOrder(t *testing.T) {
 	bad := tf(vhostFile, "{{if}}")
 	badTrap := tf(trapsName, arr(tj("a", "{{.Other}}")))
 	badForm := tf(trapsName, "[]")
-	slots := doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":"gone"}]`)
+	slots := doc(pa, ti, ty, `"headers":[{"name":"X-Note","trap":"gone"}]`)
 	rm := tf(hostDir+routeMapName, slots)
 	loadRaw(t, ErrContentInvalid, nil, bad, badForm, rm)
 	loadRaw(t, ErrContentInvalid, func(e *env) { e.l.template = stubParse }, tf(vhostFile, "i"), badForm)
@@ -181,20 +181,20 @@ func TestTU08TrapsOrder(t *testing.T) {
 	// A nil template step keeps the traps and checks the header slots.
 	none := func(e *env) { e.l.template = nil }
 	b := loadRaw(t, nil, none, tf(hostDir+"a.png", "p"), tf(trapsName, arr(tj("a", "x{{.Token}}"))),
-		tf(hostDir+routeMapName, doc(pa, png, ty, `"headers":[{"name":"X-A","trap":"a"}]`)))
+		tf(hostDir+routeMapName, doc(pa, png, ty, `"headers":[{"name":"X-Note","trap":"a"}]`)))
 	if got := b.Traps(); len(got) != 1 || got[0].Render("T") != "xT" {
 		t.Errorf("traps %+v", got)
 	}
 	loadRaw(t, ErrTemplateParse, none, tf(trapsName, arr(tj("a", "{{.Other}}"))))
 }
 
-// T-U-08: a header slot has a name and the id of a trap. The name is "X-" and
-// 1 to 32 bytes of A-Z a-z 0-9 -. The slot of the trap does not matter.
+// T-U-08: a header slot has a name from the list and the id of a trap. The slot
+// of the trap does not matter.
 func TestTU08HeaderSlots(t *testing.T) {
-	l32 := strings.Repeat("a", 32)
 	for name, ok := range map[string]bool{
-		"X-A": true, "X-" + l32: true, "X-a-Z9": true, "X-" + l32 + "a": false, "X-": false, "x-A": false, "x-a": false,
-		"A": false, "": false, "XX-a": false, "X_A": false, "X-a_b": false, "X-a b": false, "X-é": false, " X-A": false,
+		"X-Note": true, "X-Powered-By": true, "x-served-by": true, "X-REQUEST-ID": true,
+		"X-A": false, "X-" + strings.Repeat("a", 32): false, "": false, "X-": false, "A": false,
+		"XX-Note": false, " X-Note": false, "X-Note ": false, "X-é": false,
 	} {
 		want := ErrContentInvalid
 		if ok {
@@ -206,12 +206,12 @@ func TestTU08HeaderSlots(t *testing.T) {
 		})
 	}
 	for _, id := range []string{"gone", "", "T", "t "} {
-		loadRaw(t, ErrContentInvalid, nil, site(doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":"`+id+`"}]`))...)
+		loadRaw(t, ErrContentInvalid, nil, site(doc(pa, ti, ty, `"headers":[{"name":"X-Note","trap":"`+id+`"}]`))...)
 	}
 	// Only the last slot has an unknown trap. A bundle with no trap file has
 	// no trap id.
-	loadRaw(t, ErrContentInvalid, nil, site(doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":"t"},{"name":"X-B","trap":"gone"}]`))...)
-	noFile := site(doc(pa, ti, ty, `"headers":[{"name":"X-A","trap":"t"}]`))
+	loadRaw(t, ErrContentInvalid, nil, site(doc(pa, ti, ty, `"headers":[{"name":"X-Note","trap":"t"},{"name":"X-Runtime","trap":"gone"}]`))...)
+	noFile := site(doc(pa, ti, ty, `"headers":[{"name":"X-Note","trap":"t"}]`))
 	loadRaw(t, ErrContentInvalid, nil, noFile[:len(noFile)-1]...)
 }
 

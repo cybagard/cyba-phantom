@@ -241,22 +241,26 @@ func actionsPage(n int) string {
 }
 
 // templateSpec is a shape of template routes in vhosts. A route has actions
-// trap actions and slots header slots with 34-byte names.
+// trap actions and slots header slots.
 func templateSpec(actions, slots, vhosts int) shapeSpec {
 	return shapeSpec{vhosts, map[string]string{"p.tmpl": actionsPage(actions)}, func(host string, j int) string {
 		return fmt.Sprintf(`{"path":"/%d","template":"vhosts/%s/p.tmpl","type":"text/html; charset=utf-8"%s}`, j, host, slotsJSON("t", slots))
 	}, nil, trapSet()}
 }
 
-// slotsJSON gives the headers member of a route with slots header slots. The
-// names have 34 bytes. The trap of slot k is the id trapPrefix and k.
+// slotNames are 4 of the 6 names that a header slot can have. The bundle
+// loader has the full list.
+var slotNames = []string{"X-Request-Id", "X-Powered-By", "X-Generator", "X-Served-By"}
+
+// slotsJSON gives the headers member of a route with slots header slots, at
+// most 4. The trap of slot k is the id trapPrefix and k.
 func slotsJSON(trapPrefix string, slots int) string {
 	if slots == 0 {
 		return ""
 	}
 	var hs []string
 	for k := range slots {
-		hs = append(hs, fmt.Sprintf(`{"name":%q,"trap":"%s%d"}`, longName(fmt.Sprintf("X-Probe-%d-", k), 34), trapPrefix, k))
+		hs = append(hs, fmt.Sprintf(`{"name":%q,"trap":"%s%d"}`, slotNames[k], trapPrefix, k))
 	}
 	return `,"headers":[` + strings.Join(hs, ",") + `]`
 }

@@ -442,8 +442,8 @@ func TestTS31MintIndexList(t *testing.T) {
 }
 
 // slotBundle loads a bundle with one trap for each id of ids, in this order.
-// The route /t has the template tmpl and one header slot X-P<i> for the trap
-// headers[i].
+// The route /t has the template tmpl and one header slot for the trap
+// headers[i], with the name slotNames[i]. It takes at most 4 headers.
 func slotBundle(t testing.TB, ids []string, tmpl string, headers []string) *bundle.Bundle {
 	t.Helper()
 	const dir = "vhosts/example.com/"
@@ -456,7 +456,7 @@ func slotBundle(t testing.TB, ids []string, tmpl string, headers []string) *bund
 	mustOK(t, err)
 	var slots []string
 	for i, id := range headers {
-		slots = append(slots, fmt.Sprintf(`{"name":"X-P%d","trap":%q}`, i, id))
+		slots = append(slots, fmt.Sprintf(`{"name":%q,"trap":%q}`, slotNames[i], id))
 	}
 	hj := ""
 	if len(slots) > 0 {
@@ -492,7 +492,7 @@ func TestTS31MintMaxIndexes(t *testing.T) {
 		t.Fatalf("%d tokens in the page, want 64", len(texts))
 	}
 	for i := range heads {
-		texts = append(texts, tokenRE.FindAllString(w.Header().Get(fmt.Sprint("X-P", i)), -1)...)
+		texts = append(texts, tokenRE.FindAllString(w.Header().Get(slotNames[i]), -1)...)
 	}
 	m, ok := q.Drain()[0].Mint()
 	if w.Code != 200 || len(texts) != 68 || h.noKeys.Load() != 0 || !ok || m.Count != 68 || m.Unit == 0 {
