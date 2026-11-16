@@ -240,6 +240,27 @@ func TestTS32ZonedClient(t *testing.T) {
 	}
 }
 
+// TestTS32ClientIPKeepsText checks clientIP for an address with no zone. With a
+// port, the address part is the canonical text. Without a port, a text with no
+// zone comes back unchanged, also when it is not the canonical text. A zone is
+// cut with or without a port. A value that is not an address comes back as is.
+func TestTS32ClientIPKeepsText(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"2001:DB8::1", "2001:DB8::1"},
+		{"2001:0db8:0:0:0:0:0:1", "2001:0db8:0:0:0:0:0:1"},
+		{"203.0.113.7", "203.0.113.7"},
+		{"[2001:DB8::1]:80", "2001:db8::1"},
+		{"fe80::1%eth0", "fe80::1"},
+		{"[fe80::1%eth0]:80", "fe80::1"},
+		{"not an address", "not an address"},
+		{"", ""},
+	} {
+		if got := clientIP(c.in); got != c.want {
+			t.Errorf("clientIP(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestTI04CallbackDistinct checks that each distinct verified token gives one
 // event, with the surface of its first position.
 func TestTI04CallbackDistinct(t *testing.T) {

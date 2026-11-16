@@ -751,6 +751,30 @@ func TestTS28PlanWriteString(t *testing.T) {
 	}
 }
 
+// nullWriter is a response writer that keeps nothing and allocates nothing.
+type nullWriter struct{ h http.Header }
+
+func (w nullWriter) Header() http.Header       { return w.h }
+func (nullWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (nullWriter) WriteHeader(int)             {}
+
+// TestTS28PlanWriteStringNoAllocs checks writeString for a text of up to the
+// size of the scratch array, 32 bytes included. It copies the text and does
+// not allocate. A longer text is converted, so it allocates.
+func TestTS28PlanWriteStringNoAllocs(t *testing.T) {
+	for _, c := range []struct {
+		n    int
+		want float64
+	}{{1, 0}, {31, 0}, {maxTokText, 0}, {maxTokText + 1, 1}} {
+		text := strings.Repeat("k", c.n)
+		cw := capWriter{w: nullWriter{http.Header{}}, started: true}
+		got := testing.AllocsPerRun(100, func() { _ = cw.writeString(text) })
+		if got != c.want {
+			t.Errorf("%d bytes: %v allocations, want %v", c.n, got, c.want)
+		}
+	}
+}
+
 // TestTS28PlanEdges checks a page that starts and ends with a token. Its plan
 // exists and the page is equal to Execute.
 func TestTS28PlanEdges(t *testing.T) {

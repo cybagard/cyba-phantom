@@ -594,6 +594,39 @@ func TestTS12_DetailMarshaledSizeBound(t *testing.T) {
 	}
 }
 
+// T-S-12: the bound on the marshaled text is exact. A detail with one member
+// has the marshaled text {"a":"..."}. Its size is 8 + 2 * quotes + others.
+// Each size from 2048 to 2208 passes check. At 2048 the encoder gets the
+// text. A size past 2048 is an error, and the encoder gets no input. So a
+// looser bound lets at least the size 2049 through to the encoder.
+func TestTS12_DetailMarshaledSizeExactBound(t *testing.T) {
+	seen := watchEncoder(t)
+	for size := MaxDetailBytes; size <= MaxDetailBytes+160; size++ {
+		quotes, others := (size-8)/2, (size-8)%2
+		d := Detail{"a": Str(strings.Repeat(`"`, quotes) + strings.Repeat("x", others))}
+		*seen = nil
+		if err := d.check(); err != nil {
+			t.Fatalf("size %d: check: %v", size, err)
+		}
+		_, err := d.JSON()
+		if size == MaxDetailBytes {
+			if err != nil || len(*seen) != 1 || (*seen)[0] != size {
+				t.Errorf("size %d: error %v, encoder inputs %v", size, err, *seen)
+			}
+			continue
+		}
+		if err == nil || err.Error() != errDetailTooLarge || len(*seen) != 0 {
+			t.Errorf("size %d: error %v, encoder inputs %v, want %q and none", size, err, *seen, errDetailTooLarge)
+		}
+	}
+	// A plain value: check adds up to 2046, and the text has 2049 bytes.
+	d := Detail{"a": Str(strings.Repeat("x", 2041))}
+	*seen = nil
+	if _, err := d.JSON(); err == nil || err.Error() != errDetailTooLarge || len(*seen) != 0 {
+		t.Errorf("2041 bytes: error %v, encoder inputs %v", err, *seen)
+	}
+}
+
 // T-S-12: check adds the lower bounds of all members. A sum equal to the cap
 // passes check, and a sum past the cap does not.
 func TestTS12_DetailSumBound(t *testing.T) {
