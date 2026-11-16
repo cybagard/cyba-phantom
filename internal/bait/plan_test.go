@@ -758,9 +758,9 @@ func (w nullWriter) Header() http.Header       { return w.h }
 func (nullWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (nullWriter) WriteHeader(int)             {}
 
-// TestTS28PlanWriteStringNoAllocs checks that writeString copies a text of up
-// to the size of the scratch array with no allocation, 32 bytes included. A
-// longer text is converted, so it allocates.
+// TestTS28PlanWriteStringNoAllocs checks writeString for a text of up to the
+// size of the scratch array, 32 bytes included. It copies the text and does
+// not allocate. A longer text is converted, so it allocates.
 func TestTS28PlanWriteStringNoAllocs(t *testing.T) {
 	for _, c := range []struct {
 		n    int
