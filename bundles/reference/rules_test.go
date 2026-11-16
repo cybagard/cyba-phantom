@@ -40,8 +40,26 @@ var (
 	external  = regexp.MustCompile(`(?i)(?:\b(?:src|href|action)\s*=\s*["']?` +
 		`|\burl\(\s*["']?)\s*(?:https?:|//)`)
 
-	// The tree has no reason to hold an absolute URL in any position.
-	absoluteURL = regexp.MustCompile(`https?:|://|(?:^|[\s="'(,])//`)
+	// The tree has no reason to hold an absolute URL in any position. The
+	// only exception is the two SVG namespace names of svgNames.
+	absoluteURL = regexp.MustCompile(`https?:|//`)
+	svgNames    = strings.NewReplacer(`xmlns="http://www.w3.org/2000/svg"`, "",
+		`xmlns:xlink="http://www.w3.org/1999/xlink"`, "")
+	// A value that starts with a scheme, after "=", a quote or "(".
+	scheme = regexp.MustCompile(`(?i)(?:=|["'(])\s*[a-z][a-z0-9+.-]*:`)
+	// A tag of the list, also after a namespace prefix such as "s:".
+	tagRe     = regexp.MustCompile(`(?i)<(?:[a-z0-9._-]+:)?(script|iframe|object|embed|foreignobject)`)
+	styleAttr = regexp.MustCompile(`(?i)[\s"'/]style\s*=`)
+	// Markup of any kind. An open "<" runs to the end of the text.
+	markup = regexp.MustCompile(`(?s)<[^>]*(?:>|$)`)
+	// The deny check reads a text with each run of other characters as one
+	// space. "." stays, for ".env".
+	notAlnum  = regexp.MustCompile(`[^a-z0-9.]+`)
+	rmDash    = regexp.MustCompile(`(^|[^a-z0-9])rm[^a-z0-9]*-`)
+	denyStart = map[string]*regexp.Regexp{
+		"e mail":    regexp.MustCompile(`\be mail`),
+		"pass word": regexp.MustCompile(`\bpass word`),
+	}
 
 	// The two forms of a template action. Each "{{" of a template starts one.
 	actionForms = []*regexp.Regexp{
@@ -54,15 +72,11 @@ var (
 	// A trap text has no "[" or "]", and no ":" before a character that is
 	// not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:[^ ]`)
-	// The deny words are also checked with a run of separators as one space.
-	separators = regexp.MustCompile(`[ \t_-]+`)
-	rmDash     = regexp.MustCompile(`\brm\s*-`)
-	// These forms are checked on the text with the separators replaced.
-	denyJoined = []string{"apikey", "systemprompt", "privatekey", "e mail", "pass word"}
+	// These words are checked on the text with all spaces removed.
+	denyCompact = []string{"apikey", "systemprompt", "privatekey"}
 
 	topDirs  = []string{"vhosts", "traps", "secrets"}
 	urlForms = []string{"://", "//", "@", "mailto:", "www."}
-	tags     = []string{"<script", "javascript:", "<iframe", "<object", "<embed", "<foreignobject"}
 	// The deny list of ADR-042. A word matches as a part of a longer word.
 	// The pair "instruction" and "override" and the word "rm -" are checked
 	// apart.
@@ -93,18 +107,32 @@ type vhost struct {
 	traps               map[string]bool
 }
 
-func (v *vhost) readRoutes(b []byte) {
+// hostLike reports whether the first segment of the path p holds "." or is
+// all digits. A path of this form can read as a host name or an address.
+func hostLike(p string) bool {
+	seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+	return strings.Contains(seg, ".") || (seg != "" && strings.Trim(seg, "0123456789") == "")
+}
+
+func (v *vhost) readRoutes(r *result, name string, b []byte) {
 	var m struct {
 		Routes []struct {
 			Path     string
 			Callback *struct{ Segment bool }
 			Headers  []struct{ Trap string }
 		}
+		Beacon *struct{ Script, Post string }
 	}
 	if json.Unmarshal(b, &m) != nil { // The loader refuses a bad route map.
 		return
 	}
+	if m.Beacon != nil && (hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post)) {
+		r.add("path-host-form", name)
+	}
 	for _, rt := range m.Routes {
+		if hostLike(rt.Path) {
+			r.add("path-host-form", name)
+		}
 		if rt.Callback != nil {
 			v.callbacks = append(v.callbacks, rt.Path)
 			if rt.Callback.Segment {
@@ -161,7 +189,7 @@ func checkTree(fsys fs.FS) []string {
 			continue
 		}
 		if parts[2] == routesName {
-			v.readRoutes(b)
+			v.readRoutes(r, name, b)
 			continue
 		}
 		r.page(name, b, v)
@@ -242,42 +270,85 @@ func (r *result) text(name string, b []byte) {
 }
 
 // page checks a file below a vhost with the script and URL rules. For a
-// template it also checks the marker and the action forms. The tag and
-// on-attribute rules run on the raw text and on the normal form.
+// template it also checks the marker and the action forms. The tag, style
+// and on-attribute rules run on the raw text and on the normal form.
 func (r *result) page(name string, b []byte, v *vhost) {
 	raw := string(b)
 	n := normalForm(raw)
 	if strings.HasSuffix(name, ".tmpl") {
-		r.template(name, raw, v)
+		r.template(name, raw, n, v)
 	}
 	for _, s := range []string{raw, n} {
 		low := strings.ToLower(s)
-		for _, t := range tags {
-			if strings.Contains(low, t) {
-				r.add("script("+t+")", name)
-			}
+		for _, m := range tagRe.FindAllStringSubmatch(s, -1) {
+			r.add("script(<"+strings.ToLower(m[1])+")", name)
+		}
+		if strings.Contains(low, "javascript:") {
+			r.add("script(javascript:)", name)
 		}
 		if onAttr.MatchString(s) || animOn.MatchString(s) {
 			r.add("on-attr", name)
+		}
+		if styleAttr.MatchString(s) {
+			r.add("style-attr", name)
+		}
+		if len(doctypes(low)) > 0 {
+			r.add("doctype", name)
+		}
+		if hexEscape.MatchString(s) {
+			r.add("percent-escape", name)
 		}
 	}
 	if external.MatchString(n) {
 		r.add("third-party", name)
 	}
-	if absoluteURL.MatchString(strings.ToLower(n)) {
+	n = svgNames.Replace(n)
+	low := strings.ToLower(n)
+	if absoluteURL.MatchString(low) {
 		r.add("absolute-url", name)
+	}
+	if scheme.MatchString(low) {
+		r.add("scheme", name)
+	}
+	if strings.Contains(low, "data:") {
+		r.add("data-url", name)
 	}
 	if strings.Contains(raw, `\`) || strings.Contains(n, `\`) {
 		r.add("backslash", name)
 	}
 }
 
-// template checks the marker (outside an HTML comment) and the actions of a
-// template. Each "{{" must start one of the two exact forms. The traps of
-// the vhost come from these forms only.
-func (r *result) template(name, text string, v *vhost) {
-	if !strings.Contains(htmlComment.ReplaceAllString(text, ""), marker) {
+// doctypes lists the bad declarations in the lower-case text s. An entity or
+// an attlist is bad. A doctype is bad unless it is "<!doctype html>".
+func doctypes(s string) []string {
+	var bad []string
+	for _, d := range []string{"<!entity", "<!attlist"} {
+		if strings.Contains(s, d) {
+			bad = append(bad, d)
+		}
+	}
+	for i := 0; ; {
+		j := strings.Index(s[i:], "<!doctype")
+		if j < 0 {
+			return bad
+		}
+		if i += j; !strings.HasPrefix(s[i:], "<!doctype html>") {
+			bad = append(bad, "<!doctype")
+		}
+		i += len("<!doctype")
+	}
+}
+
+// template checks the marker and the actions of a template. The marker must
+// be outside markup. Each "{{" must start one of the two exact forms, and no
+// "/" comes before it. The traps of the vhost come from these forms only.
+func (r *result) template(name, text, n string, v *vhost) {
+	visible := markup.ReplaceAllString(htmlComment.ReplaceAllString(text, ""), "")
+	if !strings.Contains(visible, marker) {
 		r.add("marker", name)
+	}
+	if strings.Contains(n, "/{{") {
+		r.add("action-after-slash", name)
 	}
 	forms := 0
 	for _, re := range actionForms {
@@ -343,17 +414,20 @@ func (r *result) instruction(text string, users []*vhost) {
 	for _, u := range urlForms {
 		add("instr-url("+u+")", strings.Contains(low, u))
 	}
-	joined := separators.ReplaceAllString(low, " ")
+	s := notAlnum.ReplaceAllString(low, " ")
+	compact := strings.ReplaceAll(s, " ", "")
 	for _, w := range denyWords {
-		add("instr-deny("+w+")", strings.Contains(low, w) ||
-			strings.Contains(joined, separators.ReplaceAllString(w, " ")))
+		add("instr-deny("+w+")", strings.Contains(s, notAlnum.ReplaceAllString(w, " ")))
 	}
-	for _, w := range denyJoined {
-		add("instr-deny("+w+")", regexp.MustCompile(`\b`+w).MatchString(joined))
+	for _, w := range denyCompact {
+		add("instr-deny("+w+")", strings.Contains(compact, w))
+	}
+	for w, re := range denyStart {
+		add("instr-deny("+w+")", re.MatchString(s))
 	}
 	add("instr-deny(rm -)", rmDash.MatchString(low))
-	add("instr-deny(instruction+override)", strings.Contains(low, "instruction") &&
-		(strings.Contains(low, "override") || regexp.MustCompile(`\bover ride`).MatchString(joined)))
+	add("instr-deny(instruction+override)",
+		strings.Contains(s, "instruction") && strings.Contains(compact, "override"))
 	for _, w := range strings.Fields(text) {
 		switch p, seg := strings.CutSuffix(w, "/"+tokenAction); {
 		case strings.HasPrefix(w, "/"):
@@ -361,6 +435,7 @@ func (r *result) instruction(text string, users []*vhost) {
 				p = "/"
 			}
 			add("instr-path", !pathOK(p, seg, users))
+			add("path-host-form", hostLike(p))
 		case strings.Contains(w, "/"):
 			add("instr-path", true)
 		default:

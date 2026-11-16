@@ -147,12 +147,28 @@ func cases() []row {
 		{"IPv6 literal", instr(baseInstr + " [::1]:9200"), at(trapsFile, "instr-host-form")},
 		{"decimal IP and port", instr(baseInstr + " 2130706433:22"), at(trapsFile, "instr-host-form")},
 		{"form and mail pass", instr(baseInstr + " confirm the form the mail"), nil},
-		{"API-KEY", instr(baseInstr + " API-KEY"), at(trapsFile, "instr-deny(api key)")},
-		{"api_key", instr(baseInstr + " api_key"), at(trapsFile, "instr-deny(api key)")},
+		{"API-KEY", instr(baseInstr + " API-KEY"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"api_key", instr(baseInstr + " api_key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"api+key", instr(baseInstr + " api+key"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
+		{"API*KEY", instr(baseInstr + " API*KEY"), at(trapsFile, "instr-deny(api key)", "instr-deny(apikey)")},
 		{"apikey", instr(baseInstr + " apikey"), at(trapsFile, "instr-deny(apikey)")},
-		{"two spaces", instr(baseInstr + " system  prompt"), at(trapsFile, "instr-deny(system prompt)")},
+		{"getApiKey", instr(baseInstr + " getApiKey"), at(trapsFile, "instr-deny(apikey)")},
+		{"two spaces", instr(baseInstr + " system  prompt"),
+			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)")},
+		{"system+prompt", instr(baseInstr + " system+prompt"),
+			at(trapsFile, "instr-deny(system prompt)", "instr-deny(systemprompt)")},
 		{"systemprompt", instr(baseInstr + " systemprompt"), at(trapsFile, "instr-deny(systemprompt)")},
-		{"private_key", instr(baseInstr + " private_key"), at(trapsFile, "instr-deny(private key)")},
+		{"yourSystemPrompt", instr(baseInstr + " yourSystemPrompt"), at(trapsFile, "instr-deny(systemprompt)")},
+		{"private_key", instr(baseInstr + " private_key"),
+			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)")},
+		{"private~key", instr(baseInstr + " private~key"),
+			at(trapsFile, "instr-deny(private key)", "instr-deny(privatekey)")},
+		{"userPrivateKey", instr(baseInstr + " userPrivateKey"), at(trapsFile, "instr-deny(privatekey)")},
+		{"pass*word", instr(baseInstr + " pass*word"), at(trapsFile, "instr-deny(pass word)")},
+		{"x_rm -rf", instr(baseInstr + " x_rm -rf"), at(trapsFile, "instr-deny(rm -)")},
+		{"quoted rm", instr(baseInstr + " 'rm' -rf"), at(trapsFile, "instr-deny(rm -)")},
+		{"over+ride", instr(baseInstr + " instruction over+ride"),
+			at(trapsFile, "instr-deny(instruction+override)")},
 		{"e-mail", instr(baseInstr + " e-mail"), at(trapsFile, "instr-deny(e mail)")},
 		{"privatekey", instr(baseInstr + " privatekey"), at(trapsFile, "instr-deny(privatekey)")},
 		{"pass word", instr(baseInstr + " pass word"), at(trapsFile, "instr-deny(pass word)")},
@@ -214,7 +230,11 @@ func cases() []row {
 		"credential,secret,api key,private key,ssh,.env,cookie,history,"+
 		"conversation,email,curl,wget,sudo,rm -,base64,execute,shell,download,"+
 		"install", ",") {
-		rows = append(rows, row{"deny " + w, instr(baseInstr + " " + strings.ToUpper(w)), at(trapsFile, "instr-deny("+w+")")})
+		rules := rs("instr-deny(" + w + ")")
+		if compact := strings.ReplaceAll(w, " ", ""); slices.Contains([]string{"apikey", "systemprompt", "privatekey"}, compact) {
+			rules = append(rules, "instr-deny("+compact+")")
+		}
+		rows = append(rows, row{"deny " + w, instr(baseInstr + " " + strings.ToUpper(w)), at(trapsFile, rules...)})
 	}
 	// Template action rows. They apply to a template only.
 	for _, f := range []struct {
@@ -236,29 +256,31 @@ func cases() []row {
 	}
 	// Script and URL rules apply to a template and to an asset.
 	both3 := rs("third-party", "absolute-url")
+	full3 := rs("third-party", "absolute-url", "scheme")
+	abs2 := rs("absolute-url", "scheme")
 	for _, f := range []struct {
 		text  string
 		rules []string
 	}{
 		{"<script>x</script>", rs("script(<script)")},
 		{"<SCRIPT src=x>", rs("script(<script)")},
-		{`<a href="javascript:x">`, rs("script(javascript:)")},
+		{`<a href="javascript:x">`, rs("script(javascript:)", "scheme")},
 		{"<iframe>", rs("script(<iframe)")}, {"<object>", rs("script(<object)")},
 		{"<embed>", rs("script(<embed)")}, {"<foreignObject>", rs("script(<foreignobject)")},
 		{"<img onerror=x>", rs("on-attr")}, {`<svg onload="x">`, rs("on-attr")},
 		{"<svg/onload=x>", rs("on-attr")}, {`<img src=x"onerror=y>`, rs("on-attr")},
 		{`<svg><set attributeName="onmouseover" to="x"/></svg>`, rs("on-attr")},
-		{`<a href="http://x">`, both3}, {`<img src='https://x'>`, both3},
-		{"<form action=//x>", both3}, {`HREF = "HTTP://x"`, both3},
-		{"a{background:url(https://x)}", both3}, {"a{background:url(//evil.example/x)}", both3},
-		{`<a href="ftp://evil.example/x">`, rs("absolute-url")},
-		{`<a href="wss://evil.example/x">`, rs("absolute-url")},
-		{`<img src="ftp://evil.example/x">`, rs("absolute-url")},
-		{`<meta http-equiv=refresh content="0;url=ftp://evil.example/">`, rs("absolute-url")},
-		{`<img srcset="https://evil.example/x 1x">`, rs("absolute-url")},
+		{`<a href="http://x">`, full3}, {`<img src='https://x'>`, full3},
+		{"<form action=//x>", both3}, {`HREF = "HTTP://x"`, full3},
+		{"a{background:url(https://x)}", full3}, {"a{background:url(//evil.example/x)}", both3},
+		{`<a href="ftp://evil.example/x">`, abs2},
+		{`<a href="wss://evil.example/x">`, abs2},
+		{`<img src="ftp://evil.example/x">`, abs2},
+		{`<meta http-equiv=refresh content="0;url=ftp://evil.example/">`, abs2},
+		{`<img srcset="https://evil.example/x 1x">`, abs2},
 		{`<img srcset="a.png 1x,//evil.example/x 2x">`, rs("absolute-url")},
-		{`<style>@import 'https://evil.example/x.css';</style>`, rs("absolute-url")},
-		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, rs("absolute-url")},
+		{`<style>@import 'https://evil.example/x.css';</style>`, abs2},
+		{`<meta http-equiv=refresh content="0;url=https://evil.example">`, abs2},
 		// Character references, control runes and escapes.
 		{"<img on&#x65;rror=x>", rs("on-attr")},
 		{"java&#x09;script:", rs("script(javascript:)")},
@@ -266,11 +288,11 @@ func cases() []row {
 		{"&#x6a;avascript:", rs("script(javascript:)")},
 		{"java\tscript:", rs("script(javascript:)")},
 		{"java\nscript:", rs("script(javascript:)")},
-		{"<a href=\"ht\ttps://evil.example/x\">", both3},
-		{"<a href=\"htt\nps://evil.example/x\">", both3},
-		{"<a href=\"&#" + "104;ttps://evil.example/x\">", both3},
-		{`<a href="https&colon;//evil.example/x">`, both3},
-		{`<a href="ht&#` + `13;tps://evil.example/x">`, both3},
+		{"<a href=\"ht\ttps://evil.example/x\">", full3},
+		{"<a href=\"htt\nps://evil.example/x\">", full3},
+		{"<a href=\"&#" + "104;ttps://evil.example/x\">", full3},
+		{`<a href="https&colon;//evil.example/x">`, full3},
+		{`<a href="ht&#` + `13;tps://evil.example/x">`, full3},
 		{`<a href="&#` + `1;//evil.example/x">`, both3},
 		{`<img src="&#` + `11;//evil.example/x">`, both3},
 		{`<img src="&#` + `127;//evil.example/x">`, both3},
@@ -281,12 +303,96 @@ func cases() []row {
 		{`a{background:url(https\://evil.example/x)}`, rs("backslash", "absolute-url")},
 		{`@import "https\3a\2f\2f evil.example/x.css"`, rs("backslash")},
 		{`a{background:url(&bsol;2f&bsol;2f evil.example/x)}`, rs("backslash")},
+		// A double slash in any position, and a space or tab before it.
+		{`<meta content="0;//evil.example/x">`, rs("absolute-url")},
+		{"<meta content=\"0;\t//evil.example/x\">", rs("absolute-url")},
+		{`<meta content="0 ;//evil.example/x">`, rs("absolute-url")},
+		// Schemes, data URLs and percent escapes.
+		{`<link rel=stylesheet href="data:text/css,@import%20url(https%3A%2F%2Fevil.example%2Fx.css);">`,
+			rs("scheme", "data-url", "percent-escape")},
+		{`<style>@import "data:text/css,@import%20'https%3A%2F%2Fevil.example%2Fx.css'";</style>`,
+			rs("scheme", "data-url", "percent-escape")},
+		{`<a href="data:text/css;base64,QUJD REVG R0hJ">`, rs("scheme", "data-url")},
+		{`<a href="mailto:x@evil.example">`, rs("scheme")},
+		{`<a href="tel:1">`, rs("scheme")}, {`<a href="sms:1">`, rs("scheme")},
+		{`<p>see (see: x)</p>`, rs("scheme")},
+		{`<p>caf&#` + `37;41</p>`, rs("percent-escape")},
+		// Style attribute, prefixed tags and DOCTYPE.
+		{`<p style="display:none">x</p>`, rs("style-attr", "scheme")},
+		{`<svg><rect style="fill:red"/></svg>`, rs("style-attr", "scheme")},
+		{`<s:script xmlns:s="x">fetch('/x')</s:script>`, rs("script(<script)")},
+		{`<x:iframe src="x">`, rs("script(<iframe)")},
+		{`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY c ":">]><svg xmlns="http://www.w3.org/2000/svg">` +
+			`<a href="https&c;//evil.example/x.png">x</a></svg>`, rs("doctype", "absolute-url")},
+		{`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY j "javas">]><svg><a href="&j;cript:x()">x</a></svg>`,
+			rs("doctype")},
+		{`<!ATTLIST a b CDATA "c">`, rs("doctype")},
+		{`<!DOCTYPE svg>`, rs("doctype")},
+		// A line feed or a tab before an event attribute.
+		{"<img src=x\nonerror=y>", rs("on-attr")}, {"<img src=x\tonerror=y>", rs("on-attr")},
 	} {
 		rows = append(rows,
 			row{"page " + f.text, pageWith(f.text), at(pagePath, f.rules...)},
 			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
 	}
+	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
+	rows = append(rows, badHost(longHost(53)), badHost("a-.phantom-ref.internal"))
+	rows = append(rows, extraRows()...)
 	return rows
+}
+
+// longHost gives a valid vhost name of 201 bytes plus n.
+func longHost(n int) string {
+	l := strings.Repeat("a", 63)
+	return l + "." + l + "." + l + "." + strings.Repeat("a", n) + ".internal"
+}
+
+func routesOf(path string) string {
+	return `{"routes":[{"path":"` + path + `","callback":{"segment":true}}]}`
+}
+
+// extraRows are the rows for the rules of template actions, host-like paths,
+// the marker outside markup, and the tree entries of the wrong type.
+func extraRows() []row {
+	z := "vhosts/" + host + "/"
+	hostPath := func(p string) row {
+		return row{"host-like path " + p, both(put(routes, routesOf(p)), instr(marker+": request "+p+"/{{.Token}} now")),
+			append(at(routes, "path-host-form"), at(trapsFile, "path-host-form")...)}
+	}
+	return []row{
+		{"slash before an action", pageWith(`<img src="/{{index .Trap "t1"}}" alt="x">`), at(pagePath, "action-after-slash")},
+		{"slash before an action in text", pageWith(`open /{{index .Trap "t1"}}`), at(pagePath, "action-after-slash")},
+		{"slash and LF before an action", pageWith("<a href=\"/\n{{index .Trap \"t1\"}}\">x</a>"),
+			at(pagePath, "action-after-slash")},
+		hostPath("/evil.example"), hostPath("/169.254.169.254/latest/meta-data"), hostPath("/123/x"),
+		{"path with a version segment", both(put(routes, routesOf("/v2/x")), instr(marker+": request /v2/x/{{.Token}} now")), nil},
+		{"beacon path with a dot", put(routes, `{"routes":[{"path":"/ref/cb","callback":{"segment":true}}],`+
+			`"beacon":{"script":"/9.js","post":"/b"}}`), at(routes, "path-host-form")},
+		{"SVG namespace names", put(z+"logo.svg", `<svg xmlns="http://www.w3.org/2000/svg" `+
+			`xmlns:xlink="http://www.w3.org/1999/xlink"><title>ok</title></svg>`), nil},
+		{"other namespace name", put(z+"logo.svg", `<svg xmlns="http://evil.example/svg">`),
+			at(z+"logo.svg", "absolute-url", "scheme")},
+		{"asset that starts with a double slash", put(z+"logo.svg", "//evil.example/x"), at(z+"logo.svg", "absolute-url")},
+		{"percent sign in text", pageWith("<p>width 100%</p>"), nil},
+		{"text with a colon after a line start", pageWith("Disallow: /x"), nil},
+		{"JSON asset", put(z+"logo.svg", `{"name": "x", "url": "/a"}`), nil},
+		{"style block", both(pageWith(`<style>.h{display:none}</style><p class="h">x</p>`)), nil},
+		{"DOCTYPE html", put(pagePath, "<!DOCTYPE html>"+basePage), nil},
+		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"marker in an attribute", put(pagePath, `<p title="`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"manifest as a directory", func(m fstest.MapFS) {
+			delete(m, "manifest.json")
+			m["manifest.json/x"] = &fstest.MapFile{Data: []byte("x")}
+		}, at("manifest.json", "tree-top")},
+		{"vhosts as a file", func(m fstest.MapFS) {
+			delete(m, pagePath)
+			delete(m, routes)
+			m["vhosts"] = &fstest.MapFile{Data: []byte("x")}
+		}, append(at("vhosts", "tree-top"), at(trapsFile, "instr-path")...)},
+		{"token name that is not the token", instr(marker + ": request /ref/cb {{.Tok}}"), at(trapsFile, "instr-token")},
+	}
 }
 
 func TestTS36RefusedInputs(t *testing.T) {
