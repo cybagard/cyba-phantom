@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,50 +56,87 @@ func countOf(t *testing.T, db *sql.DB, q string, args ...any) (n int) {
 	return n
 }
 
-// TestTU27_CapRefusalStopsTheStart gives the schedule a store path that is
-// not the open database. So SetMaxBytes refuses the cap. serve must end with
-// exit 1 and one fixed line. The schedule must not run, not even the run at
-// the start, which would write the mark. A refusal that is only logged leaves
-// the sensor running with the cap off (T-U-27, SEC-41).
+// TestTU27_CapRefusalStopsTheStart has two cases. In the first, the schedule
+// gets a store path that is not the open database. So SetMaxBytes refuses the
+// cap. In the second, the cap is 0, and the real store is open. serve must end
+// with exit 1 and one fixed line. The schedule must not run, not even the run
+// at the start, which would write the mark. A refusal that is only logged
+// leaves the sensor running with the cap off (T-U-27, SEC-40).
 func TestTU27_CapRefusalStopsTheStart(t *testing.T) {
-	https, plain, ca := openListeners(t)
-	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
-	p := tempState(t, cfg)
-	p.MaxBytes = 1 << 30
-	d := realDeps
-	// The database opens as other.db, and the schedule gets events.db.
-	var opened atomic.Pointer[sql.DB]
-	d.openStore = func(r *os.Root, _ string, o store.Options) (*sql.DB, error) {
-		db, err := store.Open(r, "other.db", o)
-		opened.Store(db)
-		return db, err
+	cases := []struct {
+		name     string
+		maxBytes int64
+		dbName   string // the name that the database opens as
+	}{
+		{"name differs", 1 << 30, "other.db"},
+		{"cap 0", 0, "events.db"},
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), netWait)
-	defer cancel()
-	var stderr strings.Builder
-	code := serveWith(ctx, cancel, nil, cfg, content{}, p, d, io.Discard, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "phantom: retention cap does not start\n") {
-		t.Errorf("exit %d, stderr %q; want exit 1 and the cap line", code, stderr.String())
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			https, plain, ca := openListeners(t)
+			cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
+			p := tempState(t, cfg)
+			p.MaxBytes = c.maxBytes
+			d := realDeps
+			// With other.db, the schedule gets events.db, a name that differs.
+			var opened atomic.Pointer[sql.DB]
+			d.openStore = func(r *os.Root, _ string, o store.Options) (*sql.DB, error) {
+				db, err := store.Open(r, c.dbName, o)
+				opened.Store(db)
+				return db, err
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), netWait)
+			defer cancel()
+			var stderr strings.Builder
+			code := serveWith(ctx, cancel, nil, cfg, content{}, p, d, io.Discard, &stderr)
+			if code != 1 || !strings.Contains(stderr.String(), "phantom: retention cap does not start\n") {
+				t.Errorf("exit %d, stderr %q; want exit 1 and the cap line", code, stderr.String())
+			}
+			// The state directory is empty at the start. A refused cap gives no
+			// checkpointer, so the start makes no signing key.
+			for _, name := range []string{"keys/checkpoint.key", tlog.VKeyName} {
+				if _, err := os.Lstat(filepath.Join(p.Root, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s after the refusal: Lstat gave %v, want a missing file", name, err)
+				}
+			}
+			// The refusal must free the ports and the store, as a stop does.
+			for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
+				// A listener that is still open waits for a client. The
+				// deadline ends the wait with a timeout error, not ErrClosed.
+				ln.Listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+				if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+					t.Errorf("%s listener after the refusal: Accept gave %v, want a closed listener", name, err)
+				}
+			}
+			if db := opened.Load(); db == nil {
+				t.Error("the store did not open")
+			} else if err := db.Ping(); err == nil {
+				t.Error("the store is open after the refusal")
+			}
+			withState(t, p, c.dbName, func(db *sql.DB) {
+				if n := countOf(t, db, "SELECT count(*) FROM meta WHERE key = 'retention_last'"); n != 0 {
+					t.Errorf("%d retention marks: the schedule ran after the refusal", n)
+				}
+			})
+		})
 	}
-	// The refusal must free the ports and the store, as a stop does.
-	for name, ln := range map[string]*trackedListener{"https": https, "plain": plain} {
-		// A listener that is still open waits for a client. The deadline ends
-		// the wait. It gives a timeout error, not a closed one.
-		ln.Listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
-		if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
-			t.Errorf("%s listener after the refusal: Accept gave %v, want a closed listener", name, err)
-		}
+}
+
+// TestTU27_ScheduleRefusesNoCap checks that the schedule of the start refuses
+// a cap of 0 or less. SetMaxBytes reads such a cap as no cap. The start must
+// not run with the cap off. The schedule gives an error and no run function
+// (T-U-27, SEC-40).
+func TestTU27_ScheduleRefusesNoCap(t *testing.T) {
+	for _, maxBytes := range []int64{0, -1} {
+		t.Run(strconv.FormatInt(maxBytes, 10), func(t *testing.T) {
+			// The refusal comes before the schedule reads the writer.
+			p := startParams{MaxBytes: maxBytes, StorePath: "events.db"}
+			run, err := realDeps.schedule(nil, p, slog.New(slog.DiscardHandler))
+			if err == nil || run != nil {
+				t.Errorf("schedule with cap %d gave error %v and run %v, want an error and no run", maxBytes, err, run != nil)
+			}
+		})
 	}
-	if db := opened.Load(); db == nil {
-		t.Error("the store did not open")
-	} else if err := db.Ping(); err == nil {
-		t.Error("the store is open after the refusal")
-	}
-	withState(t, p, "other.db", func(db *sql.DB) {
-		if n := countOf(t, db, "SELECT count(*) FROM meta WHERE key = 'retention_last'"); n != 0 {
-			t.Errorf("%d retention marks: the schedule ran after the refusal", n)
-		}
-	})
 }
 
 // TestTI13_StartedSensorKeepsTheCap runs one retention run in the started

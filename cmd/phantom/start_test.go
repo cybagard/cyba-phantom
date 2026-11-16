@@ -73,7 +73,7 @@ func testParams(t *testing.T, storePath string) startParams {
 	if err := os.Chmod(root, 0o700); err != nil { // The log refuses a state directory with group or other bits.
 		t.Fatal(err)
 	}
-	return startParams{Root: root, StorePath: storePath, TlogDir: "tlog", Origin: "test/origin", Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90}
+	return startParams{Root: root, StorePath: storePath, TlogDir: "tlog", Origin: "test/origin", Interval: time.Hour, BodyPrefix: true, IPDays: 7, RawDays: 30, EventsDays: 90, MaxBytes: 1 << 30}
 }
 
 func launch(t *testing.T, p startParams, d startDeps) (*storePart, *event.Queue) {
