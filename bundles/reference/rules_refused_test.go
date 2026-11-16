@@ -355,6 +355,7 @@ func cases() []row {
 		{`<meta content="0;ms-settings:x">`, rs("scheme")},
 		{`<svg><animate attributeName="href" values="/a;mailto:x@evil.example"/></svg>`, rs("scheme")},
 		{`<a href=" mailto:x">`, rs("scheme")},
+		{`<a href=" mailto: x">`, rs("scheme")},
 		{`<a href=x;tel:1>`, rs("scheme")},
 		{`<p/style="x">`, rs("style-attr")},
 		{`<p>see (see: x)</p>`, rs("scheme")},
