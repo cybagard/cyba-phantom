@@ -332,26 +332,34 @@ var rollupPickDay = rollupNextDay
 // the mark. ok is false in three cases. There is no such day. Or a request row
 // before the cutoff is left. Or the day is not over at the cutoff. A day after
 // year 9999 is never over. The step parses no day text of a day that is not
-// done.
+// done. The day is the one that rollupWorkDay gives.
 func rollupNextDay(ctx context.Context, tx *sql.Tx, cutoff int64) (start int64, ok bool, err error) {
 	var one int
 	if left, err := scanOne(tx.QueryRowContext(ctx, rollupLeftSQL, cutoff), &one); left || err != nil {
 		return 0, false, err
 	}
+	if start, ok, err = rollupWorkDay(ctx, tx); err != nil || !ok {
+		return 0, false, err
+	}
+	return start, start+rollupDayMs <= cutoff && start < rollupFarMs, nil
+}
+
+// rollupWorkDay returns the start of the day that the day step works on next,
+// in unix ms. This is the day in progress, or the first day with a callback or
+// a seen row after the mark. ok is false when there is no such day.
+func rollupWorkDay(ctx context.Context, tx *sql.Tx) (start int64, ok bool, err error) {
 	v, inProgress, err := metaGet(ctx, tx, rollupPosKey)
 	if err != nil {
 		return 0, false, err
 	}
-	if inProgress {
-		pos, err := parseRollupPos(v)
-		if err != nil {
-			return 0, false, err
-		}
-		start = rollupDayStart(pos.ts)
-	} else if start, ok, err = rollupFirstDay(ctx, tx); err != nil || !ok {
+	if !inProgress {
+		return rollupFirstDay(ctx, tx)
+	}
+	pos, err := parseRollupPos(v)
+	if err != nil {
 		return 0, false, err
 	}
-	return start, start+rollupDayMs <= cutoff && start < rollupFarMs, nil
+	return rollupDayStart(pos.ts), true, nil
 }
 
 // rollupFirstDay returns the start of the first day after the mark that has a

@@ -283,6 +283,185 @@ func TestTU27StartRunDoesNotHoldBackTheNextDay(t *testing.T) {
 	}
 }
 
+// T-U-27: a step back of 23 h 58 min at each wall 03:14 gives no later day.
+// The wall clock never gets to 03:15 of it. In 10 d, the rule of 25 h gives a
+// run in each 25 h of monotonic time. The address of a session of 16 d is NULL
+// at the end.
+func TestTU27StepBackEachDayStillRunsEach25Hours(t *testing.T) {
+	r := newRig(t, 8)
+	start := time.Date(2027, 2, 10, 3, 13, 0, 0, time.UTC)
+	setMark(t, r.db, start.Add(-time.Hour))
+	addSessions(t, r.db, "old", 0, 1, msAgo(start, 6*oneDay), 0, "203.0.113.7")
+	s, f := fakeSchedule(t, r, time.UTC, start, nil)
+	run := direct(r)
+	var at []time.Duration
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		at = append(at, f.mono())
+		return run(ctx, steps)
+	}
+	s.begin(context.Background())
+	for range 10 * 24 * 60 {
+		minutes(s, f, 1)
+		if w := f.wall(); w.Hour() == 3 && w.Minute() == 14 {
+			f.jump(-(oneDay - 2*time.Minute))
+			s.check(context.Background())
+		}
+	}
+	prev := time.Duration(0)
+	for _, a := range at {
+		if a-prev > catchUp {
+			t.Fatalf("runs at %v: a gap of %v, want at most 25 h", at, a-prev)
+		}
+		prev = a
+	}
+	if len(at) < 9 || 10*oneDay-prev > catchUp {
+		t.Fatalf("%d runs at %v in 10 d, want 9 or more", len(at), at)
+	}
+	if got := nullIPs(t, r.db); !got["old0"] {
+		t.Fatalf("the address of 16 d is not NULL: %v", got)
+	}
+}
+
+// T-U-27: the mark is of the retention day before the start. The wall clock
+// steps back 1 h before the first check. The last run day stays the day
+// before. So the next check runs for the retention day of the start.
+func TestTU27StepBackBeforeTheFirstCheckRunsTheStartDay(t *testing.T) {
+	s, f, runs := stepRig(t, day10, 23*time.Hour)
+	f.jump(-time.Hour)
+	s.check(context.Background())
+	minutes(s, f, 1)
+	wantRuns(t, runs, "02-10 11:01")
+}
+
+// T-U-27: a normal week gives one run for each date. The rule of 25 h adds no
+// run. In Pacific/Chatham, the day of the DST repeat is 25 h long. The run of
+// the next date is 25 h after it, and that date gives one run.
+func TestTU27NormalWeekAndDSTRepeatDayGiveOneRunForEachDate(t *testing.T) {
+	s, f, runs := stepRig(t, day10, time.Hour)
+	minutes(s, f, 7*24*60)
+	wantRuns(t, runs, "02-11 03:15", "02-12 03:15", "02-13 03:15", "02-14 03:15", "02-15 03:15", "02-16 03:15", "02-17 03:15")
+
+	loc := chatham(t)
+	r := newRig(t, 8)
+	start := time.Date(2026, 4, 4, 0, 0, 0, 0, loc)
+	setMark(t, r.db, start.Add(-time.Hour))
+	cs, cf := fakeSchedule(t, r, loc, start, nil)
+	var got []string
+	cs.run = func(context.Context, []retentionStep) error { got = append(got, cf.local(loc)); return nil }
+	cs.begin(context.Background())
+	for end := time.Date(2026, 4, 7, 0, 0, 0, 0, loc); cf.wall().Before(end); cf.advance(time.Minute) {
+		cs.check(context.Background())
+	}
+	if want := "[03:15 +1345 03:15 +1345 03:15 +1245]"; fmt.Sprint(got) != want {
+		t.Fatalf("runs %v, want %s", got, want)
+	}
+}
+
+// frozen advances the monotonic clock by n minutes and checks at each minute.
+// The wall clock steps back by the same time, so it does not move.
+func frozen(s *Schedule, f *fakeClock, n int) {
+	for range n {
+		f.advance(time.Minute)
+		f.jump(-time.Minute)
+		s.check(context.Background())
+	}
+}
+
+// T-U-27: a process with no run gets a run 25 h after its start, and no run
+// 1 min before. The wall clock does not move, so no later day starts a run.
+// The next run is 25 h after the start of that run.
+func TestTU27ProcessWithNoRunGetsARunAfter25Hours(t *testing.T) {
+	s, f, runs := stepRig(t, day10, time.Hour)
+	frozen(s, f, 25*60-1)
+	wantRuns(t, runs)
+	frozen(s, f, 1)
+	wantRuns(t, runs, "02-10 12:00")
+	frozen(s, f, 25*60-1)
+	wantRuns(t, runs, "02-10 12:00")
+	frozen(s, f, 1)
+	wantRuns(t, runs, "02-10 12:00", "02-10 12:00")
+}
+
+// T-U-27: the run at the start counts for the rule of 25 h. It starts at 10 h
+// of monotonic time. The next run is 25 h later, not 15 h after it.
+func TestTU27StartRunCountsForThe25HourRule(t *testing.T) {
+	r := newRig(t, 8)
+	s, f := fakeSchedule(t, r, time.UTC, day10, nil)
+	runs := &[]string{}
+	s.run = func(context.Context, []retentionStep) error {
+		*runs = append(*runs, f.wall().Format("01-02 15:04"))
+		return nil
+	}
+	f.advance(10 * time.Hour)
+	f.jump(-10 * time.Hour)
+	s.begin(context.Background())
+	wantRuns(t, runs, "02-10 12:00")
+	frozen(s, f, 25*60-1)
+	wantRuns(t, runs, "02-10 12:00")
+	frozen(s, f, 1)
+	wantRuns(t, runs, "02-10 12:00", "02-10 12:00")
+}
+
+// T-U-27: a run of the rule of 25 h counts for the gap of 20 h. A step of the
+// wall clock to the next retention day, right after the run, gives no run.
+func TestTU27RunOf25HoursCountsForTheGap(t *testing.T) {
+	s, f, runs := stepRig(t, day10, time.Hour)
+	frozen(s, f, 25*60)
+	wantRuns(t, runs, "02-10 12:00")
+	f.jump(16 * time.Hour)
+	s.check(context.Background())
+	wantRuns(t, runs, "02-10 12:00")
+}
+
+// T-U-27: the rule of 25 h applies at a check with a step back. The last run
+// day then takes the retention day of the check, and not the earlier day.
+func TestTU27RuleOf25HoursRunsAtAStepBack(t *testing.T) {
+	s, f, runs := stepRig(t, day10, 23*time.Hour)
+	f.advance(25 * time.Hour)
+	f.jump(-26 * time.Hour)
+	s.check(context.Background())
+	wantRuns(t, runs, "02-10 11:00")
+	if s.StepBacks() != 1 || s.lastDay != "2027-02-10" {
+		t.Fatalf("%d step backs, last run day %s; want 1 and 2027-02-10", s.StepBacks(), s.lastDay)
+	}
+}
+
+// T-U-27: a check starts at most one run. A check 25 h after the start is
+// both of a later retention day and after 25 h.
+func TestTU27CheckStartsOneRun(t *testing.T) {
+	s, f, runs := stepRig(t, day10, time.Hour)
+	f.advance(25 * time.Hour)
+	s.check(context.Background())
+	wantRuns(t, runs, "02-11 13:00")
+}
+
+// T-U-27: each step back adds 1 to the count and writes one fixed log line. No
+// line has a digit, so none has a time or a duration.
+func TestTU27StepBacksCountAndWriteOneLineEach(t *testing.T) {
+	var buf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}}))
+	r := newRig(t, 8)
+	setMark(t, r.db, day10.Add(-time.Hour))
+	s, f := fakeSchedule(t, r, time.UTC, day10, lg)
+	s.run = func(context.Context, []retentionStep) error { return nil }
+	s.begin(context.Background())
+	for range 11 {
+		f.advance(time.Minute)
+		s.check(context.Background())
+		f.jump(-time.Minute)
+		s.check(context.Background())
+	}
+	want := strings.Repeat("level=WARN msg=\"wall clock stepped back\"\n", 11)
+	if got := buf.String(); s.StepBacks() != 11 || got != want || strings.ContainsAny(got, "0123456789") {
+		t.Fatalf("%d step backs, log %q; want 11 and %q", s.StepBacks(), got, want)
+	}
+}
+
 // T-U-27: each run has a deadline of at most 6 h. A run can return an error
 // that is not the stop of the schedule. Then 1 is added to the early-end count.
 // The first one writes one log line.
@@ -790,5 +969,61 @@ func TestTU27RollupStepRunsBeforeTheDayStep(t *testing.T) {
 	s.runOnce(context.Background())
 	if got, want := aggregates(t, r.db), "2027-01-10|a|human|f|1|3|2"; got != want {
 		t.Fatalf("aggregates %q, want %q", got, want)
+	}
+}
+
+// T-U-27: the writer stores a request row before the raw cutoff after the
+// roll-up step and before the day step. The day step stops, so it counts no
+// callback of the day. The event delete of the same run, with events equal to
+// raw, keeps the callbacks of that day. The next run counts them in
+// aggregate_day, and then deletes them.
+func TestTU27LateRequestRowKeepsTheCallbacksOfADayNotDone(t *testing.T) {
+	r, s, _ := prodRig(t, 0, nil)
+	s.events = 30
+	addSession(t, r.db, "s1", "human", "f")
+	mustExec(t, r.db, "UPDATE session SET last_seen = ?", rollTDel.UnixMilli())
+	day := msAgo(rollTDel, 40*oneDay)
+	addEvents(t, r.db, "request", 1, day, 0, "s1", "a")
+	addEvents(t, r.db, "callback", 2, day+1000, 1000, "s1", "a")
+	run, late := s.run, false
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		dayStep := steps[1]
+		steps[1] = func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			if !late {
+				late = true
+				_, err := tx.ExecContext(ctx, "INSERT INTO event (ts, session_id, kind, vhost) VALUES (?, 's1', 'request', 'a')", day+500)
+				if err != nil {
+					return 0, err
+				}
+			}
+			return dayStep(ctx, tx, limit)
+		}
+		return run(ctx, steps)
+	}
+	s.runOnce(context.Background())
+	if cb, req := count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'callback'"), count(t, r.db, "SELECT count(*) FROM event WHERE kind = 'request'"); !late || cb != 2 || req != 1 {
+		t.Fatalf("%d callbacks and %d requests after the first run; want 2 and 1", cb, req)
+	}
+	s.run = run
+	s.runOnce(context.Background())
+	if got, want := aggregates(t, r.db), rollupDay(day)+"|a|human|f|1|2|2"; got != want || r.events() != 0 {
+		t.Fatalf("aggregates %q, %d events; want %q and 0", got, r.events(), want)
+	}
+}
+
+// T-U-27: a database has no callback row and no seen row. It has no done mark
+// and no day for the day step. The event delete still removes its old
+// score_change row. The raw delete removes the old refused and beacon rows
+// before the event step runs.
+func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
+	r, s, _ := prodRig(t, 0, nil)
+	old := msAgo(rollTDel, 100*oneDay)
+	addEventAt(t, r.db, "score_change", old)
+	addEvents(t, r.db, "refused", 1, old, 0, nil, nil)
+	addEvents(t, r.db, "beacon", 1, old, 0, nil, nil)
+	addEventAt(t, r.db, "score_change", msAgo(rollTDel, oneDay))
+	s.runOnce(context.Background())
+	if r.events() != 1 || count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'retention_rollup_done'") != 0 {
+		t.Fatalf("%d events left, want 1 with no done mark", r.events())
 	}
 }

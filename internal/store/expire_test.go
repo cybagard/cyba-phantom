@@ -47,8 +47,11 @@ func addEventAt(tb testing.TB, db *sql.DB, kind string, at int64) {
 
 var expireCases = []expireCase{
 	{
+		// The mark says that the day step is done with each day. Else the event
+		// step keeps the callbacks of the days that the day step has not done.
 		name: "event", table: "event", key: "ts", mk: newEventExpireStep, stmt: deleteEventSQL, cost: 1, per: 3,
-		plan: "SEARCH event USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSEARCH event USING COVERING INDEX event_ts (ts<?)",
+		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") },
+		plan:  "SEARCH event USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSEARCH event USING COVERING INDEX event_ts (ts<?)",
 		add: func(tb testing.TB, db *sql.DB, at int64) {
 			for _, k := range []string{"request", "callback", "score_change"} {
 				addEventAt(tb, db, k, at)
