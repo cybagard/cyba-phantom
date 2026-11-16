@@ -386,6 +386,7 @@ func cases() []row {
 		{`<animate attributeName=src values="x"/>`, rs("anim-target")},
 		{`<animate attributeName='XLINK:HREF' values="x"/>`, rs("anim-target", "scheme")},
 		{`<animate attributeName="fill" values="red"/>`, nil},
+		{`<animate attributeName="&#x68;ref" values="x"/>`, rs("anim-target")},
 		{`<p>http:x</p>`, rs("absolute-url")}, {`<p>https:x</p>`, rs("absolute-url")},
 		{`<!ENTITY a "b">`, rs("doctype")},
 		// A line feed or a tab before an event attribute.
