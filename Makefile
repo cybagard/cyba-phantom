@@ -156,14 +156,14 @@ coverage:
 
 # T-I-16: the fill tests need a small tmpfs. PHANTOM_DISKFULL names a directory
 # on it, and /dev/shm must be a small tmpfs too. The fill job of CI sets both
-# up. Without them each test skips. This target fails, and does not pass, when
-# go test fails, when a test skips or when a named test has no PASS line.
+# up. Without them each test skips. The target fails when go test fails, a test
+# skips or a named test lacks a PASS line.
 space := $(subst ,, )
 FILL_TESTS := TestTI16_FullSmallFileSystemPausesTheWriter TestTI16_StorePartNotHealthyOnAFullFileSystem TestTI16_DecoyServesWhilePaused
 FILL_RUN := ^($(subst $(space),|,$(FILL_TESTS)))$$
 fill:
 	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
-	$(GO) test -p 1 -count=1 -v -run '$(FILL_RUN)' ./internal/store ./cmd/phantom >"$$log" 2>&1; rc=$$?; \
+	$(GO) test -race -timeout 5m -p 1 -count=1 -v -run '$(FILL_RUN)' ./internal/store ./cmd/phantom >"$$log" 2>&1; rc=$$?; \
 	cat "$$log"; \
 	[ "$$rc" -eq 0 ] || { echo "fill FAIL: go test exited with status $$rc"; exit 1; }; \
 	! grep -q -- '--- SKIP' "$$log" || { echo "fill FAIL: a test skipped"; exit 1; }; \

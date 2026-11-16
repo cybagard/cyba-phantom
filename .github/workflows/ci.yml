@@ -180,7 +180,7 @@ jobs:
   fill:
     # T-I-16: the fill tests fill a small tmpfs to 92 %. They skip without
     # one, so make fill fails when a named test skips or does not pass. The
-    # first step makes a 64 MiB tmpfs for PHANTOM_DISKFULL and shrinks
+    # first step makes a 64 MiB tmpfs for PHANTOM_DISKFULL. It also shrinks
     # /dev/shm, where the decoy test puts its state directory. The runner
     # is a throw-away machine.
     runs-on: ubuntu-24.04
@@ -193,7 +193,7 @@ jobs:
       - name: Small tmpfs for the fill tests
         run: |
           sudo mkdir -p "$PHANTOM_DISKFULL"
-          sudo mount -t tmpfs -o size=64m,mode=1777 tmpfs "$PHANTOM_DISKFULL"
+          sudo mount -t tmpfs -o size=64m,uid=$(id -u),gid=$(id -g),mode=0700 tmpfs "$PHANTOM_DISKFULL"
           sudo mount -o remount,size=64m /dev/shm
 
       - name: Fill tests (no skip allowed)
