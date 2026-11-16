@@ -35,6 +35,14 @@ const sessionExpireCost = 4
 // runs no statement and returns `limit`. With bad parameters, the step runs no
 // statement and returns an error.
 func newExpireStep(q string, cost int, tDel time.Time, days int) retentionStep {
+	return newGatedExpireStep(q, cost, tDel, days, nil)
+}
+
+// newGatedExpireStep is newExpireStep with a gate. The gate gets the cutoff
+// of each chunk, in the transaction of the chunk. It returns the cutoff that
+// the chunk uses. A nil gate keeps the cutoff.
+func newGatedExpireStep(q string, cost int, tDel time.Time, days int,
+	gate func(context.Context, *sql.Tx, int64) (int64, error)) retentionStep {
 	cutoff, ok := retentionCutoff(tDel, days, expireMaxDays)
 	if !ok {
 		return rollupRefused
@@ -44,7 +52,14 @@ func newExpireStep(q string, cost int, tDel time.Time, days int) retentionStep {
 		if most == 0 {
 			return limit, nil
 		}
-		n, err := execCount(ctx, tx, memDeleted, q, cutoff, most)
+		cut := cutoff
+		if gate != nil {
+			var err error
+			if cut, err = gate(ctx, tx, cutoff); err != nil {
+				return 0, err
+			}
+		}
+		n, err := execCount(ctx, tx, memDeleted, q, cut, most)
 		if err != nil {
 			return 0, err
 		}
@@ -56,9 +71,23 @@ func newExpireStep(q string, cost int, tDel time.Time, days int) retentionStep {
 }
 
 // newEventExpireStep deletes the event rows of each kind with ts before the
-// cutoff (SEC-39). days is store.retention_days.events.
+// cutoff (SEC-39). days is store.retention_days.events. Each chunk caps the
+// cutoff at the start of the day that the day step works on next (see
+// rollupWorkDay). Thus it removes no row of a UTC day that the day step has
+// not finished. The day step can stop early with a request row left. With no
+// such day, the cutoff does not change.
 func newEventExpireStep(tDel time.Time, days int) retentionStep {
-	return newExpireStep(deleteEventSQL, 1, tDel, days)
+	return newGatedExpireStep(deleteEventSQL, 1, tDel, days, eventGate)
+}
+
+// eventGate returns the earlier of the cutoff and the start of the day of
+// rollupWorkDay.
+func eventGate(ctx context.Context, tx *sql.Tx, cutoff int64) (int64, error) {
+	start, ok, err := rollupWorkDay(ctx, tx)
+	if err != nil || !ok {
+		return cutoff, err
+	}
+	return min(cutoff, start), nil
 }
 
 // newTokenExpireStep deletes the token rows with first_cb_at before the cutoff

@@ -28,7 +28,9 @@ const (
 	// readLimit is the time that the read of the mark at the start can take.
 	readLimit = 30 * time.Second
 
-	// catchUp is the age of the last run above which the start runs at once.
+	// catchUp is the age of the last run above which the start runs at once. A
+	// check also starts a run when this monotonic time has passed since the
+	// start of the last run.
 	catchUp = 25 * time.Hour
 
 	// retentionLastKey is the meta key of the wall time of the last run, in
@@ -39,6 +41,8 @@ const (
 // Schedule starts one retention run for each local date (SEC-40). The run is
 // at the first minute check at or after 03:15. It never starts two runs at the
 // same time. A start after more than 25 h without a run gives a run at once.
+// A check also starts a run after 25 h of monotonic time since the start of
+// the last run. Thus a wall clock that steps back cannot stop the runs.
 type Schedule struct {
 	w         *Writer
 	clock     *clockGuard
@@ -57,6 +61,8 @@ type Schedule struct {
 	began     chan struct{} // closed when the start check ends
 	ran       bool          // a check made a run
 	ranAt     time.Duration // the monotonic time of the last run of a check
+	lastRun   time.Duration // the monotonic time of the start of the last run
+	stepBacks atomic.Uint64
 	earlyEnds atomic.Uint64
 	earlyLog  atomic.Bool
 	mark      time.Time // the mark of the last run, in memory
@@ -165,6 +171,10 @@ func (s *Schedule) ClockDiffs() uint64 { return s.clock.Diffs() }
 // time of the run. It is safe to call from any goroutine.
 func (s *Schedule) MarkAhead() uint64 { return s.markAhead.Load() }
 
+// StepBacks returns the number of checks whose wall time was before the wall
+// time of the check before. It is safe to call from any goroutine.
+func (s *Schedule) StepBacks() uint64 { return s.stepBacks.Load() }
+
 // EarlyEnds returns the number of runs that ended early, with an error that is
 // not the stop of the schedule. It is safe to call from any goroutine.
 func (s *Schedule) EarlyEnds() uint64 { return s.earlyEnds.Load() }
@@ -214,13 +224,15 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // was ahead at the last run. The run keeps the mark, and it does not move back.
 // The value that it read stays in memory as the mark of the last run. This is
 // true also when the value is after the wall time. If the read fails, runOnce
-// reads the mark again. See runOnce.
+// reads the mark again. See runOnce. This run counts for the rule of 25 h in
+// check. It does not count for the gap of 20 h.
 func (s *Schedule) begin(ctx context.Context) {
 	wall := s.clock.wall()
 	s.lastWall = wall
 	mark, ok := s.readMark(ctx)
 	s.mark, s.markRead = mark, ok
 	if wall.Sub(mark) > catchUp || mark.After(wall) {
+		s.lastRun = s.clock.mono()
 		s.runOnce(ctx)
 		s.lastDay = retentionDay(wall, s.loc)
 		return
@@ -241,25 +253,49 @@ func (s *Schedule) readMark(ctx context.Context) (time.Time, bool) {
 
 // check starts a run when the retention day of the wall time is later than the
 // last run day. A local time that goes back in a DST repeat gives an earlier
-// day, and that day has run. The wall clock can step to an earlier time. Then
-// the last run day becomes the day of the new wall time, and no run starts.
-// Each later day then starts a run. A run needs 20 h of monotonic time since
-// the last run that a check started. The run at the start does not count. Thus
-// a wall clock that steps back and forth around 03:15 starts no extra run.
+// day, and that day has run. A run of a later day needs 20 h of monotonic time
+// since the last run that a check started. The run at the start does not count.
+// Thus a wall clock that steps back and forth around 03:15 starts no extra run.
+//
+// A check also starts a run 25 h of monotonic time after the start of the last
+// run. Each kind of run counts. The time counts from the process start when no
+// run has started. This holds also at a check with a step back. A check starts
+// at most one run.
+//
+// The wall time of a check can be before the one of the check before. Then the
+// check adds 1 to the step-back count and writes one fixed log line. The last
+// run day becomes the earlier of its value and the day of the new wall time.
+// A step back starts no run by the day rule. A run of the rule of 25 h also
+// sets the last run day. It takes the later of its value and the day of the
+// check.
 func (s *Schedule) check(ctx context.Context) {
-	wall := s.clock.wall()
+	wall, now := s.clock.wall(), s.clock.mono()
 	day, back := retentionDay(wall, s.loc), wall.Before(s.lastWall)
 	s.lastWall = wall
+	due, started := now-s.lastRun >= catchUp, false
 	switch {
 	case back:
-		s.lastDay = day
+		s.stepBacks.Add(1)
+		s.lg.Warn("wall clock stepped back")
+		s.lastDay = min(s.lastDay, day)
 	case day > s.lastDay:
 		s.lastDay = day
-		if !s.ran || s.clock.mono()-s.ranAt >= s.gap {
-			s.ran, s.ranAt = true, s.clock.mono()
-			s.runOnce(ctx)
+		if !s.ran || now-s.ranAt >= s.gap {
+			s.checkRun(ctx, now)
+			started = true
 		}
 	}
+	if due && !started {
+		s.lastDay = max(s.lastDay, day)
+		s.checkRun(ctx, now)
+	}
+}
+
+// checkRun makes a run that a check started at the monotonic time now. The run
+// counts for the gap of 20 h and for the rule of 25 h.
+func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
+	s.ran, s.ranAt, s.lastRun = true, now, now
+	s.runOnce(ctx)
 }
 
 // runOnce makes one run with a step list for the clock readings of the run. A
@@ -318,12 +354,11 @@ func (s *Schedule) runOnce(stop context.Context) {
 // not counted them yet. So the event cutoff is not later than the start of
 // that UTC day. With events above raw, the cap has no effect. The writer can
 // store a request row before the raw cutoff during the run. This occurs only
-// when the wall clock steps back by raw days or more. Such a row that comes
-// after the roll-up step and before the day step ends stops the day step. Then
-// the event step can delete callbacks that the day step did not count. The
-// event step can delete such a row that comes after the day step, with no
-// roll-up. With bad raw days or a zero tDel, the time is tDel. The event step
-// itself refuses bad events days, for any time.
+// when the wall clock steps back by raw days or more. Such a row stops the day
+// step. The event step then caps its cutoff in each chunk: see
+// newEventExpireStep. The event step can delete such a row that comes after the
+// day step, with no roll-up. With bad raw days or a zero tDel, the time is
+// tDel. The event step itself refuses bad events days, for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
 	cut, ok := rollupCutoff(tDel, raw)
 	if !ok {
@@ -344,10 +379,11 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // roll-up steps. A request row that the run finds at its start rolls up
 // before the event delete removes it. The configuration keeps the events days
 // not below the raw days (internal/config/validate.go). The event step has a
-// capped cutoff: see eventTime. These three deletes come before the field
-// clear, for the same reason as the raw delete. The clear does not write rows
-// that the event delete removes. The mark step is last, so a run that ends
-// early writes no mark.
+// capped cutoff: see eventTime. It also caps the cutoff in each chunk at the
+// day that the day step works on next. These three deletes come before the
+// field clear, for the same reason as the raw delete. The clear does not write
+// rows that the event delete removes. The mark step is last, so a run that
+// ends early writes no mark.
 func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
