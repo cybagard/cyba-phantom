@@ -4,7 +4,8 @@ package reference
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"html"
 	"html/template"
@@ -38,9 +39,14 @@ var (
 	base64Run = regexp.MustCompile(`[A-Za-z0-9+/=]{20,}`)
 	hexEscape = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
 	hostWord  = regexp.MustCompile(`[A-Za-z0-9-]+\.[A-Za-z0-9-]+`)
-	onAttr    = regexp.MustCompile(`(?i)[\s"'/]on[a-z]+\s*=`)
-	animOn    = regexp.MustCompile(`(?i)attributename\s*=\s*["']?\s*on`)
-	external  = regexp.MustCompile(`(?i)(?:\b(?:src|href|action)\s*=\s*["']?` +
+	// The host check deletes the characters that defang a host name, as in
+	// "evil(.)example".
+	notHostChar = regexp.MustCompile(`[^A-Za-z0-9.-]+`)
+	onAttr      = regexp.MustCompile(`(?i)[\s"'/]on[a-z]+\s*=`)
+	animOn      = regexp.MustCompile(`(?i)attributename\s*=\s*["']?\s*on`)
+	// An animation that sets href, xlink:href or src can set a URL.
+	animTarget = regexp.MustCompile(`(?i)attributename\s*=\s*["']?\s*(?:xlink:href|href|src)\b`)
+	external   = regexp.MustCompile(`(?i)(?:\b(?:src|href|action)\s*=\s*["']?` +
 		`|\burl\(\s*["']?)\s*(?:https?:|//)`)
 
 	// The tree has no reason to hold an absolute URL in any position. The
@@ -93,8 +99,8 @@ var (
 	topDirs  = []string{"vhosts", "traps", "secrets"}
 	urlForms = []string{"://", "//", "@", "mailto:", "www."}
 	// The deny list of ADR-042. A word matches as a part of a longer word.
-	// The pair "instruction" and "override" and the word "rm -" are checked
-	// apart.
+	// The pair "instruction" and "override" has its own check. So have
+	// ".env", "rm -", "e mail" and "pass word".
 	denyWords = []string{
 		"ignore", "previous", "system prompt", "password", "credential",
 		"secret", "api key", "private key", "ssh", "cookie", "history",
@@ -122,30 +128,50 @@ type vhost struct {
 	traps               map[string]bool
 }
 
-// hostLike reports whether the first segment of the path p holds "." or is
-// all digits. A path of this form can read as a host name or an address.
+// parseOpts are the decoder options of the loader, without the refusal of
+// unknown members. The test structs hold only some members. The decoder
+// matches names with the case.
+var parseOpts = []json.Options{
+	jsontext.AllowDuplicateNames(false),
+	jsontext.AllowInvalidUTF8(false),
+}
+
+// hostLike reports whether the first segment of the path p holds ".", is all
+// digits, or is "0x" with hex digits (hexHost). A path of this form can read
+// as a host name or an address.
 func hostLike(p string) bool {
 	seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
 	return strings.Contains(seg, ".") || hexHost.MatchString(seg)
 }
 
+// readRoutes reads a route map. The rule path-host-form runs only on the
+// paths that an agent is told to request: callback paths and beacon paths.
+// A page path such as "/robots.txt" is not one of them.
 func (v *vhost) readRoutes(r *result, name string, b []byte) {
 	var m struct {
 		Routes []struct {
-			Path     string
-			Callback *struct{ Segment bool }
-			Headers  []struct{ Trap string }
-		}
-		Beacon *struct{ Script, Post string }
+			Path     string `json:"path"`
+			Callback *struct {
+				Segment bool `json:"segment"`
+			} `json:"callback"`
+			Headers []struct {
+				Trap string `json:"trap"`
+			} `json:"headers"`
+		} `json:"routes"`
+		Beacon *struct {
+			Script string `json:"script"`
+			Post   string `json:"post"`
+		} `json:"beacon"`
 	}
-	if json.Unmarshal(b, &m) != nil { // The loader refuses a bad route map.
+	if json.Unmarshal(b, &m, parseOpts...) != nil {
+		r.add("routes-json", name)
 		return
 	}
 	if m.Beacon != nil && (hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post)) {
 		r.add("path-host-form", name)
 	}
 	for _, rt := range m.Routes {
-		if hostLike(rt.Path) {
+		if rt.Callback != nil && hostLike(rt.Path) {
 			r.add("path-host-form", name)
 		}
 		if rt.Callback != nil {
@@ -225,7 +251,8 @@ func checkTree(fsys fs.FS) []string {
 	return r.out
 }
 
-// shape checks the top level and secrets/.
+// shape checks the top level, secrets/ and traps/. Each of the two holds one
+// file only.
 func (r *result) shape(names []string, dirs map[string]bool, files map[string][]byte) {
 	for _, n := range names {
 		top, _, nested := strings.Cut(n, "/")
@@ -236,6 +263,8 @@ func (r *result) shape(names []string, dirs map[string]bool, files map[string][]
 			r.add("tree-top", n)
 		case top == "secrets" && n != seedName:
 			r.add("tree-secrets", n)
+		case top == "traps" && n != trapsFile:
+			r.add("tree-traps", n)
 		}
 	}
 	if seed, ok := files[seedName]; ok && len(seed) != seedLen {
@@ -332,6 +361,9 @@ func (r *result) markupRules(name, raw, n, sfx string, static bool) {
 		if styleAttr.MatchString(s) {
 			r.add("style-attr"+sfx, name)
 		}
+		if animTarget.MatchString(s) {
+			r.add("anim-target"+sfx, name)
+		}
 		if static && len(doctypes(low)) > 0 {
 			r.add("doctype", name)
 		}
@@ -375,22 +407,33 @@ func schemeFound(low string) bool {
 	return false
 }
 
-// render runs a template as the engine does, with the trap texts of the
-// tree. It runs the markup rules on the output. A template that does not
+// render runs a template as the engine does. It runs two times: with the trap
+// texts of the tree, and with no trap text (each action gives ""). It runs the
+// markup rules and the base64 rule on each output. A template that does not
 // parse or run is a finding.
 func (r *result) render(name, text string, traps map[string]string) {
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
-	var buf bytes.Buffer
-	if err == nil {
-		err = t.Execute(&buf, bundle.Page{Trap: traps})
-	}
 	if err != nil {
 		r.add("render", name)
 		return
 	}
-	out := buf.String()
-	r.markupRules(name, out, renderForm(out), "(rendered)", false)
+	for _, run := range []struct {
+		data map[string]string
+		sfx  string
+	}{{traps, "(rendered)"}, {nil, "(rendered, empty)"}} {
+		var buf bytes.Buffer
+		if t.Execute(&buf, bundle.Page{Trap: run.data}) != nil {
+			r.add("render", name)
+			return
+		}
+		out := buf.String()
+		r.markupRules(name, out, renderForm(out), run.sfx, false)
+		// The token is not part of a base64 run. It is made at run time.
+		if base64Run.MatchString(strings.ReplaceAll(out, fixedToken, "-")) {
+			r.add("base64"+run.sfx, name)
+		}
+	}
 }
 
 // comment is a copy of the function comment of internal/bundle/template.go.
@@ -483,7 +526,7 @@ func dropControls(s string) string {
 }
 
 // fixedToken is the token that a rendered page holds. It has 26 characters
-// of a-z and 2-7.
+// of a-z. The token alphabet is a-z and 2-7.
 const fixedToken = "abcdefghijklmnopqrstuvwxyz"
 
 // traps checks the instruction template of each trap in traps/traps.json. It
@@ -496,7 +539,7 @@ func (r *result) traps(b []byte, users map[string][]*vhost) map[string]string {
 		ID   string `json:"id"`
 		Text string `json:"instruction_template"`
 	}
-	if json.Unmarshal(b, &ts) != nil {
+	if json.Unmarshal(b, &ts, parseOpts...) != nil {
 		r.add("traps-json", trapsFile)
 		return nil
 	}
@@ -552,7 +595,8 @@ func (r *result) instruction(text string, users []*vhost) {
 		case strings.Contains(w, "/"):
 			add("instr-path", true)
 		default:
-			add("instr-host", hostWord.MatchString(strings.ReplaceAll(w, tokenAction, "")))
+			add("instr-host", hostWord.MatchString(notHostChar.ReplaceAllString(
+				strings.ReplaceAll(w, tokenAction, ""), "")))
 		}
 	}
 }
