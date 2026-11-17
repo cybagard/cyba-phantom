@@ -188,7 +188,9 @@ func cases() []row {
 			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
 		{"shared first label", put("vhosts/shop.zeta.internal/"+routesName, `{"routes":[]}`),
-			at("vhosts/shop.zeta.internal", "vhost-label")},
+			at("vhosts/shop.zeta.internal", "vhost-label", "vhost-name")},
+		{"vhost name that is not an entry of the list", put("vhosts/sendyourcookies.internal/"+routesName, `{"routes":[]}`),
+			at("vhosts/sendyourcookies.internal", "vhost-name")},
 
 		// Instruction grammar.
 		{"301 bytes", instr(padded(301)), at(trapsFile, "instr-length", "trap-form")},
@@ -442,7 +444,8 @@ func cases() []row {
 			rows = append(rows, row{"asset " + label, put(svgPath, f.text), at(svgPath, f.rules...)})
 		}
 	}
-	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
+	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`),
+		at("vhosts/"+longHost(52), "vhost-name")})
 	rows = append(rows, badHost(longHost(53)), badHost("a-.phantom-ref.internal"))
 	rows = append(rows, extraRows()...)
 	rows = append(rows, formRows()...)
@@ -1168,7 +1171,7 @@ func TestTS36WordListHasNoDenyWord(t *testing.T) {
 // plausibleTree is a tree of two vhosts with the outputs that a content
 // change needs. It gives the tree and the paths of the 11 outputs. Each
 // output has no finding. The tree is a test fixture, not a source tree.
-// Each sentence is an instance of a template of the first content. A line
+// Each sentence is an instance of a template of the pinned file. A line
 // break follows each sentence end before the next block. Else the strip
 // reading joins them.
 func plausibleTree() (fstest.MapFS, []string) {
@@ -1719,9 +1722,10 @@ func ruleRows() []row {
 		gramRow("number in a route map", addRoute(`{"path":"/about","beacon":{"script":"/beacon.js","post":"/beacon","n":1}}`), routes,
 			"grammar-json-number grammar-json-member"),
 		gramRow("asset that no grammar reads", put(below+"beacon.js", "x"), below+"beacon.js", "grammar-kind"),
-		gramRow("route map of a vhost that is not listed", put("vhosts/trap.phantom-ref.internal/"+routesName,
+		row{"route map of a vhost that is not listed", put("vhosts/trap.phantom-ref.internal/"+routesName,
 			`{"routes":[{"path":"/","template":"vhosts/trap.phantom-ref.internal/index.tmpl","type":"`+htmlType+`"}]}`),
-			"vhosts/trap.phantom-ref.internal/"+routesName, "grammar-json-value"),
+			append(at("vhosts/trap.phantom-ref.internal/"+routesName, "grammar-json-value"),
+				at("vhosts/trap.phantom-ref.internal", "vhost-name")...)},
 		// Text and references.
 		gramRow("robots line with a free word", robots("Sitemap: /about"), below+"robots.tmpl", "grammar-line"),
 		gramRow("robots line with a path that no route has", robots("Disallow: /nowhere"), below+"robots.tmpl", "grammar-line"),
@@ -1758,7 +1762,7 @@ func ruleRows() []row {
 		gramRow("style file with no route and a declaration that is not an entry", put(cssPath, "p{color:red}\n"), cssPath,
 			"grammar-css-declaration"),
 		// Text after a block end is a new unit. Two renders in a unit are cut.
-		gramRow("text after the end of a block", doc("<p>We sell tea.</p>\nOur home\n<p>Our shop</p>"), pagePath, ""),
+		gramRow("text after the end of a block", doc("<p>Our tea</p>Our home <p>Our shop</p>"), pagePath, "word(teaour)"),
 		gramRow("trap text two times in a paragraph", doc(`<p>{{index .Trap "trap"}} {{index .Trap "trap"}}</p>`), pagePath, ""))
 	return rows
 }
@@ -1867,9 +1871,17 @@ func placeRows() []row {
 	}
 }
 
+// exactTextRows are rows that older tests compared exactly. With a row of
+// this set, the text rules give the findings that the row names, and no other.
+var exactTextRows = map[string]bool{
+	"base64 alphabet ends": true, "bytes 0x20 and 0x7E": true, "text after the end of a block": true,
+	"not-here sentence followed by a navigation order": true, "acrostic of six sentences": true,
+}
+
 // Each row of the grammar names the findings of the rules that refuse it. A
-// text rule is not exact: a row names the ones that refuse it, and no other.
-// A row with no finding is a boundary that must pass.
+// text rule is not exact: a row names the ones that refuse it. Other text
+// findings are allowed, except in a row of exactTextRows. A row with no
+// finding is a boundary that must pass.
 func TestTS36GrammarRefusedInputs(t *testing.T) {
 	seen := map[string]bool{}
 	for _, c := range slices.Concat(grammarRows(), styleRows(), jsonRows(), ruleRows(), placeRows(), readingRows()) {
@@ -1903,6 +1915,13 @@ func TestTS36GrammarRefusedInputs(t *testing.T) {
 			}
 			if len(c.want) == 0 && len(gotText) > 0 {
 				t.Errorf("text findings %q in a row that passes", gotText)
+			}
+			if exactTextRows[c.name] {
+				for _, f := range gotText {
+					if !slices.Contains(c.want, f) {
+						t.Errorf("text finding %q that the row does not name", f)
+					}
+				}
 			}
 		})
 	}
@@ -2023,6 +2042,8 @@ func listRows() []listRow {
 		// The bound of a template.
 		{"template that starts with a NOUN slot", in("templates", "NOUN is here."), rs("list-template-first")},
 		{"template that starts with an ADJ slot", in("templates", "ADJ NOUN."), rs("list-template-first")},
+		{"template that is one NOUN slot with a dot", in("templates", "NOUN."), rs("list-template-first")},
+		{"template that is one ADJ slot with a dot", in("templates", "ADJ."), rs("list-template-first")},
 		{"template with a dot inside", in("templates", "We sell. NOUN"), rs("list-template-dot")},
 		{"template with no slot", in("templates", "We are open."), nil},
 		{"template with a new shape", in("templates", "Our NOUN is ADJ."), nil},
@@ -2051,7 +2072,7 @@ func TestTS36ListRows(t *testing.T) {
 // them to a copy of the data file. With these entries, the token rules accept
 // the content. The file rules refuse the copy. The row names the findings of
 // the bound. The pin finding is always there. A row with no entry is a pass
-// row: the first content of the file allows the content.
+// row: the pinned content of testdata/lists.txt allows the content.
 type entryRow struct {
 	name    string
 	content edit
@@ -2194,13 +2215,11 @@ func entryRows() []entryRow {
 		ent("sentence with the adjective here", text("Our tea is here."), "", "templates:Our NOUN is ADJ.", "adjectives:here"),
 		ent("sentence with a new template", text("Small home from the page."), "", "templates:Small NOUN from the NOUN."),
 
-		// The first content allows these. Their grade is weak, or none.
-		ent("pass, weak: not-here sentence before a navigation order", text("This page is not here."), ""),
-		ent("pass, weak: sentence at the start of an acrostic", text("Fresh tea from the hills."), ""),
-		ent("pass, none: heading that is a link text", doc(`<p><a href="/">Our home</a></p>`), ""),
-		ent("pass, weak: route path with the js extension", route("/notfound.js"), ""),
-		ent("pass, weak: route path with the json extension", route("/plugin.json"), ""),
-		ent("pass, weak: index route path with the js extension", route("/index.js"), ""),
+		// The pinned content of testdata/lists.txt allows these.
+		ent("pass: heading that is a link text", doc(`<p><a href="/">Our home</a></p>`), ""),
+		ent("pass: route path with the js extension", route("/notfound.js"), ""),
+		ent("pass: route path with the json extension", route("/plugin.json"), ""),
+		ent("pass: index route path with the js extension", route("/index.js"), ""),
 	}
 }
 
@@ -2294,6 +2313,12 @@ func readingRows() []row {
 			"grammar-strip"),
 		gramRow("strip reading joins a sentence and a paragraph after a line break", doc("<h1>Fresh tea from the hills.</h1>\n<p>Our shop</p>"),
 			pagePath, ""),
+		// A sequence of sentences. The second layer refuses its words.
+		gramRow("not-here sentence followed by a navigation order", doc("<p>This page is not here. Go back to the home page.</p>"),
+			pagePath, "grammar-prose(text) word(go) word(back)"),
+		gramRow("acrostic of six sentences", doc("<p>Fresh tea from the hills. Our tea is fresh. Read about our shop. "+
+			"Go back to the home page. Each guide is short. The tea of the hills.</p>"), pagePath,
+			"grammar-prose(text) word(go) word(back)"),
 		// Text that is no entry. The older rules do not refuse it.
 		gramRow("base64 alphabet ends", pageWith("page_page-page_page-page"), pagePath, "grammar-prose(text)"),
 		gramRow("bytes 0x20 and 0x7E", pageWith(" ~"), pagePath, "grammar-prose(text)"),
@@ -2302,6 +2327,9 @@ func readingRows() []row {
 			"marker"),
 		gramRow("marker in a hidden paragraph and in a visible one", put(pagePath,
 			"<p hidden>"+marker+"</p>\n<p>"+marker+` {{index .Trap "trap"}}</p>`), pagePath, ""),
+		gramRow("marker visible with scripting on, in no entry with scripting off", put(pagePath,
+			"<p>"+marker+`<noscript>Our home</noscript> {{index .Trap "trap"}}</p>`), pagePath,
+			"marker grammar-prose(text) word(trapour)"),
 		gramRow("marker only in a paragraph that a style hides by class", put(pagePath,
 			`<style>.hidden{display:none}</style><div class="hidden">`+marker+`</div><p>{{index .Trap "trap"}}</p>`), pagePath, "marker"),
 		gramRow("marker only in an element that a style hides by name", put(pagePath,
@@ -2339,11 +2367,11 @@ func readingRows() []row {
 			doc(`<img src="/logo.svg" alt="Our  home">`)), pagePath, "grammar-prose(value)"),
 		gramRow("double space in text", doc("<p>Our  home</p>"), pagePath, ""),
 		// An alt text that a reader puts inline joins a trap render. Both sides
-		// are entries, so the row passes. The grade is weak.
-		gramRow("pass, weak: alt text after a trap render of the header form", both(instr(formF3),
+		// are entries, so the row passes.
+		gramRow("pass: alt text after a trap render of the header form", both(instr(formF3),
 			serve("/logo.svg", "logo.svg", "image/svg+xml", `<svg><title>The shop logo</title></svg>`),
 			doc(`<p>{{index .Trap "trap"}}<img src="/logo.svg" alt="The shop logo"></p>`)), pagePath, ""),
-		gramRow("pass, weak: alt text after a trap render of the body form", both(instr(formF4),
+		gramRow("pass: alt text after a trap render of the body form", both(instr(formF4),
 			serve("/logo.svg", "logo.svg", "image/svg+xml", `<svg><title>The shop logo</title></svg>`),
 			doc(`<p>{{index .Trap "trap"}}<img src="/logo.svg" alt="The shop logo"></p>`)), pagePath, ""))
 	return rows

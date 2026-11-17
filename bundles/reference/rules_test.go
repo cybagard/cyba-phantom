@@ -514,8 +514,12 @@ func (r *result) vhostNames(names []string, dirs map[string]bool) map[string]*vh
 		}
 		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{},
 			host: host, names: map[string]bool{}, pages: map[string]bool{}}
-		if first, _, _ := strings.Cut(host, "."); !dirs[n] || !validVhost(host) {
+		bad := !dirs[n] || !validVhost(host)
+		if bad || !lists.in("vhosts", host) {
 			r.add("vhost-name", n)
+		}
+		if first, _, _ := strings.Cut(host, "."); bad {
+			continue
 		} else if labels[first] {
 			r.add("vhost-label", n)
 		} else {
@@ -660,8 +664,8 @@ func hiddenOf(names ...string) []*regexp.Regexp {
 }
 
 // page checks a file below a vhost with the script and URL rules. For a
-// template it also checks the marker and the action forms. An asset has no
-// action. The rules run on the raw text and on the normal form.
+// template it also checks the action forms. An asset has no action. The
+// rules run on the raw text and on the normal form.
 func (r *result) page(name string, b []byte) {
 	raw := string(b)
 	n := normalForm(raw)
@@ -1490,14 +1494,35 @@ var lists = func() listSet {
 	return loadLists(b)
 }()
 
-// loadLists reads the sections of the bytes b. A line "[name]" starts one.
-func loadLists(b []byte) listSet {
-	l, cur := listSet{}, ""
-	for _, ln := range strings.Split(string(b), "\n") {
-		if n, ok := strings.CutPrefix(ln, "["); ok && strings.HasSuffix(n, "]") {
+// A listLine is a line of the data file, with the section that it is in. A
+// line "[name]" is a head: it starts the section name.
+type listLine struct {
+	text, section string
+	head          bool
+}
+
+// parseLists splits the bytes b into lines. Each reader of the file format
+// uses it.
+func parseLists(b []byte) []listLine {
+	var out []listLine
+	cur := ""
+	for _, ln := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		n, ok := strings.CutPrefix(ln, "[")
+		head := ok && strings.HasSuffix(n, "]")
+		if head {
 			cur = strings.TrimSuffix(n, "]")
-		} else if cur != "" && ln != "" {
-			l[cur] = append(l[cur], ln)
+		}
+		out = append(out, listLine{ln, cur, head})
+	}
+	return out
+}
+
+// loadLists reads the sections of the bytes b.
+func loadLists(b []byte) listSet {
+	l := listSet{}
+	for _, ln := range parseLists(b) {
+		if !ln.head && ln.section != "" && ln.text != "" {
+			l[ln.section] = append(l[ln.section], ln.text)
 		}
 	}
 	return l
@@ -1564,8 +1589,9 @@ func listFindings(b []byte, pin string) []string {
 		add("list-final-lf")
 	}
 	var heads []string
-	section, prev, seen := "", "", map[string]bool{}
-	for _, ln := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+	prev, seen := "", map[string]bool{}
+	for _, l := range parseLists(b) {
+		ln := l.text
 		switch {
 		case ln == "":
 			add("list-empty-line")
@@ -1575,14 +1601,13 @@ func listFindings(b []byte, pin string) []string {
 		case ln[0] == ' ' || ln[len(ln)-1] == ' ':
 			add("list-space")
 		}
-		if n, ok := strings.CutPrefix(ln, "["); ok && strings.HasSuffix(n, "]") {
-			section = strings.TrimSuffix(n, "]")
-			heads = append(heads, section)
+		if l.head {
+			heads = append(heads, l.section)
 			prev, seen = "", map[string]bool{}
 			continue
 		}
 		switch {
-		case section == "":
+		case l.section == "":
 			add("list-outside")
 		case seen[ln]:
 			add("list-duplicate")
@@ -1612,10 +1637,11 @@ func (l listSet) bound(r *result) {
 	}
 	for _, sec := range []string{"templates", "sentences", "nouns", "adjectives", "names"} {
 		for _, e := range l[sec] {
-			if slices.ContainsFunc(slices.Collect(maps.Keys(actionWords)), func(a string) bool {
-				return strings.Contains(strings.ToLower(e), a)
-			}) {
-				add("list-action")
+			for a := range actionWords {
+				if strings.Contains(strings.ToLower(e), a) {
+					add("list-action")
+					break
+				}
 			}
 			if len(denied(e)) > 0 {
 				add("list-deny")
@@ -1623,7 +1649,8 @@ func (l listSet) bound(r *result) {
 		}
 	}
 	for _, t := range l["templates"] {
-		if first, _, _ := strings.Cut(t, " "); first == "NOUN" || first == "ADJ" {
+		first, _, _ := strings.Cut(t, " ")
+		if first = strings.TrimSuffix(first, "."); first == "NOUN" || first == "ADJ" {
 			add("list-template-first")
 		}
 		if strings.Contains(strings.TrimSuffix(t, "."), ".") {
@@ -1964,7 +1991,8 @@ var hiddenText = set("head title style script template textarea")
 // all text, the text visible with scripting on, and the text visible with
 // scripting off. A block element ends a unit. A hidden element gives no text
 // and no break to a visible reading. The last value is the strip reading, all
-// text with no break.
+// text with no break. The text of style and script elements is in no reading,
+// also not in the strip reading.
 func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]string, strip string) {
 	// The element names and ".class" values that a style hides.
 	hide := map[string]bool{}
@@ -2332,11 +2360,14 @@ func TestTS36ListFileIsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The pin finding of listFindings has no hash: report it here, once.
 	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != listPin {
 		t.Errorf("SHA-256 of %s is %x, want %s", listFile, sum, listPin)
 	}
 	for _, f := range listFindings(b, listPin) {
-		t.Error(f)
+		if f != "list-pin "+listName {
+			t.Error(f)
+		}
 	}
 }
 
