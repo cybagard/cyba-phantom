@@ -21,6 +21,9 @@ import (
 // It has a part of 123 ms, so a cutoff in whole seconds fails a test.
 var ipTPriv = time.UnixMilli(1_800_000_000_123)
 
+// ipWall is the wall clock of an IP step test. It always gives ipTPriv.
+func ipWall() time.Time { return ipTPriv }
+
 // ipCutoff is the cutoff of the step for `days` x 24 h, in unix ms. The tests
 // make it again from the definition, not from the code under test.
 func ipCutoff(days int) int64 { return ipTPriv.UnixMilli() - int64(days)*24*3600*1000 }
@@ -40,7 +43,7 @@ func addSessions(tb testing.TB, db *sql.DB, prefix string, from, n int, base, st
 // ipRig makes a rig with the IP step for `days` x 24 h. See ipRigFor.
 func ipRig(t *testing.T, days int) (r *rig, chunks *[]int) {
 	t.Helper()
-	return ipRigFor(t, newIPStep(ipTPriv, days))
+	return ipRigFor(t, newIPStep(ipTPriv, ipWall, days))
 }
 
 // ipRigFor makes a rig with step. The step gets only its tPriv, not the clock
@@ -193,19 +196,21 @@ func TestTU11IPStepErrorStopsTheWriter(t *testing.T) {
 }
 
 // T-U-11: a days value below 1 or above 7 gives a step that runs no statement.
-// A zero tPriv does the same. The step returns an error, so the run stops the
-// writer. No row changes. A session of 9 days and a young session show this.
+// A zero tPriv or no wall clock does the same. The step returns an error, so
+// the run stops the writer. No row changes. A session of 9 days and a young
+// session show this.
 func TestTU11IPStepRefusesBadParameters(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		tPriv time.Time
+		wall  func() time.Time
 		days  int
 	}{
-		{"0 days", ipTPriv, 0}, {"-1 days", ipTPriv, -1}, {"8 days", ipTPriv, 8},
-		{"zero tPriv", time.Time{}, 7},
+		{"0 days", ipTPriv, ipWall, 0}, {"-1 days", ipTPriv, ipWall, -1}, {"8 days", ipTPriv, ipWall, 8},
+		{"zero tPriv", time.Time{}, ipWall, 7}, {"no wall clock", ipTPriv, nil, 7},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r, chunks := ipRigFor(t, newIPStep(c.tPriv, c.days))
+			r, chunks := ipRigFor(t, newIPStep(c.tPriv, c.wall, c.days))
 			addSessions(t, r.db, "old", 0, 1, ipCutoff(9), 0, "192.0.2.1")
 			addSessions(t, r.db, "young", 0, 1, ipCutoff(7)+1_000_000, 0, "192.0.2.2")
 			wantIPRunStops(t, r)
@@ -226,13 +231,129 @@ func TestTU11IPStepUsesTheLimitOfTheRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	n, err := newIPStep(ipTPriv, 7)(context.Background(), tx, 7)
+	n, err := newIPStep(ipTPriv, ipWall, 7)(context.Background(), tx, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var left int
 	if err := tx.QueryRow("SELECT count(*) FROM session WHERE ip IS NOT NULL").Scan(&left); err != nil || n != 7 || left != 13 {
 		t.Fatalf("%d rows changed (want 7), %d rows keep an ip (want 13): %v", n, left, err)
+	}
+}
+
+// T-U-27: 3 sessions before the cutoff, 5 after the future line, and a limit of
+// 4. Part 1 comes first. The first call clears the 3 old sessions and 1 of part
+// 2, and returns 4, not 3. The next calls return 4 and 0.
+func TestTU27IPStepTwoPartsCountAndOrder(t *testing.T) {
+	db := migrated(t)
+	addSessions(t, db, "old", 0, 3, ipCutoff(7)-1_000_000, 1, "192.0.2.1")
+	addSessions(t, db, "future", 0, 5, ipTPriv.UnixMilli()+2*3_600_000, 1, "192.0.2.2")
+	step := newIPStep(ipTPriv, ipWall, 7)
+	if n := callWithin(t, db, step, 4); n != 4 || count(t, db, ipLeft+" AND first_seen < "+strconv.FormatInt(ipCutoff(7), 10)) != 0 {
+		t.Fatalf("first call returned %d, want 4, and no old session may keep an address", n)
+	}
+	for i, want := range []int{4, 0} {
+		if n := callWithin(t, db, step, 4); n != want {
+			t.Fatalf("call %d returned %d, want %d", i+2, n, want)
+		}
+	}
+	if n := count(t, db, ipLeft); n != 0 {
+		t.Fatalf("%d sessions keep an address", n)
+	}
+}
+
+// T-U-27: the future line is the later of the wall time and the stored
+// retention_check, plus 1 h. A session at the line keeps its address. A session
+// 1 ms after it loses it. A bad value gives the wall time alone.
+func TestTU27IPStepFutureLine(t *testing.T) {
+	w := ipTPriv.UnixMilli()
+	const hour = 3_600_000
+	for _, c := range []struct {
+		name   string
+		stored any
+		line   int64
+	}{
+		{"no value", nil, w + hour},
+		{"after the wall time", w + 2*hour, w + 3*hour},
+		{"before the wall time", w - 2*hour, w + hour},
+		{"bad value", "x", w + hour},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			if c.stored != nil {
+				mustExec(t, db, metaSetSQL, retentionCheckKey, fmt.Sprint(c.stored))
+			}
+			for id, ts := range map[string]int64{"a": c.line - 1, "b": c.line, "c": c.line + 1, "far": w + 100*24*hour} {
+				addSessions(t, db, id, 0, 1, ts, 0, "192.0.2.1")
+			}
+			callWithin(t, db, newIPStep(ipTPriv, ipWall, 7), chunkRows)
+			if got := fmt.Sprint(nullIPs(t, db)); got != "map[a0:false b0:false c0:true far0:true]" {
+				t.Fatalf("NULL ip by session %s", got)
+			}
+		})
+	}
+}
+
+// T-U-27: the step reads the wall time at its first call, not at its
+// construction and not at each call. The clock gives 10 h more at each read, so
+// the line must not move between the two calls.
+func TestTU27IPStepTakesTheWallTimeAtTheFirstCall(t *testing.T) {
+	db := migrated(t)
+	reads := 0
+	step := newIPStep(ipTPriv, func() time.Time {
+		reads++
+		return ipTPriv.Add(time.Duration(reads-1) * 10 * time.Hour)
+	}, 7)
+	if reads != 0 {
+		t.Fatalf("%d clock reads at construction", reads)
+	}
+	addSessions(t, db, "future", 0, 2, ipTPriv.UnixMilli()+2*3_600_000, 1, "192.0.2.1")
+	for i := range 2 {
+		if n := callWithin(t, db, step, 1); n != 1 {
+			t.Fatalf("call %d returned %d, want 1", i+1, n)
+		}
+	}
+	if n := count(t, db, ipLeft); n != 0 || reads != 1 {
+		t.Fatalf("%d sessions keep an address, %d clock reads; want 0 and 1", n, reads)
+	}
+}
+
+// T-U-27: the step takes the largest rowid at its first call. After the first
+// call, one session before the cutoff and one after the line are written. Both
+// keep their addresses. The last call returns 1, so the step ends.
+func TestTU27IPStepChangesNoRowAboveTheFirstCallRowid(t *testing.T) {
+	db := migrated(t)
+	late := ipTPriv.UnixMilli() + 40*24*3_600_000
+	addSessions(t, db, "old", 0, 6, 1, 1, "192.0.2.1")
+	addSessions(t, db, "future", 0, 3, late, 1, "192.0.2.2")
+	step := newIPStep(ipTPriv, ipWall, 7)
+	if n := callWithin(t, db, step, 4); n != 4 {
+		t.Fatalf("first call returned %d, want 4", n)
+	}
+	addSessions(t, db, "newold", 0, 1, 1, 0, "192.0.2.3")
+	addSessions(t, db, "newfuture", 0, 1, late, 0, "192.0.2.4")
+	for i, want := range []int{4, 1} {
+		if n := callWithin(t, db, step, 4); n != want {
+			t.Fatalf("call %d returned %d, want %d", i+2, n, want)
+		}
+	}
+	if got := fmt.Sprint(nullIPs(t, db)); count(t, db, ipLeft) != 2 || !strings.Contains(got, "newfuture0:false") || !strings.Contains(got, "newold0:false") {
+		t.Fatalf("NULL ip by session %s; want the 2 new sessions to keep an address", got)
+	}
+}
+
+// T-U-27: the part 2 statement names INDEXED BY session_ip_first and has ip IS
+// NOT NULL. Its plan uses the index, with no SCAN and no temporary B-tree.
+func TestTU27IPStepFutureStatementUsesTheIndex(t *testing.T) {
+	db := migrated(t)
+	if !strings.Contains(clearIPFutureSQL, "INDEXED BY session_ip_first") || !strings.Contains(clearIPFutureSQL, "ip IS NOT NULL") {
+		t.Fatalf("no INDEXED BY or no ip IS NOT NULL: %s", clearIPFutureSQL)
+	}
+	want := "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\n" +
+		"LIST SUBQUERY 1\n" +
+		"SEARCH session USING INDEX session_ip_first (first_seen>?)"
+	if p := strings.Join(queryPlan(t, db, clearIPFutureSQL, 1, 5, 1000), "\n"); p != want {
+		t.Fatalf("plan:\n%s\nwant:\n%s", p, want)
 	}
 }
 
@@ -341,15 +462,18 @@ func queryPlan(tb testing.TB, db *sql.DB, q string, args ...any) []string {
 // expire step.
 func TestTU11StatementsUseTheirIndexes(t *testing.T) {
 	db := migrated(t)
-	for _, c := range []struct{ q, plan string }{
+	for _, c := range []struct {
+		q, plan string
+		args    []any
+	}{
 		{clearIPSQL, "SEARCH session USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
-			"SEARCH session USING INDEX session_ip_first (first_seen<?)"},
+			"SEARCH session USING INDEX session_ip_first (first_seen<?)", []any{1, 5, 1000}},
 		{deleteTokenSQL, "SEARCH token USING INTEGER PRIMARY KEY (rowid=?)\n" +
 			"LIST SUBQUERY 1\n" +
-			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)"},
+			"SEARCH token USING COVERING INDEX token_first_cb (first_cb_at<?)", []any{1, 1000}},
 	} {
-		if p := strings.Join(queryPlan(t, db, c.q, 1, 1000), "\n"); p != c.plan {
+		if p := strings.Join(queryPlan(t, db, c.q, c.args...), "\n"); p != c.plan {
 			t.Errorf("plan of %q:\n%s\nwant:\n%s", c.q, p, c.plan)
 		}
 	}
@@ -612,7 +736,7 @@ func BenchmarkIPStepChild(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	w, steps := NewWriter(db, q, false, nil, Recovery{}), []retentionStep{newIPStep(time.UnixMilli(tms), 7)}
+	w, steps := NewWriter(db, q, false, nil, Recovery{}), []retentionStep{newIPStep(time.UnixMilli(tms), func() time.Time { return time.UnixMilli(tms) }, 7)}
 	var total, longest time.Duration
 	rows := 0
 	for cur := 0; cur < len(steps); {

@@ -1206,3 +1206,87 @@ func TestTU27FieldClearTakesTheClockAtItsFirstCall(t *testing.T) {
 		t.Fatalf("%d rows keep a field, want 1", n)
 	}
 }
+
+const ipLeft = "SELECT count(*) FROM session WHERE ip IS NOT NULL"
+
+// T-U-27: one run has the wall clock 40 d ahead. Sessions that the visitor
+// writes after it have a first_seen 40 d ahead. After the first run with the
+// right clock, they have no address.
+func TestTU27IPStepAfterOneRunWithTheWallClockAhead(t *testing.T) {
+	r, s, f := prodRig(t, 40*oneDay, nil)
+	s.runOnce(context.Background())
+	addSessions(t, r.db, "ahead", 0, 3, f.wall().UnixMilli(), 1, "192.0.2.1")
+	f.jump(-40 * oneDay)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, ipLeft); n != 0 {
+		t.Fatalf("%d sessions keep an address after the first run with the right clock", n)
+	}
+}
+
+// T-U-27: a process starts with the wall clock 30 d back. With the stored value
+// of the earlier process, its sessions keep their addresses. With no stored
+// value, the line is the wall time alone, and both sessions lose them.
+func TestTU27IPStepStartWithTheWallClockBack(t *testing.T) {
+	for _, c := range []struct {
+		stored bool
+		want   int
+	}{{true, 2}, {false, 0}} {
+		t.Run(fmt.Sprint("stored ", c.stored), func(t *testing.T) {
+			r := newRig(t, 8)
+			s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(-30*oneDay), nil)
+			s.run = direct(r)
+			if c.stored {
+				mustExec(t, r.db, metaSetSQL, retentionCheckKey, strconv.FormatInt(rollTDel.UnixMilli(), 10))
+			}
+			addSessions(t, r.db, "earlier", 0, 1, rollTDel.UnixMilli(), 0, "192.0.2.1")
+			addSessions(t, r.db, "earlier", 1, 1, msAgo(rollTDel, 30*time.Minute), 0, "192.0.2.1")
+			s.runOnce(context.Background())
+			if n := count(t, r.db, ipLeft); n != c.want {
+				t.Fatalf("%d sessions keep an address, want %d", n, c.want)
+			}
+		})
+	}
+}
+
+// T-U-27: a host suspend of 3 h stops the monotonic clock and not the wall
+// clock. No session younger than 2 h loses its address.
+func TestTU27IPStepAfterAHostSuspend(t *testing.T) {
+	r, s, f := prodRig(t, 0, nil)
+	addSessions(t, r.db, "before", 0, 1, msAgo(rollTDel, 30*time.Minute), 0, "192.0.2.1")
+	f.jump(3 * time.Hour)
+	addSessions(t, r.db, "after", 0, 1, msAgo(f.wall(), 30*time.Minute), 0, "192.0.2.1")
+	s.runOnce(context.Background())
+	if n := count(t, r.db, ipLeft); n != 2 {
+		t.Fatalf("%d sessions keep an address, want 2", n)
+	}
+}
+
+// T-U-27: the run takes the clock at the first call of the 7-day step, not at
+// the run start. The clock moves 2 h first, so a session 2 h 30 min later keeps
+// its address.
+func TestTU27IPStepTakesTheClockAtItsFirstCall(t *testing.T) {
+	r, s, f := prodRig(t, 0, nil)
+	run := s.run
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		f.advance(2 * time.Hour)
+		return run(ctx, steps)
+	}
+	addSessions(t, r.db, "later", 0, 1, rollTDel.Add(150*time.Minute).UnixMilli(), 0, "192.0.2.1")
+	s.runOnce(context.Background())
+	if n := count(t, r.db, ipLeft); n != 1 {
+		t.Fatalf("%d sessions keep an address, want 1", n)
+	}
+}
+
+// T-U-27: the ip member of the retention event counts the rows of both parts.
+// Two sessions are before the cutoff and three are after the future line.
+func TestTU27IPStepEventCountsBothParts(t *testing.T) {
+	r, s, _ := prodRig(t, 0, nil)
+	s.run = serveWithRun(r)
+	addSessions(t, r.db, "old", 0, 2, msAgo(rollTDel, 8*oneDay), 1, "192.0.2.1")
+	addSessions(t, r.db, "future", 0, 3, rollTDel.Add(40*oneDay).UnixMilli(), 1, "192.0.2.2")
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT json_extract(detail, '$.ip') FROM event WHERE kind = 'retention'"); n != 5 {
+		t.Fatalf("the ip count of the retention event is %d, want 5", n)
+	}
+}

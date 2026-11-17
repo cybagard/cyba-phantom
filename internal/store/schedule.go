@@ -387,24 +387,24 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // rows before the cutoff. The mark step is last, so a run that ends early
 // writes no retention_last.
 //
-// The wall time of the run is `wall`. The mark step takes it. The field clear
-// also takes it, as its wall time at its first call. This form is for tests
-// that need no clock. See runStepsClock.
+// The wall time of the run is `wall`. The mark step takes it. The 7-day step
+// and the field clear also take it, as their wall time at their first call.
+// This form is for tests that need no clock. See runStepsClock.
 func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return runStepsClock(wall, func() time.Time { return wall }, tDel, tPriv, ip, raw, events)
 }
 
 // runStepsClock is runSteps with a clock. The mark step takes `wall`, the wall
-// time at the start of the run. The field clear takes the time of `clock` at
-// its first call. That call comes after the steps before it, so it can be
-// long after the run start. With the run start, rows that the writer stores
-// in between could lie after the future line. The schedule passes its wall
-// clock as `clock`.
+// time at the start of the run. The 7-day step and the field clear take the
+// time of `clock` at their first call. That call comes after the steps before
+// it, so it can be long after the run start. With the run start, rows that the
+// writer stores in between could lie after the future line. The schedule
+// passes its wall clock as `clock`.
 func runStepsClock(wall time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
-		newIPStep(tPriv, ip),
+		newIPStep(tPriv, clock, ip),
 		newRawDeleteStep(tDel, raw),
 		newCounterDeleteStep(tDel, raw),
 		newEventExpireStep(eventTime(tDel, raw, events), events),
