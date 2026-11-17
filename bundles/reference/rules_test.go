@@ -840,7 +840,7 @@ type action struct {
 // has a token of its own.
 //
 // The check parses the output as a browser does, with scripting on and with
-// scripting off. A token has a class only at one tree place of point 8.
+// scripting off. A token has a class only at one listed tree place.
 // These places are element text and the value of alt, title or aria-label.
 // They are the content of a description meta and the href of a nofollow
 // link. They are a member value of the json-ld block and the comment of the
