@@ -179,9 +179,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		s.Stop()
 		return 1
 	}
-	// certmagic also writes with the standard log package. It gets the counting writer of the server error log,
-	// which keeps no text. This runs before the client exists.
-	log.SetOutput(srv.ErrLog())
+	// certmagic writes with the standard log package. The text is not kept
+	// and is not counted. This runs before the client exists.
+	log.SetOutput(io.Discard)
 	// startCerts opens the cache and starts the client. It returns the fixed line of the first failure, or "".
 	startCerts := func() string {
 		const clientLine = "phantom: certificate client does not start"

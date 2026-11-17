@@ -753,8 +753,8 @@ func TestTI03_ColdStart(t *testing.T) {
 
 // TestTS17_FailedHandshakeLogsNothing makes a failed handshake for a name that is not configured, and one with
 // bytes that are no TLS. It checks that both write nothing to stderr, and that the line count of the server error log rises (SEC-22).
-// On this path the failed handshakes write no line to the standard log. The test fails without log.SetOutput
-// only through its own standard log line.
+// A line of the standard log after the start does not change that count.
+// It does not reach the earlier writer or stderr.
 func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	server := captureServer(t)
 	oldLog := log.Writer()
@@ -770,8 +770,14 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	r := launchServe(t, cfg, p, realDeps)
 	r.waitStarted(t)
 	srv := server()
-	log.Print("a line of the standard log")
 	lines, errBefore := srv.ErrorLines(), r.err.String()
+	if lines != 0 {
+		t.Fatalf("%d error lines after the start, want 0", lines)
+	}
+	log.Print("a line of the standard log")
+	if n := srv.ErrorLines(); n != lines {
+		t.Errorf("a standard log line changed the error line count from %d to %d", lines, n)
+	}
 	// The timeout covers the TLS handshake too.
 	dialer := &net.Dialer{Timeout: netWait}
 	if _, err := tls.DialWithDialer(dialer, "tcp", https, &tls.Config{ServerName: "other.example.com", InsecureSkipVerify: true}); err == nil {
@@ -785,6 +791,9 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	r.awaitErrorLines(t, srv, lines+2)
 	if captured.String() != "" || r.err.String() != errBefore {
 		t.Errorf("standard log %q; stderr %q", captured.String(), r.err.String())
+	}
+	if n := srv.ErrorLines(); n != lines+2 {
+		t.Errorf("error lines %d after two failed handshakes, want %d", n, lines+2)
 	}
 }
 

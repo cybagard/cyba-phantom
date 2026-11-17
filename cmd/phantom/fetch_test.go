@@ -38,7 +38,6 @@ type fakeFetch struct {
 	every   time.Duration
 	lg      *slog.Logger // the logger argument of the call
 	logOut  io.Writer    // the writer of the std log at the call
-	errLog  io.Writer    // the error log writer of the server that serve made
 	loaded  bool         // the loader held a running bundle when run began
 	q       *event.Queue
 	err     error
@@ -56,9 +55,6 @@ func newFakeFetch(t *testing.T) *fakeFetch {
 		srv, err := oldServer(c, h)
 		f.mu.Lock()
 		f.q = c.Queue
-		if srv != nil {
-			f.errLog = srv.ErrLog()
-		}
 		f.mu.Unlock()
 		return srv, err
 	}
@@ -117,8 +113,8 @@ func awaitDone(t *testing.T, r *running) {
 
 // TestTU23_FetcherStart checks that serve starts one fetcher after the start
 // load. It gets the URL, the interval and the private list of the config. It
-// gets the logger of the bundle part. It starts after the std log went to the
-// error log writer of the server.
+// gets the logger of the bundle part. It starts after the std log went to
+// io.Discard.
 func TestTU23_FetcherStart(t *testing.T) {
 	f := newFakeFetch(t)
 	g := startFetchRun(t, fetchSection)
@@ -139,8 +135,8 @@ func TestTU23_FetcherStart(t *testing.T) {
 			t.Errorf("the fetcher logger does not write to the log of the process: %q", g.r.err.String())
 		}
 	}
-	if f.errLog == nil || f.logOut != f.errLog {
-		t.Errorf("std log writer %v at the fetcher start, want the error log writer %v of the server", f.logOut, f.errLog)
+	if f.logOut != io.Discard {
+		t.Errorf("std log writer %v at the fetcher start, want io.Discard", f.logOut)
 	}
 	if f.calls != 1 || f.url != "https://bundle.example/b.cbnd" || f.every != 20*time.Minute || !slices.Equal(f.private, want) || !f.loaded {
 		t.Errorf("%d fetchers with url %q, interval %v, private %v, loaded %v; want 1, the config values, loaded true", f.calls, f.url, f.every, f.private, f.loaded)
