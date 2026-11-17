@@ -518,8 +518,8 @@ func TestTU30_JumpOfSmallMoveWaitsForCommit(t *testing.T) {
 }
 
 // A Check while a move waits gives ErrPending. It reads no clock and changes
-// nothing: the fields of the clock, Snapshot, Now, the log and the next
-// Committed are as with no second Check.
+// nothing. The fields, Snapshot, Now, the log and the next Committed are as
+// with no second Check.
 func TestTU30_CheckRefusesWhileMoveWaits(t *testing.T) {
 	type outcome struct {
 		snap          State

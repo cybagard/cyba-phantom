@@ -43,9 +43,9 @@ const (
 )
 
 // JumpResult is a forward jump of S of more than 1 h that a start or a check
-// made. The size of a grace jump is the grace sum U plus the move. The State of the same
-// Result holds it as its last forward jump. The store writes the jump and the
-// State in one transaction.
+// made. The size of a grace jump is the grace sum U plus the move. The State
+// of the same Result holds it as its last forward jump. The store writes the
+// jump and the State in one transaction.
 type JumpResult struct {
 	ID   int64
 	Size int64 // J in ms
@@ -119,8 +119,8 @@ type Clock struct {
 	log    *slog.Logger
 	// The boot clock of the last Check, or of the start.
 	lastBoot time.Duration
-	// The wall time of the last Check. At the first Check, lastWall is 0, and
-	// a wall time is never below 0, so it gives no step back.
+	// The wall time of the last Check. At the first Check, lastWall is 0.
+	// A wall time is never below 0, so the first Check gives no step back.
 	lastWall int64
 	// pending is the newest base when a move waits for its key write. Now
 	// does not see it. Snapshot works from it, and Check refuses.

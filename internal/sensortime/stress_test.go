@@ -14,8 +14,8 @@ var stressJumps = 2000000
 // T-U-30 (read mark order): reader goroutines call Now in a loop. The writer
 // makes jumps of 1 h and 1 ms, each a Check and then Committed. The boot clock
 // is fixed, so a value of Now names the base that it loaded. A Now that
-// loaded the base of jump k-1 must be in the Read or in the Committed of jump
-// k. The test counts the reads that are in none.
+// loaded the base of jump k-1 must be in the Read of jump k. It can also be
+// in the Committed of jump k. The test counts the reads that are in none.
 func TestTU30_ReadMarkStressNoLostRead(t *testing.T) {
 	const readers = 4
 	n := stressJumps
