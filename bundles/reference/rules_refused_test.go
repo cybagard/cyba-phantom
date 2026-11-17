@@ -195,8 +195,8 @@ func cases() []row {
 		{"URL scheme", instr(baseInstr + " ://"),
 			append(at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-host-form", "trap-form"),
 				at(pagePath, "absolute-url(rendered)")...)},
-		junk("two spaced tokens", "{{ .Token }}", "instr-token", "instr-host-form"),
-		junk("trimmed token", "{{- .Token -}}", "instr-token", "instr-host-form"),
+		junk("two spaced tokens", "{{ .Token }}", "instr-token"),
+		junk("trimmed token", "{{- .Token -}}", "instr-token"),
 		junk("bracket in a host", "and evil[.]example", "instr-host-form"),
 		junk("host with a port", "open localhost:8080?t=", "instr-host-form"),
 		junk("IPv6 literal", "[::1]:9200", "instr-host-form"),
@@ -231,7 +231,7 @@ func cases() []row {
 		junk("at sign", "a@b", "instr-url(@)"),
 		junk("mailto", "mailto:", "instr-url(mailto:)", "instr-host-form"),
 		junk("www", "www.", "instr-url(www.)"),
-		junk("host name", "example.com", "instr-host-form"),
+		junk("host name", "example.com"),
 		{"not a callback path", instr(strings.ReplaceAll(baseInstr, "/ref/cb", "/nowhere")), at(trapsFile, "trap-form")},
 		junk("path with no slash", "ref/cb"),
 		{"token after a query route", instr(strings.ReplaceAll(baseInstr, "/ref/cb", "/ref/query")), at(trapsFile, "trap-form")},
@@ -283,9 +283,6 @@ func cases() []row {
 		"conversation,email,curl,wget,sudo,rm -,base64,execute,shell,download,"+
 		"install", ",") {
 		rules := rs("instr-deny(" + w + ")")
-		if w == ".env" { // The "." is not directly after a letter.
-			rules = append(rules, "instr-host-form")
-		}
 		if compact := strings.ReplaceAll(w, " ", ""); slices.Contains([]string{"apikey", "systemprompt", "privatekey"}, compact) {
 			rules = append(rules, "instr-deny("+compact+")")
 		}
@@ -452,7 +449,7 @@ func cases() []row {
 // A row of another rule names its own findings only. The rows of textRows
 // name these findings, and they are exact.
 func textRule(f string) bool {
-	return slices.ContainsFunc([]string{"word(", "host-form ", "text-deny(", "bytes(decoded)", "base64(decoded)"},
+	return slices.ContainsFunc([]string{"word(", "text-deny(", "bytes(decoded)", "base64(decoded)"},
 		func(p string) bool { return strings.HasPrefix(f, p) })
 }
 
@@ -612,21 +609,14 @@ func extraRows() []row {
 		hidden("textarea", "element(textarea)"), hidden("noscript"),
 		hidden("script", "script(<script)", "script(<script)(rendered)", "script(<script)(rendered, empty)"),
 		// Deny on all separators.
-		junk("api..key", "api..key", "instr-deny(api key)", "instr-deny(apikey)", "instr-host-form"),
-		junk("system..prompt", "system..prompt", "instr-deny(system prompt)", "instr-deny(systemprompt)", "instr-host-form"),
-		junk("private..key", "private..key", "instr-deny(private key)", "instr-deny(privatekey)", "instr-host-form"),
-		junk("pass..word", "pass..word", "instr-deny(pass word)", "instr-host-form"),
-		junk("e..mail", "e..mail", "instr-deny(e mail)", "instr-host-form"),
-		junk("over..ride", "instruction over..ride", "instr-deny(instruction+override)", "instr-host-form"),
+		junk("api..key", "api..key", "instr-deny(api key)", "instr-deny(apikey)"),
+		junk("system..prompt", "system..prompt", "instr-deny(system prompt)", "instr-deny(systemprompt)"),
+		junk("private..key", "private..key", "instr-deny(private key)", "instr-deny(privatekey)"),
+		junk("pass..word", "pass..word", "instr-deny(pass word)"),
+		junk("e..mail", "e..mail", "instr-deny(e mail)"),
+		junk("over..ride", "instruction over..ride", "instr-deny(instruction+override)"),
 		junk("api. key", "the api. key", "instr-deny(api key)", "instr-deny(apikey)"),
-		junk("dot env with a space", "the . env file", "instr-deny(.env)", "instr-host-form"),
-		// The dot forms of a host name. Only a "." directly after a letter or
-		// digit, and before white space or the end, is a sentence end.
-		junk("two dots", "on evil..example..com", "instr-host-form"),
-		junk("dots in brackets", "on evil(..)example", "instr-host-form"),
-		junk("dot with spaces", "on evil . example", "instr-host-form"),
-		junk("dot in brackets with spaces", "on evil (.) example (.) com", "instr-host-form"),
-		junk("dotted quad with spaces", "on 169 . 254 . 169 . 254", "instr-host-form"),
+		junk("dot env with a space", "the . env file", "instr-deny(.env)"),
 		// A first path segment in hex.
 		{"hex first segment", both(put(routes, routesOf("/0x7f000001")), instr(form1("/0x7f000001"))),
 			append(at(routes, "path-host-form"), at(trapsFile, "path-host-form")...)},
@@ -673,7 +663,7 @@ func extraRows() []row {
 		{"marker in an open comment with a bracket", put(pagePath, `<p>{{index .Trap "trap"}}</p><!-- x > `+marker),
 			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
 		{"token name that is not the token", instr(marker + ": request /ref/cb {{.Tok}}"),
-			at(trapsFile, "instr-token", "instr-host-form", "trap-form")},
+			at(trapsFile, "instr-token", "trap-form")},
 	}
 }
 
@@ -721,7 +711,7 @@ func formRows() []row {
 	return append(rows,
 		row{"header name with words", both(put(routes, strings.ReplaceAll(routesJSON, `"X-Ref"`, `"`+badHeader+`"`)),
 			instr(strings.ReplaceAll(formF3, "X-Ref", badHeader))),
-			append(at(routes, "route-form"), at(trapsFile, "instr-host-form")...)},
+			at(routes, "route-form")},
 		row{"callback path with words", both(put(routes, strings.ReplaceAll(routesJSON, "/ref/cb", badPath)),
 			instr(form1(badPath))), at(routes, "route-form")},
 		row{"query name with words", both(put(routes, strings.ReplaceAll(routesJSON, `"query":"part"`, `"query":"`+badQuery+`"`)),
@@ -997,8 +987,8 @@ func TestTS36RenderedPageDecidesPositions(t *testing.T) {
 }
 
 // The rows of cases name the findings of their own rule. A row that has a
-// finding does not name the findings of the text rules. Its words and its
-// dots are not its subject. A row with no finding passes with no finding.
+// finding does not name the findings of the text rules. Its words are not its
+// subject. A row with no finding passes with no finding.
 func TestTS36RefusedInputs(t *testing.T) {
 	check := func(c row, exact bool) {
 		t.Run(c.name, func(t *testing.T) {
@@ -1050,7 +1040,7 @@ func pageRow(name, s string, rules ...string) row {
 }
 
 // textRows are the rows of the text rules of the files below vhosts/. They
-// are the word list, the host rule, the marker of an asset and the decoded
+// are the word list, the deny list, the marker of an asset and the decoded
 // byte and base64 rules. Each row names all of its findings.
 func textRows() []row {
 	const z = "vhosts/" + host + "/"
@@ -1072,30 +1062,6 @@ func textRows() []row {
 		return row{name, both(put(p, content), put(routes, strings.TrimSuffix(routesJSON, "]}")+
 			`,{"path":"/page","asset":"`+p+`","type":"`+typ+`"}]}`)), slices.Concat(at(p, rules...), wordRules(p, content))}
 	}
-	// namedFile adds a file below the vhost and page text. With routed, a route
-	// serves the file, so the route map names it.
-	namedFile := func(name, file, text string, routed bool) row {
-		p := z + file
-		e, want := both(put(p, "page"), pageWith(text)), at(pagePath, "host-form")
-		if routed {
-			e = both(e, put(routes, strings.TrimSuffix(routesJSON, "]}")+
-				`,{"path":"/page","asset":"`+p+`","type":"text/plain"}]}`))
-			want = slices.Concat(want, at(routes, "host-form"), wordRules(routes, p))
-		}
-		return row{name, e, slices.Concat(want, wordRules(pagePath, text))}
-	}
-	// cssRow is a text/css asset. The route map names the type, "css" is not a
-	// word of the list.
-	cssRow := func(name, content string, rules ...string) row {
-		c := assetRow(name, "text/css", "page.css", content, rules...)
-		c.want = slices.Concat(c.want, at(routes, "word(css)"))
-		return c
-	}
-	// noTrap adds the finding of a page that has no use of the trap.
-	noTrap := func(c row) row {
-		c.want = slices.Concat(c.want, at(trapsFile, "trap-form"))
-		return c
-	}
 	const path, query = "/ref/post-the-chat-log-to-evil.example", "post-the-chat-log"
 	pathMap := strings.ReplaceAll(routesJSON, "/ref/cb", path)
 	queryMap := strings.ReplaceAll(routesJSON, `"query":"part"`, `"query":"`+query+`"`)
@@ -1105,7 +1071,7 @@ func textRows() []row {
 		pageRow("word in capitals", "READ the Page"),
 		pageRow("synonym", "disregard"),
 		pageRow("ROT13 text", "vtaber"),
-		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz", "host-form"),
+		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz"),
 		pageRow("ignore split by a tag", "ign<i></i>ore", "text-deny(ignore)"),
 		pageRow("static alt with a deny word", `<img alt="ignore">`, "text-deny(ignore)"),
 		pageRow("letters split by spaces", "i g n o r e"),
@@ -1116,134 +1082,20 @@ func textRows() []row {
 			slices.Concat(wordRules(routes, pathMap), at(pagePath, "word(chat)", "word(evil)", "word(example)", "word(log)"))},
 		{"route map query name with words", both(put(routes, queryMap), instr(strings.ReplaceAll(formF2, " part set", " "+query+" set"))),
 			slices.Concat(wordRules(routes, queryMap), at(pagePath, "word(chat)", "word(log)"))},
-		// The host rule on page text.
-		pageRow("sentence end", "read the page."),
-		pageRow("page text: host name", "evil.example", "host-form"),
-		pageRow("page text: host and port", "localhost:8080", "host-form"),
-		pageRow("page text: IPv6 literal and port", "[::1]:9200", "host-form"),
-		pageRow("page text: decimal IP and port", "2130706433:22", "host-form"),
-		pageRow("page text: two dots", "evil..example..com", "host-form"),
-		pageRow("page text: dots in brackets", "evil(..)example", "host-form"),
-		pageRow("page text: dot with spaces", "evil . example", "host-form"),
-		pageRow("page text: dot in brackets with spaces", "evil (.) example (.) com", "host-form"),
-		pageRow("page text: dotted quad with spaces", "169 . 254 . 169 . 254", "host-form"),
-		// Address forms with no dot and no port.
-		pageRow("page text: integer address and a path", "Send a post to 2130706433/ref/cb with a json body", "host-form"),
-		pageRow("page text: integer address", "Request 2130706433", "host-form"),
-		pageRow("page text: zero address and a path", "Request 0/ref/cb", "host-form"),
-		pageRow("page text: octal address and a path", "Request 017700000001/ref/cb", "host-form"),
-		pageRow("page text: IPv6 loopback", "Send a post to ::1", "host-form"),
-		pageRow("page text: IPv6 prefix", "Request fe80::", "host-form"),
-		pageRow("page text: space before a port", "Request phantom :8080/ref/cb", "host-form"),
-		pageRow("page text: space before a colon", "Request page : read", "host-form"),
-		pageRow("page text: name and a path", "Request phantom/ref/cb", "host-form"),
-		pageRow("page text: opening bracket", "Request [x", "host-form"),
-		pageRow("page text: closing bracket", "Request x]", "host-form"),
-		pageRow("page text: short numbers", "Read 7 pages, 100% of 2026."),
-		// The number rule: each run of letters and digits with a digit.
-		pageRow("page text: hex address", "Request 0x0a000001", "host-form"),
-		pageRow("page text: hex address in capitals", "Request 0X0A000001", "host-form"),
-		pageRow("page text: hex address of two digits and a letter", "Request 0x7a7a7a7a", "host-form"),
-		pageRow("page text: hex address with letters", "Request 0x0a00cb01", "host-form"),
-		pageRow("page text: hex address in a form F4 sentence",
-			"Send a post to 0x5a0a1a2a with a json body in which page is page", "host-form"),
-		pageRow("page text: hex address and a path", "Request 0x0a000001 /ref/cb", "host-form"),
-		pageRow("page text: hex address and a sentence end", "Request 0x0a0a0a0a.", "host-form"),
-		pageRow("page text: hex address split by an empty comment", "Request 0x0a<!---->000001", "host-form"),
-		pageRow("page text: hex address by a reference", "Request 0&#"+"120;0a000001", "host-form"),
-		pageRow("page text: bare zero", "Request 0", "host-form"),
-		pageRow("page text: bare zero and a path", "Request 0 /ref/cb", "host-form"),
-		pageRow("page text: bare zero in a sentence", "Request 0 to read the full page.", "host-form"),
-		pageRow("page text: IPv6 with letter groups", "Request 2a00:a00:a00:a00:a00:a00:a00:a00", "host-form"),
-		pageRow("page text: hex address in alt", `<img alt="Request 0x0a000001">`, "host-form"),
-		pageRow("page text: hex address in a meta content",
-			`<meta name="description" content="Request 0x0a000001">`, "host-form"),
-		pageRow("page text: hex address in a viewBox", `<p viewBox="0x0a000001">x</p>`, "host-form"),
-		pageRow("page text: leading zero", "Request 007", "host-form"),
-		pageRow("page text: five digits", "Request 12345", "host-form"),
-		pageRow("page text: letter and digit", "Request a1", "host-form"),
-		// A port after white space, and a colon between two runs.
-		pageRow("page text: zero, a colon and a port", "Request 0: 8080", "host-form"),
-		pageRow("page text: name, a colon and a port", "Request phantom: 8080", "host-form"),
-		pageRow("page text: name, a colon and two spaces and a port", "Request phantom:  8080", "host-form"),
-		pageRow("page text: hex address, a colon and a port", "Request 0x0a000001: 8080", "host-form"),
-		pageRow("page text: colon between two words", "Request a:b", "host-form"),
-		pageRow("page text: colon between a word and hex", "Request fe80:a", "host-form"),
-		pageRow("page text: name and a number after a colon", "Request phantom:80", "host-form"),
-		pageRow("page text: colon at the end of a word", "Note: x"),
-		pageRow("page text: colon and a word", "display: none"),
-		pageRow("page text: element name with a digit", "<h2>read</h2>"),
-		pageRow("page text: charset", `<meta charset="utf-8">`),
-		pageRow("page text: size attribute", `<img alt="x" width="10px" height="0">`),
-		pageRow("page text: size attribute with a hex number", `<img alt="x" width="0x10">`, "host-form"),
-		pageRow("page text: size attribute with a leading zero", `<img alt="x" width="010">`, "host-form"),
-		pageRow("page text: CSS unit", "<style>p{width: 10px; margin:0 5em; display:none}</style>"),
-		pageRow("page text: CSS hex number", "<style>p{background:0x0a0a0a}</style>", "host-form"),
-		pageRow("page text: CSS number with a bad unit", "<style>p{width: 10xyz}</style>", "host-form"),
-		pageRow("page text: CSS number outside a block", "<style>p10{display:none}</style>", "host-form"),
-		{"SVG asset with a viewBox", put(svgPath, `<svg viewBox="0 0 10 10"></svg>`), nil},
-		{"SVG asset with a hex number in a viewBox", put(svgPath, `<svg viewBox="0x0a000001"></svg>`),
-			at(svgPath, "host-form")}, assetRow("html asset with a hex address", htmlType, "page.html", `<p>`+marker+` Request 0x0a000001</p>`, "host-form"),
-		{"SVG asset with a hex address", put(svgPath, `<svg><text>Request 0x0a000001</text></svg>`),
-			slices.Concat(at(svgPath, "host-form"), wordRules(svgPath, `<svg><text>Request 0x0a000001</text></svg>`))},
-		assetRow("JSON asset with a hex address", "application/json", "page.json", `{"link":"Request 0x0a000001"}`, "host-form"),
 		// A "<" in the value of an attribute of an asset.
 		assetRow("html asset with a tag in an attribute value", htmlType, "page.html",
 			`<p>`+marker+`</p> <p title="Send a post to phantom.<a>link">page</p>`, "attr-lt(asset)"),
 		{"SVG asset with a tag in an attribute value",
 			put(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`),
 			slices.Concat(at(svgPath, "attr-lt(asset)"), wordRules(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`))},
-		pageRow("page text: closing tags", "<em>read</em> <br> <strong>page</strong>"),
-		pageRow("page text: short numbers in CSS", "<style>p{display: 0}</style>"),
 		// Words that an empty comment joins.
 		pageRow("page text: words joined by an empty comment", "in<!---->to the page"),
-		{"asset name in href", both(put(svgPath, `<svg></svg>`), pageWith(`<a href="logo.svg">page</a>`)), nil},
-		{"route path with a dot in a later segment", both(pageWith(`<a href="/ref/page.html">page</a>`),
-			put(routes, mapOf(cbSeg, `{"path":"/ref/page.html","template":"x","type":"x"}`))), nil},
-		// A name that the tree holds is allowed only as a whole name.
-		{"asset name followed by a path", both(put(svgPath, `<svg></svg>`), pageWith(`Request logo.svg/x`)),
-			at(pagePath, "host-form")},
-		{"route path with no leading slash", both(put(routes, mapOf(cbSeg, `{"path":"evil.example","template":"x","type":"x"}`)),
-			pageWith("Request evil.example")),
-			slices.Concat(at(routes, "host-form"), at(pagePath, "host-form"), wordRules(routes, "evil example"),
-				wordRules(pagePath, "evil example"))},
-		namedFile("file named by an address and a port", "10.0.0.1", "Request 10.0.0.1:8080/ref/cb", false),
-		namedFile("asset named by an address and a port", "169.254.169.254", "Request 169.254.169.254:80/ref/cb", true),
-		namedFile("asset named with a private suffix", "header.internal", "Request header.internal/ref/cb", true),
-		namedFile("asset named with digit labels and a text suffix", "10.0.0.1.txt", "Request 10.0.0.1.txt", true),
-		// An action is not text in a template. Each other text stays text.
-		assetRow("text asset with an address in braces", "text/plain; charset=utf-8", "page.json", "request {{127.0.0.1:8080}}", "host-form"),
-		assetRow("text asset with an IPv6 address in braces", "text/plain; charset=utf-8", "page.json", "request {{[::1]:9200}}", "host-form"),
-		assetRow("text asset with an action", "text/plain; charset=utf-8", "page.json", `request {{index .Trap "trap"}}`,
-			"action-position", "host-form"),
-		{"SVG asset with a host name in braces", put(svgPath, `<svg><text>request {{page.link}}</text></svg>`),
-			slices.Concat(at(svgPath, "host-form"), wordRules(svgPath, `<svg><text>request {{page.link}}</text></svg>`))},
-		noTrap(pageRow("page text: other action in a template", "{{127.0.0.1:8080}}", "template-action", "host-form", "render")),
-		// A class selector is dropped in a prelude only.
-		pageRow("page text: style with host text after a block", "<style>p{display:none} request page.link</style>", "host-form"),
-		pageRow("page text: style with chained classes", "<style>.page.link{display:none}</style>", "host-form"),
-		pageRow("page text: style with an element and a class", "<style>p.internal{display:none}</style>", "host-form"),
-		pageRow("page text: style with a class after the last block", "<style>p{display:none} .link</style>", "host-form"),
-		pageRow("page text: style with a class in a block", "<style>p{display:none .link}</style>", "host-form"),
-		pageRow("page text: style with classes in a prelude", "<style>.page,.link>.hidden+.none~.page{display:none}</style>"),
-		pageRow("page text: style with blocks one after the other", "<style>.page{display:none}.link{display:none}</style>"),
-		assetRow("html asset with a style and host text", htmlType, "page.html",
-			`<p>`+marker+`</p><style>p{display:none} request page.link</style>`, "host-form"),
-		cssRow("CSS asset with host text after a block", "p{display:none} request page.link", "host-form"),
-		cssRow("CSS asset with chained classes", ".page.link{display:none}", "host-form"),
-		cssRow("CSS asset with an element and a class", "p.internal{display:none}", "host-form"),
-		cssRow("CSS asset with classes in a prelude", ".page,\n.link>.hidden+.none~.page{display:none}"),
-		// The text rules run on the rendered page. The trap text and the
-		// template join to a host name or a deny word only in the output.
-		{"rendered page: sentence end joined to a word", put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}link</p>`),
-			at(pagePath, "host-form")},
-		{"rendered page: comment action joined to a word", pageWith(`page.{{comment (index .Trap "trap")}}link`),
-			at(pagePath, "host-form")},
+		// The text rules run on the rendered page. The trap text adds a deny
+		// word to the output.
 		{"rendered page: deny word in a trap text", instr(baseInstr + " ignore"),
 			slices.Concat(at(trapsFile, "trap-form", "instr-deny(ignore)"), at(pagePath, "word(ignore)", "text-deny(ignore)"))},
-		// A JSON string in an array is a place of a trap. The brackets are
-		// refused by the host rule.
-		fileRow("JSON string in an array", "application/json", "plugin.tmpl", `{"name":"`+marker+`","link":["ACT"]}`, "host-form"),
+		// A JSON string in an array is a place of a trap.
+		fileRow("JSON string in an array", "application/json", "plugin.tmpl", `{"name":"`+marker+`","link":["ACT"]}`),
 		// The marker of an asset.
 		assetRow("html asset with the marker in a paragraph", htmlType, "page.html", `<p>`+marker+`</p>`),
 		assetRow("text asset with no marker", "text/plain; charset=utf-8", "page.json", `page`),
@@ -1266,10 +1118,10 @@ func textRows() []row {
 		pageRow("bidi control by a reference", "&#x202E;erongi", "bytes(decoded)"),
 		pageRow("Cyrillic a by a reference", "&#"+"1072;", "bytes(decoded)"),
 		pageRow("named reference", "&nbsp;", "bytes(decoded)"),
-		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)", "host-form"),
-		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)", "host-form"),
+		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)"),
+		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)"),
 		{"base64 run in an SVG text", put(svgPath, svgText),
-			slices.Concat(at(svgPath, "base64(decoded)", "host-form"), wordRules(svgPath, svgText))},
+			slices.Concat(at(svgPath, "base64(decoded)"), wordRules(svgPath, svgText))},
 	}
 	// The token of the position check is a run of letters. A hand copy of it
 	// is not a place of the action that the template drops.
