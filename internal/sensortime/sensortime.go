@@ -1,6 +1,7 @@
 // Package sensortime holds the clocks and the stored state of the sensor time
 // (ADR-043). It has the boot clock, the boot id and the value of the meta key
-// sensor_time. It has no start rule and no caller yet.
+// sensor_time. It also has the start rules, the grace and the atomic S. It
+// has no caller yet.
 package sensortime
 
 import (
@@ -91,23 +92,31 @@ func (s State) format() string {
 //   - The boot id is empty or in lower-case UUID form.
 //   - The boot clock is not negative.
 //   - The four rowids of the state are not negative.
-//   - The catch-up used is from 0 to 9223372036854 ms.
+//   - The catch-up used is from 0 to 86400000 ms (24 h).
+//   - The first event rowid is not more than the next event rowid. The same
+//     holds for the session rowids.
 //   - With no jump (ID 0), every jump field is 0. The ID is not negative.
 //   - With a jump, Size is from 1 to 9223372036854 ms.
-//   - With a jump, At is from 0 to 9223372036854 ms.
-//   - With a jump, its two rowids are not negative.
+//   - With a jump, At is from 0 to 9223372036854 ms, and not after S.
+//   - With a jump, Size is not more than At.
+//   - With a jump, its two rowids are not negative. They are not more than
+//     the next event rowid and the next session rowid.
 func (s State) validate() error {
 	j := s.Jump
 	inMS := func(v int64) bool { return v >= 0 && v <= maxMS }
 	ok := inMS(s.S) && (s.BootID == "" || validUUID(s.BootID, false)) &&
 		s.BootClock >= 0 &&
 		s.FirstEvent >= 0 && s.FirstSession >= 0 &&
-		s.NextEvent >= 0 && s.NextSession >= 0 && inMS(s.CatchUp) &&
+		s.NextEvent >= 0 && s.NextSession >= 0 &&
+		s.CatchUp >= 0 && s.CatchUp <= catchUpMaxMS &&
+		s.FirstEvent <= s.NextEvent && s.FirstSession <= s.NextSession &&
 		j.ID >= 0 && j.FirstEvent >= 0 && j.FirstSession >= 0
 	if j.ID == 0 {
 		ok = ok && j == Jump{}
 	} else {
-		ok = ok && j.Size >= 1 && j.Size <= maxMS && inMS(j.At)
+		ok = ok && j.Size >= 1 && j.Size <= maxMS && inMS(j.At) &&
+			j.At <= s.S && j.Size <= j.At &&
+			j.FirstEvent <= s.NextEvent && j.FirstSession <= s.NextSession
 	}
 	if !ok {
 		return ErrState

@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -200,31 +202,45 @@ var fieldCases = []struct {
 	name string
 	set  func(*State)
 }{
-	{"S min", func(s *State) { s.S = 0 }},
+	{"S min", func(s *State) { s.S, s.Jump = 0, Jump{} }},
 	{"S max", func(s *State) { s.S = boundMS }},
 	{"no boot id", func(s *State) { s.BootID = "" }},
 	{"boot clock min", func(s *State) { s.BootClock = 0 }},
 	{"boot clock max", func(s *State) { s.BootClock = 1<<63 - 1 }},
 	{"first event min", func(s *State) { s.FirstEvent = 0 }},
-	{"first event max", func(s *State) { s.FirstEvent = 1<<63 - 1 }},
+	{"first event max", func(s *State) {
+		s.FirstEvent, s.NextEvent = 1<<63-1, 1<<63-1
+	}},
 	{"first session min", func(s *State) { s.FirstSession = 0 }},
-	{"first session max", func(s *State) { s.FirstSession = 1<<63 - 1 }},
+	{"first session max", func(s *State) {
+		s.FirstSession, s.NextSession = 1<<63-1, 1<<63-1
+	}},
 	{"catch-up min", func(s *State) { s.CatchUp = 0 }},
-	{"catch-up max", func(s *State) { s.CatchUp = boundMS }},
+	{"catch-up max", func(s *State) { s.CatchUp = 86400000 }},
 	{"no jump", func(s *State) { s.Jump = Jump{} }},
 	{"jump id min", func(s *State) { s.Jump.ID = 1 }},
 	{"jump id max", func(s *State) { s.Jump.ID = 1<<63 - 1 }},
 	{"jump size min", func(s *State) { s.Jump.Size = 1 }},
-	{"jump size max", func(s *State) { s.Jump.Size = boundMS }},
-	{"jump at min", func(s *State) { s.Jump.At = 0 }},
-	{"jump at max", func(s *State) { s.Jump.At = boundMS }},
+	{"jump size max", func(s *State) {
+		s.S, s.Jump.At, s.Jump.Size = boundMS, boundMS, boundMS
+	}},
+	{"jump at min", func(s *State) { s.Jump.At, s.Jump.Size = 1, 1 }},
+	{"jump at max", func(s *State) { s.S, s.Jump.At = boundMS, boundMS }},
 	{"jump first event min", func(s *State) { s.Jump.FirstEvent = 0 }},
-	{"jump first event max", func(s *State) { s.Jump.FirstEvent = 1<<63 - 1 }},
+	{"jump first event max", func(s *State) {
+		s.Jump.FirstEvent, s.NextEvent = 1<<63-1, 1<<63-1
+	}},
 	{"jump first session min", func(s *State) { s.Jump.FirstSession = 0 }},
-	{"jump first session max", func(s *State) { s.Jump.FirstSession = 1<<63 - 1 }},
-	{"next event min", func(s *State) { s.NextEvent = 0 }},
+	{"jump first session max", func(s *State) {
+		s.Jump.FirstSession, s.NextSession = 1<<63-1, 1<<63-1
+	}},
+	{"next event min", func(s *State) {
+		s.NextEvent, s.FirstEvent, s.Jump.FirstEvent = 0, 0, 0
+	}},
 	{"next event max", func(s *State) { s.NextEvent = 1<<63 - 1 }},
-	{"next session min", func(s *State) { s.NextSession = 0 }},
+	{"next session min", func(s *State) {
+		s.NextSession, s.FirstSession, s.Jump.FirstSession = 0, 0, 0
+	}},
 	{"next session max", func(s *State) { s.NextSession = 1<<63 - 1 }},
 }
 
@@ -312,7 +328,7 @@ func TestTU30_StateRangeRules(t *testing.T) {
 		{"negative next event", func(s *State) { s.NextEvent = -1 }},
 		{"negative next session", func(s *State) { s.NextSession = -1 }},
 		{"negative catch-up", func(s *State) { s.CatchUp = -1 }},
-		{"catch-up too large", func(s *State) { s.CatchUp = boundMS + 1 }},
+		{"catch-up too large", func(s *State) { s.CatchUp = 86400001 }},
 		{"negative jump id", func(s *State) { s.Jump.ID = -1 }},
 		{"jump size zero", func(s *State) { s.Jump.Size = 0 }},
 		{"jump size negative", func(s *State) { s.Jump.Size = -1 }},
@@ -352,5 +368,465 @@ func TestTU30_ErrorTextFixed(t *testing.T) {
 	}
 	if e2 != ErrState || e3 != ErrBootID || e4 != ErrBootID {
 		t.Error("errors are not the fixed values")
+	}
+}
+
+// Each rule has a state that passes at its edge and one that fails one above.
+func TestTU30_StateCrossRules(t *testing.T) {
+	rules := []struct {
+		name    string
+		ok, bad func(*State)
+	}{
+		{"jump at and S",
+			func(s *State) { s.Jump.At = s.S },
+			func(s *State) { s.Jump.At = s.S + 1 }},
+		{"jump size and at",
+			func(s *State) { s.Jump.Size = s.Jump.At },
+			func(s *State) { s.Jump.Size = s.Jump.At + 1 }},
+		{"catch-up",
+			func(s *State) { s.CatchUp = 86400000 },
+			func(s *State) { s.CatchUp = 86400001 }},
+		{"first event",
+			func(s *State) { s.FirstEvent = s.NextEvent },
+			func(s *State) { s.FirstEvent = s.NextEvent + 1 }},
+		{"first session",
+			func(s *State) { s.FirstSession = s.NextSession },
+			func(s *State) { s.FirstSession = s.NextSession + 1 }},
+		{"jump first event",
+			func(s *State) { s.Jump.FirstEvent = s.NextEvent },
+			func(s *State) { s.Jump.FirstEvent = s.NextEvent + 1 }},
+		{"jump first session",
+			func(s *State) { s.Jump.FirstSession = s.NextSession },
+			func(s *State) { s.Jump.FirstSession = s.NextSession + 1 }},
+	}
+	for _, r := range rules {
+		s := typical()
+		r.ok(&s)
+		v, err := s.Encode()
+		if got, derr := Decode(v); err != nil || derr != nil || got != s {
+			t.Errorf("%s: edge value: %v, %v", r.name, err, derr)
+		}
+		s = typical()
+		r.bad(&s)
+		if v, err := s.Encode(); err != ErrState || v != "" {
+			t.Errorf("%s: encode gave %q, %v", r.name, v, err)
+		}
+		if _, err := Decode(s.format()); err != ErrState {
+			t.Errorf("%s: decode err = %v, want ErrState", r.name, err)
+		}
+	}
+}
+
+// The epoch of this package is the token epoch, 2026-01-01 UTC.
+func TestTU30_EpochConstant(t *testing.T) {
+	want := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if epochMS != want {
+		t.Fatalf("epochMS = %d, want %d", epochMS, want)
+	}
+}
+
+const (
+	hourMS  = int64(3600000)
+	dayMS   = 24 * hourMS
+	s0      = epochMS + 100*dayMS // a stored S after the epoch
+	otherID = "fedcba98-7654-4321-8fed-cba987654321"
+)
+
+// fake is a source with clocks that a test sets. It is safe for many
+// goroutines. Its boot clock goes down only when a test lowers it.
+type fake struct {
+	wall, boot atomic.Int64 // wall in unix ms, boot in ns
+	id         string
+	idErr      error
+	bootErr    error // set by a test before the goroutines run
+	wallCalls  atomic.Int32
+}
+
+func newFake(wall int64, boot time.Duration, id string) *fake {
+	f := &fake{id: id}
+	f.wall.Store(wall)
+	f.boot.Store(int64(boot))
+	return f
+}
+
+func (f *fake) source() Source {
+	return Source{
+		Wall: func() time.Time {
+			f.wallCalls.Add(1)
+			return time.UnixMilli(f.wall.Load())
+		},
+		BootClock: func() (time.Duration, error) {
+			return time.Duration(f.boot.Load()), f.bootErr
+		},
+		BootID: func() (string, error) { return f.id, f.idErr },
+	}
+}
+
+// stored gives a valid stored state of S s at the boot clock boot.
+func stored(s int64, id string, boot time.Duration) *State {
+	return &State{
+		S: s, BootID: id, BootClock: boot, FirstEvent: 120, FirstSession: 40,
+		CatchUp: 600000,
+		Jump: Jump{ID: 3, Size: 7200000, At: s, FirstEvent: 100,
+			FirstSession: 30},
+		NextEvent: 5000, NextSession: 900,
+	}
+}
+
+func mustStart(t *testing.T, f *fake, in StartInput) (*Clock, Result) {
+	t.Helper()
+	c, r, err := Start(f.source(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, r
+}
+
+func mustNow(t *testing.T, c *Clock) int64 {
+	t.Helper()
+	s, err := c.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestTU30_SameBootAddsElapsed(t *testing.T) {
+	for _, off := range []int64{40 * dayMS, -40 * dayMS} {
+		for _, el := range []time.Duration{0, 90 * time.Minute} {
+			f := newFake(s0+off, 10*time.Hour+el, goodID)
+			st := stored(s0, goodID, 10*time.Hour)
+			in := StartInput{Stored: st, NextEvent: 7000, NextSession: 100}
+			c, r := mustStart(t, f, in)
+			want := s0 + el.Milliseconds()
+			if r.State.S != want || mustNow(t, c) != want || r.Jump != nil {
+				t.Fatalf("wall %+d, el %v: S %d, jump %v; want %d",
+					off, el, r.State.S, r.Jump, want)
+			}
+			w := *st
+			w.S, w.BootClock, w.NextEvent = want, 10*time.Hour+el, 7000
+			if r.State != w {
+				t.Fatalf("state %+v, want %+v", r.State, w)
+			}
+			if f.wallCalls.Load() != 0 {
+				t.Fatal("start or Now called Wall")
+			}
+		}
+	}
+}
+
+func TestTU30_RebootTakesLargerOfStoredAndWall(t *testing.T) {
+	cases := []struct {
+		name  string
+		st    *State
+		id    string
+		boot  time.Duration
+		off   int64 // wall minus stored S
+		wantS int64 // offset from s0
+		jump  int64 // 0: none
+	}{
+		{"lower boot clock", stored(s0, goodID, 10*time.Hour), goodID,
+			10*time.Hour - 1, 2 * hourMS, 2 * hourMS, 2 * hourMS},
+		{"other boot id", stored(s0, goodID, 10*time.Hour), otherID,
+			20 * time.Hour, 2 * hourMS, 2 * hourMS, 2 * hourMS},
+		{"no boot id now", stored(s0, goodID, 10*time.Hour), "",
+			20 * time.Hour, 2 * hourMS, 2 * hourMS, 2 * hourMS},
+		{"no boot id stored", stored(s0, "", 10*time.Hour), goodID,
+			20 * time.Hour, 2 * hourMS, 2 * hourMS, 2 * hourMS},
+		{"no boot id on both", stored(s0, "", 10*time.Hour), "",
+			20 * time.Hour, 2 * hourMS, 2 * hourMS, 2 * hourMS},
+		{"wall behind", stored(s0, goodID, 10*time.Hour), otherID,
+			20 * time.Hour, -5 * hourMS, 0, 0},
+		{"exactly 1 h", stored(s0, goodID, 10*time.Hour), otherID,
+			20 * time.Hour, hourMS, hourMS, 0},
+		{"1 h and 1 ms", stored(s0, goodID, 10*time.Hour), otherID,
+			20 * time.Hour, hourMS + 1, hourMS + 1, hourMS + 1},
+	}
+	for _, c := range cases {
+		f := newFake(s0+c.off, c.boot, c.id)
+		in := StartInput{Stored: c.st, NextEvent: 7000, NextSession: 100}
+		_, r := mustStart(t, f, in)
+		st := r.State
+		if st.S != s0+c.wantS || st.FirstEvent != 7000 ||
+			st.FirstSession != 900 || st.CatchUp != 0 ||
+			st.NextEvent != 7000 || st.NextSession != 900 {
+			t.Errorf("%s: state %+v", c.name, st)
+		}
+		if c.jump == 0 {
+			if r.Jump != nil || st.Jump != c.st.Jump {
+				t.Errorf("%s: jump %v, state jump %+v", c.name, r.Jump, st.Jump)
+			}
+			continue
+		}
+		want := Jump{ID: 4, Size: c.jump, At: st.S, FirstEvent: 7000,
+			FirstSession: 900}
+		if r.Jump == nil || *r.Jump != (JumpResult{4, c.jump, KindStart}) ||
+			st.Jump != want {
+			t.Errorf("%s: jump %v, state jump %+v", c.name, r.Jump, st.Jump)
+		}
+	}
+}
+
+func TestTU30_NoStoredState(t *testing.T) {
+	f := newFake(s0+400*dayMS, time.Minute, goodID)
+	_, r := mustStart(t, f, StartInput{NextEvent: 7, NextSession: 3})
+	want := State{S: s0 + 400*dayMS, BootID: goodID, BootClock: time.Minute,
+		FirstEvent: 7, FirstSession: 3, NextEvent: 7, NextSession: 3}
+	if r.State != want || r.Jump != nil {
+		t.Fatalf("state %+v, jump %v", r.State, r.Jump)
+	}
+}
+
+func TestTU30_StartClampsS(t *testing.T) {
+	far := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	cases := []struct {
+		name string
+		st   *State
+		wall int64
+		boot time.Duration
+		want int64
+	}{
+		{"wall at max", nil, boundMS, 0, boundMS},
+		{"wall above max", nil, boundMS + 1, 0, boundMS},
+		{"wall far above max", nil, far, 0, boundMS},
+		{"wall at 0", nil, 0, 0, 0},
+		{"wall below 0", nil, -1, 0, 0},
+		{"stored at max, wall behind", stored(boundMS, otherID, 0), 5, 0,
+			boundMS},
+		{"sum at max", stored(boundMS-1000, goodID, 0), 0, time.Second,
+			boundMS},
+		{"sum above max", stored(boundMS-1000, goodID, 0), 0,
+			time.Second + time.Millisecond, boundMS},
+		{"sum below max", stored(boundMS-1000, goodID, 0), 0,
+			time.Second - time.Millisecond, boundMS - 1},
+		{"huge boot clock", stored(boundMS, goodID, 0), 0, 1<<63 - 1,
+			boundMS},
+	}
+	for _, c := range cases {
+		f := newFake(c.wall, c.boot, goodID)
+		_, r := mustStart(t, f, StartInput{Stored: c.st})
+		if r.State.S != c.want {
+			t.Errorf("%s: S %d, want %d", c.name, r.State.S, c.want)
+		}
+	}
+}
+
+func TestTU30_StartRefusals(t *testing.T) {
+	f := newFake(s0, time.Hour, goodID)
+	f.idErr = ErrBootID
+	if c, _, err := Start(f.source(), StartInput{}); err != ErrBootID || c != nil {
+		t.Errorf("boot id error: %v", err)
+	}
+	f = newFake(s0, time.Hour, goodID)
+	f.bootErr = errors.New("clock")
+	if _, _, err := Start(f.source(), StartInput{}); err != f.bootErr {
+		t.Errorf("boot clock error: %v", err)
+	}
+	f = newFake(s0, time.Hour, goodID)
+	bad := stored(s0, goodID, 0)
+	bad.CatchUp = 86400001
+	if _, _, err := Start(f.source(), StartInput{Stored: bad}); err != ErrState {
+		t.Errorf("bad stored state: %v", err)
+	}
+}
+
+func TestTU30_JumpIDAboveKnownIDs(t *testing.T) {
+	cases := []struct {
+		known, stored, want int64
+	}{{0, 0, 1}, {9, 3, 10}, {2, 3, 4}, {3, 3, 4}, {0, 8, 9}}
+	for _, c := range cases {
+		st := stored(s0, goodID, time.Hour)
+		st.Jump.ID = c.stored
+		if c.stored == 0 {
+			st.Jump = Jump{}
+		}
+		f := newFake(s0+2*hourMS, time.Hour, otherID)
+		clk, r := mustStart(t, f, StartInput{Stored: st, KnownJumpID: c.known})
+		if r.Jump == nil || r.Jump.ID != c.want || r.State.Jump.ID != c.want {
+			t.Fatalf("known %d, stored %d: jump %v", c.known, c.stored, r.Jump)
+		}
+		// The next jump of this clock goes above the one it gave.
+		f.wall.Store(s0 + 10*hourMS)
+		r2, err := clk.Check()
+		if err != nil || r2.Jump == nil || r2.Jump.ID != c.want+1 {
+			t.Fatalf("grace jump after id %d: %v, %v", c.want, r2.Jump, err)
+		}
+	}
+}
+
+// graceClock starts a clock at S s on the same host boot at boot clock boot.
+func graceClock(t *testing.T, s int64, boot time.Duration) (*fake, *Clock) {
+	f := newFake(s, boot, goodID)
+	c, _ := mustStart(t, f, StartInput{Stored: stored(s, goodID, boot),
+		NextEvent: 8000, NextSession: 950})
+	return f, c
+}
+
+func TestTU30_GraceFollowsWallForward(t *testing.T) {
+	cases := []struct {
+		name string
+		s    int64
+		boot time.Duration
+		off  int64 // wall minus S
+		move bool
+		jump bool
+	}{
+		{"boot clock 6 h - 1 ns, jump", s0, 6*time.Hour - 1, 2 * hourMS, true, true},
+		{"boot clock 6 h", s0, 6 * time.Hour, 2 * hourMS, false, false},
+		{"boot clock 0", s0, 0, 2 * hourMS, true, true},
+		{"1 h, no jump", s0, time.Hour, hourMS, true, false},
+		{"1 h and 1 ms, jump", s0, time.Hour, hourMS + 1, true, true},
+		{"1 ms, no jump", s0, time.Hour, 1, true, false},
+		{"wall equal", s0, time.Hour, 0, false, false},
+		{"wall behind", s0, time.Hour, -3 * hourMS, false, false},
+		{"epoch - 1 ms, jump", epochMS - 1, 10 * time.Hour, 2 * hourMS, true, true},
+		{"epoch - 1 ms, no jump", epochMS - 1, 10 * time.Hour, 1, true, false},
+		{"epoch", epochMS, 10 * time.Hour, 2 * hourMS, false, false},
+		{"before epoch, wall behind", 5 * dayMS, 10 * time.Hour, -hourMS,
+			false, false},
+	}
+	for _, c := range cases {
+		f, clk := graceClock(t, c.s, c.boot)
+		f.wall.Store(c.s + c.off)
+		r, err := clk.Check()
+		want := c.s
+		if c.move {
+			want += c.off
+		}
+		if err != nil || r.State.S != want || mustNow(t, clk) != want ||
+			(r.Jump != nil) != c.jump {
+			t.Errorf("%s: S %d (want %d), jump %v, %v",
+				c.name, r.State.S, want, r.Jump, err)
+			continue
+		}
+		if !c.jump {
+			if r.State.Jump != stored(c.s, goodID, 0).Jump {
+				t.Errorf("%s: jump record changed: %+v", c.name, r.State.Jump)
+			}
+			continue
+		}
+		// The jump starts at the first rowids of the host boot (120, 40).
+		wantJ := Jump{ID: 4, Size: c.off, At: want, FirstEvent: 120,
+			FirstSession: 40}
+		if *r.Jump != (JumpResult{4, c.off, KindGrace}) || r.State.Jump != wantJ {
+			t.Errorf("%s: jump %v, record %+v", c.name, r.Jump, r.State.Jump)
+		}
+		if r.State.CatchUp != 600000 || r.State.NextEvent != 8000 {
+			t.Errorf("%s: state %+v", c.name, r.State)
+		}
+	}
+}
+
+func TestTU30_GraceClampsS(t *testing.T) {
+	f, c := graceClock(t, s0, time.Hour)
+	f.wall.Store(boundMS + 5*dayMS)
+	r, err := c.Check()
+	if err != nil || r.State.S != boundMS || r.Jump == nil ||
+		r.State.Jump.At != boundMS {
+		t.Fatalf("%+v, %v", r, err)
+	}
+	if _, err := r.State.Encode(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The fake boot clock jumps 3 h and the Go monotonic clock does not move.
+func TestTU30_HostSuspendCountsInS(t *testing.T) {
+	for _, boot := range []time.Duration{10 * time.Hour, time.Hour} {
+		f, c := graceClock(t, s0, boot)
+		before := mustNow(t, c)
+		f.boot.Add(int64(3 * time.Hour))
+		after := mustNow(t, c)
+		if after-before != 3*hourMS {
+			t.Fatalf("boot %v: S %d then %d", boot, before, after)
+		}
+		r, err := c.Check()
+		if err != nil || r.Jump != nil || r.State.S != after ||
+			mustNow(t, c) != after {
+			t.Fatalf("boot %v: check %+v, %v", boot, r, err)
+		}
+	}
+}
+
+func TestTU30_ReaderErrorAndBackwardBootClock(t *testing.T) {
+	f, c := graceClock(t, s0, 10*time.Hour)
+	f.boot.Add(int64(time.Minute))
+	want := mustNow(t, c)
+	f.bootErr = errors.New("clock")
+	if s, err := c.Now(); err == nil || s != 0 {
+		t.Errorf("Now gave %d, %v", s, err)
+	}
+	if _, err := c.Snapshot(); err == nil {
+		t.Error("Snapshot gave no error")
+	}
+	if _, err := c.Check(); err == nil {
+		t.Error("Check gave no error")
+	}
+	f.bootErr = nil
+	f.boot.Store(int64(time.Hour)) // a boot clock that went down
+	if got := mustNow(t, c); got != s0 {
+		t.Errorf("S %d with a lower boot clock, want the base %d", got, s0)
+	}
+	f.boot.Store(int64(10*time.Hour + time.Minute))
+	if got := mustNow(t, c); got != want {
+		t.Errorf("S %d, want %d", got, want)
+	}
+}
+
+func TestTU30_SnapshotAtCurrentBootClock(t *testing.T) {
+	f, c := graceClock(t, s0, 10*time.Hour)
+	f.boot.Add(int64(90 * time.Minute))
+	st, err := c.Snapshot()
+	if err != nil || st.S != s0+90*60000 || st.BootClock != 11*time.Hour+30*time.Minute ||
+		st.BootID != goodID || st.FirstEvent != 120 || st.NextEvent != 8000 {
+		t.Fatalf("%+v, %v", st, err)
+	}
+	v, err := st.Encode()
+	if got, derr := Decode(v); err != nil || derr != nil || got != st {
+		t.Fatalf("encode %v, decode %v", err, derr)
+	}
+}
+
+// 8 readers see a non-decreasing S while one goroutine makes grace jumps.
+func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
+	f, c := graceClock(t, s0, time.Minute)
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	errc := make(chan string, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var last int64
+			for !stop.Load() {
+				s, err := c.Now()
+				if err != nil || s < last {
+					errc <- "reader saw S go down or an error"
+					return
+				}
+				last = s
+			}
+		}()
+	}
+	jumps := 0
+	for i := 1; i <= 2000; i++ {
+		f.boot.Add(int64(time.Millisecond))
+		f.wall.Store(s0 + int64(i)*2*hourMS)
+		r, err := c.Check()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Jump != nil {
+			jumps++
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
+	close(errc)
+	for e := range errc {
+		t.Error(e)
+	}
+	if jumps != 2000 {
+		t.Fatalf("%d grace jumps, want 2000", jumps)
 	}
 }
