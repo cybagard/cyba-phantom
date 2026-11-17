@@ -1,0 +1,369 @@
+package sensortime
+
+import (
+	"log/slog"
+	"testing"
+	"time"
+)
+
+// graceSim starts a clock on the same host boot at boot clock 1 h, S = s0.
+func graceSim(t *testing.T) *sim {
+	return newSim(t, s0, time.Hour, goodID, stored(s0, goodID, time.Hour))
+}
+
+// T-U-30 (grace sum): 359 checks, each with the wall 59 min ahead. The
+// simulated writer calls Committed after each result with Write. Each second
+// check is a grace jump of more than 1 h and at most 2 h. A start that takes
+// the reboot rule sets U to 0. A start on the same host boot keeps U.
+func TestTU30_GraceSumRamp(t *testing.T) {
+	m := newSim(t, s0, 0, goodID, nil)
+	for i := 1; i <= 359; i++ {
+		r := m.set(minute, m.res.State.S+hourMS)
+		wantU := int64(59 * 60000)
+		if i%2 == 0 {
+			wantU = 0
+			if r.Jump == nil || r.Jump.Size <= hourMS || r.Jump.Size > 2*hourMS ||
+				r.State.Jump.Size != r.Jump.Size {
+				t.Fatalf("check %d: jump %+v", i, r.Jump)
+			}
+		} else if r.Jump != nil {
+			t.Fatalf("check %d: jump %+v", i, r.Jump)
+		}
+		if !r.Write || r.State.GraceSum != wantU {
+			t.Fatalf("check %d: write %v, U %d", i, r.Write, r.State.GraceSum)
+		}
+	}
+	if len(m.jumps) != 179 {
+		t.Fatalf("%d jumps, want 179", len(m.jumps))
+	}
+	// Check 359 left U at 59 min. It survives a restart on the same host boot.
+	n := restart(t, m)
+	if n.res.State.GraceSum != 59*60000 || !n.res.Write || n.res.Jump != nil {
+		t.Fatalf("restart: %+v", n.res)
+	}
+	// A reboot start sets U to 0. Its move of 30 min does not add to U.
+	snap, _ := n.c.Snapshot()
+	n.f.id = otherID
+	n.f.wall.Store(snap.S + 30*60000)
+	k := startSim(t, n.f, &snap)
+	if k.res.State.GraceSum != 0 || k.res.State.S != snap.S+30*60000 ||
+		k.res.Jump != nil {
+		t.Fatalf("reboot: %+v", k.res)
+	}
+}
+
+// A sum of exactly 1 h is no jump. One more ms is a jump with J = U + m.
+func TestTU30_GraceSumEdge(t *testing.T) {
+	m := graceSim(t)
+	m.set(0, s0+30*60000)
+	m.set(0, s0+hourMS)
+	if m.res.Jump != nil || m.res.State.GraceSum != hourMS {
+		t.Fatalf("sum of 1 h: %+v", m.res)
+	}
+	m.set(0, s0+hourMS+1)
+	if m.res.Jump == nil || m.res.Jump.Size != hourMS+1 ||
+		m.res.State.GraceSum != 0 || m.res.State.Jump.Size != hourMS+1 {
+		t.Fatalf("sum over 1 h: %+v", m.res)
+	}
+}
+
+// The catch-up adds nothing to U.
+func TestTU30_CatchUpKeepsGraceSum(t *testing.T) {
+	st := stored(s0, goodID, 7*time.Hour)
+	st.GraceSum = 30 * 60000
+	m := newSim(t, s0+3*dayMS, 7*time.Hour, goodID, st)
+	m.tick(minute)
+	if m.res.State.GraceSum != 30*60000 || m.res.State.S != s0+5*60000 {
+		t.Fatalf("state %+v", m.res.State)
+	}
+}
+
+// Two grace jumps with no Now between them report no read. With a Now between
+// them they report a read. A Now between the Check of a jump and Committed
+// shows in the value of Committed. It is not in the Read of the next jump.
+func TestTU30_ReadMarkAtJump(t *testing.T) {
+	m := graceSim(t)
+	m.set(0, s0+2*hourMS)
+	m.set(0, s0+4*hourMS)
+	if m.res.Jump == nil || m.res.Read || m.pub {
+		t.Fatalf("no Now: %+v, committed %v", m.res, m.pub)
+	}
+	mustNow(t, m.c)
+	m.set(0, s0+6*hourMS)
+	if m.res.Jump == nil || !m.res.Read || m.pub {
+		t.Fatalf("one Now: %+v, committed %v", m.res, m.pub)
+	}
+	// The Check cleared the mark.
+	m.set(0, s0+8*hourMS)
+	if m.res.Jump == nil || m.res.Read {
+		t.Fatalf("after a read: %+v", m.res)
+	}
+	m.hold = true
+	m.set(0, s0+10*hourMS)
+	if m.res.Read || !m.res.Write {
+		t.Fatalf("held jump: %+v", m.res)
+	}
+	if got := mustNow(t, m.c); got != s0+8*hourMS {
+		t.Fatalf("Now %d during the hold", got)
+	}
+	if !m.c.Committed() {
+		t.Fatal("Committed lost a read between the Check and the publish")
+	}
+	m.hold = false
+	m.set(0, s0+12*hourMS)
+	if m.res.Jump == nil || m.res.Read {
+		t.Fatalf("read counted twice: %+v", m.res)
+	}
+	// A publish with no jump does not clear the mark or report it.
+	k := graceSim(t)
+	mustNow(t, k.c)
+	k.hold = true
+	k.set(0, s0+30*60000)
+	if k.res.Jump != nil || !k.res.Write || k.c.Committed() {
+		t.Fatalf("move without jump: %+v", k.res)
+	}
+	k.hold = false
+	k.set(0, s0+91*60000)
+	if k.res.Jump == nil || !k.res.Read {
+		t.Fatalf("read lost: %+v", k.res)
+	}
+}
+
+// Now marks the read before it reads the boot clock, so also before the load
+// of the base. The test looks at the mark inside the boot clock read.
+func TestTU30_NowMarksBeforeLoad(t *testing.T) {
+	f := newFake(s0, time.Hour, goodID)
+	src := f.source()
+	var c *Clock
+	marked := false
+	inner := src.BootClock
+	src.BootClock = func() (time.Duration, error) {
+		if c != nil {
+			marked = c.read.Load()
+		}
+		return inner()
+	}
+	c, _, err := Start(src, StartInput{Stored: stored(s0, goodID, time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNow(t, c)
+	if !marked {
+		t.Fatal("Now had not marked the read at its boot clock read")
+	}
+}
+
+// A move that needs a key write is not seen by Now until Committed. With no
+// Committed, Now keeps the old S. This holds for a jump, for W over 10 min,
+// and for a catch-up gain over 10 min. W of exactly 10 min needs no write.
+func TestTU30_MoveWaitsForCommit(t *testing.T) {
+	// A jump. Snapshot and Check work from the newest S.
+	m := graceSim(t)
+	m.hold = true
+	m.set(0, s0+2*hourMS)
+	if !m.res.Write || m.res.Jump == nil {
+		t.Fatalf("jump: %+v", m.res)
+	}
+	if got := mustNow(t, m.c); got != s0 {
+		t.Fatalf("Now %d before Committed", got)
+	}
+	if snap, err := m.c.Snapshot(); err != nil || snap.S != s0+2*hourMS {
+		t.Fatalf("snapshot %+v, %v", snap, err)
+	}
+	// A second move, while the first waits, takes the newest S as its base.
+	m.set(minute, s0+2*hourMS+6*60000)
+	if !m.res.Write || m.res.Jump != nil || m.res.State.S != s0+2*hourMS+6*60000 {
+		t.Fatalf("second move: %+v", m.res)
+	}
+	// No Committed: after 1 h of boot clock, Now has the old S only.
+	m.f.boot.Add(int64(time.Hour))
+	if got := mustNow(t, m.c); got != s0+hourMS+60000 {
+		t.Fatalf("Now %d with no Committed", got)
+	}
+	m.c.Committed()
+	if got := mustNow(t, m.c); got != s0+2*hourMS+6*60000+hourMS {
+		t.Fatalf("Now %d after Committed", got)
+	}
+
+	// W over 10 min. Moves of 5 min twice make 10 min: no write. 1 ms more.
+	w := graceSim(t)
+	w.hold = true
+	for i := int64(1); i <= 2; i++ {
+		w.set(0, s0+i*5*60000)
+		if w.res.Write || mustNow(t, w.c) != s0+i*5*60000 {
+			t.Fatalf("move %d: %+v", i, w.res)
+		}
+	}
+	w.set(0, s0+10*60000+1)
+	if !w.res.Write || w.res.Jump != nil || mustNow(t, w.c) != s0+10*60000 {
+		t.Fatalf("move over 10 min: %+v", w.res)
+	}
+	w.c.Committed()
+	if mustNow(t, w.c) != s0+10*60000+1 {
+		t.Fatal("Now has the old S after Committed")
+	}
+	// Committed sets W to 0: the next move of 7 min needs no write.
+	w.set(0, s0+17*60000+1)
+	if w.res.Write {
+		t.Fatalf("W not reset: %+v", w.res)
+	}
+
+	// A catch-up gain of 10 min needs no write. A gain of 12 min does.
+	k := catchClock(t, 3*dayMS, 0)
+	k.hold = true
+	k.tick(150 * time.Second)
+	if k.res.Write || k.res.State.CatchUp != 10*60000 {
+		t.Fatalf("catch-up of 10 min: %+v", k.res)
+	}
+	k = catchClock(t, 3*dayMS, 0)
+	k.hold = true
+	k.tick(3 * minute)
+	if !k.res.Write || k.res.Jump != nil || k.res.State.S != s0+15*60000 {
+		t.Fatalf("catch-up of 12 min: %+v", k.res)
+	}
+	if got := mustNow(t, k.c); got != s0+3*60000 {
+		t.Fatalf("Now %d before Committed", got)
+	}
+	k.c.Committed()
+	if got := mustNow(t, k.c); got != s0+15*60000 {
+		t.Fatalf("Now %d after Committed", got)
+	}
+}
+
+// Committed with no pending base only sets W to 0.
+func TestTU30_CommittedWithNothingPending(t *testing.T) {
+	m := graceSim(t)
+	m.set(0, s0+6*60000)
+	if m.res.Write || m.c.Committed() {
+		t.Fatalf("result %+v", m.res)
+	}
+	// W is 0, so a move of 6 min needs no write.
+	m.set(0, s0+12*60000)
+	if m.res.Write {
+		t.Fatalf("result %+v", m.res)
+	}
+}
+
+// Grace moves of 7 min each, then a stop before a write. A start from the
+// last written state gives S at most 10 min below the largest S of a Now.
+// The last written state is the last State that Committed followed.
+// It is not the last State that Check gave.
+func TestTU30_StopBeforeWriteLosesAtMost10Min(t *testing.T) {
+	m := newSim(t, s0, 0, goodID, nil)
+	written := m.res.State // the start writes its key
+	m.c.Committed()
+	largest, worst := mustNow(t, m.c), int64(0)
+	for i := 0; i < 40; i++ {
+		m.hold = true
+		r := m.set(minute, m.res.State.S+7*60000+60000)
+		if r.Write {
+			written = r.State
+			m.c.Committed()
+		}
+		largest = max(largest, mustNow(t, m.c))
+		// A start on the same host boot, from the written state.
+		c, _, err := Start(m.f.source(), StartInput{Stored: &written})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := mustNow(t, c)
+		lost := largest - got
+		if lost < 0 || lost > 10*60000 {
+			t.Fatalf("check %d: S %d, largest %d", i, got, largest)
+		}
+		worst = max(worst, lost)
+	}
+	if worst < 7*60000 {
+		t.Fatalf("the test lost at most %d ms: it does not test the stop", worst)
+	}
+}
+
+// A start gives Write, and it publishes its base at once.
+func TestTU30_StartWritesTheKey(t *testing.T) {
+	m := newSim(t, s0, 0, goodID, nil)
+	if !m.res.Write || m.res.Read || mustNow(t, m.c) != s0 {
+		t.Fatalf("start with no state: %+v", m.res)
+	}
+	k := graceSim(t)
+	if !k.res.Write || mustNow(t, k.c) != s0 {
+		t.Fatalf("start on the same host boot: %+v", k.res)
+	}
+}
+
+// A boot clock that goes down in Check does not lower the last boot clock.
+// Else the time between the low value and the last value counts again.
+func TestTU30_BootClockDownThenUpNoReplay(t *testing.T) {
+	m := catchClock(t, 3*dayMS, 0)
+	m.set(-30*minute, s0+3*dayMS)
+	m.wantS(s0)
+	if m.res.State.CatchUp != 0 {
+		t.Fatalf("catch-up %d with a lower boot clock", m.res.State.CatchUp)
+	}
+	// 1 min above the start: 4 min of catch-up. Not 31 min of boot clock.
+	m.set(31*minute, s0+3*dayMS)
+	m.wantS(s0 + 5*60000)
+	if m.res.State.CatchUp != 4*60000 {
+		t.Fatalf("catch-up %d", m.res.State.CatchUp)
+	}
+}
+
+// A start that the last check of the state refuses writes no log line. The
+// new jump id is 9223372036854 + 1.
+func TestTU30_RefusedStartWritesNoJumpLine(t *testing.T) {
+	rec := &recorder{}
+	f := newFake(s0+2*hourMS, 3*time.Hour, otherID)
+	_, _, err := Start(f.source(), StartInput{Stored: stored(s0, goodID, time.Hour),
+		KnownJumpID: boundMS, Log: slog.New(rec)})
+	if err != ErrState || len(rec.lines) != 0 {
+		t.Fatalf("err %v, lines %d", err, len(rec.lines))
+	}
+}
+
+// At exactly 6 h of boot clock, the catch-up runs. It starts when the boot
+// clock is not below 6 h.
+func TestTU30_CatchUpAtExactlyGraceBoot(t *testing.T) {
+	st := stored(s0, goodID, 5*time.Hour+50*minute)
+	m := newSim(t, s0+3*dayMS, 5*time.Hour+50*minute, goodID, st)
+	m.set(10*minute, s0+3*dayMS)
+	if m.f.boot.Load() != int64(graceBoot) {
+		t.Fatal("the boot clock is not 6 h")
+	}
+	// 10 min of boot clock and 40 min of catch-up.
+	m.wantS(s0 + 50*60000)
+	if m.res.State.CatchUp != st.CatchUp+40*60000 || m.res.Jump != nil {
+		t.Fatalf("state %+v", m.res.State)
+	}
+}
+
+// The gain is catchUpRate times the whole ms of the boot clock time. A time
+// under 1 ms gains 0. The next ms of time gains its own 4.
+func TestTU30_CatchUpGainCutsToMilliseconds(t *testing.T) {
+	m := catchClock(t, 3*dayMS, 0)
+	m.set(900*time.Microsecond, s0+3*dayMS)
+	m.wantS(s0)
+	if m.res.State.CatchUp != 0 {
+		t.Fatalf("catch-up %d for 0.9 ms", m.res.State.CatchUp)
+	}
+	k := catchClock(t, 3*dayMS, 0)
+	k.set(1500*time.Microsecond, s0+3*dayMS)
+	// S moved 1 ms with the boot clock. The gain is 4, not 6.
+	k.wantS(s0 + 1 + 4)
+	if k.res.State.CatchUp != 4 {
+		t.Fatalf("catch-up %d for 1.5 ms", k.res.State.CatchUp)
+	}
+}
+
+// Check in the grace reads the wall clock one time.
+func TestTU30_GraceCheckReadsWallOnce(t *testing.T) {
+	for _, off := range []int64{-hourMS, 0, 2 * hourMS} {
+		f, c := graceClock(t, s0, time.Hour)
+		f.wall.Store(s0 + off)
+		calls := f.wallCalls.Load()
+		if _, err := c.Check(); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.wallCalls.Load() - calls; got != 1 {
+			t.Fatalf("wall offset %d: %d reads", off, got)
+		}
+	}
+}
