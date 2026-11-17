@@ -753,14 +753,14 @@ func dropClasses(s string, css bool) string {
 	})
 }
 
-// The number rule. Each maximal run of ASCII letters and digits that holds a
-// digit is refused, unless it is one of these. In a CSS declaration block (the
-// "{...}" of a style element or of a CSS text), or in the value of an attribute
-// of sizeAttrs: a number 0 or [1-9][0-9]{0,3}, with an optional unit of
-// cssUnits. In each other place: a number [1-9][0-9]{0,3}, or the name of an
-// element of elements (h1, h2, h3). "0x", a letter and a digit in one run, and
-// a leading zero are refused. A ":" between two letters or digits is refused
-// by pageHost, except in a CSS block.
+// The number rule. A run of ASCII letters and digits that holds a digit is
+// refused. Only these runs pass.
+// In a CSS declaration block, or in a value of sizeAttrs: 0 or
+// [1-9][0-9]{0,3}, with an optional unit of cssUnits. A declaration block is
+// the "{...}" of a style element or of a CSS text.
+// In each other place: [1-9][0-9]{0,3}, or an element name of elements (h1).
+// So "0x", a letter with a digit, and a leading zero are refused. A ":"
+// between two runs is refused by pageHost, but not in a CSS block.
 
 // span is the range s[lo:hi] of a text.
 type span struct {
@@ -811,10 +811,10 @@ func attrSpans(s string) (out []span) {
 	return out
 }
 
-// maskSpans replaces each run of numRun in a span: with "n" if it is a number
-// of cssNum, else with "0n", which badNumber refuses. In a CSS block, a ":"
-// and white space before the number go too, and each other ":" gets a space
-// after it. A run outside the spans stays.
+// maskSpans replaces each run of numRun in a span. A number of cssNum becomes
+// "n". Each other run becomes "0n", which badNumber refuses. In a CSS block,
+// the ":" and white space before a number go too. A run outside the spans
+// stays.
 func maskSpans(s string, spans []span) string {
 	var out strings.Builder
 	last := 0

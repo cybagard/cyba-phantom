@@ -434,7 +434,7 @@ func cases() []row {
 		if slices.Contains(badLtTexts, f.text) {
 			pageRules = append(pageRules, "lt-text")
 		}
-		// A tab or a line feed in a name shows as a word, so each name is unique.
+		// A tab or a line feed in a name shows as a word. Each name is unique.
 		label := strings.NewReplacer("\t", "[tab]", "\n", "[lf]").Replace(f.text)
 		rows = append(rows,
 			row{"page " + label, pageWith(f.text), noUse(pageRules, at(pagePath, pageRules...))},
@@ -1140,7 +1140,7 @@ func textRows() []row {
 		pageRow("page text: opening bracket", "Request [x", "host-form"),
 		pageRow("page text: closing bracket", "Request x]", "host-form"),
 		pageRow("page text: short numbers", "Read 7 pages, 100% of 2026."),
-		// Each run of letters and digits that holds a digit has the number rule.
+		// The number rule: each run of letters and digits with a digit.
 		pageRow("page text: hex address", "Request 0x0a000001", "host-form"),
 		pageRow("page text: hex address in capitals", "Request 0X0A000001", "host-form"),
 		pageRow("page text: hex address of two digits and a letter", "Request 0x7a7a7a7a", "host-form"),
