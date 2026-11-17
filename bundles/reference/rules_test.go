@@ -146,7 +146,7 @@ var (
 		description content script application ld style class hidden display none
 		background url animate attributename values robots disallow plugin doctype
 		shop docs lang en head footer nav main ul li h em b guide each short here home about us our
-		team small tea we sell cups and open day fresh from hills the of notfound beacon js css txt
+		team small tea we sell cups and open day fresh from hills notfound beacon js css txt
 		well known ai note openapi schema version v for human model auth api legal info image xml
 		user agent font family serif margin auto max width color viewbox height fill rect navy gray
 	`)
@@ -205,12 +205,14 @@ type vhost struct {
 	callbacks map[string]callback
 	uses      []use
 	types     map[string][]string
-	// The grammar reads the next four fields. They are the directory name
-	// of the vhost and the names that it serves. They also hold the
-	// rendered trap texts that are a form. The last one has only the
-	// texts of the form L1.
+	// The grammar reads the next five fields. They are the directory name
+	// of the vhost and the names that it serves. The names of the assets
+	// are in a set of their own. The fields also hold the rendered trap
+	// texts that are a form. The last one has only the texts of the form
+	// L1.
 	host    string
 	names   map[string]bool
+	assets  map[string]bool
 	renders []string
 	l1      []string
 }
@@ -308,6 +310,7 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 		v.names[rt.Path] = true
 		if rt.Asset != "" {
 			v.names[path.Base(rt.Asset)] = true
+			v.assets[rt.Path], v.assets[path.Base(rt.Asset)] = true, true
 		}
 		if c := rt.Callback; c != nil {
 			// A name that is set and not valid is refused, as the loader does.
@@ -507,7 +510,7 @@ func (r *result) vhostNames(names []string, dirs map[string]bool) map[string]*vh
 			continue
 		}
 		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{},
-			host: host, names: map[string]bool{}}
+			host: host, names: map[string]bool{}, assets: map[string]bool{}}
 		if first, _, _ := strings.Cut(host, "."); !dirs[n] || !validVhost(host) {
 			r.add("vhost-name", n)
 		} else if labels[first] {
@@ -1449,9 +1452,9 @@ func set(s string) map[string]bool {
 	return m
 }
 
-// These lists hold the entries of the sections of the first content of the
-// lists. The sections are names, prefixes, extensions, paths, vhosts,
-// headers, classes and members. A list has no other entry.
+// These lists hold the entries of the agreed first content. The sections
+// are [names], [prefixes], [extensions], [paths], [vhosts], [headers],
+// [classes] and [members-*]. A list has no other entry.
 var (
 	nameWords = set("about alt aria beacon comment hidden index ld link logo meta noscript note " +
 		"notfound openapi part plugin robots shop style")
@@ -1476,14 +1479,17 @@ var (
 	// svgElements is the element list of an SVG asset. A page has no svg.
 	svgElements = set("svg title g rect")
 	// blocks start and end a unit of text. A noscript element is not one.
-	blocks = set("html head body title p div h1 h2 h3 ul ol li section header footer main nav article br svg")
+	// A parser drops html, head and body in a body. A title is hidden.
+	blocks = set("p div h1 h2 h3 ul ol li section header footer main nav article br svg")
 	voids  = set("meta img br")
+	// shell gives the parent of the html, head and body start tags.
+	shell = map[string]string{"html": "", "head": "html", "body": "html"}
 	// attrClass gives the value class of an attribute, for its element or
 	// for each element ("*"). The key of an SVG attribute is in lower case.
 	attrClass = map[string]string{
 		"*.class": "class", "*.title": "prose", "*.aria-label": "prose", "*.hidden": "empty",
 		"html.lang": "fixed", "meta.charset": "fixed", "meta.name": "fixed", "meta.content": "prose",
-		"a.href": "link", "a.rel": "fixed", "img.src": "name", "img.alt": "prose", "script.type": "fixed",
+		"a.href": "link", "a.rel": "fixed", "img.src": "asset", "img.alt": "prose", "script.type": "fixed",
 		"svg.xmlns": "fixed", "svg.viewbox": "fixed",
 		"rect.width": "fixed", "rect.height": "fixed", "rect.fill": "fixed",
 	}
@@ -1500,13 +1506,14 @@ var (
 	fixedLines = []string{"User-agent: *", "# " + marker}
 	// jsonClass gives the class of the string value of a member, for each
 	// kind of JSON file. A member that is not here has no string value.
+	// A "path" member holds a path. A "word" member holds one name word.
 	jsonClass = map[string]string{
 		"routes.asset": "file", "routes.template": "file", "routes.not_found": "file",
-		"routes.body": "name", "routes.path": "name", "routes.post": "name", "routes.query": "name",
-		"routes.script": "name", "routes.header": "header", "routes.name": "header", "routes.trap": "id",
+		"routes.body": "word", "routes.path": "path", "routes.post": "path", "routes.query": "word",
+		"routes.script": "path", "routes.header": "header", "routes.name": "header", "routes.trap": "id",
 		"routes.type":           "fixed",
-		"plugin.name_for_model": "name", "plugin.url": "name", "plugin.logo_url": "name",
-		"plugin.legal_info_url": "name", "plugin.schema_version": "fixed", "plugin.type": "fixed",
+		"plugin.name_for_model": "word", "plugin.url": "path", "plugin.logo_url": "path",
+		"plugin.legal_info_url": "path", "plugin.schema_version": "fixed", "plugin.type": "fixed",
 		"plugin.name_for_human": "prose", "plugin.description_for_human": "prose",
 		"plugin.description_for_model": "prose", "ld.description": "prose",
 	}
@@ -1533,6 +1540,9 @@ func isName(v string) bool {
 	return namePaths[v] || nameWords[strings.TrimPrefix(stem, "/")]
 }
 
+// isPath reports a path: a name that starts with "/".
+func isPath(v string) bool { return strings.HasPrefix(v, "/") && isName(v) }
+
 // isID reports a trap id: an entry of prefixes and one word of nameWords.
 func isID(v string) bool {
 	return slices.ContainsFunc(prefixes, func(p string) bool {
@@ -1549,10 +1559,11 @@ func isFile(host, v string) bool {
 }
 
 // kindsOf gives the kinds of a served file. The types of the routes that
-// name it decide. A file that no route types has the kind of its extension.
+// name it decide. A kind can repeat. A file that no route types has the kind
+// of its extension.
 func kindsOf(file string, types []string) (kinds []string) {
 	for _, t := range types {
-		if k := typeKinds[t]; k != "" && !slices.Contains(kinds, k) {
+		if k := typeKinds[t]; k != "" {
 			kinds = append(kinds, k)
 		}
 	}
@@ -1588,8 +1599,10 @@ func (r *result) grammar(name, kind, out string, v *vhost) {
 		g.css(out)
 	case "text":
 		g.lines(out)
-	default:
+	case "plugin", "routes":
 		g.json(kind, out)
+	default:
+		g.add("kind")
 	}
 }
 
@@ -1671,6 +1684,7 @@ func (g gram) markup(kind, s string) {
 		g.add("cover")
 	}
 	var stack []string
+	shellSeen := map[string]bool{}
 	var unit strings.Builder
 	flush := func() {
 		g.prose("text", unit.String())
@@ -1704,6 +1718,14 @@ func (g gram) markup(kind, s string) {
 			for _, a := range t.Attr {
 				g.attr(t.Data, a)
 			}
+			// The parser merges a second html, head or body tag into the
+			// first. The round trip drops the three tags, so it cannot see it.
+			if parent, ok := shell[t.Data]; ok {
+				if shellSeen[t.Data] || top != parent {
+					g.add("tag-place")
+				}
+				shellSeen[t.Data] = true
+			}
 			if blocks[t.Data] {
 				flush()
 			}
@@ -1728,7 +1750,6 @@ func (g gram) markup(kind, s string) {
 				g.chars("text", raw)
 				g.css(raw)
 			case "script":
-				g.chars("text", strings.ReplaceAll(raw, `"`, ""))
 				g.json("ld", raw)
 			default:
 				g.chars("text", raw)
@@ -1761,8 +1782,8 @@ func (g gram) attr(el string, a xhtml.Attribute) {
 		good = classNames[a.Val]
 	case "empty":
 		good = a.Val == ""
-	case "name":
-		good = g.v.names[a.Val]
+	case "asset":
+		good = g.v.assets[a.Val]
 	case "link":
 		good = a.Val == "" || g.v.names[a.Val] || slices.Contains(g.v.l1, a.Val)
 	case "prose":
@@ -1776,6 +1797,7 @@ func (g gram) attr(el string, a xhtml.Attribute) {
 
 // css checks a style text. It has only rules "selector{decl;decl}". A part
 // of a selector is one element or one class. A declaration is an entry.
+// Only the white space between two rules is free.
 func (g gram) css(s string) {
 	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
 		sel, rest, ok := strings.Cut(s, "{")
@@ -1785,13 +1807,13 @@ func (g gram) css(s string) {
 			return
 		}
 		for _, p := range strings.Split(sel, ",") {
-			c, isClass := strings.CutPrefix(strings.TrimSpace(p), ".")
-			if !(isClass && classNames[c]) && !slices.Contains(elements, strings.TrimSpace(p)) {
+			c, isClass := strings.CutPrefix(p, ".")
+			if !(isClass && classNames[c]) && !slices.Contains(elements, p) {
 				g.add("css-selector")
 			}
 		}
-		for _, d := range strings.Split(strings.TrimSuffix(strings.TrimSpace(body), ";"), ";") {
-			if _, ok := declarations[strings.TrimSpace(d)]; !ok {
+		for _, d := range strings.Split(body, ";") {
+			if _, ok := declarations[d]; !ok {
 				g.add("css-declaration")
 			}
 		}
@@ -1837,12 +1859,8 @@ func (g gram) json(kind, s string) {
 				}
 				continue
 			}
-			// A string in an array has the class of the member of the array.
-			p := d.StackPointer()
-			for _, err := strconv.Atoi(p.LastToken()); err == nil; _, err = strconv.Atoi(p.LastToken()) {
-				p = p.Parent()
-			}
-			key := kind + "." + p.LastToken()
+			// A string in an array has an index for its key: it has no class.
+			key := kind + "." + d.StackPointer().LastToken()
 			if !g.jsonValue(jsonClass[key], key, tok.String()) {
 				g.add("json-value")
 			}
@@ -1853,8 +1871,11 @@ func (g gram) json(kind, s string) {
 // jsonValue reports whether the string v has the class of its member.
 func (g gram) jsonValue(class, key, v string) bool {
 	switch class {
-	case "name":
-		return isName(v)
+	case "path":
+		// A route map names the paths. Other files use the paths that it serves.
+		return isPath(v) && (strings.HasPrefix(key, "routes.") || g.v.names[v])
+	case "word":
+		return nameWords[v]
 	case "file":
 		return isFile(g.v.host, v)
 	case "header":
@@ -1887,8 +1908,10 @@ func (g gram) roundTrip(s string) {
 }
 
 // tokenSeq gives the tokens of s for the round trip. It drops the html, head
-// and body tags and the white-space text. It reads the attributes as a set.
-// A self-closing tag of a void element is a start tag.
+// and body tags and the white-space text. A self-closing tag of a void
+// element is a start tag. It has no attribute and no comment: a repair of
+// the parser that changes only these is a second html, head or body tag, and
+// the grammar refuses that. A parser keeps a comment in its place.
 func tokenSeq(s string) (seq []string) {
 	z := xhtml.NewTokenizer(strings.NewReader(s))
 	for z.Next() != xhtml.ErrorToken {
@@ -1898,16 +1921,11 @@ func tokenSeq(s string) (seq []string) {
 			if slices.Contains([]string{"html", "head", "body"}, t.Data) {
 				continue
 			}
-			var attrs []string
-			for _, a := range t.Attr {
-				attrs = append(attrs, a.Key+"="+a.Val)
-			}
-			slices.Sort(attrs)
 			p := "<"
 			if t.Type == xhtml.EndTagToken {
 				p = "</"
 			}
-			seq = append(seq, p+t.Data+" "+strings.Join(attrs, " "))
+			seq = append(seq, p+t.Data)
 			if t.Type == xhtml.SelfClosingTagToken && !voids[t.Data] {
 				seq = append(seq, "</"+t.Data)
 			}
@@ -1917,8 +1935,6 @@ func tokenSeq(s string) (seq []string) {
 			}
 		case xhtml.DoctypeToken:
 			seq = append(seq, "!"+strings.ToLower(t.Data))
-		case xhtml.CommentToken:
-			seq = append(seq, "--"+t.Data)
 		}
 	}
 	return seq
