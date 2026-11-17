@@ -331,7 +331,7 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	// The mint order takes tDel, as the deletes do. A step forward of the wall
 	// clock must not make mint units look old.
-	steps := withCap(runSteps(wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
+	steps := withCap(runStepsClock(wall, s.clock.wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
 	if err == nil && wall.After(s.mark) {
 		s.mark = wall
@@ -383,9 +383,24 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // capped cutoff: see eventTime. It also caps the cutoff in each chunk at the
 // day that the day step works on next. These three deletes come before the
 // field clear, for the same reason as the raw delete. The clear does not write
-// rows that the event delete removes. The mark step is last, so a run that
-// ends early writes no mark.
+// rows that the event delete removes. The clear takes the tPriv cutoff for its
+// rows before the cutoff. The mark step is last, so a run that ends early
+// writes no retention_last.
+//
+// The wall time of the run is `wall`. The mark step takes it. The field clear
+// also takes it, as its wall time at its first call. This form is for tests
+// that need no clock. See runStepsClock.
 func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
+	return runStepsClock(wall, func() time.Time { return wall }, tDel, tPriv, ip, raw, events)
+}
+
+// runStepsClock is runSteps with a clock. The mark step takes `wall`, the wall
+// time at the start of the run. The field clear takes the time of `clock` at
+// its first call. That call comes after the steps before it, so it can be
+// long after the run start. With the run start, rows that the writer stores
+// in between could lie after the future line. The schedule passes its wall
+// clock as `clock`.
+func runStepsClock(wall time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
@@ -395,7 +410,7 @@ func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep 
 		newEventExpireStep(eventTime(tDel, raw, events), events),
 		newTokenExpireStep(tDel, events),
 		newSessionExpireStep(tDel, events),
-		newFieldClearStep(tPriv, raw),
+		newFieldClearStep(tPriv, clock, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),
 	}
