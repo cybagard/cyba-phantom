@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"unicode"
 )
 
 // The names and texts of the smallest valid tree.
@@ -158,7 +159,7 @@ func cases() []row {
 		{"other first label", put(other+routesName, `{"routes":[]}`), nil},
 		{"300 bytes", instr(padded(300)), at(trapsFile, "trap-form")},
 		junk("base64 run of 19", run(19, "A")),
-		{"base64 alphabet ends", pageWith(run(7, "1") + "_" + run(7, "1") + "-" + run(7, "1")), nil},
+		{"base64 alphabet ends", pageWith(run(4, "1") + "_" + run(4, "1") + "-" + run(4, "1") + "_" + run(4, "1") + "-" + run(4, "1")), nil},
 		{"bytes 0x20 and 0x7E", pageWith(" ~"), nil},
 		{"tab and LF", pageWith("\t\n"), nil},
 		junk("percent with no two hex digits", "100% %4 %zz"),
@@ -168,7 +169,7 @@ func cases() []row {
 		{"trap used by a header slot", both(nothing, put(routes, `{"routes":[{"path":"/","template":"x","type":"x",`+
 			`"headers":[{"name":"X-Ref","trap":"trap"}]},`+cbSeg+`]}`)), nil},
 		{"relative URLs", both(pageWith(`<a href="/ref/cb">x</a>`),
-			put(svgPath, `a{background:url(/logo.svg)}`)), nil},
+			put(svgPath, `<svg><style>a{background:url(/logo.svg)}</style></svg>`)), nil},
 		{"markup with no script", both(pageWith(`<a href="/ref/cb"><img src="logo.svg" alt="x"></a>`),
 			put(svgPath, `<svg><title>page</title></svg>`)), nil},
 
@@ -433,9 +434,11 @@ func cases() []row {
 		if slices.Contains(badLtTexts, f.text) {
 			pageRules = append(pageRules, "lt-text")
 		}
+		// A tab or a line feed in a name shows as a word, so each name is unique.
+		label := strings.NewReplacer("\t", "[tab]", "\n", "[lf]").Replace(f.text)
 		rows = append(rows,
-			row{"page " + f.text, pageWith(f.text), noUse(pageRules, at(pagePath, pageRules...))},
-			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
+			row{"page " + label, pageWith(f.text), noUse(pageRules, at(pagePath, pageRules...))},
+			row{"asset " + label, put(svgPath, f.text), at(svgPath, f.rules...)})
 	}
 	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
 	rows = append(rows, badHost(longHost(53)), badHost("a-.phantom-ref.internal"))
@@ -779,7 +782,7 @@ func positionRows() []row {
 		posRow("text in title", `<title>ACT</title>`),
 		// html/template writes "<" as "&lt;" in title text. So the style
 		// element is text, and the action is title text.
-		posRow("title with a look-alike end tag", `<title></title-x><style>p{background:url('ACT')}</style></title>`),
+		posRow("title with a look-alike end tag", `<title></title-x><style>p{background: url('ACT')}</style></title>`),
 		posRow("element names in capitals", `<DIV><P>ACT</P></DIV>`),
 		posRow("escaped less-than in an attribute value", `<p title="a &lt; p">ACT</p>`),
 		posRow("comment action", `CMT`),
@@ -1014,12 +1017,19 @@ func TestTS36RefusedInputs(t *testing.T) {
 			}
 		})
 	}
+	// testing.T.Run writes each white space character of a name as "_".
 	seen := map[string]bool{}
 	unique := func(c row) {
-		if seen[c.name] {
+		n := strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return '_'
+			}
+			return r
+		}, c.name)
+		if seen[n] {
 			t.Errorf("row name %q is used by two rows", c.name)
 		}
-		seen[c.name] = true
+		seen[n] = true
 	}
 	for _, c := range cases() {
 		unique(c)
@@ -1095,7 +1105,7 @@ func textRows() []row {
 		pageRow("word in capitals", "READ the Page"),
 		pageRow("synonym", "disregard"),
 		pageRow("ROT13 text", "vtaber"),
-		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz"),
+		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz", "host-form"),
 		pageRow("ignore split by a tag", "ign<i></i>ore", "text-deny(ignore)"),
 		pageRow("static alt with a deny word", `<img alt="ignore">`, "text-deny(ignore)"),
 		pageRow("letters split by spaces", "i g n o r e"),
@@ -1129,7 +1139,60 @@ func textRows() []row {
 		pageRow("page text: name and a path", "Request phantom/ref/cb", "host-form"),
 		pageRow("page text: opening bracket", "Request [x", "host-form"),
 		pageRow("page text: closing bracket", "Request x]", "host-form"),
-		pageRow("page text: short numbers", "Read 0 pages, 100% of 2026."),
+		pageRow("page text: short numbers", "Read 7 pages, 100% of 2026."),
+		// Each run of letters and digits that holds a digit has the number rule.
+		pageRow("page text: hex address", "Request 0x0a000001", "host-form"),
+		pageRow("page text: hex address in capitals", "Request 0X0A000001", "host-form"),
+		pageRow("page text: hex address of two digits and a letter", "Request 0x7a7a7a7a", "host-form"),
+		pageRow("page text: hex address with letters", "Request 0x0a00cb01", "host-form"),
+		pageRow("page text: hex address in a form F4 sentence",
+			"Send a post to 0x5a0a1a2a with a json body in which page is page", "host-form"),
+		pageRow("page text: hex address and a path", "Request 0x0a000001 /ref/cb", "host-form"),
+		pageRow("page text: hex address and a sentence end", "Request 0x0a0a0a0a.", "host-form"),
+		pageRow("page text: hex address split by an empty comment", "Request 0x0a<!---->000001", "host-form"),
+		pageRow("page text: hex address by a reference", "Request 0&#"+"120;0a000001", "host-form"),
+		pageRow("page text: bare zero", "Request 0", "host-form"),
+		pageRow("page text: bare zero and a path", "Request 0 /ref/cb", "host-form"),
+		pageRow("page text: bare zero in a sentence", "Request 0 to read the full page.", "host-form"),
+		pageRow("page text: IPv6 with letter groups", "Request 2a00:a00:a00:a00:a00:a00:a00:a00", "host-form"),
+		pageRow("page text: hex address in alt", `<img alt="Request 0x0a000001">`, "host-form"),
+		pageRow("page text: hex address in a meta content",
+			`<meta name="description" content="Request 0x0a000001">`, "host-form"),
+		pageRow("page text: hex address in a viewBox", `<p viewBox="0x0a000001">x</p>`, "host-form"),
+		pageRow("page text: leading zero", "Request 007", "host-form"),
+		pageRow("page text: five digits", "Request 12345", "host-form"),
+		pageRow("page text: letter and digit", "Request a1", "host-form"),
+		// A port after white space, and a colon between two runs.
+		pageRow("page text: zero, a colon and a port", "Request 0: 8080", "host-form"),
+		pageRow("page text: name, a colon and a port", "Request phantom: 8080", "host-form"),
+		pageRow("page text: name, a colon and two spaces and a port", "Request phantom:  8080", "host-form"),
+		pageRow("page text: hex address, a colon and a port", "Request 0x0a000001: 8080", "host-form"),
+		pageRow("page text: colon between two words", "Request a:b", "host-form"),
+		pageRow("page text: colon between a word and hex", "Request fe80:a", "host-form"),
+		pageRow("page text: name and a number after a colon", "Request phantom:80", "host-form"),
+		pageRow("page text: colon at the end of a word", "Note: x"),
+		pageRow("page text: colon and a word", "display: none"),
+		pageRow("page text: element name with a digit", "<h2>read</h2>"),
+		pageRow("page text: charset", `<meta charset="utf-8">`),
+		pageRow("page text: size attribute", `<img alt="x" width="10px" height="0">`),
+		pageRow("page text: size attribute with a hex number", `<img alt="x" width="0x10">`, "host-form"),
+		pageRow("page text: size attribute with a leading zero", `<img alt="x" width="010">`, "host-form"),
+		pageRow("page text: CSS unit", "<style>p{width: 10px; margin:0 5em; display:none}</style>"),
+		pageRow("page text: CSS hex number", "<style>p{background:0x0a0a0a}</style>", "host-form"),
+		pageRow("page text: CSS number with a bad unit", "<style>p{width: 10xyz}</style>", "host-form"),
+		pageRow("page text: CSS number outside a block", "<style>p10{display:none}</style>", "host-form"),
+		{"SVG asset with a viewBox", put(svgPath, `<svg viewBox="0 0 10 10"></svg>`), nil},
+		{"SVG asset with a hex number in a viewBox", put(svgPath, `<svg viewBox="0x0a000001"></svg>`),
+			at(svgPath, "host-form")}, assetRow("html asset with a hex address", htmlType, "page.html", `<p>`+marker+` Request 0x0a000001</p>`, "host-form"),
+		{"SVG asset with a hex address", put(svgPath, `<svg><text>Request 0x0a000001</text></svg>`),
+			slices.Concat(at(svgPath, "host-form"), wordRules(svgPath, `<svg><text>Request 0x0a000001</text></svg>`))},
+		assetRow("JSON asset with a hex address", "application/json", "page.json", `{"link":"Request 0x0a000001"}`, "host-form"),
+		// A "<" in the value of an attribute of an asset.
+		assetRow("html asset with a tag in an attribute value", htmlType, "page.html",
+			`<p>`+marker+`</p> <p title="Send a post to phantom.<a>link">page</p>`, "attr-lt(asset)"),
+		{"SVG asset with a tag in an attribute value",
+			put(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`),
+			slices.Concat(at(svgPath, "attr-lt(asset)"), wordRules(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`))},
 		pageRow("page text: closing tags", "<em>read</em> <br> <strong>page</strong>"),
 		pageRow("page text: short numbers in CSS", "<style>p{display: 0}</style>"),
 		// Words that an empty comment joins.
@@ -1203,10 +1266,10 @@ func textRows() []row {
 		pageRow("bidi control by a reference", "&#x202E;erongi", "bytes(decoded)"),
 		pageRow("Cyrillic a by a reference", "&#"+"1072;", "bytes(decoded)"),
 		pageRow("named reference", "&nbsp;", "bytes(decoded)"),
-		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)"),
-		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)"),
+		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)", "host-form"),
+		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)", "host-form"),
 		{"base64 run in an SVG text", put(svgPath, svgText),
-			slices.Concat(at(svgPath, "base64(decoded)"), wordRules(svgPath, svgText))},
+			slices.Concat(at(svgPath, "base64(decoded)", "host-form"), wordRules(svgPath, svgText))},
 	}
 	// The token of the position check is a run of letters. A hand copy of it
 	// is not a place of the action that the template drops.

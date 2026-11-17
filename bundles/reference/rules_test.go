@@ -108,10 +108,23 @@ var (
 	// A trap text has no "[" or "]". It has no ":" at the end. It has no
 	// ":" before a character that is not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
-	// Text below vhosts/ has no "[" or "]", and no ":" before a digit (a
-	// port). It has no ":" after white space or before ":". It has no "/"
-	// after a letter, a digit, "." "-" or "_". It has no run of 8 digits.
-	pageHost = regexp.MustCompile(`[\[\]]|:[0-9]|\s:|::|[A-Za-z0-9._-]/|[0-9]{8,}`)
+	// Text below vhosts/ has no "[" or "]". It has no ":" before white space
+	// and a digit (a port). It has no ":" after white space or before ":", and
+	// none between two letters or digits ("a:b", "fe80:a"). Only a ":" at the
+	// end of a word, before white space, is text ("Note: x"). It
+	// has no "/" after a letter, a digit, "." "-" or "_". The numbers have the
+	// rule of badNumber.
+	pageHost = regexp.MustCompile(`[\[\]]|:\s*[0-9]|\s:|::|[A-Za-z0-9]:[A-Za-z0-9]|[A-Za-z0-9._-]/`)
+	// A run of ASCII letters and digits that holds a digit. Numbers of 1 to 4
+	// digits, with no leading zero, are the only plain numbers.
+	numRun   = regexp.MustCompile(`[A-Za-z0-9]*[0-9][A-Za-z0-9]*`)
+	plainNum = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
+	// The units that a number can have in a CSS block or in a size attribute.
+	cssUnits = []string{"px", "em", "rem", "vh", "vw", "s", "ms"}
+	cssNum   = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,3})(?:` + strings.Join(cssUnits, "|") + `)?$`)
+	// The attributes whose value can hold such a number, in lower case.
+	sizeAttrs  = []string{"width", "height", "viewbox", "x", "y", "cx", "cy", "r"}
+	colonSpace = regexp.MustCompile(`:\s*$`)
 	// A run of ASCII letters is a word of wordList.
 	letters = regexp.MustCompile(`[A-Za-z]+`)
 	// A class selector, at the start of a prelude or after white space, ","
@@ -146,7 +159,7 @@ var (
 	wordList = strings.Fields(`
 		phantom reference trap request to read the full page with query part set
 		header send a post json body in which is do not this link out of scope
-		x ref cb p internal vhosts index tmpl routes path template type callback segment
+		x h viewbox ref cb p internal vhosts index tmpl routes path template type callback segment
 		asset headers name text html charset utf true plain json not found comment
 		href src alt img svg logo title noscript div rel nofollow aria label meta
 		description content script application ld style class hidden display none
@@ -322,9 +335,6 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 				r.add("route-form", name)
 			}
 			v.callbacks[rt.Path] = callback{c.Segment, q, h, b}
-			// The names are values of the file too. A JSON escape can hide
-			// a letter.
-			r.words(name, q+" "+h+" "+b)
 		}
 		for _, file := range []string{rt.Template, rt.Asset} {
 			if file != "" {
@@ -398,8 +408,13 @@ func checkTree(fsys fs.FS) []string {
 	exempt := exemptNames(files, hosts)
 	r.vhostFiles(files, hosts, exempt)
 	for _, name := range assets {
-		if slices.Contains(owner[name].types[name], "text/html") && !hasMarker(string(files[name])) {
+		types := owner[name].types[name]
+		if slices.Contains(types, "text/html") && !hasMarker(string(files[name])) {
 			r.add("marker", name)
+		}
+		if (slices.Contains(types, "text/html") || slices.Contains(types, "image/svg+xml") ||
+			strings.HasSuffix(name, ".svg")) && attrLt(string(files[name])) {
+			r.add("attr-lt(asset)", name)
 		}
 	}
 	defs := r.readTraps(files[trapsFile])
@@ -520,23 +535,23 @@ func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost, na
 		if path.Base(name) == routesName {
 			src = jsonStrings(raw)
 		}
-		r.textRules(name, raw, src, names)
+		r.textRules(name, raw, src, names, css)
 	}
 }
 
 // textRules runs the word rule and the deny list on the readings of s. It
 // runs the host rule on the readings of host, the text without the parts that
-// are not text.
-func (r *result) textRules(name, s, host string, names []string) {
+// are not text. With css, host is a CSS text.
+func (r *result) textRules(name, s, host string, names []string, css bool) {
 	r.words(name, s)
 	for _, d := range readings(s) {
 		for _, w := range denied(d) {
 			r.add("text-deny("+w+")", name)
 		}
 	}
-	for _, d := range readings(host) {
+	for _, d := range readings(maskBlocks(host, css)) {
 		d = dropNames(svgNames.Replace(strings.ReplaceAll(d, ldTag, " ")), names)
-		if pageHost.MatchString(d) || badDot(d) {
+		if d = maskAttrs(d); pageHost.MatchString(d) || badDot(d) || badNumber(d) {
 			r.add("host-form", name)
 		}
 	}
@@ -738,6 +753,114 @@ func dropClasses(s string, css bool) string {
 	})
 }
 
+// The number rule. Each maximal run of ASCII letters and digits that holds a
+// digit is refused, unless it is one of these. In a CSS declaration block (the
+// "{...}" of a style element or of a CSS text), or in the value of an attribute
+// of sizeAttrs: a number 0 or [1-9][0-9]{0,3}, with an optional unit of
+// cssUnits. In each other place: a number [1-9][0-9]{0,3}, or the name of an
+// element of elements (h1, h2, h3). "0x", a letter and a digit in one run, and
+// a leading zero are refused. A ":" between two letters or digits is refused
+// by pageHost, except in a CSS block.
+
+// span is the range s[lo:hi] of a text.
+type span struct {
+	lo, hi int
+	css    bool
+}
+
+// cssSpans gives the declaration blocks of s: the text between "{" and its "}".
+// For a style element, only its content is read. An open block runs to the end.
+func cssSpans(s string, css bool) (out []span) {
+	block := func(lo, hi int) {
+		depth, start := 0, 0
+		for i := lo; i < hi; i++ {
+			switch {
+			case s[i] == '{':
+				if depth++; depth == 1 {
+					start = i + 1
+				}
+			case s[i] == '}' && depth > 0:
+				if depth--; depth == 0 {
+					out = append(out, span{start, i, true})
+				}
+			}
+		}
+		if depth > 0 {
+			out = append(out, span{start, hi, true})
+		}
+	}
+	if css {
+		block(0, len(s))
+		return out
+	}
+	for _, m := range styleBody.FindAllStringSubmatchIndex(s, -1) {
+		block(m[2], m[3])
+	}
+	return out
+}
+
+// attrSpans gives the value of each attribute of sizeAttrs in the tags of s.
+func attrSpans(s string) (out []span) {
+	for _, tag := range markup.FindAllStringIndex(s, -1) {
+		for _, m := range attrRe.FindAllStringSubmatchIndex(s[tag[0]:tag[1]], -1) {
+			if slices.Contains(sizeAttrs, strings.ToLower(s[tag[0]+m[2]:tag[0]+m[3]])) {
+				out = append(out, span{tag[0] + m[4], tag[0] + m[5], false})
+			}
+		}
+	}
+	return out
+}
+
+// maskSpans replaces each run of numRun in a span: with "n" if it is a number
+// of cssNum, else with "0n", which badNumber refuses. In a CSS block, a ":"
+// and white space before the number go too, and each other ":" gets a space
+// after it. A run outside the spans stays.
+func maskSpans(s string, spans []span) string {
+	var out strings.Builder
+	last := 0
+	for _, m := range numRun.FindAllStringIndex(s, -1) {
+		i := slices.IndexFunc(spans, func(p span) bool { return p.lo <= m[0] && m[1] <= p.hi })
+		if i < 0 {
+			continue
+		}
+		lo, rep := m[0], "0n"
+		if cssNum.MatchString(s[m[0]:m[1]]) {
+			rep = "n"
+			if c := colonSpace.FindStringIndex(s[last:lo]); c != nil && spans[i].css {
+				lo = last + c[0]
+			}
+		}
+		out.WriteString(s[last:lo] + rep)
+		last = m[1]
+	}
+	return out.String() + s[last:]
+}
+
+// maskBlocks applies maskSpans to the CSS blocks of s. The ":" that stay in a
+// block are declarations, so they get a space after them.
+func maskBlocks(s string, css bool) string {
+	spans := cssSpans(s, css)
+	s = maskSpans(s, spans)
+	spans = cssSpans(s, css)
+	var out strings.Builder
+	last := 0
+	for _, p := range spans {
+		out.WriteString(s[last:p.lo] + strings.ReplaceAll(s[p.lo:p.hi], ":", ": "))
+		last = p.hi
+	}
+	return out.String() + s[last:]
+}
+
+// maskAttrs applies maskSpans to the size attributes of d.
+func maskAttrs(d string) string { return maskSpans(d, attrSpans(d)) }
+
+// badNumber reports a run of numRun in d that is not a plain number.
+func badNumber(d string) bool {
+	return slices.ContainsFunc(numRun.FindAllString(d, -1), func(run string) bool {
+		return !plainNum.MatchString(run) && !slices.Contains(elements, strings.ToLower(run))
+	})
+}
+
 // dropNames replaces each name of names in s with the letter "n". A name that
 // is a part of a longer name stays. A name char stands directly before it, or
 // a name char after it. A "." and a letter or digit after it is the same.
@@ -929,7 +1052,7 @@ func (r *result) render(name, text string, traps map[string]string, isHTML, css 
 			r.decoded(name, o)
 		}
 		for _, o := range pages {
-			r.textRules(name, o, dropClasses(o, css), names)
+			r.textRules(name, o, dropClasses(o, css), names, css)
 		}
 	}()
 	for _, run := range []struct {
