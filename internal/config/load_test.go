@@ -873,3 +873,138 @@ func TestTS10_EscapeCut(t *testing.T) {
 		}
 	}
 }
+
+// panicText returns the text of the panic that f gives, or "" if f gives none.
+func panicText(f func()) (text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			text = fmt.Sprint(r)
+		}
+	}()
+	f()
+	return ""
+}
+
+// TestTU10_MustValue checks that Must gives the default of a key that the
+// file does not set. It also checks that Must panics with the path when
+// there is no value.
+func TestTU10_MustValue(t *testing.T) {
+	c, err := loadProd(t, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := c.Must("limits.max_conns"); v.Int != 2000 || v.Source != "default" {
+		t.Errorf("got %+v, want the default 2000", v)
+	}
+	if v := c.Must("tlog.origin"); v.Str != "test/origin" {
+		t.Errorf("got %+v, want the required value", v)
+	}
+	// acme.email is a known key. Load requires it only with acme.names.
+	noNames, err := loadProd(t, tlogLine+"tls:\n  certs: ["+certItem("c.host.zz")+"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"no.such.key", "acme.names[9]", "acme.email"} {
+		if got := panicText(func() { noNames.Must(p) }); !strings.Contains(got, p) {
+			t.Errorf("Must(%q): panic text %q does not name the path", p, got)
+		}
+	}
+}
+
+// TestTU10_ListReads checks the reads of a scalar list, and the count and the
+// field reads of a list of tables.
+func TestTU10_ListReads(t *testing.T) {
+	const secretVar = "HOOK_SECRET"
+	sinks := "alerts:\n  sinks:\n" +
+		"    - {type: webhook, url: \"https://hook.example/a\", hmac_secret_env: " + secretVar + "}\n" +
+		"    - {type: webhook, url: \"https://hook.example/b\", hmac_secret_env: " + secretVar + "}\n"
+	file := namesFile("b.host.zz", "a.host.zz") + sinks +
+		"tls:\n  certs: [" + certItem("c.host.zz") + ", " + certItem("d.host.zz") + "]\n"
+	c, err := loadProd(t, file, secretVar+"="+strings.Repeat("s", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("scalar list", func(t *testing.T) {
+		got := c.List("acme.names")
+		if !slices.Equal(got, []string{"b.host.zz", "a.host.zz"}) {
+			t.Errorf("got %q, want the names in file order", got)
+		}
+		got[0] = "changed"
+		if again := c.List("acme.names"); again[0] != "b.host.zz" {
+			t.Errorf("the slice is not new: got %q", again)
+		}
+		if got := c.List("acme.ca_private"); len(got) != 0 {
+			t.Errorf("empty list: got %q", got)
+		}
+		for _, p := range []string{"no.such.list", "tls.certs"} {
+			if got := c.List(p); got != nil {
+				t.Errorf("List(%q) = %q, want none", p, got)
+			}
+		}
+	})
+	t.Run("count", func(t *testing.T) {
+		for path, want := range map[string]int{"tls.certs": 2, "tlog.publish": 1, "alerts.sinks": 2, "acme.names": 2, "no.such.list": 0} {
+			if got := c.ListLen(path); got != want {
+				t.Errorf("ListLen(%q) = %d, want %d", path, got, want)
+			}
+		}
+	})
+	t.Run("field", func(t *testing.T) {
+		if v, ok := c.ItemField("tls.certs", 1, "name"); !ok || v.Str != "d.host.zz" {
+			t.Errorf("got %+v, %v", v, ok)
+		}
+		if v, ok := c.ItemField("tls.certs", 0, "cert_file"); !ok || v.Str != certPath {
+			t.Errorf("got %+v, %v", v, ok)
+		}
+		if v, ok := c.ItemField("alerts.sinks", 1, "url"); !ok || v.Str != "https://hook.example/b" {
+			t.Errorf("got %+v, %v", v, ok)
+		}
+		if v, ok := c.ItemField("tlog.publish", 0, "type"); !ok || v.Str != "https-put" {
+			t.Errorf("got %+v, %v", v, ok)
+		}
+		for _, r := range []struct {
+			path string
+			i    int
+		}{{"tls.certs", 2}, {"tls.certs", -1}, {"no.such.list", 0}} {
+			if _, ok := c.ItemField(r.path, r.i, "name"); ok {
+				t.Errorf("ItemField(%q, %d): got ok for a missing item", r.path, r.i)
+			}
+		}
+		if got := panicText(func() { c.ItemField("tls.certs", 0, "nme") }); !strings.Contains(got, "nme") {
+			t.Errorf("unknown field: panic text %q", got)
+		}
+	})
+	t.Run("item path", func(t *testing.T) {
+		if got := ItemPath("tlog.publish", 0); got != "tlog.publish[0]" {
+			t.Errorf("got %q", got)
+		}
+	})
+}
+
+// TestTU10_ItemFieldRules checks a required field with no value, and a field
+// that the list does not require.
+func TestTU10_ItemFieldRules(t *testing.T) {
+	saved := lists
+	t.Cleanup(func() { lists = saved })
+	lists = append(slices.Clone(lists), listKey{path: "x.items", fields: []key{
+		{path: "a", kind: kindString, req: true},
+		{path: "b", kind: kindString},
+	}})
+	c := &Config{values: map[string]Value{
+		"x.items[0].a":         {Str: "one"},
+		"x.items[1].a":         {Str: "two"},
+		"x.items[1].b":         {Str: "bee"},
+		"tlog.publish[0].type": {Str: "https-put"},
+		"tlog.publish[0].url":  {Str: "https://p.example/"},
+	}}
+	if v, ok := c.ItemField("x.items", 0, "b"); ok {
+		t.Errorf("got %+v, want no value for an absent field", v)
+	}
+	if v, ok := c.ItemField("x.items", 1, "b"); !ok || v.Str != "bee" {
+		t.Errorf("got %+v, %v", v, ok)
+	}
+	got := panicText(func() { c.ItemField("tlog.publish", 0, "token_env") })
+	if !strings.Contains(got, "tlog.publish[0].token_env") {
+		t.Errorf("required field with no value: panic text %q", got)
+	}
+}

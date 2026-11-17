@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"math"
@@ -134,6 +135,98 @@ type Config struct{ values map[string]Value }
 func (c *Config) Get(path string) (Value, bool) {
 	v, ok := c.values[path]
 	return v, ok
+}
+
+// Must returns the effective value of the scalar key at path. Use it for a
+// key that has a value after Load: a key with a default, or a required key.
+// Must panics if there is no value at path. The panic text names the path.
+func (c *Config) Must(path string) Value {
+	v, ok := c.values[path]
+	if !ok {
+		panic("config: no value at path " + path)
+	}
+	return v
+}
+
+// listByPath returns the list key at path.
+func listByPath(path string) (listKey, bool) {
+	i := slices.IndexFunc(lists, func(l listKey) bool { return l.path == path })
+	if i < 0 {
+		return listKey{}, false
+	}
+	return lists[i], true
+}
+
+// ListLen returns the number of items of the list at path. A path that is
+// not a list gives 0.
+func (c *Config) ListLen(path string) int {
+	l, ok := listByPath(path)
+	if !ok {
+		return 0
+	}
+	probe := ""
+	switch {
+	case l.item != nil:
+	case l.fields != nil:
+		probe = "." + l.fields[0].path
+	default:
+		probe = ".type"
+	}
+	n := 0
+	for {
+		if _, ok := c.values[fmt.Sprintf("%s[%d]%s", path, n, probe)]; !ok {
+			return n
+		}
+		n++
+	}
+}
+
+// List returns the items of the list of scalars at path, in file order, as
+// a new slice. An empty list, or a path that is not a list of scalars, gives
+// no items.
+func (c *Config) List(path string) []string {
+	if l, ok := listByPath(path); !ok || l.item == nil {
+		return nil
+	}
+	var out []string
+	for i := range c.ListLen(path) {
+		out = append(out, c.values[ItemPath(path, i)].Str)
+	}
+	return out
+}
+
+// ItemPath returns the path of item i of the list at path, for example
+// "tlog.publish[1]". PrivateList accepts this path.
+func ItemPath(path string, i int) string {
+	return fmt.Sprintf("%s[%d]", path, i)
+}
+
+// ItemField returns a scalar field of item i of the list of tables at path.
+// Do not use it for a field that holds a list, such as to or private.
+// For a field that Load requires, it follows Must: it panics when the value
+// is missing. For another field, it returns false when the field is absent.
+// It returns false for an item that does not exist. It panics for a field
+// that the list does not have.
+func (c *Config) ItemField(path string, i int, field string) (Value, bool) {
+	l, ok := listByPath(path)
+	if !ok || i < 0 || i >= c.ListLen(path) {
+		return Value{}, false
+	}
+	item := ItemPath(path, i)
+	schema := l.fields
+	if schema == nil {
+		// An item with a type has a type key that Load requires.
+		schema = append([]key{{path: "type", req: true}}, l.schemas[c.values[item+".type"].Str]...)
+	}
+	j := slices.IndexFunc(schema, func(f key) bool { return f.path == field })
+	if j < 0 {
+		panic("config: no field " + field + " in list " + path)
+	}
+	if schema[j].req {
+		return c.Must(item + "." + field), true
+	}
+	v, found := c.values[item+"."+field]
+	return v, found
 }
 
 // Error is one config error. It never holds a secret value: Value is empty for a secret key.
