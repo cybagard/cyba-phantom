@@ -43,6 +43,7 @@ go/token
 golang.org/x/mod/sumdb/note
 golang.org/x/mod/sumdb/tlog
 golang.org/x/sys/cpu
+golang.org/x/sys/unix
 html/template
 io
 io/fs

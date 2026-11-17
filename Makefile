@@ -21,9 +21,14 @@ export GOTOOLCHAIN
 # print "<hash>  <file>", so cut -d' ' -f1 extracts the digest either way.
 HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || printf 'shasum -a 256')
 
-.PHONY: all build test lint stelint-report check trace stamp mirror-diff dco coverage fill perf perf-inner fixtures mutate clean
+.PHONY: all build test lint tidy stelint-report check trace stamp mirror-diff dco coverage fill perf perf-inner fixtures mutate clean
 
-all: build lint test trace mirror-diff
+# The all target runs the checks of the ci workflow that need no special
+# setup. The coverage target replaces the test target, because it runs the
+# same tests. The all target does not run fill and dco. The reader oracle test
+# needs GNU tar 1.35 and Python 3.13. Without them it skips, but in the
+# devcontainer and in CI it fails.
+all: build lint tidy coverage perf trace mirror-diff
 
 # -s -w removes the symbol table and DWARF. Panic traces keep function names.
 # GOENV=off stops the go tool from reading the go env file (go env -w).
@@ -45,6 +50,10 @@ lint:
 		base=$$(git merge-base origin/main "$$head") || { echo "lint: git merge-base origin/main $$head failed"; exit 1; }; \
 	fi; \
 	$(GO) run ./tools/stelint "$$base" "$$head"
+
+# The target fails when go mod tidy would change go.mod or go.sum.
+tidy:
+	$(GO) mod tidy -diff
 
 # This target lists the comment lines over 80 columns in the tracked Go files
 # at HEAD. It also lists the comment sentences over 20 words. The HEAD
@@ -149,7 +158,8 @@ mirror-diff:
 dco:
 	$(GO) run ./tools/dco $(BASE) $(HEAD)
 
-# 07 §1 coverage gate (vacuous on internal/* in M-1; 80 % on tools/).
+# 07 §1 coverage gate: 80 % on each package of the gate set that exists,
+# and on tools/.
 coverage:
 	bash tools/coverage.sh
 	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^(TestTS25|TestTP10)' ./internal/bundle
