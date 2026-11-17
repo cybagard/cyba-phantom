@@ -201,9 +201,10 @@ func ItemPath(path string, i int) string {
 	return fmt.Sprintf("%s[%d]", path, i)
 }
 
-// ItemField returns the field of item i of the list of tables at path.
+// ItemField returns a scalar field of item i of the list of tables at path.
+// Do not use it for a field that holds a list, such as to or private.
 // For a field that Load requires, it follows Must: it panics when the value
-// is missing. For an other field, it returns false when the field is absent.
+// is missing. For another field, it returns false when the field is absent.
 // It returns false for an item that does not exist. It panics for a field
 // that the list does not have.
 func (c *Config) ItemField(path string, i int, field string) (Value, bool) {
