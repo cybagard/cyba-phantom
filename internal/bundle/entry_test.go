@@ -583,8 +583,8 @@ func TestTS19CheckEntryFormat(t *testing.T) {
 }
 
 // T-S-19: the field constants match a header that tar.Writer writes with the
-// format USTAR. The test reads the bytes of the size, checksum and type fields
-// and the mtime field after the size field, with no check code.
+// format USTAR. The test reads the size, checksum and type bytes directly. It
+// does not use the check code.
 func TestTS19HeaderFieldOffsets(t *testing.T) {
 	var buf bytes.Buffer
 	hdr := &tar.Header{
