@@ -2384,7 +2384,8 @@ func readingRows() []row {
 			"<div hidden><p>"+marker+"</p></div>\n<p>Our home</p>\n"), assetPath, "marker"),
 		gramRow("marker only in an element with aria-hidden", serve("/about", "about.txt", htmlType,
 			`<p aria-hidden="true">`+marker+"</p>\n<p>Our home</p>\n"), assetPath, "marker grammar-attr"),
-		// A parser adds html and body. A style rule that hides one is refused.
+		// A parser adds html and body. A style rule that hides one is a
+		// finding.
 		gramRow("marker in a fragment whose style hides the body", put(pagePath,
 			`<style>body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
 		gramRow("marker in a fragment whose style hides the html element", put(pagePath,
