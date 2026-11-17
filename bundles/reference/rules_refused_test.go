@@ -808,9 +808,10 @@ func positionRows() []row {
 		posRow("style after a processing instruction", `<? <style>p{background:url(ACT)}</style>`, bad, "lt-text"),
 		posRow("element after a bogus declaration", `<!x <foo>`, "element(foo)", "lt-text"),
 		// With scripting on, the content of noscript is text. With scripting off,
-		// it is markup. The two modes give two places for the action in a style
-		// element. The place is the same for a title and for a json-ld block, so
-		// only the source rule refuses these two.
+		// it is markup. An image gives two places for the action in the two
+		// modes. A title and a json-ld block give the same place in both, so only
+		// the source rule refuses these two.
+		posRow("src in noscript", `<noscript><img src="ACT"></noscript>`, bad),
 		posRow("style in noscript", `<noscript><style>ACT</style></noscript>`, bad, "noscript-raw"),
 		posRow("title in noscript", `<noscript><title>ACT</title></noscript>`, "noscript-raw"),
 		posRow("json-ld block in noscript", `<noscript>`+ld(`{"a":ACT}`)+`</noscript>`, "noscript-raw"),
