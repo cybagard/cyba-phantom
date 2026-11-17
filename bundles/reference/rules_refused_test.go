@@ -1093,6 +1093,11 @@ func textRows() []row {
 		{"form L1 with the marker as a part of a segment", both(instr("/x-"+marker+"/cb/{{.Token}}"),
 			put(routes, strings.TrimSuffix(routesJSON, "]}")+`,{"path":"/x-`+marker+`/cb","callback":{"segment":true}}]}`)),
 			at(trapsFile, "trap-form")},
+		// The trap text has 19 characters of a run, and the template adds the
+		// 20th as a reference. Only the decoded rendered page has the run.
+		{"base64 run made by the trap text and a reference", both(instr(marker+" {{.Token}} "+strings.Repeat("A", 19)),
+			put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}&#`+`97;</p>`)),
+			append(at(trapsFile, "trap-form"), at(pagePath, "base64(decoded)")...)},
 		// The decoded byte rule and base64 rule.
 		pageRow("zero-width space by a reference", "ign&#x200B;ore", "bytes(decoded)"),
 		pageRow("bidi control by a reference", "&#x202E;erongi", "bytes(decoded)"),
