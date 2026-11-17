@@ -82,9 +82,9 @@ func wallMS(src Source) int64 { return clampMS(src.Wall().UnixMilli()) }
 // Start sets the sensor time at a process start (ADR-043 decisions 4 and 5).
 // With the same host boot, S is the stored S plus the boot clock time since
 // the stored value. Start does not read the wall clock then. Else S is the
-// larger of the stored S and the wall clock. These cases refuse the start
-// with their error: a boot id error, a boot clock error, a bad stored state,
-// a known jump id out of range.
+// larger of the stored S and the wall clock. These cases refuse the start:
+// a boot id error, a boot clock error, a bad stored state, or a known jump
+// id out of range.
 func Start(src Source, in StartInput) (*Clock, Result, error) {
 	id, err := src.BootID()
 	if err != nil {
@@ -150,8 +150,9 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 
 // Now gives S. It is one load and one boot clock read. It reads no wall
 // clock. On Linux and darwin, the boot clock of the source is not the Go
-// monotonic clock, which stops in a host suspend. A boot clock error is returned, with no S. Two reads of one
-// goroutine never go down while the boot clock does not go down.
+// monotonic clock, which stops in a host suspend. A boot clock error is
+// returned, with no S. Two reads of one goroutine never go down while the
+// boot clock does not go down.
 func (c *Clock) Now() (int64, error) {
 	b := c.base.Load()
 	bc, err := c.src.BootClock()

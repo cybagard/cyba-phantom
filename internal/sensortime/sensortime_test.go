@@ -828,8 +828,8 @@ func TestTU30_CheckWithWallEqualToSKeepsBase(t *testing.T) {
 	}
 }
 
-// A grace move makes its base at the boot clock of the check, not at the
-// boot clock of the start. Boot clock 2 h, wall S + 10 h: then 3 h gives +11 h.
+// A grace move makes its base at the boot clock of the check, not of the
+// start. At boot clock 2 h the wall is S + 10 h. At 3 h, S is S + 11 h.
 func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	f, c := graceClock(t, s0, time.Hour)
 	f.boot.Store(int64(2 * time.Hour))
@@ -843,8 +843,8 @@ func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	}
 }
 
-// The state of a check is at the boot clock of the check, with or without a
-// move, when that boot clock is after the base.
+// The state of a check is at its own boot clock, with or without a move.
+// The boot clock is after the base.
 func TestTU30_CheckStateAtItsBootClock(t *testing.T) {
 	f, c := graceClock(t, s0, 10*time.Hour)
 	f.boot.Store(int64(11*time.Hour + 30*time.Minute))
