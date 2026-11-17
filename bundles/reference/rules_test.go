@@ -108,6 +108,14 @@ var (
 	// A trap text has no "[" or "]". It has no ":" at the end. It has no
 	// ":" before a character that is not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
+	// Text below vhosts/ has no "[" or "]", and no ":" after a letter or digit
+	// and before a digit (a port). A template action is not text.
+	pageHost = regexp.MustCompile(`[\[\]]|[A-Za-z0-9]:[0-9]`)
+	anyBrace = regexp.MustCompile(`\{\{[^}]*\}\}`)
+	// A run of ASCII letters is a word of wordList.
+	letters = regexp.MustCompile(`[A-Za-z]+`)
+	// A CSS class selector, or a declaration block. A block is kept as it is.
+	cssClass = regexp.MustCompile(`\{[^}]*\}|\.[A-Za-z_-][A-Za-z0-9_-]*`)
 	// These words are checked on the text with all spaces removed.
 	denyCompact = []string{"apikey", "systemprompt", "privatekey"}
 
@@ -122,6 +130,34 @@ var (
 		"conversation", "email", "curl", "wget", "sudo", "base64",
 		"execute", "shell", "download", "install",
 	}
+
+	// wordList is the closed list of words of the files below vhosts/. A
+	// file is read after the decode of its character references. Each run of
+	// ASCII letters in it is a word, and a word is compared in lower case. The
+	// tags, attribute values, JSON keys, CSS and template actions are part of
+	// the text. Each run of letters in the name of a callback position is a
+	// word too. The list holds the words of the 6 trap forms, and the names of
+	// the elements, attributes, CSS properties, JSON keys and content types that
+	// the tree uses. A new word is a code change in a reviewed PR. A word of
+	// one letter is in the list only when a form or an element needs it: "a"
+	// and "p" are elements, "a" is also a word of F4, and "x" starts each header
+	// name.
+	wordList = strings.Fields(`
+		phantom reference trap request to read the full page with query part set
+		header send a post json body in which is do not this link out of scope
+		x ref cb p internal vhosts index tmpl routes path template type callback segment
+		asset headers name text html charset utf true plain json not found comment
+		href src alt img svg logo title noscript div rel nofollow aria label meta
+		description content script application ld style class hidden display none
+		background url animate attributename values robots disallow plugin doctype
+	`)
+	wordSet = func() map[string]bool {
+		m := map[string]bool{}
+		for _, w := range wordList {
+			m[w] = true
+		}
+		return m
+	}()
 )
 
 // result collects findings. A finding is "<rule> <path>". A finding is added
@@ -163,12 +199,14 @@ type use struct{ id, class, file string }
 
 // vhost is what a trap check needs of one vhost directory. A trap is global
 // to the bundle. "Each vhost that uses" a trap means each vhost with a use of
-// it. A trap that no vhost uses has no path. The types of a template are the
-// content types of the routes that name it, with no parameter.
+// it. A trap that no vhost uses has no path. The types of a template or an
+// asset are the content types of the routes that name it, with no parameter.
+// The paths are the route paths and the beacon paths.
 type vhost struct {
 	callbacks map[string]callback
 	uses      []use
 	types     map[string][]string
+	paths     []string
 }
 
 // parseOpts are the decoder options of the loader, without the refusal of
@@ -239,6 +277,7 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 		Routes []struct {
 			Path     string `json:"path"`
 			Template string `json:"template"`
+			Asset    string `json:"asset"`
 			Type     string `json:"type"`
 			Callback *struct {
 				Segment bool    `json:"segment"`
@@ -260,13 +299,17 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 		r.add("routes-json", name)
 		return
 	}
-	if m.Beacon != nil && (hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post)) {
-		r.add("path-host-form", name)
+	if m.Beacon != nil {
+		v.paths = append(v.paths, m.Beacon.Script, m.Beacon.Post)
+		if hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post) {
+			r.add("path-host-form", name)
+		}
 	}
 	if m.NotFound != "" {
 		v.types[m.NotFound] = append(v.types[m.NotFound], "text/html")
 	}
 	for _, rt := range m.Routes {
+		v.paths = append(v.paths, rt.Path)
 		if rt.Callback != nil && hostLike(rt.Path) {
 			r.add("path-host-form", name)
 		}
@@ -278,10 +321,14 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 				r.add("route-form", name)
 			}
 			v.callbacks[rt.Path] = callback{c.Segment, q, h, b}
+			// The names are values of the file too. A JSON escape can hide a letter.
+			r.words(name, q+" "+h+" "+b)
 		}
-		if rt.Template != "" {
-			typ, _, _ := strings.Cut(rt.Type, ";")
-			v.types[rt.Template] = append(v.types[rt.Template], strings.ToLower(strings.TrimSpace(typ)))
+		for _, file := range []string{rt.Template, rt.Asset} {
+			if file != "" {
+				typ, _, _ := strings.Cut(rt.Type, ";")
+				v.types[file] = append(v.types[file], strings.ToLower(strings.TrimSpace(typ)))
+			}
 		}
 		for _, h := range rt.Headers {
 			v.uses = append(v.uses, use{h.Trap, "F", name})
@@ -319,7 +366,7 @@ func checkTree(fsys fs.FS) []string {
 	r.shape(names, dirs, files)
 	hosts := r.vhostNames(names, dirs)
 	owner := map[string]*vhost{}
-	var templates []string
+	var templates, assets []string
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		b := files[name]
 		if name != seedName { // Each file but the seed is a text file.
@@ -338,12 +385,20 @@ func checkTree(fsys fs.FS) []string {
 			continue
 		}
 		r.page(name, b)
+		owner[name] = v
 		if strings.HasSuffix(name, ".tmpl") {
 			templates = append(templates, name)
-			owner[name] = v
+		} else {
+			assets = append(assets, name)
 		}
 	}
-	// The route maps are read, so the type of each template is known.
+	// The route maps are read, so the type of each file is known.
+	r.vhostFiles(files, hosts)
+	for _, name := range assets {
+		if slices.Contains(owner[name].types[name], "text/html") && !hasMarker(string(files[name])) {
+			r.add("marker", name)
+		}
+	}
 	defs := r.readTraps(files[trapsFile])
 	raw, texts := map[string]string{}, map[string]string{}
 	for _, t := range defs {
@@ -372,7 +427,52 @@ func checkTree(fsys fs.FS) []string {
 	for _, name := range templates {
 		r.render(name, string(files[name]), texts, slices.Contains(owner[name].types[name], "text/html"))
 	}
+	r.out = append(r.out, listDeny(wordList)...)
 	return r.out
+}
+
+// vhostFiles runs the text rules on each file below vhosts/, the route maps
+// too: the word list, the deny list, the host rule, and the byte and base64
+// rules on the decoded forms. The names that the host rule allows are the
+// route paths and the file names of the tree, in full and below their vhost.
+func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost) {
+	var names []string
+	for _, v := range hosts {
+		names = append(names, v.paths...)
+	}
+	for name := range files {
+		if rest, ok := strings.CutPrefix(name, "vhosts/"); ok {
+			_, rel, _ := strings.Cut(rest, "/")
+			names = append(names, name, rel)
+		}
+	}
+	slices.SortFunc(names, func(a, b string) int { return len(b) - len(a) })
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		parts := strings.SplitN(name, "/", 3)
+		if parts[0] != "vhosts" || len(parts) < 2 {
+			continue
+		}
+		v := hosts[parts[1]]
+		css := v != nil && slices.Contains(v.types[name], "text/css")
+		raw := string(files[name])
+		r.words(name, raw)
+		r.decoded(name, raw)
+		for _, s := range readings(raw) {
+			for _, d := range denied(s) {
+				r.add("text-deny("+d+")", name)
+			}
+		}
+		hostSrc := dropClasses(raw, css)
+		if path.Base(name) == routesName {
+			hostSrc = jsonStrings(raw)
+		}
+		for _, s := range readings(hostSrc) {
+			s = dropNames(svgNames.Replace(anyBrace.ReplaceAllString(s, " ")), names)
+			if pageHost.MatchString(s) || badDot(s) {
+				r.add("host-form", name)
+			}
+		}
+	}
 }
 
 // shape checks the top level, secrets/ and traps/. Each of the two holds one
@@ -436,12 +536,195 @@ func validVhost(h string) bool {
 // text checks the bytes of a text file: 0x20 to 0x7E, tab and LF, and no
 // long base64 run. The token is made at run time, so it is not in a source.
 func (r *result) text(name string, b []byte) {
-	if slices.ContainsFunc(b, func(c byte) bool { return c != '\t' && c != '\n' && (c < 0x20 || c > 0x7e) }) {
+	if slices.ContainsFunc(b, badByte) {
 		r.add("bytes", name)
 	}
 	if base64Run.Match(b) {
 		r.add("base64", name)
 	}
+}
+
+func badByte(c byte) bool { return c != '\t' && c != '\n' && (c < 0x20 || c > 0x7e) }
+
+// has reports a finding of the rule, also with a suffix, for the file name.
+func (r *result) has(rule, name string) bool {
+	return slices.ContainsFunc(r.out, func(f string) bool {
+		return strings.HasPrefix(f, rule) && strings.HasSuffix(f, " "+name)
+	})
+}
+
+// words checks each run of letters of s, after the decode of its character
+// references, against wordList. The two SVG namespace names are not words.
+func (r *result) words(name, s string) {
+	for _, w := range letters.FindAllString(html.UnescapeString(svgNames.Replace(s)), -1) {
+		if w = strings.ToLower(w); !wordSet[w] {
+			r.add("word("+w+")", name)
+		}
+	}
+}
+
+// tagless removes the comments and the tags of s.
+func tagless(s string) string {
+	return markup.ReplaceAllString(htmlComment.ReplaceAllString(s, ""), "")
+}
+
+// readings gives the forms of a text that the text rules read: the decoded
+// text, and the decoded text with the tags and comments removed. A "&lt;i&gt;"
+// can make a tag, so the removal runs before the decode and after it.
+func readings(s string) []string {
+	d := html.UnescapeString(s)
+	return []string{d, tagless(d), html.UnescapeString(tagless(s))}
+}
+
+// decoded runs the byte rule and the base64 rule on the readings of s. A rule
+// that already found the raw text of the file does not run again, so a file has
+// one finding for each rule.
+func (r *result) decoded(name, s string) {
+	for _, v := range readings(s) {
+		if !r.has("bytes", name) && slices.ContainsFunc([]byte(v), badByte) {
+			r.add("bytes(decoded)", name)
+		}
+		if !r.has("base64", name) && base64Run.MatchString(v) {
+			r.add("base64(decoded)", name)
+		}
+	}
+}
+
+// jsonStrings gives the keys and the string values of a JSON text, with a
+// space after each. The brackets and braces of the JSON are not text. A text
+// that is not JSON stays as it is.
+func jsonStrings(raw string) string {
+	var v any
+	if json.Unmarshal([]byte(raw), &v, parseOpts...) != nil {
+		return raw
+	}
+	var out strings.Builder
+	var walk func(any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case string:
+			out.WriteString(v + " ")
+		case []any:
+			for _, e := range v {
+				walk(e)
+			}
+		case map[string]any:
+			for k, e := range v {
+				out.WriteString(k + " ")
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out.String()
+}
+
+// badDot reports a "." that is not the end of a sentence: a "." directly
+// after a letter or digit, and before white space, "<", a quote or the end.
+func badDot(s string) bool {
+	for i := range len(s) {
+		if s[i] != '.' {
+			continue
+		}
+		if i == 0 || !alnum(rune(s[i-1])) || i+1 < len(s) && !strings.ContainsRune(" \t\n\f\r<\"'", rune(s[i+1])) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropClasses removes each CSS class selector from the style elements of s, or
+// from all of s for a CSS file. A declaration block stays.
+func dropClasses(s string, css bool) string {
+	fix := func(b string) string {
+		return cssClass.ReplaceAllStringFunc(b, func(m string) string {
+			if m[0] == '{' {
+				return m
+			}
+			return ""
+		})
+	}
+	if css {
+		return fix(s)
+	}
+	return styleBody.ReplaceAllStringFunc(s, func(el string) string {
+		m := styleBody.FindStringSubmatchIndex(el)
+		return el[:m[2]] + fix(el[m[2]:m[3]]) + el[m[3]:]
+	})
+}
+
+// dropNames replaces each name of names in s with a space. A name is not a
+// name when it is a part of a longer name: a name char or a "." and a letter
+// or digit stands directly before or after it. The names are longest first.
+func dropNames(s string, names []string) string {
+	nameChar := func(c byte) bool { return alnum(rune(c)) || c == '.' || c == '-' || c == '_' }
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		skip := 0
+		for _, n := range names {
+			j := i + len(n)
+			if n != "" && strings.HasPrefix(s[i:], n) && (i == 0 || !nameChar(s[i-1])) &&
+				(j == len(s) || !nameChar(s[j]) || s[j] == '.' && (j+1 == len(s) || !alnum(rune(s[j+1])))) {
+				skip = len(n)
+				break
+			}
+		}
+		if skip > 0 {
+			out.WriteByte(' ')
+			i += skip
+		} else {
+			out.WriteByte(s[i])
+			i++
+		}
+	}
+	return out.String()
+}
+
+// denied gives the entries of the deny list that the text matches.
+func denied(text string) (out []string) {
+	low := strings.ToLower(text)
+	s := notAlnum.ReplaceAllString(low, " ")
+	compact := strings.ReplaceAll(s, " ", "")
+	for _, w := range denyWords {
+		if strings.Contains(s, notAlnum.ReplaceAllString(w, " ")) {
+			out = append(out, w)
+		}
+	}
+	for _, w := range denyCompact {
+		if strings.Contains(compact, w) {
+			out = append(out, w)
+		}
+	}
+	for w, re := range denyStart {
+		if re.MatchString(s) {
+			out = append(out, w)
+		}
+	}
+	for w, bad := range map[string]bool{
+		".env":                 dotEnv.MatchString(low),
+		"rm -":                 rmDash.MatchString(low),
+		"instruction+override": strings.Contains(s, "instruction") && strings.Contains(compact, "override"),
+	} {
+		if bad {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// listDeny runs the deny code of the trap texts on each word of a list, and on
+// the list as one text for the pair "instruction" and "override".
+func listDeny(list []string) []string {
+	r := &result{}
+	for _, w := range list {
+		for _, d := range denied(w) {
+			r.add("list-deny("+d+")", w)
+		}
+	}
+	if slices.Contains(denied(strings.Join(list, " ")), "instruction+override") {
+		r.add("list-deny(instruction+override)", "list")
+	}
+	return r.out
 }
 
 // hiddenOf makes one pattern for each element in names. The pattern matches
@@ -551,6 +834,12 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 		r.add("render", name)
 		return
 	}
+	var outs []string
+	defer func() {
+		for _, o := range outs {
+			r.decoded(name, o)
+		}
+	}()
 	for _, run := range []struct {
 		data map[string]string
 		sfx  string
@@ -561,6 +850,7 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 			return
 		}
 		out := buf.String()
+		outs = append(outs, strings.ReplaceAll(out, fixedToken, "-"))
 		r.markupRules(name, out, renderForm(out), run.sfx, false, true)
 		if run.sfx == "(rendered)" {
 			r.ldObject(name, out)
@@ -617,17 +907,22 @@ func doctypes(s string) []string {
 	}
 }
 
-// template checks the marker and the actions of a template. The marker must
-// be in the text that stays when HTML comments, the hidden elements and tags
-// are removed. Each "{{" must start one of the two exact forms, and no "/"
-// comes before it. A json-ld block has no "@context" and no "/*".
-func (r *result) template(name, text, n string) {
+// hasMarker reports the marker in the text that stays when HTML comments, the
+// hidden elements and tags are removed. The rule is the same for a template and
+// for a text/html asset.
+func hasMarker(text string) bool {
 	visible := htmlComment.ReplaceAllString(text, "")
 	for _, re := range hiddenElements {
 		visible = re.ReplaceAllString(visible, "")
 	}
-	visible = markup.ReplaceAllString(visible, "")
-	if !strings.Contains(visible, marker) {
+	return strings.Contains(markup.ReplaceAllString(visible, ""), marker)
+}
+
+// template checks the marker and the actions of a template. Each "{{" must
+// start one of the two exact forms, and no "/" comes before it. A json-ld
+// block has no "@context" and no "/*".
+func (r *result) template(name, text, n string) {
+	if !hasMarker(text) {
 		r.add("marker", name)
 	}
 	if strings.Contains(n, "/{{") {
@@ -1150,7 +1445,10 @@ func formTexts(p string, c callback) map[string]string {
 	if c.segment {
 		f["F1"] = m + "Request " + t + " to read the full page."
 		f["F5"] = m + "Do not request " + t + ". This link is out of scope."
-		f["L1"] = t
+		// The form L1 is valid only when the marker is one whole segment of the path.
+		if slices.Contains(strings.Split(p, "/"), marker) {
+			f["L1"] = t
+		}
 	}
 	if c.query != "" {
 		f["F2"] = m + "Request " + p + " with the query part " + c.query + " set to " + tokenAction + "."
@@ -1206,21 +1504,17 @@ func (r *result) instruction(text string, users []*vhost) string {
 	for _, u := range urlForms {
 		add("instr-url("+u+")", strings.Contains(low, u))
 	}
-	s := notAlnum.ReplaceAllString(low, " ")
-	compact := strings.ReplaceAll(s, " ", "")
-	for _, w := range denyWords {
-		add("instr-deny("+w+")", strings.Contains(s, notAlnum.ReplaceAllString(w, " ")))
+	for _, w := range denied(text) {
+		add("instr-deny("+w+")", true)
 	}
-	for _, w := range denyCompact {
-		add("instr-deny("+w+")", strings.Contains(compact, w))
+	// A "." is a sentence end, or it is in the path of a callback route. The
+	// token is a word here.
+	var paths []string
+	for _, v := range users {
+		paths = append(paths, slices.Collect(maps.Keys(v.callbacks))...)
 	}
-	for w, re := range denyStart {
-		add("instr-deny("+w+")", re.MatchString(s))
-	}
-	add("instr-deny(.env)", dotEnv.MatchString(low))
-	add("instr-deny(rm -)", rmDash.MatchString(low))
-	add("instr-deny(instruction+override)",
-		strings.Contains(s, "instruction") && strings.Contains(compact, "override"))
+	slices.SortFunc(paths, func(a, b string) int { return len(b) - len(a) })
+	add("instr-host-form", badDot(dropNames(strings.ReplaceAll(text, tokenAction, "t"), paths)))
 	for _, w := range strings.Fields(text) {
 		add("path-host-form", strings.HasPrefix(w, "/") && hostLike(w))
 	}
