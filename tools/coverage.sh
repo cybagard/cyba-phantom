@@ -21,7 +21,9 @@
 # for another GOOS or GOARCH has no floor.
 #
 # The statement counts come from the profile. The gate checks each profile
-# line. It cannot find a block that a hand-made profile leaves out.
+# line. It cannot find a block that a hand-made profile leaves out. A
+# hand-made profile can also add a block or a count in a listed file. A file
+# name with a byte that %q escapes, for example a backslash, fails the check.
 #
 # The table below has one row for each package: "<package> <floor>". The
 # floor is a percentage. 07 §1 requires at least 80 % on internal/{token,
@@ -41,7 +43,7 @@
 #   - a module package is missing from `go list -deps ./...` in one build;
 #   - a module package is missing from `go list ./...` in one build;
 #   - the Go files or cgo files of a package differ in the two builds;
-#   - a package that has Go files has no coverage data;
+#   - a package with a number as its floor has no coverage data;
 #   - a nostmts row names a package that has Go files, with an argument;
 #   - a nostmts row names a package that has a profile line, with no argument;
 #   - a package of the 07 §1 set has a floor below 80 or the marker;
@@ -53,7 +55,8 @@
 #     "mode: atomic";
 #   - another line is not "<module>/<path>.go:<n>.<n>,<n>.<n> <n> <n>";
 #   - the file of a line is not a Go file or cgo file of a listed package;
-#   - the block position of a line is in the profile twice.
+#   - the "<file>:<range>" text of a line is in the profile twice. The text
+#     "032.2" is not the same text as "32.2".
 set -uo pipefail
 
 # Packages of 07 §1. Each must have a floor of at least 80.
