@@ -15,6 +15,7 @@
 package verify
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"strings"
@@ -136,13 +137,43 @@ func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	return c, nil
 }
 
+// Checkpoint is a checkpoint note that ParseCheckpoint accepted. It holds the
+// origin, the size, the root and a copy of the note bytes. Only ReadCheckpoint
+// makes a value that is not zero. The fields are not exported, so code outside
+// the package cannot change a value.
+type Checkpoint struct {
+	origin string
+	size   uint64
+	root   [32]byte
+	note   []byte
+}
+
+// Origin returns the origin of the note.
+func (c Checkpoint) Origin() string { return c.origin }
+
+// Size returns the tree size of the note.
+func (c Checkpoint) Size() uint64 { return c.size }
+
+// Root returns the root hash of the note.
+func (c Checkpoint) Root() [32]byte { return c.root }
+
+// Note returns a copy of the note bytes. A change of the copy does not change
+// the value.
+func (c Checkpoint) Note() []byte { return bytes.Clone(c.note) }
+
 // ReadCheckpoint reads a note with the size cap, then calls ParseCheckpoint.
-func ReadCheckpoint(r io.Reader, v note.Verifier) (verifier.Checkpoint, error) {
+// The value is the only form of checkpoint that Inclusion accepts. The value
+// owns the bytes that the function read, so no other code holds them.
+func ReadCheckpoint(r io.Reader, v note.Verifier) (Checkpoint, error) {
 	b, err := readCapped(r, MaxNoteBytes)
 	if err != nil {
-		return verifier.Checkpoint{}, err
+		return Checkpoint{}, err
 	}
-	return ParseCheckpoint(b, v)
+	c, err := ParseCheckpoint(b, v)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	return Checkpoint{origin: c.Origin, size: c.Size, root: c.Root, note: b}, nil
 }
 
 // Event holds the received bytes of an event and their hash.

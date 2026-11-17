@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -81,6 +82,16 @@ func proofAt(t testing.TB, l *tlog.Log, index, size int64) InclusionProof {
 	return InclusionProof{Index: index, TreeSize: size, Hashes: hs}
 }
 
+// inclusion reads the note with ReadCheckpoint, then calls Inclusion. A note
+// that ReadCheckpoint refuses gives its error and the zero Result.
+func inclusion(v note.Verifier, msg []byte, e Event, p InclusionProof) (Result, error) {
+	c, err := ReadCheckpoint(bytes.NewReader(msg), v)
+	if err != nil {
+		return Result{}, err
+	}
+	return Inclusion(c, e, p)
+}
+
 // T-S-14 and the T-U-12 class: a real log, real signed checkpoints, and a
 // check of the first, the last, and the middle leaf at each size.
 func TestTS14_InclusionRoundTrip(t *testing.T) {
@@ -94,7 +105,7 @@ func TestTS14_InclusionRoundTrip(t *testing.T) {
 		msg := checkpointAt(t, l, s, size)
 		root, _ := l.RootAt(size)
 		for _, i := range slices.Compact([]int64{0, size / 2, size - 1}) {
-			res, err := Inclusion(v, msg, events[i], proofAt(t, l, i, size))
+			res, err := inclusion(v, msg, events[i], proofAt(t, l, i, size))
 			if err != nil {
 				t.Fatalf("size %d, leaf %d: %v", size, i, err)
 			}
@@ -107,7 +118,7 @@ func TestTS14_InclusionRoundTrip(t *testing.T) {
 	}
 	// A tree of one leaf has an empty proof.
 	msg := checkpointAt(t, l, s, 1)
-	res, err := Inclusion(v, msg, events[0], proofAt(t, l, 0, 1))
+	res, err := inclusion(v, msg, events[0], proofAt(t, l, 0, 1))
 	if err != nil || len(res.Proof) != 0 {
 		t.Errorf("size 1: %+v, %v", res, err)
 	}
@@ -116,7 +127,7 @@ func TestTS14_InclusionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Inclusion(v, checkpointAt(t, l, s, 257), events[100], parsed); err != nil {
+	if _, err := inclusion(v, checkpointAt(t, l, s, 257), events[100], parsed); err != nil {
 		t.Errorf("proof from a file: %v", err)
 	}
 }
@@ -170,18 +181,18 @@ func TestTS14_InclusionRefused(t *testing.T) {
 		"index past the size":           {msg, events[3], InclusionProof{Index: 10, TreeSize: 10, Hashes: good.Hashes}, ErrNotVerified},
 		"checkpoint note is bad":        {msg[:len(msg)-3], events[3], good, ErrCheckpoint},
 	} {
-		res, err := Inclusion(v, tc.msg, tc.e, tc.p)
+		res, err := inclusion(v, tc.msg, tc.e, tc.p)
 		wantErr(t, name, err, tc.want)
 		if err != nil && !reflect.DeepEqual(res, Result{}) {
 			t.Errorf("%s: result is not empty with an error: %+v", name, res)
 		}
 	}
 	// The same inputs pass when nothing is changed.
-	if _, err := Inclusion(v, msg, events[3], good); err != nil {
+	if _, err := inclusion(v, msg, events[3], good); err != nil {
 		t.Errorf("unchanged inputs: %v", err)
 	}
 	// A size-0 checkpoint has no leaf. Its proof size is 0.
-	_, err = Inclusion(v, empty, events[0], InclusionProof{Hashes: []modtlog.Hash{}})
+	_, err = inclusion(v, empty, events[0], InclusionProof{Hashes: []modtlog.Hash{}})
 	wantErr(t, "empty tree, size 0 proof", err, ErrNotVerified)
 }
 
@@ -228,7 +239,7 @@ func TestTS14_InclusionBridged(t *testing.T) {
 	msg := checkpointAt(t, l, s, 300)
 	root300, _ := l.RootAt(300)
 	good := bridgedProof(t, l, 3, 5, 300)
-	res, err := Inclusion(v, msg, events[3], good)
+	res, err := inclusion(v, msg, events[3], good)
 	if err != nil || res.Size != 300 || res.Root != root300 || res.LeafIndex != 3 ||
 		!slices.Equal(res.Proof, good.Hashes) || !slices.Equal(res.Consistency, good.Consistency) {
 		t.Fatalf("bridged proof: %+v, %v", res, err)
@@ -238,10 +249,10 @@ func TestTS14_InclusionBridged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Inclusion(v, msg, events[3], parsed); err != nil {
+	if _, err := inclusion(v, msg, events[3], parsed); err != nil {
 		t.Errorf("bridged proof from a file: %v", err)
 	}
-	if _, err := Inclusion(v, msg, events[298], bridgedProof(t, l, 298, 299, 300)); err != nil {
+	if _, err := inclusion(v, msg, events[298], bridgedProof(t, l, 298, 299, 300)); err != nil {
 		t.Errorf("proof one leaf below the checkpoint: %v", err)
 	}
 	wrongRoot := bridgedProof(t, l, 3, 5, 300)
@@ -286,7 +297,7 @@ func TestTS14_InclusionBridged(t *testing.T) {
 		}(), ErrNotVerified},
 		"size above the checkpoint size": {InclusionProof{Index: 3, TreeSize: 301, Hashes: good.Hashes}, ErrTreeSize},
 	} {
-		res, err := Inclusion(v, msg, events[3], tc.p)
+		res, err := inclusion(v, msg, events[3], tc.p)
 		wantErr(t, name, err, tc.want)
 		if errors.Is(err, ErrFork) {
 			t.Errorf("%s: a bad proof file is not a fork: %v", name, err)
@@ -352,7 +363,7 @@ func FuzzTS14_Inclusion(f *testing.F) {
 		if err != nil {
 			return
 		}
-		res, err := Inclusion(v, cp, e, p)
+		res, err := inclusion(v, cp, e, p)
 		if err != nil {
 			if !reflect.DeepEqual(res, Result{}) {
 				t.Errorf("result is not empty with an error: %+v", res)
