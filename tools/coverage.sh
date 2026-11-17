@@ -23,7 +23,8 @@
 #   - a row names a package that `go list ./...` does not list;
 #   - a package that has statements has no coverage data;
 #   - a row marked nostmts names a package that has statements;
-#   - a package of the 07 §1 set has a floor below 80 or the marker.
+#   - a package of the 07 §1 set has a floor below 80 or the marker;
+#   - a floor is not nostmts or a number from 0 to 100.
 set -uo pipefail
 
 # Packages of 07 §1. Each must have a floor of at least 80.
@@ -94,6 +95,10 @@ awk -v module="$module" -v required="$required" '
     if ($0 ~ /^[ \t]*(#|$)/) next
     if ($1 in floor) fail("two rows for " $1)
     floor[$1] = $2; rows[++nrows] = $1
+    if (NF != 2 || ($2 != "nostmts" && ($2 !~ /^[0-9]+(\.[0-9]+)?$/ || $2 + 0 > 100))) {
+      fail("bad floor on the row of " $1 " (nostmts or a number from 0 to 100)")
+      badrow[$1] = 1
+    }
     next
   }
   FILENAME == ARGV[2] {                      # go list ./...
@@ -110,6 +115,7 @@ awk -v module="$module" -v required="$required" '
     for (i = 1; i <= norder; i++) {
       p = order[i]
       if (!(p in floor)) { fail(p " has no floor row"); continue }
+      if (p in badrow) continue
       f = floor[p]
       if ((p in must) && (f == "nostmts" || f + 0 < 80)) {
         fail(p " has a floor of " f " (07 §1 needs at least 80)")
