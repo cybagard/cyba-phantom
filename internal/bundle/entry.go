@@ -128,7 +128,8 @@ const blockBytes = 512
 
 // The layout of the fields of a ustar header block is from POSIX (IEEE Std
 // 1003.1, ustar Interchange Format). Off is the offset in the block. Len is
-// the length of the field. The other names are positions in the field.
+// the length of the field. End is the offset after the field. The other
+// names are positions in the field.
 const (
 	sizeOff       = 124
 	sizeLen       = 12
