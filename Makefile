@@ -25,7 +25,8 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 
 # The all target runs the checks of CI that need no special setup. The
 # coverage target replaces the test target, because it runs the same tests.
-# The all target does not run fill, dco and the reader oracle test.
+# The all target does not run fill and dco. The reader oracle test runs only
+# in the devcontainer and in CI. It skips elsewhere.
 all: build lint tidy coverage perf trace mirror-diff
 
 # -s -w removes the symbol table and DWARF. Panic traces keep function names.
