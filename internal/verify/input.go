@@ -137,10 +137,10 @@ func ParseCheckpoint(b []byte, v note.Verifier) (verifier.Checkpoint, error) {
 	return c, nil
 }
 
-// Checkpoint is a checkpoint note that ParseCheckpoint accepted. It holds the
-// origin, the size, the root and a copy of the note bytes. Only ReadCheckpoint
-// makes a value that is not zero. The fields are not exported, so code outside
-// the package cannot change a value.
+// Checkpoint is a checkpoint note that ReadCheckpoint accepted. ReadCheckpoint
+// calls ParseCheckpoint. A value holds the origin, the size, the root and the
+// note bytes. Only ReadCheckpoint makes a value that is not zero. The fields
+// are not exported, so code outside the package cannot change a value.
 type Checkpoint struct {
 	origin string
 	size   uint64
@@ -163,7 +163,8 @@ func (c Checkpoint) Note() []byte { return bytes.Clone(c.note) }
 
 // ReadCheckpoint reads a note with the size cap, then calls ParseCheckpoint.
 // The value is the only form of checkpoint that Inclusion accepts. The value
-// owns the bytes that the function read, so no other code holds them.
+// keeps the bytes of the read with no copy. A reader must not keep the buffer
+// after Read returns (io.Reader), so no other code holds them.
 func ReadCheckpoint(r io.Reader, v note.Verifier) (Checkpoint, error) {
 	b, err := readCapped(r, MaxNoteBytes)
 	if err != nil {

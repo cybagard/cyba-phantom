@@ -160,6 +160,8 @@ func TestTS14_InclusionRefused(t *testing.T) {
 	larger := InclusionProof{Index: 3, TreeSize: 11, Hashes: good.Hashes}
 	otherRoot, _ := verifier.SignCheckpoint(s, 10, modtlog.Hash{9})
 	empty := checkpointAt(t, l, s, 0)
+	// The rows "checkpoint of another key" and "checkpoint note is bad" fail in
+	// ReadCheckpoint, in the helper inclusion. Inclusion does not see them.
 	for name, tc := range map[string]struct {
 		msg  []byte
 		e    Event

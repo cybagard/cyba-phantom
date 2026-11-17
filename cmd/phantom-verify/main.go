@@ -5,10 +5,10 @@
 // refuses a checkpoint that is not consistent with the state. The command opens
 // no network connection. Of the packages of this repository, it imports only
 // internal/verify. It also imports golang.org/x/mod/sumdb/note. Exit code 0
-// means verified. Exit code 1 means
-// not verified. Exit code 2 means a usage error, an input error, a state fault,
-// an output error, or an internal error. Error text is fixed and holds no input bytes: no path, no
-// flag value, no file content.
+// means verified. Exit code 1 means not verified. Exit code 2 means a usage
+// error, an input error, a state fault, an output error, or an internal error.
+// Error text is fixed and holds no input bytes: no path, no flag value, no file
+// content.
 package main
 
 import (
