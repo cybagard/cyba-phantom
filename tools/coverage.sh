@@ -49,7 +49,7 @@ for p in internal/token internal/score internal/tlog internal/limiter internal/s
   fi
 done
 if [ "$found" -eq 0 ]; then
-  echo "coverage: 07 §1 gate set (internal/{token,score,tlog,limiter,store}) has no package — vacuous pass"
+  echo "coverage: 07 §1 gate set (internal/{token,score,tlog,limiter,store}) has no packages yet — vacuous pass"
 fi
 
 gate tools 80 || fail=1

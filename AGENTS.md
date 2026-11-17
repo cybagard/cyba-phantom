@@ -42,7 +42,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/event` | event types, canonical JSON, hashing, bounded queue |
 | `internal/store` | modernc SQLite (CGO-free), WAL, batched single writer, migrations, retention |
 | `internal/tlog` | tiled Merkle log (`sumdb/tlog`), checkpoint signing, publish queue |
-| `internal/tlog/verifier` | checks a third party runs on the log: signed checkpoint parser, event leaf hash, inclusion proof; no file and no network |
+| `internal/tlog/verifier` | the checks that a third party runs on the log: signed checkpoint parser, event leaf hash, inclusion proof; no file and no network |
 | `internal/verify` | reads and checks the inputs of the open verifier (key, checkpoint, event, proof file) and keeps its state |
 | `internal/egress` | the fixed rule that decides if the sensor can connect to an address |
 | `internal/safefile` | opens and checks files with one rule type, before and after the open |
