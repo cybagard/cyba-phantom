@@ -10,8 +10,9 @@ module github.com/cybagard/cyba-phantom
 // checkpoint notes (sumdb/tlog, sumdb/note; ADR-002, SEC-16).
 // modernc.org/sqlite is a CGO-free SQLite for the event store (ADR-002,
 // SEC-20; C1). github.com/caddyserver/certmagic gets the ACME certificates
-// of the decoy listener (FR-01, SEC-21). go.uber.org/zap is the logger
-// setting of certmagic. golang.org/x/net gives the tests an HTML parser.
+// of the decoy listener (FR-01, SEC-21). go.uber.org/zap gives the logger
+// that the certmagic config needs. golang.org/x/net gives the tests an HTML
+// parser. Other modules also put x/net into the release binaries.
 // golang.org/x/sys/cpu finds hardware AES at the start (SEC-33).
 // golang.org/x/sys/unix reads the boot clock of the sensor time.
 // The test modules pebble/v2 and challtestsrv are named below.

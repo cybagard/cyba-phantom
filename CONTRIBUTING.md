@@ -101,8 +101,8 @@ surface.
 ## Code
 
 - Format: `gofmt` (CI checks); `go vet` clean (CI checks).
-- A new dependency needs a justification in the PR body (supply-chain and
-  size budget, C2).
+- Prefer the standard library. A new dependency needs a justification in
+  the PR body (supply-chain and size budget, C2).
 - Memory: nothing unbounded on a request path (C2). Attach a
   `go test -bench -benchmem` diff to any hot-path change.
 - Proprietary artifacts (live trap templates, fingerprint tables, scoring

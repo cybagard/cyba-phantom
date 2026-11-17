@@ -42,7 +42,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/event` | event types, canonical JSON, hashing, bounded queue |
 | `internal/store` | modernc SQLite (CGO-free), WAL, batched single writer, migrations, retention |
 | `internal/tlog` | tiled Merkle log (`sumdb/tlog`), checkpoint signing, publish queue |
-| `internal/tlog/verifier` | the checks that a third party runs on the log: signed checkpoint parser, event leaf hash, inclusion proof; no file and no network |
+| `internal/tlog/verifier` | the checks that a third party runs on the log: signed checkpoint parser, event leaf hash, inclusion proof; no file and no network. It also holds the checkpoint body writer and `SignCheckpoint` |
 | `internal/verify` | reads and checks the inputs of the open verifier (key, checkpoint, event, proof file) and keeps its state |
 | `internal/egress` | the fixed rule that decides if the sensor can connect to an address |
 | `internal/safefile` | opens and checks files with one rule type, before and after the open |
@@ -50,7 +50,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/session` | day key of the session id and of `ip_hmac` |
 | `internal/testutil` | helpers that tests of more than one package share |
 | `internal/config` | one YAML file + env overrides, `--check` |
-| `tools/` | Go tools: `trace` (traceability check), `dco` (sign-off and commit identity check), `bundle-sign` (make and sign a bundle), `stelint` (comment and text limits of ASD-STE100), `mutatepkg` (package finder for `make mutate`). Scripts: `mirror-diff.sh` (constitution table check), `coverage.sh` (coverage gate), `mutate-go.sh` (go wrapper for `make mutate`) |
+| `tools/` | Go tools: `trace` (traceability check), `dco` (sign-off and commit identity check), `bundle-sign` (make and sign a bundle). More Go tools: `stelint` (comment line and sentence length limits), `mutatepkg` (package finder for `make mutate`). Scripts: `mirror-diff.sh` (constitution table check), `coverage.sh` (coverage gate), `mutate-go.sh` (go wrapper for `make mutate`) |
 | `spec/` | synced read-only mirror of the canonical spec documents (01, 04 open sections, 07, 08, manifest, golden table) — the traceability inputs and the open interfaces |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |
@@ -75,7 +75,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 
 ## Commands
 
-- `make all` — build, lint (gofmt, vet, and `tools/stelint` on the changed comment lines), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`), and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker.
+- `make all` — build, lint (gofmt, vet, `tools/stelint`), tests (`-race`), the C10 trace check (`tools/trace` over `spec/`), and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker.
 - `make perf` — the T-P-07 gate. Two builds must hash identically. The binary must be statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. Locally, a check that cannot run (no systemd, no readelf) is skipped with a note. CI sets `PERF_STRICT=1`, so in CI each skip fails.
 - `make coverage` — the 07 §1 coverage gate: 80 % on each `internal/{token,score,tlog,limiter,store}` package that exists, and 80 % on `tools/`.
 - `make fixtures` — writes the vector hashes in `internal/event/testdata` and the golden signed note in `internal/tlog/verifier/testdata/notes.txt`; nobody edits these values by hand (`test/README`).
