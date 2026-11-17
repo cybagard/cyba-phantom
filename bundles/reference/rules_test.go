@@ -1872,7 +1872,7 @@ func (g gram) json(kind, s string) {
 func (g gram) jsonValue(class, key, v string) bool {
 	switch class {
 	case "path":
-		// A route map names the paths. Other files use the paths that it serves.
+		// A route map names the paths. Other files use served paths.
 		return isPath(v) && (strings.HasPrefix(key, "routes.") || g.v.names[v])
 	case "word":
 		return nameWords[v]
@@ -1909,9 +1909,9 @@ func (g gram) roundTrip(s string) {
 
 // tokenSeq gives the tokens of s for the round trip. It drops the html, head
 // and body tags and the white-space text. A self-closing tag of a void
-// element is a start tag. It has no attribute and no comment: a repair of
-// the parser that changes only these is a second html, head or body tag, and
-// the grammar refuses that. A parser keeps a comment in its place.
+// element is a start tag. It has no attribute and no comment. A repair that
+// changes only these is a second html, head or body tag. The grammar refuses
+// that tag. A parser keeps a comment in its place.
 func tokenSeq(s string) (seq []string) {
 	z := xhtml.NewTokenizer(strings.NewReader(s))
 	for z.Next() != xhtml.ErrorToken {

@@ -1712,7 +1712,7 @@ func ruleRows() []row {
 		gramRow("reference in a JSON template", plugin(`"name_for_human":"a&b"`), pluginPath, "grammar-reference"),
 		gramRow("reference in CSS", serve("/style.css", "style.css", "text/css; charset=utf-8", "p{color:gray}&\n"), cssPath,
 			"grammar-css-form grammar-reference"),
-		// A path member, a word member and a file member have each a class of their own.
+		// A path, a word and a file member have each a class of their own.
 		gramRow("name_for_model with a path", plugin(`"name_for_model":"/ref/cb"`), pluginPath, "grammar-json-value"),
 		gramRow("name_for_model with an array", plugin(`"name_for_model":["shop","logo"]`), pluginPath, "grammar-json-value"),
 		gramRow("api url that no route serves", plugin(`"api":{"type":"openapi","url":"/openapi.json"}`), pluginPath,
@@ -1729,7 +1729,7 @@ func ruleRows() []row {
 		gramRow("selector list with a space", doc("<style>h1, h2{color:gray}</style>"), pagePath, "grammar-css-selector"),
 		gramRow("style file with no route and a declaration that is not an entry", put(cssPath, "p{color:red}\n"), cssPath,
 			"grammar-css-declaration"),
-		// A text after the end of a block is a new unit. Two renders in a unit are cut.
+		// Text after a block end is a new unit. Two renders in a unit are cut.
 		gramRow("text after the end of a block", doc("<p>Tea.</p>cups <p>shop</p>"), pagePath, ""),
 		gramRow("trap text two times in a paragraph", doc(`<p>{{index .Trap "trap"}} {{index .Trap "trap"}}</p>`), pagePath, ""))
 	return rows
@@ -1760,7 +1760,7 @@ func placeRows() []row {
 			"</head>\n<body>\n"+basePage+"\n</body>\n</html>\n"), pagePath, "grammar-tag-place"),
 		gramRow("second body start tag in the html", put(pagePath, "<!doctype html>\n<html lang=\"en\">\n<head>\n</head>\n<body>\n"+
 			basePage+"\n</body>\n<body>\n</body>\n</html>\n"), pagePath, "grammar-tag-place"),
-		// A src is the name of an asset that the vhost serves, not a callback path.
+		// A src is an asset name that the vhost serves, not a callback path.
 		gramRow("src with a callback path", doc(`<img src="/ref/query" alt="x">`), pagePath, "grammar-value"),
 		{"href and src with the file name of an asset", both(serve("/logo.svg", "logo.svg", "image/svg+xml", `<svg><title>page</title></svg>`),
 			doc(`<a href="logo.svg"><img src="logo.svg" alt="x"></a>`)), nil},
