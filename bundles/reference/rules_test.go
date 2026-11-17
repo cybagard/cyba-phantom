@@ -840,11 +840,11 @@ type action struct {
 // has a token of its own.
 //
 // The check parses the output as a browser does, with scripting on and with
-// scripting off. A token has a class only at one tree place of point 8:
-// element text, the value of alt, title or aria-label, the content of a
-// description meta, the href of a nofollow link, a member value of the
-// json-ld block, or the comment of the comment action. Each other place has
-// no class.
+// scripting off. A token has a class only at one tree place of point 8.
+// These places are element text and the value of alt, title or aria-label.
+// They are the content of a description meta and the href of a nofollow
+// link. They are a member value of the json-ld block and the comment of the
+// comment action. Each other place has no class.
 //
 // A token has no class if it is not in the tree. It has none if it is there
 // more than once, or if its two places in the two modes differ. The function
@@ -1047,10 +1047,11 @@ func sourceNames(text string) (names []string) {
 	return names
 }
 
-// badLt reports a "<" of a text/html template that is not one of these: "<"
-// and a letter, "</" and a letter, "<!--", or "<!doctype html>". The case of
-// the doctype is not important. html/template writes each other "<" as
-// "&lt;". A source scan reads a comment there, but the page has markup.
+// badLt reports a "<" of a text/html template that is not allowed. A "<" is
+// allowed before a letter, before "/" and a letter, and in "<!--". It is also
+// allowed in "<!doctype html>", with the case ignored. html/template writes
+// each other "<" as "&lt;". A source scan reads a comment there, but the
+// page has markup.
 func badLt(s string) bool {
 	letter := func(c byte) bool { return 'a' <= c|0x20 && c|0x20 <= 'z' }
 	for i := range len(s) {
