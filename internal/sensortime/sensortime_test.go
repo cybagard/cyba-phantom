@@ -2,7 +2,9 @@ package sensortime
 
 import (
 	"errors"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +14,8 @@ import (
 const boundMS int64 = 9223372036854
 
 const (
-	goodID  = "e6e9a1b2-0c3d-4e5f-8a7b-9c0d1e2f43f8"
-	upperID = "E6E9A1B2-0C3D-4E5F-8A7B-9C0D1E2F43F8"
+	goodID  = "01234567-89ab-4cde-8f01-23456789abcd"
+	upperID = "01234567-89AB-4CDE-8F01-23456789ABCD"
 )
 
 // T-U-30: a Linux boot id that cannot be read gives the fixed error. So does
@@ -36,6 +38,8 @@ func TestTU30_LinuxBootIDParse(t *testing.T) {
 		{"wrong dash place", goodID[:9] + "-" + goodID[10:] + "\n", nil, false},
 		{"no dash", strings.ReplaceAll(goodID, "-", "0") + "\n", nil, false},
 		{"non hex", "g" + goodID[1:] + "\n", nil, false},
+		{"colon in a hex place", ":" + goodID[1:] + "\n", nil, false},
+		{"semicolon in a hex place", ";" + goodID[1:] + "\n", nil, false},
 		{"35 bytes", goodID[:34] + "\n", nil, false},
 		{"38 bytes", goodID + "00\n", nil, false},
 		{"empty", "", nil, false},
@@ -64,12 +68,15 @@ func TestTU30_DarwinBootIDForm(t *testing.T) {
 	}{
 		{"upper case as the host gives it", upperID, nil, goodID},
 		{"lower case", goodID, nil, goodID},
-		{"mixed case", "E6E9a1b2" + goodID[8:], nil, goodID},
+		{"mixed case", upperID[:24] + goodID[24:], nil, goodID},
 		{"sysctl error", upperID, errors.New("x"), ""},
 		{"empty", "", nil, ""},
 		{"LF at end", upperID + "\n", nil, ""},
 		{"wrong dash place", upperID[:9] + "-" + upperID[10:], nil, ""},
 		{"non hex", "G" + upperID[1:], nil, ""},
+		{"colon in a hex place", ":" + upperID[1:], nil, ""},
+		{"semicolon in a hex place", ";" + upperID[1:], nil, ""},
+		{"37 characters, first 36 valid", upperID + "0", nil, ""},
 	}
 	for _, c := range cases {
 		got, err := normalizeDarwinBootID(c.in, c.err)
@@ -85,10 +92,19 @@ func TestTU30_DefaultSource(t *testing.T) {
 	if src.Wall == nil || src.BootClock == nil || src.BootID == nil {
 		t.Fatal("source has a nil function")
 	}
+	before := time.Now()
+	wall := src.Wall()
+	after := time.Now()
+	if wall.Before(before.Add(-time.Second)) || wall.After(after.Add(time.Second)) {
+		t.Fatalf("wall %v is not the time now, between %v and %v",
+			wall, before, after)
+	}
+	up1 := linuxUptime(t)
 	a, err := src.BootClock()
 	if err != nil {
 		t.Fatal(err)
 	}
+	up2 := linuxUptime(t)
 	b, err := src.BootClock()
 	if err != nil || a < 0 || b < a {
 		t.Fatalf("boot clock %v then %v, %v", a, b, err)
@@ -96,6 +112,10 @@ func TestTU30_DefaultSource(t *testing.T) {
 	id, err := src.BootID()
 	if err != nil {
 		t.Fatal(err)
+	}
+	again, err := src.BootID()
+	if err != nil || again != id {
+		t.Fatalf("boot id %q then %q, %v", id, again, err)
 	}
 	switch runtime.GOOS {
 	case "linux", "darwin":
@@ -105,6 +125,12 @@ func TestTU30_DefaultSource(t *testing.T) {
 		if runtime.GOOS == "linux" && a < time.Millisecond {
 			t.Fatalf("boot clock %v is too small", a)
 		}
+		// The boot clock is the time since the host boot, not the wall time.
+		// The reads of the uptime come before and after the boot clock read.
+		if runtime.GOOS == "linux" &&
+			(a < up1-time.Second || a > up2+time.Second) {
+			t.Fatalf("boot clock %v is not between uptime %v and %v", a, up1, up2)
+		}
 	default:
 		if id != "" {
 			t.Fatalf("boot id %q on a GOOS with none", id)
@@ -112,8 +138,30 @@ func TestTU30_DefaultSource(t *testing.T) {
 	}
 }
 
+// linuxUptime gives the first field of /proc/uptime. It gives 0 on another
+// GOOS.
+func linuxUptime(t *testing.T) time.Duration {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		t.Fatalf("uptime text %q has no field", b)
+	}
+	s, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return time.Duration(s * float64(time.Second))
+}
+
 // T-U-30: a GOOS with no boot id gives an empty boot id and no error. The
-// Go monotonic clock gives an elapsed time that does not go back.
+// Go monotonic clock gives an elapsed time that grows at each read.
 func TestTU30_MonotonicSource(t *testing.T) {
 	src := monotonicSource()
 	if src.Wall == nil {
@@ -126,7 +174,7 @@ func TestTU30_MonotonicSource(t *testing.T) {
 	prev := time.Duration(0)
 	for i := 0; i < 3; i++ {
 		d, err := src.BootClock()
-		if err != nil || d < prev {
+		if err != nil || d < prev || (i > 0 && d == prev) {
 			t.Fatalf("elapsed %v after %v, %v", d, prev, err)
 		}
 		prev = d
@@ -164,13 +212,16 @@ var fieldCases = []struct {
 	{"catch-up min", func(s *State) { s.CatchUp = 0 }},
 	{"catch-up max", func(s *State) { s.CatchUp = boundMS }},
 	{"no jump", func(s *State) { s.Jump = Jump{} }},
+	{"jump id min", func(s *State) { s.Jump.ID = 1 }},
 	{"jump id max", func(s *State) { s.Jump.ID = 1<<63 - 1 }},
 	{"jump size min", func(s *State) { s.Jump.Size = 1 }},
 	{"jump size max", func(s *State) { s.Jump.Size = boundMS }},
 	{"jump at min", func(s *State) { s.Jump.At = 0 }},
 	{"jump at max", func(s *State) { s.Jump.At = boundMS }},
-	{"jump first event", func(s *State) { s.Jump.FirstEvent = 1<<63 - 1 }},
-	{"jump first session", func(s *State) { s.Jump.FirstSession = 0 }},
+	{"jump first event min", func(s *State) { s.Jump.FirstEvent = 0 }},
+	{"jump first event max", func(s *State) { s.Jump.FirstEvent = 1<<63 - 1 }},
+	{"jump first session min", func(s *State) { s.Jump.FirstSession = 0 }},
+	{"jump first session max", func(s *State) { s.Jump.FirstSession = 1<<63 - 1 }},
 	{"next event min", func(s *State) { s.NextEvent = 0 }},
 	{"next event max", func(s *State) { s.NextEvent = 1<<63 - 1 }},
 	{"next session min", func(s *State) { s.NextSession = 0 }},
@@ -220,6 +271,7 @@ func TestTU30_StateBadValue(t *testing.T) {
 		"minus zero":    strings.Replace(good, ";600000;", ";-0;", 1),
 		"upper boot id": strings.Replace(good, goodID, upperID, 1),
 		"short boot id": strings.Replace(good, goodID, goodID[1:], 1),
+		"long boot id":  strings.Replace(good, goodID, goodID+"0", 1),
 		"space":         strings.Replace(good, ";40;", "; 40;", 1),
 		"overflow":      strings.Replace(good, ";120;", ";9223372036854775808;", 1),
 		"decimal":       strings.Replace(good, ";120;", ";1.5;", 1),
