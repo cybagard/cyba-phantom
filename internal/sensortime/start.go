@@ -152,8 +152,8 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 // reads no wall clock. On Linux and darwin, the boot clock of the source is
 // not the Go monotonic clock. That clock stops in a host suspend. A boot
 // clock error, or a boot clock below 0, is returned with no S. A call that
-// starts after another call has returned never gets a lower S, while the
-// boot clock does not go down.
+// starts after another call has returned never gets a lower S. This holds
+// while the boot clock does not go down.
 func (c *Clock) Now() (int64, error) {
 	bc, err := c.bootClock()
 	if err != nil {

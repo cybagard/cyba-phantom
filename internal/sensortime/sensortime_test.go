@@ -861,8 +861,8 @@ func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	if got := mustNow(t, c); got != s0+11*hourMS {
 		t.Fatalf("S %d, want %d", got, s0+11*hourMS)
 	}
-	// The boot clock is 30 min past the base. S is S + 30 min and the wall is
-	// S + 40 min: a move of 10 min, so no jump.
+	// The boot clock is 30 min past the base, so S moves 30 min. The wall is
+	// at 40 min. That is a move of 10 min, so no jump.
 	f, c = graceClock(t, s0, time.Hour)
 	f.boot.Store(int64(time.Hour + 30*time.Minute))
 	f.wall.Store(s0 + 40*60000)
@@ -985,9 +985,9 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 	}
 }
 
-// A reader that read the boot clock before a grace move must not get a lower
-// S than a reader that started after the move. The first reader stops after
-// its boot clock read. The check moves S 40 d. Then a second reader calls Now.
+// A reader must not get a lower S than a reader that started later. The first
+// reader stops after its boot clock read. A check moves S 40 d. Then a second
+// reader calls Now.
 func TestTU30_LaterNowNeverLowerThanEarlierReturn(t *testing.T) {
 	f := newFake(s0, time.Hour, goodID)
 	src := f.source()
