@@ -77,7 +77,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 
 - `make all` — build, lint (gofmt/vet), `go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs the tests with `-race`. Then `make all` runs the C10 trace check (`tools/trace` over `spec/`) and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker. The lint step needs the ref `origin/main`, or `BASE=<sha>`. `make all` does not run two checks of the ci workflow: `make fill` (it needs a small tmpfs) and `make dco` (it needs BASE and HEAD). The reader oracle test needs GNU tar 1.35 and Python 3.13. Without them it skips, but in the devcontainer and in CI it fails.
 - `make perf` — the T-P-07 gate. Two builds must hash identically. The binary must be statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. Locally, a check that cannot run (no systemd, no readelf) is skipped with a note. CI sets `PERF_STRICT=1`, so in CI each skip fails.
-- `make coverage` — the 07 §1 coverage gate: 80 % on each `internal/{token,score,tlog,limiter,store}` package that exists, and 80 % on `tools/`.
+- `make coverage` — the 07 §1 coverage gate: a floor for each package, in the table of `tools/coverage.sh`. A package without a row fails the gate. The floor is 80 % or more on `internal/{token,score,tlog,limiter,store}`.
 - `make fixtures` — writes the vector hashes in `internal/event/testdata` and the golden signed note in `internal/tlog/verifier/testdata/notes.txt`; nobody edits these values by hand (`test/README`).
 - `make dco BASE=<sha> HEAD=<sha>` — DCO sign-off and commit identity check across a commit range (CI runs it on every PR).
 
