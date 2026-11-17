@@ -3,13 +3,13 @@
 // sensor_time. It also has the start rules, the grace, the catch-up and the
 // atomic S. S grows with the boot clock between checks. The start rules move
 // it only at Start. The grace and the catch-up move it only at a Check. The
-// grace sum U adds the grace moves since the last grace jump. A move over 1 h
-// in sum is a jump. A jump, or more than 10 min of moves since the last key
-// commit, needs a key write. Readers get such a move only when the writer
-// calls Committed. A read mark tells a jump if a reader read S since the last
-// jump. The clock writes fixed log lines. They are for a jump, a wall step
-// back, a wall that differs from S, and a used catch-up budget. It has no
-// caller yet.
+// grace sum U adds the grace moves since the last grace jump. When U plus a
+// move is over 1 h, the move is a jump. A jump, or more than 10 min of moves
+// since the last key commit, needs a key write. Readers get such a move only
+// when the writer calls Committed. Check refuses while a move waits. A read
+// mark tells a jump if a reader read S since the last jump. The clock writes
+// fixed log lines. They are for a jump, a wall step back, a wall that differs
+// from S, and a used catch-up budget. It has no caller yet.
 package sensortime
 
 import (
@@ -27,6 +27,9 @@ var (
 	// ErrState means that a stored value does not decode, or has a field
 	// out of range.
 	ErrState = errors.New("sensortime: stored state malformed or out of range")
+	// ErrPending means that Check ran while a move waits for its key write.
+	// The writer calls Committed first. Check then changes nothing.
+	ErrPending = errors.New("sensortime: a move waits for its key write")
 )
 
 // maxMS is the largest S: math.MaxInt64 ns as ms, 2262-04-11T23:47:16.854Z.

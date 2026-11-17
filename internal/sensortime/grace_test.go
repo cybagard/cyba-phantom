@@ -175,18 +175,13 @@ func TestTU30_MoveWaitsForCommit(t *testing.T) {
 	if snap, err := m.c.Snapshot(); err != nil || snap.S != s0+2*hourMS {
 		t.Fatalf("snapshot %+v, %v", snap, err)
 	}
-	// A second move, while the first waits, takes the newest S as its base.
-	m.set(minute, s0+2*hourMS+6*60000)
-	if !m.res.Write || m.res.Jump != nil || m.res.State.S != s0+2*hourMS+6*60000 {
-		t.Fatalf("second move: %+v", m.res)
-	}
 	// No Committed: after 1 h of boot clock, Now has the old S only.
 	m.f.boot.Add(int64(time.Hour))
-	if got := mustNow(t, m.c); got != s0+hourMS+60000 {
+	if got := mustNow(t, m.c); got != s0+hourMS {
 		t.Fatalf("Now %d with no Committed", got)
 	}
 	m.c.Committed()
-	if got := mustNow(t, m.c); got != s0+2*hourMS+6*60000+hourMS {
+	if got := mustNow(t, m.c); got != s0+2*hourMS+hourMS {
 		t.Fatalf("Now %d after Committed", got)
 	}
 
@@ -522,45 +517,126 @@ func TestTU30_JumpOfSmallMoveWaitsForCommit(t *testing.T) {
 	}
 }
 
-// A move while an older move waits does not reach Now before Committed. Else a
-// later publish would put S back. Committed gives the newest S, and it gives
-// the read value of the jump.
-func TestTU30_MoveWhileJumpWaits(t *testing.T) {
-	// A jump of 2 h, then a move of 1 min.
+// A Check while a move waits gives ErrPending. It reads no clock and changes
+// nothing: the fields of the clock, Snapshot, Now, the log and the next
+// Committed are as with no second Check.
+func TestTU30_CheckRefusesWhileMoveWaits(t *testing.T) {
+	type outcome struct {
+		snap          State
+		before, after int64
+		pub           bool
+		lines         int
+	}
+	run := func(refuse bool) outcome {
+		m := graceSim(t)
+		m.hold = true
+		m.set(0, s0+2*hourMS)
+		if !m.res.Write || m.res.Jump == nil {
+			t.Fatalf("jump: %+v", m.res)
+		}
+		if refuse {
+			c := m.c
+			st, lastBoot, lastWall, w := c.st, c.lastBoot, c.lastWall, c.w
+			lastID, pending, pj, mark := c.lastID, c.pending, c.pendingJump,
+				c.read.Load()
+			m.f.boot.Add(int64(minute))
+			m.f.wall.Store(s0 + 30*dayMS)
+			calls := m.f.wallCalls.Load()
+			r, err := c.Check()
+			if err != ErrPending || r.Jump != nil || r.Write || r.Read ||
+				r.State != (State{}) {
+				t.Fatalf("second Check: %+v, %v", r, err)
+			}
+			if m.f.wallCalls.Load() != calls {
+				t.Fatal("the refused Check read the wall clock")
+			}
+			if c.st != st || c.lastBoot != lastBoot || c.lastWall != lastWall ||
+				c.w != w || c.lastID != lastID || c.pending != pending ||
+				c.pendingJump != pj || c.read.Load() != mark {
+				t.Fatal("the refused Check changed a field")
+			}
+			m.f.boot.Add(-int64(minute))
+		}
+		var o outcome
+		var err error
+		if o.snap, err = m.c.Snapshot(); err != nil {
+			t.Fatal(err)
+		}
+		o.before = mustNow(t, m.c)
+		o.pub = m.c.Committed()
+		o.after = mustNow(t, m.c)
+		o.lines = len(m.rec.lines)
+		return o
+	}
+	got, want := run(true), run(false)
+	if got != want {
+		t.Fatalf("with a refused Check %+v, without %+v", got, want)
+	}
+	if got.before != s0 || got.after != s0+2*hourMS || !got.pub {
+		t.Fatalf("outcome %+v", got)
+	}
+}
+
+// Check A (wall 2 h ahead, Write), then Check B (wall 30 d ahead): ErrPending.
+// After Committed, a start from key A gives S at most 10 min below the largest
+// S of a Now.
+func TestTU30_RefusedCheckKeepsStopLossSmall(t *testing.T) {
+	m := graceSim(t)
+	m.hold = true
+	a := m.set(0, s0+2*hourMS)
+	if !a.Write {
+		t.Fatalf("check A: %+v", a)
+	}
+	m.f.wall.Store(s0 + 30*dayMS)
+	if _, err := m.c.Check(); err != ErrPending {
+		t.Fatalf("check B: %v", err)
+	}
+	m.c.Committed()
+	m.f.boot.Add(int64(minute))
+	largest := mustNow(t, m.c)
+	c, _, err := Start(m.f.source(), StartInput{Stored: &a.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lost := largest - mustNow(t, c); lost < 0 || lost > 10*60000 {
+		t.Fatalf("largest %d, start S lost %d ms", largest, lost)
+	}
+}
+
+// After Committed, Check works again.
+func TestTU30_CheckWorksAfterCommitted(t *testing.T) {
 	m := graceSim(t)
 	m.hold = true
 	m.set(0, s0+2*hourMS)
-	m.set(0, s0+2*hourMS+60000)
-	if !m.res.Write || m.res.Jump != nil {
-		t.Fatalf("second move: %+v", m.res)
+	m.f.wall.Store(s0 + 4*hourMS)
+	if _, err := m.c.Check(); err != ErrPending {
+		t.Fatalf("while the move waits: %v", err)
 	}
-	if got := mustNow(t, m.c); got != s0 {
+	m.c.Committed()
+	m.hold = false
+	r := m.set(0, s0+4*hourMS)
+	if r.Jump == nil || r.Jump.Size != 2*hourMS || r.State.S != s0+4*hourMS {
+		t.Fatalf("Check after Committed: %+v", r)
+	}
+}
+
+// A Snapshot while a move waits holds the S of the move. The next Committed
+// gives that S to Now.
+func TestTU30_SnapshotWhileMoveWaitsThenCommitted(t *testing.T) {
+	m := graceSim(t)
+	m.hold = true
+	m.set(0, s0+2*hourMS)
+	m.f.boot.Add(int64(minute))
+	snap, err := m.c.Snapshot()
+	if err != nil || snap.S != s0+2*hourMS+60000 {
+		t.Fatalf("snapshot %+v, %v", snap, err)
+	}
+	if got := mustNow(t, m.c); got != s0+60000 {
 		t.Fatalf("Now %d before Committed", got)
 	}
-	if !m.c.Committed() {
-		t.Fatal("Committed lost the read of the jump")
-	}
-	if got := mustNow(t, m.c); got != s0+2*hourMS+60000 {
-		t.Fatalf("Now %d after Committed", got)
-	}
-
-	// A small jump, then a small move: W stays under 10 min.
-	k := graceSim(t)
-	k.set(0, s0+59*60000)
-	k.hold = true
-	k.set(0, s0+61*60000)
-	k.set(0, s0+62*60000)
-	if !k.res.Write || k.res.Jump != nil {
-		t.Fatalf("small move: %+v", k.res)
-	}
-	if got := mustNow(t, k.c); got != s0+59*60000 {
-		t.Fatalf("Now %d sees a move that waits", got)
-	}
-	if !k.c.Committed() {
-		t.Fatal("Committed lost the read of the small jump")
-	}
-	if got := mustNow(t, k.c); got != s0+62*60000 {
-		t.Fatalf("Now %d after Committed", got)
+	m.c.Committed()
+	if got := mustNow(t, m.c); got != snap.S {
+		t.Fatalf("Now %d after Committed, want %d", got, snap.S)
 	}
 }
 
@@ -593,7 +669,7 @@ func TestTU30_NowAllocatesNothing(t *testing.T) {
 }
 
 // A Check that needs a new jump id above 9223372036854 gives ErrState and
-// changes nothing. The state still encodes.
+// changes nothing, also lastBoot. The state still encodes.
 func TestTU30_NoRoomForJumpID(t *testing.T) {
 	for _, known := range []bool{false, true} {
 		st := stored(s0, goodID, time.Hour)
@@ -630,6 +706,28 @@ func TestTU30_NoRoomForJumpID(t *testing.T) {
 		f.wall.Store(s0 + 30*60000)
 		if r, err := c.Check(); err != nil || r.State.GraceSum != 30*60000 {
 			t.Fatalf("known %v: small move %+v, %v", known, r, err)
+		}
+		// The refusal does not change lastBoot. At 6 h of boot clock, the
+		// catch-up counts 10 min of boot clock time since the start, not 9.
+		st5 := stored(s0, goodID, 5*time.Hour+50*minute)
+		in5 := StartInput{Stored: st5}
+		if known {
+			in5.KnownJumpID = boundMS
+		} else {
+			st5.Jump.ID = boundMS
+		}
+		f5 := newFake(s0, 5*time.Hour+50*minute, goodID)
+		c5, _ := mustStart(t, f5, in5)
+		f5.boot.Add(int64(minute))
+		f5.wall.Store(s0 + 2*hourMS)
+		if _, err := c5.Check(); err != ErrState {
+			t.Fatalf("known %v: refusal %v", known, err)
+		}
+		f5.boot.Add(int64(9 * minute))
+		f5.wall.Store(s0 + 3*dayMS)
+		r5, err := c5.Check()
+		if err != nil || r5.State.CatchUp != st5.CatchUp+40*60000 {
+			t.Fatalf("known %v: catch-up %+v, %v", known, r5.State, err)
 		}
 	}
 }

@@ -21,9 +21,9 @@ const (
 	// catchUpRate is the most that the catch-up adds for each unit of boot
 	// clock time. S then moves at most 5 times as fast as the boot clock.
 	catchUpRate = 4
-	// writeMinMS is the most that grace and catch-up moves may add up to
+	// writeMaxMS is the most that grace and catch-up moves may add up to
 	// since the last key commit. More needs a write.
-	writeMinMS int64 = 600000
+	writeMaxMS int64 = 600000
 )
 
 // Fixed texts of the log lines (ADR-043 decision 16). Each line has level
@@ -43,7 +43,7 @@ const (
 )
 
 // JumpResult is a forward jump of S of more than 1 h that a start or a check
-// made. A grace jump is the grace sum U plus the move. The State of the same
+// made. The size of a grace jump is the grace sum U plus the move. The State of the same
 // Result holds it as its last forward jump. The store writes the jump and the
 // State in one transaction.
 type JumpResult struct {
@@ -56,22 +56,22 @@ type JumpResult struct {
 type Result struct {
 	// State is at the boot clock of the call. Its rowid floor is the value
 	// of the start. The writer sets the floor before it writes the state.
-	// Its S is the newest S, also a held one. It sets no read mark. The
-	// writer must not give it to rows: rows take S from Now.
+	// Its S is the newest S, also a held one. A read of this S sets no read
+	// mark. The writer must not give it to rows: rows take S from Now.
 	State State
 	Jump  *JumpResult // nil when the call made no jump
 	// Write is true when the writer must write the key. At a start, it is
 	// always true. At a check, it is true for a jump. It is also true when
-	// the move takes the moves since the last key commit over 10 min. It
-	// is also true for a move while an older move waits for its write.
+	// the move takes the moves since the last key commit over 10 min.
 	// Readers get such a move only after the writer calls Committed.
 	Write bool
 	// Read is set only at a check that gives a jump. It is true when a Now
 	// marked a read since the Check of the last jump. It is also true for a
 	// Now that was in flight at that Check. Before the first jump, it means
-	// since Start. It can show more reads than there were. A read near a
-	// clear can be in two reports. It is never in none. A merge of two jumps
-	// is safe only when Read and Committed of the later jump are both false.
+	// since Start. It can show more reads than there were. A read near the
+	// swap of the mark can be in two reports. It is never in none. A merge of
+	// two jumps is safe only when Read and Committed of the later jump are
+	// both false.
 	Read bool
 }
 
@@ -107,11 +107,11 @@ type Clock struct {
 	src  Source
 	base atomic.Pointer[base]
 	// read is the read mark. Now sets it before it loads the base. Check
-	// clears it at a jump, and keeps it when a Now is active. Committed
-	// only reads it.
+	// swaps it to false at a jump, and sets it again when a Now is active.
+	// Committed only reads it.
 	read atomic.Bool
-	// active is the count of Now calls between their mark and the end of
-	// their load.
+	// active counts the Now calls from before their mark to after their
+	// load.
 	active atomic.Int64
 	// The fields below are for the check goroutine only.
 	st     State // the state of the start. Check keeps the jump in it.
@@ -119,11 +119,11 @@ type Clock struct {
 	log    *slog.Logger
 	// The boot clock of the last Check, or of the start.
 	lastBoot time.Duration
-	// The wall time of the last Check. The first Check has 0, and a wall
-	// time is never below 0, so it gives no step back.
+	// The wall time of the last Check. At the first Check, lastWall is 0, and
+	// a wall time is never below 0, so it gives no step back.
 	lastWall int64
 	// pending is the newest base when a move waits for its key write. Now
-	// does not see it. Check and Snapshot work from it.
+	// does not see it. Snapshot works from it, and Check refuses.
 	pending     *base
 	pendingJump bool // pending holds a jump
 	// w is W: the moves of S by the grace and the catch-up since the last
@@ -235,7 +235,10 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 // another call has returned never gets a lower S. This holds while the boot
 // clock does not go down.
 func (c *Clock) Now() (int64, error) {
+	// Add before the mark. Then a Check that swaps the mark away before
+	// this Now marks still sees this Now in active.
 	c.active.Add(1)
+	// The decrement must run after the load, so it is deferred.
 	defer c.active.Add(-1)
 	c.read.Store(true)
 	bc, err := c.bootClock()
@@ -253,21 +256,23 @@ func (c *Clock) cur() *base {
 	return c.base.Load()
 }
 
-// Committed tells the clock that the writer committed a sensor_time key that
-// it got from a Check or a Snapshot. It publishes the pending base, if any,
-// and sets W to 0. It never clears the read mark. For a base that holds a
-// jump, it returns true when a Now marked since the Check of this jump. For
-// all other bases, it returns false. A read near the publish can be in this
-// value and in the Read of the next jump. It is never in none. Both values
-// can show more reads than there were. A merge of two jumps is safe only when
-// Read and Committed of the later jump are both false. It is for the check
-// goroutine only.
+// Committed publishes the base of the last Check, if a move waits, and sets W
+// to 0. The writer calls it after the key of that Check commits, or after a
+// later Snapshot key commits. It calls no Check between them. Committed
+// never changes the read mark. For a base that holds a jump, it returns true
+// when a Now marked since the Check of this jump. For all other bases, it
+// returns false. A read near the publish can be in this value and in the Read
+// of the next jump. It is never in none. Both values can show more reads than
+// there were. A merge of two jumps is safe only when Read and Committed of the
+// later jump are both false. It is for the check goroutine only.
 func (c *Clock) Committed() bool {
 	c.w = 0
 	p := c.pending
 	if p == nil {
 		return false
 	}
+	// Store before the mark load. A Now that loads the old base has
+	// marked before this load, so the load sees its mark.
 	c.base.Store(p)
 	jump := c.pendingJump
 	c.pending, c.pendingJump = nil, false
@@ -307,8 +312,12 @@ func (c *Clock) snapshot(s int64, bc time.Duration) State {
 }
 
 // Check runs the grace and the catch-up (ADR-043 decisions 6 and 7). It is
-// for the check goroutine only. It reads the wall clock one time. It works
-// from the newest base, also when a move waits for its key write.
+// for the check goroutine only. It reads the wall clock one time.
+//
+// While a move waits for its key write, Check gives ErrPending at once. It
+// reads no clock and changes nothing. The writer calls Committed after the key
+// of the last Check commits, or after a later Snapshot key commits. It calls
+// no Check between them.
 //
 // The grace has two cases: the boot clock is under 6 h, or S is before the
 // token epoch. Then S becomes the larger of S and the wall clock. Let m be
@@ -321,11 +330,11 @@ func (c *Clock) snapshot(s int64, bc time.Duration) State {
 // less the catch-up used. The state adds the gain to its catch-up used.
 // The gain is no jump, and it adds nothing to U.
 //
-// A jump needs a key write. So does a move that takes W over 10 min. W is
-// the grace and catch-up moves since the last key commit. So does a move
-// while an older move waits for its write. Then Write is true, and the move
-// waits for Committed. A move that needs no write is published at once. Read
-// is set only for a jump.
+// A jump needs a key write. So does a move that takes W over 10 min. Then
+// Write is true, and the move waits for Committed. A move that needs no write
+// is published at once. W is the grace and catch-up moves since the last key
+// commit. One Check can gain up to 24 h. The hold until the key write covers
+// it. Read is set only for a jump.
 //
 // A jump needs a new jump id. When no id up to 9223372036854 is left, Check
 // gives ErrState. It then changes nothing and writes no line.
@@ -334,7 +343,10 @@ func (c *Clock) snapshot(s int64, bc time.Duration) State {
 // wall time before that of the last Check. One is for |wall - S| over 1 h
 // after the move. One is for the Check where the catch-up used reaches 24 h.
 func (c *Clock) Check() (Result, error) {
-	b := c.cur()
+	if c.pending != nil {
+		return Result{}, ErrPending
+	}
+	b := c.base.Load()
 	bc, err := c.bootClock()
 	if err != nil {
 		return Result{}, err
@@ -377,8 +389,10 @@ func (c *Clock) Check() (Result, error) {
 		write = c.move(&base{s: s, boot: bc}, m, jump != nil)
 	}
 	if jump != nil {
+		// Swap before the active load. A Now that adds after the load has
+		// marked after the swap, so its mark stays.
 		read = c.read.Swap(false)
-		// A Now that marked before the clear can still load a later base.
+		// A Now that marked before the swap can still load a later base.
 		// The kept mark shows it again at the next jump.
 		if c.active.Load() > 0 {
 			c.read.Store(true)
@@ -400,16 +414,16 @@ func (c *Clock) Check() (Result, error) {
 }
 
 // move adds the move of m ms to W and sets the new base nb. It reports if the
-// move needs a key write. That is so for a jump and for W over 10 min. It is
-// also so while an older move waits: else a later publish would put S back.
-// A move that needs a write is the pending base. Else it is published at once.
+// move needs a key write. That is so for a jump and for W over 10 min. A move
+// that needs a write is the pending base. Else it is published at once. Check
+// calls move only when no move waits.
 func (c *Clock) move(nb *base, m int64, jump bool) bool {
 	c.w += m
-	if !jump && c.w <= writeMinMS && c.pending == nil {
+	if !jump && c.w <= writeMaxMS {
 		c.base.Store(nb)
 		return false
 	}
 	c.pending = nb
-	c.pendingJump = c.pendingJump || jump
+	c.pendingJump = jump
 	return true
 }
