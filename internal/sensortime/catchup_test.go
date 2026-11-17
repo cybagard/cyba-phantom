@@ -343,7 +343,8 @@ func TestTU30_GraceHasNoCatchUp(t *testing.T) {
 	}
 }
 
-// S moves only at a Check: after 10 min with no Check, Now is S plus 10 min.
+// The catch-up moves S only at a Check. After 10 min with no Check, Now is
+// S plus 10 min of boot clock and no gain.
 func TestTU30_CatchUpMovesOnlyAtCheck(t *testing.T) {
 	m := catchClock(t, 2*dayMS, 0)
 	calls := m.f.wallCalls.Load()
@@ -478,9 +479,10 @@ func pauseSeq(t *testing.T, pause int64) {
 	m.wantLines(lc{differs: 480, budget: 1})
 }
 
-// T-U-30, bound table row "VM pause of up to 3 d": no reboot. The wall moves
-// +3 d at 7 h. After 6 h of checks S = W0 + 7 h + 6 h + 24 h. The offset is
-// wall - S = 3 d - 24 h = 48 h, and it stays so.
+// T-U-30, bound table row "VM pause of 20 d, no reboot". This test uses the
+// same row with a pause of 3 d. The wall moves +3 d at 7 h. After 6 h of
+// checks S = W0 + 7 h + 6 h + 24 h. The offset is wall - S = 3 d - 24 h =
+// 48 h, and it stays so.
 func TestTU30_BoundVMPause3Days(t *testing.T) { pauseSeq(t, 3*dayMS) }
 
 // T-U-30, bound table row "VM pause of 20 d, no reboot": as the 3 d pause.
@@ -549,9 +551,10 @@ func TestTU30_BoundRTCLessSyncAfter6h(t *testing.T) {
 }
 
 // T-U-30, bound table row "first install at 1970, time sync before 6 h".
-// Here the sync is at 7 h. S = 0 and the wall is 0. The sync sets the wall
-// to W0. S is 7 h, before the epoch, so the grace applies. The grace jump
-// is W0 - 7 h and the catch-up is 0.
+// Here the sync is at 7 h, and it still belongs to this row. S is before
+// the token epoch, so the grace applies after 6 h. S = 0 and the wall is 0.
+// The sync sets the wall to W0. S is 7 h then. The grace jump is W0 - 7 h
+// and the catch-up is 0.
 func TestTU30_BoundFirstInstallAt1970(t *testing.T) {
 	m := newSim(t, 0, 0, goodID, nil)
 	m.wantS(0)

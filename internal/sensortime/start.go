@@ -185,9 +185,9 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 }
 
 // Now gives S. It is one boot clock read and one load, in that order. It
-// reads no wall clock and makes no catch-up: S moves only at a Check. On
-// Linux and darwin, the boot clock of the source is not the Go monotonic
-// clock. That clock stops in a host suspend. A boot
+// reads no wall clock and makes no catch-up. The grace and the catch-up move
+// S only at a Check. On Linux and darwin, the boot clock of the source is
+// not the Go monotonic clock. That clock stops in a host suspend. A boot
 // clock error, or a boot clock below 0, is returned with no S. A call that
 // starts after another call has returned never gets a lower S. This holds
 // while the boot clock does not go down.
