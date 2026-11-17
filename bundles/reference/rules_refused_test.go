@@ -153,9 +153,6 @@ func cases() []row {
 	b64 := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwx"))
 	nothing := put(pagePath, "<p>"+marker+"</p>")
 	longPath := func(s string) string { return strings.ReplaceAll(s, "/ref/cb", "/abcdefgh/ijklmnop/qrst") }
-	badHost := func(name string) row {
-		return row{"vhost " + name, put("vhosts/"+name+"/"+routesName, `{"routes":[]}`), at("vhosts/"+name, "vhost-name")}
-	}
 	rows := []row{
 		// Boundaries that pass.
 		{"valid tree", nil, nil},
@@ -176,10 +173,7 @@ func cases() []row {
 		{"markup with no script", both(pageWith(`<a href="/ref/cb"><img src="/logo.svg" alt="Our home"></a>`),
 			serve("/logo.svg", "logo.svg", "image/svg+xml", `<svg><title>The shop logo</title></svg>`)), nil},
 
-		// Vhost names.
-		badHost("ref-a.phantom.test"), badHost("shop.example.com"), badHost("Shop.phantom-ref.internal"),
-		badHost("a_b.phantom-ref.internal"), badHost("-a.phantom-ref.internal"), badHost(run(64, "a") + ".internal"),
-		{"vhost name as a file", put("vhosts/a.phantom-ref.internal", "x"), at("vhosts/a.phantom-ref.internal", "vhost-name")},
+		// Vhost names. TestTS36VhostNameForm has the rows of the name form.
 		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="),
 			at(pagePath, "base64", "base64(rendered)", "base64(rendered, empty)")},
 		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "trap"}}</p>`), at(pagePath, "marker")},
@@ -444,9 +438,6 @@ func cases() []row {
 			rows = append(rows, row{"asset " + label, put(svgPath, f.text), at(svgPath, f.rules...)})
 		}
 	}
-	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`),
-		at("vhosts/"+longHost(52), "vhost-name")})
-	rows = append(rows, badHost(longHost(53)), badHost("a-.phantom-ref.internal"))
 	rows = append(rows, extraRows()...)
 	rows = append(rows, formRows()...)
 	rows = append(rows, positionRows()...)
@@ -1039,6 +1030,52 @@ func TestTS36RefusedInputs(t *testing.T) {
 	for _, c := range textRows() {
 		unique(c)
 		check(c, true)
+	}
+}
+
+// Each row of the name form has a list of [vhosts] that holds its name. So
+// the list cannot refuse the name: only the form check can. A row that has no
+// finding is a name of the form, and it passes.
+func TestTS36VhostNameForm(t *testing.T) {
+	base, err := os.ReadFile(listFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := func(n int) string { return strings.Repeat("a", n) }
+	for _, c := range []struct {
+		name, host string
+		file, bad  bool
+	}{
+		{"253 byte vhost name", longHost(52), false, false},
+		{"254 byte vhost name", longHost(53), false, true},
+		{"label of 63 bytes", label(63) + ".internal", false, false},
+		{"label of 64 bytes", label(64) + ".internal", false, true},
+		{"name that is not below internal", "ref-a.phantom.test", false, true},
+		{"name below example.com", "shop.example.com", false, true},
+		{"name with a capital", "Shop.phantom-ref.internal", false, true},
+		{"name with an underscore", "a_b.phantom-ref.internal", false, true},
+		{"label that starts with a hyphen", "-a.phantom-ref.internal", false, true},
+		{"label that ends with a hyphen", "a-.phantom-ref.internal", false, true},
+		{"vhost name as a file", "a.phantom-ref.internal", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			useLists(t, adding(map[string][]string{"vhosts": {c.host}})(slices.Clone(base)))
+			m := baseTree()
+			if c.file {
+				put("vhosts/"+c.host, "x")(m)
+			} else {
+				put("vhosts/"+c.host+"/"+routesName, `{"routes":[]}`)(m)
+			}
+			var want []string
+			if c.bad {
+				want = at("vhosts/"+c.host, "vhost-name")
+			}
+			got := checkTree(m)
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("findings %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -1925,6 +1962,11 @@ func TestTS36GrammarRefusedInputs(t *testing.T) {
 			}
 		})
 	}
+	for n := range exactTextRows {
+		if !seen[n] {
+			t.Errorf("exactTextRows has %q, and no row has this name", n)
+		}
+	}
 }
 
 // Each of the 11 outputs of the plausible tree passes with no finding.
@@ -1969,13 +2011,13 @@ func adding(adds map[string][]string) listEdit {
 			slices.Sort(sec)
 			out, sec = append(out, sec...), nil
 		}
-		for _, ln := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
-			if n, ok := strings.CutPrefix(ln, "["); ok && strings.HasSuffix(n, "]") {
+		for _, ln := range parseLists(b) {
+			if ln.head {
 				flush()
-				cur = strings.TrimSuffix(n, "]")
-				out = append(out, ln)
+				cur = ln.section
+				out = append(out, ln.text)
 			} else {
-				sec = append(sec, ln)
+				sec = append(sec, ln.text)
 			}
 		}
 		flush()
@@ -2342,6 +2384,15 @@ func readingRows() []row {
 			"<div hidden><p>"+marker+"</p></div>\n<p>Our home</p>\n"), assetPath, "marker"),
 		gramRow("marker only in an element with aria-hidden", serve("/about", "about.txt", htmlType,
 			`<p aria-hidden="true">`+marker+"</p>\n<p>Our home</p>\n"), assetPath, "marker grammar-attr"),
+		// A style that hides html or body hides the implied element: all text.
+		gramRow("marker in a fragment whose style hides the body", put(pagePath,
+			`<style>body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "marker"),
+		gramRow("marker in a fragment whose style hides the html element", put(pagePath,
+			`<style>html{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "marker"),
+		gramRow("marker in a fragment whose style is after the paragraph", put(pagePath,
+			`<p>`+marker+` {{index .Trap "trap"}}</p><style>body{display:none}</style>`), pagePath, "marker"),
+		gramRow("marker in an asset whose style hides the body", serve("/about", "about.txt", htmlType,
+			"<style>body{display:none}</style><p>"+marker+"</p>\n"), assetPath, "marker"),
 		gramRow("marker as a part of a word", serve("/about", "about.txt", htmlType, "<p>"+marker+"-x</p>\n"), assetPath,
 			"marker grammar-prose(text)"),
 		// Prose: each unit is a sequence of entries. An action word is only in

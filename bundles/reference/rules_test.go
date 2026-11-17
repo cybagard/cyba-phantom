@@ -1990,7 +1990,8 @@ var hiddenText = set("head title style script template textarea")
 // output. The first three values hold the units of three readings. They are
 // all text, the text visible with scripting on, and the text visible with
 // scripting off. A block element ends a unit. A hidden element gives no text
-// and no break to a visible reading. The last value is the strip reading, all
+// and no break to a visible reading. A style that hides html or body hides all
+// text of an HTML output in both. The last value is the strip reading, all
 // text with no break. The text of style and script elements is in no reading,
 // also not in the strip reading.
 func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]string, strip string) {
@@ -2003,6 +2004,9 @@ func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]s
 			}
 		}
 	}
+	// A style that hides html or body hides the implied element too, so the
+	// whole output is hidden in the visible readings.
+	startHid := kind == "html" && (hide["html"] || hide["body"])
 	var stack []readFrame
 	var cur [3]strings.Builder
 	var out strings.Builder
@@ -2045,10 +2049,10 @@ func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]s
 			}
 			out.WriteString(raws[i])
 			cur[0].WriteString(raws[i])
-			if !top.hidOn {
+			if !top.hidOn && !startHid {
 				cur[1].WriteString(raws[i])
 			}
-			if !top.hidOff {
+			if !top.hidOff && !startHid {
 				cur[2].WriteString(raws[i])
 			}
 		}
