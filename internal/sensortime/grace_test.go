@@ -500,7 +500,7 @@ func TestTU30_NoNowNoRead(t *testing.T) {
 	}
 }
 
-// A jump of a small move: U is 59 min and the move is 2 min, so W is 2 min.
+// A jump of a small move: U is 59 min and the move is 2 min. So W is 2 min.
 // Only the jump needs the write. Now keeps the old S until Committed.
 func TestTU30_JumpOfSmallMoveWaitsForCommit(t *testing.T) {
 	m := graceSim(t)
