@@ -84,7 +84,7 @@ func wallMS(src Source) int64 { return clampMS(src.Wall().UnixMilli()) }
 // the stored value. Start does not read the wall clock then. Else S is the
 // larger of the stored S and the wall clock. These cases refuse the start.
 // A boot id error. A boot clock error. A bad stored state. A known jump id
-// out of range.
+// out of range. A new jump id above 9223372036854.
 func Start(src Source, in StartInput) (*Clock, Result, error) {
 	id, err := src.BootID()
 	if err != nil {
@@ -148,30 +148,41 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 	return &JumpResult{ID: c.lastID, Size: size, Kind: kind}
 }
 
-// Now gives S. It is one load and one boot clock read. It reads no wall
-// clock. On Linux and darwin, the boot clock of the source is not the Go
-// monotonic clock. That clock stops in a host suspend. A boot clock error is
-// returned, with no S. Two reads of one goroutine never go down while the
+// Now gives S. It is one boot clock read and one load, in that order. It
+// reads no wall clock. On Linux and darwin, the boot clock of the source is
+// not the Go monotonic clock. That clock stops in a host suspend. A boot
+// clock error, or a boot clock below 0, is returned with no S. A call that
+// starts after another call has returned never gets a lower S, while the
 // boot clock does not go down.
 func (c *Clock) Now() (int64, error) {
-	b := c.base.Load()
+	bc, err := c.bootClock()
+	if err != nil {
+		return 0, err
+	}
+	return c.base.Load().at(bc), nil
+}
+
+// bootClock reads the boot clock of the source. A value below 0 is ErrState.
+func (c *Clock) bootClock() (time.Duration, error) {
 	bc, err := c.src.BootClock()
 	if err != nil {
 		return 0, err
 	}
-	return b.at(bc), nil
+	if bc < 0 {
+		return 0, ErrState
+	}
+	return bc, nil
 }
 
 // Snapshot gives the state for the hourly write and the stop write. S and
 // the boot clock are of the same read. The rowid floor is the value of the
 // start: the writer sets it before the write. It is for the check goroutine.
 func (c *Clock) Snapshot() (State, error) {
-	b := c.base.Load()
-	bc, err := c.src.BootClock()
+	bc, err := c.bootClock()
 	if err != nil {
 		return State{}, err
 	}
-	return c.snapshot(b.at(bc), bc), nil
+	return c.snapshot(c.base.Load().at(bc), bc), nil
 }
 
 func (c *Clock) snapshot(s int64, bc time.Duration) State {
@@ -186,7 +197,7 @@ func (c *Clock) snapshot(s int64, bc time.Duration) State {
 // of more than 1 h is a jump of kind grace. In other cases Check keeps S.
 func (c *Clock) Check() (Result, error) {
 	b := c.base.Load()
-	bc, err := c.src.BootClock()
+	bc, err := c.bootClock()
 	if err != nil {
 		return Result{}, err
 	}

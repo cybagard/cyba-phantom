@@ -2,6 +2,7 @@ package sensortime
 
 import (
 	"errors"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -631,6 +632,24 @@ func TestTU30_StartRefusals(t *testing.T) {
 	if _, _, err := Start(f.source(), StartInput{Stored: bad}); err != ErrState {
 		t.Errorf("bad stored state: %v", err)
 	}
+	// Only the check of the stored state refuses these. A start would
+	// otherwise clamp S or use the wall clock, and give a valid state.
+	negBoot := stored(s0, goodID, 0)
+	negBoot.BootClock = -time.Second
+	aboveBound := stored(maxMS+1, goodID, 0)
+	belowZero := stored(-5, goodID, 0)
+	aboveBound.Jump, belowZero.Jump = Jump{}, Jump{}
+	for name, st := range map[string]*State{
+		"negative boot clock": negBoot,
+		"S above the bound":   aboveBound,
+		"S below 0":           belowZero,
+	} {
+		f := newFake(s0, time.Hour, goodID)
+		if c, _, err := Start(f.source(), StartInput{Stored: st}); c != nil ||
+			!errors.Is(err, ErrState) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
 }
 
 // A source boot id that is not in lower-case UUID form gives ErrBootID. A
@@ -834,12 +853,22 @@ func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	f, c := graceClock(t, s0, time.Hour)
 	f.boot.Store(int64(2 * time.Hour))
 	f.wall.Store(s0 + 10*hourMS)
-	if r, err := c.Check(); err != nil || r.Jump == nil {
+	r, err := c.Check()
+	if err != nil || r.Jump == nil || r.Jump.Size != 9*hourMS {
 		t.Fatalf("check: %+v, %v", r, err)
 	}
 	f.boot.Store(int64(3 * time.Hour))
 	if got := mustNow(t, c); got != s0+11*hourMS {
 		t.Fatalf("S %d, want %d", got, s0+11*hourMS)
+	}
+	// The boot clock is 30 min past the base. S is S + 30 min and the wall is
+	// S + 40 min: a move of 10 min, so no jump.
+	f, c = graceClock(t, s0, time.Hour)
+	f.boot.Store(int64(time.Hour + 30*time.Minute))
+	f.wall.Store(s0 + 40*60000)
+	r, err = c.Check()
+	if err != nil || r.Jump != nil || r.State.S != s0+40*60000 {
+		t.Fatalf("small move: %+v, %v", r, err)
 	}
 }
 
@@ -878,16 +907,27 @@ func TestTU30_SnapshotAtCurrentBootClock(t *testing.T) {
 }
 
 // 8 readers see a non-decreasing S while one goroutine makes grace jumps.
+// Each reader reads once and signals before the first check. The checks go
+// on until each reader has read 100 times while they run.
 func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
+	const readers, minReads, minChecks = 8, 100, 2000
 	f, c := graceClock(t, s0, time.Minute)
 	var stop atomic.Bool
 	var wg sync.WaitGroup
-	errc := make(chan string, 8)
-	for i := 0; i < 8; i++ {
+	var reads [readers]atomic.Int64
+	ready := make(chan struct{}, readers)
+	errc := make(chan string, readers)
+	for i := 0; i < readers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var last int64
+			last, err := c.Now()
+			if err != nil {
+				errc <- "reader error"
+				ready <- struct{}{}
+				return
+			}
+			ready <- struct{}{}
 			for !stop.Load() {
 				s, err := c.Now()
 				if err != nil || s < last {
@@ -895,20 +935,39 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 					return
 				}
 				last = s
+				reads[i].Add(1)
+				runtime.Gosched()
 			}
 		}()
 	}
-	jumps := 0
-	for i := 1; i <= 2000; i++ {
+	for i := 0; i < readers; i++ {
+		<-ready
+	}
+	enough := func() bool {
+		for i := range reads {
+			if reads[i].Load() < minReads {
+				return false
+			}
+		}
+		return true
+	}
+	jumps, checks := 0, 0
+	for i := 1; i <= minChecks || !enough(); i++ {
 		f.boot.Add(int64(time.Millisecond))
 		f.wall.Store(s0 + int64(i)*2*hourMS)
 		r, err := c.Check()
 		if err != nil {
 			t.Fatal(err)
 		}
+		checks++
 		if r.Jump != nil {
 			jumps++
 		}
+		runtime.Gosched()
+	}
+	var got [readers]int64
+	for i := range reads {
+		got[i] = reads[i].Load()
 	}
 	stop.Store(true)
 	wg.Wait()
@@ -916,7 +975,80 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 	for e := range errc {
 		t.Error(e)
 	}
-	if jumps != 2000 {
-		t.Fatalf("%d grace jumps, want 2000", jumps)
+	for i, n := range got {
+		if n < minReads {
+			t.Errorf("reader %d made %d reads in the check phase", i, n)
+		}
+	}
+	if jumps != checks {
+		t.Fatalf("%d grace jumps in %d checks, want one in each", jumps, checks)
+	}
+}
+
+// A reader that read the boot clock before a grace move must not get a lower
+// S than a reader that started after the move. The first reader stops after
+// its boot clock read. The check moves S 40 d. Then a second reader calls Now.
+func TestTU30_LaterNowNeverLowerThanEarlierReturn(t *testing.T) {
+	f := newFake(s0, time.Hour, goodID)
+	src := f.source()
+	reached, release := make(chan struct{}), make(chan struct{})
+	var hold atomic.Bool
+	inner := src.BootClock
+	src.BootClock = func() (time.Duration, error) {
+		bc, err := inner()
+		if hold.CompareAndSwap(true, false) {
+			reached <- struct{}{}
+			<-release
+		}
+		return bc, err
+	}
+	c, _, err := Start(src, StartInput{Stored: stored(s0, goodID, time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold.Store(true)
+	a := make(chan int64, 1)
+	go func() {
+		s, err := c.Now()
+		if err != nil {
+			s = -1
+		}
+		a <- s
+	}()
+	<-reached
+	f.wall.Store(s0 + 40*dayMS)
+	if r, err := c.Check(); err != nil || r.Jump == nil {
+		t.Fatalf("check: %+v, %v", r, err)
+	}
+	sb := mustNow(t, c)
+	close(release)
+	if sa := <-a; sa < sb || sb < s0+40*dayMS {
+		t.Fatalf("first reader S %d, second reader S %d", sa, sb)
+	}
+}
+
+// A boot clock below 0, after a valid start, gives ErrState with no S and no
+// change of state.
+func TestTU30_NegativeBootClockAfterStart(t *testing.T) {
+	f, c := graceClock(t, s0, time.Hour)
+	f.wall.Store(s0 + 10*hourMS)
+	f.boot.Store(int64(-time.Nanosecond))
+	if s, err := c.Now(); s != 0 || !errors.Is(err, ErrState) {
+		t.Errorf("Now: %d, %v", s, err)
+	}
+	if st, err := c.Snapshot(); st != (State{}) || !errors.Is(err, ErrState) {
+		t.Errorf("Snapshot: %+v, %v", st, err)
+	}
+	if r, err := c.Check(); r.Jump != nil || r.State != (State{}) ||
+		!errors.Is(err, ErrState) {
+		t.Errorf("Check: %+v, %v", r, err)
+	}
+	f.boot.Store(int64(time.Hour))
+	if got := mustNow(t, c); got != s0 {
+		t.Errorf("S %d after the refused calls, want %d", got, s0)
+	}
+	f.boot.Store(int64(math.MinInt64))
+	if s, err := c.Now(); s != 0 || !errors.Is(err, ErrState) {
+		t.Errorf("Now at the minimum: %d, %v", s, err)
 	}
 }
