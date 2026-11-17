@@ -2004,8 +2004,8 @@ func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]s
 			}
 		}
 	}
-	// A style that hides html or body hides the implied element too, so the
-	// whole output is hidden in the visible readings.
+	// A style that hides html or body hides an implied element too. Then the
+	// visible readings have no text.
 	startHid := kind == "html" && (hide["html"] || hide["body"])
 	var stack []readFrame
 	var cur [3]strings.Builder
