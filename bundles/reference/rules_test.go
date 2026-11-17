@@ -812,7 +812,8 @@ func openQuote(s string) int {
 
 // The tokens of the rendered page. A token has the 22 letters of tokenBase and
 // 4 letters for the number of the action. Its letters are a-z, a part of the
-// token alphabet of the engine (a-z and 2-7). It has the same length.
+// token alphabet of the engine (a-z and 2-7). A token has the length of a
+// token of the engine.
 const (
 	tokenBase = "xqzjkvwxqzjkvwxqzjkvwx"
 	tokenLen  = len(tokenBase) + 4
