@@ -165,6 +165,41 @@ func (m *sim) wantLines(want lc) {
 	}
 }
 
+// wantLine checks the attributes of the n-th line (from 0) with the text msg.
+// It checks the set of keys and each value. A value is a string or an integer.
+func (m *sim) wantLine(msg string, n int, want map[string]any) {
+	m.t.Helper()
+	i := 0
+	for _, l := range m.rec.lines {
+		if l.msg != msg {
+			continue
+		}
+		if i++; i-1 != n {
+			continue
+		}
+		if len(l.attrs) != len(want) {
+			m.t.Fatalf("%q line %d: attributes %v, want %v", msg, n, l.attrs, want)
+		}
+		for k, w := range want {
+			v, ok := l.attrs[k]
+			switch w := w.(type) {
+			case string:
+				if !ok || v.Kind() != slog.KindString || v.String() != w {
+					m.t.Fatalf("%q line %d: %s is %v, want %q", msg, n, k, v, w)
+				}
+			case int64:
+				if !ok || v.Kind() != slog.KindInt64 || v.Int64() != w {
+					m.t.Fatalf("%q line %d: %s is %v, want %d", msg, n, k, v, w)
+				}
+			default:
+				m.t.Fatalf("wantLine: value of %s has type %T", k, w)
+			}
+		}
+		return
+	}
+	m.t.Fatalf("no line %d with text %q", n, msg)
+}
+
 func (m *sim) wantS(s int64) {
 	m.t.Helper()
 	if got := mustNow(m.t, m.c); got != s || m.res.State.S != s {
@@ -673,6 +708,9 @@ func TestTU30_LogJumpStart(t *testing.T) {
 	if m.jumps[0].Kind != KindStart || m.jumps[0].Size != 2*hourMS {
 		t.Fatalf("jump %+v", m.jumps[0])
 	}
+	// The stored state has jump id 3, so the new id is 4.
+	m.wantLine(txtJump, 0, map[string]any{"kind": KindStart, "id": int64(4),
+		"size_ms": int64(2 * hourMS)})
 	// A move of 1 h is no jump and no line.
 	k := newSim(t, s0+hourMS, 3*time.Hour, otherID,
 		stored(s0, goodID, 10*time.Hour))
@@ -688,6 +726,8 @@ func TestTU30_LogJumpGrace(t *testing.T) {
 	if m.jumps[0].Kind != KindGrace || m.jumps[0].Size != 2*hourMS {
 		t.Fatalf("jump %+v", m.jumps[0])
 	}
+	m.wantLine(txtJump, 0, map[string]any{"kind": KindGrace, "id": int64(4),
+		"size_ms": int64(2 * hourMS)})
 	// A move of 1 h is no jump and no line.
 	m.set(0, s0+3*hourMS)
 	m.wantLines(lc{jump: 1})
@@ -712,6 +752,13 @@ func TestTU30_LogStepBack(t *testing.T) {
 	m.wantLines(lc{back: 2, differs: 2})
 	m.set(0, s0-hourMS-1)
 	m.wantLines(lc{back: 3, differs: 3})
+	// Each line has the size of the step and the state after the Check.
+	for i, off := range []int64{-hourMS - 1, -hourMS - 2, -hourMS - 1} {
+		m.wantLine(txtStepBack, i, map[string]any{"back_ms": int64(1)})
+		m.wantLine(txtDiffers, i, map[string]any{"offset_ms": off, "s_ms": int64(s0)})
+	}
+	m.set(0, s0-hourMS-500)
+	m.wantLine(txtStepBack, 3, map[string]any{"back_ms": int64(499)})
 
 	// The first Check with a wall far behind gives only a differs line.
 	k := catchClock(t, -5*hourMS, 0)
@@ -722,6 +769,7 @@ func TestTU30_LogStepBack(t *testing.T) {
 	j.set(0, s0+1000)
 	j.set(0, s0)
 	j.wantLines(lc{back: 1})
+	j.wantLine(txtStepBack, 0, map[string]any{"back_ms": int64(1000)})
 }
 
 // A Check with |wall - S| over 1 h, after its move, gives one line. At exactly
@@ -745,7 +793,17 @@ func TestTU30_LogWallDiffers(t *testing.T) {
 		if got := m.rec.counts(t); got != c.want {
 			t.Errorf("%s: lines %+v, want %+v", c.name, got, c.want)
 		}
+		if c.want.differs == 1 {
+			m.wantLine(txtDiffers, 0, map[string]any{"offset_ms": c.off,
+				"s_ms": int64(s0)})
+		}
 	}
+	// The line has the state after the move. The wall gains 1 min and S gains
+	// 5 min.
+	g := catchClock(t, 3*dayMS, 0)
+	g.tick(minute)
+	g.wantLine(txtDiffers, 0, map[string]any{"offset_ms": 3*dayMS - 4*60000,
+		"s_ms": int64(s0 + 5*60000)})
 	// The check tests S after the move. Here S was 1 h 30 min below the wall,
 	// and the catch-up moves it to 1 h below.
 	m := catchClock(t, 0, 0)
@@ -777,12 +835,7 @@ func TestTU30_LogBudgetExhausted(t *testing.T) {
 	}
 	m.wantLines(lc{differs: 8, budget: 1})
 	// The line has its fixed text and an integer.
-	for _, l := range m.rec.lines {
-		if l.msg == txtExhausted && (len(l.attrs) != 1 ||
-			l.attrs["used_ms"].Int64() != catchUpMaxMS) {
-			t.Fatalf("line %+v", l)
-		}
-	}
+	m.wantLine(txtExhausted, 0, map[string]any{"used_ms": int64(catchUpMaxMS)})
 
 	k := catchClock(t, 3*dayMS, catchUpMaxMS)
 	k.run(5, minute)
