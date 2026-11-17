@@ -173,13 +173,13 @@ func cases() []row {
 		{"markup with no script", both(pageWith(`<a href="/ref/cb"><img src="/logo.svg" alt="Our home"></a>`),
 			serve("/logo.svg", "logo.svg", "image/svg+xml", `<svg><title>The shop logo</title></svg>`)), nil},
 
-		// Vhost names. TestTS36VhostNameForm has the rows of the name form.
 		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="),
 			at(pagePath, "base64", "base64(rendered)", "base64(rendered, empty)")},
 		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "trap"}}</p>`), at(pagePath, "marker")},
 		// A page that does not render has no use of a trap.
 		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "trap"}}</p><!-- `+marker),
 			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
+		// Vhost names. TestTS36VhostNameForm has the rows of the name form.
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
 		{"shared first label", put("vhosts/shop.zeta.internal/"+routesName, `{"routes":[]}`),
 			at("vhosts/shop.zeta.internal", "vhost-label", "vhost-name")},
