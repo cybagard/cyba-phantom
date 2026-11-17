@@ -177,7 +177,7 @@ func cases() []row {
 		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="),
 			at(pagePath, "base64", "base64(rendered)", "base64(rendered, empty)")},
 		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		// A page that does not render has no place of an action, so no use of the trap.
+		// A page that does not render has no use of a trap.
 		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- `+marker),
 			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
@@ -440,8 +440,8 @@ func cases() []row {
 	return rows
 }
 
-// badLtTexts are the texts of the page rows that have a "<" that is not a tag,
-// a comment or "<!doctype html>". A text/html template gives "lt-text" for them.
+// badLtTexts are page row texts with a "<" that is not a tag, a comment or
+// "<!doctype html>". A text/html template gives "lt-text" for them.
 var badLtTexts = []string{
 	`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY c ":">]><svg xmlns="http://www.w3.org/2000/svg">` +
 		`<a href="https&c;//evil.example/x.png">x</a></svg>`,
@@ -807,10 +807,10 @@ func positionRows() []row {
 		posRow("start tag after a closing tag with no name", `</ <img src=">ACT">`, bad, "lt-text"),
 		posRow("style after a processing instruction", `<? <style>p{background:url(ACT)}</style>`, bad, "lt-text"),
 		posRow("element after a bogus declaration", `<!x <foo>`, "element(foo)", "lt-text"),
-		// With scripting on, the content of noscript is text. With scripting off,
-		// it is markup. An image gives two places for the action in the two
-		// modes. A title and a json-ld block give the same place in both, so only
-		// the source rule refuses these two.
+		// With scripting on, the content of noscript is text. With
+		// scripting off, it is markup. So an image has two places in the
+		// two modes. A title and a json-ld block have one place in both.
+		// Only the source rule refuses these two.
 		posRow("src in noscript", `<noscript><img src="ACT"></noscript>`, bad),
 		posRow("style in noscript", `<noscript><style>ACT</style></noscript>`, bad, "noscript-raw"),
 		posRow("title in noscript", `<noscript><title>ACT</title></noscript>`, "noscript-raw"),
@@ -818,7 +818,7 @@ func positionRows() []row {
 		// The parser makes a copy of the b element, with its attributes. The
 		// value then holds the token two times.
 		posRow("attribute that the parser copies", `<b title="ACT"><p>one</b>two</p>`, bad, "element(b)"),
-		// A browser with scripting on ends noscript at the end tag in the string.
+		// With scripting on, the end tag in the string ends noscript.
 		posRow("end tag of noscript in a json-ld string",
 			`<noscript>`+ld(`{"a":"</noscript><img src='","b":ACT,"c":"'>"}`)+`</noscript>`, bad, "lt-raw", "noscript-raw"),
 		posRow("style import after an end tag of noscript in a json-ld string",
@@ -829,7 +829,7 @@ func positionRows() []row {
 			bad, "comment-empty"),
 		posRow("empty comment with a dash before a title", `<!---><title>--><style>p{background:url(ACT)}</style></title>`,
 			bad, "comment-empty"),
-		// html/template removes the JS comment, so the action is not in the page.
+		// html/template removes the JS comment, so the page has no action.
 		posRow("comment start in the block", ld("{\"a\":1,\n<!-- ':ACT}\n\"b\":2}"), bad, "json-ld(comment)", "lt-raw"),
 		posRow("comment end in the block", ld("{\"a\":1,\n--> ':ACT}\n\"b\":2}"), bad, "json-ld(comment)"),
 

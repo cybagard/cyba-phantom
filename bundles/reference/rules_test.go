@@ -834,17 +834,22 @@ type action struct {
 	text    string // The trap text, with the token of the action.
 }
 
-// htmlPlaces gives the place of each trap action of a text/html template, in
-// the order of the text. It renders the template with html/template. Each
-// action has its own key "<id>#<n>", and its trap text has a token of its own.
-// It parses the output as a browser does, with scripting on and with scripting
-// off. A token has a class only at one tree place of point 8: element text,
-// the value of alt, title or aria-label, the content of a description meta,
-// the href of a nofollow link, a member value of the json-ld block, or the
-// comment that the comment action made. Each other place has no class. A
-// token that is not in the tree, that is there more than once, or that has two
-// places in the two modes, has no class either. It also gives the name of each
-// element of the two trees. The error is a template that does not render.
+// htmlPlaces gives the place of each trap action of a text/html template.
+// The places are in the order of the text. The check renders the template
+// with html/template. Each action has its own key "<id>#<n>". Its trap text
+// has a token of its own.
+//
+// The check parses the output as a browser does, with scripting on and with
+// scripting off. A token has a class only at one tree place of point 8:
+// element text, the value of alt, title or aria-label, the content of a
+// description meta, the href of a nofollow link, a member value of the
+// json-ld block, or the comment of the comment action. Each other place has
+// no class.
+//
+// A token has no class if it is not in the tree. It has none if it is there
+// more than once, or if its two places in the two modes differ. The function
+// also gives the name of each element of the two trees. The error is a
+// template that does not render.
 func htmlPlaces(text string, defs map[string]string) (places []place, names []string, err error) {
 	var acts []action
 	keyed := actionRe.ReplaceAllStringFunc(text, func(m string) string {
@@ -898,8 +903,9 @@ func htmlPlaces(text string, defs map[string]string) (places []place, names []st
 	return places, names, nil
 }
 
-// hit is the place of a token in a parse tree. It is a string of a node: the
-// name or the text of the node, or the name or the value of an attribute.
+// hit is the place of a token in a parse tree. It is a string of a node. The
+// string is the name or the text of the node, or the name or value of an
+// attribute.
 type hit struct {
 	node *xhtml.Node
 	attr *xhtml.Attribute // The attribute, or nil.
@@ -1041,10 +1047,10 @@ func sourceNames(text string) (names []string) {
 	return names
 }
 
-// badLt reports a "<" of a text/html template that is not "<" and a letter,
-// "</" and a letter, "<!--" or "<!doctype html>" (the case is not important).
-// html/template writes each other "<" as "&lt;", and then reads the text after
-// it as markup, where a scan of the source reads a comment.
+// badLt reports a "<" of a text/html template that is not one of these: "<"
+// and a letter, "</" and a letter, "<!--", or "<!doctype html>". The case of
+// the doctype is not important. html/template writes each other "<" as
+// "&lt;". A source scan reads a comment there, but the page has markup.
 func badLt(s string) bool {
 	letter := func(c byte) bool { return 'a' <= c|0x20 && c|0x20 <= 'z' }
 	for i := range len(s) {
@@ -1064,10 +1070,10 @@ func badLt(s string) bool {
 	return false
 }
 
-// sourceRules checks the source of a text/html template for forms that the
-// check of the rendered page cannot give: a "<" that is not a tag, a "<" in
-// raw text, a raw text element in noscript, and a comment that html/template
-// ends at another place than a browser does.
+// sourceRules checks the source of a text/html template. It refuses a "<"
+// that is not a tag, and a "<" in raw text. It refuses a raw text element in
+// noscript. It also refuses a comment that html/template ends at another
+// place than a browser does.
 func (r *result) sourceRules(name, text string) {
 	if badLt(text) {
 		r.layer("lt-text", name)
