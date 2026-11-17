@@ -2406,7 +2406,7 @@ func readingRows() []row {
 		// A table gets a tbody, and it moves text out of itself.
 		gramRow("text in a table", put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}</p><table>Our home</table>`), pagePath,
 			"element(table) grammar-element grammar-strip grammar-round-trip-on grammar-round-trip-off"),
-		// A division closes a paragraph. The stack has it in the hidden paragraph.
+		// A division closes a paragraph. The stack keeps it in the hidden one.
 		gramRow("division after a hidden paragraph with no end tag", put(pagePath,
 			`<p hidden>Our home<div>`+marker+` {{index .Trap "trap"}}</div>`), pagePath,
 			"grammar-nesting grammar-round-trip-on grammar-round-trip-off marker"),
