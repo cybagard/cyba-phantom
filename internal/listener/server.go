@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -545,16 +544,14 @@ func (s *Server) RefusedEventErrors() uint64 { return s.refused.errs.Load() }
 // test replaces it.
 var serverStart = time.Now
 
-// ErrorLines is the number of lines that the server wrote to its error log.
-// They include one line for each failed handshake. The log keeps no text.
+// ErrorLines is the number of lines that the server wrote to its net/http
+// error log. They include one line for each failed handshake. It does not
+// count lines of the standard log. The log keeps no text.
 func (s *Server) ErrorLines() uint64 { return s.errLines.n.Load() }
 
 // ErrorLineSignal is for tests. It returns the channel that gets a value after a line of the error log. One value
 // can stand for more than one line, so a receiver reads ErrorLines again after each receive.
 func (s *Server) ErrorLineSignal() <-chan struct{} { return s.errLines.lines }
-
-// ErrLog returns the counting writer of the error log, which ErrorLines counts. It keeps no text.
-func (s *Server) ErrLog() io.Writer { return &s.errLines }
 
 // SourceCapCloses is the number of connections that the server closed because
 // their source had maxConnsPerSource open connections. It holds no address.

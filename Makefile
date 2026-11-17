@@ -158,8 +158,7 @@ mirror-diff:
 dco:
 	$(GO) run ./tools/dco $(BASE) $(HEAD)
 
-# 07 §1 coverage gate: 80 % on each package of the gate set that exists,
-# and on tools/.
+# 07 §1 coverage gate: one floor for each package, in tools/coverage.sh.
 coverage:
 	bash tools/coverage.sh
 	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^(TestTS25|TestTP10)' ./internal/bundle

@@ -179,9 +179,9 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		s.Stop()
 		return 1
 	}
-	// certmagic also writes with the standard log package. It gets the counting writer of the server error log,
-	// which keeps no text. This runs before the client exists.
-	log.SetOutput(srv.ErrLog())
+	// certmagic writes with the standard log package. Serve drops the text and
+	// does not count it. This runs before the client exists.
+	log.SetOutput(io.Discard)
 	// startCerts opens the cache and starts the client. It returns the fixed line of the first failure, or "".
 	startCerts := func() string {
 		const clientLine = "phantom: certificate client does not start"
@@ -247,7 +247,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		})
 	}
 	// The fetcher and the watch start here. This is after the start load.
-	// It is also after the std log went to the counting writer.
+	// Serve sets the std log writer to io.Discard before this point.
 	// No early return follows.
 	b.startFetchAndWatch(ctx, &wg, cfg)
 	serveOne(func() error { return srv.Serve(httpsLn) })
