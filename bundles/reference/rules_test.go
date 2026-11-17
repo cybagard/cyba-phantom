@@ -205,10 +205,10 @@ type vhost struct {
 	callbacks map[string]callback
 	uses      []use
 	types     map[string][]string
-	// The grammar reads the next five fields. They are the vhost directory
-	// and the route paths and asset base names of the vhost. Next come the
-	// route paths of its templates and assets. The last two are the
-	// rendered trap texts of a form, and those of the form L1.
+	// The grammar reads the next five fields. The first two are the vhost
+	// directory and its route paths and asset base names. The third holds the
+	// route paths of its templates and assets. The last two are the rendered
+	// trap texts of a form, and those of the form L1.
 	host    string
 	names   map[string]bool
 	pages   map[string]bool
@@ -1772,11 +1772,11 @@ func tagKey(t xhtml.Token) string {
 	return ""
 }
 
-// frameOK reports whether the tokens of an HTML output are right for their
-// frame. An output with no html, head or body tag is a fragment. Any other
-// output has the doctype, the six tags of frame in order, and the content of
-// head and body. Only white space is between the tags. The head holds only
-// elements of headElems, their text and comments.
+// frameOK checks the frame of an HTML output. An output with no html, head or
+// body tag is a fragment. Any other output has the six tags of frame in order.
+// A doctype can come first, but it is not necessary. Only white space is
+// between the tags. The head holds only elements of headElems, the text in
+// them, comments and white space.
 func frameOK(toks []xhtml.Token) bool {
 	if !slices.ContainsFunc(toks, func(t xhtml.Token) bool { return slices.Contains(frame, tagKey(t)) }) {
 		return true
