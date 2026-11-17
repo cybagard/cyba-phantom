@@ -95,9 +95,10 @@ func (s State) format() string {
 //   - The catch-up used is from 0 to 86400000 ms (24 h).
 //   - The first event rowid is not more than the next event rowid. The same
 //     holds for the session rowids.
-//   - With no jump (ID 0), every jump field is 0. The ID is not negative.
+//   - With no jump (ID 0), every jump field is 0.
+//   - The jump ID is from 0 to 9223372036854, so that ID + 1 cannot wrap.
 //   - With a jump, Size is from 1 to 9223372036854 ms.
-//   - With a jump, At is from 0 to 9223372036854 ms, and not after S.
+//   - With a jump, At is from 1 to 9223372036854 ms, and not after S.
 //   - With a jump, Size is not more than At.
 //   - With a jump, its two rowids are not negative. They are not more than
 //     the next event rowid and the next session rowid.
@@ -110,7 +111,7 @@ func (s State) validate() error {
 		s.NextEvent >= 0 && s.NextSession >= 0 &&
 		s.CatchUp >= 0 && s.CatchUp <= catchUpMaxMS &&
 		s.FirstEvent <= s.NextEvent && s.FirstSession <= s.NextSession &&
-		j.ID >= 0 && j.FirstEvent >= 0 && j.FirstSession >= 0
+		inMS(j.ID) && j.FirstEvent >= 0 && j.FirstSession >= 0
 	if j.ID == 0 {
 		ok = ok && j == Jump{}
 	} else {

@@ -219,7 +219,7 @@ var fieldCases = []struct {
 	{"catch-up max", func(s *State) { s.CatchUp = 86400000 }},
 	{"no jump", func(s *State) { s.Jump = Jump{} }},
 	{"jump id min", func(s *State) { s.Jump.ID = 1 }},
-	{"jump id max", func(s *State) { s.Jump.ID = 1<<63 - 1 }},
+	{"jump id max", func(s *State) { s.Jump.ID = boundMS }},
 	{"jump size min", func(s *State) { s.Jump.Size = 1 }},
 	{"jump size max", func(s *State) {
 		s.S, s.Jump.At, s.Jump.Size = boundMS, boundMS, boundMS
@@ -398,6 +398,9 @@ func TestTU30_StateCrossRules(t *testing.T) {
 		{"jump first session",
 			func(s *State) { s.Jump.FirstSession = s.NextSession },
 			func(s *State) { s.Jump.FirstSession = s.NextSession + 1 }},
+		{"jump id",
+			func(s *State) { s.Jump.ID = boundMS },
+			func(s *State) { s.Jump.ID = boundMS + 1 }},
 	}
 	for _, r := range rules {
 		s := typical()
@@ -493,7 +496,7 @@ func mustNow(t *testing.T, c *Clock) int64 {
 
 func TestTU30_SameBootAddsElapsed(t *testing.T) {
 	for _, off := range []int64{40 * dayMS, -40 * dayMS} {
-		for _, el := range []time.Duration{0, 90 * time.Minute} {
+		for _, el := range []time.Duration{0, 90 * time.Minute, 40 * time.Hour} {
 			f := newFake(s0+off, 10*time.Hour+el, goodID)
 			st := stored(s0, goodID, 10*time.Hour)
 			in := StartInput{Stored: st, NextEvent: 7000, NextSession: 100}
@@ -630,6 +633,42 @@ func TestTU30_StartRefusals(t *testing.T) {
 	}
 }
 
+// A source boot id that is not in lower-case UUID form gives ErrBootID. A
+// negative boot clock gives ErrState. A known jump id out of range gives
+// ErrState.
+func TestTU30_StartSourceChecks(t *testing.T) {
+	for _, id := range []string{"NOT-A-UUID", upperID} {
+		f := newFake(s0, time.Hour, id)
+		if c, _, err := Start(f.source(), StartInput{}); c != nil ||
+			!errors.Is(err, ErrBootID) {
+			t.Errorf("boot id %q: %v", id, err)
+		}
+	}
+	f := newFake(s0, -time.Second, goodID)
+	if c, _, err := Start(f.source(), StartInput{}); c != nil ||
+		!errors.Is(err, ErrState) {
+		t.Errorf("boot clock -1 s: %v", err)
+	}
+	for _, known := range []int64{-1, boundMS + 1} {
+		f := newFake(s0, time.Hour, goodID)
+		if c, _, err := Start(f.source(), StartInput{KnownJumpID: known}); c != nil ||
+			!errors.Is(err, ErrState) {
+			t.Errorf("known jump id %d: %v", known, err)
+		}
+	}
+	f = newFake(s0, time.Hour, goodID)
+	if _, _, err := Start(f.source(), StartInput{KnownJumpID: boundMS}); err != nil {
+		t.Errorf("known jump id at the bound: %v", err)
+	}
+}
+
+// The values of the kinds are the kind label values of ADR-043.
+func TestTU30_JumpKindValues(t *testing.T) {
+	if KindStart != "start" || KindGrace != "grace" {
+		t.Errorf("kinds %q and %q", KindStart, KindGrace)
+	}
+}
+
 func TestTU30_JumpIDAboveKnownIDs(t *testing.T) {
 	cases := []struct {
 		known, stored, want int64
@@ -730,7 +769,8 @@ func TestTU30_GraceClampsS(t *testing.T) {
 	}
 }
 
-// The fake boot clock jumps 3 h and the Go monotonic clock does not move.
+// S follows only the boot clock of the source. The test moves the boot clock
+// 3 h. The wall clock stays at the first S, so it is behind S after the move.
 func TestTU30_HostSuspendCountsInS(t *testing.T) {
 	for _, boot := range []time.Duration{10 * time.Hour, time.Hour} {
 		f, c := graceClock(t, s0, boot)
@@ -785,6 +825,41 @@ func TestTU30_CheckWithWallEqualToSKeepsBase(t *testing.T) {
 	f.boot.Store(int64(time.Hour + 2500*time.Microsecond))
 	if got := mustNow(t, c); got != s0+2 {
 		t.Fatalf("S %d after the check, want %d", got, s0+2)
+	}
+}
+
+// A grace move makes its base at the boot clock of the check, not at the
+// boot clock of the start. Boot clock 2 h, wall S + 10 h: then 3 h gives +11 h.
+func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
+	f, c := graceClock(t, s0, time.Hour)
+	f.boot.Store(int64(2 * time.Hour))
+	f.wall.Store(s0 + 10*hourMS)
+	if r, err := c.Check(); err != nil || r.Jump == nil {
+		t.Fatalf("check: %+v, %v", r, err)
+	}
+	f.boot.Store(int64(3 * time.Hour))
+	if got := mustNow(t, c); got != s0+11*hourMS {
+		t.Fatalf("S %d, want %d", got, s0+11*hourMS)
+	}
+}
+
+// The state of a check is at the boot clock of the check, with or without a
+// move, when that boot clock is after the base.
+func TestTU30_CheckStateAtItsBootClock(t *testing.T) {
+	f, c := graceClock(t, s0, 10*time.Hour)
+	f.boot.Store(int64(11*time.Hour + 30*time.Minute))
+	r, err := c.Check()
+	if err != nil || r.Jump != nil || r.State.S != s0+90*60000 ||
+		r.State.BootClock != 11*time.Hour+30*time.Minute {
+		t.Fatalf("no move: %+v, %v", r, err)
+	}
+	f, c = graceClock(t, s0, time.Hour)
+	f.boot.Store(int64(2 * time.Hour))
+	f.wall.Store(s0 + 10*hourMS)
+	r, err = c.Check()
+	if err != nil || r.Jump == nil || r.State.S != s0+10*hourMS ||
+		r.State.BootClock != 2*time.Hour {
+		t.Fatalf("move: %+v, %v", r, err)
 	}
 }
 

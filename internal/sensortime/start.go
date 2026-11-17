@@ -36,7 +36,9 @@ type JumpResult struct {
 
 // Result is what a start or a check gives to the writer.
 type Result struct {
-	State State       // the state to write, at the boot clock of the call
+	// State is at the boot clock of the call. Its rowid floor is the value
+	// of the start. The writer sets the floor before it writes the state.
+	State State
 	Jump  *JumpResult // nil when the call made no jump
 }
 
@@ -81,15 +83,22 @@ func wallMS(src Source) int64 { return clampMS(src.Wall().UnixMilli()) }
 // With the same host boot, S is the stored S plus the boot clock time since
 // the stored value. Start does not read the wall clock then. Else S is the
 // larger of the stored S and the wall clock. These cases refuse the start
-// with their error: a boot id error, a boot clock error, a bad stored state.
+// with their error: a boot id error, a boot clock error, a bad stored state,
+// a known jump id out of range.
 func Start(src Source, in StartInput) (*Clock, Result, error) {
 	id, err := src.BootID()
 	if err != nil {
 		return nil, Result{}, err
 	}
+	if id != "" && !validUUID(id, false) {
+		return nil, Result{}, ErrBootID
+	}
 	bc, err := src.BootClock()
 	if err != nil {
 		return nil, Result{}, err
+	}
+	if in.KnownJumpID < 0 || in.KnownJumpID > maxMS {
+		return nil, Result{}, ErrState
 	}
 	st := in.Stored
 	var n State
@@ -128,9 +137,10 @@ func Start(src Source, in StartInput) (*Clock, Result, error) {
 }
 
 // record makes the last forward jump of size ms that ends at S = at. Its
-// id is above every id that this clock gave or knew.
+// id is above every id that this clock gave or knew. Start sets lastID to
+// at least the stored jump id.
 func (c *Clock) record(at, size int64, kind string) *JumpResult {
-	c.lastID = max(c.lastID, c.st.Jump.ID) + 1
+	c.lastID++
 	c.st.Jump = Jump{
 		ID: c.lastID, Size: size, At: at,
 		FirstEvent: c.st.FirstEvent, FirstSession: c.st.FirstSession,
@@ -139,8 +149,8 @@ func (c *Clock) record(at, size int64, kind string) *JumpResult {
 }
 
 // Now gives S. It is one load and one boot clock read. It reads no wall
-// clock. It does not use the Go monotonic clock, which stops in a host
-// suspend. A boot clock error is returned, with no S. Two reads of one
+// clock. On Linux and darwin, the boot clock of the source is not the Go
+// monotonic clock, which stops in a host suspend. A boot clock error is returned, with no S. Two reads of one
 // goroutine never go down while the boot clock does not go down.
 func (c *Clock) Now() (int64, error) {
 	b := c.base.Load()
@@ -152,7 +162,8 @@ func (c *Clock) Now() (int64, error) {
 }
 
 // Snapshot gives the state for the hourly write and the stop write. S and
-// the boot clock are of the same read. It is for the check goroutine.
+// the boot clock are of the same read. The rowid floor is the value of the
+// start: the writer sets it before the write. It is for the check goroutine.
 func (c *Clock) Snapshot() (State, error) {
 	b := c.base.Load()
 	bc, err := c.src.BootClock()
