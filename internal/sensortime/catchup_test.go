@@ -17,7 +17,10 @@ const (
 	txtExhausted = "sensortime: catch-up budget used"
 )
 
-const minute = time.Minute
+const (
+	minute  = time.Minute
+	thirdID = "11111111-2222-4333-8444-555555555555"
+)
 
 // line is one log line that a test caught.
 type line struct {
@@ -376,8 +379,13 @@ func TestTU30_CheckReadsWallOnce(t *testing.T) {
 	}
 }
 
-// T-U-30: S never moves back, for any wall clock sequence. The generator
-// is seeded: a failure prints the seed.
+// T-U-30: S never moves back, for any wall clock sequence. The steps are
+// random. They are a Check, a clean restart on the same host boot, and a
+// host reboot. A reboot has a new boot id, a small boot clock and a random
+// wall clock. Each restart and reboot starts from the last Snapshot, through
+// Encode and Decode. No S that Start, Check or Now returns is below the
+// highest S seen before. A crash that loses a Snapshot is not covered. The
+// generator is seeded: a failure prints the seed.
 func TestTU30_SNeverMovesBackProperty(t *testing.T) {
 	pick := func(r *rand.Rand, v ...int64) int64 { return v[r.IntN(len(v))] }
 	for seed := uint64(1); seed <= 300; seed++ {
@@ -399,6 +407,41 @@ func TestTU30_SNeverMovesBackProperty(t *testing.T) {
 		last, _ := c.Now()
 		lastBoot, used := boot, r0.State.CatchUp
 		for step := 0; step < 300; step++ {
+			if k := r.IntN(10); k < 2 {
+				snap, err := c.Snapshot()
+				if err != nil {
+					t.Fatalf("seed %d step %d: %v", seed, step, err)
+				}
+				enc, err := snap.Encode()
+				if err != nil {
+					t.Fatalf("seed %d step %d: %v", seed, step, err)
+				}
+				dec, err := Decode(enc)
+				if err != nil {
+					t.Fatalf("seed %d step %d: %v", seed, step, err)
+				}
+				if k == 1 {
+					// Host reboot: new boot id, small boot clock, random wall.
+					for f.id == dec.BootID {
+						f.id = []string{goodID, otherID, thirdID}[r.IntN(3)]
+					}
+					boot = time.Duration(r.IntN(180)) * minute
+					f.boot.Store(int64(boot))
+					f.wall.Store(pick(r, 0, epochMS-1, s0, s0+r.Int64N(40*dayMS),
+						max(f.wall.Load()-r.Int64N(40*dayMS), 0)))
+				}
+				c2, r2, err := Start(f.source(), StartInput{Stored: &dec})
+				if err != nil {
+					t.Fatalf("seed %d step %d: start: %v", seed, step, err)
+				}
+				now, _ := c2.Now()
+				if r2.State.S < last || now < last {
+					t.Fatalf("seed %d step %d: start S %d, Now %d, highest %d, "+
+						"reboot %v", seed, step, r2.State.S, now, last, k == 1)
+				}
+				c, last, lastBoot, used = c2, now, boot, r2.State.CatchUp
+				continue
+			}
 			d := time.Duration(pick(r, 0, 1e6, 6e10, 6e11, 18e12, 108e12))
 			boot += d
 			f.boot.Store(int64(boot))
