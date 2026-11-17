@@ -2399,6 +2399,9 @@ func readingRows() []row {
 			`<style>h1,body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
 		gramRow("style that hides every element", put(pagePath,
 			`<style>*{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
+		// A head is hidden already, so a rule that hides it changes no reading.
+		gramRow("style that hides the head", put(pagePath,
+			`<style>head{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, ""),
 		// A table gets a tbody, and it moves text out of itself.
 		gramRow("text in a table", put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}</p><table>Our home</table>`), pagePath,
 			"element(table) grammar-element grammar-strip grammar-round-trip-on grammar-round-trip-off"),
