@@ -2384,15 +2384,28 @@ func readingRows() []row {
 			"<div hidden><p>"+marker+"</p></div>\n<p>Our home</p>\n"), assetPath, "marker"),
 		gramRow("marker only in an element with aria-hidden", serve("/about", "about.txt", htmlType,
 			`<p aria-hidden="true">`+marker+"</p>\n<p>Our home</p>\n"), assetPath, "marker grammar-attr"),
-		// A style that hides html or body hides the implied element: all text.
+		// A parser adds html and body. A style rule that hides one is refused.
 		gramRow("marker in a fragment whose style hides the body", put(pagePath,
-			`<style>body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "marker"),
+			`<style>body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
 		gramRow("marker in a fragment whose style hides the html element", put(pagePath,
-			`<style>html{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "marker"),
+			`<style>html{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
 		gramRow("marker in a fragment whose style is after the paragraph", put(pagePath,
-			`<p>`+marker+` {{index .Trap "trap"}}</p><style>body{display:none}</style>`), pagePath, "marker"),
+			`<p>`+marker+` {{index .Trap "trap"}}</p><style>body{display:none}</style>`), pagePath, "grammar-css-selector"),
 		gramRow("marker in an asset whose style hides the body", serve("/about", "about.txt", htmlType,
-			"<style>body{display:none}</style><p>"+marker+"</p>\n"), assetPath, "marker"),
+			"<style>body{display:none}</style><p>"+marker+"</p>\n"), assetPath, "grammar-css-selector"),
+		gramRow("style in a full page that hides the body", docWith("<style>body{display:none}</style>\n", "", ""), pagePath,
+			"grammar-css-selector marker"),
+		gramRow("style that hides a selector list with the body", put(pagePath,
+			`<style>h1,body{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
+		gramRow("style that hides every element", put(pagePath,
+			`<style>*{display:none}</style><p>`+marker+` {{index .Trap "trap"}}</p>`), pagePath, "grammar-css-selector"),
+		// A table gets a tbody, and it moves text out of itself.
+		gramRow("text in a table", put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}</p><table>Our home</table>`), pagePath,
+			"element(table) grammar-element grammar-strip grammar-round-trip-on grammar-round-trip-off"),
+		// A division closes a paragraph. The stack has it in the hidden paragraph.
+		gramRow("division after a hidden paragraph with no end tag", put(pagePath,
+			`<p hidden>Our home<div>`+marker+` {{index .Trap "trap"}}</div>`), pagePath,
+			"grammar-nesting grammar-round-trip-on grammar-round-trip-off marker"),
 		gramRow("marker as a part of a word", serve("/about", "about.txt", htmlType, "<p>"+marker+"-x</p>\n"), assetPath,
 			"marker grammar-prose(text)"),
 		// Prose: each unit is a sequence of entries. An action word is only in

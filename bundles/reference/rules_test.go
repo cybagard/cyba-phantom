@@ -1990,8 +1990,7 @@ var hiddenText = set("head title style script template textarea")
 // output. The first three values hold the units of three readings. They are
 // all text, the text visible with scripting on, and the text visible with
 // scripting off. A block element ends a unit. A hidden element gives no text
-// and no break to a visible reading. A style that hides html or body hides all
-// text of an HTML output in both. The last value is the strip reading, all
+// and no break to a visible reading. The last value is the strip reading, all
 // text with no break. The text of style and script elements is in no reading,
 // also not in the strip reading.
 func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]string, strip string) {
@@ -2004,9 +2003,6 @@ func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]s
 			}
 		}
 	}
-	// A style that hides html or body hides an implied element too. Then the
-	// visible readings have no text.
-	startHid := kind == "html" && (hide["html"] || hide["body"])
 	var stack []readFrame
 	var cur [3]strings.Builder
 	var out strings.Builder
@@ -2049,10 +2045,10 @@ func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]s
 			}
 			out.WriteString(raws[i])
 			cur[0].WriteString(raws[i])
-			if !top.hidOn && !startHid {
+			if !top.hidOn {
 				cur[1].WriteString(raws[i])
 			}
-			if !top.hidOff && !startHid {
+			if !top.hidOff {
 				cur[2].WriteString(raws[i])
 			}
 		}
@@ -2184,7 +2180,8 @@ func (g gram) attr(el string, a xhtml.Attribute) {
 
 // css checks a style text. It has only rules "selector{decl;decl}". A part
 // of a selector is one element or one class. A declaration is an entry.
-// White space before, between and after the rules is free.
+// White space before, between and after the rules is free. A rule that hides
+// html or body is refused, because a parser adds these elements.
 func (g gram) css(s string) {
 	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
 		sel, rest, ok := strings.Cut(s, "{")
@@ -2193,9 +2190,11 @@ func (g gram) css(s string) {
 			g.add("css-form")
 			return
 		}
+		hides := slices.ContainsFunc(strings.Split(body, ";"), func(d string) bool { return declarations[d] })
 		for _, p := range strings.Split(sel, ",") {
 			c, isClass := strings.CutPrefix(p, ".")
-			if !(isClass && lists.in("classes", c)) && !slices.Contains(elements, p) {
+			if hides && (p == "html" || p == "body") ||
+				!(isClass && lists.in("classes", c)) && !slices.Contains(elements, p) {
 				g.add("css-selector")
 			}
 		}
