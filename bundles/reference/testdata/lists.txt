@@ -1,0 +1,106 @@
+[templates]
+A ADJ NOUN of NOUN.
+Each NOUN is ADJ.
+Fresh NOUN from the NOUN.
+Our NOUN
+Our NOUN is open each day.
+The NOUN NOUN
+The NOUN of the NOUN.
+This NOUN is not here.
+We sell NOUN and NOUN.
+We sell NOUN.
+[sentences]
+About us.
+[nouns]
+cup
+cups
+guide
+hills
+home
+logo
+page
+shop
+tea
+team
+[adjectives]
+short
+small
+[names]
+about
+alt
+aria
+beacon
+comment
+hidden
+index
+ld
+link
+logo
+meta
+noscript
+note
+notfound
+openapi
+part
+plugin
+robots
+shop
+style
+[prefixes]
+a-
+b-
+[extensions]
+css
+js
+json
+svg
+tmpl
+txt
+[paths]
+/
+/.well-known/ai-plugin.json
+/phantom-reference-trap/cb
+/ref/body
+/ref/cb
+/ref/header
+/ref/query
+[vhosts]
+docs.phantom-ref.internal
+shop.phantom-ref.internal
+[headers]
+X-Note
+X-Ref
+[classes]
+hidden
+[members-routes]
+asset
+beacon
+body
+callback
+header
+headers
+name
+not_found
+path
+post
+query
+routes
+script
+segment
+template
+trap
+type
+[members-plugin]
+api
+auth
+description_for_human
+description_for_model
+legal_info_url
+logo_url
+name_for_human
+name_for_model
+schema_version
+type
+url
+[members-ld]
+description

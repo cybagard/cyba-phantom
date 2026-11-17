@@ -4,6 +4,8 @@ package reference
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -394,7 +396,7 @@ func checkTree(fsys fs.FS) []string {
 	// The route maps are read, so the type of each file is known.
 	for _, name := range assets {
 		types := owner[name].types[name]
-		if slices.Contains(types, "text/html") && !hasMarker(string(files[name])) {
+		if slices.Contains(types, "text/html") && !visibleMarker("html", string(files[name])) {
 			r.add("marker", name)
 		}
 		if (slices.Contains(types, "text/html") || slices.Contains(types, "image/svg+xml") ||
@@ -751,14 +753,22 @@ func schemeFound(low string) bool {
 // of the template runs on each output.
 func (r *result) render(name, text string, traps map[string]string, v *vhost) {
 	isHTML := slices.Contains(v.types[name], "text/html")
+	// The output with no trap text decides the marker of a text/html template.
+	marked := hasMarker(text)
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
 	if err != nil {
 		r.add("render", name)
+		if !marked {
+			r.add("marker", name)
+		}
 		return
 	}
 	var outs, pages []string
 	defer func() {
+		if !marked {
+			r.add("marker", name)
+		}
 		for _, o := range outs {
 			r.decoded(name, o)
 		}
@@ -776,6 +786,9 @@ func (r *result) render(name, text string, traps map[string]string, v *vhost) {
 			return
 		}
 		out := buf.String()
+		if isHTML && run.data == nil {
+			marked = visibleMarker("html", out)
+		}
 		for _, kind := range kindsOf(name, v.types[name]) {
 			r.grammar(name, kind, out, v)
 		}
@@ -838,8 +851,9 @@ func doctypes(s string) []string {
 }
 
 // hasMarker reports the marker in the text that stays when HTML comments, the
-// hidden elements and tags are removed. The rule is the same for a template and
-// for a text/html asset.
+// hidden elements and tags are removed. It is the marker rule of a template
+// that is not text/html, and of a template that does not render. A text/html
+// output has visibleMarker.
 func hasMarker(text string) bool {
 	visible := htmlComment.ReplaceAllString(text, "")
 	for _, re := range hiddenElements {
@@ -848,13 +862,10 @@ func hasMarker(text string) bool {
 	return strings.Contains(markup.ReplaceAllString(visible, ""), marker)
 }
 
-// template checks the marker and the actions of a template. Each "{{" must
+// template checks the actions of a template. Each "{{" must
 // start one of the two exact forms, and no "/" comes before it. A json-ld
 // block has no "@context" and no "/*".
 func (r *result) template(name, text, n string) {
-	if !hasMarker(text) {
-		r.add("marker", name)
-	}
 	if strings.Contains(n, "/{{") {
 		r.add("action-after-slash", name)
 	}
@@ -1453,27 +1464,173 @@ func set(s string) map[string]bool {
 	return m
 }
 
-// These lists hold the entries of the agreed first content. The sections
-// are [names], [prefixes], [extensions], [paths], [vhosts], [headers],
-// [classes] and [members-*]. A list has no other entry.
-var (
-	nameWords = set("about alt aria beacon comment hidden index ld link logo meta noscript note " +
-		"notfound openapi part plugin robots shop style")
-	prefixes   = []string{"a-", "b-"}
-	extensions = set("css js json svg tmpl txt")
-	namePaths  = set("/ /.well-known/ai-plugin.json /phantom-reference-trap/cb /ref/body /ref/cb " +
-		"/ref/header /ref/query")
-	vhostNames  = set("docs.phantom-ref.internal shop.phantom-ref.internal")
-	headerNames = set("X-Note X-Ref")
-	classNames  = set("hidden")
-	memberNames = map[string]map[string]bool{
-		"routes": set("asset beacon body callback header headers name not_found path post query " +
-			"routes script segment template trap type"),
-		"plugin": set("api auth description_for_human description_for_model legal_info_url logo_url " +
-			"name_for_human name_for_model schema_version type url"),
-		"ld": set("description"),
-	}
+// listFile is the data file with the closed lists of the content rules. The
+// tests read these lists only from it. listPin is its SHA-256 (ADR-044).
+const (
+	listFile = "testdata/lists.txt"
+	listName = "lists.txt" // The name in a finding.
+	listPin  = "0d16887ea50c21450ab36b51b3ce5d8cd62e054a8e610c583b1bd052ec523ea5"
 )
+
+// listSections are the sections of the file, in their order.
+var listSections = []string{"templates", "sentences", "nouns", "adjectives", "names", "prefixes",
+	"extensions", "paths", "vhosts", "headers", "classes", "members-routes", "members-plugin", "members-ld"}
+
+// actionWords are the action words of the trap forms. Only a trap render
+// holds them.
+var actionWords = set("request send post query header body set")
+
+// A listSet holds the entries of each section of the data file.
+type listSet map[string][]string
+
+// lists is the data file as the rules read it. A test that edits the file
+// bytes in memory swaps it with useLists.
+var lists = func() listSet {
+	b, _ := os.ReadFile(listFile) // The guard test reports a missing file.
+	return loadLists(b)
+}()
+
+// loadLists reads the sections of the bytes b. A line "[name]" starts one.
+func loadLists(b []byte) listSet {
+	l, cur := listSet{}, ""
+	for _, ln := range strings.Split(string(b), "\n") {
+		if n, ok := strings.CutPrefix(ln, "["); ok && strings.HasSuffix(n, "]") {
+			cur = strings.TrimSuffix(n, "]")
+		} else if cur != "" && ln != "" {
+			l[cur] = append(l[cur], ln)
+		}
+	}
+	return l
+}
+
+func (l listSet) in(section, v string) bool { return slices.Contains(l[section], v) }
+
+// useLists makes the rules read the lists of the bytes b, until the test ends.
+func useLists(t *testing.T, b []byte) {
+	old := lists
+	t.Cleanup(func() { lists = old })
+	lists = loadLists(b)
+}
+
+// sentence reports a fixed sentence or an instance of a template. An
+// instance has a noun in each NOUN slot and an adjective in each ADJ slot.
+// The check splits the words at one space.
+func (l listSet) sentence(e string) bool {
+	if l.in("sentences", e) {
+		return true
+	}
+	w := strings.Split(e, " ")
+	return slices.ContainsFunc(l["templates"], func(t string) bool {
+		tw := strings.Split(t, " ")
+		return len(tw) == len(w) && l.fits(tw, w)
+	})
+}
+
+// fits reports that the words w are an instance of the template words tw.
+// The last word of a sentence has a "." after it, also a slot.
+func (l listSet) fits(tw, w []string) bool {
+	for i, s := range tw {
+		x := w[i]
+		if dot := strings.HasSuffix(s, "."); dot != strings.HasSuffix(x, ".") {
+			return false
+		} else if dot {
+			s, x = strings.TrimSuffix(s, "."), strings.TrimSuffix(x, ".")
+		}
+		switch {
+		case s == "NOUN" && !l.in("nouns", x), s == "ADJ" && !l.in("adjectives", x),
+			s != "NOUN" && s != "ADJ" && s != x:
+			return false
+		}
+	}
+	return true
+}
+
+// wordForm is a word of a dictionary: 1 to 12 letters a-z.
+var wordForm = regexp.MustCompile(`^[a-z]{1,12}$`)
+
+// listFindings checks the bytes b of the data file: the format, the bound of
+// each entry, and the pin. A finding is "<rule> lists.txt".
+func listFindings(b []byte, pin string) []string {
+	r := &result{}
+	add := func(rule string) { r.add(rule, listName) }
+	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != pin {
+		add("list-pin")
+	}
+	// A tab has its own rule.
+	if slices.ContainsFunc(b, func(c byte) bool { return c != '\n' && c != '\t' && (c < 0x20 || c > 0x7e) }) {
+		add("list-byte")
+	}
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		add("list-final-lf")
+	}
+	var heads []string
+	section, prev, seen := "", "", map[string]bool{}
+	for _, ln := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		switch {
+		case ln == "":
+			add("list-empty-line")
+			continue
+		case strings.Contains(ln, "\t"):
+			add("list-tab")
+		case ln[0] == ' ' || ln[len(ln)-1] == ' ':
+			add("list-space")
+		}
+		if n, ok := strings.CutPrefix(ln, "["); ok && strings.HasSuffix(n, "]") {
+			section = strings.TrimSuffix(n, "]")
+			heads = append(heads, section)
+			prev, seen = "", map[string]bool{}
+			continue
+		}
+		switch {
+		case section == "":
+			add("list-outside")
+		case seen[ln]:
+			add("list-duplicate")
+		case ln < prev:
+			add("list-order")
+		}
+		seen[ln], prev = true, ln
+	}
+	if !slices.Equal(heads, listSections) {
+		add("list-section")
+	}
+	loadLists(b).bound(r)
+	return r.out
+}
+
+// bound adds the findings of the shape of the entries. A template, a fixed
+// sentence and a dictionary word hold no action word and no deny word. An
+// action word is also a part of a longer word, with the case ignored.
+func (l listSet) bound(r *result) {
+	add := func(rule string) { r.add(rule, listName) }
+	for _, sec := range []string{"nouns", "adjectives", "names"} {
+		for _, w := range l[sec] {
+			if !wordForm.MatchString(w) {
+				add("list-word")
+			}
+		}
+	}
+	for _, sec := range []string{"templates", "sentences", "nouns", "adjectives", "names"} {
+		for _, e := range l[sec] {
+			if slices.ContainsFunc(slices.Collect(maps.Keys(actionWords)), func(a string) bool {
+				return strings.Contains(strings.ToLower(e), a)
+			}) {
+				add("list-action")
+			}
+			if len(denied(e)) > 0 {
+				add("list-deny")
+			}
+		}
+	}
+	for _, t := range l["templates"] {
+		if first, _, _ := strings.Cut(t, " "); first == "NOUN" || first == "ADJ" {
+			add("list-template-first")
+		}
+		if strings.Contains(strings.TrimSuffix(t, "."), ".") {
+			add("list-template-dot")
+		}
+	}
+}
 
 // These tables are test code. A table entry is an exact value.
 var (
@@ -1534,24 +1691,24 @@ var (
 		".json": "plugin", ".svg": "svg"}
 )
 
-// isName reports a name. It is an entry of namePaths. It can also be one
-// word of nameWords. The word can have "/" before it and an extension after.
+// isName reports a name. It is an entry of [paths]. It can also be one word
+// of [names]. The word can have "/" before it and an extension after.
 func isName(v string) bool {
 	stem := v
-	if i := strings.LastIndexByte(v, '.'); i > 0 && extensions[v[i+1:]] {
+	if i := strings.LastIndexByte(v, '.'); i > 0 && lists.in("extensions", v[i+1:]) {
 		stem = v[:i]
 	}
-	return namePaths[v] || nameWords[strings.TrimPrefix(stem, "/")]
+	return lists.in("paths", v) || lists.in("names", strings.TrimPrefix(stem, "/"))
 }
 
 // isPath reports a path: a name that starts with "/".
 func isPath(v string) bool { return strings.HasPrefix(v, "/") && isName(v) }
 
-// isID reports a trap id: an entry of prefixes and one word of nameWords.
+// isID reports a trap id: an entry of [prefixes] and one word of [names].
 func isID(v string) bool {
-	return slices.ContainsFunc(prefixes, func(p string) bool {
+	return slices.ContainsFunc(lists["prefixes"], func(p string) bool {
 		w, ok := strings.CutPrefix(v, p)
-		return ok && nameWords[w]
+		return ok && lists.in("names", w)
 	})
 }
 
@@ -1559,7 +1716,7 @@ func isID(v string) bool {
 // "/" and a file name.
 func isFile(host, v string) bool {
 	f, ok := strings.CutPrefix(v, "vhosts/"+host+"/")
-	return ok && vhostNames[host] && !strings.Contains(f, "/") && isName(f)
+	return ok && lists.in("vhosts", host) && !strings.Contains(f, "/") && isName(f)
 }
 
 // kindsOf gives the kinds of a served file. The types of the routes that
@@ -1642,14 +1799,44 @@ func (g gram) chars(where, s string) {
 	}
 }
 
+// entry reports an entry of a prose string: the marker, an exact trap render
+// or a sentence of the lists.
+func (v *vhost) entry(e string) bool {
+	return e == marker || slices.Contains(v.renders, e) || lists.sentence(e)
+}
+
+// entries reports a sequence of entries with one space between them. The
+// text u is split at each space, so a double space is not in a sequence.
+func (v *vhost) entries(u string) bool {
+	if u == "" {
+		return true
+	}
+	w := strings.Split(u, " ")
+	ok := make([]bool, len(w)+1)
+	ok[len(w)] = true
+	for i := len(w) - 1; i >= 0; i-- {
+		for j := i + 1; j <= len(w) && !ok[i]; j++ {
+			ok[i] = ok[j] && v.entry(strings.Join(w[i:j], " "))
+		}
+	}
+	return ok[0]
+}
+
 // prose checks a prose string: a unit of text, an attribute value, a comment
-// or a JSON string.
+// or a JSON string. It is a sequence of entries. A unit of text or a comment
+// has each white space run read as one space.
 func (g gram) prose(where, s string) {
 	if where != "text" {
 		g.chars(where, s)
 	}
+	if where == "text" || where == "comment" {
+		s = strings.Join(strings.Fields(s), " ")
+	}
 	if g.v.unpaid(s) {
 		g.add("special(" + where + ")")
+	}
+	if !g.v.entries(s) {
+		g.add("prose(" + where + ")")
 	}
 }
 
@@ -1676,13 +1863,7 @@ func (g gram) markup(kind, s string) {
 	if kind == "svg" {
 		elems = svgElements
 	}
-	var toks []xhtml.Token
-	var raws []string
-	z := xhtml.NewTokenizer(strings.NewReader(s))
-	for z.Next() != xhtml.ErrorToken {
-		raws = append(raws, string(z.Raw()))
-		toks = append(toks, z.Token())
-	}
+	toks, raws := tokenize(s)
 	// The tokenizer drops the bytes of a start tag that has no end.
 	if strings.Join(raws, "") != s {
 		g.add("cover")
@@ -1691,11 +1872,6 @@ func (g gram) markup(kind, s string) {
 		g.add("tag-place")
 	}
 	var stack []string
-	var unit strings.Builder
-	flush := func() {
-		g.prose("text", unit.String())
-		unit.Reset()
-	}
 	for i, t := range toks {
 		raw, top := raws[i], ""
 		if len(stack) > 0 {
@@ -1724,9 +1900,6 @@ func (g gram) markup(kind, s string) {
 			for _, a := range t.Attr {
 				g.attr(t.Data, a)
 			}
-			if blocks[t.Data] {
-				flush()
-			}
 			if t.Type == xhtml.StartTagToken && !(kind == "html" && voids[t.Data]) {
 				stack = append(stack, t.Data)
 			}
@@ -1739,9 +1912,6 @@ func (g gram) markup(kind, s string) {
 			} else {
 				stack = stack[:len(stack)-1]
 			}
-			if blocks[t.Data] {
-				flush()
-			}
 		case xhtml.TextToken:
 			switch top {
 			case "style":
@@ -1751,14 +1921,151 @@ func (g gram) markup(kind, s string) {
 				g.json("ld", raw)
 			default:
 				g.chars("text", raw)
-				unit.WriteString(raw)
 			}
 		}
 	}
 	if len(stack) > 0 {
 		g.add("nesting")
 	}
-	flush()
+	units, strip := tokenReadings(kind, toks, raws)
+	for _, reading := range units {
+		for _, u := range reading {
+			g.prose("text", u)
+		}
+	}
+	if stripDot(strip) {
+		g.add("strip")
+	}
+}
+
+// tokenize cuts s into tokens, with the raw bytes of each.
+func tokenize(s string) (toks []xhtml.Token, raws []string) {
+	z := xhtml.NewTokenizer(strings.NewReader(s))
+	for z.Next() != xhtml.ErrorToken {
+		raws = append(raws, string(z.Raw()))
+		toks = append(toks, z.Token())
+	}
+	return toks, raws
+}
+
+// readFrame is an open element of a reading. Its two flags say that the
+// element or an ancestor hides its text, with scripting on and off.
+type readFrame struct {
+	name          string
+	hidOn, hidOff bool
+}
+
+// hiddenText are the elements whose text a reader does not show. The list
+// has template and textarea too, but the element list has neither.
+var hiddenText = set("head title style script template textarea")
+
+// tokenReadings gives the readings of the text tokens of an HTML or SVG
+// output. The first three values hold the units of three readings. They are
+// all text, the text visible with scripting on, and the text visible with
+// scripting off. A block element ends a unit. A hidden element gives no text
+// and no break to a visible reading. The last value is the strip reading, all
+// text with no break.
+func tokenReadings(kind string, toks []xhtml.Token, raws []string) (units [3][]string, strip string) {
+	// The element names and ".class" values that a style hides.
+	hide := map[string]bool{}
+	for i, t := range toks {
+		if t.Type == xhtml.TextToken && i > 0 && toks[i-1].Type == xhtml.StartTagToken && toks[i-1].Data == "style" {
+			for _, h := range hiders(t.Data) {
+				hide[h] = true
+			}
+		}
+	}
+	var stack []readFrame
+	var cur [3]strings.Builder
+	var out strings.Builder
+	end := func(f readFrame) {
+		for i, hidden := range [3]bool{false, f.hidOn, f.hidOff} {
+			if !hidden {
+				units[i] = append(units[i], cur[i].String())
+				cur[i].Reset()
+			}
+		}
+	}
+	for i, t := range toks {
+		var top readFrame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch t.Type {
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			hid := hide[t.Data] || hiddenText[t.Data]
+			for _, a := range t.Attr {
+				hid = hid || a.Key == "hidden" || a.Key == "aria-hidden" || a.Key == "class" && hide["."+a.Val]
+			}
+			f := readFrame{t.Data, top.hidOn || hid || t.Data == "noscript", top.hidOff || hid}
+			if blocks[t.Data] {
+				end(f)
+			}
+			if t.Type == xhtml.StartTagToken && !(kind == "html" && voids[t.Data]) {
+				stack = append(stack, f)
+			}
+		case xhtml.EndTagToken:
+			if top.name == t.Data {
+				stack = stack[:len(stack)-1]
+				if blocks[t.Data] {
+					end(top)
+				}
+			}
+		case xhtml.TextToken:
+			if top.name == "style" || top.name == "script" {
+				continue
+			}
+			out.WriteString(raws[i])
+			cur[0].WriteString(raws[i])
+			if !top.hidOn {
+				cur[1].WriteString(raws[i])
+			}
+			if !top.hidOff {
+				cur[2].WriteString(raws[i])
+			}
+		}
+	}
+	end(readFrame{})
+	return units, out.String()
+}
+
+// hiders gives the selectors of the rules of a style text that have a
+// declaration with the hide flag.
+func hiders(s string) (out []string) {
+	for {
+		sel, rest, ok := strings.Cut(s, "{")
+		body, rest, ok2 := strings.Cut(rest, "}")
+		if !ok || !ok2 {
+			return out
+		}
+		if slices.ContainsFunc(strings.Split(body, ";"), func(d string) bool { return declarations[d] }) {
+			out = append(out, strings.Split(strings.TrimSpace(sel), ",")...)
+		}
+		s = rest
+	}
+}
+
+// stripDot reports a "." in the strip reading with no white space after it.
+func stripDot(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '.' && !strings.ContainsRune(" \t\n\r\f", rune(s[i+1])) {
+			return true
+		}
+	}
+	return false
+}
+
+// visibleMarker reports the marker as an entry of a unit. Both visible
+// readings need it: with scripting on, and with scripting off.
+func visibleMarker(kind, s string) bool {
+	toks, raws := tokenize(s)
+	units, _ := tokenReadings(kind, toks, raws)
+	seen := func(us []string) bool {
+		return slices.ContainsFunc(us, func(u string) bool {
+			return strings.Contains(" "+strings.Join(strings.Fields(u), " ")+" ", " "+marker+" ")
+		})
+	}
+	return seen(units[1]) && seen(units[2])
 }
 
 // tagKey gives the name of a start tag, "/" and the name of an end tag, or "".
@@ -1827,7 +2134,7 @@ func (g gram) attr(el string, a xhtml.Attribute) {
 	case "fixed":
 		good = slices.Contains(fixedValues[key], a.Val)
 	case "class":
-		good = classNames[a.Val]
+		good = lists.in("classes", a.Val)
 	case "empty":
 		good = a.Val == ""
 	case "page":
@@ -1856,7 +2163,7 @@ func (g gram) css(s string) {
 		}
 		for _, p := range strings.Split(sel, ",") {
 			c, isClass := strings.CutPrefix(p, ".")
-			if !(isClass && classNames[c]) && !slices.Contains(elements, p) {
+			if !(isClass && lists.in("classes", c)) && !slices.Contains(elements, p) {
 				g.add("css-selector")
 			}
 		}
@@ -1907,7 +2214,7 @@ func (g gram) json(kind, s string) {
 			g.add("json-number")
 		case '"':
 			if k, count := d.StackIndex(d.StackDepth()); k == '{' && count%2 == 1 {
-				if !memberNames[kind][tok.String()] {
+				if !lists.in("members-"+kind, tok.String()) {
 					g.add("json-member")
 				}
 				continue
@@ -1929,11 +2236,11 @@ func (g gram) jsonValue(class, key, v string) bool {
 		// or an asset route.
 		return isPath(v) && (strings.HasPrefix(key, "routes.") || g.v.pages[v])
 	case "word":
-		return nameWords[v]
+		return lists.in("names", v)
 	case "file":
 		return isFile(g.v.host, v)
 	case "header":
-		return headerNames[v]
+		return lists.in("headers", v)
 	case "id":
 		return isID(v)
 	case "fixed":
@@ -2014,6 +2321,21 @@ func TestTS36RealTreeFollowsRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range checkTree(fsys) {
+		t.Error(f)
+	}
+}
+
+// The guard test of the data file. A change of one byte changes the hash.
+// So a change of the lists is a decision of the spec, not a content change.
+func TestTS36ListFileIsPinned(t *testing.T) {
+	b, err := os.ReadFile(listFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != listPin {
+		t.Errorf("SHA-256 of %s is %x, want %s", listFile, sum, listPin)
+	}
+	for _, f := range listFindings(b, listPin) {
 		t.Error(f)
 	}
 }
