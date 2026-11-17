@@ -433,10 +433,10 @@ func checkTree(fsys fs.FS) []string {
 }
 
 // vhostFiles runs the text rules on each file below vhosts/, the route maps
-// too. The rules are the word list, the deny list, the host rule, and the
-// byte and base64 rules on the decoded forms. The host rule allows the route
-// paths and the file names of the tree. A file name is in full, or below
-// its vhost.
+// too. The rules are the word list, the deny list and the host rule. The
+// byte and base64 rules run on the decoded forms. The host rule allows
+// the route paths and the file names of the tree. A file name is in full,
+// or below its vhost.
 func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost) {
 	var names []string
 	for _, v := range hosts {
