@@ -1267,9 +1267,9 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool,
 		switch {
 		case name == "_":
 		case name == ".":
-			if _, ok := banned[p]; ok && !inEgress {
-				add(imp.Pos(), "dot import "+p)
-			}
+			// A dot-imported name is not a selector. No name rule sees it.
+			// Thus each dot import is a finding, in each package.
+			add(imp.Pos(), "dot import "+p)
 		default:
 			local[name] = p
 		}
@@ -1773,6 +1773,18 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 		plantWant("dot_"+strings.ReplaceAll(p, "/", "_")+".go",
 			file("\t. \""+p+"\"\n", ""), "dot import "+p)
 	}
+	// A dot import is a finding for each path, in each package. These plants
+	// do not come from a map.
+	const dotUnix = "\t. \"golang.org/x/sys/unix\"\n"
+	plantWant("internal/egress/unix_dot.go", file(dotUnix, ""),
+		"dot import golang.org/x/sys/unix")
+	plantWant("unix_dot_name.go",
+		file(dotUnix, "var _, _ = SyscallNoError(SYS_SOCKET, 0, 0, 0)"),
+		"dot import golang.org/x/sys/unix")
+	plantWant("dot_strings.go", file("\t. \"strings\"\n", ""),
+		"dot import strings")
+	plantWant("internal/egress/dot_strings.go", file("\t. \"strings\"\n", ""),
+		"dot import strings")
 
 	// A directive, cgo, assembly, and code in internal/egress.
 	plantWant("link.go", "package p\n\n//go:linkname f runtime.f\nfunc f()\n",
