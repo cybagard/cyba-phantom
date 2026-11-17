@@ -3,13 +3,18 @@ module github.com/cybagard/cyba-phantom
 // The build pins the exact release via GOTOOLCHAIN=go1.27.3 (Makefile,
 // CI env). When the local toolchain differs, Go downloads that release
 // with checksum verification. Thus every build uses the same Go, and the
-// two-build hash compare (T-P-07) is meaningful. M-1 has four dependencies:
-// the YAML parser go.yaml.in/yaml/v3 (SEC-11); golang.org/x/mod for
-// the tlog tiles and proofs and the signed checkpoint notes (sumdb/tlog,
-// sumdb/note; ADR-002, SEC-16); modernc.org/sqlite, a CGO-free SQLite
-// for the event store (ADR-002, SEC-20; C1); and
-// github.com/caddyserver/certmagic for the ACME certificates of the decoy
-// listener (FR-01, SEC-21), with go.uber.org/zap for its logger setting.
+// two-build hash compare (T-P-07) is meaningful. The first require block
+// holds the direct modules. Each one has a use below.
+// go.yaml.in/yaml/v3 is the YAML parser (SEC-11).
+// golang.org/x/mod holds the tlog tiles and proofs and the signed
+// checkpoint notes (sumdb/tlog, sumdb/note; ADR-002, SEC-16).
+// modernc.org/sqlite is a CGO-free SQLite for the event store (ADR-002,
+// SEC-20; C1). github.com/caddyserver/certmagic gets the ACME certificates
+// of the decoy listener (FR-01, SEC-21). go.uber.org/zap is the logger
+// setting of certmagic. golang.org/x/net gives the tests an HTML parser.
+// golang.org/x/sys/cpu finds hardware AES at the start (SEC-33).
+// golang.org/x/sys/unix reads the boot clock of the sensor time.
+// The test modules pebble/v2 and challtestsrv are named below.
 // golang.org/x/net must stay at v0.60.0 or later (HTTP/2 fixes
 // GO-2026-6603, -6610, -6611, -6612, -6617); certmagic v0.25.6 asks only
 // for v0.59.0. A certmagic bump names the new acmez and x/net versions

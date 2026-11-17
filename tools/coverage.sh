@@ -4,10 +4,10 @@
 # Runs the whole test suite once (-race, with a cover profile), then gates
 # statement coverage per package prefix from that profile.
 #
-# 07 §1 requires >= 80 % on internal/{token,score,tlog,limiter,store}; in
-# M-1 none of those packages exist, so that half of the gate is a vacuous
-# pass. Until the gate set lands, the gate applies to tools/ (the only
-# real code in the repository).
+# 07 §1 requires >= 80 % on each package of the gate set: internal/token,
+# internal/score, internal/tlog, internal/limiter and internal/store. The
+# script gates each package of the set that exists. It skips the others.
+# It also gates tools/ at 80 %.
 set -uo pipefail
 
 profile="$(mktemp)" || exit 1
@@ -49,7 +49,7 @@ for p in internal/token internal/score internal/tlog internal/limiter internal/s
   fi
 done
 if [ "$found" -eq 0 ]; then
-  echo "coverage: 07 §1 gate set (internal/{token,score,tlog,limiter,store}) has no packages yet — vacuous pass"
+  echo "coverage: 07 §1 gate set (internal/{token,score,tlog,limiter,store}) has no package — vacuous pass"
 fi
 
 gate tools 80 || fail=1
