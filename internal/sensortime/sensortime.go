@@ -1,7 +1,9 @@
 // Package sensortime holds the clocks and the stored state of the sensor time
 // (ADR-043). It has the boot clock, the boot id and the value of the meta key
-// sensor_time. It also has the start rules, the grace and the atomic S. It
-// has no caller yet.
+// sensor_time. It also has the start rules, the grace, the catch-up and the
+// atomic S. S moves only at a start or at a Check. The clock writes fixed
+// log lines. They are for a jump, a wall step back, a wall that differs
+// from S, and a used catch-up budget. It has no caller yet.
 package sensortime
 
 import (
