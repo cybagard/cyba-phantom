@@ -1069,6 +1069,19 @@ var banned = map[string][]string{
 		"RawSyscall", "RawSyscall6"},
 }
 
+// allowedNames lists, for an import path, the only names that module code may
+// use. Any other name of the package is a finding. A new name fails by default.
+var allowedNames = map[string][]string{
+	"golang.org/x/sys/unix": {"ClockGettime", "Timespec", "CLOCK_BOOTTIME",
+		"CLOCK_MONOTONIC", "Sysctl"},
+}
+
+// notAllowed tells if p has an entry in allowedNames that lacks name.
+func notAllowed(p, name string) bool {
+	names, ok := allowedNames[p]
+	return ok && !slices.Contains(names, name)
+}
+
 // noRuleTypes lists the types whose value, with no pointer, dials with no
 // address rule. The pointer type *T only holds a dialer that code made
 // elsewhere. A net.ListenConfig sends datagrams with ListenPacket.
@@ -1282,7 +1295,8 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool,
 	}
 	if inEgress {
 		ast.Inspect(f, func(n ast.Node) bool {
-			if p, name := pkgName(n); slices.Contains(egressBanned[p], name) {
+			if p, name := pkgName(n); slices.Contains(egressBanned[p], name) ||
+				notAllowed(p, name) {
 				add(n.Pos(), path.Base(p)+"."+name)
 			}
 			return true
@@ -1376,7 +1390,7 @@ func scanFile(fset *token.FileSet, f *ast.File, inEgress bool,
 			p, name := pkgName(n)
 			form := path.Base(p) + "." + name
 			switch {
-			case slices.Contains(banned[p], name):
+			case slices.Contains(banned[p], name), notAllowed(p, name):
 				add(n.Pos(), form)
 			case !slices.Contains(noRuleTypes[p], name):
 			case pointed[n]:
@@ -1781,7 +1795,25 @@ func TestTS21ScanFindsPlantedFiles(t *testing.T) {
 			"var _, _ = unix.Getenv(\"X\")\nvar _ = unix.Environ()"),
 		"unix.Getenv", "unix.Environ")
 
+	// A name of x/sys/unix that is not on the allow list, even a new one.
+	const unixImp = "\t\"golang.org/x/sys/unix\"\n"
+	for _, name := range []string{"SyscallNoError", "RawSyscallNoError",
+		"Syscall9", "Sendto"} {
+		plantWant("unix_new_"+name+".go", file(unixImp, "var _ = unix."+name),
+			"unix."+name)
+	}
+	plantWant("unix_alias.go",
+		file("\tu \"golang.org/x/sys/unix\"\n", "var _ = u.SyscallNoError"),
+		"unix.SyscallNoError")
+	plantWant("internal/egress/unix_sendto.go",
+		file(unixImp, "var _ = unix.Sendto"), "unix.Sendto")
+
 	// The scan finds nothing in these files.
+	plant("unix_ok.go", file(unixImp,
+		"var ts unix.Timespec\n"+
+			"var _ = unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)\n"+
+			"var _ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)\n"+
+			"var _, _ = unix.Sysctl(\"kern.bootsessionuuid\")"))
 	plant("x_test.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("testdata/x.go", file("\t\"net\"\n", "var _, _ = net.Dial(\"tcp\", \"a:1\")"))
 	plant("testdata/x.s", "TEXT ·f(SB),0,$0\n\tRET\n")
