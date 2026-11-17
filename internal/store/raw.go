@@ -96,10 +96,11 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // Known limits. A run that takes a wall clock that is ahead takes a line that
 // is ahead too. Then the rows of that clock keep their fields. A start with
 // the wall clock back and no stored value takes a line that is back. Then the
-// rows of an earlier process after that line lose their fields. A step back
-// of the wall clock by more than 1 h in a process does the same. With no
-// stored value, the next run clears the rows younger than the step minus 1 h.
-// With a stored value, this occurs after a write of the back time.
+// rows of an earlier process after that line lose their fields. The wall
+// clock can step back by more than 1 h in a process. Then the next run also
+// takes a line that is back. With no stored value, the next run clears the
+// rows younger than the step minus 1 h. With a stored value, the rows up to
+// that value plus 1 h keep their fields.
 //
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
