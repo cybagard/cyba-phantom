@@ -992,9 +992,10 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 	}
 }
 
-// A reader must not get a lower S than a reader that started later. The first
-// reader stops after its boot clock read. A check moves S 40 d. Then a second
-// reader calls Now.
+// A reader reads its boot clock before a re-anchor and loads the base after
+// it. It must get S of the new base. The boot clock does not move between the
+// two reads. The first reader stops after its boot clock read. A check moves
+// S 40 d. Then a second reader calls Now.
 func TestTU30_LaterNowNeverLowerThanEarlierReturn(t *testing.T) {
 	f := newFake(s0, time.Hour, goodID)
 	src := f.source()
