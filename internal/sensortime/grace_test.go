@@ -2,6 +2,7 @@ package sensortime
 
 import (
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -729,5 +730,74 @@ func TestTU30_NoRoomForJumpID(t *testing.T) {
 		if err != nil || r5.State.CatchUp != st5.CatchUp+40*60000 {
 			t.Fatalf("known %v: catch-up %+v, %v", known, r5.State, err)
 		}
+	}
+}
+
+// T-U-30 (read mark order): reader goroutines call Now in a loop. The writer
+// makes jumps of 1 h and 1 ms, each a Check and then Committed. The boot clock
+// is fixed, so a value of Now names the base that it loaded. A Now that
+// loaded the base of jump k-1 must be in the Read of jump k. It can also be
+// in the Committed of jump k. The test counts the reads that are in none. It
+// stops after 2 000 000 jumps or after 1.5 s. Fewer than 10 000 jumps fail it.
+func TestTU30_ReadMarkStressNoLostRead(t *testing.T) {
+	const (
+		readers   = 4
+		maxJumps  = 2000000
+		minJumps  = 10000
+		timeLimit = 1500 * time.Millisecond
+	)
+	step := hourMS + 1
+	f, c := graceClock(t, s0, time.Hour)
+	var stop atomic.Bool
+	seen := make([][]bool, readers)
+	var wg sync.WaitGroup
+	for i := range seen {
+		seen[i] = make([]bool, maxJumps+1)
+		wg.Add(1)
+		go func(seen []bool) {
+			defer wg.Done()
+			for !stop.Load() {
+				v, err := c.Now()
+				if err != nil {
+					return
+				}
+				k := (v - s0) / step
+				if (v-s0)%step == 0 && k >= 0 && k <= maxJumps {
+					seen[k] = true
+				}
+			}
+		}(seen[i])
+	}
+	reported := make([]bool, maxJumps+1)
+	deadline := time.Now().Add(timeLimit)
+	s, n := s0, 0
+	for n < maxJumps && (n%256 != 0 || time.Now().Before(deadline)) {
+		s += step
+		f.wall.Store(s)
+		r, err := c.Check()
+		if err != nil || r.Jump == nil || !r.Write {
+			stop.Store(true)
+			wg.Wait()
+			t.Fatalf("jump %d: %+v, %v", n+1, r, err)
+		}
+		n++
+		reported[n] = c.Committed() || r.Read
+	}
+	stop.Store(true)
+	wg.Wait()
+	if n < minJumps {
+		t.Fatalf("%d jumps in %v, want at least %d", n, timeLimit, minJumps)
+	}
+	lost := 0
+	for k := 1; k <= n; k++ {
+		for i := range seen {
+			if seen[i][k-1] && !reported[k] {
+				lost++
+				break
+			}
+		}
+	}
+	if lost > 0 {
+		t.Fatalf("%d of %d jumps lost a read", lost, n)
 	}
 }
