@@ -128,8 +128,12 @@ docker run --rm -v "$PWD":/src -w /src cyba-phantom-dev make all
 
 (Or open the folder with the Dev Containers extension, which uses
 `.devcontainer/devcontainer.json`. To fetch a new vulnerability database
-copy there, rebuild the container without the build cache.) `make all` runs build, lint, tests
-(`-race`), the C10 trace check, and the constitution-table mirror.
-`make perf` and `make coverage` are the extra gates; `make dco
-BASE=<sha> HEAD=<sha>` checks the sign-off and the commit identity
-locally.
+copy there, rebuild the container without the build cache.) `make all` runs build, lint,
+`go mod tidy -diff`, the coverage gate (it runs the tests with `-race`),
+`make perf`, the C10 trace check, and the constitution-table mirror.
+`make all` does not run three checks of CI:
+
+- `make fill` needs a small tmpfs.
+- `make dco BASE=<sha> HEAD=<sha>` needs BASE and HEAD. It checks the
+  sign-off and the commit identity.
+- The reader oracle test skips outside the devcontainer and outside CI.
