@@ -11,7 +11,7 @@ import (
 func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	db := migrated(t)
 	var ddl []byte
-	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql", "0003_retention.sql", "0004_rollup.sql"} {
+	for _, name := range []string{"0001_schema_v1.sql", "0002_mint.sql", "0003_retention.sql", "0004_rollup.sql", "0005_raw_index.sql"} {
 		b, err := migrationFiles.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -23,9 +23,16 @@ func TestTU18SchemaEqualsEmbeddedDDL(t *testing.T) {
 	if err := db.QueryRow(q).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
-	// SQLite stores each statement without its final semicolon.
-	want := strings.TrimSuffix(strings.Join(strings.Split(strings.TrimSpace(string(ddl)), ";\n"), ";"), ";")
-	if got != want || strings.Count(want, "CREATE ") != 17 {
+	// SQLite stores each statement without its final semicolon. A DELETE
+	// statement of a migration is not in sqlite_master.
+	var stmts []string
+	for _, s := range strings.Split(strings.TrimSpace(string(ddl)), ";\n") {
+		if !strings.HasPrefix(s, "DELETE ") {
+			stmts = append(stmts, s)
+		}
+	}
+	want := strings.TrimSuffix(strings.Join(stmts, ";"), ";")
+	if got != want || strings.Count(want, "CREATE ") != 18 {
 		t.Fatalf("sqlite_master differs from the embedded DDL:\n%q\n%q", got, want)
 	}
 	var n int
@@ -114,7 +121,8 @@ CREATE TABLE rollup_seen (
   day TEXT NOT NULL, vhost TEXT NOT NULL, band TEXT NOT NULL, family TEXT NOT NULL,
   session_id TEXT NOT NULL,
   PRIMARY KEY (day, vhost, band, family, session_id)
-) WITHOUT ROWID`
+) WITHOUT ROWID
+CREATE INDEX event_raw_ts ON event(ts) WHERE body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL`
 
 // T-U-18: a new database has the fixed text of each table and index. The text
 // of the embedded file is not the only proof.
@@ -130,14 +138,15 @@ func TestTU18SchemaEqualsFixedText(t *testing.T) {
 }
 
 // T-U-18: the migrations are the first one, the mint table, the retention
-// indexes and the roll-up table. A new database has schema_version 4.
-func TestTU18OnlyFourMigrationsExist(t *testing.T) {
+// indexes, the roll-up table and the raw index. A new database has
+// schema_version 5.
+func TestTU18OnlyFiveMigrationsExist(t *testing.T) {
 	files, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil || len(files) != 4 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" ||
-		files[2].Name() != "0003_retention.sql" || files[3].Name() != "0004_rollup.sql" {
+	if err != nil || len(files) != 5 || files[0].Name() != "0001_schema_v1.sql" || files[1].Name() != "0002_mint.sql" ||
+		files[2].Name() != "0003_retention.sql" || files[3].Name() != "0004_rollup.sql" || files[4].Name() != "0005_raw_index.sql" {
 		t.Fatalf("migration files %v: %v", files, err)
 	}
-	if v := metaValue(t, migrated(t), "schema_version"); v != "4" {
+	if v := metaValue(t, migrated(t), "schema_version"); v != "5" {
 		t.Fatalf("schema_version %s", v)
 	}
 }

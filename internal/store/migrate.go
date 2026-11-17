@@ -71,6 +71,13 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	case have == len(scripts):
 		return checkEvent(ctx, tx, scripts)
 	}
+	// This check compares the stored text with the text of the applied scripts.
+	// It runs before a later script can fail on a changed event table.
+	if have > 0 {
+		if err := checkEvent(ctx, tx, scripts[:have]); err != nil {
+			return err
+		}
+	}
 	for _, s := range scripts[have:] {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
 			return fail(schemaName, ruleMigrate)
