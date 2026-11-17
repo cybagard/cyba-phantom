@@ -1115,7 +1115,8 @@ func textRows() []row {
 	// is not a place of the action that the template drops.
 	for form, c := range copies {
 		alt := []string{"base64(decoded)"}
-		if form == "tag" { // The tag is in the value. The value rule refuses it.
+		// The tag is in the value, so the value rule fires.
+		if form == "tag" {
 			alt = []string{"action-position", "attr-lt", "attr-lt(rendered)"}
 		}
 		rows = append(rows,
