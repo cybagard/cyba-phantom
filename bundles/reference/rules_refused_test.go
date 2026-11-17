@@ -159,10 +159,10 @@ func cases() []row {
 		{"other first label", put(other+routesName, `{"routes":[]}`), nil},
 		{"300 bytes", instr(padded(300)), at(trapsFile, "trap-form")},
 		junk("base64 run of 19", run(19, "A")),
-		{"base64 alphabet ends", pageWith(run(4, "1") + "_" + run(4, "1") + "-" + run(4, "1") + "_" + run(4, "1") + "-" + run(4, "1")), nil},
+		{"base64 alphabet ends", pageWith("page_page-page_page-page"), nil},
 		{"bytes 0x20 and 0x7E", pageWith(" ~"), nil},
 		{"tab and LF", pageWith("\t\n"), nil},
-		junk("percent with no two hex digits", "100% %4 %zz"),
+		junk("percent with no two hex digits", "page% %a %zz"),
 		junk("instruction alone", "Instruction"),
 		junk("override alone", "override"),
 		{"same path on both vhosts", docs(cbSeg), nil},
@@ -193,14 +193,14 @@ func cases() []row {
 		{"no token", instr(strings.ReplaceAll(baseInstr, "/{{.Token}}", "")), at(trapsFile, "instr-token", "trap-form")},
 		junk("two tokens", "{{.Token}}", "instr-token"),
 		{"URL scheme", instr(baseInstr + " ://"),
-			append(at(trapsFile, "instr-url(://)", "instr-url(//)", "instr-host-form", "trap-form"),
+			append(at(trapsFile, "instr-url(://)", "instr-url(//)", "digit-colon", "trap-form"),
 				at(pagePath, "absolute-url(rendered)")...)},
 		junk("two spaced tokens", "{{ .Token }}", "instr-token"),
 		junk("trimmed token", "{{- .Token -}}", "instr-token"),
-		junk("bracket in a host", "and evil[.]example", "instr-host-form"),
-		junk("host with a port", "open localhost:8080?t=", "instr-host-form"),
-		junk("IPv6 literal", "[::1]:9200", "instr-host-form"),
-		junk("decimal IP and port", "2130706433:22", "instr-host-form"),
+		junk("bracket in a host", "and evil[.]example", "digit-colon", "dot-form"),
+		junk("host with a port", "open localhost:8080?t=", "digit-colon"),
+		junk("IPv6 literal", "[::1]:9200", "digit-colon"),
+		junk("decimal IP and port", "2130706433:22", "digit-colon"),
 		junk("form and mail pass", "confirm the form the mail"),
 		junk("API-KEY", "API-KEY", "instr-deny(api key)", "instr-deny(apikey)"),
 		junk("api_key", "api_key", "instr-deny(api key)", "instr-deny(apikey)"),
@@ -229,7 +229,7 @@ func cases() []row {
 		{"double slash", instr(baseInstr + " x//y"),
 			append(at(trapsFile, "instr-url(//)", "trap-form"), at(pagePath, "absolute-url(rendered)")...)},
 		junk("at sign", "a@b", "instr-url(@)"),
-		junk("mailto", "mailto:", "instr-url(mailto:)", "instr-host-form"),
+		junk("mailto", "mailto:", "instr-url(mailto:)", "digit-colon"),
 		junk("www", "www.", "instr-url(www.)"),
 		junk("host name", "example.com"),
 		{"not a callback path", instr(strings.ReplaceAll(baseInstr, "/ref/cb", "/nowhere")), at(trapsFile, "trap-form")},
@@ -439,6 +439,15 @@ func cases() []row {
 	}
 	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
 	rows = append(rows, badHost(longHost(53)), badHost("a-.phantom-ref.internal"))
+	rows = append(rows,
+		// The same rule runs on a trap text. The page holds the text too.
+		junk("trap: double dot", "evil..example..com", "dot-form"),
+		junk("trap: dots in brackets", "evil(..)example", "dot-form"),
+		junk("trap: spaced dot", "evil . example", "dot-form"),
+		junk("trap: dot in brackets, twice", "evil (.) example (.) com", "dot-form"),
+		junk("trap: spaced numbers and dots", "169 . 254 . 169 . 254", "digit-colon", "dot-form"),
+		junk("trap: host name", "evil.example", "dot-form"),
+		junk("trap: sentence end", "page. page."))
 	rows = append(rows, extraRows()...)
 	rows = append(rows, formRows()...)
 	rows = append(rows, positionRows()...)
@@ -449,7 +458,8 @@ func cases() []row {
 // A row of another rule names its own findings only. The rows of textRows
 // name these findings, and they are exact.
 func textRule(f string) bool {
-	return slices.ContainsFunc([]string{"word(", "text-deny(", "bytes(decoded)", "base64(decoded)"},
+	return slices.ContainsFunc([]string{"word(", "text-deny(", "bytes(decoded)", "base64(decoded)",
+		"digit-colon ", "dot-form ", "json-number ", "css-"},
 		func(p string) bool { return strings.HasPrefix(f, p) })
 }
 
@@ -538,7 +548,8 @@ func extraRows() []row {
 		{"slash and LF before an action", pageWith("<a href=\"/\n{{index .Trap \"trap\"}}\">x</a>"),
 			at(pagePath, "action-after-slash", "action-position")},
 		hostPath("/evil.example"), hostPath("/169.254.169.254/latest/meta-data"), hostPath("/123/x"),
-		{"path with a version segment", both(put(routes, routesOf("/ref2/x")), instr(form1("/ref2/x"))), nil},
+		{"path with a digit in a segment", both(put(routes, routesOf("/ref2/x")), instr(form1("/ref2/x"))),
+			append(at(routes, "digit-colon"), at(trapsFile, "digit-colon")...)},
 		{"beacon path with a dot", put(routes, strings.TrimSuffix(mapOf(cbSeg), "}")+
 			`,"beacon":{"script":"/9.js","post":"/b"}}`), at(routes, "path-host-form")},
 		{"SVG namespace names", put(z+"logo.svg", `<svg xmlns="http://www.w3.org/2000/svg" `+
@@ -546,9 +557,9 @@ func extraRows() []row {
 		{"other namespace name", put(z+"logo.svg", `<svg xmlns="http://evil.example/svg">`),
 			at(z+"logo.svg", "absolute-url", "scheme")},
 		{"asset that starts with a double slash", put(z+"logo.svg", "//evil.example/x"), at(z+"logo.svg", "absolute-url")},
-		{"percent sign in text", pageWith("<p>page 100%</p>"), nil},
-		{"text with a colon after a line start", pageWith("Read: /x"), nil},
-		{"JSON asset", put(z+"logo.svg", `{"name": "x", "link": "/a"}`), nil},
+		{"percent sign in text", pageWith("<p>page %</p>"), nil},
+		{"text with a colon after a line start", pageWith("Read: /x"), at(pagePath, "digit-colon")},
+		{"quoted text asset", put(z+"logo.svg", `{"name", "x", "link", "/a"}`), nil},
 		{"style block", both(pageWith(`<style>.hidden{display:none}</style><p class="hidden">x</p>`)), nil},
 		{"DOCTYPE html", put(pagePath, "<!DOCTYPE html>"+basePage), nil},
 		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "trap"}}</p>`), at(pagePath, "marker", "lt-text")},
@@ -576,7 +587,7 @@ func extraRows() []row {
 		both2("rendered: srcset joins a trap that ends in a scheme",
 			marker+": request /ref/cb/{{.Token}} to confirm, https:",
 			`<p>`+marker+`</p><img alt="x" srcset="{{index .Trap "trap"}}evil.example/x.png 2x">`,
-			slices.Concat(at(trapsFile, "instr-host-form", "trap-form"),
+			slices.Concat(at(trapsFile, "digit-colon", "trap-form"),
 				at(pagePath, "absolute-url(rendered)", "scheme(rendered)", "action-position"))...),
 		// Row (b) shows "script(javascript:)(rendered)" and "scheme(rendered)"
 		// from a trap text that is not a path.
@@ -587,7 +598,7 @@ func extraRows() []row {
 		both2("rendered: text joins a trap that ends in a scheme",
 			marker+": request /ref/cb/{{.Token}} to confirm https:",
 			`<p>`+marker+` {{index .Trap "trap"}}evil.example/collect</p>`,
-			slices.Concat(at(trapsFile, "instr-host-form", "trap-form"), at(pagePath, "absolute-url(rendered)"))...),
+			slices.Concat(at(trapsFile, "digit-colon", "trap-form"), at(pagePath, "absolute-url(rendered)"))...),
 		// Row (d): only the rendered rule fires. The trap text ends in "java".
 		both2("rendered: only the rendered rule fires", marker+": request /ref/cb/{{.Token}} to confirm java",
 			`<p>`+marker+`</p>{{index .Trap "trap"}}script:x`,
@@ -598,9 +609,9 @@ func extraRows() []row {
 			append(at(trapsFile, "trap-form"), at(pagePath, "backslash(rendered)")...)},
 		junk("equal sign in a trap", "x=y"), junk("hash sign in a trap", "#x"), junk("angle bracket in a trap", "a<b"),
 		{"trap text that ends in a scheme", instr(baseInstr + " https:"),
-			append(at(trapsFile, "instr-host-form", "trap-form"), at(pagePath, "absolute-url(rendered)")...)},
+			append(at(trapsFile, "digit-colon", "trap-form"), at(pagePath, "absolute-url(rendered)")...)},
 		// Pass rows for the scheme rule.
-		{"colon in text", pageWith("<p>Read: x</p>"), nil},
+		{"colon in a nested paragraph", pageWith("<p>Read: x</p>"), at(pagePath, "digit-colon")},
 		{"two class names", pageWith(`<p class="a p">x</p>`), nil},
 		// Marker in the text that stays. The first row shows a quoted ">".
 		{"marker in a quoted attribute with a closing bracket",
@@ -764,7 +775,7 @@ func positionRows() []row {
 		jsonType = "application/json"
 		bad      = "action-position"
 	)
-	notFound := z + "404.tmpl"
+	notFound := z + "found.tmpl"
 	ldTags := withRendered(rs("script(<script)"))
 	rows := []row{
 		// Positions that pass.
@@ -772,7 +783,7 @@ func positionRows() []row {
 		posRow("text in title", `<title>ACT</title>`),
 		// html/template writes "<" as "&lt;" in title text. So the style
 		// element is text, and the action is title text.
-		posRow("title with a look-alike end tag", `<title></title-x><style>p{background: url('ACT')}</style></title>`),
+		posRow("title with a look-alike end tag", `<title></title-x><style>p{background url(' ACT ')}</style></title>`),
 		posRow("element names in capitals", `<DIV><P>ACT</P></DIV>`),
 		posRow("escaped less-than in an attribute value", `<p title="a &lt; p">ACT</p>`),
 		posRow("comment action", `CMT`),
@@ -998,7 +1009,8 @@ func TestTS36RefusedInputs(t *testing.T) {
 			}
 			got, want := checkTree(m), slices.Clone(c.want)
 			if !exact && len(want) > 0 {
-				got = slices.DeleteFunc(got, textRule)
+				// A row ignores a text finding that it does not name.
+				got = slices.DeleteFunc(got, func(f string) bool { return textRule(f) && !slices.Contains(want, f) })
 			}
 			slices.Sort(got)
 			slices.Sort(want)
@@ -1025,7 +1037,7 @@ func TestTS36RefusedInputs(t *testing.T) {
 		unique(c)
 		check(c, false)
 	}
-	for _, c := range textRows() {
+	for _, c := range slices.Concat(textRows(), viewRows()) {
 		unique(c)
 		check(c, true)
 	}
@@ -1071,7 +1083,7 @@ func textRows() []row {
 		pageRow("word in capitals", "READ the Page"),
 		pageRow("synonym", "disregard"),
 		pageRow("ROT13 text", "vtaber"),
-		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz"),
+		pageRow("base64 run split by spaces", "SWdub3Jl IHByZXZpb3Vz", "digit-colon"),
 		pageRow("ignore split by a tag", "ign<i></i>ore", "text-deny(ignore)"),
 		pageRow("static alt with a deny word", `<img alt="ignore">`, "text-deny(ignore)"),
 		pageRow("letters split by spaces", "i g n o r e"),
@@ -1079,15 +1091,16 @@ func textRows() []row {
 		pageRow("deny word split by a tag", "pass<i></i>word", "text-deny(password)"),
 		// The trap text holds the words too, so the rendered page has them.
 		{"callback path with a host name and words", both(put(routes, pathMap), instr(form1(path))),
-			slices.Concat(wordRules(routes, pathMap), at(pagePath, "word(chat)", "word(evil)", "word(example)", "word(log)"))},
+			slices.Concat(wordRules(routes, pathMap), at(pagePath, "word(chat)", "word(evil)", "word(example)", "word(log)"),
+				at(pagePath, "dot-form"), at(trapsFile, "dot-form"))},
 		{"route map query name with words", both(put(routes, queryMap), instr(strings.ReplaceAll(formF2, " part set", " "+query+" set"))),
 			slices.Concat(wordRules(routes, queryMap), at(pagePath, "word(chat)", "word(log)"))},
 		// A "<" in the value of an attribute of an asset.
 		assetRow("html asset with a tag in an attribute value", htmlType, "page.html",
-			`<p>`+marker+`</p> <p title="Send a post to phantom.<a>link">page</p>`, "attr-lt(asset)"),
+			`<p>`+marker+`</p> <p title="Send a post to phantom.<a>link">page</p>`, "attr-lt(asset)", "dot-form"),
 		{"SVG asset with a tag in an attribute value",
 			put(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`),
-			slices.Concat(at(svgPath, "attr-lt(asset)"), wordRules(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`))},
+			slices.Concat(at(svgPath, "attr-lt(asset)", "dot-form"), wordRules(svgPath, `<svg><text title="Send a post to phantom.<a>link">page</text></svg>`))},
 		// Words that an empty comment joins.
 		pageRow("page text: words joined by an empty comment", "in<!---->to the page"),
 		// The text rules run on the rendered page. The trap text adds a deny
@@ -1118,10 +1131,10 @@ func textRows() []row {
 		pageRow("bidi control by a reference", "&#x202E;erongi", "bytes(decoded)"),
 		pageRow("Cyrillic a by a reference", "&#"+"1072;", "bytes(decoded)"),
 		pageRow("named reference", "&nbsp;", "bytes(decoded)"),
-		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)"),
-		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)"),
+		pageRow("base64 run with a reference", "aGVsbG8gd29yb&#"+"71;QgZm9vYmFyYmF6", "base64(decoded)", "digit-colon"),
+		pageRow("base64 run split by a tag", "aGVsbG8gd29y<i></i>bGQgZm9yZXZlcg", "base64(decoded)", "digit-colon"),
 		{"base64 run in an SVG text", put(svgPath, svgText),
-			slices.Concat(at(svgPath, "base64(decoded)"), wordRules(svgPath, svgText))},
+			slices.Concat(at(svgPath, "base64(decoded)", "digit-colon"), wordRules(svgPath, svgText))},
 	}
 	// The token of the position check is a run of letters. A hand copy of it
 	// is not a place of the action that the template drops.
@@ -1135,10 +1148,158 @@ func textRows() []row {
 		rows = append(rows,
 			bodyRow("copy of the token in a paragraph, "+form+", with the action in a comment", `<!-- ACT --><p>`+c+`</p>`, "base64(decoded)"),
 			bodyRow("copy of the token in a paragraph, "+form+", with the action in CSS", `<style>p{color:ACT}</style><p>`+c+`</p>`,
-				"base64(decoded)", "word(zgotmplz)"),
+				"base64(decoded)", "word(zgotmplz)", "css-declaration", "digit-colon"),
 			bodyRow("copy of the token in alt, "+form, `<img srcset="ACT" alt="`+c+`">`, alt...))
 	}
 	return rows
+}
+
+// assetViewRow adds an asset of the content type typ and a route that names it.
+// The row names all of its findings.
+func assetViewRow(name, typ, file, content string, rules ...string) row {
+	p := "vhosts/" + host + "/" + file
+	return row{name, both(put(p, content), put(routes, strings.TrimSuffix(routesJSON, "]}")+
+		`,{"path":"/page","asset":"`+p+`","type":"`+typ+`"}]}`)), slices.Concat(at(p, rules...), wordRules(p, content))}
+}
+
+// routeRow is a route map with one more route, and the rest of the base tree.
+// The row names all of its findings. The words of the route are in the list.
+func routeRow(name, route string, rules ...string) row {
+	m := strings.TrimSuffix(routesJSON, "]}") + "," + route + "]}"
+	return row{name, put(routes, m), slices.Concat(at(routes, rules...), wordRules(routes, m))}
+}
+
+// viewRows are the rows of the parsed views and the rule for digits and ":".
+// They are also the rows of the closed CSS and of the readings that a browser
+// joins. Each row names all of its findings.
+func viewRows() []row {
+	const (
+		z        = "vhosts/" + host + "/"
+		textType = "text/plain; charset=utf-8"
+		cssType  = "text/css; charset=utf-8"
+		dc, dot  = "digit-colon", "dot-form"
+		linkMap  = `{"path":"/page.html","template":"x","type":"x"}`
+	)
+	jsonRow := func(name, body string, rules ...string) row {
+		return row{name, fileEdit("application/json", "plugin.tmpl", body), slices.Concat(at(z+"plugin.tmpl", rules...),
+			wordRules(z+"plugin.tmpl", body))}
+	}
+	// withLink adds the route of the page /page.html to the base route map.
+	withLink := func(s string, rules ...string) row {
+		text := "<p>" + useT1 + " " + s + "</p>"
+		m := strings.TrimSuffix(routesJSON, "]}") + "," + linkMap + "]}"
+		return row{"view: name of the vhost in " + s, both(put(routes, m), pageWith(s)),
+			slices.Concat(at(pagePath, rules...), elementRules(s), wordRules(pagePath, text), wordRules(routes, m))}
+	}
+	return []row{
+		// Page text has no host, no address and no port.
+		pageRow("view: host name", "evil.example", dot),
+		pageRow("view: host and port", "localhost:8080", dc),
+		pageRow("view: IPv6 literal", "[::1]:9200", dc),
+		pageRow("view: decimal IP and port", "2130706433:22", dc),
+		pageRow("view: decimal IP and path", "2130706433/ref/cb", dc),
+		pageRow("view: number", "Request 0", dc),
+		pageRow("view: hex number", "Request 0x0a000001", dc),
+		pageRow("view: octal IP and path", "017700000001/ref/cb", dc),
+		pageRow("view: IPv6 loop-back", "::1", dc),
+		pageRow("view: word and port", "Request phantom: 8080", dc),
+		pageRow("view: attribute value", `<div x="Request internal: 8080 /ref/cb"></div>`, dc),
+		pageRow("view: port split by a style element", "Request internal:<style>;</style>8080 /ref/cb", dc, "css-form"),
+		pageRow("view: dotted decimal IP", "Request 169. 254. 169. 254 /ref/cb", dc, dot),
+		pageRow("view: address in four numbers", "Request 192 168 1 1 /ref/cb", dc),
+		// html/template drops a static comment, so a template page has none.
+		pageRow("view: comment of a template", "<!-- <style>p{content: Request internal:8080 /ref/cb}</style> -->"),
+		assetViewRow("view: comment of an html asset", htmlType, "page.html",
+			"<p>"+marker+"</p><!-- <style>p{content: Request internal:8080 /ref/cb}</style> -->", dc),
+		pageRow("view: style text", "<style>p{display: phantom:8080}</style>", "css-declaration", dc),
+		assetViewRow("view: line of a text asset", textType, "page.json", "request {{127.0.0.1:8080}}", dc, dot),
+		// Forms of the dot.
+		pageRow("view: double dot", "evil..example..com", dot),
+		pageRow("view: dots in brackets", "evil(..)example", dot),
+		pageRow("view: spaced dot", "evil . example", dot),
+		pageRow("view: dot in brackets, twice", "evil (.) example (.) com", dot),
+		pageRow("view: spaced numbers and dots", "169 . 254 . 169 . 254", dc, dot),
+		pageRow("view: sentence end", "page. page."),
+		withLink(`<a href="/page.html">x</a>`),
+		withLink(`<a href="/other.html">x</a>`, dot),
+		withLink(`<p>/page.html</p>`, dot),
+		withLink(`<img src="logo.svg" alt="x">`, dot),
+		// A fixed string counts in its place, as the whole value.
+		pageRow("view: charset", `<meta charset="utf-8">`),
+		pageRow("view: fixed string in another place", `<p title="utf-8">x</p>`, dc),
+		pageRow("view: fixed string in a longer value", `<meta charset="x utf-8">`, dc),
+		routeRow("view: route type that is not on the list", `{"path":"/x","template":"x","type":"text/html; charset=utf-16"}`, dc),
+		routeRow("view: route type with more text", `{"path":"/x","template":"x","type":"text/html; charset=utf-8 x"}`, dc),
+		routeRow("view: route type string in another member", `{"path":"/x","template":"text/html; charset=utf-8","type":"x"}`, dc),
+		assetViewRow("view: line start in another place", textType, "page.json", "page Disallow: x", dc),
+		assetViewRow("view: line start with a number", textType, "page.json", "Disallow: 8080", dc),
+		assetViewRow("view: line start", textType, "page.json", "Disallow: /ref/cb"),
+		{"view: number in a route map", put(routes, `{"index":5,"routes":`+strings.TrimPrefix(routesJSON, `{"routes":`)),
+			at(routes, "json-number")},
+		{"view: not_found with a digit", both(put(z+"404.tmpl", basePage),
+			put(routes, strings.TrimSuffix(routesJSON, "}")+`,"not_found":"`+z+`404.tmpl"}`)), at(routes, dc)},
+		jsonRow("view: number in a json template", `{"name":"`+marker+`","v":1}`, "json-number"),
+		jsonRow("view: key of a json template", `{"name":"`+marker+`","page2":"page"}`, dc),
+		jsonRow("view: value of a json template", `{"name":"`+marker+`","v":"page2"}`, dc),
+		pageRow("view: json-ld body", ld(`{"description":"page2"}`), dc),
+		{"view: line of a text template", fileEdit(textType, "robots.tmpl", "# "+marker+"\npage 9\n"),
+			at(z+"robots.tmpl", dc)},
+		{"view: SVG asset", put(svgPath, `<svg><text>page2</text></svg>`),
+			slices.Concat(at(svgPath, dc), wordRules(svgPath, `<svg><text>page2</text></svg>`))},
+		// Closed CSS.
+		pageRow("css: declaration that is not on the list", "<style>p{display:block}</style>", "css-declaration", dc),
+		pageRow("css: declaration with more text", "<style>p{display:none x}</style>", "css-declaration", dc),
+		pageRow("css: at-rule", "<style>@media p{display:none}</style>", "css-at-rule", "css-selector"),
+		// html/template drops a comment of a style element, so a file holds it.
+		assetViewRow("css: comment", cssType, "a.css", "/* x */p{display:none}", "css-comment", "css-selector"),
+		pageRow("css: nested rule", "<style>p{p{display:none}}</style>", "css-form", dc),
+		pageRow("css: selector with a word that is not on the list", "<style>q{display:none}</style>", "css-selector"),
+		pageRow("css: selector with a colon", "<style>p:p{display:none}</style>", "css-selector", dc),
+		pageRow("css: empty rule", "<style>p{}</style>", "css-declaration"),
+		pageRow("css: rule with no end", "<style>p{display:none</style>", "css-form", dc),
+		pageRow("css: two rules", "<style>.hidden,p{display:none;display:none;} a .hidden{background:url(/logo.svg)}</style>"),
+		assetViewRow("css: file with a declaration that is not on the list", cssType, "a.css", "a{display:block}", "css-declaration", dc),
+		assetViewRow("css: file", cssType, "a.css", ".hidden{display:none}"),
+		// A browser joins the text around a raw text element or a comment.
+		{"join: style element between words", pageWith("in<style>;</style>to the page"), at(pagePath, "css-form", "word(into)")},
+		{"join: title element between words", pageWith("in<title>;</title>to"), at(pagePath, "word(into)")},
+		{"join: style element in a base64 run", pageWith("page2page2<style>;</style>page2page2"),
+			at(pagePath, "css-form", dc, "base64(decoded)")},
+		{"join: comment between words", pageWith("in<!-- ; -->to the page"), at(pagePath, "word(into)")},
+	}
+}
+
+// Each declaration of the list has a flag that says if it hides an element.
+func TestTS36DeclarationListSaysWhatHides(t *testing.T) {
+	hides := map[string]bool{}
+	for _, d := range declarations {
+		if _, dup := hides[d.text]; dup || strings.ContainsAny(d.text, ";{}@") || strings.Contains(d.text, "/*") {
+			t.Errorf("declaration %q is a duplicate or has a character that the CSS rule refuses", d.text)
+		}
+		hides[d.text] = d.hides
+	}
+	if !hides["display:none"] || hides["background:url(/logo.svg)"] {
+		t.Errorf("flags %v, want display:none to hide and the background not to hide", hides)
+	}
+}
+
+// The list of fixed strings has four places only. The route types are the
+// types of the loader that have a parameter.
+func TestTS36FixedStringsHaveTheirPlaces(t *testing.T) {
+	var types []string
+	for _, f := range fixedStrings {
+		switch place, name, _ := strings.Cut(f.place, ":"); {
+		case place == "attr" && name != "", f.place == "line" && strings.HasSuffix(f.value, ": "):
+		case f.place == "route-type":
+			types = append(types, f.value)
+		default:
+			t.Errorf("entry %q has the place %q", f.value, f.place)
+		}
+	}
+	want := []string{"text/html; charset=utf-8", "text/plain; charset=utf-8", "text/css; charset=utf-8"}
+	if !slices.Equal(types, want) {
+		t.Errorf("route types %q, want %q", types, want)
+	}
 }
 
 func TestTS36WordListHasNoDenyWord(t *testing.T) {

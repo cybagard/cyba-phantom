@@ -105,9 +105,8 @@ var (
 	// A start tag that a browser does not read as text in noscript.
 	noscriptInner = regexp.MustCompile(`(?i)<(?:style|script|title)(?:[\s/>]|$)`)
 
-	// A trap text has no "[" or "]". It has no ":" at the end. It has no
-	// ":" before a character that is not a space.
-	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
+	// A selector of a style text has only letters, ".", "," and white space.
+	selectorRe = regexp.MustCompile(`^[A-Za-z.,\s]+$`)
 	// A word is a run of ASCII letters. It must be in wordList.
 	letters = regexp.MustCompile(`[A-Za-z]+`)
 	// These words are checked on the text with all spaces removed.
@@ -140,7 +139,7 @@ var (
 		phantom reference trap request to read the full page with query part set
 		header send a post body in which is do not this link out of scope
 		x ref cb p internal vhosts index tmpl routes path template type callback segment
-		asset headers name text html charset utf true plain json found comment
+		asset headers name text html charset utf true plain json css found comment
 		href src alt img svg logo title noscript div rel nofollow aria label meta
 		description content script application ld style class hidden display none
 		background url animate attributename values robots disallow plugin doctype
@@ -153,6 +152,48 @@ var (
 		return m
 	}()
 )
+
+// fixedString is a string that a view can hold with a digit, a ":" or a ".".
+// It counts only in its place, and only as the whole value there. The place
+// "attr:<name>" is an attribute. The place "route-type" is the member type of
+// a route in routes.json. The place "line" is the start of a text/plain line:
+// the rest of the line is read as usual. A new entry is a code change in a
+// reviewed PR.
+type fixedString struct{ place, value string }
+
+var fixedStrings = []fixedString{
+	{"attr:charset", "utf-8"},
+	{"attr:xmlns", "http://www.w3.org/2000/svg"},
+	{"attr:xmlns:xlink", "http://www.w3.org/1999/xlink"},
+	{"line", "Disallow: "},
+	// The three types of the loader (internal/bundle/route.go) that have
+	// a parameter.
+	{"route-type", "text/html; charset=utf-8"},
+	{"route-type", "text/plain; charset=utf-8"},
+	{"route-type", "text/css; charset=utf-8"},
+}
+
+// declaration is one CSS declaration that a style text can hold. The flag says
+// if it hides an element. The check of the marker reads the flag.
+type declaration struct {
+	text  string
+	hides bool
+}
+
+var declarations = []declaration{
+	{"display:none", true},
+	{"background:url(/logo.svg)", false},
+}
+
+// viewText is a text that a browser or a loader reads. It is a text node,
+// an attribute value, a comment, a style text, a JSON string or a line. The
+// place is "text", "comment", "css", "line", "trap", "json", "json-key",
+// "route-type" or "attr:<name>". A whole value is a whole attribute value or
+// a whole JSON string value.
+type viewText struct {
+	text, place string
+	whole       bool
+}
 
 // result collects findings. A finding is "<rule> <path>". A finding is added
 // once. Each refused-input test asserts the rule, not only a failure.
@@ -195,11 +236,13 @@ type use struct{ id, class, file string }
 // to the bundle. "Each vhost that uses" a trap means each vhost with a use of
 // it. A trap that no vhost uses has no path. The types of a template or an
 // asset are the content types of the routes that name it. They have no
-// parameter.
+// parameter. The names are the route paths and the file names of the vhost.
+// A name can hold a "." as a whole value.
 type vhost struct {
 	callbacks map[string]callback
 	uses      []use
 	types     map[string][]string
+	names     map[string]bool
 }
 
 // parseOpts are the decoder options of the loader, without the refusal of
@@ -292,13 +335,17 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 		r.add("routes-json", name)
 		return
 	}
-	if m.Beacon != nil && (hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post)) {
-		r.add("path-host-form", name)
+	if m.Beacon != nil {
+		v.names[m.Beacon.Script], v.names[m.Beacon.Post] = true, true
+		if hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post) {
+			r.add("path-host-form", name)
+		}
 	}
 	if m.NotFound != "" {
 		v.types[m.NotFound] = append(v.types[m.NotFound], "text/html")
 	}
 	for _, rt := range m.Routes {
+		v.names[rt.Path] = true
 		if rt.Callback != nil && hostLike(rt.Path) {
 			r.add("path-host-form", name)
 		}
@@ -352,7 +399,7 @@ func checkTree(fsys fs.FS) []string {
 	}
 	r.shape(names, dirs, files)
 	hosts := r.vhostNames(names, dirs)
-	owner := map[string]*vhost{}
+	owner, routeMaps := map[string]*vhost{}, map[string]*vhost{}
 	var templates, assets []string
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		b := files[name]
@@ -367,8 +414,10 @@ func checkTree(fsys fs.FS) []string {
 		if v == nil {
 			continue
 		}
+		v.names[name], v.names[parts[2]], v.names["/"+parts[2]] = true, true, true
 		if parts[2] == routesName {
 			v.readRoutes(r, name, b)
+			routeMaps[name] = v
 			continue
 		}
 		r.page(name, b)
@@ -381,8 +430,14 @@ func checkTree(fsys fs.FS) []string {
 	}
 	r.vhostFiles(files)
 	// The route maps are read, so the type of each file is known.
+	for name, v := range routeMaps {
+		r.jsonViews(name, string(files[name]), v, true)
+	}
 	for _, name := range assets {
 		types := owner[name].types[name]
+		for _, kind := range viewKinds(name, types) {
+			r.views(name, kind, string(files[name]), owner[name])
+		}
 		if slices.Contains(types, "text/html") && !hasMarker(string(files[name])) {
 			r.add("marker", name)
 		}
@@ -417,7 +472,7 @@ func checkTree(fsys fs.FS) []string {
 		}
 	}
 	for _, name := range templates {
-		r.render(name, string(files[name]), texts, slices.Contains(owner[name].types[name], "text/html"))
+		r.render(name, string(files[name]), texts, owner[name])
 	}
 	r.out = append(r.out, listDeny(wordList)...)
 	return r.out
@@ -446,6 +501,199 @@ func (r *result) textRules(name, s string) {
 	for _, d := range readings(s) {
 		for _, w := range denied(d) {
 			r.add("text-deny("+w+")", name)
+		}
+	}
+}
+
+var (
+	typeKinds = map[string]string{"text/css": "css", "application/json": "json", "text/plain": "text"}
+	extKinds  = map[string]string{".css": "css", ".json": "json", ".txt": "text"}
+)
+
+// viewKinds gives the kinds of views of a file: "html", "css", "json" or
+// "text". The content types of its routes decide. With no route, the file
+// name decides. Each other type is read as HTML, and so is a file of another
+// name.
+func viewKinds(name string, types []string) (kinds []string) {
+	if len(types) == 0 {
+		types = []string{""}
+	}
+	for _, t := range types {
+		k := typeKinds[t]
+		if t == "" {
+			k = extKinds[path.Ext(name)]
+		}
+		if k == "" {
+			k = "html"
+		}
+		if !slices.Contains(kinds, k) {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds
+}
+
+// views runs the view rules on the text s of a file of the kind kind.
+func (r *result) views(name, kind, s string, v *vhost) {
+	switch kind {
+	case "css":
+		r.style(name, s, v)
+	case "json":
+		if !r.jsonViews(name, s, v, false) {
+			r.viewRule(name, viewText{text: s, place: "text"}, v)
+		}
+	case "text":
+		for _, l := range strings.Split(s, "\n") {
+			r.viewRule(name, viewText{text: l, place: "line"}, v)
+		}
+	default:
+		r.htmlViews(name, s, v)
+	}
+}
+
+// htmlViews runs the view rules on each text node, attribute value, comment
+// and style text of s. It parses with scripting on and with scripting off.
+// The text of a json-ld block is read as JSON.
+func (r *result) htmlViews(name, s string, v *vhost) {
+	for _, scripting := range []bool{true, false} {
+		root, err := xhtml.ParseWithOptions(strings.NewReader(s), xhtml.ParseOptionEnableScripting(scripting))
+		if err != nil {
+			r.add("html-parse", name)
+			return
+		}
+		var walk func(n *xhtml.Node)
+		walk = func(n *xhtml.Node) {
+			switch p := n.Parent; {
+			case n.Type == xhtml.CommentNode:
+				r.viewRule(name, viewText{text: n.Data, place: "comment"}, v)
+			case n.Type == xhtml.TextNode && p != nil && p.Data == "style":
+				r.style(name, n.Data, v)
+			case n.Type == xhtml.TextNode && p != nil && p.Data == "script" && attrOf(p, "type") == "application/ld+json":
+				if !r.jsonViews(name, n.Data, v, false) {
+					r.viewRule(name, viewText{text: n.Data, place: "text"}, v)
+				}
+			case n.Type == xhtml.TextNode:
+				r.viewRule(name, viewText{text: n.Data, place: "text"}, v)
+			}
+			for _, a := range n.Attr {
+				key := a.Key
+				if a.Namespace != "" {
+					key = a.Namespace + ":" + key
+				}
+				r.viewRule(name, viewText{text: a.Val, place: "attr:" + key, whole: true}, v)
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				walk(c)
+			}
+		}
+		walk(root)
+	}
+}
+
+// jsonViews runs the view rules on each key and each string value of the JSON
+// text s. A number is a finding. It gives false if s is not JSON. In a route
+// map (routes), the member type of a route has the place "route-type".
+func (r *result) jsonViews(name, s string, v *vhost, routes bool) bool {
+	var x any
+	if json.Unmarshal([]byte(s), &x, parseOpts...) != nil {
+		return false
+	}
+	var walk func(x any, at string)
+	walk = func(x any, at string) {
+		switch x := x.(type) {
+		case map[string]any:
+			for k, e := range x {
+				r.viewRule(name, viewText{text: k, place: "json-key"}, v)
+				walk(e, at+"/"+k)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e, at)
+			}
+		case float64:
+			r.add("json-number", name)
+		case string:
+			place := "json"
+			if routes && at == "/routes/type" {
+				place = "route-type"
+			}
+			r.viewRule(name, viewText{text: x, place: place, whole: true}, v)
+		}
+	}
+	walk(x, "")
+	return true
+}
+
+// style checks a style text. It has only rules of the form
+// "selector{declarations}". A selector has element names and class names of
+// wordList, with ".", "," and white space. Each declaration is an entry of
+// declarations. It has no at-rule and no comment. The text that these rules
+// do not accept is also a view.
+func (r *result) style(name, s string, v *vhost) {
+	if strings.Contains(s, "/*") {
+		r.add("css-comment", name)
+	}
+	if strings.Contains(s, "@") {
+		r.add("css-at-rule", name)
+	}
+	rest := ""
+	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
+		sel, after, _ := strings.Cut(s, "{")
+		body, next, closed := strings.Cut(after, "}")
+		if !closed || strings.Contains(body, "{") {
+			r.add("css-form", name)
+			rest += " " + s
+			break
+		}
+		s = next
+		if !selectorRe.MatchString(sel) || slices.ContainsFunc(letters.FindAllString(sel, -1), func(w string) bool {
+			return !wordSet[strings.ToLower(w)]
+		}) {
+			r.add("css-selector", name)
+			rest += " " + sel
+		}
+		parts := strings.Split(body, ";")
+		for i, d := range parts {
+			if d = strings.TrimSpace(d); d == "" && i > 0 && i == len(parts)-1 {
+				continue // A ";" ends the last declaration.
+			}
+			if !slices.ContainsFunc(declarations, func(e declaration) bool { return e.text == d }) {
+				r.add("css-declaration", name)
+				rest += " " + d
+			}
+		}
+	}
+	if rest != "" {
+		r.viewRule(name, viewText{text: rest, place: "css"}, v)
+	}
+}
+
+// viewRule checks a view. A view has no digit, ":", "[" or "]", unless it is
+// an entry of fixedStrings in its place. A "." is directly after a
+// letter and before white space or the end. A whole value that is a route
+// path or a file name of the vhost can also hold a ".".
+func (r *result) viewRule(name string, p viewText, v *vhost) {
+	s := p.text
+	for _, f := range fixedStrings {
+		switch {
+		case f.place != p.place:
+		case p.place == "line":
+			s = strings.TrimPrefix(s, f.value)
+		case s == f.value:
+			return
+		}
+	}
+	if strings.ContainsAny(s, "0123456789:[]") {
+		r.add("digit-colon", name)
+	}
+	if p.whole && v != nil && v.names[s] {
+		return
+	}
+	for i := range len(s) {
+		afterLetter := i > 0 && ('a' <= s[i-1]|0x20 && s[i-1]|0x20 <= 'z')
+		beforeSpace := i+1 == len(s) || strings.IndexByte(" \t\n\r\f\v", s[i+1]) >= 0
+		if s[i] == '.' && !(afterLetter && beforeSpace) {
+			r.add("dot-form", name)
 		}
 	}
 }
@@ -480,7 +728,7 @@ func (r *result) vhostNames(names []string, dirs map[string]bool) map[string]*vh
 		if dir != "vhosts/" {
 			continue
 		}
-		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{}}
+		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{}, names: map[string]bool{}}
 		if first, _, _ := strings.Cut(host, "."); !dirs[n] || !validVhost(host) {
 			r.add("vhost-name", n)
 		} else if labels[first] {
@@ -540,9 +788,15 @@ func (r *result) words(name, s string) {
 	}
 }
 
-// tagless removes the comments and the tags of s.
+// tagless removes the comments, the raw text elements with their content, and
+// the tags of s. A browser does not show what it removes, so it joins the
+// text on each side as one run.
 func tagless(s string) string {
-	return markup.ReplaceAllString(htmlComment.ReplaceAllString(s, ""), "")
+	s = htmlComment.ReplaceAllString(s, "")
+	for _, re := range rawElements {
+		s = re.ReplaceAllString(s, "")
+	}
+	return markup.ReplaceAllString(s, "")
 }
 
 // readings gives the forms of a text that the text rules read. They are the
@@ -714,10 +968,11 @@ func schemeFound(low string) bool {
 // texts of the tree, and with no trap text. In the second run, each index
 // action gives "" and each comment action gives an empty HTML comment. It
 // runs the markup rules and the base64 rule on each output. It also runs the
-// text rules on it, with each token as pageWord. A template that does not
-// parse or run is a finding. For a text/html template (isHTML), the output
+// text rules and the views on it, with each token as pageWord. A template that
+// does not parse or run is a finding. For a text/html template, the output
 // with the trap texts also has no "<" in an attribute value.
-func (r *result) render(name, text string, traps map[string]string, isHTML bool) {
+func (r *result) render(name, text string, traps map[string]string, v *vhost) {
+	isHTML := slices.Contains(v.types[name], "text/html")
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
 	if err != nil {
@@ -731,6 +986,9 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 		}
 		for _, o := range pages {
 			r.textRules(name, o)
+			for _, kind := range viewKinds(name, v.types[name]) {
+				r.views(name, kind, o, v)
+			}
 		}
 	}()
 	for _, run := range []struct {
@@ -1391,7 +1649,7 @@ func (r *result) instruction(text string, users []*vhost) string {
 	add("instr-length", len(text) > maxInstr)
 	add("instr-bytes", strings.ContainsFunc(text, func(c rune) bool { return c < 0x20 || c > 0x7e }))
 	add("instr-token", strings.Count(text, tokenAction) != 1 || strings.Count(text, "{{") != 1)
-	add("instr-host-form", hostForm.MatchString(text))
+	r.viewRule(trapsFile, viewText{text: strings.ReplaceAll(text, tokenAction, pageWord), place: "trap"}, nil)
 	add("trap-form", form == "")
 	add("marker", !strings.Contains(text, marker))
 	add("base64", base64Run.MatchString(text))
