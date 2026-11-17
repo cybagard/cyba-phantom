@@ -961,7 +961,7 @@ func placeOf(h hit, a action) (class, rule string) {
 	n := h.node
 	switch {
 	case h.name:
-	case h.attr != nil && !a.comment && n.Namespace == "":
+	case h.attr != nil && n.Namespace == "":
 		switch k := h.attr.Key; {
 		case k == "alt" || k == "title" || k == "aria-label":
 			class = "F"

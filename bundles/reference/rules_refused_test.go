@@ -750,6 +750,7 @@ func positionRows() []row {
 		posRow("aria-label", `<p aria-label="ACT">x</p>`),
 		posRow("meta description", `<meta name="description" content="ACT">`),
 		linkRow("nofollow link with href after rel", `<a href="ACT" rel="nofollow">x</a>`),
+		linkRow("nofollow link in capitals", `<A REL="NoFollow" HREF="ACT">x</A>`),
 		posRow("json-ld block", ld(`{"description":ACT}`)),
 		posRow("json-ld block with two members", ld(`{"a":ACT,"b":{"c":ACT}}`)),
 		posRow("style element that ends with a space in the end tag", `<style>p{color:red}</style > ACT`),
@@ -781,6 +782,10 @@ func positionRows() []row {
 			"# "+marker+"\nDisallow: ACT and more words\n", bad),
 		posRow("action in link href", `<link rel="stylesheet" href="ACT">`, bad, "element(link)"),
 		posRow("action in the href of a link with no nofollow", `<a href="ACT">x</a>`, bad),
+		// The link text is the form L1, so only the missing rel refuses it.
+		{"form L1 in the href of a link with no nofollow", both(instr(formL1), put(pagePath,
+			`<p>`+marker+`</p>`+actor.Replace(`<a href="ACT">x</a>`))),
+			append(at(pagePath, bad), at(trapsFile, "trap-form")...)},
 		posRow("action in a form action", `<form action="ACT"></form>`, bad, "element(form)"),
 		posRow("action in formaction", `<button formaction="ACT">x</button>`, bad, "element(button)"),
 		posRow("action in poster", `<video poster="ACT"></video>`, bad, "element(video)"),
@@ -788,6 +793,8 @@ func positionRows() []row {
 		posRow("action in the content of another meta", `<meta name="keywords" content="ACT">`, bad),
 		posRow("action in an HTML comment", `<!-- ACT -->`, bad),
 		posRow("comment action in an attribute", `<p title="CMT">x</p>`, bad),
+		// html/template writes the comment as text in a title.
+		posRow("comment action in a title", `<title>CMT</title>`, bad),
 		posRow("action in an end tag", `</p ACT>`, bad),
 		fileRow("action in a text/css template", "text/css; charset=utf-8", "a.tmpl",
 			"/* "+marker+" */\na{content:\"ACT\"}", bad),
