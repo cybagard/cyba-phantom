@@ -31,7 +31,8 @@
 #     integrity story for the workflow files themselves.
 #
 # Jobs:
-#   - lint: gofmt, go vet, comment line length and comment sentence length;
+#   - lint: gofmt, go vet, comment line length and comment sentence length,
+#     and go mod tidy;
 #   - dco: sign-off and commit identity, on PRs only;
 #   - test: go test -race and the coverage gate;
 #   - fill: the T-I-16 fill tests on a small tmpfs; a skip fails the job;
@@ -39,7 +40,8 @@
 #   - trace: the C10 matrix and the sync stamp;
 #   - trace-tests: a Go test or a marker for each test ID of the milestone;
 #   - mirror-diff: the constitution table;
-#   - build: T-P-07, a reproducible, static, sized build under a cgroup budget.
+#   - build: T-P-07, a reproducible, static, sized build under a cgroup budget,
+#     and the release build of the two commands.
 # The test, fill, oracle and build jobs share one checkout step through a YAML
 # anchor.
 # The dco, trace, trace-tests and mirror-diff jobs share their base-checkout
@@ -92,6 +94,9 @@ jobs:
 
       - name: gofmt + go vet + comment line and sentence length
         run: make lint BASE="$BASE_SHA" HEAD="$HEAD_SHA"
+
+      - name: go mod tidy
+        run: make tidy
 
   dco:
     # Checker-from-base: every commit in the PR range needs a
@@ -306,6 +311,9 @@ jobs:
 
       - name: Reproducible, static, sized build
         run: make perf
+
+      - name: Release build
+        run: make build
 
       - name: Binary facts
         run: |

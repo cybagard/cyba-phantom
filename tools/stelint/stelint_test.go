@@ -462,14 +462,17 @@ func TestTestdataIsSkipped(t *testing.T) {
 	}
 }
 
-func TestEmptyBaseDoesNotRun(t *testing.T) {
+func TestEmptyBaseIsAnError(t *testing.T) {
 	dir, _ := baseRepo(t)
-	code, out, _ := runLint(dir, "", "HEAD")
-	if code != 0 {
-		t.Errorf("code = %d, want 0", code)
+	code, out, errOut := runLint(dir, "", "HEAD")
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
 	}
-	if !strings.Contains(out, "did not run") || strings.Count(out, "\n") != 1 {
-		t.Errorf("want one line that says the check did not run, got:\n%s", out)
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	if !strings.Contains(errOut, "BASE") || !strings.Contains(errOut, "origin/main") || strings.Count(errOut, "\n") != 1 {
+		t.Errorf("want one stderr line that names BASE and origin/main, got:\n%s", errOut)
 	}
 }
 
