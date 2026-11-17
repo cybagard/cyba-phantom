@@ -23,10 +23,11 @@ HASH := $(shell command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || pr
 
 .PHONY: all build test lint tidy stelint-report check trace stamp mirror-diff dco coverage fill perf perf-inner fixtures mutate clean
 
-# The all target runs the checks of CI that need no special setup. The
-# coverage target replaces the test target, because it runs the same tests.
-# The all target does not run fill and dco. The reader oracle test runs only
-# in the devcontainer and in CI. It skips elsewhere.
+# The all target runs the checks of the ci workflow that need no special
+# setup. The coverage target replaces the test target, because it runs the
+# same tests. The all target does not run fill and dco. The reader oracle test
+# needs GNU tar 1.35 and Python 3.13. Without them it skips, but in the
+# devcontainer and in CI it fails.
 all: build lint tidy coverage perf trace mirror-diff
 
 # -s -w removes the symbol table and DWARF. Panic traces keep function names.
