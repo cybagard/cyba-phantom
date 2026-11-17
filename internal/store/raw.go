@@ -93,11 +93,13 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // the rows that it changed. A count below `limit` means that no row is left in
 // either part. The tally of the fields counts the rows of both parts.
 //
-// Known limits. A row with a ts after the cutoff, and not after the line,
-// keeps its fields. A run that takes a wall clock that is ahead takes a line
-// that is ahead too. Then the rows of that clock keep their fields. A start
-// with the wall clock back and no stored value takes a line that is back. Then
-// the rows of an earlier process after that line lose their fields.
+// Known limits. A run that takes a wall clock that is ahead takes a line that
+// is ahead too. Then the rows of that clock keep their fields. A start with
+// the wall clock back and no stored value takes a line that is back. Then the
+// rows of an earlier process after that line lose their fields. A step back
+// of the wall clock by more than 1 h in a process does the same. With no
+// stored value, the next run clears the rows younger than the step minus 1 h.
+// With a stored value, this occurs after a write of the back time.
 //
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.

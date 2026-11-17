@@ -1031,7 +1031,7 @@ func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
 // T-U-27: one run has the wall clock 40 d ahead, and the later runs have the
 // right clock. The visitor writes a callback row 1 d after the first run. The
 // row has no field after the next run, at each age from 31 d. The field clear
-// does not keep a mark that is ahead of the true time.
+// has no mark.
 func TestTU27FieldClearAfterOneRunWithTheWallClockAhead(t *testing.T) {
 	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
 		t.Run(age.String(), func(t *testing.T) {

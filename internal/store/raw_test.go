@@ -109,8 +109,9 @@ func callTally(t *testing.T, db *sql.DB, step retentionStep, limit int) (n, fiel
 	return n, int(tl[memFields])
 }
 
-// T-U-11: 2 502 rows with one ts go in chunks of 1 000, 1 000 and 502. The
-// last call returns 502, below the limit, as no row is left.
+// T-U-11: 2 500 rows share one ts. With 2 other old rows, they go in chunks
+// of 1 000, 1 000 and 502. The last call returns 502, below the limit, as no
+// row is left.
 func TestTU11FieldClearManyRowsWithOneTS(t *testing.T) {
 	r, chunks := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
 	cut := rollCutoff(30)
