@@ -908,11 +908,13 @@ func TestTU30_SnapshotAtCurrentBootClock(t *testing.T) {
 
 // 8 readers see a non-decreasing S while one goroutine makes grace jumps.
 // Each reader reads once and signals before the first check. The checks go
-// on until each reader has read 100 times while they run.
+// on until each reader has read 100 times while they run. A reader counts a
+// read only when the flag checking is set before and after the read. A bound
+// on the checks ends the loop, so a reader that cannot count fails the test.
 func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
-	const readers, minReads, minChecks = 8, 100, 2000
+	const readers, minReads, minChecks, maxChecks = 8, 100, 2000, 1000000
 	f, c := graceClock(t, s0, time.Minute)
-	var stop atomic.Bool
+	var stop, checking atomic.Bool
 	var wg sync.WaitGroup
 	var reads [readers]atomic.Int64
 	ready := make(chan struct{}, readers)
@@ -929,13 +931,16 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 			}
 			ready <- struct{}{}
 			for !stop.Load() {
+				before := checking.Load()
 				s, err := c.Now()
 				if err != nil || s < last {
 					errc <- "reader saw S go down or an error"
 					return
 				}
 				last = s
-				reads[i].Add(1)
+				if before && checking.Load() {
+					reads[i].Add(1)
+				}
 				runtime.Gosched()
 			}
 		}()
@@ -952,7 +957,8 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 		return true
 	}
 	jumps, checks := 0, 0
-	for i := 1; i <= minChecks || !enough(); i++ {
+	checking.Store(true)
+	for i := 1; i <= maxChecks && (i <= minChecks || !enough()); i++ {
 		f.boot.Add(int64(time.Millisecond))
 		f.wall.Store(s0 + int64(i)*2*hourMS)
 		r, err := c.Check()
@@ -965,6 +971,7 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 		}
 		runtime.Gosched()
 	}
+	checking.Store(false)
 	var got [readers]int64
 	for i := range reads {
 		got[i] = reads[i].Load()
