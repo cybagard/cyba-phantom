@@ -1808,7 +1808,7 @@ func placeRows() []row {
 		gramRow("form F1 as an href in an asset", htmlAsset(`<p><a href="`+render+`">x</a></p>`), assetPath, "base64 grammar-value"),
 		gramRow("form F1 as a Disallow value", fileEdit("text/plain; charset=utf-8", "robots.tmpl", "# "+marker+"\nDisallow: ACT\n"),
 			below+"robots.tmpl", "trap-class grammar-line"),
-		// The older rules had a row for each of these. The grammar refuses them.
+		// These are rows of the older rules. The grammar refuses them.
 		gramRow("relative URLs in an svg style", put(svgPath, `<svg><style>a{background:url(/logo.svg)}</style></svg>`), svgPath,
 			"grammar-css-declaration grammar-element"),
 		gramRow("asset animate with a harmless attribute", put(svgPath, `<animate attributeName="display" values="none"/>`), svgPath,
