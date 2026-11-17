@@ -2,6 +2,7 @@ package sensortime
 
 import (
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -80,7 +81,7 @@ func TestTU30_CatchUpKeepsGraceSum(t *testing.T) {
 
 // Two grace jumps with no Now between them report no read. With a Now between
 // them they report a read. A Now between the Check of a jump and Committed
-// shows in the value of Committed. It is not in the Read of the next jump.
+// shows in the value of Committed. It also shows in the Read of the next jump.
 func TestTU30_ReadMarkAtJump(t *testing.T) {
 	m := graceSim(t)
 	m.set(0, s0+2*hourMS)
@@ -111,8 +112,12 @@ func TestTU30_ReadMarkAtJump(t *testing.T) {
 	}
 	m.hold = false
 	m.set(0, s0+12*hourMS)
+	if m.res.Jump == nil || !m.res.Read {
+		t.Fatalf("Committed cleared the mark: %+v", m.res)
+	}
+	m.set(0, s0+14*hourMS)
 	if m.res.Jump == nil || m.res.Read {
-		t.Fatalf("read counted twice: %+v", m.res)
+		t.Fatalf("read counted three times: %+v", m.res)
 	}
 	// A publish with no jump does not clear the mark or report it.
 	k := graceSim(t)
@@ -364,6 +369,267 @@ func TestTU30_GraceCheckReadsWallOnce(t *testing.T) {
 		}
 		if got := f.wallCalls.Load() - calls; got != 1 {
 			t.Fatalf("wall offset %d: %d reads", off, got)
+		}
+	}
+}
+
+// gate holds one Now between its mark and its load. The Now waits in its
+// boot clock read.
+type gate struct {
+	c       *Clock
+	armed   atomic.Bool
+	in, out chan struct{}
+	got     chan int64
+}
+
+// gatedSim is a graceSim with a gate. The simulated writer is stopped: a test
+// calls Committed itself.
+func gatedSim(t *testing.T) (*sim, *gate) {
+	t.Helper()
+	g := &gate{in: make(chan struct{}), out: make(chan struct{}),
+		got: make(chan int64, 1)}
+	f := newFake(s0, time.Hour, goodID)
+	src := f.source()
+	inner := src.BootClock
+	src.BootClock = func() (time.Duration, error) {
+		if g.armed.CompareAndSwap(true, false) {
+			g.in <- struct{}{}
+			<-g.out
+		}
+		return inner()
+	}
+	m := &sim{t: t, f: f, rec: &recorder{}, hold: true}
+	c, r, err := Start(src, StartInput{Stored: stored(s0, goodID, time.Hour),
+		Log: slog.New(m.rec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.c, m.res, g.c = c, r, c
+	return m, g
+}
+
+// start runs a Now and waits until it sits between its mark and its load.
+func (g *gate) start() {
+	g.armed.Store(true)
+	go func() {
+		s, err := g.c.Now()
+		if err != nil {
+			s = -1
+		}
+		g.got <- s
+	}()
+	<-g.in
+}
+
+// release lets the held Now load its base and gives the S of that Now.
+func (g *gate) release(t *testing.T) int64 {
+	t.Helper()
+	g.out <- struct{}{}
+	s := <-g.got
+	if s < 0 {
+		t.Fatal("the held Now gave an error")
+	}
+	return s
+}
+
+// A Now marks and is held before the Check of jump k. The Check reports the
+// read, and the mark stays. The Now loads the new S after Committed. The Check
+// of jump k+1 reports the read again.
+func TestTU30_ReadInFlightAtJumpIsNotLost(t *testing.T) {
+	m, g := gatedSim(t)
+	g.start()
+	m.set(0, s0+2*hourMS)
+	if m.res.Jump == nil || !m.res.Read {
+		t.Fatalf("jump k: %+v", m.res)
+	}
+	m.c.Committed()
+	if got := g.release(t); got != s0+2*hourMS {
+		t.Fatalf("held Now %d, want the new S", got)
+	}
+	m.set(0, s0+4*hourMS)
+	if m.res.Jump == nil || !m.res.Read {
+		t.Fatalf("read lost at jump k+1: %+v", m.res)
+	}
+}
+
+// A Now marks after the Check of jump k and is held. Committed reports the
+// read and does not clear the mark. The Now loads the new S. The Check of jump
+// k+1 reports the read.
+func TestTU30_ReadMarkedAfterCheckIsNotLost(t *testing.T) {
+	m, g := gatedSim(t)
+	m.set(0, s0+2*hourMS)
+	if m.res.Jump == nil || m.res.Read {
+		t.Fatalf("jump k: %+v", m.res)
+	}
+	g.start()
+	if !m.c.Committed() {
+		t.Fatal("Committed did not report the read of the held Now")
+	}
+	if got := g.release(t); got != s0+2*hourMS {
+		t.Fatalf("held Now %d, want the new S", got)
+	}
+	m.set(0, s0+4*hourMS)
+	if m.res.Jump == nil || !m.res.Read {
+		t.Fatalf("read lost at jump k+1: %+v", m.res)
+	}
+}
+
+// A Now marks after the Check of jump k and loads the old S, before
+// Committed. Committed reports it.
+func TestTU30_ReadOfOldSInCommitted(t *testing.T) {
+	m := graceSim(t)
+	m.hold = true
+	m.set(0, s0+2*hourMS)
+	if got := mustNow(t, m.c); got != s0 {
+		t.Fatalf("Now %d before Committed", got)
+	}
+	if !m.c.Committed() {
+		t.Fatal("Committed did not report the read")
+	}
+}
+
+// With no Now, the Read and the Committed of each jump are false.
+func TestTU30_NoNowNoRead(t *testing.T) {
+	m := graceSim(t)
+	m.hold = true
+	for i := int64(1); i <= 4; i++ {
+		m.set(0, s0+2*i*hourMS)
+		if m.res.Jump == nil || m.res.Read || m.c.Committed() {
+			t.Fatalf("jump %d: %+v", i, m.res)
+		}
+	}
+}
+
+// A jump of a small move: U is 59 min and the move is 2 min, so W is 2 min.
+// Only the jump needs the write. Now keeps the old S until Committed.
+func TestTU30_JumpOfSmallMoveWaitsForCommit(t *testing.T) {
+	m := graceSim(t)
+	m.set(0, s0+59*60000)
+	if m.res.Jump != nil || m.res.State.GraceSum != 59*60000 {
+		t.Fatalf("setup: %+v", m.res)
+	}
+	m.hold = true
+	m.set(0, s0+61*60000)
+	if m.res.Jump == nil || m.res.Jump.Size != 61*60000 || !m.res.Write {
+		t.Fatalf("small jump: %+v", m.res)
+	}
+	if got := mustNow(t, m.c); got != s0+59*60000 {
+		t.Fatalf("Now %d before Committed", got)
+	}
+	m.c.Committed()
+	if got := mustNow(t, m.c); got != s0+61*60000 {
+		t.Fatalf("Now %d after Committed", got)
+	}
+}
+
+// A move while an older move waits does not reach Now before Committed. Else a
+// later publish would put S back. Committed gives the newest S, and it gives
+// the read value of the jump.
+func TestTU30_MoveWhileJumpWaits(t *testing.T) {
+	// A jump of 2 h, then a move of 1 min.
+	m := graceSim(t)
+	m.hold = true
+	m.set(0, s0+2*hourMS)
+	m.set(0, s0+2*hourMS+60000)
+	if !m.res.Write || m.res.Jump != nil {
+		t.Fatalf("second move: %+v", m.res)
+	}
+	if got := mustNow(t, m.c); got != s0 {
+		t.Fatalf("Now %d before Committed", got)
+	}
+	if !m.c.Committed() {
+		t.Fatal("Committed lost the read of the jump")
+	}
+	if got := mustNow(t, m.c); got != s0+2*hourMS+60000 {
+		t.Fatalf("Now %d after Committed", got)
+	}
+
+	// A small jump, then a small move: W stays under 10 min.
+	k := graceSim(t)
+	k.set(0, s0+59*60000)
+	k.hold = true
+	k.set(0, s0+61*60000)
+	k.set(0, s0+62*60000)
+	if !k.res.Write || k.res.Jump != nil {
+		t.Fatalf("small move: %+v", k.res)
+	}
+	if got := mustNow(t, k.c); got != s0+59*60000 {
+		t.Fatalf("Now %d sees a move that waits", got)
+	}
+	if !k.c.Committed() {
+		t.Fatal("Committed lost the read of the small jump")
+	}
+	if got := mustNow(t, k.c); got != s0+62*60000 {
+		t.Fatalf("Now %d after Committed", got)
+	}
+}
+
+// A jump is committed. Then a held move that is no jump is committed. Its
+// Committed gives false, and the mark stays for the next jump.
+func TestTU30_CommittedOfNonJumpMoveIsFalse(t *testing.T) {
+	m := graceSim(t)
+	m.set(0, s0+2*hourMS)
+	mustNow(t, m.c)
+	m.hold = true
+	m.set(0, s0+2*hourMS+12*60000)
+	if !m.res.Write || m.res.Jump != nil {
+		t.Fatalf("move: %+v", m.res)
+	}
+	if m.c.Committed() {
+		t.Fatal("Committed of a move with no jump gave true")
+	}
+	m.set(0, s0+4*hourMS)
+	if m.res.Jump == nil || !m.res.Read {
+		t.Fatalf("mark lost: %+v", m.res)
+	}
+}
+
+// Now makes no allocation.
+func TestTU30_NowAllocatesNothing(t *testing.T) {
+	m := graceSim(t)
+	if n := testing.AllocsPerRun(100, func() { mustNow(t, m.c) }); n != 0 {
+		t.Fatalf("%v allocations for each Now", n)
+	}
+}
+
+// A Check that needs a new jump id above 9223372036854 gives ErrState and
+// changes nothing. The state still encodes.
+func TestTU30_NoRoomForJumpID(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		st := stored(s0, goodID, time.Hour)
+		in := StartInput{Stored: st}
+		if known {
+			in.KnownJumpID = boundMS
+		} else {
+			st.Jump.ID = boundMS
+		}
+		rec := &recorder{}
+		in.Log = slog.New(rec)
+		f := newFake(s0, time.Hour, goodID)
+		c, _ := mustStart(t, f, in)
+		before, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.wall.Store(s0 + 2*hourMS)
+		r, err := c.Check()
+		if err != ErrState || r.Jump != nil || r.Write {
+			t.Fatalf("known %v: %+v, %v", known, r, err)
+		}
+		if got := mustNow(t, c); got != s0 {
+			t.Fatalf("known %v: Now %d", known, got)
+		}
+		after, err := c.Snapshot()
+		if err != nil || after != before || len(rec.lines) != 0 {
+			t.Fatalf("known %v: state changed, %+v, %v", known, after, err)
+		}
+		if _, err := after.Encode(); err != nil {
+			t.Fatalf("known %v: %v", known, err)
+		}
+		// A move that is no jump still works.
+		f.wall.Store(s0 + 30*60000)
+		if r, err := c.Check(); err != nil || r.State.GraceSum != 30*60000 {
+			t.Fatalf("known %v: small move %+v, %v", known, r, err)
 		}
 	}
 }
