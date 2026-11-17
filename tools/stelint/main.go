@@ -193,8 +193,8 @@
 // hunk that ends after line 1048576 is not parsed. Each gives an error and
 // exit code 2. A file for which go/scanner reports an error is also not
 // parsed. It gives an error line with the path, and exit code 2, in both
-// forms. When base is empty, stelint prints one line that says the
-// check did not run, and exits 0.
+// forms. When base is empty, stelint prints one line on stderr that names
+// BASE and the ref origin/main, and exits 2.
 //
 // stelint does not find quoted text, third-party text or legal text. The
 // writing standard does not count them, but stelint counts them. Only the
@@ -203,7 +203,7 @@
 //
 // Exit codes:
 //
-//	0  pass, or the check did not run
+//	0  pass
 //	1  a changed line is too long, or a changed sentence has too many words
 //	   (third form: a sentence in the file has too many words)
 //	2  usage, git, input limit, read or scan error
@@ -308,8 +308,8 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 		return report(dir, head, targets, stdout, stderr)
 	}
 	if base == "" {
-		fmt.Fprintln(stdout, "stelint: the check did not run: BASE is empty and the ref origin/main does not exist")
-		return 0
+		fmt.Fprintln(stderr, "stelint: BASE is empty and the ref origin/main does not exist")
+		return 2
 	}
 	targets, err := listChanged(dir, base, head)
 	if err != nil {
