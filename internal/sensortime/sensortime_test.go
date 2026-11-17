@@ -773,6 +773,21 @@ func TestTU30_ReaderErrorAndBackwardBootClock(t *testing.T) {
 	}
 }
 
+// A check with the wall clock equal to S makes no new base. A new base would
+// drop the part of a millisecond of the boot clock. Then S goes down 1 ms.
+func TestTU30_CheckWithWallEqualToSKeepsBase(t *testing.T) {
+	f, c := graceClock(t, s0, time.Hour)
+	f.boot.Store(int64(time.Hour + 1600*time.Microsecond))
+	f.wall.Store(s0 + 1)
+	if r, err := c.Check(); err != nil || r.State.S != s0+1 {
+		t.Fatalf("check: %+v, %v", r, err)
+	}
+	f.boot.Store(int64(time.Hour + 2500*time.Microsecond))
+	if got := mustNow(t, c); got != s0+2 {
+		t.Fatalf("S %d after the check, want %d", got, s0+2)
+	}
+}
+
 func TestTU30_SnapshotAtCurrentBootClock(t *testing.T) {
 	f, c := graceClock(t, s0, 10*time.Hour)
 	f.boot.Add(int64(90 * time.Minute))
