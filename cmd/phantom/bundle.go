@@ -139,8 +139,8 @@ func (b *bundlePart) startFetchAndWatch(ctx context.Context, wg *sync.WaitGroup,
 	}
 	b.l.SetStop(ctx.Done())
 	var frozen func() bool
-	if u, _ := cfg.Get("bundle.fetch_url"); u.Str != "" {
-		every, _ := cfg.Get("bundle.fetch_interval")
+	if u, ok := cfg.Get("bundle.fetch_url"); ok && u.Str != "" {
+		every := cfg.Must("bundle.fetch_interval")
 		run, fz, err := newFetcher(u.Str, cfg.PrivateList("bundle.fetch_private"), every.Dur, b.l, b.lg)
 		if err != nil {
 			b.lg.Error("bundle fetcher does not start")

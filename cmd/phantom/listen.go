@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -120,7 +119,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		fmt.Fprintln(stderr, aesWarning)
 	}
 	counters := event.NewCounters()
-	depth, _ := cfg.Get("limits.queue_depth")
+	depth := cfg.Must("limits.queue_depth")
 	q, err := event.NewQueue(int(depth.Int), counters)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -140,14 +139,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		return 1
 	}
 	b := startBundle(p, s, q, lg)
-	var names []string
-	for i := 0; ; i++ {
-		v, _ := cfg.Get("acme.names[" + strconv.Itoa(i) + "]")
-		if v.Str == "" {
-			break
-		}
-		names = append(names, v.Str)
-	}
+	names := cfg.List("acme.names")
 	decoys := slices.Clone(names)
 	acmeNames := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -158,8 +150,8 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	for _, e := range c.static {
 		decoys = append(decoys, e.Name)
 	}
-	maxConns, _ := cfg.Get("limits.max_conns")
-	headerBytes, _ := cfg.Get("limits.header_bytes")
+	maxConns := cfg.Must("limits.max_conns")
+	headerBytes := cfg.Must("limits.header_bytes")
 	var cache *listener.Store
 	var acme *listener.ACME         // nil when the client does not exist
 	var source *listener.CertSource // set before the serve calls
@@ -199,8 +191,12 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		if cache, err = listener.Open(s.root, p.CacheDir); err != nil {
 			return "phantom: certificate cache does not open"
 		}
-		ca, _ := cfg.Get("acme.ca")
-		email, _ := cfg.Get("acme.email")
+		ca := cfg.Must("acme.ca")
+		// Load requires acme.email with acme.names. Without it, no client.
+		email, ok := cfg.Get("acme.email")
+		if !ok {
+			return clientLine
+		}
 		addr := httpsLn.Addr().(*net.TCPAddr)
 		if acme, err = newACME(listener.ACMEParams{
 			Names: names, CA: config.CADirectory(ca.Str), Email: email.Str, Storage: cache,
@@ -322,10 +318,10 @@ func decoyHandler(cfg *config.Config, b *bundlePart, s *storePart, q *event.Queu
 	}
 	h := bait.NewWithDayKey(b.l, hello, q, s.DayKey())
 	h.SetRing(b.l.Ring())
-	if v, _ := cfg.Get("privacy.session_cookie"); !v.Bool {
+	if !cfg.Must("privacy.session_cookie").Bool {
 		h.DisableSessionCookie()
 	}
-	if v, _ := cfg.Get("privacy.js_beacon"); !v.Bool {
+	if !cfg.Must("privacy.js_beacon").Bool {
 		h.DisableBeacon()
 	}
 	return h
@@ -336,8 +332,7 @@ func decoyHandler(cfg *config.Config, b *bundlePart, s *storePart, q *event.Queu
 func bindBoth(cfg *config.Config, stderr io.Writer) (https, plain net.Listener, ok bool) {
 	var lns []net.Listener
 	for _, k := range []string{"listen.https", "listen.http"} {
-		v, _ := cfg.Get(k)
-		ln, err := listen("tcp", v.Str)
+		ln, err := listen("tcp", cfg.Must(k).Str)
 		if err != nil {
 			fmt.Fprintf(stderr, "phantom: cannot bind %s\n", k)
 			for _, l := range lns {
