@@ -12,25 +12,28 @@ import (
 )
 
 const (
-	// rawDoneKey is the meta key of the mark. The mark is the delete cutoff
-	// of the last field clear that ended its window. It is in unix ms, as
-	// decimal text. It can be before the old mark. The next window starts
-	// there.
-	rawDoneKey = "retention_raw_done"
+	// retentionCheckKey is the meta key of the wall time of the last hourly
+	// check, in unix ms as decimal text. The field clear only reads it.
+	retentionCheckKey = "retention_check"
 
-	// clearReadSQL reads the ts and the id of the next rows of the window
-	// after a position. It reads at most a bound of rows, in the order of
-	// event_ts: ts, then the rowid. It reads also a row with no field.
-	clearReadSQL = "SELECT ts, id FROM event WHERE ts >= ? AND ts < ? AND (ts, id) > (?, ?) " +
-		"ORDER BY ts, id LIMIT ?"
+	// rawIndexWhere is the WHERE text of event_raw_ts (migration 0005). The
+	// clear statements repeat it in the same order. Then the index can serve.
+	rawIndexWhere = "body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL"
 
-	// clearRawSQL sets the three fields to NULL on the rows that hold a value.
-	// It takes the rows after a position, up to a last row included. The
-	// caller takes the last row from clearReadSQL. So a call touches at most
-	// the bound.
-	clearRawSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL " +
-		"WHERE ts >= ? AND ts <= ? AND (ts, id) > (?, ?) AND (ts, id) <= (?, ?) " +
-		"AND (body_prefix IS NOT NULL OR detail IS NOT NULL OR record IS NOT NULL)"
+	// The clear statements set the three fields to NULL on at most a bound of
+	// rows. The subquery picks the rows in ts order from event_raw_ts, and no
+	// row above a rowid. Each picked row has a field. A cleared row leaves the
+	// index. clearPastSQL takes the rows with ts before a cutoff.
+	// clearFutureSQL takes the rows with ts after the future line.
+	clearPastSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts < ? AND id <= ? AND (" + rawIndexWhere + ") " +
+		"ORDER BY ts LIMIT ?)"
+	clearFutureSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id <= ? AND (" + rawIndexWhere + ") " +
+		"ORDER BY ts LIMIT ?)"
+
+	// clearTopSQL reads the largest event id.
+	clearTopSQL = "SELECT coalesce(max(id), 0) FROM event"
 
 	// deleteRawSQL deletes old rows of the kinds that have no roll-up. It uses
 	// event_kind_ts.
@@ -49,86 +52,79 @@ const (
 		"(SELECT set_id, unit, first FROM mint WHERE set_id = ? AND unit = ? ORDER BY first LIMIT ?)"
 )
 
+// futureLine returns the future line in unix ms. It is the later of the wall
+// time and the meta value retention_check, plus 1 h. No value, a value that
+// does not parse, or a failed read gives the wall time alone. A line past the
+// largest ms is the largest ms, so that it never clears a row by overflow.
+func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
+	at := wall.UnixMilli()
+	if text, found, err := metaGet(ctx, tx, retentionCheckKey); err == nil && found {
+		if v, err := strconv.ParseInt(text, 10, 64); err == nil {
+			at = max(at, v)
+		}
+	}
+	hour := time.Hour.Milliseconds()
+	if at > math.MaxInt64-hour {
+		return math.MaxInt64
+	}
+	return at + hour
+}
+
 // newFieldClearStep returns the step that sets body_prefix, detail and record
-// to NULL (SEC-39). It takes the event rows with ts in [mark, cutoff). The
-// cutoff is tPriv minus `days` x 24 h, in unix ms. The mark is the meta key
-// rawDoneKey. With no mark, or a mark that does not parse, the window starts at
-// the oldest row. The step reads no clock.
+// to NULL (SEC-39). It reads the rows of the index event_raw_ts. It has no
+// mark and no position, and it writes no meta key. A cleared row leaves the
+// index, so the next call does not read it again.
 //
-// At the end of the window, the step writes the mark. The mark is tDel minus
-// `days` x 24 h, not the cutoff. It can be before the old mark, so a wall clock
-// that was ahead leaves no row behind the mark. A cutoff at or before the mark
-// reads and clears no row. The step then writes that mark at once.
+// Part 1 clears the rows with ts before the cutoff, in ts order. The cutoff
+// is tPriv minus `days` x 24 h, in unix ms. When part 1 has no row left, part 2
+// clears the rows with ts after the future line. A ts after the line shows a
+// wall clock that was ahead when the row was written.
 //
-// Each call reads at most `limit` rows of the window, in the order of event_ts.
-// It reads also the rows that have no field. It sets the fields of the rows
-// that hold a value to NULL. The step keeps the ts and the id of the last row
-// that it read. The next call starts after that row. Thus a ts that many rows
-// share is not read two times. Two statements do this: one reads the rows, and
-// one clears them. One statement cannot return a row that it did not change.
-// The step writes the mark in the transaction of its last chunk. A run that
-// ends early writes no mark. The next run starts at the old mark. A row that is
-// written later with a ts before the mark keeps its fields. A row that is
-// written during a run, behind the position of the step, also keeps its fields.
+// The future line is the later of two values, plus 1 h. One value is the wall
+// time at the first call of the step, from the function `wall`. The other is
+// the meta value retention_check. See futureLine. At its first call, the step
+// also reads the largest event id. Both parts change no row above that id.
+// Thus a row that a batch writes during the run keeps its fields until the
+// next run. The step ends.
 //
-// A call returns `limit` when it read that many rows, and the rows read plus 1
-// for the mark otherwise. The tally of the fields counts the rows that changed.
-// With days outside 1 to 30, or a zero tPriv or tDel, the step runs no
+// Each statement names INDEXED BY event_raw_ts. It repeats the WHERE text of
+// the index in the same order. A call changes at most `limit` rows. It takes
+// the rest of `limit` for part 2 when part 1 ends with fewer rows. It returns
+// the rows that it changed. A count below `limit` means that no row is left in
+// either part. The tally of the fields counts the rows of both parts.
+//
+// Known limits. A row with a ts after the cutoff, and not after the line,
+// keeps its fields. A run that takes a wall clock that is ahead takes a line
+// that is ahead too. Then the rows of that clock keep their fields. A start
+// with the wall clock back and no stored value takes a line that is back. Then
+// the rows of an earlier process after that line lose their fields.
+//
+// With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
-func newFieldClearStep(tPriv, tDel time.Time, days int) retentionStep {
+func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tPriv, days)
-	markAt, markOK := rollupCutoff(tDel, days)
-	if !ok || !markOK {
+	if !ok || wall == nil {
 		return rollupRefused
 	}
-	var begun, done bool
-	pos := rollupPos{ts: math.MinInt64, id: math.MinInt64}
-	end := func(ctx context.Context, tx *sql.Tx, read int) (int, error) {
-		done = true
-		if _, err := execN(ctx, tx, metaSetSQL, rawDoneKey, strconv.FormatInt(markAt, 10)); err != nil {
-			return 0, err
-		}
-		return read + 1, nil
-	}
+	var begun, future bool
+	var line, top int64
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		if done {
-			return 0, nil
-		}
 		if !begun {
-			begun = true
-			text, found, merr := metaGet(ctx, tx, rawDoneKey)
-			if merr != nil {
-				return 0, merr
-			}
-			if mark, perr := strconv.ParseInt(text, 10, 64); found && perr == nil {
-				if cutoff <= mark {
-					return end(ctx, tx, 0)
-				}
-				pos.ts = mark
-			}
-		}
-		rows, err := tx.QueryContext(ctx, clearReadSQL, pos.ts, cutoff, pos.ts, pos.id, limit)
-		if err != nil {
-			return 0, err
-		}
-		n, last := 0, pos
-		err = eachRow(rows, func() error {
-			n++
-			return rows.Scan(&last.ts, &last.id)
-		})
-		if err != nil {
-			return 0, err
-		}
-		if n > 0 {
-			if _, err := execCount(ctx, tx, memFields, clearRawSQL, pos.ts, last.ts, pos.ts, pos.id, last.ts, last.id); err != nil {
+			if err := tx.QueryRowContext(ctx, clearTopSQL).Scan(&top); err != nil {
 				return 0, err
 			}
+			line, begun = futureLine(ctx, tx, wall()), true
 		}
-		pos = last
-		if n == limit {
-			return limit, nil
+		n := 0
+		if !future {
+			var err error
+			if n, err = execCount(ctx, tx, memFields, clearPastSQL, cutoff, top, limit); err != nil || n == limit {
+				return n, err
+			}
+			future = true
 		}
-		return end(ctx, tx, n)
+		m, err := execCount(ctx, tx, memFields, clearFutureSQL, line, top, limit-n)
+		return n + m, err
 	}
 }
 

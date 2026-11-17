@@ -133,7 +133,7 @@ func BenchmarkRawChild(b *testing.B) {
 	q, err := event.NewQueue(1, event.NewCounters())
 	check(b, err)
 	at := time.UnixMilli(tms)
-	steps := map[string]retentionStep{"clear": newFieldClearStep(at, at, 30), "delete": newRawDeleteStep(at, 30), "mint": newMintStep(at, 30),
+	steps := map[string]retentionStep{"clear": newFieldClearStep(at, func() time.Time { return at }, 30), "delete": newRawDeleteStep(at, 30), "mint": newMintStep(at, 30),
 		"session": newSessionExpireStep(at, 30), "token": newTokenExpireStep(at, 30), "event": newEventExpireStep(at, 30)}
 	run := []retentionStep{steps[os.Getenv(rawChildStep)]}
 	w := NewWriter(db, q, false, nil, Recovery{})

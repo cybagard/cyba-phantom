@@ -1063,3 +1063,146 @@ func TestTU27FieldClearAfterRunsWithTheWallClockBehind(t *testing.T) {
 		t.Fatalf("%d rows keep a field after the second run", n)
 	}
 }
+
+// T-U-27: a process starts with the wall clock 40 d ahead and makes one run.
+// It restarts with the right clock (a new schedule), and no run comes for 31 to
+// 59 d. The first run then clears a row that was written 1 d after the restart.
+func TestTU27FieldClearAfterStartAheadThenRestart(t *testing.T) {
+	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
+		t.Run(age.String(), func(t *testing.T) {
+			r := newRig(t, 8)
+			s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(40*oneDay), nil)
+			s.run = direct(r)
+			s.runOnce(context.Background())
+			s, f := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+			s.run = direct(r)
+			f.advance(oneDay)
+			addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+			f.advance(age)
+			s.runOnce(context.Background())
+			if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+				t.Fatalf("%d rows keep a field at the age %v", n, age)
+			}
+		})
+	}
+}
+
+// T-U-27: rows written with the wall clock 40 d ahead have no field after the
+// first run with the right clock. A run with the wall clock ahead came first.
+func TestTU27FieldClearRowsWrittenWithTheWallClockAhead(t *testing.T) {
+	r, s, f := prodRig(t, 40*oneDay, nil)
+	s.runOnce(context.Background())
+	for _, k := range []string{"callback", "request"} {
+		addFull(t, r.db, k, 1, f.wall().UnixMilli(), 0)
+	}
+	f.jump(-40 * oneDay)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+		t.Fatalf("%d rows keep a field after the first run with the right clock", n)
+	}
+}
+
+// fieldRows returns the rows that keep a field, as their ages by the time at,
+// in rounded minutes, oldest first.
+func fieldRows(t *testing.T, db *sql.DB, at time.Time) string {
+	t.Helper()
+	return rawText(t, db, "SELECT coalesce(group_concat((("+strconv.FormatInt(at.UnixMilli(), 10)+
+		" - ts) / 60000) || 'm', ' '), '') FROM (SELECT ts FROM event WHERE "+rawFull+" ORDER BY ts)")
+}
+
+// T-U-27: one run has the wall clock 40 d ahead. Then the clock is right, and
+// a row and a run come each day for 60 d. After each run, no row older than the
+// raw days has a field.
+func TestTU27FieldClearDailyRunsAfterTheWallClockWasAhead(t *testing.T) {
+	r, s, f := prodRig(t, 40*oneDay, nil)
+	s.runOnce(context.Background())
+	f.jump(-40 * oneDay)
+	for day := 1; day <= 60; day++ {
+		f.advance(oneDay)
+		addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+		s.runOnce(context.Background())
+		q := "SELECT count(*) FROM event WHERE " + rawFull + " AND ts < " + strconv.FormatInt(msAgo(f.wall(), 30*oneDay), 10)
+		if n := count(t, r.db, q); n != 0 {
+			t.Fatalf("%d rows older than the raw days keep a field after the run of day %d", n, day)
+		}
+	}
+}
+
+// T-U-27: a process starts with the wall clock 30 d back. With the stored
+// value of the earlier process, its rows keep their fields. With no stored
+// value, the line is the wall time alone, and both rows go.
+func TestTU27FieldClearStartWithTheWallClockBack(t *testing.T) {
+	for _, c := range []struct {
+		stored bool
+		want   string
+	}{{true, "30m 0m"}, {false, ""}} {
+		t.Run(fmt.Sprint("stored ", c.stored), func(t *testing.T) {
+			r := newRig(t, 8)
+			s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(-30*oneDay), nil)
+			s.run = direct(r)
+			if c.stored {
+				mustExec(t, r.db, metaSetSQL, retentionCheckKey, strconv.FormatInt(rollTDel.UnixMilli(), 10))
+			}
+			for _, back := range []time.Duration{0, 30 * time.Minute} {
+				addFull(t, r.db, "callback", 1, rollTDel.Add(-back).UnixMilli(), 0)
+			}
+			s.runOnce(context.Background())
+			if got := fieldRows(t, r.db, rollTDel); got != c.want {
+				t.Fatalf("rows with a field (age) %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// T-U-27: the wall clock steps back 3 h. Rows are 1 h, 2 h 30 min and 5 h old.
+// With the back value stored, only the row of 1 h is cleared. With the earlier
+// value still stored, no row is cleared.
+func TestTU27FieldClearStepBackOfThreeHours(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		stored time.Duration // the stored value, before R
+		want   string
+	}{{"back value stored", 3 * time.Hour, "300m 150m"}, {"earlier value stored", 30 * time.Minute, "300m 150m 60m"}} {
+		t.Run(c.name, func(t *testing.T) {
+			r, s, f := prodRig(t, 0, nil)
+			for _, age := range []time.Duration{time.Hour, 150 * time.Minute, 5 * time.Hour} {
+				addFull(t, r.db, "callback", 1, msAgo(rollTDel, age), 0)
+			}
+			f.jump(-3 * time.Hour)
+			mustExec(t, r.db, metaSetSQL, retentionCheckKey, strconv.FormatInt(msAgo(rollTDel, c.stored), 10))
+			s.runOnce(context.Background())
+			if got := fieldRows(t, r.db, rollTDel); got != c.want {
+				t.Fatalf("rows with a field (age) %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// T-U-27: a host suspend of 3 h stops the monotonic clock and not the wall
+// clock. No row younger than 2 h loses its fields.
+func TestTU27FieldClearAfterAHostSuspend(t *testing.T) {
+	r, s, f := prodRig(t, 0, nil)
+	addFull(t, r.db, "callback", 1, msAgo(rollTDel, 30*time.Minute), 0)
+	f.jump(3 * time.Hour)
+	addFull(t, r.db, "callback", 1, msAgo(f.wall(), 30*time.Minute), 0)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 2 {
+		t.Fatalf("%d rows keep a field, want 2", n)
+	}
+}
+
+// T-U-27: the run takes the clock at the first call of the field clear, not at
+// the run start. The clock moves 2 h first, so a row 2 h 30 min later is kept.
+func TestTU27FieldClearTakesTheClockAtItsFirstCall(t *testing.T) {
+	r, s, f := prodRig(t, 0, nil)
+	run := s.run
+	s.run = func(ctx context.Context, steps []retentionStep) error {
+		f.advance(2 * time.Hour)
+		return run(ctx, steps)
+	}
+	addFull(t, r.db, "callback", 1, rollTDel.Add(150*time.Minute).UnixMilli(), 0)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 1 {
+		t.Fatalf("%d rows keep a field, want 1", n)
+	}
+}
