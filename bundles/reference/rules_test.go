@@ -16,11 +16,13 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/cybagard/cyba-phantom/internal/bundle"
+	xhtml "golang.org/x/net/html"
 )
 
 const (
@@ -92,6 +94,16 @@ var (
 	attrRe = regexp.MustCompile(`(?s)([^\s"'=<>/]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>"']+)`)
 	// An unterminated HTML comment runs to the end of the text.
 	htmlComment = regexp.MustCompile(`(?s)<!--.*?(?:-->|$)`)
+	// The name of a tag that the pattern markup found.
+	tagStart = regexp.MustCompile(`(?i)^</?([a-z][^\s/>]*)`)
+	// The content of an element that a browser reads as raw text, or RCDATA.
+	rawElements = hiddenOf("style", "script", "title")
+	styleBody   = bodyRe("style")
+	noscript    = bodyRe("noscript")
+	// The content of the json-ld block: group 1 is the text up to its end tag.
+	ldBody = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(ldTag) + `(.*?)(?:(?i:</script)[ \t\n\f/>]|$)`)
+	// A start tag that a browser does not read as text in noscript.
+	noscriptInner = regexp.MustCompile(`(?i)<(?:style|script|title)(?:[\s/>]|$)`)
 
 	// A trap text has no "[" or "]". It has no ":" at the end. It has no
 	// ":" before a character that is not a space.
@@ -119,6 +131,19 @@ type result struct{ out []string }
 func (r *result) add(rule, name string) {
 	if f := rule + " " + name; !slices.Contains(r.out, f) {
 		r.out = append(r.out, f)
+	}
+}
+
+// secondLayer is true when the checks on the template source and the element
+// check on the parsed pages run. They only add findings. The check of the
+// rendered page gives the class of each trap action. A test sets the variable
+// to false, to see what the rendered page alone refuses.
+var secondLayer = true
+
+// layer adds a finding of the second layer.
+func (r *result) layer(rule, name string) {
+	if secondLayer {
+		r.add(rule, name)
 	}
 }
 
@@ -318,9 +343,15 @@ func checkTree(fsys fs.FS) []string {
 		}
 	}
 	// The route maps are read, so the type of each template is known.
+	defs := r.readTraps(files[trapsFile])
+	raw, texts := map[string]string{}, map[string]string{}
+	for _, t := range defs {
+		raw[t.ID] = t.Text
+		texts[t.ID] = strings.ReplaceAll(t.Text, tokenAction, fixedToken)
+	}
 	users := map[string][]*vhost{}
 	for _, name := range templates {
-		r.positions(name, string(files[name]), owner[name])
+		r.positions(name, string(files[name]), owner[name], raw)
 	}
 	for _, v := range hosts {
 		for _, u := range v.uses {
@@ -329,7 +360,7 @@ func checkTree(fsys fs.FS) []string {
 			}
 		}
 	}
-	texts, forms := r.traps(files[trapsFile], users)
+	forms := r.trapForms(defs, users)
 	for _, v := range hosts {
 		for _, u := range v.uses {
 			if f := forms[u.id]; f != "" && f[:1] != u.class {
@@ -533,7 +564,7 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 		if run.sfx == "(rendered)" {
 			r.ldObject(name, out)
 			if isHTML && attrLt(out) {
-				r.add("attr-lt(rendered)", name)
+				r.layer("attr-lt(rendered)", name)
 			}
 		}
 		// The token is not part of a base64 run. It is made at run time.
@@ -610,13 +641,13 @@ func (r *result) template(name, text, n string) {
 	if opens != len(actionRe.FindAllString(text, -1)) {
 		r.add("template-action", name)
 	}
-	if _, body, ok := strings.Cut(text, ldTag); ok {
-		if k := rawTextEnd(body, "script"); k >= 0 {
-			body = body[:k]
-		}
+	if m := ldBody.FindStringSubmatch(text); m != nil {
 		// The engine removes a JS comment, so an action in it is not rendered.
-		if strings.Contains(strings.ToLower(body), "@context") || strings.Contains(body, "/*") {
+		if strings.Contains(strings.ToLower(m[1]), "@context") || strings.Contains(m[1], "/*") {
 			r.add("json-ld", name)
+		}
+		if strings.Contains(m[1], "<!--") || strings.Contains(m[1], "-->") {
+			r.layer("json-ld(comment)", name)
 		}
 	}
 }
@@ -624,13 +655,11 @@ func (r *result) template(name, text, n string) {
 // ldObject checks that the json-ld block of a rendered page, if any, is one
 // JSON object.
 func (r *result) ldObject(name, out string) {
-	_, body, ok := strings.Cut(out, ldTag)
-	if !ok {
+	m := ldBody.FindStringSubmatch(out)
+	if m == nil {
 		return
 	}
-	if k := rawTextEnd(body, "script"); k >= 0 {
-		body = body[:k]
-	}
+	body := m[1]
 	var o map[string]jsontext.Value
 	if json.Unmarshal([]byte(body), &o, parseOpts...) != nil || o == nil {
 		r.add("json-ld(rendered)", name)
@@ -647,20 +676,30 @@ type place struct{ id, class, rule string }
 // positions. It does this for each content type of the routes that name the
 // template. A template that no route names has no type, so it has no
 // position. An action in a listed position is a use of its trap.
-func (r *result) positions(name, text string, v *vhost) {
+func (r *result) positions(name, text string, v *vhost, defs map[string]string) {
 	types := v.types[name]
 	if len(types) == 0 {
 		types = []string{""}
 	}
 	for _, typ := range types {
-		places, names := placesOf(text, typ)
-		for _, n := range names {
-			if !slices.Contains(elements, n) {
-				r.add("element("+n+")", name)
+		var places []place
+		if typ == "text/html" {
+			var names []string
+			var err error
+			if places, names, err = htmlPlaces(text, defs); err != nil {
+				r.add("render", name)
 			}
-		}
-		if typ == "text/html" && attrLt(text) {
-			r.add("attr-lt", name)
+			r.sourceRules(name, text)
+			for _, n := range append(sourceNames(text), names...) {
+				if !slices.Contains(elements, n) {
+					r.layer("element("+n+")", name)
+				}
+			}
+			if attrLt(text) {
+				r.layer("attr-lt", name)
+			}
+		} else {
+			places = placesOf(text, typ)
 		}
 		for _, p := range places {
 			switch {
@@ -675,13 +714,14 @@ func (r *result) positions(name, text string, v *vhost) {
 	}
 }
 
-// placesOf gives the place of each trap action of a template. The template
-// has the content type typ. The places are in the order of the text. Each
-// action becomes a NUL byte first. Its quotes then do not change the scan. For
-// text/html it also gives the name of each start tag and end tag.
-func placesOf(text, typ string) (out []place, names []string) {
+// placesOf gives the place of each trap action of a template that is not
+// text/html. The template has the content type typ. The places are in the
+// order of the text. Each action becomes a NUL byte first. Its quotes then do
+// not change the scan. The comment action is only for an HTML comment, so it
+// has no class here.
+func placesOf(text, typ string) (out []place) {
 	if strings.ContainsRune(text, 0) { // The byte rule refuses it.
-		return nil, nil
+		return nil
 	}
 	var ids []string // A comment action has the prefix "!".
 	s := actionRe.ReplaceAllStringFunc(text, func(m string) string {
@@ -692,20 +732,15 @@ func placesOf(text, typ string) (out []place, names []string) {
 		}
 		return "\x00"
 	})
-	// emit takes the next action. The comment action is only for element text.
-	emit := func(class string, elementText bool, rule string) {
+	// emit takes the next action.
+	emit := func(class string) {
 		id := ids[len(out)]
 		if cmt := strings.HasPrefix(id, "!"); cmt {
-			id = id[1:]
-			if !elementText {
-				class = ""
-			}
+			id, class = id[1:], ""
 		}
-		out = append(out, place{id, class, rule})
+		out = append(out, place{id, class, ""})
 	}
 	switch typ {
-	case "text/html":
-		names = htmlPlaces(s, emit)
 	case "text/plain":
 		for k := range len(s) {
 			if s[k] == 0 {
@@ -714,7 +749,7 @@ func placesOf(text, typ string) (out []place, names []string) {
 				if s[strings.LastIndex(s[:k], "\n")+1:k] == "Disallow: " && (k+1 == len(s) || s[k+1] == '\n') {
 					class = "L"
 				}
-				emit(class, false, "")
+				emit(class)
 			}
 		}
 	case "application/json":
@@ -728,16 +763,16 @@ func placesOf(text, typ string) (out []place, names []string) {
 					class = "F"
 				}
 			}
-			emit(class, false, "")
+			emit(class)
 		}
 	default:
 		for k := range len(s) {
 			if s[k] == 0 {
-				emit("", false, "")
+				emit("")
 			}
 		}
 	}
-	return out, names
+	return out
 }
 
 // attrLt reports an attribute value, quoted or not, that holds "<". It scans
@@ -774,178 +809,282 @@ func openQuote(s string) int {
 	return open
 }
 
-// htmlPlaces calls emit for each NUL byte of an HTML text s, in order. A NUL
-// byte stands in element text, in a start tag, or in a comment or raw text
-// element. These positions are listed. Element text. The values of alt, title
-// and aria-label. The "content" of a description meta. The "href" of a
-// nofollow link. A bare member value of the json-ld block. It also gives the
-// name of each start tag and end tag, in lower case.
-func htmlPlaces(s string, emit func(class string, elementText bool, rule string)) (names []string) {
-	isLetter := func(i int) bool { return i < len(s) && 'a' <= s[i]|0x20 && s[i]|0x20 <= 'z' }
-	rest := func(from, to int, f func(k int)) {
-		for k := from; k < to; k++ {
-			if s[k] == 0 {
-				f(k)
+// The tokens of the rendered page. A token has the 22 letters of tokenBase and
+// 4 letters for the number of the action. Its alphabet is a-z, like the token
+// of the engine, and it has the same length.
+const (
+	tokenBase = "xqzjkvwxqzjkvwxqzjkvwx"
+	tokenLen  = len(tokenBase) + 4
+)
+
+// tokenOf gives the token of the action number n.
+func tokenOf(n int) string {
+	d := []byte("aaaa")
+	for i := len(d) - 1; i >= 0; i, n = i-1, n/26 {
+		d[i] += byte(n % 26)
+	}
+	return tokenBase + string(d)
+}
+
+// action is one trap action of a template. Its token is in the text that the
+// page holds for it.
+type action struct {
+	id      string
+	comment bool   // The comment action.
+	text    string // The trap text, with the token of the action.
+}
+
+// htmlPlaces gives the place of each trap action of a text/html template, in
+// the order of the text. It renders the template with html/template. Each
+// action has its own key "<id>#<n>", and its trap text has a token of its own.
+// It parses the output as a browser does, with scripting on and with scripting
+// off. A token has a class only at one tree place of point 8: element text,
+// the value of alt, title or aria-label, the content of a description meta,
+// the href of a nofollow link, a member value of the json-ld block, or the
+// comment that the comment action made. Each other place has no class. A
+// token that is not in the tree, that is there more than once, or that has two
+// places in the two modes, has no class either. It also gives the name of each
+// element of the two trees. The error is a template that does not render.
+func htmlPlaces(text string, defs map[string]string) (places []place, names []string, err error) {
+	var acts []action
+	keyed := actionRe.ReplaceAllStringFunc(text, func(m string) string {
+		sm := actionRe.FindStringSubmatch(m)
+		a := action{id: sm[1]}
+		if a.id == "" {
+			a.id, a.comment = sm[2], true
+		}
+		raw, ok := defs[a.id]
+		if !ok || !strings.Contains(raw, tokenAction) {
+			// A trap that is not there, or has no token, has the token only.
+			// The trap check refuses the text of such a trap.
+			raw = tokenAction
+		}
+		a.text = strings.ReplaceAll(raw, tokenAction, tokenOf(len(acts)))
+		acts = append(acts, a)
+		return strings.Replace(m, `"`+a.id+`"`, `"`+a.id+"#"+strconv.Itoa(len(acts)-1)+`"`, 1)
+	})
+	data := map[string]string{}
+	for i, a := range acts {
+		data[a.id+"#"+strconv.Itoa(i)] = a.text
+	}
+	t, err := template.New("page").Option("missingkey=error").
+		Funcs(template.FuncMap{"comment": comment}).Parse(keyed)
+	if err != nil {
+		return nil, nil, err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, bundle.Page{Trap: data}); err != nil {
+		return nil, nil, err
+	}
+	places = make([]place, len(acts))
+	for _, scripting := range []bool{true, false} {
+		root, err := xhtml.ParseWithOptions(strings.NewReader(buf.String()), xhtml.ParseOptionEnableScripting(scripting))
+		if err != nil {
+			return nil, nil, err
+		}
+		hits := tokenHits(root, func(n string) { names = append(names, n) })
+		for i, a := range acts {
+			p := place{id: a.id}
+			if h := hits[i]; len(h) == 1 {
+				p.class, p.rule = placeOf(h[0], a)
+			}
+			if scripting {
+				places[i] = p
+			} else if places[i] != p {
+				places[i] = place{id: a.id}
 			}
 		}
 	}
-	end, ld := "", false // The name of the raw text element that is open.
-	for i := 0; i < len(s); {
-		switch {
-		case end != "":
-			j := len(s)
-			if k := rawTextEnd(s[i:], end); k >= 0 {
-				j = i + k
+	return places, names, nil
+}
+
+// hit is the place of a token in a parse tree. It is a string of a node: the
+// name or the text of the node, or the name or the value of an attribute.
+type hit struct {
+	node *xhtml.Node
+	attr *xhtml.Attribute // The attribute, or nil.
+	name bool             // The token is in the name of the attribute.
+	text string           // The string that holds the token.
+}
+
+// tokenHits gives the hits of each token of a tree, by the number of the
+// action. A token twice in one string is one hit. It calls elem with the name
+// of each element in lower case.
+func tokenHits(root *xhtml.Node, elem func(string)) map[int][]hit {
+	hits := map[int][]hit{}
+	find := func(s string, h hit) {
+		h.text = s
+		seen := map[int]bool{}
+		for rest := s; ; {
+			i := strings.Index(rest, tokenBase)
+			if i < 0 || len(rest) < i+tokenLen {
+				return
 			}
-			rest(i, j, func(k int) {
-				switch {
-				case end == "title": // RCDATA: the text is element text.
-					emit("F", true, "")
-				case !ld:
-					emit("", false, "")
-				case !bareMember(s[i:j], k-i):
-					emit("", false, "json-ld")
-				default:
-					emit("F", false, "")
-				}
-			})
-			i, end = j, ""
-		case strings.HasPrefix(s[i:], "<!--"):
-			j := len(s)
-			if k := strings.Index(s[i:], "-->"); k >= 0 {
-				j = i + k
+			n, ok := 0, true
+			for _, c := range rest[i+len(tokenBase) : i+tokenLen] {
+				n, ok = n*26+int(c-'a'), ok && 'a' <= c && c <= 'z'
 			}
-			rest(i, j, func(int) { emit("", false, "") })
-			i = min(j+3, len(s))
-		case strings.HasPrefix(s[i:], "<!") || strings.HasPrefix(s[i:], "<?") ||
-			strings.HasPrefix(s[i:], "</") && !isLetter(i+2):
-			// A browser reads these as a comment that ends at the next ">".
-			// They are "<!" with no "--", "<?", and "</" with no letter.
-			j := len(s)
-			if k := strings.IndexByte(s[i:], '>'); k >= 0 {
-				j = i + k
+			if ok && !seen[n] {
+				seen[n] = true
+				hits[n] = append(hits[n], h)
 			}
-			rest(i, j, func(int) { emit("", false, "") })
-			i = min(j+1, len(s))
-		case s[i] == '<' && (isLetter(i+1) || strings.HasPrefix(s[i:], "</")):
-			j := i + markup.FindStringIndex(s[i:])[1]
-			var name string
-			name, end, ld = tagPlaces(s[i:j], emit)
-			names = append(names, name)
-			i = j
-		default:
-			if s[i] == 0 {
-				emit("F", true, "")
+			rest = rest[i+len(tokenBase):]
+		}
+	}
+	var walk func(n *xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		find(n.Data, hit{node: n})
+		if n.Type == xhtml.ElementNode {
+			elem(strings.ToLower(n.Data))
+		}
+		for i := range n.Attr {
+			find(n.Attr[i].Key, hit{node: n, attr: &n.Attr[i], name: true})
+			find(n.Attr[i].Val, hit{node: n, attr: &n.Attr[i]})
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(root)
+	return hits
+}
+
+// placeOf gives the class and the rule of the action a at the hit h. The
+// class is "" for a place that the table does not list.
+func placeOf(h hit, a action) (class, rule string) {
+	n := h.node
+	switch {
+	case h.name:
+	case h.attr != nil && !a.comment && n.Namespace == "":
+		switch k := h.attr.Key; {
+		case k == "alt" || k == "title" || k == "aria-label":
+			class = "F"
+		case k == "content" && n.Data == "meta" && strings.EqualFold(attrOf(n, "name"), "description"):
+			class = "F"
+		case k == "href" && n.Data == "a" && strings.EqualFold(attrOf(n, "rel"), "nofollow") && h.attr.Val == a.text:
+			class = "L"
+		}
+	case n.Type == xhtml.CommentNode:
+		if a.comment && n.Data == " "+a.text+" " {
+			class = "F"
+		}
+	case n.Type == xhtml.TextNode && !a.comment && n.Parent != nil &&
+		n.Parent.Type == xhtml.ElementNode && n.Parent.Namespace == "":
+		switch p := n.Parent; {
+		case p.Data == "script" && len(p.Attr) == 1 && p.Attr[0].Key == "type" && p.Attr[0].Val == "application/ld+json":
+			if memberValue(n.Data, a.text) {
+				class = "F"
+			} else {
+				rule = "json-ld"
 			}
-			i++
+		case p.Data != "style" && p.Data != "script" && slices.Contains(elements, p.Data):
+			class = "F"
+		}
+	}
+	return class, rule
+}
+
+// attrOf gives the value of the attribute key of the element n.
+func attrOf(n *xhtml.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+// memberValue reports whether the JSON text s has a member of an object whose
+// value is the string want. An array element is not a member value.
+func memberValue(s, want string) bool {
+	var v any
+	return json.Unmarshal([]byte(s), &v, parseOpts...) == nil && hasMember(v, want)
+}
+
+func hasMember(v any, want string) bool {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, m := range v {
+			if s, ok := m.(string); ok && s == want || hasMember(m, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range v {
+			if hasMember(e, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bodyRe gives the pattern for the content of the element name. A start tag
+// can hold a quoted ">". An end tag is "</", the name and one byte of
+// " \t\n\f/>" (html/template indexTagEnd). Group 1 is the content.
+func bodyRe(name string) *regexp.Regexp {
+	return regexp.MustCompile(`(?is)<` + name + `(?:[\s/](?:"[^"]*"|'[^']*'|[^>])*)?>(.*?)(?:</` + name + `[ \t\n\f/>]|$)`)
+}
+
+// sourceNames gives the name of each tag of a template source, in lower case.
+// It skips comments and the content of style, script and title.
+func sourceNames(text string) (names []string) {
+	s := htmlComment.ReplaceAllString(text, "")
+	for _, re := range rawElements {
+		s = re.ReplaceAllString(s, "")
+	}
+	for _, tag := range markup.FindAllString(s, -1) {
+		if m := tagStart.FindStringSubmatch(tag); m != nil {
+			names = append(names, strings.ToLower(m[1]))
 		}
 	}
 	return names
 }
 
-// jsonSpace is the white space of JSON.
-const jsonSpace = " \t\n\r"
-
-// rawTextEnd gives the index of the end tag of the raw text element name in s,
-// or -1. The end tag is "</", the name with ASCII case ignored, and one byte
-// of " \t\n\f/>". This is html/template indexTagEnd (transition.go). A name at
-// the end of s, with no byte after it, is not an end tag. CR is not in the set.
-func rawTextEnd(s, name string) int {
-	low := []byte(s)
-	for i, c := range low {
-		if 'A' <= c && c <= 'Z' {
-			low[i] = c | 0x20
-		}
-	}
-	for from := 0; ; {
-		k := bytes.Index(low[from:], []byte("</"+name))
-		if k < 0 {
-			return -1
-		}
-		k += from
-		if e := k + 2 + len(name); e < len(s) && strings.IndexByte(" \t\n\f/>", s[e]) >= 0 {
-			return k
-		}
-		from = k + 1
-	}
-}
-
-// bareMember reports whether the NUL byte at k of the json-ld block is a bare
-// member value. It is not in a string. The byte before it, with spaces
-// skipped, is ":". The byte after it, with spaces skipped, is "," or "}".
-func bareMember(block string, k int) bool {
-	after := strings.TrimLeft(block[k+1:], jsonSpace)
-	return openQuote(block[:k]) < 0 && strings.HasSuffix(strings.TrimRight(block[:k], jsonSpace), ":") &&
-		after != "" && (after[0] == ',' || after[0] == '}')
-}
-
-// tagName gives the name of a tag in lower case. s is the tag with no "<" or
-// "</". The name ends at white space, "/" or ">", or at the end of s.
-func tagName(s string) string {
-	return strings.ToLower(s[:strings.IndexAny(s+">", " \t\n/>")])
-}
-
-// tagPlaces calls emit for each NUL byte of a tag. It gives the name of the
-// tag. It also gives the name of the raw text or RCDATA element that a start
-// tag opens. It says if that element is the json-ld block.
-func tagPlaces(tag string, emit func(class string, elementText bool, rule string)) (name, end string, ld bool) {
-	if strings.HasPrefix(tag, "</") {
-		for range strings.Count(tag, "\x00") {
-			emit("", false, "")
-		}
-		return tagName(tag[2:]), "", false
-	}
-	name = tagName(tag[1:])
-	attrs := attrRe.FindAllStringSubmatchIndex(tag, -1)
-	val := func(a []int) string { // One pair of matching outer quotes goes.
-		v := tag[a[4]:a[5]]
-		if n := len(v); n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n-1] == v[0] {
-			return v[1 : n-1]
-		}
-		return v
-	}
-	get := func(want string) string {
-		for _, a := range attrs {
-			if strings.EqualFold(tag[a[2]:a[3]], want) {
-				return strings.ToLower(val(a))
-			}
-		}
-		return ""
-	}
-	for k := range len(tag) {
-		if tag[k] != 0 {
+// badLt reports a "<" of a text/html template that is not "<" and a letter,
+// "</" and a letter, "<!--" or "<!doctype html>" (the case is not important).
+// html/template writes each other "<" as "&lt;", and then reads the text after
+// it as markup, where a scan of the source reads a comment.
+func badLt(s string) bool {
+	letter := func(c byte) bool { return 'a' <= c|0x20 && c|0x20 <= 'z' }
+	for i := range len(s) {
+		if s[i] != '<' {
 			continue
 		}
-		class := ""
-		for _, a := range attrs {
-			if k < a[4] || k >= a[5] {
-				continue
-			}
-			switch an := strings.ToLower(tag[a[2]:a[3]]); {
-			case an == "alt" || an == "title" || an == "aria-label":
-				class = "F"
-			case an == "content" && name == "meta" && get("name") == "description":
-				class = "F"
-			case an == "href" && name == "a" && get("rel") == "nofollow" && val(a) == "\x00":
-				class = "L"
-			}
+		rest := s[i:]
+		switch {
+		case len(rest) > 1 && letter(rest[1]):
+		case len(rest) > 2 && rest[1] == '/' && letter(rest[2]):
+		case strings.HasPrefix(rest, "<!--"):
+		case len(rest) >= 15 && strings.EqualFold(rest[:15], "<!doctype html>"):
+		default:
+			return true
 		}
-		emit(class, false, "")
 	}
-	switch {
-	case name == "style":
-		return name, "style", false
-	case name == "script":
-		return name, "script", tag == ldTag
-	case name == "title": // RCDATA: the content ends at the end tag.
-		return name, "title", false
-	case name == "noscript":
-		// A browser with scripting on reads the content as raw text up to
-		// "</noscript". Here it is markup, as html/template reads it. An end
-		// tag cannot hide in an attribute value: a value has no "<" (attr-lt).
-		// It cannot hide in a comment: html/template removes comments.
+	return false
+}
+
+// sourceRules checks the source of a text/html template for forms that the
+// check of the rendered page cannot give: a "<" that is not a tag, a "<" in
+// raw text, a raw text element in noscript, and a comment that html/template
+// ends at another place than a browser does.
+func (r *result) sourceRules(name, text string) {
+	if badLt(text) {
+		r.layer("lt-text", name)
 	}
-	return name, "", false
+	for _, m := range append(styleBody.FindAllStringSubmatch(text, -1), ldBody.FindAllStringSubmatch(text, -1)...) {
+		if strings.Contains(m[1], "<") {
+			r.layer("lt-raw", name)
+		}
+	}
+	for _, m := range noscript.FindAllStringSubmatch(text, -1) {
+		if noscriptInner.MatchString(m[1]) {
+			r.layer("noscript-raw", name)
+		}
+	}
+	if strings.Contains(text, "<!-->") || strings.Contains(text, "<!--->") {
+		r.layer("comment-empty", name)
+	}
 }
 
 // normalForm decodes the character references of s. It then deletes each
@@ -965,27 +1104,34 @@ func dropControls(s string) string {
 // of a-z. The token alphabet is a-z and 2-7.
 const fixedToken = "abcdefghijklmnopqrstuvwxyz"
 
-// traps checks the instruction template of each trap in traps/traps.json. It
-// gives the text of each trap with the fixed token, by trap id. It also gives
-// the form of each trap ("F1" to "L1", or "" for no form).
-func (r *result) traps(b []byte, users map[string][]*vhost) (texts, forms map[string]string) {
+// trapDef is the id and the instruction template of a trap.
+type trapDef struct {
+	ID   string `json:"id"`
+	Text string `json:"instruction_template"`
+}
+
+// readTraps reads traps/traps.json. It gives nil if the file is absent or is
+// not JSON.
+func (r *result) readTraps(b []byte) []trapDef {
 	if b == nil {
-		return nil, nil
+		return nil
 	}
-	var ts []struct {
-		ID   string `json:"id"`
-		Text string `json:"instruction_template"`
-	}
+	var ts []trapDef
 	if json.Unmarshal(b, &ts, parseOpts...) != nil {
 		r.add("traps-json", trapsFile)
-		return nil, nil
+		return nil
 	}
-	texts, forms = map[string]string{}, map[string]string{}
+	return ts
+}
+
+// trapForms checks the instruction template of each trap. It gives the form
+// of each trap ("F1" to "L1", or "" for no form), by trap id.
+func (r *result) trapForms(ts []trapDef, users map[string][]*vhost) map[string]string {
+	forms := map[string]string{}
 	for _, t := range ts {
 		forms[t.ID] = r.instruction(t.Text, users[t.ID])
-		texts[t.ID] = strings.ReplaceAll(t.Text, tokenAction, fixedToken)
 	}
-	return texts, forms
+	return forms
 }
 
 // formTexts gives the text of each form for the callback c at the path p.

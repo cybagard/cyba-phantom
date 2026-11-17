@@ -177,7 +177,9 @@ func cases() []row {
 		{"base64 run that needs equal signs", pageWith(run(18, "A") + "=="),
 			at(pagePath, "base64", "base64(rendered)", "base64(rendered, empty)")},
 		{"marker in an HTML comment", put(pagePath, `<!-- `+marker+` --><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- `+marker), at(pagePath, "marker", "render")},
+		// A page that does not render has no place of an action, so no use of the trap.
+		{"marker after an open comment", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- `+marker),
+			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
 		{"file below vhosts", put("vhosts/x.txt", "x"), at("vhosts/x.txt", "vhost-name")},
 		{"shared first label", put("vhosts/shop.zeta.internal/"+routesName, `{"routes":[]}`),
 			at("vhosts/shop.zeta.internal", "vhost-label")},
@@ -304,7 +306,7 @@ func cases() []row {
 		{`{{{index .Trap "t1"}}`, rs("template-action", "render")},
 		{`{{comment (index .Trap "t1")}}`, nil},
 	} {
-		rows = append(rows, row{"action " + f.text, pageWith(f.text), at(pagePath, f.rules...)})
+		rows = append(rows, row{"action " + f.text, pageWith(f.text), noUse(f.rules, at(pagePath, f.rules...))})
 	}
 	// A template page gives the findings of withRendered, except for these
 	// texts. A text that does not parse is a "render" finding. A percent
@@ -423,8 +425,11 @@ func cases() []row {
 			pageRules = o
 		}
 		pageRules = append(slices.Clone(pageRules), elementRules(f.text)...)
+		if slices.Contains(badLtTexts, f.text) {
+			pageRules = append(pageRules, "lt-text")
+		}
 		rows = append(rows,
-			row{"page " + f.text, pageWith(f.text), at(pagePath, pageRules...)},
+			row{"page " + f.text, pageWith(f.text), noUse(pageRules, at(pagePath, pageRules...))},
 			row{"asset " + f.text, put(svgPath, f.text), at(svgPath, f.rules...)})
 	}
 	rows = append(rows, row{"253 byte vhost name", put("vhosts/"+longHost(52)+"/"+routesName, `{"routes":[]}`), nil})
@@ -433,6 +438,24 @@ func cases() []row {
 	rows = append(rows, formRows()...)
 	rows = append(rows, positionRows()...)
 	return rows
+}
+
+// badLtTexts are the texts of the page rows that have a "<" that is not a tag,
+// a comment or "<!doctype html>". A text/html template gives "lt-text" for them.
+var badLtTexts = []string{
+	`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY c ":">]><svg xmlns="http://www.w3.org/2000/svg">` +
+		`<a href="https&c;//evil.example/x.png">x</a></svg>`,
+	`<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY j "javas">]><svg><a href="&j;cript:x()">x</a></svg>`,
+	`<!ATTLIST a b CDATA "c">`, `<!DOCTYPE svg>`, `<!ENTITY a "b">`,
+}
+
+// noUse adds the finding "trap-form" to want, if rules has "render". A page
+// that does not render has no place of an action, so the trap has no use.
+func noUse(rules, want []string) []string {
+	if slices.Contains(rules, "render") {
+		return append(want, at(trapsFile, "trap-form")...)
+	}
+	return want
 }
 
 // tagNames finds the name of each tag in the literal text of a row. It is a
@@ -499,11 +522,12 @@ func extraRows() []row {
 		{"JSON asset", put(z+"logo.svg", `{"name": "x", "url": "/a"}`), nil},
 		{"style block", both(pageWith(`<style>.h{display:none}</style><p class="h">x</p>`)), nil},
 		{"DOCTYPE html", put(pagePath, "<!DOCTYPE html>"+basePage), nil},
-		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
-		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
+		{"marker in a declaration", put(pagePath, "<!"+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker", "lt-text")},
+		{"marker in a processing instruction", put(pagePath, "<?"+marker+`><p>{{index .Trap "t1"}}</p>`),
+			at(pagePath, "marker", "lt-text")},
+		{"marker in a closing tag", put(pagePath, "</ "+marker+`><p>{{index .Trap "t1"}}</p>`), at(pagePath, "marker", "lt-text")},
 		{"marker after an open angle bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><`+marker),
-			at(pagePath, "marker", "render", "element("+marker+")")},
+			append(at(pagePath, "marker", "render", "element("+marker+")"), at(trapsFile, "trap-form")...)},
 		{"marker in an attribute", put(pagePath, `<p title="`+marker+`">{{index .Trap "t1"}}</p>`), at(pagePath, "marker")},
 		{"manifest as a directory", func(m fstest.MapFS) {
 			delete(m, "manifest.json")
@@ -608,7 +632,7 @@ func extraRows() []row {
 		{"marker in a comment with a bracket", put(pagePath, `<!-- x > `+marker+` --><p>{{index .Trap "t1"}}</p>`),
 			at(pagePath, "marker")},
 		{"marker in an open comment with a bracket", put(pagePath, `<p>{{index .Trap "t1"}}</p><!-- x > `+marker),
-			at(pagePath, "marker", "render")},
+			append(at(pagePath, "marker", "render"), at(trapsFile, "trap-form")...)},
 		{"token name that is not the token", instr(marker + ": request /ref/cb {{.Tok}}"), at(trapsFile, "instr-token", "trap-form")},
 	}
 }
@@ -744,10 +768,14 @@ func positionRows() []row {
 		posRow("action in srcset", `<img srcset="ACT">`, bad),
 		posRow("action in a style attribute", `<p style="ACT">x</p>`, append(withRendered(rs("style-attr")), bad)...),
 		posRow("action in a style element", `<style>ACT</style>`, bad),
-		posRow("action in CSS after a look-alike end tag", `<style>p{color:red}</stylex> p{background:url("ACT")}</style>`, bad),
-		posRow("action in CSS after a look-alike end tag with a dash", `<style>p{color:red}</style-x> p{background:url(ACT)}</style>`, bad),
-		posRow("action in a bogus comment with a question mark", `<?x ACT>`, bad),
-		posRow("action in a bogus comment with a declaration", `<!x ACT>`, bad),
+		posRow("action in CSS after a look-alike end tag", `<style>p{color:red}</stylex> p{background:url("ACT")}</style>`,
+			bad, "lt-raw"),
+		posRow("action in CSS after a look-alike end tag with a dash", `<style>p{color:red}</style-x> p{background:url(ACT)}</style>`,
+			bad, "lt-raw"),
+		// html/template writes the "<" as "&lt;", so the action is text. The
+		// source rule refuses the "<".
+		posRow("action in a bogus comment with a question mark", `<?x ACT>`, "lt-text"),
+		posRow("action in a bogus comment with a declaration", `<!x ACT>`, "lt-text"),
 		linkRow("href with quotes around the action", `<a rel="nofollow" href="''ACT">x</a>`, bad),
 		fileRow("action in a Disallow line with more words", textType, "robots.tmpl",
 			"# "+marker+"\nDisallow: ACT and more words\n", bad),
@@ -772,6 +800,38 @@ func positionRows() []row {
 		{"template that no route names", put(z+"extra.tmpl", actor.Replace(`<p>`+marker+` ACT</p>`)), at(z+"extra.tmpl", bad)},
 		{"404 template that no route names", put(notFound, actor.Replace(`<p>`+marker+` ACT</p>`)), at(notFound, bad)},
 
+		// Text that html/template writes as "&lt;" and that a source scan read
+		// as a comment. The start tag after it is real in the page. The "<" is
+		// refused in the source too.
+		posRow("start tag after a bogus declaration", `<!x <img src=">ACT">`, bad, "lt-text"),
+		posRow("start tag after a closing tag with no name", `</ <img src=">ACT">`, bad, "lt-text"),
+		posRow("style after a processing instruction", `<? <style>p{background:url(ACT)}</style>`, bad, "lt-text"),
+		posRow("element after a bogus declaration", `<!x <foo>`, "element(foo)", "lt-text"),
+		// With scripting on, the content of noscript is text. With scripting off,
+		// it is markup. The two modes give two places for the action in a style
+		// element. The place is the same for a title and for a json-ld block, so
+		// only the source rule refuses these two.
+		posRow("style in noscript", `<noscript><style>ACT</style></noscript>`, bad, "noscript-raw"),
+		posRow("title in noscript", `<noscript><title>ACT</title></noscript>`, "noscript-raw"),
+		posRow("json-ld block in noscript", `<noscript>`+ld(`{"a":ACT}`)+`</noscript>`, "noscript-raw"),
+		// The parser makes a copy of the b element, with its attributes. The
+		// value then holds the token two times.
+		posRow("attribute that the parser copies", `<b title="ACT"><p>one</b>two</p>`, bad, "element(b)"),
+		// A browser with scripting on ends noscript at the end tag in the string.
+		posRow("end tag of noscript in a json-ld string",
+			`<noscript>`+ld(`{"a":"</noscript><img src='","b":ACT,"c":"'>"}`)+`</noscript>`, bad, "lt-raw", "noscript-raw"),
+		posRow("style import after an end tag of noscript in a json-ld string",
+			`<noscript>`+ld(`{"a":"</noscript><style>@import '","b":ACT,"c":"';</style>"}`)+`</noscript>`,
+			bad, "lt-raw", "noscript-raw"),
+		// html/template ends the comment at a later "-->" than a browser does.
+		posRow("empty comment before a title", `<!--><title>--><style>p{background:url(ACT)}</style></title>`,
+			bad, "comment-empty"),
+		posRow("empty comment with a dash before a title", `<!---><title>--><style>p{background:url(ACT)}</style></title>`,
+			bad, "comment-empty"),
+		// html/template removes the JS comment, so the action is not in the page.
+		posRow("comment start in the block", ld("{\"a\":1,\n<!-- ':ACT}\n\"b\":2}"), bad, "json-ld(comment)", "lt-raw"),
+		posRow("comment end in the block", ld("{\"a\":1,\n--> ':ACT}\n\"b\":2}"), bad, "json-ld(comment)"),
+
 		// Elements and attribute values that the scan does not model.
 		posRow("element that is not in the list", `<foo>x</foo>`, "element(foo)"),
 		posRow("end tag that is not in the list", `</foo>`, "element(foo)"),
@@ -781,15 +841,17 @@ func positionRows() []row {
 			bad, "attr-lt", "element(b)"),
 		posRow("end tag of noscript in an attribute value in noscript",
 			`<noscript><b title="</noscript><style>p{background:url('ACT')}</style>">x</b></noscript>`,
-			"attr-lt", "attr-lt(rendered)", "element(b)"),
+			bad, "attr-lt", "attr-lt(rendered)", "element(b)"),
 		// html/template removes the comment, so the output has no end tag.
 		posRow("end tag of noscript in a comment in noscript",
 			`<noscript><!--</noscript><style>p{background:url('ACT')}</style>--></noscript>`, bad),
 
 		// Trap forms in a position of the other class.
 		linkRow("form L1 in element text", `<p>ACT</p>`, "trap-class"),
+		// html/template escapes the spaces of the sentence in an href, so the
+		// value is not the trap text. The link has no use of the trap.
 		{"form F1 in a nofollow link", put(pagePath, `<p>`+marker+`</p>`+actor.Replace(`<a rel="nofollow" href="ACT">x</a>`)),
-			at(pagePath, "trap-class")},
+			append(at(pagePath, bad), at(trapsFile, "trap-form")...)},
 		fileRow("form F1 in a robots.txt Disallow line", textType, "robots.tmpl", "# "+marker+"\nDisallow: ACT\n", "trap-class"),
 		{"form L1 in a header slot", both(instr(formL1), put(pagePath, `<p>`+marker+`</p>`),
 			put(routes, `{"routes":[{"path":"/","template":"x","type":"t","headers":[{"name":"X-Note","trap":"t1"}]},`+
@@ -805,12 +867,15 @@ func positionRows() []row {
 		posRow("action in a json-ld string between a colon and a comma", ld(`{"a":"1:ACT,2"}`), "json-ld", "backslash(rendered)"),
 		// html/template writes "</" in a string as "\x3C/", which is no JSON.
 		posRow("look-alike end tag in the block", ld(`{"a":"</scriptx>ACT"}`),
-			"json-ld", "json-ld(rendered)", "backslash(rendered)", "backslash(rendered, empty)"),
-		posRow("quoted action in the block", ld(`{"description":"ACT"}`), "json-ld", "backslash(rendered)"),
+			"json-ld", "json-ld(rendered)", "backslash(rendered)", "backslash(rendered, empty)", "lt-raw"),
+		// The decoded string is the trap text, so the place is a member value.
+		// The backslash that html/template writes in the string is refused.
+		posRow("quoted action in the block", ld(`{"description":"ACT"}`), "backslash(rendered)"),
 		posRow("@context in the block", ld(`{"@context":"x","description":ACT}`), "json-ld"),
 		posRow("array in the block", ld(`[{"description":ACT}]`), "json-ld(rendered)"),
-		posRow("two objects in the block", ld(`{"a":ACT}{"b":ACT}`), "json-ld(rendered)"),
-		posRow("comment in the block", ld(`{"a":1, /*':ACT}*/ "b":2}`), "json-ld"),
+		posRow("two objects in the block", ld(`{"a":ACT}{"b":ACT}`), "json-ld", "json-ld(rendered)"),
+		// html/template removes the comment, so the action is not in the page.
+		posRow("comment in the block", ld(`{"a":1, /*':ACT}*/ "b":2}`), "json-ld", bad),
 		posRow("cut object in the block", ld(`{"a":ACT`), "json-ld", "json-ld(rendered)"),
 		posRow("empty block", ld(``), "json-ld(rendered)"),
 		posRow("null in the block", ld(`null`), "json-ld(rendered)"),
@@ -820,9 +885,10 @@ func positionRows() []row {
 	// up to its own end tag. A value can hold that end tag and a style
 	// element. A scan that reads the content as markup misses it. Each name
 	// is refused. html/template escapes the content of textarea, so only
-	// that row has no "attr-lt(rendered)".
+	// that row has no "attr-lt(rendered)". In the parsed page, the style
+	// element is real and holds the action.
 	for _, el := range []string{"xmp", "noembed", "noframes", "plaintext", "textarea"} {
-		rules := rs("element("+el+")", "attr-lt")
+		rules := rs("element("+el+")", "attr-lt", bad)
 		if el != "textarea" {
 			rules = append(rules, "attr-lt(rendered)")
 		}
@@ -841,6 +907,44 @@ func TestTS36WalkErrorIsAFinding(t *testing.T) {
 	got := checkTree(failFS{fstest.MapFS{"manifest.json": {}}})
 	if len(got) != 1 || !strings.HasPrefix(got[0], "walk ") {
 		t.Errorf("findings %q, want one walk finding", got)
+	}
+}
+
+// layerOnly are the position rows that the check of the rendered page alone
+// does not refuse. Only the second layer refuses them.
+var layerOnly = map[string]string{
+	"action in a bogus comment with a question mark": "the action is page text; the source rule refuses the less-than",
+	"action in a bogus comment with a declaration":   "the action is page text; the source rule refuses the less-than",
+	"element after a bogus declaration":              "no action; the element list and the source rule refuse it",
+	"element that is not in the list":                "no action; the element list refuses it",
+	"end tag that is not in the list":                "no action; the element list refuses it",
+	"less-than in an attribute value":                "the action is page text; the attribute rule refuses the less-than",
+	"title in noscript":                              "the place is text in both modes; the noscript rule refuses the title",
+	"json-ld block in noscript":                      "the place is a member value in both modes; the noscript rule refuses the block",
+}
+
+// The check of the rendered page decides the position of a trap action. With
+// the second layer off, each position row has the same verdict as its want
+// list says: refused, or not. The rows of layerOnly are the exceptions. They
+// are refused by the second layer only, and the test checks that they are.
+func TestTS36RenderedPageDecidesPositions(t *testing.T) {
+	secondLayer = false
+	t.Cleanup(func() { secondLayer = true })
+	for _, c := range positionRows() {
+		t.Run(c.name, func(t *testing.T) {
+			m := baseTree()
+			if c.edit != nil {
+				c.edit(m)
+			}
+			refused := len(checkTree(m)) > 0
+			if _, only := layerOnly[c.name]; only {
+				if len(c.want) == 0 || refused {
+					t.Errorf("row is in layerOnly, but refused is %v with %d findings wanted", refused, len(c.want))
+				}
+			} else if want := len(c.want) > 0; refused != want {
+				t.Errorf("rendered page alone: refused is %v, the want list says %v", refused, want)
+			}
+		})
 	}
 }
 
