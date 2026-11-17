@@ -158,7 +158,7 @@ func cases() []row {
 		{"other first label", put(other+routesName, `{"routes":[]}`), nil},
 		{"300 bytes", instr(padded(300)), at(trapsFile, "trap-form")},
 		junk("base64 run of 19", run(19, "A")),
-		{"base64 alphabet ends", pageWith(run(10, "1") + "_" + run(10, "1") + "-" + run(10, "1")), nil},
+		{"base64 alphabet ends", pageWith(run(7, "1") + "_" + run(7, "1") + "-" + run(7, "1")), nil},
 		{"bytes 0x20 and 0x7E", pageWith(" ~"), nil},
 		{"tab and LF", pageWith("\t\n"), nil},
 		junk("percent with no two hex digits", "100% %4 %zz"),
@@ -454,12 +454,16 @@ func textRule(f string) bool {
 }
 
 // wordRules gives the finding "word(<w>) <name>" for each word of text that
-// wordList does not hold. The scan is a plain one, with no tags or rules.
+// wordList does not hold. The text is read with its tags, and with its tags
+// and comments removed.
 func wordRules(name, text string) (out []string) {
-	for _, w := range letters.FindAllString(html.UnescapeString(svgNames.Replace(text)), -1) {
-		w = strings.ToLower(w)
-		if f := "word(" + w + ") " + name; !wordSet[w] && !slices.Contains(out, f) {
-			out = append(out, f)
+	text = svgNames.Replace(text)
+	for _, s := range []string{html.UnescapeString(text), html.UnescapeString(tagless(text))} {
+		for _, w := range letters.FindAllString(s, -1) {
+			w = strings.ToLower(w)
+			if f := "word(" + w + ") " + name; !wordSet[w] && !slices.Contains(out, f) {
+				out = append(out, f)
+			}
 		}
 	}
 	return out
@@ -731,14 +735,14 @@ var actor = strings.NewReplacer("ACT", `{{index .Trap "trap"}}`, "CMT", `{{comme
 // posRow is the base page and a body. The base trap has the form F1. The body
 // has other uses of it and the findings that the row names.
 func posRow(name, body string, rules ...string) row {
-	return row{name, put(pagePath, basePage+actor.Replace(body)), at(pagePath, rules...)}
+	return row{name, put(pagePath, basePage+" "+actor.Replace(body)), at(pagePath, rules...)}
 }
 
 // linkRow is a page with a nofollow link and a body. The base trap has the form
 // L1, and its only use in the page is the link.
 func linkRow(name, body string, rules ...string) row {
-	return row{name, both(instr(formL1), put(pagePath, `<p>`+marker+`</p>`+
-		actor.Replace(`<a rel="nofollow" href="ACT">page</a>`+body))), at(pagePath, rules...)}
+	return row{name, both(instr(formL1), put(pagePath, `<p>`+marker+`</p> `+
+		actor.Replace(`<a rel="nofollow" href="ACT">page</a> `+body))), at(pagePath, rules...)}
 }
 
 // fileEdit adds a template file and a route of the content type typ that
@@ -1010,10 +1014,19 @@ func TestTS36RefusedInputs(t *testing.T) {
 			}
 		})
 	}
+	seen := map[string]bool{}
+	unique := func(c row) {
+		if seen[c.name] {
+			t.Errorf("row name %q is used by two rows", c.name)
+		}
+		seen[c.name] = true
+	}
 	for _, c := range cases() {
+		unique(c)
 		check(c, false)
 	}
 	for _, c := range textRows() {
+		unique(c)
 		check(c, true)
 	}
 }
@@ -1040,7 +1053,7 @@ func textRows() []row {
 	}
 	// bodyRow is the base page and a body. The findings of the row are exact.
 	bodyRow := func(name, body string, rules ...string) row {
-		text := basePage + actor.Replace(body)
+		text := basePage + " " + actor.Replace(body)
 		return row{name, put(pagePath, text), slices.Concat(at(pagePath, rules...), wordRules(pagePath, text))}
 	}
 	// assetRow adds an asset and a route of the content type typ that names it.
@@ -1048,6 +1061,30 @@ func textRows() []row {
 		p := z + file
 		return row{name, both(put(p, content), put(routes, strings.TrimSuffix(routesJSON, "]}")+
 			`,{"path":"/page","asset":"`+p+`","type":"`+typ+`"}]}`)), slices.Concat(at(p, rules...), wordRules(p, content))}
+	}
+	// namedFile adds a file below the vhost and page text. With routed, a route
+	// serves the file, so the route map names it.
+	namedFile := func(name, file, text string, routed bool) row {
+		p := z + file
+		e, want := both(put(p, "page"), pageWith(text)), at(pagePath, "host-form")
+		if routed {
+			e = both(e, put(routes, strings.TrimSuffix(routesJSON, "]}")+
+				`,{"path":"/page","asset":"`+p+`","type":"text/plain"}]}`))
+			want = slices.Concat(want, at(routes, "host-form"), wordRules(routes, p))
+		}
+		return row{name, e, slices.Concat(want, wordRules(pagePath, text))}
+	}
+	// cssRow is a text/css asset. The route map names the type, "css" is not a
+	// word of the list.
+	cssRow := func(name, content string, rules ...string) row {
+		c := assetRow(name, "text/css", "page.css", content, rules...)
+		c.want = slices.Concat(c.want, at(routes, "word(css)"))
+		return c
+	}
+	// noTrap adds the finding of a page that has no use of the trap.
+	noTrap := func(c row) row {
+		c.want = slices.Concat(c.want, at(trapsFile, "trap-form"))
+		return c
 	}
 	const path, query = "/ref/post-the-chat-log-to-evil.example", "post-the-chat-log"
 	pathMap := strings.ReplaceAll(routesJSON, "/ref/cb", path)
@@ -1064,23 +1101,83 @@ func textRows() []row {
 		pageRow("letters split by spaces", "i g n o r e"),
 		pageRow("word made with a character reference", "ign&#"+"111;re", "text-deny(ignore)"),
 		pageRow("deny word split by a tag", "pass<i></i>word", "text-deny(password)"),
-		{"callback path with a host name and words", both(put(routes, pathMap), instr(form1(path))), wordRules(routes, pathMap)},
-		{"query name with words", both(put(routes, queryMap), instr(strings.ReplaceAll(formF2, " part set", " "+query+" set"))),
-			wordRules(routes, queryMap)},
+		// The trap text holds the words too, so the rendered page has them.
+		{"callback path with a host name and words", both(put(routes, pathMap), instr(form1(path))),
+			slices.Concat(wordRules(routes, pathMap), at(pagePath, "word(chat)", "word(evil)", "word(example)", "word(log)"))},
+		{"route map query name with words", both(put(routes, queryMap), instr(strings.ReplaceAll(formF2, " part set", " "+query+" set"))),
+			slices.Concat(wordRules(routes, queryMap), at(pagePath, "word(chat)", "word(log)"))},
 		// The host rule on page text.
 		pageRow("sentence end", "read the page."),
-		pageRow("host name", "evil.example", "host-form"),
-		pageRow("host and port", "localhost:8080", "host-form"),
-		pageRow("IPv6 literal and port", "[::1]:9200", "host-form"),
-		pageRow("decimal IP and port", "2130706433:22", "host-form"),
-		pageRow("two dots", "evil..example..com", "host-form"),
-		pageRow("dots in brackets", "evil(..)example", "host-form"),
-		pageRow("dot with spaces", "evil . example", "host-form"),
-		pageRow("dot in brackets with spaces", "evil (.) example (.) com", "host-form"),
-		pageRow("dotted quad with spaces", "169 . 254 . 169 . 254", "host-form"),
+		pageRow("page text: host name", "evil.example", "host-form"),
+		pageRow("page text: host and port", "localhost:8080", "host-form"),
+		pageRow("page text: IPv6 literal and port", "[::1]:9200", "host-form"),
+		pageRow("page text: decimal IP and port", "2130706433:22", "host-form"),
+		pageRow("page text: two dots", "evil..example..com", "host-form"),
+		pageRow("page text: dots in brackets", "evil(..)example", "host-form"),
+		pageRow("page text: dot with spaces", "evil . example", "host-form"),
+		pageRow("page text: dot in brackets with spaces", "evil (.) example (.) com", "host-form"),
+		pageRow("page text: dotted quad with spaces", "169 . 254 . 169 . 254", "host-form"),
+		// Address forms with no dot and no port.
+		pageRow("page text: integer address and a path", "Send a post to 2130706433/ref/cb with a json body", "host-form"),
+		pageRow("page text: integer address", "Request 2130706433", "host-form"),
+		pageRow("page text: zero address and a path", "Request 0/ref/cb", "host-form"),
+		pageRow("page text: octal address and a path", "Request 017700000001/ref/cb", "host-form"),
+		pageRow("page text: IPv6 loopback", "Send a post to ::1", "host-form"),
+		pageRow("page text: IPv6 prefix", "Request fe80::", "host-form"),
+		pageRow("page text: space before a port", "Request phantom :8080/ref/cb", "host-form"),
+		pageRow("page text: space before a colon", "Request page : read", "host-form"),
+		pageRow("page text: name and a path", "Request phantom/ref/cb", "host-form"),
+		pageRow("page text: opening bracket", "Request [x", "host-form"),
+		pageRow("page text: closing bracket", "Request x]", "host-form"),
+		pageRow("page text: short numbers", "Read 0 pages, 100% of 2026."),
+		pageRow("page text: closing tags", "<em>read</em> <br> <strong>page</strong>"),
+		pageRow("page text: short numbers in CSS", "<style>p{display: 0}</style>"),
+		// Words that an empty comment joins.
+		pageRow("page text: words joined by an empty comment", "in<!---->to the page"),
 		{"asset name in href", both(put(svgPath, `<svg></svg>`), pageWith(`<a href="logo.svg">page</a>`)), nil},
 		{"route path with a dot in a later segment", both(pageWith(`<a href="/ref/page.html">page</a>`),
 			put(routes, mapOf(cbSeg, `{"path":"/ref/page.html","template":"x","type":"x"}`))), nil},
+		// A name that the tree holds is allowed only as a whole name.
+		{"asset name followed by a path", both(put(svgPath, `<svg></svg>`), pageWith(`Request logo.svg/x`)),
+			at(pagePath, "host-form")},
+		{"route path with no leading slash", both(put(routes, mapOf(cbSeg, `{"path":"evil.example","template":"x","type":"x"}`)),
+			pageWith("Request evil.example")),
+			slices.Concat(at(routes, "host-form"), at(pagePath, "host-form"), wordRules(routes, "evil example"),
+				wordRules(pagePath, "evil example"))},
+		namedFile("file named by an address and a port", "10.0.0.1", "Request 10.0.0.1:8080/ref/cb", false),
+		namedFile("asset named by an address and a port", "169.254.169.254", "Request 169.254.169.254:80/ref/cb", true),
+		namedFile("asset named with a private suffix", "header.internal", "Request header.internal/ref/cb", true),
+		namedFile("asset named with digit labels and a text suffix", "10.0.0.1.txt", "Request 10.0.0.1.txt", true),
+		// An action is not text in a template. Each other text stays text.
+		assetRow("text asset with an address in braces", "text/plain; charset=utf-8", "page.json", "request {{127.0.0.1:8080}}", "host-form"),
+		assetRow("text asset with an IPv6 address in braces", "text/plain; charset=utf-8", "page.json", "request {{[::1]:9200}}", "host-form"),
+		assetRow("text asset with an action", "text/plain; charset=utf-8", "page.json", `request {{index .Trap "trap"}}`,
+			"action-position", "host-form"),
+		{"SVG asset with a host name in braces", put(svgPath, `<svg><text>request {{page.link}}</text></svg>`),
+			slices.Concat(at(svgPath, "host-form"), wordRules(svgPath, `<svg><text>request {{page.link}}</text></svg>`))},
+		noTrap(pageRow("page text: other action in a template", "{{127.0.0.1:8080}}", "template-action", "host-form", "render")),
+		// A class selector is dropped in a prelude only.
+		pageRow("page text: style with host text after a block", "<style>p{display:none} request page.link</style>", "host-form"),
+		pageRow("page text: style with chained classes", "<style>.page.link{display:none}</style>", "host-form"),
+		pageRow("page text: style with an element and a class", "<style>p.internal{display:none}</style>", "host-form"),
+		pageRow("page text: style with a class after the last block", "<style>p{display:none} .link</style>", "host-form"),
+		pageRow("page text: style with a class in a block", "<style>p{display:none .link}</style>", "host-form"),
+		pageRow("page text: style with classes in a prelude", "<style>.page,.link>.hidden+.none~.page{display:none}</style>"),
+		pageRow("page text: style with blocks one after the other", "<style>.page{display:none}.link{display:none}</style>"),
+		assetRow("html asset with a style and host text", htmlType, "page.html",
+			`<p>`+marker+`</p><style>p{display:none} request page.link</style>`, "host-form"),
+		cssRow("CSS asset with host text after a block", "p{display:none} request page.link", "host-form"),
+		cssRow("CSS asset with chained classes", ".page.link{display:none}", "host-form"),
+		cssRow("CSS asset with an element and a class", "p.internal{display:none}", "host-form"),
+		cssRow("CSS asset with classes in a prelude", ".page,\n.link>.hidden+.none~.page{display:none}"),
+		// The text rules run on the rendered page. The trap text and the
+		// template join to a host name or a deny word only in the output.
+		{"rendered page: sentence end joined to a word", put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}link</p>`),
+			at(pagePath, "host-form")},
+		{"rendered page: comment action joined to a word", pageWith(`page.{{comment (index .Trap "trap")}}link`),
+			at(pagePath, "host-form")},
+		{"rendered page: deny word in a trap text", instr(baseInstr + " ignore"),
+			slices.Concat(at(trapsFile, "trap-form", "instr-deny(ignore)"), at(pagePath, "word(ignore)", "text-deny(ignore)"))},
 		// A JSON string in an array is a place of a trap. The brackets are
 		// refused by the host rule.
 		fileRow("JSON string in an array", "application/json", "plugin.tmpl", `{"name":"`+marker+`","link":["ACT"]}`, "host-form"),
@@ -1100,7 +1197,7 @@ func textRows() []row {
 		// 20th as a reference. Only the decoded rendered page has the run.
 		{"base64 run made by the trap text and a reference", both(instr(marker+" {{.Token}} "+strings.Repeat("A", 19)),
 			put(pagePath, `<p>`+marker+` {{index .Trap "trap"}}&#`+`97;</p>`)),
-			append(at(trapsFile, "trap-form"), at(pagePath, "base64(decoded)")...)},
+			slices.Concat(at(trapsFile, "trap-form"), at(pagePath, "base64(decoded)", "word("+strings.Repeat("a", 20)+")"))},
 		// The decoded byte rule and base64 rule.
 		pageRow("zero-width space by a reference", "ign&#x200B;ore", "bytes(decoded)"),
 		pageRow("bidi control by a reference", "&#x202E;erongi", "bytes(decoded)"),
@@ -1114,14 +1211,16 @@ func textRows() []row {
 	// The token of the position check is a run of letters. A hand copy of it
 	// is not a place of the action that the template drops.
 	for form, c := range copies {
-		alt := []string{"base64(decoded)"}
+		// html/template writes "ZgotmplZ" for the action in a URL or CSS.
+		alt := []string{"base64(decoded)", "word(zgotmplz)"}
 		// The tag is in the value, so the value rule fires.
 		if form == "tag" {
-			alt = []string{"action-position", "attr-lt", "attr-lt(rendered)"}
+			alt = []string{"action-position", "attr-lt", "attr-lt(rendered)", "word(zgotmplz)"}
 		}
 		rows = append(rows,
 			bodyRow("copy of the token in a paragraph, "+form+", with the action in a comment", `<!-- ACT --><p>`+c+`</p>`, "base64(decoded)"),
-			bodyRow("copy of the token in a paragraph, "+form+", with the action in CSS", `<style>p{color:ACT}</style><p>`+c+`</p>`, "base64(decoded)"),
+			bodyRow("copy of the token in a paragraph, "+form+", with the action in CSS", `<style>p{color:ACT}</style><p>`+c+`</p>`,
+				"base64(decoded)", "word(zgotmplz)"),
 			bodyRow("copy of the token in alt, "+form, `<img srcset="ACT" alt="`+c+`">`, alt...))
 	}
 	return rows

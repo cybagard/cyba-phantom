@@ -108,14 +108,15 @@ var (
 	// A trap text has no "[" or "]". It has no ":" at the end. It has no
 	// ":" before a character that is not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
-	// Text below vhosts/ has no "[" or "]". It has no ":" after a letter or
-	// digit and before a digit (a port). A template action is not text.
-	pageHost = regexp.MustCompile(`[\[\]]|[A-Za-z0-9]:[0-9]`)
-	anyBrace = regexp.MustCompile(`\{\{[^}]*\}\}`)
+	// Text below vhosts/ has no "[" or "]", and no ":" before a digit (a
+	// port). It has no ":" after white space or before ":". It has no "/"
+	// after a letter, a digit, "." "-" or "_". It has no run of 8 digits.
+	pageHost = regexp.MustCompile(`[\[\]]|:[0-9]|\s:|::|[A-Za-z0-9._-]/|[0-9]{8,}`)
 	// A run of ASCII letters is a word of wordList.
 	letters = regexp.MustCompile(`[A-Za-z]+`)
-	// A CSS class selector, or a declaration block. A block stays as it is.
-	cssClass = regexp.MustCompile(`\{[^}]*\}|\.[A-Za-z_-][A-Za-z0-9_-]*`)
+	// A class selector, at the start of a prelude or after white space, ","
+	// or a combinator. Group 1 is the character before the ".".
+	classSel = regexp.MustCompile(`(^|[\s,>+~])\.[A-Za-z_-][A-Za-z0-9_-]*`)
 	// These words are checked on the text with all spaces removed.
 	denyCompact = []string{"apikey", "systemprompt", "privatekey"}
 
@@ -394,7 +395,8 @@ func checkTree(fsys fs.FS) []string {
 		}
 	}
 	// The route maps are read, so the type of each file is known.
-	r.vhostFiles(files, hosts)
+	exempt := exemptNames(files, hosts)
+	r.vhostFiles(files, hosts, exempt)
 	for _, name := range assets {
 		if slices.Contains(owner[name].types[name], "text/html") && !hasMarker(string(files[name])) {
 			r.add("marker", name)
@@ -425,30 +427,82 @@ func checkTree(fsys fs.FS) []string {
 			}
 		}
 	}
+	pageNames := longestFirst(append(slices.Clone(exempt), segmentNames(hosts)...))
 	for _, name := range templates {
-		r.render(name, string(files[name]), texts, slices.Contains(owner[name].types[name], "text/html"))
+		types := owner[name].types[name]
+		r.render(name, string(files[name]), texts, slices.Contains(types, "text/html"),
+			slices.Contains(types, "text/css"), pageNames)
 	}
 	r.out = append(r.out, listDeny(wordList)...)
 	return r.out
 }
 
-// vhostFiles runs the text rules on each file below vhosts/, the route maps
-// too. The rules are the word list, the deny list and the host rule. The
-// byte and base64 rules run on the decoded forms. The host rule allows
-// the route paths and the file names of the tree. A file name is in full,
-// or below its vhost.
-func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost) {
+// pageWord is the list word that stands for a token in a rendered page.
+const pageWord = "page"
+
+// fileSuffixes are the last labels of a file name that the host rule allows.
+var fileSuffixes = []string{"tmpl", "html", "json", "svg", "css", "txt"}
+
+func allDigits(s string) bool {
+	return s != "" && !strings.ContainsFunc(s, func(c rune) bool { return c < '0' || c > '9' })
+}
+
+// exemptFile reports a file name that the host rule allows. Its last label is
+// one of fileSuffixes, and no label is all digits.
+func exemptFile(n string) bool {
+	labels := strings.Split(n, ".")
+	return slices.Contains(fileSuffixes, labels[len(labels)-1]) && !slices.ContainsFunc(labels, allDigits)
+}
+
+// longestFirst sorts names, the longest first.
+func longestFirst(names []string) []string {
+	slices.SortFunc(names, func(a, b string) int { return len(b) - len(a) })
+	return names
+}
+
+// exemptNames gives the names that the host rule allows. They are the route
+// paths and the beacon paths, with their leading "/". They are also the file
+// names below vhosts/, in full or below the vhost, that exemptFile allows.
+func exemptNames(files map[string][]byte, hosts map[string]*vhost) []string {
 	var names []string
 	for _, v := range hosts {
-		names = append(names, v.paths...)
+		for _, p := range v.paths {
+			if strings.HasPrefix(p, "/") {
+				names = append(names, p)
+			}
+		}
 	}
 	for name := range files {
 		if rest, ok := strings.CutPrefix(name, "vhosts/"); ok {
 			_, rel, _ := strings.Cut(rest, "/")
-			names = append(names, name, rel)
+			for _, n := range []string{name, rel} {
+				if exemptFile(n) {
+					names = append(names, n)
+				}
+			}
 		}
 	}
-	slices.SortFunc(names, func(a, b string) int { return len(b) - len(a) })
+	return longestFirst(names)
+}
+
+// segmentNames gives the path of each segment callback with the token of a
+// rendered page, as pageWord.
+func segmentNames(hosts map[string]*vhost) (names []string) {
+	for _, v := range hosts {
+		for p, c := range v.callbacks {
+			if c.segment {
+				names = append(names, p+"/"+pageWord)
+			}
+		}
+	}
+	return names
+}
+
+// vhostFiles runs the text rules on each file below vhosts/, the route maps
+// too. The rules are the word list, the deny list and the host rule. The
+// byte and base64 rules run on the decoded forms. The host rule allows the
+// names of exemptNames. In a template, an exact action is not text.
+func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost, names []string) {
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		parts := strings.SplitN(name, "/", 3)
 		if parts[0] != "vhosts" || len(parts) < 2 {
@@ -457,22 +511,33 @@ func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost) {
 		v := hosts[parts[1]]
 		css := v != nil && slices.Contains(v.types[name], "text/css")
 		raw := string(files[name])
-		r.words(name, raw)
 		r.decoded(name, raw)
-		for _, s := range readings(raw) {
-			for _, d := range denied(s) {
-				r.add("text-deny("+d+")", name)
-			}
+		src := raw
+		if strings.HasSuffix(name, ".tmpl") {
+			src = actionRe.ReplaceAllString(src, " ")
 		}
-		hostSrc := dropClasses(raw, css)
+		src = dropClasses(src, css)
 		if path.Base(name) == routesName {
-			hostSrc = jsonStrings(raw)
+			src = jsonStrings(raw)
 		}
-		for _, s := range readings(hostSrc) {
-			s = dropNames(svgNames.Replace(anyBrace.ReplaceAllString(s, " ")), names)
-			if pageHost.MatchString(s) || badDot(s) {
-				r.add("host-form", name)
-			}
+		r.textRules(name, raw, src, names)
+	}
+}
+
+// textRules runs the word rule and the deny list on the readings of s. It
+// runs the host rule on the readings of host, the text without the parts that
+// are not text.
+func (r *result) textRules(name, s, host string, names []string) {
+	r.words(name, s)
+	for _, d := range readings(s) {
+		for _, w := range denied(d) {
+			r.add("text-deny("+w+")", name)
+		}
+	}
+	for _, d := range readings(host) {
+		d = dropNames(svgNames.Replace(strings.ReplaceAll(d, ldTag, " ")), names)
+		if pageHost.MatchString(d) || badDot(d) {
+			r.add("host-form", name)
 		}
 	}
 }
@@ -555,12 +620,14 @@ func (r *result) has(rule, name string) bool {
 	})
 }
 
-// words checks each run of letters of s, after the decode of its character
-// references, against wordList. The two SVG namespace names are not words.
+// words checks each run of letters in the readings of s against wordList. The
+// two SVG namespace names are not words.
 func (r *result) words(name, s string) {
-	for _, w := range letters.FindAllString(html.UnescapeString(svgNames.Replace(s)), -1) {
-		if w = strings.ToLower(w); !wordSet[w] {
-			r.add("word("+w+")", name)
+	for _, d := range readings(svgNames.Replace(s)) {
+		for _, w := range letters.FindAllString(d, -1) {
+			if w = strings.ToLower(w); !wordSet[w] {
+				r.add("word("+w+")", name)
+			}
 		}
 	}
 }
@@ -595,7 +662,8 @@ func (r *result) decoded(name, s string) {
 
 // jsonStrings gives the keys and the string values of a JSON text, with a
 // space after each. The brackets and braces of the JSON are not text. A text
-// that is not JSON stays as it is.
+// that is not JSON stays as it is. The value of a member "type" is a content
+// type, so it is not text.
 func jsonStrings(raw string) string {
 	var v any
 	if json.Unmarshal([]byte(raw), &v, parseOpts...) != nil {
@@ -614,7 +682,9 @@ func jsonStrings(raw string) string {
 		case map[string]any:
 			for k, e := range v {
 				out.WriteString(k + " ")
-				walk(e)
+				if _, str := e.(string); k != "type" || !str {
+					walk(e)
+				}
 			}
 		}
 	}
@@ -637,28 +707,39 @@ func badDot(s string) bool {
 	return false
 }
 
-// dropClasses removes each CSS class selector from the style elements of s.
-// For a CSS file it removes them from all of s. A declaration block stays.
-func dropClasses(s string, css bool) string {
-	fix := func(b string) string {
-		return cssClass.ReplaceAllStringFunc(b, func(m string) string {
-			if m[0] == '{' {
-				return m
-			}
-			return ""
-		})
+// dropSelectors removes the class selectors of the preludes of the CSS text
+// s. A prelude is the text up to a "{", from the start or after a "{" or a
+// "}". Text up to a "}" or to the end is not a prelude.
+func dropSelectors(s string) string {
+	var out strings.Builder
+	for {
+		i := strings.IndexAny(s, "{}")
+		if i < 0 {
+			return out.String() + s
+		}
+		seg := s[:i]
+		if s[i] == '{' {
+			seg = classSel.ReplaceAllString(seg, "${1}")
+		}
+		out.WriteString(seg + s[i:i+1])
+		s = s[i+1:]
 	}
+}
+
+// dropClasses removes the class selectors from the style elements of s. For a
+// CSS file it removes them from all of s.
+func dropClasses(s string, css bool) string {
 	if css {
-		return fix(s)
+		return dropSelectors(s)
 	}
 	return styleBody.ReplaceAllStringFunc(s, func(el string) string {
 		m := styleBody.FindStringSubmatchIndex(el)
-		return el[:m[2]] + fix(el[m[2]:m[3]]) + el[m[3]:]
+		return el[:m[2]] + dropSelectors(el[m[2]:m[3]]) + el[m[3]:]
 	})
 }
 
-// dropNames replaces each name of names in s with a space. A name that is
-// a part of a longer name stays. A name char stands directly before it, or
+// dropNames replaces each name of names in s with the letter "n". A name that
+// is a part of a longer name stays. A name char stands directly before it, or
 // a name char after it. A "." and a letter or digit after it is the same.
 // The names are longest first.
 func dropNames(s string, names []string) string {
@@ -675,7 +756,7 @@ func dropNames(s string, names []string) string {
 			}
 		}
 		if skip > 0 {
-			out.WriteByte(' ')
+			out.WriteByte('n')
 			i += skip
 		} else {
 			out.WriteByte(s[i])
@@ -830,20 +911,25 @@ func schemeFound(low string) bool {
 // render runs a template as the engine does. It runs two times: with the trap
 // texts of the tree, and with no trap text. In the second run, each index
 // action gives "" and each comment action gives an empty HTML comment. It
-// runs the markup rules and the base64 rule on each output. A template that
-// does not parse or run is a finding. For a text/html template (isHTML), the
-// output with the trap texts also has no "<" in an attribute value.
-func (r *result) render(name, text string, traps map[string]string, isHTML bool) {
+// runs the markup rules and the base64 rule on each output. It also runs the
+// text rules on it, with each token as pageWord. A template that does not
+// parse or run is a finding. For a text/html template (isHTML), the output
+// with the trap texts also has no "<" in an attribute value. With css, the
+// output is a CSS text.
+func (r *result) render(name, text string, traps map[string]string, isHTML, css bool, names []string) {
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
 	if err != nil {
 		r.add("render", name)
 		return
 	}
-	var outs []string
+	var outs, pages []string
 	defer func() {
 		for _, o := range outs {
 			r.decoded(name, o)
+		}
+		for _, o := range pages {
+			r.textRules(name, o, dropClasses(o, css), names)
 		}
 	}()
 	for _, run := range []struct {
@@ -857,6 +943,7 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 		}
 		out := buf.String()
 		outs = append(outs, strings.ReplaceAll(out, fixedToken, "-"))
+		pages = append(pages, strings.ReplaceAll(out, fixedToken, pageWord))
 		r.markupRules(name, out, renderForm(out), run.sfx, false, true)
 		if run.sfx == "(rendered)" {
 			r.ldObject(name, out)
