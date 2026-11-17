@@ -238,8 +238,9 @@ func restart(t *testing.T, m *sim) *sim {
 	return n
 }
 
-// T-U-30: after 6 h, S gains 4 min for each boot-clock minute. It gains at
-// most 24 h for one host boot. A restart keeps the amount used.
+// T-U-30: after 6 h, the catch-up adds 4 min for each boot-clock minute, so
+// S moves 5 min. It adds at most 24 h for one host boot. A restart keeps the
+// amount used.
 func TestTU30_CatchUpRateAndBudget(t *testing.T) {
 	m := catchClock(t, 3*dayMS, 0)
 	for i := int64(1); i <= 200; i++ {
@@ -557,14 +558,13 @@ func pauseSeq(t *testing.T, pause int64) {
 	m.wantLines(lc{differs: 480, budget: 1})
 }
 
-// T-U-30, bound table row "VM pause of 20 d, no reboot". This test uses the
-// same row with a pause of 3 d. The wall moves +3 d at 7 h. After 6 h of
-// checks S = W0 + 7 h + 6 h + 24 h. The offset is wall - S = 3 d - 24 h =
-// 48 h, and it stays so.
+// T-U-30, fault: a VM pause of 3 d, no reboot. The wall moves +3 d at 7 h.
+// After 6 h of checks S = W0 + 7 h + 6 h + 24 h. The offset is wall - S =
+// 3 d - 24 h = 48 h, and it stays so.
 func TestTU30_BoundVMPause3Days(t *testing.T) { pauseSeq(t, 3*dayMS) }
 
-// T-U-30, bound table row "VM pause of 20 d, no reboot": as the 3 d pause.
-// The offset is 20 d - 24 h = 19 d at the end.
+// T-U-30, fault: a VM pause of 20 d, no reboot. As with the 3 d pause, the
+// offset is 20 d - 24 h = 19 d at the end.
 func TestTU30_BoundVMPause20Days(t *testing.T) { pauseSeq(t, 20*dayMS) }
 
 // rtcLessReboot starts a new host boot with the wall at 1970 and the stored
@@ -576,7 +576,7 @@ func rtcLessReboot(t *testing.T) *sim {
 	return m
 }
 
-// T-U-30, bound table row "no real-time clock, time sync before 6 h". The
+// T-U-30, fault: no real-time clock, time sync before 6 h. The
 // reboot starts with S = S0 and no jump. The sync at 1 h sets the wall to
 // S0 + 48 h + 1 h. S is S0 + 1 h then. So the grace jump is 48 h.
 func TestTU30_BoundRTCLessSyncBefore6h(t *testing.T) {
@@ -600,7 +600,7 @@ func TestTU30_BoundRTCLessSyncBefore6h(t *testing.T) {
 	m.wantLines(lc{jump: 1, differs: 59})
 }
 
-// T-U-30, bound table row "no real-time clock, time sync after 6 h". The
+// T-U-30, fault: no real-time clock, time sync after 6 h. The
 // sync at 7 h sets the wall to S0 + 48 h + 7 h, with no jump. The checks
 // 420 to 779 gain 4 min each. So 360 checks use 24 h. The offset is
 // 48 h - 24 h = 24 h. S = S0 + 779 min + 24 h.
@@ -628,11 +628,10 @@ func TestTU30_BoundRTCLessSyncAfter6h(t *testing.T) {
 	m.wantLines(lc{differs: 419 + 360 + 10, budget: 1})
 }
 
-// T-U-30, bound table row "first install at 1970, time sync before 6 h".
-// Here the sync is at 7 h, and it still belongs to this row. S is before
-// the token epoch, so the grace applies after 6 h. S = 0 and the wall is 0.
-// The sync sets the wall to W0. S is 7 h then. The grace jump is W0 - 7 h
-// and the catch-up is 0.
+// T-U-30, fault: first install at 1970, time sync at 7 h. S is before the
+// token epoch, so the grace of ADR-043 decision 6 applies also after 6 h.
+// S = 0 and the wall is 0. The sync sets the wall to W0. S is 7 h then. The
+// grace jump is W0 - 7 h and the catch-up is 0.
 func TestTU30_BoundFirstInstallAt1970(t *testing.T) {
 	m := newSim(t, 0, 0, goodID, nil)
 	m.wantS(0)
@@ -652,7 +651,7 @@ func TestTU30_BoundFirstInstallAt1970(t *testing.T) {
 	m.wantLines(lc{jump: 1})
 }
 
-// T-U-30, bound table row "forward step that stays". Start at W0, then the
+// T-U-30, fault: a forward wall step that stays. Start at W0, then the
 // wall is +10 d at 7 h and stays for 10 d. After 360 checks S = true time
 // + 24 h, and it stays. With the wall back to the true time, S stays. A
 // restart keeps the 24 h used. A reboot with the right wall takes the
@@ -668,7 +667,7 @@ func TestTU30_BoundForwardStepHeld(t *testing.T) {
 			t.Fatalf("check %d: S %d, true time %d", i, m.res.State.S, trueTime())
 		}
 	}
-	// 7 h + 360 min of boot clock = 13 h, and 24 h of catch-up.
+	// From check 360 (boot clock 13 h), all 24 h of catch-up are used.
 	m.wantLines(lc{differs: 14400, budget: 1})
 	before := m.res.State.S
 	m.set(minute, trueTime()+60000)

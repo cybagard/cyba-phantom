@@ -18,7 +18,8 @@ const (
 	graceBoot = 6 * time.Hour
 	// catchUpMaxMS is the most catch-up that one host boot may use.
 	catchUpMaxMS int64 = 86400000
-	// catchUpRate is the most that S gains for each unit of boot clock time.
+	// catchUpRate is the most that the catch-up adds for each unit of boot
+	// clock time. S then moves at most 5 times as fast as the boot clock.
 	catchUpRate = 4
 )
 
@@ -105,10 +106,10 @@ func wallMS(src Source) int64 { return clampMS(src.Wall().UnixMilli()) }
 // With the same host boot, S is the stored S plus the boot clock time since
 // the stored value. Start does not read the wall clock then. Else S is the
 // larger of the stored S and the wall clock. The stored catch-up used stays
-// with the same host boot, and is 0 after another one. A jump of the start
-// gives one log line. These cases refuse the start. A boot id error. A boot
-// clock error. A bad stored state. A known jump id out of range. A new jump
-// id above 9223372036854.
+// in the first case, and is 0 in all other cases. A jump of the start gives
+// one log line. These cases refuse the start. A boot id error. A boot clock
+// error. A bad stored state. A known jump id out of range. A new jump id
+// above 9223372036854.
 func Start(src Source, in StartInput) (*Clock, Result, error) {
 	id, err := src.BootID()
 	if err != nil {
