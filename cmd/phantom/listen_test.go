@@ -783,11 +783,17 @@ func TestTS17_FailedHandshakeLogsNothing(t *testing.T) {
 	if _, err := tls.DialWithDialer(dialer, "tcp", https, &tls.Config{ServerName: "other.example.com", InsecureSkipVerify: true}); err == nil {
 		t.Error("a handshake for a name that is not configured worked")
 	}
-	if raw, err := dialer.Dial("tcp", https); err == nil {
-		raw.SetDeadline(time.Now().Add(netWait))
-		raw.Write([]byte("garbage that is no TLS\r\n\r\n"))
-		raw.Close()
+	r.awaitErrorLines(t, srv, lines+1)
+	if n := srv.ErrorLines(); n != lines+1 {
+		t.Errorf("error lines %d after the handshake for an unknown name, want %d", n, lines+1)
 	}
+	raw, err := dialer.Dial("tcp", https)
+	if err != nil {
+		t.Fatalf("dial with bytes that are no TLS: %v", err)
+	}
+	raw.SetDeadline(time.Now().Add(netWait))
+	raw.Write([]byte("garbage that is no TLS\r\n\r\n"))
+	raw.Close()
 	r.awaitErrorLines(t, srv, lines+2)
 	if captured.String() != "" || r.err.String() != errBefore {
 		t.Errorf("standard log %q; stderr %q", captured.String(), r.err.String())
