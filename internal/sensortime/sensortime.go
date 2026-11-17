@@ -28,7 +28,8 @@ var (
 	// out of range.
 	ErrState = errors.New("sensortime: stored state malformed or out of range")
 	// ErrPending means that Check ran while a move waits for its key write.
-	// The writer calls Committed first. Check then changes nothing.
+	// Check then changes nothing. The writer calls Committed only after that
+	// key commits. After a failed write, the writer stops.
 	ErrPending = errors.New("sensortime: a move waits for its key write")
 )
 
