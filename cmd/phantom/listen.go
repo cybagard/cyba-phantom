@@ -247,7 +247,7 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 		})
 	}
 	// The fetcher and the watch start here. This is after the start load.
-	// The std log writer is set to io.Discard before this point.
+	// Serve sets the std log writer to io.Discard before this point.
 	// No early return follows.
 	b.startFetchAndWatch(ctx, &wg, cfg)
 	serveOne(func() error { return srv.Serve(httpsLn) })
