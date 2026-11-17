@@ -134,8 +134,9 @@ func (r *result) add(rule, name string) {
 	}
 }
 
-// secondLayer is true when the checks on the template source and the element
-// check on the parsed pages run. They only add findings. The check of the
+// secondLayer is true when the second layer runs. The second layer checks the
+// template source, the rendered output (attr-lt) and the element names of the
+// parsed pages. Its checks only add findings. The check of the
 // rendered page gives the class of each trap action. A test sets the variable
 // to false, to see what the rendered page alone refuses.
 var secondLayer = true
@@ -810,8 +811,8 @@ func openQuote(s string) int {
 }
 
 // The tokens of the rendered page. A token has the 22 letters of tokenBase and
-// 4 letters for the number of the action. Its alphabet is a-z, like the token
-// of the engine, and it has the same length.
+// 4 letters for the number of the action. Its letters are a-z, a part of the
+// token alphabet of the engine (a-z and 2-7). It has the same length.
 const (
 	tokenBase = "xqzjkvwxqzjkvwxqzjkvwx"
 	tokenLen  = len(tokenBase) + 4
