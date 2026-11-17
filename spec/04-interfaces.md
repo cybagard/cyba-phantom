@@ -13,6 +13,17 @@
 | `GET /healthz` | 200 if writer, tlog and listener healthy; 503 otherwise, also while the writer pauses for disk (SEC-40). Each tile-read error stops the tlog: a changed, short or missing tile, and also a mode error or an I/O error. The tlog stays not healthy until the operator opens the log again (SEC-16) |
 | `POST /reload` | bundle reload (also SIGHUP); coalesced, and two swaps are at least 30 s apart (SEC-34) |
 
+**Clock metrics (SEC-40, ADR-043).** `GET /metrics` has these series of the sensor time S:
+
+- `phantom_clock_wall_offset_seconds` (gauge): wall clock minus S;
+- `phantom_clock_before_epoch` (gauge): 1 while S is before 2026-01-01 UTC, else 0;
+- `phantom_clock_wall_differs_total`: each check with wall clock and S more than 1 h apart;
+- `phantom_clock_step_back_total`: each check with a wall time before the wall time of the check before it;
+- `phantom_clock_catch_up_seconds_total` and `phantom_clock_catch_up_budget_exhausted_total`: the catch-up of S after the first 6 h of a host boot;
+- `phantom_clock_jump_seconds_total`, label `kind` (`start`, `grace` or `reset`): the forward jumps of S and the resets. A grace jump is one in the first 6 h, or while S is before the epoch.
+
+The dashboard shows the offset. `GET /healthz` does not use these series.
+
 ## 3. Config (`/etc/phantom/config.yaml`)
 ```yaml
 listen: { http: ":80", https: ":443" }
