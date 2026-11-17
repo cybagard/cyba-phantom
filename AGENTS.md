@@ -35,22 +35,22 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `cmd/phantom` | main: config, wiring, run loop |
 | `cmd/phantom-verify` | verifier CLI: checkpoint signature, consistency with a prior checkpoint and the state, and inclusion proof of an event |
 | `internal/listener` | TLS via certmagic (ACME); ClientHello capture for JA4; connection caps (total and for each source address), read limits and header caps for each decoy connection |
-| `internal/limiter` | per-IP token bucket, body/path caps |
 | `internal/bait` | decoy vhosts, template rendering, per-session token injection, callback surfaces, JS beacon |
 | `internal/bundle` | bundle load + Ed25519 verify, hot-reload — the only path to content |
+| `internal/bundle/fetch` | HTTPS client of the bundle fetch: gets the archive and the signature file through the egress guard |
 | `internal/token` | mint/verify canary tokens (◇ code; HMAC ◆ seeds from bundle) |
-| `internal/fp` | JA4, HTTP/2, header-order, beacon, cadence collectors (tables ◆) |
-| `internal/score` | rule-based band engine (rules ◆) |
 | `internal/event` | event types, canonical JSON, hashing, bounded queue |
 | `internal/store` | modernc SQLite (CGO-free), WAL, batched single writer, migrations, retention |
 | `internal/tlog` | tiled Merkle log (`sumdb/tlog`), checkpoint signing, publish queue |
-| `internal/alert` | webhook/syslog/SMTP with HMAC, retry, storm control |
-| `internal/ops` | dashboard, /metrics, /healthz, /proof on the localhost-only ops listener |
-| `internal/safe` | escaping layer for all user-controlled strings (SEC-07) |
-| `internal/export` | nightly aggregate export, no IPs |
+| `internal/tlog/verifier` | the checks that a third party runs on the log: signed checkpoint parser, event leaf hash, inclusion proof; no file and no network. It also holds the checkpoint body writer and `SignCheckpoint` |
+| `internal/verify` | reads and checks the inputs of the open verifier (key, checkpoint, event, proof file) and keeps its state |
+| `internal/egress` | the fixed rule that decides if the sensor can connect to an address |
+| `internal/safefile` | opens and checks files with one rule type, before and after the open |
+| `internal/sensortime` | clocks and stored state of the sensor time: boot clock, boot id |
+| `internal/session` | day key of the session id and of `ip_hmac` |
+| `internal/testutil` | helpers that tests of more than one package share |
 | `internal/config` | one YAML file + env overrides, `--check` |
-| `sdk/` | Go + TS: read checkpoints, verify proofs |
-| `tools/` | `trace` (traceability check), `dco` (sign-off and commit identity check), `mirror-diff` (constitution table check), `bundle-sign`, `score-report` |
+| `tools/` | Go tools: `trace` (traceability check), `dco` (sign-off and commit identity check), `bundle-sign` (make and sign a bundle). More Go tools: `stelint` (comment line and sentence length limits), `mutatepkg` (package finder for `make mutate`). Scripts: `mirror-diff.sh` (constitution table check), `coverage.sh` (coverage gate), `mutate-go.sh` (go wrapper for `make mutate`) |
 | `spec/` | synced read-only mirror of the canonical spec documents (01, 04 open sections, 07, 08, manifest, golden table) — the traceability inputs and the open interfaces |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |
@@ -75,7 +75,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 
 ## Commands
 
-- `make all` — build, lint (gofmt/vet), `go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs the tests with `-race`. Then `make all` runs the C10 trace check (`tools/trace` over `spec/`) and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker. The lint step needs the ref `origin/main`, or `BASE=<sha>`. `make all` does not run two checks of the ci workflow: `make fill` (it needs a small tmpfs) and `make dco` (it needs BASE and HEAD). The reader oracle test needs GNU tar 1.35 and Python 3.13. Without them it skips, but in the devcontainer and in CI it fails.
+- `make all` — build, lint (gofmt, vet, `tools/stelint`), `go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs the tests with `-race`. Then `make all` runs the C10 trace check (`tools/trace` over `spec/`) and the constitution-table mirror check. The trace target also checks that each test ID up to `TRACE_MILESTONE` has a Go test or a marker. The lint step needs the ref `origin/main`, or `BASE=<sha>`. `make all` does not run two checks of the ci workflow: `make fill` (it needs a small tmpfs) and `make dco` (it needs BASE and HEAD). The reader oracle test needs GNU tar 1.35 and Python 3.13. Without them it skips, but in the devcontainer and in CI it fails.
 - `make perf` — the T-P-07 gate. Two builds must hash identically. The binary must be statically linked and ≤ 25 MB, built under a 1 vCPU / 512 MB cgroup. Locally, a check that cannot run (no systemd, no readelf) is skipped with a note. CI sets `PERF_STRICT=1`, so in CI each skip fails.
 - `make coverage` — the 07 §1 coverage gate: a floor for each package, in the table of `tools/coverage.sh`. A package without a row fails the gate. The floor is 80 % or more on `internal/{token,score,tlog,limiter,store}`.
 - `make fixtures` — writes the vector hashes in `internal/event/testdata` and the golden signed note in `internal/tlog/verifier/testdata/notes.txt`; nobody edits these values by hand (`test/README`).

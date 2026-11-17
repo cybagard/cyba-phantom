@@ -101,7 +101,7 @@ surface.
 ## Code
 
 - Format: `gofmt` (CI checks); `go vet` clean (CI checks).
-- Standard library only in M-1. A new dependency needs a justification in
+- Prefer the standard library. A new dependency needs a justification in
   the PR body (supply-chain and size budget, C2).
 - Memory: nothing unbounded on a request path (C2). Attach a
   `go test -bench -benchmem` diff to any hot-path change.
