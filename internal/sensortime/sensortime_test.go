@@ -112,6 +112,31 @@ func TestTU30_DefaultSource(t *testing.T) {
 	}
 }
 
+// T-U-30: a GOOS with no boot id gives an empty boot id and no error. The
+// Go monotonic clock gives an elapsed time that does not go back.
+func TestTU30_MonotonicSource(t *testing.T) {
+	src := monotonicSource()
+	if src.Wall == nil {
+		t.Fatal("wall clock is nil")
+	}
+	id, err := src.BootID()
+	if id != "" || err != nil {
+		t.Fatalf("boot id %q, %v; want empty and nil", id, err)
+	}
+	prev := time.Duration(0)
+	for i := 0; i < 3; i++ {
+		d, err := src.BootClock()
+		if err != nil || d < prev {
+			t.Fatalf("elapsed %v after %v, %v", d, prev, err)
+		}
+		prev = d
+		time.Sleep(time.Millisecond)
+	}
+	if prev <= 0 {
+		t.Fatalf("elapsed time %v did not grow", prev)
+	}
+}
+
 func typical() State {
 	return State{
 		S: 1794000000000, BootID: goodID, BootClock: 36 * time.Hour,
