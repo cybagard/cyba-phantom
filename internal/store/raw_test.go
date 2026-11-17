@@ -46,8 +46,8 @@ func rollWall() time.Time { return rollTDel }
 
 // T-U-11: a row with ts before the cutoff has the three fields NULL, also a
 // callback row with a record. A row at the cutoff or after it keeps them. The
-// step reads and writes no meta key: a test row gets a value again, and a run
-// with a later cutoff clears it.
+// step writes no meta key. A run with a later cutoff clears a row that has a
+// value again.
 func TestTU11FieldClearBeforeTheCutoff(t *testing.T) {
 	r, chunks := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
 	cut := rollCutoff(30)
@@ -109,9 +109,8 @@ func callTally(t *testing.T, db *sql.DB, step retentionStep, limit int) (n, fiel
 	return n, int(tl[memFields])
 }
 
-// T-U-11: more rows with one ts than one chunk are all cleared, in chunks of
-// 1 000, 1 000 and 502 rows. The call that ends the rows returns 502, below
-// the limit, as no row is left in either part.
+// T-U-11: 2 502 rows with one ts go in chunks of 1 000, 1 000 and 502. The
+// last call returns 502, below the limit, as no row is left.
 func TestTU11FieldClearManyRowsWithOneTS(t *testing.T) {
 	r, chunks := rollRig(t, newFieldClearStep(rollTDel, rollWall, 30))
 	cut := rollCutoff(30)

@@ -1087,8 +1087,8 @@ func TestTU27FieldClearAfterStartAheadThenRestart(t *testing.T) {
 	}
 }
 
-// T-U-27: rows written with the wall clock 40 d ahead have no field after the
-// first run with the right clock. A run with the wall clock ahead came first.
+// T-U-27: after the first run with the right clock, no row written 40 d ahead
+// keeps a field. A run with the wall clock ahead came first.
 func TestTU27FieldClearRowsWrittenWithTheWallClockAhead(t *testing.T) {
 	r, s, f := prodRig(t, 40*oneDay, nil)
 	s.runOnce(context.Background())
