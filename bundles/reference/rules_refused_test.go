@@ -115,7 +115,8 @@ func mapOf(routes ...string) string {
 	return `{"routes":[` + strings.Join(append([]string{pageRoute}, routes...), ",") + `]}`
 }
 
-// docs adds a second vhost with a page that uses the trap of the base tree, and routes.
+// docs adds a second vhost and routes. Its page uses the trap of the base
+// tree.
 func docs(routes ...string) edit {
 	page := `{"path":"/","template":"` + other + `index.tmpl","type":"` + htmlType + `"}`
 	return both(put(other+routesName, `{"routes":[`+strings.Join(append([]string{page}, routes...), ",")+`]}`),
@@ -748,7 +749,7 @@ func fileEdit(typ, file, content string) edit {
 		put(routes, strings.TrimSuffix(routesJSON, "]}")+`,{"path":"/x","template":"`+p+`","type":"`+typ+`"}]}`))
 }
 
-// fileRow adds a template file. The base trap has the form F1, and the base page
+// fileRow adds a template file. The base trap has the form F1. The base page
 // uses it.
 func fileRow(name, typ, file, content string, rules ...string) row {
 	return row{name, fileEdit(typ, file, content), at("vhosts/"+host+"/"+file, rules...)}
@@ -989,8 +990,8 @@ func TestTS36RenderedPageDecidesPositions(t *testing.T) {
 }
 
 // The rows of cases name the findings of their own rule. A row that has a
-// finding does not name the findings of the text rules: its words and its dots
-// are not its subject. A row with no finding passes with no finding at all.
+// finding does not name the findings of the text rules. Its words and its
+// dots are not its subject. A row with no finding passes with no finding.
 func TestTS36RefusedInputs(t *testing.T) {
 	check := func(c row, exact bool) {
 		t.Run(c.name, func(t *testing.T) {
@@ -1017,21 +1018,22 @@ func TestTS36RefusedInputs(t *testing.T) {
 	}
 }
 
-// pageRow is the base page and the text s after the action. The row names the
-// findings of its rules, and the words and elements that the lists do not hold.
+// pageRow is the base page and the text s after the action. The row names
+// the findings of its rules. It also names the words and elements that the
+// lists do not hold.
 func pageRow(name, s string, rules ...string) row {
 	text := "<p>" + useT1 + " " + s + "</p>"
 	return row{name, pageWith(s), slices.Concat(at(pagePath, rules...), at(pagePath, elementRules(s)...), wordRules(pagePath, text))}
 }
 
-// textRows are the rows of the text rules of the files below vhosts/: the word
-// list, the host rule, the marker of an asset and the decoded byte and base64
-// rules. Each row names all of its findings.
+// textRows are the rows of the text rules of the files below vhosts/. They
+// are the word list, the host rule, the marker of an asset and the decoded
+// byte and base64 rules. Each row names all of its findings.
 func textRows() []row {
 	const z = "vhosts/" + host + "/"
-	// A hand copy of the token of the first action of a page, in the position
-	// check. One is written with a character reference, and one is cut by an end
-	// tag that the parser drops. No raw run of 20 is in the source.
+	// A hand copy of the token of the second action of a page, in the
+	// position check. One is written with a character reference. One is cut
+	// by an end tag that the parser drops. No raw run of 20 is in the source.
 	copies := map[string]string{
 		"reference": "xqzjkvwxqz&#" + "106;kvwxqzjkvwxaaab",
 		"tag":       "xqzjkvwxqzjk</span>vwxqzjkvwxaaab",
@@ -1079,7 +1081,8 @@ func textRows() []row {
 		{"asset name in href", both(put(svgPath, `<svg></svg>`), pageWith(`<a href="logo.svg">page</a>`)), nil},
 		{"route path with a dot in a later segment", both(pageWith(`<a href="/ref/page.html">page</a>`),
 			put(routes, mapOf(cbSeg, `{"path":"/ref/page.html","template":"x","type":"x"}`))), nil},
-		// A JSON string in an array is a place of a trap. The brackets are not text.
+		// A JSON string in an array is a place of a trap. The brackets are
+		// refused by the host rule.
 		fileRow("JSON string in an array", "application/json", "plugin.tmpl", `{"name":"`+marker+`","link":["ACT"]}`, "host-form"),
 		// The marker of an asset.
 		assetRow("html asset with the marker in a paragraph", htmlType, "page.html", `<p>`+marker+`</p>`),
@@ -1112,7 +1115,7 @@ func textRows() []row {
 	// is not a place of the action that the template drops.
 	for form, c := range copies {
 		alt := []string{"base64(decoded)"}
-		if form == "tag" { // The tag is in the value, so the value rule refuses it as well.
+		if form == "tag" { // The tag is in the value. The value rule refuses it.
 			alt = []string{"action-position", "attr-lt", "attr-lt(rendered)"}
 		}
 		rows = append(rows,

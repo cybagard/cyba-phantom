@@ -108,13 +108,13 @@ var (
 	// A trap text has no "[" or "]". It has no ":" at the end. It has no
 	// ":" before a character that is not a space.
 	hostForm = regexp.MustCompile(`[\[\]]|:([^ ]|$)`)
-	// Text below vhosts/ has no "[" or "]", and no ":" after a letter or digit
-	// and before a digit (a port). A template action is not text.
+	// Text below vhosts/ has no "[" or "]". It has no ":" after a letter or
+	// digit and before a digit (a port). A template action is not text.
 	pageHost = regexp.MustCompile(`[\[\]]|[A-Za-z0-9]:[0-9]`)
 	anyBrace = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	// A run of ASCII letters is a word of wordList.
 	letters = regexp.MustCompile(`[A-Za-z]+`)
-	// A CSS class selector, or a declaration block. A block is kept as it is.
+	// A CSS class selector, or a declaration block. A block stays as it is.
 	cssClass = regexp.MustCompile(`\{[^}]*\}|\.[A-Za-z_-][A-Za-z0-9_-]*`)
 	// These words are checked on the text with all spaces removed.
 	denyCompact = []string{"apikey", "systemprompt", "privatekey"}
@@ -131,17 +131,17 @@ var (
 		"execute", "shell", "download", "install",
 	}
 
-	// wordList is the closed list of words of the files below vhosts/. A
-	// file is read after the decode of its character references. Each run of
-	// ASCII letters in it is a word, and a word is compared in lower case. The
-	// tags, attribute values, JSON keys, CSS and template actions are part of
-	// the text. Each run of letters in the name of a callback position is a
-	// word too. The list holds the words of the 6 trap forms, and the names of
-	// the elements, attributes, CSS properties, JSON keys and content types that
-	// the tree uses. A new word is a code change in a reviewed PR. A word of
-	// one letter is in the list only when a form or an element needs it: "a"
-	// and "p" are elements, "a" is also a word of F4, and "x" starts each header
-	// name.
+	// wordList is the closed list of words of the files below vhosts/.
+	// A file is read after the decode of its character references.
+	// Each run of ASCII letters in it is a word. A word is compared in lower
+	// case. The tags, attribute values, JSON keys, CSS and template actions
+	// are part of the text. Each run of letters in the name of a callback
+	// position is a word too. The list holds the words of the 6 trap forms.
+	// It also holds the names of the elements, attributes, CSS properties,
+	// JSON keys and content types that the tree uses. A new word is a code
+	// change in a reviewed PR. A word of one letter is in the list only when
+	// a form or an element needs it. "a" is a word of F4 and an element.
+	// "p" is an element. "x" starts each header name.
 	wordList = strings.Fields(`
 		phantom reference trap request to read the full page with query part set
 		header send a post json body in which is do not this link out of scope
@@ -200,8 +200,8 @@ type use struct{ id, class, file string }
 // vhost is what a trap check needs of one vhost directory. A trap is global
 // to the bundle. "Each vhost that uses" a trap means each vhost with a use of
 // it. A trap that no vhost uses has no path. The types of a template or an
-// asset are the content types of the routes that name it, with no parameter.
-// The paths are the route paths and the beacon paths.
+// asset are the content types of the routes that name it. They have no
+// parameter. The paths are the route paths and the beacon paths.
 type vhost struct {
 	callbacks map[string]callback
 	uses      []use
@@ -321,7 +321,8 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 				r.add("route-form", name)
 			}
 			v.callbacks[rt.Path] = callback{c.Segment, q, h, b}
-			// The names are values of the file too. A JSON escape can hide a letter.
+			// The names are values of the file too. A JSON escape can hide
+			// a letter.
 			r.words(name, q+" "+h+" "+b)
 		}
 		for _, file := range []string{rt.Template, rt.Asset} {
@@ -432,9 +433,10 @@ func checkTree(fsys fs.FS) []string {
 }
 
 // vhostFiles runs the text rules on each file below vhosts/, the route maps
-// too: the word list, the deny list, the host rule, and the byte and base64
-// rules on the decoded forms. The names that the host rule allows are the
-// route paths and the file names of the tree, in full and below their vhost.
+// too. The rules are the word list, the deny list, the host rule, and the
+// byte and base64 rules on the decoded forms. The host rule allows the route
+// paths and the file names of the tree. It reads a file name in full and
+// below its vhost.
 func (r *result) vhostFiles(files map[string][]byte, hosts map[string]*vhost) {
 	var names []string
 	for _, v := range hosts {
@@ -568,17 +570,18 @@ func tagless(s string) string {
 	return markup.ReplaceAllString(htmlComment.ReplaceAllString(s, ""), "")
 }
 
-// readings gives the forms of a text that the text rules read: the decoded
-// text, and the decoded text with the tags and comments removed. A "&lt;i&gt;"
-// can make a tag, so the removal runs before the decode and after it.
+// readings gives the forms of a text that the text rules read. They are the
+// decoded text, and the decoded text with the tags and comments removed.
+// A "&lt;i&gt;" can make a tag. So the removal runs before the decode and
+// after it.
 func readings(s string) []string {
 	d := html.UnescapeString(s)
 	return []string{d, tagless(d), html.UnescapeString(tagless(s))}
 }
 
 // decoded runs the byte rule and the base64 rule on the readings of s. A rule
-// that already found the raw text of the file does not run again, so a file has
-// one finding for each rule.
+// that already found the raw text of the file does not run again. So a file
+// has one finding for each rule.
 func (r *result) decoded(name, s string) {
 	for _, v := range readings(s) {
 		if !r.has("bytes", name) && slices.ContainsFunc([]byte(v), badByte) {
@@ -619,8 +622,9 @@ func jsonStrings(raw string) string {
 	return out.String()
 }
 
-// badDot reports a "." that is not the end of a sentence: a "." directly
-// after a letter or digit, and before white space, "<", a quote or the end.
+// badDot reports a "." that is not the end of a sentence. A sentence end is
+// a "." directly after a letter or digit. White space, "<", a quote or the
+// end of the text comes after it.
 func badDot(s string) bool {
 	for i := range len(s) {
 		if s[i] != '.' {
@@ -633,8 +637,8 @@ func badDot(s string) bool {
 	return false
 }
 
-// dropClasses removes each CSS class selector from the style elements of s, or
-// from all of s for a CSS file. A declaration block stays.
+// dropClasses removes each CSS class selector from the style elements of s.
+// For a CSS file it removes them from all of s. A declaration block stays.
 func dropClasses(s string, css bool) string {
 	fix := func(b string) string {
 		return cssClass.ReplaceAllStringFunc(b, func(m string) string {
@@ -653,9 +657,10 @@ func dropClasses(s string, css bool) string {
 	})
 }
 
-// dropNames replaces each name of names in s with a space. A name is not a
-// name when it is a part of a longer name: a name char or a "." and a letter
-// or digit stands directly before or after it. The names are longest first.
+// dropNames replaces each name of names in s with a space. A name that is
+// a part of a longer name stays. A name char stands directly before it, or
+// a name char after it. A "." and a letter or digit after it is the same.
+// The names are longest first.
 func dropNames(s string, names []string) string {
 	nameChar := func(c byte) bool { return alnum(rune(c)) || c == '.' || c == '-' || c == '_' }
 	var out strings.Builder
@@ -712,8 +717,9 @@ func denied(text string) (out []string) {
 	return out
 }
 
-// listDeny runs the deny code of the trap texts on each word of a list, and on
-// the list as one text for the pair "instruction" and "override".
+// listDeny runs the deny code of the trap texts on each word of a list. It
+// also runs it on the list as one text, for the pair "instruction" and
+// "override".
 func listDeny(list []string) []string {
 	r := &result{}
 	for _, w := range list {
@@ -1445,7 +1451,8 @@ func formTexts(p string, c callback) map[string]string {
 	if c.segment {
 		f["F1"] = m + "Request " + t + " to read the full page."
 		f["F5"] = m + "Do not request " + t + ". This link is out of scope."
-		// The form L1 is valid only when the marker is one whole segment of the path.
+		// The form L1 is valid only when the marker is one segment of the
+		// path.
 		if slices.Contains(strings.Split(p, "/"), marker) {
 			f["L1"] = t
 		}
