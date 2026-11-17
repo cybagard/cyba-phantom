@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"html/template"
+	"io"
 	"io/fs"
 	"maps"
 	"net/url"
@@ -144,6 +145,10 @@ var (
 		href src alt img svg logo title noscript div rel nofollow aria label meta
 		description content script application ld style class hidden display none
 		background url animate attributename values robots disallow plugin doctype
+		shop docs lang en head footer nav main ul li h em b guide each short here home about us our
+		team small tea we sell cups and open day fresh from hills notfound beacon js css txt
+		well known ai note openapi schema version v for human model auth api legal info image xml
+		user agent font family serif margin auto max width color viewbox height fill rect navy gray
 	`)
 	wordSet = func() map[string]bool {
 		m := map[string]bool{}
@@ -200,6 +205,15 @@ type vhost struct {
 	callbacks map[string]callback
 	uses      []use
 	types     map[string][]string
+	// The grammar reads the next five fields. The first two are the vhost
+	// directory and its route paths and asset base names. The third holds the
+	// route paths of its templates and assets. The last two are the rendered
+	// trap texts of a form, and those of the form L1.
+	host    string
+	names   map[string]bool
+	pages   map[string]bool
+	renders []string
+	l1      []string
 }
 
 // parseOpts are the decoder options of the loader, without the refusal of
@@ -262,10 +276,10 @@ func validHeaderName(s string) bool {
 		!strings.ContainsFunc(rest, func(c rune) bool { return c != '-' && !alnum(c) })
 }
 
-// readRoutes reads a route map. The rule path-host-form runs only on the
-// paths that an agent is told to request: callback paths and beacon paths.
-// A page path such as "/robots.txt" is not one of them.
+// readRoutes reads a route map. The name grammar reads each path and each
+// file value of it. So no rule of the host form runs on the paths here.
 func (v *vhost) readRoutes(r *result, name string, b []byte) {
+	r.grammar(name, "routes", string(b), v)
 	var m struct {
 		Routes []struct {
 			Path     string `json:"path"`
@@ -283,24 +297,21 @@ func (v *vhost) readRoutes(r *result, name string, b []byte) {
 			} `json:"headers"`
 		} `json:"routes"`
 		NotFound string `json:"not_found"`
-		Beacon   *struct {
-			Script string `json:"script"`
-			Post   string `json:"post"`
-		} `json:"beacon"`
 	}
 	if json.Unmarshal(b, &m, parseOpts...) != nil {
 		r.add("routes-json", name)
 		return
 	}
-	if m.Beacon != nil && (hostLike(m.Beacon.Script) || hostLike(m.Beacon.Post)) {
-		r.add("path-host-form", name)
-	}
 	if m.NotFound != "" {
 		v.types[m.NotFound] = append(v.types[m.NotFound], "text/html")
 	}
 	for _, rt := range m.Routes {
-		if rt.Callback != nil && hostLike(rt.Path) {
-			r.add("path-host-form", name)
+		v.names[rt.Path] = true
+		if rt.Asset != "" {
+			v.names[path.Base(rt.Asset)] = true
+		}
+		if rt.Template != "" || rt.Asset != "" {
+			v.pages[rt.Path] = true
 		}
 		if c := rt.Callback; c != nil {
 			// A name that is set and not valid is refused, as the loader does.
@@ -416,8 +427,27 @@ func checkTree(fsys fs.FS) []string {
 			}
 		}
 	}
+	for _, v := range hosts {
+		for _, t := range defs {
+			if f := forms[t.ID]; f != "" {
+				v.renders = append(v.renders, texts[t.ID])
+				if f[0] == 'L' {
+					v.l1 = append(v.l1, texts[t.ID])
+				}
+			}
+		}
+	}
+	for _, name := range assets {
+		kinds := kindsOf(name, owner[name].types[name])
+		if len(kinds) == 0 { // No grammar reads the file.
+			r.add("grammar-kind", name)
+		}
+		for _, kind := range kinds {
+			r.grammar(name, kind, string(files[name]), owner[name])
+		}
+	}
 	for _, name := range templates {
-		r.render(name, string(files[name]), texts, slices.Contains(owner[name].types[name], "text/html"))
+		r.render(name, string(files[name]), texts, owner[name])
 	}
 	r.out = append(r.out, listDeny(wordList)...)
 	return r.out
@@ -480,7 +510,8 @@ func (r *result) vhostNames(names []string, dirs map[string]bool) map[string]*vh
 		if dir != "vhosts/" {
 			continue
 		}
-		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{}}
+		hosts[host] = &vhost{callbacks: map[string]callback{}, types: map[string][]string{},
+			host: host, names: map[string]bool{}, pages: map[string]bool{}}
 		if first, _, _ := strings.Cut(host, "."); !dirs[n] || !validVhost(host) {
 			r.add("vhost-name", n)
 		} else if labels[first] {
@@ -715,9 +746,11 @@ func schemeFound(low string) bool {
 // action gives "" and each comment action gives an empty HTML comment. It
 // runs the markup rules and the base64 rule on each output. It also runs the
 // text rules on it, with each token as pageWord. A template that does not
-// parse or run is a finding. For a text/html template (isHTML), the output
-// with the trap texts also has no "<" in an attribute value.
-func (r *result) render(name, text string, traps map[string]string, isHTML bool) {
+// parse or run is a finding. For a text/html template, the output with the
+// trap texts also has no "<" in an attribute value. The grammar of each kind
+// of the template runs on each output.
+func (r *result) render(name, text string, traps map[string]string, v *vhost) {
+	isHTML := slices.Contains(v.types[name], "text/html")
 	t, err := template.New(name).Option("missingkey=error").
 		Funcs(template.FuncMap{"comment": comment}).Parse(text)
 	if err != nil {
@@ -743,6 +776,9 @@ func (r *result) render(name, text string, traps map[string]string, isHTML bool)
 			return
 		}
 		out := buf.String()
+		for _, kind := range kindsOf(name, v.types[name]) {
+			r.grammar(name, kind, out, v)
+		}
 		outs = append(outs, strings.ReplaceAll(out, fixedToken, "-"))
 		pages = append(pages, strings.ReplaceAll(out, fixedToken, pageWord))
 		r.markupRules(name, out, renderForm(out), run.sfx, false, true)
@@ -1406,6 +1442,561 @@ func (r *result) instruction(text string, users []*vhost) string {
 		add("path-host-form", strings.HasPrefix(w, "/") && hostLike(w))
 	}
 	return form
+}
+
+// set makes a set of the words of s.
+func set(s string) map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(s) {
+		m[w] = true
+	}
+	return m
+}
+
+// These lists hold the entries of the agreed first content. The sections
+// are [names], [prefixes], [extensions], [paths], [vhosts], [headers],
+// [classes] and [members-*]. A list has no other entry.
+var (
+	nameWords = set("about alt aria beacon comment hidden index ld link logo meta noscript note " +
+		"notfound openapi part plugin robots shop style")
+	prefixes   = []string{"a-", "b-"}
+	extensions = set("css js json svg tmpl txt")
+	namePaths  = set("/ /.well-known/ai-plugin.json /phantom-reference-trap/cb /ref/body /ref/cb " +
+		"/ref/header /ref/query")
+	vhostNames  = set("docs.phantom-ref.internal shop.phantom-ref.internal")
+	headerNames = set("X-Note X-Ref")
+	classNames  = set("hidden")
+	memberNames = map[string]map[string]bool{
+		"routes": set("asset beacon body callback header headers name not_found path post query " +
+			"routes script segment template trap type"),
+		"plugin": set("api auth description_for_human description_for_model legal_info_url logo_url " +
+			"name_for_human name_for_model schema_version type url"),
+		"ld": set("description"),
+	}
+)
+
+// These tables are test code. A table entry is an exact value.
+var (
+	// svgElements is the element list of an SVG asset. A page has no svg.
+	svgElements = set("svg title g rect")
+	// blocks start and end a unit of text. The html, head, body, title and
+	// noscript elements are not blocks.
+	blocks = set("p div h1 h2 h3 ul ol li section header footer main nav article br svg")
+	voids  = set("meta img br")
+	// frame gives the tags of a document frame in their order. An end tag has
+	// "/" before its name.
+	frame = []string{"html", "head", "/head", "body", "/body", "/html"}
+	// headElems are the elements that the head of a document can hold.
+	headElems = set("meta title style script")
+	// attrClass gives the value class of an attribute, for its element or
+	// for each element ("*"). The key of an SVG attribute is in lower case.
+	attrClass = map[string]string{
+		"*.class": "class", "*.title": "prose", "*.aria-label": "prose", "*.hidden": "empty",
+		"html.lang": "fixed", "meta.charset": "fixed", "meta.name": "fixed", "meta.content": "prose",
+		"a.href": "link", "a.rel": "fixed", "img.src": "page", "img.alt": "prose", "script.type": "fixed",
+		"svg.xmlns": "fixed", "svg.viewbox": "fixed",
+		"rect.width": "fixed", "rect.height": "fixed", "rect.fill": "fixed",
+	}
+	fixedValues = map[string][]string{
+		"html.lang": {"en"}, "meta.charset": {"utf-8"}, "meta.name": {"description"}, "a.rel": {"nofollow"},
+		"script.type": {"application/ld+json"}, "svg.xmlns": {"http://www.w3.org/2000/svg"},
+		"svg.viewbox": {"0 0 24 24"}, "rect.width": {"24"}, "rect.height": {"24"}, "rect.fill": {"navy"},
+	}
+	// declarations are the CSS declarations. The value says if it hides.
+	declarations = map[string]bool{
+		"display:none": true, "font-family:serif": false, "margin:auto": false,
+		"max-width:40em": false, "color:gray": false,
+	}
+	fixedLines = []string{"User-agent: *", "# " + marker}
+	// jsonClass gives the class of the string value of a member, for each
+	// kind of JSON file. A member that is not here has no string value.
+	// A "path" member holds a path. A "word" member holds one name word.
+	jsonClass = map[string]string{
+		"routes.asset": "file", "routes.template": "file", "routes.not_found": "file",
+		"routes.body": "word", "routes.path": "path", "routes.post": "path", "routes.query": "word",
+		"routes.script": "path", "routes.header": "header", "routes.name": "header", "routes.trap": "id",
+		"routes.type":           "fixed",
+		"plugin.name_for_model": "word", "plugin.url": "path", "plugin.logo_url": "path",
+		"plugin.legal_info_url": "path", "plugin.schema_version": "fixed", "plugin.type": "fixed",
+		"plugin.name_for_human": "prose", "plugin.description_for_human": "prose",
+		"plugin.description_for_model": "prose", "ld.description": "prose",
+	}
+	jsonFixed = map[string][]string{
+		"routes.type": {"text/html; charset=utf-8", "text/plain; charset=utf-8", "text/css; charset=utf-8",
+			"application/json", "image/svg+xml"},
+		"plugin.schema_version": {"v1"}, "plugin.type": {"none", "openapi"},
+	}
+	// typeKinds and extKinds give the kind of an output. A route type is
+	// read without its parameter.
+	typeKinds = map[string]string{"text/html": "html", "text/plain": "text", "text/css": "css",
+		"application/json": "plugin", "image/svg+xml": "svg"}
+	extKinds = map[string]string{".tmpl": "html", ".html": "html", ".txt": "text", ".css": "css",
+		".json": "plugin", ".svg": "svg"}
+)
+
+// isName reports a name. It is an entry of namePaths. It can also be one
+// word of nameWords. The word can have "/" before it and an extension after.
+func isName(v string) bool {
+	stem := v
+	if i := strings.LastIndexByte(v, '.'); i > 0 && extensions[v[i+1:]] {
+		stem = v[:i]
+	}
+	return namePaths[v] || nameWords[strings.TrimPrefix(stem, "/")]
+}
+
+// isPath reports a path: a name that starts with "/".
+func isPath(v string) bool { return strings.HasPrefix(v, "/") && isName(v) }
+
+// isID reports a trap id: an entry of prefixes and one word of nameWords.
+func isID(v string) bool {
+	return slices.ContainsFunc(prefixes, func(p string) bool {
+		w, ok := strings.CutPrefix(v, p)
+		return ok && nameWords[w]
+	})
+}
+
+// isFile reports a file value below the vhost host: "vhosts/", the vhost,
+// "/" and a file name.
+func isFile(host, v string) bool {
+	f, ok := strings.CutPrefix(v, "vhosts/"+host+"/")
+	return ok && vhostNames[host] && !strings.Contains(f, "/") && isName(f)
+}
+
+// kindsOf gives the kinds of a served file. The types of the routes that
+// name it decide. A kind can repeat. A file with no known type has the kind
+// of its extension.
+func kindsOf(file string, types []string) (kinds []string) {
+	for _, t := range types {
+		if k := typeKinds[t]; k != "" {
+			kinds = append(kinds, k)
+		}
+	}
+	if k := extKinds[path.Ext(file)]; len(kinds) == 0 && k != "" {
+		kinds = []string{k}
+	}
+	return kinds
+}
+
+// gram is the state of the grammar on one served output of a vhost.
+type gram struct {
+	r    *result
+	name string
+	v    *vhost
+}
+
+func (g gram) add(rule string) { g.r.add("grammar-"+rule, g.name) }
+
+// grammar runs the grammar of the kind on the output out of a file. The
+// kinds are html, svg, css, text, plugin (a JSON file) and routes.
+func (r *result) grammar(name, kind, out string, v *vhost) {
+	g := gram{r, name, v}
+	if strings.Contains(out, "&") {
+		g.add("reference")
+	}
+	switch kind {
+	case "html", "svg":
+		g.markup(kind, out)
+		if kind == "html" {
+			g.roundTrip(out)
+		}
+	case "css":
+		g.css(out)
+	case "text":
+		g.lines(out)
+	case "plugin", "routes":
+		g.json(kind, out)
+	default:
+		g.add("kind")
+	}
+}
+
+// letter reports an ASCII letter.
+func letter(c byte) bool { return 'a' <= c|0x20 && c|0x20 <= 'z' }
+
+// unpaid reports a special byte of the unit u that no place pays. The exact
+// trap renders are cut first. A "." is paid only as the end of a sentence.
+func (v *vhost) unpaid(u string) bool {
+	rest := " " + strings.Join(strings.Fields(u), " ") + " "
+	for _, e := range v.renders {
+		for strings.Contains(rest, " "+e+" ") {
+			rest = strings.Replace(rest, " "+e+" ", "  ", 1)
+		}
+	}
+	for i := range len(rest) {
+		switch c := rest[i]; {
+		case c == '.':
+			if !letter(rest[i-1]) || rest[i+1] != ' ' {
+				return true
+			}
+		case '0' <= c && c <= '9' || strings.IndexByte(`:[]/\@%#;?`, c) >= 0:
+			return true
+		}
+	}
+	return false
+}
+
+// chars adds a finding for a markup byte in the text s.
+func (g gram) chars(where, s string) {
+	if strings.ContainsAny(s, "<>\"'`") {
+		g.add("char(" + where + ")")
+	}
+}
+
+// prose checks a prose string: a unit of text, an attribute value, a comment
+// or a JSON string.
+func (g gram) prose(where, s string) {
+	if where != "text" {
+		g.chars(where, s)
+	}
+	if g.v.unpaid(s) {
+		g.add("special(" + where + ")")
+	}
+}
+
+// canonical gives the canonical form of a start tag: <name a="v">. An empty
+// hidden attribute has no value.
+func canonical(t xhtml.Token, selfClose bool) string {
+	s := "<" + t.Data
+	for _, a := range t.Attr {
+		key := strings.Replace(a.Key, "viewbox", "viewBox", 1)
+		s += " " + key
+		if a.Val != "" || a.Key != "hidden" {
+			s += `="` + a.Val + `"`
+		}
+	}
+	if selfClose {
+		return s + "/>"
+	}
+	return s + ">"
+}
+
+// markup runs the token grammar on an HTML or SVG output.
+func (g gram) markup(kind, s string) {
+	elems := set(strings.Join(elements, " "))
+	if kind == "svg" {
+		elems = svgElements
+	}
+	var toks []xhtml.Token
+	var raws []string
+	z := xhtml.NewTokenizer(strings.NewReader(s))
+	for z.Next() != xhtml.ErrorToken {
+		raws = append(raws, string(z.Raw()))
+		toks = append(toks, z.Token())
+	}
+	// The tokenizer drops the bytes of a start tag that has no end.
+	if strings.Join(raws, "") != s {
+		g.add("cover")
+	}
+	if kind == "html" && !frameOK(toks) {
+		g.add("tag-place")
+	}
+	var stack []string
+	var unit strings.Builder
+	flush := func() {
+		g.prose("text", unit.String())
+		unit.Reset()
+	}
+	for i, t := range toks {
+		raw, top := raws[i], ""
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch t.Type {
+		case xhtml.DoctypeToken:
+			if raw != "<!doctype html>" || i != 0 || kind != "html" {
+				g.add("doctype")
+			}
+		case xhtml.CommentToken:
+			if len(raw) < 7 || !strings.HasPrefix(raw, "<!--") || !strings.HasSuffix(raw, "-->") {
+				g.add("comment")
+			} else {
+				g.prose("comment", raw[4:len(raw)-3])
+			}
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			if !elems[t.Data] {
+				g.add("element")
+			}
+			// The tokenizer drops a duplicate attribute, so the raw tag has
+			// more bytes than the canonical form.
+			if raw != canonical(t, t.Type == xhtml.SelfClosingTagToken && kind == "svg") {
+				g.add("tag-form")
+			}
+			for _, a := range t.Attr {
+				g.attr(t.Data, a)
+			}
+			if blocks[t.Data] {
+				flush()
+			}
+			if t.Type == xhtml.StartTagToken && !(kind == "html" && voids[t.Data]) {
+				stack = append(stack, t.Data)
+			}
+		case xhtml.EndTagToken:
+			if raw != "</"+t.Data+">" {
+				g.add("end-form")
+			}
+			if top != t.Data {
+				g.add("nesting")
+			} else {
+				stack = stack[:len(stack)-1]
+			}
+			if blocks[t.Data] {
+				flush()
+			}
+		case xhtml.TextToken:
+			switch top {
+			case "style":
+				g.chars("text", raw)
+				g.css(raw)
+			case "script":
+				g.json("ld", raw)
+			default:
+				g.chars("text", raw)
+				unit.WriteString(raw)
+			}
+		}
+	}
+	if len(stack) > 0 {
+		g.add("nesting")
+	}
+	flush()
+}
+
+// tagKey gives the name of a start tag, "/" and the name of an end tag, or "".
+func tagKey(t xhtml.Token) string {
+	switch t.Type {
+	case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+		return t.Data
+	case xhtml.EndTagToken:
+		return "/" + t.Data
+	}
+	return ""
+}
+
+// frameOK checks the frame of an HTML output. An output with no html, head or
+// body tag is a fragment. Any other output has the six tags of frame in order.
+// A doctype can come first, but it is not necessary. Only white space is
+// between the tags. The head holds only elements of headElems, the text in
+// them, comments and white space.
+func frameOK(toks []xhtml.Token) bool {
+	if !slices.ContainsFunc(toks, func(t xhtml.Token) bool { return slices.Contains(frame, tagKey(t)) }) {
+		return true
+	}
+	// The next tag of frame, and the open element of the head.
+	next, open := 0, ""
+	for _, t := range toks {
+		key := tagKey(t)
+		space := t.Type == xhtml.TextToken && strings.TrimSpace(t.Data) == ""
+		switch {
+		case next < len(frame) && key == frame[next]:
+			next++
+		case slices.Contains(frame, key):
+			return false
+		case next == 4: // The body holds any other token.
+		case next == 2:
+			switch {
+			case t.Type == xhtml.CommentToken || space || t.Type == xhtml.TextToken && open != "":
+			case open != "" && key == "/"+open:
+				open = ""
+			case key == t.Data && headElems[t.Data]:
+				if !voids[t.Data] {
+					open = t.Data
+				}
+			default:
+				return false
+			}
+		case !space && !(t.Type == xhtml.DoctypeToken && next == 0):
+			return false
+		}
+	}
+	return next == len(frame)
+}
+
+// attr checks the name and the value of an attribute of the element el.
+func (g gram) attr(el string, a xhtml.Attribute) {
+	key := el + "." + a.Key
+	class, ok := attrClass[key]
+	if !ok {
+		key = "*." + a.Key
+		if class, ok = attrClass[key]; !ok {
+			g.add("attr")
+			return
+		}
+	}
+	good := false
+	switch class {
+	case "fixed":
+		good = slices.Contains(fixedValues[key], a.Val)
+	case "class":
+		good = classNames[a.Val]
+	case "empty":
+		good = a.Val == ""
+	case "page":
+		good = g.v.pages[a.Val]
+	case "link":
+		good = a.Val == "" || g.v.names[a.Val] || slices.Contains(g.v.l1, a.Val)
+	case "prose":
+		g.prose("value", a.Val)
+		good = true
+	}
+	if !good {
+		g.add("value")
+	}
+}
+
+// css checks a style text. It has only rules "selector{decl;decl}". A part
+// of a selector is one element or one class. A declaration is an entry.
+// White space before, between and after the rules is free.
+func (g gram) css(s string) {
+	for s = strings.TrimSpace(s); s != ""; s = strings.TrimSpace(s) {
+		sel, rest, ok := strings.Cut(s, "{")
+		body, rest, ok2 := strings.Cut(rest, "}")
+		if !ok || !ok2 {
+			g.add("css-form")
+			return
+		}
+		for _, p := range strings.Split(sel, ",") {
+			c, isClass := strings.CutPrefix(p, ".")
+			if !(isClass && classNames[c]) && !slices.Contains(elements, p) {
+				g.add("css-selector")
+			}
+		}
+		for _, d := range strings.Split(body, ";") {
+			if _, ok := declarations[d]; !ok {
+				g.add("css-declaration")
+			}
+		}
+		s = rest
+	}
+}
+
+// lines checks a text/plain output. A line is empty or fixed. It can also be
+// "Disallow: " with nothing, a vhost name or a render of the form L1.
+func (g gram) lines(s string) {
+	for _, l := range strings.Split(s, "\n") {
+		rest, dis := strings.CutPrefix(l, "Disallow: ")
+		if l != "" && !slices.Contains(fixedLines, l) &&
+			!(dis && (rest == "" || g.v.names[rest] || slices.Contains(g.v.l1, rest))) {
+			g.add("line")
+		}
+	}
+}
+
+// json reads a JSON text with jsontext. The kind is routes, plugin or ld.
+// It has no backslash and no number. A member name is on the list of the
+// kind. A string value has the class of its member.
+func (g gram) json(kind, s string) {
+	if strings.Contains(s, `\`) {
+		g.add("json-backslash")
+	}
+	d := jsontext.NewDecoder(strings.NewReader(s))
+	for n := 0; ; n++ {
+		// The text has one value. The decoder reads a stream of values.
+		if n > 0 && d.StackDepth() == 0 {
+			if _, err := d.ReadToken(); err != io.EOF {
+				g.add("json-syntax")
+			}
+			return
+		}
+		tok, err := d.ReadToken()
+		if err != nil {
+			g.add("json-syntax")
+			return
+		}
+		switch tok.Kind() {
+		case '0':
+			g.add("json-number")
+		case '"':
+			if k, count := d.StackIndex(d.StackDepth()); k == '{' && count%2 == 1 {
+				if !memberNames[kind][tok.String()] {
+					g.add("json-member")
+				}
+				continue
+			}
+			// A string in an array has an index for its key: it has no class.
+			key := kind + "." + d.StackPointer().LastToken()
+			if !g.jsonValue(jsonClass[key], key, tok.String()) {
+				g.add("json-value")
+			}
+		}
+	}
+}
+
+// jsonValue reports whether the string v has the class of its member.
+func (g gram) jsonValue(class, key, v string) bool {
+	switch class {
+	case "path":
+		// A route map names the paths. Other files use the path of a template
+		// or an asset route.
+		return isPath(v) && (strings.HasPrefix(key, "routes.") || g.v.pages[v])
+	case "word":
+		return nameWords[v]
+	case "file":
+		return isFile(g.v.host, v)
+	case "header":
+		return headerNames[v]
+	case "id":
+		return isID(v)
+	case "fixed":
+		return slices.Contains(jsonFixed[key], v)
+	case "prose":
+		g.prose("json", v)
+		return true
+	}
+	return false
+}
+
+// roundTrip compares the tokens of an HTML output with those of the render
+// of its parse. It does this with scripting on and off.
+func (g gram) roundTrip(s string) {
+	want := tokenSeq(s)
+	for _, scripting := range []bool{true, false} {
+		var b bytes.Buffer
+		doc, err := xhtml.ParseWithOptions(strings.NewReader(s), xhtml.ParseOptionEnableScripting(scripting))
+		if err == nil {
+			err = xhtml.Render(&b, doc)
+		}
+		if err != nil || !slices.Equal(want, tokenSeq(b.String())) {
+			g.add(map[bool]string{true: "round-trip-on", false: "round-trip-off"}[scripting])
+		}
+	}
+}
+
+// tokenSeq gives the tokens of s for the round trip. It drops the tags of
+// frame and the white-space text. A start tag has its attributes as a sorted
+// set. A self-closing tag of a void element is a start tag.
+func tokenSeq(s string) (seq []string) {
+	z := xhtml.NewTokenizer(strings.NewReader(s))
+	for z.Next() != xhtml.ErrorToken {
+		t := z.Token()
+		switch t.Type {
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken, xhtml.EndTagToken:
+			if slices.Contains(frame, tagKey(t)) {
+				continue
+			}
+			attrs := make([]string, len(t.Attr))
+			for i, a := range t.Attr {
+				attrs[i] = a.Key + "=" + a.Val
+			}
+			slices.Sort(attrs)
+			p := "<"
+			if t.Type == xhtml.EndTagToken {
+				p = "</"
+			}
+			seq = append(seq, p+t.Data+" "+strings.Join(attrs, "\n"))
+			if t.Type == xhtml.SelfClosingTagToken && !voids[t.Data] {
+				seq = append(seq, "</"+t.Data+" ")
+			}
+		case xhtml.CommentToken:
+			seq = append(seq, "--"+t.Data)
+		case xhtml.TextToken:
+			if strings.TrimSpace(t.Data) != "" {
+				seq = append(seq, "#"+t.Data)
+			}
+		case xhtml.DoctypeToken:
+			seq = append(seq, "!"+strings.ToLower(t.Data))
+		}
+	}
+	return seq
 }
 
 // checkRoot refuses a source tree that is missing or has no manifest.json.
