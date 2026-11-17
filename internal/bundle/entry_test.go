@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rawArchive makes the gzip bytes of the tar parts, with the end blocks.
@@ -261,12 +262,12 @@ func withField(h []byte, off int, v string) []byte {
 // format. The format has one %o verb for the value, which is the sum with the
 // checksum field as spaces.
 func withChksumForm(h []byte, format string) []byte {
-	copy(h[148:156], "        ")
+	copy(h[chksumOff:chksumEnd], "        ")
 	sum := 0
 	for _, c := range h {
 		sum += int(c)
 	}
-	copy(h[148:156], fmt.Sprintf(format, sum))
+	copy(h[chksumOff:chksumEnd], fmt.Sprintf(format, sum))
 	return h
 }
 
@@ -295,9 +296,9 @@ func rawFormCases() []entryCase {
 	nulSize := fmt.Sprintf("\x00%010o\x00", 512)
 	good := paxRec("path", "traps/good")
 	xNul := paxHdr(good)
-	withField(xNul[:blockBytes], 124, fmt.Sprintf("\x00%010o\x00", len(good)))
+	withField(xNul[:blockBytes], sizeOff, fmt.Sprintf("\x00%010o\x00", len(good)))
 	sizeForm := func(field string) []byte {
-		return rawArchive(withField(rawHdr(p, tar.TypeReg, 1), 124, field), padded([]byte("x")))
+		return rawArchive(withField(rawHdr(p, tar.TypeReg, 1), sizeOff, field), padded([]byte("x")))
 	}
 	hiddenLink := rawLinkHdr("traps/link", tar.TypeSymlink, "/etc/passwd")
 	// secondFile makes the file traps/b with the checksum field in the form of
@@ -347,7 +348,7 @@ func rawFormCases() []entryCase {
 		// format unknown for a size field that has no NUL at the end, so the
 		// format check refuses it first.
 		{"size field with a trailing space", sizeForm("00000000001 "), rawArchive(rawFile(p, "x"))},
-		{"size field with a leading NUL", rawArchive(withHidden(withField(slices.Clone(size), 124, nulSize))),
+		{"size field with a leading NUL", rawArchive(withHidden(withField(slices.Clone(size), sizeOff, nulSize))),
 			rawArchive(withHidden(size))},
 		{"size field of the PAX header with a leading NUL", rawArchive(xNul, rawFile("traps/good", "x")), nil},
 		{"size field with a leading space", sizeForm(fmt.Sprintf(" %010o\x00", 1)), rawArchive(rawFile(p, "x"))},
@@ -578,6 +579,48 @@ func TestTS19CheckEntryFormat(t *testing.T) {
 		if _, err := checkEntry(hdr); (err == nil) != c.ok {
 			t.Errorf("format %v: error %v; want no error %v", c.format, err, c.ok)
 		}
+	}
+}
+
+// T-S-19: the field constants match a header that tar.Writer writes with the
+// format USTAR. The test reads the bytes of the size, checksum and type fields
+// and the mtime field after the size field, with no check code.
+func TestTS19HeaderFieldOffsets(t *testing.T) {
+	var buf bytes.Buffer
+	hdr := &tar.Header{
+		Name: "traps/a", Typeflag: tar.TypeReg, Size: 1234, Format: tar.FormatUSTAR,
+		ModTime: time.Unix(0o1234567, 0),
+	}
+	if err := tar.NewWriter(&buf).WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()[:blockBytes]
+	size := b[sizeOff:sizeEnd]
+	if got, want := string(size[:sizeDigits]), "00000002322"; got != want || size[sizeNulAt] != 0 {
+		t.Errorf("size digits %q, NUL %d; want %q, 0", got, size[sizeNulAt], want)
+	}
+	if got, want := string(size), "00000002322\x00"; got != want {
+		t.Errorf("size field %q; want %q", got, want)
+	}
+	// The mtime field follows the size field.
+	if got, want := string(b[sizeEnd:sizeEnd+sizeLen]), "00001234567\x00"; got != want {
+		t.Errorf("field after size %q; want %q", got, want)
+	}
+	sum := 0
+	for i, c := range b {
+		if i >= chksumOff && i < chksumEnd {
+			c = ' '
+		}
+		sum += int(c)
+	}
+	chk := b[chksumOff:chksumEnd]
+	if got, want := string(chk[:chksumDigits]), fmt.Sprintf("%06o", sum); got != want ||
+		chk[chksumNulAt] != 0 || chk[chksumSpaceAt] != ' ' {
+		t.Errorf("checksum digits %q, field %q; want %q, NUL and space", got, chk, want)
+	}
+	// The type field follows the checksum field.
+	if b[typeflagOff] != tar.TypeReg || chksumEnd != typeflagOff {
+		t.Errorf("type byte %q at %d; want %q at %d", b[typeflagOff], typeflagOff, tar.TypeReg, chksumEnd)
 	}
 }
 

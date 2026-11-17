@@ -126,30 +126,48 @@ func validPart(p string) bool {
 // blockBytes is the size of one tar block.
 const blockBytes = 512
 
+// The layout of the fields of a ustar header block is from POSIX (IEEE Std
+// 1003.1, ustar Interchange Format). Off is the offset in the block. Len is
+// the length of the field. The other names are positions in the field.
+const (
+	sizeOff       = 124
+	sizeLen       = 12
+	sizeEnd       = sizeOff + sizeLen
+	sizeDigits    = 11 // octal digits of the size
+	sizeNulAt     = 11 // the NUL after the digits
+	chksumOff     = 148
+	chksumLen     = 8
+	chksumEnd     = chksumOff + chksumLen
+	chksumDigits  = 6 // octal digits of the checksum
+	chksumNulAt   = 6 // the NUL after the digits
+	chksumSpaceAt = 7 // the space after the NUL
+	typeflagOff   = 156
+)
+
 // ustarSizeOK reports whether the size field of the header block b has the
 // canonical form. tar.Writer, GNU tar and Python write 11 octal digits and one
 // NUL.
 func ustarSizeOK(b []byte) bool {
-	f := b[124:136]
-	for _, c := range f[:11] {
+	f := b[sizeOff:sizeEnd]
+	for _, c := range f[:sizeDigits] {
 		if c < '0' || c > '7' {
 			return false
 		}
 	}
-	return f[11] == 0
+	return f[sizeNulAt] == 0
 }
 
 // chksumOK reports whether the checksum field of the header block b has the
 // form that tar.Writer, GNU tar and Python write: 6 octal digits, one NUL and
 // one space. archive/tar checks the value of the field.
 func chksumOK(b []byte) bool {
-	f := b[148:156]
-	for _, c := range f[:6] {
+	f := b[chksumOff:chksumEnd]
+	for _, c := range f[:chksumDigits] {
 		if c < '0' || c > '7' {
 			return false
 		}
 	}
-	return f[6] == 0 && f[7] == ' '
+	return f[chksumNulAt] == 0 && f[chksumSpaceAt] == ' '
 }
 
 // rawFormOK checks the header block b of an entry. It runs only after the byte
@@ -161,7 +179,7 @@ func chksumOK(b []byte) bool {
 //   - the checksum field has the form of chksumOK;
 //   - the size field has the canonical form.
 func rawFormOK(b []byte) bool {
-	if t := b[156]; t != tar.TypeReg && t != tar.TypeDir {
+	if t := b[typeflagOff]; t != tar.TypeReg && t != tar.TypeDir {
 		return false
 	}
 	return chksumOK(b) && ustarSizeOK(b)
