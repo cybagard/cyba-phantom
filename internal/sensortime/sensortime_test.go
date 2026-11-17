@@ -203,7 +203,7 @@ var fieldCases = []struct {
 	name string
 	set  func(*State)
 }{
-	{"S min", func(s *State) { s.S, s.Jump = 0, Jump{} }},
+	{"S min", func(s *State) { s.S, s.GraceSum, s.Jump = 0, 0, Jump{} }},
 	{"S max", func(s *State) { s.S = boundMS }},
 	{"no boot id", func(s *State) { s.BootID = "" }},
 	{"boot clock min", func(s *State) { s.BootClock = 0 }},
@@ -394,6 +394,9 @@ func TestTU30_StateCrossRules(t *testing.T) {
 		{"grace sum",
 			func(s *State) { s.GraceSum = 3600000 },
 			func(s *State) { s.GraceSum = 3600001 }},
+		{"grace sum and S",
+			func(s *State) { s.S, s.GraceSum, s.Jump = 1800000, 1800000, Jump{} },
+			func(s *State) { s.S, s.GraceSum, s.Jump = 1800000, 1800001, Jump{} }},
 		{"first event",
 			func(s *State) { s.FirstEvent = s.NextEvent },
 			func(s *State) { s.FirstEvent = s.NextEvent + 1 }},

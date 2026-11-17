@@ -103,6 +103,7 @@ func (s State) format() string {
 //   - The four rowids of the state are not negative.
 //   - The catch-up used is from 0 to 86400000 ms (24 h).
 //   - The grace sum is from 0 to 3600000 ms (1 h). A sum over 1 h is a jump.
+//   - The grace sum is not more than S. It is a sum of moves that S made.
 //   - The first event rowid is not more than the next event rowid. The same
 //     holds for the session rowids.
 //   - With no jump (ID 0), every jump field is 0.
@@ -120,7 +121,7 @@ func (s State) validate() error {
 		s.FirstEvent >= 0 && s.FirstSession >= 0 &&
 		s.NextEvent >= 0 && s.NextSession >= 0 &&
 		s.CatchUp >= 0 && s.CatchUp <= catchUpMaxMS &&
-		s.GraceSum >= 0 && s.GraceSum <= jumpMinMS &&
+		s.GraceSum >= 0 && s.GraceSum <= jumpMinMS && s.GraceSum <= s.S &&
 		s.FirstEvent <= s.NextEvent && s.FirstSession <= s.NextSession &&
 		inMS(j.ID) && j.FirstEvent >= 0 && j.FirstSession >= 0
 	if j.ID == 0 {
