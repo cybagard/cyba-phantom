@@ -71,15 +71,11 @@ func migrate(db *sql.DB, set fs.FS, origin string) error {
 	case have == len(scripts):
 		return checkEvent(ctx, tx, scripts)
 	}
-	// A later script can fail on a missing event table before the final check.
-	// A pending script can change the text, so this check reads only the name.
+	// This check compares the stored text with the text of the applied scripts.
+	// It runs before a later script can fail on a changed event table.
 	if have > 0 {
-		var got string
-		switch err := tx.QueryRowContext(ctx, eventSQL).Scan(&got); {
-		case err == sql.ErrNoRows:
-			return fail(schemaName, ruleEvent)
-		case err != nil:
-			return fail(schemaName, ruleMigrate)
+		if err := checkEvent(ctx, tx, scripts[:have]); err != nil {
+			return err
 		}
 	}
 	for _, s := range scripts[have:] {

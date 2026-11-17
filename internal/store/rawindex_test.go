@@ -47,6 +47,13 @@ func rawIDs(t *testing.T, db *sql.DB, mode string) string {
 	return rawText(t, db, "SELECT coalesce(group_concat(id, ' '), '') FROM (SELECT id FROM event "+mode+" WHERE "+rawFull+" ORDER BY id)")
 }
 
+// rawEntries returns the number of entries in the leaf pages of event_raw_ts.
+// Unlike rawIDs, it counts an entry that the filter of rawFull hides.
+func rawEntries(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	return count(t, db, "SELECT coalesce(sum(ncell), 0) FROM dbstat WHERE name = 'event_raw_ts' AND pagetype = 'leaf'")
+}
+
 // T-U-18: a new database has schema_version 5. It has the index event_raw_ts
 // with its fixed text. The event table text is the text of schema 4.
 func TestTU18NewDatabaseHasRawIndex(t *testing.T) {
@@ -64,7 +71,8 @@ func TestTU18NewDatabaseHasRawIndex(t *testing.T) {
 
 // T-U-18: a database of schema 4 gets schema 5. The mark of the field clear is
 // gone. Each other meta row stays. The index holds the ids of the rows with a
-// field. A row has only a body prefix, only a detail, or only a record.
+// field, and no other entry. A row has only a body prefix, only a detail, or
+// only a record.
 func TestTU18MigrationFromSchema4DropsMarkAndIndexesRows(t *testing.T) {
 	db := schema4DB(t)
 	for _, s := range []string{
@@ -93,6 +101,9 @@ func TestTU18MigrationFromSchema4DropsMarkAndIndexesRows(t *testing.T) {
 	if in, all := rawIDs(t, db, "INDEXED BY event_raw_ts"), rawIDs(t, db, "NOT INDEXED"); in != "2 3 4" || all != in {
 		t.Fatalf("ids in the index %q, ids with a field %q, want 2 3 4", in, all)
 	}
+	if n := rawEntries(t, db); n != 3 {
+		t.Fatalf("the index has %d entries, want 3", n)
+	}
 }
 
 // T-U-18: the read of the field clear uses the index for a bound of ts in each
@@ -112,9 +123,42 @@ func TestTU18RawIndexPlanAndExit(t *testing.T) {
 	if got := rawIDs(t, db, "INDEXED BY event_raw_ts"); got != "1 2 3 4" {
 		t.Fatalf("ids in the index %q, want 1 2 3 4", got)
 	}
+	if n := rawEntries(t, db); n != 4 {
+		t.Fatalf("the index has %d entries before the update, want 4", n)
+	}
 	mustExec(t, db, "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN (2, 4)")
 	if in, all := rawIDs(t, db, "INDEXED BY event_raw_ts"), rawIDs(t, db, "NOT INDEXED"); in != "1 3" || all != in {
 		t.Fatalf("ids in the index %q, ids with a field %q, want 1 3", in, all)
+	}
+	if n := rawEntries(t, db); n != 2 {
+		t.Fatalf("the index has %d entries after the update, want 2", n)
+	}
+}
+
+// T-S-15: Migrate refuses a schema-1 database with one other byte in a column
+// name that migration 0005 names. It does not run 0005 and changes nothing.
+func TestTS15EventColumnOfTheRawIndexWithOtherTextIsRefused(t *testing.T) {
+	cur := firstMigration(t)
+	from, to := strings.Index(cur, "CREATE TABLE event"), strings.Index(cur, "CREATE TABLE token")
+	if from < 0 || to < from {
+		t.Fatal("the test cannot find the event table in the first migration")
+	}
+	// The CHECK of event names record too: rename each place of the name.
+	for _, c := range []struct{ name, old, other string }{
+		{"body_prefix", "body_prefix   BLOB", "body_prefiy   BLOB"},
+		{"detail", "detail        TEXT", "detaix        TEXT"},
+		{"record", "record", "recorx"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			table := strings.ReplaceAll(cur[from:to], c.old, c.other)
+			script := cur[:from] + table + cur[to:]
+			if script == cur {
+				t.Fatal("the test cannot change the first migration")
+			}
+			db, file := schemaOne(t, script)
+			before := content(t, db, file)
+			wantEventRefusal(t, Migrate(db, "o"), db, file, before)
+		})
 	}
 }
 
