@@ -70,9 +70,9 @@ type Result struct {
 	// marked a read since the Check of the last jump. It is also true for a
 	// Now that was in flight at that Check. Before the first jump, it means
 	// since Start. It can show more reads than there were. A read near the
-	// swap of the mark can be in two reports. Each read is in one report or
-	// in two. A merge of two jumps is safe only when Read and Committed of the
-	// later jump are both false.
+	// swap of the mark can be in more than one report. Each read is in one or
+	// more reports. A merge of two jumps is safe only when Read and Committed
+	// of the later jump are both false.
 	Read bool
 }
 
@@ -266,7 +266,7 @@ func (c *Clock) cur() *base {
 // Committed never changes the read mark. For a base that holds a jump, it
 // returns true when a Now marked since the Check of this jump. For all other
 // bases, it returns false. A read near the publish can be in this value and
-// in the Read of the next jump. Each read is in one report or in two. Both
+// in the Read of the next jump. Each read is in one or more reports. Both
 // values can show more reads than there were. A merge of two jumps is safe
 // only when Read and Committed of the later jump are both false. It is for
 // the check goroutine only.
