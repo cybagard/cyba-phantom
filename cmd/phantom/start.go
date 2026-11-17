@@ -96,13 +96,13 @@ func paramsOf(cfg *config.Config) startParams {
 		}
 		return filepath.ToSlash(r)
 	}
-	str := func(k string) string { v, _ := cfg.Get(k); return v.Str }
-	iv, _ := cfg.Get("tlog.checkpoint_interval")
-	bp, _ := cfg.Get("privacy.store_body_prefix")
-	ipd, _ := cfg.Get("store.retention_days.ip")
-	rawd, _ := cfg.Get("store.retention_days.raw")
-	evd, _ := cfg.Get("store.retention_days.events")
-	maxb, _ := cfg.Get("store.max_bytes")
+	str := func(k string) string { return cfg.Must(k).Str }
+	iv := cfg.Must("tlog.checkpoint_interval")
+	bp := cfg.Must("privacy.store_body_prefix")
+	ipd := cfg.Must("store.retention_days.ip")
+	rawd := cfg.Must("store.retention_days.raw")
+	evd := cfg.Must("store.retention_days.events")
+	maxb := cfg.Must("store.max_bytes")
 	return startParams{
 		IPDays: int(ipd.Int), RawDays: int(rawd.Int), EventsDays: int(evd.Int), MaxBytes: maxb.Int,
 		Root: stateDir, StorePath: rel(str("store.path")), TlogDir: rel(str("tlog.dir")), Origin: str("tlog.origin"),

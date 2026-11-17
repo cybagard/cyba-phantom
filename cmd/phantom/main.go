@@ -82,12 +82,8 @@ var serve = func(cfg *config.Config, c content, stdout, stderr io.Writer) int {
 func printPrivateLists(cfg *config.Config, w io.Writer) {
 	paths := []string{"acme.ca_private", "bundle.fetch_private"}
 	for _, list := range []string{"tlog.publish", "alerts.sinks"} {
-		for i := 0; ; i++ {
-			item := fmt.Sprintf("%s[%d]", list, i)
-			if _, ok := cfg.Get(item + ".type"); !ok {
-				break
-			}
-			paths = append(paths, item+".private")
+		for i := range cfg.ListLen(list) {
+			paths = append(paths, config.ItemPath(list, i)+".private")
 		}
 	}
 	for _, path := range paths {
@@ -100,15 +96,13 @@ func printPrivateLists(cfg *config.Config, w io.Writer) {
 // printSessionCookie writes one line with the key path and the effective
 // value of privacy.session_cookie.
 func printSessionCookie(cfg *config.Config, w io.Writer) {
-	v, _ := cfg.Get("privacy.session_cookie")
-	fmt.Fprintf(w, "privacy.session_cookie: %t\n", v.Bool)
+	fmt.Fprintf(w, "privacy.session_cookie: %t\n", cfg.Must("privacy.session_cookie").Bool)
 }
 
 // printJSBeacon writes one line with the key path and the effective value of
 // privacy.js_beacon.
 func printJSBeacon(cfg *config.Config, w io.Writer) {
-	v, _ := cfg.Get("privacy.js_beacon")
-	fmt.Fprintf(w, "privacy.js_beacon: %t\n", v.Bool)
+	fmt.Fprintf(w, "privacy.js_beacon: %t\n", cfg.Must("privacy.js_beacon").Bool)
 }
 
 // These are the file rules of the config loader. The key file rule also
@@ -170,7 +164,7 @@ func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) (c conten
 		}
 		return b, err == nil
 	}
-	if v, _ := cfg.Get("acme.ca_root"); v.Str != "" {
+	if v, has := cfg.Get("acme.ca_root"); has && v.Str != "" {
 		if data, got := read("acme.ca_root", v.Str, pemRule); got {
 			var err error
 			if c.roots, err = listener.ParseACMERoots(data); err != nil {
@@ -179,14 +173,11 @@ func checkContent(cfg *config.Config, now time.Time, stderr io.Writer) (c conten
 			}
 		}
 	}
-	for i := 0; ; i++ {
-		entry := fmt.Sprintf("tls.certs[%d]", i)
-		name, found := cfg.Get(entry + ".name")
-		if !found {
-			break
-		}
-		cf, _ := cfg.Get(entry + ".cert_file")
-		kf, _ := cfg.Get(entry + ".key_file")
+	for i := range cfg.ListLen("tls.certs") {
+		entry := config.ItemPath("tls.certs", i)
+		name, _ := cfg.ItemField("tls.certs", i, "name")
+		cf, _ := cfg.ItemField("tls.certs", i, "cert_file")
+		kf, _ := cfg.ItemField("tls.certs", i, "key_file")
 		certPEM, certOK := read(entry+".cert_file", cf.Str, pemRule)
 		keyPEM, keyOK := read(entry+".key_file", kf.Str, keyFileRule)
 		if !certOK || !keyOK {
