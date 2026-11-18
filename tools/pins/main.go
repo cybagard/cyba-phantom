@@ -29,14 +29,19 @@
 // tag must be the same. The image string of the FROM line must be the same
 // as the image string of ci.yml.
 //
-// The check fails closed. A missing file is a failure. A missing allowed
-// line is a failure. A second allowed line is a failure. A word line of
-// another form is a failure. A missing toolchain line is not a failure.
-// The tool prints one line for each
-// failure. It exits 1 when there is a failure, and 0 when there is none.
+// A missing file is a failure. A missing allowed line is a failure. A
+// second allowed line is a failure. A word line of another form is a
+// failure. A missing toolchain line is not a failure. The tool prints one
+// line for each failure. It exits 1 when there is a failure, and 0 when
+// there is none.
 //
 // This is a drift check, not a gate. The command make lint runs it from the
 // tree of the change. A change can edit the tool and the check together.
+// The word test reads the text of each line. It does not see a key word
+// that is built from parts or written with an escape. Of the line joins,
+// it finds only the joins that the rules above name. It does not read
+// included files, shell steps, or other files. Human review of these files
+// is the control for such a change.
 package main
 
 import (
