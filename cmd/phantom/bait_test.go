@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/net/html"
 
+	"github.com/cybagard/cyba-phantom/internal/bundle"
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/listener"
@@ -60,6 +61,10 @@ type baitOpt struct {
 	root string
 	// maxBytes is store.max_bytes in the start values. 0 keeps the config.
 	maxBytes int64
+	// name is a second decoy name, with a cached certificate. "" has none.
+	name string
+	// trust is the trust set of the start, or nil for testTrust.
+	trust func() bundle.TrustSet
 	// seed runs before the start, on the start values with the state
 	// directory.
 	seed func(t *testing.T, p startParams)
@@ -94,7 +99,11 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 		env = append(env, "PHANTOM_PRIVACY_JS_BEACON="+o.beacon)
 	}
 	// noVhost is a second decoy name. The bundle has no vhost for it.
-	body := strings.Replace(validBody(t), "names: [decoy.host.zz]", "names: [decoy.host.zz, "+noVhost+"]", 1)
+	names := "decoy.host.zz, " + noVhost
+	if o.name != "" {
+		names += ", " + o.name
+	}
+	body := strings.Replace(validBody(t), "names: [decoy.host.zz]", "names: ["+names+"]", 1)
 	cfg, err := config.Load(writeFile(t, body), env)
 	mustOK(t, err)
 	s := &baitSensor{p: tempState(t, cfg), https: "https://" + httpsLn.Addr().String(), plain: "http://" + plainLn.Addr().String()}
@@ -112,6 +121,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	}
 	caURL, _ := cfg.Get("acme.ca")
 	seedCache(t, s.p, caURL.Str)
+	if o.name != "" {
+		seedCacheFor(t, s.p, caURL.Str, o.name)
+	}
 	if o.bundle {
 		if o.files == nil {
 			o.files = baitFiles()
@@ -122,6 +134,9 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	oldTrust := bundleTrust
 	t.Cleanup(func() { bundleTrust = oldTrust })
 	bundleTrust = testTrust
+	if o.trust != nil {
+		bundleTrust = o.trust
+	}
 	d := realDeps
 	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
 		s.dk = dk // read by the test after the start line
@@ -211,13 +226,19 @@ func (s *baitSensor) sessionOf(t *testing.T, path string) string {
 // sensor must be stopped.
 func (s *baitSensor) sessionsOf(t *testing.T, path string) []string {
 	t.Helper()
+	return s.sessionsOn(t, decoyName, path)
+}
+
+// sessionsOn is sessionsOf for the vhost vhost.
+func (s *baitSensor) sessionsOn(t *testing.T, vhost, path string) []string {
+	t.Helper()
 	root, err := os.OpenRoot(s.p.Root)
 	mustOK(t, err)
 	defer root.Close()
 	db, err := store.Open(root, s.p.StorePath, store.Options{Reserved: s.p.Reserved})
 	mustOK(t, err)
 	defer db.Close()
-	rows, err := db.Query("SELECT COALESCE(session_id, '') FROM event WHERE kind = 'request' AND vhost = ? AND path = ?", decoyName, path)
+	rows, err := db.Query("SELECT COALESCE(session_id, '') FROM event WHERE kind = 'request' AND vhost = ? AND path = ?", vhost, path)
 	mustOK(t, err)
 	defer rows.Close()
 	var ids []string
@@ -341,7 +362,8 @@ func trapIDs(t *testing.T, files []tarFile) []string {
 }
 
 // checkTags checks the tags of body. Each end tag closes the element that is
-// open last. A void element (meta) has no end tag. None stays open at the end.
+// open last. A void element (meta, img) has no end tag. None stays open at the
+// end.
 func checkTags(t *testing.T, body string) {
 	t.Helper()
 	var open []string
@@ -349,7 +371,7 @@ func checkTags(t *testing.T, body string) {
 	for tt := z.Next(); tt != html.ErrorToken; tt = z.Next() {
 		tag := z.Token().Data
 		switch {
-		case tt == html.StartTagToken && tag != "meta":
+		case tt == html.StartTagToken && tag != "meta" && tag != "img":
 			open = append(open, tag)
 		case tt == html.EndTagToken:
 			if n := len(open); n == 0 || open[n-1] != tag {

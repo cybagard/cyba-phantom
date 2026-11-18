@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The tea shop</title>
+<meta name="description" content="{{index .Trap "a-meta"}}">
+<style>.hidden{display:none}</style>
+</head>
+<body>
+<header><nav><a href="/">The home page</a></nav></header>
+<main>
+<h1>The tea shop</h1>
+<img alt="{{index .Trap "a-alt"}}">
+<p>We sell tea and cups.</p>
+<p>Our shop is open each day.</p>
+<p class="hidden">{{index .Trap "a-hidden"}}</p>
+{{comment (index .Trap "a-comment")}}
+<p aria-label="{{index .Trap "a-aria"}}">Fresh tea from the hills.</p>
+<p><a href="{{index .Trap "a-link"}}" rel="nofollow">phantom-reference-trap</a></p>
+<noscript>{{index .Trap "a-noscript"}}</noscript>
+<script type="application/ld+json">{"description":{{index .Trap "a-ld"}}}</script>
+</main>
+<footer><p>phantom-reference-trap</p></footer>
+</body>
+</html>

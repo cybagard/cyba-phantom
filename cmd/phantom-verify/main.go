@@ -4,11 +4,11 @@
 // The command keeps the last accepted checkpoint of the key as its state. It
 // refuses a checkpoint that is not consistent with the state. The command opens
 // no network connection. Of the packages of this repository, it imports only
-// internal/verify and internal/tlog/verifier. It also imports
-// golang.org/x/mod/sumdb/note. Exit code 0 means verified. Exit code 1 means
-// not verified. Exit code 2 means a usage error, an input error, a state fault,
-// an output error, or an internal error. Error text is fixed and holds no input bytes: no path, no
-// flag value, no file content.
+// internal/verify. It also imports golang.org/x/mod/sumdb/note. Exit code 0
+// means verified. Exit code 1 means not verified. Exit code 2 means a usage
+// error, an input error, a state fault, an output error, or an internal error.
+// Error text is fixed and holds no input bytes: no path, no flag value, no file
+// content.
 package main
 
 import (
@@ -23,7 +23,6 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 
-	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
 	"github.com/cybagard/cyba-phantom/internal/verify"
 )
 
@@ -151,25 +150,27 @@ func verifyAll(in inputs) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	var latest bytes.Buffer
-	c, err := loadNote(in.checkpoint, v, &latest)
+	c, err := loadNote(in.checkpoint, v)
 	if err != nil {
 		return nil, "", err
 	}
+	latest := c.Note()
 	var out bytes.Buffer
 	line := func(name, value string) { fmt.Fprintf(&out, "%s: %s\n", name, value) }
 	b64 := func(h [32]byte) string { return base64.StdEncoding.EncodeToString(h[:]) }
-	line("origin", escape(c.Origin))
-	line("size", fmt.Sprint(c.Size))
-	line("root", b64(c.Root))
+	line("origin", escape(c.Origin()))
+	line("size", fmt.Sprint(c.Size()))
+	line("root", b64(c.Root()))
 
 	// The prior note is read before the proof files. The list of proofs is read
 	// once. It serves the prior check and the state check.
-	var prior bytes.Buffer
+	var prior []byte
 	if in.prior != "" {
-		if _, err := loadNote(in.prior, v, &prior); err != nil {
+		p, err := loadNote(in.prior, v)
+		if err != nil {
 			return nil, "", err
 		}
+		prior = p.Note()
 	}
 	var proofs []verify.ConsistencyProof
 	seen := map[sizePair]bool{}
@@ -186,7 +187,7 @@ func verifyAll(in inputs) ([]byte, string, error) {
 		proofs = append(proofs, cons)
 	}
 	if in.prior != "" {
-		if err := verify.Consistency(v, prior.Bytes(), latest.Bytes(), proofs); err != nil {
+		if err := verify.Consistency(v, prior, latest, proofs); err != nil {
 			return nil, "", err
 		}
 		line("prior consistency", "verified")
@@ -198,7 +199,7 @@ func verifyAll(in inputs) ([]byte, string, error) {
 			return nil, "", err
 		}
 	}
-	change, err := updateState(stateDir, v, c.Size, latest.Bytes(), proofs)
+	change, err := updateState(stateDir, v, c.Size(), latest, proofs)
 	if err != nil && !errors.Is(err, verify.ErrStateSync) {
 		return nil, "", err
 	}
@@ -219,7 +220,7 @@ func verifyAll(in inputs) ([]byte, string, error) {
 		if err != nil {
 			return nil, stateLine, err
 		}
-		res, err := verify.Inclusion(v, latest.Bytes(), e, p)
+		res, err := verify.Inclusion(c, e, p)
 		if err != nil {
 			return nil, stateLine, err
 		}
@@ -269,12 +270,10 @@ func updateState(dir string, v note.Verifier, size uint64, latest []byte, proofs
 	return st.Update(latest)
 }
 
-// loadNote reads a checkpoint note with the key v. The raw bytes that
-// ReadCheckpoint read, at most one byte more than the cap, go to raw. The
-// checks of internal/verify need these bytes.
-func loadNote(path string, v note.Verifier, raw *bytes.Buffer) (verifier.Checkpoint, error) {
-	return load(path, func(r io.Reader) (verifier.Checkpoint, error) {
-		return verify.ReadCheckpoint(io.TeeReader(r, raw), v)
+// loadNote reads a checkpoint note with the key v.
+func loadNote(path string, v note.Verifier) (verify.Checkpoint, error) {
+	return load(path, func(r io.Reader) (verify.Checkpoint, error) {
+		return verify.ReadCheckpoint(r, v)
 	})
 }
 

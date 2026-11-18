@@ -4,7 +4,6 @@ import (
 	"errors"
 	"slices"
 
-	"golang.org/x/mod/sumdb/note"
 	modtlog "golang.org/x/mod/sumdb/tlog"
 
 	"github.com/cybagard/cyba-phantom/internal/tlog/verifier"
@@ -38,12 +37,13 @@ type Result struct {
 }
 
 // Inclusion checks that the event is in the tree of a checkpoint (SEC-18,
-// FR-16). The key v is the trust anchor. The event e must come from ParseEvent
-// or ReadEvent. Inclusion uses e.Hash and does not hash e.Raw again.
+// FR-16). The checkpoint c must come from ReadCheckpoint, which checked the
+// note against the trusted key. A zero value of c gives ErrCheckpoint. The
+// event e must come from ParseEvent or ReadEvent. Inclusion uses e.Hash and
+// does not hash e.Raw again.
 //
-// The function parses the checkpoint note with ParseCheckpoint. It refuses a
-// note with a bad signature, an origin other than the key name, or a size past
-// 2^48. A proof size larger than the checkpoint size gives ErrTreeSize.
+// The function does not parse the note again. A proof size larger than the
+// checkpoint size gives ErrTreeSize.
 //
 // A proof at the checkpoint size must not have a root or a consistency proof.
 // If it has one, the result is ErrProof. A proof at a smaller size m must have
@@ -53,16 +53,15 @@ type Result struct {
 // ErrNotVerified. A bad consistency proof gives ErrNotVerified too, because
 // both come from the proof file, which is not signed. The leaf hash and the
 // proof checks come from internal/tlog/verifier.
-func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (Result, error) {
-	c, err := ParseCheckpoint(checkpoint, v)
+func Inclusion(c Checkpoint, e Event, p InclusionProof) (Result, error) {
+	if len(c.note) == 0 {
+		return Result{}, ErrCheckpoint
+	}
+	size, err := toSize(c.size)
 	if err != nil {
 		return Result{}, err
 	}
-	size, err := toSize(c.Size)
-	if err != nil {
-		return Result{}, err
-	}
-	root := c.Root
+	root := c.root
 	bridged := p.TreeSize < size
 	switch {
 	case p.TreeSize > size:
@@ -77,14 +76,14 @@ func Inclusion(v note.Verifier, checkpoint []byte, e Event, p InclusionProof) (R
 		return Result{}, ErrNotVerified
 	}
 	if bridged {
-		if consistent(tree{p.TreeSize, root}, tree{size, c.Root}, p.Consistency) != nil {
+		if consistent(tree{p.TreeSize, root}, tree{size, c.root}, p.Consistency) != nil {
 			return Result{}, ErrNotVerified
 		}
 	}
 	return Result{
-		Origin:      c.Origin,
-		Size:        c.Size,
-		Root:        c.Root,
+		Origin:      c.origin,
+		Size:        c.size,
+		Root:        c.root,
 		EventHash:   e.Hash,
 		LeafIndex:   p.Index,
 		Proof:       slices.Clone(p.Hashes),
