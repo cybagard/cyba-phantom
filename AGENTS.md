@@ -50,7 +50,7 @@ These rules override any requirement, ticket, or convenience; a PR that breaks o
 | `internal/session` | day key of the session id and of `ip_hmac` |
 | `internal/testutil` | helpers that tests of more than one package share |
 | `internal/config` | one YAML file + env overrides, `--check` |
-| `tools/` | Go tools: `trace` (traceability check), `dco` (sign-off and commit identity check), `bundle-sign` (make and sign a bundle). More Go tools: `stelint` (comment line and sentence length limits), `mutatepkg` (package finder for `make mutate`). Scripts: `mirror-diff.sh` (constitution table check), `coverage.sh` (coverage gate), `mutate-go.sh` (go wrapper for `make mutate`) |
+| `tools/` | Go tools: `trace` (traceability check), `dco` (sign-off and commit identity check), `bundle-sign` (make and sign a bundle). More Go tools: `stelint` (comment line and sentence length limits), `mutatepkg` (package finder for `make mutate`), `pins` (the Go version and the image agree in `go.mod`, `Makefile`, `ci.yml` and the Dockerfile). Scripts: `mirror-diff.sh` (constitution table check), `coverage.sh` (coverage gate), `mutate-go.sh` (go wrapper for `make mutate`) |
 | `spec/` | synced read-only mirror of the canonical spec documents (01, 04 open sections, 07, 08, manifest, golden table) — the traceability inputs and the open interfaces |
 | `bundles/reference/` | stale reference bundle (Apache-2.0, in-repo) |
 | `test/` | simulator personas, fixtures, chaos (test IDs per the spec kit) |

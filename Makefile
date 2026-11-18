@@ -48,6 +48,7 @@ lint:
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
 	GOOS=darwin $(GO) vet ./...
+	$(GO) run ./tools/pins
 	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \
 	if [ -z "$$base" ] && git rev-parse --verify -q origin/main >/dev/null; then \
 		base=$$(git merge-base origin/main "$$head") || { echo "lint: git merge-base origin/main $$head failed"; exit 1; }; \
