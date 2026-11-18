@@ -672,6 +672,12 @@ func TestTI03_StartAndStopOrder(t *testing.T) {
 // looks for it, and returns its DER bytes.
 func seedCache(t *testing.T, p startParams, ca string) []byte {
 	t.Helper()
+	return seedCacheFor(t, p, ca, decoyName)
+}
+
+// seedCacheFor is seedCache for the name name.
+func seedCacheFor(t *testing.T, p startParams, ca, name string) []byte {
+	t.Helper()
 	ok := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -686,7 +692,7 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 	defer cache.Close()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ok(err)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: decoyName}, DNSNames: []string{decoyName},
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(10 * 365 * 24 * time.Hour)}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	ok(err)
@@ -694,9 +700,9 @@ func seedCache(t *testing.T, p startParams, ca string) []byte {
 	ok(err)
 	issuer := (&certmagic.ACMEIssuer{CA: ca}).IssuerKey()
 	for k, v := range map[string][]byte{
-		certmagic.StorageKeys.SiteCert(issuer, decoyName):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		certmagic.StorageKeys.SitePrivateKey(issuer, decoyName): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-		certmagic.StorageKeys.SiteMeta(issuer, decoyName):       []byte(`{"sans":["` + decoyName + `"]}`),
+		certmagic.StorageKeys.SiteCert(issuer, name):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		certmagic.StorageKeys.SitePrivateKey(issuer, name): pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		certmagic.StorageKeys.SiteMeta(issuer, name):       []byte(`{"sans":["` + name + `"]}`),
 	} {
 		ok(cache.Store(t.Context(), k, v))
 	}
