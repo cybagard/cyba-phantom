@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/mod/sumdb/note"
@@ -79,10 +80,9 @@ type State struct {
 	root   *os.Root
 	lock   *os.File // the open directory that holds the flock
 	v      note.Verifier
-	name   string // the file name: <key hash>.note
-	loaded bool   // a state file existed at load
-	raw    []byte // the bytes of that file
-	size   uint64 // the size in that note
+	name   string     // the file name: <key hash>.note
+	loaded bool       // a state file existed at load
+	cur    Checkpoint // the checkpoint in that file
 }
 
 // DefaultStateDir returns the state directory: phantom-verify in
@@ -108,9 +108,18 @@ func DefaultStateDir() (string, error) {
 // directory and the file on the open descriptor. It checks the directory before
 // it takes the lock. Then it takes an exclusive lock on the directory.
 // If another run holds the lock, LoadState waits for at most opts.LockWait (30
-// seconds if it is zero) and then gives ErrStateLocked. A run holds the lock
+// seconds if it is zero). Then it gives ErrStateLocked. A run holds the lock
 // until it closes the state. The kernel releases it when the process ends. A
 // failure to take the lock gives ErrState. The caller must call Close.
+//
+// After it takes the lock, LoadState removes each leftover temporary file of
+// this key. A crash between the create and the rename of a write leaves one.
+// Its name is the state file name, ".tmp-", and 16 lower-case hex digits. No
+// other name is removed. A symlink with such a name is removed as a link, and
+// its target stays. The directory is read in batches of leftoverBatch entries.
+// The cleanup is best effort. If a remove or the read fails, LoadState goes on
+// with the next name and gives no error. A leftover file does no harm, and it
+// must not stop a verification.
 func LoadState(dir string, v note.Verifier, opts StateOptions) (*State, error) {
 	if opts.LockWait == 0 {
 		opts.LockWait = defaultLockWait
@@ -131,13 +140,14 @@ func LoadState(dir string, v note.Verifier, opts StateOptions) (*State, error) {
 		return nil, err
 	}
 	s := &State{sync: opts.DirSync, root: root, lock: lock, v: v, name: StateFileName(v)}
+	s.removeLeftovers()
 	raw, exists, err := s.read()
 	if err == nil && exists {
-		c, perr := ParseCheckpoint(raw, v)
+		c, perr := ReadCheckpoint(bytes.NewReader(raw), v)
 		if perr != nil {
 			err = ErrState
 		} else {
-			s.loaded, s.raw, s.size = true, raw, c.Size
+			s.loaded, s.cur = true, c
 		}
 	}
 	if err != nil {
@@ -147,8 +157,50 @@ func LoadState(dir string, v note.Verifier, opts StateOptions) (*State, error) {
 	return s, nil
 }
 
+// leftoverBatch is the number of directory entries that removeLeftovers reads
+// at one time.
+const leftoverBatch = 32
+
+// The temporary file of a write is the state file name, tmpInfix, and tmpDigits
+// lower-case hex digits.
+const (
+	tmpInfix  = ".tmp-"
+	tmpDigits = 16
+)
+
+// isLeftover tells if name is a temporary file name of this state.
+func (s *State) isLeftover(name string) bool {
+	digits, ok := strings.CutPrefix(name, s.name+tmpInfix)
+	return ok && len(digits) == tmpDigits && strings.Trim(digits, "0123456789abcdef") == ""
+}
+
+// removeLeftovers removes the leftover temporary files of the key. It does not
+// follow a symlink, and it has no error: see LoadState.
+func (s *State) removeLeftovers() {
+	d, err := s.root.Open(".")
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	for {
+		entries, err := d.ReadDir(leftoverBatch)
+		for _, e := range entries {
+			if s.isLeftover(e.Name()) {
+				s.root.Remove(e.Name())
+			}
+		}
+		if err != nil { // io.EOF at the end, else a read fault
+			return
+		}
+	}
+}
+
 // Bytes returns the note that was loaded. It is nil on first use.
-func (s *State) Bytes() []byte { return s.raw }
+func (s *State) Bytes() []byte { return s.cur.Note() }
+
+// Checkpoint returns the checkpoint that was loaded. The second value is false
+// on first use.
+func (s *State) Checkpoint() (Checkpoint, bool) { return s.cur, s.loaded }
 
 // Close releases the lock and closes the state directory. A run holds the lock
 // until it closes the state.
@@ -189,9 +241,14 @@ func (s *State) read() ([]byte, bool, error) {
 }
 
 // Update makes the checkpoint latest the state. The caller must have checked
-// latest with Consistency against Bytes. Update writes only on first use, or
-// when the size of latest is larger than the size of the state. Else it leaves
-// the file as it is.
+// latest with Consistency against Checkpoint. Update writes only on first use,
+// or when the size of latest is larger than the size of the state. Else it
+// leaves the file as it is.
+//
+// Update parses no note. If the origin is not the name of the state key, it
+// gives ErrState and writes nothing. The zero value has such an origin. If the
+// size is 0 and the root is not the empty root, it gives ErrFork and writes
+// nothing.
 //
 // The write uses a temporary file with mode 0600, Sync, and Rename. Before the
 // rename, Update reads the state file again. If the bytes differ, or the file
@@ -201,17 +258,19 @@ func (s *State) read() ([]byte, bool, error) {
 // 0 with the error.
 //
 // If the sync fails, the rename is done: the new checkpoint is the state file.
-// Update then sets the state to the new checkpoint, and returns the change that
+// Update then sets the state to the new checkpoint. It returns the change that
 // it made (StateFirstUse or StateUpdated) with ErrStateSync.
-func (s *State) Update(latest []byte) (StateChange, error) {
-	c, err := ParseCheckpoint(latest, s.v)
-	if err != nil {
+func (s *State) Update(latest Checkpoint) (StateChange, error) {
+	if latest.origin != s.v.Name() {
 		return 0, ErrState
 	}
-	if s.loaded && c.Size <= s.size {
+	if latest.size == 0 && latest.root != emptyRoot() {
+		return 0, ErrFork
+	}
+	if s.loaded && latest.size <= s.cur.size {
 		return StateUnchanged, nil
 	}
-	werr := s.write(latest)
+	werr := s.write(latest.note)
 	if werr != nil && !errors.Is(werr, ErrStateSync) {
 		return 0, werr
 	}
@@ -219,17 +278,17 @@ func (s *State) Update(latest []byte) (StateChange, error) {
 	if !s.loaded {
 		change = StateFirstUse
 	}
-	s.loaded, s.raw, s.size = true, bytes.Clone(latest), c.Size
+	s.loaded, s.cur = true, latest
 	return change, werr
 }
 
 // write is the temporary file, the second read, and the rename.
 func (s *State) write(latest []byte) (err error) {
-	var r [8]byte
+	var r [tmpDigits / 2]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		return ErrState
 	}
-	tmp := s.name + ".tmp-" + hex.EncodeToString(r[:])
+	tmp := s.name + tmpInfix + hex.EncodeToString(r[:])
 	f, err := s.root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return ErrState
@@ -249,7 +308,7 @@ func (s *State) write(latest []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	if exists != s.loaded || !bytes.Equal(cur, s.raw) {
+	if exists != s.loaded || !bytes.Equal(cur, s.cur.note) {
 		return ErrStateChanged
 	}
 	if s.root.Rename(tmp, s.name) != nil {

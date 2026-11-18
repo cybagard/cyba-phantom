@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,7 +75,7 @@ func TestTS14_StateUpdate(t *testing.T) {
 		{5, StateFirstUse, 5}, {10, StateUpdated, 10}, {10, StateUnchanged, 10}, {5, StateUnchanged, 10},
 	}
 	for _, step := range steps {
-		got, err := st.Update(cp(step.size))
+		got, err := st.Update(checkpointOf(t, v, cp(step.size)))
 		if err != nil || got != step.want {
 			t.Fatalf("size %d: %v, %v, want %v", step.size, got, err, step.want)
 		}
@@ -115,14 +116,14 @@ func TestTS14_ConcurrentRuns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := first.Update(cp5); err != nil {
+		if _, err := first.Update(checkpointOf(t, v, cp5)); err != nil {
 			t.Fatal(err)
 		}
 		first.Close()
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
-		for _, latest := range [][]byte{cp15, cp10} {
+		for _, latest := range []Checkpoint{checkpointOf(t, v, cp15), checkpointOf(t, v, cp10)} {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -357,7 +358,7 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := snapshot(t, dir)
-		if _, err := st.Update(cp(10)); !errors.Is(err, tc.err) {
+		if _, err := st.Update(checkpointOf(t, v, cp(10))); !errors.Is(err, tc.err) {
 			t.Errorf("%s: error %v, want %v", name, err, tc.err)
 		}
 		if after := snapshot(t, dir); after != before {
@@ -372,23 +373,172 @@ func TestTS14_StateChangedDuringRun(t *testing.T) {
 	}
 }
 
-// T-S-14: a note of size 0 with the empty root is consistent with itself. A
-// note of size 0 with another root is a fork. The command uses this check for
-// the first checkpoint, when there is no state.
+// T-S-14: Update takes a note of size 0 with the empty root as the first state.
+// A note of size 0 with another root gives ErrFork, also when a state exists.
+// The state file does not change.
 func TestTS14_SizeZeroRoot(t *testing.T) {
 	s, text := newKey(t, origin)
 	v, _ := ParseKey([]byte(text))
 	l, _ := realLog(t, 5)
-	empty := checkpointAt(t, l, s, 0)
+	empty := checkpointOf(t, v, checkpointAt(t, l, s, 0))
 	other, err := note.Sign(&note.Note{Text: origin + "\n0\n" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)) + "\n"}, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Consistency(v, empty, empty, nil); err != nil {
-		t.Errorf("empty root: %v", err)
+	bad := checkpointOf(t, v, other)
+	for name, old := range map[string][]byte{"first use": nil, "with a state": checkpointAt(t, l, s, 5)} {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if old != nil {
+			if err := os.WriteFile(filepath.Join(dir, StateFileName(v)), old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st, err := LoadState(dir, v, StateOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		before := snapshot(t, dir)
+		got, err := st.Update(bad)
+		if got != 0 || err != ErrFork {
+			t.Errorf("%s, another root: %v, %v, want 0 and ErrFork", name, got, err)
+		}
+		if after := snapshot(t, dir); after != before {
+			t.Errorf("%s: the directory changed:\n%s\n%s", name, before, after)
+		}
+		st.Close()
 	}
-	if err := Consistency(v, other, other, nil); !errors.Is(err, ErrFork) {
-		t.Errorf("another root: %v, want ErrFork", err)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(dir, v, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got, err := st.Update(empty); got != StateFirstUse || err != nil {
+		t.Errorf("empty root: %v, %v", got, err)
+	}
+}
+
+// T-S-14: Update refuses the zero value, and a value of another origin, with
+// ErrState. It writes nothing, and the state in the object stays as it was.
+func TestTS14_UpdateRefusesValue(t *testing.T) {
+	_, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	s2, text2 := newKey(t, origin+"-b")
+	v2, _ := ParseKey([]byte(text2))
+	l, _ := realLog(t, 10)
+	for name, c := range map[string]Checkpoint{
+		"zero value":   {},
+		"other origin": checkpointOf(t, v2, checkpointAt(t, l, s2, 10)),
+	} {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		st, err := LoadState(dir, v, StateOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		before := snapshot(t, dir)
+		if got, err := st.Update(c); got != 0 || err != ErrState {
+			t.Errorf("%s: %v, %v, want 0 and ErrState", name, got, err)
+		}
+		if after := snapshot(t, dir); after != before {
+			t.Errorf("%s: the directory changed:\n%s\n%s", name, before, after)
+		}
+		if _, ok := st.Checkpoint(); ok {
+			t.Errorf("%s: the object holds a state", name)
+		}
+		st.Close()
+	}
+}
+
+// leftover makes a file in dir and returns its name.
+func leftover(t *testing.T, dir, name string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// T-S-14: LoadState removes each leftover temporary file of its key, and no
+// other name. A symlink with the name is removed as a link: the target stays.
+// More leftovers than one batch go too. A leftover that cannot go does not stop
+// the load or the other removes.
+func TestTS14_LeftoverTemporaryFiles(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	l, _ := realLog(t, 5)
+	name := StateFileName(v)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := checkpointAt(t, l, s, 5)
+	if err := os.WriteFile(filepath.Join(dir, name), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digits := "0123456789abcdef"
+	var gone []string
+	for i := 0; i < 2*leftoverBatch+1; i++ {
+		gone = append(gone, leftover(t, dir, fmt.Sprintf("%s.tmp-%016x", name, i)))
+	}
+	gone = append(gone, name+".tmp-"+digits)
+	keep := []string{
+		name + ".tmp-" + strings.ToUpper(digits),
+		name + ".tmp-" + digits[:15],
+		name + ".tmp-" + digits + "0",
+		name + ".tmp-" + digits[:15] + "g",
+		name + ".tmp-",
+		name + ".tmp" + digits,
+		name + ".tmp-" + digits + ".x",
+		name + "x.tmp-" + digits,
+		"x" + name + ".tmp-" + digits,
+		"ffffffff.note.tmp-" + digits, // the temporary file of another key
+		"other",
+	}
+	for _, k := range keep {
+		leftover(t, dir, k)
+	}
+	target := leftover(t, dir, "target")
+	link := name + ".tmp-" + "aaaaaaaaaaaaaaaa"
+	if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+		t.Fatal(err)
+	}
+	gone = append(gone, link)
+	stuck := name + ".tmp-" + "bbbbbbbbbbbbbbbb" // Remove fails: not empty
+	if err := os.Mkdir(filepath.Join(dir, stuck), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	leftover(t, filepath.Join(dir, stuck), "inner")
+	keep = append(keep, target, stuck)
+
+	st, err := LoadState(dir, v, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, g := range gone {
+		if _, err := os.Lstat(filepath.Join(dir, g)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: not removed (%v)", g, err)
+		}
+	}
+	for _, k := range append(keep, name) {
+		if _, err := os.Lstat(filepath.Join(dir, k)); err != nil {
+			t.Errorf("%s: %v", k, err)
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, target)); err != nil || string(b) != "x" {
+		t.Errorf("the target of the link: %q, %v", b, err)
+	}
+	if !bytes.Equal(st.Bytes(), state) {
+		t.Error("the state is not loaded")
 	}
 }
 
@@ -583,7 +733,7 @@ func TestTS14_DirectorySyncFault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		got, err := st.Update(cp10)
+		got, err := st.Update(checkpointOf(t, v, cp10))
 		if got != tc.want || err != ErrStateSync || !errors.Is(err, ErrState) {
 			t.Errorf("%s: %v, %v, want %v and ErrStateSync", name, got, err, tc.want)
 		}
@@ -758,12 +908,13 @@ func TestTS14_SwapAfterCheckInUpdate(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer st.Close()
-			if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
+			if _, err := st.Update(checkpointOf(t, v, checkpointAt(t, l, s, 5))); err != nil {
 				t.Fatal(err)
 			}
 			swapped := swapAfterCheck(t, file, func() error { return tc.swap(dir, file) })
 			latest := checkpointAt(t, l, s, 10)
-			boundedCall(t, func() { _, err = st.Update(latest) })
+			latestCp := checkpointOf(t, v, latest)
+			boundedCall(t, func() { _, err = st.Update(latestCp) })
 			wantSwapRefused(t, tc, dir, file, *swapped, err, latest)
 		})
 	}
@@ -792,14 +943,14 @@ func TestTS14_ModeChangedDuringRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, err := st.Update(checkpointAt(t, l, s, 5)); err != nil {
+	if _, err := st.Update(checkpointOf(t, v, checkpointAt(t, l, s, 5))); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(file, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	before := snapshot(t, dir)
-	if _, err := st.Update(checkpointAt(t, l, s, 10)); err != ErrState {
+	if _, err := st.Update(checkpointOf(t, v, checkpointAt(t, l, s, 10))); err != ErrState {
 		t.Errorf("error %v, want ErrState", err)
 	}
 	if after := snapshot(t, dir); after != before {
