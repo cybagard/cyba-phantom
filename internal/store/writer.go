@@ -107,8 +107,8 @@ type Writer struct {
 	// make an error that no real record gives after HashEvidence worked. Nil in
 	// production: the writer then calls event.EvidenceBytes.
 	evidenceBytes func(event.Record) ([]byte, error)
-	// beforePragma runs before each PRAGMA statement of write, of storeRow, of a
-	// key write and of a retention checkpoint. It gets the text of the
+	// beforePragma runs before each PRAGMA statement of write, of storeRow, of
+	// a key write and of a retention checkpoint. It gets the text of the
 	// statement. An error from it is the error of that statement. A test sets
 	// it. It is nil in production.
 	beforePragma func(stmt string) error

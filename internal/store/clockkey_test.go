@@ -539,10 +539,10 @@ func ruleOf(err error) string {
 	return ""
 }
 
-// T-U-30: StartClock gives an error and writes no key. Four cases do this. They
-// are a stop marker, a read error, a largest rowid with no next rowid, and a
-// largest clock_jump id with no next id. The writer has no clock. It does not
-// stop.
+// T-U-30: StartClock gives an error and writes no key. Four cases do this. One
+// is a stop marker. One is a read error. One is a largest rowid with no next
+// rowid. One is a largest clock_jump id with no next id. The writer has no
+// clock. It does not stop.
 func TestTU30StartClockRefusals(t *testing.T) {
 	for _, c := range []struct{ name, rule, sql string }{
 		{"marker", ruleMarkerExists, ""},
