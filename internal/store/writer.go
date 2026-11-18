@@ -525,9 +525,8 @@ func (w *Writer) now() time.Time {
 	return time.Now()
 }
 
-// stored gives the time of a stored value. It is for a batch date, a
-// checkpoint time and the time of a retention event. A writer with a clock
-// gives S (ADR-043). A clock error is a fixed error. A writer with no clock
+// stored gives the time of a stored value. It is for a batch date, a day key
+// and a checkpoint time. A writer with a clock gives S (ADR-043). A clock error is a fixed error. A writer with no clock
 // gives w.now. The chunk budgets do not use it. They measure elapsed time with
 // w.now.
 func (w *Writer) stored() (time.Time, error) {
@@ -609,7 +608,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	defer tokens.close()
 
 	// A writer with a clock gives each new row an explicit rowid. The value in
-	// memory moves after the COMMIT, so a batch that rolls back gives none.
+	// memory moves after the COMMIT, so a batch that rolls back gives no rowid.
 	var nextEv, nextSes int64
 	if w.clk != nil {
 		if nextEv, nextSes, err = w.reserveIDs(ctx, tx); err != nil {
@@ -664,6 +663,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		}
 		var id any // nil is the next rowid of SQLite
 		if w.clk != nil {
+			if nextEv == math.MaxInt64 {
+				return false, fail(clockName, ruleStoredClock)
+			}
 			id = nextEv
 			nextEv++
 		}
@@ -786,10 +788,10 @@ type rowRequest struct {
 	reply chan error
 }
 
-// serveRow answers a request of the checkpoint sink. storeRow returns only a
-// database error or a fork signal. Each such error stops the writer, as the
-// other stop causes do, before the reply goes to the sink. The reply is the same
-// error.
+// serveRow answers a request of the checkpoint sink. storeRow returns a
+// database error, a fork signal or a clock error. Each such error stops the
+// writer, as the other stop causes do, before the reply goes to the sink. The
+// reply is the same error.
 func (w *Writer) serveRow(rq rowRequest) {
 	err := w.storeRow(rq)
 	if err != nil {

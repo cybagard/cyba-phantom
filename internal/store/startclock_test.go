@@ -1,9 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,12 +110,12 @@ func TestTU30NewRowsGetRowidsAboveTheRangesAndTheFloor(t *testing.T) {
 		t.Fatalf("rowids %q after the delete, want %q", got, want)
 	}
 
-	// The key takes the rowids that the writer gave, not the stored rows only.
+	// No row stays, so the floor of the key comes from the values in memory.
+	mustExec(t, r.db, "DELETE FROM event")
+	mustExec(t, r.db, "DELETE FROM session")
 	if err := r.w.writeSnapshot(); err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, r.db, "DELETE FROM event")
-	mustExec(t, r.db, "DELETE FROM session")
 	f.at(time.Hour)
 	w2 := NewWriter(r.db, r.q, false, nil, r.w.rec)
 	if err := w2.StartClock(f.source()); err != nil {
@@ -145,8 +148,15 @@ type sched struct {
 
 func sSchedule(t *testing.T, start time.Time, loc *time.Location) *sched {
 	t.Helper()
+	return sScheduleAt(t, start, loc, 0)
+}
+
+// sScheduleAt is sSchedule with the boot clock of the start at boot.
+func sScheduleAt(t *testing.T, start time.Time, loc *time.Location, boot time.Duration) *sched {
+	t.Helper()
 	c := &sched{r: newRig(t, 8), f: &fakeSrc{}}
-	c.f.skew.Store(start.UnixMilli() - wall0)
+	c.f.at(boot)
+	c.f.skew.Store(start.UnixMilli() - wall0 - boot.Milliseconds())
 	if err := c.r.w.StartClock(c.f.source()); err != nil {
 		t.Fatal(err)
 	}
@@ -285,5 +295,179 @@ func TestTU27SMarkIsTheSOfTheRunStart(t *testing.T) {
 	next.begin(context.Background())
 	if runs != 0 {
 		t.Fatalf("%d runs at the next start, want 0", runs)
+	}
+}
+
+// T-U-30: a stored rowid near math.MaxInt64 gives the fixed error, not a wrap.
+// The batch stores no row and the writer stops.
+func TestTU30RowidAtTheLimitStopsTheWriter(t *testing.T) {
+	const (
+		evBelow  = "INSERT INTO event (id, ts, kind) VALUES (9223372036854775806, 1, 'request')"
+		evAt     = "INSERT INTO event (id, ts, kind) VALUES (9223372036854775807, 1, 'request')"
+		sesBelow = "INSERT INTO session (rowid, id, first_seen, last_seen, ip_hmac, band) VALUES (9223372036854775806, 'x', 1, 1, 'h', 'human')"
+	)
+	for _, c := range []struct{ name, insert string }{
+		{"event below the limit", evBelow}, {"event at the limit", evAt}, {"session below the limit", sesBelow}} {
+		t.Run(c.name, func(t *testing.T) {
+			r, _ := clockRig(t)
+			mustExec(t, r.db, c.insert)
+			var evs []*event.Event
+			for _, id := range []string{"a", "b", "c"} {
+				evs = append(evs, sessEvent(t, event.KindRequest, id, "198.51.100.1", "", 1000))
+			}
+			r.w.flush(evs)
+			if ruleOf(r.w.Err()) != ruleStoredClock || r.w.Healthy() {
+				t.Errorf("error %v, healthy %v, want a stop with the stored clock rule", r.w.Err(), r.w.Healthy())
+			}
+			if n := count(t, r.db, "SELECT (SELECT count(*) FROM event) + (SELECT count(*) FROM session)"); n != 1 {
+				t.Errorf("%d rows, want only the stored row", n)
+			}
+		})
+	}
+}
+
+// T-U-30: the top rows go and no key is written. The next rows get rowids
+// above the values that the writer gave. A key write between does not change it.
+func TestTU30NewRowsAreAboveTheValuesThatTheWriterGave(t *testing.T) {
+	t.Run("no key write", func(t *testing.T) {
+		r, _ := clockRig(t)
+		r.batch(r.w, "a", "b", "c")
+		mustExec(t, r.db, "DELETE FROM event")
+		mustExec(t, r.db, "DELETE FROM session")
+		r.batch(r.w, "d")
+		if got, want := ids(t, r, "event")+" "+ids(t, r, "session"), "4 4"; got != want {
+			t.Fatalf("rowids %q, want %q", got, want)
+		}
+	})
+	t.Run("key write", func(t *testing.T) {
+		r, _ := clockRig(t)
+		r.batch(r.w, "a", "b", "c")
+		mustExec(t, r.db, "DELETE FROM event WHERE id > 1")
+		mustExec(t, r.db, "DELETE FROM session WHERE rowid > 1")
+		if err := r.w.writeSnapshot(); err != nil {
+			t.Fatal(err)
+		}
+		r.batch(r.w, "d")
+		if got, want := ids(t, r, "event")+" "+ids(t, r, "session"), "1,4 1,4"; got != want {
+			t.Fatalf("rowids %q, want %q", got, want)
+		}
+	})
+}
+
+// T-U-27: the boot clock rule of 25 h counts from the boot clock of the start,
+// not from 0. A start at a high boot clock gives no run before 25 h.
+func TestTU27SBootClockRuleCountsFromTheStart(t *testing.T) {
+	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
+	for _, boot := range []time.Duration{10 * time.Hour, 100 * time.Hour} {
+		t.Run(boot.String(), func(t *testing.T) {
+			k := sScheduleAt(t, start, time.UTC, boot)
+			setMark(t, k.r.db, start.Add(-time.Hour))
+			k.s.begin(context.Background())
+			k.s.lastDay = "9999-12-31"
+			k.f.at(boot + 24*time.Hour)
+			k.s.check(context.Background())
+			if len(k.runs) != 0 {
+				t.Fatalf("%d runs 24 h after the start, want 0", len(k.runs))
+			}
+			k.f.at(boot + 25*time.Hour)
+			k.s.check(context.Background())
+			if len(k.runs) != 1 {
+				t.Fatalf("%d runs 25 h after the start, want 1", len(k.runs))
+			}
+		})
+	}
+}
+
+// T-U-30: a clock error, then a checkpoint row request. The reply is the clock
+// error, the writer stops and no checkpoint row is stored.
+func TestTU30CheckpointClockErrorStopsTheWriter(t *testing.T) {
+	r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
+	if err := r.w.StartClock(failingSrc(f, fail)); err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	rq := rowRequest{size: 1, msg: []byte("note"), reply: make(chan error, 1)}
+	r.w.serveRow(rq)
+	if err := <-rq.reply; ruleOf(err) != ruleClock || r.w.Healthy() {
+		t.Fatalf("error %v, healthy %v, want a stop with the clock rule", err, r.w.Healthy())
+	}
+	if n := count(t, r.db, "SELECT count(*) FROM checkpoint"); n != 0 {
+		t.Fatalf("%d checkpoint rows, want 0", n)
+	}
+}
+
+// failAtSrc is the source of f. Its boot clock fails at call number failAt
+// only. The calls count in n.
+func failAtSrc(f *fakeSrc, n, failAt *atomic.Int64) sensortime.Source {
+	src := f.source()
+	boot := src.BootClock
+	src.BootClock = func() (time.Duration, error) {
+		if n.Add(1) == failAt.Load() {
+			return 0, errors.New("boot clock")
+		}
+		return boot()
+	}
+	return src
+}
+
+// T-U-27: a run uses the S that the check read. A clock error at the read of
+// begin or of check starts no run and loses no date. A later read cannot fail.
+func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
+	start := time.Date(2027, 2, 10, 3, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		mark  time.Duration // the age of the stored mark
+		after int64         // the call of the boot clock that fails, from the read
+	}{{"begin read", 30 * time.Hour, 1}, {"check read", time.Hour, 1}, {"after the check read", time.Hour, 3}} {
+		t.Run(c.name, func(t *testing.T) {
+			r, f := newRig(t, 8), &fakeSrc{}
+			n, failAt := &atomic.Int64{}, &atomic.Int64{}
+			f.skew.Store(start.UnixMilli() - wall0)
+			if err := r.w.StartClock(failAtSrc(f, n, failAt)); err != nil {
+				t.Fatal(err)
+			}
+			s := NewSchedule(r.w, 7, 30, 90, nil)
+			s.loc = time.UTC
+			runs := 0
+			s.run = func(context.Context, []retentionStep) error { runs++; return nil }
+			setMark(t, r.db, start.Add(-c.mark))
+			if c.name == "begin read" {
+				failAt.Store(n.Load() + c.after)
+				s.begin(context.Background())
+			} else {
+				s.begin(context.Background())
+				f.at(15 * time.Minute) // 03:15
+				failAt.Store(n.Load() + c.after)
+				s.check(context.Background())
+			}
+			want := 0
+			if c.after > 2 {
+				want = 1 // the run does not read the clock again
+			}
+			if runs != want {
+				t.Fatalf("%d runs at the failed read, want %d", runs, want)
+			}
+			f.at(16 * time.Minute)
+			s.check(context.Background())
+			if runs != 1 {
+				t.Fatalf("%d runs after the next good check, want 1", runs)
+			}
+		})
+	}
+}
+
+// T-U-27: a clock error writes one fixed log line, also after two errors.
+func TestTU27SClockErrorWritesOneLogLine(t *testing.T) {
+	r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
+	if err := r.w.StartClock(failingSrc(f, fail)); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	s := NewSchedule(r.w, 7, 30, 90, slog.New(slog.NewTextHandler(&buf, nil)))
+	fail.Store(true)
+	s.begin(context.Background())
+	s.check(context.Background())
+	if got := strings.Count(buf.String(), "retention cannot read the clock"); got != 1 {
+		t.Fatalf("%d log lines after two errors, want 1: %q", got, buf.String())
 	}
 }

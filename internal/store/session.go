@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"math"
 	"net/netip"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
@@ -63,7 +64,8 @@ func (s *sessionBatch) add(rec event.Record, ip string) {
 // transaction tx. It prepares the statement one time. A failure is a database
 // error. An address that has no key gets the overflow ip_hmac text. A writer
 // with a clock gives each upsert the rowid *next, and moves *next past it. A
-// known session keeps its row, so its value is skipped. It is never reused.
+// known session keeps its row, so its value is skipped. A process gives no
+// value twice. After a restart, a value can come again only above the floor.
 func (w *Writer) upsertSessions(ctx context.Context, tx *sql.Tx, key session.Key, next *int64) error {
 	if len(w.sessions.m) == 0 {
 		return nil
@@ -92,6 +94,9 @@ func (w *Writer) upsertSessions(ctx context.Context, tx *sql.Tx, key session.Key
 		}
 		var rowid any // nil is the next rowid of SQLite
 		if w.clk != nil {
+			if *next == math.MaxInt64 {
+				return fail(clockName, ruleStoredClock)
+			}
 			rowid = *next
 			*next++
 		}

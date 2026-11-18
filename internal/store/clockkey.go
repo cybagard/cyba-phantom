@@ -93,10 +93,8 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 		return err
 	}
 	w.clk, w.src = clk, src
-	w.nextEvent, w.nextSession = res.State.NextEvent, res.State.NextSession
 	if err := w.writeKey(res.State, res.Jump); err != nil {
 		w.clk = nil
-		w.nextEvent, w.nextSession = 0, 0
 		return err
 	}
 	w.lastCheck = res.State.BootClock
@@ -106,7 +104,7 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 // writeKey writes the key of st in one transaction. A grace jump adds its
 // clock_jump row in the same transaction. The rowid floor of the key is the
 // largest of four values. One is the floor that the writer wrote last. One is
-// the next rowids in memory. One is the floor of st. One is the largest rowid
+// the next rowid of event and of session in memory. One is the floor of st. One is the largest rowid
 // plus 1. A largest rowid of math.MaxInt64 has no next rowid. The write then
 // returns a fixed error and changes nothing.
 //

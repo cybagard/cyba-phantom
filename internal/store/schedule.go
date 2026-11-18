@@ -248,7 +248,7 @@ func (s *Schedule) begin(ctx context.Context) {
 		if s.w.clk == nil {
 			s.lastRun = mono
 		}
-		s.runOnce(ctx)
+		s.runAt(ctx, wall)
 		s.lastDay = retentionDay(wall, s.loc)
 		return
 	}
@@ -300,7 +300,7 @@ func (s *Schedule) check(ctx context.Context) {
 		if day > s.lastDay || now-s.lastRun >= catchUp {
 			s.lastDay = max(s.lastDay, day)
 			s.lastRun = now
-			s.runOnce(ctx)
+			s.runAt(ctx, wall)
 		}
 		return
 	}
@@ -342,7 +342,7 @@ func (s *Schedule) read() (wall time.Time, mono time.Duration, err error) {
 // clockFailed writes one fixed log line for a clock error, one time only.
 func (s *Schedule) clockFailed() {
 	if s.clockLog.CompareAndSwap(false, true) {
-		s.lg.Error("retention clock does not read")
+		s.lg.Error("retention cannot read the clock")
 	}
 }
 
@@ -363,7 +363,12 @@ func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
 // not change it. After an error, the next run reads the stored mark again.
 // Before a read of the mark has succeeded, the run reads it again. It keeps the
 // later of the two marks.
-func (s *Schedule) runOnce(stop context.Context) {
+func (s *Schedule) runOnce(stop context.Context) { s.runAt(stop, time.Time{}) }
+
+// runAt is runOnce with the S that begin or check read. A writer with a clock
+// uses it as the run date and as the base of the cutoffs, so the run does not
+// read the clock again. A writer with no clock ignores it.
+func (s *Schedule) runAt(stop context.Context, wall time.Time) {
 	if !s.markRead {
 		if m, ok := s.readMark(stop); ok {
 			s.markRead = true
@@ -373,16 +378,11 @@ func (s *Schedule) runOnce(stop context.Context) {
 		}
 	}
 	clocked := s.w.clk != nil
-	var wall, tDel, tPriv time.Time
+	var tDel, tPriv time.Time
 	clockNow := s.clock.wall
 	if clocked {
 		// S is the one base of the cutoffs and of the mark. It has no
 		// correction here, and it does not step with the wall clock.
-		var err error
-		if wall, _, err = s.read(); err != nil {
-			s.clockFailed()
-			return
-		}
 		tDel, tPriv = wall, wall
 		clockNow = func() time.Time {
 			if t, _, err := s.read(); err == nil {
