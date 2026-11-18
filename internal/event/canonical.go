@@ -11,7 +11,6 @@ package event
 import (
 	"bytes"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -48,17 +47,6 @@ func Canonical(raw []byte) ([]byte, error) {
 		return nil, errors.New("event: canonicalize failed")
 	}
 	return v, nil
-}
-
-// Encode marshals v with the strict options, then returns Canonical of the
-// result. It returns an error if the marshaled text is outside the domain of
-// Canonical.
-func Encode(v any) ([]byte, error) {
-	b, err := json.Marshal(v, strict...)
-	if err != nil {
-		return nil, errors.New("event: marshal failed")
-	}
-	return Canonical(b)
 }
 
 func errRule(rule string, off int64) error {
