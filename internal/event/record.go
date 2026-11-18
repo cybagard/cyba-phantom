@@ -413,50 +413,6 @@ func HashEvidence(r Record) ([32]byte, error) {
 	return Hash(b), nil
 }
 
-// Row holds the values of a stored event row, with the fingerprint of its
-// session row. RecordFromRow makes the record from them.
-type Row struct {
-	TS        int64    `json:"ts"`
-	SessionID *string  `json:"session_id"`
-	Kind      string   `json:"kind"`
-	Vhost     *string  `json:"vhost"`
-	Method    *string  `json:"method"`
-	Path      *string  `json:"path"`
-	Status    *int64   `json:"status"`
-	TrapID    *string  `json:"trap_id"`
-	TokenID   *string  `json:"token_id"`
-	Surface   *Surface `json:"surface"`
-	FP        *FP      `json:"fp"`
-	Detail    *string  `json:"detail"`
-}
-
-// RecordFromRow makes the record of a stored row, so that a verifier can hash
-// it again. It applies all rules of the record. The record of a refused row has
-// no session, because the session column of that row is not part of the record.
-func RecordFromRow(row Row) (Record, error) {
-	k, err := ParseKind(row.Kind)
-	if err != nil {
-		return Record{}, err
-	}
-	r := Record{
-		TS: row.TS, Session: row.SessionID, Kind: k, Vhost: row.Vhost,
-		Method: row.Method, Path: row.Path, Status: row.Status,
-		TrapID: row.TrapID, TokenID: row.TokenID, Surface: row.Surface, FP: row.FP,
-	}
-	if k == KindRefused {
-		r.Session = nil
-	}
-	if row.Detail != nil {
-		if r.Detail, err = ParseDetail(*row.Detail); err != nil {
-			return Record{}, err
-		}
-	}
-	if err := r.check(); err != nil {
-		return Record{}, err
-	}
-	return r, nil
-}
-
 // Clock gives the time of the sensor.
 type Clock func() time.Time
 
