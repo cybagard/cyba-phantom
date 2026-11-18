@@ -10,7 +10,7 @@ import (
 
 // The statements are constants. Every value is a bound parameter.
 const (
-	// A NULL id is the next rowid of SQLite. A writer with a clock gives the id.
+	// A NULL id is the next rowid of SQLite. A writer with a clock gives it.
 	insertEvent = "INSERT INTO event (id, ts, session_id, kind, vhost, method, path, status, trap_id, token_id, surface, body_prefix, hash, leaf_index, detail, record) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	// insertMint stores one mint row. A row with the same key is not an error.

@@ -68,9 +68,9 @@ type Schedule struct {
 	mark      time.Time // the mark of the last run, in memory
 	markAhead atomic.Uint64
 	markLog   atomic.Bool
-	clockLog  atomic.Bool // a clock error has a log line
-	maxBytes  int64       // store.max_bytes; 0 means no cap step
-	dbRel     string      // the name that SetMaxBytes checked, relative to the root
+	clockLog  atomic.Bool
+	maxBytes  int64  // store.max_bytes; 0 means no cap step
+	dbRel     string // the name that SetMaxBytes checked, relative to the root
 	capLog    atomic.Bool
 	// The runs that did not meet the cap, for each reason.
 	capKept, capSlow, capStuck, capFaults atomic.Uint64
@@ -284,10 +284,10 @@ func (s *Schedule) readMark(ctx context.Context) (time.Time, bool) {
 // sets the last run day. It takes the later of its value and the day of the
 // check.
 //
-// A writer with a clock has S and its boot clock. S does not step back, so the
-// check has no step-back rule and no gap of 20 h. A run starts when the day is
-// later than the last run day, or when 25 h of boot clock have passed since the
-// start of the last run. A clock error starts no run.
+// A writer with a clock has S and its boot clock. S does not step back. So the
+// check has no step-back rule and no gap of 20 h. A run starts in two cases.
+// The day is later than the last run day. Or 25 h of boot clock have passed
+// since the start of the last run. A clock error starts no run.
 func (s *Schedule) check(ctx context.Context) {
 	wall, now, err := s.read()
 	if err != nil {

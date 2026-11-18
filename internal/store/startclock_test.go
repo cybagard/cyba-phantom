@@ -100,11 +100,11 @@ func (r *rig) batch(w *Writer, sessions ...string) {
 
 // T-U-30: after a delete of every event and session row, new rows get rowids
 // above every clock_jump range and above the floor. This holds after a restart
-// that reads the key. It also holds for a stored rowid above the floor.
+// that reads the key. It holds for a stored rowid above the floor too.
 func TestTU30NewRowsGetRowidsAboveTheRangesAndTheFloor(t *testing.T) {
 	r, f := rangeRig(t)
 	stop := r.start()
-	graceJump(t, r, f) // the clock_jump row holds the events 4 to 6, the session 1
+	graceJump(t, r, f) // the clock_jump row has events 4 to 6 and session 1
 	stop()
 	mustExec(t, r.db, "DELETE FROM event")
 	mustExec(t, r.db, "DELETE FROM session")
@@ -210,8 +210,8 @@ func TestTU27SOneRunForEachLocalDateAtDST(t *testing.T) {
 	}
 }
 
-// T-U-27: a start after 30 h with no run, a start with a mark after S, and a
-// start with no mark run at once. A start after 24 h runs nothing.
+// T-U-27: a start after 30 h with no run runs at once. So does a start with a
+// mark after S. A start after 24 h runs nothing.
 func TestTU27SStartRunsAtOnce(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
@@ -252,7 +252,7 @@ func TestTU27SBootClockOf25HoursGivesARun(t *testing.T) {
 }
 
 // T-U-27: a step of the wall clock of 40 days, forward or back, moves no
-// cutoff and starts no extra run. The next date gives one run, with the cutoff
+// cutoff and starts no extra run. The next date gives one run. Its cutoff is
 // of S.
 func TestTU27SWallStepMovesNoCutoffAndStartsNoRun(t *testing.T) {
 	for _, step := range []time.Duration{40 * 24 * time.Hour, -40 * 24 * time.Hour} {
@@ -273,9 +273,9 @@ func TestTU27SWallStepMovesNoCutoffAndStartsNoRun(t *testing.T) {
 	}
 }
 
-// T-U-27: each run that ends writes retention_last as the S of its start, also
-// when the old value is after S. A start with a mark 40 d after S runs once.
-// The next start does not run at once.
+// T-U-27: each run that ends writes retention_last as the S of its start. This
+// holds when the old value is after S. A start with a mark 40 d after S runs
+// once. The next start does not run at once.
 func TestTU27SMarkIsTheSOfTheRunStart(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	k := sSchedule(t, start, time.UTC)

@@ -29,7 +29,7 @@ func TestTU30_ClockRefusalStopsTheStart(t *testing.T) {
 	cases := []struct {
 		name string
 		seam func(*store.Writer) error // nil means the real start of the clock
-		bad  bool                      // the store holds a bad sensor_time value
+		bad  bool                      // bad sensor_time in the store
 	}{
 		{"bad stored value", nil, true},
 		{"start error", func(*store.Writer) error { return errors.New("no clock") }, false},
