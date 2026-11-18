@@ -68,6 +68,7 @@ type Schedule struct {
 	mark      time.Time // the mark of the last run, in memory
 	markAhead atomic.Uint64
 	markLog   atomic.Bool
+	clockLog  atomic.Bool
 	maxBytes  int64  // store.max_bytes; 0 means no cap step
 	dbRel     string // the name that SetMaxBytes checked, relative to the root
 	capLog    atomic.Bool
@@ -223,17 +224,31 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // is 0, so it is old. A mark after the wall time is old too: the wall clock
 // was ahead at the last run. The run keeps the mark, and it does not move back.
 // The value that it read stays in memory as the mark of the last run. This is
-// true also when the value is after the wall time. If the read fails, runOnce
-// reads the mark again. See runOnce. This run counts for the rule of 25 h in
+// true also when the value is after the wall time. If the read fails, runAt
+// reads the mark again. See runAt. This run counts for the rule of 25 h in
 // check. It does not count for the gap of 20 h.
+//
+// A writer with a clock gives S as the wall time and its boot clock as the
+// monotonic time (ADR-043). A clock error starts no run. The last run day then
+// stays empty, so the first good check starts a run. The boot clock of the
+// start counts as the start of the last run, also when no run starts.
 func (s *Schedule) begin(ctx context.Context) {
-	wall := s.clock.wall()
+	wall, mono, err := s.read()
+	if err != nil {
+		s.clockFailed()
+		return
+	}
 	s.lastWall = wall
+	if s.w.clk != nil {
+		s.lastRun = mono
+	}
 	mark, ok := s.readMark(ctx)
 	s.mark, s.markRead = mark, ok
 	if wall.Sub(mark) > catchUp || mark.After(wall) {
-		s.lastRun = s.clock.mono()
-		s.runOnce(ctx)
+		if s.w.clk == nil {
+			s.lastRun = mono
+		}
+		s.runAt(ctx, wall)
 		s.lastDay = retentionDay(wall, s.loc)
 		return
 	}
@@ -268,8 +283,27 @@ func (s *Schedule) readMark(ctx context.Context) (time.Time, bool) {
 // A step back starts no run by the day rule. A run of the rule of 25 h also
 // sets the last run day. It takes the later of its value and the day of the
 // check.
+//
+// A writer with a clock has S and its boot clock. S does not step back. So the
+// check has no step-back rule and no gap of 20 h. A run starts in two cases.
+// The day is later than the last run day. Or 25 h of boot clock have passed
+// since the start of the last run. A clock error starts no run.
 func (s *Schedule) check(ctx context.Context) {
-	wall, now := s.clock.wall(), s.clock.mono()
+	wall, now, err := s.read()
+	if err != nil {
+		s.clockFailed()
+		return
+	}
+	if s.w.clk != nil {
+		s.lastWall = wall
+		day := retentionDay(wall, s.loc)
+		if day > s.lastDay || now-s.lastRun >= catchUp {
+			s.lastDay = max(s.lastDay, day)
+			s.lastRun = now
+			s.runAt(ctx, wall)
+		}
+		return
+	}
 	day, back := retentionDay(wall, s.loc), wall.Before(s.lastWall)
 	s.lastWall = wall
 	due, started := now-s.lastRun >= catchUp, false
@@ -291,6 +325,27 @@ func (s *Schedule) check(ctx context.Context) {
 	}
 }
 
+// read gives the wall time and the monotonic time of one check. A writer with
+// a clock gives S and the boot clock of its source. A writer with no clock
+// gives the readings of the clock guard.
+func (s *Schedule) read() (wall time.Time, mono time.Duration, err error) {
+	if s.w.clk == nil {
+		return s.clock.wall(), s.clock.mono(), nil
+	}
+	ms, err := s.w.clk.Now()
+	if err == nil {
+		mono, err = s.w.src.BootClock()
+	}
+	return time.UnixMilli(ms), mono, err
+}
+
+// clockFailed writes one fixed log line for a clock error, one time only.
+func (s *Schedule) clockFailed() {
+	if s.clockLog.CompareAndSwap(false, true) {
+		s.lg.Error("retention cannot read the clock")
+	}
+}
+
 // checkRun makes a run that a check started at the monotonic time now. The run
 // counts for the gap of 20 h and for the rule of 25 h.
 func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
@@ -307,8 +362,25 @@ func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
 // the later of the mark and the wall time of the run. A run with an error does
 // not change it. After an error, the next run reads the stored mark again.
 // Before a read of the mark has succeeded, the run reads it again. It keeps the
-// later of the two marks.
+// later of the two marks. A writer with a clock reads S first. A clock error
+// then starts no run.
 func (s *Schedule) runOnce(stop context.Context) {
+	if s.w.clk == nil {
+		s.runAt(stop, time.Time{})
+		return
+	}
+	wall, _, err := s.read()
+	if err != nil {
+		s.clockFailed()
+		return
+	}
+	s.runAt(stop, wall)
+}
+
+// runAt is runOnce with the S that begin or check read. A writer with a clock
+// uses it as the run date and as the base of the cutoffs. So the run does not
+// read the clock again. A writer with no clock ignores it.
+func (s *Schedule) runAt(stop context.Context, wall time.Time) {
 	if !s.markRead {
 		if m, ok := s.readMark(stop); ok {
 			s.markRead = true
@@ -317,11 +389,26 @@ func (s *Schedule) runOnce(stop context.Context) {
 			}
 		}
 	}
-	wall, tDel, tPriv := s.clock.reading(s.mark)
-	if s.mark.Sub(wall) > clockLimit {
-		s.markAhead.Add(1)
-		if s.markLog.CompareAndSwap(false, true) {
-			s.lg.Warn("retention mark is ahead of the wall clock")
+	clocked := s.w.clk != nil
+	var tDel, tPriv time.Time
+	clockNow := s.clock.wall
+	if clocked {
+		// S is the one base of the cutoffs and of the mark. It has no
+		// correction here, and it does not step with the wall clock.
+		tDel, tPriv = wall, wall
+		clockNow = func() time.Time {
+			if t, _, err := s.read(); err == nil {
+				return t
+			}
+			return wall
+		}
+	} else {
+		wall, tDel, tPriv = s.clock.reading(s.mark)
+		if s.mark.Sub(wall) > clockLimit {
+			s.markAhead.Add(1)
+			if s.markLog.CompareAndSwap(false, true) {
+				s.lg.Warn("retention mark is ahead of the wall clock")
+			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(stop, s.limit)
@@ -331,9 +418,13 @@ func (s *Schedule) runOnce(stop context.Context) {
 	run.counts.CutoffRaw, _ = rollupCutoff(tDel, s.raw)
 	// The mint order takes tDel, as the deletes do. A step forward of the wall
 	// clock must not make mint units look old.
-	steps := withCap(runStepsClock(wall, s.clock.wall, tDel, tPriv, s.ip, s.raw, s.events), run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
+	steps := runStepsClock(wall, clockNow, tDel, tPriv, s.ip, s.raw, s.events)
+	if clocked {
+		steps[len(steps)-1] = markSet(wall)
+	}
+	steps = withCap(steps, run, s.w, s.maxBytes, s.dbRel, tDel, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
-	if err == nil && wall.After(s.mark) {
+	if err == nil && (clocked || wall.After(s.mark)) {
 		s.mark = wall
 	}
 	if err != nil {
@@ -413,6 +504,15 @@ func runStepsClock(wall time.Time, clock func() time.Time, tDel, tPriv time.Time
 		newFieldClearStep(tPriv, clock, raw),
 		newMintStep(tDel, raw),
 		markStep(wall),
+	}
+}
+
+// markSet is the mark step of a writer with a clock. It sets retention_last to
+// the S of the run start, also when the old value is later. A mark that is
+// after S is a mark of a clock that was wrong, so it must not stay.
+func markSet(s time.Time) retentionStep {
+	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+		return execN(ctx, tx, metaSetSQL, retentionLastKey, strconv.FormatInt(s.UnixMilli(), 10))
 	}
 }
 

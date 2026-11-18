@@ -103,9 +103,10 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 
 // writeKey writes the key of st in one transaction. A grace jump adds its
 // clock_jump row in the same transaction. The rowid floor of the key is the
-// largest of three values. These are the floor that the writer wrote last, the
-// floor of st, and the largest rowid plus 1. A largest rowid of math.MaxInt64
-// has no next rowid. The write then returns a fixed error and changes nothing.
+// largest of four values. One is the floor that the writer wrote last. One is
+// the next rowid of event and of session in memory. One is the floor of st.
+// One is the largest rowid plus 1. A largest rowid of math.MaxInt64 has no next
+// rowid. The write then returns a fixed error and changes nothing.
 //
 // The write sets synchronous=FULL on the connection before BEGIN, and NORMAL
 // again after the transaction has ended, as storeRow does. A failure to set
@@ -148,8 +149,8 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 	if ev == math.MaxInt64 || ses == math.MaxInt64 {
 		return fail(clockName, ruleStoredClock)
 	}
-	st.NextEvent = max(w.floorEvent, st.NextEvent, ev+1)
-	st.NextSession = max(w.floorSession, st.NextSession, ses+1)
+	st.NextEvent = max(w.floorEvent, w.nextEvent, st.NextEvent, ev+1)
+	st.NextSession = max(w.floorSession, w.nextSession, st.NextSession, ses+1)
 	if jump != nil && jump.Kind == sensortime.KindGrace {
 		j := st.Jump
 		if _, err := tx.ExecContext(ctx, insertJumpSQL, j.ID, j.FirstEvent,
@@ -175,6 +176,9 @@ func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err
 		return fail(writerName, ruleDatabase)
 	}
 	w.floorEvent, w.floorSession = st.NextEvent, st.NextSession
+	// The floor is not below the values in memory. After a grace jump, a new
+	// row must not get a rowid in the range of the jump.
+	w.nextEvent, w.nextSession = st.NextEvent, st.NextSession
 	w.lastKey = st.BootClock
 	w.clk.Committed()
 	return nil

@@ -10,7 +10,9 @@ import (
 
 // The statements are constants. Every value is a bound parameter.
 const (
-	insertEvent = "INSERT INTO event (ts, session_id, kind, vhost, method, path, status, trap_id, token_id, surface, body_prefix, hash, leaf_index, detail, record) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	// A NULL id is the next rowid of SQLite. A writer with a clock gives the id
+	// itself.
+	insertEvent = "INSERT INTO event (id, ts, session_id, kind, vhost, method, path, status, trap_id, token_id, surface, body_prefix, hash, leaf_index, detail, record) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	// insertMint stores one mint row. A row with the same key is not an error.
 	// It changes nothing.
@@ -27,7 +29,8 @@ const (
 // internal/event made it. A nil pointer is NULL. The client IP goes to no
 // column. hash, leaf and record are nil for a bulk event. The body prefix is
 // stored only when w.bodyPrefix is true. The caller gives r, the record of e.
-func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, r event.Record, hash, leaf, record any) error {
+// A nil id gives the next rowid of SQLite.
+func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, r event.Record, id, hash, leaf, record any) error {
 	var detail, prefix any // nil is NULL
 	if len(r.Detail) > 0 {
 		b, err := r.Detail.JSON()
@@ -41,7 +44,7 @@ func (w *Writer) insertRow(ctx context.Context, stmt *sql.Stmt, e *event.Event, 
 			prefix = b
 		}
 	}
-	if _, err := stmt.ExecContext(ctx, r.TS, r.Session, r.Kind.String(), r.Vhost, r.Method, r.Path,
+	if _, err := stmt.ExecContext(ctx, id, r.TS, r.Session, r.Kind.String(), r.Vhost, r.Method, r.Path,
 		r.Status, r.TrapID, r.TokenID, r.Surface, prefix, hash, leaf, detail, record); err != nil {
 		return fail(writerName, ruleDatabase)
 	}
