@@ -72,12 +72,13 @@ func mustEvent(t testing.TB, now event.Clock, in event.Input) *event.Event {
 	return e
 }
 
-// recordBytes returns the canonical record bytes of r from the public API. The
-// record encoder writes the members of the record and the version member v with
-// the value 1. Encode of r alone has no v member. So recordBytes encodes a
-// struct with the same two parts. For an evidence kind, take checks that these
-// bytes equal EvidenceBytes. For request, beacon and refused, no public function gives
-// the bytes of a record, and Encode of this struct is the only source.
+// recordBytes returns the canonical record bytes of r. It calls Encode, which
+// export_test.go gives to the tests only. The record encoder writes the
+// members of the record and the version member v with the value 1. Encode of r
+// alone has no v member. So recordBytes encodes a struct with the same two
+// parts. For an evidence kind, take checks that these bytes equal
+// EvidenceBytes. For request, beacon and refused, no public function gives the
+// bytes of a record, and Encode of this struct is the only source.
 func recordBytes(t testing.TB, r event.Record) []byte {
 	t.Helper()
 	b, err := event.Encode(struct {
