@@ -6,7 +6,7 @@
 //	pins
 //
 // Run it in the repository root. It reads four files. In each file, a word
-// line is a line that is not a comment line and that holds a key word.
+// line is a line that holds a key word. A comment line is not a word line.
 // Each word line must be equal to one allowed line of that file. Each
 // allowed line must be in the file once. Any other word line is a failure.
 //
@@ -15,7 +15,7 @@
 //     "go <v>" and "toolchain go<v>". The toolchain line is optional.
 //   - Makefile: the text GOTOOLCHAIN. The allowed lines are
 //     "GOTOOLCHAIN := go<v>" and "export GOTOOLCHAIN". A comment line that
-//     ends in a backslash is a failure, because make joins the next line.
+//     ends in a backslash is a failure. Make joins the next line to it.
 //   - .github/workflows/ci.yml: GOTOOLCHAIN, "image" in any case,
 //     "container", and "docker://". The allowed lines are the top-level key
 //     "  GOTOOLCHAIN: go<v>", "container:", and "image: <image>".
@@ -244,7 +244,7 @@ func readLimited(path string) ([]byte, error) {
 // when there are two or more. Each failure adds one text. A source that
 // failed to load gives empty spots and no failure, because load reported it.
 // A missing line is not reported when the file has a word line of another
-// form, because that line is the failure.
+// form. That line is the failure.
 func audit(src source, r rule, fails *[]string) []spot {
 	spots := make([]spot, len(r.allowed))
 	if !src.ok {
