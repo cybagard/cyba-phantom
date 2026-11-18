@@ -776,3 +776,48 @@ func TestTS12_NoFloatAndShape(t *testing.T) {
 		t.Errorf("flat detail: %v, %v", d, err)
 	}
 }
+
+// encodeCounts counts the inputs of the encoder by kind until the end of the
+// test. A record text starts with the version member. The other inputs are
+// detail texts.
+func encodeCounts(t *testing.T) (records, details *int) {
+	records, details = new(int), new(int)
+	orig := canonicalize
+	canonicalize = func(raw []byte) ([]byte, error) {
+		if bytes.HasPrefix(raw, []byte(`{"v":1,`)) {
+			*records++
+		} else {
+			*details++
+		}
+		return orig(raw)
+	}
+	t.Cleanup(func() { canonicalize = orig })
+	return records, details
+}
+
+// T-U-06: count the encodes of one evidence event with a detail. NewEvent
+// encodes it for Size. Then the writer hashes it before the batch append and
+// takes the row bytes after it.
+func TestTU06_EvidenceEncodeCounts(t *testing.T) {
+	records, details := encodeCounts(t)
+	e := mustEvent(t, Input{Kind: KindCallback, Session: "s1", Vhost: "a.example.test", Method: "GET",
+		Path: "/x", TrapID: "t1", TokenID: "k1", Surface: SurfacePath,
+		Detail: Detail{"hits": Int(3), "first": Bool(true), "route": Str("/api")}})
+	afterNew := [2]int{*records, *details}
+	rec := e.Record()
+	if _, err := HashEvidence(rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EvidenceBytes(rec); err != nil {
+		t.Fatal(err)
+	}
+	// The writer also makes the detail column of the row from the detail.
+	if _, err := rec.Detail.JSON(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("after NewEvent: %d record encodes, %d detail encodes", afterNew[0], afterNew[1])
+	t.Logf("after the writer calls: %d record encodes, %d detail encodes", *records, *details)
+	if afterNew != [2]int{1, 1} || *records != 3 || *details != 4 {
+		t.Errorf("record encodes %d, detail encodes %d, want 3 and 4", *records, *details)
+	}
+}
