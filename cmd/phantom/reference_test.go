@@ -74,11 +74,11 @@ var refVisibility = map[string]string{
 	"hidden-p":         "human-invisible", // class hidden has display none
 	"html-comment":     "human-invisible", // a comment is not drawn
 	"meta-description": "human-invisible", // a meta element of the head
-	"alt":              "human-visible",   // an img with no src draws its alt text
-	"aria-label":       "human-invisible", // an attribute that a screen reader reads
+	"alt":              "human-visible",   // an img with no src shows its alt
+	"aria-label":       "human-invisible", // a screen reader reads it
 	"nofollow-link":    "human-visible",   // a link in the body
 	"json-ld":          "human-invisible", // a script element is not drawn
-	"noscript":         "human-visible",   // drawn when the browser has no script
+	"noscript":         "human-visible",   // shown when script is off
 	"robots-disallow":  "human-invisible", // a line of robots.txt
 	"ai-plugin":        "human-invisible", // a JSON file for tools
 	"not-found":        "human-visible",   // a paragraph of the 404 page
@@ -466,9 +466,10 @@ func refCallbackRequest(t *testing.T, r *refRun, v refVhost, ip net.IP, route, t
 
 // TestTI04_ReferenceCallbackRoutes checks T-I-04 on the reference bundle
 // (FR-04, SEC-37, SEC-42). The token of each trap goes to the callback route
-// that the text of the trap names, on the vhost of the trap. The route gives a
-// callback row. The surface of the row is the surface of the trap. The row has
-// the trap of the token, the vhost of the trap and reference_seed: true.
+// that the text of the trap names. The request has the host of the trap. The
+// route gives a callback row. The surface of the row is the surface of the
+// trap. The row has the trap of the token, the vhost of the trap and
+// reference_seed: true.
 func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 	r := startReference(t)
 	r.needSecondAddr(t)
