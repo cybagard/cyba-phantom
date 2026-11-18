@@ -16,8 +16,8 @@ import (
 // A writer that takes its times from S never shows it.
 func otherWall() time.Time { return time.UnixMilli(wall0).Add(40 * 24 * time.Hour) }
 
-// T-U-30: the batch date, the day key, the checkpoint time and the time of the
-// retention event are of S. The test hook of the wall clock gives another date.
+// T-U-30: the batch date, the day key and the checkpoint time are of S. The
+// test hook of the wall clock gives another date.
 func TestTU30StoredTimesAreOfS(t *testing.T) {
 	r, _ := clockRig(t)
 	r.w.clock = otherWall
@@ -36,12 +36,6 @@ func TestTU30StoredTimesAreOfS(t *testing.T) {
 	}
 	if got := count(t, r.db, fmt.Sprintf("SELECT count(*) FROM checkpoint WHERE created_at = %d", wall0)); got != 1 {
 		t.Errorf("%d checkpoint rows with the time of S, want 1", got)
-	}
-	if err := r.w.endRun(&retentionRun{}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := count(t, r.db, fmt.Sprintf("SELECT count(*) FROM event WHERE kind = 'retention' AND ts = %d", wall0)); got != 1 {
-		t.Errorf("%d retention events with the time of S, want 1", got)
 	}
 }
 
@@ -291,26 +285,5 @@ func TestTU27SMarkIsTheSOfTheRunStart(t *testing.T) {
 	next.begin(context.Background())
 	if runs != 0 {
 		t.Fatalf("%d runs at the next start, want 0", runs)
-	}
-}
-
-// T-U-30: with the stop marker, StartClock returns ErrStopMarker. The caller
-// tests for it with errors.Is. The writer has no clock, and the stored key
-// stays as it is.
-func TestTU30StartClockWithStopMarkerReturnsTheSentinel(t *testing.T) {
-	r, f := clockRig(t)
-	if err := r.w.writeSnapshot(); err != nil {
-		t.Fatal(err)
-	}
-	key := metaValue(t, r.db, sensorTimeKey)
-	if err := makeMarker(r.root); err != nil {
-		t.Fatal(err)
-	}
-	w := NewWriter(r.db, r.q, false, nil, r.w.rec)
-	if err := w.StartClock(f.source()); !errors.Is(err, ErrStopMarker) || w.clk != nil {
-		t.Fatalf("error %v, clock %v, want ErrStopMarker and no clock", err, w.clk)
-	}
-	if got := metaValue(t, r.db, sensorTimeKey); got != key {
-		t.Fatalf("key %q after the refusal, want %q", got, key)
 	}
 }

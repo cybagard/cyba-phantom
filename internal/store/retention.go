@@ -244,13 +244,7 @@ func (w *Writer) endRun(run *retentionRun, err error) error {
 	if run == nil || !w.Healthy() {
 		return err
 	}
-	// The event time is S for a writer with a clock.
-	at, eerr := w.stored()
-	if eerr != nil {
-		w.stop(eerr)
-		return eerr
-	}
-	e, eerr := event.NewRetentionEvent(func() time.Time { return at }, run.counts)
+	e, eerr := event.NewRetentionEvent(w.now, run.counts)
 	if eerr != nil {
 		eerr = fail(writerName, ruleRecord)
 		w.stop(eerr)
