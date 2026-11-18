@@ -107,8 +107,8 @@ type Writer struct {
 	// make an error that no real record gives after HashEvidence worked. Nil in
 	// production: the writer then calls event.EvidenceBytes.
 	evidenceBytes func(event.Record) ([]byte, error)
-	// beforePragma runs before each PRAGMA statement of write, of storeRow and
-	// of a retention checkpoint. It gets the text of the statement. An error
+	// beforePragma runs before each PRAGMA statement of write, of storeRow, of a
+	// key write and of a retention checkpoint. It gets the text of the statement. An error
 	// from it is the error of that statement. A test sets it. It is nil in
 	// production.
 	beforePragma func(stmt string) error
@@ -357,7 +357,9 @@ func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*ev
 // an empty batch. This write sends the drop counts that are still in memory to
 // ip_counter. It is also made while paused: it has no event row and calls no
 // appender. Thus a writer that has not stopped keeps no count in memory after
-// shutdown. A stopped writer writes nothing.
+// shutdown. Then it writes the sensor time key, when the writer has not stopped
+// (see writeSnapshot). A stopped writer writes nothing: this holds for the key
+// too.
 func (w *Writer) shutdown(batch []*event.Event) {
 	w.flush(batch)
 	for rest := w.q.Drain(); len(rest) > 0; {
@@ -515,8 +517,8 @@ func (w *Writer) now() time.Time {
 	return time.Now()
 }
 
-// pragma runs one PRAGMA statement of write, of storeRow or of a retention
-// checkpoint on conn. It calls beforePragma first.
+// pragma runs one PRAGMA statement of write, of storeRow, of a key write or of a
+// retention checkpoint on conn. It calls beforePragma first.
 func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error {
 	if w.beforePragma != nil {
 		if err := w.beforePragma(stmt); err != nil {
