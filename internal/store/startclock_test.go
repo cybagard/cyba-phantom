@@ -100,7 +100,7 @@ func (r *rig) batch(w *Writer, sessions ...string) {
 
 // T-U-30: after a delete of every event and session row, new rows get rowids
 // above every clock_jump range and above the floor. This holds after a restart
-// that reads the key. It holds for a stored rowid above the floor too.
+// that reads the key. A stored rowid above the floor wins.
 func TestTU30NewRowsGetRowidsAboveTheRangesAndTheFloor(t *testing.T) {
 	r, f := rangeRig(t)
 	stop := r.start()
@@ -251,9 +251,8 @@ func TestTU27SBootClockOf25HoursGivesARun(t *testing.T) {
 	}
 }
 
-// T-U-27: a step of the wall clock of 40 days, forward or back, moves no
-// cutoff and starts no extra run. The next date gives one run. Its cutoff is
-// of S.
+// T-U-27: a wall clock step of 40 days, forward or back, moves no cutoff. It
+// starts no extra run. The next date gives one run. Its cutoff is of S.
 func TestTU27SWallStepMovesNoCutoffAndStartsNoRun(t *testing.T) {
 	for _, step := range []time.Duration{40 * 24 * time.Hour, -40 * 24 * time.Hour} {
 		t.Run(step.String(), func(t *testing.T) {
