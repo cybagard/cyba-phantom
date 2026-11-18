@@ -293,3 +293,24 @@ func TestTU27SMarkIsTheSOfTheRunStart(t *testing.T) {
 		t.Fatalf("%d runs at the next start, want 0", runs)
 	}
 }
+
+// T-U-30: with the stop marker, StartClock returns ErrStopMarker. The caller
+// tests for it with errors.Is. The writer has no clock, and the stored key
+// stays as it is.
+func TestTU30StartClockWithStopMarkerReturnsTheSentinel(t *testing.T) {
+	r, f := clockRig(t)
+	if err := r.w.writeSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	key := metaValue(t, r.db, sensorTimeKey)
+	if err := makeMarker(r.root); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWriter(r.db, r.q, false, nil, r.w.rec)
+	if err := w.StartClock(f.source()); !errors.Is(err, ErrStopMarker) || w.clk != nil {
+		t.Fatalf("error %v, clock %v, want ErrStopMarker and no clock", err, w.clk)
+	}
+	if got := metaValue(t, r.db, sensorTimeKey); got != key {
+		t.Fatalf("key %q after the refusal, want %q", got, key)
+	}
+}
