@@ -18,11 +18,12 @@ import (
 // The build check completes the import check. It takes each GOOS of
 // "go tool dist list" at run time, except linux and darwin, with one GOARCH.
 // Android and ios are in the list. For each GOOS, a build of the package must
-// fail, and its output must name the verify guard or the safefile guard. So
-// no other GOOS builds the verifier code without an import check. The check
-// also needs the safefile package to have exactly one of safefile_unix.go and
-// safefile_other.go, and a build with safefile_other.go must name its guard.
-// The test fails if the list has no other GOOS.
+// fail. Its output must name the verify guard or the safefile guard. So no
+// other GOOS builds the verifier code without an import check.
+//
+// The safefile package must have exactly one of safefile_unix.go and
+// safefile_other.go for each GOOS. A build with safefile_other.go must name
+// its guard. The test fails if the list has no other GOOS.
 //
 // The test does not prove that the code opens no network connection. A package
 // for raw system calls (syscall) is not forbidden, because package os needs it.
