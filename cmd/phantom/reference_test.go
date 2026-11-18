@@ -67,18 +67,18 @@ var refVhosts = []refVhost{
 	{refHostB, "b-", "The shop guide", []string{"hidden-p", "html-comment", "alt", "aria-label"}, refRoutesB},
 }
 
-// refVisibility gives the visibility of each slot to a human who opens the page
-// in a browser. It follows the render position of the slot. The tag of a trap
-// must be the value of its slot.
+// refVisibility gives the visibility of each slot to a human in a browser. The
+// value comes from the place of the slot in the reference templates. The tag
+// of a trap must be the value of its slot. The table does not read the page.
 var refVisibility = map[string]string{
 	"hidden-p":         "human-invisible", // class hidden has display none
-	"html-comment":     "human-invisible", // a comment is not drawn
+	"html-comment":     "human-invisible", // a browser draws no comment
 	"meta-description": "human-invisible", // a meta element of the head
 	"alt":              "human-visible",   // an img with no src shows its alt
-	"aria-label":       "human-invisible", // a screen reader reads it
+	"aria-label":       "human-invisible", // a browser does not draw the label
 	"nofollow-link":    "human-visible",   // a link in the body
-	"json-ld":          "human-invisible", // a script element is not drawn
-	"noscript":         "human-visible",   // shown when script is off
+	"json-ld":          "human-invisible", // a browser draws no script element
+	"noscript":         "human-visible",   // a browser shows it, scripting off
 	"robots-disallow":  "human-invisible", // a line of robots.txt
 	"ai-plugin":        "human-invisible", // a JSON file for tools
 	"not-found":        "human-visible",   // a paragraph of the 404 page
@@ -330,15 +330,15 @@ func (r *refRun) allTokens(t *testing.T, v refVhost, ip net.IP) (map[string]stri
 }
 
 // TestTI02_ReferenceVhostServesEachSlot checks T-I-02 on the source tree of
-// the reference bundle (FR-03, SEC-42). The tree is packed in memory. A test
-// key of class reference signs it. The sensor serves both vhosts, each with its
-// own page. Vhost A has each of the 12 slots. Its page has 8 of them. The
-// robots.txt file, the JSON file, the 404 page and the X-Note header of the
-// page have the other 4. Vhost B has the slots of its own page. Each end tag
-// of the HTML closes the element that is open last. Each token verifies to the
-// trap of its slot. Two sessions get their own tokens. The request row of each
-// page has the vhost that the Host header named. A host that is not Linux and
-// has no 127.0.0.2 skips the test.
+// the reference bundle (FR-03, SEC-42). The test packs the tree in memory.
+// A test key of class reference signs it. The sensor serves both vhosts, each
+// with its own page. Vhost A has each of the 12 slots. Its page has 8 of them.
+// The robots.txt file, the JSON file, the 404 page and the X-Note header of
+// the page have the other 4. Vhost B has the slots of its own page. Each end
+// tag of the HTML closes the element that is open last. Each token verifies to
+// the trap of its slot. Two sessions get their own tokens. The request row of
+// each page has the vhost that the Host header named. A host that is not Linux
+// and has no 127.0.0.2 skips the test.
 func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	r := startReference(t)
 	r.needSecondAddr(t)
@@ -394,10 +394,10 @@ func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	}
 }
 
-// TestTI02_ReferenceTrapVisibility checks the visibility tag of each trap of
-// the reference bundle (SEC-42). The tag must be the visibility that the render
-// position of the slot gives. The traps of vhost A and of vhost B are read from
-// the source tree.
+// TestTI02_ReferenceTrapVisibility checks the visibility tag of each trap that
+// T-I-02 serves (SEC-42). The tag must be the value of its slot in
+// refVisibility. The test reads the traps of vhost A and of vhost B from the
+// source tree. It starts no sensor.
 func TestTI02_ReferenceTrapVisibility(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(refSrc, "traps/traps.json"))
 	mustOK(t, err)
