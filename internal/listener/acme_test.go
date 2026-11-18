@@ -919,7 +919,7 @@ func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
 		path.Join("acme", issuer, "challenge_tokens"), // the prefix, as List gets it
 		"acme/" + issuer + "/challenge_tokens/",
 		"acme/" + issuer + "/challenge_tokens/a/b.json",
-		"acme/other-issuer/challenge_tokens/decoy.test.json", // another issuer element
+		"acme/other-issuer/challenge_tokens/decoy.test.json", // other issuer
 	}
 	for _, k := range tokenKeys {
 		under := &countingStorage{Storage: errStorage{sentinel}}

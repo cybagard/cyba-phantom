@@ -449,7 +449,7 @@ func (c *countReader) Read(p []byte) (int, error) {
 // call must read the padding of the previous entry and one header block. The
 // end must read the padding and two zero blocks. readArchive counts these
 // bytes in its byte count. Both entries have a size that is not a multiple
-// of 512 (100 and 1000), so each Next call after the first reads padding.
+// of 512 (100 and 1000). So each later Next call reads padding.
 func TestTS19TarReadsNoAheadOfTheHeaderBlock(t *testing.T) {
 	entries := []ent{
 		{name: "a", data: bytes.Repeat([]byte{'a'}, 100)},
