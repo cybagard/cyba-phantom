@@ -224,8 +224,8 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // is 0, so it is old. A mark after the wall time is old too: the wall clock
 // was ahead at the last run. The run keeps the mark, and it does not move back.
 // The value that it read stays in memory as the mark of the last run. This is
-// true also when the value is after the wall time. If the read fails, runOnce
-// reads the mark again. See runOnce. This run counts for the rule of 25 h in
+// true also when the value is after the wall time. If the read fails, runAt
+// reads the mark again. See runAt. This run counts for the rule of 25 h in
 // check. It does not count for the gap of 20 h.
 //
 // A writer with a clock gives S as the wall time and its boot clock as the
@@ -362,8 +362,20 @@ func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
 // the later of the mark and the wall time of the run. A run with an error does
 // not change it. After an error, the next run reads the stored mark again.
 // Before a read of the mark has succeeded, the run reads it again. It keeps the
-// later of the two marks.
-func (s *Schedule) runOnce(stop context.Context) { s.runAt(stop, time.Time{}) }
+// later of the two marks. A writer with a clock reads S first. A clock error
+// then starts no run.
+func (s *Schedule) runOnce(stop context.Context) {
+	if s.w.clk == nil {
+		s.runAt(stop, time.Time{})
+		return
+	}
+	wall, _, err := s.read()
+	if err != nil {
+		s.clockFailed()
+		return
+	}
+	s.runAt(stop, wall)
+}
 
 // runAt is runOnce with the S that begin or check read. A writer with a clock
 // uses it as the run date and as the base of the cutoffs. So the run does not

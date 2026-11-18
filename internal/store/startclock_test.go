@@ -305,9 +305,11 @@ func TestTU30RowidAtTheLimitStopsTheWriter(t *testing.T) {
 		evBelow  = "INSERT INTO event (id, ts, kind) VALUES (9223372036854775806, 1, 'request')"
 		evAt     = "INSERT INTO event (id, ts, kind) VALUES (9223372036854775807, 1, 'request')"
 		sesBelow = "INSERT INTO session (rowid, id, first_seen, last_seen, ip_hmac, band) VALUES (9223372036854775806, 'x', 1, 1, 'h', 'human')"
+		sesAt    = "INSERT INTO session (rowid, id, first_seen, last_seen, ip_hmac, band) VALUES (9223372036854775807, 'x', 1, 1, 'h', 'human')"
 	)
 	for _, c := range []struct{ name, insert string }{
-		{"event below the limit", evBelow}, {"event at the limit", evAt}, {"session below the limit", sesBelow}} {
+		{"event below the limit", evBelow}, {"event at the limit", evAt},
+		{"session below the limit", sesBelow}, {"session at the limit", sesAt}} {
 		t.Run(c.name, func(t *testing.T) {
 			r, _ := clockRig(t)
 			mustExec(t, r.db, c.insert)
@@ -326,9 +328,9 @@ func TestTU30RowidAtTheLimitStopsTheWriter(t *testing.T) {
 	}
 }
 
-// T-U-30: the top rows go and no key is written. The next rows get rowids
-// above the values that the writer gave. A key write between does not change
-// this.
+// T-U-30: the top rows go and the writer writes no key. The next rows get
+// rowids above the values that the writer gave. A key write between does not
+// change this.
 func TestTU30NewRowsAreAboveTheValuesThatTheWriterGave(t *testing.T) {
 	t.Run("no key write", func(t *testing.T) {
 		r, _ := clockRig(t)
@@ -380,7 +382,7 @@ func TestTU27SBootClockRuleCountsFromTheStart(t *testing.T) {
 }
 
 // T-U-30: a clock error, then a checkpoint row request. The reply is the clock
-// error, the writer stops and no checkpoint row is stored.
+// error, the writer stops and it stores no checkpoint row.
 func TestTU30CheckpointClockErrorStopsTheWriter(t *testing.T) {
 	r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
 	if err := r.w.StartClock(failingSrc(f, fail)); err != nil {
@@ -412,14 +414,19 @@ func failAtSrc(f *fakeSrc, n, failAt *atomic.Int64) sensortime.Source {
 }
 
 // T-U-27: a run uses the S that the check read. A clock error at the read of
-// begin or of check starts no run and loses no date. A later read cannot fail.
+// begin or of check starts no run and loses no date. A read takes two boot
+// clock calls: one in S and one for the boot clock. Each call can fail. The
+// failure is off before the next check.
 func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 	start := time.Date(2027, 2, 10, 3, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
 		name  string
 		mark  time.Duration // the age of the stored mark
 		after int64         // the boot clock call that fails, from the read
-	}{{"begin read", 30 * time.Hour, 1}, {"check read", time.Hour, 1}, {"after the check read", time.Hour, 3}} {
+		begin bool          // the failed read is the one of begin
+	}{{"begin read", 30 * time.Hour, 1, true}, {"begin boot clock", 30 * time.Hour, 2, true},
+		{"check read", time.Hour, 1, false}, {"check boot clock", time.Hour, 2, false},
+		{"after the check read", time.Hour, 3, false}} {
 		t.Run(c.name, func(t *testing.T) {
 			r, f := newRig(t, 8), &fakeSrc{}
 			n, failAt := &atomic.Int64{}, &atomic.Int64{}
@@ -432,14 +439,19 @@ func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 			runs := 0
 			s.run = func(context.Context, []retentionStep) error { runs++; return nil }
 			setMark(t, r.db, start.Add(-c.mark))
-			if c.name == "begin read" {
+			if c.begin {
 				failAt.Store(n.Load() + c.after)
 				s.begin(context.Background())
 			} else {
 				s.begin(context.Background())
 				f.at(15 * time.Minute) // 03:15
+				day, last := s.lastDay, s.lastRun
 				failAt.Store(n.Load() + c.after)
 				s.check(context.Background())
+				if c.after < 3 && (s.lastDay != day || s.lastRun != last) {
+					t.Errorf("last run day %q and boot clock %v after the failed read, want %q and %v",
+						s.lastDay, s.lastRun, day, last)
+				}
 			}
 			want := 0
 			if c.after > 2 {
@@ -448,6 +460,7 @@ func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 			if runs != want {
 				t.Fatalf("%d runs at the failed read, want %d", runs, want)
 			}
+			failAt.Store(0)
 			f.at(16 * time.Minute)
 			s.check(context.Background())
 			if runs != 1 {
@@ -455,6 +468,36 @@ func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// T-U-27: a run that runOnce makes on a writer with a clock uses S for the
+// cutoffs and for the mark. A clock error gives no run.
+func TestTU27SRunOnceReadsS(t *testing.T) {
+	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
+	t.Run("good clock", func(t *testing.T) {
+		k := sSchedule(t, start, time.UTC)
+		k.s.runOnce(context.Background())
+		if len(k.runs) != 1 || k.raw[0] != start.UnixMilli()-30*24*time.Hour.Milliseconds() {
+			t.Fatalf("runs %v, cutoffs %v, want one run with the cutoff of S", k.runs, k.raw)
+		}
+		if !k.s.mark.Equal(start) {
+			t.Fatalf("mark %v, want S %v", k.s.mark, start)
+		}
+	})
+	t.Run("clock error", func(t *testing.T) {
+		r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
+		if err := r.w.StartClock(failingSrc(f, fail)); err != nil {
+			t.Fatal(err)
+		}
+		s := NewSchedule(r.w, 7, 30, 90, nil)
+		runs := 0
+		s.run = func(context.Context, []retentionStep) error { runs++; return nil }
+		fail.Store(true)
+		s.runOnce(context.Background())
+		if runs != 0 {
+			t.Fatalf("%d runs after a clock error, want 0", runs)
+		}
+	})
 }
 
 // T-U-27: a clock error writes one fixed log line, also after two errors.
