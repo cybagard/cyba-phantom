@@ -78,7 +78,7 @@ func mustEvent(t testing.TB, now event.Clock, in event.Input) *event.Event {
 // alone has no v member. So recordBytes encodes a struct with the same two
 // parts. For an evidence kind, take checks that these bytes equal
 // EvidenceBytes. For request, beacon and refused, no public function gives the
-// bytes of a record, and Encode of this struct is the only source.
+// bytes of a record. Encode of this struct is the only source.
 func recordBytes(t testing.TB, r event.Record) []byte {
 	t.Helper()
 	b, err := event.Encode(struct {
