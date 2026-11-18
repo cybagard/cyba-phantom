@@ -185,7 +185,8 @@ func (w *Writer) RetentionCheckpointBusy() uint64 { return w.checkpointBusy.Load
 // four cases. These are: ctx has ended, the caller has left, the queue is
 // closed, or the writer has stopped. Each chunk is a transaction, so no partial
 // chunk stays. A database error stops the writer. The run ends with the
-// checkpoint.
+// checkpoint. Before its first chunk, the run writes the sensor time key. That
+// write is not a chunk and makes no retention event.
 func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batch []*event.Event, rq retentionRequest) []*event.Event {
 	if !w.Healthy() || ctx.Err() != nil || rq.left() {
 		rq.reply <- fail(writerName, ruleRetention)
@@ -194,6 +195,11 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 	steps := rq.steps
 	if steps == nil {
 		steps = retentionSteps
+	}
+	// The key write is not a run: it makes no retention event.
+	if err := w.writeSnapshot(); err != nil {
+		rq.reply <- err
+		return batch
 	}
 	for cur := 0; cur < len(steps); {
 		if rq.run.settleDue(cur) {
@@ -342,6 +348,7 @@ func (w *Writer) betweenChunks(tick <-chan time.Time, batch []*event.Event) []*e
 	select {
 	case <-tick:
 		batch = w.flush(batch)
+		w.serveClock()
 	default:
 	}
 	return batch
