@@ -48,7 +48,7 @@ const (
 // largest clock_jump id with no next id, and a stored jump id with no next id.
 // A read error is an *Error with the rule of a failed read. A Start error is
 // returned as it is. A failed write is an *Error.
-// In each case but one, the database keeps its old rows, and the writer has no
+// In each case but one, the database keeps its old rows. The writer has no
 // clock and does not stop. The one case is a COMMIT that worked and a NORMAL
 // pragma that then failed. The key is stored (it was written with FULL), and
 // StartClock returns the error. The writer has no clock, and a later start
