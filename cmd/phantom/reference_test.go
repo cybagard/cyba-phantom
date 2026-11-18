@@ -95,9 +95,13 @@ func vhostOf(tr refTrap) (refVhost, bool) {
 	return refVhost{}, false
 }
 
-// refSeed is the token seed of the tests. The source tree has no seed, so the
-// tests add it to the files in memory.
-var refSeed = bytes.Repeat([]byte{7}, 32)
+// refSeed returns the token seed of the source tree. The seed is public.
+func refSeed(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(refSrc, "secrets/token.seed"))
+	mustOK(t, err)
+	return b
+}
 
 // refTrap is a trap of the source tree.
 type refTrap struct {
@@ -120,10 +124,10 @@ func refTrust() bundle.TrustSet {
 	return bundle.TrustSet{{KeyID: refKeyID, PublicKey: pubOf(seedKey(goodSeed)), Class: bundle.ClassReference}}
 }
 
-// startReference packs the source tree in memory with the test seed. It signs
-// the archive with the test key and starts a sensor on it. The manifest dates
-// are fixed. So the loader clock is the real clock, held between `created`
-// + 1 h and `expires` - 1 h.
+// startReference packs the source tree in memory. It signs the archive with
+// the test key and starts a sensor on it. The manifest dates are fixed. So
+// the loader clock is the real clock, held between `created` + 1 h and
+// `expires` - 1 h.
 func startReference(t *testing.T) *refRun {
 	t.Helper()
 	var files []tarFile
@@ -136,7 +140,6 @@ func startReference(t *testing.T) *refRun {
 		files = append(files, tarFile{p, b})
 		return err
 	}))
-	files = append(files, tarFile{"secrets/token.seed", refSeed})
 	var man struct{ Created, Expires time.Time }
 	var traps []refTrap
 	for _, f := range files {
@@ -356,7 +359,7 @@ func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 			t.Fatalf("vhost %s: trap slots %q; want one trap for each of %q", v.host, slots[v.host], v.slots)
 		}
 	}
-	ks, err := token.NewKeySet(refSeed, sha256.Sum256(r.arch), ids, true)
+	ks, err := token.NewKeySet(refSeed(t), sha256.Sum256(r.arch), ids, true)
 	mustOK(t, err)
 	seen := map[string]bool{}
 	ips := []string{"127.0.0.1", "127.0.0.2"}
