@@ -955,9 +955,6 @@ func checkDecoyName(_ *loader, raw string) string {
 	return ""
 }
 
-// checkAbsPath checks that a path is absolute and clean.
-func checkAbsPath(_ *loader, raw string) string { return checkPathForm(raw) }
-
 // decoyCheck checks the rules that compare the decoy names of acme.names
 // and tls.certs. It reads the entries that passed their own check. It
 // skips the total when a list has a shape error (expandLists reports it).
