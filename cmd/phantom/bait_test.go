@@ -61,8 +61,8 @@ type baitOpt struct {
 	root string
 	// maxBytes is store.max_bytes in the start values. 0 keeps the config.
 	maxBytes int64
-	// name is a second decoy name, with a cached certificate. "" has none.
-	name string
+	// names are more decoy names, each with a cached certificate. nil has none.
+	names []string
 	// trust is the trust set of the start, or nil for testTrust.
 	trust func() bundle.TrustSet
 	// seed runs before the start, on the start values with the state
@@ -100,8 +100,8 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	}
 	// noVhost is a second decoy name. The bundle has no vhost for it.
 	names := "decoy.host.zz, " + noVhost
-	if o.name != "" {
-		names += ", " + o.name
+	for _, n := range o.names {
+		names += ", " + n
 	}
 	body := strings.Replace(validBody(t), "names: [decoy.host.zz]", "names: ["+names+"]", 1)
 	cfg, err := config.Load(writeFile(t, body), env)
@@ -121,8 +121,8 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	}
 	caURL, _ := cfg.Get("acme.ca")
 	seedCache(t, s.p, caURL.Str)
-	if o.name != "" {
-		seedCacheFor(t, s.p, caURL.Str, o.name)
+	for _, n := range o.names {
+		seedCacheFor(t, s.p, caURL.Str, n)
 	}
 	if o.bundle {
 		if o.files == nil {
