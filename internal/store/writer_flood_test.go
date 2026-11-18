@@ -166,7 +166,9 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 			}
 		}, 0},
 		{"record bytes error", func(r *rig) {
-			r.w.evidenceBytes = func(event.Record) ([]byte, error) { return nil, errors.New("no bytes") }
+			r.w.canonicalEvidence = func(event.Record) ([]byte, [32]byte, error) {
+				return nil, [32]byte{}, errors.New("no bytes")
+			}
 		}, 0},
 		{"insert error", func(r *rig) { r.app.next = -1 }, 0},
 		{"drop counts error", func(r *rig) {
@@ -191,6 +193,10 @@ func TestTU18RolledBackBatchIsCountedForItsLanes(t *testing.T) {
 			s := r.w.Stats()
 			if s.Dropped != (Drops{Bulk: 3, Evidence: 2}) || s.WriteFailed != c.failed || r.w.Healthy() || len(r.commits) != 0 {
 				t.Fatalf("stats %+v (want bulk 3, evidence 2, %d failed), healthy %v, %d commits of the batch", s, c.failed, r.w.Healthy(), len(r.commits))
+			}
+			// The record bytes come before the append: no call, no orphan leaf.
+			if c.name == "record bytes error" && (r.app.tries != 0 || s.OrphanLeaves != 0) {
+				t.Fatalf("%d appender calls, %d orphan leaves, want none", r.app.tries, s.OrphanLeaves)
 			}
 		})
 	}

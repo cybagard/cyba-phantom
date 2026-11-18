@@ -168,6 +168,59 @@ func TestTU18StoredValuesEqualEventValues(t *testing.T) {
 	}
 }
 
+// T-U-18: take a set of evidence records. The stored record column is the
+// value of EvidenceBytes. The stored hash is the Hash of that value. The set
+// has each evidence kind with and without a detail. It also has a detail of 8
+// members, a path with escapes and the largest record.
+func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
+	mk := func(in event.Input, ts int64) *event.Event {
+		e, err := event.NewEvent(func() time.Time { return time.UnixMilli(ts) }, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	var batch []*event.Event
+	for i, k := range allKinds {
+		if ok, _ := k.IsEvidence(); ok {
+			batch = append(batch, rowEvent(t, k, true, 1000+int64(i)), rowEvent(t, k, false, 2000+int64(i)))
+		}
+	}
+	eight := event.Detail{}
+	for i := range 8 {
+		eight[fmt.Sprintf("m%d", i)] = event.Int(int64(i) - 4)
+	}
+	batch = append(batch,
+		mk(event.Input{Kind: event.KindCallback, Session: "s8", TrapID: "t", TokenID: "k", Detail: eight}, 3000),
+		mk(event.Input{Kind: event.KindCallback, Session: "se", Path: "/a\"\\/\x01é ?q=%FF", TrapID: "t", TokenID: "k"}, 3001))
+	// The longest ts and status are the negative integers -(2^53-1). Each
+	// control byte is a 6-byte escape in canonical form.
+	long, st := int64(-(1<<53 - 1)), int64(-(1<<53 - 1))
+	ctl := strings.Repeat("\x01", 300)
+	batch = append(batch, mk(event.Input{Kind: event.KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
+		Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+		Surface: event.SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+		Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))}}, long))
+	r := newRig(t, 100)
+	if err := r.w.write(batch); err != nil {
+		t.Fatal(err)
+	}
+	rows := r.stored()
+	if len(rows) != len(batch) {
+		t.Fatalf("%d rows for %d events", len(rows), len(batch))
+	}
+	for i, e := range batch {
+		want, err := event.EvidenceBytes(e.Record())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h := event.Hash(want); !bytes.Equal(rows[i].record, want) || !bytes.Equal(rows[i].hash, h[:]) {
+			t.Errorf("row %d (%v): record of %d bytes (want %d, equal %v), hash %x, want %x",
+				i, e.Record().Kind, len(rows[i].record), len(want), bytes.Equal(rows[i].record, want), rows[i].hash, h)
+		}
+	}
+}
+
 // addressForms returns the text of a and its raw 4 and 16 bytes. It also
 // returns the lower-case and upper-case hex of both.
 func addressForms(a netip.Addr) []string {
@@ -364,9 +417,9 @@ func TestTU18BatchUsesTheDateOfItsStart(t *testing.T) {
 	// read after the first event gives the next date.
 	inRows := false
 	start := day("2026-03-01T23:59:59.999Z")
-	r.w.evidenceBytes = func(rec event.Record) ([]byte, error) {
+	r.w.canonicalEvidence = func(rec event.Record) ([]byte, [32]byte, error) {
 		inRows = true
-		return event.EvidenceBytes(rec)
+		return event.CanonicalEvidence(rec)
 	}
 	r.w.clock = func() time.Time {
 		if inRows {

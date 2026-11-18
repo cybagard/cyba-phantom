@@ -796,8 +796,8 @@ func encodeCounts(t *testing.T) (records, details *int) {
 }
 
 // T-U-06: count the encodes of one evidence event with a detail. NewEvent
-// encodes it for Size. Then the writer hashes it before the batch append and
-// takes the row bytes after it.
+// encodes it for Size. Then the writer calls CanonicalEvidence one time before
+// the batch append, and the row uses its bytes.
 func TestTU06_EvidenceEncodeCounts(t *testing.T) {
 	records, details := encodeCounts(t)
 	e := mustEvent(t, Input{Kind: KindCallback, Session: "s1", Vhost: "a.example.test", Method: "GET",
@@ -805,10 +805,7 @@ func TestTU06_EvidenceEncodeCounts(t *testing.T) {
 		Detail: Detail{"hits": Int(3), "first": Bool(true), "route": Str("/api")}})
 	afterNew := [2]int{*records, *details}
 	rec := e.Record()
-	if _, err := HashEvidence(rec); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := EvidenceBytes(rec); err != nil {
+	if _, _, err := CanonicalEvidence(rec); err != nil {
 		t.Fatal(err)
 	}
 	// The writer also makes the detail column of the row from the detail.
@@ -817,7 +814,33 @@ func TestTU06_EvidenceEncodeCounts(t *testing.T) {
 	}
 	t.Logf("after NewEvent: %d record encodes, %d detail encodes", afterNew[0], afterNew[1])
 	t.Logf("after the writer calls: %d record encodes, %d detail encodes", *records, *details)
-	if afterNew != [2]int{1, 1} || *records != 3 || *details != 4 {
-		t.Errorf("record encodes %d, detail encodes %d, want 3 and 4", *records, *details)
+	if afterNew != [2]int{1, 1} || *records != 2 || *details != 3 {
+		t.Errorf("record encodes %d, detail encodes %d, want 2 and 3", *records, *details)
+	}
+}
+
+// T-U-06: CanonicalEvidence gives the bytes and the hash from one encode. The
+// bytes and the hash are the same as those of EvidenceBytes and HashEvidence.
+// It refuses the kinds that are not evidence, as they do.
+func TestTU06_CanonicalEvidenceOneEncode(t *testing.T) {
+	records, _ := encodeCounts(t)
+	r := mustEvent(t, Input{Kind: KindCallback, Session: "s1", TrapID: "t1", TokenID: "k1",
+		Detail: Detail{"hits": Int(3)}}).Record()
+	*records = 0
+	b, h, err := CanonicalEvidence(r)
+	if err != nil || *records != 1 {
+		t.Fatalf("error %v, record encodes %d, want nil and 1", err, *records)
+	}
+	want, err := EvidenceBytes(r)
+	if err != nil || !bytes.Equal(b, want) || h != Hash(b) {
+		t.Errorf("bytes %s, hash %x, want %s, error %v", b, h, want, err)
+	}
+	if hh, err := HashEvidence(r); err != nil || hh != h {
+		t.Errorf("HashEvidence %x, %v, want %x", hh, err, h)
+	}
+	for _, k := range []Kind{KindRequest, KindBeacon, KindRefused, Kind(0), Kind(200)} {
+		if b, h, err := CanonicalEvidence(Record{TS: 1, Kind: k}); err == nil || b != nil || h != ([32]byte{}) {
+			t.Errorf("kind %q: bytes %s, hash %x, error %v, want an error", k, b, h, err)
+		}
 	}
 }

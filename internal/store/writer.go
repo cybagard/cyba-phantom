@@ -104,10 +104,10 @@ type Writer struct {
 	// beforeAppend runs in the transaction before AppendBatch. A test sets it;
 	// nil in production.
 	beforeAppend func()
-	// evidenceBytes makes the record bytes of an evidence row. A test sets it, to
-	// make an error that no real record gives after HashEvidence worked. Nil in
-	// production: the writer then calls event.EvidenceBytes.
-	evidenceBytes func(event.Record) ([]byte, error)
+	// canonicalEvidence makes the record bytes and the hash of an evidence
+	// event, before AppendBatch. A test sets it. Nil in production: the writer
+	// then calls event.CanonicalEvidence.
+	canonicalEvidence func(event.Record) ([]byte, [32]byte, error)
 	// beforePragma runs before each PRAGMA statement of write, of storeRow, of
 	// a key write and of a retention checkpoint. It gets the text of the
 	// statement. An error from it is the error of that statement. A test sets
@@ -409,21 +409,22 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 	return batch[:0]
 }
 
-// write stores one batch in one transaction. It hashes the evidence events
-// first. For a batch with evidence it takes the one pool connection and sets
-// synchronous=FULL on it before BEGIN. It sets NORMAL again when the transaction
-// has ended, after a commit and after a rollback. A failure to set either value
-// is a database error. Suppose write returns an error and the COMMIT did not
+// write stores one batch in one transaction. It makes the record bytes and the
+// hash of each evidence event first, with one encode. For a batch with
+// evidence it takes the one pool connection and sets synchronous=FULL on it
+// before BEGIN. It sets NORMAL again when the transaction has ended, after a
+// commit and after a rollback. A failure to set either value is a database
+// error. Suppose write returns an error and the COMMIT did not
 // succeed. Then write counts each event of the batch as a drop. The lane of
 // each drop is the lane of the kind of the record copy of that event. A failed
 // NORMAL after a good COMMIT counts none, because the rows exist.
 //
 // In the transaction, the evidence hashes go to the appender in one call before
 // COMMIT. Row i of the evidence events gets leaf_index first+i. The insert loop
-// makes the record bytes for each row, binds them, and drops them after the
-// insert. Thus the writer keeps no second copy of the record bytes of the batch.
-// The transaction does not use the context of Run: the last write must work after
-// ctx ends.
+// binds the bytes that were hashed. Thus the stored record is the hashed value.
+// The writer holds the record bytes of the batch until the transaction ends, at
+// most maxBatch records of MaxRecordBytes. The transaction does not use the
+// context of Run: the last write must work after ctx ends.
 //
 // If AppendBatch fails, the transaction stores only the bulk rows of the batch.
 // It stores no evidence row. Each evidence event of the batch counts as a failed
@@ -435,10 +436,10 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 //
 // Suppose AppendBatch works and the transaction then ends without a COMMIT.
 // Then the leaves of the batch are in the log and have no row. Each of them
-// counts as an orphan leaf. This holds for each error after the append: the
-// record bytes, an insert, the drop counts and the COMMIT. An error before the
-// append, for example of the prepare, counts none, because no leaf reached the
-// log.
+// counts as an orphan leaf. This holds for each error after the append: an
+// insert, the drop counts and the COMMIT. An error before the append counts
+// none, because no leaf reached the log. Examples are an error of the record
+// bytes and an error of the prepare.
 //
 // At its start the batch reads the clock one time and takes the UTC date and
 // the day key for it. The ip_counter rows of the batch use them, also when the
@@ -479,8 +480,16 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	}
 	key := w.dk.At(now)
 	day := now.UTC().Format(dayLayout)
+	// One encode of each evidence record gives the bytes and the hash. The
+	// row stores these bytes. An error comes before AppendBatch, so it gives
+	// no leaf and no orphan leaf.
+	canon := event.CanonicalEvidence
+	if w.canonicalEvidence != nil {
+		canon = w.canonicalEvidence
+	}
 	hs := make([]tlog.EventHash, 0, len(batch))
 	evidence := make([]bool, len(batch))
+	bs := make([][]byte, len(batch))
 	for j, rec := range recs {
 		ok, err := rec.Kind.IsEvidence()
 		if err != nil {
@@ -489,11 +498,12 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 		if !ok {
 			continue
 		}
-		h, err := event.HashEvidence(rec)
+		b, h, err := canon(rec)
 		if err != nil {
 			return fail(writerName, ruleRecord)
 		}
 		evidence[j] = true
+		bs[j] = b
 		hs = append(hs, tlog.EventHash(h))
 	}
 
@@ -513,7 +523,7 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 			}
 		}()
 	}
-	committed, err = w.transact(ctx, conn, batch, recs, hs, evidence, day, key, begin)
+	committed, err = w.transact(ctx, conn, batch, recs, bs, hs, evidence, day, key, begin)
 	return err
 }
 
@@ -579,7 +589,7 @@ func (w *Writer) pragma(ctx context.Context, conn *sql.Conn, stmt string) error 
 // count of the mint rows grows only after a good COMMIT. The counts of
 // unlinked callbacks do the same. onCommit gets the count of event rows, not
 // of session rows.
-func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
+func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Event, recs []event.Record, bs [][]byte, hs []tlog.EventHash, evidence []bool, day string, key session.Key, begin time.Time) (committed bool, err error) {
 	appended := false
 	defer func() {
 		if appended && !committed {
@@ -650,15 +660,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			rec.Session = key.SessionID(e.IP(), ja4)
 		}
 		if evidence[j] {
-			evBytes := event.EvidenceBytes
-			if w.evidenceBytes != nil {
-				evBytes = w.evidenceBytes
-			}
-			b, err := evBytes(rec)
-			if err != nil {
-				return false, fail(writerName, ruleRecord)
-			}
-			hash, leaf, record = hs[i][:], first+int64(i), b
+			hash, leaf, record = hs[i][:], first+int64(i), bs[j]
 			i++
 		}
 		var id any // nil is the next rowid of SQLite
