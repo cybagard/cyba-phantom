@@ -18,6 +18,7 @@ import (
 	"github.com/cybagard/cyba-phantom/internal/config"
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/safefile"
+	"github.com/cybagard/cyba-phantom/internal/sensortime"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/store"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
@@ -60,6 +61,10 @@ type startDeps struct {
 	// days and the cap of p (store.max_bytes). An error means that the
 	// schedule refused the cap. Then no run may start. Nil means no schedule.
 	schedule func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error)
+	// startClock starts the sensor time of the writer (ADR-043). It runs before
+	// the writer runs. An error other than store.ErrStopMarker refuses the
+	// start. Nil means no clock.
+	startClock func(w *store.Writer) error
 }
 
 var realDeps = startDeps{
@@ -70,6 +75,9 @@ var realDeps = startDeps{
 	newCheckpointer: tlog.NewCheckpointer,
 	runCheckpointer: func(ctx context.Context, c *tlog.Checkpointer) { c.Run(ctx) },
 	openGuard:       store.OpenDiskGuard,
+	startClock: func(w *store.Writer) error {
+		return w.StartClock(sensortime.DefaultSource())
+	},
 	schedule: func(w *store.Writer, p startParams, lg *slog.Logger) (func(context.Context), error) {
 		// SetMaxBytes reads a cap of 0 or less as no cap. The start refuses it.
 		if p.MaxBytes <= 0 {
@@ -133,6 +141,19 @@ type storePart struct {
 	stopSched context.CancelFunc // stops the retention schedule
 	sched     sync.WaitGroup
 	capErr    error // the schedule refused the cap, so it did not start
+	clockErr  error // the sensor time did not start, so the writer did not run
+}
+
+// refusal gives the fixed stderr line of a refused start, or "" when the start
+// works. After a refusal, serve closes the listeners and stops.
+func (s *storePart) refusal() string {
+	switch {
+	case s.clockErr != nil:
+		return "phantom: sensor time does not start"
+	case s.capErr != nil:
+		return "phantom: retention cap does not start"
+	}
+	return ""
 }
 
 // DayKey returns the day key holder that the writer uses. The code that
@@ -171,6 +192,17 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 	}
 	if s.db != nil {
 		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log}, s.dk)
+		// The clock starts before the writer runs. A stop marker is no refusal.
+		// The writer then has no clock and stops at its start check. The sensor
+		// serves on, not healthy. Any other error gives no writer run.
+		if d.startClock != nil {
+			if err := d.startClock(s.writer); err != nil && !errors.Is(err, store.ErrStopMarker) {
+				lg.Error("sensor time does not start", "error", err)
+				s.clockErr = err
+			}
+		}
+	}
+	if s.db != nil && s.clockErr == nil {
 		if d.openGuard != nil {
 			if s.guard, err = d.openGuard(s.root, p.TlogDir); err != nil {
 				lg.Error("disk guard does not open")
@@ -192,12 +224,12 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 				s.sched.Go(func() { run(ctx) })
 			}
 		}
-	} else {
+	} else if s.db == nil {
 		s.wg.Go(func() { store.Discard(context.Background(), q, &s.drops) })
 	}
-	// After a refused cap, start does not start the checkpointer. So it
-	// makes no key and signs nothing.
-	if s.log != nil && s.capErr == nil {
+	// After a refused cap or clock, start does not start the checkpointer. So
+	// it makes no key and signs nothing.
+	if s.log != nil && s.refusal() == "" {
 		if err := s.startCheckpointer(p, d, lg); err != nil {
 			lg.Error("checkpointer does not start", "error", err)
 		}
