@@ -112,6 +112,13 @@ func TestAgreeingVariants(t *testing.T) {
 			f[ciFile] += "  # image: x\n\t# container: golang:1.0.0\n    # uses: docker://x\n    # GOTOOLCHAIN: go1.0.0\n"
 			f[dockerFile] += "# ENV GOTOOLCHAIN=go1.0.0\n  # FROM scratch\n"
 		},
+		"backslash line before a line without a key word": func(t *testing.T, f files) {
+			f[makeFile] += "FOO := bar \\\nBAZ := 1\n"
+			f[dockerFile] += "RUN true \\\n  && true\n"
+		},
+		"Dockerfile comment that ends in a backslash before FROM": func(t *testing.T, f files) {
+			f.edit(t, dockerFile, "FROM golang:1.27.3", "# note \\\nFROM golang:1.27.3")
+		},
 		"lines without a key word": func(t *testing.T, f files) {
 			f[goModFile] += "\nrequire (\n\tgo.uber.org/x v1.0.0\n)\n"
 			f[makeFile] += "all:\n\tgo test ./...\n"
@@ -263,6 +270,28 @@ func TestDisagreement(t *testing.T) {
 				f.edit(t, makeFile, "# GOTOOLCHAIN := go1.0.0", "# note \\")
 			},
 			want: []string{`Makefile:1: comment line "# note \\" ends in a backslash`},
+		},
+		{
+			name: "Makefile assignment after a line that ends in a backslash",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, makeFile, "GOTOOLCHAIN := go1.27.3", "FOO := bar \\\nGOTOOLCHAIN := go1.27.3")
+			},
+			want: []string{`Makefile:3: line "GOTOOLCHAIN := go1.27.3" is joined to the line before it`},
+		},
+		{
+			name: "Makefile export after a line that ends in a backslash",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, makeFile, "export GOTOOLCHAIN", "FOO := bar \\\nexport GOTOOLCHAIN")
+			},
+			want: []string{`Makefile:4: line "export GOTOOLCHAIN" is joined to the line before it`},
+		},
+		{
+			name: "Dockerfile FROM after a line that ends in a backslash",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, dockerFile, "FROM golang:1.27.3", "RUN true \\\nFROM golang:1.27.3")
+			},
+			want: []string{`.devcontainer/Dockerfile:3: line "FROM golang:1.27.3@sha256:` + digestA +
+				`" is joined to the line before it`},
 		},
 		{
 			name: "indented comment line that ends in a backslash",

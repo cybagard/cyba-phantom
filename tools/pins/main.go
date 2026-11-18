@@ -16,6 +16,8 @@
 //   - Makefile: the text GOTOOLCHAIN. The allowed lines are
 //     "GOTOOLCHAIN := go<v>" and "export GOTOOLCHAIN". A comment line that
 //     ends in a backslash is a failure. Make joins the next line to it.
+//     A word line after a line that ends in a backslash is a failure.
+//     Make joins the two lines. The Dockerfile has the same rule.
 //   - .github/workflows/ci.yml: GOTOOLCHAIN, "image" in any case,
 //     "container", and "docker://". The allowed lines are the top-level key
 //     "  GOTOOLCHAIN: go<v>", "container:", and "image: <image>".
@@ -69,12 +71,18 @@ type allowed struct {
 
 // rule is the allow list of one file. A line that starts with the comment
 // text, after spaces and tabs, is a comment line. With joins set, a
-// comment line that ends in a backslash fails.
+// comment line that ends in a backslash fails. With joined set, a word line
+// after a line that ends in a backslash fails.
 type rule struct {
 	comment string
 	joins   bool
+	joined  bool
 	word    func(line string) bool
 	allowed []allowed
+}
+
+func (r rule) isComment(l string) bool {
+	return strings.HasPrefix(strings.TrimLeft(l, " \t"), r.comment)
 }
 
 // The indexes of the allowed lines in each rule, and of the groups that
@@ -118,7 +126,7 @@ var rules = map[string]rule{
 			{"go", regexp.MustCompile(`^go (` + versionRE + `)$`), false},
 			{"toolchain", regexp.MustCompile(`^toolchain go(` + versionRE + `)$`), true},
 		}},
-	makeFile: {comment: "#", joins: true,
+	makeFile: {comment: "#", joins: true, joined: true,
 		word: hasWord("GOTOOLCHAIN"),
 		allowed: []allowed{
 			{"GOTOOLCHAIN assignment", regexp.MustCompile(`^GOTOOLCHAIN := go(` + versionRE + `)$`), false},
@@ -134,7 +142,7 @@ var rules = map[string]rule{
 			{"container", regexp.MustCompile(`^ +container:$`), false},
 			{"image", regexp.MustCompile(`^ +image: (\S+)$`), false},
 		}},
-	dockerFile: {comment: "#",
+	dockerFile: {comment: "#", joined: true,
 		word: func(l string) bool {
 			return strings.EqualFold(firstField(l), "FROM") || strings.Contains(l, "GOTOOLCHAIN")
 		},
@@ -255,7 +263,7 @@ func audit(src source, r rule, fails *[]string) []spot {
 	other := false
 	for i, l := range src.lines {
 		n := i + 1
-		if strings.HasPrefix(strings.TrimLeft(l, " \t"), r.comment) {
+		if r.isComment(l) {
 			if r.joins && strings.HasSuffix(l, `\`) {
 				*fails = append(*fails, fmt.Sprintf("%s:%d: comment line %q ends in a backslash",
 					src.name, n, l))
@@ -264,6 +272,11 @@ func audit(src source, r rule, fails *[]string) []spot {
 		}
 		if !r.word(l) {
 			continue
+		}
+		if r.joined && i > 0 && !r.isComment(src.lines[i-1]) &&
+			strings.HasSuffix(src.lines[i-1], `\`) {
+			*fails = append(*fails, fmt.Sprintf("%s:%d: line %q is joined to the line before it",
+				src.name, n, l))
 		}
 		match := false
 		for j, a := range r.allowed {
