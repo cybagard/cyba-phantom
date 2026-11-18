@@ -79,7 +79,7 @@ func TestTS14_Checkpoint(t *testing.T) {
 	otherV, _ := ParseKey([]byte(otherText))
 	good := signed(t, s, 7)
 	c, err := ReadCheckpoint(bytes.NewReader(good), v)
-	if err != nil || c.Size != 7 || c.Origin != origin || c.Root != testRoot {
+	if err != nil || c.Size() != 7 || c.Origin() != origin || c.Root() != testRoot || !bytes.Equal(c.Note(), good) {
 		t.Fatalf("good note: %+v, %v", c, err)
 	}
 	sigLine := good[bytes.LastIndex(good, []byte("\n\n"))+2:]
@@ -144,7 +144,7 @@ func TestTS14_Checkpoint(t *testing.T) {
 }
 
 // T-S-14: a nil verifier means that the trusted key is missing. The result is
-// ErrKey and not a panic, also for a note past the size cap. Inclusion and
+// ErrKey and not a panic, also for a note past the size cap. ReadCheckpoint and
 // Consistency call ParseCheckpoint, so they give the same result. The test
 // covers only a nil interface.
 func TestTS14_NilVerifier(t *testing.T) {
@@ -156,9 +156,37 @@ func TestTS14_NilVerifier(t *testing.T) {
 	wantErr(t, "ParseCheckpoint, note over the cap", err, ErrKey)
 	_, err = ReadCheckpoint(bytes.NewReader(good), nil)
 	wantErr(t, "ReadCheckpoint", err, ErrKey)
-	_, err = Inclusion(nil, good, Event{}, InclusionProof{})
-	wantErr(t, "Inclusion", err, ErrKey)
 	wantErr(t, "Consistency", Consistency(nil, good, good, nil), ErrKey)
+}
+
+// T-S-14: a value from ReadCheckpoint holds the origin, size, root and note
+// bytes of the note. A change of the returned bytes does not change the value.
+func TestTS14_CheckpointValue(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	good := signed(t, s, 7)
+	c, err := ReadCheckpoint(bytes.NewReader(good), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParseCheckpoint(good, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Origin() != p.Origin || c.Size() != p.Size || c.Root() != p.Root || !bytes.Equal(c.Note(), good) {
+		t.Errorf("value %+v differs from the parsed note %+v", c, p)
+	}
+	got := c.Note()
+	got[0] ^= 1
+	if !bytes.Equal(c.Note(), good) {
+		t.Errorf("note bytes changed through the returned slice")
+	}
+}
+
+// T-S-14: a zero value is not a checkpoint. Inclusion refuses it.
+func TestTS14_InclusionZeroCheckpoint(t *testing.T) {
+	_, err := Inclusion(Checkpoint{}, Event{}, InclusionProof{})
+	wantErr(t, "Inclusion, zero value", err, ErrCheckpoint)
 }
 
 // T-S-14, input cases: the event bytes.
