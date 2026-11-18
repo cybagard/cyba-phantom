@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +21,30 @@ func consProof(t testing.TB, l *tlog.Log, oldSize, newSize int64) ConsistencyPro
 		t.Fatal(err)
 	}
 	return ConsistencyProof{OldSize: oldSize, NewSize: newSize, Hashes: hs}
+}
+
+// checkpointOf reads a note with the key v, as the command does.
+func checkpointOf(t testing.TB, v note.Verifier, b []byte) Checkpoint {
+	t.Helper()
+	c, err := ReadCheckpoint(bytes.NewReader(b), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// consistencyOf reads both notes with the key v, then calls Consistency. A note
+// that does not read gives its error.
+func consistencyOf(v note.Verifier, prior, latest []byte, proofs []ConsistencyProof) error {
+	p, err := ReadCheckpoint(bytes.NewReader(prior), v)
+	if err != nil {
+		return err
+	}
+	l, err := ReadCheckpoint(bytes.NewReader(latest), v)
+	if err != nil {
+		return err
+	}
+	return Consistency(p, l, proofs)
 }
 
 // emptyCheckpoint signs the checkpoint of a tree with no leaf.
@@ -64,22 +89,22 @@ func TestTS14_Consistency(t *testing.T) {
 		"latest is empty, other root": {cp(10), emptyCheckpoint(t, s, modtlog.Hash{9}), nil, ErrFork},
 		"both empty, bad roots":       {emptyCheckpoint(t, s, modtlog.Hash{9}), emptyCheckpoint(t, s, modtlog.Hash{9}), nil, ErrFork},
 	} {
-		wantErr(t, name, Consistency(v, tc.prior, tc.latest, tc.proofs), tc.want)
+		wantErr(t, name, consistencyOf(v, tc.prior, tc.latest, tc.proofs), tc.want)
 	}
 	// A proof with a hash that is changed.
 	for _, i := range []int{0, 1} {
 		p := consProof(t, l, 5, 10)
 		p.Hashes = slices.Clone(p.Hashes)
 		p.Hashes[i][0] ^= 1
-		wantErr(t, "changed hash", Consistency(v, cp(5), cp(10), []ConsistencyProof{p}), ErrFork)
-		wantErr(t, "changed hash, reverse", Consistency(v, cp(10), cp(5), []ConsistencyProof{p}), ErrFork)
+		wantErr(t, "changed hash", consistencyOf(v, cp(5), cp(10), []ConsistencyProof{p}), ErrFork)
+		wantErr(t, "changed hash, reverse", consistencyOf(v, cp(10), cp(5), []ConsistencyProof{p}), ErrFork)
 	}
 	short := consProof(t, l, 5, 10)
 	short.Hashes = short.Hashes[1:]
-	wantErr(t, "hash missing", Consistency(v, cp(5), cp(10), []ConsistencyProof{short}), ErrFork)
+	wantErr(t, "hash missing", consistencyOf(v, cp(5), cp(10), []ConsistencyProof{short}), ErrFork)
 	noHash := consProof(t, l, 5, 10)
 	noHash.Hashes = nil
-	wantErr(t, "no hash", Consistency(v, cp(5), cp(10), []ConsistencyProof{noHash}), ErrFork)
+	wantErr(t, "no hash", consistencyOf(v, cp(5), cp(10), []ConsistencyProof{noHash}), ErrFork)
 }
 
 // signedAt signs a checkpoint of the given size with a root that the caller gives.
@@ -102,17 +127,46 @@ func TestTS14_ConsistencyFork(t *testing.T) {
 	for _, tc := range []struct{ old, new int64 }{{1, 20}, {5, 20}, {5, 10}, {16, 20}} {
 		prior := checkpointAt(t, a, s, tc.old)
 		latest := checkpointAt(t, b, s, tc.new)
-		wantErr(t, "proof of the second log", Consistency(v, prior, latest, []ConsistencyProof{consProof(t, b, tc.old, tc.new)}), ErrFork)
-		wantErr(t, "proof of the first log", Consistency(v, prior, latest, []ConsistencyProof{consProof(t, a, tc.old, tc.new)}), ErrFork)
+		wantErr(t, "proof of the second log", consistencyOf(v, prior, latest, []ConsistencyProof{consProof(t, b, tc.old, tc.new)}), ErrFork)
+		wantErr(t, "proof of the first log", consistencyOf(v, prior, latest, []ConsistencyProof{consProof(t, a, tc.old, tc.new)}), ErrFork)
 		// The reverse order, with the smaller note from the second log.
-		wantErr(t, "reverse", Consistency(v, latest, prior, []ConsistencyProof{consProof(t, b, tc.old, tc.new)}), ErrFork)
+		wantErr(t, "reverse", consistencyOf(v, latest, prior, []ConsistencyProof{consProof(t, b, tc.old, tc.new)}), ErrFork)
 	}
 	// The same size and another leaf gives another root.
-	wantErr(t, "same size", Consistency(v, checkpointAt(t, a, s, 20), checkpointAt(t, b, s, 20), nil), ErrFork)
+	wantErr(t, "same size", consistencyOf(v, checkpointAt(t, a, s, 20), checkpointAt(t, b, s, 20), nil), ErrFork)
 	// One log gives no fault at the same sizes.
-	if err := Consistency(v, checkpointAt(t, a, s, 5), checkpointAt(t, a, s, 20), []ConsistencyProof{consProof(t, a, 5, 20)}); err != nil {
+	if err := consistencyOf(v, checkpointAt(t, a, s, 5), checkpointAt(t, a, s, 20), []ConsistencyProof{consProof(t, a, 5, 20)}); err != nil {
 		t.Errorf("one log: %v", err)
 	}
+}
+
+// T-S-14: two checkpoints with different origins are not one log, also when the
+// roots and the sizes are equal. A zero value is not consistent with itself or
+// with a real checkpoint. A size above the cap gives ErrRange.
+func TestTS14_ConsistencyOrigin(t *testing.T) {
+	s, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	s2, text2 := newKey(t, origin+"-b")
+	v2, _ := ParseKey([]byte(text2))
+	l, _ := realLog(t, 10)
+	a, b := checkpointOf(t, v, checkpointAt(t, l, s, 10)), checkpointOf(t, v2, checkpointAt(t, l, s2, 10))
+	proofs := []ConsistencyProof{consProof(t, l, 5, 10)}
+	a5, b5 := checkpointOf(t, v, checkpointAt(t, l, s, 5)), checkpointOf(t, v2, checkpointAt(t, l, s2, 5))
+	wantErr(t, "same size and root", Consistency(a, b, nil), ErrFork)
+	wantErr(t, "same size and root, reverse", Consistency(b, a, nil), ErrFork)
+	wantErr(t, "with a proof", Consistency(a5, b, proofs), ErrFork)
+	wantErr(t, "with a proof, reverse", Consistency(b, a5, proofs), ErrFork)
+	wantErr(t, "same origin", Consistency(a5, a, proofs), nil)
+	wantErr(t, "other origin, same origin", Consistency(b5, b, proofs), nil)
+
+	var zero Checkpoint
+	wantErr(t, "zero and zero", Consistency(zero, zero, nil), ErrFork)
+	wantErr(t, "zero and real", Consistency(zero, a, nil), ErrFork)
+	wantErr(t, "real and zero", Consistency(a, zero, nil), ErrFork)
+	big := a
+	big.size = maxSize + 1
+	wantErr(t, "size above the cap", Consistency(a, big, nil), ErrRange)
+	wantErr(t, "prior size above the cap", Consistency(big, a, nil), ErrRange)
 }
 
 // T-S-14: the errors have fixed text that holds no input bytes. The text of

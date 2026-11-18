@@ -154,7 +154,6 @@ func verifyAll(in inputs) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	latest := c.Note()
 	var out bytes.Buffer
 	line := func(name, value string) { fmt.Fprintf(&out, "%s: %s\n", name, value) }
 	b64 := func(h [32]byte) string { return base64.StdEncoding.EncodeToString(h[:]) }
@@ -164,13 +163,11 @@ func verifyAll(in inputs) ([]byte, string, error) {
 
 	// The prior note is read before the proof files. The list of proofs is read
 	// once. It serves the prior check and the state check.
-	var prior []byte
+	var prior verify.Checkpoint
 	if in.prior != "" {
-		p, err := loadNote(in.prior, v)
-		if err != nil {
+		if prior, err = loadNote(in.prior, v); err != nil {
 			return nil, "", err
 		}
-		prior = p.Note()
 	}
 	var proofs []verify.ConsistencyProof
 	seen := map[sizePair]bool{}
@@ -187,7 +184,7 @@ func verifyAll(in inputs) ([]byte, string, error) {
 		proofs = append(proofs, cons)
 	}
 	if in.prior != "" {
-		if err := verify.Consistency(v, prior, latest, proofs); err != nil {
+		if err := verify.Consistency(prior, c, proofs); err != nil {
 			return nil, "", err
 		}
 		line("prior consistency", "verified")
@@ -199,7 +196,7 @@ func verifyAll(in inputs) ([]byte, string, error) {
 			return nil, "", err
 		}
 	}
-	change, err := updateState(stateDir, v, c.Size(), latest, proofs)
+	change, err := updateState(stateDir, v, c, proofs)
 	if err != nil && !errors.Is(err, verify.ErrStateSync) {
 		return nil, "", err
 	}
@@ -249,21 +246,14 @@ var (
 // command does not hold the lock while it reads the event and proof files. If
 // the directory sync fails after the write, it returns the change together with
 // verify.ErrStateSync.
-func updateState(dir string, v note.Verifier, size uint64, latest []byte, proofs []verify.ConsistencyProof) (verify.StateChange, error) {
+func updateState(dir string, v note.Verifier, latest verify.Checkpoint, proofs []verify.ConsistencyProof) (verify.StateChange, error) {
 	st, err := verify.LoadState(dir, v, verify.StateOptions{LockWait: stateLockWait, DirSync: stateDirSync})
 	if err != nil {
 		return 0, err
 	}
 	defer st.Close()
-	if prev := st.Bytes(); prev != nil {
-		if err := verify.Consistency(v, prev, latest, proofs); err != nil {
-			return 0, err
-		}
-	}
-	if size == 0 {
-		// A note of size 0 needs no proof, but its root must be the empty root.
-		// With no state and no --prior, no check above has looked at the root.
-		if err := verify.Consistency(v, latest, latest, nil); err != nil {
+	if prev, ok := st.Checkpoint(); ok {
+		if err := verify.Consistency(prev, latest, proofs); err != nil {
 			return 0, err
 		}
 	}
