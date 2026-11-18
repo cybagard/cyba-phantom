@@ -105,8 +105,8 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 // clock_jump row in the same transaction. The rowid floor of the key is the
 // largest of four values. One is the floor that the writer wrote last. One is
 // the next rowid of event and of session in memory. One is the floor of st.
-// One is the largest rowid plus 1. A largest rowid of math.MaxInt64 has no next rowid. The write then
-// returns a fixed error and changes nothing.
+// One is the largest rowid plus 1. A largest rowid of math.MaxInt64 has no next
+// rowid. The write then returns a fixed error and changes nothing.
 //
 // The write sets synchronous=FULL on the connection before BEGIN, and NORMAL
 // again after the transaction has ended, as storeRow does. A failure to set
