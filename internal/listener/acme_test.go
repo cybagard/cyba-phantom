@@ -903,8 +903,8 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 // tokenKeyLayoutHint ends the message of a test that counts the wrong number
 // of token keys at the wrapper. Three certmagic functions build the key of
 // the token lookup.
-const tokenKeyLayoutHint = " Possible cause: certmagic changed the key of its token" +
-	" lookup in config.go. That key comes from challengeTokensKey in" +
+const tokenKeyLayoutHint = " Possible cause: certmagic changed the key that its" +
+	" token lookup in config.go uses. That key comes from challengeTokensKey in" +
 	" solvers.go, storageKeyACMECAPrefix in account.go and IssuerKey in" +
 	" acmeissuer.go. noTokenStorage must match that key layout."
 
