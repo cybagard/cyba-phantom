@@ -753,7 +753,10 @@ func TestTU18_SigtermHelper(t *testing.T) {
 	}
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
-	p := tempState(t, cfg)
+	p := paramsOf(cfg)
+	// The child ends with os.Exit. A state directory in /dev/shm would stay
+	// there, so the state is below TMPDIR, which the parent removes.
+	p.Root = diskRoot(t)
 	savedKey(t, p)
 	vpath := filepath.Join(p.Root, tlog.VKeyName)
 	if err := os.Remove(vpath); err != nil {

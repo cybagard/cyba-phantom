@@ -193,15 +193,27 @@ func serveCfg(t *testing.T, https, plain, ca string, extra ...string) *config.Co
 	return cfg
 }
 
+// diskRoot makes a state directory below the temporary directory of the test.
+// The test removes it at the end, also when it is below TMPDIR of a parent.
+func diskRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // tempState returns the start values of cfg with a temporary state directory.
-// The directory is on a memory filesystem. The stop of serve syncs the log and
+// On Linux, the directory is on a memory filesystem. On other systems, it is on
+// the disk (stateRoot). The stop of serve syncs the log and
 // the database to disk. On a busy host, one sync can take seconds. The close
 // bound of ADR-041 counts wall time. A disk can thus fail the stop of a test
 // that is not about the disk. The packages of the store and the log test the
 // sync order.
 func tempState(t *testing.T, cfg *config.Config) startParams {
 	p := paramsOf(cfg)
-	p.Root = memoryRoot(t)
+	p.Root = stateRoot(t)
 	return p
 }
 
