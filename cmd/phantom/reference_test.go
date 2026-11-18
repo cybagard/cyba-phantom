@@ -215,7 +215,8 @@ func (r *refRun) needSecondAddr(t *testing.T) {
 }
 
 // outSlotTexts gets the 4 slots out of the page for the client address ip. page
-// is the response for "/". The text of each slot is by the name of the slot.
+// is the response for "/". The map key is the slot name, and the value is the
+// text of the slot.
 func (r *refRun) outSlotTexts(t *testing.T, ip net.IP, page baitResp) map[string]string {
 	t.Helper()
 	get := func(path string, status int, ctype string) baitResp {
@@ -301,7 +302,7 @@ func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 		toks, page := r.allTokens(t, net.ParseIP(ip))
 		checkTags(t, page.body)
 		for id, text := range toks {
-			if text == "" { // pageTokensOf has reported it
+			if text == "" { // tokensOf has reported it
 				continue
 			}
 			tok, ok := token.Parse(text)
@@ -391,8 +392,8 @@ func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 			t.Fatalf("trap %s: text %q is not a token", tr.ID, toks[tr.ID])
 		}
 		route := refRouteOf(t, tr)
-		// A client address gets at most 10 callback events in a minute
-		// (SEC-37). So the traps use 2 addresses.
+		// The engine caps the callback events of one client address at 10
+		// in a minute. So the traps use 2 addresses.
 		ip := []net.IP{net.IPv4(127, 0, 0, 1), secondAddr}[i%2]
 		refCallbackRequest(t, r, ip, route, toks[tr.ID], cookie)
 		var got, trap, vhost, detail string
