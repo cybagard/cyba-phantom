@@ -51,6 +51,9 @@ type refTrap struct {
 type refRun struct {
 	*baitSensor
 	traps []refTrap
+	// clockHeld is true when the window of the manifest holds the loader
+	// clock off the real clock. The tokens then look stale or future.
+	clockHeld bool
 }
 
 // refTrust is a trust set with a test key of class reference and the key id of
@@ -61,7 +64,8 @@ func refTrust() bundle.TrustSet {
 
 // startReference packs the source tree in memory with the test seed. It signs
 // the archive with the test key and starts a sensor on it. The manifest dates
-// are fixed. So the loader clock starts one hour after `created` and runs on.
+// are fixed. So the loader clock is the real clock, held between `created`
+// + 1 h and `expires` - 1 h.
 func startReference(t *testing.T) *refRun {
 	t.Helper()
 	var files []tarFile
@@ -75,7 +79,7 @@ func startReference(t *testing.T) *refRun {
 		return err
 	}))
 	files = append(files, tarFile{"secrets/token.seed", refSeed})
-	var man struct{ Created time.Time }
+	var man struct{ Created, Expires time.Time }
 	var traps []refTrap
 	for _, f := range files {
 		switch f.name {
@@ -85,12 +89,20 @@ func startReference(t *testing.T) *refRun {
 			mustOK(t, json.Unmarshal(f.data, &traps))
 		}
 	}
-	begin := time.Now()
 	oldNew := newLoader
 	t.Cleanup(func() { newLoader = oldNew })
 	newLoader = func(s *os.Root, path string, ts bundle.TrustSet, k hpke.PrivateKey) *bundle.Loader {
 		l := oldNew(s, path, ts, k)
-		l.SetClock(func() time.Time { return man.Created.Add(time.Hour + time.Since(begin)) }, time.Sleep)
+		l.SetClock(func() time.Time {
+			now, from, to := time.Now(), man.Created.Add(time.Hour), man.Expires.Add(-time.Hour)
+			if now.Before(from) {
+				return from
+			}
+			if now.After(to) {
+				return to
+			}
+			return now
+		}, time.Sleep)
 		return l
 	}
 	arch := archiveOf(t, files...)
@@ -104,7 +116,8 @@ func startReference(t *testing.T) *refRun {
 	}
 	s := startBait(t, baitOpt{name: refHost, trust: refTrust, seed: seed})
 	s.arch = arch
-	return &refRun{s, traps}
+	now := time.Now()
+	return &refRun{s, traps, now.Before(man.Created.Add(time.Hour)) || now.After(man.Expires.Add(-time.Hour))}
 }
 
 // slotTexts returns the text of each in-page slot of the page in body, by the
@@ -309,6 +322,12 @@ func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 			[]any{token.ID(parsed)}, &got, &trap, &vhost, &detail)
 		var d map[string]any
 		mustOK(t, json.Unmarshal([]byte(detail), &d))
+		// With the real clock in the window, the token is not stale or future.
+		for _, k := range []string{"stale", "future"} {
+			if _, ok := d[k]; ok && !r.clockHeld {
+				t.Errorf("%s route: detail %s has %s", surface, detail, k)
+			}
+		}
 		if got != surface || trap != tr.ID || vhost != refHost || d["reference_seed"] != true {
 			t.Errorf("%s route: row surface %q, trap %q, vhost %q, detail %s; want %q, %q, %q and reference_seed true",
 				surface, got, trap, vhost, detail, surface, tr.ID, refHost)
