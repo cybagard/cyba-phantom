@@ -92,6 +92,10 @@ type sim struct {
 	rec   *recorder
 	jumps []JumpResult
 	res   Result
+	// hold stops the simulated writer: set does not call Committed.
+	hold bool
+	// pub is the result of the last Committed that set called.
+	pub bool
 }
 
 func newSim(t *testing.T, wall int64, boot time.Duration, id string,
@@ -111,7 +115,8 @@ func startSim(t *testing.T, f *fake, st *State) *sim {
 	return m
 }
 
-// set moves the boot clock by d, sets the wall clock, and runs a Check.
+// set moves the boot clock by d, sets the wall clock, and runs a Check. Then
+// it calls Committed when the result has Write, as the writer does.
 func (m *sim) set(d time.Duration, wall int64) Result {
 	m.t.Helper()
 	m.f.boot.Add(int64(d))
@@ -119,6 +124,9 @@ func (m *sim) set(d time.Duration, wall int64) Result {
 	r, err := m.c.Check()
 	if err != nil {
 		m.t.Fatal(err)
+	}
+	if r.Write && !m.hold {
+		m.pub = m.c.Committed()
 	}
 	if r.Jump != nil {
 		m.jumps = append(m.jumps, *r.Jump)
@@ -495,6 +503,9 @@ func TestTU30_SNeverMovesBackProperty(t *testing.T) {
 			f.wall.Store(w)
 			before, _ := c.Now()
 			res, err := c.Check()
+			if res.Write {
+				c.Committed()
+			}
 			after, _ := c.Now()
 			if err != nil || res.State.S != after || after < before ||
 				before < last {
