@@ -98,9 +98,9 @@ func (r *rig) batch(w *Writer, sessions ...string) {
 	}
 }
 
-// T-U-30: after a delete of every event and session row, new rows get rowids
-// above every clock_jump range and above the floor. This holds after a restart
-// that reads the key. A stored rowid above the floor wins.
+// T-U-30: delete every event and session row. New rows then get rowids above
+// every clock_jump range and above the floor. This holds after a restart that
+// reads the key. A stored rowid above the floor wins.
 func TestTU30NewRowsGetRowidsAboveTheRangesAndTheFloor(t *testing.T) {
 	r, f := rangeRig(t)
 	stop := r.start()
