@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The shop guide</title>
+<style>.hidden{display:none}</style>
+</head>
+<body>
+<header><nav><a href="/">The home page</a></nav></header>
+<main>
+<h1>The shop guide</h1>
+<img alt="{{index .Trap "b-alt"}}">
+<p>A short guide of tea.</p>
+<p>Each guide is short.</p>
+<p class="hidden">{{index .Trap "b-hidden"}}</p>
+{{comment (index .Trap "b-comment")}}
+<h2>Our team</h2>
+<p aria-label="{{index .Trap "b-aria"}}">Our team is open each day.</p>
+</main>
+<footer><p>phantom-reference-trap</p></footer>
+</body>
+</html>
