@@ -542,6 +542,44 @@ func TestTS14_LeftoverTemporaryFiles(t *testing.T) {
 	}
 }
 
+// T-S-14: the temporary name of a write is a leftover name. The next
+// LoadState removes a file with that name.
+func TestTS14_WriteNameIsLeftoverName(t *testing.T) {
+	_, text := newKey(t, origin)
+	v, _ := ParseKey([]byte(text))
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(dir, v, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var made []string
+	for i := 0; i < 8; i++ {
+		tmp, err := st.tmpName()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.isLeftover(tmp) {
+			t.Errorf("%q: not a leftover name", tmp)
+		}
+		made = append(made, leftover(t, dir, tmp))
+	}
+	st.Close()
+
+	st, err = LoadState(dir, v, StateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, m := range made {
+		if _, err := os.Lstat(filepath.Join(dir, m)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: not removed (%v)", m, err)
+		}
+	}
+}
+
 // T-S-14: the default directory.
 func TestTS14_DefaultStateDir(t *testing.T) {
 	for name, tc := range map[string]struct{ xdg, home, want string }{

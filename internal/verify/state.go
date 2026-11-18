@@ -174,6 +174,15 @@ func (s *State) isLeftover(name string) bool {
 	return ok && len(digits) == tmpDigits && strings.Trim(digits, "0123456789abcdef") == ""
 }
 
+// tmpName makes the name of the temporary file of a write.
+func (s *State) tmpName() (string, error) {
+	var r [tmpDigits / 2]byte
+	if _, err := rand.Read(r[:]); err != nil {
+		return "", ErrState
+	}
+	return s.name + tmpInfix + hex.EncodeToString(r[:]), nil
+}
+
 // removeLeftovers removes the leftover temporary files of the key. It does not
 // follow a symlink, and it has no error: see LoadState.
 func (s *State) removeLeftovers() {
@@ -284,11 +293,10 @@ func (s *State) Update(latest Checkpoint) (StateChange, error) {
 
 // write is the temporary file, the second read, and the rename.
 func (s *State) write(latest []byte) (err error) {
-	var r [tmpDigits / 2]byte
-	if _, err := rand.Read(r[:]); err != nil {
-		return ErrState
+	tmp, err := s.tmpName()
+	if err != nil {
+		return err
 	}
-	tmp := s.name + tmpInfix + hex.EncodeToString(r[:])
 	f, err := s.root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return ErrState
