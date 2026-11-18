@@ -40,8 +40,10 @@
 // The word test reads the text of each line. It does not see a key word
 // that is built from parts or written with an escape. Of the line joins,
 // it finds only the joins that the rules above name. It does not read
-// included files, shell steps, or other files. Human review of these files
-// is the control for such a change.
+// included files, shell steps, or other files. In the Dockerfile, it does
+// not check COPY --from or a # syntax line. A change can also turn off an
+// allowed line, for example with ifeq. Human review of each changed file is
+// the control for such a change.
 package main
 
 import (
