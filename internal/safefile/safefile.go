@@ -48,18 +48,17 @@ type FileID = seam.FileID
 
 // The refusals. Each one is the Reason field of an *Error.
 var (
-	ErrRule        = errors.New("safefile: rule is not valid")
-	ErrName        = errors.New("safefile: name or path is not valid")
-	ErrType        = errors.New("safefile: file has the wrong type")
-	ErrSymlink     = errors.New("safefile: file is a symbolic link")
-	ErrOwner       = errors.New("safefile: file has the wrong owner")
-	ErrMode        = errors.New("safefile: file has the wrong mode")
-	ErrLinks       = errors.New("safefile: file has more than one link")
-	ErrSize        = errors.New("safefile: file is too large")
-	ErrChanged     = errors.New("safefile: file changed during the check")
-	ErrExamine     = errors.New("safefile: file cannot be examined")
-	ErrOpen        = errors.New("safefile: file cannot be opened")
-	ErrUnsupported = errors.New("safefile: system is not supported")
+	ErrRule    = errors.New("safefile: rule is not valid")
+	ErrName    = errors.New("safefile: name or path is not valid")
+	ErrType    = errors.New("safefile: file has the wrong type")
+	ErrSymlink = errors.New("safefile: file is a symbolic link")
+	ErrOwner   = errors.New("safefile: file has the wrong owner")
+	ErrMode    = errors.New("safefile: file has the wrong mode")
+	ErrLinks   = errors.New("safefile: file has more than one link")
+	ErrSize    = errors.New("safefile: file is too large")
+	ErrChanged = errors.New("safefile: file changed during the check")
+	ErrExamine = errors.New("safefile: file cannot be examined")
+	ErrOpen    = errors.New("safefile: file cannot be opened")
 )
 
 // Error is a refusal. Its text is the fixed text of the refusal. It holds

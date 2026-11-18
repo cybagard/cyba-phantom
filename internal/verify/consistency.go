@@ -3,7 +3,6 @@ package verify
 import (
 	"errors"
 
-	"golang.org/x/mod/sumdb/note"
 	modtlog "golang.org/x/mod/sumdb/tlog"
 )
 
@@ -16,36 +15,44 @@ var (
 	ErrNoProof = errors.New("verify: no consistency proof has the needed sizes")
 )
 
+// emptyRoot returns the root of the empty tree.
+func emptyRoot() modtlog.Hash {
+	h, _ := modtlog.TreeHash(0, nil) // reads nothing, so it has no error
+	return h
+}
+
 // Consistency checks that two checkpoints belong to one log (SEC-18, FR-16).
-// The key v is the trust anchor for both notes. S is the size of the prior
-// note and N is the size of the latest note.
+// The caller must read both values with ReadCheckpoint and one key. The
+// function does not check that one key read both values: it compares only
+// the origins. The function parses no note. S is the size of the prior
+// checkpoint and N is the size of the latest checkpoint.
 //
+// Two checkpoints with different origins are not one log. That gives ErrFork.
 // If N is larger than S, a proof from S to N must verify. If N is smaller than
 // S, a proof from N to S must verify. If the sizes are equal, the roots must be
 // equal. A size of 0 needs no proof, but its root must be the root of the empty
 // tree. The sizes do not have to be adjacent. The function does not read or
 // write state.
 //
-// A proof that fails, roots that differ at one size, or a bad empty root give
-// ErrFork. A list without the needed proof gives ErrNoProof.
-func Consistency(v note.Verifier, prior, latest []byte, proofs []ConsistencyProof) error {
-	p, err := ParseCheckpoint(prior, v)
+// The zero value is not from ReadCheckpoint. It has size 0 and a root that is
+// not the empty root, so it gives ErrFork.
+//
+// A proof that fails, roots that differ at one size, different origins, or a
+// bad empty root give ErrFork. A list without the needed proof gives
+// ErrNoProof.
+func Consistency(prior, latest Checkpoint, proofs []ConsistencyProof) error {
+	if prior.origin != latest.origin {
+		return ErrFork
+	}
+	priorSize, err := toSize(prior.size)
 	if err != nil {
 		return err
 	}
-	l, err := ParseCheckpoint(latest, v)
+	latestSize, err := toSize(latest.size)
 	if err != nil {
 		return err
 	}
-	priorSize, err := toSize(p.Size)
-	if err != nil {
-		return err
-	}
-	latestSize, err := toSize(l.Size)
-	if err != nil {
-		return err
-	}
-	small, large := tree{priorSize, p.Root}, tree{latestSize, l.Root}
+	small, large := tree{priorSize, prior.root}, tree{latestSize, latest.root}
 	if small.size > large.size {
 		small, large = large, small
 	}
@@ -70,7 +77,7 @@ type tree struct {
 // are used only if both sizes are above 0 and different.
 func consistent(small, large tree, hashes []modtlog.Hash) error {
 	if small.size == 0 {
-		empty, _ := modtlog.TreeHash(0, nil) // reads nothing, so it has no error
+		empty := emptyRoot()
 		if small.root != empty || (large.size == 0 && large.root != empty) {
 			return ErrFork
 		}
