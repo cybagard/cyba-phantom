@@ -39,18 +39,18 @@ const (
 // calls sensortime.Start with them, and writes the key of the result before it
 // returns. A start jump has no clock_jump row: only the key holds it.
 //
-// It checks the state directory and the stop marker first, as the start check
-// of Run does. With a marker it returns that error, and it reads and writes
-// nothing.
+// It refuses a writer with no state directory handle. Then it checks the stop
+// marker, as the start check of Run does. With a marker it returns that error,
+// and it reads and writes nothing.
 //
 // A stored value that does not decode gives an *Error with a fixed rule. A
 // largest event or session rowid with no next rowid does the same. So does a
 // largest clock_jump id with no next id, and a stored jump id with no next id.
 // A read error is an *Error with the rule of a failed read. A Start error is
 // returned as it is. A failed write is an *Error.
-// In each case but one, the database keeps its old rows. The writer has no
+// In each case except one, the database keeps its old rows. The writer has no
 // clock and does not stop. The one case is a COMMIT that worked and a NORMAL
-// pragma that then failed. The key is stored (it was written with FULL), and
+// pragma that then failed. The write used FULL, so the database keeps the key.
 // StartClock returns the error. The writer has no clock, and a later start
 // reads that key. Without a StartClock call, the writer has no clock and writes
 // no key.
@@ -110,10 +110,10 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 // The write sets synchronous=FULL on the connection before BEGIN, and NORMAL
 // again after the transaction has ended, as storeRow does. A failure to set
 // either value is a database error. Committed runs only when the COMMIT worked.
-// A failed write changes nothing and does not call Committed. Suppose the
-// COMMIT worked and the NORMAL pragma failed. Then the key is stored and
-// Committed has run. The write returns the error. The caller decides on a
-// stop.
+// A write that fails before or at the COMMIT changes nothing and does not call
+// Committed. Suppose the COMMIT worked and the NORMAL pragma failed. Then the
+// key is stored and Committed has run. The write returns the error. The caller
+// decides on a stop.
 func (w *Writer) writeKey(st sensortime.State, jump *sensortime.JumpResult) (err error) {
 	ctx := context.Background()
 	conn, err := w.db.Conn(ctx)
