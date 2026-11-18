@@ -13,14 +13,15 @@ import (
 // package from forbidden (SEC-18, T-S-14). The forbidden packages cover the
 // network, child processes, plugins, cgo and x/sys. The verifier supports only
 // Linux and macOS, so the import check covers only linux and darwin. It lists
-// the dependencies without test files for each GOOS, GOARCH and cgo setting.
-// It also checks the GOOS of each output line.
+// the dependencies without test files for amd64 and arm64, with cgo on and
+// off. It also checks the GOOS of each output line.
 //
 // The build check completes the import check. It takes each GOOS of
-// "go tool dist list" at run time, except linux and darwin, with one GOARCH.
-// Android and ios are in the list. For each GOOS, a build of the package must
-// fail. Its output must name the verify guard or the safefile guard. So no
-// other GOOS builds the verifier code without an import check.
+// "go tool dist list" at run time, except linux and darwin. Android and ios
+// are in the list. The check uses the first GOARCH of each GOOS, with cgo
+// off. For each GOOS, a build of the package must fail. Its output must name
+// the verify guard or the safefile guard. The check does not build other
+// GOARCH values or cgo builds of these GOOS.
 //
 // The safefile package must have exactly one of safefile_unix.go and
 // safefile_other.go for each GOOS. A build with safefile_other.go must name
