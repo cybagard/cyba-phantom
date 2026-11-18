@@ -168,7 +168,7 @@ func pollRow(t *testing.T, db *sql.DB, query string, args []any, dest ...any) ti
 // state is on a memory filesystem. So the 250 ms bound checks the sensor path
 // and not the disk syncs.
 func TestTI04_CallbackRowsEndToEnd(t *testing.T) {
-	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
+	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
 	requireTmpfs(t, s.p.Root)
 	db := readStore(t, s)
 	render := fetch(t, s.https, decoyName, "/slots", "")
@@ -250,7 +250,7 @@ func cbCount(t *testing.T, db *sql.DB, id string) (rows, count int64) {
 // each token can refuse. The state is on a memory filesystem. So the 250 ms
 // bound checks the sensor path and not the disk syncs.
 func TestTI04_SameTokenOnceAndRepeatCapped(t *testing.T) {
-	s := startBait(t, baitOpt{bundle: true, files: callbackFiles(), memory: true})
+	s := startBait(t, baitOpt{bundle: true, files: callbackFiles()})
 	requireTmpfs(t, s.p.Root)
 	db := readStore(t, s)
 	// Each render has new tokens. Each render makes one mint row.

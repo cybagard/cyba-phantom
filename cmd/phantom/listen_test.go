@@ -194,12 +194,14 @@ func serveCfg(t *testing.T, https, plain, ca string, extra ...string) *config.Co
 }
 
 // tempState returns the start values of cfg with a temporary state directory.
+// The directory is on a memory filesystem. The stop of serve syncs the log and
+// the database to disk. On a busy host, one sync can take seconds. The close
+// bound of ADR-041 counts wall time. A disk can thus fail the stop of a test
+// that is not about the disk. The packages of the store and the log test the
+// sync order.
 func tempState(t *testing.T, cfg *config.Config) startParams {
 	p := paramsOf(cfg)
-	p.Root = t.TempDir()
-	if err := os.Chmod(p.Root, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	p.Root = memoryRoot(t)
 	return p
 }
 

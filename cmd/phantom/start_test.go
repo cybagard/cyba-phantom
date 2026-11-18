@@ -1171,7 +1171,7 @@ func TestTI16_DecoyServesWhilePaused(t *testing.T) {
 	if size := uint64(st.Bsize) * uint64(st.Blocks); size > 256<<20 {
 		t.Skipf("/dev/shm is a file system of %d MiB: the limit is 256 MiB", size>>20)
 	}
-	s := startBait(t, baitOpt{bundle: true, memory: true})
+	s := startBait(t, baitOpt{bundle: true})
 	w := kept.Load()
 	if w == nil {
 		t.Fatal("start made no writer")
