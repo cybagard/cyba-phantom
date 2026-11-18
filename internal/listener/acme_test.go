@@ -896,9 +896,17 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 		t.Errorf("log output: %q %q", logs.String(), std.String())
 	}
 	if n := rec.count(tokenKeyOf(a, "decoy.test")); n != total {
-		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake", n, total)
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake.%s", n, total, tokenKeyLayoutHint)
 	}
 }
+
+// tokenKeyLayoutHint ends the message of a test that counts the wrong number
+// of token keys at the wrapper. Three certmagic functions build the key of
+// the token lookup.
+const tokenKeyLayoutHint = " Possible cause: certmagic changed the key that its" +
+	" token lookup in config.go uses. That key comes from challengeTokensKey in" +
+	" solvers.go, storageKeyACMECAPrefix in account.go and IssuerKey in" +
+	" acmeissuer.go. noTokenStorage must match that key layout."
 
 func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
 	a := newTestACME(t, nil)
@@ -912,6 +920,7 @@ func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
 		path.Join("acme", issuer, "challenge_tokens"), // the prefix, as List gets it
 		"acme/" + issuer + "/challenge_tokens/",
 		"acme/" + issuer + "/challenge_tokens/a/b.json",
+		"acme/other-issuer/challenge_tokens/decoy.test.json", // other issuer
 	}
 	for _, k := range tokenKeys {
 		under := &countingStorage{Storage: errStorage{sentinel}}

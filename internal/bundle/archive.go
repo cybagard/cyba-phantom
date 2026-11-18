@@ -173,15 +173,18 @@ func readArchive(src io.Reader, checkEntry func(*tar.Header) (string, error)) (*
 			return nil, ErrArchiveInvalid
 		}
 		// The byte count is a second guard, next to the format rule and
-		// maxKept. Together, the three refuse each meta header. With
-		// go1.27.2, an 'x' header with records fails at maxKept. An 'x'
-		// header with no records fails the byte count. A 'g' header with no
-		// records passes both, and the format and type rules refuse it. The
-		// bytes that this Next call read must be the padding of the previous
-		// entry and one header block. This needs archive/tar to read the
-		// header block exactly, with no read-ahead, from a source that is not
-		// an io.Seeker. The capReader is such a source. If a Go change adds a
-		// read-ahead, every archive fails. So the guard fails closed.
+		// maxKept. Together, the three refuse each meta header. An 'x'
+		// header with records fails at maxKept. An 'x' header with no
+		// records fails the byte count. A 'g' header with no records passes
+		// both, and the format and type rules refuse it. The bytes that
+		// this Next call read must be the padding of the previous entry and
+		// one header block. This needs archive/tar to read the header block
+		// exactly, with no read-ahead, from a source that is not an
+		// io.Seeker. The capReader is such a source. If a Go change adds a
+		// read-ahead, the byte count refuses valid archives, as
+		// TestTS19ValidArchive shows. The format rule still refuses a meta
+		// header. TestTS19TarReadsNoAheadOfTheHeaderBlock names the read-ahead
+		// cause.
 		if int64(len(cr.kept)) != prevPad+blockBytes {
 			return nil, ErrArchiveInvalid
 		}
