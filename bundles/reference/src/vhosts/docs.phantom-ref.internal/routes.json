@@ -1,0 +1,1 @@
+{"routes":[{"path":"/","template":"vhosts/docs.phantom-ref.internal/index.tmpl","type":"text/html; charset=utf-8"},{"path":"/ref/cb","callback":{"segment":true}},{"path":"/ref/query","callback":{"query":"part"}},{"path":"/ref/body","callback":{"body":"link"}}],"not_found":"vhosts/docs.phantom-ref.internal/notfound.tmpl"}
