@@ -191,7 +191,7 @@ func TestTU30_MonotonicSource(t *testing.T) {
 func typical() State {
 	return State{
 		S: 1794000000000, BootID: goodID, BootClock: 36 * time.Hour,
-		FirstEvent: 120, FirstSession: 40, CatchUp: 600000,
+		FirstEvent: 120, FirstSession: 40, CatchUp: 600000, GraceSum: 1800000,
 		Jump: Jump{ID: 3, Size: 7200000, At: 1793990000000,
 			FirstEvent: 100, FirstSession: 30},
 		NextEvent: 5000, NextSession: 900,
@@ -203,7 +203,7 @@ var fieldCases = []struct {
 	name string
 	set  func(*State)
 }{
-	{"S min", func(s *State) { s.S, s.Jump = 0, Jump{} }},
+	{"S min", func(s *State) { s.S, s.GraceSum, s.Jump = 0, 0, Jump{} }},
 	{"S max", func(s *State) { s.S = boundMS }},
 	{"no boot id", func(s *State) { s.BootID = "" }},
 	{"boot clock min", func(s *State) { s.BootClock = 0 }},
@@ -218,6 +218,8 @@ var fieldCases = []struct {
 	}},
 	{"catch-up min", func(s *State) { s.CatchUp = 0 }},
 	{"catch-up max", func(s *State) { s.CatchUp = 86400000 }},
+	{"grace sum min", func(s *State) { s.GraceSum = 0 }},
+	{"grace sum max", func(s *State) { s.GraceSum = 3600000 }},
 	{"no jump", func(s *State) { s.Jump = Jump{} }},
 	{"jump id min", func(s *State) { s.Jump.ID = 1 }},
 	{"jump id max", func(s *State) { s.Jump.ID = boundMS }},
@@ -271,7 +273,7 @@ func TestTU30_StateRoundTrip(t *testing.T) {
 func TestTU30_StateFieldPlaces(t *testing.T) {
 	base, _ := typical().Encode()
 	if base != "1;1794000000000;"+goodID+";129600000000000;120;40;600000;"+
-		"3;7200000;1793990000000;100;30;5000;900" {
+		"1800000;3;7200000;1793990000000;100;30;5000;900" {
 		t.Fatalf("form changed: %q", base)
 	}
 }
@@ -330,6 +332,8 @@ func TestTU30_StateRangeRules(t *testing.T) {
 		{"negative next session", func(s *State) { s.NextSession = -1 }},
 		{"negative catch-up", func(s *State) { s.CatchUp = -1 }},
 		{"catch-up too large", func(s *State) { s.CatchUp = 86400001 }},
+		{"negative grace sum", func(s *State) { s.GraceSum = -1 }},
+		{"grace sum over 1 h", func(s *State) { s.GraceSum = 3600001 }},
 		{"negative jump id", func(s *State) { s.Jump.ID = -1 }},
 		{"jump size zero", func(s *State) { s.Jump.Size = 0 }},
 		{"jump size negative", func(s *State) { s.Jump.Size = -1 }},
@@ -387,6 +391,12 @@ func TestTU30_StateCrossRules(t *testing.T) {
 		{"catch-up",
 			func(s *State) { s.CatchUp = 86400000 },
 			func(s *State) { s.CatchUp = 86400001 }},
+		{"grace sum",
+			func(s *State) { s.GraceSum = 3600000 },
+			func(s *State) { s.GraceSum = 3600001 }},
+		{"grace sum and S",
+			func(s *State) { s.S, s.GraceSum, s.Jump = 1800000, 1800000, Jump{} },
+			func(s *State) { s.S, s.GraceSum, s.Jump = 1800000, 1800001, Jump{} }},
 		{"first event",
 			func(s *State) { s.FirstEvent = s.NextEvent },
 			func(s *State) { s.FirstEvent = s.NextEvent + 1 }},
@@ -747,6 +757,9 @@ func TestTU30_GraceFollowsWallForward(t *testing.T) {
 		f, clk := graceClock(t, c.s, c.boot)
 		f.wall.Store(c.s + c.off)
 		r, err := clk.Check()
+		if r.Write {
+			clk.Committed()
+		}
 		want := c.s
 		if c.move {
 			want += c.off
@@ -854,9 +867,10 @@ func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	f.boot.Store(int64(2 * time.Hour))
 	f.wall.Store(s0 + 10*hourMS)
 	r, err := c.Check()
-	if err != nil || r.Jump == nil || r.Jump.Size != 9*hourMS {
+	if err != nil || r.Jump == nil || r.Jump.Size != 9*hourMS || !r.Write {
 		t.Fatalf("check: %+v, %v", r, err)
 	}
+	c.Committed()
 	f.boot.Store(int64(3 * time.Hour))
 	if got := mustNow(t, c); got != s0+11*hourMS {
 		t.Fatalf("S %d, want %d", got, s0+11*hourMS)
@@ -869,6 +883,17 @@ func TestTU30_GraceBaseAtCheckBootClock(t *testing.T) {
 	r, err = c.Check()
 	if err != nil || r.Jump != nil || r.State.S != s0+40*60000 {
 		t.Fatalf("small move: %+v, %v", r, err)
+	}
+	// The boot clock is 1 h past the base, so S is S0 + 1 h at the check. The
+	// wall is at 90 min. That is a move of 30 min, so no jump. A threshold on
+	// the wall minus the base would see 90 min and give a jump.
+	f, c = graceClock(t, s0, time.Hour)
+	f.boot.Store(int64(2 * time.Hour))
+	f.wall.Store(s0 + 90*60000)
+	r, err = c.Check()
+	if err != nil || r.Jump != nil || r.State.S != s0+90*60000 ||
+		r.State.GraceSum != 30*60000 {
+		t.Fatalf("move after 1 h of boot clock: %+v, %v", r, err)
 	}
 }
 
@@ -965,6 +990,7 @@ func TestTU30_ReadersNeverSeeSGoDown(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		c.Committed()
 		checks++
 		if r.Jump != nil {
 			jumps++
@@ -1025,9 +1051,10 @@ func TestTU30_LaterNowNeverLowerThanEarlierReturn(t *testing.T) {
 	}()
 	<-reached
 	f.wall.Store(s0 + 40*dayMS)
-	if r, err := c.Check(); err != nil || r.Jump == nil {
+	if r, err := c.Check(); err != nil || r.Jump == nil || !r.Write {
 		t.Fatalf("check: %+v, %v", r, err)
 	}
+	c.Committed()
 	sb := mustNow(t, c)
 	close(release)
 	if sa := <-a; sa < sb || sb < s0+40*dayMS {

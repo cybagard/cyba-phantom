@@ -3,8 +3,13 @@
 // sensor_time. It also has the start rules, the grace, the catch-up and the
 // atomic S. S grows with the boot clock between checks. The start rules move
 // it only at Start. The grace and the catch-up move it only at a Check. The
-// clock writes fixed log lines. They are for a jump, a wall step back, a
-// wall that differs from S, and a used catch-up budget. It has no caller yet.
+// grace sum U adds the grace moves since the last grace jump. When U plus a
+// move is over 1 h, the move is a jump. A jump, or more than 10 min of moves
+// since the last key commit, needs a key write. Readers get such a move only
+// when the writer calls Committed. Check refuses while a move waits. A read
+// mark tells a jump if a reader read S since the last jump. The clock writes
+// fixed log lines. They are for a jump, a wall step back, a wall that differs
+// from S, and a used catch-up budget. It has no caller yet.
 package sensortime
 
 import (
@@ -22,6 +27,10 @@ var (
 	// ErrState means that a stored value does not decode, or has a field
 	// out of range.
 	ErrState = errors.New("sensortime: stored state malformed or out of range")
+	// ErrPending means that Check ran while a move waits for its key write.
+	// Check then changes nothing. The writer calls Committed only after that
+	// key commits. After a failed write, the writer stops.
+	ErrPending = errors.New("sensortime: a move waits for its key write")
 )
 
 // maxMS is the largest S: math.MaxInt64 ns as ms, 2262-04-11T23:47:16.854Z.
@@ -60,6 +69,7 @@ type State struct {
 	FirstEvent   int64         // first event rowid of this host boot
 	FirstSession int64         // first session rowid of this host boot
 	CatchUp      int64         // ms of catch-up used on this host boot
+	GraceSum     int64         // U: ms of grace moves since the last grace jump
 	Jump         Jump
 	NextEvent    int64 // rowid floor of event
 	NextSession  int64 // rowid floor of session
@@ -67,7 +77,7 @@ type State struct {
 
 const (
 	stateVersion = "1"
-	stateFields  = 14
+	stateFields  = 15
 )
 
 // Encode gives the one canonical string of a state. It refuses a state that
@@ -83,7 +93,7 @@ func (s State) format() string {
 	n := func(v int64) string { return strconv.FormatInt(v, 10) }
 	return strings.Join([]string{
 		stateVersion, n(s.S), s.BootID, n(int64(s.BootClock)),
-		n(s.FirstEvent), n(s.FirstSession), n(s.CatchUp),
+		n(s.FirstEvent), n(s.FirstSession), n(s.CatchUp), n(s.GraceSum),
 		n(s.Jump.ID), n(s.Jump.Size), n(s.Jump.At),
 		n(s.Jump.FirstEvent), n(s.Jump.FirstSession),
 		n(s.NextEvent), n(s.NextSession),
@@ -96,6 +106,8 @@ func (s State) format() string {
 //   - The boot clock is not negative.
 //   - The four rowids of the state are not negative.
 //   - The catch-up used is from 0 to 86400000 ms (24 h).
+//   - The grace sum is from 0 to 3600000 ms (1 h). A sum over 1 h is a jump.
+//   - The grace sum is not more than S. It is a sum of moves that S made.
 //   - The first event rowid is not more than the next event rowid. The same
 //     holds for the session rowids.
 //   - With no jump (ID 0), every jump field is 0.
@@ -113,6 +125,7 @@ func (s State) validate() error {
 		s.FirstEvent >= 0 && s.FirstSession >= 0 &&
 		s.NextEvent >= 0 && s.NextSession >= 0 &&
 		s.CatchUp >= 0 && s.CatchUp <= catchUpMaxMS &&
+		s.GraceSum >= 0 && s.GraceSum <= jumpMinMS && s.GraceSum <= s.S &&
 		s.FirstEvent <= s.NextEvent && s.FirstSession <= s.NextSession &&
 		inMS(j.ID) && j.FirstEvent >= 0 && j.FirstSession >= 0
 	if j.ID == 0 {
@@ -149,12 +162,12 @@ func Decode(v string) (State, error) {
 	}
 	s := State{
 		S: n[1], BootID: f[2], BootClock: time.Duration(n[3]),
-		FirstEvent: n[4], FirstSession: n[5], CatchUp: n[6],
+		FirstEvent: n[4], FirstSession: n[5], CatchUp: n[6], GraceSum: n[7],
 		Jump: Jump{
-			ID: n[7], Size: n[8], At: n[9], FirstEvent: n[10],
-			FirstSession: n[11],
+			ID: n[8], Size: n[9], At: n[10], FirstEvent: n[11],
+			FirstSession: n[12],
 		},
-		NextEvent: n[12], NextSession: n[13],
+		NextEvent: n[13], NextSession: n[14],
 	}
 	if s.validate() != nil || s.format() != v {
 		return State{}, ErrState
