@@ -236,7 +236,7 @@ func TestTS16NoStorageReadForAcmeTLSDuringARealIssuance(t *testing.T) {
 		}
 	}
 	if n := rec.count(key) - loads0; n != handshakes {
-		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake", n, handshakes)
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake.%s", n, handshakes, tokenKeyLayoutHint)
 	}
 	if got := f.a.Refused(); got != refused0 {
 		t.Errorf("refused changed from %d to %d: the gate did not let each handshake through", refused0, got)
