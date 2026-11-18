@@ -896,9 +896,16 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 		t.Errorf("log output: %q %q", logs.String(), std.String())
 	}
 	if n := rec.count(tokenKeyOf(a, "decoy.test")); n != total {
-		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake. The token key layout of certmagic (challengeTokensKey in solvers.go) may have changed. noTokenStorage must match it", n, total)
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake.%s", n, total, tokenKeyLayoutHint)
 	}
 }
+
+// tokenKeyLayoutHint ends the message of a test that sees no token key at the
+// wrapper. Two places in certmagic v0.25.6 build the key that Load gets.
+const tokenKeyLayoutHint = " Possible cause: certmagic changed the looked-up key." +
+	" Two sources build that key: challengeTokensKey in solvers.go, and the" +
+	" issuer prefix of the lookup in config.go. noTokenStorage must match that" +
+	" key layout."
 
 func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
 	a := newTestACME(t, nil)
@@ -912,6 +919,7 @@ func TestTS16StorageRefusesTokenKeysAndPassesOtherKeys(t *testing.T) {
 		path.Join("acme", issuer, "challenge_tokens"), // the prefix, as List gets it
 		"acme/" + issuer + "/challenge_tokens/",
 		"acme/" + issuer + "/challenge_tokens/a/b.json",
+		"acme/other-issuer/challenge_tokens/decoy.test.json", // another issuer element
 	}
 	for _, k := range tokenKeys {
 		under := &countingStorage{Storage: errStorage{sentinel}}

@@ -181,8 +181,8 @@ func readArchive(src io.Reader, checkEntry func(*tar.Header) (string, error)) (*
 		// one header block. This needs archive/tar to read the header block
 		// exactly, with no read-ahead, from a source that is not an
 		// io.Seeker. The capReader is such a source. If a Go change adds a
-		// read-ahead, every archive fails. So the guard fails closed.
-		// TestTS19TarReadsNoAheadOfTheHeaderBlock names that cause.
+		// read-ahead, each valid archive fails. The format rule still refuses a
+		// meta header. TestTS19TarReadsNoAheadOfTheHeaderBlock names that cause.
 		if int64(len(cr.kept)) != prevPad+blockBytes {
 			return nil, ErrArchiveInvalid
 		}

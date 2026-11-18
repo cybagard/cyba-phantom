@@ -445,10 +445,11 @@ func (c *countReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// T-S-19: canary for archive/tar. The source is not an io.Seeker. Each Next
+// T-S-19: test of archive/tar. The source is not an io.Seeker. Each Next
 // call must read the padding of the previous entry and one header block. The
-// end must read the padding and two zero blocks. readArchive depends on
-// this. The second entry has a size that is not a multiple of 512.
+// end must read the padding and two zero blocks. readArchive counts these
+// bytes in its byte count. Both entries have a size that is not a multiple
+// of 512 (100 and 1000), so each Next call after the first reads padding.
 func TestTS19TarReadsNoAheadOfTheHeaderBlock(t *testing.T) {
 	entries := []ent{
 		{name: "a", data: bytes.Repeat([]byte{'a'}, 100)},
@@ -456,7 +457,7 @@ func TestTS19TarReadsNoAheadOfTheHeaderBlock(t *testing.T) {
 	}
 	cr := &countReader{r: bytes.NewReader(buildTar(entries...))}
 	tr := tar.NewReader(cr)
-	const hint = "archive/tar read ahead of the header block; readArchive refuses each archive in that case"
+	const hint = "archive/tar changed what Next reads: a read-ahead of the header block, or a read of padding outside Next. Each valid archive then fails in readArchive. The format rule still refuses a meta header"
 	pad := 0
 	for _, e := range entries {
 		cr.n = 0
