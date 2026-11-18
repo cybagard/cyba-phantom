@@ -433,6 +433,53 @@ func TestTS19ValidArchive(t *testing.T) {
 	}
 }
 
+// countReader counts the bytes that it gives. It has no Seek method.
+type countReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// T-S-19: canary for archive/tar. The source is not an io.Seeker. Each Next
+// call must read the padding of the previous entry and one header block. The
+// end must read the padding and two zero blocks. readArchive depends on
+// this. The second entry has a size that is not a multiple of 512.
+func TestTS19TarReadsNoAheadOfTheHeaderBlock(t *testing.T) {
+	entries := []ent{
+		{name: "a", data: bytes.Repeat([]byte{'a'}, 100)},
+		{name: "b", data: bytes.Repeat([]byte{'b'}, 1000)},
+	}
+	cr := &countReader{r: bytes.NewReader(buildTar(entries...))}
+	tr := tar.NewReader(cr)
+	const hint = "archive/tar read ahead of the header block; readArchive refuses each archive in that case"
+	pad := 0
+	for _, e := range entries {
+		cr.n = 0
+		if _, err := tr.Next(); err != nil {
+			t.Fatalf("entry %q: %v", e.name, err)
+		}
+		if want := pad + blockBytes; cr.n != want {
+			t.Errorf("entry %q: Next read %d bytes; want %d. %s", e.name, cr.n, want, hint)
+		}
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			t.Fatalf("entry %q data: %v", e.name, err)
+		}
+		pad = (blockBytes - len(e.data)%blockBytes) % blockBytes
+	}
+	cr.n = 0
+	if _, err := tr.Next(); err != io.EOF {
+		t.Fatalf("end: error %v; want io.EOF", err)
+	}
+	if want := pad + 2*blockBytes; cr.n != want {
+		t.Errorf("end: Next read %d bytes; want %d. %s", cr.n, want, hint)
+	}
+}
+
 // T-S-19: the caps accept the values at the cap.
 func TestTS19AtTheCapsPasses(t *testing.T) {
 	_, pass := fixtures()

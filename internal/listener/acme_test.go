@@ -896,7 +896,7 @@ func TestTS16NoStorageReadWhenTheChallengeEndsBeforeTheLookup(t *testing.T) {
 		t.Errorf("log output: %q %q", logs.String(), std.String())
 	}
 	if n := rec.count(tokenKeyOf(a, "decoy.test")); n != total {
-		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake", n, total)
+		t.Errorf("the token key reached the wrapper %d times; want %d, one for each handshake. The token key layout of certmagic (challengeTokensKey in solvers.go) may have changed. noTokenStorage must match it", n, total)
 	}
 }
 
