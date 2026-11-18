@@ -206,9 +206,9 @@ func (r *refRun) pageTokensOf(t *testing.T, page string) map[string]string {
 // TestTI02_ReferenceVhostServesEachSlot checks T-I-02 on the source tree of
 // the reference bundle (FR-03, SEC-42). The tree is packed in memory. A test
 // key of class reference signs it. The page of the vhost has each declared
-// in-page slot, and the HTML is valid. Each token verifies to the trap of its
-// slot. Two sessions get their own tokens. A host that is not Linux and has no
-// 127.0.0.2 skips the test.
+// in-page slot, and each tag of the HTML closes in order. Each token verifies
+// to the trap of its slot. Two sessions get their own tokens. A host that is
+// not Linux and has no 127.0.0.2 skips the test.
 func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	r := startReference(t)
 	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}, Timeout: netWait}
