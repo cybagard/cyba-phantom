@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -151,6 +152,10 @@ type Writer struct {
 	// floorEvent and floorSession are the rowid floor that the writer wrote
 	// last. A key write never gives a lower floor.
 	floorEvent, floorSession int64
+	// nextEvent and nextSession are the next rowids that the writer gives. A
+	// new row gets the larger of this value and the largest rowid plus 1.
+	// StartClock sets them to the floor of the start.
+	nextEvent, nextSession int64
 	// lastCheck and lastKey are the boot clock of the last clock check and of
 	// the last key write.
 	lastCheck, lastKey time.Duration
@@ -468,7 +473,10 @@ func (w *Writer) write(batch []*event.Event) (err error) {
 	}
 	// The batch uses one date and one key for all its rows, also when it ends
 	// after midnight.
-	now := w.now()
+	now, err := w.stored()
+	if err != nil {
+		return err
+	}
 	key := w.dk.At(now)
 	day := now.UTC().Format(dayLayout)
 	hs := make([]tlog.EventHash, 0, len(batch))
@@ -515,6 +523,36 @@ func (w *Writer) now() time.Time {
 		return w.clock()
 	}
 	return time.Now()
+}
+
+// stored gives the time of a stored value: a batch date, a checkpoint time or
+// the time of a retention event. A writer with a clock gives S (ADR-043), and
+// a clock error is a fixed error. A writer with no clock gives w.now. The
+// chunk budgets do not use it: they measure elapsed time with w.now.
+func (w *Writer) stored() (time.Time, error) {
+	if w.clk == nil {
+		return w.now(), nil
+	}
+	ms, err := w.clk.Now()
+	if err != nil {
+		return time.Time{}, fail(clockName, ruleClock)
+	}
+	return time.UnixMilli(ms), nil
+}
+
+// reserveIDs gives the next rowids of event and session for one transaction.
+// Each is the larger of the value in memory and the largest stored rowid plus
+// 1. A largest rowid with no next rowid is a fixed error.
+func (w *Writer) reserveIDs(ctx context.Context, tx *sql.Tx) (ev, ses int64, err error) {
+	var me, ms int64
+	if tx.QueryRowContext(ctx, maxEventSQL).Scan(&me) != nil ||
+		tx.QueryRowContext(ctx, maxSessionSQL).Scan(&ms) != nil {
+		return 0, 0, fail(writerName, ruleDatabase)
+	}
+	if me == math.MaxInt64 || ms == math.MaxInt64 {
+		return 0, 0, fail(clockName, ruleStoredClock)
+	}
+	return max(w.nextEvent, me+1), max(w.nextSession, ms+1), nil
 }
 
 // pragma runs one PRAGMA statement of write, of storeRow, of a key write or of
@@ -569,6 +607,14 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 	tokens := tokenWriter{tx: tx}
 	defer tokens.close()
 
+	// A writer with a clock gives each new row an explicit rowid. The value in
+	// memory moves after the COMMIT, so a batch that rolls back gives none.
+	var nextEv, nextSes int64
+	if w.clk != nil {
+		if nextEv, nextSes, err = w.reserveIDs(ctx, tx); err != nil {
+			return false, err
+		}
+	}
 	var first int64
 	var appendErr error
 	if len(hs) > 0 {
@@ -615,7 +661,12 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			hash, leaf, record = hs[i][:], first+int64(i), b
 			i++
 		}
-		if err := w.insertRow(ctx, stmt, e, rec, hash, leaf, record); err != nil {
+		var id any // nil is the next rowid of SQLite
+		if w.clk != nil {
+			id = nextEv
+			nextEv++
+		}
+		if err := w.insertRow(ctx, stmt, e, rec, id, hash, leaf, record); err != nil {
 			return false, err
 		}
 		if err := mints.add(ctx, e, rec); err != nil {
@@ -626,7 +677,7 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 		w.sessions.add(rec, e.IP())
 		w.beacons.add(rec)
 	}
-	if err := w.upsertSessions(ctx, tx, key); err != nil {
+	if err := w.upsertSessions(ctx, tx, key, &nextSes); err != nil {
 		return false, err
 	}
 	// The beacon updates come after the session upserts, so a session of the
@@ -658,6 +709,9 @@ func (w *Writer) transact(ctx context.Context, conn *sql.Conn, batch []*event.Ev
 			return false, appendErr
 		}
 		return false, fail(writerName, ruleDatabase)
+	}
+	if w.clk != nil {
+		w.nextEvent, w.nextSession = nextEv, nextSes
 	}
 	// A rolled-back batch counts no duplicate and no unlinked callback.
 	w.mintDups.Add(mints.dups)
@@ -777,8 +831,12 @@ func (w *Writer) storeRow(rq rowRequest) (err error) {
 	case !errors.Is(err, sql.ErrNoRows):
 		return fail(writerName, ruleDatabase)
 	}
+	at, err := w.stored()
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO checkpoint (tree_size, root_hash, signed_note, created_at) VALUES (?, ?, ?, ?)",
-		rq.size, rq.root[:], string(rq.msg), w.now().UnixMilli()); err != nil {
+		rq.size, rq.root[:], string(rq.msg), at.UnixMilli()); err != nil {
 		return fail(writerName, ruleDatabase)
 	}
 	err = nil

@@ -260,8 +260,8 @@ func (c *Clock) cur() *base {
 // Committed publishes the base of the move that waits, if any, and sets W to
 // 0. The writer calls it only after a key commits. That key is of the last
 // Check with Write, or of a later Snapshot. Between that Check or Snapshot
-// and Committed, the writer calls no Check. After a failed write, the writer
-// stops and does not call Committed.
+// and Committed, the writer calls no Check. After a failed COMMIT, the writer
+// does not call Committed.
 //
 // Committed never changes the read mark. For a base that holds a jump, it
 // returns true when a Now marked since the Check of this jump. For all other

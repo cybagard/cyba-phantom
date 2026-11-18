@@ -341,6 +341,9 @@ func TestTU18_OneStart(t *testing.T) {
 	var o opens
 	writers := 0
 	d := o.deps()
+	// The start of the clock refuses a store with a stop marker. This test is
+	// about the writer start check, so it runs with no clock.
+	d.startClock = nil
 	d.newWriter = func(db *sql.DB, q *event.Queue, bp bool, lg *slog.Logger, r store.Recovery, dk *session.DayKey) *store.Writer {
 		writers++
 		return store.NewWriterWithDayKey(db, q, bp, lg, r, dk)

@@ -10,8 +10,9 @@ import (
 )
 
 // upsertSession adds a session row. A known session changes only last_seen
-// and req_count. The first address, ip_hmac and JA4 stay.
-const upsertSession = "INSERT INTO session (id, first_seen, last_seen, ip, ip_hmac, ja4, req_count, band, score) VALUES (?, ?, ?, ?, ?, ?, ?, 'human', 0) ON CONFLICT(id) DO UPDATE SET last_seen = max(last_seen, excluded.last_seen), req_count = req_count + excluded.req_count"
+// and req_count. The first address, ip_hmac and JA4 stay. A NULL rowid is the
+// next rowid of SQLite. A writer with a clock gives the rowid.
+const upsertSession = "INSERT INTO session (rowid, id, first_seen, last_seen, ip, ip_hmac, ja4, req_count, band, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'human', 0) ON CONFLICT(id) DO UPDATE SET last_seen = max(last_seen, excluded.last_seen), req_count = req_count + excluded.req_count"
 
 // sessionEntry is what one batch knows of one session. ip and ja4 are the
 // values of the first row of the session in the batch. An empty text is absent.
@@ -60,8 +61,10 @@ func (s *sessionBatch) add(rec event.Record, ip string) {
 
 // upsertSessions runs one upsert for each entry of the batch, in the
 // transaction tx. It prepares the statement one time. A failure is a database
-// error. An address that has no key gets the overflow ip_hmac text.
-func (w *Writer) upsertSessions(ctx context.Context, tx *sql.Tx, key session.Key) error {
+// error. An address that has no key gets the overflow ip_hmac text. A writer
+// with a clock gives each upsert the rowid *next, and moves *next past it. A
+// known session keeps its row, so its value is skipped. It is never reused.
+func (w *Writer) upsertSessions(ctx context.Context, tx *sql.Tx, key session.Key, next *int64) error {
 	if len(w.sessions.m) == 0 {
 		return nil
 	}
@@ -87,7 +90,12 @@ func (w *Writer) upsertSessions(ctx context.Context, tx *sql.Tx, key session.Key
 		if w.sessions.onExec != nil {
 			w.sessions.onExec()
 		}
-		if _, err := stmt.ExecContext(ctx, id, e.first, e.last, ip, hmac, ja4, e.count); err != nil {
+		var rowid any // nil is the next rowid of SQLite
+		if w.clk != nil {
+			rowid = *next
+			*next++
+		}
+		if _, err := stmt.ExecContext(ctx, rowid, id, e.first, e.last, ip, hmac, ja4, e.count); err != nil {
 			return fail(writerName, ruleDatabase)
 		}
 	}
