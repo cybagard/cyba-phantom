@@ -195,21 +195,21 @@ func TestTS19DecodedCapInTarHeaders(t *testing.T) {
 func rawHdr(name string, typ byte, size int64) []byte {
 	b := make([]byte, 512)
 	copy(b, name)
-	copy(b[100:], "0000644\x00")
-	copy(b[124:], fmt.Sprintf("%011o\x00", size))
-	b[156] = typ
-	copy(b[257:], "ustar\x0000")
+	copy(b[100:], "0000644\x00") // the mode field is at offset 100
+	copy(b[sizeOff:], fmt.Sprintf("%011o\x00", size))
+	b[typeflagOff] = typ
+	copy(b[257:], "ustar\x0000") // the magic field is at offset 257
 	return withSum(b)
 }
 
 // withSum writes the checksum of the header block b into b.
 func withSum(b []byte) []byte {
-	copy(b[148:156], "        ")
+	copy(b[chksumOff:chksumEnd], "        ")
 	sum := 0
 	for _, c := range b {
 		sum += int(c)
 	}
-	copy(b[148:], fmt.Sprintf("%06o\x00 ", sum))
+	copy(b[chksumOff:], fmt.Sprintf("%06o\x00 ", sum))
 	return b
 }
 
