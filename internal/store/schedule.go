@@ -366,7 +366,7 @@ func (s *Schedule) checkRun(ctx context.Context, now time.Duration) {
 func (s *Schedule) runOnce(stop context.Context) { s.runAt(stop, time.Time{}) }
 
 // runAt is runOnce with the S that begin or check read. A writer with a clock
-// uses it as the run date and as the base of the cutoffs, so the run does not
+// uses it as the run date and as the base of the cutoffs. So the run does not
 // read the clock again. A writer with no clock ignores it.
 func (s *Schedule) runAt(stop context.Context, wall time.Time) {
 	if !s.markRead {

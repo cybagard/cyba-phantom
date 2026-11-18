@@ -327,7 +327,8 @@ func TestTU30RowidAtTheLimitStopsTheWriter(t *testing.T) {
 }
 
 // T-U-30: the top rows go and no key is written. The next rows get rowids
-// above the values that the writer gave. A key write between does not change it.
+// above the values that the writer gave. A key write between does not change
+// this.
 func TestTU30NewRowsAreAboveTheValuesThatTheWriterGave(t *testing.T) {
 	t.Run("no key write", func(t *testing.T) {
 		r, _ := clockRig(t)
@@ -417,7 +418,7 @@ func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		mark  time.Duration // the age of the stored mark
-		after int64         // the call of the boot clock that fails, from the read
+		after int64         // the boot clock call that fails, from the read
 	}{{"begin read", 30 * time.Hour, 1}, {"check read", time.Hour, 1}, {"after the check read", time.Hour, 3}} {
 		t.Run(c.name, func(t *testing.T) {
 			r, f := newRig(t, 8), &fakeSrc{}

@@ -526,9 +526,9 @@ func (w *Writer) now() time.Time {
 }
 
 // stored gives the time of a stored value. It is for a batch date, a day key
-// and a checkpoint time. A writer with a clock gives S (ADR-043). A clock error is a fixed error. A writer with no clock
-// gives w.now. The chunk budgets do not use it. They measure elapsed time with
-// w.now.
+// and a checkpoint time. A writer with a clock gives S (ADR-043). A clock error
+// is a fixed error. A writer with no clock gives w.now. The chunk budgets do
+// not use it. They measure elapsed time with w.now.
 func (w *Writer) stored() (time.Time, error) {
 	if w.clk == nil {
 		return w.now(), nil
