@@ -27,9 +27,10 @@
 // tag must be the same. The image string of the FROM line must be the same
 // as the image string of ci.yml.
 //
-// The check fails closed. A missing file, a missing allowed line, a second
-// allowed line, or a word line of another form is a failure. A missing
-// toolchain line is not a failure. The tool prints one line for each
+// The check fails closed. A missing file is a failure. A missing allowed
+// line is a failure. A second allowed line is a failure. A word line of
+// another form is a failure. A missing toolchain line is not a failure.
+// The tool prints one line for each
 // failure. It exits 1 when there is a failure, and 0 when there is none.
 //
 // This is a drift check, not a gate. The command make lint runs it from the
