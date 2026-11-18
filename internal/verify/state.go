@@ -115,11 +115,13 @@ func DefaultStateDir() (string, error) {
 // After it takes the lock, LoadState removes each leftover temporary file of
 // this key. A crash between the create and the rename of a write leaves one.
 // Its name is the state file name, ".tmp-", and 16 lower-case hex digits. No
-// other name is removed. A symlink with such a name is removed as a link, and
-// its target stays. The directory is read in batches of leftoverBatch entries.
-// The cleanup is best effort. If a remove or the read fails, LoadState goes on
-// with the next name and gives no error. A leftover file does no harm, and it
-// must not stop a verification.
+// other name is removed. Each entry with such a name is removed: a file, a
+// second link, or an empty directory. A symlink with such a name is removed
+// as a link, and its target stays. The directory is read in batches of
+// leftoverBatch entries. The cleanup is best effort. If a remove fails, the
+// cleanup goes on with the next name. If the read fails, the cleanup stops.
+// In both cases LoadState gives no error. A leftover file does no harm, and
+// it must not stop a verification.
 func LoadState(dir string, v note.Verifier, opts StateOptions) (*State, error) {
 	if opts.LockWait == 0 {
 		opts.LockWait = defaultLockWait
@@ -253,6 +255,9 @@ func (s *State) read() ([]byte, bool, error) {
 // latest with Consistency against Checkpoint. Update writes only on first use,
 // or when the size of latest is larger than the size of the state. Else it
 // leaves the file as it is.
+//
+// The caller must read latest with ReadCheckpoint and the key of the state.
+// Update checks only the name of the key, not the key itself.
 //
 // Update parses no note. If the origin is not the name of the state key, it
 // gives ErrState and writes nothing. The zero value has such an origin. If the

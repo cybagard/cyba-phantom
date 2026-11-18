@@ -22,9 +22,10 @@ func emptyRoot() modtlog.Hash {
 }
 
 // Consistency checks that two checkpoints belong to one log (SEC-18, FR-16).
-// The two values come from ReadCheckpoint, so the key has verified both notes.
-// The function parses no note. S is the size of the prior checkpoint and N is
-// the size of the latest checkpoint.
+// The caller must read both values with ReadCheckpoint and one key. The
+// function does not check that one key read both values: it compares only
+// the origins. The function parses no note. S is the size of the prior
+// checkpoint and N is the size of the latest checkpoint.
 //
 // Two checkpoints with different origins are not one log. That gives ErrFork.
 // If N is larger than S, a proof from S to N must verify. If N is smaller than
