@@ -131,8 +131,8 @@ func serveWith(ctx context.Context, stop context.CancelFunc, hup <-chan os.Signa
 	}
 	lg := slog.New(slog.NewTextHandler(stderr, nil))
 	s := start(p, q, d, lg)
-	if line := s.refusal(); line != "" {
-		fmt.Fprintln(stderr, line)
+	if s.capErr != nil {
+		fmt.Fprintln(stderr, "phantom: retention cap does not start")
 		httpsLn.Close()
 		httpLn.Close()
 		s.Stop()
