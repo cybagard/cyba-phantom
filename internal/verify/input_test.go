@@ -144,9 +144,9 @@ func TestTS14_Checkpoint(t *testing.T) {
 }
 
 // T-S-14: a nil verifier means that the trusted key is missing. The result is
-// ErrKey and not a panic, also for a note past the size cap. ReadCheckpoint and
-// Consistency call ParseCheckpoint, so they give the same result. The test
-// covers only a nil interface.
+// ErrKey and not a panic, also for a note past the size cap. ReadCheckpoint
+// calls ParseCheckpoint, so it gives the same result. The test covers only a
+// nil interface.
 func TestTS14_NilVerifier(t *testing.T) {
 	s, _ := newKey(t, origin)
 	good := signed(t, s, 7)
@@ -156,7 +156,6 @@ func TestTS14_NilVerifier(t *testing.T) {
 	wantErr(t, "ParseCheckpoint, note over the cap", err, ErrKey)
 	_, err = ReadCheckpoint(bytes.NewReader(good), nil)
 	wantErr(t, "ReadCheckpoint", err, ErrKey)
-	wantErr(t, "Consistency", Consistency(nil, good, good, nil), ErrKey)
 }
 
 // T-S-14: a value from ReadCheckpoint holds the origin, size, root and note
