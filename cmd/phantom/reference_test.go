@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -33,9 +34,19 @@ const (
 	refSrc   = "../../bundles/reference/src"
 )
 
-// refSlots are the 8 in-page slots of the vhost. Each one has one trap.
-var refSlots = []string{"hidden-p", "html-comment", "meta-description", "alt", "aria-label",
-	"nofollow-link", "json-ld", "noscript"}
+// refPageSlots are the 8 slots in the page of the vhost. refOutSlots are the 4
+// slots out of it: a robots.txt line, a JSON file, the 404 page and a header.
+// refSlots are the 12 slots of the vhost. Each one has one trap.
+var (
+	refPageSlots = []string{"hidden-p", "html-comment", "meta-description", "alt", "aria-label",
+		"nofollow-link", "json-ld", "noscript"}
+	refOutSlots = []string{"robots-disallow", "ai-plugin", "not-found", "header"}
+	refSlots    = slices.Concat(refPageSlots, refOutSlots)
+)
+
+// refRoutes gives the surface of each callback route of the vhost.
+var refRoutes = map[string]string{"/phantom-reference-trap/cb": "path", "/ref/query": "query",
+	"/ref/header": "header", "/ref/body": "body"}
 
 // refSeed is the token seed of the tests. The source tree has no seed, so the
 // tests add it to the files in memory.
@@ -153,6 +164,8 @@ func slotTexts(t *testing.T, body string) map[string]string {
 			out["hidden-p"] = text
 		case attr("aria-label") != "":
 			out["aria-label"] = attr("aria-label")
+		case n.Data == "p" && strings.HasPrefix(text, "phantom-reference-trap. "):
+			out["not-found"] = text
 		case n.Data == "a" && attr("rel") == "nofollow":
 			out["nofollow-link"] = attr("href")
 		case n.Data == "noscript":
@@ -185,15 +198,62 @@ func tokenIn(tpl, render string) (string, bool) {
 	return strings.CutSuffix(mid, after)
 }
 
-// pageTokensOf gives the token text of each trap on the page, by trap id. A
-// trap with no token in its slot fails the test.
-func (r *refRun) pageTokensOf(t *testing.T, page string) map[string]string {
+// secondAddr is a second client address of the loopback.
+var secondAddr = net.ParseIP("127.0.0.2")
+
+// needSecondAddr skips the test on a host that is not Linux and has no client
+// address 127.0.0.2.
+func (r *refRun) needSecondAddr(t *testing.T) {
 	t.Helper()
-	slots, out := slotTexts(t, page), map[string]string{}
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: secondAddr}, Timeout: netWait}
+	c, err := d.DialContext(t.Context(), "tcp", strings.TrimPrefix(r.https, "https://"))
+	if runtime.GOOS != "linux" && errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Skipf("no client address 127.0.0.2 on %s: %v", runtime.GOOS, err)
+	}
+	mustOK(t, err)
+	c.Close()
+}
+
+// outSlotTexts gets the 4 slots out of the page for the client address ip. page
+// is the response for "/". The map key is the slot name, and the value is the
+// text of the slot.
+func (r *refRun) outSlotTexts(t *testing.T, ip net.IP, page baitResp) map[string]string {
+	t.Helper()
+	get := func(path string, status int, ctype string) baitResp {
+		resp := fetchFrom(t, r.https, refHost, path, "", ip)
+		if resp.status != status || resp.header.Get("Content-Type") != ctype {
+			t.Errorf("GET %s: status %d, type %q; want %d and %q", path, resp.status, resp.header.Get("Content-Type"), status, ctype)
+		}
+		return resp
+	}
+	out := map[string]string{"header": page.header.Get("X-Note")}
+	for _, l := range strings.Split(get("/robots.txt", 200, "text/plain; charset=utf-8").body, "\n") {
+		if rest, ok := strings.CutPrefix(l, "Disallow: "); ok {
+			out["robots-disallow"] = rest
+		}
+	}
+	var plugin struct {
+		Model string `json:"description_for_model"`
+	}
+	mustOK(t, json.Unmarshal([]byte(get("/.well-known/ai-plugin.json", 200, "application/json").body), &plugin))
+	out["ai-plugin"] = plugin.Model
+	// A path with no route gets the 404 decoy of the route map.
+	out["not-found"] = slotTexts(t, get("/missing", 404, "text/html; charset=utf-8").body)["not-found"]
+	return out
+}
+
+// tokensOf gives the token text of each trap of the slots, by trap id. texts
+// has the text of each slot. A trap with no token in its slot fails the test.
+func (r *refRun) tokensOf(t *testing.T, texts map[string]string, slots []string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
 	for _, tr := range r.traps {
-		render, ok := slots[tr.Slot]
+		if !slices.Contains(slots, tr.Slot) {
+			continue
+		}
+		render, ok := texts[tr.Slot]
 		if !ok {
-			t.Errorf("trap %s: the page has no %s slot", tr.ID, tr.Slot)
+			t.Errorf("trap %s: the response has no %s slot", tr.ID, tr.Slot)
 			continue
 		}
 		if out[tr.ID], ok = tokenIn(tr.Template, render); !ok {
@@ -203,21 +263,30 @@ func (r *refRun) pageTokensOf(t *testing.T, page string) map[string]string {
 	return out
 }
 
+// allTokens gets the page for "/" and the 4 slots out of it for the client
+// address ip. It gives the token text of each trap, by trap id, and the page.
+func (r *refRun) allTokens(t *testing.T, ip net.IP) (map[string]string, baitResp) {
+	t.Helper()
+	page := fetchFrom(t, r.https, refHost, "/", "", ip)
+	if page.status != 200 {
+		t.Fatalf("client %v: status %d; want 200", ip, page.status)
+	}
+	texts := slotTexts(t, page.body)
+	maps.Copy(texts, r.outSlotTexts(t, ip, page))
+	return r.tokensOf(t, texts, refSlots), page
+}
+
 // TestTI02_ReferenceVhostServesEachSlot checks T-I-02 on the source tree of
 // the reference bundle (FR-03, SEC-42). The tree is packed in memory. A test
-// key of class reference signs it. The page of the vhost has each declared
-// in-page slot. Each end tag of the HTML closes the element that is open last.
-// Each token verifies to the trap of its slot. Two sessions get their own
-// tokens. A host that is not Linux and has no 127.0.0.2 skips the test.
+// key of class reference signs it. The vhost has each of the 12 slots. The
+// page has 8 of them. The robots.txt file, the JSON file, the 404 page and the
+// X-Note header of the page have the other 4. Each end tag of the HTML closes
+// the element that is open last. Each token verifies to the trap of its slot.
+// Two sessions get their own tokens. A host that is not Linux and has no
+// 127.0.0.2 skips the test.
 func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	r := startReference(t)
-	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}, Timeout: netWait}
-	c, err := d.DialContext(t.Context(), "tcp", strings.TrimPrefix(r.https, "https://"))
-	if runtime.GOOS != "linux" && errors.Is(err, syscall.EADDRNOTAVAIL) {
-		t.Skipf("no client address 127.0.0.2 on %s: %v", runtime.GOOS, err)
-	}
-	mustOK(t, err)
-	c.Close()
+	r.needSecondAddr(t)
 	var slots, ids []string
 	for _, tr := range r.traps {
 		slots, ids = append(slots, tr.Slot), append(ids, tr.ID)
@@ -230,13 +299,10 @@ func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	seen := map[string]bool{}
 	ips := []string{"127.0.0.1", "127.0.0.2"}
 	for i, ip := range ips {
-		page := fetchFrom(t, r.https, refHost, "/", "", net.ParseIP(ip))
-		if page.status != 200 {
-			t.Fatalf("client %s: status %d; want 200", ip, page.status)
-		}
+		toks, page := r.allTokens(t, net.ParseIP(ip))
 		checkTags(t, page.body)
-		for id, text := range r.pageTokensOf(t, page.body) {
-			if text == "" { // pageTokensOf has reported it
+		for id, text := range toks {
+			if text == "" { // tokensOf has reported it
 				continue
 			}
 			tok, ok := token.Parse(text)
@@ -262,61 +328,74 @@ func TestTI02_ReferenceVhostServesEachSlot(t *testing.T) {
 	}
 }
 
-// refCallbackRequest sends one callback request with the token text tok to the
-// route of the surface, on its own connection.
-func refCallbackRequest(t *testing.T, r *refRun, surface, tok, cookie string) {
+// refRouteOf gives the callback route that the text of a trap names.
+func refRouteOf(t *testing.T, tr refTrap) string {
 	t.Helper()
-	method, target, body, hdr := http.MethodGet, "", "", http.Header{"Cookie": {cookie}}
-	switch surface {
+	var named []string
+	for route := range refRoutes {
+		if strings.Contains(tr.Template, route) {
+			named = append(named, route)
+		}
+	}
+	if len(named) != 1 {
+		t.Fatalf("trap %s: text %q names the routes %q; want one", tr.ID, tr.Template, named)
+	}
+	return named[0]
+}
+
+// refCallbackRequest sends one callback request with the token text tok to
+// the callback route. It uses its own connection from the client address ip.
+func refCallbackRequest(t *testing.T, r *refRun, ip net.IP, route, tok, cookie string) {
+	t.Helper()
+	method, target, body, hdr := http.MethodGet, route, "", http.Header{"Cookie": {cookie}}
+	switch refRoutes[route] {
 	case "path":
-		target = "/phantom-reference-trap/cb/" + tok
+		target += "/" + tok
 	case "query":
-		target = "/ref/query?part=" + tok
+		target += "?part=" + tok
 	case "header":
-		target = "/ref/header"
 		hdr.Set("X-Ref", tok)
 	case "body":
-		method, target, body = http.MethodPost, "/ref/body", `{"link":"`+tok+`"}`
+		method, body = http.MethodPost, `{"link":"`+tok+`"}`
 	}
 	req, err := http.NewRequestWithContext(t.Context(), method, r.https+target, strings.NewReader(body))
 	mustOK(t, err)
 	req.Host, req.Header = refHost, hdr
-	resp, err := plainClient().Do(req)
+	cl := plainClient()
+	cl.Transport.(*http.Transport).DialContext = (&net.Dialer{LocalAddr: &net.TCPAddr{IP: ip}}).DialContext
+	resp, err := cl.Do(req)
 	mustOK(t, err)
 	defer resp.Body.Close()
 	_, err = io.Copy(io.Discard, resp.Body)
 	mustOK(t, err)
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("callback at the %s route: status %d; want 204", surface, resp.StatusCode)
+		t.Fatalf("callback at the route %s: status %d; want 204", route, resp.StatusCode)
 	}
 }
 
 // TestTI04_ReferenceCallbackRoutes checks T-I-04 on the reference bundle
-// (FR-04, SEC-37, SEC-42). A token of the page goes to each of the 4 callback
-// routes. The route gives a callback row of its surface. The row has the trap
-// of the token, the vhost and reference_seed: true.
+// (FR-04, SEC-37, SEC-42). The token of each trap goes to the callback route
+// that the text of the trap names. The route gives a callback row. The surface
+// of the row is the surface of the trap. The row has the trap of the token, the
+// vhost and reference_seed: true.
 func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 	r := startReference(t)
+	r.needSecondAddr(t)
 	db := readStore(t, r.baitSensor)
-	page := fetch(t, r.https, refHost, "/", "")
-	if page.status != 200 {
-		t.Fatalf("page: status %d; want 200", page.status)
-	}
-	toks := r.pageTokensOf(t, page.body)
+	toks, _ := r.allTokens(t, nil)
 	var mints int
 	pollRow(t, db, "SELECT count(*) FROM mint WHERE session_id = ? HAVING count(*) > 0", []any{r.keyedID(t)}, &mints)
 	cookie, _ := r.cookie(t)
-	for _, surface := range []string{"path", "query", "header", "body"} {
-		i := slices.IndexFunc(r.traps, func(tr refTrap) bool { return tr.Surface == surface })
-		if i < 0 {
-			t.Fatalf("no trap with the surface %s", surface)
-		}
-		tr := r.traps[i]
+	for i, tr := range r.traps {
 		parsed, ok := token.Parse(toks[tr.ID])
 		if !ok {
 			t.Fatalf("trap %s: text %q is not a token", tr.ID, toks[tr.ID])
 		}
-		refCallbackRequest(t, r, surface, toks[tr.ID], cookie)
+		route := refRouteOf(t, tr)
+		// The engine caps the callback events of one client address at 10
+		// in a minute. So the traps use 2 addresses.
+		ip := []net.IP{net.IPv4(127, 0, 0, 1), secondAddr}[i%2]
+		refCallbackRequest(t, r, ip, route, toks[tr.ID], cookie)
 		var got, trap, vhost, detail string
 		pollRow(t, db, "SELECT surface, trap_id, vhost, detail FROM event WHERE kind = 'callback' AND token_id = ?",
 			[]any{token.ID(parsed)}, &got, &trap, &vhost, &detail)
@@ -325,13 +404,29 @@ func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 		// With the real clock in the window, the token is not stale or future.
 		for _, k := range []string{"stale", "future"} {
 			if _, ok := d[k]; ok && !r.clockHeld {
-				t.Errorf("%s route: detail %s has %s", surface, detail, k)
+				t.Errorf("trap %s: detail %s has %s", tr.ID, detail, k)
 			}
 		}
-		if got != surface || trap != tr.ID || vhost != refHost || d["reference_seed"] != true {
-			t.Errorf("%s route: row surface %q, trap %q, vhost %q, detail %s; want %q, %q, %q and reference_seed true",
-				surface, got, trap, vhost, detail, surface, tr.ID, refHost)
+		if got != tr.Surface || trap != tr.ID || vhost != refHost || d["reference_seed"] != true {
+			t.Errorf("trap %s at %s: row surface %q, trap %q, vhost %q, detail %s; want %q, %q, %q and reference_seed true",
+				tr.ID, route, got, trap, vhost, detail, tr.Surface, tr.ID, refHost)
 		}
+	}
+	r.stop(t)
+}
+
+// TestTI02_ReferenceBeaconScript checks T-I-02 for the beacon of the reference
+// bundle (SEC-38, SEC-42). The route map names the script path /beacon.js and
+// the post path /beacon. A GET of the script path gives the script of the
+// engine, with the post path in it.
+func TestTI02_ReferenceBeaconScript(t *testing.T) {
+	r := startReference(t)
+	got := fetch(t, r.https, refHost, "/beacon.js", "")
+	if ct := got.header.Get("Content-Type"); got.status != 200 || ct != "text/javascript; charset=utf-8" {
+		t.Errorf("GET /beacon.js: status %d, type %q; want 200 and text/javascript; charset=utf-8", got.status, ct)
+	}
+	if !strings.HasPrefix(got.body, `navigator.sendBeacon("/beacon","`) || !strings.HasSuffix(got.body, `")`) {
+		t.Errorf("GET /beacon.js: body %q; want a sendBeacon call to /beacon", got.body)
 	}
 	r.stop(t)
 }
