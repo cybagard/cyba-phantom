@@ -457,7 +457,7 @@ func TestTS19TarReadsNoAheadOfTheHeaderBlock(t *testing.T) {
 	}
 	cr := &countReader{r: bytes.NewReader(buildTar(entries...))}
 	tr := tar.NewReader(cr)
-	const hint = "archive/tar changed what Next reads: a read-ahead of the header block, or a read of padding outside Next. Each valid archive then fails in readArchive. The format rule still refuses a meta header"
+	const hint = "archive/tar changed what Next reads: a read-ahead of the header block, or a read of padding outside Next. The byte count of readArchive then refuses each archive with padding. The format rule still refuses a meta header"
 	pad := 0
 	for _, e := range entries {
 		cr.n = 0
