@@ -1,0 +1,28 @@
+# This bot opens pull requests for Go modules and for GitHub Actions.
+# A pull request of this bot fails the required sign-off check (dco),
+# because the bot commit has no Signed-off-by line. We do not change that
+# check for the bot. The pull request takes the outside-contributor path
+# of CONTRIBUTING.md. The maintainer closes it, and opens a new pull
+# request with a new commit of the maintainer (git commit -s). The
+# maintainer does not cherry-pick the bot commit. A new release waits
+# 7 days before the bot proposes it.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      gomod:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
