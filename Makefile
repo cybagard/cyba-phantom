@@ -41,10 +41,13 @@ test:
 	$(GO) test -race ./...
 	GOMEMLIMIT=256MiB $(GO) test -count=1 -run '^(TestTS25|TestTP10)' ./internal/bundle
 
+# The second vet call checks the darwin files, so a Linux run finds a darwin
+# build or vet error.
 lint:
 	@bad=$$(gofmt -l .) || { echo "gofmt: gofmt -l . failed"; exit 1; }; \
 	if [ -n "$$bad" ]; then echo "gofmt: $$(echo "$$bad" | wc -l | tr -d ' ') file(s) need formatting; run gofmt -l . locally"; exit 1; fi
 	$(GO) vet ./...
+	GOOS=darwin $(GO) vet ./...
 	@base="$(BASE)"; head="$(or $(HEAD),HEAD)"; \
 	if [ -z "$$base" ] && git rev-parse --verify -q origin/main >/dev/null; then \
 		base=$$(git merge-base origin/main "$$head") || { echo "lint: git merge-base origin/main $$head failed"; exit 1; }; \
