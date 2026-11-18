@@ -539,12 +539,13 @@ func ruleOf(err error) string {
 	return ""
 }
 
-// T-U-30: StartClock gives an error and writes no key. Four cases do this. One
-// is a stop marker. One is a read error. One is a largest rowid with no next
-// rowid. One is a largest clock_jump id with no next id. The writer has no
-// clock. It does not stop.
+// T-U-30: StartClock gives an error and writes no key. Five cases do this. One
+// is a stop marker. One is a writer with no recovery. One is a read error. One
+// is a largest rowid with no next rowid. One is a largest clock_jump id with no
+// next id. The writer has no clock. It does not stop.
 func TestTU30StartClockRefusals(t *testing.T) {
 	for _, c := range []struct{ name, rule, sql string }{
+		{"no recovery", ruleNoRecover, "-"},
 		{"marker", ruleMarkerExists, ""},
 		{"first read", ruleDBRead, "DROP TABLE meta"},
 		{"jump read", ruleDBRead, "DROP TABLE clock_jump"},
@@ -553,11 +554,14 @@ func TestTU30StartClockRefusals(t *testing.T) {
 		{"jump id", ruleStoredClock, "INSERT INTO clock_jump VALUES (9223372036854, 1, 1, 1, 1, 5, 5)"},
 	} {
 		r := newRig(t, 8)
-		if c.sql == "" {
+		switch c.sql {
+		case "-":
+			r.w.rec = Recovery{}
+		case "":
 			if err := makeMarker(r.root); err != nil {
 				t.Fatal(err)
 			}
-		} else {
+		default:
 			mustExec(t, r.db, c.sql)
 		}
 		if err := r.w.StartClock((&fakeSrc{}).source()); ruleOf(err) != c.rule || r.w.clk != nil || r.w.Err() != nil {
@@ -566,6 +570,54 @@ func TestTU30StartClockRefusals(t *testing.T) {
 		if c.sql != "DROP TABLE meta" && count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'sensor_time'") != 0 {
 			t.Errorf("%s: the key was written", c.name)
 		}
+	}
+}
+
+// T-U-30: a stored key with the last jump id has no next jump id, also with no
+// clock_jump row. StartClock gives the fixed error and writes nothing.
+func TestTU30StoredLastJumpIdRefusesTheStart(t *testing.T) {
+	r, f := clockRig(t)
+	st := r.key()
+	st.Jump = sensortime.Jump{ID: lastJumpID, Size: 5, At: 5}
+	v, err := st.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, r.db, metaSetSQL, sensorTimeKey, v)
+	before := dbText(t, r.db)
+	w := NewWriter(r.db, r.q, false, nil, r.w.rec)
+	if err := w.StartClock(f.source()); ruleOf(err) != ruleStoredClock || w.clk != nil || dbText(t, r.db) != before {
+		t.Errorf("error %v", err)
+	}
+}
+
+// T-U-30: the COMMIT of the start write works and the NORMAL pragma fails. The
+// key is stored, StartClock gives the database error, and the writer has no
+// clock and does not stop. A start with no hook takes the stored key on the
+// same boot.
+func TestTU30StartClockFailedNormalKeepsTheKey(t *testing.T) {
+	r, f := newRig(t, 8), &fakeSrc{}
+	r.w.beforePragma = func(s string) error {
+		if s == "PRAGMA synchronous=NORMAL" {
+			return errors.New("no pragma")
+		}
+		return nil
+	}
+	f.at(10 * time.Second)
+	if err := r.w.StartClock(f.source()); ruleOf(err) != ruleDatabase || r.w.clk != nil || r.w.Err() != nil {
+		t.Fatalf("error %v, stop %v", err, r.w.Err())
+	}
+	if st := r.key(); st.S != wall0+10000 || st.BootClock != 10*time.Second {
+		t.Fatalf("key %+v", st)
+	}
+	r.w.beforePragma = nil
+	f.at(20 * time.Second)
+	f.skew.Store((40 * 24 * time.Hour).Milliseconds())
+	if err := r.w.StartClock(f.source()); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.key(); st.S != wall0+20000 || st.BootClock != 20*time.Second {
+		t.Fatalf("key %+v after the second start", st)
 	}
 }
 

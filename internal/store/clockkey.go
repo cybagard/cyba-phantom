@@ -39,16 +39,20 @@ const (
 // calls sensortime.Start with them, and writes the key of the result before it
 // returns. A start jump has no clock_jump row: only the key holds it.
 //
-// It checks the stop marker first, as the start check of Run does. With a
-// marker it returns that error, and it reads and writes nothing.
+// It checks the state directory and the stop marker first, as the start check
+// of Run does. With a marker it returns that error, and it reads and writes
+// nothing.
 //
 // A stored value that does not decode gives an *Error with a fixed rule. A
 // largest event or session rowid with no next rowid does the same. So does a
-// largest clock_jump id with no next id. A read error is an *Error with the
-// rule of a failed read. A Start error is returned as it is. A failed write is
-// an *Error.
-// In each case the database keeps its old rows, and the writer has no clock and
-// does not stop. Without a StartClock call, the writer has no clock and writes
+// largest clock_jump id with no next id, and a stored jump id with no next id.
+// A read error is an *Error with the rule of a failed read. A Start error is
+// returned as it is. A failed write is an *Error.
+// In each case but one, the database keeps its old rows, and the writer has no
+// clock and does not stop. The one case is a COMMIT that worked and a NORMAL
+// pragma that then failed. The key is stored (it was written with FULL), and
+// StartClock returns the error. The writer has no clock, and a later start
+// reads that key. Without a StartClock call, the writer has no clock and writes
 // no key.
 func (w *Writer) StartClock(src sensortime.Source) error {
 	if w.rec.State == nil {
@@ -78,7 +82,8 @@ func (w *Writer) StartClock(src sensortime.Source) error {
 			return fail(writerName, ruleDBRead)
 		}
 	}
-	if in.NextEvent == math.MaxInt64 || in.NextSession == math.MaxInt64 || in.KnownJumpID >= lastJumpID {
+	if in.NextEvent == math.MaxInt64 || in.NextSession == math.MaxInt64 || in.KnownJumpID >= lastJumpID ||
+		in.Stored != nil && in.Stored.Jump.ID >= lastJumpID {
 		return fail(clockName, ruleStoredClock)
 	}
 	in.NextEvent++
