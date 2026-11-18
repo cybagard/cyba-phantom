@@ -90,7 +90,7 @@ internal/verify                  90.9
 tools/bundle-sign                92.2
 tools/dco                        96.7
 tools/mutatepkg                  92.4
-tools/pins                       96.8
+tools/pins                       96.9
 tools/stelint                    97.5
 tools/trace                      93.5
 '
