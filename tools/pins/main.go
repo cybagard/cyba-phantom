@@ -5,20 +5,35 @@
 //
 //	pins
 //
-// Run it in the repository root. It reads four files and finds one line in
-// each place. The places are:
-//   - go.mod: the "go" line, and the "toolchain" line when there is one.
-//   - Makefile: the assignment of GOTOOLCHAIN.
-//   - .github/workflows/ci.yml: the key GOTOOLCHAIN, and the key "image:".
-//   - .devcontainer/Dockerfile: the FROM line.
+// Run it in the repository root. It reads four files. In each file, a word
+// line is a line that is not a comment line and that holds a key word.
+// Each word line must be equal to one allowed line of that file. Each
+// allowed line must be in the file once. Any other word line is a failure.
+//
+// The files, the key words, and the allowed lines are:
+//   - go.mod: the first field is "go" or "toolchain". The allowed lines are
+//     "go <v>" and "toolchain go<v>". The toolchain line is optional.
+//   - Makefile: the text GOTOOLCHAIN. The allowed lines are
+//     "GOTOOLCHAIN := go<v>" and "export GOTOOLCHAIN". A comment line that
+//     ends in a backslash is a failure, because make joins the next line.
+//   - .github/workflows/ci.yml: GOTOOLCHAIN, "image" in any case,
+//     "container", and "docker://". The allowed lines are the top-level key
+//     "  GOTOOLCHAIN: go<v>", "container:", and "image: <image>".
+//   - .devcontainer/Dockerfile: the first field is FROM in any case, or the
+//     text GOTOOLCHAIN. The allowed line is
+//     "FROM golang:<v>@sha256:<64 hex digits>".
 //
 // The version in go.mod, in the Makefile, in ci.yml and in the Dockerfile
 // tag must be the same. The image string of the FROM line must be the same
 // as the image string of ci.yml.
 //
-// The check fails closed. A missing file, a missing line, a second line, or
-// a line of another form is a failure. The tool prints one line for each
+// The check fails closed. A missing file, a missing allowed line, a second
+// allowed line, or a word line of another form is a failure. A missing
+// toolchain line is not a failure. The tool prints one line for each
 // failure. It exits 1 when there is a failure, and 0 when there is none.
+//
+// This is a drift check, not a gate. The command make lint runs it from the
+// tree of the change. A change can edit the tool and the check together.
 package main
 
 import (
@@ -42,32 +57,90 @@ const (
 	maxFileBytes = 1 << 20
 )
 
-// place is a kind of line that must be in a file exactly once. The target
-// selects the lines that count. The form is the one valid text of such a
-// line. The want text names that form in a failure message.
-type place struct {
-	what   string
-	target *regexp.Regexp
-	form   *regexp.Regexp
-	want   string
+// allowed is one line that a word line may be. The line must be in the file
+// once, or at most once when optional is set. The groups of re hold the
+// values that check compares.
+type allowed struct {
+	what     string
+	re       *regexp.Regexp
+	optional bool
 }
 
-var (
-	goPlace = place{"go", regexp.MustCompile(`^go(\s|$)`),
-		regexp.MustCompile(`^go (` + versionRE + `)$`), "go <x>.<y>.<z>"}
-	toolchainPlace = place{"toolchain", regexp.MustCompile(`^toolchain(\s|$)`),
-		regexp.MustCompile(`^toolchain go(` + versionRE + `)$`), "toolchain go<x>.<y>.<z>"}
-	makePlace = place{"GOTOOLCHAIN assignment",
-		regexp.MustCompile(`^ *((override|export) +)*GOTOOLCHAIN *[:?+!]*=`),
-		regexp.MustCompile(`^GOTOOLCHAIN := go(` + versionRE + `)$`), "GOTOOLCHAIN := go<x>.<y>.<z>"}
-	ciEnvPlace = place{"GOTOOLCHAIN", regexp.MustCompile(`^ *GOTOOLCHAIN *:`),
-		regexp.MustCompile(`^ *GOTOOLCHAIN: go(` + versionRE + `)$`), "GOTOOLCHAIN: go<x>.<y>.<z>"}
-	ciImagePlace = place{"image", regexp.MustCompile(`^ *image *:`),
-		regexp.MustCompile(`^ *image: (\S+)$`), "image: <image>"}
-	fromPlace = place{"FROM", regexp.MustCompile(`(?i)^ *FROM(\s|$)`),
-		regexp.MustCompile(`^FROM (golang:(` + versionRE + `)@` + digestRE + `)$`),
-		"FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>"}
+// rule is the allow list of one file. A line that starts with the comment
+// text, after spaces and tabs, is a comment line. With joins set, a
+// comment line that ends in a backslash fails.
+type rule struct {
+	comment string
+	joins   bool
+	word    func(line string) bool
+	allowed []allowed
+}
+
+// The indexes of the allowed lines in each rule, and of the groups that
+// check compares.
+const (
+	goLine, toolchainLine = 0, 1
+	makeAssign            = 0
+	ciEnv, ciImage        = 0, 2
+	dockerFrom            = 0
+
+	versionGroup     = 1
+	imageGroup       = 1
+	fromVersionGroup = 2
 )
+
+func hasWord(words ...string) func(string) bool {
+	return func(l string) bool {
+		for _, w := range words {
+			if strings.Contains(l, w) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func firstField(l string) string {
+	if f := strings.Fields(l); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
+var rules = map[string]rule{
+	goModFile: {comment: "//",
+		word: func(l string) bool {
+			f := firstField(l)
+			return f == "go" || f == "toolchain"
+		},
+		allowed: []allowed{
+			{"go", regexp.MustCompile(`^go (` + versionRE + `)$`), false},
+			{"toolchain", regexp.MustCompile(`^toolchain go(` + versionRE + `)$`), true},
+		}},
+	makeFile: {comment: "#", joins: true,
+		word: hasWord("GOTOOLCHAIN"),
+		allowed: []allowed{
+			{"GOTOOLCHAIN assignment", regexp.MustCompile(`^GOTOOLCHAIN := go(` + versionRE + `)$`), false},
+			{"export GOTOOLCHAIN", regexp.MustCompile(`^export GOTOOLCHAIN$`), false},
+		}},
+	ciFile: {comment: "#",
+		word: func(l string) bool {
+			return hasWord("GOTOOLCHAIN", "container", "docker://")(l) ||
+				strings.Contains(strings.ToLower(l), "image")
+		},
+		allowed: []allowed{
+			{"GOTOOLCHAIN", regexp.MustCompile(`^  GOTOOLCHAIN: go(` + versionRE + `)$`), false},
+			{"container", regexp.MustCompile(`^ +container:$`), false},
+			{"image", regexp.MustCompile(`^ +image: (\S+)$`), false},
+		}},
+	dockerFile: {comment: "#",
+		word: func(l string) bool {
+			return strings.EqualFold(firstField(l), "FROM") || strings.Contains(l, "GOTOOLCHAIN")
+		},
+		allowed: []allowed{
+			{"FROM", regexp.MustCompile(`^FROM (golang:(` + versionRE + `)@` + digestRE + `)$`), false},
+		}},
+}
 
 // source is a file after the read. Its lines are nil when the read failed.
 type source struct {
@@ -76,8 +149,9 @@ type source struct {
 	ok    bool
 }
 
-// spot is the one line that find found. The sub field holds the groups of
-// the form. Item 0 is the whole line.
+// spot is the one line that audit found for an allowed line. The sub field
+// holds the groups of the allowed line, and is nil when there is no such
+// line. Item 0 is the whole line.
 type spot struct {
 	file string
 	line int
@@ -85,6 +159,8 @@ type spot struct {
 }
 
 func (s spot) String() string { return fmt.Sprintf("%s:%d", s.file, s.line) }
+
+func (s spot) found() bool { return s.sub != nil }
 
 func main() { os.Exit(run(".", os.Stdout, os.Stderr)) }
 
@@ -106,45 +182,32 @@ func run(dir string, stdout, stderr io.Writer) int {
 // agree.
 func check(dir string) []string {
 	var fails []string
-	goMod := load(dir, goModFile, &fails)
-	mk := load(dir, makeFile, &fails)
-	ci := load(dir, ciFile, &fails)
-	df := load(dir, dockerFile, &fails)
+	goMod := audit(load(dir, goModFile, &fails), rules[goModFile], &fails)
+	mk := audit(load(dir, makeFile, &fails), rules[makeFile], &fails)
+	ci := audit(load(dir, ciFile, &fails), rules[ciFile], &fails)
+	df := audit(load(dir, dockerFile, &fails), rules[dockerFile], &fails)
 
-	goLine, goOK := find(goMod, goPlace, false, &fails)
-	tcLine, tcOK := find(goMod, toolchainPlace, true, &fails)
-	mkLine, mkOK := find(mk, makePlace, false, &fails)
-	ciLine, ciOK := find(ci, ciEnvPlace, false, &fails)
-	imLine, imOK := find(ci, ciImagePlace, false, &fails)
-	dfLine, dfOK := find(df, fromPlace, false, &fails)
-
-	if goOK {
-		if tcOK {
-			sameVersion(&fails, tcLine, 1, goLine)
-		}
-		if mkOK {
-			sameVersion(&fails, mkLine, 1, goLine)
-		}
-		if ciOK {
-			sameVersion(&fails, ciLine, 1, goLine)
-		}
-		if dfOK {
-			sameVersion(&fails, dfLine, 2, goLine)
-		}
+	goSpot := goMod[goLine]
+	if goSpot.found() {
+		sameVersion(&fails, goMod[toolchainLine], versionGroup, goSpot)
+		sameVersion(&fails, mk[makeAssign], versionGroup, goSpot)
+		sameVersion(&fails, ci[ciEnv], versionGroup, goSpot)
+		sameVersion(&fails, df[dockerFrom], fromVersionGroup, goSpot)
 	}
-	if dfOK && imOK && dfLine.sub[1] != imLine.sub[1] {
+	from, image := df[dockerFrom], ci[ciImage]
+	if from.found() && image.found() && from.sub[imageGroup] != image.sub[imageGroup] {
 		fails = append(fails, fmt.Sprintf("%s: image %q is not the image %q of %s",
-			imLine, imLine.sub[1], dfLine.sub[1], dfLine))
+			image, image.sub[imageGroup], from.sub[imageGroup], from))
 	}
 	return fails
 }
 
-// sameVersion adds a failure when the version of s is not the version of
-// the go line. Group i of s holds the version.
-func sameVersion(fails *[]string, s spot, i int, goLine spot) {
-	if s.sub[i] != goLine.sub[1] {
+// sameVersion adds a failure when s is there and its version is not the
+// version of the go line. Group i of s holds the version.
+func sameVersion(fails *[]string, s spot, i int, goSpot spot) {
+	if s.found() && s.sub[i] != goSpot.sub[1] {
 		*fails = append(*fails, fmt.Sprintf("%s: version %q is not version %q of %s",
-			s, s.sub[i], goLine.sub[1], goLine))
+			s, s.sub[i], goSpot.sub[1], goSpot))
 	}
 }
 
@@ -176,42 +239,61 @@ func readLimited(path string) ([]byte, error) {
 	return data, nil
 }
 
-// find looks for the one line of src that the target of p selects. A comment
-// line never counts. It returns false and adds a failure in three cases.
-// The first case is no such line. The second is two or more lines. The
-// third is a line that is not of the form of p. With optional set, a
-// missing line is not a failure. A source that failed to load gives false
-// and no failure, because load reported it.
-func find(src source, p place, optional bool, fails *[]string) (spot, bool) {
+// audit applies the rule to the lines of src. It returns one spot for each
+// allowed line of the rule. A spot is empty when its line is missing, or
+// when there are two or more. Each failure adds one text. A source that
+// failed to load gives empty spots and no failure, because load reported it.
+// A missing line is not reported when the file has a word line of another
+// form, because that line is the failure.
+func audit(src source, r rule, fails *[]string) []spot {
+	spots := make([]spot, len(r.allowed))
 	if !src.ok {
-		return spot{}, false
+		return spots
 	}
-	var hits []int
+	hits := make([][]spot, len(r.allowed))
+	other := false
 	for i, l := range src.lines {
-		if strings.HasPrefix(strings.TrimLeft(l, " \t"), "#") {
+		n := i + 1
+		if strings.HasPrefix(strings.TrimLeft(l, " \t"), r.comment) {
+			if r.joins && strings.HasSuffix(l, `\`) {
+				*fails = append(*fails, fmt.Sprintf("%s:%d: comment line %q ends in a backslash",
+					src.name, n, l))
+			}
 			continue
 		}
-		if p.target.MatchString(l) {
-			hits = append(hits, i+1)
+		if !r.word(l) {
+			continue
+		}
+		match := false
+		for j, a := range r.allowed {
+			if sub := a.re.FindStringSubmatch(l); sub != nil {
+				hits[j] = append(hits[j], spot{src.name, n, sub})
+				match = true
+				break
+			}
+		}
+		if !match {
+			other = true
+			*fails = append(*fails, fmt.Sprintf("%s:%d: line %q is not an allowed line",
+				src.name, n, l))
 		}
 	}
-	switch {
-	case len(hits) == 0:
-		if !optional {
-			*fails = append(*fails, fmt.Sprintf("%s: no %s line", src.name, p.what))
+	for j, a := range r.allowed {
+		switch {
+		case len(hits[j]) == 0:
+			if !a.optional && !other {
+				*fails = append(*fails, fmt.Sprintf("%s: no %s line", src.name, a.what))
+			}
+		case len(hits[j]) > 1:
+			lines := make([]int, len(hits[j]))
+			for k, h := range hits[j] {
+				lines[k] = h.line
+			}
+			*fails = append(*fails, fmt.Sprintf("%s:%d: %d %s lines (lines %v), one allowed",
+				src.name, lines[1], len(lines), a.what, lines))
+		default:
+			spots[j] = hits[j][0]
 		}
-		return spot{}, false
-	case len(hits) > 1:
-		*fails = append(*fails, fmt.Sprintf("%s:%d: %d %s lines (lines %v), one needed",
-			src.name, hits[1], len(hits), p.what, hits))
-		return spot{}, false
 	}
-	text := src.lines[hits[0]-1]
-	sub := p.form.FindStringSubmatch(text)
-	if sub == nil {
-		*fails = append(*fails, fmt.Sprintf("%s:%d: %s line %q is not of the form %q",
-			src.name, hits[0], p.what, text, p.want))
-		return spot{}, false
-	}
-	return spot{file: src.name, line: hits[0], sub: sub}, true
+	return spots
 }

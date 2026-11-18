@@ -19,7 +19,8 @@ var (
 type files map[string]string
 
 // baseFiles returns copies of the four files that agree. Line numbers in
-// the expected messages below come from these texts.
+// the expected messages below come from these texts. The comment lines name
+// the key words on purpose: a comment line must never count.
 func baseFiles() files {
 	return files{
 		goModFile: "module example.com/x\n\ngo 1.27.3\n",
@@ -69,8 +70,18 @@ func skew(file string, line int, got, want, goLine string) string {
 	return fmt.Sprintf("%s:%d: version %q is not version %q of %s", file, line, got, want, goLine)
 }
 
-func badForm(file string, line int, what, text, want string) string {
-	return fmt.Sprintf("%s:%d: %s line %q is not of the form %q", file, line, what, text, want)
+func notAllowed(file string, line int, text string) string {
+	return fmt.Sprintf("%s:%d: line %q is not an allowed line", file, line, text)
+}
+
+// shortNames gives the failures of check with ci.yml by its short name, as
+// the cases below write it.
+func shortNames(fails []string) []string {
+	out := slices.Clone(fails)
+	for i := range out {
+		out[i] = strings.ReplaceAll(out[i], ciFile, "ci.yml")
+	}
+	return out
 }
 
 func TestRepoFilesAgree(t *testing.T) {
@@ -95,8 +106,17 @@ func TestAgreeingVariants(t *testing.T) {
 				f[name] = strings.ReplaceAll(f[name], "1.27.3", "10.27.30")
 			}
 		},
-		"export line is not an assignment": func(t *testing.T, f files) {
-			f.edit(t, makeFile, "export GOTOOLCHAIN\n", "export GOTOOLCHAIN\nexport GOTOOLCHAIN\n")
+		"comment lines that name the key words": func(t *testing.T, f files) {
+			f[goModFile] += "// go 1.0.0\n\t// toolchain go1.0.0\n"
+			f[makeFile] += "# GOTOOLCHAIN := go1.0.0\n\t# export GOTOOLCHAIN\n  # unexport GOTOOLCHAIN\n"
+			f[ciFile] += "  # image: x\n\t# container: golang:1.0.0\n    # uses: docker://x\n    # GOTOOLCHAIN: go1.0.0\n"
+			f[dockerFile] += "# ENV GOTOOLCHAIN=go1.0.0\n  # FROM scratch\n"
+		},
+		"lines without a key word": func(t *testing.T, f files) {
+			f[goModFile] += "\nrequire (\n\tgo.uber.org/x v1.0.0\n)\n"
+			f[makeFile] += "all:\n\tgo test ./...\n"
+			f[ciFile] += "    runs-on: ubuntu-latest\n"
+			f[dockerFile] += "RUN go version\n"
 		},
 	}
 	for name, mod := range cases {
@@ -143,7 +163,14 @@ func TestDisagreement(t *testing.T) {
 			mod: func(t *testing.T, f files) {
 				f.edit(t, ciFile, "    container:\n", "    env:\n      GOTOOLCHAIN: go1.27.3\n    container:\n")
 			},
-			want: []string{"ci.yml:8: 2 GOTOOLCHAIN lines (lines [4 8]), one needed"},
+			want: []string{notAllowed("ci.yml", 8, "      GOTOOLCHAIN: go1.27.3")},
+		},
+		{
+			name: "second GOTOOLCHAIN key at the indent of the first",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, ciFile, "jobs:\n", "  GOTOOLCHAIN: go1.27.3\njobs:\n")
+			},
+			want: []string{"ci.yml:5: 2 GOTOOLCHAIN lines (lines [4 5]), one allowed"},
 		},
 		{
 			name: "ci.yml image digest differs from the Dockerfile digest",
@@ -181,176 +208,153 @@ func TestDisagreement(t *testing.T) {
 			mod: func(t *testing.T, f files) {
 				f.edit(t, goModFile, "go 1.27.3\n", "go 1.27.3\n\ntoolchain 1.27.3\n")
 			},
-			want: []string{badForm(goModFile, 5, "toolchain", "toolchain 1.27.3", "toolchain go<x>.<y>.<z>")},
+			want: []string{notAllowed(goModFile, 5, "toolchain 1.27.3")},
 		},
 		{
 			name: "second toolchain line",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, goModFile, "go 1.27.3\n", "go 1.27.3\n\ntoolchain go1.27.3\n\ntoolchain go1.27.3\n")
 			},
-			want: []string{"go.mod:7: 2 toolchain lines (lines [5 7]), one needed"},
+			want: []string{"go.mod:7: 2 toolchain lines (lines [5 7]), one allowed"},
 		},
 		{
 			name: "second go line",
 			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3\n", "go 1.27.3\ngo 1.27.3\n") },
-			want: []string{"go.mod:4: 2 go lines (lines [3 4]), one needed"},
-		},
-		{
-			name: "second Makefile assignment with =",
-			mod: func(t *testing.T, f files) {
-				f.edit(t, makeFile, "export", "GOTOOLCHAIN = go1.27.3\nexport")
-			},
-			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one needed"},
-		},
-		{
-			name: "second Makefile assignment with ?=",
-			mod: func(t *testing.T, f files) {
-				f.edit(t, makeFile, "export", "GOTOOLCHAIN ?= go1.27.3\nexport")
-			},
-			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one needed"},
-		},
-		{
-			name: "second Makefile assignment with +=",
-			mod: func(t *testing.T, f files) {
-				f.edit(t, makeFile, "export", "GOTOOLCHAIN += go1.27.3\nexport")
-			},
-			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one needed"},
+			want: []string{"go.mod:4: 2 go lines (lines [3 4]), one allowed"},
 		},
 		{
 			name: "second Makefile assignment with :=",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, makeFile, "export", "GOTOOLCHAIN := go1.27.3\nexport")
 			},
-			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one needed"},
+			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one allowed"},
 		},
 		{
-			name: "export with an assignment is a second assignment",
+			name: "second export line",
 			mod: func(t *testing.T, f files) {
-				f.edit(t, makeFile, "export GOTOOLCHAIN\n", "export GOTOOLCHAIN := go1.27.3\n")
+				f.edit(t, makeFile, "export GOTOOLCHAIN\n", "export GOTOOLCHAIN\nexport GOTOOLCHAIN\n")
 			},
-			want: []string{"Makefile:3: 2 GOTOOLCHAIN assignment lines (lines [2 3]), one needed"},
+			want: []string{"Makefile:4: 2 export GOTOOLCHAIN lines (lines [3 4]), one allowed"},
 		},
 		{
-			name: "second image line",
+			name: "second container line",
 			mod: func(t *testing.T, f files) {
-				f.edit(t, ciFile, "    container:\n", "    services:\n      image: golang:1.27.3\n    container:\n")
+				f.edit(t, ciFile, "    container:\n", "    container:\n    container:\n")
 			},
-			want: []string{"ci.yml:10: 2 image lines (lines [8 10]), one needed"},
+			want: []string{"ci.yml:8: 2 container lines (lines [7 8]), one allowed"},
+		},
+		{
+			name: "second image line at a deeper indent",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, ciFile, "    container:\n", "    services:\n          image: golang:1.27.3\n    container:\n")
+			},
+			want: []string{"ci.yml:10: 2 image lines (lines [8 10]), one allowed"},
 		},
 		{
 			name: "second FROM line",
 			mod: func(t *testing.T, f files) {
 				f[dockerFile] += "FROM golang:1.27.3@sha256:" + digestA + "\n"
 			},
-			want: []string{".devcontainer/Dockerfile:3: 2 FROM lines (lines [2 3]), one needed"},
+			want: []string{".devcontainer/Dockerfile:3: 2 FROM lines (lines [2 3]), one allowed"},
 		},
 		{
-			name: "second FROM line in lower case",
-			mod:  func(t *testing.T, f files) { f[dockerFile] += "from scratch\n" },
-			want: []string{".devcontainer/Dockerfile:3: 2 FROM lines (lines [2 3]), one needed"},
+			name: "comment line that ends in a backslash",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, makeFile, "# GOTOOLCHAIN := go1.0.0", "# note \\")
+			},
+			want: []string{`Makefile:1: comment line "# note \\" ends in a backslash`},
 		},
 		{
-			name: "go line with a part missing",
-			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3", "go 1.27") },
-			want: []string{badForm(goModFile, 3, "go", "go 1.27", "go <x>.<y>.<z>")},
-		},
-		{
-			name: "go line with a suffix",
-			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3", "go 1.27.3-rc1") },
-			want: []string{badForm(goModFile, 3, "go", "go 1.27.3-rc1", "go <x>.<y>.<z>")},
-		},
-		{
-			name: "go line with a comment",
-			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3", "go 1.27.3 // pin") },
-			want: []string{badForm(goModFile, 3, "go", "go 1.27.3 // pin", "go <x>.<y>.<z>")},
-		},
-		{
-			name: "go line with a prefix part",
-			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3", "go 1.1.27.3") },
-			want: []string{badForm(goModFile, 3, "go", "go 1.1.27.3", "go <x>.<y>.<z>")},
-		},
-		{
-			name: "go line with no version",
-			mod:  func(t *testing.T, f files) { f.edit(t, goModFile, "go 1.27.3", "go") },
-			want: []string{badForm(goModFile, 3, "go", "go", "go <x>.<y>.<z>")},
+			name: "indented comment line that ends in a backslash",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, makeFile, "export", "\t# note \\\nexport")
+			},
+			want: []string{`Makefile:3: comment line "\t# note \\" ends in a backslash`},
 		},
 		{
 			name: "Makefile assignment with =",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, makeFile, "GOTOOLCHAIN := go1.27.3", "GOTOOLCHAIN = go1.27.3")
 			},
-			want: []string{badForm(makeFile, 2, "GOTOOLCHAIN assignment", "GOTOOLCHAIN = go1.27.3", "GOTOOLCHAIN := go<x>.<y>.<z>")},
+			want: []string{notAllowed(makeFile, 2, "GOTOOLCHAIN = go1.27.3")},
 		},
 		{
 			name: "Makefile assignment without the go prefix",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, makeFile, "GOTOOLCHAIN := go1.27.3", "GOTOOLCHAIN := 1.27.3")
 			},
-			want: []string{badForm(makeFile, 2, "GOTOOLCHAIN assignment", "GOTOOLCHAIN := 1.27.3", "GOTOOLCHAIN := go<x>.<y>.<z>")},
+			want: []string{notAllowed(makeFile, 2, "GOTOOLCHAIN := 1.27.3")},
 		},
 		{
 			name: "Makefile assignment with override",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, makeFile, "GOTOOLCHAIN := go1.27.3", "override GOTOOLCHAIN := go1.27.3")
 			},
-			want: []string{badForm(makeFile, 2, "GOTOOLCHAIN assignment", "override GOTOOLCHAIN := go1.27.3", "GOTOOLCHAIN := go<x>.<y>.<z>")},
+			want: []string{notAllowed(makeFile, 2, "override GOTOOLCHAIN := go1.27.3")},
+		},
+		{
+			name: "export with an assignment",
+			mod: func(t *testing.T, f files) {
+				f.edit(t, makeFile, "export GOTOOLCHAIN\n", "export GOTOOLCHAIN := go1.27.3\n")
+			},
+			want: []string{notAllowed(makeFile, 3, "export GOTOOLCHAIN := go1.27.3")},
 		},
 		{
 			name: "ci.yml GOTOOLCHAIN with a local value",
 			mod:  func(t *testing.T, f files) { f.edit(t, ciFile, "GOTOOLCHAIN: go1.27.3", "GOTOOLCHAIN: local") },
-			want: []string{badForm(ciFile, 4, "GOTOOLCHAIN", "  GOTOOLCHAIN: local", "GOTOOLCHAIN: go<x>.<y>.<z>")},
+			want: []string{notAllowed("ci.yml", 4, "  GOTOOLCHAIN: local")},
 		},
 		{
 			name: "ci.yml GOTOOLCHAIN with a trailing comment",
 			mod: func(t *testing.T, f files) {
 				f.edit(t, ciFile, "GOTOOLCHAIN: go1.27.3", "GOTOOLCHAIN: go1.27.3 # pin")
 			},
-			want: []string{badForm(ciFile, 4, "GOTOOLCHAIN", "  GOTOOLCHAIN: go1.27.3 # pin", "GOTOOLCHAIN: go<x>.<y>.<z>")},
+			want: []string{notAllowed("ci.yml", 4, "  GOTOOLCHAIN: go1.27.3 # pin")},
 		},
 		{
 			name: "ci.yml image with two words",
 			mod:  func(t *testing.T, f files) { f.edit(t, ciFile, "      image: golang", "      image: x golang") },
-			want: []string{badForm(ciFile, 8, "image", "      image: x golang:1.27.3@sha256:"+digestA, "image: <image>")},
+			want: []string{notAllowed("ci.yml", 8, "      image: x golang:1.27.3@sha256:"+digestA)},
+		},
+		{
+			name: "ci.yml container with a trailing comment",
+			mod:  func(t *testing.T, f files) { f.edit(t, ciFile, "    container:\n", "    container: # c\n") },
+			want: []string{notAllowed("ci.yml", 7, "    container: # c")},
 		},
 		{
 			name: "Dockerfile FROM without a digest",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, "@sha256:"+digestA, "") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3", "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3")},
 		},
 		{
 			name: "Dockerfile FROM with 63 hex digits",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, digestA, digestA[1:]) },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha256:"+digestA[1:], "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha256:"+digestA[1:])},
 		},
 		{
 			name: "Dockerfile FROM with 65 hex digits",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, digestA, digestA+"a") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha256:"+digestA+"a", "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha256:"+digestA+"a")},
 		},
 		{
 			name: "Dockerfile FROM with an upper-case digit",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, "sha256:a", "sha256:A") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha256:A"+digestA[1:], "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha256:A"+digestA[1:])},
 		},
 		{
 			name: "Dockerfile FROM with a non-hex digit",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, "sha256:a", "sha256:g") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha256:g"+digestA[1:], "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha256:g"+digestA[1:])},
 		},
 		{
 			name: "Dockerfile FROM with another algorithm",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, "sha256:", "sha512:") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha512:"+digestA, "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha512:"+digestA)},
 		},
 		{
 			name: "Dockerfile FROM with a stage name",
 			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, digestA+"\n", digestA+" AS dev\n") },
-			want: []string{badForm(dockerFile, 2, "FROM", "FROM golang:1.27.3@sha256:"+digestA+" AS dev", "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
-		},
-		{
-			name: "Dockerfile FROM in lower case",
-			mod:  func(t *testing.T, f files) { f.edit(t, dockerFile, "\nFROM", "\nfrom") },
-			want: []string{badForm(dockerFile, 2, "FROM", "from golang:1.27.3@sha256:"+digestA, "FROM golang:<x>.<y>.<z>@sha256:<64 hex digits>")},
+			want: []string{notAllowed(dockerFile, 2, "FROM golang:1.27.3@sha256:"+digestA+" AS dev")},
 		},
 		{
 			name: "no go line",
@@ -363,9 +367,19 @@ func TestDisagreement(t *testing.T) {
 			want: []string{"Makefile: no GOTOOLCHAIN assignment line"},
 		},
 		{
+			name: "no export line in the Makefile",
+			mod:  func(t *testing.T, f files) { f.edit(t, makeFile, "export GOTOOLCHAIN\n", "") },
+			want: []string{"Makefile: no export GOTOOLCHAIN line"},
+		},
+		{
 			name: "no GOTOOLCHAIN key in ci.yml",
 			mod:  func(t *testing.T, f files) { f.edit(t, ciFile, "  GOTOOLCHAIN: go1.27.3\n", "") },
 			want: []string{"ci.yml: no GOTOOLCHAIN line"},
+		},
+		{
+			name: "no container key in ci.yml",
+			mod:  func(t *testing.T, f files) { f.edit(t, ciFile, "    container:\n", "") },
+			want: []string{"ci.yml: no container line"},
 		},
 		{
 			name: "no image key in ci.yml",
@@ -386,15 +400,89 @@ func TestDisagreement(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := baseFiles()
 			c.mod(t, f)
+			got := shortNames(check(f.write(t)))
+			want := shortNames(c.want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("got failures:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// TestRejectedForms tests each other form of a line with a key word. The
+// form is added as a new line, or it replaces the line named by old. The
+// only failure is that the new line is not an allowed line.
+func TestRejectedForms(t *testing.T) {
+	cases := []struct {
+		name string
+		file string
+		old  string // the line that the form replaces; empty to add the form
+		text string // the form, one line
+	}{
+		// go.mod
+		{"go.mod indented toolchain line", goModFile, "", " toolchain go1.28.0"},
+		{"go.mod toolchain line after a tab", goModFile, "", "\ttoolchain go1.28.0"},
+		{"go.mod go line after a tab, added", goModFile, "", "\tgo 1.27.3"},
+		{"go.mod go line after a tab, replaced", goModFile, "go 1.27.3", "\tgo 1.27.3"},
+		{"go.mod go line with a tab as the separator", goModFile, "go 1.27.3", "go\t1.27.3"},
+		{"go.mod toolchain line with a comment", goModFile, "", "toolchain go1.27.3 // pin"},
+		// Makefile
+		{"Makefile tab before :=", makeFile, "", "GOTOOLCHAIN\t:= go1.2.3"},
+		{"Makefile tab before :=, replaced", makeFile, "GOTOOLCHAIN := go1.27.3", "GOTOOLCHAIN\t:= go1.27.3"},
+		{"Makefile export with a tab", makeFile, "", "export\tGOTOOLCHAIN := go1.2.3"},
+		{"Makefile export with a tab and no value", makeFile, "export GOTOOLCHAIN", "export\tGOTOOLCHAIN"},
+		{"Makefile leading tab", makeFile, "", "\tGOTOOLCHAIN := go1.2.3"},
+		{"Makefile leading tab, replaced", makeFile, "GOTOOLCHAIN := go1.27.3", "\tGOTOOLCHAIN := go1.27.3"},
+		{"Makefile leading space on export", makeFile, "export GOTOOLCHAIN", " export GOTOOLCHAIN"},
+		{"Makefile assignment with a comment", makeFile, "GOTOOLCHAIN := go1.27.3", "GOTOOLCHAIN := go1.27.3 # pin"},
+		{"Makefile export with a comment", makeFile, "export GOTOOLCHAIN", "export GOTOOLCHAIN # pin"},
+		{"Makefile target-specific assignment", makeFile, "", "lint: GOTOOLCHAIN := go1.2.3"},
+		{"Makefile define", makeFile, "", "define GOTOOLCHAIN\ngo1.2.3\nendef"},
+		{"Makefile unexport", makeFile, "", "unexport GOTOOLCHAIN"},
+		{"Makefile undefine", makeFile, "", "undefine GOTOOLCHAIN"},
+		{"Makefile recipe line", makeFile, "", "\tGOTOOLCHAIN=go1.2.3 go vet ./..."},
+		{"Makefile go command with the variable", makeFile, "", "GO := GOTOOLCHAIN=go1.27.2 go"},
+		{"Makefile eval", makeFile, "", "$(eval GOTOOLCHAIN := go1.2.3)"},
+		// ci.yml
+		{"ci.yml double-quoted key", ciFile, "", "    \"GOTOOLCHAIN\": go1.2.3"},
+		{"ci.yml single-quoted key", ciFile, "", "    'GOTOOLCHAIN': go1.2.3"},
+		{"ci.yml flow mapping", ciFile, "", "    env: {GOTOOLCHAIN: go1.2.3}"},
+		{"ci.yml make argument", ciFile, "", "    run: make perf GOTOOLCHAIN=go1.2.3"},
+		{"ci.yml GITHUB_ENV", ciFile, "", "    run: echo GOTOOLCHAIN=go1.2.3 >> $GITHUB_ENV"},
+		{"ci.yml only key moved into a job env", ciFile, "  GOTOOLCHAIN: go1.27.3", "    GOTOOLCHAIN: go1.27.3"},
+		{"ci.yml key after a prefix", ciFile, "  GOTOOLCHAIN: go1.27.3", "x  GOTOOLCHAIN: go1.27.3"},
+		{"ci.yml container with a string", ciFile, "", "    container: golang:1.2.3"},
+		{"ci.yml container with a string, replaced", ciFile, "    container:", "    container: golang:1.27.3"},
+		{"ci.yml container after a dash", ciFile, "    container:", "    - container:"},
+		{"ci.yml container in a flow mapping", ciFile, "", "    container: {image: golang:1.2.3}"},
+		{"ci.yml quoted image key", ciFile, "", "      \"image\": golang:1.2.3"},
+		{"ci.yml image key in upper case", ciFile, "", "      IMAGE: golang:1.2.3"},
+		{"ci.yml image after a dash", ciFile, "      image: golang", "      - image: golang"},
+		{"ci.yml image without indent", ciFile, "      image: golang", "image: golang"},
+		{"ci.yml docker image in uses", ciFile, "", "      - uses: docker://golang:1.2.3"},
+		// Dockerfile
+		{"Dockerfile FROM after a tab, added", dockerFile, "", "\tFROM golang:1.2.3"},
+		{"Dockerfile FROM after a tab, replaced", dockerFile, "FROM golang:1.27.3", "\tFROM golang:1.27.3"},
+		{"Dockerfile FROM after a space", dockerFile, "", " FROM golang:1.2.3"},
+		{"Dockerfile FROM in lower case, added", dockerFile, "", "from scratch"},
+		{"Dockerfile FROM in lower case, replaced", dockerFile, "FROM golang:1.27.3", "from golang:1.27.3"},
+		{"Dockerfile FROM in mixed case", dockerFile, "", "From scratch"},
+		{"Dockerfile ENV GOTOOLCHAIN", dockerFile, "", "ENV GOTOOLCHAIN=go1.27.3"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := baseFiles()
+			var line int
+			if c.old == "" {
+				line = strings.Count(f[c.file], "\n") + 1
+				f[c.file] += c.text + "\n"
+			} else {
+				line = strings.Count(f[c.file][:strings.Index(f[c.file], c.old)], "\n") + 1
+				f.edit(t, c.file, c.old, c.text)
+			}
+			text := strings.Split(f[c.file], "\n")[line-1]
 			got := check(f.write(t))
-			// A message names ci.yml by its path. The cases use the short name.
-			for i := range got {
-				got[i] = strings.ReplaceAll(got[i], ciFile, "ci.yml")
-			}
-			want := slices.Clone(c.want)
-			for i := range want {
-				want[i] = strings.ReplaceAll(want[i], ciFile, "ci.yml")
-			}
+			want := []string{notAllowed(c.file, line, text)}
 			if !slices.Equal(got, want) {
 				t.Fatalf("got failures:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
