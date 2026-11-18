@@ -28,6 +28,18 @@ func schema4Set(tb testing.TB) fstest.MapFS {
 	return set
 }
 
+// schema5Set is the embedded first five migrations: the schema of version 5.
+func schema5Set(tb testing.TB) fstest.MapFS {
+	tb.Helper()
+	set := schema4Set(tb)
+	b, err := migrationFiles.ReadFile("migrations/0005_raw_index.sql")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	set["0005_raw_index.sql"] = &fstest.MapFile{Data: b}
+	return set
+}
+
 // schema4DB returns a database of schema 4 in the state directory root.
 func schema4DB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -54,11 +66,11 @@ func rawEntries(t *testing.T, db *sql.DB) int {
 	return count(t, db, "SELECT coalesce(sum(ncell), 0) FROM dbstat WHERE name = 'event_raw_ts' AND pagetype = 'leaf'")
 }
 
-// T-U-18: a new database has schema_version 5. It has the index event_raw_ts
+// T-U-18: a new database has schema_version 6. It has the index event_raw_ts
 // with its fixed text. The event table text is the text of schema 4.
 func TestTU18NewDatabaseHasRawIndex(t *testing.T) {
 	db := migrated(t)
-	if v := metaValue(t, db, "schema_version"); v != "5" {
+	if v := metaValue(t, db, "schema_version"); v != "6" {
 		t.Fatalf("schema_version %s", v)
 	}
 	if got := rawText(t, db, "SELECT sql FROM sqlite_master WHERE name = 'event_raw_ts'"); got != rawIndexText {
@@ -86,7 +98,7 @@ func TestTU18MigrationFromSchema4DropsMarkAndIndexesRows(t *testing.T) {
 	} {
 		mustExec(t, db, s)
 	}
-	if err := Migrate(db, "origin"); err != nil {
+	if err := migrate(db, schema5Set(t), "origin"); err != nil {
 		t.Fatal(err)
 	}
 	if v := metaValue(t, db, "schema_version"); v != "5" {

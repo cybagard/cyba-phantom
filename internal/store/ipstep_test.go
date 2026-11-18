@@ -273,9 +273,10 @@ func schemaEntries(t *testing.T, db *sql.DB) map[string]schemaEntry {
 	return out
 }
 
-// T-U-11: a database of schema 2 with a row in each table gets schema 5. Each
+// T-U-11: a database of schema 2 with a row in each table gets schema 6. Each
 // old entry keeps its SQL text and its root page, so no table is rebuilt. The
-// row counts stay. The only new entries are three indexes and rollup_seen.
+// row counts stay. The only new entries are three indexes, rollup_seen and
+// clock_jump.
 func TestTU11MigrationAddsThreeIndexesAndTheSeenTableWithoutRebuild(t *testing.T) {
 	root, _, _ := newState(t)
 	db := mustOpen(t, root, "events.db")
@@ -301,7 +302,7 @@ func TestTU11MigrationAddsThreeIndexesAndTheSeenTableWithoutRebuild(t *testing.T
 		t.Fatal(err)
 	}
 	after := schemaEntries(t, db)
-	if v := metaValue(t, db, "schema_version"); v != "5" {
+	if v := metaValue(t, db, "schema_version"); v != "6" {
 		t.Fatalf("schema_version %s", v)
 	}
 	for name, was := range before {
@@ -309,8 +310,8 @@ func TestTU11MigrationAddsThreeIndexesAndTheSeenTableWithoutRebuild(t *testing.T
 			t.Errorf("%s changed: %+v, was %+v", name, after[name], was)
 		}
 	}
-	if len(after) != len(before)+4 || after["session_ip_first"].typ != "index" || after["token_first_cb"].typ != "index" ||
-		after["event_raw_ts"].typ != "index" || after["rollup_seen"].typ != "table" {
+	if len(after) != len(before)+5 || after["session_ip_first"].typ != "index" || after["token_first_cb"].typ != "index" ||
+		after["event_raw_ts"].typ != "index" || after["rollup_seen"].typ != "table" || after["clock_jump"].typ != "table" {
 		t.Errorf("new entries: %+v", after)
 	}
 }

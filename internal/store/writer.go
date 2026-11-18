@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cybagard/cyba-phantom/internal/event"
+	"github.com/cybagard/cyba-phantom/internal/sensortime"
 	"github.com/cybagard/cyba-phantom/internal/session"
 	"github.com/cybagard/cyba-phantom/internal/tlog"
 )
@@ -54,6 +55,14 @@ const (
 //
 // With a disk guard (SetDiskGuard) the writer can also pause. A pause is not a
 // stop (see Paused).
+//
+// After StartClock, the writer also keeps the meta key sensor_time (ADR-043,
+// T-U-30). It writes the key at each hour of boot clock. It also writes it at
+// each retention run before its first chunk and at a clean stop. A clock move
+// that needs it also gives a write. A jump, its clock_jump row and the key are
+// one transaction. A failed key write is a database error: the writer stops.
+// The key write also runs in a disk pause. A writer with no clock writes no
+// key.
 //
 // Healthy, Err, Paused, DiskCheckErrors and Stats are safe to call from any
 // goroutine.
@@ -133,6 +142,18 @@ type Writer struct {
 
 	// beacons holds the sessions of the beacon rows of the batch in progress.
 	beacons beaconSet
+
+	// clk and src are the sensor time clock and its source. StartClock sets
+	// them. A writer with no StartClock call has no clock and writes no key.
+	// The fields below are for the writer goroutine, after StartClock.
+	clk *sensortime.Clock
+	src sensortime.Source
+	// floorEvent and floorSession are the rowid floor that the writer wrote
+	// last. A key write never gives a lower floor.
+	floorEvent, floorSession int64
+	// lastCheck and lastKey are the boot clock of the last clock check and of
+	// the last key write.
+	lastCheck, lastKey time.Duration
 }
 
 // NewWriter returns a writer for db, taking events from q and putting evidence
@@ -179,6 +200,10 @@ func NewWriterWithDayKey(db *sql.DB, q *event.Queue, bodyPrefix bool, log *slog.
 // A retention request makes Run run the retention steps in chunks (see
 // serveRetention). Between two chunks, Run serves a waiting row request. Then
 // it writes at most one batch from the lanes. Then it serves a waiting tick.
+//
+// At each tick, also in a disk pause, Run serves the clock (see serveClock).
+// The two other places that take the tick do the same. A shutdown writes the
+// key after its last batch, when the writer has not stopped.
 //
 // Before the first write, Run does the start check (see start). A stop marker or
 // a failed check stops the writer, and Run goes to the stopped state at once.
@@ -246,6 +271,7 @@ func (w *Writer) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-tick:
 			batch = w.flush(batch)
+			w.serveClock()
 		case rq := <-w.rows:
 			w.serveRow(rq)
 		case rq := <-w.retention:
@@ -319,6 +345,7 @@ func (w *Writer) serveWaiting(tick <-chan time.Time, batch []*event.Event) []*ev
 	select {
 	case <-tick:
 		batch = w.flush(batch)
+		w.serveClock()
 	default:
 	}
 	return batch
@@ -342,6 +369,10 @@ func (w *Writer) shutdown(batch []*event.Event) {
 		if err := w.write(nil); err != nil {
 			w.stop(err)
 		}
+	}
+	// The last key write. A stopped writer writes none.
+	if w.Healthy() {
+		w.writeSnapshot()
 	}
 }
 
