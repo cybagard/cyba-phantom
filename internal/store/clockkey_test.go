@@ -465,8 +465,9 @@ func TestTU30FloorSurvivesADelete(t *testing.T) {
 		t.Fatalf("floors %d, %d after the delete", st.NextEvent, st.NextSession)
 	}
 
-	// A delete of the top rows, then a new writer. The largest rowid plus 1 is
-	// still at or above the first rowid, so only the stored floor keeps 7 and 2.
+	// A delete of the top rows, then a new writer. The largest rowid plus 1
+	// is still at or above the first rowid. So only the stored floor keeps 7
+	// and 2.
 	r, f = rangeRig(t)
 	stop = r.start()
 	f.at(time.Hour)
@@ -538,9 +539,10 @@ func ruleOf(err error) string {
 	return ""
 }
 
-// T-U-30: StartClock gives an error and writes no key. This holds for a stop
-// marker, a read error, a largest rowid with no next rowid, and a largest
-// clock_jump id with no next id. The writer has no clock and does not stop.
+// T-U-30: StartClock gives an error and writes no key. Four cases do this. They
+// are a stop marker, a read error, a largest rowid with no next rowid, and a
+// largest clock_jump id with no next id. The writer has no clock. It does not
+// stop.
 func TestTU30StartClockRefusals(t *testing.T) {
 	for _, c := range []struct{ name, rule, sql string }{
 		{"marker", ruleMarkerExists, ""},
@@ -567,7 +569,7 @@ func TestTU30StartClockRefusals(t *testing.T) {
 	}
 }
 
-// T-U-30: a key write of a running writer with a largest rowid of math.MaxInt64
+// T-U-30: a running writer has a largest rowid of math.MaxInt64. Its key write
 // stops the writer and changes no row.
 func TestTU30KeyWriteRefusesAMaxRowid(t *testing.T) {
 	for _, q := range []string{
@@ -587,8 +589,8 @@ func TestTU30KeyWriteRefusesAMaxRowid(t *testing.T) {
 	}
 }
 
-// T-U-30: a start jump (another boot id, S more than 1 h before the wall) is
-// in the key and has no clock_jump row.
+// T-U-30: a start jump is in the key and has no clock_jump row. The stored key
+// has another boot id, and its S is more than 1 h before the wall.
 func TestTU30StartJumpIsInTheKeyOnly(t *testing.T) {
 	r, f := clockRig(t)
 	src := f.source()
@@ -608,7 +610,7 @@ func TestTU30StartJumpIsInTheKeyOnly(t *testing.T) {
 
 // floodRig is a rig with a started clock and 503 request events in the lanes.
 // Its tick channel has room for one tick. on gets the number of each flush of
-// the writer goroutine, and so can put a tick in the channel at that point.
+// the writer goroutine. So it can put a tick in the channel at that point.
 func floodRig(t *testing.T, on func(n int, tick chan time.Time)) (*rig, *fakeSrc) {
 	t.Helper()
 	r, f := rangeRigOf(t, 600)
@@ -700,8 +702,8 @@ func TestTU30BetweenChunksServesTheClock(t *testing.T) {
 	}
 }
 
-// T-U-30: a failed key write at the start of a retention run gives the error,
-// runs no chunk, makes no retention event, and stops the writer.
+// T-U-30: a key write fails at the start of a retention run. The run gives the
+// error, runs no chunk and makes no retention event. The writer stops.
 func TestTU30FailedKeyWriteAtARunStopsTheRun(t *testing.T) {
 	r, _ := clockRig(t)
 	r.w.beforeCommit = func(*sql.Tx) error { return errors.New("no commit") }
@@ -735,9 +737,9 @@ func TestTU30KeyWriteUsesFullSync(t *testing.T) {
 	}
 }
 
-// T-U-30: a failed synchronous pragma of the key write is a database error and
-// stops the writer. A failed FULL leaves no row, the old key, and the old S. A
-// failed NORMAL comes after the COMMIT: the row and the key are there, and
+// T-U-30: a failed synchronous pragma of the key write is a database error. It
+// stops the writer. A failed FULL leaves no row, the old key and the old S. A
+// failed NORMAL comes after the COMMIT. The row and the key are there, and
 // Committed has run, so Now gives the new S.
 func TestTU30KeyWritePragmaFailureStopsTheWriter(t *testing.T) {
 	for _, c := range []struct {
