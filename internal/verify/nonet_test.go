@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,8 @@ func TestTS14_NoNetworkOrExecImports(t *testing.T) {
 		"github.com/cybagard/cyba-phantom/internal/tlog/verifier",
 		"github.com/cybagard/cyba-phantom/cmd/phantom-verify",
 	}
-	for _, goos := range []string{"linux", "darwin"} {
+	supported := []string{"linux", "darwin"}
+	for _, goos := range supported {
 		for _, goarch := range []string{"amd64", "arm64"} {
 			for _, cgo := range []string{"0", "1"} {
 				t.Run(goos+"/"+goarch+"/cgo="+cgo, func(t *testing.T) {
@@ -108,7 +110,7 @@ func TestTS14_NoNetworkOrExecImports(t *testing.T) {
 		if !ok {
 			t.Fatalf("go tool dist list: line %q is not \"GOOS/GOARCH\"", line)
 		}
-		if goos == "linux" || goos == "darwin" {
+		if slices.Contains(supported, goos) {
 			continue
 		}
 		if _, seen := archOf[goos]; !seen {
