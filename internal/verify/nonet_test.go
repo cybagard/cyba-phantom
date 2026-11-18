@@ -10,7 +10,8 @@ import (
 
 // TestTS14_NoNetworkOrExecImports checks that the verifier code imports no
 // package from forbidden (SEC-18, T-S-14). The forbidden packages cover the
-// network, child processes, plugins, cgo and x/sys. The test lists the
+// network, child processes, plugins, cgo and x/sys. The verifier supports only
+// Linux and macOS, so the test checks only linux and darwin. The test lists the
 // dependencies without test files for each GOOS, GOARCH and cgo setting. It
 // also checks the GOOS of each output line.
 //
@@ -34,7 +35,7 @@ func TestTS14_NoNetworkOrExecImports(t *testing.T) {
 		"github.com/cybagard/cyba-phantom/internal/tlog/verifier",
 		"github.com/cybagard/cyba-phantom/cmd/phantom-verify",
 	}
-	for _, goos := range []string{"linux", "darwin", "windows", "freebsd"} {
+	for _, goos := range []string{"linux", "darwin"} {
 		for _, goarch := range []string{"amd64", "arm64"} {
 			for _, cgo := range []string{"0", "1"} {
 				t.Run(goos+"/"+goarch+"/cgo="+cgo, func(t *testing.T) {
