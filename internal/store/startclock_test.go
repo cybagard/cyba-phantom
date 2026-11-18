@@ -470,8 +470,8 @@ func TestTU27SClockErrorAtOneReadStartsNoRunAndLosesNoDate(t *testing.T) {
 	}
 }
 
-// T-U-27: a run that runOnce makes on a writer with a clock uses S for the
-// cutoffs and for the mark. A clock error gives no run.
+// T-U-27: on a writer with a clock, runOnce makes a run with S as the base of
+// the cutoffs and as the mark. A clock error gives no run.
 func TestTU27SRunOnceReadsS(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	t.Run("good clock", func(t *testing.T) {
