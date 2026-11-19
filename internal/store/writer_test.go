@@ -1070,7 +1070,7 @@ func (r *rig) ipCounters() (out []string) {
 	return out
 }
 
-// T-U-18: take a good AppendBatch call. After it, four errors each count each
+// T-U-18: take a good AppendBatch call. After it, three errors each count each
 // leaf of the batch as an orphan leaf. They are the errors of an insert, of the
 // drop counts and of the COMMIT. The writer stops and no row of the batch
 // exists. The batch has three evidence events.

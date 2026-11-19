@@ -410,9 +410,9 @@ func HashEvidence(r Record) ([32]byte, error) {
 }
 
 // CanonicalEvidence returns the canonical bytes of an evidence record and the
-// hash of these bytes, from one encode. It is the only function that hashes a
-// record. It returns an error for request, beacon and refused records and for
-// an unknown kind.
+// hash of these bytes, from one encode. It and HashEvidence are the only
+// functions that hash a record. HashEvidence calls it. It returns an error for
+// request, beacon and refused records and for an unknown kind.
 func CanonicalEvidence(r Record) ([]byte, [32]byte, error) {
 	b, err := EvidenceBytes(r)
 	if err != nil {
