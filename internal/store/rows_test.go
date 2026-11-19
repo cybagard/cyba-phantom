@@ -181,8 +181,9 @@ func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
 		}
 		return e
 	}
-	// The bulk event is first. Then an evidence row cannot use its own row
-	// index.
+	// The bulk event is first. Thus the batch index of each evidence event is
+	// not its evidence index. A row with the bytes of the wrong index then
+	// fails.
 	batch := []*event.Event{rowEvent(t, event.KindRequest, true, 500)}
 	for i, k := range allKinds {
 		if ok, _ := k.IsEvidence(); ok {
