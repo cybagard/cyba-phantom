@@ -1070,19 +1070,16 @@ func (r *rig) ipCounters() (out []string) {
 	return out
 }
 
-// T-U-18: take a good AppendBatch call. After it, four errors each count each
-// leaf of the batch as an orphan leaf. They are the errors of the record bytes,
-// of an insert, of the drop counts and of the COMMIT. The writer stops and no
-// row of the batch exists. The batch has three evidence events.
+// T-U-18: take a good AppendBatch call. After it, three errors each count each
+// leaf of the batch as an orphan leaf. They are the errors of an insert, of the
+// drop counts and of the COMMIT. The writer stops and no row of the batch
+// exists. The batch has three evidence events.
 func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
 	cases := []struct {
 		name  string
 		rule  string
 		setup func(r *rig)
 	}{
-		{"record bytes", ruleRecord, func(r *rig) {
-			r.w.evidenceBytes = func(event.Record) ([]byte, error) { return nil, errors.New("no bytes") }
-		}},
 		{"insert", ruleDatabase, func(r *rig) { r.app.next = -1 }},
 		{"drop counts", ruleDatabase, func(r *rig) {
 			if _, err := r.db.Exec("DROP TABLE ip_counter"); err != nil {
@@ -1111,6 +1108,29 @@ func TestTU18ErrorAfterGoodAppendCountsOrphanLeaves(t *testing.T) {
 				t.Fatalf("%d rows, %d commits", r.rows(), len(r.commits))
 			}
 		})
+	}
+}
+
+// T-U-18: a record-bytes error comes before the batch append. The appender gets
+// no call, so the batch gives no leaf and no orphan leaf. The writer stops with
+// the record rule and no row exists. Each event of the batch counts as a drop
+// for its lane. The batch has one bulk and three evidence events.
+func TestTU18RecordBytesErrorComesBeforeAppend(t *testing.T) {
+	r := newRig(t, 100)
+	r.w.canonicalEvidence = func(event.Record) ([]byte, [32]byte, error) {
+		return nil, [32]byte{}, errors.New("no bytes")
+	}
+	r.batchOfFour()
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantRule(t, r.w.Err(), writerName, ruleRecord)
+	s := r.w.Stats()
+	if r.w.Healthy() || r.app.tries != 0 || s.OrphanLeaves != 0 || s.WriteFailed != 0 || s.Dropped != (Drops{Bulk: 1, Evidence: 3}) {
+		t.Fatalf("healthy %v, stats %+v, %d appender calls", r.w.Healthy(), s, r.app.tries)
+	}
+	if r.rows() != 0 || len(r.commits) != 0 {
+		t.Fatalf("%d rows, %d commits", r.rows(), len(r.commits))
 	}
 }
 

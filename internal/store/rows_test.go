@@ -168,6 +168,118 @@ func TestTU18StoredValuesEqualEventValues(t *testing.T) {
 	}
 }
 
+// T-U-18: take a set of evidence records. The stored record column is the
+// value of EvidenceBytes. The stored hash is the Hash of that value. The set
+// has each evidence kind with and without a detail. It also has a detail of 8
+// members, a path with escapes and the largest record. A request event in the
+// set has a NULL record and a NULL hash.
+func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
+	mk := func(in event.Input, ts int64) *event.Event {
+		e, err := event.NewEvent(func() time.Time { return time.UnixMilli(ts) }, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	// The bulk event is first. Thus the batch index of each evidence event is
+	// not its evidence index. A row with the bytes of the wrong index then
+	// fails.
+	batch := []*event.Event{rowEvent(t, event.KindRequest, true, 500)}
+	for i, k := range allKinds {
+		if ok, _ := k.IsEvidence(); ok {
+			batch = append(batch, rowEvent(t, k, true, 1000+int64(i)), rowEvent(t, k, false, 2000+int64(i)))
+		}
+	}
+	eight := event.Detail{}
+	for i := range 8 {
+		eight[fmt.Sprintf("m%d", i)] = event.Int(int64(i) - 4)
+	}
+	batch = append(batch,
+		mk(event.Input{Kind: event.KindCallback, Session: "s8", TrapID: "t", TokenID: "k", Detail: eight}, 3000),
+		mk(event.Input{Kind: event.KindCallback, Session: "se", Path: "/a\"\\/\x01é ?q=%FF", TrapID: "t", TokenID: "k"}, 3001))
+	// The longest ts and status are the negative integers -(2^53-1). Each
+	// control byte is a 6-byte escape in canonical form.
+	long, st := int64(-(1<<53 - 1)), int64(-(1<<53 - 1))
+	ctl := strings.Repeat("\x01", 300)
+	batch = append(batch, mk(event.Input{Kind: event.KindScoreChange, Session: ctl, Vhost: ctl + strings.Repeat("a", 253),
+		Method: ctl, Path: strings.Repeat("\"", 2100), TrapID: ctl, TokenID: ctl, Status: &st,
+		Surface: event.SurfaceHeader, JA4: ctl, H2: ctl, Hdr: ctl,
+		Detail: event.Detail{"a": event.Str(strings.Repeat("\x01", 340))}}, long))
+	r := newRig(t, 100)
+	if err := r.w.write(batch); err != nil {
+		t.Fatal(err)
+	}
+	rows := r.stored()
+	if len(rows) != len(batch) {
+		t.Fatalf("%d rows for %d events", len(rows), len(batch))
+	}
+	for i, e := range batch {
+		if e.Kind() == event.KindRequest {
+			if rows[i].record != nil || rows[i].hash != nil {
+				t.Errorf("row %d (request): record %x, hash %x, want NULL", i, rows[i].record, rows[i].hash)
+			}
+			continue
+		}
+		want, err := event.EvidenceBytes(e.Record())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h := event.Hash(want); !bytes.Equal(rows[i].record, want) || !bytes.Equal(rows[i].hash, h[:]) {
+			t.Errorf("row %d (%v): record of %d bytes (want %d, equal %v), hash %x, want %x",
+				i, e.Record().Kind, len(rows[i].record), len(want), bytes.Equal(rows[i].record, want), rows[i].hash, h)
+		}
+	}
+}
+
+// T-U-18: for each evidence row, sha256(record) equals hash. The writer makes
+// the record bytes and the hash of an evidence event one time. The seam gives
+// bytes that are not those of EvidenceBytes. Each evidence row must store the
+// bytes and the hash that the seam gave for its event. The seam is called one
+// time for each evidence event and not for a bulk event.
+func TestTU18WriterEncodesEachEvidenceRecordOnce(t *testing.T) {
+	r := newRig(t, 100)
+	var calls int
+	var gave [][]byte
+	r.w.canonicalEvidence = func(rec event.Record) ([]byte, [32]byte, error) {
+		calls++
+		rec.TS++
+		b, err := event.EvidenceBytes(rec)
+		if err != nil {
+			t.Error(err)
+		}
+		gave = append(gave, b)
+		return b, event.Hash(b), nil
+	}
+	batch := []*event.Event{
+		rowEvent(t, event.KindCallback, true, 1000),
+		rowEvent(t, event.KindRequest, false, 1001),
+		rowEvent(t, event.KindScoreChange, false, 1002),
+		rowEvent(t, event.KindAlertSent, true, 1003),
+	}
+	if err := r.w.write(batch); err != nil {
+		t.Fatal(err)
+	}
+	rows := r.stored()
+	if calls != 3 || len(gave) != 3 || len(rows) != len(batch) {
+		t.Fatalf("%d seam calls for 3 evidence events, %d rows for %d events", calls, len(rows), len(batch))
+	}
+	n := 0
+	for i, e := range batch {
+		if e.Kind() == event.KindRequest {
+			continue
+		}
+		own, err := event.EvidenceBytes(e.Record())
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := event.Hash(gave[n])
+		if !bytes.Equal(rows[i].record, gave[n]) || !bytes.Equal(rows[i].hash, h[:]) || bytes.Equal(gave[n], own) {
+			t.Errorf("row %d: record %s, want %s", i, rows[i].record, gave[n])
+		}
+		n++
+	}
+}
+
 // addressForms returns the text of a and its raw 4 and 16 bytes. It also
 // returns the lower-case and upper-case hex of both.
 func addressForms(a netip.Addr) []string {
@@ -362,14 +474,14 @@ func TestTU18BatchUsesTheDateOfItsStart(t *testing.T) {
 	// The clock gives the start time until the writer makes the record bytes of
 	// the first evidence event. Then it gives a time after midnight. Thus a
 	// read after the first event gives the next date.
-	inRows := false
+	encoded := false
 	start := day("2026-03-01T23:59:59.999Z")
-	r.w.evidenceBytes = func(rec event.Record) ([]byte, error) {
-		inRows = true
-		return event.EvidenceBytes(rec)
+	r.w.canonicalEvidence = func(rec event.Record) ([]byte, [32]byte, error) {
+		encoded = true
+		return event.CanonicalEvidence(rec)
 	}
 	r.w.clock = func() time.Time {
-		if inRows {
+		if encoded {
 			return start.Add(time.Second)
 		}
 		return start
@@ -382,7 +494,7 @@ func TestTU18BatchUsesTheDateOfItsStart(t *testing.T) {
 	if err := r.w.write(batch(1)); err != nil {
 		t.Fatal(err)
 	}
-	if !inRows {
+	if !encoded {
 		t.Fatal("the batch made no evidence record")
 	}
 	rows := r.counterRows()
