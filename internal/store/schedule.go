@@ -233,8 +233,8 @@ func (s *Schedule) readMark(ctx context.Context) time.Time {
 	return time.UnixMilli(ms)
 }
 
-// check starts a run in two cases. The retention day of S is later than the last
-// run day. Or 25 h of boot clock have passed since the start of the last run.
+// check starts a run in two cases. The retention day of S is later than the
+// last run day. Or 25 h of boot clock have passed since the start of the last run.
 // Each kind of run counts. The time counts from the start of the schedule when
 // no run has started. A local time that goes back in a DST repeat gives an
 // earlier day, and that day has run. A check starts at most one run. A clock
@@ -288,9 +288,10 @@ func (s *Schedule) runOnce(stop context.Context) {
 	s.runAt(stop, wall)
 }
 
-// runAt is runOnce with the S that begin or check read. S is the run date and
-// the base of the cutoffs and of the mark, so the run does not read it again.
-// It has no correction here, and it does not step with the wall clock.
+// runAt is runOnce with the S that begin or check read. S is the run date.
+// It is also the base of the cutoffs and of the mark. So the run does not read
+// it again. It has no correction here, and it does not step with the wall
+// clock.
 func (s *Schedule) runAt(stop context.Context, wall time.Time) {
 	clockNow := func() time.Time {
 		if t, _, err := s.read(); err == nil {
