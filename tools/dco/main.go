@@ -37,7 +37,8 @@
 //
 // Any other byte or character fails. That includes a byte that is not valid
 // UTF-8, a control character and a format character. It includes a combining
-// mark and each look-alike of "@" or ".".
+// mark. It includes these look-alikes of "@" and ".": U+FF20, U+FE6B, U+2024,
+// U+FE52, U+FF0E, U+FF61 and U+3002.
 //
 // The at-sign list. Each "@" in the message must be one of four uses.
 //   - Maintainer: the "@" is inside the maintainer address. The address is
@@ -49,22 +50,30 @@
 //     (without case) and ":". The name is "Claude" or starts with "Claude ".
 //     The line ends in <noreply@anthropic.com>. It holds no other "@".
 //   - Mention: the "@" starts the line. Or it comes after a character that
-//     is not a letter, a digit or one of . _ % + -. After it come 1 to 39
-//     letters, digits or "-". Then come no "@", letter, digit, "_" or "%".
-//     No "." before a letter or a digit comes next.
+//     is not a letter, a digit or one of . _ % + -. The name after it is
+//     context, dependabot or cybagard, without case. Then come no "@",
+//     letter, digit, "_" or "%".
 //   - Version: the "@" comes after a letter, a digit or one of . _ / -. After
 //     it come "v", digits, and groups of "." and digits. A "-" and a
 //     pre-release text of letters, digits and "." can follow. The last
 //     "."-part of that text is not two or more letters only. Then come no
-//     "@", letter, digit, "_", "%", "+" or "-". No "." before a letter or a
-//     digit comes next.
+//     "@", letter, digit, "_", "%", "+" or "-".
+//
+// Word end. After the maintainer address, a mention or a version, the next
+// byte is not 0x80 or more. A "." before a letter or a digit is not next.
+//
+// No dot after. After a mention or a version, dco skips spaces and TABs. It
+// skips one line break and the spaces and TABs after it. A "." before a
+// letter or a digit then fails the "@". The next line counts.
 //
 // Costs. These forms fail by design: REDACTED@" (a quote after the "@"),
-// and user:pw@tcp(host)/db. A version also fails when its pre-release text
-// ends in letters only, such as "-beta.rc".
+// and user:pw@tcp(host)/db. A version also fails when the last part of its
+// pre-release text is two or more letters, such as -beta.rc.
 //
-// Known limit. dco does not find an address with no at-sign character. One
+// Known limits. dco does not find an address with no at-sign character. One
 // example is an address written with the words "at" and "dot". Another is %40.
+// dco also passes an address with a space after its dot, such as
+// @dependabot. com.
 //
 // A commit with a non-empty encoding header fails, whatever its value. An
 // empty value gives an empty %e, the same as no header, and dco does not fail
@@ -208,7 +217,7 @@ func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, 
 	// each field. The NUL+LF that ends the record is not in it. Git joins
 	// the trailers with LF. An unfolded trailer holds no LF and no NUL.
 	// The checker prints no PR-authored text. It prints only hashes and counts.
-	total, unsigned, badID, badEnc, badAddr := 0, 0, 0, 0, 0
+	total, unsigned, badID, badEnc, badIdentity := 0, 0, 0, 0, 0
 	for _, rec := range records {
 		f := bytes.SplitN(rec, []byte{0}, 7)
 		if len(f) < 7 {
@@ -230,17 +239,17 @@ func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, 
 		encoded := len(f[5]) > 0
 		// A commit with no raw message fails: dco cannot check it.
 		msg, haveMsg := msgs[full]
-		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers) ||
+		identityBad := !identityOK(string(f[1]), string(f[2]), trailers) ||
 			!nameOK(string(f[3])) || !nameOK(string(f[4])) || !haveMsg || !messageOK(msg)
-		if encoded || wrongAddr {
+		if encoded || identityBad {
 			badID++
 			fmt.Fprintf(stdout, "identity: %s\n", hash)
 		}
 		if encoded {
 			badEnc++
 		}
-		if wrongAddr {
-			badAddr++
+		if identityBad {
+			badIdentity++
 		}
 	}
 
@@ -254,7 +263,7 @@ func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, 
 		if unsigned > 0 {
 			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
 		}
-		if badAddr > 0 {
+		if badIdentity > 0 {
 			fmt.Fprintln(stdout, "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.")
 		}
 		if badEnc > 0 {
@@ -343,13 +352,19 @@ func nameOK(name string) bool {
 }
 
 // messageOK applies both lists to a commit message: the character list, then
-// the at-sign list for each line.
+// the at-sign list for each line. The rule for a mention or a version also
+// looks at the next line.
 func messageOK(msg []byte) bool {
 	if !charsOK(string(msg)) {
 		return false
 	}
-	for _, line := range strings.Split(string(msg), "\n") {
-		if !atSignsOK(strings.TrimSuffix(line, "\r")) {
+	lines := strings.Split(string(msg), "\n")
+	for k, line := range lines {
+		next := ""
+		if k+1 < len(lines) {
+			next = lines[k+1]
+		}
+		if !atSignsOK(strings.TrimSuffix(line, "\r"), next) {
 			return false
 		}
 	}
@@ -357,17 +372,19 @@ func messageOK(msg []byte) bool {
 }
 
 // atSignsOK reports whether each "@" of a line (without its CR) is one of the
-// four allowed uses.
-func atSignsOK(line string) bool {
+// four allowed uses. next is the line after it, for the no-dot rule.
+func atSignsOK(line, next string) bool {
+	claude := strings.Contains(line, "@") && claudeAt(line)
 	for i := 0; i < len(line); i++ {
-		if line[i] == '@' && !maintainerAt(line, i) && !claudeAt(line) &&
-			!mentionAt(line, i) && !versionAt(line, i) {
+		if line[i] == '@' && !claude && !maintainerAt(line, i) &&
+			!mentionAt(line, i, next) && !versionAt(line, i, next) {
 			return false
 		}
 	}
 	return true
 }
 
+// isAlnum reports whether c is an ASCII letter or digit.
 func isAlnum(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
@@ -377,16 +394,28 @@ func isLocal(c byte) bool { return isAlnum(c) || strings.IndexByte("._%+-", c) >
 
 // wordEnd reports whether a word that ends before line[j] is whole. The next
 // character is not "@", a letter, a digit, "_" or "%", or one of the bytes of
-// more. It is not a "." that comes before a letter or a digit either.
+// more. It is not a byte of 0x80 or more, and not a "." that comes before a
+// letter or a digit.
 func wordEnd(line string, j int, more string) bool {
 	if j >= len(line) {
 		return true
 	}
 	c := line[j]
-	if c == '@' || isAlnum(c) || c == '_' || c == '%' || strings.IndexByte(more, c) >= 0 {
+	if c >= 0x80 || c == '@' || isAlnum(c) || c == '_' || c == '%' || strings.IndexByte(more, c) >= 0 {
 		return false
 	}
 	return !(c == '.' && j+1 < len(line) && isAlnum(line[j+1]))
+}
+
+// noDotAfter reports whether no "." and word follow line[j:]. It skips spaces
+// and TABs, and at most one line break with the spaces and TABs that start
+// next. A "." before a letter or a digit then fails.
+func noDotAfter(line string, j int, next string) bool {
+	rest := strings.TrimLeft(line[j:], " \t")
+	if rest == "" {
+		rest = strings.TrimLeft(next, " \t")
+	}
+	return !(len(rest) >= 2 && rest[0] == '.' && isAlnum(rest[1]))
 }
 
 // maintainerAt reports whether the "@" at line[i] is inside the maintainer
@@ -410,8 +439,12 @@ func claudeAt(line string) bool {
 	return len(value) >= len(tail) && asciiEqualFold(value[len(value)-len(tail):], tail) && claudeName(value)
 }
 
-// mentionAt reports whether the "@" at line[i] starts a mention.
-func mentionAt(line string, i int) bool {
+// mentions lists the only names that a mention can have.
+var mentions = []string{"context", "dependabot", "cybagard"}
+
+// mentionAt reports whether the "@" at line[i] starts a mention. The name is
+// on the list mentions, without case.
+func mentionAt(line string, i int, next string) bool {
 	if i > 0 && isLocal(line[i-1]) {
 		return false
 	}
@@ -419,13 +452,26 @@ func mentionAt(line string, i int) bool {
 	for j < len(line) && (isAlnum(line[j]) || line[j] == '-') {
 		j++
 	}
-	return j-i-1 >= 1 && j-i-1 <= 39 && wordEnd(line, j, "")
+	listed := false
+	for _, name := range mentions {
+		listed = listed || asciiEqualFold(line[i+1:j], name)
+	}
+	return listed && wordEnd(line, j, "") && noDotAfter(line, j, next)
+}
+
+// skipDigits returns the index of the first byte at or after j that is not an
+// ASCII digit.
+func skipDigits(line string, j int) int {
+	for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+		j++
+	}
+	return j
 }
 
 // versionAt reports whether the "@" at line[i] comes before a version such as
 // v1.2.3 or v1.2.3-rc.1. The last "."-part of a pre-release text is not two or
 // more letters only.
-func versionAt(line string, i int) bool {
+func versionAt(line string, i int, next string) bool {
 	if i == 0 || !(isAlnum(line[i-1]) || strings.IndexByte("._/-", line[i-1]) >= 0) {
 		return false
 	}
@@ -433,20 +479,13 @@ func versionAt(line string, i int) bool {
 	if j >= len(line) || line[j] != 'v' {
 		return false
 	}
-	digits := func() bool {
-		start := j
-		for j < len(line) && line[j] >= '0' && line[j] <= '9' {
-			j++
-		}
-		return j > start
-	}
 	j++
-	if !digits() {
+	if skipDigits(line, j) == j {
 		return false
 	}
+	j = skipDigits(line, j)
 	for j+1 < len(line) && line[j] == '.' && line[j+1] >= '0' && line[j+1] <= '9' {
-		j++
-		digits()
+		j = skipDigits(line, j+1)
 	}
 	if j < len(line) && line[j] == '-' {
 		j++
@@ -467,7 +506,7 @@ func versionAt(line string, i int) bool {
 			return false
 		}
 	}
-	return wordEnd(line, j, "+-")
+	return wordEnd(line, j, "+-") && noDotAfter(line, j, next)
 }
 
 // asciiEqualFold reports whether two strings are equal without case. It

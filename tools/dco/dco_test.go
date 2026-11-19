@@ -660,6 +660,26 @@ func TestMessageFails(t *testing.T) {
 		"Claude line, other address": midClaude("Co-authored-by: Claude <" + other + ">"),
 		"Claude line, 2 @ in a body": midClaude(claude + " " + other),
 		"maintainer in a mid body":   midClaude("by " + me + " and " + other),
+		// A mention or version that an address can follow.
+		"mention, middle dot":        body("(alice)@gmail\xc2\xb7com"),
+		"mention, space, middle dot": body("alice @gmail\xc2\xb7com"),
+		"angle, middle dot":          body("Alice <alice @gmail\xc2\xb7com>"),
+		"quote, middle dot":          body("alice'@gmail\xc2\xb7com"),
+		"line break, middle dot":     body("alice\n@gmail\xc2\xb7com"),
+		"version, middle dot":        body("alice#v1\xc2\xb7example.com"),
+		"version 6, middle dot":      body("alice#v6\xc2\xb7mail.example.com"),
+		"version, en dash":           body("alice#v1\xe2\x80\x93example.com"),
+		"version, ellipsis":          body("alice#v1\xe2\x80\xa6example.com"),
+		"spaced dot":                 body("alice @example .com"),
+		"double dot":                 body("alice @example..com"),
+		"dot on the third line":      body("alice\n@example\n.com"),
+		"cybagard, space, dot":       body("alice @cybagard .com"),
+		"dependabot, break, dot":     body("alice @dependabot\n  .com"),
+		"name not on the list":       body("@someone"),
+		"copilot":                    body("thanks @copilot"),
+		"maintainer, middle dot":     body(me + "\xc2\xb7evil.example"),
+		"version, dot, other text":   body("alice#v1-example.com. Thanks"),
+		"mention, CRLF, dot":         "subject\r\n\r\nalice @dependabot\r\n.com\r\n\r\nSigned-off-by: t <" + me + ">\r\n",
 	}
 	for name, msg := range cases {
 		// "#" stands for "@" in the messages that would look like an address.
@@ -731,10 +751,10 @@ func TestMessagePasses(t *testing.T) {
 		"Claude key in other case":  signoff + "CO-AUTHORED-BY: Claude <NOREPLY@ANTHROPIC.COM>\n",
 		"Claude line with CRLF":     "subject\r\n\r\n" + claude + "\r\n\r\nSigned-off-by: t <" + me + ">\r\n",
 		"maintainer and a mention":  body(me + " @cybagard"),
-		"no at-sign, plain words":   body("write to alice at example dot com"),
-		"percent-encoded at-sign":   body("alice%40example.com"),
-		"two mentions":              body("@a and @b-c"),
-		"mention of 39 characters":  body("@" + strings.Repeat("a", 39)),
+		"mention, upper case":       body("@CYBAGARD"),
+		"mention then a sentence":   body("thanks @dependabot. Next sentence."),
+		"version, comma, then text": body("uses actions/checkout@v5.1.0, ok"),
+		"version, space, em dash":   body("see x@v1.2 \xe2\x80\x94 note"),
 		"version after a slash dot": body("x/y@v0.1"),
 	}
 	for name, msg := range cases {
@@ -758,7 +778,8 @@ func TestMessagePasses(t *testing.T) {
 	}
 }
 
-// atSignCases pins each boundary of the four at-sign uses, one line at a time.
+// TestAtSignBoundaries pins each boundary of the four at-sign uses, one line
+// at a time.
 func TestAtSignBoundaries(t *testing.T) {
 	m := me
 	cases := []struct {
@@ -775,14 +796,24 @@ func TestAtSignBoundaries(t *testing.T) {
 		{m + ".x", false}, {m + ".7", false}, {m + ".", true}, {m + ". x", true},
 		{m + ">", true}, {m + ",", true}, {strings.ToUpper(m), true},
 		// Mention: the character before.
-		{"a@b", false}, {"Z@b", false}, {"0@b", false}, {".@b", false},
-		{"_@b", false}, {"%@b", false}, {"+@b", false}, {"-@b", false},
-		{" @b", true}, {"(@b", true}, {"@b", true}, {"/@b", true},
-		// Mention: the length and the characters.
-		{"@", false}, {"@ b", false}, {"@a", true}, {"@A-9", true},
-		{"@" + strings.Repeat("a", 39), true}, {"@" + strings.Repeat("a", 40), false},
-		{"@a@", false}, {"@a_", false}, {"@a%", false}, {"@a.b", false},
-		{"@a.7", false}, {"@a.", true}, {"@a+", true}, {"@a,", true}, {"@a:", true},
+		{"a@context", false}, {"Z@context", false}, {"0@context", false},
+		{".@context", false}, {"_@context", false}, {"%@context", false},
+		{"+@context", false}, {"-@context", false},
+		{" @context", true}, {"(@context", true}, {"@context", true}, {"/@context", true},
+		// Mention: only the names on the list, without case.
+		{"@", false}, {"@ context", false}, {"@b", false}, {"@a", false}, {"@copilot", false},
+		{"@someone", false}, {"@contex", false}, {"@contextx", false}, {"@context-", false},
+		{"@context-x", false}, {"@Context", true}, {"@DEPENDABOT", true},
+		{"@dependabot", true}, {"@cybagard", true}, {"@CYBAGARD", true},
+		{"@dependabot[bot]", true}, {"@depend", false}, {"@cyba", false},
+		// Mention: the character after.
+		{"@context@", false}, {"@context_", false}, {"@context%", false},
+		{"@context.b", false}, {"@context.7", false}, {"@context.", true},
+		{"@context+", true}, {"@context,", true}, {"@context:", true},
+		{"@contexta", false}, {"@contextz", false}, {"@contextA", false},
+		{"@contextZ", false}, {"@context0", false}, {"@context9", false},
+		{"@context\xc2\xb7x", false}, {"@context\xe2\x80\x93x", false},
+		{"@context\xe2\x80\xa6", false}, {"@context \xe2\x80\x94 x", true},
 		// Version: the character before.
 		{"a@v1.2", true}, {"Z@v1.2", true}, {"0@v1.2", true}, {".@v1.2", true},
 		{"_@v1.2", true}, {"/@v1.2", true}, {"-@v1.2", true},
@@ -818,13 +849,20 @@ func TestAtSignBoundaries(t *testing.T) {
 		{"Co-authored-by: Claude <" + other + "> <noreply@anthropic.com>", false},
 		{"Co-authored-bz: Claude <noreply@anthropic.com>", false},
 		// A second "@" next to a word that is whole only without it.
-		{m + "@v1.2", false}, {"@a@v1", false}, {"a@v1@v1", false},
-		{"@" + strings.Repeat("a", 39) + "-", false}, {"a@v1.-rc", true},
+		{m + "@v1.2", false}, {"@context@v1", false}, {"a@v1@v1", false},
+		{"a@v1.-rc", true},
 		// The ends of the letter and digit ranges: A, Z, a, z, 0 and 9.
 		{"A" + m, false}, {"z" + m, false}, {"9" + m, false},
 		{m + "A", false}, {m + "z", false}, {m + "9", false},
-		{"@a9.x", false}, {"@az.x", false}, {"@aZ.x", false}, {"@A0.x", false},
-		{"@9", true}, {"@z", true}, {"@Z.", true},
+		// A version that ends before a dot and a non-word character.
+		{"x@v1._", true}, {"x@v1.@v2", true}, {"x@v1-rc1._", true}, {"x@v1-rc1.-", true},
+		{"x#v1.2.", true}, {"alice#v1-example.com. Thanks", false},
+		// A version that a byte of 0x80 or more follows.
+		{"x@v1.2\xc2\xb7y", false}, {"x@v1.2\xe2\x80\x93y", false},
+		{"x@v1.2\xe2\x80\xa6y", false}, {"x@v1-rc1\xc2\xb7y", false},
+		{"x@v1.2 \xe2\x80\x94 note", true}, {"x@v1.2", true},
+		{m + "\xc2\xb7evil.example", false}, {m + "\xe2\x80\x94", false},
+		{m + " \xe2\x80\x94", true},
 		// Versions with the digits 0 and 9 in each group, and a dot at the end.
 		{"x@v9.9.9", true}, {"x@v1.9", true}, {"x@v19", true}, {"x@v0.0", true},
 		{"x#v1.9.example", false}, {"x#v1.9.9.example", false},
@@ -838,8 +876,61 @@ func TestAtSignBoundaries(t *testing.T) {
 	for _, c := range cases {
 		// "#" stands for "@" in the lines that would look like an address.
 		c.line = strings.ReplaceAll(c.line, "#", "@")
-		if got := atSignsOK(c.line); got != c.want {
+		if got := atSignsOK(c.line, ""); got != c.want {
 			t.Errorf("atSignsOK(%q) = %v, want %v", c.line, got, c.want)
+		}
+	}
+}
+
+// The known limits of the address rules, as tested facts. dco does not find an
+// address with no at-sign character, and it passes a space after the dot.
+func TestKnownLimits(t *testing.T) {
+	for name, msg := range map[string]string{
+		"words for at and dot":  body("write to alice at example dot com"),
+		"percent-encoded at":    body("alice%40example.com"),
+		"space after the dot":   body("alice @dependabot. com"),
+		"space after the dot 2": body("alice @cybagard. com"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if code, out, _ := runOn(t, nil, msg); code != 0 {
+				t.Fatalf("run = %d, want 0; output %q", code, out)
+			}
+		})
+	}
+}
+
+// A mention at the very end of the message passes.
+func TestMentionAtMessageEnd(t *testing.T) {
+	if !messageOK([]byte("thanks @dependabot")) || !messageOK([]byte("thanks @dependabot\r\n")) {
+		t.Error("messageOK refuses a mention at the end of the message")
+	}
+	if messageOK([]byte("alice @dependabot\n.com")) || messageOK([]byte("alice @dependabot\r\n  .com")) {
+		t.Error("messageOK accepts a dot and a word on the next line")
+	}
+}
+
+// After a mention or a version, a "." and a word fail the "@". dco skips
+// spaces and TABs, and one line break with the spaces and TABs after it.
+func TestNoDotAfter(t *testing.T) {
+	for _, c := range []struct {
+		line, next string
+		want       bool
+	}{
+		{"@context .com", "", false}, {"@context  .com", "", false},
+		{"@context\t.com", "", false}, {"@context \t .7", "", false},
+		{"@context", ".com", false}, {"@context", "  .com", false},
+		{"@context  ", "\t.com", false}, {"x@v1.2 .com", "", false},
+		{"x@v1.2", " .a", false}, {"x@v1.2", ".7", false},
+		{"@context . com", "", true}, {"@context ..com", "", true},
+		{"@context", ". com", true}, {"@context", "", true}, {"@context", ".", true},
+		{"@context", "x .com", true}, {"@context x", ".com", true},
+		{"@context", "\n.com", true}, {"@context", "-.com", true},
+		{"x@v1.2", " x", true}, {"x@v1.2 ", "", true}, {"x@v1.2", "._", true},
+		// The known limit: a space after the dot.
+		{"@dependabot. com", "", true}, {"@dependabot.", " com", true},
+	} {
+		if got := atSignsOK(c.line, c.next); got != c.want {
+			t.Errorf("atSignsOK(%q, %q) = %v, want %v", c.line, c.next, got, c.want)
 		}
 	}
 }
@@ -891,11 +982,11 @@ func TestCatFileFailureIsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, script := range map[string]string{
-		"exit 128 with text":  `echo "fatal: alice@example.com" >&2; exit 128`,
-		"bad header":          `echo "alice@example.com commit"`,
-		"short object":        `read h; echo "$h commit 999"; echo "alice@example.com"`,
-		"empty output":        `read h`,
-		"object of the wrong": `read h; echo "$h blob 0"; echo`,
+		"exit 128 with text":       `echo "fatal: alice@example.com" >&2; exit 128`,
+		"bad header":               `echo "alice@example.com commit"`,
+		"short object":             `read h; echo "$h commit 999"; echo "alice@example.com"`,
+		"empty output":             `read h`,
+		"object of the wrong type": `read h; echo "$h blob 0"; echo`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := newRepo(t)

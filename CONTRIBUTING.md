@@ -17,20 +17,24 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    makes. For the check to pass, every address in any other trailer is
    also the maintainer noreply address. The Claude co-author address is
    allowed only on a `Co-authored-by` line for Claude, in a trailer or in
-   the text. The name on that line is "Claude" or starts with "Claude ",
-   and the line has no other address. The check also reads the whole
-   commit message (subject, body, every paragraph and line). The message
-   may hold only printable ASCII, TAB, line ends (LF, or CR before LF),
-   and the characters U+00A7, U+2014, U+2013, U+2026 and U+00B7. Each "@"
-   in the message must be one of four uses: inside the maintainer
-   address, inside the Claude address on a Claude co-author line, a
-   mention such as `@dependabot`, or a version such as `x@v1.2.3` or
-   `actions/checkout@v5.1.0`. Any other "@" fails the check. The author
-   name and the committer name follow the same character list and hold
-   no "@". The header comment of `tools/dco/main.go` gives the full
-   rules, with the forms that fail by design. It also covers the rule
-   for the encoding header. A commit
-   that fails one of these rules fails the check.
+   the text. On that line, the key starts at column 1 and ":" follows it
+   directly. The name is "Claude" or starts with "Claude ". The line has
+   no other address. The check also reads the whole commit message
+   (subject, body, every paragraph and line). The message may hold only
+   printable ASCII, TAB, line ends (LF, or CR before LF), and the
+   characters U+00A7, U+2014, U+2013, U+2026 and U+00B7. Each "@" in the
+   message must be one of four uses. It is inside the maintainer address.
+   It is inside the Claude address on a Claude co-author line. It starts a
+   mention: `@context`, `@dependabot` or `@cybagard`, and no other name.
+   Or it comes before a version such as `x@v1.2.3` or
+   `actions/checkout@v5.1.0`. After a mention or a version, a "." and a
+   word fail the "@", also after spaces or one line break. A byte that is
+   not ASCII cannot follow the maintainer address, a mention or a version.
+   Any other "@" fails the check. The author name and the committer name
+   follow the same character list and hold no "@". The header comment of
+   `tools/dco/main.go` gives the full rules, with the forms that fail by
+   design and the known limits. It also covers the rule for the encoding
+   header. A commit that fails one of these rules fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. An outside contributor commits with their
    own name and address, never with the maintainer address. The `dco`
