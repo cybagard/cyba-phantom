@@ -193,13 +193,27 @@ func serveCfg(t *testing.T, https, plain, ca string, extra ...string) *config.Co
 	return cfg
 }
 
-// tempState returns the start values of cfg with a temporary state directory.
-func tempState(t *testing.T, cfg *config.Config) startParams {
-	p := paramsOf(cfg)
-	p.Root = t.TempDir()
-	if err := os.Chmod(p.Root, 0o700); err != nil {
+// diskRoot makes a state directory below the temporary directory of the test.
+// The test cleanup removes it.
+func diskRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return root
+}
+
+// tempState returns the start values of cfg with a temporary state directory.
+// stateRoot makes the directory. On Linux, it is on a memory filesystem. On
+// other systems, it is on the disk. The stop of serve syncs the log and
+// the database to disk. On a busy host, one sync can take seconds. The close
+// bound of ADR-041 counts wall time. A disk can thus fail the stop of a test
+// that is not about the disk. The packages of the store and the log test the
+// sync order.
+func tempState(t *testing.T, cfg *config.Config) startParams {
+	p := paramsOf(cfg)
+	p.Root = stateRoot(t)
 	return p
 }
 
@@ -1065,7 +1079,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 		if _, ok := openers[id]; ok {
 			continue // checked above
 		}
-		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || runtimeGoroutine(block) {
+		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || runtimeGoroutine(block) || endedGoroutine(block) {
 			continue
 		}
 		t.Errorf("goroutine %d started in serve and is still running after serve returned:\n%s", id, block)
@@ -1077,6 +1091,31 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 // The cleanup goroutine has no "created by" line.
 func runtimeGoroutine(block string) bool {
 	return strings.Contains(block, "\ncreated by runtime.") || strings.Contains(block, "\nruntime.runCleanups(")
+}
+
+// endedGoroutine reports whether a stack block is a goroutine that has ended
+// its function. Its first frame is runtime.goexit1. A goroutine of wg.Go in
+// this state has called Done already. So serve can return before the runtime
+// removes it. A goexit
+// frame later in the block is a goroutine that still runs: it is no match.
+func endedGoroutine(block string) bool {
+	_, rest, _ := strings.Cut(block, "\n")
+	return strings.HasPrefix(rest, "runtime.goexit1(")
+}
+
+func TestTI03_EndedGoroutine(t *testing.T) {
+	for _, c := range []struct {
+		name, block string
+		want        bool
+	}{
+		{"ended in goexit1", "goroutine 19688 [runnable]:\nruntime.goexit1()\n\t/usr/local/go/src/runtime/proc.go:4490 +0xe0\nruntime.goexit({})\n\t/usr/local/go/src/runtime/asm_arm64.s:1040 +0x8\ncreated by sync.(*WaitGroup).Go in goroutine 19683\n\t/usr/local/go/src/sync/waitgroup.go:1 +0x1", true},
+		{"running with goexit later", "goroutine 31 [select]:\nmain.serveWith.func3()\n\t/src/cmd/phantom/listen.go:1 +0x1\nruntime.goexit1()\n\t/usr/local/go/src/runtime/proc.go:4490 +0xe0\ncreated by sync.(*WaitGroup).Go in goroutine 9\n\t/usr/local/go/src/sync/waitgroup.go:1 +0x1", false},
+		{"leak of serve", "goroutine 30 [select]:\nruntime.gopark()\n\t/usr/local/go/src/runtime/proc.go:1 +0x1\nmain.leak()\n\t/src/cmd/phantom/listen.go:1 +0x1\ncreated by main.serveWith in goroutine 9\n\t/src/cmd/phantom/listen.go:2 +0x1", false},
+	} {
+		if got := endedGoroutine(c.block); got != c.want {
+			t.Errorf("%s: endedGoroutine = %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 func TestTI03_RuntimeGoroutine(t *testing.T) {
