@@ -194,7 +194,7 @@ func serveCfg(t *testing.T, https, plain, ca string, extra ...string) *config.Co
 }
 
 // diskRoot makes a state directory below the temporary directory of the test.
-// The test removes it at the end, also when it is below TMPDIR of a parent.
+// The test cleanup removes it.
 func diskRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -205,8 +205,8 @@ func diskRoot(t *testing.T) string {
 }
 
 // tempState returns the start values of cfg with a temporary state directory.
-// On Linux, the directory is on a memory filesystem. On other systems, it is on
-// the disk (stateRoot). The stop of serve syncs the log and
+// stateRoot makes the directory. On Linux, it is on a memory filesystem. On
+// other systems, it is on the disk. The stop of serve syncs the log and
 // the database to disk. On a busy host, one sync can take seconds. The close
 // bound of ADR-041 counts wall time. A disk can thus fail the stop of a test
 // that is not about the disk. The packages of the store and the log test the
@@ -1094,8 +1094,9 @@ func runtimeGoroutine(block string) bool {
 }
 
 // endedGoroutine reports whether a stack block is a goroutine that has ended
-// its function. Its first frame is runtime.goexit1. The goroutine has called
-// Done already, so serve can return before the runtime removes it. A goexit
+// its function. Its first frame is runtime.goexit1. A goroutine of wg.Go in
+// this state has called Done already. So serve can return before the runtime
+// removes it. A goexit
 // frame later in the block is a goroutine that still runs: it is no match.
 func endedGoroutine(block string) bool {
 	_, rest, _ := strings.Cut(block, "\n")

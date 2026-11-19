@@ -738,7 +738,9 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
 	}
-	// The child must use the state directory that the parent made.
+	// The helper must use the state directory that the parent made. The helper
+	// writes the key files there before serve starts. So this check shows only
+	// that the helper used the directory.
 	if ents, err := os.ReadDir(root); err != nil {
 		t.Fatal(err)
 	} else if len(ents) == 0 {
