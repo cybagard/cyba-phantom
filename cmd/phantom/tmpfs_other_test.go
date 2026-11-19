@@ -4,6 +4,10 @@ package main
 
 import "testing"
 
+// stateRoot makes the state directory of tempState on the disk. Only Linux has
+// the memory filesystem that memoryRoot needs.
+func stateRoot(t *testing.T) string { return diskRoot(t) }
+
 // requireTmpfs skips the test. The check runs only on Linux. On other systems
 // the test skips.
 func requireTmpfs(t *testing.T, _ string) {

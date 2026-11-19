@@ -8,6 +8,9 @@ import (
 // tmpfsMagic is the filesystem type number of tmpfs in statfs(2).
 const tmpfsMagic = 0x01021994
 
+// stateRoot makes the state directory of tempState on a memory filesystem.
+func stateRoot(t *testing.T) string { return memoryRoot(t) }
+
 // requireTmpfs stops the test if dir is not on a tmpfs. An error or another
 // type fails the test, so a run cannot skip the check.
 func requireTmpfs(t *testing.T, dir string) {
