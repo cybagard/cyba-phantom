@@ -290,8 +290,8 @@ func TestTU30_ClockErrorKeepsTheStoreStill(t *testing.T) {
 			if !errors.Is(s.clockErr, clockErr) {
 				t.Errorf("clockErr %v, want %v", s.clockErr, clockErr)
 			}
-			// A writer that ran would take the event at once. A drain takes it at
-			// the stop, and counts it as dropped.
+			// A writer that ran would take the event at once. A drain takes
+			// it at the stop, and counts it as dropped.
 			time.Sleep(100 * time.Millisecond)
 			s.Stop()
 			if d := s.Drops(); d != (store.Drops{}) {

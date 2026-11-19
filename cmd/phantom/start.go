@@ -192,9 +192,10 @@ func start(p startParams, q *event.Queue, d startDeps, lg *slog.Logger) *storePa
 	}
 	if s.db != nil {
 		s.writer = d.newWriter(s.db, q, p.BodyPrefix, lg, store.Recovery{State: s.root, Origin: p.Origin, Log: s.log}, s.dk)
-		// The clock starts before the writer runs. A stop marker does not refuse the start.
-		// The writer then has no clock and stops at its start check. The sensor
-		// serves on, not healthy. Any other error gives no writer run.
+		// The clock starts before the writer runs. A stop marker does not
+		// refuse the start. The writer then has no clock and stops at its
+		// start check. The sensor serves on, not healthy. Any other error
+		// gives no writer run.
 		if d.startClock != nil {
 			if err := d.startClock(s.writer); err != nil && !errors.Is(err, store.ErrStopMarker) {
 				lg.Error("sensor time does not start", "error", err)
