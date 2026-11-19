@@ -51,6 +51,18 @@ if [ "$tablelines" -ne 12 ]; then
   exit 2
 fi
 
+# A table row right after the 12 lines is an extra rule. The awk above does
+# not read it, so this check fails on it.
+after=$(sed -e 's/\r$//' "$AGENTS_MD" | awk '
+  found && n == 12 { print substr($0, 1, 1); exit }
+  /^\| Rule \| Digest \|$/ { if (found) exit; found = 1; n = 0 }
+  found { n++ }
+')
+if [ "$after" = "|" ]; then
+  echo "mirror-diff: table in $AGENTS_MD has a row after the 12 lines (header + separator + 10 rows)" >&2
+  exit 2
+fi
+
 if cmp -s "$GOLDEN" "$tmp"; then
   echo "mirror-diff: $AGENTS_MD C1–C10 table matches $GOLDEN (12 lines, byte-identical)"
   exit 0

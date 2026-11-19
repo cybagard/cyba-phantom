@@ -2,9 +2,11 @@
 //
 // The matrix must agree with the requirement IDs declared in 01-prd.md and
 // the Covers columns of 07-test-plan.md. After the set checks it re-emits
-// the matrix in canonical form (row order from 01, Tests cells ordered by
-// first occurrence in 07) and requires a byte-exact match with the
-// committed file, so the file is a pure function of the other two.
+// the matrix in canonical form and requires a byte-exact match with the
+// committed file. Row order comes from 01. A Tests cell lists its test IDs
+// in 07 order. A run is IDs that are next to each other in 07, with one
+// type letter and consecutive numbers. A run of two or more is one range.
+// So the file is a pure function of the other two.
 //
 // Findings name IDs and counts only: spec text is PR-controlled, so it
 // never reaches a CI log.
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,8 +34,7 @@ const (
 var (
 	reqIDRE   = regexp.MustCompile(`^(FR|NFR|SEC)-\d{2}$`)
 	goalIDRE  = regexp.MustCompile(`^G\d+$`)
-	cRuleRE   = regexp.MustCompile(`^C(10|[1-9])$`)
-	reqTokRE  = regexp.MustCompile(`^(FR-\d{2}|NFR-\d{2}|SEC-\d{2}|C(10|[1-9])|G\d+)$`)
+	reqTokRE  = regexp.MustCompile(`^(FR-\d{2}|NFR-\d{2}|SEC-\d{2}|G\d+)$`)
 	sepCellRE = regexp.MustCompile(`^-{3,}$`)
 	// idLikeRE matches a token that starts like a requirement ID, valid or
 	// not, in any case: "FR-O3", "fr-03", "SEC-04a", "FR 01", "C11", "G 2".
@@ -44,6 +46,20 @@ var (
 	testRefRE         = regexp.MustCompile(`^T-([A-Z])-(\d{2})(\.\.(\d{2}))?$`) // a test ID or a range: T-U-01..04
 	testRefAnywhereRE = regexp.MustCompile(`T-[A-Z]-\d{2}(?:\.\.\d{2})?`)       // a test reference anywhere in a string
 )
+
+// cRuleIDs returns the constitution rule IDs C1..C10 in order.
+func cRuleIDs() []string {
+	ids := make([]string, 0, 10)
+	for i := 1; i <= 10; i++ {
+		ids = append(ids, fmt.Sprintf("C%d", i))
+	}
+	return ids
+}
+
+// isCRule reports if id is a constitution rule ID.
+func isCRule(id string) bool {
+	return slices.Contains(cRuleIDs(), id)
+}
 
 // req is a requirement or goal declared in 01.
 type req struct {
@@ -222,7 +238,7 @@ func parseTestPlan(text string, findings *[]string) []test {
 			tok = strings.TrimSpace(tok)
 			switch {
 			case tok == "":
-			case reqTokRE.MatchString(tok):
+			case reqTokRE.MatchString(tok) || isCRule(tok):
 				t.covers = append(t.covers, tok)
 			case idLikeRE.MatchString(tok):
 				// Looks like an ID but is not one (FR-1, FR-100, C11):
@@ -245,7 +261,7 @@ func parseMatrixFile(text string, findings *[]string) ([]matRow, []matGroup) {
 	rowOpen := false // a row line has appeared since the current header
 
 	isRowID := func(id string) bool {
-		return reqIDRE.MatchString(id) || goalIDRE.MatchString(id) || cRuleRE.MatchString(id)
+		return reqIDRE.MatchString(id) || goalIDRE.MatchString(id) || isCRule(id)
 	}
 
 	for i, line := range lines {
@@ -308,9 +324,7 @@ func expectedRows(reqs []req) (main, goals []string) {
 		}
 		main = append(main, r.id)
 	}
-	for i := 1; i <= 10; i++ {
-		main = append(main, fmt.Sprintf("C%d", i))
-	}
+	main = append(main, cRuleIDs()...)
 	return main, goals
 }
 
@@ -362,22 +376,24 @@ func setDelta(want, got map[string]bool) (missing, extra []string) {
 	return missing, extra
 }
 
-// reemitTests rewrites a committed Tests cell in canonical form: tokens
-// ordered by their first member's declaration order in 07, joined with
-// ", ". A committed range stays a range. A cell with no test references
-// (a "no tests" marker) is returned as-is.
+// reemitTests writes a Tests cell in canonical form from the set of test
+// IDs it names, not from its tokens. The IDs follow their declaration
+// order in 07. IDs that are next to each other in 07, with
+// one type letter and consecutive numbers, make a run. A run of two or
+// more is one range. Other IDs stand alone. Then come the IDs that 07
+// does not declare, in ID order, and the prose tokens, in cell order.
+// Tokens are joined with ", ". A cell with no test references (a "no
+// tests" marker) is returned as-is.
 func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	testPos := make(map[string]int, len(tests))
 	for _, t := range tests {
 		testPos[t.id] = t.order
 	}
 
-	type tok struct {
-		orig string
-		ids  []string
-		pos  int
-	}
-	var toks []tok
+	var known []test // IDs that 07 declares, in cell order
+	var unknown, prose []string
+	seen := map[string]bool{}
+	hasTest := false
 	for i, part := range strings.Split(cell, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -388,52 +404,71 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 			if testRefAnywhereRE.MatchString(part) {
 				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference (item %d)", reqID, i+1))
 			}
-			toks = append(toks, tok{orig: part, pos: -1}) // prose marker
+			prose = append(prose, part)
 			continue
 		}
-		tr := tok{orig: part, ids: ids, pos: -1}
+		hasTest = true
 		contig := true
 		prev := -1
 		for _, id := range ids {
 			p, ok := testPos[id]
 			if !ok {
 				contig = false
-				if tr.pos < 0 {
-					tr.pos = len(tests) // unknown member: sort last
-				}
-				continue
-			}
-			if tr.pos < 0 {
-				tr.pos = p
-			}
-			if prev >= 0 && p != prev+1 {
+			} else if prev >= 0 && p != prev+1 {
 				contig = false
 			}
-			prev = p
+			if ok {
+				prev = p
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if ok {
+				known = append(known, test{id: id, order: p})
+			} else {
+				unknown = append(unknown, id)
+			}
 		}
 		if len(ids) > 1 && !contig {
 			*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell range %s is not contiguous in 07 order", reqID, part))
-		}
-		toks = append(toks, tr)
-	}
-
-	hasTest := false
-	for _, t := range toks {
-		if t.ids != nil {
-			hasTest = true
 		}
 	}
 	if !hasTest {
 		return cell
 	}
-	sorted := make([]tok, len(toks))
-	copy(sorted, toks)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].pos < sorted[j].pos })
-	parts := make([]string, len(sorted))
-	for i, t := range sorted {
-		parts[i] = t.orig
+
+	sort.Slice(known, func(i, j int) bool { return known[i].order < known[j].order })
+	sort.Strings(unknown)
+	var parts []string
+	for i := 0; i < len(known); {
+		j := i + 1
+		for j < len(known) && nextInRun(known[j-1], known[j]) {
+			j++
+		}
+		if j-i >= 2 {
+			parts = append(parts, known[i].id+".."+known[j-1].id[len(known[j-1].id)-2:])
+		} else {
+			parts = append(parts, known[i].id)
+		}
+		i = j
 	}
+	parts = append(parts, unknown...)
+	parts = append(parts, prose...)
 	return strings.Join(parts, ", ")
+}
+
+// nextInRun reports if b continues a range that ends with a. Then b is
+// next to a in 07, has the type letter of a, and has the next number.
+func nextInRun(a, b test) bool {
+	ma := testIDRE.FindStringSubmatch(a.id)
+	mb := testIDRE.FindStringSubmatch(b.id)
+	if ma == nil || mb == nil || ma[1] != mb[1] || b.order != a.order+1 {
+		return false
+	}
+	na, _ := strconv.Atoi(ma[2])
+	nb, _ := strconv.Atoi(mb[2])
+	return nb == na+1
 }
 
 // tableRows records which kinds of row a committed table holds. A table
@@ -573,8 +608,8 @@ func checkMatrix(prd, tp, mat string) []string {
 			exempt[r.id] = true
 		}
 	}
-	for i := 1; i <= 10; i++ {
-		declared[fmt.Sprintf("C%d", i)] = true
+	for _, id := range cRuleIDs() {
+		declared[id] = true
 	}
 
 	// Row set <-> requirement set, in both directions.
