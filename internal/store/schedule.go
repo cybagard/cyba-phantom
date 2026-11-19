@@ -234,8 +234,8 @@ func (s *Schedule) readMark(ctx context.Context) time.Time {
 }
 
 // check starts a run in two cases. The retention day of S is later than the
-// last run day. Or 25 h of boot clock have passed since the start of the last run.
-// Each kind of run counts. The time counts from the start of the schedule when
+// last run day. Or 25 h of boot clock have passed since the start of the last
+// run. Each kind of run counts. The time counts from the start of the schedule when
 // no run has started. A local time that goes back in a DST repeat gives an
 // earlier day, and that day has run. A check starts at most one run. A clock
 // error starts no run.
