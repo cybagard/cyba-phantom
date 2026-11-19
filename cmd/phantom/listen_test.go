@@ -1079,7 +1079,7 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 		if _, ok := openers[id]; ok {
 			continue // checked above
 		}
-		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || runtimeGoroutine(block) {
+		if (openersOK && strings.Contains(block, "\ncreated by database/sql.")) || runtimeGoroutine(block) || endedGoroutine(block) {
 			continue
 		}
 		t.Errorf("goroutine %d started in serve and is still running after serve returned:\n%s", id, block)
@@ -1091,6 +1091,30 @@ func TestTI03_ServerFailureExits1(t *testing.T) {
 // The cleanup goroutine has no "created by" line.
 func runtimeGoroutine(block string) bool {
 	return strings.Contains(block, "\ncreated by runtime.") || strings.Contains(block, "\nruntime.runCleanups(")
+}
+
+// endedGoroutine reports whether a stack block is a goroutine that has ended
+// its function. Its first frame is runtime.goexit1. The goroutine has called
+// Done already, so serve can return before the runtime removes it. A goexit
+// frame later in the block is a goroutine that still runs: it is no match.
+func endedGoroutine(block string) bool {
+	_, rest, _ := strings.Cut(block, "\n")
+	return strings.HasPrefix(rest, "runtime.goexit1(")
+}
+
+func TestTI03_EndedGoroutine(t *testing.T) {
+	for _, c := range []struct {
+		name, block string
+		want        bool
+	}{
+		{"ended in goexit1", "goroutine 19688 [runnable]:\nruntime.goexit1()\n\t/usr/local/go/src/runtime/proc.go:4490 +0xe0\nruntime.goexit({})\n\t/usr/local/go/src/runtime/asm_arm64.s:1040 +0x8\ncreated by sync.(*WaitGroup).Go in goroutine 19683\n\t/usr/local/go/src/sync/waitgroup.go:1 +0x1", true},
+		{"running with goexit later", "goroutine 31 [select]:\nmain.serveWith.func3()\n\t/src/cmd/phantom/listen.go:1 +0x1\nruntime.goexit1()\n\t/usr/local/go/src/runtime/proc.go:4490 +0xe0\ncreated by sync.(*WaitGroup).Go in goroutine 9\n\t/usr/local/go/src/sync/waitgroup.go:1 +0x1", false},
+		{"leak of serve", "goroutine 30 [select]:\nruntime.gopark()\n\t/usr/local/go/src/runtime/proc.go:1 +0x1\nmain.leak()\n\t/src/cmd/phantom/listen.go:1 +0x1\ncreated by main.serveWith in goroutine 9\n\t/src/cmd/phantom/listen.go:2 +0x1", false},
+	} {
+		if got := endedGoroutine(c.block); got != c.want {
+			t.Errorf("%s: endedGoroutine = %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 func TestTI03_RuntimeGoroutine(t *testing.T) {
