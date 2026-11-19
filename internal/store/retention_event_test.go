@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,23 +307,49 @@ func TestTU11RetentionEventThroughRunningWriter(t *testing.T) {
 	sameDetail(t, detail, seededDetail())
 }
 
-// T-U-11: the address cutoff uses tPriv and the raw cutoff uses tDel. The wall
-// clock is 30 min behind the monotonic clock, so tDel is before tPriv.
-func TestTU11RetentionEventCutoffsUseTheirTimes(t *testing.T) {
-	r := newRig(t, 8)
-	addEvents(t, r.db, "request", 3, rollCutoff(30)-2*3600*1000, 1, nil, nil)
-	s, f := fakeSchedule(t, r, time.UTC, rollTDel, nil)
-	f.jump(-30 * time.Minute)
-	s.run = serveWithRun(r)
-	s.runOnce(context.Background())
+// T-U-11: the address cutoff and the raw cutoff are S minus their days. The
+// wall hook of the writer is 40 d off S, and it does not move them.
+func TestTU11RetentionEventCutoffsAreOfS(t *testing.T) {
+	k := sSchedule(t, rollTDel, time.UTC)
+	k.r.w.clock = func() time.Time { return rollTDel.Add(40 * 24 * time.Hour) }
+	addEvents(t, k.r.db, "request", 3, rollCutoff(30)-2*3600*1000, 1, nil, nil)
+	k.s.run = serveWithRun(k.r)
+	k.s.runOnce(context.Background())
 	var detail string
-	check(t, r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
+	check(t, k.r.db.QueryRow("SELECT detail FROM event WHERE kind = 'retention'").Scan(&detail))
 	sameDetail(t, detail, event.Detail{
 		"ip": event.Int(0), "fields": event.Int(0), "rolled": event.Int(3), "deleted": event.Int(0),
 		"evicted": event.Int(0), "vacuumed": event.Int(0),
 		"cutoff_ip":  event.Int(rollTDel.UnixMilli() - 7*24*3600*1000),
-		"cutoff_raw": event.Int(rollCutoff(30) - 30*60*1000),
+		"cutoff_raw": event.Int(rollCutoff(30)),
 	})
+}
+
+// T-U-27: the ts of the retention event is S. The wall hook of the writer is
+// 40 d off S, and it does not give the ts.
+func TestTU27RetentionEventTimeIsS(t *testing.T) {
+	k := sSchedule(t, rollTDel, time.UTC)
+	k.r.w.clock = func() time.Time { return rollTDel.Add(40 * 24 * time.Hour) }
+	k.s.run = serveWithRun(k.r)
+	k.s.runOnce(context.Background())
+	q := fmt.Sprintf("SELECT count(*) FROM event WHERE kind = 'retention' AND ts = %d", rollTDel.UnixMilli())
+	if n := retentionRows(t, k.r); n != 1 || count(t, k.r.db, q) != 1 {
+		t.Fatalf("%d retention rows, want 1 with the ts of S", n)
+	}
+}
+
+// T-U-30: a clock error at the end of a run stops the writer. The run makes no
+// retention event.
+func TestTU30ClockErrorAtTheEndOfARunStopsTheWriter(t *testing.T) {
+	r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
+	if err := r.w.StartClock(failingSrc(f, fail)); err != nil {
+		t.Fatal(err)
+	}
+	run := &retentionRun{}
+	fail.Store(true)
+	if err := r.w.endRun(run, nil); ruleOf(err) != ruleClock || r.w.Healthy() || retentionRows(t, r) != 0 {
+		t.Fatalf("error %v, healthy %v, %d retention rows; want the clock rule and a stop", err, r.w.Healthy(), retentionRows(t, r))
+	}
 }
 
 // T-U-11: when the write of the event stops the writer, the run replies with

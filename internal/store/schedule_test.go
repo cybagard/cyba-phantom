@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -14,13 +13,13 @@ import (
 	"time"
 )
 
-// fakeClock is the wall clock and the monotonic clock of a schedule test.
-// The monotonic time is the time since the anchor. A jump moves only the wall
-// clock.
+// fakeClock is the wall clock and the boot clock of a schedule test. The wall
+// clock is S of a writer with no clock. The boot clock is the time since the
+// start. A jump moves only the wall clock.
 type fakeClock struct {
-	mu          sync.Mutex
-	anchor, now time.Time
-	skew        time.Duration
+	mu         sync.Mutex
+	start, now time.Time
+	skew       time.Duration
 }
 
 func (f *fakeClock) wall() time.Time {
@@ -32,7 +31,7 @@ func (f *fakeClock) wall() time.Time {
 func (f *fakeClock) mono() time.Duration {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.now.Sub(f.anchor)
+	return f.now.Sub(f.start)
 }
 
 func (f *fakeClock) advance(d time.Duration) {
@@ -49,13 +48,15 @@ func (f *fakeClock) jump(d time.Duration) {
 
 func (f *fakeClock) local(l *time.Location) string { return f.wall().In(l).Format("15:04 -0700") }
 
-// fakeSchedule makes a schedule of the rig at the time start. The run function
-// is the one of the caller.
+// fakeSchedule makes a schedule of the rig at the time start. The rig has no
+// clock, so the wall hook of its writer gives S. The run function is the one of
+// the caller.
 func fakeSchedule(t *testing.T, r *rig, loc *time.Location, start time.Time, lg *slog.Logger) (*Schedule, *fakeClock) {
 	t.Helper()
 	s := NewSchedule(r.w, 7, 30, 90, lg)
-	f := &fakeClock{anchor: start, now: start}
-	s.loc, s.clock.anchor, s.clock.wall, s.clock.mono = loc, start, f.wall, f.mono
+	f := &fakeClock{start: start, now: start}
+	r.w.clock = f.wall
+	s.loc, s.mono = loc, f.mono
 	return s, f
 }
 
@@ -194,11 +195,10 @@ func TestTU27FutureMarkRunsAtOnceThenEachDay(t *testing.T) {
 // T-U-27 (feeds T-C-06): a run with the wall clock 2 d ahead writes a mark 2 d
 // ahead. After a restart with the right clock, the start runs at once. It
 // clears the address of a session of 7 d and 1 h. A session of 4 d keeps its
-// address. It is 6 d old by the mark. The mark keeps its value.
+// address. The mark is S of the restart.
 func TestTU27RestartAfterWallPlusTwoDaysClearsAddresses(t *testing.T) {
 	r, s, _ := prodRig(t, 48*time.Hour, nil)
 	s.runOnce(context.Background())
-	mark := metaValue(t, r.db, retentionLastKey)
 	restart := rollTDel.Add(time.Hour)
 	addSessions(t, r.db, "old", 0, 1, msAgo(restart, 7*oneDay+time.Hour), 0, "203.0.113.7")
 	addSessions(t, r.db, "new", 0, 1, msAgo(restart, 4*oneDay), 0, "203.0.113.8")
@@ -208,13 +208,13 @@ func TestTU27RestartAfterWallPlusTwoDaysClearsAddresses(t *testing.T) {
 	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] {
 		t.Fatalf("null addresses %v; want old0 only", got)
 	}
-	if got := metaValue(t, r.db, retentionLastKey); got != mark {
-		t.Fatalf("mark %s after the restart, want %s", got, mark)
+	if got, want := metaValue(t, r.db, retentionLastKey), strconv.FormatInt(restart.UnixMilli(), 10); got != want {
+		t.Fatalf("mark %s after the restart, want %s", got, want)
 	}
 }
 
-// T-U-27: a step of the wall clock to an earlier time starts no run. A step of
-// 2 min after the run of 03:15 and 120 checks around 03:15 give one run.
+// T-U-27: a move of S to an earlier time starts no run. A move of 2 min after
+// the run of 03:15 and 120 checks around 03:15 give one run.
 func TestTU27SmallStepsBackGiveOneRunForEachDate(t *testing.T) {
 	start := time.Date(2027, 2, 10, 3, 14, 0, 0, time.UTC)
 	s, f, runs := stepRig(t, start, time.Hour)
@@ -232,105 +232,6 @@ func TestTU27SmallStepsBackGiveOneRunForEachDate(t *testing.T) {
 		s.check(context.Background())
 	}
 	wantRuns(t, runs, "02-10 03:15")
-}
-
-// T-U-27: a step back of 2 d gives one run on each later retention day.
-func TestTU27WallStepBackRunsOnEachLaterDay(t *testing.T) {
-	s, f, runs := stepRig(t, day10, time.Hour)
-	minutes(s, f, 5)
-	f.jump(-48 * time.Hour)
-	minutes(s, f, 3*24*60)
-	wantRuns(t, runs, "02-09 03:15", "02-10 03:15", "02-11 03:15")
-}
-
-// T-U-27: the process has more than 2 d of uptime. Then the wall clock steps
-// +2 d and then -2 d. The step forward gives no run 9 h after a run. After the
-// step back, each later day gives one run.
-func TestTU27StepsForwardAndBackInTheProcess(t *testing.T) {
-	s, f, runs := stepRig(t, day10, time.Hour)
-	minutes(s, f, 24*60)
-	f.jump(48 * time.Hour)
-	s.check(context.Background())
-	wantRuns(t, runs, "02-11 03:15")
-	minutes(s, f, 24*60)
-	f.jump(-48 * time.Hour)
-	s.check(context.Background())
-	minutes(s, f, 48*60)
-	wantRuns(t, runs, "02-11 03:15", "02-14 03:15", "02-13 03:15", "02-14 03:15")
-}
-
-// T-U-27: a later day starts a run after 20 h of monotonic time since the last
-// run. A step of +2 d, 1 h after a run, gives no run. The next retention day,
-// 23 h later, gives one run.
-func TestTU27GapHoldsBackTheRunAfterAStepForward(t *testing.T) {
-	s, f, runs := stepRig(t, time.Date(2027, 2, 10, 3, 14, 0, 0, time.UTC), time.Hour)
-	minutes(s, f, 1)
-	minutes(s, f, 60)
-	f.jump(48 * time.Hour)
-	s.check(context.Background())
-	wantRuns(t, runs, "02-10 03:15")
-	minutes(s, f, 23*60)
-	wantRuns(t, runs, "02-10 03:15", "02-13 03:15")
-}
-
-// T-U-27: a run at the start, at 04:00 or 10:00, does not hold back the next
-// run. That run is at 03:15 on the next day.
-func TestTU27StartRunDoesNotHoldBackTheNextDay(t *testing.T) {
-	for _, h := range []int{4, 10} {
-		s, f, runs := stepRig(t, time.Date(2027, 2, 10, h, 0, 0, 0, time.UTC), 0)
-		minutes(s, f, 24*60)
-		wantRuns(t, runs, fmt.Sprintf("02-10 %02d:00", h), "02-11 03:15")
-	}
-}
-
-// T-U-27: a step back of 23 h 58 min at each wall 03:14 gives no later day.
-// The wall clock never gets to 03:15 of it. In 10 d, the rule of 25 h gives a
-// run in each 25 h of monotonic time. The address of a session of 16 d is NULL
-// at the end.
-func TestTU27StepBackEachDayStillRunsEach25Hours(t *testing.T) {
-	r := newRig(t, 8)
-	start := time.Date(2027, 2, 10, 3, 13, 0, 0, time.UTC)
-	setMark(t, r.db, start.Add(-time.Hour))
-	addSessions(t, r.db, "old", 0, 1, msAgo(start, 6*oneDay), 0, "203.0.113.7")
-	s, f := fakeSchedule(t, r, time.UTC, start, nil)
-	run := direct(r)
-	var at []time.Duration
-	s.run = func(ctx context.Context, steps []retentionStep) error {
-		at = append(at, f.mono())
-		return run(ctx, steps)
-	}
-	s.begin(context.Background())
-	for range 10 * 24 * 60 {
-		minutes(s, f, 1)
-		if w := f.wall(); w.Hour() == 3 && w.Minute() == 14 {
-			f.jump(-(oneDay - 2*time.Minute))
-			s.check(context.Background())
-		}
-	}
-	prev := time.Duration(0)
-	for _, a := range at {
-		if a-prev > catchUp {
-			t.Fatalf("runs at %v: a gap of %v, want at most 25 h", at, a-prev)
-		}
-		prev = a
-	}
-	if len(at) < 9 || 10*oneDay-prev > catchUp {
-		t.Fatalf("%d runs at %v in 10 d, want 9 or more", len(at), at)
-	}
-	if got := nullIPs(t, r.db); !got["old0"] {
-		t.Fatalf("the address of 16 d is not NULL: %v", got)
-	}
-}
-
-// T-U-27: the mark is of the retention day before the start. The wall clock
-// steps back 1 h before the first check. The last run day stays the day
-// before. So the next check runs for the retention day of the start.
-func TestTU27StepBackBeforeTheFirstCheckRunsTheStartDay(t *testing.T) {
-	s, f, runs := stepRig(t, day10, 23*time.Hour)
-	f.jump(-time.Hour)
-	s.check(context.Background())
-	minutes(s, f, 1)
-	wantRuns(t, runs, "02-10 11:01")
 }
 
 // T-U-27: a normal week gives one run for each date. The rule of 25 h adds no
@@ -357,7 +258,7 @@ func TestTU27NormalWeekAndDSTRepeatDayGiveOneRunForEachDate(t *testing.T) {
 	}
 }
 
-// frozen advances the monotonic clock by n minutes and checks at each minute.
+// frozen advances the boot clock by n minutes and checks at each minute.
 // The wall clock steps back by the same time, so it does not move.
 func frozen(s *Schedule, f *fakeClock, n int) {
 	for range n {
@@ -383,7 +284,7 @@ func TestTU27ProcessWithNoRunGetsARunAfter25Hours(t *testing.T) {
 }
 
 // T-U-27: the run at the start counts for the rule of 25 h. It starts at 10 h
-// of monotonic time. The next run is 25 h later, not 15 h after it.
+// of boot clock time. The next run is 25 h later, not 15 h after it.
 func TestTU27StartRunCountsForThe25HourRule(t *testing.T) {
 	r := newRig(t, 8)
 	s, f := fakeSchedule(t, r, time.UTC, day10, nil)
@@ -402,18 +303,7 @@ func TestTU27StartRunCountsForThe25HourRule(t *testing.T) {
 	wantRuns(t, runs, "02-10 12:00", "02-10 12:00")
 }
 
-// T-U-27: a run of the rule of 25 h counts for the gap of 20 h. A step of the
-// wall clock to the next retention day, right after the run, gives no run.
-func TestTU27RunOf25HoursCountsForTheGap(t *testing.T) {
-	s, f, runs := stepRig(t, day10, time.Hour)
-	frozen(s, f, 25*60)
-	wantRuns(t, runs, "02-10 12:00")
-	f.jump(16 * time.Hour)
-	s.check(context.Background())
-	wantRuns(t, runs, "02-10 12:00")
-}
-
-// T-U-27: the rule of 25 h applies at a check with a step back. The last run
+// T-U-27: the rule of 25 h applies at a check where S is earlier. The last run
 // day then takes the retention day of the check, and not the earlier day.
 func TestTU27RuleOf25HoursRunsAtAStepBack(t *testing.T) {
 	s, f, runs := stepRig(t, day10, 23*time.Hour)
@@ -421,8 +311,8 @@ func TestTU27RuleOf25HoursRunsAtAStepBack(t *testing.T) {
 	f.jump(-26 * time.Hour)
 	s.check(context.Background())
 	wantRuns(t, runs, "02-10 11:00")
-	if s.StepBacks() != 1 || s.lastDay != "2027-02-10" {
-		t.Fatalf("%d step backs, last run day %s; want 1 and 2027-02-10", s.StepBacks(), s.lastDay)
+	if s.lastDay != "2027-02-10" {
+		t.Fatalf("last run day %s; want 2027-02-10", s.lastDay)
 	}
 }
 
@@ -433,33 +323,6 @@ func TestTU27CheckStartsOneRun(t *testing.T) {
 	f.advance(25 * time.Hour)
 	s.check(context.Background())
 	wantRuns(t, runs, "02-11 13:00")
-}
-
-// T-U-27: each step back adds 1 to the count and writes one fixed log line. No
-// line has a digit, so none has a time or a duration.
-func TestTU27StepBacksCountAndWriteOneLineEach(t *testing.T) {
-	var buf bytes.Buffer
-	lg := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey {
-			return slog.Attr{}
-		}
-		return a
-	}}))
-	r := newRig(t, 8)
-	setMark(t, r.db, day10.Add(-time.Hour))
-	s, f := fakeSchedule(t, r, time.UTC, day10, lg)
-	s.run = func(context.Context, []retentionStep) error { return nil }
-	s.begin(context.Background())
-	for range 11 {
-		f.advance(time.Minute)
-		s.check(context.Background())
-		f.jump(-time.Minute)
-		s.check(context.Background())
-	}
-	want := strings.Repeat("level=WARN msg=\"wall clock stepped back\"\n", 11)
-	if got := buf.String(); s.StepBacks() != 11 || got != want || strings.ContainsAny(got, "0123456789") {
-		t.Fatalf("%d step backs, log %q; want 11 and %q", s.StepBacks(), got, want)
-	}
 }
 
 // T-U-27: each run has a deadline of at most 6 h. A run can return an error
@@ -481,8 +344,8 @@ func TestTU27RunHasDeadlineAndEarlyEndIsCounted(t *testing.T) {
 	}
 	s.runOnce(context.Background())
 	s.runOnce(context.Background())
-	if left < 5*time.Hour || left > 6*time.Hour || s.limit != 6*time.Hour || s.gap != 20*time.Hour {
-		t.Errorf("time left %v, limit %v, gap %v; want 5 h to 6 h, 6 h and 20 h", left, s.limit, s.gap)
+	if left < 5*time.Hour || left > 6*time.Hour || s.limit != 6*time.Hour {
+		t.Errorf("time left %v, limit %v; want 5 h to 6 h and 6 h", left, s.limit)
 	}
 	if s.EarlyEnds() != 2 || strings.Count(buf.String(), "retention run ended early") != 1 {
 		t.Errorf("%d early ends, log %q; want 2 and one line", s.EarlyEnds(), buf.String())
@@ -630,48 +493,9 @@ func TestTU27TickDrivesTheChecks(t *testing.T) {
 	}
 }
 
-// T-U-27: deletes take the earlier time and the address step takes the later
-// time. A difference of more than 1 h counts for each run. The first one writes
-// one log line, with the difference in seconds.
-func TestTU27ClockGuardTimes(t *testing.T) {
-	t0 := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
-	for _, c := range []struct {
-		skew  time.Duration
-		diffs uint64
-	}{{48 * time.Hour, 1}, {-48 * time.Hour, 1}, {time.Hour, 0}, {-time.Hour, 0}, {time.Hour + time.Second, 1}, {90 * time.Minute, 1}} {
-		g := newClockGuard(nil)
-		f := &fakeClock{anchor: t0, now: t0, skew: c.skew}
-		g.anchor, g.wall, g.mono = t0, f.wall, f.mono
-		f.advance(time.Minute)
-		_, tDel, tPriv := g.reading(time.Time{})
-		mono := t0.Add(time.Minute)
-		if want := f.wall(); c.skew < 0 && (!tDel.Equal(want) || !tPriv.Equal(mono)) || c.skew > 0 && (!tDel.Equal(mono) || !tPriv.Equal(want)) {
-			t.Errorf("skew %v: tDel %v, tPriv %v", c.skew, tDel, tPriv)
-		}
-		if g.Diffs() != c.diffs {
-			t.Errorf("skew %v: %d counts, want %d", c.skew, g.Diffs(), c.diffs)
-		}
-	}
-	var buf bytes.Buffer
-	g := newClockGuard(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey {
-			return slog.Attr{}
-		}
-		return a
-	}})))
-	f := &fakeClock{anchor: t0, now: t0, skew: 48 * time.Hour}
-	g.anchor, g.wall, g.mono = t0, f.wall, f.mono
-	for range 3 {
-		g.reading(time.Time{})
-	}
-	if want := "level=WARN msg=\"wall clock differs from monotonic clock\" seconds=172800\n"; g.Diffs() != 3 || buf.String() != want {
-		t.Errorf("%d counts, log %q; want 3 and %q", g.Diffs(), buf.String(), want)
-	}
-}
-
 // prodRig makes a schedule of the production step list on a real database. The
 // writer serves the run in this goroutine. The wall clock is `skew` from the
-// monotonic clock. The time of the anchor is rollTDel.
+// boot clock. The time of the start is rollTDel.
 func prodRig(t *testing.T, skew time.Duration, lg *slog.Logger) (*rig, *Schedule, *fakeClock) {
 	t.Helper()
 	r := newRig(t, 8)
@@ -685,252 +509,6 @@ func prodRig(t *testing.T, skew time.Duration, lg *slog.Logger) (*rig, *Schedule
 func msAgo(t time.Time, back time.Duration) int64 { return t.Add(-back).UnixMilli() }
 
 const oneDay = 24 * time.Hour
-
-// T-U-27 (feeds T-C-06): the wall clock is 2 d ahead. A request row of 29 d by
-// the monotonic time stays. A row of 31 d goes. The events days are 90. An
-// evidence row, a token and a session of 89 d stay. They are younger than the
-// events cutoff by tDel. They are older than it by tPriv.
-func TestTU27WallPlusTwoDaysDeletesNothingEarly(t *testing.T) {
-	r, s, _ := prodRig(t, 48*time.Hour, nil)
-	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 29*oneDay), 0, nil, nil)
-	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 31*oneDay), 0, nil, nil)
-	young := msAgo(rollTDel, 89*oneDay)
-	addEventAt(t, r.db, "score_change", young)
-	expireCaseNamed("token").add(t, r.db, young)
-	expireCaseNamed("session").add(t, r.db, young)
-	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE ts = "+strconv.FormatInt(msAgo(rollTDel, 29*oneDay), 10)); n != 1 || r.events() != 2 {
-		t.Fatalf("%d rows of 29 d, %d rows in all; want 1 and 2", n, r.events())
-	}
-	if tok, ses := count(t, r.db, "SELECT count(*) FROM token"), count(t, r.db, "SELECT count(*) FROM session"); tok != 1 || ses != 4 {
-		t.Fatalf("%d tokens, %d sessions left; want 1 and 4", tok, ses)
-	}
-}
-
-// T-U-27 (feeds T-C-06): the wall clock is 2 d behind. The address of a
-// session of 7 d and 1 h by the monotonic time is NULL. A session of 6 d keeps
-// its address.
-func TestTU27WallMinusTwoDaysClearsAddressesOnTime(t *testing.T) {
-	r, s, _ := prodRig(t, -48*time.Hour, nil)
-	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 7*oneDay+time.Hour), 0, "203.0.113.7")
-	addSessions(t, r.db, "new", 0, 1, msAgo(rollTDel, 6*oneDay), 0, "203.0.113.8")
-	s.runOnce(context.Background())
-	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] {
-		t.Fatalf("null addresses %v; want old0 only", got)
-	}
-}
-
-// T-U-27 (feeds T-C-06): a restart has a wall clock 2 d behind. The anchor is
-// wrong too. The mark is 1 h before the true time. The start run sets the
-// address of a session to NULL. The session is 7 d and 2 h old by the true
-// time. A session of 6 d keeps its address.
-func TestTU27RestartWithWallMinusTwoDaysUsesTheMark(t *testing.T) {
-	r := newRig(t, 8)
-	trueNow := rollTDel
-	setMark(t, r.db, trueNow.Add(-time.Hour))
-	addSessions(t, r.db, "old", 0, 1, msAgo(trueNow, 7*oneDay+2*time.Hour), 0, "203.0.113.7")
-	addSessions(t, r.db, "new", 0, 1, msAgo(trueNow, 6*oneDay), 0, "203.0.113.8")
-	s, _ := fakeSchedule(t, r, time.UTC, trueNow.Add(-48*time.Hour), nil)
-	s.run = direct(r)
-	s.begin(context.Background())
-	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] {
-		t.Fatalf("null addresses %v; want old0 only", got)
-	}
-}
-
-// T-U-27: the mark is 2 d after the wall time. The address of a session of 5 d
-// and 1 h by the wall time is NULL. A session of 4 d and 23 h keeps its
-// address. Each row is just inside its delete age by tDel, so no row goes.
-func TestTU27MarkAheadClearsAddressesAndDeletesNothingEarly(t *testing.T) {
-	r, s, _ := prodRig(t, 0, nil)
-	setMark(t, r.db, rollTDel.Add(48*time.Hour))
-	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
-	addSessions(t, r.db, "new", 0, 1, msAgo(rollTDel, 4*oneDay+23*time.Hour), 0, "203.0.113.8")
-	addEvents(t, r.db, "request", 1, msAgo(rollTDel, 30*oneDay-time.Hour), 0, nil, nil)
-	young := msAgo(rollTDel, 90*oneDay-time.Hour)
-	addEventAt(t, r.db, "score_change", young)
-	expireCaseNamed("token").add(t, r.db, young)
-	expireCaseNamed("session").add(t, r.db, young)
-	q := func() [3]int {
-		return [3]int{r.events(), count(t, r.db, "SELECT count(*) FROM token"), count(t, r.db, "SELECT count(*) FROM session")}
-	}
-	before := q()
-	s.begin(context.Background())
-	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] {
-		t.Fatalf("null addresses %v; want old0 only", got)
-	}
-	if after := q(); after != before {
-		t.Fatalf("events, tokens and sessions %v after the run, %v before", after, before)
-	}
-}
-
-// T-U-27: a run that ends early does not change the mark in memory. The next
-// run uses the old mark. The start sets the mark to 2 d after the wall time. A
-// run with the wall clock 4 d ahead fails. Then the wall clock is right again.
-// The read of the mark in the next run fails, so only the mark in memory
-// counts. An address of 5 d and 1 h is NULL, so the mark is not reset. An
-// address of 4 d stays, so the mark did not take the wall time of the failed
-// run.
-func TestTU27EarlyEndKeepsTheMarkInMemory(t *testing.T) {
-	r, s, f := prodRig(t, 0, nil)
-	setMark(t, r.db, rollTDel.Add(48*time.Hour))
-	s.begin(context.Background())
-	ok := s.run
-	s.run = func(context.Context, []retentionStep) error { return errors.New("early end") }
-	f.jump(96 * time.Hour)
-	s.runOnce(context.Background())
-	f.jump(-96 * time.Hour)
-	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
-	addSessions(t, r.db, "new", 0, 1, msAgo(rollTDel, 4*oneDay), 0, "203.0.113.8")
-	s.readTime = 50 * time.Millisecond
-	conn, err := r.db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.run = func(ctx context.Context, steps []retentionStep) error {
-		conn.Close() // the writer connection is free for the run
-		return ok(ctx, steps)
-	}
-	s.runOnce(context.Background())
-	if got := nullIPs(t, r.db); !got["old0"] || got["new0"] || s.markRead || s.EarlyEnds() != 1 {
-		t.Fatalf("null addresses %v, read of the mark %v, %d early ends; want old0 only, a failed read and 1", got, s.markRead, s.EarlyEnds())
-	}
-}
-
-// T-U-27: a run can store its mark and still end with an error. This occurs
-// when the run limit ends while the run waits for the reply. The next run
-// reads the stored mark again. The first run has the wall clock 2 d ahead.
-// Then the wall clock is right again. The stored mark is the wall time of that
-// run. An address of 5 d and 1 h is NULL by the mark. The run counts a mark
-// ahead.
-func TestTU27LostReplyAfterTheMarkIsStoredReadsTheMarkAgain(t *testing.T) {
-	r, s, f := prodRig(t, 0, nil)
-	s.begin(context.Background())
-	ok := s.run
-	s.run = func(ctx context.Context, steps []retentionStep) error {
-		if err := ok(ctx, steps); err != nil {
-			return err
-		}
-		return context.DeadlineExceeded
-	}
-	f.jump(48 * time.Hour)
-	ahead := strconv.FormatInt(f.wall().UnixMilli(), 10)
-	s.runOnce(context.Background())
-	f.jump(-48 * time.Hour)
-	s.run = ok
-	addSessions(t, r.db, "old", 0, 1, msAgo(rollTDel, 5*oneDay+time.Hour), 0, "203.0.113.7")
-	s.runOnce(context.Background())
-	if got, mark := nullIPs(t, r.db), metaValue(t, r.db, retentionLastKey); !got["old0"] || mark != ahead || s.MarkAhead() != 1 || s.EarlyEnds() != 1 {
-		t.Fatalf("null addresses %v, mark %s, %d marks ahead, %d early ends; want old0, %s, 1 and 1", got, mark, s.MarkAhead(), s.EarlyEnds(), ahead)
-	}
-}
-
-// T-U-27: a read of the mark that fails at the start is made again in a run.
-// The restart has the wall clock 2 d behind. The mark is 1 h before the true
-// time. A session of 7 d and 2 h has an address. A session of 7 d and 30 min
-// has one. The read at the start fails, and so does the read in the start run.
-// That run leaves both addresses, as it has no mark. The next run reads the
-// mark. The address of 7 d and 2 h is NULL. The other stays: it is 6 d, 23 h
-// and 30 min old by the mark.
-func TestTU27FailedStartReadIsMadeAgain(t *testing.T) {
-	r := newRig(t, 8)
-	trueNow := rollTDel
-	setMark(t, r.db, trueNow.Add(-time.Hour))
-	addSessions(t, r.db, "old", 0, 1, msAgo(trueNow, 7*oneDay+2*time.Hour), 0, "203.0.113.7")
-	addSessions(t, r.db, "near", 0, 1, msAgo(trueNow, 7*oneDay+30*time.Minute), 0, "203.0.113.8")
-	s, _ := fakeSchedule(t, r, time.UTC, trueNow.Add(-48*time.Hour), nil)
-	s.readTime = 50 * time.Millisecond
-	conn, err := r.db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := direct(r)
-	s.run = func(ctx context.Context, steps []retentionStep) error {
-		conn.Close() // the writer connection is free for the run
-		return run(ctx, steps)
-	}
-	s.begin(context.Background())
-	if got := nullIPs(t, r.db); s.markRead || got["old0"] || got["near0"] {
-		t.Fatalf("read of the mark %v, null addresses %v; want a failed read and none", s.markRead, got)
-	}
-	s.readTime = readLimit
-	s.runOnce(context.Background())
-	if got := nullIPs(t, r.db); !s.markRead || !got["old0"] || got["near0"] {
-		t.Fatalf("read of the mark %v, null addresses %v; want a read and old0 only", s.markRead, got)
-	}
-}
-
-// T-U-27: each run with a mark more than 1 h after the wall time adds 1 to the
-// count. The first one writes one fixed log line with no digit. A mark of
-// exactly 1 h gives no count. The mark adds nothing to the clock differences.
-func TestTU27MarkAheadCountsAndLogsOnce(t *testing.T) {
-	for _, c := range []struct {
-		ahead time.Duration
-		want  uint64
-	}{{48 * time.Hour, 2}, {time.Hour + time.Millisecond, 2}, {time.Hour, 0}, {0, 0}} {
-		var buf bytes.Buffer
-		lg := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Attr{}
-			}
-			return a
-		}}))
-		r, s, _ := prodRig(t, 0, lg)
-		setMark(t, r.db, rollTDel.Add(c.ahead))
-		s.begin(context.Background())
-		s.runOnce(context.Background())
-		line := "level=WARN msg=\"retention mark is ahead of the wall clock\"\n"
-		if c.want == 0 {
-			line = ""
-		}
-		if got := buf.String(); s.MarkAhead() != c.want || got != line || strings.ContainsAny(got, "0123456789") || s.ClockDiffs() != 0 {
-			t.Errorf("ahead %v: %d counts, %d clock differences, log %q; want %d, 0 and %q", c.ahead, s.MarkAhead(), s.ClockDiffs(), got, c.want, line)
-		}
-	}
-}
-
-// T-U-27: the mark does not move back after a run with a wall clock that is 2 d
-// behind. Each run with a difference counts, and the log has one line of the
-// clock difference. The mark ahead of the second run has its own line.
-func TestTU27MarkNeverMovesBackAndDifferencesCount(t *testing.T) {
-	var buf bytes.Buffer
-	r, s, f := prodRig(t, 48*time.Hour, slog.New(slog.NewTextHandler(&buf, nil)))
-	s.runOnce(context.Background())
-	want := strconv.FormatInt(f.wall().UnixMilli(), 10)
-	f.jump(-96 * time.Hour)
-	s.runOnce(context.Background())
-	if got := metaValue(t, r.db, retentionLastKey); got != want || s.ClockDiffs() != 2 || strings.Count(buf.String(), "wall clock differs") != 1 {
-		t.Fatalf("mark %s, %d counts, log %q; want %s, 2 and one line", got, s.ClockDiffs(), buf.String(), want)
-	}
-	f.jump(120 * time.Hour)
-	s.runOnce(context.Background())
-	if got, want := metaValue(t, r.db, retentionLastKey), strconv.FormatInt(f.wall().UnixMilli(), 10); got != want {
-		t.Fatalf("mark %s after a later run, want %s", got, want)
-	}
-}
-
-// T-U-27: the mark is the wall time of the run, not the later of the two
-// times. The wall clock is 2 d behind, so the mono time is later. The mark in
-// memory is the wall time too: a second run has no mark ahead.
-func TestTU27MarkIsTheWallTimeOfTheRun(t *testing.T) {
-	r, s, f := prodRig(t, -48*time.Hour, nil)
-	s.runOnce(context.Background())
-	s.runOnce(context.Background())
-	if got, want := metaValue(t, r.db, retentionLastKey), strconv.FormatInt(f.wall().UnixMilli(), 10); got != want || s.MarkAhead() != 0 {
-		t.Fatalf("mark %s, %d marks ahead; want %s and 0", got, s.MarkAhead(), want)
-	}
-}
-
-// T-U-27: the production sources of the clock guard. Right after the guard
-// starts, both times are the time now, and there is no count.
-func TestTU27ClockGuardProductionSources(t *testing.T) {
-	g := newClockGuard(nil)
-	_, tDel, tPriv := g.reading(time.Time{})
-	now := time.Now()
-	if tDel.Sub(now).Abs() > time.Second || tPriv.Sub(now).Abs() > time.Second || g.Diffs() != 0 {
-		t.Fatalf("tDel %v, tPriv %v, %d counts; now %v", tDel, tPriv, g.Diffs(), now)
-	}
-}
 
 // T-U-27: a run that ends early writes no mark, and the count shows it. The
 // mark step is the last step. The ctx of the run ends after the first chunk of
@@ -1030,8 +608,7 @@ func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
 
 // T-U-27: one run has the wall clock 40 d ahead, and the later runs have the
 // right clock. The visitor writes a callback row 1 d after the first run. The
-// row has no field after the next run, at each age from 31 d. The field clear
-// has no mark.
+// row has no field after the next run, at each age from 31 d.
 func TestTU27FieldClearAfterOneRunWithTheWallClockAhead(t *testing.T) {
 	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
 		t.Run(age.String(), func(t *testing.T) {
@@ -1046,21 +623,6 @@ func TestTU27FieldClearAfterOneRunWithTheWallClockAhead(t *testing.T) {
 				t.Fatalf("%d rows keep a field at the age %v", n, age)
 			}
 		})
-	}
-}
-
-// T-U-27: the wall clock is 40 d behind for two runs. A callback row that the
-// visitor writes between them has a ts of about 40 d before the true time. It
-// has no field after the second run.
-func TestTU27FieldClearAfterRunsWithTheWallClockBehind(t *testing.T) {
-	r, s, f := prodRig(t, -40*oneDay, nil)
-	s.runOnce(context.Background())
-	f.advance(time.Hour)
-	addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
-	f.advance(time.Hour)
-	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
-		t.Fatalf("%d rows keep a field after the second run", n)
 	}
 }
 
@@ -1102,14 +664,6 @@ func TestTU27FieldClearRowsWrittenWithTheWallClockAhead(t *testing.T) {
 	}
 }
 
-// fieldRows returns the rows that keep a field, as their ages by the time at,
-// in rounded minutes, oldest first.
-func fieldRows(t *testing.T, db *sql.DB, at time.Time) string {
-	t.Helper()
-	return rawText(t, db, "SELECT coalesce(group_concat((("+strconv.FormatInt(at.UnixMilli(), 10)+
-		" - ts) / 60000) || 'm', ' '), '') FROM (SELECT ts FROM event WHERE "+rawFull+" ORDER BY ts)")
-}
-
 // T-U-27: one run has the wall clock 40 d ahead. Then the clock is right, and
 // a row and a run come each day for 60 d. After each run, no row older than the
 // raw days has a field.
@@ -1125,69 +679,6 @@ func TestTU27FieldClearDailyRunsAfterTheWallClockWasAhead(t *testing.T) {
 		if n := count(t, r.db, q); n != 0 {
 			t.Fatalf("%d rows older than the raw days keep a field after the run of day %d", n, day)
 		}
-	}
-}
-
-// T-U-27: a process starts with the wall clock 30 d back. With the stored
-// value of the earlier process, its rows keep their fields. With no stored
-// value, the line is the wall time alone, and both rows go.
-func TestTU27FieldClearStartWithTheWallClockBack(t *testing.T) {
-	for _, c := range []struct {
-		stored bool
-		want   string
-	}{{true, "30m 0m"}, {false, ""}} {
-		t.Run(fmt.Sprint("stored ", c.stored), func(t *testing.T) {
-			r := newRig(t, 8)
-			s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(-30*oneDay), nil)
-			s.run = direct(r)
-			if c.stored {
-				mustExec(t, r.db, metaSetSQL, retentionCheckKey, strconv.FormatInt(rollTDel.UnixMilli(), 10))
-			}
-			for _, back := range []time.Duration{0, 30 * time.Minute} {
-				addFull(t, r.db, "callback", 1, rollTDel.Add(-back).UnixMilli(), 0)
-			}
-			s.runOnce(context.Background())
-			if got := fieldRows(t, r.db, rollTDel); got != c.want {
-				t.Fatalf("rows with a field (age) %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
-// T-U-27: the wall clock steps back 3 h. Rows are 1 h, 2 h 30 min and 5 h old.
-// With the back value stored, only the row of 1 h is cleared. With the earlier
-// value still stored, no row is cleared.
-func TestTU27FieldClearStepBackOfThreeHours(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		stored time.Duration // the stored value, before R
-		want   string
-	}{{"back value stored", 3 * time.Hour, "300m 150m"}, {"earlier value stored", 30 * time.Minute, "300m 150m 60m"}} {
-		t.Run(c.name, func(t *testing.T) {
-			r, s, f := prodRig(t, 0, nil)
-			for _, age := range []time.Duration{time.Hour, 150 * time.Minute, 5 * time.Hour} {
-				addFull(t, r.db, "callback", 1, msAgo(rollTDel, age), 0)
-			}
-			f.jump(-3 * time.Hour)
-			mustExec(t, r.db, metaSetSQL, retentionCheckKey, strconv.FormatInt(msAgo(rollTDel, c.stored), 10))
-			s.runOnce(context.Background())
-			if got := fieldRows(t, r.db, rollTDel); got != c.want {
-				t.Fatalf("rows with a field (age) %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
-// T-U-27: a host suspend of 3 h stops the monotonic clock and not the wall
-// clock. No row younger than 2 h loses its fields.
-func TestTU27FieldClearAfterAHostSuspend(t *testing.T) {
-	r, s, f := prodRig(t, 0, nil)
-	addFull(t, r.db, "callback", 1, msAgo(rollTDel, 30*time.Minute), 0)
-	f.jump(3 * time.Hour)
-	addFull(t, r.db, "callback", 1, msAgo(f.wall(), 30*time.Minute), 0)
-	s.runOnce(context.Background())
-	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 2 {
-		t.Fatalf("%d rows keep a field, want 2", n)
 	}
 }
 
