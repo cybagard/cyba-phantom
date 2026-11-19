@@ -42,7 +42,10 @@
 // A word such as actions/checkout@v5.1.0, @dependabot or user:pw@tcp(host)/db
 // is not an address. It has no local part, or no dotted domain that ends in
 // letters. The pattern does not match an address with no dot in the domain.
-// It does not match one with a byte that is not valid UTF-8 either.
+// Before it matches, dco drops each format character from a line. That is
+// each character of Unicode category Cf, such as U+200B or U+00AD. So such a
+// character cannot split an address. A message that is not valid UTF-8 fails
+// the commit. A commit with no raw message fails too.
 //
 // A commit with a non-empty encoding header fails, whatever its value. An
 // empty value gives an empty %e, the same as no header, and dco does not fail
@@ -66,6 +69,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -207,7 +212,9 @@ func check(out []byte, msgs map[string][]byte, base, head string, stdout, stderr
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
 		}
 		encoded := len(f[3]) > 0
-		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers) || !messageOK(msgs[full])
+		// A commit with no raw message fails: dco cannot check it.
+		msg, haveMsg := msgs[full]
+		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers) || !haveMsg || !messageOK(msg)
 		if encoded || wrongAddr {
 			badID++
 			fmt.Fprintf(stdout, "identity: %s\n", hash)
@@ -284,9 +291,20 @@ func identityOK(author, committer string, trailers []string) bool {
 	return true
 }
 
-// messageOK applies the address rule to every line of a commit message.
+// messageOK applies the address rule to every line of a commit message. A
+// message that is not valid UTF-8 fails. Each format character (category Cf,
+// such as U+200B or U+00AD) is dropped first. It cannot split an address.
 func messageOK(msg []byte) bool {
-	for _, line := range strings.Split(string(msg), "\n") {
+	if !utf8.Valid(msg) {
+		return false
+	}
+	noFormat := func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}
+	for _, line := range strings.Split(strings.Map(noFormat, string(msg)), "\n") {
 		addrs := msgAddrRE.FindAllString(line, -1)
 		for _, a := range addrs {
 			if asciiEqualFold(a, maintainerAddr) {

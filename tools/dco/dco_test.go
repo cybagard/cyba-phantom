@@ -347,6 +347,28 @@ func TestFailHintMatchesFailure(t *testing.T) {
 // empty encoding header, and a sign-off trailer.
 const goodRecord = "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00Signed-off-by: t <" + me + ">\x00\n"
 
+// goodMsgs holds an empty raw message for each hash that the records of these
+// tests use.
+var goodMsgs = map[string][]byte{"0123456789abcdef": {}, "fedcba9876543210": {}}
+
+// A commit with no raw message fails, and so does one whose message is not
+// valid UTF-8. Both are identity failures, never a pass.
+func TestCheckFailsClosed(t *testing.T) {
+	for name, msgs := range map[string]map[string][]byte{
+		"nil map":      nil,
+		"other hash":   {"fedcba9876543210": {}},
+		"invalid text": {"0123456789abcdef": []byte("a\xffb\n")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := check([]byte(goodRecord), msgs, "base", "HEAD", &stdout, &stderr)
+			if code != 1 || !strings.Contains(stdout.String(), "identity: 0123456789ab\n") {
+				t.Fatalf("check = %d, want 1 with an identity line; stdout %q", code, stdout.String())
+			}
+		})
+	}
+}
+
 // A record with fewer than five fields is an error. The checker prints a
 // fixed line, no part of the record, and never "all N commits pass".
 func TestMalformedRecordIsError(t *testing.T) {
@@ -359,7 +381,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 	for name, out := range cases {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := check([]byte(out), nil, "base", "HEAD", &stdout, &stderr); code != 2 {
+			if code := check([]byte(out), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 2 {
 				t.Fatalf("check = %d, want 2; stdout %q", code, stdout.String())
 			}
 			if got, want := stderr.String(), "dco: malformed git log record\n"; got != want {
@@ -375,7 +397,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 // A well-formed record passes.
 func TestCheckGoodRecord(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := check([]byte(goodRecord), nil, "base", "HEAD", &stdout, &stderr); code != 0 {
+	if code := check([]byte(goodRecord), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 0 {
 		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -384,7 +406,7 @@ func TestCheckGoodRecord(t *testing.T) {
 func TestCheckKeepsLastRecordWithoutEnd(t *testing.T) {
 	unsigned := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00\x00"
 	var stdout, stderr bytes.Buffer
-	if code := check([]byte(unsigned), nil, "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
+	if code := check([]byte(unsigned), goodMsgs, "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
 		t.Errorf("check = %d, want 1 with an unsigned line; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -400,7 +422,7 @@ func TestCheckCountsRecords(t *testing.T) {
 		{"one unsigned", goodRecord + unsigned, "dco FAIL: of 2 commits in base..HEAD, 1 lack", 1},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := check([]byte(c.out), nil, "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
+		if code := check([]byte(c.out), goodMsgs, "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
 			t.Errorf("%s: check = %d, stdout %q, stderr %q; want %d and %q", c.name, code, stdout.String(), stderr.String(), c.code, c.want)
 		}
 	}
@@ -579,8 +601,52 @@ func TestMessageAddressFails(t *testing.T) {
 		"Claude line, 2 addresses":     signoff + "Co-authored-by: Claude <noreply@anthropic.com> " + other + "\n",
 		"fullwidth maintainer":         body("67512030+cybagard＠users.noreply.github.com"),
 	}
+	const zwsp, softHyphen = "\xe2\x80\x8b", "\xc2\xad" // U+200B, U+00AD
+	cases["zero width space in domain"] = body("other@exa" + zwsp + "mple.com")
+	cases["soft hyphen in domain"] = body("other@exa" + softHyphen + "mple.com")
+	cases["zero width space before at-sign"] = body("other" + zwsp + "@example.com")
+	cases["maintainer and another address"] = body("by " + me + " and " + other)
 	for name, msg := range cases {
 		t.Run(name, func(t *testing.T) { failsWith(t, nil, msg, "identity") })
+	}
+}
+
+// A message that is not valid UTF-8 fails: a bad byte can split an address
+// for the pattern. The commit object is made by hand, with no address in it.
+func TestInvalidUTF8MessageFails(t *testing.T) {
+	dir, hash := forgeCommit(t, "", body("a\xffb"))
+	code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+	if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") {
+		t.Fatalf("run = %d, want 1 with an identity line; output %q %q", code, out, errOut)
+	}
+}
+
+// trailersOf returns what git parses as the trailers of msg.
+func trailersOf(t *testing.T, msg string) string {
+	t.Helper()
+	dir := newRepo(t)
+	commitWith(t, dir, nil, "--cleanup=verbatim", "-m", msg)
+	return git(t, dir, "log", "-1", "--format=%(trailers:only)")
+}
+
+// A line in a paragraph that is not the trailer block is not a git trailer.
+// The trailer rule does not see it, so only the message rule can fail the
+// commit. The test checks with git that the line is no trailer.
+func TestMessageRuleAloneFails(t *testing.T) {
+	signed := "\n\nbody\n\nSigned-off-by: t <" + me + ">\n"
+	cases := map[string]string{
+		"Claude line at another address":    "subject\n\nCo-authored-by: Claude <" + other + ">" + signed,
+		"Claude address in another key":     "subject\n\nReviewed-by: Claude <noreply@anthropic.com>" + signed,
+		"Claude line with a second address": "subject\n\nCo-authored-by: Claude <noreply@anthropic.com> " + other + signed,
+		"maintainer and another address":    "subject\n\nby " + me + " and " + other + signed,
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := trailersOf(t, msg); strings.Contains(got, "Claude") || strings.Contains(got, "by "+me) {
+				t.Fatalf("git parses the line as a trailer: %q", got)
+			}
+			failsWith(t, nil, msg, "identity")
+		})
 	}
 }
 
@@ -629,6 +695,21 @@ func TestRawMessagesErrors(t *testing.T) {
 	}
 	if _, err := rawMessages(t.TempDir(), []string{strings.Repeat("a", 40)}); err == nil {
 		t.Error("rawMessages accepts a directory that is not a repository")
+	}
+}
+
+// The reader accepts an empty object and an object that ends exactly at the
+// output. It refuses a body one byte short of the object and its LF.
+func TestParseBatchSizes(t *testing.T) {
+	got, err := parseBatch([]byte("a commit 0\n\nb commit 6\nh\n\nmsg\n"), 2)
+	if err != nil || len(got) != 2 || len(got["a"]) != 0 || string(got["b"]) != "msg" {
+		t.Errorf("parseBatch = %q, %v; want a empty and b msg", got, err)
+	}
+	if _, err := parseBatch([]byte("a commit 3\nxxx"), 1); err == nil {
+		t.Error("parseBatch accepts an object without its LF")
+	}
+	if _, err := parseBatch([]byte("a commit 3\nxxx\n"), 1); err != nil {
+		t.Errorf("parseBatch refuses an object with its LF: %v", err)
 	}
 }
 
