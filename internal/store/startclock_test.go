@@ -334,9 +334,10 @@ func TestTU27SStepBackAt0314For10Days(t *testing.T) {
 }
 
 // T-U-27: a real run of a writer with a clock takes each cutoff from S. The
-// wall hook of the writer is 40 d ahead of S, or 40 d behind. Three steps have
-// rows on both sides of their cutoff of S. These are the address step, the raw
-// delete and the field clear. The rows that stay are those of S.
+// wall hook of the writer is 40 d ahead of S, or 40 d behind. The test checks
+// three steps that have rows on both sides of their cutoff of S. These are the
+// address step, the raw delete and the field clear. The rows that stay are
+// those of S.
 func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) int64 { return start.Add(-d).UnixMilli() }
