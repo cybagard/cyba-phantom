@@ -710,6 +710,9 @@ func TestTU18_VkeyRefused(t *testing.T) {
 // helper skips.
 const sigtermHelperEnv = "PHANTOM_TEST_SIGTERM_HELPER"
 
+// sigtermRootEnv gives the helper the state directory that the parent made.
+const sigtermRootEnv = "PHANTOM_TEST_SIGTERM_ROOT"
+
 // TestTU18_SigtermDuringStart runs the real serve function in a child process
 // with a FIFO at the public key file. A SIGTERM during the start must end the
 // child with exit code 0 before the deadline (T-U-18).
@@ -718,8 +721,11 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTU18_SigtermHelper$")
 	// The child ends with os.Exit, so its cleanup does not run.
-	// t.TempDir uses GOTMPDIR before TMPDIR. The test sets both to tmp,
-	// so the child makes its files in tmp, and the parent removes tmp.
+	// The parent makes the state directory of the child, so the parent
+	// removes it. On Linux it is on a memory filesystem (stateRoot).
+	// t.TempDir uses GOTMPDIR before TMPDIR. The test sets both to tmp.
+	// So the other files of the child are in tmp, and the parent removes tmp.
+	root := stateRoot(t)
 	tmp := t.TempDir()
 	// The htpasswd file of the child is below the package directory.
 	fixtures, err := os.MkdirTemp(pkgDir, "_tmp-")
@@ -727,15 +733,16 @@ func TestTU18_SigtermDuringStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(fixtures) })
-	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", fixtureDirEnv+"="+fixtures, "GOTMPDIR="+tmp, "TMPDIR="+tmp)
+	cmd.Env = append(os.Environ(), sigtermHelperEnv+"=1", fixtureDirEnv+"="+fixtures, sigtermRootEnv+"="+root, "GOTMPDIR="+tmp, "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child: %v (context %v), output:\n%s", err, ctx.Err(), out)
 	}
-	if ents, err := os.ReadDir(tmp); err != nil {
+	// The child must use the state directory that the parent made.
+	if ents, err := os.ReadDir(root); err != nil {
 		t.Fatal(err)
 	} else if len(ents) == 0 {
-		t.Fatal("the child made no directory below its TMPDIR")
+		t.Fatal("the child made no file in its state directory")
 	}
 	// A skipped helper or a pattern with no test also exits 0.
 	for _, w := range []string{"checkpointer does not start", safefile.ErrType.Error()} {
@@ -754,9 +761,12 @@ func TestTU18_SigtermHelper(t *testing.T) {
 	https, plain, ca := openListeners(t)
 	cfg := serveCfg(t, https.Addr().String(), plain.Addr().String(), ca)
 	p := paramsOf(cfg)
-	// The child ends with os.Exit. A state directory in /dev/shm would stay
-	// there, so the state is below TMPDIR, which the parent removes.
-	p.Root = diskRoot(t)
+	// The child ends with os.Exit, so its cleanup does not run. The parent
+	// made the state directory and removes it.
+	p.Root = os.Getenv(sigtermRootEnv)
+	if p.Root == "" {
+		t.Fatal(sigtermRootEnv + " is not set")
+	}
 	savedKey(t, p)
 	vpath := filepath.Join(p.Root, tlog.VKeyName)
 	if err := os.Remove(vpath); err != nil {
