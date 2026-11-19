@@ -3,10 +3,13 @@
 // The matrix must agree with the requirement IDs declared in 01-prd.md and
 // the Covers columns of 07-test-plan.md. After the set checks it re-emits
 // the matrix in canonical form and requires a byte-exact match with the
-// committed file. Row order comes from 01. A Tests cell lists its test IDs
+// committed file. 01 and 07 decide the row set, the row order, and the
+// Tests cell of each row that has tests. A Tests cell lists its test IDs
 // in 07 order. A run is IDs that are next to each other in 07, with one
 // type letter and consecutive numbers. A run of two or more is one range.
-// So the file is a pure function of the other two.
+// The trace tool keeps three things from the committed file. They are the
+// Design column, the text of a cell that has no tests, and the lines
+// outside the tables.
 //
 // Findings name IDs and counts only: spec text is PR-controlled, so it
 // never reaches a CI log.
@@ -17,7 +20,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,9 +58,18 @@ func cRuleIDs() []string {
 	return ids
 }
 
+// cRuleSet holds the IDs of cRuleIDs, built once.
+var cRuleSet = func() map[string]bool {
+	set := map[string]bool{}
+	for _, id := range cRuleIDs() {
+		set[id] = true
+	}
+	return set
+}()
+
 // isCRule reports if id is a constitution rule ID.
 func isCRule(id string) bool {
-	return slices.Contains(cRuleIDs(), id)
+	return cRuleSet[id]
 }
 
 // req is a requirement or goal declared in 01.
@@ -382,8 +393,9 @@ func setDelta(want, got map[string]bool) (missing, extra []string) {
 // one type letter and consecutive numbers, make a run. A run of two or
 // more is one range. Other IDs stand alone. Then come the IDs that 07
 // does not declare, in ID order, and the prose tokens, in cell order.
-// Tokens are joined with ", ". A cell with no test references (a "no
-// tests" marker) is returned as-is.
+// Tokens are joined with ", ". A prose token in a cell that has a test
+// reference is a finding. A cell with no test references (a "no tests"
+// marker) stays as it is.
 func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	testPos := make(map[string]int, len(tests))
 	for _, t := range tests {
@@ -392,6 +404,7 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 
 	var known []test // IDs that 07 declares, in cell order
 	var unknown, prose []string
+	var proseItems []int // item numbers of prose tokens with no finding yet
 	seen := map[string]bool{}
 	hasTest := false
 	for i, part := range strings.Split(cell, ",") {
@@ -403,6 +416,8 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 		if ids == nil {
 			if testRefAnywhereRE.MatchString(part) {
 				*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has a malformed test reference (item %d)", reqID, i+1))
+			} else {
+				proseItems = append(proseItems, i+1)
 			}
 			prose = append(prose, part)
 			continue
@@ -437,6 +452,9 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	if !hasTest {
 		return cell
 	}
+	for _, n := range proseItems {
+		*findings = append(*findings, fmt.Sprintf("08-traceability: %s Tests cell has an item that is not a test reference (item %d)", reqID, n))
+	}
 
 	sort.Slice(known, func(i, j int) bool { return known[i].order < known[j].order })
 	sort.Strings(unknown)
@@ -458,8 +476,8 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// nextInRun reports if b continues a range that ends with a. Then b is
-// next to a in 07, has the type letter of a, and has the next number.
+// nextInRun reports if b continues a range that ends with a. For that, b
+// is next to a in 07. It has the type letter of a. It has the next number.
 func nextInRun(a, b test) bool {
 	ma := testIDRE.FindStringSubmatch(a.id)
 	mb := testIDRE.FindStringSubmatch(b.id)

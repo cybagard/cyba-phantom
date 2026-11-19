@@ -235,9 +235,11 @@ func TestReemitTestsOrder(t *testing.T) {
 		tests            []test
 		findings         int
 	}{
-		{"prose goes last", "prose, T-U-01", "T-U-01, prose", plan("T-U-01"), 0},
-		{"prose keeps cell order", "x, y, T-U-01", "T-U-01, x, y", plan("T-U-01"), 0},
-		{"prose after unknown IDs", "x, T-U-09, T-U-01", "T-U-01, T-U-09, x", plan("T-U-01"), 0},
+		{"prose goes last", "prose, T-U-01", "T-U-01, prose", plan("T-U-01"), 1},
+		{"prose keeps cell order", "x, y, T-U-01", "T-U-01, x, y", plan("T-U-01"), 2},
+		{"prose after unknown IDs", "x, T-U-09, T-U-01", "T-U-01, T-U-09, x", plan("T-U-01"), 1},
+		{"malformed reference is one finding", "T-U-011, T-U-01", "T-U-01, T-U-011", plan("T-U-01"), 1},
+		{"no-test cell with a comma stays", "a,b", "a,b", plan("T-U-01"), 0},
 		{"unknown IDs sorted last, no finding", "T-U-20, T-U-09, T-U-01", "T-U-01, T-U-09, T-U-20", plan("T-U-01"), 0},
 		{"unknown member of a range", "T-U-03, T-U-01..02", "T-U-01, T-U-03, T-U-02", plan("T-U-01", "T-U-03"), 1},
 		{"gap in a range", "T-U-01..03", "T-U-01, T-U-02..03", plan("T-U-01", "T-U-05", "T-U-02", "T-U-03"), 1},
@@ -252,8 +254,25 @@ func TestReemitTestsOrder(t *testing.T) {
 	}
 }
 
+// TestProseItemFinding checks the text of the finding: it has the ID and
+// the item number, and never the token.
+func TestProseItemFinding(t *testing.T) {
+	var f []string
+	reemitTests("FR-01", "T-U-01, secret-token, T-U-02", plan("T-U-01", "T-U-02"), &f)
+	want := []string{"08-traceability: FR-01 Tests cell has an item that is not a test reference (item 2)"}
+	if !slices.Equal(f, want) {
+		t.Errorf("findings %q, want %q", f, want)
+	}
+}
+
+func TestProseInTestsCellFailsTrace(t *testing.T) {
+	dir := newSpec(t)
+	replaceLine(t, dir, "08-traceability.md", "| FR-01 | 02 | T-U-01, T-I-01 |", "| FR-01 | 02 | T-U-01, T-I-01, note |")
+	wantFinding(t, dir, "08-traceability: FR-01 Tests cell has an item that is not a test reference (item 3)")
+}
+
 // TestCellForms has one row for each written form of a Tests cell. A cell
-// that is not canonical must be re-emitted in another form.
+// that is not canonical needs another form when trace re-emits it.
 func TestCellForms(t *testing.T) {
 	flat := plan("T-U-01", "T-U-02", "T-U-03", "T-I-04", "T-U-04", "T-U-06", "T-U-05")
 	apart := plan("T-U-01", "T-U-03", "T-U-02")

@@ -13,8 +13,17 @@ import (
 // tests run it on a temporary AGENTS.md and a temporary golden file.
 
 // mirrorScript is the absolute path of the script. Other tests change the
-// working directory, so the path is set at package start.
-var mirrorScript, _ = filepath.Abs("../mirror-diff.sh")
+// working directory, so TestMain sets the path before any test runs.
+var mirrorScript string
+
+func TestMain(m *testing.M) {
+	var err error
+	if mirrorScript, err = filepath.Abs("../mirror-diff.sh"); err != nil {
+		fmt.Fprintln(os.Stderr, "mirror-diff script path:", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 func mirrorTable() string {
 	lines := []string{"| Rule | Digest |", "|------|--------|"}
@@ -28,10 +37,16 @@ func mirrorTable() string {
 // the table. It returns the exit status and stderr.
 func runMirrorDiff(t *testing.T, table, after string) (int, string) {
 	t.Helper()
+	return runMirrorDiffText(t, "# Agents\n\n"+table+after)
+}
+
+// runMirrorDiffText runs the script on an AGENTS.md with exactly this text.
+func runMirrorDiffText(t *testing.T, text string) (int, string) {
+	t.Helper()
 	dir := t.TempDir()
 	agents := filepath.Join(dir, "AGENTS.md")
 	golden := filepath.Join(dir, "golden.md")
-	if err := os.WriteFile(agents, []byte("# Agents\n\n"+table+after), 0o644); err != nil {
+	if err := os.WriteFile(agents, []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(golden, []byte(mirrorTable()), 0o644); err != nil {
@@ -51,26 +66,42 @@ func runMirrorDiff(t *testing.T, table, after string) (int, string) {
 
 func TestMirrorDiffInSync(t *testing.T) {
 	for name, after := range map[string]string{
-		"table at the end":       "",
-		"text after the table":   "\nMore text.\n",
-		"line right after table": "More text.\n",
+		"table at the end":                   "",
+		"text after the table":               "\nMore text.\n",
+		"a line with only spaces, then text": " \t \nMore text.\n",
 	} {
 		if rc, stderr := runMirrorDiff(t, mirrorTable(), after); rc != 0 {
 			t.Errorf("%s: exit %d, want 0: %s", name, rc, stderr)
 		}
 	}
+	crlf := strings.ReplaceAll("# Agents\n\n"+mirrorTable()+"\nMore text.\n", "\n", "\r\n")
+	if rc, stderr := runMirrorDiffText(t, crlf); rc != 0 {
+		t.Errorf("CRLF line ends, blank line, text: exit %d, want 0: %s", rc, stderr)
+	}
 }
 
 func TestMirrorDiffExtraRow(t *testing.T) {
-	rc, stderr := runMirrorDiff(t, mirrorTable(), "| C11 | x |\n")
-	if rc != 2 {
-		t.Fatalf("exit %d, want 2: %s", rc, stderr)
+	for name, after := range map[string]string{
+		"row after the table":          "| C11 | x |\n",
+		"row without a leading pipe":   "C11 | x\n",
+		"row with 3 spaces":            "   | C11 | x |\n",
+		"row with a tab":               "\t| C11 | x |\n",
+		"plain text right after table": "More text.\n",
+	} {
+		rc, stderr := runMirrorDiff(t, mirrorTable(), after)
+		if rc != 2 {
+			t.Errorf("%s: exit %d, want 2: %s", name, rc, stderr)
+		}
+		if !strings.Contains(stderr, "AGENTS.md") {
+			t.Errorf("%s: stderr does not name the file: %q", name, stderr)
+		}
+		if strings.Contains(stderr, "C11") || strings.Contains(stderr, "| x") || strings.Contains(stderr, "More text") {
+			t.Errorf("%s: stderr has table text: %q", name, stderr)
+		}
 	}
-	if !strings.Contains(stderr, "AGENTS.md") {
-		t.Errorf("stderr does not name the file: %q", stderr)
-	}
-	if strings.Contains(stderr, "C11") || strings.Contains(stderr, "| x") {
-		t.Errorf("stderr has table text: %q", stderr)
+	crlf := strings.ReplaceAll("# Agents\n\n"+mirrorTable()+"| C11 | x |\n", "\n", "\r\n")
+	if rc, stderr := runMirrorDiffText(t, crlf); rc != 2 {
+		t.Errorf("CRLF line ends, 13th row: exit %d, want 2: %s", rc, stderr)
 	}
 }
 

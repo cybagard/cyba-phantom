@@ -26,14 +26,17 @@ if [ ! -f "$GOLDEN" ]; then
 fi
 
 tmp="$(mktemp)" || exit 2
-trap 'rm -f "$tmp"' EXIT
+nonblank="$(mktemp)" || exit 2
+trap 'rm -f "$tmp" "$nonblank"' EXIT
 
 # The table block: the "| Rule | Digest |" header, its separator, and the
-# ten C-rows — 12 lines (awk stops after the 12th), LF-normalized
-# (.gitattributes pins eol=lf).
-sed -e 's/\r$//' "$AGENTS_MD" | awk '
+# ten C-rows — 12 lines, LF-normalized (.gitattributes pins eol=lf). The
+# same pass reads the line after the block. A line that is not blank (empty,
+# or only spaces and tabs) goes to $nonblank: in GFM it continues the table.
+sed -e 's/\r$//' "$AGENTS_MD" | awk -v nonblank="$nonblank" '
+  found && n == 12 { if ($0 !~ /^[ \t]*$/) print "x" > nonblank; exit }
   /^\| Rule \| Digest \|$/ { if (found) exit; found = 1; n = 0 }
-  found { print; if (++n == 12) exit }
+  found { print; n++ }
 ' > "$tmp"
 
 lines=$(wc -l < "$tmp" | tr -d '[:space:]')
@@ -51,14 +54,10 @@ if [ "$tablelines" -ne 12 ]; then
   exit 2
 fi
 
-# A table row right after the 12 lines is an extra rule. The awk above does
-# not read it, so this check fails on it.
-after=$(sed -e 's/\r$//' "$AGENTS_MD" | awk '
-  found && n == 12 { print substr($0, 1, 1); exit }
-  /^\| Rule \| Digest \|$/ { if (found) exit; found = 1; n = 0 }
-  found { n++ }
-')
-if [ "$after" = "|" ]; then
+# After the 12 lines comes a blank line or the end of the file. Any other
+# line right after the table continues it (a non-blank line is a row in GFM,
+# with or without a leading "|"), so it is an extra rule: the check fails.
+if [ -s "$nonblank" ]; then
   echo "mirror-diff: table in $AGENTS_MD has a row after the 12 lines (header + separator + 10 rows)" >&2
   exit 2
 fi
