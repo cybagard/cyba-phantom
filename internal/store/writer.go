@@ -410,14 +410,14 @@ func (w *Writer) flush(batch []*event.Event) []*event.Event {
 }
 
 // write stores one batch in one transaction. It makes the record bytes and the
-// hash of each evidence event first, with one encode. For a batch with evidence
-// it takes the one pool connection and sets synchronous=FULL on it before BEGIN.
-// It sets NORMAL again when the transaction has ended, after a commit and after
-// a rollback. A failure to set either value is a database error. Suppose write
-// returns an error and the COMMIT did not succeed. Then write counts each event
-// of the batch as a drop. The lane of each drop is the lane of the kind of the
-// record copy of that event. A failed NORMAL after a good COMMIT counts none,
-// because the rows exist.
+// hash of each evidence event first, with one encode. For a batch with
+// evidence it takes the one pool connection and sets synchronous=FULL on it
+// before BEGIN. It sets NORMAL again when the transaction has ended, after a
+// commit and after a rollback. A failure to set either value is a database
+// error. Suppose write returns an error and the COMMIT did not succeed. Then
+// write counts each event of the batch as a drop. The lane of each drop is the
+// lane of the kind of the record copy of that event. A failed NORMAL after a
+// good COMMIT counts none, because the rows exist.
 //
 // In the transaction, the evidence hashes go to the appender in one call before
 // COMMIT. Row i of the evidence events gets leaf_index first+i. The insert loop

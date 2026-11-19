@@ -181,8 +181,8 @@ func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
 		}
 		return e
 	}
-	// The bulk event is first, so that the evidence rows do not use their own
-	// row index to find their bytes.
+	// The bulk event is first. Then an evidence row cannot use its own row
+	// index.
 	batch := []*event.Event{rowEvent(t, event.KindRequest, true, 500)}
 	for i, k := range allKinds {
 		if ok, _ := k.IsEvidence(); ok {
@@ -232,9 +232,8 @@ func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
 
 // T-U-18: for each evidence row, sha256(record) equals hash. The writer makes
 // the record bytes and the hash of an evidence event one time. The seam gives
-// bytes that are not those of EvidenceBytes. The stored record and hash of each
-// evidence row must be the bytes and the hash that the seam gave for its event.
-// The seam is called one time for each evidence event and not for a bulk event.
+// bytes that are not those of EvidenceBytes. Each evidence row must store the
+// bytes and the hash that the seam gave for its event. The seam is called one time for each evidence event and not for a bulk event.
 func TestTU18WriterEncodesEachEvidenceRecordOnce(t *testing.T) {
 	r := newRig(t, 100)
 	var calls int
