@@ -369,10 +369,10 @@ func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 	}
 }
 
-// T-U-27: the cap step takes S as its time. S is at unit 500 000. Two mint
-// units lie on the two sides of the wrap point of the unit order for the wall
-// hook, 40 d behind S, and for the time 0. With S, the first unit is older and
-// goes. With one of those times, the second unit goes.
+// T-U-27: the cap step takes S as its time. S is at unit 500 000. For the wall
+// hook, 40 d behind S, and for the time 0, the wrap point of the unit order is
+// between the two mint units. With S, the first unit is older and goes. With
+// one of those times, the second unit goes.
 func TestTU27SCapStepOrdersMintUnitsByS(t *testing.T) {
 	start := token.Epoch().Add(500_000 * 10 * time.Minute)
 	k := sSchedule(t, start, time.UTC)
