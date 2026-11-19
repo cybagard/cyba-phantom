@@ -12,18 +12,9 @@ import (
 // The tests of tools/mirror-diff.sh. The script is a shell script, so the
 // tests run it on a temporary AGENTS.md and a temporary golden file.
 
-// mirrorScript is the absolute path of the script. Other tests change the
-// working directory, so TestMain sets the path before any test runs.
-var mirrorScript string
-
-func TestMain(m *testing.M) {
-	var err error
-	if mirrorScript, err = filepath.Abs("../mirror-diff.sh"); err != nil {
-		fmt.Fprintln(os.Stderr, "mirror-diff script path:", err)
-		os.Exit(1)
-	}
-	os.Exit(m.Run())
-}
+// extraLineText is the part of the stderr text that names the check of the
+// line after the table.
+const extraLineText = "has a line after the 12 lines that is not blank"
 
 func mirrorTable() string {
 	lines := []string{"| Rule | Digest |", "|------|--------|"}
@@ -92,6 +83,9 @@ func TestMirrorDiffExtraRow(t *testing.T) {
 		if rc != 2 {
 			t.Errorf("%s: exit %d, want 2: %s", name, rc, stderr)
 		}
+		if !strings.Contains(stderr, extraLineText) {
+			t.Errorf("%s: stderr is not the extra-line text: %q", name, stderr)
+		}
 		if !strings.Contains(stderr, "AGENTS.md") {
 			t.Errorf("%s: stderr does not name the file: %q", name, stderr)
 		}
@@ -100,8 +94,9 @@ func TestMirrorDiffExtraRow(t *testing.T) {
 		}
 	}
 	crlf := strings.ReplaceAll("# Agents\n\n"+mirrorTable()+"| C11 | x |\n", "\n", "\r\n")
-	if rc, stderr := runMirrorDiffText(t, crlf); rc != 2 {
-		t.Errorf("CRLF line ends, 13th row: exit %d, want 2: %s", rc, stderr)
+	rc, stderr := runMirrorDiffText(t, crlf)
+	if rc != 2 || !strings.Contains(stderr, extraLineText) {
+		t.Errorf("CRLF line ends, 13th row: exit %d, want 2 with the extra-line text: %s", rc, stderr)
 	}
 }
 

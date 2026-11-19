@@ -26,13 +26,15 @@ if [ ! -f "$GOLDEN" ]; then
 fi
 
 tmp="$(mktemp)" || exit 2
+trap 'rm -f "$tmp"' EXIT
 nonblank="$(mktemp)" || exit 2
 trap 'rm -f "$tmp" "$nonblank"' EXIT
 
 # The table block: the "| Rule | Digest |" header, its separator, and the
 # ten C-rows — 12 lines, LF-normalized (.gitattributes pins eol=lf). The
-# same pass reads the line after the block. A line that is not blank (empty,
-# or only spaces and tabs) goes to $nonblank: in GFM it continues the table.
+# same pass reads the line after the block. If that line is not blank, awk
+# writes a marker "x" to $nonblank. A blank line is empty, or has only
+# spaces and tabs.
 sed -e 's/\r$//' "$AGENTS_MD" | awk -v nonblank="$nonblank" '
   found && n == 12 { if ($0 !~ /^[ \t]*$/) print "x" > nonblank; exit }
   /^\| Rule \| Digest \|$/ { if (found) exit; found = 1; n = 0 }
@@ -54,11 +56,11 @@ if [ "$tablelines" -ne 12 ]; then
   exit 2
 fi
 
-# After the 12 lines comes a blank line or the end of the file. Any other
-# line right after the table continues it (a non-blank line is a row in GFM,
-# with or without a leading "|"), so it is an extra rule: the check fails.
+# After the 12 lines, the check needs a blank line or the end of the file.
+# In GFM, a line right after a table can be one more row, also with no
+# leading "|".
 if [ -s "$nonblank" ]; then
-  echo "mirror-diff: table in $AGENTS_MD has a row after the 12 lines (header + separator + 10 rows)" >&2
+  echo "mirror-diff: table in $AGENTS_MD has a line after the 12 lines that is not blank (header + separator + 10 rows)" >&2
   exit 2
 fi
 

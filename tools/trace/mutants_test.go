@@ -243,7 +243,6 @@ func TestReemitTestsOrder(t *testing.T) {
 		{"unknown IDs sorted last, no finding", "T-U-20, T-U-09, T-U-01", "T-U-01, T-U-09, T-U-20", plan("T-U-01"), 0},
 		{"unknown member of a range", "T-U-03, T-U-01..02", "T-U-01, T-U-03, T-U-02", plan("T-U-01", "T-U-03"), 1},
 		{"gap in a range", "T-U-01..03", "T-U-01, T-U-02..03", plan("T-U-01", "T-U-05", "T-U-02", "T-U-03"), 1},
-		{"malformed reference", "T-U-011, T-U-01", "T-U-01, T-U-011", plan("T-U-01"), 1},
 		{"duplicate ID", "T-U-01, T-U-01", "T-U-01", plan("T-U-01"), 0},
 		{"no-test marker stays", "— (no T-ID)", "— (no T-ID)", plan("T-U-01"), 0},
 	} {

@@ -7,9 +7,9 @@
 // Tests cell of each row that has tests. A Tests cell lists its test IDs
 // in 07 order. A run is IDs that are next to each other in 07, with one
 // type letter and consecutive numbers. A run of two or more is one range.
-// The trace tool keeps three things from the committed file. They are the
-// Design column, the text of a cell that has no tests, and the lines
-// outside the tables.
+// The trace tool keeps the Design column of the committed file. It keeps the
+// text of a cell that has no tests. It keeps the place of each table. It
+// keeps the lines that are not rows: text, table headers, and separators.
 //
 // Findings name IDs and counts only: spec text is PR-controlled, so it
 // never reaches a CI log.
@@ -58,7 +58,7 @@ func cRuleIDs() []string {
 	return ids
 }
 
-// cRuleSet holds the IDs of cRuleIDs, built once.
+// cRuleSet holds the IDs of cRuleIDs. The package builds it once, at start.
 var cRuleSet = func() map[string]bool {
 	set := map[string]bool{}
 	for _, id := range cRuleIDs() {
@@ -393,9 +393,9 @@ func setDelta(want, got map[string]bool) (missing, extra []string) {
 // one type letter and consecutive numbers, make a run. A run of two or
 // more is one range. Other IDs stand alone. Then come the IDs that 07
 // does not declare, in ID order, and the prose tokens, in cell order.
-// Tokens are joined with ", ". A prose token in a cell that has a test
-// reference is a finding. A cell with no test references (a "no tests"
-// marker) stays as it is.
+// reemitTests joins the tokens with ", ". A prose token in a cell that has
+// a test reference is a finding. A cell with no test references (a "no
+// tests" marker) stays as it is.
 func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	testPos := make(map[string]int, len(tests))
 	for _, t := range tests {
@@ -404,7 +404,8 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 
 	var known []test // IDs that 07 declares, in cell order
 	var unknown, prose []string
-	var proseItems []int // item numbers of prose tokens with no finding yet
+	// Item numbers of prose tokens that are not malformed references.
+	var proseItems []int
 	seen := map[string]bool{}
 	hasTest := false
 	for i, part := range strings.Split(cell, ",") {
@@ -476,8 +477,9 @@ func reemitTests(reqID, cell string, tests []test, findings *[]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// nextInRun reports if b continues a range that ends with a. For that, b
-// is next to a in 07. It has the type letter of a. It has the next number.
+// nextInRun reports if b continues a range that ends with a. A range
+// continues when b is next to a in 07. b must also have the type letter of
+// a and the next number.
 func nextInRun(a, b test) bool {
 	ma := testIDRE.FindStringSubmatch(a.id)
 	mb := testIDRE.FindStringSubmatch(b.id)
