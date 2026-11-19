@@ -321,14 +321,14 @@ func (s *Schedule) runAt(stop context.Context, st time.Time) {
 // can delete the callbacks of that UTC day before the cutoff. The day step has
 // not counted them yet. So the event cutoff is not later than the start of
 // that UTC day. With events above raw, the cap has no effect. The writer can
-// store a request row before the raw cutoff during the run. S never steps back,
-// so such a row comes only from a clock other than S. That case needs a
-// clock_jump correction. Such a row that comes after the roll-up step and
-// before the day step ends stops the day step. The event step then caps its
-// cutoff in each chunk: see newEventExpireStep. The event step can delete such
-// a row that comes after the day step, with no roll-up. With bad raw days or a
-// zero tDel, the time is tDel. The event step itself refuses bad events days,
-// for any time.
+// store a request row before the raw cutoff during the run. The S of a writer
+// with a clock does not step back in one process. So such a row has a time
+// from another clock, for example time.Now in the bait handler. Such a row
+// that comes after the roll-up step and before the day step ends stops the day
+// step. The event step then caps its cutoff in each chunk: see
+// newEventExpireStep. The event step can delete such a row that comes after
+// the day step, with no roll-up. With bad raw days or a zero tDel, the time is
+// tDel. The event step itself refuses bad events days, for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
 	cut, ok := rollupCutoff(tDel, raw)
 	if !ok {

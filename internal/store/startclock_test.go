@@ -334,8 +334,9 @@ func TestTU27SStepBackAt0314For10Days(t *testing.T) {
 }
 
 // T-U-27: a real run of a writer with a clock takes each cutoff from S. The
-// wall hook of the writer is 40 d ahead of S, or 40 d behind. Each step has a
-// row on each side of its cutoff of S. The rows that stay are those of S.
+// wall hook of the writer is 40 d ahead of S, or 40 d behind. Three steps have
+// rows on both sides of their cutoff of S. These are the address step, the raw
+// delete and the field clear. The rows that stay are those of S.
 func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) int64 { return start.Add(-d).UnixMilli() }
@@ -370,9 +371,9 @@ func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
 }
 
 // T-U-27: the cap step takes S as its time. S is at unit 500 000. The wall
-// hook is 40 d behind S. Two mint units lie on the two sides of the wrap point
-// of the unit order. This holds for the wall hook and for the time 0. With S,
-// the first unit is older and goes. With one of those times, the second goes.
+// hook is 40 d behind S. The two mint units are 2^19 units apart. In the unit
+// order of S, the first unit is older and goes. In the order of the wall hook
+// or of the time 0, the second unit is older.
 func TestTU27SCapStepOrdersMintUnitsByS(t *testing.T) {
 	start := token.Epoch().Add(500_000 * 10 * time.Minute)
 	k := sSchedule(t, start, time.UTC)
@@ -400,7 +401,7 @@ func TestTU27SCapStepOrdersMintUnitsByS(t *testing.T) {
 }
 
 // T-U-27: a failed read of retention_last gives no mark, so the start runs at
-// once. A mark of 1 h that the read gets gives no run.
+// once. A mark 1 h before S that the read gets gives no run at once.
 func TestTU27SFailedMarkReadRunsAtOnce(t *testing.T) {
 	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {

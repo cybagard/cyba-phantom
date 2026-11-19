@@ -239,10 +239,10 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // its own. It does not use the queue, so a full evidence lane cannot drop it. A
 // paused writer drops it with a count, as flush does. A stopped writer makes no
 // event and counts no drop. The event time is S. A clock error stops the
-// writer, and endRun returns that error. This holds in a disk pause too, as
-// endRun reads the clock before flush drops the event. In all other cases
-// endRun returns err. If the write stops the writer, it returns the error of
-// the stop.
+// writer, and endRun returns that error. endRun reads the clock before flush,
+// so this is also true in a disk pause. An event that cannot be made stops the
+// writer, and endRun returns the record error. Else endRun returns err. If the
+// write stops the writer, it returns the error of the stop.
 func (w *Writer) endRun(run *retentionRun, err error) error {
 	if run == nil || !w.Healthy() {
 		return err
