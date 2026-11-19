@@ -3,9 +3,11 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/cybagard/cyba-phantom/internal/event"
 	"github.com/cybagard/cyba-phantom/internal/sensortime"
+	"github.com/cybagard/cyba-phantom/internal/token"
 )
 
 // otherWall is a wall clock that is 40 days after S of a rig at boot clock 0.
@@ -295,6 +298,125 @@ func TestTU27SMarkIsTheSOfTheRunStart(t *testing.T) {
 	next.begin(context.Background())
 	if runs != 0 {
 		t.Fatalf("%d runs at the next start, want 0", runs)
+	}
+}
+
+// T-U-27: on S, 10 days with a wall clock step back at each 03:14 change no
+// run. Each step is 23 h 58 min. Each date has one run, at 03:15. The first run
+// clears the address of 16 d.
+func TestTU27SStepBackAt0314For10Days(t *testing.T) {
+	start := time.Date(2027, 2, 10, 3, 13, 0, 0, time.UTC)
+	k := sSchedule(t, start, time.UTC)
+	setMark(t, k.r.db, start.Add(-time.Hour))
+	addSessions(t, k.r.db, "old", 0, 1, start.Add(-16*oneDay).UnixMilli(), 0, "203.0.113.7")
+	record, real := k.s.run, serveWithRun(k.r)
+	k.s.run = func(ctx context.Context, steps []retentionStep) error {
+		_ = record(ctx, steps)
+		return real(ctx, steps)
+	}
+	k.s.begin(context.Background())
+	for end := start.AddDate(0, 0, 10); k.now().Before(end); {
+		k.minutes(1)
+		if k.local(time.UTC).Format("15:04") == "03:14" {
+			k.f.skew.Add(-(oneDay - 2*time.Minute).Milliseconds())
+		}
+	}
+	var want []string
+	for d := 10; d < 20; d++ {
+		want = append(want, fmt.Sprintf("02-%02d 03:15 +0000", d))
+	}
+	if fmt.Sprint(k.runs) != fmt.Sprint(want) {
+		t.Fatalf("runs %v, want %v", k.runs, want)
+	}
+	if got := nullIPs(t, k.r.db); !got["old0"] {
+		t.Fatalf("the address of 16 d is not NULL: %v", got)
+	}
+}
+
+// T-U-27: a real run of a writer with a clock takes each cutoff from S. The
+// wall hook of the writer is 40 d ahead of S, or 40 d behind. Each step has a
+// row on each side of its cutoff of S. The rows that stay are those of S.
+func TestTU27SRealStepsTakeEachCutoffFromS(t *testing.T) {
+	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
+	ago := func(d time.Duration) int64 { return start.Add(-d).UnixMilli() }
+	ages := "SELECT coalesce(group_concat(((" + strconv.FormatInt(start.UnixMilli(), 10) +
+		" - ts) / 86400000) || 'd', ' '), '') FROM (SELECT ts FROM event WHERE kind = '%s' %s ORDER BY ts)"
+	for _, off := range []time.Duration{40 * oneDay, -40 * oneDay} {
+		t.Run(off.String(), func(t *testing.T) {
+			k := sSchedule(t, start, time.UTC)
+			k.r.w.clock = func() time.Time { return start.Add(off) }
+			k.r.app.next = 10_000 // above the leaf indexes of the seed
+			addSessions(t, k.r.db, "s", 3, 1, ago(3*oneDay), 0, "203.0.113.7")
+			addSessions(t, k.r.db, "s", 8, 1, ago(8*oneDay), 0, "203.0.113.8")
+			for _, d := range []time.Duration{25 * oneDay, 35 * oneDay} {
+				addEvents(t, k.r.db, "refused", 1, ago(d), 0, nil, nil)
+			}
+			for _, d := range []time.Duration{35 * oneDay, 25 * oneDay, oneDay, -2 * oneDay} {
+				addFull(t, k.r.db, "callback", 1, ago(d), 0)
+			}
+			k.s.run = serveWithRun(k.r)
+			k.s.runOnce(context.Background())
+			if got, want := fmt.Sprint(nullIPs(t, k.r.db)), "map[s3:false s8:true]"; got != want {
+				t.Errorf("addresses %s, want %s", got, want)
+			}
+			if got, want := rawText(t, k.r.db, fmt.Sprintf(ages, "refused", "")), "25d"; got != want {
+				t.Errorf("refused rows %q, want %q", got, want)
+			}
+			if got, want := rawText(t, k.r.db, fmt.Sprintf(ages, "callback", "AND "+rawFull)), "25d 1d"; got != want {
+				t.Errorf("callback rows with a field %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// T-U-27: the cap step takes S as its time. S is at unit 500 000. Two mint
+// units lie on the two sides of the wrap point of the unit order for the wall
+// hook, 40 d behind S, and for the time 0. With S, the first unit is older and
+// goes. With one of those times, the second unit goes.
+func TestTU27SCapStepOrdersMintUnitsByS(t *testing.T) {
+	start := token.Epoch().Add(500_000 * 10 * time.Minute)
+	k := sSchedule(t, start, time.UTC)
+	k.r.w.clock = func() time.Time { return start.Add(-40 * oneDay) }
+	first := start.Add(-30 * oneDay)
+	addMint(t, k.r.db, "01", first.UnixMilli(), 1)
+	addMint(t, k.r.db, "01", first.Add((1<<19)*mintUnitMs*time.Millisecond).UnixMilli(), 2)
+	check(t, k.s.SetMaxBytes(1, "events.db"))
+	k.s.tune = func(c *capRun) {
+		c.begun, c.over = true, true
+		c.measure = func(ctx context.Context, tx *sql.Tx) (int64, error) {
+			var rows int64
+			err := tx.QueryRowContext(ctx, "SELECT count(*) FROM mint").Scan(&rows)
+			if rows > 1 {
+				return 1 << 40, err
+			}
+			return 0, err
+		}
+	}
+	k.s.run = serveWithRun(k.r)
+	k.s.runOnce(context.Background())
+	if got := rawText(t, k.r.db, "SELECT coalesce(group_concat(first), '') FROM mint"); got != "2" {
+		t.Fatalf("mint rows left %q, want the second unit only", got)
+	}
+}
+
+// T-U-27: a failed read of retention_last gives no mark, so the start runs at
+// once. A mark of 1 h that the read gets gives no run.
+func TestTU27SFailedMarkReadRunsAtOnce(t *testing.T) {
+	start := time.Date(2027, 2, 10, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		read time.Duration
+		runs int
+	}{{"read fails", time.Nanosecond, 1}, {"read works", readLimit, 0}} {
+		t.Run(c.name, func(t *testing.T) {
+			k := sSchedule(t, start, time.UTC)
+			setMark(t, k.r.db, start.Add(-time.Hour))
+			k.s.readTime = c.read
+			k.s.begin(context.Background())
+			if len(k.runs) != c.runs {
+				t.Fatalf("%d runs at the start, want %d", len(k.runs), c.runs)
+			}
+		})
 	}
 }
 

@@ -54,8 +54,8 @@ type Schedule struct {
 	earlyEnds atomic.Uint64
 	earlyLog  atomic.Bool
 	clockLog  atomic.Bool
-	// mono is the boot clock time of a writer with no clock. It is the time
-	// since NewSchedule. A test replaces it.
+	// mono is the time since NewSchedule. It is not a boot clock. A writer with
+	// no clock uses it in place of one. A test replaces it.
 	mono     func() time.Duration
 	maxBytes int64  // store.max_bytes; 0 means no cap step
 	dbRel    string // the name that SetMaxBytes checked, relative to the root
@@ -207,16 +207,16 @@ func retentionDay(t time.Time, loc *time.Location) string {
 // boot clock of the start counts as the start of the last run, also when no run
 // starts.
 func (s *Schedule) begin(ctx context.Context) {
-	wall, mono, err := s.read()
+	st, mono, err := s.read()
 	if err != nil {
 		s.clockFailed()
 		return
 	}
 	s.lastRun = mono
 	mark := s.readMark(ctx)
-	if wall.Sub(mark) > catchUp || mark.After(wall) {
-		s.runAt(ctx, wall)
-		s.lastDay = retentionDay(wall, s.loc)
+	if st.Sub(mark) > catchUp || mark.After(st) {
+		s.runAt(ctx, st)
+		s.lastDay = retentionDay(st, s.loc)
 		return
 	}
 	s.lastDay = retentionDay(mark, s.loc)
@@ -240,32 +240,32 @@ func (s *Schedule) readMark(ctx context.Context) time.Time {
 // repeat gives an earlier day, and that day has run. A check starts at most
 // one run. A clock error starts no run.
 func (s *Schedule) check(ctx context.Context) {
-	wall, now, err := s.read()
+	st, now, err := s.read()
 	if err != nil {
 		s.clockFailed()
 		return
 	}
-	day := retentionDay(wall, s.loc)
+	day := retentionDay(st, s.loc)
 	if day > s.lastDay || now-s.lastRun >= catchUp {
 		s.lastDay = max(s.lastDay, day)
 		s.lastRun = now
-		s.runAt(ctx, wall)
+		s.runAt(ctx, st)
 	}
 }
 
 // read gives S and the boot clock time of one check. A writer with a clock
 // gives S and the boot clock of its source. A writer with no clock gives
 // w.stored and the time since NewSchedule.
-func (s *Schedule) read() (wall time.Time, mono time.Duration, err error) {
-	wall, err = s.w.stored()
+func (s *Schedule) read() (st time.Time, mono time.Duration, err error) {
+	st, err = s.w.stored()
 	if err != nil {
-		return wall, 0, err
+		return st, 0, err
 	}
 	if s.w.clk == nil {
-		return wall, s.mono(), nil
+		return st, s.mono(), nil
 	}
 	mono, err = s.w.src.BootClock()
-	return wall, mono, err
+	return st, mono, err
 }
 
 // clockFailed writes one fixed log line for a clock error, one time only.
@@ -280,32 +280,32 @@ func (s *Schedule) clockFailed() {
 // schedule. Then it adds 1 to the early-end count. The first early end writes
 // one log line.
 func (s *Schedule) runOnce(stop context.Context) {
-	wall, _, err := s.read()
+	st, _, err := s.read()
 	if err != nil {
 		s.clockFailed()
 		return
 	}
-	s.runAt(stop, wall)
+	s.runAt(stop, st)
 }
 
 // runAt is runOnce with the S that begin or check read. S is the run date.
 // It is also the base of the cutoffs and of the mark. So the run does not read
 // it again. It has no correction here, and it does not step with the wall
 // clock.
-func (s *Schedule) runAt(stop context.Context, wall time.Time) {
+func (s *Schedule) runAt(stop context.Context, st time.Time) {
 	clockNow := func() time.Time {
 		if t, _, err := s.read(); err == nil {
 			return t
 		}
-		return wall
+		return st
 	}
 	ctx, cancel := context.WithTimeout(stop, s.limit)
 	defer cancel()
 	run := &retentionRun{}
-	run.counts.CutoffIP, _ = retentionCutoff(wall, s.ip, 7)
-	run.counts.CutoffRaw, _ = rollupCutoff(wall, s.raw)
-	steps := runStepsClock(wall, clockNow, wall, wall, s.ip, s.raw, s.events)
-	steps = withCap(steps, run, s.w, s.maxBytes, s.dbRel, wall, s.capUnmet, s.tune)
+	run.counts.CutoffIP, _ = retentionCutoff(st, s.ip, 7)
+	run.counts.CutoffRaw, _ = rollupCutoff(st, s.raw)
+	steps := runStepsClock(st, clockNow, st, st, s.ip, s.raw, s.events)
+	steps = withCap(steps, run, s.w, s.maxBytes, s.dbRel, st, s.capUnmet, s.tune)
 	err := s.run(withRun(ctx, run), steps)
 	if err != nil && stop.Err() == nil {
 		s.earlyEnds.Add(1)
@@ -321,13 +321,14 @@ func (s *Schedule) runAt(stop context.Context, wall time.Time) {
 // can delete the callbacks of that UTC day before the cutoff. The day step has
 // not counted them yet. So the event cutoff is not later than the start of
 // that UTC day. With events above raw, the cap has no effect. The writer can
-// store a request row before the raw cutoff during the run. This occurs only
-// when the wall clock steps back by raw days or more. Such a row that comes
-// after the roll-up step and before the day step ends stops the day step. The
-// event step then caps its cutoff in each chunk: see newEventExpireStep. The
-// event step can delete such a row that comes after the day step, with no
-// roll-up. With bad raw days or a zero tDel, the time is tDel. The event step
-// itself refuses bad events days, for any time.
+// store a request row before the raw cutoff during the run. S never steps back,
+// so such a row comes only from a clock other than S. That case needs a
+// clock_jump correction. Such a row that comes after the roll-up step and
+// before the day step ends stops the day step. The event step then caps its
+// cutoff in each chunk: see newEventExpireStep. The event step can delete such
+// a row that comes after the day step, with no roll-up. With bad raw days or a
+// zero tDel, the time is tDel. The event step itself refuses bad events days,
+// for any time.
 func eventTime(tDel time.Time, raw, events int) time.Time {
 	cut, ok := rollupCutoff(tDel, raw)
 	if !ok {
@@ -351,24 +352,23 @@ func eventTime(tDel time.Time, raw, events int) time.Time {
 // capped cutoff: see eventTime. It also caps the cutoff in each chunk at the
 // day that the day step works on next. These three deletes come before the
 // field clear, for the same reason as the raw delete. The clear does not write
-// rows that the event delete removes. The clear takes the tPriv cutoff for its
-// rows before the cutoff. The mark step is last, so a run that ends early
-// writes no retention_last.
+// rows that the event delete removes. The clear takes its cutoff from tPriv.
+// The mark step is last, so a run that ends early writes no retention_last.
 //
-// The wall time of the run is `wall`. The mark step takes it. The field clear
-// also takes it, as its wall time at its first call. This form is for tests
-// that need no clock. See runStepsClock.
-func runSteps(wall, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
-	return runStepsClock(wall, func() time.Time { return wall }, tDel, tPriv, ip, raw, events)
+// The time of the run is `st`. The mark step takes it. The field clear also
+// takes it, as its time at its first call. This form is for tests that need no
+// clock. See runStepsClock.
+func runSteps(st, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
+	return runStepsClock(st, func() time.Time { return st }, tDel, tPriv, ip, raw, events)
 }
 
-// runStepsClock is runSteps with a clock. The mark step takes `wall`, the wall
-// time at the start of the run. The field clear takes the time of `clock` at
-// its first call. That call comes after the steps before it, so it can be
-// long after the run start. With the run start, rows that the writer stores
-// in between could lie after the future line. The schedule passes its wall
-// clock as `clock`.
-func runStepsClock(wall time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
+// runStepsClock is runSteps with a clock. The mark step takes `st`, the S at
+// the start of the run. The field clear takes the time of `clock` at its first
+// call. That call comes after the steps before it, so it can be long after the
+// run start. With the run start, rows that the writer stores in between could
+// lie after the future line. The schedule passes a function that reads S as
+// `clock`.
+func runStepsClock(st time.Time, clock func() time.Time, tDel, tPriv time.Time, ip, raw, events int) []retentionStep {
 	return []retentionStep{
 		newRollupStep(tDel, raw),
 		newRollupDayStep(tDel, raw),
@@ -380,7 +380,7 @@ func runStepsClock(wall time.Time, clock func() time.Time, tDel, tPriv time.Time
 		newSessionExpireStep(tDel, events),
 		newFieldClearStep(tPriv, clock, raw),
 		newMintStep(tDel, raw),
-		markStep(wall),
+		markStep(st),
 	}
 }
 

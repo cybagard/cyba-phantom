@@ -15,11 +15,11 @@ import (
 
 // fakeClock is the wall clock and the boot clock of a schedule test. The wall
 // clock is S of a writer with no clock. The boot clock is the time since the
-// anchor. A jump moves only the wall clock.
+// start. A jump moves only the wall clock.
 type fakeClock struct {
-	mu          sync.Mutex
-	anchor, now time.Time
-	skew        time.Duration
+	mu         sync.Mutex
+	start, now time.Time
+	skew       time.Duration
 }
 
 func (f *fakeClock) wall() time.Time {
@@ -31,7 +31,7 @@ func (f *fakeClock) wall() time.Time {
 func (f *fakeClock) mono() time.Duration {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.now.Sub(f.anchor)
+	return f.now.Sub(f.start)
 }
 
 func (f *fakeClock) advance(d time.Duration) {
@@ -54,7 +54,7 @@ func (f *fakeClock) local(l *time.Location) string { return f.wall().In(l).Forma
 func fakeSchedule(t *testing.T, r *rig, loc *time.Location, start time.Time, lg *slog.Logger) (*Schedule, *fakeClock) {
 	t.Helper()
 	s := NewSchedule(r.w, 7, 30, 90, lg)
-	f := &fakeClock{anchor: start, now: start}
+	f := &fakeClock{start: start, now: start}
 	r.w.clock = f.wall
 	s.loc, s.mono = loc, f.mono
 	return s, f
@@ -213,6 +213,27 @@ func TestTU27RestartAfterWallPlusTwoDaysClearsAddresses(t *testing.T) {
 	}
 }
 
+// T-U-27: a move of S to an earlier time starts no run. A move of 2 min after
+// the run of 03:15 and 120 checks around 03:15 give one run.
+func TestTU27SmallStepsBackGiveOneRunForEachDate(t *testing.T) {
+	start := time.Date(2027, 2, 10, 3, 14, 0, 0, time.UTC)
+	s, f, runs := stepRig(t, start, time.Hour)
+	minutes(s, f, 1)
+	f.jump(-2 * time.Minute)
+	s.check(context.Background())
+	minutes(s, f, 60)
+	wantRuns(t, runs, "02-10 03:15")
+	s, f, runs = stepRig(t, start, time.Hour)
+	minutes(s, f, 1)
+	for range 60 {
+		f.jump(-time.Minute)
+		s.check(context.Background())
+		f.jump(time.Minute)
+		s.check(context.Background())
+	}
+	wantRuns(t, runs, "02-10 03:15")
+}
+
 // T-U-27: a normal week gives one run for each date. The rule of 25 h adds no
 // run. In Pacific/Chatham, the day of the DST repeat is 25 h long. The run of
 // the next date is 25 h after it, and that date gives one run.
@@ -237,7 +258,7 @@ func TestTU27NormalWeekAndDSTRepeatDayGiveOneRunForEachDate(t *testing.T) {
 	}
 }
 
-// frozen advances the monotonic clock by n minutes and checks at each minute.
+// frozen advances the boot clock by n minutes and checks at each minute.
 // The wall clock steps back by the same time, so it does not move.
 func frozen(s *Schedule, f *fakeClock, n int) {
 	for range n {
@@ -263,7 +284,7 @@ func TestTU27ProcessWithNoRunGetsARunAfter25Hours(t *testing.T) {
 }
 
 // T-U-27: the run at the start counts for the rule of 25 h. It starts at 10 h
-// of monotonic time. The next run is 25 h later, not 15 h after it.
+// of boot clock time. The next run is 25 h later, not 15 h after it.
 func TestTU27StartRunCountsForThe25HourRule(t *testing.T) {
 	r := newRig(t, 8)
 	s, f := fakeSchedule(t, r, time.UTC, day10, nil)
@@ -280,6 +301,19 @@ func TestTU27StartRunCountsForThe25HourRule(t *testing.T) {
 	wantRuns(t, runs, "02-10 12:00")
 	frozen(s, f, 1)
 	wantRuns(t, runs, "02-10 12:00", "02-10 12:00")
+}
+
+// T-U-27: the rule of 25 h applies at a check where S is earlier. The last run
+// day then takes the retention day of the check, and not the earlier day.
+func TestTU27RuleOf25HoursRunsAtAStepBack(t *testing.T) {
+	s, f, runs := stepRig(t, day10, 23*time.Hour)
+	f.advance(25 * time.Hour)
+	f.jump(-26 * time.Hour)
+	s.check(context.Background())
+	wantRuns(t, runs, "02-10 11:00")
+	if s.lastDay != "2027-02-10" {
+		t.Fatalf("last run day %s; want 2027-02-10", s.lastDay)
+	}
 }
 
 // T-U-27: a check starts at most one run. A check 25 h after the start is
@@ -461,7 +495,7 @@ func TestTU27TickDrivesTheChecks(t *testing.T) {
 
 // prodRig makes a schedule of the production step list on a real database. The
 // writer serves the run in this goroutine. The wall clock is `skew` from the
-// monotonic clock. The time of the anchor is rollTDel.
+// boot clock. The time of the start is rollTDel.
 func prodRig(t *testing.T, skew time.Duration, lg *slog.Logger) (*rig, *Schedule, *fakeClock) {
 	t.Helper()
 	r := newRig(t, 8)
@@ -569,6 +603,64 @@ func TestTU27EventDeleteRunsWithNoCallbackAndNoSeenRow(t *testing.T) {
 	s.runOnce(context.Background())
 	if r.events() != 1 || count(t, r.db, "SELECT count(*) FROM meta WHERE key = 'retention_rollup_done'") != 0 {
 		t.Fatalf("%d events left, want 1 with no done mark", r.events())
+	}
+}
+
+// T-U-27: one run has the wall clock 40 d ahead, and the later runs have the
+// right clock. The visitor writes a callback row 1 d after the first run. The
+// row has no field after the next run, at each age from 31 d.
+func TestTU27FieldClearAfterOneRunWithTheWallClockAhead(t *testing.T) {
+	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
+		t.Run(age.String(), func(t *testing.T) {
+			r, s, f := prodRig(t, 40*oneDay, nil)
+			s.runOnce(context.Background())
+			f.jump(-40 * oneDay)
+			f.advance(oneDay)
+			addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+			f.advance(age)
+			s.runOnce(context.Background())
+			if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+				t.Fatalf("%d rows keep a field at the age %v", n, age)
+			}
+		})
+	}
+}
+
+// T-U-27: a process starts with the wall clock 40 d ahead and makes one run.
+// It restarts with the right clock (a new schedule), and no run comes for 31 to
+// 59 d. The first run then clears a row that was written 1 d after the restart.
+func TestTU27FieldClearAfterStartAheadThenRestart(t *testing.T) {
+	for _, age := range []time.Duration{31 * oneDay, 39 * oneDay, 44 * oneDay, 59 * oneDay} {
+		t.Run(age.String(), func(t *testing.T) {
+			r := newRig(t, 8)
+			s, _ := fakeSchedule(t, r, time.UTC, rollTDel.Add(40*oneDay), nil)
+			s.run = direct(r)
+			s.runOnce(context.Background())
+			s, f := fakeSchedule(t, r, time.UTC, rollTDel, nil)
+			s.run = direct(r)
+			f.advance(oneDay)
+			addFull(t, r.db, "callback", 1, f.wall().UnixMilli(), 0)
+			f.advance(age)
+			s.runOnce(context.Background())
+			if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+				t.Fatalf("%d rows keep a field at the age %v", n, age)
+			}
+		})
+	}
+}
+
+// T-U-27: after the first run with the right clock, no row written 40 d ahead
+// keeps a field. A run with the wall clock ahead came first.
+func TestTU27FieldClearRowsWrittenWithTheWallClockAhead(t *testing.T) {
+	r, s, f := prodRig(t, 40*oneDay, nil)
+	s.runOnce(context.Background())
+	for _, k := range []string{"callback", "request"} {
+		addFull(t, r.db, k, 1, f.wall().UnixMilli(), 0)
+	}
+	f.jump(-40 * oneDay)
+	s.runOnce(context.Background())
+	if n := count(t, r.db, "SELECT count(*) FROM event WHERE "+rawFull); n != 0 {
+		t.Fatalf("%d rows keep a field after the first run with the right clock", n)
 	}
 }
 
