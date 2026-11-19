@@ -56,7 +56,6 @@ type baitOpt struct {
 	bundle bool      // put the signed test bundle in the state directory
 	refuse bool      // the store does not open, so no load runs
 	files  []tarFile // the files of that bundle, or nil for baitFiles
-	memory bool      // put the state directory on a memory filesystem
 	// root is the state directory of an earlier start, to start on its data.
 	root string
 	// maxBytes is store.max_bytes in the start values. 0 keeps the config.
@@ -107,9 +106,6 @@ func startBait(t *testing.T, o baitOpt) *baitSensor {
 	cfg, err := config.Load(writeFile(t, body), env)
 	mustOK(t, err)
 	s := &baitSensor{p: tempState(t, cfg), https: "https://" + httpsLn.Addr().String(), plain: "http://" + plainLn.Addr().String()}
-	if o.memory {
-		s.p.Root = memoryRoot(t)
-	}
 	if o.root != "" {
 		s.p.Root = o.root
 	}
