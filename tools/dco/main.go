@@ -18,10 +18,53 @@
 //     also permits the Claude co-author address, in a Co-authored-by
 //     trailer. The name in that trailer is "Claude" or starts with
 //     "Claude ". That trailer holds exactly one address.
+//   - The author name and the committer name (%an and %cn) pass the
+//     character list below, and they hold no "@".
 //
-// An address is any token of the form x@y with no space, "<" or ">". dco
-// skips a trailer without an address. A Signed-off-by trailer without
-// an address fails.
+// In a trailer, an address is any token of the form x@y with no space, "<"
+// or ">". dco skips a trailer without an address. A Signed-off-by trailer
+// without an address fails.
+//
+// dco also checks the whole commit message: subject, body, every paragraph
+// and every line. It reads the message from the commit object, so the bytes
+// after a NUL byte count too. A commit with no raw message fails. The check
+// has two allow lists. A commit that breaks one fails as an identity failure.
+//
+// The character list. A message holds only these characters:
+//   - printable ASCII (0x20 to 0x7E), TAB and LF;
+//   - CR, directly before LF;
+//   - U+00A7, U+2014, U+2013, U+2026 and U+00B7.
+//
+// Any other byte or character fails. That includes a byte that is not valid
+// UTF-8, a control character and a format character. It includes a combining
+// mark and each look-alike of "@" or ".".
+//
+// The at-sign list. Each "@" in the message must be one of four uses.
+//   - Maintainer: the "@" is inside the maintainer address. The address is
+//     whole. The character before it is not a letter or a digit. It is not
+//     one of . _ % + - either. The character after it is not a letter or
+//     a digit. It is not one of _ % + - @, and not a "." before a letter or
+//     a digit. The compare is ASCII only and without case.
+//   - Claude: the line starts at column 1 with the key Co-authored-by
+//     (without case) and ":". The name is "Claude" or starts with "Claude ".
+//     The line ends in <noreply@anthropic.com>. It holds no other "@".
+//   - Mention: the "@" starts the line. Or it comes after a character that
+//     is not a letter, a digit or one of . _ % + -. After it come 1 to 39
+//     letters, digits or "-". Then come no "@", letter, digit, "_" or "%".
+//     No "." before a letter or a digit comes next.
+//   - Version: the "@" comes after a letter, a digit or one of . _ / -. After
+//     it come "v", digits, and groups of "." and digits. A "-" and a
+//     pre-release text of letters, digits and "." can follow. The last
+//     "."-part of that text is not two or more letters only. Then come no
+//     "@", letter, digit, "_", "%", "+" or "-". No "." before a letter or a
+//     digit comes next.
+//
+// Costs. These forms fail by design: REDACTED@" (a quote after the "@"),
+// and user:pw@tcp(host)/db. A version also fails when its pre-release text
+// ends in letters only, such as "-beta.rc".
+//
+// Known limit. dco does not find an address with no at-sign character. One
+// example is an address written with the words "at" and "dot". Another is %40.
 //
 // A commit with a non-empty encoding header fails, whatever its value. An
 // empty value gives an empty %e, the same as no header, and dco does not fail
@@ -31,18 +74,21 @@
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
 // a trailer value. A PR author controls these, and a CI log shows them.
-// Exit codes: 0 all commits pass (or an empty range), 1 a commit fails a
-// check, 2 usage, git or log format error.
+// Exit codes: 0 all commits pass or the range is empty. 1 a commit fails.
+// 2 usage, git or log format error.
 package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -58,12 +104,15 @@ var signoffRE = regexp.MustCompile(`^\S.* <[^<>\s]+@[^<>\s]+\.[^<>\s]+>$`)
 // addrRE finds each address in a trailer value.
 var addrRE = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
-// logFormat asks git for the hash, author address, committer address,
-// encoding header and trailers of each commit. Git's own trailer parser
-// decides what a trailer is. The option `only` drops the lines of the
-// trailer block that are not trailers. Because git parses the trailers, dco
+// hashRE matches the full hash that %H prints.
+var hashRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
+// logFormat asks git for these fields of each commit. They are the hash, the
+// author and committer addresses and names, the encoding header and the
+// trailers. Git's own trailer parser decides what a trailer is. The option
+// `only` drops the lines of the trailer block that are not trailers. So dco
 // accepts only the sign-offs that git recognizes as trailers.
-const logFormat = "--format=%H%x00%ae%x00%ce%x00%e%x00%(trailers:only,unfold,separator=%x0a)%x00"
+const logFormat = "--format=%H%x00%ae%x00%ce%x00%an%x00%cn%x00%e%x00%(trailers:only,unfold,separator=%x0a)%x00"
 
 func main() { os.Exit(run(os.Args[1:], ".", os.Stdout, os.Stderr)) }
 
@@ -83,39 +132,106 @@ func run(args []string, dir string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dco: git log %s..%s failed: %v\n", base, head, err)
 		return 2
 	}
-	return check(out, base, head, stdout, stderr)
+	// git log stops a message at a NUL byte, so dco reads the message from
+	// the object. A malformed record gives no hash here, and check reports it.
+	records := splitRecords(out)
+	var hashes []string
+	for _, rec := range records {
+		if h, _, _ := bytes.Cut(rec, []byte{0}); hashRE.Match(h) {
+			hashes = append(hashes, string(h))
+		}
+	}
+	msgs, err := rawMessages(dir, hashes)
+	if err != nil {
+		fmt.Fprintf(stderr, "dco: git cat-file failed: %v\n", err)
+		return 2
+	}
+	return check(records, msgs, base, head, stdout, stderr)
 }
 
-// check parses the output of git log and applies both rules to each commit.
-func check(out []byte, base, head string, stdout, stderr io.Writer) int {
-	// Each record is H NUL AE NUL CE NUL E NUL TRAILERS NUL. Git ends every
-	// record with its own newline, so records separate on NUL+LF. Git joins
-	// the trailers with LF. An unfolded trailer holds no LF and no NUL. The
-	// checker prints no PR-authored text, only hashes and counts.
+// rawMessages returns the message of each commit as stored in the object,
+// keyed by full hash. The message starts after the first blank line of the
+// object. A NUL byte and the bytes after it stay in the message.
+func rawMessages(dir string, hashes []string) (map[string][]byte, error) {
+	msgs := make(map[string][]byte, len(hashes))
+	if len(hashes) == 0 {
+		return msgs, nil
+	}
+	cmd := exec.Command("git", "-C", dir, "cat-file", "--batch")
+	cmd.Stdin = strings.NewReader(strings.Join(hashes, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseBatch(out, len(hashes))
+}
+
+// parseBatch reads n objects from the output of git cat-file --batch. Each
+// object is a header line "<hash> commit <size>", the object and one LF.
+func parseBatch(out []byte, n int) (map[string][]byte, error) {
+	msgs := make(map[string][]byte, n)
+	for range n {
+		line, rest, ok := bytes.Cut(out, []byte{'\n'})
+		f := strings.Fields(string(line))
+		if !ok || len(f) != 3 || f[1] != "commit" {
+			return nil, errors.New("cat-file: bad object header")
+		}
+		size, err := strconv.Atoi(f[2])
+		if err != nil || size < 0 {
+			return nil, errors.New("cat-file: bad object header")
+		}
+		if len(rest) < size+1 {
+			return nil, errors.New("cat-file: short object")
+		}
+		// The object is followed by one LF.
+		_, msg, _ := bytes.Cut(rest[:size], []byte("\n\n"))
+		msgs[f[0]] = msg
+		out = rest[size+1:]
+	}
+	return msgs, nil
+}
+
+// splitRecords splits the output of git log into records. Git ends every
+// record with its own newline, so records separate on NUL+LF.
+func splitRecords(out []byte) [][]byte {
 	records := bytes.Split(out, []byte{0, '\n'})
 	if last := len(records) - 1; last >= 0 && len(records[last]) == 0 {
 		records = records[:last]
 	}
+	return records
+}
+
+// check applies the rules to each record of the output of git log. msgs holds
+// the raw message of each commit, keyed by full hash.
+func check(records [][]byte, msgs map[string][]byte, base, head string, stdout, stderr io.Writer) int {
+	// A record is the fields H, AE, CE, AN, CN, E and TRAILERS. A NUL ends
+	// each field. The NUL+LF that ends the record is not in it. Git joins
+	// the trailers with LF. An unfolded trailer holds no LF and no NUL.
+	// The checker prints no PR-authored text. It prints only hashes and counts.
 	total, unsigned, badID, badEnc, badAddr := 0, 0, 0, 0, 0
 	for _, rec := range records {
-		f := bytes.SplitN(rec, []byte{0}, 5)
-		if len(f) < 5 {
+		f := bytes.SplitN(rec, []byte{0}, 7)
+		if len(f) < 7 {
 			// dco does not print the record: it is PR-authored content.
 			fmt.Fprintln(stderr, "dco: malformed git log record")
 			return 2
 		}
-		hash := string(f[0])
+		full := string(f[0])
+		hash := full
 		if len(hash) > 12 {
 			hash = hash[:12]
 		}
 		total++
-		trailers := strings.Split(string(f[4]), "\n")
+		trailers := strings.Split(string(f[6]), "\n")
 		if !hasSignoff(trailers) {
 			unsigned++
 			fmt.Fprintf(stdout, "unsigned: %s\n", hash)
 		}
-		encoded := len(f[3]) > 0
-		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers)
+		encoded := len(f[5]) > 0
+		// A commit with no raw message fails: dco cannot check it.
+		msg, haveMsg := msgs[full]
+		wrongAddr := !identityOK(string(f[1]), string(f[2]), trailers) ||
+			!nameOK(string(f[3])) || !nameOK(string(f[4])) || !haveMsg || !messageOK(msg)
 		if encoded || wrongAddr {
 			badID++
 			fmt.Fprintf(stdout, "identity: %s\n", hash)
@@ -139,7 +255,7 @@ func check(out []byte, base, head string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
 		}
 		if badAddr > 0 {
-			fmt.Fprintln(stdout, "hint: this check passes only for commits of the maintainer; for an outside contribution, see CONTRIBUTING.md (the maintainer commits the change again)")
+			fmt.Fprintln(stdout, "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.")
 		}
 		if badEnc > 0 {
 			fmt.Fprintln(stdout, "hint: commits must not set an encoding header")
@@ -190,6 +306,168 @@ func identityOK(author, committer string, trailers []string) bool {
 		}
 	}
 	return true
+}
+
+// allowedRune reports whether the character list has r: printable ASCII, TAB,
+// LF, and U+00A7, U+2014, U+2013, U+2026, U+00B7. CR is not here: charsOK
+// allows it only before LF. A byte that is not valid UTF-8 gives U+FFFD, which
+// is not on the list.
+func allowedRune(r rune) bool {
+	switch r {
+	case '\t', '\n', 0xA7, 0x2014, 0x2013, 0x2026, 0xB7:
+		return true
+	}
+	return r >= 0x20 && r <= 0x7E
+}
+
+// charsOK reports whether every character of s is on the character list.
+func charsOK(s string) bool {
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r == '\r' {
+			if i+1 >= len(s) || s[i+1] != '\n' {
+				return false
+			}
+		} else if !allowedRune(r) {
+			return false
+		}
+		i += n
+	}
+	return true
+}
+
+// nameOK applies the name rule to an author or committer name: the character
+// list, and no "@".
+func nameOK(name string) bool {
+	return charsOK(name) && !strings.Contains(name, "@")
+}
+
+// messageOK applies both lists to a commit message: the character list, then
+// the at-sign list for each line.
+func messageOK(msg []byte) bool {
+	if !charsOK(string(msg)) {
+		return false
+	}
+	for _, line := range strings.Split(string(msg), "\n") {
+		if !atSignsOK(strings.TrimSuffix(line, "\r")) {
+			return false
+		}
+	}
+	return true
+}
+
+// atSignsOK reports whether each "@" of a line (without its CR) is one of the
+// four allowed uses.
+func atSignsOK(line string) bool {
+	for i := 0; i < len(line); i++ {
+		if line[i] == '@' && !maintainerAt(line, i) && !claudeAt(line) &&
+			!mentionAt(line, i) && !versionAt(line, i) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAlnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// isLocal reports whether c can be part of the local part of an address.
+func isLocal(c byte) bool { return isAlnum(c) || strings.IndexByte("._%+-", c) >= 0 }
+
+// wordEnd reports whether a word that ends before line[j] is whole. The next
+// character is not "@", a letter, a digit, "_" or "%", or one of the bytes of
+// more. It is not a "." that comes before a letter or a digit either.
+func wordEnd(line string, j int, more string) bool {
+	if j >= len(line) {
+		return true
+	}
+	c := line[j]
+	if c == '@' || isAlnum(c) || c == '_' || c == '%' || strings.IndexByte(more, c) >= 0 {
+		return false
+	}
+	return !(c == '.' && j+1 < len(line) && isAlnum(line[j+1]))
+}
+
+// maintainerAt reports whether the "@" at line[i] is inside the maintainer
+// address and the address is whole.
+func maintainerAt(line string, i int) bool {
+	start := i - strings.IndexByte(maintainerAddr, '@')
+	end := start + len(maintainerAddr)
+	if start < 0 || end > len(line) || !asciiEqualFold(line[start:end], maintainerAddr) {
+		return false
+	}
+	return (start == 0 || !isLocal(line[start-1])) && wordEnd(line, end, "+-")
+}
+
+// claudeAt reports whether the line is a Claude co-author line with one "@".
+func claudeAt(line string) bool {
+	const key, tail = "Co-authored-by:", "<" + claudeAddr + ">"
+	if len(line) < len(key) || !asciiEqualFold(line[:len(key)], key) || strings.Count(line, "@") != 1 {
+		return false
+	}
+	value := line[len(key):]
+	return len(value) >= len(tail) && asciiEqualFold(value[len(value)-len(tail):], tail) && claudeName(value)
+}
+
+// mentionAt reports whether the "@" at line[i] starts a mention.
+func mentionAt(line string, i int) bool {
+	if i > 0 && isLocal(line[i-1]) {
+		return false
+	}
+	j := i + 1
+	for j < len(line) && (isAlnum(line[j]) || line[j] == '-') {
+		j++
+	}
+	return j-i-1 >= 1 && j-i-1 <= 39 && wordEnd(line, j, "")
+}
+
+// versionAt reports whether the "@" at line[i] comes before a version such as
+// v1.2.3 or v1.2.3-rc.1. The last "."-part of a pre-release text is not two or
+// more letters only.
+func versionAt(line string, i int) bool {
+	if i == 0 || !(isAlnum(line[i-1]) || strings.IndexByte("._/-", line[i-1]) >= 0) {
+		return false
+	}
+	j := i + 1
+	if j >= len(line) || line[j] != 'v' {
+		return false
+	}
+	digits := func() bool {
+		start := j
+		for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+			j++
+		}
+		return j > start
+	}
+	j++
+	if !digits() {
+		return false
+	}
+	for j+1 < len(line) && line[j] == '.' && line[j+1] >= '0' && line[j+1] <= '9' {
+		j++
+		digits()
+	}
+	if j < len(line) && line[j] == '-' {
+		j++
+		start := j
+		for j < len(line) && (isAlnum(line[j]) || line[j] == '.' && j+1 < len(line) && isAlnum(line[j+1])) {
+			j++
+		}
+		text := line[start:j]
+		if text == "" || !isAlnum(text[0]) {
+			return false
+		}
+		last := text[strings.LastIndexByte(text, '.')+1:]
+		letters := true
+		for k := 0; k < len(last); k++ {
+			letters = letters && !(last[k] >= '0' && last[k] <= '9')
+		}
+		if len(last) >= 2 && letters {
+			return false
+		}
+	}
+	return wordEnd(line, j, "+-")
 }
 
 // asciiEqualFold reports whether two strings are equal without case. It
