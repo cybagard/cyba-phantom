@@ -233,7 +233,8 @@ func TestTU18StoredRecordAndHashAreTheCanonicalBytes(t *testing.T) {
 // T-U-18: for each evidence row, sha256(record) equals hash. The writer makes
 // the record bytes and the hash of an evidence event one time. The seam gives
 // bytes that are not those of EvidenceBytes. Each evidence row must store the
-// bytes and the hash that the seam gave for its event. The seam is called one time for each evidence event and not for a bulk event.
+// bytes and the hash that the seam gave for its event. The seam is called one
+// time for each evidence event and not for a bulk event.
 func TestTU18WriterEncodesEachEvidenceRecordOnce(t *testing.T) {
 	r := newRig(t, 100)
 	var calls int
