@@ -103,7 +103,10 @@ jobs:
     # Signed-off-by. The author, the committer and every trailer address
     # must be the maintainer noreply address. The committer can also be
     # the GitHub committer address. A Co-authored-by trailer for Claude,
-    # with only the Claude co-author address, is the exception.
+    # with only the Claude co-author address, is the exception. The whole
+    # commit message and the author and committer names pass a character
+    # list. Each "@" in the message is the maintainer address, a Claude
+    # co-author line, a listed mention or a version.
     # tools/dco/main.go gives the full rules.
     # PRs only — squash merges drop trailers, so pushed main is never
     # re-checked (the history of main is what was reviewed).
