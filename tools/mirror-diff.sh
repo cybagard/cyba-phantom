@@ -27,13 +27,18 @@ fi
 
 tmp="$(mktemp)" || exit 2
 trap 'rm -f "$tmp"' EXIT
+nonblank="$(mktemp)" || exit 2
+trap 'rm -f "$tmp" "$nonblank"' EXIT
 
 # The table block: the "| Rule | Digest |" header, its separator, and the
-# ten C-rows — 12 lines (awk stops after the 12th), LF-normalized
-# (.gitattributes pins eol=lf).
-sed -e 's/\r$//' "$AGENTS_MD" | awk '
+# ten C-rows — 12 lines, LF-normalized (.gitattributes pins eol=lf). The
+# same pass reads the line after the block. If that line is not blank, awk
+# writes a marker "x" to $nonblank. A blank line is empty, or has only
+# spaces and tabs.
+sed -e 's/\r$//' "$AGENTS_MD" | awk -v nonblank="$nonblank" '
+  found && n == 12 { if ($0 !~ /^[ \t]*$/) print "x" > nonblank; exit }
   /^\| Rule \| Digest \|$/ { if (found) exit; found = 1; n = 0 }
-  found { print; if (++n == 12) exit }
+  found { print; n++ }
 ' > "$tmp"
 
 lines=$(wc -l < "$tmp" | tr -d '[:space:]')
@@ -48,6 +53,14 @@ fi
 tablelines=$(grep -c '^|' "$tmp" || true)
 if [ "$tablelines" -ne 12 ]; then
   echo "mirror-diff: table block in $AGENTS_MD is malformed (only $tablelines of 12 lines are table rows)" >&2
+  exit 2
+fi
+
+# After the 12 lines, the check needs a blank line or the end of the file.
+# In GFM, a line right after a table can be one more row, also with no
+# leading "|".
+if [ -s "$nonblank" ]; then
+  echo "mirror-diff: table in $AGENTS_MD has a line after the 12 lines that is not blank (header + separator + 10 rows)" >&2
   exit 2
 fi
 
