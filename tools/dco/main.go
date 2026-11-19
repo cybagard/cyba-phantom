@@ -72,8 +72,12 @@
 //
 // Known limits. dco does not find an address with no at-sign character. One
 // example is an address written with the words "at" and "dot". Another is %40.
-// dco also passes an address with a space after its dot, such as
-// @dependabot. com.
+// After a mention or a version, dco also passes these forms:
+//   - a space after the dot, such as "@dependabot. com";
+//   - a dot at the end of the line or before a TAB, and the rest of the
+//     address on the next line;
+//   - the word "dot" in place of the dot;
+//   - a space or a line break, and then a non-ASCII character such as U+00B7.
 //
 // A commit with a non-empty encoding header fails, whatever its value. An
 // empty value gives an empty %e, the same as no header, and dco does not fail
