@@ -820,6 +820,20 @@ func TestAtSignBoundaries(t *testing.T) {
 		// A second "@" next to a word that is whole only without it.
 		{m + "@v1.2", false}, {"@a@v1", false}, {"a@v1@v1", false},
 		{"@" + strings.Repeat("a", 39) + "-", false}, {"a@v1.-rc", true},
+		// The ends of the letter and digit ranges: A, Z, a, z, 0 and 9.
+		{"A" + m, false}, {"z" + m, false}, {"9" + m, false},
+		{m + "A", false}, {m + "z", false}, {m + "9", false},
+		{"@a9.x", false}, {"@az.x", false}, {"@aZ.x", false}, {"@A0.x", false},
+		{"@9", true}, {"@z", true}, {"@Z.", true},
+		// Versions with the digits 0 and 9 in each group, and a dot at the end.
+		{"x@v9.9.9", true}, {"x@v1.9", true}, {"x@v19", true}, {"x@v0.0", true},
+		{"x#v1.9.example", false}, {"x#v1.9.9.example", false},
+		{"uses x@v1.9.", true}, {"x@v1.9.0.", true},
+		{"x@v1-rc1.", true}, {"x@v1-rc.", false}, {"x@v1-rc.1.", true},
+		// The last pre-release part: digits make it a number, letters do not.
+		{"x#v1-rc.00", true}, {"x#v1-rc.99", true}, {"x#v1-rc.a9", true},
+		{"x#v1-rc.0a", true}, {"x#v1-rc.9a", true}, {"x#v1-rc.ab", false},
+		{"x#v1-rc.zz", false}, {"x#v1-rc.AZ", false},
 	}
 	for _, c := range cases {
 		// "#" stands for "@" in the lines that would look like an address.
