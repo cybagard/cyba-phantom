@@ -394,8 +394,8 @@ func isLocal(c byte) bool { return isAlnum(c) || strings.IndexByte("._%+-", c) >
 
 // wordEnd reports whether a word that ends before line[j] is whole. The next
 // character is not "@", a letter, a digit, "_" or "%", or one of the bytes of
-// more. It is not a byte of 0x80 or more, and not a "." that comes before a
-// letter or a digit.
+// more. It is not a byte of 0x80 or more. It is not a "." before a letter or
+// a digit.
 func wordEnd(line string, j int, more string) bool {
 	if j >= len(line) {
 		return true
