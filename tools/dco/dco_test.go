@@ -274,7 +274,7 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 }
 
 // idHint is the fixed text of the identity hint.
-const idHint = "hint: this check passes only for commits of the maintainer; for an outside contribution, see CONTRIBUTING.md (the maintainer commits the change again)\n"
+const idHint = "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.\n"
 
 // oldIDHint is the text of the identity hint before it stopped naming the
 // maintainer address. It is a negative fixture: the hint must not return to it.
@@ -359,7 +359,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 	for name, out := range cases {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := check([]byte(out), "base", "HEAD", &stdout, &stderr); code != 2 {
+			if code := check([]byte(out), nil, "base", "HEAD", &stdout, &stderr); code != 2 {
 				t.Fatalf("check = %d, want 2; stdout %q", code, stdout.String())
 			}
 			if got, want := stderr.String(), "dco: malformed git log record\n"; got != want {
@@ -375,7 +375,7 @@ func TestMalformedRecordIsError(t *testing.T) {
 // A well-formed record passes.
 func TestCheckGoodRecord(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := check([]byte(goodRecord), "base", "HEAD", &stdout, &stderr); code != 0 {
+	if code := check([]byte(goodRecord), nil, "base", "HEAD", &stdout, &stderr); code != 0 {
 		t.Fatalf("check = %d, want 0; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -384,7 +384,7 @@ func TestCheckGoodRecord(t *testing.T) {
 func TestCheckKeepsLastRecordWithoutEnd(t *testing.T) {
 	unsigned := "0123456789abcdef\x00" + me + "\x00" + me + "\x00\x00\x00"
 	var stdout, stderr bytes.Buffer
-	if code := check([]byte(unsigned), "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
+	if code := check([]byte(unsigned), nil, "base", "HEAD", &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "unsigned: 0123456789ab\n") {
 		t.Errorf("check = %d, want 1 with an unsigned line; stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -400,7 +400,7 @@ func TestCheckCountsRecords(t *testing.T) {
 		{"one unsigned", goodRecord + unsigned, "dco FAIL: of 2 commits in base..HEAD, 1 lack", 1},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := check([]byte(c.out), "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
+		if code := check([]byte(c.out), nil, "base", "HEAD", &stdout, &stderr); code != c.code || !strings.Contains(stdout.String(), c.want) {
 			t.Errorf("%s: check = %d, stdout %q, stderr %q; want %d and %q", c.name, code, stdout.String(), stderr.String(), c.code, c.want)
 		}
 	}
@@ -419,10 +419,11 @@ func TestASCIIEqualFoldRefusesHighByte(t *testing.T) {
 }
 
 // forgeCommit writes a commit object by hand on top of a signed base. The
-// header line extra goes after the committer line. It uses no --literally, so
-// git checks the object. It returns the repository and the full hash. The
-// branch "base" holds the base commit and the branch "forged" the new one.
-func forgeCommit(t *testing.T, extra, msg string) (dir, hash string) {
+// header line extra goes after the committer line. Without flags, git checks
+// the object; flags go to git hash-object (for example --literally). It
+// returns the repository and the full hash. The branch "base" holds the base
+// commit and the branch "forged" the new one.
+func forgeCommit(t *testing.T, extra, msg string, flags ...string) (dir, hash string) {
 	t.Helper()
 	dir = newRepo(t)
 	commit(t, dir, "base", true)
@@ -432,7 +433,7 @@ func forgeCommit(t *testing.T, extra, msg string) (dir, hash string) {
 	ident := "t <" + me + "> 1700000000 +0000"
 	obj := "tree " + tree + "\nparent " + parent + "\nauthor " + ident + "\ncommitter " + ident + "\n" +
 		extra + "\n" + msg
-	cmd := exec.Command("git", "-C", dir, "hash-object", "-t", "commit", "-w", "--stdin")
+	cmd := exec.Command("git", append([]string{"-C", dir, "hash-object", "-t", "commit", "-w", "--stdin"}, flags...)...)
 	cmd.Stdin = strings.NewReader(obj)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -548,5 +549,101 @@ func TestIdentityRule(t *testing.T) {
 				t.Errorf("identity line for %q present = %v, want %v; output %q", hash, got, c.want == 1, out)
 			}
 		})
+	}
+}
+
+// body is a message with the free text x between a subject and a valid
+// sign-off.
+func body(x string) string { return "subject\n\n" + x + "\n\nSigned-off-by: t <" + me + ">\n" }
+
+// An address anywhere in the message, not only in a trailer, fails the
+// commit. Each message has a valid sign-off, so only the address fails.
+func TestMessageAddressFails(t *testing.T) {
+	cases := map[string]string{
+		"subject":                      "s " + other + "\n\nSigned-off-by: t <" + me + ">\n",
+		"body text":                    body("write to " + other),
+		"co-author before a body":      "subject\n\nCo-authored-by: Bob <" + other + ">\n\nbody\n\nSigned-off-by: t <" + me + ">\n",
+		"sign-off not last":            "subject\n\nSigned-off-by: Bob <" + other + ">\n\nbody\n\nSigned-off-by: t <" + me + ">\n",
+		"equals sign separator":        signoff + "Co-authored-by = Bob <" + other + ">\n",
+		"fullwidth at-sign":            body("other＠example.com"),
+		"small at-sign":                body("other﹫example.com"),
+		"non-ASCII key":                signoff + "ſigned-off-by: Bob <" + other + ">\n",
+		"non-ASCII domain":             body("other@exämple.com"),
+		"combining mark in domain":     body("other@exämple.com"),
+		"fullwidth at-sign, combining": body("other＠exämple.com"),
+		"ideographic full stop":        body("other@example。com"),
+		"mixed case":                   body("Other@Example.COM"),
+		"mailto link":                  body("<mailto:" + other + ">"),
+		"CRLF line":                    "subject\r\n\r\ncontact " + other + "\r\n\r\nSigned-off-by: t <" + me + ">\r\n",
+		"Claude address in body":       body("Claude <noreply@anthropic.com>"),
+		"Claude line, 2 addresses":     signoff + "Co-authored-by: Claude <noreply@anthropic.com> " + other + "\n",
+		"fullwidth maintainer":         body("67512030+cybagard＠users.noreply.github.com"),
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) { failsWith(t, nil, msg, "identity") })
+	}
+}
+
+// A word with an at-sign that is not an address passes. So do the
+// maintainer address and a Claude co-author line.
+func TestMessageNonAddressPasses(t *testing.T) {
+	cases := map[string]string{
+		"JSON-LD keyword":           body("the key @context"),
+		"quoted prefix":             body(`the text "//REDACTED@".`),
+		"quoted word":               body(`the text "REDACTED@"`),
+		"connection string":         body("user:pw@tcp(host)/db"),
+		"action version":            body("uses actions/checkout@v5.1.0"),
+		"module version":            body("golang.org/x/net@v0.30.0"),
+		"mention":                   body("thanks @dependabot"),
+		"maintainer address":        body("by " + me),
+		"maintainer in upper case":  body("by " + strings.ToUpper(me)),
+		"Claude co-author, 1 word":  "subject\n\nCo-authored-by: Claude <noreply@anthropic.com>\n\nbody\n\nSigned-off-by: t <" + me + ">\n",
+		"Claude co-author, 3 words": signoff + "Co-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>\n",
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			if code, out, _ := runOn(t, nil, msg); code != 0 {
+				t.Fatalf("run = %d, want 0; output %q", code, out)
+			}
+		})
+	}
+}
+
+// The reader of git cat-file output refuses a malformed header or size.
+// rawMessages refuses a repository that git cannot read.
+func TestRawMessagesErrors(t *testing.T) {
+	for name, out := range map[string]string{
+		"no LF":        "abc commit 4",
+		"not a commit": "abc blob 4\nxxxx\n",
+		"missing":      "abc missing\n",
+		"bad size":     "abc commit x\nxxxx\n",
+		"negative":     "abc commit -1\n\n",
+		"short body":   "abc commit 9\nxxxx\n",
+		"one of two":   "abc commit 1\nx\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseBatch([]byte(out), 2); err == nil {
+				t.Error("parseBatch accepts the output")
+			}
+		})
+	}
+	if _, err := rawMessages(t.TempDir(), []string{strings.Repeat("a", 40)}); err == nil {
+		t.Error("rawMessages accepts a directory that is not a repository")
+	}
+}
+
+// git log stops a message at a NUL byte, but the bytes stay in the object.
+// An address after the NUL fails the commit.
+func TestNULHidesNoAddress(t *testing.T) {
+	dir, hash := forgeCommit(t, "", signoff+"\x00hidden "+other+"\n", "--literally")
+	if shown := git(t, dir, "log", "-1", "--format=%B", hash); strings.Contains(shown, "hidden") {
+		t.Fatalf("git log shows the hidden address: %q", shown)
+	}
+	code, out, errOut := runDCO([]string{"base", "forged"}, dir)
+	if code != 1 || !strings.Contains(out, "identity: "+hash[:12]+"\n") {
+		t.Fatalf("run = %d, want 1 with an identity line; output %q", code, out)
+	}
+	if strings.Contains(out+errOut, "@") {
+		t.Errorf("the output shows an address: %q %q", out, errOut)
 	}
 }

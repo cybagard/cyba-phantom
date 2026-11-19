@@ -18,10 +18,14 @@ C1–C10, hard rules, non-choices). This file adds the working agreement.
    also the maintainer noreply address. Only a `Co-authored-by` trailer
    can have the Claude co-author address. The name in that trailer is
    "Claude" or starts with "Claude ", and the trailer has no other
-   address. The header comment of `tools/dco/main.go` gives the full
-   rules. It also covers the rule for
-   the encoding header. A commit that fails one of these rules fails the
-   check.
+   address. The check also reads the whole commit message (subject,
+   body, every paragraph and line). An address there is the maintainer
+   noreply address, or the Claude co-author address on a `Co-authored-by`
+   line for Claude. Any other address fails the check. A version string
+   such as `actions/checkout@v5.1.0` or a mention such as `@dependabot`
+   is not an address. The header comment of `tools/dco/main.go` gives the
+   full rules. It also covers the rule for the encoding header. A commit
+   that fails one of these rules fails the check.
    An outside contributor forks, branches, commits with `git commit -s`,
    and opens a pull request. An outside contributor commits with their
    own name and address, never with the maintainer address. The `dco`
