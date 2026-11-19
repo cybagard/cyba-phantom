@@ -238,13 +238,20 @@ func (w *Writer) serveRetention(ctx context.Context, tick <-chan time.Time, batc
 // calls it after a chunk has committed. The event goes to flush as a batch of
 // its own. It does not use the queue, so a full evidence lane cannot drop it. A
 // paused writer drops it with a count, as flush does. A stopped writer makes no
-// event and counts no drop. endRun returns err. If the write stops the writer,
+// event and counts no drop. The event time is S. A clock error stops the writer.
+// endRun returns err. If the write stops the writer,
 // it returns the error of the stop.
 func (w *Writer) endRun(run *retentionRun, err error) error {
 	if run == nil || !w.Healthy() {
 		return err
 	}
-	e, eerr := event.NewRetentionEvent(w.now, run.counts)
+	// The event time is S. A clock error stops the writer, as it does in a batch.
+	at, eerr := w.stored()
+	if eerr != nil {
+		w.stop(eerr)
+		return eerr
+	}
+	e, eerr := event.NewRetentionEvent(func() time.Time { return at }, run.counts)
 	if eerr != nil {
 		eerr = fail(writerName, ruleRecord)
 		w.stop(eerr)

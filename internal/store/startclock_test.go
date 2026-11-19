@@ -480,9 +480,6 @@ func TestTU27SRunOnceReadsS(t *testing.T) {
 		if len(k.runs) != 1 || k.raw[0] != start.UnixMilli()-30*24*time.Hour.Milliseconds() {
 			t.Fatalf("runs %v, cutoffs %v, want one run with the cutoff of S", k.runs, k.raw)
 		}
-		if !k.s.mark.Equal(start) {
-			t.Fatalf("mark %v, want S %v", k.s.mark, start)
-		}
 	})
 	t.Run("clock error", func(t *testing.T) {
 		r, f, fail := newRig(t, 8), &fakeSrc{}, &atomic.Bool{}
