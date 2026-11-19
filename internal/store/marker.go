@@ -12,6 +12,12 @@ const markerName = "writer.stop"
 
 const ruleMarkerExists = "stop marker exists"
 
+// ErrStopMarker is the error of a start check that finds the stop marker. The
+// marker is the stop state of the writer, not a fault of the start. A caller
+// tests for it with errors.Is. StartClock returns it when the marker exists. A
+// caller must not change it.
+var ErrStopMarker error = &Error{Name: writerName, Rule: ruleMarkerExists}
+
 // closeFile closes the marker file and the state directory. openStateDir
 // opens the state directory for its fsync. Both calls of fsync use syncFile.
 // A test replaces these test hooks to make a step fail.
@@ -26,7 +32,7 @@ var (
 func checkMarker(root *os.Root) error {
 	switch _, err := root.Lstat(markerName); {
 	case err == nil:
-		return fail(writerName, ruleMarkerExists)
+		return ErrStopMarker
 	case !errors.Is(err, fs.ErrNotExist):
 		return fail(markerName, ruleExamine)
 	}

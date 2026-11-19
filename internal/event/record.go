@@ -360,7 +360,7 @@ func (r Record) check() error {
 }
 
 // canonical returns the canonical bytes of r for every kind. It is not
-// exported: only EvidenceBytes and HashEvidence give these bytes out.
+// exported: only EvidenceBytes and CanonicalEvidence give these bytes out.
 func (r Record) canonical() ([]byte, error) {
 	if err := r.check(); err != nil {
 		return nil, err
@@ -402,15 +402,23 @@ func EvidenceBytes(r Record) ([]byte, error) {
 	return r.canonical()
 }
 
-// HashEvidence returns the hash of an evidence record. It is the only function
-// that hashes a record. It returns an error for request, beacon and refused
-// records and for an unknown kind.
+// HashEvidence returns the hash of an evidence record. It calls
+// CanonicalEvidence and gives the same errors.
 func HashEvidence(r Record) ([32]byte, error) {
+	_, h, err := CanonicalEvidence(r)
+	return h, err
+}
+
+// CanonicalEvidence returns the canonical bytes of an evidence record and the
+// hash of these bytes, from one encode. It and HashEvidence are the only
+// functions that hash a record. HashEvidence calls it. It returns an error for
+// request, beacon and refused records and for an unknown kind.
+func CanonicalEvidence(r Record) ([]byte, [32]byte, error) {
 	b, err := EvidenceBytes(r)
 	if err != nil {
-		return [32]byte{}, err
+		return nil, [32]byte{}, err
 	}
-	return Hash(b), nil
+	return b, Hash(b), nil
 }
 
 // Clock gives the time of the sensor.

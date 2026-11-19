@@ -776,3 +776,34 @@ func TestTS12_NoFloatAndShape(t *testing.T) {
 		t.Errorf("flat detail: %v, %v", d, err)
 	}
 }
+
+// T-U-06: CanonicalEvidence gives the same bytes as EvidenceBytes. Its hash is
+// the Hash of these bytes, and HashEvidence gives the same hash.
+func TestTU06_CanonicalEvidenceOneEncode(t *testing.T) {
+	r := mustEvent(t, Input{Kind: KindCallback, Session: "s1", TrapID: "t1", TokenID: "k1",
+		Detail: Detail{"hits": Int(3)}}).Record()
+	b, h, err := CanonicalEvidence(r)
+	want, werr := EvidenceBytes(r)
+	if err != nil || werr != nil || !bytes.Equal(b, want) || h != Hash(b) {
+		t.Errorf("bytes %s, hash %x, want %s, errors %v, %v", b, h, want, err, werr)
+	}
+	if hh, err := HashEvidence(r); err != nil || hh != h {
+		t.Errorf("HashEvidence %x, %v, want %x", hh, err, h)
+	}
+}
+
+// T-S-12: CanonicalEvidence refuses request, beacon, refused and unknown kinds.
+// It gives no bytes and a zero hash. The refused record is valid, so only its
+// kind makes the error.
+func TestTS12_CanonicalEvidenceRefusal(t *testing.T) {
+	refused := mustEvent(t, refusedInput(nil)).Record()
+	if _, err := refused.canonical(); err != nil {
+		t.Fatalf("the refused record is not valid: %v", err)
+	}
+	for _, r := range []Record{{TS: 1, Kind: KindRequest}, {TS: 1, Kind: KindBeacon}, refused,
+		{TS: 1, Kind: Kind(0)}, {TS: 1, Kind: Kind(200)}} {
+		if b, h, err := CanonicalEvidence(r); err == nil || b != nil || h != ([32]byte{}) {
+			t.Errorf("kind %v: bytes %s, hash %x, error %v, want an error", r.Kind, b, h, err)
+		}
+	}
+}
