@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/hpke"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -113,21 +116,31 @@ type refTrap struct {
 type refRun struct {
 	*baitSensor
 	traps []refTrap
-	// clockHeld is true when the window of the manifest holds the loader
-	// clock off the real clock. The tokens then look stale or future.
-	clockHeld bool
+	// clock is the loader clock of the run: `created` + 1 h of the manifest.
+	clock time.Time
 }
 
-// refTrust is a trust set with a test key of class reference and the key id of
-// the manifest. The release trust set has no such key.
-func refTrust() bundle.TrustSet {
-	return bundle.TrustSet{{KeyID: refKeyID, PublicKey: pubOf(seedKey(goodSeed)), Class: bundle.ClassReference}}
+// refTrustOf is a trust set with the one key pub. The key has class reference
+// and the key id of the manifest. The release trust set has no such key.
+func refTrustOf(pub ed25519.PublicKey) bundle.TrustSet {
+	return bundle.TrustSet{{KeyID: refKeyID, PublicKey: [32]byte(pub), Class: bundle.ClassReference}}
 }
 
-// startReference packs the source tree in memory. It signs the archive with
-// the test key and starts a sensor on it. The manifest dates are fixed. So
-// the loader clock is the real clock, held between `created` + 1 h and
-// `expires` - 1 h.
+// devKey makes a new signing key from crypto/rand. A test makes its own key and
+// keeps it in memory. The repository holds no part of it.
+func devKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	_, k, err := ed25519.GenerateKey(rand.Reader)
+	mustOK(t, err)
+	return k
+}
+
+// startReference packs the source tree in memory. It signs the archive with a
+// new key of the test (devKey) and starts a sensor on it. The trust set has
+// that key as its one key of class reference. The loader clock is `created` +
+// 1 h of the manifest, through the loader seam. The tokens come from the real
+// clock of the handler, so they look future and stale to the ring. See
+// refAgeClass.
 func startReference(t *testing.T) *refRun {
 	t.Helper()
 	var files []tarFile
@@ -150,35 +163,45 @@ func startReference(t *testing.T) *refRun {
 			mustOK(t, json.Unmarshal(f.data, &traps))
 		}
 	}
+	clock := man.Created.Add(time.Hour)
 	oldNew := newLoader
 	t.Cleanup(func() { newLoader = oldNew })
 	newLoader = func(s *os.Root, path string, ts bundle.TrustSet, k hpke.PrivateKey) *bundle.Loader {
 		l := oldNew(s, path, ts, k)
-		l.SetClock(func() time.Time {
-			now, from, to := time.Now(), man.Created.Add(time.Hour), man.Expires.Add(-time.Hour)
-			if now.Before(from) {
-				return from
-			}
-			if now.After(to) {
-				return to
-			}
-			return now
-		}, time.Sleep)
+		l.SetClock(func() time.Time { return clock }, time.Sleep)
 		return l
 	}
+	key := devKey(t)
 	arch := archiveOf(t, files...)
 	seed := func(t *testing.T, p startParams) {
-		putBundle(t, p.Root, p.BundlePath, arch, seedKey(goodSeed))
+		putBundle(t, p.Root, p.BundlePath, arch, key)
 		// putBundle names the key t1. The manifest names the reference key.
 		sig := filepath.Join(p.Root, strings.TrimSuffix(p.BundlePath, ".cbnd")+".sig")
 		b, err := os.ReadFile(sig)
 		mustOK(t, err)
 		mustOK(t, os.WriteFile(sig, bytes.Replace(b, []byte("t1 "), []byte(refKeyID+" "), 1), 0o600))
 	}
-	s := startBait(t, baitOpt{names: []string{refHost, refHostB}, trust: refTrust, seed: seed})
+	trust := func() bundle.TrustSet { return refTrustOf(key.Public().(ed25519.PublicKey)) }
+	s := startBait(t, baitOpt{names: []string{refHost, refHostB}, trust: trust, seed: seed})
 	s.arch = arch
-	now := time.Now()
-	return &refRun{s, traps, now.Before(man.Created.Add(time.Hour)) || now.After(man.Expires.Add(-time.Hour))}
+	return &refRun{s, traps, clock}
+}
+
+// refAgeClass tells if the ring of the loader must class a token of the run as
+// stale and as future. The ring reads the loader clock (r.clock). The mint
+// reads the real clock of the handler. The age is the first minus the second
+// in units of 10 min. A token is future above 1 h ahead of the loader clock,
+// and stale above 25 h behind it or when it is future. The tokens come from
+// the window from t0 to t1. known is false when the window does not fix the
+// classes: the unit of a token can then be on either side of a limit.
+func (r *refRun) refAgeClass(t0, t1 time.Time) (stale, future, known bool) {
+	switch {
+	case t0.Sub(r.clock) >= 70*time.Minute:
+		return true, true, true
+	case t1.Sub(r.clock) <= time.Hour && r.clock.Sub(t0) <= 25*time.Hour:
+		return false, false, true
+	}
+	return false, false, false
 }
 
 // slotTexts returns the text of each in-page slot of the page in body, by the
@@ -472,19 +495,30 @@ func refCallbackRequest(t *testing.T, r *refRun, v refVhost, ip net.IP, route, t
 // that the text of the trap names. The request has the host of the trap. The
 // route gives a callback row. The surface of the row is the surface of the
 // trap. The row has the trap of the token, the vhost of the trap and
-// reference_seed: true.
+// reference_seed: true. It has a leaf in the log, and the callback session. The
+// token row has the session of the render and cb_count 1. The 4 surfaces of
+// vhost A (path, query, header, body) are in the 16 traps. The classes stale
+// and future follow the loader clock, which the run sets to `created` + 1 h.
+// The key of the run is new for the test.
 func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 	r := startReference(t)
 	r.needSecondAddr(t)
 	db := readStore(t, r.baitSensor)
 	toks := map[string]string{}
+	t0 := time.Now()
 	for _, v := range refVhosts {
 		got, _ := r.allTokens(t, v, nil)
 		maps.Copy(toks, got)
 	}
+	t1 := time.Now()
+	wantStale, wantFuture, known := r.refAgeClass(t0, t1)
+	renderSession := r.keyedID(t)
 	var mints int
-	pollRow(t, db, "SELECT count(*) FROM mint WHERE session_id = ? HAVING count(*) > 0", []any{r.keyedID(t)}, &mints)
-	cookie, _ := r.cookie(t)
+	pollRow(t, db, "SELECT count(*) FROM mint WHERE session_id = ? HAVING count(*) > 0", []any{renderSession}, &mints)
+	cookie, cbSession := r.cookie(t)
+	if cbSession == renderSession {
+		t.Fatal("the callback session and the render session are the same")
+	}
 	for i, tr := range r.traps {
 		parsed, ok := token.Parse(toks[tr.ID])
 		if !ok {
@@ -499,20 +533,42 @@ func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 		// in a minute. So the 16 traps use 2 addresses, 8 each.
 		ip := []net.IP{net.IPv4(127, 0, 0, 1), secondAddr}[i%2]
 		refCallbackRequest(t, r, v, ip, route, toks[tr.ID], cookie)
-		var got, trap, vhost, detail string
-		pollRow(t, db, "SELECT surface, trap_id, vhost, detail FROM event WHERE kind = 'callback' AND token_id = ?",
-			[]any{token.ID(parsed)}, &got, &trap, &vhost, &detail)
+		var got, trap, vhost, detail, session string
+		var leaf sql.NullInt64
+		id := token.ID(parsed)
+		pollRow(t, db, "SELECT surface, trap_id, vhost, detail, session_id, leaf_index FROM event WHERE kind = 'callback' AND token_id = ?",
+			[]any{id}, &got, &trap, &vhost, &detail, &session, &leaf)
 		var d map[string]any
 		mustOK(t, json.Unmarshal([]byte(detail), &d))
-		// With the real clock in the window, the token is not stale or future.
-		for _, k := range []string{"stale", "future"} {
-			if _, ok := d[k]; ok && !r.clockHeld {
-				t.Errorf("trap %s: detail %s has %s", tr.ID, detail, k)
+		// The ring sets stale and future from the loader clock (the clock of
+		// this run) and the time of the mint (the real clock of the handler).
+		// Not from the real clock alone. The loader clock is `created` + 1 h,
+		// so the tokens of a later day are future.
+		if known {
+			for k, want := range map[string]bool{"stale": wantStale, "future": wantFuture} {
+				if _, has := d[k]; has != want {
+					t.Errorf("trap %s: detail %s; want %s present: %v (loader clock %v, mint from %v to %v)",
+						tr.ID, detail, k, want, r.clock, t0, t1)
+				}
 			}
 		}
 		if got != tr.Surface || trap != tr.ID || vhost != v.host || d["reference_seed"] != true {
 			t.Errorf("trap %s at %s: row surface %q, trap %q, vhost %q, detail %s; want %q, %q, %q and reference_seed true",
 				tr.ID, route, got, trap, vhost, detail, tr.Surface, tr.ID, v.host)
+		}
+		// The proof of the callback is the leaf of the event in the log.
+		if !leaf.Valid || leaf.Int64 < 0 || session != cbSession {
+			t.Errorf("trap %s: callback row leaf %v, session %q; want a leaf and the callback session %q",
+				tr.ID, leaf, session, cbSession)
+		}
+		// The token row comes in the batch of the callback row.
+		var tokSession, tokTrap string
+		var count int64
+		mustOK(t, db.QueryRowContext(t.Context(), "SELECT session_id, trap_id, cb_count FROM token WHERE token_id = ?", id).
+			Scan(&tokSession, &tokTrap, &count))
+		if tokSession != renderSession || tokTrap != tr.ID || count != 1 {
+			t.Errorf("trap %s: token row session %q, trap %q, cb_count %d; want %q, %q, 1",
+				tr.ID, tokSession, tokTrap, count, renderSession, tr.ID)
 		}
 	}
 	r.stop(t)
