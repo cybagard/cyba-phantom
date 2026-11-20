@@ -58,9 +58,9 @@ func seedsIn(text []byte) [][]byte {
 }
 
 // keyFilesIn walks the tree below root. It reads each regular file for base64
-// runs that decode to a seed (seedsIn). It gives the path of each file that
-// has a seed with a public key of class reference in the trust set. The paths
-// use "/" and are relative to root.
+// runs that decode to a seed (seedsIn). It gives the path of each file with a
+// seed. The public key of the seed must be a key of class reference in the
+// trust set. The paths use "/" and are relative to root.
 //
 // The walk skips each entry named .git, a directory or a file. It holds the
 // object store of the version control, and no file of the tree. The walk also
@@ -134,10 +134,10 @@ func TestTU29_NoReferenceSigningKeyInModule(t *testing.T) {
 // TestTU29_KeyScanFindsPlantedSeed checks the key scan (T-U-29, SEC-42). A tree
 // in a temporary directory holds the base64 text of a seed. The public key of
 // the seed is the reference key of the test trust set. The scan finds the file
-// in each of these forms: the 32 bytes alone, a longer line of text, the 64
-// bytes of a private key, and a longer run of base64 characters. It does not
-// find these: a seed of another key, a file below .git, a seed in raw bytes,
-// and a run with the wrong length.
+// in each of these forms. The 32 bytes alone. A longer line of text. The 64
+// bytes of a private key. A longer run of base64 characters. The scan does
+// not find these. A seed of another key. A file below .git. A seed in raw
+// bytes. A run with the wrong length.
 func TestTU29_KeyScanFindsPlantedSeed(t *testing.T) {
 	seed := devKey(t).Seed()
 	priv := ed25519.NewKeyFromSeed(seed)
