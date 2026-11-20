@@ -13,10 +13,11 @@ import (
 )
 
 // The base64 text of a signing seed is 43 characters and "=" (32 bytes). The
-// text of a private key is 86 characters and "==" (64 bytes: the seed and the
-// public key). A longer run of base64 characters that ends in such a tail is
-// found too. The scan is by hand and not a regular expression: the test reads
-// the build output of the tree, and a repeat count of 43 is slow in regexp.
+// text of a private key is 86 characters and "==" (64 bytes). These are the
+// seed and the public key. A longer run of base64 characters that ends in such
+// a tail is found too. The scan is by hand and not a regular expression. The
+// test reads the build output of the tree. A repeat count of 43 is slow in
+// regexp.
 const (
 	seedChars = 43
 	privChars = 86
@@ -56,19 +57,19 @@ func seedsIn(text []byte) [][]byte {
 	return out
 }
 
-// keyFilesIn walks the tree below root. For each regular file, it reads the
-// base64 runs of the text that decode to a seed (seedsIn). It gives the path of
-// each file that has a seed whose public key is a key of class reference in the
-// trust set. The paths use "/" and are relative to root.
+// keyFilesIn walks the tree below root. It reads each regular file for base64
+// runs that decode to a seed (seedsIn). It gives the path of each file that
+// has a seed with a public key of class reference in the trust set. The paths
+// use "/" and are relative to root.
 //
-// The walk skips the entry named .git, a directory or a file, because it holds
-// the object store of the version control and no file of the tree. It skips
-// each link and each file that is not regular, because the walk does not follow
-// links and a link has no bytes of its own. It skips no other path: the build
-// output, the test data and the untracked files are in the scan, so a key
+// The walk skips each entry named .git, a directory or a file. It holds the
+// object store of the version control, and no file of the tree. The walk also
+// skips each link and each file that is not regular. It does not follow links,
+// and a link has no bytes of its own. It skips no other path. The build
+// output, the test data and the untracked files are in the scan. So a key
 // cannot hide in a directory that the version control ignores.
 //
-// The scan takes the trust set as a parameter, so a test can run it with the
+// The scan takes the trust set as a parameter. So a test can run it with the
 // trust set of a release build.
 func keyFilesIn(root string, trust bundle.TrustSet) ([]string, error) {
 	var keys [][32]byte
@@ -131,12 +132,12 @@ func TestTU29_NoReferenceSigningKeyInModule(t *testing.T) {
 }
 
 // TestTU29_KeyScanFindsPlantedSeed checks the key scan (T-U-29, SEC-42). A tree
-// in a temporary directory holds the base64 text of a seed. The public
-// key of the seed is the reference key of the test trust set. The scan finds
-// the file in each of these forms: the 32 bytes alone, a longer line of text,
-// the 64 bytes of a private key, and a longer run of base64 characters. It
-// does not find a seed of another key, a file below .git, a seed in raw bytes,
-// or a run with the wrong length.
+// in a temporary directory holds the base64 text of a seed. The public key of
+// the seed is the reference key of the test trust set. The scan finds the file
+// in each of these forms: the 32 bytes alone, a longer line of text, the 64
+// bytes of a private key, and a longer run of base64 characters. It does not
+// find these: a seed of another key, a file below .git, a seed in raw bytes,
+// and a run with the wrong length.
 func TestTU29_KeyScanFindsPlantedSeed(t *testing.T) {
 	seed := devKey(t).Seed()
 	priv := ed25519.NewKeyFromSeed(seed)

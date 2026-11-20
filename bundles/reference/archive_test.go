@@ -44,8 +44,9 @@ func treeEntries(dir string) ([]archiveEntry, error) {
 	return out, err
 }
 
-// packEntries makes an archive as bundle-sign pack does: a gzip stream of a tar
-// with USTAR headers, mode 0644, no mtime, in the order of the entries.
+// packEntries makes an archive as bundle-sign pack does. It is a gzip stream
+// of a tar. The headers are USTAR with mode 0644 and no mtime. The order of
+// the entries is the order of the files.
 func packEntries(files []archiveEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -100,11 +101,11 @@ func archiveEntries(arch []byte) ([]archiveEntry, error) {
 }
 
 // archiveEqualsTree compares the entries of the archive arch with the files
-// below dir. The names must be the same, the bytes of each file must be the
-// same, and the archive must have no other entry. The error names each
-// difference. It is nil when the archive and the tree are equal. It takes the
-// archive as bytes and the tree as a directory, so a test can run it on a
-// committed archive file.
+// below dir. The names must be the same. The bytes of each file must be the
+// same. The archive must have no other entry. The error names each difference.
+// It is nil when the archive and the tree are equal. It takes the archive as
+// bytes and the tree as a directory. So a test can run it on a committed
+// archive file.
 func archiveEqualsTree(arch []byte, dir string) error {
 	got, err := archiveEntries(arch)
 	if err != nil {
@@ -141,9 +142,9 @@ func archiveEqualsTree(arch []byte, dir string) error {
 // has the same entries as the tree (T-U-29, SEC-42). The test packs src/ as
 // bundle-sign pack does. The reader of the engine accepts the archive. After
 // the decompress, the entries have the names and the bytes of the files of
-// src/, and no other entry. A copy with one extra entry, a copy with one
-// missing entry, and a copy with one changed byte are each found, and the error
-// names the entry.
+// src/, and no other entry. Three test copies each have a fault: one extra
+// entry, one missing entry, or one changed byte. The compare finds each. The
+// error names the entry.
 func TestTU29_ArchiveEntriesEqualTree(t *testing.T) {
 	const src = "src"
 	files, err := treeEntries(src)

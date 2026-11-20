@@ -189,11 +189,11 @@ func startReference(t *testing.T) *refRun {
 
 // refAgeClass tells if the ring of the loader must class a token of the run as
 // stale and as future. The ring reads the loader clock (r.clock). The mint
-// reads the real clock of the handler. The age is the first minus the second
-// in units of 10 min. A token is future above 1 h ahead of the loader clock,
-// and stale above 25 h behind it or when it is future. The tokens come from
+// reads the real clock of the handler. The age is the first minus the second,
+// in units of 10 min. A token is future above 1 h ahead of the loader clock.
+// It is stale above 25 h behind it, or when it is future. The tokens come from
 // the window from t0 to t1. known is false when the window does not fix the
-// classes: the unit of a token can then be on either side of a limit.
+// classes. The unit of a token can then be on either side of a limit.
 func (r *refRun) refAgeClass(t0, t1 time.Time) (stale, future, known bool) {
 	switch {
 	case t0.Sub(r.clock) >= 70*time.Minute:
@@ -540,10 +540,10 @@ func TestTI04_ReferenceCallbackRoutes(t *testing.T) {
 			[]any{id}, &got, &trap, &vhost, &detail, &session, &leaf)
 		var d map[string]any
 		mustOK(t, json.Unmarshal([]byte(detail), &d))
-		// The ring sets stale and future from the loader clock (the clock of
-		// this run) and the time of the mint (the real clock of the handler).
-		// Not from the real clock alone. The loader clock is `created` + 1 h,
-		// so the tokens of a later day are future.
+		// The ring sets stale and future. It reads the loader clock, which
+		// is the clock of this run. The mint time is the real clock of the
+		// handler. So the real clock alone does not give the age. The loader
+		// clock is `created` + 1 h, so the tokens of a later day are future.
 		if known {
 			for k, want := range map[string]bool{"stale": wantStale, "future": wantFuture} {
 				if _, has := d[k]; has != want {
