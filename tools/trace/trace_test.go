@@ -652,8 +652,7 @@ func TestExemptCoverIsFinding(t *testing.T) {
 // heading of the fixture 01.
 func exemptIDs(t *testing.T, dir string) []string {
 	t.Helper()
-	var findings []string
-	reqs := parsePRD(readSpec(t, dir, "01-prd.md"), &findings)
+	reqs, _ := parsePRD(readSpec(t, dir, "01-prd.md"))
 	var ids []string
 	for _, r := range reqs {
 		if r.exempt {

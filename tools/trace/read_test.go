@@ -446,7 +446,7 @@ func TestStampWriteErrorNamesTheTypedDir(t *testing.T) {
 // no part of the resolved path.
 func TestHashDirErrorNamesTheTypedDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "absent")
-	_, _, _, err := hashDir(dir, "typed/spec")
+	_, err := hashDir(dir, "typed/spec")
 	want := `cannot read spec dir "typed/spec": no such file or directory`
 	if err == nil || err.Error() != want {
 		t.Errorf("hashDir: err %v, want %q", err, want)

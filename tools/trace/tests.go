@@ -109,9 +109,9 @@ func runTests(specDir, root, milestone string) ([]string, error) {
 		return nil, fmt.Errorf("unknown milestone %q: no such row in the milestone table", milestone)
 	}
 
-	var ignored []string
+	parsed, _ := parseTestPlan(text)
 	declared := map[string]bool{}
-	for _, t := range parseTestPlan(text, &ignored) {
+	for _, t := range parsed {
 		declared[t.id] = true
 	}
 	findings = append(findings, checkRows(rows, declared)...)
