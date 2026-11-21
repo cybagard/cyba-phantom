@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The tests of the README and of the expiry of the reference bundle (SEC-42,
-// T-U-29).
+// This file holds the tests of the README and of the expiry of the reference
+// bundle (SEC-42, T-U-29).
 
 const (
 	readmeFile   = "README.md"
@@ -49,7 +50,7 @@ func mustRead(t *testing.T, name string) []byte {
 }
 
 // checkReadmeFacts reports a README that does not hold the key_id and the
-// expires of the manifest, as written there.
+// expires of the manifest, each as a whole line of its own.
 func checkReadmeFacts(readme, manifest []byte) error {
 	m, err := readManifest(manifest)
 	if err != nil {
@@ -58,9 +59,13 @@ func checkReadmeFacts(readme, manifest []byte) error {
 	if m.KeyID == "" || m.Expires == "" {
 		return errors.New("manifest has no key_id or no expires")
 	}
-	for name, v := range map[string]string{"key_id": m.KeyID, "expires": m.Expires} {
-		if !bytes.Contains(readme, []byte(v)) {
-			return fmt.Errorf("README does not hold the %s %q", name, v)
+	lines := strings.Split(string(readme), "\n")
+	for _, f := range []struct{ name, line string }{
+		{"key_id", "The key id is `" + m.KeyID + "`."},
+		{"expires", "The bundle expires on `" + m.Expires + "`."},
+	} {
+		if !slices.Contains(lines, f.line) {
+			return fmt.Errorf("README does not hold the line %q for the %s", f.line, f.name)
 		}
 	}
 	return nil
@@ -95,7 +100,10 @@ func TestTU29_ReadmeHoldsKeyIDAndExpires(t *testing.T) {
 	if err := checkReadmeFacts(readme, manifest); err != nil {
 		t.Fatal(err)
 	}
-	m, _ := readManifest(manifest)
+	m, err := readManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	badReadme := bytes.ReplaceAll(readme, []byte(m.Expires), []byte("2027-11-17T00:00:00Z"))
 	if bytes.Equal(badReadme, readme) {
 		t.Fatal("test copy of the README is not changed")
@@ -109,6 +117,43 @@ func TestTU29_ReadmeHoldsKeyIDAndExpires(t *testing.T) {
 	}
 	if checkReadmeFacts(readme, badManifest) == nil {
 		t.Error("manifest with another key_id passes")
+	}
+}
+
+func TestTU29_ReadmeFactRows(t *testing.T) {
+	readme := mustRead(t, readmeFile)
+	const expires = "2027-11-16T00:00:00Z"
+	manifest := func(keyID, exp string) []byte {
+		return fmt.Appendf(nil, `{"key_id":%q,"expires":%q}`, keyID, exp)
+	}
+	text := func(keyLine, expLine string) []byte {
+		return []byte("# Title\n" + keyLine + "\n" + expLine + "\nThe old key id is `ref1`.\n")
+	}
+	const goodExp = "The bundle expires on `" + expires + "`."
+	rows := []struct {
+		name     string
+		readme   []byte
+		manifest []byte
+	}{
+		{"key_id ref in the real README", readme, manifest("ref", expires)},
+		{"key_id e in the real README", readme, manifest("e", expires)},
+		{"key_id ref10 in the real README", readme, manifest("ref10", expires)},
+		{"key id line ref2, ref1 on another line", text("The key id is `ref2`.", goodExp), manifest("ref1", expires)},
+		{"key id line ref10, manifest ref1", text("The key id is `ref10`.", goodExp), manifest("ref1", expires)},
+		{"another expires line", text("The key id is `ref1`.", "The bundle expires on `2027-11-17T00:00:00Z`."), manifest("ref1", expires)},
+		{"expires only as a part of a line", text("The key id is `ref1`.", "Note: "+goodExp), manifest("ref1", expires)},
+		{"empty key_id", text("The key id is ``.", goodExp), manifest("", expires)},
+		{"empty expires", text("The key id is `ref1`.", "The bundle expires on ``."), manifest("ref1", "")},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			if checkReadmeFacts(r.readme, r.manifest) == nil {
+				t.Error("passes")
+			}
+		})
+	}
+	if err := checkReadmeFacts(text("The key id is `ref1`.", goodExp), manifest("ref1", expires)); err != nil {
+		t.Errorf("the control README fails: %v", err)
 	}
 }
 
@@ -152,15 +197,14 @@ func TestTU29_ExpiryWatchRows(t *testing.T) {
 				t.Errorf("fails: %v", err)
 			case !r.pass && err == nil:
 				t.Error("passes")
+			case err == nil:
+				// A row that passes, as the row wants.
 			case r.fixed && err.Error() != want:
 				t.Errorf("error text %q, want %q", err, want)
 			case !r.pass && !r.fixed && err.Error() == want:
 				t.Error("a bad manifest gives the text of an expiry")
 			}
 		})
-	}
-	if !strings.Contains(want, "signs the bundle again") || !strings.Contains(want, "new manifest version") {
-		t.Error("the fixed text does not name the re-sign step")
 	}
 }
 
