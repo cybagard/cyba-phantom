@@ -145,9 +145,11 @@ copy there, rebuild the container without the build cache.) `make all` runs buil
 `go mod tidy -diff`, the coverage gate and `make perf`. The coverage gate runs
 the tests with `-race`. Then `make all` runs the C10 trace check and the
 constitution-table mirror. The lint step needs the ref `origin/main`, or
-`BASE=<sha>`. `make all` does not run two checks of the ci workflow:
+`BASE=<sha>`. `make all` does not run three checks of the ci workflow:
 
 - `make fill` needs a small tmpfs.
+- `make coldstart` needs root and a free `/var/lib/phantom`. Without them,
+  the target fails.
 - `make dco BASE=<sha> HEAD=<sha>` needs BASE and HEAD. It checks the
   sign-off and the commit identity.
 
