@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -681,5 +684,116 @@ func TestFlaggedFileNotReportedTwice(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("07-test-plan.md has %d findings, want 1: %v", n, findings)
+	}
+}
+
+// captureRun runs run with the given arguments. It returns the exit code and
+// the exact text that run wrote to stdout and to stderr.
+func captureRun(t *testing.T, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+	code = run(args)
+	outW.Close()
+	errW.Close()
+	o, _ := io.ReadAll(outR)
+	e, _ := io.ReadAll(errR)
+	outR.Close()
+	errR.Close()
+	return code, string(o), string(e)
+}
+
+func TestRunOutputOfEachMode(t *testing.T) {
+	dir := newSpec(t)
+	_, root := newTree(t, defaultRows[:1], defaultFiles())
+	const testsOut = "trace: each test ID up to M-1 has a Go test or a marker\n"
+	for _, c := range []struct {
+		name    string
+		args    []string
+		chdir   string
+		wantOut string
+	}{
+		{"matrix", []string{"matrix", dir}, "", "trace: 08-traceability.md agrees with 01-prd.md and 07-test-plan.md (byte-exact)\n"},
+		{"stamp", []string{"stamp", dir}, "", "trace: spec stamp in sync (" + dir + ")\n"},
+		{"all", []string{"all", dir}, "", "trace: matrix and stamp in sync\n"},
+		{"stamp write", []string{"stamp", dir, "--write"}, "", "trace: stamp rotated in " + dir + "\n"},
+		{"tests", []string{"tests", "spec", "--milestone", "M-1"}, root, testsOut},
+		{"tests equals form", []string{"tests", "spec", "--milestone=M-1"}, root, testsOut},
+	} {
+		if c.chdir != "" {
+			t.Chdir(c.chdir)
+		}
+		code, out, errOut := captureRun(t, c.args...)
+		if code != 0 || out != c.wantOut || errOut != "" {
+			t.Errorf("%s: got code %d, stdout %q, stderr %q; want code 0, stdout %q, no stderr",
+				c.name, code, out, errOut, c.wantOut)
+		}
+	}
+}
+
+func TestRunUsageErrorText(t *testing.T) {
+	const usage = "usage: trace [matrix|stamp|all] [spec-dir] [--write]\n" +
+		"       trace tests [spec-dir] --milestone M-n\n"
+	for _, c := range []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{"unknown mode", []string{"bogus", "spec"}, "trace: unknown mode \"bogus\" (want matrix, stamp, all, or tests)\n"},
+		{"write outside stamp", []string{"matrix", "spec", "--write"}, "trace: --write is only valid in stamp mode\n"},
+		{"write in all", []string{"all", "spec", "--write"}, "trace: --write is only valid in stamp mode\n"},
+		{"tests without milestone", []string{"tests", "spec"}, "trace: tests mode needs --milestone M-n\n"},
+		{"milestone outside tests", []string{"stamp", "spec", "--milestone", "M-1"}, "trace: --milestone is only valid in tests mode\n"},
+		{"too many arguments", []string{"matrix", "spec", "extra"}, usage},
+		{"unknown flag", []string{"-x"}, "trace: unknown flag \"-x\"\n"},
+		{"milestone with no value", []string{"tests", "--milestone"}, "trace: --milestone needs a value\n"},
+	} {
+		code, out, errOut := captureRun(t, c.args...)
+		if code != 2 || out != "" || errOut != c.wantStderr {
+			t.Errorf("%s: got code %d, stdout %q, stderr %q; want code 2, no stdout, stderr %q",
+				c.name, code, out, errOut, c.wantStderr)
+		}
+	}
+}
+
+// TestCheckMatrixFindingOrder pins the whole findings list of one input.
+// The input gives findings from the three parsers, the checks of
+// checkMatrix, a mixed table and a prose token in a Tests cell.
+func TestCheckMatrixFindingOrder(t *testing.T) {
+	prd := base01 + "| FR-01 | Again | dup |\n"
+	tp := strings.Replace(base07, "| T-U-05 | C9 | reference bundle |\n",
+		"| T-U-05 | C9 | reference bundle |\n| T-U-01 | FR-01 | again |\n| T-U-06 | | orphan |\n", 1)
+	mat := "| FR-01 | 02 | T-U-01 |\n" + base08
+	mat = strings.Replace(mat, "T-U-01, T-I-01 |", "T-U-01, T-I-01, note |", 1)
+	mat = strings.Replace(mat, "| G1 | 07 harness | T-I-01, T-A-02 |\n", "", 1)
+	mat = strings.Replace(mat, "| C10 | this matrix, tools/trace | — (no T-ID) |\n",
+		"| C10 | this matrix, tools/trace | — (no T-ID) |\n| G1 | 07 harness | T-I-01, T-A-02 |\n", 1)
+	want := []string{
+		"01-prd: duplicate requirement ID FR-01",
+		"07-test-plan: duplicate test ID T-U-01",
+		"08-traceability: row FR-01 lies outside a table (line 1)",
+		"07-test-plan: test T-U-06 covers no requirement (orphan)",
+		"08-traceability: table 1 mixes goal and requirement rows",
+		"08-traceability: FR-01 Tests cell has an item that is not a test reference (item 3)",
+		// The goals table has no rows now: it gets the main rows too.
+		"08-traceability: FR-01 Tests cell has an item that is not a test reference (item 3)",
+		"08-traceability: re-emitted matrix differs from the committed file at 15 line(s):",
+	}
+	for n := 28; n <= 37; n++ {
+		want = append(want, fmt.Sprintf("08-traceability: line %d differs (committed vs canonical)", n))
+	}
+	want = append(want, "… 5 more differing line(s)")
+	got := checkMatrix(prd, tp, mat)
+	if !slices.Equal(got, want) {
+		t.Errorf("findings:\n%q\nwant:\n%q", got, want)
 	}
 }
