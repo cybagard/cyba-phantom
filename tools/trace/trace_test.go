@@ -765,8 +765,8 @@ func TestRunUsageErrorText(t *testing.T) {
 }
 
 // TestCheckMatrixFindingOrder pins the whole findings list of one input.
-// The input gives findings from the three parsers, the checks of
-// checkMatrix, a mixed table and a prose token in a Tests cell.
+// The input gives findings from the three parsers and from the checks of
+// checkMatrix. It also has a mixed table and a prose token in a Tests cell.
 func TestCheckMatrixFindingOrder(t *testing.T) {
 	prd := base01 + "| FR-01 | Again | dup |\n"
 	tp := strings.Replace(base07, "| T-U-05 | C9 | reference bundle |\n",

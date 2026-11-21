@@ -553,9 +553,9 @@ func diffFinding(committed, canonical string) []string {
 	return append([]string{header}, out...)
 }
 
-// canonInput holds what buildCanonical needs besides the text and the
-// tables: the canonical row IDs from 01, the committed rows and the tests
-// of 07.
+// canonInput holds the values that buildCanonical needs besides the text
+// and the tables. They are the canonical row IDs from 01, the committed
+// rows, and the tests of 07.
 type canonInput struct {
 	expMain, expGoals []string
 	rows              []matRow
