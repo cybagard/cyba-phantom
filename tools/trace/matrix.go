@@ -195,9 +195,9 @@ func isSepRow(cells []string) bool {
 	return true
 }
 
-// parsePRD collects requirement and goal IDs in declaration order,
-// tracking the nearest heading for the C10 exemption marker. It also
-// returns the findings.
+// parsePRD collects requirement and goal IDs in declaration order. It keeps
+// the nearest heading for the C10 exemption marker. It also returns the
+// findings.
 func parsePRD(text string) ([]req, []string) {
 	var reqs []req
 	var findings []string
@@ -227,8 +227,8 @@ func parsePRD(text string) ([]req, []string) {
 }
 
 // parseTestPlan collects test IDs in declaration order with their Covers
-// tokens (cell 2). Rows whose first cell is not a T-ID (layer rows,
-// milestone rows) are ignored. It also returns the findings.
+// tokens (cell 2). It ignores rows whose first cell is not a T-ID (layer
+// rows, milestone rows). It also returns the findings.
 func parseTestPlan(text string) ([]test, []string) {
 	var tests []test
 	var findings []string
@@ -562,9 +562,9 @@ type canonInput struct {
 	tests             []test
 }
 
-// buildCanonical re-emits the 08 file: non-row lines pass through, row
-// lines are replaced by the canonical rows in canonical order. It also
-// returns the findings.
+// buildCanonical re-emits the 08 file: non-row lines pass through, and the
+// canonical rows replace the row lines, in canonical order. It also returns
+// the findings.
 func buildCanonical(text string, groups []matGroup, in canonInput) (string, []string) {
 	var findings []string
 	lines := strings.Split(text, "\n")
