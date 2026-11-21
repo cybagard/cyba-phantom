@@ -293,7 +293,7 @@ func TestCaseInsensitiveCompare(t *testing.T) {
 }
 
 // idHint is the fixed text of the identity hint.
-const idHint = "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.\n"
+const idHint = "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header comment of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.\n"
 
 // oldIDHint is the text of the identity hint before it stopped naming the
 // maintainer address. It is a negative fixture: the hint must not return to it.
@@ -363,7 +363,7 @@ func TestFailHintMatchesFailure(t *testing.T) {
 }
 
 // headerHint is the fixed text of the header hint.
-const headerHint = "hint: the header rule fails this commit. A signed commit fails it. See the header of tools/dco/main.go.\n"
+const headerHint = "hint: a commit above breaks the header rule. A commit with a GPG or SSH signature breaks it. See the header comment of tools/dco/main.go.\n"
 
 // A commit that fails only the header rule gets the header hint and not the
 // identity hint. An identity failure gets the identity hint and not the header
@@ -1207,8 +1207,9 @@ func TestHeaderFails(t *testing.T) {
 	}
 }
 
-// These headers pass: an unsigned commit with the GitHub committer. Also
-// these pass: the committer in upper case, a root commit and a merge commit.
+// These headers pass: a commit with the GitHub committer and no signature.
+// Also these pass: the committer in upper case, a root commit and a merge
+// commit.
 func TestHeaderPasses(t *testing.T) {
 	for name, header := range map[string]string{
 		"GitHub committer":               ghHeader,
@@ -1226,8 +1227,8 @@ func TestHeaderPasses(t *testing.T) {
 	}
 }
 
-// The setting log.showSignature in the repository adds gpg text to the output
-// of git log for a signed commit. dco asks for no signature, so the output
+// The setting log.showSignature in the repository adds gpg text to the git log
+// output of a commit with a signature. dco asks for no signature, so the output
 // holds only the expected lines. The test uses an empty GnuPG home.
 func TestShowSignatureSettingChangesNothing(t *testing.T) {
 	t.Setenv("GNUPGHOME", t.TempDir())

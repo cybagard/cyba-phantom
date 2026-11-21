@@ -99,17 +99,10 @@ jobs:
         run: make tidy
 
   dco:
-    # Checker-from-base: every commit in the PR range needs a
-    # Signed-off-by. The author, the committer and every trailer address
-    # must be the maintainer noreply address. The committer can also be
-    # the GitHub committer address. A Co-authored-by trailer for Claude,
-    # with only the Claude co-author address, is the exception. The whole
-    # commit message and the author and committer names pass a character
-    # list. Each "@" in the message is the maintainer address, a Claude
-    # co-author line, a listed mention or a version. The header of each
-    # commit object has only the permitted keys: one tree, any parent
-    # lines, one author and one committer. A signed commit fails.
-    # tools/dco/main.go gives the full rules.
+    # Checker-from-base: every commit in the PR range needs a sign-off
+    # (Signed-off-by) and the maintainer identity. A commit with a GPG or
+    # SSH signature fails. The header comment of tools/dco/main.go is the
+    # only full statement of the rule.
     # PRs only — squash merges drop trailers, so pushed main is never
     # re-checked (the history of main is what was reviewed).
     if: github.event_name == 'pull_request'

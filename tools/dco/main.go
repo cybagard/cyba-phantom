@@ -12,7 +12,8 @@
 // no mailmap applies.
 //   - The author address is the maintainer noreply address.
 //   - The committer address is that address, or the GitHub committer
-//     address. GitHub makes the commit for a web merge.
+//     address. GitHub adds a GPG signature to a commit that it makes, so
+//     the header rule below fails such a commit.
 //   - Every Signed-off-by value has the maintainer address.
 //   - Every address in any other trailer is the maintainer address. dco
 //     also permits the Claude co-author address, in a Co-authored-by
@@ -78,14 +79,13 @@
 // word "dot" passes too. So does a dot at the end of the line. So does a
 // space, a TAB or a line break before a non-ASCII character such as U+00B7.
 //
-// The header rule. dco reads the header of each commit object: the bytes
-// before the first empty line. A header line is "<key> <value>". A line that
-// starts with one space is a continuation line. A commit that breaks one of
-// these rules fails as an identity failure. A signed commit has a signature
-// field, so it fails.
+// The header rule. dco reads the object header of each commit: the bytes
+// before the first empty line of the commit object. A header line is
+// "<key> <value>". A line that starts with one space is a continuation line.
+// A commit that breaks one of these rules fails as an identity failure.
 //   - A key compares exactly, with case. The permitted keys are tree, parent,
 //     author and committer. Any other key fails, also gpgsig and
-//     gpgsig-sha256. So a signed commit fails.
+//     gpgsig-sha256. So a commit with a GPG or SSH signature fails.
 //   - A continuation line fails.
 //   - The order is one tree line, any parent lines, one author line and one
 //     committer line. Any other count or order fails.
@@ -100,9 +100,10 @@
 //     reads both from the raw line.
 //   - An encoding line fails, whatever its value, also an empty one.
 //
-// A commit that fails only the header rule gets its own hint, with its
-// identity line. A commit with an encoding line gets its own hint too. It
-// gets that hint also when the rest of the header does not parse.
+// A commit that breaks the header rule, and no other identity rule, gets the
+// header hint with its identity line. An encoding line alone does not give
+// the header hint. It gives the encoding hint, also when the rest of the
+// object header does not parse.
 //
 // It runs git (the toolchain image ships it). It prints short commit
 // hashes and counts only. It never prints an address, a name, a subject or
@@ -297,13 +298,13 @@ func check(records [][]byte, objs map[string]commitObject, base, head string, st
 		fmt.Fprintf(stdout, "dco FAIL: of %d commits in %s..%s, %d lack a Signed-off-by trailer and %d break the identity rule\n",
 			total, base, head, unsigned, badID)
 		if unsigned > 0 {
-			fmt.Fprintln(stdout, "hint: sign with `git commit -s`")
+			fmt.Fprintln(stdout, "hint: add a sign-off with `git commit -s`")
 		}
 		if badIdentity > 0 {
-			fmt.Fprintln(stdout, "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.")
+			fmt.Fprintln(stdout, "hint: only a commit with the identity of the maintainer passes this check. Maintainer: see the header comment of tools/dco/main.go for the rule. Outside contribution: see CONTRIBUTING.md.")
 		}
 		if badHeader > 0 {
-			fmt.Fprintln(stdout, "hint: the header rule fails this commit. A signed commit fails it. See the header of tools/dco/main.go.")
+			fmt.Fprintln(stdout, "hint: a commit above breaks the header rule. A commit with a GPG or SSH signature breaks it. See the header comment of tools/dco/main.go.")
 		}
 		if badEnc > 0 {
 			fmt.Fprintln(stdout, "hint: commits must not set an encoding line")
