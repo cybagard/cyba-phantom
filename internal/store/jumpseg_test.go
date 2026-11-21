@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,15 +13,24 @@ import (
 
 const hourMs = int64(time.Hour / time.Millisecond)
 
-// testJump is the correction of a clock_jump row of a test. Its event range and
-// its session range are the same.
+// testJump is the rowid range and the j of a clock_jump row of a test.
 type testJump struct{ from, to, j int64 }
 
+// addJumps adds one clock_jump row for each jump. The event range and the
+// session range of a row are the same.
 func addJumps(tb testing.TB, db *sql.DB, jumps []testJump) {
 	tb.Helper()
-	for i, k := range jumps {
+	addRanges(tb, db, jumps, jumps)
+}
+
+// addRanges adds one clock_jump row for each pair of the two lists. The pair
+// gives the event range and the session range. The j of the row is the j of the
+// event jump.
+func addRanges(tb testing.TB, db *sql.DB, event, session []testJump) {
+	tb.Helper()
+	for i, k := range event {
 		mustExec(tb, db, "INSERT INTO clock_jump VALUES (?, ?, ?, ?, ?, ?, ?)",
-			i+1, k.from, k.to, k.from, k.to, k.j, math.MaxInt64)
+			i+1, k.from, k.to, session[i].from, session[i].to, k.j, math.MaxInt64)
 	}
 }
 
@@ -36,15 +46,34 @@ func sumAt(jumps []testJump, id int64) (sum int64) {
 }
 
 // corrCase is one step of the correction tests. seed inserts one row with the
-// rowid id and the row time ts. acted tells if the step changed the row.
+// rowid id and the row time ts. bulk inserts the rows from to last, with the row
+// times ts, ts + 1 and so on. acted tells if the step changed the row.
 type corrCase struct {
 	name      string
 	days      int
-	corrected bool // false: the rows of the step have no rowid range
+	corrected bool // false: the step makes no clock_jump correction
+	session   bool // true: the rows are session rows, with the session range
 	mk        func() retentionStep
 	setup     func(tb testing.TB, db *sql.DB)
 	seed      func(tb testing.TB, db *sql.DB, id, ts int64)
+	bulk      func(tb testing.TB, db *sql.DB, from, last, ts int64)
 	acted     func(tb testing.TB, db *sql.DB, id int64) bool
+}
+
+// rowsFrom is a recursive query that gives the integers from `from` to `last`.
+const rowsFrom = "WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i + 1 FROM c WHERE i < ?) "
+
+func bulkEvent(kind string) func(testing.TB, *sql.DB, int64, int64, int64) {
+	return func(tb testing.TB, db *sql.DB, from, last, ts int64) {
+		mustExec(tb, db, rowsFrom+"INSERT INTO event (id, ts, kind, body_prefix, detail) SELECT i, ? + i - ?, ?, x'62', '{}' FROM c",
+			from, last, ts, from, kind)
+	}
+}
+
+func bulkSession(tb testing.TB, db *sql.DB, from, last, ts int64) {
+	mustExec(tb, db, rowsFrom+"INSERT INTO session (rowid, id, first_seen, last_seen, ip, ip_hmac, band) "+
+		"SELECT i, 's' || i, ? + i - ?, ? + i - ?, '192.0.2.1', 'h', 'human' FROM c",
+		from, last, ts, from, ts, from)
 }
 
 func rowGone(table, key string) func(testing.TB, *sql.DB, int64) bool {
@@ -65,22 +94,22 @@ func seedSession(tb testing.TB, db *sql.DB, id, ts int64) {
 }
 
 var corrCases = []corrCase{
-	{name: "field clear", days: 30, corrected: true, seed: seedEvent("request"),
+	{name: "field clear", days: 30, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
 		mk: func() retentionStep { return newFieldClearStep(rollTDel, rollWall, 30) },
 		acted: func(tb testing.TB, db *sql.DB, id int64) bool {
 			return count(tb, db, fmt.Sprint("SELECT count(*) FROM event WHERE id = ", id, " AND body_prefix IS NULL")) == 1
 		}},
-	{name: "7-day step", days: 7, corrected: true, seed: seedSession,
+	{name: "7-day step", days: 7, corrected: true, session: true, seed: seedSession, bulk: bulkSession,
 		mk: func() retentionStep { return newIPStep(rollTDel, 7) },
 		acted: func(tb testing.TB, db *sql.DB, id int64) bool {
 			return count(tb, db, fmt.Sprint("SELECT count(*) FROM session WHERE rowid = ", id, " AND ip IS NULL")) == 1
 		}},
-	{name: "raw delete", days: 30, corrected: true, seed: seedEvent("refused"), acted: rowGone("event", "id"),
-		mk: func() retentionStep { return newRawDeleteStep(rollTDel, 30) }},
-	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), acted: rowGone("event", "id"),
-		mk:    func() retentionStep { return newEventExpireStep(rollTDel, 90) },
+	{name: "raw delete", days: 30, corrected: true, seed: seedEvent("refused"), bulk: bulkEvent("refused"),
+		acted: rowGone("event", "id"), mk: func() retentionStep { return newRawDeleteStep(rollTDel, 30) }},
+	{name: "event delete", days: 90, corrected: true, seed: seedEvent("request"), bulk: bulkEvent("request"),
+		acted: rowGone("event", "id"), mk: func() retentionStep { return newEventExpireStep(rollTDel, 90) },
 		setup: func(tb testing.TB, db *sql.DB) { mustExec(tb, db, metaSetSQL, rollupDoneKey, "9999-12-31") }},
-	{name: "session delete", days: 90, corrected: true, seed: seedSession, acted: rowGone("session", "rowid"),
+	{name: "session delete", days: 90, session: true, seed: seedSession, acted: rowGone("session", "rowid"),
 		mk: func() retentionStep { return newSessionExpireStep(rollTDel, 90) }},
 	{name: "token delete", days: 90, acted: rowGone("token", "session_id"),
 		mk: func() retentionStep { return newTokenExpireStep(rollTDel, 90) },
@@ -89,18 +118,24 @@ var corrCases = []corrCase{
 		}},
 }
 
-// checkCorrections runs each step over the rowids 1 to last. The clock_jump
-// rows are the jumps. The rowids go in pairs. The odd row of a pair has its
-// time 1 ms before the corrected cutoff. The even row has its time at it. A row
-// acts when its time plus its sum is before the cutoff.
-func checkCorrections(t *testing.T, jumps []testJump, last int64) {
+// checkCorrections runs each step over the rowids 1 to last. Each clock_jump
+// row has the event range and the session range of the same place in the two
+// lists. The rowids go in pairs. The odd row of a pair has its time 1 ms before
+// the corrected cutoff. The even row has its time at it. A row acts when its
+// time plus its sum is before the cutoff. A step of event rows takes its sums
+// from the event ranges, and a step of session rows from the session ranges.
+func checkCorrections(t *testing.T, event, session []testJump, last int64) {
 	for _, c := range corrCases {
 		t.Run(c.name, func(t *testing.T) {
+			jumps := event
+			if c.session {
+				jumps = session
+			}
 			r, _ := rollRig(t, c.mk())
 			if c.setup != nil {
 				c.setup(t, r.db)
 			}
-			addJumps(t, r.db, jumps)
+			addRanges(t, r.db, event, session)
 			ts := func(id int64) int64 { return rollCutoff(c.days) - sumAt(jumps, id) - (id & 1) }
 			for id := int64(1); id <= last; id++ {
 				c.seed(t, r.db, id, ts(id))
@@ -122,10 +157,11 @@ func checkCorrections(t *testing.T, jumps []testJump, last int64) {
 
 // T-U-27: rows with a correction of +J act J later. Rows with -J act J earlier.
 // Rows outside each range act at S - days. Each step is tested 1 ms before its
-// cutoff and at it. The token delete has no correction.
+// cutoff and at it. The token delete and the session delete have no correction.
 func TestTU27ClockJumpCorrectionMovesTheCutoffOfEachStep(t *testing.T) {
 	const j = 72 * 3600_000
-	checkCorrections(t, []testJump{{3, 4, j}, {5, 6, -j}}, 8)
+	jumps := []testJump{{3, 4, j}, {5, 6, -j}}
+	checkCorrections(t, jumps, jumps, 8)
 }
 
 // T-U-27: three nested grace ranges of one host boot and one reset row. Each
@@ -133,7 +169,26 @@ func TestTU27ClockJumpCorrectionMovesTheCutoffOfEachStep(t *testing.T) {
 // hold the j of up to four rows.
 func TestTU27NestedGraceRangesAndAResetRowSumTheirJ(t *testing.T) {
 	h := hourMs
-	checkCorrections(t, []testJump{{1, 14, 10 * h}, {1, 8, 20 * h}, {1, 4, 40 * h}, {3, 12, -5 * h}}, 16)
+	jumps := []testJump{{1, 14, 10 * h}, {1, 8, 20 * h}, {1, 4, 40 * h}, {3, 12, -5 * h}}
+	checkCorrections(t, jumps, jumps, 16)
+}
+
+// T-U-27: the event range and the session range of a clock_jump row differ. A
+// step of event rows reads the event range, and a step of session rows reads the
+// session range. A step that reads the other range acts on the wrong rows.
+func TestTU27EachStepReadsTheRangeOfItsOwnTable(t *testing.T) {
+	const j = 72 * 3600_000
+	event := []testJump{{1, 4, j}, {5, 6, -j}}
+	session := []testJump{{5, 8, j}, {1, 2, -j}}
+	checkCorrections(t, event, session, 8)
+}
+
+// T-U-27: a range that starts at the smallest rowid. The rows after it have no
+// correction. The cut of the ranges must not wrap at the start of the range.
+func TestTU27RangeFromTheSmallestRowidCorrectsItsRows(t *testing.T) {
+	const j = 72 * 3600_000
+	jumps := []testJump{{math.MinInt64, 4, j}}
+	checkCorrections(t, jumps, jumps, 8)
 }
 
 // T-U-27: the ranges of the nested rows give these segments. A range with its
@@ -146,12 +201,12 @@ func TestTU27SegmentsCutTheRangesWithoutOverlap(t *testing.T) {
 		tx, err := db.Begin()
 		check(t, err)
 		defer tx.Rollback()
-		segs, err := k.segments(context.Background(), tx)
+		js, err := k.sums(context.Background(), tx)
 		check(t, err)
-		if segs == nil {
+		if js == nil {
 			return "none"
 		}
-		return fmt.Sprint(segs)
+		return fmt.Sprint(js.segs)
 	}
 	if got := text(eventRows); got != "none" {
 		t.Fatalf("segments %s with no clock_jump row", got)
@@ -172,8 +227,8 @@ func TestTU27SegmentsCutTheRangesWithoutOverlap(t *testing.T) {
 	}
 }
 
-// T-U-27: the cutoff of a segment is the cutoff minus the sum. It does not pass
-// the range of int64.
+// T-U-27: the time before which a row acts is the cutoff minus the sum. It does
+// not pass the range of int64.
 func TestTU27ShiftStaysInTheRangeOfInt64(t *testing.T) {
 	for _, c := range []struct{ cutoff, sum, want int64 }{
 		{10, 3, 7}, {10, -3, 13}, {math.MinInt64 + 1, 5, math.MinInt64}, {math.MaxInt64 - 1, -5, math.MaxInt64},
@@ -181,6 +236,47 @@ func TestTU27ShiftStaysInTheRangeOfInt64(t *testing.T) {
 		if got := shift(c.cutoff, c.sum); got != c.want {
 			t.Errorf("shift(%d, %d) = %d, want %d", c.cutoff, c.sum, got, c.want)
 		}
+	}
+}
+
+// T-U-27: a sum stays in the range of int64. Two j of the largest value give the
+// largest value. The j of the smallest value plus 1 and -2 give the smallest
+// value. A sum that wrapped would delete a fresh row at once.
+func TestTU27SumOfJStaysInTheRangeOfInt64(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		jumps []testJump
+		want  int64
+	}{
+		{"largest twice", []testJump{{1, 1, math.MaxInt64}, {1, 1, math.MaxInt64}}, math.MaxInt64},
+		{"largest and 2", []testJump{{1, 1, math.MaxInt64}, {1, 1, 2}}, math.MaxInt64},
+		{"smallest", []testJump{{1, 1, math.MinInt64 + 1}, {1, 1, -2}}, math.MinInt64},
+		{"overlap of the largest", []testJump{{1, 10, math.MaxInt64}, {1, 5, math.MaxInt64}}, math.MaxInt64},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			addJumps(t, db, c.jumps)
+			tx, err := db.Begin()
+			check(t, err)
+			defer tx.Rollback()
+			js, err := eventRows.sums(context.Background(), tx)
+			check(t, err)
+			if got := js.at(1); got != c.want || js.low > 0 {
+				t.Errorf("sum %d, smallest %d; want %d", got, js.low, c.want)
+			}
+		})
+	}
+}
+
+// T-U-27: a fresh row in a range with two j that would wrap stays. The event
+// delete reads the clamped sum.
+func TestTU27EventDeleteKeepsAFreshRowWhenTheSumWouldWrap(t *testing.T) {
+	db := migrated(t)
+	mustExec(t, db, metaSetSQL, rollupDoneKey, "9999-12-31")
+	addJumps(t, db, []testJump{{1, 1, math.MaxInt64}, {1, 1, 2}})
+	seedEvent("request")(t, db, 1, rollTDel.UnixMilli())
+	if n := call(t, db, newEventExpireStep(rollTDel, 90), 1000); n != 0 || count(t, db, "SELECT count(*) FROM event") != 1 {
+		t.Fatalf("the call read %d entries; want 0 and the row kept", n)
 	}
 }
 
@@ -256,23 +352,119 @@ func TestTU11JumpExpireDeletesRowsWithNoRowInTheirRanges(t *testing.T) {
 	}
 }
 
-// T-U-27: a segmented step changes at most limit rows in all segments. It
-// returns fewer only when no row is left. 30 old rows are in three segments.
-func TestTU27SegmentedStepKeepsTheLimit(t *testing.T) {
+// T-U-27: a corrected step returns the count of the entries that it read, at
+// most the limit. A count below the limit means that no entry before the end is
+// left. The rows 1 to 30 act, in four ranges of sums. The rows 31 to 35 are in
+// a +1 d range and stay, but the step reads their entries. Thus 35 entries are
+// read, and 30 rows are deleted.
+func TestTU27CorrectedStepReturnsTheEntriesThatItRead(t *testing.T) {
 	db := migrated(t)
 	mustExec(t, db, metaSetSQL, rollupDoneKey, "9999-12-31")
-	jumps := []testJump{{1, 10, rawDay}, {5, 20, -rawDay}}
+	jumps := []testJump{{1, 10, rawDay}, {5, 20, -rawDay}, {31, 35, rawDay}}
 	addJumps(t, db, jumps)
-	for id := int64(1); id <= 30; id++ {
-		seedEvent("request")(t, db, id, rollCutoff(90)-sumAt(jumps, id)-1)
+	for id := int64(1); id <= 35; id++ {
+		ts := rollCutoff(90) - sumAt(jumps, id)
+		if id <= 30 {
+			ts-- // 1 ms before the corrected cutoff: the row acts
+		}
+		seedEvent("request")(t, db, id, ts)
 	}
 	step := newEventExpireStep(rollTDel, 90)
 	var got []int
 	for range 6 {
 		got = append(got, call(t, db, step, 7))
 	}
-	if fmt.Sprint(got) != "[7 7 7 7 2 0]" || count(t, db, "SELECT count(*) FROM event") != 0 {
-		t.Fatalf("calls returned %v; want [7 7 7 7 2 0] and no row left", got)
+	if left := eventIDs(t, db); fmt.Sprint(got) != "[7 7 7 7 7 0]" || left != "31 32 33 34 35" {
+		t.Fatalf("calls returned %v, rows left %q; want [7 7 7 7 7 0] and 31 32 33 34 35", got, left)
+	}
+}
+
+// eventIDs returns the rowids of the event rows, in order, as text.
+func eventIDs(tb testing.TB, db *sql.DB) string {
+	tb.Helper()
+	return rawText(tb, db, "SELECT coalesce(group_concat(id, ' '), '') FROM (SELECT id FROM event ORDER BY id)")
+}
+
+// bound is the number of rows that a +J range keeps in the read bound tests.
+const bound = 5000
+
+// T-U-27: each call of a corrected step reads at most the limit, also when a
+// range keeps many rows. 5 000 rows are before the cutoff and in a +J range.
+// Their entries come first in the index. 10 rows after them act. The calls read
+// 1 000 entries each and reach the rows that act. No call reads an entry again.
+func TestTU27CorrectedStepReadIsBoundedByTheLimit(t *testing.T) {
+	for _, c := range corrCases {
+		if c.bulk == nil {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			if c.setup != nil {
+				c.setup(t, db)
+			}
+			addJumps(t, db, []testJump{{1, bound, 100 * rawDay}})
+			cutoff := rollCutoff(c.days)
+			c.bulk(t, db, 1, bound, cutoff-20_000)
+			c.bulk(t, db, bound+1, bound+10, cutoff-100)
+			step := c.mk()
+			var got []int
+			for range 8 {
+				got = append(got, call(t, db, step, 1000))
+			}
+			if fmt.Sprint(got) != "[1000 1000 1000 1000 1000 10 0 0]" {
+				t.Errorf("calls returned %v; want 5 calls of 1 000, then 10, then 0", got)
+			}
+			for _, id := range []int64{1, 2500, bound} {
+				if c.acted(t, db, id) {
+					t.Errorf("row %d acted; its +J range keeps it", id)
+				}
+			}
+			for id := int64(bound + 1); id <= bound+10; id++ {
+				if !c.acted(t, db, id) {
+					t.Errorf("row %d did not act", id)
+				}
+			}
+		})
+	}
+}
+
+// T-U-27: 2 500 entries have one time. The cursor falls inside them. The rows 1
+// to 1 250 are in a +J range and stay. The rows 1 251 to 2 500 act. With a limit
+// of 1 000, the calls read 1 000, 1 000 and 500 entries. No row is missed, and
+// no entry is read twice.
+func TestTU27CorrectedStepReadsEntriesOfOneTimeAcrossTheCursor(t *testing.T) {
+	for _, c := range corrCases {
+		if c.bulk == nil {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			db := migrated(t)
+			if c.setup != nil {
+				c.setup(t, db)
+			}
+			addJumps(t, db, []testJump{{1, 1250, 100 * rawDay}})
+			for id := int64(1); id <= 2500; id++ {
+				c.seed(t, db, id, rollCutoff(c.days)-10)
+			}
+			step := c.mk()
+			var got []int
+			for range 4 {
+				got = append(got, call(t, db, step, 1000))
+			}
+			if fmt.Sprint(got) != "[1000 1000 500 0]" {
+				t.Errorf("calls returned %v; want [1000 1000 500 0]", got)
+			}
+			for _, id := range []int64{1, 1000, 1250} {
+				if c.acted(t, db, id) {
+					t.Errorf("row %d acted; its +J range keeps it", id)
+				}
+			}
+			for _, id := range []int64{1251, 1500, 2000, 2001, 2500} {
+				if !c.acted(t, db, id) {
+					t.Errorf("row %d did not act", id)
+				}
+			}
+		})
 	}
 }
 
@@ -317,25 +509,118 @@ func TestTU27EachStepRunsBeforeTheTokenEpoch(t *testing.T) {
 	}
 }
 
-// T-U-11: each statement of a segment uses an index, and none scans event or
-// session. The clock_jump delete searches the rowids of event and session.
-func TestTU11SegmentStatementsUseTheirIndexes(t *testing.T) {
+// T-U-27: the field clear keeps its bound `top` with a clock_jump row in place.
+// The first call takes the largest rowid, 3. It reads 3 entries, which is its
+// limit, so part 1 is not at its end. A row 4 that the writer stores after it
+// keeps its fields, also when its rowid is in the range.
+func TestTU27FieldClearKeepsItsTopWithAJumpRow(t *testing.T) {
 	db := migrated(t)
-	for _, c := range []struct {
+	addJumps(t, db, []testJump{{1, math.MaxInt64, 10}})
+	cutoff := rollCutoff(30)
+	bulkEvent("request")(t, db, 1, 3, cutoff-100)
+	step := newFieldClearStep(rollTDel, rollWall, 30)
+	if n := call(t, db, step, 3); n != 3 {
+		t.Fatalf("the first call read %d entries; want 3", n)
+	}
+	bulkEvent("request")(t, db, 4, 4, cutoff-50) // after the cursor
+	call(t, db, step, 1000)
+	if left := count(t, db, "SELECT count(*) FROM event WHERE body_prefix IS NOT NULL"); left != 1 ||
+		count(t, db, "SELECT count(*) FROM event WHERE id = 4 AND body_prefix IS NOT NULL") != 1 {
+		t.Fatalf("%d rows keep their fields; want only the row 4", left)
+	}
+}
+
+// T-U-27: the raw delete takes the beacon rows and the refused rows of a range.
+// The rows 3 and 4 are in a +3 d range, and the rows 5 and 6 in a -3 d range.
+// The beacon rows 2, 3 and 5 follow the same rule as the refused rows. The
+// request row 7 and the row 8, which has no range, stay.
+func TestTU27RawDeleteTakesBeaconAndRefusedRowsOfARange(t *testing.T) {
+	db := migrated(t)
+	const j = 72 * 3600_000
+	addJumps(t, db, []testJump{{3, 4, j}, {5, 6, -j}})
+	cutoff := rollCutoff(30)
+	for _, r := range []struct {
+		id   int64
+		kind string
+		ts   int64
+	}{
+		{1, "refused", cutoff - 1}, {2, "beacon", cutoff - 1}, {3, "beacon", cutoff - 1}, {4, "refused", cutoff - 1},
+		{5, "beacon", cutoff + j - 1}, {6, "refused", cutoff + j - 1}, {7, "request", cutoff - 1}, {8, "beacon", cutoff + j - 1},
+	} {
+		seedEvent(r.kind)(t, db, r.id, r.ts)
+	}
+	call(t, db, newRawDeleteStep(rollTDel, 30), 1000)
+	if left := eventIDs(t, db); left != "3 4 7 8" {
+		t.Fatalf("rows left %q; want 3 4 7 8", left)
+	}
+}
+
+// T-U-27: the event delete with a negative sum keeps each row with a stored ts
+// at or after the gate. The day step has not counted that day. The range has the
+// sum -2 d, so the rows 10 to 12 reach the cutoff. The row 12 is before the
+// day of the gate and goes. The rows 10 and 11 stay. The row 11 has the ts of
+// the start of the day. The call reads only the entry of the row 12.
+func TestTU27EventDeleteWithANegativeSumKeepsRowsAtTheGate(t *testing.T) {
+	db := migrated(t)
+	day := rollupDayStart(rollCutoff(90))
+	mustExec(t, db, metaSetSQL, rollupDoneKey, rollupDay(day-1))
+	for id, ts := range map[int64]int64{10: day + hourMs, 11: day, 12: day - 1} {
+		mustExec(t, db, "INSERT INTO event (id, ts, kind, hash, leaf_index) VALUES (?, ?, 'callback', zeroblob(32), ?)", id, ts, id)
+	}
+	addJumps(t, db, []testJump{{10, 12, -48 * hourMs}})
+	n := call(t, db, newEventExpireStep(rollTDel, 90), 1000)
+	if left := eventIDs(t, db); n != 1 || left != "10 11" {
+		t.Fatalf("the call read %d entries and left the rows %q; want 1 and 10 11", n, left)
+	}
+}
+
+// T-U-11: the clock_jump delete runs after the event delete. One run deletes the
+// last event row of a range and the clock_jump row of that range.
+func TestTU11JumpExpireRunsAfterTheEventDeleteInOneRun(t *testing.T) {
+	r, _ := rollRig(t, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 90)...)
+	addEvents(t, r.db, "callback", 1, rollCutoff(90)-rawDay, 0, nil, nil)
+	mustExec(t, r.db, "INSERT INTO clock_jump VALUES (1, 1, 1, 50, 49, 5, 5)")
+	runOK(t, r)
+	if e, c := count(t, r.db, "SELECT count(*) FROM event"), count(t, r.db, "SELECT count(*) FROM clock_jump"); e != 0 || c != 0 {
+		t.Fatalf("%d event rows and %d clock_jump rows left; want none", e, c)
+	}
+}
+
+// T-U-27: each read statement searches the index of its step. It has no SCAN
+// and no temporary B-tree. Each statement that acts on a JSON array of rowids
+// searches the table by rowid. The clock_jump delete searches the rowids of
+// event and session.
+func TestTU27ReadStatementsSearchTheirIndexes(t *testing.T) {
+	db := migrated(t)
+	type stmt struct {
 		q, use string
 		args   []any
+	}
+	var all []stmt
+	for _, c := range []struct {
+		use        string
+		q          readSQL
+		lead, tail []any
 	}{
-		{clearIPSegSQL, "session_ip_first", []any{1, 1, 2, 1000}},
-		{deleteRawSegSQL, "event_kind_ts", []any{1, 1, 2, 1000}},
-		{deleteEventSegSQL, "event_ts", []any{1, 1, 2, 1000}},
-		{deleteSessionSegSQL, "session_band_last", []any{1, 1, 2, 1000}},
-		{clearPastSegSQL, "event_raw_ts", []any{1, 1, 2, 1000}},
-		{clearFutureSegSQL, "event_raw_ts", []any{1, 1, 2, 1000}},
-		{deleteJumpSQL, "INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{1000}},
+		{"event_ts", eventRead, nil, nil},
+		{"event_kind_ts", rawRead, []any{"refused"}, nil},
+		{"event_raw_ts", clearRead, nil, []any{1}},
+		{"session_ip_first", ipRead, nil, nil},
 	} {
+		eq := slices.Concat(c.lead, []any{1, 1}, c.tail, []any{1000})
+		gt := slices.Concat(c.lead, []any{1, 2}, c.tail, []any{1000})
+		all = append(all, stmt{c.q.eq, c.use, eq}, stmt{c.q.gt, c.use, gt})
+	}
+	for _, q := range []string{deleteEventIDsSQL, clearIDsSQL} {
+		all = append(all, stmt{q, "SEARCH event USING INTEGER PRIMARY KEY", []any{"[1]"}})
+	}
+	all = append(all, stmt{clearIPIDsSQL, "SEARCH session USING INTEGER PRIMARY KEY", []any{"[1]"}},
+		stmt{deleteJumpSQL, "INTEGER PRIMARY KEY (rowid>? AND rowid<?)", []any{1000}})
+	for _, c := range all {
 		plan := strings.Join(queryPlan(t, db, c.q, c.args...), "\n")
-		if !strings.Contains(plan, c.use) || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "SCAN session") {
-			t.Errorf("plan of %q:\n%s\nwant %q and no SCAN of event or session", c.q, plan, c.use)
+		if !strings.Contains(plan, c.use) || strings.Contains(plan, "SCAN event") || strings.Contains(plan, "SCAN session") ||
+			strings.Contains(plan, "TEMP B-TREE") {
+			t.Errorf("plan of %q:\n%s\nwant %q, no SCAN of event or session, and no temporary B-tree", c.q, plan, c.use)
 		}
 	}
 }

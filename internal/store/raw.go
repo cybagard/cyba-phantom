@@ -32,24 +32,17 @@ const (
 		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id <= ? AND (" + rawIndexWhere + ") " +
 		"ORDER BY ts LIMIT ?)"
 
-	// The segment forms of the two clear statements have the ends of a rowid
-	// segment. They do not have the bound `id <= ?`. Their values are the
-	// cutoff, the first id, the last id and the limit.
-	clearPastSegSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
-		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts < ? AND id BETWEEN ? AND ? AND (" + rawIndexWhere + ") " +
-		"ORDER BY ts LIMIT ?)"
-	clearFutureSegSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
-		"(SELECT id FROM event INDEXED BY event_raw_ts WHERE ts > ? AND id BETWEEN ? AND ? AND (" + rawIndexWhere + ") " +
-		"ORDER BY ts LIMIT ?)"
+	// clearIDsSQL clears the three fields of the rows of a JSON array of
+	// rowids. The cursor read of the past part gives the rowids.
+	clearIDsSQL = "UPDATE event SET body_prefix = NULL, detail = NULL, record = NULL WHERE id IN " +
+		"(SELECT value FROM json_each(?))"
 
 	// clearTopSQL reads the largest event id.
 	clearTopSQL = "SELECT coalesce(max(id), 0) FROM event"
 
 	// deleteRawSQL deletes old rows of the kinds that have no roll-up. It uses
-	// event_kind_ts. deleteRawSegSQL is the form for one rowid segment.
-	deleteRawSQL    = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind IN ('refused', 'beacon') AND ts < ? LIMIT ?)"
-	deleteRawSegSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event INDEXED BY event_kind_ts " +
-		"WHERE kind IN ('refused', 'beacon') AND ts < ? AND id BETWEEN ? AND ? LIMIT ?)"
+	// event_kind_ts.
+	deleteRawSQL = "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE kind IN ('refused', 'beacon') AND ts < ? LIMIT ?)"
 
 	// The mint statements use the primary key. mintNextSQL finds the next
 	// set_id after a position. mintUnitSQL finds the oldest unit of a set_id
@@ -62,6 +55,16 @@ const (
 	mintDropSQL   = "DELETE FROM mint WHERE set_id = ? AND unit = ?"
 	mintDeleteSQL = "DELETE FROM mint WHERE (set_id, unit, first) IN " +
 		"(SELECT set_id, unit, first FROM mint WHERE set_id = ? AND unit = ? ORDER BY first LIMIT ?)"
+)
+
+// The cursor reads of the field clear and of the raw delete. The clear read
+// has the terms of event_raw_ts after the time terms: the bound `top` and the
+// WHERE text of the index. The raw read has the kind as its lead term. A
+// kind is one of rawKinds, which are the kinds of deleteRawSQL.
+var (
+	clearRead = cursorRead("event", "id", "ts", "event_raw_ts", "", " AND id <= ? AND ("+rawIndexWhere+")")
+	rawRead   = cursorRead("event", "id", "ts", "event_kind_ts", "kind = ? AND ", "")
+	rawKinds  = []string{"refused", "beacon"}
 )
 
 // futureLine returns the future line in unix ms. It is the later of the wall
@@ -90,7 +93,8 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // Part 1 clears the rows with ts before the cutoff, in ts order. The cutoff
 // is tPriv minus `days` x 24 h, in unix ms. When part 1 has no row left, part 2
 // clears the rows with ts after the future line. A ts after the line shows a
-// wall clock that was ahead when the row was written.
+// wall clock that was ahead when the row was written. Part 2 has no
+// clock_jump correction, until a later change removes the future line.
 //
 // The future line is the later of two values, plus 1 h. One value is the wall
 // time at the first call of the step, from the function `wall`. The other is
@@ -114,11 +118,11 @@ func futureLine(ctx context.Context, tx *sql.Tx, wall time.Time) int64 {
 // rows younger than the step minus 1 h. With a stored value, the rows up to
 // that value plus 1 h keep their fields.
 //
-// A row in an event range of a clock_jump row has its ts with the correction
-// of that row (ADR-043). The step reads each rowid segment with its own cutoff
-// and its own line. Each is the value minus the sum of j of the segment. Both
-// parts keep the bound `top`. In a segment, the last id is the lesser of `top`
-// and the end of the segment.
+// With no clock_jump range, part 1 runs the plain statement. With a range, it
+// reads event_raw_ts after a cursor (see corrected). A row in an event range of
+// a clock_jump row has its ts with the correction of that row (ADR-043). Each
+// read keeps the bound `top`. In that case a call returns the entries that part
+// 1 read, and part 2 gets the rest of `limit`.
 //
 // With days outside 1 to 30, a zero tPriv, or no `wall`, the step runs no
 // statement. It returns an error.
@@ -129,55 +133,60 @@ func newFieldClearStep(tPriv time.Time, wall func() time.Time, days int) retenti
 	}
 	var begun, future bool
 	var line, top int64
+	read := newIndexRead(clearRead)
+	past := (&corrected{
+		kind: eventRows, cutoff: cutoff, act: clearIDsSQL, mem: memFields, reads: []*indexRead{read},
+		plain: func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			return execCount(ctx, tx, memFields, clearPastSQL, cutoff, top, limit)
+		},
+	}).step()
 	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
 		if !begun {
 			if err := tx.QueryRowContext(ctx, clearTopSQL).Scan(&top); err != nil {
 				return 0, err
 			}
 			line, begun = futureLine(ctx, tx, wall()), true
+			read.tail = []any{top}
 		}
 		n := 0
 		if !future {
 			var err error
-			if n, err = clearPart(ctx, tx, clearPastSQL, clearPastSegSQL, cutoff, top, limit); err != nil || n == limit {
+			if n, err = past(ctx, tx, limit); err != nil || n == limit {
 				return n, err
 			}
 			future = true
 		}
-		m, err := clearPart(ctx, tx, clearFutureSQL, clearFutureSegSQL, line, top, limit-n)
+		m, err := execCount(ctx, tx, memFields, clearFutureSQL, line, top, limit-n)
 		return n + m, err
 	}
 }
 
-// clearPart runs one part of the field clear, with the plain statement or with
-// the statement of one segment. at is the cutoff or the future line.
-func clearPart(ctx context.Context, tx *sql.Tx, plain, seg string, at, top int64, limit int) (int, error) {
-	return eventRows.each(ctx, tx, at, limit, func(cut int64, s *segment, lim int) (int, error) {
-		if s == nil {
-			return execCount(ctx, tx, memFields, plain, cut, top, lim)
-		}
-		return execCount(ctx, tx, memFields, seg, cut, s.lo, min(s.hi, top), lim)
-	})
-}
-
 // newRawDeleteStep returns the step that deletes the refused and beacon rows
 // with ts before the cutoff (SEC-39). The cutoff is S minus `days` x 24 h. The
-// caller gives S as tDel. A row in an event range of a clock_jump row has its
-// ts with the correction of that row (ADR-043). It rolls up no row. It reads no
-// clock. Each call deletes at most `limit` rows and returns their count. With
-// days outside 1 to 30, or a zero tDel, the step runs no statement and returns
-// an error.
+// caller gives S as tDel. It rolls up no row. It reads no clock. Each call
+// deletes at most `limit` rows and returns their count. With days outside 1 to
+// 30, or a zero tDel, the step runs no statement and returns an error.
+//
+// With no clock_jump range, the step runs the plain statement. With a range, it
+// reads event_kind_ts after a cursor for each kind (see corrected). A row in an
+// event range of a clock_jump row has its ts with the correction of that row
+// (ADR-043). Then a call returns the entries that it read.
 func newRawDeleteStep(tDel time.Time, days int) retentionStep {
 	cutoff, ok := rollupCutoff(tDel, days)
 	if !ok {
 		return rollupRefused
 	}
-	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
-		return rawCorrection.exec(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
+	c := &corrected{
+		kind: eventRows, cutoff: cutoff, act: deleteEventIDsSQL, mem: memDeleted,
+		plain: func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+			return execCount(ctx, tx, memDeleted, deleteRawSQL, cutoff, limit)
+		},
 	}
+	for _, kind := range rawKinds {
+		c.reads = append(c.reads, newIndexRead(rawRead, kind))
+	}
+	return c.step()
 }
-
-var rawCorrection = &correction{eventRows, deleteRawSegSQL}
 
 // mintRanges returns the unit ranges, both ends included, of the units before
 // the unit cu. A unit is before cu when cu minus the unit is above 0. The

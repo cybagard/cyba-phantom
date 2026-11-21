@@ -1,10 +1,13 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"math"
+	"math/big"
 	"slices"
+	"strconv"
 )
 
 // A rowKind names the two clock_jump columns that hold the rowid range of the
@@ -16,64 +19,107 @@ var (
 	sessionRows = rowKind{"session_from", "session_to"}
 )
 
-// A segment is a range of rowids, both ends included. Each row in it takes the
-// same correction. The field sum is the sum of j of each clock_jump row that
-// holds the segment. The segments of a table do not overlap. They cover all
-// rowids.
+// A segment is a range of rowids, both ends included. Each row in it has the
+// same sum of j.
 type segment struct{ lo, hi, sum int64 }
 
-// segments cuts the ranges of the clock_jump rows into segments, in rowid
-// order. A range with no row (from after to) is not used. It returns nil when
-// no range is used. The ranges of one host boot overlap. Thus each rowid takes
-// the sum of j of the ranges that hold it. A rowid in no range takes 0. Two
-// segments next to each other with the same sum are one segment.
-func (k rowKind) segments(ctx context.Context, tx *sql.Tx) ([]segment, error) {
+// jumpSums gives the sum of j of the clock_jump rows for each rowid of one
+// table.
+type jumpSums struct {
+	segs []segment // in rowid order, with no overlap; they cover all rowids
+	low  int64     // the smallest sum of any rowid, at most 0
+}
+
+// sums reads the ranges of the clock_jump rows of kind k. It returns nil when
+// no range is used. A range with its start after its end is not used. The
+// ranges of one host boot overlap. Thus a rowid has the sum of j of each range
+// that holds it. A rowid in no range has the sum 0. Two segments next to each
+// other with the same sum are one segment. A sum stays in the range of int64:
+// it is the true sum, or the nearest end of that range.
+//
+// A step calls sums one time for each step call, not one time for each run.
+// The writer can move the end of a range between two chunks. A call then sees
+// the ranges that its own transaction sees.
+func (k rowKind) sums(ctx context.Context, tx *sql.Tx) (*jumpSums, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT "+k.from+", "+k.to+", j FROM clock_jump WHERE "+k.from+" <= "+k.to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	step := map[int64]int64{} // the change of the sum at a rowid
+	// A change of the sum at a rowid. A big number holds the sum of any count
+	// of changes. The result is clamped when a segment is made.
+	type change struct {
+		at int64
+		d  *big.Int
+	}
+	var changes []change
 	for rows.Next() {
 		var from, to, j int64
 		if err := rows.Scan(&from, &to, &j); err != nil {
 			return nil, err
 		}
-		step[from] += j
+		changes = append(changes, change{from, big.NewInt(j)})
 		if to < math.MaxInt64 {
-			step[to+1] -= j
+			changes = append(changes, change{to + 1, new(big.Int).Neg(big.NewInt(j))})
 		}
 	}
-	if err := rows.Err(); err != nil || len(step) == 0 {
+	if err := rows.Err(); err != nil || len(changes) == 0 {
 		return nil, err
 	}
-	edges := make([]int64, 0, len(step))
-	for e := range step {
-		edges = append(edges, e)
-	}
-	slices.Sort(edges)
-	var segs []segment
-	lo, sum := int64(math.MinInt64), int64(0)
+	slices.SortFunc(changes, func(a, b change) int { return cmp.Compare(a.at, b.at) })
+	js := &jumpSums{}
+	lo, sum := int64(math.MinInt64), new(big.Int)
 	cut := func(hi int64) {
-		if n := len(segs); n > 0 && segs[n-1].sum == sum {
-			segs[n-1].hi = hi
+		s := clamp(sum)
+		js.low = min(js.low, s)
+		if n := len(js.segs); n > 0 && js.segs[n-1].sum == s {
+			js.segs[n-1].hi = hi
 		} else {
-			segs = append(segs, segment{lo, hi, sum})
+			js.segs = append(js.segs, segment{lo, hi, s})
 		}
 	}
-	for _, e := range edges {
+	for i := 0; i < len(changes); {
+		e := changes[i].at
 		if e > lo {
 			cut(e - 1)
 		}
-		lo, sum = e, sum+step[e]
+		for ; i < len(changes) && changes[i].at == e; i++ {
+			sum.Add(sum, changes[i].d)
+		}
+		lo = e
 	}
 	cut(math.MaxInt64)
-	return segs, nil
+	return js, nil
 }
 
-// shift returns the cutoff of a segment: cutoff minus sum. A row acts when its
-// time plus the sum is before the cutoff. Thus its time must be before this
-// value. The result stays in the range of int64.
+// clamp returns v, or the nearest end of the range of int64.
+func clamp(v *big.Int) int64 {
+	switch {
+	case v.IsInt64():
+		return v.Int64()
+	case v.Sign() < 0:
+		return math.MinInt64
+	}
+	return math.MaxInt64
+}
+
+// at returns the sum of j of the rowid id.
+func (s *jumpSums) at(id int64) int64 {
+	i, _ := slices.BinarySearchFunc(s.segs, id, func(g segment, id int64) int {
+		switch {
+		case g.hi < id:
+			return -1
+		case g.lo > id:
+			return 1
+		}
+		return 0
+	})
+	return s.segs[i].sum
+}
+
+// shift returns the time before which a row with the sum acts. The row acts
+// when its time plus the sum is before the cutoff. Thus its time must be before
+// cutoff minus sum. The result stays in the range of int64.
 func shift(cutoff, sum int64) int64 {
 	switch {
 	case sum > 0 && cutoff < math.MinInt64+sum:
@@ -84,50 +130,157 @@ func shift(cutoff, sum int64) int64 {
 	return cutoff - sum
 }
 
-// each calls run for the segments of k in rowid order, until the calls changed
-// limit rows. run gets the cutoff of the segment, the segment, and the rows
-// that it can still change. It returns the rows that it changed, at most that
-// limit. A segment that gives fewer rows has no row left. Thus each returns
-// fewer than limit rows only when no segment has a row left. With no clock_jump
-// range, each calls run one time, with the cutoff and a nil segment.
-func (k rowKind) each(ctx context.Context, tx *sql.Tx, cutoff int64, limit int,
-	run func(cut int64, s *segment, limit int) (int, error)) (int, error) {
-	segs, err := k.segments(ctx, tx)
+// An entry is one entry of an index: the rowid and the row time.
+type entry struct{ id, ts int64 }
+
+// A readSQL holds the two statements of a cursor read. Each selects the rowid
+// and the time of at most `limit` entries of one index, in the order of time,
+// then rowid. The first has the entries with the time of the cursor and a
+// larger rowid. The second has the entries with a later time and a time before
+// the end. Together they read at most `limit` entries, also when more than
+// `limit` entries have one time.
+//
+// Each statement takes these bound values in this order: the lead values, the
+// two values of the time terms, the tail values and the limit. The eq values
+// are a time and a rowid. The gt values are a time and the end.
+type readSQL struct{ eq, gt string }
+
+// cursorRead makes the statements of the index `index` of `table`. lead and
+// tail are the terms of the WHERE text before and after the time terms. They
+// are the only filters. Each of them is a term of the index.
+func cursorRead(table, idCol, timeCol, index, lead, tail string) readSQL {
+	from := "SELECT " + idCol + ", " + timeCol + " FROM " + table + " INDEXED BY " + index + " WHERE " + lead
+	return readSQL{
+		eq: from + timeCol + " = ? AND " + idCol + " > ?" + tail + " ORDER BY " + idCol + " LIMIT ?",
+		gt: from + timeCol + " > ? AND " + timeCol + " < ?" + tail + " ORDER BY " + timeCol + ", " + idCol + " LIMIT ?",
+	}
+}
+
+// An indexRead is the cursor read of one step on one index. cur is the last
+// entry that a call read. The step keeps it for the run.
+type indexRead struct {
+	sql        readSQL
+	lead, tail []any
+	cur        entry
+}
+
+func newIndexRead(q readSQL, lead ...any) *indexRead {
+	return &indexRead{sql: q, lead: lead, cur: entry{math.MinInt64, math.MinInt64}}
+}
+
+// read returns at most limit entries after the cursor, with a time before end.
+// It moves the cursor to the last entry that it returns. An answer with fewer
+// than limit entries means that no entry before end is left.
+func (r *indexRead) read(ctx context.Context, tx *sql.Tx, end int64, limit int) ([]entry, error) {
+	if r.cur.ts >= end {
+		return nil, nil
+	}
+	es, err := r.query(ctx, tx, r.sql.eq, r.cur.id, limit)
+	if err != nil || len(es) == limit {
+		return es, r.move(es, err)
+	}
+	more, err := r.query(ctx, tx, r.sql.gt, end, limit-len(es))
+	es = append(es, more...)
+	return es, r.move(es, err)
+}
+
+// move puts the cursor on the last of the entries es.
+func (r *indexRead) move(es []entry, err error) error {
+	if n := len(es); err == nil && n > 0 {
+		r.cur = es[n-1]
+	}
+	return err
+}
+
+// query runs q with the cursor time and the value b.
+func (r *indexRead) query(ctx context.Context, tx *sql.Tx, q string, b int64, limit int) ([]entry, error) {
+	args := slices.Concat(r.lead, []any{r.cur.ts, b}, r.tail, []any{limit})
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var es []entry
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.id, &e.ts); err != nil {
+			return nil, err
+		}
+		es = append(es, e)
+	}
+	return es, rows.Err()
+}
+
+// A corrected is a retention step with the clock_jump correction. This is the
+// one place of the correction code.
+//
+// A call reads at most `limit` index entries, with no other filter than the
+// index terms. It adds to each entry the sum of j of its rowid. It acts, by
+// rowid, on the entries with a corrected time before the cutoff. The read ends
+// at the time "cutoff minus low", where low is the smallest sum, at most 0.
+// Thus no entry that can act lies after the end.
+//
+// With no clock_jump range, a call runs `plain`. It is the statement that the
+// step had before the correction. The behavior of the step does not change.
+type corrected struct {
+	kind   rowKind
+	cutoff int64
+	// gate gives an end in stored time. No row with a stored time at or after
+	// it acts, whatever its sum. A nil gate has no such end.
+	gate  func(context.Context, *sql.Tx) (int64, error)
+	plain retentionStep
+	reads []*indexRead // one for each statement form; the call reads them in order
+	act   string       // the statement that takes a JSON array of rowids
+	mem   member
+}
+
+// step returns the retention step. It returns the count of the entries that it
+// read, at most `limit`. A count below `limit` means that no entry before the
+// end is left.
+func (c *corrected) step() retentionStep {
+	return func(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+		js, err := c.kind.sums(ctx, tx)
+		if err != nil {
+			return 0, err
+		}
+		if js == nil {
+			return c.plain(ctx, tx, limit)
+		}
+		stored := int64(math.MaxInt64)
+		if c.gate != nil {
+			if stored, err = c.gate(ctx, tx); err != nil {
+				return 0, err
+			}
+		}
+		n := 0
+		for _, r := range c.reads {
+			m, err := c.run(ctx, tx, r, js, stored, limit-n)
+			if n += m; err != nil || n >= limit {
+				return n, err
+			}
+		}
+		return n, nil
+	}
+}
+
+// run reads the entries of r and acts on those with a corrected time before the
+// cutoff and a stored time before `stored`. It returns the entries that it read.
+func (c *corrected) run(ctx context.Context, tx *sql.Tx, r *indexRead, js *jumpSums, stored int64, limit int) (int, error) {
+	es, err := r.read(ctx, tx, min(shift(c.cutoff, js.low), stored), limit)
 	if err != nil {
 		return 0, err
 	}
-	if segs == nil {
-		return run(cutoff, nil, limit)
-	}
-	n := 0
-	for i := range segs {
-		m, err := run(shift(cutoff, segs[i].sum), &segs[i], limit-n)
-		if n += m; err != nil || n >= limit {
-			return n, err
+	ids := []byte{'['}
+	for _, e := range es {
+		if e.ts < min(shift(c.cutoff, js.at(e.id)), stored) {
+			if len(ids) > 1 {
+				ids = append(ids, ',')
+			}
+			ids = strconv.AppendInt(ids, e.id, 10)
 		}
 	}
-	return n, nil
-}
-
-// A correction is a statement that reads the rows of one segment. Its text
-// takes the cutoff, the two ends of the segment and the limit, in this order.
-type correction struct {
-	kind rowKind
-	sql  string
-}
-
-// exec runs a step statement on the rows that act at the cutoff. A nil
-// correction, or no clock_jump range, runs plain with the cutoff and the limit.
-// Else it runs the statement of c for each segment, with the cutoff of the
-// segment. It counts the rows that the statements changed in member m.
-func (c *correction) exec(ctx context.Context, tx *sql.Tx, m member, plain string, cutoff int64, limit int) (int, error) {
-	if c == nil {
-		return execCount(ctx, tx, m, plain, cutoff, limit)
+	if len(ids) > 1 {
+		_, err = execCount(ctx, tx, c.mem, c.act, string(append(ids, ']')))
 	}
-	return c.kind.each(ctx, tx, cutoff, limit, func(cut int64, s *segment, lim int) (int, error) {
-		if s == nil {
-			return execCount(ctx, tx, m, plain, cut, lim)
-		}
-		return execCount(ctx, tx, m, c.sql, cut, s.lo, s.hi, lim)
-	})
+	return len(es), err
 }
