@@ -1165,8 +1165,8 @@ func failsHeader(t *testing.T, header string, flags ...string) {
 	}
 }
 
-// A header with an extra key, a wrong count or order, or a signature field
-// fails, also with the GitHub committer. So does an author name with two
+// These headers fail: an extra key, a wrong count or order, and a signature
+// field, also with the GitHub committer. So does an author name with two
 // spaces before the address. Git accepts the forms in the first group.
 func TestHeaderFails(t *testing.T) {
 	lit := "--literally"
@@ -1207,8 +1207,8 @@ func TestHeaderFails(t *testing.T) {
 	}
 }
 
-// These headers pass: an unsigned commit with the GitHub committer, also in
-// upper case, a root commit and a merge commit.
+// These headers pass: an unsigned commit with the GitHub committer. Also
+// these pass: the committer in upper case, a root commit and a merge commit.
 func TestHeaderPasses(t *testing.T) {
 	for name, header := range map[string]string{
 		"GitHub committer":               ghHeader,
