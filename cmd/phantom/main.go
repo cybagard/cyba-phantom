@@ -35,8 +35,9 @@ func main() {
 
 // run returns the exit code of the process.
 //
-// Exit code 2 means a usage error: the arguments are not an optional --check
-// flag, then one config path. A panic also ends the process with code 2.
+// Exit code 2 means a usage error: the flags do not parse, or there is not
+// exactly one config path. An unrecovered panic also ends the process with
+// code 2. The HTTP server recovers a panic in a request.
 //
 // Exit code 1 means one of these causes:
 //   - The config file does not load, or a file that it names is not valid.
@@ -51,8 +52,9 @@ func main() {
 //     ends with an error.
 //
 // Other start failures in serve mode do not change the code. Examples are
-// the store and the certificate client. A second SIGINT or SIGTERM during
-// the stop kills the process. See serveWith for the detail.
+// the state directory, the store database and the certificate client. A
+// second SIGINT or SIGTERM during the stop kills the process. See serveWith
+// for the detail.
 func run(args, env []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("phantom", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // The flag package prints a flag name raw, so run prints a fixed usage line.
