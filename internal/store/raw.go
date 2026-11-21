@@ -58,9 +58,9 @@ const (
 )
 
 // The cursor reads of the field clear and of the raw delete. The clear read
-// has the terms of event_raw_ts after the time terms: the bound `top` and the
-// WHERE text of the index. The raw read has the kind as its lead term. A
-// kind is one of rawKinds, which are the kinds of deleteRawSQL.
+// has two terms after the time terms. They are the bound `top` and the WHERE
+// text of event_raw_ts. The raw read has the kind as its lead term. A kind is
+// one of rawKinds, which are the kinds of deleteRawSQL.
 var (
 	clearRead = cursorRead("event", "id", "ts", "event_raw_ts", "", " AND id <= ? AND ("+rawIndexWhere+")")
 	rawRead   = cursorRead("event", "id", "ts", "event_kind_ts", "kind = ? AND ", "")

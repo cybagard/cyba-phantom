@@ -46,8 +46,8 @@ func sumAt(jumps []testJump, id int64) (sum int64) {
 }
 
 // corrCase is one step of the correction tests. seed inserts one row with the
-// rowid id and the row time ts. bulk inserts the rows from to last, with the row
-// times ts, ts + 1 and so on. acted tells if the step changed the row.
+// rowid id and the row time ts. bulk inserts the rows from to last. Their row
+// times are ts, ts + 1 and so on. acted tells if the step changed the row.
 type corrCase struct {
 	name      string
 	days      int
@@ -123,7 +123,8 @@ var corrCases = []corrCase{
 // lists. The rowids go in pairs. The odd row of a pair has its time 1 ms before
 // the corrected cutoff. The even row has its time at it. A row acts when its
 // time plus its sum is before the cutoff. A step of event rows takes its sums
-// from the event ranges, and a step of session rows from the session ranges.
+// from the event ranges. A step of session rows takes them from the session
+// ranges.
 func checkCorrections(t *testing.T, event, session []testJump, last int64) {
 	for _, c := range corrCases {
 		t.Run(c.name, func(t *testing.T) {
@@ -173,8 +174,8 @@ func TestTU27NestedGraceRangesAndAResetRowSumTheirJ(t *testing.T) {
 	checkCorrections(t, jumps, jumps, 16)
 }
 
-// T-U-27: the event range and the session range of a clock_jump row differ. A
-// step of event rows reads the event range, and a step of session rows reads the
+// T-U-27: the event range and the session range of a clock_jump row differ.
+// A step of event rows reads the event range. A step of session rows reads the
 // session range. A step that reads the other range acts on the wrong rows.
 func TestTU27EachStepReadsTheRangeOfItsOwnTable(t *testing.T) {
 	const j = 72 * 3600_000
@@ -239,9 +240,9 @@ func TestTU27ShiftStaysInTheRangeOfInt64(t *testing.T) {
 	}
 }
 
-// T-U-27: a sum stays in the range of int64. Two j of the largest value give the
-// largest value. The j of the smallest value plus 1 and -2 give the smallest
-// value. A sum that wrapped would delete a fresh row at once.
+// T-U-27: a sum stays in the range of int64. Two j of the largest value give
+// the largest value. The j of the smallest value plus 1, and -2, give the
+// smallest value. A sum that wrapped would delete a fresh row at once.
 func TestTU27SumOfJStaysInTheRangeOfInt64(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -429,9 +430,9 @@ func TestTU27CorrectedStepReadIsBoundedByTheLimit(t *testing.T) {
 }
 
 // T-U-27: 2 500 entries have one time. The cursor falls inside them. The rows 1
-// to 1 250 are in a +J range and stay. The rows 1 251 to 2 500 act. With a limit
-// of 1 000, the calls read 1 000, 1 000 and 500 entries. No row is missed, and
-// no entry is read twice.
+// to 1 250 are in a +J range and stay. The rows 1 251 to 2 500 act. With a
+// limit of 1 000, the calls read 1 000, 1 000 and 500 entries. No row is
+// missed, and no entry is read twice.
 func TestTU27CorrectedStepReadsEntriesOfOneTimeAcrossTheCursor(t *testing.T) {
 	for _, c := range corrCases {
 		if c.bulk == nil {
@@ -531,9 +532,9 @@ func TestTU27FieldClearKeepsItsTopWithAJumpRow(t *testing.T) {
 }
 
 // T-U-27: the raw delete takes the beacon rows and the refused rows of a range.
-// The rows 3 and 4 are in a +3 d range, and the rows 5 and 6 in a -3 d range.
-// The beacon rows 2, 3 and 5 follow the same rule as the refused rows. The
-// request row 7 and the row 8, which has no range, stay.
+// The rows 3 and 4 are in a +3 d range. The rows 5 and 6 are in a -3 d range.
+// A beacon row follows the same rule as a refused row. The request row 7 stays.
+// The row 8 has no range and stays.
 func TestTU27RawDeleteTakesBeaconAndRefusedRowsOfARange(t *testing.T) {
 	db := migrated(t)
 	const j = 72 * 3600_000
@@ -556,8 +557,8 @@ func TestTU27RawDeleteTakesBeaconAndRefusedRowsOfARange(t *testing.T) {
 }
 
 // T-U-27: the event delete with a negative sum keeps each row with a stored ts
-// at or after the gate. The day step has not counted that day. The range has the
-// sum -2 d, so the rows 10 to 12 reach the cutoff. The row 12 is before the
+// at or after the gate. The day step has not counted that day. The range has
+// the sum -2 d, so the rows 10 to 12 reach the cutoff. The row 12 is before the
 // day of the gate and goes. The rows 10 and 11 stay. The row 11 has the ts of
 // the start of the day. The call reads only the entry of the row 12.
 func TestTU27EventDeleteWithANegativeSumKeepsRowsAtTheGate(t *testing.T) {
@@ -574,8 +575,8 @@ func TestTU27EventDeleteWithANegativeSumKeepsRowsAtTheGate(t *testing.T) {
 	}
 }
 
-// T-U-11: the clock_jump delete runs after the event delete. One run deletes the
-// last event row of a range and the clock_jump row of that range.
+// T-U-11: the clock_jump delete runs after the event delete. One run deletes
+// the last event row of a range and the clock_jump row of that range.
 func TestTU11JumpExpireRunsAfterTheEventDeleteInOneRun(t *testing.T) {
 	r, _ := rollRig(t, runSteps(rollTDel, rollTDel, rollTDel, 7, 30, 90)...)
 	addEvents(t, r.db, "callback", 1, rollCutoff(90)-rawDay, 0, nil, nil)

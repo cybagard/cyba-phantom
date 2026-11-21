@@ -134,15 +134,15 @@ func shift(cutoff, sum int64) int64 {
 type entry struct{ id, ts int64 }
 
 // A readSQL holds the two statements of a cursor read. Each selects the rowid
-// and the time of at most `limit` entries of one index, in the order of time,
-// then rowid. The first has the entries with the time of the cursor and a
-// larger rowid. The second has the entries with a later time and a time before
-// the end. Together they read at most `limit` entries, also when more than
-// `limit` entries have one time.
+// and the time of at most `limit` entries of one index. The order is time, then
+// rowid. The eq statement has the entries with the time of the cursor and a
+// larger rowid. The gt statement has the entries with a later time and a time
+// before the end. Together they read at most `limit` entries. This holds also
+// when more than `limit` entries have one time.
 //
-// Each statement takes these bound values in this order: the lead values, the
-// two values of the time terms, the tail values and the limit. The eq values
-// are a time and a rowid. The gt values are a time and the end.
+// Each statement takes these bound values, in this order. They are the lead
+// values, two values of the time terms, the tail values and the limit. The eq
+// values are a time and a rowid. The gt values are a time and the end.
 type readSQL struct{ eq, gt string }
 
 // cursorRead makes the statements of the index `index` of `table`. lead and
@@ -229,8 +229,9 @@ type corrected struct {
 	// it acts, whatever its sum. A nil gate has no such end.
 	gate  func(context.Context, *sql.Tx) (int64, error)
 	plain retentionStep
-	reads []*indexRead // one for each statement form; the call reads them in order
-	act   string       // the statement that takes a JSON array of rowids
+	// reads has one read for each statement form. A call reads them in order.
+	reads []*indexRead
+	act   string // the statement that takes a JSON array of rowids
 	mem   member
 }
 
@@ -263,8 +264,9 @@ func (c *corrected) step() retentionStep {
 	}
 }
 
-// run reads the entries of r and acts on those with a corrected time before the
-// cutoff and a stored time before `stored`. It returns the entries that it read.
+// run reads the entries of r. It acts on the entries with a corrected time
+// before the cutoff and a stored time before `stored`. It returns the count of
+// the entries that it read.
 func (c *corrected) run(ctx context.Context, tx *sql.Tx, r *indexRead, js *jumpSums, stored int64, limit int) (int, error) {
 	es, err := r.read(ctx, tx, min(shift(c.cutoff, js.low), stored), limit)
 	if err != nil {
